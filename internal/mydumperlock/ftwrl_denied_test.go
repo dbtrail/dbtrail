@@ -20,7 +20,7 @@ func TestFTWRLDeniedHint(t *testing.T) {
 		want   []string
 	}{
 		{RemedyCLI, []string{"RDS", "Aurora", "--lock-mode lock-all", "GRANT RELOAD"}},
-		{RemedyConsole, []string{"RDS", "Aurora", "Lock while dumping", "lock-all", "BINTRAIL_CONSOLE_BASELINE_LOCK_MODE=lock-all"}},
+		{RemedyConsole, []string{"RDS", "Aurora", "lock-all", "BINTRAIL_CONSOLE_BASELINE_LOCK_MODE=lock-all"}},
 	} {
 		got := FTWRLDeniedHint(baseline.LockModeFTWRL, rdsGlobalLockDenied, c.remedy)
 		t.Logf("%s: %s", c.remedy, got)
@@ -31,6 +31,13 @@ func TestFTWRLDeniedHint(t *testing.T) {
 		}
 		if strings.Contains(got, "—") {
 			t.Errorf("em dash in %q", got)
+		}
+		// #1986: the snapshot settings have no lock control since #1846, so
+		// naming one sends the operator to look for a control that is not there.
+		for _, gone := range []string{"Lock while dumping", "snapshot settings", "Snapshots, Settings"} {
+			if strings.Contains(got, gone) {
+				t.Errorf("%s hint names %q, a control the console does not have: %q", c.remedy, gone, got)
+			}
 		}
 	}
 	// Upper case, as some builds log the SQL error text.

@@ -36,7 +36,7 @@ Before you start:
 
 **If you are using managed MySQL** (RDS, Aurora, Cloud SQL — no binlog file access):
 - [ ] Use `bintrail stream` instead of `bintrail index` — it connects over the replication protocol
-- [ ] Replication user with `REPLICATION SLAVE` and `REPLICATION CLIENT` privileges on the source (plus `LOCK TABLES` and `SHOW VIEW` for baselines, with the `lock-all` mode: `bintrail dump --lock-mode lock-all`, or `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE=lock-all` for `bintrail-console`, `BASELINE_LOCK_MODE` in the compose `.env`; managed MySQL does not grant `BACKUP_ADMIN`, which the default mode needs)
+- [ ] Replication user with `REPLICATION SLAVE` and `REPLICATION CLIENT` privileges on the source (plus `LOCK TABLES` and `SHOW VIEW` for baselines, with the `lock-all` mode: `bintrail dump --lock-mode lock-all`; the console's snapshots pick `lock-all` on their own for an Amazon RDS or Aurora host and retry once with it when the default is refused, and `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (`BASELINE_LOCK_MODE` in the compose `.env`) only overrides that; managed MySQL does not grant `BACKUP_ADMIN`, which the default mode needs)
 - [ ] Source DSN uses TCP: `user:pass@tcp(host:3306)/` (unix socket is not supported for replication)
 
 ---

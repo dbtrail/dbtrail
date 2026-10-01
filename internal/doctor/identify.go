@@ -177,7 +177,7 @@ func identify(ctx context.Context, host, port string, opts ...func(*identifyConf
 		return Identification{}, err
 	}
 	id := Identification{Addr: net.JoinHostPort(host, port)}
-	id.Managed, id.Proxy = managedFromHost(host)
+	id.Managed, id.Proxy = ManagedFromHost(host)
 	if id.Proxy == "" && port == "6033" {
 		id.Proxy = ProxyProxySQL
 	}
@@ -383,12 +383,13 @@ func isIPv6(host string) bool {
 	return err == nil && a.Is6()
 }
 
-// managedFromHost reads the managed service from an Amazon RDS endpoint name:
+// ManagedFromHost reads the managed service from an Amazon RDS endpoint name:
 // <name>.cluster-[ro-|custom-]<id>.<region>.rds.amazonaws.com is Aurora, a
 // proxy-<id> label is RDS Proxy (in front of RDS or Aurora), anything else
 // under rds.amazonaws.com is RDS. An Aurora instance endpoint looks like RDS;
-// the check after login settles it.
-func managedFromHost(host string) (managed, proxy string) {
+// the check after login settles it. Exported for the console's automatic
+// snapshot lock mode (#1986), which picks lock-all for these hosts.
+func ManagedFromHost(host string) (managed, proxy string) {
 	h := strings.TrimSuffix(strings.ToLower(host), ".")
 	if !strings.HasSuffix(h, ".rds.amazonaws.com") && !strings.HasSuffix(h, ".rds.amazonaws.com.cn") {
 		return "", ""

@@ -71,10 +71,18 @@ Both also need `SHOW VIEW` when the dumped schemas hold views.
 there at all (`GRANT BACKUP_ADMIN` fails with *"ERROR 1227 … you need the
 RDSADMIN USER privilege"*), and `ftwrl` issues `LOCK INSTANCE FOR BACKUP` first,
 so it cannot work no matter what else you grant. mydumper says so itself: *"We
-support LOCK_ALL and SAFE_NO_LOCK modes for RDS/Aurora."* Select it with
-`bintrail dump --lock-mode lock-all`, or
-`BINTRAIL_CONSOLE_BASELINE_LOCK_MODE=lock-all` for `bintrail-console`
-(`BASELINE_LOCK_MODE=lock-all` in `.env` on the compose install).
+support LOCK_ALL and SAFE_NO_LOCK modes for RDS/Aurora."*
+
+The web console's snapshots pick it **on their own**: when no lock mode was
+set, a source whose host name is an Amazon RDS or Aurora endpoint
+(`*.rds.amazonaws.com`, RDS Proxy included) gets `lock-all`, and a snapshot
+whose default `ftwrl` is refused (the global lock denied, or `RELOAD` /
+`BACKUP_ADMIN` missing, as on an RDS reached through an IP or a CNAME) is
+retried once with `lock-all`. It never falls back to a mode without a lock.
+The snapshot records the mode it used. `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE`
+(`BASELINE_LOCK_MODE` in `.env` on the compose install) only overrides that
+choice, for every server. `bintrail dump` does not choose: pass
+`--lock-mode lock-all` there.
 
 If you grant neither, capture keeps working normally and only the baseline is
 refused — with a message naming the exact `GRANT` to run. It never quietly falls

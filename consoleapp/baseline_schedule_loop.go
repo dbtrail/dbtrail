@@ -204,7 +204,7 @@ func (b *backupScheduler) FullBackups() (bool, error) {
 	// Snapshots page lets dumps through again at once, and the
 	// schedule's card, next-run prediction and gates must say so too rather
 	// than wait for a restart.
-	_, err := b.sup.lockModeNow()
+	_, _, err := b.sup.lockModeNow()
 	return b.fullBackups, err
 }
 

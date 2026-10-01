@@ -91,7 +91,7 @@ var oldVocabulary = regexp.MustCompile(`(?i)\b(backups?|baselines?)\b`)
 // test's log, and CI does not run with -v — so the gap is visible locally on
 // request, not announced.
 const (
-	assetVocabularyPin      = 63 // string literals in assets/app.js (includes the frozen routes "/api/baselines" and "/baseline/restore" the Restore page reads for the restore-to-a-moment card since the Snapshots cut, the frozen permission name baseline:create, PERM_SNAPSHOT_CREATE, the frozen docs slug "guides/backup-strategy" each server block links since #1681 removed the card that carried it, and the frozen route "/api/baselines" the Overview flow reads for the copy arrow)
+	assetVocabularyPin      = 64 // string literals in assets/app.js (includes the frozen docs slug "guides/backup-strategy" a second time, in the Connect screen's point-in-time fold (#1986): docsMore needs the literal so the site check reaches its section; plus the frozen routes "/api/baselines" and "/baseline/restore" the Restore page reads for the restore-to-a-moment card since the Snapshots cut, the frozen permission name baseline:create, PERM_SNAPSHOT_CREATE, the frozen docs slug "guides/backup-strategy" each server block links since #1681 removed the card that carried it, and the frozen route "/api/baselines" the Overview flow reads for the copy arrow)
 	goVocabularyPin         = 109 // string literals in this package's non-test .go files; #1681's frozen names (two import paths of internal/baseline) balance the refresh endpoint's it removed
 	consoleappVocabularyPin = 174 // string literals in consoleapp's non-test .go files
 	vocabularySlack         = 3   // how far under a pin may drift before it must be lowered

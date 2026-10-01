@@ -118,6 +118,11 @@ var (
 	// (BINTRAIL_CONSOLE_BASELINE_LOCK_MODE); has no effect unless
 	// baseline-trigger is also on.
 	upConsoleBaselineLockMode = baseline.DefaultLockMode
+	// upConsoleBaselineLockModeSet says the variable set a valid mode: an
+	// operator's choice, which every dump uses as is. Unset, the mode is
+	// automatic (#1986): lock-all for an RDS/Aurora host, ftwrl elsewhere,
+	// with one retry in lock-all when ftwrl is refused.
+	upConsoleBaselineLockModeSet bool
 	// upConsoleBaselineLockModeErr holds an invalid BINTRAIL_CONSOLE_BASELINE_LOCK_MODE
 	// so the baseline supervisor can refuse with it. Startup is NOT failed:
 	// see the parse site in resolveUpConsoleEnv.
@@ -919,6 +924,7 @@ func mainSourceJobInfo(sourceDSN, indexDSN, flavor string) ext.SourceJobInfo {
 func newBaselineSupervisorFromConfig(ctx context.Context, stagingDir string, reg *console.Registry) *baselineSupervisor {
 	sup := newBaselineSupervisor(ctx, stagingDir, upConsoleBaselineLockMode)
 	sup.configErr = upConsoleBaselineLockModeErr
+	sup.lockModeChosen = upConsoleBaselineLockModeSet
 	// The settings store the lock mode is re-read from per job (#1682).
 	sup.reg = reg
 	sup.tableDeltas = upBaselineTableDeltas
@@ -1059,28 +1065,7 @@ func resolveUpConsoleEnv(cmd *cobra.Command) error {
 	if v := os.Getenv("BINTRAIL_CONSOLE_BASELINE_STAGING"); v != "" {
 		upBaselineStageDir = v
 	}
-	// Lock mode defaults to point-consistent (baseline.DefaultLockMode). The
-	// pre-#1377 BINTRAIL_CONSOLE_BASELINE_POINT_CONSISTENT opt-in is gone: it
-	// selected what is now the default, so an operator who set it keeps the
-	// behaviour they asked for and needs no migration. Only this variable can
-	// select a WEAKER mode — a snapshot that can be torn has to be asked for.
-	if v := os.Getenv("BINTRAIL_CONSOLE_BASELINE_LOCK_MODE"); v != "" {
-		m, err := baseline.ParseLockMode(v)
-		if err != nil {
-			// Refuse BASELINES, not the daemon. Under `watch` this process is
-			// also the capture plane, so failing startup over a baseline
-			// setting would turn a typo into permanently lost events — the
-			// same trap that made a refresh-only daemon refuse to boot. The
-			// error is carried to the baseline supervisor, which returns it
-			// from every Trigger, so it lands in baseline status where the
-			// operator is looking.
-			upConsoleBaselineLockModeErr = fmt.Errorf("BINTRAIL_CONSOLE_BASELINE_LOCK_MODE: %w", err)
-			slog.Error("console: MySQL baseline DUMPS disabled by an invalid lock mode; capture and the periodic refresh are unaffected",
-				"error", upConsoleBaselineLockModeErr)
-		} else {
-			upConsoleBaselineLockMode = m
-		}
-	}
+	resolveBaselineLockModeEnv()
 	// Verify trigger is env-only (no flag), same shape as baseline trigger.
 	if v := os.Getenv("BINTRAIL_CONSOLE_VERIFY_TRIGGER"); v == "1" || v == "true" {
 		upConsoleVerifyTrigger = true
@@ -1874,4 +1859,34 @@ func baselinePruneSweep(ctx context.Context, reg *console.Registry, globalDir, g
 	// retention is set (#1681); a set one still protects younger snapshots.
 	targets = append(targets, localKeepPruneTargets(entries, globalDir)...)
 	runBaselinePruneCycle(ctx, targets, retain, pruneFn)
+}
+
+// resolveBaselineLockModeEnv reads BINTRAIL_CONSOLE_BASELINE_LOCK_MODE. Empty
+// is unset: the automatic mode (#1986), which the Compose file relies on by
+// passing an empty value when BASELINE_LOCK_MODE is not in .env.
+func resolveBaselineLockModeEnv() {
+	// Lock mode defaults to point-consistent (baseline.DefaultLockMode). The
+	// pre-#1377 BINTRAIL_CONSOLE_BASELINE_POINT_CONSISTENT opt-in is gone: it
+	// selected what is now the default, so an operator who set it keeps the
+	// behaviour they asked for and needs no migration. Only this variable can
+	// select a WEAKER mode — a snapshot that can be torn has to be asked for.
+	upConsoleBaselineLockModeSet = false
+	if v := os.Getenv("BINTRAIL_CONSOLE_BASELINE_LOCK_MODE"); v != "" {
+		m, err := baseline.ParseLockMode(v)
+		if err != nil {
+			// Refuse BASELINES, not the daemon. Under `watch` this process is
+			// also the capture plane, so failing startup over a baseline
+			// setting would turn a typo into permanently lost events — the
+			// same trap that made a refresh-only daemon refuse to boot. The
+			// error is carried to the baseline supervisor, which returns it
+			// from every Trigger, so it lands in baseline status where the
+			// operator is looking.
+			upConsoleBaselineLockModeErr = fmt.Errorf("BINTRAIL_CONSOLE_BASELINE_LOCK_MODE: %w", err)
+			slog.Error("console: MySQL baseline DUMPS disabled by an invalid lock mode; capture and the periodic refresh are unaffected",
+				"error", upConsoleBaselineLockModeErr)
+		} else {
+			upConsoleBaselineLockMode = m
+			upConsoleBaselineLockModeSet = true
+		}
+	}
 }

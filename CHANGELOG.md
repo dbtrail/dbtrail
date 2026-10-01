@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **Snapshots on Amazon RDS and Aurora work without setting anything**
+  (#1986). With no lock mode set, each console snapshot picks one: `lock-all`
+  for an RDS or Aurora host name (RDS Proxy included), `ftwrl` elsewhere, and
+  one retry with `lock-all` when `ftwrl` is refused (the global lock denied,
+  or `RELOAD`/`BACKUP_ADMIN` missing, as on an RDS behind an IP or a CNAME).
+  Never a mode without a lock; the snapshot records the mode it used.
+  `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (`BASELINE_LOCK_MODE` in `.env`) now
+  only overrides, and the Compose file passes it empty unless set. A saved
+  empty lock mode means automatic. `bintrail dump --lock-mode` is unchanged.
+- The Connect screen's RDS permission explains what it is for, with a closed
+  "How snapshots stay point-in-time" note for the DBA, and no longer asks for
+  a "Lock while dumping" setting that does not exist.
 ## [0.92.0] - 2026-09-30
 ### Added
 - **Connect a server in three steps** (#1953). Find it: DBTrail reads the

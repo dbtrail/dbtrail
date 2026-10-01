@@ -57,10 +57,13 @@ console.log(JSON.stringify(grantBlocks("dbtrail", "Ab3-xyzXYZ789_qq")));`
 		if !strings.Contains(b, "-- GRANT LOCK TABLES, SHOW VIEW ON *.* TO 'dbtrail'@'%';") {
 			t.Errorf("%s: the RDS/Aurora alternative (LOCK TABLES with lock-all) is gone", flavor)
 		}
-		// The compose file maps BASELINE_LOCK_MODE from .env onto the long
-		// name; the long name in .env never reaches the container.
-		if !strings.Contains(b, "BASELINE_LOCK_MODE=lock-all in .env") || !strings.Contains(b, "BINTRAIL_CONSOLE_BASELINE_LOCK_MODE otherwise") {
-			t.Errorf("%s: the lock-all switch does not name the compose .env variable and the plain one", flavor)
+		// #1986: snapshots pick lock-all on their own (RDS/Aurora host, or a
+		// refused default), so the alternative names no variable to set.
+		if strings.Contains(b, "BASELINE_LOCK_MODE") || strings.Contains(b, ".env") {
+			t.Errorf("%s: the RDS/Aurora alternative still asks for a lock-mode variable", flavor)
+		}
+		if !strings.Contains(b, "run this line instead of the GRANT RELOAD line above.\n-- GRANT LOCK TABLES, SHOW VIEW ON *.* TO 'dbtrail'@'%';") {
+			t.Errorf("%s: the RDS/Aurora alternative does not say it replaces GRANT RELOAD", flavor)
 		}
 		// mydumper refuses the whole backup at the first view it cannot read.
 		for _, l := range strings.Split(b, "\n") {

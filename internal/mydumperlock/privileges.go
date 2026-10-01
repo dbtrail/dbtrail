@@ -13,6 +13,7 @@ package mydumperlock
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -107,6 +108,26 @@ func (r Remedy) noCheckModes() string {
 	return " — to proceed without this check, " + r.forMode(baseline.LockModeSafeNoLock) +
 		", which needs no privilege but ABORTS rather than write a snapshot stitched from" +
 		" several instants; or " + r.forMode(baseline.LockModeNoLock) + " to accept such a snapshot"
+}
+
+// ErrFTWRLPrivilegesMissing marks the refusal of lock mode ftwrl because the
+// user lacks RELOAD (or FLUSH_TABLES), BACKUP_ADMIN, or both (#1986). The
+// console's automatic lock mode retries such a snapshot once with lock-all,
+// which managed MySQL accepts where BACKUP_ADMIN cannot be granted. Only the
+// three missing-privilege refusals carry it: a source that cannot be reached,
+// grants or a version that cannot be read, and every lock-all refusal do not,
+// because retrying on those would hide their real cause.
+var ErrFTWRLPrivilegesMissing = errors.New("lock mode ftwrl: RELOAD/FLUSH_TABLES or BACKUP_ADMIN missing")
+
+// ftwrlPrivilegesError keeps the refusal's own words while answering
+// errors.Is(err, ErrFTWRLPrivilegesMissing).
+type ftwrlPrivilegesError struct{ msg string }
+
+func (e *ftwrlPrivilegesError) Error() string        { return e.msg }
+func (e *ftwrlPrivilegesError) Is(target error) bool { return target == ErrFTWRLPrivilegesMissing }
+
+func ftwrlPrivilegesMissing(format string, args ...any) error {
+	return &ftwrlPrivilegesError{msg: fmt.Sprintf(format, args...)}
 }
 
 // CheckPrivileges queries the source for the privileges the requested
@@ -498,7 +519,7 @@ func checkPrivilegesDB(ctx context.Context, db *sql.DB, mode baseline.LockMode, 
 
 	switch {
 	case !hasFlush && missingBackupAdmin:
-		return fmt.Errorf("point-consistent baseline mode (the default) requires the source DB user to have BOTH the"+
+		return ftwrlPrivilegesMissing("point-consistent baseline mode (the default) requires the source DB user to have BOTH the"+
 			" BACKUP_ADMIN and the RELOAD (or FLUSH_TABLES) privilege (MySQL/Percona 8.0+); the current user has"+
 			" neither — grant both, e.g. GRANT BACKUP_ADMIN, RELOAD ON *.* TO '<user>'@'%%'%s%s", alternatives, roleCaveat)
 	case !hasFlush:
@@ -512,11 +533,11 @@ func checkPrivilegesDB(ctx context.Context, db *sql.DB, mode baseline.LockMode, 
 			crashNote = " — granting BACKUP_ADMIN alone is the dangerous half-grant:" +
 				" the pinned mydumper build SEGFAULTS on it rather than failing cleanly, which is why this check runs first"
 		}
-		return fmt.Errorf("point-consistent baseline mode requires the RELOAD (or FLUSH_TABLES) privilege, which the"+
+		return ftwrlPrivilegesMissing("point-consistent baseline mode requires the RELOAD (or FLUSH_TABLES) privilege, which the"+
 			" current user has at neither name — grant it, e.g. GRANT RELOAD ON *.* TO '<user>'@'%%'%s%s%s",
 			crashNote, alternatives, roleCaveat)
 	default:
-		return fmt.Errorf("point-consistent baseline mode requires the BACKUP_ADMIN privilege (MySQL/Percona 8.0+) in"+
+		return ftwrlPrivilegesMissing("point-consistent baseline mode requires the BACKUP_ADMIN privilege (MySQL/Percona 8.0+) in"+
 			" addition to RELOAD/FLUSH_TABLES, which the current user already has — grant it, e.g."+
 			" GRANT BACKUP_ADMIN ON *.* TO '<user>'@'%%'. NOTE: on managed MySQL such as RDS this grant is REFUSED"+
 			" outright, so ftwrl cannot work there%s%s", alternatives, roleCaveat)

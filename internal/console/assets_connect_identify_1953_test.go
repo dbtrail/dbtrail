@@ -205,7 +205,9 @@ func TestConnectTileWords(t *testing.T) {
 
 // On Amazon RDS or Aurora the block grants what the lock-all mode needs as
 // its live line: the default mode cannot work there, so offering it would
-// only fail on the first snapshot. Everything else stays as it was.
+// only fail on the first snapshot. Snapshots choose lock-all on their own
+// there (#1986), so the block asks for no setting. Everything else stays as
+// it was.
 func TestGrantBlocksForAManagedServer(t *testing.T) {
 	js := readAsset(t, "app.js")
 	script := functionBody(t, js, "function sqlString(") + "\n" + functionBody(t, js, "function grantBlocks(") + `
@@ -229,8 +231,10 @@ console.log(JSON.stringify({ mysql: live(m.mysql), mariadb: live(m.mariadb), pla
 			t.Errorf("%s on RDS lost the capture grant:\n%s", name, joined)
 		}
 	}
-	if !strings.Contains(got.Note, "lock-all") {
-		t.Errorf("the block does not say which setting the grant needs:\n%s", got.Note)
+	// #1986: what the permission is for, in the reader's words, and no
+	// setting to change: snapshots pick lock-all on an RDS/Aurora host.
+	if !strings.Contains(got.Note, "\n-- Amazon RDS and Aurora: this permission lets each snapshot start every table at the same point-in-time.\nGRANT LOCK TABLES, SHOW VIEW ON *.* TO 'dbtrail'@'%';") {
+		t.Errorf("the RDS block does not explain its permission with the agreed line:\n%s", got.Note)
 	}
 	if !strings.Contains(strings.Join(got.Plain, "\n"), "GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW") {
 		t.Errorf("a server that is not managed lost its default grant: %v", got.Plain)
@@ -238,5 +242,33 @@ console.log(JSON.stringify({ mysql: live(m.mysql), mariadb: live(m.mariadb), pla
 	// No password: nothing runnable, managed or not.
 	if len(got.None) != 0 {
 		t.Errorf("a managed block with no password has runnable lines: %v", got.None)
+	}
+}
+
+// #1986: the SQL on both screens (Connect and the full form), managed or not,
+// typed or not, never sends anyone to a setting: snapshots pick their mode on
+// their own, and the "Lock while dumping" control has not existed since #1846.
+// Specific tokens, not an upper-case pattern: BACKUP_ADMIN and FLUSH_TABLES
+// are SQL and belong here.
+func TestGrantBlocksNameNoSettingOrVariable(t *testing.T) {
+	js := readAsset(t, "app.js")
+	script := functionBody(t, js, "function sqlString(") + "\n" + functionBody(t, js, "function grantBlocks(") + `
+const all = [];
+for (const m of [true, false]) for (const [u, p] of [["dbtrail", "Pw-1"], ["", ""], ["dbtrail", ""]]) {
+  const b = grantBlocks(u, p, false, m);
+  all.push(b.mysql, b.mariadb);
+}
+console.log(JSON.stringify(all));
+`
+	var blocks []string
+	if err := json.Unmarshal(runNodeConnect(t, script), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range blocks {
+		for _, bad := range []string{"Snapshots, Settings", "Lock while dumping", "BASELINE_LOCK_MODE", "BINTRAIL_", "DBTRAIL_", ".env", "lock mode", "lock-all", "—"} {
+			if strings.Contains(b, bad) {
+				t.Errorf("the SQL names %q:\n%s", bad, b)
+			}
+		}
 	}
 }

@@ -291,6 +291,16 @@ const toStep2 = async (host, answer) => {
     block: f.querySelector("pre[data-grant]").textContent, user: f.elements.source_user.value, pwLen: f.elements.source_password.value.length,
     draftPut: calls.filter((c) => c.startsWith("PUT /api/servers/draft")).pop() || "",
     banned: texts(f).flatMap((t) => bannedHits(t).map((h) => h.word + " in: " + t)) };
+  // #1986: the RDS box, ticked by the host name, shows the closed fold under
+  // the SQL; unticking hides it, ticking again shows it.
+  const pitOf = () => { const d = f.querySelector("details.cx-pit"); if (!d) return null;
+    const a = d.querySelector("a"); const sum = d.querySelector("summary"); const p = d.querySelector("p");
+    return { shown: !d.hidden, open: !!d.open, summary: sum && sum._text, body: p && p._text, href: a ? a.attrs.href : "", texts: texts(d) }; };
+  out.found.pit = pitOf();
+  f.elements.cx_managed.checked = false; f.elements.cx_managed.fire("change");
+  out.found.pitUnticked = pitOf();
+  f.elements.cx_managed.checked = true; f.elements.cx_managed.fire("change");
+  out.found.pitTickedAgain = pitOf();
   // A different host undoes it: back to step 1.
   f.elements.source_host.value = "db1b"; f.elements.source_host.fire("input");
   out.backToWhere = { step: step(f), step2Hidden: !shown(f, 2), found: identified(f).length };
@@ -460,7 +470,7 @@ const toStep2 = async (host, answer) => {
   ctx.__checkAnswer = { ok: true, started: true, name: "db1", doctor: { warnings: 0, checks: [{ name: "Source MySQL connection", status: "pass", light: "reach" }] } };
   f.fire("submit"); await flush(6);
   out.started = { step: step(f), submit: button(f), result: result(f), lights: lights(f), notices: notices.length - noticesBefore, lists: serverLists - listsBefore,
-    scheduled: scheduled.length, still: !!form(), managedNote: result(f).some((t) => t.includes("lock-all")) };
+    scheduled: scheduled.length, still: !!form(), managedNote: result(f).some((t) => /lock|RDS|Aurora|Settings/.test(t)) };
   f.fire("submit"); await flush();
   out.doneCloses = !form();
   // A start whose only findings are optional improvements folds them, and
@@ -656,6 +666,11 @@ func TestConnectScreenWiring(t *testing.T) {
 			Step2, Managed, FullShown                          bool
 			PwLen                                              int
 			Texts, Banned                                      []string
+			Pit, PitUnticked, PitTickedAgain                   *struct {
+				Shown, Open         bool
+				Summary, Body, Href string
+				Texts               []string
+			}
 		}
 		BackToWhere struct {
 			Step        string
@@ -828,6 +843,31 @@ func TestConnectScreenWiring(t *testing.T) {
 	if len(fd.Banned) > 0 {
 		t.Errorf("step 2 uses words the first run bans: %v", fd.Banned)
 	}
+	// #1986: the fold for the DBA, under the RDS permission only, closed.
+	const pitBody = "Writes to the copied tables may wait while a snapshot starts, until every copy thread marks the same point-in-time. " +
+		"If a long query or open transaction is still running on those tables, the wait lasts until it ends."
+	if fd.Pit != nil {
+		t.Logf("RDS fold, as the Connect screen renders it: %q", fd.Pit.Texts)
+	}
+	if p := fd.Pit; p == nil || !p.Shown || p.Open || p.Summary != "How snapshots stay point-in-time" || p.Body != pitBody ||
+		p.Href != "https://www.dbtrail.com/docs/guides/backup-strategy/#how-a-snapshot-stays-point-in-time" {
+		t.Errorf("RDS ticked from the host name: fold %+v; want it shown, closed, with the agreed title, text and link", p)
+	} else {
+		for _, tx := range p.Texts {
+			low := strings.ToLower(tx)
+			for _, bad := range []string{"lock", "pause", "freeze", "—"} {
+				if strings.Contains(low, bad) {
+					t.Errorf("the fold says %q: %q", bad, tx)
+				}
+			}
+		}
+	}
+	if p := fd.PitUnticked; p == nil || p.Shown {
+		t.Errorf("RDS box unticked: fold %+v; want it hidden", p)
+	}
+	if p := fd.PitTickedAgain; p == nil || !p.Shown {
+		t.Errorf("RDS box ticked again: fold %+v; want it shown", p)
+	}
 	if b := out.BackToWhere; b.Step != "1" || !b.Step2Hidden || b.Found != 0 {
 		t.Errorf("another host after step 1 found one: %+v; want step 1 again, the answer gone", b)
 	}
@@ -935,8 +975,8 @@ func TestConnectScreenWiring(t *testing.T) {
 	if st.Step != "done" || st.Submit != "Done" || !st.Still || st.Notices != 0 || st.Lists != 1 || st.Scheduled != 0 {
 		t.Errorf("started: %+v", st)
 	}
-	if len(st.Result) < 2 || st.Result[0] != "Capture started" || !strings.Contains(st.Result[1], "Capture started for db1") || !st.ManagedNote {
-		t.Errorf("started result: %v; want the start said, and the lock-all note for RDS", st.Result)
+	if len(st.Result) < 2 || st.Result[0] != "Capture started" || !strings.Contains(st.Result[1], "Capture started for db1") || st.ManagedNote {
+		t.Errorf("started result: %v; want the start said, and no RDS line (#1986: snapshots pick lock-all on their own)", st.Result)
 	}
 	if !out.DoneCloses {
 		t.Error("Done did not close the screen")

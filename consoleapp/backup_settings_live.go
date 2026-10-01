@@ -29,29 +29,36 @@ func savedBackupSetting(reg *console.Registry, key string) (string, bool) {
 	return reg.BackupSettings().Get(key)
 }
 
-// effectiveLockMode resolves the lock mydumper takes, per dump job. The boot
-// error rides along: with no saved value, a lock mode the environment got
-// wrong still refuses dumps exactly as before — and a SAVED value clears that
-// refusal, which is the point (an operator who cannot restart the daemon can
-// fix the typo from the browser).
-func effectiveLockMode(reg *console.Registry, bootMode baseline.LockMode, bootErr error) (baseline.LockMode, error) {
+// effectiveLockMode resolves the lock mode an OPERATOR chose, per dump job,
+// and says whether one did (#1986). A saved value wins; nothing saved means
+// the environment variable, which counts as a choice only when it was set
+// (bootChosen). Nothing chosen is the automatic mode: the caller then picks
+// from the source host (lockModeFor), and the mode returned here is the
+// default it falls back to.
+//
+// The boot error rides along: with no saved value, a lock mode the
+// environment got wrong still refuses dumps exactly as before, and a SAVED
+// value clears that refusal, which is the point (an operator who cannot
+// restart the daemon can fix the typo from the browser).
+func effectiveLockMode(reg *console.Registry, bootMode baseline.LockMode, bootChosen bool, bootErr error) (baseline.LockMode, bool, error) {
 	raw, ok := savedBackupSetting(reg, console.BackupSettingLockMode)
 	if !ok {
-		return bootMode, bootErr
+		return bootMode, bootChosen, bootErr
 	}
 	if raw == "" {
-		// Saved empty means "the built-in", not "the environment's value":
-		// the operator cleared the setting from the page, and the built-in
-		// is what an unset environment gives.
-		return baseline.DefaultLockMode, nil
+		// Saved empty means "automatic", not "the environment's value": the
+		// operator cleared the setting, and automatic is what an unset
+		// environment gives. Before #1986 this was the built-in ftwrl, which
+		// automatic still is on a host that is not RDS or Aurora.
+		return baseline.DefaultLockMode, false, nil
 	}
 	mode, err := baseline.ParseLockMode(raw)
 	if err != nil {
 		slog.Warn("snapshot settings: ignoring an unreadable saved lock mode; using the value this process started with",
 			"saved", raw, "error", err)
-		return bootMode, bootErr
+		return bootMode, bootChosen, bootErr
 	}
-	return mode, nil
+	return mode, true, nil
 }
 
 // effectiveVerifyTables resolves the verification filter, per cycle.
