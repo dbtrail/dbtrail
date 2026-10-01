@@ -174,8 +174,9 @@ type backupSettingsServerDTO struct {
 	// is pruned. KeepNewest is the saved setting; the two differ where the
 	// setting does not apply (blocked, a destination, no loop).
 	KeepInForce int `json:"keep_in_force,omitempty"`
-	// PruneRetainMinutes is the age retention the same loop applies to every
-	// folder (--baseline-retain or its saved value), in minutes: a snapshot
+	// PruneRetainMinutes is the age retention the same loop reads
+	// (--baseline-retain or its saved value), in minutes. In a folder with no
+	// S3 destination it deletes nothing; there a snapshot
 	// younger than it is kept even outside the newest KeepInForce, so it
 	// stretches how far back this server can go. 0 = none, or unreadable
 	// (the loop then applies none either).

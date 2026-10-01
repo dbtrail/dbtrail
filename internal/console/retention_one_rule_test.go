@@ -122,7 +122,7 @@ const walk = (n, f) => { if (!n || n.nodeType !== 1) return; f(n); for (const c 
 const find = (root, pred) => { let hit = null; walk(root, (n) => { if (!hit && pred(n)) hit = n; }); return hit; };
 const visible = (root) => { const out = []; const go = (n, hid) => { if (!n || n.nodeType === 3) return; const h = hid || n.hidden; if (!h && n.tag === "p" && n._text) out.push(n._text); for (const c of n.children) go(c, h); }; go(root, false); return out; };
 const reds = (root) => { const out = []; walk(root, (n) => { if (!n.hidden && n.tag === "p" && /\berr\b/.test(n.className) && n._text) out.push(n._text); }); return out; };
-const titles = ["Keep by count", "On this machine", "Only in S3"];
+const titles = ["Keep by count", "On this machine", "Only in S3", "No snapshots"];
 const title = (root) => { const n = find(root, (x) => x.tag === "span" && titles.includes(x.textContent)); return n ? n.textContent : ""; };
 const stepShown = (root) => { const s = find(root, (x) => /\bkeep-step\b/.test(x.className)); let h = false; for (let n = s; n; n = n.parent) if (n.hidden) h = true; return s ? !h : null; };
 const base = { id: "s1", name: "prod", baseline_dir: "/srv/snaps", baseline_s3: "s3://b/p/", default_dir: "/state/snapshots/s1", local_copy: true, prune_loop: true, source: "server" };
@@ -131,6 +131,12 @@ const row = (o) => ctx.backupServerRow(Object.assign({}, base, o), false, [], ""
 const snap = (name, r) => { out[name] = { words: visible(r), reds: reds(r), title: title(r), step: stepShown(r) }; };
 snap("age7d", row({ delete_after_minutes: 7 * 1440 }));
 snap("ageEmpty", row({}));
+snap("age60h", row({ delete_after_minutes: 60 * 60 }));
+snap("age90m", row({ delete_after_minutes: 90 }));
+const none = row({ baseline_s3: "", keep_newest: 3 });
+const no = find(none, (n) => n.tag === "input" && n.attrs.value === "no"); const yes = find(none, (n) => n.tag === "input" && n.attrs.value === "yes");
+yes.checked = false; no.checked = true; fire(no, "change");
+snap("neither", none);
 snap("noLoop", row({ prune_loop: false, delete_after_minutes: 60 }));
 snap("notIn3", row({ delete_after_minutes: 60, not_in_s3: { at: "2026-10-01T10:00:00Z", count: 3 } }));
 snap("notIn1", row({ delete_after_minutes: 60, not_in_s3: { at: "2026-10-01T10:00:00Z", count: 1 } }));
@@ -168,7 +174,10 @@ console.log(JSON.stringify(out));
 	hasRed := func(v view, s string) bool { return strings.Contains(strings.Join(v.Reds, " | "), s) }
 	off := func(v view) bool { return v.Step != nil && !*v.Step }
 	for name, c := range map[string]struct{ title, says, red, never string }{
-		"age7d":    {"On this machine", "Deleted here when older than 7 days, once S3 has it. S3 keeps them all.", "", "Keep the newest"},
+		"age7d":    {"On this machine", "Deleted here when older than 7 days, once S3 has it. DBTrail leaves S3 alone.", "", "Keep the newest"},
+		"age60h":   {"On this machine", "Deleted here when older than 60 hours, once S3 has it.", "", "3 days"},
+		"age90m":   {"On this machine", "Deleted here when older than 90 minutes, once S3 has it.", "", ""},
+		"neither":  {"No snapshots", "With neither, this server keeps no snapshots at all.", "", "Only in S3"},
 		"ageEmpty": {"On this machine", "Kept here: Delete by age is empty.", "", "Deleted here"},
 		"noLoop":   {"On this machine", "Kept here: this DBTrail removes nothing.", "", "Deleted here"},
 		"notIn3":   {"On this machine", "Deleted here when older than 1 hour", "Not in S3, so kept here: 3 older copies (checked 2026-10-01 10:00:00 UTC). The log says why.", ""},
@@ -179,7 +188,7 @@ console.log(JSON.stringify(out));
 		"noLoopStale":   {"On this machine", "Kept here: this DBTrail removes nothing.", "", "Not known what S3 has"},
 		"editedS3":      {"On this machine", "After you save, Delete by age applies here.", "", "Not in S3"},
 		"s3OnlyAtRest":  {"Only in S3", "No copy on this machine yet.", "", "Not in S3"},
-		"notInErr":      {"On this machine", "", "Not known what S3 has: the record cannot be read", ""},
+		"notInErr":      {"On this machine", "", "S3 state unknown: the record cannot be read", ""},
 		"typedS3":       {"On this machine", "After you save, Delete by age applies here.", "", "Not in S3"},
 	} {
 		v := got[name]

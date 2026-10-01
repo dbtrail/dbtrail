@@ -7595,7 +7595,7 @@ function localCopyWords(local, s3, keep, loop, reuse, was, reach) {
     if (age.s3Only) say("No copy on this machine yet.");
     else if (!age.asSaved) say("After you save, Delete by age applies here.");
     else if (!loop) say("Kept here: this DBTrail removes nothing.");
-    else if (age.minutes > 0) say("Deleted here when older than " + reachSpan(age.minutes) + ", once S3 has it. S3 keeps them all.");
+    else if (age.minutes > 0) say("Deleted here when older than " + exactSpan(age.minutes) + ", once S3 has it. DBTrail leaves S3 alone.");
     else say("Kept here: Delete by age is empty.");
     // The count is the last age prune's, so it is shown only where that
     // prune still runs (this daemon prunes, an age is set) and with its date:
@@ -7604,7 +7604,7 @@ function localCopyWords(local, s3, keep, loop, reuse, was, reach) {
     const live = age.asSaved && loop && age.minutes > 0;
     const n = live && age.notIn ? age.notIn.count : 0;
     if (n > 0) say("Not in S3, so kept here: " + n + " older " + (n === 1 ? "copy" : "copies") + " (checked " + utcLabel(age.notIn.at) + "). The log says why.", true);
-    if (live && age.notInError) say("Not known what S3 has: " + age.notInError, true);
+    if (live && age.notInError) say("S3 state unknown: " + age.notInError, true);
     return out;
   }
   if (reuse) say("A table that did not change keeps its last file, so a new snapshot only costs the tables that changed.");
@@ -7695,6 +7695,16 @@ function localReachWords(keep, reach) {
 
 // reachSpan says a number of minutes the way a person would: hours below a
 // day, whole days as days, hours again up to two days, days above.
+// exactSpan states a threshold the prune applies exactly (Delete by age), so
+// it never rounds: whole days only when the value is whole days, else hours,
+// else minutes. reachSpan below is the rounded "about how far back" wording.
+function exactSpan(mins) {
+  const plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
+  if (mins % 1440 === 0) return plural(mins / 1440, "day");
+  if (mins % 60 === 0) return plural(mins / 60, "hour");
+  return plural(mins, "minute");
+}
+
 function reachSpan(mins) {
   const day = 24 * 60;
   if (mins < day || (mins % day !== 0 && mins < 2 * day)) {
@@ -7881,7 +7891,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     // shows the default only as a suggestion (Save stays asleep), so nothing
     // is on this machine and the card must not promise "after you save".
     const s3OnlyAtRest = !was.rawDir && !!was.s3 && s3v === was.s3 && dir.value.trim() === was.dir;
-    keepTitle.textContent = !local || s3OnlyAtRest ? "Only in S3" : s3v ? "On this machine" : "Keep by count";
+    keepTitle.textContent = !local ? (s3v ? "Only in S3" : "No snapshots") : s3OnlyAtRest ? "Only in S3" : s3v ? "On this machine" : "Keep by count";
     clear(words);
     // The reach is said for the count as it applies to the folder as saved:
     // a typed folder or destination makes it a number that does not apply yet.
