@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
+	"sync"
 
 	"github.com/dbtrail/dbtrail/internal/config"
 )
@@ -35,13 +37,19 @@ type SourceTLS struct {
 // connectSourceSSL is config.ConnectSSL, swappable in tests.
 var connectSourceSSL = config.ConnectSSL
 
+// cleartextWarned holds the source hosts whose cleartext fallback has already
+// been warned about in this process.
+var cleartextWarned sync.Map
+
 // OpenSource opens a MySQL or MariaDB source the way the core's capture
 // does: dsn with tls applied (an empty Mode is "preferred"; a tls= in the
 // DSN wins). The caller owns the returned handle and must Close it.
 //
 // Under "preferred", a server that offers no TLS at all is read in
-// cleartext, as capture does; that fallback is logged at debug level. A
-// server that demands TLS is never retried in cleartext. A bad setting
+// cleartext, as capture does; that fallback is logged as a warning the first
+// time per source host in this process (at debug level after that, so a job
+// that reconnects every cycle does not flood the log). A server that demands
+// TLS is never retried in cleartext. A bad setting
 // (unknown mode, unreadable CA file, a certificate without its key) returns
 // an error that names the setting without naming any command-line flag and
 // unwraps to the underlying settings error; a connect failure is returned as
@@ -52,9 +60,14 @@ func OpenSource(dsn string, tls SourceTLS) (*sql.DB, error) {
 		ssl.Mode = config.DefaultSourceSSLMode
 	}
 	db, err := connectSourceSSL(dsn, ssl, func(err error) {
-		slog.Log(context.Background(), slog.LevelDebug,
-			"ext: the source offers no TLS; opening it WITHOUT encryption, as capture does",
-			"host", config.DSNHost(dsn), "error", err)
+		host := config.DSNHost(dsn)
+		level := slog.LevelDebug
+		if _, seen := cleartextWarned.LoadOrStore(host, struct{}{}); !seen {
+			level = slog.LevelWarn
+		}
+		slog.Log(context.Background(), level,
+			"ext: the source offers no TLS; an extension is reading it WITHOUT encryption (credentials and data in cleartext), as capture does under ssl mode preferred",
+			"host", host, "error", err)
 	})
 	var se *config.TLSSettingsError
 	if errors.As(err, &se) {
@@ -68,6 +81,7 @@ func OpenSource(dsn string, tls SourceTLS) (*sql.DB, error) {
 type sourceTLSSettingsError struct{ se *config.TLSSettingsError }
 
 func (e *sourceTLSSettingsError) Error() string {
-	return fmt.Sprintf("source TLS setting %s: %s", e.se.Setting, e.se.Problem)
+	// Registry spelling (ssl_mode), not the flag spelling (ssl-mode).
+	return fmt.Sprintf("source TLS setting %s: %s", strings.ReplaceAll(e.se.Setting, "-", "_"), e.se.Problem)
 }
 func (e *sourceTLSSettingsError) Unwrap() error { return e.se }

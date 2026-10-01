@@ -1,8 +1,10 @@
 package ext
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -94,8 +96,8 @@ func TestOpenSource_SettingsErrorNamesNoFlag(t *testing.T) {
 		if !errors.As(err, &se) {
 			t.Errorf("%+v: error %v does not unwrap to the settings error", in, err)
 		}
-		if !strings.Contains(err.Error(), "TLS") {
-			t.Errorf("%+v: error %q does not say it is about TLS", in, err)
+		if !strings.Contains(err.Error(), "TLS") || !strings.Contains(err.Error(), "ssl_") {
+			t.Errorf("%+v: error %q does not name the TLS setting as the registry spells it", in, err)
 		}
 	}
 }
@@ -119,5 +121,38 @@ func TestSourceTLS_ConvertsFromCoreSettings(t *testing.T) {
 	in := config.SSL{Mode: "verify-identity", CA: "a", Cert: "b", Key: "c"}
 	if got := SourceTLS(in); got != (SourceTLS{Mode: "verify-identity", CA: "a", Cert: "b", Key: "c"}) {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+// Falling back to cleartext must be visible: an extension may be the only
+// thing in the process that opens this source (a console serving views and
+// tools runs no capture), so it warns, once per host.
+func TestOpenSource_CleartextFallbackWarnsOncePerHost(t *testing.T) {
+	orig := connectSourceSSL
+	t.Cleanup(func() { connectSourceSSL = orig })
+	connectSourceSSL = func(_ string, _ config.SSL, onCleartext func(error)) (*sql.DB, error) {
+		onCleartext(mysql.ErrNoTLS)
+		return sql.Open("mysql", "u:p@tcp(127.0.0.1:1)/x")
+	}
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	for _, dsn := range []string{
+		"u:p@tcp(warn-a.example:3306)/", "u:p@tcp(warn-a.example:3306)/", "u:p@tcp(warn-b.example:3306)/",
+	} {
+		db, err := OpenSource(dsn, SourceTLS{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+	}
+	out := buf.String()
+	if n := strings.Count(out, "level=WARN"); n != 2 {
+		t.Fatalf("%d warnings, want one per host (2):\n%s", n, out)
+	}
+	if strings.Count(out, "level=DEBUG") != 1 || !strings.Contains(out, "WITHOUT encryption") {
+		t.Fatalf("want the repeat at debug level and the warning to say it is unencrypted:\n%s", out)
 	}
 }
