@@ -295,3 +295,43 @@ func (s *baselineSupervisor) dumpDiskOf(serverID string, own *console.BaselineSt
 	}
 	return st.DiskCheck, st.DiskNote
 }
+
+// transportNoteKey carries, in a dump's context, where runMydumper reports a
+// read made without encryption (#1996): a side channel, so the many callers
+// and fakes of runMydumper keep their signature.
+type transportNoteKey struct{}
+
+func withTransportNote(ctx context.Context, note func(string)) context.Context {
+	return context.WithValue(ctx, transportNoteKey{}, note)
+}
+
+// reportTransportNote hands note to the dump's run, when one listens.
+func reportTransportNote(ctx context.Context, note string) {
+	if f, ok := ctx.Value(transportNoteKey{}).(func(string)); ok {
+		f(note)
+	}
+}
+
+// noteDumpTransport records on the running job that its read reached the
+// source without encryption, as noteDumpDisk records the disk check.
+func (s *baselineSupervisor) noteDumpTransport(serverID, note string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if st := s.jobs[serverID]; st != nil && st.State == "running" {
+		st.TransportNote = note
+	}
+}
+
+// dumpTransportOf reads back what noteDumpTransport wrote, as dumpDiskOf.
+func (s *baselineSupervisor) dumpTransportOf(serverID string, own *console.BaselineStatus) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := own
+	if st == nil {
+		st = s.jobs[serverID]
+	}
+	if st == nil {
+		return ""
+	}
+	return st.TransportNote
+}

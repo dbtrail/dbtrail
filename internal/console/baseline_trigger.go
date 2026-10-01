@@ -331,6 +331,11 @@ type BaselineStatus struct {
 	// carries neither. Set while the read is still running.
 	DiskCheck string `json:"disk_check,omitempty"`
 	DiskNote  string `json:"disk_note,omitempty"`
+	// TransportNote (full reads of MySQL/MariaDB only, #1996): set when the
+	// read reached the source WITHOUT encryption, saying why ("read without
+	// encryption: the source offers no TLS (TLS mode preferred)"); empty
+	// for an encrypted read. Set while the read is still running.
+	TransportNote string `json:"transport_note,omitempty"`
 	// ForeignSource: the job was refused because the snapshot it would build
 	// on was written by another writer, or its writer could not be told
 	// (#1684). The schedule does not answer it with a full read: that would

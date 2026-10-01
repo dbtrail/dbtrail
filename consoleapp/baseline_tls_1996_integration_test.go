@@ -63,6 +63,20 @@ func TestFullReadPreChecks_UseTheSourceTLS(t *testing.T) {
 			t.Fatalf("resolveDumpTLS = %+v, %v; want an encrypted dump", got, err)
 		}
 	})
+	t.Run("mandatory-TLS check before a Connector/C mydumper", func(t *testing.T) {
+		fp, err := realSourceTLSPin(ctx, dsn, dumpTLS{encrypt: true})
+		if err != nil || len(fp) != 59 {
+			t.Fatalf("sourceTLSPin = %q, %v; want a SHA-1 fingerprint", fp, err)
+		}
+		// A DSN's own tls=false must not turn the mandatory check off.
+		if fp2, err := realSourceTLSPin(ctx, dsn+"?tls=false", dumpTLS{encrypt: true}); err != nil || fp2 != fp {
+			t.Fatalf("with tls=false in the DSN: %q, %v; want the same certificate", fp2, err)
+		}
+		ca, _, _ := writeTLSFiles(t)
+		if _, err := realSourceTLSPin(ctx, dsn, dumpTLS{encrypt: true, verify: "ca", goCA: ca}); err == nil {
+			t.Fatal("a certificate from another CA passed the verify-ca check")
+		}
+	})
 	t.Run("no-lock table count", func(t *testing.T) {
 		var buf bytes.Buffer
 		prev := slog.Default()
@@ -73,7 +87,13 @@ func TestFullReadPreChecks_UseTheSourceTLS(t *testing.T) {
 			t.Fatalf("the no-lock table count did not run: %s", buf.String())
 		}
 	})
-	t.Run("disabled is refused in plain words", func(t *testing.T) {
+	// The plain-English 3159 wording needs a server-wide
+	// require_secure_transport=ON, which this shared test server cannot be
+	// switched to while other packages use it: a REQUIRE SSL user reached in
+	// cleartext gets 1045 (access denied), not 3159. The wording is pinned by
+	// internal/doctor's TestSourceTLSRefusalText and was checked against a
+	// MariaDB with require_secure_transport=ON for #1996.
+	t.Run("disabled is refused", func(t *testing.T) {
 		_, err := estimateDumpSize(ctx, dsn, config.SSL{Mode: "disabled"}, nil)
 		if err == nil {
 			t.Fatal("a cleartext connection reached a REQUIRE SSL user")

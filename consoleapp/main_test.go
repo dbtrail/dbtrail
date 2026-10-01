@@ -42,12 +42,18 @@ func TestMain(m *testing.M) {
 	// for them. A test about that decision sets its own answer
 	// (stubSourceEncrypted); the integration tests restore the real probe.
 	sourceEncrypted = func(context.Context, string, config.SSL) (bool, error) { return false, nil }
+	// Same for the mandatory-TLS check before a Connector/C mydumper.
+	sourceTLSPin = func(context.Context, string, dumpTLS) (string, error) { return "00:11", nil }
 	os.Exit(m.Run())
 }
 
 // realSourceEncrypted is the production probe, captured before TestMain
 // replaces it.
 var realSourceEncrypted = sourceEncrypted
+
+// realSourceTLSPin is the production check, captured before TestMain
+// replaces it.
+var realSourceTLSPin = sourceTLSPin
 
 // fakeMydumperBound is how long a test here gives a fake mydumper: the
 // --version probe's bound, and the deadline of any wait for a job that runs

@@ -124,6 +124,9 @@ type backupScheduleRunDTO struct {
 	// unattended read that ran on a low disk says so on the card.
 	DiskCheck string `json:"disk_check,omitempty"`
 	DiskNote  string `json:"disk_note,omitempty"`
+	// TransportNote: the full read reached the source without encryption,
+	// and why (#1996).
+	TransportNote string `json:"transport_note,omitempty"`
 }
 
 type backupScheduleSkipDTO struct {
@@ -363,7 +366,7 @@ func scheduleRunFromRecord(run *BaselineRunRecord) *backupScheduleRunDTO {
 		CarriedCopied: run.CarriedCopied,
 		Refused:       run.Refused,
 		RefusedTables: run.RefusedTables, RefusedTablesOmitted: run.RefusedTablesOmitted,
-		DiskCheck: run.DiskCheck, DiskNote: run.DiskNote,
+		DiskCheck: run.DiskCheck, DiskNote: run.DiskNote, TransportNote: run.TransportNote,
 		NewTables: run.NewTables, NewTablesOmitted: run.NewTablesOmitted, NewTablesUnchecked: run.NewTablesUnchecked,
 		NewTablesAction: run.NewTablesAction, NewTablesActionReason: run.NewTablesActionReason,
 	}
@@ -404,7 +407,7 @@ func scheduleRunFromStatus(st BackupScheduleState) *backupScheduleRunDTO {
 		CarriedCopied: cur.CarriedCopied,
 		Refused:       cur.Refused,
 		RefusedTables: cur.RefusedTables, RefusedTablesOmitted: cur.RefusedTablesOmitted,
-		DiskCheck: cur.DiskCheck, DiskNote: cur.DiskNote,
+		DiskCheck: cur.DiskCheck, DiskNote: cur.DiskNote, TransportNote: cur.TransportNote,
 		NewTables: cur.NewTables, NewTablesOmitted: cur.NewTablesOmitted, NewTablesUnchecked: cur.NewTablesUnchecked,
 		NewTablesAction: cur.NewTablesAction, NewTablesActionReason: cur.NewTablesActionReason,
 	}

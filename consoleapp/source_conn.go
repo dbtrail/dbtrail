@@ -90,7 +90,8 @@ func (e *sourceTLSRefusal) Unwrap() error { return e.err }
 // asked (empty on an unencrypted connection). A seam, so the tests need no
 // server.
 var sourceEncrypted = func(ctx context.Context, dsn string, ssl config.SSL) (bool, error) {
-	db, fellBack, err := connectSourceCleartext(dsn, ssl, slog.LevelWarn)
+	// Debug: the full read that asks logs the outcome once itself.
+	db, fellBack, err := connectSourceCleartext(dsn, ssl, slog.LevelDebug)
 	if err != nil {
 		return false, err
 	}

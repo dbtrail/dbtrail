@@ -9426,10 +9426,12 @@ async function createBaseline(id, btn) {
   // A low disk (#1938) stays on screen: the read ran, and the next one may not.
   const lowDisk = done && done.disk_check === "low" && done.disk_note ? done.disk_note : "";
   const unchecked = done && done.disk_check === "unchecked" && done.disk_note ? ". " + done.disk_note : "";
+  // A read that reached the source without encryption says so (#1996).
+  const cleartext = done && done.transport_note ? " " + done.transport_note : "";
   if (done && done.state === "succeeded" && !done.uploading) {
     toast("Snapshot complete: " + (done.tables || 0) + " table(s)" +
       (done.uploaded ? ", " + done.uploaded + " file(s) uploaded" : "") +
-      (done.swept ? ", " + done.swept + " earlier snapshot(s) sent too" : "") + unchecked);
+      (done.swept ? ", " + done.swept + " earlier snapshot(s) sent too" : "") + unchecked + cleartext);
     if (lowDisk) toastError(lowDisk);
   } else if (done && done.uploading) {
     // The poll's cap hit mid-copy: say what is true, not "complete".
@@ -9814,6 +9816,8 @@ async function loadBackupDetail(at, box) {
   // The full read's disk check (#1938): a low disk in the error style, the
   // rest as a plain line.
   if (d.run && d.run.disk_note) box.append(el("p", { class: d.run.disk_check === "low" ? "form-msg err" : "form-hint", text: d.run.disk_note }));
+  // A read made without encryption (#1996), as a plain line.
+  if (d.run && d.run.transport_note) box.append(el("p", { class: "form-hint", text: d.run.transport_note }));
   const skipped = viewsSkippedBlock(d.views_skipped);
   if (skipped) box.append(skipped);
   const tbl = el("table", { class: "bk-table" });
@@ -10416,6 +10420,8 @@ function backupScheduleCard(cur, b) {
       if (run.disk_note && run.disk_check !== "ok") {
         body.append(el("p", { class: run.disk_check === "low" ? "form-msg err" : "form-hint", text: run.disk_note }));
       }
+      // A full read that reached the source without encryption (#1996).
+      if (run.transport_note) body.append(el("p", { class: "form-hint", text: run.transport_note }));
       // The reason a full backup was taken, as recorded when it ran, and
       // the setting that turns the next one into an update (#1604). After
       // BOTH branches: a full read that then failed is the run whose

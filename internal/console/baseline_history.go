@@ -97,6 +97,9 @@ type BaselineRunRecord struct {
 	// that ran on a low disk says so after the live status is gone.
 	DiskCheck string `json:"disk_check,omitempty"`
 	DiskNote  string `json:"disk_note,omitempty"`
+	// TransportNote: see BaselineStatus. A read made in cleartext says so
+	// after the live status is gone.
+	TransportNote string `json:"transport_note,omitempty"`
 	// Events is how far the index high-water mark moved between this
 	// daemon's previous fold of the snapshot an update started from and
 	// this one (every source writing to the index counts, and so do rows a
