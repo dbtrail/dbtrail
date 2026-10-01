@@ -154,9 +154,9 @@ var probeCapture = probeCaptureFromDBs
 // then answers slowly would otherwise hold a page for several of them. The
 // probe keeps running in the background after that, until those same
 // bounds end it; its answer is then dropped.
-func probeCaptureFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor, sourceRead time.Time) captureProbeResult {
+func probeCaptureFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL, anchor, sourceRead time.Time) captureProbeResult {
 	return boundedCaptureProbe(ctx, windowProbeTimeout, func(ctx context.Context) captureProbeResult {
-		return captureFromDBs(ctx, indexDSN, sourceDSN, anchor, sourceRead)
+		return captureFromDBs(ctx, indexDSN, sourceDSN, ssl, anchor, sourceRead)
 	})
 }
 
@@ -187,7 +187,7 @@ func boundedCaptureProbe(parent context.Context, within time.Duration, probe fun
 // Unknown on any failure: the caller keeps the full backup. Each connection
 // is bounded like the window probe (windowProbeTimeout, dial and reads),
 // and its queries by ctx; a failure's cause is scrubbed of both DSNs.
-func captureFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor, sourceRead time.Time) captureProbeResult {
+func captureFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL, anchor, sourceRead time.Time) captureProbeResult {
 	idx, err := config.Connect(probeDSN(indexDSN))
 	if err != nil {
 		return captureProbeResult{detail: "the index did not answer", cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
@@ -198,7 +198,7 @@ func captureFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor, sou
 		return captureProbeResult{detail: "the capture's checkpoint could not be read", cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
 	}
 	r, err := compareCapture(ctx, idx, st, anchor, sourceRead, func() (*sql.DB, error) {
-		return config.Connect(sourceProbeDSN(sourceDSN))
+		return connectSource(sourceProbeDSN(sourceDSN), ssl)
 	})
 	if err != nil {
 		r.cause = config.ScrubDSNError(err, indexDSN, sourceDSN)

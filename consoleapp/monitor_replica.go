@@ -78,7 +78,7 @@ func (m *monitorSupervisor) replicaOverlapCheck(ctx context.Context, e console.S
 	ctx, cancel := context.WithTimeout(ctx, replicaOverlapTimeout)
 	defer cancel()
 
-	srcDB, err := config.Connect(e.SourceDSN)
+	srcDB, err := connectSource(e.SourceDSN, e.SourceSSL())
 	if err != nil {
 		return &console.DoctorCheck{Name: replicaCheckName, Status: "skip",
 			Detail: "could not connect to the source to compare GTID lineage: " + err.Error()}

@@ -340,7 +340,7 @@ func (b *backupScheduler) captureVerdict(ctx context.Context, e console.ServerEn
 	case e.IsPostgres():
 		r.detail = "PostgreSQL sources are not compared yet"
 	default:
-		r = probeCapture(ctx, e.DSN, e.SourceDSN, anchor, sourceRead)
+		r = probeCapture(ctx, e.DSN, e.SourceDSN, e.SourceSSL(), anchor, sourceRead)
 	}
 	if ctx.Err() != nil {
 		return r.verdict, r.detail

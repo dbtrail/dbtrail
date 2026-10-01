@@ -317,7 +317,8 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		// unattended reboot would crash-loop instead of capturing while
 		// there is still room). Standalone `bintrail doctor` keeps full FAIL
 		// semantics for CI.
-		preflight := doctor.Build(cmd.Context(), upSourceDSN, upIndexDSN, upSchemas, upRotationCfg.Retain)
+		preflight := doctor.Build(cmd.Context(), upSourceDSN, upIndexDSN, upSchemas, upRotationCfg.Retain,
+			doctor.WithSourceSSL(bootSourceSSL()))
 		if err := preflight.Write(os.Stderr, "text"); err != nil {
 			return fmt.Errorf("write preflight report: %w", err)
 		}
@@ -1603,7 +1604,7 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		// The Overview asks the source whether capture is caught up (#1794).
 		// Here because both watch entry points reach this function; the
 		// read-only serve does not, and answers unknown.
-		CaptureStatus:    newCaptureStatusReporter(upSourceDSN).withBootFlavor(bootFlavor.get),
+		CaptureStatus:    newCaptureStatusReporter(upSourceDSN).withBootFlavor(bootFlavor.get).withBootSSL(bootSourceSSL()),
 		BootSourceFlavor: bootSourceFlavor,
 
 		BaselineDir:     opts.BaselineDir,
@@ -1906,4 +1907,10 @@ func bootLockModeReport() string {
 		return ""
 	}
 	return string(upConsoleBaselineLockMode)
+}
+
+// bootSourceSSL is the TLS of the daemon's own capture, from --ssl-*: the
+// boot server's console checks connect with it too.
+func bootSourceSSL() config.SSL {
+	return config.SSL{Mode: upSSLMode, CA: upSSLCA, Cert: upSSLCert, Key: upSSLKey}
 }

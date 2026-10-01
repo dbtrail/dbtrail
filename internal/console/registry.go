@@ -13,6 +13,7 @@ import (
 
 	yaml "go.yaml.in/yaml/v2"
 
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
@@ -316,6 +317,26 @@ func LoadRegistry(path string) (*Registry, error) {
 	}
 	r.syncBucketStores()
 	return r, nil
+}
+
+// DefaultSourceSSLMode is the TLS mode a source connection uses when its
+// entry sets none: try TLS, and fall back to cleartext (with a warning) only
+// when the server offers no TLS at all.
+const DefaultSourceSSLMode = "preferred"
+
+// SourceSSL is the TLS the SOURCE connection uses: the entry's ssl_* fields,
+// with an empty ssl_mode meaning DefaultSourceSSLMode. Capture and every
+// check the console runs against the source read it here, so a check never
+// connects differently from the capture it is checking (a server that only
+// accepts encrypted connections failed the startup checks in cleartext while
+// capture, over TLS, would have worked). The mode is passed through as
+// written: a misspelled one fails in config.BuildTLSConfig, for both.
+func (e ServerEntry) SourceSSL() config.SSL {
+	mode := e.SSLMode
+	if mode == "" {
+		mode = DefaultSourceSSLMode
+	}
+	return config.SSL{Mode: mode, CA: e.SSLCA, Cert: e.SSLCert, Key: e.SSLKey}
 }
 
 // BucketStore builds the per-bucket store this entry's S3 settings describe.

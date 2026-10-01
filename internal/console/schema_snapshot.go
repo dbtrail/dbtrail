@@ -3,6 +3,8 @@ package console
 import (
 	"errors"
 	"net/http"
+
+	"github.com/dbtrail/dbtrail/internal/config"
 )
 
 // ErrSchemaSnapshotRunning is returned by SchemaSnapshotController.Trigger when
@@ -49,6 +51,9 @@ type SchemaSnapshotRequest struct {
 	// snapshot it already had.
 	IndexDSN string
 	Schemas  []string
+	// SourceSSL is how the source connection uses TLS: the entry's
+	// SourceSSL, so the snapshot reads the source the way capture does.
+	SourceSSL config.SSL
 }
 
 // SchemaSnapshotStatus is the pollable state of a server's most recent
@@ -119,6 +124,7 @@ func (s *Server) handleSchemaSnapshotTrigger(w http.ResponseWriter, r *http.Requ
 		SourceDSN:  e.SourceDSN,
 		IndexDSN:   e.DSN,
 		Schemas:    splitSchemas(e.Schemas),
+		SourceSSL:  e.SourceSSL(),
 	}
 	if err := s.schemaSnapCtrl.Trigger(req); err != nil {
 		if errors.Is(err, ErrSchemaSnapshotRunning) {

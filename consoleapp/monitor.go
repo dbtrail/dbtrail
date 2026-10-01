@@ -378,7 +378,7 @@ func (m *monitorSupervisor) doctor(ctx context.Context, e console.ServerEntry, o
 			Schemas:     e.Schemas,
 		})
 	default:
-		opts = append(opts, doctor.WithLoopbackRetry(m.loopbackRetry))
+		opts = append(opts, doctor.WithLoopbackRetry(m.loopbackRetry), doctor.WithSourceSSL(e.SourceSSL()))
 		r = doctor.Build(ctx, e.SourceDSN, e.DSN, e.Schemas, m.rotateRetain, opts...)
 	}
 	out := &console.DoctorReport{
@@ -753,9 +753,9 @@ func sourcePGStreamConfig(e console.ServerEntry, serverID uint32, batchSize int)
 
 // sourceStreamConfig builds the supervised stream's streamrun.Config from a
 // registry entry (Hooks are attached by the caller — they need the live job).
-// The source connection's TLS comes from the entry's ssl_* fields (#879): an
-// empty SSLMode defaults to "preferred", preserving pre-#879 behavior for
-// entries with no TLS configured. Flavor is the entry's resolved source flavor
+// The source connection's TLS comes from the entry's ssl_* fields (#879) via
+// ServerEntry.SourceSSL, the one place an empty SSLMode becomes "preferred":
+// the console's checks of the same source read it there too. Flavor is the entry's resolved source flavor
 // ("mysql"/"mariadb" — this builder is only reached in the non-postgres branch):
 // without it the stream normalized an empty Flavor to "mysql", so a console-
 // monitored MariaDB source was captured with the MySQL GTID parser AND the ext
@@ -763,10 +763,7 @@ func sourcePGStreamConfig(e console.ServerEntry, serverID uint32, batchSize int)
 // extracted from Start so the entry→config fan-out (SSL especially) is
 // unit-testable without a live DB.
 func sourceStreamConfig(e console.ServerEntry, serverID uint32, batchSize int) streamrun.Config {
-	sslMode := e.SSLMode
-	if sslMode == "" {
-		sslMode = "preferred"
-	}
+	ssl := e.SourceSSL()
 	return streamrun.Config{
 		IndexDSN:  e.DSN,
 		SourceDSN: e.SourceDSN,
@@ -781,10 +778,10 @@ func sourceStreamConfig(e console.ServerEntry, serverID uint32, batchSize int) s
 		// for all supervised streams (per-stream binds would conflict).
 		MetricsSource: e.ID,
 		Checkpoint:    10,
-		SSLMode:       sslMode,
-		SSLCA:         e.SSLCA,
-		SSLCert:       e.SSLCert,
-		SSLKey:        e.SSLKey,
+		SSLMode:       ssl.Mode,
+		SSLCA:         ssl.CA,
+		SSLCert:       ssl.Cert,
+		SSLKey:        ssl.Key,
 		Format:        "text",
 		GapTimeout:    30,
 		Deps:          streamdeps.Default(),

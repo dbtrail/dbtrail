@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/status"
 	"github.com/go-sql-driver/mysql"
@@ -186,7 +187,7 @@ func stubCaptureProbe(t *testing.T, r captureProbeResult) *[]string {
 	var asked []string
 	prev := probeCapture
 	t.Cleanup(func() { probeCapture = prev })
-	probeCapture = func(_ context.Context, indexDSN, sourceDSN string, anchor, sourceRead time.Time) captureProbeResult {
+	probeCapture = func(_ context.Context, indexDSN, sourceDSN string, _ config.SSL, anchor, sourceRead time.Time) captureProbeResult {
 		read := "never"
 		if !sourceRead.IsZero() {
 			read = sourceRead.UTC().Format(time.RFC3339)

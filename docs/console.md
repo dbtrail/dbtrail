@@ -518,6 +518,11 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
   Setting these in the registry is the only way to get `verify-ca` / mutual
   TLS on a "+ Add server" source; an empty `ssl_mode` means the default
   `preferred` (opportunistic, no certificate verification).
+  The startup checks ("Connect a database", Test, Start) and the
+  replica-overlap check connect to the source with these same settings, so
+  a server that only accepts encrypted connections
+  (`require_secure_transport=ON`, the default on Amazon RDS for MariaDB
+  11.8) passes them under the default `preferred`.
   `ssl_ca`/`ssl_cert`/`ssl_key` are certificate/key file paths **on the
   daemon host**, not secrets.
 

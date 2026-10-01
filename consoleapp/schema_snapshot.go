@@ -105,7 +105,7 @@ func newSchemaSnapshotSupervisor(ctx context.Context, reload func(context.Contex
 // "succeeded" that silently omits the tables that will KEEP being skipped is
 // the same half-truth this issue is about.
 func takeSchemaSnapshot(req console.SchemaSnapshotRequest) (metadata.SnapshotStats, error) {
-	sourceDB, err := config.Connect(req.SourceDSN)
+	sourceDB, err := connectSource(req.SourceDSN, req.SourceSSL)
 	if err != nil {
 		return metadata.SnapshotStats{}, err
 	}
