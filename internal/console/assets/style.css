@@ -2122,7 +2122,13 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .bk-expandable { cursor: pointer; }
 .bk-expandable:hover { background: var(--raised); }
 .bk-detail { padding: 6px 10px 12px 38px; border-bottom: 1px solid var(--line); }
-.bk-facts { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 4px 0 8px; }
+.bk-facts { display: flex; align-items: flex-start; gap: 8px 14px; flex-wrap: wrap; margin: 4px 0 8px; }
+/* A snapshot's facts are sentences (#2002): one per line, wrapped, never cut
+   with an ellipsis the way .stg-dest cuts a path. The list takes the room and
+   the Download button stays at its right, or drops under it on a phone. */
+.bk-fact-list { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.bk-fact { color: var(--ink-2); overflow-wrap: anywhere; }
+.bk-facts > .btn { flex: none; }
 .bk-table { border-collapse: collapse; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
 .bk-table th { text-align: left; font-weight: 600; padding: 2px 18px 2px 0; color: var(--ink-3); }
 .bk-table td { padding: 2px 18px 2px 0; }
