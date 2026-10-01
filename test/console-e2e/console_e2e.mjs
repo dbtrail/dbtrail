@@ -2473,7 +2473,7 @@ try {
     await page.route(route, (r) => r.request().method() === "POST"
       ? r.fulfill({ status: 202, contentType: "application/json", body: "{}" })
       : r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ baseline: { state: "failed", finished_at: "2026-10-01T09:00:00Z",
-          last_error: raw, failure: { kind: "missing_permission", grant, privileges: 1 } } }) }));
+          last_error: raw, failure: { kind: "missing_permission", grant, privileges: 1, server: "e2e-src" } } }) }));
     await page.evaluate(() => {
       const t = document.getElementById("toast-error");
       if (t && !t.hidden) dismissToast();
@@ -2505,7 +2505,7 @@ try {
     });
     await page.unroute(route);
     await page.evaluate(() => dismissToast());
-    (closedBefore && fail.open && /^Snapshot did not finish\. Your database was not changed\./.test(fail.shown)
+    (closedBefore && fail.open && /^Snapshot of e2e-src did not finish\. Your database was not changed\./.test(fail.shown)
       && /needs one more permission\. Run this on your database, then press Read database now again:/.test(fail.shown)
       && fail.sql === grant && fail.sqlVisible && fail.copy
       && fail.fold.includes("CRITICAL") && !/CRITICAL|Access denied/.test(fail.shown))

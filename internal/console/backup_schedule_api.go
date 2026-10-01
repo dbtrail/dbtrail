@@ -348,6 +348,7 @@ func scheduleRunFromRecord(run *BaselineRunRecord) *backupScheduleRunDTO {
 		OK:            run.Error == "",
 		Error:         run.Error,
 		Failure:       run.Failure,
+		Published:     run.SnapshotTime != "",
 		SnapshotTime:  run.SnapshotTime,
 		Tables:        run.Tables,
 		Rows:          run.Rows,

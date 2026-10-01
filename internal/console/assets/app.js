@@ -3043,10 +3043,14 @@ function firstRunCard(rep) {
     const body = el("div", { class: "dc-body" }, el("div", { class: "dc-name", text: s.name }));
     const known = s.snapshot_failed && s.failure && ((s.failure.kind === "missing_permission" && s.failure.grant) ||
       (s.failure.kind === "mydumper_too_old" && s.failure.min_version));
-    if (s.snapshot_failed) body.append(snapshotFailureCard(s.failure, s.detail || "", "overview", s.note || ""));
+    // The button is named only when this session could press it, for a run
+    // a person started; otherwise the next try is the schedule's.
+    const pressable = !!capsCache.baseline_trigger && sessionMay(PERM_SNAPSHOT_CREATE) && !(s.failure && s.failure.scheduled);
+    if (s.snapshot_failed) body.append(snapshotFailureCard(s.failure, s.detail || "", pressable ? "overview" : "scheduled", s.note || ""));
     else if (s.detail) body.append(el("div", { class: "fr-detail", text: s.detail }));
-    // A card that names its fix already says where to try again.
-    if (s.fix && !known) {
+    // A card that names its fix, or names the schedule as the next try,
+    // already says where to try again.
+    if (s.fix && !known && !(s.snapshot_failed && !pressable)) {
       // A fix that names a page carries the way there: "press Start in
       // Servers" opens the Servers dialog, "on the Snapshots page" goes to
       // that page. The sentence itself is the server's and stays as sent.
@@ -9221,17 +9225,29 @@ function newestCopyLine(snaps, canRead, mayRead) {
 }
 
 // SNAPSHOT_FAILED_HEAD is the first line of every failed full read the page
-// explains (#1986): true whatever went wrong, because a snapshot only reads.
+// explains (#1986): true whatever went wrong, because a MySQL or MariaDB
+// snapshot only reads.
 const SNAPSHOT_FAILED_HEAD = "Snapshot did not finish. Your database was not changed.";
 
-// snapshotFailureBody is what follows that headline: the one fix the daemon
-// could name for certain (failure.kind, never read from the error text), then
-// the full error text in a closed "Technical details" fold. where says where
-// the card is, which decides how the next try is named: "now" beside the
-// Read database now button, "overview" away from it, "scheduled" on the
-// schedule card. note is a line that stays visible (a low disk). A failure
-// with no kind, or none at all (an older daemon, an old run record, a
-// Postgres snapshot), gets the fold alone.
+// snapshotFailureHead is that line for one failure. A Postgres snapshot
+// creates a replication slot on the source that a failure can leave behind,
+// so it does not say the database was not changed. name, when given, says
+// which server: two failures at once must not read the same.
+function snapshotFailureHead(failure, name) {
+  const pg = !!(failure && failure.postgres);
+  const head = name ? "Snapshot of " + name + " did not finish." : "Snapshot did not finish.";
+  return pg ? head : head + " Your database was not changed.";
+}
+
+// snapshotFailureBody is what follows the headline: the one fix the daemon
+// could name for certain (failure.kind, never read from the error text), or,
+// with none, the error's first line (failure.summary, without mydumper's
+// output) as the hint; then the full error in a closed "Technical details"
+// fold. where says how the next try is named: "now" beside the Read
+// database now button, "overview" away from it, "scheduled" when the next
+// try is the schedule's. note is a line that stays visible (a low disk, a
+// location that could not be checked). No failure at all (an older daemon,
+// an old run record) gets the fold alone.
 function snapshotFailureBody(failure, raw, where, note) {
   const f = failure || {};
   const box = el("div", { class: "snap-fail" });
@@ -9244,14 +9260,20 @@ function snapshotFailureBody(failure, raw, where, note) {
     box.append(pre, el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(f.grant, "SQL") }));
     // The daemon gives no statement for this on a host named as Amazon RDS
     // or Aurora, but one reached by an address or another name looks
-    // self-hosted to it, and RDS refuses this permission to every user.
+    // self-hosted to it, and RDS refuses this permission to every user. The
+    // mode that needs it is only ever tried last because an operator chose
+    // it (automatic retries another), and the page has no control for that
+    // choice, so the card points at where the details name it.
     if (/\bBACKUP_ADMIN\b/.test(f.grant)) {
-      box.append(el("p", { class: "snap-fail-note", text: "On Amazon RDS or Aurora this permission cannot be granted. There, leave the snapshot settings on automatic and snapshots pick a way that works." }));
+      box.append(el("p", { class: "snap-fail-note", text: "On Amazon RDS or Aurora this permission cannot be granted." +
+        (f.mode_chosen ? " DBTrail was started with a setting that forces this way of reading; the technical details below say where it is." : "") }));
     }
   } else if (f.kind === "mydumper_too_old" && f.min_version) {
-    box.append(el("p", { class: "snap-fail-fix", text: "Install mydumper " + f.min_version + " or newer where DBTrail runs, then " + retry + "." }));
-  } else if (where === "scheduled") {
-    box.append(el("p", { class: "snap-fail-fix", text: "The next scheduled snapshot tries again." }));
+    box.append(el("p", { class: "snap-fail-fix", text: "Install mydumper " + f.min_version + " or newer where DBTrail runs, then " + retry + "." +
+      (f.mode_chosen ? " The technical details below show another way." : "") }));
+  } else {
+    if (f.summary) box.append(el("p", { class: "snap-fail-why", text: f.summary }));
+    if (where === "scheduled") box.append(el("p", { class: "snap-fail-fix", text: "The next scheduled snapshot tries again." }));
   }
   if (note) box.append(el("p", { class: "snap-fail-note", text: note }));
   if (raw) {
@@ -9263,9 +9285,9 @@ function snapshotFailureBody(failure, raw, where, note) {
 
 // snapshotFailureCard is the headline and the body in one block, for the
 // places that are not a toast (the toast's own line is the headline).
-function snapshotFailureCard(failure, raw, where, note) {
+function snapshotFailureCard(failure, raw, where, note, name) {
   const box = snapshotFailureBody(failure, raw, where, note);
-  box.prepend(el("p", { class: "snap-fail-head", text: SNAPSHOT_FAILED_HEAD }));
+  box.prepend(el("p", { class: "snap-fail-head", text: snapshotFailureHead(failure, name) }));
   return box;
 }
 
@@ -9305,7 +9327,7 @@ async function createBaseline(id, btn) {
   } else if (done && !done.published) {
     // The failure toast never fades, so the whole card fits in it (#1986):
     // the headline is its line, the fix and the folded error sit under it.
-    toastError(SNAPSHOT_FAILED_HEAD, snapshotFailureBody(done.failure, done.last_error || "unknown error", "now", lowDisk));
+    toastError(snapshotFailureHead(done.failure, done.failure && done.failure.server), snapshotFailureBody(done.failure, done.last_error || "unknown error", "now", lowDisk));
   } else if (done) {
     // Published, then the copy to the destination failed: a snapshot
     // exists, so "did not finish" would be false.
@@ -10259,7 +10281,7 @@ function backupScheduleCard(cur, b) {
           // A full read that published nothing: the same card the toast and
           // the Overview draw (#1986), with the error folded.
           body.append(el("p", { class: "form-msg err", text: "Last scheduled snapshot failed " + when + " (" + what + ")." }),
-            snapshotFailureCard(run.failure, run.error || "unknown error", "scheduled"));
+            snapshotFailureCard(run.failure, run.error || "unknown error", "scheduled", "", (run.failure && run.failure.server) || cur.name || ""));
         } else {
           body.append(el("p", { class: "form-msg err", text: run.snapshot_time
             ? "Last scheduled snapshot " + when + " (" + what + ") wrote the snapshot on this machine but could not " +

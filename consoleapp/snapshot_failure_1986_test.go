@@ -24,6 +24,14 @@ func missingErr(mode baseline.LockMode, account string, privs ...string) error {
 	return &mydumperlock.MissingPrivilegesError{Mode: mode, Missing: privs, Account: account}
 }
 
+// kindOnly keeps what names the fix, nil when there is none.
+func kindOnly(f *console.SnapshotFailure) *console.SnapshotFailure {
+	if f == nil || f.Kind == "" {
+		return nil
+	}
+	return &console.SnapshotFailure{Kind: f.Kind, Grant: f.Grant, Privileges: f.Privileges, MinVersion: f.MinVersion}
+}
+
 func TestSnapshotFailureOf_kinds(t *testing.T) {
 	for _, c := range []struct {
 		name   string
@@ -56,7 +64,10 @@ func TestSnapshotFailureOf_kinds(t *testing.T) {
 			&console.SnapshotFailure{Kind: console.SnapshotFailureMydumperTooOld, MinVersion: "0.18.1"}, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got := snapshotFailureOf(c.err, console.BaselineRequest{SourceDSN: c.dsn, Flavor: c.flavor})
+			// Since the #1991 review every failure carries the card's context
+			// (summary, server...); this table is about the kind alone, and
+			// want nil means "no kind".
+			got := kindOnly(snapshotFailureOf(c.err, console.BaselineRequest{SourceDSN: c.dsn, Flavor: c.flavor}))
 			if fmt.Sprintf("%+v", got) != fmt.Sprintf("%+v", c.want) {
 				t.Errorf("snapshotFailureOf = %+v, want %+v", got, c.want)
 			}

@@ -21,38 +21,51 @@ type mydumperTooOldError struct {
 func (e *mydumperTooOldError) Error() string { return e.err.Error() }
 func (e *mydumperTooOldError) Unwrap() error { return e.err }
 
-// snapshotFailureOf is why a full read failed, for the page, when the cause
-// is one it can explain in plain words (#1986); nil for every other failure,
-// which the page draws as the generic card with the error text folded.
+// chosenModeError marks a dump failure whose lock mode an operator chose
+// (a startup variable or a saved setting), so the page may say the fix can
+// be undoing that choice. Made in execute, which knows where the mode came
+// from; the message is unchanged.
+type chosenModeError struct{ err error }
+
+func (e *chosenModeError) Error() string { return e.err.Error() }
+func (e *chosenModeError) Unwrap() error { return e.err }
+
+// snapshotFailureOf is what the page's failure card needs about a failed run
+// that published nothing (#1986): nil only for a success. Its Kind is set
+// only for the two causes the card explains in plain words; any other
+// failure carries Summary, the error's first line, as its hint.
 //
-// Read only from typed errors, never from the message. It gives no kind when
-// the statement it would show could be wrong:
+// Kinds come from typed errors, never from the message. No kind when the
+// statement it would show could be wrong:
 //   - ftwrl's missing privileges on an Amazon RDS or Aurora host name: RDS
 //     refuses BACKUP_ADMIN outright, so the GRANT could not work;
 //   - mydumper's own refusal of the global read lock (ftwrlDeniedError): the
 //     privilege check passed, so the user already holds RELOAD;
 //   - no account read from SHOW GRANTS (the DSN's user at '%' would be a
-//     guess at the account's host).
+//     guess at the account's host);
+//   - a Postgres source, which never runs mydumper.
 //
 // After execute's automatic retry the error wraps only the lock-all attempt's
 // failure, so the statement is for what lock-all needs, the mode tried last.
 func snapshotFailureOf(err error, req console.BaselineRequest) *console.SnapshotFailure {
-	if err == nil || req.Flavor == console.FlavorPostgres {
+	if err == nil {
 		return nil
 	}
-	if old := (*mydumperTooOldError)(nil); errors.As(err, &old) {
-		return &console.SnapshotFailure{Kind: console.SnapshotFailureMydumperTooOld, MinVersion: old.min}
+	f := &console.SnapshotFailure{Server: req.ServerName, Scheduled: req.Trigger == console.BaselineRunTriggerScheduled}
+	var chosen *chosenModeError
+	f.ModeChosen = errors.As(err, &chosen)
+	if req.Flavor == console.FlavorPostgres {
+		f.Postgres = true
+	} else if old := (*mydumperTooOldError)(nil); errors.As(err, &old) {
+		f.Kind, f.MinVersion = console.SnapshotFailureMydumperTooOld, old.min
+	} else if mp := (*mydumperlock.MissingPrivilegesError)(nil); errors.As(err, &mp) &&
+		!(errors.Is(mp, mydumperlock.ErrFTWRLPrivilegesMissing) && sourceIsManaged(req.SourceDSN)) {
+		if grant := mp.Grant(); grant != "" {
+			f.Kind, f.Grant, f.Privileges = console.SnapshotFailureMissingPermission, grant, len(mp.Missing)
+		}
 	}
-	var mp *mydumperlock.MissingPrivilegesError
-	if !errors.As(err, &mp) {
-		return nil
+	if f.Kind == "" {
+		f.Summary = refusalSummary(err)
 	}
-	if errors.Is(mp, mydumperlock.ErrFTWRLPrivilegesMissing) && sourceIsManaged(req.SourceDSN) {
-		return nil
-	}
-	grant := mp.Grant()
-	if grant == "" {
-		return nil
-	}
-	return &console.SnapshotFailure{Kind: console.SnapshotFailureMissingPermission, Grant: grant, Privileges: len(mp.Missing)}
+	return f
 }

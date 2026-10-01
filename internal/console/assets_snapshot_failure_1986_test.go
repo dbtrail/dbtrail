@@ -165,7 +165,7 @@ console.log(JSON.stringify(res));
 		if fix != w.fix {
 			t.Errorf("%s: fix line %q, want %q", key, fix, w.fix)
 		}
-		rds := "On Amazon RDS or Aurora this permission cannot be granted. There, leave the snapshot settings on automatic and snapshots pick a way that works."
+		rds := "On Amazon RDS or Aurora this permission cannot be granted."
 		if strings.Contains(w.sql, "BACKUP_ADMIN") {
 			// RDS refuses BACKUP_ADMIN to everyone: a host reached by address
 			// looks self-hosted to the daemon, so the card says it.
@@ -228,6 +228,7 @@ console.log(JSON.stringify(entries));
 // own "Try again" line; the generic one keeps it.
 func TestSnapshotFailure_firstRunStep(t *testing.T) {
 	out := runSnapshotFailureJS(t, `
+vm.runInContext("capsCache = { baseline_trigger: true };", ctx);
 const card = fn("firstRunCard");
 const step = (failure) => ({ complete: false, steps: [{ name: "Take the first full DB snapshot", state: "failed",
   detail: "dump: refused", fix: "Try again on the Snapshots page.", snapshot_failed: true, failure, note: "Could not check for an existing snapshot: s3 denied" }] });
@@ -290,7 +291,7 @@ console.log(JSON.stringify({
 	}
 	perm := strings.Join(got.Perm.Shown, " | ")
 	t.Logf("perm: %q\nold: %q", got.Perm.Shown, got.Old.Shown)
-	if !strings.Contains(perm, "Last scheduled snapshot failed") || !strings.Contains(perm, headline) ||
+	if !strings.Contains(perm, "Last scheduled snapshot failed") || !strings.Contains(perm, "Snapshot of a did not finish. Your database was not changed.") ||
 		!strings.Contains(perm, "then the next scheduled snapshot will use it:") || len(got.Perm.SQL) != 1 {
 		t.Errorf("scheduled permission card: %q, SQL %q", perm, got.Perm.SQL)
 	}
@@ -301,16 +302,17 @@ console.log(JSON.stringify({
 		t.Errorf("the error is not in a closed Technical details fold: %+v", got.Perm)
 	}
 	old := strings.Join(got.Old.Shown, " | ")
-	if !strings.Contains(old, headline) || !strings.Contains(old, "The next scheduled snapshot tries again.") || len(got.Old.SQL) != 0 {
+	// The schedule card names its server (cur.name "a") in the headline.
+	if !strings.Contains(old, "Snapshot of a did not finish. Your database was not changed.") || !strings.Contains(old, "The next scheduled snapshot tries again.") || len(got.Old.SQL) != 0 {
 		t.Errorf("an old record without the field: %q, want the generic card", old)
 	}
-	if r := strings.Join(got.Refresh.Shown, " | "); strings.Contains(r, headline) || !strings.Contains(r, "Nothing was overwritten; the next scheduled run tries again.") {
+	if r := strings.Join(got.Refresh.Shown, " | "); strings.Contains(r, "did not finish") || !strings.Contains(r, "Nothing was overwritten; the next scheduled run tries again.") {
 		t.Errorf("an update's failure lost its own wording: %q", r)
 	}
-	if s := strings.Join(got.Sent.Shown, " | "); strings.Contains(s, headline) || !strings.Contains(s, "could not send it") {
+	if s := strings.Join(got.Sent.Shown, " | "); strings.Contains(s, "did not finish") || !strings.Contains(s, "could not send it") {
 		t.Errorf("a full read whose snapshot exists says it did not finish: %q", s)
 	}
-	if s := strings.Join(got.SentLive.Shown, " | "); strings.Contains(s, headline) {
+	if s := strings.Join(got.SentLive.Shown, " | "); strings.Contains(s, "did not finish") {
 		t.Errorf("a published full read seen live says it did not finish: %q", s)
 	}
 }
