@@ -7429,7 +7429,7 @@ function backupDaemonEditRow(row, locked) {
   if (locked) input.disabled = true;
   wrap.append(el("div", { class: "bks-erow-in" }, input, locked ? null : save, locked ? null : revert));
   if (row.key === "baseline_retain") {
-    wrap.append(el("p", { class: "form-hint", text: "Days or hours: 7d, 36h. Empty keeps them all. Applies to every server's local folder." }));
+    wrap.append(el("p", { class: "form-hint", text: "Days or hours: 7d, 36h. Empty keeps them all. Deletes only where snapshots also go to S3, once S3 has each one. Without S3, copies younger than this stay even past the count." }));
   }
   // Provenance, in one line: what is winning, and what it is winning over.
   wrap.append(el("p", { class: "form-hint", text: row.source === "saved"
@@ -7588,7 +7588,23 @@ function localCopyWords(local, s3, keep, loop, reuse, was, reach) {
     return out;
   }
   if (s3) {
-    say("A copy stays on this machine, and each snapshot is also sent to S3.");
+    // With S3 the count does not apply: age does ("Delete by age"), and only
+    // to a local copy S3 has confirmed (2026-10-01). Said for the place as
+    // saved; a destination typed and not saved yet gets the rule, no numbers.
+    const age = was.age || {};
+    if (age.s3Only) say("No copy on this machine yet.");
+    else if (!age.asSaved) say("After you save, Delete by age applies here.");
+    else if (!loop) say("Kept here: this DBTrail removes nothing.");
+    else if (age.minutes > 0) say("Deleted here when older than " + exactSpan(age.minutes) + ", once S3 has it. DBTrail leaves S3 alone.");
+    else say("Kept here: Delete by age is empty.");
+    // The count is the last age prune's, so it is shown only where that
+    // prune still runs (this daemon prunes, an age is set) and with its date:
+    // with no age prune nothing refreshes it, and an old number would read
+    // as today's.
+    const live = age.asSaved && loop && age.minutes > 0;
+    const n = live && age.notIn ? age.notIn.count : 0;
+    if (n > 0) say("Not in S3, so kept here: " + n + " older " + (n === 1 ? "copy" : "copies") + " (checked " + utcLabel(age.notIn.at) + "). The log says why.", true);
+    if (live && age.notInError) say("S3 state unknown: " + age.notInError, true);
     return out;
   }
   if (reuse) say("A table that did not change keeps its last file, so a new snapshot only costs the tables that changed.");
@@ -7679,6 +7695,16 @@ function localReachWords(keep, reach) {
 
 // reachSpan says a number of minutes the way a person would: hours below a
 // day, whole days as days, hours again up to two days, days above.
+// exactSpan states a threshold the prune applies exactly (Delete by age), so
+// it never rounds: whole days only when the value is whole days, else hours,
+// else minutes. reachSpan below is the rounded "about how far back" wording.
+function exactSpan(mins) {
+  const plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
+  if (mins % 1440 === 0) return plural(mins / 1440, "day");
+  if (mins % 60 === 0) return plural(mins / 60, "hour");
+  return plural(mins, "minute");
+}
+
 function reachSpan(mins) {
   const day = 24 * 60;
   if (mins < day || (mins % day !== 0 && mins < 2 * day)) {
@@ -7727,9 +7753,13 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   const minus = el("button", { class: "btn btn-icon keep-btn", type: "button", "aria-label": "Keep one fewer", text: "\u2212", onclick: () => step(-1) });
   const plus = el("button", { class: "btn btn-icon keep-btn", type: "button", "aria-label": "Keep one more", text: "+", onclick: () => step(1) });
   const unit = el("span", { class: "keep-unit", text: "snapshots" });
+  // One card, one rule (2026-10-01): a count where the copies live only on
+  // this machine, age (Delete by age) where they also go to S3. The title and
+  // the stepper follow the mode, so a server never shows a rule it does not obey.
+  const keepTitle = el("span", { class: "field-label", text: "Keep by count" });
+  const keepStep = el("div", { class: "keep-step" }, el("span", { class: "keep-lead", text: "the newest" }), minus, keep, plus, unit);
   const keepField = el("div", { class: "stg-card keep-card" },
-    el("div", { class: "stg-card-t" }, icon("layers", "stg-ico stg-ico-mint"), el("span", { class: "field-label", text: "Keep by count" })),
-    el("div", { class: "keep-step" }, el("span", { class: "keep-lead", text: "the newest" }), minus, keep, plus, unit));
+    el("div", { class: "stg-card-t" }, icon("layers", "stg-ico stg-ico-mint"), keepTitle), keepStep);
   // The drawing: the copies kept, newest at the right, the ones past the
   // count fading out on the left, and how far back the oldest reaches.
   const shape = el("div", { class: "keep-shape" });
@@ -7856,6 +7886,12 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     // With S3 the count does nothing (S3 keeps everything), so the stepper
     // goes and the words say what happens instead.
     minus.hidden = plus.hidden = keep.hidden = unit.hidden = !local || !!s3v;
+    keepStep.hidden = keep.hidden;
+    // Saved with S3 and no folder of its own, untouched: the folder field
+    // shows the default only as a suggestion (Save stays asleep), so nothing
+    // is on this machine and the card must not promise "after you save".
+    const s3OnlyAtRest = !was.rawDir && !!was.s3 && s3v === was.s3 && dir.value.trim() === was.dir;
+    keepTitle.textContent = !local ? (s3v ? "Only in S3" : "No snapshots") : s3OnlyAtRest ? "Only in S3" : s3v ? "On this machine" : "Keep by count";
     clear(words);
     // The reach is said for the count as it applies to the folder as saved:
     // a typed folder or destination makes it a number that does not apply yet.
@@ -7868,6 +7904,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     // about this server", so the card is read at a glance.
     const said = localCopyWords(local, s3v, keepNow() || 0, !!srv.prune_loop, !!reuse && !!capsCache.monitor,
       { local: was.local, dir: was.rawDir, source: srv.source, blocked: !!srv.keep_blocked, held: !!srv.keep_held,
+        age: { asSaved: asSaved && !!was.s3 && !!was.rawDir, s3Only: s3OnlyAtRest, minutes: srv.delete_after_minutes || 0, notIn: srv.not_in_s3 || null, notInError: srv.not_in_s3_error || "" },
         shared: asSaved ? snapSharedWith : [] },
       { inForce: asSaved ? (srv.keep_in_force || 0) : -1,
         every: srv.snapshot_every_minutes || 0, retain: srv.prune_retain_minutes || 0 });

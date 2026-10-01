@@ -3,11 +3,13 @@ package console
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 )
 
@@ -172,12 +174,24 @@ type backupSettingsServerDTO struct {
 	// is pruned. KeepNewest is the saved setting; the two differ where the
 	// setting does not apply (blocked, a destination, no loop).
 	KeepInForce int `json:"keep_in_force,omitempty"`
-	// PruneRetainMinutes is the age retention the same loop applies to every
-	// folder (--baseline-retain or its saved value), in minutes: a snapshot
+	// PruneRetainMinutes is the age retention the same loop reads
+	// (--baseline-retain or its saved value), in minutes. In a folder with no
+	// S3 destination it deletes nothing; there a snapshot
 	// younger than it is kept even outside the newest KeepInForce, so it
 	// stretches how far back this server can go. 0 = none, or unreadable
 	// (the loop then applies none either).
 	PruneRetainMinutes int `json:"prune_retain_minutes,omitempty"`
+	// DeleteAfterMinutes is "Delete by age" as it reaches THIS server
+	// (2026-10-01): set only where the server has both a folder and an S3
+	// destination, the one place age retention deletes (it removes a local
+	// copy once S3 confirms it). 0 where it deletes nothing here.
+	DeleteAfterMinutes int `json:"delete_after_minutes,omitempty"`
+	// NotInS3 is the last prune's count of old snapshots the S3 destination
+	// answered it does not have (baseline.NotInDestinationFile): the only
+	// copy, so they stay on this machine. NotInS3Error says the record would
+	// not read, never "they are all there".
+	NotInS3      *notInS3DTO `json:"not_in_s3,omitempty"`
+	NotInS3Error string      `json:"not_in_s3_error,omitempty"`
 	// SnapshotEveryMinutes is how often this server gets a snapshot without
 	// a click (#1681): its schedule (with the full copies off its grid),
 	// where the schedule can run in this process, and the daemon-wide
@@ -294,6 +308,19 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	dto.PruneLoop = s.localPruneLoop
 	dto.KeepBlocked = LocalKeepBlocked(s.cm.reg.List(), e, s.cm.defaultBaselineDir)
 	dto.KeepHeld = heldNow(e)
+	if e.BaselineDir != "" && e.BaselineS3 != "" {
+		dto.DeleteAfterMinutes = s.pruneRetainMinutes()
+		// With no age set, no prune refreshes the record: what it says is
+		// frozen, so it is not read (the card would show a stale count).
+		if dto.DeleteAfterMinutes > 0 && s.localPruneLoop {
+			if rec, ok, err := baseline.ReadNotInDestination(e.BaselineDir); err != nil {
+				slog.Warn("console: the record of snapshots not at the destination could not be read", "server", e.ID, "dir", e.BaselineDir, "error", err)
+				dto.NotInS3Error = err.Error()
+			} else if ok {
+				dto.NotInS3 = &notInS3DTO{At: rec.At.UTC().Format(time.RFC3339), Count: rec.Count}
+			}
+		}
+	}
 	if r := s.localRetentionOf(e.ID); r != nil {
 		dto.KeepInForce = r.KeepNewest
 		dto.PruneRetainMinutes = s.pruneRetainMinutes()
@@ -559,4 +586,10 @@ func (s *Server) handleBackupSettingsDaemonUpdate(w http.ResponseWriter, r *http
 		return
 	}
 	s.handleBackupSettingsGet(w, r)
+}
+
+// notInS3DTO is baseline.NotInDestination on the wire.
+type notInS3DTO struct {
+	At    string `json:"at"` // RFC3339, UTC
+	Count int    `json:"count"`
 }

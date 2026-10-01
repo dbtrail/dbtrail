@@ -53,6 +53,7 @@ func ReadLastPrune(dir string) (rec LastPrune, ok bool, err error) {
 var (
 	writeRecord        = writeLastPrune
 	writeFailureRecord = writePruneFailure
+	writeNotInDestRecord = writeNotInDestination
 	removeRecord       = os.Remove
 )
 
@@ -82,6 +83,48 @@ func ReadLastPruneFailure(dir string) (rec PruneFailure, ok bool, err error) {
 		return PruneFailure{}, false, fmt.Errorf("the prune failure record %s cannot be read", filepath.Join(dir, LastPruneFailureFile))
 	}
 	return rec, true, nil
+}
+
+// NotInDestinationFile records, beside the snapshots, how many snapshots the
+// last prune attempt kept because the S3 destination answered that it does
+// not have them (2026-10-01). They are old enough to go, but a local snapshot
+// with no S3 copy is the only copy, so it stays, and before this the only
+// place that said so was the daemon's log. Snapshots that could not be
+// CHECKED are not counted here: that attempt failed, and LastPruneFailureFile
+// says it. Written by every completed attempt against an S3 destination,
+// removed when the count is zero or the folder has no destination any more.
+const NotInDestinationFile = ".not-in-destination.json"
+
+// NotInDestination is that record.
+type NotInDestination struct {
+	At    time.Time `json:"at"`
+	Count int       `json:"count"`
+}
+
+// ReadNotInDestination reads dir's record; ok is false when the last attempt
+// found every old snapshot at the destination. An unreadable record is an
+// error, never "all of them are there".
+func ReadNotInDestination(dir string) (rec NotInDestination, ok bool, err error) {
+	b, err := os.ReadFile(filepath.Join(dir, NotInDestinationFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return NotInDestination{}, false, nil
+	}
+	if err != nil {
+		return NotInDestination{}, false, fmt.Errorf("read the record of snapshots not at the destination: %w", err)
+	}
+	if err := json.Unmarshal(b, &rec); err != nil || rec.At.IsZero() || rec.Count <= 0 {
+		return NotInDestination{}, false, fmt.Errorf("the record of snapshots not at the destination %s cannot be read", filepath.Join(dir, NotInDestinationFile))
+	}
+	return rec, true, nil
+}
+
+func writeNotInDestination(dir string, rec NotInDestination) error {
+	rec.At = rec.At.UTC()
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic0600(dir, NotInDestinationFile, b)
 }
 
 func writePruneFailure(dir string, rec PruneFailure) error {
@@ -137,7 +180,7 @@ func isPruneArtifact(root, path string) bool {
 		return false
 	}
 	name := filepath.Base(path)
-	for _, rec := range []string{LastPruneFile, LastPruneFailureFile} {
+	for _, rec := range []string{LastPruneFile, LastPruneFailureFile, NotInDestinationFile} {
 		if name == rec || strings.HasPrefix(name, rec+".tmp-") {
 			return true
 		}

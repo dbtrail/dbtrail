@@ -238,9 +238,11 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	}
 	// An S3-only server reads as yes since the cut (the local copy is always
 	// on): its folder shows, prefilled with the default one, and the row says
-	// each snapshot also goes to S3.
+	// that no copy is on this machine yet (Save stays asleep, so it must not
+	// say "after you save"), and nothing about copies kept "here".
 	so := got["s3onlyAsIs"]
-	if !b(so.Before.DirShown) || so.Before.Dir != "/state/snapshots/s1" || !strings.Contains(joined(so.Before), "each snapshot is also sent to S3") {
+	if !b(so.Before.DirShown) || so.Before.Dir != "/state/snapshots/s1" || !strings.Contains(joined(so.Before), "No copy on this machine yet.") ||
+		strings.Contains(joined(so.Before), "Kept here") {
 		t.Errorf("an S3-only server does not read as yes with the default folder: %+v", so.Before)
 	}
 	if b(so.Before.KeepShown) || so.Before.SaveDisabled != true {
