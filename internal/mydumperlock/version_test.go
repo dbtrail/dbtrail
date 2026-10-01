@@ -304,3 +304,31 @@ func TestProbeVersionGivesUpOnABinaryThatNeverAnswers(t *testing.T) {
 		t.Errorf("the probe waited %s for a binary that never answers", took)
 	}
 }
+
+// The client library decides how a TLS mode is spelled for mydumper, so each
+// --version shape the product meets must name the right one, and anything else
+// must stay unknown rather than be guessed.
+func TestParseClientLibrary(t *testing.T) {
+	for _, tc := range []struct {
+		output string
+		want   ClientLibrary
+	}{
+		// The two builds of the pinned 1.0.3-1 (console base image), measured.
+		{"mydumper v1.0.3-1, built against MySQL 8.4.9 with SSL support", LibMySQL},
+		{"mydumper v1.0.3-1, built against MariaDB 10.11.18 with SSL support", LibMariaDB},
+		// Homebrew, measured.
+		{"mydumper v1.0.5-1, built against MariaDB 10.8.8 with SSL support", LibMariaDB},
+		// Ubuntu 24.04's package.
+		{"mydumper 0.10.0, built against MySQL 8.0.36", LibMySQL},
+		{"mydumper v0.16.3-6, built against Percona Server 8.0.35", LibMySQL},
+		// Noise ahead of the version line, as ParseVersion tolerates.
+		{"ld.so: warning\nmydumper v1.0.3-1, built against MariaDB 10.11.18 with SSL support\n", LibMariaDB},
+		{"mydumper v1.0.3-1", LibUnknown},
+		{"", LibUnknown},
+		{"built against", LibUnknown},
+	} {
+		if got := ParseClientLibrary(tc.output); got != tc.want {
+			t.Errorf("ParseClientLibrary(%q) = %q, want %q", tc.output, got, tc.want)
+		}
+	}
+}

@@ -53,8 +53,8 @@ const sourceTablesTimeout = 15 * time.Second
 // is set). foldCase reports lower_case_table_names != 0, under which the
 // server compares table names without case. Indirected so unit tests do not
 // need a source.
-var listSourceTables = func(ctx context.Context, sourceDSN string, schemas []string) (tables []string, foldCase bool, err error) {
-	db, err := config.Connect(sourceDSN)
+var listSourceTables = func(ctx context.Context, sourceDSN string, ssl config.SSL, schemas []string) (tables []string, foldCase bool, err error) {
+	db, err := connectSource(sourceDSN, ssl)
 	if err != nil {
 		return nil, false, err
 	}
@@ -126,7 +126,7 @@ func (s *baselineSupervisor) checkNewTables(req refreshRequest, snapshot []strin
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, sourceTablesTimeout)
 	defer cancel()
-	source, foldCase, err := listSourceTables(ctx, req.SourceDSN, req.Schemas)
+	source, foldCase, err := listSourceTables(ctx, req.SourceDSN, req.SourceSSL, req.Schemas)
 	if err != nil {
 		return newTablesCheck{unchecked: console.ScrubReason(
 			fmt.Sprintf("could not ask the source which tables it has: %v", err), req.SourceDSN)}
@@ -208,7 +208,7 @@ var tablesCreatedSince = func(ctx context.Context, indexDSN string, since time.T
 // disagree about which schemas count.
 func withSource(req *refreshRequest, e console.ServerEntry) {
 	br := console.BaselineRequestFor(e)
-	req.SourceDSN, req.Schemas, req.SourcePostgres = br.SourceDSN, br.Schemas, e.IsPostgres()
+	req.SourceDSN, req.SourceSSL, req.Schemas, req.SourcePostgres = br.SourceDSN, br.SourceSSL, br.Schemas, e.IsPostgres()
 }
 
 // reportNewTables puts the check in the daemon log, where the published line

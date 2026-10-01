@@ -2,6 +2,7 @@ package consoleapp
 
 import (
 	"context"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,7 +86,7 @@ func TestBaselineJobGoroutines_survivePanicAndReportFailure(t *testing.T) {
 			name: "dump",
 			inject: func(sentinel string) func() {
 				prev := checkMydumperPrivileges
-				checkMydumperPrivileges = func(context.Context, string, baseline.LockMode, mydumperlock.Remedy, []string) error {
+				checkMydumperPrivileges = func(context.Context, string, config.SSL, baseline.LockMode, mydumperlock.Remedy, []string) error {
 					panic(sentinel)
 				}
 				return func() { checkMydumperPrivileges = prev }

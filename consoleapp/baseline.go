@@ -35,7 +35,13 @@ import (
 // unreachable source, so hardcoding one here passes the whole suite while
 // re-introducing #1381 — an operator who selected lock-all gets judged against
 // ftwrl's requirements and told to grant BACKUP_ADMIN, which RDS refuses.
-var checkMydumperPrivileges = mydumperlock.CheckPrivileges
+//
+// It connects with the source's TLS settings (connectSource), so a server
+// that only accepts encrypted connections is checked over TLS, as capture
+// reaches it (#1996).
+var checkMydumperPrivileges = func(ctx context.Context, sourceDSN string, ssl config.SSL, mode baseline.LockMode, remedy mydumperlock.Remedy, schemas []string) error {
+	return mydumperlock.CheckPrivilegesWith(ctx, func() (*sql.DB, error) { return connectSource(sourceDSN, ssl) }, mode, remedy, schemas)
+}
 
 // baselineSupervisor implements console.BaselineController by running the
 // dump→convert→upload pipeline IN-PROCESS (#613): the console image bundles
@@ -656,6 +662,7 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 		Why: req.Why, WhyCode: console.BackupWhyCode(req.Why),
 	}
 	rec.DiskCheck, rec.DiskNote = s.dumpDiskOf(req.ServerID, own)
+	rec.TransportNote = s.dumpTransportOf(req.ServerID, own)
 	// A snapshot instant is recorded when a snapshot was published: a
 	// success, or a local publish whose upload failed.
 	if !out.at.IsZero() && (err == nil || (out.snapDir != "" && !out.staged)) {
@@ -871,7 +878,8 @@ func (s *baselineSupervisor) dumpAttempt(req console.BaselineRequest, lockMode b
 	// index ran on the source before this dump began, so the dump holds its
 	// effect, and no update from this snapshot has to place it by position.
 	a.ddlMark = dumpDDLMarkFunc(req)
-	if err := runMydumperFunc(s.ctx, req.SourceDSN, req.Schemas, dir, lockMode, src); err != nil {
+	ctx := withTransportNote(s.ctx, func(note string) { s.noteDumpTransport(req.ServerID, note) })
+	if err := runMydumperFunc(ctx, req.SourceDSN, req.SourceSSL, req.Schemas, dir, lockMode, src); err != nil {
 		if rmErr := os.RemoveAll(dir); rmErr != nil {
 			slog.Warn("console snapshot: could not remove the folder of a failed dump", "path", dir, "error", rmErr)
 		}
@@ -1083,12 +1091,15 @@ type mydumperPlan struct {
 	// the binlog position on the source's MySQL version.
 	version      mydumperlock.Version
 	versionKnown bool
+	// lib is the client library --version named; it decides how a TLS mode
+	// is spelled for this build (mydumperTLSArgs).
+	lib mydumperlock.ClientLibrary
 }
 
 // sourceServerVersion reads SELECT VERSION() from the source. A seam, so the
 // tests need no server.
-var sourceServerVersion = func(ctx context.Context, dsn string) (string, error) {
-	db, err := config.Connect(dsn)
+var sourceServerVersion = func(ctx context.Context, dsn string, ssl config.SSL) (string, error) {
+	db, err := connectSource(dsn, ssl)
 	if err != nil {
 		return "", err
 	}
@@ -1130,7 +1141,7 @@ func planMydumper(lockMode baseline.LockMode, src lockModeSource) (mydumperPlan,
 			"install mydumper %s or newer, which supports every lock mode",
 			err, mydumperlock.LockModeFloor)
 	}
-	v, verErr := mydumperlock.ProbeVersion(path)
+	v, lib, verErr := mydumperlock.ProbeBuild(path)
 	ftwrl := lockMode == baseline.LockModeFTWRL
 	switch {
 	case errors.Is(verErr, mydumperlock.ErrNotRunnable):
@@ -1150,7 +1161,7 @@ func planMydumper(lockMode baseline.LockMode, src lockModeSource) (mydumperPlan,
 				"Install mydumper %s or newer, or %s",
 				lockMode, path, verErr, mydumperlock.LockModeFloor, chosenModeUndo(src))
 		}
-		return mydumperPlan{path: path, sendLockFlags: false, preflight: true,
+		return mydumperPlan{path: path, sendLockFlags: false, preflight: true, lib: lib,
 			fallback: fmt.Sprintf("could not read the mydumper version (%v), so the dump runs without "+
 				"--sync-thread-lock-mode and --trx-tables, after the privilege check", verErr)}, nil
 	case !v.SupportsLockMode():
@@ -1178,10 +1189,10 @@ func planMydumper(lockMode baseline.LockMode, src lockModeSource) (mydumperPlan,
 		// because the failure it prevents is a segfault.
 		return mydumperPlan{path: path, sendLockFlags: false,
 			preflight: v.TakesBackupLock() && lockMode.NeedsElevatedPrivileges(),
-			fallback:  fallback, version: v, versionKnown: true}, nil
+			fallback:  fallback, version: v, versionKnown: true, lib: lib}, nil
 	default:
 		return mydumperPlan{path: path, sendLockFlags: true, preflight: lockMode.NeedsElevatedPrivileges(),
-			version: v, versionKnown: true}, nil
+			version: v, versionKnown: true, lib: lib}, nil
 	}
 }
 
@@ -1237,7 +1248,7 @@ func mydumperBootWarning(lockMode baseline.LockMode, src lockModeSource) string 
 // runMydumperFunc runs mydumper; a test replaces it.
 var runMydumperFunc = runMydumper
 
-func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDir string, lockMode baseline.LockMode, src lockModeSource) error {
+func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas []string, dumpDir string, lockMode baseline.LockMode, src lockModeSource) error {
 	remedy := mydumperlock.RemedyConsole
 	if src == lockModeSaved {
 		remedy = mydumperlock.RemedyConsoleSaved
@@ -1258,13 +1269,33 @@ func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDi
 	if plan.fallback != "" {
 		slog.Warn("baseline: "+plan.fallback, "mydumper", plan.path, "lock_mode", string(lockMode))
 	}
+	// How mydumper connects: the TLS capture and the pre-checks use (#1996).
+	// Decided before any lock or privilege check, so a TLS setting the dump
+	// cannot honor is refused before anything touches the source's locks.
+	tlsPlan, err := resolveDumpTLS(ctx, sourceDSN, ssl)
+	if err != nil {
+		return err
+	}
+	if !tlsPlan.encrypt {
+		// The one log line per read about it (the pre-checks log their own
+		// cleartext fallback at Debug), louder when nobody chose it:
+		// preferred fell back because the source offers no TLS. disabled or
+		// a DSN's tls=false are choices. The run records it too, so the
+		// card and the history say it, not only the log.
+		level := slog.LevelInfo
+		if tlsPlan.fellBack {
+			level = slog.LevelWarn
+		}
+		slog.Log(ctx, level, "console snapshot: mydumper reads the source WITHOUT encryption: "+tlsPlan.why, "host", host)
+		reportTransportNote(ctx, "Read without encryption: "+tlsPlan.why+".")
+	}
 	// A build older than 0.16.3 exits 0 against MySQL 8.4 with no position in
 	// its metadata (measured). execute refuses that dump afterwards; refusing
 	// here instead spares the source a full dump under FTWRL that would be
 	// thrown away. A source whose version cannot be read goes ahead: the
 	// after-dump check still guards it.
 	if plan.versionKnown && plan.version.Less(mydumperlock.PositionFloor) {
-		sv, verr := sourceServerVersion(ctx, sourceDSN)
+		sv, verr := sourceServerVersion(ctx, sourceDSN, ssl)
 		if verr != nil {
 			// The dump still runs and its own metadata is checked afterwards,
 			// but that check comes AFTER a full dump: say why the cheap
@@ -1290,7 +1321,7 @@ func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDi
 		// would refuse a dump that works — while 0.16 and 0.17 DO take it and
 		// keep the gate. An unreadable version keeps the gate too.
 		if plan.preflight {
-			if err := checkMydumperPrivileges(ctx, sourceDSN, lockMode, remedy, schemas); err != nil {
+			if err := checkMydumperPrivileges(ctx, sourceDSN, ssl, lockMode, remedy, schemas); err != nil {
 				return err
 			}
 		}
@@ -1301,10 +1332,38 @@ func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDi
 		// low-privilege mode that cannot produce it.
 		// Best-effort, advisory only — never blocks or fails the dump. See
 		// warnIfMultiTableNoLock.
-		warnIfMultiTableNoLock(ctx, sourceDSN, schemas)
+		multiTableNoLockCheck(ctx, sourceDSN, ssl, schemas)
 	}
 
-	args := buildConsoleMydumperArgs(host, port, user, schemas, dumpDir, lockMode, plan.sendLockFlags)
+	tlsArgs := mydumperTLSArgs(tlsPlan, plan.lib)
+	// A build linked against the MySQL client library enforces --ssl-mode
+	// REQUIRED itself. Any other does not reliably (Connector/C, measured:
+	// it dumps in cleartext from a server without TLS), so the dump is
+	// preceded by a connection with TLS mandatory, in every lock mode, and on
+	// Connector/C pinned to that connection's certificate (sourceTLSPin).
+	if tlsPlan.encrypt && plan.lib != mydumperlock.LibMySQL {
+		fp, err := sourceTLSPin(ctx, sourceDSN, tlsPlan)
+		if err != nil {
+			return fmt.Errorf("the full read must reach the source encrypted, and a connection with TLS required failed: %w", err)
+		}
+		if plan.lib == mydumperlock.LibMariaDB {
+			pin, remove, err := writeMydumperTLSPin(filepath.Dir(dumpDir), fp)
+			if err != nil {
+				return fmt.Errorf("could not write the TLS settings file for mydumper: %w", err)
+			}
+			defer remove()
+			tlsArgs = append(tlsArgs, "--defaults-extra-file", pin)
+		} else {
+			// Unknown library: the check proved the server encrypts, but
+			// mydumper is not pinned, so an attacker between the check
+			// and the dump is not stopped. Said on the run, not hidden.
+			slog.Warn("console snapshot: the source was checked to encrypt, but mydumper's client library could not be "+
+				"identified from its --version, so it is not pinned to that certificate", "mydumper", plan.path, "host", host)
+			reportTransportNote(ctx, "Encrypted, not pinned: mydumper's client library could not be identified, so the "+
+				"source was checked to encrypt but mydumper was not tied to its certificate.")
+		}
+	}
+	args := buildConsoleMydumperArgs(host, port, user, schemas, dumpDir, lockMode, plan.sendLockFlags, tlsArgs)
 	// plan.path, not the bare name: the dump must run the very binary whose
 	// version was just read.
 	cmd := exec.CommandContext(ctx, plan.path, args...)
@@ -1318,6 +1377,9 @@ func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDi
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if msg := strings.TrimSpace(string(out)); msg != "" {
+			if hint := mydumperTLSHint(msg, tlsPlan); hint != "" {
+				return fmt.Errorf("mydumper failed: %w: %s; output: %s", err, hint, msg)
+			}
 			if hint := mydumperlock.FTWRLDeniedHint(lockMode, msg, remedy); hint != "" {
 				return &ftwrlDeniedError{err: fmt.Errorf("mydumper failed: %w: %s; output: %s", err, hint, msg)}
 			}
@@ -1368,7 +1430,7 @@ const systemSchemaExcludeRegex = `^(?!(mysql|sys|performance_schema|information_
 // both --sync-thread-lock-mode and --trx-tables with "Unknown option", or when
 // its version could not be read and the mode is ftwrl (#1688); see
 // planMydumper for when the dump may proceed without them.
-func buildConsoleMydumperArgs(host string, port uint16, user string, schemas []string, dumpDir string, lockMode baseline.LockMode, sendLockFlags bool) []string {
+func buildConsoleMydumperArgs(host string, port uint16, user string, schemas []string, dumpDir string, lockMode baseline.LockMode, sendLockFlags bool, tlsArgs []string) []string {
 	args := []string{
 		"--host", host,
 		"--port", strconv.Itoa(int(port)),
@@ -1389,6 +1451,9 @@ func buildConsoleMydumperArgs(host string, port uint16, user string, schemas []s
 		args = append(args, "--regex", systemSchemaExcludeRegex)
 	}
 	// --outputdir last: docker wrapper scripts read the last arg for the mount.
+	// TLS options (#1996): how this source's TLS mode is spelled for this
+	// mydumper build, from mydumperTLSArgs.
+	args = append(args, tlsArgs...)
 	args = append(args, "--outputdir", dumpDir)
 	return args
 }
@@ -1433,17 +1498,24 @@ func dumpableTablesWhere(schemas []string) (string, []any) {
 // Called ONLY for no-lock, not for safe-no-lock: the latter aborts on thread
 // skew instead of writing it, so warning there would cry wolf about the one
 // low-privilege mode that cannot produce the condition this describes.
-func warnIfMultiTableNoLock(ctx context.Context, sourceDSN string, schemas []string) {
-	db, err := config.Connect(sourceDSN)
+// multiTableNoLockCheck is warnIfMultiTableNoLock behind a seam, so a test
+// can see the TLS settings runMydumper hands it.
+var multiTableNoLockCheck = warnIfMultiTableNoLock
+
+func warnIfMultiTableNoLock(ctx context.Context, sourceDSN string, ssl config.SSL, schemas []string) {
+	db, err := connectSource(sourceDSN, ssl)
 	if err != nil {
-		slog.Debug("baseline: could not open source to check table count for the NO_LOCK skew warning", "error", err)
+		// Warn, not Debug: when this check cannot run, the warning it exists
+		// to give (a no-lock dump of several tables is not point-consistent)
+		// is lost, and the log is the only place that can say so.
+		slog.Warn("baseline: could not open the source to count its tables, so a no-lock dump of several tables is not warned about", "error", err)
 		return
 	}
 	defer db.Close()
 
 	count, err := countDumpableTables(ctx, db, schemas)
 	if err != nil {
-		slog.Debug("baseline: could not count tables for the no-lock skew warning", "error", err)
+		slog.Warn("baseline: could not count the source's tables, so a no-lock dump of several tables is not warned about", "error", err)
 		return
 	}
 	if count > 1 {

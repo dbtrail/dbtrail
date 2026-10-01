@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
@@ -63,7 +64,10 @@ type BaselineRequest struct {
 	ServerID   string
 	ServerName string
 	SourceDSN  string
-	Schemas    []string
+	// SourceSSL is how the full read connects to the source, its pre-checks
+	// and mydumper alike: the entry's SourceSSL, the TLS capture uses (#1996).
+	SourceSSL config.SSL
+	Schemas   []string
 	// LocalDir is the per-server baseline directory (entry.BaselineDir). When
 	// set, the snapshot is written there persistently and NOT uploaded. Empty
 	// means S3-only: stage in a temp dir, upload to S3, discard the staging.
@@ -105,6 +109,7 @@ func BaselineRequestFor(e ServerEntry) BaselineRequest {
 		ServerID:    e.ID,
 		ServerName:  e.Name,
 		SourceDSN:   e.SourceDSN,
+		SourceSSL:   e.SourceSSL(),
 		Schemas:     splitSchemas(e.Schemas),
 		LocalDir:    e.BaselineDir,
 		S3:          e.BaselineS3,
@@ -326,6 +331,11 @@ type BaselineStatus struct {
 	// carries neither. Set while the read is still running.
 	DiskCheck string `json:"disk_check,omitempty"`
 	DiskNote  string `json:"disk_note,omitempty"`
+	// TransportNote (full reads of MySQL/MariaDB only, #1996): set when the
+	// read reached the source WITHOUT encryption, saying why ("read without
+	// encryption: the source offers no TLS (TLS mode preferred)"); empty
+	// for an encrypted read. Set while the read is still running.
+	TransportNote string `json:"transport_note,omitempty"`
 	// ForeignSource: the job was refused because the snapshot it would build
 	// on was written by another writer, or its writer could not be told
 	// (#1684). The schedule does not answer it with a full read: that would

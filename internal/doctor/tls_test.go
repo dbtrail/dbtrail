@@ -129,3 +129,48 @@ func TestBuild_TLSSettingsErrorIsLocal(t *testing.T) {
 		t.Fatalf("check = %+v", c)
 	}
 }
+
+// The console's own source reads (snapshot pre-checks, verify, schema
+// snapshot) word a TLS refusal the way the startup checks do: 3159 names the
+// setting that decided it, and a mode that requires TLS against a server with
+// none says so instead of the driver's bare "server does not support TLS".
+func TestSourceTLSRefusalText(t *testing.T) {
+	refused := &mysql.MySQLError{Number: 3159, Message: "Connections using insecure transport are prohibited"}
+	noTLS := fmt.Errorf("failed to ping: %w", mysql.ErrNoTLS)
+	const dsn = "u:p@tcp(db:3306)/"
+	for _, tc := range []struct {
+		name   string
+		err    error
+		dsn    string
+		mode   string
+		wantOK bool
+		want   string
+	}{
+		{"3159 under disabled names the mode", refused, dsn, "disabled", true, "its TLS mode is disabled"},
+		{"3159 under a DSN tls=false names the DSN", refused, dsn + "?tls=false", "preferred", true, "tls=false"},
+		{"3159 under preferred: the server offered no TLS", refused, dsn, "preferred", true, "did not offer TLS"},
+		{"required against a server without TLS", noTLS, dsn, "required", true, "its TLS mode is required"},
+		{"verify-ca against a server without TLS", noTLS, dsn, "verify-ca", true, "its TLS mode is verify-ca"},
+		{"verify-identity against a server without TLS", noTLS, dsn, "verify-identity", true, "its TLS mode is verify-identity"},
+		{"no TLS under preferred is not a refusal (it retries)", noTLS, dsn, "preferred", false, ""},
+		{"no TLS under a DSN tls= is the DSN's doing", noTLS, dsn + "?tls=skip-verify", "required", false, ""},
+		{"access denied is not a TLS refusal", &mysql.MySQLError{Number: 1045, Message: "Access denied"}, dsn, "required", false, ""},
+		{"nil", nil, dsn, "required", false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			detail, fix, ok := SourceTLSRefusalText(tc.err, tc.dsn, config.SSL{Mode: tc.mode})
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v (%q %q)", ok, tc.wantOK, detail, fix)
+			}
+			if !ok {
+				return
+			}
+			if !strings.Contains(detail+" "+fix, tc.want) {
+				t.Errorf("text %q / %q does not contain %q", detail, fix, tc.want)
+			}
+			if strings.Contains(detail+fix, "insecure transport") {
+				t.Errorf("raw server text leaked: %q", detail)
+			}
+		})
+	}
+}

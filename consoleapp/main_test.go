@@ -1,10 +1,12 @@
 package consoleapp
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/mydumperlock"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
@@ -33,8 +35,25 @@ func TestMain(m *testing.M) {
 		os.Exit(Main("test", "none", "unknown"))
 	}
 	mydumperlock.ProbeTimeout = fakeMydumperBound
+	// A full read under the default TLS mode (preferred) asks the source
+	// whether it encrypts before mydumper runs (#1996). The tests here run
+	// fake mydumpers against sources that do not exist, so the question gets
+	// a fixed answer: no TLS, the read goes on in cleartext as it always did
+	// for them. A test about that decision sets its own answer
+	// (stubSourceEncrypted); the integration tests restore the real probe.
+	sourceEncrypted = func(context.Context, string, config.SSL) (bool, error) { return false, nil }
+	// Same for the mandatory-TLS check before a Connector/C mydumper.
+	sourceTLSPin = func(context.Context, string, dumpTLS) (string, error) { return "00:11", nil }
 	os.Exit(m.Run())
 }
+
+// realSourceEncrypted is the production probe, captured before TestMain
+// replaces it.
+var realSourceEncrypted = sourceEncrypted
+
+// realSourceTLSPin is the production check, captured before TestMain
+// replaces it.
+var realSourceTLSPin = sourceTLSPin
 
 // fakeMydumperBound is how long a test here gives a fake mydumper: the
 // --version probe's bound, and the deadline of any wait for a job that runs

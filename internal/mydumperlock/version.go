@@ -116,24 +116,73 @@ func (v Version) RecordsPositionOn(serverVersion string) bool {
 // A build that prints a readable version and then exits non-zero still told us
 // what it is, so the version wins over the exit status.
 func ProbeVersion(path string) (Version, error) {
+	v, _, err := ProbeBuild(path)
+	return v, err
+}
+
+// ClientLibrary is the MySQL client library a mydumper build is linked
+// against, as its --version line names it. It decides how a TLS mode is
+// spelled for that build: the two libraries accept different --ssl-mode
+// values (see consoleapp's mydumperTLSArgs).
+type ClientLibrary string
+
+const (
+	// LibMySQL is the MySQL client library ("built against MySQL 8.4.9"):
+	// the amd64 packages of the mydumper releases. With no TLS option it
+	// tries TLS and falls back to cleartext, and it accepts --ssl-mode
+	// DISABLED, PREFERRED, REQUIRED, VERIFY_CA and VERIFY_IDENTITY.
+	LibMySQL ClientLibrary = "mysql"
+	// LibMariaDB is MariaDB Connector/C ("built against MariaDB 10.11.18"):
+	// the arm64 packages, and Homebrew. With no TLS option it does not
+	// encrypt, and --ssl-mode accepts only REQUIRED and VERIFY_IDENTITY.
+	LibMariaDB ClientLibrary = "mariadb"
+	// LibUnknown is a --version line that names neither (older builds, or
+	// one that could not be read).
+	LibUnknown ClientLibrary = ""
+)
+
+// ProbeBuild is ProbeVersion plus the client library the same --version
+// output names, read from one run of the binary.
+func ProbeBuild(path string) (Version, ClientLibrary, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), ProbeTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, path, "--version").CombinedOutput()
 	if ctx.Err() != nil {
-		return Version{}, fmt.Errorf("%w: %s --version did not answer within %s", ErrNotRunnable, path, ProbeTimeout)
+		return Version{}, LibUnknown, fmt.Errorf("%w: %s --version did not answer within %s", ErrNotRunnable, path, ProbeTimeout)
 	}
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			if v, perr := ParseVersion(string(out)); perr == nil {
-				return v, nil
+				return v, ParseClientLibrary(string(out)), nil
 			}
-			return Version{}, fmt.Errorf("%w: %s --version exited with status %d: %s",
+			return Version{}, LibUnknown, fmt.Errorf("%w: %s --version exited with status %d: %s",
 				ErrNotRunnable, path, exitErr.ExitCode(), firstLines(string(out)))
 		}
-		return Version{}, fmt.Errorf("%w: %s: %v", ErrNotRunnable, path, err)
+		return Version{}, LibUnknown, fmt.Errorf("%w: %s: %v", ErrNotRunnable, path, err)
 	}
-	return ParseVersion(string(out))
+	v, err := ParseVersion(string(out))
+	return v, ParseClientLibrary(string(out)), err
+}
+
+// ParseClientLibrary reads which client library a mydumper --version output
+// names ("built against MySQL ..." or "built against MariaDB ..."), on any
+// line, as ParseVersion reads the version.
+func ParseClientLibrary(output string) ClientLibrary {
+	for _, line := range strings.Split(output, "\n") {
+		_, after, ok := strings.Cut(strings.ToLower(line), "built against ")
+		if !ok {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(after, "mariadb"):
+			return LibMariaDB
+		case strings.HasPrefix(after, "mysql"), strings.HasPrefix(after, "percona"):
+			// Percona's client library is the MySQL one, rebranded.
+			return LibMySQL
+		}
+	}
+	return LibUnknown
 }
 
 // firstLines keeps the start of a failed binary's output for an error message:

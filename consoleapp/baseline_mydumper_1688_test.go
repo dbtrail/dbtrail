@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -56,11 +57,11 @@ const loaderFailure = "printf 'mydumper: error while loading shared libraries: l
 func stubPreflight(t *testing.T, err error) *int {
 	t.Helper()
 	calls := new(int)
-	checkMydumperPrivileges = func(context.Context, string, baseline.LockMode, mydumperlock.Remedy, []string) error {
+	checkMydumperPrivileges = func(context.Context, string, config.SSL, baseline.LockMode, mydumperlock.Remedy, []string) error {
 		*calls++
 		return err
 	}
-	t.Cleanup(func() { checkMydumperPrivileges = mydumperlock.CheckPrivileges })
+	t.Cleanup(func() { checkMydumperPrivileges = realCheckMydumperPrivileges })
 	return calls
 }
 
@@ -200,7 +201,7 @@ func TestRunMydumperDistributionBuildDumpsWithDefaultMode(t *testing.T) {
 	calls := stubPreflight(t, errors.New("preflight must not run for a build read as pre-0.18"))
 
 	out := filepath.Join(t.TempDir(), "out")
-	if err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", []string{"appdb"}, out, baseline.LockModeFTWRL, lockModeFromEnv); err != nil {
+	if err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", config.SSL{Mode: "disabled"}, []string{"appdb"}, out, baseline.LockModeFTWRL, lockModeFromEnv); err != nil {
 		t.Fatalf("runMydumper: %v", err)
 	}
 	if *calls != 0 {
@@ -222,7 +223,7 @@ func TestRunMydumperDistributionBuildRefusesAnotherMode(t *testing.T) {
 	record := fakeConsoleMydumper(t, printsVersion(versionDistro))
 	calls := stubPreflight(t, nil)
 
-	err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", nil, filepath.Join(t.TempDir(), "out"), baseline.LockModeLockAll, lockModeFromEnv)
+	err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", config.SSL{Mode: "disabled"}, nil, filepath.Join(t.TempDir(), "out"), baseline.LockModeLockAll, lockModeFromEnv)
 	if err == nil || !strings.Contains(err.Error(), "0.10.0") || !strings.Contains(err.Error(), "0.18.1") {
 		t.Fatalf("err = %v, want a refusal naming the installed 0.10.0 and the 0.18.1 floor", err)
 	}
@@ -238,7 +239,7 @@ func TestRunMydumperBrokenBinaryNeverReachesThePreflight(t *testing.T) {
 	record := fakeConsoleMydumper(t, loaderFailure)
 	calls := stubPreflight(t, errors.New("BACKUP_ADMIN missing"))
 
-	err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", nil, filepath.Join(t.TempDir(), "out"), baseline.LockModeFTWRL, lockModeFromEnv)
+	err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", config.SSL{Mode: "disabled"}, nil, filepath.Join(t.TempDir(), "out"), baseline.LockModeFTWRL, lockModeFromEnv)
 	if err == nil || !strings.Contains(err.Error(), "libmysqlclient.so.21") {
 		t.Fatalf("err = %v, want the loader's own complaint", err)
 	}
@@ -255,7 +256,7 @@ func TestRunMydumperUnreadableVersionKeepsThePreflight(t *testing.T) {
 	stop := errors.New("stop after preflight")
 	calls := stubPreflight(t, stop)
 
-	err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", nil, filepath.Join(t.TempDir(), "out"), baseline.LockModeFTWRL, lockModeFromEnv)
+	err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", config.SSL{Mode: "disabled"}, nil, filepath.Join(t.TempDir(), "out"), baseline.LockModeFTWRL, lockModeFromEnv)
 	if !errors.Is(err, stop) || *calls != 1 {
 		t.Fatalf("err = %v, preflight calls = %d; want the preflight to run once and stop the dump", err, *calls)
 	}
@@ -268,7 +269,7 @@ func TestRunMydumperModernBuildKeepsTheFlags(t *testing.T) {
 	record := fakeConsoleMydumper(t, printsVersion(versionModern))
 	stubPreflight(t, nil)
 
-	if err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", nil, filepath.Join(t.TempDir(), "out"), baseline.LockModeSafeNoLock, lockModeFromEnv); err != nil {
+	if err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", config.SSL{Mode: "disabled"}, nil, filepath.Join(t.TempDir(), "out"), baseline.LockModeSafeNoLock, lockModeFromEnv); err != nil {
 		t.Fatalf("runMydumper: %v", err)
 	}
 	args := recordedArgs(t, record)
@@ -396,7 +397,7 @@ func stubSourceVersion(t *testing.T, version string, err error) *int {
 	t.Helper()
 	calls := new(int)
 	prev := sourceServerVersion
-	sourceServerVersion = func(context.Context, string) (string, error) {
+	sourceServerVersion = func(context.Context, string, config.SSL) (string, error) {
 		*calls++
 		return version, err
 	}
@@ -485,7 +486,7 @@ func TestRunMydumperOldBuildIsRefusedBeforeDumpingMySQL84(t *testing.T) {
 			record := fakeConsoleMydumper(t, printsVersion(versionDistro))
 			stubPreflight(t, nil)
 			calls := stubSourceVersion(t, tc.server, tc.err)
-			err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", nil, filepath.Join(t.TempDir(), "out"), baseline.LockModeFTWRL, lockModeFromEnv)
+			err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", config.SSL{Mode: "disabled"}, nil, filepath.Join(t.TempDir(), "out"), baseline.LockModeFTWRL, lockModeFromEnv)
 			if *calls != 1 {
 				t.Errorf("source version read %d time(s), want once for a build older than 0.16.3", *calls)
 			}
@@ -507,7 +508,7 @@ func TestRunMydumperOldBuildIsRefusedBeforeDumpingMySQL84(t *testing.T) {
 		fakeConsoleMydumper(t, printsVersion(versionModern))
 		stubPreflight(t, nil)
 		calls := stubSourceVersion(t, "8.4.9", nil)
-		if err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", nil, filepath.Join(t.TempDir(), "out"), baseline.LockModeSafeNoLock, lockModeFromEnv); err != nil {
+		if err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", config.SSL{Mode: "disabled"}, nil, filepath.Join(t.TempDir(), "out"), baseline.LockModeSafeNoLock, lockModeFromEnv); err != nil {
 			t.Fatalf("runMydumper: %v", err)
 		}
 		if *calls != 0 {

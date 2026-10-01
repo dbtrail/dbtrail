@@ -84,3 +84,30 @@ func TLSSettingsText(err error) (detail, remediation string, ok bool) {
 			"for a server given on the command line, " + flag + " (or " + env + ").",
 		true
 }
+
+// SourceTLSRefusalText words the two ways a source connection fails over TLS
+// for a person: the server demands encryption the connection did not use
+// (3159, worded by unencryptedRefusal for the setting that decided it), or a
+// TLS mode that requires encryption met a server that offers none. ok is false
+// for any other error, and for a no-TLS failure under a DSN with its own tls=
+// (that DSN setting, not the mode, decided the connection).
+func SourceTLSRefusalText(err error, dsn string, ssl config.SSL) (detail, remediation string, ok bool) {
+	if refusesUnencrypted(err) {
+		detail, remediation = unencryptedRefusal(dsn, &ssl)
+		return detail, remediation, true
+	}
+	if !config.IsTLSUnsupportedError(err) || config.DSNHasExplicitTLS(dsn) {
+		return "", "", false
+	}
+	switch ssl.Mode {
+	case "required", "verify-ca", "verify-identity":
+		return "This server does not offer encrypted (TLS) connections, and DBTrail is set to require them: " +
+				"its TLS mode is " + ssl.Mode + ".",
+			"Turn TLS on in the server's configuration (give it a certificate and key), or set this server's TLS mode " +
+				"to preferred, which connects without encryption when the server offers none. For a server added in " +
+				"the web console, that is the ssl_mode line of its entry in console-servers.yaml. " +
+				"For bintrail-console watch, it is --ssl-mode.",
+			true
+	}
+	return "", "", false
+}

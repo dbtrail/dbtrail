@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"os"
 	"path/filepath"
 	"strings"
@@ -184,7 +185,7 @@ func stubRetryDump(t *testing.T, fn func(n int, mode baseline.LockMode, dir stri
 	t.Cleanup(func() { runMydumperFunc, dumpDDLMarkFunc = prevDump, prevMark })
 	var mu sync.Mutex
 	calls, marks = &[]dumpCall{}, &[]time.Time{}
-	runMydumperFunc = func(_ context.Context, _ string, _ []string, dir string, mode baseline.LockMode, _ lockModeSource) error {
+	runMydumperFunc = func(_ context.Context, _ string, _ config.SSL, _ []string, dir string, mode baseline.LockMode, _ lockModeSource) error {
 		mu.Lock()
 		*calls = append(*calls, dumpCall{mode, dir})
 		n := len(*calls)
@@ -312,9 +313,9 @@ func TestExecute_retryStartsCleanAndRecordsLockAll(t *testing.T) {
 	// For the marks; mydumper itself is replaced right after (its cleanup
 	// restores the real one).
 	_, marks := stubRetryDump(t, nil)
-	runMydumperFunc = func(ctx context.Context, dsn string, schemas []string, dir string, mode baseline.LockMode, src lockModeSource) error {
+	runMydumperFunc = func(ctx context.Context, dsn string, ssl config.SSL, schemas []string, dir string, mode baseline.LockMode, src lockModeSource) error {
 		dirs = append(dirs, dir)
-		return runMydumper(ctx, dsn, schemas, dir, mode, src)
+		return runMydumper(ctx, dsn, ssl, schemas, dir, mode, src)
 	}
 
 	s := newBaselineSupervisor(context.Background(), stage, baseline.DefaultLockMode)
@@ -375,7 +376,7 @@ func TestRunMydumper_globalLockDeniedIsTyped(t *testing.T) {
 			installFake(t, "#!/bin/bash\nif [ \"$1\" = \"--version\" ]; then "+printsVersion(versionModern)+"; fi\n"+
 				"printf '%s\\n' \""+c.out+"\" >&2\nexit 1\n")
 			stubPreflight(t, nil)
-			err := runMydumper(context.Background(), "admin:p@tcp(127.0.0.1:1)/", []string{"appdb"}, t.TempDir(), c.mode, lockModeFromEnv)
+			err := runMydumper(context.Background(), "admin:p@tcp(127.0.0.1:1)/", config.SSL{Mode: "disabled"}, []string{"appdb"}, t.TempDir(), c.mode, lockModeFromEnv)
 			if err == nil {
 				t.Fatal("runMydumper succeeded")
 			}

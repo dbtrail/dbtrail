@@ -5,6 +5,7 @@ package consoleapp
 import (
 	"context"
 	"fmt"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +22,7 @@ func TestIntegrationEstimateDumpSize(t *testing.T) {
 	ctx := context.Background()
 	sourceDSN := testutil.BaseDSN() + "/"
 
-	empty, err := estimateDumpSize(ctx, sourceDSN, []string{name})
+	empty, err := estimateDumpSize(ctx, sourceDSN, config.SSL{Mode: "preferred"}, []string{name})
 	if err != nil || empty.tables != 0 || empty.bytes != 0 || empty.unsized != 0 {
 		t.Fatalf("empty schema: %+v, %v", empty, err)
 	}
@@ -59,7 +60,7 @@ func TestIntegrationEstimateDumpSize(t *testing.T) {
 	var est dumpEstimate
 	deadline := time.Now().Add(90 * time.Second)
 	for {
-		est, err = estimateDumpSize(ctx, sourceDSN, []string{name})
+		est, err = estimateDumpSize(ctx, sourceDSN, config.SSL{Mode: "preferred"}, []string{name})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -83,7 +84,7 @@ func TestIntegrationEstimateDumpSize(t *testing.T) {
 
 	// Every non-system schema: this one's table is counted, the system
 	// schemas are not.
-	all, err := estimateDumpSize(ctx, sourceDSN, nil)
+	all, err := estimateDumpSize(ctx, sourceDSN, config.SSL{Mode: "preferred"}, nil)
 	if err != nil || all.tables < 1 || all.bytes < est.bytes {
 		t.Fatalf("all schemas: %+v, %v", all, err)
 	}
@@ -108,7 +109,7 @@ func TestIntegrationEstimateDumpSize(t *testing.T) {
 
 	// A source that refuses gives an error, which the verdict turns into
 	// "the check did not run".
-	if _, err := estimateDumpSize(ctx, strings.Replace(sourceDSN, ":testroot@", ":wrong@", 1), nil); err == nil {
+	if _, err := estimateDumpSize(ctx, strings.Replace(sourceDSN, ":testroot@", ":wrong@", 1), config.SSL{Mode: "preferred"}, nil); err == nil {
 		t.Fatal("a wrong password returned an estimate")
 	} else {
 		t.Log(fmt.Sprint("refused as expected: ", err))

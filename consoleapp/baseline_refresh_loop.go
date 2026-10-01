@@ -14,6 +14,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
@@ -65,6 +66,7 @@ type refreshRequest struct {
 	// the snapshot it starts from (#1993, checkNewTables). Empty SourceDSN:
 	// no source is known, and no check is made or claimed.
 	SourceDSN      string
+	SourceSSL      config.SSL // the entry's SourceSSL, as the full read uses (#1996)
 	Schemas        []string
 	SourcePostgres bool
 	// PlanNewTables, set by the backup schedule, decides what happens to the

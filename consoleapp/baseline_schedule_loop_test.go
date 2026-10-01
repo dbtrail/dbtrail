@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -656,7 +657,7 @@ func TestBackupScheduler_fallbackFullBackupIsWatched(t *testing.T) {
 		return nil, nil, errors.New("capture gap in the reconstruction window")
 	})
 	prev := checkMydumperPrivileges
-	checkMydumperPrivileges = func(context.Context, string, baseline.LockMode, mydumperlock.Remedy, []string) error {
+	checkMydumperPrivileges = func(context.Context, string, config.SSL, baseline.LockMode, mydumperlock.Remedy, []string) error {
 		panic("boom in the fallback dump")
 	}
 	t.Cleanup(func() { checkMydumperPrivileges = prev })
@@ -1041,7 +1042,7 @@ func TestBackupScheduler_runningAfterARealFire(t *testing.T) {
 	var releaseOnce sync.Once
 	entered := make(chan struct{}, 1)
 	prev := checkMydumperPrivileges
-	checkMydumperPrivileges = func(ctx context.Context, dsn string, mode baseline.LockMode, remedy mydumperlock.Remedy, schemas []string) error {
+	checkMydumperPrivileges = func(ctx context.Context, dsn string, _ config.SSL, mode baseline.LockMode, remedy mydumperlock.Remedy, schemas []string) error {
 		entered <- struct{}{}
 		<-release
 		return errors.New("held by the test")
