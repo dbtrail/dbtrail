@@ -10,6 +10,12 @@ import (
 // startup, handed to every registered agent command at dispatch time. Any
 // field may be zero (the agent runs with whatever data sources it was
 // configured with) — handlers must nil-check what they use.
+//
+// There is no TLS setting here: the agent has no --ssl-* flags and opens the
+// source from SourceDSN alone (SourceDB is that connection). A handler that
+// opens the source itself gets the same TLS from ext.OpenSource(SourceDSN,
+// SourceTLS{}), which means "preferred"; to require TLS or verify the
+// server's certificate, put tls= in the agent's source DSN.
 type AgentDeps struct {
 	IndexDB    *sql.DB
 	SourceDB   *sql.DB

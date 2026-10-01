@@ -64,8 +64,9 @@ func ValidSSLMode(mode string) bool {
 //
 //   - disabled: no TLS (a tls= in the DSN still applies, see applyTLS).
 //   - preferred: try TLS (certificate not verified). ONLY when the server
-//     genuinely does not support TLS (IsTLSUnsupportedError) is onCleartext
-//     called and the connection retried in cleartext, never the driver's own
+//     genuinely does not support TLS (IsTLSUnsupportedError) is the
+//     connection retried in cleartext (and onCleartext called once that
+//     retry has connected), never the driver's own
 //     silent AllowFallbackToPlaintext. Any other failure (access denied, a
 //     refused port, a server that demands TLS) is returned as is.
 //   - required, verify-ca, verify-identity: TLS or an error, never a retry.
@@ -74,9 +75,11 @@ func ValidSSLMode(mode string) bool {
 // the default, so a typo never quietly becomes a weaker mode. A tls= in the
 // DSN wins over ssl (applyTLS); with one there is no cleartext retry at all.
 //
-// onCleartext may be nil. It gets the error that proved the server has no
-// TLS; the caller decides how loudly to say "unencrypted" (a long-lived
-// capture warns, a check that runs every few seconds should not flood).
+// onCleartext may be nil. It is called only after the cleartext retry has
+// connected (never for a retry that failed), with the error that proved the
+// server has no TLS; the caller decides how loudly to say "unencrypted" (a
+// long-lived capture warns, a check that runs every few seconds should not
+// flood).
 func ConnectSSL(dsn string, ssl SSL, onCleartext func(error)) (*sql.DB, error) {
 	return connectSSL(dsn, ssl, onCleartext, ConnectWithTLS)
 }
@@ -98,12 +101,15 @@ func connectSSL(dsn string, ssl SSL, onCleartext func(error), open func(string, 
 	if ssl.Mode != "preferred" || !IsTLSUnsupportedError(err) || DSNHasExplicitTLS(dsn) {
 		return nil, err
 	}
-	if onCleartext != nil {
-		onCleartext(err)
-	}
+	noTLS := err
 	db, err = open(dsn, nil)
 	if err != nil {
 		return nil, fmt.Errorf("cleartext retry after the server offered no TLS: %w", err)
+	}
+	// Reported only once the cleartext connection exists: a failed retry read
+	// nothing, and its error already says the retry was in cleartext.
+	if onCleartext != nil {
+		onCleartext(noTLS)
 	}
 	return db, nil
 }

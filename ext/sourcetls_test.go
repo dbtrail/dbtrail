@@ -124,30 +124,52 @@ func TestSourceTLS_ConvertsFromCoreSettings(t *testing.T) {
 	}
 }
 
-// Falling back to cleartext must be visible: an extension may be the only
-// thing in the process that opens this source (a console serving views and
-// tools runs no capture), so it warns, once per host.
-func TestOpenSource_CleartextFallbackWarnsOncePerHost(t *testing.T) {
+// stubConnect makes every connect "succeed"; a DSN listed in plain falls back
+// to cleartext (onCleartext fires, as config.ConnectSSL does once the
+// cleartext retry has connected), any other connects over TLS.
+func stubConnect(t *testing.T, plain map[string]bool) {
+	t.Helper()
 	orig := connectSourceSSL
 	t.Cleanup(func() { connectSourceSSL = orig })
-	connectSourceSSL = func(_ string, _ config.SSL, onCleartext func(error)) (*sql.DB, error) {
-		onCleartext(mysql.ErrNoTLS)
+	connectSourceSSL = func(dsn string, _ config.SSL, onCleartext func(error)) (*sql.DB, error) {
+		if plain[dsn] {
+			onCleartext(mysql.ErrNoTLS)
+		}
 		return sql.Open("mysql", "u:p@tcp(127.0.0.1:1)/x")
 	}
+}
+
+// captureLog routes slog to a buffer and starts from an empty warned set, so
+// the test also passes under -count=2.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
 	var buf bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	cleartextWarned.Clear()
+	t.Cleanup(func() { slog.SetDefault(prev); cleartextWarned.Clear() })
+	return &buf
+}
 
-	for _, dsn := range []string{
-		"u:p@tcp(warn-a.example:3306)/", "u:p@tcp(warn-a.example:3306)/", "u:p@tcp(warn-b.example:3306)/",
-	} {
+func openAll(t *testing.T, dsns ...string) {
+	t.Helper()
+	for _, dsn := range dsns {
 		db, err := OpenSource(dsn, SourceTLS{})
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("%s: %v", dsn, err)
 		}
 		db.Close()
 	}
+}
+
+// Falling back to cleartext must be visible: an extension may be the only
+// thing in the process that opens this source (a console serving views and
+// tools runs no capture), so it warns, once per source address.
+func TestOpenSource_CleartextFallbackWarnsOncePerHost(t *testing.T) {
+	const a, b = "u:p@tcp(warn-a.example:3306)/", "u:p@tcp(warn-b.example:3306)/"
+	stubConnect(t, map[string]bool{a: true, b: true})
+	buf := captureLog(t)
+	openAll(t, a, a, b)
 	out := buf.String()
 	if n := strings.Count(out, "level=WARN"); n != 2 {
 		t.Fatalf("%d warnings, want one per host (2):\n%s", n, out)
@@ -155,4 +177,60 @@ func TestOpenSource_CleartextFallbackWarnsOncePerHost(t *testing.T) {
 	if strings.Count(out, "level=DEBUG") != 1 || !strings.Contains(out, "WITHOUT encryption") {
 		t.Fatalf("want the repeat at debug level and the warning to say it is unencrypted:\n%s", out)
 	}
+}
+
+// The warned set is keyed by the whole address: two servers on one host
+// (different ports), two unix sockets, and two DSNs that do not parse are
+// each their own source and each warn; none share an empty key.
+func TestOpenSource_WarnKeyIsTheAddress(t *testing.T) {
+	dsns := []string{
+		"u:p@tcp(shared.example:3306)/", "u:p@tcp(shared.example:3307)/",
+		"u:p@unix(/run/a.sock)/", "u:p@unix(/run/b.sock)/",
+		"not a dsn one", "not a dsn two",
+	}
+	plain := map[string]bool{}
+	for _, d := range dsns {
+		plain[d] = true
+	}
+	stubConnect(t, plain)
+	buf := captureLog(t)
+	openAll(t, dsns...)
+	if n := strings.Count(buf.String(), "level=WARN"); n != len(dsns) {
+		t.Fatalf("%d warnings, want %d (one per distinct source):\n%s", n, len(dsns), buf)
+	}
+}
+
+// A source that connected over TLS and later stops offering it is a
+// regression worth a fresh warning: a TLS success clears the warned mark.
+func TestOpenSource_TLSSuccessRearmsTheWarning(t *testing.T) {
+	const dsn = "u:p@tcp(flaky.example:3306)/"
+	plain := map[string]bool{dsn: true}
+	stubConnect(t, plain)
+	buf := captureLog(t)
+	openAll(t, dsn) // cleartext: warn
+	plain[dsn] = false
+	openAll(t, dsn) // TLS: clears
+	plain[dsn] = true
+	openAll(t, dsn) // cleartext again: warn again
+	if n := strings.Count(buf.String(), "level=WARN"); n != 2 {
+		t.Fatalf("%d warnings, want 2 (before and after the TLS success):\n%s", n, buf)
+	}
+}
+
+// OpenSource speaks MySQL only. A Postgres DSN must be refused by name, not
+// fail inside the MySQL DSN parser with an unrelated message.
+func TestOpenSource_RefusesPostgresDSN(t *testing.T) {
+	stubConnect(t, nil)
+	for _, dsn := range []string{
+		"postgres://u:p@h:5432/db?sslmode=require",
+		"POSTGRESQL://u:p@h/db",
+		"host=h port=5432 user=u dbname=db sslmode=require",
+	} {
+		_, err := OpenSource(dsn, SourceTLS{})
+		if err == nil || !strings.Contains(err.Error(), "MySQL/MariaDB sources only") || !strings.Contains(err.Error(), "sslmode=") {
+			t.Errorf("%q: err = %v, want the MySQL-only refusal", dsn, err)
+		}
+	}
+	// A MySQL DSN whose password contains "host=" is still MySQL.
+	openAll(t, "u:host=x@tcp(h:3306)/")
 }
