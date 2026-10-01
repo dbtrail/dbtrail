@@ -414,30 +414,67 @@ try {
     after.focus === "server-test" ? ok("notice: focus returns to the Test button") : bad("notice: focus returns to the Test button", JSON.stringify(after));
   }
 
-  // #1804: a NEW server opens the Connect screen, whose one button checks the
-  // database and starts capture only when nothing failed. A wrong password
-  // against the suite's own MySQL is deterministic: the check refuses, and
-  // the notice says so in plain words (access_denied), not as a check name.
-  // Cancel then throws the saved form away, so no later page load reopens it.
+  // #1953: a NEW server opens the Connect screen in three steps. Step 1 reads
+  // the server's greeting (no login) against the suite's own MySQL and names
+  // it; a closed port is drawn as the broken part of the path instead. Step 3
+  // with a wrong password is deterministic: the login light turns red with
+  // the fix in plain words (access_denied), in place, with no notice. Cancel
+  // then throws the saved form away, so no later page load reopens it.
+  const connectStep = () => page.evaluate(() => (document.getElementById("server-form") || {}).dataset?.step || "");
+  const waitStep = async (want, what) => {
+    for (let i = 0; i < 80; i++) { if ((await connectStep()) === want) return true; await page.waitForTimeout(250); }
+    bad(what, "step " + (await connectStep()) + ", want " + want);
+    return false;
+  };
   await page.click("#server-cancel");
   await page.click("#server-add");
   await page.waitForSelector('#server-form[data-connect] input[name="source_host"]', { timeout: 5000 });
-  await page.fill('#server-form-mount input[name="name"]', "e2e-draft");
   await page.fill('#server-form-mount input[name="source_host"]', "127.0.0.1");
+  await page.fill('#server-form-mount input[name="source_port"]', "1");
+  await page.click("#server-form-mount button[type=submit]");
+  let miss = null;
+  for (let i = 0; i < 40 && !miss; i++) {
+    await page.waitForTimeout(250);
+    miss = await page.evaluate(() => {
+      const p = document.querySelector("#connect-found .cx-path");
+      return p ? { label: p.getAttribute("aria-label"), text: document.getElementById("connect-found").innerText, step: document.getElementById("server-form").dataset.step } : null;
+    });
+  }
+  miss && miss.step === "1" && /Nothing listens on port 1/.test(miss.text) && /Nothing listens on port 1 at 127\.0\.0\.1/.test(miss.label)
+    ? ok("connect: a closed port is drawn as the broken part of the path, on step 1")
+    : bad("connect: a closed port is drawn as the broken part of the path, on step 1", JSON.stringify(miss));
   await page.fill('#server-form-mount input[name="source_port"]', "13306");
+  await page.click("#server-form-mount button[type=submit]");
+  if (await waitStep("2", "connect: the suite's MySQL is identified from its greeting")) {
+    const tile = await page.evaluate(() => (document.querySelector("#connect-found strong") || {}).textContent || "");
+    /^MySQL \d+\.\d+/.test(tile.trim())
+      ? ok("connect: the suite's MySQL is identified from its greeting")
+      : bad("connect: the suite's MySQL is identified from its greeting", JSON.stringify(tile));
+  }
   await page.fill('#server-form-mount input[name="source_user"]', "root");
   await page.fill('#server-form-mount input[name="source_password"]', "definitely-not-the-password");
   await page.click("#server-form-mount button[type=submit]");
-  let draft = "";
-  for (let i = 0; i < 60 && !/Capture did not start|Capture started/.test(draft); i++) {
+  let lightsSeen = null;
+  for (let i = 0; i < 80 && !(lightsSeen && lightsSeen.bad); i++) {
     await page.waitForTimeout(250);
-    draft = await page.evaluate(() => (document.querySelector("#notice-mount .notice") || {}).textContent || "");
+    lightsSeen = await page.evaluate(() => {
+      const bad = document.querySelector("#connect-lights .cx-light.bad");
+      return { bad: bad ? bad.innerText : "", notice: !!document.querySelector("#notice-mount .notice"), auto: document.getElementById("connect-auto").innerText };
+    });
   }
-  /Capture did not start/.test(draft) && /MySQL refused the user or the password/.test(draft)
+  lightsSeen && /User logs in/.test(lightsSeen.bad) && /MySQL refused the user or the password/.test(lightsSeen.bad) && !lightsSeen.notice && /Checking again in 10 seconds/.test(lightsSeen.auto)
     ? ok("connect: a wrong password is refused in plain words")
-    : bad("connect: a wrong password is refused in plain words", JSON.stringify(draft.slice(0, 300)));
-  await page.keyboard.press("Escape");
-  await page.waitForTimeout(200);
+    : bad("connect: a wrong password is refused in plain words", JSON.stringify(lightsSeen));
+  // A fix inside a light stays inside the dialog: laid out as a row, a long
+  // statement once pushed the card past the dialog's right edge.
+  const lightOverflow = await page.evaluate(() => {
+    const dlg = document.getElementById("server-form-mount").closest(".modal").getBoundingClientRect();
+    return Array.from(document.querySelectorAll("#connect-lights .doctor-card"))
+      .map((c) => c.getBoundingClientRect()).filter((r) => r.right > dlg.right + 1).map((r) => Math.round(r.right) + " > " + Math.round(dlg.right));
+  });
+  lightOverflow.length === 0
+    ? ok("connect: the fix inside a light fits inside the dialog")
+    : bad("connect: the fix inside a light fits inside the dialog", lightOverflow.join("; "));
   await page.click("#server-cancel");
   let saved = null;
   for (let i = 0; i < 20; i++) {

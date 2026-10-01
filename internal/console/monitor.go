@@ -24,6 +24,9 @@ type DoctorCheck struct {
 	Kind       string   `json:"kind,omitempty"`
 	Subjects   []string `json:"subjects,omitempty"`
 	Statements []string `json:"statements,omitempty"`
+	// Light is the question the Connect screen's step 3 draws this check
+	// under (doctor.Lights: reach, login, rows, permissions, keys, other).
+	Light string `json:"light,omitempty"`
 	// Optional marks a warn about something capture works fine without
 	// (doctor.CheckResult.Optional). The screens fold it under "Optional
 	// improvements", outside the warning count.

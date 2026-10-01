@@ -3,6 +3,7 @@ package console
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -22,6 +23,7 @@ func TestDraftStoreRoundTripsEveryField(t *testing.T) {
 		SourceHost: "db.example.com", SourcePort: "5433", SourceUser: "dbtrail",
 		Schemas:        "shop,billing",
 		SourceDatabase: "appdb", SourceSlot: "slot", SourcePublication: "pub",
+		Identified: &DraftIdentity{Version: "10.11.6-MariaDB-log", Flavor: "mariadb", Managed: "rds", Proxy: "rds_proxy", ServerError: 1130, ManagedChoice: new(bool)},
 	}
 	if err := d.Save(want); err != nil {
 		t.Fatal(err)
@@ -31,8 +33,42 @@ func TestDraftStoreRoundTripsEveryField(t *testing.T) {
 		t.Fatalf("Load() = (_, %v, %v), want (_, true, nil)", ok, err)
 	}
 	got.SavedAt = ""
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round trip lost something:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// A check saves the form without the identification step 1 found (#1953).
+// Replacing the draft must keep it while the address is the same, or a
+// reload during the checks comes back to a step 1 it would have to probe
+// again; and drop it for another address, where it describes nothing.
+func TestCheckKeepsTheIdentificationOfTheSameAddress(t *testing.T) {
+	ident := &DraftIdentity{Version: "8.4.3", Flavor: "mysql"}
+	for _, c := range []struct {
+		name, body string
+		keep       bool
+	}{
+		{"same address", `{"source_host":"db.example.com","source_port":"3306","source_user":"dbtrail","source_password":"x"}`, true},
+		{"another host", `{"source_host":"other.example.com","source_port":"3306","source_user":"dbtrail","source_password":"x"}`, false},
+		{"another port", `{"source_host":"db.example.com","source_port":"3307","source_user":"dbtrail","source_password":"x"}`, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv, ctrl := newSupervisorServer(t)
+			ctrl.report = &DoctorReport{Failed: 1, Checks: []DoctorCheck{{Name: "x", Status: "fail"}}}
+			if err := srv.drafts.Save(ConnectDraft{SourceHost: "db.example.com", SourcePort: "3306", Identified: ident}); err != nil {
+				t.Fatal(err)
+			}
+			if rec, body := doServersReq(t, srv, "POST", "/api/servers/check", c.body); rec.Code != 200 {
+				t.Fatalf("code=%d body=%s", rec.Code, body)
+			}
+			got, ok, err := srv.drafts.Load()
+			if err != nil || !ok {
+				t.Fatalf("no draft after the check: %v", err)
+			}
+			if (got.Identified != nil) != c.keep {
+				t.Errorf("identified = %+v, want kept=%v", got.Identified, c.keep)
+			}
+		})
 	}
 }
 

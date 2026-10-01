@@ -83,7 +83,7 @@ console.log(JSON.stringify([b.mysql, b.mariadb]));`)
 		if !strings.Contains(b, "IDENTIFIED BY <choose a password>;") {
 			t.Errorf("a block without a password does not hold an unquoted placeholder:\n%s", b)
 		}
-		if !strings.HasPrefix(b, "-- Fill in the source password above.") {
+		if !strings.HasPrefix(b, "-- Fill in the source password.") {
 			t.Errorf("a block without a password does not say why it cannot run:\n%s", b)
 		}
 		for _, l := range strings.Split(b, "\n") {
@@ -146,7 +146,7 @@ func TestGrantBlockWithoutAUserHasNothingRunnable(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &b); err != nil {
 		t.Fatalf("decode %q: %v", out, err)
 	}
-	if !strings.HasPrefix(b, "-- Fill in the source user above.") {
+	if !strings.HasPrefix(b, "-- Fill in the source user.") {
 		t.Errorf("a block without a user does not say why it cannot run:\n%s", b)
 	}
 	for _, l := range strings.Split(b, "\n") {

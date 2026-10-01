@@ -7,7 +7,11 @@ package console
 const renderHarnessJS = `const fs = require("fs"), vm = require("vm");
 class FakeEl {
   constructor(tag) { this.tag = tag; this.children = []; this.className = ""; this._text = ""; this.attrs = {}; this.hidden = false; this.nodeType = 1; this.value = ""; this.checked = false; this.style = {}; this.dataset = {};
-    this.classList = { add: (c) => { this.className += " " + c; }, remove() {}, toggle() {}, contains: () => false }; }
+    const has = (c) => (" " + this.className + " ").includes(" " + c + " ");
+    const drop = (c) => { this.className = this.className.split(" ").filter((x) => x && x !== c).join(" "); };
+    this.classList = { add: (c) => { if (!has(c)) this.className += " " + c; }, remove: drop,
+      toggle: (c, on) => { const want = on === undefined ? !has(c) : !!on; if (want && !has(c)) this.className += " " + c; if (!want) drop(c); return want; },
+      contains: has }; }
   set textContent(v) { this._text = String(v); this.children = []; }
   get textContent() { return this._text + this.children.map((c) => c.textContent).join(""); }
   append(...k) { for (const x of k) if (x != null) this.children.push(x); }

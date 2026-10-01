@@ -75,12 +75,23 @@ First run: open the URL and create your username and password.
 ```
 
 Open it and use **+ Add server** (the Servers screen opens itself on a
-fresh install): pick the **source type** (MySQL, MariaDB, or PostgreSQL) and
-paste the database to watch — host, user, password, optional schema filter
-(a PostgreSQL source adds database/slot/publication fields, see
-[postgres.md](./postgres.md)). DBTrail runs the preflight (failures come
-back as remediation cards), provisions a dedicated index for that source, and
-starts streaming.
+fresh install). Connecting a MySQL or MariaDB server takes three steps:
+
+1. **Where is it?** Type the host and port and press **Find it**. DBTrail reads
+   the greeting the server sends before any login and says what answered
+   (for example "MariaDB 10.11 on Amazon RDS"), or why nothing did: a name that
+   does not exist, a firewall that drops the connection (with the address to
+   allow), a closed port, something that is not MySQL, or a server that
+   blocked DBTrail's address.
+2. **Let DBTrail in.** Run the SQL block it shows, made for that server, with a
+   generated password, and press **I ran it**. DBTrail never runs it itself.
+3. **Checking.** The startup checks turn into a list of lights. A failing one
+   shows its fix, and DBTrail checks again every 10 seconds until everything
+   passes, then provisions a dedicated index for that server and starts
+   streaming.
+
+For PostgreSQL, S3 or an index of your own, the link at the foot of the form
+opens the full form (see [postgres.md](./postgres.md)).
 
 A database on this same machine is `host.docker.internal` from inside Docker.
 On Linux the compose maps that name with `host-gateway`, which needs Docker

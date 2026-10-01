@@ -1,19 +1,19 @@
 {
   "schema": 1,
-  "measured_at_commit": "e38d8b19",
+  "measured_at_commit": "848de9db",
   "platform": "darwin/153.0.8010.12",
   "viewport": "1280x720",
   "runs": {
     "clean": {
       "clicks_to_first_snapshot": 11,
       "clicks_to_first_snapshot_minimum": 9,
-      "fields_typed": 7,
+      "fields_typed": 6,
       "forced_choices": 0,
       "trips_out_of_browser": 1,
       "words_per_step_max": 135,
       "words_per_error_max": "not measurable",
-      "banned_words": 12,
-      "yellow_red": 1,
+      "banned_words": 8,
+      "yellow_red": 0,
       "changes_visible_without_reload": 3,
       "changes_visible_within_5s": 0,
       "primary_below_fold_px": 368,
@@ -25,23 +25,23 @@
     },
     "second-server": {
       "clicks_to_capture": 6,
-      "fields_typed": 5,
+      "fields_typed": 4,
       "forced_choices": 0,
       "trips_out_of_browser": 1,
-      "words_per_step_max": 84,
-      "banned_words": 7,
-      "yellow_red": 3,
-      "primary_below_fold_px": 248
+      "words_per_step_max": 82,
+      "banned_words": 2,
+      "yellow_red": 0,
+      "primary_below_fold_px": 185
     },
     "no-primary-key": {
-      "clicks_to_capture": 8,
-      "fields_typed": 5,
+      "clicks_to_capture": 6,
+      "fields_typed": 4,
       "forced_choices": 0,
       "trips_out_of_browser": 2,
-      "words_per_step_max": 93,
-      "words_per_error_max": 46,
-      "banned_words": 7,
-      "primary_below_fold_px": 344
+      "words_per_step_max": 82,
+      "words_per_error_max": 44,
+      "banned_words": 2,
+      "primary_below_fold_px": 185
     },
     "refused-update": {
       "renewal_sentence_with_gate_open": "not measurable",
@@ -54,8 +54,8 @@
         "clicks": [
           "Create & sign in",
           "+ Add server",
-          "Check and connect",
-          "OK",
+          "Find it",
+          "I ran it",
           "close the Servers dialog (✕)",
           "Recent changes",
           "Undo (optional)",
@@ -69,7 +69,6 @@
         "fields": [
           "sign-in: password",
           "sign-in: confirm password",
-          "connect: name",
           "connect: host",
           "connect: port",
           "connect: password",
@@ -104,22 +103,29 @@
           {
             "step": "connect",
             "kind": "step",
-            "words_above_fold": 75,
-            "words_whole": 257,
+            "words_above_fold": 25,
+            "words_whole": 77,
+            "layer": "modal"
+          },
+          {
+            "step": "connect-account",
+            "kind": "step",
+            "words_above_fold": 24,
+            "words_whole": 217,
             "layer": "modal"
           },
           {
             "step": "save-result",
             "kind": "step",
-            "words_above_fold": 18,
-            "words_whole": 127,
-            "layer": "notice"
+            "words_above_fold": 41,
+            "words_whole": 251,
+            "layer": "modal"
           },
           {
             "step": "after-ok",
             "kind": "step",
-            "words_above_fold": 55,
-            "words_whole": 109,
+            "words_above_fold": 41,
+            "words_whole": 251,
             "layer": "modal"
           },
           {
@@ -185,19 +191,15 @@
         "per_word": {
           "baseline": 1,
           "em dash": 1,
-          "index": 4,
-          "monitor": 2,
+          "index": 3,
           "protect": 1,
           "source": 1,
-          "stream": 1,
-          "watch": 1
+          "stream": 1
         },
         "sentences_in": "the run's first-run-scoreboard.json"
       },
       "yellow_red": {
-        "elements": [
-          "after-ok: .chip-mon \"PENDING\""
-        ]
+        "elements": []
       },
       "changes_visible_without_reload": {
         "changes": [
@@ -211,8 +213,8 @@
         "steps": [
           "sign-in: 0 px (Create & sign in)",
           "after-sign-in: 0 px (+ Add server)",
-          "connect: 185 px (Check and connect)",
-          "save-result: 0 px (OK)",
+          "connect: 0 px (Find it)",
+          "connect-account: 185 px (I ran it)",
           "snapshot-location: 368 px (Save (the snapshot location))",
           "snapshot-ready: 0 px (Read database now)"
         ]
@@ -220,8 +222,8 @@
       "final_window_matches_retention": "the final screen states no retention (no \"Changes are kept N days\" sentence)",
       "copied_differs_from_shown": {
         "blocks": [
-          "connect: permissions block: matches",
-          "connect: Copy button: matches",
+          "connect-account: permissions block: matches",
+          "connect-account: Copy button: matches",
           "undo: Copy button: matches"
         ]
       }
@@ -236,15 +238,14 @@
         "clicks": [
           "Manage servers",
           "+ Add server",
-          "Check and connect",
-          "OK",
+          "Find it",
+          "I ran it",
           "close the Servers dialog (✕)",
-          "choose shop-db-2 in the server selector"
+          "choose 127.0.0.1-58630-2 in the server selector"
         ]
       },
       "fields_typed": {
         "fields": [
-          "connect: name",
           "connect: host",
           "connect: port",
           "connect: user",
@@ -260,27 +261,34 @@
         ]
       },
       "words_per_step_max": {
-        "worst": "connect",
+        "worst": "overview",
         "steps": [
           {
             "step": "connect",
             "kind": "step",
-            "words_above_fold": 84,
-            "words_whole": 425,
+            "words_above_fold": 25,
+            "words_whole": 236,
+            "layer": "modal"
+          },
+          {
+            "step": "connect-account",
+            "kind": "step",
+            "words_above_fold": 24,
+            "words_whole": 376,
             "layer": "modal"
           },
           {
             "step": "save-result",
             "kind": "step",
-            "words_above_fold": 18,
-            "words_whole": 295,
-            "layer": "notice"
+            "words_above_fold": 41,
+            "words_whole": 410,
+            "layer": "modal"
           },
           {
             "step": "after-ok",
             "kind": "step",
-            "words_above_fold": 64,
-            "words_whole": 277,
+            "words_above_fold": 41,
+            "words_whole": 410,
             "layer": "modal"
           },
           {
@@ -294,26 +302,19 @@
       },
       "banned_words": {
         "per_word": {
-          "index": 1,
-          "monitor": 2,
           "source": 1,
-          "stream": 1,
-          "watch": 2
+          "stream": 1
         },
         "sentences_in": "the run's first-run-scoreboard.json"
       },
       "yellow_red": {
-        "elements": [
-          "connect: .chip-mon \"RUNNING\"",
-          "after-ok: .chip-mon \"RUNNING\"",
-          "after-ok: .chip-mon \"PENDING\""
-        ]
+        "elements": []
       },
       "primary_below_fold_px": {
-        "worst": "connect",
+        "worst": "connect-account",
         "steps": [
-          "connect: 248 px (Check and connect)",
-          "save-result: 0 px (OK)"
+          "connect: 0 px (Find it)",
+          "connect-account: 185 px (I ran it)"
         ]
       }
     },
@@ -322,17 +323,14 @@
         "clicks": [
           "Manage servers",
           "+ Add server",
-          "Check and connect",
-          "Back to the form",
-          "Check and connect",
-          "OK",
+          "Find it",
+          "I ran it",
           "close the Servers dialog (✕)",
-          "choose shop-audit in the server selector"
+          "choose 127.0.0.1-58630-3 in the server selector"
         ]
       },
       "fields_typed": {
         "fields": [
-          "connect: name",
           "connect: host",
           "connect: port",
           "connect: user",
@@ -349,34 +347,41 @@
         ]
       },
       "words_per_step_max": {
-        "worst": "connect",
+        "worst": "overview",
         "steps": [
           {
             "step": "connect",
             "kind": "step",
-            "words_above_fold": 93,
-            "words_whole": 315,
+            "words_above_fold": 25,
+            "words_whole": 117,
+            "layer": "modal"
+          },
+          {
+            "step": "connect-account",
+            "kind": "step",
+            "words_above_fold": 24,
+            "words_whole": 257,
             "layer": "modal"
           },
           {
             "step": "save-refused",
             "kind": "error",
-            "words_above_fold": 46,
-            "words_whole": 384,
-            "layer": "notice"
+            "words_above_fold": 44,
+            "words_whole": 312,
+            "layer": "modal"
           },
           {
             "step": "save-result",
             "kind": "step",
-            "words_above_fold": 18,
-            "words_whole": 185,
-            "layer": "notice"
+            "words_above_fold": 41,
+            "words_whole": 291,
+            "layer": "modal"
           },
           {
             "step": "after-ok",
             "kind": "step",
-            "words_above_fold": 73,
-            "words_whole": 167,
+            "words_above_fold": 41,
+            "words_whole": 291,
             "layer": "modal"
           },
           {
@@ -393,20 +398,16 @@
       },
       "banned_words": {
         "per_word": {
-          "index": 1,
-          "monitor": 2,
           "source": 1,
-          "stream": 1,
-          "watch": 2
+          "stream": 1
         },
         "sentences_in": "the run's first-run-scoreboard.json"
       },
       "primary_below_fold_px": {
-        "worst": "connect",
+        "worst": "connect-account",
         "steps": [
-          "connect: 344 px (Check and connect)",
-          "save-refused: 0 px (Back to the form)",
-          "save-result: 0 px (OK)"
+          "connect: 0 px (Find it)",
+          "connect-account: 185 px (I ran it)"
         ]
       }
     },

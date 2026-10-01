@@ -1121,6 +1121,70 @@ button { font-family: inherit; }
   background: var(--raised); border: 1px solid var(--line);
   border-radius: var(--radius); user-select: all;
 }
+/* Connect in three steps (#1953). One form; the steps below the current one
+   are hidden with the hidden attribute, so no rule here may set display on
+   .cx-step itself. */
+.cx .cx-dots { display: flex; gap: 6px; margin: 2px 0 18px; }
+.cx .cx-dots span { flex: 1; height: 4px; border-radius: var(--r-pill); background: var(--line); }
+.cx .cx-dots span.on { background: var(--grad); }
+.cx-step[hidden] { display: none; }
+.cx-title { font-family: var(--f-display); font-weight: 600; font-size: var(--fs-md, 15px); margin: 14px 0 8px; color: var(--ink); }
+.cx-where { grid-template-columns: 1fr 110px; }
+/* While a server is being connected the dialog is that form: the list of the
+   others and the dialog's lead come back with Done or Cancel. */
+.modal-body:has(#server-form-mount > form[data-connect]) #servers-list { display: none; }
+.modal:has(#server-form-mount > form[data-connect]) .modal-desc { display: none; }
+.cx-row { display: flex; align-items: center; gap: 14px; margin: -6px 0 12px; }
+.cx-row .cx-managed { margin: 0; }
+
+.cx-found { display: grid; grid-template-columns: 28px 1fr; gap: 4px 12px; align-items: center;
+  margin: 4px 0 6px; padding: 12px 14px; border-radius: var(--r-md); background: var(--strip); color: var(--strip-ink); }
+.cx-found .cx-mark { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--insert); color: var(--strip); font-weight: 700; }
+.cx-found strong { font-family: var(--f-display); font-size: 15px; }
+.cx-found p, .cx-found .cx-pick { grid-column: 2; margin: 2px 0 0; font-size: 12.5px; }
+.cx-pick { display: flex; gap: 6px; }
+.cx-pick .btn[aria-pressed="true"] { background: var(--strip-ink); color: var(--strip); }
+.cx-miss { margin: 4px 0 6px; padding: 12px 14px; border-radius: var(--r-md); border: 1px solid var(--delete); background: var(--delete-bg); }
+.cx-miss > p { margin: 8px 0; }
+.cx-miss .btn { margin-right: 6px; }
+.cx-path { display: flex; align-items: center; gap: 0; flex-wrap: wrap; font-family: var(--f-mono); font-size: 12px; }
+.cx-node { padding: 4px 8px; border-radius: var(--r-sm); background: var(--surface); border: 1px solid var(--line); color: var(--ink); overflow-wrap: anywhere; }
+.cx-node.bad { border-style: dashed; border-color: var(--delete); color: var(--delete); }
+.cx-seg { position: relative; flex: 1 1 32px; min-width: 32px; height: 2px; background: var(--insert); margin: 0 4px; }
+.cx-seg.bad { background: repeating-linear-gradient(90deg, var(--delete) 0 6px, transparent 6px 10px); }
+.cx-seg em { position: absolute; left: 50%; top: 6px; transform: translateX(-50%); white-space: nowrap;
+  font-style: normal; font-family: var(--f-ui); font-size: 11px; color: var(--delete); }
+.cx-path:has(.cx-seg.bad em) { padding-bottom: 16px; }
+.cx-managed { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); margin: 0 0 12px; }
+.cx-lights { list-style: none; margin: 0; padding: 0; }
+.cx-light { position: relative; display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 6px 12px; align-items: center; padding: 0 0 14px; }
+.cx-light:not(:last-child)::before { content: ""; position: absolute; left: 12px; top: 26px; bottom: 0; border-left: 2px dashed var(--line); }
+.cx-dot { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 700;
+  background: var(--inset); color: var(--ink-4); z-index: 1; }
+.cx-light.ok .cx-dot { background: var(--insert); color: var(--surface); }
+.cx-light.bad .cx-dot { background: var(--delete); color: var(--surface); box-shadow: 0 0 0 4px var(--delete-bg); }
+.cx-light.warn .cx-dot { background: var(--ochre); color: var(--surface); }
+.cx-light.wait .cx-label { color: var(--ink-4); }
+.cx-label { font-weight: 500; }
+.cx-light > .doctor-cards { grid-column: 2; min-width: 0; margin-top: 4px; }
+/* Inside a light the fix stacks: text, then the code (scrolling sideways if a
+   statement is long), then its Copy button. As a row it pushed out of the
+   dialog. */
+.cx-light .doctor-card { flex-direction: column; align-items: stretch; min-width: 0; }
+.cx-light .doctor-card .form-code { max-width: 100%; margin: 0; }
+.cx-light .doctor-card p { margin: 0; }
+.cx-light .doctor-card .btn { align-self: flex-start; }
+.cx-auto { font-size: 12.5px; color: var(--ink-3); margin: 0 0 10px; }
+.cx-auto:empty { display: none; }
+.cx .modal-foot .cx-full { margin-left: auto; }
+.cx .modal-foot .cx-full[hidden] { display: none; }
+.notice-inline { padding: 12px 14px; border-radius: var(--r-md); border: 1px solid var(--line); border-top: 3px solid var(--insert); margin: 6px 0; }
+.notice-inline.warn { border-top-color: var(--ochre); }
+.notice-inline.err { border-top-color: var(--delete); }
+.notice-inline p { margin: 4px 0; }
+.cx-done { font-family: var(--f-display); font-weight: 600; }
+@media (max-width: 520px) { .cx-where { grid-template-columns: 1fr 90px; } }
 .form-advanced { margin-top: 18px; }
 .form-adv-summary { cursor: pointer; font-family: var(--f-ui); font-size: 13px; font-weight: 500; color: var(--ink-3); list-style: none; }
 .form-adv-summary:hover, .form-advanced[open] > .form-adv-summary { color: var(--accent); }
