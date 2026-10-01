@@ -50,6 +50,14 @@ only for the moment the threads synchronize — never for the duration of the
 dump. A baseline that is not point-consistent yields a table state that never
 existed, and every answer reconstructed from it inherits that silently.
 
+**That moment can stretch.** Before the lock is granted, the server waits for
+work already running to finish, and new writes queue behind the waiting lock,
+so the application can stall for as long as that work takes. Under `ftwrl`
+that is any statement already running, a long report included; under
+`lock-all` it is an open transaction writing to one of the dumped tables, or a
+schema change on one. Take baselines that read the source when no long
+statements, long transactions or `ALTER TABLE` are running.
+
 Two ways to satisfy it, both point-consistent:
 
 | Lock mode | Privileges | Use when |
