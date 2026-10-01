@@ -23,6 +23,10 @@ import (
 
 func dsnFor(host string) string { return "u:p@tcp(" + host + ":3306)/" }
 
+// ownHostDSN is a self-hosted source that refuses at once, so the disk
+// estimate in execute does not wait on a network timeout.
+const ownHostDSN = "u:p@tcp(127.0.0.1:1)/"
+
 func TestSourceIsManaged_readsTheHostName(t *testing.T) {
 	for _, c := range []struct {
 		dsn  string
@@ -87,7 +91,7 @@ func TestEffectiveLockMode_operatorChoiceVersusAutomatic(t *testing.T) {
 			if (err != nil) != c.wantErr {
 				t.Fatalf("err = %v, want error %v", err, c.wantErr)
 			}
-			if mode != c.wantMode || chosen != c.wantChosen {
+			if mode != c.wantMode || chosen.chosen() != c.wantChosen {
 				t.Errorf("= %s chosen=%v, want %s chosen=%v", mode, chosen, c.wantMode, c.wantChosen)
 			}
 		})
@@ -125,7 +129,7 @@ func TestLockModeFor_hostDecidesOnlyWhenNothingWasChosen(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if mode != c.wantMode || chosen != c.wantChosen {
+			if mode != c.wantMode || chosen.chosen() != c.wantChosen {
 				t.Errorf("= %s chosen=%v, want %s chosen=%v", mode, chosen, c.wantMode, c.wantChosen)
 			}
 		})
@@ -180,7 +184,7 @@ func stubRetryDump(t *testing.T, fn func(n int, mode baseline.LockMode, dir stri
 	t.Cleanup(func() { runMydumperFunc, dumpDDLMarkFunc = prevDump, prevMark })
 	var mu sync.Mutex
 	calls, marks = &[]dumpCall{}, &[]time.Time{}
-	runMydumperFunc = func(_ context.Context, _ string, _ []string, dir string, mode baseline.LockMode) error {
+	runMydumperFunc = func(_ context.Context, _ string, _ []string, dir string, mode baseline.LockMode, _ lockModeSource) error {
 		mu.Lock()
 		*calls = append(*calls, dumpCall{mode, dir})
 		n := len(*calls)
@@ -230,7 +234,7 @@ func TestExecute_retriesWithLockAllOnlyForTheRefusedDefault(t *testing.T) {
 				s.reg = liveRegistry(t)
 				save(t, s.reg, console.BackupSettingLockMode, *c.saved)
 			}
-			_, err := s.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: dsnFor("10.0.0.5")})
+			_, err := s.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: ownHostDSN})
 			if err == nil {
 				t.Fatal("execute succeeded over a failed dump")
 			}
@@ -273,7 +277,7 @@ func TestExecute_noRetryAfterShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	calls, _ := stubRetryDump(t, func(int, baseline.LockMode, string) error { cancel(); return errDeniedFTWRL })
 	s := newBaselineSupervisor(ctx, t.TempDir(), baseline.DefaultLockMode)
-	if _, err := s.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: dsnFor("10.0.0.5")}); err == nil {
+	if _, err := s.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: ownHostDSN}); err == nil {
 		t.Fatal("execute succeeded")
 	}
 	if len(*calls) != 1 {
@@ -308,9 +312,9 @@ func TestExecute_retryStartsCleanAndRecordsLockAll(t *testing.T) {
 	// For the marks; mydumper itself is replaced right after (its cleanup
 	// restores the real one).
 	_, marks := stubRetryDump(t, nil)
-	runMydumperFunc = func(ctx context.Context, dsn string, schemas []string, dir string, mode baseline.LockMode) error {
+	runMydumperFunc = func(ctx context.Context, dsn string, schemas []string, dir string, mode baseline.LockMode, src lockModeSource) error {
 		dirs = append(dirs, dir)
-		return runMydumper(ctx, dsn, schemas, dir, mode)
+		return runMydumper(ctx, dsn, schemas, dir, mode, src)
 	}
 
 	s := newBaselineSupervisor(context.Background(), stage, baseline.DefaultLockMode)
@@ -371,7 +375,7 @@ func TestRunMydumper_globalLockDeniedIsTyped(t *testing.T) {
 			installFake(t, "#!/bin/bash\nif [ \"$1\" = \"--version\" ]; then "+printsVersion(versionModern)+"; fi\n"+
 				"printf '%s\\n' \""+c.out+"\" >&2\nexit 1\n")
 			stubPreflight(t, nil)
-			err := runMydumper(context.Background(), "admin:p@tcp(127.0.0.1:1)/", []string{"appdb"}, t.TempDir(), c.mode)
+			err := runMydumper(context.Background(), "admin:p@tcp(127.0.0.1:1)/", []string{"appdb"}, t.TempDir(), c.mode, lockModeFromEnv)
 			if err == nil {
 				t.Fatal("runMydumper succeeded")
 			}

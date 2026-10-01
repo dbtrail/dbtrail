@@ -940,7 +940,11 @@ func newBaselineSupervisorFromConfig(ctx context.Context, stagingDir string, reg
 	// Only the creation opt-in runs mydumper; a refresh-only daemon never does,
 	// and a lock-mode typo already has its own refusal (configErr).
 	if upConsoleBaselineTrigger && upConsoleBaselineLockModeErr == nil {
-		if msg := mydumperBootWarning(upConsoleBaselineLockMode); msg != "" {
+		src := lockModeAutomatic
+		if upConsoleBaselineLockModeSet {
+			src = lockModeFromEnv
+		}
+		if msg := mydumperBootWarning(upConsoleBaselineLockMode, src); msg != "" {
 			slog.Warn("console: " + msg)
 		}
 	}
@@ -1626,7 +1630,7 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		BackupSettingsDefaults: console.BackupSettingsDefaults{
 			BaselineRetain: upConsoleBaselineRetain,
 			RefreshEvery:   upBaselineRefreshEvery,
-			LockMode:       string(upConsoleBaselineLockMode),
+			LockMode:       bootLockModeReport(),
 			LockModeErr:    errString(upConsoleBaselineLockModeErr),
 			TriggerOn:      upConsoleBaselineTrigger,
 			StagingDir:     upBaselineStageDir,
@@ -1891,4 +1895,15 @@ func resolveBaselineLockModeEnv() {
 			upConsoleBaselineLockModeSet = true
 		}
 	}
+}
+
+// bootLockModeReport is the lock mode the settings API reports as the startup
+// value: what the variable set, or "" when it is unset, which is the automatic
+// mode (#1986). Reporting the internal default (ftwrl) there would say every
+// dump runs ftwrl while an RDS host's run lock-all.
+func bootLockModeReport() string {
+	if !upConsoleBaselineLockModeSet {
+		return ""
+	}
+	return string(upConsoleBaselineLockMode)
 }

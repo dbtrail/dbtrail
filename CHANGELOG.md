@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (`BASELINE_LOCK_MODE` in `.env`) now
   only overrides, and the Compose file passes it empty unless set. A saved
   empty lock mode means automatic. `bintrail dump --lock-mode` is unchanged.
+- Refusals say where the lock mode came from: one the automatic choice made
+  names no variable (an old mydumper on an RDS host is told to install
+  0.18.1 or newer, and the startup line warns about it), and one saved in the
+  console's settings names `PUT /api/backup-settings/daemon/lock_mode` and
+  the settings file instead of the environment variable it wins over. The
+  settings API reports an unset lock mode as empty (automatic). A failed
+  retry keeps both causes in the error and logs a warning.
 - The Connect screen's RDS permission explains what it is for, with a closed
   "How snapshots stay point-in-time" note for the DBA, and no longer asks for
   a "Lock while dumping" setting that does not exist.

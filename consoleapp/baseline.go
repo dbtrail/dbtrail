@@ -240,7 +240,7 @@ func newBaselineSupervisor(ctx context.Context, stagingDir string, lockMode base
 // readable value is saved, which is the whole point of the setting being
 // editable while the daemon runs. It does not look at any host: Trigger and
 // the schedule card ask it only whether a dump is refused.
-func (s *baselineSupervisor) lockModeNow() (baseline.LockMode, bool, error) {
+func (s *baselineSupervisor) lockModeNow() (baseline.LockMode, lockModeSource, error) {
 	return effectiveLockMode(s.reg, s.lockMode, s.lockModeChosen, s.configErr)
 }
 
@@ -248,17 +248,17 @@ func (s *baselineSupervisor) lockModeNow() (baseline.LockMode, bool, error) {
 // operator's choice wins, whatever the host. With none, an Amazon RDS or
 // Aurora endpoint gets lock-all, because no user there may take the global
 // read lock ftwrl needs (not even the master user), and every other host
-// gets ftwrl. chosen=false is what allows execute's one retry with lock-all.
+// gets ftwrl. Only lockModeAutomatic allows execute's one retry with lock-all.
 // Nothing is stored: the host is in every request.
-func (s *baselineSupervisor) lockModeFor(req console.BaselineRequest) (mode baseline.LockMode, chosen bool, err error) {
-	mode, chosen, err = s.lockModeNow()
-	if err != nil || chosen {
-		return mode, chosen, err
+func (s *baselineSupervisor) lockModeFor(req console.BaselineRequest) (mode baseline.LockMode, src lockModeSource, err error) {
+	mode, src, err = s.lockModeNow()
+	if err != nil || src.chosen() {
+		return mode, src, err
 	}
 	if sourceIsManaged(req.SourceDSN) {
-		return baseline.LockModeLockAll, false, nil
+		return baseline.LockModeLockAll, lockModeAutomatic, nil
 	}
-	return baseline.LockModeFTWRL, false, nil
+	return baseline.LockModeFTWRL, lockModeAutomatic, nil
 }
 
 // sourceIsManaged says whether the source DSN's host is an Amazon RDS or
@@ -748,15 +748,15 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	// the very next dump. Trigger refused an unreadable one already, but the
 	// saved value can be cleared between Trigger and here, bringing back an
 	// invalid environment value; that refuses too, never runs automatic.
-	lockMode, chosen, err := s.lockModeFor(req)
+	lockMode, src, err := s.lockModeFor(req)
 	if err != nil {
 		return dumpOutcome{}, err
 	}
-	if !chosen && lockMode == baseline.LockModeLockAll {
+	if src == lockModeAutomatic && lockMode == baseline.LockModeLockAll {
 		slog.Info("console snapshot: the source is an Amazon RDS or Aurora endpoint, so this snapshot uses lock mode lock-all",
 			"server", req.ServerID)
 	}
-	att, err := s.dumpAttempt(req, lockMode)
+	att, err := s.dumpAttempt(req, lockMode, src)
 	// One retry, and only for the automatic mode (#1986): ftwrl was refused
 	// for want of a privilege no user can have on a managed server (the
 	// global read lock itself, or RELOAD/BACKUP_ADMIN before mydumper ran).
@@ -764,17 +764,27 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	// retry is lock-all, never a mode without a lock: whether this user has
 	// LOCK TABLES is for lock-all's own privilege check to say. An operator's
 	// explicit ftwrl is never second-guessed.
-	if err != nil && !chosen && lockMode == baseline.LockModeFTWRL && ftwrlRefused(err) && s.ctx.Err() == nil {
+	if err != nil && src == lockModeAutomatic && lockMode == baseline.LockModeFTWRL && ftwrlRefused(err) && s.ctx.Err() == nil {
 		slog.Info("console snapshot: lock mode ftwrl was refused by the source; retrying this snapshot once with lock-all",
 			"server", req.ServerID, "error", err)
-		att, err = s.dumpAttempt(req, baseline.LockModeLockAll)
+		first := err
+		att, err = s.dumpAttempt(req, baseline.LockModeLockAll, lockModeAutomatic)
 		if err != nil {
-			// The lock-all failure is the one to act on; the ftwrl refusal
-			// before it is named, not repeated (it is in the log line above).
-			err = fmt.Errorf("lock mode ftwrl was refused by the source, and the automatic retry with lock-all failed too: %w", err)
+			// Both causes reach the operator: the lock-all failure is the
+			// one to act on, and the ftwrl refusal before it is why lock-all
+			// was tried at all.
+			slog.Warn("console snapshot: the automatic retry with lock-all failed too",
+				"server", req.ServerID, "ftwrl_refusal", first, "error", err)
+			err = fmt.Errorf("lock mode ftwrl was refused by the source (%s), and the automatic retry with lock-all failed too: %w",
+				refusalSummary(first), err)
 		}
 	}
 	if err != nil {
+		if src == lockModeSaved && s.reg != nil {
+			// The saved value wins over the environment, so a refusal that
+			// names how to change it must also say where it lives.
+			err = fmt.Errorf("%w (this snapshot used lock mode %s, saved in %s under backup_settings.lock_mode)", err, lockMode, s.reg.Path())
+		}
 		return dumpOutcome{}, err
 	}
 	dumpDir, dumpStartedAt, ddlMark := att.dir, att.startedAt, att.ddlMark
@@ -825,7 +835,7 @@ type dumpAttempt struct {
 	ddlMark   string
 }
 
-func (s *baselineSupervisor) dumpAttempt(req console.BaselineRequest, lockMode baseline.LockMode) (dumpAttempt, error) {
+func (s *baselineSupervisor) dumpAttempt(req console.BaselineRequest, lockMode baseline.LockMode, src lockModeSource) (dumpAttempt, error) {
 	dir, err := os.MkdirTemp(s.stagingDir, "dump-")
 	if err != nil {
 		return dumpAttempt{}, fmt.Errorf("create dump dir: %w", err)
@@ -842,8 +852,10 @@ func (s *baselineSupervisor) dumpAttempt(req console.BaselineRequest, lockMode b
 	// index ran on the source before this dump began, so the dump holds its
 	// effect, and no update from this snapshot has to place it by position.
 	a.ddlMark = dumpDDLMarkFunc(req)
-	if err := runMydumperFunc(s.ctx, req.SourceDSN, req.Schemas, dir, lockMode); err != nil {
-		os.RemoveAll(dir)
+	if err := runMydumperFunc(s.ctx, req.SourceDSN, req.Schemas, dir, lockMode, src); err != nil {
+		if rmErr := os.RemoveAll(dir); rmErr != nil {
+			slog.Warn("console snapshot: could not remove the folder of a failed dump", "path", dir, "error", rmErr)
+		}
 		return dumpAttempt{}, fmt.Errorf("dump: %w", err)
 	}
 	return a, nil
@@ -857,6 +869,17 @@ type ftwrlDeniedError struct{ err error }
 
 func (e *ftwrlDeniedError) Error() string { return e.err.Error() }
 func (e *ftwrlDeniedError) Unwrap() error { return e.err }
+
+// refusalSummary is an error's first line, without mydumper's output, short
+// enough to sit inside another error's sentence.
+func refusalSummary(err error) string {
+	s, _, _ := strings.Cut(firstLineOf(err.Error()), "; output:")
+	const max = 300
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max]) + "..."
+	}
+	return s
+}
 
 // ftwrlRefused says a dump in lock mode ftwrl failed for want of what no user
 // has on a managed server: the global read lock itself (mydumper's refusal),
@@ -1064,7 +1087,11 @@ var sourceServerVersion = func(ctx context.Context, dsn string) (string, error) 
 // flag would dump under a lock the operator did not choose, which is the silent
 // wrong answer the CLI's refusal exists to prevent, so the run refuses and
 // names the remedy.
-func planMydumper(lockMode baseline.LockMode) (mydumperPlan, error) {
+//
+// src words the refusal (#1986): a mode the automatic choice made must not
+// tell the operator to remove a variable nobody set, and a saved mode is
+// changed where it was saved, not in the environment it wins over.
+func planMydumper(lockMode baseline.LockMode, src lockModeSource) (mydumperPlan, error) {
 	path, err := exec.LookPath("mydumper")
 	if err != nil {
 		return mydumperPlan{}, fmt.Errorf("mydumper is not installed where DBTrail can run it (%v). "+
@@ -1082,20 +1109,30 @@ func planMydumper(lockMode baseline.LockMode) (mydumperPlan, error) {
 			verErr, mydumperlock.LockModeFloor)
 	case verErr != nil:
 		if !ftwrl {
+			if src == lockModeAutomatic {
+				return mydumperPlan{}, fmt.Errorf("%s, and the version of %s could not be read (%v), "+
+					"so DBTrail cannot tell whether it accepts --sync-thread-lock-mode. Install mydumper %s or newer",
+					autoNeedsMode(lockMode), path, verErr, mydumperlock.LockModeFloor)
+			}
 			return mydumperPlan{}, fmt.Errorf("lock mode %s cannot be used: the version of %s could not be read (%v), "+
 				"so DBTrail cannot tell whether it accepts --sync-thread-lock-mode. "+
-				"Install mydumper %s or newer, or remove BINTRAIL_CONSOLE_BASELINE_LOCK_MODE to back up with ftwrl",
-				lockMode, path, verErr, mydumperlock.LockModeFloor)
+				"Install mydumper %s or newer, or %s",
+				lockMode, path, verErr, mydumperlock.LockModeFloor, chosenModeUndo(src))
 		}
 		return mydumperPlan{path: path, sendLockFlags: false, preflight: true,
 			fallback: fmt.Sprintf("could not read the mydumper version (%v), so the dump runs without "+
 				"--sync-thread-lock-mode and --trx-tables, after the privilege check", verErr)}, nil
 	case !v.SupportsLockMode():
 		if !ftwrl {
+			if src == lockModeAutomatic {
+				return mydumperPlan{}, fmt.Errorf("%s, which needs mydumper %s or newer, and %s is mydumper %s, "+
+					"which does not accept --sync-thread-lock-mode. Install mydumper %s or newer (distribution packages are often older)",
+					autoNeedsMode(lockMode), mydumperlock.LockModeFloor, path, v, mydumperlock.LockModeFloor)
+			}
 			return mydumperPlan{}, fmt.Errorf("lock mode %s needs mydumper %s or newer, and %s is mydumper %s, "+
 				"which does not accept --sync-thread-lock-mode. Install mydumper %s or newer (distribution packages are often older), "+
-				"or remove BINTRAIL_CONSOLE_BASELINE_LOCK_MODE to back up with ftwrl, which this build uses by default",
-				lockMode, mydumperlock.LockModeFloor, path, v, mydumperlock.LockModeFloor)
+				"or %s, which this build uses by default",
+				lockMode, mydumperlock.LockModeFloor, path, v, mydumperlock.LockModeFloor, chosenModeUndo(src))
 		}
 		fallback := fmt.Sprintf("mydumper %s is older than %s, so the dump runs without --sync-thread-lock-mode "+
 			"and --trx-tables and takes that build's own FTWRL", v, mydumperlock.LockModeFloor)
@@ -1117,20 +1154,47 @@ func planMydumper(lockMode baseline.LockMode) (mydumperPlan, error) {
 	}
 }
 
+// autoNeedsMode opens a refusal of a mode the automatic choice made (#1986).
+func autoNeedsMode(m baseline.LockMode) string {
+	return fmt.Sprintf("this source needs lock mode %s (it is an Amazon RDS or Aurora host, or it refused ftwrl)", m)
+}
+
+// chosenModeUndo is how an operator goes back from a mode they chose to ftwrl.
+func chosenModeUndo(src lockModeSource) string {
+	if src == lockModeSaved {
+		return "save lock mode ftwrl (" + mydumperlock.SavedLockModeEndpoint + ` with {"value":"ftwrl"}) to back up with ftwrl`
+	}
+	return "remove BINTRAIL_CONSOLE_BASELINE_LOCK_MODE to back up with ftwrl"
+}
+
 // mydumperBootWarning is the startup line for a daemon that may take full
 // backups (#1688): the verdict every run will reach, said once before the first
 // slot as well as by each run. Empty when the local mydumper accepts the
 // configured mode as is.
-func mydumperBootWarning(lockMode baseline.LockMode) string {
-	plan, err := planMydumper(lockMode)
+//
+// In the automatic mode (#1986) the line is about ftwrl, the mode most
+// sources get, plus a second sentence when this mydumper cannot do lock-all:
+// every Amazon RDS or Aurora source would then fail, and only a startup line
+// says so before the first slot.
+func mydumperBootWarning(lockMode baseline.LockMode, src lockModeSource) string {
+	plan, err := planMydumper(lockMode, src)
+	var msg string
 	switch {
 	case err != nil:
 		return "full reads of MySQL and MariaDB servers will fail until this is fixed: " + err.Error()
 	case plan.fallback != "":
-		return "full reads of MySQL and MariaDB servers will run, but " + plan.fallback
-	default:
-		return ""
+		msg = "full reads of MySQL and MariaDB servers will run, but " + plan.fallback
 	}
+	if src == lockModeAutomatic && lockMode != baseline.LockModeLockAll {
+		if _, laErr := planMydumper(baseline.LockModeLockAll, lockModeAutomatic); laErr != nil {
+			rds := "snapshots of Amazon RDS and Aurora servers, and of any server that refuses ftwrl, will fail until mydumper is upgraded: " + laErr.Error()
+			if msg == "" {
+				return rds
+			}
+			msg += ". Also, " + rds
+		}
+	}
+	return msg
 }
 
 // runMydumper invokes the mydumper on the PATH against the source DSN, writing a
@@ -1142,7 +1206,11 @@ func mydumperBootWarning(lockMode baseline.LockMode) string {
 // runMydumperFunc runs mydumper; a test replaces it.
 var runMydumperFunc = runMydumper
 
-func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDir string, lockMode baseline.LockMode) error {
+func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDir string, lockMode baseline.LockMode, src lockModeSource) error {
+	remedy := mydumperlock.RemedyConsole
+	if src == lockModeSaved {
+		remedy = mydumperlock.RemedyConsoleSaved
+	}
 	host, port, user, password, err := config.ParseSourceDSN(sourceDSN)
 	if err != nil {
 		return err
@@ -1152,7 +1220,7 @@ func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDi
 	// mydumper is to install another one, and that has to take effect without
 	// restarting the process that also captures changes. One exec of
 	// --version costs nothing next to a dump.
-	plan, err := planMydumper(lockMode)
+	plan, err := planMydumper(lockMode, src)
 	if err != nil {
 		return err
 	}
@@ -1191,7 +1259,7 @@ func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDi
 		// would refuse a dump that works — while 0.16 and 0.17 DO take it and
 		// keep the gate. An unreadable version keeps the gate too.
 		if plan.preflight {
-			if err := checkMydumperPrivileges(ctx, sourceDSN, lockMode, mydumperlock.RemedyConsole, schemas); err != nil {
+			if err := checkMydumperPrivileges(ctx, sourceDSN, lockMode, remedy, schemas); err != nil {
 				return err
 			}
 		}
@@ -1219,7 +1287,7 @@ func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDi
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if msg := strings.TrimSpace(string(out)); msg != "" {
-			if hint := mydumperlock.FTWRLDeniedHint(lockMode, msg, mydumperlock.RemedyConsole); hint != "" {
+			if hint := mydumperlock.FTWRLDeniedHint(lockMode, msg, remedy); hint != "" {
 				return &ftwrlDeniedError{err: fmt.Errorf("mydumper failed: %w: %s; output: %s", err, hint, msg)}
 			}
 			return fmt.Errorf("mydumper failed: %w; output: %s", err, msg)
@@ -1349,7 +1417,7 @@ func warnIfMultiTableNoLock(ctx context.Context, sourceDSN string, schemas []str
 			"anchored at a slightly different instant (no cross-table synchronization barrier), so a multi-table "+
 			"reconstruct (e.g. a parent/child FK pair) can be mutually inconsistent; set "+
 			"BINTRAIL_CONSOLE_BASELINE_LOCK_MODE=lock-all for a point-consistent snapshot (needs only LOCK TABLES, and "+
-			"is the mode that works on managed MySQL such as RDS), or unset it for the ftwrl default (requires the "+
+			"is the mode that works on managed MySQL such as RDS), or ftwrl (requires the "+
 			"RELOAD or FLUSH_TABLES privilege; MySQL/Percona 8.0+ also requires BACKUP_ADMIN, which RDS will not grant "+
 			"and which MariaDB and MySQL 5.7 do not have) — see docs/dump-and-baseline.md",
 			"tables", count)

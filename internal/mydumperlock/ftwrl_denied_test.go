@@ -68,3 +68,36 @@ func TestFTWRLDeniedHint_quietOtherwise(t *testing.T) {
 		}
 	}
 }
+
+// #1989 review: a lock mode SAVED in the console's settings wins over the
+// environment variable, so its remedy is the saved setting, never the
+// variable. The hint no longer calls ftwrl "the default": on the console,
+// unset is the automatic choice.
+func TestFTWRLDeniedHint_savedSetting(t *testing.T) {
+	got := FTWRLDeniedHint(baseline.LockModeFTWRL, rdsGlobalLockDenied, RemedyConsoleSaved)
+	t.Logf("saved: %s", got)
+	for _, want := range []string{"RDS", "lock-all", SavedLockModeEndpoint, `{"value":"lock-all"}`, `{"use_startup":true}`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("saved hint lacks %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "BINTRAIL_CONSOLE_BASELINE_LOCK_MODE") {
+		t.Errorf("saved hint names the variable the saved value wins over: %q", got)
+	}
+	for _, r := range []Remedy{RemedyCLI, RemedyConsole, RemedyConsoleSaved} {
+		if h := FTWRLDeniedHint(baseline.LockModeFTWRL, rdsGlobalLockDenied, r); strings.Contains(h, "the default") {
+			t.Errorf("%s hint calls ftwrl the default: %q", r, h)
+		}
+	}
+}
+
+func TestRemedyForMode_savedSetting(t *testing.T) {
+	got := RemedyConsoleSaved.forMode(baseline.LockModeLockAll)
+	if !strings.Contains(got, SavedLockModeEndpoint) || !strings.Contains(got, `{"value":"lock-all"}`) ||
+		!strings.Contains(got, `{"use_startup":true}`) || strings.Contains(got, "BINTRAIL_") {
+		t.Errorf("saved remedy = %q", got)
+	}
+	if got := SavedLockModeEndpoint; got != "PUT /api/backup-settings/daemon/lock_mode" {
+		t.Errorf("endpoint %q is not the console's route", got)
+	}
+}

@@ -36,14 +36,20 @@ func FTWRLDeniedHint(mode baseline.LockMode, output string, remedy Remedy) strin
 		return ""
 	}
 	how := "pass --lock-mode lock-all"
-	if remedy == RemedyConsole {
+	switch remedy {
+	case RemedyConsoleSaved:
+		// The saved value wins over the variable, so the variable is not
+		// named: it would change nothing.
+		how = "change the saved lock mode to lock-all (" + SavedLockModeEndpoint + ` with {"value":"lock-all"}), ` +
+			`or clear it with {"use_startup":true} so snapshots switch to lock-all on their own when ftwrl is refused`
+	case RemedyConsole:
 		// The environment variable only (#1986): the snapshot settings have
 		// had no lock control since #1846, and with the variable unset the
 		// console retries a refused ftwrl with lock-all on its own, so an
 		// operator reads this only after choosing ftwrl explicitly.
 		how = "set BINTRAIL_CONSOLE_BASELINE_LOCK_MODE=lock-all, or leave it unset so snapshots switch to lock-all on their own when ftwrl is refused"
 	}
-	return "mydumper could not take the global read lock (FLUSH TABLES WITH READ LOCK) that lock mode ftwrl, the default, uses. " +
+	return "mydumper could not take the global read lock (FLUSH TABLES WITH READ LOCK) that lock mode ftwrl uses. " +
 		"On RDS and Aurora no user may take it, not even the master user with RELOAD, so there the lock mode must be lock-all: " +
 		how + ". It needs only LOCK TABLES. On a server you run yourself, GRANT RELOAD to this user instead"
 }

@@ -89,12 +89,25 @@ const (
 	// RemedyConsole marks the console daemon, which has no flag surface and is
 	// configured by environment variable.
 	RemedyConsole Remedy = "console"
+	// RemedyConsoleSaved marks the console when the lock mode in force was
+	// saved in its settings file (#1986). That value wins over the
+	// environment variable, so naming the variable would send the operator
+	// to a knob that changes nothing; the remedy is the saved setting.
+	RemedyConsoleSaved Remedy = "console-saved"
 )
+
+// SavedLockModeEndpoint is how the console's saved lock mode is changed or
+// cleared (internal/console handleBackupSettingsDaemonUpdate).
+const SavedLockModeEndpoint = "PUT /api/backup-settings/daemon/lock_mode"
 
 // forMode renders this surface's way of selecting a specific mode.
 func (r Remedy) forMode(m baseline.LockMode) string {
-	if r == RemedyCLI {
+	switch r {
+	case RemedyCLI:
 		return "pass --lock-mode " + string(m)
+	case RemedyConsoleSaved:
+		return "save lock mode " + string(m) + " instead (" + SavedLockModeEndpoint + ` with {"value":"` + string(m) +
+			`"}; {"use_startup":true} clears the saved one)`
 	}
 	return "set BINTRAIL_CONSOLE_BASELINE_LOCK_MODE=" + string(m)
 }

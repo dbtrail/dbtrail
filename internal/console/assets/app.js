@@ -7351,16 +7351,16 @@ const BACKUP_DAEMON_ROWS = {
 // would lie: an empty Backup dir is no shared location at all, an empty
 // interval is a loop that never runs, an empty table filter is every table.
 // The word renders as a value in the muted style; "not set" read as a fault
-// on nine rows of a healthy install. lock_mode is never empty on the wire
-// under watch, the only surface that renders this card (the daemon resolves
-// its default before reporting), and trigger is a boolean; both carry an
-// entry so the table stays one-to-one with the rows.
+// on nine rows of a healthy install. An empty lock_mode is the automatic
+// choice (#1986: lock-all for an RDS or Aurora host, ftwrl elsewhere), not a
+// missing value. trigger is a boolean; it carries an entry so the table stays
+// one-to-one with the rows.
 const BACKUP_DAEMON_EMPTY = {
   baseline_dir: "none",
   baseline_s3: "none",
   baseline_retain: "off",
   refresh_every: "off",
-  lock_mode: "built-in",
+  lock_mode: "automatic",
   trigger: "Off",
   staging_dir: "temp folder",
   verify_interval: "off",
@@ -13579,7 +13579,7 @@ function genSourcePassword() {
 // and Percona 8.0 or later. LOCK TABLES is only what lock-all needs, which is
 // the RDS/Aurora path: the commented alternative (#1658), or the live line
 // when managed is set (the Connect screen's RDS box, #1953).
-function grantBlocks(user, password, hasSavedPassword, managed) {
+function grantBlocks(user, password, hasSavedPassword, managed, connect) {
   const typedUser = String(user || "").trim();
   const acct = sqlString(typedUser || "dbtrail") + "@'%'";
   // A placeholder, not '': an empty quoted string is a real password MySQL
@@ -13598,9 +13598,13 @@ function grantBlocks(user, password, hasSavedPassword, managed) {
   // the Connect screen (where ticking the RDS box makes it the live line)
   // and the full form, which has no box. Snapshots pick the matching mode on
   // their own (#1986), so nothing here asks for a setting.
-  const grantLockAll = (who) =>
-    "-- " + who + ", run this line instead of the GRANT RELOAD line above.\n" +
-    "-- GRANT LOCK TABLES, SHOW VIEW ON *.* TO " + acct + ";";
+  // On the Connect screen the box under the SQL swaps in the RDS block, so
+  // the line only points at it (#1986, checked: the box sits in the row right
+  // below the SQL).
+  const grantLockAll = (who) => connect
+    ? "-- On Amazon RDS or Aurora? Tick the box below."
+    : "-- " + who + ", run this line instead of the GRANT RELOAD line above.\n" +
+      "-- GRANT LOCK TABLES, SHOW VIEW ON *.* TO " + acct + ";";
   // SHOW VIEW is on every backup line: mydumper stops at the first view it
   // cannot read ("SHOW VIEW command denied"), so a schema holding one view
   // fails the whole backup on RELOAD alone.
@@ -13652,7 +13656,7 @@ function grantBlocks(user, password, hasSavedPassword, managed) {
 function refreshGrants(form) {
   const f = form.elements;
   const managed = !!(f.cx_managed && f.cx_managed.checked);
-  const b = grantBlocks(f.source_user.value, f.source_password.value, !!savedSourcePasswords.get(form), managed);
+  const b = grantBlocks(f.source_user.value, f.source_password.value, !!savedSourcePasswords.get(form), managed, !!form.dataset.connect);
   // The Connect screen shows one block, for the flavor step 1 found or chose.
   if (form.dataset.connect) $all("pre[data-grant]", form).forEach((p) => p.setAttribute("data-grant", f.flavor.value === "mariadb" ? "mariadb" : "mysql"));
   $all("pre[data-grant]", form).forEach((p) => { p.textContent = b[p.dataset.grant]; });
@@ -14150,7 +14154,7 @@ function buildConnectForm() {
   const s2 = el("div", { class: "cx-step", "data-cx-step": "2", hidden: true });
   s2.append(el("p", { class: "cx-title", text: "2. Let DBTrail in" }));
   s2.append(el("p", { class: "form-hint", text: "Run this on that server, as an admin:" }));
-  const pre = el("pre", { class: "form-code", "data-grant": "mysql", text: grantBlocks("", "").mysql });
+  const pre = el("pre", { class: "form-code", "data-grant": "mysql", text: grantBlocks("", "", false, false, true).mysql });
   s2.append(el("div", {}, pre,
     el("div", { class: "cx-row" },
       el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(pre.textContent, "SQL") }),

@@ -188,7 +188,7 @@ exit 0
 	// against this fake setup (nothing listens on 127.0.0.1:3306), aborting
 	// before the fake mydumper ever runs. no-lock only triggers the best-effort
 	// skew warning, whose connection failure is swallowed (Debug-logged).
-	err := runMydumper(context.Background(), "root:"+pw+"@tcp(127.0.0.1:3306)/", nil, filepath.Join(dir, "out"), baseline.LockModeNoLock)
+	err := runMydumper(context.Background(), "root:"+pw+"@tcp(127.0.0.1:3306)/", nil, filepath.Join(dir, "out"), baseline.LockModeNoLock, lockModeFromEnv)
 	if err != nil {
 		t.Fatalf("runMydumper: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestRunMydumper_pointConsistentPreflightBlocksExecution(t *testing.T) {
 
 	// 127.0.0.1:1 refuses the connection immediately (closed port) so the
 	// preflight's config.Connect fails fast rather than waiting out a timeout.
-	err := runMydumper(context.Background(), "root:pw@tcp(127.0.0.1:1)/", nil, filepath.Join(dir, "out"), baseline.LockModeFTWRL)
+	err := runMydumper(context.Background(), "root:pw@tcp(127.0.0.1:1)/", nil, filepath.Join(dir, "out"), baseline.LockModeFTWRL, lockModeFromEnv)
 	if err == nil {
 		t.Fatal("expected an error from the point-consistent preflight, got nil")
 	}

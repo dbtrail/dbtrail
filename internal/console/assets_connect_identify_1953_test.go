@@ -2,11 +2,13 @@ package console
 
 import (
 	"encoding/json"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/dbtrail/dbtrail/internal/doctor"
+	"github.com/dbtrail/dbtrail/internal/mydumperlock"
 )
 
 // constLine extracts one top-level `const NAME = ...;` statement from app.js,
@@ -270,5 +272,66 @@ console.log(JSON.stringify(all));
 				t.Errorf("the SQL names %q:\n%s", bad, b)
 			}
 		}
+	}
+}
+
+// #1989 review: on the Connect screen the RDS box sits in the row right
+// under the SQL, so the non-RDS block points at it with the agreed line. The
+// full form has no box and keeps the commented alternative.
+func TestGrantBlocksConnectPointsAtTheBox(t *testing.T) {
+	js := readAsset(t, "app.js")
+	script := functionBody(t, js, "function sqlString(") + "\n" + functionBody(t, js, "function grantBlocks(") + `
+const c = grantBlocks("dbtrail", "Pw-1", false, false, true), f = grantBlocks("dbtrail", "Pw-1", false, false, false);
+console.log(JSON.stringify({ cm: c.mysql, cd: c.mariadb, fm: f.mysql, fd: f.mariadb }));
+`
+	var got struct{ CM, CD, FM, FD string }
+	if err := json.Unmarshal(runNodeConnect(t, script), &got); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("Connect MySQL:\n%s\nfull form MySQL:\n%s", got.CM, got.FM)
+	for name, b := range map[string]string{"connect mysql": got.CM, "connect mariadb": got.CD} {
+		if !strings.HasSuffix(b, "\n-- On Amazon RDS or Aurora? Tick the box below.") {
+			t.Errorf("%s does not end with the line pointing at the box:\n%s", name, b)
+		}
+		if strings.Contains(b, "LOCK TABLES") {
+			t.Errorf("%s repeats the RDS grant the box swaps in:\n%s", name, b)
+		}
+	}
+	if !strings.HasSuffix(got.FM, "\n-- On Amazon RDS, Aurora or Cloud SQL, run this line instead of the GRANT RELOAD line above.\n-- GRANT LOCK TABLES, SHOW VIEW ON *.* TO 'dbtrail'@'%';") {
+		t.Errorf("full form MySQL lost its commented alternative:\n%s", got.FM)
+	}
+	if !strings.HasSuffix(got.FD, "\n-- On Amazon RDS for MariaDB, run this line instead of the GRANT RELOAD line above.\n-- GRANT LOCK TABLES, SHOW VIEW ON *.* TO 'dbtrail'@'%';") {
+		t.Errorf("full form MariaDB lost its commented alternative:\n%s", got.FD)
+	}
+	if strings.Contains(got.FM+got.FD, "Tick the box") {
+		t.Error("the full form, which has no box, is told to tick one")
+	}
+	// The box really is below the SQL on the Connect screen: the same
+	// wrapper holds the <pre> first and the row with the box after it.
+	i := strings.Index(js, `const pre = el("pre", { class: "form-code", "data-grant": "mysql", text: grantBlocks("", "", false, false, true).mysql });`)
+	j := strings.Index(js, `" On Amazon RDS or Aurora"`)
+	k := strings.Index(js[i:], `s2.append(el("div", {}, pre,`)
+	if i < 0 || j < i || k < 0 {
+		t.Error("the Connect screen no longer builds the SQL with the box right after it; recheck \"Tick the box below\"")
+	}
+}
+
+// #1989 review: an empty lock_mode on the wire is the automatic choice.
+func TestBackupDaemonEmptyLockModeIsAutomatic(t *testing.T) {
+	js := readAsset(t, "app.js")
+	if !strings.Contains(js, `  lock_mode: "automatic",`) || strings.Contains(js, `lock_mode: "built-in"`) {
+		t.Error(`BACKUP_DAEMON_EMPTY.lock_mode must read "automatic": an unset lock mode is the automatic choice (#1986)`)
+	}
+}
+
+// The saved-setting remedy the console prints names this server's route.
+func TestSavedLockModeEndpointIsTheRoute(t *testing.T) {
+	raw, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `api.HandleFunc("PUT /api/backup-settings/daemon/{key}", s.handleBackupSettingsDaemonUpdate)`) ||
+		strings.Replace("PUT /api/backup-settings/daemon/{key}", "{key}", BackupSettingLockMode, 1) != mydumperlock.SavedLockModeEndpoint {
+		t.Errorf("mydumperlock.SavedLockModeEndpoint %q is not the route that saves %s", mydumperlock.SavedLockModeEndpoint, BackupSettingLockMode)
 	}
 }

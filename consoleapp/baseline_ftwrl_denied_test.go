@@ -25,7 +25,7 @@ func TestRunMydumperFTWRLDeniedNamesTheSetting(t *testing.T) {
 	stubPreflight(t, nil)
 
 	err := runMydumper(context.Background(), "admin:p@tcp(127.0.0.1:1)/", []string{"appdb"},
-		filepath.Join(t.TempDir(), "out"), baseline.LockModeFTWRL)
+		filepath.Join(t.TempDir(), "out"), baseline.LockModeFTWRL, lockModeFromEnv)
 	if err == nil {
 		t.Fatal("runMydumper succeeded over a failed mydumper")
 	}
