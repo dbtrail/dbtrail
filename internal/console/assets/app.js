@@ -2157,6 +2157,25 @@ function ovFlowModel(inp) {
     const keeps = keep > 0 ? "keeps " + keep + (keep === 1 ? " snapshot" : " snapshots") : "";
     bucket = piece("Your copy", "none", tablesWord((snap.tables || []).length), [kinds.join(" + "), keeps].filter(Boolean).join(" · "));
   } else bucket = piece("Your copy", "none", bl.snapshots ? "no copy yet" : "", "");
+  // Tables created after the snapshot an update started from (#1993): the
+  // newest copy does not hold them, and the count alone above read as the
+  // whole database. The live refresh status first (it keeps the list while
+  // later updates fail), then the schedule's last run when it was an update;
+  // newTablesNote checks the list against the newest snapshot's own tables.
+  const gapRun = bl.refresh && (bl.refresh.new_tables || bl.refresh.new_tables_omitted || bl.refresh.new_tables_unchecked) ? bl.refresh
+    : (run && run.method === "refresh" ? run : null);
+  const gap = snap && !blUnknown ? newTablesNote(gapRun, snap) : null;
+  if (gap && gap.warn) {
+    bucket.tone = "warn";
+    bucket.sub = (gap.count === 1 ? "1 new table" : gap.count + " new tables") + " not in it yet";
+    cards.push({ kind: "new-tables", key: sid + "|new-tables|" + (gapRun.new_tables_snapshot || gapRun.snapshot_time || "") + "|" + (gapRun.new_tables_action || ""), tone: "warn",
+      title: gap.title,
+      lines: [gap.text],
+      cost: gap.actions.some((a) => a.run === "read") ? "Reading the database takes longer than a refresh, and writes may wait while it starts." : "",
+      actions: gap.actions });
+  } else if (gap) {
+    bucket.sub = [bucket.sub, "new tables not checked"].filter(Boolean).join(" · ");
+  }
   // How far back a row can be taken (#1950): the start of the window the
   // coverage read reports, the time alone when it opened the same day the
   // newest change landed, the date with it otherwise. Only beside a copy
@@ -8548,6 +8567,93 @@ function refusedTablesBlock(run, tail) {
 
 // baselineRefreshNote renders the last automatic refresh for the selected
 // server.
+// newTablesNote (#1993): what a published update says about tables created
+// on the database after the snapshot it started from. An update brings the
+// tables it already has forward, so a new table is not in its snapshot until
+// a full read takes it. What comes next is the daemon's recorded decision
+// (new_tables_action), never a guess: a full snapshot is promised only when
+// one was started. snap is the newest snapshot listed: a later one that holds
+// a named table (a full read) takes it off the list; one that does not (a
+// point-in-time restore, a full read that still missed it) leaves it on.
+// Returns { warn, count, title, text, actions } or null. "Not checked" is its
+// own sentence and never reads as "no new tables".
+function newTablesNote(run, snap) {
+  if (!run) return null;
+  let names = Array.isArray(run.new_tables) ? run.new_tables.map((n) => String(n == null ? "" : n)).filter(Boolean) : [];
+  let left = Math.max(0, Math.floor(Number(run.new_tables_omitted)) || 0);
+  const about = utcLabel(run.new_tables_snapshot || run.snapshot_time || "");
+  const newest = snap ? utcLabel(snap.time) : "";
+  const later = / UTC$/.test(about) && / UTC$/.test(newest) && newest > about;
+  if (later) {
+    if (!Array.isArray(snap.tables)) return null;
+    const have = new Set(snap.tables.map(String));
+    const still = names.filter((n) => !have.has(n));
+    // Every named table is in the newer snapshot: it read the database, and
+    // so took the unnamed rest too.
+    if (names.length && !still.length) return null;
+    if (!names.length && left) return null;
+    names = still;
+  }
+  const n = names.length + left;
+  const READ = { label: "Read database now", run: "read", confirm: READ_DB_CONFIRM };
+  if (n > 0) {
+    const one = n === 1;
+    const they = one ? "It" : "They";
+    const join = one ? " joins" : " join";
+    const list = names.length ? ": " + names.join(", ") + (left ? " and " + left + " more" : "") : "";
+    const head = (one ? "1 table is" : n + " tables are") + " not in your copy yet";
+    const made = (one ? "It was" : "They were") + " created on your database after the snapshot this update started from.";
+    let next, actions;
+    switch (later ? "" : String(run.new_tables_action || "")) {
+      case "full_read":
+        next = "A full snapshot was started to include " + (one ? "it." : "them.");
+        actions = [{ label: "Wait for the full snapshot", primary: true, run: "dismiss" }];
+        break;
+      case "not_possible": {
+        const why = String(run.new_tables_action_reason || "").replace(/\s+/g, " ").trim();
+        next = "A full snapshot cannot start from here" + (why ? ": " + why.replace(/[.\s]+$/, "") : "") + ". Until that is fixed, " +
+          they.toLowerCase() + " will not join the copy on " + (one ? "its" : "their") + " own. Fix it, or take a full snapshot with the bintrail command line.";
+        actions = [{ label: "OK", primary: true, run: "dismiss" }];
+        break;
+      }
+      case "gave_up":
+        next = "Full snapshots were started to include " + (one ? "it" : "them") + " and none finished, so DBTrail stopped trying on its own. " +
+          "Check why the last full snapshot failed on the Snapshots page, then take one.";
+        actions = [Object.assign({ primary: true }, READ), { label: "Later", run: "dismiss" }];
+        break;
+      case "still_missing":
+        next = "A full snapshot read your database after that and still did not include " + (one ? "it" : "them") +
+          ", so another one would not either. Check that the server's schema list covers " + (one ? "its" : "their") +
+          " schema and that the name is spelled the way the database lists it.";
+        actions = [{ label: "OK", primary: true, run: "dismiss" }];
+        break;
+      case "no_schedule":
+        next = "Automatic refreshes never read your database in full, so " + they.toLowerCase() + join + " the copy only when a full snapshot is taken.";
+        actions = [Object.assign({ primary: true }, READ), { label: "Later", run: "dismiss" }];
+        break;
+      default:
+        // An older record, a newer snapshot that still lacks them, or an
+        // update whose snapshot did not reach its destination: no decision
+        // to report, and no promise.
+        next = they + join + " the copy when a full snapshot is taken.";
+        actions = [Object.assign({ primary: true }, READ), { label: "Later", run: "dismiss" }];
+    }
+    return { warn: true, count: n, title: head, text: head + list + ". " + made + " " + next, actions: actions };
+  }
+  const why = later ? "" : String(run.new_tables_unchecked || "").replace(/\s+/g, " ").trim();
+  if (why) {
+    return { warn: false, count: 0, title: "", actions: [],
+      text: "Could not check your database for tables created since the previous snapshot, so this snapshot may be missing some. Reason: " + why };
+  }
+  return null;
+}
+
+function newTablesBlock(run, snap) {
+  const d = newTablesNote(run, snap);
+  if (!d) return null;
+  return el("p", { class: d.warn ? "form-msg err" : "form-hint", text: d.text });
+}
+
 function baselineRefreshNote(rf) {
   // finished_at/since are RFC3339 UTC on the wire; utcLabel renders them in
   // the console's labeled shape ("YYYY-MM-DD HH:MM:SS UTC", #1354).
@@ -9063,7 +9169,12 @@ function baselinesPanel(b, servers, opts) {
   // Gated on the PAYLOAD, never on capsCache.baseline_trigger: the refresh and
   // the mydumper dump are independently opt-in, so a refresh-only daemon reports
   // here with baseline_trigger false, and a capability gate would render nothing.
-  if (b && !b.error && b.refresh) panel.append(baselineRefreshNote(b.refresh), refusedTablesBlock(b.refresh) || "");
+  if (b && !b.error && b.refresh) {
+    panel.append(baselineRefreshNote(b.refresh), refusedTablesBlock(b.refresh) || "");
+    // The list the last published update left (#1993), checked against the
+    // newest snapshot's own tables.
+    panel.append(newTablesBlock(b.refresh, (b.snapshots || [])[0]) || "");
+  }
   if (b && !b.error) snapshotRetentionLines(b).forEach((line) => panel.append(line));
   const list = el("div", { class: "stg-list" });
   if (!b || b.error) {
@@ -10293,6 +10404,12 @@ function backupScheduleCard(cur, b) {
         }
         const stopped = refusedTablesBlock(run);
         if (stopped) body.append(stopped);
+      }
+      // Tables the update left out (#1993): said on a published update, the
+      // one whose snapshot lacks them.
+      if (run.method === "refresh") {
+        const left = newTablesBlock(run, ((b && b.snapshots) || [])[0]);
+        if (left) body.append(left);
       }
       // A full read that ran on a low disk, or without its disk check
       // (#1938): nobody clicked, so the card is where it is said.

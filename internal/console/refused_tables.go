@@ -138,9 +138,45 @@ func withholdScheduleTables(r *http.Request, dto *backupScheduleDTO) *backupSche
 	}
 	if dto.LastRun != nil {
 		dto.LastRun.RefusedTables, dto.LastRun.RefusedTablesOmitted = nil, 0
+		// The names go, the count stays: "3 tables are not in your copy
+		// yet" names nothing a profile could deny.
+		dto.LastRun.NewTables, dto.LastRun.NewTablesOmitted = nil, dto.LastRun.NewTablesOmitted+len(dto.LastRun.NewTables)
+		dto.LastRun.NewTablesUnchecked = withheldUnchecked(dto.LastRun.NewTablesUnchecked)
 	}
 	if dto.LastFallback != nil {
 		dto.LastFallback.RefusedTables, dto.LastFallback.RefusedTablesOmitted = nil, 0
 	}
 	return dto
+}
+
+// NewTablesOf keeps the names of the tables a published update left out
+// (#1993), sorted as given, up to RefusedTablesCap, and counts the rest: the
+// same bound and the same reason as RefusedTablesOf (a migration that creates
+// hundreds of tables must not grow the run history without limit).
+func NewTablesOf(names []string) (kept []string, omitted int) {
+	for _, n := range names {
+		if len(kept) >= RefusedTablesCap {
+			omitted++
+			continue
+		}
+		kept = append(kept, clipRunes(oneLine(n), refusedNameCap))
+	}
+	return kept, omitted
+}
+
+// ScrubReason is the treatment RefusedTablesOf gives a reason, for an error
+// text that is not a table's: one line, at most refusedReasonCap runes, and
+// each connection string in secrets, its password and any credentials left
+// in a URL or DSN removed. It reaches a browser and a file on disk.
+func ScrubReason(msg string, secrets ...string) string {
+	return clipRunes(oneLine(scrubSecrets(msg, secrets)), refusedReasonCap)
+}
+
+// withheldUnchecked keeps the fact that the new-tables check did not run and
+// drops the driver's error, which can name the source's account and host.
+func withheldUnchecked(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	return "the source could not be asked"
 }

@@ -279,6 +279,32 @@ type BaselineStatus struct {
 	// for a session with a data profile. Refused stays the count either way.
 	RefusedTables        []RefusedTable `json:"refused_tables,omitempty"`
 	RefusedTablesOmitted int            `json:"refused_tables_omitted,omitempty"`
+	// NewTables (#1993, refresh only) names the tables in the source's scope
+	// that the PUBLISHED snapshot does not hold, because they were created
+	// after the snapshot the update started from: an update folds changes
+	// onto the tables it already has, so a new table has nothing to fold
+	// onto. Up to RefusedTablesCap names; NewTablesOmitted counts the rest.
+	// Empty on a run that published nothing (its fallback full read holds
+	// every table) and for a session with a data profile.
+	//
+	// NewTablesUnchecked says why the source could not be asked for its
+	// tables. A non-empty value means "not known", never "none": an empty
+	// list beside it is not a finding.
+	NewTables          []string `json:"new_tables,omitempty"`
+	NewTablesOmitted   int      `json:"new_tables_omitted,omitempty"`
+	NewTablesUnchecked string   `json:"new_tables_unchecked,omitempty"`
+	// NewTablesAction is what the daemon decided to do about NewTables, so
+	// the page never promises a full read that is not coming (one of the
+	// NewTablesAction* values; empty on a record from before it, or on an
+	// update whose snapshot did not reach its destination).
+	// NewTablesActionReason carries the gate's refusal for
+	// NewTablesActionNotPossible.
+	NewTablesAction       string `json:"new_tables_action,omitempty"`
+	NewTablesActionReason string `json:"new_tables_action_reason,omitempty"`
+	// NewTablesSnapshot (live status only, RFC3339) is the snapshot the list
+	// describes: the last update that published. A later update that fails
+	// keeps the list, because the newest copy still lacks those tables.
+	NewTablesSnapshot string `json:"new_tables_snapshot,omitempty"`
 	// TooManyChanges: the run refused for too many changed rows
 	// (reconstruct.ErrTouchedRowBudget, #1107): one of a table's on-disk groups
 	// of changes passed the per-table limit, or a table with no backup passed

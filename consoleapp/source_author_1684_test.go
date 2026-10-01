@@ -118,7 +118,7 @@ func TestFoldSourceAuthor(t *testing.T) {
 			asked := ownIdentity(t, tc.own, tc.ownErr)
 			folds := foldCounter(t, at)
 			sup := refusedFixture(t)
-			_, _, _, _, err := sup.executeRefresh(refreshRequest{ServerID: "s", ServerName: "s", BaselineDir: dir, IndexDSN: "idx"}, refreshAt)
+			_, _, _, _, _, err := sup.executeRefresh(refreshRequest{ServerID: "s", ServerName: "s", BaselineDir: dir, IndexDSN: "idx"}, refreshAt)
 			check("refresh", err, folds, asked)
 
 			asked.Store(0)
