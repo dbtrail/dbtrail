@@ -269,9 +269,9 @@ change is reused as the older snapshot's own file, and keeps that file's record.
 snapshot is modified for any of this.
 
 A snapshot is only as good as its worst table: one `torn` table makes the snapshot `torn`.
-Only a new full snapshot taken with locks clears it.
+Only a new point-in-time database read clears it (a locked read, a `safe-no-lock` read that completed, or any PostgreSQL read).
 
-`bintrail status --baseline-dir` prints it in the `LOCKS` column (`snapshot_lock` in JSON), the
+`bintrail status --baseline-dir` prints it in the `POINT_IN_TIME` column (`snapshot_lock` in JSON), the
 web interface marks the snapshot's row, and `bintrail verify` uses it to read a difference
 (see [verify.md](verify.md)).
 

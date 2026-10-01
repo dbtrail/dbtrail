@@ -544,7 +544,13 @@ async function runClean(block) {
   }
   const createLabel = (await create.innerText()).trim();
   await measure("snapshot-ready", "step", { locator: create, label: createLabel });
+  // Read database now asks first (2026-10-01): it is the one action that
+  // reaches production. Pressing OK is one more click a person makes, and it
+  // is counted as one.
+  let confirmed = false;
+  page.once("dialog", (d) => { confirmed = true; d.accept(); });
   await click(create, createLabel);
+  if (confirmed) rec({ kind: "click", label: "OK on the read confirmation", optional: false });
   // The finish line has THREE halves, and the third is the one that matters.
   // The daemon listing the snapshot is not enough, and neither is the button
   // coming back to its own name: the page re-enables that button before its

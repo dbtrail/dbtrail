@@ -319,7 +319,7 @@ func (r *Report) ExitError() error {
 	case VerdictDiffers:
 		// A difference was found and only its cause is in doubt (#1380): the
 		// run fails even when every other table matched.
-		return fmt.Errorf("%d table(s) differ from a snapshot that was read with no locks; the difference may come from that read or from the recorded changes, and a full snapshot taken with locks tells which",
+		return fmt.Errorf("%d table(s) differ from a snapshot read at different points in time; the difference may come from that read or from the recorded changes, and a point-in-time database read tells which",
 			r.Summary.InconclusiveDiffers)
 	case VerdictUnproven:
 		// The exit stays non-zero even when every inconclusive is benign: the

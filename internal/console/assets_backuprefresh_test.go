@@ -189,7 +189,7 @@ func TestBackupScheduleCard_introIsNotAnEssay(t *testing.T) {
 		t.Error("the card explains the producer choice in general above the line that names it for the next run")
 	}
 	// The specific half must survive the cut.
-	if !strings.Contains(body, "will update the latest snapshot from the recorded changes") {
+	if !strings.Contains(body, "will refresh the latest snapshot from the recorded changes") {
 		t.Fatal("the per-run producer line is gone, so nothing says how the next run will be made")
 	}
 }

@@ -137,6 +137,18 @@ func TestOverviewFlowModel(t *testing.T) {
 		"gap": {"input": c{"coverage": c{"freshness": "current", "continuity": "gap_lost", "delta_to": "2026-09-23 14:02:10"}, "baselines": c{}, "server": nil, "schema": c{"unavailable": true}, "uncaptured": c{}}},
 		// C6: state unknown is amber, and dims nothing.
 		"unknown": {"input": c{"coverage": c{"freshness": "unknown"}, "baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": sched}, "server": nil, "schema": c{"unavailable": true}, "uncaptured": c{}}},
+		// The next run's word follows the daemon's plan (next_method): a refresh
+		// touches only the recorded changes, a read touches the database, and a
+		// run that cannot start gets no time even though next_method is set.
+		"next-refresh": {"input": c{"coverage": c{"freshness": "current", "continuity": "ok", "delta_to": "2026-09-23 14:58:52"},
+			"baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": c{"every": "5m", "runnable": true, "next_run": "2026-09-23T14:35:00Z", "next_method": "refresh"}},
+			"server":    registry, "schema": c{"state": "idle"}, "uncaptured": c{}}},
+		"next-read": {"input": c{"coverage": c{"freshness": "current", "continuity": "ok", "delta_to": "2026-09-23 14:58:52"},
+			"baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": c{"every": "5m", "runnable": true, "next_run": "2026-09-23T14:35:00Z", "next_method": "backup"}},
+			"server":    registry, "schema": c{"state": "idle"}, "uncaptured": c{}}},
+		"next-blocked": {"input": c{"coverage": c{"freshness": "current", "continuity": "ok", "delta_to": "2026-09-23 14:58:52"},
+			"baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": c{"every": "5m", "runnable": true, "next_run": "2026-09-23T14:35:00Z", "next_method": "backup", "next_method_error": "the snapshot location could not be read"}},
+			"server":    registry, "schema": c{"state": "idle"}, "uncaptured": c{}}},
 		// U8: a schema change refused the update and the fallback has not succeeded: the decision card.
 		"fold-refused": {"input": c{
 			"coverage": c{"freshness": "current", "continuity": "ok", "lag_seconds": 5, "delta_to": "2026-09-23 14:58:52"},
@@ -269,6 +281,15 @@ const origPaint = paint;`, 1)
 		t.Errorf("empty: update label = %q, want 'no schedule set'", get("empty").Pieces[update].Title)
 	}
 
+	for name, want := range map[string]string{
+		"next-refresh": "copy from 14:30 · next refresh 14:35",
+		"next-read":    "copy from 14:30 · next read 14:35",
+		"next-blocked": "copy from 14:30 · next run cannot start",
+	} {
+		if got := get(name).Pieces[update].Sub; got != want {
+			t.Errorf("%s: update sub = %q, want %q", name, got, want)
+		}
+	}
 	h := get("healthy")
 	want("healthy", capture, "ok", "12s behind")
 	want("healthy", engine, "ok", "47 tables")

@@ -245,11 +245,11 @@ func TestSnapshotLock_wordsOfTheRealListingAndDetail(t *testing.T) {
 	runViewsScript(t, "const b = "+string(body)+";\n"+
 		"console.log(JSON.stringify(Object.fromEntries(b.snapshots.map((sn) => [sn.time, flat(snapshotLockPill(sn.lock)) || null]))));", &pills)
 	for at, want := range map[string]string{
-		lockMixedAt:  "no locks",
+		lockMixedAt:  "different points-in-time",
 		lockLockedAt: "",
-		lockTornAt:   "no locks",
-		lockOldAt:    "locks not recorded",
-		lockBadAt:    "locks not recorded",
+		lockTornAt:   "different points-in-time",
+		lockOldAt:    "point-in-time unknown",
+		lockBadAt:    "point-in-time unknown",
 	} {
 		got := ""
 		if p := pills[at]; p != nil {
@@ -277,11 +277,11 @@ func TestSnapshotLock_wordsOfTheRealListingAndDetail(t *testing.T) {
 		"  marks: Object.fromEntries(d.tables.map((t) => [t.table, (flat(tableLockMark(t)) || { text: '' }).text])) };\n"+
 		"console.log(JSON.stringify(out));", &lines)
 	for at, want := range map[string]struct{ line, orders, users string }{
-		lockMixedAt:  {"Read with no locks: 1 of 2 tables. Rows were copied at different moments and may not agree with each other.", " · no locks", ""},
-		lockLockedAt: {"Read with locks: every row is from one moment.", "", ""},
-		lockTornAt:   {"Read with no locks: 2 of 2 tables. Rows were copied at different moments and may not agree with each other.", " · no locks", " · no locks"},
-		lockOldAt:    {"Locks not recorded: 2 of 2 tables. They may have been read with no locks.", " · locks not recorded", " · locks not recorded"},
-		lockBadAt:    {"Locks not recorded: 1 of 2 tables. They may have been read with no locks.", "", " · locks not recorded"},
+		lockMixedAt:  {"Different points-in-time: 1 of 2 tables. Their rows were read at different instants and may not agree with each other. A refresh keeps this mark.", " · different points-in-time", ""},
+		lockLockedAt: {"Point-in-time copy: every row is from the same instant.", "", ""},
+		lockTornAt:   {"Different points-in-time: 2 of 2 tables. Their rows were read at different instants and may not agree with each other. A refresh keeps this mark.", " · different points-in-time", " · different points-in-time"},
+		lockOldAt:    {"Point-in-time unknown: 2 of 2 tables. They come from a database read that did not record it. A new read records it.", " · point-in-time unknown", " · point-in-time unknown"},
+		lockBadAt:    {"Point-in-time unknown: 1 of 2 tables. They come from a database read that did not record it. A new read records it.", "", " · point-in-time unknown"},
 	} {
 		got := lines[at]
 		if got.Line != want.line {
@@ -298,9 +298,9 @@ func TestSnapshotLock_words(t *testing.T) {
 	var got []string
 	values := []string{`"consistent"`, `"torn"`, `"unknown"`, `undefined`, `null`, `""`, `"Consistent"`, `"ok"`, `true`, `0`, `"consistent "`, `{}`}
 	runViewsScript(t, "console.log(JSON.stringify(["+strings.Join(values, ",")+"].map((v) => (flat(snapshotLockPill(v)) || { text: '' }).text)));", &got)
-	want := []string{"", "no locks", "locks not recorded",
-		"locks not checked", "locks not checked", "locks not checked", "locks not checked", "locks not checked",
-		"locks not checked", "locks not checked", "locks not checked", "locks not checked"}
+	want := []string{"", "different points-in-time", "point-in-time unknown",
+		"not checked", "not checked", "not checked", "not checked", "not checked",
+		"not checked", "not checked", "not checked", "not checked"}
 	if len(got) != len(want) {
 		t.Fatalf("%d answers for %d values", len(got), len(want))
 	}
@@ -308,6 +308,21 @@ func TestSnapshotLock_words(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("lock %s: %q, want %q", values[i], got[i], want[i])
 		}
+	}
+
+	// The dashed outline is for "point-in-time unknown" only: it lands on most
+	// rows of an older install, while "different points-in-time" is a finding
+	// and "not checked" is a different unknown.
+	var classes []string
+	runViewsScript(t, "console.log(JSON.stringify(["+strings.Join(values, ",")+"].map((v) => (flat(snapshotLockPill(v)) || { class: '' }).class)));", &classes)
+	for i, c := range classes {
+		dashed := strings.Contains(c, "snap-lock-dashed")
+		if dashed != (values[i] == `"unknown"`) {
+			t.Errorf("lock %s: class %q, dashed %v", values[i], c, dashed)
+		}
+	}
+	if len(classes) != len(values) {
+		t.Fatalf("%d classes for %d values", len(classes), len(values))
 	}
 
 	// The detail's line: nothing looked up says nothing, and a count of zero
@@ -321,14 +336,14 @@ func TestSnapshotLock_words(t *testing.T) {
 		`{"lock":"unknown","lock_unknown":1,"tables":[{"table":"a"}]}`,
 	}
 	runViewsScript(t, "console.log(JSON.stringify(["+strings.Join(docs, ",")+"].map(snapshotLockLine)));", &lines)
-	const unread = "Locks not checked: Stored in S3, where this list does not read how a snapshot was locked."
+	const unread = "Not checked: Some tables are only in S3, and this list does not open S3 files to check."
 	// No table listed (a local snapshot with no table file): nothing, and
 	// never the S3 line. One table and no lock word: not checked.
 	wantLines := []string{"", "", unread,
-		"Read with locks: every row is from one moment.",
-		"Read with no locks: 1 of 1 table. Rows were copied at different moments and may not agree with each other.",
-		"Read with no locks: 1 of 3 tables. Rows were copied at different moments and may not agree with each other. Locks not recorded: 2 of 3 tables. They may have been read with no locks.",
-		"Locks not recorded: 1 of 1 table. They may have been read with no locks.",
+		"Point-in-time copy: every row is from the same instant.",
+		"Different points-in-time: 1 of 1 table. Their rows were read at different instants and may not agree with each other. A refresh keeps this mark.",
+		"Different points-in-time: 1 of 3 tables. Their rows were read at different instants and may not agree with each other. A refresh keeps this mark. Point-in-time unknown: 2 of 3 tables. They come from a database read that did not record it. A new read records it.",
+		"Point-in-time unknown: 1 of 1 table. They come from a database read that did not record it. A new read records it.",
 	}
 	for i := range wantLines {
 		if i >= len(lines) || lines[i] != wantLines[i] {

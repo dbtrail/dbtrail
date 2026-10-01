@@ -102,21 +102,21 @@ func withSnapshotLock(st Status, detail string, sides ...lockSide) lockVerdict {
 // tornSentence says which snapshots were read with no locks: one, or two.
 func tornSentence(what []string) string {
 	if len(what) == 1 {
-		return capitalize(what[0]) + " was taken with no locks, so its rows were copied at different moments and the difference may come from that. " +
-			"Take a full snapshot with locks to check this table"
+		return capitalize(what[0]) + " was read at different points in time, so its rows may not agree and the difference may come from that. " +
+			"A point-in-time database read checks this table"
 	}
-	return capitalize(joinAnd(what)) + " were taken with no locks, so their rows were copied at different moments and the difference may come from that. " +
-		"Take a full snapshot with locks to check this table"
+	return capitalize(joinAnd(what)) + " were read at different points in time, so their rows may not agree and the difference may come from that. " +
+		"A point-in-time database read checks this table"
 }
 
 // unrecordedSentence says which snapshots have no record of their locks.
 func unrecordedSentence(what []string) string {
 	if len(what) == 1 {
-		return capitalize(what[0]) + " does not record how it was locked, so it may have been taken with no locks. " +
-			"A full snapshot taken with this version records it"
+		return capitalize(what[0]) + " does not record whether it is point-in-time, so it may have been read at different points in time. " +
+			"A database read with this version records it"
 	}
-	return "Neither " + strings.Join(what, " nor ") + " records how it was locked, so they may have been taken with no locks. " +
-		"A full snapshot taken with this version records it"
+	return "Neither " + strings.Join(what, " nor ") + " records whether it is point-in-time, so they may have been read at different points in time. " +
+		"A database read with this version records it"
 }
 
 func joinAnd(s []string) string {

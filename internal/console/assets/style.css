@@ -2113,6 +2113,10 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
   font-size: var(--fs-sm);
 }
 .stg-row:last-child { border-bottom: none; }
+/* At phone width a row wraps (when, then state and place) instead of pushing
+   its chips past the screen's edge: the newest row already ran ~365px into a
+   343px viewport before "different points-in-time" made it longer. */
+@media (max-width: 600px) { .stg-row { flex-wrap: wrap; row-gap: 6px; } }
 
 /* ── Backups: expandable rows, detail, restore card ── */
 .bk-expandable { cursor: pointer; }
@@ -2295,6 +2299,10 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
    going at the next cleanup, how a snapshot was locked (#1380). The detail
    line's "no locks" words keep the warning ink. */
 .snap-lock-torn { color: var(--orange-deep); }
+/* "point-in-time unknown" lands on most rows of an older install (every
+   refresh inherits it), so it is drawn lighter than a finding: a dashed
+   outline, not a filled warning. */
+.chip.snap-lock-dashed { border-style: dashed; }
 .bks-others { margin: 10px 14px 6px; }
 .stg-rel { font-family: var(--f-ui); font-size: var(--fs-xs); color: var(--ink-3); white-space: nowrap; }
 /* The newest row is the one tint on this list, so what it carries has to

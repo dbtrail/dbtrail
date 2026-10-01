@@ -138,8 +138,8 @@ The run is never called verified, and the `watch` daemon sends a warning and
 does not close an open verify alert. A torn snapshot that matches is a
 `match`, and every other `inconclusive` behaves as before. This holds in all
 three content modes: baseline-anchored, live-source (`--source-dsn`) and
-PostgreSQL. Take a full snapshot with locks to make the table
-checkable again.
+PostgreSQL. A point-in-time database read makes the table checkable
+again.
 
 The next full backup makes such a table checkable. A run where no table was
 proven exits non-zero. The window between the two baselines can be days old, so

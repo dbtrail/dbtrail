@@ -35,17 +35,17 @@ func TestWrite_baselinesSayHowTheyWereLocked(t *testing.T) {
 	header := strings.Fields(strings.Split(out, "\n")[1])
 	col := -1
 	for i, h := range header {
-		if h == "LOCKS" {
+		if h == "POINT_IN_TIME" {
 			col = i
 		}
 	}
 	if col < 0 {
-		t.Fatalf("no LOCKS column in %v", header)
+		t.Fatalf("no POINT_IN_TIME column in %v", header)
 	}
 	// The cell of each table's row at the newest snapshot. The snapshot time
-	// is two fields, and "⚠ no locks" is three.
+	// is two fields, and "⚠ different points-in-time" is three.
 	want := map[string]string{
-		"orders":   "⚠ no locks",
+		"orders":   "⚠ different points-in-time",
 		"users":    "consistent",
 		"old":      "unknown",
 		"later":    "unknown",
@@ -61,7 +61,7 @@ func TestWrite_baselinesSayHowTheyWereLocked(t *testing.T) {
 		// SIZE, BINLOG_FILE, BINLOG_POS, GTID are "-" here, then the cell.
 		cell := strings.Join(f[8:len(f)-2], " ")
 		if cell != want[table] {
-			t.Errorf("%s: LOCKS = %q, want %q (row %q)", table, cell, want[table], l)
+			t.Errorf("%s: POINT_IN_TIME = %q, want %q (row %q)", table, cell, want[table], l)
 		}
 		seen[table] = true
 	}
@@ -72,14 +72,14 @@ func TestWrite_baselinesSayHowTheyWereLocked(t *testing.T) {
 	}
 
 	for _, say := range []string{
-		"⚠ NO LOCKS: the newest snapshot of 1 table was read with no locks, so its rows may not agree with each other.",
-		"LOCKS NOT RECORDED: the newest snapshot of 2 tables does not say how it was locked.",
+		"⚠ DIFFERENT POINTS-IN-TIME: the newest snapshot of 1 table was read at different points in time, so its rows may not agree with each other.",
+		"POINT-IN-TIME UNKNOWN: the newest snapshot of 2 tables does not record whether it is point-in-time.",
 	} {
 		if !strings.Contains(out, say) {
 			t.Errorf("the report does not say %q", say)
 		}
 	}
-	if strings.ContainsAny(out[strings.Index(out, "NO LOCKS"):], "\u2014\u2013") {
+	if strings.ContainsAny(out[strings.Index(out, "DIFFERENT POINTS-IN-TIME"):], "\u2014\u2013") {
 		t.Errorf("the lines carry a dash that is not a hyphen:\n%s", out)
 	}
 }
@@ -95,7 +95,7 @@ func TestWrite_baselinesSayNothingWhenLocked(t *testing.T) {
 	} {
 		var buf bytes.Buffer
 		(&StatusData{Baselines: infos}).Write(&buf)
-		if out := buf.String(); strings.Contains(out, "NO LOCKS") || strings.Contains(out, "NOT RECORDED") {
+		if out := buf.String(); strings.Contains(out, "DIFFERENT POINTS-IN-TIME") || strings.Contains(out, "POINT-IN-TIME UNKNOWN") {
 			t.Errorf("%s:\n%s", name, out)
 		}
 	}
@@ -139,7 +139,7 @@ func TestWriteJSON_baselinesSayHowTheyWereLocked(t *testing.T) {
 
 func TestLockColumn(t *testing.T) {
 	for in, want := range map[string]string{
-		"": "-", "consistent": "consistent", "torn": "⚠ no locks", "unknown": "unknown",
+		"": "-", "consistent": "consistent", "torn": "⚠ different points-in-time", "unknown": "unknown",
 		"Consistent": "unknown", "consistent ": "unknown", "ok": "unknown", "true": "unknown",
 	} {
 		if got := lockColumn(in); got != want {

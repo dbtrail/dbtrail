@@ -139,7 +139,7 @@ func (n *watchNotifier) VerifyFinished(rec console.VerifyRunRecord) {
 	case allInconclusive && !differs:
 		summary = fmt.Sprintf("verification could not verify any table: all %d inconclusive", s.Total)
 	case differs && s.Mismatch == 0 && s.Error == 0:
-		summary = fmt.Sprintf("verification found %d table(s) that differ from a snapshot read with no locks (%d match); the difference may come from that read, and a full snapshot taken with locks tells",
+		summary = fmt.Sprintf("verification found %d table(s) that differ from a snapshot read at different points in time (%d match); the difference may come from that read, and a point-in-time database read tells",
 			s.InconclusiveDiffers, s.Match)
 	}
 	n.send.Notify(notify.Event{

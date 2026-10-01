@@ -368,12 +368,12 @@ vm.runInContext("loadBackupDetail", ctx)("2026-06-01T15:00:00Z", box).then(() =>
 		t.Errorf("uncounted line:\n got %q\nwant %q", got.UncountedLine, want)
 	}
 	cells := map[string]string{
-		"orders": "built from changes · last read 2026-06-01 03:00:00",
+		"orders": "refreshed from changes · last read 2026-06-01 03:00:00",
 		"quiet":  "reused unchanged · last read 2026-06-01 03:00:00",
-		"fresh":  "read from source",
+		"fresh":  "database read",
 		// Too old to record a read: it still names the backup it came from,
 		// as the page did before #1570.
-		"old": "built from changes · 2026-06-01 09:00:00",
+		"old": "refreshed from changes · 2026-06-01 09:00:00",
 	}
 	for name, want := range cells {
 		if got.Cells[name].Text != want {
