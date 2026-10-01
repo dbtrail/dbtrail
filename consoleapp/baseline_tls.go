@@ -117,11 +117,11 @@ func preferredDumpTLS(ctx context.Context, dsn string, ssl config.SSL, t dumpTLS
 // require_secure_transport=ON): amd64 links the MySQL client library, which
 // accepts every --ssl-mode and, given none, tries TLS on its own; arm64 links
 // MariaDB Connector/C, which accepts only REQUIRED and VERIFY_IDENTITY and,
-// given none, does not encrypt. On both, REQUIRED with --ca checks the chain
-// but not the host name (verify-ca) and VERIFY_IDENTITY with --ca checks both,
-// so those spellings serve every build. Only "no TLS" differs: the MySQL
-// library needs DISABLED to stay in cleartext, which Connector/C refuses as
-// unsupported. A build whose library could not be read gets no flag, which
+// given none, does not encrypt. VERIFY_IDENTITY with --ca checks the chain
+// and the host name on both. verify-ca is VERIFY_CA with --ca, except on
+// Connector/C, which lacks it and checks the chain with REQUIRED plus --ca
+// (measured). "No TLS" differs too: the MySQL library needs DISABLED to stay
+// in cleartext, which Connector/C refuses as unsupported. A build whose library could not be read gets no flag, which
 // is cleartext on Connector/C and TLS-when-offered on the MySQL library.
 func mydumperTLSArgs(t dumpTLS, lib mydumperlock.ClientLibrary) []string {
 	if !t.encrypt {
@@ -135,7 +135,15 @@ func mydumperTLSArgs(t dumpTLS, lib mydumperlock.ClientLibrary) []string {
 	case "identity":
 		args = []string{"--ssl-mode", "VERIFY_IDENTITY", "--ca", t.ca}
 	case "ca":
-		args = []string{"--ssl-mode", "REQUIRED", "--ca", t.ca}
+		// Connector/C has no VERIFY_CA: REQUIRED with --ca checks the chain
+		// there (measured). Every other build is told VERIFY_CA by name, so
+		// the check never rests on how a library treats REQUIRED plus a CA,
+		// and a build that cannot express it refuses loudly.
+		if lib == mydumperlock.LibMariaDB {
+			args = []string{"--ssl-mode", "REQUIRED", "--ca", t.ca}
+		} else {
+			args = []string{"--ssl-mode", "VERIFY_CA", "--ca", t.ca}
+		}
 	default:
 		args = []string{"--ssl-mode", "REQUIRED"}
 	}

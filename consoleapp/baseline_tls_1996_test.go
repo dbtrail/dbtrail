@@ -78,9 +78,11 @@ func TestMydumperTLS_ModeMapping(t *testing.T) {
 	const dsn = "u:p@tcp(db.example.com:3306)/"
 	type want struct {
 		mysqlLib   []string // args for a build linked against the MySQL client library
-		mariadbLib []string // args for MariaDB Connector/C (and an unknown build)
-		probes     int
-		errHas     string
+		mariadbLib []string // args for MariaDB Connector/C
+		// An unknown build gets the MySQL library's spelling for TLS (named
+		// modes, a build that lacks one refuses loudly) and no flag for none.
+		probes int
+		errHas string
 	}
 	for _, tc := range []struct {
 		name      string
@@ -104,7 +106,7 @@ func TestMydumperTLS_ModeMapping(t *testing.T) {
 		{"required: TLS, no verification, no probe", dsn, config.SSL{Mode: "required", CA: ca}, false,
 			want{[]string{"--ssl-mode", "REQUIRED"}, []string{"--ssl-mode", "REQUIRED"}, 0, ""}},
 		{"verify-ca: TLS checked against the CA", dsn, config.SSL{Mode: "verify-ca", CA: ca}, false,
-			want{[]string{"--ssl-mode", "REQUIRED", "--ca", ca}, []string{"--ssl-mode", "REQUIRED", "--ca", ca}, 0, ""}},
+			want{[]string{"--ssl-mode", "VERIFY_CA", "--ca", ca}, []string{"--ssl-mode", "REQUIRED", "--ca", ca}, 0, ""}},
 		{"verify-identity: CA and host name", dsn, config.SSL{Mode: "verify-identity", CA: ca, Cert: crt, Key: key}, false,
 			want{[]string{"--ssl-mode", "VERIFY_IDENTITY", "--ca", ca, "--cert", crt, "--key", key},
 				[]string{"--ssl-mode", "VERIFY_IDENTITY", "--ca", ca, "--cert", crt, "--key", key}, 0, ""}},
@@ -145,8 +147,13 @@ func TestMydumperTLS_ModeMapping(t *testing.T) {
 				}
 				args := mydumperTLSArgs(got, lib)
 				want := tc.want.mariadbLib
-				if lib == mydumperlock.LibMySQL {
+				switch {
+				case lib == mydumperlock.LibMySQL:
 					want = tc.want.mysqlLib
+				case lib == mydumperlock.LibUnknown && got.encrypt:
+					want = tc.want.mysqlLib
+				case lib == mydumperlock.LibUnknown:
+					want = nil
 				}
 				if !slices.Equal(args, want) {
 					t.Errorf("%s: args = %q, want %q", lib, args, want)
