@@ -6,7 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.93.0] - 2026-10-01
 ### Changed
+- **Breaking for scripts that parse `bintrail status --baseline-dir`**: the
+  `LOCKS` column is now `POINT_IN_TIME`, and its torn value reads
+  `⚠ different points-in-time` (was `⚠ no locks`). The JSON field
+  `snapshot_lock` and its values are unchanged (#1988).
+- **The console says "point-in-time", not "locks"** (#1988). "Read with
+  locks" was false for a `safe-no-lock` read and a PostgreSQL read, which are
+  point-in-time without a lock. Snapshot rows are marked `different
+  points-in-time`, `point-in-time unknown` (dashed) or `not checked`; a
+  point-in-time snapshot carries no mark. "Point-in-time restore" is now
+  "restore to a past time". Verify reasons, the verify summary, the differs
+  notification and `bintrail status` use the same words.
+- **Read database now asks first** on the Snapshots page, as the Overview
+  card already did ("writes may wait while it starts, longer if a long query
+  is running"), and a line beside it says what the newest copy records and
+  how to clear its mark (#1988).
+- The Overview strip says `next refresh` or `next read`, and `next run cannot
+  start` instead of a time for a run that would only be skipped (#1988).
+  Snapshot rows wrap at phone width.
+- **Each server's retention card shows the one rule it obeys** (#1990): a
+  count when copies live only on this machine; with S3, "On this machine"
+  and the exact age that deletes a local copy once S3 has it (DBTrail never
+  deletes in S3); "Only in S3" for a server with no folder. The Delete by age
+  hint no longer claims it applies to every local folder.
+- **Old snapshots S3 does not have are shown**, not only logged (#1990): each
+  prune against S3 writes their count to `.not-in-destination.json`, and the
+  retention card shows it with the time it was checked
+  (`GET /api/backup-settings` `not_in_s3`, `delete_after_minutes`).
+- **A failed snapshot says why in plain words** (#1986, #1991): "Snapshot of
+  <server> did not finish. Your database was not changed." (PostgreSQL: "did
+  not finish"), with the exact GRANT that is missing and a Copy button, or
+  the mydumper version to install, the first line of the error, and the rest
+  under "Technical details", in the toast, the Overview and the scheduled-run
+  line. A PostgreSQL snapshot whose only failure was the S3 upload no longer
+  reads "did not finish".
+- Docs: when the snapshot's brief lock can make writes wait (#1987).
 - **Snapshots on Amazon RDS and Aurora work without setting anything**
   (#1986). With no lock mode set, each console snapshot picks one: `lock-all`
   for an RDS or Aurora host name (RDS Proxy included), `ftwrl` elsewhere, and
@@ -23,6 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the settings file instead of the environment variable it wins over. The
   settings API reports an unset lock mode as empty (automatic). A failed
   retry keeps both causes in the error and logs a warning.
+- Upgrading on RDS or Aurora: v0.92.0 still needs `BASELINE_LOCK_MODE=lock-all`
+  (or the saved setting); from this release nothing is needed.
 - The Connect screen's RDS permission explains what it is for, with a closed
   "How snapshots stay point-in-time" note for the DBA, and no longer asks for
   a "Lock while dumping" setting that does not exist.
