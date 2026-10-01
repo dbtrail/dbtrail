@@ -3662,7 +3662,7 @@ try {
       controlTinted: regions[0] ? (regions[0].querySelector(".vfy-state-t") || {}).textContent === "Never checked" : false,
       // One line under the title since round 3, and only that one: what a
       // snapshot is. The mode help below carries what each check does.
-      subGone: (document.querySelector(".view .page-sub") || {}).textContent === "A snapshot is a copy of every table at one moment in time.",
+      subGone: (document.querySelector(".view .page-sub") || {}).textContent === "A snapshot is a copy of every table.",
       helpBefore, helpAfter: help ? help.textContent : "",
       // Measured, not scrollWidth: Chrome reports scrollWidth == clientWidth
       // for a <select> at ANY width (the closed control clips its text and

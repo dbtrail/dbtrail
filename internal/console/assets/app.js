@@ -6748,7 +6748,7 @@ async function renderSnapshots() {
     const v = VIEW(); clear(v);
     // One line under the title says what the page is about (round 3): the
     // word is new to most readers, and the hero below SHOWS the rest.
-    v.append(backupsHead = pageHead("Snapshots", el("p", { class: "page-sub", text: "A snapshot is a copy of every table at one moment in time." })));
+    v.append(backupsHead = pageHead("Snapshots", el("p", { class: "page-sub", text: "A snapshot is a copy of every table." })));
     backupsPaintedFor = paintFor;
     // Where this reader's old page went, read from the ALIAS TABLE rather
     // than a second list here, so the note and the address can never
@@ -9161,11 +9161,11 @@ function newestCopyLine(snaps, canRead, mayRead) {
   const key = snapshotLockKey(newest.lock);
   if (key === "") {
     const marked = snaps.slice(1).some((s) => { const k = snapshotLockKey(s.lock); return k === "torn" || k === "unknown"; });
-    return marked ? "Your newest copy is point-in-time. Older copies keep their mark." : "";
+    return marked ? "Newest copy: point-in-time. Older copies keep their mark." : "";
   }
-  if (key === "torn") return "Your newest copy has tables from different points-in-time.";
+  if (key === "torn") return "Newest copy: different points-in-time.";
   if (key !== "unknown") return "";
-  const head = "Your newest copy doesn't record whether it is point-in-time.";
+  const head = "Newest copy: point-in-time unknown.";
   if (canRead) return head + " Read database now records it.";
   return mayRead ? head : head + " Ask an admin to read the database to record it.";
 }

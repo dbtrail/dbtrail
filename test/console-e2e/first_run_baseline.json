@@ -5,8 +5,8 @@
   "viewport": "1280x720",
   "runs": {
     "clean": {
-      "clicks_to_first_snapshot": 11,
-      "clicks_to_first_snapshot_minimum": 9,
+      "clicks_to_first_snapshot": 12,
+      "clicks_to_first_snapshot_minimum": 10,
       "fields_typed": 6,
       "forced_choices": 0,
       "trips_out_of_browser": 1,
@@ -62,7 +62,8 @@
           "Snapshots (sidebar) (optional)",
           "Save (the snapshot location)",
           "Snapshots (sidebar)",
-          "Read database now"
+          "Read database now",
+          "OK on the read confirmation"
         ]
       },
       "fields_typed": {

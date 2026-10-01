@@ -14,9 +14,9 @@ import (
 // all of them would never change after a read.
 func TestNewestCopyLine(t *testing.T) {
 	const (
-		unknownHead = "Your newest copy doesn't record whether it is point-in-time."
-		olderMarked = "Your newest copy is point-in-time. Older copies keep their mark."
-		torn        = "Your newest copy has tables from different points-in-time."
+		unknownHead = "Newest copy: point-in-time unknown."
+		olderMarked = "Newest copy: point-in-time. Older copies keep their mark."
+		torn        = "Newest copy: different points-in-time."
 	)
 	cases := []struct {
 		name, snaps     string
@@ -72,7 +72,7 @@ func TestNewestCopyLine_realListing(t *testing.T) {
 	}
 	var got string
 	runViewsScript(t, "const b = "+string(body)+";\nconsole.log(JSON.stringify(newestCopyLine(b.snapshots, true, true)));", &got)
-	if got != "Your newest copy has tables from different points-in-time." {
+	if got != "Newest copy: different points-in-time." {
 		t.Errorf("newest of the fixture: %q", got)
 	}
 }
@@ -137,7 +137,7 @@ console.log(JSON.stringify(out));
 	if len(got.Asked) != 2 || got.Asked[0] != got.Want || !strings.Contains(got.Want, "writes may wait while it starts") {
 		t.Errorf("asked %q, want twice %q", got.Asked, got.Want)
 	}
-	if !strings.Contains(got.Hero, "Your newest copy doesn't record whether it is point-in-time. Read database now records it.") {
+	if !strings.Contains(got.Hero, "Newest copy: point-in-time unknown. Read database now records it.") {
 		t.Errorf("hero lacks the newest-copy line: %q", got.Hero)
 	}
 	if strings.ContainsAny(got.Want, "\u2014\u2013") || strings.Contains(strings.ToLower(got.Want), "lock") {
