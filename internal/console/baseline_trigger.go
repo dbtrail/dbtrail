@@ -200,6 +200,9 @@ type BaselineStatus struct {
 	Since      string `json:"since,omitempty"`
 	FinishedAt string `json:"finished_at,omitempty"`
 	LastError  string `json:"last_error,omitempty"`
+	// Failure is why a full read failed, as data, when it is a cause the page
+	// can explain in plain words (#1986); nil otherwise and on success.
+	Failure *SnapshotFailure `json:"failure,omitempty"`
 	// Published: this run left a complete snapshot in the server's local
 	// directory. Normally that is just State == "succeeded", but the two
 	// diverge on one failure — the fold finished and marked the snapshot and

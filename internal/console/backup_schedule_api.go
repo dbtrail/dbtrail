@@ -91,6 +91,12 @@ type backupScheduleRunDTO struct {
 	FinishedAt string `json:"finished_at"`
 	OK         bool   `json:"ok"`
 	Error      string `json:"error,omitempty"`
+	// Failure: see BaselineStatus.Failure.
+	Failure *SnapshotFailure `json:"failure,omitempty"`
+	// Published: the run wrote a snapshot even though it failed (only its
+	// upload did). The live view can know this without an anchor (a dump
+	// never stamps At), so the page must not call such a run unfinished.
+	Published bool `json:"published,omitempty"`
 	// SnapshotTime names the backup the run published, when it did. For a
 	// full backup it comes from the history only: the loop's live view has
 	// no anchor for a dump (chosen mid-run), so a scheduled dump rendered
@@ -341,6 +347,8 @@ func scheduleRunFromRecord(run *BaselineRunRecord) *backupScheduleRunDTO {
 		FinishedAt:    run.FinishedAt,
 		OK:            run.Error == "",
 		Error:         run.Error,
+		Failure:       run.Failure,
+		Published:     run.SnapshotTime != "",
 		SnapshotTime:  run.SnapshotTime,
 		Tables:        run.Tables,
 		Rows:          run.Rows,
@@ -378,6 +386,8 @@ func scheduleRunFromStatus(st BackupScheduleState) *backupScheduleRunDTO {
 		FinishedAt:    cur.FinishedAt,
 		OK:            ok,
 		Error:         cur.LastError,
+		Failure:       cur.Failure,
+		Published:     cur.Published,
 		SnapshotTime:  snapshot,
 		Tables:        cur.Tables,
 		Rows:          cur.Rows,

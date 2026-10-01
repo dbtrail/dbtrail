@@ -327,8 +327,8 @@ func (s *baselineSupervisor) run(req console.BaselineRequest) {
 		// record could name the snapshot the next update folds from, so
 		// that update goes unmeasured and the one after it is measured
 		// from the memo (#1737).
-		stats, uploaded, err := s.executePG(req)
-		s.finishDump(req, started, dumpOutcome{stats: stats}, nil, uploaded, 0, err)
+		out, uploaded, err := s.executePG(req)
+		s.finishDump(req, started, out, nil, uploaded, 0, err)
 		return
 	}
 	produce := s.produce
@@ -424,6 +424,7 @@ func (s *baselineSupervisor) recoverDumpJob(req console.BaselineRequest, own *du
 	own.st.State = "failed"
 	own.st.Uploading = false
 	own.st.LastError = fmt.Sprintf("internal error during %s: %v", phase, r)
+	own.st.Failure = nil
 	own.st.FinishedAt = nowStamp()
 }
 
@@ -498,6 +499,7 @@ func (s *baselineSupervisor) publishDump(req console.BaselineRequest, out dumpOu
 	st.Published = true
 	st.Uploading = true
 	st.LastError = ""
+	st.Failure = nil
 	st.Tables = out.stats.TablesProcessed
 	st.ViewsSkipped = len(out.stats.ViewsSkipped)
 	st.Rows = out.stats.RowsWritten
@@ -665,6 +667,12 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	if rec.SnapshotTime != "" {
 		rec.IndexMark = out.indexMark
 	}
+	// Why it failed, as data, for the page's plain-words card (#1986). Only
+	// when nothing was published: a snapshot whose upload failed exists, and
+	// its card is a different one.
+	if rec.SnapshotTime == "" {
+		rec.Failure = snapshotFailureOf(err, req)
+	}
 	s.recordRun(req.ServerID, req.ServerName, rec, err)
 
 	s.mu.Lock()
@@ -680,6 +688,13 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	if err != nil {
 		st.State = "failed"
 		st.LastError = err.Error()
+		st.Failure = rec.Failure
+		// A snapshot written to the server's own folder before the failure
+		// exists (a Postgres upload that failed after the snapshot; a MySQL
+		// one was already marked by publishDump).
+		if rec.SnapshotTime != "" {
+			st.Published = true
+		}
 		// A full read refused for disk (#1938), or one that found the disk
 		// full anyway, reads the same to the page as a refused update.
 		st.DiskRefused = foldDiskRefused(err)
@@ -700,6 +715,7 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	}
 	st.State = "succeeded"
 	st.LastError = ""
+	st.Failure = nil
 	st.Tables = out.stats.TablesProcessed
 	st.ViewsSkipped = len(out.stats.ViewsSkipped)
 	st.Rows = out.stats.RowsWritten
@@ -784,6 +800,9 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 			// The saved value wins over the environment, so a refusal that
 			// names how to change it must also say where it lives.
 			err = fmt.Errorf("%w (this snapshot used lock mode %s, saved in %s under backup_settings.lock_mode)", err, lockMode, s.reg.Path())
+		}
+		if src.chosen() {
+			err = &chosenModeError{err: err}
 		}
 		return dumpOutcome{}, err
 	}
@@ -975,41 +994,53 @@ var dumpDDLMarkFunc = func(req console.BaselineRequest) string {
 // snapshot time from the database's own now(). Destination handling mirrors
 // execute(): a local dir is written persistently; S3-only stages in a temp dir,
 // uploads via the same source-agnostic baseline.Upload, and discards the staging.
-func (s *baselineSupervisor) executePG(req console.BaselineRequest) (baseline.Stats, int, error) {
+// pgBaselineRun is pgbaseline.Run; a test replaces it.
+var pgBaselineRun = pgbaseline.Run
+
+// executePG returns the snapshot it wrote even when the upload after it
+// failed: with a local directory that snapshot exists (out.snapDir set,
+// not staged), and finishDump then marks the run published and names its
+// time, so no page calls it unfinished (#1991 review).
+func (s *baselineSupervisor) executePG(req console.BaselineRequest) (dumpOutcome, int, error) {
 	if err := os.MkdirAll(s.stagingDir, 0o755); err != nil {
-		return baseline.Stats{}, 0, fmt.Errorf("create staging dir: %w", err)
+		return dumpOutcome{}, 0, fmt.Errorf("create staging dir: %w", err)
 	}
 	outputDir := req.LocalDir
-	if outputDir == "" { // S3-only: stage then upload, discard staging
+	staged := outputDir == ""
+	if staged { // S3-only: stage then upload, discard staging
 		var err error
 		outputDir, err = os.MkdirTemp(s.stagingDir, "pgbaseline-")
 		if err != nil {
-			return baseline.Stats{}, 0, fmt.Errorf("create baseline staging dir: %w", err)
+			return dumpOutcome{}, 0, fmt.Errorf("create baseline staging dir: %w", err)
 		}
 		defer os.RemoveAll(outputDir)
 	}
 
 	cfg, err := pgBaselineConfig(req, outputDir)
 	if err != nil {
-		return baseline.Stats{}, 0, err
+		return dumpOutcome{}, 0, err
 	}
-	pgStats, err := pgbaseline.Run(s.ctx, cfg)
+	pgStats, err := pgBaselineRun(s.ctx, cfg)
 	if err != nil {
-		return baseline.Stats{}, 0, fmt.Errorf("pg baseline: %w", err)
+		return dumpOutcome{}, 0, fmt.Errorf("pg baseline: %w", err)
+	}
+	out := dumpOutcome{stats: baseline.Stats{
+		TablesProcessed: pgStats.TablesProcessed,
+		RowsWritten:     pgStats.RowsWritten,
+		FilesWritten:    pgStats.FilesWritten,
+	}, at: pgStats.SnapshotTime, staged: staged}
+	if !pgStats.SnapshotTime.IsZero() {
+		out.snapDir = filepath.Join(outputDir, reconstruct.SnapshotDirName(pgStats.SnapshotTime))
 	}
 
 	var uploaded int
 	if req.S3 != "" {
 		uploaded, err = uploadSnapshot(s.ctx, outputDir, req.S3, "", false)
 		if err != nil {
-			return baseline.Stats{}, 0, fmt.Errorf("upload: %w", err)
+			return out, 0, fmt.Errorf("upload: %w", err)
 		}
 	}
-	return baseline.Stats{
-		TablesProcessed: pgStats.TablesProcessed,
-		RowsWritten:     pgStats.RowsWritten,
-		FilesWritten:    pgStats.FilesWritten,
-	}, uploaded, nil
+	return out, uploaded, nil
 }
 
 // pgBaselineConfig builds the pgbaseline.Config for a PG source, mirroring
@@ -1125,14 +1156,14 @@ func planMydumper(lockMode baseline.LockMode, src lockModeSource) (mydumperPlan,
 	case !v.SupportsLockMode():
 		if !ftwrl {
 			if src == lockModeAutomatic {
-				return mydumperPlan{}, fmt.Errorf("%s, which needs mydumper %s or newer, and %s is mydumper %s, "+
+				return mydumperPlan{}, &mydumperTooOldError{min: mydumperlock.LockModeFloor, err: fmt.Errorf("%s, which needs mydumper %s or newer, and %s is mydumper %s, "+
 					"which does not accept --sync-thread-lock-mode. Install mydumper %s or newer (distribution packages are often older)",
-					autoNeedsMode(lockMode), mydumperlock.LockModeFloor, path, v, mydumperlock.LockModeFloor)
+					autoNeedsMode(lockMode), mydumperlock.LockModeFloor, path, v, mydumperlock.LockModeFloor)}
 			}
-			return mydumperPlan{}, fmt.Errorf("lock mode %s needs mydumper %s or newer, and %s is mydumper %s, "+
+			return mydumperPlan{}, &mydumperTooOldError{min: mydumperlock.LockModeFloor, err: fmt.Errorf("lock mode %s needs mydumper %s or newer, and %s is mydumper %s, "+
 				"which does not accept --sync-thread-lock-mode. Install mydumper %s or newer (distribution packages are often older), "+
 				"or %s, which this build uses by default",
-				lockMode, mydumperlock.LockModeFloor, path, v, mydumperlock.LockModeFloor, chosenModeUndo(src))
+				lockMode, mydumperlock.LockModeFloor, path, v, mydumperlock.LockModeFloor, chosenModeUndo(src))}
 		}
 		fallback := fmt.Sprintf("mydumper %s is older than %s, so the dump runs without --sync-thread-lock-mode "+
 			"and --trx-tables and takes that build's own FTWRL", v, mydumperlock.LockModeFloor)
@@ -1242,10 +1273,10 @@ func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDi
 				"mydumper", plan.version.String(), "error", verr)
 		}
 		if verr == nil && !plan.version.RecordsPositionOn(sv) {
-			return fmt.Errorf("mydumper %s cannot record the binlog position on MySQL %s: builds older than %s read it "+
+			return &mydumperTooOldError{min: mydumperlock.LockModeFloor, err: fmt.Errorf("mydumper %s cannot record the binlog position on MySQL %s: builds older than %s read it "+
 				"with SHOW MASTER STATUS, which MySQL 8.4 removed, so the snapshot would be refused after a full dump and "+
 				"the dump was not started. Install mydumper %s or newer",
-				plan.version, sv, mydumperlock.PositionFloor, mydumperlock.LockModeFloor)
+				plan.version, sv, mydumperlock.PositionFloor, mydumperlock.LockModeFloor)}
 		}
 	}
 

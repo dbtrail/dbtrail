@@ -132,15 +132,55 @@ func (r Remedy) noCheckModes() string {
 // because retrying on those would hide their real cause.
 var ErrFTWRLPrivilegesMissing = errors.New("lock mode ftwrl: RELOAD/FLUSH_TABLES or BACKUP_ADMIN missing")
 
-// ftwrlPrivilegesError keeps the refusal's own words while answering
-// errors.Is(err, ErrFTWRLPrivilegesMissing).
-type ftwrlPrivilegesError struct{ msg string }
+// MissingPrivilegesError is a refusal because the user lacks privileges a
+// lock mode needs, with what is missing as data (#1986): the console shows the
+// exact GRANT to run without reading the message. The message is the
+// refusal's own words, unchanged. Only ftwrl's refusals answer
+// errors.Is(err, ErrFTWRLPrivilegesMissing), the marker execute retries on.
+//
+// Made only where the statement is certain: the privileges ftwrl or lock-all
+// need, granted ON *.*. A partial REVOKE, unreadable grants or an unreadable
+// version never make one, because a GRANT that names the wrong thing sends
+// the operator to fix the wrong thing.
+type MissingPrivilegesError struct {
+	// Mode is the lock mode the check was for.
+	Mode baseline.LockMode
+	// Missing is the privileges to grant ON *.*, in the order the statement
+	// names them.
+	Missing []string
+	// Account is the connecting account as SHOW GRANTS names it (`u`@`h`,
+	// or 'u'@'h' on MySQL 5.7 and MariaDB), quotes included; "" when no line
+	// could be read for it.
+	Account string
+	msg     string
+}
 
-func (e *ftwrlPrivilegesError) Error() string        { return e.msg }
-func (e *ftwrlPrivilegesError) Is(target error) bool { return target == ErrFTWRLPrivilegesMissing }
+func (e *MissingPrivilegesError) Error() string { return e.msg }
+func (e *MissingPrivilegesError) Is(target error) bool {
+	return target == ErrFTWRLPrivilegesMissing && e.Mode == baseline.LockModeFTWRL
+}
 
-func ftwrlPrivilegesMissing(format string, args ...any) error {
-	return &ftwrlPrivilegesError{msg: fmt.Sprintf(format, args...)}
+// Grant is the statement that gives the account what the check found
+// missing, naming the account exactly as SHOW GRANTS did. "" when no account
+// was read: the source DSN names the server's host, not the account's, so
+// "user@'%'" would be a guess, and a GRANT for an account that does not exist
+// (or, on MariaDB, one that creates a second account) sends the operator to
+// fix the wrong thing.
+func (e *MissingPrivilegesError) Grant() string {
+	if len(e.Missing) == 0 || e.Account == "" {
+		return ""
+	}
+	return "GRANT " + strings.Join(e.Missing, ", ") + " ON *.* TO " + e.Account + ";"
+}
+
+// missingPrivileges builds the refusal. SHOW VIEW joins the statement when
+// the account holds it nowhere: mydumper needs it for any view in the dump,
+// and the Connect screen's grant asks for it beside these.
+func missingPrivileges(g *grantSet, mode baseline.LockMode, missing []string, format string, args ...any) error {
+	if !g.grantedAnywhere("SHOW VIEW") {
+		missing = append(missing, "SHOW VIEW")
+	}
+	return &MissingPrivilegesError{Mode: mode, Missing: missing, Account: g.account, msg: fmt.Sprintf(format, args...)}
 }
 
 // CheckPrivileges queries the source for the privileges the requested
@@ -192,6 +232,10 @@ type grantSet struct {
 	// refused confidently while reading the wrong source, and the operator had
 	// no way to tell a real refusal from a blind one.
 	unparsed int
+	// account is the connecting account as the first privilege line names it
+	// after TO, quotes included and nothing after it (MariaDB appends the
+	// password hash there); "" when no line could be read for it.
+	account string
 }
 
 // grantedGlobally reports whether p was granted ON *.*, directly or via
@@ -247,6 +291,9 @@ func (g *grantSet) add(line string) {
 		g.unparsed++
 		return
 	}
+	if g.account == "" {
+		g.account = grantAccount(line)
+	}
 	if obj = strings.TrimSpace(obj[:ti]); obj == "*.*" {
 		for _, n := range names {
 			g.global[n] = true
@@ -256,6 +303,53 @@ func (g *grantSet) add(line string) {
 	for _, n := range names {
 		g.scoped[n] = append(g.scoped[n], obj)
 	}
+}
+
+// grantAccount is the account a privilege line grants to, verbatim: the
+// quoted user, @, the quoted host, and nothing after (WITH GRANT OPTION,
+// REQUIRE, MariaDB's IDENTIFIED BY PASSWORD '<hash>'). "" for a line that has
+// no ON clause (a role membership) or an account this cannot read whole.
+func grantAccount(line string) string {
+	oi := strings.Index(line, " ON ")
+	if oi < 0 {
+		return ""
+	}
+	rest := line[oi+len(" ON "):]
+	ti := strings.Index(rest, " TO ")
+	if ti < 0 {
+		return ""
+	}
+	s := rest[ti+len(" TO "):]
+	user := quotedLen(s)
+	if user == 0 || user >= len(s) || s[user] != '@' {
+		return ""
+	}
+	host := quotedLen(s[user+1:])
+	if host == 0 {
+		return ""
+	}
+	return s[:user+1+host]
+}
+
+// quotedLen is the length of the quoted identifier or string s starts with,
+// closing quote included: `...` with “ inside, or '...' with ” or \'
+// inside. 0 when s does not start with one or it never closes.
+func quotedLen(s string) int {
+	if s == "" || (s[0] != '`' && s[0] != '\'') {
+		return 0
+	}
+	q := s[0]
+	for i := 1; i < len(s); i++ {
+		switch {
+		case q == '\'' && s[i] == '\\':
+			i++
+		case s[i] == q && i+1 < len(s) && s[i+1] == q:
+			i++
+		case s[i] == q:
+			return i + 1
+		}
+	}
+	return 0
 }
 
 // addRevoke parses "REVOKE <privs> ON <object> FROM <user>".
@@ -476,12 +570,21 @@ func checkPrivilegesDB(ctx context.Context, db *sql.DB, mode baseline.LockMode, 
 		// Name ftwrl when the user could actually run it: an operator who copied
 		// an RDS recipe onto a self-hosted source holding global RELOAD would
 		// otherwise be steered straight past the point-consistent mode they have.
+		// ftwrl also needs BACKUP_ADMIN on MySQL/Percona 8.0+ (#1986): RELOAD
+		// alone does not make it available there, and a version that cannot be
+		// read makes no claim at all.
 		alt := remedy.noCheckModes()
 		if g.grantedGlobally("RELOAD") || g.grantedGlobally("FLUSH_TABLES") {
-			alt = " — this user already holds RELOAD/FLUSH_TABLES globally, so " +
-				remedy.forMode(baseline.LockModeFTWRL) + " is available and is also point-consistent" + alt
+			needBA, verErr := requiresBackupAdmin(ctx, db)
+			if verErr != nil {
+				slog.Debug("lock-all refusal: the source version could not be read, so it does not say whether ftwrl is available", "error", verErr)
+			}
+			if verErr == nil && (!needBA || g.grantedGlobally("BACKUP_ADMIN")) {
+				alt = " — this user already holds RELOAD/FLUSH_TABLES globally, so " +
+					remedy.forMode(baseline.LockModeFTWRL) + " is available and is also point-consistent" + alt
+			}
 		}
-		return fmt.Errorf("lock-all baseline mode requires the LOCK TABLES privilege, which the current user does not"+
+		return missingPrivileges(g, mode, []string{"LOCK TABLES"}, "lock-all baseline mode requires the LOCK TABLES privilege, which the current user does not"+
 			" have at any scope — grant it, e.g. GRANT LOCK TABLES ON *.* TO '<user>'@'%%' (a grant on just the dumped"+
 			" schema also works, since LOCK_ALL locks the exported tables)%s%s", roleCaveat, alt)
 	}
@@ -532,9 +635,10 @@ func checkPrivilegesDB(ctx context.Context, db *sql.DB, mode baseline.LockMode, 
 
 	switch {
 	case !hasFlush && missingBackupAdmin:
-		return ftwrlPrivilegesMissing("point-consistent baseline mode (the default) requires the source DB user to have BOTH the"+
-			" BACKUP_ADMIN and the RELOAD (or FLUSH_TABLES) privilege (MySQL/Percona 8.0+); the current user has"+
-			" neither — grant both, e.g. GRANT BACKUP_ADMIN, RELOAD ON *.* TO '<user>'@'%%'%s%s", alternatives, roleCaveat)
+		return missingPrivileges(g, mode, []string{"RELOAD", "BACKUP_ADMIN"},
+			"point-consistent baseline mode requires the source DB user to have BOTH the"+
+				" BACKUP_ADMIN and the RELOAD (or FLUSH_TABLES) privilege (MySQL/Percona 8.0+); the current user has"+
+				" neither — grant both, e.g. GRANT BACKUP_ADMIN, RELOAD ON *.* TO '<user>'@'%%'%s%s", alternatives, roleCaveat)
 	case !hasFlush:
 		// Reached when BACKUP_ADMIN is present (or not required) but RELOAD is
 		// not. On MySQL 8.0+ that half-grant is the #800 crash input, and it is
@@ -546,11 +650,11 @@ func checkPrivilegesDB(ctx context.Context, db *sql.DB, mode baseline.LockMode, 
 			crashNote = " — granting BACKUP_ADMIN alone is the dangerous half-grant:" +
 				" the pinned mydumper build SEGFAULTS on it rather than failing cleanly, which is why this check runs first"
 		}
-		return ftwrlPrivilegesMissing("point-consistent baseline mode requires the RELOAD (or FLUSH_TABLES) privilege, which the"+
+		return missingPrivileges(g, mode, []string{"RELOAD"}, "point-consistent baseline mode requires the RELOAD (or FLUSH_TABLES) privilege, which the"+
 			" current user has at neither name — grant it, e.g. GRANT RELOAD ON *.* TO '<user>'@'%%'%s%s%s",
 			crashNote, alternatives, roleCaveat)
 	default:
-		return ftwrlPrivilegesMissing("point-consistent baseline mode requires the BACKUP_ADMIN privilege (MySQL/Percona 8.0+) in"+
+		return missingPrivileges(g, mode, []string{"BACKUP_ADMIN"}, "point-consistent baseline mode requires the BACKUP_ADMIN privilege (MySQL/Percona 8.0+) in"+
 			" addition to RELOAD/FLUSH_TABLES, which the current user already has — grant it, e.g."+
 			" GRANT BACKUP_ADMIN ON *.* TO '<user>'@'%%'. NOTE: on managed MySQL such as RDS this grant is REFUSED"+
 			" outright, so ftwrl cannot work there%s%s", alternatives, roleCaveat)

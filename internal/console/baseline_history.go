@@ -78,6 +78,9 @@ type BaselineRunRecord struct {
 	RefusedTables        []RefusedTable `json:"refused_tables,omitempty"`
 	RefusedTablesOmitted int            `json:"refused_tables_omitted,omitempty"`
 	Error                string         `json:"error,omitempty"`
+	// Failure: see BaselineStatus.Failure. Absent in records written before
+	// #1986, which the page draws as the generic card.
+	Failure *SnapshotFailure `json:"failure,omitempty"`
 	// Why is the reason a scheduled run was a FULL backup rather than an
 	// update, as decided when it ran (#1604); WhyCode is BackupWhyCode of
 	// it, fixed at write time. Empty on updates and manual backups.

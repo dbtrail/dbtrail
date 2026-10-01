@@ -299,8 +299,10 @@ func TestFirstRunStaysUntilASnapshotExists(t *testing.T) {
 				t.Fatalf("states = %s, complete = %v, want %s and %v (%+v)", states.String(), got.Complete, c.states, c.complete, got.Steps)
 			}
 			last := got.Steps[len(got.Steps)-1]
-			if c.detail != "" && !strings.Contains(last.Detail, c.detail) {
-				t.Errorf("snapshot step detail = %q, want it to carry %q", last.Detail, c.detail)
+			// A failed snapshot carries the location check error in Note,
+			// beside the folded error, since #1986: read the two together.
+			if said := strings.TrimSpace(last.Detail + " " + last.Note); c.detail != "" && !strings.Contains(said, c.detail) {
+				t.Errorf("snapshot step detail = %q, want it to carry %q", said, c.detail)
 			}
 			if last.Name == "Take the first full DB snapshot" && last.State == firstRunDone && (last.Detail != "" || last.Fix != "") {
 				t.Errorf("a done snapshot step still carries a reason or a fix: %+v", last)
