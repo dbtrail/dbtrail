@@ -107,13 +107,14 @@ func TestConnectFindingsSayEveryKind(t *testing.T) {
   const out = {};
   for (const [k, c] of Object.entries(` + string(in) + `)) {
     const p = connectFindingParts(c);
-    out[k] = p ? { ...p, banned: bannedHits(p.text + " " + (p.note || "")).map((h) => h.word), words: countWords(p.text + " " + (p.note || "")) } : null;
+    out[k] = p ? { ...p, inLight: (connectFindingParts(c, true) || {}).text, banned: bannedHits(p.text + " " + (p.note || "")).map((h) => h.word), words: countWords(p.text + " " + (p.note || "")) } : null;
   }
   console.log(JSON.stringify(out));
 })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
 `
 	var got map[string]*struct {
 		Text, Code, Rem, Note string
+		InLight               string
 		Banned                []string
 		Words                 int
 	}
@@ -136,6 +137,17 @@ func TestConnectFindingsSayEveryKind(t *testing.T) {
 		}
 		if p.Words > 40 {
 			t.Errorf("%s: %d words, over the 40 a step allows: %q", k, p.Words, p.Text)
+		}
+	}
+	// Under the keys light the card starts at what to run, since the light's
+	// title says what is wrong; the notice after a start has no title and
+	// keeps the reason. Every other kind reads the same in both places.
+	if pk := got[doctor.KindNoPrimaryKey]; pk.InLight != "Run this on the server to add one:" || !strings.Contains(pk.Text, "without a primary key") {
+		t.Errorf("no primary key: under the light %q, in the notice %q", pk.InLight, pk.Text)
+	}
+	for _, k := range doctor.Kinds() {
+		if p := got[k]; p != nil && k != doctor.KindNoPrimaryKey && p.InLight != p.Text {
+			t.Errorf("%s: under a light %q, elsewhere %q; only the key card drops its first sentence", k, p.InLight, p.Text)
 		}
 	}
 	if got["unknown"] != nil {
@@ -177,9 +189,12 @@ const connectHarnessJS = `
 ctx.crypto = require("crypto").webcrypto;
 const walk = (n, f) => { f(n); for (const c of n.children || []) if (c && c.nodeType === 1) walk(c, f); };
 const matches = (n, sel) => {
-  const m = /^([a-z]*)(?:#([\w-]+))?(?:\.([\w-]+))?(?:\[([\w-]+)(?:=([\w-]+))?\])?$/.exec(sel);
+  const m = /^([a-z]*)(?:#([\w-]+))?(?:\.([\w-]+))?(?:\[([\w-]+)(?:=(?:"([^"]*)"|([\w-]+)))?\])?$/.exec(sel);
   if (!m) throw new Error("harness selector not supported: " + sel);
-  const [, tag, id, cls, attr, val] = m;
+  const [, tag, id, cls, attr, quoted, bare] = m;
+  // A browser throws on an unquoted value that is not a CSS identifier.
+  if (bare !== undefined && !/^-?[a-zA-Z_][\w-]*$/.test(bare)) throw new Error("a browser rejects this selector, quote the value: " + sel);
+  const val = quoted !== undefined ? quoted : bare;
   if (tag && n.tag !== tag) return false;
   if (id && n.attrs.id !== id) return false;
   if (cls && !(" " + n.className + " ").includes(" " + cls + " ")) return false;
@@ -229,7 +244,7 @@ const show = (caps) => { setCaps(caps); vm.runInContext("showServerForm(null)", 
 const texts = (f) => { const out = []; walk(f, (n) => { if (n.tag !== "pre" && n._text) out.push(n._text); if (n.attrs && n.attrs.placeholder) out.push(n.attrs.placeholder); if (n.attrs && n.attrs["aria-label"]) out.push(n.attrs["aria-label"]); }); return out; };
 const flush = async (n = 1) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
 const step = (f) => f.dataset.step;
-const shown = (f, n) => !f.querySelector("div[data-cx-step=" + n + "]").hidden;
+const shown = (f, n) => !f.querySelector('div[data-cx-step="' + n + '"]').hidden;
 const button = (f) => f.querySelector("button[type=submit]").textContent;
 const lights = (f) => f.querySelector("ol#connect-lights").children.map((li) => li.className.replace("cx-light ", "") + ":" + li.children[1]._text);
 const lightLabels = (f) => f.querySelector("ol#connect-lights").children.map((li) => li.attrs["aria-label"]);

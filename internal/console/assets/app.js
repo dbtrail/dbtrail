@@ -14399,7 +14399,7 @@ function drawConnectLights(form, report, started) {
     const li = el("li", { class: "cx-light " + l.status, "aria-label": l.label + ": " + LIGHT_STATE[l.status] },
       el("span", { class: "cx-dot", "aria-hidden": "true", text: l.status === "ok" ? "✓" : l.status === "wait" ? "" : "!" }),
       el("span", { class: "cx-label", text: l.label }));
-    if (l.checks.length && l.status !== "ok" && !started) li.append(connectFindings(l.checks));
+    if (l.checks.length && l.status !== "ok" && !started) li.append(connectFindings(l.checks, true));
     return li;
   }));
   // The fix is what the person came for: bring step 3 into view from its
@@ -14673,7 +14673,7 @@ const BINLOG_SETTING_WORDS = {
 // the only place the answer is (the address found on this machine). kind ""
 // or one this page does not know returns null: the caller shows the check's
 // own card instead, so a finding is never dropped.
-function connectFindingParts(c) {
+function connectFindingParts(c, inLight) {
   const subjects = c.subjects || [];
   const statements = c.statements || [];
   switch (c.kind) {
@@ -14709,7 +14709,10 @@ function connectFindingParts(c) {
       const byHand = subjects.filter((_, i) => !statements[i]);
       const pk = c.kind === "no_primary_key";
       return {
-        text: pk ? "DBTrail cannot capture a table without a primary key." + (code ? " Run this on the server to add one:" : "")
+        // Under the keys light its title already says what is wrong, so the
+        // card starts at what to run; the notice after a start has no title.
+        text: pk ? (code && inLight ? "Run this on the server to add one:"
+          : "DBTrail cannot capture a table without a primary key." + (code ? " Run this on the server to add one:" : ""))
           : "DBTrail captures InnoDB tables only." + (code ? " Run this on the server at a quiet moment, since it rewrites each table:" : ""),
         code,
         note: byHand.length ? (pk ? "Add a primary key by hand to: " : "Convert by hand: ") + byHand.join(", ") : "",
@@ -14719,10 +14722,10 @@ function connectFindingParts(c) {
   return null;
 }
 
-function connectFindings(checks) {
+function connectFindings(checks, inLight) {
   const box = el("div", { class: "doctor-cards" });
   (checks || []).forEach((c) => {
-    const p = connectFindingParts(c);
+    const p = connectFindingParts(c, inLight);
     if (!p) { box.append(doctorCards([c])); return; }
     const card = el("div", { class: "doctor-card " + (c.status === "warn" ? "warn" : "fail") });
     card.append(el("p", { text: p.text }));
