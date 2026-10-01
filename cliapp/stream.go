@@ -204,5 +204,8 @@ func streamSourceJobInfo(flavor string) ext.SourceJobInfo {
 		SourceDSN: strmSourceDSN,
 		IndexDSN:  strmIndexDSN,
 		Flavor:    flavor,
+		// --ssl-* configure the source connection too, so a job opens the
+		// source with the TLS this stream's capture uses.
+		SourceTLS: ext.SourceTLS{Mode: strmSSLMode, CA: strmSSLCA, Cert: strmSSLCert, Key: strmSSLKey},
 	}
 }

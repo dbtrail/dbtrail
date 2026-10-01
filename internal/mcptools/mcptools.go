@@ -75,6 +75,10 @@ type Target struct {
 	// it is handed to extension tools (ext/mcpext), which may need the live
 	// source. Empty means "no source available", not an error.
 	SourceDSN string
+	// SourceTLS is the TLS capture uses for SourceDSN, handed to extension
+	// tools with it. Zero means "preferred" (the standalone server, whose
+	// source comes from the environment with no TLS settings of its own).
+	SourceTLS ext.SourceTLS
 	// CloseDB is true when the connection was opened for this call and the
 	// handler must close it (standalone). False when the connection is owned
 	// by a long-lived pool (console connManager bundles).
@@ -436,6 +440,7 @@ func extToolContext(cfg Config) mcpext.ToolContextFunc {
 			DB:        t.DB,
 			DBName:    t.DBName,
 			SourceDSN: t.SourceDSN,
+			SourceTLS: t.SourceTLS,
 			Close:     closeFn,
 		}, nil
 	}

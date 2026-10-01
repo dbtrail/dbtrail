@@ -44,6 +44,12 @@ type TLSSettingsError struct {
 func (e *TLSSettingsError) Error() string { return e.flagText }
 func (e *TLSSettingsError) Unwrap() error { return e.Err }
 
+// DefaultSourceSSLMode is the TLS mode a source connection uses when nothing
+// sets one: try TLS, and fall back to cleartext only when the server offers
+// no TLS at all. Every layer that fills an empty mode reads it here, so the
+// console registry and the extension seam cannot drift apart.
+const DefaultSourceSSLMode = "preferred"
+
 // ValidSSLMode reports whether mode is one BuildTLSConfig accepts.
 func ValidSSLMode(mode string) bool {
 	switch mode {

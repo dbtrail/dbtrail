@@ -14,6 +14,11 @@ type SourceJobInfo struct {
 	SourceDSN string
 	IndexDSN  string
 	Flavor    string
+	// SourceTLS is the TLS capture uses for SourceDSN (see SourceTLS; zero
+	// means "preferred"). Open the source with OpenSource(SourceDSN,
+	// SourceTLS) so a source that only accepts encrypted connections is
+	// reached the way capture reaches it.
+	SourceTLS SourceTLS
 }
 
 // sourceJobs is empty in the OSS build — RunSourceJobs is a no-op.

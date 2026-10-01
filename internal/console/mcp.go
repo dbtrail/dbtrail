@@ -339,9 +339,11 @@ func (s *Server) newMCPServer(id string, pol *ext.AccessPolicy) *mcp.Server {
 			// the registry, never from a tool argument. Empty for the boot
 			// entry and for a selection with no source configured.
 			sourceDSN := ""
+			var sourceTLS ext.SourceTLS
 			serverName := rid
 			if e, ok := s.cm.reg.Get(rid); ok {
 				sourceDSN = e.SourceDSN
+				sourceTLS = ext.SourceTLS(e.SourceSSL())
 				serverName = e.Name
 			}
 			if sel := mcptools.RequestedServer(ctx); sel != "" && !pol.Allows(ext.PermServersRead) {
@@ -361,6 +363,7 @@ func (s *Server) newMCPServer(id string, pol *ext.AccessPolicy) *mcp.Server {
 				DB:         b.db,
 				DBName:     b.dbName,
 				SourceDSN:  sourceDSN,
+				SourceTLS:  sourceTLS,
 				ServerID:   serverID,
 				ServerName: serverName,
 				// Time travel (#953): the bundle's own lookup, NOT

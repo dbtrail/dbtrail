@@ -601,7 +601,7 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 	// startJobs launches the extension source jobs (see below) with the
 	// flavor capture runs as.
 	startJobs := func(f string) {
-		ext.RunSourceJobs(jobCtx, ext.SourceJobInfo{SourceDSN: e.SourceDSN, IndexDSN: e.DSN, Flavor: f})
+		ext.RunSourceJobs(jobCtx, entrySourceJobInfo(e, f))
 	}
 	switch flavor {
 	case console.FlavorPostgres:

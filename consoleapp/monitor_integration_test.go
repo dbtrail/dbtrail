@@ -103,7 +103,7 @@ func TestIntegrationMonitorRunsExtSourceJob(t *testing.T) {
 	var jobCtx context.Context
 	select {
 	case got := <-infoCh:
-		want := ext.SourceJobInfo{SourceDSN: entry.SourceDSN, IndexDSN: entry.DSN, Flavor: console.FlavorMySQL}
+		want := ext.SourceJobInfo{SourceDSN: entry.SourceDSN, IndexDSN: entry.DSN, Flavor: console.FlavorMySQL, SourceTLS: ext.SourceTLS{Mode: "preferred"}}
 		if got != want {
 			t.Fatalf("source job info = %+v, want %+v", got, want)
 		}
@@ -257,7 +257,7 @@ func TestIntegrationMonitorExtSourceJobPGFlavor(t *testing.T) {
 
 	select {
 	case got := <-infoCh:
-		want := ext.SourceJobInfo{SourceDSN: entry.SourceDSN, IndexDSN: entry.DSN, Flavor: console.FlavorPostgres}
+		want := ext.SourceJobInfo{SourceDSN: entry.SourceDSN, IndexDSN: entry.DSN, Flavor: console.FlavorPostgres, SourceTLS: ext.SourceTLS{Mode: "preferred"}}
 		if got != want {
 			t.Fatalf("pg source job info = %+v, want %+v", got, want)
 		}

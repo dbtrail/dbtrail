@@ -635,10 +635,51 @@ func TestRunBaselinePruneCycle(t *testing.T) {
 // flavor is the one the main stream resolved (OnFlavorResolved) and is carried
 // verbatim: there is no "mysql" fallback left to guess with.
 func TestMainSourceJobInfo(t *testing.T) {
+	orig := upSSLMode
+	t.Cleanup(func() { upSSLMode = orig })
+	upSSLMode = "required"
 	got := mainSourceJobInfo("src", "idx", "mariadb")
-	want := ext.SourceJobInfo{SourceDSN: "src", IndexDSN: "idx", Flavor: "mariadb"}
+	want := ext.SourceJobInfo{SourceDSN: "src", IndexDSN: "idx", Flavor: "mariadb", SourceTLS: ext.SourceTLS{Mode: "required"}}
 	if got != want {
 		t.Errorf("mariadb flavor: got %+v, want %+v", got, want)
+	}
+}
+
+// The boot server's jobs get the TLS the daemon's own capture uses, from
+// --ssl-* (bootSourceSSL). Distinct value per field, so a dropped or swapped
+// field fails.
+func TestMainSourceJobInfo_BootTLSFromSSLFlags(t *testing.T) {
+	orig := [4]string{upSSLMode, upSSLCA, upSSLCert, upSSLKey}
+	t.Cleanup(func() { upSSLMode, upSSLCA, upSSLCert, upSSLKey = orig[0], orig[1], orig[2], orig[3] })
+	upSSLMode, upSSLCA, upSSLCert, upSSLKey = "verify-identity", "/b/ca.pem", "/b/cert.pem", "/b/key.pem"
+
+	got := mainSourceJobInfo("src", "idx", "mysql").SourceTLS
+	want := ext.SourceTLS{Mode: "verify-identity", CA: "/b/ca.pem", Cert: "/b/cert.pem", Key: "/b/key.pem"}
+	if got != want {
+		t.Fatalf("boot SourceTLS = %+v, want %+v", got, want)
+	}
+}
+
+// A registry source's jobs get that entry's TLS: no ssl_mode reads as
+// preferred (the zero value's meaning), disabled stays disabled, and two
+// entries never share settings.
+func TestEntrySourceJobInfo_CarriesTheEntrysTLS(t *testing.T) {
+	a := console.ServerEntry{SourceDSN: "a-src", DSN: "a-idx", SSLMode: "verify-ca", SSLCA: "/a/ca.pem", SSLCert: "/a/cert.pem", SSLKey: "/a/key.pem"}
+	b := console.ServerEntry{SourceDSN: "b-src", DSN: "b-idx", SSLMode: "disabled"}
+	c := console.ServerEntry{SourceDSN: "c-src", DSN: "c-idx"}
+
+	for _, tc := range []struct {
+		e    console.ServerEntry
+		want ext.SourceJobInfo
+	}{
+		{a, ext.SourceJobInfo{SourceDSN: "a-src", IndexDSN: "a-idx", Flavor: "mysql",
+			SourceTLS: ext.SourceTLS{Mode: "verify-ca", CA: "/a/ca.pem", Cert: "/a/cert.pem", Key: "/a/key.pem"}}},
+		{b, ext.SourceJobInfo{SourceDSN: "b-src", IndexDSN: "b-idx", Flavor: "mysql", SourceTLS: ext.SourceTLS{Mode: "disabled"}}},
+		{c, ext.SourceJobInfo{SourceDSN: "c-src", IndexDSN: "c-idx", Flavor: "mysql", SourceTLS: ext.SourceTLS{Mode: "preferred"}}},
+	} {
+		if got := entrySourceJobInfo(tc.e, "mysql"); got != tc.want {
+			t.Errorf("entry %s: got %+v, want %+v", tc.e.SourceDSN, got, tc.want)
+		}
 	}
 }
 

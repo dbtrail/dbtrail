@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **Extensions that open the source now get its TLS settings** (#1997). The
+  seams that hand a source to an extension (`ext.SourceJobInfo`,
+  `ext.ConsoleQueryContext`, `mcpext.ToolContext`) carried only the source
+  DSN, so an extension opening it connected in cleartext and was refused by a
+  source that only accepts encrypted connections (error 3159, the default on a
+  fresh Amazon RDS for MariaDB 11.8) even where capture itself connected fine.
+  Each now also carries `SourceTLS` (the registry entry's `ssl_*` settings, or
+  `watch`/`stream`'s `--ssl-*` for the source they were started with), and
+  `ext.OpenSource(dsn, tls)` opens the source exactly the way capture does.
+  Additive: the zero value means `preferred`, the same default as an entry
+  with no `ssl_mode`, and a `tls=` in the DSN still wins.
 ## [0.93.0] - 2026-10-01
 ### Changed
 - **Breaking for scripts that parse `bintrail status --baseline-dir`**: the

@@ -49,6 +49,10 @@ type ConsoleQueryContext struct {
 	// is populated even when the index is unreachable (the DB-nil case above) —
 	// that is what keeps a source-only view working during an index outage.
 	SourceDSN string
+	// SourceTLS is the selected entry's source TLS (its ssl_* settings), the
+	// TLS capture uses for SourceDSN; zero means "preferred". Open the source
+	// with OpenSource(SourceDSN, SourceTLS). Populated whenever SourceDSN is.
+	SourceTLS SourceTLS
 }
 
 // ConsoleQueryContextFunc resolves the ConsoleQueryContext for the selected

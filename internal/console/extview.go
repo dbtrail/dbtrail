@@ -23,8 +23,10 @@ func (s *Server) consoleQueryContext(r *http.Request) (ext.ConsoleQueryContext, 
 	// index is unreachable or not yet created. "not found" is not an error: an
 	// empty DSN means "no source", which the provider treats as not-configured.
 	sourceDSN := ""
+	var sourceTLS ext.SourceTLS
 	if e, ok := s.selectedEntry(r); ok {
 		sourceDSN = e.SourceDSN
+		sourceTLS = ext.SourceTLS(e.SourceSSL())
 	}
 
 	b, err := s.resolve(r)
@@ -46,12 +48,14 @@ func (s *Server) consoleQueryContext(r *http.Request) (ext.ConsoleQueryContext, 
 				return nil, nil, err
 			},
 			SourceDSN: sourceDSN,
+			SourceTLS: sourceTLS,
 		}, nil
 	}
 	return ext.ConsoleQueryContext{
 		DB:        b.db,
 		Fetch:     s.consoleFetch(b),
 		SourceDSN: sourceDSN,
+		SourceTLS: sourceTLS,
 	}, nil
 }
 

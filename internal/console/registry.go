@@ -337,7 +337,7 @@ func warnUnusableSSLModes(path string, entries []ServerEntry) {
 // DefaultSourceSSLMode is the TLS mode a source connection uses when its
 // entry sets none: try TLS, and fall back to cleartext (with a warning) only
 // when the server offers no TLS at all.
-const DefaultSourceSSLMode = "preferred"
+const DefaultSourceSSLMode = config.DefaultSourceSSLMode
 
 // SourceSSL is the TLS the SOURCE connection uses: the entry's ssl_* fields,
 // with an empty ssl_mode meaning DefaultSourceSSLMode. Capture and every
