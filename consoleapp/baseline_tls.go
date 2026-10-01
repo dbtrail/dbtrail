@@ -134,7 +134,16 @@ var caBundlePaths = []string{
 
 // systemCABundle returns the first CA bundle file present, "" for none. A
 // seam, so the tests do not depend on the host.
-var systemCABundle = func() string { return findCABundle(caBundlePaths) }
+var systemCABundle = func() string {
+	// SSL_CERT_FILE first: Go's own system roots honor it, so mydumper then
+	// checks against the same CAs the Go side did.
+	if f := os.Getenv("SSL_CERT_FILE"); f != "" {
+		if b := findCABundle([]string{f}); b != "" {
+			return b
+		}
+	}
+	return findCABundle(caBundlePaths)
+}
 
 func findCABundle(paths []string) string {
 	for _, p := range paths {
@@ -176,7 +185,9 @@ func preferredDumpTLS(ctx context.Context, dsn string, ssl config.SSL, t dumpTLS
 // between this check and the dump fails the dump, loudly. A build whose
 // client library could not be read gets the check but no pin, since its
 // library may not know ssl-fp; an active attacker between the check and the
-// dump is then not stopped. A seam, so the tests need no server.
+// dump is then not stopped. ctx is not passed down: the connection is bounded
+// by the DSN's own timeout (config.ConnectWithTLS). A seam, so the tests need
+// no server.
 var sourceTLSPin = func(ctx context.Context, dsn string, t dumpTLS) (string, error) {
 	mode := "required"
 	switch t.verify {
@@ -190,24 +201,14 @@ var sourceTLSPin = func(ctx context.Context, dsn string, t dumpTLS) (string, err
 	if err != nil {
 		return "", err
 	}
-	var leaf []byte
-	verify := cfg.VerifyConnection
-	cfg.VerifyConnection = func(cs tls.ConnectionState) error {
-		if verify != nil {
-			if err := verify(cs); err != nil {
-				return err
-			}
-		}
-		if len(cs.PeerCertificates) > 0 {
-			leaf = cs.PeerCertificates[0].Raw
-		}
-		return nil
-	}
+	leaf := captureLeaf(cfg)
 	// The DSN's own tls= was already folded into t; it must not replace the
-	// mandatory config here (config.applyTLS lets a DSN's tls= win).
+	// mandatory config here (config.applyTLS lets a DSN's tls= win), and its
+	// allowFallbackToPlaintext must not turn the mandatory TLS into a
+	// silent cleartext connection.
 	plain := dsn
-	if c, err := mysql.ParseDSN(dsn); err == nil && (c.TLSConfig != "" || c.TLS != nil) {
-		c.TLSConfig, c.TLS = "", nil
+	if c, err := mysql.ParseDSN(dsn); err == nil && (c.TLSConfig != "" || c.TLS != nil || c.AllowFallbackToPlaintext) {
+		c.TLSConfig, c.TLS, c.AllowFallbackToPlaintext = "", nil, false
 		plain = c.FormatDSN()
 	}
 	db, err := config.ConnectWithTLS(plain, cfg)
@@ -218,10 +219,33 @@ var sourceTLSPin = func(ctx context.Context, dsn string, t dumpTLS) (string, err
 		return "", err
 	}
 	db.Close()
-	if leaf == nil {
-		return "", errors.New("the source's TLS handshake presented no certificate")
+	if *leaf == nil {
+		// Not a certificate problem: no TLS handshake happened at all (the
+		// fallback is turned off above, so this is a driver surprise).
+		return "", errors.New("the check connection to the source was not encrypted: no TLS handshake happened, " +
+			"so the full read cannot be pinned to the server's certificate")
 	}
-	return tlsFingerprint(leaf), nil
+	return tlsFingerprint(*leaf), nil
+}
+
+// captureLeaf makes cfg record the certificate the server presents (the
+// LEAF, PeerCertificates[0], never an intermediate), after any check cfg
+// already does. The returned pointer is filled by the handshake.
+func captureLeaf(cfg *tls.Config) *[]byte {
+	leaf := new([]byte)
+	verify := cfg.VerifyConnection
+	cfg.VerifyConnection = func(cs tls.ConnectionState) error {
+		if verify != nil {
+			if err := verify(cs); err != nil {
+				return err
+			}
+		}
+		if len(cs.PeerCertificates) > 0 {
+			*leaf = cs.PeerCertificates[0].Raw
+		}
+		return nil
+	}
+	return leaf
 }
 
 // tlsFingerprint is the SHA-1 of a DER certificate, as Connector/C's ssl-fp
@@ -329,9 +353,10 @@ func mydumperTLSHint(output string, t dumpTLS) string {
 		return "mydumper could not connect encrypted: the server does not offer encrypted (TLS) connections, and this read " +
 			"requires them. Turn TLS on in the server's configuration, or set this server's TLS mode to preferred"
 	case strings.Contains(low, "fingerprint"):
-		return "the server presented a different certificate to mydumper than to DBTrail's check a moment before (it was " +
-			"replaced in between, or something between DBTrail and the server answered). Run the snapshot again; if it " +
-			"repeats, check the network path to the server"
+		return "the server presented a different certificate to mydumper than to DBTrail's check a moment before. " +
+			"If its certificate was just replaced, run the snapshot again. If it repeats, the source address may reach " +
+			"several servers with different certificates (a load balancer, a reader endpoint or round-robin DNS): point " +
+			"the source at one server. Otherwise something between DBTrail and the server answered: check the network path"
 	case strings.Contains(low, "certificate"):
 		hint := "mydumper did not trust the server's certificate: it is not signed by a CA in " + t.ca
 		if t.verify == "identity" {

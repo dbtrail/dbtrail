@@ -5,11 +5,13 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -634,5 +636,151 @@ func TestRunMydumper_TLSFailureIsWorded(t *testing.T) {
 	}
 	if i, j := strings.Index(err.Error(), "does not offer encrypted"), strings.Index(err.Error(), "; output:"); i < 0 || j < i {
 		t.Fatalf("err = %v, want the worded hint ahead of the output", err)
+	}
+}
+
+// A build whose client library is unknown is checked but not pinned: the
+// run says so, not only the log.
+func TestRunMydumper_UnpinnedReadIsNoted(t *testing.T) {
+	fakeConsoleMydumper(t, printsVersion("mydumper v1.0.3-1"))
+	stubPreflight(t, nil)
+	stubSourceTLSPin(t, "AA", nil)
+	var notes []string
+	ctx := withTransportNote(context.Background(), func(n string) { notes = append(notes, n) })
+	if err := runMydumper(ctx, "u:p@tcp(127.0.0.1:1)/", config.SSL{Mode: "required"}, []string{"appdb"},
+		filepath.Join(t.TempDir(), "out"), baseline.LockModeNoLock, lockModeFromEnv); err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != 1 || !strings.Contains(notes[0], "Encrypted, not pinned") {
+		t.Fatalf("notes = %q, want the not-pinned note", notes)
+	}
+}
+
+// The fingerprint hint names the innocent causes too.
+func TestMydumperTLSHint_FingerprintNamesInnocentCauses(t *testing.T) {
+	h := mydumperTLSHint("Error connection to database: TLS/SSL error: Fingerprint verification of server certificate failed", dumpTLS{encrypt: true})
+	for _, w := range []string{"load balancer", "one server", "again"} {
+		if !strings.Contains(h, w) {
+			t.Errorf("hint %q lacks %q", h, w)
+		}
+	}
+}
+
+// SSL_CERT_FILE, which Go's own system roots honor, is the bundle mydumper
+// gets too.
+func TestSystemCABundle_SSLCertFileFirst(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "roots.pem")
+	if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SSL_CERT_FILE", p)
+	if got := systemCABundle(); got != p {
+		t.Errorf("systemCABundle = %q, want SSL_CERT_FILE %q", got, p)
+	}
+}
+
+// The pin is the LEAF certificate's, not an intermediate's: a real TLS
+// handshake with a two-level chain.
+func TestCaptureLeaf_TakesTheServerCertificate(t *testing.T) {
+	root, rootKey := mkCert(t, "root", nil, nil, true)
+	inter, interKey := mkCert(t, "inter", root, rootKey, true)
+	leaf, leafKey := mkCert(t, "leaf", inter, interKey, false)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{{
+		Certificate: [][]byte{leaf.Raw, inter.Raw}, PrivateKey: leafKey}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			_ = c.(*tls.Conn).Handshake()
+			c.Close()
+		}
+	}()
+	cfg := &tls.Config{InsecureSkipVerify: true} //nolint:gosec // test
+	got := captureLeaf(cfg)
+	c, err := tls.Dial("tcp", ln.Addr().String(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	if tlsFingerprint(*got) != tlsFingerprint(leaf.Raw) {
+		t.Fatalf("pinned %s, want the leaf's %s (intermediate is %s)", tlsFingerprint(*got), tlsFingerprint(leaf.Raw), tlsFingerprint(inter.Raw))
+	}
+}
+
+func mkCert(t *testing.T, cn string, parent *x509.Certificate, parentKey *ecdsa.PrivateKey, ca bool) (*x509.Certificate, *ecdsa.PrivateKey) {
+	t.Helper()
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: cn},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: ca, BasicConstraintsValid: true,
+		KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign}
+	if parent == nil {
+		parent, parentKey = tmpl, k
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, &k.PublicKey, parentKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, k
+}
+
+// fakeMySQLWithoutTLS answers every connection with a MySQL handshake that
+// does not offer TLS (no CLIENT_SSL capability), then closes.
+func fakeMySQLWithoutTLS(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	var caps uint32 = 0x1 | 0x200 | 0x2000 | 0x8000 | 0x80000 // long password, protocol 41, transactions, secure conn, plugin auth
+	var p []byte
+	p = append(p, 10)
+	p = append(p, "8.0.0-fake\x00"...)
+	p = append(p, 1, 0, 0, 0)
+	p = append(p, "abcdefgh"...)
+	p = append(p, 0, byte(caps), byte(caps>>8), 33, 2, 0, byte(caps>>16), byte(caps>>24), 21)
+	p = append(p, make([]byte, 10)...)
+	p = append(p, "ijklmnopqrst\x00"...)
+	p = append(p, "mysql_native_password\x00"...)
+	pkt := append([]byte{byte(len(p)), byte(len(p) >> 8), byte(len(p) >> 16), 0}, p...)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = c.Write(pkt)
+			buf := make([]byte, 4096)
+			_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+			_, _ = c.Read(buf)
+			c.Close()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// The mandatory-TLS check refuses a server that offers no TLS, worded, and a
+// DSN that allows a plaintext fallback does not turn it into one.
+func TestSourceTLSPin_RefusesAServerWithoutTLS(t *testing.T) {
+	addr := fakeMySQLWithoutTLS(t)
+	for _, dsn := range []string{
+		"u:p@tcp(" + addr + ")/",
+		"u:p@tcp(" + addr + ")/?allowFallbackToPlaintext=true",
+		"u:p@tcp(" + addr + ")/?tls=preferred",
+	} {
+		_, err := realSourceTLSPin(context.Background(), dsn, dumpTLS{encrypt: true})
+		if err == nil || !strings.Contains(err.Error(), "does not offer encrypted") {
+			t.Errorf("%s: err = %v, want the worded no-TLS refusal", dsn, err)
+		}
 	}
 }

@@ -532,7 +532,7 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
   against the host's system CA bundle (the first of
   `/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`,
   `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`,
-  `/etc/ssl/ca-bundle.pem`, `/etc/ssl/cert.pem`; the console image has the
+  `/etc/ssl/ca-bundle.pem`, `/etc/ssl/cert.pem`, after `SSL_CERT_FILE` when set; the console image has the
   first). With no bundle on the host the read is refused; set `ssl_ca` to
   the CA, or to a CA bundle file. A `tls=` in the source DSN wins over
   `ssl_mode`, as for every other connection (`tls=true` checks the
@@ -544,7 +544,7 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
   pins mydumper to the certificate that connection saw, by its SHA-1
   fingerprint; a server that changes certificate in between fails the read.
   A mydumper whose client library cannot be read from `--version` gets the
-  same check but no pin, so an attacker on the network between the check and
+  same check but no pin (its run says "Encrypted, not pinned"), so an attacker on the network between the check and
   the dump is not stopped there.
   `ssl_ca`/`ssl_cert`/`ssl_key` are certificate/key file paths **on the
   daemon host**, not secrets.

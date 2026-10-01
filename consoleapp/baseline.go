@@ -1353,6 +1353,14 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 			}
 			defer remove()
 			tlsArgs = append(tlsArgs, "--defaults-extra-file", pin)
+		} else {
+			// Unknown library: the check proved the server encrypts, but
+			// mydumper is not pinned, so an attacker between the check
+			// and the dump is not stopped. Said on the run, not hidden.
+			slog.Warn("console snapshot: the source was checked to encrypt, but mydumper's client library could not be "+
+				"identified from its --version, so it is not pinned to that certificate", "mydumper", plan.path, "host", host)
+			reportTransportNote(ctx, "Encrypted, not pinned: mydumper's client library could not be identified, so the "+
+				"source was checked to encrypt but mydumper was not tied to its certificate.")
 		}
 	}
 	args := buildConsoleMydumperArgs(host, port, user, schemas, dumpDir, lockMode, plan.sendLockFlags, tlsArgs)
