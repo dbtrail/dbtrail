@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.92.0] - 2026-09-30
+### Added
+- **Connect a server in three steps** (#1953). Find it: DBTrail reads the
+  server's greeting without logging in and says what answered ("MariaDB 10.11
+  on Amazon RDS"), or draws where the path breaks with the fix for each cause.
+  Let DBTrail in: the permissions block for that server. Checking: the startup
+  checks as lights, rechecked every 10 seconds; capture starts the moment all
+  pass. New route `POST /api/servers/identify` (permission `servers:write`).
+- **Ask the copy in SQL from the console** (#1952). Read-only SQL on the
+  Parquet copy runs in a sandboxed worker, with its own permission, an audit
+  record per query and CSV export.
+- **MariaDB as a source is supported, no longer beta** (#1939-#1949). Capture
+  detects MySQL vs MariaDB from the server and starts in GTID mode; UUID,
+  INET4, INET6 and VECTOR columns round-trip through the copy and recover
+  exactly; verify and the Overview compare MariaDB GTID positions; RDS for
+  MariaDB accepts `BINLOG MONITOR`. CI covers 10.11, 11.8 and 12.3.
+- **One MCP connection reaches every server** in the console (#1935), with an
+  optional server argument.
+- **Full reads check free disk** before mydumper starts and refuse when the
+  dump cannot fit (#1940).
+
+### Changed
+- **The console has a new look** (#1950): one set of colors, buttons, cards,
+  tables and tabs across every page. The Overview shows the flow and the four
+  ways to use the copy; Status draws the capture path; Restore draws the row
+  before and after.
+- **MariaDB minimum is 10.11** (#1943). A `--source-flavor` that contradicts
+  the server now refuses (#1941).
+- **Snapshot locations are per server** (#1926). Servers that used the startup
+  location keep it as their own.
+- The web interface says DBTrail instead of daemon or console (#1933, #1683).
+
+### Fixed
+- The Status page shows the real snapshot state (#1975).
+- MCP query and recover skip archives the live index already answers (#1936).
+- The pruning test no longer fails in the last hours of a month (#1979).
 
 ## [0.91.0] - 2026-09-28
 
