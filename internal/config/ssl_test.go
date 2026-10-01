@@ -51,7 +51,7 @@ func TestConnectSSL_RetryRule(t *testing.T) {
 		{"preferred, server has no TLS: warn once, retry in cleartext", "preferred",
 			[]error{fmt.Errorf("failed to ping MySQL: %w", mysql.ErrNoTLS), nil}, true, []bool{true, false}, true, nil, ""},
 		{"preferred, cleartext retry fails too", "preferred",
-			[]error{mysql.ErrNoTLS, denied}, false, []bool{true, false}, true, denied, "cleartext retry"},
+			[]error{mysql.ErrNoTLS, denied}, false, []bool{true, false}, false, denied, "cleartext retry"},
 		{"preferred, server demands TLS (3159) is not a reason to drop TLS", "preferred",
 			[]error{refusedPlain}, false, []bool{true}, false, refusedPlain, ""},
 		{"preferred, access denied never retries", "preferred", []error{denied}, false, []bool{true}, false, denied, ""},
@@ -191,4 +191,35 @@ func TestConnectSSL_VerifyModesHonorFiles(t *testing.T) {
 			t.Fatal("preferred must not verify: a self-signed server certificate (MariaDB, RDS without the CA bundle) would refuse")
 		}
 	})
+}
+
+// onCleartext reports a cleartext connection that EXISTS: it fires after the
+// retry succeeds, never before, and still carries the error that proved the
+// server has no TLS. A failed retry read nothing, so it must not be reported
+// as an unencrypted read (#1997 review).
+func TestConnectSSL_OnCleartextFiresAfterTheRetrySucceeds(t *testing.T) {
+	var order []string
+	open := func(_ string, c *tls.Config) (*sql.DB, error) {
+		if c != nil {
+			order = append(order, "tls attempt")
+			return nil, mysql.ErrNoTLS
+		}
+		order = append(order, "cleartext open")
+		return sql.Open("mysql", "u:p@tcp(127.0.0.1:1)/x")
+	}
+	var got error
+	db, err := connectSSL(sslTestDSN, SSL{Mode: "preferred"}, func(e error) {
+		order = append(order, "onCleartext")
+		got = e
+	}, open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if strings.Join(order, ",") != "tls attempt,cleartext open,onCleartext" {
+		t.Fatalf("order = %v", order)
+	}
+	if !errors.Is(got, mysql.ErrNoTLS) {
+		t.Fatalf("onCleartext got %v, want the no-TLS error", got)
+	}
 }

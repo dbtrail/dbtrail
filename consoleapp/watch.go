@@ -906,8 +906,17 @@ func watchStreamConfig(serverID uint32) streamrun.Config {
 // mainSourceJobInfo builds the ext.SourceJobInfo for `watch`'s main (non-registry)
 // source. flavor is the one the main stream resolved (OnFlavorResolved), never
 // the declared --source-flavor, which is empty when detection decides.
+// Its SourceTLS is the TLS the main capture connects with (bootSourceSSL,
+// from --ssl-*), so a job opens the source the way capture does.
 func mainSourceJobInfo(sourceDSN, indexDSN, flavor string) ext.SourceJobInfo {
-	return ext.SourceJobInfo{SourceDSN: sourceDSN, IndexDSN: indexDSN, Flavor: flavor}
+	return ext.SourceJobInfo{SourceDSN: sourceDSN, IndexDSN: indexDSN, Flavor: flavor, SourceTLS: ext.SourceTLS(bootSourceSSL())}
+}
+
+// entrySourceJobInfo builds the ext.SourceJobInfo for a supervised registry
+// source: the entry's DSNs and its source TLS (SourceSSL), with the flavor
+// capture runs as.
+func entrySourceJobInfo(e console.ServerEntry, flavor string) ext.SourceJobInfo {
+	return ext.SourceJobInfo{SourceDSN: e.SourceDSN, IndexDSN: e.DSN, Flavor: flavor, SourceTLS: ext.SourceTLS(e.SourceSSL())}
 }
 
 // resolveUpConsoleEnv applies the console-specific env vars to the upConsole*

@@ -660,6 +660,10 @@ func agentSourceJobInfo(flavor string) (ext.SourceJobInfo, bool) {
 		SourceDSN: agtSourceDSN,
 		IndexDSN:  agtIndexDSN,
 		Flavor:    flavor,
+		// SourceTLS stays zero ("preferred"): the agent has no --ssl-* flags
+		// and opens the source from the DSN alone, so the DSN's own tls= is
+		// the only TLS setting there is, and it wins over SourceTLS anyway.
+		// Documented on ext.SourceJobInfo and ext.AgentDeps.
 	}, true
 }
 

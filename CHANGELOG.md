@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **Extensions that open the source now get its TLS settings** (#1997). The
+  seams that hand a source to an extension (`ext.SourceJobInfo`,
+  `ext.ConsoleQueryContext`, `mcpext.ToolContext`) carried only the source
+  DSN, so an extension opening it connected in cleartext and was refused by a
+  source that only accepts encrypted connections (error 3159, the default on a
+  fresh Amazon RDS for MariaDB 11.8) even where capture itself connected fine.
+  Each now also carries `SourceTLS`: the registry entry's `ssl_*` settings,
+  `watch`/`stream`'s `--ssl-*` (or `BINTRAIL_SSL_*`) for the source they were
+  started with, and `BINTRAIL_SSL_*` on the standalone `bintrail-mcp` server.
+  `ext.OpenSource(dsn, tls)` opens the source exactly the way capture does;
+  a bad setting matches `ext.ErrSourceTLSSettings`, and a Postgres DSN is
+  refused (its TLS lives in its own DSN). Additive: the zero value means
+  `preferred`, the same default as an entry with no `ssl_mode`, and a `tls=`
+  in the DSN still wins.
+  **The agent is the exception**: it has no `--ssl-*` settings, so its source
+  jobs and agent commands (`ext.AgentDeps`) get `preferred`. To require TLS
+  or verify the certificate there, put `tls=` in the agent's source DSN.
+- A cleartext fallback under `ssl_mode: preferred` is now reported only after
+  the cleartext connection has actually been made; a retry that fails no
+  longer logs that it is reading without encryption.
+
 
 ## [0.94.0] - 2026-10-01
 ### Fixed

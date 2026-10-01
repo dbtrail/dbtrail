@@ -34,6 +34,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -75,6 +76,11 @@ type Target struct {
 	// it is handed to extension tools (ext/mcpext), which may need the live
 	// source. Empty means "no source available", not an error.
 	SourceDSN string
+	// SourceTLS is the TLS capture uses for SourceDSN, handed to extension
+	// tools with it: the selected registry entry's ssl_* settings on the
+	// console, BINTRAIL_SSL_* on the standalone server (envSourceTLS). Zero
+	// means "preferred".
+	SourceTLS ext.SourceTLS
 	// CloseDB is true when the connection was opened for this call and the
 	// handler must close it (standalone). False when the connection is owned
 	// by a long-lived pool (console connManager bundles).
@@ -436,6 +442,7 @@ func extToolContext(cfg Config) mcpext.ToolContextFunc {
 			DB:        t.DB,
 			DBName:    t.DBName,
 			SourceDSN: t.SourceDSN,
+			SourceTLS: t.SourceTLS,
 			Close:     closeFn,
 		}, nil
 	}
@@ -468,12 +475,37 @@ func DSNTarget(resolve func(argDSN string) (string, error)) ResolveTarget {
 			// never touch the source (reconstruct included — it folds a
 			// baseline snapshot with indexed events, never the live server).
 			SourceDSN:           os.Getenv("BINTRAIL_SOURCE_DSN"),
+			SourceTLS:           envSourceTLS(),
 			CloseDB:             true,
 			EnsureSchema:        true,
 			EnvArchiveDiscovery: true,
 		}, nil
 	}
 }
+
+// envSourceTLS is the standalone server's source TLS: BINTRAIL_SSL_MODE,
+// _CA, _CERT and _KEY, the same environment the capture commands read for
+// their source connection. Unset means the zero value ("preferred"). A mode
+// that is not a TLS mode is passed through as written, never replaced by
+// "preferred": ext.OpenSource refuses it with an error naming the setting,
+// and it is logged here once so the operator sees it before a tool fails.
+func envSourceTLS() ext.SourceTLS {
+	t := ext.SourceTLS{
+		Mode: os.Getenv("BINTRAIL_SSL_MODE"),
+		CA:   os.Getenv("BINTRAIL_SSL_CA"),
+		Cert: os.Getenv("BINTRAIL_SSL_CERT"),
+		Key:  os.Getenv("BINTRAIL_SSL_KEY"),
+	}
+	if t.Mode != "" && !config.ValidSSLMode(t.Mode) {
+		badEnvSSLModeOnce.Do(func() {
+			slog.Warn("BINTRAIL_SSL_MODE is not a TLS mode; extension tools that open the source will refuse to connect until it is fixed",
+				"BINTRAIL_SSL_MODE", t.Mode, "use", "disabled, preferred, required, verify-ca or verify-identity")
+		})
+	}
+	return t
+}
+
+var badEnvSSLModeOnce sync.Once
 
 // ─── Tool argument types ─────────────────────────────────────────────────────
 

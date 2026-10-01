@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/dbtrail/dbtrail/ext"
 )
 
 // The extension source-job seam (ext.RegisterSourceJob) exists so an
@@ -164,5 +166,38 @@ func TestSourceJobsStartOncePerDaemon(t *testing.T) {
 			t.Errorf("unexpected ext.RunSourceJobs call in %s (%d): source jobs share the stream's lifecycle — "+
 				"a caller that delegates to runStream must not start them again", fn, n)
 		}
+	}
+}
+
+// The stream's --ssl-* configure its source connection, so a source job must
+// get them: a job opening the source from the DSN alone connects in cleartext
+// and is refused by a source that only accepts encrypted connections.
+// Distinct values per field, so a dropped or swapped field fails.
+func TestStreamSourceJobInfoCarriesTheStreamsSourceTLS(t *testing.T) {
+	orig := [4]string{strmSSLMode, strmSSLCA, strmSSLCert, strmSSLKey}
+	t.Cleanup(func() { strmSSLMode, strmSSLCA, strmSSLCert, strmSSLKey = orig[0], orig[1], orig[2], orig[3] })
+
+	strmSSLMode, strmSSLCA, strmSSLCert, strmSSLKey = "verify-ca", "/s/ca.pem", "/s/cert.pem", "/s/key.pem"
+	got := streamSourceJobInfo("mysql").SourceTLS
+	want := ext.SourceTLS{Mode: "verify-ca", CA: "/s/ca.pem", Cert: "/s/cert.pem", Key: "/s/key.pem"}
+	if got != want {
+		t.Fatalf("SourceTLS = %+v, want %+v", got, want)
+	}
+
+	strmSSLMode, strmSSLCA, strmSSLCert, strmSSLKey = "disabled", "", "", ""
+	if got := streamSourceJobInfo("mysql").SourceTLS; got != (ext.SourceTLS{Mode: "disabled"}) {
+		t.Fatalf("disabled: SourceTLS = %+v", got)
+	}
+}
+
+// The agent has no --ssl-* flags and opens the source from the DSN alone, so
+// its jobs get the zero value ("preferred"), never a stale setting.
+func TestAgentSourceJobInfoSourceTLSIsZero(t *testing.T) {
+	origSource, origIndex := agtSourceDSN, agtIndexDSN
+	t.Cleanup(func() { agtSourceDSN, agtIndexDSN = origSource, origIndex })
+	agtSourceDSN, agtIndexDSN = "u:p@tcp(src:3306)/", "u:p@tcp(idx:3306)/bintrail_index"
+	got, ok := agentSourceJobInfo("mysql")
+	if !ok || got.SourceTLS != (ext.SourceTLS{}) {
+		t.Fatalf("ok = %v, SourceTLS = %+v, want the zero value", ok, got.SourceTLS)
 	}
 }

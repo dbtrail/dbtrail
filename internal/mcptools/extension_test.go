@@ -8,6 +8,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/dbtrail/dbtrail/ext"
 	"github.com/dbtrail/dbtrail/ext/mcpext"
 )
 
@@ -35,6 +36,7 @@ func standaloneLikeConfig(db *sql.DB, sourceDSN string) Config {
 				DB:        db,
 				DBName:    "bintrail_index",
 				SourceDSN: sourceDSN,
+				SourceTLS: ext.SourceTLS{Mode: "verify-ca", CA: "/ca.pem", Cert: "/c.pem", Key: "/k.pem"},
 				CloseDB:   true,
 			}, nil
 		},
@@ -84,6 +86,11 @@ func TestNewServerRunsExtensionProviders(t *testing.T) {
 	// notice it being dropped in the adaptation.
 	if gotCtx.SourceDSN != "u:p@tcp(src:3306)/shop" {
 		t.Errorf("SourceDSN = %q, want the surface's source DSN", gotCtx.SourceDSN)
+	}
+	// The source TLS travels with the DSN, or an extension tool reaches a
+	// TLS-only source in cleartext and is refused.
+	if want := (ext.SourceTLS{Mode: "verify-ca", CA: "/ca.pem", Cert: "/c.pem", Key: "/k.pem"}); gotCtx.SourceTLS != want {
+		t.Errorf("SourceTLS = %+v, want %+v", gotCtx.SourceTLS, want)
 	}
 	if gotCtx.Close == nil {
 		t.Error("Close is nil — the seam documents it as always callable")

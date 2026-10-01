@@ -15,6 +15,8 @@ import (
 	"database/sql"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/dbtrail/dbtrail/ext"
 )
 
 // ToolContext is the per-call index access an extension MCP tool receives.
@@ -37,6 +39,11 @@ type ToolContext struct {
 	// tool that reads only the index works regardless, and a tool that needs
 	// the live source should degrade with a clear message.
 	SourceDSN string
+	// SourceTLS is the TLS capture uses for SourceDSN: the selected registry
+	// entry's ssl_* settings on the console, BINTRAIL_SSL_MODE/_CA/_CERT/_KEY
+	// on the standalone server. Zero means "preferred". Open the source with
+	// ext.OpenSource(SourceDSN, SourceTLS).
+	SourceTLS ext.SourceTLS
 	// Close releases whatever the resolve allocated. Always non-nil; it is a
 	// no-op on surfaces whose connection is pool-owned (the console), and it
 	// closes the per-call connection on the standalone server. A tool that
