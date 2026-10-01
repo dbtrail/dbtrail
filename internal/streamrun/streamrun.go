@@ -709,6 +709,12 @@ func buildTLSConfig(mode, ca, cert, key, serverName string) (*tls.Config, error)
 // unencrypted warns identically. required/verify-* never retry: a
 // TLS-incapable server fails closed with an actionable hint.
 func connectHelper(dsn, label, mode, ca, cert, key string) (*sql.DB, error) {
+	// Settings errors first and unwrapped (a bad --ssl-mode or an unreadable
+	// --ssl-ca is a local problem): wrapped below they would carry tlsHint's
+	// "enable TLS on the server" advice, which points at the wrong fix.
+	if _, err := buildTLSConfig(mode, ca, cert, key, config.DSNHost(dsn)); err != nil {
+		return nil, err
+	}
 	// A tls= in the DSN wins (operator override), but under a mandatory
 	// --ssl-mode that override can silently WEAKEN the connection (e.g. a stale
 	// tls=skip-verify under --ssl-mode=verify-identity: encrypted but

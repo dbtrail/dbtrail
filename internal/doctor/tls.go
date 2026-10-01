@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/go-sql-driver/mysql"
 
@@ -25,8 +26,8 @@ func refusesUnencrypted(err error) bool {
 // setting that decided it. That setting depends on how the connection was
 // made, and naming the wrong one sends them to fix a thing that is fine:
 //
-//   - the DSN's own tls= wins over any mode (config.applyTLS), so it is named
-//     first;
+//   - the DSN's own tls= wins over any mode (config.applyTLS): tls=false is
+//     named first, any other tls= means the server offered no TLS;
 //   - ssl == nil: no TLS mode at all (bintrail doctor), so the DSN is the
 //     place to ask for TLS;
 //   - mode disabled: DBTrail was told not to encrypt, on purpose;
@@ -36,19 +37,28 @@ func unencryptedRefusal(dsn string, ssl *config.SSL) (detail, remediation string
 	const lead = "This server only accepts encrypted (TLS) connections"
 	const code = " (server error 3159)."
 	switch {
-	case config.DSNHasExplicitTLS(dsn):
-		return lead + ", and the source DSN's own tls= setting turned encryption off" + code,
-			"Remove tls= from the source DSN, or change it to tls=preferred."
+	case dsnTLSOff(dsn):
+		return lead + ", and the source DSN's own tls=false turned encryption off" + code,
+			"Remove tls=false from the source DSN, or change it to tls=preferred."
+	case config.DSNHasExplicitTLS(dsn), ssl != nil && ssl.Mode != "disabled":
+		// Any other tls= in the DSN, or a mode that asks for TLS: the
+		// connection went out unencrypted only because the server offered
+		// no TLS (tls=preferred falls back on its own, as does our retry).
+		return lead + ", but it did not offer TLS when DBTrail asked for it" + code,
+			"Turn TLS on in the server's configuration (give it a certificate and key), then try again."
 	case ssl == nil:
 		return lead + ", and this check connected without encryption" + code,
 			"Add tls=preferred to the source DSN to connect with encryption (the server's certificate is not checked)."
-	case ssl.Mode == "disabled":
+	default: // ssl.Mode == "disabled"
 		return lead + ", and DBTrail is set to connect to it without encryption: its TLS mode is disabled" + code,
 			"Set this server's TLS mode to preferred or required. For a server added in the web console, " +
 				"that is the ssl_mode line of its entry in console-servers.yaml (delete the line to use preferred). " +
 				"For bintrail-console watch, it is --ssl-mode."
-	default:
-		return lead + ", but it did not offer TLS when DBTrail asked for it" + code,
-			"Turn TLS on in the server's configuration (give it a certificate and key), then try again."
 	}
+}
+
+// dsnTLSOff reports whether the DSN itself turns TLS off (tls=false).
+func dsnTLSOff(dsn string) bool {
+	cfg, err := mysql.ParseDSN(dsn)
+	return err == nil && cfg.TLS == nil && strings.EqualFold(cfg.TLSConfig, "false")
 }
