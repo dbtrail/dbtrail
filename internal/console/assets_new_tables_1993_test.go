@@ -153,6 +153,17 @@ func TestOverviewFlow_newTables(t *testing.T) {
 		"unchecked": {"input": c{"coverage": cov, "server": registry, "schema": c{"state": "idle"}, "uncaptured": c{},
 			"baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": sched(runDTO(&BaselineRunRecord{
 				Kind: BaselineRunRefresh, SnapshotTime: "2026-10-01T09:05:00Z", NewTablesUnchecked: "could not ask the source"}))}}},
+		// The full read the schedule took for them failed: the newest copy
+		// is still the update's, and the live refresh status still says so.
+		"full-failed": {"input": c{"coverage": cov, "server": registry, "schema": c{"state": "idle"}, "uncaptured": c{},
+			"baselines": c{"configured": true, "snapshots": []any{snap},
+				"refresh": status(BaselineStatus{State: "succeeded", At: "2026-10-01T09:05:00Z", NewTables: []string{"demo.orders"}}),
+				"schedule": sched(runDTO(&BaselineRunRecord{Kind: BaselineRunDump, StartedAt: "2026-10-01T09:05:03Z", Error: "mydumper: access denied",
+					Why: NewTablesWhy(1), WhyCode: BackupWhyCode(NewTablesWhy(1))}))}}},
+		// A newer snapshot (a manual full read) than the update's: silent.
+		"newer-snapshot": {"input": c{"coverage": cov, "server": registry, "schema": c{"state": "idle"}, "uncaptured": c{},
+			"baselines": c{"configured": true, "snapshots": []any{c{"time": "2026-10-01 09:30:00", "age_hours": 0.01, "tables": []string{"demo.kept", "demo.orders"}}},
+				"schedule": sched(runDTO(&BaselineRunRecord{Kind: BaselineRunRefresh, SnapshotTime: "2026-10-01T09:05:00Z", NewTables: []string{"demo.orders"}}))}}},
 		"after-full": {"input": c{"coverage": cov, "server": registry, "schema": c{"state": "idle"}, "uncaptured": c{},
 			"baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": sched(runDTO(&BaselineRunRecord{
 				Kind: BaselineRunDump, SnapshotTime: "2026-10-01T09:05:00Z", Tables: 3,
@@ -211,6 +222,12 @@ func TestOverviewFlow_newTables(t *testing.T) {
 	if len(newCards(u)) != 0 || u.Pieces[bucket].Tone == "warn" || !strings.Contains(u.Pieces[bucket].Sub, "new tables not checked") {
 		t.Errorf("unchecked: box %+v cards %+v", u.Pieces[bucket], u.Cards)
 	}
+	if len(newCards(out["full-failed"])) != 1 || out["full-failed"].Pieces[bucket].Tone != "warn" {
+		t.Errorf("a failed full read hid the gap: %+v", out["full-failed"])
+	}
+	if len(newCards(out["newer-snapshot"])) != 0 || out["newer-snapshot"].Pieces[bucket].Tone == "warn" {
+		t.Errorf("a newer snapshot did not silence it: %+v", out["newer-snapshot"])
+	}
 	if len(newCards(out["after-full"])) != 0 || out["after-full"].Pieces[bucket].Tone == "warn" {
 		t.Errorf("the full read that included them still warns: %+v", out["after-full"])
 	}
@@ -249,6 +266,13 @@ func TestNewTables_withheldFromASessionWithADataProfile(t *testing.T) {
 	dto := &backupScheduleDTO{LastRun: &backupScheduleRunDTO{NewTables: []string{"hr.salaries"}, NewTablesOmitted: 1}}
 	if cut := withholdScheduleTables(profiled, dto); cut.LastRun.NewTables != nil || cut.LastRun.NewTablesOmitted != 0 {
 		t.Errorf("a profiled session was handed the schedule's names: %+v", cut.LastRun)
+	}
+	unc := BaselineStatus{NewTablesUnchecked: "could not ask the source which tables it has: Error 1045: Access denied for user 'snap'@'10.0.0.5'"}
+	if got := withholdRefusedTables(profiled, unc); got.NewTablesUnchecked != "the source could not be asked" {
+		t.Errorf("a profiled session was handed the driver error, or lost the fact: %q", got.NewTablesUnchecked)
+	}
+	if got := withholdRefusedTables(profiled, BaselineStatus{}); got.NewTablesUnchecked != "" {
+		t.Errorf("a checked run became unchecked: %q", got.NewTablesUnchecked)
 	}
 }
 

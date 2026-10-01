@@ -127,6 +127,7 @@ func withholdRefusedTables(r *http.Request, st BaselineStatus) BaselineStatus {
 	if sessionRestricted(r) {
 		st.RefusedTables, st.RefusedTablesOmitted = nil, 0
 		st.NewTables, st.NewTablesOmitted = nil, 0
+		st.NewTablesUnchecked = withheldUnchecked(st.NewTablesUnchecked)
 	}
 	return st
 }
@@ -140,6 +141,7 @@ func withholdScheduleTables(r *http.Request, dto *backupScheduleDTO) *backupSche
 	if dto.LastRun != nil {
 		dto.LastRun.RefusedTables, dto.LastRun.RefusedTablesOmitted = nil, 0
 		dto.LastRun.NewTables, dto.LastRun.NewTablesOmitted = nil, 0
+		dto.LastRun.NewTablesUnchecked = withheldUnchecked(dto.LastRun.NewTablesUnchecked)
 	}
 	if dto.LastFallback != nil {
 		dto.LastFallback.RefusedTables, dto.LastFallback.RefusedTablesOmitted = nil, 0
@@ -168,4 +170,13 @@ func NewTablesOf(names []string) (kept []string, omitted int) {
 // in a URL or DSN removed. It reaches a browser and a file on disk.
 func ScrubReason(msg string, secrets ...string) string {
 	return clipRunes(oneLine(scrubSecrets(msg, secrets)), refusedReasonCap)
+}
+
+// withheldUnchecked keeps the fact that the new-tables check did not run and
+// drops the driver's error, which can name the source's account and host.
+func withheldUnchecked(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	return "the source could not be asked"
 }

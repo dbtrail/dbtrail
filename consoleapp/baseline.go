@@ -1409,7 +1409,10 @@ func dumpableTableCountQuery(schemas []string) (string, []any) {
 // a console dump selects, shared by the no-lock count above and the disk
 // check's size estimate (dumpSizeQuery, #1938) so the two cannot drift apart.
 func dumpableTablesWhere(schemas []string) (string, []any) {
-	const base = "TABLE_TYPE = 'BASE TABLE' AND "
+	// SYSTEM VERSIONED is how MariaDB lists a system-versioned table; it is
+	// a table mydumper dumps like any other (#1993 reads this list to find
+	// tables a snapshot lacks, and would never see one created that way).
+	const base = "TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VERSIONED') AND "
 	if len(schemas) == 0 {
 		return base + "TABLE_SCHEMA NOT IN ('mysql','sys','performance_schema','information_schema')", nil
 	}

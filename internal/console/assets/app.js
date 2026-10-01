@@ -2159,10 +2159,13 @@ function ovFlowModel(inp) {
   } else bucket = piece("Your copy", "none", bl.snapshots ? "no copy yet" : "", "");
   // Tables created after the snapshot an update started from (#1993): the
   // newest copy does not hold them, and the count alone above read as the
-  // whole database. From the schedule's last run when it was an update, else
-  // the daemon's refresh while its snapshot is still the newest.
-  const gapRun = run && run.method === "refresh" ? run
-    : (!sch && bl.refresh && snap && sameInstant(bl.refresh.at, snap.time) ? bl.refresh : null);
+  // whole database. Only from the update whose snapshot IS the newest one:
+  // the live refresh status first (it outlives a full read that then
+  // failed), then the schedule's last run. A newer snapshot (a full read,
+  // scheduled or manual) holds the tables and silences it.
+  const gapRun = !snap ? null
+    : (bl.refresh && bl.refresh.state !== "running" && sameInstant(bl.refresh.at, snap.time)) ? bl.refresh
+    : (run && run.method === "refresh" && sameInstant(run.snapshot_time, snap.time)) ? run : null;
   const gap = snap && !blUnknown ? newTablesNote(gapRun) : null;
   if (gap && gap.warn) {
     bucket.tone = "warn";
@@ -10366,7 +10369,7 @@ function backupScheduleCard(cur, b) {
       }
       // Tables the update left out (#1993): said on a published update, the
       // one whose snapshot lacks them.
-      if (run.method === "refresh") {
+      if (run.method === "refresh" && sameInstant(run.snapshot_time, ((b && b.snapshots) || [])[0] && b.snapshots[0].time)) {
         const left = newTablesBlock(run);
         if (left) body.append(left);
       }

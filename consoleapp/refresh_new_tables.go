@@ -109,9 +109,9 @@ func tablesLeftOut(snapshot, source []string, foldCase bool) []string {
 func (s *baselineSupervisor) checkNewTables(req refreshRequest, snapshot []string) newTablesCheck {
 	if req.SourceDSN == "" {
 		// No source is known for this request (the command-line server of
-		// the daemon-wide loop): there is nothing to compare with, and
-		// nothing has been claimed.
-		return newTablesCheck{}
+		// the daemon-wide loop, a registry server with no source set). Said,
+		// not skipped: an empty list here would read as "nothing missing".
+		return newTablesCheck{unchecked: "no source connection is set for this server, so tables created on it after the previous snapshot were not looked for"}
 	}
 	if req.SourcePostgres {
 		return newTablesCheck{unchecked: "tables created after the previous snapshot are not looked for on PostgreSQL sources yet"}
@@ -152,6 +152,11 @@ func withSource(req *refreshRequest, e console.ServerEntry) {
 // alone used to read as the whole database.
 func reportNewTables(req refreshRequest, c newTablesCheck) {
 	switch {
+	case c.unchecked != "" && req.SourceDSN == "":
+		// The same at every cycle of a server that has no source to ask;
+		// the run's status says it, the log does not repeat it as a warning.
+		slog.Debug("snapshot refresh: no source to check for tables created after the previous snapshot",
+			"server", req.ServerName, "id", req.ServerID)
 	case c.unchecked != "":
 		slog.Warn("snapshot refresh: could not check for tables created after the previous snapshot; this snapshot may be missing some",
 			"server", req.ServerName, "id", req.ServerID, "reason", c.unchecked)
@@ -167,7 +172,15 @@ func reportNewTables(req refreshRequest, c newTablesCheck) {
 type newTablesTry struct {
 	names map[string]bool
 	at    string
+	// attempts counts the full reads started for these tables. A full read
+	// that keeps failing (privileges, a refused lock) is not retried at
+	// every update against production: newTablesMaxAttempts bounds it.
+	attempts int
 }
+
+// newTablesMaxAttempts is how many full reads the schedule starts for the
+// same new tables before it stops and leaves the gap reported.
+const newTablesMaxAttempts = 3
 
 // includeNewTables answers an update that PUBLISHED without tables created on
 // the source after its starting snapshot (#1993). There is no per-table read
@@ -195,12 +208,16 @@ func (b *backupScheduler) includeNewTables(e console.ServerEntry, done console.B
 	}
 	cur, ok := b.reg.Get(e.ID)
 	if !ok || cur.BackupSchedule == nil || e.BackupSchedule == nil || cur.BackupSchedule.Identity() != e.BackupSchedule.Identity() {
+		slog.Info("snapshot schedule: the update left out tables created after the previous snapshot, but the schedule was removed or changed meanwhile; no full read taken",
+			"server", e.Name, "id", e.ID, "tables", strings.Join(done.NewTables, ","))
 		return
 	}
 	e = cur
-	if !b.newTablesOwed(e.ID, done.NewTables) {
-		slog.Warn("snapshot schedule: tables created after the previous snapshot are still not in it after a full read; not starting another",
-			"server", e.Name, "id", e.ID, "tables", strings.Join(done.NewTables, ","), "not_listed", done.NewTablesOmitted)
+	attempts, owed := b.newTablesOwed(e.ID, done.NewTables)
+	if !owed {
+		slog.Warn("snapshot schedule: tables created after the previous snapshot are still not in it after a full read was taken for them "+
+			"(it went through, or failed too many times); not starting another, the gap stays reported",
+			"server", e.Name, "id", e.ID, "tables", strings.Join(done.NewTables, ","), "not_listed", done.NewTablesOmitted, "full_reads_started", attempts)
 		return
 	}
 	if err := console.FullBackupPossible(e, b.gates()); err != nil {
@@ -212,6 +229,8 @@ func (b *backupScheduler) includeNewTables(e console.ServerEntry, done console.B
 	_, observed := b.seen[e.ID]
 	b.mu.Unlock()
 	if !observed {
+		slog.Info("snapshot schedule: the update left out tables created after the previous snapshot, but the schedule was removed meanwhile; no full read taken",
+			"server", e.Name, "id", e.ID)
 		return
 	}
 	now := time.Now().UTC()
@@ -225,38 +244,44 @@ func (b *backupScheduler) includeNewTables(e console.ServerEntry, done console.B
 			names[n] = true
 		}
 		b.mu.Lock()
-		b.newTablesTried[e.ID] = newTablesTry{names: names, at: stamp}
+		b.newTablesTried[e.ID] = newTablesTry{names: names, at: stamp, attempts: attempts + 1}
 		b.mu.Unlock()
 		b.watch(e, stamp, console.BackupMethodFull)
 	}
 }
 
 // newTablesOwed reports whether a full read should still be started for
-// names: yes when one of them was never tried, or when no full read recorded
-// at or after the one tried for them succeeded (it failed, or is not recorded
-// yet), so it is retried. Without a run history there is no way to tell a
-// failed full read from one that missed the tables, and the answer is no: a
-// loop of full reads against production is the worse error, and the gap stays
-// reported either way.
-func (b *backupScheduler) newTablesOwed(serverID string, names []string) bool {
+// names, and how many were already started for them. Yes when one of them was
+// never tried. Otherwise no when a full read recorded at or after the last
+// one started for them went through (it read the source and still lacks them:
+// another would too), or when newTablesMaxAttempts were started and failed;
+// yes while fewer failed. Without a run history a failed full read cannot be
+// told from one that missed the tables, and the answer is no: a loop of full
+// reads against production is the worse error, and the gap stays reported
+// either way.
+func (b *backupScheduler) newTablesOwed(serverID string, names []string) (attempts int, owed bool) {
 	b.mu.Lock()
 	tried, ok := b.newTablesTried[serverID]
 	b.mu.Unlock()
 	if !ok {
-		return true
+		return 0, true
 	}
+	fresh := false
 	for _, n := range names {
 		if !tried.names[n] {
-			return true
+			fresh = true
 		}
 	}
-	if b.sup.history == nil {
-		return false
+	if fresh {
+		return 0, true
+	}
+	if b.sup.history == nil || tried.attempts >= newTablesMaxAttempts {
+		return tried.attempts, false
 	}
 	for _, r := range b.sup.history.List(serverID) {
 		if r.Kind == console.BaselineRunDump && r.Error == "" && r.StartedAt >= tried.at {
-			return false
+			return tried.attempts, false
 		}
 	}
-	return true
+	return tried.attempts, true
 }

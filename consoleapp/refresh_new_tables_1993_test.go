@@ -166,6 +166,31 @@ func TestScheduledRefresh_newTablesRetryAfterAFailedFullRead(t *testing.T) {
 	}
 }
 
+// A full read that keeps failing is not started at every update forever:
+// after newTablesMaxAttempts the gap stays reported and nothing starts.
+func TestScheduledRefresh_newTablesFailingFullReadIsBounded(t *testing.T) {
+	b, _, _, e := newTablesFixture(t, true, []string{"shop.kept"})
+	stubSourceTables(t, func(context.Context, string, []string) ([]string, bool, error) {
+		return []string{"shop.kept", "shop.orders"}, false, nil
+	})
+	fulls := 0
+	for i := range newTablesMaxAttempts + 2 {
+		if i > 0 {
+			time.Sleep(1100 * time.Millisecond) // whole-second stamps
+		}
+		st := rebuildOnce(t, b, e, time.Now().UTC().Format(time.RFC3339))
+		if st.LastMethod == console.BackupMethodFull {
+			fulls++
+			if st = waitTerminalMethod(t, b, e.ID, console.BackupMethodFull); st.Last.State != "failed" {
+				t.Skipf("the fixture's full read did not fail (%+v)", st.Last)
+			}
+		}
+	}
+	if fulls != newTablesMaxAttempts {
+		t.Fatalf("%d full reads started for the same failing tables, want %d", fulls, newTablesMaxAttempts)
+	}
+}
+
 // Full reads not allowed: the update still publishes the tables it has, the
 // gap is reported, and nothing else starts.
 func TestScheduledRefresh_newTablesGateClosedReportsTheGap(t *testing.T) {
@@ -233,8 +258,10 @@ func TestCheckNewTables_postgresIsUnchecked(t *testing.T) {
 	if c.unchecked == "" || len(c.tables) > 0 {
 		t.Fatalf("got %+v", c)
 	}
-	if got := sup.checkNewTables(refreshRequest{}, []string{"s.a"}); !reflect.DeepEqual(got, newTablesCheck{}) {
-		t.Fatalf("no source known, yet a check was claimed: %+v", got)
+	// No source known: said as unchecked, never an empty list that reads
+	// as "nothing missing".
+	if got := sup.checkNewTables(refreshRequest{}, []string{"s.a"}); got.unchecked == "" || len(got.tables) > 0 {
+		t.Fatalf("no source known, and the run does not say the check did not run: %+v", got)
 	}
 }
 

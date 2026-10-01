@@ -263,7 +263,7 @@ func TestDumpSizeQuery(t *testing.T) {
 	if !strings.Contains(q, "TABLE_SCHEMA NOT IN ('mysql','sys','performance_schema','information_schema')") || len(args) != 0 {
 		t.Fatalf("empty list: %s %v", q, args)
 	}
-	if !strings.Contains(q, "COALESCE(SUM(") || !strings.Contains(q, "INDEX_LENGTH") || !strings.Contains(q, "'BASE TABLE'") {
+	if !strings.Contains(q, "COALESCE(SUM(") || !strings.Contains(q, "INDEX_LENGTH") || !strings.Contains(q, "'BASE TABLE', 'SYSTEM VERSIONED'") {
 		t.Fatalf("query = %s", q)
 	}
 	_, args = dumpSizeQuery([]string{"Shop", " b "})
@@ -271,7 +271,7 @@ func TestDumpSizeQuery(t *testing.T) {
 		t.Fatalf("names were changed on the way: %v", args)
 	}
 	count, _ := dumpableTableCountQuery([]string{"a"})
-	if !strings.HasSuffix(count, "TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA IN (?)") {
+	if !strings.HasSuffix(count, "TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VERSIONED') AND TABLE_SCHEMA IN (?)") {
 		t.Fatalf("count query = %s", count)
 	}
 }
