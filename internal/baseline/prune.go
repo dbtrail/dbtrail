@@ -253,7 +253,33 @@ func pruneWithProbe(ctx context.Context, opts PruneOptions, probe durableProbe) 
 		slog.Error("baseline prune: the attempt succeeded but the record of an earlier failure could not be removed; the page will go on showing it",
 			"dir", opts.LocalDir, "error", rerr)
 	}
+	recordNotInDestination(opts, res, err, now)
 	return res, err
+}
+
+// recordNotInDestination keeps NotInDestinationFile in step with a completed
+// attempt: the snapshots the destination answered it does not have (kept
+// minus the ones that could not be checked, which the failure record names).
+// An attempt that returned an error leaves the record as it was: its counts
+// are partial. With no destination the record is stale (the server stopped
+// sending to S3) and goes.
+func recordNotInDestination(opts PruneOptions, res PruneResult, err error, now time.Time) {
+	if err != nil {
+		return
+	}
+	path := filepath.Join(opts.LocalDir, NotInDestinationFile)
+	n := res.KeptNotDurable - res.ProbeErrors
+	if opts.S3URL == "" || n <= 0 {
+		if rerr := removeRecord(path); rerr != nil && !os.IsNotExist(rerr) {
+			slog.Error("baseline prune: every old snapshot is at the destination, but the record saying some were not could not be removed; the page will go on showing it",
+				"dir", opts.LocalDir, "error", rerr)
+		}
+		return
+	}
+	if werr := writeNotInDestRecord(opts.LocalDir, NotInDestination{At: now, Count: n}); werr != nil {
+		slog.Error("baseline prune: snapshots the destination does not have were kept, and the record of them could not be written; the page will not say it",
+			"dir", opts.LocalDir, "kept", n, "error", werr)
+	}
 }
 
 // pruneFailureReason is why an attempt counts as failed, in words the page
