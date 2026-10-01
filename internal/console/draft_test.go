@@ -23,7 +23,7 @@ func TestDraftStoreRoundTripsEveryField(t *testing.T) {
 		SourceHost: "db.example.com", SourcePort: "5433", SourceUser: "dbtrail",
 		Schemas:        "shop,billing",
 		SourceDatabase: "appdb", SourceSlot: "slot", SourcePublication: "pub",
-		Identified: &DraftIdentity{Version: "10.11.6-MariaDB-log", Flavor: "mariadb", Managed: "rds", Proxy: "rds_proxy", ServerError: 1130},
+		Identified: &DraftIdentity{Version: "10.11.6-MariaDB-log", Flavor: "mariadb", Managed: "rds", Proxy: "rds_proxy", ServerError: 1130, ManagedChoice: new(bool)},
 	}
 	if err := d.Save(want); err != nil {
 		t.Fatal(err)

@@ -59,6 +59,10 @@ type DraftIdentity struct {
 	Managed     string `yaml:"managed,omitempty" json:"managed,omitempty"`
 	Proxy       string `yaml:"proxy,omitempty" json:"proxy,omitempty"`
 	ServerError int    `yaml:"server_error,omitempty" json:"server_error,omitempty"`
+	// ManagedChoice is the Connect screen's RDS/Aurora box when the person
+	// set it, apart from Managed (what the host name showed): nil when they
+	// left it as detected.
+	ManagedChoice *bool `yaml:"managed_choice,omitempty" json:"managed_choice,omitempty"`
 }
 
 // DraftStore holds the one Connect draft. One, not a set: two people

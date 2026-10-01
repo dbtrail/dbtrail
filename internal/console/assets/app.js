@@ -14153,7 +14153,7 @@ function showConnectForm(draft) {
     f.source_user.value = draft.source_user || "";
     if (draft.identified) {
       const id = draft.identified;
-      connectManaged.set(form, { addr: connectAddr(form), on: !!id.managed });
+      if (typeof id.managed_choice === "boolean") connectManaged.set(form, { addr: connectAddr(form), on: id.managed_choice });
       showIdentified(form, id, draft.flavor);
     }
     $("#connect-pw-again", form).hidden = !connectRestored.has(form);
@@ -14168,7 +14168,7 @@ function showConnectForm(draft) {
   ["source_host", "source_port"].forEach((k) => f[k].addEventListener("input", () => {
     if (form.dataset.done) return;
     if (form.dataset.step !== "1") backToWhere(form);
-    else stopConnectRecheck(form);
+    else { stopConnectRecheck(form); clearFindLine(form); }
   }));
   ["source_host", "source_port", "source_user"].forEach((k) =>
     f[k].addEventListener("input", () => saveConnectDraftSoon(form)));
@@ -14211,27 +14211,42 @@ async function identifyConnect(form, pressed = true) {
   try {
     id = await api("/api/servers/identify", { method: "POST", body: { source_host: f.source_host.value.trim(), source_port: f.source_port.value.trim() } });
   } catch (err) {
-    if (form.isConnected && connectAddr(form) === asked) formMsg("DBTrail could not look: " + ((err && err.message) || err), true);
+    if (form.isConnected && connectAddr(form) === asked) {
+      formMsg("DBTrail could not look: " + ((err && err.message) || err), true);
+      // An automatic look that failed as a request keeps looking when the
+      // trouble can pass (the network, a 5xx); otherwise the line that
+      // promised it is taken back.
+      const passing = !(err && err.status) || err.status >= 500;
+      if (!pressed && passing) scheduleFindRetry(form, round);
+      else clearFindLine(form);
+    }
     return;
   } finally {
     delete form.dataset.busy;
     if (btn) { btn.disabled = false; btn.textContent = CONNECT_STEP_BUTTON[form.dataset.step]; }
     if (form.dataset.saveAfter) { delete form.dataset.saveAfter; saveConnectDraftSoon(form); }
+    // Use <host> pressed while a look was running: look at it now.
+    if (form.dataset.findAfter) { delete form.dataset.findAfter; if (form.isConnected) identifyConnect(form, true); }
   }
   // Host or Port changed while it looked: the answer is about another server.
   if (!form.isConnected || connectAddr(form) !== asked) return;
   if (id.kind) {
     showNotFound(form, id);
-    scheduleFindRetry(form, round);
+    // localhost inside a container is fixed by Use <host>, not by waiting,
+    // and its probe reads the greeting of a real server at the retry address,
+    // which that server may count against DBTrail's address: never repeated.
+    if (id.kind !== "loopback_in_container") scheduleFindRetry(form, round);
   } else showIdentified(form, id, "");
   saveConnectDraftSoon(form);
 }
 
 // scheduleFindRetry looks again in 10 seconds, CONNECT_RECHECK_MAX times at
-// most, then waits for a press. Safe for the server: none of the causes
-// completes a MySQL handshake, which is what counts toward max_connect_errors
-// (a blocked address is refused before one, and a greeting that answers ends
-// the retries by moving to step 2).
+// most, then waits for a press. It runs only for causes where no MySQL server
+// is read, which is what counts toward max_connect_errors: no name, no route,
+// no answer, a closed port, something that is not MySQL. A blocked address is
+// refused before a login either way, and a greeting that answers ends the
+// retries by moving to step 2. The loopback case reads a real server's
+// greeting at the retry address, so identifyConnect never schedules it.
 function scheduleFindRetry(form, round) {
   const line = form.querySelector("p#connect-find-auto");
   if (round >= CONNECT_RECHECK_MAX) {
@@ -14246,6 +14261,12 @@ function scheduleFindRetry(form, round) {
   }, CONNECT_RECHECK_MS);
   connectFindRetry.set(form, { timer, round });
   if (line) line.textContent = "Trying again in 10 seconds.";
+}
+
+// clearFindLine takes back "Trying again", once no retry is coming.
+function clearFindLine(form) {
+  const line = form.querySelector("p#connect-find-auto");
+  if (line) line.textContent = "";
 }
 
 // showNotFound draws why step 1 did not get there and stays on it.
@@ -14263,7 +14284,9 @@ function showNotFound(form, id) {
   if (p.use) {
     const useHost = p.use.replace(/:\d+$/, "");
     box.append(el("button", { class: "btn btn-sm", type: "button", text: "Use " + useHost, onclick: () => {
-      f.source_host.value = useHost; saveConnectDraftSoon(form); identifyConnect(form, true);
+      f.source_host.value = useHost; saveConnectDraftSoon(form);
+      if (form.dataset.busy) form.dataset.findAfter = "1";
+      else identifyConnect(form, true);
     } }));
   }
   if (p.note) box.append(el("p", { class: "form-hint", text: p.note }));
@@ -14312,9 +14335,11 @@ function connectIdentityBody(form) {
   const id = connectIdentity.get(form);
   if (!id) return undefined;
   const out = {};
-  for (const k of ["version", "flavor", "proxy", "server_error"]) if (id[k]) out[k] = id[k];
-  // The box as it stands, which is the detection unless the person changed it.
-  if (form.elements.cx_managed.checked) out.managed = id.managed || "rds";
+  for (const k of ["version", "flavor", "managed", "proxy", "server_error"]) if (id[k]) out[k] = id[k];
+  // What the person set the RDS box to, apart from what was detected: the
+  // tile's title says only what the server's name showed.
+  const chosen = connectManaged.get(form);
+  if (chosen && chosen.addr === connectAddr(form)) out.managed_choice = chosen.on;
   return out;
 }
 
@@ -14381,7 +14406,7 @@ function drawConnectLights(form, report, started) {
   // title, so the lights, the fix and what happens next are what is on
   // screen, not the fields of step 2 above them.
   const bad = list.querySelector("li.bad");
-  const s3 = form.querySelector("div[data-cx-step=3]");
+  const s3 = form.querySelector('div[data-cx-step="3"]');
   if (bad && s3 && typeof s3.scrollIntoView === "function") s3.scrollIntoView({ block: "start", behavior: prefersReducedMotion() ? "auto" : "smooth" });
 }
 
@@ -14434,7 +14459,10 @@ async function runConnectCheck(form, pressed) {
   }
   if (!form.isConnected) {
     if (res && (res.started || res.error)) openNotice(connectNotice(res));
-    else openNotice({ tone: "err", title: "Capture did not start", lines: ["Nothing was saved. Open + Add server to see what to fix."], button: "OK" });
+    // No answer at all: the server may have saved and started it before the
+    // answer was lost, so this says what is not known and where to look.
+    else if (failure && !res) openNotice({ tone: "warn", title: "No answer from the checks", lines: ["DBTrail could not tell whether capture started: " + failure + ". Look for the server in the list before adding it again."], button: "OK" });
+    else openNotice({ tone: "err", title: "Capture did not start", lines: ["Nothing was saved. Some checks did not pass."], button: "OK" });
     return;
   }
   // Host or Port changed while the checks ran. A start still happened, for

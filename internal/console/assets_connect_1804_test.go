@@ -339,6 +339,58 @@ const toStep2 = async (host, answer) => {
   ctx.__identifyAnswer = { addr: "nope2.example:3306", version: "8.4.3", flavor: "mysql" };
   const upFn = scheduled.shift(); if (upFn) { upFn(); await flush(4); }
   out.findRetry.found = { step: step(f), pending: scheduled.length };
+  // localhost in a container: fixed by Use, and its probe reads a real
+  // server's greeting, so it is never looked at again by itself.
+  setCaps({ monitor: true });
+  vm.runInContext("showConnectForm(null)", ctx);
+  f = form();
+  f.elements.source_host.value = "localhost";
+  scheduled.length = 0;
+  ctx.__identifyAnswer = { addr: "localhost:3306", kind: "loopback_in_container", suggest: "host.docker.internal:3306" };
+  f.fire("submit"); await flush(4);
+  out.loopbackRetries = scheduled.length;
+  // The line that promised a retry is taken back when the person types.
+  f.elements.source_host.value = "nope3.example"; ctx.__identifyAnswer = { addr: "nope3.example:3306", kind: "name_not_found" };
+  scheduled.length = 0;
+  f.fire("submit"); await flush(4);
+  const lineBefore = findLine();
+  f.elements.source_host.value = "nope3.exampl"; f.elements.source_host.fire("input");
+  out.lineAfterTyping = { before: lineBefore, after: (f.querySelector("p#connect-find-auto") || {})._text || "" };
+  // An automatic look that fails on the network keeps looking; one refused
+  // as a request stops and takes the line back.
+  f.elements.source_host.value = "nope3.example";
+  scheduled.length = 0;
+  f.fire("submit"); await flush(4);
+  const netFn = scheduled.shift();
+  const realApi2 = ctx.__api;
+  ctx.__api = async (p, o) => { if (p === "/api/servers/identify") { calls.push("POST " + p); throw new Error("network down"); } return realApi2(p, o); };
+  if (netFn) { netFn(); await flush(4); }
+  out.autoNetFail = { scheduled: scheduled.length, line: (f.querySelector("p#connect-find-auto") || {})._text || "" };
+  const refFn = scheduled.shift();
+  ctx.__api = async (p, o) => { if (p === "/api/servers/identify") { const e = new Error("bad request"); e.status = 400; throw e; } return realApi2(p, o); };
+  if (refFn) { refFn(); await flush(4); }
+  out.autoRefused = { scheduled: scheduled.length, line: (f.querySelector("p#connect-find-auto") || {})._text || "" };
+  ctx.__api = realApi2;
+  // Use <host> pressed while a look runs is not lost: it looks right after.
+  vm.runInContext("showConnectForm(null)", ctx);
+  f = form();
+  f.elements.source_host.value = "localhost";
+  ctx.__identifyAnswer = { addr: "localhost:3306", kind: "loopback_in_container", suggest: "host.docker.internal:3306" };
+  f.fire("submit"); await flush(4);
+  const useBtn = f.querySelector("div#connect-found").querySelectorAll("button").find((b) => (b._text || "").startsWith("Use "));
+  let openBusy; const busyGate = new Promise((r) => { openBusy = r; });
+  ctx.__api = async (p, o) => { if (p === "/api/servers/identify") await busyGate; return realApi2(p, o); };
+  f.fire("submit"); await flush();
+  ctx.__identifyAnswer = { addr: "host.docker.internal:3306", version: "8.4.3", flavor: "mysql" };
+  if (useBtn) useBtn.fire("click");
+  openBusy(); await flush(8);
+  ctx.__api = realApi2;
+  out.useWhileBusy = { step: step(f), host: f.elements.source_host.value };
+  // A box the person ticked is not a detection: after a reload the title
+  // still says only what the server's name showed.
+  vm.runInContext("showConnectForm({ source_host: 'db', source_port: '3307', source_user: 'alice', identified: { version: '8.0.39', flavor: 'mysql', managed_choice: true } })", ctx);
+  f = form();
+  out.choiceRestored = { title: identified(f)[0], checked: !!f.elements.cx_managed.checked };
   // Step 2: I ran it with no password checks nothing.
   f = await toStep2("db1", mariaRDS);
   f.elements.source_password.value = "";
@@ -683,6 +735,21 @@ func TestConnectScreenWiring(t *testing.T) {
 			Checked, Block bool
 			Put            string
 		}
+		LoopbackRetries int
+		UseWhileBusy    struct{ Step, Host string }
+		ChoiceRestored  struct {
+			Title   string
+			Checked bool
+		}
+		LineAfterTyping struct{ Before, After string }
+		AutoNetFail     struct {
+			Scheduled int
+			Line      string
+		}
+		AutoRefused struct {
+			Scheduled int
+			Line      string
+		}
 		RestoredFindIt struct {
 			Step, Pw     string
 			PwAgainShown bool
@@ -776,6 +843,24 @@ func TestConnectScreenWiring(t *testing.T) {
 	if fr.AfterEdit != 0 || fr.AfterSilentEdit != 0 || fr.AfterTyping != 0 {
 		t.Errorf("a retry probed after Host changed: typed %d, changed with no event %d, typed and put back %d; want none",
 			fr.AfterEdit, fr.AfterSilentEdit, fr.AfterTyping)
+	}
+	if u := out.UseWhileBusy; u.Step != "2" || u.Host != "host.docker.internal" {
+		t.Errorf("Use pressed while a look ran: %+v; want the new host looked at right after", u)
+	}
+	if c := out.ChoiceRestored; c.Title != "MySQL 8.0" || !c.Checked {
+		t.Errorf("a ticked RDS box after a reload: %+v; want the box ticked and the title without a detection it never had", c)
+	}
+	if out.LoopbackRetries != 0 {
+		t.Errorf("localhost in a container was scheduled to be looked at again %d times; its probe reads a real server's greeting", out.LoopbackRetries)
+	}
+	if l := out.LineAfterTyping; l.Before != "Trying again in 10 seconds." || l.After != "" {
+		t.Errorf("the retry line after typing: %+v; want it taken back", l)
+	}
+	if a := out.AutoNetFail; a.Scheduled != 1 || a.Line != "Trying again in 10 seconds." {
+		t.Errorf("an automatic look that failed on the network: %+v; want it to keep looking", a)
+	}
+	if a := out.AutoRefused; a.Scheduled != 0 || a.Line != "" {
+		t.Errorf("an automatic look refused as a request: %+v; want no retry and the line taken back", a)
 	}
 	if fr.Found.Step != "2" || fr.Found.Pending != 0 {
 		t.Errorf("a retry that finds the server: %+v; want step 2 and no more retries", fr.Found)
@@ -878,7 +963,7 @@ func TestConnectScreenWiring(t *testing.T) {
 	if rr := out.RefusedRequest; rr.Scheduled != 0 || rr.Lights != 0 || !strings.HasPrefix(rr.Auto, "A server named db1 already exists.") || !strings.Contains(rr.Auto, "Press Check again") {
 		t.Errorf("a check refused as a request: %+v; want the server's words once, the old lights gone, no automatic retry", rr)
 	}
-	if mk := out.ManagedKept; !mk.Checked || !mk.Block || !strings.Contains(mk.Put, `"managed":"rds"`) {
+	if mk := out.ManagedKept; !mk.Checked || !mk.Block || !strings.Contains(mk.Put, `"managed_choice":true`) || strings.Contains(mk.Put, `"managed":`) {
 		t.Errorf("the RDS box the person ticked: %+v; want it kept across Find it and saved in the draft", mk)
 	}
 	if rf := out.RestoredFindIt; rf.Step != "2" || rf.Pw != "" || !rf.PwAgainShown {
