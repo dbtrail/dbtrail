@@ -13,6 +13,7 @@ import (
 
 	yaml "go.yaml.in/yaml/v2"
 
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
@@ -314,8 +315,43 @@ func LoadRegistry(path string) (*Registry, error) {
 			"turn_it_off_with", "the watch daemon's --baseline-carry-forward-unchanged=false (or BINTRAIL_BASELINE_CARRY_FORWARD_UNCHANGED=false)",
 			"note", "the block is left in the file untouched")
 	}
+	warnUnusableSSLModes(path, r.file.Servers)
 	r.syncBucketStores()
 	return r, nil
+}
+
+// warnUnusableSSLModes names, once at load, each entry whose ssl_mode is not
+// one capture accepts. It does not refuse the file: the console is a recovery
+// path and must boot. That entry's capture and checks fail with the same
+// reason when they connect; this line says it before anyone has to look.
+func warnUnusableSSLModes(path string, entries []ServerEntry) {
+	for _, e := range entries {
+		if e.SSLMode != "" && !config.ValidSSLMode(e.SSLMode) {
+			slog.Warn("a server's ssl_mode is not a TLS mode; its capture and checks will refuse to connect until it is fixed",
+				"file", path, "server", e.Name, "ssl_mode", e.SSLMode,
+				"use", "disabled, preferred, required, verify-ca or verify-identity (or delete the line for preferred)")
+		}
+	}
+}
+
+// DefaultSourceSSLMode is the TLS mode a source connection uses when its
+// entry sets none: try TLS, and fall back to cleartext (with a warning) only
+// when the server offers no TLS at all.
+const DefaultSourceSSLMode = "preferred"
+
+// SourceSSL is the TLS the SOURCE connection uses: the entry's ssl_* fields,
+// with an empty ssl_mode meaning DefaultSourceSSLMode. Capture and every
+// check the console runs against the source read it here, so a check never
+// connects differently from the capture it is checking (a server that only
+// accepts encrypted connections failed the startup checks in cleartext while
+// capture, over TLS, would have worked). The mode is passed through as
+// written: a misspelled one fails in config.BuildTLSConfig, for both.
+func (e ServerEntry) SourceSSL() config.SSL {
+	mode := e.SSLMode
+	if mode == "" {
+		mode = DefaultSourceSSLMode
+	}
+	return config.SSL{Mode: mode, CA: e.SSLCA, Cert: e.SSLCert, Key: e.SSLKey}
 }
 
 // BucketStore builds the per-bucket store this entry's S3 settings describe.

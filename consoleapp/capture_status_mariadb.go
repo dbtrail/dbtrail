@@ -35,7 +35,7 @@ import (
 // source is never the index's own server.
 
 // captureHeadFromDBsMariaDB is captureHeadFromDBs for a MariaDB source.
-func captureHeadFromDBsMariaDB(ctx context.Context, indexDSN, sourceDSN string) captureProbeResult {
+func captureHeadFromDBsMariaDB(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL) captureProbeResult {
 	idx, err := config.Connect(probeDSN(indexDSN))
 	if err != nil {
 		return captureProbeResult{detail: "the index did not answer", cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
@@ -46,7 +46,7 @@ func captureHeadFromDBsMariaDB(ctx context.Context, indexDSN, sourceDSN string) 
 		return captureProbeResult{detail: "the capture's checkpoint could not be read", cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
 	}
 	r, err := headFromStateMariaDB(ctx, st, func() (*sql.DB, error) {
-		return config.Connect(sourceProbeDSN(sourceDSN))
+		return connectSource(sourceProbeDSN(sourceDSN), ssl)
 	})
 	if err != nil {
 		r.cause = config.ScrubDSNError(err, indexDSN, sourceDSN)

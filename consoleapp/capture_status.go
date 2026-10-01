@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"runtime/debug"
 	"strings"
@@ -84,6 +85,9 @@ type captureStatusReporter struct {
 	// reported); nil or "" reads as MySQL. The boot entry carries no flavor
 	// of its own.
 	bootFlavor func() string
+	// bootSSL is the TLS of the daemon's own capture (watch's --ssl-*
+	// flags); zero reads as console.DefaultSourceSSLMode.
+	bootSSL config.SSL
 
 	mu    sync.Mutex
 	slots map[string]*captureSlot
@@ -104,18 +108,33 @@ func (c *captureStatusReporter) withBootFlavor(flavor func() string) *captureSta
 	return c
 }
 
+// withBootSSL sets the TLS the daemon's own capture connects with, so the
+// boot server's status read connects the same way.
+func (c *captureStatusReporter) withBootSSL(ssl config.SSL) *captureStatusReporter {
+	c.bootSSL = ssl
+	return c
+}
+
+// sourceOf is the source e's status is read from: its DSN, flavor and TLS,
+// the daemon's own for the boot server. The TLS is what capture of that
+// source uses, so the read cannot fail on a server capture reaches.
+func (c *captureStatusReporter) sourceOf(e console.ServerEntry) (dsn, flavor string, ssl config.SSL) {
+	dsn, flavor, ssl = e.SourceDSN, e.SourceFlavor(), e.SourceSSL()
+	if e.ID == bootCaptureServerID {
+		dsn, ssl = c.bootSourceDSN, sourceSSLOrDefault(c.bootSSL)
+		if c.bootFlavor != nil && c.bootFlavor() == console.FlavorMariaDB {
+			flavor = console.FlavorMariaDB
+		}
+	}
+	return dsn, flavor, ssl
+}
+
 // CaptureStatus answers for e, from the last answer while it is fresh.
 func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.ServerEntry) console.CaptureStatus {
 	unknown := func(detail string) console.CaptureStatus {
 		return console.CaptureStatus{ServerID: e.ID, State: console.CaptureStateUnknown, Detail: detail}
 	}
-	source, flavor := e.SourceDSN, e.SourceFlavor()
-	if e.ID == bootCaptureServerID {
-		source = c.bootSourceDSN
-		if c.bootFlavor != nil && c.bootFlavor() == console.FlavorMariaDB {
-			flavor = console.FlavorMariaDB
-		}
-	}
+	source, flavor, ssl := c.sourceOf(e)
 	// What is known without asking anyone.
 	switch {
 	case source == "":
@@ -123,7 +142,11 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 	case e.IsPostgres():
 		return unknown("PostgreSQL sources are not compared yet")
 	}
-	now, read := time.Now, captureHeadFromDBs
+	// The real reads take the source's TLS; a test's read does not need it.
+	now := time.Now
+	read := func(ctx context.Context, indexDSN, sourceDSN string) captureProbeResult {
+		return captureHeadFromDBs(ctx, indexDSN, sourceDSN, ssl)
+	}
 	if c.now != nil {
 		now = c.now
 	}
@@ -132,13 +155,16 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 	}
 	if flavor == console.FlavorMariaDB {
 		// Up to date on an exact match, else unknown (capture_status_mariadb.go).
-		read = captureHeadFromDBsMariaDB
+		read = func(ctx context.Context, indexDSN, sourceDSN string) captureProbeResult {
+			return captureHeadFromDBsMariaDB(ctx, indexDSN, sourceDSN, ssl)
+		}
 		if c.readMariaDB != nil {
 			read = c.readMariaDB
 		}
 	}
 	// The flavor too: an edit of the flavor alone changes which read runs.
-	key := e.DSN + "\x00" + source + "\x00" + flavor
+	// And the TLS: an edit of ssl_mode alone changes how the read connects.
+	key := e.DSN + "\x00" + source + "\x00" + flavor + "\x00" + fmt.Sprint(ssl)
 
 	c.mu.Lock()
 	if c.slots == nil {
@@ -390,7 +416,7 @@ func countGTIDs(s *gomysql.MysqlGTIDSet) int64 {
 // captureHeadFromDBs is captureFromDBs for the capture status: the same
 // connections, bounds and scrubbing, and compareWithSource for the read,
 // but refusing only on what checkpointComparable refuses.
-func captureHeadFromDBs(ctx context.Context, indexDSN, sourceDSN string) captureProbeResult {
+func captureHeadFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL) captureProbeResult {
 	idx, err := config.Connect(probeDSN(indexDSN))
 	if err != nil {
 		return captureProbeResult{detail: "the index did not answer", cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
@@ -401,7 +427,7 @@ func captureHeadFromDBs(ctx context.Context, indexDSN, sourceDSN string) capture
 		return captureProbeResult{detail: "the capture's checkpoint could not be read", cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
 	}
 	r, err := headFromState(ctx, idx, st, func() (*sql.DB, error) {
-		return config.Connect(sourceProbeDSN(sourceDSN))
+		return connectSource(sourceProbeDSN(sourceDSN), ssl)
 	})
 	if err != nil {
 		r.cause = config.ScrubDSNError(err, indexDSN, sourceDSN)

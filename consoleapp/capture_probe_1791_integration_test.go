@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -30,7 +31,7 @@ func TestIntegrationProbeCapture(t *testing.T) {
 
 	probe := func() captureProbeResult {
 		t.Helper()
-		return captureFromDBs(ctx, indexDSN, sourceDSN, anchor, time.Time{})
+		return captureFromDBs(ctx, indexDSN, sourceDSN, config.SSL{}, anchor, time.Time{})
 	}
 	// A file-mode index: no stream_state row.
 	if r := probe(); r.verdict != "" || r.detail != "the index has no live capture on record" {

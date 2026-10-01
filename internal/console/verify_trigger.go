@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/verify/verdict"
 )
 
@@ -97,12 +98,15 @@ const (
 // controller. The index/source DSNs (secrets) stay inside the process — never
 // written to disk or serialized to any HTTP response.
 type VerifyRequest struct {
-	ServerID    string
-	ServerName  string
-	Mode        VerifyMode
-	Tables      []string // optional "schema.table" filter; empty = all
-	IndexDSN    string
-	SourceDSN   string // only required/used for VerifyModeLiveSource
+	ServerID   string
+	ServerName string
+	Mode       VerifyMode
+	Tables     []string // optional "schema.table" filter; empty = all
+	IndexDSN   string
+	SourceDSN  string // only required/used for VerifyModeLiveSource
+	// SourceSSL is how the live-source check connects to the source: the
+	// entry's SourceSSL, the TLS capture uses for it.
+	SourceSSL   config.SSL
 	BaselineDir string
 	BaselineS3  string
 	NoArchive   bool
@@ -336,7 +340,7 @@ func (s *Server) handleVerifyTrigger(w http.ResponseWriter, r *http.Request) {
 
 	req := VerifyRequest{
 		ServerID: e.ID, ServerName: e.Name, Mode: mode, Tables: body.Tables,
-		IndexDSN: e.DSN, SourceDSN: e.SourceDSN,
+		IndexDSN: e.DSN, SourceDSN: e.SourceDSN, SourceSSL: e.SourceSSL(),
 		BaselineDir: e.BaselineDir, BaselineS3: e.BaselineS3, NoArchive: e.NoArchive,
 	}
 	if err := s.verifyCtrl.Trigger(req); err != nil {

@@ -153,6 +153,35 @@ type buildConfig struct {
 	snapshot      snapshotState
 	sourceOnly    bool
 	loopbackRetry func(host, port string) string
+	// sourceSSL, when set, is how the source connection uses TLS (see
+	// WithSourceSSL). nil keeps the DSN's own tls= as the only TLS setting.
+	sourceSSL *config.SSL
+}
+
+// WithSourceSSL makes the checks open the source the way capture does:
+// config.ConnectSSL with the same TLS mode and files (#879/#946). Without it,
+// a server that only accepts encrypted connections (require_secure_transport)
+// failed the checks in cleartext while capture, over TLS, would have worked.
+// Pass the value capture gets: a console entry's ServerEntry.SourceSSL, or
+// watch's --ssl-* flags.
+func WithSourceSSL(ssl config.SSL) BuildOption {
+	return func(c *buildConfig) { c.sourceSSL = &ssl }
+}
+
+// openSource opens the source for the checks: through config.ConnectSSL when
+// WithSourceSSL was given, else config.Connect (the DSN's tls= alone). Under
+// "preferred", a server with no TLS at all is checked in cleartext, as capture
+// will connect to it, and that is logged as a warning: a person asked for
+// these checks, so it runs once per ask, not on a timer.
+func (c *buildConfig) openSource(dsn string) (*sql.DB, error) {
+	if c.sourceSSL == nil {
+		return config.Connect(dsn)
+	}
+	return config.ConnectSSL(dsn, *c.sourceSSL, func(err error) {
+		slog.Warn("doctor: the source offers no TLS; checking it WITHOUT encryption "+
+			"(ssl mode preferred), the way capture will connect to it",
+			"host", config.DSNHost(dsn), "error", err)
+	})
 }
 
 // WithRetainNote names WHERE the retention window came from, for the capacity
@@ -235,7 +264,20 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 	schemas := cliutil.ParseSchemaList(schemasCSV)
 
 	// ── Source MySQL checks ──────────────────────────────────────────────────
-	sourceDB, err := config.Connect(sourceDSN)
+	// A TLS setting that cannot be used is a local problem: say which one,
+	// before any connection attempt, instead of the network advice below.
+	if cfg.sourceSSL != nil {
+		s := *cfg.sourceSSL
+		if _, err := config.BuildTLSConfig(s.Mode, s.CA, s.Cert, s.Key, config.DSNHost(sourceDSN)); err != nil {
+			c := CheckResult{Name: SourceConnectionCheckName, Status: StatusFail, Detail: err.Error()}
+			if detail, fix, ok := TLSSettingsText(err); ok {
+				c.Detail, c.Remediation = detail, fix
+			}
+			report.add(c)
+			return report
+		}
+	}
+	sourceDB, err := cfg.openSource(sourceDSN)
 	if err != nil {
 		c := CheckResult{
 			Name:   SourceConnectionCheckName,
@@ -253,6 +295,9 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 			c.Kind = KindLoopbackInContainer
 			c.Detail += "; a MySQL server answered at " + alt + " instead"
 			c.Remediation = loopbackRemediation(sourceDSN, alt)
+		}
+		if refusesUnencrypted(err) {
+			c.Detail, c.Remediation = unencryptedRefusal(sourceDSN, cfg.sourceSSL)
 		}
 		report.add(c)
 		return report

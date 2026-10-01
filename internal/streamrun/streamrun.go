@@ -3,7 +3,6 @@ package streamrun
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -11,14 +10,12 @@ import (
 	"math"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
-	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/dbtrail/dbtrail/internal/cliutil"
@@ -692,94 +689,35 @@ func describeCheckpoint(mode, file string, pos uint64, gtidSet string) string {
 
 // ─── TLS configuration ───────────────────────────────────────────────────────────────
 
-// buildTLSConfig returns a *tls.Config for the given ssl-mode, or nil for
-// "disabled". serverName is the target host (used only for verify-identity).
+// buildTLSConfig is config.BuildTLSConfig: the one TLS builder capture and
+// the console's checks share, so they cannot disagree about a mode.
 func buildTLSConfig(mode, ca, cert, key, serverName string) (*tls.Config, error) {
-	if mode == "disabled" {
-		return nil, nil
-	}
-	switch mode {
-	case "preferred", "required", "verify-ca", "verify-identity":
-	default:
-		return nil, fmt.Errorf("invalid --ssl-mode %q: must be one of disabled, preferred, required, verify-ca, verify-identity", mode)
-	}
-	if (cert == "") != (key == "") {
-		return nil, fmt.Errorf("--ssl-cert and --ssl-key must both be specified together")
-	}
-
-	cfg := &tls.Config{}
-
-	// Load CA pool (optional — system CAs used when empty).
-	var caPool *x509.CertPool
-	if ca != "" {
-		pem, err := os.ReadFile(ca)
-		if err != nil {
-			return nil, fmt.Errorf("read --ssl-ca %q: %w", ca, err)
-		}
-		caPool = x509.NewCertPool()
-		if !caPool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("--ssl-ca %q: no valid certificates found", ca)
-		}
-		cfg.RootCAs = caPool
-	}
-
-	// Load client certificate for mutual TLS.
-	if cert != "" {
-		kp, err := tls.LoadX509KeyPair(cert, key)
-		if err != nil {
-			return nil, fmt.Errorf("load --ssl-cert/--ssl-key: %w", err)
-		}
-		cfg.Certificates = []tls.Certificate{kp}
-	}
-
-	switch mode {
-	case "preferred", "required":
-		// Encrypt the connection but skip server certificate verification.
-		cfg.InsecureSkipVerify = true //nolint:gosec // intentional for these modes
-	case "verify-ca":
-		// Verify the certificate chain against the CA pool but not the hostname.
-		cfg.InsecureSkipVerify = true //nolint:gosec // hostname check done via VerifyConnection
-		cfg.VerifyConnection = func(cs tls.ConnectionState) error {
-			if len(cs.PeerCertificates) == 0 {
-				return errors.New("server presented no certificate")
-			}
-			opts := x509.VerifyOptions{
-				Roots:         caPool, // nil → system CAs
-				Intermediates: x509.NewCertPool(),
-			}
-			for _, c := range cs.PeerCertificates[1:] {
-				opts.Intermediates.AddCert(c)
-			}
-			_, err := cs.PeerCertificates[0].Verify(opts)
-			return err
-		}
-	case "verify-identity":
-		// Full TLS verification: certificate chain + hostname.
-		cfg.ServerName = serverName
-	}
-
-	return cfg, nil
+	return config.BuildTLSConfig(mode, ca, cert, key, serverName)
 }
 
-// connectHelper opens an index or source helper connection (config.ConnectWithTLS)
-// honoring --ssl-mode, mirroring the binlog syncer's TLS via the same
-// buildTLSConfig. These connections carry full row images (PII) and credentials,
-// so --ssl-mode must protect them too — not only the replication stream (#946).
-// label names the connection in log/error messages.
+// connectHelper opens an index or source helper connection honoring --ssl-mode,
+// mirroring the binlog syncer's TLS via the same buildTLSConfig. These
+// connections carry full row images (PII) and credentials, so --ssl-mode must
+// protect them too, not only the replication stream (#946). label names the
+// connection in log/error messages.
 //
-// Under "preferred" it does the SAME explicit two-step as the syncer: try TLS,
-// and only if the server genuinely lacks TLS log a loud warning and retry in
-// cleartext — never the driver's OWN silent AllowFallbackToPlaintext, so every
-// connection that may send data unencrypted warns identically. required/verify-*
-// never retry: a TLS-incapable server fails closed with an actionable hint.
+// The connect itself is config.ConnectSSL, shared with the console's checks of
+// the same source: under "preferred" it is the SAME explicit two-step as the
+// syncer (try TLS, and only if the server genuinely lacks TLS log a loud
+// warning and retry in cleartext, never the driver's OWN silent
+// AllowFallbackToPlaintext), so every connection that may send data
+// unencrypted warns identically. required/verify-* never retry: a
+// TLS-incapable server fails closed with an actionable hint.
 func connectHelper(dsn, label, mode, ca, cert, key string) (*sql.DB, error) {
-	tlsCfg, err := buildTLSConfig(mode, ca, cert, key, config.DSNHost(dsn))
-	if err != nil {
+	// Settings errors first and unwrapped (a bad --ssl-mode or an unreadable
+	// --ssl-ca is a local problem): wrapped below they would carry tlsHint's
+	// "enable TLS on the server" advice, which points at the wrong fix.
+	if _, err := buildTLSConfig(mode, ca, cert, key, config.DSNHost(dsn)); err != nil {
 		return nil, err
 	}
-	// A tls= in the DSN wins (operator override) — but under a mandatory
+	// A tls= in the DSN wins (operator override), but under a mandatory
 	// --ssl-mode that override can silently WEAKEN the connection (e.g. a stale
-	// tls=skip-verify under --ssl-mode=verify-identity → encrypted but
+	// tls=skip-verify under --ssl-mode=verify-identity: encrypted but
 	// unauthenticated). Surface the precedence so it is a conscious choice. The
 	// message stays neutral: the DSN's own tls= may also be *stronger* than the
 	// mode, and we can't tell which here (#946).
@@ -788,26 +726,15 @@ func connectHelper(dsn, label, mode, ca, cert, key string) (*sql.DB, error) {
 			"precedence over --ssl-mode; verify it meets your security requirement",
 			"connection", label, "ssl_mode", mode)
 	}
-
-	db, err := config.ConnectWithTLS(dsn, tlsCfg)
-	if err == nil {
-		return db, nil
-	}
-	// preferred: retry in cleartext ONLY when the server genuinely lacks TLS, and
-	// log it loudly (never the driver's silent AllowFallbackToPlaintext). An
-	// explicit tls= in the DSN survives this nil retry (applyTLS keeps it), so the
-	// retry re-attempts the same config and fails closed rather than downgrading.
-	if mode == "preferred" && isTLSUnsupportedError(err) {
+	db, err := config.ConnectSSL(dsn, config.SSL{Mode: mode, CA: ca, Cert: cert, Key: key}, func(err error) {
 		slog.Warn("server does not support TLS; connecting WITHOUT encryption "+
 			"(--ssl-mode preferred) — credentials and data will be sent in cleartext",
 			"connection", label, "error", err)
-		db, err = config.ConnectWithTLS(dsn, nil)
-		if err != nil {
-			return nil, fmt.Errorf("connect %s (cleartext retry): %w", label, err)
-		}
-		return db, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("connect %s%s: %w", label, tlsHint(mode), err)
 	}
-	return nil, fmt.Errorf("connect %s%s: %w", label, tlsHint(mode), err)
+	return db, nil
 }
 
 // tlsHint returns a parenthetical remediation appended to a helper-connection
@@ -823,27 +750,11 @@ func tlsHint(mode string) string {
 	}
 }
 
-// isTLSUnsupportedError reports whether err means the server does not support
-// TLS at all — the ONLY condition under which --ssl-mode=preferred may retry in
-// cleartext. The go-sql-driver helper connections return the sentinel
-// drivermysql.ErrNoTLS; the go-mysql binlog syncer returns a fixed message when
-// the server omits the CLIENT_SSL capability (client/auth.go); a mid-handshake
-// plaintext reply surfaces as tls.RecordHeaderError. Every other failure (auth
-// denied, unreachable host, bad binlog position) must NOT trigger a downgrade,
-// or credentials and data would be resent unencrypted on an unrelated error
-// (#947).
+// isTLSUnsupportedError is config.IsTLSUnsupportedError: the ONLY condition
+// under which --ssl-mode=preferred may retry in cleartext (#947), for the
+// helper connections and the binlog syncer alike.
 func isTLSUnsupportedError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, drivermysql.ErrNoTLS) {
-		return true
-	}
-	var rhe tls.RecordHeaderError
-	if errors.As(err, &rhe) {
-		return true
-	}
-	return strings.Contains(err.Error(), "the MySQL Server does not support TLS")
+	return config.IsTLSUnsupportedError(err)
 }
 
 // ─── Start position resolution ───────────────────────────────────────────────
