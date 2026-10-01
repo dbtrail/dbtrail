@@ -3183,3 +3183,14 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 .s3-signing { margin-top: 10px; }
 .s3-signing[hidden] { display: none; }
 .stg-staged { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+
+/* Snapshot failure card (#1986): the headline, the one fix the daemon could
+   name, and the full error folded under "Technical details". The same block
+   sits in the failure toast, the Overview's first-run step and the schedule
+   card. */
+.snap-fail p { margin: 6px 0 0; }
+.snap-fail .snap-fail-head { font-weight: 600; margin-top: 0; }
+.snap-fail .form-code { margin: 6px 0 6px; white-space: pre-wrap; word-break: break-all; }
+.snap-fail-details { margin-top: 8px; }
+.snap-fail-details summary { cursor: pointer; }
+.snap-fail-raw { margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--f-mono); font-size: 12px; }

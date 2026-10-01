@@ -31,6 +31,12 @@ type FirstRunStep struct {
 	State  string `json:"state"`
 	Detail string `json:"detail,omitempty"`
 	Fix    string `json:"fix,omitempty"`
+	// SnapshotFailed marks the snapshot step failed by its last run (#1986):
+	// the page draws the snapshot failure card for it, with Detail inside its
+	// "Technical details" fold. Failure is why, when the cause is one the
+	// card can explain; nil draws the generic card.
+	SnapshotFailed bool             `json:"snapshot_failed,omitempty"`
+	Failure        *SnapshotFailure `json:"failure,omitempty"`
 }
 
 // FirstRunReport is GET /api/servers/{id}/first-run. Complete: the list is no
@@ -210,6 +216,7 @@ func backupStep(in firstRunInput) (FirstRunStep, bool) {
 		step.State, step.Fix = firstRunDone, ""
 	case b.State == "failed":
 		step.State, step.Detail, step.Fix = firstRunFailed, withCheckError(b.LastError, in.SnapshotCheckError), "Try again on the "+PageSnapshots+" page."
+		step.SnapshotFailed, step.Failure = true, b.Failure
 	case b.State == "running":
 		step.State, step.Detail, step.Fix = firstRunRunning, withCheckError("", in.SnapshotCheckError), ""
 	case in.SnapshotExists:

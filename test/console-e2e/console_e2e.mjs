@@ -2460,6 +2460,59 @@ try {
     ? ok("baselines: the newest row wears the treatment, carries relative age, and drops the constant column")
     : bad("baselines: the newest row wears the treatment, carries relative age, and drops the constant column", stg.rowText);
 
+  // Scenario 15b1 — a failed snapshot in plain words (#1986): the REAL Read
+  // database now button, with the daemon's answer stubbed to a refusal that
+  // carries a missing_permission kind (no dump runs). The failure toast must
+  // say the headline, show the GRANT with its Copy button, and keep the raw
+  // error inside a CLOSED "Technical details" fold, which this opens before
+  // reading it: a closed <details> hides its text from Playwright.
+  {
+    const grant = "GRANT LOCK TABLES ON *.* TO `dbtrail`@`%`;";
+    const raw = "dump: lock-all baseline mode requires the LOCK TABLES privilege; output: ** (mydumper:7): CRITICAL **: Access denied";
+    const route = "**/api/servers/*/baseline";
+    await page.route(route, (r) => r.request().method() === "POST"
+      ? r.fulfill({ status: 202, contentType: "application/json", body: "{}" })
+      : r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ baseline: { state: "failed", finished_at: "2026-10-01T09:00:00Z",
+          last_error: raw, failure: { kind: "missing_permission", grant, privileges: 1 } } }) }));
+    await page.evaluate(() => {
+      const t = document.getElementById("toast-error");
+      if (t && !t.hidden) dismissToast();
+      const b = Array.from(document.querySelectorAll(".snap-tab-actions button")).find((x) => x.textContent === "Read database now");
+      // The button asks first; answer yes for this one click.
+      const ask = window.confirm;
+      window.confirm = () => true;
+      b.click();
+      window.confirm = ask;
+    });
+    await page.waitForFunction(() => !document.getElementById("toast-error").hidden, null, { timeout: 15000 });
+    const closedBefore = await page.evaluate(() => {
+      const d = document.querySelector("#toast-error .snap-fail-details");
+      return !!d && !d.open;
+    });
+    await page.click("#toast-error .snap-fail-details summary");
+    const fail = await page.evaluate(() => {
+      const t = document.getElementById("toast-error");
+      const d = t.querySelector(".snap-fail-details");
+      const pre = t.querySelector(".snap-fail-grant");
+      const shown = Array.from(t.querySelectorAll(".toast-msg")).map((m) => {
+        const c = m.cloneNode(true);
+        c.querySelectorAll("details, pre").forEach((x) => x.remove());
+        return c.textContent;
+      }).join(" ");
+      return { shown, open: !!d && d.open, fold: d ? d.innerText : "", sql: pre ? pre.textContent : "",
+        sqlVisible: !!pre && pre.getBoundingClientRect().height > 0,
+        copy: Array.from(t.querySelectorAll("button")).some((b) => b.textContent === "Copy") };
+    });
+    await page.unroute(route);
+    await page.evaluate(() => dismissToast());
+    (closedBefore && fail.open && /^Snapshot did not finish\. Your database was not changed\./.test(fail.shown)
+      && /needs one more permission\. Run this on your database, then press Read database now again:/.test(fail.shown)
+      && fail.sql === grant && fail.sqlVisible && fail.copy
+      && fail.fold.includes("CRITICAL") && !/CRITICAL|Access denied/.test(fail.shown))
+      ? ok("snapshot failure: the toast shows the headline, the GRANT with Copy, and the error in a closed Technical details fold")
+      : bad("snapshot failure: the toast shows the headline, the GRANT with Copy, and the error in a closed Technical details fold", JSON.stringify({ closedBefore, ...fail }));
+  }
+
   // Scenario 15b2 — the first screen's word budget (#1573): arriving at
   // /snapshots, with everything folded, the page may show at most 150 words
   // above the fold. Three pages became one, and the failure mode of that

@@ -424,6 +424,7 @@ func (s *baselineSupervisor) recoverDumpJob(req console.BaselineRequest, own *du
 	own.st.State = "failed"
 	own.st.Uploading = false
 	own.st.LastError = fmt.Sprintf("internal error during %s: %v", phase, r)
+	own.st.Failure = nil
 	own.st.FinishedAt = nowStamp()
 }
 
@@ -498,6 +499,7 @@ func (s *baselineSupervisor) publishDump(req console.BaselineRequest, out dumpOu
 	st.Published = true
 	st.Uploading = true
 	st.LastError = ""
+	st.Failure = nil
 	st.Tables = out.stats.TablesProcessed
 	st.ViewsSkipped = len(out.stats.ViewsSkipped)
 	st.Rows = out.stats.RowsWritten
@@ -665,6 +667,12 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	if rec.SnapshotTime != "" {
 		rec.IndexMark = out.indexMark
 	}
+	// Why it failed, as data, for the page's plain-words card (#1986). Only
+	// when nothing was published: a snapshot whose upload failed exists, and
+	// its card is a different one.
+	if rec.SnapshotTime == "" {
+		rec.Failure = snapshotFailureOf(err, req)
+	}
 	s.recordRun(req.ServerID, req.ServerName, rec, err)
 
 	s.mu.Lock()
@@ -680,6 +688,7 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	if err != nil {
 		st.State = "failed"
 		st.LastError = err.Error()
+		st.Failure = rec.Failure
 		// A full read refused for disk (#1938), or one that found the disk
 		// full anyway, reads the same to the page as a refused update.
 		st.DiskRefused = foldDiskRefused(err)
@@ -700,6 +709,7 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	}
 	st.State = "succeeded"
 	st.LastError = ""
+	st.Failure = nil
 	st.Tables = out.stats.TablesProcessed
 	st.ViewsSkipped = len(out.stats.ViewsSkipped)
 	st.Rows = out.stats.RowsWritten
@@ -1125,14 +1135,14 @@ func planMydumper(lockMode baseline.LockMode, src lockModeSource) (mydumperPlan,
 	case !v.SupportsLockMode():
 		if !ftwrl {
 			if src == lockModeAutomatic {
-				return mydumperPlan{}, fmt.Errorf("%s, which needs mydumper %s or newer, and %s is mydumper %s, "+
+				return mydumperPlan{}, &mydumperTooOldError{min: mydumperlock.LockModeFloor, err: fmt.Errorf("%s, which needs mydumper %s or newer, and %s is mydumper %s, "+
 					"which does not accept --sync-thread-lock-mode. Install mydumper %s or newer (distribution packages are often older)",
-					autoNeedsMode(lockMode), mydumperlock.LockModeFloor, path, v, mydumperlock.LockModeFloor)
+					autoNeedsMode(lockMode), mydumperlock.LockModeFloor, path, v, mydumperlock.LockModeFloor)}
 			}
-			return mydumperPlan{}, fmt.Errorf("lock mode %s needs mydumper %s or newer, and %s is mydumper %s, "+
+			return mydumperPlan{}, &mydumperTooOldError{min: mydumperlock.LockModeFloor, err: fmt.Errorf("lock mode %s needs mydumper %s or newer, and %s is mydumper %s, "+
 				"which does not accept --sync-thread-lock-mode. Install mydumper %s or newer (distribution packages are often older), "+
 				"or %s, which this build uses by default",
-				lockMode, mydumperlock.LockModeFloor, path, v, mydumperlock.LockModeFloor, chosenModeUndo(src))
+				lockMode, mydumperlock.LockModeFloor, path, v, mydumperlock.LockModeFloor, chosenModeUndo(src))}
 		}
 		fallback := fmt.Sprintf("mydumper %s is older than %s, so the dump runs without --sync-thread-lock-mode "+
 			"and --trx-tables and takes that build's own FTWRL", v, mydumperlock.LockModeFloor)
@@ -1242,10 +1252,10 @@ func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDi
 				"mydumper", plan.version.String(), "error", verr)
 		}
 		if verr == nil && !plan.version.RecordsPositionOn(sv) {
-			return fmt.Errorf("mydumper %s cannot record the binlog position on MySQL %s: builds older than %s read it "+
+			return &mydumperTooOldError{min: mydumperlock.LockModeFloor, err: fmt.Errorf("mydumper %s cannot record the binlog position on MySQL %s: builds older than %s read it "+
 				"with SHOW MASTER STATUS, which MySQL 8.4 removed, so the snapshot would be refused after a full dump and "+
 				"the dump was not started. Install mydumper %s or newer",
-				plan.version, sv, mydumperlock.PositionFloor, mydumperlock.LockModeFloor)
+				plan.version, sv, mydumperlock.PositionFloor, mydumperlock.LockModeFloor)}
 		}
 	}
 

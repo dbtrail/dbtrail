@@ -777,7 +777,13 @@ function toast(msg) {
 // 2.2s auto-hide it was not merely easy to miss, it was unreadable. The
 // operator was left with a button that did nothing and no way to recover the
 // reason. Nothing here starts a timer.
-function toastError(msg) {
+//
+// extra is an optional node shown under msg in the same entry: the snapshot
+// failure card (#1986), whose GRANT and Copy button cannot be plain text.
+// Entries are matched on msg AND extra's text, so two servers failing for
+// different reasons under the same headline stay two entries, and each
+// entry's node is carried over when a later failure rebuilds the stack.
+function toastError(msg, extra) {
   const t = document.getElementById("toast-error");
   if (!t) return;
   // A second failure STACKS rather than replaces. These never auto-hide, so a
@@ -791,10 +797,12 @@ function toastError(msg) {
   const prior = t.hidden ? [] : $all(".toast-msg", t).map((n) => ({
     text: n.dataset.msg || n.textContent,
     n: Number(n.dataset.count || "1"),
+    extra: n.toastExtra || null,
   }));
-  const dupe = prior.find((p) => p.text === msg);
+  const same = (p) => p.text === msg && (p.extra ? p.extra.textContent : "") === (extra ? extra.textContent : "");
+  const dupe = prior.find(same);
   if (dupe) dupe.n += 1;
-  else prior.push({ text: msg, n: 1 });
+  else prior.push({ text: msg, n: 1, extra: extra || null });
   // role=alert so a screen reader announces it; the visual persistence is
   // useless to someone who cannot see it fade. The node is unhidden BEFORE the
   // text lands: a live region that appears with its content already in place
@@ -807,6 +815,7 @@ function toastError(msg) {
     const span = el("span", { class: "toast-msg", text: m.n > 1 ? m.text + "  (\u00d7" + m.n + ")" : m.text });
     span.dataset.msg = m.text;
     span.dataset.count = String(m.n);
+    if (m.extra) { span.toastExtra = m.extra; span.append(m.extra); }
     body.append(span);
   }
   t.append(body);
@@ -3032,8 +3041,12 @@ function firstRunCard(rep) {
   rep.steps.forEach((s, i) => {
     const state = stateOf(s);
     const body = el("div", { class: "dc-body" }, el("div", { class: "dc-name", text: s.name }));
-    if (s.detail) body.append(el("div", { class: "fr-detail", text: s.detail }));
-    if (s.fix) {
+    const known = s.snapshot_failed && s.failure && ((s.failure.kind === "missing_permission" && s.failure.grant) ||
+      (s.failure.kind === "mydumper_too_old" && s.failure.min_version));
+    if (s.snapshot_failed) body.append(snapshotFailureCard(s.failure, s.detail || "", "overview"));
+    else if (s.detail) body.append(el("div", { class: "fr-detail", text: s.detail }));
+    // A card that names its fix already says where to try again.
+    if (s.fix && !known) {
       // A fix that names a page carries the way there: "press Start in
       // Servers" opens the Servers dialog, "on the Snapshots page" goes to
       // that page. The sentence itself is the server's and stays as sent.
@@ -9207,6 +9220,49 @@ function newestCopyLine(snaps, canRead, mayRead) {
   return mayRead ? head : head + " Ask an admin to read the database to record it.";
 }
 
+// SNAPSHOT_FAILED_HEAD is the first line of every failed full read the page
+// explains (#1986): true whatever went wrong, because a snapshot only reads.
+const SNAPSHOT_FAILED_HEAD = "Snapshot did not finish. Your database was not changed.";
+
+// snapshotFailureBody is what follows that headline: the one fix the daemon
+// could name for certain (failure.kind, never read from the error text), then
+// the full error text in a closed "Technical details" fold. where says where
+// the card is, which decides how the next try is named: "now" beside the
+// Read database now button, "overview" away from it, "scheduled" on the
+// schedule card. note is a line that stays visible (a low disk). A failure
+// with no kind, or none at all (an older daemon, an old run record, a
+// Postgres snapshot), gets the fold alone.
+function snapshotFailureBody(failure, raw, where, note) {
+  const f = failure || {};
+  const box = el("div", { class: "snap-fail" });
+  const retry = where === "scheduled" ? "the next scheduled snapshot will use it"
+    : "press Read database now again" + (where === "overview" ? " on the Snapshots page" : "");
+  if (f.kind === "missing_permission" && f.grant) {
+    box.append(el("p", { class: "snap-fail-fix", text: "The database user needs " + (f.privileges === 1 ? "one more permission" : "more permissions") +
+      ". Run this on your database, then " + retry + ":" }));
+    const pre = el("pre", { class: "form-code snap-fail-grant", text: f.grant });
+    box.append(pre, el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(f.grant, "SQL") }));
+  } else if (f.kind === "mydumper_too_old" && f.min_version) {
+    box.append(el("p", { class: "snap-fail-fix", text: "Install mydumper " + f.min_version + " or newer where DBTrail runs, then " + retry + "." }));
+  } else if (where === "scheduled") {
+    box.append(el("p", { class: "snap-fail-fix", text: "The next scheduled snapshot tries again." }));
+  }
+  if (note) box.append(el("p", { class: "snap-fail-note", text: note }));
+  if (raw) {
+    box.append(el("details", { class: "snap-fail-details" }, el("summary", { text: "Technical details" }),
+      el("div", { class: "snap-fail-raw", text: raw })));
+  }
+  return box;
+}
+
+// snapshotFailureCard is the headline and the body in one block, for the
+// places that are not a toast (the toast's own line is the headline).
+function snapshotFailureCard(failure, raw, where, note) {
+  const box = snapshotFailureBody(failure, raw, where, note);
+  box.prepend(el("p", { class: "snap-fail-head", text: SNAPSHOT_FAILED_HEAD }));
+  return box;
+}
+
 async function createBaseline(id, btn) {
   if (btn) { btn.disabled = true; btn.textContent = "Creating…"; }
   const restore = () => { if (btn) { btn.disabled = false; btn.textContent = "Read database now"; } };
@@ -9240,7 +9296,13 @@ async function createBaseline(id, btn) {
     // The poll's cap hit mid-copy: say what is true, not "complete".
     toast("Snapshot saved on this machine. The copy to the snapshot destination is still running; the Snapshots page shows when it finishes.");
     if (lowDisk) toastError(lowDisk);
+  } else if (done && !done.published) {
+    // The failure toast never fades, so the whole card fits in it (#1986):
+    // the headline is its line, the fix and the folded error sit under it.
+    toastError(SNAPSHOT_FAILED_HEAD, snapshotFailureBody(done.failure, done.last_error || "unknown error", "now", lowDisk));
   } else if (done) {
+    // Published, then the copy to the destination failed: a snapshot
+    // exists, so "did not finish" would be false.
     const why = done.last_error || "unknown error";
     toastError("Snapshot failed: " + why + (lowDisk ? (/[.!?]$/.test(why) ? " " : ". ") + lowDisk : ""));
   } else {
@@ -10187,13 +10249,20 @@ function backupScheduleCard(cur, b) {
         // backup exists: the fold finished and only the upload failed. Telling
         // that operator nothing was written would send them looking for a
         // backup they already have.
-        body.append(el("p", { class: "form-msg err", text: run.snapshot_time
-          ? "Last scheduled snapshot " + when + " (" + what + ") wrote the snapshot on this machine but could not " +
-            "send it to the snapshot destination: " + backupFoldError(run.error || "unknown error") +
-            " The snapshot is on disk and can be restored from. The next scheduled run folds a new one."
-          : "Last scheduled snapshot failed " + when + " (" + what + ")" +
-            (refusedTableRows(run) ? "." : ": " + backupFoldError(run.error || "unknown error")) +
-            " Nothing was overwritten; the next scheduled run tries again." }));
+        if (!run.snapshot_time && run.method !== "refresh") {
+          // A full read that published nothing: the same card the toast and
+          // the Overview draw (#1986), with the error folded.
+          body.append(el("p", { class: "form-msg err", text: "Last scheduled snapshot failed " + when + " (" + what + ")." }),
+            snapshotFailureCard(run.failure, run.error || "unknown error", "scheduled"));
+        } else {
+          body.append(el("p", { class: "form-msg err", text: run.snapshot_time
+            ? "Last scheduled snapshot " + when + " (" + what + ") wrote the snapshot on this machine but could not " +
+              "send it to the snapshot destination: " + backupFoldError(run.error || "unknown error") +
+              " The snapshot is on disk and can be restored from. The next scheduled run folds a new one."
+            : "Last scheduled snapshot failed " + when + " (" + what + ")" +
+              (refusedTableRows(run) ? "." : ": " + backupFoldError(run.error || "unknown error")) +
+              " Nothing was overwritten; the next scheduled run tries again." }));
+        }
         const stopped = refusedTablesBlock(run);
         if (stopped) body.append(stopped);
       }

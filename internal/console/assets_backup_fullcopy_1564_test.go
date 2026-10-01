@@ -143,6 +143,9 @@ const draw = (caps, sched) => {
   const st = byClass(card, "bk-card-state")[0];
   return { state: st.textContent, alarm: String(st.className).includes("alarm"),
     red: byClass(card, "form-msg err").map((n) => flat(n).join("")).filter((s) => s),
+    // A failed full read's error sits in the card's closed Technical
+    // details fold since #1986, not on the red line.
+    fold: byClass(card, "snap-fail-raw").map((n) => flat(n).join("")),
     // The healthy next-run sentence is a drawing since #1950 (the chain); its
     // words, reason included, are the drawing's text alternative, read here
     // beside the hints so the assertions below hold on the same sentence.
@@ -176,6 +179,7 @@ console.log(JSON.stringify({
 		State string
 		Alarm bool
 		Red   []string
+		Fold  []string
 		Hints []string
 		Full  string
 	}
@@ -247,9 +251,11 @@ console.log(JSON.stringify({
 	if has(got["down"].Red, "takes it") {
 		t.Errorf("down: the card promises a debt the loop does not hold: %v", got["down"].Red)
 	}
-	if fl := got["failedIsLast"]; strings.Count(strings.Join(fl.Red, "\n"), "mydumper: exit status 2") != 1 {
-		t.Errorf("failed and still the last run: the failure is said %d times, want once: %v",
-			strings.Count(strings.Join(fl.Red, "\n"), "mydumper: exit status 2"), fl.Red)
+	// Said once, counting the red lines AND the failure card's fold (#1986
+	// moved a failed full read's error into the fold).
+	if fl := got["failedIsLast"]; strings.Count(strings.Join(append(fl.Red, fl.Fold...), "\n"), "mydumper: exit status 2") != 1 {
+		t.Errorf("failed and still the last run: the failure is said %d times, want once: %v / fold %v",
+			strings.Count(strings.Join(append(fl.Red, fl.Fold...), "\n"), "mydumper: exit status 2"), fl.Red, fl.Fold)
 	}
 
 	if rc := got["refusedClean"]; !rc.Alarm || !strings.HasSuffix(rc.State, " The full read cannot run.") || strings.Count(rc.State, "cannot run") != 1 {
