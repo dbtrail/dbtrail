@@ -2,6 +2,7 @@ package consoleapp
 
 import (
 	"context"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +25,7 @@ func TestRunMydumperFTWRLDeniedNamesTheSetting(t *testing.T) {
 	t.Setenv("PATH", dir)
 	stubPreflight(t, nil)
 
-	err := runMydumper(context.Background(), "admin:p@tcp(127.0.0.1:1)/", []string{"appdb"},
+	err := runMydumper(context.Background(), "admin:p@tcp(127.0.0.1:1)/", config.SSL{Mode: "disabled"}, []string{"appdb"},
 		filepath.Join(t.TempDir(), "out"), baseline.LockModeFTWRL, lockModeFromEnv)
 	if err == nil {
 		t.Fatal("runMydumper succeeded over a failed mydumper")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"reflect"
 	"strings"
 	"testing"
@@ -49,7 +50,9 @@ func TestTablesLeftOut(t *testing.T) {
 func stubSourceTables(t *testing.T, fn func(ctx context.Context, dsn string, schemas []string) ([]string, bool, error)) {
 	t.Helper()
 	prev := listSourceTables
-	listSourceTables = fn
+	listSourceTables = func(ctx context.Context, dsn string, _ config.SSL, schemas []string) ([]string, bool, error) {
+		return fn(ctx, dsn, schemas)
+	}
 	t.Cleanup(func() { listSourceTables = prev })
 }
 

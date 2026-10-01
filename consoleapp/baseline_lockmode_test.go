@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"errors"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"slices"
 	"testing"
 
@@ -36,7 +37,7 @@ func TestBuildConsoleMydumperArgsCarriesLockMode(t *testing.T) {
 		{baseline.LockModeSafeNoLock, "SAFE_NO_LOCK"},
 		{baseline.LockModeNoLock, "NO_LOCK"},
 	} {
-		args := buildConsoleMydumperArgs("127.0.0.1", 3306, "root", []string{"demo"}, "/tmp/d", tc.mode, true)
+		args := buildConsoleMydumperArgs("127.0.0.1", 3306, "root", []string{"demo"}, "/tmp/d", tc.mode, true, nil)
 		i := slices.Index(args, "--sync-thread-lock-mode")
 		if i < 0 || i+1 >= len(args) {
 			t.Fatalf("mode %s: no --sync-thread-lock-mode in argv", tc.mode)
@@ -61,16 +62,16 @@ func TestRunMydumperForwardsTheSelectedModeToThePreflight(t *testing.T) {
 	var gotRemedy mydumperlock.Remedy
 	var gotSchemas []string
 	sentinel := errors.New("stop after preflight")
-	checkMydumperPrivileges = func(_ context.Context, _ string, m baseline.LockMode, r mydumperlock.Remedy, sch []string) error {
+	checkMydumperPrivileges = func(_ context.Context, _ string, _ config.SSL, m baseline.LockMode, r mydumperlock.Remedy, sch []string) error {
 		got, gotRemedy, gotSchemas = m, r, sch
 		return sentinel
 	}
-	t.Cleanup(func() { checkMydumperPrivileges = mydumperlock.CheckPrivileges })
+	t.Cleanup(func() { checkMydumperPrivileges = realCheckMydumperPrivileges })
 	// A modern mydumper on PATH: the version probe (#1688) runs before the
 	// preflight, and with no binary at all the run would stop there instead.
 	fakeConsoleMydumper(t, printsVersion(versionModern))
 
-	err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/db", []string{"appdb"},
+	err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/db", config.SSL{Mode: "disabled"}, []string{"appdb"},
 		t.TempDir(), baseline.LockModeLockAll, lockModeFromEnv)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("runMydumper err = %v, want the preflight's own error to propagate unchanged", err)

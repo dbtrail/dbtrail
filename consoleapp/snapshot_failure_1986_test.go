@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"path/filepath"
 	"testing"
 	"time"
@@ -117,7 +118,7 @@ func TestRunMydumper_positionFloorRefusalIsTooOld(t *testing.T) {
 	fakeConsoleMydumper(t, printsVersion(versionDistro))
 	stubPreflight(t, nil)
 	stubSourceVersion(t, "8.4.9", nil)
-	err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", nil, filepath.Join(t.TempDir(), "out"), baseline.LockModeFTWRL, lockModeFromEnv)
+	err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", config.SSL{Mode: "disabled"}, nil, filepath.Join(t.TempDir(), "out"), baseline.LockModeFTWRL, lockModeFromEnv)
 	if err == nil {
 		t.Fatal("refusal expected")
 	}

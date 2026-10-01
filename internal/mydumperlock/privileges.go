@@ -191,7 +191,15 @@ func missingPrivileges(g *grantSet, mode baseline.LockMode, missing []string, fo
 // attempt FTWRL half-privileged — is a segfault, not a clean error (#800).
 // Never silently falls back to a mode that is not point-consistent.
 func CheckPrivileges(ctx context.Context, sourceDSN string, mode baseline.LockMode, remedy Remedy, schemas []string) error {
-	db, err := config.Connect(sourceDSN)
+	return CheckPrivilegesWith(ctx, func() (*sql.DB, error) { return config.Connect(sourceDSN) }, mode, remedy, schemas)
+}
+
+// CheckPrivilegesWith is CheckPrivileges on a source the caller opens: the
+// console connects with the source's TLS settings (connectSource), so the
+// check reaches a server that only accepts encrypted connections the way
+// capture and mydumper do (#1996).
+func CheckPrivilegesWith(ctx context.Context, connect func() (*sql.DB, error), mode baseline.LockMode, remedy Remedy, schemas []string) error {
+	db, err := connect()
 	if err != nil {
 		// Deliberately NO alternatives clause. An unreachable source is not a
 		// privilege problem: mydumper cannot dump in ANY mode, so naming the

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
@@ -47,7 +48,48 @@ func connectSourceAt(dsn string, ssl config.SSL, level slog.Level) (*sql.DB, err
 	if detail, fix, ok := doctor.TLSSettingsText(err); ok {
 		return nil, errors.New(detail + " " + fix)
 	}
+	// A refusal over TLS (a server that demands encryption the connection
+	// did not use, or a mode that requires TLS against a server with none)
+	// is worded for a person, as the startup checks word it (#1996). The
+	// driver's error stays in the chain for errors.Is/As, out of the text.
+	if detail, fix, ok := doctor.SourceTLSRefusalText(err, dsn, sourceSSLOrDefault(ssl)); ok {
+		return nil, &sourceTLSRefusal{msg: detail + " " + fix, err: err}
+	}
 	return db, err
+}
+
+// sourceTLSRefusal is a TLS refusal worded for a person, wrapping the
+// driver's error.
+type sourceTLSRefusal struct {
+	msg string
+	err error
+}
+
+func (e *sourceTLSRefusal) Error() string { return e.msg }
+func (e *sourceTLSRefusal) Unwrap() error { return e.err }
+
+// sourceEncrypted reports whether a source connection made with ssl is
+// encrypted: under preferred that is the server's answer (TLS when it offers
+// it, cleartext when it does not), and the full read's mydumper must make the
+// same choice (#1996). It reads the session's Ssl_cipher, which MySQL and
+// MariaDB both report, empty on an unencrypted connection. A seam, so the
+// tests need no server.
+var sourceEncrypted = func(ctx context.Context, dsn string, ssl config.SSL) (bool, error) {
+	db, err := connectSourceAsked(dsn, ssl)
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var name, cipher string
+	if err := db.QueryRowContext(qctx, "SHOW SESSION STATUS LIKE 'Ssl_cipher'").Scan(&name, &cipher); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, errors.New("the source does not report whether a connection is encrypted (no Ssl_cipher status variable)")
+		}
+		return false, err
+	}
+	return cipher != "", nil
 }
 
 // sourceSSLOrDefault fills an empty mode with console.DefaultSourceSSLMode.

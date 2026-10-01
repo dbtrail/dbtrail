@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"errors"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,7 +49,7 @@ func stubSameFS(t *testing.T, same bool, err error) {
 func stubEstimate(t *testing.T, est dumpEstimate, err error) {
 	t.Helper()
 	prev := dumpSizeEstimateFn
-	dumpSizeEstimateFn = func(context.Context, string, []string) (dumpEstimate, error) { return est, err }
+	dumpSizeEstimateFn = func(context.Context, string, config.SSL, []string) (dumpEstimate, error) { return est, err }
 	t.Cleanup(func() { dumpSizeEstimateFn = prev })
 }
 
@@ -282,7 +283,7 @@ func countMydumper(t *testing.T) *atomic.Int32 {
 	t.Helper()
 	var n atomic.Int32
 	prev := runMydumperFunc
-	runMydumperFunc = func(context.Context, string, []string, string, baseline.LockMode, lockModeSource) error {
+	runMydumperFunc = func(context.Context, string, config.SSL, []string, string, baseline.LockMode, lockModeSource) error {
 		n.Add(1)
 		return errors.New("fake mydumper stopped")
 	}
@@ -405,7 +406,7 @@ func TestBackupScheduler_diskRefusedFullReadIsOnItsSlot(t *testing.T) {
 	b, reg, sup := newScheduleFixture(t, true)
 	var estimates atomic.Int32
 	prevEst := dumpSizeEstimateFn
-	dumpSizeEstimateFn = func(context.Context, string, []string) (dumpEstimate, error) {
+	dumpSizeEstimateFn = func(context.Context, string, config.SSL, []string) (dumpEstimate, error) {
 		estimates.Add(1)
 		return dumpEstimate{bytes: int64(10 * gib), tables: 2}, nil
 	}

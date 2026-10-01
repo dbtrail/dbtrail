@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"errors"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"testing"
 	"time"
 
@@ -23,7 +24,7 @@ func TestFullBackup_readsTheDDLMarkBeforeTheDump(t *testing.T) {
 		return `{"id":7}`
 	}
 	stop := errors.New("stop after the dump")
-	runMydumperFunc = func(context.Context, string, []string, string, baseline.LockMode, lockModeSource) error {
+	runMydumperFunc = func(context.Context, string, config.SSL, []string, string, baseline.LockMode, lockModeSource) error {
 		order = append(order, "mydumper")
 		return stop
 	}

@@ -523,6 +523,14 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
   a server that only accepts encrypted connections
   (`require_secure_transport=ON`, the default on Amazon RDS for MariaDB
   11.8) passes them under the default `preferred`.
+  A full read (snapshot) uses them too: its checks before the dump, and
+  mydumper itself. `preferred` asks the source once and dumps over TLS when
+  the source offers it, in cleartext when it does not (as capture does);
+  `required` encrypts without checking the certificate; `verify-ca` and
+  `verify-identity` check it against `ssl_ca`, which a full read needs set
+  (mydumper cannot use the system's trusted CAs). A `tls=` in the source DSN
+  wins over `ssl_mode`, as for every other connection; `tls=true` is refused
+  for full reads for the same reason as an empty `ssl_ca`.
   `ssl_ca`/`ssl_cert`/`ssl_key` are certificate/key file paths **on the
   daemon host**, not secrets.
 

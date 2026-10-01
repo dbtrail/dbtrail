@@ -93,8 +93,8 @@ func dumpSizeQuery(schemas []string) (string, []any) {
 // (MariaDB, 5.7) refuses the SET with 1193, and its sizes are current anyway.
 // Any other refusal (a proxy that rejects the SET, say) leaves the day-old
 // cache in play, and the estimate says so.
-func estimateDumpSize(ctx context.Context, sourceDSN string, schemas []string) (dumpEstimate, error) {
-	db, err := config.Connect(sourceDSN)
+func estimateDumpSize(ctx context.Context, sourceDSN string, ssl config.SSL, schemas []string) (dumpEstimate, error) {
+	db, err := connectSource(sourceDSN, ssl)
 	if err != nil {
 		return dumpEstimate{}, err
 	}
@@ -133,7 +133,7 @@ func estimateDumpSize(ctx context.Context, sourceDSN string, schemas []string) (
 func (s *baselineSupervisor) checkDumpDisk(req console.BaselineRequest) (check, note string, err error) {
 	ctx, cancel := context.WithTimeout(s.ctx, dumpEstimateTimeout)
 	defer cancel()
-	est, estErr := dumpSizeEstimateFn(ctx, req.SourceDSN, req.Schemas)
+	est, estErr := dumpSizeEstimateFn(ctx, req.SourceDSN, req.SourceSSL, req.Schemas)
 	return dumpDiskVerdict(s.stagingDir, req.LocalDir, est, estErr)
 }
 

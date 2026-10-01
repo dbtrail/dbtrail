@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
@@ -63,7 +64,10 @@ type BaselineRequest struct {
 	ServerID   string
 	ServerName string
 	SourceDSN  string
-	Schemas    []string
+	// SourceSSL is how the full read connects to the source, its pre-checks
+	// and mydumper alike: the entry's SourceSSL, the TLS capture uses (#1996).
+	SourceSSL config.SSL
+	Schemas   []string
 	// LocalDir is the per-server baseline directory (entry.BaselineDir). When
 	// set, the snapshot is written there persistently and NOT uploaded. Empty
 	// means S3-only: stage in a temp dir, upload to S3, discard the staging.
@@ -105,6 +109,7 @@ func BaselineRequestFor(e ServerEntry) BaselineRequest {
 		ServerID:    e.ID,
 		ServerName:  e.Name,
 		SourceDSN:   e.SourceDSN,
+		SourceSSL:   e.SourceSSL(),
 		Schemas:     splitSchemas(e.Schemas),
 		LocalDir:    e.BaselineDir,
 		S3:          e.BaselineS3,

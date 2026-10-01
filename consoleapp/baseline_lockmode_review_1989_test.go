@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -86,17 +87,17 @@ func TestMydumperBootWarning_automaticWarnsAboutRDS(t *testing.T) {
 func TestRunMydumper_savedModeUsesTheSavedRemedy(t *testing.T) {
 	fakeConsoleMydumper(t, printsVersion(versionModern))
 	var got mydumperlock.Remedy
-	checkMydumperPrivileges = func(_ context.Context, _ string, _ baseline.LockMode, r mydumperlock.Remedy, _ []string) error {
+	checkMydumperPrivileges = func(_ context.Context, _ string, _ config.SSL, _ baseline.LockMode, r mydumperlock.Remedy, _ []string) error {
 		got = r
 		return errors.New("stop")
 	}
-	t.Cleanup(func() { checkMydumperPrivileges = mydumperlock.CheckPrivileges })
+	t.Cleanup(func() { checkMydumperPrivileges = realCheckMydumperPrivileges })
 	for src, want := range map[lockModeSource]mydumperlock.Remedy{
 		lockModeSaved:     mydumperlock.RemedyConsoleSaved,
 		lockModeFromEnv:   mydumperlock.RemedyConsole,
 		lockModeAutomatic: mydumperlock.RemedyConsole,
 	} {
-		_ = runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", nil, t.TempDir(), baseline.LockModeFTWRL, src)
+		_ = runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", config.SSL{Mode: "disabled"}, nil, t.TempDir(), baseline.LockModeFTWRL, src)
 		if got != want {
 			t.Errorf("source %d: privilege check told remedy %q, want %q", src, got, want)
 		}
@@ -107,7 +108,7 @@ func TestRunMydumper_savedModeGlobalLockHint(t *testing.T) {
 	installFake(t, "#!/bin/bash\nif [ \"$1\" = \"--version\" ]; then "+printsVersion(versionModern)+"; fi\n"+
 		"printf '%s\\n' \"Couldn't acquire global lock, snapshots will not be consistent: Access denied for user 'admin'@'%'\" >&2\nexit 1\n")
 	stubPreflight(t, nil)
-	err := runMydumper(context.Background(), "admin:p@tcp(127.0.0.1:1)/", nil, t.TempDir(), baseline.LockModeFTWRL, lockModeSaved)
+	err := runMydumper(context.Background(), "admin:p@tcp(127.0.0.1:1)/", config.SSL{Mode: "disabled"}, nil, t.TempDir(), baseline.LockModeFTWRL, lockModeSaved)
 	if err == nil {
 		t.Fatal("runMydumper succeeded")
 	}
