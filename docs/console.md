@@ -597,11 +597,14 @@ saved, shown with the reason `serve` is not running it.
   own backup location* when it has none, or both, followed by "(Backup
   settings page)". A server with no location at all shows the setup empty
   state instead.
-- **How a snapshot was locked** (#1380): a row carries a mark when the
-  snapshot was read with no locks (**no locks**: its rows were copied at
-  different moments and may not agree with each other) or does not say how it
-  was locked (**locks not recorded**, which is every snapshot taken before
-  this was recorded). A snapshot read with locks carries no mark. The answer
+- **Whether a snapshot is point-in-time** (#1380): a row carries a mark when
+  the snapshot was read with no locks (**different points-in-time**: its rows
+  were copied at different moments and may not agree with each other) or does
+  not record how it was read (**point-in-time unknown**, drawn with a dashed
+  outline, which is every snapshot taken before this was recorded). A
+  point-in-time snapshot carries no mark. The page says "point-in-time", not
+  "locks", because a safe-no-lock read and a PostgreSQL read are point-in-time
+  without taking a lock. The answer
   is the worst of the snapshot's tables, and a snapshot updated from the
   recorded changes inherits it. Opening the row says how many tables are
   behind it and marks each one. A snapshot kept only in S3 shows **locks not

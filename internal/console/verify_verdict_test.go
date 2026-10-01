@@ -41,7 +41,7 @@ func TestWithVerdict(t *testing.T) {
 		// A verdict carried in (a newer build wrote one, a hand edit) is not
 		// trusted: it is recomputed, or cleared for a run that has none.
 		{"a stale verdict on a failed run", VerifyStatus{State: VerifyStateFailed, Verdict: verdict.Verified}, ""},
-		// #1380: a table differs from a snapshot read with no locks.
+		// #1380: a table differs from a snapshot with different points-in-time.
 		{"a torn difference beside proof", VerifyStatus{State: VerifyStateSucceeded,
 			Summary: VerifySummary{Match: 9, Inconclusive: 1, InconclusiveDiffers: 1, Total: 10}}, verdict.Differs},
 		{"a stale verdict on a torn difference", VerifyStatus{State: VerifyStateSucceeded, Verdict: verdict.Verified,
@@ -270,7 +270,7 @@ runs.unknown = Object.assign({}, runs.clean, { verdict: "someday" });
 		"failed":          "failed: boom",
 		// #1380: the table that differs is said apart from the ones not
 		// checked, and nothing reads as a pass.
-		"differs": "9 match · 1 differs from a snapshot read with no locks · 1 not checked",
+		"differs": "9 match · 1 differs from a snapshot with different points-in-time · 1 not checked",
 	}
 	for name := range wantHead {
 		if _, ok := got[name]; !ok {

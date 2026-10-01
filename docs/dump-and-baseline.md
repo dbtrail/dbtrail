@@ -271,7 +271,7 @@ snapshot is modified for any of this.
 A snapshot is only as good as its worst table: one `torn` table makes the snapshot `torn`.
 Only a new full snapshot taken with locks clears it.
 
-`bintrail status --baseline-dir` prints it in the `LOCKS` column (`snapshot_lock` in JSON), the
+`bintrail status --baseline-dir` prints it in the `POINT_IN_TIME` column (`snapshot_lock` in JSON), the
 web interface marks the snapshot's row, and `bintrail verify` uses it to read a difference
 (see [verify.md](verify.md)).
 

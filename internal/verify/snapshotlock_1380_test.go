@@ -32,21 +32,21 @@ func TestPairLockVerdict_mismatch(t *testing.T) {
 	}{
 		{"both consistent: a difference is a mismatch", c, c, StatusMismatch, "consistent", lockDiff},
 		{"the read is torn", x, c, StatusInconclusive, "torn",
-			lockDiff + ". The snapshot of " + newer + " was taken with no locks, so its rows were copied at different moments and the difference may come from that. Take a full snapshot with locks to check this table"},
+			lockDiff + ". The snapshot of " + newer + " was read at different points in time, so its rows may not agree and the difference may come from that. A point-in-time database read checks this table"},
 		{"the older side is torn", c, x, StatusInconclusive, "torn",
-			lockDiff + ". The snapshot of " + older + " was taken with no locks, so its rows were copied at different moments and the difference may come from that. Take a full snapshot with locks to check this table"},
+			lockDiff + ". The snapshot of " + older + " was read at different points in time, so its rows may not agree and the difference may come from that. A point-in-time database read checks this table"},
 		{"both torn", x, x, StatusInconclusive, "torn",
-			lockDiff + ". The snapshot of " + newer + " and the snapshot of " + older + " were taken with no locks, so their rows were copied at different moments and the difference may come from that. Take a full snapshot with locks to check this table"},
+			lockDiff + ". The snapshot of " + newer + " and the snapshot of " + older + " were read at different points in time, so their rows may not agree and the difference may come from that. A point-in-time database read checks this table"},
 		{"torn beside unknown names the torn one", u, x, StatusInconclusive, "torn",
-			lockDiff + ". The snapshot of " + older + " was taken with no locks, so its rows were copied at different moments and the difference may come from that. Take a full snapshot with locks to check this table"},
+			lockDiff + ". The snapshot of " + older + " was read at different points in time, so its rows may not agree and the difference may come from that. A point-in-time database read checks this table"},
 		{"no record on the read: still a mismatch", u, c, StatusMismatch, "unknown",
-			lockDiff + ". The snapshot of " + newer + " does not record how it was locked, so it may have been taken with no locks. A full snapshot taken with this version records it"},
+			lockDiff + ". The snapshot of " + newer + " does not record whether it is point-in-time, so it may have been read at different points in time. A database read with this version records it"},
 		{"no record on the older side: still a mismatch", c, u, StatusMismatch, "unknown",
-			lockDiff + ". The snapshot of " + older + " does not record how it was locked, so it may have been taken with no locks. A full snapshot taken with this version records it"},
+			lockDiff + ". The snapshot of " + older + " does not record whether it is point-in-time, so it may have been read at different points in time. A database read with this version records it"},
 		{"no record on either, which is every installation on the day it upgrades", u, u, StatusMismatch, "unknown",
-			lockDiff + ". Neither the snapshot of " + newer + " nor the snapshot of " + older + " records how it was locked, so they may have been taken with no locks. A full snapshot taken with this version records it"},
+			lockDiff + ". Neither the snapshot of " + newer + " nor the snapshot of " + older + " records whether it is point-in-time, so they may have been read at different points in time. A database read with this version records it"},
 		{"a value out of range is no record", baseline.ReadConsistency(42), c, StatusMismatch, "unknown",
-			lockDiff + ". The snapshot of " + newer + " does not record how it was locked, so it may have been taken with no locks. A full snapshot taken with this version records it"},
+			lockDiff + ". The snapshot of " + newer + " does not record whether it is point-in-time, so it may have been read at different points in time. A database read with this version records it"},
 	}
 	for _, tc := range cases {
 		v := pairLockVerdict(lockPair(tc.newL, tc.prev), StatusMismatch, lockDiff)
@@ -161,7 +161,7 @@ func TestSnapshotLock_exitCode(t *testing.T) {
 			t.Errorf("%s: %d counted as nothing to check", tc.name, rep.Summary.InconclusiveNothingToCheck)
 		}
 		for _, tr := range rep.Tables {
-			if tr.Reason != "" && strings.Contains(tr.Reason, "no locks") && (tr.Status == StatusInconclusive) != (tr.InconclusiveKind == InconclusiveTornSnapshot) {
+			if tr.Reason != "" && strings.Contains(tr.Reason, "different points in time") && (tr.Status == StatusInconclusive) != (tr.InconclusiveKind == InconclusiveTornSnapshot) {
 				t.Errorf("%s: %s.%s is %s with kind %q", tc.name, tr.Schema, tr.Table, tr.Status, tr.InconclusiveKind)
 			}
 		}
@@ -246,7 +246,7 @@ func TestLastRead_aTornReadBehindNewerSnapshots(t *testing.T) {
 	}
 	v := pairLockVerdict(p, StatusMismatch, lockDiff)
 	st, reason := v.status, v.detail
-	if st != StatusInconclusive || !strings.Contains(reason, "The snapshot of "+lr1.Format(time.RFC3339)+" was taken with no locks") {
+	if st != StatusInconclusive || !strings.Contains(reason, "The snapshot of "+lr1.Format(time.RFC3339)+" was read at different points in time") {
 		t.Fatalf("%s: %q", st, reason)
 	}
 }
@@ -260,7 +260,7 @@ func TestSnapshotLock_differsExitAndSummary(t *testing.T) {
 		t.Fatalf("summary %+v", rep.Summary)
 	}
 	err := rep.ExitError()
-	want := "1 table(s) differ from a snapshot that was read with no locks; the difference may come from that read or from the recorded changes, and a full snapshot taken with locks tells which"
+	want := "1 table(s) differ from a snapshot read at different points in time; the difference may come from that read or from the recorded changes, and a point-in-time database read tells which"
 	if err == nil || err.Error() != want {
 		t.Fatalf("exit error %v, want %q", err, want)
 	}

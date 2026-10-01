@@ -1872,7 +1872,7 @@ func lockColumn(lock string) string {
 	case LockConsistent:
 		return LockConsistent
 	case LockTorn:
-		return "⚠ no locks"
+		return "⚠ different points-in-time"
 	}
 	return LockUnknown
 }
@@ -1900,12 +1900,12 @@ func writeBaselineLocks(w io.Writer, baselines []BaselineInfo, newestOf map[stri
 	}
 	fmt.Fprintln(w)
 	if torn > 0 {
-		fmt.Fprintf(w, "⚠ NO LOCKS: the newest snapshot of %s was read with no locks, so its rows may not agree with each other.\n", tablesNoun(torn))
-		fmt.Fprintln(w, "  Every snapshot updated from it inherits that. A full snapshot taken with locks clears it.")
+		fmt.Fprintf(w, "⚠ DIFFERENT POINTS-IN-TIME: the newest snapshot of %s was read at different points in time, so its rows may not agree with each other.\n", tablesNoun(torn))
+		fmt.Fprintln(w, "  Every snapshot refreshed from it inherits that. A point-in-time database read clears it.")
 	}
 	if unknown > 0 {
-		fmt.Fprintf(w, "LOCKS NOT RECORDED: the newest snapshot of %s does not say how it was locked.\n", tablesNoun(unknown))
-		fmt.Fprintln(w, "  It may have been read with no locks. A full snapshot taken with this version records it.")
+		fmt.Fprintf(w, "POINT-IN-TIME UNKNOWN: the newest snapshot of %s does not record whether it is point-in-time.\n", tablesNoun(unknown))
+		fmt.Fprintln(w, "  It may have been read at different points in time. A database read with this version records it.")
 	}
 }
 
@@ -1924,7 +1924,7 @@ func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "=== Baselines ===")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "SNAPSHOT\tDATABASE\tTABLE\tSIZE\tBINLOG_FILE\tBINLOG_POS\tGTID\tLOCKS\tREADS_FROM\tSTALENESS")
+	fmt.Fprintln(tw, "SNAPSHOT\tDATABASE\tTABLE\tSIZE\tBINLOG_FILE\tBINLOG_POS\tGTID\tPOINT_IN_TIME\tREADS_FROM\tSTALENESS")
 	fmt.Fprintln(tw, "────────\t────────\t─────\t────\t───────────\t──────────\t────\t─────\t──────────\t─────────")
 	// The ⚠ glyph is reserved for rows the banner keys on — each table's
 	// NEWEST snapshot. A superseded snapshot past coverage is routine on a

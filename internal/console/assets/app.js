@@ -2087,7 +2087,14 @@ function ovFlowModel(inp) {
   if (srv && !sch && !bl.refresh && !blUnknown && monitorCap && may("settings:write")) update.action = { label: "Set a schedule", run: "schedule" };
   if (snap) {
     update.big = ageMin >= 0 ? plainDuration(ageMin * 60) + " ago" : "";
-    update.sub = (snapAt ? "copy from " + snapAt : "") + (nextAt ? (snapAt ? " · " : "") + "next " + nextAt : "");
+    // "read" touches the database, "refresh" only the recorded changes. The
+    // word is the daemon's plan as of this page load (next_method): a refresh
+    // that fails at run time can still fall back to a read, as the schedule
+    // card says. A run that cannot start gets no time at all, because the
+    // daemon fills next_method even then (next_method_error says why).
+    const nextWord = sch && sch.next_method === "refresh" ? "next refresh " : sch && sch.next_method ? "next read " : "next ";
+    const nextPart = sch && sch.next_method_error ? "next run cannot start" : nextAt ? nextWord + nextAt : "";
+    update.sub = (snapAt ? "copy from " + snapAt : "") + (nextPart ? (snapAt ? " · " : "") + nextPart : "");
     update.stamp = snap.time;
     if (everyMin && ageMin >= 0) {
       const ratio = ageMin / everyMin;
@@ -2120,10 +2127,10 @@ function ovFlowModel(inp) {
     cards.push({ kind: "update-blocked", key: sid + "|blocked|" + stamp, tone: "bad",
       title: "A schema change stopped the update from changes",
       lines: [said || "A table changed shape. The copy cannot be updated from the recorded changes until that table is read again from the database."],
-      cost: "Reading the database takes longer than an update and adds load on your server. The lock mode is set when DBTrail starts.",
+      cost: "Reading the database takes longer than a refresh, and writes wait while it starts.",
       actions: [
         nextAt ? { label: "Wait for the scheduled read at " + nextAt, primary: true, run: "dismiss" } : { label: "Wait", primary: true, run: "dismiss" },
-        { label: "Read database now", run: "read", confirm: "Read every table from the source now?\n\nThis reads your whole database, with the lock mode set when DBTrail starts, and publishes a new copy when it finishes." },
+        { label: "Read database now", run: "read", confirm: READ_DB_CONFIRM },
       ] });
   }
 
@@ -6581,6 +6588,7 @@ function snapshotHero(b, cov, cur, acts) {
   // One filled button per tab (#1950): Download is it on Versions, the tab
   // it acts on; on Checks that is Run verification, and on Settings the Save
   // of the form being changed (snapshotTabs.select keeps this in step).
+  let canRead = false;
   if (acts && acts.download) actions.append(el("button", { class: "btn snap-dl" + (snapTab && snapTab !== "versions" ? "" : " btn-primary"), type: "button", text: "Download", onclick: acts.download }));
   if (cur && cur.id && cur.kind === "registry" && sessionMay(PERM_SNAPSHOT_CREATE)) {
     // cur is the RAW registry entry, while b.configured also counts the
@@ -6594,8 +6602,9 @@ function snapshotHero(b, cov, cur, acts) {
       hero.append(el("div", { class: "hero-note", text: "Read database now: " + cur.write_refusal }));
     } else if (!off && ownLoc) {
       const btn = el("button", { class: "btn", type: "button", text: "Read database now" });
-      btn.onclick = () => createBaseline(cur.id, btn);
+      btn.onclick = () => { if (typeof window.confirm === "function" && window.confirm(READ_DB_CONFIRM)) createBaseline(cur.id, btn); };
       actions.append(btn);
+      canRead = true;
     } else if (cur.has_source) {
       const why = [];
       if (off) why.push("turned off at startup");
@@ -6603,6 +6612,8 @@ function snapshotHero(b, cov, cur, acts) {
       hero.append(el("div", { class: "hero-note", text: "Read database now: " + why.join(", and ") + (sessionMayConfigureServer() && acts && acts.settings ? " (under Settings)" : "") }));
     }
   }
+  const pit = newestCopyLine(snaps, canRead, sessionMay(PERM_SNAPSHOT_CREATE));
+  if (pit) hero.append(el("div", { class: "hero-note snap-pit", text: pit }));
   if (actions.children.length && !(acts && acts.mount)) hero.append(actions);
   return hero;
 }
@@ -9009,7 +9020,7 @@ function baselinesPanel(b, servers, opts) {
   } else if (!b.configured) {
     list.append(el("div", { class: "stg-empty" },
       el("p", { class: "stg-empty-lead", text: "No snapshots configured." }),
-      el("p", { class: "stg-empty-sub", text: "A snapshot is a full copy of your tables at one point in time. With one, Time-travel can show complete rows, not just the ones that changed lately." }),
+      el("p", { class: "stg-empty-sub", text: "A snapshot is a full copy of your tables. With one, Time-travel can show complete rows, not just the ones that changed lately." }),
       ...(sessionMayConfigureServer() ? [el("p", { class: "stg-empty-sub", text: "1. Create snapshots:" }),
       el("code", { class: "stg-code", text: "docker compose --profile baseline run --rm baseline" }),
       el("p", { class: "stg-empty-sub", text: "2. " + baselineConfigHint(cur, opts && opts.serversErr) })] : [])));
@@ -9130,6 +9141,34 @@ function baselinesPanel(b, servers, opts) {
 // createBaseline triggers an in-process baseline (dump→convert→upload) on the
 // daemon for the selected server, then polls until it finishes and refreshes the
 // Storage view so the new snapshot appears. The button is disabled while in flight.
+// READ_DB_CONFIRM is asked before every "Read database now": the read is the
+// one action on these pages that reaches production, and writes wait while
+// it starts (longer behind a long-running query, docs #1987).
+const READ_DB_CONFIRM = "Read every table from your database now?\n\nBest at a quiet time: writes wait while it starts, longer if a long query is running.";
+
+// newestCopyLine is the line beside Read database now (2026-10-01): what the
+// newest copy says about being point-in-time, and the way out. It reads the
+// NEWEST copy only, because older copies keep their mark until retention
+// removes them, so a line about all of them would never change after a read.
+// "" when there is nothing to say: no copy, a point-in-time newest copy with
+// no marked older one, or a copy this list did not check (S3). The last one is
+// silent on purpose: on a server that keeps its copies in S3 it would be a
+// line that never goes away, and the row's own "not checked" chip says it.
+function newestCopyLine(snaps, canRead, mayRead) {
+  const newest = (snaps || [])[0];
+  if (!newest) return "";
+  const key = snapshotLockKey(newest.lock);
+  if (key === "") {
+    const marked = snaps.slice(1).some((s) => { const k = snapshotLockKey(s.lock); return k === "torn" || k === "unknown"; });
+    return marked ? "Your newest copy is point-in-time. Older copies keep their mark." : "";
+  }
+  if (key === "torn") return "Your newest copy has tables from different points-in-time.";
+  if (key !== "unknown") return "";
+  const head = "Your newest copy doesn't record whether it is point-in-time.";
+  if (canRead) return head + " Read database now records it.";
+  return mayRead ? head : head + " Ask an admin to read the database to record it.";
+}
+
 async function createBaseline(id, btn) {
   if (btn) { btn.disabled = true; btn.textContent = "Creating…"; }
   const restore = () => { if (btn) { btn.disabled = false; btn.textContent = "Read database now"; } };
@@ -9209,7 +9248,10 @@ function fmtSeconds(sec) {
   return Math.floor(sec / 3600) + "h " + Math.round((sec % 3600) / 60) + "m";
 }
 
-const BACKUP_KIND_LABEL = { dump: "full copy of the source", refresh: "automatic refresh", restore: "point-in-time restore" };
+// "restore to a past time", not "point-in-time restore": point-in-time is the
+// word for a copy whose rows are all from one instant (SNAPSHOT_LOCK), and a
+// restore can inherit "different points-in-time" from the copy it starts on.
+const BACKUP_KIND_LABEL = { dump: "database read", refresh: "automatic refresh", restore: "restore to a past time" };
 
 // Why a scheduled run read the database in full instead of updating the
 // previous backup (#1604), keyed by the code the daemon fixed when the run
@@ -9282,8 +9324,8 @@ function backupWhyLine(why, code, remedy) {
 // this codebase's names for its own mechanics, and nobody reading a backup page
 // knows them.
 const MADE_BY = {
-  dump: ["read from source", "A full copy taken from the database itself."],
-  fold: ["built from changes", "The previous copy brought forward over the recorded changes. The source was not read."],
+  dump: ["database read", "A full copy read from your database."],
+  fold: ["refreshed from changes", "The previous copy brought forward over the recorded changes. Your database was not read."],
   carried_forward: ["reused unchanged", "Nothing changed in this table, so the previous copy was reused as is."],
   // No cause named. This verdict is reached by a backup old enough to predate
   // the record, by a newer version writing a value this build does not know,
@@ -9378,10 +9420,15 @@ function sourceReadLine(d) {
 // "consistent" draws nothing on a row: it is the normal state. Every other
 // answer draws, and so does no answer at all, because a row with nothing on
 // it reads as a good one.
+//
+// The words name the result, never the method (2026-10-01): a safe-no-lock
+// read and a PostgreSQL read are point-in-time without taking a lock, so
+// "read with locks" was false for them, and "lock" reads to a DBA as "you
+// stopped production".
 const SNAPSHOT_LOCK = {
-  torn: ["no locks", "Read with no locks. Its rows were copied at different moments and may not agree with each other."],
-  unknown: ["locks not recorded", "This snapshot does not say how it was locked. It may have been read with no locks."],
-  unread: ["locks not checked", "Stored in S3, where this list does not read how a snapshot was locked."],
+  torn: ["different points-in-time", "Its tables were read at different points in time, so their rows may not agree with each other."],
+  unknown: ["point-in-time unknown", "It comes from a database read that did not record whether it was point-in-time."],
+  unread: ["not checked", "Some tables are only in S3, and this list does not open S3 files to check."],
 };
 
 // snapshotLockKey maps the wire value to a key of SNAPSHOT_LOCK, or "" for
@@ -9397,7 +9444,8 @@ function snapshotLockPill(lock) {
   if (!entry) return null;
   // A chip of the status family (#1950): read with no locks is a warning,
   // not recorded and not checked are unknowns.
-  return el("span", { class: "chip snap-lock " + (snapshotLockKey(lock) === "torn" ? "chip-warn" : "chip-unknown"), title: entry[1], text: entry[0] });
+  const key = snapshotLockKey(lock);
+  return el("span", { class: "chip snap-lock " + (key === "torn" ? "chip-warn" : key === "unknown" ? "chip-unknown snap-lock-dashed" : "chip-unknown"), title: entry[1], text: entry[0] });
 }
 
 // snapshotLockLine is the detail's own line. A snapshot whose files were not
@@ -9410,11 +9458,11 @@ function snapshotLockLine(d) {
   const unknown = (d && d.lock_unknown) || 0;
   // No table listed: nothing to say about locks, and above all not "S3".
   if (!d || !(d.tables || []).length) return "";
-  if (snapshotLockKey(d.lock) === "unread") return "Locks not checked: " + SNAPSHOT_LOCK.unread[1];
-  if (d.lock === "consistent") return "Read with locks: every row is from one moment.";
+  if (snapshotLockKey(d.lock) === "unread") return "Not checked: " + SNAPSHOT_LOCK.unread[1];
+  if (d.lock === "consistent") return "Point-in-time copy: every row is from the same instant.";
   const parts = [];
-  if (torn) parts.push("Read with no locks: " + count(torn) + ". Rows were copied at different moments and may not agree with each other.");
-  if (unknown) parts.push("Locks not recorded: " + count(unknown) + ". They may have been read with no locks.");
+  if (torn) parts.push("Different points-in-time: " + count(torn) + ". Their rows were read at different instants and may not agree with each other. A refresh keeps this mark.");
+  if (unknown) parts.push("Point-in-time unknown: " + count(unknown) + ". They come from a database read that did not record it. A new read records it.");
   return parts.join(" ");
 }
 
@@ -10042,7 +10090,7 @@ function backupScheduleCard(cur, b) {
       body.append(el("p", { class: "form-msg err", text:
         "The next run cannot start: " + plainWords(sch.next_method_error) + (/[.!?]$/.test(sch.next_method_error) ? "" : ".") }));
     } else if (sch.runnable && sch.next_method) {
-      const how = sch.next_method === "refresh" ? "will update the latest snapshot from the recorded changes" : "will take a full read from your database";
+      const how = sch.next_method === "refresh" ? "will refresh the latest snapshot from the recorded changes" : "will read your whole database";
       // A setting that makes EVERY run a full read (no Backup dir, no index
       // connection) is a warning, not the grey of a healthy prediction
       // (#1659); a first backup or a one-off unreadable bucket stays a hint.
@@ -11297,7 +11345,7 @@ function vfyHeadline(rec) {
       // difference was found, so the run failed; the rest are said apart.
       const differs = s.inconclusive_differs || 0;
       const other = notChecked - differs;
-      return [s.match + " match", differs + (differs === 1 ? " differs" : " differ") + " from a snapshot read with no locks"]
+      return [s.match + " match", differs + (differs === 1 ? " differs" : " differ") + " from a snapshot with different points-in-time"]
         .concat(other > 0 ? [other + " not checked"] : []).join(" · ");
     }
   }
@@ -11436,7 +11484,7 @@ function vfyVerdictWords(latest, whyNone) {
     case "error":
       return { state: "bad", title: "Errors on " + n(s.error) + (s.error === 1 ? " table" : " tables"), line: n(s.match) + " match", when: when, mark: "cross" };
     case "differs":
-      return { state: "bad", title: n(s.inconclusive_differs) + (s.inconclusive_differs === 1 ? " table differs" : " tables differ"), line: "from a snapshot read with no locks · " + n(s.match) + " match", when: when, mark: "cross" };
+      return { state: "bad", title: n(s.inconclusive_differs) + (s.inconclusive_differs === 1 ? " table differs" : " tables differ"), line: "from a snapshot with different points-in-time · " + n(s.match) + " match", when: when, mark: "cross" };
     case "no_predecessor":
       return { state: "none", title: "Nothing to compare yet", line: "Only one snapshot so far", when: when, mark: "check" };
   }

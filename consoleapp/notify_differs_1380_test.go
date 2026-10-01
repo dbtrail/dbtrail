@@ -31,8 +31,8 @@ func TestWatchNotifier_aTornDifferenceIsNotClean(t *testing.T) {
 	if strings.Contains(ev.Summary, "clean") {
 		t.Fatalf("a torn difference says clean: %q", ev.Summary)
 	}
-	want := "verification found 1 table(s) that differ from a snapshot read with no locks (3 match); " +
-		"the difference may come from that read, and a full snapshot taken with locks tells"
+	want := "verification found 1 table(s) that differ from a snapshot read at different points in time (3 match); " +
+		"the difference may come from that read, and a point-in-time database read tells"
 	if ev.Summary != want || ev.Details["differs"] != "1" {
 		t.Fatalf("summary %q details %v", ev.Summary, ev.Details)
 	}

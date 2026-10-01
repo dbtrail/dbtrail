@@ -206,7 +206,7 @@ console.log(JSON.stringify({
 	if !strings.HasPrefix(d.State, "Every 1d at 03:00 UTC, with a full read every 1d.") || d.Alarm {
 		t.Errorf("daily state = %q (alarm %v)", d.State, d.Alarm)
 	}
-	if !has(d.Hints, "Next run will take a full read from your database (the schedule takes a full read every 1d).") {
+	if !has(d.Hints, "Next run will read your whole database (the schedule takes a full read every 1d).") {
 		t.Errorf("daily: the next run is not said to be the full read: %v", d.Hints)
 	}
 	// When the next run IS the full backup, its own "next full read" line

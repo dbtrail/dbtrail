@@ -743,9 +743,10 @@ event on the transition into broken (see
 [Alerts](https://www.dbtrail.com/docs/monitoring/alerts/#webhook)). The fix is always the
 same: take a fresh baseline (`bintrail dump` + `bintrail baseline`).
 
-**How each snapshot was locked**: the `LOCKS` column says how the database
-was locked when the table's rows were read (`snapshot_lock` in JSON):
-`consistent`, `unknown`, or `⚠ no locks` (`torn` in JSON). `unknown` is a
+**How each snapshot was locked**: the `POINT_IN_TIME` column says whether the
+table's rows were read at one point in time (`snapshot_lock` in JSON):
+`consistent`, `unknown`, or `⚠ different points-in-time` (`torn` in JSON, a
+read with no locks). `unknown` is a
 snapshot that does not say, which is every snapshot taken before this was
 recorded. A snapshot updated from the recorded changes inherits the answer of
 the snapshot it was built from. Under the table, status counts the tables
