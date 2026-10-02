@@ -34,8 +34,7 @@ func fkCascadeCheck(t *testing.T, rows *sqlmock.Rows, queryErr error) CheckResul
 
 // What the user must not be handed: issue or bug numbers, project history,
 // storage-engine internals, schema-change statements, any advice to change the
-// user's foreign keys (RESTRICT), em dashes, or a command-line flag the console
-// has no field for.
+// user's foreign keys (RESTRICT), em dashes, flags or a list of commands.
 var fkCascadeJargon = regexp.MustCompile(`#\d|Phase|phase-|InnoDB|Bug|ALTER|RESTRICT|no longer|\x{2014}|--[a-z]|` +
 	"`stream`|`watch`|`up`|`index`")
 
@@ -67,25 +66,19 @@ func TestFKCascadesWarnNamesConstraints(t *testing.T) {
 			t.Errorf("user-facing text carries %q:\n%s", m, s)
 		}
 	}
-	assertConsoleWording(t, "fk cascades", c)
 	if !strings.HasPrefix(c.Remediation, "Capture works normally.") {
-		t.Errorf("the fix must open by saying nothing is broken:\n%s", c.Remediation)
+		t.Errorf("the note must open by saying nothing is broken:\n%s", c.Remediation)
 	}
-	// Both surfaces get their own way to restore, and the cascade-aware
-	// restore comes before the optional schema change.
-	for _, want := range []string{"Restore page", "`bintrail recover-cascade`"} {
+	// Command-line wording only: the console never shows this check, so the
+	// note names the CLI's commands and nothing of the console's.
+	for _, want := range []string{"`bintrail recover-cascade`", "`bintrail recover`"} {
 		if !strings.Contains(c.Remediation, want) {
-			t.Errorf("fix does not name %q:\n%s", want, c.Remediation)
+			t.Errorf("note does not name %q:\n%s", want, c.Remediation)
 		}
 	}
-	if r, s := strings.Index(c.Remediation, "Restore page"), strings.Index(c.Remediation, "RESTRICT"); s >= 0 && s < r {
-		t.Errorf("the schema change comes before the restore:\n%s", c.Remediation)
-	}
-	// Every line flush left: the console turns an indented line into a code
-	// box with a Copy button, and nothing here is meant to be run.
-	for _, l := range strings.Split(c.Remediation, "\n") {
-		if strings.HasPrefix(l, " ") || strings.HasPrefix(l, "\t") {
-			t.Errorf("indented line would draw as code: %q", l)
+	for _, bad := range []string{"console", "Restore page", "snapshot"} {
+		if strings.Contains(c.Remediation, bad) {
+			t.Errorf("note carries %q, which is not command-line wording:\n%s", bad, c.Remediation)
 		}
 	}
 }

@@ -156,6 +156,8 @@ type buildConfig struct {
 	// sourceSSL, when set, is how the source connection uses TLS (see
 	// WithSourceSSL). nil keeps the DSN's own tls= as the only TLS setting.
 	sourceSSL *config.SSL
+	// console is set by ForConsole: the report is for the web console.
+	console bool
 }
 
 // WithSourceSSL makes the checks open the source the way capture does:
@@ -201,6 +203,15 @@ func ForUnsavedServer() BuildOption {
 		c.snapshot = snapshotPending
 		c.sourceOnly = true
 	}
+}
+
+// ForConsole leaves out the checks a web-console user has nothing to act on.
+// Today that is the foreign keys that cascade: they are the user's design,
+// and the console's Restore includes the child rows when the parent table is
+// picked. Left out at the source, the check is in no list, count or light the
+// console draws. `bintrail doctor` and the watch preflight keep it.
+func ForConsole() BuildOption {
+	return func(c *buildConfig) { c.console = true }
 }
 
 // snapshotState is what the index says about its first schema snapshot, the
@@ -319,7 +330,9 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 	report.add(checkBinlogRowValueOptions(ctx, sourceDB))
 	report.add(checkReplicationGrants(ctx, sourceDB))
 	report.add(checkServerIDCollision(ctx, sourceDB, sourceDSN))
-	report.add(checkFKCascades(sourceDB, schemas))
+	if !cfg.console {
+		report.add(checkFKCascades(sourceDB, schemas))
+	}
 	report.add(checkSchemaVisibility(ctx, sourceDB, schemas))
 	snapshot := cfg.snapshot
 	if snapshot == snapshotUnknown && indexDSN != "" {
@@ -1053,26 +1066,19 @@ func extractGrantUser(grant string) string {
 // the parent table is undone.
 const FKCascadeCheckName = "Foreign keys that cascade"
 
-// fkCascadeAdvice is the fix shown under a cascade finding, worded for both
-// the terminal and the console: each surface's way to restore is named as
-// that surface's (the console's Restore page, the command line's
-// recover-cascade), and no flag appears. Every line is flush left so the
-// console draws it as prose, never as a box to copy. It never suggests changing
-// the foreign keys: cascades are the user's design and fully supported.
+// fkCascadeAdvice is the note under a cascade finding. It is command-line
+// wording only: the web console leaves the check out (ForConsole), because
+// its Restore already brings the child rows back when the parent table is
+// picked, so a console user has nothing to act on. Nothing here suggests
+// changing the foreign keys: they are the user's design, and supported.
 const fkCascadeAdvice = "Capture works normally. Each foreign key above is listed as child table → parent\n" +
-	"table. When a parent row is deleted or its key changes, the server also deletes or\n" +
-	"changes the matching child rows, and MariaDB and MySQL before 9.6 do not write\n" +
-	"those child changes to the binary log.\n" +
+	"table. When a parent row is deleted or its key changes, the server also changes the\n" +
+	"matching child rows, and MariaDB and MySQL before 9.6 do not write those child\n" +
+	"changes to the binary log.\n" +
 	"\n" +
-	"To undo a delete or key change on a parent table, use a restore that handles\n" +
-	"cascades. In the console, open the Restore page and pick that one parent table:\n" +
-	"the script then includes the child rows. On the command line, run\n" +
-	"`bintrail recover-cascade`. A plain `bintrail recover` does not fix the child rows.\n" +
-	"\n" +
-	"Both rebuild a child row from the changes DBTrail captured. A child row that did\n" +
-	"not change during that time comes back only from a snapshot: the console uses\n" +
-	"one when snapshots are set up, and `bintrail recover-cascade` when you point it\n" +
-	"at one. When the result may be missing child rows, the restore says so."
+	"To undo a delete or key change on a parent table, run `bintrail recover-cascade`:\n" +
+	"it includes the child rows, and says so when some may be missing. A plain\n" +
+	"`bintrail recover` does not include them."
 
 // rootCause drops the wrapping prefixes of err, so a detail that already says
 // what failed does not say it twice.
