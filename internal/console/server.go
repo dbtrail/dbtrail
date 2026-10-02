@@ -740,6 +740,7 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("GET /api/baselines/files", s.handleBaselineFiles)
 	api.HandleFunc("GET /api/baselines/download", s.handleBaselineDownload)
 	api.HandleFunc("GET /api/views.sql", s.handleViewsSQL)
+	api.HandleFunc("GET /api/dashboards", s.handleDashboards)
 	api.HandleFunc("POST /api/sql", s.recordAction("sql", s.handleSQL))
 	api.HandleFunc("GET /api/sql", s.handleSQLInfo)
 	// The sandboxed SQL panel (#1177). Registered unconditionally so the

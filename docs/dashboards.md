@@ -12,6 +12,50 @@ reaches its charts at the next scheduled snapshot, with nothing to rebuild.
 answering at the first refresh that changed a table, and had to be generated
 again.
 
+## Two ways in: S3 or the local folder
+Where the server's snapshots live decides which path fits.
+
+- **The snapshots go to S3.** On the **Overview**, open **Dashboards for the
+  team**. The card gives a small `views.sql` whose views read the bucket
+  directly, and shows the newest snapshot on S3. Nothing is downloaded or
+  mounted, and the tool can run anywhere that can reach the bucket. See
+  [Reading the snapshots from S3](#reading-the-snapshots-from-s3) below.
+- **The snapshots stay on this machine only.** The card says so, and links to
+  the S3 field on **Snapshots**, under **Where and how often**. Or follow the
+  steps from [How it works](#how-it-works) on: they read the local folder, so
+  the tool has to run on the same host.
+
+## Reading the snapshots from S3
+Download `views.sql` from the card, then open it in DuckDB:
+
+```sh
+duckdb -init views.sql team.duckdb
+```
+In a DuckDB session that is already open, `.read views.sql` does the same.
+
+Run the file at the start of **every** session, not once. It sets up S3 for
+that session and picks the newest snapshot carrying a `_SUCCESS` marker, so
+each new session reads the newest one without a new file. A snapshot still
+uploading is not read until it completes. In Metabase, paste the file into the
+DuckDB connection's **Init SQL**; see the note in step 4 about what that costs
+per query.
+
+What each reader needs:
+
+- Read access to the bucket and prefix the card names.
+- The bucket's region. When DBTrail could detect it, the file already names
+  it; otherwise their own AWS setup has to.
+- AWS credentials on their own machine, found the usual way (environment,
+  `~/.aws`, or SSO). The file holds none: DBTrail never hands out its own.
+
+The card also lists any table left out of the snapshot, which has no view.
+The list of tables comes from the snapshot the file was made against: get the
+file again after a table is added or dropped. A prefix holding `[`, `*`, `?` or
+`{` gets no file, because DuckDB reads those characters as wildcards.
+
+A session with a data profile does not get the file, the same as the SQL card:
+it reads the raw files, which the profile cannot filter.
+
 ## How it works
 
 There is no server to connect to: no host, port, user and password to type

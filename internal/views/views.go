@@ -409,6 +409,13 @@ type Input struct {
 	// changes wording, never mechanism.
 	SnapshotScoped bool
 
+	// ArchivesNotAsked marks a file whose producer skipped archive_state on
+	// purpose because the file holds state views only (the Overview's
+	// dashboards card, #2014). The header then says the archives are not
+	// part of this file instead of claiming none are registered, which the
+	// producer never checked. Wording only, like SnapshotScoped.
+	ArchivesNotAsked bool
+
 	// OmitEvents leaves the events view out even when archive sources ARE
 	// available. It is the DEFAULT for both file producers since #1535: binding
 	// that view opens one Parquet footer per archived file at CREATE VIEW time,
@@ -900,6 +907,8 @@ func writeHeader(b *strings.Builder, in Input) {
 		b.WriteString("--   (out of scope: this file describes the one snapshot it was published\n")
 		b.WriteString("--   with; `bintrail views` writes the file that also reads the archived\n")
 		b.WriteString("--   change log)\n")
+	case in.ArchivesNotAsked:
+		b.WriteString("--   (not part of this file, which holds the snapshot's tables only)\n")
 	case in.ArchiveDiscoveryFailed:
 		b.WriteString("--   (could not be read from archive_state; the log of the run that wrote\n--   this file has the error)\n")
 	case len(in.ArchiveSources) == 0:

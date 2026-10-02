@@ -51,6 +51,18 @@ type viewsRequest struct {
 	// to make, and emitting a location the snapshots were never written to
 	// produces a file whose every state view fails to resolve.
 	PortableBaseline bool
+	// S3Baseline reads the state views from whichever of this server's two
+	// snapshot locations is the S3 one, the primary on a server with only a
+	// bucket and the fallback on one that also keeps a local folder (#2014).
+	// The Overview's dashboards card asks for it: the file goes to a teammate,
+	// and only the bucket is reachable from there. With no S3 location the
+	// input names no baseline at all, never the local folder in its place.
+	S3Baseline bool
+	// StateOnly skips the archive half entirely: no archive_state read, no
+	// archive bucket in the region detection. Set with OmitEvents by a caller
+	// whose file never reads the archives, so a bucket the file does not touch
+	// cannot make the region ambiguous and leave the secret unpinned (#2014).
+	StateOnly bool
 }
 
 // naming, not a degrade: silently dropping the baseline half would hand over a
@@ -84,10 +96,13 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 		in.LiveLegUnavailable = true
 	}
 	var archiveErr error
-	in.ArchiveSources, archiveErr = consoleArchiveSources(ctx, b.db, portable)
-	in.PortableRouting = portable
+	if !req.StateOnly {
+		in.ArchiveSources, archiveErr = consoleArchiveSources(ctx, b.db, portable)
+	}
+	in.PortableRouting = portable && !req.StateOnly
+	in.ArchivesNotAsked = req.StateOnly
 	in.ArchiveDiscoveryFailed = archiveErr != nil
-	if archiveErr == nil {
+	if archiveErr == nil && !req.StateOnly {
 		// Per-column-set groups (#1535): whether a statement over the events
 		// view waits on EVERY archived file's footer or on one per schema.
 		// The console no longer runs this SQL itself (#1554 removed the panel),
@@ -121,6 +136,9 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 		// server actually has are the only two it can be asked for, so a
 		// request cannot name a prefix nothing was written to.
 		baseSrc = b.baselineFallbackSrc
+	}
+	if req.S3Baseline {
+		baseSrc = bundleBaselineS3(b)
 	}
 	if baseSrc != "" {
 		in.BaselineSource = baseSrc
@@ -167,7 +185,7 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 					// telling this reader to untick would hand a file of local
 					// paths to someone who asked for one that travels. The
 					// fact alone is right there; only the route is withheld.
-					if !req.PortableBaseline {
+					if !req.PortableBaseline && !req.S3Baseline {
 						in.NewerElsewhereHowTo = `To read that one instead, tick "Works on another machine" and download again.`
 					}
 				}
@@ -236,11 +254,12 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 			return views.Input{}, fmt.Errorf("S3 endpoint configuration: %w", err)
 		}
 		in.S3Endpoint = ep
-		// Every bucket store the daemon knows, not only this server's: the
-		// endpoints are locations, the file is what a reader on another
-		// machine has, and a secret for a bucket the file never reads costs
-		// nothing.
-		in.BucketStores = storage.BucketStores()
+		// Only the stores of the buckets this layout reads. The table is
+		// process-wide, one entry per bucket of EVERY server, and the file
+		// leaves this host: another server's bucket name and its internal
+		// endpoint are not this reader's business (#2014 review). A secret
+		// for a bucket the file never reads would also do nothing.
+		in.BucketStores = layoutBucketStores(in)
 		// The region for this layout, when it was actually DETECTED (#1462).
 		// Not "the region our own reads use": those fall back to the ambient
 		// one and are right to, since they fail here and loudly. A file that
@@ -319,8 +338,7 @@ func (s *Server) handleViewsSQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if b.noArchive {
-		writeJSONError(w, http.StatusNotFound,
-			"archive access is disabled for this server, so there is no Parquet layout to describe")
+		writeJSONError(w, http.StatusNotFound, noArchiveMessage(b))
 		return
 	}
 
@@ -515,4 +533,27 @@ func otherBaselineSource(b *bundle, picked string) string {
 		}
 	}
 	return ""
+}
+
+// layoutBucketStores keeps the bucket stores of the buckets `in` reads.
+func layoutBucketStores(in views.Input) map[string]storage.BucketStore {
+	all := storage.BucketStores()
+	out := map[string]storage.BucketStore{}
+	for _, b := range layoutBuckets(in) {
+		if st, ok := all[b]; ok {
+			out[b] = st
+		}
+	}
+	return out
+}
+
+// noArchiveMessage names why a server reads no Parquet, since the two causes
+// have different remedies: the server's own setting, or a data profile the
+// whole console runs under (its rules cannot filter a file read elsewhere).
+func noArchiveMessage(b *bundle) string {
+	if b.noArchiveProfile {
+		return "this console runs under a data profile, which turns off reading the Parquet copy for every server: " +
+			"a file read outside DBTrail could not be filtered by the profile, so there is no layout to describe"
+	}
+	return "archive access is disabled for this server, so there is no Parquet layout to describe"
 }

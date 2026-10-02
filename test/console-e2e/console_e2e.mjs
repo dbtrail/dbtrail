@@ -6543,6 +6543,47 @@ try {
       ? ok("sql: opening another card replaces the SQL panel")
       : bad("sql: opening another card replaces the SQL panel", JSON.stringify(swapped));
 
+    // Dashboards for the team (#2014). This daemon keeps its snapshots in a
+    // local folder only, so the card offers no file and sends the reader to
+    // the S3 field on Snapshots. Then an S3 server's answer, served in place
+    // of the route's, to drive the download: the saved file is the bytes the
+    // answer carried.
+    await page.click('.use-card[data-use="dash"] .use-act');
+    const dashLocal = await page.evaluate(async () => {
+      for (let i = 0; i < 100 && !document.querySelector(".dash-body"); i++) await new Promise((r) => setTimeout(r, 50));
+      const b = document.querySelector(".dash-body");
+      return { text: b ? b.textContent : "", buttons: b ? Array.from(b.querySelectorAll("button")).map((x) => x.textContent) : [] };
+    });
+    (dashLocal.text.includes("This server keeps its snapshots only on this machine, so a teammate's DuckDB cannot reach them.")
+      && dashLocal.buttons.includes("Add an S3 location") && !dashLocal.buttons.some((t) => /Download/.test(t)))
+      ? ok("dashboards: a local-only server is told so, offered no file, and sent to add an S3 location")
+      : bad("dashboards: a local-only server is told so, offered no file, and sent to add an S3 location", JSON.stringify(dashLocal));
+    await page.evaluate(() => Array.from(document.querySelectorAll(".dash-body button")).find((x) => x.textContent === "Add an S3 location").click());
+    const s3Field = await page.waitForSelector('input[name="baseline_s3"]', { timeout: 15000 }).then(() => true, () => false);
+    const routeNow = await page.evaluate(() => location.pathname);
+    (s3Field && routeNow === "/snapshots")
+      ? ok("dashboards: Add an S3 location lands on Snapshots, where the S3 field is")
+      : bad("dashboards: Add an S3 location lands on Snapshots, where the S3 field is", JSON.stringify({ s3Field, routeNow }));
+    const dashDoc = { state: "s3", s3: "s3://team-bucket/snapshots and more/", snapshot: "2026-10-02 06:00:00", tables: 2, follows: true,
+      region: "eu-west-1", views_sql: "-- views for the e2e\nSELECT 1;\n" };
+    await page.route("**/api/dashboards", (route) => route.fulfill({ json: dashDoc }));
+    await page.evaluate(() => navigate("overview"));
+    await page.waitForSelector('.use-card[data-use="dash"] .use-act:not([hidden])', { timeout: 15000 }).catch(() => {});
+    await page.click('.use-card[data-use="dash"] .use-act');
+    await page.waitForSelector(".dash-body", { timeout: 15000 }).catch(() => {});
+    const dashS3 = await page.evaluate(() => (document.querySelector(".dash-body") || {}).textContent || "");
+    let dashFile;
+    try {
+      const [dl] = await Promise.all([page.waitForEvent("download", { timeout: 20000 }),
+        page.evaluate(() => Array.from(document.querySelectorAll(".dash-body button")).find((x) => x.textContent === "Download views.sql").click())]);
+      dashFile = { name: dl.suggestedFilename(), text: readFileSync(await dl.path(), "utf8") };
+    } catch (err) { dashFile = { error: String(err) }; }
+    await page.unroute("**/api/dashboards");
+    (dashS3.includes("Newest snapshot on S3: 2026-10-02 06:00:00 UTC, 2 tables.") && dashS3.includes("duckdb -init views.sql team.duckdb")
+      && dashS3.includes("The bucket's region, eu-west-1.") && dashFile.name === "views.sql" && dashFile.text === dashDoc.views_sql)
+      ? ok("dashboards: an S3 server's card shows the newest snapshot and the command, and saves views.sql as the answer carried it")
+      : bad("dashboards: an S3 server's card shows the newest snapshot and the command, and saves views.sql as the answer carried it", JSON.stringify({ dashS3, dashFile }));
+
     // A session the server reports sql:false for does not see the card. The
     // server-side half (no sql:execute, a data profile, an S3-only copy all
     // report false) is pinned in Go; this is the page obeying the capability.

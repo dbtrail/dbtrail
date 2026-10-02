@@ -43,6 +43,11 @@ type bundle struct {
 	// the entry's own flag OR'd with the process-global profileActive: archives
 	// do not enforce RBAC, so an active profile forces it on every server.
 	noArchive bool
+	// noArchiveProfile says noArchive comes from the process-wide data
+	// profile (connManager.profileActive), not from the entry's own setting:
+	// the two have different remedies, and the dashboards card and
+	// /api/views.sql name the right one (#2014 review).
+	noArchiveProfile bool
 	// baselineSrc is the resolved reconstruct baseline source (local dir wins
 	// over s3:// prefix); empty when reconstruct is not configured.
 	baselineSrc string
@@ -318,6 +323,7 @@ func newBundleDerived(db *sql.DB, dbName string, entry ServerEntry, profileActiv
 		dbName:              dbName,
 		engine:              query.New(db),
 		noArchive:           noArchive,
+		noArchiveProfile:    profileActive,
 		baselineSrc:         src,
 		baselineFallbackSrc: fallback,
 		baselineConfigured:  src != "" && !noArchive,

@@ -2880,11 +2880,24 @@ const USE_PANELS = {
     body.append(row, msg);
   },
   dash(body) {
-    body.append(el("p", { class: "use-note" }, "Point Metabase, or any tool that runs DuckDB, at the copy and load ",
-      el("code", { text: DUCKDB_VIEWS_FILE }), " once. Every query then reads the newest copy."));
-    // The same schema card MCP Server carries, under the same gate.
-    if (capsCache.views && (capsCache.permissions || {})["settings:read"] !== false) body.append(duckdbPanel());
-    body.append(docsMore("guides/dashboards", "", "dashboards on the copy"));
+    // The always-current path (#2014): see dashPanelBody. The local folder's
+    // schema card stays on MCP Server, where the dashboards guide sends a tool
+    // that runs on this machine.
+    if ((capsCache.permissions || {})["settings:read"] === false) {
+      body.append(el("p", { class: "use-note", text: dashErrorText(403, "") }));
+      return;
+    }
+    body.append(ovSkelLines(3));
+    const gen = serverGen;
+    api("/api/dashboards").then((doc) => {
+      if (gen !== serverGen || !body.isConnected) return;
+      clear(body);
+      body.append(dashPanelBody(doc || {}));
+    }, (err) => {
+      if (gen !== serverGen || !body.isConnected) return;
+      clear(body);
+      body.append(el("p", { class: "use-note", text: dashErrorText(err && err.status, (err && err.message) || String(err)) }));
+    });
   },
   client(body) {
     // The same panel MCP Server carries, read when the card is opened and
@@ -2904,6 +2917,113 @@ const USE_PANELS = {
 
 // useCopySection builds the row once and returns { section, update }: the
 // cards and the panel slot are static, update() moves the figures.
+// Dashboards for the team (#2014). The always-current path: a small views
+// file whose views read the server's S3 snapshot location, so a teammate's
+// DuckDB (or Metabase on DuckDB) reads the newest snapshot with nothing
+// downloaded. Only S3 can be reached from their machine, so a server that keeps
+// its snapshots only here is told so and sent to add a bucket, instead of being
+// handed a file whose every path names this host.
+//
+// The file arrives inside GET /api/dashboards, beside the facts shown here, so
+// the card cannot describe one snapshot and save a file made against another.
+const DASH_DB = "team.duckdb";
+
+function dashErrorText(status, message) {
+  if (status === 403) {
+    if (/profile/.test(String(message || ""))) return "Not available while a data profile is active. The file reads the raw files, which the profile cannot filter.";
+    return "Your session is not allowed to get this file.";
+  }
+  return "The file for this server could not be prepared: " + (message || "no answer") + ".";
+}
+
+function dashTablesWord(n) {
+  return n === 1 ? "1 table" : n + " tables";
+}
+
+function dashPanelBody(doc) {
+  const box = el("div", { class: "dash-body" });
+  const note = (text) => el("p", { class: "use-note", text });
+  const hint = (...kids) => el("p", { class: "form-hint" }, ...kids);
+  const go = (label, target) => el("div", { class: "use-acts" },
+    el("button", { class: "btn btn-primary", type: "button", text: label, onclick: () => navigate(target) }));
+  switch (doc.state) {
+    case "s3": break;
+    case "s3_empty":
+      box.append(note("Snapshots for this server go to S3, at " + doc.s3 + ", and none has finished uploading there yet. The file is offered here once one has."),
+        go("See Snapshots", "snapshots"));
+      return box;
+    case "s3_pattern_chars":
+      box.append(note("The name of the S3 location, " + doc.s3 + ", contains [, *, ? or {. DuckDB reads those as wildcards, so a file for this location would not find the snapshots. Use an S3 location without them."),
+        go("Change the S3 location", "snapshots#setup"));
+      return box;
+    case "s3_unreadable":
+      box.append(note("DBTrail could not prepare the file for the S3 location " + doc.s3 + ". The reason is below."));
+      if (doc.error) box.append(hint(doc.error));
+      box.append(go("See Snapshots", "snapshots"));
+      return box;
+    case "local_only":
+      // Snapshots page, "Where and how often": the S3 field left the server
+      // form for that page (#1582).
+      box.append(note("This server keeps its snapshots only on this machine, so a teammate's DuckDB cannot reach them."),
+        note("Add an S3 location for this server, and this card gives a small file that reads the newest snapshot from anywhere."),
+        go("Add an S3 location", "snapshots#setup"),
+        hint("A tool running on this same machine can read the local folder instead. The guide has the steps."),
+        docsMore("guides/dashboards", "", "dashboards on the copy"));
+      return box;
+    case "s3_timeout":
+      box.append(note("S3 did not answer within " + (doc.timeout_seconds || 0) + " s, so there is no file yet. Open the card again in a moment. If it keeps happening, check the S3 location on Snapshots."),
+        go("See Snapshots", "snapshots"));
+      return box;
+    case "no_archive":
+      box.append(note("This server is set not to read its copy's files, so there is no file to give. An admin can turn that setting off in the server's configuration."));
+      return box;
+    case "no_archive_profile":
+      box.append(note("This console runs under a data profile, which turns off reading the copy's files for every server: a file read outside DBTrail could not be filtered by the profile. Start the console without the profile to offer the file."));
+      return box;
+    default:
+      box.append(note("No snapshot yet. Set up snapshots with an S3 location, and this card gives a file your team can open."),
+        go("Set up snapshots", "snapshots#setup"));
+      return box;
+  }
+  box.append(note(doc.follows
+    ? "Your team reads the copy straight from S3, in their own DuckDB. Nothing is downloaded, and each new session reads the newest snapshot."
+    : "Your team reads the copy straight from S3, in their own DuckDB. This file stays on the snapshot below: download it again to see a newer one."));
+  box.append(el("p", { class: "use-note" }, "Newest snapshot on S3: ",
+    el("b", { text: doc.snapshot, title: utcLocalTitle(doc.snapshot) || null }), " UTC, " + dashTablesWord(doc.tables || 0) + "."));
+  if (doc.newer_local) box.append(hint("A newer snapshot, from " + doc.newer_local + " UTC, is on this machine and not on S3 yet. The file sees it once it is uploaded."));
+  // The one primary action. The file is the answer already in hand, so the
+  // click saves it and asks the server nothing.
+  const dl = el("button", { class: "btn btn-primary", type: "button", text: "Download " + DUCKDB_VIEWS_FILE,
+    onclick: () => downloadBlob(DUCKDB_VIEWS_FILE, doc.views_sql || "", "text/plain") });
+  box.append(el("div", { class: "use-acts" }, dl));
+  box.append(hint("Then open it in DuckDB:"), duckdbCommandLine(DUCKDB_VIEWS_FILE, DASH_DB));
+  box.append(hint("In a DuckDB session already open: ", el("code", { text: ".read " + DUCKDB_VIEWS_FILE }), "."));
+  // Every session, not once: the S3 secret and the snapshot the views read
+  // live in the session, and a database file keeps neither.
+  box.append(hint("Run the file at the start of every session: it sets up S3 for that session" + (doc.follows ? " and picks the newest snapshot" : "") + ". In Metabase, paste it into Init SQL."));
+  const needs = el("ul", { class: "form-hint" });
+  needs.append(el("li", null, "Read access to ", el("code", { text: doc.s3 }), "."));
+  needs.append(el("li", { text: doc.region
+    ? "The bucket's region, " + doc.region + ". The file already names it."
+    : "Their AWS setup naming the bucket's region." }));
+  if (doc.endpoint) needs.append(el("li", { text: "Network access to " + doc.endpoint + ", where the bucket lives." }));
+  needs.append(el("li", { text: "AWS credentials on their own machine, found the usual way: environment, ~/.aws, or SSO. The file holds none, and DBTrail never hands out its own." }));
+  box.append(el("p", { class: "use-note", text: "What each reader needs:" }), needs);
+  const left = doc.left_out_tables || [];
+  const more = doc.left_out_tables_omitted || 0;
+  if (left.length || more) {
+    const n = left.length + more;
+    box.append(el("p", { class: "use-note", text: (n === 1 ? "1 table is" : n + " tables are") + " not in this snapshot, so not in the file:" }));
+    const ul = el("ul", { class: "form-hint" });
+    for (const t of left) ul.append(el("li", null, el("code", { text: t.name }), t.reason ? ": " + t.reason : ""));
+    if (more) ul.append(el("li", { text: "and " + more + " more" }));
+    box.append(ul);
+  }
+  box.append(hint("The list of tables comes from this snapshot. Download the file again after a table is added or dropped."),
+    docsMore("guides/dashboards", "", "dashboards on the copy"));
+  return box;
+}
+
 function useCopySection() {
   const section = el("section", { class: "use", "aria-label": "Use your copy" });
   // Hidden until the flow's reads say a copy exists: before the first copy
@@ -8256,13 +8376,11 @@ function duckdbTypedIdent(s) {
 // skeleton, and unlike claudeAskMock it depicted nothing the server sends, so
 // there was nothing to pin it against. The command itself is the part that has
 // to be exact, and it is the part a drawing cannot carry.
-function duckdbCommandLine(file) {
-  const cmd = "duckdb -init " + file + " lake.db";
-  const box = el("div", { class: "dk-run" },
+function duckdbCommandLine(file, db) {
+  const cmd = "duckdb -init " + file + " " + (db || "lake.db");
+  return el("div", { class: "dk-run" },
     el("code", { class: "dk-cmd", text: cmd }),
-    el("button", { class: "btn btn-sm dk-copy", type: "button", text: "Copy" }));
-  box.querySelector(".dk-copy").onclick = () => copyText(cmd, "command");
-  return box;
+    el("button", { class: "btn btn-sm dk-copy", type: "button", text: "Copy", onclick: () => copyText(cmd, "command") }));
 }
 
 // duckdbNameList renders what the reader can now query, by name.
