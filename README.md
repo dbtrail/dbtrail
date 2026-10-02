@@ -108,8 +108,8 @@ Method, cost comparison and ClickBench results:
 
 ### Time travel and recovery, from the same stream
 
-The binlog DBTrail reads for the copy carries every row change, before and
-after. From the day you install it, the same install gives you:
+DBTrail keeps every change on your MySQL server, before and after, and writes the SQL that undoes the ones you didn't want. It reads them from the same
+binlog as the copy, from the day you install it:
 
 - **Every version of every row.** See any row or table as it was at a past
   moment, from the web interface or the `reconstruct` CLI. An optional MySQL
