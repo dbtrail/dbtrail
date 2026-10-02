@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **A `mysql` client can run ordinary SQL on the copy through the embedded
+  time-travel port.** `bintrail-console watch --flashback-listen` used to
+  answer only the four time-travel shapes and refused any other statement
+  with 1235. Now a statement that is not time travel runs on the server's
+  Parquet copy the way the console's SQL card runs it: same locked DuckDB
+  child process, same views, same caps, same audit (`shim`/`sql.run`). The
+  SQL dialect is DuckDB's; `USE` selects the schema unqualified names resolve
+  in, `SHOW DATABASES` / `SHOW TABLES` / `SHOW COLUMNS` answer from the
+  copy's catalog, and a result cut at the row cap raises a warning `SHOW
+  WARNINGS` returns. Column types are mapped to MySQL's so a client shows
+  numbers as numbers. A server whose copy is only on S3, or with archive
+  access off, keeps refusing with 1235 and now says why. The standalone
+  `bintrail shim` and the PostgreSQL front-end gain one thing from this:
+  `USE <db>` sent as statement text (drivers and `mysql -e` do that; the
+  interactive client sends the protocol's own command) now selects the
+  schema, where it used to be refused with 1235. See docs/time-travel-sql.md.
 ### Changed
 - **The Overview's "Dashboards for the team" card now says on its front that it
   reads from S3.** Its tag reads "reads from S3" and its line "Any DuckDB,

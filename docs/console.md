@@ -1170,6 +1170,10 @@ The API behind it is `POST /api/sql` with `{"sql": "..."}` (JSON result, or CSV
 with `?format=csv`), and `GET /api/sql` for the list of tables, the copy's age
 and the limits. Both need `sql:execute`.
 
+The same queries run from a `mysql` client, with the same caps, over the
+embedded time-travel port (`watch --flashback-listen`): see
+[Ordinary SQL on the copy](time-travel-sql.md#ordinary-sql-on-the-copy-embedded-port-only).
+
 An earlier SQL page was removed in 0.75.0. It ran queries inside the process
 that captures, and it defined the `events` view on every page load, which took
 minutes on a large archive. This one runs each query in a separate process and

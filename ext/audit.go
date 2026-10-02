@@ -39,7 +39,9 @@ import (
 //     authenticates on the shared console token and its username
 //     is a server-ROUTING key, so its Actor is "server:<name>" —
 //     the routing target, prefixed so a sink cannot mistake it for
-//     a person.
+//     a person. Plus sql.run: free read-only SQL over the Parquet
+//     copy served by the console's embedded port (raw row data; the
+//     statement is the reader's own and travels in Detail).
 //   - "console" — query.run, recover.generate, recover.cascade,
 //     reconstruct.run, verify.explain, sql.run, baseline.download,
 //     plus two refusals that are not data reads: authz.denied

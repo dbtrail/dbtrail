@@ -29,14 +29,17 @@ in *how the client connects*:
    and it serves `_flashback` / `_snapshot` / `_diff` for *every* server in the
    web interface, routed by the connection username. No separate `bintrail shim`
    process, no hand-built index DSN. See [the embedded port](#the-embedded-port-multi-source)
-   below. Start here if you run `watch`.
+   below. Start here if you run `watch`. This port also answers **ordinary
+   SQL on the copy** — joins, aggregations, anything the console's SQL card
+   takes — see [Ordinary SQL on the copy](#ordinary-sql-on-the-copy-embedded-port-only).
 2. **A dedicated terminal — point `mysql` straight at a standalone shim (no
    ProxySQL).** Simplest for a single index. The shim already speaks the MySQL
    protocol, so an analyst connects a `mysql` client directly to it and runs
    `_flashback` / `_snapshot` / `_diff` queries. Trade-off: that connection
    answers *only* time-travel queries (a normal `SELECT` against a real table
-   returns `ER_NOT_SUPPORTED_YET`, 1235). Use it when a person or tool just needs
-   to read historical state from one index.
+   returns `ER_NOT_SUPPORTED_YET`, 1235; the standalone shim has no copy to
+   read). Use it when a person or tool just needs to read historical state
+   from one index.
 3. **Transparent routing — ProxySQL in front (the rest of this guide).** Needed
    only when an application's *normal* connection must mix live queries and
    `AS OF` queries on the same endpoint. ProxySQL routes virtual-schema queries
@@ -73,6 +76,55 @@ mysql -h 127.0.0.1 -P 3308 -u 7f4d577430b48821 -p"$BINTRAIL_CONSOLE_TOKEN"
 mysql> USE myapp;   -- optional: seeded from the server's source DSN when known
 mysql> SELECT * FROM _flashback.orders AS OF '2026-05-02 10:00:00' WHERE id = 12345;
 ```
+
+### Ordinary SQL on the copy (embedded port only)
+The same connection runs ordinary read-only SQL over the server's Parquet
+copy, the snapshots and the archived change log, exactly as the console's
+**SQL** card does: same locked DuckDB child process, same views, same caps
+(2 threads, 2 GB, 60 seconds, 1,000 rows, one query at a time per server).
+A statement that is not time travel is handed to it:
+
+```sql
+mysql> SHOW DATABASES;                       -- the copy's schemas, plus main (the events view)
+mysql> SHOW TABLES;                          -- the views in the current schema
+mysql> SHOW COLUMNS FROM orders;
+mysql> SELECT status, count(*) FROM orders GROUP BY 1;
+mysql> SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 20;
+mysql> SELECT count(*) FROM events WHERE table_name = 'orders';
+```
+
+What to know before relying on it:
+
+- **The SQL dialect is DuckDB's, not MySQL's.** The client is the transport;
+  the statement is what the SQL card takes. `DATE_FORMAT`, `GROUP_CONCAT` as
+  MySQL spells them, and backtick-quoted names are not understood; DuckDB's
+  `strftime`, `string_agg` and double quotes are. `USE <schema>` works and sets
+  where unqualified names resolve; the connection starts in the server's
+  source database when the registry knows it.
+- **Read-only, one SELECT per statement.** Anything else is refused with
+  1064. A result cut at the row cap, or a cell cut at the cell cap, raises a
+  warning the client counts; `SHOW WARNINGS` says which.
+- **The copy has to be on local disk**, as for the SQL card. A server whose
+  copy is only on S3, or with archive access disabled, or whose copy defines
+  no view yet, keeps the time-travel shapes and refuses ordinary SQL with
+  1235 and the reason.
+- **A current database the copy does not have** (the server's source
+  database before its first snapshot, a typo in `-D`) is left alone:
+  unqualified names then resolve in `main`, `SHOW DATABASES` and `events`
+  keep working, and a name that fails to resolve says which database is
+  missing from the copy.
+- **Access is the token's, all or nothing.** The port authenticates on the
+  console token, which has no data profile and no table or column rules, so
+  none apply here — the same rule the SQL card follows for a token session.
+  Give this port to people who may read every table of every server.
+- Every statement is written to the audit trail when one is installed
+  (`shim` / `sql.run`: the statement, the schema, the row count).
+- Column types are mapped to MySQL's (DuckDB `INTEGER` arrives as `BIGINT`,
+  `DECIMAL(p,s)` as `DECIMAL`, `TIMESTAMP` as `DATETIME`, `BOOLEAN` as 1/0,
+  a `LIST`/`STRUCT` as JSON text, `MAP`/`HUGEINT`/`UUID`/`INTERVAL` as text).
+  Verified with the `mysql` command-line client; a graphical client that
+  probes `information_schema` the MySQL way may show an incomplete table
+  tree, since DuckDB answers those probes with its own catalog.
 
 Servers added in the web interface mid-session are reachable immediately (the registry
 is read live). A token is **required** — MySQL-protocol auth cannot use the
@@ -540,7 +592,7 @@ If `bintrail-shim` is dead, `journalctl -u bintrail-shim -n 100` shows why. Comm
 The shim emits typed wire codes so ORMs and monitoring can distinguish *user input* errors from *server fault* errors — a 1105 spike no longer means "any time-travel query failed". Codes you may see:
 
 - **1064 `ER_PARSE_ERROR`** — a query mentions `_flashback` / `_snapshot` / `_diff` but doesn't match any supported shape (missing `AS OF`, missing `BETWEEN`, missing `USE <db>`, unparseable timestamp). Same code MySQL itself returns for any SQL syntax error.
-- **1235 `ER_NOT_SUPPORTED_YET`** — a non-virtual-schema query reached the shim (typically a direct connection to `:3308` bypassing ProxySQL). Hostgroup routing is misconfigured.
+- **1235 `ER_NOT_SUPPORTED_YET`** — a non-virtual-schema query reached a shim that has no copy to run it on: the standalone `bintrail shim` (typically a direct connection to `:3308` bypassing ProxySQL; hostgroup routing is misconfigured), or the embedded port for a server whose copy is only on S3 or whose archive access is off (the message says which).
 - **1526 `ER_NO_PARTITION_FOR_GIVEN_VALUE`** — two causes, distinguished by the message. Either the AS OF or BETWEEN range falls outside what this index retains (rotated out of MySQL with no archive coverage) — narrow the time range or check `archive_state` and the shim's `--allow-gaps` flag. Or a **full-table `_snapshot`** query found the configured baseline unusable (no baseline snapshot at-or-before the AS OF instant, or a primary key the baseline merge can't canonicalize) and refused rather than return a partial table — create or re-run `bintrail baseline` so a snapshot covers the AS OF, or query `_flashback` for a binlog-only view.
 - **1045 `ER_ACCESS_DENIED_ERROR`** — credential mismatch (see the section above).
 - **1317 `ER_QUERY_INTERRUPTED`** — the query exceeded `--query-timeout` (message names the flag), or its client disconnected / the shim shut down mid-query. Narrow the AS OF range, filter by PK, or raise the timeout.

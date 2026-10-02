@@ -878,3 +878,67 @@ func TestIsWorkerInvocation(t *testing.T) {
 		}
 	}
 }
+
+// Job.Schema is the MySQL-protocol port's USE: unqualified names resolve in
+// that schema, events (in main) stays reachable, and a schema the views did
+// not create is the user's own error, naming the schema, not a worker
+// failure. The odd names prove the literal quoting: an unbalanced quote
+// would surface as a parser error, not as the catalog error asserted here.
+func TestRun_schemaResolvesUnqualifiedNames(t *testing.T) {
+	f := newCopyFixture(t)
+	r := newTestRunner(t, testLimits())
+	withSchema := func(schema, sqlText string) Job {
+		j := f.job(sqlText)
+		j.Schema = schema
+		return j
+	}
+	res, err := r.Run(context.Background(), withSchema("shop", "SELECT id FROM orders ORDER BY id"))
+	if err != nil {
+		t.Fatalf("unqualified orders under schema shop: %v", err)
+	}
+	if want := [][]any{{json.Number("1")}, {json.Number("2")}}; !reflect.DeepEqual(res.Rows, want) {
+		t.Errorf("rows = %#v, want %#v", res.Rows, want)
+	}
+	res, err = r.Run(context.Background(), withSchema("shop", "SELECT count(*) AS n FROM events"))
+	if err != nil {
+		t.Fatalf("events under schema shop: %v", err)
+	}
+	if got := res.Rows[0][0]; got != json.Number("1") {
+		t.Errorf("events count = %#v, want 1", got)
+	}
+	// Without a schema the default stays main: orders is not there.
+	if _, err := r.Run(context.Background(), f.job("SELECT id FROM orders")); err == nil {
+		t.Error("unqualified orders with no schema ran; want a QueryError")
+	}
+	// A schema the copy does not have, odd spellings included: the default
+	// stays, so a statement that needs no schema still runs...
+	for _, schema := range []string{"nope", `we"ird`, "a,b", "it's"} {
+		if _, err := r.Run(context.Background(), withSchema(schema, "SELECT 1 AS one")); err != nil {
+			t.Fatalf("schema %q: SELECT 1 = %v, want it to run on the default", schema, err)
+		}
+		res, err := r.Run(context.Background(), withSchema(schema, "SELECT count(*) AS n FROM events"))
+		if err != nil || res.Rows[0][0] != json.Number("1") {
+			t.Fatalf("schema %q: events = (%v, %v), want 1 row counted", schema, res.Rows, err)
+		}
+	}
+	// ...and a name that then fails to resolve says why, naming the schema
+	// and the way out.
+	_, err = r.Run(context.Background(), withSchema("shopp", "SELECT id FROM orders"))
+	var qerr *QueryError
+	if !errors.As(err, &qerr) {
+		t.Fatalf("typo schema: err = %v (%T), want *QueryError", err, err)
+	}
+	for _, want := range []string{"does not exist", `the current database "shopp" is not in the copy`, "SHOW DATABASES"} {
+		if !strings.Contains(qerr.Message, want) {
+			t.Errorf("typo schema: message %q lacks %q", qerr.Message, want)
+		}
+	}
+	// A DuckDB error that is not about a missing name carries no hint.
+	_, err = r.Run(context.Background(), withSchema("shopp", "SELECT 'x'::INTEGER AS boom"))
+	if !errors.As(err, &qerr) {
+		t.Fatalf("conversion: err = %v, want a QueryError", err)
+	}
+	if strings.Contains(qerr.Message, "current database") {
+		t.Errorf("conversion error carried the schema hint: %q", qerr.Message)
+	}
+}

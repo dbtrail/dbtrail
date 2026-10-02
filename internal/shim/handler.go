@@ -156,6 +156,14 @@ type Handler struct {
 	// instead of indistinguishable from a real event.
 	actor string
 
+	// freeSQL, when non-nil, serves ordinary statements over the Parquet
+	// copy (see freesql.go); freeSQLWhyNot is the reason shown when it is
+	// nil and one is known. lastWarning is what SHOW WARNINGS answers
+	// after a free-SQL result cut at the row cap; guarded by mu.
+	freeSQL       FreeSQL
+	freeSQLWhyNot string
+	lastWarnings  []string
+
 	// allowedSchemas is the authenticated tenant's opt-in schema
 	// allowlist (issue #824), bound by BindAllowedSchemas after the
 	// handshake — same lifecycle as actor. nil/empty = unrestricted
@@ -466,6 +474,16 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 	currentDB := h.db
 	h.mu.Unlock()
 
+	// With free SQL bound, SHOW WARNINGS is a real statement (the row-cap
+	// warning, freesql.go), answered before the noise allowlist would
+	// swallow it; every other statement clears it, as on MySQL.
+	if h.freeSQL != nil {
+		if showWarningsRE.MatchString(qstr) {
+			return h.showWarnings()
+		}
+		h.setWarnings(nil)
+	}
+
 	// SHOW TABLES FROM _flashback/_diff/_snapshot (#315). Intercepted
 	// here, before Parse(), so the table list comes from the schema
 	// snapshots rather than letting the query fall through to the
@@ -536,14 +554,22 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, perr.Error())
 	}
 
+	// USE as statement text: a driver or `mysql -e "USE x; ..."` sends it
+	// as a query, not as COM_INIT_DB. Same gate and effect as UseDB.
+	if m := useStatementRE.FindStringSubmatch(qstr); m != nil {
+		if err := h.UseDB(strings.Trim(m[1], "`")); err != nil {
+			return nil, err
+		}
+		return &mysql.Result{Status: 2}, nil
+	}
 	if isHandshakeNoise(qstr) {
 		return &mysql.Result{Status: 2}, nil
 	}
+	if h.freeSQL != nil {
+		return h.runFreeSQL(currentDB, qstr)
+	}
 
-	return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, fmt.Sprintf(
-		"this server only handles _flashback / _snapshot / _diff virtual-schema queries; got: %s",
-		strings.TrimSpace(qstr),
-	))
+	return nil, h.notTimeTravelError(qstr)
 }
 
 // auditTimeTravel reports one served time-travel query to the audit seam.

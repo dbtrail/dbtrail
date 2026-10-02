@@ -118,6 +118,22 @@ func runJob(job wireJob, stderr io.Writer) (res wireResult) {
 			return sessionErr("install the copy's views: %v", err)
 		}
 	}
+	// The port's USE, before the lock like every other SET. A schema the
+	// views did not create (a default seeded from the source DSN, a typo in
+	// -D) is NOT applied: SET search_path refuses it, and refusing every
+	// statement on the connection would take down SHOW DATABASES, the one
+	// statement that shows the way out. The default stays, and a name that
+	// then fails to resolve carries the hint.
+	missingSchema := ""
+	if job.Schema != "" {
+		if schemaExists(ctx, conn, job.Schema) {
+			if _, err := conn.ExecContext(ctx, "SET search_path = "+searchPathLiteral(job.Schema)); err != nil {
+				return sessionErr("SET search_path: %v", err)
+			}
+		} else {
+			missingSchema = job.Schema
+		}
+	}
 	if _, err := conn.ExecContext(ctx, lockLast); err != nil {
 		return sessionErr("%s: %v", lockLast, err)
 	}
@@ -125,7 +141,12 @@ func runJob(job wireJob, stderr io.Writer) (res wireResult) {
 	start := time.Now()
 	rows, err := conn.QueryContext(ctx, job.SQL)
 	if err != nil {
-		return wireResult{Error: &wireError{Kind: errQuery, Message: err.Error()}}
+		msg := err.Error()
+		if missingSchema != "" && strings.Contains(msg, "does not exist") {
+			msg += fmt.Sprintf("; the current database %q is not in the copy, so unqualified names resolve in main: "+
+				"SHOW DATABASES lists the schemas that are, USE one of them", missingSchema)
+		}
+		return wireResult{Error: &wireError{Kind: errQuery, Message: msg}}
 	}
 	defer rows.Close()
 	types, err := rows.ColumnTypes()
@@ -431,4 +452,23 @@ func floatCell(f float64) any {
 		return "-Infinity"
 	}
 	return f
+}
+
+// schemaExists reports whether the views created a schema of that name, as
+// DuckDB compares names: ASCII case folded. A lookup failure reads as absent,
+// which is the safe side (the default stays).
+func schemaExists(ctx context.Context, conn *sql.Conn, schema string) bool {
+	var n int
+	err := conn.QueryRowContext(ctx,
+		"SELECT count(*) FROM information_schema.schemata WHERE lower(schema_name) = lower(?)", schema).Scan(&n)
+	return err == nil && n > 0
+}
+
+// searchPathLiteral renders one schema name as the string literal SET
+// search_path takes: the name as a quoted identifier (so a space, a comma
+// or a double quote inside it is part of the name, not a separator), inside
+// a single-quoted string.
+func searchPathLiteral(schema string) string {
+	ident := `"` + strings.ReplaceAll(schema, `"`, `""`) + `"`
+	return "'" + strings.ReplaceAll(ident, "'", "''") + "'"
 }

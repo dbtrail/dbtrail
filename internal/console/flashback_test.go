@@ -3,6 +3,8 @@ package console
 import (
 	"context"
 	"errors"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
+	"strings"
 	"testing"
 )
 
@@ -100,5 +102,24 @@ func TestSplitBaselineSource(t *testing.T) {
 		if dir != tc.dir || s3 != tc.s3 {
 			t.Errorf("splitBaselineSource(%q) = (%q,%q), want (%q,%q)", tc.src, dir, s3, tc.dir, tc.s3)
 		}
+	}
+}
+
+// The port's executor turns the route's own refusals into
+// sqlsandbox.UnavailableError, worded for a MySQL client (never "the
+// browser"). A bundle with no index behind it fails view discovery before
+// any runner, which is the shape of a route refusal.
+func TestSQLOnCopyRun_refusalsAreUnavailableOnTheWire(t *testing.T) {
+	q := &SQLOnCopy{s: &Server{}, b: &bundle{}, user: "server:x"}
+	_, err := q.Run(context.Background(), "SELECT 1", "")
+	var un *sqlsandbox.UnavailableError
+	if !errors.As(err, &un) {
+		t.Fatalf("err = %v (%T), want *sqlsandbox.UnavailableError", err, err)
+	}
+	if strings.Contains(un.Reason, "browser") {
+		t.Errorf("reason names the browser on the MySQL wire: %q", un.Reason)
+	}
+	if strings.Contains(sqlCopyNotLocalPortMessage, "browser") {
+		t.Errorf("port wording for a non-local copy names the browser: %q", sqlCopyNotLocalPortMessage)
 	}
 }

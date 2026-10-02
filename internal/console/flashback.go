@@ -3,9 +3,13 @@ package console
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"log/slog"
 	"strings"
 
 	drivermysql "github.com/go-sql-driver/mysql"
+
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
 // FlashbackTarget is the go-mysql-free resolution of a flashback connection's
@@ -37,6 +41,69 @@ type FlashbackTarget struct {
 	// seeded so USE-less `_flashback.<table>` queries resolve; empty for the
 	// boot entry (no registry SourceDSN).
 	DefaultSchema string
+	// SQL runs free read-only SQL on this server's Parquet copy, the same
+	// way POST /api/sql does for the browser (same sandbox, same views, same
+	// caps); nil when the port cannot offer it, and SQLUnavailable says why
+	// in the words the client is shown. Whether the copy is local is decided
+	// per statement, inside Run, so the reason stays exact.
+	SQL            *SQLOnCopy
+	SQLUnavailable string
+}
+
+// SQLOnCopy is the free-SQL executor the embedded port hands each connection.
+type SQLOnCopy struct {
+	s    *Server
+	b    *bundle
+	user string
+}
+
+// Run runs one statement; schema is where unqualified names resolve (the
+// connection's USE), empty for DuckDB's default. The error is one the
+// client can be shown: the runner's typed errors pass through, the route's
+// own refusals (the copy is not queryable here, whatever the statement)
+// become a sqlsandbox.UnavailableError with wording that does not name the
+// browser, and a worker failure, whose text can carry host paths, is logged
+// here and replaced.
+func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string) (sqlsandbox.Result, error) {
+	out, err := q.s.runSQL(ctx, q.b, q.user, statement, schema, 0)
+	if err != nil {
+		var werr *sqlsandbox.WorkerError
+		var refusal *sqlRefusal
+		switch {
+		case errors.As(err, &werr):
+			slog.Error("console: the SQL worker failed", "error", err, "surface", "flashback port")
+			return sqlsandbox.Result{}, errors.New(sqlWorkerFailedMessage)
+		case errors.As(err, &refusal):
+			msg := refusal.Message
+			if msg == sqlCopyNotLocalMessage {
+				msg = sqlCopyNotLocalPortMessage
+			}
+			return sqlsandbox.Result{}, &sqlsandbox.UnavailableError{Reason: msg}
+		case errors.Is(err, sqlsandbox.ErrCopyNotLocal):
+			return sqlsandbox.Result{}, &sqlsandbox.UnavailableError{Reason: sqlCopyNotLocalPortMessage}
+		}
+		return sqlsandbox.Result{}, err
+	}
+	return out.Result, nil
+}
+
+// sqlCopyNotLocalPortMessage is sqlCopyNotLocalMessage for a MySQL client,
+// which is not in a browser.
+const sqlCopyNotLocalPortMessage = "the copy for this server is only on S3; SQL on the copy needs a local copy"
+
+// sqlOnCopyFor decides, once per connection, whether the port can offer
+// free SQL on this server: the console has a sandbox runner, and archive
+// access is on. The same two gates POST /api/sql applies before it looks at
+// the copy, minus the data-profile one, which a token-authenticated port has
+// no profile to apply.
+func (s *Server) sqlOnCopyFor(b *bundle, id string) (*SQLOnCopy, string) {
+	switch {
+	case s.sqlRunner == nil:
+		return nil, "SQL on the copy is not enabled on this console"
+	case b.noArchive:
+		return nil, "archive access is disabled for this server, so its copy cannot be read"
+	}
+	return &SQLOnCopy{s: s, b: b, user: "server:" + id}, ""
 }
 
 // ResolveFlashback maps a flashback connection username to its target server's
@@ -56,13 +123,16 @@ func (s *Server) ResolveFlashback(ctx context.Context, selector string) (Flashba
 		return FlashbackTarget{}, err
 	}
 	dir, s3 := splitBaselineSource(b.baselineSrc)
+	sqlOnCopy, sqlWhyNot := s.sqlOnCopyFor(b, id)
 	return FlashbackTarget{
-		IndexDB:       b.db,
-		IndexDBName:   b.dbName,
-		BaselineDir:   dir,
-		BaselineS3:    s3,
-		NoArchive:     b.noArchive,
-		DefaultSchema: s.flashbackDefaultSchema(id),
+		IndexDB:        b.db,
+		IndexDBName:    b.dbName,
+		BaselineDir:    dir,
+		BaselineS3:     s3,
+		NoArchive:      b.noArchive,
+		DefaultSchema:  s.flashbackDefaultSchema(id),
+		SQL:            sqlOnCopy,
+		SQLUnavailable: sqlWhyNot,
 	}, nil
 }
 
