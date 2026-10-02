@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Fixed
+- **Snapshot refresh now works on MariaDB system-versioned tables** (#2007).
+  A refresh refused every table created `WITH SYSTEM VERSIONING` (its primary
+  key carries the generated `row_end` column), and because a refresh publishes
+  all tables or none, one such table stopped every refresh. A refresh, and a
+  full-table `reconstruct`, now hold the table's current rows, the same as a
+  full read: changes are folded on the declared primary key, history rows are
+  ignored and a versioned delete is a delete, so a reconstruct at a past
+  moment equals `FOR SYSTEM_TIME AS OF` that moment. Hidden and declared
+  period columns and `PARTITION BY SYSTEM_TIME` are covered. Versioning added
+  by `ALTER TABLE` after the last full read is refused until the next full
+  read, and transaction-precise versioning is refused.
+- **`recover` no longer writes wrong SQL for a system-versioned table**
+  (#2007). A delete was reversed with an `UPDATE ... WHERE row_end = <past>`
+  that matched nothing, so the row never came back, and a `DELETE HISTORY`
+  was reversed into `INSERT`s that brought old versions back as current rows.
+  A delete is now reversed with an `INSERT`, history rows are skipped with a
+  comment, and the `WHERE` uses the declared key.
+- **Single-row `reconstruct` refuses a system-versioned table** (#2007)
+  instead of answering with the snapshot's row as if nothing had changed
+  since: its changes are stored under the key plus `row_end`, so the lookup by
+  the declared key found none.
 - **Extensions that open the source now get its TLS settings** (#1997). The
   seams that hand a source to an extension (`ext.SourceJobInfo`,
   `ext.ConsoleQueryContext`, `mcpext.ToolContext`) carried only the source

@@ -123,7 +123,7 @@ func TestFoldPage_unresolvedToastMarker(t *testing.T) {
 		EventType:  event.EventUpdate,
 		SchemaName: "mydb", TableName: "orders", PKValues: pkStrForInt(2),
 		RowAfter: map[string]any{"id": "2", "status": toastMarker()},
-	}}, "mydb", "orders", pkColsIntID(), res)
+	}}, "mydb", "orders", pkColsIntID(), nil, res)
 	if err == nil {
 		t.Fatal("expected a loud error for a marker-carrying change")
 	}

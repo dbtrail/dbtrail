@@ -163,16 +163,15 @@ var generatedRe = regexp.MustCompile(`(?i)\bAS\s*\(.*\)\s*(?:VIRTUAL|STORED|PERS
 // its tableColumns already excludes these via GENERATION_EXPRESSION, which
 // MariaDB fills with the literal "ROW START"/"ROW END" (verified live).
 //
-// Known scope limit (#1266): MariaDB extends the table's PRIMARY KEY with the
-// ROW END column, and the schema snapshot keeps it (PKColumnMetas selects on
-// IsPK only), so FULL-TABLE reconstruct — and verify, which reconstructs —
-// refuse such a table UP FRONT (reconstruct.GeneratedPKColumn gates both
-// full-table paths; verify reports it inconclusive rather than error).
-// Excluding the column from the join key instead would corrupt silently —
-// the binlog carries history rows and versioned deletes under the same
-// remaining key; see GeneratedPKColumn's comment for the MariaDB 11.4
-// evidence. The baseline itself, single-row reconstruct with --pk-columns,
-// and the query paths all work.
+// Known scope limit (#1266, narrowed by #2007): MariaDB extends the table's
+// PRIMARY KEY with the ROW END column, and the schema snapshot keeps it
+// (PKColumnMetas selects on IsPK only), so the baseline cannot hold that key
+// column. Full-table reconstruct (and snapshot refresh) key a versioned table
+// on its declared key instead and read each event for what it means to the
+// current rows, which is what a baseline of it holds (mydumper's SELECT
+// returns current rows only); see reconstruct.sysVersioningFor. verify, the
+// shim's full-table views and the cascade baseline still refuse such a table,
+// and the CLI's single-row reconstruct refuses it too.
 var rowPeriodRe = regexp.MustCompile(`(?i)\bGENERATED\s+ALWAYS\s+AS\s+ROW\s+(?:START|END)\b`)
 
 // ParseSchema reads a mydumper <db>.<table>-schema.sql file and returns the

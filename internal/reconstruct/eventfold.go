@@ -99,14 +99,29 @@ func retainEvent(ev *query.ResultRow) *query.ResultRow {
 // Both refuse the whole run. That is deliberate and matches the pre-existing
 // stance for these two conditions: the alternative is a dump that loads cleanly
 // and is wrong.
+//
+// sv is non-nil for a MariaDB system-versioned table (#2007): each event is
+// first rewritten into its meaning for the current rows (or dropped, for the
+// history versions the server keeps), so the guards above and the change map
+// see an ordinary table keyed on the declared PK, which pkCols then is.
 func foldPage(
 	page []query.ResultRow,
 	schema, table string,
 	pkCols []metadata.ColumnMeta,
+	sv *sysVersioned,
 	res *foldResult,
 ) error {
 	for i := range page {
 		ev := &page[i]
+		if sv != nil {
+			keep, err := sv.normalize(ev)
+			if err != nil {
+				return err
+			}
+			if !keep {
+				continue
+			}
+		}
 		if err := checkEventToast(*ev); err != nil {
 			return err
 		}
@@ -165,6 +180,9 @@ type foldConfig struct {
 	Schema string
 	Table  string
 	PKCols []metadata.ColumnMeta
+	// SysVersioned is set for a MariaDB system-versioned table (#2007); PKCols
+	// is then the declared key, without the ROW END column. See foldPage.
+	SysVersioned *sysVersioned
 
 	// Opts is the event filter for the window. Limit, LimitPerPK and AfterEvent
 	// must be unset — the stream owns paging and rejects a caller that presets
@@ -468,7 +486,7 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 			}
 		}
 
-		if err := foldPage(page, fc.Schema, fc.Table, fc.PKCols, res); err != nil {
+		if err := foldPage(page, fc.Schema, fc.Table, fc.PKCols, fc.SysVersioned, res); err != nil {
 			foldErr = err
 			return err
 		}

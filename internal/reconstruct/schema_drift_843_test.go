@@ -270,7 +270,7 @@ func TestDroppedBaselineColumns(t *testing.T) {
 func foldForTest(t *testing.T, events []query.ResultRow) *foldResult {
 	t.Helper()
 	res := &foldResult{Changes: map[string]*query.ResultRow{}}
-	if err := foldPage(events, "mydb", "orders", pkColsIntID(), res); err != nil {
+	if err := foldPage(events, "mydb", "orders", pkColsIntID(), nil, res); err != nil {
 		t.Fatalf("foldPage: %v", err)
 	}
 	return res

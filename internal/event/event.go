@@ -339,6 +339,30 @@ func splitPKValues(s string) []string {
 	return append(parts, cur.String())
 }
 
+// DropPKComponent removes the idx-th component from a stored pk_values string
+// built over n key columns, keeping every other component spelled exactly as
+// stored. It reports false, and returns "", when the string does not hold
+// exactly n components or idx is out of range: a key that does not have the
+// shape the caller expects must never lose "some" component.
+//
+// It exists for MariaDB system-versioned tables (#2007), whose stored key
+// carries the ROW END period column MariaDB appends to the PRIMARY KEY; the
+// readers that want the table as the application sees it key it on the
+// declared columns alone.
+func DropPKComponent(pkValues string, idx, n int) (string, bool) {
+	parts := splitPKValues(pkValues)
+	if len(parts) != n || idx < 0 || idx >= n {
+		return "", false
+	}
+	kept := make([]string, 0, n-1)
+	for i, p := range parts {
+		if i != idx {
+			kept = append(kept, EscapePKValue(p))
+		}
+	}
+	return strings.Join(kept, "|"), true
+}
+
 // CanonicalPKValues rewrites a pk_values string into the spelling
 // BuildPKValues produces today for the same key: any component whose raw
 // bytes are not valid UTF-8 is re-spelled as hexPKPrefix + uppercase hex,

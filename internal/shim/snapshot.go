@@ -495,14 +495,16 @@ func (h *Handler) pkColumnMetas(schema, table string) ([]metadata.ColumnMeta, bo
 // duplicate live rows, and a versioned DELETE is an Update_rows tombstone the
 // latest-event rule keeps as live — verified against MariaDB 11.4). And no
 // shim single-row steer either: the versioned PK is composite (id, row_end),
-// so PKColumnCheck refuses the `WHERE pk = v` shape on these tables — the one
-// single-row path that does work is the CLI's, with an explicit column list.
+// so PKColumnCheck refuses the `WHERE pk = v` shape on these tables. The
+// steer is to the CLI's full-table reconstruct, which reads versioned tables
+// since #2007 (the CLI's single-row path refuses them: a lookup by the
+// declared key misses every stored change).
 func generatedPKFullTableError(qType QueryType, schema, table string, c metadata.ColumnMeta) error {
 	return mysql.NewError(mysql.ER_NO_PARTITION_FOR_GIVEN_VALUE, fmt.Sprintf(
 		"resolve %s: primary-key column %s of %s.%s is a generated column (most commonly MariaDB system versioning, "+
 			"which extends the PK with its ROW END period column); neither the baseline merge nor a binlog-only fold "+
 			"can render this table faithfully — history rows and versioned deletes share the surviving key — so the "+
-			"full-table view is refused; use the CLI's single-row reconstruct with an explicit PK column list",
+			"full-table view is refused here; the CLI's full-table reconstruct reads system-versioned tables",
 		qType, c.Name, schema, table))
 }
 

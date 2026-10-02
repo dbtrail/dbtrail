@@ -1,0 +1,147 @@
+package recovery
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/parser"
+	"github.com/dbtrail/dbtrail/internal/query"
+)
+
+// #2007: reversal SQL for a MariaDB system-versioned table. The binlog of such
+// a table carries history rows and versioned deletes; reversing them as if
+// they were ordinary row changes resurrects old versions as current rows
+// (a DELETE HISTORY reversed into INSERTs) and silently fails to restore a
+// deleted row (its tombstone UPDATE reversed with WHERE row_end = <past>).
+
+const (
+	svCur = "2106-02-07 06:28:15.999999"
+	svT0  = "2026-10-02 06:13:40.000001"
+	svT1  = "2026-10-02 06:13:43.628276"
+)
+
+// The snapshot shape of `CREATE TABLE prices (...) WITH SYSTEM VERSIONING`:
+// the hidden period columns synthesized (#1272), row_end appended to the PK.
+func svGen() *Generator {
+	tm := &metadata.TableMeta{Schema: "shop", Table: "prices", Columns: []metadata.ColumnMeta{
+		{Name: "id", OrdinalPosition: 1, IsPK: true, DataType: "int"},
+		{Name: "price", OrdinalPosition: 2, DataType: "decimal"},
+		{Name: "row_start", OrdinalPosition: 3, DataType: "timestamp", ColumnType: "timestamp(6)", IsGenerated: true},
+		{Name: "row_end", OrdinalPosition: 4, IsPK: true, DataType: "timestamp", ColumnType: "timestamp(6)", IsGenerated: true},
+	}, PKColumns: []string{"id", "row_end"}}
+	return New(nil, metadata.NewResolverFromTables(1, map[string]*metadata.TableMeta{"shop.prices": tm}))
+}
+
+func svRow(id float64, price, start, end string) map[string]any {
+	return map[string]any{"id": id, "price": price, "row_start": start, "row_end": end}
+}
+
+func svEvent(id uint64, typ parser.EventType, pk string, before, after map[string]any) query.ResultRow {
+	return query.ResultRow{EventID: id, EventTimestamp: time.Date(2026, 10, 2, 6, 13, 43, 0, time.UTC),
+		SchemaName: "shop", TableName: "prices", EventType: typ, PKValues: pk, RowBefore: before, RowAfter: after}
+}
+
+// statementFor returns the SQL emitted under the "-- [id]" header of one event,
+// or "" when the event emitted no statement.
+func statementFor(t *testing.T, script string, id string) (header, stmt string) {
+	t.Helper()
+	lines := strings.Split(script, "\n")
+	for i, l := range lines {
+		if strings.HasPrefix(l, "-- ["+id+"]") {
+			header = l + "\n"
+			for _, n := range lines[i+1:] {
+				if strings.HasPrefix(n, "-- [") || strings.TrimSpace(n) == "" {
+					return header, ""
+				}
+				if !strings.HasPrefix(n, "--") {
+					return header, n
+				}
+				header += n + "\n"
+			}
+			return header, ""
+		}
+	}
+	t.Fatalf("no header for event %s in:\n%s", id, script)
+	return "", ""
+}
+
+func TestGenerate_systemVersioned_2007(t *testing.T) {
+	rows := []query.ResultRow{
+		svEvent(1, parser.EventInsert, "1|"+svCur, nil, svRow(1, "1.00", svT0, svCur)),
+		svEvent(2, parser.EventUpdate, "1|"+svCur, svRow(1, "1.00", svT0, svCur), svRow(1, "1.50", svT1, svCur)),
+		svEvent(3, parser.EventInsert, "1|"+svT1, nil, svRow(1, "1.00", svT0, svT1)),
+		svEvent(4, parser.EventUpdate, "2|"+svCur, svRow(2, "2.00", svT0, svCur), svRow(2, "2.00", svT0, svT1)),
+		svEvent(5, parser.EventDelete, "1|"+svT1, svRow(1, "1.00", svT0, svT1), nil),
+		svEvent(6, parser.EventUpdate, "3|"+svT0, svRow(3, "3.00", svT0, svT0), svRow(3, "3.30", svT0, svT0)),
+		svEvent(7, parser.EventDelete, "4|"+svCur, svRow(4, "4.00", svT0, svCur), nil),
+	}
+	var buf bytes.Buffer
+	n, err := svGen().GenerateSQLFromRows(rows, &buf)
+	if err != nil {
+		t.Fatalf("GenerateSQLFromRows: %v", err)
+	}
+	script := buf.String()
+	if n != 4 {
+		t.Errorf("statements written = %d, want 4 (insert, update, versioned delete, real delete)\n%s", n, script)
+	}
+
+	for _, c := range []struct {
+		id, want string // want "" = no statement
+	}{
+		{"1", "DELETE FROM `shop`.`prices` WHERE `id` = 1"},
+		{"2", "UPDATE `shop`.`prices` SET `id` = 1, `price` = '1.00' WHERE `id` = 1"},
+		{"3", ""}, // the old version an UPDATE keeps: the server owns it
+		{"4", "INSERT INTO `shop`.`prices` (`id`, `price`) VALUES (2, '2.00')"},
+		{"5", ""}, // DELETE HISTORY: history cannot be written back
+		{"6", ""}, // an edit of history
+		{"7", "INSERT INTO `shop`.`prices` (`id`, `price`) VALUES (4, '4.00')"},
+	} {
+		_, stmt := statementFor(t, script, c.id)
+		if stmt != c.want+map[bool]string{true: "", false: ";"}[c.want == ""] {
+			t.Errorf("event %s: statement = %q, want %q\n%s", c.id, stmt, c.want, script)
+		}
+	}
+	if strings.Contains(script, "row_end` =") || strings.Contains(script, "`row_start`") {
+		t.Errorf("period columns reached the reversal SQL:\n%s", script)
+	}
+	for _, id := range []string{"3", "5", "6"} {
+		header, _ := statementFor(t, script, id)
+		if !strings.Contains(header, "system-versioned") {
+			t.Errorf("event %s: skipped without saying why: %q", id, header)
+		}
+	}
+}
+
+func TestGenerate_systemVersioned_unknownMarkerRefused_2007(t *testing.T) {
+	far := "2090-01-01 00:00:00.000000"
+	rows := []query.ResultRow{
+		svEvent(1, parser.EventInsert, "1|"+far, nil, svRow(1, "1.00", svT0, far)),
+	}
+	var buf bytes.Buffer
+	_, err := svGen().GenerateSQLFromRows(rows, &buf)
+	if err == nil || !strings.Contains(err.Error(), "neither") {
+		t.Fatalf("GenerateSQLFromRows = %v, want a refusal for an end value nothing explains\n%s", err, buf.String())
+	}
+}
+
+// A MySQL table with a stored generated TIMESTAMP in its key (MariaDB refuses
+// a generated PK column outright, so the shape only exists on MySQL) has no
+// row start column and keeps the ordinary reversal.
+func TestGenerate_generatedTimestampKeyWithoutPeriod_unchanged_2007(t *testing.T) {
+	tm := &metadata.TableMeta{Schema: "shop", Table: "t", Columns: []metadata.ColumnMeta{
+		{Name: "id", OrdinalPosition: 1, IsPK: true, DataType: "int"},
+		{Name: "ts", OrdinalPosition: 2, IsPK: true, DataType: "timestamp", ColumnType: "timestamp(6)", IsGenerated: true},
+	}, PKColumns: []string{"id", "ts"}}
+	g := New(nil, metadata.NewResolverFromTables(1, map[string]*metadata.TableMeta{"shop.t": tm}))
+	row := query.ResultRow{EventID: 1, EventTimestamp: time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC),
+		SchemaName: "shop", TableName: "t", EventType: parser.EventDelete, PKValues: "1|" + svT0,
+		RowBefore: map[string]any{"id": float64(1), "ts": svT0}}
+	var buf bytes.Buffer
+	n, err := g.GenerateSQLFromRows([]query.ResultRow{row}, &buf)
+	if err != nil || n != 1 || !strings.Contains(buf.String(), "INSERT INTO `shop`.`t` (`id`) VALUES (1)") {
+		t.Fatalf("n=%d err=%v, want the ordinary reversal INSERT:\n%s", n, err, buf.String())
+	}
+}

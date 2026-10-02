@@ -24,6 +24,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/sysversion"
 )
 
 // Dialect selects the SQL dialect for generated reversal SQL. The index is
@@ -332,6 +333,11 @@ func (g *Generator) generate(rows []query.ResultRow, w *countingWriter) (int, []
 	for _, row := range rows {
 		fmt.Fprintln(&body)
 
+		// A system-versioned table's binlog also carries history versions
+		// and logs a delete as an UPDATE of row_end (#2007).
+		capturedType := row.EventType
+		row, svSkip, svErr := g.sysVersionedReversal(row)
+
 		gtidSuffix := ""
 		if row.GTID != nil {
 			gtidSuffix = " gtid=" + SanitizeForComment(*row.GTID)
@@ -348,6 +354,23 @@ func (g *Generator) generate(rows []query.ResultRow, w *countingWriter) (int, []
 			row.EventTimestamp.Format("2006-01-02 15:04:05"),
 			gtidSuffix,
 		)
+		if svErr != nil {
+			fmt.Fprintf(&body, "-- ERROR generating reversal for event %d: %s\n",
+				row.EventID, SanitizeForComment(svErr.Error()))
+			genFailures = append(genFailures, genFailure{
+				eventID: row.EventID, schemaName: row.SchemaName, tableName: row.TableName,
+				pkValues: row.PKValues, err: svErr,
+			})
+			continue
+		}
+		if svSkip != "" {
+			fmt.Fprintf(&body, "-- skipped, system-versioned table: %s\n", SanitizeForComment(svSkip))
+			continue
+		}
+		if row.EventType != capturedType {
+			fmt.Fprintf(&body, "-- system-versioned table: MariaDB logged this delete as an %s that ended the row's current version\n",
+				eventTypeName(capturedType))
+		}
 
 		stmt, cols, err := g.buildStatement(row)
 		if err != nil {
@@ -1320,6 +1343,13 @@ func (g *Generator) pkWhereClause(resolver *metadata.Resolver, schema, table str
 				"schema", schema, "table", table, "error", err)
 		} else {
 			pkCols := tm.PKColumnMetas()
+			// A system-versioned table's key carries its ROW END column
+			// (#2007). Plain DML on such a table only ever touches current
+			// rows, so the declared key alone names the row, without
+			// spelling the server's current-row marker into the SQL.
+			if period, ok := sysversion.FromSnapshot(tm.Columns); ok {
+				pkCols = slices.DeleteFunc(slices.Clone(pkCols), func(c metadata.ColumnMeta) bool { return c.Name == period.End })
+			}
 			if len(pkCols) > 0 {
 				// A BLOB/TEXT column can be a PK with a prefix length, and its
 				// row value is the same base64 string as elsewhere — decode it or
