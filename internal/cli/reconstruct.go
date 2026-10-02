@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -375,13 +377,6 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// would silently resolve a truncated-away row as if it still existed at
 	// --at (#764; same guard as the full-table path and the shim's
 	// _snapshot).
-	// A system-versioned table's changes are stored under the key plus ROW
-	// END, so a lookup by the declared key would find none and answer with
-	// the snapshot row unchanged (#2007).
-	if err := reconstruct.SingleRowSysVersionedRefusal(recSchema, recTable, bmeta.CreateTableSQL); err != nil {
-		return err
-	}
-
 	if err := reconstruct.CheckDestructiveDDL(cmd.Context(), db, recSchema, recTable,
 		reconstruct.DDLWindow{Since: snapshotTime, Until: at, Anchor: reconstruct.AnchorOf(bmeta),
 			Mark: reconstruct.ParseDDLMark(bmeta.DDLMark)}); err != nil {
@@ -414,6 +409,14 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// matches the Parquet column). The two want the key spelled DIFFERENTLY —
 	// see reconstruct.IndexPKSpelling and ReadBaselineRow (#1155/#1157).
 	pkMetas := reconstruct.ResolvePKMetasAt(db, recSchema, recTable, snapshotTime)
+
+	// A system-versioned table's changes are stored under the key plus ROW
+	// END, so a lookup by the declared key would find none and answer with
+	// the snapshot row unchanged (#2007).
+	if err := reconstruct.SingleRowSysVersionedRefusal(recSchema, recTable, bmeta.CreateTableSQL, pkMetas,
+		slices.Collect(maps.Keys(pkFilter))); err != nil {
+		return err
+	}
 
 	// A nil baselineRow (this PK absent from the snapshot) is NOT resolved here:
 	// it flows past the event fetch below so the "no row found" error can be

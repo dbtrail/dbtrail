@@ -145,3 +145,57 @@ func TestGenerate_generatedTimestampKeyWithoutPeriod_unchanged_2007(t *testing.T
 		t.Fatalf("n=%d err=%v, want the ordinary reversal INSERT:\n%s", n, err, buf.String())
 	}
 }
+
+// The index's source flavor decides when it is known: MariaDB refuses a
+// generated column in a primary key except ROW END, so there any generated
+// key member is the period end, whatever else the table holds; MySQL has no
+// system versioning, so the shape rule must never fire there.
+func TestGenerate_systemVersioned_flavorDecides_2007(t *testing.T) {
+	cols := []metadata.ColumnMeta{
+		{Name: "id", OrdinalPosition: 1, IsPK: true, DataType: "int"},
+		{Name: "price", OrdinalPosition: 2, DataType: "decimal"},
+		{Name: "expires", OrdinalPosition: 3, DataType: "timestamp", IsGenerated: true}, // an ordinary generated TIMESTAMP
+		{Name: "row_start", OrdinalPosition: 4, DataType: "timestamp", IsGenerated: true},
+		{Name: "row_end", OrdinalPosition: 5, IsPK: true, DataType: "timestamp", IsGenerated: true},
+	}
+	gen := func(flavor string, cols []metadata.ColumnMeta) *Generator {
+		tm := &metadata.TableMeta{Schema: "shop", Table: "prices", Columns: cols}
+		for _, c := range cols {
+			if c.IsPK {
+				tm.PKColumns = append(tm.PKColumns, c.Name)
+			}
+		}
+		g := New(nil, metadata.NewResolverFromTables(1, map[string]*metadata.TableMeta{"shop.prices": tm}))
+		g.flavor, g.flavorRead = flavor, true
+		return g
+	}
+	tomb := svEvent(1, parser.EventUpdate, "2|"+svCur, svRow(2, "2.00", svT0, svCur), svRow(2, "2.00", svT0, svT1))
+
+	// MariaDB: versioned despite the extra generated TIMESTAMP.
+	var buf bytes.Buffer
+	if _, err := gen("mariadb", cols).GenerateSQLFromRows([]query.ResultRow{tomb}, &buf); err != nil ||
+		!strings.Contains(buf.String(), "INSERT INTO `shop`.`prices` (`id`, `price`) VALUES (2, '2.00')") {
+		t.Fatalf("mariadb: err=%v, want the versioned delete reversed with an INSERT:\n%s", err, buf.String())
+	}
+
+	// MySQL: the exact versioned shape is an ordinary table there.
+	mysqlCols := []metadata.ColumnMeta{cols[0], cols[1], cols[3], cols[4]}
+	buf.Reset()
+	hist := svEvent(2, parser.EventInsert, "1|"+svT1, nil, svRow(1, "1.00", svT0, svT1))
+	if n, err := gen("mysql", mysqlCols).GenerateSQLFromRows([]query.ResultRow{hist}, &buf); err != nil || n != 1 ||
+		strings.Contains(buf.String(), "skipped") {
+		t.Fatalf("mysql: n=%d err=%v, want the ordinary reversal, nothing skipped:\n%s", n, err, buf.String())
+	}
+
+	// MariaDB, transaction-precise (BIGINT period): refused, not guessed.
+	bigCols := []metadata.ColumnMeta{cols[0], cols[1],
+		{Name: "row_start", OrdinalPosition: 3, DataType: "bigint", IsGenerated: true},
+		{Name: "row_end", OrdinalPosition: 4, IsPK: true, DataType: "bigint", IsGenerated: true}}
+	buf.Reset()
+	trx := svEvent(3, parser.EventInsert, "1|18446744073709551615", nil,
+		map[string]any{"id": float64(1), "price": "1.00", "row_start": float64(10), "row_end": float64(1.8446744073709552e19)})
+	if _, err := gen("mariadb", bigCols).GenerateSQLFromRows([]query.ResultRow{trx}, &buf); err == nil ||
+		!strings.Contains(err.Error(), "transaction-precise") {
+		t.Fatalf("mariadb transaction-precise: err=%v, want a refusal", err)
+	}
+}

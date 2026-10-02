@@ -59,6 +59,12 @@ func TestSysVersioningFor_2007(t *testing.T) {
 			wantErr: "generated column"},
 		{name: "versioned, but the generated key member is not the period end", create: svImplicitCreate,
 			pk: svPK("other", "timestamp"), wantErr: "generated column"},
+		// DROP SYSTEM VERSIONING after the snapshot (or a snapshot that
+		// lacks the synthesized row_end): the window's events still carry
+		// the extended key, so folding as a plain table would emit history
+		// rows as live ones.
+		{name: "CREATE versioned, snapshot key plain", create: svImplicitCreate,
+			pk: []metadata.ColumnMeta{{Name: "id", IsPK: true, DataType: "int"}}, wantErr: "WITH SYSTEM VERSIONING"},
 		{name: "transaction-precise versioning", create: svExplicitCreate, pk: svPK("re", "bigint"),
 			wantErr: "transaction-precise"},
 		{name: "two generated key members", create: svImplicitCreate,
@@ -73,6 +79,9 @@ func TestSysVersioningFor_2007(t *testing.T) {
 				}
 				if c.wantErr == "generated column" && !errors.Is(err, ErrGeneratedPK) {
 					t.Fatalf("err = %v, want it classified ErrGeneratedPK", err)
+				}
+				if c.wantErr == "WITH SYSTEM VERSIONING" && !errors.Is(err, ErrSchemaChanged) {
+					t.Fatalf("err = %v, want it classified ErrSchemaChanged (a full read cures it)", err)
 				}
 				return
 			}
@@ -266,15 +275,31 @@ func TestFoldPage_systemVersioned_pkChangeStillRefused_2007(t *testing.T) {
 }
 
 func TestSingleRowSysVersionedRefusal_2007(t *testing.T) {
-	for _, create := range []string{svImplicitCreate, svExplicitCreate} {
-		err := SingleRowSysVersionedRefusal("shop", "prices", create)
-		if err == nil || !strings.Contains(err.Error(), "system-versioned") || !strings.Contains(err.Error(), "shop.prices") {
-			t.Fatalf("SingleRowSysVersionedRefusal = %v, want a refusal naming the table", err)
-		}
-	}
-	for _, create := range []string{svPlainCreate, ""} {
-		if err := SingleRowSysVersionedRefusal("shop", "prices", create); err != nil {
-			t.Fatalf("a plain table (or unknown CREATE) must not be refused: %v", err)
-		}
+	plainPK := []metadata.ColumnMeta{{Name: "id", IsPK: true, DataType: "int"}}
+	for _, c := range []struct {
+		name    string
+		create  string
+		pk      []metadata.ColumnMeta
+		cols    []string
+		refused bool
+	}{
+		{"implicit, from the CREATE", svImplicitCreate, svPK("row_end", "timestamp"), []string{"id"}, true},
+		{"explicit, from the CREATE", svExplicitCreate, svPK("re", "timestamp"), []string{"id"}, true},
+		// The baseline's metadata was unreadable, or predates the embedded
+		// CREATE: the snapshot key still says the lookup would miss.
+		{"no CREATE, generated key member left out", "", svPK("row_end", "timestamp"), []string{"id"}, true},
+		{"no CREATE, generated key member named", "", svPK("row_end", "timestamp"), []string{"id", "row_end"}, false},
+		{"plain table", svPlainCreate, plainPK, []string{"id"}, false},
+		{"nothing known", "", nil, []string{"id"}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := SingleRowSysVersionedRefusal("shop", "prices", c.create, c.pk, c.cols)
+			if c.refused != (err != nil) {
+				t.Fatalf("SingleRowSysVersionedRefusal = %v, want refused=%v", err, c.refused)
+			}
+			if err != nil && !strings.Contains(err.Error(), "shop.prices") {
+				t.Fatalf("the refusal must name the table: %v", err)
+			}
+		})
 	}
 }

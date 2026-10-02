@@ -24,7 +24,6 @@ import (
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
-	"github.com/dbtrail/dbtrail/internal/sysversion"
 )
 
 // Dialect selects the SQL dialect for generated reversal SQL. The index is
@@ -69,6 +68,10 @@ type Generator struct {
 	// checklist after COMMIT on the MySQL path (#1003). Opt-in — see
 	// SetRestoreAutoIncrement. Inert on the PostgreSQL path.
 	restoreAutoIncrement bool
+
+	// flavor is the index's source flavor, read once by sourceFlavor (#2007).
+	flavor     string
+	flavorRead bool
 }
 
 // New creates a Generator emitting MySQL-dialect SQL. resolver may be nil — in that
@@ -1347,8 +1350,8 @@ func (g *Generator) pkWhereClause(resolver *metadata.Resolver, schema, table str
 			// (#2007). Plain DML on such a table only ever touches current
 			// rows, so the declared key alone names the row, without
 			// spelling the server's current-row marker into the SQL.
-			if period, ok := sysversion.FromSnapshot(tm.Columns); ok {
-				pkCols = slices.DeleteFunc(slices.Clone(pkCols), func(c metadata.ColumnMeta) bool { return c.Name == period.End })
+			if end, ok := g.sysVersionedEnd(tm); ok {
+				pkCols = slices.DeleteFunc(slices.Clone(pkCols), func(c metadata.ColumnMeta) bool { return c.Name == end })
 			}
 			if len(pkCols) > 0 {
 				// A BLOB/TEXT column can be a PK with a prefix length, and its

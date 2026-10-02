@@ -2,24 +2,71 @@ package recovery
 
 import (
 	"fmt"
+	"log/slog"
 
 	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/sysversion"
 )
 
-// sysVersionedPeriod reports the period columns of row's table when its
-// event-time schema snapshot has the MariaDB system-versioning shape (#2007).
-func (g *Generator) sysVersionedPeriod(row query.ResultRow) (sysversion.Period, bool) {
+// sourceFlavor is the index's source flavor ("mysql", "mariadb", "postgres"
+// or "" when unknown), read once.
+func (g *Generator) sourceFlavor() string {
+	if !g.flavorRead {
+		g.flavorRead = true
+		if g.db != nil {
+			g.flavor = query.SourceFlavor(g.db)
+		}
+	}
+	return g.flavor
+}
+
+// sysVersionedEnd names the ROW END column of a MariaDB system-versioned
+// table (#2007), from its schema snapshot.
+//
+// On a MariaDB source any generated primary-key member IS the ROW END column:
+// MariaDB refuses a generated column in a primary key otherwise ("Primary key
+// cannot be defined upon a generated column"). A MySQL or PostgreSQL source
+// has no system versioning, whatever the table's shape. Only when the flavor
+// is unknown (an index read without stream_state) does the snapshot shape
+// decide (sysversion.FromSnapshot).
+func (g *Generator) sysVersionedEnd(tm *metadata.TableMeta) (string, bool) {
+	end, gens := "", 0
+	for _, c := range tm.Columns {
+		if c.IsPK && c.IsGenerated {
+			end = c.Name
+			gens++
+		}
+	}
+	if gens == 0 {
+		return "", false // the common case: no flavor read needed
+	}
+	switch g.sourceFlavor() {
+	case "mysql", "postgres":
+		return "", false
+	case "mariadb":
+		return end, gens == 1
+	}
+	p, ok := sysversion.FromSnapshot(tm.Columns)
+	return p.End, ok
+}
+
+// sysVersionedPeriodEnd is sysVersionedEnd for row's table, resolved against
+// the event-time schema snapshot.
+func (g *Generator) sysVersionedPeriodEnd(row query.ResultRow) (string, bool) {
 	r := g.resolverForRow(row)
 	if r == nil {
-		return sysversion.Period{}, false
+		return "", false
 	}
 	tm, err := r.Resolve(row.SchemaName, row.TableName)
 	if err != nil {
-		return sysversion.Period{}, false
+		// pkWhereClause warns about the same failure for this row.
+		slog.Debug("cannot resolve table to check for system versioning", "schema", row.SchemaName,
+			"table", row.TableName, "error", err)
+		return "", false
 	}
-	return sysversion.FromSnapshot(tm.Columns)
+	return g.sysVersionedEnd(tm)
 }
 
 // sysVersionedReversal decides what reversing one event means when its table
@@ -44,7 +91,7 @@ func (g *Generator) sysVersionedPeriod(row query.ResultRow) (sysversion.Period, 
 // history version current, or a ROW END value nothing explains, is an error:
 // guessing would emit SQL that applies and is wrong.
 func (g *Generator) sysVersionedReversal(row query.ResultRow) (out query.ResultRow, skip string, err error) {
-	period, ok := g.sysVersionedPeriod(row)
+	end, ok := g.sysVersionedPeriodEnd(row)
 	if !ok {
 		return row, "", nil
 	}
@@ -52,7 +99,7 @@ func (g *Generator) sysVersionedReversal(row query.ResultRow) (out query.ResultR
 		if img == nil {
 			return 0, fmt.Errorf("system-versioned table %s.%s: event %d has no %s image", row.SchemaName, row.TableName, row.EventID, which)
 		}
-		st, err := sysversion.RowEnd(img[period.End], row.EventTimestamp)
+		st, err := sysversion.RowEnd(img[end], row.EventTimestamp)
 		if err != nil {
 			return 0, fmt.Errorf("system-versioned table %s.%s: event %d: %w", row.SchemaName, row.TableName, row.EventID, err)
 		}

@@ -3,6 +3,7 @@ package reconstruct
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/dbtrail/dbtrail/internal/event"
@@ -58,11 +59,22 @@ func sysVersioningFor(schema, table, createSQL string, pkCols []metadata.ColumnM
 		}
 		genIdx = i
 	}
+	period, versioned := sysversion.FromCreateTable(createSQL)
 	if genIdx < 0 {
+		if versioned {
+			// The snapshot's rows came from a versioned table, but the
+			// schema snapshot's key has no ROW END: versioning was dropped
+			// after the snapshot, or the schema snapshot predates #1272.
+			// Events from while it was versioned carry the extended key, so
+			// a plain fold would emit their history rows as live ones.
+			return nil, nil, fmt.Errorf("full-table reconstruct: %s.%s: the snapshot this starts from declares the table "+
+				"WITH SYSTEM VERSIONING, but the schema snapshot's primary key has no ROW END column (versioning dropped "+
+				"since, or a schema snapshot older than the hidden-column support); a new full snapshot of the table, "+
+				"after `bintrail snapshot`, cures this: %w", schema, table, ErrSchemaChanged)
+		}
 		return nil, pkCols, nil
 	}
 	gen := pkCols[genIdx]
-	period, versioned := sysversion.FromCreateTable(createSQL)
 	if !versioned || !strings.EqualFold(gen.Name, period.End) {
 		return nil, nil, fullTableGeneratedPKRefusal(schema, table, gen)
 	}
@@ -176,8 +188,13 @@ func (sv *sysVersioned) strip(img map[string]any) map[string]any {
 		return nil
 	}
 	out := maps.Clone(img)
-	delete(out, sv.period.Start)
-	delete(out, sv.period.End)
+	// MySQL identifiers are case-insensitive: the CREATE TABLE and the
+	// snapshot may spell a period column differently.
+	for k := range out {
+		if strings.EqualFold(k, sv.period.Start) || strings.EqualFold(k, sv.period.End) {
+			delete(out, k)
+		}
+	}
 	return out
 }
 
@@ -187,7 +204,7 @@ func (sv *sysVersioned) refuse(ev *query.ResultRow, why string) error {
 }
 
 // SingleRowSysVersionedRefusal refuses a single-row reconstruct of a MariaDB
-// system-versioned table (#2007), judged from the snapshot's CREATE TABLE.
+// system-versioned table (#2007).
 //
 // The single-row paths look a row's changes up by its stored key, and a
 // versioned table stores every change under the declared key PLUS ROW END
@@ -197,8 +214,21 @@ func (sv *sysVersioned) refuse(ev *query.ResultRow, why string) error {
 // confident, wrong answer. Full-table reconstruct reads these tables; this
 // says so instead of answering. A baseline-only read needs no changes and is
 // not refused.
-func SingleRowSysVersionedRefusal(schema, table, createSQL string) error {
-	if _, ok := sysversion.FromCreateTable(createSQL); !ok {
+//
+// Two signals, because either can be missing: the snapshot's CREATE TABLE
+// (empty when its metadata could not be read, or predates the embedded
+// statement), and the schema snapshot's key (pkMetas): a generated key member
+// the caller's key columns (pkCols) leave out means the lookup cannot match.
+func SingleRowSysVersionedRefusal(schema, table, createSQL string, pkMetas []metadata.ColumnMeta, pkCols []string) error {
+	_, versioned := sysversion.FromCreateTable(createSQL)
+	if !versioned {
+		if gen, ok := GeneratedPKColumn(pkMetas); ok && !slices.ContainsFunc(pkCols, func(c string) bool {
+			return strings.EqualFold(strings.TrimSpace(c), gen.Name)
+		}) {
+			versioned = true
+		}
+	}
+	if !versioned {
 		return nil
 	}
 	return fmt.Errorf("%s.%s is a system-versioned table: single-row reconstruct cannot look its changes up by the "+
