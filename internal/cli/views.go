@@ -290,7 +290,14 @@ func runViews(cmd *cobra.Command, _ []string) error {
 	// table was left out says which tables and why, not only "no baseline".
 	notes := in.NamingNotes()
 	for _, n := range notes {
-		fmt.Fprintf(cmd.ErrOrStderr(), "note: %s\n", n)
+		// A name can carry a line break or a terminal escape; one note stays
+		// one line.
+		fmt.Fprintf(cmd.ErrOrStderr(), "note: %s\n", strings.Map(func(r rune) rune {
+			if r < 0x20 || r == 0x7f {
+				return ' '
+			}
+			return r
+		}, n))
 	}
 	if !in.RendersAnyView() {
 		if len(in.Baselines) > 0 {

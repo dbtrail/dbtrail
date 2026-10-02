@@ -876,6 +876,12 @@ func TestSQLMentionsEvents(t *testing.T) {
 		"SELECT * FROM main.\"events\"":                   true,
 		"SELECT * FROM MAIN . events":                     true,
 		"SELECT * FROM shop.events JOIN events e ON true": true,
+		"SELECT * FROM memory.events":                     true,
+		"SELECT * FROM -- the change log.\n events":       true,
+		"SELECT * FROM /* x. */ events":                   true,
+		"SELECT '--', * FROM events":                      true,
+		"SELECT 'shop.' || x FROM events":                 true,
+		"SELECT * FROM shop.events -- not events.x":       false,
 		"SELECT * FROM main.events":                       true,
 		"SELECT * FROM memory.main.events e":              true,
 		"FROM Events":                                     true,
@@ -1188,5 +1194,50 @@ func TestCapabilities_sqlAgreesWithTheRoute(t *testing.T) {
 	f.s.handleCapabilities(cw, httptest.NewRequest("GET", "/api/capabilities", nil))
 	if strings.Contains(cw.Body.String(), `"sql":true`) {
 		t.Errorf("an S3-only copy reports sql:true: %s", cw.Body.String())
+	}
+}
+
+// TestSQLAPI_namesTheTablesLeftOut (#2013): a table in a schema DuckDB keeps
+// for itself (temp, without a database of its own) has no view. The list
+// says which and why, and a copy where that is every table is refused for
+// that reason, not as "only on S3" or "no snapshot".
+func TestSQLAPI_namesTheTablesLeftOut(t *testing.T) {
+	f := newSQLFixture(t, &fakeSQLRunner{res: oneRowResult()}, false)
+	data, err := os.ReadFile(filepath.Join(f.schemaDir, "orders.parquet"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tempDir := filepath.Join(filepath.Dir(f.schemaDir), "temp")
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "sessions.parquet"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	get := func() *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		f.s.handleSQLInfo(w, httptest.NewRequest("GET", "/api/sql", nil))
+		return w
+	}
+	w := get()
+	var info sqlInfoResponse
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &info) != nil {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Join(info.Views, ",") != "shop.orders" || len(info.Notes) != 1 || !strings.HasPrefix(info.Notes[0], "temp.sessions: not defined") {
+		t.Errorf("views = %v, notes = %v; want shop.orders and a note naming temp.sessions", info.Views, info.Notes)
+	}
+
+	if err := os.RemoveAll(f.schemaDir); err != nil {
+		t.Fatal(err)
+	}
+	for name, w := range map[string]*httptest.ResponseRecorder{
+		"GET /api/sql":  get(),
+		"POST /api/sql": postSQL(t, f.s, `{"sql":"SELECT 1"}`),
+	} {
+		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "keeps for itself") ||
+			!strings.Contains(w.Body.String(), "temp.sessions") {
+			t.Errorf("%s with only temp.sessions: code=%d body=%s", name, w.Code, w.Body.String())
+		}
 	}
 }

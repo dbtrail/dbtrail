@@ -207,21 +207,31 @@ func sqlArchivesLocal(sources []string) bool {
 // for each of those statements is the footer cost for nothing. So a match is
 // skipped when it is clearly another name's part: followed by a dot (a schema
 // called events), or preceded by one whose schema is not main (a table called
-// events). main.events and memory.main.events are still the view.
+// events). main.events, memory.events and memory.main.events are still the
+// view.
 var sqlEventsWord = regexp.MustCompile(`(?i)\bevents\b`)
 
 // sqlQualifierBefore matches a dotted name ending right before a match, and
 // captures the part just before the last dot: `shop.`, `"shop" . `.
 var sqlQualifierBefore = regexp.MustCompile(`(?i)("(?:[^"]|"")*"|[\w$]+)\s*\.\s*"?$`)
 
+// sqlLiteralsAndComments are cut out before the dotted-name check, so a
+// comment ending in a dot cannot pass for a qualifier ("-- the log.\n events")
+// and a '--' inside a string cannot cut the statement short. Literals first.
+var sqlLiterals = regexp.MustCompile(`'(?:[^']|'')*'`)
+var sqlComments = regexp.MustCompile(`(?s)--[^\n]*|/\*.*?\*/`)
+
 func sqlMentionsEvents(statement string) bool {
+	statement = sqlComments.ReplaceAllString(sqlLiterals.ReplaceAllString(statement, "''"), " ")
 	for _, m := range sqlEventsWord.FindAllStringIndex(statement, -1) {
 		after := strings.TrimLeft(statement[m[1]:], `"`)
 		if strings.HasPrefix(strings.TrimLeft(after, " \t\r\n"), ".") {
 			continue // events.<table>: a schema called events
 		}
 		if q := sqlQualifierBefore.FindStringSubmatch(statement[:m[0]]); q != nil {
-			if !strings.EqualFold(strings.Trim(q[1], `"`), "main") {
+			// main.events, and memory.events: the SQL card's DuckDB opens
+			// with no file, so its database is called memory.
+			if part := strings.Trim(q[1], `"`); !strings.EqualFold(part, "main") && !strings.EqualFold(part, "memory") {
 				continue // <schema>.events: a table called events
 			}
 		}
@@ -230,11 +240,31 @@ func sqlMentionsEvents(statement string) bool {
 	return false
 }
 
+// viewsLeftOutMessage answers a copy that has tables and defines no view
+// because every one of them is in a schema DuckDB keeps for itself (#2013).
+// Without it that copy was refused for a reason that is false: "only on
+// S3", or "no snapshot was found". Empty when that is not what happened.
+func viewsLeftOutMessage(in views.Input) string {
+	if len(in.Baselines) == 0 || in.RendersAnyView() {
+		return ""
+	}
+	notes := in.NamingNotes()
+	if len(notes) == 0 {
+		return ""
+	}
+	return "every table of the snapshot is in a schema DuckDB keeps for itself, so there is no view to query: " +
+		strings.Join(notes, "; ")
+}
+
 // sqlInfoResponse is GET /api/sql: what the panel needs before the first
 // query, read from the same resolver as /api/views.sql with no DuckDB and
 // no worker. Views are the names a statement can use.
 type sqlInfoResponse struct {
-	Views         []string     `json:"views"`
+	Views []string `json:"views"`
+	// Notes name the tables listed under another name or not at all, and
+	// why (#2013): a table in a schema DuckDB keeps for itself has no view,
+	// and without this the list would just be one table short.
+	Notes         []string     `json:"notes,omitempty"`
 	CopyUpdatedAt *time.Time   `json:"copy_updated_at"`
 	Limits        sqlLimitsDTO `json:"limits"`
 }
@@ -284,10 +314,14 @@ func (s *Server) handleSQLInfo(w http.ResponseWriter, r *http.Request) {
 		names = append(names, n)
 	}
 	if len(names) == 0 {
+		if why := viewsLeftOutMessage(in); why != "" {
+			writeJSONError(w, http.StatusConflict, why)
+			return
+		}
 		writeJSONError(w, http.StatusConflict, sqlCopyNotLocalMessage)
 		return
 	}
-	resp := sqlInfoResponse{Views: names, Limits: sqlLimitsDTO{
+	resp := sqlInfoResponse{Views: names, Notes: in.NamingNotes(), Limits: sqlLimitsDTO{
 		TimeoutSeconds: int(s.sqlLimits.Timeout / time.Second),
 		MaxRows:        s.sqlLimits.MaxRows,
 		MaxCellBytes:   sqlsandbox.MaxCellBytes,
@@ -334,6 +368,10 @@ func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
 		return
 	case err != nil:
 		writeJSONError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if why := viewsLeftOutMessage(in); why != "" {
+		writeJSONError(w, http.StatusConflict, why)
 		return
 	}
 	if in.NeedsS3() || (!in.RendersAnyView() && eventsInS3) {

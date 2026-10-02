@@ -2729,6 +2729,8 @@ function renderSQLPanel(box) {
     f.shown.forEach((n) => list.append(el("button", { class: "sqlp-name", type: "button", role: "listitem", text: n, title: "Insert " + n, onclick: () => insert(n) })));
     if (f.more > 0) list.append(el("div", { class: "sqlp-more", text: "… " + f.more.toLocaleString("en-US") + " more. Filter to narrow." }));
     if (names.length && f.matched === 0) list.append(el("div", { class: "sqlp-more", text: "No table matches." }));
+    // Tables listed under another name, or not at all, and why (#2013).
+    if (!filter.value) ((st.info && st.info.notes) || []).forEach((n) => list.append(el("div", { class: "sqlp-more sqlp-note", text: n })));
   };
   filter.addEventListener("input", paintList);
 
