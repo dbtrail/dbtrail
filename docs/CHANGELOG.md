@@ -6,7 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.95.0] - 2026-10-02
 ### Fixed
+- **Snapshots keep real table names, and a refresh that a full read cannot
+  fix no longer reads the source every cycle** (#2006, #2008). mydumper writes
+  a made-up `mydumper_N` file for a table or schema whose name has a dot,
+  slash, `@`, non-ASCII letters or is too long; the snapshot published that
+  made-up table and every later refresh refused it and fell back to a full
+  read, every slot. The converter now reads the real names from the dump
+  (`metadata` and the `CREATE` statements); a table whose real name cannot be
+  stored is left out alone, named in red with the reason, and every other
+  table is copied. The console passes its schema list (and, with none chosen,
+  the source's user schemas) to mydumper 1.0+ as `--database a,b`, so renamed
+  schemas keep their `CREATE DATABASE`, and mydumper gets a UTF-8 locale when
+  none is set (a schema such as `ventas_año` failed before connecting). The
+  scheduler takes at most one self-initiated full read per server per day
+  (fallbacks, failed ones and new-table reads; your own full-read timetable
+  and manual reads are not limited), and stops falling back when the same
+  refusal repeats after a full read.
+- **The console no longer warns about foreign keys that cascade** (#2003,
+  #2005). Cascades are supported and the console's Restore includes the child
+  rows. `bintrail doctor` keeps a short note that names the foreign keys and
+  points to `bintrail recover-cascade`, without suggesting a schema change.
+- **Snapshot facts are readable in full** (#2002, #2004). The facts of an
+  expanded snapshot row were cut with an ellipsis; each now wraps on its own
+  line.
 - **Snapshot refresh now works on MariaDB system-versioned tables** (#2007).
   A refresh refused every table created `WITH SYSTEM VERSIONING` (its primary
   key carries the generated `row_end` column), and because a refresh publishes
