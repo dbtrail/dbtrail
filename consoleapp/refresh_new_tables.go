@@ -474,7 +474,8 @@ func (b *backupScheduler) noteNewTablesStart(serverID string, now time.Time) {
 // one back at now, and when the next is allowed: at most newTablesMaxAttempts
 // per server per newTablesWindow, whatever tables they were for (the per-set
 // rules in newTablesOwed live in memory and a restart forgets them; this one
-// is counted from the starts the history recorded, so it does not). Emergency
+// is counted from the starts the history recorded, so it does not, except on
+// a daemon with no run history, where the count lives in memory only). Emergency
 // reads do not count here, and these do not count toward emergencyCap.
 func (b *backupScheduler) newTablesHeld(serverID string, now time.Time) (next time.Time, held bool) {
 	// The history keeps every start this process noted (in memory even when
@@ -484,9 +485,14 @@ func (b *backupScheduler) newTablesHeld(serverID string, now time.Time) (next ti
 	var starts []time.Time
 	if h := b.sup.history; h != nil {
 		for _, stamp := range h.NewTablesStarts(serverID) {
-			if at, err := time.Parse(time.RFC3339, stamp); err == nil {
-				starts = append(starts, at)
+			at, err := time.Parse(time.RFC3339, stamp)
+			if err != nil {
+				// Counted as just now: a damaged stamp must not buy one more
+				// read of production.
+				slog.Warn("snapshot schedule: unreadable start of a full read for new tables in the run history; counting it as recent", "id", serverID, "value", stamp)
+				at = now
 			}
+			starts = append(starts, at)
 		}
 	} else {
 		b.mu.Lock()

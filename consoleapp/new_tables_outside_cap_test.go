@@ -194,3 +194,17 @@ func TestNewTables_betweenTwoRefusedSlots(t *testing.T) {
 		t.Fatalf("the 10:00 slot does not say the emergency cap held it: %q", st.LastSkipReason)
 	}
 }
+
+func TestNewTablesHeld_damagedStampCountsAsRecent(t *testing.T) {
+	b, _, sup := newScheduleFixture(t, true)
+	now := time.Now().UTC()
+	for i := 0; i < newTablesMaxAttempts-1; i++ {
+		b.noteNewTablesStart("s", now.Add(-time.Hour))
+	}
+	if err := sup.history.NoteNewTablesStart("s", "not a time", newTablesMaxAttempts); err != nil {
+		t.Fatal(err)
+	}
+	if _, held := b.newTablesHeld("s", now); !held {
+		t.Fatal("a damaged stamp in the history allowed one more full read")
+	}
+}
