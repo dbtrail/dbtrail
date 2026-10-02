@@ -113,7 +113,7 @@ jobs:
               - 'go.mod'
               - 'go.sum'
               - 'Makefile'
-              - 'migrations/**'
+              - 'docs/migrations/**'
               - 'test/console-e2e/**'
               # The first-run walk runs the permissions block from the
               # quickstart, read out of that file: a docs-only edit that
@@ -128,7 +128,7 @@ jobs:
               - 'go.mod'
               - 'go.sum'
               - 'Makefile'
-              - 'migrations/**'
+              - 'docs/migrations/**'
               - '.github/workflows/ci.yml'
               # The S3 test store actions run inside the integration job
               # (#1884): a change to one must be able to run that job.
@@ -142,7 +142,7 @@ jobs:
               - '**/*.go'
               - 'go.mod'
               - 'go.sum'
-              - 'migrations/**'
+              - 'docs/migrations/**'
               - '.github/workflows/ci.yml'
               - '.github/actions/**'
               - '!internal/console/**'

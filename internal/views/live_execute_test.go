@@ -20,7 +20,7 @@ const (
 
 // liveStandIn creates the catalog the generated ATTACH would create, with the
 // column TYPES DuckDB's mysql extension produces for the index's own DDL
-// (migrations/001_create_tables.sql), so the union this test executes is the
+// (docs/migrations/001_create_tables.sql), so the union this test executes is the
 // one an operator's DuckDB builds:
 //
 //	event_id        BIGINT UNSIGNED  -> UBIGINT
