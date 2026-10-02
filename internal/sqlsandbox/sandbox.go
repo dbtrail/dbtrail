@@ -161,8 +161,11 @@ type Job struct {
 	// (DuckDB's search_path): the MySQL-protocol port's USE. The views put
 	// each source schema's tables in a schema of that name, and events in
 	// main, which DuckDB searches after the search_path, so events stays
-	// reachable. A schema the views did not create is a QueryError naming
-	// it. Empty leaves DuckDB's default (main).
+	// reachable. A schema the views did not create (a default seeded from
+	// the source DSN, a typo) leaves the default in place, so SHOW
+	// DATABASES, events and anything qualified keep working; a name that
+	// then fails to resolve gets a hint naming the missing schema. Empty
+	// leaves DuckDB's default (main).
 	Schema string
 	// Limits override the Runner's defaults field by field.
 	Limits Limits
@@ -202,6 +205,13 @@ var ErrBusy = errors.New("a query is already running (yours, or the server is at
 // side may say so: the worker counts as it collects rows, and the parent
 // counts what it reads from the pipe.
 var ErrResultTooLarge = errors.New("the result is too large to return; narrow the query")
+
+// UnavailableError: the copy cannot be queried here at all, whatever the
+// statement (it lives only on S3, defines no view, holds the console's own
+// configuration). Reason is written for the reader of whichever wire asked.
+type UnavailableError struct{ Reason string }
+
+func (e *UnavailableError) Error() string { return e.Reason }
 
 // RefusedError: the statement was not run at all because of its shape (empty,
 // more than one statement, not a SELECT, a syntax error).

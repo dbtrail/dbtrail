@@ -20,6 +20,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/audittest"
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -153,8 +154,17 @@ func TestIntegrationFlashbackFreeSQLOnTheCopy(t *testing.T) {
 	if name != "alice" {
 		t.Errorf("time-travel name = %q, want alice", name)
 	}
-	if _, err := conn.Query("SELECT id FROM orders"); mysqlCode(err) != 1105 {
-		t.Errorf("after USE myapp, unqualified orders: err = %v, want 1105 (the view is in shop, not myapp)", err)
+	// myapp is not a schema of the copy: the default stays, so the copy is
+	// still browsable from here, and the failing name says what is missing.
+	_, err = conn.Query("SELECT id FROM orders")
+	if mysqlCode(err) != 1105 || !strings.Contains(err.Error(), `the current database "myapp" is not in the copy`) {
+		t.Errorf("after USE myapp, unqualified orders: err = %v, want 1105 naming the missing database", err)
+	}
+	if dbs := scanStrings(t, conn, "SHOW DATABASES"); !contains(dbs, "shop") {
+		t.Errorf("SHOW DATABASES under a database the copy lacks = %v, want it to still list shop", dbs)
+	}
+	if n := scanStrings(t, conn, "SELECT count(*) FROM shop.orders"); len(n) != 1 || n[0] != "2" {
+		t.Errorf("qualified shop.orders under a database the copy lacks = %v, want [2]", n)
 	}
 
 	// Audit: each served free-SQL statement is shim/sql.run by the routing
@@ -171,16 +181,15 @@ func TestIntegrationFlashbackFreeSQLOnTheCopy(t *testing.T) {
 			timeTravel++
 		}
 	}
-	if sqlRuns != 4 || timeTravel != 1 {
-		t.Errorf("audited %d sql.run and %d timetravel.query, want 4 (the SELECT and three SHOWs) and 1", sqlRuns, timeTravel)
+	if sqlRuns != 6 || timeTravel != 1 {
+		t.Errorf("audited %d sql.run and %d timetravel.query, want 6 (the SELECT, three SHOWs, SHOW DATABASES and the qualified count) and 1", sqlRuns, timeTravel)
 	}
 
 	// The real mysql client, when the machine has one: the CLI's connection
 	// chatter and its rendering are what a person sees.
 	mysqlCLI, err := exec.LookPath("mysql")
 	if err != nil {
-		t.Log("no mysql client on PATH; the CLI leg is skipped")
-		return
+		t.Skip("no mysql client on PATH; the CLI leg (the client's chatter and rendering) did not run")
 	}
 	host, port, _ := net.SplitHostPort(addr)
 	out, err := exec.Command(mysqlCLI, "-h", host, "-P", port, "-u", ent.ID, "-ptok", "--batch",
@@ -199,6 +208,45 @@ func TestIntegrationFlashbackFreeSQLOnTheCopy(t *testing.T) {
 		t.Fatalf("mysql CLI (table): %v\n%s", err, table)
 	}
 	t.Logf("mysql CLI:\n%s", table)
+	rendered := string(table)
+	for _, want := range []string{"|  2.5 |", "|    0 |", "|    1 |", "| new    |", "| shop     |", "| status      | VARCHAR"} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("mysql CLI table output lacks %q (a wrong column type or a binary charset shows as hex or misaligned)", want)
+		}
+	}
+	if strings.Contains(rendered, "0x") {
+		t.Error("mysql CLI rendered a text column as hex: a column was declared with the binary charset")
+	}
+
+	// A result cut at the row cap: the client is told. The count rides the
+	// EOF packet (the CLI prints the warnings with --show-warnings), and SHOW
+	// WARNINGS names the cut.
+	capped, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg,
+		SQLLimits: sqlsandbox.Limits{MaxRows: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	served2 := make(chan struct{})
+	go func() { _ = serveFlashback(ctx2, capped, ln2, flashbackConfig{}); close(served2) }()
+	defer func() { cancel2(); <-served2 }()
+	_, port2, _ := net.SplitHostPort(ln2.Addr().String())
+	cut, err := exec.Command(mysqlCLI, "-h", host, "-P", port2, "-u", ent.ID, "-ptok", "--table", "--show-warnings",
+		"-e", "SELECT id FROM orders ORDER BY id").CombinedOutput()
+	if err != nil {
+		t.Fatalf("mysql CLI (capped): %v\n%s", err, cut)
+	}
+	t.Logf("mysql CLI, 1-row cap:\n%s", cut)
+	if !strings.Contains(string(cut), "cut at 1 rows") {
+		t.Errorf("a result cut at the cap did not reach the client as a warning:\n%s", cut)
+	}
+	if strings.Contains(string(cut), "|  2 |") {
+		t.Errorf("the 1-row cap did not cut the result:\n%s", cut)
+	}
 }
 
 func scanStrings(t *testing.T, conn *sql.DB, q string) []string {

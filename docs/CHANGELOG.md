@@ -19,7 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   WARNINGS` returns. Column types are mapped to MySQL's so a client shows
   numbers as numbers. A server whose copy is only on S3, or with archive
   access off, keeps refusing with 1235 and now says why. The standalone
-  `bintrail shim` is unchanged. See docs/time-travel-sql.md.
+  `bintrail shim` and the PostgreSQL front-end gain one thing from this:
+  `USE <db>` sent as statement text (drivers and `mysql -e` do that; the
+  interactive client sends the protocol's own command) now selects the
+  schema, where it used to be refused with 1235. See docs/time-travel-sql.md.
 ### Changed
 - **The Overview's "Dashboards for the team" card now says on its front that it
   reads from S3.** Its tag reads "reads from S3" and its line "Any DuckDB,

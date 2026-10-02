@@ -1,15 +1,15 @@
 package console
 
 import (
-	"errors"
-	"log/slog"
-
 	"context"
 	"database/sql"
-	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
+	"errors"
+	"log/slog"
 	"strings"
 
 	drivermysql "github.com/go-sql-driver/mysql"
+
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
 // FlashbackTarget is the go-mysql-free resolution of a flashback connection's
@@ -59,21 +59,37 @@ type SQLOnCopy struct {
 
 // Run runs one statement; schema is where unqualified names resolve (the
 // connection's USE), empty for DuckDB's default. The error is one the
-// client can be shown: the runner's typed errors and the route's refusals
-// pass through, and a worker failure, whose text can carry host paths, is
-// logged here and replaced.
+// client can be shown: the runner's typed errors pass through, the route's
+// own refusals (the copy is not queryable here, whatever the statement)
+// become a sqlsandbox.UnavailableError with wording that does not name the
+// browser, and a worker failure, whose text can carry host paths, is logged
+// here and replaced.
 func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string) (sqlsandbox.Result, error) {
 	out, err := q.s.runSQL(ctx, q.b, q.user, statement, schema, 0)
 	if err != nil {
 		var werr *sqlsandbox.WorkerError
-		if errors.As(err, &werr) {
+		var refusal *sqlRefusal
+		switch {
+		case errors.As(err, &werr):
 			slog.Error("console: the SQL worker failed", "error", err, "surface", "flashback port")
 			return sqlsandbox.Result{}, errors.New(sqlWorkerFailedMessage)
+		case errors.As(err, &refusal):
+			msg := refusal.Message
+			if msg == sqlCopyNotLocalMessage {
+				msg = sqlCopyNotLocalPortMessage
+			}
+			return sqlsandbox.Result{}, &sqlsandbox.UnavailableError{Reason: msg}
+		case errors.Is(err, sqlsandbox.ErrCopyNotLocal):
+			return sqlsandbox.Result{}, &sqlsandbox.UnavailableError{Reason: sqlCopyNotLocalPortMessage}
 		}
 		return sqlsandbox.Result{}, err
 	}
 	return out.Result, nil
 }
+
+// sqlCopyNotLocalPortMessage is sqlCopyNotLocalMessage for a MySQL client,
+// which is not in a browser.
+const sqlCopyNotLocalPortMessage = "the copy for this server is only on S3; SQL on the copy needs a local copy"
 
 // sqlOnCopyFor decides, once per connection, whether the port can offer
 // free SQL on this server: the console has a sandbox runner, and archive

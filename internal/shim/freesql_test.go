@@ -163,14 +163,26 @@ func TestRewriteForDuckDB(t *testing.T) {
 		"SHOW COLUMNS FROM orders":            `DESCRIBE "orders"`,
 		"show fields from `orders` from shop": `DESCRIBE "shop"."orders"`,
 		"SHOW COLUMNS IN orders IN `we\"ird`": `DESCRIBE "we""ird"."orders"`,
+		"SHOW COLUMNS FROM shop.orders":       `DESCRIBE "shop"."orders"`, // the dotted spelling clients send
+		"SHOW COLUMNS FROM `odd.name`":        `DESCRIBE "odd.name"`,      // a quoted dot is part of the name
 		"SHOW TABLES":                         "SHOW TABLES",
 		"DESCRIBE orders":                     "DESCRIBE orders",
 		"SELECT 'SHOW DATABASES'":             "SELECT 'SHOW DATABASES'",
 		"SHOW DATABASES LIKE 'x'":             "SHOW DATABASES LIKE 'x'", // not the bare form: DuckDB's own error says so
 	}
 	for in, want := range cases {
-		if got := rewriteForDuckDB(in); got != want {
+		got, schema := rewriteForDuckDB(in, "shop")
+		if got != want {
 			t.Errorf("rewrite(%q) = %q, want %q", in, got, want)
+		}
+		// SHOW DATABASES drops the schema: a current database that is not in
+		// the copy must not take the one statement that lists the copy down.
+		wantSchema := "shop"
+		if want == showDatabasesSQL {
+			wantSchema = ""
+		}
+		if schema != wantSchema {
+			t.Errorf("rewrite(%q) schema = %q, want %q", in, schema, wantSchema)
 		}
 	}
 }
@@ -246,23 +258,28 @@ func TestFreeSQLResultset_typesAndCells(t *testing.T) {
 func TestFreeSQL_truncationWarning(t *testing.T) {
 	cut := oneCell("id", "INTEGER", json.Number("1"))
 	cut.Truncated = true
+	cut.TruncatedCells = 3
 	f := &fakeFreeSQL{res: cut}
 	h := NewHandler(nil, nil)
 	h.BindFreeSQL(f)
-	res, err := h.HandleQuery("SELECT id FROM orders")
-	if err != nil {
+	conn := &warningsConn{}
+	h.BindConn(conn)
+	if _, err := h.HandleQuery("SELECT id FROM orders"); err != nil {
 		t.Fatal(err)
 	}
-	if res.Warnings != 1 {
-		t.Errorf("warnings = %d, want 1", res.Warnings)
+	// The count travels on the CONNECTION: go-mysql writes the EOF packet's
+	// warning count from Conn.SetWarnings, never from Result.Warnings.
+	if conn.warnings != 2 {
+		t.Errorf("connection warnings = %d, want 2 (rows cut, cells cut)", conn.warnings)
 	}
 	w, err := h.HandleQuery("SHOW WARNINGS")
 	if err != nil {
 		t.Fatal(err)
 	}
 	rows := textRows(t, w.Resultset)
-	if len(rows) != 1 || rows[0][0] != "Warning" || !strings.Contains(rows[0][2], "cut at 1 rows") || !strings.Contains(rows[0][2], "LIMIT") {
-		t.Errorf("SHOW WARNINGS rows = %v, want one Warning naming the cut and a LIMIT", rows)
+	if len(rows) != 2 || rows[0][0] != "Warning" || !strings.Contains(rows[0][2], "cut at 1 rows") || !strings.Contains(rows[0][2], "LIMIT") ||
+		!strings.Contains(rows[1][2], "3 cell(s)") {
+		t.Errorf("SHOW WARNINGS rows = %v, want the row cut (with a LIMIT) and the 3 cut cells", rows)
 	}
 	if f.calls != 1 {
 		t.Errorf("SHOW WARNINGS reached the executor (calls = %d)", f.calls)
@@ -277,6 +294,9 @@ func TestFreeSQL_truncationWarning(t *testing.T) {
 	}
 	if rows := textRows(t, w.Resultset); len(rows) != 0 {
 		t.Errorf("SHOW WARNINGS after a clean statement = %v, want none", rows)
+	}
+	if conn.warnings != 0 {
+		t.Errorf("connection warnings after a clean statement = %d, want 0 (a stale count would mark the next result)", conn.warnings)
 	}
 
 	plain := NewHandler(nil, nil)
@@ -301,6 +321,7 @@ func TestFreeSQL_errorMapping(t *testing.T) {
 		{"timeout", &sqlsandbox.TimeoutError{Limit: 30 * time.Second}, mysql.ER_QUERY_INTERRUPTED, "cap of 30 s", ""},
 		{"busy", sqlsandbox.ErrBusy, mysql.ER_TOO_MANY_USER_CONNECTIONS, "already running", ""},
 		{"cancelled", context.Canceled, mysql.ER_QUERY_INTERRUPTED, "cancelled", ""},
+		{"deadline without a cap", context.DeadlineExceeded, mysql.ER_QUERY_INTERRUPTED, "cancelled", ""},
 		{"too large", sqlsandbox.ErrResultTooLarge, mysql.ER_UNKNOWN_ERROR, "too large", ""},
 		{"not local", sqlsandbox.ErrCopyNotLocal, mysql.ER_UNKNOWN_ERROR, "only on S3", ""},
 		{"worker", &sqlsandbox.WorkerError{Err: errors.New("exit 2"), Stderr: "/Users/dani/secret/path"}, mysql.ER_UNKNOWN_ERROR, "DBTrail's log", "secret"},
@@ -351,4 +372,19 @@ func TestUseStatementText(t *testing.T) {
 	denied.BindAllowedSchemas([]string{"myapp"})
 	_, err := denied.HandleQuery("USE shop")
 	wantMyError(t, err, mysql.ER_DBACCESS_DENIED_ERROR)
+}
+
+// warningsConn is the slice of server.Conn the warning count needs.
+type warningsConn struct{ warnings uint16 }
+
+func (c *warningsConn) WritePacket([]byte) error { return nil }
+func (c *warningsConn) SetWarnings(n uint16)     { c.warnings = n }
+
+// The connection's own QueryTimeout (shorter than the sandbox's) is reported
+// as that cap, not as a cancel nobody issued.
+func TestFreeSQL_connectionDeadlineIsNamed(t *testing.T) {
+	h := NewHandlerWithConfig(nil, Config{QueryTimeout: 7 * time.Second}, nil)
+	h.BindFreeSQL(&fakeFreeSQL{err: context.DeadlineExceeded})
+	_, err := h.HandleQuery("SELECT id FROM orders")
+	wantMyError(t, err, mysql.ER_QUERY_INTERRUPTED, "this connection's cap of 7 s")
 }

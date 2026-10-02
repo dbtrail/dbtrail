@@ -78,28 +78,46 @@ func (h *Handler) notTimeTravelError(qstr string) error {
 func (h *Handler) runFreeSQL(schema, qstr string) (*mysql.Result, error) {
 	ctx, cancel := h.queryContext()
 	defer cancel()
-	res, err := h.freeSQL.Run(ctx, rewriteForDuckDB(qstr), schema)
+	stmt, schema := rewriteForDuckDB(qstr, schema)
+	res, err := h.freeSQL.Run(ctx, stmt, schema)
 	if err != nil {
 		return nil, h.freeSQLError(err)
 	}
 	rs, err := freeSQLResultset(res)
 	if err != nil {
+		// Only a worker bug (a row with the wrong column count) gets here.
+		h.logger.Error("free sql: build resultset", "err", err)
 		return nil, fmt.Errorf("free sql: build resultset: %w", err)
 	}
-	out := &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}
+	var warnings []string
 	if res.Truncated {
-		out.Warnings = 1
-		h.setLastWarning(fmt.Sprintf("the result was cut at %d rows, this server's cap; add a LIMIT or narrow the query", len(res.Rows)))
+		warnings = append(warnings, fmt.Sprintf("the result was cut at %d rows, this server's cap; add a LIMIT or narrow the query", len(res.Rows)))
 	}
-	h.recordFreeSQL(qstr, schema, len(res.Rows), res.Truncated)
-	return out, nil
+	if res.TruncatedCells > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d cell(s) longer than this server's cap were cut; each ends with a marker", res.TruncatedCells))
+	}
+	h.setWarnings(warnings)
+	h.recordFreeSQL(qstr, schema, res)
+	return &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}, nil
 }
 
-// setLastWarning stores what SHOW WARNINGS answers until the next statement.
-func (h *Handler) setLastWarning(msg string) {
+// warningsSetter is the part of go-mysql's server.Conn that carries the
+// warning count: the EOF packet closing a resultset reads it from the
+// CONNECTION (Conn.SetWarnings), never from mysql.Result.Warnings, which is
+// written only into an OK packet. A connection bound by BindConn gets the
+// count set here; an unbound handler (unit tests) keeps the SHOW WARNINGS
+// half alone.
+type warningsSetter interface{ SetWarnings(uint16) }
+
+// setWarnings stores what SHOW WARNINGS answers until the next statement and
+// puts the count on the connection, so the client's "N warning(s)" shows.
+func (h *Handler) setWarnings(msgs []string) {
 	h.mu.Lock()
-	h.lastWarning = msg
+	h.lastWarnings = msgs
 	h.mu.Unlock()
+	if ws, ok := h.conn.(warningsSetter); ok {
+		ws.SetWarnings(uint16(len(msgs)))
+	}
 }
 
 // showWarnings answers SHOW WARNINGS the way MySQL does: Level, Code,
@@ -108,12 +126,12 @@ func (h *Handler) setLastWarning(msg string) {
 // stays handshake noise (an empty OK), as it always was.
 func (h *Handler) showWarnings() (*mysql.Result, error) {
 	h.mu.Lock()
-	msg := h.lastWarning
+	msgs := h.lastWarnings
 	h.mu.Unlock()
 	cols := []string{"Level", "Code", "Message"}
 	var rows [][]any
-	if msg != "" {
-		rows = [][]any{{"Warning", int64(mysql.ER_WARN_TOO_MANY_RECORDS), msg}}
+	for _, msg := range msgs {
+		rows = append(rows, []any{"Warning", int64(mysql.ER_WARN_TOO_MANY_RECORDS), msg})
 	}
 	rs, err := mysql.BuildSimpleTextResultset(cols, rows)
 	if err != nil {
@@ -139,19 +157,29 @@ const showDatabasesSQL = `SELECT DISTINCT schema_name AS "Database" FROM informa
 
 // rewriteForDuckDB maps the two MySQL metadata statements DuckDB does not
 // read to their DuckDB form; everything else passes through unchanged,
-// SHOW TABLES and DESCRIBE included, which DuckDB reads as they are.
-func rewriteForDuckDB(qstr string) string {
+// SHOW TABLES and DESCRIBE included, which DuckDB reads as they are. SHOW
+// DATABASES runs with NO schema: it needs none, and it must keep working
+// when the connection's current database is not in the copy (a default
+// seeded from the source DSN, or a typo in -D), since it is the way out.
+func rewriteForDuckDB(qstr, schema string) (string, string) {
 	if showDatabasesRE.MatchString(qstr) {
-		return showDatabasesSQL
+		return showDatabasesSQL, ""
 	}
 	if m := showColumnsRE.FindStringSubmatch(qstr); m != nil {
 		table := strings.Trim(m[1], "`")
-		if schema := strings.Trim(m[2], "`"); schema != "" {
-			return "DESCRIBE " + quoteDuckIdent(schema) + "." + quoteDuckIdent(table)
+		schemaPart := strings.Trim(m[2], "`")
+		// The dotted spelling, SHOW COLUMNS FROM shop.orders.
+		if schemaPart == "" {
+			if dot := strings.Index(table, "."); dot > 0 && !strings.HasPrefix(m[1], "`") {
+				schemaPart, table = table[:dot], strings.Trim(table[dot+1:], "`")
+			}
 		}
-		return "DESCRIBE " + quoteDuckIdent(table)
+		if schemaPart != "" {
+			return "DESCRIBE " + quoteDuckIdent(schemaPart) + "." + quoteDuckIdent(table), schema
+		}
+		return "DESCRIBE " + quoteDuckIdent(table), schema
 	}
-	return qstr
+	return qstr, schema
 }
 
 // quoteDuckIdent quotes one name the way DuckDB reads identifiers.
@@ -179,12 +207,20 @@ func (h *Handler) freeSQLError(err error) error {
 			fmt.Sprintf("the query ran longer than this server's cap of %.0f s and was stopped; narrow it", timeout.Limit.Seconds()))
 	case errors.Is(err, sqlsandbox.ErrBusy):
 		return mysql.NewError(mysql.ER_TOO_MANY_USER_CONNECTIONS, err.Error())
+	case errors.Is(err, context.DeadlineExceeded) && h.cfg.QueryTimeout > 0:
+		// This connection's own cap (shorter than the sandbox's), not a cancel.
+		return mysql.NewError(mysql.ER_QUERY_INTERRUPTED,
+			fmt.Sprintf("the query ran longer than this connection's cap of %.0f s and was stopped; narrow it", h.cfg.QueryTimeout.Seconds()))
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return mysql.NewError(mysql.ER_QUERY_INTERRUPTED, "the query was cancelled")
 	case errors.As(err, &werr):
 		h.logger.Error("free sql: the SQL worker failed", "err", err)
 		return mysql.NewError(mysql.ER_UNKNOWN_ERROR, "the SQL worker failed before it could answer; DBTrail's log has the details")
 	default:
+		// The executor's own refusals (copy not local, no view, too large):
+		// the message is written for the reader. Logged too, so a new error
+		// shape from a future runner leaves a trace.
+		h.logger.Warn("free sql: statement refused", "err", err)
 		return mysql.NewError(mysql.ER_UNKNOWN_ERROR, err.Error())
 	}
 }
@@ -338,7 +374,7 @@ func decimalScale(duckType string) uint8 {
 // raw row data left the copy, and the statement is the reader's own text,
 // which is what an auditor needs to know what was asked. Success path only,
 // after the resultset is built, same contract as auditTimeTravel.
-func (h *Handler) recordFreeSQL(statement, schema string, rows int, truncated bool) {
+func (h *Handler) recordFreeSQL(statement, schema string, res sqlsandbox.Result) {
 	if !ext.Auditing() {
 		return
 	}
@@ -348,8 +384,11 @@ func (h *Handler) recordFreeSQL(statement, schema string, rows int, truncated bo
 	}
 	detail := map[string]string{
 		"sql":       statement,
-		"rows":      strconv.Itoa(rows),
-		"truncated": strconv.FormatBool(truncated),
+		"rows":      strconv.Itoa(len(res.Rows)),
+		"truncated": strconv.FormatBool(res.Truncated),
+	}
+	if res.TruncatedCells > 0 {
+		detail["truncated_cells"] = strconv.Itoa(res.TruncatedCells)
 	}
 	if schema != "" {
 		detail["schema"] = schema

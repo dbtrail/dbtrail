@@ -102,10 +102,17 @@ What to know before relying on it:
   where unqualified names resolve; the connection starts in the server's
   source database when the registry knows it.
 - **Read-only, one SELECT per statement.** Anything else is refused with
-  1064. A result cut at the row cap sets a warning; `SHOW WARNINGS` says so.
+  1064. A result cut at the row cap, or a cell cut at the cell cap, raises a
+  warning the client counts; `SHOW WARNINGS` says which.
 - **The copy has to be on local disk**, as for the SQL card. A server whose
-  copy is only on S3, or with archive access disabled, keeps the time-travel
-  shapes and refuses ordinary SQL with 1235 and the reason.
+  copy is only on S3, or with archive access disabled, or whose copy defines
+  no view yet, keeps the time-travel shapes and refuses ordinary SQL with
+  1235 and the reason.
+- **A current database the copy does not have** (the server's source
+  database before its first snapshot, a typo in `-D`) is left alone:
+  unqualified names then resolve in `main`, `SHOW DATABASES` and `events`
+  keep working, and a name that fails to resolve says which database is
+  missing from the copy.
 - **Access is the token's, all or nothing.** The port authenticates on the
   console token, which has no data profile and no table or column rules, so
   none apply here — the same rule the SQL card follows for a token session.
@@ -114,7 +121,7 @@ What to know before relying on it:
   (`shim` / `sql.run`: the statement, the schema, the row count).
 - Column types are mapped to MySQL's (DuckDB `INTEGER` arrives as `BIGINT`,
   `DECIMAL(p,s)` as `DECIMAL`, `TIMESTAMP` as `DATETIME`, `BOOLEAN` as 1/0,
-  a `LIST`/`STRUCT`/`MAP` as JSON text, `HUGEINT`/`UUID`/`INTERVAL` as text).
+  a `LIST`/`STRUCT` as JSON text, `MAP`/`HUGEINT`/`UUID`/`INTERVAL` as text).
   Verified with the `mysql` command-line client; a graphical client that
   probes `information_schema` the MySQL way may show an incomplete table
   tree, since DuckDB answers those probes with its own catalog.

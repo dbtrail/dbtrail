@@ -162,7 +162,7 @@ type Handler struct {
 	// after a free-SQL result cut at the row cap; guarded by mu.
 	freeSQL       FreeSQL
 	freeSQLWhyNot string
-	lastWarning   string
+	lastWarnings  []string
 
 	// allowedSchemas is the authenticated tenant's opt-in schema
 	// allowlist (issue #824), bound by BindAllowedSchemas after the
@@ -481,7 +481,7 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 		if showWarningsRE.MatchString(qstr) {
 			return h.showWarnings()
 		}
-		h.setLastWarning("")
+		h.setWarnings(nil)
 	}
 
 	// SHOW TABLES FROM _flashback/_diff/_snapshot (#315). Intercepted
