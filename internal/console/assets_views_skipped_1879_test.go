@@ -45,6 +45,7 @@ const sessionMay = () => false;
 function clear(n) { if (n) n.replaceChildren(); }
 function backupWhyLine() { return ""; }
 function downloadBackup() {}
+function leftOutTablesBlock() { return null; } // #2006, drawn by its own test
 `}
 	for _, decl := range []string{"function el(", "function utcLabel(", "function fmtSeconds(", "function timesText(", "function fmtAge(",
 		"const MADE_BY", "function madeByCell(", "function sourceReadLine(", "function snapshotLockKey(", "function snapshotLockPill(",

@@ -58,6 +58,10 @@ type BaselineRunRecord struct {
 	// ViewsSkipped: see BaselineStatus.ViewsSkipped. Zero also for every run
 	// recorded before the count existed, so zero is never shown as a count.
 	ViewsSkipped int `json:"views_skipped,omitempty"`
+	// LeftOutTables / LeftOutTablesOmitted: see BaselineStatus. Kept with the
+	// run: the new-tables check reads them to know these tables are not new.
+	LeftOutTables        []RefusedTable `json:"left_out_tables,omitempty"`
+	LeftOutTablesOmitted int            `json:"left_out_tables_omitted,omitempty"`
 	// Carried counts tables published by reusing the previous snapshot's file
 	// (refresh and restore). Persisted rather than left to the live status,
 	// which the next run overwrites: whether a run cost a full rewrite is

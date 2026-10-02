@@ -107,6 +107,11 @@ type backupScheduler struct {
 	// a collision there records a skip, and the page must not say a full
 	// backup was taken next to a line saying nothing ran.
 	fallback map[string]scheduledFallback
+	// emergency: per server, when this process last started an emergency
+	// full read (a fallback, or one for new tables), for emergencyCap. The
+	// run history is the durable copy; this covers a read still running,
+	// which has no record yet, and a daemon without a history.
+	emergency map[string]time.Time
 
 	// newTablesTried: per server, the tables an update left out that a full
 	// read was started for, and when (#1993, includeNewTables). Memory only:
@@ -192,6 +197,7 @@ func newBackupScheduler(sup *baselineSupervisor, reg *console.Registry, fullBack
 		fullMissed:       make(map[string]scheduledSkip),
 		fullOwed:         make(map[string]string),
 		fallback:         make(map[string]scheduledFallback),
+		emergency:        make(map[string]time.Time),
 		newTablesTried:   make(map[string]newTablesTry),
 		newTablesPending: make(map[string]newTablesTry),
 		warned:           make(map[string]bool),
@@ -1219,6 +1225,13 @@ func (b *backupScheduler) fallBack(e console.ServerEntry, failed console.Baselin
 	}
 	because := how + " (" + reason + ")"
 	now := time.Now().UTC()
+	if next, held := b.emergencyHeld(e.ID, now); held {
+		// Said on the card (the skipped line) and in the log, not in the
+		// history: the update's own failure is recorded at every slot, and a
+		// record per slot here would push the real runs out of it.
+		b.noteSkip(e, now, because+" and no full read is taken in its place: "+emergencyHeldWords(next))
+		return
+	}
 	if err := console.FullBackupPossible(e, b.gates()); err != nil {
 		b.skip(e, now, because+" and a full read cannot start here: "+err.Error())
 		return
@@ -1237,6 +1250,7 @@ func (b *backupScheduler) fallBack(e console.ServerEntry, failed console.Baselin
 	}
 	stamp := now.Format(time.RFC3339)
 	if b.startFull(e, stamp, now, because, because) {
+		b.noteEmergency(e.ID, now)
 		b.mu.Lock()
 		b.fallback[e.ID] = scheduledFallback{at: stamp, reason: reason,
 			tables: failed.Tables, refused: failed.Refused,
@@ -1425,4 +1439,58 @@ func sameIncurableRefusal(prev []console.RefusedTable, prevOmitted int, cur []co
 		}
 	}
 	return true
+}
+
+// emergencyCap is the most often the schedule reads a server in full on its
+// own initiative (#2006): a full read standing in for a refused or crashed
+// update, or one for tables an update left out. Whatever the reason, at most
+// one per this long, so a cause no full read cures costs one read of
+// production a day, not one per slot. Full reads the operator asked for (the
+// full-copy timetable, a schedule that always reads in full, "Read database
+// now") are not emergency reads: they neither count nor wait.
+var emergencyCap = 24 * time.Hour
+
+// isEmergencyWhy reports whether a full read's recorded reason makes it an
+// emergency read.
+func isEmergencyWhy(code string) bool {
+	return code == "fold_refused" || code == "fold_crashed" || code == console.BackupWhyCodeNewTables
+}
+
+// noteEmergency records that an emergency full read started now.
+func (b *backupScheduler) noteEmergency(serverID string, now time.Time) {
+	b.mu.Lock()
+	b.emergency[serverID] = now
+	b.mu.Unlock()
+}
+
+// emergencyHeld reports whether the cap holds back an emergency full read at
+// now, and when the next is allowed. The newest emergency read is the later of
+// this process's own start and the run history's newest scheduled full read
+// with an emergency reason, failed ones included (a read that fails every
+// time is the loop the cap exists for). The history survives a restart.
+func (b *backupScheduler) emergencyHeld(serverID string, now time.Time) (next time.Time, held bool) {
+	b.mu.Lock()
+	last := b.emergency[serverID]
+	b.mu.Unlock()
+	if b.sup.history != nil {
+		for _, r := range b.sup.history.List(serverID) {
+			if r.Kind != console.BaselineRunDump || r.SkipReason != "" || r.Trigger != console.BaselineRunTriggerScheduled || !isEmergencyWhy(r.WhyCode) {
+				continue
+			}
+			if at, err := time.Parse(time.RFC3339, r.StartedAt); err == nil && at.After(last) {
+				last = at
+			}
+		}
+	}
+	if last.IsZero() {
+		return time.Time{}, false
+	}
+	next = last.Add(emergencyCap)
+	return next, now.Before(next)
+}
+
+// emergencyHeldWords says the cap in the page's words.
+func emergencyHeldWords(next time.Time) string {
+	return "DBTrail reads this server in full on its own at most once a day, and the last such read was less than a day ago; " +
+		"the next one is allowed after " + next.UTC().Format("2006-01-02 15:04") + " UTC"
 }

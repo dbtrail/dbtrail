@@ -132,6 +132,10 @@ type baselineRunDTO struct {
 	DiskNote  string `json:"disk_note,omitempty"`
 	// TransportNote: the read reached the source without encryption (#1996).
 	TransportNote string `json:"transport_note,omitempty"`
+	// LeftOutTables / LeftOutTablesOmitted: the tables this full read left
+	// out of the snapshot, and why (#2006).
+	LeftOutTables        []RefusedTable `json:"left_out_tables,omitempty"`
+	LeftOutTablesOmitted int            `json:"left_out_tables_omitted,omitempty"`
 }
 
 // baselineSnapshotFile is one stored file of a snapshot: its path relative to
@@ -441,7 +445,8 @@ func (s *Server) handleBaselineFiles(w http.ResponseWriter, r *http.Request) {
 	if s.baselineHistory != nil {
 		if rec := s.baselineHistory.FindBySnapshot(s.selectedServerID(r), ts.Format(time.RFC3339)); rec != nil {
 			run := &baselineRunDTO{Kind: rec.Kind, Tables: rec.Tables, Rows: rec.Rows, Why: rec.Why, WhyCode: rec.WhyCode,
-				DiskCheck: rec.DiskCheck, DiskNote: rec.DiskNote, TransportNote: rec.TransportNote}
+				DiskCheck: rec.DiskCheck, DiskNote: rec.DiskNote, TransportNote: rec.TransportNote,
+				LeftOutTables: rec.LeftOutTables, LeftOutTablesOmitted: rec.LeftOutTablesOmitted}
 			if st, err1 := time.Parse(time.RFC3339, rec.StartedAt); err1 == nil {
 				if fin, err2 := time.Parse(time.RFC3339, rec.FinishedAt); err2 == nil {
 					run.Seconds = fin.Sub(st).Seconds()

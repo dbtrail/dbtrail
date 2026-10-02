@@ -24,7 +24,12 @@ func TestParseDrillTables(t *testing.T) {
 	if len(schemas) != 2 || schemas[0] != "shop" || schemas[1] != "hr" {
 		t.Fatalf("schemas = %v", schemas)
 	}
-	for _, bad := range []string{"", "noschema", "a.b.c", ".t", "s.", "s.`t`"} {
+	// A table name may hold a dot (#2006): split at the first one, as the
+	// snapshot and the reconstruct do.
+	if tables, schemas, err := parseDrillTables("demo.order.items"); err != nil || tables[0] != "demo.order.items" || schemas[0] != "demo" {
+		t.Fatalf("dotted table: %v %v %v", tables, schemas, err)
+	}
+	for _, bad := range []string{"", "noschema", ".t", "s.", "s.`t`"} {
 		if _, _, err := parseDrillTables(bad); err == nil {
 			t.Fatalf("entry %q must be rejected", bad)
 		}

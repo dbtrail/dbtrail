@@ -114,6 +114,9 @@ type backupScheduleRunDTO struct {
 	// RefusedTables / RefusedTablesOmitted: see BaselineStatus.
 	RefusedTables        []RefusedTable `json:"refused_tables,omitempty"`
 	RefusedTablesOmitted int            `json:"refused_tables_omitted,omitempty"`
+	// LeftOutTables / LeftOutTablesOmitted: see BaselineStatus (#2006).
+	LeftOutTables        []RefusedTable `json:"left_out_tables,omitempty"`
+	LeftOutTablesOmitted int            `json:"left_out_tables_omitted,omitempty"`
 	// NewTables / NewTablesOmitted / NewTablesUnchecked: see BaselineStatus.
 	NewTables             []string `json:"new_tables,omitempty"`
 	NewTablesOmitted      int      `json:"new_tables_omitted,omitempty"`
@@ -370,6 +373,7 @@ func scheduleRunFromRecord(run *BaselineRunRecord) *backupScheduleRunDTO {
 		CarriedCopied: run.CarriedCopied,
 		Refused:       run.Refused,
 		RefusedTables: run.RefusedTables, RefusedTablesOmitted: run.RefusedTablesOmitted,
+		LeftOutTables: run.LeftOutTables, LeftOutTablesOmitted: run.LeftOutTablesOmitted,
 		DiskCheck: run.DiskCheck, DiskNote: run.DiskNote, TransportNote: run.TransportNote,
 		NewTables: run.NewTables, NewTablesOmitted: run.NewTablesOmitted, NewTablesUnchecked: run.NewTablesUnchecked,
 		NewTablesAction: run.NewTablesAction, NewTablesActionReason: run.NewTablesActionReason,
@@ -411,6 +415,7 @@ func scheduleRunFromStatus(st BackupScheduleState) *backupScheduleRunDTO {
 		CarriedCopied: cur.CarriedCopied,
 		Refused:       cur.Refused,
 		RefusedTables: cur.RefusedTables, RefusedTablesOmitted: cur.RefusedTablesOmitted,
+		LeftOutTables: cur.LeftOutTables, LeftOutTablesOmitted: cur.LeftOutTablesOmitted,
 		DiskCheck: cur.DiskCheck, DiskNote: cur.DiskNote, TransportNote: cur.TransportNote,
 		NewTables: cur.NewTables, NewTablesOmitted: cur.NewTablesOmitted, NewTablesUnchecked: cur.NewTablesUnchecked,
 		NewTablesAction: cur.NewTablesAction, NewTablesActionReason: cur.NewTablesActionReason,

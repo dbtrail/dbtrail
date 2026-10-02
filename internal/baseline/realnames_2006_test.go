@@ -136,51 +136,76 @@ func TestRun_RealNamesReachTheSnapshot_2006(t *testing.T) {
 
 // A name that cannot be stored as a file name fails the read, naming the
 // real table and the file it came from, and nothing else is converted.
-func TestDiscoverDump_SlashInNameFailsLoudly_2006(t *testing.T) {
-	_, _, err := DiscoverDump(fixtureNames2006)
-	if err == nil {
-		t.Fatal("DiscoverDump accepted a table named order/items")
+// leftOutOf runs DiscoverDumpNames and returns the left-out list as
+// "table: reason" lines, failing on a discovery error.
+func leftOutOf(t *testing.T, dir string) ([]TableFiles, []LeftOutTable) {
+	t.Helper()
+	tables, _, left, err := DiscoverDumpNames(dir)
+	if err != nil {
+		t.Fatalf("DiscoverDumpNames: %v", err)
 	}
-	for _, want := range []string{"`demo`.`order/items`", "demo.mydumper_5-schema.sql", `"/"`} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not say %s", err, want)
-		}
-	}
-	if strings.Contains(err.Error(), "order.items") || strings.Contains(err.Error(), "注文") {
-		t.Errorf("error names tables that are fine: %q", err)
+	return tables, left
+}
+
+// A name that cannot be stored as a file name leaves out THAT table, with
+// its real name and why; every other table is converted (decision on #2006:
+// the dump already read all of production).
+func TestRun_SlashInNameLeavesOutOnlyThatTable_2006(t *testing.T) {
+	tables, left := leftOutOf(t, fixtureNames2006)
+	if len(tables) != 12 || len(left) != 1 || left[0].Table != "demo.order/items" ||
+		!strings.Contains(left[0].Reason, `"/"`) || !strings.Contains(left[0].Reason, "demo.mydumper_5-schema.sql") {
+		t.Fatalf("tables %d, left out %+v; want 12 kept and demo.order/items left out naming the slash and the file", len(tables), left)
 	}
 	out := t.TempDir()
-	if _, err := Run(context.Background(), Config{InputDir: fixtureNames2006, OutputDir: out}); err == nil {
-		t.Fatal("Run converted a dump holding order/items")
+	stats, err := Run(context.Background(), Config{InputDir: fixtureNames2006, OutputDir: out})
+	if err != nil {
+		t.Fatalf("Run refused the whole dump for one table: %v", err)
+	}
+	if stats.TablesProcessed != 12 || len(stats.TablesLeftOut) != 1 || stats.TablesLeftOut[0].Table != "demo.order/items" {
+		t.Fatalf("stats = %+v", stats)
+	}
+	if m, _ := filepath.Glob(filepath.Join(out, "20*", "demo", "order*")); len(m) != 2 {
+		t.Errorf("want order.items and order items in the snapshot and nothing for order/items, got %q", m)
+	}
+	// A caller that cannot report left-out tables still gets them as an error.
+	if _, _, err := DiscoverDump(fixtureNames2006); err == nil || !strings.Contains(err.Error(), "demo.order/items") {
+		t.Errorf("DiscoverDump = %v, want the left-out table as an error", err)
 	}
 }
 
-// A schema whose name holds a dot: mydumper writes it as mydumper_0 and
-// keeps the real name only in its CREATE DATABASE. Every consumer splits
-// "schema.table" at the first dot, so it is refused rather than stored.
-func TestDiscoverDump_DottedSchemaRefused_2006(t *testing.T) {
-	_, _, err := DiscoverDump(fixtureDottedSchema2006)
-	if err == nil {
-		t.Fatal("DiscoverDump accepted schema my.db")
+// A schema whose name holds a dot: mydumper writes it as mydumper_0 and keeps
+// the real name only in its CREATE DATABASE. Its tables are left out, named
+// with the real schema.
+func TestDiscoverDump_DottedSchemaLeftOut_2006(t *testing.T) {
+	tables, left := leftOutOf(t, fixtureDottedSchema2006)
+	if len(tables) != 0 || len(left) != 2 {
+		t.Fatalf("tables %d, left %+v", len(tables), left)
 	}
-	if !strings.Contains(err.Error(), "`my.db`") {
-		t.Errorf("error %q does not name the real schema my.db", err)
+	for _, l := range left {
+		if !strings.HasPrefix(l.Table, "my.db.") || !strings.Contains(l.Reason, "holds a dot") {
+			t.Errorf("left out %+v: want it named under my.db, saying the schema holds a dot", l)
+		}
 	}
-	if strings.Contains(err.Error(), "`mydumper_0`.") {
-		t.Errorf("error names the made-up schema as if it were real: %q", err)
+	// Only that schema: with every table left out the run fails, saying why.
+	_, err := Run(context.Background(), Config{InputDir: fixtureDottedSchema2006, OutputDir: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "my.db.t") {
+		t.Fatalf("Run = %v, want a failure naming the left-out tables", err)
 	}
 }
 
-// The console's multi-schema dump (--regex) writes no CREATE DATABASE file,
-// so a renamed schema cannot be read back: refused, never published as
-// mydumper_0.
+// The console's multi-schema dump (--regex) writes no CREATE DATABASE file:
+// a renamed schema cannot be read back, so its tables are left out, named by
+// table only, never as mydumper_0.
 func TestDiscoverDump_MadeUpSchemaWithoutCreateDatabase_2006(t *testing.T) {
-	_, _, err := DiscoverDump(fixtureSchemaNoCreate2006)
-	if err == nil {
-		t.Fatal("DiscoverDump published schema mydumper_0")
+	dir := copyDump(t, fixtureSchemaNoCreate2006)
+	writeFile(t, dir, "shop.orders-schema.sql", "CREATE TABLE `orders` (\n  `id` int NOT NULL\n);\n")
+	tables, left := leftOutOf(t, dir)
+	if len(tables) != 1 || tables[0].Database != "shop" {
+		t.Fatalf("tables = %+v, want shop.orders kept", tables)
 	}
-	if !strings.Contains(err.Error(), "mydumper_0") || !strings.Contains(err.Error(), "real name") {
-		t.Errorf("error %q does not say the schema's real name is unknown", err)
+	if len(left) != 1 || left[0].Table != "t" || strings.Contains(left[0].Table, "mydumper_0") ||
+		!strings.Contains(left[0].Reason, "made-up name") {
+		t.Fatalf("left out %+v, want table t with the reason", left)
 	}
 }
 
@@ -239,46 +264,90 @@ func TestStorableName_2006(t *testing.T) {
 
 // Two files that claim the same real name (a dump folder holding two dumps,
 // or a hand-edited one) are refused, never one silently kept.
+// Two files that claim the same real name: neither is known to be it, so
+// both are left out; never one silently kept.
 func TestDiscoverDump_TwoFilesOneRealName_2006(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, dir, "demo.mydumper_0-schema.sql", "CREATE TABLE `order.items` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n);\n")
-	writeFile(t, dir, "demo.mydumper_1-schema.sql", "CREATE TABLE `order.items` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n);\n")
-	_, _, err := DiscoverDump(dir)
-	if err == nil || !strings.Contains(err.Error(), "`demo`.`order.items`") {
-		t.Fatalf("err = %v, want a refusal naming demo.order.items", err)
+	writeFile(t, dir, "demo.mydumper_0-schema.sql", "CREATE TABLE `order.items` (\n  `id` int NOT NULL\n);\n")
+	writeFile(t, dir, "demo.mydumper_1-schema.sql", "CREATE TABLE `order.items` (\n  `id` int NOT NULL\n);\n")
+	writeFile(t, dir, "demo.plain-schema.sql", "CREATE TABLE `plain` (\n  `id` int NOT NULL\n);\n")
+	tables, left := leftOutOf(t, dir)
+	if len(tables) != 1 || tables[0].Table != "plain" || len(left) != 2 || left[0].Table != "demo.order.items" {
+		t.Fatalf("tables %+v, left %+v", tables, left)
 	}
 }
 
-// metadata's real_table_name and the CREATE TABLE must agree; when they do
-// not, the dump is not what it says and nothing is converted.
+// metadata's real_table_name and the CREATE TABLE must agree.
 func TestDiscoverDump_MetadataDisagrees_2006(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "demo.mydumper_0-schema.sql", "CREATE TABLE `order.items` (\n  `id` int NOT NULL\n);\n")
 	writeFile(t, dir, "metadata", "[`demo`.`mydumper_0`]\nreal_table_name=order.lines\nrows = 0\n")
-	_, _, err := DiscoverDump(dir)
-	if err == nil || !strings.Contains(err.Error(), "order.lines") {
-		t.Fatalf("err = %v, want a refusal naming both names", err)
+	_, left := leftOutOf(t, dir)
+	if len(left) != 1 || !strings.Contains(left[0].Reason, "order.lines") || !strings.Contains(left[0].Reason, "order.items") {
+		t.Fatalf("left %+v, want both names said", left)
 	}
 }
 
-// A made-up file name whose CREATE TABLE cannot be read is refused even
+// A made-up file name whose CREATE TABLE cannot be read is left out even
 // when metadata names it: a name with a line break cuts the metadata line.
 func TestDiscoverDump_MetadataAloneIsNotEnough_2006(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "demo.mydumper_0-schema.sql", "CREATE TABLE `a\nb` (\n  `id` int NOT NULL\n);\n")
 	writeFile(t, dir, "metadata", "[`demo`.`mydumper_0`]\nreal_table_name=a\nb\nrows = 0\n")
-	if _, _, err := DiscoverDump(dir); err == nil {
-		t.Fatal("published a table under a name cut at its line break")
+	tables, left := leftOutOf(t, dir)
+	if len(tables) != 0 || len(left) != 1 || left[0].Table == "demo.a" {
+		t.Fatalf("tables %+v, left %+v: must not publish the name cut at its line break", tables, left)
 	}
 }
 
 // A dotted schema written raw into the file name splits wrongly at the
-// first dot; the CREATE TABLE shows it, and the read is refused.
-func TestDiscoverDump_RawDottedSchemaRefused_2006(t *testing.T) {
+// first dot; the CREATE TABLE shows it.
+func TestDiscoverDump_RawDottedSchemaLeftOut_2006(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "my.db.t-schema.sql", "CREATE TABLE `t` (\n  `id` int NOT NULL\n);\n")
-	_, _, err := DiscoverDump(dir)
-	if err == nil || !strings.Contains(err.Error(), "`t`") {
-		t.Fatalf("err = %v, want a refusal naming the real table", err)
+	tables, left := leftOutOf(t, dir)
+	if len(tables) != 0 || len(left) != 1 || !strings.Contains(left[0].Reason, "holds a dot") {
+		t.Fatalf("tables %+v, left %+v", tables, left)
 	}
+}
+
+// A dotted file name whose CREATE TABLE cannot be read, with no metadata,
+// is left out: never the file name split at its first dot.
+func TestDiscoverDump_DottedNameUnreadable_2006(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "demo.order.items-schema.sql", "/*!40101 SET NAMES utf8mb4*/;\n")
+	tables, left := leftOutOf(t, dir)
+	if len(tables) != 0 || len(left) != 1 || left[0].Table == "demo.order.items" {
+		t.Fatalf("tables %+v, left %+v", tables, left)
+	}
+}
+
+// Metadata values as mydumper 1.0.3-1 wrote them (measured): raw, a leading
+// space and backslashes kept, no key-file escapes; they match the CREATE TABLE.
+func TestDiscoverDump_MetadataValuesAreRaw_2006(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "demo. lead-schema.sql", "CREATE TABLE ` lead` (\n  `id` int NOT NULL\n);\n")
+	writeFile(t, dir, "demo.mydumper_5-schema.sql", "CREATE TABLE `a\\\\b` (\n  `id` int NOT NULL\n);\n")
+	writeFile(t, dir, "demo.mydumper_6-schema.sql", "CREATE TABLE `a=b#c;d` (\n  `id` int NOT NULL\n);\n")
+	writeFile(t, dir, "metadata", "[`demo`.` lead`]\nreal_table_name= lead\n[`demo`.`mydumper_5`]\nreal_table_name=a\\\\b\n[`demo`.`mydumper_6`]\nreal_table_name=a=b#c;d\n")
+	tables, left := leftOutOf(t, dir)
+	wantNames(t, "tables", tableNames(tables), []string{"demo. lead", "demo.a=b#c;d"})
+	// A backslash is a legal name on the source, but the snapshot's delta
+	// files treat it as a path separator: left out, saying so.
+	if len(left) != 1 || left[0].Table != `demo.a\\b` || !strings.Contains(left[0].Reason, `"\"`) {
+		t.Fatalf("left out %+v, want demo.a\\b for its backslash", left)
+	}
+}
+
+// A view written under a made-up name with no metadata is reported by the
+// name its CREATE VIEW gives.
+func TestDiscoverDump_ViewNameFromCreateView_2006(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "demo.plain-schema.sql", "CREATE TABLE `plain` (\n  `id` int NOT NULL\n);\n")
+	writeFile(t, dir, "demo.mydumper_7-schema-view.sql", "/*!40101 SET NAMES binary*/;\nCREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `v.dotted` AS select 1 AS `x`;\n")
+	_, views, _, err := DiscoverDumpNames(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNames(t, "views", viewNames(views), []string{"demo.v.dotted"})
 }

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -508,6 +509,7 @@ func (s *baselineSupervisor) publishDump(req console.BaselineRequest, out dumpOu
 	st.Failure = nil
 	st.Tables = out.stats.TablesProcessed
 	st.ViewsSkipped = len(out.stats.ViewsSkipped)
+	st.LeftOutTables, st.LeftOutTablesOmitted = console.LeftOutTablesOf(leftOutOf(out.stats))
 	st.Rows = out.stats.RowsWritten
 	st.FinishedAt = nowStamp()
 	slog.Info("baseline: snapshot published locally; uploading it to the snapshot destination in the background",
@@ -661,6 +663,7 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 		// recomputed later it would name whatever is true THEN.
 		Why: req.Why, WhyCode: console.BackupWhyCode(req.Why),
 	}
+	rec.LeftOutTables, rec.LeftOutTablesOmitted = console.LeftOutTablesOf(leftOutOf(out.stats))
 	rec.DiskCheck, rec.DiskNote = s.dumpDiskOf(req.ServerID, own)
 	rec.TransportNote = s.dumpTransportOf(req.ServerID, own)
 	// A snapshot instant is recorded when a snapshot was published: a
@@ -725,12 +728,13 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	st.Failure = nil
 	st.Tables = out.stats.TablesProcessed
 	st.ViewsSkipped = len(out.stats.ViewsSkipped)
+	st.LeftOutTables, st.LeftOutTablesOmitted = console.LeftOutTablesOf(leftOutOf(out.stats))
 	st.Rows = out.stats.RowsWritten
 	st.Uploaded = uploaded
 	st.Swept = swept
 	st.Published = st.Published || out.snapDir != ""
 	slog.Info("baseline: snapshot complete", "server", req.ServerName, "id", req.ServerID,
-		"tables", out.stats.TablesProcessed, "views_skipped", len(out.stats.ViewsSkipped),
+		"tables", out.stats.TablesProcessed, "views_skipped", len(out.stats.ViewsSkipped), "tables_left_out", len(out.stats.TablesLeftOut),
 		"rows", out.stats.RowsWritten, "uploaded", uploaded, "swept", swept)
 }
 
@@ -1363,7 +1367,12 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 				"source was checked to encrypt but mydumper was not tied to its certificate.")
 		}
 	}
-	args := buildConsoleMydumperArgs(host, port, user, schemas, dumpDir, lockMode, plan.sendLockFlags, tlsArgs)
+	// A list of schemas goes as --database a,b on a mydumper measured to write
+	// each schema's CREATE DATABASE that way (1.0.3-1): under --regex it
+	// writes none, and a schema it renames (a non-ASCII or "@" name) then
+	// cannot be read back from the dump (#2006).
+	listSchemas := plan.versionKnown && !plan.version.Less(mydumperlock.Version{Major: 1})
+	args := buildConsoleMydumperArgs(host, port, user, schemas, dumpDir, lockMode, plan.sendLockFlags, tlsArgs, listSchemas)
 	// plan.path, not the bare name: the dump must run the very binary whose
 	// version was just read.
 	cmd := exec.CommandContext(ctx, plan.path, args...)
@@ -1371,9 +1380,7 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 	// MySQL client library mydumper links against) so it never lands on argv,
 	// where it would be world-readable in `ps aux` / /proc/<pid>/cmdline. The
 	// child's /proc/<pid>/environ is mode 0400 (#811).
-	if password != "" {
-		cmd.Env = append(os.Environ(), "MYSQL_PWD="+password)
-	}
+	cmd.Env = mydumperEnv(os.Environ(), password)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if msg := strings.TrimSpace(string(out)); msg != "" {
@@ -1430,7 +1437,7 @@ const systemSchemaExcludeRegex = `^(?!(mysql|sys|performance_schema|information_
 // both --sync-thread-lock-mode and --trx-tables with "Unknown option", or when
 // its version could not be read and the mode is ftwrl (#1688); see
 // planMydumper for when the dump may proceed without them.
-func buildConsoleMydumperArgs(host string, port uint16, user string, schemas []string, dumpDir string, lockMode baseline.LockMode, sendLockFlags bool, tlsArgs []string) []string {
+func buildConsoleMydumperArgs(host string, port uint16, user string, schemas []string, dumpDir string, lockMode baseline.LockMode, sendLockFlags bool, tlsArgs []string, listSchemas bool) []string {
 	args := []string{
 		"--host", host,
 		"--port", strconv.Itoa(int(port)),
@@ -1445,6 +1452,8 @@ func buildConsoleMydumperArgs(host string, port uint16, user string, schemas []s
 	switch {
 	case len(schemas) == 1:
 		args = append(args, "--database", schemas[0])
+	case len(schemas) > 1 && listSchemas && !slices.ContainsFunc(schemas, func(s string) bool { return strings.Contains(s, ",") }):
+		args = append(args, "--database", strings.Join(schemas, ","))
 	case len(schemas) > 1:
 		args = append(args, "--regex", "^("+strings.Join(schemas, "|")+")\\.")
 	default:
@@ -1575,4 +1584,32 @@ func publishedSnapshotTime(at time.Time, err error) string {
 		return ""
 	}
 	return at.UTC().Format(time.RFC3339)
+}
+
+// mydumperEnv is the environment mydumper runs with: the daemon's, the
+// source password out of band (MYSQL_PWD, #811), and a UTF-8 locale when the
+// daemon has none. Measured with mydumper 1.0.3-1 in the console image, which
+// sets no locale: a schema name outside ASCII on its command line ("ventas_año")
+// fails with "option parsing failed: Invalid byte sequence in conversion
+// input" before it connects (#2006). An operator's own locale is kept.
+func mydumperEnv(base []string, password string) []string {
+	env := append([]string(nil), base...)
+	if password != "" {
+		env = append(env, "MYSQL_PWD="+password)
+	}
+	for _, kv := range base {
+		if k, v, _ := strings.Cut(kv, "="); v != "" && (k == "LC_ALL" || k == "LC_CTYPE" || k == "LANG") {
+			return env
+		}
+	}
+	return append(env, "LC_ALL=C.UTF-8")
+}
+
+// leftOutOf is the converter's left-out tables in the console's type.
+func leftOutOf(st baseline.Stats) []console.LeftOut {
+	out := make([]console.LeftOut, len(st.TablesLeftOut))
+	for i, l := range st.TablesLeftOut {
+		out[i] = console.LeftOut{Table: l.Table, Reason: l.Reason}
+	}
+	return out
 }

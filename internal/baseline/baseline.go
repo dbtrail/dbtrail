@@ -53,6 +53,10 @@ type Stats struct {
 	// ViewsSkipped names, as "db.view" and sorted, the views the dump held.
 	// A view has no rows of its own, so it is not part of the baseline.
 	ViewsSkipped []string
+	// TablesLeftOut are the tables the dump held that this snapshot leaves
+	// out because their real name cannot be read back from the dump or
+	// cannot be stored as a file name (#2006). The rest were published.
+	TablesLeftOut []LeftOutTable
 }
 
 // Run converts a mydumper output directory into Parquet files.
@@ -120,9 +124,19 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	}
 
 	// Discover tables.
-	tables, views, err := DiscoverDump(cfg.InputDir)
+	tables, views, leftOut, err := DiscoverDumpNames(cfg.InputDir)
 	if err != nil {
 		return Stats{}, fmt.Errorf("discover tables: %w", err)
+	}
+	if len(tables) == 0 && len(leftOut) > 0 {
+		// Every table was left out: there is no snapshot to publish, and
+		// "no tables found" would hide why.
+		parts := make([]string, len(leftOut))
+		for i, l := range leftOut {
+			parts[i] = l.Table + ": " + l.Reason
+		}
+		return Stats{TablesLeftOut: leftOut}, fmt.Errorf("every table in the dump was left out because its real name cannot be read back or stored: %s",
+			strings.Join(parts, "; "))
 	}
 	viewNames := make([]string, len(views))
 	for i, v := range views {
@@ -160,6 +174,7 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	// Under --tables the caller chose what to copy, so what was left out is
 	// not news: the views are reported only for a run that takes everything.
 	var stats Stats
+	stats.TablesLeftOut = leftOut
 	if len(cfg.Tables) == 0 && len(viewNames) > 0 {
 		stats.ViewsSkipped = viewNames
 	}

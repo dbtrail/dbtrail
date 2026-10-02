@@ -158,6 +158,7 @@ func TestBackupScheduler_aRefusalAFullReadCannotCureStopsTheFullReads_2006(t *te
 // A schema change IS cured by a full read: each one that stops an update
 // still gets its full read, also right after another.
 func TestBackupScheduler_aSchemaChangeStillFallsBackEveryTime_2006(t *testing.T) {
+	noEmergencyCap(t) // this test is about another rule; the daily cap has its own (#2006)
 	refuseWith(t, func() []reconstruct.TableFailure { return []reconstruct.TableFailure{schemaChanged("orders")} })
 	b, reg, sup := newScheduleFixture(t, true)
 	reads := stubFullReads(t, sup)
@@ -172,6 +173,7 @@ func TestBackupScheduler_aSchemaChangeStillFallsBackEveryTime_2006(t *testing.T)
 
 // A new table in the refused list is a new reason: it gets its full read.
 func TestBackupScheduler_aNewRefusedTableFallsBackOnceMore_2006(t *testing.T) {
+	noEmergencyCap(t) // this test is about another rule; the daily cap has its own (#2006)
 	refused := []reconstruct.TableFailure{notFound("mydumper_0")}
 	var mu sync.Mutex
 	refuseWith(t, func() []reconstruct.TableFailure { mu.Lock(); defer mu.Unlock(); return refused })
@@ -200,6 +202,7 @@ func TestBackupScheduler_aNewRefusedTableFallsBackOnceMore_2006(t *testing.T) {
 // A full read that failed proves nothing about the refusal: the next one
 // falls back again, as before.
 func TestBackupScheduler_aFailedFullReadDoesNotStopTheFallback_2006(t *testing.T) {
+	noEmergencyCap(t) // this test is about another rule; the daily cap has its own (#2006)
 	refuseWith(t, func() []reconstruct.TableFailure { return []reconstruct.TableFailure{notFound("mydumper_0")} })
 	b, reg, sup := newScheduleFixture(t, true)
 	reads := stubFullReads(t, sup)
@@ -248,6 +251,7 @@ func TestSameIncurableRefusal_2006(t *testing.T) {
 
 // A stop lasts a day; then one full read is tried again.
 func TestBackupScheduler_aStopRetriesAfterADay_2006(t *testing.T) {
+	noEmergencyCap(t) // this test is about another rule; the daily cap has its own (#2006)
 	refuseWith(t, func() []reconstruct.TableFailure { return []reconstruct.TableFailure{notFound("mydumper_0")} })
 	b, reg, sup := newScheduleFixture(t, true)
 	reads := stubFullReads(t, sup)
@@ -265,5 +269,89 @@ func TestBackupScheduler_aStopRetriesAfterADay_2006(t *testing.T) {
 	st := slotAt(t, b, e.ID, 11)
 	if reads.count() != 2 || st.LastFallbackStoppedAt != "" {
 		t.Fatalf("a day into a stop, one full read must be tried: reads %d, state %+v", reads.count(), st)
+	}
+}
+
+// noEmergencyCap turns the daily cap off for a test of another rule.
+func noEmergencyCap(t *testing.T) {
+	t.Helper()
+	prev := emergencyCap
+	emergencyCap = 0
+	t.Cleanup(func() { emergencyCap = prev })
+}
+
+// The daily cap (#2006): whatever the reason, the schedule reads a server in
+// full on its own at most once a day. A schema change IS cured by a full
+// read, but a second one within the day waits, and the card says until when.
+func TestBackupScheduler_emergencyCapHoldsBackASecondFallback_2006(t *testing.T) {
+	refuseWith(t, func() []reconstruct.TableFailure { return []reconstruct.TableFailure{schemaChanged("orders")} })
+	b, reg, sup := newScheduleFixture(t, true)
+	reads := stubFullReads(t, sup)
+	e := addScheduled(t, reg, true)
+	b.tick(context.Background(), time.Date(2026, 8, 28, 8, 0, 5, 0, time.UTC))
+	slotAt(t, b, e.ID, 9)
+	st := slotAt(t, b, e.ID, 10)
+	if reads.count() != 1 {
+		t.Fatalf("a second emergency full read within the day: %d reads", reads.count())
+	}
+	if !strings.Contains(st.LastSkipReason, "at most once a day") || !strings.Contains(st.LastSkipReason, "the next one is allowed after") {
+		t.Fatalf("the card does not say the cap held it back: %q", st.LastSkipReason)
+	}
+	// Survives a restart: a new loop reads the cap from the run history.
+	b2 := newBackupScheduler(sup, reg, true, false)
+	if _, held := b2.emergencyHeld(e.ID, time.Now().UTC()); !held {
+		t.Fatal("after a restart the cap forgot the emergency read in the run history")
+	}
+}
+
+// What counts against the cap: scheduled full reads the schedule took on its
+// own (a fallback, new tables), failed ones too. A full read the operator
+// asked for (manual, the full-copy timetable) or the schedule's normal choice
+// (the first read) neither counts nor waits.
+func TestEmergencyHeld_whatCounts_2006(t *testing.T) {
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name string
+		rec  console.BaselineRunRecord
+		held bool
+	}{
+		{"fallback", console.BaselineRunRecord{Trigger: console.BaselineRunTriggerScheduled, WhyCode: "fold_refused"}, true},
+		{"failed fallback", console.BaselineRunRecord{Trigger: console.BaselineRunTriggerScheduled, WhyCode: "fold_crashed", Error: "mydumper exit 1"}, true},
+		{"new tables", console.BaselineRunRecord{Trigger: console.BaselineRunTriggerScheduled, WhyCode: console.BackupWhyCodeNewTables}, true},
+		{"full-copy timetable", console.BaselineRunRecord{Trigger: console.BaselineRunTriggerScheduled, WhyCode: console.BackupWhyCodeFullCopy}, false},
+		{"first backup", console.BaselineRunRecord{Trigger: console.BaselineRunTriggerScheduled, WhyCode: "first_backup"}, false},
+		{"manual", console.BaselineRunRecord{Trigger: "manual", WhyCode: "fold_refused"}, false},
+		{"skip", console.BaselineRunRecord{Trigger: console.BaselineRunTriggerScheduled, WhyCode: "fold_refused", SkipReason: "busy"}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b, _, sup := newScheduleFixture(t, true)
+			c.rec.ServerID, c.rec.Kind = "s", console.BaselineRunDump
+			c.rec.StartedAt, c.rec.FinishedAt = now.Add(-2*time.Hour).Format(time.RFC3339), now.Add(-time.Hour).Format(time.RFC3339)
+			if err := sup.history.Append(c.rec); err != nil {
+				t.Fatal(err)
+			}
+			next, held := b.emergencyHeld("s", now)
+			if held != c.held {
+				t.Fatalf("held = %v, want %v", held, c.held)
+			}
+			if held && !next.Equal(now.Add(-2*time.Hour).Add(emergencyCap)) {
+				t.Errorf("next = %v, want a day after the read started", next)
+			}
+			if _, held := b.emergencyHeld("s", now.Add(23*time.Hour)); held {
+				t.Error("still held a day after the read")
+			}
+		})
+	}
+}
+
+// New tables are under the same cap: one full read for them a day, even
+// when newTablesMaxAttempts would allow more.
+func TestEmergencyCap_newTablesPlannerWaits_2006(t *testing.T) {
+	b, reg, _ := newScheduleFixture(t, true)
+	e := addScheduled(t, reg, true)
+	b.noteEmergency(e.ID, time.Now().UTC())
+	action, reason := b.newTablesPlanner(e)([]string{"demo.fresh"})
+	if action != console.NewTablesActionNotPossible || !strings.Contains(reason, "at most once a day") {
+		t.Fatalf("planner = %q, %q; want not possible, saying the daily cap", action, reason)
 	}
 }

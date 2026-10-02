@@ -27,6 +27,7 @@ func init() {
 // error (AppendSkip). It is not a full read that went through, so it must not
 // stop a retry after a full read that failed.
 func TestScheduledRefresh_aSkippedSlotIsNotAFullReadThatWentThrough(t *testing.T) {
+	noEmergencyCap(t) // this test is about another rule; the daily cap has its own (#2006)
 	b, _, sup, e := newTablesFixture(t, true, []string{"shop.kept"})
 	stubSourceTables(t, func(context.Context, string, []string) ([]string, bool, error) {
 		return []string{"shop.kept", "shop.orders"}, false, nil
@@ -52,6 +53,7 @@ func TestScheduledRefresh_aSkippedSlotIsNotAFullReadThatWentThrough(t *testing.T
 // table, not the 20 names kept for display: a table sorting after the first
 // 20 is still a table no full read was tried for.
 func TestScheduledRefresh_aNewTablePastTheDisplayCapStillCounts(t *testing.T) {
+	noEmergencyCap(t) // this test is about another rule; the daily cap has its own (#2006)
 	b, _, sup, e := newTablesFixture(t, true, []string{"shop.kept"})
 	source := []string{"shop.kept"}
 	for i := range 25 {

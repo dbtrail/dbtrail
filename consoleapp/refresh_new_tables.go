@@ -131,7 +131,7 @@ func (s *baselineSupervisor) checkNewTables(req refreshRequest, snapshot []strin
 		return newTablesCheck{unchecked: console.ScrubReason(
 			fmt.Sprintf("could not ask the source which tables it has: %v", err), req.SourceDSN)}
 	}
-	all := tablesLeftOut(snapshot, source, foldCase)
+	all := tablesLeftOut(append(append([]string(nil), snapshot...), s.knownLeftOut(req.ServerID)...), source, foldCase)
 	kept, omitted := console.NewTablesOf(all)
 	return newTablesCheck{all: all, tables: kept, omitted: omitted}
 }
@@ -273,6 +273,12 @@ func (b *backupScheduler) newTablesPlanner(e console.ServerEntry) func(all []str
 		if err := console.FullBackupPossible(cur, b.gates()); err != nil {
 			return console.NewTablesActionNotPossible, err.Error()
 		}
+		// The same daily cap as every other full read the schedule takes on
+		// its own (#2006), on top of newTablesMaxAttempts: whichever holds
+		// first.
+		if next, held := b.emergencyHeld(e.ID, time.Now().UTC()); held {
+			return console.NewTablesActionNotPossible, emergencyHeldWords(next)
+		}
 		names := make(map[string]bool, len(all))
 		for _, n := range all {
 			names[n] = true
@@ -324,6 +330,7 @@ func (b *backupScheduler) includeNewTables(e console.ServerEntry, done console.B
 	slog.Info("snapshot schedule: the update left out tables created after the previous snapshot; taking a full read to include them",
 		"server", e.Name, "id", e.ID, "count", n, "tables", strings.Join(done.NewTables, ","), "attempt", pending.attempts+1)
 	if b.startFull(e, stamp, now, "", console.NewTablesWhy(n)) {
+		b.noteEmergency(e.ID, now)
 		b.mu.Lock()
 		b.newTablesTried[e.ID] = newTablesTry{names: pending.names, at: stamp, attempts: pending.attempts + 1}
 		b.mu.Unlock()
@@ -383,4 +390,23 @@ func (b *backupScheduler) newTablesOwed(serverID string, all []string) (attempts
 		return tried.attempts, console.NewTablesActionGaveUp
 	}
 	return tried.attempts, ""
+}
+
+// knownLeftOut is the tables the newest full read that went through left out
+// on purpose, because their real name cannot be read back or stored (#2006).
+// They are not new: counting them as new would start a full read for them at
+// every update, and the next one would leave them out again.
+func (s *baselineSupervisor) knownLeftOut(serverID string) []string {
+	if s.history == nil {
+		return nil
+	}
+	rec := s.history.LastFullRead(serverID)
+	if rec == nil {
+		return nil
+	}
+	out := make([]string, 0, len(rec.LeftOutTables))
+	for _, t := range rec.LeftOutTables {
+		out = append(out, t.Name)
+	}
+	return out
 }

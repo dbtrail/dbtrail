@@ -171,11 +171,19 @@ func readIdent(s string) (name, rest string, ok bool) {
 	return s[:end], s[end:], end > 0
 }
 
-// dumpRealNames reads metadata's real_table_name per file key, keyed by
-// "<file db>.<file table>". A dump without a metadata file, or a mydumper that
-// does not write the key, gives an empty map: the CREATE TABLE is then the
-// only source, and it is always there.
-func dumpRealNames(inputDir string) map[string]string {
+// dumpKey is a table's (schema, table) as the dump's file names spell them.
+// A pair, not "db.table": with a dot in either half the joined string is
+// ambiguous.
+type dumpKey struct{ db, table string }
+
+// dumpRealNames reads metadata's real_table_name per file key. A dump without
+// a metadata file, or a mydumper that does not write the key, gives an empty
+// map: the CREATE TABLE is then the only source, and it is always there.
+//
+// The value is written raw: measured with mydumper 1.0.3-1, a leading space,
+// "=", "#", ";" and backslashes come back as they are (no key-file escapes);
+// only a backtick is doubled, as in a quoted name.
+func dumpRealNames(inputDir string) map[dumpKey]string {
 	f, err := os.Open(filepath.Join(inputDir, "metadata"))
 	if err != nil {
 		// Only a missing file is expected (an older mydumper). The names
@@ -186,25 +194,24 @@ func dumpRealNames(inputDir string) map[string]string {
 		return nil
 	}
 	defer f.Close()
-	out := make(map[string]string)
+	out := make(map[dumpKey]string)
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	section := ""
+	var section *dumpKey
 	for sc.Scan() {
 		line := sc.Text()
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			section = ""
+			section = nil
 			db, rest, ok := readIdent(line[1 : len(line)-1])
 			if ok && strings.HasPrefix(rest, ".") {
 				if table, tail, ok := readIdent(rest[1:]); ok && tail == "" {
-					section = db + "." + table
+					section = &dumpKey{db, table}
 				}
 			}
 			continue
 		}
-		if v, ok := strings.CutPrefix(line, "real_table_name="); ok && section != "" {
-			// The value doubles a backtick, as a quoted name does.
-			out[section] = strings.ReplaceAll(v, "``", "`")
+		if v, ok := strings.CutPrefix(line, "real_table_name="); ok && section != nil {
+			out[*section] = strings.ReplaceAll(v, "``", "`")
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -213,16 +220,25 @@ func dumpRealNames(inputDir string) map[string]string {
 	return out
 }
 
+// LeftOutTable is a table the dump holds that the snapshot leaves out
+// (#2006), because its real name cannot be read back or cannot be stored.
+// Table is as much of the real name as is known, never a made-up one.
+type LeftOutTable struct {
+	Table  string
+	Reason string
+}
+
 // quoteName writes a name the way the messages below show it.
 func quoteName(s string) string {
 	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
 }
 
 // realDumpNames replaces the file-derived names DiscoverDump found with the
-// real ones the dump records, and refuses (naming every table it cannot
-// store) rather than publish a made-up or wrong name. Views get their real
-// name when metadata has it; they are only reported, never stored.
-func realDumpNames(inputDir string, tables []TableFiles, views []SkippedView) ([]TableFiles, []SkippedView, error) {
+// real ones the dump records. A table whose real name cannot be read back or
+// cannot be stored is left out, with why (never published under a made-up or
+// wrong name); every other table is kept. Views get their real name too; they
+// are only reported, never stored.
+func realDumpNames(inputDir string, tables []TableFiles, views []SkippedView) ([]TableFiles, []SkippedView, []LeftOutTable) {
 	meta := dumpRealNames(inputDir)
 
 	// Schemas: <file db>-schema-create.sql, when mydumper wrote it.
@@ -245,19 +261,18 @@ func realDumpNames(inputDir string, tables []TableFiles, views []SkippedView) ([
 		} else if name, err := createdName(createFile, "DATABASE"); err == nil {
 			d.name = name
 		} else if errors.Is(err, os.ErrNotExist) {
-			d.err = fmt.Errorf("the dump calls its schema %s, a name mydumper makes up for a schema whose name it will not put in a file name, "+
-				"and holds no CREATE DATABASE to read the real name from", quoteName(fileDB))
+			d.err = fmt.Errorf("mydumper wrote its schema as %s, a made-up name, and wrote no CREATE DATABASE to read the real one from", quoteName(fileDB))
 		} else {
-			d.err = fmt.Errorf("the dump calls its schema %s, a name mydumper makes up, and its real name cannot be read from %s: %w",
+			d.err = fmt.Errorf("mydumper wrote its schema as %s, a made-up name, and the real one cannot be read from %s: %w",
 				quoteName(fileDB), filepath.Base(createFile), err)
 		}
 		if d.err == nil {
 			switch {
 			case strings.Contains(d.name, "."):
-				d.err = fmt.Errorf("the schema name %s holds a dot, which a snapshot cannot store yet", quoteName(d.name))
+				d.err = fmt.Errorf("its schema name %s holds a dot, which a snapshot cannot store yet", quoteName(d.name))
 			default:
 				if err := storableName(d.name); err != nil {
-					d.err = fmt.Errorf("schema %s: %w", quoteName(d.name), err)
+					d.err = fmt.Errorf("its schema name %s cannot be stored: %w", quoteName(d.name), err)
 				}
 			}
 		}
@@ -265,79 +280,150 @@ func realDumpNames(inputDir string, tables []TableFiles, views []SkippedView) ([
 		return d
 	}
 
-	var problems []string
-	seen := make(map[string]string, len(tables))
-	out := make([]TableFiles, 0, len(tables))
+	var left []LeftOutTable
+	type kept struct {
+		tf   TableFiles
+		name string // schema.table, the display name
+		file string
+	}
+	var keep []kept
+	count := make(map[dumpKey]int, len(tables))
 	for _, tf := range tables {
 		file := filepath.Base(tf.SchemaFile)
 		d := realDB(tf.Database)
 		// Which name is the table's: metadata's real_table_name when the
 		// dump has one (checked against the CREATE TABLE); else the CREATE
-		// TABLE when the file name is one mydumper made up; else the file
-		// name, which is what mydumper writes whenever it can, and what
-		// every earlier release used.
+		// TABLE when the file name is one mydumper made up or holds a dot;
+		// else the file name, which is what mydumper writes whenever it can,
+		// and what every earlier release used.
 		created, cerr := createdName(tf.SchemaFile, "TABLE")
-		recorded := meta[tf.Database+"."+tf.Table]
-		var table string
+		recorded := meta[dumpKey{tf.Database, tf.Table}]
+		unknown := "unknown name (dump file " + file + ")"
+		var table, problem string
 		switch {
-		case generatedName.MatchString(tf.Table) && cerr != nil:
-			// A made-up file name needs the CREATE TABLE to confirm any
-			// name: a metadata value alone can be cut short (a name with
-			// a line break splits the metadata line).
-			problems = append(problems, fmt.Sprintf("the table in %s: mydumper wrote it under a made-up name and its real name cannot be read (%v)", file, cerr))
-			continue
+		case (generatedName.MatchString(tf.Table) || strings.Contains(tf.Table, ".")) && cerr != nil:
+			// A made-up or dotted file name needs the CREATE TABLE to
+			// confirm the name: a metadata value alone can be cut short (a
+			// name with a line break splits the metadata line), and a
+			// dotted one may split at the wrong dot.
+			problem = fmt.Sprintf("its real name cannot be read from the dump (%v)", cerr)
 		case recorded != "" && (cerr != nil || created != recorded):
-			problems = append(problems, fmt.Sprintf("the table in %s: its CREATE TABLE names it %s but the dump's metadata names it %s",
-				file, quoteName(created), quoteName(recorded)))
-			continue
+			problem = fmt.Sprintf("the dump names it two ways: %s in its CREATE TABLE and %s in its metadata", quoteName(created), quoteName(recorded))
 		case recorded != "":
 			table = recorded
 		case generatedName.MatchString(tf.Table):
 			table = created
-		case strings.Contains(tf.Table, ".") && cerr == nil && created != tf.Table:
+		case strings.Contains(tf.Table, ".") && created != tf.Table:
 			// A mydumper that writes a dotted schema name into the file
 			// name: "my.db.t" splits as schema "my", table "db.t". The
 			// CREATE TABLE says "t", so the split is wrong.
-			problems = append(problems, fmt.Sprintf("the table in %s: the file name reads as %s.%s but its CREATE TABLE names it %s; a schema name with a dot cannot be stored in a snapshot yet",
-				file, quoteName(tf.Database), quoteName(tf.Table), quoteName(created)))
-			continue
+			table = created
+			problem = fmt.Sprintf("the dump file name reads as %s.%s but the table is %s, so its schema name holds a dot, which a snapshot cannot store yet",
+				quoteName(tf.Database), quoteName(tf.Table), quoteName(created))
 		default:
 			table = tf.Table
 		}
-		// The schema's real name when it was read, even if it is refused.
-		label := quoteName(d.name) + "." + quoteName(table)
-		if d.name == "" {
-			label = quoteName(tf.Database) + "." + quoteName(table)
+		name := unknown
+		if table != "" {
+			name = table
+			if d.name != "" {
+				name = d.name + "." + table
+			}
 		}
-		if d.err != nil {
-			problems = append(problems, fmt.Sprintf("%s (dump file %s): %v", label, file, d.err))
+		if problem == "" && d.err != nil {
+			problem = d.err.Error()
+		}
+		if problem == "" {
+			if err := storableName(table); err != nil {
+				problem = err.Error()
+			}
+		}
+		if problem != "" {
+			left = append(left, LeftOutTable{Table: name, Reason: problem + " (dump file " + file + ")"})
 			continue
 		}
-		if err := storableName(table); err != nil {
-			problems = append(problems, fmt.Sprintf("%s (dump file %s): %v", label, file, err))
-			continue
-		}
-		key := d.name + "." + table
-		if other, dup := seen[key]; dup {
-			problems = append(problems, fmt.Sprintf("%s: both %s and %s hold it", label, other, file))
-			continue
-		}
-		seen[key] = file
 		tf.Database, tf.Table = d.name, table
-		out = append(out, tf)
+		count[dumpKey{d.name, table}]++
+		keep = append(keep, kept{tf: tf, name: name, file: file})
 	}
-	if len(problems) > 0 {
-		return nil, nil, fmt.Errorf("%d table(s) in the dump cannot be stored under their real names, so none was converted: %s",
-			len(problems), strings.Join(problems, "; "))
+	out := make([]TableFiles, 0, len(keep))
+	for _, k := range keep {
+		if count[dumpKey{k.tf.Database, k.tf.Table}] > 1 {
+			// Two files claim one real name: neither is known to be it.
+			left = append(left, LeftOutTable{Table: k.name,
+				Reason: "two dump files hold a table of this name, so which one is the table is not known (dump file " + k.file + ")"})
+			continue
+		}
+		out = append(out, k.tf)
+	}
+	for _, l := range left {
+		slog.Warn("snapshot: a table is left out because its real name cannot be read back or stored", "table", l.Table, "reason", l.Reason)
 	}
 
 	for i, v := range views {
 		if d := realDB(v.Database); d.err == nil {
 			views[i].Database = d.name
 		}
-		if name := meta[v.Database+"."+v.Name]; name != "" {
+		if name := meta[dumpKey{v.Database, v.Name}]; name != "" {
+			views[i].Name = name
+		} else if !generatedName.MatchString(v.Name) {
+			// A name mydumper kept is the real one.
+		} else if name, err := createdViewName(v.File); err == nil {
 			views[i].Name = name
 		}
 	}
-	return out, views, nil
+	return out, views, left
+}
+
+// createdViewName reads the view's name from the CREATE ... VIEW statement
+// of a mydumper <db>.<view>-schema-view.sql file.
+func createdViewName(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		up := strings.ToUpper(line)
+		if !strings.HasPrefix(up, "CREATE ") {
+			continue
+		}
+		// CREATE [ALGORITHM=...] [DEFINER=...] [SQL SECURITY ...] VIEW `name`:
+		// the first " VIEW " outside a quoted definer.
+		i := viewKeyword(line)
+		if i < 0 {
+			return "", fmt.Errorf("%s: its first CREATE is not a CREATE VIEW", filepath.Base(path))
+		}
+		name, _, ok := readIdent(skipSpaceAndComments(line[i+len(" VIEW "):]))
+		if !ok {
+			return "", fmt.Errorf("%s: cannot read the view's name", filepath.Base(path))
+		}
+		return name, nil
+	}
+	if err := sc.Err(); err != nil {
+		return "", err
+	}
+	return "", fmt.Errorf("%s holds no CREATE VIEW", filepath.Base(path))
+}
+
+// viewKeyword finds " VIEW " (any case) outside backticks and quotes.
+func viewKeyword(line string) int {
+	var q byte
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case q != 0:
+			if c == q {
+				q = 0
+			}
+		case c == '`' || c == '\'' || c == '"':
+			q = c
+		case c == ' ' && i+6 <= len(line) && strings.EqualFold(line[i:i+6], " VIEW "):
+			return i
+		}
+	}
+	return -1
 }
