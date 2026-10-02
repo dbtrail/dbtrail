@@ -33,9 +33,10 @@ func fkCascadeCheck(t *testing.T, rows *sqlmock.Rows, queryErr error) CheckResul
 }
 
 // What the user must not be handed: issue or bug numbers, project history,
-// storage-engine internals, schema-change statements, em dashes, or a
-// command-line flag the console has no field for.
-var fkCascadeJargon = regexp.MustCompile(`#\d|Phase|phase-|InnoDB|Bug|ALTER|no longer|\x{2014}|--[a-z]|` +
+// storage-engine internals, schema-change statements, any advice to change the
+// user's foreign keys (RESTRICT), em dashes, or a command-line flag the console
+// has no field for.
+var fkCascadeJargon = regexp.MustCompile(`#\d|Phase|phase-|InnoDB|Bug|ALTER|RESTRICT|no longer|\x{2014}|--[a-z]|` +
 	"`stream`|`watch`|`up`|`index`")
 
 func TestFKCascadesPass(t *testing.T) {

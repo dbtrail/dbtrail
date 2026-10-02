@@ -1057,8 +1057,8 @@ const FKCascadeCheckName = "Foreign keys that cascade"
 // the terminal and the console: each surface's way to restore is named as
 // that surface's (the console's Restore page, the command line's
 // recover-cascade), and no flag appears. Every line is flush left so the
-// console draws it as prose, never as a box to copy. Changing the schema is
-// offered last, as an alternative, because keeping the cascades is supported.
+// console draws it as prose, never as a box to copy. It never suggests changing
+// the foreign keys: cascades are the user's design and fully supported.
 const fkCascadeAdvice = "Capture works normally. Each foreign key above is listed as child table → parent\n" +
 	"table. When a parent row is deleted or its key changes, the server also deletes or\n" +
 	"changes the matching child rows, and MariaDB and MySQL before 9.6 do not write\n" +
@@ -1072,10 +1072,7 @@ const fkCascadeAdvice = "Capture works normally. Each foreign key above is liste
 	"Both rebuild a child row from the changes DBTrail captured. A child row that did\n" +
 	"not change during that time comes back only from a snapshot: the console uses\n" +
 	"one when snapshots are set up, and `bintrail recover-cascade` when you point it\n" +
-	"at one. When the result may be missing child rows, the restore says so.\n" +
-	"\n" +
-	"If you prefer not to rely on this, you can change these foreign keys to ON DELETE\n" +
-	"RESTRICT and ON UPDATE RESTRICT. Nothing requires it."
+	"at one. When the result may be missing child rows, the restore says so."
 
 // rootCause drops the wrapping prefixes of err, so a detail that already says
 // what failed does not say it twice.
