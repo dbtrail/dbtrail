@@ -664,6 +664,7 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 		Why: req.Why, WhyCode: console.BackupWhyCode(req.Why),
 	}
 	rec.LeftOutTables, rec.LeftOutTablesOmitted = console.LeftOutTablesOf(leftOutOf(out.stats))
+	rec.LeftOutKeys = console.LeftOutKeys(leftOutOf(out.stats))
 	rec.DiskCheck, rec.DiskNote = s.dumpDiskOf(req.ServerID, own)
 	rec.TransportNote = s.dumpTransportOf(req.ServerID, own)
 	// A snapshot instant is recorded when a snapshot was published: a
@@ -1372,6 +1373,19 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 	// writes none, and a schema it renames (a non-ASCII or "@" name) then
 	// cannot be read back from the dump (#2006).
 	listSchemas := plan.versionKnown && !plan.version.Less(mydumperlock.Version{Major: 1})
+	if listSchemas && len(schemas) == 0 {
+		// No schema list set: the user schemas, asked from the source, go as
+		// that list too, so a schema mydumper renames can be read back here
+		// as well (the default setup is where most servers are). A schema
+		// created between this question and the dump is not read; the next
+		// update names it as a new table. If the source cannot be asked, the
+		// dump runs as before, under --regex.
+		if all, lerr := listUserSchemas(ctx, sourceDSN, ssl); lerr != nil {
+			slog.Warn("snapshot: could not list the source's schemas; the full read selects them by pattern, so a schema mydumper renames cannot be read back", "error", lerr)
+		} else if len(all) > 0 {
+			schemas = all
+		}
+	}
 	args := buildConsoleMydumperArgs(host, port, user, schemas, dumpDir, lockMode, plan.sendLockFlags, tlsArgs, listSchemas)
 	// plan.path, not the bare name: the dump must run the very binary whose
 	// version was just read.
@@ -1587,29 +1601,78 @@ func publishedSnapshotTime(at time.Time, err error) string {
 }
 
 // mydumperEnv is the environment mydumper runs with: the daemon's, the
-// source password out of band (MYSQL_PWD, #811), and a UTF-8 locale when the
-// daemon has none. Measured with mydumper 1.0.3-1 in the console image, which
-// sets no locale: a schema name outside ASCII on its command line ("ventas_año")
-// fails with "option parsing failed: Invalid byte sequence in conversion
-// input" before it connects (#2006). An operator's own locale is kept.
+// source password out of band (MYSQL_PWD, #811), and a UTF-8 character
+// locale unless the one in effect already names UTF-8. Measured with mydumper
+// 1.0.3-1 in the console image, which sets no locale: a schema name outside
+// ASCII on its command line ("ventas_año") fails with "option parsing failed:
+// Invalid byte sequence in conversion input" before it connects (#2006).
+// LANG=C fails the same way, so "set" is not enough: the effective value
+// (LC_ALL, else LC_CTYPE, else LANG) must name UTF-8. Only the character
+// type changes (LC_CTYPE), unless LC_ALL is set, which overrides it and so is
+// what has to change. An operator's UTF-8 locale is kept as it is, even one
+// not installed on the host (which this cannot see).
 func mydumperEnv(base []string, password string) []string {
+	get := func(k string) string {
+		for i := len(base) - 1; i >= 0; i-- {
+			if name, v, ok := strings.Cut(base[i], "="); ok && name == k {
+				return v
+			}
+		}
+		return ""
+	}
 	env := append([]string(nil), base...)
 	if password != "" {
 		env = append(env, "MYSQL_PWD="+password)
 	}
-	for _, kv := range base {
-		if k, v, _ := strings.Cut(kv, "="); v != "" && (k == "LC_ALL" || k == "LC_CTYPE" || k == "LANG") {
-			return env
-		}
+	effective := get("LC_ALL")
+	if effective == "" {
+		effective = get("LC_CTYPE")
 	}
-	return append(env, "LC_ALL=C.UTF-8")
+	if effective == "" {
+		effective = get("LANG")
+	}
+	if u := strings.ToUpper(effective); strings.Contains(u, "UTF-8") || strings.Contains(u, "UTF8") {
+		return env
+	}
+	if get("LC_ALL") != "" {
+		return append(env, "LC_ALL=C.UTF-8")
+	}
+	return append(env, "LC_CTYPE=C.UTF-8")
 }
 
 // leftOutOf is the converter's left-out tables in the console's type.
 func leftOutOf(st baseline.Stats) []console.LeftOut {
 	out := make([]console.LeftOut, len(st.TablesLeftOut))
 	for i, l := range st.TablesLeftOut {
-		out[i] = console.LeftOut{Table: l.Table, Reason: l.Reason}
+		out[i] = console.LeftOut{Table: l.Table, Reason: l.Reason, Schema: l.Schema, Name: l.Name}
 	}
 	return out
+}
+
+// listUserSchemas lists the source's schemas a full read with no schema list
+// covers: every one but the system schemas (the same ones
+// systemSchemaExcludeRegex leaves out). Indirected for tests.
+var listUserSchemas = func(ctx context.Context, sourceDSN string, ssl config.SSL) ([]string, error) {
+	db, err := connectSource(sourceDSN, ssl)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(ctx, sourceTablesTimeout)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA "+
+		"WHERE SCHEMA_NAME NOT IN ('mysql', 'sys', 'performance_schema', 'information_schema') ORDER BY SCHEMA_NAME")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
 }

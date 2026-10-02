@@ -334,7 +334,7 @@ func TestEmergencyHeld_whatCounts_2006(t *testing.T) {
 			if held != c.held {
 				t.Fatalf("held = %v, want %v", held, c.held)
 			}
-			if held && !next.Equal(now.Add(-2*time.Hour).Add(emergencyCap)) {
+			if held && !next.Equal(now.Add(-2*time.Hour).Add(emergencyCap-emergencySlack)) {
 				t.Errorf("next = %v, want a day after the read started", next)
 			}
 			if _, held := b.emergencyHeld("s", now.Add(23*time.Hour)); held {
@@ -353,5 +353,73 @@ func TestEmergencyCap_newTablesPlannerWaits_2006(t *testing.T) {
 	action, reason := b.newTablesPlanner(e)([]string{"demo.fresh"})
 	if action != console.NewTablesActionNotPossible || !strings.Contains(reason, "at most once a day") {
 		t.Fatalf("planner = %q, %q; want not possible, saying the daily cap", action, reason)
+	}
+}
+
+// A daily schedule gets its daily emergency read even when the update that
+// fails before it takes a minute less than yesterday's (#2006 review).
+func TestEmergencyHeld_dailyScheduleJitter_2006(t *testing.T) {
+	b, _, _ := newScheduleFixture(t, true)
+	day1 := time.Date(2026, 10, 1, 3, 1, 10, 0, time.UTC) // yesterday's read, after a 65 s update
+	b.noteEmergency("s", day1)
+	if _, held := b.emergencyHeld("s", time.Date(2026, 10, 2, 3, 0, 15, 0, time.UTC)); held {
+		t.Fatal("a daily schedule's read was pushed to the day after by a shorter update")
+	}
+	if _, held := b.emergencyHeld("s", day1.Add(6*time.Hour)); !held {
+		t.Fatal("six hours later the cap must hold")
+	}
+}
+
+// The start is durable: a read the daemon died in (no record written) still
+// counts after a restart, and the newest emergency record survives the
+// history cap under a run of failing updates.
+func TestEmergencyHeld_survivesRestartAndHistoryCap_2006(t *testing.T) {
+	b, reg, sup := newScheduleFixture(t, true)
+	now := time.Now().UTC()
+	b.noteEmergency("s", now.Add(-time.Hour)) // the daemon dies in this read
+	b2 := newBackupScheduler(sup, reg, true, false)
+	h2, err := console.OpenBaselineHistory(sup.history.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup.history = h2
+	if _, held := b2.emergencyHeld("s", now); !held {
+		t.Fatal("after a restart the read the daemon died in no longer counts")
+	}
+
+	b3, _, sup3 := newScheduleFixture(t, true)
+	if err := sup3.history.Append(console.BaselineRunRecord{ServerID: "s", Kind: console.BaselineRunDump, Trigger: console.BaselineRunTriggerScheduled,
+		WhyCode: "fold_refused", Error: "mydumper exit 2", StartedAt: now.Add(-time.Hour).Format(time.RFC3339), FinishedAt: now.Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < console.BaselineRunHistoryCap+5; i++ {
+		if err := sup3.history.Append(console.BaselineRunRecord{ServerID: "s", Kind: console.BaselineRunRefresh, Trigger: console.BaselineRunTriggerScheduled,
+			Error: "refused", StartedAt: now.Format(time.RFC3339), FinishedAt: now.Format(time.RFC3339)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, held := b3.emergencyHeld("s", now); !held {
+		t.Fatal("the history cap evicted the newest emergency read")
+	}
+}
+
+// Through the real path: the full read started for new tables is recorded
+// as an emergency read as it starts (durably), so the cap holds while it
+// runs and after a restart.
+func TestIncludeNewTables_recordsTheEmergencyStart_2006(t *testing.T) {
+	b, reg, sup := newScheduleFixture(t, true)
+	stubFullReads(t, sup)
+	e := addScheduled(t, reg, true)
+	b.tick(context.Background(), time.Date(2026, 8, 28, 8, 0, 5, 0, time.UTC)) // the schedule is observed
+	if action, reason := b.newTablesPlanner(e)([]string{"demo.fresh"}); action != console.NewTablesActionFullRead {
+		t.Fatalf("planner = %q %q", action, reason)
+	}
+	b.includeNewTables(e, console.BaselineStatus{State: "succeeded", NewTables: []string{"demo.fresh"}, NewTablesAction: console.NewTablesActionFullRead})
+	waitTerminalMethod(t, b, e.ID, console.BackupMethodFull)
+	if sup.history.EmergencyStarted(e.ID) == "" {
+		t.Fatal("the new-tables full read was not recorded as an emergency read when it started")
+	}
+	if action, reason := b.newTablesPlanner(e)([]string{"demo.other"}); action != console.NewTablesActionNotPossible || !strings.Contains(reason, "at most once a day") {
+		t.Fatalf("a second new-tables read the same day: %q %q", action, reason)
 	}
 }

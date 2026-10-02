@@ -50,7 +50,11 @@ func storableName(name string) error {
 	case strings.ContainsRune(name, '/'):
 		return fmt.Errorf(`the name holds a "/", which a snapshot cannot store as a file name`)
 	case strings.ContainsRune(name, '\\'):
-		return fmt.Errorf(`the name holds a "\", which a snapshot cannot store as a file name`)
+		// Storable on Linux, but the snapshot's change files (table deltas)
+		// are matched by name with "\" taken as a folder separator
+		// (TableDeltaNameFilter): table `a\b` would read table `b`'s
+		// changes as its own, and `b` would read `a\b`'s.
+		return fmt.Errorf(`the name holds a "\", which the snapshot's change files treat as a folder separator, so this table and the table named after the "\" would read each other's changes`)
 	case strings.ContainsRune(name, 0):
 		return errors.New("the name holds a NUL byte")
 	case len(name)+longestDeltaSuffix > maxFileNameBytes:
@@ -226,6 +230,10 @@ func dumpRealNames(inputDir string) map[dumpKey]string {
 type LeftOutTable struct {
 	Table  string
 	Reason string
+	// Schema and Name are the real schema and table as the source spells
+	// them, each "" when it could not be read: what a comparison with the
+	// source's own table list matches on. Table is for reading.
+	Schema, Name string
 }
 
 // quoteName writes a name the way the messages below show it.
@@ -339,7 +347,13 @@ func realDumpNames(inputDir string, tables []TableFiles, views []SkippedView) ([
 			}
 		}
 		if problem != "" {
-			left = append(left, LeftOutTable{Table: name, Reason: problem + " (dump file " + file + ")"})
+			// What the source calls it, as far as the dump says: the table
+			// name metadata recorded when the CREATE TABLE could not give one.
+			match := table
+			if match == "" {
+				match = recorded
+			}
+			left = append(left, LeftOutTable{Table: name, Reason: problem + " (dump file " + file + ")", Schema: d.name, Name: match})
 			continue
 		}
 		tf.Database, tf.Table = d.name, table
@@ -351,7 +365,8 @@ func realDumpNames(inputDir string, tables []TableFiles, views []SkippedView) ([
 		if count[dumpKey{k.tf.Database, k.tf.Table}] > 1 {
 			// Two files claim one real name: neither is known to be it.
 			left = append(left, LeftOutTable{Table: k.name,
-				Reason: "two dump files hold a table of this name, so which one is the table is not known (dump file " + k.file + ")"})
+				Reason: "two dump files hold a table of this name, so which one is the table is not known (dump file " + k.file + ")",
+				Schema: k.tf.Database, Name: k.tf.Table})
 			continue
 		}
 		out = append(out, k.tf)

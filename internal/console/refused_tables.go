@@ -92,7 +92,21 @@ const VerdictLeftOut = "left-out"
 
 // LeftOut is one table a full read left out of its snapshot and why: the
 // converter's list, as this package takes it.
-type LeftOut struct{ Table, Reason string }
+type LeftOut struct{ Table, Reason, Schema, Name string }
+
+// LeftOutKeys is every left-out table the source can be matched against, as
+// "schema.table", or ".table" when the schema's real name is unknown; one whose
+// table name is unknown cannot be matched and is not listed. Uncapped: the
+// new-tables check (#1998) needs all of them, not the 20 the page shows.
+func LeftOutKeys(left []LeftOut) []string {
+	var out []string
+	for _, l := range left {
+		if l.Name != "" {
+			out = append(out, l.Schema+"."+l.Name)
+		}
+	}
+	return out
+}
 
 // LeftOutTablesOf keeps the tables a full read left out, as RefusedTables,
 // with the same bounds and scrubbing as RefusedTablesOf.

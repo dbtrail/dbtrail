@@ -1450,42 +1450,53 @@ func sameIncurableRefusal(prev []console.RefusedTable, prevOmitted int, cur []co
 // now") are not emergency reads: they neither count nor wait.
 var emergencyCap = 24 * time.Hour
 
-// isEmergencyWhy reports whether a full read's recorded reason makes it an
-// emergency read.
-func isEmergencyWhy(code string) bool {
-	return code == "fold_refused" || code == "fold_crashed" || code == console.BackupWhyCodeNewTables
-}
+// emergencySlack is taken off the cap so a daily schedule gets its daily
+// emergency read: the read starts after the update fails, and an update that
+// takes a minute less tomorrow would otherwise land just inside the day and
+// push the read to the day after.
+const emergencySlack = time.Hour
 
-// noteEmergency records that an emergency full read started now.
+// noteEmergency records that an emergency full read started now: in memory,
+// and durably in the run history before the read runs, so a read the daemon
+// dies in still counts after a restart.
 func (b *backupScheduler) noteEmergency(serverID string, now time.Time) {
 	b.mu.Lock()
 	b.emergency[serverID] = now
 	b.mu.Unlock()
+	if b.sup.history != nil {
+		if err := b.sup.history.NoteEmergencyStart(serverID, now.UTC().Format(time.RFC3339)); err != nil {
+			slog.Warn("snapshot schedule: could not record the start of an emergency full read; after a restart the daily cap may allow one more", "id", serverID, "error", err)
+		}
+	}
 }
 
 // emergencyHeld reports whether the cap holds back an emergency full read at
-// now, and when the next is allowed. The newest emergency read is the later of
-// this process's own start and the run history's newest scheduled full read
-// with an emergency reason, failed ones included (a read that fails every
-// time is the loop the cap exists for). The history survives a restart.
+// now, and when the next is allowed. The newest emergency read is the latest
+// of this process's own start, the start the history recorded as it began,
+// and the history's newest scheduled full read with an emergency reason,
+// failed ones included (a read that fails every time is the loop the cap
+// exists for).
 func (b *backupScheduler) emergencyHeld(serverID string, now time.Time) (next time.Time, held bool) {
 	b.mu.Lock()
 	last := b.emergency[serverID]
 	b.mu.Unlock()
-	if b.sup.history != nil {
-		for _, r := range b.sup.history.List(serverID) {
-			if r.Kind != console.BaselineRunDump || r.SkipReason != "" || r.Trigger != console.BaselineRunTriggerScheduled || !isEmergencyWhy(r.WhyCode) {
-				continue
-			}
-			if at, err := time.Parse(time.RFC3339, r.StartedAt); err == nil && at.After(last) {
-				last = at
+	later := func(stamp string) {
+		if at, err := time.Parse(time.RFC3339, stamp); err == nil && at.After(last) {
+			last = at
+		}
+	}
+	if h := b.sup.history; h != nil {
+		later(h.EmergencyStarted(serverID))
+		for _, r := range h.List(serverID) {
+			if r.Kind == console.BaselineRunDump && r.SkipReason == "" && r.Trigger == console.BaselineRunTriggerScheduled && console.IsEmergencyWhyCode(r.WhyCode) {
+				later(r.StartedAt)
 			}
 		}
 	}
-	if last.IsZero() {
+	if last.IsZero() || emergencyCap <= 0 {
 		return time.Time{}, false
 	}
-	next = last.Add(emergencyCap)
+	next = last.Add(emergencyCap - emergencySlack)
 	return next, now.Before(next)
 }
 

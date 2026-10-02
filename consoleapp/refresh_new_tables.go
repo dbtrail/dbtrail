@@ -131,7 +131,7 @@ func (s *baselineSupervisor) checkNewTables(req refreshRequest, snapshot []strin
 		return newTablesCheck{unchecked: console.ScrubReason(
 			fmt.Sprintf("could not ask the source which tables it has: %v", err), req.SourceDSN)}
 	}
-	all := tablesLeftOut(append(append([]string(nil), snapshot...), s.knownLeftOut(req.ServerID)...), source, foldCase)
+	all := withoutKnownLeftOut(tablesLeftOut(snapshot, source, foldCase), snapshot, s.knownLeftOut(req.ServerID), foldCase)
 	kept, omitted := console.NewTablesOf(all)
 	return newTablesCheck{all: all, tables: kept, omitted: omitted}
 }
@@ -392,21 +392,57 @@ func (b *backupScheduler) newTablesOwed(serverID string, all []string) (attempts
 	return tried.attempts, ""
 }
 
-// knownLeftOut is the tables the newest full read that went through left out
-// on purpose, because their real name cannot be read back or stored (#2006).
-// They are not new: counting them as new would start a full read for them at
-// every update, and the next one would leave them out again.
+// knownLeftOut is every table the newest full read that went through left
+// out on purpose, because its real name cannot be read back or stored (#2006),
+// as the source names it: "schema.table", or ".table" when the dump did not
+// say the schema's real name. Read from the run's uncapped key list.
 func (s *baselineSupervisor) knownLeftOut(serverID string) []string {
 	if s.history == nil {
 		return nil
 	}
-	rec := s.history.LastFullRead(serverID)
-	if rec == nil {
-		return nil
+	if rec := s.history.LastFullRead(serverID); rec != nil {
+		return rec.LeftOutKeys
 	}
-	out := make([]string, 0, len(rec.LeftOutTables))
-	for _, t := range rec.LeftOutTables {
-		out = append(out, t.Name)
+	return nil
+}
+
+// withoutKnownLeftOut drops from the new tables the ones the last full read
+// left out on purpose: counting them as new would start a full read for them
+// at every update, and each would leave them out again. A ".table" key (the
+// schema's real name unknown: mydumper renamed the schema and wrote no CREATE
+// DATABASE) matches that table in any schema the snapshot holds no table of,
+// which is what such a schema looks like from here.
+func withoutKnownLeftOut(newTables, snapshot, known []string, foldCase bool) []string {
+	if len(known) == 0 {
+		return newTables
+	}
+	key := func(s string) string {
+		if foldCase {
+			return strings.ToLower(s)
+		}
+		return s
+	}
+	exact, anySchema := map[string]bool{}, map[string]bool{}
+	for _, k := range known {
+		if t, ok := strings.CutPrefix(k, "."); ok {
+			anySchema[key(t)] = true
+		} else {
+			exact[key(k)] = true
+		}
+	}
+	held := map[string]bool{}
+	for _, t := range snapshot {
+		if sch, _, ok := strings.Cut(t, "."); ok {
+			held[key(sch)] = true
+		}
+	}
+	out := newTables[:0:0]
+	for _, t := range newTables {
+		sch, tbl, _ := strings.Cut(t, ".")
+		if exact[key(t)] || (anySchema[key(tbl)] && !held[key(sch)]) {
+			continue
+		}
+		out = append(out, t)
 	}
 	return out
 }

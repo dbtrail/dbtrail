@@ -203,7 +203,7 @@ func TestDiscoverDump_MadeUpSchemaWithoutCreateDatabase_2006(t *testing.T) {
 	if len(tables) != 1 || tables[0].Database != "shop" {
 		t.Fatalf("tables = %+v, want shop.orders kept", tables)
 	}
-	if len(left) != 1 || left[0].Table != "t" || strings.Contains(left[0].Table, "mydumper_0") ||
+	if len(left) != 1 || left[0].Table != "t" || left[0].Name != "t" || left[0].Schema != "" || strings.Contains(left[0].Table, "mydumper_0") ||
 		!strings.Contains(left[0].Reason, "made-up name") {
 		t.Fatalf("left out %+v, want table t with the reason", left)
 	}
