@@ -237,6 +237,9 @@ var apiRoutePerms = []routePerm{
 	// settings:read alone can learn the index endpoint here. Both are
 	// admin-shaped tiers, and neither yields a credential.
 	{"GET", "/api/views.sql", ext.PermSettingsRead},
+	// The Overview's dashboards card (#2014): the same views file, read from
+	// the S3 snapshot location, with the facts the card shows beside it.
+	{"GET", "/api/dashboards", ext.PermSettingsRead},
 	{"POST", "/api/sql", ext.PermSQLExecute},
 	{"GET", "/api/sql", ext.PermSQLExecute},
 	{"GET", "/api/telemetry", ext.PermSettingsRead},

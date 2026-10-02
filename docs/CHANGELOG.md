@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **The Overview's "Dashboards for the team" card hands out a views file that
+  reads the snapshots straight from S3** (#2014). On a server whose snapshots
+  go to S3, the card shows the newest snapshot there and gives a `views.sql`
+  whose views read the bucket, plus the line to open it
+  (`duckdb -init views.sql team.duckdb`). Each new DuckDB session reads the
+  newest completed snapshot, so the file stays current with nothing
+  downloaded. The card says what each reader needs (read access to the
+  prefix, the region, their own AWS credentials; the file carries none) and
+  names any table left out of the snapshot. A server that keeps its snapshots
+  only on this machine is told so and sent to the S3 field on Snapshots
+  instead of being handed a file a teammate could not use. A session with a
+  data profile does not get the file. New route: `GET /api/dashboards`
+  (settings:read).
 ### Changed
 - **Breaking: the DuckDB views of a snapshot are named exactly like the
   source** (#2013). `SELECT * FROM shop.orders`, and `demo."order.items"` for a

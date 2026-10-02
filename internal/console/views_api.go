@@ -51,6 +51,18 @@ type viewsRequest struct {
 	// to make, and emitting a location the snapshots were never written to
 	// produces a file whose every state view fails to resolve.
 	PortableBaseline bool
+	// S3Baseline reads the state views from whichever of this server's two
+	// snapshot locations is the S3 one, the primary on a server with only a
+	// bucket and the fallback on one that also keeps a local folder (#2014).
+	// The Overview's dashboards card asks for it: the file goes to a teammate,
+	// and only the bucket is reachable from there. With no S3 location the
+	// input names no baseline at all, never the local folder in its place.
+	S3Baseline bool
+	// StateOnly skips the archive half entirely: no archive_state read, no
+	// archive bucket in the region detection. Set with OmitEvents by a caller
+	// whose file never reads the archives, so a bucket the file does not touch
+	// cannot make the region ambiguous and leave the secret unpinned (#2014).
+	StateOnly bool
 }
 
 // naming, not a degrade: silently dropping the baseline half would hand over a
@@ -84,10 +96,13 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 		in.LiveLegUnavailable = true
 	}
 	var archiveErr error
-	in.ArchiveSources, archiveErr = consoleArchiveSources(ctx, b.db, portable)
-	in.PortableRouting = portable
+	if !req.StateOnly {
+		in.ArchiveSources, archiveErr = consoleArchiveSources(ctx, b.db, portable)
+	}
+	in.PortableRouting = portable && !req.StateOnly
+	in.ArchivesNotAsked = req.StateOnly
 	in.ArchiveDiscoveryFailed = archiveErr != nil
-	if archiveErr == nil {
+	if archiveErr == nil && !req.StateOnly {
 		// Per-column-set groups (#1535): whether a statement over the events
 		// view waits on EVERY archived file's footer or on one per schema.
 		// The console no longer runs this SQL itself (#1554 removed the panel),
@@ -121,6 +136,9 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 		// server actually has are the only two it can be asked for, so a
 		// request cannot name a prefix nothing was written to.
 		baseSrc = b.baselineFallbackSrc
+	}
+	if req.S3Baseline {
+		baseSrc = bundleBaselineS3(b)
 	}
 	if baseSrc != "" {
 		in.BaselineSource = baseSrc
@@ -167,7 +185,7 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 					// telling this reader to untick would hand a file of local
 					// paths to someone who asked for one that travels. The
 					// fact alone is right there; only the route is withheld.
-					if !req.PortableBaseline {
+					if !req.PortableBaseline && !req.S3Baseline {
 						in.NewerElsewhereHowTo = `To read that one instead, tick "Works on another machine" and download again.`
 					}
 				}
