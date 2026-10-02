@@ -329,7 +329,7 @@ say "and ${B}a MySQL login that can create users${RST} and grant them privileges
 say ""
 say "${B}Next steps${RST}"
 say "  ${B}1. Sign in.${RST} Open ${B}${CONSOLE_URL}${RST} and create a username and password."
-say "  ${B}2. Connect.${RST} The form to add your server opens after you sign in. Fill in"
+say "  ${B}2. Connect.${RST} Click + Add server, fill in"
 say "     the host and port of your MySQL server and press Find it. The form then"
 say "     shows the SQL that creates a user for DBTrail: run it on your MySQL with"
 say "     that login, then press I ran it. DBTrail checks the rest by itself."
