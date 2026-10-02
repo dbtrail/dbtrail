@@ -19,7 +19,7 @@ against the [latest release](https://github.com/dbtrail/dbtrail/releases/latest)
 
 ## 2. Read the changelog before you upgrade
 
-[CHANGELOG.md](../CHANGELOG.md) documents every release, in order, newest
+[CHANGELOG.md](CHANGELOG.md) documents every release, in order, newest
 first. Skim every version **between** your current one and the target —
 entries marked **BREAKING** call out a behavior change that needs a manual
 step (a flag/env var rename, a default that flipped, an auth model change).

@@ -113,7 +113,7 @@ jobs:
               - 'go.mod'
               - 'go.sum'
               - 'Makefile'
-              - 'migrations/**'
+              - 'docs/migrations/**'
               - 'test/console-e2e/**'
               # The first-run walk runs the permissions block from the
               # quickstart, read out of that file: a docs-only edit that
@@ -128,7 +128,7 @@ jobs:
               - 'go.mod'
               - 'go.sum'
               - 'Makefile'
-              - 'migrations/**'
+              - 'docs/migrations/**'
               - '.github/workflows/ci.yml'
               # The S3 test store actions run inside the integration job
               # (#1884): a change to one must be able to run that job.
@@ -142,7 +142,7 @@ jobs:
               - '**/*.go'
               - 'go.mod'
               - 'go.sum'
-              - 'migrations/**'
+              - 'docs/migrations/**'
               - '.github/workflows/ci.yml'
               - '.github/actions/**'
               - '!internal/console/**'
@@ -981,7 +981,7 @@ jobs:
             ${{ runner.temp }}/first-run-walk-failure-*.png
           if-no-files-found: ignore
 
-  # The .goreleaser.yaml signs block only ever executes on a tag push, so no
+  # The build/.goreleaser.yaml signs block only ever executes on a tag push, so no
   # PR check can catch a broken flag set until a release run fails — the worst
   # possible moment (recovery is delete-tag, fix, re-tag; cosign v3 made the
   # Sigstore bundle sign-blob's default output, and an installer-action major
@@ -1025,10 +1025,10 @@ jobs:
           artifact="$(mktemp)"
           echo "signing probe ${GITHUB_SHA}" > "$artifact"
 
-          cmd="$(yq -r '.signs[0].cmd' .goreleaser.yaml)"
-          sig_tpl="$(yq -r '.signs[0].signature // "${artifact}.sig"' .goreleaser.yaml)"
-          cert_tpl="$(yq -r '.signs[0].certificate // ""' .goreleaser.yaml)"
-          args_raw="$(yq -r '.signs[0].args[]' .goreleaser.yaml)"
+          cmd="$(yq -r '.signs[0].cmd' build/.goreleaser.yaml)"
+          sig_tpl="$(yq -r '.signs[0].signature // "${artifact}.sig"' build/.goreleaser.yaml)"
+          cert_tpl="$(yq -r '.signs[0].certificate // ""' build/.goreleaser.yaml)"
+          args_raw="$(yq -r '.signs[0].args[]' build/.goreleaser.yaml)"
 
           # Fail closed on template forms this replay does not implement: the
           # renderer below knows exactly ${artifact}/${signature}/${certificate}.

@@ -56,7 +56,13 @@ bintrail recover --index-dsn "$BINTRAIL_INDEX_DSN" --schema demo --table custome
 
 ## MCP tools (Claude integration)
 
-The `.mcp.json` at the repo root registers bintrail as an MCP server. Set the env var and the `query`, `recover`, and `status` tools work automatically in Claude Code on this machine:
+Create a `.mcp.json` at the repo root (it is gitignored, so it stays yours) to register bintrail as an MCP server:
+
+```json
+{"mcpServers":{"bintrail":{"command":"go","args":["run","./cmd/bintrail-mcp"]}}}
+```
+
+Set the env var and the `query`, `recover`, and `status` tools work automatically in Claude Code on this machine:
 
 ```bash
 export BINTRAIL_INDEX_DSN='root:demo@tcp(127.0.0.1:3307)/bintrail_index'

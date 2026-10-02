@@ -30,7 +30,7 @@ internal/          Core packages. Each package has a _test.go alongside it.
                    both cmd/bintrail/ commands and cmd/bintrail-mcp/.
   observe/         Structured logging (slog) setup and Prometheus metrics for stream.
   status/          Shared index status types and display helpers.
-migrations/        Reference DDL — tables are created by `bintrail init`, not this file.
+docs/migrations/   Reference DDL — tables are created by `bintrail init`, not this file.
 ```
 
 Read `CLAUDE.md` for a detailed map of the architecture, key patterns, and gotchas discovered during development.

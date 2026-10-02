@@ -7,7 +7,7 @@
 #   bintrail-mcp --connect <console_url> --token <token>
 #
 # Invoked by GoReleaser as a per-artifact post-build hook on the bintrail-mcp
-# build (see .goreleaser.yaml), and usable standalone:
+# build (see build/.goreleaser.yaml), and usable standalone:
 #
 #   scripts/build-mcpb.sh <binary-path> <goos> <goarch> <version>
 #

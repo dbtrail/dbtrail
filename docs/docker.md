@@ -1,17 +1,17 @@
 # Docker Deployment
 
-DBTrail ships a multi-stage Dockerfile that produces a minimal image containing both `bintrail` and `bintrail-mcp` binaries.
+DBTrail ships a multi-stage Dockerfile (`build/Dockerfile.bintrail`) that produces a minimal image containing both `bintrail` and `bintrail-mcp` binaries.
 
 ## Building the image
 
 ```bash
-docker build -t bintrail .
+docker build -f build/Dockerfile.bintrail -t bintrail .
 ```
 
 Inject version metadata at build time:
 
 ```bash
-docker build \
+docker build -f build/Dockerfile.bintrail \
   --build-arg VERSION=$(git describe --tags --always) \
   --build-arg COMMIT=$(git rev-parse --short HEAD) \
   --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
@@ -23,7 +23,7 @@ docker build \
 Build for both `amd64` and `arm64` using Docker Buildx:
 
 ```bash
-docker buildx build \
+docker buildx build -f build/Dockerfile.bintrail \
   --platform linux/amd64,linux/arm64 \
   -t your-registry/bintrail:latest \
   --push .

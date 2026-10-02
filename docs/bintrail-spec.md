@@ -36,7 +36,7 @@ bintrail/
 │   │   └── recovery.go           # Reversal SQL generator from stored row data
 │   └── config/
 │       └── config.go             # Configuration and connection settings
-├── migrations/
+├── docs/migrations/
 │   └── 001_create_tables.sql     # DDL for index tables
 ├── go.mod
 ├── go.sum

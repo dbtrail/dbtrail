@@ -146,9 +146,13 @@ archives:
     files:
       - LICENSE*
       - README*
-      - CHANGELOG*
+      # Kept at the archive root, where they sat before moving out of the
+      # repo root (the root file list sits above the README on GitHub).
+      - src: docs/CHANGELOG.md
+        dst: CHANGELOG.md
       - NOTICE
-      - THIRD-PARTY-NOTICES
+      - src: build/THIRD-PARTY-NOTICES
+        dst: THIRD-PARTY-NOTICES
 
 checksum:
   name_template: "checksums.txt"
@@ -196,7 +200,7 @@ nfpms:
         dst: /usr/share/doc/bintrail/LICENSE
       - src: NOTICE
         dst: /usr/share/doc/bintrail/NOTICE
-      - src: THIRD-PARTY-NOTICES
+      - src: build/THIRD-PARTY-NOTICES
         dst: /usr/share/doc/bintrail/THIRD-PARTY-NOTICES
 
   # Separate package, mirroring the binary split: the core CLI stays UI-free
@@ -224,7 +228,7 @@ nfpms:
         dst: /usr/share/doc/bintrail-console/LICENSE
       - src: NOTICE
         dst: /usr/share/doc/bintrail-console/NOTICE
-      - src: THIRD-PARTY-NOTICES
+      - src: build/THIRD-PARTY-NOTICES
         dst: /usr/share/doc/bintrail-console/THIRD-PARTY-NOTICES
 
   # Separate package for the PostgreSQL-source binary (#534), mirroring the
@@ -253,7 +257,7 @@ nfpms:
         dst: /usr/share/doc/bintrail-pg/LICENSE
       - src: NOTICE
         dst: /usr/share/doc/bintrail-pg/NOTICE
-      - src: THIRD-PARTY-NOTICES
+      - src: build/THIRD-PARTY-NOTICES
         dst: /usr/share/doc/bintrail-pg/THIRD-PARTY-NOTICES
 
 # ── Docker images (multi-arch, published to GHCR) ──────────
@@ -279,7 +283,7 @@ dockers:
     extra_files:
       - LICENSE
       - NOTICE
-      - THIRD-PARTY-NOTICES
+      - build/THIRD-PARTY-NOTICES
     image_templates:
       - "ghcr.io/dbtrail/bintrail:{{ .Version }}-amd64"
     build_flag_templates:
@@ -302,7 +306,7 @@ dockers:
     extra_files:
       - LICENSE
       - NOTICE
-      - THIRD-PARTY-NOTICES
+      - build/THIRD-PARTY-NOTICES
     image_templates:
       - "ghcr.io/dbtrail/bintrail:{{ .Version }}-arm64"
     build_flag_templates:
@@ -326,7 +330,7 @@ dockers:
     extra_files:
       - LICENSE
       - NOTICE
-      - THIRD-PARTY-NOTICES
+      - build/THIRD-PARTY-NOTICES
     image_templates:
       - "ghcr.io/dbtrail/bintrail-console:{{ .Version }}-amd64"
     build_flag_templates:
@@ -348,7 +352,7 @@ dockers:
     extra_files:
       - LICENSE
       - NOTICE
-      - THIRD-PARTY-NOTICES
+      - build/THIRD-PARTY-NOTICES
     image_templates:
       - "ghcr.io/dbtrail/bintrail-console:{{ .Version }}-arm64"
     build_flag_templates:
@@ -372,7 +376,7 @@ dockers:
     extra_files:
       - LICENSE
       - NOTICE
-      - THIRD-PARTY-NOTICES
+      - build/THIRD-PARTY-NOTICES
     image_templates:
       - "ghcr.io/dbtrail/bintrail-pg:{{ .Version }}-amd64"
     build_flag_templates:
@@ -394,7 +398,7 @@ dockers:
     extra_files:
       - LICENSE
       - NOTICE
-      - THIRD-PARTY-NOTICES
+      - build/THIRD-PARTY-NOTICES
     image_templates:
       - "ghcr.io/dbtrail/bintrail-pg:{{ .Version }}-arm64"
     build_flag_templates:

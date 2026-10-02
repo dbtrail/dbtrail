@@ -251,7 +251,7 @@ func TestBackupScheduleCard_saysWhatARunCosts(t *testing.T) {
 	// dump-and-baseline.md, which the loop above does not read. Paraphrases
 	// count, because an operator acts on the meaning.
 	//
-	// Scoped to docs/ on purpose: CHANGELOG.md narrates the old rule as
+	// Scoped to these two pages on purpose: docs/CHANGELOG.md narrates the old rule as
 	// history, correctly, and a repo-wide grep would ban that too.
 	for _, page := range []string{"console.md", "dump-and-baseline.md"} {
 		body, err := os.ReadFile(filepath.Join("..", "..", "docs", page))

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Regenerate the repo-root THIRD-PARTY-NOTICES file.
+# Regenerate build/THIRD-PARTY-NOTICES.
 #
 # Run via `make notices`. Produces a single file with two parts:
 #   PART 1 (manual)    — scripts/notices-header.txt, checked in by hand. Covers
@@ -25,7 +25,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-OUT="$REPO_ROOT/THIRD-PARTY-NOTICES"
+OUT="$REPO_ROOT/build/THIRD-PARTY-NOTICES"
 HEADER="$REPO_ROOT/scripts/notices-header.txt"
 MARKER="$REPO_ROOT/scripts/THIRD-PARTY-NOTICES.deps.sha256"
 
