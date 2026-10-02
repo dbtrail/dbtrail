@@ -280,8 +280,8 @@ func noEmergencyCap(t *testing.T) {
 	t.Cleanup(func() { emergencyCap = prev })
 }
 
-// The daily cap (#2006): whatever the reason, the schedule reads a server in
-// full on its own at most once a day. A schema change IS cured by a full
+// The daily cap (#2006): the schedule reads a server in full in place of a
+// failed update at most once a day. A schema change IS cured by a full
 // read, but a second one within the day waits, and the card says until when.
 func TestBackupScheduler_emergencyCapHoldsBackASecondFallback_2006(t *testing.T) {
 	refuseWith(t, func() []reconstruct.TableFailure { return []reconstruct.TableFailure{schemaChanged("orders")} })
@@ -317,7 +317,7 @@ func TestEmergencyHeld_whatCounts_2006(t *testing.T) {
 	}{
 		{"fallback", console.BaselineRunRecord{Trigger: console.BaselineRunTriggerScheduled, WhyCode: "fold_refused"}, true},
 		{"failed fallback", console.BaselineRunRecord{Trigger: console.BaselineRunTriggerScheduled, WhyCode: "fold_crashed", Error: "mydumper exit 1"}, true},
-		{"new tables", console.BaselineRunRecord{Trigger: console.BaselineRunTriggerScheduled, WhyCode: console.BackupWhyCodeNewTables}, true},
+		{"new tables", console.BaselineRunRecord{Trigger: console.BaselineRunTriggerScheduled, WhyCode: console.BackupWhyCodeNewTables}, false},
 		{"full-copy timetable", console.BaselineRunRecord{Trigger: console.BaselineRunTriggerScheduled, WhyCode: console.BackupWhyCodeFullCopy}, false},
 		{"first backup", console.BaselineRunRecord{Trigger: console.BaselineRunTriggerScheduled, WhyCode: "first_backup"}, false},
 		{"manual", console.BaselineRunRecord{Trigger: "manual", WhyCode: "fold_refused"}, false},
@@ -346,13 +346,12 @@ func TestEmergencyHeld_whatCounts_2006(t *testing.T) {
 
 // New tables are under the same cap: one full read for them a day, even
 // when newTablesMaxAttempts would allow more.
-func TestEmergencyCap_newTablesPlannerWaits_2006(t *testing.T) {
+func TestEmergencyCap_newTablesPlannerDoesNotWait_2006(t *testing.T) {
 	b, reg, _ := newScheduleFixture(t, true)
 	e := addScheduled(t, reg, true)
 	b.noteEmergency(e.ID, time.Now().UTC())
-	action, reason := b.newTablesPlanner(e)([]string{"demo.fresh"})
-	if action != console.NewTablesActionNotPossible || !strings.Contains(reason, "at most once a day") {
-		t.Fatalf("planner = %q, %q; want not possible, saying the daily cap", action, reason)
+	if action, reason := b.newTablesPlanner(e)([]string{"demo.fresh"}); action != console.NewTablesActionFullRead {
+		t.Fatalf("planner = %q, %q; new tables must not wait for the emergency cap", action, reason)
 	}
 }
 
@@ -406,7 +405,7 @@ func TestEmergencyHeld_survivesRestartAndHistoryCap_2006(t *testing.T) {
 // Through the real path: the full read started for new tables is recorded
 // as an emergency read as it starts (durably), so the cap holds while it
 // runs and after a restart.
-func TestIncludeNewTables_recordsTheEmergencyStart_2006(t *testing.T) {
+func TestIncludeNewTables_recordsItsOwnStartNotAnEmergency_2006(t *testing.T) {
 	b, reg, sup := newScheduleFixture(t, true)
 	stubFullReads(t, sup)
 	e := addScheduled(t, reg, true)
@@ -416,10 +415,13 @@ func TestIncludeNewTables_recordsTheEmergencyStart_2006(t *testing.T) {
 	}
 	b.includeNewTables(e, console.BaselineStatus{State: "succeeded", NewTables: []string{"demo.fresh"}, NewTablesAction: console.NewTablesActionFullRead})
 	waitTerminalMethod(t, b, e.ID, console.BackupMethodFull)
-	if sup.history.EmergencyStarted(e.ID) == "" {
-		t.Fatal("the new-tables full read was not recorded as an emergency read when it started")
+	if got := sup.history.EmergencyStarted(e.ID); got != "" {
+		t.Fatalf("the new-tables full read was recorded as an emergency read: %q", got)
 	}
-	if action, reason := b.newTablesPlanner(e)([]string{"demo.other"}); action != console.NewTablesActionNotPossible || !strings.Contains(reason, "at most once a day") {
-		t.Fatalf("a second new-tables read the same day: %q %q", action, reason)
+	if len(sup.history.NewTablesStarts(e.ID)) != 1 {
+		t.Fatalf("the new-tables full read's start was not recorded: %v", sup.history.NewTablesStarts(e.ID))
+	}
+	if action, reason := b.newTablesPlanner(e)([]string{"demo.other"}); action != console.NewTablesActionFullRead {
+		t.Fatalf("a second new-tables read the same day, within the bound: %q %q", action, reason)
 	}
 }

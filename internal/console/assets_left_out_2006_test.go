@@ -58,7 +58,7 @@ func TestBackupScheduleCard_leftOutAndCap_2006(t *testing.T) {
 			LastError: "demo.orders: schema changed since the baseline"},
 		LastSkippedAt: "2026-10-02T10:00:31Z",
 		LastSkipReason: "the update from the recorded changes was refused (demo.orders: schema changed since the baseline) and no full read is taken in its place: " +
-			"DBTrail reads this server in full on its own at most once a day, and the last such read was less than a day ago; the next one is allowed after 2026-10-03 09:00 UTC"}
+			"DBTrail reads this server in full in place of a failed update at most once a day, and the last such read was less than a day ago; the next one is allowed after 2026-10-03 09:00 UTC"}
 	capDoc := docOf(open)
 
 	appJS, err := filepath.Abs("assets/app.js")

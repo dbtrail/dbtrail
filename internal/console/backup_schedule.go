@@ -746,6 +746,15 @@ const (
 // BackupWhyCodeNewTables is BackupWhyCode's code for NewTablesWhy.
 const BackupWhyCodeNewTables = "new_tables"
 
+// NewTablesHeldReason is the NewTablesActionNotPossible reason when the
+// daemon's bound on full reads for new tables (max per day, counted per
+// server) holds one back until next. The page keys on "the next one is
+// allowed after" to say the tables join later on their own.
+func NewTablesHeldReason(max int, next time.Time) string {
+	return fmt.Sprintf("DBTrail starts at most %d full reads a day on its own to include new tables, and that many started in the last day; ", max) +
+		"the next one is allowed after " + next.UTC().Format("2006-01-02 15:04") + " UTC"
+}
+
 // NewTablesWhy is the reason recorded on the full read a scheduled update
 // starts to include the n tables it left out (#1993). A count, never the
 // names: the reason is served to every session that can see the schedule,
