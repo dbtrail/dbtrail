@@ -2970,8 +2970,15 @@ function dashPanelBody(doc) {
         hint("A tool running on this same machine can read the local folder instead. The guide has the steps."),
         docsMore("guides/dashboards", "", "dashboards on the copy"));
       return box;
+    case "s3_timeout":
+      box.append(note("S3 did not answer within " + (doc.timeout_seconds || 0) + " s, so there is no file yet. Open the card again in a moment. If it keeps happening, check the S3 location on Snapshots."),
+        go("See Snapshots", "snapshots"));
+      return box;
     case "no_archive":
-      box.append(note("Reading the copy is turned off for this server, so there is no file to give."));
+      box.append(note("This server is set not to read its copy's files, so there is no file to give. An admin can turn that setting off in the server's configuration."));
+      return box;
+    case "no_archive_profile":
+      box.append(note("This console runs under a data profile, which turns off reading the copy's files for every server: a file read outside DBTrail could not be filtered by the profile. Start the console without the profile to offer the file."));
       return box;
     default:
       box.append(note("No snapshot yet. Set up snapshots with an S3 location, and this card gives a file your team can open."),

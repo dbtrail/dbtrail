@@ -7,15 +7,18 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/dbtrail/dbtrail/ext"
+	"github.com/dbtrail/dbtrail/internal/audittest"
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
@@ -449,5 +452,156 @@ func TestDashboardsAPI_bucketWithItsOwnStore_2014(t *testing.T) {
 	}
 	if !strings.Contains(doc.ViewsSQL, "ap-south-1") {
 		t.Errorf("the file's scoped secret does not name the store's region:\n%s", doc.ViewsSQL)
+	}
+}
+
+// Review of #2017, 1: the file names only the stores of the buckets it reads.
+// The store table is process-wide, one entry per bucket of EVERY server; an
+// unrelated server's bucket and its internal endpoint must not travel in a
+// file handed to a teammate. Same for /api/views.sql, the same builder.
+func TestDashboardsAPI_fileNamesOnlyItsOwnBucketStores_2014(t *testing.T) {
+	const prefix = "dash-2014-stores/"
+	f := newDashS3(t, snapKeys(prefix, "2026-10-02T06-00-00Z", "demo/prices")...)
+	own, err := storage.NewBucketStore(f.srv.URL, "path", "eu-west-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := storage.NewBucketStore("http://minio.internal:9000", "path", "us-west-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage.SetBucketStores(map[string]storage.BucketStore{"b": own, "other-unrelated": other})
+	t.Cleanup(func() { storage.SetBucketStores(nil) })
+	srv := newDashServer(t, "s3://b/"+prefix, "")
+	code, doc, raw := getDashboards(t, srv)
+	if code != 200 || doc.State != "s3" {
+		t.Fatalf("code = %d doc = %+v %s", code, doc, raw)
+	}
+	rec, body := doServersReq(t, srv, "GET", "/api/views.sql", "")
+	if rec.Code != 200 {
+		t.Fatalf("views.sql code = %d: %s", rec.Code, body)
+	}
+	for name, file := range map[string]string{"dashboards": doc.ViewsSQL, "views.sql": string(body)} {
+		for _, leak := range []string{"other-unrelated", "minio.internal"} {
+			if strings.Contains(file, leak) {
+				t.Errorf("%s file names %q, a bucket store it never reads", name, leak)
+			}
+		}
+		if !strings.Contains(file, "SCOPE 's3://b'") && !strings.Contains(file, "SCOPE 's3://b/'") {
+			t.Errorf("%s file lost the store of the bucket it does read:\n%s", name, file)
+		}
+	}
+}
+
+// Review of #2017, 2: when the local folder beside S3 could not be read in
+// full, the file says a check did not answer, and names the folder by what it
+// is, never by its path on this host.
+func TestDashboardsAPI_uncheckedLocalFolderIsNotNamedByPath_2014(t *testing.T) {
+	const prefix = "dash-2014-unchecked/"
+	newDashS3(t, snapKeys(prefix, "2026-10-01T06-00-00Z", "demo/prices")...)
+	dir := t.TempDir()
+	writeBaselineFixture(t, dir, "2026-09-30T06-00-00Z", "demo", "prices.parquet")
+	locked := filepath.Join(dir, "2026-10-02T06-00-00Z")
+	writeBaselineFixture(t, dir, "2026-10-02T06-00-00Z", "demo", "prices.parquet")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	if _, err := os.ReadDir(locked); err == nil {
+		t.Skip("this user can read a mode-000 folder (root?)")
+	}
+	code, doc, raw := getDashboards(t, newDashServer(t, dir, "s3://b/"+prefix))
+	if code != 200 || doc.State != "s3" {
+		t.Fatalf("code = %d doc = %+v %s", code, doc, raw)
+	}
+	if strings.Contains(doc.ViewsSQL, dir) {
+		t.Errorf("the file names this host's folder:\n%s", doc.ViewsSQL)
+	}
+	if !strings.Contains(doc.ViewsSQL, "whether the server's local snapshot folder holds a newer snapshot could not be read") {
+		t.Errorf("the file does not say the local check did not answer:\n%s", doc.ViewsSQL)
+	}
+}
+
+// Review of #2017, 3: the two reasons a server reads no copy are told apart.
+// A console started under a data profile is not "this server's setting".
+func TestDashboardsAPI_noArchiveCauses_2014(t *testing.T) {
+	setting := newDashServer(t, t.TempDir(), "")
+	setting.cm.boot.noArchive = true
+	_, doc, _ := getDashboards(t, setting)
+	if doc.State != "no_archive" {
+		t.Errorf("server setting: state = %q", doc.State)
+	}
+	profiled := newDashServer(t, t.TempDir(), "")
+	profiled.cm.boot.noArchive, profiled.cm.boot.noArchiveProfile = true, true
+	_, doc, _ = getDashboards(t, profiled)
+	if doc.State != "no_archive_profile" {
+		t.Errorf("console profile: state = %q", doc.State)
+	}
+	// /api/views.sql refuses both, and says which.
+	rec, body := doServersReq(t, profiled, "GET", "/api/views.sql", "")
+	if rec.Code != http.StatusNotFound || !strings.Contains(string(body), "data profile") {
+		t.Errorf("views.sql under a console profile: %d %s", rec.Code, body)
+	}
+	rec, body = doServersReq(t, setting, "GET", "/api/views.sql", "")
+	if rec.Code != http.StatusNotFound || strings.Contains(string(body), "data profile") {
+		t.Errorf("views.sql under the server setting: %d %s", rec.Code, body)
+	}
+}
+
+// Review of #2017, 4: an S3 endpoint that does not answer ends in a state
+// that says so, within the deadline, instead of a card loading forever.
+func TestDashboardsAPI_s3ThatDoesNotAnswer_2014(t *testing.T) {
+	release := make(chan struct{})
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(hang.Close)
+	t.Cleanup(func() { close(release) })
+	newDashS3(t)
+	t.Setenv(storage.EnvS3Endpoint, hang.URL)
+	old := dashboardsTimeout
+	dashboardsTimeout = time.Second
+	t.Cleanup(func() { dashboardsTimeout = old })
+	start := time.Now()
+	code, doc, raw := getDashboards(t, newDashServer(t, "s3://b/dash-2014-hang/", ""))
+	if took := time.Since(start); took > 10*time.Second {
+		t.Fatalf("the answer took %v", took)
+	}
+	if code != 200 || doc.State != "s3_timeout" || doc.TimeoutSeconds != 1 {
+		t.Fatalf("code = %d doc = %+v %s", code, doc, raw)
+	}
+}
+
+// Review of #2017, 5: a store with an endpoint and no region signs with
+// us-east-1 (SigningRegion), so the file pins that and the card says that.
+func TestDashboardsAPI_storeWithoutRegionShowsTheSigningRegion_2014(t *testing.T) {
+	const prefix = "dash-2014-noregion/"
+	f := newDashS3(t, snapKeys(prefix, "2026-10-02T06-00-00Z", "demo/prices")...)
+	st, err := storage.NewBucketStore(f.srv.URL, "path", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage.SetBucketStores(map[string]storage.BucketStore{"b": st})
+	t.Cleanup(func() { storage.SetBucketStores(nil) })
+	_, doc, raw := getDashboards(t, newDashServer(t, "s3://b/"+prefix, ""))
+	if doc.Region != "us-east-1" || !strings.Contains(doc.ViewsSQL, "REGION 'us-east-1'") {
+		t.Fatalf("region = %q, file:\n%s\n%s", doc.Region, doc.ViewsSQL, raw)
+	}
+}
+
+// Review of #2017, 6: the refusal is audited under this route's own name.
+func TestDashboardsAPI_profileRefusalIsAuditedAsDashboards_2014(t *testing.T) {
+	rec := audittest.Install(t)
+	srv := newDashServer(t, "s3://b/x/", "")
+	req := httptest.NewRequest("GET", "/api/dashboards", nil)
+	req = req.WithContext(context.WithValue(req.Context(), policyCtxKey{},
+		&ext.AccessPolicy{Profile: "analyst", Permissions: ext.AllPermissions()}))
+	srv.handleDashboards(httptest.NewRecorder(), req)
+	evs := rec.Events()
+	if len(evs) != 1 || evs[0].Action != "profile.denied" || evs[0].Detail["surface_gate"] != "dashboards" {
+		t.Fatalf("events = %+v", evs)
 	}
 }

@@ -254,11 +254,12 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 			return views.Input{}, fmt.Errorf("S3 endpoint configuration: %w", err)
 		}
 		in.S3Endpoint = ep
-		// Every bucket store the daemon knows, not only this server's: the
-		// endpoints are locations, the file is what a reader on another
-		// machine has, and a secret for a bucket the file never reads costs
-		// nothing.
-		in.BucketStores = storage.BucketStores()
+		// Only the stores of the buckets this layout reads. The table is
+		// process-wide, one entry per bucket of EVERY server, and the file
+		// leaves this host: another server's bucket name and its internal
+		// endpoint are not this reader's business (#2014 review). A secret
+		// for a bucket the file never reads would also do nothing.
+		in.BucketStores = layoutBucketStores(in)
 		// The region for this layout, when it was actually DETECTED (#1462).
 		// Not "the region our own reads use": those fall back to the ambient
 		// one and are right to, since they fail here and loudly. A file that
@@ -337,8 +338,7 @@ func (s *Server) handleViewsSQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if b.noArchive {
-		writeJSONError(w, http.StatusNotFound,
-			"archive access is disabled for this server, so there is no Parquet layout to describe")
+		writeJSONError(w, http.StatusNotFound, noArchiveMessage(b))
 		return
 	}
 
@@ -533,4 +533,27 @@ func otherBaselineSource(b *bundle, picked string) string {
 		}
 	}
 	return ""
+}
+
+// layoutBucketStores keeps the bucket stores of the buckets `in` reads.
+func layoutBucketStores(in views.Input) map[string]storage.BucketStore {
+	all := storage.BucketStores()
+	out := map[string]storage.BucketStore{}
+	for _, b := range layoutBuckets(in) {
+		if st, ok := all[b]; ok {
+			out[b] = st
+		}
+	}
+	return out
+}
+
+// noArchiveMessage names why a server reads no Parquet, since the two causes
+// have different remedies: the server's own setting, or a data profile the
+// whole console runs under (its rules cannot filter a file read elsewhere).
+func noArchiveMessage(b *bundle) string {
+	if b.noArchiveProfile {
+		return "this console runs under a data profile, which turns off reading the Parquet copy for every server: " +
+			"a file read outside DBTrail could not be filtered by the profile, so there is no layout to describe"
+	}
+	return "archive access is disabled for this server, so there is no Parquet layout to describe"
 }

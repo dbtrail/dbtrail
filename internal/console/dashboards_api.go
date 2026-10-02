@@ -1,9 +1,11 @@
 package console
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -28,7 +30,10 @@ import (
 //   - "local_only": the snapshots are kept only in a folder on this machine,
 //     which a teammate's DuckDB cannot reach. No file is offered.
 //   - "none": no snapshot location at all.
-//   - "no_archive": reading the copy is turned off for this server.
+//   - "s3_timeout": S3 did not answer within dashboardsTimeout.
+//   - "no_archive": reading the copy is turned off by this server's setting.
+//   - "no_archive_profile": the console runs under a data profile, which
+//     turns reading the copy off for every server.
 type dashboardsDTO struct {
 	State string `json:"state"`
 	// S3 is the snapshot location the file reads, as configured.
@@ -54,9 +59,17 @@ type dashboardsDTO struct {
 	// out (#2006), so they have no view.
 	LeftOutTables        []RefusedTable `json:"left_out_tables,omitempty"`
 	LeftOutTablesOmitted int            `json:"left_out_tables_omitted,omitempty"`
-	Error                string         `json:"error,omitempty"`
-	ViewsSQL             string         `json:"views_sql,omitempty"`
+	// TimeoutSeconds is the deadline S3 did not answer within, for
+	// s3_timeout.
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+	Error          string `json:"error,omitempty"`
+	ViewsSQL       string `json:"views_sql,omitempty"`
 }
+
+// dashboardsTimeout bounds the whole answer. The request context has no
+// deadline, and an S3 endpoint that accepts a connection and never answers
+// would leave the card loading forever. A variable so a test can shorten it.
+var dashboardsTimeout = baselineListTimeout
 
 // handleDashboards serves GET /api/dashboards. The views file travels inside
 // the answer rather than from a second request, so the card can never describe
@@ -73,19 +86,24 @@ func (s *Server) handleDashboards(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if sessionRestricted(r) {
-		recordProfileGateDeny(r, "views")
+		recordProfileGateDeny(r, "dashboards")
 		writeJSONError(w, http.StatusForbidden,
 			"the dashboards file is unavailable while an access-control profile is active: "+
 				"it maps directly onto the unredacted Parquet files")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	doc := s.dashboardsDoc(r, b)
+	ctx, cancel := context.WithTimeout(r.Context(), dashboardsTimeout)
+	defer cancel()
+	doc := s.dashboardsDoc(r.WithContext(ctx), b)
 	writeJSON(w, http.StatusOK, doc)
 }
 
 func (s *Server) dashboardsDoc(r *http.Request, b *bundle) dashboardsDTO {
 	if b.noArchive {
+		if b.noArchiveProfile {
+			return dashboardsDTO{State: "no_archive_profile"}
+		}
 		return dashboardsDTO{State: "no_archive"}
 	}
 	s3 := bundleBaselineS3(b)
@@ -122,6 +140,10 @@ func (s *Server) dashboardsDoc(r *http.Request, b *bundle) dashboardsDTO {
 	case errors.Is(err, errNoViewSources):
 		doc.State = "s3_empty"
 		return doc
+	case err != nil && errors.Is(r.Context().Err(), context.DeadlineExceeded):
+		doc.State = "s3_timeout"
+		doc.TimeoutSeconds = int(math.Ceil(dashboardsTimeout.Seconds()))
+		return doc
 	case err != nil:
 		// Not only a listing that failed: an S3 endpoint setting that does
 		// not parse lands here too, so the card words it as "could not
@@ -151,7 +173,9 @@ func (s *Server) dashboardsDoc(r *http.Request, b *bundle) dashboardsDTO {
 	// on purpose, so without this the card names the wrong place.
 	if bucket, _, perr := storage.ParseS3URL(s3); perr == nil {
 		if st, routed := storage.BucketStoreFor(bucket); routed {
-			doc.Region, doc.Endpoint = st.Region, ""
+			// SigningRegion, not Region: a store with an endpoint and no
+			// region signs with us-east-1, and that is what the file pins.
+			doc.Region, doc.Endpoint = st.SigningRegion(), ""
 			if st.Endpoint.Set() {
 				doc.Endpoint = st.Endpoint.URL
 			}

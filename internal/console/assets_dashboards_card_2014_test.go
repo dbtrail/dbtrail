@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dbtrail/dbtrail/ext"
+	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
 // #2014: what the Overview's "Dashboards for the team" card says in each
@@ -62,6 +64,25 @@ func TestDashboardsCard_textsFromRealDocuments_2014(t *testing.T) {
 	noArch := newDashServer(t, local, "")
 	noArch.cm.boot.noArchive = true
 	get("no_archive", noArch)
+	noArchProfile := newDashServer(t, local, "")
+	noArchProfile.cm.boot.noArchive, noArchProfile.cm.boot.noArchiveProfile = true, true
+	get("no_archive_profile", noArchProfile)
+	// S3 that does not answer: a real s3_timeout document, with a 1 s deadline.
+	release := make(chan struct{})
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(hang.Close)
+	t.Cleanup(func() { close(release) })
+	oldTimeout := dashboardsTimeout
+	dashboardsTimeout = time.Second
+	t.Setenv(storage.EnvS3Endpoint, hang.URL)
+	get("s3_timeout", newDashServer(t, "s3://b/dash-2014-card-hang/", ""))
+	dashboardsTimeout = oldTimeout
+	t.Setenv(storage.EnvS3Endpoint, "")
 
 	// The refusal under a data profile, from the real handler.
 	req := httptest.NewRequest("GET", "/api/dashboards", nil)
@@ -108,7 +129,7 @@ console.log(JSON.stringify(out));
 	if err := json.Unmarshal(rawOut, &got); err != nil {
 		t.Fatalf("%v\n%s", err, rawOut)
 	}
-	for _, k := range []string{"s3", "s3_empty", "s3_unreadable", "s3_pattern_chars", "local_only", "none", "no_archive", "profile", "denied"} {
+	for _, k := range []string{"s3", "s3_empty", "s3_unreadable", "s3_pattern_chars", "local_only", "none", "no_archive", "no_archive_profile", "s3_timeout", "profile", "denied"} {
 		t.Logf("%s: %s", k, got[k])
 	}
 
@@ -127,13 +148,15 @@ console.log(JSON.stringify(out));
 			"1 table is not in this snapshot, so not in the file:",
 			`demo.order/items: the name holds a "/"`,
 		},
-		"s3_empty":      {"Snapshots for this server go to S3, at s3://b/" + empty + ", and none has finished uploading there yet.", "See Snapshots"},
-		"s3_unreadable": {"DBTrail could not prepare the file for the S3 location s3://c/dash-2014-card/. The reason is below.", "See Snapshots"},
-		"local_only":    {"This server keeps its snapshots only on this machine, so a teammate's DuckDB cannot reach them.", "Add an S3 location"},
-		"none":          {"No snapshot yet.", "Set up snapshots"},
-		"no_archive":    {"Reading the copy is turned off for this server"},
-		"profile":       {"Not available while a data profile is active."},
-		"denied":        {"Your session is not allowed to get this file."},
+		"s3_empty":           {"Snapshots for this server go to S3, at s3://b/" + empty + ", and none has finished uploading there yet.", "See Snapshots"},
+		"s3_unreadable":      {"DBTrail could not prepare the file for the S3 location s3://c/dash-2014-card/. The reason is below.", "See Snapshots"},
+		"local_only":         {"This server keeps its snapshots only on this machine, so a teammate's DuckDB cannot reach them.", "Add an S3 location"},
+		"none":               {"No snapshot yet.", "Set up snapshots"},
+		"no_archive":         {"This server is set not to read its copy's files", "in the server's configuration"},
+		"no_archive_profile": {"This console runs under a data profile", "Start the console without the profile"},
+		"s3_timeout":         {"S3 did not answer within 1 s, so there is no file yet.", "See Snapshots"},
+		"profile":            {"Not available while a data profile is active."},
+		"denied":             {"Your session is not allowed to get this file."},
 	}
 	for k, phrases := range want {
 		for _, p := range phrases {
