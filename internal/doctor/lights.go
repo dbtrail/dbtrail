@@ -43,7 +43,7 @@ var checkLights = map[string]string{
 	SchemaAccessCheckName:                          LightPermissions,
 	PrimaryKeyCheckName:                            LightKeys,
 	InnoDBCheckName:                                LightKeys,
-	"No FK CASCADE constraints":                    LightOther,
+	FKCascadeCheckName:                             LightOther,
 	"Replication server-id collision":              LightOther,
 	// Index and storage checks: not run for a server being connected
 	// (ForUnsavedServer), placed so a report that carries one still draws.

@@ -117,7 +117,7 @@ func TestCheckStartsWithWarnings(t *testing.T) {
 	srv, ctrl := newSupervisorServer(t)
 	ctrl.report = &DoctorReport{Passed: 1, Warnings: 1, Checks: []DoctorCheck{
 		{Name: "ok", Status: "pass"},
-		{Name: "No FK CASCADE constraints", Status: "warn"},
+		{Name: "Foreign keys that cascade", Status: "warn"},
 	}}
 	_, body := doServersReq(t, srv, "POST", "/api/servers/check", checkBody)
 	got := decodeCheck(t, body)

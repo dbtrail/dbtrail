@@ -484,7 +484,7 @@ const toStep2 = async (host, answer) => {
   f = await toStep2("db8", { addr: "db8:3306", version: "8.4.3", flavor: "mysql" });
   f.elements.source_password.value = "Pw-8";
   ctx.__checkAnswer = { ok: true, started: true, name: "db8", doctor: { warnings: 1, optional: 1,
-    checks: ctx.__checkAnswer.doctor.checks.concat([{ name: "No FK CASCADE constraints", status: "warn", detail: "x", light: "other" }]) } };
+    checks: ctx.__checkAnswer.doctor.checks.concat([{ name: "Foreign keys that cascade", status: "warn", detail: "x", light: "other" }]) } };
   f.fire("submit"); await flush(6);
   out.mixed = { result: result(f), card: f.querySelector("div#connect-result").children[0].className, lights: lights(f) };
   // The start itself failed: said, with nothing re-checked.

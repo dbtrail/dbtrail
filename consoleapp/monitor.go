@@ -378,7 +378,7 @@ func (m *monitorSupervisor) doctor(ctx context.Context, e console.ServerEntry, o
 			Schemas:     e.Schemas,
 		})
 	default:
-		opts = append(opts, doctor.WithLoopbackRetry(m.loopbackRetry), doctor.WithSourceSSL(e.SourceSSL()))
+		opts = append(opts, doctor.ForConsole(), doctor.WithLoopbackRetry(m.loopbackRetry), doctor.WithSourceSSL(e.SourceSSL()))
 		r = doctor.Build(ctx, e.SourceDSN, e.DSN, e.Schemas, m.rotateRetain, opts...)
 	}
 	out := &console.DoctorReport{

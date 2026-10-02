@@ -156,6 +156,8 @@ type buildConfig struct {
 	// sourceSSL, when set, is how the source connection uses TLS (see
 	// WithSourceSSL). nil keeps the DSN's own tls= as the only TLS setting.
 	sourceSSL *config.SSL
+	// console is set by ForConsole: the report is for the web console.
+	console bool
 }
 
 // WithSourceSSL makes the checks open the source the way capture does:
@@ -201,6 +203,15 @@ func ForUnsavedServer() BuildOption {
 		c.snapshot = snapshotPending
 		c.sourceOnly = true
 	}
+}
+
+// ForConsole leaves out the checks a web-console user has nothing to act on.
+// Today that is the foreign keys that cascade: they are the user's design,
+// and the console's Restore includes the child rows when the parent table is
+// picked. Left out at the source, the check is in no list, count or light the
+// console draws. `bintrail doctor` and the watch preflight keep it.
+func ForConsole() BuildOption {
+	return func(c *buildConfig) { c.console = true }
 }
 
 // snapshotState is what the index says about its first schema snapshot, the
@@ -319,7 +330,9 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 	report.add(checkBinlogRowValueOptions(ctx, sourceDB))
 	report.add(checkReplicationGrants(ctx, sourceDB))
 	report.add(checkServerIDCollision(ctx, sourceDB, sourceDSN))
-	report.add(checkFKCascades(sourceDB, schemas))
+	if !cfg.console {
+		report.add(checkFKCascades(sourceDB, schemas))
+	}
 	report.add(checkSchemaVisibility(ctx, sourceDB, schemas))
 	snapshot := cfg.snapshot
 	if snapshot == snapshotUnknown && indexDSN != "" {
@@ -1047,28 +1060,64 @@ func extractGrantUser(grant string) string {
 	return rest
 }
 
+// FKCascadeCheckName is the check that lists the source's foreign keys whose
+// ON DELETE or ON UPDATE rule is CASCADE or SET NULL. It names what it looks
+// at, not a rule: such keys are supported, they only change how a delete on
+// the parent table is undone.
+const FKCascadeCheckName = "Foreign keys that cascade"
+
+// fkCascadeAdvice is the note under a cascade finding. It is command-line
+// wording only: the web console leaves the check out (ForConsole), because
+// its Restore already brings the child rows back when the parent table is
+// picked, so a console user has nothing to act on. Nothing here suggests
+// changing the foreign keys: they are the user's design, and supported.
+const fkCascadeAdvice = "Capture works normally. Each foreign key above is listed as child table → parent\n" +
+	"table. When a parent row is deleted or its key changes, the server also changes the\n" +
+	"matching child rows, and MariaDB and MySQL before 9.6 do not write those child\n" +
+	"changes to the binary log.\n" +
+	"\n" +
+	"To undo a delete or key change on a parent table, run `bintrail recover-cascade`:\n" +
+	"it includes the child rows, and says so when some may be missing. A plain\n" +
+	"`bintrail recover` does not include them."
+
+// rootCause drops the wrapping prefixes of err, so a detail that already says
+// what failed does not say it twice.
+func rootCause(err error) error {
+	for {
+		inner := errors.Unwrap(err)
+		if inner == nil {
+			return err
+		}
+		err = inner
+	}
+}
+
 func checkFKCascades(db *sql.DB, schemas []string) CheckResult {
-	err := metadata.ValidateNoFKCascades(db, schemas)
-	if err == nil {
-		return CheckResult{Name: "No FK CASCADE constraints", Status: StatusPass}
+	found, err := metadata.FindFKCascades(db, schemas)
+	if err != nil {
+		// A failed read is not a finding: say what failed, without the
+		// cascade advice that would read as if cascades had been found.
+		return CheckResult{
+			Name:   FKCascadeCheckName,
+			Status: StatusWarn,
+			Detail: "could not read the foreign keys: " + rootCause(err).Error(),
+		}
+	}
+	if len(found) == 0 {
+		// Without a detail a pass line reads "✓ Foreign keys that cascade",
+		// which says the opposite of what was found.
+		return CheckResult{Name: FKCascadeCheckName, Status: StatusPass, Detail: "none found"}
+	}
+	subjects := make([]string, len(found))
+	for i, c := range found {
+		subjects[i] = c.String()
 	}
 	return CheckResult{
-		Name:   "No FK CASCADE constraints",
-		Status: StatusWarn,
-		Detail: err.Error(),
-		Remediation: "Foreign keys with ON DELETE CASCADE or ON UPDATE CASCADE produce side-effect row\n" +
-			"changes that InnoDB executes below the binary log (MySQL Bug #32506), so plain\n" +
-			"`recover` cannot reconstruct cascade-deleted child rows. Options:\n\n" +
-			"  1. Drop or change the cascade rules:\n" +
-			"     ALTER TABLE <child> DROP FOREIGN KEY <fk_name>;\n" +
-			"     ALTER TABLE <child> ADD CONSTRAINT <fk_name> FOREIGN KEY (...) REFERENCES <parent>(...)\n" +
-			"         ON DELETE RESTRICT ON UPDATE RESTRICT;\n\n" +
-			"  2. Keep the cascades and reconstruct cascade-deleted child rows with\n" +
-			"     `bintrail recover-cascade` (Phase-1: binlog-window; baseline fallback #552).\n\n" +
-			"Ingestion (`stream`/`watch`/`up`/`index --source-dsn`) no longer refuses cascade\n" +
-			"schemas — it WARNS and proceeds — so the FK graph is captured for cascade recovery.\n" +
-			"Plain `recover` still produces incomplete SQL for cascade-affected tables; use\n" +
-			"`recover-cascade` instead for those.",
+		Name:        FKCascadeCheckName,
+		Status:      StatusWarn,
+		Detail:      metadata.DescribeFKCascades(found, metadata.FKCascadeListLimit),
+		Subjects:    subjects,
+		Remediation: fkCascadeAdvice,
 	}
 }
 
