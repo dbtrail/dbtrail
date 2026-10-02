@@ -26,7 +26,7 @@ RUN apt-get update && \
 COPY bintrail-pg /usr/local/bin/bintrail-pg
 
 # License-compliance notices (#428). GoReleaser stages these into the build
-# context via the `dockers.*.extra_files` entries in .goreleaser.yaml.
+# context via the `dockers.*.extra_files` entries in build/.goreleaser.yaml.
 COPY LICENSE NOTICE build/THIRD-PARTY-NOTICES /usr/share/doc/bintrail-pg/
 
 USER bintrail

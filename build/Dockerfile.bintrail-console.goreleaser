@@ -18,7 +18,7 @@ FROM ghcr.io/dbtrail/bintrail-console-base:bookworm-mydumper1.0.3-1-r1
 COPY bintrail-console /usr/local/bin/bintrail-console
 
 # License-compliance notices (#428). GoReleaser stages these into the build
-# context via the `dockers.*.extra_files` entries in .goreleaser.yaml.
+# context via the `dockers.*.extra_files` entries in build/.goreleaser.yaml.
 COPY LICENSE NOTICE build/THIRD-PARTY-NOTICES /usr/share/doc/bintrail-console/
 
 USER bintrail

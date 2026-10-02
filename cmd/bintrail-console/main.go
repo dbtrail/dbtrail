@@ -2,7 +2,7 @@
 // standalone binary, decoupled from the core `bintrail` CLI. All command
 // behavior lives in the importable consoleapp package (the console sibling
 // of cliapp); this main exists only to receive the -ldflags-injected build
-// metadata (which must target main.* so the Makefile and .goreleaser.yaml
+// metadata (which must target main.* so the Makefile and build/.goreleaser.yaml
 // ldflags keep working unchanged) and to own the process exit.
 package main
 

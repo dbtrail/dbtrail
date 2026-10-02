@@ -431,7 +431,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Required by the .goreleaser.yaml signs/docker_signs/sboms blocks.
+      # Required by the build/.goreleaser.yaml signs/docker_signs/sboms blocks.
       # The signs block emits the Sigstore bundle (the cosign v3+ default;
       # #1350), and the ci.yml `signing` job replays those exact args against
       # this same action on every PR. The action pin determines which cosign

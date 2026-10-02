@@ -1,7 +1,7 @@
 // Command bintrail is the OSS binary. All CLI behavior lives in the
 // importable cliapp package; this main exists only to receive the
 // -ldflags-injected build metadata (which must target main.* so the
-// Makefile and .goreleaser.yaml ldflags keep working unchanged) and to
+// Makefile and build/.goreleaser.yaml ldflags keep working unchanged) and to
 // own the process exit.
 package main
 

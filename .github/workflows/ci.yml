@@ -981,7 +981,7 @@ jobs:
             ${{ runner.temp }}/first-run-walk-failure-*.png
           if-no-files-found: ignore
 
-  # The .goreleaser.yaml signs block only ever executes on a tag push, so no
+  # The build/.goreleaser.yaml signs block only ever executes on a tag push, so no
   # PR check can catch a broken flag set until a release run fails — the worst
   # possible moment (recovery is delete-tag, fix, re-tag; cosign v3 made the
   # Sigstore bundle sign-blob's default output, and an installer-action major
