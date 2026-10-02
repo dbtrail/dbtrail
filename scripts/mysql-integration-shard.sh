@@ -23,8 +23,10 @@
 # share one MySQL server and its binlog, and the binlog tests count exact
 # events. Each package ends with the same `ok`/`FAIL` line `go test` prints.
 set -euo pipefail
-# A failing `go list` inside $(...) must stop the script too, not shorten a list.
-shopt -s inherit_errexit
+# A failing `go list` inside $(...) must stop the script too, not shorten a
+# list. bash 4.4+ (the CI runners); macOS's bash 3.2 lacks the option and
+# runs without it, which only matters for a local `list`.
+shopt -s inherit_errexit 2>/dev/null || true
 
 SHARD_COUNT=3
 

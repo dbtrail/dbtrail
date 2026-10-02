@@ -483,7 +483,7 @@ jobs:
             bad=1
           fi
           echo "ready=$ready" >> "$GITHUB_OUTPUT"
-          grep -E '^(ok|FAIL)'$'\t' /tmp/mysql-it.out || true
+          grep -E '^(ok  |FAIL)'$'\t' /tmp/mysql-it.out || true
           exit "$bad"
 
       # The false-green tripwires: these tests must have PASSED in some shard,
