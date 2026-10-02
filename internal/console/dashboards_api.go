@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/storage"
 	"github.com/dbtrail/dbtrail/internal/views"
 )
 
@@ -122,10 +123,18 @@ func (s *Server) dashboardsDoc(r *http.Request, b *bundle) dashboardsDTO {
 		doc.State = "s3_empty"
 		return doc
 	case err != nil:
+		// Not only a listing that failed: an S3 endpoint setting that does
+		// not parse lands here too, so the card words it as "could not
+		// prepare" and shows the error, rather than blaming bucket access.
 		doc.State, doc.Error = "s3_unreadable", err.Error()
 		return doc
-	case !in.RendersAnyView():
+	case len(in.Baselines) == 0:
 		doc.State = "s3_empty"
+		return doc
+	case !in.RendersAnyView():
+		// Snapshots were found and no table in them became a view: that is
+		// not "nothing uploaded", and saying so would send the reader to wait.
+		doc.State, doc.Error = "s3_unreadable", "the newest snapshot on S3 has no table this file can describe"
 		return doc
 	}
 	doc.State = "s3"
@@ -135,6 +144,18 @@ func (s *Server) dashboardsDoc(r *http.Request, b *bundle) dashboardsDTO {
 	doc.Region = in.ArchiveRegion
 	if in.S3Endpoint.Set() {
 		doc.Endpoint = in.S3Endpoint.URL
+	}
+	// A bucket with a store of its own (#1575) is read through its scoped
+	// secret, which names that store's endpoint and region. The ambient pair
+	// above describes every OTHER bucket, and archiveRegion skips a routed one
+	// on purpose, so without this the card names the wrong place.
+	if bucket, _, perr := storage.ParseS3URL(s3); perr == nil {
+		if st, routed := storage.BucketStoreFor(bucket); routed {
+			doc.Region, doc.Endpoint = st.Region, ""
+			if st.Endpoint.Set() {
+				doc.Endpoint = st.Endpoint.URL
+			}
+		}
 	}
 	if !in.NewerElsewhere.IsZero() {
 		doc.NewerLocal = in.NewerElsewhere.UTC().Format(consoleTSFormat)

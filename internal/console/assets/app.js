@@ -2957,7 +2957,7 @@ function dashPanelBody(doc) {
         go("Change the S3 location", "snapshots#setup"));
       return box;
     case "s3_unreadable":
-      box.append(note("DBTrail could not read the S3 location " + doc.s3 + ", so there is no file to give."));
+      box.append(note("DBTrail could not prepare the file for the S3 location " + doc.s3 + ". The reason is below."));
       if (doc.error) box.append(hint(doc.error));
       box.append(go("See Snapshots", "snapshots"));
       return box;

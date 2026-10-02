@@ -128,7 +128,7 @@ console.log(JSON.stringify(out));
 			`demo.order/items: the name holds a "/"`,
 		},
 		"s3_empty":      {"Snapshots for this server go to S3, at s3://b/" + empty + ", and none has finished uploading there yet.", "See Snapshots"},
-		"s3_unreadable": {"DBTrail could not read the S3 location s3://c/dash-2014-card/, so there is no file to give.", "See Snapshots"},
+		"s3_unreadable": {"DBTrail could not prepare the file for the S3 location s3://c/dash-2014-card/. The reason is below.", "See Snapshots"},
 		"local_only":    {"This server keeps its snapshots only on this machine, so a teammate's DuckDB cannot reach them.", "Add an S3 location"},
 		"none":          {"No snapshot yet.", "Set up snapshots"},
 		"no_archive":    {"Reading the copy is turned off for this server"},

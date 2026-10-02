@@ -426,3 +426,28 @@ func TestDashboardsAPI_routePermission_2014(t *testing.T) {
 	}
 	t.Fatal("GET /api/dashboards is not in the route permission table")
 }
+
+// A bucket with a store of its own (#1575): the card names that store's
+// region and endpoint, the ones its scoped secret in the file signs with,
+// never the ambient pair that describes every other bucket.
+func TestDashboardsAPI_bucketWithItsOwnStore_2014(t *testing.T) {
+	const prefix = "dash-2014-store/"
+	f := newDashS3(t, snapKeys(prefix, "2026-10-02T06-00-00Z", "demo/prices")...)
+	st, err := storage.NewBucketStore(f.srv.URL, "path", "ap-south-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage.SetBucketStores(map[string]storage.BucketStore{"b": st})
+	t.Cleanup(func() { storage.SetBucketStores(nil) })
+	t.Setenv(storage.EnvS3Endpoint, "")
+	code, doc, raw := getDashboards(t, newDashServer(t, "s3://b/"+prefix, ""))
+	if code != 200 {
+		t.Fatalf("code = %d: %s", code, raw)
+	}
+	if doc.State != "s3" || doc.Region != "ap-south-1" || doc.Endpoint != st.Endpoint.URL || doc.Endpoint == "" {
+		t.Fatalf("doc = %+v, want the store's region and endpoint", doc)
+	}
+	if !strings.Contains(doc.ViewsSQL, "ap-south-1") {
+		t.Errorf("the file's scoped secret does not name the store's region:\n%s", doc.ViewsSQL)
+	}
+}
