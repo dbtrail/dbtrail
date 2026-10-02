@@ -35,3 +35,6 @@ drafts/
 
 # tokenade editor artifacts
 *.tokenade-original
+
+# Local Claude Code MCP registration (example in demo/README.md)
+.mcp.json
