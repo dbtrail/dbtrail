@@ -743,6 +743,21 @@ event on the transition into broken (see
 [Alerts](https://www.dbtrail.com/docs/monitoring/alerts/#webhook)). The fix is always the
 same: take a fresh baseline (`bintrail dump` + `bintrail baseline`).
 
+**Renamed tables**: retention never deletes a table's newest snapshot, so a
+table that was renamed (or that an older build wrote under a made-up name)
+keeps its last copy under the old name, and that copy turns `broken` once the
+index no longer reaches back to it. That copy keeps its own `broken` row, but
+it does not set the banner, the `baseline_staleness` field, the console's
+Snapshots headline or the `baseline_stale` webhook alert. The old name counts
+as replaced only when its last snapshot also held other tables of the same
+database and the first newer snapshot that holds all of those other tables
+also holds a table of that database the old snapshot did not have. A newer
+snapshot of other databases only, or of just some of the tables, is not
+enough: the table keeps being graded. So does a table dropped at the source
+with no new table beside it in that snapshot (a table created later does not
+count), because from the snapshots alone that looks the same as a snapshot
+that left it out on purpose.
+
 **How each snapshot was locked**: the `POINT_IN_TIME` column says whether the
 table's rows were read at one point in time (`snapshot_lock` in JSON):
 `consistent`, `unknown`, or `⚠ different points-in-time` (`torn` in JSON, a

@@ -86,8 +86,8 @@ func TestStalenessWatcher_unattributableStillGradesInWindow(t *testing.T) {
 
 func TestWatchNotifier_BaselineStale(t *testing.T) {
 	n, f := testNotifier()
-	n.BaselineStale("wp", "dsn1", true, "shop.legacy", "2026-07-28T00:00:00Z")
-	n.BaselineStale("wp", "dsn1", true, "shop.legacy", "2026-07-28T00:00:00Z")
+	n.BaselineStale("wp", "dsn1", true, "shop.legacy", "2026-07-28T00:00:00Z", "")
+	n.BaselineStale("wp", "dsn1", true, "shop.legacy", "2026-07-28T00:00:00Z", "")
 	if len(f.events) != 1 || f.events[0].Event != "baseline_stale" || f.events[0].Severity != "critical" {
 		t.Fatalf("want one critical baseline_stale, got %+v", f.events)
 	}
@@ -97,20 +97,20 @@ func TestWatchNotifier_BaselineStale(t *testing.T) {
 	// The coverage floor advances every rotation cycle while the SAME tables
 	// stay broken — the edge detail is the table list precisely so this does
 	// not re-page hourly.
-	n.BaselineStale("wp", "dsn1", true, "shop.legacy", "2026-07-28T01:00:00Z")
+	n.BaselineStale("wp", "dsn1", true, "shop.legacy", "2026-07-28T01:00:00Z", "")
 	if len(f.events) != 1 {
 		t.Fatalf("advancing floor with unchanged broken tables must not re-fire: %+v", f.events)
 	}
 	// A NEW table joining the broken set IS a new condition: immediate re-fire.
-	n.BaselineStale("wp", "dsn1", true, "shop.legacy, shop.orders", "2026-07-28T01:00:00Z")
+	n.BaselineStale("wp", "dsn1", true, "shop.legacy, shop.orders", "2026-07-28T01:00:00Z", "")
 	if len(f.events) != 2 {
 		t.Fatalf("a new broken table must fire through the repeat window: %+v", f.events)
 	}
-	n.BaselineStale("wp", "dsn1", false, "", "")
+	n.BaselineStale("wp", "dsn1", false, "", "", "")
 	if len(f.events) != 3 || !f.events[2].Resolved {
 		t.Fatalf("recovery must resolve once, got %+v", f.events)
 	}
-	n.BaselineStale("wp", "dsn1", false, "", "")
+	n.BaselineStale("wp", "dsn1", false, "", "", "")
 	if len(f.events) != 3 {
 		t.Fatalf("healthy with no prior alert must stay silent, got %+v", f.events)
 	}

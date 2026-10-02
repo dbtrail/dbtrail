@@ -11,6 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads from S3.** Its tag reads "reads from S3" and its line "Any DuckDB,
   Metabase included, reads the copy straight from your S3." Before, nothing on
   the front told it apart as the card for DuckDB on a bucket.
+### Fixed
+- **A renamed table no longer holds the staleness headline at broken
+  forever** (#2022). Retention keeps every table's newest snapshot, so a table
+  renamed at the source, or written under another name by an older build,
+  kept a last copy under the old name that graded broken once the index
+  rotated past it, and the server read "full-table restore broken" while every
+  table still backed up was fine. That copy keeps its own broken row; the
+  headline (the console's Snapshots page, `bintrail status` and its JSON
+  `baseline_staleness`) and the `baseline_stale` webhook now leave it out. The
+  old name counts as replaced only when the first newer snapshot that holds
+  every other table of that database the old snapshot held also holds a table
+  of that database the old snapshot did not have. A newer snapshot of other
+  databases only, or of just some of the tables, keeps it graded, and so does
+  a table dropped at the source with no new table beside it. A
+  `baseline_stale` alert that resolves because its table was read as renamed
+  says so, naming the table in `no_longer_graded`.
 
 ## [0.96.0] - 2026-10-02
 ### Added

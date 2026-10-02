@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -330,18 +331,133 @@ func AnnotateBaselineStaleness(baselines []BaselineInfo, floor DeltaFloor, now t
 }
 
 // OverallBaselineStaleness is the worst verdict across each table's NEWEST
-// snapshot. "" when the list is empty or unannotated.
+// snapshot, over the tables still being backed up (#2022, see
+// RetiredBaselineTables). "" when the list is empty or unannotated.
 func OverallBaselineStaleness(baselines []BaselineInfo) BaselineStalenessVerdict {
-	newest := make(map[string]BaselineInfo, len(baselines))
+	var out BaselineStalenessVerdict
+	for _, b := range headlineBaselines(baselines) {
+		out = WorseBaselineStaleness(out, b.Staleness)
+	}
+	return out
+}
+
+// BaselineTable is a table's identity in a baseline listing: the pair, never
+// a dotted string, because a table name can hold a dot (#2008).
+type BaselineTable struct{ Database, Table string }
+
+// baselineKey is the unexported spelling the status package keys on.
+type baselineKey = BaselineTable
+
+// headlineBaselines returns each table's newest entry, leaving out the tables
+// RetiredBaselineTables names.
+func headlineBaselines(baselines []BaselineInfo) map[baselineKey]BaselineInfo {
+	newest := newestPerTable(baselines)
+	for k := range RetiredBaselineTables(baselines) {
+		delete(newest, k)
+	}
+	return newest
+}
+
+func newestPerTable(baselines []BaselineInfo) map[baselineKey]BaselineInfo {
+	newest := make(map[baselineKey]BaselineInfo, len(baselines))
 	for _, b := range baselines {
-		k := b.Database + "." + b.Table
+		k := baselineKey{b.Database, b.Table}
 		if cur, ok := newest[k]; !ok || cur.SnapshotTime.Before(b.SnapshotTime) {
 			newest[k] = b
 		}
 	}
-	var out BaselineStalenessVerdict
-	for _, b := range newest {
-		out = WorseBaselineStaleness(out, b.Staleness)
+	return newest
+}
+
+// RetiredBaselineTables names the tables later snapshots no longer carry
+// (#2022). Every surface that grades a server by its tables' newest snapshots
+// (the status headline and banner, the console's Snapshots headline, the
+// baseline_stale webhook) leaves them out; each copy still carries its own
+// verdict on its row. Only SnapshotTime, Database and Table are read.
+//
+// Prune keeps every table's newest snapshot forever, so a table dropped at the
+// source, renamed, or written under a made-up name by an older build keeps a
+// copy that grades broken once the index rotates past it. Graded, it would
+// hold the server red for good.
+//
+// A table is retired only when the FIRST newer snapshot that holds every other
+// table of the same schema its newest copy sat beside also holds a table of
+// that schema the old snapshot did not: the schema was backed up again in
+// full, with this table under another name. That is a rename at the source,
+// or a name an older build made up and a newer one corrected (#2008).
+//
+// Anything weaker keeps the table graded, because a snapshot can hold a
+// subset on purpose: another database only (CLI --database), one table (a
+// per-table baseline), or some of the tables (CLI --tables, even every table
+// but one), and a full read can leave out a table whose name it cannot store
+// (#2008). None of those adds a table at the snapshot where the table went
+// missing, and a table created later in another snapshot does not count
+// either. A subset that both leaves this table out and picks up a table
+// created since its last copy is the one shape that still retires it. The
+// cost is otherwise on the side of the alarm:
+// a table dropped at the source with nothing new beside it keeps grading, as
+// does a table that was alone in its schema's snapshot.
+//
+// Names compare exactly. The tables of the newest snapshot are never retired,
+// so a graded, non-empty listing never reduces to the empty verdict.
+func RetiredBaselineTables(baselines []BaselineInfo) map[BaselineTable]bool {
+	// The tables each snapshot holds, by snapshot time (UnixNano, so a local
+	// and an S3 copy of one snapshot fold into one set).
+	held := map[int64]map[baselineKey]bool{}
+	var times []int64 // oldest first
+	for _, b := range baselines {
+		at := b.SnapshotTime.UnixNano()
+		if held[at] == nil {
+			held[at] = map[baselineKey]bool{}
+			times = append(times, at)
+		}
+		held[at][baselineKey{b.Database, b.Table}] = true
 	}
-	return out
+	slices.Sort(times)
+	retired := map[BaselineTable]bool{}
+	for k, b := range newestPerTable(baselines) {
+		at := b.SnapshotTime.UnixNano()
+		var siblings []baselineKey
+		for s := range held[at] {
+			if s.Database == k.Database && s != k {
+				siblings = append(siblings, s)
+			}
+		}
+		if len(siblings) == 0 {
+			continue
+		}
+		// The FIRST later snapshot that backs the schema up again is where
+		// the table went missing, so the new name has to appear there: a
+		// table created months later is not where this one went.
+		for _, later := range times {
+			if later <= at || !holdsAll(held[later], siblings) {
+				continue
+			}
+			if addsTable(held[later], held[at], k.Database) {
+				retired[k] = true
+			}
+			break
+		}
+	}
+	return retired
+}
+
+func holdsAll(set map[baselineKey]bool, keys []baselineKey) bool {
+	for _, k := range keys {
+		if !set[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// addsTable reports whether set holds a table of db that old does not: the
+// name the retired table lives on under.
+func addsTable(set, old map[baselineKey]bool, db string) bool {
+	for k := range set {
+		if k.Database == db && !old[k] {
+			return true
+		}
+	}
+	return false
 }

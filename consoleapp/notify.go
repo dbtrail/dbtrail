@@ -226,14 +226,25 @@ const bootContinuityName = "cli index"
 // table list) — never a clock- or floor-derived string: the coverage floor
 // advances with every rotation cycle, and a volatile edge detail would bypass
 // the repeat window and page every hour.
-func (n *watchNotifier) BaselineStale(server, edgeKey string, broken bool, brokenTables, coverageFloor string) {
+//
+// noLongerGraded names the tables the alert in force named that later
+// snapshots carry under another name (#2022, status.RetiredBaselineTables):
+// a resolve they caused says so, so an operator paged about a table is never
+// told it was fixed when it was only renamed.
+func (n *watchNotifier) BaselineStale(server, edgeKey string, broken bool, brokenTables, coverageFloor, noLongerGraded string) {
 	key := "baseline:" + edgeKey
 	if !broken {
 		if n.edge.Resolve(key) {
-			n.send.Notify(notify.Event{
+			ev := notify.Event{
 				Event: notify.EventBaselineStale, Severity: notify.SeverityInfo, Server: server, Resolved: true,
-				Summary: "every table's newest baseline is inside delta coverage again; full-table restore is possible",
-			})
+				Summary: "the newest baseline of every table still backed up is inside delta coverage again; full-table restore is possible",
+			}
+			if noLongerGraded != "" {
+				ev.Summary = "no table still backed up is past delta coverage. " + noLongerGraded +
+					" no longer appears in newer snapshots, which hold a new table beside it (read as a rename), so its last copy is not graded"
+				ev.Details = map[string]string{"no_longer_graded": noLongerGraded}
+			}
+			n.send.Notify(ev)
 		}
 		return
 	}
@@ -412,9 +423,22 @@ func (w *stalenessWatcher) runCycle(ctx context.Context) {
 		// (#1707): with table deltas that is the start of the chain beside
 		// the table, which is earlier than the snapshot. One footer read per
 		// table with a chain, and over S3 none for a snapshot already read.
+		// Less the tables later snapshots no longer carry (#2022): the
+		// same tables the status and console headlines grade.
+		listed := make([]status.BaselineInfo, len(files))
+		for i, f := range files {
+			listed[i] = status.BaselineInfo{Database: f.Schema, Table: f.Table, SnapshotTime: f.SnapshotTime}
+		}
+		retired := status.RetiredBaselineTables(listed)
+		retiredNames := make(map[string]bool, len(retired))
+		for k := range retired {
+			retiredNames[k.Database+"."+k.Table] = true
+		}
 		var newest []reconstruct.BaselineFile
 		for _, i := range reconstruct.NewestPerTable(files) {
-			newest = append(newest, files[i])
+			if !retired[status.BaselineTable{Database: files[i].Schema, Table: files[i].Table}] {
+				newest = append(newest, files[i])
+			}
 		}
 		bounds := w.boundsWithin(ctx, t, newest)
 		// ALL broken tables, sorted — the edge detail must be a stable
@@ -466,15 +490,23 @@ func (w *stalenessWatcher) runCycle(ctx context.Context) {
 			if len(brokenTables) > 0 {
 				w.keepStanding(edgeID, brokenTables)
 				w.n.BaselineStale(t.name, edgeID, true,
-					strings.Join(brokenTables, ", "), floor.Hour.UTC().Format(time.RFC3339))
+					strings.Join(brokenTables, ", "), floor.Hour.UTC().Format(time.RFC3339), "")
 			}
 			continue
 		}
 		w.unknownEdge.Resolve("staleness-attribution:" + edgeID)
 		sort.Strings(brokenTables)
+		// The alert's tables that left the graded set as renamed, named on
+		// the resolve they cause.
+		var noLongerGraded []string
+		for _, s := range w.standing[edgeID] {
+			if retiredNames[s] {
+				noLongerGraded = append(noLongerGraded, s)
+			}
+		}
 		w.keepStanding(edgeID, brokenTables)
 		w.n.BaselineStale(t.name, edgeID, len(brokenTables) > 0,
-			strings.Join(brokenTables, ", "), floor.Hour.UTC().Format(time.RFC3339))
+			strings.Join(brokenTables, ", "), floor.Hour.UTC().Format(time.RFC3339), strings.Join(noLongerGraded, ", "))
 	}
 }
 
