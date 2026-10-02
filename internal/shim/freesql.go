@@ -1,0 +1,367 @@
+package shim
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/go-mysql-org/go-mysql/mysql"
+
+	"github.com/dbtrail/dbtrail/ext"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
+)
+
+// Free SQL on the copy, over the MySQL protocol.
+//
+// Before this, a connection to the shim answered ONLY the four time-travel
+// shapes (AS OF on a table or a row, _diff between two instants) and every
+// other statement got ER_NOT_SUPPORTED_YET (1235). With a FreeSQL bound,
+// an ordinary statement that is not time travel is handed to it instead:
+// the embedded port binds the console's own SQL-on-the-copy executor (the
+// one behind POST /api/sql), so an analyst with nothing but a mysql client
+// runs joins and aggregations over the Parquet copy — same locked DuckDB
+// child process, same views, same caps.
+//
+// What the client gets is DuckDB SQL over a MySQL wire: the SQL dialect is
+// DuckDB's (the one the console's SQL card takes), not MySQL's. The wire
+// does three MySQL-shaped things on top: USE selects the schema unqualified
+// names resolve in (sqlsandbox.Job.Schema), SHOW DATABASES / SHOW COLUMNS
+// are rewritten to their DuckDB equivalents (rewriteForDuckDB), and a
+// result cut at the row cap raises a warning SHOW WARNINGS returns. The
+// standalone `bintrail shim` binds nothing and keeps refusing as before.
+//
+// The order in HandleQuery is load-bearing: time travel first (a parse
+// error on a virtual schema stays 1064), then handshake noise (so a
+// client's `select @@version_comment limit 1` never reaches DuckDB, which
+// would fail it), then free SQL.
+
+// FreeSQL runs one ordinary read-only statement on the server's Parquet
+// copy. schema is where unqualified names resolve, "" for the default. The
+// error must be one the client can be shown: the executor replaces a
+// worker failure, whose text can carry host paths, before it gets here
+// (freeSQLError does so again, as a belt).
+type FreeSQL interface {
+	Run(ctx context.Context, statement, schema string) (sqlsandbox.Result, error)
+}
+
+// BindFreeSQL enables free SQL on this connection. Call once after the
+// handshake, like BindActor; f must be non-nil.
+func (h *Handler) BindFreeSQL(f FreeSQL) {
+	h.freeSQL = f
+	h.freeSQLWhyNot = ""
+}
+
+// BindFreeSQLUnavailable records why this connection has no free SQL, so
+// the 1235 refusal says it instead of only "time travel only".
+func (h *Handler) BindFreeSQLUnavailable(why string) {
+	h.freeSQL = nil
+	h.freeSQLWhyNot = why
+}
+
+// notTimeTravelError is the refusal for an ordinary statement with no
+// FreeSQL bound: the pre-free-SQL 1235, plus the reason when one is known.
+func (h *Handler) notTimeTravelError(qstr string) error {
+	msg := fmt.Sprintf("this server only handles _flashback / _snapshot / _diff virtual-schema queries; got: %s",
+		strings.TrimSpace(qstr))
+	if h.freeSQLWhyNot != "" {
+		msg += "; SQL on the copy is unavailable here: " + h.freeSQLWhyNot
+	}
+	return mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, msg)
+}
+
+// runFreeSQL serves one ordinary statement through the bound FreeSQL.
+func (h *Handler) runFreeSQL(schema, qstr string) (*mysql.Result, error) {
+	ctx, cancel := h.queryContext()
+	defer cancel()
+	res, err := h.freeSQL.Run(ctx, rewriteForDuckDB(qstr), schema)
+	if err != nil {
+		return nil, h.freeSQLError(err)
+	}
+	rs, err := freeSQLResultset(res)
+	if err != nil {
+		return nil, fmt.Errorf("free sql: build resultset: %w", err)
+	}
+	out := &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}
+	if res.Truncated {
+		out.Warnings = 1
+		h.setLastWarning(fmt.Sprintf("the result was cut at %d rows, this server's cap; add a LIMIT or narrow the query", len(res.Rows)))
+	}
+	h.recordFreeSQL(qstr, schema, len(res.Rows), res.Truncated)
+	return out, nil
+}
+
+// setLastWarning stores what SHOW WARNINGS answers until the next statement.
+func (h *Handler) setLastWarning(msg string) {
+	h.mu.Lock()
+	h.lastWarning = msg
+	h.mu.Unlock()
+}
+
+// showWarnings answers SHOW WARNINGS the way MySQL does: Level, Code,
+// Message rows, none when the last statement raised nothing. Only a
+// handler with free SQL bound answers this way; without it SHOW WARNINGS
+// stays handshake noise (an empty OK), as it always was.
+func (h *Handler) showWarnings() (*mysql.Result, error) {
+	h.mu.Lock()
+	msg := h.lastWarning
+	h.mu.Unlock()
+	cols := []string{"Level", "Code", "Message"}
+	var rows [][]any
+	if msg != "" {
+		rows = [][]any{{"Warning", int64(mysql.ER_WARN_TOO_MANY_RECORDS), msg}}
+	}
+	rs, err := mysql.BuildSimpleTextResultset(cols, rows)
+	if err != nil {
+		return nil, fmt.Errorf("show warnings: %w", err)
+	}
+	return &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}, nil
+}
+
+var (
+	useStatementRE  = regexp.MustCompile("(?is)^\\s*use\\s+(`[^`]+`|[^\\s;`]+)\\s*;?\\s*$")
+	showWarningsRE  = regexp.MustCompile(`(?is)^\s*show\s+warnings\s*;?\s*$`)
+	showDatabasesRE = regexp.MustCompile(`(?is)^\s*show\s+(?:databases|schemas)\s*;?\s*$`)
+	// SHOW COLUMNS FROM t [FROM s] / SHOW FIELDS FROM t: the forms a MySQL
+	// client sends to describe a table. DuckDB spells it DESCRIBE [s.]t.
+	showColumnsRE = regexp.MustCompile(`(?is)^\s*show\s+(?:columns|fields)\s+(?:from|in)\s+(\S+)(?:\s+(?:from|in)\s+(\S+))?\s*;?\s*$`)
+)
+
+// showDatabasesSQL lists the schemas the views created, under the column
+// name a MySQL client expects from SHOW DATABASES. main stays: the events
+// view lives there. DuckDB's own catalog schemas do not.
+const showDatabasesSQL = `SELECT DISTINCT schema_name AS "Database" FROM information_schema.schemata ` +
+	`WHERE schema_name NOT IN ('information_schema', 'pg_catalog') ORDER BY 1`
+
+// rewriteForDuckDB maps the two MySQL metadata statements DuckDB does not
+// read to their DuckDB form; everything else passes through unchanged,
+// SHOW TABLES and DESCRIBE included, which DuckDB reads as they are.
+func rewriteForDuckDB(qstr string) string {
+	if showDatabasesRE.MatchString(qstr) {
+		return showDatabasesSQL
+	}
+	if m := showColumnsRE.FindStringSubmatch(qstr); m != nil {
+		table := strings.Trim(m[1], "`")
+		if schema := strings.Trim(m[2], "`"); schema != "" {
+			return "DESCRIBE " + quoteDuckIdent(schema) + "." + quoteDuckIdent(table)
+		}
+		return "DESCRIBE " + quoteDuckIdent(table)
+	}
+	return qstr
+}
+
+// quoteDuckIdent quotes one name the way DuckDB reads identifiers.
+func quoteDuckIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// freeSQLError maps the executor's errors to MySQL wire errors. The two
+// shapes a client caused get client-input codes (1064 for a statement the
+// sandbox would not run, 1317 for one it stopped); the rest is 1105 with
+// the message, except a worker failure, which is replaced (its text can
+// carry host paths) and logged.
+func (h *Handler) freeSQLError(err error) error {
+	var refused *sqlsandbox.RefusedError
+	var qerr *sqlsandbox.QueryError
+	var timeout *sqlsandbox.TimeoutError
+	var werr *sqlsandbox.WorkerError
+	switch {
+	case errors.As(err, &refused):
+		return mysql.NewError(mysql.ER_PARSE_ERROR, refused.Reason)
+	case errors.As(err, &qerr):
+		return mysql.NewError(mysql.ER_UNKNOWN_ERROR, qerr.Message)
+	case errors.As(err, &timeout):
+		return mysql.NewError(mysql.ER_QUERY_INTERRUPTED,
+			fmt.Sprintf("the query ran longer than this server's cap of %.0f s and was stopped; narrow it", timeout.Limit.Seconds()))
+	case errors.Is(err, sqlsandbox.ErrBusy):
+		return mysql.NewError(mysql.ER_TOO_MANY_USER_CONNECTIONS, err.Error())
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return mysql.NewError(mysql.ER_QUERY_INTERRUPTED, "the query was cancelled")
+	case errors.As(err, &werr):
+		h.logger.Error("free sql: the SQL worker failed", "err", err)
+		return mysql.NewError(mysql.ER_UNKNOWN_ERROR, "the SQL worker failed before it could answer; DBTrail's log has the details")
+	default:
+		return mysql.NewError(mysql.ER_UNKNOWN_ERROR, err.Error())
+	}
+}
+
+// freeSQLResultset renders a sandbox result as a MySQL text resultset. The
+// cells arrive JSON-shaped (nil, bool, string, json.Number, []any, map); each
+// is rendered to text by its column's DuckDB type, and the column
+// definitions carry the MySQL type that DuckDB type maps to, so a client
+// shows numbers as numbers and dates as dates. Every cell is sent as text
+// bytes: BuildSimpleTextResultset fixes a column's wire type from its first
+// non-null row, and a column mixing Go types across rows is an error there.
+func freeSQLResultset(res sqlsandbox.Result) (*mysql.Resultset, error) {
+	names := make([]string, len(res.Columns))
+	for i, c := range res.Columns {
+		names[i] = c.Name
+	}
+	values := make([][]any, len(res.Rows))
+	for i, row := range res.Rows {
+		out := make([]any, len(row))
+		for j, cell := range row {
+			typ := ""
+			if j < len(res.Columns) {
+				typ = res.Columns[j].Type
+			}
+			out[j] = freeSQLCell(cell, typ)
+		}
+		values[i] = out
+	}
+	rs, err := mysql.BuildSimpleTextResultset(names, values)
+	if err != nil {
+		return nil, err
+	}
+	for i, c := range res.Columns {
+		if i >= len(rs.Fields) {
+			break
+		}
+		applyDuckType(rs.Fields[i], c.Type)
+	}
+	return rs, nil
+}
+
+// freeSQLCell renders one JSON-shaped cell to the text the wire carries,
+// nil staying NULL. A timestamp arrives RFC 3339 in UTC and leaves in
+// MySQL's DATETIME spelling, because that is what the column is declared
+// as; a nested value (LIST, STRUCT, MAP, JSON) is its JSON text; a boolean
+// is 1 or 0, as MySQL's own BOOLEAN reads back.
+func freeSQLCell(v any, duckType string) any {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case json.Number:
+		// The worker's own rendering, every digit kept: re-rendering through
+		// a float would turn a DECIMAL's 12.50 into 12.5.
+		return []byte(x.String())
+	case bool:
+		if x {
+			return []byte("1")
+		}
+		return []byte("0")
+	case string:
+		if isTimestampType(duckType) {
+			if t, err := time.Parse(time.RFC3339Nano, x); err == nil {
+				return []byte(t.UTC().Format("2006-01-02 15:04:05.999999"))
+			}
+		}
+		return []byte(x)
+	case []any, map[string]any:
+		b, err := json.Marshal(x)
+		if err != nil {
+			return []byte(fmt.Sprint(x))
+		}
+		return b
+	default:
+		return []byte(fmt.Sprint(x))
+	}
+}
+
+func isTimestampType(duckType string) bool {
+	return strings.HasPrefix(strings.ToUpper(duckType), "TIMESTAMP")
+}
+
+// applyDuckType sets the MySQL column type a DuckDB type maps to. Text
+// columns are declared utf8mb4, never binary: a MySQL 8 client shows a
+// binary-charset string column as hex, which would make every VARCHAR
+// unreadable. Numbers, dates and times keep MySQL's own convention
+// (charset 63, binary flag). What has no MySQL shape (HUGEINT, INTERVAL,
+// UUID, ENUM) is text; nested types are JSON.
+func applyDuckType(f *mysql.Field, duckType string) {
+	upper := strings.ToUpper(strings.TrimSpace(duckType))
+	// A LIST or ARRAY (INTEGER[], VARCHAR[3]) is nested whatever its element.
+	nested := strings.HasSuffix(upper, "]") || strings.HasPrefix(upper, "STRUCT") || strings.HasPrefix(upper, "MAP") || upper == "JSON"
+	base := upper
+	if i := strings.IndexAny(base, "(["); i >= 0 {
+		base = strings.TrimSpace(base[:i])
+	}
+	numeric := func(t uint8, unsigned bool) {
+		f.Type = t
+		f.Charset = 63
+		f.Flag |= mysql.BINARY_FLAG
+		if unsigned {
+			f.Flag |= mysql.UNSIGNED_FLAG
+		}
+	}
+	text := func(t uint8) {
+		f.Type = t
+		f.Charset = 255 // utf8mb4
+		f.Flag &^= mysql.BINARY_FLAG
+	}
+	switch {
+	case nested:
+		text(mysql.MYSQL_TYPE_JSON)
+	case base == "TINYINT", base == "SMALLINT", base == "INTEGER", base == "BIGINT":
+		numeric(mysql.MYSQL_TYPE_LONGLONG, false)
+	case base == "UTINYINT", base == "USMALLINT", base == "UINTEGER", base == "UBIGINT":
+		numeric(mysql.MYSQL_TYPE_LONGLONG, true)
+	case strings.HasPrefix(base, "DECIMAL"):
+		numeric(mysql.MYSQL_TYPE_NEWDECIMAL, false)
+		f.Decimal = decimalScale(duckType)
+	case base == "FLOAT", base == "REAL":
+		numeric(mysql.MYSQL_TYPE_FLOAT, false)
+	case base == "DOUBLE":
+		numeric(mysql.MYSQL_TYPE_DOUBLE, false)
+	case base == "BOOLEAN":
+		numeric(mysql.MYSQL_TYPE_TINY, false)
+	case base == "DATE":
+		numeric(mysql.MYSQL_TYPE_DATE, false)
+	case strings.HasPrefix(base, "TIMESTAMP"):
+		numeric(mysql.MYSQL_TYPE_DATETIME, false)
+		f.Decimal = 6
+	case base == "TIME":
+		numeric(mysql.MYSQL_TYPE_TIME, false)
+	default:
+		text(mysql.MYSQL_TYPE_VAR_STRING)
+	}
+}
+
+// decimalScale reads the scale of DECIMAL(p,s); 0 when absent.
+func decimalScale(duckType string) uint8 {
+	open, comma, closeP := strings.Index(duckType, "("), strings.Index(duckType, ","), strings.Index(duckType, ")")
+	if open < 0 || comma < open || closeP < comma {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(duckType[comma+1 : closeP]))
+	if err != nil || n < 0 || n > 255 {
+		return 0
+	}
+	return uint8(n)
+}
+
+// recordFreeSQL reports one served free-SQL statement on the audit seam:
+// raw row data left the copy, and the statement is the reader's own text,
+// which is what an auditor needs to know what was asked. Success path only,
+// after the resultset is built, same contract as auditTimeTravel.
+func (h *Handler) recordFreeSQL(statement, schema string, rows int, truncated bool) {
+	if !ext.Auditing() {
+		return
+	}
+	actor := h.actor
+	if actor == "" {
+		actor = unboundActor
+	}
+	detail := map[string]string{
+		"sql":       statement,
+		"rows":      strconv.Itoa(rows),
+		"truncated": strconv.FormatBool(truncated),
+	}
+	if schema != "" {
+		detail["schema"] = schema
+	}
+	ctx := context.Background()
+	if h.baseCtx != nil {
+		ctx = context.WithoutCancel(h.baseCtx)
+	}
+	ext.Record(ctx, ext.AuditEvent{
+		Surface: "shim",
+		Action:  "sql.run",
+		Actor:   actor,
+		Detail:  detail,
+	})
+}

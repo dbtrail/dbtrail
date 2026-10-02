@@ -157,6 +157,13 @@ type Job struct {
 	ViewsSQL string
 	// SQL is the user's statement.
 	SQL string
+	// Schema, when set, is the schema unqualified names in SQL resolve in
+	// (DuckDB's search_path): the MySQL-protocol port's USE. The views put
+	// each source schema's tables in a schema of that name, and events in
+	// main, which DuckDB searches after the search_path, so events stays
+	// reachable. A schema the views did not create is a QueryError naming
+	// it. Empty leaves DuckDB's default (main).
+	Schema string
 	// Limits override the Runner's defaults field by field.
 	Limits Limits
 }
@@ -362,6 +369,7 @@ type wireJob struct {
 	CopyDirs    []string `json:"copy_dirs"`
 	ViewsSQL    string   `json:"views_sql"`
 	SQL         string   `json:"sql"`
+	Schema      string   `json:"schema,omitempty"`
 	Threads     int      `json:"threads"`
 	MemoryLimit string   `json:"memory_limit"`
 	MaxRows     int      `json:"max_rows"`
@@ -411,7 +419,7 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 		args = []string{WorkerCommand}
 	}
 	in, err := json.Marshal(wireJob{
-		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: job.ViewsSQL, SQL: job.SQL,
+		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: job.ViewsSQL, SQL: job.SQL, Schema: job.Schema,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
 	})

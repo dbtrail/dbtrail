@@ -376,69 +376,17 @@ func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	in, eventsInS3, err := s.sqlViewsFor(r.Context(), b, req.SQL)
-	switch {
-	case errors.Is(err, errNoViewSources):
-		writeJSONError(w, http.StatusConflict,
-			errNoViewSources.Error()+"; there is no copy to run SQL on yet")
-		return
-	case err != nil:
-		writeJSONError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	if why := viewsLeftOutMessage(in); why != "" {
-		writeJSONError(w, http.StatusConflict, why)
-		return
-	}
-	if in.NeedsS3() || (!in.RendersAnyView() && eventsInS3) {
-		// The tables themselves are in S3, or the change log in S3 is all
-		// there is: nothing here is local.
-		writeJSONError(w, http.StatusConflict, sqlCopyNotLocalMessage)
-		return
-	}
-	if !in.RendersAnyView() {
-		writeJSONError(w, http.StatusConflict,
-			"the copy defines no view to query: no snapshot was found to build state views from, and no archived partition")
-		return
-	}
-	if s.sqlViewsObserver != nil {
-		s.sqlViewsObserver(in)
-	}
-	copyDirs := sqlCopyDirs(in)
-	if dir, file, covered := dirCoversConfig(copyDirs, s.protectedConfigFiles()); covered {
-		writeJSONError(w, http.StatusConflict,
-			fmt.Sprintf("the copy directory %s contains the console's own configuration (%s), so SQL cannot run over it; "+
-				"point this server's snapshot directory at a directory that holds only snapshots", dir, filepath.Base(file)))
-		return
-	}
-	var copyUpdatedAt *time.Time
-	if !in.BaselineSnapshot.IsZero() {
-		at := in.BaselineSnapshot.UTC()
-		copyUpdatedAt = &at
-	}
-
-	job := sqlsandbox.Job{
-		// One query at a time per identity: the login identity, or the
-		// shared automation token as one identity.
-		User:     consoleActor(r),
-		CopyDirs: copyDirs,
-		ViewsSQL: views.Generate(in),
-		SQL:      req.SQL,
-		Limits:   sqlsandbox.Limits{MaxRows: req.MaxRows},
-	}
-	res, err := s.sqlRunner.Run(r.Context(), job)
+	out, err := s.runSQL(r.Context(), b, consoleActor(r), req.SQL, "", req.MaxRows)
 	if err != nil {
-		var qerr *sqlsandbox.QueryError
-		if eventsInS3 && errors.As(err, &qerr) && sqlEventsMissing.MatchString(qerr.Message) {
-			// The statement really read events, which was not installed
-			// because the change log is in S3: say that, not DuckDB's
-			// "does not exist".
-			writeJSONError(w, http.StatusUnprocessableEntity, sqlEventsInS3Message)
+		var refusal *sqlRefusal
+		if errors.As(err, &refusal) {
+			writeJSONError(w, refusal.Status, refusal.Message)
 			return
 		}
 		s.writeSQLError(w, r, err)
 		return
 	}
+	res, copyUpdatedAt := out.Result, out.CopyUpdatedAt
 
 	csv := wantsCSV(r)
 	if csv {
@@ -466,6 +414,92 @@ func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
 		detail["format"] = "csv"
 	}
 	recordConsoleAccess(r, "sql.run", "", "", detail)
+}
+
+// sqlRefusal is a gate the statement did not pass before anything ran: the
+// HTTP route answers with Status and Message, the MySQL-protocol port with
+// Message alone.
+type sqlRefusal struct {
+	Status  int
+	Message string
+}
+
+func (e *sqlRefusal) Error() string { return e.Message }
+
+// sqlOutcome is a statement that ran.
+type sqlOutcome struct {
+	Result sqlsandbox.Result
+	// CopyUpdatedAt is the newest snapshot the state views were pinned to;
+	// nil when the copy has no snapshot and only the change log is queryable.
+	CopyUpdatedAt *time.Time
+}
+
+// runSQL is POST /api/sql without the HTTP: the gates that need the copy
+// (local, defines a view, holds no console configuration), the views, the
+// job and the run. user keys the one-query-at-a-time gate; schema, when
+// set, is where unqualified names resolve (the port's USE); maxRows 0 is
+// the server's cap. The data-profile and archive gates are the caller's:
+// they need the request, or the target, which this does not see. The
+// errors are a *sqlRefusal or the runner's own typed errors, so each caller
+// maps them to its wire.
+func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema string, maxRows int) (sqlOutcome, error) {
+	in, eventsInS3, err := s.sqlViewsFor(ctx, b, statement)
+	switch {
+	case errors.Is(err, errNoViewSources):
+		return sqlOutcome{}, &sqlRefusal{http.StatusConflict,
+			errNoViewSources.Error() + "; there is no copy to run SQL on yet"}
+	case err != nil:
+		return sqlOutcome{}, &sqlRefusal{http.StatusBadGateway, err.Error()}
+	}
+	if why := viewsLeftOutMessage(in); why != "" {
+		return sqlOutcome{}, &sqlRefusal{http.StatusConflict, why}
+	}
+	if in.NeedsS3() || (!in.RendersAnyView() && eventsInS3) {
+		// The tables themselves are in S3, or the change log in S3 is all
+		// there is: nothing here is local.
+		return sqlOutcome{}, &sqlRefusal{http.StatusConflict, sqlCopyNotLocalMessage}
+	}
+	if !in.RendersAnyView() {
+		return sqlOutcome{}, &sqlRefusal{http.StatusConflict,
+			"the copy defines no view to query: no snapshot was found to build state views from, and no archived partition"}
+	}
+	if s.sqlViewsObserver != nil {
+		s.sqlViewsObserver(in)
+	}
+	copyDirs := sqlCopyDirs(in)
+	if dir, file, covered := dirCoversConfig(copyDirs, s.protectedConfigFiles()); covered {
+		return sqlOutcome{}, &sqlRefusal{http.StatusConflict,
+			fmt.Sprintf("the copy directory %s contains the console's own configuration (%s), so SQL cannot run over it; "+
+				"point this server's snapshot directory at a directory that holds only snapshots", dir, filepath.Base(file))}
+	}
+	var copyUpdatedAt *time.Time
+	if !in.BaselineSnapshot.IsZero() {
+		at := in.BaselineSnapshot.UTC()
+		copyUpdatedAt = &at
+	}
+
+	job := sqlsandbox.Job{
+		// One query at a time per identity: the login identity, or the
+		// shared automation token as one identity.
+		User:     user,
+		CopyDirs: copyDirs,
+		ViewsSQL: views.Generate(in),
+		SQL:      statement,
+		Schema:   schema,
+		Limits:   sqlsandbox.Limits{MaxRows: maxRows},
+	}
+	res, err := s.sqlRunner.Run(ctx, job)
+	if err != nil {
+		var qerr *sqlsandbox.QueryError
+		if eventsInS3 && errors.As(err, &qerr) && sqlEventsMissing.MatchString(qerr.Message) {
+			// The statement really read events, which was not installed
+			// because the change log is in S3: say that, not DuckDB's
+			// "does not exist".
+			return sqlOutcome{}, &sqlRefusal{http.StatusUnprocessableEntity, sqlEventsInS3Message}
+		}
+		return sqlOutcome{}, err
+	}
+	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt}, nil
 }
 
 // sqlCopyDirs lists the directories the generated views read, and nothing
@@ -622,6 +656,10 @@ var sqlEventsMissing = regexp.MustCompile(`(?i)table with name "?events"? does n
 // whose change log is in S3.
 const sqlEventsInS3Message = "the change history for this server is on S3, so events cannot be read here; the tables can"
 
+// sqlWorkerFailedMessage replaces a WorkerError on every wire: its text can
+// carry host paths, so the log gets it and the client gets this.
+const sqlWorkerFailedMessage = "the SQL worker failed before it could answer; DBTrail's log has the details"
+
 // sqlCopyNotLocalMessage is the 409 for a copy the worker cannot reach.
 const sqlCopyNotLocalMessage = "the copy for this server is only on S3; SQL in the browser needs a local copy"
 
@@ -653,8 +691,7 @@ func (s *Server) writeSQLError(w http.ResponseWriter, r *http.Request, err error
 		slog.Debug("console: sql request cancelled by the client", "error", err)
 	case errors.As(err, &werr):
 		slog.Error("console: the SQL worker failed", "error", err, "server", r.Header.Get(serverHeader))
-		writeJSONError(w, http.StatusInternalServerError,
-			"the SQL worker failed before it could answer; DBTrail's log has the details")
+		writeJSONError(w, http.StatusInternalServerError, sqlWorkerFailedMessage)
 	default:
 		slog.Error("console: sql query failed", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "the query could not be run; DBTrail's log has the details")

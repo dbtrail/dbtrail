@@ -159,6 +159,11 @@ var Required = []Requirement{
 		Why:   "network time-travel reads (_flashback/_snapshot/_diff) by an authenticated tenant",
 	},
 	{
+		Pair:  Pair{Surface: "shim", Action: "sql.run"},
+		Owner: OwnerShim,
+		Why:   "free read-only SQL over the Parquet copy by an authenticated tenant of the MySQL-protocol port: raw row data, and the statement is the reader's own",
+	},
+	{
 		// The SAME pair again, under a second owner: bintrail-pg flashback
 		// serves the same virtual schemas through the exported resolve seam,
 		// BYPASSING Handler.HandleQuery — so the MySQL command loop's

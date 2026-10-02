@@ -878,3 +878,49 @@ func TestIsWorkerInvocation(t *testing.T) {
 		}
 	}
 }
+
+// Job.Schema is the MySQL-protocol port's USE: unqualified names resolve in
+// that schema, events (in main) stays reachable, and a schema the views did
+// not create is the user's own error, naming the schema, not a worker
+// failure. The odd names prove the literal quoting: an unbalanced quote
+// would surface as a parser error, not as the catalog error asserted here.
+func TestRun_schemaResolvesUnqualifiedNames(t *testing.T) {
+	f := newCopyFixture(t)
+	r := newTestRunner(t, testLimits())
+	withSchema := func(schema, sqlText string) Job {
+		j := f.job(sqlText)
+		j.Schema = schema
+		return j
+	}
+	res, err := r.Run(context.Background(), withSchema("shop", "SELECT id FROM orders ORDER BY id"))
+	if err != nil {
+		t.Fatalf("unqualified orders under schema shop: %v", err)
+	}
+	if want := [][]any{{json.Number("1")}, {json.Number("2")}}; !reflect.DeepEqual(res.Rows, want) {
+		t.Errorf("rows = %#v, want %#v", res.Rows, want)
+	}
+	res, err = r.Run(context.Background(), withSchema("shop", "SELECT count(*) AS n FROM events"))
+	if err != nil {
+		t.Fatalf("events under schema shop: %v", err)
+	}
+	if got := res.Rows[0][0]; got != json.Number("1") {
+		t.Errorf("events count = %#v, want 1", got)
+	}
+	// Without a schema the default stays main: orders is not there.
+	if _, err := r.Run(context.Background(), f.job("SELECT id FROM orders")); err == nil {
+		t.Error("unqualified orders with no schema ran; want a QueryError")
+	}
+	for _, schema := range []string{"nope", `we"ird`, "a,b", "it's"} {
+		_, err := r.Run(context.Background(), withSchema(schema, "SELECT 1"))
+		var qerr *QueryError
+		if !errors.As(err, &qerr) {
+			t.Fatalf("schema %q: err = %v (%T), want *QueryError", schema, err, err)
+		}
+		// DuckDB echoes an odd name in its quoted spelling, so only the USE
+		// prefix is pinned to the bare name; the lookup itself is the catalog
+		// error (a broken literal would be a parser error instead).
+		if !strings.Contains(qerr.Message, "USE "+schema+":") || !strings.Contains(qerr.Message, "No catalog + schema named") {
+			t.Errorf("schema %q: message = %q, want the USE prefix and a missing-schema catalog error", schema, qerr.Message)
+		}
+	}
+}

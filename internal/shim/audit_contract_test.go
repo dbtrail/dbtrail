@@ -2,6 +2,7 @@ package shim
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/dbtrail/dbtrail/ext"
 	"github.com/dbtrail/dbtrail/internal/audittest"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
 // auditHandler builds a Handler over a sqlmock index whose binlog_events
@@ -136,6 +138,44 @@ func TestAuditContract_Shim(t *testing.T) {
 			observed = append(observed, audittest.Pair{Surface: ev.Surface, Action: ev.Action})
 		})
 	}
+
+	// Free SQL on the copy (freesql.go): an ordinary statement served
+	// through the bound executor is shim/sql.run, attributed the same way,
+	// with the statement itself in the detail; a failed one emits nothing.
+	t.Run("free sql", func(t *testing.T) {
+		rec.Reset()
+		h := NewHandler(nil, nil)
+		h.BindActor("tenant_a")
+		f := &fakeFreeSQL{res: oneCell("n", "BIGINT", json.Number("2"))}
+		h.BindFreeSQL(f)
+		if err := h.UseDB("shop"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.HandleQuery("SELECT count(*) AS n FROM orders"); err != nil {
+			t.Fatalf("HandleQuery: %v", err)
+		}
+		evs := rec.Events()
+		if len(evs) != 1 {
+			t.Fatalf("recorded %d audit events, want exactly 1: %+v", len(evs), evs)
+		}
+		ev := evs[0]
+		if ev.Surface != "shim" || ev.Action != "sql.run" || ev.Actor != "tenant_a" {
+			t.Errorf("event = %s/%s by %q, want shim/sql.run by tenant_a", ev.Surface, ev.Action, ev.Actor)
+		}
+		if ev.Detail["sql"] != "SELECT count(*) AS n FROM orders" || ev.Detail["rows"] != "1" || ev.Detail["schema"] != "shop" || ev.Detail["truncated"] != "false" {
+			t.Errorf("detail = %v, want the statement, rows=1, schema=shop, truncated=false", ev.Detail)
+		}
+		observed = append(observed, audittest.Pair{Surface: ev.Surface, Action: ev.Action})
+
+		rec.Reset()
+		f.err = &sqlsandbox.QueryError{Message: "boom"}
+		if _, err := h.HandleQuery("SELECT boom"); err == nil {
+			t.Fatal("failed statement reported success")
+		}
+		if n := len(rec.Events()); n != 0 {
+			t.Errorf("a failed statement recorded %d events, want 0", n)
+		}
+	})
 
 	audittest.CheckCoverage(t, audittest.OwnerShim, observed)
 }

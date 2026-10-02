@@ -42,6 +42,7 @@ var recordCallSites = map[string]int{
 	"internal/mcptools/reconstruct.go":     1, // mcp|console reconstruct.row
 	"internal/mcptools/recover_cascade.go": 1, // mcp|console recover.cascade
 	"internal/shim/handler.go":             1, // shim/timetravel.query (recordTimeTravel — all three serving layers)
+	"internal/shim/freesql.go":             1, // shim/sql.run (recordFreeSQL — the console's embedded port)
 }
 
 // TestAuditRecordCallSitesAccounted walks the module source tree and asserts

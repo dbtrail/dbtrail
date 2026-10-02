@@ -118,6 +118,14 @@ func runJob(job wireJob, stderr io.Writer) (res wireResult) {
 			return sessionErr("install the copy's views: %v", err)
 		}
 	}
+	// The port's USE, before the lock like every other SET. A schema the
+	// views did not create fails HERE, as the user's own error (errQuery,
+	// which reaches them), not as a session failure (which does not).
+	if job.Schema != "" {
+		if _, err := conn.ExecContext(ctx, "SET search_path = "+searchPathLiteral(job.Schema)); err != nil {
+			return wireResult{Error: &wireError{Kind: errQuery, Message: fmt.Sprintf("USE %s: %v", job.Schema, err)}}
+		}
+	}
 	if _, err := conn.ExecContext(ctx, lockLast); err != nil {
 		return sessionErr("%s: %v", lockLast, err)
 	}
@@ -431,4 +439,13 @@ func floatCell(f float64) any {
 		return "-Infinity"
 	}
 	return f
+}
+
+// searchPathLiteral renders one schema name as the string literal SET
+// search_path takes: the name as a quoted identifier (so a space, a comma
+// or a double quote inside it is part of the name, not a separator), inside
+// a single-quoted string.
+func searchPathLiteral(schema string) string {
+	ident := `"` + strings.ReplaceAll(schema, `"`, `""`) + `"`
+	return "'" + strings.ReplaceAll(ident, "'", "''") + "'"
 }
