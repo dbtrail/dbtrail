@@ -411,10 +411,12 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	pkMetas := reconstruct.ResolvePKMetasAt(db, recSchema, recTable, snapshotTime)
 
 	// A system-versioned table's changes are stored under the key plus ROW
-	// END, so a lookup by the declared key would find none and answer with
-	// the snapshot row unchanged (#2007).
-	if err := reconstruct.SingleRowSysVersionedRefusal(recSchema, recTable, bmeta.CreateTableSQL, pkMetas,
-		slices.Collect(maps.Keys(pkFilter))); err != nil {
+	// END, and its binlog carries history versions and versioned deletes:
+	// look the row up under the stored spellings and read its events for
+	// what they mean to the current row (#2007).
+	sysVer, err := reconstruct.SingleRowSysVersioning(recSchema, recTable, bmeta.CreateTableSQL, pkMetas,
+		slices.Collect(maps.Keys(pkFilter)), query.SourceFlavor(db))
+	if err != nil {
 		return err
 	}
 
@@ -443,6 +445,9 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 		PKValues: reconstruct.IndexPKSpelling(recPK, pkMetas),
 		Since:    &snapshotTime,
 		Until:    &at,
+	}
+	if sysVer != nil {
+		sysVer.ExpandKey(&opts)
 	}
 	duckTuning, err := DuckDBTuningFromFlags(cmd)
 	if err != nil {
@@ -476,6 +481,11 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("fetch binlog events: %w", err)
 	}
 	slog.Debug("fetched binlog events", "count", len(events))
+	if sysVer != nil {
+		if events, err = sysVer.Normalize(events); err != nil {
+			return err
+		}
+	}
 
 	// No baseline row for this PK (the fixed BINARY(n) pad-and-retry already
 	// ran inside ReadBaselineRow). Refuse — but tell a genuinely-absent

@@ -114,7 +114,8 @@ func TestFromSnapshot(t *testing.T) {
 		{"explicit", []metadata.ColumnMeta{id, gen("rs", false, "timestamp"), gen("re", true, "timestamp")}, Period{"rs", "re"}, true},
 		{"MySQL: one generated TIMESTAMP in the key", []metadata.ColumnMeta{id, gen("ts", true, "timestamp")}, Period{}, false},
 		{"MySQL: one generated TIMESTAMP outside the key", []metadata.ColumnMeta{id, gen("ts", false, "timestamp")}, Period{}, false},
-		{"transaction-precise (BIGINT)", []metadata.ColumnMeta{id, gen("rs", false, "bigint"), gen("re", true, "bigint")}, Period{}, false},
+		{"transaction-precise (BIGINT), detected so RowEnd refuses it", []metadata.ColumnMeta{id, gen("rs", false, "bigint"), gen("re", true, "bigint")}, Period{"rs", "re"}, true},
+		{"mixed period types", []metadata.ColumnMeta{id, gen("rs", false, "bigint"), gen("re", true, "timestamp")}, Period{}, false},
 		{"two generated TIMESTAMPs in the key", []metadata.ColumnMeta{id, gen("a", true, "timestamp"), gen("b", true, "timestamp"), gen("s", false, "timestamp")}, Period{}, false},
 		{"plain table", []metadata.ColumnMeta{id}, Period{}, false},
 	} {

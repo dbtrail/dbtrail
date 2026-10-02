@@ -1702,6 +1702,15 @@ func checkPostBaselineColumns(in mergeInput, changes map[string]*query.ResultRow
 				"schema", in.Schema, "table", in.Table, "columns", strings.Join(dropped, ", "))
 		}
 	}
+	if len(extra) > 0 && onlyPeriodColumns(extra, in.CreateTableSQL) {
+		// Versioning added (and maybe dropped) inside the window: only the
+		// period columns are "new", and the events carrying them are a
+		// versioned table's (#2007).
+		return fmt.Errorf(
+			"full-table reconstruct: %s.%s was system-versioned during part of this window (its events carry the "+
+				"period column(s) %s, which the snapshot this starts from does not have); a new full snapshot of the "+
+				"table cures this: %w", in.Schema, in.Table, strings.Join(extra, ", "), ErrSchemaChanged)
+	}
 	if len(extra) > 0 {
 		return fmt.Errorf(
 			"full-table reconstruct: %s.%s has column(s) %s present in delta events but absent from the baseline schema "+

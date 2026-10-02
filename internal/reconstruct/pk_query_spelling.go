@@ -68,6 +68,11 @@ func SpellIndexPKFilter(ctx context.Context, db *sql.DB, opts *query.Options) (m
 			return nil, nil
 		}
 	}
+	// A system-versioned table stores each change under the key plus ROW
+	// END: spell the declared key that way first (#2007), so the UUID/INET
+	// re-spelling below sees values as wide as the stored key and leaves the
+	// marker component alone (it is a TIMESTAMP, never a fixed-width type).
+	expandSysVersionedPKFilter(ctx, db, opts)
 	typed := opts.PKValuesIn
 	if opts.PKValues != "" {
 		typed = []string{opts.PKValues}

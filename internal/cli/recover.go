@@ -501,8 +501,9 @@ func runRecover(cmd *cobra.Command, args []string) error {
 	}
 
 	if n == 0 {
-		fmt.Fprintln(os.Stderr, "No events matched the specified criteria.")
-		if cfg, err := mysqldriver.ParseDSN(rIndexDSN); err == nil {
+		msg, hint := noStatementsMessage(len(rows))
+		fmt.Fprintln(os.Stderr, msg)
+		if cfg, err := mysqldriver.ParseDSN(rIndexDSN); hint && err == nil {
 			HintSiblingIndexes(cmd.Context(), db, cfg.DBName, os.Stderr)
 		}
 	} else {
@@ -512,6 +513,18 @@ func runRecover(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "Warning: results truncated at %d events; only the most recent events of the window are reversed. Use a narrower time range or --limit to adjust.\n", rLimit)
 	}
 	return nil
+}
+
+// noStatementsMessage words a script with no statements. matched events
+// that produced none can only be history versions of a system-versioned
+// table, which the generator skips (#2007; any other event either reverses
+// or refuses the whole script): saying "no events matched" and pointing at
+// sibling indexes would send the operator to look in the wrong place.
+func noStatementsMessage(matched int) (msg string, siblingHint bool) {
+	if matched == 0 {
+		return "No events matched the specified criteria.", true
+	}
+	return fmt.Sprintf("%d event(s) matched; all were history versions of a system-versioned table, which have no reversal.", matched), false
 }
 
 // wrapScriptBudget adds recover-CLI-specific guidance to a recovery

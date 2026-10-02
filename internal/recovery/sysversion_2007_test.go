@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -197,5 +198,110 @@ func TestGenerate_systemVersioned_flavorDecides_2007(t *testing.T) {
 	if _, err := gen("mariadb", bigCols).GenerateSQLFromRows([]query.ResultRow{trx}, &buf); err == nil ||
 		!strings.Contains(err.Error(), "transaction-precise") {
 		t.Fatalf("mariadb transaction-precise: err=%v, want a refusal", err)
+	}
+}
+
+// Without a schema snapshot describing the table, nothing says whether it is
+// system-versioned, and reversing a versioned table's events literally is the
+// original #2007 bug (a delete that never comes back, DELETE HISTORY
+// resurrecting old versions). A current-row marker in an image is the tell:
+// refuse rather than guess.
+func TestGenerate_noSnapshot_markerRefused_2007(t *testing.T) {
+	tomb := svEvent(1, parser.EventUpdate, "2|"+svCur, svRow(2, "2.00", svT0, svCur), svRow(2, "2.00", svT0, svT1))
+	other := metadata.NewResolverFromTables(1, map[string]*metadata.TableMeta{"shop.other": {Schema: "shop", Table: "other",
+		Columns: []metadata.ColumnMeta{{Name: "id", IsPK: true, DataType: "int"}}, PKColumns: []string{"id"}}})
+	for name, g := range map[string]*Generator{
+		"no resolver":                     New(nil, nil),
+		"table missing from the snapshot": New(nil, other),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			_, err := g.GenerateSQLFromRows([]query.ResultRow{tomb}, &buf)
+			if err == nil || !strings.Contains(err.Error(), "take a schema snapshot first") ||
+				!strings.Contains(err.Error(), "shop.prices") {
+				t.Fatalf("err = %v, want the no-snapshot refusal naming the table\n%s", err, buf.String())
+			}
+			if !errors.Is(err, ErrSystemVersioned) {
+				t.Fatalf("err = %v, want it classified ErrSystemVersioned", err)
+			}
+		})
+	}
+	// An ordinary row with no marker anywhere keeps the degraded reversal.
+	plain := query.ResultRow{EventID: 2, EventTimestamp: svEvent(0, 0, "", nil, nil).EventTimestamp, SchemaName: "shop",
+		TableName: "t", EventType: parser.EventDelete, PKValues: "1", RowBefore: map[string]any{"id": float64(1), "v": "x"}}
+	var buf bytes.Buffer
+	if n, err := New(nil, nil).GenerateSQLFromRows([]query.ResultRow{plain}, &buf); err != nil || n != 1 {
+		t.Fatalf("plain row without a snapshot: n=%d err=%v, want the ordinary reversal", n, err)
+	}
+}
+
+// A versioning refusal must read as one, not as the corruption message the
+// per-event generation failures share.
+func TestGenerate_versioningRefusalWording_2007(t *testing.T) {
+	far := "2090-01-01 00:00:00.000000"
+	var buf bytes.Buffer
+	_, err := svGen().GenerateSQLFromRows([]query.ResultRow{
+		svEvent(1, parser.EventInsert, "1|"+far, nil, svRow(1, "1.00", svT0, far)),
+	}, &buf)
+	if !errors.Is(err, ErrSystemVersioned) {
+		t.Fatalf("err = %v, want ErrSystemVersioned", err)
+	}
+	if strings.Contains(err.Error(), "malformed") || strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("a versioning refusal must not send the operator hunting corruption: %v", err)
+	}
+	if !strings.Contains(err.Error(), "system-versioned") {
+		t.Fatalf("the refusal must say it is about system versioning: %v", err)
+	}
+}
+
+// Flavor unknown (file-indexed binlogs): a transaction-precise table is
+// detected by its shape and refused, not reversed literally. Flavor stamped
+// mysql on an index that in fact reads MariaDB: a generated key member
+// holding a current-row marker is refused.
+func TestGenerate_uncertainFlavor_2007(t *testing.T) {
+	mk := func(flavor string, cols []metadata.ColumnMeta) *Generator {
+		tm := &metadata.TableMeta{Schema: "shop", Table: "prices", Columns: cols}
+		for _, c := range cols {
+			if c.IsPK {
+				tm.PKColumns = append(tm.PKColumns, c.Name)
+			}
+		}
+		g := New(nil, metadata.NewResolverFromTables(1, map[string]*metadata.TableMeta{"shop.prices": tm}))
+		g.flavor, g.flavorRead = flavor, true
+		return g
+	}
+	id := metadata.ColumnMeta{Name: "id", OrdinalPosition: 1, IsPK: true, DataType: "int"}
+	price := metadata.ColumnMeta{Name: "price", OrdinalPosition: 2, DataType: "decimal"}
+	big := []metadata.ColumnMeta{id, price,
+		{Name: "row_start", OrdinalPosition: 3, DataType: "bigint", IsGenerated: true},
+		{Name: "row_end", OrdinalPosition: 4, IsPK: true, DataType: "bigint", IsGenerated: true}}
+	trx := svEvent(1, parser.EventInsert, "1|18446744073709551615", nil,
+		map[string]any{"id": float64(1), "price": "1.00", "row_start": float64(10), "row_end": float64(1.8446744073709552e19)})
+	var buf bytes.Buffer
+	if _, err := mk("", big).GenerateSQLFromRows([]query.ResultRow{trx}, &buf); err == nil ||
+		!strings.Contains(err.Error(), "transaction-precise") {
+		t.Fatalf("unknown flavor, BIGINT periods: err=%v, want the transaction-precise refusal", err)
+	}
+
+	ts := []metadata.ColumnMeta{id, price,
+		{Name: "row_start", OrdinalPosition: 3, DataType: "timestamp", IsGenerated: true},
+		{Name: "row_end", OrdinalPosition: 4, IsPK: true, DataType: "timestamp", IsGenerated: true}}
+	tomb := svEvent(2, parser.EventUpdate, "2|"+svCur, svRow(2, "2.00", svT0, svCur), svRow(2, "2.00", svT0, svT1))
+	buf.Reset()
+	if _, err := mk("mysql", ts).GenerateSQLFromRows([]query.ResultRow{tomb}, &buf); !errors.Is(err, ErrSystemVersioned) {
+		t.Fatalf("flavor mysql, marker in a generated key member: err=%v, want ErrSystemVersioned", err)
+	}
+}
+
+func TestGenerate_historySkipWording_2007(t *testing.T) {
+	var buf bytes.Buffer
+	if _, err := svGen().GenerateSQLFromRows([]query.ResultRow{
+		svEvent(1, parser.EventInsert, "1|"+svCur, nil, svRow(1, "1.00", svT0, svCur)),
+		svEvent(2, parser.EventInsert, "1|"+svT1, nil, svRow(1, "1.00", svT0, svT1)),
+	}, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "owns it") || !strings.Contains(buf.String(), "history version") {
+		t.Fatalf("the skip comment must describe a history version without claiming the server wrote it:\n%s", buf.String())
 	}
 }

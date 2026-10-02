@@ -274,32 +274,92 @@ func TestFoldPage_systemVersioned_pkChangeStillRefused_2007(t *testing.T) {
 	}
 }
 
-func TestSingleRowSysVersionedRefusal_2007(t *testing.T) {
+// Single-row reconstruct of a versioned table (#2007): the declared-key value
+// is looked up under both current markers and the events are read for what
+// they mean to the current row, or the lookup refuses when it cannot be
+// sure. Never the snapshot row as if nothing had happened.
+func TestSingleRowSysVersioning_2007(t *testing.T) {
 	plainPK := []metadata.ColumnMeta{{Name: "id", IsPK: true, DataType: "int"}}
 	for _, c := range []struct {
-		name    string
-		create  string
-		pk      []metadata.ColumnMeta
-		cols    []string
-		refused bool
+		name      string
+		create    string
+		pk        []metadata.ColumnMeta
+		cols      []string
+		flavor    string
+		versioned bool
+		wantErr   string
 	}{
-		{"implicit, from the CREATE", svImplicitCreate, svPK("row_end", "timestamp"), []string{"id"}, true},
-		{"explicit, from the CREATE", svExplicitCreate, svPK("re", "timestamp"), []string{"id"}, true},
-		// The baseline's metadata was unreadable, or predates the embedded
-		// CREATE: the snapshot key still says the lookup would miss.
-		{"no CREATE, generated key member left out", "", svPK("row_end", "timestamp"), []string{"id"}, true},
-		{"no CREATE, generated key member named", "", svPK("row_end", "timestamp"), []string{"id", "row_end"}, false},
-		{"plain table", svPlainCreate, plainPK, []string{"id"}, false},
-		{"nothing known", "", nil, []string{"id"}, false},
+		{"implicit", svImplicitCreate, svPK("row_end", "timestamp"), []string{"id"}, "mariadb", true, ""},
+		{"explicit", svExplicitCreate, svPK("re", "timestamp"), []string{"id"}, "mariadb", true, ""},
+		{"period end named in the key columns", svImplicitCreate, svPK("row_end", "timestamp"), []string{"id", "row_end"}, "mariadb", false, "declared"},
+		// Metadata unreadable or older than the embedded CREATE: the
+		// snapshot key alone says the lookup would miss.
+		{"no CREATE, generated key member", "", svPK("row_end", "timestamp"), []string{"id"}, "mariadb", false, "system-versioned"},
+		{"transaction-precise", svExplicitCreate, svPK("re", "bigint"), []string{"id"}, "mariadb", false, "transaction-precise"},
+		{"plain table", svPlainCreate, plainPK, []string{"id"}, "mariadb", false, ""},
+		{"nothing known, MariaDB source", "", nil, []string{"id"}, "mariadb", false, "schema snapshot"},
+		{"nothing known, source not recorded: warns only", "", nil, []string{"id"}, "", false, ""},
+		{"nothing known, MySQL source", "", nil, []string{"id"}, "mysql", false, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			err := SingleRowSysVersionedRefusal("shop", "prices", c.create, c.pk, c.cols)
-			if c.refused != (err != nil) {
-				t.Fatalf("SingleRowSysVersionedRefusal = %v, want refused=%v", err, c.refused)
+			h, err := SingleRowSysVersioning("shop", "prices", c.create, c.pk, c.cols, c.flavor)
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) || !strings.Contains(err.Error(), "shop.prices") {
+					t.Fatalf("err = %v, want a refusal containing %q and naming the table", err, c.wantErr)
+				}
+				return
 			}
-			if err != nil && !strings.Contains(err.Error(), "shop.prices") {
-				t.Fatalf("the refusal must name the table: %v", err)
+			if err != nil {
+				t.Fatalf("unexpected refusal: %v", err)
+			}
+			if (h != nil) != c.versioned {
+				t.Fatalf("handle = %v, want versioned=%v", h, c.versioned)
 			}
 		})
+	}
+
+	h, err := SingleRowSysVersioning("shop", "prices", svImplicitCreate, svPK("row_end", "timestamp"), []string{"id"}, "mariadb")
+	if err != nil || h == nil {
+		t.Fatalf("SingleRowSysVersioning: %v %v", h, err)
+	}
+	opts := query.Options{PKValues: "2"}
+	h.ExpandKey(&opts)
+	if opts.PKValues != "" || len(opts.PKValuesIn) != 3 {
+		t.Fatalf("ExpandKey: PKValues=%q In=%q, want the value plus both markers", opts.PKValues, opts.PKValuesIn)
+	}
+	t0, t1 := "2026-10-02 06:13:40.000001", "2026-10-02 06:13:43.628276"
+	evs, err := h.Normalize([]query.ResultRow{
+		svEv(1, event.EventUpdate, "2|"+svCur, svRow(2, "2.00", t0, svCur), svRow(2, "2.50", t1, svCur)),
+		svEv(2, event.EventInsert, "2|"+t1, nil, svRow(2, "2.00", t0, t1)),
+		svEv(3, event.EventUpdate, "2|"+svCur, svRow(2, "2.50", t1, svCur), svRow(2, "2.50", t1, "2026-10-02 06:13:44.000000")),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 2 || evs[0].EventType != event.EventUpdate || evs[1].EventType != event.EventDelete {
+		t.Fatalf("Normalize = %+v, want the update then the delete, the history row dropped", evs)
+	}
+	state, err := ApplyAt(map[string]any{"id": 2.0, "price": "2.00"}, evs, svAt.Add(time.Hour))
+	if err != nil || state != nil {
+		t.Fatalf("ApplyAt over the normalized events = %v, %v; want the row deleted (nil)", state, err)
+	}
+}
+
+// Versioning added and dropped again inside the window leaves the period
+// columns in some events' images; that is not a column added after the
+// baseline, and the refusal must say what happened.
+func TestCheckPostBaselineColumns_periodColumnsWording_2007(t *testing.T) {
+	changes := map[string]*query.ResultRow{"1": {EventType: event.EventUpdate,
+		RowAfter: map[string]any{"id": 1.0, "price": "1.00", "row_start": "x", "row_end": svCur}}}
+	in := mergeInput{Schema: "shop", Table: "prices", CreateTableSQL: svPlainCreate}
+	err := checkPostBaselineColumns(in, changes, []string{"id", "price", "sku"})
+	if err == nil || !errors.Is(err, ErrSchemaChanged) || !strings.Contains(err.Error(), "system-versioned during part of this window") ||
+		strings.Contains(err.Error(), "added after the baseline") {
+		t.Fatalf("err = %v, want the versioning wording, classified ErrSchemaChanged", err)
+	}
+	changes["1"].RowAfter["note"] = "new column"
+	if err := checkPostBaselineColumns(in, changes, []string{"id", "price", "sku"}); err == nil ||
+		!strings.Contains(err.Error(), "added after the baseline") {
+		t.Fatalf("a real added column keeps the original wording: %v", err)
 	}
 }

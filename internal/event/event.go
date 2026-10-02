@@ -363,6 +363,28 @@ func DropPKComponent(pkValues string, idx, n int) (string, bool) {
 	return strings.Join(kept, "|"), true
 }
 
+// InsertPKComponent is DropPKComponent's inverse for lookups: it puts value
+// back as the idx-th component of a key that holds the other n-1 components,
+// spelling every component the stored way. It reports false when pkValues
+// does not hold exactly n-1 components or idx is out of range (#2007).
+func InsertPKComponent(pkValues string, idx, n int, value string) (string, bool) {
+	parts := splitPKValues(pkValues)
+	if len(parts) != n-1 || idx < 0 || idx >= n {
+		return "", false
+	}
+	out := make([]string, 0, n)
+	for i, p := range parts {
+		if i == idx {
+			out = append(out, EscapePKValue(value))
+		}
+		out = append(out, EscapePKValue(p))
+	}
+	if idx == n-1 {
+		out = append(out, EscapePKValue(value))
+	}
+	return strings.Join(out, "|"), true
+}
+
 // CanonicalPKValues rewrites a pk_values string into the spelling
 // BuildPKValues produces today for the same key: any component whose raw
 // bytes are not valid UTF-8 is re-spelled as hexPKPrefix + uppercase hex,

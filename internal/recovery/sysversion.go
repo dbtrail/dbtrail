@@ -1,14 +1,54 @@
 package recovery
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/sysversion"
 )
+
+// ErrSystemVersioned classifies a refusal to reverse an event of a MariaDB
+// system-versioned table (#2007): a versioning shape this tool cannot read,
+// or one it cannot rule out. It is not a damaged row image, and the error
+// says so, so the operator does not go hunting corruption.
+var ErrSystemVersioned = errors.New("cannot reverse an event of a system-versioned table")
+
+type svRefusal struct{ msg string }
+
+func (e *svRefusal) Error() string        { return e.msg }
+func (e *svRefusal) Is(target error) bool { return target == ErrSystemVersioned }
+
+func svRefuse(format string, args ...any) error { return &svRefusal{msg: fmt.Sprintf(format, args...)} }
+
+// systemVersionedError is the whole-script refusal when one or more events
+// of a system-versioned table cannot be reversed.
+func systemVersionedError(failures []genFailure) error {
+	parts := make([]string, 0, len(failures))
+	for _, f := range failures {
+		parts = append(parts, f.err.Error())
+	}
+	return &svRefusal{msg: fmt.Sprintf("recover: refusing to emit reversal SQL — %d matched event(s) of a "+
+		"system-versioned table cannot be reversed safely, and a script without them would be a silently "+
+		"incomplete recovery: %s", len(failures), strings.Join(parts, "; "))}
+}
+
+// imageHoldsMarker reports whether any value of the row's images is a
+// current-row marker of MariaDB system versioning.
+func imageHoldsMarker(row query.ResultRow) bool {
+	for _, img := range []map[string]any{row.RowBefore, row.RowAfter} {
+		for _, v := range img {
+			if sysversion.IsCurrentMarker(v) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // sourceFlavor is the index's source flavor ("mysql", "mariadb", "postgres"
 // or "" when unknown), read once.
@@ -52,21 +92,37 @@ func (g *Generator) sysVersionedEnd(tm *metadata.TableMeta) (string, bool) {
 	return p.End, ok
 }
 
-// sysVersionedPeriodEnd is sysVersionedEnd for row's table, resolved against
-// the event-time schema snapshot.
-func (g *Generator) sysVersionedPeriodEnd(row query.ResultRow) (string, bool) {
+// markerInGeneratedKey reports whether one of tm's generated primary-key
+// columns holds a current-row marker in row's images: the shape of a MariaDB
+// versioned table the flavor rule did not recognize.
+func (g *Generator) markerInGeneratedKey(tm *metadata.TableMeta, row query.ResultRow) bool {
+	for _, c := range tm.Columns {
+		if !c.IsPK || !c.IsGenerated {
+			continue
+		}
+		for _, img := range []map[string]any{row.RowBefore, row.RowAfter} {
+			if sysversion.IsCurrentMarker(img[c.Name]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sysVersionedTable resolves row's table against the event-time schema
+// snapshot. found is false when no snapshot describes it.
+func (g *Generator) sysVersionedTable(row query.ResultRow) (*metadata.TableMeta, bool) {
 	r := g.resolverForRow(row)
 	if r == nil {
-		return "", false
+		return nil, false
 	}
 	tm, err := r.Resolve(row.SchemaName, row.TableName)
 	if err != nil {
-		// pkWhereClause warns about the same failure for this row.
-		slog.Debug("cannot resolve table to check for system versioning", "schema", row.SchemaName,
-			"table", row.TableName, "error", err)
-		return "", false
+		slog.Warn("no schema snapshot describes the table, so recover cannot tell whether it is system-versioned",
+			"schema", row.SchemaName, "table", row.TableName, "error", err)
+		return nil, false
 	}
-	return g.sysVersionedEnd(tm)
+	return tm, true
 }
 
 // sysVersionedReversal decides what reversing one event means when its table
@@ -91,17 +147,35 @@ func (g *Generator) sysVersionedPeriodEnd(row query.ResultRow) (string, bool) {
 // history version current, or a ROW END value nothing explains, is an error:
 // guessing would emit SQL that applies and is wrong.
 func (g *Generator) sysVersionedReversal(row query.ResultRow) (out query.ResultRow, skip string, err error) {
-	end, ok := g.sysVersionedPeriodEnd(row)
+	tm, found := g.sysVersionedTable(row)
+	if !found {
+		// Without a snapshot nothing says whether the table is versioned,
+		// and reading a versioned table's events literally is the #2007
+		// bug. A current-row marker in an image is the tell.
+		if imageHoldsMarker(row) {
+			return row, "", svRefuse("event %d: cannot tell whether %s.%s is system-versioned without a schema snapshot "+
+				"(its row image holds MariaDB's current-row marker); take a schema snapshot first (`bintrail snapshot`)",
+				row.EventID, row.SchemaName, row.TableName)
+		}
+		return row, "", nil
+	}
+	end, ok := g.sysVersionedEnd(tm)
 	if !ok {
+		if g.markerInGeneratedKey(tm, row) {
+			return row, "", svRefuse("event %d: %s.%s has a generated primary-key column holding MariaDB's current-row "+
+				"marker, but the index records its source as %q, so recover cannot tell whether the table is "+
+				"system-versioned; take a schema snapshot with the current bintrail (`bintrail snapshot`) so the "+
+				"source is recorded, then retry", row.EventID, row.SchemaName, row.TableName, g.sourceFlavor())
+		}
 		return row, "", nil
 	}
 	state := func(img map[string]any, which string) (sysversion.State, error) {
 		if img == nil {
-			return 0, fmt.Errorf("system-versioned table %s.%s: event %d has no %s image", row.SchemaName, row.TableName, row.EventID, which)
+			return 0, svRefuse("event %d of system-versioned table %s.%s has no %s image", row.EventID, row.SchemaName, row.TableName, which)
 		}
 		st, err := sysversion.RowEnd(img[end], row.EventTimestamp)
 		if err != nil {
-			return 0, fmt.Errorf("system-versioned table %s.%s: event %d: %w", row.SchemaName, row.TableName, row.EventID, err)
+			return 0, svRefuse("event %d of system-versioned table %s.%s: %v", row.EventID, row.SchemaName, row.TableName, err)
 		}
 		return st, nil
 	}
@@ -112,7 +186,7 @@ func (g *Generator) sysVersionedReversal(row query.ResultRow) (out query.ResultR
 			return row, "", err
 		}
 		if after == sysversion.History {
-			return row, "this is the old version system versioning kept when the row changed; the server writes and owns it", nil
+			return row, "this is a history version of the row (an old version kept when the row changed, or one written into history directly), not a change to its current rows", nil
 		}
 	case event.EventUpdate:
 		before, err := state(row.RowBefore, "before")
@@ -130,8 +204,8 @@ func (g *Generator) sysVersionedReversal(row query.ResultRow) (out query.ResultR
 		case before == sysversion.History && after == sysversion.History:
 			return row, "this edits a history version; history cannot be written back", nil
 		case before == sysversion.History:
-			return row, "", fmt.Errorf("system-versioned table %s.%s: event %d makes a history version current again, "+
-				"which has no reversal this tool can write", row.SchemaName, row.TableName, row.EventID)
+			return row, "", svRefuse("event %d of system-versioned table %s.%s makes a history version current again, "+
+				"which has no reversal this tool can write", row.EventID, row.SchemaName, row.TableName)
 		}
 	case event.EventDelete:
 		before, err := state(row.RowBefore, "before")

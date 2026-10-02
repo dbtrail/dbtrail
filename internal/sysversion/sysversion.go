@@ -62,6 +62,18 @@ var currentMarkers = map[string]bool{
 	"2106-02-07 06:28:15.999999": true, // 11.5 and later, 64-bit
 }
 
+// CurrentMarkers returns every ROW END value that marks a current row, in a
+// fixed order, for lookups that must spell a current row's stored key.
+func CurrentMarkers() []string {
+	return []string{"2038-01-19 03:14:07.999999", "2106-02-07 06:28:15.999999"}
+}
+
+// IsCurrentMarker reports whether v is one of the current-row markers.
+func IsCurrentMarker(v any) bool {
+	s, ok := v.(string)
+	return ok && currentMarkers[s]
+}
+
 // historySlack is how far past the moment of its own event a history row's
 // ROW END may sit and still be read as "ended". MariaDB stamps ROW END with
 // the statement's time and the binlog event with the same clock, so the two
@@ -229,33 +241,41 @@ func unquoteIdent(s string) string {
 }
 
 // FromSnapshot names the period of a table whose schema snapshot has the
-// system-versioning shape, for readers that hold the snapshot but no CREATE
-// TABLE statement (recovery): exactly one generated TIMESTAMP column in the
-// primary key (ROW END, which MariaDB appends to the key) and exactly one
-// other generated TIMESTAMP column outside it (ROW START).
+// system-versioning shape, for readers that hold the snapshot but neither a
+// CREATE TABLE statement nor a known source flavor (recovery over an index
+// whose flavor is not recorded): exactly one generated column in the primary
+// key (ROW END, which MariaDB appends to the key) and exactly one other
+// generated column outside it (ROW START), both TIMESTAMP or both BIGINT.
 //
-// The shape cannot be anything else on MariaDB, which refuses a generated
-// column in a primary key ("Primary key cannot be defined upon a generated
-// column") except for ROW END. MySQL has no system versioning; a MySQL table
-// would need both a stored generated TIMESTAMP in its key and a second
-// generated TIMESTAMP beside it to match, and a single one (the plausible
-// MySQL shape) does not.
+// BIGINT is the transaction-precise form, accepted here so it is DETECTED:
+// RowEnd then refuses its values instead of the table passing as an
+// ordinary one.
+//
+// MariaDB refuses a generated column in a primary key ("Primary key cannot
+// be defined upon a generated column") except ROW END. MySQL has no system
+// versioning; a MySQL table would need both a stored generated column in its
+// key and a second one of the same type beside it to match.
 func FromSnapshot(cols []metadata.ColumnMeta) (Period, bool) {
 	var p Period
+	var startType, endType string
 	for _, c := range cols {
-		if !c.IsGenerated || !strings.EqualFold(strings.TrimSpace(c.DataType), "timestamp") {
+		if !c.IsGenerated {
 			continue
 		}
-		slot := &p.Start
+		typ := strings.ToLower(strings.TrimSpace(c.DataType))
+		if typ != "timestamp" && typ != "bigint" {
+			continue
+		}
+		slot, slotType := &p.Start, &startType
 		if c.IsPK {
-			slot = &p.End
+			slot, slotType = &p.End, &endType
 		}
 		if *slot != "" {
 			return Period{}, false
 		}
-		*slot = c.Name
+		*slot, *slotType = c.Name, typ
 	}
-	if p.Start == "" || p.End == "" {
+	if p.Start == "" || p.End == "" || startType != endType {
 		return Period{}, false
 	}
 	return p, true

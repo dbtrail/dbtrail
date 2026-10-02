@@ -2,6 +2,7 @@ package reconstruct
 
 import (
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -28,6 +29,8 @@ type sysVersioned struct {
 	period        sysversion.Period
 	// endIdx is ROW END's position in the stored pk_values, keyN its width.
 	endIdx, keyN int
+	// surface names the reader in refusals; empty is full-table reconstruct.
+	surface string
 }
 
 // sysVersioningFor decides how a full-table fold keys a table whose snapshot
@@ -199,39 +202,120 @@ func (sv *sysVersioned) strip(img map[string]any) map[string]any {
 }
 
 func (sv *sysVersioned) refuse(ev *query.ResultRow, why string) error {
-	return fmt.Errorf("full-table reconstruct: %s.%s is system-versioned and event %d cannot be read as a change "+
-		"of its current rows: %s", sv.schema, sv.table, ev.EventID, why)
+	surface := sv.surface
+	if surface == "" {
+		surface = "full-table reconstruct"
+	}
+	return fmt.Errorf("%s: %s.%s is system-versioned and event %d cannot be read as a change "+
+		"of its current rows: %s", surface, sv.schema, sv.table, ev.EventID, why)
 }
 
-// SingleRowSysVersionedRefusal refuses a single-row reconstruct of a MariaDB
-// system-versioned table (#2007).
-//
-// The single-row paths look a row's changes up by its stored key, and a
-// versioned table stores every change under the declared key PLUS ROW END
-// ("2|2106-02-07 06:28:15.999999", "2|2026-10-02 06:13:43.628276", ...). A
-// lookup by the declared key alone finds none of them and would answer with
-// the snapshot's row unchanged, as if nothing had happened since: a
-// confident, wrong answer. Full-table reconstruct reads these tables; this
-// says so instead of answering. A baseline-only read needs no changes and is
-// not refused.
+// SingleRowVersioned is how a single-row reconstruct reads a MariaDB
+// system-versioned table (#2007): the declared-key value is looked up under
+// the stored spellings (ExpandKey) and the events found are read for what
+// they mean to the current row (Normalize), as the full-table fold reads
+// them.
+type SingleRowVersioned struct {
+	sv      *sysVersioned
+	pkMetas []metadata.ColumnMeta
+}
+
+// SingleRowSysVersioning decides how a single-row reconstruct reads
+// schema.table: nil for an ordinary table, a handle for a system-versioned
+// one, or a refusal when it cannot be read safely.
 //
 // Two signals, because either can be missing: the snapshot's CREATE TABLE
 // (empty when its metadata could not be read, or predates the embedded
-// statement), and the schema snapshot's key (pkMetas): a generated key member
-// the caller's key columns (pkCols) leave out means the lookup cannot match.
-func SingleRowSysVersionedRefusal(schema, table, createSQL string, pkMetas []metadata.ColumnMeta, pkCols []string) error {
+// statement), and the schema snapshot's key (pkMetas). Reading needs the
+// CREATE TABLE (it names the period columns); a generated key member without
+// it refuses. With neither, nothing rules versioning out, so a MariaDB
+// source (flavor) refuses; an unknown source only warns, since an index
+// without a recorded source is the file-indexed shape, which predates
+// MariaDB support for most installs; a MySQL or PostgreSQL source has no
+// system versioning.
+//
+// pkCols are the key columns the caller looks the row up by: they must be
+// the declared key, without the period end.
+func SingleRowSysVersioning(schema, table, createSQL string, pkMetas []metadata.ColumnMeta, pkCols []string, flavor string) (*SingleRowVersioned, error) {
 	_, versioned := sysversion.FromCreateTable(createSQL)
+	gen, hasGen := GeneratedPKColumn(pkMetas)
+	if !versioned && !hasGen {
+		if createSQL == "" && len(pkMetas) == 0 && flavor == "" {
+			slog.Warn("neither the snapshot's metadata nor a schema snapshot describes the table, and the index does not "+
+				"record its source; if it is a MariaDB system-versioned table this lookup misses its changes "+
+				"(take a schema snapshot, `bintrail snapshot`, to rule that out)", "schema", schema, "table", table)
+		}
+		if createSQL == "" && len(pkMetas) == 0 && flavor == "mariadb" {
+			return nil, fmt.Errorf("cannot tell whether %s.%s is system-versioned: neither the snapshot's metadata nor a schema "+
+				"snapshot describes it, and a system-versioned table's changes are stored under a key this lookup would miss, "+
+				"so the answer could be the snapshot row as if nothing had changed; take a schema snapshot first (`bintrail snapshot`)",
+				schema, table)
+		}
+		return nil, nil
+	}
+	if hasGen && slices.ContainsFunc(pkCols, func(c string) bool { return strings.EqualFold(strings.TrimSpace(c), gen.Name) }) {
+		return nil, fmt.Errorf("%s.%s is system-versioned: look the row up by its declared primary key, without %q, which "+
+			"MariaDB appends to the key; the row's current and past versions are read for you", schema, table, gen.Name)
+	}
 	if !versioned {
-		if gen, ok := GeneratedPKColumn(pkMetas); ok && !slices.ContainsFunc(pkCols, func(c string) bool {
-			return strings.EqualFold(strings.TrimSpace(c), gen.Name)
-		}) {
-			versioned = true
+		return nil, fmt.Errorf("%s.%s looks system-versioned (its primary key has the generated column %q), but the "+
+			"snapshot's metadata does not carry its CREATE TABLE, which names the period columns; reconstruct the whole "+
+			"table, or take a new full snapshot and retry", schema, table, gen.Name)
+	}
+	sv, _, err := sysVersioningFor(schema, table, createSQL, pkMetas)
+	if err != nil {
+		return nil, err
+	}
+	if sv == nil {
+		return nil, nil
+	}
+	sv.surface = "reconstruct"
+	return &SingleRowVersioned{sv: sv, pkMetas: pkMetas}, nil
+}
+
+// ExpandKey adds the stored spellings of opts' declared-key value(s).
+func (h *SingleRowVersioned) ExpandKey(opts *query.Options) {
+	values := opts.PKValuesIn
+	if opts.PKValues != "" {
+		values = []string{opts.PKValues}
+		if opts.PKValuesAlt != "" {
+			values = append(values, opts.PKValuesAlt)
 		}
 	}
-	if !versioned {
-		return nil
+	if out, ok := expandSysVersionedKeys(h.pkMetas, values); ok {
+		opts.PKValues, opts.PKValuesAlt, opts.PKValuesIn = "", "", out
 	}
-	return fmt.Errorf("%s.%s is a system-versioned table: single-row reconstruct cannot look its changes up by the "+
-		"primary key, because MariaDB records each change under the key plus the row's ROW END time; reconstruct the "+
-		"whole table instead (full-table mode, which reads these tables) and read the row from its output", schema, table)
+}
+
+// Normalize reads the row's events for what they mean to its current
+// version, dropping history versions, and refuses one it cannot read.
+func (h *SingleRowVersioned) Normalize(events []query.ResultRow) ([]query.ResultRow, error) {
+	out := make([]query.ResultRow, 0, len(events))
+	for i := range events {
+		ev := events[i]
+		keep, err := h.sv.normalize(&ev)
+		if err != nil {
+			return nil, err
+		}
+		if keep {
+			out = append(out, ev)
+		}
+	}
+	return out, nil
+}
+
+// onlyPeriodColumns reports whether every column in extra is a system-
+// versioning period column: the hidden row_start/row_end, or the period the
+// CREATE TABLE declares.
+func onlyPeriodColumns(extra []string, createSQL string) bool {
+	names := []string{sysversion.ImplicitStart, sysversion.ImplicitEnd}
+	if p, ok := sysversion.FromCreateTable(createSQL); ok {
+		names = append(names, p.Start, p.End)
+	}
+	for _, col := range extra {
+		if !slices.ContainsFunc(names, func(n string) bool { return strings.EqualFold(n, col) }) {
+			return false
+		}
+	}
+	return true
 }

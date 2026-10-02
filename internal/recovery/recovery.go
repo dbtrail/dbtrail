@@ -327,6 +327,7 @@ func (g *Generator) generate(rows []query.ResultRow, w *countingWriter) (int, []
 	drift := map[string]map[string]bool{} // "schema.table" -> set of drifted columns
 	var driftOrder []string               // table keys in first-seen order, for a stable message
 	var genFailures []genFailure          // per-event generation errors, in first-seen order (#784)
+	var svFailures []genFailure           // system-versioning refusals (#2007), reported as such
 
 	written := 0
 	// Body-relative statement ends; rebased onto w's counter once the preamble
@@ -360,7 +361,7 @@ func (g *Generator) generate(rows []query.ResultRow, w *countingWriter) (int, []
 		if svErr != nil {
 			fmt.Fprintf(&body, "-- ERROR generating reversal for event %d: %s\n",
 				row.EventID, SanitizeForComment(svErr.Error()))
-			genFailures = append(genFailures, genFailure{
+			svFailures = append(svFailures, genFailure{
 				eventID: row.EventID, schemaName: row.SchemaName, tableName: row.TableName,
 				pkValues: row.PKValues, err: svErr,
 			})
@@ -423,6 +424,9 @@ func (g *Generator) generate(rows []query.ResultRow, w *countingWriter) (int, []
 	// (#784) — checked ahead of the drift refusal because a nil/malformed row
 	// image is a more fundamental data-integrity problem than a since-renamed
 	// column, and both are fail-loud refusals returning zero statements.
+	if len(svFailures) > 0 {
+		return 0, nil, systemVersionedError(svFailures)
+	}
 	if len(genFailures) > 0 {
 		return 0, nil, partialGenerationError(genFailures)
 	}

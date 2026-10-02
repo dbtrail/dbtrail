@@ -157,12 +157,19 @@ func TestEndToEnd_MariaDBSystemVersionedRefresh(t *testing.T) {
 		}
 	}
 
-	// Single-row reconstruct cannot look a versioned row's changes up; it
-	// must say so, not answer with the snapshot row (#2007).
+	// Single-row reconstruct looks the row up under the stored spellings
+	// and reads its events for the current row (#2007): several UPDATEs
+	// (id 1), and DELETE then re-INSERT (id 3).
+	for _, id := range []string{"1", "3"} {
+		out := run(t, binPath, coverDir, "reconstruct", "--index-dsn", indexDSN, "--baseline-dir", baseDir,
+			"--schema", sourceName, "--table", "prices", "--pk", id, "--pk-columns", "id", "--at", at1)
+		assertReconstructedRow(t, "prices id="+id+" at T1", out, byName["prices"].sourceRow(t, sourceDB, sourceName, "id = "+id))
+	}
+	// Naming the period column in the key is refused with the reason.
 	if out, errOut, err := runResult(binPath, coverDir, "reconstruct", "--index-dsn", indexDSN, "--baseline-dir", baseDir,
-		"--schema", sourceName, "--table", "prices", "--pk", "1", "--pk-columns", "id", "--at", at1); err == nil ||
-		!strings.Contains(out+errOut, "system-versioned") {
-		t.Errorf("single-row reconstruct of a versioned table: err=%v, want a refusal naming system versioning\n%s\n%s", err, out, errOut)
+		"--schema", sourceName, "--table", "prices", "--pk", "1|x", "--pk-columns", "id,row_end", "--at", at1); err == nil ||
+		!strings.Contains(out+errOut, "declared primary key") {
+		t.Errorf("single-row reconstruct keyed with row_end: err=%v, want the refusal\n%s\n%s", err, out, errOut)
 	}
 
 	// ── Refresh 1: every table rewritten in full ─────────────────────────────
@@ -221,9 +228,38 @@ func TestEndToEnd_MariaDBSystemVersionedRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sinceW2 := since.Add(time.Second).Format("2006-01-02 15:04:05")
+	applyDB, err := sql.Open("mysql", testutil.MariaDBBaseDSN()+"/"+sourceName+"?multiStatements=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer applyDB.Close()
+
+	// By key: id 1 was deleted in window 2. `query --pk 1` and `recover
+	// --pk 1` type the declared key and must find it (#2007), and the
+	// script must bring the row back.
+	if out := run(t, binPath, coverDir, "query", "--index-dsn", indexDSN, "--schema", sourceName, "--table", "prices",
+		"--pk", "1", "--format", "json"); !strings.Contains(out, "event_id") {
+		t.Errorf("query --pk 1 on a versioned table found no events:\n%s", out)
+	}
+	pkSQL := filepath.Join(tmp, "recover-pk.sql")
+	run(t, binPath, coverDir, "recover", "--index-dsn", indexDSN, "--schema", sourceName, "--table", "prices",
+		"--pk", "1", "--since", sinceW2, "--until", at2, "--output", pkSQL)
+	pkScript, err := os.ReadFile(pkSQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applyDB.Exec(string(pkScript)); err != nil {
+		t.Fatalf("apply recover --pk 1: %v\n%s", err, pkScript)
+	}
+	want1 := state1["prices"][0]
+	if got := byName["prices"].textRows(t, sourceDB, sourceName); len(got) == 0 || got[0] != want1 {
+		t.Fatalf("recover --pk 1 did not bring the deleted row back: got %q, want first row %q\n%s", got, want1, pkScript)
+	}
+	exec("DELETE FROM prices WHERE id = 1") // back to the state the window-wide reversal below starts from
 	recSQL := filepath.Join(tmp, "recover.sql")
 	run(t, binPath, coverDir, "recover", "--index-dsn", indexDSN, "--schema", sourceName,
-		"--since", since.Add(time.Second).Format("2006-01-02 15:04:05"), "--until", at2, "--output", recSQL)
+		"--since", sinceW2, "--until", at2, "--output", recSQL)
 	script, err := os.ReadFile(recSQL)
 	if err != nil {
 		t.Fatal(err)
@@ -231,11 +267,6 @@ func TestEndToEnd_MariaDBSystemVersionedRefresh(t *testing.T) {
 	if !strings.Contains(string(script), "skipped, system-versioned table") {
 		t.Errorf("the reversal script skipped no history event, so the versioned path was not exercised:\n%s", script)
 	}
-	applyDB, err := sql.Open("mysql", testutil.MariaDBBaseDSN()+"/"+sourceName+"?multiStatements=true")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer applyDB.Close()
 	if _, err := applyDB.Exec(string(script)); err != nil {
 		t.Fatalf("apply the reversal script: %v\n%s", err, script)
 	}
