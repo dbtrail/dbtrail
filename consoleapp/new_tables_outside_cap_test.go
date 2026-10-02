@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
 // Full reads that include new tables sit outside the daily cap on emergency
@@ -163,5 +164,33 @@ func TestNewTablesHeld_onlyNewTablesStartsCount(t *testing.T) {
 	next, held := b.newTablesHeld("s", now)
 	if !held || !next.Equal(first.Add(newTablesWindow)) {
 		t.Fatalf("held = %v next = %v; want held until %v", held, next, first.Add(newTablesWindow))
+	}
+}
+
+// Through the real slots: a fallback at 09:00 uses the day's emergency read,
+// new tables get their full read anyway, and the refused update at 10:00 is
+// still held by the cap the fallback set.
+func TestNewTables_betweenTwoRefusedSlots(t *testing.T) {
+	refuseWith(t, func() []reconstruct.TableFailure { return []reconstruct.TableFailure{schemaChanged("orders")} })
+	b, reg, sup := newScheduleFixture(t, true)
+	reads := stubFullReads(t, sup)
+	e := addScheduled(t, reg, true)
+	b.tick(context.Background(), time.Date(2026, 8, 28, 8, 0, 5, 0, time.UTC))
+	slotAt(t, b, e.ID, 9)
+	if reads.count() != 1 {
+		t.Fatalf("fixture: the 09:00 fallback did not read in full: %d reads", reads.count())
+	}
+	if action, reason := newTablesRead(t, b, reads, e, "demo.fresh"); action != console.NewTablesActionFullRead {
+		t.Fatalf("new tables held back after the day's fallback: %q %q", action, reason)
+	}
+	if reads.count() != 2 {
+		t.Fatalf("full reads = %d, want 2 (fallback + new tables)", reads.count())
+	}
+	st := slotAt(t, b, e.ID, 10)
+	if reads.count() != 2 {
+		t.Fatalf("the 10:00 refused update read in full again: %d reads", reads.count())
+	}
+	if !strings.Contains(st.LastSkipReason, "at most once a day") {
+		t.Fatalf("the 10:00 slot does not say the emergency cap held it: %q", st.LastSkipReason)
 	}
 }
