@@ -200,19 +200,19 @@ answers, and prints the next steps.
    and press **Find it**. The form shows the SQL that creates DBTrail's user.
    Run it on your MySQL, then press **I ran it**. DBTrail checks the rest and
    starts on its own.
-3. **First copy.** On **Snapshots**, press **Read database now**. Normally
+3. **First change.** Change a row on your MySQL. It shows under
+   **Recent changes** on the Overview within a minute, with an **Undo** that
+   writes the SQL to reverse it.
+4. **First copy.** On **Snapshots**, press **Read database now**. Normally
    this is the only time DBTrail reads your tables directly.
-4. **Set a schedule.** On the **Settings** tab of **Snapshots**, under
+5. **Set a schedule.** On the **Settings** tab of **Snapshots**, under
    **Update the copy**, pick how often (every 5 minutes, for example) and
    press **Turn on**. Each run after the first folds the recorded changes
    instead of reading the source.
-5. **Query it.** On **Snapshots**, press **Download**, then
+6. **Query it.** On **Snapshots**, press **Download**, then
    **Download the data**. Unpack the `.tar.gz` and run `duckdb -init views.sql`
    inside the snapshot folder. To read the copy that keeps updating, see
    [Query in DuckDB](https://www.dbtrail.com/docs/guides/query-in-duckdb/).
-6. **See a change.** Change a row on your MySQL. It shows under
-   **Recent changes** on the Overview within a minute, with an **Undo** that
-   writes the SQL to reverse it.
 
 Prefer the command line? See the [command-line quickstart](docs/quickstart.md).
 
