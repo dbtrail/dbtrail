@@ -45,6 +45,20 @@ func TestPerPKSatisfiedLive(t *testing.T) {
 			why:  "the trim keeps this row and discards every older archived one",
 		},
 		{
+			// #2007: a system-versioned lookup adds spellings (key plus
+			// each current marker). The trim is per stored spelling, and
+			// an added spelling with no live row (the other server
+			// version's marker, or the plain key from before versioning)
+			// can still hold archived rows the full answer keeps.
+			name: "spellings added by a system-versioned lookup",
+			opts: Options{LimitPerPK: 1, PKValuesIn: []string{"2|m"},
+				PKAliases: map[string]string{"2|m": "2", "2|n": "2"}},
+			rows: pkRowsAt("2|m", 1, inside),
+			plan: &QueryPlan{ArchivesBelowLive: true, MySQLRanges: []TimeRange{live}},
+			want: false,
+			why:  "an added spelling's archived rows survive the per-spelling trim",
+		},
+		{
 			name: "several named PKs, all satisfied",
 			opts: Options{LimitPerPK: 2, PKValuesIn: []string{"1", "2"}},
 			rows: append(pkRowsAt("1", 2, inside), pkRowsAt("2", 2, inside)...),

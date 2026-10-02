@@ -209,6 +209,13 @@ func TestEndToEnd_MariaDBSystemVersionedRefresh(t *testing.T) {
 	if err == nil || !strings.Contains(out+errOut, "new full snapshot") {
 		t.Fatalf("refresh of a table versioned after its snapshot: err=%v, want the curable refusal\n%s\n%s", err, out, errOut)
 	}
+	// Single-row reconstruct of altv across the ALTER: its changes sit
+	// under two key spellings, so it refuses rather than miss half.
+	if out, errOut, err := runResult(binPath, coverDir, "reconstruct", "--index-dsn", indexDSN, "--baseline-dir", baseDir,
+		"--schema", sourceName, "--table", "altv", "--pk", "2", "--pk-columns", "id", "--at", at3); err == nil ||
+		!strings.Contains(out+errOut, "system versioning") {
+		t.Errorf("single-row reconstruct across ADD SYSTEM VERSIONING: err=%v, want a refusal\n%s\n%s", err, out, errOut)
+	}
 	dump(filepath.Join(tmp, "dump2"))
 	secondBoundary()
 	dml(2, "UPDATE altv SET n = 33 WHERE id = 1")

@@ -1358,7 +1358,7 @@ func TestWriteGroupedJSON_preservesInputOrderAndEmits_emptyGroups(t *testing.T) 
 		{EventID: 2, SchemaName: "db", TableName: "t", PKValues: "a", EventType: binparser.EventDelete},
 	}
 	var buf bytes.Buffer
-	n, err := writeGroupedJSON([]string{"a", "b", "c"}, nil, rows, &buf)
+	n, err := writeGroupedJSON([]string{"a", "b", "c"}, nil, nil, rows, &buf)
 	if err != nil {
 		t.Fatalf("writeGroupedJSON: %v", err)
 	}
@@ -1396,7 +1396,7 @@ func TestWriteGroupedJSON_findsRowsUnderTheStoredSpelling(t *testing.T) {
 		{EventID: 1, SchemaName: "shop", TableName: "sessions", PKValues: stored, EventType: binparser.EventUpdate},
 	}
 	var buf bytes.Buffer
-	n, err := writeGroupedJSON([]string{text, "other"}, map[string]string{text: stored}, rows, &buf)
+	n, err := writeGroupedJSON([]string{text, "other"}, map[string]string{text: stored}, nil, rows, &buf)
 	if err != nil {
 		t.Fatal(err)
 	}

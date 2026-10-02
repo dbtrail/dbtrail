@@ -152,7 +152,10 @@ func (g *Generator) sysVersionedReversal(row query.ResultRow) (out query.ResultR
 		// Without a snapshot nothing says whether the table is versioned,
 		// and reading a versioned table's events literally is the #2007
 		// bug. A current-row marker in an image is the tell.
-		if imageHoldsMarker(row) {
+		// MySQL and PostgreSQL have no system versioning, and MySQL's
+		// largest TIMESTAMP IS the 2038 marker (a common "never expires"
+		// value), so only a MariaDB or unrecorded source is checked.
+		if imageHoldsMarker(row) && g.sourceFlavor() != "mysql" && g.sourceFlavor() != "postgres" {
 			return row, "", svRefuse("event %d: cannot tell whether %s.%s is system-versioned without a schema snapshot "+
 				"(its row image holds MariaDB's current-row marker); take a schema snapshot first (`bintrail snapshot`)",
 				row.EventID, row.SchemaName, row.TableName)

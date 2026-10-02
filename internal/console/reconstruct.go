@@ -436,6 +436,16 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 	// answered "the row did not exist" for such a key while the CLI answered
 	// correctly. Best-effort: nil metas keep the exact-match behavior.
 	pkMetas := reconstruct.ResolvePKMetasAt(b.db, schema, table, snapshotTime)
+	// A MariaDB system-versioned table (#2007): looked up by its declared
+	// key under the stored spellings, its events read for the current row,
+	// or refused when that cannot be done safely. Never the snapshot row
+	// as if nothing had changed.
+	sysVer, pkSearch, err := reconstruct.PrepareSingleRowLookup(ctx, b.db, schema, table, pk, bmeta.CreateTableSQL,
+		pkMetas, pkCols, snapshotTime, atTime)
+	if err != nil {
+		writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	if err := reconstruct.CheckUntypedMariaDBFixedPK(ctx, path, pkFilter, pkMetas); err != nil {
 		writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -503,11 +513,14 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 		// presents baseline-era state as the state at `at` — a fail-loud to
 		// fail-silent regression (#1155's indexPKSpelling hazard, same as the
 		// CLI).
-		PKValues: reconstruct.IndexPKSpelling(pk, pkMetas),
+		PKValues: pkSearch,
 		Since:    &snapshotTime,
 		Until:    &atTime,
 		Order:    "", // ASC: ApplyAt/BuildHistory require chronological input.
 		Limit:    reconstructMaxEvents + 1,
+	}
+	if sysVer != nil {
+		sysVer.ExpandKey(&opts)
 	}
 	fmOpts := query.FetchMergedOptions{
 		Opts:           opts,
@@ -566,6 +579,12 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 	// before the fold so State/History carry the real value, not base64 text
 	// (#666). Baseline values are read raw from Parquet and pass through.
 	reconstruct.DecodeEventBinaries(b.db, schema, table, rows)
+	if sysVer != nil {
+		if rows, err = sysVer.Normalize(rows); err != nil {
+			writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+	}
 
 	resp := reconstructResponse{
 		Schema: schema, Table: table, PK: pk,
@@ -639,7 +658,7 @@ func (b *bundle) pkColumns(schema, table string) ([]string, error) {
 	if len(tm.PKColumns) == 0 {
 		return nil, fmt.Errorf("table %s.%s has no primary key; reconstruct requires one", schema, table)
 	}
-	return tm.PKColumns, nil
+	return reconstruct.SingleRowKeyColumns(tm, query.SourceFlavor(b.db)), nil
 }
 
 // buildPKFilter zips ordinal PK column names with the pipe-delimited values.

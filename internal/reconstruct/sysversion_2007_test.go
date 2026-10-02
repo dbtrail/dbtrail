@@ -2,6 +2,7 @@ package reconstruct
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -361,5 +362,41 @@ func TestCheckPostBaselineColumns_periodColumnsWording_2007(t *testing.T) {
 	if err := checkPostBaselineColumns(in, changes, []string{"id", "price", "sku"}); err == nil ||
 		!strings.Contains(err.Error(), "added after the baseline") {
 		t.Fatalf("a real added column keeps the original wording: %v", err)
+	}
+}
+
+// A versioned table keyed by a MariaDB UUID: the stored key is the UUID's
+// bytes plus the marker. Expanding after spelling (the old order) searched
+// "<uuid text>|<marker>", found nothing, and answered with the snapshot row.
+func TestSingleRowExpandKey_uuidKey_2007(t *testing.T) {
+	const u = "123e4567-e89b-12d3-a456-426614174000"
+	pk := []metadata.ColumnMeta{
+		{Name: "u", IsPK: true, DataType: "uuid"},
+		{Name: "row_end", IsPK: true, DataType: "timestamp", IsGenerated: true},
+	}
+	create := "CREATE TABLE `t` (\n  `u` uuid NOT NULL,\n  PRIMARY KEY (`u`)\n) ENGINE=InnoDB WITH SYSTEM VERSIONING;"
+	h, err := SingleRowSysVersioning("shop", "t", create, pk, []string{"u"}, "mariadb")
+	if err != nil || h == nil {
+		t.Fatalf("SingleRowSysVersioning: %v %v", h, err)
+	}
+	opts := query.Options{PKValues: u}
+	h.ExpandKey(&opts)
+	want := IndexPKSpelling(u+"|"+svCur, pk)
+	if want == u+"|"+svCur {
+		t.Fatal("test premise: the UUID must spell differently in the index")
+	}
+	if !slices.Contains(opts.PKValuesIn, want) {
+		t.Fatalf("ExpandKey = %q, want it to include the stored spelling %q", opts.PKValuesIn, want)
+	}
+}
+
+// On a MySQL source a generated key column is no period end: the refusal
+// must not talk about system versioning.
+func TestSingleRowSysVersioning_mysqlGeneratedKey_2007(t *testing.T) {
+	pk := []metadata.ColumnMeta{{Name: "id", IsPK: true, DataType: "int"},
+		{Name: "g", IsPK: true, DataType: "int", IsGenerated: true}}
+	_, err := SingleRowSysVersioning("shop", "t", "CREATE TABLE `t` (\n  `id` int NOT NULL\n) ENGINE=InnoDB;", pk, []string{"id"}, "mysql")
+	if err == nil || strings.Contains(err.Error(), "versioned") || !strings.Contains(err.Error(), `"g"`) {
+		t.Fatalf("err = %v, want a refusal naming the generated key column, without system versioning", err)
 	}
 }

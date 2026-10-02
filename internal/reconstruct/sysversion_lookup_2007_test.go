@@ -29,6 +29,12 @@ func TestExpandSysVersionedKeys_2007(t *testing.T) {
 			[]string{"x|5", "x|" + m4 + "|5", "x|" + m11 + "|5"}},
 		{"value already holds the end", []metadata.ColumnMeta{id, end}, []string{"2|" + m11}, nil},
 		{"plain table", []metadata.ColumnMeta{id}, []string{"2"}, nil},
+		// One component fewer than the key, but nothing generated: a
+		// typed composite prefix must not grow a marker.
+		{"plain composite key, value one short", []metadata.ColumnMeta{a, id}, []string{"x"}, nil},
+		// A generated INT key member (MySQL allows it) is no period end.
+		{"generated INT key member", []metadata.ColumnMeta{id,
+			{Name: "g", IsPK: true, DataType: "int", IsGenerated: true}}, []string{"2"}, nil},
 		{"transaction-precise end: no marker to spell", []metadata.ColumnMeta{id,
 			{Name: "re", IsPK: true, DataType: "bigint", IsGenerated: true}}, []string{"2"}, nil},
 		{"two generated key members", []metadata.ColumnMeta{id, end,

@@ -305,3 +305,18 @@ func TestGenerate_historySkipWording_2007(t *testing.T) {
 		t.Fatalf("the skip comment must describe a history version without claiming the server wrote it:\n%s", buf.String())
 	}
 }
+
+// MySQL's largest TIMESTAMP is exactly the 2038 marker, a common "never
+// expires" value: on a source recorded as MySQL (no system versioning), a
+// row holding it must reverse normally even without a schema snapshot.
+func TestGenerate_noSnapshot_mysqlSentinelNotRefused_2007(t *testing.T) {
+	g := New(nil, nil)
+	g.flavor, g.flavorRead = "mysql", true
+	row := query.ResultRow{EventID: 1, EventTimestamp: svEvent(0, 0, "", nil, nil).EventTimestamp, SchemaName: "shop",
+		TableName: "tokens", EventType: parser.EventDelete, PKValues: "1",
+		RowBefore: map[string]any{"id": float64(1), "valid_until": "2038-01-19 03:14:07.999999"}}
+	var buf bytes.Buffer
+	if n, err := g.GenerateSQLFromRows([]query.ResultRow{row}, &buf); err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v, want the ordinary reversal for a MySQL never-expires value", n, err)
+	}
+}

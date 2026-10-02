@@ -1,11 +1,14 @@
 package reconstruct
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
@@ -253,14 +256,30 @@ func SingleRowSysVersioning(schema, table, createSQL string, pkMetas []metadata.
 		}
 		return nil, nil
 	}
-	if hasGen && slices.ContainsFunc(pkCols, func(c string) bool { return strings.EqualFold(strings.TrimSpace(c), gen.Name) }) {
+	genNamed := hasGen && slices.ContainsFunc(pkCols, func(c string) bool { return strings.EqualFold(strings.TrimSpace(c), gen.Name) })
+	if flavor == "mysql" || flavor == "postgres" {
+		// No system versioning there: a generated key column is just a
+		// column the snapshot does not hold.
+		if hasGen && !genNamed {
+			return nil, fmt.Errorf("primary-key column %q of %s.%s is a generated column: its changes are stored under "+
+				"the whole key, so a lookup by the other key columns cannot match them; include it in the key columns, "+
+				"or reconstruct the whole table", gen.Name, schema, table)
+		}
+		return nil, nil
+	}
+	if genNamed {
 		return nil, fmt.Errorf("%s.%s is system-versioned: look the row up by its declared primary key, without %q, which "+
 			"MariaDB appends to the key; the row's current and past versions are read for you", schema, table, gen.Name)
 	}
-	if !versioned {
+	if !versioned && createSQL == "" {
 		return nil, fmt.Errorf("%s.%s looks system-versioned (its primary key has the generated column %q), but the "+
 			"snapshot's metadata does not carry its CREATE TABLE, which names the period columns; reconstruct the whole "+
 			"table, or take a new full snapshot and retry", schema, table, gen.Name)
+	}
+	if !versioned {
+		return nil, fmt.Errorf("%s.%s looks system-versioned (its primary key has the generated column %q), but the "+
+			"snapshot this starts from was taken before it was; take a new full snapshot and retry: %w",
+			schema, table, gen.Name, ErrSchemaChanged)
 	}
 	sv, _, err := sysVersioningFor(schema, table, createSQL, pkMetas)
 	if err != nil {
@@ -273,7 +292,11 @@ func SingleRowSysVersioning(schema, table, createSQL string, pkMetas []metadata.
 	return &SingleRowVersioned{sv: sv, pkMetas: pkMetas}, nil
 }
 
-// ExpandKey adds the stored spellings of opts' declared-key value(s).
+// ExpandKey adds the stored spellings of opts' declared-key value(s), as
+// TYPED: each value with each current marker at ROW END's position, then
+// each of those re-spelled the way the index stores a MariaDB UUID/INET key
+// component. In that order: spelling first would see a value one component
+// short of the key, leave it alone, and search the text form (#2007).
 func (h *SingleRowVersioned) ExpandKey(opts *query.Options) {
 	values := opts.PKValuesIn
 	if opts.PKValues != "" {
@@ -282,9 +305,21 @@ func (h *SingleRowVersioned) ExpandKey(opts *query.Options) {
 			values = append(values, opts.PKValuesAlt)
 		}
 	}
-	if out, ok := expandSysVersionedKeys(h.pkMetas, values); ok {
-		opts.PKValues, opts.PKValuesAlt, opts.PKValuesIn = "", "", out
+	out, ok := expandSysVersionedKeys(h.pkMetas, values)
+	if !ok {
+		return
 	}
+	seen := make(map[string]bool, len(out))
+	for _, v := range out {
+		seen[v] = true
+	}
+	for _, v := range slices.Clone(out) {
+		if sp := IndexPKSpelling(v, h.pkMetas); !seen[sp] {
+			seen[sp] = true
+			out = append(out, sp)
+		}
+	}
+	opts.PKValues, opts.PKValuesAlt, opts.PKValuesIn = "", "", out
 }
 
 // Normalize reads the row's events for what they mean to its current
@@ -318,4 +353,51 @@ func onlyPeriodColumns(extra []string, createSQL string) bool {
 		}
 	}
 	return true
+}
+
+// SingleRowKeyColumns names the key columns a single-row lookup takes from
+// its caller: the snapshot's primary key, minus the ROW END column MariaDB
+// appends to a system-versioned table's key (the declared key is what an
+// operator knows; #2007). A MySQL or PostgreSQL source keeps every column.
+func SingleRowKeyColumns(tm *metadata.TableMeta, flavor string) []string {
+	if flavor == "mysql" || flavor == "postgres" {
+		return tm.PKColumns
+	}
+	gen := ""
+	for _, c := range tm.PKColumnMetas() {
+		if c.IsGenerated {
+			if gen != "" {
+				return tm.PKColumns
+			}
+			gen = c.Name
+		}
+	}
+	if gen == "" {
+		return tm.PKColumns
+	}
+	return slices.DeleteFunc(slices.Clone(tm.PKColumns), func(c string) bool { return c == gen })
+}
+
+// PrepareSingleRowLookup is the shared single-row setup for a possibly
+// system-versioned table (#2007): it decides how the table is read
+// (SingleRowSysVersioning), refuses a window in which versioning changed
+// (CheckSysVersioningChange), and returns the PKValues to search: the typed
+// value spelled the stored way for an ordinary table, or the typed value as
+// is for a versioned one, whose handle's ExpandKey spells every candidate.
+func PrepareSingleRowLookup(ctx context.Context, db *sql.DB, schema, table, pk, createSQL string,
+	pkMetas []metadata.ColumnMeta, pkCols []string, since, until time.Time) (*SingleRowVersioned, string, error) {
+	flavor := query.SourceFlavor(db)
+	h, err := SingleRowSysVersioning(schema, table, createSQL, pkMetas, pkCols, flavor)
+	if err != nil {
+		return nil, "", err
+	}
+	if flavor != "mysql" && flavor != "postgres" {
+		if err := CheckSysVersioningChange(ctx, db, schema, table, since, until); err != nil {
+			return nil, "", err
+		}
+	}
+	if h != nil {
+		return h, pk, nil
+	}
+	return nil, IndexPKSpelling(pk, pkMetas), nil
 }

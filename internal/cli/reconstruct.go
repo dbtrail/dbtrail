@@ -414,8 +414,8 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// END, and its binlog carries history versions and versioned deletes:
 	// look the row up under the stored spellings and read its events for
 	// what they mean to the current row (#2007).
-	sysVer, err := reconstruct.SingleRowSysVersioning(recSchema, recTable, bmeta.CreateTableSQL, pkMetas,
-		slices.Collect(maps.Keys(pkFilter)), query.SourceFlavor(db))
+	sysVer, pkSearch, err := reconstruct.PrepareSingleRowLookup(cmd.Context(), db, recSchema, recTable, recPK,
+		bmeta.CreateTableSQL, pkMetas, slices.Collect(maps.Keys(pkFilter)), snapshotTime, at)
 	if err != nil {
 		return err
 	}
@@ -442,7 +442,7 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 		// that is silent and wrong rather than loud: the baseline lookup above
 		// resolves such a key, the fetch returns zero events, and ApplyAt then
 		// renders baseline-era state as the state at --at.
-		PKValues: reconstruct.IndexPKSpelling(recPK, pkMetas),
+		PKValues: pkSearch,
 		Since:    &snapshotTime,
 		Until:    &at,
 	}
