@@ -12,7 +12,7 @@
 
 ```sh
 $ duckdb -init views.sql
-D SELECT status, count(*) FROM state_shop_orders GROUP BY 1;
+D SELECT status, count(*) FROM shop.orders GROUP BY 1;
 ```
 
 <p align="center"><em>That query reads Parquet in your bucket. The MySQL primary never saw it.</em></p>
@@ -34,7 +34,7 @@ copy of their own, one that also remembers the past.
   schedule, from every 5 minutes to once a day, without reading the source
   again. No pipeline, no warehouse, no Kafka. See [Analytics with DuckDB](docs/analytics.md).
 - **DuckDB, ready to open.** One `views.sql` gives you one view per table,
-  `state_<schema>_<table>`, that follows the newest snapshot on its own. Your
+  named like the source table (`shop.orders`), that follows the newest snapshot on its own. Your
   DuckDB runs it, on your machine: a laptop, a notebook, a BI box.
 - **Open files, your bucket.** Plain Parquet on disk or in S3, Hive-partitioned
   change history, nothing proprietary. Hand a table to Spark, Trino or Athena

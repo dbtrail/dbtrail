@@ -2550,11 +2550,12 @@ function sqlFilterViews(names, filter, max) {
   return { shown: all.slice(0, max), more: Math.max(0, all.length - max), matched: all.length };
 }
 
-// sqlStarterQuery: a first query over the first table (a state view when
-// there is one, else whatever the copy defines).
+// sqlStarterQuery: a first query over the first table (a table of the
+// source, named as on the source, e.g. demo.prices, when there is one; else
+// whatever the copy defines, which is the events view).
 function sqlStarterQuery(names) {
   const list = names || [];
-  const first = list.find((n) => /^state_/.test(n)) || list[0];
+  const first = list.find((n) => n !== "events") || list[0];
   return first ? "SELECT * FROM " + first + " LIMIT 100" : "";
 }
 
@@ -2728,6 +2729,8 @@ function renderSQLPanel(box) {
     f.shown.forEach((n) => list.append(el("button", { class: "sqlp-name", type: "button", role: "listitem", text: n, title: "Insert " + n, onclick: () => insert(n) })));
     if (f.more > 0) list.append(el("div", { class: "sqlp-more", text: "… " + f.more.toLocaleString("en-US") + " more. Filter to narrow." }));
     if (names.length && f.matched === 0) list.append(el("div", { class: "sqlp-more", text: "No table matches." }));
+    // Tables listed under another name, or not at all, and why (#2013).
+    if (!filter.value) ((st.info && st.info.notes) || []).forEach((n) => list.append(el("div", { class: "sqlp-more sqlp-note", text: n })));
   };
   filter.addEventListener("input", paintList);
 
@@ -8192,23 +8195,57 @@ function duckdbShape() {
 // duckdbViewNames pulls the view names out of a generated views.sql.
 //
 // Read off the file the user just downloaded, rather than asked for separately.
-// The names are sanitized and collision-suffixed by the generator, so a second
-// source for them is a second opinion that can drift; these ARE the names in the
-// file, or there is no file. It also costs nothing: the bytes are already here,
-// where asking the server would have re-listed storage to answer.
+// The names are settled by the generator (a case collision renames one table, a
+// schema DuckDB keeps for itself drops one), so a second source for them is a
+// second opinion that can drift; these ARE the names in the file, or there is no
+// file. It also costs nothing: the bytes are already here, where asking the
+// server would have re-listed storage to answer.
 //
-// The generator writes every one as CREATE OR REPLACE VIEW "<name>". A name can
-// hold no quote of its own to confuse the match, because the generator builds it
-// through sanitizeIdent, which keeps only [a-z0-9_] and folds everything else to
-// an underscore. assets_duckdbcard_test.go pins BOTH halves of that against
-// views.Generate, so neither the statement shape nor the character set can
-// quietly stop matching.
+// The generator writes every one as CREATE OR REPLACE VIEW "<schema>"."<table>"
+// (or "events"), each part quoted with any quote inside it doubled. The list
+// shows each the way a person types it: demo.prices, and demo."order.items" for
+// a part DuckDB cannot read bare (duckdbTypedIdent). assets_duckdbcard_test.go
+// pins this against views.Generate and DefinedViews, so neither the statement
+// shape nor the typing rule can quietly stop matching.
 function duckdbViewNames(sql) {
   const out = [];
-  const re = /^CREATE OR REPLACE VIEW "([^"]+)"/gm;
+  const re = /^CREATE OR REPLACE VIEW ((?:"(?:[^"]|"")*"\.)*"(?:[^"]|"")*") AS$/gm;
   let m;
-  while ((m = re.exec(sql)) !== null) out.push(m[1]);
+  while ((m = re.exec(sql)) !== null) {
+    const parts = [];
+    const part = /"((?:[^"]|"")*)"/g;
+    let p;
+    while ((p = part.exec(m[1])) !== null) parts.push(duckdbTypedIdent(p[1].replace(/""/g, '"')));
+    out.push(parts.join("."));
+  }
   return out;
+}
+
+// DUCKDB_BARE_KEYWORDS: the SQL keywords DuckDB cannot read unquoted as a name.
+// A copy of views.BareKeywords, pinned to it by assets_duckdbcard_test.go.
+const DUCKDB_BARE_KEYWORDS = new Set([
+  "all", "analyse", "analyze", "and", "anti", "any", "array", "as", "asc",
+  "asof", "asymmetric", "at", "authorization", "binary", "both", "by", "case",
+  "cast", "check", "collate", "collation", "column", "concurrently",
+  "constraint", "create", "cross", "default", "deferrable", "desc", "describe",
+  "distinct", "do", "else", "end", "except", "false", "fetch", "for",
+  "foreign", "freeze", "from", "full", "glob", "group", "having", "ilike",
+  "in", "initially", "inner", "intersect", "into", "is", "isnull", "join",
+  "lambda", "lateral", "leading", "left", "like", "limit", "natural", "not",
+  "notnull", "null", "offset", "on", "only", "or", "order", "outer",
+  "overlaps", "pivot", "pivot_longer", "pivot_wider", "placing", "positional",
+  "primary", "qualify", "references", "returning", "right", "select", "semi",
+  "show", "similar", "some", "summarize", "symmetric", "table", "tablesample",
+  "then", "to", "trailing", "true", "union", "unique", "unpack", "unpivot",
+  "using", "variadic", "verbose", "when", "where", "window", "with"
+]);
+
+// duckdbTypedIdent: one name part the way a person types it, bare when DuckDB
+// reads it bare and quoted otherwise. The same rule as the generator's
+// typedIdent.
+function duckdbTypedIdent(s) {
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(s) && !DUCKDB_BARE_KEYWORDS.has(s.toLowerCase())) return s;
+  return '"' + s.replace(/"/g, '""') + '"';
 }
 
 // duckdbCommandLine renders the one command the reader has to reproduce, with a

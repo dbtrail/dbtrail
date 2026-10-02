@@ -232,7 +232,7 @@ func (f *fx1918) stateOf(db *sql.DB, view string) (rows []string, types []string
 }
 
 func viewName1918(table string) string {
-	return stateViewName("shop", table, map[string]bool{})
+	return "shop." + typedIdent(table)
 }
 
 // TestFollowingDeltaView_everyShapeARefreshLeaves_1918 walks one session's

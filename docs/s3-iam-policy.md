@@ -148,7 +148,7 @@ What each part does:
   object keys (dates and hours), not their contents.
 - **The change log views stop working.** A `views.sql` downloaded with
   **Include the change log** reads the archives, so its events view fails with
-  `AccessDenied`. The `state_<schema>_<table>` views keep working.
+  `AccessDenied`. The table views (`shop.orders`) keep working.
 
 Two things a reader with this policy can still see, stated plainly:
 

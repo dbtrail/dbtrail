@@ -34,7 +34,7 @@ func TestIntegrationSQLRoute_realRunnerOnAFixtureCopy(t *testing.T) {
 	}
 	srv.sqlRunner = sqlsandbox.New(sqlsandbox.Config{Exe: exe, Args: []string{}, Limits: sqlsandbox.Limits{Timeout: 60 * time.Second}})
 
-	rec, body := doReq(t, srv, "POST", "/api/sql", `{"sql":"SELECT id, status FROM state_shop_orders ORDER BY id"}`)
+	rec, body := doReq(t, srv, "POST", "/api/sql", `{"sql":"SELECT id, status FROM shop.orders ORDER BY id"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code=%d body=%s", rec.Code, body)
 	}
@@ -52,7 +52,7 @@ func TestIntegrationSQLRoute_realRunnerOnAFixtureCopy(t *testing.T) {
 		t.Errorf("copy_updated_at = %v, want %v", resp.CopyUpdatedAt, sqlSnapshotAt)
 	}
 
-	rec, body = doReq(t, srv, "POST", "/api/sql?format=csv", `{"sql":"SELECT id, status FROM state_shop_orders ORDER BY id"}`)
+	rec, body = doReq(t, srv, "POST", "/api/sql?format=csv", `{"sql":"SELECT id, status FROM shop.orders ORDER BY id"}`)
 	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/csv") {
 		t.Fatalf("csv: code=%d type=%s body=%s", rec.Code, rec.Header().Get("Content-Type"), body)
 	}
@@ -70,7 +70,7 @@ func TestIntegrationSQLRoute_realRunnerOnAFixtureCopy(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(string(body), "one statement") {
 		t.Errorf("two statements: code=%d body=%s", rec.Code, body)
 	}
-	if rec, _ := doReq(t, srv, "POST", "/api/sql", `{"sql":"SELECT count(*) AS n FROM state_shop_orders"}`); rec.Code != http.StatusOK {
+	if rec, _ := doReq(t, srv, "POST", "/api/sql", `{"sql":"SELECT count(*) AS n FROM shop.orders"}`); rec.Code != http.StatusOK {
 		t.Errorf("after the refusals: code=%d", rec.Code)
 	}
 }

@@ -200,15 +200,87 @@ func sqlArchivesLocal(sources []string) bool {
 // the footer cost and can spend the whole time budget; on a change log that
 // lives in S3 it changes nothing, because the view is not installed there
 // at all (sqlViewsFor).
+//
+// One exception to the loose match (#2013): since the table views are named
+// after the source, a source table or schema called events is a name a person
+// types every day (shop.events, events.orders), and installing the change log
+// for each of those statements is the footer cost for nothing. So a match is
+// skipped when it is clearly another name's part: followed by a dot (a schema
+// called events), or preceded by one whose schema is not main (a table called
+// events). main.events, memory.events and memory.main.events are still the
+// view.
 var sqlEventsWord = regexp.MustCompile(`(?i)\bevents\b`)
 
-func sqlMentionsEvents(statement string) bool { return sqlEventsWord.MatchString(statement) }
+// sqlQualifierBefore matches a dotted name ending right before a match, and
+// captures the part just before the last dot: `shop.`, `"shop" . `.
+var sqlQualifierBefore = regexp.MustCompile(`(?i)("(?:[^"]|"")*"|[\w$]+)\s*\.\s*"?$`)
+
+// sqlLexed blanks string literals and comments in ONE left-to-right pass, so
+// whichever starts first wins: a quote inside a comment ("-- what's") does
+// not open a string, and "--" inside an identifier ("a--b") or a string does
+// not open a comment. Double-quoted identifiers are matched only so they are
+// skipped whole, and are kept as they are: the check below reads "events" and
+// "main"."events" through them. Comments go, so one ending in a dot cannot
+// pass for a qualifier ("-- the log.\n events").
+var sqlLexed = regexp.MustCompile(`'(?:[^']|'')*'|"(?:[^"]|"")*"|--[^\n]*|(?s:/\*.*?\*/)`)
+
+func sqlBlankLiteralsAndComments(statement string) string {
+	return sqlLexed.ReplaceAllStringFunc(statement, func(tok string) string {
+		switch {
+		case strings.HasPrefix(tok, `"`):
+			return tok
+		case strings.HasPrefix(tok, "'"):
+			return "''"
+		default:
+			return " "
+		}
+	})
+}
+
+func sqlMentionsEvents(statement string) bool {
+	statement = sqlBlankLiteralsAndComments(statement)
+	for _, m := range sqlEventsWord.FindAllStringIndex(statement, -1) {
+		after := strings.TrimLeft(statement[m[1]:], `"`)
+		if strings.HasPrefix(strings.TrimLeft(after, " \t\r\n"), ".") {
+			continue // events.<table>: a schema called events
+		}
+		if q := sqlQualifierBefore.FindStringSubmatch(statement[:m[0]]); q != nil {
+			// main.events, and memory.events: the SQL card's DuckDB opens
+			// with no file, so its database is called memory.
+			if part := strings.Trim(q[1], `"`); !strings.EqualFold(part, "main") && !strings.EqualFold(part, "memory") {
+				continue // <schema>.events: a table called events
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// viewsLeftOutMessage answers a copy that has tables and defines no view
+// because every one of them is in a schema DuckDB keeps for itself (#2013).
+// Without it that copy was refused for a reason that is false: "only on
+// S3", or "no snapshot was found". Empty when that is not what happened.
+func viewsLeftOutMessage(in views.Input) string {
+	if len(in.Baselines) == 0 || in.RendersAnyView() {
+		return ""
+	}
+	notes := in.NamingNotes()
+	if len(notes) == 0 {
+		return ""
+	}
+	return "every table of the snapshot is in a schema DuckDB keeps for itself, so there is no view to query: " +
+		strings.Join(notes, "; ")
+}
 
 // sqlInfoResponse is GET /api/sql: what the panel needs before the first
 // query, read from the same resolver as /api/views.sql with no DuckDB and
 // no worker. Views are the names a statement can use.
 type sqlInfoResponse struct {
-	Views         []string     `json:"views"`
+	Views []string `json:"views"`
+	// Notes name the tables listed under another name or not at all, and
+	// why (#2013): a table in a schema DuckDB keeps for itself has no view,
+	// and without this the list would just be one table short.
+	Notes         []string     `json:"notes,omitempty"`
 	CopyUpdatedAt *time.Time   `json:"copy_updated_at"`
 	Limits        sqlLimitsDTO `json:"limits"`
 }
@@ -258,10 +330,14 @@ func (s *Server) handleSQLInfo(w http.ResponseWriter, r *http.Request) {
 		names = append(names, n)
 	}
 	if len(names) == 0 {
+		if why := viewsLeftOutMessage(in); why != "" {
+			writeJSONError(w, http.StatusConflict, why)
+			return
+		}
 		writeJSONError(w, http.StatusConflict, sqlCopyNotLocalMessage)
 		return
 	}
-	resp := sqlInfoResponse{Views: names, Limits: sqlLimitsDTO{
+	resp := sqlInfoResponse{Views: names, Notes: in.NamingNotes(), Limits: sqlLimitsDTO{
 		TimeoutSeconds: int(s.sqlLimits.Timeout / time.Second),
 		MaxRows:        s.sqlLimits.MaxRows,
 		MaxCellBytes:   sqlsandbox.MaxCellBytes,
@@ -308,6 +384,10 @@ func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
 		return
 	case err != nil:
 		writeJSONError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if why := viewsLeftOutMessage(in); why != "" {
+		writeJSONError(w, http.StatusConflict, why)
 		return
 	}
 	if in.NeedsS3() || (!in.RendersAnyView() && eventsInS3) {

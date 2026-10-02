@@ -120,7 +120,7 @@ func TestAuditContract_ConsoleUnit(t *testing.T) {
 			name:       "sql",
 			action:     "sql.run",
 			wantActor:  tokenActor,
-			wantDetail: map[string]string{"sql": "SELECT id FROM state_shop_orders", "rows": "1", "truncated": "false"},
+			wantDetail: map[string]string{"sql": "SELECT id FROM shop.orders", "rows": "1", "truncated": "false"},
 			call: func(t *testing.T) {
 				s, _ := newSQLServer(t, &fakeSQLRunner{res: sqlsandbox.Result{
 					Columns: []sqlsandbox.Column{{Name: "id", Type: "INTEGER"}},
@@ -128,7 +128,7 @@ func TestAuditContract_ConsoleUnit(t *testing.T) {
 				}})
 				w := httptest.NewRecorder()
 				s.handleSQL(w, httptest.NewRequest("POST", "/api/sql",
-					strings.NewReader(`{"sql":"SELECT id FROM state_shop_orders"}`)))
+					strings.NewReader(`{"sql":"SELECT id FROM shop.orders"}`)))
 				if w.Code != http.StatusOK {
 					t.Fatalf("sql: code=%d body=%s", w.Code, w.Body.String())
 				}

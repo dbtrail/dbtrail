@@ -50,7 +50,7 @@ func testLimits() Limits {
 func TestRun_queryOverCopyViewsSucceeds(t *testing.T) {
 	f := newCopyFixture(t)
 	r := newTestRunner(t, testLimits())
-	res, err := r.Run(context.Background(), f.job("SELECT id, status FROM state_shop_orders ORDER BY id"))
+	res, err := r.Run(context.Background(), f.job("SELECT id, status FROM shop.orders ORDER BY id"))
 	if err != nil {
 		t.Fatalf("Run: %v\n--- views ---\n%s", err, f.views)
 	}
@@ -157,7 +157,7 @@ func TestRun_nonSelectStatementsRefused(t *testing.T) {
 		"CALL":                "CALL pragma_version()",
 		"BEGIN":               "BEGIN",
 		"EXPLAIN":             "EXPLAIN SELECT 1",
-		"top-level PIVOT":     "PIVOT state_shop_orders ON status",
+		"top-level PIVOT":     "PIVOT shop.orders ON status",
 		"SELECT then SET":     "SELECT 1; SET threads = 64",
 		"SET then SELECT":     "SET threads = 64; SELECT 1",
 		"two SELECTs":         "SELECT 1; SELECT 2",
@@ -233,10 +233,10 @@ func TestRun_selectShapedStatementsAllowed(t *testing.T) {
 	f := newCopyFixture(t)
 	r := newTestRunner(t, testLimits())
 	for _, q := range []string{
-		"DESCRIBE state_shop_orders",
+		"DESCRIBE shop.orders",
 		"SHOW TABLES",
-		"SUMMARIZE state_shop_orders",
-		"FROM state_shop_orders",
+		"SUMMARIZE shop.orders",
+		"FROM shop.orders",
 		"VALUES (1), (2)",
 		"WITH x AS (SELECT 1 AS a) SELECT a FROM x",
 		"SELECT 1 UNION ALL SELECT 2",
@@ -319,7 +319,7 @@ func TestRun_timeoutKillsWorkerAndParentKeepsServing(t *testing.T) {
 	// The follow-up query gets a normal deadline: the point is that the
 	// parent still works, not that a slow (race-instrumented) child starts
 	// within the tight cap above.
-	after := f.job("SELECT count(*) AS n FROM state_shop_orders")
+	after := f.job("SELECT count(*) AS n FROM shop.orders")
 	after.Limits.Timeout = 30 * time.Second
 	res, err := r.Run(context.Background(), after)
 	if err != nil {
@@ -583,7 +583,7 @@ func TestRun_copyDirThatIsASymlinkAdmitsTheResolvedDir(t *testing.T) {
 		OmitEvents:       true,
 	})
 	r := newTestRunner(t, testLimits())
-	res, err := r.Run(context.Background(), Job{CopyDirs: []string{link}, ViewsSQL: viewsSQL, SQL: "SELECT count(*) AS n FROM state_shop_orders"})
+	res, err := r.Run(context.Background(), Job{CopyDirs: []string{link}, ViewsSQL: viewsSQL, SQL: "SELECT count(*) AS n FROM shop.orders"})
 	if err != nil {
 		t.Fatalf("through the link with resolved paths: %v", err)
 	}
@@ -687,7 +687,7 @@ func TestRun_stateChangingTableFunctionsRefused(t *testing.T) {
 		"enable_logging into the copy": {"SELECT * FROM enable_logging(storage='file', storage_config={'path':'" + logs + "'})", "enable_logging"},
 		"enable_logging plain":         {"SELECT * FROM enable_logging()", "enable_logging"},
 		"hidden in query()":            {"SELECT * FROM query('SELECT * FROM enable_logging(storage=''file'', storage_config={''path'':''" + logs + "''})')", "query"},
-		"query_table":                  {"SELECT * FROM query_table('state_shop_orders')", "query_table"},
+		"query_table":                  {"SELECT * FROM query_table('shop.orders')", "query_table"},
 		"disable_logging":              {"SELECT * FROM disable_logging()", "disable_logging"},
 		"checkpoint":                   {"SELECT * FROM checkpoint()", "checkpoint"},
 		"force_checkpoint":             {"SELECT * FROM force_checkpoint()", "force_checkpoint"},
@@ -697,9 +697,9 @@ func TestRun_stateChangingTableFunctionsRefused(t *testing.T) {
 		"in a CTE":                     {"WITH x AS (SELECT * FROM force_checkpoint()) SELECT * FROM x", "force_checkpoint"},
 		"in a set operation":           {"SELECT 1 UNION ALL SELECT * FROM truncate_duckdb_logs()", "truncate_duckdb_logs"},
 		"in a LATERAL":                 {"SELECT * FROM range(3) t, LATERAL (SELECT * FROM checkpoint()) l", "checkpoint"},
-		"in WHERE EXISTS":              {"SELECT * FROM state_shop_orders WHERE EXISTS (SELECT 1 FROM disable_logging())", "disable_logging"},
-		"in LIMIT":                     {"SELECT * FROM state_shop_orders LIMIT (SELECT count(*) FROM checkpoint())", "checkpoint"},
-		"in a JOIN":                    {"SELECT * FROM state_shop_orders JOIN checkpoint() ON true", "checkpoint"},
+		"in WHERE EXISTS":              {"SELECT * FROM shop.orders WHERE EXISTS (SELECT 1 FROM disable_logging())", "disable_logging"},
+		"in LIMIT":                     {"SELECT * FROM shop.orders LIMIT (SELECT count(*) FROM checkpoint())", "checkpoint"},
+		"in a JOIN":                    {"SELECT * FROM shop.orders JOIN checkpoint() ON true", "checkpoint"},
 		"mixed case":                   {"SELECT * FROM Enable_Logging()", "enable_logging"},
 	}
 	for name, c := range cases {
@@ -728,7 +728,7 @@ func TestRun_stateChangingTableFunctionsRefused(t *testing.T) {
 		"WITH r AS (SELECT * FROM range(3)) SELECT (SELECT count(*) FROM generate_series(1, 2)) FROM r, LATERAL (SELECT unnest([1])) u",
 		"SELECT count(*) FROM duckdb_views()",
 		"SELECT * FROM pragma_version()",
-		"SELECT * FROM state_shop_orders PIVOT (count(*) FOR status IN ('new', 'paid'))",
+		"SELECT * FROM shop.orders PIVOT (count(*) FOR status IN ('new', 'paid'))",
 	} {
 		if _, err := r.Run(context.Background(), f.job(q)); err != nil {
 			t.Errorf("%s: %v", q, err)

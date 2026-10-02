@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **Breaking: the DuckDB views of a snapshot are named exactly like the
+  source** (#2013). `SELECT * FROM shop.orders`, and `demo."order.items"` for a
+  name DuckDB cannot read bare, instead of `state_shop_orders`. Each source
+  schema is a DuckDB schema and each table keeps its own name, in `views.sql`,
+  in `bintrail views`, in the snapshot download and in the console's SQL card.
+  The old `state_<schema>_<table>` names are gone, with no aliases: regenerate
+  the file and update saved queries and dashboards. A DuckDB database file
+  that kept the old views still holds them; list the statements that drop
+  them with `SELECT 'DROP VIEW ' || database_name || '.' || schema_name || '.'
+  || view_name || ';' FROM duckdb_views() WHERE view_name LIKE 'state\_%' ESCAPE '\';`. The old names were also
+  lossy (`a.b_c` and `a_b.c` were one name). Two tables whose names differ only
+  in letter case are one name to DuckDB: the all-lowercase spelling keeps it
+  and the other gets a suffix made from its own spelling
+  (`shop.Orders_xxxxxx`), so it does not change when a third twin appears;
+  tables in a schema DuckDB keeps for itself
+  (`information_schema`, `pg_catalog`, and `temp`, `system`, `memory` without
+  `--database`) are left out. The file and the command name each one.
+- **Breaking: `bintrail views --schema` is now `--database`.** A server's views
+  go in a DuckDB database of that name (`wp.shop.orders`, `wp.events`) instead
+  of a schema, since schemas now carry the source's. The database is attached
+  in memory unless one by that name is already open; `ATTACH 'wp.db' AS wp`
+  before reading the file keeps the views on disk. `--schema` is refused with
+  a note saying so.
+- The console's SQL card no longer loads the change log for a statement that
+  names a source table or schema called `events` (`shop.events`,
+  `events.orders`); only `events` and `main.events` are the change log.
 - **Full reads that bring in new tables no longer wait for, or use up, the
   daily cap.** Since 0.95.0 the scheduler takes at most one self-initiated
   full read per server per day, and a full read to include tables created

@@ -159,11 +159,11 @@ func TestGeneratedSQL_executesInDuckDB(t *testing.T) {
 
 	// The state view must expose the baseline's own columns.
 	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM state_shop_orders WHERE "status" = 'paid'`).Scan(&n); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM shop.orders WHERE "status" = 'paid'`).Scan(&n); err != nil {
 		t.Fatalf("query state view: %v", err)
 	}
 	if n != 1 {
-		t.Errorf("state_shop_orders has %d paid rows, want 1", n)
+		t.Errorf("shop.orders has %d paid rows, want 1", n)
 	}
 }
 
@@ -252,7 +252,7 @@ func TestStateView_decimalColumnsAreNumeric(t *testing.T) {
 
 	// The failure from the issue, on the column it was reported on.
 	var total string
-	if err := db.QueryRow(`SELECT CAST(sum("ol_amount") AS VARCHAR) FROM state_tpcc_order_line`).Scan(&total); err != nil {
+	if err := db.QueryRow(`SELECT CAST(sum("ol_amount") AS VARCHAR) FROM tpcc.order_line`).Scan(&total); err != nil {
 		t.Fatalf("sum() over a money column failed — this is #1486:\n%v\n\n--- generated ---\n%s", err, sqlText)
 	}
 	if total != "10.75" {
@@ -261,7 +261,7 @@ func TestStateView_decimalColumnsAreNumeric(t *testing.T) {
 
 	// The cast must carry the DECLARED scale, not one inferred from the text.
 	var colType string
-	if err := db.QueryRow(`SELECT lower(column_type) FROM (DESCRIBE SELECT * FROM state_tpcc_order_line)
+	if err := db.QueryRow(`SELECT lower(column_type) FROM (DESCRIBE SELECT * FROM tpcc.order_line)
 	                       WHERE column_name = 'micro_rate'`).Scan(&colType); err != nil {
 		t.Fatalf("describe state view: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestStateView_decimalColumnsAreNumeric(t *testing.T) {
 	// Past DuckDB's 38-digit ceiling there is no DECIMAL to cast to, so the
 	// column stays text. Casting it to something narrower would silently
 	// truncate a value the operator chose 65 digits to hold.
-	if err := db.QueryRow(`SELECT lower(column_type) FROM (DESCRIBE SELECT * FROM state_tpcc_order_line)
+	if err := db.QueryRow(`SELECT lower(column_type) FROM (DESCRIBE SELECT * FROM tpcc.order_line)
 	                       WHERE column_name = 'huge'`).Scan(&colType); err != nil {
 		t.Fatalf("describe state view: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestStateView_decimalColumnsAreNumeric(t *testing.T) {
 
 	// Non-decimal columns are untouched.
 	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM state_tpcc_order_line WHERE "ol_number" = 2`).Scan(&n); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM tpcc.order_line WHERE "ol_number" = 2`).Scan(&n); err != nil {
 		t.Fatalf("query state view: %v", err)
 	}
 	if n != 1 {

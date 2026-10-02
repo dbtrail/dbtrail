@@ -41,7 +41,7 @@ func serverFile(t *testing.T, schema, id, stamp string, follow FollowMode, rows 
 	in := Input{
 		GeneratedAt:      time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC),
 		Version:          "test",
-		Schema:           schema,
+		Database:         schema,
 		ArchiveSources:   []string{filepath.Join(archives, "bintrail_id="+id)},
 		BaselineSource:   baselines,
 		BaselineSnapshot: snap,
@@ -122,11 +122,11 @@ func TestSchema_twoServersInOneDatabase(t *testing.T) {
 				t.Fatalf("DuckDB rejected the two files loaded together:\n%v\n\n--- a ---\n%s\n--- b ---\n%s", err, fileA, fileB)
 			}
 
-			if got := statuses(t, db, "a.state_shop_orders"); !sameStrings(got, rowsA) {
-				t.Errorf("a.state_shop_orders returned %v, want server a's rows %v", got, rowsA)
+			if got := statuses(t, db, "a.shop.orders"); !sameStrings(got, rowsA) {
+				t.Errorf("a.shop.orders returned %v, want server a's rows %v", got, rowsA)
 			}
-			if got := statuses(t, db, "b.state_shop_orders"); !sameStrings(got, rowsB) {
-				t.Errorf("b.state_shop_orders returned %v, want server b's rows %v", got, rowsB)
+			if got := statuses(t, db, "b.shop.orders"); !sameStrings(got, rowsB) {
+				t.Errorf("b.shop.orders returned %v, want server b's rows %v", got, rowsB)
 			}
 
 			for schema, want := range map[string]string{"a": serverAID, "b": serverBID} {
@@ -141,18 +141,18 @@ func TestSchema_twoServersInOneDatabase(t *testing.T) {
 			}
 
 			// Nothing was left in the default schema for a third file to replace.
-			var inMain int
+			var inLake int
 			if err := db.QueryRow(`SELECT count(*) FROM duckdb_views()
-			                       WHERE NOT internal AND schema_name = 'main'`).Scan(&inMain); err != nil {
+			                       WHERE NOT internal AND database_name = 'lake'`).Scan(&inLake); err != nil {
 				t.Fatalf("list views: %v", err)
 			}
-			if inMain != 0 {
-				t.Errorf("%d view(s) were created in main", inMain)
+			if inLake != 0 {
+				t.Errorf("%d view(s) were created in the session's own database instead of a server's", inLake)
 			}
 
 			// The cross-server read the feature exists for.
 			var both int
-			if err := db.QueryRow(`SELECT count(*) FROM a.state_shop_orders x, b.state_shop_orders y`).Scan(&both); err != nil {
+			if err := db.QueryRow(`SELECT count(*) FROM a.shop.orders x, b.shop.orders y`).Scan(&both); err != nil {
 				t.Fatalf("join across servers: %v", err)
 			}
 			if both != len(rowsA)*len(rowsB) {
@@ -164,8 +164,8 @@ func TestSchema_twoServersInOneDatabase(t *testing.T) {
 			if _, err := db.Exec(fileA); err != nil {
 				t.Fatalf("DuckDB rejected server a's file loaded a second time: %v", err)
 			}
-			if got := statuses(t, db, "b.state_shop_orders"); !sameStrings(got, rowsB) {
-				t.Errorf("after reloading a, b.state_shop_orders returned %v, want %v", got, rowsB)
+			if got := statuses(t, db, "b.shop.orders"); !sameStrings(got, rowsB) {
+				t.Errorf("after reloading a, b.shop.orders returned %v, want %v", got, rowsB)
 			}
 		})
 	}
@@ -182,8 +182,8 @@ func TestSchema_withoutOneTheSecondServerReplacesTheFirst(t *testing.T) {
 			fileB := serverFile(t, "", serverBID, stampB, mode.follow, rowsB)
 			db := execViews(t, fileA+"\n"+fileB)
 
-			if got := statuses(t, db, "state_shop_orders"); !sameStrings(got, rowsB) {
-				t.Errorf("state_shop_orders returned %v; the premise is that server b's %v replaced it", got, rowsB)
+			if got := statuses(t, db, "shop.orders"); !sameStrings(got, rowsB) {
+				t.Errorf("shop.orders returned %v; the premise is that server b's %v replaced it", got, rowsB)
 			}
 			var n int
 			if err := db.QueryRow(`SELECT count(*) FROM duckdb_views() WHERE NOT internal`).Scan(&n); err != nil {
@@ -196,50 +196,54 @@ func TestSchema_withoutOneTheSecondServerReplacesTheFirst(t *testing.T) {
 	}
 }
 
-// TestSchema_persistedViewsKeepTheirServer reopens the database file, which is
-// where an operator with one file per session actually meets these views.
-// Pinned only: a following file keeps its snapshot in a session variable, and
-// what a new session does with that is its own documented behaviour.
+// TestSchema_persistedViewsKeepTheirServer reopens the database files, which
+// is where an operator with one file per session actually meets these views.
+// Each server's database is attached in memory unless one by that name is
+// already open, so keeping the views means attaching a file under that name
+// first, which is what the file's header tells the reader to do. Pinned only:
+// a following file keeps its snapshot in a session variable, and what a new
+// session does with that is its own documented behaviour.
 func TestSchema_persistedViewsKeepTheirServer(t *testing.T) {
 	fileA := serverFile(t, "a", serverAID, stampA, FollowNone, rowsA)
 	fileB := serverFile(t, "b", serverBID, stampB, FollowNone, rowsB)
-	lake := filepath.Join(t.TempDir(), "lake.db")
+	if !strings.Contains(fileA, "ATTACH 'a.db' AS a;") {
+		t.Errorf("the file does not say how to keep its views in a file:\n%s", fileA)
+	}
+	dir := t.TempDir()
+	attach := "ATTACH '" + filepath.Join(dir, "a.db") + "' AS a; ATTACH '" + filepath.Join(dir, "b.db") + "' AS b;"
 
-	db, err := sql.Open("duckdb", lake)
+	db, err := sql.Open("duckdb", filepath.Join(dir, "lake.db"))
 	if err != nil {
 		t.Fatalf("open duckdb: %v", err)
 	}
-	if _, err := db.Exec(fileA + "\n" + fileB); err != nil {
+	if _, err := db.Exec(attach + "\n" + fileA + "\n" + fileB); err != nil {
 		t.Fatalf("DuckDB rejected the two files: %v", err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 
-	db, err = sql.Open("duckdb", lake)
+	db, err = sql.Open("duckdb", filepath.Join(dir, "lake.db"))
 	if err != nil {
 		t.Fatalf("reopen duckdb: %v", err)
 	}
 	defer db.Close()
-	if got := statuses(t, db, "a.state_shop_orders"); !sameStrings(got, rowsA) {
-		t.Errorf("after reopening, a.state_shop_orders returned %v, want %v", got, rowsA)
+	if _, err := db.Exec(attach); err != nil {
+		t.Fatalf("reattach: %v", err)
 	}
-	if got := statuses(t, db, "b.state_shop_orders"); !sameStrings(got, rowsB) {
-		t.Errorf("after reopening, b.state_shop_orders returned %v, want %v", got, rowsB)
+	if got := statuses(t, db, "a.shop.orders"); !sameStrings(got, rowsA) {
+		t.Errorf("after reopening, a.shop.orders returned %v, want %v", got, rowsA)
+	}
+	if got := statuses(t, db, "b.shop.orders"); !sameStrings(got, rowsB) {
+		t.Errorf("after reopening, b.shop.orders returned %v, want %v", got, rowsB)
 	}
 }
 
-// TestSchema_twoServersWithTheLiveLeg loads two files that each carry an
-// index leg into one session.
-//
-// The ATTACH itself cannot run here: it needs the mysql extension and a MySQL
-// to dial. What stands in for it is a catalog under the alias each file names,
-// so everything AFTER the ATTACH is the real generated text: the two-leg view,
 // its anti-join, and which catalog each server's view reads.
 func TestSchema_twoServersWithTheLiveLeg(t *testing.T) {
 	file := func(schema, id string) string {
 		in := twoLegInput(t, id)
-		in.Schema = schema
+		in.Database = schema
 		return Generate(in)
 	}
 	fileA, fileB := file("a", serverAID), file("b", serverBID)
@@ -330,7 +334,7 @@ func TestDuckDB_schemaNamesFoldCase(t *testing.T) {
 	if x != "lower" {
 		t.Errorf(`"A"."v" returned %q: DuckDB kept "A" and "a" apart, so uppercase names need not be refused`, x)
 	}
-	if err := ValidateSchemaName("A"); err == nil {
+	if err := ValidateDatabaseName("A"); err == nil {
 		t.Error(`"A" is accepted, and DuckDB reads it as the same schema as "a"`)
 	}
 }
@@ -367,23 +371,23 @@ func TestDuckDB_namesItAlreadyHas(t *testing.T) {
 	}
 }
 
-// TestDuckDB_aDatabaseNamedLikeTheSchema pins the one collision the generator
-// cannot see and the file therefore warns about: DuckDB names a database after
-// its file, and a two-part name whose first part is both a database and a
-// schema is refused as ambiguous.
-func TestDuckDB_aDatabaseNamedLikeTheSchema(t *testing.T) {
+// TestDuckDB_aDatabaseFileNamedLikeTheServer: DuckDB names a database after
+// its file, so `duckdb wp.db` already has a database called wp. Under the old
+// per-server SCHEMA that made every name ambiguous and the load stopped at the
+// first view; the per-server DATABASE is attached only if it is not there, so
+// the views simply land in wp.db.
+func TestDuckDB_aDatabaseFileNamedLikeTheServer(t *testing.T) {
 	fileA := serverFile(t, "wp", serverAID, stampA, FollowNone, rowsA)
-	if !strings.Contains(fileA, "wp.db") {
-		t.Errorf("the file does not warn against a database file named like its schema:\n%s", fileA)
-	}
 	db, err := sql.Open("duckdb", filepath.Join(t.TempDir(), "wp.db"))
 	if err != nil {
 		t.Fatalf("open duckdb: %v", err)
 	}
 	defer db.Close()
-	_, err = db.Exec(fileA)
-	if err == nil || !strings.Contains(err.Error(), "Ambiguous") {
-		t.Errorf("loading schema wp into wp.db gave %v; the file warns that DuckDB refuses it as ambiguous", err)
+	if _, err := db.Exec(fileA); err != nil {
+		t.Fatalf("loading server wp into wp.db: %v", err)
+	}
+	if got := statuses(t, db, "wp.shop.orders"); !sameStrings(got, rowsA) {
+		t.Errorf("wp.shop.orders returned %v, want %v", got, rowsA)
 	}
 }
 
@@ -423,14 +427,14 @@ func TestDuckDB_keywordsThatCannotBeTypedBare(t *testing.T) {
 		q := quoteIdent(k)
 		if _, err := db.Exec(`CREATE SCHEMA IF NOT EXISTS ` + q + `; CREATE OR REPLACE VIEW ` + q + `."v" AS SELECT 1 AS x;`); err != nil {
 			// DuckDB will not create it under any spelling (a built-in name).
-			if ValidateSchemaName(k) == nil {
+			if ValidateDatabaseName(k) == nil {
 				acceptedAndBroken = append(acceptedAndBroken, k)
 			}
 			continue
 		}
 		var x int
 		bare := db.QueryRow(`SELECT x FROM ` + k + `.v`).Scan(&x)
-		verdict := ValidateSchemaName(k)
+		verdict := ValidateDatabaseName(k)
 		switch {
 		case bare != nil && verdict == nil:
 			acceptedAndBroken = append(acceptedAndBroken, k)

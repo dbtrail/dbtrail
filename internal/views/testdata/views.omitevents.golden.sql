@@ -20,7 +20,7 @@
 --   /data/archives/bintrail_id=11111111-2222-3333-4444-555555555555
 --   s3://my-bucket/archives/bintrail_id=66666666-7777-8888-9999-000000000000
 -- Baseline snapshot:
---   s3://my-bucket/baselines/ at 2026-04-30T03:00:00Z (4 table(s))
+--   s3://my-bucket/baselines/ at 2026-04-30T03:00:00Z (5 table(s))
 
 -- Timestamps are recorded in UTC, and the archives carry the zone, so the
 -- session's setting decides how they print and where date_trunc puts a day
@@ -43,7 +43,11 @@ CREATE OR REPLACE SECRET bintrail_s3_chain (TYPE s3, PROVIDER credential_chain, 
 --   CREATE OR REPLACE SECRET bintrail_s3_chain (
 --     TYPE s3, KEY_ID '…', SECRET '…', REGION '…');
 
--- state_<schema>_<table>: each table's full contents as of the baseline snapshot.
+-- <schema>.<table>: each table's full contents as of the baseline snapshot.
+-- Each table keeps its own name: SELECT * FROM demo.prices, and a name DuckDB
+-- cannot read bare is quoted, as in demo."order.items".
+-- Do not open this in a database file named after one of these schemas:
+-- in demo.db, demo.prices is ambiguous and the load stops at that view.
 --
 -- These are the SNAPSHOT's rows, not the table's current state: changes after
 -- the snapshot are not in this file. `bintrail views --include-events`
@@ -66,16 +70,23 @@ CREATE OR REPLACE SECRET bintrail_s3_chain (TYPE s3, PROVIDER credential_chain, 
 -- refreshed; a PostgreSQL-source baseline stores all its values as text and
 -- will not gain them. If a footer could not be read at all, the bintrail log
 -- has the error.
--- state_legacy_db_audit_log: this file carries no column types, so nothing is cast; decimal columns read as text
-CREATE OR REPLACE VIEW "state_legacy_db_audit_log" AS
+CREATE SCHEMA IF NOT EXISTS "Legacy-DB";
+CREATE SCHEMA IF NOT EXISTS "shop";
+CREATE SCHEMA IF NOT EXISTS "shop_order";
+-- "Legacy-DB"."Audit Log": this file carries no column types, so nothing is cast; decimal columns read as text
+CREATE OR REPLACE VIEW "Legacy-DB"."Audit Log" AS
   SELECT * FROM read_parquet('s3://my-bucket/baselines/2026-04-30T03-00-00Z/Legacy-DB/Audit Log.parquet');
-CREATE OR REPLACE VIEW "state_shop_order_items" AS
+-- shop.ORDER_ITEMS_945701: the table shop.ORDER_ITEMS. DuckDB does not tell names apart by letter case, and shop.order_items already has that name
+-- shop.ORDER_ITEMS_945701: this file carries no column types, so nothing is cast; decimal columns read as text
+CREATE OR REPLACE VIEW "shop"."ORDER_ITEMS_945701" AS
+  SELECT * FROM read_parquet('s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/ORDER_ITEMS.parquet');
+CREATE OR REPLACE VIEW "shop"."order_items" AS
   SELECT * FROM read_parquet('s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/order_items.parquet');
-CREATE OR REPLACE VIEW "state_shop_orders" AS
+CREATE OR REPLACE VIEW "shop"."orders" AS
   SELECT * REPLACE (CAST("total" AS DECIMAL(10,2)) AS "total", CAST("tax_rate" AS DECIMAL(6,4)) AS "tax_rate")
   FROM read_parquet('s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/orders.parquet');
--- state_shop_order_items_2: weight is DECIMAL(65,30), wider than DuckDB's 38 digits (left as text)
-CREATE OR REPLACE VIEW "state_shop_order_items_2" AS
+-- shop_order.items: weight is DECIMAL(65,30), wider than DuckDB's 38 digits (left as text)
+CREATE OR REPLACE VIEW "shop_order"."items" AS
   SELECT * FROM read_parquet('s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop_order/items.parquet');
 
 -- events: not included in this file.

@@ -35,7 +35,7 @@ func baselineDirWithATable(t *testing.T) string {
 // changes what the NEXT test observes.
 func saveViewsFlags(t *testing.T) {
 	t.Helper()
-	strs := []*string{&vIndexDSN, &vArchiveDir, &vArchiveS3, &vBintrailID, &vBaselineDir, &vBaselineS3, &vOut, &vSchema}
+	strs := []*string{&vIndexDSN, &vArchiveDir, &vArchiveS3, &vBintrailID, &vBaselineDir, &vBaselineS3, &vOut, &vDatabase, &vOldSchema}
 	strVals := make([]string, len(strs))
 	for i, p := range strs {
 		strVals[i] = *p
@@ -97,7 +97,7 @@ func TestRunViews_eventsViewIsOptIn(t *testing.T) {
 	}
 	// The state views are what the default file is FOR. Without this the
 	// assertion below would pass on a file with nothing in it.
-	if !strings.Contains(byDefault, `CREATE OR REPLACE VIEW "state_shop_orders"`) {
+	if !strings.Contains(byDefault, `CREATE OR REPLACE VIEW "shop"."orders"`) {
 		t.Fatalf("the default file defines no state view, so it proves nothing about "+
 			"the events view being the only thing left out:\n%s", byDefault)
 	}

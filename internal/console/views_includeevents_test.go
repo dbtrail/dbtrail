@@ -1,6 +1,7 @@
 package console
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -71,7 +72,7 @@ func TestViewsAPI_eventsViewIsOptIn(t *testing.T) {
 	}
 	// The state views are what the cheap file is FOR; without them this would
 	// pass on an empty response.
-	if !strings.Contains(string(body), `CREATE OR REPLACE VIEW "state_`) {
+	if !regexp.MustCompile(`CREATE OR REPLACE VIEW "[^"]+"."`).MatchString(string(body)) {
 		t.Fatalf("the default download defines no state view either:\n%s", body)
 	}
 

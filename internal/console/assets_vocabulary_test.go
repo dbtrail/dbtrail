@@ -103,7 +103,8 @@ const (
 	// between the two slashes and the counts above cannot be trusted. Left
 	// unpinned, that second case is silent — and silence is worse now that
 	// the counts tolerate drifting under their pins.
-	quoteCarryingRegexes = 9
+	// 12 since #2013: the DuckDB card parses quoted view names part by part.
+	quoteCarryingRegexes = 12
 )
 
 func TestOldVocabularyOnlyShrinks(t *testing.T) {

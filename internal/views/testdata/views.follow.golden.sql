@@ -39,7 +39,7 @@
 --   /data/archives/bintrail_id=11111111-2222-3333-4444-555555555555
 --   s3://my-bucket/archives/bintrail_id=66666666-7777-8888-9999-000000000000
 -- Baseline snapshot:
---   /data/baselines at 2026-04-30T03:00:00Z (4 table(s))
+--   /data/baselines at 2026-04-30T03:00:00Z (5 table(s))
 --   read through /data/baselines/current, which is that snapshot right now
 --   a directory, so the state views resolve only where it is mounted,
 --   at exactly this path
@@ -65,8 +65,12 @@ CREATE OR REPLACE SECRET bintrail_s3_chain (TYPE s3, PROVIDER credential_chain, 
 --   CREATE OR REPLACE SECRET bintrail_s3_chain (
 --     TYPE s3, KEY_ID '…', SECRET '…', REGION '…');
 
--- state_<schema>_<table>: each table's full contents as of the snapshot the
+-- <schema>.<table>: each table's full contents as of the snapshot the
 -- `current` pointer names, which is whichever one completed most recently.
+-- Each table keeps its own name: SELECT * FROM demo.prices, and a name DuckDB
+-- cannot read bare is quoted, as in demo."order.items".
+-- Do not open this in a database file named after one of these schemas:
+-- in demo.db, demo.prices is ambiguous and the load stops at that view.
 --
 -- These are the SNAPSHOT's rows, not the table's current state: changes after
 -- the snapshot live in the `events` view.
@@ -93,6 +97,7 @@ CREATE OR REPLACE SECRET bintrail_s3_chain (TYPE s3, PROVIDER credential_chain, 
 SET VARIABLE bintrail_missing_tables = (
   SELECT string_agg(t, ', ' ORDER BY t) FROM (VALUES
     ('Legacy-DB/Audit Log.parquet'),
+    ('shop/ORDER_ITEMS.parquet'),
     ('shop/order_items.parquet'),
     ('shop/orders.parquet'),
     ('shop_order/items.parquet')
@@ -103,17 +108,26 @@ SET VARIABLE bintrail_tables_checked = (SELECT CASE WHEN getvariable('bintrail_m
     '. Looked in ' || '/data/baselines/current/' ||
     '. If they were dropped or renamed, download this file again.') END);
 
--- state_legacy_db_audit_log: this file carries no column types, so nothing is cast; decimal columns read as text
--- state_legacy_db_audit_log: reads the table file alone because its schema could not be read. If a refresh writes changes beside the file, this view stops with an error until the views are generated again
-CREATE OR REPLACE VIEW "state_legacy_db_audit_log" AS
+CREATE SCHEMA IF NOT EXISTS "Legacy-DB";
+CREATE SCHEMA IF NOT EXISTS "shop";
+CREATE SCHEMA IF NOT EXISTS "shop_order";
+-- "Legacy-DB"."Audit Log": this file carries no column types, so nothing is cast; decimal columns read as text
+-- "Legacy-DB"."Audit Log": reads the table file alone because its schema could not be read. If a refresh writes changes beside the file, this view stops with an error until the views are generated again
+CREATE OR REPLACE VIEW "Legacy-DB"."Audit Log" AS
   SELECT * FROM read_parquet('/data/baselines/current/Legacy-DB/Audit Log.parquet')
   WHERE CASE WHEN (SELECT count(*) FROM glob('/data/baselines/current/Legacy-DB/Audit Log.[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) + (SELECT count(*) FROM glob('/data/baselines/current/Legacy-DB/Audit Log.[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) > 0 THEN error('bintrail views: Legacy-DB.Audit Log now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
-CREATE OR REPLACE VIEW "state_shop_order_items" AS
+-- shop.ORDER_ITEMS_945701: the table shop.ORDER_ITEMS. DuckDB does not tell names apart by letter case, and shop.order_items already has that name
+-- shop.ORDER_ITEMS_945701: this file carries no column types, so nothing is cast; decimal columns read as text
+-- shop.ORDER_ITEMS_945701: reads the table file alone because its schema could not be read. If a refresh writes changes beside the file, this view stops with an error until the views are generated again
+CREATE OR REPLACE VIEW "shop"."ORDER_ITEMS_945701" AS
+  SELECT * FROM read_parquet('/data/baselines/current/shop/ORDER_ITEMS.parquet')
+  WHERE CASE WHEN (SELECT count(*) FROM glob('/data/baselines/current/shop/ORDER_ITEMS.[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) + (SELECT count(*) FROM glob('/data/baselines/current/shop/ORDER_ITEMS.[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) > 0 THEN error('bintrail views: shop.ORDER_ITEMS now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
+CREATE OR REPLACE VIEW "shop"."order_items" AS
   WITH bintrail_delta AS (SELECT * FROM read_parquet('/data/baselines/current/shop/order_items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[ts]', filename=true, union_by_name=true) WHERE regexp_matches(filename, '(^|[/\\])order_items\.[0-9]{6}(-[0-9]{6})?\.upserts$') UNION ALL BY NAME SELECT NULL::VARCHAR AS "bintrail_pk", NULL::VARCHAR AS "bintrail_op" WHERE false), bintrail_latest AS (SELECT * EXCLUDE (filename) FROM bintrail_delta QUALIFY row_number() OVER (PARTITION BY "bintrail_pk" ORDER BY filename DESC) = 1) SELECT * FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet('/data/baselines/current/shop/order_items.parquet', file_row_number=true) WHERE file_row_number NOT IN (SELECT CAST("pos" AS BIGINT) FROM (SELECT * FROM read_parquet('/data/baselines/current/shop/order_items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[tl]', filename=true) WHERE regexp_matches(filename, '(^|[/\\])order_items\.[0-9]{6}(-[0-9]{6})?\.posdel$') UNION ALL BY NAME SELECT NULL::BIGINT AS "pos" WHERE false) WHERE "pos" IS NOT NULL) UNION ALL BY NAME SELECT * EXCLUDE ("bintrail_pk", "bintrail_op") FROM bintrail_latest WHERE "bintrail_op" = 'u');
-CREATE OR REPLACE VIEW "state_shop_orders" AS
+CREATE OR REPLACE VIEW "shop"."orders" AS
   WITH bintrail_delta AS (SELECT * FROM read_parquet('/data/baselines/current/shop/orders.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[ts]', filename=true, union_by_name=true) WHERE regexp_matches(filename, '(^|[/\\])orders\.[0-9]{6}(-[0-9]{6})?\.upserts$') UNION ALL BY NAME SELECT NULL::VARCHAR AS "bintrail_pk", NULL::VARCHAR AS "bintrail_op" WHERE false), bintrail_latest AS (SELECT * EXCLUDE (filename) FROM bintrail_delta QUALIFY row_number() OVER (PARTITION BY "bintrail_pk" ORDER BY filename DESC) = 1) SELECT * REPLACE (CAST("total" AS DECIMAL(10,2)) AS "total", CAST("tax_rate" AS DECIMAL(6,4)) AS "tax_rate") FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet('/data/baselines/current/shop/orders.parquet', file_row_number=true) WHERE file_row_number NOT IN (SELECT CAST("pos" AS BIGINT) FROM (SELECT * FROM read_parquet('/data/baselines/current/shop/orders.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[tl]', filename=true) WHERE regexp_matches(filename, '(^|[/\\])orders\.[0-9]{6}(-[0-9]{6})?\.posdel$') UNION ALL BY NAME SELECT NULL::BIGINT AS "pos" WHERE false) WHERE "pos" IS NOT NULL) UNION ALL BY NAME SELECT * EXCLUDE ("bintrail_pk", "bintrail_op") FROM bintrail_latest WHERE "bintrail_op" = 'u');
--- state_shop_order_items_2: weight is DECIMAL(65,30), wider than DuckDB's 38 digits (left as text)
-CREATE OR REPLACE VIEW "state_shop_order_items_2" AS
+-- shop_order.items: weight is DECIMAL(65,30), wider than DuckDB's 38 digits (left as text)
+CREATE OR REPLACE VIEW "shop_order"."items" AS
   WITH bintrail_delta AS (SELECT * FROM read_parquet('/data/baselines/current/shop_order/items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[ts]', filename=true, union_by_name=true) WHERE regexp_matches(filename, '(^|[/\\])items\.[0-9]{6}(-[0-9]{6})?\.upserts$') UNION ALL BY NAME SELECT NULL::VARCHAR AS "bintrail_pk", NULL::VARCHAR AS "bintrail_op" WHERE false), bintrail_latest AS (SELECT * EXCLUDE (filename) FROM bintrail_delta QUALIFY row_number() OVER (PARTITION BY "bintrail_pk" ORDER BY filename DESC) = 1) SELECT * FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet('/data/baselines/current/shop_order/items.parquet', file_row_number=true) WHERE file_row_number NOT IN (SELECT CAST("pos" AS BIGINT) FROM (SELECT * FROM read_parquet('/data/baselines/current/shop_order/items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[tl]', filename=true) WHERE regexp_matches(filename, '(^|[/\\])items\.[0-9]{6}(-[0-9]{6})?\.posdel$') UNION ALL BY NAME SELECT NULL::BIGINT AS "pos" WHERE false) WHERE "pos" IS NOT NULL) UNION ALL BY NAME SELECT * EXCLUDE ("bintrail_pk", "bintrail_op") FROM bintrail_latest WHERE "bintrail_op" = 'u');
 
 -- events: every archived binlog event, across all archive sources.

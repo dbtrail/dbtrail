@@ -88,7 +88,7 @@ func TestPointerStateView_readsThroughTheSymlink(t *testing.T) {
 	db := execViews(t, pointerFixture(t, root, paths))
 
 	var status string
-	if err := db.QueryRow(`SELECT "status" FROM state_shop_orders`).Scan(&status); err != nil {
+	if err := db.QueryRow(`SELECT "status" FROM shop.orders`).Scan(&status); err != nil {
 		t.Fatalf("query state view: %v", err)
 	}
 	if status != "here" {
@@ -168,7 +168,7 @@ func TestPointerStateView_acceptsATableNestedDeeper(t *testing.T) {
 
 	db := execViews(t, Generate(in))
 	var status string
-	if err := db.QueryRow(`SELECT "status" FROM state_shop_orders`).Scan(&status); err != nil {
+	if err := db.QueryRow(`SELECT "status" FROM shop.orders`).Scan(&status); err != nil {
 		t.Fatalf("query state view: %v", err)
 	}
 	if status != "here" {
@@ -273,7 +273,7 @@ func TestPointerFollow_acceptsARootWithGlobMetacharacters(t *testing.T) {
 			}
 			db := execViews(t, sqlText)
 			var status string
-			if err := db.QueryRow(`SELECT "status" FROM state_shop_orders`).Scan(&status); err != nil {
+			if err := db.QueryRow(`SELECT "status" FROM shop.orders`).Scan(&status); err != nil {
 				t.Fatalf("query state view: %v", err)
 			}
 			if status != "here" {
@@ -324,7 +324,7 @@ func TestPointerFollow_refusesToFollowABackslashRoot(t *testing.T) {
 	// the half glob disagrees with.
 	db := execViews(t, sqlText)
 	var status string
-	if err := db.QueryRow(`SELECT "status" FROM state_shop_orders`).Scan(&status); err != nil {
+	if err := db.QueryRow(`SELECT "status" FROM shop.orders`).Scan(&status); err != nil {
 		t.Fatalf("query state view: %v", err)
 	}
 	if status != "here" {

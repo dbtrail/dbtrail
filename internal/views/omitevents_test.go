@@ -21,7 +21,7 @@ func TestOmitEvents_leavesTheViewOutButSaysSo(t *testing.T) {
 	}
 	// The state views are the whole point of the cheap file, so their absence
 	// would make this test pass for the wrong reason.
-	if !strings.Contains(out, `CREATE OR REPLACE VIEW "state_shop_orders"`) {
+	if !strings.Contains(out, `CREATE OR REPLACE VIEW "shop"."orders"`) {
 		t.Fatalf("the state views went missing too:\n%s", out)
 	}
 	// Silence would leave the reader unable to tell "left out" from "your

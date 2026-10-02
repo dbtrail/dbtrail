@@ -75,7 +75,7 @@ You get:
 | View | What it is |
 |---|---|
 | `events` | every archived binlog event across all archive sources, with `event_type` decoded to `INSERT`/`UPDATE`/`DELETE` (the raw code stays as `event_type_code`), `commit_ts_us` also exposed as a real timestamp in `commit_time`, and the Hive path columns `bintrail_id` / `event_date` / `event_hour` projected |
-| `state_<schema>_<table>` | one per table in the newest discoverable baseline snapshot — that table's full contents as of the snapshot |
+| `<schema>.<table>` | one per table in the newest discoverable baseline snapshot, named exactly like the source table (`shop.orders`, `demo."order.items"`) — that table's full contents as of the snapshot |
 
 Archive sources come from the index's `archive_state` registry, so a new server or a new bucket shows up without being named. To generate the file without an index at all, name a source directly:
 
@@ -91,18 +91,18 @@ Three properties worth knowing:
 - **An S3-compatible store is named in the file.** When the generating process runs with `BINTRAIL_S3_ENDPOINT`, the file sets `s3_endpoint`, `s3_url_style` and `s3_use_ssl` and repeats them in its secret, so DuckDB on another machine reads the same store instead of AWS, and keeps doing so if the secret fails. A location, not a credential: the file stays shareable.
 - **The S3 secret lasts one session.** Views persist in a `.db` file; secrets do not. Reopen `lake.db` tomorrow and a `SELECT` over an S3-backed view fails with "No credentials are provided" until you run the file again (`.read views.sql`). Do not turn the secret into a `PERSISTENT` one: DuckDB resolves your credential chain at that moment and writes the resulting keys to `~/.duckdb/stored_secrets`.
 - **Archive sources are named for another machine.** An archive registered both on the generating host and in S3 is listed by its S3 location; a local path appears only when the registry holds no S3 location for it. State views point wherever `--baseline-dir`/`--baseline-s3` points, so a local baseline directory resolves only on the host that holds it. The daemon's own reads still prefer the local copy.
-- **The state views follow the newest baseline; the rest is a snapshot of the layout.** With `--include-events`, that view's globs keep picking up newly rotated partitions on their own. The `state_` views read through `<baseline root>/current`, a pointer that a NEWER completed snapshot updates (a snapshot produced for a past instant, such as a point-in-time restore, completes normally and deliberately does not take it), so a snapshot published after this file was written reaches it with nothing to re-run. That covers the case that used to catch people: a daemon running `bintrail-console watch --baseline-refresh-interval` publishes a new snapshot every interval, and the views move to it when it completes. All of them move together, because the pointer is replaced in one step, so no query can read one table from the new snapshot and another from the old, and a query already running finishes against the files it opened.
+- **The state views follow the newest baseline; the rest is a snapshot of the layout.** With `--include-events`, that view's globs keep picking up newly rotated partitions on their own. The table views read through `<baseline root>/current`, a pointer that a NEWER completed snapshot updates (a snapshot produced for a past instant, such as a point-in-time restore, completes normally and deliberately does not take it), so a snapshot published after this file was written reaches it with nothing to re-run. That covers the case that used to catch people: a daemon running `bintrail-console watch --baseline-refresh-interval` publishes a new snapshot every interval, and the views move to it when it completes. All of them move together, because the pointer is replaced in one step, so no query can read one table from the new snapshot and another from the old, and a query already running finishes against the files it opened.
 
   What does *not* follow is the file's idea of the **shape** of the data: which views exist, and the precision each `DECIMAL` column is read at, were both decided from the snapshot named in the header. Regenerate after a table is added or dropped, after a column changes type, and whenever archive sources are added or removed. **Which of those you notice follows one rule**: the generated file names only the paths and the `DECIMAL` columns, so only those two can fail. A table that leaves the newest snapshot is caught by a check the file runs before it creates anything: it names the table, says which snapshot it looked in, and stops, so you never end up with half the views defined. A `DECIMAL` column renamed or dropped fails later, at its own view. Everything else is quiet, because `SELECT *` passes it through: a table *added* to the source simply has no view, a `DECIMAL` whose scale grew is read at the old scale, a column that changes to some other type arrives as whatever the new file holds (an `ORDER BY` can start sorting text), and an archive source added later is not there. The loud half is deliberate: the pointer names the newest complete snapshot whatever tables it holds, and refusing to advance unless every table is still present would freeze it forever on the first dropped table, leaving every generated file quietly serving older and older rows. Only an operator action reaches this — `--tables` on a hand-run baseline, or narrowing a server's schemas — since the periodic refresh folds exactly the tables of the snapshot it read.
 
-  An **S3 baseline root** follows too, by a different route. There is no pointer object to publish there: doing so would mean copying every table to a second prefix, which is not atomic across tables, so a query could read half of one snapshot and half of another. Instead the file resolves the newest `_SUCCESS`-marked snapshot into a session variable when it is read, and every `state_` view reads through that one value. One lookup for the whole file, so it costs what pinning costs, and the views agree with each other the way the pointer makes them agree. A refresh published while you are working is picked up by reading the file again, which an S3 session already does for its credentials.
+  An **S3 baseline root** follows too, by a different route. There is no pointer object to publish there: doing so would mean copying every table to a second prefix, which is not atomic across tables, so a query could read half of one snapshot and half of another. Instead the file resolves the newest `_SUCCESS`-marked snapshot into a session variable when it is read, and every table view reads through that one value. One lookup for the whole file, so it costs what pinning costs, and the views agree with each other the way the pointer makes them agree. A refresh published while you are working is picked up by reading the file again, which an S3 session already does for its credentials.
 
   Several cases pin to one snapshot instead, and the generated file always says which it did. `--pin-snapshot` is the deliberate one, for reproducible analysis against a fixed instant. A local baseline root written by an older bintrail carries no pointer until its next snapshot completes. And a `current` an operator replaced with a real directory is never touched, so that root pins too.
-- **Money columns are cast back to numbers.** MySQL `DECIMAL` and `NUMERIC` are stored as text in the Parquet, so that a value MySQL can hold is never rounded to fit a narrower type. One caveat belongs with a *following* file: the precision and scale are read when the file is generated, and they do not follow. Widen a `DECIMAL` column's scale and the view goes on reading it at the old scale, rounding the extra digits away with no error. Regenerate after a column changes type. The `state_` views cast them back to `DECIMAL(p,s)` using the precision and scale the column was declared with, so `sum()` and the rest work on them directly. See below for the two cases where a column stays text.
+- **Money columns are cast back to numbers.** MySQL `DECIMAL` and `NUMERIC` are stored as text in the Parquet, so that a value MySQL can hold is never rounded to fit a narrower type. One caveat belongs with a *following* file: the precision and scale are read when the file is generated, and they do not follow. Widen a `DECIMAL` column's scale and the view goes on reading it at the old scale, rounding the extra digits away with no error. Regenerate after a column changes type. The table views cast them back to `DECIMAL(p,s)` using the precision and scale the column was declared with, so `sum()` and the rest work on them directly. See below for the two cases where a column stays text.
 
-`state_` views are the snapshot's rows, not the table's current state. To materialize a *later* point in time, use `bintrail reconstruct` — folding deltas back onto a baseline is what that command does, and it is not expressible as a view.
+The table views are the snapshot's rows, not the table's current state. To materialize a *later* point in time, use `bintrail reconstruct` — folding deltas back onto a baseline is what that command does, and it is not expressible as a view.
 
-**Deleted rows are not in the `state_` views, and they are not lost.** A `state_<schema>_<table>` view is the table as it stood at the snapshot, so a row deleted before that instant is not in it, and a `baseline refresh` applies a DELETE by dropping the row, the same way the table did. There is no `_deleted` marker column, which is what a warehouse connector would give you instead. The row lives in the `events` view: every DELETE is kept with its full before-image in `row_before`, for as long as the archives are kept. That view is opt-in: regenerate with `--include-events` if the file you have does not define it. Without `--include-live` it covers the archives only, so a DELETE from the last few hours is not in it until rotation archives its partition; add `--include-events --include-live` to read the index too (the live leg is a leg of that view, so it needs both).
+**Deleted rows are not in the table views, and they are not lost.** A table's view (`shop.orders`) is the table as it stood at the snapshot, so a row deleted before that instant is not in it, and a `baseline refresh` applies a DELETE by dropping the row, the same way the table did. There is no `_deleted` marker column, which is what a warehouse connector would give you instead. The row lives in the `events` view: every DELETE is kept with its full before-image in `row_before`, for as long as the archives are kept. That view is opt-in: regenerate with `--include-events` if the file you have does not define it. Without `--include-live` it covers the archives only, so a DELETE from the last few hours is not in it until rotation archives its partition; add `--include-events --include-live` to read the index too (the live leg is a leg of that view, so it needs both).
 
 ```sql
 SELECT event_timestamp, pk_values, row_before
@@ -115,41 +115,87 @@ ORDER BY event_timestamp DESC;
 
 To get a table back as it stood before a purge, use `bintrail reconstruct --at` with a baseline taken before it. An archival purge (rows moved out of the operational database on purpose) leaves through the binlog as ordinary DELETEs, so the refresh cannot tell it from a business delete and drops those rows from the snapshot too; the event log is where they remain.
 
-### Several servers in one DuckDB file
+### How the views are named
 
-A view is named after its table, not after its server. Load the files of two
-servers into one database and every table they share is defined twice under one
-name: the second file wins, the first server's table is gone from the catalog,
-and nothing reports it.
-
-```text
-server wp    shop.orders  ->  state_shop_orders  \
-                                                   one name, the last file loaded wins
-server rds   shop.orders  ->  state_shop_orders  /
-```
-
-Give each server its own schema with `--schema`:
-
-```sh
-bintrail views --baseline-dir /data/baselines/wp  --schema wp  --output wp.sql
-bintrail views --baseline-dir /data/baselines/rds --schema rds --output rds.sql
-
-cat wp.sql rds.sql > all.sql
-duckdb lake.db -c ".read all.sql"
-```
-
-```text
-server wp    shop.orders  ->  wp.state_shop_orders
-server rds   shop.orders  ->  rds.state_shop_orders
-```
-
-Both tables are there, each with its own server's rows, and one query can read
-across them:
+Each table is a view with the table's own name, in a DuckDB schema with the
+source schema's name, so you query it the way you would on the source:
 
 ```sql
-SELECT 'wp' AS server, * FROM wp.state_shop_orders
+SELECT * FROM shop.orders;
+SELECT * FROM demo."order.items";   -- quoted, because of the dot
+```
+
+A name DuckDB cannot read bare (a dot, a space, a dash, an accent, a SQL
+keyword such as `select`) has to be quoted with double quotes. Nothing is
+renamed to avoid that, with two exceptions, and the file and the command both
+say which tables they hit:
+
+- **Names that differ only in letter case.** DuckDB compares names without
+  letter case (ASCII letters only), so `shop.Orders` and `shop.orders` are one
+  name there. The spelling that sorts last keeps the exact name, which is
+  the all-lowercase one when there is one (`shop.orders`). Every other
+  spelling gets a suffix made from a short hash of its own spelling
+  (`shop.Orders_` and six letters and digits), so its name does not depend on
+  which other twins exist: a twin added later does not rename it. The one
+  rename a new twin can cause is to the plain-named table, when the new
+  spelling sorts after it (a lowercase spelling appearing).
+- **`main.events`.** That is the `events` view (the change log), so a source
+  table `events` in a schema called `main` gets the same kind of suffix
+(`main.events_` and six letters and digits). A table
+  called `events` in any other schema (`shop.events`) keeps its name.
+
+Some source schemas cannot hold views at all. `information_schema` and
+`pg_catalog` are DuckDB's own and refuse them in every database. `temp`,
+`system` and `memory` are names of DuckDB databases, so `temp.orders` would be
+ambiguous; with `--database` (below) they work, as `wp.temp.orders`. Tables in
+those schemas are left out, with a note in the file and on the command's
+output.
+
+**Do not name the DuckDB database file after one of your schemas.** DuckDB
+names a database after its file, so in `shop.db` the name `shop.orders` is
+ambiguous between the database and the schema and the load stops with
+`Ambiguous reference to catalog or schema "shop"`. Any other file name works
+(`lake.db`).
+
+Before #2013 the views were called `state_<schema>_<table>` (`state_shop_orders`).
+Those names are gone; regenerate the file and use the source names.
+
+### Several servers in one DuckDB session
+
+A view is named after its schema and table, not after its server. Load the
+files of two servers into one session and every table they share is defined
+twice under one name: the second file wins, the first server's table is gone
+from the catalog, and nothing reports it.
+
+```text
+server wp    shop.orders  ->  shop.orders  \
+                                             one name, the last file loaded wins
+server rds   shop.orders  ->  shop.orders  /
+```
+
+Give each server its own DuckDB database with `--database`:
+
+```sh
+bintrail views --baseline-dir /data/baselines/wp  --database wp  --output wp.sql
+bintrail views --baseline-dir /data/baselines/rds --database rds --output rds.sql
+
+duckdb -c ".read wp.sql" -c ".read rds.sql"
+```
+
+```text
+server wp    shop.orders  ->  wp.shop.orders
+server rds   shop.orders  ->  rds.shop.orders
+```
+
+Each file starts with `ATTACH IF NOT EXISTS ':memory:' AS wp`, so the server's
+views live in a database of that name, next to the other server's. The change
+log is `wp.events`. Both tables are there, each with its own server's rows, and
+one query can read across them:
+
+```sql
+SELECT 'wp' AS server, * FROM wp.shop.orders
 UNION ALL
-SELECT 'rds', * FROM rds.state_shop_orders
+SELECT 'rds', * FROM rds.shop.orders
 ORDER BY 1, 2;
 ```
 
@@ -166,6 +212,18 @@ ORDER BY 1, 2;
 └─────────┴───────┴──────────┴───────────────┘
 ```
 
+**The databases are in memory unless you say otherwise.** They last as long as
+the session. To keep a server's views in a file, attach the file under the
+server's name before reading its views, and attach it again in later sessions:
+
+```sql
+ATTACH 'wp.db' AS wp;
+.read wp.sql
+```
+
+Opening that file directly also works (`duckdb wp.db`, then `.read wp.sql`):
+DuckDB names it `wp`, and the file uses the database that is already there.
+
 To refresh one server, generate its file again and read it again. It replaces
 that server's views and leaves the others alone.
 
@@ -174,45 +232,44 @@ reason when you run the command:
 
 | Name | Why it is refused |
 |---|---|
-| `WP`, `Wp` | DuckDB reads `WP` and `wp` as the same schema, even quoted, so two servers named that way would replace each other. Use lowercase |
+| `WP`, `Wp` | DuckDB reads `WP` and `wp` as the same database, even quoted, so two servers named that way would replace each other. Use lowercase |
 | `my server`, `wp.prod`, `wp-prod` | Only lowercase letters, digits and underscore |
 | `1wp` | A name that starts with a digit has to be quoted in every query |
-| `main`, `temp`, `system`, `memory`, `information_schema`, `pg_catalog` | DuckDB already has them. `main` is where a file generated with no `--schema` puts its views |
+| `main`, `temp`, `system`, `memory`, `information_schema`, `pg_catalog` | DuckDB already has them |
 | `select`, `order`, `left`, ... | SQL keywords DuckDB cannot read unquoted: `FROM order.events` is a syntax error |
 | `wp_live` | The name a server's live index is attached under (below) |
 
-Three things a schema does not cover:
+`--schema` was this option's name before #2013, when a server was a DuckDB
+schema. It is refused now with a note to use `--database`.
 
-- **Do not name the database file after a schema.** DuckDB names a database
-  after its file, so loading `--schema wp` into `wp.db` stops at the first view
-  with `Ambiguous reference to catalog or schema "wp"`. Any other file name
-  works (`lake.db` above).
+Two things a database per server does not cover:
+
 - **The S3 settings are shared.** A DuckDB session has one S3 region, one S3
   endpoint and one general S3 secret, and every file sets them. Servers whose
   buckets are in the same store and region load together. Servers in different
   regions, or one in AWS and one in an S3-compatible store, do not: the last
   file read sets them for everyone, so the other server's reads go to the wrong
-  store or region. Keep those in separate database files.
+  store or region. Keep those in separate sessions.
 - **With `--include-live`, fill in each file's password.** Each file attaches its
-  own index, as `<schema>_live` (`wp_live`, `rds_live`), through its own secret.
-  Without `--schema` every file attaches `bintrail_live`, and DuckDB refuses the
+  own index, as `<database>_live` (`wp_live`, `rds_live`), through its own secret.
+  Without `--database` every file attaches `bintrail_live`, and DuckDB refuses the
   second one.
 
 ### Every flag
 
 | Flag | What it does |
 |---|---|
-| `--baseline-dir` | Local backup directory. Source of the `state_` views |
+| `--baseline-dir` | Local backup directory. Source of the table views |
 | `--baseline-s3` | S3 backup prefix. Mutually exclusive with `--baseline-dir` |
-| `--pin-snapshot` | Freeze the `state_` views on the snapshot that exists now, instead of following the newest |
-| `--schema` | Create every view inside this DuckDB schema, so several servers fit in one database. See [Several servers in one DuckDB file](#several-servers-in-one-duckdb-file) |
+| `--pin-snapshot` | Freeze the table views on the snapshot that exists now, instead of following the newest |
+| `--database` | Create every view inside a DuckDB database of this name (`wp.shop.orders`, `wp.events`), so several servers fit in one session. Replaces `--schema`. See [Several servers in one DuckDB session](#several-servers-in-one-duckdb-session) |
 | `--include-events` | Add the `events` view. Off by default; see the cost above |
 | `--index-dsn` | The index, where archive locations are discovered. Needed with `--include-events` unless you name a location directly |
 | `--archive-dir` | Local archive root, named directly. Needs `--bintrail-id` |
 | `--archive-s3` | S3 archive prefix, named directly. Needs `--bintrail-id` |
 | `--bintrail-id` | The server's identity UUID. Required with the two flags above |
 | `--include-live` | Add the live index leg to `events`. Needs `--index-dsn`, and read its section above first |
-| `--no-baselines` | Emit `events` only, no `state_` views. Needs `--include-events` |
+| `--no-baselines` | Emit `events` only, no table views. Needs `--include-events` |
 | `--region` | AWS region to pin in the generated S3 secret |
 | `--output` | Output file, or `-` for stdout. Default `views.sql`. The older name `--out` keeps working |
 

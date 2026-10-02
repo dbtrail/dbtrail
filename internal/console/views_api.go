@@ -421,6 +421,10 @@ func (s *Server) handleViewsSQL(w http.ResponseWriter, r *http.Request) {
 	// exist, but with the events view left out and no baseline snapshot to
 	// build state views from, the file would carry no view at all. Served as a
 	// 200 it looked like a successful download of an empty schema.
+	if why := viewsLeftOutMessage(in); why != "" && !in.RendersAnyView() {
+		writeJSONError(w, http.StatusNotFound, "this would define no view at all: "+why)
+		return
+	}
 	if !in.RendersAnyView() {
 		writeJSONError(w, http.StatusNotFound,
 			"this would define no view at all: no baseline snapshot was found to build "+

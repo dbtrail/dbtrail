@@ -16,7 +16,7 @@ func createdViews(t *testing.T, sql string) []string {
 			continue
 		}
 		name := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(line[i+len(marker):]), " AS"))
-		names = append(names, strings.Trim(name, `"`))
+		names = append(names, strings.ReplaceAll(name, `"`, ""))
 	}
 	return names
 }
@@ -39,9 +39,9 @@ func TestGenerateViews_onlyWhatIsAsked(t *testing.T) {
 		want []string
 	}{
 		{"nil selects everything", nil, all},
-		{"one state view", ViewSet{"state_shop_orders": true}, []string{"state_shop_orders"}},
+		{"one state view", ViewSet{"shop.orders": true}, []string{"shop.orders"}},
 		{"the events view alone", ViewSet{"events": true}, []string{"events"}},
-		{"two views", ViewSet{"events": true, "state_shop_orders": true}, []string{"events", "state_shop_orders"}},
+		{"two views", ViewSet{"events": true, "shop.orders": true}, []string{"events", "shop.orders"}},
 		{"a name this layout does not define selects nothing", ViewSet{"nope": true}, nil},
 		{"an empty set selects nothing", ViewSet{}, nil},
 	} {
@@ -74,9 +74,9 @@ func TestGenerateViews_selectsNothingRendersNothing(t *testing.T) {
 
 // TestGenerateViews_stateNamesDoNotMoveWhenFiltered guards the rule that names
 // are assigned over EVERY table, not over the selected ones. The golden fixture
-// has a deliberate collision (shop.order_items and shop_order.items both want
-// state_shop_order_items), and the second one is only called
-// state_shop_order_items_2 because the first was seen first. Name them after
+// has a deliberate collision (shop.ORDER_ITEMS and shop.order_items are one name to
+// DuckDB), and shop.ORDER_ITEMS only gets a suffix because its lowercase twin
+// is in the snapshot. Name them after
 // filtering and that suffix disappears the moment the sibling is left out —
 // which would mean the name a reader queries by depends on the statement they
 // wrote, and their own query would stop resolving.
@@ -85,7 +85,7 @@ func TestGenerateViews_stateNamesDoNotMoveWhenFiltered(t *testing.T) {
 	full := createdViews(t, GenerateViews(in))
 	var collided string
 	for _, n := range full {
-		if strings.HasSuffix(n, "_2") {
+		if strings.HasPrefix(n, "shop.ORDER_ITEMS_") {
 			collided = n
 		}
 	}
@@ -93,12 +93,12 @@ func TestGenerateViews_stateNamesDoNotMoveWhenFiltered(t *testing.T) {
 		t.Fatalf("the fixture no longer collides on a state view name (%v); this guard covers nothing", full)
 	}
 
-	in.OnlyViews = ViewSet{collided: true}
+	in.OnlyViews = ViewSet{asciiLower(collided): true}
 	got := createdViews(t, GenerateViews(in))
 	if len(got) != 1 || got[0] != collided {
 		t.Fatalf("selecting %q alone defined %v, want just it", collided, got)
 	}
-	if !strings.Contains(GenerateViews(in), "shop_order/items.parquet") {
+	if !strings.Contains(GenerateViews(in), "/shop/ORDER_ITEMS.parquet") {
 		t.Errorf("%q was rendered over the wrong file: the suffix moved to another table", collided)
 	}
 }
@@ -108,7 +108,7 @@ func TestGenerateViews_stateNamesDoNotMoveWhenFiltered(t *testing.T) {
 // it cannot.
 func TestDefinedViews(t *testing.T) {
 	in := goldenInput()
-	if got, want := strings.Join(in.DefinedViews(), ","), strings.Join(createdViews(t, GenerateViews(in)), ","); got != want {
+	if got, want := strings.ReplaceAll(strings.Join(in.DefinedViews(), ","), `"`, ""), strings.Join(createdViews(t, GenerateViews(in)), ","); got != want {
 		t.Fatalf("DefinedViews = %s, but the render defines %s", got, want)
 	}
 	// No archive source and no live index: there is no events view to name.
@@ -197,9 +197,9 @@ func TestNeedsS3_honorsOnlyViews(t *testing.T) {
 		{"unfiltered, S3 everywhere", s3Both, nil, true},
 		{"no view at all", s3Both, ViewSet{}, false},
 		{"only the events view, archives on S3", s3ArchiveOnly, ViewSet{"events": true}, true},
-		{"only a state view, archives on S3", s3ArchiveOnly, ViewSet{"state_shop_orders": true}, false},
+		{"only a state view, archives on S3", s3ArchiveOnly, ViewSet{"shop.orders": true}, false},
 		{"only the events view, baseline on S3", s3BaselineOnly, ViewSet{"events": true}, false},
-		{"only a state view, baseline on S3", s3BaselineOnly, ViewSet{"state_shop_orders": true}, true},
+		{"only a state view, baseline on S3", s3BaselineOnly, ViewSet{"shop.orders": true}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := tc.in
@@ -222,7 +222,7 @@ func TestSelectedBaselines(t *testing.T) {
 	if got := in.SelectedBaselines(); len(got) != 0 {
 		t.Fatalf("a render that defines no view still reads %d baseline tables", len(got))
 	}
-	in.OnlyViews = ViewSet{"state_shop_orders": true}
+	in.OnlyViews = ViewSet{"shop.orders": true}
 	got := in.SelectedBaselines()
 	if len(got) != 1 || got[0].Schema != "shop" || got[0].Table != "orders" {
 		t.Fatalf("SelectedBaselines = %+v, want just shop.orders", got)

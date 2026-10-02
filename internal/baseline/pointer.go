@@ -19,8 +19,8 @@ import (
 //	<root>/current -> 2026-08-31T03-00-00Z
 //
 // It exists so a generated artifact can name a path that stays correct after
-// the next snapshot lands. `bintrail views` points its state_<schema>_<table>
-// views at <root>/current/... by default, so a periodically refreshed baseline
+// the next snapshot lands. `bintrail views` points its table views (shop.orders)
+// at <root>/current/... by default, so a periodically refreshed baseline
 // reaches an already-generated views file without regenerating it (#1484).
 //
 // The pointer is a SYMLINK, not a copy or a rewritten directory, for one

@@ -6276,7 +6276,7 @@ try {
       csvDisabled: (document.querySelector(".sqlp-csv") || {}).disabled,
       err: (document.querySelector(".sqlp-msg") || {}).textContent || "",
     }));
-    const stateView = `state_${FIX}_orders`;
+    const stateView = `${FIX}.orders`;
     (panelUp && opened.starter === `SELECT * FROM ${stateView} LIMIT 100` && opened.names.includes(stateView) && opened.label && opened.csvDisabled === true)
       ? ok("sql: the panel opens with the copy's tables, a starter query over the first one, a labelled editor")
       : bad("sql: the panel opens with the copy's tables, a starter query over the first one, a labelled editor", JSON.stringify(opened));

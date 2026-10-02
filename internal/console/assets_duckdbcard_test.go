@@ -233,10 +233,15 @@ func TestDuckDBCardNamesMatchTheFileItParses(t *testing.T) {
 		BaselineSnapshot: time.Date(2026, 4, 30, 3, 0, 0, 0, time.UTC),
 		Baselines: []views.BaselineTable{
 			{Schema: "shop", Table: "orders", Path: "/data/baselines/s/shop/orders.parquet"},
-			// Sanitizes to the same name as shop.order_items, so the generator
-			// suffixes it. A hand-derived list would get this pair wrong, which
-			// is half the reason the card does not derive one.
 			{Schema: "shop", Table: "order_items", Path: "/data/baselines/s/shop/order_items.parquet"},
+			// One name to DuckDB with shop.order_items, so the generator renames
+			// one. A hand-derived list would get this pair wrong, which is half
+			// the reason the card does not derive one.
+			{Schema: "shop", Table: "ORDER_ITEMS", Path: "/data/baselines/s/shop/ORDER_ITEMS.parquet"},
+			// A dot, a keyword and a quote, each of which the list must quote.
+			{Schema: "shop", Table: "order.items", Path: "/data/baselines/s/shop/order.items.parquet"},
+			{Schema: "shop", Table: "select", Path: "/data/baselines/s/shop/select.parquet"},
+			{Schema: "shop", Table: `say "hi"`, Path: "/data/baselines/s/shop/say.parquet"},
 			{Schema: "shop_order", Table: "items", Path: "/data/baselines/s/shop_order/items.parquet"},
 			// Neither a hyphen nor a space is legal bare in an identifier.
 			{Schema: "Legacy-DB", Table: "Audit Log", Path: "/data/baselines/s/Legacy-DB/Audit Log.parquet"},
@@ -248,32 +253,49 @@ func TestDuckDBCardNamesMatchTheFileItParses(t *testing.T) {
 		t.Fatal("the fixture defines no view, so this asserts nothing")
 	}
 
-	// The same expression app.js uses. Kept as a literal rather than read out of
-	// the asset: the point is that these two agree, and reading one to test
-	// itself would agree with anything.
-	re := regexp.MustCompile(`(?m)^CREATE OR REPLACE VIEW "([^"]+)"`)
+	// The same expressions app.js uses, and its typing rule. Kept as literals
+	// rather than read out of the asset: the point is that these two agree, and
+	// reading one to test itself would agree with anything.
+	re := regexp.MustCompile(`(?m)^CREATE OR REPLACE VIEW ((?:"(?:[^"]|"")*"\.)*"(?:[^"]|"")*") AS$`)
+	part := regexp.MustCompile(`"((?:[^"]|"")*)"`)
+	bare := regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	typed := func(s string) string {
+		if bare.MatchString(s) && !slices.Contains(views.BareKeywords(), strings.ToLower(s)) {
+			return s
+		}
+		return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+	}
 	var got []string
 	for _, m := range re.FindAllStringSubmatch(sqlText, -1) {
-		got = append(got, m[1])
+		var parts []string
+		for _, p := range part.FindAllStringSubmatch(m[1], -1) {
+			parts = append(parts, typed(strings.ReplaceAll(p[1], `""`, `"`)))
+		}
+		got = append(got, strings.Join(parts, "."))
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("the card would list %v; the file defines %v", got, want)
 	}
 
-	// The character set the simple pattern above relies on. sanitizeIdent folds
-	// everything outside [a-z0-9_], so a name can carry no quote of its own; if
-	// that ever changes, the pattern needs the quote-doubling case back and this
-	// says so before the list starts truncating names.
-	safe := regexp.MustCompile(`^[a-z0-9_]+$`)
-	for _, n := range want {
-		if !safe.MatchString(n) {
-			t.Errorf("view name %q is outside [a-z0-9_]; the card's pattern assumes it is not", n)
-		}
+	// The keyword list the JavaScript quotes on is the generator's.
+	js := readAsset(t, "app.js")
+	i := strings.Index(js, "const DUCKDB_BARE_KEYWORDS = new Set([")
+	if i < 0 {
+		t.Fatal("app.js no longer carries DUCKDB_BARE_KEYWORDS")
+	}
+	block := js[i : i+strings.Index(js[i:], "]);")]
+	var jsWords []string
+	for _, m := range regexp.MustCompile(`"([a-z_]+)"`).FindAllStringSubmatch(block, -1) {
+		jsWords = append(jsWords, m[1])
+	}
+	if !slices.Equal(jsWords, views.BareKeywords()) {
+		t.Errorf("app.js quotes on %v; the generator on %v", jsWords, views.BareKeywords())
 	}
 
 	// And the asset really does carry that expression.
 	body := functionBody(t, readAsset(t, "app.js"), "function duckdbViewNames(")
-	if !strings.Contains(body, `/^CREATE OR REPLACE VIEW "([^"]+)"/gm`) {
+	if !strings.Contains(body, `/^CREATE OR REPLACE VIEW ((?:"(?:[^"]|"")*"\.)*"(?:[^"]|"")*") AS$/gm`) ||
+		!strings.Contains(body, `/"((?:[^"]|"")*)"/g`) {
 		t.Error("app.js no longer greps for the statement shape this test pinned")
 	}
 

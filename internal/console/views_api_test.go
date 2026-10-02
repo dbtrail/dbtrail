@@ -43,12 +43,12 @@ func TestViewsAPI_servesADownloadableSQLFile(t *testing.T) {
 	}
 
 	sql := string(body)
-	for _, want := range []string{`CREATE OR REPLACE VIEW "state_shop_orders"`, `CREATE OR REPLACE VIEW "state_shop_users"`} {
+	for _, want := range []string{`CREATE OR REPLACE VIEW "shop"."orders"`, `CREATE OR REPLACE VIEW "shop"."users"`} {
 		if !strings.Contains(sql, want) {
 			t.Errorf("generated SQL is missing %s:\n%s", want, sql)
 		}
 	}
-	if strings.Contains(sql, "state_shop_retired") {
+	if strings.Contains(sql, "shop.retired") {
 		t.Error("a superseded snapshot's table leaked into the schema")
 	}
 }

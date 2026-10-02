@@ -1005,7 +1005,8 @@ and lands on Retention.
   only on a daemon that can build `.sql` backups.
 - **Download a DuckDB schema** (#1528, formerly *Query in DuckDB*; on MCP Server since #1573, after the SQL client panel) — a one-click download of `views.sql`: a ready-made
   DuckDB schema over the selected server's own Parquet — one
-  `state_<schema>_<table>` view per table in the newest baseline snapshot, plus
+  view per table in the newest baseline snapshot, named like the source table
+  (`shop.orders`), plus
   an `events` view across every archive source registered in `archive_state`
   when you tick **Include the change log**. It
   is the same file `bintrail views` writes. **The web interface does not run it.**
@@ -1127,7 +1128,8 @@ comes back as a table. It runs on DBTrail's copy of your data, the Parquet
 files on the index host. It never runs on MySQL.
 
 What you can query is what the copy defines: one table per source table, named
-`state_<schema>_<table>` (the table as of the newest snapshot), and `events`,
+like the source table, `shop.orders` (the table as of the newest snapshot;
+a name DuckDB cannot read bare is quoted, `demo."order.items"`), and `events`,
 the change log, when archived changes exist on local disk. The list on the left
 shows them; type in the filter to narrow it, click a name to put it in the
 query. The line under the editor says how old the copy is.

@@ -51,16 +51,16 @@ func TestViewsAPI_realFootersReachTheChainRule_1733(t *testing.T) {
 		}
 		sqlText := string(body)
 		view := func(name string) string {
-			i := strings.Index(sqlText, "CREATE OR REPLACE VIEW \""+name+"\"")
+			i := strings.Index(sqlText, "CREATE OR REPLACE VIEW \""+strings.Replace(name, ".", "\".\"", 1)+"\"")
 			if i < 0 {
 				t.Fatalf("%s: no view %s in:\n%s", round, name, sqlText)
 			}
 			return sqlText[i : i+strings.Index(sqlText[i:], ";")]
 		}
-		if v := view("state_shop_orders"); !strings.Contains(v, "bintrail_latest") {
+		if v := view("shop.orders"); !strings.Contains(v, "bintrail_latest") {
 			t.Errorf("%s: an ordinary table did not get the chain-aware body:\n%s", round, v)
 		}
-		if v := view("state_shop_odd"); strings.Contains(v, "file_row_number") {
+		if v := view("shop.odd"); strings.Contains(v, "file_row_number") {
 			t.Errorf("%s: a table with a filename column got the chain-aware body, which does not bind:\n%s", round, v)
 		}
 		if strings.Contains(sqlText, "reads the table file alone") {
