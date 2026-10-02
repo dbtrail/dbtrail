@@ -108,14 +108,19 @@ type backupScheduler struct {
 	// backup was taken next to a line saying nothing ran.
 	fallback map[string]scheduledFallback
 	// emergency: per server, when this process last started an emergency
-	// full read (a fallback, or one for new tables), for emergencyCap. The
+	// full read (a fallback for a refused or crashed update), for
+	// emergencyCap. The
 	// run history is the durable copy; this covers a read still running,
 	// which has no record yet, and a daemon without a history.
 	emergency map[string]time.Time
+	// newTablesStarts: per server, when this process started full reads for
+	// new tables, for newTablesHeld; the run history keeps the durable copy.
+	newTablesStarts map[string][]time.Time
 
 	// newTablesTried: per server, the tables an update left out that a full
 	// read was started for, and when (#1993, includeNewTables). Memory only:
-	// a restart forgets it, and costs at most one more full read.
+	// a restart forgets it; newTablesHeld, counted from the run history,
+	// still bounds the reads.
 	newTablesTried map[string]newTablesTry
 	// newTablesPending: per server, the full read PlanNewTables promised and
 	// the watcher has not started yet.
@@ -198,6 +203,7 @@ func newBackupScheduler(sup *baselineSupervisor, reg *console.Registry, fullBack
 		fullOwed:         make(map[string]string),
 		fallback:         make(map[string]scheduledFallback),
 		emergency:        make(map[string]time.Time),
+		newTablesStarts:  make(map[string][]time.Time),
 		newTablesTried:   make(map[string]newTablesTry),
 		newTablesPending: make(map[string]newTablesTry),
 		warned:           make(map[string]bool),
@@ -1441,13 +1447,15 @@ func sameIncurableRefusal(prev []console.RefusedTable, prevOmitted int, cur []co
 	return true
 }
 
-// emergencyCap is the most often the schedule reads a server in full on its
-// own initiative (#2006): a full read standing in for a refused or crashed
-// update, or one for tables an update left out. Whatever the reason, at most
-// one per this long, so a cause no full read cures costs one read of
-// production a day, not one per slot. Full reads the operator asked for (the
-// full-copy timetable, a schedule that always reads in full, "Read database
-// now") are not emergency reads: they neither count nor wait.
+// emergencyCap is the most often the schedule reads a server in full in place
+// of an update (#2006): a full read standing in for a refused or crashed
+// update. At most one per this long, so a cause no full read cures costs one
+// read of production a day, not one per slot. Full reads the operator asked
+// for (the full-copy timetable, a schedule that always reads in full, "Read
+// database now") are not emergency reads: they neither count nor wait. Nor
+// are full reads that include new tables (#1993): a new table is not in the
+// copy until one runs, so they have their own bound (newTablesHeld) and
+// neither count toward this cap nor wait for it.
 var emergencyCap = 24 * time.Hour
 
 // emergencySlack is taken off the cap so a daily schedule gets its daily
@@ -1502,6 +1510,6 @@ func (b *backupScheduler) emergencyHeld(serverID string, now time.Time) (next ti
 
 // emergencyHeldWords says the cap in the page's words.
 func emergencyHeldWords(next time.Time) string {
-	return "DBTrail reads this server in full on its own at most once a day, and the last such read was less than a day ago; " +
+	return "DBTrail reads this server in full in place of a failed update at most once a day, and the last such read was less than a day ago; " +
 		"the next one is allowed after " + next.UTC().Format("2006-01-02 15:04") + " UTC"
 }

@@ -13,7 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schema is a DuckDB schema and each table keeps its own name, in `views.sql`,
   in `bintrail views`, in the snapshot download and in the console's SQL card.
   The old `state_<schema>_<table>` names are gone, with no aliases: regenerate
-  the file and update saved queries and dashboards. The old names were also
+  the file and update saved queries and dashboards. A DuckDB database file
+  that kept the old views still holds them; list the statements that drop
+  them with `SELECT 'DROP VIEW ' || database_name || '.' || schema_name || '.'
+  || view_name || ';' FROM duckdb_views() WHERE view_name LIKE 'state\_%' ESCAPE '\';`. The old names were also
   lossy (`a.b_c` and `a_b.c` were one name). Two tables whose names differ only
   in letter case are one name to DuckDB, so one gets a number
   (`shop.orders_2`); tables in a schema DuckDB keeps for itself
@@ -28,6 +31,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The console's SQL card no longer loads the change log for a statement that
   names a source table or schema called `events` (`shop.events`,
   `events.orders`); only `events` and `main.events` are the change log.
+- **Full reads that bring in new tables no longer wait for, or use up, the
+  daily cap.** Since 0.95.0 the scheduler takes at most one self-initiated
+  full read per server per day, and a full read to include tables created
+  after the last snapshot counted toward it: a fallback in the night could
+  keep new tables out of the copy for most of the next day. The cap now
+  covers only full reads that stand in for a refused or crashed update. Full
+  reads for new tables have their own limit: at most 3 per server in any
+  24 hours, counted from start times saved in the run history so a restart
+  does not reset it, on top of the existing rules (a full read that finished
+  and still lacks the tables is not retried, and tables left out because
+  their name cannot be stored are not treated as new). When that limit holds
+  one back, the snapshot card says when the next one may start and offers
+  **Read database now**.
 
 ## [0.95.0] - 2026-10-02
 ### Fixed

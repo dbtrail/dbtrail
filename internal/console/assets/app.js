@@ -8707,6 +8707,14 @@ function newTablesNote(run, snap) {
         break;
       case "not_possible": {
         const why = String(run.new_tables_action_reason || "").replace(/\s+/g, " ").trim();
+        // Held by the daily bound on full reads for new tables: nothing to
+        // fix, the first update after that time starts one.
+        if (/the next one is allowed after/.test(why)) {
+          next = "A full snapshot is held back for now: " + why.replace(/[.\s]+$/, "") + ". The first update after that time starts one, so " +
+            they.toLowerCase() + join + " the copy then. To include " + (one ? "it" : "them") + " sooner, read the database now.";
+          actions = [Object.assign({ primary: true }, READ), { label: "Later", run: "dismiss" }];
+          break;
+        }
         next = "A full snapshot cannot start from here" + (why ? ": " + why.replace(/[.\s]+$/, "") : "") + ". Until that is fixed, " +
           they.toLowerCase() + " will not join the copy on " + (one ? "its" : "their") + " own. Fix it, or take a full snapshot with the bintrail command line.";
         actions = [{ label: "OK", primary: true, run: "dismiss" }];

@@ -69,6 +69,7 @@ func TestNewTablesNote_words(t *testing.T) {
 		"full_read":     {st(NewTablesActionFullRead, ""), same},
 		"not_possible":  {st(NewTablesActionNotPossible, gateErr.Error()), same},
 		"gave_up":       {st(NewTablesActionGaveUp, ""), same},
+		"held_per_day":  {st(NewTablesActionNotPossible, NewTablesHeldReason(3, time.Date(2026, 10, 2, 9, 5, 0, 0, time.UTC))), same},
 		"still_missing": {st(NewTablesActionStillMissing, ""), same},
 		"no_schedule":   {st(NewTablesActionNoSchedule, ""), same},
 		"old_record":    {st("", ""), same},
@@ -120,6 +121,9 @@ func TestNewTablesNote_words(t *testing.T) {
 		"not_possible": {head2 + "A full snapshot cannot start from here: creating snapshots from the web interface is turned off here " +
 			"(BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1). Until that is fixed, they will not join the copy on their own. " +
 			"Fix it, or take a full snapshot with the bintrail command line.", "OK*"},
+		"held_per_day": {head2 + "A full snapshot is held back for now: DBTrail starts at most 3 full reads a day on its own to include new tables, " +
+			"and that many started in the last day; the next one is allowed after 2026-10-02 09:05 UTC. The first update after that time starts one, " +
+			"so they join the copy then. To include them sooner, read the database now.", "Read database now*|Later"},
 		"gave_up": {head2 + "Full snapshots were started to include them and none finished, so DBTrail stopped trying on its own. " +
 			"Check why the last full snapshot failed on the Snapshots page, then take one.", "Read database now*|Later"},
 		"still_missing": {head2 + "A full snapshot read your database after that and still did not include them, so another one would not either. " +
