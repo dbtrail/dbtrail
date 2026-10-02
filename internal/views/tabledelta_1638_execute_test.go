@@ -85,7 +85,7 @@ func writeLegacyDeltaPair(t *testing.T, base string, dead []int64, upserts [][2]
 func stateRows(t *testing.T, sqlText string) []string {
 	t.Helper()
 	db := execViews(t, sqlText)
-	rows, err := db.Query(`SELECT id::VARCHAR || '=' || status FROM state_shop_orders ORDER BY id`)
+	rows, err := db.Query(`SELECT id::VARCHAR || '=' || status FROM shop.orders ORDER BY id`)
 	if err != nil {
 		t.Fatalf("query the state view: %v\n--- generated ---\n%s", err, sqlText)
 	}
@@ -310,13 +310,13 @@ func TestFollowingStateView_readsADeltaThatAppearsLater(t *testing.T) {
 			})
 			db := execViews(t, sqlText)
 			var n int
-			if err := db.QueryRow(`SELECT count(*) FROM state_shop_orders`).Scan(&n); err != nil || n != 3 {
+			if err := db.QueryRow(`SELECT count(*) FROM shop.orders`).Scan(&n); err != nil || n != 3 {
 				t.Fatalf("before any delta: n=%d err=%v", n, err)
 			}
 			state := func() string {
 				t.Helper()
 				var got string
-				if err := db.QueryRow(`SELECT string_agg(CAST(id AS VARCHAR) || '=' || status, ',' ORDER BY id) FROM state_shop_orders`).Scan(&got); err != nil {
+				if err := db.QueryRow(`SELECT string_agg(CAST(id AS VARCHAR) || '=' || status, ',' ORDER BY id) FROM shop.orders`).Scan(&got); err != nil {
 					t.Fatal(err)
 				}
 				return got

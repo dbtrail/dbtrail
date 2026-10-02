@@ -78,10 +78,12 @@ duckdb -init views.sql lake.db
 ```
 
 ```sql
-SELECT status, count(*) FROM state_shop_orders GROUP BY 1;
+SELECT status, count(*) FROM shop.orders GROUP BY 1;
 ```
 
-Each table in the newest snapshot is a view named `state_<schema>_<table>`.
+Each table in the newest snapshot is a view with the table's own name, in a
+schema with the source schema's name: `shop.orders`. A name DuckDB cannot read
+bare is quoted: `demo."order.items"`.
 
 **The views follow the newest snapshot.** A file generated once keeps up with
 the schedule on its own: locally through the `current/` pointer, on S3 through
@@ -109,7 +111,7 @@ To put a reporting tool such as Metabase in front of the copy, see
 ### The change history, too
 
 With `--include-events` (or **Include the change log** in the web interface),
-the file adds an `events` view over every archived row change. The `state_*`
+the file adds an `events` view over every archived row change. The table
 views are the tables as of the newest snapshot. `events` is what happened to
 them, row by row, with before and after images.
 
@@ -155,7 +157,7 @@ replaced or removed) and `.upserts` (the rows it changed or added):
 ```
 
 This keeps each refresh proportional to what changed, not to the size of the
-table. The `state_*` views apply the chain for you. **An engine reading the
+table. The table views apply the chain for you. **An engine reading the
 table file by itself, without the views, sees the table as of the start of
 the chain.** It has to apply the `.posdel` and `.upserts` files itself. The
 merge rule is in [Dump & Baseline](dump-and-baseline.md#refreshing-on-a-schedule).

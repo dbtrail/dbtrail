@@ -10,14 +10,14 @@ import (
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
-// TestValidateSchemaName is the list of names written down BEFORE the
+// TestValidateDatabaseName is the list of names written down BEFORE the
 // validator, one per way a value typed at a flag can go wrong.
 //
 // Every refusal is checked for its REASON, not only for being a refusal: a
 // validator that refused everything would pass a test that asked for errors
 // alone, and the accepted half below is what keeps it honest in the other
 // direction.
-func TestValidateSchemaName(t *testing.T) {
+func TestValidateDatabaseName(t *testing.T) {
 	for _, name := range []string{
 		"wp", "a", "b", "rds_prod", "server1", "_x", "a1_b2", "wp_posts",
 		// A keyword DuckDB takes bare. Refusing every keyword would refuse
@@ -25,7 +25,7 @@ func TestValidateSchemaName(t *testing.T) {
 		"data", "index", "user",
 		strings.Repeat("a", maxSchemaNameLen),
 	} {
-		if err := ValidateSchemaName(name); err != nil {
+		if err := ValidateDatabaseName(name); err != nil {
 			t.Errorf("%q was refused, and it is a usable name: %v", name, err)
 		}
 	}
@@ -73,7 +73,7 @@ func TestValidateSchemaName(t *testing.T) {
 		{"the suffix alone", "_live", "_live"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateSchemaName(tc.in)
+			err := ValidateDatabaseName(tc.in)
 			if err == nil {
 				t.Fatalf("%q was accepted", tc.in)
 			}
@@ -152,7 +152,7 @@ func schemaInputs() map[string]Input {
 }
 
 var (
-	createViewRE  = regexp.MustCompile(`(?m)^CREATE OR REPLACE VIEW (\S+) AS$`)
+	createViewRE  = regexp.MustCompile(`(?m)^CREATE OR REPLACE VIEW (.+) AS$`)
 	setVariableRE = regexp.MustCompile(`(?m)^SET VARIABLE (\w+) = `)
 	getVariableRE = regexp.MustCompile(`getvariable\('(\w+)'\)`)
 	attachRE      = regexp.MustCompile(`(?m)^ATTACH '' AS ("[^"]+") `)
@@ -160,7 +160,8 @@ var (
 	createSecret  = regexp.MustCompile(`(?m)^CREATE OR REPLACE SECRET (\S+) \(`)
 	liveFromRE    = regexp.MustCompile(`FROM ("[^"]+")\."binlog_events"`)
 	liveProseRE   = regexp.MustCompile("(\"[^\"]+\"|`[^`]+`)\\.\"binlog_events\"")
-	createSchema  = regexp.MustCompile(`(?m)^CREATE SCHEMA IF NOT EXISTS (\S+);$`)
+	createSchema  = regexp.MustCompile(`(?m)^CREATE SCHEMA IF NOT EXISTS (.+);$`)
+	attachDBRE    = regexp.MustCompile(`(?m)^ATTACH IF NOT EXISTS ':memory:' AS (.+);$`)
 )
 
 func captures(re *regexp.Regexp, s string) []string {
@@ -195,10 +196,10 @@ func TestSchema_nothingAFileCreatesIsSharedWithAnotherServers(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			created := func(schema string) []string {
 				in := in
-				in.Schema = schema
+				in.Database = schema
 				out := Generate(in)
 				var all []string
-				for _, re := range []*regexp.Regexp{createViewRE, setVariableRE, attachRE, createSecret} {
+				for _, re := range []*regexp.Regexp{createViewRE, setVariableRE, attachRE, attachDBRE, createSecret} {
 					all = append(all, captures(re, out)...)
 				}
 				if len(all) == 0 {
@@ -223,7 +224,7 @@ func TestSchema_nothingAFileCreatesIsSharedWithAnotherServers(t *testing.T) {
 func TestSchema_everyReferenceStaysInsideTheFile(t *testing.T) {
 	for name, in := range schemaInputs() {
 		t.Run(name, func(t *testing.T) {
-			in.Schema = "wp"
+			in.Database = "wp"
 			out := Generate(in)
 
 			// Every view is created in the schema, quoted.
@@ -238,12 +239,17 @@ func TestSchema_everyReferenceStaysInsideTheFile(t *testing.T) {
 			}
 
 			// The schema exists before the first view that needs it, once.
-			schemas := captures(createSchema, out)
-			if len(schemas) != 1 || schemas[0] != `"wp"` {
-				t.Fatalf("CREATE SCHEMA statements = %v, want exactly one for \"wp\"", schemas)
+			dbs := captures(attachDBRE, out)
+			if len(dbs) != 1 || dbs[0] != `"wp"` {
+				t.Fatalf("databases attached = %v, want exactly one for \"wp\"", dbs)
 			}
-			if strings.Index(out, "CREATE SCHEMA") > strings.Index(out, "CREATE OR REPLACE VIEW") {
-				t.Error("the schema is created after a view that lives in it")
+			if strings.Index(out, "ATTACH IF NOT EXISTS") > strings.Index(out, "CREATE OR REPLACE VIEW") {
+				t.Error("the database is attached after a view that lives in it")
+			}
+			for _, s := range captures(createSchema, out) {
+				if !strings.HasPrefix(s, `"wp"."`) {
+					t.Errorf("schema %s is not created in the database", s)
+				}
 			}
 
 			// A variable read is a variable this file set.
@@ -307,12 +313,14 @@ func TestSchema_emptyIsTheFileAsItWas(t *testing.T) {
 	for name, in := range schemaInputs() {
 		t.Run(name, func(t *testing.T) {
 			out := Generate(in)
-			if strings.Contains(out, "CREATE SCHEMA") {
-				t.Error("a file generated with no schema creates one")
+			if strings.Contains(out, "ATTACH IF NOT EXISTS") {
+				t.Error("a file generated with no database attaches one")
 			}
+			// Two parts at most: "schema"."table", or "events" alone.
+			quotedPart := regexp.MustCompile(`^"(?:[^"]|"")*"(?:\."(?:[^"]|"")*")?$`)
 			for _, v := range captures(createViewRE, out) {
-				if strings.Contains(v, ".") {
-					t.Errorf("view %s is qualified in a file generated with no schema", v)
+				if !quotedPart.MatchString(v) {
+					t.Errorf("view %s is qualified with a database in a file generated with none", v)
 				}
 			}
 			if in.LiveIndex != nil && !strings.Contains(out, `ATTACH '' AS "bintrail_live" (TYPE mysql, SECRET "bintrail_index", READ_ONLY);`) {
@@ -332,7 +340,7 @@ func TestSchema_emptyIsTheFileAsItWas(t *testing.T) {
 // unvalidated must still not be able to end its identifier.
 func TestSchema_isQuotedWhereverItIsWritten(t *testing.T) {
 	in := schemaInputs()["pinned with the live leg"]
-	in.Schema = `x"; DROP VIEW y; --`
+	in.Database = `x"; DROP VIEW y; --`
 	out := Generate(in)
 	// With every quoted identifier and string literal taken out of a line,
 	// what is left is the SQL the engine would parse as statements.
@@ -352,8 +360,8 @@ func TestSchema_isQuotedWhereverItIsWritten(t *testing.T) {
 	if seen < 3 {
 		t.Errorf("the name was written on %d statement line(s); this input has a schema, a view and an ATTACH to write it on", seen)
 	}
-	if !strings.Contains(out, `CREATE SCHEMA IF NOT EXISTS "x""; DROP VIEW y; --";`) {
-		t.Errorf("the schema is not created under its quoted name:\n%s", out)
+	if !strings.Contains(out, `ATTACH IF NOT EXISTS ':memory:' AS "x""; DROP VIEW y; --";`) {
+		t.Errorf("the database is not attached under its quoted name:\n%s", out)
 	}
 }
 
@@ -361,12 +369,12 @@ func TestSchema_isQuotedWhereverItIsWritten(t *testing.T) {
 // statement with its views and an empty string without them, as before.
 func TestGenerateViews_schema(t *testing.T) {
 	in := goldenInput()
-	in.Schema = "wp"
+	in.Database = "wp"
 	out := GenerateViews(in)
-	if strings.Index(out, `CREATE SCHEMA IF NOT EXISTS "wp";`) != 0 {
-		t.Errorf("the schema is not the first statement:\n%s", out)
+	if strings.Index(out, `ATTACH IF NOT EXISTS ':memory:' AS "wp";`) != 0 {
+		t.Errorf("the database is not the first statement:\n%s", out)
 	}
-	if !strings.Contains(out, `CREATE OR REPLACE VIEW "wp"."events" AS`) {
+	if !strings.Contains(out, `CREATE OR REPLACE VIEW "wp"."main"."events" AS`) {
 		t.Errorf("the events view is not qualified:\n%s", out)
 	}
 	in.OnlyViews = ViewSet{}

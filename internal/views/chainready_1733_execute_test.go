@@ -83,7 +83,7 @@ func TestFollowingView_reservedColumnKeepsTheFileRead_1733(t *testing.T) {
 				}
 				db := execViews(t, sqlText)
 				var n int
-				if err := db.QueryRow(`SELECT count(*) FROM state_shop_orders`).Scan(&n); err != nil || n != 1 {
+				if err := db.QueryRow(`SELECT count(*) FROM shop.orders`).Scan(&n); err != nil || n != 1 {
 					t.Fatalf("n=%d err=%v", n, err)
 				}
 			})
@@ -122,11 +122,11 @@ func TestFollowingView_guardStaysWhereTheChainBodyIsNotSafe_1733(t *testing.T) {
 				}
 				in := followInput1733(t, root, stamp, mode.follow, tables...)
 				sqlText := Generate(in)
-				if want := "-- state_shop_orders: reads the table file alone "; !strings.Contains(sqlText, want) || !strings.Contains(sqlText, tc.why) {
+				if want := "-- shop.orders: reads the table file alone "; !strings.Contains(sqlText, want) || !strings.Contains(sqlText, tc.why) {
 					t.Fatalf("the file does not say why the view reads the file alone (want %q and %q):\n%s", want, tc.why, sqlText)
 				}
 				db := execViews(t, sqlText)
-				rows, err := db.Query(`SELECT * FROM state_shop_orders LIMIT 0`)
+				rows, err := db.Query(`SELECT * FROM shop.orders LIMIT 0`)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -137,7 +137,7 @@ func TestFollowingView_guardStaysWhereTheChainBodyIsNotSafe_1733(t *testing.T) {
 				}
 				writeDeltaPairAt(t, filepath.Join(root, stamp, "shop", "orders.parquet"), 0, []int64{0}, nil)
 				var n int
-				err = db.QueryRow(`SELECT count(*) FROM state_shop_orders`).Scan(&n)
+				err = db.QueryRow(`SELECT count(*) FROM shop.orders`).Scan(&n)
 				if err == nil || !strings.Contains(err.Error(), "Generate the views again") {
 					t.Fatalf("after a chain appeared: n=%d err=%v, want the guard's refusal", n, err)
 				}

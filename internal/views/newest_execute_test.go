@@ -113,7 +113,7 @@ func TestNewestStateView_readsTheNewestMarkedSnapshot(t *testing.T) {
 
 	var n int
 	var status string
-	if err := db.QueryRow(`SELECT count(*), min("status") FROM state_shop_orders`).Scan(&n, &status); err != nil {
+	if err := db.QueryRow(`SELECT count(*), min("status") FROM shop.orders`).Scan(&n, &status); err != nil {
 		t.Fatalf("query state view: %v", err)
 	}
 	if n != 1 || status != "new-a" {
@@ -132,7 +132,7 @@ func TestNewestStateView_ignoresAnUnmarkedNewerSnapshot(t *testing.T) {
 	db := execViews(t, newestFixture(t, root, filepath.Join("shop", "orders.parquet")))
 
 	var status string
-	if err := db.QueryRow(`SELECT "status" FROM state_shop_orders`).Scan(&status); err != nil {
+	if err := db.QueryRow(`SELECT "status" FROM shop.orders`).Scan(&status); err != nil {
 		t.Fatalf("query state view: %v", err)
 	}
 	if status != "complete" {
@@ -235,7 +235,7 @@ func TestNewestStateView_persistedViewsNameTheMissingVariable(t *testing.T) {
 	// The CASE must cost nothing in the session that ran the file: the SET
 	// VARIABLE precedes every CREATE, so error() never binds against NULL.
 	var status string
-	if err := first.QueryRow(`SELECT "status" FROM state_shop_orders`).Scan(&status); err != nil {
+	if err := first.QueryRow(`SELECT "status" FROM shop.orders`).Scan(&status); err != nil {
 		first.Close()
 		t.Fatalf("state view unreadable in the session that created it: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestNewestStateView_persistedViewsNameTheMissingVariable(t *testing.T) {
 		t.Fatalf("reopen lake.db: %v", err)
 	}
 	t.Cleanup(func() { second.Close() })
-	err = second.QueryRow(`SELECT "status" FROM state_shop_orders`).Scan(&status)
+	err = second.QueryRow(`SELECT "status" FROM shop.orders`).Scan(&status)
 	if err == nil {
 		t.Fatal("a persisted state view read rows in a session that never set the variable; " +
 			"there is no snapshot choice for it to have read through")
@@ -273,7 +273,7 @@ func TestNewestStateView_persistedViewsNameTheMissingVariable(t *testing.T) {
 	if _, err := second.Exec(sqlText[i : i+j+1]); err != nil {
 		t.Fatalf("the SET VARIABLE statement the message points at failed on its own: %v", err)
 	}
-	if err := second.QueryRow(`SELECT "status" FROM state_shop_orders`).Scan(&status); err != nil {
+	if err := second.QueryRow(`SELECT "status" FROM shop.orders`).Scan(&status); err != nil {
 		t.Fatalf("after the SET VARIABLE statement the persisted view still fails: %v", err)
 	}
 	if status != "kept" {

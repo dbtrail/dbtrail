@@ -200,9 +200,35 @@ func sqlArchivesLocal(sources []string) bool {
 // the footer cost and can spend the whole time budget; on a change log that
 // lives in S3 it changes nothing, because the view is not installed there
 // at all (sqlViewsFor).
+//
+// One exception to the loose match (#2013): since the table views are named
+// after the source, a source table or schema called events is a name a person
+// types every day (shop.events, events.orders), and installing the change log
+// for each of those statements is the footer cost for nothing. So a match is
+// skipped when it is clearly another name's part: followed by a dot (a schema
+// called events), or preceded by one whose schema is not main (a table called
+// events). main.events and memory.main.events are still the view.
 var sqlEventsWord = regexp.MustCompile(`(?i)\bevents\b`)
 
-func sqlMentionsEvents(statement string) bool { return sqlEventsWord.MatchString(statement) }
+// sqlQualifierBefore matches a dotted name ending right before a match, and
+// captures the part just before the last dot: `shop.`, `"shop" . `.
+var sqlQualifierBefore = regexp.MustCompile(`(?i)("(?:[^"]|"")*"|[\w$]+)\s*\.\s*"?$`)
+
+func sqlMentionsEvents(statement string) bool {
+	for _, m := range sqlEventsWord.FindAllStringIndex(statement, -1) {
+		after := strings.TrimLeft(statement[m[1]:], `"`)
+		if strings.HasPrefix(strings.TrimLeft(after, " \t\r\n"), ".") {
+			continue // events.<table>: a schema called events
+		}
+		if q := sqlQualifierBefore.FindStringSubmatch(statement[:m[0]]); q != nil {
+			if !strings.EqualFold(strings.Trim(q[1], `"`), "main") {
+				continue // <schema>.events: a table called events
+			}
+		}
+		return true
+	}
+	return false
+}
 
 // sqlInfoResponse is GET /api/sql: what the panel needs before the first
 // query, read from the same resolver as /api/views.sql with no DuckDB and

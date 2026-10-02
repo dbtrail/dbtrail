@@ -20,7 +20,6 @@ import (
 	"net"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -418,8 +417,8 @@ type Input struct {
 	// the whole change log to get them.
 	//
 	// A separate field rather than an OnlyViews entry, because OnlyViews names
-	// views INDIVIDUALLY and the state view names are manufactured in this
-	// package (sanitized, deduped). A caller outside it cannot spell "every
+	// views INDIVIDUALLY and the state view names are settled in this package
+	// (a case collision renames one, a name DuckDB keeps for itself drops one). A caller outside it cannot spell "every
 	// state view but not events" without duplicating that naming.
 	//
 	// Composes with OnlyViews rather than replacing it: events renders only if
@@ -428,25 +427,26 @@ type Input struct {
 	// events whenever a statement names it — is unaffected.
 	OmitEvents bool
 
-	// Schema, when set, is the DuckDB schema every view of this file is created
-	// in (#1874). Empty keeps the file exactly as it was before the field
-	// existed: views in `main`, named without a qualifier.
+	// Database, when set, is the DuckDB database every view of this file is
+	// created in (#1874, a schema until #2013). Empty keeps the views in the
+	// session's own database: demo.prices and events.
 	//
-	// It exists for the reader who loads one file per server into ONE database.
-	// A view name carries the table and never the server, and every statement is
-	// CREATE OR REPLACE, so two servers that share a schema.table overwrite each
-	// other without an error and `events` does it on the first pair.
+	// It exists for the reader who loads one file per server into ONE session.
+	// A view is named after its source schema and table and never after the
+	// server, and every statement is CREATE OR REPLACE, so two servers that share
+	// a schema.table overwrite each other without an error and `events` does it
+	// on the first pair. With it, the two are wp.demo.prices and rds.demo.prices.
 	//
-	// A schema holds views and nothing else. Everything in this file that lives
-	// OUTSIDE a schema has one name per session, so it is derived from Schema
-	// too (see schema.go): the ATTACH alias and its secret, and the session
-	// variables the following state views read through at query time. A view
-	// qualified into its own schema that still read a shared variable would show
+	// A database holds views and schemas. Everything in this file that lives
+	// OUTSIDE a database has one name per session, so it is derived from
+	// Database too (see schema.go): the ATTACH alias and its secret, and the
+	// session variables the following state views read through at query time. A
+	// view in its own database that still read a shared variable would show
 	// another server's rows, which is the overwrite again, harder to see.
 	//
-	// The producer validates it with ValidateSchemaName; the generator quotes it
-	// wherever it is written.
-	Schema string
+	// The producer validates it with ValidateDatabaseName; the generator quotes
+	// it wherever it is written.
+	Database string
 }
 
 // ViewSet names a subset of the views an Input defines.
@@ -460,16 +460,17 @@ type ViewSet map[string]bool
 
 // wants reports whether name is in the set.
 //
-// The lookup is lowercased because DuckDB identifiers are case-insensitive and
-// a set is built from a statement a human typed; the set's KEYS are therefore
-// expected lowercase, which is how its one producer builds them. An
+// The lookup is lowercased (ASCII only, as DuckDB compares names) because a set
+// is built from a statement a human typed; the set's KEYS are therefore
+// expected lowercase. A state view's key is the name a reader types without
+// the database: demo.prices, demo."order.items" (stateKey). An
 // unrecognized name is simply not wanted: this is a filter, never a validator,
 // so it neither errors nor logs on one.
 func (v ViewSet) wants(name string) bool {
 	if v == nil {
 		return true
 	}
-	return v[strings.ToLower(name)]
+	return v[asciiLower(name)]
 }
 
 // Generate renders the complete .sql file: the explanatory header, the S3
@@ -501,7 +502,7 @@ func Generate(in Input) string {
 	}
 	// Ahead of every view, and after the S3 preamble only because nothing in
 	// that preamble lives in a schema.
-	writeSchema(&b, in)
+	writeDatabase(&b, in)
 	// The state views FIRST, then the ATTACH, then the events view that needs
 	// it.
 	//
@@ -586,12 +587,12 @@ func GenerateViews(in Input) string {
 		// nothing.
 		return ""
 	}
-	// The schema goes with the views and only with them: the empty answer
+	// The database goes with the views and only with them: the empty answer
 	// above stays empty, since a caller told to run nothing must not be handed
-	// a CREATE SCHEMA to run.
-	var schema strings.Builder
-	writeSchemaStatement(&schema, in)
-	return schema.String() + b.String()
+	// an ATTACH to run.
+	var db strings.Builder
+	writeDatabaseStatement(&db, in)
+	return db.String() + b.String()
 }
 
 // NeedsS3 reports whether the rendered file will read any s3:// path. Callers
@@ -617,8 +618,8 @@ func (in Input) NeedsS3() bool {
 			}
 		}
 	}
-	for _, p := range stateViewPlan(in) {
-		if isS3(p.table.Path) && in.OnlyViews.wants(p.name) {
+	for _, p := range selectedStatePlans(in) {
+		if isS3(p.table.Path) {
 			return true
 		}
 	}
@@ -636,10 +637,12 @@ func (in Input) NeedsS3() bool {
 func (in Input) DefinedViews() []string {
 	var names []string
 	if in.definesEvents() {
-		names = append(names, eventsViewName)
+		names = append(names, in.viewLabel(eventsViewName))
 	}
 	for _, p := range stateViewPlan(in) {
-		names = append(names, p.name)
+		if p.skip == "" {
+			names = append(names, in.stateLabel(p))
+		}
 	}
 	return names
 }
@@ -651,10 +654,8 @@ func (in Input) DefinedViews() []string {
 // about their column types would be describing files that query never touched.
 func (in Input) SelectedBaselines() []BaselineTable {
 	var out []BaselineTable
-	for _, p := range stateViewPlan(in) {
-		if in.OnlyViews.wants(p.name) {
-			out = append(out, p.table)
-		}
+	for _, p := range selectedStatePlans(in) {
+		out = append(out, p.table)
 	}
 	return out
 }
@@ -690,12 +691,7 @@ func (in Input) RendersAnyView() bool {
 	if in.rendersEvents() {
 		return true
 	}
-	for _, p := range stateViewPlan(in) {
-		if in.OnlyViews.wants(p.name) {
-			return true
-		}
-	}
-	return false
+	return len(selectedStatePlans(in)) > 0
 }
 
 // definesEvents reports whether the events view is emitted at all: it needs a
@@ -1316,13 +1312,13 @@ func writeAttachDegradeNote(b *strings.Builder, stateSurvives, coldLegAvailable 
 	b.WriteString("--\n")
 	b.WriteString("-- Defined AFTER the ATTACH above, so an index this machine cannot reach\n")
 	if stateSurvives {
-		b.WriteString("-- leaves this view undefined and the state_ views above already created.\n")
+		b.WriteString("-- leaves this view undefined and the table views above already created.\n")
 		b.WriteString("-- Keeping them takes a session that outlives the error: `.read` this file\n")
 		b.WriteString("-- from an open DuckDB, or run `duckdb -init <this file> your.db` and then\n")
 		b.WriteString("-- reopen your.db. A bare `duckdb -init <this file>` exits on the error and\n")
 		b.WriteString("-- the in-memory database goes with it, so nothing is left.\n")
 	} else {
-		b.WriteString("-- leaves you with no view at all: this file defines no state_ view either\n")
+		b.WriteString("-- leaves you with no view at all: this file defines no table view either\n")
 		b.WriteString("-- (it names no baseline snapshot), so there is nothing here to fall back\n")
 		b.WriteString("-- on. Point the generator at a baseline location to get one.\n")
 	}
@@ -1838,36 +1834,6 @@ func archiveGlob(base string) string {
 	return strings.TrimRight(base, "/") + "/event_date=*/event_hour=*/*.parquet"
 }
 
-// statePlan pairs one baseline table with the view name it is emitted under.
-type statePlan struct {
-	table BaselineTable
-	name  string
-}
-
-// stateViewPlan assigns a view name to EVERY table of the snapshot, in emission
-// order.
-//
-// Names are assigned over every table even when only some are rendered: a
-// name's collision suffix depends on which names came before it, so choosing
-// the tables first and naming them second would rename a view the moment its
-// colliding sibling is left out — and a name that moves with the statement is a
-// name nobody can write a query against.
-func stateViewPlan(in Input) []statePlan {
-	tables := append([]BaselineTable(nil), in.Baselines...)
-	sort.Slice(tables, func(i, j int) bool {
-		if tables[i].Schema != tables[j].Schema {
-			return tables[i].Schema < tables[j].Schema
-		}
-		return tables[i].Table < tables[j].Table
-	})
-	used := map[string]bool{}
-	plan := make([]statePlan, 0, len(tables))
-	for _, t := range tables {
-		plan = append(plan, statePlan{table: t, name: stateViewName(t.Schema, t.Table, used)})
-	}
-	return plan
-}
-
 // writeStateViews emits one view per table in the newest baseline snapshot, and
 // returns whether it emitted any.
 func writeStateViews(b *strings.Builder, in Input) bool {
@@ -1877,15 +1843,34 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 	if in.OnlyViews != nil && len(wanted) == 0 {
 		return false
 	}
+	// One view per table, named exactly like the source table, in a schema
+	// named exactly like the source schema (#2013).
+	shape := "<schema>.<table>"
+	if in.Database != "" {
+		shape = commentSafe(in.Database) + "." + shape
+	}
 	switch in.Follow {
 	case FollowPointer:
-		b.WriteString("-- state_<schema>_<table>: each table's full contents as of the snapshot the\n")
+		b.WriteString("-- " + shape + ": each table's full contents as of the snapshot the\n")
 		b.WriteString("-- `" + baseline.CurrentLinkName + "` pointer names, which is whichever one completed most recently.\n")
 	case FollowNewest:
-		b.WriteString("-- state_<schema>_<table>: each table's full contents as of the newest snapshot\n")
+		b.WriteString("-- " + shape + ": each table's full contents as of the newest snapshot\n")
 		b.WriteString("-- carrying a `" + baseline.SuccessMarker + "` marker, chosen when the view is read.\n")
 	default:
-		b.WriteString("-- state_<schema>_<table>: each table's full contents as of the baseline snapshot.\n")
+		b.WriteString("-- " + shape + ": each table's full contents as of the baseline snapshot.\n")
+	}
+	db := ""
+	if in.Database != "" {
+		db = commentSafe(in.Database) + "."
+	}
+	fmt.Fprintf(b, "-- Each table keeps its own name: SELECT * FROM %sdemo.prices, and a name DuckDB\n", db)
+	fmt.Fprintf(b, "-- cannot read bare is quoted, as in %sdemo.\"order.items\".\n", db)
+	if in.Database == "" {
+		// DuckDB names a database after its file, and a two-part name whose
+		// first part is both a database and a schema is refused as ambiguous.
+		// Only the reader knows the file name, so the file can only say it.
+		b.WriteString("-- Do not open this in a database file named after one of these schemas:\n")
+		b.WriteString("-- in demo.db, demo.prices is ambiguous and the load stops at that view.\n")
 	}
 	b.WriteString("--\n")
 	b.WriteString("-- These are the SNAPSHOT's rows, not the table's current state: changes after\n")
@@ -1919,15 +1904,20 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 	}
 	writeSnapshotPreflight(b, in, wanted)
 
+	writeNamingNotes(b, in)
+	writeStateSchemas(b, in, wanted)
 	for _, p := range wanted {
-		t, name := p.table, p.name
+		t, name := p.table, commentSafe(in.stateLabel(p))
+		if p.renamed != "" {
+			fmt.Fprintf(b, "-- %s: %s\n", name, p.renamed)
+		}
 		for _, line := range decimalComments(t) {
 			fmt.Fprintf(b, "-- %s: %s\n", name, line)
 		}
 		if line := fileAloneComment(in, t); line != "" {
 			fmt.Fprintf(b, "-- %s: %s\n", name, line)
 		}
-		fmt.Fprintf(b, "CREATE OR REPLACE VIEW %s AS\n", in.viewRef(name))
+		fmt.Fprintf(b, "CREATE OR REPLACE VIEW %s AS\n", in.stateRef(p))
 		if in.Follow == FollowNewest {
 			writeNewestStateBody(b, in, t)
 			continue
@@ -2019,7 +2009,7 @@ func selectedStatePlans(in Input) []statePlan {
 	plan := stateViewPlan(in)
 	out := make([]statePlan, 0, len(plan))
 	for _, p := range plan {
-		if in.OnlyViews.wants(p.name) {
+		if p.skip == "" && in.OnlyViews.wants(stateKey(p)) {
 			out = append(out, p)
 		}
 	}
@@ -2382,26 +2372,10 @@ func deltaAppearedGuard(plain, rng string, t BaselineTable) string {
 		plain, rng, sqlString(msg))
 }
 
-// stateViewName builds the view identifier for a table and guarantees it is
-// unique within the file.
-//
-// Sanitizing collapses distinct tables onto one name — `a_b`.`c` and `a`.`b_c`
-// both want state_a_b_c — and since every statement is CREATE OR REPLACE, a
-// collision would silently leave only the last one, with the earlier table's
-// view pointing at the wrong Parquet file. Suffixing is not pretty; a view that
-// reads someone else's table is worse.
-func stateViewName(schema, table string, used map[string]bool) string {
-	base := "state_" + sanitizeIdent(schema) + "_" + sanitizeIdent(table)
-	name := base
-	for i := 2; used[name]; i++ {
-		name = fmt.Sprintf("%s_%d", base, i)
-	}
-	used[name] = true
-	return name
-}
-
-// sanitizeIdent reduces a MySQL identifier to a bare word so the generated view
-// name stays typeable without quoting in an interactive DuckDB session.
+// sanitizeIdent reduces a name to a bare word, for the session variables and
+// secrets derived from Input.Database: those are written bare and inside
+// string literals, where quoting is not available. Never for a view name: a
+// view is named exactly like its source table (#2013).
 func sanitizeIdent(s string) string {
 	var b strings.Builder
 	for _, r := range s {

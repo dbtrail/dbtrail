@@ -86,7 +86,7 @@ func TestSQLPanelPureFunctions(t *testing.T) {
 	names := make([]string, 0, 120)
 	names = append(names, "events")
 	for i := 0; i < 119; i++ {
-		names = append(names, "state_shop_t"+string(rune('a'+i%26))+string(rune('a'+i/26)))
+		names = append(names, "shop.t"+string(rune('a'+i%26))+string(rune('a'+i/26)))
 	}
 	const htmlCell = `<img src=x onerror=alert(1)>`
 	arg := c{
@@ -102,11 +102,11 @@ func TestSQLPanelPureFunctions(t *testing.T) {
 		"filter": []c{
 			{"names": names, "filter": ""},
 			{"names": names, "filter": "EVENTS"},
-			{"names": names, "filter": "op_tb"},
+			{"names": names, "filter": "op.tb"},
 			{"names": names, "filter": "nothing-matches"},
 			{"names": []string{}, "filter": ""},
 		},
-		"starter": [][]string{{"events", "state_shop_orders", "state_shop_users"}, {"events"}, {}},
+		"starter": [][]string{{"events", "shop.orders", "shop.users"}, {"events"}, {}},
 		"cells":   []any{nil, "NULL", "", "text", 12, 1.5, true, false, []any{1, 2}, c{"a": 1}, `{"cut": "js`},
 		"count": []c{
 			{"res": c{"rows": []any{}}, "ms": 3.4},
@@ -212,9 +212,9 @@ func TestSQLPanelPureFunctions(t *testing.T) {
 		t.Errorf("filter EVENTS (any case): %+v", f)
 	}
 	// A filter that matches in the MIDDLE of a name: exactly the five
-	// state_shop_tb* tables.
+	// shop.tb* tables.
 	if f := out.Filter[2]; f.Matched != 5 || len(f.Shown) != 5 || f.More != 0 {
-		t.Errorf("filter op_tb: %+v, want exactly 5 matches", f)
+		t.Errorf("filter op.tb: %+v, want exactly 5 matches", f)
 	}
 	if f := out.Filter[3]; len(f.Shown) != 0 || f.Matched != 0 || f.More != 0 {
 		t.Errorf("filter with no match: %+v", f)
@@ -222,7 +222,7 @@ func TestSQLPanelPureFunctions(t *testing.T) {
 	if f := out.Filter[4]; len(f.Shown) != 0 || f.More != 0 {
 		t.Errorf("no names: %+v", f)
 	}
-	if want := []string{"SELECT * FROM state_shop_orders LIMIT 100", "SELECT * FROM events LIMIT 100", ""}; !reflect.DeepEqual(out.Starter, want) {
+	if want := []string{"SELECT * FROM shop.orders LIMIT 100", "SELECT * FROM events LIMIT 100", ""}; !reflect.DeepEqual(out.Starter, want) {
 		t.Errorf("sqlStarterQuery = %q, want %q", out.Starter, want)
 	}
 	wantCells := []struct {

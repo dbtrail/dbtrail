@@ -34,8 +34,11 @@ read_parquet globs.
 
 The generated file defines:
 
-  state_<schema>_<table>     each table's contents as of the newest
-                             discoverable baseline snapshot
+  <schema>.<table>           each table's contents as of the newest
+                             discoverable baseline snapshot, named exactly
+                             like the source table: demo.prices, and
+                             demo."order.items" for a name DuckDB cannot
+                             read bare
   events                     every archived binlog event across all archive
                              sources, with event_type decoded and the commit
                              timestamp typed -- only with --include-events
@@ -77,11 +80,20 @@ neither: --baseline-dir/--baseline-s3 on its own is enough. That is what a
 snapshot downloaded from the web interface arrives as, and it can be queried on a
 machine that cannot reach the index at all.
 
-To keep several servers in one DuckDB database, generate one file per server
-with --schema set to a name for that server. Every view is then created
-inside that schema (wp.events, wp.state_shop_orders), so two servers that
-share a table no longer replace each other's view. Without it every view goes
-to the default schema, where the second file loaded wins without an error.
+Two tables whose names differ only in letter case (demo.Orders and
+demo.orders) are one name to DuckDB, so one of them gets a numbered name and
+the file says which. Tables in a source schema DuckDB keeps for itself
+(information_schema, pg_catalog) are left out, and so are those in temp,
+system and memory unless --database is set; the command lists each one.
+
+To keep several servers in one DuckDB session, generate one file per server
+with --database set to a name for that server. Every view is then created
+inside a DuckDB database of that name (wp.demo.prices, wp.events), so two
+servers that share a table no longer replace each other's view. Without it
+every view goes to the session's own database, where the second file loaded
+wins without an error. The database is attached in memory unless one by that
+name is already open: to keep the views on disk, ATTACH 'wp.db' AS wp before
+reading the file, or open wp.db itself.
 
 The file is a snapshot of the LAYOUT, not of the rows. The state views reach a
 baseline published later on their own, by whichever route the root allows: a
@@ -107,6 +119,12 @@ Examples:
   # Open an interactive DuckDB with the views and the S3 secret loaded
   bintrail views --index-dsn "..." --baseline-dir /data/baselines --output views.sql
   duckdb -init views.sql lake.db
+  # (Name the database file after none of your schemas: in demo.db, demo.prices
+  # would be ambiguous between the database and the schema.)
+
+  # Two servers in one session: wp.demo.prices and rds.demo.prices
+  bintrail views --index-dsn "..." --baseline-dir /data/wp --database wp --output wp.sql
+  bintrail views --index-dsn "..." --baseline-dir /data/rds --database rds --output rds.sql
 
   # Without an index: name the archive and baseline locations directly
   bintrail views --archive-s3 s3://bucket/archives/ --bintrail-id <uuid> \
@@ -127,7 +145,8 @@ var (
 	vIncludeLive   bool
 	vIncludeEvents bool
 	vPinSnapshot   bool
-	vSchema        string
+	vDatabase      string
+	vOldSchema     string
 )
 
 func init() {
@@ -136,7 +155,12 @@ func init() {
 	viewsCmd.Flags().StringVar(&vArchiveS3, "archive-s3", "", "S3 root URL prefix of Parquet archives (requires --bintrail-id; e.g. s3://bucket/prefix/)")
 	viewsCmd.Flags().StringVar(&vBintrailID, "bintrail-id", "", "Server identity UUID (required when --archive-dir or --archive-s3 is set)")
 	viewsCmd.Flags().BoolVar(&vPinSnapshot, "pin-snapshot", false, "Bind the state views to the snapshot discovered now, so they keep returning today's rows after a baseline refresh (default: follow the newest snapshot, through the current/ pointer locally and through the newest _SUCCESS marker on S3)")
-	viewsCmd.Flags().StringVar(&vSchema, "schema", "", "Create every view inside this DuckDB schema, so the files of several servers can be loaded into one database: a view is named after its table and not its server, and without this the second server to define a table replaces the first one's view without an error. Lowercase letters, digits and underscore. With --include-live the index is attached as <schema>_live (default: the default schema, names unqualified)")
+	viewsCmd.Flags().StringVar(&vDatabase, "database", "", "Create every view inside a DuckDB database of this name, so the files of several servers can be loaded into one session: a view is named after its source schema and table and not its server, and without this the second server to define a table replaces the first one's view without an error. Query them as <database>.<schema>.<table> and <database>.events. Lowercase letters, digits and underscore. With --include-live the index is attached as <database>_live (default: the session's own database)")
+	// --schema was this option's name until views were named after the source
+	// schema (#2013). Kept, hidden, only to say so: silently accepting it would
+	// generate wp.demo.prices for a reader whose queries say wp.state_demo_prices.
+	viewsCmd.Flags().StringVar(&vOldSchema, "schema", "", "Renamed to --database")
+	_ = viewsCmd.Flags().MarkHidden("schema")
 	viewsCmd.Flags().StringVar(&vRegion, "region", "", "AWS region to pin in the generated S3 secret (default: resolved by the credential chain)")
 	viewsCmd.Flags().StringVar(&vBaselineDir, "baseline-dir", "", "Local directory of baseline Parquet snapshots")
 	viewsCmd.Flags().StringVar(&vBaselineS3, "baseline-s3", "", "S3 URL prefix of baseline Parquet snapshots (e.g. s3://bucket/baselines/)")
@@ -146,18 +170,28 @@ func init() {
 	AddOutputFlag(viewsCmd, &vOut, "views.sql", "Output file, or - for stdout", OutAlias)
 }
 
+// errSchemaRenamed answers the old --schema option. Pinned by a test: the text
+// is the whole migration note for someone whose script still passes it.
+var errSchemaRenamed = fmt.Errorf("--schema is now --database. Views are named after the source " +
+	"(shop.orders, no longer state_shop_orders), so a server gets its own DuckDB database instead of a " +
+	"schema: --database wp, then query wp.shop.orders and wp.events")
+
 func runViews(cmd *cobra.Command, _ []string) error {
 	// First, ahead of every refusal that depends on what else was passed: a
 	// name that cannot be used is wrong whatever the rest of the command says.
-	if vSchema != "" {
-		if err := views.ValidateSchemaName(vSchema); err != nil {
-			return fmt.Errorf("--schema: %w", err)
+	if cmd.Flags().Changed("schema") {
+		return errSchemaRenamed
+	}
+	if vDatabase != "" {
+		if err := views.ValidateDatabaseName(vDatabase); err != nil {
+			return fmt.Errorf("--database: %w", err)
 		}
-	} else if cmd.Flags().Changed("schema") {
-		// `--schema ""` is a value that was typed (an unset shell variable,
-		// usually). Reading it as "no schema" would write every view to the
-		// default schema, which is the overwrite the flag was passed to avoid.
-		return fmt.Errorf("--schema: %w", views.ValidateSchemaName(vSchema))
+	} else if cmd.Flags().Changed("database") {
+		// `--database ""` is a value that was typed (an unset shell variable,
+		// usually). Reading it as "no database" would write every view to the
+		// session's own database, which is the overwrite the flag was passed to
+		// avoid.
+		return fmt.Errorf("--database: %w", views.ValidateDatabaseName(vDatabase))
 	}
 	if (vArchiveDir != "" || vArchiveS3 != "") && vBintrailID == "" {
 		return fmt.Errorf("--bintrail-id is required when --archive-dir or --archive-s3 is set")
@@ -204,7 +238,7 @@ func runViews(cmd *cobra.Command, _ []string) error {
 		// never emits the preamble that would use it.
 		ArchiveRegion: vRegion,
 		OmitEvents:    !vIncludeEvents,
-		Schema:        vSchema,
+		Database:      vDatabase,
 	}
 
 	switch {
@@ -252,7 +286,17 @@ func runViews(cmd *cobra.Command, _ []string) error {
 	// empty file reached by simply not naming a baseline location. Before the
 	// S3 probe, so a render with nothing in it is refused for the reason that
 	// matters rather than over a bucket it would never read.
+	// Before the refusal below, so a file that defines nothing because every
+	// table was left out says which tables and why, not only "no baseline".
+	notes := in.NamingNotes()
+	for _, n := range notes {
+		fmt.Fprintf(cmd.ErrOrStderr(), "note: %s\n", n)
+	}
 	if !in.RendersAnyView() {
+		if len(in.Baselines) > 0 {
+			return fmt.Errorf("this would define no view at all: every table of the snapshot " +
+				"is in a schema DuckDB keeps for itself (listed above)")
+		}
 		if in.OmitEvents {
 			return fmt.Errorf("this would define no view at all: no baseline snapshot was " +
 				"found to build state views from. Name one with --baseline-dir/--baseline-s3, " +
@@ -292,8 +336,8 @@ func runViews(cmd *cobra.Command, _ []string) error {
 		if in.RendersEventsView() {
 			events = fmt.Sprintf("over %d archive source(s)", len(in.ArchiveSources))
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "wrote %s (%d state view(s), events view: %s)\n",
-			vOut, len(in.Baselines), events)
+		fmt.Fprintf(cmd.OutOrStdout(), "wrote %s (%d table view(s), events view: %s)\n",
+			vOut, len(in.SelectedBaselines()), events)
 	}
 	return nil
 }

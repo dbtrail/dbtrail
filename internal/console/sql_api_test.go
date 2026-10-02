@@ -251,7 +251,7 @@ func TestSQLAPI_runsTheStatementOnTheCopy(t *testing.T) {
 	f := newSQLFixture(t, &fakeSQLRunner{res: oneRowResult()}, true)
 	var seen *views.Input
 	f.s.sqlViewsObserver = func(in views.Input) { seen = &in }
-	const stmt = "SELECT o.id, o.status FROM state_shop_orders o WHERE o.id IN (SELECT 1 FROM events)"
+	const stmt = "SELECT o.id, o.status FROM shop.orders o WHERE o.id IN (SELECT 1 FROM events)"
 	w := f.post(t, `{"sql":"`+stmt+`","max_rows":50}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
@@ -295,7 +295,7 @@ func TestSQLAPI_runsTheStatementOnTheCopy(t *testing.T) {
 		t.Errorf("views input sources = %v / %d baselines", seen.ArchiveSources, len(seen.Baselines))
 	}
 	// And the rendered text, as a second belt.
-	if !strings.Contains(job.ViewsSQL, "state_shop_orders") || !strings.Contains(job.ViewsSQL, "VIEW events") && !strings.Contains(job.ViewsSQL, "VIEW \"events\"") {
+	if !strings.Contains(job.ViewsSQL, "shop.orders") || !strings.Contains(job.ViewsSQL, "VIEW events") && !strings.Contains(job.ViewsSQL, "VIEW \"events\"") {
 		t.Errorf("views do not define the state view and the events view:\n%s", job.ViewsSQL)
 	}
 	for _, forbidden := range []string{"ATTACH", "INSTALL", "LOAD ", "s3://"} {
@@ -305,7 +305,7 @@ func TestSQLAPI_runsTheStatementOnTheCopy(t *testing.T) {
 	}
 	// A statement that does not name events gets neither the events view nor
 	// the archive directory: defining that view is the expensive half.
-	w = f.post(t, `{"sql":"SELECT id FROM state_shop_orders"}`)
+	w = f.post(t, `{"sql":"SELECT id FROM shop.orders"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("state-only: code=%d body=%s", w.Code, w.Body.String())
 	}
@@ -339,7 +339,7 @@ func TestSQLAPI_realWorkerReadsOnlyTheNarrowedDirs(t *testing.T) {
 	if err := os.WriteFile(planted, []byte("password: s3cret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	w := f.post(t, `{"sql":"SELECT id, status FROM state_shop_orders ORDER BY id"}`)
+	w := f.post(t, `{"sql":"SELECT id, status FROM shop.orders ORDER BY id"}`)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `[1,"new"]`) || !strings.Contains(w.Body.String(), `[2,"paid"]`) {
 		t.Fatalf("state view: code=%d body=%s", w.Code, w.Body.String())
 	}
@@ -610,7 +610,7 @@ func TestSQLAPI_auditsTheRunAndReportsTruncation(t *testing.T) {
 	res.Truncated = true
 	res.TruncatedCells = 3
 	s, _ := newSQLServer(t, &fakeSQLRunner{res: res})
-	w := postSQL(t, s, `{"sql":"SELECT id FROM state_shop_orders"}`, serverHeader, bootServerID)
+	w := postSQL(t, s, `{"sql":"SELECT id FROM shop.orders"}`, serverHeader, bootServerID)
 	if w.Code != http.StatusOK {
 		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
 	}
@@ -626,7 +626,7 @@ func TestSQLAPI_auditsTheRunAndReportsTruncation(t *testing.T) {
 		t.Fatalf("events = %+v", events)
 	}
 	ev := events[0]
-	want := map[string]string{"sql": "SELECT id FROM state_shop_orders", "rows": "1", "truncated": "true", "elapsed_ms": "12", "server": bootServerID}
+	want := map[string]string{"sql": "SELECT id FROM shop.orders", "rows": "1", "truncated": "true", "elapsed_ms": "12", "server": bootServerID}
 	for k, v := range want {
 		if ev.Detail[k] != v {
 			t.Errorf("detail[%s] = %q, want %q", k, ev.Detail[k], v)
@@ -862,18 +862,26 @@ func sqlsandboxLocal(d string) bool { return filepath.IsAbs(d) && !strings.HasPr
 
 func TestSQLMentionsEvents(t *testing.T) {
 	for stmt, want := range map[string]bool{
-		"SELECT * FROM events":                   true,
-		"select count(*) from EVENTS e":          true,
-		"SELECT * FROM \"events\" LIMIT 1":       true,
-		"SELECT * FROM state_shop_orders":        false,
-		"SELECT * FROM state_shop_events_log":    false,
-		"SELECT * FROM state_x WHERE eventsx=1":  false,
-		"SELECT * FROM main.events":              true,
-		"SELECT * FROM memory.main.events e":     true,
-		"FROM Events":                            true,
-		"SELECT count(*) FROM events;":           true,
-		"SELECT * FROM (events)":                 true,
-		"SELECT count(*) AS events FROM state_x": true,
+		"SELECT * FROM events":                            true,
+		"select count(*) from EVENTS e":                   true,
+		"SELECT * FROM \"events\" LIMIT 1":                true,
+		"SELECT * FROM shop.orders":                       false,
+		"SELECT * FROM shop.events_log":                   false,
+		"SELECT * FROM x.y WHERE eventsx=1":               false,
+		"SELECT * FROM shop.events":                       false,
+		"SELECT * FROM shop.\"events\"":                   false,
+		"SELECT * FROM \"Shop Floor\".events":             false,
+		"SELECT * FROM events.orders":                     false,
+		"SELECT * FROM \"events\".\"orders\"":             false,
+		"SELECT * FROM main.\"events\"":                   true,
+		"SELECT * FROM MAIN . events":                     true,
+		"SELECT * FROM shop.events JOIN events e ON true": true,
+		"SELECT * FROM main.events":                       true,
+		"SELECT * FROM memory.main.events e":              true,
+		"FROM Events":                                     true,
+		"SELECT count(*) FROM events;":                    true,
+		"SELECT * FROM (events)":                          true,
+		"SELECT count(*) AS events FROM x.y":              true,
 	} {
 		if got := sqlMentionsEvents(stmt); got != want {
 			t.Errorf("sqlMentionsEvents(%q) = %v, want %v", stmt, got, want)
@@ -904,8 +912,8 @@ func TestSQLAPI_infoListsViewsCopyTimeAndLimits(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &info); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(info.Views, ",") != "events,state_shop_orders" {
-		t.Errorf("views = %v, want [events state_shop_orders]", info.Views)
+	if strings.Join(info.Views, ",") != "events,shop.orders" {
+		t.Errorf("views = %v, want [events shop.orders]", info.Views)
 	}
 	if info.CopyUpdatedAt == nil || !info.CopyUpdatedAt.Equal(sqlSnapshotAt) {
 		t.Errorf("copy_updated_at = %v", info.CopyUpdatedAt)
@@ -919,7 +927,7 @@ func TestSQLAPI_infoListsViewsCopyTimeAndLimits(t *testing.T) {
 	// Without a change log the list is the state views alone.
 	g := newSQLFixture(t, &fakeSQLRunner{}, false)
 	w = get(g.s, nil)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"views":["state_shop_orders"]`) {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"views":["shop.orders"]`) {
 		t.Errorf("no archive: code=%d body=%s", w.Code, w.Body.String())
 	}
 	// The profile gate refuses the listing too: view names are table names.
@@ -1014,9 +1022,9 @@ func TestSQLAPI_localTablesWithChangeLogInS3(t *testing.T) {
 	var seen *views.Input
 	f.s.sqlViewsObserver = func(in views.Input) { seen = &in }
 	for _, stmt := range []string{
-		"SELECT id FROM state_shop_orders",
-		"SELECT count(*) AS events FROM state_shop_orders",
-		"SELECT id FROM state_shop_orders WHERE status LIKE '%events%'",
+		"SELECT id FROM shop.orders",
+		"SELECT count(*) AS events FROM shop.orders",
+		"SELECT id FROM shop.orders WHERE status LIKE '%events%'",
 	} {
 		w := postS3(`{"sql":"` + stmt + `"}`)
 		if w.Code != http.StatusOK {
@@ -1032,7 +1040,7 @@ func TestSQLAPI_localTablesWithChangeLogInS3(t *testing.T) {
 	}
 	// A statement that really reads events: DuckDB says the table does not
 	// exist (it was not installed); the person reads why.
-	f.runner.err = &sqlsandbox.QueryError{Message: "Catalog Error: Table with name events does not exist!\nDid you mean \"state_shop_orders\"?"}
+	f.runner.err = &sqlsandbox.QueryError{Message: "Catalog Error: Table with name events does not exist!\nDid you mean \"shop.orders\"?"}
 	w := postS3(`{"sql":"SELECT count(*) FROM events"}`)
 	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "on S3, so events cannot be read here; the tables can") {
 		t.Errorf("reading events with the change log in S3: code=%d body=%s", w.Code, w.Body.String())
@@ -1050,7 +1058,7 @@ func TestSQLAPI_localTablesWithChangeLogInS3(t *testing.T) {
 	f.expectArchiveS3()
 	g := httptest.NewRecorder()
 	f.s.handleSQLInfo(g, httptest.NewRequest("GET", "/api/sql", nil))
-	if g.Code != http.StatusOK || !strings.Contains(g.Body.String(), `"views":["state_shop_orders"]`) {
+	if g.Code != http.StatusOK || !strings.Contains(g.Body.String(), `"views":["shop.orders"]`) {
 		t.Errorf("listing: code=%d body=%s", g.Code, g.Body.String())
 	}
 	// On a fully local copy the same catalog error is NOT rewritten.

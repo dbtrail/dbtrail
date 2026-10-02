@@ -74,8 +74,8 @@ func TestRunViews_realFootersReachTheChainRule_1733(t *testing.T) {
 		}
 		return got
 	}
-	if got := state("state_shop_odd"); got != "1" {
-		t.Fatalf("state_shop_odd = %s", got)
+	if got := state("shop.odd"); got != "1" {
+		t.Fatalf("shop.odd = %s", got)
 	}
 	// A refresh writes the table's first chain: row 0 (id 1) replaced, id 3 new.
 	err = baseline.WriteTableDeltaPair(orders, 0, cols, nil, []int64{0}, func(emit func([]string, []bool) error) error {
@@ -84,7 +84,7 @@ func TestRunViews_realFootersReachTheChainRule_1733(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := state("state_shop_orders"); got != "2,3" {
-		t.Fatalf("after the first chain: state_shop_orders = %s, want 2,3", got)
+	if got := state("shop.orders"); got != "2,3" {
+		t.Fatalf("after the first chain: shop.orders = %s, want 2,3", got)
 	}
 }

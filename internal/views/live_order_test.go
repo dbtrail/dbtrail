@@ -31,7 +31,7 @@ func TestLiveLeg_parquetOnlyViewsPrecedeTheAttach(t *testing.T) {
 		t.Fatalf("no ATTACH in a file generated with an index:\n%s", out)
 	}
 	events := strings.Index(out, `CREATE OR REPLACE VIEW "events"`)
-	state := strings.Index(out, `CREATE OR REPLACE VIEW "state_`)
+	state := strings.Index(out, `CREATE OR REPLACE VIEW "shop"."orders"`)
 
 	if events < 0 || state < 0 {
 		t.Fatalf("expected both an events view and a state view:\n%s", out)
@@ -87,7 +87,7 @@ func TestLiveLeg_saysWhatAFailedAttachCosts(t *testing.T) {
 	}
 	for _, want := range []string{
 		"cannot reach",
-		"the state_ views above already created",
+		"the table views above already created",
 		// The degrade is CONDITIONAL on how the file is run, and this is the
 		// invocation that breaks it: `duckdb -init file.sql` with no database
 		// file exits on the error and the in-memory catalog dies with it, so
@@ -114,7 +114,7 @@ func TestAttachDegrade_saysNothingSurvivesWhenNoStateViewsExist(t *testing.T) {
 	in.Baselines, in.BaselineSource = nil, ""
 	out := Generate(in)
 
-	if strings.Contains(out, `CREATE OR REPLACE VIEW "state_`) {
+	if strings.Contains(out, `CREATE OR REPLACE VIEW "shop"."orders"`) {
 		t.Fatalf("fixture defines a state view, so it cannot test the no-state degrade:\n%s", out)
 	}
 	if !strings.Contains(out, "no view at all") {
@@ -253,10 +253,10 @@ func TestIsSingleLabelHost(t *testing.T) {
 // reading through it, under a preamble introducing a leg that is not there.
 func TestOnlyViews_noOrphanAttach(t *testing.T) {
 	in := orderedInput()
-	in.OnlyViews = ViewSet{"state_shop_orders": true}
+	in.OnlyViews = ViewSet{"shop.orders": true}
 	out := Generate(in)
 
-	if !strings.Contains(out, `CREATE OR REPLACE VIEW "state_shop_orders"`) {
+	if !strings.Contains(out, `CREATE OR REPLACE VIEW "shop"."orders"`) {
 		t.Fatalf("the view that WAS asked for is missing, so this proves nothing:\n%s", out)
 	}
 	if strings.Contains(out, `CREATE OR REPLACE VIEW "events"`) {

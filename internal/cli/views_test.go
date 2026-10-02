@@ -21,7 +21,7 @@ func resetViewsFlags() {
 	vIndexDSN, vArchiveDir, vArchiveS3, vBintrailID = "", "", "", ""
 	vRegion, vBaselineDir, vBaselineS3, vOut = "", "", "", "views.sql"
 	vNoBaselines, vIncludeEvents, vIncludeLive, vPinSnapshot = false, false, false, false
-	vSchema = ""
+	vDatabase, vOldSchema = "", ""
 }
 
 // TestRunViews_flagValidation covers the refusals that must happen BEFORE any
@@ -150,7 +150,7 @@ func TestRunViews_baselinesOnlyNeedsNoIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runViews over a baselines-only root: %v", err)
 	}
-	if !strings.Contains(out, `CREATE OR REPLACE VIEW "state_wp_wp_posts"`) {
+	if !strings.Contains(out, `CREATE OR REPLACE VIEW "wp"."wp_posts"`) {
 		t.Errorf("no state view for the snapshot's table in:\n%s", out)
 	}
 	// The events view reads an archive source and there is none, so it must

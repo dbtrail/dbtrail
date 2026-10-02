@@ -262,12 +262,14 @@ func viewStateRows(t *testing.T, viewsFile, schema string, ct chainTable) []stri
 	if _, err := ddb.Exec(string(sqlText)); err != nil {
 		t.Fatalf("run views.sql: %v\n%s", err, sqlText)
 	}
-	var view string
-	if err := ddb.QueryRow("SELECT table_name FROM information_schema.tables WHERE lower(table_name) = lower(?)",
-		"state_"+schema+"_"+ct.name).Scan(&view); err != nil {
-		t.Fatalf("no state view for %s.%s in views.sql: %v", schema, ct.name, err)
+	// Named exactly like the source table, in a schema named like the source
+	// schema (#2013).
+	var viewSchema, view string
+	if err := ddb.QueryRow("SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema = ? AND table_name = ?",
+		schema, ct.name).Scan(&viewSchema, &view); err != nil {
+		t.Fatalf("no view %s.%s in views.sql: %v", schema, ct.name, err)
 	}
-	q := fmt.Sprintf(`SELECT * FROM "%s" ORDER BY "%s"`, view, strings.Join(ct.pk, `", "`))
+	q := fmt.Sprintf(`SELECT * FROM "%s"."%s" ORDER BY "%s"`, viewSchema, view, strings.Join(ct.pk, `", "`))
 	rows, err := ddb.Query(q)
 	if err != nil {
 		t.Fatalf("read %s: %v", view, err)

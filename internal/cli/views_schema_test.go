@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	_ "github.com/duckdb/duckdb-go/v2"
+	"github.com/spf13/cobra"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 )
@@ -55,10 +57,10 @@ func viewsFor(t *testing.T, schema, baselineDir string) string {
 	t.Helper()
 	vIndexDSN, vArchiveDir, vArchiveS3, vBintrailID, vBaselineS3 = "", "", "", "", ""
 	vNoBaselines, vIncludeLive, vIncludeEvents, vPinSnapshot = false, false, false, false
-	vBaselineDir, vOut, vSchema = baselineDir, "-", schema
+	vBaselineDir, vOut, vDatabase = baselineDir, "-", schema
 	out, err := runViewsToString(t)
 	if err != nil {
-		t.Fatalf("views --schema %q --baseline-dir %s: %v", schema, baselineDir, err)
+		t.Fatalf("views --database %q --baseline-dir %s: %v", schema, baselineDir, err)
 	}
 	return out
 }
@@ -106,11 +108,11 @@ func TestRunViews_schemaKeepsTwoServersApart(t *testing.T) {
 			if _, err := db.Exec(fileA + "\n" + fileB); err != nil {
 				t.Fatalf("DuckDB rejected the two files loaded together:\n%v\n\n--- a ---\n%s\n--- b ---\n%s", err, fileA, fileB)
 			}
-			if got := orderStatuses(t, db, "a.state_shop_orders"); got != "from-a" {
-				t.Errorf("a.state_shop_orders returned %q, want server a's rows", got)
+			if got := orderStatuses(t, db, "a.shop.orders"); got != "from-a" {
+				t.Errorf("a.shop.orders returned %q, want server a's rows", got)
 			}
-			if got := orderStatuses(t, db, "b.state_shop_orders"); got != "from-b-1,from-b-2" {
-				t.Errorf("b.state_shop_orders returned %q, want server b's rows", got)
+			if got := orderStatuses(t, db, "b.shop.orders"); got != "from-b-1,from-b-2" {
+				t.Errorf("b.shop.orders returned %q, want server b's rows", got)
 			}
 		})
 	}
@@ -123,11 +125,11 @@ func TestRunViews_noSchemaIsTheFileAsItWas(t *testing.T) {
 	saveViewsFlags(t)
 	root := writeServerBaseline(t, "2026-04-30T03-00-00Z", false, "x")
 	out := viewsFor(t, "", root)
-	if strings.Contains(out, "SCHEMA") {
-		t.Errorf("a file generated with no --schema mentions one:\n%s", out)
+	if strings.Contains(out, "ATTACH IF NOT EXISTS") {
+		t.Errorf("a file generated with no --database attaches one:\n%s", out)
 	}
-	if !strings.Contains(out, "CREATE OR REPLACE VIEW \"state_shop_orders\" AS\n") {
-		t.Errorf("the state view is not named as before:\n%s", out)
+	if !strings.Contains(out, "CREATE OR REPLACE VIEW \"shop\".\"orders\" AS\n") {
+		t.Errorf("the table view is not named after the source:\n%s", out)
 	}
 }
 
@@ -152,13 +154,13 @@ func TestRunViews_refusesASchemaItCannotUse(t *testing.T) {
 			out := filepath.Join(t.TempDir(), "views.sql")
 			vIndexDSN, vArchiveDir, vArchiveS3, vBintrailID, vBaselineS3 = "", "", "", "", ""
 			vNoBaselines, vIncludeLive, vIncludeEvents, vPinSnapshot = false, false, false, false
-			vBaselineDir, vOut, vSchema = root, out, tc.schema
+			vBaselineDir, vOut, vDatabase = root, out, tc.schema
 
 			_, err := runViewsToString(t)
 			if err == nil {
-				t.Fatalf("--schema %q was accepted", tc.schema)
+				t.Fatalf("--database %q was accepted", tc.schema)
 			}
-			if !strings.HasPrefix(err.Error(), "--schema: ") || !strings.Contains(err.Error(), tc.want) {
+			if !strings.HasPrefix(err.Error(), "--database: ") || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("the refusal does not name the flag and say %q: %v", tc.want, err)
 			}
 			if _, statErr := os.Stat(out); statErr == nil {
@@ -174,9 +176,9 @@ func TestRunViews_refusesASchemaItCannotUse(t *testing.T) {
 func TestRunViews_refusesASchemaBeforeAnyOtherRefusal(t *testing.T) {
 	saveViewsFlags(t)
 	resetViewsFlags()
-	vSchema = "main"
+	vDatabase = "main"
 	_, err := runViewsToString(t)
-	if err == nil || !strings.HasPrefix(err.Error(), "--schema: ") {
+	if err == nil || !strings.HasPrefix(err.Error(), "--database: ") {
 		t.Errorf("got %v, want the refusal of the schema name", err)
 	}
 }
@@ -188,13 +190,13 @@ func TestRunViews_refusesASchemaBeforeAnyOtherRefusal(t *testing.T) {
 func TestViewsCmd_refusesAnEmptySchemaThatWasTyped(t *testing.T) {
 	saveViewsFlags(t)
 	root := writeServerBaseline(t, "2026-04-30T03-00-00Z", false, "x")
-	f := viewsCmd.Flags().Lookup("schema")
+	f := viewsCmd.Flags().Lookup("database")
 	if f == nil {
-		t.Fatal("no --schema flag")
+		t.Fatal("no --database flag")
 	}
 	t.Cleanup(func() { f.Changed = false })
 
-	if err := viewsCmd.ParseFlags([]string{"--schema", "", "--baseline-dir", root, "--output", "-"}); err != nil {
+	if err := viewsCmd.ParseFlags([]string{"--database", "", "--baseline-dir", root, "--output", "-"}); err != nil {
 		t.Fatalf("parse flags: %v", err)
 	}
 	t.Cleanup(func() {
@@ -209,7 +211,7 @@ func TestViewsCmd_refusesAnEmptySchemaThatWasTyped(t *testing.T) {
 	// before one is needed.
 	viewsCmd.SetContext(context.Background())
 	err := runViews(viewsCmd, nil)
-	if err == nil || !strings.Contains(err.Error(), "--schema") || !strings.Contains(err.Error(), "empty") {
+	if err == nil || !strings.Contains(err.Error(), "--database") || !strings.Contains(err.Error(), "empty") {
 		t.Errorf("got %v, want the empty name refused", err)
 	}
 }
@@ -217,16 +219,104 @@ func TestViewsCmd_refusesAnEmptySchemaThatWasTyped(t *testing.T) {
 // TestSchemaHelp_saysWhatItIsFor: the flag help has to carry the reason, since
 // the failure it prevents has no error for the operator to search for.
 func TestSchemaHelp_saysWhatItIsFor(t *testing.T) {
-	f := viewsCmd.Flags().Lookup("schema")
+	f := viewsCmd.Flags().Lookup("database")
 	if f == nil {
-		t.Fatal("no --schema flag")
+		t.Fatal("no --database flag")
 	}
-	for _, want := range []string{"several servers", "without an error", "<schema>_live", "Lowercase"} {
+	for _, want := range []string{"several servers", "without an error", "<database>_live", "Lowercase", "<database>.<schema>.<table>"} {
 		if !strings.Contains(f.Usage, want) {
-			t.Errorf("--schema help does not say %q:\n%s", want, f.Usage)
+			t.Errorf("--database help does not say %q:\n%s", want, f.Usage)
 		}
 	}
-	if !strings.Contains(viewsCmd.Long, "--schema") {
-		t.Error("the long help does not mention --schema")
+	if !strings.Contains(viewsCmd.Long, "--database") {
+		t.Error("the long help does not mention --database")
+	}
+}
+
+// TestViewsCmd_oldSchemaOptionSaysItWasRenamed (#2013): --schema meant a DuckDB
+// schema per server; the source's schemas are DuckDB schemas now, so the server
+// moved up to a database. A script that still passes --schema is told so, and
+// no file is written, whatever the value.
+func TestViewsCmd_oldSchemaOptionSaysItWasRenamed(t *testing.T) {
+	saveViewsFlags(t)
+	root := writeServerBaseline(t, "2026-04-30T03-00-00Z", false, "x")
+	out := filepath.Join(t.TempDir(), "views.sql")
+	f := viewsCmd.Flags().Lookup("schema")
+	if f == nil || !f.Hidden {
+		t.Fatal("--schema should still be registered, hidden, to answer old scripts")
+	}
+	t.Cleanup(func() {
+		for _, name := range []string{"schema", "baseline-dir", "output"} {
+			if fl := viewsCmd.Flags().Lookup(name); fl != nil {
+				fl.Changed = false
+			}
+		}
+	})
+	if err := viewsCmd.ParseFlags([]string{"--schema", "wp", "--baseline-dir", root, "--output", out}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	viewsCmd.SetContext(context.Background())
+	err := runViews(viewsCmd, nil)
+	if err == nil || err.Error() != "--schema is now --database. Views are named after the source (shop.orders, "+
+		"no longer state_shop_orders), so a server gets its own DuckDB database instead of a schema: "+
+		"--database wp, then query wp.shop.orders and wp.events" {
+		t.Errorf("got %v, want the rename explained", err)
+	}
+	if _, statErr := os.Stat(out); statErr == nil {
+		t.Error("a file was written for the old option")
+	}
+}
+
+// TestRunViews_namesTheTablesItLeavesOut (#2013): a table in a schema DuckDB
+// keeps for itself has no view, and the command says so on stderr, where a
+// person running it looks; a file where that is EVERY table is refused for
+// that reason, not as "no baseline".
+func TestRunViews_namesTheTablesItLeavesOut(t *testing.T) {
+	saveViewsFlags(t)
+	const stamp = "2026-04-30T03-00-00Z"
+	root := writeServerBaseline(t, stamp, false, "x")
+	src := filepath.Join(root, stamp, "shop", "orders.parquet")
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, stamp, "temp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, stamp, "temp", "orders.parquet"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run := func() (string, string, error) {
+		vIndexDSN, vArchiveDir, vArchiveS3, vBintrailID, vBaselineS3 = "", "", "", "", ""
+		vNoBaselines, vIncludeLive, vIncludeEvents, vPinSnapshot = false, false, false, true
+		vBaselineDir, vOut, vDatabase = root, "-", ""
+		var out, errOut bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		cmd.SetContext(context.Background())
+		err := runViews(cmd, nil)
+		return out.String(), errOut.String(), err
+	}
+	out, stderr, err := run()
+	if err != nil {
+		t.Fatalf("views: %v", err)
+	}
+	if !strings.Contains(stderr, "note: temp.orders: not defined") || !strings.Contains(stderr, "--database") {
+		t.Errorf("stderr does not name the table left out and the way to reach it:\n%s", stderr)
+	}
+	if !strings.Contains(out, `CREATE OR REPLACE VIEW "shop"."orders" AS`) || strings.Contains(out, `VIEW "temp"`) {
+		t.Errorf("the file should define shop.orders and not temp.orders:\n%s", out)
+	}
+
+	if err := os.Remove(src); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = run()
+	if err == nil || !strings.Contains(err.Error(), "schema DuckDB keeps for itself") {
+		t.Errorf("a snapshot whose only table is left out gave %v, want that reason", err)
+	}
+	if !strings.Contains(stderr, "note: temp.orders") {
+		t.Errorf("the refusal is not preceded by the note naming the table:\n%s", stderr)
 	}
 }

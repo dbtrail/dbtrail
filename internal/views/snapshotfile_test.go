@@ -62,7 +62,7 @@ func TestWriteSuccessMarker_publishesTheSnapshotViewsFile(t *testing.T) {
 		t.Fatalf("DuckDB rejected the published views file:\n%v\n\n--- file ---\n%s", err, sqlText)
 	}
 	var status string
-	if err := db.QueryRow(`SELECT "status" FROM state_shop_orders`).Scan(&status); err != nil {
+	if err := db.QueryRow(`SELECT "status" FROM shop.orders`).Scan(&status); err != nil {
 		t.Fatalf("query state view: %v", err)
 	}
 	if status != "kept" {

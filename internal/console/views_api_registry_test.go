@@ -114,7 +114,7 @@ func TestViewsAPI_registryReadFailure(t *testing.T) {
 		if strings.Contains(sql, "SELECT command denied") {
 			t.Errorf("raw registry error leaked into the downloadable file:\n%s", sql)
 		}
-		if !strings.Contains(sql, `CREATE OR REPLACE VIEW "state_shop_orders"`) {
+		if !strings.Contains(sql, `CREATE OR REPLACE VIEW "shop"."orders"`) {
 			t.Errorf("baseline half missing:\n%s", sql)
 		}
 	})

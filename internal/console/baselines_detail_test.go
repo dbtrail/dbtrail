@@ -462,22 +462,22 @@ func TestBaselineDownload_viewsSQLReadsTheChain(t *testing.T) {
 		t.Fatalf("no generated %s in the archive; entries = %v", views.SnapshotFileName, keysOf(got))
 	}
 	view := func(name string) string {
-		i := strings.Index(vsql, "CREATE OR REPLACE VIEW \""+name+"\"")
+		i := strings.Index(vsql, "CREATE OR REPLACE VIEW \""+strings.Replace(name, ".", "\".\"", 1)+"\"")
 		if i < 0 {
 			t.Fatalf("no view %s in:\n%s", name, vsql)
 		}
 		j := strings.Index(vsql[i:], ";")
 		return vsql[i : i+j]
 	}
-	if v := view("state_shop_orders"); !strings.Contains(v, "bintrail_latest") ||
+	if v := view("shop.orders"); !strings.Contains(v, "bintrail_latest") ||
 		!strings.Contains(v, "./shop/orders.[0-9][0-9][0-9][0-9][0-9][0-9]*.upserts") || // the #1723 glob: plain and range pairs
 		!strings.Contains(v, `regexp_matches(filename, '(^|[/\\])orders\.[0-9]{6}(-[0-9]{6})?\.upserts$')`) {
 		t.Errorf("orders view does not read the chain:\n%s", v)
 	}
-	if v := view("state_shop_users"); strings.Contains(v, "bintrail_latest") || !strings.Contains(v, "./shop/users.upserts") {
+	if v := view("shop.users"); strings.Contains(v, "bintrail_latest") || !strings.Contains(v, "./shop/users.upserts") {
 		t.Errorf("users view does not read the legacy pair:\n%s", v)
 	}
-	if v := view("state_shop_plain"); strings.Contains(v, "upserts") || strings.Contains(v, "file_row_number") {
+	if v := view("shop.plain"); strings.Contains(v, "upserts") || strings.Contains(v, "file_row_number") {
 		t.Errorf("plain view got a delta body:\n%s", v)
 	}
 	for _, name := range []string{"shop/orders.000001.posdel", "shop/users.posdel"} {

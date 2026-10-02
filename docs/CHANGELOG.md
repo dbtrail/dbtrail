@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **Breaking: the DuckDB views of a snapshot are named exactly like the
+  source** (#2013). `SELECT * FROM shop.orders`, and `demo."order.items"` for a
+  name DuckDB cannot read bare, instead of `state_shop_orders`. Each source
+  schema is a DuckDB schema and each table keeps its own name, in `views.sql`,
+  in `bintrail views`, in the snapshot download and in the console's SQL card.
+  The old `state_<schema>_<table>` names are gone, with no aliases: regenerate
+  the file and update saved queries and dashboards. The old names were also
+  lossy (`a.b_c` and `a_b.c` were one name). Two tables whose names differ only
+  in letter case are one name to DuckDB, so one gets a number
+  (`shop.orders_2`); tables in a schema DuckDB keeps for itself
+  (`information_schema`, `pg_catalog`, and `temp`, `system`, `memory` without
+  `--database`) are left out. The file and the command name each one.
+- **Breaking: `bintrail views --schema` is now `--database`.** A server's views
+  go in a DuckDB database of that name (`wp.shop.orders`, `wp.events`) instead
+  of a schema, since schemas now carry the source's. The database is attached
+  in memory unless one by that name is already open; `ATTACH 'wp.db' AS wp`
+  before reading the file keeps the views on disk. `--schema` is refused with
+  a note saying so.
+- The console's SQL card no longer loads the change log for a statement that
+  names a source table or schema called `events` (`shop.events`,
+  `events.orders`); only `events` and `main.events` are the change log.
 
 ## [0.95.0] - 2026-10-02
 ### Fixed

@@ -18,7 +18,7 @@ There is no server to connect to: no host, port, user and password to type
 into the tool's form. Instead, the tool runs DuckDB inside its own process, and
 DuckDB reads the Parquet files directly. What connects the two is the **views
 file**, a short SQL file that turns each snapshot file into a table with a
-plain name (`state_<schema>_<table>`).
+plain name: the source's own, `shop.orders`.
 
 You run the views file once, into a small DuckDB database file, and point the
 tool at that file. Three things have to be true, and the steps below take care
@@ -127,8 +127,8 @@ In Metabase, **Admin settings > Databases > Add a database**, and pick
 | Database file | `/bi/lake.duckdb` |
 | Establish a read-only connection | on |
 
-Save. Metabase lists one table per source table, named
-`state_<schema>_<table>`, and both typed SQL and the visual query builder work
+Save. Metabase lists one table per source table, under its source schema and with
+its source name (`shop.orders`), and both typed SQL and the visual query builder work
 on them.
 
 Why not `:memory:` with the views file pasted into **Init SQL**, which skips

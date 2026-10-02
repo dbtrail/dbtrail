@@ -38,8 +38,9 @@ func goldenInput() Input {
 			// No decimal columns at all: nothing to cast, and nothing to say.
 			{Schema: "shop", Table: "order_items", Path: "s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/order_items.parquet",
 				SchemaKnown: true},
-			// Sanitizes to the same view name as shop.order_items above. Its
-			// DECIMAL(65,30) is past DuckDB's ceiling, so it stays text and the
+			// Collapsed onto shop.order_items above under the old
+			// state_<schema>_<table> names; named after the source it is its own
+			// view (#2013). Its DECIMAL(65,30) is past DuckDB's ceiling, so it stays text and the
 			// file has to say which column and why.
 			{Schema: "shop_order", Table: "items", Path: "s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop_order/items.parquet",
 				SchemaKnown: true,
@@ -48,6 +49,10 @@ func goldenInput() Input {
 			// footer could not be read, which is a different fact from "no
 			// decimal columns" and is stated as one.
 			{Schema: "Legacy-DB", Table: "Audit Log", Path: "s3://my-bucket/baselines/2026-04-30T03-00-00Z/Legacy-DB/Audit Log.parquet"},
+			// The same name as shop.order_items to DuckDB, which compares names
+			// without letter case, so one of the two is renamed and the file
+			// says why (#2013).
+			{Schema: "shop", Table: "ORDER_ITEMS", Path: "s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/ORDER_ITEMS.parquet"},
 		},
 	}
 }
@@ -124,7 +129,7 @@ func TestGenerate_noBaselines(t *testing.T) {
 	in := goldenInput()
 	in.Baselines = nil
 	got := Generate(in)
-	if strings.Contains(got, "state_") && !strings.Contains(got, "state_<schema>_<table>") {
+	if strings.Contains(got, "state_") {
 		t.Errorf("a state view was emitted with no baselines:\n%s", got)
 	}
 	if !strings.Contains(got, "no baseline snapshot was discovered") {
@@ -172,18 +177,23 @@ func TestGenerate_noCredentialsInOutput(t *testing.T) {
 	}
 }
 
-// TestStateViewName_collision: two different tables must never share a view
-// name. Every statement is CREATE OR REPLACE, so a collision would leave one
-// table's view silently pointing at the other's Parquet file.
-func TestStateViewName_collision(t *testing.T) {
-	used := map[string]bool{}
-	first := stateViewName("shop", "order_items", used)
-	second := stateViewName("shop_order", "items", used)
-	if first == second {
-		t.Fatalf("both tables got the view name %q", first)
+// TestStateViewName_noLongerCollapses: the old state_<schema>_<table> names
+// collapsed shop.order_items and shop_order.items onto one name. Named after
+// the source, the two are different views and neither is renamed.
+func TestStateViewName_noLongerCollapses(t *testing.T) {
+	in := Input{Baselines: []BaselineTable{
+		{Schema: "shop", Table: "order_items", Path: "/a.parquet"},
+		{Schema: "shop_order", Table: "items", Path: "/b.parquet"},
+		{Schema: "a.b", Table: "c", Path: "/c.parquet"},
+		{Schema: "a", Table: "b.c", Path: "/d.parquet"},
+	}}
+	got := in.DefinedViews()
+	want := []string{`a."b.c"`, `"a.b".c`, "shop.order_items", "shop_order.items"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("DefinedViews = %v, want %v", got, want)
 	}
-	if first != "state_shop_order_items" || second != "state_shop_order_items_2" {
-		t.Fatalf("names = %q, %q", first, second)
+	if notes := in.NamingNotes(); len(notes) != 0 {
+		t.Fatalf("nothing should be renamed: %v", notes)
 	}
 }
 

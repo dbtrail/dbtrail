@@ -101,7 +101,7 @@ func TestStateView_pinnedNamesTheChainFiles(t *testing.T) {
 	}
 	// The behaviour first (the shape the view binds to), the text second.
 	db := execViews(t, sqlText)
-	rows, err := db.Query(`SELECT * FROM state_shop_orders LIMIT 0`)
+	rows, err := db.Query(`SELECT * FROM shop.orders LIMIT 0`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestStateView_followsARangePairAlone(t *testing.T) {
 			})
 			db := execViews(t, sqlText)
 			var n int
-			if err := db.QueryRow(`SELECT count(*) FROM state_shop_orders`).Scan(&n); err != nil || n != 3 {
+			if err := db.QueryRow(`SELECT count(*) FROM shop.orders`).Scan(&n); err != nil || n != 3 {
 				t.Fatalf("before any delta: n=%d err=%v", n, err)
 			}
 			writeDeltaPair(t, base, 0, []int64{0}, nil)
@@ -153,7 +153,7 @@ func TestStateView_followsARangePairAlone(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := db.QueryRow(`SELECT count(*) FROM state_shop_orders`).Scan(&n); err != nil || n != 2 {
+			if err := db.QueryRow(`SELECT count(*) FROM shop.orders`).Scan(&n); err != nil || n != 2 {
 				t.Fatalf("after a range pair alone appeared: n=%d err=%v, want 2 (the chain's dead row gone)", n, err)
 			}
 		})

@@ -399,7 +399,7 @@ func viewTextRows(t *testing.T, viewsFile, schema string, ct chainTable) []strin
 	for i, c := range ct.cols {
 		parts[i] = fmt.Sprintf(`coalesce(CAST("%s" AS VARCHAR), 'NULL')`, c)
 	}
-	q := fmt.Sprintf(`SELECT concat_ws(',', %s) FROM "state_%s_%s" ORDER BY "%s"`,
+	q := fmt.Sprintf(`SELECT concat_ws(',', %s) FROM "%s"."%s" ORDER BY "%s"`,
 		strings.Join(parts, ", "), schema, ct.name, strings.Join(ct.pk, `", "`))
 	rows, err := ddb.Query(q)
 	if err != nil {

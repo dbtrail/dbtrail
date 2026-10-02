@@ -53,17 +53,17 @@ func TestViewsPortableBaseline_readsTheOtherLocation(t *testing.T) {
 	// Both directions. Asserting only that the portable file reads the second
 	// location would pass for a build that read it in EVERY file, which breaks
 	// the reader on the host instead of the one off it.
-	if !strings.Contains(string(local), "state_shop_orders") {
+	if !strings.Contains(string(local), "shop.orders") {
 		t.Error("the default download does not read the snapshot directory on this host")
 	}
-	if strings.Contains(string(local), "state_shop_invoices") {
+	if strings.Contains(string(local), "shop.invoices") {
 		t.Error("the default download reads the uploaded copy, which needs credentials " +
 			"this host may not have")
 	}
-	if !strings.Contains(string(portable), "state_shop_invoices") {
+	if !strings.Contains(string(portable), "shop.invoices") {
 		t.Error("portable_baseline=1 did not move the state views to the uploaded copy")
 	}
-	if strings.Contains(string(portable), "state_shop_orders") {
+	if strings.Contains(string(portable), "shop.orders") {
 		t.Error("the portable download still reads the snapshot directory on this host, " +
 			"which is not on the machine it was downloaded to")
 	}
