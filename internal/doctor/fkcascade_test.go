@@ -43,8 +43,8 @@ func TestFKCascadesPass(t *testing.T) {
 	if c.Name != FKCascadeCheckName || c.Status != StatusPass {
 		t.Fatalf("got %q %s, want %q pass", c.Name, c.Status, FKCascadeCheckName)
 	}
-	if c.Remediation != "" {
-		t.Errorf("a pass carries no fix, got %q", c.Remediation)
+	if c.Remediation != "" || c.Detail != "none found" {
+		t.Errorf("a pass says none were found and carries no fix, got %q / %q", c.Detail, c.Remediation)
 	}
 }
 
@@ -107,7 +107,7 @@ func TestFKCascadesWarnCapsTheList(t *testing.T) {
 // if cascades had been found.
 func TestFKCascadesReadFailure(t *testing.T) {
 	c := fkCascadeCheck(t, nil, errors.New("Error 1142: SELECT command denied"))
-	if c.Status != StatusWarn || !strings.Contains(c.Detail, "1142") {
+	if c.Status != StatusWarn || c.Detail != "could not read the foreign keys: Error 1142: SELECT command denied" {
 		t.Fatalf("got %s %q, want a warn naming the error", c.Status, c.Detail)
 	}
 	if strings.Contains(c.Remediation, "recover-cascade") {

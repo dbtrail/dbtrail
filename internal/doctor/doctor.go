@@ -1077,6 +1077,18 @@ const fkCascadeAdvice = "Capture works normally. Each foreign key above is liste
 	"If you prefer not to rely on this, you can change these foreign keys to ON DELETE\n" +
 	"RESTRICT and ON UPDATE RESTRICT. Nothing requires it."
 
+// rootCause drops the wrapping prefixes of err, so a detail that already says
+// what failed does not say it twice.
+func rootCause(err error) error {
+	for {
+		inner := errors.Unwrap(err)
+		if inner == nil {
+			return err
+		}
+		err = inner
+	}
+}
+
 func checkFKCascades(db *sql.DB, schemas []string) CheckResult {
 	found, err := metadata.FindFKCascades(db, schemas)
 	if err != nil {
@@ -1085,11 +1097,13 @@ func checkFKCascades(db *sql.DB, schemas []string) CheckResult {
 		return CheckResult{
 			Name:   FKCascadeCheckName,
 			Status: StatusWarn,
-			Detail: "could not read the foreign keys: " + err.Error(),
+			Detail: "could not read the foreign keys: " + rootCause(err).Error(),
 		}
 	}
 	if len(found) == 0 {
-		return CheckResult{Name: FKCascadeCheckName, Status: StatusPass}
+		// Without a detail a pass line reads "✓ Foreign keys that cascade",
+		// which says the opposite of what was found.
+		return CheckResult{Name: FKCascadeCheckName, Status: StatusPass, Detail: "none found"}
 	}
 	subjects := make([]string, len(found))
 	for i, c := range found {
