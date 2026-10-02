@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -177,6 +178,11 @@ func readIdent(s string) (name, rest string, ok bool) {
 func dumpRealNames(inputDir string) map[string]string {
 	f, err := os.Open(filepath.Join(inputDir, "metadata"))
 	if err != nil {
+		// Only a missing file is expected (an older mydumper). The names
+		// then come from each CREATE TABLE, which is always there.
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("cannot read the dump's metadata file; table names are read from each CREATE TABLE instead", "dir", inputDir, "error", err)
+		}
 		return nil
 	}
 	defer f.Close()
@@ -200,6 +206,9 @@ func dumpRealNames(inputDir string) map[string]string {
 			// The value doubles a backtick, as a quoted name does.
 			out[section] = strings.ReplaceAll(v, "``", "`")
 		}
+	}
+	if err := sc.Err(); err != nil {
+		slog.Warn("could not read the whole metadata file; table names it did not give are read from each CREATE TABLE", "dir", inputDir, "error", err)
 	}
 	return out
 }
@@ -271,17 +280,27 @@ func realDumpNames(inputDir string, tables []TableFiles, views []SkippedView) ([
 		recorded := meta[tf.Database+"."+tf.Table]
 		var table string
 		switch {
-		case recorded != "" && cerr == nil && created != recorded:
+		case generatedName.MatchString(tf.Table) && cerr != nil:
+			// A made-up file name needs the CREATE TABLE to confirm any
+			// name: a metadata value alone can be cut short (a name with
+			// a line break splits the metadata line).
+			problems = append(problems, fmt.Sprintf("the table in %s: mydumper wrote it under a made-up name and its real name cannot be read (%v)", file, cerr))
+			continue
+		case recorded != "" && (cerr != nil || created != recorded):
 			problems = append(problems, fmt.Sprintf("the table in %s: its CREATE TABLE names it %s but the dump's metadata names it %s",
 				file, quoteName(created), quoteName(recorded)))
 			continue
 		case recorded != "":
 			table = recorded
-		case generatedName.MatchString(tf.Table) && cerr != nil:
-			problems = append(problems, fmt.Sprintf("the table in %s: mydumper wrote it under a made-up name and its real name cannot be read (%v)", file, cerr))
-			continue
 		case generatedName.MatchString(tf.Table):
 			table = created
+		case strings.Contains(tf.Table, ".") && cerr == nil && created != tf.Table:
+			// A mydumper that writes a dotted schema name into the file
+			// name: "my.db.t" splits as schema "my", table "db.t". The
+			// CREATE TABLE says "t", so the split is wrong.
+			problems = append(problems, fmt.Sprintf("the table in %s: the file name reads as %s.%s but its CREATE TABLE names it %s; a schema name with a dot cannot be stored in a snapshot yet",
+				file, quoteName(tf.Database), quoteName(tf.Table), quoteName(created)))
+			continue
 		default:
 			table = tf.Table
 		}

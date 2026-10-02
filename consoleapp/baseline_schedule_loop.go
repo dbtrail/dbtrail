@@ -1341,6 +1341,15 @@ func (b *backupScheduler) fullReadCannotCure(e console.ServerEntry, failed conso
 		b.mu.Unlock()
 		return false
 	}
+	// Stopped for a day: one full read again. The match is on the reason's
+	// words, and a refusal a full read does cure can still read the same
+	// twice (a second change of the same kind right after the first); this
+	// bounds what such a case costs to one day without a snapshot.
+	if at, err := time.Parse(time.RFC3339, prev.stoppedAt); err == nil && time.Since(at) >= stuckRetryEvery {
+		b.mu.Unlock()
+		slog.Info("snapshot schedule: updates have been refused for a day with no full read; trying one full read again", "server", e.Name)
+		return false
+	}
 	first := prev.stoppedAt == ""
 	if first {
 		prev.stoppedAt = now
@@ -1371,20 +1380,29 @@ func (b *backupScheduler) fullReadCannotCure(e console.ServerEntry, failed conso
 	return true
 }
 
-// stuckReason is the history's sentence for a stop: plain words, the
-// tables named, no command.
+// stuckRetryEvery is how long a stop lasts before one full read is tried
+// again (fullReadCannotCure).
+var stuckRetryEvery = 24 * time.Hour
+
+// stuckReason is the history's sentence for a stop: plain words, no
+// command, and the tables COUNTED, not named: a history reason reaches
+// sessions whose data profile hides table names, and the page names them
+// from the fallback, where they are withheld for such a session.
 func stuckReason(names []string) string {
-	what := "table " + names[0]
-	if len(names) > 1 {
-		what = "tables " + strings.Join(names, ", ")
+	what := "1 table"
+	if len(names) != 1 {
+		what = fmt.Sprintf("%d tables", len(names))
 	}
 	return "no full read taken: the update from the recorded changes was refused for " + what +
-		" again right after a full read, so a full read does not fix it. No snapshot is published until the update goes through"
+		" again right after a full read, so a full read does not fix it. No snapshot is published until the update goes through; one full read is tried again a day later"
 }
 
 // sameIncurableRefusal reports whether an update refused cur after a full
 // read for nothing a full read can fix: every table it refused was refused
-// before that full read with the same verdict. A schema change and a capture
+// before that full read with the same verdict and the same reason. The
+// reason counts: the catch-all verdict "refused" also covers causes a full
+// read does cure (a primary-key change inside the window), and a new one of
+// those reads differently. A schema change and a capture
 // gap are about events inside the update's window, which a full read moves
 // past, so seeing one again means a NEW one, and it gets its full read. A
 // list cut short (omitted > 0) cannot be compared, and a new table in it is
@@ -1395,14 +1413,14 @@ func sameIncurableRefusal(prev []console.RefusedTable, prevOmitted int, cur []co
 	}
 	before := make(map[console.RefusedTable]bool, len(prev))
 	for _, t := range prev {
-		before[console.RefusedTable{Name: t.Name, Verdict: t.Verdict}] = true
+		before[t] = true
 	}
 	for _, t := range cur {
 		switch t.Verdict {
 		case reconstruct.RefreshVerdictRefusedDDL, reconstruct.RefreshVerdictRefusedGap:
 			return false
 		}
-		if !before[console.RefusedTable{Name: t.Name, Verdict: t.Verdict}] {
+		if !before[t] {
 			return false
 		}
 	}

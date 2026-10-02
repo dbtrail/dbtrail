@@ -46,7 +46,9 @@ func TestBackupScheduleCard_fallbackStopped_2006(t *testing.T) {
 	}
 	stopped := base
 	stopped.LastFallbackStoppedAt = "2026-10-02T10:05:07Z"
-	stoppedDoc, fellDoc := dtoJSON(stopped), dtoJSON(base)
+	withheld := stopped
+	withheld.LastFallbackRefusedTables = nil // a data profile hides the names
+	stoppedDoc, fellDoc, withheldDoc := dtoJSON(stopped), dtoJSON(base), dtoJSON(withheld)
 	if !strings.Contains(stoppedDoc, `"stopped_at":"2026-10-02T10:05:07Z"`) || strings.Contains(fellDoc, "stopped_at") {
 		t.Fatalf("stopped_at on the wire: stopped %s\nfell back %s", stoppedDoc, fellDoc)
 	}
@@ -62,7 +64,7 @@ const text = (n) => { const out = []; walk(n, (x) => { if (x._text) out.push(x._
 const reds = (n) => { const out = []; walk(n, (x) => { if (x.tag === "p" && /\berr\b/.test(x.className) && x._text) out.push(x._text); }); return out; };
 const cur = { id: "s1", kind: "registry", baseline_s3: "" };
 const out = {};
-for (const [k, doc] of Object.entries({ stopped: ` + stoppedDoc + `, fell: ` + fellDoc + ` })) {
+for (const [k, doc] of Object.entries({ stopped: ` + stoppedDoc + `, fell: ` + fellDoc + `, withheld: ` + withheldDoc + ` })) {
   const card = ctx.backupScheduleCard(cur, { schedule: doc });
   out[k] = { all: text(card), reds: reds(card) };
 }
@@ -84,6 +86,9 @@ console.log(JSON.stringify(out));
 		t.Fatalf("%v\n%s", err, raw)
 	}
 	st, fell := got["stopped"], got["fell"]
+	if w := strings.Join(got["withheld"].All, " | "); !strings.Contains(w, "was refused for 1 table, and") || strings.Contains(w, "mydumper_0") || strings.Contains(w, "below") {
+		t.Errorf("with the names withheld the card must count, not point at a list: %s", w)
+	}
 	all := strings.Join(st.All, " | ")
 	t.Logf("stopped card: %s", all)
 	t.Logf("fallback card: %s", strings.Join(fell.All, " | "))

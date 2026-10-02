@@ -10483,13 +10483,17 @@ function backupScheduleCard(cur, b) {
         // being published, and reading the database again will not change
         // that.
         noteAt(fb.stopped_at, "Updates are refused, and a full read does not fix it.");
-        const one = (fb.refused_tables || []).length === 1 && !(fb.refused_tables_omitted > 0);
+        // The list is withheld from a session whose data profile hides
+        // table names: then the count stands in for it.
+        const listed = (fb.refused_tables || []).length;
+        const count = Math.max(listed + (Math.floor(Number(fb.refused_tables_omitted)) || 0), Math.floor(Number(fb.refused)) || 0);
+        const which = listed ? (count === 1 ? "the table below" : "the tables below") : (count === 1 ? "1 table" : count + " tables");
         body.append(el("p", { class: "form-msg err", text:
           "No new snapshot is being published for this server. The update from the recorded changes was refused for " +
-          (one ? "the table below" : "the tables below") + ", and refused the same way again right after a full read, " +
-          "so another full read would not fix it. Since " + utcLabel(fb.stopped_at) + " DBTrail takes no full read in its place. " +
+          which + ", and refused the same way again right after a full read, so another full read would not fix it. " +
+          "Since " + utcLabel(fb.stopped_at) + " DBTrail takes no full read in its place, except one a day to check. " +
           "The update keeps running at each scheduled time and reads only the recorded changes; the first one that goes through " +
-          "ends this. " + (one ? "The reason under it" : "The reason under each table") + " says what has to change." }));
+          "ends this." + (listed ? " " + (count === 1 ? "The reason under it" : "The reason under each table") + " says what has to change." : "") }));
         const stuck = refusedTablesBlock(fb, "No full read is taken in its place.");
         if (stuck) body.append(stuck);
       } else {

@@ -137,8 +137,8 @@ func TestBackupScheduler_aRefusalAFullReadCannotCureStopsTheFullReads_2006(t *te
 	if len(recs) != 1 {
 		t.Fatalf("history holds %d records of the stop, want 1", len(recs))
 	}
-	if r := recs[0].SkipReason; !strings.Contains(r, "demo.mydumper_0") || strings.Contains(r, "bintrail snapshot") || strings.Contains(r, "—") {
-		t.Errorf("the recorded reason = %q: it must name the table, with no command and no em dash", r)
+	if r := recs[0].SkipReason; !strings.Contains(r, "1 table") || strings.Contains(r, "mydumper_0") || strings.Contains(r, "bintrail snapshot") || strings.Contains(r, "\u2014") {
+		t.Errorf("the recorded reason = %q: it must count the table without naming it (a data profile may hide names), with no command and no em dash", r)
 	}
 
 	// And it stays stopped, said once, while the refusal lasts.
@@ -216,7 +216,7 @@ func TestBackupScheduler_aFailedFullReadDoesNotStopTheFallback_2006(t *testing.T
 // The matching rule on its own.
 func TestSameIncurableRefusal_2006(t *testing.T) {
 	r := func(name, verdict string) console.RefusedTable {
-		return console.RefusedTable{Name: name, Verdict: verdict}
+		return console.RefusedTable{Name: name, Verdict: verdict, Reason: "why"}
 	}
 	prev := []console.RefusedTable{r("demo.a", "refused"), r("demo.b", "refused")}
 	for _, c := range []struct {
@@ -231,6 +231,7 @@ func TestSameIncurableRefusal_2006(t *testing.T) {
 		{"a new table", []console.RefusedTable{r("demo.a", "refused"), r("demo.c", "refused")}, 0, 0, false},
 		{"same table, other verdict", []console.RefusedTable{r("demo.a", "refused-gap")}, 0, 0, false},
 		{"schema change", []console.RefusedTable{r("demo.a", "refused-ddl")}, 0, 0, false},
+		{"same verdict, new reason", []console.RefusedTable{{Name: "demo.a", Verdict: "refused", Reason: "a primary-key change at 10:05"}}, 0, 0, false},
 		{"empty list", nil, 0, 0, false},
 		{"list cut short now", prev, 0, 3, false},
 		{"list cut short before", prev, 3, 0, false},
@@ -242,5 +243,27 @@ func TestSameIncurableRefusal_2006(t *testing.T) {
 	gapBefore := []console.RefusedTable{r("demo.a", "refused-gap")}
 	if sameIncurableRefusal(gapBefore, 0, gapBefore, 0) {
 		t.Error("a capture gap after a full read is a new gap: it must fall back")
+	}
+}
+
+// A stop lasts a day; then one full read is tried again.
+func TestBackupScheduler_aStopRetriesAfterADay_2006(t *testing.T) {
+	refuseWith(t, func() []reconstruct.TableFailure { return []reconstruct.TableFailure{notFound("mydumper_0")} })
+	b, reg, sup := newScheduleFixture(t, true)
+	reads := stubFullReads(t, sup)
+	e := addScheduled(t, reg, true)
+	b.tick(context.Background(), time.Date(2026, 8, 28, 8, 0, 5, 0, time.UTC))
+	slotAt(t, b, e.ID, 9)
+	if st := slotAt(t, b, e.ID, 10); reads.count() != 1 || st.LastFallbackStoppedAt == "" {
+		t.Fatalf("setup: reads %d, state %+v", reads.count(), st)
+	}
+	b.mu.Lock()
+	fb := b.fallback[e.ID]
+	fb.stoppedAt = time.Now().Add(-stuckRetryEvery - time.Minute).UTC().Format(time.RFC3339)
+	b.fallback[e.ID] = fb
+	b.mu.Unlock()
+	st := slotAt(t, b, e.ID, 11)
+	if reads.count() != 2 || st.LastFallbackStoppedAt != "" {
+		t.Fatalf("a day into a stop, one full read must be tried: reads %d, state %+v", reads.count(), st)
 	}
 }

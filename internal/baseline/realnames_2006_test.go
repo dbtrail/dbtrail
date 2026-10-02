@@ -260,3 +260,25 @@ func TestDiscoverDump_MetadataDisagrees_2006(t *testing.T) {
 		t.Fatalf("err = %v, want a refusal naming both names", err)
 	}
 }
+
+// A made-up file name whose CREATE TABLE cannot be read is refused even
+// when metadata names it: a name with a line break cuts the metadata line.
+func TestDiscoverDump_MetadataAloneIsNotEnough_2006(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "demo.mydumper_0-schema.sql", "CREATE TABLE `a\nb` (\n  `id` int NOT NULL\n);\n")
+	writeFile(t, dir, "metadata", "[`demo`.`mydumper_0`]\nreal_table_name=a\nb\nrows = 0\n")
+	if _, _, err := DiscoverDump(dir); err == nil {
+		t.Fatal("published a table under a name cut at its line break")
+	}
+}
+
+// A dotted schema written raw into the file name splits wrongly at the
+// first dot; the CREATE TABLE shows it, and the read is refused.
+func TestDiscoverDump_RawDottedSchemaRefused_2006(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "my.db.t-schema.sql", "CREATE TABLE `t` (\n  `id` int NOT NULL\n);\n")
+	_, _, err := DiscoverDump(dir)
+	if err == nil || !strings.Contains(err.Error(), "`t`") {
+		t.Fatalf("err = %v, want a refusal naming the real table", err)
+	}
+}
