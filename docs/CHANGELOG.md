@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.96.0] - 2026-10-02
 ### Added
 - **The Overview's "Dashboards for the team" card hands out a views file that
   reads the snapshots straight from S3** (#2014). On a server whose snapshots
@@ -60,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their name cannot be stored are not treated as new). When that limit holds
   one back, the snapshot card says when the next one may start and offers
   **Read database now**.
+### Fixed
+- The installer's last step no longer says the add-server form opens by
+  itself after sign-in; it tells you to press **+ Add server** (#2018).
 
 ## [0.95.0] - 2026-10-02
 ### Fixed
