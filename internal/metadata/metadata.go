@@ -2050,7 +2050,7 @@ func DetectFlavor(db *sql.DB) string {
 // (#365). The signature tables are created before access_rules, so any schema
 // carrying that cascade necessarily carries the signature too.
 func buildFKCascadeQuery(schemas []string) (string, []any) {
-	query := `SELECT CONSTRAINT_SCHEMA, CONSTRAINT_NAME, DELETE_RULE, UPDATE_RULE
+	query := `SELECT CONSTRAINT_SCHEMA, TABLE_NAME, CONSTRAINT_NAME, UNIQUE_CONSTRAINT_SCHEMA, REFERENCED_TABLE_NAME, DELETE_RULE, UPDATE_RULE
 		FROM information_schema.REFERENTIAL_CONSTRAINTS
 		WHERE (DELETE_RULE IN ('CASCADE', 'SET NULL') OR UPDATE_RULE IN ('CASCADE', 'SET NULL'))`
 
@@ -2074,34 +2074,90 @@ func buildFKCascadeQuery(schemas []string) (string, []any) {
 			" AND TABLE_NAME IN ('binlog_events','schema_snapshots','stream_state')" +
 			" GROUP BY TABLE_SCHEMA HAVING COUNT(DISTINCT TABLE_NAME) = 3)"
 	}
+	query += " ORDER BY CONSTRAINT_SCHEMA, TABLE_NAME, CONSTRAINT_NAME"
 	return query, args
 }
 
-// ErrFKCascadesFound is wrapped into the error ValidateNoFKCascades returns when
-// the source carries FK CASCADE constraints — as opposed to an operational
+// ErrFKCascadesFound is matched by the error ValidateNoFKCascades returns when
+// the source carries cascading foreign keys, as opposed to an operational
 // failure (a dropped connection, a permissions error reading
 // information_schema). Call sites use errors.Is to tell the two apart: a cascade
-// finding is now a warn-and-proceed signal, while a genuine query failure must
+// finding is a warn-and-proceed signal, while a genuine query failure must
 // still abort. Without this distinction a real fault would be silently
 // downgraded to a warning and mislabeled as "cascades present".
-var ErrFKCascadesFound = errors.New("FK cascade constraints present on source")
+var ErrFKCascadesFound = errors.New("foreign keys that cascade found on source")
 
-// ValidateNoFKCascades checks that none of the targeted schemas contain foreign
-// key constraints with cascading (CASCADE / SET NULL) referential rules, on
-// either the DELETE or the UPDATE action. When schemas is empty, all non-system,
-// non-bintrail-internal schemas are checked (see buildFKCascadeQuery). FK
-// cascades produce invisible side-effect row changes that make reversal SQL
-// unreliable. A cascade finding is returned wrapped in ErrFKCascadesFound; any
-// other returned error is an operational failure.
-func ValidateNoFKCascades(db *sql.DB, schemas []string) error {
+// FKCascadeConstraint is one foreign key on the source whose ON DELETE or ON
+// UPDATE rule is CASCADE or SET NULL: Schema.Table is the child that holds the
+// key, ReferencedSchema.ReferencedTable the parent it points at (the same
+// table for a self-reference).
+type FKCascadeConstraint struct {
+	Schema           string
+	Table            string
+	Name             string
+	ReferencedSchema string
+	ReferencedTable  string
+	DeleteRule       string
+	UpdateRule       string
+}
+
+// cascades reports whether a referential rule changes child rows.
+func cascades(rule string) bool { return rule == "CASCADE" || rule == "SET NULL" }
+
+// String names the constraint child → parent with the rules that cascade, and
+// only those: "demo.orders → demo.customers, ON DELETE CASCADE".
+func (c FKCascadeConstraint) String() string {
+	var rules []string
+	if cascades(c.DeleteRule) {
+		rules = append(rules, "ON DELETE "+c.DeleteRule)
+	}
+	if cascades(c.UpdateRule) {
+		rules = append(rules, "ON UPDATE "+c.UpdateRule)
+	}
+	return c.Schema + "." + c.Table + " → " + c.ReferencedSchema + "." + c.ReferencedTable +
+		", " + strings.Join(rules, " and ")
+}
+
+// FKCascadeListLimit is how many constraints a one-line finding names before
+// it counts the rest: a schema can carry dozens, and a wall of names reads as
+// noise.
+const FKCascadeListLimit = 5
+
+// DescribeFKCascades names up to limit constraints, separated by "; ", and
+// counts the rest as "and N more".
+func DescribeFKCascades(found []FKCascadeConstraint, limit int) string {
+	parts := make([]string, 0, min(len(found), limit)+1)
+	for i, c := range found {
+		if i == limit {
+			parts = append(parts, fmt.Sprintf("and %d more", len(found)-limit))
+			break
+		}
+		parts = append(parts, c.String())
+	}
+	return strings.Join(parts, "; ")
+}
+
+// FKCascadesError is the cascade finding ValidateNoFKCascades returns. It
+// matches ErrFKCascadesFound and carries every constraint found.
+type FKCascadesError struct{ Found []FKCascadeConstraint }
+
+func (e *FKCascadesError) Error() string {
+	return "foreign keys that cascade: " + DescribeFKCascades(e.Found, FKCascadeListLimit)
+}
+
+func (e *FKCascadesError) Unwrap() error { return ErrFKCascadesFound }
+
+// FindFKCascades lists the foreign keys in the targeted schemas whose DELETE
+// or UPDATE rule is CASCADE or SET NULL, ordered by child schema, child table
+// and constraint name. When schemas is empty, all non-system,
+// non-bintrail-internal schemas are checked (see buildFKCascadeQuery). An
+// error is always an operational failure; no constraints is an empty list.
+func FindFKCascades(db *sql.DB, schemas []string) ([]FKCascadeConstraint, error) {
 	query, args := buildFKCascadeQuery(schemas)
 
-	// The unscoped scan skips schemas that look like a bintrail index — those
-	// holding all of bintrail's signature tables (see buildFKCascadeQuery) — so a
-	// clean result does not cover them. Disclose the rule, naming the signature
-	// tables rather than asserting the skipped schemas are definitely bintrail's:
-	// a user schema that replicated those table names would be skipped too, and
-	// the operator should be able to recognise that case.
+	// The unscoped scan skips schemas that look like a bintrail index (those
+	// holding all of bintrail's signature tables, see buildFKCascadeQuery), so
+	// a clean result does not cover them.
 	if len(schemas) == 0 {
 		slog.Info("FK cascade pre-flight skips schemas that look like a bintrail index DB " +
 			"(those containing binlog_events, schema_snapshots and stream_state); a clean result does not cover them")
@@ -2109,32 +2165,46 @@ func ValidateNoFKCascades(db *sql.DB, schemas []string) error {
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
-		return fmt.Errorf("failed to query FK cascades: %w", err)
+		return nil, fmt.Errorf("failed to query FK cascades: %w", err)
 	}
 	defer rows.Close()
 
-	type cascade struct{ schema, name, deleteRule, updateRule string }
-	var found []cascade
+	var found []FKCascadeConstraint
 	for rows.Next() {
-		var c cascade
-		if err := rows.Scan(&c.schema, &c.name, &c.deleteRule, &c.updateRule); err != nil {
-			return fmt.Errorf("failed to scan FK cascade row: %w", err)
+		var c FKCascadeConstraint
+		if err := rows.Scan(&c.Schema, &c.Table, &c.Name, &c.ReferencedSchema, &c.ReferencedTable,
+			&c.DeleteRule, &c.UpdateRule); err != nil {
+			return nil, fmt.Errorf("failed to scan FK cascade row: %w", err)
 		}
 		found = append(found, c)
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("failed to iterate FK cascade rows: %w", err)
+		return nil, fmt.Errorf("failed to iterate FK cascade rows: %w", err)
 	}
+	return found, nil
+}
 
-	if len(found) > 0 {
-		for _, c := range found {
-			slog.Warn("FK cascade constraint found on source",
-				"source_schema", c.schema, "constraint", c.name,
-				"delete_rule", c.deleteRule, "update_rule", c.updateRule)
-		}
-		return fmt.Errorf("%d FK cascade constraint(s) found on source; reversal SQL from `recover` may not correctly handle cascade side-effects: %w", len(found), ErrFKCascadesFound)
+// ValidateNoFKCascades checks that none of the targeted schemas contain foreign
+// keys with cascading (CASCADE / SET NULL) referential rules, on either the
+// DELETE or the UPDATE action. The server changes the child rows of such a key
+// itself, and MariaDB and MySQL before 9.6 do not write those changes to the
+// binary log. A cascade finding is returned as an *FKCascadesError (matching
+// ErrFKCascadesFound); any other returned error is an operational failure.
+func ValidateNoFKCascades(db *sql.DB, schemas []string) error {
+	found, err := FindFKCascades(db, schemas)
+	if err != nil {
+		return err
 	}
-	return nil
+	if len(found) == 0 {
+		return nil
+	}
+	for _, c := range found {
+		slog.Warn("FK cascade constraint found on source",
+			"source_schema", c.Schema, "table", c.Table, "constraint", c.Name,
+			"referenced_table", c.ReferencedSchema+"."+c.ReferencedTable,
+			"delete_rule", c.DeleteRule, "update_rule", c.UpdateRule)
+	}
+	return &FKCascadesError{Found: found}
 }
 
 // FKCascadeEdge describes a CASCADE foreign-key edge recorded in the index's

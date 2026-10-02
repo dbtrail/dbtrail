@@ -1047,28 +1047,60 @@ func extractGrantUser(grant string) string {
 	return rest
 }
 
+// FKCascadeCheckName is the check that lists the source's foreign keys whose
+// ON DELETE or ON UPDATE rule is CASCADE or SET NULL. It names what it looks
+// at, not a rule: such keys are supported, they only change how a delete on
+// the parent table is undone.
+const FKCascadeCheckName = "Foreign keys that cascade"
+
+// fkCascadeAdvice is the fix shown under a cascade finding, worded for both
+// the terminal and the console: each surface's way to restore is named as
+// that surface's (the console's Restore page, the command line's
+// recover-cascade), and no flag appears. Every line is flush left so the
+// console draws it as prose, never as a box to copy. Changing the schema is
+// offered last, as an alternative, because keeping the cascades is supported.
+const fkCascadeAdvice = "Capture works normally. Each foreign key above is listed as child table → parent\n" +
+	"table. When a parent row is deleted or its key changes, the server also deletes or\n" +
+	"changes the matching child rows, and MariaDB and MySQL before 9.6 do not write\n" +
+	"those child changes to the binary log.\n" +
+	"\n" +
+	"To undo a delete or key change on a parent table, use a restore that handles\n" +
+	"cascades. In the console, open the Restore page and pick that one parent table:\n" +
+	"the script then includes the child rows. On the command line, run\n" +
+	"`bintrail recover-cascade`. A plain `bintrail recover` does not fix the child rows.\n" +
+	"\n" +
+	"Both rebuild a child row from the changes DBTrail captured. A child row that did\n" +
+	"not change during that time comes back only from a snapshot: the console uses\n" +
+	"one when snapshots are set up, and `bintrail recover-cascade` when you point it\n" +
+	"at one. When the result may be missing child rows, the restore says so.\n" +
+	"\n" +
+	"If you prefer not to rely on this, you can change these foreign keys to ON DELETE\n" +
+	"RESTRICT and ON UPDATE RESTRICT. Nothing requires it."
+
 func checkFKCascades(db *sql.DB, schemas []string) CheckResult {
-	err := metadata.ValidateNoFKCascades(db, schemas)
-	if err == nil {
-		return CheckResult{Name: "No FK CASCADE constraints", Status: StatusPass}
+	found, err := metadata.FindFKCascades(db, schemas)
+	if err != nil {
+		// A failed read is not a finding: say what failed, without the
+		// cascade advice that would read as if cascades had been found.
+		return CheckResult{
+			Name:   FKCascadeCheckName,
+			Status: StatusWarn,
+			Detail: "could not read the foreign keys: " + err.Error(),
+		}
+	}
+	if len(found) == 0 {
+		return CheckResult{Name: FKCascadeCheckName, Status: StatusPass}
+	}
+	subjects := make([]string, len(found))
+	for i, c := range found {
+		subjects[i] = c.String()
 	}
 	return CheckResult{
-		Name:   "No FK CASCADE constraints",
-		Status: StatusWarn,
-		Detail: err.Error(),
-		Remediation: "Foreign keys with ON DELETE CASCADE or ON UPDATE CASCADE produce side-effect row\n" +
-			"changes that InnoDB executes below the binary log (MySQL Bug #32506), so plain\n" +
-			"`recover` cannot reconstruct cascade-deleted child rows. Options:\n\n" +
-			"  1. Drop or change the cascade rules:\n" +
-			"     ALTER TABLE <child> DROP FOREIGN KEY <fk_name>;\n" +
-			"     ALTER TABLE <child> ADD CONSTRAINT <fk_name> FOREIGN KEY (...) REFERENCES <parent>(...)\n" +
-			"         ON DELETE RESTRICT ON UPDATE RESTRICT;\n\n" +
-			"  2. Keep the cascades and reconstruct cascade-deleted child rows with\n" +
-			"     `bintrail recover-cascade` (Phase-1: binlog-window; baseline fallback #552).\n\n" +
-			"Ingestion (`stream`/`watch`/`up`/`index --source-dsn`) no longer refuses cascade\n" +
-			"schemas — it WARNS and proceeds — so the FK graph is captured for cascade recovery.\n" +
-			"Plain `recover` still produces incomplete SQL for cascade-affected tables; use\n" +
-			"`recover-cascade` instead for those.",
+		Name:        FKCascadeCheckName,
+		Status:      StatusWarn,
+		Detail:      metadata.DescribeFKCascades(found, metadata.FKCascadeListLimit),
+		Subjects:    subjects,
+		Remediation: fkCascadeAdvice,
 	}
 }
 

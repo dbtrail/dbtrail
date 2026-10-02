@@ -962,22 +962,13 @@ func TestValidateNoFKCascades_customNamedIndexSkippedWhenUnscoped(t *testing.T) 
 // not) excluded without depending on the rest of the server being cascade-free.
 func unscopedFKCascadeSchemas(t *testing.T, db *sql.DB) map[string]bool {
 	t.Helper()
-	q, args := buildFKCascadeQuery(nil)
-	rows, err := db.Query(q, args...)
+	found, err := FindFKCascades(db, nil)
 	if err != nil {
 		t.Fatalf("unscoped FK-cascade query: %v", err)
 	}
-	defer rows.Close()
 	got := map[string]bool{}
-	for rows.Next() {
-		var schema, name, del, upd string
-		if err := rows.Scan(&schema, &name, &del, &upd); err != nil {
-			t.Fatalf("scan FK-cascade row: %v", err)
-		}
-		got[schema] = true
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate FK-cascade rows: %v", err)
+	for _, c := range found {
+		got[c.Schema] = true
 	}
 	return got
 }

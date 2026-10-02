@@ -2229,10 +2229,10 @@ func oneRun(ctx context.Context, cfg Config) error {
 		if !errors.Is(err, metadata.ErrFKCascadesFound) {
 			return err // genuine query/connection failure: abort as before
 		}
-		slog.Warn("FK cascade constraints present on source; streaming will proceed, "+
-			"but InnoDB executes cascades below the binlog (MySQL Bug #32506) so cascaded "+
-			"child-row deletes are NOT captured \u2014 plain `recover` cannot restore them. "+
-			"Reconstruct them with `bintrail recover-cascade`.",
+		slog.Warn("source has foreign keys that cascade; streaming proceeds. The server changes "+
+			"their child rows itself, and MariaDB and MySQL before 9.6 do not write those "+
+			"changes to the binary log, so plain `bintrail recover` does not fix the child "+
+			"rows. Undo a parent delete or key change with `bintrail recover-cascade`.",
 			"detail", err.Error())
 	} else {
 		fmt.Println("Source: no FK cascades \u2713")
