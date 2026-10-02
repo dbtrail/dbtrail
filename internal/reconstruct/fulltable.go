@@ -798,11 +798,15 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	sem := make(chan struct{}, cfg.Parallelism)
 	var wg sync.WaitGroup
 
+	// Every entry is checked before any table starts: a bad one found
+	// mid-loop returned while the tables before it were still folding.
 	for _, entry := range cfg.Tables {
-		schema, table, ok := splitSchemaTable(entry)
-		if !ok {
+		if _, _, ok := splitSchemaTable(entry); !ok {
 			return nil, fmt.Errorf("invalid --tables entry %q: must be schema.table", entry)
 		}
+	}
+	for _, entry := range cfg.Tables {
+		schema, table, _ := splitSchemaTable(entry)
 		wg.Add(1)
 		go func(schema, table string) {
 			defer wg.Done()
@@ -1155,7 +1159,7 @@ func ReconstructTable(
 	// ── 3. Resolve PK columns from the schema resolver ─────────────────────
 	tm, err := resolver.Resolve(schema, table)
 	if err != nil {
-		return nil, fmt.Errorf("resolve schema for %s.%s: %w; run `bintrail snapshot` to refresh", schema, table, err)
+		return nil, fmt.Errorf("resolve schema for %s.%s: %w", schema, table, err)
 	}
 	pkCols := tm.PKColumnMetas()
 	if len(pkCols) == 0 {
@@ -2476,7 +2480,7 @@ func reconstructBinlogOnly(
 ) (*TableReport, error) {
 	tm, err := resolver.Resolve(schema, table)
 	if err != nil {
-		return nil, fmt.Errorf("resolve schema for %s.%s: %w; run `bintrail snapshot` to refresh", schema, table, err)
+		return nil, fmt.Errorf("resolve schema for %s.%s: %w", schema, table, err)
 	}
 	pkCols := tm.PKColumnMetas()
 	if len(pkCols) == 0 {
@@ -2782,17 +2786,16 @@ func writeBinlogOnlyChanges(
 	return nil
 }
 
-// splitSchemaTable parses "db.table" into (db, table, true). Rejects entries
-// with zero or more than one dot.
+// splitSchemaTable parses "db.table" into (db, table, true), splitting at
+// the first dot: a table name may hold a dot (`order.items`, #2006), and a
+// schema name with one is refused when a snapshot is made, so the first dot
+// is always the separator. Rejects an entry with no dot or an empty half.
 func splitSchemaTable(entry string) (string, string, bool) {
 	parts := strings.SplitN(entry, ".", 2)
 	if len(parts) != 2 {
 		return "", "", false
 	}
 	if parts[0] == "" || parts[1] == "" {
-		return "", "", false
-	}
-	if strings.Contains(parts[1], ".") {
 		return "", "", false
 	}
 	return parts[0], parts[1], true

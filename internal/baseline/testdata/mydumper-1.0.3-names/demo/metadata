@@ -1,0 +1,109 @@
+# Started dump at: 2026-10-02 01:57:48
+[config]
+quote-character = BACKTICK
+
+[myloader_session_variables]
+SQL_MODE='NO_AUTO_VALUE_ON_ZERO,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION' /*!40101
+
+[source]
+# Channel_Name = '' # It can be use to setup replication FOR CHANNEL
+# executed_gtid_set = "0-1-36"
+# SOURCE_LOG_FILE = "mysql-bin.000002"
+# SOURCE_LOG_POS = 8387
+
+[`demo`.`a b`]
+real_table_name=a b
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`a-b`]
+real_table_name=a-b
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`mydumper_0`]
+real_table_name=a.b
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`mydumper_1`]
+real_table_name=a@b
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`mydumper_2`]
+real_table_name=mydumper_1
+rows = 0
+schema_checksum = 5b03492
+indexes_checksum = 1f09d0e1
+
+[`demo`.`mydumper_3`]
+real_table_name=mydumper_2
+rows = 1
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`order items`]
+real_table_name=order items
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`mydumper_4`]
+real_table_name=order.items
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`mydumper_5`]
+real_table_name=order/items
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`mydumper_6`]
+real_table_name=pedidos_año
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`plain`]
+real_table_name=plain
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`v plain`]
+real_table_name=v plain
+rows = 0
+is_view = 1
+schema_checksum = 1b72869c
+
+[`demo`.`mydumper_7`]
+real_table_name=v.dotted
+rows = 0
+is_view = 1
+schema_checksum = 1b72869c
+
+[`demo`.`mydumper_8`]
+real_table_name=x234567890123456789012345678901234567890123456789012345678901.y
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`mydumper_9`]
+real_table_name=注文
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`]
+schema_checksum = CF6BDB7B
+[config]
+max-statement-size = 356
+num-sequences = 0
+# Finished dump at: 2026-10-02 01:57:48

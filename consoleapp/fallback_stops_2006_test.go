@@ -1,0 +1,246 @@
+package consoleapp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
+)
+
+// #2006 / #2007: an update refused for a reason a full read cannot cure (a
+// table the snapshot holds under a name the index does not know, a table
+// shape the update cannot fold) used to drive a full read of the source at
+// every slot, forever. One full read is tried; when the update right after
+// it is refused again for the same tables, no further full read is taken.
+
+// refuseWith makes every update refuse the tables refuse() names, with err.
+func refuseWith(t *testing.T, refuse func() []reconstruct.TableFailure) {
+	t.Helper()
+	realList := newestSnapshotTables
+	t.Cleanup(func() { newestSnapshotTables = realList })
+	newestSnapshotTables = func(context.Context, string) (time.Time, []string, error) {
+		return refreshAt.Add(-time.Hour), []string{"demo.mydumper_0", "demo.mydumper_1", "demo.orders", "demo.plain"}, nil
+	}
+	holdFold(t, func(context.Context, reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		failed := refuse()
+		if len(failed) == 0 {
+			return []*reconstruct.TableReport{{Schema: "demo", Table: "plain"}}, nil, nil
+		}
+		var errs []error
+		for _, f := range failed {
+			errs = append(errs, f.Err)
+		}
+		return nil, failed, errors.Join(errs...)
+	})
+}
+
+// fullReadsSucceed makes every full read publish a snapshot without a
+// mydumper, counting them; fail makes the next ones fail instead.
+type fakeFullReads struct {
+	mu    sync.Mutex
+	n     int
+	fail  bool
+	clock time.Time
+}
+
+func (f *fakeFullReads) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.n
+}
+
+func stubFullReads(t *testing.T, sup *baselineSupervisor) *fakeFullReads {
+	t.Helper()
+	mark := indexMark{}
+	stubIndexMark(t, &mark, false)
+	f := &fakeFullReads{clock: time.Date(2026, 8, 28, 9, 30, 0, 0, time.UTC)}
+	sup.produce = func(req console.BaselineRequest) (dumpOutcome, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.n++
+		if f.fail {
+			return dumpOutcome{}, errors.New("dump: mydumper exit 2")
+		}
+		f.clock = f.clock.Add(time.Minute)
+		return dumpOutcomeAt(t, req.LocalDir, f.clock), nil
+	}
+	return f
+}
+
+func notFound(table string) reconstruct.TableFailure {
+	return reconstruct.TableFailure{Schema: "demo", Table: table,
+		Err: fmt.Errorf("full-table reconstruct failed: resolve schema for demo.%s: table demo.%s not found in snapshot 8; consider re-running `bintrail snapshot`", table, table)}
+}
+
+func schemaChanged(table string) reconstruct.TableFailure {
+	return reconstruct.TableFailure{Schema: "demo", Table: table, Err: fmt.Errorf("demo.%s: %w", table, reconstruct.ErrSchemaChanged)}
+}
+
+// slotAt fires the slot at hour h and waits for everything it started.
+func slotAt(t *testing.T, b *backupScheduler, id string, h int) console.BackupScheduleState {
+	t.Helper()
+	b.tick(context.Background(), time.Date(2026, 8, 28, h, 0, 5, 0, time.UTC))
+	st := waitTerminal(t, b, id)
+	b.watchers.Wait()
+	// A fallback full read started by the watcher: wait for it too.
+	st = b.ScheduleState(id)
+	for deadline := time.Now().Add(10 * time.Second); st.Running && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+		st = b.ScheduleState(id)
+	}
+	b.watchers.Wait()
+	return b.ScheduleState(id)
+}
+
+func stuckRecords(sup *baselineSupervisor, id string) []console.BaselineRunRecord {
+	var out []console.BaselineRunRecord
+	for _, r := range sup.history.List(id) {
+		if strings.Contains(r.SkipReason, "a full read does not fix") {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func TestBackupScheduler_aRefusalAFullReadCannotCureStopsTheFullReads_2006(t *testing.T) {
+	refuseWith(t, func() []reconstruct.TableFailure { return []reconstruct.TableFailure{notFound("mydumper_0")} })
+	b, reg, sup := newScheduleFixture(t, true)
+	reads := stubFullReads(t, sup)
+	e := addScheduled(t, reg, true)
+
+	// First slot after the save is only observed; the next one fires.
+	b.tick(context.Background(), time.Date(2026, 8, 28, 8, 0, 5, 0, time.UTC))
+	st := slotAt(t, b, e.ID, 9)
+	if reads.count() != 1 || st.LastFallbackAt == "" || st.LastFallbackStoppedAt != "" {
+		t.Fatalf("the first refusal must fall back once, as before: reads %d, state %+v", reads.count(), st)
+	}
+
+	// The update right after that full read is refused the same way: a full
+	// read did not fix it, so none is taken in its place.
+	st = slotAt(t, b, e.ID, 10)
+	if reads.count() != 1 {
+		t.Fatalf("a second full read was taken for a refusal the first one did not cure (%d reads)", reads.count())
+	}
+	if st.LastMethod != console.BackupMethodRefresh || st.LastFallbackStoppedAt == "" {
+		t.Fatalf("state = %+v, want the update on record and the stop said", st)
+	}
+	if len(st.LastFallbackRefusedTables) != 1 || st.LastFallbackRefusedTables[0].Name != "demo.mydumper_0" {
+		t.Fatalf("the stop does not name the table: %+v", st.LastFallbackRefusedTables)
+	}
+	recs := stuckRecords(sup, e.ID)
+	if len(recs) != 1 {
+		t.Fatalf("history holds %d records of the stop, want 1", len(recs))
+	}
+	if r := recs[0].SkipReason; !strings.Contains(r, "demo.mydumper_0") || strings.Contains(r, "bintrail snapshot") || strings.Contains(r, "—") {
+		t.Errorf("the recorded reason = %q: it must name the table, with no command and no em dash", r)
+	}
+
+	// And it stays stopped, said once, while the refusal lasts.
+	st = slotAt(t, b, e.ID, 11)
+	if reads.count() != 1 || st.LastFallbackStoppedAt == "" || len(stuckRecords(sup, e.ID)) != 1 {
+		t.Fatalf("third slot: reads %d, state %+v, records %d", reads.count(), st, len(stuckRecords(sup, e.ID)))
+	}
+
+	// An update that goes through ends it.
+	refuseWith(t, func() []reconstruct.TableFailure { return nil })
+	st = slotAt(t, b, e.ID, 12)
+	if st.LastFallbackAt != "" || st.LastFallbackStoppedAt != "" {
+		t.Fatalf("a published update did not end the alarm: %+v", st)
+	}
+}
+
+// A schema change IS cured by a full read: each one that stops an update
+// still gets its full read, also right after another.
+func TestBackupScheduler_aSchemaChangeStillFallsBackEveryTime_2006(t *testing.T) {
+	refuseWith(t, func() []reconstruct.TableFailure { return []reconstruct.TableFailure{schemaChanged("orders")} })
+	b, reg, sup := newScheduleFixture(t, true)
+	reads := stubFullReads(t, sup)
+	e := addScheduled(t, reg, true)
+	b.tick(context.Background(), time.Date(2026, 8, 28, 8, 0, 5, 0, time.UTC))
+	slotAt(t, b, e.ID, 9)
+	st := slotAt(t, b, e.ID, 10)
+	if reads.count() != 2 || st.LastFallbackStoppedAt != "" || len(stuckRecords(sup, e.ID)) != 0 {
+		t.Fatalf("a schema change after a full read must fall back again: reads %d, state %+v", reads.count(), st)
+	}
+}
+
+// A new table in the refused list is a new reason: it gets its full read.
+func TestBackupScheduler_aNewRefusedTableFallsBackOnceMore_2006(t *testing.T) {
+	refused := []reconstruct.TableFailure{notFound("mydumper_0")}
+	var mu sync.Mutex
+	refuseWith(t, func() []reconstruct.TableFailure { mu.Lock(); defer mu.Unlock(); return refused })
+	b, reg, sup := newScheduleFixture(t, true)
+	reads := stubFullReads(t, sup)
+	e := addScheduled(t, reg, true)
+	b.tick(context.Background(), time.Date(2026, 8, 28, 8, 0, 5, 0, time.UTC))
+	slotAt(t, b, e.ID, 9)
+	if st := slotAt(t, b, e.ID, 10); reads.count() != 1 || st.LastFallbackStoppedAt == "" {
+		t.Fatalf("setup: reads %d, state %+v", reads.count(), st)
+	}
+	mu.Lock()
+	refused = []reconstruct.TableFailure{notFound("mydumper_0"), notFound("mydumper_1")}
+	mu.Unlock()
+	st := slotAt(t, b, e.ID, 11)
+	if reads.count() != 2 || st.LastFallbackStoppedAt != "" {
+		t.Fatalf("a new refused table must get a full read: reads %d, state %+v", reads.count(), st)
+	}
+	// Then the same pair again: stopped, and said a second time.
+	st = slotAt(t, b, e.ID, 12)
+	if reads.count() != 2 || st.LastFallbackStoppedAt == "" || len(stuckRecords(sup, e.ID)) != 2 {
+		t.Fatalf("reads %d, state %+v, records %d", reads.count(), st, len(stuckRecords(sup, e.ID)))
+	}
+}
+
+// A full read that failed proves nothing about the refusal: the next one
+// falls back again, as before.
+func TestBackupScheduler_aFailedFullReadDoesNotStopTheFallback_2006(t *testing.T) {
+	refuseWith(t, func() []reconstruct.TableFailure { return []reconstruct.TableFailure{notFound("mydumper_0")} })
+	b, reg, sup := newScheduleFixture(t, true)
+	reads := stubFullReads(t, sup)
+	reads.fail = true
+	e := addScheduled(t, reg, true)
+	b.tick(context.Background(), time.Date(2026, 8, 28, 8, 0, 5, 0, time.UTC))
+	slotAt(t, b, e.ID, 9)
+	st := slotAt(t, b, e.ID, 10)
+	if reads.count() != 2 || st.LastFallbackStoppedAt != "" {
+		t.Fatalf("after a failed full read the next refusal must fall back: reads %d, state %+v", reads.count(), st)
+	}
+}
+
+// The matching rule on its own.
+func TestSameIncurableRefusal_2006(t *testing.T) {
+	r := func(name, verdict string) console.RefusedTable {
+		return console.RefusedTable{Name: name, Verdict: verdict}
+	}
+	prev := []console.RefusedTable{r("demo.a", "refused"), r("demo.b", "refused")}
+	for _, c := range []struct {
+		name      string
+		cur       []console.RefusedTable
+		prevLeft  int
+		curLeft   int
+		wantStuck bool
+	}{
+		{"same", prev, 0, 0, true},
+		{"fewer: the rest was cured", []console.RefusedTable{r("demo.a", "refused")}, 0, 0, true},
+		{"a new table", []console.RefusedTable{r("demo.a", "refused"), r("demo.c", "refused")}, 0, 0, false},
+		{"same table, other verdict", []console.RefusedTable{r("demo.a", "refused-gap")}, 0, 0, false},
+		{"schema change", []console.RefusedTable{r("demo.a", "refused-ddl")}, 0, 0, false},
+		{"empty list", nil, 0, 0, false},
+		{"list cut short now", prev, 0, 3, false},
+		{"list cut short before", prev, 3, 0, false},
+	} {
+		if got := sameIncurableRefusal(prev, c.prevLeft, c.cur, c.curLeft); got != c.wantStuck {
+			t.Errorf("%s: stuck = %v, want %v", c.name, got, c.wantStuck)
+		}
+	}
+	gapBefore := []console.RefusedTable{r("demo.a", "refused-gap")}
+	if sameIncurableRefusal(gapBefore, 0, gapBefore, 0) {
+		t.Error("a capture gap after a full read is a new gap: it must fall back")
+	}
+}

@@ -1,0 +1,112 @@
+# Started dump at: 2026-10-02 01:51:53
+[config]
+quote-character = BACKTICK
+
+[myloader_session_variables]
+SQL_MODE='NO_AUTO_VALUE_ON_ZERO,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION' /*!40101
+
+[source]
+# Channel_Name = '' # It can be use to setup replication FOR CHANNEL
+# executed_gtid_set = "0-1-28"
+# SOURCE_LOG_FILE = "mysql-bin.000002"
+# SOURCE_LOG_POS = 6564
+
+[`demo`.`a b`]
+real_table_name=a b
+rows = 0
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`a-b`]
+real_table_name=a-b
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`mydumper_2`]
+real_table_name=a.b
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`mydumper_3`]
+real_table_name=a@b
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`order items`]
+real_table_name=order items
+rows = 0
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`mydumper_4`]
+real_table_name=order.items
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`mydumper_5`]
+real_table_name=order/items
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`mydumper_6`]
+real_table_name=order``items
+rows = 0
+schema_checksum = 0
+indexes_checksum = 0
+
+[`demo`.`mydumper_7`]
+real_table_name=pedidos_año
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`plain`]
+real_table_name=plain
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`mydumper_8`]
+real_table_name=x234567890123456789012345678901234567890123456789012345678901.y
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`.`mydumper_9`]
+real_table_name=注文
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`mydumper_0`.`mydumper_1`]
+real_table_name=t.u
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`mydumper_0`.`t`]
+real_table_name=t
+rows = 3
+schema_checksum = 94be4ecf
+indexes_checksum = 1f09d0e1
+
+[`demo`]
+schema_checksum = CF6BDB7B
+
+[`my.db`]
+schema_checksum = CF6BDB7B
+
+[`mysql`]
+schema_checksum = CF6BDB7B
+
+[`sys`]
+schema_checksum = D9790177
+[config]
+max-statement-size = 356
+num-sequences = 0
+# Finished dump at: 2026-10-02 01:51:53

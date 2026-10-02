@@ -10102,6 +10102,10 @@ function backupFoldError(msg) {
     .replace(/,?[ \t]*or target a different instant with --at/g, ", or pick another second")
     .replace(/ \u2014 a snapshot emitted from it would carry the OLD CREATE TABLE forward and project every row onto the old columns and types, so every reconstruct anchored on it would be wrong\. Take a real snapshot instead: `bintrail dump` \+ `bintrail baseline`\. \(If the schema snapshot is what is stale, run `bintrail snapshot` first and retry\.\): schema changed since the baseline/g,
       ". Updating it from the recorded changes needs a snapshot taken after that change")
+    // The engine's advice names a command; the console says it in its own
+    // words, and only as a possibility (#2006).
+    .replace(/;?\s*consider re-running .bintrail snapshot./g,
+      "; if the table was created after the last schema snapshot, a new schema snapshot may fix this")
     .replace(/\u2014/g, "-");
   if (!/[.!?]$/.test(out.trim())) out = out.trim() + ".";
   return out;
@@ -10472,17 +10476,35 @@ function backupScheduleCard(cur, b) {
       // named as one, not as a refusal. The daemon records a fallback only
       // once the full backup actually started, so "started" is a fact.
       alarm = true;
-      // startsRun: this stamp is when the full backup STARTED, so it must
-      // never outrank that backup's own outcome recorded in the same second.
-      noteAt(fb.at, "An update was refused, so a full read ran instead.", true);
-      const crashed = /^internal error/.test(fb.reason || "");
-      const why = backupFoldError(crashed ? fb.reason.replace(/^internal error:?\s*/, "") : fb.reason);
-      body.append(el("p", { class: "form-msg err", text:
-        "At " + utcLabel(fb.at) + " the update from the recorded changes " + (crashed ? "hit an internal error" : "was refused") +
-        (refusedTableRows(fb) ? "," : " (" + why + ")") +
-        " so a full read was started instead. If this repeats, the recorded changes cannot be used for this server; check the reason." }));
-      const stopped = refusedTablesBlock(fb, "A full read was started instead.");
-      if (stopped) body.append(stopped);
+      if (fb.stopped_at) {
+        // #2006: the update was refused again for the same tables right
+        // after a full read went through, so the daemon takes no more full
+        // reads for it. Said apart from the fallback line below: nothing is
+        // being published, and reading the database again will not change
+        // that.
+        noteAt(fb.stopped_at, "Updates are refused, and a full read does not fix it.");
+        const one = (fb.refused_tables || []).length === 1 && !(fb.refused_tables_omitted > 0);
+        body.append(el("p", { class: "form-msg err", text:
+          "No new snapshot is being published for this server. The update from the recorded changes was refused for " +
+          (one ? "the table below" : "the tables below") + ", and refused the same way again right after a full read, " +
+          "so another full read would not fix it. Since " + utcLabel(fb.stopped_at) + " DBTrail takes no full read in its place. " +
+          "The update keeps running at each scheduled time and reads only the recorded changes; the first one that goes through " +
+          "ends this. " + (one ? "The reason under it" : "The reason under each table") + " says what has to change." }));
+        const stuck = refusedTablesBlock(fb, "No full read is taken in its place.");
+        if (stuck) body.append(stuck);
+      } else {
+        // startsRun: this stamp is when the full backup STARTED, so it must
+        // never outrank that backup's own outcome recorded in the same second.
+        noteAt(fb.at, "An update was refused, so a full read ran instead.", true);
+        const crashed = /^internal error/.test(fb.reason || "");
+        const why = backupFoldError(crashed ? fb.reason.replace(/^internal error:?\s*/, "") : fb.reason);
+        body.append(el("p", { class: "form-msg err", text:
+          "At " + utcLabel(fb.at) + " the update from the recorded changes " + (crashed ? "hit an internal error" : "was refused") +
+          (refusedTableRows(fb) ? "," : " (" + why + ")") +
+          " so a full read was started instead. If this repeats, the recorded changes cannot be used for this server; check the reason." }));
+        const stopped = refusedTablesBlock(fb, "A full read was started instead.");
+        if (stopped) body.append(stopped);
+      }
     }
     // A full backup of the schedule's own timetable that did not start, or
     // started and failed (#1564): red until a full backup succeeds, not

@@ -224,6 +224,12 @@ func DiscoverDump(inputDir string) ([]TableFiles, []SkippedView, error) {
 			Format:     formats[k],
 		})
 	}
+	// The names so far are the file names; the snapshot takes the real
+	// ones (#2006).
+	result, views, err = realDumpNames(inputDir, result, views)
+	if err != nil {
+		return nil, nil, err
+	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].Database != result[j].Database {
 			return result[i].Database < result[j].Database

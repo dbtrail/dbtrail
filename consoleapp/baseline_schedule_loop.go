@@ -172,6 +172,14 @@ type scheduledFallback struct {
 	tables, refused int
 	refusedTables   []console.RefusedTable
 	refusedOmitted  int
+	// fullReadOK: the full read this fallback started went through (#2006),
+	// so the update after it starts from a snapshot the database was just
+	// read into. Only then does a refusal of the same tables prove that a
+	// full read does not fix it.
+	fullReadOK bool
+	// stoppedAt: when the loop stopped taking full reads for this refusal
+	// because one did not fix it (#2006); "" while it still falls back.
+	stoppedAt string
 }
 
 func newBackupScheduler(sup *baselineSupervisor, reg *console.Registry, fullBackups, carryDefault bool) *backupScheduler {
@@ -560,6 +568,7 @@ func (b *backupScheduler) ScheduleState(serverID string) console.BackupScheduleS
 		out.LastFallbackAt, out.LastFallbackReason = fb.at, fb.reason
 		out.LastFallbackTables, out.LastFallbackRefused = fb.tables, fb.refused
 		out.LastFallbackRefusedTables, out.LastFallbackRefusedOmitted = fb.refusedTables, fb.refusedOmitted
+		out.LastFallbackStoppedAt = fb.stoppedAt
 	}
 	if !started {
 		return out
@@ -603,7 +612,7 @@ func (b *backupScheduler) ScheduleState(serverID string) console.BackupScheduleS
 					// this lock must not have its fresh alarm deleted by
 					// a stale reader.
 					delete(b.fallback, serverID)
-					out.LastFallbackAt, out.LastFallbackReason = "", ""
+					out.LastFallbackAt, out.LastFallbackReason, out.LastFallbackStoppedAt = "", "", ""
 				}
 			}
 			b.mu.Unlock()
@@ -1176,7 +1185,12 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 			return
 		}
 		if method == console.BackupMethodRefresh && st.Last.State == "failed" && !st.Last.Published && !st.Last.DiskRefused {
-			b.fallBack(e, *st.Last)
+			if !b.fullReadCannotCure(e, *st.Last) {
+				b.fallBack(e, *st.Last)
+			}
+		}
+		if method == console.BackupMethodFull && st.Last.State == "succeeded" {
+			b.noteFallbackReadOK(e.ID, stamp)
 		}
 		if method == console.BackupMethodRefresh && st.Last.State == "succeeded" {
 			b.includeNewTables(e, *st.Last)
@@ -1296,4 +1310,101 @@ func (b *backupScheduler) skip(e console.ServerEntry, now time.Time, reason stri
 	if err != nil {
 		slog.Warn("snapshot schedule: could not record the skip in the history", "server", e.Name, "error", err)
 	}
+}
+
+// noteFallbackReadOK records that the full read a fallback started at stamp
+// went through. Called by that read's own watcher, which starts after the
+// fallback is recorded, so the two cannot race.
+func (b *backupScheduler) noteFallbackReadOK(serverID, stamp string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if fb, ok := b.fallback[serverID]; ok && fb.at == stamp {
+		fb.fullReadOK = true
+		b.fallback[serverID] = fb
+	}
+}
+
+// fullReadCannotCure decides whether a refused update gets its full read
+// (#2006, #2007). It does not when the last fallback's full read went
+// through and the update right after it was refused again for the same
+// tables: a full read did not fix that, and taking one at every slot would
+// read the whole database every few minutes for as long as it lasts. The
+// update itself keeps running at each slot (it reads only the recorded
+// changes), so the first one that goes through ends this. In memory only: a
+// restart forgets it, and the first refusal after the restart gets one full
+// read again before it stops.
+func (b *backupScheduler) fullReadCannotCure(e console.ServerEntry, failed console.BaselineStatus) bool {
+	now := time.Now().UTC().Format(time.RFC3339)
+	b.mu.Lock()
+	prev, ok := b.fallback[e.ID]
+	if !ok || !prev.fullReadOK || !sameIncurableRefusal(prev.refusedTables, prev.refusedOmitted, failed.RefusedTables, failed.RefusedTablesOmitted) {
+		b.mu.Unlock()
+		return false
+	}
+	first := prev.stoppedAt == ""
+	if first {
+		prev.stoppedAt = now
+	}
+	prev.reason = failed.LastError
+	prev.tables, prev.refused = failed.Tables, failed.Refused
+	prev.refusedTables, prev.refusedOmitted = failed.RefusedTables, failed.RefusedTablesOmitted
+	b.fallback[e.ID] = prev
+	b.mu.Unlock()
+
+	names := make([]string, len(failed.RefusedTables))
+	for i, t := range failed.RefusedTables {
+		names[i] = t.Name
+	}
+	slog.Warn("snapshot schedule: the update was refused again for the same tables right after a full read, so a full read does not fix it and none is taken in its place; no snapshot is published until the update goes through",
+		"server", e.Name, "tables", names, "reason", failed.LastError, "since", prev.stoppedAt)
+	if !first || b.sup.history == nil {
+		return true
+	}
+	// Once, when it stops: the update's own failure is recorded at every
+	// slot already, and this is the one fact those records do not say.
+	if _, err := b.sup.history.AppendSkip(console.BaselineRunRecord{
+		ServerID: e.ID, ServerName: e.Name, Kind: console.BaselineRunDump, SkipReason: stuckReason(names),
+		StartedAt: now, FinishedAt: now,
+	}); err != nil {
+		slog.Warn("snapshot schedule: could not record in the history that full reads stopped", "server", e.Name, "error", err)
+	}
+	return true
+}
+
+// stuckReason is the history's sentence for a stop: plain words, the
+// tables named, no command.
+func stuckReason(names []string) string {
+	what := "table " + names[0]
+	if len(names) > 1 {
+		what = "tables " + strings.Join(names, ", ")
+	}
+	return "no full read taken: the update from the recorded changes was refused for " + what +
+		" again right after a full read, so a full read does not fix it. No snapshot is published until the update goes through"
+}
+
+// sameIncurableRefusal reports whether an update refused cur after a full
+// read for nothing a full read can fix: every table it refused was refused
+// before that full read with the same verdict. A schema change and a capture
+// gap are about events inside the update's window, which a full read moves
+// past, so seeing one again means a NEW one, and it gets its full read. A
+// list cut short (omitted > 0) cannot be compared, and a new table in it is
+// a new reason: both fall back.
+func sameIncurableRefusal(prev []console.RefusedTable, prevOmitted int, cur []console.RefusedTable, curOmitted int) bool {
+	if len(cur) == 0 || prevOmitted > 0 || curOmitted > 0 {
+		return false
+	}
+	before := make(map[console.RefusedTable]bool, len(prev))
+	for _, t := range prev {
+		before[console.RefusedTable{Name: t.Name, Verdict: t.Verdict}] = true
+	}
+	for _, t := range cur {
+		switch t.Verdict {
+		case reconstruct.RefreshVerdictRefusedDDL, reconstruct.RefreshVerdictRefusedGap:
+			return false
+		}
+		if !before[console.RefusedTable{Name: t.Name, Verdict: t.Verdict}] {
+			return false
+		}
+	}
+	return true
 }
