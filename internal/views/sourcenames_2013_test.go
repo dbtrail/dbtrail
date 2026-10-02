@@ -2,7 +2,9 @@ package views
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -128,10 +130,22 @@ func TestSourceNames_tablesAreQueriedByTheirOwnName_2013(t *testing.T) {
 	}
 }
 
+// twinName is the name a case twin of demo.<table> gets: its own spelling
+// plus the first six hex digits of the SHA-256 of schema NUL table. Computed
+// here on its own so the test states the rule instead of calling the code
+// under test.
+func twinName(table string) string { return twinIn("demo", table) }
+
+func twinIn(schema, table string) string {
+	sum := sha256.Sum256([]byte(schema + "\x00" + table))
+	return table + "_" + hex.EncodeToString(sum[:])[:6]
+}
+
 // DuckDB compares identifiers case-insensitively (ASCII only), so demo.Orders
-// and demo.orders are ONE name there. Every real table keeps its exact name
-// when it can; only the loser of a case collision is renamed, and never onto a
-// name a real table holds (demo.orders_2 here is a real table).
+// and demo.orders are ONE name there. The all-lowercase spelling keeps the
+// plain name; every other spelling gets a suffix derived from its OWN
+// spelling, so a name never depends on which other twins exist, and never
+// lands on a name a real table holds (demo.orders_2 here is a real table).
 func TestSourceNames_caseCollisionNeverStealsARealName_2013(t *testing.T) {
 	root := t.TempDir()
 	tables := []BaselineTable{
@@ -144,23 +158,53 @@ func TestSourceNames_caseCollisionNeverStealsARealName_2013(t *testing.T) {
 	in := input2013(root, tables...)
 	sqlText := Generate(in)
 	db := execViews(t, sqlText)
+	upper := twinName("Orders")
 	for ref, want := range map[string][]string{
-		`demo."Orders"`: {"upper"},
-		`demo.orders_2`: {"real-2"},
-		`demo.orders_3`: {"lower"},
-		`demo."Ñ"`:      {"enye-upper"},
-		`demo."ñ"`:      {"enye-lower"},
+		`demo.orders`:          {"lower"},
+		`demo."` + upper + `"`: {"upper"},
+		`demo.orders_2`:        {"real-2"},
+		`demo."Ñ"`:             {"enye-upper"},
+		`demo."ñ"`:             {"enye-lower"},
 	} {
 		if got := statusesOf(t, db, ref, sqlText); !slices.Equal(got, want) {
 			t.Errorf("%s returned %v, want %v", ref, got, want)
 		}
 	}
 	notes := strings.Join(in.NamingNotes(), "\n")
-	if !strings.Contains(notes, "demo.orders_3") || !strings.Contains(notes, "demo.orders") {
+	if !strings.Contains(notes, "demo."+upper) || !strings.Contains(notes, "demo.Orders") {
 		t.Errorf("the rename is not reported; notes:\n%s", notes)
 	}
-	if !strings.Contains(sqlText, "-- demo.orders_3: ") {
-		t.Errorf("the file does not say why demo.orders_3 is named that way:\n%s", sqlText)
+	if !strings.Contains(sqlText, "-- demo."+upper+": ") {
+		t.Errorf("the file does not say why demo.%s is named that way:\n%s", upper, sqlText)
+	}
+}
+
+// A saved query must not change meaning when a new twin appears: adding
+// demo.ORDERS, and then demo.orders, leaves every existing view's name alone
+// except the one the rule gives the lowercase spelling.
+func TestSourceNames_aNewTwinRenamesNoExistingView_2013(t *testing.T) {
+	names := func(tables ...string) map[string]string {
+		var bt []BaselineTable
+		for _, tb := range tables {
+			bt = append(bt, BaselineTable{Schema: "demo", Table: tb, Path: "/x/" + tb + ".parquet"})
+		}
+		out := map[string]string{}
+		for _, p := range stateViewPlan(input2013("/x", bt...)) {
+			out[p.table.Table] = p.view
+		}
+		return out
+	}
+	one := names("Orders")
+	two := names("Orders", "ORDERS")
+	three := names("Orders", "ORDERS", "orders")
+	if one["Orders"] != "Orders" {
+		t.Fatalf("a table with no twin was renamed: %v", one)
+	}
+	if two["ORDERS"] != twinName("ORDERS") || two["Orders"] != "Orders" {
+		t.Errorf("adding ORDERS renamed an existing view or picked another name: %v", two)
+	}
+	if three["ORDERS"] != two["ORDERS"] || three["orders"] != "orders" {
+		t.Errorf("adding orders moved ORDERS or did not give orders its plain name: %v", three)
 	}
 }
 
@@ -223,7 +267,7 @@ func TestSourceNames_builtInSchemaNames_2013(t *testing.T) {
 }
 
 // The events view is main.events. A source table main.events cannot have that
-// name, so it is renamed (and said so); shop.events is a different name and
+// name, so it gets a suffix (and the file says so); shop.events is a different name and
 // keeps it.
 func TestSourceNames_tablesNamedEvents_2013(t *testing.T) {
 	root, archives := t.TempDir(), t.TempDir()
@@ -242,9 +286,9 @@ func TestSourceNames_tablesNamedEvents_2013(t *testing.T) {
 		t.Fatalf("the events view answered %d, %v; want the one archived event", n, err)
 	}
 	for ref, want := range map[string][]string{
-		`main.events_2`: {"main-events"},
-		`shop.events`:   {"shop-events"},
-		`events.orders`: {"events-schema"},
+		`main.` + twinIn("main", "events"): {"main-events"},
+		`shop.events`:                      {"shop-events"},
+		`events.orders`:                    {"events-schema"},
 	} {
 		if got := statusesOf(t, db, ref, sqlText); !slices.Equal(got, want) {
 			t.Errorf("%s returned %v, want %v", ref, got, want)
@@ -253,7 +297,7 @@ func TestSourceNames_tablesNamedEvents_2013(t *testing.T) {
 	// Reserved whether or not this render defines the events view, so the
 	// name does not move when it is switched on.
 	in.OmitEvents = true
-	if got := in.DefinedViews(); !slices.Contains(got, "main.events_2") {
+	if got := in.DefinedViews(); !slices.Contains(got, "main."+twinIn("main", "events")) {
 		t.Errorf("without the events view main.events moved: %v", got)
 	}
 }
@@ -394,7 +438,7 @@ func TestSourceNames_lineBreakInANameStaysInsideTheComment_2013(t *testing.T) {
 	)
 	sqlText := Generate(in)
 	db := execViews(t, sqlText)
-	if got := statusesOf(t, db, "demo.\"x\nSELECT 1_2\"", sqlText); !slices.Equal(got, []string{"lower"}) {
+	if got := statusesOf(t, db, `demo."`+twinName("X\nSELECT 1")+`"`, sqlText); !slices.Equal(got, []string{"upper"}) {
 		t.Errorf("the renamed view returned %v", got)
 	}
 	// With every quoted identifier and literal taken out, the name's second

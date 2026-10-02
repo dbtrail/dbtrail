@@ -81,8 +81,9 @@ snapshot downloaded from the web interface arrives as, and it can be queried on 
 machine that cannot reach the index at all.
 
 Two tables whose names differ only in letter case (demo.Orders and
-demo.orders) are one name to DuckDB, so one of them gets a numbered name and
-the file says which. Tables in a source schema DuckDB keeps for itself
+demo.orders) are one name to DuckDB: the all-lowercase spelling keeps it, the
+other gets a suffix made from a short hash of its own spelling, and the file
+says which. Tables in a source schema DuckDB keeps for itself
 (information_schema, pg_catalog) are left out, and so are those in temp,
 system and memory unless --database is set; the command lists each one.
 

@@ -132,10 +132,16 @@ say which tables they hit:
 
 - **Names that differ only in letter case.** DuckDB compares names without
   letter case (ASCII letters only), so `shop.Orders` and `shop.orders` are one
-  name there. One keeps the exact name and the other gets a number
-  (`shop.orders_2`, or the next number no table already uses).
+  name there. The spelling that sorts last keeps the exact name, which is
+  the all-lowercase one when there is one (`shop.orders`). Every other
+  spelling gets a suffix made from a short hash of its own spelling
+  (`shop.Orders_` and six letters and digits), so its name does not depend on
+  which other twins exist: a twin added later does not rename it. The one
+  rename a new twin can cause is to the plain-named table, when the new
+  spelling sorts after it (a lowercase spelling appearing).
 - **`main.events`.** That is the `events` view (the change log), so a source
-  table `events` in a schema called `main` becomes `main.events_2`. A table
+  table `events` in a schema called `main` gets the same kind of suffix
+(`main.events_` and six letters and digits). A table
   called `events` in any other schema (`shop.events`) keeps its name.
 
 Some source schemas cannot hold views at all. `information_schema` and

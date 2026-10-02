@@ -862,32 +862,38 @@ func sqlsandboxLocal(d string) bool { return filepath.IsAbs(d) && !strings.HasPr
 
 func TestSQLMentionsEvents(t *testing.T) {
 	for stmt, want := range map[string]bool{
-		"SELECT * FROM events":                            true,
-		"select count(*) from EVENTS e":                   true,
-		"SELECT * FROM \"events\" LIMIT 1":                true,
-		"SELECT * FROM shop.orders":                       false,
-		"SELECT * FROM shop.events_log":                   false,
-		"SELECT * FROM x.y WHERE eventsx=1":               false,
-		"SELECT * FROM shop.events":                       false,
-		"SELECT * FROM shop.\"events\"":                   false,
-		"SELECT * FROM \"Shop Floor\".events":             false,
-		"SELECT * FROM events.orders":                     false,
-		"SELECT * FROM \"events\".\"orders\"":             false,
-		"SELECT * FROM main.\"events\"":                   true,
-		"SELECT * FROM MAIN . events":                     true,
-		"SELECT * FROM shop.events JOIN events e ON true": true,
-		"SELECT * FROM memory.events":                     true,
-		"SELECT * FROM -- the change log.\n events":       true,
-		"SELECT * FROM /* x. */ events":                   true,
-		"SELECT '--', * FROM events":                      true,
-		"SELECT 'shop.' || x FROM events":                 true,
-		"SELECT * FROM shop.events -- not events.x":       false,
-		"SELECT * FROM main.events":                       true,
-		"SELECT * FROM memory.main.events e":              true,
-		"FROM Events":                                     true,
-		"SELECT count(*) FROM events;":                    true,
-		"SELECT * FROM (events)":                          true,
-		"SELECT count(*) AS events FROM x.y":              true,
+		"SELECT * FROM events":                                                true,
+		"select count(*) from EVENTS e":                                       true,
+		"SELECT * FROM \"events\" LIMIT 1":                                    true,
+		"SELECT * FROM shop.orders":                                           false,
+		"SELECT * FROM shop.events_log":                                       false,
+		"SELECT * FROM x.y WHERE eventsx=1":                                   false,
+		"SELECT * FROM shop.events":                                           false,
+		"SELECT * FROM shop.\"events\"":                                       false,
+		"SELECT * FROM \"Shop Floor\".events":                                 false,
+		"SELECT * FROM events.orders":                                         false,
+		"SELECT * FROM \"events\".\"orders\"":                                 false,
+		"SELECT * FROM main.\"events\"":                                       true,
+		"SELECT * FROM MAIN . events":                                         true,
+		"SELECT * FROM shop.events JOIN events e ON true":                     true,
+		"SELECT * FROM memory.events":                                         true,
+		"SELECT * FROM -- the change log.\n events":                           true,
+		"SELECT * FROM /* x. */ events":                                       true,
+		"SELECT '--', * FROM events":                                          true,
+		"SELECT 'shop.' || x FROM events":                                     true,
+		"SELECT * FROM shop.events -- not events.x":                           false,
+		"-- what's changed\nSELECT * FROM events WHERE event_type = 'DELETE'": true,
+		"/* don't */ SELECT * FROM events WHERE t='x'":                        true,
+		"SELECT * FROM \"a--b\" JOIN events USING (x)":                        true,
+		"SELECT * FROM \"o'brien\".t, events WHERE x='1'":                     true,
+		"SELECT * FROM \"main\".\"events\"":                                   true,
+		"SELECT * FROM \"shop\".\"events\"":                                   false,
+		"SELECT * FROM main.events":                                           true,
+		"SELECT * FROM memory.main.events e":                                  true,
+		"FROM Events":                                                         true,
+		"SELECT count(*) FROM events;":                                        true,
+		"SELECT * FROM (events)":                                              true,
+		"SELECT count(*) AS events FROM x.y":                                  true,
 	} {
 		if got := sqlMentionsEvents(stmt); got != want {
 			t.Errorf("sqlMentionsEvents(%q) = %v, want %v", stmt, got, want)
@@ -1239,5 +1245,13 @@ func TestSQLAPI_namesTheTablesLeftOut(t *testing.T) {
 			!strings.Contains(w.Body.String(), "temp.sessions") {
 			t.Errorf("%s with only temp.sessions: code=%d body=%s", name, w.Code, w.Body.String())
 		}
+	}
+	// The download says the same, not "no baseline snapshot was found".
+	dl := httptest.NewRecorder()
+	f.s.handleViewsSQL(dl, httptest.NewRequest("GET", "/api/views.sql", nil))
+	if dl.Code != http.StatusNotFound || !strings.Contains(dl.Body.String(), "would define no view at all") ||
+		!strings.Contains(dl.Body.String(), "keeps for itself") || !strings.Contains(dl.Body.String(), "temp.sessions") ||
+		strings.Contains(dl.Body.String(), "no baseline snapshot") {
+		t.Errorf("GET /api/views.sql with only temp.sessions: code=%d body=%s", dl.Code, dl.Body.String())
 	}
 }

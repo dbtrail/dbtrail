@@ -130,15 +130,15 @@ CREATE OR REPLACE VIEW "Legacy-DB"."Audit Log" AS
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')
     ELSE getvariable('bintrail_newest_snapshot') || 'Legacy-DB/Audit Log.parquet' END)
   WHERE CASE WHEN (SELECT count(*) FROM glob(getvariable('bintrail_newest_snapshot') || 'Legacy-DB/Audit Log.[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) + (SELECT count(*) FROM glob(getvariable('bintrail_newest_snapshot') || 'Legacy-DB/Audit Log.[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) > 0 THEN error('bintrail views: Legacy-DB.Audit Log now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
--- shop.ORDER_ITEMS: this file carries no column types, so nothing is cast; decimal columns read as text
--- shop.ORDER_ITEMS: reads the table file alone because its schema could not be read. If a refresh writes changes beside the file, this view stops with an error until the views are generated again
-CREATE OR REPLACE VIEW "shop"."ORDER_ITEMS" AS
+-- shop.ORDER_ITEMS_945701: the table shop.ORDER_ITEMS. DuckDB does not tell names apart by letter case, and shop.order_items already has that name
+-- shop.ORDER_ITEMS_945701: this file carries no column types, so nothing is cast; decimal columns read as text
+-- shop.ORDER_ITEMS_945701: reads the table file alone because its schema could not be read. If a refresh writes changes beside the file, this view stops with an error until the views are generated again
+CREATE OR REPLACE VIEW "shop"."ORDER_ITEMS_945701" AS
   SELECT * FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')
     ELSE getvariable('bintrail_newest_snapshot') || 'shop/ORDER_ITEMS.parquet' END)
   WHERE CASE WHEN (SELECT count(*) FROM glob(getvariable('bintrail_newest_snapshot') || 'shop/ORDER_ITEMS.[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) + (SELECT count(*) FROM glob(getvariable('bintrail_newest_snapshot') || 'shop/ORDER_ITEMS.[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) > 0 THEN error('bintrail views: shop.ORDER_ITEMS now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
--- shop.order_items_2: the table shop.order_items. DuckDB does not tell names apart by letter case, and shop.ORDER_ITEMS already has that name
-CREATE OR REPLACE VIEW "shop"."order_items_2" AS
+CREATE OR REPLACE VIEW "shop"."order_items" AS
   WITH bintrail_delta AS (SELECT * FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')
     ELSE getvariable('bintrail_newest_snapshot') || 'shop/order_items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[ts]' END, filename=true, union_by_name=true) WHERE regexp_matches(filename, '(^|[/\\])order_items\.[0-9]{6}(-[0-9]{6})?\.upserts$') UNION ALL BY NAME SELECT NULL::VARCHAR AS "bintrail_pk", NULL::VARCHAR AS "bintrail_op" WHERE false), bintrail_latest AS (SELECT * EXCLUDE (filename) FROM bintrail_delta QUALIFY row_number() OVER (PARTITION BY "bintrail_pk" ORDER BY filename DESC) = 1) SELECT * FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL

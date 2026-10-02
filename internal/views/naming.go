@@ -1,6 +1,8 @@
 package views
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"sort"
@@ -16,7 +18,8 @@ import (
 //
 //   - It compares names case-insensitively, ASCII letters only: demo.Orders and
 //     demo.orders are one view there, while Ñ and ñ stay two. One of a colliding
-//     pair keeps the exact name; the other is renamed and the file says why.
+//     pair keeps the exact name; the other gets a suffix (see stateViewPlan)
+//     and the file says why.
 //   - information_schema and pg_catalog are its own catalog, in every
 //     database, and refuse views. Tables in a source schema named that way
 //     cannot be defined at all.
@@ -47,10 +50,17 @@ type statePlan struct {
 // is left out, and a name that moves with the statement is a name nobody can
 // write a query against.
 //
-// Two passes, so a rename never takes a real table's name: first every table
-// claims its exact name, and only then do the losers of a case collision pick
-// a numbered name no table holds. One pass would let demo.orders become
-// demo.orders_2 and push the real demo.orders_2 table off its own name.
+// Which of two case twins keeps the plain name is a rule about the names
+// alone, never about the order they were seen in: the spelling that sorts
+// last byte by byte, which is the all-lowercase one when there is one
+// (lowercase letters sort after capitals). Every other twin is named after
+// its OWN spelling plus a short hash of it (Orders_b7e8ac), so its name does
+// not depend on which other twins exist: adding a twin renames nothing that
+// already had a suffix, and renames the plain-named one only when the new
+// table's spelling sorts after it (a lowercase spelling appearing).
+//
+// Winners are settled before any loser is named, so a suffixed name never
+// takes a real table's name.
 func stateViewPlan(in Input) []statePlan {
 	tables := append([]BaselineTable(nil), in.Baselines...)
 	sort.Slice(tables, func(i, j int) bool {
@@ -59,6 +69,18 @@ func stateViewPlan(in Input) []statePlan {
 		}
 		return tables[i].Table < tables[j].Table
 	})
+	spelling := func(t BaselineTable) string { return t.Schema + "\x00" + t.Table }
+	// winner maps a name as DuckDB compares it to the table that keeps it.
+	winner := map[string]BaselineTable{}
+	for _, t := range tables {
+		if in.reservedSchema(t.Schema) != "" {
+			continue
+		}
+		k := nameKey(t.Schema, t.Table)
+		if w, ok := winner[k]; !ok || spelling(t) > spelling(w) {
+			winner[k] = t
+		}
+	}
 	// holder maps a name as DuckDB compares it to who has it, for the note
 	// the loser carries. main.events is the events view's whether or not this
 	// render defines that view, so the table's name does not change when it
@@ -67,33 +89,33 @@ func stateViewPlan(in Input) []statePlan {
 		nameKey("main", eventsViewName): "the events view (the change log)",
 	}
 	plan := make([]statePlan, 0, len(tables))
-	var losers []int
 	for _, t := range tables {
 		p := statePlan{table: t, view: t.Table}
 		if why := in.reservedSchema(t.Schema); why != "" {
 			p.skip = why
-			plan = append(plan, p)
-			continue
-		}
-		k := nameKey(t.Schema, t.Table)
-		if _, taken := holder[k]; taken {
-			losers = append(losers, len(plan))
-		} else {
+		} else if k := nameKey(t.Schema, t.Table); k != nameKey("main", eventsViewName) && spelling(winner[k]) == spelling(t) {
 			holder[k] = in.stateLabel(p)
 		}
 		plan = append(plan, p)
 	}
-	for _, i := range losers {
+	for i := range plan {
 		p := &plan[i]
-		taken := holder[nameKey(p.table.Schema, p.table.Table)]
+		k := nameKey(p.table.Schema, p.table.Table)
+		if p.skip != "" || holder[k] == in.stateLabel(*p) {
+			continue
+		}
+		taken := holder[k]
+		sum := sha256.Sum256([]byte(spelling(p.table)))
+		base := p.table.Table + "_" + hex.EncodeToString(sum[:])[:6]
+		v := base
 		for n := 2; ; n++ {
-			v := fmt.Sprintf("%s_%d", p.table.Table, n)
 			if _, used := holder[nameKey(p.table.Schema, v)]; !used {
-				p.view = v
-				holder[nameKey(p.table.Schema, v)] = in.stateLabel(*p)
 				break
 			}
+			v = fmt.Sprintf("%s_%d", base, n)
 		}
+		p.view = v
+		holder[nameKey(p.table.Schema, v)] = in.stateLabel(*p)
 		p.renamed = fmt.Sprintf("the table %s.%s. DuckDB does not tell names apart by letter case, and %s already has that name",
 			p.table.Schema, p.table.Table, taken)
 	}

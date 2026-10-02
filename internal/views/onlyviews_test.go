@@ -75,8 +75,8 @@ func TestGenerateViews_selectsNothingRendersNothing(t *testing.T) {
 // TestGenerateViews_stateNamesDoNotMoveWhenFiltered guards the rule that names
 // are assigned over EVERY table, not over the selected ones. The golden fixture
 // has a deliberate collision (shop.ORDER_ITEMS and shop.order_items are one name to
-// DuckDB), and the second one is only called shop.order_items_2 because the first
-// was seen first. Name them after
+// DuckDB), and shop.ORDER_ITEMS only gets a suffix because its lowercase twin
+// is in the snapshot. Name them after
 // filtering and that suffix disappears the moment the sibling is left out —
 // which would mean the name a reader queries by depends on the statement they
 // wrote, and their own query would stop resolving.
@@ -85,7 +85,7 @@ func TestGenerateViews_stateNamesDoNotMoveWhenFiltered(t *testing.T) {
 	full := createdViews(t, GenerateViews(in))
 	var collided string
 	for _, n := range full {
-		if strings.HasSuffix(n, "_2") {
+		if strings.HasPrefix(n, "shop.ORDER_ITEMS_") {
 			collided = n
 		}
 	}
@@ -93,12 +93,12 @@ func TestGenerateViews_stateNamesDoNotMoveWhenFiltered(t *testing.T) {
 		t.Fatalf("the fixture no longer collides on a state view name (%v); this guard covers nothing", full)
 	}
 
-	in.OnlyViews = ViewSet{collided: true}
+	in.OnlyViews = ViewSet{asciiLower(collided): true}
 	got := createdViews(t, GenerateViews(in))
 	if len(got) != 1 || got[0] != collided {
 		t.Fatalf("selecting %q alone defined %v, want just it", collided, got)
 	}
-	if !strings.Contains(GenerateViews(in), "/shop/order_items.parquet") {
+	if !strings.Contains(GenerateViews(in), "/shop/ORDER_ITEMS.parquet") {
 		t.Errorf("%q was rendered over the wrong file: the suffix moved to another table", collided)
 	}
 }

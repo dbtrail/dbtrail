@@ -215,14 +215,30 @@ var sqlEventsWord = regexp.MustCompile(`(?i)\bevents\b`)
 // captures the part just before the last dot: `shop.`, `"shop" . `.
 var sqlQualifierBefore = regexp.MustCompile(`(?i)("(?:[^"]|"")*"|[\w$]+)\s*\.\s*"?$`)
 
-// sqlLiteralsAndComments are cut out before the dotted-name check, so a
-// comment ending in a dot cannot pass for a qualifier ("-- the log.\n events")
-// and a '--' inside a string cannot cut the statement short. Literals first.
-var sqlLiterals = regexp.MustCompile(`'(?:[^']|'')*'`)
-var sqlComments = regexp.MustCompile(`(?s)--[^\n]*|/\*.*?\*/`)
+// sqlLexed blanks string literals and comments in ONE left-to-right pass, so
+// whichever starts first wins: a quote inside a comment ("-- what's") does
+// not open a string, and "--" inside an identifier ("a--b") or a string does
+// not open a comment. Double-quoted identifiers are matched only so they are
+// skipped whole, and are kept as they are: the check below reads "events" and
+// "main"."events" through them. Comments go, so one ending in a dot cannot
+// pass for a qualifier ("-- the log.\n events").
+var sqlLexed = regexp.MustCompile(`'(?:[^']|'')*'|"(?:[^"]|"")*"|--[^\n]*|(?s:/\*.*?\*/)`)
+
+func sqlBlankLiteralsAndComments(statement string) string {
+	return sqlLexed.ReplaceAllStringFunc(statement, func(tok string) string {
+		switch {
+		case strings.HasPrefix(tok, `"`):
+			return tok
+		case strings.HasPrefix(tok, "'"):
+			return "''"
+		default:
+			return " "
+		}
+	})
+}
 
 func sqlMentionsEvents(statement string) bool {
-	statement = sqlComments.ReplaceAllString(sqlLiterals.ReplaceAllString(statement, "''"), " ")
+	statement = sqlBlankLiteralsAndComments(statement)
 	for _, m := range sqlEventsWord.FindAllStringIndex(statement, -1) {
 		after := strings.TrimLeft(statement[m[1]:], `"`)
 		if strings.HasPrefix(strings.TrimLeft(after, " \t\r\n"), ".") {

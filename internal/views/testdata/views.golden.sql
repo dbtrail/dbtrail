@@ -76,11 +76,11 @@ CREATE SCHEMA IF NOT EXISTS "shop_order";
 -- "Legacy-DB"."Audit Log": this file carries no column types, so nothing is cast; decimal columns read as text
 CREATE OR REPLACE VIEW "Legacy-DB"."Audit Log" AS
   SELECT * FROM read_parquet('s3://my-bucket/baselines/2026-04-30T03-00-00Z/Legacy-DB/Audit Log.parquet');
--- shop.ORDER_ITEMS: this file carries no column types, so nothing is cast; decimal columns read as text
-CREATE OR REPLACE VIEW "shop"."ORDER_ITEMS" AS
+-- shop.ORDER_ITEMS_945701: the table shop.ORDER_ITEMS. DuckDB does not tell names apart by letter case, and shop.order_items already has that name
+-- shop.ORDER_ITEMS_945701: this file carries no column types, so nothing is cast; decimal columns read as text
+CREATE OR REPLACE VIEW "shop"."ORDER_ITEMS_945701" AS
   SELECT * FROM read_parquet('s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/ORDER_ITEMS.parquet');
--- shop.order_items_2: the table shop.order_items. DuckDB does not tell names apart by letter case, and shop.ORDER_ITEMS already has that name
-CREATE OR REPLACE VIEW "shop"."order_items_2" AS
+CREATE OR REPLACE VIEW "shop"."order_items" AS
   SELECT * FROM read_parquet('s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/order_items.parquet');
 CREATE OR REPLACE VIEW "shop"."orders" AS
   SELECT * REPLACE (CAST("total" AS DECIMAL(10,2)) AS "total", CAST("tax_rate" AS DECIMAL(6,4)) AS "tax_rate")

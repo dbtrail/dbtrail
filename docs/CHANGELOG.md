@@ -18,8 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them with `SELECT 'DROP VIEW ' || database_name || '.' || schema_name || '.'
   || view_name || ';' FROM duckdb_views() WHERE view_name LIKE 'state\_%' ESCAPE '\';`. The old names were also
   lossy (`a.b_c` and `a_b.c` were one name). Two tables whose names differ only
-  in letter case are one name to DuckDB, so one gets a number
-  (`shop.orders_2`); tables in a schema DuckDB keeps for itself
+  in letter case are one name to DuckDB: the all-lowercase spelling keeps it
+  and the other gets a suffix made from its own spelling
+  (`shop.Orders_xxxxxx`), so it does not change when a third twin appears;
+  tables in a schema DuckDB keeps for itself
   (`information_schema`, `pg_catalog`, and `temp`, `system`, `memory` without
   `--database`) are left out. The file and the command name each one.
 - **Breaking: `bintrail views --schema` is now `--database`.** A server's views
