@@ -19,7 +19,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 MARKER="$REPO_ROOT/scripts/THIRD-PARTY-NOTICES.deps.sha256"
-NOTICES="$REPO_ROOT/THIRD-PARTY-NOTICES"
+NOTICES="$REPO_ROOT/build/THIRD-PARTY-NOTICES"
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -36,7 +36,7 @@ if [ "$want" != "$have" ]; then
   echo "" >&2
   echo "A dependency was added, removed, or bumped. Regenerate the notices:" >&2
   echo "  make notices" >&2
-  echo "and commit THIRD-PARTY-NOTICES + scripts/THIRD-PARTY-NOTICES.deps.sha256." >&2
+  echo "and commit build/THIRD-PARTY-NOTICES + scripts/THIRD-PARTY-NOTICES.deps.sha256." >&2
   exit 1
 fi
 

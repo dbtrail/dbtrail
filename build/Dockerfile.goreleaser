@@ -27,7 +27,7 @@ COPY bintrail-mcp /usr/local/bin/bintrail-mcp
 
 # License-compliance notices (#428). GoReleaser stages these into the build
 # context via the `dockers.*.extra_files` entries in .goreleaser.yaml.
-COPY LICENSE NOTICE THIRD-PARTY-NOTICES /usr/share/doc/bintrail/
+COPY LICENSE NOTICE build/THIRD-PARTY-NOTICES /usr/share/doc/bintrail/
 
 USER bintrail
 ENTRYPOINT ["bintrail"]

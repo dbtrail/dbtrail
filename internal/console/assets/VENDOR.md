@@ -58,7 +58,7 @@ and the license, either as accompanying text or in machine-readable font
 metadata. Both paths are covered, and each has a CI pin:
 
 - **Accompanying text**: the full OFL-1.1 text plus the three copyright
-  notices above ship in the repo-root `THIRD-PARTY-NOTICES` (the manual
+  notices above ship in `build/THIRD-PARTY-NOTICES` (the manual
   section, maintained in `scripts/notices-header.txt`), which rides in every
   release artifact — tarballs, deb/rpm, and images. `scripts/check-notices.sh`
   fails CI if the section goes missing.

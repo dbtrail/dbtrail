@@ -1025,10 +1025,10 @@ jobs:
           artifact="$(mktemp)"
           echo "signing probe ${GITHUB_SHA}" > "$artifact"
 
-          cmd="$(yq -r '.signs[0].cmd' .goreleaser.yaml)"
-          sig_tpl="$(yq -r '.signs[0].signature // "${artifact}.sig"' .goreleaser.yaml)"
-          cert_tpl="$(yq -r '.signs[0].certificate // ""' .goreleaser.yaml)"
-          args_raw="$(yq -r '.signs[0].args[]' .goreleaser.yaml)"
+          cmd="$(yq -r '.signs[0].cmd' build/.goreleaser.yaml)"
+          sig_tpl="$(yq -r '.signs[0].signature // "${artifact}.sig"' build/.goreleaser.yaml)"
+          cert_tpl="$(yq -r '.signs[0].certificate // ""' build/.goreleaser.yaml)"
+          args_raw="$(yq -r '.signs[0].args[]' build/.goreleaser.yaml)"
 
           # Fail closed on template forms this replay does not implement: the
           # renderer below knows exactly ${artifact}/${signature}/${certificate}.
