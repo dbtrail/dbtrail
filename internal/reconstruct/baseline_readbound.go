@@ -179,9 +179,12 @@ func recoverReadBound(path string, b *status.ReadBound) {
 // snapshot file: the ones a headline verdict is decided on, and so the ones
 // worth a footer read.
 func NewestPerTable(files []BaselineFile) []int {
-	newest := map[string]int{}
+	// Keyed on the pair: a table name can hold a dot (#2008), so a dotted
+	// string would fold a/b.c into a.b/c.
+	type table struct{ schema, name string }
+	newest := map[table]int{}
 	for i, f := range files {
-		k := f.Schema + "." + f.Table
+		k := table{f.Schema, f.Table}
 		if j, ok := newest[k]; !ok || files[j].SnapshotTime.Before(f.SnapshotTime) {
 			newest[k] = i
 		}

@@ -1927,9 +1927,12 @@ func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 	fmt.Fprintln(tw, "SNAPSHOT\tDATABASE\tTABLE\tSIZE\tBINLOG_FILE\tBINLOG_POS\tGTID\tPOINT_IN_TIME\tREADS_FROM\tSTALENESS")
 	fmt.Fprintln(tw, "────────\t────────\t─────\t────\t───────────\t──────────\t────\t─────\t──────────\t─────────")
 	// The ⚠ glyph is reserved for rows the banner keys on — each table's
-	// NEWEST snapshot. A superseded snapshot past coverage is routine on a
-	// healthy retention cadence (the console's rule too); it still reads
-	// "broken" honestly, just not as an alarm.
+	// NEWEST snapshot, among the tables still being backed up (#2022). A
+	// superseded snapshot past coverage is routine on a healthy retention
+	// cadence (the console's rule too), and so is the last copy of a table
+	// later snapshots no longer carry; both still read "broken" honestly,
+	// just not as an alarm.
+	keyed := headlineBaselines(baselines)
 	newestOf := make(map[string]time.Time, len(baselines))
 	for _, b := range baselines {
 		k := b.Database + "." + b.Table
@@ -1957,7 +1960,7 @@ func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 		staleness := "-"
 		if b.Staleness != "" {
 			staleness = string(b.Staleness)
-			if b.Staleness == BaselineBroken && newestOf[b.Database+"."+b.Table].Equal(b.SnapshotTime) {
+			if k, ok := keyed[baselineKey{b.Database, b.Table}]; ok && b.Staleness == BaselineBroken && k.SnapshotTime.Equal(b.SnapshotTime) {
 				staleness = "⚠ broken"
 			}
 		}
@@ -2020,18 +2023,11 @@ func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 // could not be read (#1707); floorUnknown says at least one is unknown for
 // any other reason, which is the floor.
 func unknownNewestTables(baselines []BaselineInfo) (unread []string, floorUnknown bool) {
-	newest := make(map[string]BaselineInfo, len(baselines))
-	for _, b := range baselines {
-		k := b.Database + "." + b.Table
-		if cur, ok := newest[k]; !ok || cur.SnapshotTime.Before(b.SnapshotTime) {
-			newest[k] = b
-		}
-	}
-	for k, b := range newest {
+	for k, b := range headlineBaselines(baselines) {
 		switch {
 		case b.Staleness != BaselineUnknown:
 		case b.Bound.Unread:
-			unread = append(unread, k)
+			unread = append(unread, k.Database+"."+k.Table)
 		default:
 			floorUnknown = true
 		}

@@ -235,7 +235,9 @@ func AnnotateBaselineStaleness(baselines []BaselineInfo, floor DeltaFloor, now t
 
 // OverallBaselineStaleness reduces to one verdict, worst-first (broken >
 // unknown > aging > ok), over each TABLE'S NEWEST snapshot — an old snapshot
-// does not outvote a fresh one for the same table.
+// does not outvote a fresh one for the same table. A table later snapshots no
+// longer carry (dropped, renamed) is left out; see
+// status.RetiredBaselineTables for the exact rule.
 //
 // It returns the empty verdict, which is none of the four constants, when the
 // input is empty or ungraded. Empty input is the worst baseline posture there

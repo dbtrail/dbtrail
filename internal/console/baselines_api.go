@@ -419,11 +419,14 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	}
 	// Headline over the files of the snapshots the page reads (the cap plus
 	// one, #1679), delegated to the status package's newest-per-table
-	// rollup. The CLI's status walks every snapshot, so the two can differ
-	// on one shape: a table whose newest baseline is older than the page
-	// window (dropped from the backup set long ago) grades the CLI's
-	// headline and not this one. Reading the whole inventory for that
-	// grade is the cost this bound removes.
+	// rollup, which leaves out the tables later snapshots no longer carry
+	// (#2022, status.RetiredBaselineTables). The CLI's status walks every
+	// snapshot, so the two can differ: a table whose newest baseline is
+	// older than the page window grades the CLI's headline and not this
+	// one, and with two locations each is cut at its own newest snapshots,
+	// so an old S3 snapshot can be listed without the newer local ones that
+	// would retire a table in it. The second only adds an alarm, never
+	// hides one. Reading the whole inventory is the cost this bound removes.
 	infos := make([]status.BaselineInfo, len(files))
 	for i, f := range files {
 		infos[i] = status.BaselineInfo{Database: f.Schema, Table: f.Table, SnapshotTime: f.SnapshotTime, Bound: bounds[i]}
