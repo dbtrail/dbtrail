@@ -24,10 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was reversed into `INSERT`s that brought old versions back as current rows.
   A delete is now reversed with an `INSERT`, history rows are skipped with a
   comment, and the `WHERE` uses the declared key.
-- **Single-row `reconstruct` refuses a system-versioned table** (#2007)
-  instead of answering with the snapshot's row as if nothing had changed
-  since: its changes are stored under the key plus `row_end`, so the lookup by
-  the declared key found none.
+- **Lookups by key work on a system-versioned table** (#2007). Its changes
+  are stored under the key plus `row_end`, so `query --pk`, `recover --pk`
+  and single-row `reconstruct` (CLI, console, MCP) found nothing and the
+  latter answered with the snapshot's row as if nothing had changed. A
+  declared-key value is now also looked up with the current-row marker at
+  `row_end`'s position, and single-row reconstruct reads the events for the
+  current row; it refuses a window in which versioning was added or dropped.
+- **`--pks` lookups use the key-hash index** (#2007). A `--pks` list (and a
+  `--pk` lookup on a system-versioned table, which becomes one) now matches
+  `pk_hash IN (...) AND pk_values IN (...)` instead of a bare `pk_values IN`,
+  so it no longer scans the table's whole time window. Two consequences: a
+  key now matches the stored bytes exactly, case included, as `--pk` and the
+  Parquet archives already did; and each key takes two placeholders, so a
+  single list of more than about 32,000 keys hits MySQL's 65,535-placeholder
+  limit (split such a list into several calls).
 - **Extensions that open the source now get its TLS settings** (#1997). The
   seams that hand a source to an extension (`ext.SourceJobInfo`,
   `ext.ConsoleQueryContext`, `mcpext.ToolContext`) carried only the source

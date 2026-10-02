@@ -75,12 +75,14 @@ func expandSysVersionedKeys(pkMetas []metadata.ColumnMeta, values []string) ([]s
 // Versioning added after the newest snapshot is not seen; taking a snapshot
 // (which the stream does on the DDL) fixes that.
 //
-// A source recorded as MySQL or PostgreSQL has no system versioning, so the
-// snapshot is not read. Best-effort and additive: a read that fails is
+// A source recorded as PostgreSQL has no system versioning, so the snapshot
+// is not read. 'mysql' is not trusted for that: it is stream_state.flavor's
+// default, which an old or stopped MariaDB index can carry. Best-effort and additive: a read that fails is
 // logged and leaves the lookup as typed, which is what it was before #2007.
 func expandSysVersionedPKFilter(ctx context.Context, db *sql.DB, opts *query.Options) {
-	switch query.SourceFlavor(db) {
-	case "mysql", "postgres":
+	// Only PostgreSQL rules versioning out: stream_state.flavor defaults
+	// to 'mysql', so an old or stopped MariaDB index can carry it.
+	if query.SourceFlavor(db) == "postgres" {
 		return
 	}
 	metas, err := versionedPKShape(ctx, db, opts.Schema, opts.Table)

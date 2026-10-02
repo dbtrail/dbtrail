@@ -925,13 +925,27 @@ func EnsureSchema(db *sql.DB) error {
 	// Every --pk lookup reads a table's newest snapshot by (schema_name,
 	// table_name) to tell whether it is system-versioned (#2007); the only
 	// other index on schema_snapshots leads with snapshot_id.
+	// Performance-only: an account without ALTER (a read-only console or
+	// MCP server) keeps working, with slower key lookups and one warning.
 	if err := ensureIndex(db, "schema_snapshots", "idx_table_snapshot",
 		`ALTER TABLE schema_snapshots ADD INDEX idx_table_snapshot (schema_name, table_name, snapshot_id)`,
 	); err != nil {
-		return err
+		var mysqlErr *mysql.MySQLError
+		if !errors.As(err, &mysqlErr) || (mysqlErr.Number != 1142 && mysqlErr.Number != 1044) {
+			return err
+		}
+		snapshotIndexWarn.Do(func() {
+			slog.Warn("could not add index idx_table_snapshot to schema_snapshots; lookups by key will be slower; "+
+				"run any bintrail command once with an account that has ALTER on the index database to add it",
+				"error", err)
+		})
 	}
 	return nil
 }
+
+// snapshotIndexWarn keeps the missing-ALTER warning to once per process:
+// EnsureSchema runs on every command and, in the console, per request.
+var snapshotIndexWarn sync.Once
 
 // ensureIndex runs an idempotent ALTER TABLE ADD INDEX: checks
 // information_schema.STATISTICS, bails out if the index exists, and swallows

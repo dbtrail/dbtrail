@@ -36,7 +36,7 @@ var ErrPKTypeUnknown = errors.New("primary key type unknown")
 //
 // First it adds the stored spellings of a MariaDB system-versioned table's
 // key (#2007, expandSysVersionedPKFilter): that reads stream_state's source
-// flavor on every lookup and, unless the source is MySQL or PostgreSQL, the
+// flavor on every lookup and, unless the source is PostgreSQL, the
 // table's key from schema_snapshots (two reads on idx_table_snapshot). The
 // UUID/INET part reads the snapshot only when some typed component parses as
 // one of these types (in any spelling metadata.ParseMariaDBFixedKey accepts),

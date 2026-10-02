@@ -85,9 +85,10 @@ func TestSpellIndexPKFilter_versioningDroppedLater_2007(t *testing.T) {
 	}
 }
 
-// A source recorded as MySQL or PostgreSQL has no system versioning: the
-// lookup does not even read the snapshot.
-func TestSpellIndexPKFilter_mysqlSourceSkips_2007(t *testing.T) {
+// stream_state.flavor is NOT NULL DEFAULT 'mysql', so an old or stopped
+// MariaDB index can carry 'mysql': the flavor cannot rule versioning out, and
+// a snapshot whose key has a generated TIMESTAMP still expands the lookup.
+func TestSpellIndexPKFilter_mysqlStampedIndexStillExpands_2007(t *testing.T) {
 	db, _ := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
 	testutil.MustExec(t, db, "INSERT INTO schema_snapshots (snapshot_id, snapshot_time, schema_name, table_name, "+
@@ -99,8 +100,8 @@ func TestSpellIndexPKFilter_mysqlSourceSkips_2007(t *testing.T) {
 	if _, err := SpellIndexPKFilter(context.Background(), db, &opts); err != nil {
 		t.Fatal(err)
 	}
-	if opts.PKValues != "2" || len(opts.PKValuesIn) != 0 {
-		t.Fatalf("mysql source: PKValues=%q In=%q, want the lookup unchanged", opts.PKValues, opts.PKValuesIn)
+	if len(opts.PKValuesIn) != 3 {
+		t.Fatalf("mysql-stamped index: PKValues=%q In=%q, want the typed value plus both versioned spellings", opts.PKValues, opts.PKValuesIn)
 	}
 }
 

@@ -339,7 +339,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	// ── Spell a MariaDB UUID/INET key the way the index stores it ───────────
 	// The index keys those rows by the value's bytes; the operator types the
 	// text form. Unlike the #957 note above, this reads the snapshot: for a
-	// key that parses as one of these types, and, on a MariaDB or unrecorded
+	// key that parses as one of these types, and, on any non-PostgreSQL
 	// source, to tell whether the table is system-versioned (#2007), whose
 	// stored keys carry the row_end column. Either way the typed form stays
 	// among the candidates, so a stale snapshot can only add a spelling that
