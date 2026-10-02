@@ -224,7 +224,20 @@ jobs:
           BINTRAIL_REQUIRE_NODE: "1"
         run: go test ./... -race -count=1
 
-  integration:
+  # The MySQL integration suite, split in shards that run side by side.
+  # It used to be ONE job per MySQL version running every package one at a
+  # time, about 25 minutes. Each shard is its own runner with its own MySQL
+  # and S3 store, so packages inside a shard still run one at a time (they
+  # share that server's binlog) while the shards overlap. What runs where, and
+  # why only packages with integration-tagged tests, is in
+  # scripts/mysql-integration-shard.sh: the last shard takes every package the
+  # others do not name, so a new package can never go unrun.
+  #
+  # These cells are NOT the required checks. `integration (8.0)` and
+  # `integration (8.4)` are, and they are the `integration` job below, which
+  # collects every shard's result and test log and fails unless all of them
+  # ran and passed.
+  integration-shard:
     needs: changes
     runs-on: ubuntu-22.04
 
@@ -240,6 +253,10 @@ jobs:
       fail-fast: false
       matrix:
         mysql: ["8.0", "8.4"]
+        # Must list 1..SHARD_COUNT of scripts/mysql-integration-shard.sh: the
+        # script refuses a shard past its count, and the `integration` job
+        # fails when a shard's result is missing.
+        shard: [1, 2, 3]
 
     env:
       # Matches internal/testutil.DefaultDSN — set explicitly to mirror the
@@ -262,13 +279,8 @@ jobs:
       RUN: ${{ github.event_name != 'pull_request' || (needs.changes.outputs.dbgo == 'true' && (matrix.mysql == '8.4' || needs.changes.outputs.data == 'true')) }}
 
     steps:
-      # Step-level (not job-level) `if:` — see the note on the `changes` job.
-      # This job has a matrix, and a job-level `if:` evaluated before matrix
-      # expansion, which means the specifically-named required contexts
-      # (`integration (8.0)`, `integration (8.4)`) never got created at all
-      # on a skipped run, leaving those required checks permanently pending.
-      # Step-level `if:` lets the matrix still expand into both contexts;
-      # each just completes instantly with every step skipped.
+      # Step-level (not job-level) `if:`, as everywhere a matrix job reports
+      # under the gate (see the note on the `changes` job).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: env.RUN == 'true'
 
@@ -330,21 +342,6 @@ jobs:
           docker logs bintrail-test-mysql >&2 || true
           exit 1
 
-      # -p 1 serializes package execution. Integration tests share one MySQL
-      # instance with a single server-wide binlog; running packages in parallel
-      # lets one package's DDL/DML leak into another's binlog window (the binlog
-      # parser tests assert exact event counts). Serializing keeps each package
-      # the sole writer during its run.
-      #
-      # BINTRAIL_REQUIRE_MYSQL=1 (above) only catches a dial/ping failure INSIDE
-      # a test that actually runs — a build-tag or path drift that silently
-      # dropped the integration tests from this run would still exit 0 green
-      # with ZERO MySQL coverage. Close that false-green the same way the
-      # PostgreSQL-source job does: assert the flagship end-to-end and
-      # caching_sha2 auth-seam tests genuinely ran, not merely that `go test`
-      # exited 0. pipefail keeps the go-test exit code through the tee.
-      # (The paragraph above documents the integration-test step further down.)
-      #
       # An S3-compatible store for the #1453/#1454 leg: the SDK half uploads
       # through BINTRAIL_S3_ENDPOINT and the DuckDB half reads the object back
       # through the session's endpoint settings. The image, its pin and its
@@ -358,7 +355,16 @@ jobs:
         if: env.RUN == 'true'
         uses: ./.github/actions/s3-test-store
 
-      - name: Integration tests (-tags=integration)
+      # The shard's packages run one at a time against this job's MySQL: they
+      # share one server-wide binlog, and running two at once lets one
+      # package's DDL/DML leak into another's binlog window (the binlog parser
+      # tests assert exact event counts). The script first builds the shard's
+      # test binaries in parallel, which `go test -p 1` would build one by one.
+      #
+      # BINTRAIL_REQUIRE_MYSQL=1 (above) only catches a dial/ping failure INSIDE
+      # a test that actually runs. That a shard's key tests really ran is
+      # checked by the `integration` job, over every shard's log.
+      - name: Integration tests (-tags=integration, shard ${{ matrix.shard }})
         id: tests
         if: env.RUN == 'true'
         env:
@@ -366,8 +372,118 @@ jobs:
           BINTRAIL_TEST_MINIO_ACCESS_KEY: bintrail
           BINTRAIL_TEST_MINIO_SECRET_KEY: bintrail-it-secret
         run: |
-          set -o pipefail
-          go test -tags=integration -race -p 1 -count=1 -v ./... 2>&1 | tee /tmp/mysql-it.out
+          mkdir -p /tmp/mysql-it-shard
+          bash scripts/mysql-integration-shard.sh run ${{ matrix.shard }} /tmp/mysql-it-shard/mysql-it.out
+
+      # What the `integration` job reads: this shard's test log, how its tests
+      # step ended and whether its S3 store started. Written even when the
+      # tests failed, so the collector can say which shard and why.
+      - name: Record the shard result
+        if: ${{ !cancelled() && env.RUN == 'true' }}
+        env:
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
+          S3_READY: ${{ steps.s3store.outputs.ready }}
+        run: |
+          mkdir -p /tmp/mysql-it-shard
+          touch /tmp/mysql-it-shard/mysql-it.out
+          printf '%s\n' "$TESTS_OUTCOME" > /tmp/mysql-it-shard/outcome
+          printf '%s\n' "${S3_READY:-false}" > /tmp/mysql-it-shard/s3-ready
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() && env.RUN == 'true' }}
+        with:
+          name: mysql-it-${{ matrix.mysql }}-shard-${{ matrix.shard }}
+          path: /tmp/mysql-it-shard/
+          if-no-files-found: error
+          retention-days: 7
+
+  # The REQUIRED checks `integration (8.0)` and `integration (8.4)`: the name
+  # and matrix are kept exactly so branch protection does not change. It runs
+  # no tests; it collects the shards of its MySQL version and is green only
+  # when every shard ran and passed, then runs the false-green tripwires and
+  # the S3 check over all their logs together. `!cancelled()` makes it report
+  # even when a shard failed, which a plain `needs:` would turn into "skipped"
+  # (and a skipped required check counts as passing).
+  integration:
+    needs: [changes, integration-shard]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        mysql: ["8.0", "8.4"]
+    env:
+      # The same gate as integration-shard: when a cell's shards were told to
+      # skip, so is this.
+      RUN: ${{ github.event_name != 'pull_request' || (needs.changes.outputs.dbgo == 'true' && (matrix.mysql == '8.4' || needs.changes.outputs.data == 'true')) }}
+    steps:
+      # A failed `changes` job leaves every output empty, which reads as
+      # "skip" on a PR: refuse instead of passing on nothing.
+      - name: The changes job finished
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+        run: |
+          if [ "$CHANGES_RESULT" != success ]; then
+            echo "::error::the changes job ended '$CHANGES_RESULT', so it is unknown whether the MySQL ${{ matrix.mysql }} tests had to run"
+            exit 1
+          fi
+          if [ "$RUN" != true ]; then
+            echo "MySQL ${{ matrix.mysql }} integration tests are not needed for this change (see the note on the changes job)."
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.RUN == 'true'
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: env.RUN == 'true'
+        with:
+          pattern: mysql-it-${{ matrix.mysql }}-shard-*
+          path: /tmp/mysql-it-shards
+
+      # Every shard must have reported and passed. A missing result means the
+      # shard was cancelled, crashed before writing it, or the matrix and
+      # SHARD_COUNT disagree. Readiness of the S3 store is true only when it
+      # started in EVERY shard: a shard whose store was down skipped its S3
+      # tests.
+      - name: Collect the shards (MySQL ${{ matrix.mysql }})
+        id: s3store
+        if: env.RUN == 'true'
+        run: |
+          count="$(bash scripts/mysql-integration-shard.sh count)"
+          bad=0
+          ready=true
+          : > /tmp/mysql-it.out
+          for i in $(seq 1 "$count"); do
+            d="/tmp/mysql-it-shards/mysql-it-${{ matrix.mysql }}-shard-$i"
+            if [ ! -f "$d/outcome" ]; then
+              echo "::error::shard $i of $count left no result (cancelled, crashed, or not in the matrix)"
+              bad=1
+              ready=false
+              continue
+            fi
+            outcome="$(cat "$d/outcome")"
+            if [ "$outcome" != success ]; then
+              echo "::error::shard $i of $count: tests ended '$outcome'; its log is in the integration-shard (${{ matrix.mysql }}, $i) job"
+              bad=1
+            fi
+            [ "$(cat "$d/s3-ready")" = true ] || ready=false
+            cat "$d/mysql-it.out" >> /tmp/mysql-it.out
+          done
+          extra="$(find /tmp/mysql-it-shards -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+          if [ "$extra" -gt "$count" ]; then
+            echo "::error::found $extra shard results, SHARD_COUNT is $count: the matrix and the script disagree"
+            bad=1
+          fi
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+          grep -E '^(ok|FAIL)'$'\t' /tmp/mysql-it.out || true
+          exit "$bad"
+
+      # The false-green tripwires: these tests must have PASSED in some shard,
+      # not merely not failed. They live in different shards, so they are
+      # checked here over every shard's log.
+      - name: Key tests ran
+        if: env.RUN == 'true'
+        run: |
           grep -q -- '--- PASS: TestEndToEnd_fullPipeline' /tmp/mysql-it.out \
             || { echo "FATAL: MySQL end-to-end integration test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestCachingSha2ColdAuthSeam' /tmp/mysql-it.out \
@@ -389,12 +505,10 @@ jobs:
           grep -q -- '--- PASS: TestOne_SourceFlavor_mysqlDetectedWhenUndeclared ' /tmp/mysql-it.out \
             || { echo "FATAL: source-flavor detection test did not run (false-green tripwire)" >&2; exit 1; }
 
-      # The S3 tripwire, kept apart from the step above so a store that did
-      # not start is red even when every other test passed. It runs when the
-      # tests failed too, and stays quiet only when the tests never ran
-      # (an earlier step already made the job red).
+      # The S3 tripwire, kept apart from the steps above so a store that did
+      # not start is red even when every test passed.
       - name: S3-compatible leg
-        if: ${{ !cancelled() && env.RUN == 'true' && steps.tests.outcome != 'skipped' }}
+        if: ${{ !cancelled() && env.RUN == 'true' }}
         uses: ./.github/actions/s3-test-store-check
         with:
           ready: ${{ steps.s3store.outputs.ready }}
