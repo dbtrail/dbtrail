@@ -1909,7 +1909,7 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 	for _, p := range wanted {
 		t, name := p.table, commentSafe(in.stateLabel(p))
 		if p.renamed != "" {
-			fmt.Fprintf(b, "-- %s: %s\n", name, p.renamed)
+			fmt.Fprintf(b, "-- %s: %s\n", name, commentSafe(p.renamed))
 		}
 		for _, line := range decimalComments(t) {
 			fmt.Fprintf(b, "-- %s: %s\n", name, line)

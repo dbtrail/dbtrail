@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -379,5 +380,29 @@ func TestOnlyViews_keyedBySourceName_2013(t *testing.T) {
 	got := createdViews(t, GenerateViews(in))
 	if !slices.Equal(got, []string{"demo.order.items"}) {
 		t.Errorf("OnlyViews{demo.\"order.items\"} defined %v", got)
+	}
+}
+
+// A name with a line break is legal in MySQL. Every comment the file writes
+// about it must stay one comment, or the rest of the name becomes SQL.
+func TestSourceNames_lineBreakInANameStaysInsideTheComment_2013(t *testing.T) {
+	root := t.TempDir()
+	in := input2013(root,
+		writeTableFile2013(t, root, "demo", "X\nSELECT 1", "f1", "upper"),
+		writeTableFile2013(t, root, "demo", "x\nSELECT 1", "f2", "lower"),
+		writeTableFile2013(t, root, "temp", "t\nDROP", "f3", "skipped"),
+	)
+	sqlText := Generate(in)
+	db := execViews(t, sqlText)
+	if got := statusesOf(t, db, "demo.\"x\nSELECT 1_2\"", sqlText); !slices.Equal(got, []string{"lower"}) {
+		t.Errorf("the renamed view returned %v", got)
+	}
+	// With every quoted identifier and literal taken out, the name's second
+	// line must not start a line of its own: that is SQL a comment leaked.
+	unquoted := regexp.MustCompile(`"(?:[^"]|"")*"|'(?:[^']|'')*'`).ReplaceAllString(sqlText, "")
+	for _, line := range strings.Split(unquoted, "\n") {
+		if strings.HasPrefix(line, "SELECT 1") || strings.HasPrefix(line, "DROP") {
+			t.Errorf("a name's second line escaped its comment: %q", line)
+		}
 	}
 }
