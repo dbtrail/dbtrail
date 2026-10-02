@@ -68,6 +68,10 @@ type Generator struct {
 	// checklist after COMMIT on the MySQL path (#1003). Opt-in — see
 	// SetRestoreAutoIncrement. Inert on the PostgreSQL path.
 	restoreAutoIncrement bool
+
+	// flavor is the index's source flavor, read once by sourceFlavor (#2007).
+	flavor     string
+	flavorRead bool
 }
 
 // New creates a Generator emitting MySQL-dialect SQL. resolver may be nil — in that
@@ -323,6 +327,7 @@ func (g *Generator) generate(rows []query.ResultRow, w *countingWriter) (int, []
 	drift := map[string]map[string]bool{} // "schema.table" -> set of drifted columns
 	var driftOrder []string               // table keys in first-seen order, for a stable message
 	var genFailures []genFailure          // per-event generation errors, in first-seen order (#784)
+	var svFailures []genFailure           // system-versioning refusals (#2007), reported as such
 
 	written := 0
 	// Body-relative statement ends; rebased onto w's counter once the preamble
@@ -331,6 +336,11 @@ func (g *Generator) generate(rows []query.ResultRow, w *countingWriter) (int, []
 	touched := map[string]bool{} // "schema\x00table" of every table the emitted SQL writes (#1003)
 	for _, row := range rows {
 		fmt.Fprintln(&body)
+
+		// A system-versioned table's binlog also carries history versions
+		// and logs a delete as an UPDATE of row_end (#2007).
+		capturedType := row.EventType
+		row, svSkip, svErr := g.sysVersionedReversal(row)
 
 		gtidSuffix := ""
 		if row.GTID != nil {
@@ -348,6 +358,23 @@ func (g *Generator) generate(rows []query.ResultRow, w *countingWriter) (int, []
 			row.EventTimestamp.Format("2006-01-02 15:04:05"),
 			gtidSuffix,
 		)
+		if svErr != nil {
+			fmt.Fprintf(&body, "-- ERROR generating reversal for event %d: %s\n",
+				row.EventID, SanitizeForComment(svErr.Error()))
+			svFailures = append(svFailures, genFailure{
+				eventID: row.EventID, schemaName: row.SchemaName, tableName: row.TableName,
+				pkValues: row.PKValues, err: svErr,
+			})
+			continue
+		}
+		if svSkip != "" {
+			fmt.Fprintf(&body, "-- skipped, system-versioned table: %s\n", SanitizeForComment(svSkip))
+			continue
+		}
+		if row.EventType != capturedType {
+			fmt.Fprintf(&body, "-- system-versioned table: MariaDB logged this delete as an %s that ended the row's current version\n",
+				eventTypeName(capturedType))
+		}
 
 		stmt, cols, err := g.buildStatement(row)
 		if err != nil {
@@ -397,6 +424,9 @@ func (g *Generator) generate(rows []query.ResultRow, w *countingWriter) (int, []
 	// (#784) — checked ahead of the drift refusal because a nil/malformed row
 	// image is a more fundamental data-integrity problem than a since-renamed
 	// column, and both are fail-loud refusals returning zero statements.
+	if len(svFailures) > 0 {
+		return 0, nil, systemVersionedError(svFailures)
+	}
 	if len(genFailures) > 0 {
 		return 0, nil, partialGenerationError(genFailures)
 	}
@@ -1320,6 +1350,13 @@ func (g *Generator) pkWhereClause(resolver *metadata.Resolver, schema, table str
 				"schema", schema, "table", table, "error", err)
 		} else {
 			pkCols := tm.PKColumnMetas()
+			// A system-versioned table's key carries its ROW END column
+			// (#2007). Plain DML on such a table only ever touches current
+			// rows, so the declared key alone names the row, without
+			// spelling the server's current-row marker into the SQL.
+			if end, ok := g.sysVersionedEnd(tm); ok {
+				pkCols = slices.DeleteFunc(slices.Clone(pkCols), func(c metadata.ColumnMeta) bool { return c.Name == end })
+			}
 			if len(pkCols) > 0 {
 				// A BLOB/TEXT column can be a PK with a prefix length, and its
 				// row value is the same base64 string as elsewhere — decode it or

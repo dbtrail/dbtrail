@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -408,6 +410,16 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// see reconstruct.IndexPKSpelling and ReadBaselineRow (#1155/#1157).
 	pkMetas := reconstruct.ResolvePKMetasAt(db, recSchema, recTable, snapshotTime)
 
+	// A system-versioned table's changes are stored under the key plus ROW
+	// END, and its binlog carries history versions and versioned deletes:
+	// look the row up under the stored spellings and read its events for
+	// what they mean to the current row (#2007).
+	sysVer, pkSearch, err := reconstruct.PrepareSingleRowLookup(cmd.Context(), db, recSchema, recTable, recPK,
+		bmeta.CreateTableSQL, pkMetas, slices.Collect(maps.Keys(pkFilter)), snapshotTime, at)
+	if err != nil {
+		return err
+	}
+
 	// A nil baselineRow (this PK absent from the snapshot) is NOT resolved here:
 	// it flows past the event fetch below so the "no row found" error can be
 	// told apart from a PK-changing UPDATE that stored the row under a
@@ -430,9 +442,12 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 		// that is silent and wrong rather than loud: the baseline lookup above
 		// resolves such a key, the fetch returns zero events, and ApplyAt then
 		// renders baseline-era state as the state at --at.
-		PKValues: reconstruct.IndexPKSpelling(recPK, pkMetas),
+		PKValues: pkSearch,
 		Since:    &snapshotTime,
 		Until:    &at,
+	}
+	if sysVer != nil {
+		sysVer.ExpandKey(&opts)
 	}
 	duckTuning, err := DuckDBTuningFromFlags(cmd)
 	if err != nil {
@@ -466,6 +481,11 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("fetch binlog events: %w", err)
 	}
 	slog.Debug("fetched binlog events", "count", len(events))
+	if sysVer != nil {
+		if events, err = sysVer.Normalize(events); err != nil {
+			return err
+		}
+	}
 
 	// No baseline row for this PK (the fixed BINARY(n) pad-and-retry already
 	// ran inside ReadBaselineRow). Refuse — but tell a genuinely-absent

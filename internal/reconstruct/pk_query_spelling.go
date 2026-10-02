@@ -34,9 +34,13 @@ var ErrPKTypeUnknown = errors.New("primary key type unknown")
 // spellings are added beside the typed ones, and the returned map (typed to
 // stored) lets a caller that groups rows by the typed key find them.
 //
-// It reads the schema snapshot only when some typed component parses as one
-// of these types (in any spelling metadata.ParseMariaDBFixedKey accepts), so a
-// numeric or plain text key costs nothing. When one does and the snapshot
+// First it adds the stored spellings of a MariaDB system-versioned table's
+// key (#2007, expandSysVersionedPKFilter): that reads stream_state's source
+// flavor on every lookup and, unless the source is PostgreSQL, the
+// table's key from schema_snapshots (two reads on idx_table_snapshot). The
+// UUID/INET part reads the snapshot only when some typed component parses as
+// one of these types (in any spelling metadata.ParseMariaDBFixedKey accepts),
+// so a numeric or plain text key costs it nothing. When one does and the snapshot
 // cannot say what the column is, the lookup is refused with ErrPKTypeUnknown
 // instead of answering "no history" on a guess. A table the request's profile
 // denies, or leaves out of its allow list, is left alone, so the answer cannot
@@ -68,6 +72,11 @@ func SpellIndexPKFilter(ctx context.Context, db *sql.DB, opts *query.Options) (m
 			return nil, nil
 		}
 	}
+	// A system-versioned table stores each change under the key plus ROW
+	// END: spell the declared key that way first (#2007), so the UUID/INET
+	// re-spelling below sees values as wide as the stored key and leaves the
+	// marker component alone (it is a TIMESTAMP, never a fixed-width type).
+	expandSysVersionedPKFilter(ctx, db, opts)
 	typed := opts.PKValuesIn
 	if opts.PKValues != "" {
 		typed = []string{opts.PKValues}

@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -336,9 +338,12 @@ func runQuery(cmd *cobra.Command, args []string) error {
 
 	// ── Spell a MariaDB UUID/INET key the way the index stores it ───────────
 	// The index keys those rows by the value's bytes; the operator types the
-	// text form. Unlike the #957 note above, this reads the snapshot, but only
-	// for a key that parses as one of these types, and it keeps the typed form
-	// as the alternate. After the profile rules, so a denied table's key is
+	// text form. Unlike the #957 note above, this reads the snapshot: for a
+	// key that parses as one of these types, and, on any non-PostgreSQL
+	// source, to tell whether the table is system-versioned (#2007), whose
+	// stored keys carry the row_end column. Either way the typed form stays
+	// among the candidates, so a stale snapshot can only add a spelling that
+	// matches nothing. After the profile rules, so a denied table's key is
 	// never described.
 	spelledPKs, err := reconstruct.SpellIndexPKFilter(cmd.Context(), db, &opts)
 	if err != nil {
@@ -349,8 +354,10 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	// (#1440) The cast both engines compare through is chosen from the PK
 	// column's declared signedness, and a composite or non-integer key is
 	// refused here, BEFORE any query runs. Only loaded when a range was
-	// asked for: an exact --pk lookup never consults the snapshot (see the
-	// staleness note above). After the profile rules, as the MCP tools do.
+	// asked for: an exact --pk lookup reads the snapshot only additively
+	// (the spelling step above keeps the typed value), never to narrow the
+	// key (see the staleness note above). After the profile rules, as the
+	// MCP tools do.
 	if pkRange != nil {
 		resolver, resolverErr := metadata.NewResolver(db, 0)
 		if err := resolvePKRange(resolver, resolverErr, qSchema, qTable, pkRange); err != nil {
@@ -507,7 +514,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 
 	var n int
 	if groupedJSON {
-		n, err = writeGroupedJSON(qPKs, spelledPKs, results, os.Stdout)
+		n, err = writeGroupedJSON(qPKs, spelledPKs, opts.PKAliases, results, os.Stdout)
 	} else {
 		n, err = query.Format(results, qFormat, os.Stdout)
 	}
@@ -732,7 +739,7 @@ func sanitizeArchiveErrorMessage(err error) string {
 // separate lookup. Returns the total number of events written across all
 // groups (matching the row-count semantic of query.Format for the truncation
 // warning at the call site).
-func writeGroupedJSON(pks []string, spelled map[string]string, rows []query.ResultRow, w io.Writer) (int, error) {
+func writeGroupedJSON(pks []string, spelled, aliases map[string]string, rows []query.ResultRow, w io.Writer) (int, error) {
 	type groupedEvent struct {
 		EventID        uint64         `json:"event_id"`
 		BinlogFile     string         `json:"binlog_file"`
@@ -795,6 +802,17 @@ func writeGroupedJSON(pks []string, spelled map[string]string, rows []query.Resu
 		// label carries (reconstruct.SpellIndexPKFilter).
 		if sp, ok := spelled[pk]; ok && sp != pk && sp != esc {
 			evs = append(evs, byPK[sp]...)
+		}
+		// Spellings a system-versioned lookup added for this value (#2007),
+		// each possibly re-spelled for a UUID/INET key.
+		for _, added := range slices.Sorted(maps.Keys(aliases)) {
+			if from := aliases[added]; from != pk && from != esc {
+				continue
+			}
+			evs = append(evs, byPK[added]...)
+			if sp, ok := spelled[added]; ok && sp != added {
+				evs = append(evs, byPK[sp]...)
+			}
 		}
 		groups = append(groups, group{PK: pk, Events: evs})
 		total += len(evs)

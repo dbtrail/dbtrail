@@ -336,7 +336,7 @@ func ArchiveSkipNeedsPlan(opts Options, rows []ResultRow) bool {
 	if opts.Limit > 0 && len(rows) >= opts.Limit && OrderDirection(opts.Order) == "DESC" {
 		return true
 	}
-	return opts.LimitPerPK > 0 && opts.PKValuesAlt == "" &&
+	return opts.LimitPerPK > 0 && opts.PKValuesAlt == "" && len(opts.PKAliases) == 0 &&
 		(opts.PKValues != "" || len(opts.PKValuesIn) > 0)
 }
 
@@ -533,6 +533,15 @@ func perPKSatisfiedLive(opts Options, rows []ResultRow, plan *QueryPlan) bool {
 	// across two partitions and "this PK has its N" stops being well defined.
 	// Refused rather than approximated.
 	if opts.PKValuesAlt != "" {
+		return false
+	}
+	// The same holds for the spellings a system-versioned lookup adds
+	// (#2007): one per current-row marker, plus the typed key itself. An
+	// index normally holds rows under only one of them, so "every spelling
+	// has its N live" never holds, and judging by the typed value instead
+	// would skip an archive whose rows, under a spelling with no live row,
+	// the per-spelling trim keeps. Refused, as for PKValuesAlt.
+	if len(opts.PKAliases) > 0 {
 		return false
 	}
 	names := opts.PKValuesIn

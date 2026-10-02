@@ -173,7 +173,7 @@ func resolveBaselineLookup(cfg Config, t *Target, args ReconstructArgs) (FindBas
 
 // reconstructPKColumns returns the primary-key column names for schema.table
 // from the loaded schema snapshot, in ordinal order.
-func reconstructPKColumns(resolver *metadata.Resolver, schema, table string) ([]string, error) {
+func reconstructPKColumns(resolver *metadata.Resolver, schema, table, flavor string) ([]string, error) {
 	if resolver == nil {
 		return nil, errors.New("no schema snapshot available to determine primary-key columns; run `bintrail snapshot`")
 	}
@@ -184,7 +184,7 @@ func reconstructPKColumns(resolver *metadata.Resolver, schema, table string) ([]
 	if len(tm.PKColumns) == 0 {
 		return nil, fmt.Errorf("table %s.%s has no primary key; reconstruct requires one", schema, table)
 	}
-	return tm.PKColumns, nil
+	return reconstruct.SingleRowKeyColumns(tm, flavor), nil
 }
 
 // buildPKFilter zips ordinal PK column names with the pipe-delimited values.
@@ -276,7 +276,7 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 			}
 			resolver = r
 		}
-		pkCols, err := reconstructPKColumns(resolver, args.Schema, args.Table)
+		pkCols, err := reconstructPKColumns(resolver, args.Schema, args.Table, query.SourceFlavor(t.DB))
 		if err != nil {
 			return ErrorResult(err), nil, nil
 		}
@@ -326,6 +326,14 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 		if err != nil {
 			return ErrorResult(fmt.Errorf("read baseline metadata: %w", err)), nil, nil
 		}
+		// A MariaDB system-versioned table (#2007): looked up by its
+		// declared key under the stored spellings, its events read for the
+		// current row, or refused; never the snapshot row as if unchanged.
+		sysVer, pkSearch, err := reconstruct.PrepareSingleRowLookup(ctx, t.DB, args.Schema, args.Table, args.PK,
+			bmeta.CreateTableSQL, pkMetas, pkCols, snapshotTime, atTime)
+		if err != nil {
+			return ErrorResult(err), nil, nil
+		}
 		if err := reconstruct.CheckDestructiveDDL(ctx, t.DB, args.Schema, args.Table,
 			reconstruct.DDLWindow{Since: snapshotTime, Until: atTime, Anchor: reconstruct.AnchorOf(bmeta),
 				Mark: reconstruct.ParseDDLMark(bmeta.DDLMark)}); err != nil {
@@ -367,7 +375,7 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 				// baseline-era state as the state at `at` — a fail-loud to
 				// fail-silent regression (#1155's indexPKSpelling hazard,
 				// same as the CLI).
-				PKValues: reconstruct.IndexPKSpelling(args.PK, pkMetas),
+				PKValues: pkSearch,
 				Since:    &snapshotTime,
 				Until:    &atTime,
 				Order:    "", // ASC: ApplyAt/BuildHistory require chronological input.
@@ -385,6 +393,9 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 			// a stale registration is `bintrail archive reconcile --repair` —
 			// full wording in reconstructFetchError below.
 			ArchiveFetcher: parquetquery.Fetch,
+		}
+		if sysVer != nil {
+			sysVer.ExpandKey(&fmOpts.Opts)
 		}
 		// FetchMergedFull, not FetchMerged: an MCP client sees only the JSON,
 		// never the server log, so a skipped archive source or a planner
@@ -422,6 +433,11 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 		// and History carry real values.
 		reconstruct.MapEventEnumLabels(t.DB, resolver, args.Schema, args.Table, rows)
 		reconstruct.DecodeEventBinaries(t.DB, args.Schema, args.Table, rows)
+		if sysVer != nil {
+			if rows, err = sysVer.Normalize(rows); err != nil {
+				return ErrorResult(err), nil, nil
+			}
+		}
 
 		res := reconstructResult{
 			Schema:       args.Schema,

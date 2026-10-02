@@ -221,6 +221,11 @@ type Options struct {
 	// so a stale snapshot never regresses a previously-correct lookup.
 	PKValuesAlt string
 	PKValuesIn  []string // multi-PK lookup (mutually exclusive with PKValues)
+	// PKAliases maps a PKValuesIn spelling a lookup ADDED to the value the
+	// caller typed (a system-versioned table's stored key, #2007), so a
+	// caller grouping results by typed key can put those rows back in their
+	// group. Not part of the filter.
+	PKAliases map[string]string
 	// PKRange restricts results to a single-column integer primary key
 	// within an inclusive window (#1440). Mutually exclusive with
 	// PKValues/PKValuesIn, requires Schema and Table, and must be resolved
@@ -723,16 +728,22 @@ func buildQuery(opts Options) (string, []any) {
 			args = append(args, opts.PKValues, opts.PKValues)
 		}
 	} else if len(opts.PKValuesIn) > 0 {
-		// Multi-PK lookup. The pk_hash generated column index can't help with
-		// IN-lists, so the planner falls back to per-partition scans pruned by
-		// (schema_name, table_name, event_timestamp). Callers supply schema
-		// and table to keep the scan bounded.
+		// Multi-PK lookup: pk_hash IN for idx_pk_hash (schema_name,
+		// table_name, pk_hash, event_timestamp), pk_values IN as the
+		// collision guard, the same pair as the single-PK path. A bare
+		// pk_values IN scanned the table's whole time window, and every
+		// system-versioned --pk lookup lands here (#2007).
+		hashes := make([]string, len(opts.PKValuesIn))
 		placeholders := make([]string, len(opts.PKValuesIn))
+		for i, v := range opts.PKValuesIn {
+			hashes[i] = "SHA2(?, 256)"
+			args = append(args, v)
+		}
 		for i, v := range opts.PKValuesIn {
 			placeholders[i] = "?"
 			args = append(args, v)
 		}
-		where = append(where, "pk_values IN ("+strings.Join(placeholders, ",")+")")
+		where = append(where, "pk_hash IN ("+strings.Join(hashes, ",")+") AND pk_values IN ("+strings.Join(placeholders, ",")+")")
 	}
 	if opts.PKRange != nil {
 		// Numeric window over a single-column integer key (#1440). The cast

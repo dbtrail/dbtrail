@@ -1185,16 +1185,20 @@ func ReconstructTable(
 			return nil, fullTablePKTypeRefusal(schema, table, pkCol)
 		}
 	}
-	// A generated column inside the PK — the MariaDB system-versioning shape
-	// (#1266) — can never canonicalize: the baseline omits generated columns,
-	// so every probe row would die with MissingPKColumnError deep in the
-	// merge. Refuse up front with the versioning-aware message instead; see
-	// GeneratedPKColumn for why a reduced join key is NOT the fix.
+	// A generated column inside the PK can never canonicalize: the baseline
+	// omits generated columns, so every probe row would die with
+	// MissingPKColumnError deep in the merge. The one such shape this fold
+	// reads is MariaDB system versioning (#2007), whose generated member is the
+	// ROW END column MariaDB appends to the declared key: when the baseline's
+	// own CREATE TABLE says so, the fold keys the table on the declared key and
+	// reads each event for what it means to the current rows (sysVersioned).
+	// Every other generated member keeps the up-front refusal (#1266).
 	// Deliberately AFTER the type loop: an empty DataType must keep winning
 	// the #1009 wrong-path verdict (PG-shaped snapshot on the MySQL path),
 	// which only the type gate discriminates.
-	if pkCol, ok := GeneratedPKColumn(pkCols); ok {
-		return nil, fullTableGeneratedPKRefusal(schema, table, pkCol)
+	sv, pkCols, err := sysVersioningFor(schema, table, bmeta.CreateTableSQL, pkCols)
+	if err != nil {
+		return nil, err
 	}
 
 	// For DATETIME/TIMESTAMP PK columns, warn loudly if the column_type
@@ -1402,6 +1406,7 @@ func ReconstructTable(
 		Schema:         schema,
 		Table:          table,
 		PKCols:         pkCols,
+		SysVersioned:   sv,
 		Opts:           fetchOpts,
 		AllowGaps:      cfg.AllowGaps,
 		ArchiveFetcher: fetcher,
@@ -1696,6 +1701,15 @@ func checkPostBaselineColumns(in mergeInput, changes map[string]*query.ResultRow
 			slog.Debug("full-table reconstruct: generated column(s) in delta events left out of the output, the server recomputes them",
 				"schema", in.Schema, "table", in.Table, "columns", strings.Join(dropped, ", "))
 		}
+	}
+	if len(extra) > 0 && onlyPeriodColumns(extra, in.CreateTableSQL) {
+		// Versioning added (and maybe dropped) inside the window: only the
+		// period columns are "new", and the events carrying them are a
+		// versioned table's (#2007).
+		return fmt.Errorf(
+			"full-table reconstruct: %s.%s was system-versioned during part of this window (its events carry the "+
+				"period column(s) %s, which the snapshot this starts from does not have); a new full snapshot of the "+
+				"table cures this: %w", in.Schema, in.Table, strings.Join(extra, ", "), ErrSchemaChanged)
 	}
 	if len(extra) > 0 {
 		return fmt.Errorf(
@@ -2491,6 +2505,8 @@ func reconstructBinlogOnly(
 	// versioned table's history-row inserts fold under their own full
 	// pk_values and would be emitted as duplicate live rows (the output
 	// column list excludes generated columns, so nothing distinguishes them).
+	// Unlike the baseline path it cannot read a versioned table (#2007): the
+	// decision needs a snapshot's CREATE TABLE, and there is none here.
 	if pkCol, ok := GeneratedPKColumn(pkCols); ok {
 		return nil, fullTableGeneratedPKRefusal(schema, table, pkCol)
 	}

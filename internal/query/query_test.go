@@ -600,14 +600,19 @@ func TestBuildQuery_pkValuesIn(t *testing.T) {
 	opts := Options{Schema: "db", Table: "t", PKValuesIn: []string{"1", "2", "3"}, Limit: 10}
 	q, args := buildQuery(opts)
 
-	if !strings.Contains(q, "pk_values IN (?,?,?)") {
-		t.Errorf("expected pk_values IN (?,?,?) in query: %s", q)
+	// pk_hash IN reaches idx_pk_hash (schema_name, table_name, pk_hash, ...),
+	// which a bare pk_values IN cannot: without it a --pks lookup (and every
+	// system-versioned --pk lookup, which expands into PKValuesIn, #2007)
+	// scans the table's whole window. pk_values IN stays as the collision
+	// guard, exactly as the single-PK pair.
+	if !strings.Contains(q, "pk_hash IN (SHA2(?, 256),SHA2(?, 256),SHA2(?, 256)) AND pk_values IN (?,?,?)") {
+		t.Errorf("expected the pk_hash IN + pk_values IN pair in query: %s", q)
 	}
-	if strings.Contains(q, "SHA2") {
-		t.Errorf("PKValuesIn must not use the SHA2 single-PK path: %s", q)
+	if strings.Contains(q, "pk_hash = SHA2") {
+		t.Errorf("PKValuesIn must not use the single-PK predicate: %s", q)
 	}
-	// Args order: schema, table, pk1, pk2, pk3, limit
-	wantArgs := []any{"db", "t", "1", "2", "3", 10}
+	// Args order: schema, table, hashes, values, limit
+	wantArgs := []any{"db", "t", "1", "2", "3", "1", "2", "3", 10}
 	if fmt.Sprintf("%v", args) != fmt.Sprintf("%v", wantArgs) {
 		t.Errorf("args mismatch: got %v want %v", args, wantArgs)
 	}
@@ -655,8 +660,8 @@ func TestBuildQuery_limitPerPK(t *testing.T) {
 	if !strings.HasSuffix(q, joinSuffix) {
 		t.Errorf("query must end at the JOIN (no outer ORDER BY over wide cols): %s", q)
 	}
-	// Args: schema, table, pk1, pk2, limitPerPK, limit
-	wantArgs := []any{"db", "t", "1", "2", 1, 100}
+	// Args: schema, table, pk1, pk2 (hashes), pk1, pk2 (values), limitPerPK, limit
+	wantArgs := []any{"db", "t", "1", "2", "1", "2", 1, 100}
 	if fmt.Sprintf("%v", args) != fmt.Sprintf("%v", wantArgs) {
 		t.Errorf("args mismatch: got %v want %v", args, wantArgs)
 	}

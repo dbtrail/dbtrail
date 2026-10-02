@@ -272,7 +272,8 @@ CREATE TABLE schema_snapshots (
     data_type       VARCHAR(64) NOT NULL,
     is_nullable     VARCHAR(3)  NOT NULL,
     column_default  TEXT DEFAULT NULL,
-    INDEX idx_snapshot_table (snapshot_id, schema_name, table_name)
+    INDEX idx_snapshot_table (snapshot_id, schema_name, table_name),
+    INDEX idx_table_snapshot (schema_name, table_name, snapshot_id)
 );
 ```
 

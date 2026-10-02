@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS schema_snapshots (
     column_default   TEXT         DEFAULT NULL,
     is_generated     TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '1 if STORED or VIRTUAL generated column',
     INDEX idx_snapshot_id    (snapshot_id),
-    INDEX idx_snapshot_table (snapshot_id, schema_name, table_name)
+    INDEX idx_snapshot_table (snapshot_id, schema_name, table_name),
+    INDEX idx_table_snapshot (schema_name, table_name, snapshot_id)
 ) ENGINE=InnoDB;
 -- Note: snapshot_id is NOT the auto-increment row ID. It is allocated by the
 -- snapshot command via MAX(snapshot_id)+1 and shared by all rows of a snapshot.

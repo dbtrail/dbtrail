@@ -142,17 +142,18 @@ func PKTypeGateReason(c metadata.ColumnMeta, surface, action string) string {
 // can be built and the merge would die deep in the probe with
 // MissingPKColumnError on every row.
 //
-// Why the gates that call this REFUSE instead of dropping the column from the
-// join key (the fix direction #1266 first suggested): the binlog does NOT
-// carry only current-state rows for a versioned table. Verified against
-// MariaDB 11.4: an UPDATE logs the current-row update PLUS a Write_rows for
-// the history row (same remaining key, row_end = now), and a DELETE logs no
-// Delete_rows at all — it is an Update_rows tombstone (row_end sentinel →
-// now). Under a reduced key the history insert would overwrite the current
-// row in the last-write-wins change map, orphan history rows would be emitted
-// as duplicate live rows, and tombstoned deletes would resurrect — silent
-// corruption where today's refusal is loud. Supporting these tables takes
-// versioning-aware fold semantics, not a smaller key.
+// Why the gates that call this do not simply drop the column from the join
+// key: the binlog does NOT carry only current-state rows for a versioned
+// table. Verified against MariaDB 11.4 and 11.8: an UPDATE logs the
+// current-row update PLUS a Write_rows for the history row (same remaining
+// key, row_end = now), and a DELETE logs no Delete_rows at all — it is an
+// Update_rows tombstone (row_end marker → now). Under a reduced key alone the
+// history insert would overwrite the current row in the last-write-wins change
+// map, orphan history rows would be emitted as duplicate live rows, and
+// tombstoned deletes would resurrect. Full-table reconstruct (and so snapshot
+// refresh) reads these tables since #2007 by reading each event for what it
+// means to the current rows (sysVersioned in sysversion.go) on top of the
+// reduced key; the surfaces that still call this gate do not.
 func GeneratedPKColumn(pkCols []metadata.ColumnMeta) (metadata.ColumnMeta, bool) {
 	for _, c := range pkCols {
 		if c.IsGenerated {
@@ -170,19 +171,17 @@ func GeneratedPKGateReason(c metadata.ColumnMeta, surface string) string {
 	return fmt.Sprintf(
 		"primary-key column %q is a generated column — most commonly the MariaDB system-versioning shape, which extends "+
 			"a versioned table's PK with its ROW END period column — and baselines deliberately omit generated columns, "+
-			"so %s cannot build the baseline-side PK join key for this table; dropping the column from the key instead "+
-			"would corrupt silently, because a versioned table's binlog carries history rows (as inserts) and versioned "+
-			"deletes (as row_end updates) under the same remaining key; query and recover are not gated, and the CLI's "+
-			"single-row reconstruct with an explicit PK column list also works", c.Name, surface)
+			"so %s cannot build the baseline-side PK join key for this table; it does not read system-versioned tables, "+
+			"whose binlog carries history rows (as inserts) and versioned deletes (as row_end updates) under the same "+
+			"remaining key. Full-table reconstruct and snapshot refresh do read them, and query and recover are not gated", c.Name, surface)
 }
 
-// fullTableGeneratedPKRefusal is the error both full-table reconstruct paths
-// (baseline merge and binlog-only fallback) return when the PK contains a
-// generated column, so the two cannot drift. Classified as ErrGeneratedPK
-// (via GeneratedPKRefusalError) so machine callers need no string matching.
 func fullTableGeneratedPKRefusal(schema, table string, pkCol metadata.ColumnMeta) error {
-	return GeneratedPKRefusalError(fmt.Sprintf("full-table reconstruct: %s.%s: %s", schema, table,
-		GeneratedPKGateReason(pkCol, "full-table reconstruct")))
+	return GeneratedPKRefusalError(fmt.Sprintf("full-table reconstruct: %s.%s: primary-key column %q is a generated "+
+		"column, and baselines deliberately omit generated columns, so the baseline-side PK join key cannot be built. "+
+		"The one such key this reads is MariaDB system versioning's ROW END column, and only when the snapshot it "+
+		"starts from declares the table WITH SYSTEM VERSIONING (#2007): if versioning was added after that snapshot "+
+		"was taken, a new full snapshot cures this", schema, table, pkCol.Name))
 }
 
 // fullTablePKTypeRefusal is the error ReconstructTable's PK-type gate returns

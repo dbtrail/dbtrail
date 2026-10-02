@@ -129,12 +129,11 @@ func TestInsertBatch_binaryPrimaryKey(t *testing.T) {
 	// rebuilt one ever diverged, this returns zero rows — the silent-miss
 	// failure mode, not a loud one.
 	//
-	// NOT every read path uses this pair: the multi-PK --pks filter builds a
-	// bare `pk_values IN (…)` with no pk_hash term (query.go:433), and the
-	// Parquet archive path likewise matches on pk_values alone
-	// (internal/parquetquery/parquetquery.go:929,937). Those two are exactly
-	// where the case-collation reasoning below would bite, since nothing
-	// disambiguates two case-variant spellings there.
+	// The multi-PK --pks filter uses the same pair as IN-lists since #2007.
+	// NOT every read path does: the Parquet archive path matches on
+	// pk_values alone (internal/parquetquery/parquetquery.go), which is
+	// exactly where the case-collation reasoning below would bite, since
+	// nothing disambiguates two case-variant spellings there.
 	var got string
 	err = db.QueryRow(
 		`SELECT pk_values FROM binlog_events WHERE pk_hash = SHA2(?, 256) AND pk_values = ?`,

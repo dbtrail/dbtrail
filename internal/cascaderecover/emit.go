@@ -149,7 +149,9 @@ func EmitSQLIndexed(w io.Writer, gen *recovery.Generator, rows []query.ResultRow
 	// Reconcile the generated statement count against the parent+victim rows
 	// (#835): the generator emits exactly one statement per row or fails loud
 	// (#784), so a deficit here means a row — e.g. a synthesized cascade victim
-	// — vanished from the script without an error. Refusing makes a silently
+	// — vanished from the script without an error. The one deliberate skip,
+	// a MariaDB system-versioned table's history events (#2007), refuses here
+	// too: cascade recovery does not read versioned tables. Refusing makes a silently
 	// incomplete cascade recovery impossible even if the generator regresses.
 	if n != len(rows) {
 		return 0, nil, fmt.Errorf("cascade recover: generator rendered %d of %d expected reversal statement(s); refusing to emit a script that silently drops row(s)", n, len(rows))

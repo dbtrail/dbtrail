@@ -162,7 +162,7 @@ func TestFoldPage_pkChangingUpdateRefused_scenarioB(t *testing.T) {
 func assertPKChangeRefusal(t *testing.T, page []query.ResultRow) {
 	t.Helper()
 	res := &foldResult{Changes: map[string]*query.ResultRow{}}
-	err := foldPage(page, "mydb", "orders", pkColsIntID(), res)
+	err := foldPage(page, "mydb", "orders", pkColsIntID(), nil, res)
 	if err == nil {
 		t.Fatal("expected a fail-loud error for a PK-changing UPDATE, got nil")
 	}
@@ -233,7 +233,7 @@ func TestFoldPage_pkChangingUpdate_reinsertPermutation(t *testing.T) {
 			res := &foldResult{Changes: map[string]*query.ResultRow{}}
 			var err error
 			for _, page := range tc.pages {
-				if err = foldPage(page, "mydb", "orders", pkColsIntID(), res); err != nil {
+				if err = foldPage(page, "mydb", "orders", pkColsIntID(), nil, res); err != nil {
 					break
 				}
 			}
@@ -264,7 +264,7 @@ func TestFoldPage_lastWriteWinsAcrossPages(t *testing.T) {
 
 	res := &foldResult{Changes: map[string]*query.ResultRow{}}
 	for i, page := range pages {
-		if err := foldPage(page, "mydb", "orders", pkColsIntID(), res); err != nil {
+		if err := foldPage(page, "mydb", "orders", pkColsIntID(), nil, res); err != nil {
 			t.Fatalf("foldPage(page %d): %v", i, err)
 		}
 	}
