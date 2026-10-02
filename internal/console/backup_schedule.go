@@ -1059,6 +1059,12 @@ type BackupScheduleState struct {
 	LastFallbackRefused        int
 	LastFallbackRefusedTables  []RefusedTable
 	LastFallbackRefusedOmitted int
+	// LastFallbackStoppedAt: the update was refused again for the same
+	// tables right after the fallback's full read went through, so the loop
+	// takes no more full reads for it (#2006). Set from then until an update
+	// goes through; the Refused* fields above then describe the newest
+	// refusal. This process only.
+	LastFallbackStoppedAt string
 }
 
 // BackupScheduleReporter is the schedule loop as the console sees it. nil when

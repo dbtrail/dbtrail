@@ -69,9 +69,29 @@ func DiscoverTables(inputDir string) ([]TableFiles, error) {
 // -schema-view.sql that is empty or cannot be read, is an error that names
 // the file.
 func DiscoverDump(inputDir string) ([]TableFiles, []SkippedView, error) {
+	tables, views, leftOut, err := DiscoverDumpNames(inputDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(leftOut) > 0 {
+		// A caller that cannot report left-out tables must not lose them
+		// silently: it gets them as an error.
+		parts := make([]string, len(leftOut))
+		for i, l := range leftOut {
+			parts[i] = l.Table + ": " + l.Reason
+		}
+		return nil, nil, fmt.Errorf("%d table(s) in the dump cannot be stored under their real names: %s", len(leftOut), strings.Join(parts, "; "))
+	}
+	return tables, views, nil
+}
+
+// DiscoverDumpNames is DiscoverDump that also returns the tables it leaves
+// out because their real name cannot be read back or stored (#2006), instead
+// of refusing the whole dump for them.
+func DiscoverDumpNames(inputDir string) ([]TableFiles, []SkippedView, []LeftOutTable, error) {
 	entries, err := os.ReadDir(inputDir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read input directory: %w", err)
+		return nil, nil, nil, fmt.Errorf("read input directory: %w", err)
 	}
 
 	type tableKey struct{ db, table string }
@@ -97,7 +117,7 @@ func DiscoverDump(inputDir string) ([]TableFiles, []SkippedView, error) {
 		// dump then surfaces as an unhelpful "no tables found". Fail loud with
 		// actionable guidance instead.
 		if isCompressedDump(name) {
-			return nil, nil, fmt.Errorf("compressed mydumper dump detected (%s): compressed dumps are not supported — "+
+			return nil, nil, nil, fmt.Errorf("compressed mydumper dump detected (%s): compressed dumps are not supported — "+
 				"re-run mydumper without --compress, or decompress the dump first (e.g. gunzip *.gz / unzstd *.zst)", name)
 		}
 
@@ -168,7 +188,7 @@ func DiscoverDump(inputDir string) ([]TableFiles, []SkippedView, error) {
 	for k, viewPath := range viewFiles {
 		holdsView, err := holdsCreateView(viewPath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("cannot tell whether %s.%s is a view: %w", k.db, k.table, err)
+			return nil, nil, nil, fmt.Errorf("cannot tell whether %s.%s is a view: %w", k.db, k.table, err)
 		}
 		if !holdsView {
 			continue // table data under a name that looks like a view file
@@ -224,6 +244,9 @@ func DiscoverDump(inputDir string) ([]TableFiles, []SkippedView, error) {
 			Format:     formats[k],
 		})
 	}
+	// The names so far are the file names; the snapshot takes the real
+	// ones (#2006).
+	result, views, leftOut := realDumpNames(inputDir, result, views)
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].Database != result[j].Database {
 			return result[i].Database < result[j].Database
@@ -236,7 +259,7 @@ func DiscoverDump(inputDir string) ([]TableFiles, []SkippedView, error) {
 		}
 		return views[i].Name < views[j].Name
 	})
-	return result, views, nil
+	return result, views, leftOut, nil
 }
 
 // holdsCreateView reports whether the first CREATE statement of a

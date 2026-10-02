@@ -65,6 +65,7 @@ func TestS3OnlyBackupWarning_1659(t *testing.T) {
 var capsCache = {};
 const lines = [];
 const el = (tag, o) => ({ class: o.class, text: o.text });
+const leftOutTablesBlock = () => null; // #2006, drawn by its own test
 // The healthy next run is a drawing since #1950; its words are the drawing's
 // text alternative, kept here as the line so the copy checks still read them.
 const scheduleChainDraw = (sch, alt) => ({ class: "ks-chain", text: alt });

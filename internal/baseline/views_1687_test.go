@@ -91,17 +91,17 @@ func TestDiscoverDump_RealDumpEdgeNames_1687(t *testing.T) {
 		t.Fatalf("DiscoverDump: %v", err)
 	}
 	wantNames(t, "tables", tableNames(tables), []string{
+		"edge.Mixed.Case", // written as mydumper_0; its real name (#2006)
 		"edge.empty_real",
 		"edge.items",
 		"edge.items-schema-view",
 		"edge.log-schema",
 		"edge.mem_real",
-		"edge.mydumper_0", // table `Mixed.Case`
 		"edge.orders-view",
 		"edge.sales",
 	})
 	wantNames(t, "views", viewNames(views), []string{
-		"edge.mydumper_1", // view `Totals.By-schema`
+		"edge.Totals.By-schema", // written as mydumper_1 (#2006)
 		"edge.sale",
 		"edge.sales_recent",
 		"onlyviews.v1",

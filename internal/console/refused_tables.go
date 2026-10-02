@@ -86,6 +86,54 @@ func RefusedTablesOf(outcomes []reconstruct.RefreshOutcome, secrets ...string) (
 	return kept, omitted
 }
 
+// VerdictLeftOut is the RefusedTable verdict of a table a full read left out
+// of its snapshot (#2006).
+const VerdictLeftOut = "left-out"
+
+// LeftOut is one table a full read left out of its snapshot and why: the
+// converter's list, as this package takes it.
+type LeftOut struct{ Table, Reason, Schema, Name string }
+
+// LeftOutKeys is every left-out table the source can be matched against, as
+// "schema.table", or ".table" when the schema's real name is unknown; one whose
+// table name is unknown cannot be matched and is not listed. Uncapped: the
+// new-tables check (#1998) needs all of them, not the 20 the page shows.
+func LeftOutKeys(left []LeftOut) []string {
+	var out []string
+	for _, l := range left {
+		if l.Name != "" {
+			out = append(out, l.Schema+"."+l.Name)
+		}
+	}
+	return out
+}
+
+// LeftOutTablesOf keeps the tables a full read left out, as RefusedTables,
+// with the same bounds and scrubbing as RefusedTablesOf.
+func LeftOutTablesOf(left []LeftOut, secrets ...string) (kept []RefusedTable, omitted int) {
+	for _, l := range left {
+		if len(kept) >= RefusedTablesCap {
+			omitted++
+			continue
+		}
+		kept = append(kept, RefusedTable{
+			Name:    clipRunes(oneLine(l.Table), refusedNameCap),
+			Verdict: VerdictLeftOut,
+			Reason:  clipRunes(oneLine(scrubSecrets(l.Reason, secrets)), refusedReasonCap),
+		})
+	}
+	return kept, omitted
+}
+
+// withholdLeftOut drops the left-out tables' names from a session with a data
+// profile and keeps their count.
+func withholdLeftOut(r *http.Request, list *[]RefusedTable, omitted *int) {
+	if sessionRestricted(r) {
+		*omitted += len(*list)
+		*list = nil
+	}
+}
+
 // scrubSecrets removes each connection string and its password from msg, then
 // the credentials of any URL or DSN left in it.
 func scrubSecrets(msg string, secrets []string) string {
@@ -127,6 +175,7 @@ func withholdRefusedTables(r *http.Request, st BaselineStatus) BaselineStatus {
 	if sessionRestricted(r) {
 		st.RefusedTables, st.RefusedTablesOmitted = nil, 0
 	}
+	withholdLeftOut(r, &st.LeftOutTables, &st.LeftOutTablesOmitted)
 	return st
 }
 
@@ -142,6 +191,7 @@ func withholdScheduleTables(r *http.Request, dto *backupScheduleDTO) *backupSche
 		// yet" names nothing a profile could deny.
 		dto.LastRun.NewTables, dto.LastRun.NewTablesOmitted = nil, dto.LastRun.NewTablesOmitted+len(dto.LastRun.NewTables)
 		dto.LastRun.NewTablesUnchecked = withheldUnchecked(dto.LastRun.NewTablesUnchecked)
+		withholdLeftOut(r, &dto.LastRun.LeftOutTables, &dto.LastRun.LeftOutTablesOmitted)
 	}
 	if dto.LastFallback != nil {
 		dto.LastFallback.RefusedTables, dto.LastFallback.RefusedTablesOmitted = nil, 0

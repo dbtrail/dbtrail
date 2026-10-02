@@ -147,7 +147,7 @@ func parseDrillTables(list string) (tables []string, schemas []string, err error
 			continue
 		}
 		parts := strings.SplitN(entry, ".", 2)
-		if len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.Contains(parts[1], ".") {
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			return nil, nil, fmt.Errorf("--tables entry %q is not schema.table", entry)
 		}
 		if strings.ContainsAny(entry, "`\"'") {

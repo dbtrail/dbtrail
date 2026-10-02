@@ -151,6 +151,7 @@ func TestScheduledRefresh_newTablesStartOneFullRead(t *testing.T) {
 // A full read that FAILED does not count as one that missed the tables: the
 // next update tries again.
 func TestScheduledRefresh_newTablesRetryAfterAFailedFullRead(t *testing.T) {
+	noEmergencyCap(t) // this test is about another rule; the daily cap has its own (#2006)
 	b, _, _, e := newTablesFixture(t, true, []string{"shop.kept"})
 	stubSourceTables(t, func(context.Context, string, []string) ([]string, bool, error) {
 		return []string{"shop.kept", "shop.orders"}, false, nil
@@ -173,6 +174,7 @@ func TestScheduledRefresh_newTablesRetryAfterAFailedFullRead(t *testing.T) {
 // A full read that keeps failing is not started at every update forever:
 // after newTablesMaxAttempts the gap stays reported and nothing starts.
 func TestScheduledRefresh_newTablesFailingFullReadIsBounded(t *testing.T) {
+	noEmergencyCap(t) // this test is about another rule; the daily cap has its own (#2006)
 	b, _, _, e := newTablesFixture(t, true, []string{"shop.kept"})
 	stubSourceTables(t, func(context.Context, string, []string) ([]string, bool, error) {
 		return []string{"shop.kept", "shop.orders"}, false, nil

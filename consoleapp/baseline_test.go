@@ -22,7 +22,7 @@ func TestBuildConsoleMydumperArgs(t *testing.T) {
 		// These let a least-privilege replication user (no BACKUP_ADMIN/RELOAD)
 		// dump consistently — verified against a real Percona 8.0 source. Their
 		// absence is the bug that produced a schema-only dump.
-		args := buildConsoleMydumperArgs("h", 3306, "u", []string{"x"}, "/out", baseline.LockModeNoLock, true, nil)
+		args := buildConsoleMydumperArgs("h", 3306, "u", []string{"x"}, "/out", baseline.LockModeNoLock, true, nil, false)
 		if valueAfter(args, "--sync-thread-lock-mode") != "NO_LOCK" {
 			t.Errorf("missing --sync-thread-lock-mode NO_LOCK: %v", args)
 		}
@@ -40,7 +40,7 @@ func TestBuildConsoleMydumperArgs(t *testing.T) {
 	// stays present: it shortens the FTWRL hold for transactional tables and is
 	// documented as compatible with any --sync-thread-lock-mode value.
 	t.Run("point-consistent mode uses FTWRL", func(t *testing.T) {
-		args := buildConsoleMydumperArgs("h", 3306, "u", []string{"x"}, "/out", baseline.LockModeFTWRL, true, nil)
+		args := buildConsoleMydumperArgs("h", 3306, "u", []string{"x"}, "/out", baseline.LockModeFTWRL, true, nil, false)
 		if valueAfter(args, "--sync-thread-lock-mode") != "FTWRL" {
 			t.Errorf("missing --sync-thread-lock-mode FTWRL: %v", args)
 		}
@@ -53,7 +53,7 @@ func TestBuildConsoleMydumperArgs(t *testing.T) {
 	})
 
 	t.Run("no schema filter excludes system schemas", func(t *testing.T) {
-		args := buildConsoleMydumperArgs("h", 3306, "u", nil, "/out", baseline.LockModeNoLock, true, nil)
+		args := buildConsoleMydumperArgs("h", 3306, "u", nil, "/out", baseline.LockModeNoLock, true, nil, false)
 		if has(args, "--database") {
 			t.Errorf("no schema filter must not use --database: %v", args)
 		}
@@ -66,7 +66,7 @@ func TestBuildConsoleMydumperArgs(t *testing.T) {
 	})
 
 	t.Run("single schema uses --database", func(t *testing.T) {
-		args := buildConsoleMydumperArgs("h", 3306, "u", []string{"wordpress"}, "/out", baseline.LockModeNoLock, true, nil)
+		args := buildConsoleMydumperArgs("h", 3306, "u", []string{"wordpress"}, "/out", baseline.LockModeNoLock, true, nil, false)
 		if v := valueAfter(args, "--database"); v != "wordpress" {
 			t.Errorf("--database = %q, want wordpress: %v", v, args)
 		}
@@ -76,7 +76,7 @@ func TestBuildConsoleMydumperArgs(t *testing.T) {
 	})
 
 	t.Run("multiple schemas use anchored --regex", func(t *testing.T) {
-		args := buildConsoleMydumperArgs("h", 3306, "u", []string{"a", "b"}, "/out", baseline.LockModeNoLock, true, nil)
+		args := buildConsoleMydumperArgs("h", 3306, "u", []string{"a", "b"}, "/out", baseline.LockModeNoLock, true, nil, false)
 		if v := valueAfter(args, "--regex"); v != "^(a|b)\\." {
 			t.Errorf("--regex = %q, want ^(a|b)\\. : %v", v, args)
 		}
@@ -88,7 +88,7 @@ func TestBuildConsoleMydumperArgs(t *testing.T) {
 	t.Run("password never appears on argv (#811)", func(t *testing.T) {
 		for _, schemas := range [][]string{nil, {"wordpress"}, {"a", "b"}} {
 			for _, lockMode := range baseline.LockModeValues {
-				args := buildConsoleMydumperArgs("h", 3306, "u", schemas, "/out", lockMode, true, nil)
+				args := buildConsoleMydumperArgs("h", 3306, "u", schemas, "/out", lockMode, true, nil, false)
 				if has(args, "--password") {
 					t.Errorf("schemas=%v lockMode=%v: --password must never appear on argv: %v", schemas, lockMode, args)
 				}

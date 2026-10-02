@@ -227,6 +227,13 @@ type BaselineStatus struct {
 	// A view has no rows of its own, so it is not in the snapshot; the daemon
 	// log names each one.
 	ViewsSkipped int `json:"views_skipped,omitempty"`
+	// LeftOutTables names the tables a full read left out of its snapshot
+	// because their real name cannot be read back from the dump or stored
+	// (#2006), up to RefusedTablesCap, with why (Verdict "left-out");
+	// LeftOutTablesOmitted counts the rest, and every name withheld from a
+	// session with a data profile.
+	LeftOutTables        []RefusedTable `json:"left_out_tables,omitempty"`
+	LeftOutTablesOmitted int            `json:"left_out_tables_omitted,omitempty"`
 	// Carried counts tables published by reusing the previous snapshot's file
 	// rather than folding them again (refresh and restore only). It is the
 	// ONLY confirmation the operator gets that the reuse setting did anything:
@@ -377,7 +384,7 @@ func (s *Server) handleBaselineTrigger(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"baseline": s.baselineCtrl.Status(e.ID)})
+	writeJSON(w, http.StatusAccepted, map[string]any{"baseline": withholdRefusedTables(r, s.baselineCtrl.Status(e.ID))})
 }
 
 // handleBaselineStatus reports the latest baseline job state for the selected
@@ -392,7 +399,7 @@ func (s *Server) handleBaselineStatus(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"baseline": s.baselineCtrl.Status(e.ID)})
+	writeJSON(w, http.StatusOK, map[string]any{"baseline": withholdRefusedTables(r, s.baselineCtrl.Status(e.ID))})
 }
 
 // splitSchemas parses a comma-separated schema filter into a trimmed,

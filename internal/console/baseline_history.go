@@ -58,6 +58,13 @@ type BaselineRunRecord struct {
 	// ViewsSkipped: see BaselineStatus.ViewsSkipped. Zero also for every run
 	// recorded before the count existed, so zero is never shown as a count.
 	ViewsSkipped int `json:"views_skipped,omitempty"`
+	// LeftOutTables / LeftOutTablesOmitted: see BaselineStatus. Kept with the
+	// run: the new-tables check reads them to know these tables are not new.
+	LeftOutTables        []RefusedTable `json:"left_out_tables,omitempty"`
+	LeftOutTablesOmitted int            `json:"left_out_tables_omitted,omitempty"`
+	// LeftOutKeys is every left-out table as the source names it (see
+	// LeftOutKeys), uncapped: what the new-tables check leaves alone.
+	LeftOutKeys []string `json:"left_out_keys,omitempty"`
 	// Carried counts tables published by reusing the previous snapshot's file
 	// (refresh and restore). Persisted rather than left to the live status,
 	// which the next run overwrites: whether a run cost a full rewrite is
@@ -369,6 +376,12 @@ func (h *BaselineRunHistory) LastFullBackup(serverID string) time.Duration {
 type baselineHistoryFile struct {
 	Version int                            `json:"version"`
 	Servers map[string][]BaselineRunRecord `json:"servers"`
+	// EmergencyStarted is when each server's newest emergency full read
+	// STARTED (#2006): written as it starts, so a read the daemon died in
+	// (an out-of-memory kill) still counts against the daily cap after the
+	// restart. A record is written only when a run ends. Older binaries
+	// ignore the key.
+	EmergencyStarted map[string]string `json:"emergency_started,omitempty"`
 }
 
 const baselineHistoryVersion = 1
@@ -378,9 +391,10 @@ const baselineHistoryVersion = 1
 // verify history. Console-local state on disk, deliberately NOT a table in
 // the index database (registry DSNs never receive DDL).
 type BaselineRunHistory struct {
-	mu      sync.Mutex
-	path    string
-	servers map[string][]BaselineRunRecord
+	mu        sync.Mutex
+	path      string
+	servers   map[string][]BaselineRunRecord
+	emergency map[string]string
 }
 
 // DefaultBaselineHistoryPath returns the history file path as a sibling of
@@ -393,7 +407,7 @@ func DefaultBaselineHistoryPath(serversPath string) string {
 // history; a corrupt or newer-versioned file is an error for the caller to
 // decide on, never silently truncated.
 func OpenBaselineHistory(path string) (*BaselineRunHistory, error) {
-	h := &BaselineRunHistory{path: path, servers: make(map[string][]BaselineRunRecord)}
+	h := &BaselineRunHistory{path: path, servers: make(map[string][]BaselineRunRecord), emergency: make(map[string]string)}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return h, nil
@@ -414,12 +428,39 @@ func OpenBaselineHistory(path string) (*BaselineRunHistory, error) {
 	if f.Servers != nil {
 		h.servers = f.Servers
 	}
+	if f.EmergencyStarted != nil {
+		h.emergency = f.EmergencyStarted
+	}
 	return h, nil
 }
 
 // Append records one run and saves the file (oldest dropped past the cap). A
 // save failure is returned for the caller to log; history is an observability
 // aid and must never fail the run it describes.
+// IsEmergencyWhyCode reports whether a full read's recorded reason makes it
+// an emergency read (#2006): one the schedule took on its own because an
+// update was refused or crashed, or for tables an update left out.
+func IsEmergencyWhyCode(code string) bool {
+	return code == "fold_refused" || code == "fold_crashed" || code == BackupWhyCodeNewTables
+}
+
+// NoteEmergencyStart records, durably and before the read runs, that an
+// emergency full read of the server started at (RFC 3339).
+func (h *BaselineRunHistory) NoteEmergencyStart(serverID, at string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.emergency[serverID] = at
+	return h.save()
+}
+
+// EmergencyStarted is the newest emergency full read's start NoteEmergencyStart
+// recorded for the server, "" if none.
+func (h *BaselineRunHistory) EmergencyStarted(serverID string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.emergency[serverID]
+}
+
 func (h *BaselineRunHistory) Append(rec BaselineRunRecord) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -447,8 +488,14 @@ func capRecords(recs []BaselineRunRecord) []BaselineRunRecord {
 	// So is the newest successful full backup of any trigger (LastFullRead):
 	// it is what ends a miss's line, and evicting it while the miss stays
 	// would bring back an alarm that was already answered.
-	keepRun, keepSkip, keepFullRun, keepFullSkip, keepFullRead := -1, -1, -1, -1, -1
+	keepRun, keepSkip, keepFullRun, keepFullSkip, keepFullRead, keepEmergency := -1, -1, -1, -1, -1, -1
 	for i := len(recs) - 1; i >= 0; i-- {
+		// The newest emergency full read, failed or not: the daily cap
+		// (#2006) is measured from it, and a run of failing updates must not
+		// push it out.
+		if keepEmergency < 0 && recs[i].Kind == BaselineRunDump && recs[i].SkipReason == "" && IsEmergencyWhyCode(recs[i].WhyCode) {
+			keepEmergency = i
+		}
 		if keepFullRead < 0 && recs[i].Kind == BaselineRunDump && recs[i].SkipReason == "" && recs[i].Error == "" {
 			keepFullRead = i
 		}
@@ -475,7 +522,7 @@ func capRecords(recs []BaselineRunRecord) []BaselineRunRecord {
 	}
 	out := make([]BaselineRunRecord, 0, BaselineRunHistoryCap)
 	for i, r := range recs {
-		if excess > 0 && i != keepRun && i != keepSkip && i != keepFullRun && i != keepFullSkip && i != keepFullRead {
+		if excess > 0 && i != keepRun && i != keepSkip && i != keepFullRun && i != keepFullSkip && i != keepFullRead && i != keepEmergency {
 			excess--
 			continue
 		}
@@ -668,7 +715,7 @@ func (h *BaselineRunHistory) List(serverID string) []BaselineRunRecord {
 }
 
 func (h *BaselineRunHistory) save() error {
-	b, err := json.Marshal(baselineHistoryFile{Version: baselineHistoryVersion, Servers: h.servers})
+	b, err := json.Marshal(baselineHistoryFile{Version: baselineHistoryVersion, Servers: h.servers, EmergencyStarted: h.emergency})
 	if err != nil {
 		// The only step here whose failure names nothing on its own: every
 		// other one returns an *os.PathError/*os.LinkError already carrying
@@ -707,3 +754,6 @@ func (h *BaselineRunHistory) save() error {
 	}
 	return os.Rename(tmp.Name(), h.path)
 }
+
+// Path is the file the history is kept in.
+func (h *BaselineRunHistory) Path() string { return h.path }

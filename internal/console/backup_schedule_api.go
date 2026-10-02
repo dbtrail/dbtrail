@@ -114,6 +114,9 @@ type backupScheduleRunDTO struct {
 	// RefusedTables / RefusedTablesOmitted: see BaselineStatus.
 	RefusedTables        []RefusedTable `json:"refused_tables,omitempty"`
 	RefusedTablesOmitted int            `json:"refused_tables_omitted,omitempty"`
+	// LeftOutTables / LeftOutTablesOmitted: see BaselineStatus (#2006).
+	LeftOutTables        []RefusedTable `json:"left_out_tables,omitempty"`
+	LeftOutTablesOmitted int            `json:"left_out_tables_omitted,omitempty"`
 	// NewTables / NewTablesOmitted / NewTablesUnchecked: see BaselineStatus.
 	NewTables             []string `json:"new_tables,omitempty"`
 	NewTablesOmitted      int      `json:"new_tables_omitted,omitempty"`
@@ -142,6 +145,9 @@ type backupScheduleSkipDTO struct {
 	Refused              int            `json:"refused,omitempty"`
 	RefusedTables        []RefusedTable `json:"refused_tables,omitempty"`
 	RefusedTablesOmitted int            `json:"refused_tables_omitted,omitempty"`
+	// StoppedAt, on LastFallback only: since then no full read is taken for
+	// this refusal, because one did not fix it (#2006).
+	StoppedAt string `json:"stopped_at,omitempty"`
 }
 
 // backupScheduleRequest is the PUT body. When is the operator's; how is
@@ -310,7 +316,8 @@ func (s *Server) backupScheduleDTO(ctx context.Context, e ServerEntry, now time.
 		if st.LastFallbackAt != "" {
 			dto.LastFallback = &backupScheduleSkipDTO{At: st.LastFallbackAt, Reason: st.LastFallbackReason,
 				Tables: st.LastFallbackTables, Refused: st.LastFallbackRefused,
-				RefusedTables: st.LastFallbackRefusedTables, RefusedTablesOmitted: st.LastFallbackRefusedOmitted}
+				RefusedTables: st.LastFallbackRefusedTables, RefusedTablesOmitted: st.LastFallbackRefusedOmitted,
+				StoppedAt: st.LastFallbackStoppedAt}
 		}
 		if st.LastFullMissedAt != "" {
 			consider(backupScheduleSkipDTO{At: st.LastFullMissedAt, Reason: st.LastFullMissedReason})
@@ -366,6 +373,7 @@ func scheduleRunFromRecord(run *BaselineRunRecord) *backupScheduleRunDTO {
 		CarriedCopied: run.CarriedCopied,
 		Refused:       run.Refused,
 		RefusedTables: run.RefusedTables, RefusedTablesOmitted: run.RefusedTablesOmitted,
+		LeftOutTables: run.LeftOutTables, LeftOutTablesOmitted: run.LeftOutTablesOmitted,
 		DiskCheck: run.DiskCheck, DiskNote: run.DiskNote, TransportNote: run.TransportNote,
 		NewTables: run.NewTables, NewTablesOmitted: run.NewTablesOmitted, NewTablesUnchecked: run.NewTablesUnchecked,
 		NewTablesAction: run.NewTablesAction, NewTablesActionReason: run.NewTablesActionReason,
@@ -407,6 +415,7 @@ func scheduleRunFromStatus(st BackupScheduleState) *backupScheduleRunDTO {
 		CarriedCopied: cur.CarriedCopied,
 		Refused:       cur.Refused,
 		RefusedTables: cur.RefusedTables, RefusedTablesOmitted: cur.RefusedTablesOmitted,
+		LeftOutTables: cur.LeftOutTables, LeftOutTablesOmitted: cur.LeftOutTablesOmitted,
 		DiskCheck: cur.DiskCheck, DiskNote: cur.DiskNote, TransportNote: cur.TransportNote,
 		NewTables: cur.NewTables, NewTablesOmitted: cur.NewTablesOmitted, NewTablesUnchecked: cur.NewTablesUnchecked,
 		NewTablesAction: cur.NewTablesAction, NewTablesActionReason: cur.NewTablesActionReason,

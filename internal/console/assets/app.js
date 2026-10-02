@@ -8566,6 +8566,44 @@ function refusedTableRows(run, tail) {
   };
 }
 
+// leftOutWords (#2006): the tables a full read left out of its snapshot
+// because their real name could not be read back from the dump or cannot be
+// stored, as words. Everything else was copied. A session whose data profile
+// hides table names gets the count only (left_out_tables_omitted). null when
+// none was left out.
+function leftOutWords(run) {
+  const list = run && Array.isArray(run.left_out_tables) ? run.left_out_tables : [];
+  const more = Math.max(0, Math.floor(Number(run && run.left_out_tables_omitted)) || 0);
+  const n = list.length + more;
+  if (!n) return null;
+  const clip = (v, k) => {
+    const c = Array.from(String(v == null ? "" : v).replace(/\s+/g, " ").trim());
+    return c.length > k ? c.slice(0, k - 3).join("") + "..." : c.join("");
+  };
+  return {
+    head: (n === 1 ? "1 table is" : n + " tables are") + " not in this snapshot. DBTrail could not read back or store " +
+      (n === 1 ? "its real name, so it was" : "their real names, so they were") +
+      " left out; every other table was copied. Changing the name on the database fixes it at the next full read.",
+    rows: list.map((t) => ({ name: clip(t && t.name, 130) || "(no name)", reason: clip(backupFoldError(String((t && t.reason) || "")), 300) })),
+    more: list.length && more ? more + " more not listed." : "",
+  };
+}
+
+// leftOutTablesBlock draws leftOutWords, every value as text.
+function leftOutTablesBlock(run) {
+  const d = leftOutWords(run);
+  if (!d) return null;
+  const list = el("ul", { class: "refused-list" });
+  for (const r of d.rows) {
+    list.append(el("li", null, el("code", { text: r.name }), el("span", { class: "refused-what", text: "left out" }),
+      r.reason ? el("span", { class: "refused-why", text: r.reason }) : null));
+  }
+  return el("div", { class: "refused-tables" },
+    el("p", { class: "form-msg err", text: d.head }),
+    d.rows.length ? list : null,
+    d.more ? el("p", { class: "form-hint", text: d.more }) : null);
+}
+
 // refusedTablesBlock draws refusedTableRows: one row per table, its name,
 // what happened and the fix, the reason under it. Every value is set as
 // text, never parsed as markup: names and reasons come from a server.
@@ -9454,6 +9492,8 @@ async function createBaseline(id, btn) {
       (done.uploaded ? ", " + done.uploaded + " file(s) uploaded" : "") +
       (done.swept ? ", " + done.swept + " earlier snapshot(s) sent too" : "") + unchecked + cleartext);
     if (lowDisk) toastError(lowDisk);
+    const left = leftOutWords(done);
+    if (left) toastError(left.head + (left.rows.length ? " " + left.rows.map((r) => r.name + ": " + r.reason).join(" ") : ""));
   } else if (done && done.uploading) {
     // The poll's cap hit mid-copy: say what is true, not "complete".
     toast("Snapshot saved on this machine. The copy to the snapshot destination is still running; the Snapshots page shows when it finishes.");
@@ -9848,6 +9888,8 @@ async function loadBackupDetail(at, box) {
   if (d.run && d.run.transport_note) box.append(el("p", { class: "form-hint", text: d.run.transport_note }));
   const skipped = viewsSkippedBlock(d.views_skipped);
   if (skipped) box.append(skipped);
+  const leftOut = leftOutTablesBlock(d.run);
+  if (leftOut) box.append(leftOut);
   const tbl = el("table", { class: "bk-table" });
   // The "Made by" column is only rendered when a row actually carries a verdict
   // (#1545). An S3 source does not look it up, and a header over a column of
@@ -10102,6 +10144,10 @@ function backupFoldError(msg) {
     .replace(/,?[ \t]*or target a different instant with --at/g, ", or pick another second")
     .replace(/ \u2014 a snapshot emitted from it would carry the OLD CREATE TABLE forward and project every row onto the old columns and types, so every reconstruct anchored on it would be wrong\. Take a real snapshot instead: `bintrail dump` \+ `bintrail baseline`\. \(If the schema snapshot is what is stale, run `bintrail snapshot` first and retry\.\): schema changed since the baseline/g,
       ". Updating it from the recorded changes needs a snapshot taken after that change")
+    // The engine's advice names a command; the console says it in its own
+    // words, and only as a possibility (#2006).
+    .replace(/;?\s*consider re-running .bintrail snapshot./g,
+      "; if the table was created after the last schema snapshot, a new schema snapshot may fix this")
     .replace(/\u2014/g, "-");
   if (!/[.!?]$/.test(out.trim())) out = out.trim() + ".";
   return out;
@@ -10437,6 +10483,9 @@ function backupScheduleCard(cur, b) {
         const stopped = refusedTablesBlock(run);
         if (stopped) body.append(stopped);
       }
+      // Tables a full read left out of its snapshot (#2006), in red.
+      const leftOut = leftOutTablesBlock(run);
+      if (leftOut) { alarm = true; noteAt(run.finished_at || run.started_at || "", "A table is not in the last snapshot."); body.append(leftOut); }
       // Tables the update left out (#1993): said on a published update, the
       // one whose snapshot lacks them.
       if (run.method === "refresh") {
@@ -10472,17 +10521,39 @@ function backupScheduleCard(cur, b) {
       // named as one, not as a refusal. The daemon records a fallback only
       // once the full backup actually started, so "started" is a fact.
       alarm = true;
-      // startsRun: this stamp is when the full backup STARTED, so it must
-      // never outrank that backup's own outcome recorded in the same second.
-      noteAt(fb.at, "An update was refused, so a full read ran instead.", true);
-      const crashed = /^internal error/.test(fb.reason || "");
-      const why = backupFoldError(crashed ? fb.reason.replace(/^internal error:?\s*/, "") : fb.reason);
-      body.append(el("p", { class: "form-msg err", text:
-        "At " + utcLabel(fb.at) + " the update from the recorded changes " + (crashed ? "hit an internal error" : "was refused") +
-        (refusedTableRows(fb) ? "," : " (" + why + ")") +
-        " so a full read was started instead. If this repeats, the recorded changes cannot be used for this server; check the reason." }));
-      const stopped = refusedTablesBlock(fb, "A full read was started instead.");
-      if (stopped) body.append(stopped);
+      if (fb.stopped_at) {
+        // #2006: the update was refused again for the same tables right
+        // after a full read went through, so the daemon takes no more full
+        // reads for it. Said apart from the fallback line below: nothing is
+        // being published, and reading the database again will not change
+        // that.
+        noteAt(fb.stopped_at, "Updates are refused, and a full read does not fix it.");
+        // The list is withheld from a session whose data profile hides
+        // table names: then the count stands in for it.
+        const listed = (fb.refused_tables || []).length;
+        const count = Math.max(listed + (Math.floor(Number(fb.refused_tables_omitted)) || 0), Math.floor(Number(fb.refused)) || 0);
+        const which = listed ? (count === 1 ? "the table below" : "the tables below") : (count === 1 ? "1 table" : count + " tables");
+        body.append(el("p", { class: "form-msg err", text:
+          "No new snapshot is being published for this server. The update from the recorded changes was refused for " +
+          which + ", and refused the same way again right after a full read, so another full read would not fix it. " +
+          "Since " + utcLabel(fb.stopped_at) + " DBTrail takes no full read in its place, except one a day to check. " +
+          "The update keeps running at each scheduled time and reads only the recorded changes; the first one that goes through " +
+          "ends this." + (listed ? " " + (count === 1 ? "The reason under it" : "The reason under each table") + " says what has to change." : "") }));
+        const stuck = refusedTablesBlock(fb, "No full read is taken in its place.");
+        if (stuck) body.append(stuck);
+      } else {
+        // startsRun: this stamp is when the full backup STARTED, so it must
+        // never outrank that backup's own outcome recorded in the same second.
+        noteAt(fb.at, "An update was refused, so a full read ran instead.", true);
+        const crashed = /^internal error/.test(fb.reason || "");
+        const why = backupFoldError(crashed ? fb.reason.replace(/^internal error:?\s*/, "") : fb.reason);
+        body.append(el("p", { class: "form-msg err", text:
+          "At " + utcLabel(fb.at) + " the update from the recorded changes " + (crashed ? "hit an internal error" : "was refused") +
+          (refusedTableRows(fb) ? "," : " (" + why + ")") +
+          " so a full read was started instead. If this repeats, the recorded changes cannot be used for this server; check the reason." }));
+        const stopped = refusedTablesBlock(fb, "A full read was started instead.");
+        if (stopped) body.append(stopped);
+      }
     }
     // A full backup of the schedule's own timetable that did not start, or
     // started and failed (#1564): red until a full backup succeeds, not
@@ -10511,12 +10582,16 @@ function backupScheduleCard(cur, b) {
     // newer fact, not an older one.
     if (skip && (!run || skip.at >= (run.finished_at || ""))) {
       alarm = true;
-      noteAt(skip.at, "A scheduled run did not start.");
+      // The daily cap on full reads the schedule takes on its own (#2006):
+      // the update DID run; what waits is the full read in its place.
+      const capped = /at most once a day/.test(skip.reason || "");
+      noteAt(skip.at, capped ? "A full read was held back: at most one a day." : "A scheduled run did not start.");
       // backupFoldError, not plainWords: a fold error rides in here too,
       // with its bare --allow-gaps hint.
-      body.append(el("p", { class: "form-msg err", text:
-        "Did not run at " + utcLabel(skip.at) + ": " + backupFoldError(skip.reason) +
-        scheduleSkipTail(skip.reason) }));
+      body.append(el("p", { class: "form-msg err", text: capped
+        ? "At " + utcLabel(skip.at) + " " + backupFoldError(skip.reason)
+        : "Did not run at " + utcLabel(skip.at) + ": " + backupFoldError(skip.reason) +
+          scheduleSkipTail(skip.reason) }));
     }
     if (!run && !skip && !fm && !sch.running && !sch.history_unavailable) {
       body.append(el("p", { class: "form-hint", text: "It has not run yet." }));

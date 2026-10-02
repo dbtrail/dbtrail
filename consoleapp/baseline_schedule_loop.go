@@ -107,6 +107,11 @@ type backupScheduler struct {
 	// a collision there records a skip, and the page must not say a full
 	// backup was taken next to a line saying nothing ran.
 	fallback map[string]scheduledFallback
+	// emergency: per server, when this process last started an emergency
+	// full read (a fallback, or one for new tables), for emergencyCap. The
+	// run history is the durable copy; this covers a read still running,
+	// which has no record yet, and a daemon without a history.
+	emergency map[string]time.Time
 
 	// newTablesTried: per server, the tables an update left out that a full
 	// read was started for, and when (#1993, includeNewTables). Memory only:
@@ -172,6 +177,14 @@ type scheduledFallback struct {
 	tables, refused int
 	refusedTables   []console.RefusedTable
 	refusedOmitted  int
+	// fullReadOK: the full read this fallback started went through (#2006),
+	// so the update after it starts from a snapshot the database was just
+	// read into. Only then does a refusal of the same tables prove that a
+	// full read does not fix it.
+	fullReadOK bool
+	// stoppedAt: when the loop stopped taking full reads for this refusal
+	// because one did not fix it (#2006); "" while it still falls back.
+	stoppedAt string
 }
 
 func newBackupScheduler(sup *baselineSupervisor, reg *console.Registry, fullBackups, carryDefault bool) *backupScheduler {
@@ -184,6 +197,7 @@ func newBackupScheduler(sup *baselineSupervisor, reg *console.Registry, fullBack
 		fullMissed:       make(map[string]scheduledSkip),
 		fullOwed:         make(map[string]string),
 		fallback:         make(map[string]scheduledFallback),
+		emergency:        make(map[string]time.Time),
 		newTablesTried:   make(map[string]newTablesTry),
 		newTablesPending: make(map[string]newTablesTry),
 		warned:           make(map[string]bool),
@@ -560,6 +574,7 @@ func (b *backupScheduler) ScheduleState(serverID string) console.BackupScheduleS
 		out.LastFallbackAt, out.LastFallbackReason = fb.at, fb.reason
 		out.LastFallbackTables, out.LastFallbackRefused = fb.tables, fb.refused
 		out.LastFallbackRefusedTables, out.LastFallbackRefusedOmitted = fb.refusedTables, fb.refusedOmitted
+		out.LastFallbackStoppedAt = fb.stoppedAt
 	}
 	if !started {
 		return out
@@ -603,7 +618,7 @@ func (b *backupScheduler) ScheduleState(serverID string) console.BackupScheduleS
 					// this lock must not have its fresh alarm deleted by
 					// a stale reader.
 					delete(b.fallback, serverID)
-					out.LastFallbackAt, out.LastFallbackReason = "", ""
+					out.LastFallbackAt, out.LastFallbackReason, out.LastFallbackStoppedAt = "", "", ""
 				}
 			}
 			b.mu.Unlock()
@@ -1176,7 +1191,12 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 			return
 		}
 		if method == console.BackupMethodRefresh && st.Last.State == "failed" && !st.Last.Published && !st.Last.DiskRefused {
-			b.fallBack(e, *st.Last)
+			if !b.fullReadCannotCure(e, *st.Last) {
+				b.fallBack(e, *st.Last)
+			}
+		}
+		if method == console.BackupMethodFull && st.Last.State == "succeeded" {
+			b.noteFallbackReadOK(e.ID, stamp)
 		}
 		if method == console.BackupMethodRefresh && st.Last.State == "succeeded" {
 			b.includeNewTables(e, *st.Last)
@@ -1205,6 +1225,13 @@ func (b *backupScheduler) fallBack(e console.ServerEntry, failed console.Baselin
 	}
 	because := how + " (" + reason + ")"
 	now := time.Now().UTC()
+	if next, held := b.emergencyHeld(e.ID, now); held {
+		// Said on the card (the skipped line) and in the log, not in the
+		// history: the update's own failure is recorded at every slot, and a
+		// record per slot here would push the real runs out of it.
+		b.noteSkip(e, now, because+" and no full read is taken in its place: "+emergencyHeldWords(next))
+		return
+	}
 	if err := console.FullBackupPossible(e, b.gates()); err != nil {
 		b.skip(e, now, because+" and a full read cannot start here: "+err.Error())
 		return
@@ -1223,6 +1250,7 @@ func (b *backupScheduler) fallBack(e console.ServerEntry, failed console.Baselin
 	}
 	stamp := now.Format(time.RFC3339)
 	if b.startFull(e, stamp, now, because, because) {
+		b.noteEmergency(e.ID, now)
 		b.mu.Lock()
 		b.fallback[e.ID] = scheduledFallback{at: stamp, reason: reason,
 			tables: failed.Tables, refused: failed.Refused,
@@ -1296,4 +1324,184 @@ func (b *backupScheduler) skip(e console.ServerEntry, now time.Time, reason stri
 	if err != nil {
 		slog.Warn("snapshot schedule: could not record the skip in the history", "server", e.Name, "error", err)
 	}
+}
+
+// noteFallbackReadOK records that the full read a fallback started at stamp
+// went through. Called by that read's own watcher, which starts after the
+// fallback is recorded, so the two cannot race.
+func (b *backupScheduler) noteFallbackReadOK(serverID, stamp string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if fb, ok := b.fallback[serverID]; ok && fb.at == stamp {
+		fb.fullReadOK = true
+		b.fallback[serverID] = fb
+	}
+}
+
+// fullReadCannotCure decides whether a refused update gets its full read
+// (#2006, #2007). It does not when the last fallback's full read went
+// through and the update right after it was refused again for the same
+// tables: a full read did not fix that, and taking one at every slot would
+// read the whole database every few minutes for as long as it lasts. The
+// update itself keeps running at each slot (it reads only the recorded
+// changes), so the first one that goes through ends this. In memory only: a
+// restart forgets it, and the first refusal after the restart gets one full
+// read again before it stops.
+func (b *backupScheduler) fullReadCannotCure(e console.ServerEntry, failed console.BaselineStatus) bool {
+	now := time.Now().UTC().Format(time.RFC3339)
+	b.mu.Lock()
+	prev, ok := b.fallback[e.ID]
+	if !ok || !prev.fullReadOK || !sameIncurableRefusal(prev.refusedTables, prev.refusedOmitted, failed.RefusedTables, failed.RefusedTablesOmitted) {
+		b.mu.Unlock()
+		return false
+	}
+	// Stopped for a day: one full read again. The match is on the reason's
+	// words, and a refusal a full read does cure can still read the same
+	// twice (a second change of the same kind right after the first); this
+	// bounds what such a case costs to one day without a snapshot.
+	if at, err := time.Parse(time.RFC3339, prev.stoppedAt); err == nil && time.Since(at) >= stuckRetryEvery {
+		b.mu.Unlock()
+		slog.Info("snapshot schedule: updates have been refused for a day with no full read; trying one full read again", "server", e.Name)
+		return false
+	}
+	first := prev.stoppedAt == ""
+	if first {
+		prev.stoppedAt = now
+	}
+	prev.reason = failed.LastError
+	prev.tables, prev.refused = failed.Tables, failed.Refused
+	prev.refusedTables, prev.refusedOmitted = failed.RefusedTables, failed.RefusedTablesOmitted
+	b.fallback[e.ID] = prev
+	b.mu.Unlock()
+
+	names := make([]string, len(failed.RefusedTables))
+	for i, t := range failed.RefusedTables {
+		names[i] = t.Name
+	}
+	slog.Warn("snapshot schedule: the update was refused again for the same tables right after a full read, so a full read does not fix it and none is taken in its place; no snapshot is published until the update goes through",
+		"server", e.Name, "tables", names, "reason", failed.LastError, "since", prev.stoppedAt)
+	if !first || b.sup.history == nil {
+		return true
+	}
+	// Once, when it stops: the update's own failure is recorded at every
+	// slot already, and this is the one fact those records do not say.
+	if _, err := b.sup.history.AppendSkip(console.BaselineRunRecord{
+		ServerID: e.ID, ServerName: e.Name, Kind: console.BaselineRunDump, SkipReason: stuckReason(names),
+		StartedAt: now, FinishedAt: now,
+	}); err != nil {
+		slog.Warn("snapshot schedule: could not record in the history that full reads stopped", "server", e.Name, "error", err)
+	}
+	return true
+}
+
+// stuckRetryEvery is how long a stop lasts before one full read is tried
+// again (fullReadCannotCure).
+var stuckRetryEvery = 24 * time.Hour
+
+// stuckReason is the history's sentence for a stop: plain words, no
+// command, and the tables COUNTED, not named: a history reason reaches
+// sessions whose data profile hides table names, and the page names them
+// from the fallback, where they are withheld for such a session.
+func stuckReason(names []string) string {
+	what := "1 table"
+	if len(names) != 1 {
+		what = fmt.Sprintf("%d tables", len(names))
+	}
+	return "no full read taken: the update from the recorded changes was refused for " + what +
+		" again right after a full read, so a full read does not fix it. No snapshot is published until the update goes through; one full read is tried again a day later"
+}
+
+// sameIncurableRefusal reports whether an update refused cur after a full
+// read for nothing a full read can fix: every table it refused was refused
+// before that full read with the same verdict and the same reason. The
+// reason counts: the catch-all verdict "refused" also covers causes a full
+// read does cure (a primary-key change inside the window), and a new one of
+// those reads differently. A schema change and a capture
+// gap are about events inside the update's window, which a full read moves
+// past, so seeing one again means a NEW one, and it gets its full read. A
+// list cut short (omitted > 0) cannot be compared, and a new table in it is
+// a new reason: both fall back.
+func sameIncurableRefusal(prev []console.RefusedTable, prevOmitted int, cur []console.RefusedTable, curOmitted int) bool {
+	if len(cur) == 0 || prevOmitted > 0 || curOmitted > 0 {
+		return false
+	}
+	before := make(map[console.RefusedTable]bool, len(prev))
+	for _, t := range prev {
+		before[t] = true
+	}
+	for _, t := range cur {
+		switch t.Verdict {
+		case reconstruct.RefreshVerdictRefusedDDL, reconstruct.RefreshVerdictRefusedGap:
+			return false
+		}
+		if !before[t] {
+			return false
+		}
+	}
+	return true
+}
+
+// emergencyCap is the most often the schedule reads a server in full on its
+// own initiative (#2006): a full read standing in for a refused or crashed
+// update, or one for tables an update left out. Whatever the reason, at most
+// one per this long, so a cause no full read cures costs one read of
+// production a day, not one per slot. Full reads the operator asked for (the
+// full-copy timetable, a schedule that always reads in full, "Read database
+// now") are not emergency reads: they neither count nor wait.
+var emergencyCap = 24 * time.Hour
+
+// emergencySlack is taken off the cap so a daily schedule gets its daily
+// emergency read: the read starts after the update fails, and an update that
+// takes a minute less tomorrow would otherwise land just inside the day and
+// push the read to the day after.
+const emergencySlack = time.Hour
+
+// noteEmergency records that an emergency full read started now: in memory,
+// and durably in the run history before the read runs, so a read the daemon
+// dies in still counts after a restart.
+func (b *backupScheduler) noteEmergency(serverID string, now time.Time) {
+	b.mu.Lock()
+	b.emergency[serverID] = now
+	b.mu.Unlock()
+	if b.sup.history != nil {
+		if err := b.sup.history.NoteEmergencyStart(serverID, now.UTC().Format(time.RFC3339)); err != nil {
+			slog.Warn("snapshot schedule: could not record the start of an emergency full read; after a restart the daily cap may allow one more", "id", serverID, "error", err)
+		}
+	}
+}
+
+// emergencyHeld reports whether the cap holds back an emergency full read at
+// now, and when the next is allowed. The newest emergency read is the latest
+// of this process's own start, the start the history recorded as it began,
+// and the history's newest scheduled full read with an emergency reason,
+// failed ones included (a read that fails every time is the loop the cap
+// exists for).
+func (b *backupScheduler) emergencyHeld(serverID string, now time.Time) (next time.Time, held bool) {
+	b.mu.Lock()
+	last := b.emergency[serverID]
+	b.mu.Unlock()
+	later := func(stamp string) {
+		if at, err := time.Parse(time.RFC3339, stamp); err == nil && at.After(last) {
+			last = at
+		}
+	}
+	if h := b.sup.history; h != nil {
+		later(h.EmergencyStarted(serverID))
+		for _, r := range h.List(serverID) {
+			if r.Kind == console.BaselineRunDump && r.SkipReason == "" && r.Trigger == console.BaselineRunTriggerScheduled && console.IsEmergencyWhyCode(r.WhyCode) {
+				later(r.StartedAt)
+			}
+		}
+	}
+	if last.IsZero() || emergencyCap <= 0 {
+		return time.Time{}, false
+	}
+	next = last.Add(emergencyCap - emergencySlack)
+	return next, now.Before(next)
+}
+
+// emergencyHeldWords says the cap in the page's words.
+func emergencyHeldWords(next time.Time) string {
+	return "DBTrail reads this server in full on its own at most once a day, and the last such read was less than a day ago; " +
+		"the next one is allowed after " + next.UTC().Format("2006-01-02 15:04") + " UTC"
 }

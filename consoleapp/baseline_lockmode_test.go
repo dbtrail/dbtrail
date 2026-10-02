@@ -37,7 +37,7 @@ func TestBuildConsoleMydumperArgsCarriesLockMode(t *testing.T) {
 		{baseline.LockModeSafeNoLock, "SAFE_NO_LOCK"},
 		{baseline.LockModeNoLock, "NO_LOCK"},
 	} {
-		args := buildConsoleMydumperArgs("127.0.0.1", 3306, "root", []string{"demo"}, "/tmp/d", tc.mode, true, nil)
+		args := buildConsoleMydumperArgs("127.0.0.1", 3306, "root", []string{"demo"}, "/tmp/d", tc.mode, true, nil, false)
 		i := slices.Index(args, "--sync-thread-lock-mode")
 		if i < 0 || i+1 >= len(args) {
 			t.Fatalf("mode %s: no --sync-thread-lock-mode in argv", tc.mode)

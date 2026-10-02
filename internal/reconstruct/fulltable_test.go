@@ -515,7 +515,11 @@ func TestSplitSchemaTable(t *testing.T) {
 		{"nodot", false, "", ""},
 		{".notable", false, "", ""},
 		{"noschema.", false, "", ""},
-		{"too.many.dots", false, "", ""},
+		// A table name may hold a dot (#2006): a snapshot stores the real
+		// name, and the split is at the first dot because a schema name with
+		// a dot is refused when the snapshot is made.
+		{"demo.order.items", true, "demo", "order.items"},
+		{"demo.a.b.c", true, "demo", "a.b.c"},
 	}
 	for _, c := range cases {
 		s, tbl, ok := splitSchemaTable(c.in)
