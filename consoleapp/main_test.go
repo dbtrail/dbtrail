@@ -6,7 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/dbtrail/dbtrail/internal/config"
+	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/mydumperlock"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
@@ -35,6 +38,10 @@ func TestMain(m *testing.M) {
 		os.Exit(Main("test", "none", "unknown"))
 	}
 	mydumperlock.ProbeTimeout = fakeMydumperBound
+	// Password tests here hash through the console package: at the shipped
+	// cost each one costs seconds under -race. The cost itself is pinned by
+	// the console package's own tests.
+	console.SetBcryptCostForTest(bcrypt.MinCost)
 	// A full read under the default TLS mode (preferred) asks the source
 	// whether it encrypts before mydumper runs (#1996). The tests here run
 	// fake mydumpers against sources that do not exist, so the question gets

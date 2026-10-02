@@ -123,6 +123,7 @@ func TestUserRemove(t *testing.T) {
 }
 
 func TestUserStatusPrintsNoSecrets(t *testing.T) {
+	t.Cleanup(console.SetBcryptCostForTest(12)) // the status line reports the shipped cost
 	resetUserGlobals(t)
 	path := filepath.Join(t.TempDir(), "auth.yaml")
 	if err := console.SetAuthPassword(path, "ops", "status-pass-123"); err != nil {

@@ -6,6 +6,8 @@ import (
 	"slices"
 	"testing"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
@@ -21,6 +23,10 @@ func TestMain(m *testing.M) {
 	if sqlsandbox.IsWorkerProcess() {
 		os.Exit(sqlsandbox.WorkerMain(os.Stdin, os.Stdout, os.Stderr))
 	}
+	// Hash test passwords at bcrypt's minimum cost: at the shipped cost every
+	// login that sets or upgrades a password costs seconds under -race. Tests
+	// about the cost itself put the shipped value back (useShippedBcryptCost).
+	SetBcryptCostForTest(bcrypt.MinCost)
 	tmp, err := os.MkdirTemp("", "console-test-home-*")
 	if err == nil {
 		os.Setenv("HOME", tmp)

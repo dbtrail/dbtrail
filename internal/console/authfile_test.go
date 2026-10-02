@@ -32,6 +32,7 @@ func TestAuthFileCorruptFailsLoud(t *testing.T) {
 }
 
 func TestSetAuthPasswordRoundTrip(t *testing.T) {
+	useShippedBcryptCost(t)
 	p := filepath.Join(t.TempDir(), "auth.yaml")
 	if err := SetAuthPassword(p, "", "hunter22hunter"); err != nil {
 		t.Fatal(err)
@@ -183,6 +184,7 @@ func TestAuthFileMalformedHashFailsLoud(t *testing.T) {
 }
 
 func TestVerifyAndMaybeRehashUpgradesCost(t *testing.T) {
+	useShippedBcryptCost(t)
 	p := filepath.Join(t.TempDir(), "auth.yaml")
 	hash, _ := bcrypt.GenerateFromPassword([]byte("upgrademe123"), bcrypt.MinCost)
 	os.WriteFile(p, []byte("version: 1\nusername: admin\npassword_bcrypt: "+string(hash)+"\n"), 0o600)

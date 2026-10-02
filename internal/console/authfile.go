@@ -24,6 +24,12 @@ const authFileVersion = 1
 // them opportunistically at login, the one moment the plaintext is in hand.
 const consoleBcryptCost = 12
 
+// bcryptCost is the cost SetAuthPassword hashes at and the cost
+// verifyAndMaybeRehash upgrades to. It equals consoleBcryptCost in every
+// shipped binary; only test binaries lower it, through the hook in testing.go,
+// so their logins do not pay ~250ms (several seconds under -race) per hash.
+var bcryptCost = consoleBcryptCost
+
 // minPasswordChars is the floor enforced when a password is SET (never at
 // verify time — an existing shorter password must keep logging in after a
 // policy bump). The ceiling is bcrypt's own 72-byte limit, rejected with a
@@ -171,7 +177,7 @@ func SetAuthPassword(path, username, password string) error {
 	if a.Username == "" {
 		a.Username = "admin"
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), consoleBcryptCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
 	if err != nil {
 		// ErrPasswordTooLong is pre-empted by ValidateNewPassword; anything
 		// else here is an internal bcrypt failure.
@@ -190,7 +196,7 @@ func verifyAndMaybeRehash(path string, a *AuthFile, username, password string) b
 	if !a.VerifyPassword(username, password) {
 		return false
 	}
-	if cost, err := bcrypt.Cost([]byte(a.PasswordBcrypt)); err == nil && cost < consoleBcryptCost && !a.ReadOnly() {
+	if cost, err := bcrypt.Cost([]byte(a.PasswordBcrypt)); err == nil && cost < bcryptCost && !a.ReadOnly() {
 		_ = SetAuthPassword(path, a.Username, password)
 	}
 	return true
