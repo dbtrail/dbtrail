@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **The Overview's "Dashboards for the team" card now says on its front that it
+  reads from S3.** Its tag reads "reads from S3" and its line "Any DuckDB,
+  Metabase included, reads the copy straight from your S3." Before, nothing on
+  the front told it apart as the card for DuckDB on a bucket.
 
 ## [0.96.0] - 2026-10-02
 ### Added
