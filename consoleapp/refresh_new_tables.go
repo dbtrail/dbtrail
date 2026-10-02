@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -273,11 +274,11 @@ func (b *backupScheduler) newTablesPlanner(e console.ServerEntry) func(all []str
 		if err := console.FullBackupPossible(cur, b.gates()); err != nil {
 			return console.NewTablesActionNotPossible, err.Error()
 		}
-		// The same daily cap as every other full read the schedule takes on
-		// its own (#2006), on top of newTablesMaxAttempts: whichever holds
-		// first.
-		if next, held := b.emergencyHeld(e.ID, time.Now().UTC()); held {
-			return console.NewTablesActionNotPossible, emergencyHeldWords(next)
+		// Not the daily cap on emergency reads (#2006): a full read for new
+		// tables neither waits for it nor uses it up. Its own bound is
+		// newTablesHeld, on top of the per-set rules in newTablesOwed.
+		if next, held := b.newTablesHeld(e.ID, time.Now().UTC()); held {
+			return console.NewTablesActionNotPossible, console.NewTablesHeldReason(newTablesMaxAttempts, next)
 		}
 		names := make(map[string]bool, len(all))
 		for _, n := range all {
@@ -330,7 +331,7 @@ func (b *backupScheduler) includeNewTables(e console.ServerEntry, done console.B
 	slog.Info("snapshot schedule: the update left out tables created after the previous snapshot; taking a full read to include them",
 		"server", e.Name, "id", e.ID, "count", n, "tables", strings.Join(done.NewTables, ","), "attempt", pending.attempts+1)
 	if b.startFull(e, stamp, now, "", console.NewTablesWhy(n)) {
-		b.noteEmergency(e.ID, now)
+		b.noteNewTablesStart(e.ID, now)
 		b.mu.Lock()
 		b.newTablesTried[e.ID] = newTablesTry{names: pending.names, at: stamp, attempts: pending.attempts + 1}
 		b.mu.Unlock()
@@ -445,4 +446,69 @@ func withoutKnownLeftOut(newTables, snapshot, known []string, foldCase bool) []s
 		out = append(out, t)
 	}
 	return out
+}
+
+// newTablesWindow is the window newTablesHeld counts full reads for new
+// tables over.
+const newTablesWindow = 24 * time.Hour
+
+// noteNewTablesStart records that a full read for new tables started now: in
+// memory, and durably in the run history before the read runs, so a read the
+// daemon dies in still counts after a restart.
+func (b *backupScheduler) noteNewTablesStart(serverID string, now time.Time) {
+	b.mu.Lock()
+	starts := append(b.newTablesStarts[serverID], now)
+	if len(starts) > newTablesMaxAttempts {
+		starts = starts[len(starts)-newTablesMaxAttempts:]
+	}
+	b.newTablesStarts[serverID] = starts
+	b.mu.Unlock()
+	if b.sup.history != nil {
+		if err := b.sup.history.NoteNewTablesStart(serverID, now.UTC().Format(time.RFC3339), newTablesMaxAttempts); err != nil {
+			slog.Warn("snapshot schedule: could not record the start of a full read for new tables; after a restart the daily bound on them may allow more", "id", serverID, "error", err)
+		}
+	}
+}
+
+// newTablesHeld reports whether the bound on full reads for new tables holds
+// one back at now, and when the next is allowed: at most newTablesMaxAttempts
+// per server per newTablesWindow, whatever tables they were for (the per-set
+// rules in newTablesOwed live in memory and a restart forgets them; this one
+// is counted from the starts the history recorded, so it does not, except on
+// a daemon with no run history, where the count lives in memory only). Emergency
+// reads do not count here, and these do not count toward emergencyCap.
+func (b *backupScheduler) newTablesHeld(serverID string, now time.Time) (next time.Time, held bool) {
+	// The history keeps every start this process noted (in memory even when
+	// a save failed) plus those from before a restart; the in-memory list is
+	// the copy for a daemon without a history. Not merged: two starts in the
+	// same second are two reads, not one.
+	var starts []time.Time
+	if h := b.sup.history; h != nil {
+		for _, stamp := range h.NewTablesStarts(serverID) {
+			at, err := time.Parse(time.RFC3339, stamp)
+			if err != nil {
+				// Counted as just now: a damaged stamp must not buy one more
+				// read of production.
+				slog.Warn("snapshot schedule: unreadable start of a full read for new tables in the run history; counting it as recent", "id", serverID, "value", stamp)
+				at = now
+			}
+			starts = append(starts, at)
+		}
+	} else {
+		b.mu.Lock()
+		starts = slices.Clone(b.newTablesStarts[serverID])
+		b.mu.Unlock()
+	}
+	var inWindow []time.Time
+	for _, at := range starts {
+		if now.Before(at.Add(newTablesWindow)) {
+			inWindow = append(inWindow, at)
+		}
+	}
+	if len(inWindow) < newTablesMaxAttempts {
+		return time.Time{}, false
+	}
+	sort.Slice(inWindow, func(i, j int) bool { return inWindow[i].Before(inWindow[j]) })
+	// The oldest start that must leave the window for one more to fit.
+	return inWindow[len(inWindow)-newTablesMaxAttempts].Add(newTablesWindow), true
 }

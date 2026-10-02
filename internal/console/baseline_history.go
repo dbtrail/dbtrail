@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 )
@@ -382,6 +383,11 @@ type baselineHistoryFile struct {
 	// restart. A record is written only when a run ends. Older binaries
 	// ignore the key.
 	EmergencyStarted map[string]string `json:"emergency_started,omitempty"`
+	// NewTablesStarted is when each server's newest full reads for new
+	// tables STARTED, newest last, capped by the caller: the durable count
+	// behind the daemon's per-day bound on them, written as each starts for
+	// the same reason as EmergencyStarted. Older binaries ignore the key.
+	NewTablesStarted map[string][]string `json:"new_tables_started,omitempty"`
 }
 
 const baselineHistoryVersion = 1
@@ -395,6 +401,7 @@ type BaselineRunHistory struct {
 	path      string
 	servers   map[string][]BaselineRunRecord
 	emergency map[string]string
+	newTables map[string][]string
 }
 
 // DefaultBaselineHistoryPath returns the history file path as a sibling of
@@ -407,7 +414,7 @@ func DefaultBaselineHistoryPath(serversPath string) string {
 // history; a corrupt or newer-versioned file is an error for the caller to
 // decide on, never silently truncated.
 func OpenBaselineHistory(path string) (*BaselineRunHistory, error) {
-	h := &BaselineRunHistory{path: path, servers: make(map[string][]BaselineRunRecord), emergency: make(map[string]string)}
+	h := &BaselineRunHistory{path: path, servers: make(map[string][]BaselineRunRecord), emergency: make(map[string]string), newTables: make(map[string][]string)}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return h, nil
@@ -431,6 +438,9 @@ func OpenBaselineHistory(path string) (*BaselineRunHistory, error) {
 	if f.EmergencyStarted != nil {
 		h.emergency = f.EmergencyStarted
 	}
+	if f.NewTablesStarted != nil {
+		h.newTables = f.NewTablesStarted
+	}
 	return h, nil
 }
 
@@ -439,9 +449,11 @@ func OpenBaselineHistory(path string) (*BaselineRunHistory, error) {
 // aid and must never fail the run it describes.
 // IsEmergencyWhyCode reports whether a full read's recorded reason makes it
 // an emergency read (#2006): one the schedule took on its own because an
-// update was refused or crashed, or for tables an update left out.
+// update was refused or crashed. A full read for tables an update left out
+// (BackupWhyCodeNewTables) is not one: it has its own bound and neither
+// counts toward nor waits for the emergency cap.
 func IsEmergencyWhyCode(code string) bool {
-	return code == "fold_refused" || code == "fold_crashed" || code == BackupWhyCodeNewTables
+	return code == "fold_refused" || code == "fold_crashed"
 }
 
 // NoteEmergencyStart records, durably and before the read runs, that an
@@ -459,6 +471,28 @@ func (h *BaselineRunHistory) EmergencyStarted(serverID string) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.emergency[serverID]
+}
+
+// NoteNewTablesStart records, durably and before the read runs, that a full
+// read for new tables of the server started at (RFC 3339), keeping the newest
+// keep starts.
+func (h *BaselineRunHistory) NoteNewTablesStart(serverID, at string, keep int) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	starts := append(h.newTables[serverID], at)
+	if keep > 0 && len(starts) > keep {
+		starts = starts[len(starts)-keep:]
+	}
+	h.newTables[serverID] = slices.Clone(starts)
+	return h.save()
+}
+
+// NewTablesStarts is the starts NoteNewTablesStart kept for the server, oldest
+// first.
+func (h *BaselineRunHistory) NewTablesStarts(serverID string) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.newTables[serverID])
 }
 
 func (h *BaselineRunHistory) Append(rec BaselineRunRecord) error {
@@ -715,7 +749,7 @@ func (h *BaselineRunHistory) List(serverID string) []BaselineRunRecord {
 }
 
 func (h *BaselineRunHistory) save() error {
-	b, err := json.Marshal(baselineHistoryFile{Version: baselineHistoryVersion, Servers: h.servers, EmergencyStarted: h.emergency})
+	b, err := json.Marshal(baselineHistoryFile{Version: baselineHistoryVersion, Servers: h.servers, EmergencyStarted: h.emergency, NewTablesStarted: h.newTables})
 	if err != nil {
 		// The only step here whose failure names nothing on its own: every
 		// other one returns an *os.PathError/*os.LinkError already carrying

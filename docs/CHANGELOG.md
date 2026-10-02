@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **Full reads that bring in new tables no longer wait for, or use up, the
+  daily cap.** Since 0.95.0 the scheduler takes at most one self-initiated
+  full read per server per day, and a full read to include tables created
+  after the last snapshot counted toward it: a fallback in the night could
+  keep new tables out of the copy for most of the next day. The cap now
+  covers only full reads that stand in for a refused or crashed update. Full
+  reads for new tables have their own limit: at most 3 per server in any
+  24 hours, counted from start times saved in the run history so a restart
+  does not reset it, on top of the existing rules (a full read that finished
+  and still lacks the tables is not retried, and tables left out because
+  their name cannot be stored are not treated as new). When that limit holds
+  one back, the snapshot card says when the next one may start and offers
+  **Read database now**.
 
 ## [0.95.0] - 2026-10-02
 ### Fixed
