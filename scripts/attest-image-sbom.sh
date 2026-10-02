@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Attach syft-generated SBOMs to a published GHCR image as cosign
 # attestations (#976). Invoked by the sbom-attestation entry under
-# `docker_signs` in .goreleaser.yaml, during GoReleaser's publish phase,
+# `docker_signs` in build/.goreleaser.yaml, during GoReleaser's publish phase,
 # with the manifest reference and digest GoReleaser just pushed:
 #
 #   attest-image-sbom.sh <manifest-ref> <sha256:digest>
@@ -34,7 +34,7 @@ case "$ref" in
 esac
 
 # Discover the platforms actually present in the manifest list instead of
-# hardcoding the arch matrix, so an arch added in .goreleaser.yaml gets an
+# hardcoding the arch matrix, so an arch added in build/.goreleaser.yaml gets an
 # SBOM here without touching this script. Attestation manifests (platform
 # "unknown/unknown") are filtered out; empty lines come from the template's
 # trailing newline.

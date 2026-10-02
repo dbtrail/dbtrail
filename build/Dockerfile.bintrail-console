@@ -39,7 +39,7 @@ COPY --from=builder /bintrail-console /usr/local/bin/bintrail-console
 
 # License-compliance notices (#428): our license + retained upstream notices
 # for the statically-linked MIT/MPL-2.0/BSD dependencies (DuckDB et al.).
-COPY --from=builder /src/LICENSE /src/NOTICE /src/THIRD-PARTY-NOTICES /usr/share/doc/bintrail-console/
+COPY --from=builder /src/LICENSE /src/NOTICE /src/build/THIRD-PARTY-NOTICES /usr/share/doc/bintrail-console/
 
 USER bintrail
 ENTRYPOINT ["bintrail-console"]

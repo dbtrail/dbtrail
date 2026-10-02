@@ -246,7 +246,7 @@ jobs:
             type=semver,pattern={{version}},value=${{ inputs.tag || github.ref_name }}
             # :latest stays off prereleases (tags containing '-', e.g.
             # v0.8.0-rc1), mirroring skip_push: auto on the main image's
-            # manifest in .goreleaser.yaml.
+            # manifest in build/.goreleaser.yaml.
             type=raw,value=latest,enable=${{ !contains(inputs.tag || github.ref_name, '-') }}
 
       - name: Create multi-arch manifest list
