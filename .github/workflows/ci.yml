@@ -240,6 +240,9 @@ jobs:
   integration-shard:
     needs: changes
     runs-on: ubuntu-22.04
+    # A hung test must not hold a runner for the 6-hour default. The slowest
+    # shard took about 12 minutes when this was written.
+    timeout-minutes: 40
 
     # Two supported cells: the BYO contract floor (8.0) and the bundled index
     # engine (8.4, where mysql_native_password is disabled by default so every
@@ -453,6 +456,11 @@ jobs:
           bad=0
           ready=true
           : > /tmp/mysql-it.out
+          if [ -f /tmp/mysql-it-shards/outcome ]; then
+            # download-artifact extracts flat when only ONE artifact matched.
+            echo "::error::only one of $count shards reported a result"
+            exit 1
+          fi
           for i in $(seq 1 "$count"); do
             d="/tmp/mysql-it-shards/mysql-it-${{ matrix.mysql }}-shard-$i"
             if [ ! -f "$d/outcome" ]; then

@@ -23,6 +23,8 @@
 # share one MySQL server and its binlog, and the binlog tests count exact
 # events. Each package ends with the same `ok`/`FAIL` line `go test` prints.
 set -euo pipefail
+# A failing `go list` inside $(...) must stop the script too, not shorten a list.
+shopt -s inherit_errexit
 
 SHARD_COUNT=3
 
@@ -86,7 +88,7 @@ shard_packages() {
 }
 
 run_shard() {
-  local shard="$1" log="$2" bindir t0 status=0 pkg dir bin rc start elapsed
+  local shard="$1" log="$2" bindir t0 status=0 pkg dir bin rc start elapsed ran=0 dirs
   local list
   local -a pkgs=()
   # Not a process substitution: a refusal inside shard_packages must stop the
@@ -105,8 +107,10 @@ run_shard() {
     || die "building the test binaries failed"
   echo "built ${#pkgs[@]} test binaries in parallel in $((SECONDS - t0))s"
 
+  dirs="$(go list -f '{{.ImportPath}} {{.Dir}}' "${pkgs[@]}")"
   : >"$log"
   while read -r pkg dir; do
+    ran=$((ran + 1))
     bin="$bindir/${pkg##*/}.test"
     if [ ! -x "$bin" ]; then
       printf 'FAIL\t%s\t[no test binary at %s]\n' "$pkg" "$bin" | tee -a "$log"
@@ -116,7 +120,10 @@ run_shard() {
     start="$(now)"
     set +e
     # The flags `go test -v -count=1` passes, with its default 10m timeout.
-    (cd "$dir" && "$bin" -test.paniconexit0 -test.timeout=10m0s -test.count=1 -test.v=true) 2>&1 | tee -a "$log"
+    # stdin is /dev/null: a test that read it would otherwise swallow the
+    # package list this loop reads. `timeout` is the watchdog `go test` keeps
+    # past the binary's own timer, for a hang that timer cannot interrupt.
+    (cd "$dir" && timeout -s QUIT 11m "$bin" -test.paniconexit0 -test.timeout=10m0s -test.count=1 -test.v=true </dev/null) 2>&1 | tee -a "$log"
     rc=${PIPESTATUS[0]}
     set -e
     elapsed="$(awk -v a="$start" -v b="$(now)" 'BEGIN { printf "%.3f", b - a }')"
@@ -126,8 +133,12 @@ run_shard() {
       printf 'FAIL\t%s\t%ss\n' "$pkg" "$elapsed" | tee -a "$log"
       status=1
     fi
-  done < <(go list -f '{{.ImportPath}} {{.Dir}}' "${pkgs[@]}")
+  done <<<"$dirs"
   rm -rf "$bindir"
+  if [ "$ran" -ne "${#pkgs[@]}" ]; then
+    printf 'FAIL\tshard %s ran %s of its %s packages\n' "$shard" "$ran" "${#pkgs[@]}" | tee -a "$log"
+    status=1
+  fi
   return "$status"
 }
 
