@@ -51,16 +51,18 @@ dump. A baseline that is not point-consistent yields a table state that never
 existed, and every answer reconstructed from it inherits that silently.
 
 **That moment can stretch.** The lock itself is held for tens of milliseconds
-(13 to 70 ms measured, most of it network round trips). Before it is granted,
+(a median of 13 to 73 ms measured, never above 141 ms). Before it is granted,
 the server may wait for work already running, and what stops during that wait
 depends on the mode and the server:
 
 - `ftwrl` on MySQL waits for a query already reading a dumped table, and writes
-  to *that* table stop until the query ends. A running `ALTER TABLE` delays the
-  start of the dump but does not stop writes.
+  to *that* table stop until the query ends, so an application whose
+  transactions touch it stops too. A running `ALTER TABLE` delays the start of
+  the dump but does not stop writes, and once the dump starts no schema change
+  can run until it ends.
 - `ftwrl` on MariaDB does not wait for queries, but it does wait for a running
-  `ALTER TABLE`, and while it waits **every write on the server stops**, for up
-  to 60 seconds, after which the snapshot fails.
+  `ALTER TABLE`, and while it waits **every write on the server stops**, until
+  the `ALTER` ends or, past 60 seconds, the snapshot fails.
 - `lock-all` waits for an open transaction that wrote to a dumped table and has
   not committed. On MySQL, writes to some of the other dumped tables stop until
   that transaction commits.

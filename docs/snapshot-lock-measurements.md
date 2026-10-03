@@ -7,26 +7,31 @@ source, per lock mode and per server.
 
 ## What the numbers say
 
-**The lock itself is short.** From the moment it is granted until mydumper releases it, it was held
-for 13 to 23 ms on a local MySQL, about 40 ms on MariaDB and 50 to 70 ms on Amazon RDS. It is a few
-round trips between mydumper and the server, so it follows the network, not the size of the data or
-the write load.
+**The lock itself is short.** From the moment `FLUSH TABLES WITH READ LOCK` (`ftwrl`) or
+`LOCK TABLE` (`lock-all`) is granted until mydumper releases it, the median run held it for 13 to
+73 ms, and no run held it longer than 141 ms. That window is mydumper's worker threads opening their
+snapshots one after another. It did not grow with the write load; the size of the data was not
+varied.
+
+One lock is not short: on MySQL 8.0 and 8.4, `ftwrl` first takes `LOCK INSTANCE FOR BACKUP` and holds
+it for the **whole dump**. It does not stop writes, but no `ALTER TABLE` or other schema change can
+run until the dump ends.
 
 **What can be long is the wait before the lock is granted**, and what stops during that wait depends
 on the mode and on the server:
 
 | Running on the source when the snapshot starts | `ftwrl` on MySQL 8.0 / 8.4 | `ftwrl` on MariaDB 10.11 | `lock-all` (MySQL, RDS, MariaDB) |
 |---|---|---|---|
-| A long query reading a dumped table | The lock waits until the query ends. **Writes to the table that query reads stop for the whole wait** (12.8 s in the test); writes to other tables continue. | No wait. | No wait. |
-| An open transaction that wrote to a dumped table and has not committed | No wait. | No wait. | The lock waits until the transaction commits (12.7 to 12.9 s in the test). On MySQL and RDS, **writes to some of the other dumped tables stop for the whole wait**: the ones the lock already took. The transaction's own table keeps accepting writes. On MariaDB no writes stopped. |
-| An online `ALTER TABLE` on a dumped table | The dump does not start until the `ALTER` finishes (29 to 57 s in the test), but writes continue: the wait is on `LOCK INSTANCE FOR BACKUP`, which blocks schema changes, not writes. | **Every write on the server stops** while the lock waits for the `ALTER`, tables outside the snapshot included. After 60 s mydumper cancels its own lock request and the snapshot fails. Seen in 3 of 3 runs: 61 s with no committed write anywhere on the server. | The lock waits 0.05 to 2.4 s. |
+| A long query reading a dumped table | The lock waits until the query ends. **Writes to the table that query reads stop for the whole wait** (12.8 s in the test). Writes that touch only other tables continue, but an application whose transactions also touch that table stops entirely: the sysbench load committed nothing for 11 s. | No wait. | No wait. |
+| An open transaction that wrote to a dumped table and has not committed | No wait. | No wait. | The lock waits until the transaction commits (12.7 to 13.1 s in the test). On MySQL and RDS, **writes to some of the other dumped tables stop for the whole wait**: the ones the lock already took. The transaction's own table keeps accepting writes. On MariaDB no writes stopped. |
+| An online `ALTER TABLE` on a dumped table | The dump does not start until the `ALTER` finishes (26 to 57 s in the test), but writes continue: the wait is on `LOCK INSTANCE FOR BACKUP`, which blocks schema changes, not writes. | **Every write on the server stops** while the lock waits for the `ALTER`, tables outside the snapshot included. If the `ALTER` runs past 60 s, mydumper cancels its own lock request and the snapshot fails. Seen in 3 of 3 runs, with an `ALTER` that ran 79 to 84 s: 61 s with no committed write anywhere on the server. | The lock waits 0.03 to 2.4 s. On MariaDB it already waited 0.4 to 0.7 s with no `ALTER` at all. |
 
 So:
 
 - Take snapshots when no long queries, long transactions or `ALTER TABLE` are running.
 - On MariaDB with `ftwrl`, never let a snapshot start during an `ALTER TABLE`.
-- `safe-no-lock` aborted in 5 of 5 runs on every server under a steady write load (300 transactions
-  per second), within the first second of the dump. It never wrote a snapshot that was not
+- `safe-no-lock` aborted in 5 of 5 runs on every server with a steady write load of 300 transactions
+  per second, within the first second of the dump. It never wrote a snapshot that was not
   point-consistent, and it never finished one either.
 
 The 60 s in the MariaDB case is mydumper's `--long-query-guard` default, which DBTrail does not
@@ -36,17 +41,22 @@ was interrupted`.
 
 ## How it was measured
 
-- **mydumper** v1.0.3-1 (the build DBTrail ships), started exactly as DBTrail starts it:
-  `--threads 4 --compress-protocol --complete-insert --sync-thread-lock-mode <MODE> --trx-tables
-  --database sbtest`.
+- **mydumper** v1.0.3-1 (the build DBTrail ships), in its Docker image, with the arguments DBTrail
+  passes: `--threads 4 --compress-protocol --complete-insert --sync-thread-lock-mode <MODE>
+  --trx-tables --database sbtest`. On MySQL and RDS it ran as the container's first process, and
+  after a `safe-no-lock` abort it never exited (the measurement killed it at 180 s); on MariaDB it
+  ran behind `docker run --init` and exited within a second. The console is not affected, because it
+  runs mydumper as a child process; `bintrail dump` through Docker is, see #2039.
 - **Data**: the dumped schema held four sysbench tables of 500,000 rows, one 4,000,000-row table
   (`big`, the target of the `ALTER`) and a small `probe` table.
 - **Write load**: sysbench `oltp_write_only`, 8 threads, fixed at 300 transactions per second.
-  "Quiet" means no sysbench: only the probes below, a few hundred single-row writes per second.
+  "Quiet" means no sysbench: only the probes below, about 1,300 to 1,600 single-row writes per
+  second (about 300 on RDS, where every write crossed the network).
 - **Probes**, each a loop of single-row autocommit writes that records how long every write took:
   two into the dumped table the blocker uses (`sbtest1`, or `big` for the `ALTER`), two into another
   dumped table (`probe`), and one into a table outside the dumped schema. The outside probe is the
-  control: a pause that shows up there too comes from the machine being busy, not from the lock.
+  control: a pause that shows up there too comes from the machine being busy, not from the lock,
+  except when the lock is server-wide (MariaDB `ftwrl` behind an `ALTER`).
 - **Blockers**, started 2 s before the dump: `SELECT SLEEP(15) FROM sbtest1 LIMIT 1`; a transaction
   that ran `UPDATE sbtest1 ... WHERE id=1` and committed 15 s later; and
   `ALTER TABLE big ADD INDEX (c, pad), ALGORITHM=INPLACE, LOCK=NONE`.
@@ -60,18 +70,20 @@ was interrupted`.
   (`safe-no-lock` 5 times); tables show the median and, in parentheses, the worst run.
 
 Absolute latencies belong to these machines and are not comparable across servers. On the laptop,
-every probe, the control included, paused for 0.2 to 4 s at some point during every dump, in every
-mode: that is the dump competing for the same CPU and disk, which the control probe shows. Compare
+every probe, the control included, paused for 0.2 to 4 s at some point during every `ftwrl` and
+`lock-all` dump: that is the dump competing for the same CPU and disk, which the control probe shows. Compare
 each row's three pause columns with each other, not with another server's.
 
 ## Results
 
 "Longest write pause" is the longest stretch with no committed write on that probe while the dump
-ran. "Seconds at 0 tx/s" counts the seconds in which sysbench committed nothing.
+ran. "Write latency" is the `probe` table's probe. "Seconds at 0 tx/s" counts the seconds in which
+sysbench committed nothing. The `safe-no-lock` rows show only the outcome: on MySQL and RDS the
+dump aborted within 75 ms and the rest of the window was a mydumper that had stopped working.
 
 #### MySQL 8.4
 
-| Mode | Running when the dump starts | Dumps OK | Lock wait, ms | Lock held, ms | Longest write pause, ms: table the blocker uses / other dumped table / outside the dump | Write latency p50 / p99, ms | Seconds at 0 tx/s |
+| Mode | Running when the dump starts | Dumps OK | Lock wait, ms | Lock held, ms | Longest write pause, ms: table the blocker uses / other dumped table / outside the dump | Write latency p50 / p99, ms (`probe`) | Seconds at 0 tx/s |
 |---|---|---|---|---|---|---|---|
 | ftwrl | quiet | 3/3 | 8 (67) | 21 (27) | 245 (502) / 222 (502) / 249 (489) | 3 (3) / 15 (22) | – |
 | ftwrl | write load | 3/3 | 27 (38) | 15 (19) | 255 (353) / 258 (352) / 258 (354) | 3 (3) / 14 (15) | 0 (0) |
@@ -83,11 +95,11 @@ ran. "Seconds at 0 tx/s" counts the seconds in which sysbench committed nothing.
 | lock-all | + long SELECT | 3/3 | 15 (23) | 21 (23) | 593 (1693) / 569 (1691) / 594 (1692) | 3 (3) / 30 (33) | 0 (1) |
 | lock-all | + open write trx | 3/3 | 12.8 s (12.8 s) | 13 (17) | 269 (379) / 12.8 s (12.8 s) / 288 (387) | 3 (3) / 13 (14) | 0 (0) |
 | lock-all | + online ALTER | 3/3 | 301 (2409) | 73 (141) | 1.6 s (2.9 s) / 1.0 s (2.6 s) / 1.6 s (2.9 s) | 4 (4) / 48 (140) | 1 (2) |
-| safe-no-lock | write load | 0/5, aborted 5/5 | – | – | – | 2 (2) / 9 (9) | 0 (0) |
+| safe-no-lock | write load | 0/5, aborted 5/5 | – | – | – | – | – |
 
 #### MySQL 8.0
 
-| Mode | Running when the dump starts | Dumps OK | Lock wait, ms | Lock held, ms | Longest write pause, ms: table the blocker uses / other dumped table / outside the dump | Write latency p50 / p99, ms | Seconds at 0 tx/s |
+| Mode | Running when the dump starts | Dumps OK | Lock wait, ms | Lock held, ms | Longest write pause, ms: table the blocker uses / other dumped table / outside the dump | Write latency p50 / p99, ms (`probe`) | Seconds at 0 tx/s |
 |---|---|---|---|---|---|---|---|
 | ftwrl | quiet | 3/3 | 7 (15) | 13 (24) | 726 (1453) / 485 (1480) / 630 (1480) | 3 (3) / 11 (20) | – |
 | ftwrl | write load | 3/3 | 9 (13) | 16 (17) | 606 (638) / 602 (640) / 610 (640) | 3 (4) / 13 (13) | 0 (0) |
@@ -99,25 +111,25 @@ ran. "Seconds at 0 tx/s" counts the seconds in which sysbench committed nothing.
 | lock-all | + long SELECT | 3/3 | 29 (50) | 15 (16) | 629 (653) / 626 (653) / 629 (651) | 3 (4) / 10 (13) | 0 (0) |
 | lock-all | + open write trx | 3/3 | 12.8 s (12.8 s) | 14 (16) | 559 (688) / 12.8 s (12.8 s) / 561 (688) | 3 (3) / 10 (12) | 0 (0) |
 | lock-all | + online ALTER | 3/3 | 586 (2397) | 19 (25) | 2.0 s (2.9 s) / 1.7 s (4.0 s) / 2.0 s (3.0 s) | 6 (7) / 85 (187) | 1 (5) |
-| safe-no-lock | write load | 0/5, aborted 5/5 | – | – | – | 2 (2) / 6 (7) | 0 (0) |
+| safe-no-lock | write load | 0/5, aborted 5/5 | – | – | – | – | – |
 
 The MySQL 8.0 runs overlapped the laptop's disk filling up, so their pauses are larger across the
 board, the control included; the lock timings are unaffected.
 
 #### Amazon RDS for MySQL 8.4 (`lock-all` only: `ftwrl` cannot run on RDS)
 
-| Mode | Running when the dump starts | Dumps OK | Lock wait, ms | Lock held, ms | Longest write pause, ms: table the blocker uses / other dumped table / outside the dump | Write latency p50 / p99, ms | Seconds at 0 tx/s |
+| Mode | Running when the dump starts | Dumps OK | Lock wait, ms | Lock held, ms | Longest write pause, ms: table the blocker uses / other dumped table / outside the dump | Write latency p50 / p99, ms (`probe`) | Seconds at 0 tx/s |
 |---|---|---|---|---|---|---|---|
 | lock-all | quiet | 3/3 | 15 (27) | 50 (54) | 146 (240) / 231 (240) / 156 (240) | 15 (16) / 99 (101) | – |
 | lock-all | write load | 3/3 | 95 (158) | 68 (119) | 139 (181) / 177 (236) / 75 (139) | 13 (16) / 37 (48) | 0 (0) |
 | lock-all | + long SELECT | 3/3 | 70 (100) | 57 (83) | 74 (98) / 111 (151) / 63 (101) | 15 (16) / 45 (46) | 0 (0) |
 | lock-all | + open write trx | 3/3 | 12.8 s (12.9 s) | 52 (60) | 118 (121) / 12.9 s (13.0 s) / 93 (106) | 15 (16) / 48 (53) | 0 (0) |
 | lock-all | + online ALTER | 3/3 | 46 (113) | 62 (63) | 153 (218) / 164 (166) / 166 (229) | 24 (25) / 125 (129) | 0 (0) |
-| safe-no-lock | write load | 0/5, aborted 5/5 | – | – | – | 7 (8) / 15 (17) | 0 (0) |
+| safe-no-lock | write load | 0/5, aborted 5/5 | – | – | – | – | – |
 
 #### MariaDB 10.11
 
-| Mode | Running when the dump starts | Dumps OK | Lock wait, ms | Lock held, ms | Longest write pause, ms: table the blocker uses / other dumped table / outside the dump | Write latency p50 / p99, ms | Seconds at 0 tx/s |
+| Mode | Running when the dump starts | Dumps OK | Lock wait, ms | Lock held, ms | Longest write pause, ms: table the blocker uses / other dumped table / outside the dump | Write latency p50 / p99, ms (`probe`) | Seconds at 0 tx/s |
 |---|---|---|---|---|---|---|---|
 | ftwrl | quiet | 3/3 | 3 (8) | 38 (38) | 162 (184) / 140 (185) / 162 (833) | 3 (3) / 9 (9) | – |
 | ftwrl | write load | 3/3 | 3 (3) | 40 (41) | 225 (386) / 181 (195) / 180 (198) | 3 (3) / 9 (12) | 0 (0) |
@@ -129,13 +141,16 @@ board, the control included; the lock timings are unaffected.
 | lock-all | + long SELECT | 3/3 | 117 (845) | 40 (41) | 310 (864) / 150 (227) / 190 (310) | 3 (3) / 11 (12) | 0 (0) |
 | lock-all | + open write trx | 3/3 | 12.7 s (13.1 s) | 41 (47) | 487 (1493) / 255 (1545) / 255 (1494) | 2 (2) / 8 (9) | 0 (1) |
 | lock-all | + online ALTER | 3/3 | 506 (959) | 39 (45) | 204 (570) / 155 (162) / 191 (205) | 3 (4) / 81 (82) | 0 (0) |
-| safe-no-lock | write load | 0/5, aborted 5/5 | – | – | – | 2 (2) / 9 (9) | 0 (0) |
+| safe-no-lock | write load | 0/5, aborted 5/5 | – | – | – | – | – |
 
 ## What was not measured
 
 - An `ALTER TABLE` that runs longer than 60 s on MySQL with `ftwrl`: the longest wait on the backup
   lock was 57 s, so whether mydumper's long-query guard also cancels that wait is not known.
-- An `ALTER TABLE` that **starts** while the dump is running, rather than before it.
+- An `ALTER TABLE` that **starts** while the dump is running, rather than before it, and on MariaDB
+  an `ALTER` shorter than 60 s (the wait should then end when the `ALTER` does).
+- A long query on a table **outside** the dump. `FLUSH TABLES` is server-wide, so on MySQL it most
+  likely makes `ftwrl` wait the same way.
 - Sources other than the four above (Percona Server, Aurora, MariaDB other than 10.11), and
   mydumper builds other than v1.0.3-1.
 - Which of the other dumped tables `lock-all` takes before it waits. In these runs the tables that

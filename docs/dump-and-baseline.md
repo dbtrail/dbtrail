@@ -231,8 +231,8 @@ both directions were verified against the pinned build.
 position before and after syncing threads and, on any difference, stops with *"we cannot guarantee
 the backup to be consistent. Stopping backup due to the use of SAFE_NO_LOCK."* So it never writes a
 torn snapshot, but on a source taking concurrent writes it will mostly refuse. Verified empirically
-against mydumper `v1.0.3-1` on MySQL 8.0 and 8.4, RDS for MySQL 8.4 and MariaDB 10.11: under 300
-transactions per second it aborted in 5 of 5 runs on each, and it is the only low-privilege mode
+against mydumper `v1.0.3-1` on MySQL 8.0 and 8.4, RDS for MySQL 8.4 and MariaDB 10.11: with a steady load
+of 300 transactions per second it aborted in 5 of 5 runs on each, and it is the only low-privilege mode
 that will not lie to you.
 
 `no-lock` accepts a torn snapshot. mydumper's own help describes it as the mode to use *"if you
