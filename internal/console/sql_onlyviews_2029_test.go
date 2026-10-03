@@ -49,15 +49,14 @@ func TestSQLWantedViews_2029(t *testing.T) {
 		{"main.events", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("", "main", "events")}}, set("events")},
 		{"memory.main.events", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("memory", "main", "events")}}, set("events")},
 		{"join", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("", "shop", "orders"), ref("", "shop", "items")}}, set("shop.orders", "shop.items")},
-		{"a CTE name is not a view", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("", "", "q"), ref("", "shop", "orders")}, CTEs: []string{"q"}}, set("shop.orders")},
-		// A WITH that shadows a view reads the view inside its own body.
-		{"a CTE shadowing a view keeps the view", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("", "", "events"), ref("", "", "events")}, CTEs: []string{"events"}}, set("events")},
+		// The worker reports a catalog view a WITH shadows only where the WITH
+		// does not bind it (its own body): it matches no view, so every view.
+		{"a catalog view read under a WITH of its name", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("", "", "duckdb_views")}}, nil},
 		{"unsure", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("", "shop", "orders")}, Unsure: true}, nil},
 		{"system table", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("", "information_schema", "tables")}}, nil},
 		{"typo keeps every view for Did you mean", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("", "shop", "ordrs")}}, nil},
 		{"right name, wrong schema", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("", "crm", "items")}}, nil},
 		{"another catalog", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("other", "shop", "orders")}}, nil},
-		{"a qualified CTE-looking name is not a CTE", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{ref("", "x", "q")}, CTEs: []string{"q"}}, nil},
 	}
 	for _, c := range cases {
 		if got := sqlWantedViews(in, c.refs); !reflect.DeepEqual(got, c.want) {
@@ -113,6 +112,13 @@ func TestSQL_realWorkerNarrowedViews_2029(t *testing.T) {
 	}
 	if w := f.post(t, `{"sql":"SELECT * FROM shop.ordrs"}`); w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "orders") {
 		t.Errorf("a typo should still be pointed at the real view: code=%d body=%s", w.Code, w.Body.String())
+	}
+
+	// The review's case: a WITH named after a catalog view reads the catalog
+	// inside its own body, so the copy's view must be there to be counted.
+	w := f.post(t, `{"sql":"WITH duckdb_views AS (SELECT * FROM duckdb_views WHERE NOT internal) SELECT count(*) AS n FROM duckdb_views"}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"rows":[[1]]`) {
+		t.Errorf("WITH shadowing duckdb_views: code=%d body=%s, want the copy's one view counted", w.Code, w.Body.String())
 	}
 
 	out, err := f.s.runSQL(context.Background(), f.s.cm.boot, "u", "SELECT current_schema() AS s", "shop", 0)

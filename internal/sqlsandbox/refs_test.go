@@ -34,7 +34,6 @@ func parseForRefs(t *testing.T, text string) Refs {
 		a, b := refs.Tables[i], refs.Tables[j]
 		return a.Catalog+"\x00"+a.Schema+"\x00"+a.Name < b.Catalog+"\x00"+b.Schema+"\x00"+b.Name
 	})
-	sort.Strings(refs.CTEs)
 	return refs
 }
 
@@ -61,12 +60,20 @@ func TestCollectRefs(t *testing.T) {
 		{"SELECT (SELECT max(id) FROM a.x) FROM b.y WHERE EXISTS (SELECT 1 FROM c.z) AND id IN (SELECT id FROM d.w) LIMIT (SELECT 1 FROM e.v)",
 			Refs{Tables: []TableRef{tr("", "a", "x"), tr("", "b", "y"), tr("", "c", "z"), tr("", "d", "w"), tr("", "e", "v")}}},
 		{"SELECT * FROM (SELECT * FROM shop.orders) s", Refs{Tables: []TableRef{tr("", "shop", "orders")}}},
-		{"WITH q AS (SELECT * FROM shop.orders) SELECT * FROM q",
-			Refs{Tables: []TableRef{tr("", "", "q"), tr("", "shop", "orders")}, CTEs: []string{"q"}}},
-		// A WITH whose name shadows a view reads the view inside its own body:
-		// both readings stay, and the caller decides.
+		{"WITH q AS (SELECT * FROM shop.orders) SELECT * FROM q", Refs{Tables: []TableRef{tr("", "shop", "orders")}}},
+		{"WITH Q AS (SELECT 1) SELECT * FROM q, (SELECT * FROM q) s", Refs{}},
+		// A WITH's own body does not see it: the name there is the relation.
 		{"WITH events AS (SELECT * FROM events WHERE id > 0) SELECT count(*) FROM events",
-			Refs{Tables: []TableRef{tr("", "", "events"), tr("", "", "events")}, CTEs: []string{"events"}}},
+			Refs{Tables: []TableRef{tr("", "", "events")}}},
+		{"WITH duckdb_views AS (SELECT * FROM duckdb_views WHERE NOT internal) SELECT count(*) FROM duckdb_views",
+			Refs{Tables: []TableRef{tr("", "", "duckdb_views")}}},
+		// A WITH inside a subquery binds nothing outside it.
+		{"SELECT (SELECT count(*) FROM (WITH duckdb_views AS (SELECT 1) SELECT * FROM duckdb_views)), (SELECT count(*) FROM duckdb_views)",
+			Refs{Tables: []TableRef{tr("", "", "duckdb_views")}}},
+		// A qualified name is never a WITH.
+		{"WITH orders AS (SELECT 1) SELECT * FROM shop.orders", Refs{Tables: []TableRef{tr("", "shop", "orders")}}},
+		// A sibling reference is reported (the safe side: it matches no view).
+		{"WITH a AS (SELECT 1), b AS (SELECT * FROM a) SELECT * FROM b", Refs{Tables: []TableRef{tr("", "", "a")}}},
 		{"DESCRIBE shop.orders", Refs{Tables: []TableRef{tr("", "shop", "orders")}}},
 		{"SUMMARIZE shop.orders", Refs{Tables: []TableRef{tr("", "shop", "orders")}}},
 		{"SELECT * FROM information_schema.tables", Refs{Tables: []TableRef{tr("", "information_schema", "tables")}}},

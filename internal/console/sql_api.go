@@ -605,23 +605,18 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 // catalog, or a typo: DuckDB's "Did you mean" is computed from the catalog,
 // so a typo answered out of a narrowed one would suggest the wrong thing.
 // An extra view costs about half a millisecond; a missing one turns a
-// working statement into "does not exist".
+// working statement into "does not exist". The worker has already left out
+// the references a WITH in scope binds (sqlsandbox.Refs).
 //
 // Names compare the way DuckDB compares them (ASCII case only). A name
 // without a schema matches that view in every schema, not only the one the
 // search path would pick: following DuckDB's resolution here could only
-// leave out the view it picks. A view is matched BEFORE a WITH name, because
-// `WITH events AS (SELECT * FROM events ...)` reads the view inside the
-// clause that shadows it, and the parse lists the two under one name.
+// leave out the view it picks.
 func sqlWantedViews(in views.Input, refs sqlsandbox.Refs) views.ViewSet {
 	if refs.Unsure {
 		return nil
 	}
 	names := in.ViewNames()
-	ctes := map[string]bool{}
-	for _, c := range refs.CTEs {
-		ctes[sqlFoldName(c)] = true
-	}
 	want := views.ViewSet{}
 	for _, r := range refs.Tables {
 		catalog, schema, name := sqlFoldName(r.Catalog), sqlFoldName(r.Schema), sqlFoldName(r.Name)
@@ -635,7 +630,7 @@ func sqlWantedViews(in views.Input, refs sqlsandbox.Refs) views.ViewSet {
 				matched = true
 			}
 		}
-		if !matched && !(schema == "" && ctes[name]) {
+		if !matched {
 			return nil
 		}
 	}
