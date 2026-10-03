@@ -52,12 +52,27 @@ import "fmt"
 // The default stays FTWRL for the reason #1377 chose it: it is the one
 // point-consistent mode that needs no per-object privilege, so it works on a
 // self-hosted source with a single global grant and on every flavor including
-// MariaDB and MySQL 5.7. LOCK_ALL is not a worse mode — the locking-cost
-// comparison between the two has NOT been measured here, and no claim is made
-// either way — it is simply the one that requires knowing which objects will be
-// dumped. It is the right answer where FTWRL cannot run, which the refusal in
-// internal/mydumperlock names first. SAFE_NO_LOCK is unusable as a default on
-// the sources that most need a baseline, and NO_LOCK is not a backup.
+// MariaDB and MySQL 5.7. LOCK_ALL is not a worse mode, it is simply the one that
+// requires knowing which objects will be dumped, and it is the right answer
+// where FTWRL cannot run, which the refusal in internal/mydumperlock names
+// first. SAFE_NO_LOCK is unusable as a default on the sources that most need a
+// baseline, and NO_LOCK is not a backup.
+//
+// What the two point-consistent modes cost the source was measured in #1985
+// (docs/snapshot-lock-measurements.md). Both hold FTWRL / LOCK TABLE for tens
+// of milliseconds; they differ in what they wait for before it is granted:
+//
+//   - FTWRL on MySQL waits for a statement already reading a dumped table, and
+//     writes to that table stop meanwhile. It first takes LOCK INSTANCE FOR
+//     BACKUP, which waits for a running ALTER (writes continue) and then
+//     blocks schema changes for the whole dump.
+//   - FTWRL on MariaDB ignores running queries but waits for a running ALTER
+//     while blocking every write on the server, until the ALTER ends or, past
+//     mydumper's 60 s --long-query-guard, mydumper cancels it and the dump
+//     fails.
+//   - LOCK_ALL waits for an uncommitted transaction that wrote to a dumped
+//     table, and on MySQL stops writes to some of the other dumped tables
+//     meanwhile.
 type LockMode string
 
 const (

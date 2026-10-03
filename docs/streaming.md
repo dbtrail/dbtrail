@@ -50,13 +50,27 @@ only for the moment the threads synchronize — never for the duration of the
 dump. A baseline that is not point-consistent yields a table state that never
 existed, and every answer reconstructed from it inherits that silently.
 
-**That moment can stretch.** Before the lock is granted, the server waits for
-work already running to finish, and new writes queue behind the waiting lock,
-so the application can stall for as long as that work takes. Under `ftwrl`
-that is any statement already running, a long report included; under
-`lock-all` it is an open transaction writing to one of the dumped tables, or a
-schema change on one. Take baselines that read the source when no long
-statements, long transactions or `ALTER TABLE` are running.
+**That moment can stretch.** The lock itself is held for tens of milliseconds
+(a median of 13 to 73 ms measured, never above 141 ms). Before it is granted,
+the server may wait for work already running, and what stops during that wait
+depends on the mode and the server:
+
+- `ftwrl` on MySQL waits for a query already reading a dumped table, and writes
+  to *that* table stop until the query ends, so an application whose
+  transactions touch it stops too. A running `ALTER TABLE` delays the start of
+  the dump but does not stop writes, and once the dump starts no schema change
+  can run until it ends.
+- `ftwrl` on MariaDB does not wait for queries, but it does wait for a running
+  `ALTER TABLE`, and while it waits **every write on the server stops**, until
+  the `ALTER` ends or, past 60 seconds, the snapshot fails.
+- `lock-all` waits for an open transaction that wrote to a dumped table and has
+  not committed. On MySQL, writes to some of the other dumped tables stop until
+  that transaction commits.
+
+Take baselines that read the source when no long queries, long transactions or
+`ALTER TABLE` are running, and on MariaDB with `ftwrl` never during an
+`ALTER TABLE`. The numbers are in
+[How long a snapshot blocks writes](snapshot-lock-measurements.md).
 
 Two ways to satisfy it, both point-consistent:
 
