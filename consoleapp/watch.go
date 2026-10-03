@@ -30,6 +30,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/observe"
+	"github.com/dbtrail/dbtrail/internal/readrouter"
 	"github.com/dbtrail/dbtrail/internal/rotation"
 	"github.com/dbtrail/dbtrail/internal/serverid"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
@@ -107,8 +108,18 @@ var (
 	// (#2030): the SQL card and the embedded port together, each a worker
 	// with its own threads and memory beside capture. Env
 	// BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT; below 1 refuses to start.
-	upSQLMaxInFlight  = sqlsandbox.DefaultMaxInFlight
-	upArchiveStageDir string
+	upSQLMaxInFlight = sqlsandbox.DefaultMaxInFlight
+	// upRouteMaxCopyAge turns read routing on the port on (#2038): MySQL
+	// answers by default, the copy takes expensive SELECTs while its snapshot
+	// is at most this old. Zero (default) = copy-only port, as before.
+	// Env BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE.
+	upRouteMaxCopyAge time.Duration
+	// upRouteCostThreshold / upRouteScanRows are the EXPLAIN thresholds read
+	// routing decides on (readrouter.Policy). Env
+	// BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD / BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS.
+	upRouteCostThreshold float64
+	upRouteScanRows      int64
+	upArchiveStageDir    string
 	// upConsoleBaselineTrigger opts into in-process baseline creation from the
 	// console (#613). Env-only (BINTRAIL_CONSOLE_BASELINE_TRIGGER=1) — off by
 	// default because it needs mydumper in the image and reaches the source DB.
@@ -266,6 +277,9 @@ func init() {
 	watchCmd.Flags().BoolVar(&upConsoleAllowSetup, "console-allow-setup", false, "Allow browser first-run password setup on a non-loopback bind (assert the bind is access-controlled, e.g. published only on the host loopback)")
 	watchCmd.Flags().IntVar(&upSQLMaxInFlight, "sql-max-in-flight", sqlsandbox.DefaultMaxInFlight, "How many SQL-on-the-copy statements run at once, the SQL card and the --flashback-listen port together; one more is refused. Each runs as its own process with 2 threads and up to 2 GB, on the host that captures, and every result is held in this process while it is sent, so raise it only with cores and memory to spare. Env BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT.")
 	watchCmd.Flags().StringVar(&upConsoleFlashbackListen, "flashback-listen", "", "Serve an embedded MySQL-protocol time-travel port (_flashback/_snapshot/_diff) for every monitored server, routed by the connection username (server id or name); e.g. 127.0.0.1:3308. Requires --console-token, which reads every schema of every server: the port does not filter by schema. Empty = off. Env BINTRAIL_CONSOLE_FLASHBACK_LISTEN.")
+	watchCmd.Flags().DurationVar(&upRouteMaxCopyAge, "route-max-copy-age", 0, "Experimental read routing on the --flashback-listen port: forward every statement, WRITES INCLUDED, to the server's source MySQL with the registry's source account, except SELECTs whose EXPLAIN FORMAT=JSON says they are expensive (see --route-cost-threshold, --route-scan-rows), which run on the copy while its snapshot is at most this old; a statement the copy rejects runs on MySQL. Anyone holding the access token can then do on the source whatever that account can. 0 = off (the port serves the copy only). Env BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE.")
+	watchCmd.Flags().Float64Var(&upRouteCostThreshold, "route-cost-threshold", readrouter.DefaultPolicy().CostThreshold, "Read routing: a SELECT whose plan query_cost is at least this goes to the copy (a point lookup costs about 1; a full scan over 200k rows about 20000). 0 disables the cost rule. Env BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD.")
+	watchCmd.Flags().Int64Var(&upRouteScanRows, "route-scan-rows", readrouter.DefaultPolicy().ScanRows, "Read routing: a SELECT whose plan has a full table scan over at least this many rows goes to the copy. 0 disables the scan rule. Env BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS.")
 	watchCmd.Flags().StringVar(&upArchiveStageDir, "archive-staging-dir", "", "Local staging directory for S3 archive uploads (default: OS temp dir). Rotated Parquet is written here, uploaded to a source's configured Archive S3 bucket, then pruned.")
 	watchCmd.Flags().StringVar(&upRotateRetain, "rotate-retain", indexer.DefaultRotateRetain, "Built-in rotation: drop index partitions older than this (Nd/Nh; \"off\" disables)")
 	watchCmd.Flags().StringVar(&upRotateInterval, "rotate-interval", "1h", "Built-in rotation: how often to run a rotation cycle")
@@ -638,14 +652,21 @@ func startFlashbackPort(ctx context.Context, srv *console.Server) (func(), error
 	if err != nil {
 		return nil, fmt.Errorf("flashback: cannot bind %s: %w", upConsoleFlashbackListen, err)
 	}
+	cfg := flashbackConfig{
+		RouteMaxCopyAge: upRouteMaxCopyAge,
+		RoutePolicy:     readrouter.Policy{CostThreshold: upRouteCostThreshold, ScanRows: upRouteScanRows},
+	}
 	done := make(chan struct{})
 	go func() {
-		if err := serveFlashback(ctx, srv, ln, flashbackConfig{}); err != nil {
+		if err := serveFlashback(ctx, srv, ln, cfg); err != nil {
 			slog.Warn("flashback port exited with error", "error", err)
 		}
 		close(done)
 	}()
 	fmt.Fprintf(os.Stderr, "Time-travel SQL (MySQL protocol) is listening on %s; connect a MySQL client with user=<server id or name>, password=<access token> (--console-token).\n", ln.Addr())
+	if cfg.RouteMaxCopyAge > 0 {
+		fmt.Fprintf(os.Stderr, "Read routing (experimental) is on: statements, writes included, go to each server's source MySQL with the registry's source account; SELECTs with plan cost >= %.0f or a full scan over >= %d rows run on the copy while its snapshot is at most %s old. Anyone holding the access token can do on each source what that account can.\n", cfg.RoutePolicy.CostThreshold, cfg.RoutePolicy.ScanRows, cfg.RouteMaxCopyAge)
+	}
 	return func() { <-done }, nil
 }
 
@@ -1077,6 +1098,33 @@ func resolveUpConsoleEnv(cmd *cobra.Command) error {
 	if !cmd.Flags().Changed("flashback-listen") {
 		if v := os.Getenv("BINTRAIL_CONSOLE_FLASHBACK_LISTEN"); v != "" {
 			upConsoleFlashbackListen = v
+		}
+	}
+	if !cmd.Flags().Changed("route-max-copy-age") {
+		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE"); v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE: %w", err)
+			}
+			upRouteMaxCopyAge = d
+		}
+	}
+	if !cmd.Flags().Changed("route-cost-threshold") {
+		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD"); v != "" {
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD: %w", err)
+			}
+			upRouteCostThreshold = f
+		}
+	}
+	if !cmd.Flags().Changed("route-scan-rows") {
+		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS"); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS: %w", err)
+			}
+			upRouteScanRows = n
 		}
 	}
 	if !cmd.Flags().Changed("archive-staging-dir") {

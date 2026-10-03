@@ -68,6 +68,21 @@ func newStreamWriter(conn packetWriter, cols []string) *streamWriter {
 	return &streamWriter{conn: conn, fields: fields, buf: make([]byte, 4, 256)}
 }
 
+// newStreamWriterFields is newStreamWriter for a resultset whose column
+// metadata is already known (a forwarded MySQL resultset, #2038): the fields
+// go out as the source declared them.
+func newStreamWriterFields(conn packetWriter, fields []*mysql.Field) *streamWriter {
+	return &streamWriter{conn: conn, fields: fields, buf: make([]byte, 4, 256)}
+}
+
+// Header and Row make streamWriter a readrouter.RowSink.
+func (w *streamWriter) Header(fields []*mysql.Field) error {
+	w.fields = fields
+	return w.writeHeader()
+}
+
+func (w *streamWriter) Row(values []any) error { return w.writeRow(values) }
+
 // writeHeader emits the column-count packet, one packet per column definition,
 // and the intermediate EOF that terminates the column-definition block. That
 // trailing EOF is REQUIRED: go-mysql/server never advertises

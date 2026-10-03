@@ -1,0 +1,41 @@
+{
+ "query_block": {
+  "select_id": 1,
+  "cost_info": {
+   "query_cost": "808.75"
+  },
+  "ordering_operation": {
+   "using_filesort": false,
+   "table": {
+    "table_name": "orders",
+    "access_type": "ref",
+    "possible_keys": [
+     "customer_id"
+    ],
+    "key": "customer_id",
+    "used_key_parts": [
+     "customer_id"
+    ],
+    "key_length": "5",
+    "ref": [
+     "const"
+    ],
+    "rows_examined_per_scan": 4000,
+    "rows_produced_per_join": 4000,
+    "filtered": "100.00",
+    "cost_info": {
+     "read_cost": "408.75",
+     "eval_cost": "400.00",
+     "prefix_cost": "808.75",
+     "data_read_per_join": "312K"
+    },
+    "used_columns": [
+     "id",
+     "customer_id",
+     "amount",
+     "status"
+    ]
+   }
+  }
+ }
+}

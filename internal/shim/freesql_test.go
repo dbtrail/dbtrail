@@ -21,7 +21,11 @@ type fakeFreeSQL struct {
 	calls     int
 	gotStmt   string
 	gotSchema string
+	updatedAt time.Time
+	ageCalls  int
 }
+
+func (f *fakeFreeSQL) CopyUpdatedAt(context.Context) time.Time { f.ageCalls++; return f.updatedAt }
 
 func (f *fakeFreeSQL) Run(_ context.Context, statement, schema string) (sqlsandbox.Result, error) {
 	f.calls++

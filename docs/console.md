@@ -1300,6 +1300,15 @@ one release and warns that it no longer does anything. Remove it.
   (e.g. `127.0.0.1:3308`): serve an embedded MySQL-protocol time-travel port for
   every monitored server, routed by the connection username. Off by default;
   requires an access token. See [Time-travel over the MySQL protocol](#time-travel-over-the-mysql-protocol-flashback-port).
+- `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE` (`watch` only) — same as
+  `--route-max-copy-age` (e.g. `15m`): experimental read routing on the
+  flashback port. Statements are forwarded to each server's source MySQL;
+  SELECTs whose plan is expensive run on the copy while its snapshot is at
+  most this old, and fall back to MySQL when the copy rejects them. Off by
+  default (`0`). `BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD` and
+  `BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS` set the plan thresholds
+  (`--route-cost-threshold`, default 10000; `--route-scan-rows`, default
+  100000). See [time-travel-sql.md](time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental).
 
 There is deliberately **no** environment variable for the password itself —
 env vars leak through `docker inspect`, `ps e`, and `/proc`; the password is
