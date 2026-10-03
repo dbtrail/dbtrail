@@ -14,6 +14,7 @@ import (
 	"github.com/go-mysql-org/go-mysql/server"
 
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/readrouter"
 	"github.com/dbtrail/dbtrail/internal/shim"
 )
 
@@ -45,6 +46,16 @@ type flashbackConfig struct {
 	// AuthMethod selects the MySQL auth plugin the port advertises. Empty
 	// (default) keeps mysql_native_password; see shim.NewMySQLServer for values.
 	AuthMethod string
+	// RouteMaxCopyAge turns read routing on (#2038): with a non-zero value,
+	// a connection to a server that has a source DSN forwards every
+	// statement to that MySQL except SELECTs whose EXPLAIN says they are
+	// expensive, which run on the copy when the copy's snapshot is at most
+	// this old. Zero (default) = the port serves the copy only, as before.
+	RouteMaxCopyAge time.Duration
+	// RoutePolicy is the threshold EXPLAIN is read against. The zero value
+	// never routes to the copy; watch passes readrouter.DefaultPolicy()
+	// adjusted by its flags.
+	RoutePolicy readrouter.Policy
 }
 
 const (
@@ -196,6 +207,13 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 		// first query (a typed MySQL error) rather than a bare disconnect.
 		proxy.fail = err
 	}
+	// The handler may hold an upstream MySQL connection (read routing); it
+	// ends with this one.
+	defer func() {
+		if proxy.inner != nil {
+			proxy.inner.Close()
+		}
+	}()
 
 	for {
 		if err := mysqlConn.HandleCommand(); err != nil {
@@ -263,6 +281,30 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 		h.BindFreeSQL(tgt.SQL)
 	} else {
 		h.BindFreeSQLUnavailable(tgt.SQLUnavailable)
+	}
+	// Read routing (#2038): one upstream MySQL connection per client
+	// connection, opened on first use with the registry's source
+	// credentials. Bound BEFORE the schema seeds below so the upstream
+	// follows them. A server that cannot route stays copy-only and says so
+	// once per connection: silently serving the copy to a client who was
+	// promised MySQL semantics is the one thing this must not do.
+	if cfg.RouteMaxCopyAge > 0 {
+		switch {
+		case tgt.SQL == nil:
+			logger.Warn("read routing off for this connection: SQL on the copy unavailable", "server", user, "reason", tgt.SQLUnavailable)
+		case tgt.SourceDSN == "":
+			logger.Warn("read routing off for this connection: the server has no source DSN to forward to", "server", user)
+		default:
+			fw, err := readrouter.NewForwarder(tgt.SourceDSN, cfg.RoutePolicy, cfg.QueryTimeout)
+			if err != nil {
+				// The DSN is the registry's own and was parsed to open the
+				// source; a scheme the forwarder does not speak is the
+				// realistic cause. The message carries no secret.
+				logger.Warn("read routing off for this connection", "server", user, "err", err)
+			} else {
+				h.BindRouter(fw, shim.RouterConfig{MaxCopyAge: cfg.RouteMaxCopyAge})
+			}
+		}
 	}
 	// Seed the source schema so fully qualified `_flashback.<table>` queries
 	// work without a prior `USE <db>` (mirrors the standalone shim's #263

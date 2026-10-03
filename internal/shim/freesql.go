@@ -13,6 +13,7 @@ import (
 	"github.com/go-mysql-org/go-mysql/mysql"
 
 	"github.com/dbtrail/dbtrail/ext"
+	"github.com/dbtrail/dbtrail/internal/readrouter"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
@@ -47,6 +48,218 @@ import (
 // (freeSQLError does so again, as a belt).
 type FreeSQL interface {
 	Run(ctx context.Context, statement, schema string) (sqlsandbox.Result, error)
+	// CopyUpdatedAt is the time of the snapshot the copy's tables answer
+	// from; zero when there is none or it cannot be read. The router
+	// compares it with the server's maximum copy age before it sends a
+	// statement to the copy.
+	CopyUpdatedAt(ctx context.Context) time.Time
+}
+
+// Router is the read-routing seam (#2038): with one bound, an ordinary
+// statement is no longer run on the copy by default. Everything that is not
+// a SELECT, everything inside a transaction or after a session SET, every
+// vetoed construct and every statement whose plan is cheap is FORWARDED to
+// MySQL and answered with MySQL's own result; only a SELECT whose plan is
+// expensive runs on the copy, and when the copy refuses it MySQL runs it
+// instead. The implementation (internal/readrouter) holds one upstream
+// MySQL connection per client connection, so transactions and USE behave as
+// on MySQL itself, and once that connection is lost it says so on every
+// statement (readrouter.CodeUpstreamLost) rather than reconnect behind the
+// client's back.
+type Router interface {
+	// Decide runs EXPLAIN on the source and says whether the copy should
+	// take the statement. An error means "could not decide": the statement
+	// is forwarded.
+	Decide(ctx context.Context, statement string) (toCopy bool, reason string, err error)
+	// Forward runs the statement on the source. A resultset is streamed
+	// through sink and the returned Result is its tail (go-mysql writes the
+	// trailing EOF from it); an OK packet comes back whole.
+	Forward(ctx context.Context, statement string, sink readrouter.RowSink) (*mysql.Result, error)
+	// UseDB selects the database on the upstream connection.
+	UseDB(ctx context.Context, db string) error
+	// InTransaction reports whether the upstream connection is inside an
+	// explicit transaction (from MySQL's status flags).
+	InTransaction() bool
+	// Close drops the upstream connection.
+	Close()
+}
+
+// RouterConfig is the per-server routing policy the handler applies before
+// asking the Router.
+type RouterConfig struct {
+	// MaxCopyAge is how old the copy's snapshot may be for a statement to
+	// run there. Zero means never: every statement is forwarded.
+	MaxCopyAge time.Duration
+}
+
+// BindRouter turns this connection into a routing one. Call once after the
+// handshake, with a FreeSQL already bound; r must be non-nil.
+func (h *Handler) BindRouter(r Router, cfg RouterConfig) {
+	h.router = r
+	h.routerCfg = cfg
+}
+
+// Close releases what a connection holds: today, the router's upstream
+// connection. Safe to call on a handler that bound nothing.
+func (h *Handler) Close() {
+	if h.router != nil {
+		h.router.Close()
+	}
+}
+
+// errCopyTruncated: the copy answered, but cut the result at the port's row
+// or cell cap. Under routing that is a refusal, not an answer: MySQL would
+// have returned every row, and a client that does not read the warning
+// count would take the cut result for the whole one.
+var errCopyTruncated = errors.New("the copy's result exceeded the port's row or cell cap")
+
+// routeStatement is HandleQuery's path with a Router bound: the time-travel
+// shapes were already served, so what arrives here is MySQL traffic.
+func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) {
+	ctx, cancel := h.queryContext()
+	defer cancel()
+	kind := readrouter.Classify(qstr)
+	switch kind {
+	case readrouter.KindSet:
+		if !readrouter.HarmlessSet(qstr) {
+			h.mu.Lock()
+			h.routeSettingsSet = true
+			h.mu.Unlock()
+		}
+		return h.forward(ctx, qstr, "session setting")
+	case readrouter.KindWrite:
+		// A write reaches the source with the registry's account, on the
+		// strength of the console token. Named in the log at info: the
+		// audit trail covers historical reads, and this is neither.
+		h.logger.Info("read routing: write forwarded to mysql", "statement", readrouter.LeadingKeyword(qstr))
+		return h.forward(ctx, qstr, "write")
+	case readrouter.KindTxnBegin, readrouter.KindTxnEnd, readrouter.KindOther:
+		return h.forward(ctx, qstr, "not a select")
+	}
+	h.mu.Lock()
+	settingsSet := h.routeSettingsSet
+	h.mu.Unlock()
+	switch {
+	case h.router.InTransaction():
+		return h.forward(ctx, qstr, "in transaction")
+	case settingsSet:
+		return h.forward(ctx, qstr, "session settings were set on this connection")
+	case h.routerCfg.MaxCopyAge <= 0:
+		return h.forward(ctx, qstr, "routing to the copy is off (no max copy age)")
+	}
+	if v := readrouter.Veto(qstr); v != "" {
+		return h.forward(ctx, qstr, "veto: "+v)
+	}
+	// The plan first, the copy's freshness second: freshness costs a
+	// snapshot listing (an S3 call on an S3 copy), and the cheap reads
+	// this exists to keep fast must not pay it.
+	toCopy, reason, err := h.router.Decide(ctx, qstr)
+	if err != nil {
+		h.routeWarn("explain", "read routing: could not explain, statement forwarded", err)
+		return h.forward(ctx, qstr, "could not explain: "+err.Error())
+	}
+	if !toCopy {
+		return h.forward(ctx, qstr, reason)
+	}
+	at := h.freeSQL.CopyUpdatedAt(ctx)
+	if at.IsZero() {
+		h.routeWarn("age", "read routing: copy age unknown, expensive statement forwarded", nil)
+		return h.forward(ctx, qstr, "copy age unknown")
+	}
+	if age := time.Since(at); age > h.routerCfg.MaxCopyAge {
+		return h.forward(ctx, qstr, fmt.Sprintf("copy is %s old, max %s", age.Round(time.Second), h.routerCfg.MaxCopyAge))
+	}
+	res, err := h.runFreeSQLRouted(currentDB, readrouter.ForCopy(qstr), qstr, reason)
+	if err != nil {
+		// The slow path is always right: whatever the copy could not do
+		// (a construct DuckDB lacks, a missing table, busy, a timeout, a
+		// result over the cap), MySQL does.
+		h.routeWarn("copy", "read routing: copy refused an expensive statement, forwarded to mysql", err)
+		return h.forward(ctx, qstr, "copy refused: "+shortErr(err))
+	}
+	h.mu.Lock()
+	h.routeLastForwarded = false
+	h.mu.Unlock()
+	return res, nil
+}
+
+// routeWarn logs a fallback that hides an operational problem (the feature
+// is on, yet the copy never answers) once per key per connection, so a
+// broken copy path is visible without debug logging and without a line per
+// statement.
+func (h *Handler) routeWarn(key, msg string, err error) {
+	h.mu.Lock()
+	if h.routeWarned == nil {
+		h.routeWarned = map[string]bool{}
+	}
+	seen := h.routeWarned[key]
+	h.routeWarned[key] = true
+	h.mu.Unlock()
+	if seen {
+		return
+	}
+	if err != nil {
+		h.logger.Warn(msg, "err", err, "note", "logged once per connection")
+		return
+	}
+	h.logger.Warn(msg, "note", "logged once per connection")
+}
+
+// forward sends the statement to MySQL and hands its result back as is. A
+// resultset is streamed to the client as it arrives (the handler's conn is
+// the sink), so a forwarded SELECT * never sits whole in the capture
+// process. The reason is logged at debug: it is the trace a routing
+// decision leaves.
+func (h *Handler) forward(ctx context.Context, qstr, reason string) (*mysql.Result, error) {
+	h.logger.Debug("read routing: forwarded to mysql", "reason", reason)
+	h.mu.Lock()
+	h.routeLastForwarded = true
+	h.mu.Unlock()
+	var sink readrouter.RowSink
+	var buf *readrouter.BufferSink
+	if h.conn != nil {
+		sink = newStreamWriterFields(h.conn, nil)
+	} else {
+		buf = &readrouter.BufferSink{}
+		sink = buf
+	}
+	res, err := h.router.Forward(ctx, qstr, sink)
+	if err != nil {
+		if readrouter.IsLost(err) {
+			h.routeWarn("lost", "read routing: the connection to the source was lost; this client connection answers 2006 until it reconnects", err)
+		}
+		return nil, err
+	}
+	if res != nil && res.Resultset != nil {
+		// A forwarded result set carries MySQL's warning count; put it on
+		// the connection like a copy result does (see setWarnings), before
+		// go-mysql writes the trailing EOF from this result.
+		if ws, ok := h.conn.(warningsSetter); ok {
+			ws.SetWarnings(res.Warnings)
+		}
+		if buf != nil && res.Resultset.StreamingDone {
+			// No connection to stream to and the router streamed through
+			// the buffer: hand back a buffered resultset.
+			names := make([]string, len(buf.Fields))
+			for i, f := range buf.Fields {
+				names[i] = string(f.Name)
+			}
+			rs, err := mysql.BuildSimpleTextResultset(names, buf.Rows)
+			if err != nil {
+				return nil, err
+			}
+			return &mysql.Result{Status: res.Status, Warnings: res.Warnings, Resultset: rs}, nil
+		}
+	}
+	return res, nil
+}
+
+func shortErr(err error) string {
+	var me *mysql.MyError
+	if errors.As(err, &me) {
+		return fmt.Sprintf("%d %s", me.Code, me.Message)
+	}
+	return err.Error()
 }
 
 // BindFreeSQL enables free SQL on this connection. Call once after the
@@ -76,12 +289,22 @@ func (h *Handler) notTimeTravelError(qstr string) error {
 
 // runFreeSQL serves one ordinary statement through the bound FreeSQL.
 func (h *Handler) runFreeSQL(schema, qstr string) (*mysql.Result, error) {
+	return h.runFreeSQLRouted(schema, qstr, qstr, "")
+}
+
+// runFreeSQLRouted is runFreeSQL with the statement the copy runs (copyStmt,
+// backticks rewritten under routing) kept apart from the one the client sent
+// (qstr, what the audit records), and the routing reason when there is one.
+func (h *Handler) runFreeSQLRouted(schema, copyStmt, qstr, routeReason string) (*mysql.Result, error) {
 	ctx, cancel := h.queryContext()
 	defer cancel()
-	stmt, schema := rewriteForDuckDB(qstr, schema)
+	stmt, schema := rewriteForDuckDB(copyStmt, schema)
 	res, err := h.freeSQL.Run(ctx, stmt, schema)
 	if err != nil {
 		return nil, h.freeSQLError(err)
+	}
+	if routeReason != "" && (res.Truncated || res.TruncatedCells > 0) {
+		return nil, errCopyTruncated
 	}
 	rs, err := freeSQLResultset(res)
 	if err != nil {
@@ -97,7 +320,7 @@ func (h *Handler) runFreeSQL(schema, qstr string) (*mysql.Result, error) {
 		warnings = append(warnings, fmt.Sprintf("%d cell(s) longer than this server's cap were cut; each ends with a marker", res.TruncatedCells))
 	}
 	h.setWarnings(warnings)
-	h.recordFreeSQL(qstr, schema, res)
+	h.recordFreeSQL(qstr, schema, res, routeReason)
 	return &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}, nil
 }
 
@@ -374,7 +597,7 @@ func decimalScale(duckType string) uint8 {
 // raw row data left the copy, and the statement is the reader's own text,
 // which is what an auditor needs to know what was asked. Success path only,
 // after the resultset is built, same contract as auditTimeTravel.
-func (h *Handler) recordFreeSQL(statement, schema string, res sqlsandbox.Result) {
+func (h *Handler) recordFreeSQL(statement, schema string, res sqlsandbox.Result, routeReason string) {
 	if !ext.Auditing() {
 		return
 	}
@@ -389,6 +612,11 @@ func (h *Handler) recordFreeSQL(statement, schema string, res sqlsandbox.Result)
 	}
 	if res.TruncatedCells > 0 {
 		detail["truncated_cells"] = strconv.Itoa(res.TruncatedCells)
+	}
+	if routeReason != "" {
+		// Under read routing (#2038): the copy took this statement, and why.
+		detail["route"] = "copy"
+		detail["route_reason"] = routeReason
 	}
 	if schema != "" {
 		detail["schema"] = schema

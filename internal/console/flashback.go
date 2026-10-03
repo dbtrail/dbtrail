@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"time"
 
 	drivermysql "github.com/go-sql-driver/mysql"
 
@@ -48,6 +49,10 @@ type FlashbackTarget struct {
 	// per statement, inside Run, so the reason stays exact.
 	SQL            *SQLOnCopy
 	SQLUnavailable string
+	// SourceDSN is the registry entry's source DSN (credentials included),
+	// for the serving layer's read router (#2038) to EXPLAIN on and forward
+	// to; empty for the boot entry and for a server with no source.
+	SourceDSN string
 }
 
 // SQLOnCopy is the free-SQL executor the embedded port hands each connection.
@@ -91,6 +96,20 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string) (sqlsandb
 // which is not in a browser.
 const sqlCopyNotLocalPortMessage = "the copy for this server is only on S3; SQL on the copy needs a local copy"
 
+// CopyUpdatedAt is the snapshot time the copy's tables answer from, zero
+// when there is none or it cannot be read: the router's freshness input.
+// One state-only view build (snapshot discovery on disk; no index read).
+func (q *SQLOnCopy) CopyUpdatedAt(ctx context.Context) time.Time {
+	in, err := q.s.buildViewsInput(ctx, q.b, viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true})
+	if err != nil {
+		// The router forwards on a zero time; the operator still has to
+		// learn why the copy never answers.
+		slog.Warn("read routing: cannot read the copy's snapshot time; statements are forwarded", "server", q.user, "err", err)
+		return time.Time{}
+	}
+	return in.BaselineSnapshot
+}
+
 // sqlOnCopyFor decides, once per connection, whether the port can offer
 // free SQL on this server: the console has a sandbox runner, and archive
 // access is on. The same two gates POST /api/sql applies before it looks at
@@ -133,6 +152,7 @@ func (s *Server) ResolveFlashback(ctx context.Context, selector string) (Flashba
 		DefaultSchema:  s.flashbackDefaultSchema(id),
 		SQL:            sqlOnCopy,
 		SQLUnavailable: sqlWhyNot,
+		SourceDSN:      s.flashbackSourceDSN(id),
 	}, nil
 }
 
@@ -156,6 +176,16 @@ func (s *Server) flashbackTarget(selector string) (string, bool) {
 		return bootServerID, true
 	}
 	return "", false
+}
+
+// flashbackSourceDSN is the registry entry's source DSN, or "" when the
+// entry has none (the boot entry, a server registered without a source).
+func (s *Server) flashbackSourceDSN(id string) string {
+	entry, ok := s.cm.reg.Get(id)
+	if !ok {
+		return ""
+	}
+	return entry.SourceDSN
 }
 
 // flashbackDefaultSchema derives the source database name for a target server

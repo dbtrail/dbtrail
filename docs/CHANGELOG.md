@@ -14,6 +14,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variable that is not a whole number, stops the daemon at startup with the
   name to fix, and the daemon warns when the statements could take more
   threads than the host has cores.
+- **Read routing on the embedded MySQL-protocol port (experimental, #2038)**:
+  `watch --route-max-copy-age <duration>` (env
+  `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE`) makes a connection on
+  `--flashback-listen` to a server with a source DSN behave like a connection
+  to that MySQL: every statement is forwarded to the source over one upstream
+  connection per client connection and answered by MySQL, except a `SELECT`
+  whose `EXPLAIN FORMAT=JSON` is expensive (`--route-cost-threshold`, default
+  10000, or a full scan over `--route-scan-rows` rows, default 100000), which
+  runs on the copy when the copy's snapshot is at most that old, and runs on
+  MySQL when the copy rejects it. Writes, `SHOW`, transactions, a connection
+  after a `SET`, and constructs the copy would answer differently
+  (`GROUP_CONCAT`, `NOW()`, `COLLATE`, variables, locking reads, ...) always
+  go to MySQL. Forwarded resultsets are streamed to the client, never held
+  in the daemon; a result the copy would cut at its cap runs on MySQL
+  instead; a lost upstream connection answers 2006 for the rest of the
+  client connection rather than reconnecting behind the client's back.
+  Off by default; the port keeps serving the copy alone without the flag.
+  A copy-served statement's audit event carries `route: copy` and the plan
+  reason; forwarded writes are logged at info level by their leading
+  keyword.
 - **Per-phase timings of SQL on the copy as a Prometheus histogram**
   (#2026): `bintrail_sql_statement_phase_seconds{phase}`, the same phases as
   `phases_ms`, for the SQL card and the embedded port alike, exported by

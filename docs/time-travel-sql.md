@@ -142,6 +142,110 @@ What to know before relying on it:
   `DECIMAL(p,s)` as `DECIMAL`, `TIMESTAMP` as `DATETIME`, `BOOLEAN` as 1/0,
   a `LIST`/`STRUCT` as JSON text, `MAP`/`HUGEINT`/`UUID`/`INTERVAL` as text).
 
+### Read routing: MySQL answers, the copy takes the heavy reads (experimental)
+With `--route-max-copy-age` set (for example `--route-max-copy-age 15m`), a
+connection on this port to a server that has a source DSN forwards every
+statement to that MySQL over one upstream connection per client connection,
+with the source DSN's credentials, and MySQL's own answer comes back, errors
+included; resultsets are streamed to the client as they arrive, never held
+in the daemon. The one exception is a `SELECT` whose plan says it is
+expensive: it runs on the copy, and if the copy rejects it (DuckDB does not
+know the syntax, the table is not in the copy, the copy is busy, the result
+exceeds the port's row or cell cap), MySQL runs it. Nothing the client sends
+needs to change. **This is experimental**: for what MySQL answers, the
+behaviour is MySQL's; for what the copy answers, it is DuckDB's, and the
+list below of where the two differ is what the feature's own testing is
+still growing.
+
+```
+bintrail-console watch ... --flashback-listen 127.0.0.1:3308 --route-max-copy-age 15m
+mysql -h 127.0.0.1 -P 3308 -u <server> -p<token> shop
+mysql> SELECT * FROM orders WHERE id = 42;                    -- MySQL (a point lookup)
+mysql> SELECT status, count(*) FROM orders GROUP BY status;  -- the copy (a full scan)
+mysql> SELECT GROUP_CONCAT(status) FROM orders;              -- MySQL (the copy would answer differently)
+mysql> UPDATE orders SET status = 'paid' WHERE id = 42;      -- MySQL
+```
+
+The decision, in order, for every statement:
+
+1. Not a `SELECT` (a write, `SHOW`, `BEGIN`, `SET`, `USE`, a client's
+   connection chatter): **MySQL**. After a `SET` on the connection nothing on
+   that connection goes to the copy any more, because the copy does not
+   honour session settings; the same for `CREATE TEMPORARY TABLE`, `LOCK
+   TABLES` and `PREPARE`, and for a `SET` inside MySQL's executable comment
+   (`/*!40101 SET ... */`). The settings a driver sends when it connects
+   (`SET NAMES`, `SET character_set_*`, `SET autocommit=1`) are forwarded
+   without pinning the connection.
+2. Inside an explicit transaction (`BEGIN` ... `COMMIT`): **MySQL**, so a
+   transaction reads its own writes.
+3. A construct the copy would answer *differently* without an error
+   (`GROUP_CONCAT`, `NOW()` and the session-time-zone family, `STR_TO_DATE`,
+   `DATEDIFF`, `COLLATE`, `CAST AS UNSIGNED`, `DIV`, `RAND`, user and system
+   variables, locking reads, `information_schema`, full-text `MATCH`,
+   optimizer hints): **MySQL**.
+4. The copy's snapshot older than `--route-max-copy-age`, or its age
+   unknown: **MySQL**.
+5. `EXPLAIN FORMAT=JSON` on the source. A plan whose `query_cost` is at
+   least `--route-cost-threshold` (default 10,000; a point lookup costs about
+   1, a full scan over 200,000 rows about 20,000) or that has a full table
+   scan over at least `--route-scan-rows` rows (default 100,000): **the
+   copy**, with backtick names rewritten to double quotes; the copy refusing
+   it means **MySQL**. Anything cheaper: **MySQL**.
+
+What this is and is not:
+
+- **The copy's answer is as fresh as its snapshot.** A heavy read served
+  from the copy does not see what changed since the last snapshot; that is
+  what `--route-max-copy-age` bounds, and why there is no default that turns
+  this on. A `SELECT` that must see the last second belongs in a transaction
+  or behind a `SET`, both of which pin the connection to MySQL.
+- **The copy's grants are nobody's; the forwarded ones are the registry's.**
+  Forwarded statements run with the source DSN's account. Give this port to
+  people who may do on MySQL whatever that account can.
+- **Where the copy answers differently without an error.** The veto list
+  keeps the known cases on MySQL (`GROUP_CONCAT`, the `NOW()` family,
+  `COLLATE`, `DIV`, `||`, `^`, double-quoted string literals, variables,
+  ...), but three differences cannot be vetoed by looking at the statement
+  and apply to every copy-served read: **text comparison is
+  case-sensitive on the copy** (MySQL's default collations treat `'Paid'`
+  and `'paid'` as equal in `WHERE`, `GROUP BY`, `DISTINCT` and `ORDER BY`;
+  DuckDB does not), **NULLs sort last on the copy** on an ascending `ORDER
+  BY` (first on MySQL), and **`AVG` and `/` return full double precision**
+  (MySQL rounds to four decimals). If a workload depends on any of these,
+  keep the copy for the reads where they do not matter, or leave routing off.
+- **The thresholds are knobs, not truths.** The optimizer's cost is its
+  own estimate; it misleads on `LIMIT`, on cached data and on skewed values.
+  Start with the defaults, read the daemon's log (every decision is logged
+  with its reason at debug; a copy that never answers, a failing EXPLAIN or
+  an unreadable snapshot time is a warning, once per connection) and the
+  audit trail (a copy-served statement carries `route: copy` and the
+  reason), and move the thresholds.
+- **One query at a time per server on the copy, still.** A heavy read that
+  arrives while the copy is busy is not refused: it runs on MySQL. The
+  limits of the section above are the copy's; MySQL's are MySQL's.
+- **The port accepts writes under routing.** `INSERT`, `UPDATE`, `DELETE`,
+  DDL, `GRANT`: everything that is not a `SELECT` reaches the source with
+  the registry's source account, which is the account the daemon captures
+  with. Anyone holding the access token can do on the source what that
+  account can, including killing the capture's own connection or changing
+  its password. Each forwarded write is logged at info level with its
+  leading keyword (never the statement). Turn routing on only where the
+  token's holders may already do that.
+- **A lost connection to the source is not hidden.** If the upstream
+  connection drops (the source closes an idle connection, a network error,
+  the query deadline), every later statement on that client connection
+  fails with MySQL error 2006 ("MySQL server has gone away") until the
+  client reconnects. The port never reconnects on its own: that would be a
+  new session with the transaction rolled back, the `SET`s gone and the
+  database reset, while the client believes nothing happened.
+- Forwarded statements run under the port's query deadline
+  (`QueryTimeout`, 5 minutes by default), the same as a copy statement.
+- `SHOW WARNINGS` after a forwarded statement is MySQL's; after a statement
+  the copy served it is the copy's.
+- A server with no source DSN (the daemon's own command-line source, a
+  server registered without one), or whose copy is unavailable, keeps the
+  copy-only behaviour and says so once per connection in the daemon's log.
+
 Servers added in the web interface mid-session are reachable immediately (the registry
 is read live). A token is **required** — MySQL-protocol auth cannot use the
 web interface's password store, so set `--console-token` / `BINTRAIL_CONSOLE_TOKEN`;

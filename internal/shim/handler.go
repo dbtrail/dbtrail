@@ -164,6 +164,20 @@ type Handler struct {
 	freeSQLWhyNot string
 	lastWarnings  []string
 
+	// router, when non-nil, makes this a routing connection (#2038, see
+	// freesql.go): MySQL answers by default, the copy takes expensive
+	// plans. routeSettingsSet remembers a SET on this connection, after
+	// which nothing goes to the copy (it does not honour session
+	// settings); guarded by mu.
+	router           Router
+	routerCfg        RouterConfig
+	routeSettingsSet bool
+	// routeLastForwarded: the last statement was MySQL's, so a SHOW WARNINGS
+	// is MySQL's too; after a copy-served one the warnings are ours.
+	// routeWarned keys the once-per-connection fallback warnings.
+	routeLastForwarded bool
+	routeWarned        map[string]bool
+
 	// allowedSchemas is the authenticated tenant's opt-in schema
 	// allowlist (issue #824), bound by BindAllowedSchemas after the
 	// handshake — same lifecycle as actor. nil/empty = unrestricted
@@ -457,6 +471,18 @@ func (h *Handler) UseDB(dbName string) error {
 	if !h.schemaAllowed(dbName) {
 		return h.schemaDenied(dbName)
 	}
+	if h.router != nil {
+		// The upstream connection goes first, so forwarded statements
+		// resolve unqualified names where the client expects and a USE
+		// MySQL refuses (an unknown database) changes nothing here either:
+		// the copy and MySQL stay on the same schema. Before the upstream
+		// is open the router only records the name.
+		ctx, cancel := h.queryContext()
+		defer cancel()
+		if err := h.router.UseDB(ctx, dbName); err != nil {
+			return err
+		}
+	}
 	h.mu.Lock()
 	h.db = dbName
 	h.mu.Unlock()
@@ -479,6 +505,18 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 	// swallow it; every other statement clears it, as on MySQL.
 	if h.freeSQL != nil {
 		if showWarningsRE.MatchString(qstr) {
+			h.mu.Lock()
+			forwarded := h.routeLastForwarded
+			h.mu.Unlock()
+			if h.router != nil && forwarded {
+				// Under read routing the last statement was MySQL's, so
+				// its warnings are MySQL's too. After a copy-served one
+				// they are ours (the row cap), and MySQL's would be the
+				// EXPLAIN's note, which the client never sent.
+				ctx, cancel := h.queryContext()
+				defer cancel()
+				return h.forward(ctx, qstr, "show warnings after a forwarded statement")
+			}
 			return h.showWarnings()
 		}
 		h.setWarnings(nil)
@@ -561,6 +599,12 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 			return nil, err
 		}
 		return &mysql.Result{Status: 2}, nil
+	}
+	if h.router != nil && h.freeSQL != nil {
+		// Routing mode: MySQL answers everything the time-travel shapes above
+		// did not, the connection-setup chatter included (it is MySQL's to
+		// answer), except the expensive SELECTs the copy takes.
+		return h.routeStatement(currentDB, qstr)
 	}
 	if isHandshakeNoise(qstr) {
 		return &mysql.Result{Status: 2}, nil
