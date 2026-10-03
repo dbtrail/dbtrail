@@ -99,13 +99,15 @@ type sqlResponse struct {
 	CopyUpdatedAt *time.Time `json:"copy_updated_at"`
 	// PhasesMS is where the time went (#2026): view_build (the daemon's
 	// discovery and script generation), then the sandbox's phases.
-	PhasesMS map[string]int64 `json:"phases_ms"`
+	// Milliseconds with microsecond precision, so a sub-millisecond phase
+	// reads as the small number it is, not as "not measured".
+	PhasesMS map[string]float64 `json:"phases_ms"`
 }
 
 // sqlPhasesMS renders the phases for the response and the log.
-func sqlPhasesMS(viewBuild time.Duration, p sqlsandbox.Phases) map[string]int64 {
-	ms := func(d time.Duration) int64 { return d.Milliseconds() }
-	return map[string]int64{
+func sqlPhasesMS(viewBuild time.Duration, p sqlsandbox.Phases) map[string]float64 {
+	ms := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
+	return map[string]float64{
 		"view_build": ms(viewBuild), "spawn": ms(p.Spawn), "open": ms(p.Open), "lockdown": ms(p.Lockdown),
 		"views": ms(p.Views), "query": ms(p.Query), "decode": ms(p.Decode), "total": ms(p.Total),
 	}
@@ -480,16 +482,34 @@ type sqlOutcome struct {
 // errors are a *sqlRefusal or the runner's own typed errors, so each caller
 // maps them to its wire.
 func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema string, maxRows int) (sqlOutcome, error) {
+	// What is known without any I/O is refused before the slot: a copy that
+	// lives only on S3 is never served here, and listing it would hold one
+	// of the daemon's two slots while it waits on the network.
+	if strings.HasPrefix(b.baselineSrc, "s3://") {
+		return sqlOutcome{}, &sqlRefusal{http.StatusConflict, sqlCopyNotLocalMessage}
+	}
 	// The slot first (#2026): a statement that will be refused as busy must
 	// not pay for the view build below, which reads the index and walks the
-	// copy. An unused slot is given back on every early return.
+	// copy. An unused slot is given back on every early return, and said so
+	// at debug with how long it was held: the slot is one of two, so a
+	// build that holds it for long is everybody else's "busy".
 	slot, err := s.sqlRunner.Reserve(user)
 	if err != nil {
 		return sqlOutcome{}, err
 	}
-	defer slot.Release()
+	ran := false
 	viewsStart := time.Now()
-	in, eventsInS3, err := s.sqlViewsFor(ctx, b, statement)
+	defer func() {
+		slot.Release()
+		if !ran {
+			slog.Debug("console: sql slot released without a run", "user", user, "held", time.Since(viewsStart))
+		}
+	}()
+	// The build has a deadline so a slow disk or listing cannot hold the
+	// slot for long; the sandbox has its own, longer one for the statement.
+	buildCtx, cancelBuild := context.WithTimeout(ctx, baselineListTimeout)
+	in, eventsInS3, err := s.sqlViewsFor(buildCtx, b, statement)
+	cancelBuild()
 	switch {
 	case errors.Is(err, errNoViewSources):
 		return sqlOutcome{}, &sqlRefusal{http.StatusConflict,
@@ -536,6 +556,7 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 		Schema:   schema,
 		Limits:   sqlsandbox.Limits{MaxRows: maxRows},
 	}
+	ran = true
 	res, err := slot.Run(ctx, job)
 	if err != nil {
 		var qerr *sqlsandbox.QueryError

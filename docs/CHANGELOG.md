@@ -23,9 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the daemon's discovery and script), `spawn` (the worker's whole lifetime,
   which contains `open`, `lockdown`, `views` and `query`; the remainder is
   process start, result encoding and exit), `decode` and `total`. No
-  statement's SQL changes; one edge answers differently: a snapshot whose
-  tables all sit in schemas DuckDB keeps for itself still falls back to the
-  change log for a statement that does not name `events`, as before.
+  statement's SQL changes. Two edges answer differently: a copy whose
+  snapshot directories cannot all be read now says so (before, a statement
+  that did not name `events` ran over the change log and the unreadable
+  snapshot went unmentioned); and a copy that lives only on S3 is refused
+  before any slot is taken, with no listing of S3.
 
 ## [0.97.0] - 2026-10-02
 ### Added

@@ -372,6 +372,7 @@ type Slot struct {
 	r        *Runner
 	user     string
 	released bool
+	running  bool
 	mu       sync.Mutex
 }
 
@@ -401,12 +402,14 @@ func (s *Slot) Release() {
 // a WorkerError so it cannot pass silently. The pre-worker refusals (empty
 // SQL, no local copy) still return before any process starts.
 func (s *Slot) Run(ctx context.Context, job Job) (Result, error) {
+	// Claimed in one step under the lock: a released slot holds no gate, and
+	// a second concurrent Run on the same slot would run ungated too.
 	s.mu.Lock()
-	spent := s.released
+	spent := s.released || s.running
+	s.running = true
 	s.mu.Unlock()
 	if spent {
-		// A released slot holds no gate: running here would run ungated.
-		return Result{}, &WorkerError{Err: errors.New("the slot was already released; reserve another")}
+		return Result{}, &WorkerError{Err: errors.New("the slot was already used or released; reserve another")}
 	}
 	defer s.Release()
 	if job.User != s.user {

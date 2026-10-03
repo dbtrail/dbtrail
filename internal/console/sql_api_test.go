@@ -1280,10 +1280,12 @@ func TestSQLAPI_namesTheTablesLeftOut(t *testing.T) {
 	}
 }
 
-// recordingMock is a sqlmock whose matcher records EVERY statement the code
-// sends, matched or not. ExpectationsWereMet cannot prove a query did NOT
-// run here: the archive reads swallow their errors with a warning, so an
-// unexpected query fails nothing. Counting what arrived does.
+// recordingMock is a sqlmock whose matcher records every QUERY the code
+// sends (an Exec or Prepare would be rejected before the matcher runs; the
+// paths under test only query, and the positive control in each test is
+// what proves the recorder sees them). ExpectationsWereMet cannot prove a
+// query did NOT run here: the archive reads swallow their errors with a
+// warning, so an unexpected query fails nothing. Counting what arrived does.
 func recordingMock(t *testing.T) (*sql.DB, *[]string) {
 	t.Helper()
 	var seen []string
@@ -1368,7 +1370,7 @@ func TestSQL_tablesOnlyStatementSkipsTheArchive(t *testing.T) {
 	}
 	// The response carries the phases, view_build included.
 	var body struct {
-		PhasesMS map[string]int64 `json:"phases_ms"`
+		PhasesMS map[string]float64 `json:"phases_ms"`
 	}
 	rec := postSQL(t, f.s, `{"sql":"SELECT id FROM shop.orders"}`)
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
@@ -1400,5 +1402,18 @@ func TestSQL_eventsInS3DoesNoS3Work(t *testing.T) {
 	w := postSQL(t, f.s, `{"sql":"SELECT count(*) FROM events"}`)
 	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), sqlEventsInS3Message) {
 		t.Errorf("events on an S3 change log with a broken endpoint setting: code=%d body=%s, want 422 %q", w.Code, w.Body.String(), sqlEventsInS3Message)
+	}
+}
+
+// #2026 (review): a copy that lives only on S3 is refused before the slot
+// is taken (no listing of S3 while holding one of the daemon's two slots),
+// and the runner never hears of it.
+func TestSQL_s3OnlyCopyRefusedBeforeTheSlot(t *testing.T) {
+	runner := &fakeSQLRunner{busy: true} // a busy runner would answer 429 if Reserve ran first
+	f := newSQLFixture(t, runner, false)
+	f.s.cm.boot.baselineSrc = "s3://bucket/prefix"
+	w := postSQL(t, f.s, `{"sql":"SELECT 1"}`)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), sqlCopyNotLocalMessage) {
+		t.Errorf("S3-only copy: code=%d body=%s, want 409 copy-not-local before any slot", w.Code, w.Body.String())
 	}
 }
