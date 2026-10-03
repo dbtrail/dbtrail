@@ -210,6 +210,9 @@ when `ftwrl` is refused. They never fall to a weaker mode; setting the variable 
 | `safe-no-lock` | `SAFE_NO_LOCK` | yes — or it aborts | **usually not** | `SELECT` + `REPLICATION CLIENT` |
 | `no-lock` | `NO_LOCK` | **no** | yes | `SELECT` + `REPLICATION CLIENT` |
 
+What each mode costs the application while it waits for its lock, and what it waits for, is
+measured in [How long a snapshot blocks writes](snapshot-lock-measurements.md).
+
 Every mode also needs `SHOW VIEW` when the dumped schemas hold views: mydumper stops the whole dump
 at the first view it cannot read (`SHOW VIEW command denied`), including under `no-lock`.
 
@@ -228,8 +231,9 @@ both directions were verified against the pinned build.
 position before and after syncing threads and, on any difference, stops with *"we cannot guarantee
 the backup to be consistent. Stopping backup due to the use of SAFE_NO_LOCK."* So it never writes a
 torn snapshot, but on a source taking concurrent writes it will mostly refuse. Verified empirically
-against mydumper `v1.0.3-1` and MySQL 8.0: it aborts under sustained writes, and it is the only
-low-privilege mode that will not lie to you.
+against mydumper `v1.0.3-1` on MySQL 8.0 and 8.4, RDS for MySQL 8.4 and MariaDB 10.11: under 300
+transactions per second it aborted in 5 of 5 runs on each, and it is the only low-privilege mode
+that will not lie to you.
 
 `no-lock` accepts a torn snapshot. mydumper's own help describes it as the mode to use *"if you
 don't need a consistent backup"* and pointedly leaves it out of its list of sync modes (*"There are 4
