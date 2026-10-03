@@ -38,9 +38,26 @@ type fakeSQLRunner struct {
 	err  error
 	// busy makes Reserve refuse (ErrBusy) without a job.
 	busy bool
+	// refs is what the fake's "worker" reports a statement names when the
+	// job asks for its views (#2029); nil reports Unsure, which gets every
+	// view. The script it is answered with is recorded as the job's ViewsSQL.
+	refs *sqlsandbox.Refs
 }
 
 func (f *fakeSQLRunner) Run(_ context.Context, job sqlsandbox.Job) (sqlsandbox.Result, error) {
+	f.mu.Lock()
+	refs := sqlsandbox.Refs{Unsure: true}
+	if f.refs != nil {
+		refs = *f.refs
+	}
+	f.mu.Unlock()
+	if job.ViewsFor != nil {
+		script, err := job.ViewsFor(refs)
+		if err != nil {
+			return sqlsandbox.Result{}, &sqlsandbox.WorkerError{Err: err}
+		}
+		job.ViewsSQL = script
+	}
 	f.mu.Lock()
 	f.jobs = append(f.jobs, job)
 	f.mu.Unlock()

@@ -61,6 +61,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -155,6 +156,12 @@ type Job struct {
 	// (views.Generate), installed in the worker before the query runs. It
 	// must reference nothing outside CopyDirs.
 	ViewsSQL string
+	// ViewsFor, when set, replaces ViewsSQL (#2029): the worker parses the
+	// statement first and the parent calls ViewsFor with what it names, so
+	// the script can define only the views the statement reads. It runs in
+	// the parent, while the worker waits, and is not called for a statement
+	// the worker refuses. Its error fails the run as a WorkerError.
+	ViewsFor func(Refs) (string, error)
 	// SQL is the user's statement.
 	SQL string
 	// Schema, when set, is the schema unqualified names in SQL resolve in
@@ -473,13 +480,16 @@ func localCopy(dirs []string) bool {
 
 // wireJob is what the parent writes to the child's stdin.
 type wireJob struct {
-	CopyDirs    []string `json:"copy_dirs"`
-	ViewsSQL    string   `json:"views_sql"`
-	SQL         string   `json:"sql"`
-	Schema      string   `json:"schema,omitempty"`
-	Threads     int      `json:"threads"`
-	MemoryLimit string   `json:"memory_limit"`
-	MaxRows     int      `json:"max_rows"`
+	CopyDirs []string `json:"copy_dirs"`
+	ViewsSQL string   `json:"views_sql"`
+	// AskViews: ViewsSQL is empty, and the worker asks for the script once
+	// it has parsed the statement (Job.ViewsFor).
+	AskViews    bool   `json:"ask_views,omitempty"`
+	SQL         string `json:"sql"`
+	Schema      string `json:"schema,omitempty"`
+	Threads     int    `json:"threads"`
+	MemoryLimit string `json:"memory_limit"`
+	MaxRows     int    `json:"max_rows"`
 	// MaxResultBytes is counted by the worker as it collects rows, so it
 	// stops before building a result the parent would refuse anyway.
 	MaxResultBytes int64 `json:"max_result_bytes"`
@@ -488,10 +498,18 @@ type wireJob struct {
 	TimeoutNS int64 `json:"timeout_ns"`
 }
 
+// wireViews is the parent's answer to an Ask: the views script to install.
+type wireViews struct {
+	ViewsSQL string `json:"views_sql"`
+}
+
 // wireResult is what the child writes to stdout: a result, or a structured
 // error. The child exits 0 in both cases; a non-zero exit is a protocol
 // failure (it could not even read the job or encode its answer).
 type wireResult struct {
+	// Ask is the worker's question, not a result: the relations the
+	// statement names, sent ahead of the result when the job has AskViews.
+	Ask            *Refs    `json:"ask,omitempty"`
 	Columns        []Column `json:"columns,omitempty"`
 	Rows           [][]any  `json:"rows,omitempty"`
 	Truncated      bool     `json:"truncated"`
@@ -529,8 +547,13 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 	if args == nil {
 		args = []string{WorkerCommand}
 	}
+	asking := job.ViewsFor != nil
+	viewsSQL := job.ViewsSQL
+	if asking {
+		viewsSQL = ""
+	}
 	in, err := json.Marshal(wireJob{
-		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: job.ViewsSQL, SQL: job.SQL, Schema: job.Schema,
+		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, Schema: job.Schema,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
 	})
@@ -546,7 +569,15 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 	defer cancel()
 	cmd := exec.CommandContext(cctx, exe, args...)
 	cmd.Env = childEnv()
-	cmd.Stdin = bytes.NewReader(in)
+	var stdin io.WriteCloser
+	if asking {
+		// Kept open: the answer to the worker's question goes here too.
+		if stdin, err = cmd.StdinPipe(); err != nil {
+			return Result{}, &WorkerError{Err: fmt.Errorf("stdin: %w", err)}
+		}
+	} else {
+		cmd.Stdin = bytes.NewReader(in)
+	}
 	setProcessGroup(cmd)
 	// On timeout or cancel, kill the whole process group: DuckDB's worker
 	// threads belong to the child, and a plain Kill of the leader is enough
@@ -555,6 +586,9 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 	// If the group kill somehow leaves the pipes open, stop waiting on them.
 	cmd.WaitDelay = 5 * time.Second
 	stdout := &cappedBuffer{max: limits.MaxResultBytes, onOverflow: func() { _ = killProcessGroup(cmd.Process) }}
+	if asking {
+		stdout.firstLine = make(chan []byte, 1)
+	}
 	// stderr is diagnostics: past its cap the rest is dropped, never a reason
 	// to fail the child.
 	stderr := &cappedBuffer{max: 64 << 10, drop: true}
@@ -568,7 +602,16 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 	if r.onStart != nil {
 		r.onStart(pid)
 	}
-	waitErr := cmd.Wait()
+	var waitErr error
+	if asking {
+		var askErr error
+		waitErr, askErr = answerAsk(cmd, stdin, in, stdout.firstLine, job.ViewsFor)
+		if askErr != nil && ctx.Err() == nil && cctx.Err() == nil {
+			return Result{}, &WorkerError{Err: askErr, PID: pid, Stderr: stderr.buf.String()}
+		}
+	} else {
+		waitErr = cmd.Wait()
+	}
 
 	switch {
 	case ctx.Err() != nil:
@@ -584,7 +627,13 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 	var out wireResult
 	dec := json.NewDecoder(bytes.NewReader(stdout.buf.Bytes()))
 	dec.UseNumber()
-	if err := dec.Decode(&out); err != nil {
+	err = dec.Decode(&out)
+	if err == nil && out.Ask != nil {
+		// The question came first; the result follows it.
+		out = wireResult{}
+		err = dec.Decode(&out)
+	}
+	if err != nil {
 		if waitErr != nil {
 			err = fmt.Errorf("%w (no result: %v)", waitErr, err)
 		} else {
@@ -615,6 +664,55 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 		res.Rows = [][]any{}
 	}
 	return res, nil
+}
+
+// answerAsk runs a worker that asks for its views (Job.ViewsFor): it sends
+// the job, waits for the worker's first line, and when that line is the
+// question it answers with the script ViewsFor returns. A first line that is
+// not a question is the result itself (a statement the worker refused, a
+// session that failed before asking), and a worker that exits without a
+// line answers nothing: either way stdin is closed and the run ends as
+// usual. The second error is a failure of the exchange itself; a killed
+// worker (timeout, cancel) is reported by the caller from the contexts.
+func answerAsk(cmd *exec.Cmd, stdin io.WriteCloser, job []byte, firstLine <-chan []byte, viewsFor func(Refs) (string, error)) (waitErr, askErr error) {
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	// The job is written from its own goroutine: a statement can be larger
+	// than the pipe's buffer, and a worker that dies before reading it must
+	// not leave this write blocked.
+	go func() {
+		if _, err := stdin.Write(job); err != nil {
+			_ = stdin.Close()
+		}
+	}()
+	select {
+	case line := <-firstLine:
+		var q wireResult
+		if err := json.Unmarshal(line, &q); err != nil || q.Ask == nil {
+			_ = stdin.Close()
+			return <-done, nil
+		}
+		script, err := viewsFor(*q.Ask)
+		if err != nil {
+			_ = killProcessGroup(cmd.Process)
+			_ = stdin.Close()
+			<-done
+			return nil, fmt.Errorf("build the views for the statement: %w", err)
+		}
+		answer, err := json.Marshal(wireViews{ViewsSQL: script})
+		if err != nil {
+			_ = killProcessGroup(cmd.Process)
+			_ = stdin.Close()
+			<-done
+			return nil, err
+		}
+		// A write that fails means the worker is gone; its exit says why.
+		_, _ = stdin.Write(answer)
+		_ = stdin.Close()
+		return <-done, nil
+	case err := <-done:
+		return err, nil
+	}
 }
 
 // childEnv is the scrubbed environment the worker gets: what a process and
@@ -667,6 +765,12 @@ type cappedBuffer struct {
 	drop       bool
 	overflowed bool
 	onOverflow func()
+	// firstLine, when set, receives a copy of the first newline-terminated
+	// line once it has been written (the worker's question, #2029). The line
+	// stays in buf.
+	firstLine chan []byte
+	scanned   int
+	lineSent  bool
 }
 
 func (c *cappedBuffer) Write(p []byte) (int, error) {
@@ -688,5 +792,15 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 		}
 		return 0, ErrResultTooLarge
 	}
-	return c.buf.Write(p)
+	n, err := c.buf.Write(p)
+	if c.firstLine != nil && !c.lineSent {
+		b := c.buf.Bytes()
+		if i := bytes.IndexByte(b[c.scanned:], '\n'); i >= 0 {
+			c.lineSent = true
+			c.firstLine <- bytes.Clone(b[:c.scanned+i])
+		} else {
+			c.scanned = len(b)
+		}
+	}
+	return n, err
 }

@@ -553,18 +553,27 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 		at := in.BaselineSnapshot.UTC()
 		copyUpdatedAt = &at
 	}
-	viewsSQL := views.Generate(in)
 	viewBuild := time.Since(viewsStart)
 
+	// The worker parses the statement first and asks for the views it names
+	// (#2029): installing every table's view was half of a short statement's
+	// time on a copy of a hundred tables. CopyDirs stay the whole copy's: they
+	// bound what the worker may read, the script only what it defines.
+	var viewsSQL string
 	job := sqlsandbox.Job{
 		// One query at a time per identity: the login identity, or the
 		// shared automation token as one identity.
 		User:     user,
 		CopyDirs: copyDirs,
-		ViewsSQL: viewsSQL,
-		SQL:      statement,
-		Schema:   schema,
-		Limits:   sqlsandbox.Limits{MaxRows: maxRows},
+		ViewsFor: func(refs sqlsandbox.Refs) (string, error) {
+			narrowed := in
+			narrowed.OnlyViews = sqlWantedViews(in, refs)
+			viewsSQL = views.Generate(narrowed) + sqlUsedSchema(in, narrowed.OnlyViews, schema)
+			return viewsSQL, nil
+		},
+		SQL:    statement,
+		Schema: schema,
+		Limits: sqlsandbox.Limits{MaxRows: maxRows},
 	}
 	ran = true
 	res, err := slot.Run(ctx, job)
@@ -587,6 +596,86 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 	}
 	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, ViewBuild: viewBuild}, nil
 }
+
+// sqlWantedViews decides which of the copy's views a statement needs, from
+// the relations the worker's parse of it names (#2029). nil means every view,
+// and it is the answer whenever the set is not certain: a statement that can
+// depend on what it does not name (Refs.Unsure), and a name that matches no
+// view and no WITH of the statement, which is a system table, another
+// catalog, or a typo: DuckDB's "Did you mean" is computed from the catalog,
+// so a typo answered out of a narrowed one would suggest the wrong thing.
+// An extra view costs about half a millisecond; a missing one turns a
+// working statement into "does not exist".
+//
+// Names compare the way DuckDB compares them (ASCII case only). A name
+// without a schema matches that view in every schema, not only the one the
+// search path would pick: following DuckDB's resolution here could only
+// leave out the view it picks. A view is matched BEFORE a WITH name, because
+// `WITH events AS (SELECT * FROM events ...)` reads the view inside the
+// clause that shadows it, and the parse lists the two under one name.
+func sqlWantedViews(in views.Input, refs sqlsandbox.Refs) views.ViewSet {
+	if refs.Unsure {
+		return nil
+	}
+	names := in.ViewNames()
+	ctes := map[string]bool{}
+	for _, c := range refs.CTEs {
+		ctes[sqlFoldName(c)] = true
+	}
+	want := views.ViewSet{}
+	for _, r := range refs.Tables {
+		catalog, schema, name := sqlFoldName(r.Catalog), sqlFoldName(r.Schema), sqlFoldName(r.Name)
+		if catalog != "" && catalog != "memory" {
+			return nil // the worker's DuckDB has one catalog, memory
+		}
+		matched := false
+		for _, n := range names {
+			if sqlFoldName(n.View) == name && (schema == "" || sqlFoldName(n.Schema) == schema) {
+				want[n.Key] = true
+				matched = true
+			}
+		}
+		if !matched && !(schema == "" && ctes[name]) {
+			return nil
+		}
+	}
+	return want
+}
+
+// sqlUsedSchema keeps the port's USE working on a narrowed script: the worker
+// applies a schema only if the views created it, so `USE shop` followed by a
+// statement that names no view of shop (SELECT current_schema()) would
+// otherwise fall back to main and say the schema does not exist. Returns the
+// statement creating that schema, spelled as the copy spells it, when the
+// copy has it; IF NOT EXISTS makes it a no-op when a wanted view already
+// created it. A schema the copy does not have stays missing, and gets the
+// worker's hint.
+func sqlUsedSchema(in views.Input, wanted views.ViewSet, schema string) string {
+	if schema == "" || wanted == nil {
+		return ""
+	}
+	for _, n := range in.ViewNames() {
+		if sqlFoldName(n.Schema) == sqlFoldName(schema) {
+			return "\nCREATE SCHEMA IF NOT EXISTS " + sqlQuoteIdent(n.Schema) + ";\n"
+		}
+	}
+	return ""
+}
+
+// sqlFoldName folds A-Z only, as DuckDB does when it compares names: Ñ and ñ
+// are two names there.
+func sqlFoldName(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
+}
+
+// sqlQuoteIdent quotes an identifier for DuckDB.
+func sqlQuoteIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
 // sqlCopyDirs lists the directories the generated views read, and nothing
 // wider: each archive base (bintrail_id=<id>), the directory holding each

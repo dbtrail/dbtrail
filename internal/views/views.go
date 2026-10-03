@@ -654,6 +654,36 @@ func (in Input) DefinedViews() []string {
 	return names
 }
 
+// ViewName is one view an Input renders, in the parts a statement names it
+// by (#2029).
+type ViewName struct {
+	// Schema is the DuckDB schema the view is created in: the source schema
+	// for a state view, main for events.
+	Schema string
+	// View is the view's own name, a renamed twin's included.
+	View string
+	// Key is its key in a ViewSet (OnlyViews).
+	Key string
+}
+
+// ViewNames lists the views a full render of this Input (OnlyViews left
+// aside) creates, in emission order, for a caller that narrows the render to
+// what a statement names. Not for an Input with Database set: there a view
+// is three parts, and no caller narrows one.
+func (in Input) ViewNames() []ViewName {
+	var names []ViewName
+	in.OnlyViews = nil
+	if in.rendersEvents() {
+		names = append(names, ViewName{Schema: "main", View: eventsViewName, Key: eventsViewName})
+	}
+	for _, p := range stateViewPlan(in) {
+		if p.skip == "" {
+			names = append(names, ViewName{Schema: p.table.Schema, View: p.view, Key: stateKey(p)})
+		}
+	}
+	return names
+}
+
 // SelectedBaselines returns the baseline tables whose state view this Input
 // would render, honoring OnlyViews. It answers "which baseline files does this
 // render actually read", which is what a caller that reports on those files has
