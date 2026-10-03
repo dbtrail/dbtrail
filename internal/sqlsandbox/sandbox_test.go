@@ -814,7 +814,7 @@ func TestWorker_cutsOversizedCells(t *testing.T) {
 	res := runJob(wireJob{
 		CopyDirs: []string{f.archiveRoot}, SQL: "SELECT repeat('x', 2 * 1024 * 1024) AS big, 'small' AS s",
 		Threads: 1, MemoryLimit: "256MB", MaxRows: 10, MaxResultBytes: 8 << 20,
-	}, os.Stderr)
+	}, nil, os.Stderr)
 	if res.Error != nil {
 		t.Fatalf("error: %+v", res.Error)
 	}
@@ -835,7 +835,7 @@ func TestWorker_stopsAtMaxResultBytesItself(t *testing.T) {
 	res := runJob(wireJob{
 		CopyDirs: []string{f.archiveRoot}, SQL: "SELECT repeat('x', 1000) AS s FROM range(100)",
 		Threads: 1, MemoryLimit: "256MB", MaxRows: 1000, MaxResultBytes: 4096,
-	}, os.Stderr)
+	}, nil, os.Stderr)
 	if res.Error == nil || res.Error.Kind != errTooLarge {
 		t.Fatalf("error = %+v, want kind %s", res.Error, errTooLarge)
 	}

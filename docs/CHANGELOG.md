@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `watch --metrics-addr`. Only statements that ran to a result are observed.
 
 ### Changed
+- **SQL on the copy prepares only the tables a statement names** (#2029).
+  Every statement used to install a view for every table of the copy before
+  it ran: on a copy of 111 tables that was 50-60 ms, half of a short
+  statement, on a 4-vCPU Linux host. Now the worker parses the statement
+  first and the console hands it only the views it names (16 ms to 1 ms on
+  a laptop for that copy; a short statement 43 ms to 27 ms). A statement
+  that lists tables (`SHOW ALL TABLES`, `information_schema`, a table
+  function such as `duckdb_tables()`) or names something the copy does not
+  have still gets every view, so listings stay complete and a misspelled
+  name still gets DuckDB's "Did you mean". No statement's result changes.
 - **SQL on the copy takes its worker slot before it builds the views**
   (#2026). A statement refused as busy (HTTP 429 on the SQL card, MySQL
   error 1203 on the embedded port) used to pay the whole preparation first:

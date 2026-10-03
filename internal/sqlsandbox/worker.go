@@ -35,7 +35,8 @@ func WorkerMain(stdin io.Reader, stdout, stderr io.Writer) int {
 	// out on the host, ahead of the console that is also the capture plane.
 	lowerOOMPriority(stderr)
 	var job wireJob
-	if err := json.NewDecoder(stdin).Decode(&job); err != nil {
+	dec := json.NewDecoder(stdin)
+	if err := dec.Decode(&job); err != nil {
 		fmt.Fprintf(stderr, "sql worker: read job: %v\n", err)
 		return 2
 	}
@@ -49,7 +50,20 @@ func WorkerMain(stdin io.Reader, stdout, stderr io.Writer) int {
 		})
 		defer stop.Stop()
 	}
-	res := runJob(job, stderr)
+	// The views a statement needs (#2029): the worker says what the statement
+	// names, on stdout ahead of the result, and the parent answers on stdin
+	// with the script to install.
+	ask := func(refs Refs) (string, error) {
+		if err := json.NewEncoder(stdout).Encode(wireResult{Ask: &refs}); err != nil {
+			return "", fmt.Errorf("send the statement's names: %w", err)
+		}
+		var v wireViews
+		if err := dec.Decode(&v); err != nil {
+			return "", fmt.Errorf("read the views script: %w", err)
+		}
+		return v.ViewsSQL, nil
+	}
+	res := runJob(job, ask, stderr)
 	if err := json.NewEncoder(stdout).Encode(res); err != nil {
 		fmt.Fprintf(stderr, "sql worker: write result: %v\n", err)
 		return 2
@@ -68,7 +82,7 @@ const (
 
 // runJob never panics out: a panic anywhere below becomes a session error
 // with the stack on stderr, so the parent gets a typed answer.
-func runJob(job wireJob, stderr io.Writer) (res wireResult) {
+func runJob(job wireJob, ask func(Refs) (string, error), stderr io.Writer) (res wireResult) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(stderr, "sql worker: panic: %v\n%s", r, debug.Stack())
@@ -98,7 +112,8 @@ func runJob(job wireJob, stderr io.Writer) (res wireResult) {
 	defer conn.Close()
 	mark(&res.OpenNS)
 
-	if reason := checkStatement(ctx, conn, job.SQL); reason != "" {
+	stmt, reason := parseStatement(ctx, conn, job.SQL)
+	if reason != "" {
 		return wireResult{Error: &wireError{Kind: errRefused, Message: reason}}
 	}
 
@@ -121,8 +136,15 @@ func runJob(job wireJob, stderr io.Writer) (res wireResult) {
 		}
 	}
 	mark(&res.LockdownNS)
-	if strings.TrimSpace(job.ViewsSQL) != "" {
-		if _, err := conn.ExecContext(ctx, job.ViewsSQL); err != nil {
+	viewsSQL := job.ViewsSQL
+	if job.AskViews {
+		var err error
+		if viewsSQL, err = ask(collectRefs(stmt)); err != nil {
+			return sessionErr("%v", err)
+		}
+	}
+	if strings.TrimSpace(viewsSQL) != "" {
+		if _, err := conn.ExecContext(ctx, viewsSQL); err != nil {
 			return sessionErr("install the copy's views: %v", err)
 		}
 	}
@@ -342,7 +364,7 @@ func refusedTableFunction(node any) string {
 	return ""
 }
 
-// checkStatement asks DuckDB's own parser what the text is, through
+// parseStatement asks DuckDB's own parser what the text is, through
 // json_serialize_sql (built into the engine; verified on v1.4.5), and returns
 // a refusal reason, or "" when the text is exactly one SELECT-shaped
 // statement whose table functions are all allowed. The serializer accepts
@@ -351,10 +373,13 @@ func refusedTableFunction(node any) string {
 // everything else (COPY, CREATE, ATTACH, INSTALL, LOAD, SET, RESET, PRAGMA,
 // CALL, EXPLAIN, INSERT, a top-level PIVOT, ...). A comment or
 // whitespace-only text parses to zero statements.
-func checkStatement(ctx context.Context, conn *sql.Conn, text string) string {
+//
+// The parsed statement comes back with the verdict so the caller can read
+// what it names (collectRefs) from the same parse that allowed it.
+func parseStatement(ctx context.Context, conn *sql.Conn, text string) (any, string) {
 	var raw string
 	if err := conn.QueryRowContext(ctx, "SELECT json_serialize_sql(?::VARCHAR)::VARCHAR", text).Scan(&raw); err != nil {
-		return "could not parse the statement: " + err.Error()
+		return nil, "could not parse the statement: " + err.Error()
 	}
 	var parsed struct {
 		Error        bool   `json:"error"`
@@ -363,24 +388,24 @@ func checkStatement(ctx context.Context, conn *sql.Conn, text string) string {
 		Statements   []any  `json:"statements"`
 	}
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		return "could not parse the statement: " + err.Error()
+		return nil, "could not parse the statement: " + err.Error()
 	}
 	switch {
 	case parsed.Error && strings.Contains(parsed.ErrorMessage, "Only SELECT statements"):
-		return "only a single SELECT statement can run here (no COPY, CREATE, ATTACH, INSTALL, LOAD, SET, PRAGMA or CALL)"
+		return nil, "only a single SELECT statement can run here (no COPY, CREATE, ATTACH, INSTALL, LOAD, SET, PRAGMA or CALL)"
 	case parsed.Error && parsed.ErrorType == "parser":
-		return "syntax error: " + parsed.ErrorMessage
+		return nil, "syntax error: " + parsed.ErrorMessage
 	case parsed.Error:
-		return parsed.ErrorType + " error: " + parsed.ErrorMessage
+		return nil, parsed.ErrorType + " error: " + parsed.ErrorMessage
 	case len(parsed.Statements) == 0:
-		return "the query is empty"
+		return nil, "the query is empty"
 	case len(parsed.Statements) > 1:
-		return fmt.Sprintf("one statement at a time: %d statements were given", len(parsed.Statements))
+		return nil, fmt.Sprintf("one statement at a time: %d statements were given", len(parsed.Statements))
 	}
 	if name := refusedTableFunction(parsed.Statements[0]); name != "" {
-		return fmt.Sprintf("the table function %s is not allowed here; only readers (read_parquet, glob, the parquet_* metadata functions, range, unnest, json_each and the duckdb_* catalog) can run on the copy", name)
+		return nil, fmt.Sprintf("the table function %s is not allowed here; only readers (read_parquet, glob, the parquet_* metadata functions, range, unnest, json_each and the duckdb_* catalog) can run on the copy", name)
 	}
-	return ""
+	return parsed.Statements[0], ""
 }
 
 // renderer turns driver values into cells and counts the ones it cut.

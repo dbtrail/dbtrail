@@ -1149,6 +1149,12 @@ The limits, so a query can never hurt capture:
   refusal costs nothing: the slot is taken before anything is read. For a team
   or a dashboard tool, each reader's own DuckDB on the bucket is how reads
   scale (see [Dashboards](dashboards.md)).
+- Only the tables a query names are prepared before it runs, so a copy with
+  hundreds of tables costs a short query no more than a copy with a few. A
+  query that lists tables (`SHOW ALL TABLES`, `information_schema`,
+  `duckdb_tables()`), or that names a table the copy does not have, gets
+  every table, so the list is complete and a misspelled name is still
+  answered with the closest real one.
 - Read-only. One `SELECT` per run (`DESCRIBE`, `SHOW` and `SUMMARIZE` work
   too). It can read the copy and nothing else on the host: no other file, no
   network, no extension.
@@ -1156,12 +1162,13 @@ The limits, so a query can never hurt capture:
 Every query is written to the audit trail when one is installed: who ran it,
 on which server, the statement, and how many rows came back. The response's
 `phases_ms` field, the daemon's log at debug level, and the
-`bintrail_sql_statement_phase_seconds` histogram under
-`watch --metrics-addr`
-([Observability](observability.md)) say where the time went: `view_build` (the console's own discovery and script), `spawn` (the
-worker's whole lifetime, which contains `open`, `lockdown`, `views` and
-`query`; what is left of it is process start, result encoding and exit),
-`decode` and `total`.
+`bintrail_sql_statement_phase_seconds` histogram under `watch --metrics-addr`
+([Observability](observability.md)) say where the time went: `view_build`
+(the console's own discovery), `spawn` (the worker's whole lifetime, which
+contains `open`, `lockdown`, `views` and `query`; what is left of it is
+process start, result encoding and exit), `decode` and `total`. `views` is
+installing the views the query names, including the console writing them
+while the worker waits.
 
 Who sees it: a session that holds the `sql:execute` permission. With no access
 policy (the built-in password login and the static token) every session holds
