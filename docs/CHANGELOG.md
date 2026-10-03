@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **Per-phase timings of SQL on the copy as a Prometheus histogram**
+  (#2026): `bintrail_sql_statement_phase_seconds{phase}`, the same phases as
+  `phases_ms`, for the SQL card and the embedded port alike, exported by
+  `watch --metrics-addr`. Only statements that ran to a result are observed.
+
 ### Changed
 - **SQL on the copy takes its worker slot before it builds the views**
   (#2026). A statement refused as busy (HTTP 429 on the SQL card, MySQL

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/ext"
+	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/views"
@@ -104,13 +105,22 @@ type sqlResponse struct {
 	PhasesMS map[string]float64 `json:"phases_ms"`
 }
 
+// sqlPhases names a statement's phases once, for the response, the log
+// and the histogram, so the three cannot disagree on a key.
+func sqlPhases(viewBuild time.Duration, p sqlsandbox.Phases) map[string]time.Duration {
+	return map[string]time.Duration{
+		"view_build": viewBuild, "spawn": p.Spawn, "open": p.Open, "lockdown": p.Lockdown,
+		"views": p.Views, "query": p.Query, "decode": p.Decode, "total": p.Total,
+	}
+}
+
 // sqlPhasesMS renders the phases for the response and the log.
 func sqlPhasesMS(viewBuild time.Duration, p sqlsandbox.Phases) map[string]float64 {
-	ms := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
-	return map[string]float64{
-		"view_build": ms(viewBuild), "spawn": ms(p.Spawn), "open": ms(p.Open), "lockdown": ms(p.Lockdown),
-		"views": ms(p.Views), "query": ms(p.Query), "decode": ms(p.Decode), "total": ms(p.Total),
+	out := map[string]float64{}
+	for k, d := range sqlPhases(viewBuild, p) {
+		out[k] = float64(d.Microseconds()) / 1000
 	}
+	return out
 }
 
 // sqlRequestMaxBytes bounds the POST body: a statement is text a person
@@ -572,6 +582,9 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 	// load can be read back from the log.
 	slog.Debug("console: sql statement phases", "user", user, "events", sqlMentionsEvents(statement),
 		"views_sql_bytes", len(viewsSQL), "phases_ms", sqlPhasesMS(viewBuild, res.Phases))
+	for phase, d := range sqlPhases(viewBuild, res.Phases) {
+		observe.ObserveSQLStatementPhase(phase, d)
+	}
 	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, ViewBuild: viewBuild}, nil
 }
 

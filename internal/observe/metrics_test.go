@@ -2,6 +2,7 @@ package observe_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -142,5 +143,43 @@ func TestUnhandledRowsDropped(t *testing.T) {
 	observe.UnhandledRowsDropped(1)
 	if got := read(); got != before+4 {
 		t.Errorf("unhandled_rows_dropped_total = %v after adding 3+1, want %v", got, before+4)
+	}
+}
+
+// phaseHistogram reads the sample count and sum of one phase's series from
+// the default registry; zero when the series has no observation yet.
+func phaseHistogram(t *testing.T, phase string) (uint64, float64) {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != "bintrail_sql_statement_phase_seconds" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "phase" && l.GetValue() == phase {
+					return m.GetHistogram().GetSampleCount(), m.GetHistogram().GetSampleSum()
+				}
+			}
+		}
+	}
+	return 0, 0
+}
+
+// #2026: one observation lands in its own phase's series, in seconds, and
+// leaves the other phases alone.
+func TestObserveSQLStatementPhase(t *testing.T) {
+	qCount, qSum := phaseHistogram(t, "query")
+	vCount, _ := phaseHistogram(t, "views")
+	observe.ObserveSQLStatementPhase("query", 250*time.Millisecond)
+	gotCount, gotSum := phaseHistogram(t, "query")
+	if gotCount != qCount+1 || gotSum-qSum < 0.2499 || gotSum-qSum > 0.2501 {
+		t.Errorf("query phase: count %d→%d, sum +%v; want +1 and +0.25 s", qCount, gotCount, gotSum-qSum)
+	}
+	if c, _ := phaseHistogram(t, "views"); c != vCount {
+		t.Errorf("views phase moved %d→%d on a query observation", vCount, c)
 	}
 }
