@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,6 +32,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/rotation"
 	"github.com/dbtrail/dbtrail/internal/serverid"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/status"
 	"github.com/dbtrail/dbtrail/internal/streamdeps"
 	"github.com/dbtrail/dbtrail/internal/streamrun"
@@ -101,7 +103,12 @@ var (
 	// Empty (default) = off. Requires a console token (MySQL-protocol auth can't
 	// use the bcrypt password store). Env BINTRAIL_CONSOLE_FLASHBACK_LISTEN.
 	upConsoleFlashbackListen string
-	upArchiveStageDir        string
+	// upSQLMaxInFlight caps how many SQL-on-the-copy statements run at once
+	// (#2030): the SQL card and the embedded port together, each a worker
+	// with its own threads and memory beside capture. Env
+	// BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT; below 1 refuses to start.
+	upSQLMaxInFlight  = sqlsandbox.DefaultMaxInFlight
+	upArchiveStageDir string
 	// upConsoleBaselineTrigger opts into in-process baseline creation from the
 	// console (#613). Env-only (BINTRAIL_CONSOLE_BASELINE_TRIGGER=1) — off by
 	// default because it needs mydumper in the image and reaches the source DB.
@@ -257,6 +264,7 @@ func init() {
 	watchCmd.Flags().StringVar(&upConsoleTLSKey, "console-tls-key", "", "TLS private key file (PEM; requires --console-tls-cert)")
 	watchCmd.Flags().StringSliceVar(&upConsoleAllowedHost, "console-allowed-hosts", nil, "Extra hostnames allowed in the Host header (for a TLS-terminating reverse proxy); IP literals and localhost are always allowed")
 	watchCmd.Flags().BoolVar(&upConsoleAllowSetup, "console-allow-setup", false, "Allow browser first-run password setup on a non-loopback bind (assert the bind is access-controlled, e.g. published only on the host loopback)")
+	watchCmd.Flags().IntVar(&upSQLMaxInFlight, "sql-max-in-flight", sqlsandbox.DefaultMaxInFlight, "How many SQL-on-the-copy statements run at once, the SQL card and the --flashback-listen port together; one more is refused. Each runs as its own process with 2 threads and up to 2 GB, on the host that captures, and every result is held in this process while it is sent, so raise it only with cores and memory to spare. Env BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT.")
 	watchCmd.Flags().StringVar(&upConsoleFlashbackListen, "flashback-listen", "", "Serve an embedded MySQL-protocol time-travel port (_flashback/_snapshot/_diff) for every monitored server, routed by the connection username (server id or name); e.g. 127.0.0.1:3308. Requires --console-token, which reads every schema of every server: the port does not filter by schema. Empty = off. Env BINTRAIL_CONSOLE_FLASHBACK_LISTEN.")
 	watchCmd.Flags().StringVar(&upArchiveStageDir, "archive-staging-dir", "", "Local staging directory for S3 archive uploads (default: OS temp dir). Rotated Parquet is written here, uploaded to a source's configured Archive S3 bucket, then pruned.")
 	watchCmd.Flags().StringVar(&upRotateRetain, "rotate-retain", indexer.DefaultRotateRetain, "Built-in rotation: drop index partitions older than this (Nd/Nh; \"off\" disables)")
@@ -291,6 +299,10 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	upRotationCfg, err = rotation.ParseSettings(upRotateRetain, upRotateInterval, upRotateAddFuture,
 		cmd.Flags().Changed("rotate-retain"))
 	if err != nil {
+		return err
+	}
+
+	if err := resolveSQLMaxInFlight(cmd); err != nil {
 		return err
 	}
 
@@ -1519,6 +1531,8 @@ type consoleOpts struct {
 	// a bind failure, so a value the console reports was bound at startup;
 	// a mid-run serve failure is logged and swallowed, not reflected here.
 	FlashbackListen string
+	// SQLMaxInFlight is the resolved --sql-max-in-flight (#2030).
+	SQLMaxInFlight int
 }
 
 // upConsoleOpts snapshots the resolved upConsole* globals.
@@ -1536,6 +1550,7 @@ func upConsoleOpts() consoleOpts {
 		AllowedHosts:    upConsoleAllowedHost,
 		AllowSetup:      upConsoleAllowSetup,
 		FlashbackListen: upConsoleFlashbackListen,
+		SQLMaxInFlight:  upSQLMaxInFlight,
 	}
 }
 
@@ -1597,6 +1612,11 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 	// because both watch entry points reach this function and neither reaches
 	// the other, and once per process: it is a startup line, not a monitor.
 	composeDriftReporter(indexDSN, opts)
+	// GOMAXPROCS, not NumCPU: since Go 1.25 it follows a container's CPU
+	// limit, which is the number of cores the workers really share.
+	if w := sqlMaxInFlightWarning(opts.SQLMaxInFlight, sqlsandbox.DefaultLimits().Threads, runtime.GOMAXPROCS(0)); w != "" {
+		slog.Warn(w)
+	}
 	// Only a daemon that captures its own source has a flavor to show.
 	var bootSourceFlavor func() string
 	if upSourceDSN != "" {
@@ -1624,6 +1644,7 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		TLSKey:          opts.TLSKey,
 		AllowedHosts:    opts.AllowedHosts,
 		FlashbackListen: opts.FlashbackListen,
+		SQLMaxInFlight:  opts.SQLMaxInFlight,
 		// The daemon's --rotate-* defaults, so GET /api/rotation can report the
 		// effective policy (and the console panel prefill it) before the
 		// operator saves an override.
@@ -1922,4 +1943,38 @@ func bootLockModeReport() string {
 // boot server's console checks connect with it too.
 func bootSourceSSL() config.SSL {
 	return config.SSL{Mode: upSSLMode, CA: upSSLCA, Cert: upSSLCert, Key: upSSLKey}
+}
+
+// sqlMaxInFlightWarning says, once at startup, when the SQL statements
+// allowed at once can take more threads than the host has cores (#2030).
+// Not a refusal: the operator may know the host better (statements that
+// rarely overlap). Only for a cap the operator raised: the default on a small
+// host would otherwise warn at every boot about a choice nobody made. Empty
+// when the cap fits.
+func sqlMaxInFlightWarning(maxInFlight, threadsEach, cores int) string {
+	if maxInFlight <= sqlsandbox.DefaultMaxInFlight || maxInFlight*threadsEach <= cores {
+		return ""
+	}
+	return fmt.Sprintf("--sql-max-in-flight %d: %d statements at once can take %d threads on a host with %d cores, and they share them with capture; capture may fall behind while they run",
+		maxInFlight, maxInFlight, maxInFlight*threadsEach, cores)
+}
+
+// resolveSQLMaxInFlight sets upSQLMaxInFlight from --sql-max-in-flight or,
+// when the flag is not given, BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT (#2030).
+// Called before the daemon waits for its index, so a typo fails at once: a
+// cap below 1 would refuse every statement, and falling back to the default
+// would hide the mistake.
+func resolveSQLMaxInFlight(cmd *cobra.Command) error {
+	if !cmd.Flags().Changed("sql-max-in-flight") {
+		if v := strings.TrimSpace(os.Getenv("BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT")); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 {
+				return fmt.Errorf("BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT=%q: want a whole number of at least 1 (how many SQL statements run at once; the default is %d)", v, sqlsandbox.DefaultMaxInFlight)
+			}
+			upSQLMaxInFlight = n
+		}
+	} else if upSQLMaxInFlight < 1 {
+		return fmt.Errorf("--sql-max-in-flight %d: want at least 1 (how many SQL statements run at once; the default is %d)", upSQLMaxInFlight, sqlsandbox.DefaultMaxInFlight)
+	}
+	return nil
 }

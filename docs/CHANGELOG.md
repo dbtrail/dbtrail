@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **`watch --sql-max-in-flight`** (env `BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT`,
+  #2030): how many SQL-on-the-copy statements run at once, the SQL card and
+  the time-travel port together. The default stays 2, measured right for a
+  4-core host in #2026; a bigger host can raise it. A value below 1, or a
+  variable that is not a whole number, stops the daemon at startup with the
+  name to fix, and the daemon warns when the statements could take more
+  threads than the host has cores.
 - **Per-phase timings of SQL on the copy as a Prometheus histogram**
   (#2026): `bintrail_sql_statement_phase_seconds{phase}`, the same phases as
   `phases_ms`, for the SQL card and the embedded port alike, exported by
