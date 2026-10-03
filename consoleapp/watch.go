@@ -1612,7 +1612,9 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 	// because both watch entry points reach this function and neither reaches
 	// the other, and once per process: it is a startup line, not a monitor.
 	composeDriftReporter(indexDSN, opts)
-	if w := sqlMaxInFlightWarning(opts.SQLMaxInFlight, sqlsandbox.DefaultLimits().Threads, runtime.NumCPU()); w != "" {
+	// GOMAXPROCS, not NumCPU: since Go 1.25 it follows a container's CPU
+	// limit, which is the number of cores the workers really share.
+	if w := sqlMaxInFlightWarning(opts.SQLMaxInFlight, sqlsandbox.DefaultLimits().Threads, runtime.GOMAXPROCS(0)); w != "" {
 		slog.Warn(w)
 	}
 	// Only a daemon that captures its own source has a flavor to show.
@@ -1945,11 +1947,12 @@ func bootSourceSSL() config.SSL {
 
 // sqlMaxInFlightWarning says, once at startup, when the SQL statements
 // allowed at once can take more threads than the host has cores (#2030).
-// Not a refusal: the operator may know the host better than NumCPU does
-// (a container's CPU quota, statements that rarely overlap). Empty when the
-// cap fits.
+// Not a refusal: the operator may know the host better (statements that
+// rarely overlap). Only for a cap the operator raised: the default on a small
+// host would otherwise warn at every boot about a choice nobody made. Empty
+// when the cap fits.
 func sqlMaxInFlightWarning(maxInFlight, threadsEach, cores int) string {
-	if maxInFlight*threadsEach <= cores {
+	if maxInFlight <= sqlsandbox.DefaultMaxInFlight || maxInFlight*threadsEach <= cores {
 		return ""
 	}
 	return fmt.Sprintf("--sql-max-in-flight %d: %d statements at once can take %d threads on a host with %d cores, and they share them with capture; capture may fall behind while they run",

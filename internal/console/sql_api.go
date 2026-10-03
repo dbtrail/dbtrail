@@ -501,8 +501,8 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 	// The slot first (#2026): a statement that will be refused as busy must
 	// not pay for the view build below, which reads the index and walks the
 	// copy. An unused slot is given back on every early return, and said so
-	// at debug with how long it was held: the slot is one of two, so a
-	// build that holds it for long is everybody else's "busy".
+	// at debug with how long it was held: the slot is one of a few (two by
+	// default), so a build that holds it for long is everybody else's "busy".
 	slot, err := s.sqlRunner.Reserve(user)
 	if err != nil {
 		return sqlOutcome{}, err

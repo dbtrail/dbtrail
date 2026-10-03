@@ -86,6 +86,12 @@ func TestSQLMaxInFlightWarning_2030(t *testing.T) {
 	if w := sqlMaxInFlightWarning(4, 2, 8); w != "" {
 		t.Errorf("4 x 2 threads on 8 cores (exactly full) warned: %q", w)
 	}
+	if w := sqlMaxInFlightWarning(2, 2, 2); w != "" {
+		t.Errorf("the default on a 2-core host warned about a choice nobody made: %q", w)
+	}
+	if w := sqlMaxInFlightWarning(3, 2, 4); w == "" {
+		t.Error("3 x 2 threads on 4 cores did not warn")
+	}
 	w := sqlMaxInFlightWarning(6, 2, 8)
 	for _, want := range []string{"6", "12", "8", "capture"} {
 		if !strings.Contains(w, want) {

@@ -1144,7 +1144,7 @@ The limits, so a query can never hurt capture:
   saves the same rows as a file.
 - One query at a time per person, two at a time for the whole daemon by
   default (`watch --sql-max-in-flight`, see below; shared
-  with the MySQL-protocol port, where the unit is one per server). A third
+  with the MySQL-protocol port, where the unit is one per server). One more
   statement is refused at once, not queued: the process that serves it is the
   one capturing changes, so it refuses before it competes with capture. The
   refusal costs nothing: the slot is taken before anything is read. For a team
@@ -1291,7 +1291,8 @@ one release and warns that it no longer does anything. Remove it.
   to start). Each one is its own process with 2 threads and up to 2 GB, on
   the host that captures, and every result is held in the daemon while it is
   sent, so the daemon's own memory grows with it; on the compose stack the
-  workers share the `watch` container, which sets no limit. The default is
+  workers share the `watch` container, which sets no limit, and the value goes
+  in `.env` as `SQL_MAX_IN_FLIGHT`. The default is
   right for a 4-core host: measured there, two heavy statements kept capture
   current (#2026). The daemon warns at startup when the statements could take
   more threads than the host has cores.
