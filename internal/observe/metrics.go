@@ -152,6 +152,28 @@ var (
 	})
 )
 
+// sqlStatementPhase is where a SQL-on-the-copy statement's time went
+// (#2026), for the console's SQL card and the embedded port alike: they share
+// one runner. Observed only for a statement that RAN to a result; a busy
+// refusal or a failed statement has no complete set of phases, and mixing
+// partial ones in would pull every quantile toward zero. The phase label is a
+// fixed set (view_build, spawn, open, lockdown, views, query, decode, total;
+// spawn contains open, lockdown, views and query), so the cardinality is
+// bounded. No server or user label on purpose: one series per phase answers
+// "where does the time go on this daemon" without growing with the registry.
+var sqlStatementPhase = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	Namespace: "bintrail",
+	Subsystem: "sql",
+	Name:      "statement_phase_seconds",
+	Help:      "Seconds per phase of a SQL-on-the-copy statement that ran to a result (view_build, spawn, open, lockdown, views, query, decode, total).",
+	Buckets:   prometheus.ExponentialBuckets(0.001, 2, 17), // 1ms … ~65s (the statement cap is 60s)
+}, []string{"phase"})
+
+// ObserveSQLStatementPhase records one phase of a SQL-on-the-copy statement.
+func ObserveSQLStatementPhase(phase string, d time.Duration) {
+	sqlStatementPhase.WithLabelValues(phase).Observe(d.Seconds())
+}
+
 // StatementDMLDropped increments the statement-DML-dropped counter. Called from
 // the binlog parser's QUERY_EVENT handlers (file and stream paths) when a DML
 // statement — not DDL, not transaction-control — is observed, i.e. the

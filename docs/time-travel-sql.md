@@ -115,9 +115,10 @@ What to know before relying on it:
   reads (see [Dashboards](dashboards.md)): it runs on the reader's machine and
   adds no load to the capture host. The trade-off: bucket permissions replace
   the console's access rules, and the data is as fresh as the last snapshot
-  and the last archived hour. The daemon's log at debug level, and the
-  `phases_ms` field of the SQL card's response, say where each statement's
-  time went.
+  and the last archived hour. The daemon's log at debug level, the
+  `phases_ms` field of the SQL card's response, and the
+  `bintrail_sql_statement_phase_seconds` histogram say where each
+  statement's time went.
 - **Read-only, one SELECT per statement.** Anything else is refused with
   1064. A result cut at the row cap, or a cell cut at the cell cap, raises a
   warning the client counts; `SHOW WARNINGS` says which.

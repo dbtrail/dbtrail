@@ -24,6 +24,8 @@ import (
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/storage"
 	"github.com/dbtrail/dbtrail/internal/views"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // fakeSQLRunner stands in for sqlsandbox.Runner: it records the job the
@@ -1415,5 +1417,66 @@ func TestSQL_s3OnlyCopyRefusedBeforeTheSlot(t *testing.T) {
 	w := postSQL(t, f.s, `{"sql":"SELECT 1"}`)
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), sqlCopyNotLocalMessage) {
 		t.Errorf("S3-only copy: code=%d body=%s, want 409 copy-not-local before any slot", w.Code, w.Body.String())
+	}
+}
+
+// sqlPhaseCounts reads every phase's sample count from the default registry.
+func sqlPhaseCounts(t *testing.T) map[string]uint64 {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	out := map[string]uint64{}
+	for _, mf := range mfs {
+		if mf.GetName() != "bintrail_sql_statement_phase_seconds" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "phase" {
+					out[l.GetValue()] = m.GetHistogram().GetSampleCount()
+				}
+			}
+		}
+	}
+	return out
+}
+
+// #2026: a statement that ran observes every phase the response names, once;
+// a busy refusal and a failed statement observe nothing (they have no
+// complete set of phases, and a partial one would drag the quantiles down).
+func TestSQL_phasesReachTheHistogram(t *testing.T) {
+	runner := &fakeSQLRunner{res: sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "id", Type: "INTEGER"}}, Rows: [][]any{}}}
+	f := newSQLFixture(t, runner, false)
+	phases := []string{"view_build", "spawn", "open", "lockdown", "views", "query", "decode", "total"}
+
+	before := sqlPhaseCounts(t)
+	if rec := postSQL(t, f.s, `{"sql":"SELECT id FROM shop.orders"}`); rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body %s", rec.Code, rec.Body.String())
+	}
+	after := sqlPhaseCounts(t)
+	for _, p := range phases {
+		if after[p] != before[p]+1 {
+			t.Errorf("phase %q: count %d→%d after one statement, want +1", p, before[p], after[p])
+		}
+	}
+	if len(after) != len(phases) {
+		t.Errorf("histogram phases = %v, want exactly %v", after, phases)
+	}
+
+	runner.busy = true
+	if rec := postSQL(t, f.s, `{"sql":"SELECT id FROM shop.orders"}`); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("busy: status %d, body %s", rec.Code, rec.Body.String())
+	}
+	runner.busy = false
+	runner.err = &sqlsandbox.QueryError{Message: "Binder Error: nope"}
+	if rec := postSQL(t, f.s, `{"sql":"SELECT nope FROM shop.orders"}`); rec.Code == http.StatusOK {
+		t.Fatalf("failed statement answered 200: %s", rec.Body.String())
+	}
+	for p, n := range sqlPhaseCounts(t) {
+		if n != after[p] {
+			t.Errorf("phase %q moved %d→%d on a refused or failed statement", p, after[p], n)
+		}
 	}
 }

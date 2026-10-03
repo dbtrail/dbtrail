@@ -273,6 +273,24 @@ for an index the watcher cannot reach, so unknown can never read as no-gap).
 | `bintrail_rotation_healthy` | gauge | 1 = the last built-in rotation cycle neither failed nor deferred unarchived partitions |
 | `bintrail_rotation_deferred_partitions` | gauge | Unarchived partitions the last cycle declined to drop |
 
+## SQL on the copy (`bintrail_sql_statement_phase_seconds`)
+
+The console's SQL card and the embedded port's free SQL share one runner,
+and each statement that runs to a result is timed per phase:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `bintrail_sql_statement_phase_seconds{phase}` | histogram | Seconds per phase: `view_build` (the daemon's discovery and views script), `spawn` (the worker's whole lifetime, which contains `open`, `lockdown`, `views` and `query`), `decode` and `total`. A statement refused as busy, or one that fails, is not observed |
+
+The count of `phase="total"` is the number of statements served. Refusals are
+not in it: the daemon runs two statements at once and refuses a third, so a
+flat count under load can mean the slots are full, not that nobody asked.
+
+```promql
+# where a statement's time goes, p90 per phase
+histogram_quantile(0.9, sum by (le, phase) (rate(bintrail_sql_statement_phase_seconds_bucket[5m])))
+```
+
 ## Example Prometheus alert rules
 
 The push-based sibling of these metrics is the watch daemon's
