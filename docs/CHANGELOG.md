@@ -17,11 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads the archive at all (the state views are all it needs; a copy with no
   snapshot still falls back to the change log), and the SQL path never lists
   the other snapshot location, whose only purpose was a note in a downloaded
-  file. Every statement's time is now broken into phases (view build, worker
-  start, DuckDB open, lock-down, views install, statement, decode), returned
-  as `phases_ms` by `POST /api/sql` and logged at debug level, so the
-  measurement the issue asks for can be read off a real host. No statement's
-  SQL or result changes.
+  file. Every statement's time is now broken into phases, returned as
+  `phases_ms` by `POST /api/sql` and logged at debug level, so the
+  measurement the issue asks for can be read off a real host: `view_build`
+  (the daemon's discovery and script), `spawn` (the worker's whole lifetime,
+  which contains `open`, `lockdown`, `views` and `query`; the remainder is
+  process start, result encoding and exit), `decode` and `total`. No
+  statement's SQL changes; one edge answers differently: a snapshot whose
+  tables all sit in schemas DuckDB keeps for itself still falls back to the
+  change log for a statement that does not name `events`, as before.
 
 ## [0.97.0] - 2026-10-02
 ### Added

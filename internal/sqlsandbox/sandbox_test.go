@@ -997,6 +997,10 @@ func TestReserve_slotBeforeTheJob(t *testing.T) {
 	if ph.Query != res.Elapsed {
 		t.Errorf("Phases.Query = %v, Elapsed = %v, want equal", ph.Query, res.Elapsed)
 	}
+	// A spent slot holds no gate, so it runs nothing.
+	if _, err := slot3.Run(context.Background(), job); !errors.As(err, &werr) {
+		t.Errorf("Run on a released slot: err = %v, want WorkerError", err)
+	}
 	// Released after the run: the slot is free again.
 	if s, err := r.Reserve("alice"); err != nil {
 		t.Errorf("Reserve after a completed Run: %v", err)

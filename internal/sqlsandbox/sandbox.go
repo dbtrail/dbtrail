@@ -197,21 +197,24 @@ type Result struct {
 
 // Phases times one run, worker side (reported by the child) and parent
 // side. Every field is a duration; a zero one did not happen or was not
-// measured. The parent's Spawn covers process start up to the first byte
-// the child wrote, so it includes the child's own Open; Total is the
-// parent's view of the whole run.
+// measured. They nest: Total (the parent's whole run) contains Spawn (the
+// worker's whole lifetime, exec to exit), which contains every child phase;
+// Spawn minus the child phases is process start, result encoding and exit.
 type Phases struct {
 	// Child: opening the in-memory DuckDB and taking the connection.
 	Open time.Duration `json:"open_ns"`
-	// Child: checking the statement's shape, caps and the lock-down.
+	// Child: checking the statement's shape, the caps and the restrictions
+	// (everything before the views script).
 	Lockdown time.Duration `json:"lockdown_ns"`
-	// Child: installing the views script (CREATE VIEW over the copy).
+	// Child: installing the views script (CREATE VIEW over the copy), the
+	// USE and the final configuration lock.
 	Views time.Duration `json:"views_ns"`
 	// Child: running the statement and collecting rows (= Elapsed). The
 	// child cannot time its own encoding from inside the encoded message;
 	// Spawn minus the child phases is that cost plus process start and exit.
 	Query time.Duration `json:"query_ns"`
-	// Parent: from exec to the child's exit, pipe included.
+	// Parent: the worker's whole lifetime, exec to exit, pipe included: NOT
+	// process start alone, which is Spawn minus the child phases.
 	Spawn time.Duration `json:"spawn_ns"`
 	// Parent: decoding the child's result.
 	Decode time.Duration `json:"decode_ns"`
@@ -345,6 +348,12 @@ func IsWorkerInvocation(args []string) bool {
 // busy) return before any process starts. Reserve + Slot.Run, for a caller
 // that has nothing to prepare between the two.
 func (r *Runner) Run(ctx context.Context, job Job) (Result, error) {
+	if strings.TrimSpace(job.SQL) == "" {
+		return Result{}, &RefusedError{Reason: "the query is empty"}
+	}
+	if !localCopy(job.CopyDirs) {
+		return Result{}, ErrCopyNotLocal
+	}
 	slot, err := r.Reserve(job.User)
 	if err != nil {
 		return Result{}, err
@@ -392,6 +401,13 @@ func (s *Slot) Release() {
 // a WorkerError so it cannot pass silently. The pre-worker refusals (empty
 // SQL, no local copy) still return before any process starts.
 func (s *Slot) Run(ctx context.Context, job Job) (Result, error) {
+	s.mu.Lock()
+	spent := s.released
+	s.mu.Unlock()
+	if spent {
+		// A released slot holds no gate: running here would run ungated.
+		return Result{}, &WorkerError{Err: errors.New("the slot was already released; reserve another")}
+	}
 	defer s.Release()
 	if job.User != s.user {
 		return Result{}, &WorkerError{Err: fmt.Errorf("job for user %q run in a slot reserved for %q", job.User, s.user)}

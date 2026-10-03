@@ -22,6 +22,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/audittest"
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
+	"github.com/dbtrail/dbtrail/internal/storage"
 	"github.com/dbtrail/dbtrail/internal/views"
 )
 
@@ -1385,5 +1386,19 @@ func TestSQL_tablesOnlyStatementSkipsTheArchive(t *testing.T) {
 	}
 	if len(*seen) == 0 {
 		t.Error("a statement naming events read nothing from the index")
+	}
+}
+
+// #2026 (review): a statement naming events on a copy whose change log is in
+// S3 is answered from the sources alone, as before: the events view is never
+// built, so no S3 endpoint or region work happens, and a broken S3 endpoint
+// setting changes nothing (it would have turned the 422 into a 502).
+func TestSQL_eventsInS3DoesNoS3Work(t *testing.T) {
+	t.Setenv(storage.EnvS3Endpoint, "::not a url::")
+	f := newSQLFixture(t, &fakeSQLRunner{err: &sqlsandbox.QueryError{Message: "Catalog Error: Table with name events does not exist!"}}, true)
+	f.expectArchiveS3()
+	w := postSQL(t, f.s, `{"sql":"SELECT count(*) FROM events"}`)
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), sqlEventsInS3Message) {
+		t.Errorf("events on an S3 change log with a broken endpoint setting: code=%d body=%s, want 422 %q", w.Code, w.Body.String(), sqlEventsInS3Message)
 	}
 }

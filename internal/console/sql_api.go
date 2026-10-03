@@ -683,31 +683,37 @@ func (s *Server) sqlViewsFor(ctx context.Context, b *bundle, statement string) (
 	// A statement that does not name events needs the state views alone:
 	// no archive_state read, no per-file check of the change log, no listing
 	// of the other snapshot location (#2026). That was most of the daemon's
-	// fixed cost per statement, paid by every statement.
+	// fixed cost per statement, paid by every statement. A copy that gives
+	// no state view this way (no snapshot, or every table in a schema
+	// DuckDB keeps for itself) falls through to the archive, as before.
 	tablesOnly := viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true}
 	if !sqlMentionsEvents(statement) {
 		in, err = s.buildViewsInput(ctx, b, tablesOnly)
-		if !errors.Is(err, errNoViewSources) {
-			return in, false, err
+		if err == nil && in.RendersAnyView() {
+			return in, false, nil
 		}
-		// No snapshot: the change log is the whole copy, so the archive
-		// read is the one thing that can define a view here. Fall through
-		// to the full build, as any statement on such a copy always did.
+		if err != nil && !errors.Is(err, errNoViewSources) {
+			return views.Input{}, false, err
+		}
+	}
+	// The archive is needed. Read it WITHOUT the events view first: that
+	// build does no S3 work (NeedsS3 is false with events omitted), so an
+	// S3 change log is detected from the sources alone and answered with
+	// the tables, exactly as before; only a local change log is then built
+	// with the events view on.
+	in, err = s.buildViewsInput(ctx, b, viewsRequest{PinSnapshot: true, OmitEvents: true, ForStatement: true})
+	if err != nil {
+		return views.Input{}, false, err
+	}
+	if len(in.ArchiveSources) == 0 {
+		return in, false, nil
+	}
+	if !sqlArchivesLocal(in.ArchiveSources) {
+		return in, true, nil
 	}
 	in, err = s.buildViewsInput(ctx, b, viewsRequest{PinSnapshot: true, ForStatement: true})
 	if err != nil {
 		return views.Input{}, false, err
-	}
-	if len(in.ArchiveSources) > 0 && !sqlArchivesLocal(in.ArchiveSources) {
-		// The change log is in S3: the tables are installed alone, and the
-		// caller says why events is missing instead of DuckDB. With no
-		// snapshot either, the input is empty and the caller's "copy not
-		// local" refusal applies.
-		in, err = s.buildViewsInput(ctx, b, tablesOnly)
-		if errors.Is(err, errNoViewSources) {
-			return views.Input{}, true, nil
-		}
-		return in, true, err
 	}
 	return in, false, nil
 }

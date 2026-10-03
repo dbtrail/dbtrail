@@ -126,7 +126,6 @@ func runJob(job wireJob, stderr io.Writer) (res wireResult) {
 			return sessionErr("install the copy's views: %v", err)
 		}
 	}
-	mark(&res.ViewsNS)
 	// The port's USE, before the lock like every other SET. A schema the
 	// views did not create (a default seeded from the source DSN, a typo in
 	// -D) is NOT applied: SET search_path refuses it, and refusing every
@@ -146,6 +145,7 @@ func runJob(job wireJob, stderr io.Writer) (res wireResult) {
 	if _, err := conn.ExecContext(ctx, lockLast); err != nil {
 		return sessionErr("%s: %v", lockLast, err)
 	}
+	mark(&res.ViewsNS)
 
 	start := time.Now()
 	rows, err := conn.QueryContext(ctx, job.SQL)

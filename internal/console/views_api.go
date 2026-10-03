@@ -112,9 +112,9 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 	if archiveErr == nil && !req.StateOnly {
 		// Per-column-set groups (#1535): whether a statement over the events
 		// view waits on EVERY archived file's footer or on one per schema.
-		// The console no longer runs this SQL itself (#1554 removed the panel),
-		// so the wait this saves is entirely the operator's, in whatever DuckDB
-		// they open the downloaded file in.
+		// The wait this saves is the operator's in a downloaded file, and the
+		// SQL card's and the MySQL-protocol port's for every statement that
+		// names events (they install these views per statement, #2026).
 		//
 		// A failure to read the column sets is NOT fatal and NOT reported as
 		// discovery failure: the sources resolved, so the file is honest with

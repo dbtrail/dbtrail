@@ -1156,8 +1156,10 @@ The limits, so a query can never hurt capture:
 Every query is written to the audit trail when one is installed: who ran it,
 on which server, the statement, and how many rows came back. The response's
 `phases_ms` field, and the daemon's log at debug level, say where the time
-went: building the views, starting the worker, installing the views, the
-statement itself.
+went: `view_build` (the console's own discovery and script), `spawn` (the
+worker's whole lifetime, which contains `open`, `lockdown`, `views` and
+`query`; what is left of it is process start, result encoding and exit),
+`decode` and `total`.
 
 Who sees it: a session that holds the `sql:execute` permission. With no access
 policy (the built-in password login and the static token) every session holds
