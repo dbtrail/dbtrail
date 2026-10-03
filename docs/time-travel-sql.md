@@ -101,6 +101,23 @@ What to know before relying on it:
   `strftime`, `string_agg` and double quotes are. `USE <schema>` works and sets
   where unqualified names resolve; the connection starts in the server's
   source database when the registry knows it.
+- **Tested with the `mysql` command-line client.** A graphical client
+  (DBeaver, Workbench) probes `information_schema` the MySQL way and may show
+  an incomplete table tree; that has not been tested.
+- **How many at once.** Two statements run at once per daemon, shared between
+  the SQL card and this port, and **one at a time per server on this port**:
+  two people querying the same server at the same moment means the second one
+  gets MySQL error 1203 ("a query is already running") at once, not a wait.
+  The daemon that serves them is the one capturing changes, which is why the
+  limits are small and a third statement is refused rather than queued. A
+  statement past 2 GB fails instead of spilling to disk. For a team or a
+  dashboard tool, each reader's own DuckDB on the bucket is the way to scale
+  reads (see [Dashboards](dashboards.md)): it runs on the reader's machine and
+  adds no load to the capture host. The trade-off: bucket permissions replace
+  the console's access rules, and the data is as fresh as the last snapshot
+  and the last archived hour. The daemon's log at debug level, and the
+  `phases_ms` field of the SQL card's response, say where each statement's
+  time went.
 - **Read-only, one SELECT per statement.** Anything else is refused with
   1064. A result cut at the row cap, or a cell cut at the cell cap, raises a
   warning the client counts; `SHOW WARNINGS` says which.
@@ -122,9 +139,6 @@ What to know before relying on it:
 - Column types are mapped to MySQL's (DuckDB `INTEGER` arrives as `BIGINT`,
   `DECIMAL(p,s)` as `DECIMAL`, `TIMESTAMP` as `DATETIME`, `BOOLEAN` as 1/0,
   a `LIST`/`STRUCT` as JSON text, `MAP`/`HUGEINT`/`UUID`/`INTERVAL` as text).
-  Verified with the `mysql` command-line client; a graphical client that
-  probes `information_schema` the MySQL way may show an incomplete table
-  tree, since DuckDB answers those probes with its own catalog.
 
 Servers added in the web interface mid-session are reachable immediately (the registry
 is read live). A token is **required** — MySQL-protocol auth cannot use the

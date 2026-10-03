@@ -636,7 +636,7 @@ func New(cfg Config) (*Server, error) {
 	// given the value on upgrade (MigrateProcessBaselineLocation, run where
 	// the registry is loaded, before any loop reads it).
 	s.sqlLimits = resolveSQLLimits(cfg.SQLLimits)
-	s.sqlRunner = sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits})
+	s.sqlRunner = sandboxRunner{sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits})}
 	s.cm.defaultBaselineDir = cfg.BaselineDir
 	s.cm.defaultBaselineS3 = cfg.BaselineS3
 	// That bucket is read with the process-wide endpoint, so no per-server

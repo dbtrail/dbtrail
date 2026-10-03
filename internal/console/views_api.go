@@ -63,6 +63,13 @@ type viewsRequest struct {
 	// whose file never reads the archives, so a bucket the file does not touch
 	// cannot make the region ambiguous and leave the secret unpinned (#2014).
 	StateOnly bool
+	// ForStatement marks the input for one SQL statement on the copy
+	// (#2026), not for a downloaded file: the header notes nobody reads are
+	// not computed, in particular the listing of the OTHER snapshot
+	// location (an S3 listing with a 15 s timeout on a server that keeps
+	// snapshots both locally and in S3), which exists to tell a file's
+	// reader that a newer snapshot lives elsewhere.
+	ForStatement bool
 }
 
 // naming, not a degrade: silently dropping the baseline half would hand over a
@@ -158,7 +165,7 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 			// other one is invisible to its reader. Not merged -- the state
 			// views resolve paths under a single root, and a mixed file
 			// resolves for nobody. Named instead, best-effort.
-			if other := otherBaselineSource(b, baseSrc); other != "" {
+			if other := otherBaselineSource(b, baseSrc); other != "" && !req.ForStatement {
 				octx, cancel := context.WithTimeout(ctx, baselineListTimeout)
 				othersFiles, oskipped, oerr := reconstruct.ListBaselinesReport(octx, other)
 				cancel()

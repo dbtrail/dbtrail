@@ -191,6 +191,32 @@ type Result struct {
 	Truncated      bool          `json:"truncated"`
 	TruncatedCells int           `json:"truncated_cells"`
 	Elapsed        time.Duration `json:"elapsed_ns"`
+	// Phases is where the time went, for the measurement #2026 asks for.
+	Phases Phases `json:"phases"`
+}
+
+// Phases times one run, worker side (reported by the child) and parent
+// side. Every field is a duration; a zero one did not happen or was not
+// measured. The parent's Spawn covers process start up to the first byte
+// the child wrote, so it includes the child's own Open; Total is the
+// parent's view of the whole run.
+type Phases struct {
+	// Child: opening the in-memory DuckDB and taking the connection.
+	Open time.Duration `json:"open_ns"`
+	// Child: checking the statement's shape, caps and the lock-down.
+	Lockdown time.Duration `json:"lockdown_ns"`
+	// Child: installing the views script (CREATE VIEW over the copy).
+	Views time.Duration `json:"views_ns"`
+	// Child: running the statement and collecting rows (= Elapsed). The
+	// child cannot time its own encoding from inside the encoded message;
+	// Spawn minus the child phases is that cost plus process start and exit.
+	Query time.Duration `json:"query_ns"`
+	// Parent: from exec to the child's exit, pipe included.
+	Spawn time.Duration `json:"spawn_ns"`
+	// Parent: decoding the child's result.
+	Decode time.Duration `json:"decode_ns"`
+	// Parent: the whole run, from Slot.Run's entry.
+	Total time.Duration `json:"total_ns"`
 }
 
 // ErrCopyNotLocal: the job names no local copy directory. v1 reads a local
@@ -316,20 +342,72 @@ func IsWorkerInvocation(args []string) bool {
 // typed errors above (RefusedError, QueryError, TimeoutError, WorkerError,
 // ErrCopyNotLocal, ErrBusy, ErrResultTooLarge) or ctx.Err() when the caller
 // cancelled. Refusals that need no worker (empty SQL, no local copy, user
-// busy) return before any process starts.
+// busy) return before any process starts. Reserve + Slot.Run, for a caller
+// that has nothing to prepare between the two.
 func (r *Runner) Run(ctx context.Context, job Job) (Result, error) {
+	slot, err := r.Reserve(job.User)
+	if err != nil {
+		return Result{}, err
+	}
+	return slot.Run(ctx, job)
+}
+
+// Slot is a reserved worker slot: the global one and, when a user was
+// named, that user's. It serves ONE job (Run releases it) or is given back
+// with Release. A Slot is what lets a caller take the slot BEFORE the work
+// that prepares a job (#2026: the console builds the views, which reads the
+// index and walks the copy, and a request that will be refused as busy must
+// not pay for that), so the refusal costs nothing and the slot is not held
+// idle by a caller that failed to prepare.
+type Slot struct {
+	r        *Runner
+	user     string
+	released bool
+	mu       sync.Mutex
+}
+
+// Reserve takes a slot for user ("" = the global slot only), or returns
+// ErrBusy at once: there is no wait.
+func (r *Runner) Reserve(user string) (*Slot, error) {
+	if !r.acquire(user) {
+		return nil, ErrBusy
+	}
+	return &Slot{r: r, user: user}, nil
+}
+
+// Release gives the slot back without running. Idempotent, and a no-op
+// after Run, which releases on its own.
+func (s *Slot) Release() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.released {
+		return
+	}
+	s.released = true
+	s.r.release(s.user)
+}
+
+// Run runs job in this slot and releases it. job.User must be the user the
+// slot was reserved for; a mismatch is a programming error and is refused as
+// a WorkerError so it cannot pass silently. The pre-worker refusals (empty
+// SQL, no local copy) still return before any process starts.
+func (s *Slot) Run(ctx context.Context, job Job) (Result, error) {
+	defer s.Release()
+	if job.User != s.user {
+		return Result{}, &WorkerError{Err: fmt.Errorf("job for user %q run in a slot reserved for %q", job.User, s.user)}
+	}
 	if strings.TrimSpace(job.SQL) == "" {
 		return Result{}, &RefusedError{Reason: "the query is empty"}
 	}
 	if !localCopy(job.CopyDirs) {
 		return Result{}, ErrCopyNotLocal
 	}
-	limits := job.Limits.withDefaults(r.limits)
-	if !r.acquire(job.User) {
-		return Result{}, ErrBusy
+	start := time.Now()
+	res, err := s.r.spawn(ctx, job, job.Limits.withDefaults(s.r.limits))
+	if err == nil {
+		res.Phases.Total = time.Since(start)
 	}
-	defer r.release(job.User)
-	return r.spawn(ctx, job, limits)
+	return res, err
 }
 
 // acquire takes a worker slot: the global one always, the user's when the
@@ -395,12 +473,16 @@ type wireJob struct {
 // error. The child exits 0 in both cases; a non-zero exit is a protocol
 // failure (it could not even read the job or encode its answer).
 type wireResult struct {
-	Columns        []Column   `json:"columns,omitempty"`
-	Rows           [][]any    `json:"rows,omitempty"`
-	Truncated      bool       `json:"truncated"`
-	TruncatedCells int        `json:"truncated_cells"`
-	ElapsedNS      int64      `json:"elapsed_ns"`
-	Error          *wireError `json:"error,omitempty"`
+	Columns        []Column `json:"columns,omitempty"`
+	Rows           [][]any  `json:"rows,omitempty"`
+	Truncated      bool     `json:"truncated"`
+	TruncatedCells int      `json:"truncated_cells"`
+	ElapsedNS      int64    `json:"elapsed_ns"`
+	// Child-side phase durations, ns (see Phases).
+	OpenNS     int64      `json:"open_ns,omitempty"`
+	LockdownNS int64      `json:"lockdown_ns,omitempty"`
+	ViewsNS    int64      `json:"views_ns,omitempty"`
+	Error      *wireError `json:"error,omitempty"`
 }
 
 type wireError struct {
@@ -459,6 +541,7 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 	stderr := &cappedBuffer{max: 64 << 10, drop: true}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 
+	spawnStart := time.Now()
 	if err := cmd.Start(); err != nil {
 		return Result{}, &WorkerError{Err: fmt.Errorf("start: %w", err)}
 	}
@@ -477,6 +560,8 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 		return Result{}, ErrResultTooLarge
 	}
 
+	spawnTook := time.Since(spawnStart)
+	decodeStart := time.Now()
 	var out wireResult
 	dec := json.NewDecoder(bytes.NewReader(stdout.buf.Bytes()))
 	dec.UseNumber()
@@ -501,7 +586,12 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 		}
 	}
 	res := Result{Columns: out.Columns, Rows: out.Rows, Truncated: out.Truncated,
-		TruncatedCells: out.TruncatedCells, Elapsed: time.Duration(out.ElapsedNS)}
+		TruncatedCells: out.TruncatedCells, Elapsed: time.Duration(out.ElapsedNS),
+		Phases: Phases{
+			Open: time.Duration(out.OpenNS), Lockdown: time.Duration(out.LockdownNS),
+			Views: time.Duration(out.ViewsNS), Query: time.Duration(out.ElapsedNS),
+			Spawn: spawnTook, Decode: time.Since(decodeStart),
+		}}
 	if res.Rows == nil {
 		res.Rows = [][]any{}
 	}

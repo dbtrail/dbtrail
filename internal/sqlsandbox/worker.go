@@ -76,6 +76,12 @@ func runJob(job wireJob, stderr io.Writer) (res wireResult) {
 		}
 	}()
 	ctx := context.Background()
+	phase := time.Now()
+	mark := func(dst *int64) {
+		now := time.Now()
+		*dst = int64(now.Sub(phase))
+		phase = now
+	}
 	db, err := sql.Open("duckdb", "")
 	if err != nil {
 		return sessionErr("open DuckDB: %v", err)
@@ -90,6 +96,7 @@ func runJob(job wireJob, stderr io.Writer) (res wireResult) {
 		return sessionErr("open DuckDB connection: %v", err)
 	}
 	defer conn.Close()
+	mark(&res.OpenNS)
 
 	if reason := checkStatement(ctx, conn, job.SQL); reason != "" {
 		return wireResult{Error: &wireError{Kind: errRefused, Message: reason}}
@@ -113,11 +120,13 @@ func runJob(job wireJob, stderr io.Writer) (res wireResult) {
 			return sessionErr("%s: %v", stmt, err)
 		}
 	}
+	mark(&res.LockdownNS)
 	if strings.TrimSpace(job.ViewsSQL) != "" {
 		if _, err := conn.ExecContext(ctx, job.ViewsSQL); err != nil {
 			return sessionErr("install the copy's views: %v", err)
 		}
 	}
+	mark(&res.ViewsNS)
 	// The port's USE, before the lock like every other SET. A schema the
 	// views did not create (a default seeded from the source DSN, a typo in
 	// -D) is NOT applied: SET search_path refuses it, and refusing every

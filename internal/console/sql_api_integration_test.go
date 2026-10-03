@@ -32,7 +32,7 @@ func TestIntegrationSQLRoute_realRunnerOnAFixtureCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.sqlRunner = sqlsandbox.New(sqlsandbox.Config{Exe: exe, Args: []string{}, Limits: sqlsandbox.Limits{Timeout: 60 * time.Second}})
+	srv.sqlRunner = sandboxRunner{sqlsandbox.New(sqlsandbox.Config{Exe: exe, Args: []string{}, Limits: sqlsandbox.Limits{Timeout: 60 * time.Second}})}
 
 	rec, body := doReq(t, srv, "POST", "/api/sql", `{"sql":"SELECT id, status FROM shop.orders ORDER BY id"}`)
 	if rec.Code != http.StatusOK {
