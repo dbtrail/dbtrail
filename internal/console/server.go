@@ -163,6 +163,10 @@ type Config struct {
 	// threads, memory, wall clock, rows. Zero fields take
 	// sqlsandbox.DefaultLimits (2 threads, 2 GB, 60 s, 1,000 rows).
 	SQLLimits sqlsandbox.Limits
+	// SQLMaxInFlight is how many SQL-on-the-copy statements run at once for
+	// the whole process, the SQL card and the embedded port together (#2030,
+	// watch --sql-max-in-flight); 0 means sqlsandbox.DefaultMaxInFlight.
+	SQLMaxInFlight int
 	// BaselineDir / BaselineS3 enable point-in-time reconstruct (Phase 2) on
 	// the boot entry. When either is set (and no RBAC profile is active), the
 	// "Reconstruct" surface is exposed. BaselineDir takes precedence;
@@ -636,7 +640,7 @@ func New(cfg Config) (*Server, error) {
 	// given the value on upgrade (MigrateProcessBaselineLocation, run where
 	// the registry is loaded, before any loop reads it).
 	s.sqlLimits = resolveSQLLimits(cfg.SQLLimits)
-	s.sqlRunner = sandboxRunner{sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits})}
+	s.sqlRunner = sandboxRunner{sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits, MaxInFlight: cfg.SQLMaxInFlight})}
 	s.cm.defaultBaselineDir = cfg.BaselineDir
 	s.cm.defaultBaselineS3 = cfg.BaselineS3
 	// That bucket is read with the process-wide endpoint, so no per-server

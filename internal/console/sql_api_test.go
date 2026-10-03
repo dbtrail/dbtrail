@@ -1530,3 +1530,28 @@ func TestSQL_phasesReachTheHistogram(t *testing.T) {
 		}
 	}
 }
+
+// #2030: Config.SQLMaxInFlight sets how many statements run at once; zero
+// keeps the default of two. Checked through Reserve, which is the gate.
+func TestSQLAPI_maxInFlightFromConfig_2030(t *testing.T) {
+	for _, c := range []struct{ cfg, want int }{{0, sqlsandbox.DefaultMaxInFlight}, {3, 3}} {
+		srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", SQLMaxInFlight: c.cfg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var slots []sqlSlot
+		for i := range c.want {
+			s, err := srv.sqlRunner.Reserve(fmt.Sprintf("u%d", i))
+			if err != nil {
+				t.Fatalf("cfg %d: slot %d refused: %v", c.cfg, i+1, err)
+			}
+			slots = append(slots, s)
+		}
+		if _, err := srv.sqlRunner.Reserve("one-more"); !errors.Is(err, sqlsandbox.ErrBusy) {
+			t.Errorf("cfg %d: slot %d = %v, want ErrBusy", c.cfg, c.want+1, err)
+		}
+		for _, s := range slots {
+			s.Release()
+		}
+	}
+}

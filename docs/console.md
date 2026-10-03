@@ -1142,7 +1142,8 @@ The limits, so a query can never hurt capture:
 - 60 seconds. A longer query is stopped.
 - 1,000 rows come back. The page says when there were more. **Download CSV**
   saves the same rows as a file.
-- One query at a time per person, two at a time for the whole daemon (shared
+- One query at a time per person, two at a time for the whole daemon by
+  default (`watch --sql-max-in-flight`, see below; shared
   with the MySQL-protocol port, where the unit is one per server). A third
   statement is refused at once, not queued: the process that serves it is the
   one capturing changes, so it refuses before it competes with capture. The
@@ -1284,6 +1285,16 @@ one release and warns that it no longer does anything. Remove it.
   Off by default for a bare `watch` invocation; the bundled compose stack sets
   this on by default (see [docker.md](docker.md) — `VERIFY_TRIGGER=0` in
   `.env` opts out there).
+- `BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT` (`watch` only) — same as
+  `--sql-max-in-flight`: how many SQL-on-the-copy statements run at once, the
+  SQL card and the time-travel port together (default `2`; below `1` refuses
+  to start). Each one is its own process with 2 threads and up to 2 GB, on
+  the host that captures, and every result is held in the daemon while it is
+  sent, so the daemon's own memory grows with it; on the compose stack the
+  workers share the `watch` container, which sets no limit. The default is
+  right for a 4-core host: measured there, two heavy statements kept capture
+  current (#2026). The daemon warns at startup when the statements could take
+  more threads than the host has cores.
 - `BINTRAIL_CONSOLE_FLASHBACK_LISTEN` (`watch` only) — same as `--flashback-listen`
   (e.g. `127.0.0.1:3308`): serve an embedded MySQL-protocol time-travel port for
   every monitored server, routed by the connection username. Off by default;

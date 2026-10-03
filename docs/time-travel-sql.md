@@ -104,7 +104,8 @@ What to know before relying on it:
 - **Tested with the `mysql` command-line client.** A graphical client
   (DBeaver, Workbench) probes `information_schema` the MySQL way and may show
   an incomplete table tree; that has not been tested.
-- **How many at once.** Two statements run at once per daemon, shared between
+- **How many at once.** Two statements run at once per daemon by default
+  (`--sql-max-in-flight` raises it on a host with cores to spare), shared between
   the SQL card and this port, and **one at a time per server on this port**:
   two people querying the same server at the same moment means the second one
   gets MySQL error 1203 ("a query is already running") at once, not a wait.
