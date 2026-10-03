@@ -2,8 +2,10 @@ package console
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +22,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/audittest"
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
+	"github.com/dbtrail/dbtrail/internal/storage"
 	"github.com/dbtrail/dbtrail/internal/views"
 )
 
@@ -30,6 +33,8 @@ type fakeSQLRunner struct {
 	jobs []sqlsandbox.Job
 	res  sqlsandbox.Result
 	err  error
+	// busy makes Reserve refuse (ErrBusy) without a job.
+	busy bool
 }
 
 func (f *fakeSQLRunner) Run(_ context.Context, job sqlsandbox.Job) (sqlsandbox.Result, error) {
@@ -38,6 +43,25 @@ func (f *fakeSQLRunner) Run(_ context.Context, job sqlsandbox.Job) (sqlsandbox.R
 	f.mu.Unlock()
 	return f.res, f.err
 }
+
+// Reserve hands out a slot that runs through the fake; busy makes it refuse
+// like a full runner would, before any job exists.
+func (f *fakeSQLRunner) Reserve(string) (sqlSlot, error) {
+	f.mu.Lock()
+	busy := f.busy
+	f.mu.Unlock()
+	if busy {
+		return nil, sqlsandbox.ErrBusy
+	}
+	return fakeSlot{f}, nil
+}
+
+type fakeSlot struct{ f *fakeSQLRunner }
+
+func (s fakeSlot) Run(ctx context.Context, job sqlsandbox.Job) (sqlsandbox.Result, error) {
+	return s.f.Run(ctx, job)
+}
+func (fakeSlot) Release() {}
 
 func (f *fakeSQLRunner) last(t *testing.T) sqlsandbox.Job {
 	t.Helper()
@@ -333,7 +357,7 @@ func TestSQLAPI_realWorkerReadsOnlyTheNarrowedDirs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner := sqlsandbox.New(sqlsandbox.Config{Exe: exe, Args: []string{}, Limits: sqlsandbox.Limits{Timeout: 60 * time.Second}})
+	runner := sandboxRunner{sqlsandbox.New(sqlsandbox.Config{Exe: exe, Args: []string{}, Limits: sqlsandbox.Limits{Timeout: 60 * time.Second}})}
 	f := newSQLFixture(t, runner, true)
 	planted := filepath.Join(f.root, "console-servers.yaml")
 	if err := os.WriteFile(planted, []byte("password: s3cret\n"), 0o600); err != nil {
@@ -1253,5 +1277,143 @@ func TestSQLAPI_namesTheTablesLeftOut(t *testing.T) {
 		!strings.Contains(dl.Body.String(), "keeps for itself") || !strings.Contains(dl.Body.String(), "temp.sessions") ||
 		strings.Contains(dl.Body.String(), "no baseline snapshot") {
 		t.Errorf("GET /api/views.sql with only temp.sessions: code=%d body=%s", dl.Code, dl.Body.String())
+	}
+}
+
+// recordingMock is a sqlmock whose matcher records every QUERY the code
+// sends (an Exec or Prepare would be rejected before the matcher runs; the
+// paths under test only query, and the positive control in each test is
+// what proves the recorder sees them). ExpectationsWereMet cannot prove a
+// query did NOT run here: the archive reads swallow their errors with a
+// warning, so an unexpected query fails nothing. Counting what arrived does.
+func recordingMock(t *testing.T) (*sql.DB, *[]string) {
+	t.Helper()
+	var seen []string
+	var mu sync.Mutex
+	// The matcher runs only while an expectation is pending, so plenty are
+	// queued; each matches whatever arrives, records it, and answers an
+	// error the code under test swallows or reports.
+	matcher := sqlmock.QueryMatcherFunc(func(expected, actual string) error {
+		mu.Lock()
+		seen = append(seen, actual)
+		mu.Unlock()
+		return nil
+	})
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(matcher))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 200 {
+		mock.ExpectQuery("").WillReturnError(fmt.Errorf("recorded"))
+	}
+	t.Cleanup(func() { db.Close() })
+	return db, &seen
+}
+
+// #2026: the slot is taken BEFORE the views are built, so a statement
+// refused as busy reads nothing from the index (and walks nothing on disk:
+// the runner's job list stays empty too). The positive control first: the
+// same statement with a free slot DOES reach the index, so the recorder is
+// known to see queries.
+func TestSQL_busyRefusalReadsNothing(t *testing.T) {
+	runner := &fakeSQLRunner{res: sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "BIGINT"}}, Rows: [][]any{{json.Number("1")}}}}
+	f := newSQLFixture(t, runner, false)
+	db, seen := recordingMock(t)
+	f.s.cm.boot.db = db
+	f.s.cm.boot.dsn = "u:p@tcp(127.0.0.1:3306)/bintrail_index"
+
+	rec := postSQL(t, f.s, `{"sql":"SELECT count(*) FROM events"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("control: status %d, body %s", rec.Code, rec.Body.String())
+	}
+	if len(*seen) == 0 {
+		t.Fatal("control: a statement naming events sent no query to the index; the recorder sees nothing, so the test below proves nothing")
+	}
+	*seen = nil
+
+	runner.busy = true
+	rec = postSQL(t, f.s, `{"sql":"SELECT count(*) FROM events"}`)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("busy: status %d, body %s", rec.Code, rec.Body.String())
+	}
+	if n := len(*seen); n != 0 {
+		t.Errorf("a refused statement sent %d queries to the index: %q", n, *seen)
+	}
+	if runner.calls() != 1 {
+		t.Errorf("runner calls = %d, want 1 (the control only)", runner.calls())
+	}
+}
+
+// #2026: a statement that does not name events needs the state views alone,
+// so the daemon reads neither archive_state nor the archived files' column
+// sets; one that names events still does, and gets the events view.
+func TestSQL_tablesOnlyStatementSkipsTheArchive(t *testing.T) {
+	runner := &fakeSQLRunner{res: sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "id", Type: "INTEGER"}}, Rows: [][]any{}}}
+	f := newSQLFixture(t, runner, false)
+	db, seen := recordingMock(t)
+	f.s.cm.boot.db = db
+	f.s.cm.boot.dsn = "u:p@tcp(127.0.0.1:3306)/bintrail_index"
+	var inputs []views.Input
+	f.s.sqlViewsObserver = func(in views.Input) { inputs = append(inputs, in) }
+
+	if rec := postSQL(t, f.s, `{"sql":"SELECT id FROM shop.orders"}`); rec.Code != http.StatusOK {
+		t.Fatalf("tables only: status %d, body %s", rec.Code, rec.Body.String())
+	}
+	if n := len(*seen); n != 0 {
+		t.Errorf("a tables-only statement sent %d queries to the index: %q", n, *seen)
+	}
+	if len(inputs) != 1 || !inputs[0].ArchivesNotAsked || inputs[0].RendersEventsView() {
+		t.Errorf("tables-only views input = %+v, want ArchivesNotAsked and no events view", inputs)
+	}
+	if strings.Contains(runner.last(t).ViewsSQL, "CREATE OR REPLACE VIEW events") {
+		t.Error("tables-only statement installed the events view")
+	}
+	// The response carries the phases, view_build included.
+	var body struct {
+		PhasesMS map[string]float64 `json:"phases_ms"`
+	}
+	rec := postSQL(t, f.s, `{"sql":"SELECT id FROM shop.orders"}`)
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"view_build", "spawn", "views", "query", "total"} {
+		if _, ok := body.PhasesMS[k]; !ok {
+			t.Errorf("phases_ms lacks %q: %v", k, body.PhasesMS)
+		}
+	}
+
+	*seen = nil
+	if rec := postSQL(t, f.s, `{"sql":"SELECT count(*) FROM events"}`); rec.Code != http.StatusOK {
+		t.Fatalf("events: status %d, body %s", rec.Code, rec.Body.String())
+	}
+	if len(*seen) == 0 {
+		t.Error("a statement naming events read nothing from the index")
+	}
+}
+
+// #2026 (review): a statement naming events on a copy whose change log is in
+// S3 is answered from the sources alone, as before: the events view is never
+// built, so no S3 endpoint or region work happens, and a broken S3 endpoint
+// setting changes nothing (it would have turned the 422 into a 502).
+func TestSQL_eventsInS3DoesNoS3Work(t *testing.T) {
+	t.Setenv(storage.EnvS3Endpoint, "::not a url::")
+	f := newSQLFixture(t, &fakeSQLRunner{err: &sqlsandbox.QueryError{Message: "Catalog Error: Table with name events does not exist!"}}, true)
+	f.expectArchiveS3()
+	w := postSQL(t, f.s, `{"sql":"SELECT count(*) FROM events"}`)
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), sqlEventsInS3Message) {
+		t.Errorf("events on an S3 change log with a broken endpoint setting: code=%d body=%s, want 422 %q", w.Code, w.Body.String(), sqlEventsInS3Message)
+	}
+}
+
+// #2026 (review): a copy that lives only on S3 is refused before the slot
+// is taken (no listing of S3 while holding one of the daemon's two slots),
+// and the runner never hears of it.
+func TestSQL_s3OnlyCopyRefusedBeforeTheSlot(t *testing.T) {
+	runner := &fakeSQLRunner{busy: true} // a busy runner would answer 429 if Reserve ran first
+	f := newSQLFixture(t, runner, false)
+	f.s.cm.boot.baselineSrc = "s3://bucket/prefix"
+	w := postSQL(t, f.s, `{"sql":"SELECT 1"}`)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), sqlCopyNotLocalMessage) {
+		t.Errorf("S3-only copy: code=%d body=%s, want 409 copy-not-local before any slot", w.Code, w.Body.String())
 	}
 }

@@ -110,7 +110,7 @@ func TestSplitBaselineSource(t *testing.T) {
 // browser"). A bundle with no index behind it fails view discovery before
 // any runner, which is the shape of a route refusal.
 func TestSQLOnCopyRun_refusalsAreUnavailableOnTheWire(t *testing.T) {
-	q := &SQLOnCopy{s: &Server{}, b: &bundle{}, user: "server:x"}
+	q := &SQLOnCopy{s: &Server{sqlRunner: &fakeSQLRunner{}}, b: &bundle{}, user: "server:x"}
 	_, err := q.Run(context.Background(), "SELECT 1", "")
 	var un *sqlsandbox.UnavailableError
 	if !errors.As(err, &un) {

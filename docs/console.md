@@ -1142,13 +1142,24 @@ The limits, so a query can never hurt capture:
 - 60 seconds. A longer query is stopped.
 - 1,000 rows come back. The page says when there were more. **Download CSV**
   saves the same rows as a file.
-- One query at a time per person, two at a time for the whole server.
+- One query at a time per person, two at a time for the whole daemon (shared
+  with the MySQL-protocol port, where the unit is one per server). A third
+  statement is refused at once, not queued: the process that serves it is the
+  one capturing changes, so it refuses before it competes with capture. The
+  refusal costs nothing: the slot is taken before anything is read. For a team
+  or a dashboard tool, each reader's own DuckDB on the bucket is how reads
+  scale (see [Dashboards](dashboards.md)).
 - Read-only. One `SELECT` per run (`DESCRIBE`, `SHOW` and `SUMMARIZE` work
   too). It can read the copy and nothing else on the host: no other file, no
   network, no extension.
 
 Every query is written to the audit trail when one is installed: who ran it,
-on which server, the statement, and how many rows came back.
+on which server, the statement, and how many rows came back. The response's
+`phases_ms` field, and the daemon's log at debug level, say where the time
+went: `view_build` (the console's own discovery and script), `spawn` (the
+worker's whole lifetime, which contains `open`, `lockdown`, `views` and
+`query`; what is left of it is process start, result encoding and exit),
+`decode` and `total`.
 
 Who sees it: a session that holds the `sql:execute` permission. With no access
 policy (the built-in password login and the static token) every session holds

@@ -50,9 +50,30 @@ import (
 // would be a change to the views generator, not to this route.
 
 // sqlRunner is what the handler needs from sqlsandbox.Runner; an interface
-// so the handler's tests can run without a child process.
+// so the handler's tests can run without a child process. The slot is taken
+// FIRST (#2026): the views are built after it, so a statement refused as
+// busy has read nothing from the index and nothing from the copy.
 type sqlRunner interface {
+	Reserve(user string) (sqlSlot, error)
+}
+
+// sqlSlot is one reserved worker slot: Run serves one job and releases it,
+// Release gives an unused one back (a no-op after Run).
+type sqlSlot interface {
 	Run(ctx context.Context, job sqlsandbox.Job) (sqlsandbox.Result, error)
+	Release()
+}
+
+// sandboxRunner adapts *sqlsandbox.Runner to sqlRunner (its Reserve returns
+// the concrete *sqlsandbox.Slot).
+type sandboxRunner struct{ r *sqlsandbox.Runner }
+
+func (a sandboxRunner) Reserve(user string) (sqlSlot, error) {
+	slot, err := a.r.Reserve(user)
+	if err != nil {
+		return nil, err
+	}
+	return slot, nil
 }
 
 // sqlRequest is the POST body.
@@ -76,6 +97,20 @@ type sqlResponse struct {
 	// ("runs on the copy updated N min ago"); null when the copy has no
 	// snapshot and only the change log is queryable.
 	CopyUpdatedAt *time.Time `json:"copy_updated_at"`
+	// PhasesMS is where the time went (#2026): view_build (the daemon's
+	// discovery and script generation), then the sandbox's phases.
+	// Milliseconds with microsecond precision, so a sub-millisecond phase
+	// reads as the small number it is, not as "not measured".
+	PhasesMS map[string]float64 `json:"phases_ms"`
+}
+
+// sqlPhasesMS renders the phases for the response and the log.
+func sqlPhasesMS(viewBuild time.Duration, p sqlsandbox.Phases) map[string]float64 {
+	ms := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
+	return map[string]float64{
+		"view_build": ms(viewBuild), "spawn": ms(p.Spawn), "open": ms(p.Open), "lockdown": ms(p.Lockdown),
+		"views": ms(p.Views), "query": ms(p.Query), "decode": ms(p.Decode), "total": ms(p.Total),
+	}
 }
 
 // sqlRequestMaxBytes bounds the POST body: a statement is text a person
@@ -395,7 +430,7 @@ func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, sqlResponse{
 			Columns: res.Columns, Rows: res.Rows, Truncated: res.Truncated,
 			TruncatedCells: res.TruncatedCells, ElapsedMS: res.Elapsed.Milliseconds(),
-			CopyUpdatedAt: copyUpdatedAt,
+			CopyUpdatedAt: copyUpdatedAt, PhasesMS: sqlPhasesMS(out.ViewBuild, res.Phases),
 		})
 	}
 	// After the response, like the events surface: the rows were read and
@@ -432,6 +467,10 @@ type sqlOutcome struct {
 	// CopyUpdatedAt is the newest snapshot the state views were pinned to;
 	// nil when the copy has no snapshot and only the change log is queryable.
 	CopyUpdatedAt *time.Time
+	// ViewBuild is the daemon's own part of the statement's time: snapshot
+	// discovery, the archive reads when the statement names events, and the
+	// views script. The sandbox's phases are in Result.Phases.
+	ViewBuild time.Duration
 }
 
 // runSQL is POST /api/sql without the HTTP: the gates that need the copy
@@ -443,7 +482,34 @@ type sqlOutcome struct {
 // errors are a *sqlRefusal or the runner's own typed errors, so each caller
 // maps them to its wire.
 func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema string, maxRows int) (sqlOutcome, error) {
-	in, eventsInS3, err := s.sqlViewsFor(ctx, b, statement)
+	// What is known without any I/O is refused before the slot: a copy that
+	// lives only on S3 is never served here, and listing it would hold one
+	// of the daemon's two slots while it waits on the network.
+	if strings.HasPrefix(b.baselineSrc, "s3://") {
+		return sqlOutcome{}, &sqlRefusal{http.StatusConflict, sqlCopyNotLocalMessage}
+	}
+	// The slot first (#2026): a statement that will be refused as busy must
+	// not pay for the view build below, which reads the index and walks the
+	// copy. An unused slot is given back on every early return, and said so
+	// at debug with how long it was held: the slot is one of two, so a
+	// build that holds it for long is everybody else's "busy".
+	slot, err := s.sqlRunner.Reserve(user)
+	if err != nil {
+		return sqlOutcome{}, err
+	}
+	ran := false
+	viewsStart := time.Now()
+	defer func() {
+		slot.Release()
+		if !ran {
+			slog.Debug("console: sql slot released without a run", "user", user, "held", time.Since(viewsStart))
+		}
+	}()
+	// The build has a deadline so a slow disk or listing cannot hold the
+	// slot for long; the sandbox has its own, longer one for the statement.
+	buildCtx, cancelBuild := context.WithTimeout(ctx, baselineListTimeout)
+	in, eventsInS3, err := s.sqlViewsFor(buildCtx, b, statement)
+	cancelBuild()
 	switch {
 	case errors.Is(err, errNoViewSources):
 		return sqlOutcome{}, &sqlRefusal{http.StatusConflict,
@@ -477,18 +543,21 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 		at := in.BaselineSnapshot.UTC()
 		copyUpdatedAt = &at
 	}
+	viewsSQL := views.Generate(in)
+	viewBuild := time.Since(viewsStart)
 
 	job := sqlsandbox.Job{
 		// One query at a time per identity: the login identity, or the
 		// shared automation token as one identity.
 		User:     user,
 		CopyDirs: copyDirs,
-		ViewsSQL: views.Generate(in),
+		ViewsSQL: viewsSQL,
 		SQL:      statement,
 		Schema:   schema,
 		Limits:   sqlsandbox.Limits{MaxRows: maxRows},
 	}
-	res, err := s.sqlRunner.Run(ctx, job)
+	ran = true
+	res, err := slot.Run(ctx, job)
 	if err != nil {
 		var qerr *sqlsandbox.QueryError
 		if eventsInS3 && errors.As(err, &qerr) && sqlEventsMissing.MatchString(qerr.Message) {
@@ -499,7 +568,11 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 		}
 		return sqlOutcome{}, err
 	}
-	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt}, nil
+	// The measurement #2026 asks for, per statement, at debug so a run under
+	// load can be read back from the log.
+	slog.Debug("console: sql statement phases", "user", user, "events", sqlMentionsEvents(statement),
+		"views_sql_bytes", len(viewsSQL), "phases_ms", sqlPhasesMS(viewBuild, res.Phases))
+	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, ViewBuild: viewBuild}, nil
 }
 
 // sqlCopyDirs lists the directories the generated views read, and nothing
@@ -628,12 +701,30 @@ func dirCoversConfig(copyDirs, files []string) (dir, file string, covered bool) 
 // instead of "the copy is only on S3", which would be false for a server
 // whose tables are local.
 func (s *Server) sqlViewsFor(ctx context.Context, b *bundle, statement string) (in views.Input, eventsInS3 bool, err error) {
-	in, err = s.buildViewsInput(ctx, b, viewsRequest{PinSnapshot: true, OmitEvents: true})
+	// A statement that does not name events needs the state views alone:
+	// no archive_state read, no per-file check of the change log, no listing
+	// of the other snapshot location (#2026). That was most of the daemon's
+	// fixed cost per statement, paid by every statement. A copy that gives
+	// no state view this way (no snapshot, or every table in a schema
+	// DuckDB keeps for itself) falls through to the archive, as before.
+	tablesOnly := viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true}
+	if !sqlMentionsEvents(statement) {
+		in, err = s.buildViewsInput(ctx, b, tablesOnly)
+		if err == nil && in.RendersAnyView() {
+			return in, false, nil
+		}
+		if err != nil && !errors.Is(err, errNoViewSources) {
+			return views.Input{}, false, err
+		}
+	}
+	// The archive is needed. Read it WITHOUT the events view first: that
+	// build does no S3 work (NeedsS3 is false with events omitted), so an
+	// S3 change log is detected from the sources alone and answered with
+	// the tables, exactly as before; only a local change log is then built
+	// with the events view on.
+	in, err = s.buildViewsInput(ctx, b, viewsRequest{PinSnapshot: true, OmitEvents: true, ForStatement: true})
 	if err != nil {
 		return views.Input{}, false, err
-	}
-	if !sqlMentionsEvents(statement) && in.RendersAnyView() {
-		return in, false, nil
 	}
 	if len(in.ArchiveSources) == 0 {
 		return in, false, nil
@@ -641,7 +732,7 @@ func (s *Server) sqlViewsFor(ctx context.Context, b *bundle, statement string) (
 	if !sqlArchivesLocal(in.ArchiveSources) {
 		return in, true, nil
 	}
-	in, err = s.buildViewsInput(ctx, b, viewsRequest{PinSnapshot: true})
+	in, err = s.buildViewsInput(ctx, b, viewsRequest{PinSnapshot: true, ForStatement: true})
 	if err != nil {
 		return views.Input{}, false, err
 	}

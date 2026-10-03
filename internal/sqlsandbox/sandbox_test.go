@@ -942,3 +942,78 @@ func TestRun_schemaResolvesUnqualifiedNames(t *testing.T) {
 		t.Errorf("conversion error carried the schema hint: %q", qerr.Message)
 	}
 }
+
+// Reserve takes the slot before any job exists (#2026: the caller prepares
+// the job AFTER the slot, so a busy refusal costs no preparation). The slot
+// serves one job and is released by Run; Release gives an unused one back;
+// the per-user and global gates are the same ones Run applies.
+func TestReserve_slotBeforeTheJob(t *testing.T) {
+	f := newCopyFixture(t)
+	r := New(Config{Exe: testExe(t), Args: []string{}, Limits: testLimits(), MaxInFlight: 1})
+	slot, err := r.Reserve("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The global slot is taken: a second reservation, any user, is busy now.
+	if _, err := r.Reserve("bob"); !errors.Is(err, ErrBusy) {
+		t.Errorf("second Reserve with MaxInFlight 1 = %v, want ErrBusy", err)
+	}
+	// An unused slot given back frees it.
+	slot.Release()
+	slot.Release() // idempotent
+	slot2, err := r.Reserve("alice")
+	if err != nil {
+		t.Fatalf("Reserve after Release: %v", err)
+	}
+	// A job for another user cannot ride this slot.
+	wrong := f.job("SELECT 1")
+	wrong.User = "bob"
+	var werr *WorkerError
+	if _, err := slot2.Run(context.Background(), wrong); !errors.As(err, &werr) {
+		t.Fatalf("job for another user in the slot: err = %v, want WorkerError", err)
+	}
+	// Run released it even on that refusal.
+	slot3, err := r.Reserve("alice")
+	if err != nil {
+		t.Fatalf("Reserve after a refused Run: %v", err)
+	}
+	job := f.job("SELECT id FROM shop.orders ORDER BY id")
+	job.User = "alice"
+	res, err := slot3.Run(context.Background(), job)
+	if err != nil {
+		t.Fatalf("Slot.Run: %v", err)
+	}
+	if len(res.Rows) != 2 {
+		t.Errorf("rows = %d, want 2", len(res.Rows))
+	}
+	// Phases: the child reports its own, the parent its spawn and total.
+	ph := res.Phases
+	if ph.Open <= 0 || ph.Lockdown <= 0 || ph.Views <= 0 || ph.Query <= 0 || ph.Spawn <= 0 || ph.Total <= 0 {
+		t.Errorf("phases not all measured: %+v", ph)
+	}
+	if ph.Total < ph.Spawn || ph.Spawn < ph.Open+ph.Lockdown+ph.Views+ph.Query {
+		t.Errorf("phases do not nest (total >= spawn >= child phases): %+v", ph)
+	}
+	if ph.Query != res.Elapsed {
+		t.Errorf("Phases.Query = %v, Elapsed = %v, want equal", ph.Query, res.Elapsed)
+	}
+	// A spent slot holds no gate, so it runs nothing.
+	if _, err := slot3.Run(context.Background(), job); !errors.As(err, &werr) {
+		t.Errorf("Run on a released slot: err = %v, want WorkerError", err)
+	}
+	// Released after the run: the slot is free again.
+	if s, err := r.Reserve("alice"); err != nil {
+		t.Errorf("Reserve after a completed Run: %v", err)
+	} else {
+		s.Release()
+	}
+}
+
+func testExe(t *testing.T) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return exe
+}

@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **SQL on the copy takes its worker slot before it builds the views**
+  (#2026). A statement refused as busy (HTTP 429 on the SQL card, MySQL
+  error 1203 on the embedded port) used to pay the whole preparation first:
+  the snapshot discovery, the `archive_state` read with a check of every
+  archived file, and, on a server that keeps snapshots both locally and in
+  S3, an S3 listing with a 15-second timeout. Now the slot comes first and a
+  refusal reads nothing. A statement that does not name `events` no longer
+  reads the archive at all (the state views are all it needs; a copy with no
+  snapshot still falls back to the change log), and the SQL path never lists
+  the other snapshot location, whose only purpose was a note in a downloaded
+  file. Every statement's time is now broken into phases, returned as
+  `phases_ms` by `POST /api/sql` and logged at debug level, so the
+  measurement the issue asks for can be read off a real host: `view_build`
+  (the daemon's discovery and script), `spawn` (the worker's whole lifetime,
+  which contains `open`, `lockdown`, `views` and `query`; the remainder is
+  process start, result encoding and exit), `decode` and `total`. No
+  statement's SQL changes. Two edges answer differently: a copy whose
+  snapshot directories cannot all be read now says so (before, a statement
+  that did not name `events` ran over the change log and the unreadable
+  snapshot went unmentioned); and a copy that lives only on S3 is refused
+  before any slot is taken, with no listing of S3.
 
 ## [0.97.0] - 2026-10-02
 ### Added
