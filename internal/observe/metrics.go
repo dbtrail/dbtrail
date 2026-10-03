@@ -166,7 +166,7 @@ var sqlStatementPhase = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Subsystem: "sql",
 	Name:      "statement_phase_seconds",
 	Help:      "Seconds per phase of a SQL-on-the-copy statement that ran to a result (view_build, spawn, open, lockdown, views, query, decode, total).",
-	Buckets:   prometheus.ExponentialBuckets(0.001, 2, 17), // 1ms … ~65s (the statement cap is 60s)
+	Buckets:   prometheus.ExponentialBuckets(0.001, 2, 17), // 1ms … ~65s; a statement past the 60s cap fails and is not observed
 }, []string{"phase"})
 
 // ObserveSQLStatementPhase records one phase of a SQL-on-the-copy statement.

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1423,11 +1424,18 @@ func TestSQL_s3OnlyCopyRefusedBeforeTheSlot(t *testing.T) {
 // sqlPhaseCounts reads every phase's sample count from the default registry.
 func sqlPhaseCounts(t *testing.T) map[string]uint64 {
 	t.Helper()
+	counts, _ := sqlPhaseHistograms(t)
+	return counts
+}
+
+// sqlPhaseHistograms reads every phase's sample count and sum (seconds).
+func sqlPhaseHistograms(t *testing.T) (map[string]uint64, map[string]float64) {
+	t.Helper()
 	mfs, err := prometheus.DefaultGatherer.Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
 	}
-	out := map[string]uint64{}
+	out, sums := map[string]uint64{}, map[string]float64{}
 	for _, mf := range mfs {
 		if mf.GetName() != "bintrail_sql_statement_phase_seconds" {
 			continue
@@ -1436,29 +1444,54 @@ func sqlPhaseCounts(t *testing.T) map[string]uint64 {
 			for _, l := range m.GetLabel() {
 				if l.GetName() == "phase" {
 					out[l.GetValue()] = m.GetHistogram().GetSampleCount()
+					sums[l.GetValue()] = m.GetHistogram().GetSampleSum()
 				}
 			}
 		}
 	}
-	return out
+	return out, sums
 }
 
 // #2026: a statement that ran observes every phase the response names, once;
 // a busy refusal and a failed statement observe nothing (they have no
 // complete set of phases, and a partial one would drag the quantiles down).
 func TestSQL_phasesReachTheHistogram(t *testing.T) {
-	runner := &fakeSQLRunner{res: sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "id", Type: "INTEGER"}}, Rows: [][]any{}}}
+	// Distinct durations, so a timer wired to the wrong name shows.
+	ms := time.Millisecond
+	want := map[string]time.Duration{"open": 1 * ms, "lockdown": 2 * ms, "views": 3 * ms, "query": 4 * ms, "spawn": 5 * ms, "decode": 6 * ms, "total": 7 * ms}
+	runner := &fakeSQLRunner{res: sqlsandbox.Result{
+		Columns: []sqlsandbox.Column{{Name: "id", Type: "INTEGER"}}, Rows: [][]any{},
+		Phases: sqlsandbox.Phases{Open: want["open"], Lockdown: want["lockdown"], Views: want["views"], Query: want["query"],
+			Spawn: want["spawn"], Decode: want["decode"], Total: want["total"]},
+	}}
 	f := newSQLFixture(t, runner, false)
 	phases := []string{"view_build", "spawn", "open", "lockdown", "views", "query", "decode", "total"}
 
-	before := sqlPhaseCounts(t)
-	if rec := postSQL(t, f.s, `{"sql":"SELECT id FROM shop.orders"}`); rec.Code != http.StatusOK {
+	before, sumBefore := sqlPhaseHistograms(t)
+	rec := postSQL(t, f.s, `{"sql":"SELECT id FROM shop.orders"}`)
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d, body %s", rec.Code, rec.Body.String())
 	}
-	after := sqlPhaseCounts(t)
+	var body struct {
+		PhasesMS map[string]float64 `json:"phases_ms"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	after, sumAfter := sqlPhaseHistograms(t)
 	for _, p := range phases {
 		if after[p] != before[p]+1 {
 			t.Errorf("phase %q: count %d→%d after one statement, want +1", p, before[p], after[p])
+		}
+		d, ok := want[p]
+		if !ok {
+			continue // view_build is the daemon's own clock
+		}
+		if got := sumAfter[p] - sumBefore[p]; math.Abs(got-d.Seconds()) > 1e-9 {
+			t.Errorf("phase %q: histogram got %v s, want %v s", p, got, d.Seconds())
+		}
+		if got := body.PhasesMS[p]; math.Abs(got-float64(d.Milliseconds())) > 1e-9 {
+			t.Errorf("phase %q: phases_ms = %v, want %v", p, got, d.Milliseconds())
 		}
 	}
 	if len(after) != len(phases) {

@@ -1156,7 +1156,8 @@ The limits, so a query can never hurt capture:
 Every query is written to the audit trail when one is installed: who ran it,
 on which server, the statement, and how many rows came back. The response's
 `phases_ms` field, the daemon's log at debug level, and the
-`bintrail_sql_statement_phase_seconds` histogram under `--metrics-addr`
+`bintrail_sql_statement_phase_seconds` histogram under
+`watch --metrics-addr`
 ([Observability](observability.md)) say where the time went: `view_build` (the console's own discovery and script), `spawn` (the
 worker's whole lifetime, which contains `open`, `lockdown`, `views` and
 `query`; what is left of it is process start, result encoding and exit),

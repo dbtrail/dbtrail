@@ -280,11 +280,14 @@ and each statement that runs to a result is timed per phase:
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `bintrail_sql_statement_phase_seconds{phase}` | histogram | Seconds per phase: `view_build` (the daemon's discovery and views script), `spawn` (the worker's whole lifetime, which contains `open`, `lockdown`, `views` and `query`), `decode` and `total`. A statement refused as busy, or one that fails, is not observed |
+| `bintrail_sql_statement_phase_seconds{phase}` | histogram | Seconds per phase: `view_build` (the daemon's discovery and views script), `spawn` (the worker's whole lifetime, which contains `open`, `lockdown`, `views` and `query`), `decode` and `total`. Exported by `bintrail-console watch --metrics-addr` (`serve` has no metrics endpoint). A statement refused as busy, or one that fails, is not observed, and a statement that hits the 60-second cap or the result-size cap counts as failed |
 
-The count of `phase="total"` is the number of statements served. Refusals are
-not in it: the daemon runs two statements at once and refuses a third, so a
-flat count under load can mean the slots are full, not that nobody asked.
+The count of `phase="total"` is the number of statements that ran to a
+result. Refusals are not in it: the daemon runs two statements at once, one
+per person on the SQL card and one per server on the port, and refuses the
+rest, so a flat count under load can mean the slots are full, not that nobody
+asked. Timeouts are not in it either, so the quantiles below describe the
+statements that finished, not the slowest ones.
 
 ```promql
 # where a statement's time goes, p90 per phase
