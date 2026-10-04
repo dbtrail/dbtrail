@@ -385,8 +385,8 @@ func (flashbackCreds) OnAuthFailure(*server.Conn, error) {}
 // *shim.Handler is set by bindFlashbackHandler once the handshake completes; if
 // routing failed, fail carries the typed error returned on the first command.
 // server.EmptyHandler supplies the commands shim.Handler itself does not
-// implement (field-list, prepared statements) — identical to a bare
-// shim.Handler, which embeds the same EmptyHandler.
+// implement (field-list) — identical to a bare shim.Handler, which embeds
+// the same EmptyHandler.
 type routingHandler struct {
 	server.EmptyHandler
 	inner *shim.Handler
@@ -423,6 +423,30 @@ func (r *routingHandler) HandleQuery(query string) (*gomysql.Result, error) {
 		return nil, r.unresolved()
 	}
 	return r.inner.HandleQuery(query)
+}
+
+// Prepared statements (#2036) go to the bound handler like queries do; the
+// embedded EmptyHandler's own versions refuse them and write the statement
+// and its arguments to the process log, which nothing here should do.
+func (r *routingHandler) HandleStmtPrepare(query string) (int, int, any, error) {
+	if r.inner == nil {
+		return 0, 0, nil, r.unresolved()
+	}
+	return r.inner.HandleStmtPrepare(query)
+}
+
+func (r *routingHandler) HandleStmtExecute(context any, query string, args []any) (*gomysql.Result, error) {
+	if r.inner == nil {
+		return nil, r.unresolved()
+	}
+	return r.inner.HandleStmtExecute(context, query, args)
+}
+
+func (r *routingHandler) HandleStmtClose(context any) error {
+	if r.inner == nil {
+		return nil
+	}
+	return r.inner.HandleStmtClose(context)
 }
 
 func (r *routingHandler) unresolved() error {

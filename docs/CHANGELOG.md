@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **Prepared statements on the time-travel port** (#2036). The embedded
+  port and `bintrail shim` refused `COM_STMT_PREPARE`, so every driver that
+  prepares by default (Go's `database/sql` with arguments, `mysql2`
+  `execute`, .NET) failed on its first statement, and the refusal wrote the
+  statement to the process log.
+  A prepared statement is now a template: prepare counts the placeholders,
+  execute writes the arguments in as SQL literals and runs the statement as
+  if it had been sent as text, on the copy or through the time-travel
+  shapes, and answers in binary rows with typed columns. Results are
+  buffered (a whole-table `_snapshot` is held to the row cap), an execute
+  error arrives as 1105 with the original code in its text, a re-execution
+  that does not re-send its argument types (Connector/J server prepares,
+  the C API, PHP `mysqlnd`) is refused rather than run with empty
+  arguments, and with read
+  routing on the port still refuses to prepare (1295) until forwarded
+  statements are bound by MySQL itself.
 - **Every baseline upload to S3 now names the newest snapshot in one small
   object, `<root>/_NEWEST`** (#2052, first half). A views file that follows
   the newest snapshot found it by listing every object under the root: 616
@@ -50,10 +66,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frees the slot at once.
 
 ### Added
-- **Read routing vetoes a backslash inside a string literal** (#2036).
-  MySQL reads `'a\\b'` as `a\b` and `'it\'s'` as `it's`; DuckDB reads the
-  backslash as a plain character, so the copy would answer about a
-  different string without an error. Such a statement now stays on MySQL.
 - **Read routing keeps a small `LIMIT` on MySQL, and vetoes JSON** (#2038).
   MySQL's plan cost ignores `LIMIT`, so `SELECT id FROM orders ORDER BY id
   DESC LIMIT 2` carried a six-figure cost and went to the copy (340 ms

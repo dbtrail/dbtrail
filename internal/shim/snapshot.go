@@ -328,7 +328,7 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 	if streamCols == nil {
 		streamCols = h.columnOrderFor(q.Schema, q.Table)
 	}
-	if h.conn != nil && q.Limit == 0 && len(streamCols) > 0 {
+	if h.conn != nil && !h.buffered && q.Limit == 0 && len(streamCols) > 0 {
 		return h.streamSnapshotFullTable(ctx, q, input, streamCols)
 	}
 
