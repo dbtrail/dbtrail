@@ -142,8 +142,11 @@ What to know before relying on it:
   `'Paid' = 'paid'` and `'café' = 'cafe'` are true, `GROUP BY` and `SELECT
   DISTINCT` fold them, `ORDER BY` sorts them together, and NULLs sort first
   on an ascending `ORDER BY` and last on a descending one, as on MySQL
-  (`utf8mb4_0900_ai_ci`). Not folded: `LIKE`, `REGEXP`, `count(DISTINCT
-  ...)`, `instr`/`position`/`contains`, `'ß' = 'ss'`. A column MySQL
+  (`utf8mb4_0900_ai_ci`). So are `'ß' = 'ss'`, full-width letters,
+  `'æ' = 'ae'` and hiragana against katakana, and punctuation sorts before
+  the digits. Not folded: `LIKE`, `REGEXP`, `count(DISTINCT ...)`,
+  `instr`/`position`/`contains`, and the duplicate removal of `UNION`,
+  `INTERSECT` and `EXCEPT`. A column MySQL
   declares under a `_bin` collation compares byte by byte here too
   (`code = 'ab'` does not match `'AB'`, and it groups and sorts by code
   point); a `_cs` column is still case-insensitive here. The same applies
@@ -370,28 +373,30 @@ What this is and is not:
   does: `'Paid'` and `'paid'`, `'café'` and `'cafe'` are equal in `WHERE`,
   `GROUP BY`, `SELECT DISTINCT`, `IN` and `ORDER BY`, and NULLs sort first
   on an ascending `ORDER BY` and last on a descending one (DuckDB's
-  `default_collation` and `default_null_order`, fixed in the copy's locked
-  session). A column MySQL declares under a `_bin` collation
+  `default_collation`, set to `nocase.icu_noaccent`, and
+  `default_null_order`, fixed in the copy's locked session). That
+  collation also equates what MySQL's does beyond case and accents
+  (`'ß' = 'ss'`, full-width letters, `'æ' = 'ae'`, `'ø' = 'o'`, hiragana
+  against katakana) and sorts as it does (punctuation before the digits):
+  of 57 pairs of strings measured against MySQL 8.4 one differs (a
+  mathematical bold `𝐀` is an `A` on MySQL and not on the copy), and 48
+  strings sort in the same order on both. ICU, which provides it, is part
+  of the binary; nothing is downloaded. It has a price: comparing,
+  grouping or sorting text costs about twice what DuckDB's built-in
+  case-and-accent folding does, and up to ten times on a column where
+  every value is different (5 million rows of 32-character tokens on
+  disk: an equality filter takes 1.8 s instead of 0.2 s). Columns with
+  few distinct values, numbers, dates and `_bin` columns are not
+  affected. A column MySQL declares under a `_bin` collation
   (`utf8mb4_bin`, `utf8mb4_0900_bin`, `latin1_bin`, ...), by its own
   definition or by its table's default, is compared byte by byte on the
   copy as well: the copy reads each column's collation from the `CREATE
   TABLE` stored with the snapshot. Close, not identical. What still
   differs, none of which can be caught per statement:
-  - **Equalities MySQL's default collation has and the copy lacks.**
-    `'ß' = 'ss'`, full-width letters (`'Ａ' = 'A'`), ligatures and letters
-    with a stroke (`'æ' = 'ae'`, `'ø' = 'o'`, `'ł' = 'l'`), and hiragana
-    against katakana are equal under `utf8mb4_0900_ai_ci` and not on the
-    copy, which folds case and accents and nothing else. The other way
-    round, the copy takes the breve of Cyrillic `й` for an accent and
-    equates it with `и`, which MySQL keeps apart.
-  - **Where punctuation sorts.** MySQL sorts every punctuation mark before
-    the digits; the copy sorts them by their ASCII code (`:` and `@` after
-    the digits). Plain and accented letters sort the same on both; the
-    characters of the previous point (`ß`, `æ`, `ø`, full-width forms)
-    sort after `z` on the copy and beside their plain letters on MySQL.
-  - One DuckDB collation does both of the above as MySQL does
-    (`nocase.icu_noaccent`). The copy does not use it because it makes
-    every comparison of text about twice as slow.
+  - **Duplicate removal in `UNION`, `INTERSECT` and `EXCEPT`** compares
+    bytes on the copy: `SELECT 'a' UNION SELECT 'A'` is one row on MySQL
+    and two on the copy. `SELECT DISTINCT` and `GROUP BY` fold as on
+    MySQL.
   - **`_cs` columns.** A column MySQL declares `_cs`
     (`utf8mb4_0900_as_cs`) is case-insensitive on the copy. Bytes would
     compare it right and sort it wrong: `_cs` puts `a` before `B`, bytes

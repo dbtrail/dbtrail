@@ -187,10 +187,14 @@ Your own DuckDB keeps DuckDB's defaults: `'live'` and `'LIVE'` are two
 values, `'café'` and `'cafe'` two, NULL sorts last. The console's SQL card
 and MySQL-protocol port run the same files under a MySQL-like default
 collation, so a `GROUP BY status` can return two groups here and one there.
-To match them, run `SET default_collation = 'nocase.noaccent'; SET
+To match them, run `SET default_collation = 'nocase.icu_noaccent'; SET
 default_null_order = 'nulls_first_on_asc_last_on_desc';` in your session
 before the views; the state views themselves compare keys as bytes
 (`COLLATE C`) either way, so no row is lost under a folding collation.
+The collation is ICU's (the `icu` extension, which the DuckDB command-line
+client includes), and it costs: text comparisons take
+about twice as long as under DuckDB's built-in `nocase.noaccent`, which
+folds case and accents but not `ß`, full-width letters or kana.
 One thing does not carry over: the console gives a column MySQL declares
 `_bin` byte comparison under its folding default, and a views file that
 follows new snapshots does not, so under those two settings such a column

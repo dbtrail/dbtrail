@@ -43,7 +43,7 @@ func TestApplyFooters_binaryText(t *testing.T) {
 
 // A column MySQL declares _bin compares byte by byte in its state view, under
 // a session that folds case and accents everywhere else (#2083). The copy's
-// SQL session runs under nocase.noaccent to match MySQL's default collation,
+// SQL session folds case and accents to match MySQL's default collation,
 // and that made `code = 'ab'` match 'AB' and 'Ab' on a column where MySQL
 // matches one row.
 //
@@ -105,14 +105,22 @@ func TestStateView_binaryCollationColumnComparesBytes(t *testing.T) {
 		t.Errorf("a table with no _bin column got a collation or its note:\n%s", plain)
 	}
 
+	// The copy's session defaults (sqlsandbox lock-down), and the built-in
+	// folding collation it used before: COLLATE C on the column outranks
+	// both.
+	for _, collation := range []string{"nocase.icu_noaccent", "nocase.noaccent"} {
+		t.Run(collation, func(t *testing.T) { binaryCollationCases(t, sqlText, collation) })
+	}
+}
+
+func binaryCollationCases(t *testing.T, sqlText, collation string) {
 	db, err := sql.Open("duckdb", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	// The copy's session defaults (sqlsandbox lock-down).
-	for _, s := range []string{"SET default_collation = 'nocase.noaccent'", "SET default_null_order = 'nulls_first_on_asc_last_on_desc'"} {
+	for _, s := range []string{"SET default_collation = '" + collation + "'", "SET default_null_order = 'nulls_first_on_asc_last_on_desc'"} {
 		if _, err := db.Exec(s); err != nil {
 			t.Fatal(err)
 		}
@@ -137,6 +145,10 @@ func TestStateView_binaryCollationColumnComparesBytes(t *testing.T) {
 		{"joined to itself", `SELECT count(*) FROM shop.codes a JOIN shop.codes b ON a.code = b.code`, "5"},
 		{"through a CTE and a function", `WITH c AS (SELECT upper(code) AS u FROM shop.codes) SELECT count(*) FROM c WHERE u = 'ab'`, "0"},
 		{"through a subquery", `SELECT count(*) FROM (SELECT code AS k FROM shop.codes) WHERE k = 'AB'`, "1"},
+		{"UNION ALL with a folded column, then compared: bytes", `SELECT count(*) FROM (SELECT code AS k FROM shop.codes UNION ALL SELECT label FROM shop.codes) WHERE k = 'ab'`, "2"},
+		{"COALESCE of a byte column and a folded one: bytes", `SELECT count(*) FROM shop.codes WHERE coalesce(code, label) = 'ab'`, "1"},
+		{"CASE over both: bytes", `SELECT count(*) FROM shop.codes WHERE CASE WHEN id > 0 THEN code ELSE label END = 'AB'`, "1"},
+		{"a folded column beside it is untouched by the byte column", `SELECT count(*) FROM shop.codes WHERE code = 'ab' AND label = 'ab'`, "1"},
 		{"the decimal cast is still there", `SELECT CAST(sum(amount) AS VARCHAR) FROM shop.codes`, "15.00"},
 		{"the column is still a VARCHAR", `SELECT lower(column_type) FROM (DESCRIBE SELECT code FROM shop.codes)`, "varchar"},
 	}

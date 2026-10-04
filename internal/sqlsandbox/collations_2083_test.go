@@ -2,6 +2,8 @@ package sqlsandbox
 
 import (
 	"database/sql"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -10,21 +12,18 @@ import (
 
 // collationPairs is where text equality on the copy stands against MySQL's
 // default collation (#2083). mysql is what MySQL 8.4.9 answers for
-// `a = b` under utf8mb4_0900_ai_ci, measured on a live server; onCopy is what
-// the copy's session default (nocase.noaccent) answers; icu is what DuckDB's
-// nocase.icu_noaccent answers, the one collation in the pinned engine that
-// equates 'ß' with 'ss' and a full-width letter with its ASCII form.
+// `a = b` under utf8mb4_0900_ai_ci, measured on a live server; icu is what
+// the copy's session default (nocase.icu_noaccent) answers; plain is what
+// DuckDB's built-in nocase.noaccent answers, which was the copy's default
+// before and is what a DuckDB without ICU can offer.
 //
-// The copy's default disagrees with MySQL on 26 of these 57 pairs, and the
-// ICU one on 1. It is not the default because it costs about twice as much on
-// every comparison of text (measured on 3 million rows, 2 threads: GROUP BY a
-// text column 359 ms against 653 ms, a full sort 919 ms against 2598 ms), and
-// which of the two the copy should pay for is a product decision. The
-// documentation lists the difference; this table is what keeps that list true
-// across an engine bump.
+// The copy's default disagrees with MySQL on 1 of these 57 pairs (a
+// mathematical bold letter against its plain one); nocase.noaccent on 26. The
+// documentation says so; this table is what keeps it true across an engine
+// bump, and what a change of the default has to be measured against.
 var collationPairs = []struct {
-	a, b             string
-	mysql, onCopy, icu bool
+	a, b              string
+	mysql, plain, icu bool
 }{
 	{"Paid", "paid", true, true, true},
 	{"café", "cafe", true, true, true},
@@ -87,7 +86,7 @@ var collationPairs = []struct {
 
 func TestDefaultCollation_whereItDiffersFromMySQL(t *testing.T) {
 	// The default under test is the one the lock-down sets.
-	if script := strings.Join(lockdownStatements([]string{"/copy"}), "\n"); !strings.Contains(script, "SET default_collation = 'nocase.noaccent'") {
+	if script := strings.Join(lockdownStatements([]string{"/copy"}), "\n"); !strings.Contains(script, "SET default_collation = 'nocase.icu_noaccent'") {
 		t.Fatalf("the copy's default collation changed; re-measure collationPairs against it and update docs/time-travel-sql.md:\n%s", script)
 	}
 	db, err := sql.Open("duckdb", "")
@@ -97,16 +96,17 @@ func TestDefaultCollation_whereItDiffersFromMySQL(t *testing.T) {
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 	for _, c := range []struct {
-		collation string
-		want      func(i int) bool
+		collation   string
+		want        func(i int) bool
+		wantDiffers int
 	}{
-		{"nocase.noaccent", func(i int) bool { return collationPairs[i].onCopy }},
-		{"nocase.icu_noaccent", func(i int) bool { return collationPairs[i].icu }},
+		{"nocase.icu_noaccent", func(i int) bool { return collationPairs[i].icu }, 1},
+		{"nocase.noaccent", func(i int) bool { return collationPairs[i].plain }, 26},
 	} {
 		if _, err := db.Exec("SET default_collation = '" + c.collation + "'"); err != nil {
 			t.Fatalf("SET default_collation = %s: %v", c.collation, err)
 		}
-		differs := 0
+		var differs []string
 		for i, p := range collationPairs {
 			var got bool
 			q := "SELECT a = b FROM (SELECT '" + p.a + "'::VARCHAR AS a, '" + p.b + "'::VARCHAR AS b)"
@@ -117,15 +117,68 @@ func TestDefaultCollation_whereItDiffersFromMySQL(t *testing.T) {
 				t.Errorf("%s: %q = %q is %v, recorded %v", c.collation, p.a, p.b, got, c.want(i))
 			}
 			if got != p.mysql {
-				differs++
+				differs = append(differs, p.a+" = "+p.b)
 			}
 		}
-		t.Logf("%s differs from MySQL's utf8mb4_0900_ai_ci on %d of %d pairs", c.collation, differs, len(collationPairs))
+		if len(differs) != c.wantDiffers {
+			t.Errorf("%s differs from MySQL's utf8mb4_0900_ai_ci on %d of %d pairs, recorded %d: %q", c.collation, len(differs), len(collationPairs), c.wantDiffers, differs)
+		}
 	}
 	// The two the issue names, said outright.
 	for _, p := range collationPairs[2:5] {
-		if !p.mysql || p.onCopy || !p.icu {
-			t.Errorf("%q = %q: mysql %v, copy %v, icu %v; the documentation says MySQL equates them, the copy does not, and nocase.icu_noaccent would", p.a, p.b, p.mysql, p.onCopy, p.icu)
+		if !p.mysql || p.plain || !p.icu {
+			t.Errorf("%q = %q: mysql %v, nocase.noaccent %v, the copy %v; MySQL equates them, and so must the copy", p.a, p.b, p.mysql, p.plain, p.icu)
 		}
+	}
+}
+
+// collationSortList and mysqlSortOrder: 48 strings and the order MySQL 8.4.9
+// returns them in (ORDER BY s, i over a utf8mb4_0900_ai_ci column, i being
+// the position in this list), measured on a live server. Letters, case,
+// accents, punctuation, digits, a space, the empty string, kana, Cyrillic,
+// 'ß', 'æ', 'ø' and a full-width letter.
+var collationSortList = []string{"a", "A", "b", "B", "Z", "z", "_", "-", " ", "1", "10", "2", "9", ":", "@", "[", "é", "e", "f", "ñ", "n", "o", "ö", "ø", "p", "ss", "ß", "st", "æ", "ad", "af", "あ", "ア", "か", "Ａ", "~", "!", "a b", "ab", "a-b", "Ab", "aB", "", "я", "Я", "ё", "е", "ж"}
+
+var mysqlSortOrder = []int{42, 8, 6, 7, 13, 36, 15, 14, 35, 9, 10, 11, 12, 0, 1, 34, 37, 39, 38, 40, 41, 29, 28, 30, 2, 3, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 4, 5, 45, 46, 47, 43, 44, 31, 32, 33}
+
+// ORDER BY on the copy returns those 48 strings in MySQL's order, position
+// for position. The built-in nocase.noaccent does not: it sorts punctuation
+// by ASCII code and puts 'ß', 'æ', 'ø' and the full-width letter after 'z'.
+func TestDefaultCollation_ordersLikeMySQL(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	values := make([]string, len(collationSortList))
+	for i, s := range collationSortList {
+		values[i] = "(" + strconv.Itoa(i) + ", '" + s + "')"
+	}
+	query := "SELECT i FROM (VALUES " + strings.Join(values, ", ") + ") t(i, s) ORDER BY s, i"
+	order := func(collation string) []int {
+		if _, err := db.Exec("SET default_collation = '" + collation + "'"); err != nil {
+			t.Fatal(err)
+		}
+		rows, err := db.Query(query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []int
+		for rows.Next() {
+			var i int
+			if err := rows.Scan(&i); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, i)
+		}
+		return out
+	}
+	if got := order("nocase.icu_noaccent"); !slices.Equal(got, mysqlSortOrder) {
+		t.Errorf("the copy's order differs from MySQL's:\n got  %v\n want %v", got, mysqlSortOrder)
+	}
+	if got := order("nocase.noaccent"); slices.Equal(got, mysqlSortOrder) {
+		t.Error("nocase.noaccent now sorts like MySQL too; the comparison in the documentation is out of date")
 	}
 }

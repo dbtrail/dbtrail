@@ -198,8 +198,18 @@ func valuesFixtures() []valuesFixture {
 		// ('x' before 'Z'), the copy's folding default does too, bytes do not.
 		{"SELECT id, tag FROM sales WHERE id IN (1, 4) ORDER BY tag", eq, "", "x before Z on both"},
 		{"SELECT id FROM sales WHERE name = 'bob'", diff, "rows", "utf8mb4_general_ci is PAD SPACE: 'bob ' matches on MySQL"},
-		{"SELECT id FROM sales WHERE note = 'strasse'", diff, "rows", "utf8mb4_0900_ai_ci: ß equals ss"},
-		{"SELECT id FROM sales WHERE note = 'A'", diff, "rows", "utf8mb4_0900_ai_ci: full-width A equals A"},
+		// The copy's default collation (nocase over ICU's accent-insensitive
+		// one) equates what utf8mb4_0900_ai_ci equates, and sorts like it.
+		{"SELECT id FROM sales WHERE note = 'strasse'", eq, "", "ß equals ss"},
+		{"SELECT id FROM sales WHERE note = 'A'", eq, "", "full-width A equals A"},
+		{"SELECT id, note FROM sales ORDER BY note, id", eq, "", "NULL, the two A, the two strasse"},
+		{"SELECT COUNT(*) FROM (SELECT note FROM sales GROUP BY note) t", eq, "", "three groups"},
+		{"SELECT COUNT(DISTINCT id) FROM sales a WHERE EXISTS (SELECT 1 FROM sales b WHERE b.note = a.note AND b.id <> a.id)", eq, "", "a join on the folded column: all four"},
+		// A _bin column next to folded ones, under the new default.
+		{"SELECT COUNT(*) FROM (SELECT code k FROM sales UNION ALL SELECT name FROM sales) t WHERE k = 'ab'", eq, "", "_bin and _ci in one UNION ALL column: bytes on both"},
+		// UNION's own duplicate removal does not fold on the copy, under this
+		// collation or the one before it. Documented.
+		{"SELECT note FROM sales WHERE id = 4 UNION SELECT 'A'", diff, "rows", "one row on MySQL ('a' and 'A' are duplicates), two on the copy"},
 	}
 }
 

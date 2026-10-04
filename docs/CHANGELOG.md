@@ -7,14 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
-- **SQL on the copy: the text differences from MySQL are listed in full**
-  (#2083). The documentation named `'ß' = 'ss'` as the one equality the copy
-  does not share with MySQL's default collation. Measured against MySQL 8.4,
-  there are more of the same kind (full-width letters, `'æ' = 'ae'`,
-  `'ø' = 'o'`, hiragana against katakana) and one in `ORDER BY` (punctuation
-  sorts by ASCII code on the copy, before the digits on MySQL).
-  `docs/time-travel-sql.md` now lists them, and says which DuckDB collation
-  would close them and what it costs. Nothing in the copy's behavior changes.
+- **SQL on the copy compares text as MySQL's default collation does, beyond
+  case and accents** (#2083). `'ß' = 'ss'`, full-width letters, `'æ' = 'ae'`,
+  `'ø' = 'o'` and hiragana against katakana are now equal on the copy as
+  they are under `utf8mb4_0900_ai_ci`, in `WHERE`, `IN`, `GROUP BY`,
+  `SELECT DISTINCT` and joins, and `ORDER BY` sorts punctuation before the
+  digits as MySQL does. Of 57 pairs of strings measured against MySQL 8.4
+  the copy now differs on one (26 before), and 48 strings sort in the same
+  order on both. The copy's session default goes from DuckDB's built-in
+  `nocase.noaccent` to `nocase.icu_noaccent`; ICU is part of the binary, so
+  nothing is downloaded and an air-gapped install is unaffected. **It is
+  slower on text**: comparing, grouping or sorting a text column costs
+  about twice as much as before, and up to ten times on a column where
+  every value is different (an equality filter over 5 million 32-character
+  tokens on disk: 0.2 s before, 1.8 s now). Columns with few distinct
+  values, numbers, dates and columns MySQL declares `_bin` are not
+  affected. `LIKE`, `REGEXP`, `count(DISTINCT ...)` and `INSTR` still do not
+  fold, and stay on MySQL under routing.
 
 ### Fixed
 - **SQL on the copy: a `_bin` column compares byte by byte, as on MySQL**

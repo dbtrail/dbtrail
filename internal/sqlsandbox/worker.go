@@ -333,20 +333,36 @@ var sandboxSettings = []string{
 // lockdownStatements is the session lock-down, in order, lock LAST. What
 // each one does, as observed on DuckDB v1.4.5:
 //
-//   - default_collation = 'nocase.noaccent' and default_null_order =
+//   - autoinstall_known_extensions / autoload_known_extensions = false,
+//     FIRST: a function or a collation that lives in a not-yet-loaded
+//     extension does not trigger a download or a load; it is simply not
+//     there. First, because the next statement names an ICU collation, and
+//     the product runs air-gapped: with these off, an engine that lacked ICU
+//     fails that SET by name instead of reaching for the network.
+//   - default_collation = 'nocase.icu_noaccent' and default_null_order =
 //     'nulls_first_on_asc_last_on_desc': MySQL semantics for the two things
 //     no statement-level check can catch (#2038). MySQL's default collation
 //     (utf8mb4_0900_ai_ci) treats 'Paid' and 'paid', 'café' and 'cafe' as
 //     EQUAL in WHERE, GROUP BY, SELECT DISTINCT, IN and ORDER BY, and sorts
 //     NULL first on ASC and last on DESC (NULL is its smallest value);
 //     DuckDB's defaults do neither, so a copy-served statement answered
-//     differently from MySQL without any error. Both collations are built in
-//     (no ICU, verified with extension loading off). Close to _ai_ci, not
+//     differently from MySQL without any error. The collation is nocase
+//     over ICU's accent-insensitive one (#2083): like MySQL's it also
+//     equates 'ß' with 'ss', full-width forms, ligatures and kana, and sorts
+//     punctuation before digits, where the built-in nocase.noaccent this
+//     used to be folds case and accents and nothing else (57 measured pairs:
+//     1 disagreement with MySQL against 26; collations_2083_test.go). It
+//     costs about twice as much on every comparison of text, which is the
+//     price accepted for the same answers. ICU is statically linked into
+//     the engine (TestLockdown_collationComesFromTheBinary), never loaded
+//     at run time; a collation the engine does not have fails this SET, and
+//     runJob fails the statement on any lock-down error, so no worker can
+//     end up answering under another collation. Close to _ai_ci, not
 //     identical: LIKE/REGEXP, count(DISTINCT ...) and the string-search
-//     functions (instr, position, contains) do NOT fold (DuckDB #10416 for
-//     LIKE), which the read router vetoes; 'ß' = 'ss' and full-width forms
-//     stay unequal; a column MySQL declares _cs becomes case-insensitive
-//     here. A _bin column does not: its state view gives it COLLATE C
+//     functions (instr, position, contains) do NOT fold under either
+//     collation (DuckDB #10416 for LIKE), which the read router vetoes; a
+//     column MySQL declares _cs becomes case-insensitive here. A _bin
+//     column does not: its state view gives it COLLATE C
 //     (views.BaselineTable.BinaryText, #2083), which outranks this default.
 //     The copy's OWN views are immune on purpose:
 //     the delta chain partitions by "bintrail_pk" COLLATE C
@@ -368,9 +384,6 @@ var sandboxSettings = []string{
 //     allowed_directories (read_csv('/etc/passwd'), read_parquet elsewhere,
 //     glob, ATTACH a file, COPY TO elsewhere), no http:// or s3:// URLs,
 //     no INSTALL (it cannot reach the extension directory), no LOAD.
-//   - autoinstall_known_extensions / autoload_known_extensions = false: a
-//     function that lives in a not-yet-loaded extension does not trigger a
-//     download or a load; it is simply not there.
 //   - temp_directory = ”: no spill. A query past memory_limit fails with
 //     an Out of Memory Error instead of writing to disk. The worker never
 //     writes anything.
@@ -378,23 +391,25 @@ var sandboxSettings = []string{
 //     PRAGMA is "Cannot change configuration option ... the configuration
 //     has been locked", including this one and every setting above.
 //
-// Two orderings are load-bearing, and TestLockdownRunsInOrderOnPinnedEngine
-// pins both on the real engine: temp_directory must be set BEFORE external
+// Three orderings are load-bearing. TestLockdownRunsInOrderOnPinnedEngine
+// pins two on the real engine: temp_directory must be set BEFORE external
 // access goes off (afterwards DuckDB answers "Modifying the temp_directory
 // has been disabled by configuration"), and lock_configuration must be LAST.
+// TestLockdown_collationComesFromTheBinary pins the third: extension
+// loading goes off BEFORE the collation is set.
 func lockdownStatements(copyDirs []string) []string {
 	quoted := make([]string, len(copyDirs))
 	for i, d := range copyDirs {
 		quoted[i] = "'" + strings.ReplaceAll(d, "'", "''") + "'"
 	}
 	return []string{
-		"SET default_collation = 'nocase.noaccent'",
+		"SET autoinstall_known_extensions = false",
+		"SET autoload_known_extensions = false",
+		"SET default_collation = 'nocase.icu_noaccent'",
 		"SET default_null_order = 'nulls_first_on_asc_last_on_desc'",
 		"SET ieee_floating_point_ops = false",
 		"SET allowed_directories = [" + strings.Join(quoted, ", ") + "]",
 		"SET temp_directory = ''",
-		"SET autoinstall_known_extensions = false",
-		"SET autoload_known_extensions = false",
 		"SET enable_external_access = false",
 		"SET lock_configuration = true",
 	}
