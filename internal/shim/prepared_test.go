@@ -320,12 +320,6 @@ func TestPrepared_refusals(t *testing.T) {
 	if _, err := h.HandleStmtExecute(ctx, "", []any{math.NaN(), int64(1)}); mysqlErrCode(err) != mysql.ER_WRONG_ARGUMENTS {
 		t.Errorf("NaN: err = %v, want 1210", err)
 	}
-	// Every argument nil is what go-mysql hands over when a client re-executes
-	// without re-sending the argument types (Connector/J, the C API): running
-	// it would answer `? = NULL`, an empty result with no error.
-	if _, err := h.HandleStmtExecute(ctx, "", []any{nil, nil}); mysqlErrCode(err) != mysql.ER_WRONG_ARGUMENTS || !strings.Contains(err.Error(), "arrived as NULL") {
-		t.Errorf("all-nil arguments: err = %v, want the 1210 refusal that names the cause", err)
-	}
 	if _, err := h.HandleStmtExecute("not ours", "", nil); mysqlErrCode(err) != mysql.ER_UNKNOWN_STMT_HANDLER {
 		t.Errorf("foreign context: err = %v, want 1243", err)
 	}

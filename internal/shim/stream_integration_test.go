@@ -57,9 +57,10 @@ func startShimServer(t *testing.T, db *sql.DB, cfg Config, defaultSchema string)
 					return
 				}
 				h.BindConn(mc) // enable the streaming full-table _snapshot path (#998)
+				session := NewSession(mc, h)
 				for {
 					c.SetReadDeadline(time.Now().Add(15 * time.Second))
-					if err := mc.HandleCommand(); err != nil {
+					if err := session.HandleCommand(); err != nil {
 						return
 					}
 				}

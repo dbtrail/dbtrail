@@ -219,8 +219,9 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 		}
 	}()
 
+	session := shim.NewSession(mysqlConn, proxy)
 	for {
-		if err := mysqlConn.HandleCommand(); err != nil {
+		if err := session.HandleCommand(); err != nil {
 			if !errors.Is(err, net.ErrClosed) {
 				logger.Debug("flashback connection ended", "err", err, "remote", c.RemoteAddr())
 			}

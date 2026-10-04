@@ -16,12 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   execute writes the arguments in as SQL literals and runs the statement as
   if it had been sent as text, on the copy or through the time-travel
   shapes, and answers in binary rows with typed columns. Results are
-  buffered (a whole-table `_snapshot` is held to the row cap), an execute
-  error arrives as 1105 with the original code in its text, a re-execution
-  that does not re-send its argument types (Connector/J server prepares,
-  the C API, PHP `mysqlnd`) is refused rather than run with empty
-  arguments, and with read
-  routing on the port still refuses to prepare (1295) until forwarded
+  buffered (a whole-table `_snapshot` is held to the row cap), and with
+  read routing on the port still refuses to prepare (1295) until forwarded
   statements are bound by MySQL itself.
 - **Every baseline upload to S3 now names the newest snapshot in one small
   object, `<root>/_NEWEST`** (#2052, first half). A views file that follows
@@ -75,6 +71,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to 32 s; 1.1: 77 s to 57 s). Same rows and column types.
 
 ### Fixed
+- **Prepared statements: a re-execution keeps its arguments, and an error
+  keeps its code** (#2036). The port's command loop handed every argument
+  over as `NULL` when a client re-executed a prepared statement without
+  re-sending the argument types, which is what MySQL Connector/J with server
+  prepares, the C API and PHP's `mysqlnd` do from the second execution on;
+  the first cut of prepared statements refused those executions, and any
+  whose arguments were all `NULL`. The port now reads the statement commands
+  itself, keeps each statement's types and decodes the values on every
+  execution, so those clients work and an all-`NULL` execution runs. An
+  `EXECUTE` error also reaches the client with its own MySQL code instead
+  of 1105 with the code buried in the text. Values sent ahead in chunks
+  (`COM_STMT_SEND_LONG_DATA`) are honoured, up to 64 MiB pending per
+  connection, and a connection may keep 16382 statements open (MySQL's own
+  default), so one client cannot make the process hold memory without bound.
 - **Time-travel results return an empty string as an empty string, not as
   `NULL`** (#2065). A column whose value was `''` reached the client as
   `NULL` in `_flashback`, `_diff` and the buffered `_snapshot` reads (a

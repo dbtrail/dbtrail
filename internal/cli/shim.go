@@ -786,8 +786,9 @@ func handleConn(ctx context.Context, c net.Conn, db *sql.DB, srv *server.Server,
 			)
 		}
 	}
+	session := shim.NewSession(mysqlConn, handler)
 	for {
-		if err := mysqlConn.HandleCommand(); err != nil {
+		if err := session.HandleCommand(); err != nil {
 			if !errors.Is(err, net.ErrClosed) {
 				slog.Debug("connection ended", "err", err, "remote", c.RemoteAddr())
 			}
