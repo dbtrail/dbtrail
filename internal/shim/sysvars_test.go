@@ -9,7 +9,7 @@ import (
 const connectorJHandshake = `/* mysql-connector-j-9.1.0 (Revision: cf2917ea44ae2e43a4514a33771035aa99de73bf) */SELECT  @@session.auto_increment_increment AS auto_increment_increment, @@character_set_client AS character_set_client, @@character_set_connection AS character_set_connection, @@character_set_results AS character_set_results, @@character_set_server AS character_set_server, @@collation_server AS collation_server, @@collation_connection AS collation_connection, @@init_connect AS init_connect, @@interactive_timeout AS interactive_timeout, @@license AS license, @@lower_case_table_names AS lower_case_table_names, @@max_allowed_packet AS max_allowed_packet, @@net_write_timeout AS net_write_timeout, @@performance_schema AS performance_schema, @@sql_mode AS sql_mode, @@system_time_zone AS system_time_zone, @@time_zone AS time_zone, @@transaction_isolation AS transaction_isolation, @@wait_timeout AS wait_timeout`
 
 func TestSysVarSelect(t *testing.T) {
-	res, ok := sysVarSelect(connectorJHandshake)
+	res, ok := sysVarSelect(connectorJHandshake, nil)
 	if !ok {
 		t.Fatal("Connector/J's connect statement was not answered")
 	}
@@ -37,14 +37,14 @@ func TestSysVarSelect(t *testing.T) {
 	}
 
 	// An unaliased variable is named by its expression, as on MySQL.
-	res, ok = sysVarSelect("select @@version_comment limit 1")
+	res, ok = sysVarSelect("select @@version_comment limit 1", nil)
 	if !ok || string(res.Fields[0].Name) != "@@version_comment" {
 		t.Fatalf("mysql client's statement: ok=%v fields=%v", ok, res)
 	}
 	if v := textRows(t, res.Resultset)[0][0]; !strings.Contains(v, "DBTrail") {
 		t.Errorf("version_comment = %q", v)
 	}
-	if res, ok = sysVarSelect("SELECT @@GLOBAL.max_allowed_packet;"); !ok || textRows(t, res.Resultset)[0][0] != "67108864" {
+	if res, ok = sysVarSelect("SELECT @@GLOBAL.max_allowed_packet;", nil); !ok || textRows(t, res.Resultset)[0][0] != "67108864" {
 		t.Error("a scoped variable with a semicolon was not answered")
 	}
 
@@ -59,7 +59,7 @@ func TestSysVarSelect(t *testing.T) {
 		"SELECT @x",
 		"",
 	} {
-		if _, ok := sysVarSelect(stmt); ok {
+		if _, ok := sysVarSelect(stmt, nil); ok {
 			t.Errorf("%q was answered as a system-variable select", stmt)
 		}
 	}

@@ -167,6 +167,11 @@ type Handler struct {
 	freeSQL       FreeSQL
 	freeSQLWhyNot string
 	lastWarnings  []string
+	// sessVars is what this connection SET for itself (time_zone, sql_mode,
+	// sql_select_limit) while free SQL is bound and no router is: applied to
+	// every statement on the copy and answered by SELECT @@... (#2035, see
+	// sessionvars.go); guarded by mu.
+	sessVars sessionVars
 
 	// router, when non-nil, makes this a routing connection (#2038, see
 	// freesql.go): MySQL answers by default, the copy takes expensive
@@ -617,8 +622,20 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 		// answer), except the expensive SELECTs the copy takes.
 		return h.routeStatement(currentDB, qstr)
 	}
-	if res, ok := sysVarSelect(qstr); ok {
-		// A driver asking the server about itself as it connects.
+	if h.freeSQL != nil {
+		// A SET of time_zone, sql_mode or sql_select_limit is applied or
+		// refused by name (#2035), before the allowlist below would answer
+		// it with an empty OK. Without free SQL it stays chatter.
+		if res, handled, err := h.applySessionSet(qstr); handled {
+			return res, err
+		}
+	}
+	h.mu.Lock()
+	overrides := h.sessVars.overrides()
+	h.mu.Unlock()
+	if res, ok := sysVarSelect(qstr, overrides); ok {
+		// A driver asking the server about itself as it connects, or reading
+		// back what it set.
 		return res, nil
 	}
 	if isHandshakeNoise(qstr) {
@@ -2024,6 +2041,10 @@ func emptyResult() *mysql.Result {
 // PASSWORD, SET ROLE, SET GLOBAL) falls through to the rejection
 // path so a customer / attacker cannot pretend their privileged
 // statement succeeded by exploiting an over-broad `SET ` prefix.
+//
+// The time_zone, sql_mode and sql_select_limit entries are chatter only on a
+// connection with no free SQL bound (time travel reads none of them). With
+// free SQL bound, applySessionSet answers those statements first (#2035).
 //
 // Each prefix MUST end with a delimiter (' ' or '=') so a longer
 // keyword cannot smuggle itself in: e.g. `set autocommitfoo` no

@@ -21,15 +21,16 @@ type fakeFreeSQL struct {
 	calls     int
 	gotStmt   string
 	gotSchema string
+	gotSess   sqlsandbox.Session
 	updatedAt time.Time
 	ageCalls  int
 }
 
 func (f *fakeFreeSQL) CopyUpdatedAt(context.Context) time.Time { f.ageCalls++; return f.updatedAt }
 
-func (f *fakeFreeSQL) Run(_ context.Context, statement, schema string) (sqlsandbox.Result, error) {
+func (f *fakeFreeSQL) Run(_ context.Context, statement, schema string, sess sqlsandbox.Session) (sqlsandbox.Result, error) {
 	f.calls++
-	f.gotStmt, f.gotSchema = statement, schema
+	f.gotStmt, f.gotSchema, f.gotSess = statement, schema, sess
 	return f.res, f.err
 }
 
@@ -211,7 +212,7 @@ func TestFreeSQLResultset_typesAndCells(t *testing.T) {
 				map[string]any{"a": json.Number("1")}, "x", json.Number("18446744073709551615"), "170141183460469231731687303715884105727", "2026-01-02"},
 		},
 	}
-	rs, err := freeSQLResultset(res)
+	rs, err := freeSQLResultset(res, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +252,7 @@ func TestFreeSQLResultset_typesAndCells(t *testing.T) {
 		}
 	}
 
-	empty, err := freeSQLResultset(sqlsandbox.Result{Columns: res.Columns[:2]})
+	empty, err := freeSQLResultset(sqlsandbox.Result{Columns: res.Columns[:2]}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -80,6 +80,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to 32 s; 1.1: 77 s to 57 s). Same rows and column types.
 
 ### Fixed
+- **The embedded port applies `SET time_zone`, `SET sql_select_limit` and
+  `SET sql_mode`, or refuses them by name** (#2035). On a connection that
+  runs ordinary SQL on the copy the three were answered with an empty OK and
+  ignored: a client in `SET time_zone = 'America/Argentina/Buenos_Aires'`
+  got `NOW()` and its windows in UTC, with no error and no warning. Now
+  `time_zone` is the copy's session zone for that connection (zone names,
+  whole-hour offsets from `-12:00` to `+14:00`, `UTC`, `SYSTEM`; an offset
+  with minutes such as `+05:30` is refused with error 1298 and the zone name
+  works instead), `sql_select_limit` cuts a `SELECT` that has no `LIMIT` of
+  its own (never above the server's row cap), and `sql_mode` is recorded,
+  except the modes that change how a statement is read (`ANSI_QUOTES`,
+  `PIPES_AS_CONCAT`, `NO_BACKSLASH_ESCAPES`, `HIGH_NOT_PRECEDENCE`, `ANSI`
+  and the other combinations containing them), which are refused with error
+  1231. `SELECT @@time_zone`, `@@sql_mode` and `@@sql_select_limit` answer
+  what the connection set. A `SET` with several assignments is all or
+  nothing. **What changes for an existing client:** a connection that sets
+  one of the refused values (a driver configured with `sql_mode=ANSI`, a
+  `+05:30` offset, `sql_select_limit = 0`) used to get an OK and now gets an
+  error, at the `SET`. Under a session zone other than UTC the copy reads a
+  `DATETIME` column as the wall clock MySQL holds and a `TIMESTAMP` column
+  as an instant printed in that zone; it tells them apart from the column
+  types the snapshot records, so a table whose snapshot does not record
+  them (written before they were embedded, or from a PostgreSQL source) is
+  refused under such a zone, by name, and reads again under UTC. Read
+  routing is unchanged (there every `SET` is forwarded to MySQL), and so is
+  the standalone `bintrail shim`, which runs no ordinary SQL. See
+  [time-travel-sql.md](time-travel-sql.md#ordinary-sql-on-the-copy-embedded-port-only).
 - **Read routing works with a MariaDB source** (#2073). MariaDB prints
   `EXPLAIN FORMAT=JSON` in its own shape (`rows` where MySQL says
   `rows_examined_per_scan`, a `filesort` node, the shortcut message on a

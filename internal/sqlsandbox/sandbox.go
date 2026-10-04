@@ -174,8 +174,33 @@ type Job struct {
 	// then fails to resolve gets a hint naming the missing schema. Empty
 	// leaves DuckDB's default (main).
 	Schema string
+	// Session carries the connection's own settings (the MySQL-protocol
+	// port's SET time_zone and SET sql_select_limit). The zero value changes
+	// nothing.
+	Session Session
 	// Limits override the Runner's defaults field by field.
 	Limits Limits
+}
+
+// Session is what a client connection set for itself and the statement must
+// run under. The MySQL-protocol port fills it; the console's SQL card has no
+// session and leaves it zero.
+type Session struct {
+	// TimeZone is the session time zone, as a name DuckDB's SET TimeZone
+	// takes ('America/Argentina/Buenos_Aires', 'Etc/GMT-3'). Empty leaves the
+	// zone the views script pins, UTC. The worker sets it AFTER the views
+	// script (which sets UTC) and BEFORE the lock (after which no SET runs).
+	// A name the engine refuses fails the statement as a RefusedError that
+	// names it: the statement never runs under another zone.
+	TimeZone string
+	// SelectLimit is MySQL's sql_select_limit: the most rows a SELECT with no
+	// LIMIT of its own returns. Zero is no limit. It never raises the cap:
+	// at or under Limits.MaxRows the result is cut at it and NOT reported as
+	// Truncated (the client asked for the cut); above MaxRows the cap rules
+	// and a cut there is Truncated as always. A statement with its own
+	// top-level LIMIT ignores it, as on MySQL, and so do SHOW, DESCRIBE and
+	// SUMMARIZE, which are not SELECTs there.
+	SelectLimit int
 }
 
 // Column is one result column with DuckDB's type name (INTEGER, VARCHAR,
@@ -576,6 +601,8 @@ type wireJob struct {
 	AskViews    bool   `json:"ask_views,omitempty"`
 	SQL         string `json:"sql"`
 	Schema      string `json:"schema,omitempty"`
+	TimeZone    string `json:"time_zone,omitempty"`
+	SelectLimit int    `json:"select_limit,omitempty"`
 	Threads     int    `json:"threads"`
 	MemoryLimit string `json:"memory_limit"`
 	MaxRows     int    `json:"max_rows"`
@@ -643,6 +670,7 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 	}
 	in, err := json.Marshal(wireJob{
 		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, Schema: job.Schema,
+		TimeZone: job.Session.TimeZone, SelectLimit: job.Session.SelectLimit,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
 	})

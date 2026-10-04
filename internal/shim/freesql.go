@@ -47,7 +47,10 @@ import (
 // worker failure, whose text can carry host paths, before it gets here
 // (freeSQLError does so again, as a belt).
 type FreeSQL interface {
-	Run(ctx context.Context, statement, schema string) (sqlsandbox.Result, error)
+	// sess is what the connection set for itself (#2035): the statement
+	// runs under that time zone and select limit, or fails; it never runs
+	// under other ones.
+	Run(ctx context.Context, statement, schema string, sess sqlsandbox.Session) (sqlsandbox.Result, error)
 	// CopyUpdatedAt is the time of the snapshot the copy's tables answer
 	// from; zero when there is none or it cannot be read. The router
 	// compares it with the server's maximum copy age before it sends a
@@ -423,14 +426,32 @@ func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string) (*mysql.Res
 	ctx, cancel := h.queryContext()
 	defer cancel()
 	stmt, schema := rewriteForDuckDB(qstr, schema)
-	res, err := h.freeSQL.Run(ctx, stmt, schema)
+	// What the connection set for itself (#2035). Always zero under routing:
+	// there a SET is MySQL's and never reaches sessVars.
+	h.mu.Lock()
+	vars := h.sessVars
+	h.mu.Unlock()
+	sess := vars.session()
+	if stmt != qstr {
+		// A SHOW this port rewrote into a SELECT: sql_select_limit limits
+		// SELECTs, and the client did not send one.
+		sess.SelectLimit = 0
+		if showDatabasesRE.MatchString(qstr) {
+			// The schema list holds no time and reads no table, and it is
+			// the way out of every dead end (rewriteForDuckDB): it must not
+			// be refused because some table cannot be read under the
+			// connection's zone.
+			sess = sqlsandbox.Session{}
+		}
+	}
+	res, err := h.freeSQL.Run(ctx, stmt, schema, sess)
 	if err != nil {
 		return nil, h.freeSQLError(err)
 	}
 	if routeReason != "" && (res.Truncated || res.TruncatedCells > 0) {
 		return nil, errCopyTruncated
 	}
-	rs, err := freeSQLResultset(res)
+	rs, err := freeSQLResultset(res, vars.loc)
 	if err != nil {
 		// Only a worker bug (a row with the wrong column count) gets here.
 		h.logger.Error("free sql: build resultset", "err", err)
@@ -579,7 +600,8 @@ func (h *Handler) freeSQLError(err error) error {
 // shows numbers as numbers and dates as dates. Every cell is sent as text
 // bytes: BuildSimpleTextResultset fixes a column's wire type from its first
 // non-null row, and a column mixing Go types across rows is an error there.
-func freeSQLResultset(res sqlsandbox.Result) (*mysql.Resultset, error) {
+// loc is the session's time zone, nil for UTC: an instant is printed in it.
+func freeSQLResultset(res sqlsandbox.Result, loc *time.Location) (*mysql.Resultset, error) {
 	names := make([]string, len(res.Columns))
 	for i, c := range res.Columns {
 		names[i] = c.Name
@@ -592,7 +614,7 @@ func freeSQLResultset(res sqlsandbox.Result) (*mysql.Resultset, error) {
 			if j < len(res.Columns) {
 				typ = res.Columns[j].Type
 			}
-			out[j] = freeSQLCell(cell, typ)
+			out[j] = freeSQLCell(cell, typ, loc)
 		}
 		values[i] = out
 	}
@@ -612,9 +634,12 @@ func freeSQLResultset(res sqlsandbox.Result) (*mysql.Resultset, error) {
 // freeSQLCell renders one JSON-shaped cell to the text the wire carries,
 // nil staying NULL. A timestamp arrives RFC 3339 in UTC and leaves in
 // MySQL's DATETIME spelling, because that is what the column is declared
-// as; a nested value (LIST, STRUCT, MAP, JSON) is its JSON text; a boolean
+// as. An INSTANT (TIMESTAMP WITH TIME ZONE: now(), a MySQL TIMESTAMP column)
+// is printed in the session's zone, loc, as MySQL prints one; a zone-less
+// TIMESTAMP is a wall clock and is printed as it is, whatever the zone. A
+// nested value (LIST, STRUCT, MAP, JSON) is its JSON text; a boolean
 // is 1 or 0, as MySQL's own BOOLEAN reads back.
-func freeSQLCell(v any, duckType string) any {
+func freeSQLCell(v any, duckType string, loc *time.Location) any {
 	switch x := v.(type) {
 	case nil:
 		return nil
@@ -630,7 +655,11 @@ func freeSQLCell(v any, duckType string) any {
 	case string:
 		if isTimestampType(duckType) {
 			if t, err := time.Parse(time.RFC3339Nano, x); err == nil {
-				return []byte(t.UTC().Format("2006-01-02 15:04:05.999999"))
+				t = t.UTC()
+				if loc != nil && isInstantType(duckType) {
+					t = t.In(loc)
+				}
+				return []byte(t.Format("2006-01-02 15:04:05.999999"))
 			}
 		}
 		return []byte(x)
@@ -647,6 +676,16 @@ func freeSQLCell(v any, duckType string) any {
 
 func isTimestampType(duckType string) bool {
 	return strings.HasPrefix(strings.ToUpper(duckType), "TIMESTAMP")
+}
+
+// isInstantType: DuckDB's TIMESTAMP WITH TIME ZONE, under either of the names
+// the driver reports it by. Every other TIMESTAMP flavour has no zone.
+func isInstantType(duckType string) bool {
+	switch strings.ToUpper(strings.TrimSpace(duckType)) {
+	case "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE":
+		return true
+	}
+	return false
 }
 
 // applyDuckType sets the MySQL column type a DuckDB type maps to. Text

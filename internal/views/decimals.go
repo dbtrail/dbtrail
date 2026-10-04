@@ -56,6 +56,7 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 			continue
 		}
 		in.Baselines[i].Decimals = f.Decimals
+		in.Baselines[i].Datetimes = f.Datetimes
 		in.Baselines[i].DeltaReserved = f.DeltaReserved
 		in.Baselines[i].SchemaKnown = true
 	}
@@ -150,7 +151,7 @@ func decimalComments(t BaselineTable) []string {
 	return []string{strings.Join(uncastable, "; ") + " (left as text)"}
 }
 
-// decimalReplaceClause builds the `* REPLACE (...)` list that re-types this
+// replaceClause builds the `* REPLACE (...)` list that re-types this
 // table's decimal columns. Empty when there is nothing to cast, in which case
 // the caller emits the plain `SELECT *` it always did.
 //
@@ -176,11 +177,23 @@ func decimalComments(t BaselineTable) []string {
 //     columns parseSchemaFrom drops (generated, MariaDB period) are dropped
 //     from both halves together. Nothing here re-checks it: doing so would cost
 //     another footer read per table.
-func decimalReplaceClause(t BaselineTable) string {
+//
+// The same list carries the DATETIME columns of a table read under a session
+// time zone (WallClockDatetimes): each becomes a zone-less TIMESTAMP holding
+// the wall clock MySQL stored. The same two invariants apply to those names.
+func replaceClause(t BaselineTable) string {
 	if !t.SchemaKnown {
 		return ""
 	}
 	var parts []string
+	if t.WallClockDatetimes {
+		for _, name := range t.Datetimes {
+			// The file holds the wall clock labelled UTC, so reading it back
+			// AT TIME ZONE 'UTC' gives that wall clock whatever the session's
+			// zone is.
+			parts = append(parts, fmt.Sprintf("%s AT TIME ZONE 'UTC' AS %s", quoteIdent(name), quoteIdent(name)))
+		}
+	}
 	for _, d := range t.Decimals {
 		if !castableDecimal(d) {
 			continue
