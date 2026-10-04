@@ -385,9 +385,11 @@ What this is and is not:
   ignores trailing spaces on MySQL, so `'bob ' = 'bob'` there and not
   here; a `_bin` column in a multi-byte character set other than UTF-8
   sorts by that character set's bytes on MySQL and by Unicode code point
-  here; a snapshot that carries no `CREATE TABLE` (one taken from
-  PostgreSQL) has no collations to read, so all its
-  text columns fold case; and **`AVG` and `/` return a double** on the copy, where MySQL
+  here; a column's collation is the one it had at the last full snapshot
+  (a refresh carries the table definition forward, so an `ALTER` that
+  changes a collation is seen at the next full snapshot); a snapshot that
+  carries no `CREATE TABLE` (one taken from PostgreSQL) has no collations
+  to read, so all its text columns fold case; and **`AVG` and `/` return a double** on the copy, where MySQL
   returns a `DECIMAL` with four decimals more than the operand has (for
   `DECIMAL` and integer operands; a `DOUBLE` operand gives a double on
   both): `AVG(amount)` over a `DECIMAL(12,2)` is `1.8` on the copy and

@@ -57,7 +57,7 @@ func TestIntegrationSQLCompareValues(t *testing.T) {
 		{"1", "10.00", "1.5000000000", "4", "3", "AB", "x", "bob", "straße"},
 		{"2", "2.50", "2.2500000000", "5", "4", "ab", "X", "bob ", "Ａ"},
 		{"3", "-7.10", "0.0000000000", "0", "0", "Ab", "x", "BOB", "strasse"},
-		{"4", "117329550.00", "12345678901234567890.1234567890", "7", "9", "zz", "y", "AB", "a"},
+		{"4", "117329550.00", "12345678901234567890.1234567890", "7", "9", "zz", "Z", "AB", "a"},
 		{"5", "", "", "", "", "", "", "", ""},
 	}
 	nullRow := 4
@@ -194,6 +194,9 @@ func valuesFixtures() []valuesFixture {
 		// What stays different, each with its line in docs/time-travel-sql.md.
 		{"SELECT id FROM sales WHERE code = 'ab '", diff, "rows", "utf8mb4_bin is PAD SPACE: MySQL ignores the trailing space"},
 		{"SELECT id FROM sales WHERE tag = 'x'", diff, "rows", "utf8mb4_0900_as_cs: 'X' is not 'x'; the copy folds it"},
+		// Why a _cs column is not given COLLATE C: it sorts alphabetically
+		// ('x' before 'Z'), the copy's folding default does too, bytes do not.
+		{"SELECT id, tag FROM sales WHERE id IN (1, 4) ORDER BY tag", eq, "", "x before Z on both"},
 		{"SELECT id FROM sales WHERE name = 'bob'", diff, "rows", "utf8mb4_general_ci is PAD SPACE: 'bob ' matches on MySQL"},
 		{"SELECT id FROM sales WHERE note = 'strasse'", diff, "rows", "utf8mb4_0900_ai_ci: ß equals ss"},
 		{"SELECT id FROM sales WHERE note = 'A'", diff, "rows", "utf8mb4_0900_ai_ci: full-width A equals A"},

@@ -161,3 +161,31 @@ func TestStateView_binaryCollationColumnComparesBytes(t *testing.T) {
 		})
 	}
 }
+
+// A view that FOLLOWS later snapshots carries no column collation. DuckDB
+// binds the REPLACE list against whichever file the view reads at query time,
+// so a _bin column dropped or retyped at the source would fail every query on
+// that table until the file was regenerated; and a following file is read by
+// a DuckDB of the reader's own, whose default collation already compares
+// bytes. The pinned views (what the copy's own SQL session runs) carry it.
+func TestStateView_followingViewsCarryNoCollation(t *testing.T) {
+	table := BaselineTable{Schema: "shop", Table: "codes", Path: "/snap/2026-04-30T03-00-00Z/shop/codes.parquet",
+		Rel: "shop/codes.parquet", SchemaKnown: true, BinaryText: []string{"code"},
+		Decimals: []DecimalColumn{{Name: "amount", Precision: 10, Scale: 2}}}
+	for _, mode := range []FollowMode{FollowNone, FollowPointer, FollowNewest} {
+		in := Input{GeneratedAt: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC), Version: "test",
+			BaselineSource: "/snap", BaselineSnapshot: time.Date(2026, 4, 30, 3, 0, 0, 0, time.UTC),
+			Follow: mode, Baselines: []BaselineTable{table}}
+		sqlText := Generate(in)
+		has := strings.Contains(sqlText, `"code" COLLATE C AS "code"`) || strings.Contains(sqlText, "_bin collation")
+		if want := mode == FollowNone; has != want {
+			t.Errorf("follow mode %v: collation in the file = %v, want %v", mode, has, want)
+		}
+		if !strings.Contains(sqlText, `CAST("amount" AS DECIMAL(10,2))`) {
+			t.Errorf("follow mode %v lost the decimal cast", mode)
+		}
+		if in.Baselines[0].BinaryText == nil {
+			t.Errorf("follow mode %v: Generate changed the caller's tables", mode)
+		}
+	}
+}

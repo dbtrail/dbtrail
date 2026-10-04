@@ -116,6 +116,8 @@ type BaselineTable struct {
 	// whatever the session's default collation is. Without it, a session that
 	// folds case and accents to match MySQL's default (the copy's SQL session
 	// does) folds these columns too, and `code = 'ab'` matches 'AB' (#2083).
+	// Only a pinned view carries it; writeStateViews says why a following
+	// one does not.
 	BinaryText []string
 	// DeltaReserved says the table has a column under a name a table delta
 	// reserves (baseline.TableFooter says why). Set with SchemaKnown.
@@ -2069,6 +2071,21 @@ func archiveGlob(base string) string {
 // writeStateViews emits one view per table in the newest baseline snapshot, and
 // returns whether it emitted any.
 func writeStateViews(b *strings.Builder, in Input) bool {
+	if in.Follow.follows() {
+		// A following view carries no column collation (BinaryText). DuckDB
+		// binds the REPLACE list against the file the view reads at query
+		// time, so a _bin column dropped or retyped at the source would fail
+		// every query on its table until this file was regenerated, and the
+		// reader of a following file is a DuckDB of their own, whose default
+		// collation already compares bytes. On a copy, so the caller's tables
+		// are left as they were.
+		tables := make([]BaselineTable, len(in.Baselines))
+		copy(tables, in.Baselines)
+		for i := range tables {
+			tables[i].BinaryText = nil
+		}
+		in.Baselines = tables
+	}
 	wanted := selectedStatePlans(in)
 	// A filtered render that selected no state view emits NOTHING, comments
 	// included, for the reason GenerateViews states: its caller executes this.
