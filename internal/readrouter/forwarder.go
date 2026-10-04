@@ -41,10 +41,10 @@ type RowSink interface {
 // upstream connection, exactly as if the client had connected to MySQL
 // itself. It also runs the EXPLAIN the decision reads.
 //
-// The credentials are the registry's source DSN (the operator's), not the
-// client's: the port authenticates on the console token, so a forwarded
-// statement has the operator's grants, the same way the copy has no grants
-// at all.
+// The credentials are the operator's, not the client's: the server's
+// forwarding account when the registry holds one, else its source DSN. The
+// port authenticates on the console token, so a forwarded statement has that
+// account's grants, the same way the copy has no grants at all.
 //
 // The connection is never replaced behind the client's back. Once it is lost
 // (a network error, the source closing an idle connection, the query
@@ -80,7 +80,8 @@ type Forwarder struct {
 	dead error
 }
 
-// NewForwarder parses a go-sql-driver DSN (the registry's source DSN) and
+// NewForwarder parses a go-sql-driver DSN (the registry's forwarding or
+// source DSN) and
 // returns a Forwarder that connects on first use. ssl is the TLS the server's
 // source connection uses, the value capture connects to the same server
 // with: the upstream connection is encrypted, or refused, or falls back to

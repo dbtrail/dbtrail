@@ -64,9 +64,16 @@ type serverDTO struct {
 	SourcePort        string `json:"source_port,omitempty"`
 	SourceUser        string `json:"source_user,omitempty"`
 	HasSourcePassword bool   `json:"has_source_password,omitempty"`
-	SourceServerID    uint32 `json:"source_server_id,omitempty"`
-	Schemas           string `json:"schemas,omitempty"`
-	MonitorDesired    bool   `json:"monitor_desired"`
+	// The forwarding account (#2079), masked like the source: whether one
+	// is set, its user and where it connects. Never its password.
+	HasRoute         bool   `json:"has_route,omitempty"`
+	RouteUser        string `json:"route_user,omitempty"`
+	RouteHost        string `json:"route_host,omitempty"`
+	RoutePort        string `json:"route_port,omitempty"`
+	HasRoutePassword bool   `json:"has_route_password,omitempty"`
+	SourceServerID   uint32 `json:"source_server_id,omitempty"`
+	Schemas          string `json:"schemas,omitempty"`
+	MonitorDesired   bool   `json:"monitor_desired"`
 	// Flavor is the source family ("mysql" | "mariadb" | "postgres"); the
 	// frontend gates per-server without opening the index. SourceDatabase /
 	// SourceSlot / SourcePublication are the PostgreSQL-only source parts (the
@@ -100,8 +107,8 @@ type serverDTO struct {
 	// instead of offering Read database now and the restore, which would
 	// answer 409. Empty when it may write.
 	WriteRefusal string `json:"write_refusal,omitempty"`
-	Editable    bool `json:"editable"`
-	Deletable   bool `json:"deletable"`
+	Editable     bool   `json:"editable"`
+	Deletable    bool   `json:"deletable"`
 	// Connected reports whether a live connection is currently cached.
 	Connected bool `json:"connected"`
 }
@@ -158,6 +165,11 @@ type serverRequest struct {
 	SourcePort     string  `json:"source_port"`
 	SourceUser     string  `json:"source_user"`
 	SourcePassword *string `json:"source_password"`
+	// The forwarding account (#2079, buildRouteDSN): every field omitted
+	// keeps what is stored; route_user "" (or route_dsn "") removes it.
+	RouteDSN       *string `json:"route_dsn"`
+	RouteUser      *string `json:"route_user"`
+	RoutePassword  *string `json:"route_password"`
 	SourceServerID uint32  `json:"source_server_id"`
 	Schemas        string  `json:"schemas"`
 	// Source family + PostgreSQL-only source config (#1019). Flavor is
@@ -301,6 +313,10 @@ func (s *Server) buildNewEntry(req serverRequest) (ServerEntry, bool, error) {
 	if err := validatePGSourceMonitorConfig(flavor, sourceDSN, req.SourceSlot, req.SourcePublication); err != nil {
 		return ServerEntry{}, false, err
 	}
+	routeDSN, err := buildRouteDSN(req, "", "", sourceDSN, flavor)
+	if err != nil {
+		return ServerEntry{}, false, err
+	}
 	deriveIndex := indexIsDerived(req) && sourceDSN != "" && s.monitorCtrl != nil
 	var dsn string
 	if !deriveIndex {
@@ -337,6 +353,7 @@ func (s *Server) buildNewEntry(req serverRequest) (ServerEntry, bool, error) {
 		S3AccessKeyID:     s3KeyID,
 		S3SecretAccessKey: s3Secret,
 		SourceDSN:         sourceDSN,
+		RouteDSN:          routeDSN,
 		SourceServerID:    req.SourceServerID,
 		Schemas:           req.Schemas,
 		Flavor:            flavor,
@@ -557,6 +574,14 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusConflict, "this server is being monitored; stop monitoring before changing its source")
 		return
 	}
+	// The forwarding account (#2079). No monitoring guard: it is read when a
+	// client connects to the port, so a change applies to connections opened
+	// after it and capture never uses it.
+	routeDSN, err := buildRouteDSN(req, old.RouteDSN, old.SourceDSN, sourceDSN, flavor)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	s3KeyID, s3Secret, err := resolveS3Keys(req, old.S3AccessKeyID, old.S3SecretAccessKey)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -593,6 +618,7 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 		S3AccessKeyID:     s3KeyID,
 		S3SecretAccessKey: s3Secret,
 		SourceDSN:         sourceDSN,
+		RouteDSN:          routeDSN,
 		// The verbs that flip monitoring intent arrive with the supervisor
 		// (phase 3); a plain edit must not silently start or stop anything.
 		MonitorDesired: old.MonitorDesired,
@@ -1504,6 +1530,7 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 	}
 	fillDSNParts(&dto, e.DSN)
 	fillSourceDSNParts(&dto, e.SourceDSN, e.SourceFlavor())
+	fillRouteDSNParts(&dto, e.RouteDSN)
 	if s.monitorCtrl != nil && e.SourceDSN != "" {
 		st := s.monitorCtrl.Status(e.ID)
 		dto.MonitorState, dto.MonitorPhase, dto.MonitorPhaseDetail = st.State, st.Phase, st.PhaseDetail

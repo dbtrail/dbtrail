@@ -13666,9 +13666,19 @@ function routingBlock(fb, cur) {
     // one a reader must not have to infer from a missing line.
     wrap.append(r.read_only
       ? el("p", { class: "cn-sql-row" }, el("b", { text: "This port is read-only." }),
-        " A statement that would change the server (INSERT, UPDATE, DELETE, CREATE, DROP, GRANT and the like) is refused and never sent to MySQL. The check reads the statement's text, so give the account DBTrail uses on that server only the permissions you want this port to have.")
+        " A statement that would change the server (INSERT, UPDATE, DELETE, CREATE, DROP, GRANT and the like) is refused and never sent to MySQL. The check reads the statement's text; the permissions of the account below bound everything else.")
       : el("p", { class: "cn-sql-row" }, el("b", { text: "This port is read-write." }),
         " Writes sent to it run on MySQL. To refuse them, start DBTrail with ", el("code", { text: "--route-read-only" }), "."));
+    // Which account runs what MySQL answers (#2079): the user name only.
+    if (cur.has_route) {
+      wrap.append(el("p", { class: "cn-sql-row" }, "On MySQL, statements run as ",
+        cur.route_user ? el("code", { text: cur.route_user }) : "this server's forwarding account",
+        cur.route_user ? ", this server's forwarding user. The account DBTrail captures with is not used by this port." : ". The account DBTrail captures with is not used by this port."));
+    } else if (cur.has_source) {
+      wrap.append(el("p", { class: "cn-sql-row" }, "On MySQL, statements run as ",
+        cur.source_user ? el("code", { text: cur.source_user }) : "the source user",
+        ", the account DBTrail captures with: this port can do whatever that account can. To use another one, edit the server and set a forwarding user."));
+    }
     if (total > 0) {
       const reasons = Object.entries(t.reasons || {}).sort((x, y) => y[1] - x[1]);
       const ul = el("ul", { class: "form-hint", style: "margin:4px 0 0 18px; padding:0" });
@@ -14230,6 +14240,10 @@ function serverRow(s) {
 // server form (add/edit) ------------------------------------------------------
 
 // srvField builds a labeled input row: <label class="field"><span/><input/></label>.
+// FORWARDING_HINT explains the two optional forwarding fields of the server
+// form (#2079) in the form's own words.
+const FORWARDING_HINT = "Forwarding user and password are optional. They only matter when DBTrail was started with read routing: what a SQL client sends to the MySQL port then runs on this server as the forwarding user, not as the source user, so the forwarding user's permissions are all that port can do here. Give it SELECT only for a port that cannot change anything. Blank forwards with the source user.";
+
 function srvField(label, name, opts) {
   opts = opts || {};
   return el("label", { class: "field" },
@@ -14487,6 +14501,11 @@ function buildServerForm() {
   monGrid.append(srvField("Source port", "source_port", { placeholder: "3306" }));
   monGrid.append(srvField("Source user", "source_user", { placeholder: "repl" }));
   monGrid.append(srvField("Source password", "source_password", { type: "password", autocomplete: "new-password" }));
+  // The forwarding account (#2079): optional, MySQL and MariaDB only. Always
+  // resent by serverFormBody, so an emptied user removes the account; the
+  // password is never prefilled and blank keeps the saved one.
+  monGrid.append(tagFlavor(srvField("Forwarding user", "route_user", { placeholder: "(optional) blank forwards with the source user", autocomplete: "off" }), "mysql mariadb"));
+  monGrid.append(tagFlavor(srvField("Forwarding password", "route_password", { type: "password", autocomplete: "new-password" }), "mysql mariadb"));
   // PostgreSQL-only: a logical-replication connection is per-database, and the
   // slot/publication are operator-created (validate-don't-create).
   monGrid.append(tagFlavor(srvField("Database", "source_database", { placeholder: "appdb" }), "postgres"));
@@ -14508,6 +14527,7 @@ function buildServerForm() {
   monGrid.append(srvField("S3 access key", "s3_access_key_id", { placeholder: "(optional) blank uses DBTrail's own credentials", autocomplete: "off" }));
   monGrid.append(srvField("S3 secret key", "s3_secret_access_key", { type: "password", autocomplete: "new-password" }));
   mon.append(monGrid);
+  mon.append(tagFlavor(el("p", { class: "form-hint", text: FORWARDING_HINT }), "mysql mariadb"));
   mon.append(el("p", { class: "form-hint", text: "Leave the S3 fields blank for AWS. They apply to the Archive and Snapshots locations set on this server, for uploads and reads alike, not to the default Snapshots location DBTrail was started with. A bucket has one store and one pair of keys, so two servers sharing a bucket must agree. Clearing the access key removes both keys." }));
   // The source user is the #1 friction point — spell out the grant inline,
   // never behind a <details>. REPLICATION SLAVE/CLIENT drive the stream;
@@ -14631,9 +14651,10 @@ function showServerForm(prefill, opts) {
 
   if (prefill) {
     form.elements.id.value = prefill.id || "";
-    ["name", "host", "port", "user", "dbname", "archive_s3", "s3_endpoint", "s3_path_style", "s3_region", "s3_access_key_id", "source_host", "source_port", "source_user", "schemas", "source_database", "source_slot", "source_publication"].forEach((k) => {
+    ["name", "host", "port", "user", "dbname", "archive_s3", "s3_endpoint", "s3_path_style", "s3_region", "s3_access_key_id", "source_host", "source_port", "source_user", "route_user", "schemas", "source_database", "source_slot", "source_publication"].forEach((k) => {
       if (form.elements[k] && prefill[k] != null) form.elements[k].value = prefill[k];
     });
+    form.elements.route_password.placeholder = prefill.has_route_password ? "(unchanged; leave blank to keep)" : "";
     form.elements.password.placeholder = prefill.has_password ? "(unchanged; leave blank to keep)" : "(none)";
     form.elements.source_password.placeholder = prefill.has_source_password ? "(unchanged; leave blank to keep)" : "";
     if (prefill.has_source_password) savedSourcePasswords.set(form, true);
@@ -15562,6 +15583,15 @@ function serverFormBody(form) {
   if (f.password.value !== "") body.password = f.password.value;
   if (f.source_password.value !== "") body.source_password = f.source_password.value;
   if (f.s3_secret_access_key.value !== "") body.s3_secret_access_key = f.s3_secret_access_key.value;
+  // The forwarding account: the user is always sent (empty removes the
+  // account), the password only when typed (blank keeps the saved one).
+  // A PostgreSQL source has none: its two fields are hidden, and what was
+  // typed in them before the source type changed is not sent.
+  if (f.route_user) {
+    const none = f.flavor.value === "postgres";
+    body.route_user = none ? "" : f.route_user.value.trim();
+    if (!none && f.route_password.value !== "") body.route_password = f.route_password.value;
+  }
   // No source host: the account the grant block filled in is not a source the
   // user asked for, so it stays behind and the entry saves as index-only.
   // Values somebody typed are sent, so a forgotten host still gets its error.

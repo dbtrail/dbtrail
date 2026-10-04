@@ -35,7 +35,8 @@ const flat = (n, out = []) => { if (n == null) return out; if (typeof n === "str
 const block = vm.runInContext("routingBlock", ctx);
 const fmt = vm.runInContext("fmtGoDuration", ctx);
 const draw = (routing, cur) => flat(block({ enabled: true, listen: "127.0.0.1:3308", port: "3308", routing }, cur)).join(" ").replace(/\s+/g, " ");
-const srv = { id: "s1", name: "shop" };
+const srv = { id: "s1", name: "shop", has_source: true, source_user: "repl" };
+const fwd = { ...srv, has_route: true, route_user: "report_ro" };
 const on = { enabled: true, max_copy_age: "10m0s", cost_threshold: 10000, scan_rows: 100000, since: "2026-10-04T12:00:00Z" };
 console.log(JSON.stringify({
   off: draw({ enabled: false }, srv),
@@ -48,6 +49,11 @@ console.log(JSON.stringify({
   readOnly: draw({ ...on, read_only: true, servers: { s1: { copy: 3, mysql: 7, refused: 2, reasons: { expensive_plan: 3, cheap_plan: 7, read_only: 2 } } } }, srv),
   readOnlyOnlyRefusals: draw({ ...on, read_only: true, servers: { s1: { copy: 0, mysql: 0, refused: 4, reasons: { read_only: 4 } } } }, srv),
   readOnlyNoRule: draw({ ...on, read_only: true, cost_threshold: 0, scan_rows: 0 }, srv),
+  forwarding: draw(on, fwd),
+  forwardingReadOnly: draw({ ...on, read_only: true }, fwd),
+  forwardingNoName: draw(on, { ...srv, has_route: true }),
+  noSource: draw(on, { id: "s1", name: "shop" }),
+  hint: vm.runInContext("FORWARDING_HINT", ctx),
   durations: ["15m0s", "10m0s", "1h0m0s", "1h30m0s", "1m30s", "30s", "24h0m0s"].map(fmt),
 }));
 `
@@ -62,13 +68,16 @@ console.log(JSON.stringify({
 	var got struct {
 		Off, NoServer, None, Counts, Other, Unavailable, NoRule string
 		ReadOnly, ReadOnlyOnlyRefusals, ReadOnlyNoRule          string
+		Forwarding, ForwardingReadOnly, ForwardingNoName        string
+		NoSource, Hint                                          string
 		Durations                                               []string
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
 	}
 	for name, text := range map[string]string{"off": got.Off, "no server": got.NoServer, "none": got.None, "counts": got.Counts, "unavailable": got.Unavailable, "no rule": got.NoRule,
-		"read-only": got.ReadOnly, "only refusals": got.ReadOnlyOnlyRefusals, "ro no rule": got.ReadOnlyNoRule} {
+		"read-only": got.ReadOnly, "only refusals": got.ReadOnlyOnlyRefusals, "ro no rule": got.ReadOnlyNoRule,
+		"forwarding": got.Forwarding, "forwarding ro": got.ForwardingReadOnly, "fwd no name": got.ForwardingNoName, "no source": got.NoSource, "form hint": got.Hint} {
 		t.Logf("%-12s %s", name+":", text)
 	}
 	must := func(name, text string, wants ...string) {
@@ -110,6 +119,22 @@ console.log(JSON.stringify({
 		if strings.Contains(text, "read-write") || strings.Contains(text, "writes included") {
 			t.Errorf("%s: a read-only port is described as taking writes: %s", name, text)
 		}
+	}
+	// Which account runs what MySQL answers (#2079): the forwarding user
+	// when the server has one, else the capture account, by user name.
+	must("none", got.None, "On MySQL, statements run as repl", "the account DBTrail captures with", "set a forwarding user")
+	must("read-only", got.ReadOnly, "On MySQL, statements run as repl", "the permissions of the account below")
+	must("forwarding", got.Forwarding, "On MySQL, statements run as report_ro", "this server's forwarding user", "The account DBTrail captures with is not used by this port")
+	must("forwarding ro", got.ForwardingReadOnly, "This port is read-only.", "statements run as report_ro")
+	must("fwd no name", got.ForwardingNoName, "statements run as this server's forwarding account")
+	must("form hint", got.Hint, "Forwarding user", "SELECT only", "Blank forwards with the source user")
+	for name, text := range map[string]string{"forwarding": got.Forwarding, "forwarding ro": got.ForwardingReadOnly, "fwd no name": got.ForwardingNoName} {
+		if strings.Contains(text, "repl") || strings.Contains(text, "whatever that account can") {
+			t.Errorf("%s: a server with a forwarding account still names the capture account as the one that runs statements: %s", name, text)
+		}
+	}
+	if strings.Contains(got.NoSource, "statements run as") || strings.Contains(got.Unavailable, "statements run as") {
+		t.Errorf("a server with no source names an account: %s / %s", got.NoSource, got.Unavailable)
 	}
 	for name, text := range map[string]string{"counts": got.Counts, "none": got.None, "unavailable": got.Unavailable} {
 		if strings.Contains(text, "read-only.") || strings.Contains(text, "refused") {

@@ -300,9 +300,9 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 		h.BindFreeSQLUnavailable(tgt.SQLUnavailable)
 	}
 	// Read routing (#2038): one upstream MySQL connection per client
-	// connection, opened on first use with the registry's source
-	// credentials. Bound BEFORE the schema seeds below so the upstream
-	// follows them. A server that cannot route stays copy-only and says so
+	// connection, opened on first use with the server's forwarding account
+	// when it has one (#2079), else with its source credentials. Bound
+	// BEFORE the schema seeds below so the upstream follows them. A server that cannot route stays copy-only and says so
 	// once per connection: silently serving the copy to a client who was
 	// promised MySQL semantics is the one thing this must not do.
 	bindReadRouter(h, srv, tgt, user, cfg, logger)
@@ -337,27 +337,32 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 	case tgt.SQL == nil:
 		logger.Warn("read routing off for this connection: SQL on the copy unavailable", "server", user, "reason", tgt.SQLUnavailable)
 		srv.RecordRouteUnavailable(tgt.ID, "SQL on the copy is unavailable ("+tgt.SQLUnavailable+")")
-	case tgt.SourceDSN == "":
+	case tgt.ForwardDSN == "":
 		logger.Warn("read routing off for this connection: the server has no source DSN to forward to", "server", user)
 		srv.RecordRouteUnavailable(tgt.ID, "the server has no source database to forward to")
 	default:
-		// The connection is opened with the TLS capture uses for this
+		// ForwardDSN is the server's forwarding account when it has one
+		// (#2079), else its source account. This Forwarder is the only
+		// thing the port ever opens on the source, so with a forwarding
+		// account set the capture account is not used here at all. Either
+		// way the connection is opened with the TLS capture uses for this
 		// server (tgt.SourceSSL), by capture's own rule.
-		fw, err := readrouter.NewForwarder(tgt.SourceDSN, tgt.SourceSSL, cfg.RoutePolicy, cfg.QueryTimeout)
+		fw, err := readrouter.NewForwarder(tgt.ForwardDSN, tgt.SourceSSL, cfg.RoutePolicy, cfg.QueryTimeout)
 		if err != nil {
 			// The DSN is the registry's own and was parsed to open the
 			// source; a scheme the forwarder does not speak, or a TLS
 			// setting that cannot be used, is the realistic cause. The
 			// message carries no secret.
 			logger.Warn("read routing off for this connection", "server", user, "err", err)
-			why := "the source address cannot be forwarded to (" + err.Error() + ")"
+			why := forwardAddressUnavailable(tgt.ForwardSeparate, err)
 			if problem, isTLS := strings.CutPrefix(err.Error(), "source TLS settings: "); isTLS {
 				why = "this server's TLS settings cannot be used (" + problem + ")"
 			}
 			srv.RecordRouteUnavailable(tgt.ID, why)
 		} else {
 			srv.RecordRouteAvailable(tgt.ID)
-			host := config.DSNHost(tgt.SourceDSN)
+			logger.Debug("read routing: connection bound", "server", user, "separate_forwarding_account", tgt.ForwardSeparate)
+			host := config.DSNHost(tgt.ForwardDSN)
 			fw.OnCleartext = func(err error) {
 				// The same thing capture says when its own connection to
 				// this source falls back, once per client connection.
@@ -378,6 +383,17 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 			})
 		}
 	}
+}
+
+// forwardAddressUnavailable says, in the words the Connect page shows, that
+// the DSN read routing would forward with cannot be used, and names which
+// of the server's two accounts it belongs to.
+func forwardAddressUnavailable(separate bool, err error) string {
+	why := strings.TrimPrefix(err.Error(), "source DSN: ")
+	if separate {
+		return "the forwarding account's address cannot be forwarded to (" + why + ")"
+	}
+	return "the source address cannot be forwarded to (" + why + ")"
 }
 
 // flashbackCreds authenticates the flashback port on the shared console token

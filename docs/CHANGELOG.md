@@ -37,6 +37,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`bintrail_read_routing_decisions_total{route="refused",reason="read_only"}`).
   Without the flag nothing changes. See
   [time-travel-sql.md](time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental).
+- **A separate account for what the routed port sends to MySQL** (#2079).
+  Until now read routing forwarded every statement with the account the
+  daemon captures with, so anyone holding the port's token could do on the
+  source whatever that account can. A server can now carry a forwarding
+  account: **Forwarding user** and **Forwarding password** on the server's
+  edit form, or `route_user` / `route_password` (or a whole `route_dsn`) on
+  `POST` / `PUT /api/servers`. With one set, everything the port does on
+  that server's MySQL (forwarded statements, the `EXPLAIN` behind each
+  decision, prepared statements, `USE`) runs as that account, and the
+  capture account is never opened by the port. Give it `SELECT` only and
+  the port cannot change the source even through a stored function, which
+  the read-only mode above, a check of the statement's text, cannot
+  promise alone. The password is stored like the source's and never
+  returned; an empty user removes the account; the account follows the
+  source when its address changes. The **Connect a SQL client** panel names
+  the user statements run as. Servers without one forward with the source
+  account, as before. MySQL and MariaDB sources.
 
 ### Fixed
 - **SQL on the copy prints a `DECIMAL` with its trailing zeros** (#2083). A

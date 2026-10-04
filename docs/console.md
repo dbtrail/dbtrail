@@ -508,7 +508,14 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
   in [upload.md → A store per server](upload.md#a-store-per-server-from-the-web-interface).
 - Registry fields: `source_dsn` (replication credentials — a secret with the
   same masking/keep-password discipline as the index DSN; `source_dsn: ""`
-  clears it), `source_server_id` (0 = derived), `schemas`, `monitor_desired`,
+  clears it), `route_dsn` (the optional forwarding account read routing
+  connects to the source with instead of `source_dsn`: a secret with the
+  same discipline, set through `route_user` / `route_password` or a raw
+  `route_dsn`, shown as `has_route` / `route_user` / `route_host` /
+  `route_port` / `has_route_password`; an empty `route_user` removes it, and
+  clearing the source removes it too; see
+  [time-travel-sql.md](time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental)),
+  `source_server_id` (0 = derived), `schemas`, `monitor_desired`,
   `archive_s3` (the bucket above — non-secret, round-trips in the masked DTO),
   `s3_endpoint` / `s3_path_style` (`path`, `vhost` or empty = path with an
   endpoint) / `s3_region` (the S3 store above — non-secret, round-trip too),
