@@ -2176,7 +2176,7 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 const newestVar = "bintrail_newest_snapshot"
 
 // filesVar is the session variable holding every file of the snapshot newestVar
-// names, sorted, from ONE listing taken when the file is read (#2063). The
+// names, sorted, from ONE listing taken when the file is read (#2064). The
 // state views pick their own files out of it instead of each listing the store
 // for its table: over S3 that was two listings per view, one after another, at
 // creation and again on every query (36 of them, 18 s of a 49 s load from a

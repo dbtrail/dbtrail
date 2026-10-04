@@ -25,7 +25,7 @@ func listedFixture(t *testing.T, root, stamp string) string {
 // would see the file at once, and every other test here would pass the same.
 // (A published snapshot never gains a file, so this staleness is not one a
 // reader meets.)
-func TestListedView_readsThroughTheSessionListing_2063(t *testing.T) {
+func TestListedView_readsThroughTheSessionListing_2064(t *testing.T) {
 	root, stamp := t.TempDir(), "2026-04-30T03-00-00Z"
 	base := writeSnapshot(t, root, stamp, true, "a", "b", "c")
 	sqlText := listedFixture(t, root, stamp)
@@ -55,7 +55,7 @@ func TestListedView_readsThroughTheSessionListing_2063(t *testing.T) {
 // statement alone (what the header used to say picks up a refresh), or naming
 // the snapshot by hand, moves newestVar and leaves the listing behind. The
 // views then ask the store, and read the snapshot newestVar names.
-func TestListedView_staleListingFallsBackToTheStore_2063(t *testing.T) {
+func TestListedView_staleListingFallsBackToTheStore_2064(t *testing.T) {
 	root := t.TempDir()
 	writeSnapshot(t, root, "2026-04-30T03-00-00Z", true, "old")
 	sqlText := listedFixture(t, root, "2026-04-30T03-00-00Z")

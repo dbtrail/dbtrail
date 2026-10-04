@@ -63,7 +63,7 @@ func TestFooterPrefetch_namesEveryFileTheViewsOpen_2053(t *testing.T) {
 	}
 
 	// A following file prefetches from its own listing of the snapshot, never
-	// from the files named at generation (#2063): it meets later snapshots.
+	// from the files named at generation (#2064): it meets later snapshots.
 	in.Follow = FollowNewest
 	if got := Generate(in); !strings.Contains(got, "parquet_file_metadata(") || strings.Contains(got, "'"+want[0]+"',") {
 		t.Error("a following file must prefetch from the session's listing, with no file named at generation")

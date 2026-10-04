@@ -293,18 +293,24 @@ takes 0.2 to 0.5 s, and a snapshot of 17 tables names 71 files.
   1.4 do not keep the footers between statements, so there the file opens one
   file at a time as before (50 to 60 s). Same rows and column types either way.
 - **A file that follows the newest snapshot** (the default, and what the
-  console's download gives) opens its files one after another: about 50 s from
-  a laptop for the same 17 tables, with the `_NEWEST` pointer in place. For an
-  analysis you open again and again from outside AWS, a pinned file is the
-  faster choice; generate a new one to move to a newer snapshot.
+  console's download gives) lists the snapshot it chose once, and reads the
+  footers the same parallel way on DuckDB 1.5 or newer: 49 s before, 9 s now
+  for the same 17 tables, with the `_NEWEST` pointer in place. Queries no
+  longer ask S3 for a listing each time. The listing lives in a session
+  variable next to the one naming the snapshot; reading the file again
+  refreshes both. A session that has only the snapshot variable (set by hand,
+  or a reopened database file) reads the slower way, with the same rows.
 
-A pinned S3 file also turns on DuckDB's `enable_http_metadata_cache`, so a
+Both kinds of file turn on DuckDB's `enable_http_metadata_cache`, so a
 query repeated in the same session does not ask S3 again whether each file
 changed (snapshot files never change once published). The setting covers the
 whole DuckDB session: if that session also reads S3 objects of yours that do
-change, run `RESET enable_http_metadata_cache;` after the file. A file that
-also reads the archives from S3 does not turn it on, because an archive can be
-rewritten under the same name.
+change, run `RESET enable_http_metadata_cache;` after the file (a following
+file then goes back to checking each file on every query). A following file
+keeps it off while it chooses the snapshot, so reading the file again in the
+same session still sees a refresh. A file that also reads the archives from S3
+does not turn it on, because an archive can be rewritten under the same name;
+that file opens the slower way.
 
 ### Backups in a folder, on a machine you are not on
 

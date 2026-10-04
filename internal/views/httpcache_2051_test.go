@@ -26,7 +26,7 @@ func TestHTTPMetadataCache_onlyPinnedS3_2051(t *testing.T) {
 		want bool
 	}{
 		{"pinned S3 snapshot", func() Input { in := base; in.BaselineSource = "s3://b/base/"; in.Baselines = s3Table; return in }, true},
-		// #2063: a following file turns it on too, after choosing the snapshot.
+		// #2064: a following file turns it on too, after choosing the snapshot.
 		{"S3 snapshot following the newest", func() Input {
 			in := base
 			in.BaselineSource = "s3://b/base/"
@@ -84,11 +84,11 @@ func TestHTTPMetadataCache_onlyPinnedS3_2051(t *testing.T) {
 	}
 }
 
-// #2063: in a following file the cache is OFF while the snapshot is chosen and
+// #2064: in a following file the cache is OFF while the snapshot is chosen and
 // ON only after it. With it on, DuckDB 1.4 and 1.5 answer a second read of
 // _NEWEST in one session from the first (measured), so a file read again
 // would never see a refresh.
-func TestHTTPMetadataCache_offWhileTheSnapshotIsChosen_2063(t *testing.T) {
+func TestHTTPMetadataCache_offWhileTheSnapshotIsChosen_2064(t *testing.T) {
 	in := newestInput()
 	in.ArchiveSources = nil
 	for _, ptr := range []string{"", "2026-04-30T03-00-00Z"} {
