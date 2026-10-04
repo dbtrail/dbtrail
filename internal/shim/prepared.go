@@ -149,7 +149,12 @@ func (h *Handler) HandleStmtPrepare(query string) (params int, columns int, cont
 	return len(parts) - 1, 0, &preparedStmt{parts: parts, mysqlEscapes: mysqlEscapes}, nil
 }
 
-// HandleStmtExecute answers COM_STMT_EXECUTE: the template with its
+// HandleStmtExecute answers COM_STMT_EXECUTE. The arguments must come from a
+// Session: go-mysql's own command loop hands over nil for every argument of
+// a re-execution whose types the client did not re-send, which would run
+// here as `= NULL`.
+//
+// The template with its
 // arguments written in, run as text, its rows re-encoded for the binary
 // protocol. The statement runs buffered: a resultset streamed to the
 // connection would be text rows, which this client cannot read.
@@ -157,15 +162,6 @@ func (h *Handler) HandleStmtExecute(context any, _ string, args []any) (*mysql.R
 	st, ok := context.(*preparedStmt)
 	if !ok {
 		return nil, mysql.NewError(mysql.ER_UNKNOWN_STMT_HANDLER, "unknown prepared statement")
-	}
-	if allNil(args) {
-		// go-mysql's server decodes the arguments only when the client
-		// re-sends their types, and hands over nil for every one when it
-		// does not (Connector/J, the C API and PHP's mysqlnd skip the types
-		// from the second execute on). That is indistinguishable here from
-		// every argument bound to NULL, and running it would answer
-		// `WHERE id = NULL`: an empty result, no error. Refused instead.
-		return nil, mysql.NewError(mysql.ER_WRONG_ARGUMENTS, "every argument of this prepared statement arrived as NULL: this port cannot tell that from a re-execution whose argument types were not re-sent, so it does not run it; send the statement as text (client-side prepares)")
 	}
 	text, err := st.interpolate(args)
 	if err != nil {
@@ -198,16 +194,6 @@ func (h *Handler) HandleStmtExecute(context any, _ string, args []any) (*mysql.R
 
 // HandleStmtClose answers COM_STMT_CLOSE: nothing is held per statement.
 func (h *Handler) HandleStmtClose(any) error { return nil }
-
-// allNil: a statement with placeholders whose every argument is nil.
-func allNil(args []any) bool {
-	for _, a := range args {
-		if a != nil {
-			return false
-		}
-	}
-	return len(args) > 0
-}
 
 // interpolate writes the arguments into the template.
 func (st *preparedStmt) interpolate(args []any) (string, error) {

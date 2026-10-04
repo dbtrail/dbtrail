@@ -1956,8 +1956,9 @@ func runHandshakeTest(t *testing.T, serverUser, serverPass, clientUser, clientPa
 			serverErr <- err
 			return
 		}
+		session := NewSession(mc, h)
 		for {
-			if err := mc.HandleCommand(); err != nil {
+			if err := session.HandleCommand(); err != nil {
 				serverErr <- nil
 				return
 			}

@@ -117,10 +117,9 @@ func TestIntegrationFlashbackPreparedStatements(t *testing.T) {
 	if err := conn.QueryRowContext(ctx, "SELECT max(status) FROM orders WHERE status = ? AND id > ?", nil, -1).Scan(&maybe); err != nil || maybe.Valid {
 		t.Errorf("max over no rows = %+v, %v; want NULL", maybe, err)
 	}
-	// Every argument NULL is refused with its reason: the port cannot tell
-	// it from a re-execution whose arguments were never decoded.
-	if err := conn.QueryRowContext(ctx, "SELECT max(status) FROM orders WHERE status = ?", nil).Scan(&maybe); err == nil || !strings.Contains(err.Error(), "arrived as NULL") {
-		t.Errorf("an all-NULL execution: %+v, %v; want the refusal that names the cause", maybe, err)
+	// So does a statement whose every argument is NULL.
+	if err := conn.QueryRowContext(ctx, "SELECT max(status) FROM orders WHERE status = ?", nil).Scan(&maybe); err != nil || maybe.Valid {
+		t.Errorf("an all-NULL execution = %+v, %v; want NULL", maybe, err)
 	}
 	// A negative argument after a minus is arithmetic, not the copy's comment.
 	var sum int
@@ -128,15 +127,14 @@ func TestIntegrationFlashbackPreparedStatements(t *testing.T) {
 		t.Errorf("5-(-3) = %d, %v; want 8", sum, err)
 	}
 
-	// Refusals reach the client with their words. The code of an EXECUTE
-	// error is always 1105: go-mysql wraps what the handler returns before
-	// its error writer looks for a MySQL code, so the original code travels
-	// in the message.
-	if _, err := conn.ExecContext(ctx, "DELETE FROM orders WHERE id = ?", 1); mysqlCode(err) != 1105 || !strings.Contains(err.Error(), "1064") || !strings.Contains(err.Error(), "only a single SELECT") {
-		t.Errorf("prepared DELETE: err = %v, want 1105 carrying the 1064 refusal", err)
+	// Refusals reach the client with their words and their code, the same
+	// ones the statement gets as text.
+	if _, err := conn.ExecContext(ctx, "DELETE FROM orders WHERE id = ?", 1); mysqlCode(err) != 1064 || !strings.Contains(err.Error(), "only a single SELECT") {
+		t.Errorf("prepared DELETE: err = %v, want the 1064 refusal", err)
 	}
-	if _, err := conn.QueryContext(ctx, "SELECT * FROM nope WHERE id = ?", 1); mysqlCode(err) != 1105 || !strings.Contains(err.Error(), "does not exist") {
-		t.Errorf("prepared SELECT on a missing table: err = %v, want 1105 naming the missing table", err)
+	_, textErr := conn.QueryContext(ctx, "SELECT * FROM nope WHERE id = 1")
+	if _, err := conn.QueryContext(ctx, "SELECT * FROM nope WHERE id = ?", 1); err == nil || !strings.Contains(err.Error(), "does not exist") || mysqlCode(err) != mysqlCode(textErr) {
+		t.Errorf("prepared SELECT on a missing table: err = %v; want the error the text statement gets (%v)", err, textErr)
 	}
 
 	// The time-travel shapes take arguments the same way, on the same
