@@ -506,7 +506,7 @@ func Generate(in Input) string {
 		// baselines are local and whose archives are on S3. The degrade
 		// documented below is about the ATTACH, not about credentials.
 		writeS3Preamble(&b, region, in.S3Endpoint, in.RegionAmbiguous, in.BucketStores)
-		if !in.Follow.follows() {
+		if in.cachesHTTPMetadata() {
 			writeHTTPMetadataCache(&b)
 		}
 	}
@@ -1079,6 +1079,28 @@ func writeTimeZone(b *strings.Builder) {
 	b.WriteString("SET TimeZone = 'UTC';\n\n")
 }
 
+// cachesHTTPMetadata reports whether the file turns on DuckDB's HTTP metadata
+// cache (#2051): its state views are pinned and read S3, and it reads no
+// archive from S3. The setting covers the whole DuckDB session, not this
+// file's views, so the events view rules it out: an hour's archive keeps one
+// key and is uploaded again when a partition is archived a second time
+// before it is dropped, and with the cache on a reader would keep the first
+// upload's size and bytes.
+func (in Input) cachesHTTPMetadata() bool {
+	if in.Follow.follows() {
+		return false
+	}
+	if in.rendersEvents() {
+		for _, s := range in.ArchiveSources {
+			if isS3(s) {
+				return false
+			}
+		}
+	}
+	// Only reached from inside NeedsS3, so a state view here reads S3.
+	return len(selectedStatePlans(in)) > 0
+}
+
 // writeHTTPMetadataCache turns on DuckDB's HTTP metadata cache for a file
 // pinned to one snapshot (#2051). DuckDB keeps the bytes it reads from S3 for
 // the session, but by default re-checks every cached file with a HEAD before
@@ -1090,8 +1112,11 @@ func writeTimeZone(b *strings.Builder) {
 // would do the same but only exists from 1.5, and an unknown setting stops
 // the whole file from loading.
 func writeHTTPMetadataCache(b *strings.Builder) {
-	b.WriteString("-- The files below never change once published, so DuckDB need not re-check\n")
-	b.WriteString("-- each one with S3 before every query.\n")
+	b.WriteString("-- The snapshot files below never change once published, so DuckDB need not\n")
+	b.WriteString("-- ask S3 again before every query whether each one changed. This setting\n")
+	b.WriteString("-- covers this whole DuckDB session, not only these views: if the same session\n")
+	b.WriteString("-- also reads S3 objects of yours that do change, turn it back off with\n")
+	b.WriteString("-- RESET enable_http_metadata_cache;\n")
 	b.WriteString("SET enable_http_metadata_cache = true;\n\n")
 }
 

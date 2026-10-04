@@ -45,10 +45,6 @@ CREATE OR REPLACE SECRET bintrail_s3_chain (TYPE s3, PROVIDER credential_chain, 
 --   CREATE OR REPLACE SECRET bintrail_s3_chain (
 --     TYPE s3, KEY_ID '…', SECRET '…', REGION '…');
 
--- The files below never change once published, so DuckDB need not re-check
--- each one with S3 before every query.
-SET enable_http_metadata_cache = true;
-
 -- <schema>.<table>: each table's full contents as of the baseline snapshot.
 -- Each table keeps its own name: SELECT * FROM demo.prices, and a name DuckDB
 -- cannot read bare is quoted, as in demo."order.items".

@@ -69,8 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dashboards) now turns on `enable_http_metadata_cache`, safe because a
   published snapshot's files never change: the same query takes about 0.2 s
   and makes no S3 request (measured on DuckDB 1.3, 1.4 and 1.5). The setting
-  exists since DuckDB 1.1, so the file still loads on every version it did. A
-  file that follows the newest snapshot is unchanged.
+  exists since DuckDB 1.1, so the file still loads on every version it did.
+  It covers the reader's whole DuckDB session, and the file says so and how
+  to turn it off (`RESET enable_http_metadata_cache`). A file that follows
+  the newest snapshot, or that also reads the change log from S3 (an
+  archived hour keeps its key and can be uploaded again), does not get it.
 - **SQL on the copy waits for a free slot instead of refusing at once**
   (#2033). When every slot is busy, a statement on the SQL card or the
   embedded MySQL port now waits up to 30 seconds and runs as soon as a slot
