@@ -190,6 +190,12 @@ if [ ! -f "$DIR/docker-compose.yml" ]; then
     Choose one with DBTRAIL_METRICS_PORT."
     MPORT_MOVED=1
   fi
+  # The MySQL-protocol port (3309) is off until it is turned on in the web
+  # interface, so a taken 3309 is no reason to fail: the stack is installed
+  # without publishing it, and says so.
+  if [ "$PORT" = "3309" ] || [ "$MPORT" = "3309" ] || port_in_use 3309; then
+    SQLPORT_SKIP=1
+  fi
 fi
 
 # Need curl or wget to fetch the compose file.
@@ -245,6 +251,16 @@ else
     installer expected. Edit it by hand, or report it."
     fi
     say "${DIM}    DBTrail will answer on port ${PORT}${RST}"
+  fi
+  if [ -n "${SQLPORT_SKIP:-}" ]; then
+    grep -v '"127.0.0.1:3309:3309"' docker-compose.yml > docker-compose.yml.tmp \
+      && mv docker-compose.yml.tmp docker-compose.yml
+    if grep -Eq '^[[:space:]]*- .*3309:3309' docker-compose.yml; then
+      die "Port 3309 is in use on this machine and the MySQL port's published-port
+    line in ${DIR}/docker-compose.yml isn't what this installer expected. Delete
+    that 'ports:' line by hand, or report it."
+    fi
+    say "${DIM}    port 3309 is taken, so the MySQL port is not published (add a 'ports:' line to docker-compose.yml to use it)${RST}"
   fi
   # Same rewrite for the metrics mapping, verified the same way.
   if [ "$MPORT" != "9090" ]; then

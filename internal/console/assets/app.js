@@ -13421,11 +13421,12 @@ function otherClientsPanel(servers) {
 // _flashback / _snapshot / _diff schemas for every monitored server over the
 // MySQL protocol, routed by the connection USERNAME (the server's registry
 // name or id, "default" for the boot entry: the same selector /mcp uses, so
-// mcpSelector is reused) and authenticated with the console token. Display
-// only: the port is daemon configuration, so this panel can say where it is,
-// or that it is off and what turns it on, and never toggle it. Status comes
-// from GET /api/flashback; a null status means the call failed, and the panel
-// says so instead of guessing an address.
+// mcpSelector is reused) and authenticated with the console token or with the
+// port's own password. A daemon that was not given the port's address at
+// startup lets this panel turn the port on and off (#2101); one that was
+// shows where it is and never toggles it. Status comes from GET
+// /api/flashback; a null status means the call failed, and the panel says so
+// instead of guessing an address.
 
 // shellWord quotes a value for the copy-paste mysql line when it carries
 // anything a shell would split or expand (a display name with a space).
@@ -13440,7 +13441,27 @@ function flashbackHost(fb) {
   // location.hostname keeps the brackets of an IPv6 literal ("[::1]"), while
   // a named bind comes through Go's SplitHostPort bare ("::1"); strip them so
   // both shapes print the same way.
-  return fb.host || (location.hostname || "").replace(/^\[|\]$/g, "") || "127.0.0.1";
+  // "localhost" is the one name that must not be printed: the mysql client
+  // reads it as "use the local socket file" and never tries the port.
+  const page = (location.hostname || "").replace(/^\[|\]$/g, "");
+  return fb.host || (page.toLowerCase() === "localhost" ? "" : page) || "127.0.0.1";
+}
+
+// changeSQLPort sends one change to the port (on, off, new password) and
+// draws the panel again from the answer, in place. reveal is the password,
+// present only in the answer that created it.
+function changeSQLPort(panel, servers, method, path, body, btn) {
+  if (btn) btn.disabled = true;
+  return api(path, { method, body }).then((rep) => {
+    // The fresh render's buttons are wired to panel, the element on the
+    // page, not to the detached section they were built in: otherwise the
+    // second press would redraw something nobody is looking at.
+    const fresh = sqlClientPanel(servers, rep, rep && rep.password, panel);
+    panel.replaceChildren(...Array.from(fresh.children));
+  }, (err) => {
+    if (btn) btn.disabled = false;
+    toastError("MySQL port: " + ((err && err.message) || err));
+  });
 }
 
 // sqlClientPanel renders the port's state in one of four shapes: could not
@@ -13449,8 +13470,11 @@ function flashbackHost(fb) {
 // (address, user rule, password rule, and the ready-to-copy mysql line for
 // the server picked in the sidebar). Not a .cn-card: the three numbered cards
 // are the Connect AI how-to, and this is a different client.
-function sqlClientPanel(servers, fb) {
+function sqlClientPanel(servers, fb, reveal, live) {
   const panel = el("section", { class: "ov-panel cn-sql", style: "margin-top:18px" });
+  // live: the panel already on the page that this render will be moved
+  // into (changeSQLPort); the buttons act on that one.
+  live = live || panel;
   panel.append(el("div", { class: "ov-panel-head" }, el("h2", { class: "ov-panel-title", text: "Connect a SQL client" })));
   const body = el("div", { class: "cn-sql-body" });
   panel.append(body);
@@ -13467,6 +13491,22 @@ function sqlClientPanel(servers, fb) {
         "Not available: this DBTrail is read-only. The time-travel port is part of the DBTrail service (CLI: ",
         el("code", { text: "bintrail-console watch --flashback-listen" }),
         "). Start DBTrail that way and your usual MySQL client can read any table as it was at a chosen moment."));
+      return panel;
+    }
+    if (fb.can_manage) {
+      if (!sessionMay("settings:write")) {
+        body.append(el("p", { class: "cn-sql-row", text: "Off. Someone who can change settings can turn it on here." }));
+        return panel;
+      }
+      body.append(el("p", { class: "cn-sql-row", text: "Off. Turn it on and your usual MySQL client can read any table as it was at a chosen moment." }));
+      if (fb.error) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: "It was on and did not start: " + fb.error }));
+      const addr = el("input", { class: "input cn-sql-addr", type: "text", value: fb.suggested_listen || "", "aria-label": "Port address", spellcheck: "false", autocomplete: "off" });
+      const on = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Turn on" });
+      on.onclick = () => changeSQLPort(live, servers, "PUT", "/api/flashback", { enabled: true, listen: addr.value }, on);
+      body.append(el("div", { class: "cn-urlrow" }, el("span", { class: "cn-sql-lbl", text: "Address" }), addr, on));
+      body.append(cnFine("Which address, and the password",
+        el("p", { class: "form-hint", text: "127.0.0.1 answers only on the machine DBTrail runs on. 0.0.0.0 answers on every network address of that machine. In the Docker install keep 0.0.0.0. Who can reach the port is then decided by docker-compose.yml: a new install publishes it to the machine itself only, and one installed before this existed does not publish it until its ports line is added." }),
+        el("p", { class: "form-hint", text: "Turning it on creates the port's password. It is shown once, right then." })));
       return panel;
     }
     body.append(el("p", { class: "cn-sql-row", text: "Off. The port is set when DBTrail starts, not from the web interface." }));
@@ -13488,18 +13528,39 @@ function sqlClientPanel(servers, fb) {
   body.append(el("p", { class: "cn-sql-row" }, "User ",
     user ? el("code", { text: user }) : el("code", { text: "<server name>" }),
     user ? ", the server picked in the left sidebar" : ", the name of a server in the left sidebar (none yet)"));
-  body.append(el("p", { class: "cn-sql-row" },
-    "Password: the access token (CLI: ", el("code", { text: "--console-token" }), " or ", el("code", { text: "BINTRAIL_CONSOLE_TOKEN" }), "), never shown in the web interface"));
+  const own = fb.source === "saved";
+  if (own && reveal) {
+    // Drawn whatever else the answer says: after a new password this is the
+    // only place the working one exists.
+    body.append(el("p", { class: "cn-sql-row", text: "Password, shown only now. Copy it and keep it somewhere safe:" }));
+    body.append(el("div", { class: "cn-urlrow" },
+      el("code", { class: "stg-code cn-url", text: reveal }),
+      el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(reveal, "Port password") })));
+  } else if (own) {
+    body.append(el("p", { class: "cn-sql-row", text: "Password: the one shown when it was created" +
+      (fb.password_created_at ? ", " + utcLabel(fb.password_created_at) : "") + ". It cannot be shown again." }));
+  } else {
+    body.append(el("p", { class: "cn-sql-row" },
+      "Password: the access token (CLI: ", el("code", { text: "--console-token" }), " or ", el("code", { text: "BINTRAIL_CONSOLE_TOKEN" }), "), never shown in the web interface"));
+  }
   if (fb.port) {
     const line = "mysql -h " + shellWord(flashbackHost(fb)) + " -P " + fb.port + " -u " + (user ? shellWord(user) : "<server-name>") + " -p";
     body.append(el("div", { class: "cn-urlrow" },
       el("code", { class: "stg-code cn-url", text: line }),
       el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(line, "mysql command") })));
-    body.append(el("p", { class: "cn-sql-row", text: "Paste the token at the password prompt." }));
+    body.append(el("p", { class: "cn-sql-row", text: own ? "Paste the password at the password prompt." : "Paste the token at the password prompt." }));
   }
   // The port does not filter by schema (#1685): say so, so it is not taken
   // for a path that scopes access per schema.
   body.append(el("p", { class: "cn-sql-row", text: "This password reads every schema on every server in the sidebar." }));
+  if (fb.can_manage && sessionMay("settings:write")) {
+    const ask = (q) => typeof window.confirm !== "function" || window.confirm(q);
+    const fresh = el("button", { class: "btn btn-sm", type: "button", text: "New password" });
+    fresh.onclick = () => { if (ask("Create a new password?\n\nThe current one stops working for new connections.")) changeSQLPort(live, servers, "POST", "/api/flashback/password", {}, fresh); };
+    const off = el("button", { class: "btn btn-sm btn-danger", type: "button", text: "Turn off" });
+    off.onclick = () => { if (ask("Turn the port off?\n\nMySQL clients connected to it are disconnected.")) changeSQLPort(live, servers, "PUT", "/api/flashback", { enabled: false }, off); };
+    body.append(el("div", { class: "cn-links" }, fresh, off));
+  }
   body.append(routingBlock(fb, cur));
   body.append(cnFine("What to run, and other machines",
     el("p", { class: "form-hint" }, "Ask for a table as it was: ",
@@ -13507,7 +13568,7 @@ function sqlClientPanel(servers, fb) {
       " Use _snapshot for the whole table (needs a snapshot) and _diff for what changed between two moments. The user picks the server, so each server has its own line; pick another in the sidebar and copy again."),
     el("p", { class: "form-hint", text: fb.host
       ? "The port answers on that address only. Run mysql where it can reach it (on the machine DBTrail runs on when it is 127.0.0.1), or open a tunnel to it."
-      : "The port answers on every network address of the machine DBTrail runs on; the command uses the name the web interface was opened with. If that name is a reverse proxy in front of DBTrail, it does not pass this port through, so use that machine's own name or address instead." })));
+      : "The port answers on every network address of the machine DBTrail runs on; the command uses the name the web interface was opened with. If that name is a reverse proxy in front of DBTrail, it does not pass this port through, so use that machine's own name or address instead. In the Docker install, docker-compose.yml decides who can reach it: a new install publishes it to the machine itself only." })));
   return panel;
 }
 
