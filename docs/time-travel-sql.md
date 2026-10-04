@@ -375,9 +375,16 @@ What this is and is not:
   (`utf8mb4_bin`, `utf8mb4_0900_bin`, `latin1_bin`, ...), by its own
   definition or by its table's default, is compared byte by byte on the
   copy as well: the copy reads each column's collation from the `CREATE
-  TABLE` stored with the snapshot. Close, not identical: `'ß' = 'ss'` and
-  full-width letters are equal under `utf8mb4_0900_ai_ci` and not on the
-  copy; a column MySQL declares `_cs` (`utf8mb4_0900_as_cs`) is
+  TABLE` stored with the snapshot. Close, not identical: `'ß' = 'ss'`,
+  full-width letters (`'Ａ' = 'A'`), ligatures and letters with a stroke
+  (`'æ' = 'ae'`, `'ø' = 'o'`, `'ł' = 'l'`), and hiragana against katakana
+  are equal under `utf8mb4_0900_ai_ci` and not on the copy, which folds
+  case and accents and nothing else; and where MySQL sorts every
+  punctuation mark before the digits, the copy sorts them by their ASCII
+  code (`:` and `@` after the digits). One DuckDB
+  collation does all of that as MySQL does (`nocase.icu_noaccent`); the
+  copy does not use it because it makes every comparison of text about
+  twice as slow. A column MySQL declares `_cs` (`utf8mb4_0900_as_cs`) is
   case-insensitive on the copy, because bytes would compare it right and
   sort it wrong (`_cs` puts `a` before `B`, bytes do not); a column under a
   PAD SPACE collation (every collation older than the `0900` ones:

@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **SQL on the copy: the text differences from MySQL are listed in full**
+  (#2083). The documentation named `'ß' = 'ss'` as the one equality the copy
+  does not share with MySQL's default collation. Measured against MySQL 8.4,
+  there are more of the same kind (full-width letters, `'æ' = 'ae'`,
+  `'ø' = 'o'`, hiragana against katakana) and one in `ORDER BY` (punctuation
+  sorts by ASCII code on the copy, before the digits on MySQL).
+  `docs/time-travel-sql.md` now lists them, and says which DuckDB collation
+  would close them and what it costs. Nothing in the copy's behavior changes.
+
 ### Fixed
 - **SQL on the copy: a `_bin` column compares byte by byte, as on MySQL**
   (#2083). The copy compares text without case or accents, to match MySQL's
