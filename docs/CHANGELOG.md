@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SQL on the copy also says so when it cannot find out where the change log
   is, instead of DuckDB's "table does not exist".
 
+
+## [0.98.0] - 2026-10-04
 ### Changed
 - **SQL on the copy says what to use when `events` is in S3** (#2028). On the
   bundled stack the change log is only in S3, so `events` was never readable
