@@ -350,7 +350,7 @@ func sortKeys(ks []key) {
 // insertAction builds the full-row insert for a file (or backend pair)
 // with no registry row. The column set mirrors rotate's upsert, PLUS
 // s3_uploaded_at when the S3 object was confirmed — rotate stamps that in
-// a separate post-upload UPDATE, and hasPendingS3Upload treats
+// a separate post-upload UPDATE, and pendingS3Uploads treats
 // s3_bucket-set + s3_uploaded_at-NULL as an upload still pending, which
 // makes rotate REFUSE to drop the partition. A reconcile row must never
 // manufacture that phantom pending state.
@@ -387,7 +387,7 @@ func insertAction(k key, local, s3f *ScannedFile) Action {
 //   - row_count drift → update only under Deep (footer reads are the
 //     expensive part on S3)
 //   - S3 object confirmed but s3_uploaded_at NULL → stamp it (the
-//     hasPendingS3Upload drop-block trap, see insertAction)
+//     pendingS3Uploads drop-block trap, see insertAction)
 //
 // Backends NOT scanned this run are never touched.
 func updateAction(k key, row *StateRow, local, s3f *ScannedFile, opts DiffOptions) (Action, bool) {
@@ -427,7 +427,7 @@ func updateAction(k key, row *StateRow, local, s3f *ScannedFile, opts DiffOption
 			)
 			addReason("S3 object present but not (correctly) registered")
 		case s3f != nil && !row.S3UploadedAt.Valid:
-			// Object confirmed; stamp the upload so hasPendingS3Upload
+			// Object confirmed; stamp the upload so pendingS3Uploads
 			// doesn't read this row as an upload forever in flight.
 			a.Changes = append(a.Changes, FieldChange{"s3_uploaded_at", s3f.LastModified.UTC()})
 			addReason("S3 object confirmed but s3_uploaded_at was never stamped (would block partition drops)")

@@ -339,17 +339,18 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 					}
 
 					// Safety check: never drop a partition that has a pending S3 upload,
-					// even if the current run does not have --archive-s3 configured.
-					pending, err := hasPendingS3Upload(ctx, db, name, opts.BintrailID)
+					// even if the current run does not have --archive-s3 configured,
+					// and whichever source the upload belongs to (#2088).
+					pendingBy, err := pendingS3Uploads(ctx, db, name)
 					if err != nil {
 						return Result{}, fmt.Errorf("check pending S3 upload for %s: %w", name, err)
 					}
-					if pending {
+					if len(pendingBy) > 0 {
 						slog.Warn("partition archived locally but not yet uploaded to S3; skipping drop",
-							"partition", name)
+							"partition", name, "pending_sources", strings.Join(pendingBy, ","))
 						if opts.Format != "json" {
-							fmt.Fprintf(os.Stdout, "skipped drop for %s (pending S3 upload)\n", name)
-							fmt.Fprintf(os.Stdout, "  run 'bintrail rotate --retry --archive-s3 ...' to retry\n")
+							fmt.Fprintf(os.Stdout, "skipped drop for %s (pending S3 upload for %s)\n", name, strings.Join(pendingBy, ", "))
+							fmt.Fprintf(os.Stdout, "  run 'bintrail rotate --retry --archive-s3 ...' for that source to retry\n")
 						}
 						// A still-pending upload is an undropped partition too — count it
 						// so the loop escalates rather than reporting a healthy cycle.
@@ -457,15 +458,16 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 							continue
 						}
 					}
-					pending, err := hasPendingS3Upload(ctx, db, name, opts.BintrailID)
+					pendingBy, err := pendingS3Uploads(ctx, db, name)
 					if err != nil {
 						return Result{}, fmt.Errorf("check pending S3 upload for %s: %w", name, err)
 					}
-					if pending {
+					if len(pendingBy) > 0 {
 						slog.Warn("partition has pending S3 upload from a previous run; skipping drop",
-							"partition", name)
+							"partition", name, "pending_sources", strings.Join(pendingBy, ","))
 						if opts.Format != "json" {
-							fmt.Fprintf(os.Stdout, "skipped drop for %s (pending S3 upload)\n", name)
+							fmt.Fprintf(os.Stdout, "skipped drop for %s (pending S3 upload for %s)\n", name, strings.Join(pendingBy, ", "))
+							fmt.Fprintf(os.Stdout, "  run 'bintrail rotate --retry --archive-s3 ...' for that source to retry\n")
 						}
 						continue
 					}
@@ -555,35 +557,39 @@ var uploadFileFunc = storage.UploadFile
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// hasPendingS3Upload reports whether archive_state records a non-empty S3
-// destination (s3_bucket) for the given partition that has not yet been uploaded
-// (s3_uploaded_at IS NULL). When bintrailID is empty, it checks across all
-// bintrail_ids for that partition. Returns false if no archive_state row exists
-// or if the row has no S3 bucket (NULL or empty).
-func hasPendingS3Upload(ctx context.Context, db *sql.DB, partition, bintrailID string) (bool, error) {
-	var pending bool
-	var err error
-	if bintrailID != "" {
-		err = db.QueryRowContext(ctx,
-			`SELECT COUNT(*) > 0 FROM archive_state
-			WHERE partition_name = ? AND bintrail_id = ?
-			  AND s3_bucket IS NOT NULL AND s3_bucket != ''
-			  AND s3_uploaded_at IS NULL`,
-			partition, bintrailID,
-		).Scan(&pending)
-	} else {
-		err = db.QueryRowContext(ctx,
-			`SELECT COUNT(*) > 0 FROM archive_state
-			WHERE partition_name = ?
-			  AND s3_bucket IS NOT NULL AND s3_bucket != ''
-			  AND s3_uploaded_at IS NULL`,
-			partition,
-		).Scan(&pending)
-	}
+// pendingS3Uploads returns the bintrail_id of every source whose archive_state
+// row for this partition records an S3 destination (a non-empty s3_bucket)
+// that has not been uploaded yet (s3_uploaded_at IS NULL), sorted. Empty when
+// there is none: no row, a row with no bucket (a local-only archive), or an
+// uploaded one.
+//
+// Deliberately NOT scoped to the source that is rotating (#2088). The
+// partitions of an index belong to every source that writes to it, so a drop
+// run by one source removes the hour for all of them, and a pending row is
+// read elsewhere as "this hour is still in the live index" (the archive
+// resolver in internal/query counts it as covered by S3 on that basis). A row
+// with a NULL or empty bintrail_id is reported as "(no id)".
+func pendingS3Uploads(ctx context.Context, db *sql.DB, partition string) ([]string, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT DISTINCT COALESCE(NULLIF(bintrail_id, ''), '(no id)') AS source FROM archive_state
+		WHERE partition_name = ?
+		  AND s3_bucket IS NOT NULL AND s3_bucket != ''
+		  AND s3_uploaded_at IS NULL
+		ORDER BY source`,
+		partition)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	return pending, nil
+	defer rows.Close()
+	var sources []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		sources = append(sources, id)
+	}
+	return sources, rows.Err()
 }
 
 // indexHasArchives reports whether archive_state contains any rows at all —
