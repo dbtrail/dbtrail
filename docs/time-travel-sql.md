@@ -123,6 +123,15 @@ What to know before relying on it:
   `phases_ms` field of the SQL card's response, and the
   `bintrail_sql_statement_phase_seconds` histogram say where each
   statement's time went.
+- **Text compares close to MySQL's default collation, not DuckDB's.**
+  `'Paid' = 'paid'` and `'café' = 'cafe'` are true, `GROUP BY` and `SELECT
+  DISTINCT` fold them, `ORDER BY` sorts them together, and NULLs sort first
+  on an ascending `ORDER BY` and last on a descending one, as on MySQL
+  (`utf8mb4_0900_ai_ci`). Not folded: `LIKE`, `REGEXP`, `count(DISTINCT
+  ...)`, `instr`/`position`/`contains`, `'ß' = 'ss'`; and a column MySQL
+  declares `_bin` or `_cs` is case-insensitive here too. The same applies to
+  the SQL card; a DuckDB of your own over the same files (see
+  [Dashboards](dashboards.md)) keeps DuckDB's defaults.
 - **Read-only, one SELECT per statement.** Anything else is refused with
   1064. A result cut at the row cap, or a cell cut at the cell cap, raises a
   warning the client counts; `SHOW WARNINGS` says which.
@@ -213,15 +222,21 @@ What this is and is not:
   be served by the copy.
 - **Where the copy answers differently without an error.** The veto list
   keeps the known cases on MySQL (`GROUP_CONCAT`, the `NOW()` family,
-  `COLLATE`, `DIV`, `||`, `^`, double-quoted string literals, variables,
-  ...), but three differences cannot be vetoed by looking at the statement
-  and apply to every copy-served read: **text comparison is
-  case-sensitive on the copy** (MySQL's default collations treat `'Paid'`
-  and `'paid'` as equal in `WHERE`, `GROUP BY`, `DISTINCT` and `ORDER BY`;
-  DuckDB does not), **NULLs sort last on the copy** on an ascending `ORDER
-  BY` (first on MySQL), and **`AVG` and `/` return full double precision**
-  (MySQL rounds to four decimals). If a workload depends on any of these,
-  keep the copy for the reads where they do not matter, or leave routing off.
+  `LIKE`/`REGEXP`, `COLLATE`, `DIV`, `||`, `^`, double-quoted string
+  literals, `count(DISTINCT ...)`, `INSTR`/`LOCATE`, variables, ...). The
+  copy itself compares text close to the way MySQL's default collation
+  does: `'Paid'` and `'paid'`, `'café'` and `'cafe'` are equal in `WHERE`,
+  `GROUP BY`, `SELECT DISTINCT`, `IN` and `ORDER BY`, and NULLs sort first
+  on an ascending `ORDER BY` and last on a descending one (DuckDB's
+  `default_collation` and `default_null_order`, fixed in the copy's locked
+  session). Close, not identical: `'ß' = 'ss'` and full-width letters are
+  equal under `utf8mb4_0900_ai_ci` and not on the copy; a column MySQL
+  declares case-sensitive (`_bin`, `_cs`) is case-insensitive on the copy;
+  a legacy `utf8mb4_general_ci` column ignores trailing spaces on MySQL and
+  not here; and **`AVG` and `/` return full double precision** (MySQL
+  rounds to four decimals). None of these can be caught per statement. If a
+  workload depends on one, keep the copy for the reads where they do not
+  matter, or leave routing off.
 - **The thresholds are knobs, not truths.** The optimizer's cost is its
   own estimate; it misleads on `LIMIT`, on cached data and on skewed values.
   Start with the defaults, read the daemon's log (every decision is logged

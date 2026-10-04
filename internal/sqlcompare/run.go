@@ -137,16 +137,18 @@ func Run(ctx context.Context, opts Options, statements []string) (*Report, error
 // probeCopy makes sure --copy-dsn is the copy with routing OFF. With routing
 // on, the port forwards every cheap statement to MySQL and this tool would
 // compare MySQL with MySQL: every line EQUAL, exit 0, the worst possible
-// outcome. 'a' = 'A' is true on MySQL (case-insensitive collation) and false
-// on the copy; it is vetoed by nothing and its plan is trivial, so a routing
-// port forwards it.
+// outcome. `2 ^ 3` is vetoed by the router (so a routing port forwards it
+// to MySQL, where ^ is XOR: 1), while on the copy ^ is power: 8. Independent
+// of collation and sql_mode, which a probe such as 'a' = 'A' was not once
+// the copy folded case; and not connection chatter the port answers itself
+// (version() is).
 func probeCopy(ctx context.Context, c *sql.Conn) error {
 	var v sql.NullString
-	if err := c.QueryRowContext(ctx, "SELECT 'a' = 'A'").Scan(&v); err != nil {
+	if err := c.QueryRowContext(ctx, "SELECT 2 ^ 3").Scan(&v); err != nil {
 		return fmt.Errorf("the copy cannot run SQL (%w); --copy-dsn must be the console's MySQL-protocol port for a server whose copy is on local disk", err)
 	}
-	if v.Valid && (v.String == "1" || strings.EqualFold(v.String, "true")) {
-		return errors.New("--copy-dsn answered like MySQL: the port has read routing on (--route-max-copy-age); sql-compare needs a port with routing off, so every statement runs on the copy")
+	if !v.Valid || !strings.HasPrefix(v.String, "8") {
+		return fmt.Errorf("--copy-dsn answered like MySQL (2 ^ 3 = %q): the port has read routing on (--route-max-copy-age); sql-compare needs a port with routing off, so every statement runs on the copy", v.String)
 	}
 	return nil
 }

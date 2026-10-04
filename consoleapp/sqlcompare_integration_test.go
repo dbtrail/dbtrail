@@ -22,8 +22,9 @@ import (
 
 // sql-compare against a real MySQL source and the port as the copy. The copy
 // holds the SAME rows as the source, so every difference the run reports is a
-// semantic one: MySQL's case-insensitive collation groups 'live' and 'LIVE'
-// together, the copy does not.
+// semantic one. With the copy's default collation matching MySQL's
+// (sqlsandbox lock-down), the mixed-case rows compare EQUAL in GROUP BY,
+// WHERE and ORDER BY; LIKE is the difference that remains, and it is vetoed.
 func TestIntegrationSQLCompare(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	now := time.Now().UTC().Truncate(time.Hour)
@@ -32,7 +33,7 @@ func TestIntegrationSQLCompare(t *testing.T) {
 	srcDB, srcName := testutil.CreateTestDB(t)
 	for _, q := range []string{
 		"CREATE TABLE orders (id INT NOT NULL PRIMARY KEY, status VARCHAR(32))",
-		"INSERT INTO orders VALUES (1,'live'),(2,'live'),(3,'LIVE')",
+		"INSERT INTO orders VALUES (1,'live'),(2,'live'),(3,'LIVE'),(4,'straße')",
 		"ANALYZE TABLE orders",
 	} {
 		if _, err := srcDB.Exec(q); err != nil {
@@ -42,7 +43,7 @@ func TestIntegrationSQLCompare(t *testing.T) {
 	sourceDSN := testutil.IntegrationDSN(srcName)
 
 	baseDir := t.TempDir()
-	writeCompareBaseline(t, baseDir, srcName, [][]string{{"1", "live"}, {"2", "live"}, {"3", "LIVE"}})
+	writeCompareBaseline(t, baseDir, srcName, [][]string{{"1", "live"}, {"2", "live"}, {"3", "LIVE"}, {"4", "straße"}})
 
 	reg, err := console.LoadRegistry(t.TempDir() + "/servers.yaml")
 	if err != nil {
@@ -70,11 +71,14 @@ func TestIntegrationSQLCompare(t *testing.T) {
 	if err := os.WriteFile(stmts, []byte(`
 -- identical data, deterministic order
 SELECT id, status FROM orders ORDER BY id;
--- MySQL groups live/LIVE together (collation), the copy does not
+-- the copy's default collation folds live/LIVE like MySQL's: EQUAL
 SELECT status, count(*) FROM orders GROUP BY status;
 SELECT id FROM orders WHERE status = 'live';
--- same rows; MySQL orders live/LIVE as equal (then by id), the copy puts 'LIVE' first
 SELECT status FROM orders ORDER BY status, id;
+-- LIKE is not folded on the copy (DuckDB #10416): DIFFERENT, but vetoed
+SELECT id FROM orders WHERE status LIKE 'L%';
+-- utf8mb4_0900_ai_ci equates ß and ss; the copy's collation does not: a copy-routed DIFFERENT
+SELECT id FROM orders WHERE status = 'strasse';
 -- MySQL syntax the copy lacks
 SELECT CONVERT(status USING utf8mb4) s, count(*) FROM orders GROUP BY s;
 -- the router vetoes NOW(): a difference here does not count
@@ -112,10 +116,12 @@ SELECT * FROM nope;
 		route   string
 	}{
 		"SELECT id, status FROM orders ORDER BY id":                                           {sqlcompare.Equal, "", ""},
-		"SELECT status, count(*) FROM orders GROUP BY status":                                 {sqlcompare.Different, "rows", "copy"},
-		"SELECT id FROM orders WHERE status = 'live'":                                         {sqlcompare.Different, "rows", "copy"},
-		"SELECT status FROM orders ORDER BY status, id":                                       {sqlcompare.Different, "order", "copy"},
+		"SELECT status, count(*) FROM orders GROUP BY status":                                 {sqlcompare.Equal, "", "copy"},
+		"SELECT id FROM orders WHERE status = 'live'":                                         {sqlcompare.Equal, "", "copy"},
+		"SELECT status FROM orders ORDER BY status, id":                                       {sqlcompare.Equal, "", "copy"},
 		"SELECT `status`, count(*) FROM `orders` GROUP BY `status`":                           {sqlcompare.NotOnCopy, "", "copy"},
+		"SELECT id FROM orders WHERE status LIKE 'L%'":                                        {sqlcompare.Different, "rows", "mysql"},
+		"SELECT id FROM orders WHERE status = 'strasse'":                                      {sqlcompare.Different, "rows", "copy"},
 		"SELECT CONVERT(status USING utf8mb4) s, count(*) FROM orders GROUP BY s":             {sqlcompare.NotOnCopy, "", "copy"},
 		"WITH c AS (SELECT id FROM orders) DELETE FROM orders WHERE id IN (SELECT id FROM c)": {sqlcompare.Skipped, "not_read_only", "mysql"},
 		"UPDATE orders SET status = 'x'":                                                      {sqlcompare.Skipped, "not_a_select", "mysql"},
@@ -137,12 +143,15 @@ SELECT * FROM nope;
 	if r := by["SELECT id, NOW() FROM orders ORDER BY id"]; r.Route != "mysql" || !strings.Contains(r.RouteReason, "veto: NOW") || (r.Verdict != sqlcompare.Different && r.Verdict != sqlcompare.Inconclusive) {
 		t.Errorf("NOW(): got %s route=%s (%s), want DIFFERENT or INCONCLUSIVE, vetoed", r.Verdict, r.Route, r.RouteReason)
 	}
-	if rep.CopyDiffers != 2 || rep.CopyOrderDiffers != 1 || !rep.Failed() {
-		t.Errorf("CopyDiffers = %d, CopyOrderDiffers = %d, want 2 and 1 (the collation differences the router would route to the copy; the backtick one is refused by the copy, so it is not a difference; NOW() is vetoed; the ORDER BY one is counted apart)", rep.CopyDiffers, rep.CopyOrderDiffers)
+	if rep.CopyDiffers != 1 || rep.CopyOrderDiffers != 0 || !rep.Failed() {
+		t.Errorf("CopyDiffers = %d, CopyOrderDiffers = %d, want 1 and 0: the case differences are gone (the copy's default collation matches MySQL's), LIKE and NOW() are vetoed, and the ß/ss one is the documented remainder the harness must still catch", rep.CopyDiffers, rep.CopyOrderDiffers)
+	}
+	if r := by["SELECT id FROM orders WHERE status LIKE 'L%'"]; !strings.Contains(r.RouteReason, "veto: LIKE") || r.SourceRows != 3 || r.CopyRows != 1 {
+		t.Errorf("LIKE: got %s route=%s (%s) source %d copy %d; want the veto, 3 rows on MySQL and 1 on the copy", r.Verdict, r.Route, r.RouteReason, r.SourceRows, r.CopyRows)
 	}
 	var status string
 	var n int
-	if err := srcDB.QueryRow("SELECT status, (SELECT count(*) FROM orders) FROM orders WHERE id = 1").Scan(&status, &n); err != nil || status != "live" || n != 3 {
+	if err := srcDB.QueryRow("SELECT status, (SELECT count(*) FROM orders) FROM orders WHERE id = 1").Scan(&status, &n); err != nil || status != "live" || n != 4 {
 		t.Errorf("the source was written to (status=%q, rows=%d, err=%v): the UPDATE and the WITH ... DELETE must have been skipped", status, n, err)
 	}
 	// A copy port with routing ON is refused before anything runs.
@@ -152,7 +161,7 @@ SELECT * FROM nope;
 	}
 	var out bytes.Buffer
 	sqlcompare.WriteText(&out, rep)
-	for _, s := range []string{"DIFFERENT    router=copy", "same rows in a different order", "NOT_ON_COPY", "SKIPPED", "2 statement(s) the router would send to the copy answer DIFFERENTLY", "1 copy-routed statement(s) return the same rows in a different order"} {
+	for _, s := range []string{"DIFFERENT    router=mysql", "veto: LIKE", "NOT_ON_COPY", "SKIPPED", "1 statement(s) the router would send to the copy answer DIFFERENTLY"} {
 		if !strings.Contains(out.String(), s) {
 			t.Errorf("text report lacks %q:\n%s", s, out.String())
 		}

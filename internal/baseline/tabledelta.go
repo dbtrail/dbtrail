@@ -659,6 +659,13 @@ func TableDeltaFollowStateSQL(base, posdelGlob, upsertsGlob, basePath, replace s
 // tableDeltaStateSQL assembles the state from its two chain reads: upserts
 // selects every row of the chain's .upserts files with a filename column, and
 // dead selects the dead row numbers.
+//
+// The window partitions by "bintrail_pk" COLLATE C: the key is text, and a
+// session whose default collation folds case or accents (the console's SQL
+// sandbox runs under nocase.noaccent, #2038) would otherwise fold two keys
+// that differ only that way into ONE partition and drop a row, silently.
+// COLLATE C is byte comparison whatever the session default; the filename
+// order is pinned the same way.
 func tableDeltaStateSQL(base, upserts, dead, replace string) string {
 	star := "*"
 	if replace != "" {
@@ -666,7 +673,7 @@ func tableDeltaStateSQL(base, upserts, dead, replace string) string {
 	}
 	return fmt.Sprintf("WITH bintrail_delta AS (%s), "+
 		"bintrail_latest AS (SELECT * EXCLUDE (filename) FROM bintrail_delta "+
-		"QUALIFY row_number() OVER (PARTITION BY \"%s\" ORDER BY filename DESC) = 1) "+
+		"QUALIFY row_number() OVER (PARTITION BY \"%s\" COLLATE C ORDER BY filename COLLATE C DESC) = 1) "+
 		"SELECT %s FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet(%s, file_row_number=true) "+
 		"WHERE file_row_number NOT IN (%s) "+
 		"UNION ALL BY NAME SELECT * EXCLUDE (\"%s\", \"%s\") FROM bintrail_latest WHERE \"%s\" = '%s')",
