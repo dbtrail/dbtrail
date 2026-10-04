@@ -273,12 +273,28 @@ func scrub(stmt string) (blanked string, doubleQuoted, backslash bool) {
 type Plan struct {
 	// Cost is the top-level query_block's query_cost (optimizer units).
 	Cost float64
+	// CostUnknown is true when the plan carries no MySQL query cost: a
+	// MariaDB plan. MariaDB before 11.0 reports no cost at all, and from
+	// 11.0 on reports one in its own unit (about milliseconds: a 200,000-row
+	// scan is 32, where MySQL says 20,000), which a threshold written for
+	// MySQL's cannot be compared with. The cost rule does not apply then;
+	// the scan rule does.
+	CostUnknown bool
 	// Tables is how many table accesses the plan has, derived tables included.
 	Tables int
 	// FullScans is how many of them are access_type ALL.
 	FullScans int
-	// MaxScanRows is the largest rows_examined_per_scan over every table.
+	// MaxScanRows is the largest rows_examined_per_scan (MySQL) or rows
+	// (MariaDB) over every table.
 	MaxScanRows int64
+	// MaxIndexScanRows is the largest row estimate over every table read by
+	// walking a whole index (access_type index), outside subqueries. Under
+	// an ORDER BY the index serves with a LIMIT, the server reports the few
+	// rows it expects to walk, so a large value here is an index read end
+	// to end. An index scan inside a subquery is left out: for EXISTS it
+	// stops at the first entry, and the plan does not say which kind of
+	// subquery it is. Only consulted when the plan has no cost.
+	MaxIndexScanRows int64
 	// Message is the optimizer's shortcut when there is no plan ("no matching
 	// row in const table", "Impossible WHERE"): the query is trivial.
 	Message string
@@ -297,6 +313,8 @@ type Plan struct {
 	ScanFilter bool
 	// scans and conditions are the two halves ScanFilter is computed from.
 	scans, conditions bool
+	// costInfo records that some node of the plan carries MySQL's cost_info.
+	costInfo bool
 }
 
 // ParsePlan reads the two things the decision needs from EXPLAIN FORMAT=JSON.
@@ -320,16 +338,39 @@ func ParsePlan(explainJSON []byte) (Plan, error) {
 	}
 	if m, ok := qb["message"].(string); ok {
 		p.Message = m
+	} else if t, ok := qb["table"].(map[string]any); ok {
+		// MariaDB puts the shortcut on a table node of the top block
+		// ("Impossible WHERE", "No tables used"). Only there: the same
+		// message deeper down is one branch of a UNION, and the other
+		// branches still do work. (A top block with no tables and a heavy
+		// scalar subquery is called trivial too, on MySQL as well: it
+		// stays on the source.)
+		if m, ok := t["message"].(string); ok {
+			p.Message = m
+		}
 	}
-	walk(qb, &p)
+	walk(qb, &p, false)
+	// A MySQL plan carries a cost_info on every table and block, even when
+	// the top block has none (a UNION); a plan with none anywhere is not
+	// MySQL's.
+	p.CostUnknown = !p.costInfo
 	p.ScanFilter = p.scans && p.conditions
 	return p, nil
 }
 
-func walk(v any, p *Plan) {
+// walk visits every node of the plan. inSubquery is true below a
+// "subqueries" key (MariaDB's list of the block's subqueries).
+func walk(v any, p *Plan, inSubquery bool) {
 	switch x := v.(type) {
 	case map[string]any:
+		if _, ok := x["cost_info"]; ok {
+			p.costInfo = true
+		}
 		if fs, ok := x["using_filesort"].(bool); ok && fs {
+			p.Filesort = true
+		}
+		if _, ok := x["filesort"].(map[string]any); ok {
+			// MariaDB's spelling: a "filesort" node wraps what it sorts.
 			p.Filesort = true
 		}
 		if t, ok := x["table"].(map[string]any); ok {
@@ -344,17 +385,25 @@ func walk(v any, p *Plan) {
 				if cond, _ := t["attached_condition"].(string); cond != "" {
 					p.conditions = true
 				}
-				if n := int64(number(t["rows_examined_per_scan"])); n > p.MaxScanRows {
+				rows, ok := t["rows_examined_per_scan"]
+				if !ok {
+					rows = t["rows"] // MariaDB
+				}
+				n := int64(number(rows))
+				if n > p.MaxScanRows {
 					p.MaxScanRows = n
+				}
+				if at == "index" && !inSubquery && n > p.MaxIndexScanRows {
+					p.MaxIndexScanRows = n
 				}
 			}
 		}
-		for _, child := range x {
-			walk(child, p)
+		for key, child := range x {
+			walk(child, p, inSubquery || key == "subqueries")
 		}
 	case []any:
 		for _, child := range x {
-			walk(child, p)
+			walk(child, p, inSubquery)
 		}
 	}
 }
@@ -515,11 +564,19 @@ func (pol Policy) Decide(p Plan) Decision {
 	if p.Message != "" {
 		return Decision{Reason: "trivial plan: " + p.Message, Rule: RuleTrivial}
 	}
-	if pol.CostThreshold > 0 && p.Cost >= pol.CostThreshold {
+	if pol.CostThreshold > 0 && !p.CostUnknown && p.Cost >= pol.CostThreshold {
 		return Decision{ToCopy: true, Reason: fmt.Sprintf("plan cost %.0f >= %.0f", p.Cost, pol.CostThreshold), Rule: RuleCost}
 	}
 	if pol.ScanRows > 0 && p.FullScans > 0 && p.MaxScanRows >= pol.ScanRows {
 		return Decision{ToCopy: true, Reason: fmt.Sprintf("full scan over %d rows >= %d", p.MaxScanRows, pol.ScanRows), Rule: RuleScan}
+	}
+	if pol.ScanRows > 0 && p.CostUnknown && p.MaxIndexScanRows >= pol.ScanRows {
+		// Without a cost to go by, an index walked end to end over that
+		// many rows is the same work as a full scan.
+		return Decision{ToCopy: true, Reason: fmt.Sprintf("full index scan over %d rows >= %d", p.MaxIndexScanRows, pol.ScanRows), Rule: RuleScan}
+	}
+	if p.CostUnknown {
+		return Decision{Reason: fmt.Sprintf("no full scan over %d rows (the plan carries no cost: the cost rule does not apply)", pol.ScanRows), Rule: RuleCheap}
 	}
 	return Decision{Reason: fmt.Sprintf("plan cost %.0f below %.0f, no full scan over %d rows", p.Cost, pol.CostThreshold, pol.ScanRows), Rule: RuleCheap}
 }

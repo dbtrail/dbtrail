@@ -1,0 +1,41 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 11.26489104,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "customers",
+          "access_type": "ref",
+          "possible_keys": ["PRIMARY", "tier"],
+          "key": "tier",
+          "key_length": "67",
+          "used_key_parts": ["tier"],
+          "ref": ["const"],
+          "loops": 1,
+          "rows": 1666,
+          "cost": 0.25200673,
+          "filtered": 100,
+          "attached_condition": "customers.tier = 'gold'",
+          "using_index": true
+        }
+      },
+      {
+        "table": {
+          "table_name": "orders",
+          "access_type": "ref",
+          "possible_keys": ["customer_id"],
+          "key": "customer_id",
+          "key_length": "4",
+          "used_key_parts": ["customer_id"],
+          "ref": ["plans.customers.id"],
+          "loops": 1666,
+          "rows": 39,
+          "cost": 11.01288431,
+          "filtered": 100,
+          "using_index": true
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "message": "No tables used",
+    "optimized_away_subqueries": [
+      {
+        "dependent": false,
+        "cacheable": true,
+        "query_block": {
+          "select_id": 2,
+          "cost_info": {
+            "query_cost": "26808.25"
+          },
+          "table": {
+            "table_name": "orders",
+            "access_type": "ALL",
+            "rows_examined_per_scan": 263995,
+            "rows_produced_per_join": 26399,
+            "filtered": "10.00",
+            "cost_info": {
+              "read_cost": "24168.30",
+              "eval_cost": "2639.95",
+              "prefix_cost": "26808.25",
+              "data_read_per_join": "8M"
+            },
+            "used_columns": [
+              "note"
+            ],
+            "attached_condition": "(`plans`.`orders`.`note` = 'x')"
+          }
+        }
+      }
+    ]
+  }
+}

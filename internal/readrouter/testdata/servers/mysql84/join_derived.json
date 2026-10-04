@@ -1,0 +1,112 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "25069.14"
+    },
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "ref",
+          "possible_keys": [
+            "PRIMARY",
+            "tier"
+          ],
+          "key": "tier",
+          "used_key_parts": [
+            "tier"
+          ],
+          "key_length": "67",
+          "ref": [
+            "const"
+          ],
+          "rows_examined_per_scan": 1666,
+          "rows_produced_per_join": 1666,
+          "filtered": "100.00",
+          "using_index": true,
+          "cost_info": {
+            "read_cost": "3.84",
+            "eval_cost": "166.60",
+            "prefix_cost": "170.44",
+            "data_read_per_join": "546K"
+          },
+          "used_columns": [
+            "id",
+            "tier"
+          ]
+        }
+      },
+      {
+        "table": {
+          "table_name": "t",
+          "access_type": "ref",
+          "possible_keys": [
+            "<auto_key0>"
+          ],
+          "key": "<auto_key0>",
+          "used_key_parts": [
+            "customer_id"
+          ],
+          "key_length": "4",
+          "ref": [
+            "plans.c.id"
+          ],
+          "rows_examined_per_scan": 42,
+          "rows_produced_per_join": 71139,
+          "filtered": "100.00",
+          "cost_info": {
+            "read_cost": "17784.79",
+            "eval_cost": "7113.91",
+            "prefix_cost": "25069.14",
+            "data_read_per_join": "1M"
+          },
+          "used_columns": [
+            "customer_id",
+            "n"
+          ],
+          "materialized_from_subquery": {
+            "using_temporary_table": true,
+            "dependent": false,
+            "cacheable": true,
+            "query_block": {
+              "select_id": 2,
+              "cost_info": {
+                "query_cost": "22156.15"
+              },
+              "grouping_operation": {
+                "using_filesort": false,
+                "table": {
+                  "table_name": "orders",
+                  "access_type": "index",
+                  "possible_keys": [
+                    "customer_id"
+                  ],
+                  "key": "customer_id",
+                  "used_key_parts": [
+                    "customer_id"
+                  ],
+                  "key_length": "4",
+                  "rows_examined_per_scan": 217474,
+                  "rows_produced_per_join": 217474,
+                  "filtered": "100.00",
+                  "using_index": true,
+                  "cost_info": {
+                    "read_cost": "408.75",
+                    "eval_cost": "21747.40",
+                    "prefix_cost": "22156.15",
+                    "data_read_per_join": "71M"
+                  },
+                  "used_columns": [
+                    "id",
+                    "customer_id"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}

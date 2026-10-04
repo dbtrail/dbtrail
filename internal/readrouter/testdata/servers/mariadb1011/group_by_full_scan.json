@@ -1,0 +1,20 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "filesort": {
+      "sort_key": "orders.`status`",
+      "temporary_table": {
+        "nested_loop": [
+          {
+            "table": {
+              "table_name": "orders",
+              "access_type": "ALL",
+              "rows": 200246,
+              "filtered": 100
+            }
+          }
+        ]
+      }
+    }
+  }
+}

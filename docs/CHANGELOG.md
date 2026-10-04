@@ -80,6 +80,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to 32 s; 1.1: 77 s to 57 s). Same rows and column types.
 
 ### Fixed
+- **Read routing works with a MariaDB source** (#2073). MariaDB prints
+  `EXPLAIN FORMAT=JSON` in its own shape (`rows` where MySQL says
+  `rows_examined_per_scan`, a `filesort` node, the shortcut message on a
+  table) and the router read none of it: every plan looked free, so with a
+  MariaDB source no statement ever went to the copy, and nothing said so.
+  The plan is now read in both spellings. MariaDB's cost is absent before
+  11.0 and in another unit after, so on a MariaDB source the cost rule does
+  not apply; the scan rule does, plus a full index scan over
+  `--route-scan-rows` rows outside a subquery. Checked on MariaDB 10.11,
+  11.4, 11.8 and 12.3 against MySQL 8.4 over the same statements: 19 of 23
+  are routed the same way, and the four that differ are statements only
+  MySQL's cost sends to the copy, which on MariaDB stay on the source.
 - **MySQL Connector/J can connect to the time-travel port** (#2036). On
   connect the Java driver sends one `SELECT` of nineteen system variables
   (`@@session.auto_increment_increment`, `@@character_set_client`, ...)

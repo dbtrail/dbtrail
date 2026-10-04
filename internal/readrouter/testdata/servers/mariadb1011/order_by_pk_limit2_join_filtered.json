@@ -1,0 +1,36 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "filesort": {
+      "sort_key": "o.`id`",
+      "temporary_table": {
+        "nested_loop": [
+          {
+            "table": {
+              "table_name": "c",
+              "access_type": "ALL",
+              "possible_keys": ["PRIMARY"],
+              "rows": 5000,
+              "filtered": 100,
+              "attached_condition": "c.`name` = 'nope'"
+            }
+          },
+          {
+            "table": {
+              "table_name": "o",
+              "access_type": "ref",
+              "possible_keys": ["customer_id"],
+              "key": "customer_id",
+              "key_length": "4",
+              "used_key_parts": ["customer_id"],
+              "ref": ["plans.c.id"],
+              "rows": 19,
+              "filtered": 100,
+              "using_index": true
+            }
+          }
+        ]
+      }
+    }
+  }
+}

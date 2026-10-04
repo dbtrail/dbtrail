@@ -221,6 +221,19 @@ The decision, in order, for every statement:
    full scan over 200,000 rows about 20,000) or that has a full table scan
    over at least `--route-scan-rows` rows (default 100,000) is the copy's
    if step 6 agrees; anything cheaper: **MySQL**.
+   On a **MariaDB** source the plan is read in MariaDB's own spelling
+   (`rows`, a `filesort` node, the shortcut message on a table), and the
+   cost rule does not apply: MariaDB before 11.0 reports no cost, and from
+   11.0 on reports one in its own unit (a full scan over 200,000 rows is
+   about 32, where MySQL says 20,000), which `--route-cost-threshold`
+   cannot be compared with. The scan rule applies, and so does one more: an
+   index walked end to end over at least `--route-scan-rows` rows is the
+   copy's (an index scan inside a subquery is not counted: for `EXISTS` it
+   stops at the first entry). A statement only the cost would have sent to
+   the copy stays on the source: for example an index walked in order
+   under a `LIMIT` with a filter no index serves. The study of which statements the copy answers the same way
+   (the vetoes of step 4) was run against MySQL; on a MariaDB source read
+   routing is as experimental, and less measured.
 6. For a plan the copy should take: the copy's snapshot older than
    `--route-max-copy-age`, or its age unknown: **MySQL**. Otherwise **the
    copy**, sent exactly as written; the copy refusing it means **MySQL**.

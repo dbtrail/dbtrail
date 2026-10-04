@@ -1,0 +1,45 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "const_condition": "<in_optimizer>(1,exists(subquery#2))",
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "customers",
+          "access_type": "const",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "ref": ["const"],
+          "rows": 1,
+          "filtered": 100
+        }
+      }
+    ],
+    "subqueries": [
+      {
+        "query_block": {
+          "select_id": 2,
+          "cost": 28.80283102,
+          "nested_loop": [
+            {
+              "table": {
+                "table_name": "orders",
+                "access_type": "index",
+                "key": "customer_id",
+                "key_length": "4",
+                "used_key_parts": ["customer_id"],
+                "loops": 1,
+                "rows": 195573,
+                "cost": 28.80283102,
+                "filtered": 100,
+                "using_index": true
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
