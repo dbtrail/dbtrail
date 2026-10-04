@@ -42,6 +42,8 @@ type fakeSQLRunner struct {
 	// job asks for its views (#2029); nil reports Unsure, which gets every
 	// view. The script it is answered with is recorded as the job's ViewsSQL.
 	refs *sqlsandbox.Refs
+	// reserveCtx is the context the last Reserve was called with.
+	reserveCtx context.Context
 }
 
 func (f *fakeSQLRunner) Run(_ context.Context, job sqlsandbox.Job) (sqlsandbox.Result, error) {
@@ -66,8 +68,9 @@ func (f *fakeSQLRunner) Run(_ context.Context, job sqlsandbox.Job) (sqlsandbox.R
 
 // Reserve hands out a slot that runs through the fake; busy makes it refuse
 // like a full runner would, before any job exists.
-func (f *fakeSQLRunner) Reserve(string) (sqlSlot, error) {
+func (f *fakeSQLRunner) Reserve(ctx context.Context, _ string) (sqlSlot, error) {
 	f.mu.Lock()
+	f.reserveCtx = ctx
 	busy := f.busy
 	f.mu.Unlock()
 	if busy {
@@ -472,7 +475,8 @@ func TestSQLAPI_errorMapping(t *testing.T) {
 		{"refused", &sqlsandbox.RefusedError{Reason: "one statement at a time: 2 statements were given"}, 422, "one statement at a time", ""},
 		{"query", &sqlsandbox.QueryError{Message: "Binder Error: column nope not found"}, 422, "Binder Error", ""},
 		{"timeout", &sqlsandbox.TimeoutError{Limit: 60 * time.Second, PID: 7}, 504, "60 s", ""},
-		{"busy", sqlsandbox.ErrBusy, 429, "already running", ""},
+		{"busy", sqlsandbox.ErrBusy, 429, "is busy", ""},
+		{"busy after the wait", &sqlsandbox.BusyError{Waited: 30 * time.Second, MaxInFlight: 2}, 429, "waited 30s", ""},
 		{"not local", sqlsandbox.ErrCopyNotLocal, 409, "only on S3", ""},
 		{"too large", sqlsandbox.ErrResultTooLarge, 422, "too large", ""},
 		{"worker", &sqlsandbox.WorkerError{Err: errors.New("exit status 2"), Stderr: "panic at /var/lib/secret/path"}, 500, "DBTrail's log", "/var/lib/secret"},
@@ -1482,7 +1486,7 @@ func TestSQL_phasesReachTheHistogram(t *testing.T) {
 			Spawn: want["spawn"], Decode: want["decode"], Total: want["total"]},
 	}}
 	f := newSQLFixture(t, runner, false)
-	phases := []string{"view_build", "spawn", "open", "lockdown", "views", "query", "decode", "total"}
+	phases := []string{"slot_wait", "view_build", "spawn", "open", "lockdown", "views", "query", "decode", "total"}
 
 	before, sumBefore := sqlPhaseHistograms(t)
 	rec := postSQL(t, f.s, `{"sql":"SELECT id FROM shop.orders"}`)
@@ -1541,17 +1545,42 @@ func TestSQLAPI_maxInFlightFromConfig_2030(t *testing.T) {
 		}
 		var slots []sqlSlot
 		for i := range c.want {
-			s, err := srv.sqlRunner.Reserve(fmt.Sprintf("u%d", i))
+			s, err := srv.sqlRunner.Reserve(context.Background(), fmt.Sprintf("u%d", i))
 			if err != nil {
 				t.Fatalf("cfg %d: slot %d refused: %v", c.cfg, i+1, err)
 			}
 			slots = append(slots, s)
 		}
-		if _, err := srv.sqlRunner.Reserve("one-more"); !errors.Is(err, sqlsandbox.ErrBusy) {
-			t.Errorf("cfg %d: slot %d = %v, want ErrBusy", c.cfg, c.want+1, err)
+		// The next one waits for a slot (#2033): no slot inside 200 ms.
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		if _, err := srv.sqlRunner.Reserve(ctx, "one-more"); !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("cfg %d: slot %d = %v, want it still waiting at the deadline", c.cfg, c.want+1, err)
 		}
+		cancel()
 		for _, s := range slots {
 			s.Release()
 		}
+	}
+}
+
+// #2033: the wait for a slot ends when the caller leaves. The route hands
+// Reserve the request's context, so a browser that closes the tab is not
+// left holding a place in line.
+func TestSQL_waitFollowsTheRequest_2033(t *testing.T) {
+	runner := &fakeSQLRunner{busy: true}
+	f := newSQLFixture(t, runner, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/api/sql", strings.NewReader(`{"sql":"SELECT 1"}`)).WithContext(ctx)
+	f.s.handleSQL(httptest.NewRecorder(), req)
+	got := runner.reserveCtx
+	if got == nil {
+		t.Fatal("Reserve was not called")
+	}
+	if got.Err() != nil {
+		t.Fatal("the context was already done before the request ended")
+	}
+	cancel()
+	if got.Err() == nil {
+		t.Error("cancelling the request did not reach the context Reserve waits on")
 	}
 }

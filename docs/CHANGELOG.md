@@ -58,6 +58,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `watch --metrics-addr`. Only statements that ran to a result are observed.
 
 ### Changed
+- **SQL on the copy waits for a free slot instead of refusing at once**
+  (#2033). When every slot is busy, a statement on the SQL card or the
+  embedded MySQL port now waits up to 30 seconds and runs as soon as a slot
+  frees, so a dashboard that draws eight panels at once gets eight slow
+  panels instead of two panels and six errors. Past 30 seconds, or with 16
+  statements already waiting, it is refused as before (HTTP 429, MySQL 1203),
+  with a message that says it waited. A waiter whose own slot is busy (the
+  same person, or the same server on the port) never holds up anyone else,
+  and a client that leaves while waiting leaves the line. The new
+  `slot_wait` phase in `phases_ms` and in the
+  `bintrail_sql_statement_phase_seconds` histogram says how long each
+  statement waited.
 - **SQL on the copy prepares only the tables a statement names** (#2029).
   Every statement used to install a view for every table of the copy before
   it ran: on a copy of 111 tables that was 50-60 ms, half of a short

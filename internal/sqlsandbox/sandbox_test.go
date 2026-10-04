@@ -36,7 +36,9 @@ func newTestRunner(t *testing.T, limits Limits) *Runner {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(Config{Exe: exe, Args: []string{}, Limits: limits})
+	// MaxWait -1: these tests pin the gate itself, refused at once; the wait
+	// for a slot (#2033) has its own tests.
+	return New(Config{Exe: exe, Args: []string{}, Limits: limits, MaxWait: -1})
 }
 
 func testLimits() Limits {
@@ -771,7 +773,7 @@ func TestRun_zeroRowsIsAnEmptyList(t *testing.T) {
 func TestRun_globalInFlightCap(t *testing.T) {
 	f := newCopyFixture(t)
 	exe, _ := os.Executable()
-	r := New(Config{Exe: exe, Args: []string{}, Limits: testLimits(), MaxInFlight: 1})
+	r := New(Config{Exe: exe, Args: []string{}, Limits: testLimits(), MaxInFlight: 1, MaxWait: -1})
 	started := make(chan int, 1)
 	r.onStart = func(pid int) {
 		select {
@@ -949,19 +951,19 @@ func TestRun_schemaResolvesUnqualifiedNames(t *testing.T) {
 // the per-user and global gates are the same ones Run applies.
 func TestReserve_slotBeforeTheJob(t *testing.T) {
 	f := newCopyFixture(t)
-	r := New(Config{Exe: testExe(t), Args: []string{}, Limits: testLimits(), MaxInFlight: 1})
-	slot, err := r.Reserve("alice")
+	r := New(Config{Exe: testExe(t), Args: []string{}, Limits: testLimits(), MaxInFlight: 1, MaxWait: -1})
+	slot, err := r.Reserve(context.Background(), "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The global slot is taken: a second reservation, any user, is busy now.
-	if _, err := r.Reserve("bob"); !errors.Is(err, ErrBusy) {
+	if _, err := r.Reserve(context.Background(), "bob"); !errors.Is(err, ErrBusy) {
 		t.Errorf("second Reserve with MaxInFlight 1 = %v, want ErrBusy", err)
 	}
 	// An unused slot given back frees it.
 	slot.Release()
 	slot.Release() // idempotent
-	slot2, err := r.Reserve("alice")
+	slot2, err := r.Reserve(context.Background(), "alice")
 	if err != nil {
 		t.Fatalf("Reserve after Release: %v", err)
 	}
@@ -973,7 +975,7 @@ func TestReserve_slotBeforeTheJob(t *testing.T) {
 		t.Fatalf("job for another user in the slot: err = %v, want WorkerError", err)
 	}
 	// Run released it even on that refusal.
-	slot3, err := r.Reserve("alice")
+	slot3, err := r.Reserve(context.Background(), "alice")
 	if err != nil {
 		t.Fatalf("Reserve after a refused Run: %v", err)
 	}
@@ -1002,7 +1004,7 @@ func TestReserve_slotBeforeTheJob(t *testing.T) {
 		t.Errorf("Run on a released slot: err = %v, want WorkerError", err)
 	}
 	// Released after the run: the slot is free again.
-	if s, err := r.Reserve("alice"); err != nil {
+	if s, err := r.Reserve(context.Background(), "alice"); err != nil {
 		t.Errorf("Reserve after a completed Run: %v", err)
 	} else {
 		s.Release()

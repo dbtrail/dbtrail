@@ -1145,9 +1145,13 @@ The limits, so a query can never hurt capture:
 - One query at a time per person, two at a time for the whole daemon by
   default (`watch --sql-max-in-flight`, see below; shared
   with the MySQL-protocol port, where the unit is one per server). One more
-  statement is refused at once, not queued: the process that serves it is the
-  one capturing changes, so it refuses before it competes with capture. The
-  refusal costs nothing: the slot is taken before anything is read. For a team
+  statement waits for a free slot, up to 30 seconds, and runs as soon as one
+  is free, so a burst (a dashboard drawing its panels, two people at once)
+  turns slow instead of failing. Past 30 seconds, or with 16 statements
+  already waiting, it is refused as busy (HTTP 429). It never runs beside the
+  others: the process that serves it is the one capturing changes. Waiting
+  costs nothing, because the slot is taken before anything is read, and a
+  page closed while waiting leaves the line. For a team
   or a dashboard tool, each reader's own DuckDB on the bucket is how reads
   scale (see [Dashboards](dashboards.md)).
 - Only the tables a query names are prepared before it runs, so a copy with
@@ -1164,8 +1168,8 @@ Every query is written to the audit trail when one is installed: who ran it,
 on which server, the statement, and how many rows came back. The response's
 `phases_ms` field, the daemon's log at debug level, and the
 `bintrail_sql_statement_phase_seconds` histogram under `watch --metrics-addr`
-([Observability](observability.md)) say where the time went: `view_build`
-(the console's own discovery), `spawn` (the worker's whole lifetime, which
+([Observability](observability.md)) say where the time went: `slot_wait`
+(the wait for a free slot), `view_build` (the console's own discovery), `spawn` (the worker's whole lifetime, which
 contains `open`, `lockdown`, `views` and `query`; what is left of it is
 process start, result encoding and exit), `decode` and `total`. `views` is
 installing the views the query names, including the console writing them

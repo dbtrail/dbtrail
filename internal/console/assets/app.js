@@ -2614,7 +2614,7 @@ function sqlErrorView(status, message, limits) {
       if (/no copy|no view/.test(msg)) return { text: "There is no copy to run SQL on yet.", detail: "" };
       return { text: "This copy cannot be queried from the web interface.", detail: msg };
     case 422: return { text: "The query did not run.", detail: msg };
-    case 429: return { text: "A query of yours is already running, or the server is at its limit. Wait for it to finish.", detail: "" };
+    case 429: return { text: "SQL on the copy is busy: other queries are running. Try again in a moment.", detail: "" };
     case 504: return { text: "The query ran longer than the " + (lim.timeout_seconds ? lim.timeout_seconds + " s " : "time ") + "limit and was stopped. Narrow it: a WHERE on a table, or a smaller window on events.", detail: "" };
     case 500: return { text: "The query could not be run. DBTrail's log has the details.", detail: "" };
     case 502: return { text: "The copy could not be read.", detail: msg };
