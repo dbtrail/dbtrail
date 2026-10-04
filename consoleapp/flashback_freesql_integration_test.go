@@ -218,9 +218,9 @@ func TestIntegrationFlashbackFreeSQLOnTheCopy(t *testing.T) {
 		t.Error("mysql CLI rendered a text column as hex: a column was declared with the binary charset")
 	}
 
-	// A result cut at the row cap: the client is told. The count rides the
-	// EOF packet (the CLI prints the warnings with --show-warnings), and SHOW
-	// WARNINGS names the cut.
+	// A result with more rows than the row cap (#2037): an ERROR the CLI
+	// shows, naming the cap and the way out, never the first rows with a
+	// warning a client may not read. Pinned with a 1-row cap.
 	capped, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg,
 		SQLLimits: sqlsandbox.Limits{MaxRows: 1}})
 	if err != nil {
@@ -235,17 +235,38 @@ func TestIntegrationFlashbackFreeSQLOnTheCopy(t *testing.T) {
 	go func() { _ = serveFlashback(ctx2, capped, ln2, flashbackConfig{}); close(served2) }()
 	defer func() { cancel2(); <-served2 }()
 	_, port2, _ := net.SplitHostPort(ln2.Addr().String())
-	cut, err := exec.Command(mysqlCLI, "-h", host, "-P", port2, "-u", ent.ID, "-ptok", "--table", "--show-warnings",
-		"-e", "SELECT id FROM orders ORDER BY id").CombinedOutput()
-	if err != nil {
-		t.Fatalf("mysql CLI (capped): %v\n%s", err, cut)
+	cappedCLI := func(statements string) (string, error) {
+		out, err := exec.Command(mysqlCLI, "-h", host, "-P", port2, "-u", ent.ID, "-ptok", "--table", "--show-warnings",
+			"-e", statements).CombinedOutput()
+		t.Logf("mysql CLI, 1-row cap, %q:\n%s", statements, out)
+		return string(out), err
 	}
-	t.Logf("mysql CLI, 1-row cap:\n%s", cut)
-	if !strings.Contains(string(cut), "cut at 1 rows") {
-		t.Errorf("a result cut at the cap did not reach the client as a warning:\n%s", cut)
+	cut, err := cappedCLI("SELECT id FROM orders ORDER BY id")
+	if err == nil || !strings.Contains(cut, "ERROR 1104") || !strings.Contains(cut, "more than 1 rows") || !strings.Contains(cut, "LIMIT of 1 or less") {
+		t.Errorf("two rows under a 1-row cap: err = %v, output:\n%s\nwant ERROR 1104 naming the cap and the LIMIT that avoids it", err, cut)
 	}
-	if strings.Contains(string(cut), "|  2 |") {
-		t.Errorf("the 1-row cap did not cut the result:\n%s", cut)
+	if strings.Contains(cut, "|    1 |") {
+		t.Errorf("the refused result still delivered rows:\n%s", cut)
+	}
+	// The way out the error names: the statement's own LIMIT.
+	if out, err := cappedCLI("SELECT id FROM orders ORDER BY id LIMIT 1"); err != nil || !strings.Contains(out, "|    1 |") || strings.Contains(out, "|    2 |") {
+		t.Errorf("with LIMIT 1 under a 1-row cap: err = %v, output:\n%s\nwant the first row", err, out)
+	}
+	// A result that fits the cap exactly is whole, not cut.
+	if out, err := cappedCLI("SELECT id FROM orders WHERE id = 2"); err != nil || !strings.Contains(out, "|    2 |") {
+		t.Errorf("one row under a 1-row cap: err = %v, output:\n%s\nwant the row", err, out)
+	}
+	// The other way out: the client asks for the cut, and gets it with no
+	// error and no warning.
+	asked, err := cappedCLI("SET sql_select_limit = 1; SELECT id FROM orders ORDER BY id; SHOW WARNINGS")
+	if err != nil || !strings.Contains(asked, "|    1 |") || strings.Contains(asked, "|    2 |") || strings.Contains(asked, "Warning (Code") {
+		t.Errorf("SET sql_select_limit = 1 under a 1-row cap: err = %v, output:\n%s\nwant the first row alone, silently", err, asked)
+	}
+	// The cap still bounds what a client can ask for: a limit above it does
+	// not lift it, and the error says so.
+	above, err := cappedCLI("SET sql_select_limit = 5; SELECT id FROM orders ORDER BY id")
+	if err == nil || !strings.Contains(above, "ERROR 1104") || !strings.Contains(above, "it is 5 now, above the cap") {
+		t.Errorf("SET sql_select_limit = 5 under a 1-row cap: err = %v, output:\n%s\nwant ERROR 1104 saying the limit is above the cap", err, above)
 	}
 }
 

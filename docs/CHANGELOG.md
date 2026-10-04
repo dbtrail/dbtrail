@@ -246,6 +246,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `watch --metrics-addr`. Only statements that ran to a result are observed.
 
 ### Changed
+- **On the embedded port, a result with more rows than the row cap is now
+  an error instead of a short answer** (#2037). **This changes what an
+  existing client sees.** A statement on the copy whose result passed the
+  cap (1,000 rows by default) used to return the first 1,000 rows as a
+  success, with a warning count that many drivers and applications never
+  read, so a cut result looked like a whole one. It now fails with error
+  1104, whose message names the cap and the way out: add a `LIMIT` at or
+  under the cap, or narrow the statement. A result of exactly the cap's
+  size is whole and is returned as before. A connection that wants results
+  cut without an error says so with `SET sql_select_limit = N` (#2035): with
+  N at or under the cap, a `SELECT` with no `LIMIT` of its own returns its
+  first N rows, silently. The cap still bounds what a client can ask for:
+  with N above the cap, a result past the cap is the same error, and the
+  message says the limit is above the cap. Unchanged: a cell cut at the
+  cell cap is still a warning (`SHOW WARNINGS`); under read routing a
+  result past the cap is still answered by MySQL instead; the console's SQL
+  card still returns the first rows and says there were more.
 - **A views file pinned to one snapshot on S3 no longer re-checks every
   file with S3 before each query** (#2051). DuckDB keeps what it read for the
   session, but by default asked S3 again, one file at a time, whether each

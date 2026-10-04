@@ -162,8 +162,8 @@ type Handler struct {
 
 	// freeSQL, when non-nil, serves ordinary statements over the Parquet
 	// copy (see freesql.go); freeSQLWhyNot is the reason shown when it is
-	// nil and one is known. lastWarning is what SHOW WARNINGS answers
-	// after a free-SQL result cut at the row cap; guarded by mu.
+	// nil and one is known. lastWarnings is what SHOW WARNINGS answers
+	// after a free-SQL result with cells cut at the cell cap; guarded by mu.
 	freeSQL       FreeSQL
 	freeSQLWhyNot string
 	lastWarnings  []string
@@ -509,7 +509,7 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 	currentDB := h.db
 	h.mu.Unlock()
 
-	// With free SQL bound, SHOW WARNINGS is a real statement (the row-cap
+	// With free SQL bound, SHOW WARNINGS is a real statement (the cell-cap
 	// warning, freesql.go), answered before the noise allowlist would
 	// swallow it; every other statement clears it, as on MySQL.
 	if h.freeSQL != nil {
@@ -520,7 +520,7 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 			if h.router != nil && forwarded {
 				// Under read routing the last statement was MySQL's, so
 				// its warnings are MySQL's too. After a copy-served one
-				// they are ours (the row cap), and MySQL's would be the
+				// they are ours (the cell cap), and MySQL's would be the
 				// EXPLAIN's note, which the client never sent.
 				ctx, cancel := h.queryContext()
 				defer cancel()

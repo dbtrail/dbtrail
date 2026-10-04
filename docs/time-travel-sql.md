@@ -166,7 +166,8 @@ What to know before relying on it:
     own at N rows, with no warning: the client asked for the cut. A `LIMIT`
     in the statement takes precedence, as on MySQL, and `SHOW` and
     `DESCRIBE` are not limited. It never raises the server's row cap: with N
-    above the cap, the cap applies as if nothing were set. `DEFAULT` and
+    above the cap, the cap applies as if nothing were set (see the row cap
+    below). `DEFAULT` and
     MySQL's own "no limit" value (18446744073709551615) remove it; 0 is
     refused.
   - **`sql_mode`** is recorded and reported back; no mode changes how the
@@ -190,8 +191,24 @@ What to know before relying on it:
   shim`, which runs no ordinary SQL, accepts the three as connection chatter,
   as it always did.
 - **Read-only, one SELECT per statement.** Anything else is refused with
-  1064. A result cut at the row cap, or a cell cut at the cell cap, raises a
-  warning the client counts; `SHOW WARNINGS` says which.
+  1064.
+- **A result with more rows than the row cap is an error, not a short
+  answer.** The statement fails with error 1104, which names the cap (1,000
+  rows by default) and the way out: add a `LIMIT` at or under the cap, or
+  narrow the statement. Nothing is returned, so an application cannot take
+  the first 1,000 rows for the whole result. A result of exactly the cap's
+  size is whole and is returned. The one cut that is not an error is the one
+  the connection asked for: after `SET sql_select_limit = N`, with N at or
+  under the cap, a `SELECT` with no `LIMIT` of its own returns its first N
+  rows, silently. With N above the cap the cap still applies, and a result
+  past it is the same error, which says the limit is above the cap. A
+  listing (`SHOW TABLES`, `DESCRIBE`) takes neither a `LIMIT` nor the select
+  limit, so its error points at `information_schema`, which does. (Under
+  read routing a result past the cap is not an error: MySQL answers that
+  statement instead.) A cell longer than the cell cap (1 MiB) is cut and
+  marked, and raises a warning the client counts; `SHOW WARNINGS` reports
+  it. The console's SQL card keeps its own behaviour: it returns the first
+  rows up to the cap and says on the page that there were more.
 - **The copy has to be on local disk**, as for the SQL card. A server whose
   copy is only on S3, or with archive access disabled, or whose copy defines
   no view yet, keeps the time-travel shapes and refuses ordinary SQL with

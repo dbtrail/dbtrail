@@ -33,7 +33,8 @@ import (
 // does three MySQL-shaped things on top: USE selects the schema unqualified
 // names resolve in (sqlsandbox.Job.Schema), SHOW DATABASES / SHOW COLUMNS
 // are rewritten to their DuckDB equivalents (rewriteForDuckDB), and a
-// result cut at the row cap raises a warning SHOW WARNINGS returns. The
+// result with more rows than the row cap is an error (1104, rowCapError)
+// unless the connection asked for the cut with SET sql_select_limit. The
 // standalone `bintrail shim` binds nothing and keeps refusing as before.
 //
 // The order in HandleQuery is load-bearing: time travel first (a parse
@@ -451,6 +452,15 @@ func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string) (*mysql.Res
 	if routeReason != "" && (res.Truncated || res.TruncatedCells > 0) {
 		return nil, errCopyTruncated
 	}
+	if res.Truncated {
+		// The result did not fit the row cap (#2037). It is refused, not
+		// returned short: a client that does not read warnings would take the
+		// first rows for the whole answer. The one cut that is NOT an error
+		// never gets here: a connection that SET sql_select_limit at or under
+		// the cap asked for it, and the executor does not report that cut as
+		// Truncated (sqlsandbox.Session.SelectLimit).
+		return nil, rowCapError(qstr, len(res.Rows), vars.selectLimit)
+	}
 	rs, err := freeSQLResultset(res, vars.loc)
 	if err != nil {
 		// Only a worker bug (a row with the wrong column count) gets here.
@@ -458,15 +468,37 @@ func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string) (*mysql.Res
 		return nil, fmt.Errorf("free sql: build resultset: %w", err)
 	}
 	var warnings []string
-	if res.Truncated {
-		warnings = append(warnings, fmt.Sprintf("the result was cut at %d rows, this server's cap; add a LIMIT or narrow the query", len(res.Rows)))
-	}
 	if res.TruncatedCells > 0 {
 		warnings = append(warnings, fmt.Sprintf("%d cell(s) longer than this server's cap were cut; each ends with a marker", res.TruncatedCells))
 	}
 	h.setWarnings(warnings)
 	h.recordFreeSQL(qstr, schema, res, routeReason)
 	return &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}, nil
+}
+
+// rowCapError is the refusal for a result with more rows than the port's row
+// cap: MySQL's own code for a SELECT it will not run to the end (1104), the
+// cap, and the ways out. rowCap is the cap itself: a result cut there holds
+// exactly that many rows. The ways out depend on the statement: a SELECT
+// takes a LIMIT, or the connection's sql_select_limit; a listing (SHOW,
+// DESCRIBE, SUMMARIZE) takes neither, so it is pointed at the catalog, which
+// does. selectLimit is the connection's sql_select_limit (0 when not set),
+// named when it is above the cap, because the client that set it expects it
+// to have covered this.
+func rowCapError(qstr string, rowCap int, selectLimit uint64) error {
+	msg := fmt.Sprintf("the result has more than %d rows, the row cap for SQL on the copy on this server, and is not returned cut; ", rowCap)
+	switch readrouter.LeadingKeyword(qstr) {
+	case "SHOW", "DESCRIBE", "DESC", "SUMMARIZE":
+		msg += fmt.Sprintf("this statement takes no LIMIT: read the same from the catalog with one "+
+			"(SELECT ... FROM information_schema.tables, or information_schema.columns, WHERE ... LIMIT %d)", rowCap)
+	default:
+		msg += fmt.Sprintf("add a LIMIT of %d or less to the statement, or narrow it. To have a SELECT with no LIMIT of its own cut "+
+			"without an error, SET sql_select_limit to %d or less on the connection", rowCap, rowCap)
+		if selectLimit > uint64(rowCap) {
+			msg += fmt.Sprintf(" (it is %d now, above the cap, so the cap applied)", selectLimit)
+		}
+	}
+	return mysql.NewError(mysql.ER_TOO_BIG_SELECT, msg)
 }
 
 // warningsSetter is the part of go-mysql's server.Conn that carries the
@@ -489,7 +521,8 @@ func (h *Handler) setWarnings(msgs []string) {
 }
 
 // showWarnings answers SHOW WARNINGS the way MySQL does: Level, Code,
-// Message rows, none when the last statement raised nothing. Only a
+// Message rows, none when the last statement raised nothing. The one warning
+// a copy result raises is a cell cut at the cell cap. Only a
 // handler with free SQL bound answers this way; without it SHOW WARNINGS
 // stays handshake noise (an empty OK), as it always was.
 func (h *Handler) showWarnings() (*mysql.Result, error) {

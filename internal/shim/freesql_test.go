@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 
+	"github.com/dbtrail/dbtrail/internal/audittest"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
@@ -261,12 +262,84 @@ func TestFreeSQLResultset_typesAndCells(t *testing.T) {
 	}
 }
 
-// A result cut at the cap raises one warning, SHOW WARNINGS returns it, and
-// the next statement clears it. Without free SQL bound SHOW WARNINGS stays
-// the empty OK it always was.
+// A result with more rows than the cap is an error naming the cap and the
+// ways out (#2037), never the first rows with a warning: nothing is
+// returned, nothing is audited as served, and no warning is left behind.
+func TestFreeSQL_rowCapIsAnError(t *testing.T) {
+	cut := sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "id", Type: "INTEGER"}},
+		Rows: [][]any{{json.Number("1")}, {json.Number("2")}, {json.Number("3")}}, Truncated: true}
+	f := &fakeFreeSQL{res: cut}
+	h := NewHandler(nil, nil)
+	h.BindFreeSQL(f)
+	conn := &warningsConn{}
+	h.BindConn(conn)
+	rec := audittest.Install(t)
+
+	res, err := h.HandleQuery("SELECT id FROM orders")
+	if res != nil {
+		t.Errorf("a cut result came back with the error: %+v", res)
+	}
+	me := wantMyError(t, err, mysql.ER_TOO_BIG_SELECT, "more than 3 rows", "row cap", "LIMIT of 3 or less", "no LIMIT of its own", "sql_select_limit to 3 or less")
+	if strings.Contains(me.Message, "above the cap") {
+		t.Errorf("no sql_select_limit is set, yet the message speaks of one: %q", me.Message)
+	}
+	if conn.warnings != 0 {
+		t.Errorf("connection warnings = %d after the refusal, want 0", conn.warnings)
+	}
+	if n := len(rec.Events()); n != 0 {
+		t.Errorf("a refused result was audited as served (%d event(s))", n)
+	}
+
+	// A sql_select_limit above the cap does not lift it: the same refusal,
+	// saying the limit is above the cap. At or under the cap the executor
+	// cuts at the client's limit and does not report it as truncated, so
+	// the result is returned and nothing is raised.
+	if _, err := h.HandleQuery("SET sql_select_limit = 50"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = h.HandleQuery("SELECT id FROM orders")
+	wantMyError(t, err, mysql.ER_TOO_BIG_SELECT, "more than 3 rows", "it is 50 now, above the cap")
+	if f.gotSess.SelectLimit != 50 {
+		t.Errorf("the executor was given limit %d, want the client's 50 (it applies the cap)", f.gotSess.SelectLimit)
+	}
+	if _, err := h.HandleQuery("SET sql_select_limit = 3"); err != nil {
+		t.Fatal(err)
+	}
+	f.res.Truncated = false // what the executor reports for a cut at the client's own limit
+	res, err = h.HandleQuery("SELECT id FROM orders")
+	if err != nil || len(textRows(t, res.Resultset)) != 3 {
+		t.Fatalf("a cut the client asked for: (%v, %v), want the 3 rows and no error", res, err)
+	}
+	if conn.warnings != 0 {
+		t.Errorf("a cut the client asked for raised %d warning(s), want none", conn.warnings)
+	}
+
+	// A listing takes no LIMIT and no sql_select_limit: its refusal points at
+	// the catalog instead of at advice that cannot be followed.
+	f.res.Truncated = true
+	for _, stmt := range []string{"SHOW TABLES", "describe orders", "/* c */ SHOW ALL TABLES"} {
+		_, err = h.HandleQuery(stmt)
+		me := wantMyError(t, err, mysql.ER_TOO_BIG_SELECT, "more than 3 rows", "takes no LIMIT", "information_schema")
+		if strings.Contains(me.Message, "sql_select_limit") {
+			t.Errorf("%s: the refusal advises sql_select_limit, which a listing ignores: %q", stmt, me.Message)
+		}
+	}
+
+	// A prepared statement is refused the same way.
+	f.res.Truncated = true
+	_, _, ctx, err := h.HandleStmtPrepare("SELECT id FROM orders WHERE id > ?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = h.HandleStmtExecute(ctx, "", []any{int64(0)})
+	wantMyError(t, err, mysql.ER_TOO_BIG_SELECT, "more than 3 rows")
+}
+
+// A cell cut at the cell cap raises one warning, SHOW WARNINGS returns it,
+// and the next statement clears it. Without free SQL bound SHOW WARNINGS
+// stays the empty OK it always was.
 func TestFreeSQL_truncationWarning(t *testing.T) {
 	cut := oneCell("id", "INTEGER", json.Number("1"))
-	cut.Truncated = true
 	cut.TruncatedCells = 3
 	f := &fakeFreeSQL{res: cut}
 	h := NewHandler(nil, nil)
@@ -278,17 +351,16 @@ func TestFreeSQL_truncationWarning(t *testing.T) {
 	}
 	// The count travels on the CONNECTION: go-mysql writes the EOF packet's
 	// warning count from Conn.SetWarnings, never from Result.Warnings.
-	if conn.warnings != 2 {
-		t.Errorf("connection warnings = %d, want 2 (rows cut, cells cut)", conn.warnings)
+	if conn.warnings != 1 {
+		t.Errorf("connection warnings = %d, want 1 (cells cut)", conn.warnings)
 	}
 	w, err := h.HandleQuery("SHOW WARNINGS")
 	if err != nil {
 		t.Fatal(err)
 	}
 	rows := textRows(t, w.Resultset)
-	if len(rows) != 2 || rows[0][0] != "Warning" || !strings.Contains(rows[0][2], "cut at 1 rows") || !strings.Contains(rows[0][2], "LIMIT") ||
-		!strings.Contains(rows[1][2], "3 cell(s)") {
-		t.Errorf("SHOW WARNINGS rows = %v, want the row cut (with a LIMIT) and the 3 cut cells", rows)
+	if len(rows) != 1 || rows[0][0] != "Warning" || !strings.Contains(rows[0][2], "3 cell(s)") {
+		t.Errorf("SHOW WARNINGS rows = %v, want the 3 cut cells", rows)
 	}
 	if f.calls != 1 {
 		t.Errorf("SHOW WARNINGS reached the executor (calls = %d)", f.calls)
