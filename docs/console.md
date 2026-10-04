@@ -1130,7 +1130,14 @@ files on the index host. It never runs on MySQL.
 What you can query is what the copy defines: one table per source table, named
 like the source table, `shop.orders` (the table as of the newest snapshot;
 a name DuckDB cannot read bare is quoted, `demo."order.items"`), and `events`,
-the change log, when archived changes exist on local disk. The list on the left
+the change log, when archived changes exist on local disk. Under `watch` with
+an S3 location they normally do not: each archived hour is uploaded and the
+local file removed once the upload is confirmed, so `events` is not listed, a
+note under the list says why, and a query
+that reads it is refused with the two things that do answer: the **Events**
+page for one row's history, and your own DuckDB over the bucket for the whole
+of it (**Download a DuckDB schema** with **Include the change log**, and
+**Works on another machine** to run it anywhere but the index host). The list on the left
 shows them; type in the filter to narrow it, click a name to put it in the
 query. The line under the editor says how old the copy is.
 

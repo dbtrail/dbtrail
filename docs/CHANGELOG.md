@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **SQL on the copy says what to use when `events` is in S3** (#2028). On the
+  bundled stack the change log is only in S3, so `events` was never readable
+  from the SQL card or the port, and the list of tables left it out without a
+  word. The refusal now names what answers (the Events page or `_diff` for one
+  row, your own DuckDB for the whole history) and the SQL card has a note
+  under its list. Nothing else changes: `events` is still read from local
+  disk only.
+
 ### Added
 - **Prepared statements on the time-travel port** (#2036). The embedded
   port and `bintrail shim` refused `COM_STMT_PREPARE`, so every driver that

@@ -84,8 +84,11 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string) (sqlsandb
 			return sqlsandbox.Result{}, errors.New(sqlWorkerFailedMessage)
 		case errors.As(err, &refusal):
 			msg := refusal.Message
-			if msg == sqlCopyNotLocalMessage {
+			switch msg {
+			case sqlCopyNotLocalMessage:
 				msg = sqlCopyNotLocalPortMessage
+			case sqlEventsInS3Message:
+				msg = sqlEventsInS3PortMessage
 			}
 			return sqlsandbox.Result{}, &sqlsandbox.UnavailableError{Reason: msg}
 		case errors.Is(err, sqlsandbox.ErrCopyNotLocal):
@@ -99,6 +102,13 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string) (sqlsandb
 // sqlCopyNotLocalPortMessage is sqlCopyNotLocalMessage for a MySQL client,
 // which is not in a browser.
 const sqlCopyNotLocalPortMessage = "the copy for this server is only on S3; SQL on the copy needs a local copy"
+
+// sqlEventsInS3PortMessage is sqlEventsInS3Message for a MySQL client: the
+// row history it can ask for on this same connection is _diff, which reads
+// the archives in S3. Kept short: clients cut an error message at 512 bytes.
+const sqlEventsInS3PortMessage = "the change history for this server is on S3, so events cannot be read on this port; the tables can. " +
+	"For one row's history: SELECT * FROM _diff.<table> BETWEEN '<from>' AND '<to>' WHERE <pk> = <value>. " +
+	"To query the whole history, run your own DuckDB on the copy in S3 (views.sql with the change log included)"
 
 // CopyUpdatedAt is the snapshot time the copy's tables answer from, zero
 // when there is none or it cannot be read: the router's freshness input.

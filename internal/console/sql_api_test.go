@@ -1108,6 +1108,39 @@ func TestSQLAPI_localTablesWithChangeLogInS3(t *testing.T) {
 	if strings.Contains(w.Body.String(), "only on S3") || strings.Contains(w.Body.String(), "Catalog Error") {
 		t.Errorf("the answer blames the whole copy or echoes the catalog error: %s", w.Body.String())
 	}
+	// The refusal says what the person can do instead (#2028): the Events
+	// page for one row, their own DuckDB for the whole history. Never the
+	// port's _diff shape, which the SQL card does not take.
+	for _, want := range []string{"Events page", "your own DuckDB"} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Errorf("the refusal does not name %q: %s", want, w.Body.String())
+		}
+	}
+	if strings.Contains(w.Body.String(), "_diff") {
+		t.Errorf("the SQL card's refusal offers the port's _diff shape: %s", w.Body.String())
+	}
+	// The same statement on the MySQL port: worded for that wire, with the
+	// shape that works there.
+	f.expectArchiveS3()
+	_, perr := (&SQLOnCopy{s: f.s, b: f.s.cm.boot, user: "server:x"}).Run(context.Background(), "SELECT count(*) FROM events", "")
+	var un *sqlsandbox.UnavailableError
+	if !errors.As(perr, &un) {
+		t.Fatalf("port: err = %v (%T), want *sqlsandbox.UnavailableError", perr, perr)
+	}
+	for _, want := range []string{"cannot be read on this port; the tables can", "_diff.", "your own DuckDB"} {
+		if !strings.Contains(un.Reason, want) {
+			t.Errorf("port refusal does not name %q: %s", want, un.Reason)
+		}
+	}
+	for _, not := range []string{"Events page", "Settings", "only on S3", "Catalog Error"} {
+		if strings.Contains(un.Reason, not) {
+			t.Errorf("port refusal names %q, which a MySQL client cannot use: %s", not, un.Reason)
+		}
+	}
+	// A MySQL error message is cut at 512 bytes by the protocol's clients.
+	if len(un.Reason) > 400 {
+		t.Errorf("port refusal is %d bytes, too long for a MySQL error message: %s", len(un.Reason), un.Reason)
+	}
 	// Any other DuckDB error there stays DuckDB's.
 	f.runner.err = &sqlsandbox.QueryError{Message: "Binder Error: column nope not found"}
 	if w := postS3(`{"sql":"SELECT nope FROM events"}`); w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "Binder Error") {
@@ -1120,6 +1153,31 @@ func TestSQLAPI_localTablesWithChangeLogInS3(t *testing.T) {
 	f.s.handleSQLInfo(g, httptest.NewRequest("GET", "/api/sql", nil))
 	if g.Code != http.StatusOK || !strings.Contains(g.Body.String(), `"views":["shop.orders"]`) {
 		t.Errorf("listing: code=%d body=%s", g.Code, g.Body.String())
+	}
+	// And says why events is not among them, so the list does not read as
+	// "this server has no change log" (#2028).
+	var info sqlInfoResponse
+	if err := json.Unmarshal(g.Body.Bytes(), &info); err != nil {
+		t.Fatalf("listing: %v: %s", err, g.Body.String())
+	}
+	if len(info.Notes) != 1 || info.Notes[0] != sqlEventsInS3Note {
+		t.Errorf("listing notes = %q, want the one that says where events went", info.Notes)
+	}
+	// A local change log lists events and has nothing to explain; so does
+	// a copy with no change log at all.
+	for name, withArchive := range map[string]bool{"local change log": true, "no change log": false} {
+		lf := newSQLFixture(t, &fakeSQLRunner{res: oneRowResult()}, withArchive)
+		lf.expectArchive()
+		lg := httptest.NewRecorder()
+		lf.s.handleSQLInfo(lg, httptest.NewRequest("GET", "/api/sql", nil))
+		if lg.Code != http.StatusOK || strings.Contains(lg.Body.String(), "on S3") {
+			t.Errorf("%s: code=%d, the listing explains an S3 change log that is not there: %s", name, lg.Code, lg.Body.String())
+		}
+		// The two legs must differ, or the local one is not testing a
+		// local change log at all.
+		if listed := strings.Contains(lg.Body.String(), `"events"`); listed != withArchive {
+			t.Errorf("%s: events listed = %v, want %v: %s", name, listed, withArchive, lg.Body.String())
+		}
 	}
 	// On a fully local copy the same catalog error is NOT rewritten.
 	l := newSQLFixture(t, &fakeSQLRunner{err: &sqlsandbox.QueryError{Message: "Catalog Error: Table with name events does not exist!"}}, false)
