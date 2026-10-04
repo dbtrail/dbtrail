@@ -299,3 +299,104 @@ func TestReadOnly_preparedShowWarningsAfterARefusal(t *testing.T) {
 		t.Errorf("prepared SHOW WARNINGS after a refusal ran on the source")
 	}
 }
+
+// A SHOW WARNINGS the client prepares AFTER the refusal still shows it:
+// preparing the statement that reads the diagnostics must not clear them.
+// With and without an earlier forwarded statement (the two states SHOW
+// WARNINGS otherwise picks its side from).
+func TestReadOnly_showWarningsPreparedAfterTheRefusal(t *testing.T) {
+	for _, forwardedFirst := range []bool{true, false} {
+		r := &fakeRouter{}
+		f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
+		h, _ := readOnlyHandler(t, r, f)
+		if forwardedFirst {
+			if _, err := h.HandleQuery("SELECT * FROM t WHERE id = 1"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_, refusal := h.HandleQuery("DELETE FROM t")
+		refusedReadOnly(t, "DELETE FROM t", refusal)
+		var me *mysql.MyError
+		errors.As(refusal, &me)
+		forwardedBefore := len(r.forwarded)
+
+		_, _, ctx, err := h.HandleStmtPrepare("SHOW WARNINGS")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range 2 { // executing it does not clear what it shows
+			res, err := h.HandleStmtExecute(ctx, "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, st := range r.prepared {
+				if len(st.executed) != 0 {
+					t.Fatalf("forwarded first=%v: the prepared SHOW WARNINGS ran on the source", forwardedFirst)
+				}
+			}
+			rs := res.Resultset
+			if rs == nil || len(rs.RowDatas) != 1 {
+				t.Fatalf("forwarded first=%v: prepared SHOW WARNINGS = %+v, want one row", forwardedFirst, res)
+			}
+			vals, err := rs.RowDatas[0].ParseBinary(rs.Fields, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(vals[0].AsString()) != "Error" || vals[1].AsInt64() != 1290 || string(vals[2].AsString()) != me.Message {
+				t.Fatalf("forwarded first=%v: prepared SHOW WARNINGS row = %v %v %q, want Error 1290 and the refusal", forwardedFirst, string(vals[0].AsString()), vals[1].Value(), vals[2].AsString())
+			}
+		}
+		if len(r.forwarded) != forwardedBefore {
+			t.Errorf("forwarded first=%v: something was forwarded: %v", forwardedFirst, r.forwarded[forwardedBefore:])
+		}
+
+		// Another statement in between clears it: prepared ...
+		if _, _, _, err := h.HandleStmtPrepare("SELECT * FROM t WHERE id = ?"); err != nil {
+			t.Fatal(err)
+		}
+		if got := refusalShown(t, h); got {
+			t.Errorf("forwarded first=%v: the refusal survived another PREPARE", forwardedFirst)
+		}
+		// ... or run.
+		_, _ = h.HandleQuery("DELETE FROM t")
+		if !refusalShown(t, h) {
+			t.Fatal("the second refusal is not shown")
+		}
+		if _, err := h.HandleQuery("SELECT * FROM t WHERE id = 3"); err != nil {
+			t.Fatal(err)
+		}
+		if refusalShown(t, h) {
+			t.Errorf("forwarded first=%v: the refusal survived another statement", forwardedFirst)
+		}
+	}
+}
+
+// refusalShown reports whether SHOW WARNINGS answers with a read-only
+// refusal right now.
+func refusalShown(t *testing.T, h *Handler) bool {
+	t.Helper()
+	res, err := h.HandleQuery("SHOW WARNINGS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := textRows(t, res.Resultset)
+	return len(rows) == 1 && rows[0][0] == "Error" && rows[0][1] == "1290"
+}
+
+// A protocol-level USE (COM_INIT_DB) between the refusal and SHOW WARNINGS
+// keeps the refusal, as MySQL 8.4 and MariaDB 11.4 keep the previous
+// statement's diagnostics across a successful COM_INIT_DB.
+func TestReadOnly_refusalSurvivesComInitDB(t *testing.T) {
+	r := &fakeRouter{}
+	h, _ := readOnlyHandler(t, r, &fakeFreeSQL{})
+	if _, err := h.HandleQuery("SELECT * FROM t WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = h.HandleQuery("DELETE FROM t")
+	if err := h.UseDB("shop"); err != nil {
+		t.Fatal(err)
+	}
+	if !refusalShown(t, h) {
+		t.Error("COM_INIT_DB cleared the refusal")
+	}
+}

@@ -231,7 +231,12 @@ func (h *Handler) HandleStmtClose(context any) error {
 // the statement split the MySQL way, kept for the executions the routing
 // ladder sends to the copy.
 func (h *Handler) prepareRouted(query string, parts []string) (int, int, any, error) {
-	h.clearRefusal()
+	// A statement being prepared replaces the refused one as "the last
+	// statement", except SHOW WARNINGS itself: preparing the statement that
+	// reads the refusal must not erase it.
+	if !showWarningsRE.MatchString(query) {
+		h.clearRefusal()
+	}
 	if err := h.readOnlyRefusal(query); err != nil {
 		return 0, 0, nil, err
 	}
