@@ -153,8 +153,9 @@ func (n *watchNotifier) VerifyFinished(rec console.VerifyRunRecord) {
 }
 
 // RotationCycle is the rotation.StartLoop onCycle hook. Unhealthy mirrors the
-// loop's own escalation condition — failed OR deferring unarchived partitions
-// — because either way the index is not shrinking when it should.
+// loop's own escalation condition — failed OR declining to drop partitions
+// past retention (rotation.Result.Deferred) — because
+// either way the index is not shrinking when it should.
 func (n *watchNotifier) RotationCycle(failed bool, deferred int) {
 	const key = "rotation"
 	if !failed && deferred == 0 {
