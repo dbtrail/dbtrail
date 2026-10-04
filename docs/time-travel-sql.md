@@ -379,7 +379,9 @@ What this is and is not:
   full-width letters (`'Ａ' = 'A'`), ligatures and letters with a stroke
   (`'æ' = 'ae'`, `'ø' = 'o'`, `'ł' = 'l'`), and hiragana against katakana
   are equal under `utf8mb4_0900_ai_ci` and not on the copy, which folds
-  case and accents and nothing else; and where MySQL sorts every
+  case and accents and nothing else; the other way round, the copy takes
+  the breve of Cyrillic `й` for an accent and equates it with `и`, which
+  MySQL keeps apart; and where MySQL sorts every
   punctuation mark before the digits, the copy sorts them by their ASCII
   code (`:` and `@` after the digits). One DuckDB
   collation does all of that as MySQL does (`nocase.icu_noaccent`); the
