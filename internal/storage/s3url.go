@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
@@ -414,4 +415,15 @@ func GetSmallObject(ctx context.Context, client *s3.Client, bucket, key string, 
 		return nil, false, fmt.Errorf("read s3://%s/%s: %w", bucket, key, err)
 	}
 	return b, true, nil
+}
+
+// IsAccessDenied reports whether err is S3 refusing the request (403 /
+// AccessDenied), as opposed to a missing key or a network failure.
+func IsAccessDenied(err error) bool {
+	var ae smithy.APIError
+	if errors.As(err, &ae) && ae.ErrorCode() == "AccessDenied" {
+		return true
+	}
+	var re *smithyhttp.ResponseError
+	return errors.As(err, &re) && re.Response != nil && re.Response.StatusCode == 403
 }

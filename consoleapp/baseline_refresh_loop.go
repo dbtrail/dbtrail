@@ -1547,7 +1547,7 @@ var foldTables = reconstruct.ReconstructTablesDetailed
 func uploadAndInvalidate(ctx context.Context, outputDir, s3URL, region string, retry bool) (int, error) {
 	n, err := baselineUpload(ctx, outputDir, s3URL, region, retry)
 	invalidateS3Inventory(s3URL)
-	if errors.Is(err, baseline.ErrNewestPointer) {
+	if warn, _ := baseline.SplitPointerError(err); warn != nil {
 		// The snapshot is in S3, complete, and discoverable: only the root's
 		// newest-snapshot pointer (#2052) is behind. Reporting the upload as
 		// failed would send the callers down their "not uploaded" paths (keep

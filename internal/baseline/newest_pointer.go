@@ -32,12 +32,46 @@ const NewestPointerName = "_NEWEST"
 // publish moves it.
 var ErrNewestPointer = errors.New("the snapshot is published, but the root's newest-snapshot pointer is not up to date")
 
-// newestPointerMu serializes the read-compare-write of a pointer within this
-// process: a sweep re-sending an older snapshot and a refresh publishing a new
-// one can run at once, and two interleaved compares could move the pointer
-// backward. Another process publishing to the same root is not covered; one
-// daemon owns a root.
-var newestPointerMu sync.Mutex
+// pointerLocks serializes the read-compare-write of each root's pointer
+// within this process: a sweep re-sending an older snapshot and a refresh
+// publishing a new one can run at once, and two interleaved compares could
+// move the pointer backward. One lock per root, so a slow or stalled request
+// on one server's bucket never holds up another's. Another process
+// publishing to the same root is not covered; one daemon owns a root.
+var pointerLocks sync.Map // root key -> *sync.Mutex
+
+func lockNewestPointer(root string) func() {
+	m, _ := pointerLocks.LoadOrStore(root, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+// SplitPointerError separates a pointer-only failure from a failed upload:
+// warning is non-nil when the snapshot itself is published and only the
+// root's newest pointer is behind (ErrNewestPointer), fatal is any other
+// error. Every caller of Upload reports the first as a warning and goes on
+// (the backup is there, and a reader that finds no current pointer falls
+// back to listing the root); only the second fails the run.
+func SplitPointerError(err error) (warning, fatal error) {
+	if errors.Is(err, ErrNewestPointer) {
+		return err, nil
+	}
+	return nil, err
+}
+
+// pointerAccessHint names the permission behind a refused pointer request.
+// Without s3:ListBucket, S3 answers a read of a key that does not exist yet
+// with 403 instead of 404, so a writer scoped to PutObject/GetObject on the
+// prefix cannot tell "no pointer yet" from "not allowed", and the pointer is
+// never created.
+func pointerAccessHint(err error) string {
+	if !storage.IsAccessDenied(err) {
+		return ""
+	}
+	return " (S3 refused it: grant s3:ListBucket on the bucket, without which S3 answers 403 instead of 404 for a pointer " +
+		"that does not exist yet, and s3:GetObject and s3:PutObject on the pointer's key)"
+}
 
 // publishNewestPointers moves each root's pointer to the newest snapshot this
 // upload published under it, never backward. snapDirs are the local snapshot
@@ -76,28 +110,34 @@ func publishNewestPointers(ctx context.Context, outputDir, prefix string, snapDi
 		roots = append(roots, r)
 	}
 	sort.Strings(roots)
-	newestPointerMu.Lock()
-	defer newestPointerMu.Unlock()
 	for _, root := range roots {
-		name := newest[root]
-		ptr := path.Join(root, NewestPointerName)
-		cur, found, err := ops.getObject(ctx, ptr)
-		if err != nil {
-			// Not "absent": writing blind could move a newer pointer back.
-			return fmt.Errorf("%w: snapshot %s; reading %s: %v", ErrNewestPointer, name, ptr, err)
+		if err := publishNewestPointer(ctx, root, newest[root], ops); err != nil {
+			return err
 		}
-		if found {
-			// Snapshot names sort by time. Content that is not a snapshot name
-			// cannot name a newer one and is replaced.
-			if c := strings.TrimSpace(string(cur)); c >= name {
-				if _, ok := snapshotdir.ParseTime(c); ok {
-					continue
-				}
+	}
+	return nil
+}
+
+func publishNewestPointer(ctx context.Context, root, name string, ops s3UploadOps) error {
+	unlock := lockNewestPointer(root)
+	defer unlock()
+	ptr := path.Join(root, NewestPointerName)
+	cur, found, err := ops.getObject(ctx, ptr)
+	if err != nil {
+		// Not "absent": writing blind could move a newer pointer back.
+		return fmt.Errorf("%w: snapshot %s; reading %s: %v%s", ErrNewestPointer, name, ptr, err, pointerAccessHint(err))
+	}
+	if found {
+		// Snapshot names sort by time. Content that is not a snapshot name
+		// cannot name a newer one and is replaced.
+		if c := strings.TrimSpace(string(cur)); c >= name {
+			if _, ok := snapshotdir.ParseTime(c); ok {
+				return nil
 			}
 		}
-		if err := ops.putObject(ctx, ptr, []byte(name+"\n")); err != nil {
-			return fmt.Errorf("%w: snapshot %s; writing %s: %v", ErrNewestPointer, name, ptr, err)
-		}
+	}
+	if err := ops.putObject(ctx, ptr, []byte(name+"\n")); err != nil {
+		return fmt.Errorf("%w: snapshot %s; writing %s: %v%s", ErrNewestPointer, name, ptr, err, pointerAccessHint(err))
 	}
 	return nil
 }

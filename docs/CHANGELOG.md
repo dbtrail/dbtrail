@@ -15,9 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   next change read one object instead. It is written after the snapshot's
   `_SUCCESS`, never moves back to an older snapshot (a sweep re-sending an
   old one leaves it alone), and is a shortcut only: `_SUCCESS` still decides
-  completeness. If it cannot be read or written, `bintrail baseline --upload`
-  fails saying the snapshot itself is published; the console logs it as an
-  error and treats the upload as done. On a versioned bucket each write is a
+  completeness. If it cannot be read or written, the upload warns that the
+  snapshot itself is published and goes on (`bintrail baseline --upload`,
+  `bintrail-pg baseline --upload` and the console alike); it never writes the
+  pointer without reading it first. Creating it needs `s3:ListBucket` too:
+  without it S3 answers 403 for a missing key (docs/s3-iam-policy.md). On a versioned bucket each write is a
   new version of a few bytes (see docs/object-lock.md).
 
 ### Fixed

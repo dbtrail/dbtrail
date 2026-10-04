@@ -3,12 +3,14 @@ package baseline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 )
 
 // fakeBucket is an in-memory S3 for the upload: every call is recorded in
@@ -253,5 +255,45 @@ func TestNewestPointer_newestRegardlessOfOrder_2052(t *testing.T) {
 	}
 	if got := string(b.objects[ptrKey]); got != "2026-10-04T12-00-03Z\n" {
 		t.Errorf("pointer = %q, want the newer snapshot", got)
+	}
+}
+
+// Every caller of Upload sorts its error through SplitPointerError: a
+// pointer-only failure is a warning (the snapshot is published), anything
+// else stays fatal, and nil stays nil.
+func TestSplitPointerError_2052(t *testing.T) {
+	ptrErr := fmt.Errorf("%w: snapshot x; writing p/_NEWEST: boom", ErrNewestPointer)
+	if w, f := SplitPointerError(ptrErr); w == nil || f != nil {
+		t.Errorf("pointer error: warning=%v fatal=%v", w, f)
+	}
+	other := errors.New("upload failed")
+	if w, f := SplitPointerError(other); w != nil || f != other {
+		t.Errorf("other error: warning=%v fatal=%v", w, f)
+	}
+	if w, f := SplitPointerError(nil); w != nil || f != nil {
+		t.Errorf("nil: warning=%v fatal=%v", w, f)
+	}
+}
+
+// A refused read (no s3:ListBucket makes S3 answer 403 for a missing key)
+// names the permissions in the error; the pointer is not written blind.
+func TestNewestPointer_accessDeniedNamesThePermission_2052(t *testing.T) {
+	root := t.TempDir()
+	mkUploadSnapshot(t, root, "2026-10-04T12-00-03Z")
+	b := newFakeBucket()
+	b.fail["get "+ptrKey] = &smithy.GenericAPIError{Code: "AccessDenied", Message: "Access Denied"}
+	_, err := uploadWithOps(context.Background(), root, "p", false, b.ops())
+	if !errors.Is(err, ErrNewestPointer) || !strings.Contains(err.Error(), "s3:ListBucket") {
+		t.Fatalf("err = %v, want ErrNewestPointer naming s3:ListBucket", err)
+	}
+	if _, ok := b.objects[ptrKey]; ok {
+		t.Error("pointer written blind after a refused read")
+	}
+	// Any other failure carries no permission hint.
+	b2 := newFakeBucket()
+	b2.fail["get "+ptrKey] = errors.New("connection reset")
+	_, err = uploadWithOps(context.Background(), root, "p", false, b2.ops())
+	if strings.Contains(err.Error(), "ListBucket") {
+		t.Errorf("a network error blamed permissions: %v", err)
 	}
 }

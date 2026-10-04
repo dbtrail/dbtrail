@@ -269,6 +269,11 @@ The IAM principal (user or role) needs these S3 permissions on the destination b
 ```
 
 - `s3:PutObject` — required for uploading files
+- Baseline uploads also keep `<root>/_NEWEST`, a one-line pointer to the
+  newest snapshot. Creating it the first time needs `s3:ListBucket` on the
+  bucket as well: without it S3 answers 403 for a key that does not exist
+  yet, and the upload leaves the pointer alone and warns (the snapshot itself
+  is published).
 - `s3:GetObject` — required for the `HeadObject` existence check `--retry` issues (AWS authorizes `HeadObject` under the `s3:GetObject` permission — there is no separate `s3:HeadObject` IAM action), and if you later query archives with `bintrail query --archive-s3`
 - `s3:AbortMultipartUpload` — uploads stream through the AWS SDK multipart Uploader (files above ~5 MiB are split into parts); when an upload fails or is interrupted, the SDK automatically aborts the multipart upload, which requires this permission. Without it, orphaned parts remain in the bucket and are billed. As a backstop for aborts that never run (crash, `SIGKILL`, network loss), attach the `AbortIncompleteMultipartUpload` lifecycle rule from [Deployment → S3 archive bucket: abort orphaned multipart uploads](deployment.md#s3-archive-bucket-abort-orphaned-multipart-uploads)
 - `s3:GetBucketLocation` — **optional**, bucket-level (not scoped to `/archives/*`). `bintrail query --archive-s3` uses it only to cross-check the bucket's region against the one already resolved from the credential chain; without it, that check is skipped (logged at debug level, not a warning) and the resolved region is used as-is. Grant it only if the archive bucket lives in a different region than your EC2/ECS/EKS principal otherwise resolves — see [S3 Prerequisites](query-and-recovery.md#s3-prerequisites).
