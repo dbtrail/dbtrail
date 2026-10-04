@@ -54,10 +54,10 @@ func TestDiffInsert(t *testing.T) {
 		t.Errorf("insert changes incomplete: %v", ch)
 	}
 	// The drop-block trap: an S3-confirmed insert MUST stamp s3_uploaded_at —
-	// rotate's hasPendingS3Upload reads bucket-set + stamp-NULL as a pending
+	// rotate's pendingS3Uploads reads bucket-set + stamp-NULL as a pending
 	// upload and refuses to drop the partition forever.
 	if _, ok := ch["s3_uploaded_at"]; !ok {
-		t.Error("insert with confirmed S3 object must stamp s3_uploaded_at (hasPendingS3Upload drop-block trap)")
+		t.Error("insert with confirmed S3 object must stamp s3_uploaded_at (pendingS3Uploads drop-block trap)")
 	}
 	if err := rep.Err(); err == nil {
 		t.Error("drift must make Err() non-nil (cron exit-code contract)")

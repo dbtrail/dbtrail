@@ -19,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Go's `map[a:10]`, is now the JSON object its column is declared as. `AVG`
   and `/` are not part of this: they are doubles on the copy, and still
   print as such.
+- **Rotation: another source's pending S3 upload now blocks the drop** (#2088).
+  On an index that several sources write to, a partition was dropped while
+  another source's upload of that hour was still unconfirmed: the check for
+  pending uploads looked only at the source that was rotating, and partitions
+  are shared by all of them. The hour stayed in that source's local file but
+  was in neither the index nor S3, and nothing retried the upload afterwards.
+  The check now covers every source, and the message names whose upload is
+  holding the hour. Not the bundled stack, where each source has its own
+  index.
 - **A partial local archive no longer hides the S3 copy** (#2078). Every
   reader of archived changes (the Events page, the time-travel schemas,
   recover, SQL on the copy) read the local archive folder whenever it held
