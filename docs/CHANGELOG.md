@@ -60,6 +60,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `watch --metrics-addr`. Only statements that ran to a result are observed.
 
 ### Changed
+- **A views file pinned to one snapshot on S3 no longer re-checks every
+  file with S3 before each query** (#2051). DuckDB keeps what it read for the
+  session, but by default asked S3 again, one file at a time, whether each
+  file had changed: from outside AWS about half a second per file, so a
+  query over data already in memory still took 2 to 6 seconds. The pinned
+  file (`bintrail views --pin-snapshot`, and the one the console offers for
+  dashboards) now turns on `enable_http_metadata_cache`, safe because a
+  published snapshot's files never change: the same query takes about 0.2 s
+  and makes no S3 request (measured on DuckDB 1.3, 1.4 and 1.5). The setting
+  exists since DuckDB 1.1, so the file still loads on every version it did. A
+  file that follows the newest snapshot is unchanged.
 - **SQL on the copy waits for a free slot instead of refusing at once**
   (#2033). When every slot is busy, a statement on the SQL card or the
   embedded MySQL port now waits up to 30 seconds and runs as soon as a slot
