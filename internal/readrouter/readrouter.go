@@ -161,6 +161,7 @@ var vetoes = []struct {
 	{"DISTINCT inside an aggregate (not folded by the copy's collation)", regexp.MustCompile(`(?i)\b(count|sum|avg|min|max|group_concat)\s*\(\s*distinct\b`)},
 	{"INSTR/LOCATE/POSITION/STRCMP (case-sensitive on the copy)", regexp.MustCompile(`(?i)\b(instr|locate|position|strcmp|field|find_in_set)\s*\(`)},
 	{"|| (string concatenation on the copy, logical OR on MySQL)", regexp.MustCompile(`\|\|`)},
+	{"JSON function or -> operator (missing or different on the copy)", regexp.MustCompile(`(?i)\bjson_[a-z_]+\s*\(|->>?`)}, // JSON_UNQUOTE does not exist on the copy; JSON_EXTRACT paths and quoting differ
 	{"^ (power on the copy, bitwise XOR on MySQL)", regexp.MustCompile(`\^`)},
 }
 
@@ -272,6 +273,21 @@ type Plan struct {
 	// Message is the optimizer's shortcut when there is no plan ("no matching
 	// row in const table", "Impossible WHERE"): the query is trivial.
 	Message string
+	// Filesort is true when any ordering_operation sorts (using_filesort),
+	// i.e. the ORDER BY is not served by an index. With a LIMIT, that is the
+	// difference between MySQL reading the whole table and reading N rows.
+	Filesort bool
+	// ScanFilter is true when the plan both scans a table (access_type ALL,
+	// index or range) and filters somewhere (an attached_condition on any
+	// table): a condition no index serves, which MySQL evaluates row by row
+	// as it scans. With a LIMIT under an index-served ORDER BY,
+	// rows_examined_per_scan is then only the optimizer's guess (LIMIT over
+	// the filter's assumed selectivity, across the join when the filter sits
+	// on a joined table), while a rare or absent value makes MySQL walk the
+	// whole index.
+	ScanFilter bool
+	// scans and conditions are the two halves ScanFilter is computed from.
+	scans, conditions bool
 }
 
 // ParsePlan reads the two things the decision needs from EXPLAIN FORMAT=JSON.
@@ -297,17 +313,27 @@ func ParsePlan(explainJSON []byte) (Plan, error) {
 		p.Message = m
 	}
 	walk(qb, &p)
+	p.ScanFilter = p.scans && p.conditions
 	return p, nil
 }
 
 func walk(v any, p *Plan) {
 	switch x := v.(type) {
 	case map[string]any:
+		if fs, ok := x["using_filesort"].(bool); ok && fs {
+			p.Filesort = true
+		}
 		if t, ok := x["table"].(map[string]any); ok {
 			if at, ok := t["access_type"].(string); ok {
 				p.Tables++
 				if at == "ALL" {
 					p.FullScans++
+				}
+				if at == "ALL" || at == "index" || at == "range" {
+					p.scans = true
+				}
+				if cond, _ := t["attached_condition"].(string); cond != "" {
+					p.conditions = true
 				}
 				if n := int64(number(t["rows_examined_per_scan"])); n > p.MaxScanRows {
 					p.MaxScanRows = n
@@ -348,6 +374,127 @@ type Policy struct {
 	ScanRows      int64
 }
 
+// limitBoundRows is the largest top-level LIMIT (offset included) that
+// counts as "a few rows", and the largest plan row estimate under which a
+// LIMIT-bounded statement is MySQL's.
+const limitBoundRows = 1000
+
+var (
+	// topLimit matches a LIMIT that ends the statement: "LIMIT n",
+	// "LIMIT off, n", "LIMIT n OFFSET off", with an optional trailing ";".
+	topLimit = regexp.MustCompile(`(?i)\blimit\s+(\d+)(?:\s*,\s*(\d+)|\s+offset\s+(\d+))?\s*;?\s*$`)
+	// unboundedWork matches what makes MySQL read past the LIMIT before it
+	// can emit the first row: aggregation, grouping, DISTINCT, window
+	// functions and UNION all materialize or sort first.
+	unboundedWork = regexp.MustCompile(`(?i)\b(group\s+by|having|distinct|distinctrow|union|intersect|except|rollup|over|sql_calc_found_rows)\b|\b(count|sum|avg|min|max|group_concat|any_value|grouping|std|stddev|stddev_pop|stddev_samp|var_pop|var_samp|variance|bit_and|bit_or|bit_xor|json_arrayagg|json_objectagg)\s*\(`)
+	// anyLimit counts LIMITs: a second one belongs to a derived table or
+	// CTE, which MySQL materializes whole before the outer LIMIT applies.
+	anyLimit = regexp.MustCompile(`(?i)\blimit\b`)
+	// bareLimit is the one shape decided without a plan: a select list with
+	// no parentheses (so no subquery, no function call), FROM one table with
+	// an optional alias, LIMIT, nothing else. No WHERE, JOIN, comma join,
+	// ORDER BY or GROUP BY fits between the table and the LIMIT.
+	bareLimit = regexp.MustCompile("(?is)^\\s*select\\s+[^()]*?\\s+from\\s+[\\w.`]+(?:\\s+(?:as\\s+)?[\\w`]+)?\\s+limit\\s+\\d+(?:\\s*,\\s*\\d+|\\s+offset\\s+\\d+)?\\s*;?\\s*$")
+)
+
+// limitBounded reports whether a top-level LIMIT caps the rows MySQL must
+// PRODUCE at a few (limitBoundRows, offset included), with nothing in the
+// statement that forces it to read everything first (no aggregate, GROUP
+// BY, HAVING, DISTINCT, window function or UNION, and no second LIMIT in a
+// derived table or CTE, which is materialized whole). It says nothing about
+// the rows MySQL must READ to find them: a filter with no index behind it
+// scans until it has n matches, which is why the plan's row estimate still
+// decides (DecideStatement). Matched on the scrubbed statement, so a literal
+// cannot fake a LIMIT; a MySQL executable comment (`/*!... */`), which
+// scrub blanks, disqualifies, since it may hide a GROUP BY.
+func limitBounded(stmt string) (rows int64, ok bool) {
+	rows, _, ok = limitBoundedScrubbed(stmt)
+	return rows, ok
+}
+
+// limitBoundedScrubbed is limitBounded returning the scrubbed text too, so
+// a caller that reads it further (Prejudge) scrubs once.
+func limitBoundedScrubbed(stmt string) (rows int64, blanked string, ok bool) {
+	if hintComment.MatchString(stmt) {
+		return 0, "", false
+	}
+	blanked, _ = scrub(stmt)
+	m := topLimit.FindStringSubmatch(blanked)
+	if m == nil || unboundedWork.MatchString(blanked) || len(anyLimit.FindAllStringIndex(blanked, 2)) > 1 {
+		return 0, "", false
+	}
+	var total int64
+	for _, part := range m[1:] {
+		if part == "" {
+			continue
+		}
+		n, err := strconv.ParseInt(part, 10, 64)
+		if err != nil || n > limitBoundRows {
+			return 0, "", false // an unparseable or huge number is never "a few"
+		}
+		total += n
+	}
+	if total > limitBoundRows {
+		return 0, "", false
+	}
+	return total, blanked, true
+}
+
+// Rule names which rule of the policy decided, for callers that count
+// decisions (the shim's routing tally) without parsing the reason text.
+type Rule string
+
+const (
+	RuleTrivial      Rule = "trivial"       // the optimizer short-circuited the plan
+	RuleCost         Rule = "cost"          // query_cost at or above CostThreshold
+	RuleScan         Rule = "scan"          // a full scan over ScanRows rows or more
+	RuleCheap        Rule = "cheap"         // below both thresholds
+	RuleBoundedLimit Rule = "bounded_limit" // a small LIMIT MySQL answers without reading past it
+)
+
+// Decision is the policy's verdict on one statement.
+type Decision struct {
+	ToCopy bool
+	// Reason is the verdict in words an operator can read in the audit
+	// trail and the debug log.
+	Reason string
+	Rule   Rule
+}
+
+// Prejudge decides the one statement shape that needs no plan: a select
+// list without parentheses FROM one table, LIMIT a few rows, nothing else
+// (no WHERE, JOIN, ORDER BY, GROUP BY, subquery or function). On a base
+// table MySQL stops after those rows whatever the table's size, while its
+// plan cost, which ignores LIMIT, would send it to the copy. The text
+// cannot tell a view from a table: a view that aggregates or joins is built
+// whole first, and is still MySQL's here. ok is false for every other
+// statement: those need EXPLAIN and DecideStatement.
+func (pol Policy) Prejudge(stmt string) (d Decision, ok bool) {
+	n, blanked, bounded := limitBoundedScrubbed(stmt)
+	if !bounded || !bareLimit.MatchString(blanked) {
+		return Decision{}, false
+	}
+	return Decision{Reason: fmt.Sprintf("LIMIT %d on one table with no filter, join or sort: a base table stops after %d rows", n, n), Rule: RuleBoundedLimit}, true
+}
+
+// DecideStatement is Decide with the statement text in hand. A
+// LIMIT-bounded statement (limitBounded) whose plan sorts nothing
+// (Filesort), filters nothing while scanning (ScanFilter) and examines at
+// most limitBoundRows rows per table scan is MySQL's, whatever the plan's
+// cost says: the cost ignores LIMIT, the row estimate does not, so an ORDER
+// BY served from an index reads n rows (rows_examined_per_scan: n) and a
+// filter an index serves (ref access) is bounded by the index. A filter no
+// index serves, on the scanned table or on one joined to it, falls through
+// to Decide, as before: under a full scan its estimate is the table; under
+// an index-served order its estimate is only a guess from the filter's
+// assumed selectivity, and a rare value walks the whole index.
+func (pol Policy) DecideStatement(stmt string, p Plan) Decision {
+	if n, ok := limitBounded(stmt); ok && !p.Filesort && !p.ScanFilter && p.Message == "" && p.MaxScanRows <= limitBoundRows {
+		return Decision{Reason: fmt.Sprintf("LIMIT %d served without a sort or an unindexed filter: at most %d rows per table scan", n, p.MaxScanRows), Rule: RuleBoundedLimit}
+	}
+	return pol.Decide(p)
+}
+
 // DefaultPolicy: 10,000 cost units (a point lookup is about 1; a full scan
 // over 200k rows about 20,000, measured on MySQL 8.4) or a full scan over
 // 100,000 rows.
@@ -355,15 +502,15 @@ func DefaultPolicy() Policy { return Policy{CostThreshold: 10000, ScanRows: 1000
 
 // Decide reports whether the plan is expensive enough for the copy, and why
 // either way, in words an operator can read in the audit trail.
-func (pol Policy) Decide(p Plan) (toCopy bool, reason string) {
+func (pol Policy) Decide(p Plan) Decision {
 	if p.Message != "" {
-		return false, "trivial plan: " + p.Message
+		return Decision{Reason: "trivial plan: " + p.Message, Rule: RuleTrivial}
 	}
 	if pol.CostThreshold > 0 && p.Cost >= pol.CostThreshold {
-		return true, fmt.Sprintf("plan cost %.0f >= %.0f", p.Cost, pol.CostThreshold)
+		return Decision{ToCopy: true, Reason: fmt.Sprintf("plan cost %.0f >= %.0f", p.Cost, pol.CostThreshold), Rule: RuleCost}
 	}
 	if pol.ScanRows > 0 && p.FullScans > 0 && p.MaxScanRows >= pol.ScanRows {
-		return true, fmt.Sprintf("full scan over %d rows >= %d", p.MaxScanRows, pol.ScanRows)
+		return Decision{ToCopy: true, Reason: fmt.Sprintf("full scan over %d rows >= %d", p.MaxScanRows, pol.ScanRows), Rule: RuleScan}
 	}
-	return false, fmt.Sprintf("plan cost %.0f below %.0f, no full scan over %d rows", p.Cost, pol.CostThreshold, pol.ScanRows)
+	return Decision{Reason: fmt.Sprintf("plan cost %.0f below %.0f, no full scan over %d rows", p.Cost, pol.CostThreshold, pol.ScanRows), Rule: RuleCheap}
 }

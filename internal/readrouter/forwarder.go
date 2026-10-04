@@ -155,14 +155,20 @@ func (f *Forwarder) watch(ctx context.Context) func() bool {
 	return context.AfterFunc(ctx, func() { f.lose(ctx.Err()) })
 }
 
-// Decide runs EXPLAIN FORMAT=JSON on the source and applies the policy. A
-// failure to EXPLAIN (a statement MySQL itself rejects, a lost connection) is
-// returned as an error; the caller forwards the statement, so MySQL's own
-// answer, error included, reaches the client.
-func (f *Forwarder) Decide(ctx context.Context, stmt string) (toCopy bool, reason string, err error) {
+// Decide applies the policy to the statement: the one shape that needs no
+// plan (Policy.Prejudge: SELECT ... FROM one table LIMIT a few) is decided
+// here without touching the source; everything else runs EXPLAIN
+// FORMAT=JSON on the source and goes through Policy.DecideStatement. A
+// failure to EXPLAIN (a statement MySQL itself rejects, a lost connection)
+// is returned as an error; the caller forwards the statement, so MySQL's
+// own answer, error included, reaches the client.
+func (f *Forwarder) Decide(ctx context.Context, stmt string) (Decision, error) {
+	if d, ok := f.policy.Prejudge(stmt); ok {
+		return d, nil
+	}
 	c, err := f.get(ctx)
 	if err != nil {
-		return false, "", err
+		return Decision{}, err
 	}
 	defer f.watch(ctx)()
 	res, err := c.Execute("EXPLAIN FORMAT=JSON " + stmt)
@@ -170,22 +176,21 @@ func (f *Forwarder) Decide(ctx context.Context, stmt string) (toCopy bool, reaso
 		if !isMySQLError(err) {
 			f.lose(err)
 		}
-		return false, "", fmt.Errorf("explain: %w", err)
+		return Decision{}, fmt.Errorf("explain: %w", err)
 	}
 	defer res.Close()
 	if res.Resultset == nil || res.RowNumber() == 0 {
-		return false, "", errors.New("explain: no plan returned")
+		return Decision{}, errors.New("explain: no plan returned")
 	}
 	raw, err := res.GetString(0, 0)
 	if err != nil {
-		return false, "", fmt.Errorf("explain: %w", err)
+		return Decision{}, fmt.Errorf("explain: %w", err)
 	}
 	plan, err := ParsePlan([]byte(raw))
 	if err != nil {
-		return false, "", err
+		return Decision{}, err
 	}
-	toCopy, reason = f.policy.Decide(plan)
-	return toCopy, reason, nil
+	return f.policy.DecideStatement(stmt, plan), nil
 }
 
 // sinkError marks an error raised by the caller's RowSink (the client went

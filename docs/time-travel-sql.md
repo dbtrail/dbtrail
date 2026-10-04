@@ -194,15 +194,37 @@ The decision, in order, for every statement:
    (`GROUP_CONCAT`, `NOW()` and the session-time-zone family, `STR_TO_DATE`,
    `DATEDIFF`, `COLLATE`, `CAST AS UNSIGNED`, `DIV`, `RAND`, user and system
    variables, locking reads, `information_schema`, full-text `MATCH`,
-   optimizer hints): **MySQL**.
-4. The copy's snapshot older than `--route-max-copy-age`, or its age
-   unknown: **MySQL**.
-5. `EXPLAIN FORMAT=JSON` on the source. A plan whose `query_cost` is at
-   least `--route-cost-threshold` (default 10,000; a point lookup costs about
-   1, a full scan over 200,000 rows about 20,000) or that has a full table
-   scan over at least `--route-scan-rows` rows (default 100,000): **the
+   JSON functions and the `->`/`->>` operators, optimizer hints): **MySQL**.
+4. The one shape that needs no plan: `SELECT <columns> FROM <one table>
+   LIMIT <at most 1,000 rows, offset included>` with nothing else (no
+   `WHERE`, join, `ORDER BY`, `GROUP BY`, subquery or function call):
+   **MySQL**, decided on the text, with no `EXPLAIN`. On a base table MySQL
+   stops after those rows whatever the table's size; its plan cost, which
+   ignores `LIMIT`, would say otherwise. The text cannot tell a view from a
+   table: a view that aggregates or joins is built whole first, and is
+   still MySQL's here.
+5. `EXPLAIN FORMAT=JSON` on the source. First the `LIMIT` rule with the
+   plan in hand: a top-level `LIMIT` of at most 1,000 rows with no
+   aggregate, `GROUP BY`, `HAVING`, `DISTINCT`, window function, `UNION` or
+   second `LIMIT`, whose plan sorts nothing (`using_filesort: false`),
+   filters nothing while scanning (no `attached_condition` on a table read
+   by scan) and examines at most 1,000 rows per table scan
+   (`rows_examined_per_scan`, which unlike the cost does honour `LIMIT`):
+   **MySQL**. That is `ORDER BY id DESC LIMIT 2` on the primary key (cost
+   272,000, two rows examined) or a filter an index serves. A filter no
+   index serves falls through: under a full scan its estimate is the whole
+   table, and under an index-served `ORDER BY` the estimate is only the
+   `LIMIT` over a guessed selectivity, while a rare value walks the whole
+   index. Then a plan whose `query_cost` is at least
+   `--route-cost-threshold` (default 10,000; a point lookup costs about 1, a
+   full scan over 200,000 rows about 20,000) or that has a full table scan
+   over at least `--route-scan-rows` rows (default 100,000) is the copy's
+   if step 6 agrees; anything cheaper: **MySQL**.
+6. For a plan the copy should take: the copy's snapshot older than
+   `--route-max-copy-age`, or its age unknown: **MySQL**. Otherwise **the
    copy**, sent exactly as written; the copy refusing it means **MySQL**.
-   Anything cheaper: **MySQL**.
+   (Freshness is checked after the plan on purpose: it costs a snapshot
+   listing, which the cheap reads must not pay.)
 
 What this is and is not:
 
@@ -233,12 +255,16 @@ What this is and is not:
   equal under `utf8mb4_0900_ai_ci` and not on the copy; a column MySQL
   declares case-sensitive (`_bin`, `_cs`) is case-insensitive on the copy;
   a legacy `utf8mb4_general_ci` column ignores trailing spaces on MySQL and
-  not here; and **`AVG` and `/` return full double precision** (MySQL
-  rounds to four decimals). None of these can be caught per statement. If a
+  not here; **`AVG` and `/` return full double precision** (MySQL
+  rounds to four decimals); and **numbers print without trailing zeros**:
+  `ROUND(AVG(points), 1)` is `0` on the copy and `0.0` on MySQL,
+  `ROUND(SUM(amount), 2)` is `117329550` and `117329550.00`, the same value
+  in a different text. None of these can be caught per statement. If a
   workload depends on one, keep the copy for the reads where they do not
   matter, or leave routing off.
 - **The thresholds are knobs, not truths.** The optimizer's cost is its
-  own estimate; it misleads on `LIMIT`, on cached data and on skewed values.
+  own estimate; it misleads on cached data and on skewed values (and on
+  `LIMIT`, which is why steps 4 and 5 read the statement, not the cost).
   Start with the defaults, read the daemon's log (every decision is logged
   with its reason at debug; a copy that never answers, a failing EXPLAIN or
   an unreadable snapshot time is a warning, once per connection) and the
@@ -314,7 +340,8 @@ MySQL's.
   `bintrail_read_routing_decisions_total{server, route, reason}` — `server`
   is the registry id, `route` is `copy` or `mysql`, and `reason` is one of
   a closed set: `expensive_plan` (the one reason a statement goes to the
-  copy), `cheap_plan`, `not_a_select`, `write`, `session_setting`,
+  copy), `cheap_plan`, `bounded_limit` (a small `LIMIT` MySQL answers
+  without reading past it), `not_a_select`, `write`, `session_setting`,
   `settings_set`, `in_transaction`, `veto`, `explain_failed`,
   `copy_age_unknown`, `copy_too_old`, `copy_refused`, `show_warnings`,
   `upstream_lost` (nobody answered: the port's connection to the source is

@@ -20,6 +20,7 @@ import (
 type fakeRouter struct {
 	toCopy    bool
 	reason    string
+	rule      readrouter.Rule
 	decideErr error
 	inTxn     bool
 	useDBErr  error
@@ -31,9 +32,9 @@ type fakeRouter struct {
 	closed     int
 }
 
-func (r *fakeRouter) Decide(_ context.Context, stmt string) (bool, string, error) {
+func (r *fakeRouter) Decide(_ context.Context, stmt string) (readrouter.Decision, error) {
 	r.explained = append(r.explained, stmt)
-	return r.toCopy, r.reason, r.decideErr
+	return readrouter.Decision{ToCopy: r.toCopy, Reason: r.reason, Rule: r.rule}, r.decideErr
 }
 
 func (r *fakeRouter) Forward(_ context.Context, stmt string, _ readrouter.RowSink) (*mysql.Result, error) {

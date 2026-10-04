@@ -304,7 +304,7 @@ once:
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `bintrail_read_routing_decisions_total{server,route,reason}` | counter | Routing decisions per server (`server` is the registry id), side (`route` is `copy` or `mysql`) and reason, a closed set: `expensive_plan` (the one reason a statement goes to the copy), `cheap_plan`, `not_a_select`, `write`, `session_setting`, `settings_set`, `in_transaction`, `veto`, `explain_failed`, `copy_age_unknown`, `copy_too_old`, `copy_refused`, `show_warnings`, `upstream_lost` (nobody answered: the connection to the source is lost, the client got 2006), `routing_off`. Decisions, not successes: a statement MySQL then fails was still MySQL's. Exported by `watch --metrics-addr` only; a daemon without routing never creates a series |
+| `bintrail_read_routing_decisions_total{server,route,reason}` | counter | Routing decisions per server (`server` is the registry id), side (`route` is `copy` or `mysql`) and reason, a closed set: `expensive_plan` (the one reason a statement goes to the copy), `cheap_plan`, `bounded_limit` (a small `LIMIT` MySQL answers without reading past it), `not_a_select`, `write`, `session_setting`, `settings_set`, `in_transaction`, `veto`, `explain_failed`, `copy_age_unknown`, `copy_too_old`, `copy_refused`, `show_warnings`, `upstream_lost` (nobody answered: the connection to the source is lost, the client got 2006), `routing_off`. Decisions, not successes: a statement MySQL then fails was still MySQL's. Exported by `watch --metrics-addr` only; a daemon without routing never creates a series |
 
 The copy's share of the work is `route="copy"` over the total. A copy that
 never answers is visible as `copy_refused`, `copy_too_old` or

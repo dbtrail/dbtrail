@@ -49,13 +49,17 @@ type Result struct {
 	Detail string `json:"detail,omitempty"`
 	// Route is what the read router would do with this statement, "copy"
 	// or "mysql", and RouteReason why.
-	Route       string  `json:"route"`
-	RouteReason string  `json:"route_reason"`
-	PlanCost    float64 `json:"plan_cost,omitempty"`
-	SourceRows  int     `json:"source_rows"`
-	CopyRows    int     `json:"copy_rows"`
-	SourceMS    float64 `json:"source_ms"`
-	CopyMS      float64 `json:"copy_ms"`
+	Route       string `json:"route"`
+	RouteReason string `json:"route_reason"`
+	// RouteRule is which rule decided, without parsing RouteReason: the
+	// router's readrouter.Rule values, or "veto" / "explain_failed" for the
+	// exits before a plan; empty for a statement that was not routed.
+	RouteRule  string  `json:"route_rule,omitempty"`
+	PlanCost   float64 `json:"plan_cost,omitempty"`
+	SourceRows int     `json:"source_rows"`
+	CopyRows   int     `json:"copy_rows"`
+	SourceMS   float64 `json:"source_ms"`
+	CopyMS     float64 `json:"copy_ms"`
 }
 
 // Report is the whole run.
@@ -120,7 +124,7 @@ func Run(ctx context.Context, opts Options, statements []string) (*Report, error
 		if res.Verdict == Equal || res.Verdict == Different {
 			rep.Compared++
 		}
-		if strings.HasPrefix(res.RouteReason, "could not explain") {
+		if res.RouteRule == "explain_failed" {
 			rep.ExplainFailed++
 		}
 		if res.Verdict == Different && res.Route == "copy" {
@@ -228,7 +232,7 @@ func compareOne(ctx context.Context, src, cp *conn, opts Options, stmt string) R
 		res.Route, res.RouteReason = "mysql", "not a plain read"
 		return res
 	}
-	res.Route, res.RouteReason, res.PlanCost = route(ctx, src, opts.Policy, stmt)
+	res.Route, res.RouteReason, res.RouteRule, res.PlanCost = route(ctx, src, opts.Policy, stmt)
 
 	srcRows, srcOver, srcMS, srcErr := fetch(ctx, src.c, stmt, opts.MaxRows)
 	res.SourceMS = srcMS
@@ -292,23 +296,28 @@ func compareOne(ctx context.Context, src, cp *conn, opts Options, stmt string) R
 
 // route is the read router's decision for the statement, taken the same way
 // the port takes it: veto first, then EXPLAIN FORMAT=JSON on the source.
-func route(ctx context.Context, src *conn, pol readrouter.Policy, stmt string) (string, string, float64) {
+func route(ctx context.Context, src *conn, pol readrouter.Policy, stmt string) (side, reason, rule string, cost float64) {
+	// The port's own order: veto, then the one shape decided on its text
+	// (Prejudge), then EXPLAIN and the policy with the statement in hand.
 	if v := readrouter.Veto(stmt); v != "" {
-		return "mysql", "veto: " + v, 0
+		return "mysql", "veto: " + v, "veto", 0
+	}
+	if d, ok := pol.Prejudge(stmt); ok {
+		return "mysql", d.Reason, string(d.Rule), 0
 	}
 	var raw string
 	if err := src.c.QueryRowContext(ctx, "EXPLAIN FORMAT=JSON "+stmt).Scan(&raw); err != nil {
-		return "mysql", "could not explain: " + err.Error(), 0
+		return "mysql", "could not explain: " + err.Error(), "explain_failed", 0
 	}
 	plan, err := readrouter.ParsePlan([]byte(raw))
 	if err != nil {
-		return "mysql", "could not explain: " + err.Error(), 0
+		return "mysql", "could not explain: " + err.Error(), "explain_failed", 0
 	}
-	toCopy, reason := pol.Decide(plan)
-	if toCopy {
-		return "copy", reason, plan.Cost
+	d := pol.DecideStatement(stmt, plan)
+	if d.ToCopy {
+		return "copy", d.Reason, string(d.Rule), plan.Cost
 	}
-	return "mysql", reason, plan.Cost
+	return "mysql", d.Reason, string(d.Rule), plan.Cost
 }
 
 // fetch runs the statement and reads up to max rows; over reports that a

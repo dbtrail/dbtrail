@@ -49,6 +49,7 @@ func TestRouter_observesEveryRungOnce(t *testing.T) {
 		{"routing off", "SELECT count(*) FROM t", fakeRouter{toCopy: true}, nil, fresh, 0, "mysql/routing_off"},
 		{"explain failed", "SELECT * FROM t WHERE id = 1", fakeRouter{decideErr: errors.New("boom")}, nil, fresh, time.Minute, "mysql/explain_failed"},
 		{"cheap plan", "SELECT * FROM t WHERE id = 1", fakeRouter{toCopy: false, reason: "cheap"}, nil, fresh, time.Minute, "mysql/cheap_plan"},
+		{"bounded limit", "SELECT id FROM t ORDER BY id DESC LIMIT 2", fakeRouter{toCopy: false, reason: "LIMIT 2", rule: readrouter.RuleBoundedLimit}, nil, fresh, time.Minute, "mysql/bounded_limit"},
 		{"copy age unknown", "SELECT count(*) FROM t", fakeRouter{toCopy: true}, nil, time.Time{}, time.Minute, "mysql/copy_age_unknown"},
 		{"copy too old", "SELECT count(*) FROM t", fakeRouter{toCopy: true}, nil, time.Now().Add(-time.Hour), time.Minute, "mysql/copy_too_old"},
 		{"copy refused", "SELECT a, count(*) FROM t GROUP BY a", fakeRouter{toCopy: true}, errors.New("Binder Error"), fresh, time.Minute, "mysql/copy_refused"},

@@ -67,10 +67,10 @@ type FreeSQL interface {
 // statement (readrouter.CodeUpstreamLost) rather than reconnect behind the
 // client's back.
 type Router interface {
-	// Decide runs EXPLAIN on the source and says whether the copy should
-	// take the statement. An error means "could not decide": the statement
-	// is forwarded.
-	Decide(ctx context.Context, statement string) (toCopy bool, reason string, err error)
+	// Decide says whether the copy should take the statement (EXPLAIN on
+	// the source, except for the one shape decided on its text). An error
+	// means "could not decide": the statement is forwarded.
+	Decide(ctx context.Context, statement string) (readrouter.Decision, error)
 	// Forward runs the statement on the source. A resultset is streamed
 	// through sink and the returned Result is its tail (go-mysql writes the
 	// trailing EOF from it); an OK packet comes back whole.
@@ -123,6 +123,7 @@ const (
 	RouteReasonVeto           RouteReason = "veto"             // a construct the copy answers differently
 	RouteReasonExplainFailed  RouteReason = "explain_failed"   // EXPLAIN did not run (MySQL refused it)
 	RouteReasonCheapPlan      RouteReason = "cheap_plan"       // below both thresholds
+	RouteReasonBoundedLimit   RouteReason = "bounded_limit"    // a small LIMIT MySQL answers without reading past it
 	RouteReasonCopyAgeUnknown RouteReason = "copy_age_unknown" // no snapshot time
 	RouteReasonCopyTooOld     RouteReason = "copy_too_old"     // snapshot older than MaxCopyAge
 	RouteReasonCopyRefused    RouteReason = "copy_refused"     // the copy errored or cut the result
@@ -199,13 +200,17 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 	// The plan first, the copy's freshness second: freshness costs a
 	// snapshot listing (an S3 call on an S3 copy), and the cheap reads
 	// this exists to keep fast must not pay it.
-	toCopy, reason, err := h.router.Decide(ctx, qstr)
+	d, err := h.router.Decide(ctx, qstr)
 	if err != nil {
 		h.routeWarn("explain", "read routing: could not explain, statement forwarded", err)
 		return h.forward(ctx, qstr, RouteReasonExplainFailed, "could not explain: "+err.Error())
 	}
-	if !toCopy {
-		return h.forward(ctx, qstr, RouteReasonCheapPlan, reason)
+	if !d.ToCopy {
+		reason := RouteReasonCheapPlan
+		if d.Rule == readrouter.RuleBoundedLimit {
+			reason = RouteReasonBoundedLimit
+		}
+		return h.forward(ctx, qstr, reason, d.Reason)
 	}
 	at := h.freeSQL.CopyUpdatedAt(ctx)
 	if at.IsZero() {
@@ -215,7 +220,7 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 	if age := time.Since(at); age > h.routerCfg.MaxCopyAge {
 		return h.forward(ctx, qstr, RouteReasonCopyTooOld, fmt.Sprintf("copy is %s old, max %s", age.Round(time.Second), h.routerCfg.MaxCopyAge))
 	}
-	res, err := h.runFreeSQLRouted(currentDB, qstr, reason)
+	res, err := h.runFreeSQLRouted(currentDB, qstr, d.Reason)
 	if err != nil {
 		// The slow path is always right: whatever the copy could not do
 		// (a construct DuckDB lacks, a missing table, busy, a timeout, a
@@ -226,7 +231,7 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 	// The copy's side of the trace: forwarded statements log their reason,
 	// so a copy-served one must too, or the log reads as if nothing ever
 	// reached the copy.
-	h.logger.Debug("read routing: served by the copy", "reason", reason)
+	h.logger.Debug("read routing: served by the copy", "reason", d.Reason)
 	h.observeRoute(RouteCopy, RouteReasonExpensivePlan)
 	h.mu.Lock()
 	h.routeLastForwarded = false

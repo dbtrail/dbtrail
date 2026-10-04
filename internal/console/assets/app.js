@@ -13502,6 +13502,7 @@ function sqlClientPanel(servers, fb) {
 const ROUTE_REASON_TEXT = {
   expensive_plan: "an expensive plan: the copy answered",
   cheap_plan: "a cheap plan (a lookup or a small read)",
+  bounded_limit: "a small LIMIT MySQL answers without reading past it",
   not_a_select: "not a SELECT (SHOW, BEGIN, COMMIT, …)",
   write: "a write (INSERT, UPDATE, DELETE, DDL)",
   session_setting: "a SET statement",

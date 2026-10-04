@@ -44,35 +44,38 @@ func TestClassify(t *testing.T) {
 
 func TestVeto(t *testing.T) {
 	vetoed := map[string]string{
-		"SELECT GROUP_CONCAT(name) FROM t":                     "GROUP_CONCAT",
-		"SELECT * FROM t WHERE ts > NOW() - INTERVAL 1 DAY":    "NOW/CURDATE/CURTIME/CURRENT_TIMESTAMP",
-		"SELECT STR_TO_DATE(d, '%Y') FROM t":                   "STR_TO_DATE",
-		"SELECT TIMESTAMPDIFF(DAY, a, b) FROM t":               "TIMESTAMPDIFF/DATEDIFF",
-		"SELECT * FROM t WHERE name = 'x' COLLATE utf8mb4_bin": "COLLATE",
-		"SELECT CAST(a AS UNSIGNED) FROM t":                    "CAST AS UNSIGNED/SIGNED",
-		"SELECT a DIV 2 FROM t":                                "DIV",
-		"SELECT RAND()":                                        "RAND/UUID",
-		"SELECT FOUND_ROWS()":                                  "FOUND_ROWS/LAST_INSERT_ID/ROW_COUNT",
-		"SELECT SQL_CALC_FOUND_ROWS * FROM t LIMIT 10":         "FOUND_ROWS/LAST_INSERT_ID/ROW_COUNT",
-		"SELECT DATABASE()":                                    "CONNECTION_ID/USER/DATABASE/VERSION",
-		"SELECT @@version":                                     "user or system variable",
-		"SELECT @x := 1":                                       "user or system variable",
-		"SELECT * FROM t FOR UPDATE":                           "locking read",
-		"SELECT * FROM t LOCK IN SHARE MODE":                   "locking read",
-		"SELECT * FROM t INTO OUTFILE '/tmp/x'":                "INTO (OUTFILE/DUMPFILE/variables)",
-		"SELECT * FROM information_schema.tables":              "system schema",
-		"SELECT * FROM mysql.user":                             "system schema",
-		"SELECT * FROM t WHERE MATCH(body) AGAINST ('x')":      "MATCH AGAINST",
-		"SELECT * FROM t WHERE BINARY name = 'A'":              "binary string comparison",
-		"SELECT /*+ NO_INDEX(t) */ * FROM t":                   "optimizer hint or MySQL comment",
-		"SELECT * FROM t WHERE name LIKE 'a%'":                 "LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)",
-		"SELECT count(DISTINCT status) FROM t":                 "DISTINCT inside an aggregate (not folded by the copy's collation)",
-		"SELECT INSTR(name, 'x') FROM t":                       "INSTR/LOCATE/POSITION/STRCMP (case-sensitive on the copy)",
-		"SELECT * FROM t WHERE name REGEXP '^a'":               "LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)",
-		"SELECT a || b FROM t":                                 "|| (string concatenation on the copy, logical OR on MySQL)",
-		"SELECT 2 ^ 3":                                         "^ (power on the copy, bitwise XOR on MySQL)",
-		`SELECT * FROM t WHERE status = "paid"`:                "double-quoted string literal",
-		`SELECT "id" FROM t`:                                   "double-quoted string literal",
+		"SELECT GROUP_CONCAT(name) FROM t":                      "GROUP_CONCAT",
+		"SELECT * FROM t WHERE ts > NOW() - INTERVAL 1 DAY":     "NOW/CURDATE/CURTIME/CURRENT_TIMESTAMP",
+		"SELECT STR_TO_DATE(d, '%Y') FROM t":                    "STR_TO_DATE",
+		"SELECT TIMESTAMPDIFF(DAY, a, b) FROM t":                "TIMESTAMPDIFF/DATEDIFF",
+		"SELECT * FROM t WHERE name = 'x' COLLATE utf8mb4_bin":  "COLLATE",
+		"SELECT CAST(a AS UNSIGNED) FROM t":                     "CAST AS UNSIGNED/SIGNED",
+		"SELECT a DIV 2 FROM t":                                 "DIV",
+		"SELECT RAND()":                                         "RAND/UUID",
+		"SELECT FOUND_ROWS()":                                   "FOUND_ROWS/LAST_INSERT_ID/ROW_COUNT",
+		"SELECT SQL_CALC_FOUND_ROWS * FROM t LIMIT 10":          "FOUND_ROWS/LAST_INSERT_ID/ROW_COUNT",
+		"SELECT DATABASE()":                                     "CONNECTION_ID/USER/DATABASE/VERSION",
+		"SELECT @@version":                                      "user or system variable",
+		"SELECT @x := 1":                                        "user or system variable",
+		"SELECT * FROM t FOR UPDATE":                            "locking read",
+		"SELECT JSON_UNQUOTE(JSON_EXTRACT(v, '$.tier')) FROM t": "JSON function or -> operator (missing or different on the copy)",
+		"SELECT v->>'$.tier' FROM t":                            "JSON function or -> operator (missing or different on the copy)",
+		"SELECT v->'$.tier' FROM t":                             "JSON function or -> operator (missing or different on the copy)",
+		"SELECT * FROM t LOCK IN SHARE MODE":                    "locking read",
+		"SELECT * FROM t INTO OUTFILE '/tmp/x'":                 "INTO (OUTFILE/DUMPFILE/variables)",
+		"SELECT * FROM information_schema.tables":               "system schema",
+		"SELECT * FROM mysql.user":                              "system schema",
+		"SELECT * FROM t WHERE MATCH(body) AGAINST ('x')":       "MATCH AGAINST",
+		"SELECT * FROM t WHERE BINARY name = 'A'":               "binary string comparison",
+		"SELECT /*+ NO_INDEX(t) */ * FROM t":                    "optimizer hint or MySQL comment",
+		"SELECT * FROM t WHERE name LIKE 'a%'":                  "LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)",
+		"SELECT count(DISTINCT status) FROM t":                  "DISTINCT inside an aggregate (not folded by the copy's collation)",
+		"SELECT INSTR(name, 'x') FROM t":                        "INSTR/LOCATE/POSITION/STRCMP (case-sensitive on the copy)",
+		"SELECT * FROM t WHERE name REGEXP '^a'":                "LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)",
+		"SELECT a || b FROM t":                                  "|| (string concatenation on the copy, logical OR on MySQL)",
+		"SELECT 2 ^ 3":                                          "^ (power on the copy, bitwise XOR on MySQL)",
+		`SELECT * FROM t WHERE status = "paid"`:                 "double-quoted string literal",
+		`SELECT "id" FROM t`:                                    "double-quoted string literal",
 		// A quote inside a comment must not blank what follows it.
 		"SELECT /* it's */ NOW() /* it's */ FROM t": "NOW/CURDATE/CURTIME/CURRENT_TIMESTAMP",
 		"SELECT -- don't\n NOW(), 'x' FROM t":       "NOW/CURDATE/CURTIME/CURRENT_TIMESTAMP",
@@ -95,8 +98,9 @@ func TestVeto(t *testing.T) {
 		"SELECT count(*) FROM t WHERE distinct_id = 1",
 		"SELECT user_id FROM t", // not user(
 		"SELECT * FROM t WHERE note = '#not a comment -- nor this' AND a = 1",
-		"SELECT `a\"b` FROM t",  // a double quote inside a backtick identifier is not a string
-		"SELECT 'it''s' FROM t", // a doubled quote does not end the literal
+		"SELECT `a\"b` FROM t",            // a double quote inside a backtick identifier is not a string
+		"SELECT 'it''s' FROM t",           // a doubled quote does not end the literal
+		"SELECT json_col, jsonish FROM t", // a column named like the functions, no call
 	}
 	harmless := map[string]bool{
 		"SET NAMES utf8mb4":                            true,
@@ -140,6 +144,12 @@ func TestParsePlan_fixtures(t *testing.T) {
 		// "ALL", so it is the COST rule that sends it to the copy.
 		{"group_by_filter_sort.json", 20145.85, 1, 0, 200096, true},
 		{"join_derived.json", 253574.82, 3, 1, 200096, true},
+		// Real plans behind the LIMIT rule (limit_test.go): the cost rule fires
+		// on both; DecideStatement is what keeps the index-ordered one on MySQL.
+		{"order_by_pk_limit2.json", 272233.65, 1, 0, 2, true},
+		{"order_by_filesort_limit20.json", 272233.65, 1, 1, 2654806, true},
+		{"order_by_pk_limit2_filtered.json", 272233.65, 1, 0, 20, true},
+		{"order_by_pk_limit2_join_filtered.json", 310020.10, 2, 0, 20, true},
 	}
 	pol := DefaultPolicy()
 	for _, tc := range cases {
@@ -154,8 +164,8 @@ func TestParsePlan_fixtures(t *testing.T) {
 		if p.Cost != tc.cost || p.Tables != tc.tables || p.FullScans != tc.fullScans || p.MaxScanRows != tc.maxRows {
 			t.Errorf("%s: plan = %+v, want cost %v tables %d fullScans %d maxRows %d", tc.file, p, tc.cost, tc.tables, tc.fullScans, tc.maxRows)
 		}
-		if toCopy, reason := pol.Decide(p); toCopy != tc.toCopy {
-			t.Errorf("%s: Decide = %v (%s), want %v", tc.file, toCopy, reason, tc.toCopy)
+		if d := pol.Decide(p); d.ToCopy != tc.toCopy {
+			t.Errorf("%s: Decide = %v (%s), want %v", tc.file, d.ToCopy, d.Reason, tc.toCopy)
 		}
 	}
 }
@@ -166,18 +176,18 @@ func TestParsePlan_shapes(t *testing.T) {
 	if err != nil || p.Message == "" {
 		t.Fatalf("message plan: %+v, %v", p, err)
 	}
-	if toCopy, reason := DefaultPolicy().Decide(p); toCopy || reason == "" {
-		t.Errorf("trivial plan routed to the copy: %v %q", toCopy, reason)
+	if d := DefaultPolicy().Decide(p); d.ToCopy || d.Reason == "" || d.Rule != RuleTrivial {
+		t.Errorf("trivial plan routed to the copy: %+v", d)
 	}
 	// Full scan over few rows with a low cost: stays on MySQL; the scan rule
 	// needs BOTH a full scan and the row count.
 	p, _ = ParsePlan([]byte(`{"query_block": {"cost_info": {"query_cost": "5.0"}, "table": {"table_name": "t", "access_type": "ALL", "rows_examined_per_scan": 40}}}`))
-	if toCopy, _ := DefaultPolicy().Decide(p); toCopy {
+	if DefaultPolicy().Decide(p).ToCopy {
 		t.Error("a 40-row full scan went to the copy")
 	}
 	// A zero policy never routes to the copy.
 	p, _ = ParsePlan([]byte(`{"query_block": {"cost_info": {"query_cost": "9e9"}, "table": {"table_name": "t", "access_type": "ALL", "rows_examined_per_scan": 9000000}}}`))
-	if toCopy, _ := (Policy{}).Decide(p); toCopy {
+	if (Policy{}).Decide(p).ToCopy {
 		t.Error("the zero policy routed to the copy")
 	}
 	if _, err := ParsePlan([]byte(`not json`)); err == nil {

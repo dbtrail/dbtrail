@@ -50,6 +50,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frees the slot at once.
 
 ### Added
+- **Read routing keeps a small `LIMIT` on MySQL, and vetoes JSON** (#2038).
+  MySQL's plan cost ignores `LIMIT`, so `SELECT id FROM orders ORDER BY id
+  DESC LIMIT 2` carried a six-figure cost and went to the copy (340 ms
+  there) although MySQL walks the primary key for two rows in 0.2 ms. A
+  `SELECT <columns> FROM <one table> LIMIT <a few>` with nothing else is
+  now MySQL's on its text alone, with no `EXPLAIN`; any other statement
+  with a top-level `LIMIT` of at most 1,000 rows and no aggregate, `GROUP
+  BY`, `HAVING`, `DISTINCT`, window function, `UNION` or inner `LIMIT` is
+  MySQL's when its plan sorts nothing, filters nothing while scanning and
+  examines at most 1,000 rows per table scan (the row estimate, unlike the
+  cost, honours `LIMIT`); a filter no index serves still goes to the copy.
+  Counted as `bounded_limit`.
+  Found by `sql-compare` on a real workload, which also added a veto for
+  JSON functions and the `->` / `->>` operators (`JSON_UNQUOTE` does not
+  exist on the copy, `JSON_EXTRACT` paths and quoting differ).
 - **Read routing says who answered** (#2038). On Settings → MCP Server →
   Connect a SQL client, a *Who answered* block counts, per server and since
   the daemon started, the statements MySQL answered and the ones the copy
