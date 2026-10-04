@@ -95,7 +95,11 @@ Three properties worth knowing:
 
   What does *not* follow is the file's idea of the **shape** of the data: which views exist, and the precision each `DECIMAL` column is read at, were both decided from the snapshot named in the header. Regenerate after a table is added or dropped, after a column changes type, and whenever archive sources are added or removed. **Which of those you notice follows one rule**: the generated file names only the paths and the `DECIMAL` columns, so only those two can fail. A table that leaves the newest snapshot is caught by a check the file runs before it creates anything: it names the table, says which snapshot it looked in, and stops, so you never end up with half the views defined. A `DECIMAL` column renamed or dropped fails later, at its own view. Everything else is quiet, because `SELECT *` passes it through: a table *added* to the source simply has no view, a `DECIMAL` whose scale grew is read at the old scale, a column that changes to some other type arrives as whatever the new file holds (an `ORDER BY` can start sorting text), and an archive source added later is not there. The loud half is deliberate: the pointer names the newest complete snapshot whatever tables it holds, and refusing to advance unless every table is still present would freeze it forever on the first dropped table, leaving every generated file quietly serving older and older rows. Only an operator action reaches this — `--tables` on a hand-run baseline, or narrowing a server's schemas — since the periodic refresh folds exactly the tables of the snapshot it read.
 
-  An **S3 baseline root** follows too, by a different route. There is no pointer object to publish there: doing so would mean copying every table to a second prefix, which is not atomic across tables, so a query could read half of one snapshot and half of another. Instead the file resolves the newest `_SUCCESS`-marked snapshot into a session variable when it is read, and every table view reads through that one value. One lookup for the whole file, so it costs what pinning costs, and the views agree with each other the way the pointer makes them agree. A refresh published while you are working is picked up by reading the file again, which an S3 session already does for its credentials.
+  An **S3 baseline root** follows too, by a different route. There is no pointer object to publish there: doing so would mean copying every table to a second prefix, which is not atomic across tables, so a query could read half of one snapshot and half of another. Instead the file resolves the newest snapshot into a session variable when it is read, and every table view reads through that one value, so the views agree with each other the way the pointer makes them agree. A refresh published while you are working is picked up by reading the file again, which an S3 session already does for its credentials.
+
+How it finds the newest one depends on the root. Every S3 upload writes a small `<root>/_NEWEST` object naming the snapshot it just published, after that snapshot's `_SUCCESS` marker, and never moves it back to an older one. When `_NEWEST` exists and names the snapshot found at generation, the file reads that one object. Otherwise (a root written only by builds before `_NEWEST` existed) the file lists every object under the root for the newest `_SUCCESS` marker, which grows with every snapshot kept: on a root holding a few months of hourly snapshots, about a minute inside AWS and 18 minutes from a laptop. The next upload writes the pointer; generate the file again after it to get the fast form. The header says which form a file uses.
+
+The pointer is a shortcut, and it only knows what uploads told it. A snapshot published without moving it is not followed until it moves: one copied into the root by hand, one published by an older build, or one whose upload could not write the pointer (that upload logs an ERROR saying so). Two processes uploading to the same root can also move it back to an older snapshot. If `_NEWEST` is deleted, reading the file fails with a 404 naming it: generate the file again and it lists the root instead.
 
   Several cases pin to one snapshot instead, and the generated file always says which it did. `--pin-snapshot` is the deliberate one, for reproducible analysis against a fixed instant. A local baseline root written by an older bintrail carries no pointer until its next snapshot completes. And a `current` an operator replaced with a real directory is never touched, so that root pins too.
 - **Money columns are cast back to numbers.** MySQL `DECIMAL` and `NUMERIC` are stored as text in the Parquet, so that a value MySQL can hold is never rounded to fit a narrower type. One caveat belongs with a *following* file: the precision and scale are read when the file is generated, and they do not follow. Widen a `DECIMAL` column's scale and the view goes on reading it at the old scale, rounding the extra digits away with no error. Regenerate after a column changes type. The table views cast them back to `DECIMAL(p,s)` using the precision and scale the column was declared with, so `sum()` and the rest work on them directly. See below for the two cases where a column stays text.
@@ -276,6 +280,31 @@ Two things a database per server does not cover:
 A baselines-only file needs no index at all: `--baseline-dir` or `--baseline-s3`
 on its own is enough, and the result reads on a machine that cannot reach your
 database.
+
+### Opening the file from outside AWS
+Running the file creates the views, and DuckDB creates a view by opening every
+file it names: one request for the file's size and one for its footer. Inside
+AWS each request takes a few milliseconds. From a laptop over the internet each
+takes 0.2 to 0.5 s, and a snapshot of 17 tables names 71 files.
+
+- **A file pinned to one snapshot** (`bintrail views --pin-snapshot`) reads all
+  those footers in one parallel request first, on DuckDB 1.5 or newer. Measured
+  from a laptop on a 17-table snapshot: 43 s before, 5.6 s now. DuckDB 1.1 to
+  1.4 do not keep the footers between statements, so there the file opens one
+  file at a time as before (50 to 60 s). Same rows and column types either way.
+- **A file that follows the newest snapshot** (the default, and what the
+  console's download gives) opens its files one after another: about 50 s from
+  a laptop for the same 17 tables, with the `_NEWEST` pointer in place. For an
+  analysis you open again and again from outside AWS, a pinned file is the
+  faster choice; generate a new one to move to a newer snapshot.
+
+A pinned S3 file also turns on DuckDB's `enable_http_metadata_cache`, so a
+query repeated in the same session does not ask S3 again whether each file
+changed (snapshot files never change once published). The setting covers the
+whole DuckDB session: if that session also reads S3 objects of yours that do
+change, run `RESET enable_http_metadata_cache;` after the file. A file that
+also reads the archives from S3 does not turn it on, because an archive can be
+rewritten under the same name.
 
 ### Backups in a folder, on a machine you are not on
 

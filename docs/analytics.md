@@ -87,8 +87,10 @@ bare is quoted: `demo."order.items"`.
 
 **The views follow the newest snapshot.** A file generated once keeps up with
 the schedule on its own: locally through the `current/` pointer, on S3 through
-the newest `_SUCCESS` marker. Nothing needs to be regenerated after each
-refresh. Two forms stay pinned to one snapshot on purpose:
+the `_NEWEST` object each upload writes at the root, which names the newest
+snapshot (a root with no `_NEWEST` yet is listed for the newest `_SUCCESS`
+marker instead, which is much slower). Nothing needs to be regenerated after
+each refresh. Two forms stay pinned to one snapshot on purpose:
 
 - a file generated with `--pin-snapshot`, for reproducible analysis at a fixed
   instant;
@@ -102,6 +104,14 @@ file again after a table is added or dropped, or a column changes type.
 chain, so the file is safe to share or commit. The S3 secret it creates lasts
 one DuckDB session, so run the file again (`.read views.sql`) in each session
 that reads S3.
+
+**Opening it from outside AWS takes a while.** Creating the views reads a
+little of every file they name, and over the internet each read is a round
+trip. A followed file opens in about 50 s from a laptop for 17 tables. A pinned S3 file
+(`bintrail views --pin-snapshot`) opens much faster on DuckDB 1.5 or newer,
+because it reads all those files at once: 5.6 s instead of 43 s for a 17-table
+snapshot, measured from a laptop. Details and numbers:
+[Opening the file from outside AWS](parquet-debugging.md#opening-the-file-from-outside-aws).
 
 **The web interface does not run the file.** Your DuckDB runs it, in your
 process, on your machine: a laptop, a notebook, the box your BI tool runs on.
