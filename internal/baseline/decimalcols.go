@@ -29,6 +29,12 @@ type TableFooter struct {
 	// DuckDB refuses the filename and file_row_number options on a file that
 	// already has a column of that name.
 	DeltaReserved bool
+	// Datetimes are the table's DATETIME columns, by name. The writer stores
+	// DATETIME and TIMESTAMP the same way (a UTC-adjusted Parquet timestamp),
+	// so the file alone cannot tell a wall-clock DATETIME from a TIMESTAMP
+	// instant; the embedded CREATE TABLE can, and a reader under a session
+	// time zone other than UTC needs to (views.BaselineTable.Datetimes).
+	Datetimes []string
 }
 
 // TableFootersFor reports, for each baseline Parquet file, the decimal and
@@ -178,7 +184,7 @@ func collectDecimalRows(rows *sql.Rows, out map[string]TableFooter) {
 			// columns" rather than a nil that reads like an absent key.
 			decs = []DecimalColumn{}
 		}
-		out[file] = TableFooter{Decimals: decs, DeltaReserved: hasDeltaReservedColumn(cols)}
+		out[file] = TableFooter{Decimals: decs, DeltaReserved: hasDeltaReservedColumn(cols), Datetimes: DatetimeColumns(cols)}
 	}
 	if err := rows.Err(); err != nil {
 		// Warn: an iteration that dies partway leaves every file after the
@@ -208,6 +214,19 @@ func DecimalColumns(cols []Column) []DecimalColumn {
 			Precision: c.DecimalPrecision,
 			Scale:     c.DecimalScale,
 		})
+	}
+	return out
+}
+
+// DatetimeColumns picks the DATETIME columns out of a parsed schema: the ones
+// whose value is a wall clock with no zone. TIMESTAMP columns are instants and
+// are not listed.
+func DatetimeColumns(cols []Column) []string {
+	var out []string
+	for _, c := range cols {
+		if c.MySQLType == "datetime" {
+			out = append(out, c.Name)
+		}
 	}
 	return out
 }

@@ -164,10 +164,34 @@ func runJob(job wireJob, ask func(Refs) (string, error), stderr io.Writer) (res 
 			missingSchema = job.Schema
 		}
 	}
+	// The client's time zone (the port's SET time_zone), after the views
+	// script, which pins UTC, and before the lock, after which no SET runs. A
+	// zone the engine does not know refuses the statement by name: running it
+	// under UTC instead would be the silent wrong answer this exists to end.
+	if job.TimeZone != "" {
+		if _, err := conn.ExecContext(ctx, "SET TimeZone = '"+strings.ReplaceAll(job.TimeZone, "'", "''")+"'"); err != nil {
+			return wireResult{Error: &wireError{Kind: errRefused, Message: fmt.Sprintf(
+				"the session time zone %q (SET time_zone) cannot be applied on the copy: %v", job.TimeZone, firstLine(err.Error()))}}
+		}
+	}
 	if _, err := conn.ExecContext(ctx, lockLast); err != nil {
 		return sessionErr("%s: %v", lockLast, err)
 	}
 	mark(&res.ViewsNS)
+
+	// The client's sql_select_limit: the cut it asked for, when the statement
+	// is a SELECT with no LIMIT of its own and the limit is within the cap.
+	rowLimit, askedFor := job.MaxRows, false
+	if job.SelectLimit > 0 {
+		applies, known := selectLimitApplies(stmt)
+		if !known {
+			return wireResult{Error: &wireError{Kind: errRefused, Message: "sql_select_limit is set on this connection and " +
+				"cannot be applied to a statement of this shape; give the statement its own LIMIT, or SET sql_select_limit = DEFAULT"}}
+		}
+		if applies && job.SelectLimit <= job.MaxRows {
+			rowLimit, askedFor = job.SelectLimit, true
+		}
+	}
 
 	start := time.Now()
 	rows, err := conn.QueryContext(ctx, job.SQL)
@@ -194,9 +218,11 @@ func runJob(job wireJob, ask func(Refs) (string, error), stderr io.Writer) (res 
 	var rd renderer
 	var bytesSoFar int64
 	for rows.Next() {
-		if len(res.Rows) == job.MaxRows {
-			// One past the cap: the result was cut. Do not keep it.
-			res.Truncated = true
+		if len(res.Rows) == rowLimit {
+			// One past the limit: the result was cut. Do not keep it. A cut
+			// at the client's own sql_select_limit is what it asked for, not
+			// a truncation.
+			res.Truncated = !askedFor
 			break
 		}
 		raw := make([]any, len(types))
@@ -232,6 +258,56 @@ func runJob(job wireJob, ask func(Refs) (string, error), stderr io.Writer) (res 
 	}
 	res.ElapsedNS = int64(time.Since(start))
 	return res
+}
+
+// selectLimitApplies reports whether MySQL's sql_select_limit governs the
+// parsed statement: a SELECT (or a set operation) with no LIMIT of its own at
+// the top level. A LIMIT there takes precedence, as on MySQL, an OFFSET alone
+// does not count as one, and SHOW, DESCRIBE and SUMMARIZE (a SELECT over a
+// SHOW_REF in DuckDB's tree) are not SELECTs on MySQL. known is false for a
+// tree this cannot read: the caller refuses instead of guessing, because both
+// guesses are silent (a cut below the statement's own LIMIT, or more rows
+// than the client's limit).
+func selectLimitApplies(stmt any) (applies, known bool) {
+	top, _ := stmt.(map[string]any)
+	node, _ := top["node"].(map[string]any)
+	switch node["type"] {
+	case "SELECT_NODE":
+		if from, _ := node["from_table"].(map[string]any); from["type"] == "SHOW_REF" {
+			return false, true
+		}
+	case "SET_OPERATION_NODE":
+	default:
+		return false, false
+	}
+	mods, ok := node["modifiers"].([]any)
+	if !ok && node["modifiers"] != nil {
+		return false, false
+	}
+	for _, m := range mods {
+		mod, ok := m.(map[string]any)
+		if !ok {
+			return false, false
+		}
+		switch mod["type"] {
+		case "LIMIT_PERCENT_MODIFIER":
+			return false, true
+		case "LIMIT_MODIFIER":
+			if mod["limit"] != nil {
+				return false, true
+			}
+		}
+	}
+	return true, true
+}
+
+// firstLine keeps an engine message's first line: DuckDB appends a list of
+// candidates on the following ones.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
 }
 
 func sessionErr(format string, args ...any) wireResult {

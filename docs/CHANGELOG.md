@@ -80,6 +80,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to 32 s; 1.1: 77 s to 57 s). Same rows and column types.
 
 ### Fixed
+- **The embedded port applies `SET time_zone`, `SET sql_select_limit` and
+  `SET sql_mode`, or refuses them by name** (#2035). On a connection that
+  runs ordinary SQL on the copy the three were answered with an empty OK and
+  ignored: a client in `SET time_zone = 'America/Argentina/Buenos_Aires'`
+  got `NOW()` and its windows in UTC, with no error and no warning. Now
+  `time_zone` is the copy's session zone for that connection (zone names,
+  whole-hour offsets from `-12:00` to `+14:00`, `UTC`, `SYSTEM`; an offset
+  with minutes such as `+05:30` is refused with error 1298 and the zone name
+  works instead), `sql_select_limit` cuts a `SELECT` that has no `LIMIT` of
+  its own (never above the server's row cap), and `sql_mode` is recorded,
+  except the modes that change how a statement is read (`ANSI_QUOTES`,
+  `PIPES_AS_CONCAT`, `NO_BACKSLASH_ESCAPES`, `HIGH_NOT_PRECEDENCE`, `ANSI`
+  and the other combinations containing them), which are refused with error
+  1231. `SELECT @@time_zone`, `@@sql_mode` and `@@sql_select_limit` answer
+  what the connection set. A `SET` with several assignments is all or
+  nothing. **What changes for an existing client:** a connection that sets
+  one of the refused values (a driver configured with `sql_mode=ANSI`, a
+  `+05:30` offset, `sql_select_limit = 0`) used to get an OK and now gets an
+  error, at the `SET`. The other assignments of a `SET` the port already
+  accepted (a driver's connect statement: `SET NAMES ..., @@SESSION.sql_mode
+  = CONCAT(...), @@SESSION.wait_timeout = ...`) stay ignored as before, and
+  `sql_mode` computed with `CONCAT` or `REPLACE` over `@@sql_mode` is read.
+  A time-travel statement on a connection whose zone is not UTC used to be
+  answered in UTC and is now refused with error 1235 naming the zone; `SET
+  time_zone = '+00:00'` runs it. The console binaries
+  now embed the time zone database (about 450 KB), so zone names resolve on
+  a host that has none installed. Under a session zone other than UTC the copy reads a
+  `DATETIME` column as the wall clock MySQL holds and a `TIMESTAMP` column
+  as an instant printed in that zone; it tells them apart from the column
+  types the snapshot records, so a table whose snapshot does not record
+  them (written before they were embedded, or from a PostgreSQL source) is
+  refused under such a zone, by name, and reads again under UTC. Read
+  routing is unchanged (there every `SET` is forwarded to MySQL), and so is
+  the standalone `bintrail shim`, which runs no ordinary SQL. See
+  [time-travel-sql.md](time-travel-sql.md#ordinary-sql-on-the-copy-embedded-port-only).
 - **Read routing works with a MariaDB source** (#2073). MariaDB prints
   `EXPLAIN FORMAT=JSON` in its own shape (`rows` where MySQL says
   `rows_examined_per_scan`, a `filesort` node, the shortcut message on a
@@ -219,6 +254,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `watch --metrics-addr`. Only statements that ran to a result are observed.
 
 ### Changed
+- **On the embedded port, a result with more rows than the row cap is now
+  an error instead of a short answer** (#2037). **This changes what an
+  existing client sees.** A statement on the copy whose result passed the
+  cap (1,000 rows by default) used to return the first 1,000 rows as a
+  success, with a warning count that many drivers and applications never
+  read, so a cut result looked like a whole one. It now fails with error
+  1104, whose message names the cap and the way out: add a `LIMIT` at or
+  under the cap, or narrow the statement. A result of exactly the cap's
+  size is whole and is returned as before. A connection that wants results
+  cut without an error says so with `SET sql_select_limit = N` (#2035): with
+  N at or under the cap, a `SELECT` with no `LIMIT` of its own returns its
+  first N rows, silently. The cap still bounds what a client can ask for:
+  with N above the cap, a result past the cap is the same error, and the
+  message says the limit is above the cap. Unchanged: a cell cut at the
+  cell cap is still a warning (`SHOW WARNINGS`); under read routing a
+  result past the cap is still answered by MySQL instead; the console's SQL
+  card still returns the first rows and says there were more.
 - **A views file pinned to one snapshot on S3 no longer re-checks every
   file with S3 before each query** (#2051). DuckDB keeps what it read for the
   session, but by default asked S3 again, one file at a time, whether each

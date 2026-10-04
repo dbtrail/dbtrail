@@ -121,7 +121,7 @@ func TestSQL_realWorkerNarrowedViews_2029(t *testing.T) {
 		t.Errorf("WITH shadowing duckdb_views: code=%d body=%s, want the copy's one view counted", w.Code, w.Body.String())
 	}
 
-	out, err := f.s.runSQL(context.Background(), f.s.cm.boot, "u", "SELECT current_schema() AS s", "shop", 0)
+	out, err := f.s.runSQL(context.Background(), f.s.cm.boot, "u", "SELECT current_schema() AS s", "shop", 0, sqlsandbox.Session{})
 	if err != nil {
 		t.Fatalf("USE shop; SELECT current_schema(): %v", err)
 	}

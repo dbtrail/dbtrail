@@ -95,6 +95,21 @@ type BaselineTable struct {
 	// without the reader having to discover the storage choice through a
 	// failed sum().
 	Decimals []DecimalColumn
+	// Datetimes are the table's DATETIME columns (set with SchemaKnown), and
+	// WallClockDatetimes asks the state view to read them as what MySQL holds:
+	// a wall clock with no zone. The baseline writer stores DATETIME and
+	// TIMESTAMP alike as a UTC-adjusted Parquet timestamp, which DuckDB reads
+	// as TIMESTAMP WITH TIME ZONE. Under a UTC session that prints the wall
+	// clock and compares like MySQL does. Under any other session zone it
+	// does not: the DATETIME would print shifted by the zone's offset and be
+	// compared with literals and now() as an instant it never was. With the
+	// flag set the view casts each one to a zone-less TIMESTAMP (the same
+	// REPLACE list as the decimal casts), which is right in every zone, and
+	// TIMESTAMP columns stay instants. Set by a reader that runs the script
+	// under a session zone other than UTC (the MySQL-protocol port after SET
+	// time_zone); everything else leaves it off and the columns as they were.
+	Datetimes          []string
+	WallClockDatetimes bool
 	// DeltaReserved says the table has a column under a name a table delta
 	// reserves (baseline.TableFooter says why). Set with SchemaKnown.
 	DeltaReserved bool
@@ -393,6 +408,16 @@ type Input struct {
 	// Empty for the downloadable `bintrail views` file, which describes the
 	// operator's OWN Parquet in full.
 	ExcludeEventColumns []string
+
+	// NonUTCSession says the reader will run this script and then set a
+	// session time zone other than UTC (the MySQL-protocol port after SET
+	// time_zone; the script itself still pins UTC). events.commit_time is
+	// built from epoch microseconds as a zone-less TIMESTAMP that means UTC,
+	// which a UTC session reads right and any other zone would take for its
+	// own wall clock; with this set it is emitted as the instant it is
+	// (TIMESTAMP WITH TIME ZONE), like event_timestamp beside it. The state
+	// views' side of the same problem is BaselineTable.WallClockDatetimes.
+	NonUTCSession bool
 
 	// OnlyViews limits the render to the views it names. Mechanical, like
 	// ExcludeEventColumns above: this package decides nothing about WHICH views
@@ -1863,7 +1888,11 @@ func writeEventSelect(b *strings.Builder, in Input, live bool, group *ArchiveGro
 			// DuckDB, not ours. Epoch microseconds stay far below 2^63 (year
 			// 294247), so the narrowing cannot lose a real value.
 			b.WriteString(col + "CASE WHEN \"commit_ts_us\" IS NULL THEN NULL\n")
-			b.WriteString(col + "     ELSE make_timestamp(CAST(\"commit_ts_us\" AS BIGINT)) END AS \"commit_time\",\n")
+			instant := ""
+			if in.NonUTCSession {
+				instant = " AT TIME ZONE 'UTC'"
+			}
+			b.WriteString(col + "     ELSE make_timestamp(CAST(\"commit_ts_us\" AS BIGINT))" + instant + " END AS \"commit_time\",\n")
 		default:
 			fmt.Fprintf(b, "%s%s,\n", col, quoteIdent(c.Name))
 		}
@@ -2156,7 +2185,7 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 			plain, rng := deltaAppearedPatterns(t.Path)
 			guard = "\n  " + deltaAppearedGuard(sqlString(plain), sqlString(rng), t)
 		}
-		if replace := decimalReplaceClause(t); replace != "" {
+		if replace := replaceClause(t); replace != "" {
 			fmt.Fprintf(b, "  SELECT * REPLACE (%s)\n", replace)
 			fmt.Fprintf(b, "  FROM read_parquet(%s)%s;\n", sqlString(t.Path), guard)
 			continue
@@ -2608,7 +2637,7 @@ func writeNewestStateBody(b *strings.Builder, in Input, t BaselineTable) {
 	if t.Delta || chainReady(in, t) {
 		if once {
 			posdel, upserts := baseline.TableDeltaFollowGlobs(t.Rel)
-			fmt.Fprintf(b, "  %s;\n", baseline.TableDeltaFollowStateSQL(path(t.Rel), listed(posdel), listed(upserts), t.Rel, decimalReplaceClause(t)))
+			fmt.Fprintf(b, "  %s;\n", baseline.TableDeltaFollowStateSQL(path(t.Rel), listed(posdel), listed(upserts), t.Rel, replaceClause(t)))
 			return
 		}
 		fmt.Fprintf(b, "  %s;\n", deltaStateBody(t, t.Rel, path, false))
@@ -2620,7 +2649,7 @@ func writeNewestStateBody(b *strings.Builder, in Input, t BaselineTable) {
 	guard := "\n  " + deltaAppearedGuard(fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(plain)),
 		fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(rng)), t)
 	read := "read_parquet(" + path(t.Rel) + ")" + guard
-	if replace := decimalReplaceClause(t); replace != "" {
+	if replace := replaceClause(t); replace != "" {
 		fmt.Fprintf(b, "  SELECT * REPLACE (%s)\n", replace)
 		fmt.Fprintf(b, "  FROM %s;\n", read)
 		return
@@ -2692,7 +2721,7 @@ func deltaStateBody(t BaselineTable, p string, expr func(string) string, pinned 
 	if t.DeltaLegacy {
 		stem := strings.TrimSuffix(p, ".parquet")
 		return baseline.LegacyTableDeltaStateSQL(expr(p), expr(stem+baseline.TableDeltaPosdelSuffix),
-			expr(stem+baseline.TableDeltaUpsertsSuffix), decimalReplaceClause(t))
+			expr(stem+baseline.TableDeltaUpsertsSuffix), replaceClause(t))
 	}
 	if pinned && len(t.DeltaFiles) > 0 {
 		posdels := make([]string, 0, len(t.DeltaFiles))
@@ -2701,11 +2730,11 @@ func deltaStateBody(t BaselineTable, p string, expr func(string) string, pinned 
 			posdels = append(posdels, expr(f.Posdel))
 			upserts = append(upserts, expr(f.Upserts))
 		}
-		return baseline.TableDeltaStateSQL(expr(p), "["+strings.Join(posdels, ", ")+"]", "["+strings.Join(upserts, ", ")+"]", p, decimalReplaceClause(t))
+		return baseline.TableDeltaStateSQL(expr(p), "["+strings.Join(posdels, ", ")+"]", "["+strings.Join(upserts, ", ")+"]", p, replaceClause(t))
 	}
 	if pinned {
 		posdel, upserts := baseline.TableDeltaGlobs(p)
-		return baseline.TableDeltaStateSQL(expr(p), expr(posdel), expr(upserts), p, decimalReplaceClause(t))
+		return baseline.TableDeltaStateSQL(expr(p), expr(posdel), expr(upserts), p, replaceClause(t))
 	}
 	// A following view outlives the snapshot it was generated against, and a
 	// later one can hold this table rewritten in full with no chain beside it
@@ -2713,7 +2742,7 @@ func deltaStateBody(t BaselineTable, p string, expr func(string) string, pinned 
 	// also match the table's own file, so the view reads the base alone then
 	// instead of failing on a glob that matches nothing.
 	posdel, upserts := baseline.TableDeltaFollowGlobs(p)
-	return baseline.TableDeltaFollowStateSQL(expr(p), expr(posdel), expr(upserts), p, decimalReplaceClause(t))
+	return baseline.TableDeltaFollowStateSQL(expr(p), expr(posdel), expr(upserts), p, replaceClause(t))
 }
 
 // deltaAppearedPatterns are the two globs deltaAppearedGuard counts: the

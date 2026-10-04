@@ -67,14 +67,15 @@ type SQLOnCopy struct {
 }
 
 // Run runs one statement; schema is where unqualified names resolve (the
-// connection's USE), empty for DuckDB's default. The error is one the
+// connection's USE), empty for DuckDB's default; sess is what the connection
+// set for itself (its time zone and sql_select_limit). The error is one the
 // client can be shown: the runner's typed errors pass through, the route's
 // own refusals (the copy is not queryable here, whatever the statement)
 // become a sqlsandbox.UnavailableError with wording that does not name the
 // browser, and a worker failure, whose text can carry host paths, is logged
 // here and replaced.
-func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string) (sqlsandbox.Result, error) {
-	out, err := q.s.runSQL(ctx, q.b, q.user, statement, schema, 0)
+func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqlsandbox.Session) (sqlsandbox.Result, error) {
+	out, err := q.s.runSQL(ctx, q.b, q.user, statement, schema, 0, sess)
 	if err != nil {
 		var werr *sqlsandbox.WorkerError
 		var refusal *sqlRefusal
