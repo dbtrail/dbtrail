@@ -1122,7 +1122,7 @@ func TestSQLAPI_localTablesWithChangeLogInS3(t *testing.T) {
 	// The same statement on the MySQL port: worded for that wire, with the
 	// shape that works there.
 	f.expectArchiveS3()
-	_, perr := (&SQLOnCopy{s: f.s, b: f.s.cm.boot, user: "server:x"}).Run(context.Background(), "SELECT count(*) FROM events", "")
+	_, perr := (&SQLOnCopy{s: f.s, b: f.s.cm.boot, user: "server:x"}).Run(context.Background(), "SELECT count(*) FROM events", "", sqlsandbox.Session{})
 	var un *sqlsandbox.UnavailableError
 	if !errors.As(perr, &un) {
 		t.Fatalf("port: err = %v (%T), want *sqlsandbox.UnavailableError", perr, perr)
