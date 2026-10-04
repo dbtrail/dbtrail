@@ -47,6 +47,11 @@ func TestArchiveRoutingsAgreeOnCount(t *testing.T) {
 	}
 	defer db.Close()
 	mock.ExpectQuery("FROM archive_state").WillReturnRows(shapes())
+	// with-data has a local copy with data and an S3 one: the resolver
+	// checks its files (#2078). One source either way, so the count holds.
+	mock.ExpectQuery(`SELECT local_path, s3_bucket, s3_key FROM archive_state WHERE bintrail_id = \?`).WithArgs("with-data").
+		WillReturnRows(sqlmock.NewRows([]string{"local_path", "s3_bucket", "s3_key"}).
+			AddRow(filepath.Join(withData, "event_date=2026-06-05", "event_hour=10", "e.parquet"), "bkt", "events/bintrail_id=with-data/f.parquet"))
 	mock.ExpectQuery("FROM archive_state").WillReturnRows(shapes())
 
 	local, err := ResolveArchiveSources(context.Background(), db)

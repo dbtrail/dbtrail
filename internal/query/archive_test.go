@@ -1,10 +1,13 @@
 package query
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -65,6 +68,11 @@ func TestResolveArchiveSourcesRouting(t *testing.T) {
 		// silently omitted, leaving the planner-claimed coverage with
 		// nothing to fail on).
 		AddRow("gone-orphan", filepath.Join(dir, "bintrail_id=gone-orphan", "events.parquet"), nil, nil))
+	// (1) has data locally AND an S3 copy, so its files are checked one by
+	// one (#2078): the one registered file is on disk, local stays.
+	mock.ExpectQuery(`SELECT local_path, s3_bucket, s3_key FROM archive_state WHERE bintrail_id = \?`).WithArgs("with-data").
+		WillReturnRows(sqlmock.NewRows([]string{"local_path", "s3_bucket", "s3_key"}).
+			AddRow(filepath.Join(dataBase, "event_date=2026-06-05", "event_hour=10", "events.parquet"), "bkt", "events/bintrail_id=with-data/f.parquet"))
 
 	got, rerr := ResolveArchiveSources(context.Background(), db)
 	if rerr != nil {
@@ -246,4 +254,132 @@ func TestResolveArchiveSourcesErrors(t *testing.T) {
 			t.Fatalf("nil db must resolve to (nil, nil), got (%v, %v)", got, rerr)
 		}
 	})
+}
+
+// TestResolveArchiveSourcesLocalMustBeComplete pins #2078: a local base that
+// holds SOME of a source's archived files must not shadow the S3 copy that
+// holds all of them. Every reader globs the base it is handed, and the
+// planner counts hours from archive_state, so a partial local base read as
+// "the archive" drops the missing hours with no error anywhere.
+func TestResolveArchiveSourcesLocalMustBeComplete(t *testing.T) {
+	const s3Root = "s3://bkt/arch/bintrail_id=src"
+	key := func(hour string) string {
+		return "arch/bintrail_id=src/event_date=2026-05-01/event_hour=" + hour + "/events.parquet"
+	}
+	type row struct {
+		hour    string
+		onDisk  bool // the local file exists
+		noLocal bool // local_path is NULL in the registry
+		noS3    bool // the row has no S3 columns
+		asDir   bool // a directory sits where the file should be
+		moved   bool // the file exists, under ANOTHER local base
+		oddKey  bool // the S3 key is under another prefix than the source's
+	}
+	cases := []struct {
+		name    string
+		rows    []row
+		detail  error // the per-file query fails
+		want    string
+		wantErr bool
+		// neither copy is whole: the one outcome that still reads short,
+		// and the log line is the only thing that tells it from "local".
+		wantWarn bool
+	}{
+		{name: "every registered file is on disk: local", rows: []row{{hour: "03", onDisk: true}, {hour: "04", onDisk: true}}, want: "local"},
+		{name: "an older hour was uploaded and pruned, a newer one is still on disk: S3",
+			rows: []row{{hour: "03"}, {hour: "04", onDisk: true}}, want: s3Root},
+		{name: "the newest hour is the missing one: S3", rows: []row{{hour: "03", onDisk: true}, {hour: "04"}}, want: s3Root},
+		{name: "a row registered in S3 only (no local path) beside a local file: S3",
+			rows: []row{{hour: "03", noLocal: true}, {hour: "04", onDisk: true}}, want: s3Root},
+		{name: "a directory where the file should be is not the file: S3",
+			rows: []row{{hour: "03", asDir: true}, {hour: "04", onDisk: true}}, want: s3Root},
+		{name: "neither copy is complete (an hour archived before S3 was configured): local, as before",
+			rows: []row{{hour: "02", onDisk: true, noS3: true}, {hour: "03"}, {hour: "04", onDisk: true}}, want: "local", wantWarn: true},
+		{name: "every file exists, one under another local base the reader will not glob: S3",
+			rows: []row{{hour: "03", moved: true}, {hour: "04", onDisk: true}}, want: s3Root},
+		{name: "local is missing a file and one S3 key is outside the source's prefix: neither",
+			rows: []row{{hour: "03", oddKey: true}, {hour: "04", onDisk: true}}, want: "local", wantWarn: true},
+		{name: "the per-file read fails: an error, never a guess",
+			rows: []row{{hour: "03"}, {hour: "04", onDisk: true}}, detail: errors.New("boom"), wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			base := filepath.Join(root, "bintrail_id=src")
+			var logged bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+			detail := sqlmock.NewRows([]string{"local_path", "s3_bucket", "s3_key"})
+			sample := filepath.Join(base, "event_date=2026-05-01", "event_hour=03", "events.parquet")
+			for _, r := range tc.rows {
+				p := filepath.Join(base, "event_date=2026-05-01", "event_hour="+r.hour, "events.parquet")
+				if r.moved {
+					p = filepath.Join(root, "old", "bintrail_id=src", "event_date=2026-05-01", "event_hour="+r.hour, "events.parquet")
+				}
+				switch {
+				case r.asDir:
+					if err := os.MkdirAll(p, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				case r.onDisk, r.moved:
+					if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var local, bucket, k any = p, "bkt", key(r.hour)
+				if r.noLocal {
+					local = nil
+				}
+				if r.noS3 {
+					bucket, k = nil, nil
+				}
+				if r.oddKey {
+					k = "elsewhere/bintrail_id=src/event_date=2026-05-01/event_hour=" + r.hour + "/events.parquet"
+				}
+				detail.AddRow(local, bucket, k)
+			}
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			mock.ExpectQuery(`MIN\(local_path\)`).WillReturnRows(
+				sqlmock.NewRows([]string{"bintrail_id", "sample_local", "sample_bucket", "sample_key"}).
+					AddRow("src", sample, "bkt", key("03")))
+			q := mock.ExpectQuery(`SELECT local_path, s3_bucket, s3_key FROM archive_state WHERE bintrail_id = \?`).WithArgs("src")
+			if tc.detail != nil {
+				q.WillReturnError(tc.detail)
+			} else {
+				q.WillReturnRows(detail)
+			}
+
+			got, rerr := ResolveArchiveSources(context.Background(), db)
+			if tc.wantErr {
+				if !errors.Is(rerr, tc.detail) {
+					t.Fatalf("got (%v, %v), want the read error", got, rerr)
+				}
+				return
+			}
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			want := tc.want
+			if want == "local" {
+				want = base
+			}
+			if len(got) != 1 || got[0] != want {
+				t.Errorf("sources = %v, want [%s]", got, want)
+			}
+			if warned := strings.Contains(logged.String(), "neither the local archive base nor the S3 copy"); warned != tc.wantWarn {
+				t.Errorf("warned that neither copy is whole = %v, want %v; log:\n%s", warned, tc.wantWarn, logged.String())
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet expectations: %v", err)
+			}
+		})
+	}
 }

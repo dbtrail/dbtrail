@@ -104,10 +104,10 @@ What to know before relying on it:
 - **`events` needs the change log on local disk, and the bundled stack keeps
   it in S3.** `watch` uploads each archived hour to the server's S3 location
   and removes the local file once the upload is confirmed, so on that stack a
-  statement that reads `events` is normally refused with an error that says
-  so. (An hour whose upload has not been confirmed is still on local disk;
-  while one is, `events` answers from those hours alone.) The tables are not
-  affected. What to use
+  statement that reads `events` is refused with an error that says so, from
+  the first uploaded hour on. (An hour whose upload is not confirmed yet is
+  still on local disk; a folder with only some hours is not treated as the
+  change log while S3 has them all, so `events` is still refused.) The tables are not affected. What to use
   instead: for one row's history, `_diff` on this same connection
   (`SELECT * FROM _diff.orders BETWEEN '2026-05-01' AND '2026-05-02' WHERE id = 12345`),
   which reads the archives in S3; for counts and grouping over the whole

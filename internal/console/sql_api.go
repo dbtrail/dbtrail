@@ -385,9 +385,13 @@ func (s *Server) handleSQLInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	notes := in.NamingNotes()
-	if len(in.ArchiveSources) > 0 && !eventsLocal {
+	switch {
+	case len(in.ArchiveSources) > 0 && !eventsLocal:
 		// There is a change log and it is not offered: say where it is.
 		notes = append(notes, sqlEventsInS3Note)
+	case in.ArchiveDiscoveryFailed:
+		// Whether there is one could not be read: not "no change log".
+		notes = append(notes, sqlEventsLookupFailedNote)
 	}
 	resp := sqlInfoResponse{Views: names, Notes: notes, Limits: sqlLimitsDTO{
 		TimeoutSeconds: int(s.sqlLimits.Timeout / time.Second),
@@ -613,11 +617,17 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 			return sqlOutcome{}, zoneRefusal
 		}
 		var qerr *sqlsandbox.QueryError
-		if eventsInS3 && errors.As(err, &qerr) && sqlEventsMissing.MatchString(qerr.Message) {
-			// The statement really read events, which was not installed
-			// because the change log is in S3: say that, not DuckDB's
-			// "does not exist".
-			return sqlOutcome{}, &sqlRefusal{http.StatusUnprocessableEntity, sqlEventsInS3Message}
+		if errors.As(err, &qerr) && sqlEventsMissing.MatchString(qerr.Message) {
+			// The statement really read events, which was not installed:
+			// say why, not DuckDB's "does not exist".
+			switch {
+			case eventsInS3:
+				return sqlOutcome{}, &sqlRefusal{http.StatusUnprocessableEntity, sqlEventsInS3Message}
+			case in.ArchiveDiscoveryFailed:
+				// Where the change log lives could not be read at all
+				// (#2078): nothing here knows whether events exists.
+				return sqlOutcome{}, &sqlRefusal{http.StatusBadGateway, sqlEventsLookupFailedMessage}
+			}
 		}
 		return sqlOutcome{}, err
 	}
@@ -914,6 +924,16 @@ const sqlEventsInS3Message = "the change history for this server is on S3, so ev
 // has no change log".
 const sqlEventsInS3Note = "events, the change log, is not listed: this server's change history is on S3. " +
 	"The Events page shows a row's history. Your own DuckDB reads all of it: Settings, MCP Server, Download a DuckDB schema."
+
+// sqlEventsLookupFailedMessage answers a statement that reads events when
+// the archive registry could not be read (#2078), so the view was not
+// installed and nothing here knows where the change log is. The cause is in
+// the log, where consoleArchiveSources wrote it; this answer does not repeat
+// it.
+const sqlEventsLookupFailedMessage = "where the change history for this server is kept could not be read, so events cannot be read; the tables can. DBTrail's log has the reason"
+
+// sqlEventsLookupFailedNote is the same fact under the list of tables.
+const sqlEventsLookupFailedNote = "events, the change log, is not listed: where it is kept could not be read. DBTrail's log has the reason."
 
 // sqlWorkerFailedMessage replaces a WorkerError on every wire: its text can
 // carry host paths, so the log gets it and the client gets this.
