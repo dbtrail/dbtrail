@@ -1906,11 +1906,20 @@ func numberToText(n json.Number) []byte {
 }
 
 // resultsetValue normalizes a row-image cell for BuildSimpleTextResultset. A
-// json.Number (#496) is pre-rendered to uniform text bytes via numberToText;
-// every other value passes through unchanged.
+// json.Number (#496) is pre-rendered to uniform text bytes via numberToText.
+// An empty string becomes an empty, non-nil []byte: go-mysql's builder
+// renders a Go "" to a nil slice and writes every nil as NULL (0xfb), so a
+// column that held an empty string would reach the client as NULL,
+// indistinguishable from a real one. Every other value passes through
+// unchanged.
 func resultsetValue(v any) any {
-	if n, ok := v.(json.Number); ok {
-		return numberToText(n)
+	switch x := v.(type) {
+	case json.Number:
+		return numberToText(x)
+	case string:
+		if x == "" {
+			return []byte{}
+		}
 	}
 	return v
 }

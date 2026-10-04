@@ -41,6 +41,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and loads there at about the same speed as before. Same rows and column types either way.
 
 ### Fixed
+- **Time-travel results return an empty string as an empty string, not as
+  `NULL`** (#2065). A column whose value was `''` reached the client as
+  `NULL` in `_flashback`, `_diff` and the buffered `_snapshot` reads (a
+  `LIMIT`, a single row): the row image carries it as a Go empty string,
+  which the resultset builder writes as `NULL`. `name IS NULL` and
+  `name = ''` were the same answer. The streaming row writer gets the same
+  guard.
 - **The embedded time-travel port notices a client that hangs up in the
   middle of a statement** (#2033). Nothing read the socket while a statement
   ran, so a client that left kept its SQL worker running and held its

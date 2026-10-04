@@ -203,3 +203,19 @@ func TestStreamWriter_NullEncoding(t *testing.T) {
 		t.Errorf("row payload = %v, want %v (0xfb NULL + lenenc 'hi')", row, want)
 	}
 }
+
+// An empty string is an empty string on the wire (lenenc 0x00), whatever Go
+// type carries it; only nil is NULL. go-mysql's FormatTextValue renders a Go
+// "" to a nil slice, which read as NULL here.
+func TestStreamWriter_EmptyStringIsNotNull(t *testing.T) {
+	cols := []string{"a", "b", "c"}
+	pw := &capturePW{}
+	sw := newStreamWriter(pw, cols)
+	if err := sw.writeRow([]any{"", []byte{}, nil}); err != nil {
+		t.Fatalf("writeRow: %v", err)
+	}
+	row := pw.packets[headerPackets(cols)]
+	if want := []byte{0x00, 0x00, 0xfb}; string(row) != string(want) {
+		t.Errorf("row payload = % x, want % x (two empty strings, then NULL)", row, want)
+	}
+}
