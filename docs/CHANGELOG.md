@@ -91,6 +91,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frees the slot at once.
 
 ### Added
+- **Read routing vetoes `--` with no space after it** (#2036). MySQL opens
+  a comment with `--` only before whitespace, so `x > 5--3` is `x > 8`
+  there; DuckDB opens one regardless, and the copy would answer `x > 5` and
+  drop the rest of the line, without an error. Such a statement now stays
+  on MySQL.
+- **Read routing vetoes a backslash inside a string literal** (#2036).
+  MySQL reads `'a\\b'` as `a\b` and `'it\'s'` as `it's`; DuckDB reads the
+  backslash as a plain character, so the copy would answer about a
+  different string without an error. Such a statement now stays on MySQL.
 - **Read routing keeps a small `LIMIT` on MySQL, and vetoes JSON** (#2038).
   MySQL's plan cost ignores `LIMIT`, so `SELECT id FROM orders ORDER BY id
   DESC LIMIT 2` carried a six-figure cost and went to the copy (340 ms

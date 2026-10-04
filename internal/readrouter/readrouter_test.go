@@ -58,6 +58,10 @@ func TestVeto(t *testing.T) {
 		"SELECT @@version":                                      "user or system variable",
 		"SELECT @x := 1":                                        "user or system variable",
 		"SELECT * FROM t FOR UPDATE":                            "locking read",
+		`SELECT * FROM t WHERE path = 'a\\b'`:                   "backslash in a string literal (an escape on MySQL, a plain character on the copy)",
+		`SELECT * FROM t WHERE name = 'it\'s'`:                  "backslash in a string literal (an escape on MySQL, a plain character on the copy)",
+		`SELECT id FROM t WHERE code = 'A\_1' ORDER BY id`:      "backslash in a string literal (an escape on MySQL, a plain character on the copy)",
+		`SELECT * FROM t WHERE a = 1 AND note = '\n'`:           "backslash in a string literal (an escape on MySQL, a plain character on the copy)",
 		"SELECT JSON_UNQUOTE(JSON_EXTRACT(v, '$.tier')) FROM t": "JSON function or -> operator (missing or different on the copy)",
 		"SELECT v->>'$.tier' FROM t":                            "JSON function or -> operator (missing or different on the copy)",
 		"SELECT v->'$.tier' FROM t":                             "JSON function or -> operator (missing or different on the copy)",
@@ -72,6 +76,8 @@ func TestVeto(t *testing.T) {
 		"SELECT count(DISTINCT status) FROM t":                  "DISTINCT inside an aggregate (not folded by the copy's collation)",
 		"SELECT INSTR(name, 'x') FROM t":                        "INSTR/LOCATE/POSITION/STRCMP (case-sensitive on the copy)",
 		"SELECT * FROM t WHERE name REGEXP '^a'":                "LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)",
+		"SELECT * FROM t WHERE x > 5--3 AND y = 1":              "-- without a space after it (two minus signs on MySQL, a comment on the copy)",
+		"SELECT a --b\n FROM t":                                 "-- without a space after it (two minus signs on MySQL, a comment on the copy)",
 		"SELECT a || b FROM t":                                  "|| (string concatenation on the copy, logical OR on MySQL)",
 		"SELECT 2 ^ 3":                                          "^ (power on the copy, bitwise XOR on MySQL)",
 		`SELECT * FROM t WHERE status = "paid"`:                 "double-quoted string literal",
@@ -98,9 +104,11 @@ func TestVeto(t *testing.T) {
 		"SELECT count(*) FROM t WHERE distinct_id = 1",
 		"SELECT user_id FROM t", // not user(
 		"SELECT * FROM t WHERE note = '#not a comment -- nor this' AND a = 1",
-		"SELECT `a\"b` FROM t",            // a double quote inside a backtick identifier is not a string
-		"SELECT 'it''s' FROM t",           // a doubled quote does not end the literal
-		"SELECT json_col, jsonish FROM t", // a column named like the functions, no call
+		"SELECT `a\"b` FROM t",                              // a double quote inside a backtick identifier is not a string
+		"SELECT 'it''s' FROM t",                             // a doubled quote does not end the literal
+		"SELECT * FROM t WHERE path = 'C:/tmp' -- not a\\b", // a backslash in a comment is not in a literal
+		"SELECT `a\\b` FROM t WHERE c = 'x'",                // nor one in a backtick identifier
+		"SELECT json_col, jsonish FROM t",                   // a column named like the functions, no call
 	}
 	harmless := map[string]bool{
 		"SET NAMES utf8mb4":                            true,
