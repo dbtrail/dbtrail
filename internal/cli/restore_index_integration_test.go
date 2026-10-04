@@ -159,7 +159,7 @@ func TestIntegrationRestoreIndex_roundTrip(t *testing.T) {
 	}
 
 	// recordRestoredArchive S3 branch: a confirmed S3 object must be stamped
-	// (bucket-set/stamp-NULL trips hasPendingS3Upload → rotate refuses drops
+	// (bucket-set/stamp-NULL trips pendingS3Uploads → rotate refuses drops
 	// forever).
 	s3f := archive.ScannedFile{PartitionName: "p_2099010100", BintrailID: id,
 		Backend: archive.BackendS3, S3Bucket: "b", S3Key: "k", SizeBytes: 1,
