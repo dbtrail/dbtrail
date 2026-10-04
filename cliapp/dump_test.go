@@ -658,6 +658,30 @@ func TestResolveMydumper_dockerFallback(t *testing.T) {
 
 // ─── buildDockerArgs ──────────────────────────────────────────────────────────
 
+// TestBuildDockerArgs_init pins --init (#2039). Without it mydumper is PID 1 in
+// the container, and the signal it raises on itself after a fatal error
+// (g_error: SIGTRAP/SIGABRT) is dropped by the kernel, so the container never
+// exits and `bintrail dump` waits forever. --init is a docker flag, so it must
+// come before the image: after it, docker hands it to mydumper as an argument.
+func TestBuildDockerArgs_init(t *testing.T) {
+	for _, host := range []string{"db.example.com", "127.0.0.1"} {
+		args := buildDockerArgs("mydumper/mydumper:latest", "/tmp/dump", host,
+			[]string{"--host", host}, "/path/to/key", "/path/to/defaults.cnf")
+		n := 0
+		for _, a := range args {
+			if a == "--init" {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("host %s: want --init exactly once, got %d in %v", host, n, args)
+		}
+		if initIdx, imgIdx := argsIndex(args, "--init"), argsIndex(args, "mydumper/mydumper:latest"); initIdx > imgIdx {
+			t.Errorf("host %s: --init at %d must precede the image at %d: %v", host, initIdx, imgIdx, args)
+		}
+	}
+}
+
 func TestBuildDockerArgs_basic(t *testing.T) {
 	mydumperArgs := []string{"--host", "db.example.com", "--port", "3306", "--user", "root", "--outputdir", "/tmp/dump"}
 	args := buildDockerArgs("mydumper/mydumper:latest", "/tmp/dump", "db.example.com", mydumperArgs, "", "")

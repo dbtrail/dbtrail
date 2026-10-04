@@ -133,7 +133,8 @@ func resolveMydumper(cmd *cobra.Command) (dumpResolution, error) {
 // the key file is also bind-mounted into the container. When defaultsFile is
 // non-empty it is likewise bind-mounted read-only at the same path so the
 // container's mydumper can read the source password from it via --defaults-file
-// (keeping the secret off argv and out of `docker inspect`, #811).
+// (keeping the secret off argv and out of `docker inspect`, #811). --init runs
+// a minimal init as PID 1 so a mydumper fatal error ends the container (#2039).
 func buildDockerArgs(image, outputDir, host string, mydumperArgs []string, encryptKeyPath, defaultsFile string) []string {
 	absOutput, err := filepath.Abs(outputDir)
 	if err != nil {
@@ -141,7 +142,7 @@ func buildDockerArgs(image, outputDir, host string, mydumperArgs []string, encry
 	}
 
 	args := []string{
-		"run", "--rm",
+		"run", "--rm", "--init",
 		"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		"-v", absOutput + ":" + absOutput,
 	}
