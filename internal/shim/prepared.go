@@ -231,6 +231,7 @@ func (h *Handler) HandleStmtClose(context any) error {
 // the statement split the MySQL way, kept for the executions the routing
 // ladder sends to the copy.
 func (h *Handler) prepareRouted(query string, parts []string) (int, int, any, error) {
+	h.clearRefusal()
 	if err := h.readOnlyRefusal(query); err != nil {
 		return 0, 0, nil, err
 	}
@@ -264,12 +265,16 @@ func (h *Handler) executeRouted(st *preparedStmt, args []any) (*mysql.Result, er
 	defer cancel()
 	h.mu.Lock()
 	currentDB := h.db
-	forwarded := h.routeLastForwarded
+	forwarded, refusal := h.routeLastForwarded, h.routeRefusal
 	h.mu.Unlock()
-	if showWarningsRE.MatchString(st.query) && !forwarded {
+	if showWarningsRE.MatchString(st.query) && (!forwarded || refusal != "") {
 		// After a copy-served statement the warnings are the port's own,
 		// as for the text statement; the source's would be its EXPLAIN's.
+		// After a read-only refusal they are that refusal.
 		res, err := h.showWarnings()
+		if refusal != "" {
+			res, err = refusalDiagnostics(refusal)
+		}
 		if err != nil || res == nil || res.Resultset == nil {
 			return res, err
 		}

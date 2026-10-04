@@ -404,8 +404,10 @@ What this is and is not:
 - **`--route-read-only` makes the routed port read-only.** With it (or
   `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=1`), a statement that is not a read is
   refused with MySQL error 1290 and a message that names the flag, and it is
-  never sent to the source, not even to be explained or prepared. The flag
-  needs `--route-max-copy-age`; `watch` refuses to start with it alone.
+  never sent to the source, not even to be explained or prepared. `SHOW
+  WARNINGS` right after shows that refusal. The flag needs
+  `--route-max-copy-age`; `watch` refuses to start with it alone, before it
+  connects to anything.
   - **Allowed**: `SELECT`, `WITH ... SELECT`, `TABLE`, `VALUES`, `SHOW`,
     `DESCRIBE`, `EXPLAIN` (and `EXPLAIN ANALYZE`, or MariaDB's `ANALYZE`, of a
     read), `USE`, `BEGIN`,
@@ -425,7 +427,9 @@ What this is and is not:
     `DELETE`, `UPDATE` or `INSERT`; `EXPLAIN ANALYZE` of a write (it runs
     it); a line with more than one statement; and any statement holding
     MySQL's executable comment (`/*!50000 ... */`), since the server runs
-    what is inside. A `SET NAMES` to a character set other than `utf8mb4`,
+    what is inside. A statement with `--` right before a non-ASCII byte is
+    refused as well: the server reads that as the start of a comment under
+    `latin1` and not under `utf8mb4`, and the port cannot know which. A `SET NAMES` to a character set other than `utf8mb4`,
     `utf8`, `latin1`, `ascii` or `binary` is refused too: under `gbk` or
     `sjis` the port could not tell where a string ends.
   - **What it cannot see.** The check reads the statement's text. A

@@ -45,6 +45,13 @@ func TestReadOnlyRefusal_allows(t *testing.T) {
 		`SELECT * FROM t WHERE name LIKE '%\_%'`,
 		`SELECT 'c:\\dir\\'`,
 		"SELECT for_update, into_count, lock_in FROM t",
+		// A quoted name that is not a lock function, and one that only
+		// looks like it (both servers answer "incorrect routine name").
+		"SELECT `get_lock` FROM t",
+		"SELECT `is_free_lock`('x'), `my_get_lock`('x')",
+		"SELECT 'get_lock'('x')",
+		"SELECT 5 - -3, 'caf\xc3\xa9 -- x', `col--\xc3\xa9`",
+		"SELECT 1 /* --\xa0 */ -- \xa0 tail",
 		`SELECT \N`,
 		`SELECT a, \N FROM t`,
 		"SELECT updated_at FROM t WHERE format = 'x'",
@@ -227,6 +234,27 @@ func TestReadOnlyRefusal_refuses(t *testing.T) {
 		{"SELECT * FROM (SELECT * FROM t FOR UPDATE) x", "locking read"},
 		{"SELECT GET_LOCK('x', 10)", "GET_LOCK"},
 		{"SELECT RELEASE_LOCK('x')", "GET_LOCK"},
+		{"SELECT get_lock ('x', 1)", "GET_LOCK"},
+		{"SELECT get_lock/**/('x', 1)", "GET_LOCK"},
+		// A quoted name still calls the built-in (MySQL 8.4 and MariaDB 11.4
+		// both return 1 for these), in backticks and, under ANSI_QUOTES, in
+		// double quotes.
+		{"SELECT `get_lock`('zz', 1)", "GET_LOCK"},
+		{"SELECT `GET_LOCK` ('zz', 1)", "GET_LOCK"},
+		{"SELECT `release_lock`('zz')", "GET_LOCK"},
+		{"SELECT `release_all_locks`()", "GET_LOCK"},
+		{"SELECT 1, `Release_All_Locks`/* c */()", "GET_LOCK"},
+		{`SELECT "get_lock"('zz', 1)`, "GET_LOCK"},
+		{`SELECT "release_all_locks"()`, "GET_LOCK"},
+		{"SET @a = `get_lock`('zz', 1)", "GET_LOCK"},
+		// `--` in front of a byte above 0x7f: under latin1 the servers read
+		// --\xa0 as the start of a comment (0xA0 is a space there), under
+		// utf8mb4 they do not. The screen cannot know which, so it refuses.
+		{"SELECT 1 --\xa0 ' \n INTO OUTFILE '/tmp/x' -- '", "--"},
+		{"SELECT * FROM t --\xa0 ' \n FOR UPDATE -- '", "--"},
+		{"SELECT 1 --\xa0 ' \n , get_lock('a',1) -- '", "--"},
+		{"SELECT 1 --\xc2\xa0 x", "--"},
+		{"SELECT 1 --\xe9", "--"},
 		{"SELECT NEXTVAL(seq)", "sequence"},
 		{"SELECT NEXT VALUE FOR seq", "sequence"},
 		{"SELECT SETVAL(seq, 10)", "sequence"},
@@ -299,10 +327,15 @@ func TestReadOnlyRefusal_reasonCarriesNoLiterals(t *testing.T) {
 	for _, stmt := range []string{
 		"INSERT INTO t VALUES ('s3cr3t')",
 		"s3cr3t_keyword_that_is_very_long_and_not_sql_at_all_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx 1",
+		"s3cr3t",
+		"hunter2secretpassword",
+		"s3cr3t INSERT INTO t VALUES (1)",
+		"(s3cr3t)",
 		"SET PASSWORD = 's3cr3t'",
 	} {
 		why := ReadOnlyRefusal(stmt)
-		if strings.Contains(why, "s3cr3t'") || len(why) > 200 {
+		low := strings.ToLower(why)
+		if strings.Contains(low, "s3cr3t") || strings.Contains(low, "hunter2") || len(why) > 200 {
 			t.Errorf("reason for %q is %q", stmt, why)
 		}
 	}

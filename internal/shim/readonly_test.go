@@ -227,3 +227,75 @@ func TestReadOnly_offForwardsWrites(t *testing.T) {
 		}
 	}
 }
+
+// SHOW WARNINGS after a refusal shows the refusal (MySQL's own shape: Error,
+// the code, the message), answered here: forwarding it would return the
+// diagnostics of whatever statement the source ran before, and the refused
+// one never got there.
+func TestReadOnly_showWarningsAfterARefusalIsTheRefusal(t *testing.T) {
+	r := &fakeRouter{}
+	f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
+	h, _ := readOnlyHandler(t, r, f)
+	// A forwarded statement first, so "the last statement was MySQL's".
+	if _, err := h.HandleQuery("SELECT * FROM t WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
+	_, refusal := h.HandleQuery("DELETE FROM t")
+	refusedReadOnly(t, "DELETE FROM t", refusal)
+	before := len(r.forwarded)
+	for range 2 { // SHOW WARNINGS does not clear what it shows
+		res, err := h.HandleQuery("SHOW WARNINGS")
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows := textRows(t, res.Resultset)
+		var me *mysql.MyError
+		errors.As(refusal, &me)
+		if len(rows) != 1 || rows[0][0] != "Error" || rows[0][1] != "1290" || rows[0][2] != me.Message {
+			t.Fatalf("SHOW WARNINGS after a refusal = %v, want one Error 1290 row with the refusal's message", rows)
+		}
+	}
+	if len(r.forwarded) != before {
+		t.Errorf("SHOW WARNINGS after a refusal went to the source: %v", r.forwarded[before:])
+	}
+	// The next statement clears it: after a forwarded one SHOW WARNINGS is
+	// MySQL's again.
+	if _, err := h.HandleQuery("SELECT * FROM t WHERE id = 2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.HandleQuery("SHOW WARNINGS"); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(r.forwarded); r.forwarded[n-1] != "SHOW WARNINGS" {
+		t.Errorf("SHOW WARNINGS after a forwarded statement stayed local: %v", r.forwarded)
+	}
+}
+
+// The same through the binary protocol: a prepared SHOW WARNINGS executed
+// after a refusal shows the refusal and is not executed on the source, and a
+// refused PREPARE is a refusal SHOW WARNINGS shows too.
+func TestReadOnly_preparedShowWarningsAfterARefusal(t *testing.T) {
+	r := &fakeRouter{}
+	f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
+	h, _ := readOnlyHandler(t, r, f)
+	_, _, ctx, err := h.HandleStmtPrepare("SHOW WARNINGS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.HandleQuery("SELECT * FROM t WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := h.HandleStmtPrepare("UPDATE t SET a = ?"); err == nil {
+		t.Fatal("the prepared write was not refused")
+	}
+	res, err := h.HandleStmtExecute(ctx, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res == nil || res.Resultset == nil || len(res.Resultset.RowDatas) != 1 {
+		t.Fatalf("prepared SHOW WARNINGS after a refusal = %+v, want one row", res)
+	}
+	if len(r.prepared) != 1 || len(r.prepared[0].executed) != 0 {
+		t.Errorf("prepared SHOW WARNINGS after a refusal ran on the source")
+	}
+}

@@ -304,10 +304,34 @@ func (h *Handler) readOnlyRefusal(qstr string) error {
 	if why == "" {
 		return nil
 	}
-	h.logger.Debug("read routing: refused by read-only mode", "statement", readrouter.LeadingKeyword(qstr), "reason", why)
+	// The reason alone: it is fixed text and known keywords, where the
+	// statement's first word can be anything the client typed.
+	h.logger.Debug("read routing: refused by read-only mode", "reason", why)
 	h.observeRoute(RouteRefused, RouteReasonReadOnly)
-	return mysql.NewError(mysql.ER_OPTION_PREVENTS_STATEMENT,
-		"this port is read-only (--route-read-only) and refused the statement: "+why+". Nothing was sent to the source.")
+	msg := "this port is read-only (--route-read-only) and refused the statement: " + why + ". Nothing was sent to the source."
+	h.mu.Lock()
+	h.routeRefusal = msg
+	h.mu.Unlock()
+	return mysql.NewError(mysql.ER_OPTION_PREVENTS_STATEMENT, msg)
+}
+
+// clearRefusal forgets the last read-only refusal: the statement now
+// starting replaces it as "the last statement".
+func (h *Handler) clearRefusal() {
+	h.mu.Lock()
+	h.routeRefusal = ""
+	h.mu.Unlock()
+}
+
+// refusalDiagnostics is SHOW WARNINGS after a read-only refusal: one row,
+// the way MySQL shows the error of the statement before.
+func refusalDiagnostics(msg string) (*mysql.Result, error) {
+	rs, err := mysql.BuildSimpleTextResultset([]string{"Level", "Code", "Message"},
+		[][]any{{"Error", int64(mysql.ER_OPTION_PREVENTS_STATEMENT), msg}})
+	if err != nil {
+		return nil, fmt.Errorf("show warnings: %w", err)
+	}
+	return &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}, nil
 }
 
 // routeWarn logs a fallback that hides an operational problem (the feature
@@ -546,6 +570,9 @@ type warningsSetter interface{ SetWarnings(uint16) }
 func (h *Handler) setWarnings(msgs []string) {
 	h.mu.Lock()
 	h.lastWarnings = msgs
+	// Called when a statement starts and when the copy answered one: either
+	// way the refusal of an earlier statement is no longer the last word.
+	h.routeRefusal = ""
 	h.mu.Unlock()
 	if ws, ok := h.conn.(warningsSetter); ok {
 		ws.SetWarnings(uint16(len(msgs)))

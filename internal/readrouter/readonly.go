@@ -89,9 +89,27 @@ var (
 // GTID into the source's executed set.
 var roDeniedSessionVars = map[string]bool{"password": true, "gtid_next": true, "global": true, "persist": true, "persist_only": true}
 
+// roKnownVerbs are the leading keywords a refusal may name. Any other first
+// word is not repeated back: it is whatever the client typed, and it goes to
+// the client's error and to the log.
+var roKnownVerbs = map[string]bool{
+	"insert": true, "update": true, "delete": true, "replace": true, "create": true, "alter": true, "drop": true,
+	"truncate": true, "rename": true, "grant": true, "revoke": true, "kill": true, "call": true, "do": true,
+	"handler": true, "lock": true, "unlock": true, "load": true, "xa": true, "prepare": true, "execute": true,
+	"deallocate": true, "flush": true, "reset": true, "optimize": true, "repair": true, "check": true,
+	"checksum": true, "binlog": true, "shutdown": true, "restart": true, "install": true, "uninstall": true,
+	"change": true, "stop": true, "purge": true, "import": true, "clone": true, "cache": true, "signal": true,
+	"resignal": true, "get": true, "help": true, "merge": true, "backup": true, "end": true, "declare": true,
+}
+
+// roLockFunctions are built-ins that take or free a lock other sessions
+// wait on. Quoting the name does not stop it from being the built-in.
+var roLockFunctions = map[string]bool{"get_lock": true, "release_lock": true, "release_all_locks": true}
+
 // ReadOnlyRefusal returns why read-only mode refuses the statement, as a
 // clause that completes "refused: ...", or "" when the statement is allowed.
-// The reason never carries the statement's literals.
+// The reason is built from fixed text and from keywords in roKnownVerbs: it
+// never repeats a literal, a name or an unknown word of the statement.
 func ReadOnlyRefusal(stmt string) string {
 	if strings.Contains(stmt, "/*!") || strings.Contains(stmt, "/*M!") {
 		return "it holds a MySQL executable comment (/*! ... */), which the server runs and this mode does not read"
@@ -115,6 +133,10 @@ func ReadOnlyRefusal(stmt string) string {
 			continue
 		case roUnterminatedOther:
 			return "it holds an unterminated comment or quoted name"
+		case roDashHighByte:
+			// Verified on MySQL 8.4 and MariaDB 11.4: under latin1 `--`
+			// before 0xA0 starts a comment, under utf8mb4 it does not.
+			return "it holds -- followed by a byte above 0x7f, which the server reads as the start of a comment under some character sets and not under others"
 		}
 		screened++
 		kept, _ := roClean(stmt, r[0], r[1], true)
@@ -132,6 +154,7 @@ const (
 	roClosed = iota
 	roUnterminatedString
 	roUnterminatedOther
+	roDashHighByte
 )
 
 // roClean returns the statement lower-cased, with comments turned into a
@@ -156,6 +179,8 @@ func roClean(stmt string, escSingle, escDouble, keepStrings bool) (string, int) 
 			}
 			b.WriteByte(' ')
 			i += end + 4
+		case c == '-' && i+2 < n && stmt[i+1] == '-' && stmt[i+2] >= 0x80:
+			return "", roDashHighByte
 		case c == '#', c == '-' && i+1 < n && stmt[i+1] == '-' && (i+2 >= n || stmt[i+2] <= ' ' || stmt[i+2] == 0x7f):
 			nl := strings.IndexByte(stmt[i:], '\n')
 			b.WriteByte(' ')
@@ -189,9 +214,13 @@ func roClean(stmt string, escSingle, escDouble, keepStrings bool) (string, int) 
 			if !closed {
 				return "", roUnterminatedString
 			}
-			if keepStrings {
+			switch name := strings.ToLower(stmt[i+1 : j]); {
+			case c == '"' && roLockFunctions[name]:
+				// Under ANSI_QUOTES "get_lock"(...) is the function.
+				b.WriteString(" " + name + " ")
+			case keepStrings:
 				b.WriteString(strings.ToLower(stmt[i : j+1]))
-			} else {
+			default:
 				b.WriteString("''")
 			}
 			i = j + 1
@@ -212,7 +241,12 @@ func roClean(stmt string, escSingle, escDouble, keepStrings bool) (string, int) 
 			if !closed {
 				return "", roUnterminatedOther
 			}
-			b.WriteString("``")
+			if name := strings.ToLower(stmt[i+1 : j]); roLockFunctions[name] {
+				// `get_lock`(...) is the function all the same.
+				b.WriteString(" " + name + " ")
+			} else {
+				b.WriteString("``")
+			}
 			i = j + 1
 		case c == '\\':
 			// Outside a string, MySQL reads \N as NULL, a token of its own:
@@ -331,13 +365,11 @@ func roScreenOne(kept, s string) string {
 			return ""
 		}
 		return "USE in a form this mode does not read"
-	case "":
-		return "it is not recognised as a read"
 	}
-	if len(kw) > 32 {
-		kw = kw[:32]
+	if roKnownVerbs[kw] {
+		return strings.ToUpper(kw) + " is not a read"
 	}
-	return strings.ToUpper(kw) + " is not a read"
+	return "it is not recognised as a read"
 }
 
 // roReadBody screens the body of a statement whose class is a read for the

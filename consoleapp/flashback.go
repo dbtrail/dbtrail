@@ -301,39 +301,7 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	// follows them. A server that cannot route stays copy-only and says so
 	// once per connection: silently serving the copy to a client who was
 	// promised MySQL semantics is the one thing this must not do.
-	if cfg.RouteMaxCopyAge > 0 {
-		switch {
-		case tgt.SQL == nil:
-			logger.Warn("read routing off for this connection: SQL on the copy unavailable", "server", user, "reason", tgt.SQLUnavailable)
-			srv.RecordRouteUnavailable(tgt.ID, "SQL on the copy is unavailable ("+tgt.SQLUnavailable+")")
-		case tgt.SourceDSN == "":
-			logger.Warn("read routing off for this connection: the server has no source DSN to forward to", "server", user)
-			srv.RecordRouteUnavailable(tgt.ID, "the server has no source database to forward to")
-		default:
-			fw, err := readrouter.NewForwarder(tgt.SourceDSN, cfg.RoutePolicy, cfg.QueryTimeout)
-			if err != nil {
-				// The DSN is the registry's own and was parsed to open the
-				// source; a scheme the forwarder does not speak is the
-				// realistic cause. The message carries no secret.
-				logger.Warn("read routing off for this connection", "server", user, "err", err)
-				srv.RecordRouteUnavailable(tgt.ID, "the source address cannot be forwarded to ("+err.Error()+")")
-			} else {
-				srv.RecordRouteAvailable(tgt.ID)
-				// Every decision is counted twice over, by the canonical
-				// server id: the Prometheus counter for dashboards and
-				// the console's tally for the Connect page (#2038).
-				id := tgt.ID
-				h.BindRouter(fw, shim.RouterConfig{
-					MaxCopyAge: cfg.RouteMaxCopyAge,
-					ReadOnly:   cfg.RouteReadOnly,
-					Observe: func(route shim.RouteSide, reason shim.RouteReason) {
-						observe.ObserveRouteDecision(id, string(route), string(reason))
-						srv.RecordRouteDecision(id, string(route), string(reason))
-					},
-				})
-			}
-		}
-	}
+	bindReadRouter(h, srv, tgt, user, cfg, logger)
 	// Seed the source schema so fully qualified `_flashback.<table>` queries
 	// work without a prior `USE <db>` (mirrors the standalone shim's #263
 	// behaviour). Best-effort: the boot entry has no registry SourceDSN.
@@ -349,6 +317,49 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	}
 	proxy.inner = h
 	return nil
+}
+
+// bindReadRouter turns h into a routing handler when read routing is on and
+// the server can route, with the port's policy: the copy's maximum age and
+// whether the port is read-only (cfg.RouteReadOnly, #2079). A server that
+// cannot route stays copy-only, and the Connect page is told why. Its own
+// function so the wiring from the port's configuration to the handler is
+// tested without a database: nothing here opens a connection.
+func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackTarget, user string, cfg flashbackConfig, logger *slog.Logger) {
+	if cfg.RouteMaxCopyAge <= 0 {
+		return
+	}
+	switch {
+	case tgt.SQL == nil:
+		logger.Warn("read routing off for this connection: SQL on the copy unavailable", "server", user, "reason", tgt.SQLUnavailable)
+		srv.RecordRouteUnavailable(tgt.ID, "SQL on the copy is unavailable ("+tgt.SQLUnavailable+")")
+	case tgt.SourceDSN == "":
+		logger.Warn("read routing off for this connection: the server has no source DSN to forward to", "server", user)
+		srv.RecordRouteUnavailable(tgt.ID, "the server has no source database to forward to")
+	default:
+		fw, err := readrouter.NewForwarder(tgt.SourceDSN, cfg.RoutePolicy, cfg.QueryTimeout)
+		if err != nil {
+			// The DSN is the registry's own and was parsed to open the
+			// source; a scheme the forwarder does not speak is the
+			// realistic cause. The message carries no secret.
+			logger.Warn("read routing off for this connection", "server", user, "err", err)
+			srv.RecordRouteUnavailable(tgt.ID, "the source address cannot be forwarded to ("+err.Error()+")")
+		} else {
+			srv.RecordRouteAvailable(tgt.ID)
+			// Every decision is counted twice over, by the canonical
+			// server id: the Prometheus counter for dashboards and
+			// the console's tally for the Connect page (#2038).
+			id := tgt.ID
+			h.BindRouter(fw, shim.RouterConfig{
+				MaxCopyAge: cfg.RouteMaxCopyAge,
+				ReadOnly:   cfg.RouteReadOnly,
+				Observe: func(route shim.RouteSide, reason shim.RouteReason) {
+					observe.ObserveRouteDecision(id, string(route), string(reason))
+					srv.RecordRouteDecision(id, string(route), string(reason))
+				},
+			})
+		}
+	}
 }
 
 // flashbackCreds authenticates the flashback port on the shared console token

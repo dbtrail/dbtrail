@@ -324,6 +324,12 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	if err := resolveSQLMaxInFlight(cmd); err != nil {
 		return err
 	}
+	// The port's flags, checked here, before the first connection: a
+	// read-only flag that cannot apply, or an environment value that does
+	// not parse, must not wait for the index to answer.
+	if err := resolveRouteFlags(cmd); err != nil {
+		return err
+	}
 
 	// Containerized installs start the daemon and the index MySQL together,
 	// and the official mysql image briefly accepts-then-drops connections
@@ -646,6 +652,73 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 // could ever reach the copy: routing on (a max copy age) with both plan
 // thresholds at 0. Every statement would land under cheap_plan, which reads
 // as a tuning question rather than the misconfiguration it is.
+// resolveRouteFlags applies the environment to the MySQL-protocol port's
+// flags (--flashback-listen and the --route-* family) and checks them
+// together. It opens nothing and starts nothing, so runWatch calls it before
+// the first connection: a typo in a safety setting stops the daemon at once,
+// not after the index answered. resolveUpConsoleEnv calls it again from the
+// console paths; it is idempotent.
+func resolveRouteFlags(cmd *cobra.Command) error {
+	if !cmd.Flags().Changed("flashback-listen") {
+		if v := os.Getenv("BINTRAIL_CONSOLE_FLASHBACK_LISTEN"); v != "" {
+			upConsoleFlashbackListen = v
+		}
+	}
+	if !cmd.Flags().Changed("route-max-copy-age") {
+		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE"); v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE: %w", err)
+			}
+			upRouteMaxCopyAge = d
+		}
+	}
+	if !cmd.Flags().Changed("route-read-only") {
+		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_READ_ONLY"); v != "" {
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_READ_ONLY=%q is not a yes or no: use 1 or true to make the routed port read-only, 0 or false (or leave it unset) for read-write", v)
+			}
+			upRouteReadOnly = b
+		}
+	}
+	if !cmd.Flags().Changed("route-cost-threshold") {
+		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD"); v != "" {
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD: %w", err)
+			}
+			upRouteCostThreshold = f
+		}
+	}
+	if !cmd.Flags().Changed("route-scan-rows") {
+		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS"); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS: %w", err)
+			}
+			upRouteScanRows = n
+		}
+	}
+	if err := validateRouteReadOnly(upRouteReadOnly, upConsoleFlashbackListen, upRouteMaxCopyAge); err != nil {
+		return err
+	}
+	if upConsoleFlashbackListen != "" {
+		return validateRoutePolicy(upRouteMaxCopyAge, upRouteCostThreshold, upRouteScanRows)
+	}
+	return nil
+}
+
+// flashbackConfigFromFlags is the port's serving configuration as the
+// resolved flags give it: what startFlashbackPort serves with.
+func flashbackConfigFromFlags() flashbackConfig {
+	return flashbackConfig{
+		RouteMaxCopyAge: upRouteMaxCopyAge,
+		RoutePolicy:     readrouter.Policy{CostThreshold: upRouteCostThreshold, ScanRows: upRouteScanRows},
+		RouteReadOnly:   upRouteReadOnly,
+	}
+}
+
 // validateRouteReadOnly refuses --route-read-only where it would guard
 // nothing: without the port, or with the port serving the copy only (routing
 // off sends nothing to the source). A safety flag that is silently ignored
@@ -700,11 +773,7 @@ func startFlashbackPort(ctx context.Context, srv *console.Server) (func(), error
 	if err != nil {
 		return nil, fmt.Errorf("flashback: cannot bind %s: %w", upConsoleFlashbackListen, err)
 	}
-	cfg := flashbackConfig{
-		RouteMaxCopyAge: upRouteMaxCopyAge,
-		RoutePolicy:     readrouter.Policy{CostThreshold: upRouteCostThreshold, ScanRows: upRouteScanRows},
-		RouteReadOnly:   upRouteReadOnly,
-	}
+	cfg := flashbackConfigFromFlags()
 	done := make(chan struct{})
 	go func() {
 		if err := serveFlashback(ctx, srv, ln, cfg); err != nil {
@@ -1144,46 +1213,8 @@ func resolveUpConsoleEnv(cmd *cobra.Command) error {
 			upConsoleAllowSetup = true
 		}
 	}
-	if !cmd.Flags().Changed("flashback-listen") {
-		if v := os.Getenv("BINTRAIL_CONSOLE_FLASHBACK_LISTEN"); v != "" {
-			upConsoleFlashbackListen = v
-		}
-	}
-	if !cmd.Flags().Changed("route-max-copy-age") {
-		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE"); v != "" {
-			d, err := time.ParseDuration(v)
-			if err != nil {
-				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE: %w", err)
-			}
-			upRouteMaxCopyAge = d
-		}
-	}
-	if !cmd.Flags().Changed("route-read-only") {
-		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_READ_ONLY"); v != "" {
-			b, err := strconv.ParseBool(v)
-			if err != nil {
-				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_READ_ONLY: %w", err)
-			}
-			upRouteReadOnly = b
-		}
-	}
-	if !cmd.Flags().Changed("route-cost-threshold") {
-		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD"); v != "" {
-			f, err := strconv.ParseFloat(v, 64)
-			if err != nil {
-				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD: %w", err)
-			}
-			upRouteCostThreshold = f
-		}
-	}
-	if !cmd.Flags().Changed("route-scan-rows") {
-		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS"); v != "" {
-			n, err := strconv.ParseInt(v, 10, 64)
-			if err != nil {
-				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS: %w", err)
-			}
-			upRouteScanRows = n
-		}
+	if err := resolveRouteFlags(cmd); err != nil {
+		return err
 	}
 	if !cmd.Flags().Changed("archive-staging-dir") {
 		if v := os.Getenv("BINTRAIL_CONSOLE_ARCHIVE_STAGING"); v != "" {
