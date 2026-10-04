@@ -235,7 +235,7 @@ var ErrCopyNotLocal = errors.New("running SQL on the copy needs a local copy dir
 
 // ErrBusy: the user already has a query running, or the runner is at its
 // limit of concurrent workers.
-var ErrBusy = errors.New("a query is already running (yours, or the server is at its limit); wait for it to finish")
+var ErrBusy = errors.New("SQL on the copy is busy: every slot is taken and the line for one is full; try again in a moment")
 
 // ErrResultTooLarge: the result would exceed Limits.MaxResultBytes. Either
 // side may say so: the worker counts as it collects rows, and the parent
@@ -308,7 +308,22 @@ type Config struct {
 	// MaxInFlight caps how many workers run at once across all users; 0
 	// means DefaultMaxInFlight.
 	MaxInFlight int
+	// MaxWait is how long Reserve waits for a slot before refusing (#2033);
+	// 0 means DefaultMaxWait, a negative value refuses at once.
+	MaxWait time.Duration
+	// MaxWaiters bounds how many callers wait at once; past it Reserve
+	// refuses at once. 0 means DefaultMaxWaiters.
+	MaxWaiters int
 }
+
+// DefaultMaxWait and DefaultMaxWaiters bound the line for a slot (#2033):
+// a burst of statements (a dashboard drawing its panels, two people at
+// once) waits up to half a minute instead of failing, and only a bounded
+// number of callers wait, so a flood is still refused rather than parked.
+const (
+	DefaultMaxWait    = 30 * time.Second
+	DefaultMaxWaiters = 16
+)
 
 // Runner spawns workers and keeps the per-user and the global gate.
 type Runner struct {
@@ -316,10 +331,16 @@ type Runner struct {
 	args        []string
 	limits      Limits
 	maxInFlight int
+	maxWait     time.Duration
+	maxWaiters  int
 
 	mu       sync.Mutex
 	busy     map[string]bool
 	inFlight int
+	// waiting counts the callers parked in Reserve; freed is closed (and
+	// replaced) on every release, which wakes all of them to try again.
+	waiting int
+	freed   chan struct{}
 
 	// onStart is a test hook that receives the child's pid.
 	onStart func(pid int)
@@ -332,10 +353,19 @@ func New(cfg Config) *Runner {
 		args:        cfg.Args,
 		limits:      cfg.Limits.withDefaults(DefaultLimits()),
 		maxInFlight: cfg.MaxInFlight,
+		maxWait:     cfg.MaxWait,
+		maxWaiters:  cfg.MaxWaiters,
 		busy:        map[string]bool{},
+		freed:       make(chan struct{}),
 	}
 	if r.maxInFlight <= 0 {
 		r.maxInFlight = DefaultMaxInFlight
+	}
+	if r.maxWait == 0 {
+		r.maxWait = DefaultMaxWait
+	}
+	if r.maxWaiters <= 0 {
+		r.maxWaiters = DefaultMaxWaiters
 	}
 	return r
 }
@@ -361,7 +391,7 @@ func (r *Runner) Run(ctx context.Context, job Job) (Result, error) {
 	if !localCopy(job.CopyDirs) {
 		return Result{}, ErrCopyNotLocal
 	}
-	slot, err := r.Reserve(job.User)
+	slot, err := r.Reserve(ctx, job.User)
 	if err != nil {
 		return Result{}, err
 	}
@@ -383,13 +413,71 @@ type Slot struct {
 	mu       sync.Mutex
 }
 
-// Reserve takes a slot for user ("" = the global slot only), or returns
-// ErrBusy at once: there is no wait.
-func (r *Runner) Reserve(user string) (*Slot, error) {
-	if !r.acquire(user) {
+// Reserve takes a slot for user ("" = the global slot only). When none is
+// free it waits, up to MaxWait, for one (#2033), then refuses with an error
+// that is ErrBusy. A full line (MaxWaiters callers already waiting) refuses
+// at once, and so does a negative MaxWait. A ctx that ends while waiting
+// returns its error: the caller left, nobody is told "busy".
+//
+// Not first-come-first-served: every release wakes every waiter and the
+// first to take a slot it can use wins. That is deliberate, because a waiter
+// whose own per-person slot is busy can never use the freed slot, and a
+// strict line would park everyone behind it.
+func (r *Runner) Reserve(ctx context.Context, user string) (*Slot, error) {
+	r.mu.Lock()
+	if r.acquireLocked(user) {
+		r.mu.Unlock()
+		return &Slot{r: r, user: user}, nil
+	}
+	if r.maxWait < 0 || r.waiting >= r.maxWaiters {
+		r.mu.Unlock()
 		return nil, ErrBusy
 	}
-	return &Slot{r: r, user: user}, nil
+	r.waiting++
+	defer func() {
+		r.mu.Lock()
+		r.waiting--
+		r.mu.Unlock()
+	}()
+	timer := time.NewTimer(r.maxWait)
+	defer timer.Stop()
+	for {
+		freed := r.freed
+		r.mu.Unlock()
+		select {
+		case <-freed:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+			return nil, &BusyError{Waited: r.maxWait, MaxInFlight: r.maxInFlight}
+		}
+		r.mu.Lock()
+		if r.acquireLocked(user) {
+			r.mu.Unlock()
+			return &Slot{r: r, user: user}, nil
+		}
+	}
+}
+
+// BusyError is a statement that waited MaxWait for a slot and got none. It
+// is ErrBusy (errors.Is), with the wait said in its message.
+type BusyError struct {
+	Waited      time.Duration
+	MaxInFlight int
+}
+
+func (e *BusyError) Error() string {
+	return fmt.Sprintf("SQL on the copy is busy: waited %s and no query finished (%d run at once, and one at a time per person on the console or per server on the MySQL port); try again in a moment",
+		e.Waited.Round(time.Second), e.MaxInFlight)
+}
+
+func (e *BusyError) Is(target error) bool { return target == ErrBusy }
+
+// waitingNow is how many callers wait in Reserve (tests).
+func (r *Runner) waitingNow() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.waiting
 }
 
 // Release gives the slot back without running. Idempotent, and a no-op
@@ -438,9 +526,8 @@ func (s *Slot) Run(ctx context.Context, job Job) (Result, error) {
 
 // acquire takes a worker slot: the global one always, the user's when the
 // job names a user.
-func (r *Runner) acquire(user string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// acquireLocked takes the global slot and user's; r.mu is held.
+func (r *Runner) acquireLocked(user string) bool {
 	if r.inFlight >= r.maxInFlight {
 		return false
 	}
@@ -460,6 +547,8 @@ func (r *Runner) release(user string) {
 	if user != "" {
 		delete(r.busy, user)
 	}
+	close(r.freed)
+	r.freed = make(chan struct{})
 	r.mu.Unlock()
 }
 
