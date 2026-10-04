@@ -617,6 +617,10 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 		// answer), except the expensive SELECTs the copy takes.
 		return h.routeStatement(currentDB, qstr)
 	}
+	if res, ok := sysVarSelect(qstr); ok {
+		// A driver asking the server about itself as it connects.
+		return res, nil
+	}
 	if isHandshakeNoise(qstr) {
 		return &mysql.Result{Status: 2}, nil
 	}
