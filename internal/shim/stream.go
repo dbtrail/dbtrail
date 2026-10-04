@@ -45,6 +45,9 @@ type streamWriter struct {
 	wroteHeader bool
 	rows        int
 	buf         []byte // reused per-row packet buffer (4-byte header + payload)
+	// binary writes each row in the binary protocol's encoding (the answer
+	// to a prepared statement) under the header's column types.
+	binary bool
 }
 
 // newStreamWriter builds a text-protocol streamer for the given column names.
@@ -131,6 +134,9 @@ func (w *streamWriter) writeRow(cells []any) error {
 	if err := w.writeHeader(); err != nil {
 		return err
 	}
+	if w.binary {
+		return w.writeBinaryRow(cells)
+	}
 	w.buf = w.buf[:4]
 	for _, v := range cells {
 		b, err := mysql.FormatTextValue(v)
@@ -146,6 +152,35 @@ func (w *streamWriter) writeRow(cells []any) error {
 		} else {
 			w.buf = append(w.buf, mysql.PutLengthEncodedString(b)...)
 		}
+	}
+	if err := w.conn.WritePacket(w.buf); err != nil {
+		return fmt.Errorf("stream row %d: %w", w.rows, err)
+	}
+	w.rows++
+	return nil
+}
+
+// writeBinaryRow is writeRow for a prepared statement's answer: a zero byte,
+// the NULL bitmap (offset 2) and each non-NULL cell encoded under its
+// column's type. A cell that does not encode under the type the header
+// already announced is an error: the client would decode it as something
+// else.
+func (w *streamWriter) writeBinaryRow(cells []any) error {
+	if len(cells) != len(w.fields) {
+		return fmt.Errorf("stream row %d: %d cells for %d columns", w.rows, len(cells), len(w.fields))
+	}
+	bitmapLen := (len(cells) + 7 + 2) >> 3
+	w.buf = append(w.buf[:4], make([]byte, 1+bitmapLen)...)
+	for c, v := range cells {
+		if v == nil {
+			w.buf[4+1+(c+2)/8] |= 1 << (uint(c+2) % 8)
+			continue
+		}
+		enc, err := encodeBinaryValue(w.fields[c], v)
+		if err != nil {
+			return fmt.Errorf("stream row %d, column %s: %w", w.rows, w.fields[c].Name, err)
+		}
+		w.buf = append(w.buf, enc...)
 	}
 	if err := w.conn.WritePacket(w.buf); err != nil {
 		return fmt.Errorf("stream row %d: %w", w.rows, err)

@@ -15,10 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A prepared statement is now a template: prepare counts the placeholders,
   execute writes the arguments in as SQL literals and runs the statement as
   if it had been sent as text, on the copy or through the time-travel
-  shapes, and answers in binary rows with typed columns. Results are
-  buffered (a whole-table `_snapshot` is held to the row cap), and with
-  read routing on the port still refuses to prepare (1295) until forwarded
-  statements are bound by MySQL itself.
+  shapes, and answers in binary rows with typed columns. A template's
+  results are buffered (a whole-table `_snapshot` is held to the row cap).
+  With read
+  routing on, a statement that is not a time-travel shape is prepared and
+  executed on MySQL itself, which binds the arguments: nothing forwarded is
+  ever rebuilt from text, so a write stores exactly what the client bound.
+  Each execution goes through the routing rules with its own arguments,
+  and only one the rules send to the copy is written out, for the copy
+  alone. The repository's integration test covers Go's `database/sql`
+  against MySQL; checked by hand as well with Connector/J 9.1 (server
+  prepares), `mysql2` `execute` and the C API (through
+  `mysql-connector-python`'s C extension), against MySQL 8.4 and MariaDB
+  11.4 sources. Cursors are refused.
 - **Every baseline upload to S3 now names the newest snapshot in one small
   object, `<root>/_NEWEST`** (#2052, first half). A views file that follows
   the newest snapshot found it by listing every object under the root: 616

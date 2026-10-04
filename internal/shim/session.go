@@ -166,6 +166,11 @@ func (s *Session) prepare(query string) any {
 	s.stmts[s.next] = &sessionStmt{query: query, params: params, ctx: ctx}
 	out := &server.Stmt{Query: query, Context: ctx}
 	out.ID, out.Params, out.Columns = s.next, params, columns
+	if f, ok := ctx.(interface{ stmtFields() ([][]byte, [][]byte) }); ok {
+		// A statement prepared on the source answers with the source's own
+		// parameter and column definitions.
+		out.RawParamFields, out.RawColumnFields = f.stmtFields()
+	}
 	return out
 }
 
@@ -293,6 +298,12 @@ func decodeStmtArgs(args []any, nullBitmap, types, values []byte, long map[int][
 		tp := types[i<<1]
 		unsigned := types[(i<<1)+1]&mysql.PARAM_UNSIGNED != 0
 		if v, ok := long[i]; ok {
+			// Long data is a string whatever type the client declared for
+			// the parameter (MySQL reads it so): relayed under a numeric or
+			// temporal type it would be decoded as that type's bytes.
+			if !isLenEncType(tp) {
+				tp = mysql.MYSQL_TYPE_BLOB
+			}
 			args[i] = mysql.TypedBytes{Type: tp, Bytes: v}
 			continue
 		}

@@ -263,6 +263,25 @@ func TestSession_longData(t *testing.T) {
 	}
 }
 
+// Long data is a string whatever type the client declared for the
+// parameter: relayed under an integer or a temporal type, the source would
+// read its bytes as that type and misplace every argument after it.
+func TestSession_longDataIsAStringWhateverTheDeclaredType(t *testing.T) {
+	h := &stmtRecorder{params: 2}
+	s := NewSession(nil, h)
+	id := prepareStmt(t, s, "q")
+	chunk := append(binary.LittleEndian.AppendUint16(binary.LittleEndian.AppendUint32(nil, id), 0), "12345"...)
+	s.dispatch(mysql.COM_STMT_SEND_LONG_DATA, chunk)
+	types := []byte{mysql.MYSQL_TYPE_LONG, 0, mysql.MYSQL_TYPE_VAR_STRING, 0}
+	if err, _ := s.dispatch(mysql.COM_STMT_EXECUTE, execPacket(id, 2, nil, types, []byte{1, 'x'})).(error); err != nil {
+		t.Fatal(err)
+	}
+	want := []any{mysql.TypedBytes{Type: mysql.MYSQL_TYPE_BLOB, Bytes: []byte("12345")}, mysql.TypedBytes{Type: mysql.MYSQL_TYPE_VAR_STRING, Bytes: []byte("x")}}
+	if got := h.execs[0][2:]; !reflect.DeepEqual(got, want) {
+		t.Errorf("arguments = %#v, want %#v", got, want)
+	}
+}
+
 // The long data a connection may hold is bounded across all its statements.
 // Data past the bound is not kept, and the execution it belongs to is
 // refused rather than run with a cut value; the one after is clean.

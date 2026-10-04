@@ -30,6 +30,65 @@ type fakeRouter struct {
 	explained  []string
 	useDBs     []string
 	closed     int
+	// Prepared statements: what the source was asked to prepare, the
+	// placeholder count it answers (the statement's `?` count unless
+	// paramsOverride is set), and its refusal when prepareErr is set.
+	prepared       []*fakeStmt
+	prepareErr     error
+	paramsOverride int
+}
+
+// fakeStmt is a statement "prepared on the source": it records every
+// execution's arguments and answers one row saying mysql answered.
+type fakeStmt struct {
+	r        *fakeRouter
+	query    string
+	params   int
+	executed [][]any
+	decided  [][]any
+	closed   int
+}
+
+func (s *fakeStmt) Params() int            { return s.params }
+func (s *fakeStmt) Columns() int           { return 1 }
+func (s *fakeStmt) ParamFields() [][]byte  { return [][]byte{[]byte("param-def")} }
+func (s *fakeStmt) ColumnFields() [][]byte { return [][]byte{[]byte("column-def")} }
+func (s *fakeStmt) Close()                 { s.closed++ }
+
+func (s *fakeStmt) Decide(_ context.Context, args []any) (readrouter.Decision, error) {
+	s.decided = append(s.decided, args)
+	return readrouter.Decision{ToCopy: s.r.toCopy, Reason: s.r.reason, Rule: s.r.rule}, s.r.decideErr
+}
+
+func (s *fakeStmt) Execute(_ context.Context, args []any, sink readrouter.RowSink) (*mysql.Result, error) {
+	s.executed = append(s.executed, args)
+	if s.r.forwardErr != nil {
+		return nil, s.r.forwardErr
+	}
+	f := &mysql.Field{Name: []byte("side"), Type: mysql.MYSQL_TYPE_VAR_STRING}
+	if err := sink.Header([]*mysql.Field{f}); err != nil {
+		return nil, err
+	}
+	if err := sink.Row([]any{[]byte("mysql")}); err != nil {
+		return nil, err
+	}
+	rs := mysql.NewResultset(1)
+	rs.Fields = []*mysql.Field{f}
+	rs.Streaming, rs.StreamingDone = mysql.StreamingSelect, true
+	return &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}, nil
+}
+
+func (r *fakeRouter) Prepare(_ context.Context, stmt string) (readrouter.Stmt, error) {
+	if r.prepareErr != nil {
+		return nil, r.prepareErr
+	}
+	params := len(splitPlaceholders(stmt, true)) - 1
+	if r.paramsOverride != 0 {
+		params = r.paramsOverride
+	}
+	s := &fakeStmt{r: r, query: stmt, params: params}
+	r.prepared = append(r.prepared, s)
+	return s, nil
 }
 
 func (r *fakeRouter) Decide(_ context.Context, stmt string) (readrouter.Decision, error) {

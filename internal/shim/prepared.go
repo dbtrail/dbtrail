@@ -1,6 +1,7 @@
 package shim
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -12,20 +13,24 @@ import (
 	"unicode/utf8"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
+
+	"github.com/dbtrail/dbtrail/internal/readrouter"
 )
 
-// Prepared statements (#2036). The port has no server-side statement to keep
-// (the copy runs one statement per sandbox child, the time-travel shapes are
-// parsed from text), so a prepared statement here is a template: PREPARE
-// counts its placeholders, EXECUTE writes the arguments into it as SQL
-// literals and runs the result through HandleQuery, exactly as if the client
-// had sent that text, and the answer goes back in the binary row encoding
-// the client asked for.
+// Prepared statements (#2036). The copy and the time-travel shapes have no
+// server-side statement to keep (the copy runs one statement per sandbox
+// child, the time-travel shapes are parsed from text), so for them a
+// prepared statement is a template: PREPARE counts its placeholders, EXECUTE
+// writes the arguments into it as SQL literals and runs the result through
+// HandleQuery, exactly as if the client had sent that text, and the answer
+// goes back in the binary row encoding the client asked for.
 //
-// With read routing bound the port refuses them for now: a forwarded
-// statement must be prepared and executed on MySQL itself, with MySQL doing
-// the binding, never rebuilt from text here (a write whose argument is
-// escaped under the wrong sql_mode would store another value).
+// With read routing bound, a statement that is not a time-travel shape is
+// MySQL's: it is prepared on the source and executed there with the source
+// binding the arguments, never rebuilt from text (a write whose argument is
+// escaped under the wrong sql_mode would store another value). Only an
+// execution the routing ladder sends to the copy is written out as text,
+// and that text goes to the copy alone.
 
 // maxPreparedParams is the protocol's own ceiling (a 16-bit count).
 const maxPreparedParams = 65535
@@ -40,6 +45,22 @@ type preparedStmt struct {
 	// copy the way standard SQL does (a backslash is a character), so the
 	// same value needs a different spelling for each reader.
 	mysqlEscapes bool
+	// up is the statement on the source, under read routing; nil for a
+	// template. query is its text, which the routing ladder reads.
+	up    readrouter.Stmt
+	query string
+	// db is the database selected when the statement was prepared: the
+	// source resolves the statement's unqualified names in it for good.
+	db string
+}
+
+// stmtFields hands the session the source's own parameter and column
+// definitions, to relay in the PREPARE answer.
+func (st *preparedStmt) stmtFields() (params, columns [][]byte) {
+	if st.up == nil {
+		return nil, nil
+	}
+	return st.up.ParamFields(), st.up.ColumnFields()
 }
 
 // readByTimeTravel reports which reader a statement text is headed for: the
@@ -124,13 +145,12 @@ func splitPlaceholders(stmt string, mysqlStyle bool) []string {
 // reader the statement is headed for; the arguments do not exist yet.
 const probeArgument = "'x'"
 
-// HandleStmtPrepare answers COM_STMT_PREPARE: the placeholder count, and no
-// column definitions (the columns are only known once the statement runs;
-// the EXECUTE response carries them, which is where drivers read them).
+// HandleStmtPrepare answers COM_STMT_PREPARE. For a template: the
+// placeholder count, and no column definitions (the columns are only known
+// once the statement runs; the EXECUTE response carries them, which is where
+// drivers read them). For a statement prepared on the source: the source's
+// own counts and definitions.
 func (h *Handler) HandleStmtPrepare(query string) (params int, columns int, context any, err error) {
-	if h.router != nil {
-		return 0, 0, nil, mysql.NewError(mysql.ER_UNSUPPORTED_PS, "prepared statements are not supported on this port while read routing is on; send the statement as text")
-	}
 	h.mu.Lock()
 	db := h.db
 	h.mu.Unlock()
@@ -140,6 +160,9 @@ func (h *Handler) HandleStmtPrepare(query string) (params int, columns int, cont
 	// copy's way.
 	parts := splitPlaceholders(query, true)
 	mysqlEscapes := readByTimeTravel(strings.Join(parts, probeArgument), db)
+	if !mysqlEscapes && h.router != nil && h.freeSQL != nil {
+		return h.prepareRouted(query, parts)
+	}
 	if !mysqlEscapes {
 		parts = splitPlaceholders(query, false)
 	}
@@ -162,6 +185,9 @@ func (h *Handler) HandleStmtExecute(context any, _ string, args []any) (*mysql.R
 	st, ok := context.(*preparedStmt)
 	if !ok {
 		return nil, mysql.NewError(mysql.ER_UNKNOWN_STMT_HANDLER, "unknown prepared statement")
+	}
+	if st.up != nil {
+		return h.executeRouted(st, args)
 	}
 	text, err := st.interpolate(args)
 	if err != nil {
@@ -192,8 +218,139 @@ func (h *Handler) HandleStmtExecute(context any, _ string, args []any) (*mysql.R
 	return &out, nil
 }
 
-// HandleStmtClose answers COM_STMT_CLOSE: nothing is held per statement.
-func (h *Handler) HandleStmtClose(any) error { return nil }
+// HandleStmtClose answers COM_STMT_CLOSE: a template holds nothing; a routed
+// statement is freed on the source.
+func (h *Handler) HandleStmtClose(context any) error {
+	if st, ok := context.(*preparedStmt); ok && st.up != nil {
+		st.up.Close()
+	}
+	return nil
+}
+
+// prepareRouted prepares a statement that is MySQL's on the source. parts is
+// the statement split the MySQL way, kept for the executions the routing
+// ladder sends to the copy.
+func (h *Handler) prepareRouted(query string, parts []string) (int, int, any, error) {
+	ctx, cancel := h.queryContext()
+	defer cancel()
+	up, err := h.router.Prepare(ctx, query)
+	if err != nil {
+		if readrouter.IsLost(err) {
+			h.observeRoute(RouteMySQL, RouteReasonUpstreamLost)
+			h.routeWarn("lost", "read routing: the connection to the source was lost; this client connection answers 2006 until it reconnects", err)
+		}
+		return 0, 0, nil, err
+	}
+	h.mu.Lock()
+	db := h.db
+	h.mu.Unlock()
+	st := &preparedStmt{up: up, query: query, db: db}
+	if len(parts)-1 == up.Params() {
+		st.parts = parts
+	}
+	// Otherwise the source counted other placeholders than this port did:
+	// the statement still runs there, and is never written out for the copy.
+	return up.Params(), up.Columns(), st, nil
+}
+
+// executeRouted runs one execution of a statement prepared on the source
+// through the routing ladder (route): the source binds the arguments on
+// every rung but the copy's.
+func (h *Handler) executeRouted(st *preparedStmt, args []any) (*mysql.Result, error) {
+	ctx, cancel := h.queryContext()
+	defer cancel()
+	h.mu.Lock()
+	currentDB := h.db
+	forwarded := h.routeLastForwarded
+	h.mu.Unlock()
+	if showWarningsRE.MatchString(st.query) && !forwarded {
+		// After a copy-served statement the warnings are the port's own,
+		// as for the text statement; the source's would be its EXPLAIN's.
+		res, err := h.showWarnings()
+		if err != nil || res == nil || res.Resultset == nil {
+			return res, err
+		}
+		bin, err := binaryResultset(res.Resultset)
+		if err != nil {
+			return nil, err
+		}
+		out := *res
+		out.Resultset = bin
+		return &out, nil
+	}
+	h.setWarnings(nil)
+	return h.route(ctx, st.query, routeOps{
+		forward: func(reason RouteReason, detail string) (*mysql.Result, error) {
+			return h.forwardWith(reason, detail, true, func(sink readrouter.RowSink) (*mysql.Result, error) {
+				return st.up.Execute(ctx, args, sink)
+			})
+		},
+		decide:  func() (readrouter.Decision, error) { return st.up.Decide(ctx, args) },
+		runCopy: func(reason string) (*mysql.Result, error) { return h.runPreparedOnCopy(st, args, currentDB, reason) },
+		extraVeto: func() string {
+			switch {
+			case st.parts == nil:
+				return "the source counts other placeholders than the port"
+			case currentDB != st.db:
+				// The source runs the statement in the database it was
+				// prepared in; the copy would resolve its names in the
+				// current one.
+				return "the database changed since the statement was prepared"
+			}
+			return copyUnsafeArgument(args)
+		},
+	})
+}
+
+// plainInteger is a number MySQL and the copy both read as that integer.
+var plainInteger = regexp.MustCompile(`^[+-]?\d+$`)
+
+// copyUnsafeArgument names an argument the copy would compare differently
+// than MySQL, or "" when there is none. A string that spells a number but
+// not a plain integer is one: against an integer column MySQL compares it
+// as a double ('12.7' matches nothing) and the copy casts it to the column's
+// type (and finds 13).
+func copyUnsafeArgument(args []any) string {
+	for i, a := range args {
+		tb, ok := a.(mysql.TypedBytes)
+		if !ok {
+			continue
+		}
+		switch tb.Type {
+		case mysql.MYSQL_TYPE_DECIMAL, mysql.MYSQL_TYPE_NEWDECIMAL,
+			mysql.MYSQL_TYPE_DATE, mysql.MYSQL_TYPE_NEWDATE, mysql.MYSQL_TYPE_DATETIME,
+			mysql.MYSQL_TYPE_TIMESTAMP, mysql.MYSQL_TYPE_TIME:
+			continue
+		}
+		text := bytes.TrimSpace(tb.Bytes)
+		if decimalText.Match(text) && !plainInteger.Match(text) {
+			return fmt.Sprintf("argument %d is a string that spells a non-integer number (compared as a number on MySQL, cast to the column's type on the copy)", i+1)
+		}
+	}
+	return ""
+}
+
+// runPreparedOnCopy writes the arguments into the statement the copy's way
+// (standard SQL: a quote doubled, a backslash a character) and runs it there.
+// The text never goes anywhere else: MySQL's rungs execute the statement
+// prepared on the source.
+func (h *Handler) runPreparedOnCopy(st *preparedStmt, args []any, db, reason string) (*mysql.Result, error) {
+	text, err := st.interpolate(args)
+	if err != nil {
+		return nil, err
+	}
+	res, err := h.runFreeSQLRouted(db, text, reason)
+	if err != nil {
+		return nil, err
+	}
+	bin, err := binaryResultset(res.Resultset)
+	if err != nil {
+		return nil, err
+	}
+	out := *res
+	out.Resultset = bin
+	return &out, nil
+}
 
 // interpolate writes the arguments into the template.
 func (st *preparedStmt) interpolate(args []any) (string, error) {
@@ -210,7 +367,13 @@ func (st *preparedStmt) interpolate(args []any) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("argument %d: %w", i+1, err)
 		}
+		// A space on each side: a placeholder is a token of its own, and a
+		// literal written flush against its neighbours is not. `LIMIT?`
+		// would become `LIMIT5` (an alias), `?e1` the number 5e1, and
+		// `5-?` with -3 the comment `5--3`.
+		b.WriteByte(' ')
 		b.WriteString(lit)
+		b.WriteByte(' ')
 	}
 	return b.String(), nil
 }
@@ -220,16 +383,6 @@ var decimalText = regexp.MustCompile(`^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$`)
 // sqlLiteral renders one bound argument (the Go values go-mysql's server
 // decodes COM_STMT_EXECUTE into) as a SQL literal.
 func sqlLiteral(arg any, mysqlEscapes bool) (string, error) {
-	lit, err := rawLiteral(arg, mysqlEscapes)
-	if err == nil && strings.HasPrefix(lit, "-") {
-		// `5-?` with -3 must not become `5--3`: the copy reads `--` as a
-		// comment and would drop the rest of the statement.
-		lit = " " + lit
-	}
-	return lit, err
-}
-
-func rawLiteral(arg any, mysqlEscapes bool) (string, error) {
 	switch v := arg.(type) {
 	case nil:
 		return "NULL", nil
@@ -250,7 +403,9 @@ func rawLiteral(arg any, mysqlEscapes bool) (string, error) {
 	case uint64:
 		return strconv.FormatUint(v, 10), nil
 	case float32:
-		return floatLiteral(float64(v), 32)
+		// Widened first, as MySQL widens a FLOAT argument: 0.1 bound as a
+		// float is 0.10000000149011612, not the decimal 0.1.
+		return floatLiteral(float64(v), 64)
 	case float64:
 		return floatLiteral(v, 64)
 	case mysql.TypedBytes:
@@ -484,6 +639,32 @@ func fieldValueText(fv *mysql.FieldValue) []byte {
 		return []byte{}
 	}
 	return s
+}
+
+// encodeBinaryValue encodes one non-NULL cell as go-mysql's client hands it
+// over after reading a row from the source (integers, floats, bytes; a
+// temporal value as its text), under the column's type.
+func encodeBinaryValue(f *mysql.Field, v any) ([]byte, error) {
+	var text []byte
+	switch x := v.(type) {
+	case []byte:
+		text = x
+	case string:
+		text = []byte(x)
+	case int64:
+		text = strconv.AppendInt(nil, x, 10)
+	case uint64:
+		text = strconv.AppendUint(nil, x, 10)
+	case float64:
+		text = strconv.AppendFloat(nil, x, 'g', -1, 64)
+	default:
+		return nil, fmt.Errorf("unsupported cell type %T", v)
+	}
+	enc, ok := encodeBinaryCell(f, text)
+	if !ok {
+		return nil, fmt.Errorf("value %q does not encode as column type %d", text, f.Type)
+	}
+	return enc, nil
 }
 
 // isLenEncType: the types the binary protocol carries as a length-encoded
