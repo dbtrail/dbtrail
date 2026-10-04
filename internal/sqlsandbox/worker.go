@@ -243,6 +243,8 @@ func sessionErr(format string, args ...any) wireResult {
 // true across engine bumps). allowed_paths (single files) also exists there
 // and is not needed: the copy is whole directories.
 var sandboxSettings = []string{
+	"default_collation",
+	"default_null_order",
 	"allowed_directories",
 	"enable_external_access",
 	"autoinstall_known_extensions",
@@ -252,8 +254,26 @@ var sandboxSettings = []string{
 }
 
 // lockdownStatements is the session lock-down, in order, lock LAST. What
-// each one blocks, as observed on DuckDB v1.4.5:
+// each one does, as observed on DuckDB v1.4.5:
 //
+//   - default_collation = 'nocase.noaccent' and default_null_order =
+//     'nulls_first_on_asc_last_on_desc': MySQL semantics for the two things
+//     no statement-level check can catch (#2038). MySQL's default collation
+//     (utf8mb4_0900_ai_ci) treats 'Paid' and 'paid', 'café' and 'cafe' as
+//     EQUAL in WHERE, GROUP BY, SELECT DISTINCT, IN and ORDER BY, and sorts
+//     NULL first on ASC and last on DESC (NULL is its smallest value);
+//     DuckDB's defaults do neither, so a copy-served statement answered
+//     differently from MySQL without any error. Both collations are built in
+//     (no ICU, verified with extension loading off). Close to _ai_ci, not
+//     identical: LIKE/REGEXP, count(DISTINCT ...) and the string-search
+//     functions (instr, position, contains) do NOT fold (DuckDB #10416 for
+//     LIKE), which the read router vetoes; 'ß' = 'ss' and full-width forms
+//     stay unequal; a column MySQL declares _bin or _cs becomes
+//     case-insensitive here. The copy's OWN views are immune on purpose:
+//     the delta chain partitions by "bintrail_pk" COLLATE C
+//     (baseline.tableDeltaStateSQL), or two keys differing only in case
+//     would fold into one row. Locked with the rest so a statement cannot
+//     undo them.
 //   - allowed_directories = [copy dirs]: the directories reads may touch
 //     while external access is off. A path outside them, including one that
 //     traverses out with "..", is a Permission Error. Note it admits WRITES
@@ -283,6 +303,8 @@ func lockdownStatements(copyDirs []string) []string {
 		quoted[i] = "'" + strings.ReplaceAll(d, "'", "''") + "'"
 	}
 	return []string{
+		"SET default_collation = 'nocase.noaccent'",
+		"SET default_null_order = 'nulls_first_on_asc_last_on_desc'",
 		"SET allowed_directories = [" + strings.Join(quoted, ", ") + "]",
 		"SET temp_directory = ''",
 		"SET autoinstall_known_extensions = false",

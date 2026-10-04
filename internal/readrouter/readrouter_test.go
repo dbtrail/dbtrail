@@ -65,6 +65,10 @@ func TestVeto(t *testing.T) {
 		"SELECT * FROM t WHERE MATCH(body) AGAINST ('x')":      "MATCH AGAINST",
 		"SELECT * FROM t WHERE BINARY name = 'A'":              "binary string comparison",
 		"SELECT /*+ NO_INDEX(t) */ * FROM t":                   "optimizer hint or MySQL comment",
+		"SELECT * FROM t WHERE name LIKE 'a%'":                 "LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)",
+		"SELECT count(DISTINCT status) FROM t":                 "DISTINCT inside an aggregate (not folded by the copy's collation)",
+		"SELECT INSTR(name, 'x') FROM t":                       "INSTR/LOCATE/POSITION/STRCMP (case-sensitive on the copy)",
+		"SELECT * FROM t WHERE name REGEXP '^a'":               "LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)",
 		"SELECT a || b FROM t":                                 "|| (string concatenation on the copy, logical OR on MySQL)",
 		"SELECT 2 ^ 3":                                         "^ (power on the copy, bitwise XOR on MySQL)",
 		`SELECT * FROM t WHERE status = "paid"`:                "double-quoted string literal",
@@ -84,8 +88,11 @@ func TestVeto(t *testing.T) {
 		"SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.amount > 100",
 		"SELECT * FROM t WHERE note = 'call NOW() at @home DIV user()'", // inside a string literal
 		"SELECT `id`, `status` FROM `shop`.`orders` LIMIT 10, 20",
-		"SELECT nowhere FROM t", // not the function
-		"SELECT divisor FROM t", // not the keyword
+		"SELECT nowhere FROM t",         // not the function
+		"SELECT divisor FROM t",         // not the keyword
+		"SELECT likes, unlike FROM t",   // not the operator
+		"SELECT DISTINCT status FROM t", // SELECT DISTINCT folds; only the aggregate form does not
+		"SELECT count(*) FROM t WHERE distinct_id = 1",
 		"SELECT user_id FROM t", // not user(
 		"SELECT * FROM t WHERE note = '#not a comment -- nor this' AND a = 1",
 		"SELECT `a\"b` FROM t",  // a double quote inside a backtick identifier is not a string

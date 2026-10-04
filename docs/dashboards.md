@@ -181,6 +181,16 @@ With 100 tables that added about 1.5 seconds to each query, against 27
 milliseconds with the database file. And when one table leaves the snapshot,
 every query fails instead of only that table's.
 
+## Text compares the DuckDB way here
+Your own DuckDB keeps DuckDB's defaults: `'live'` and `'LIVE'` are two
+values, `'café'` and `'cafe'` two, NULL sorts last. The console's SQL card
+and MySQL-protocol port run the same files under a MySQL-like default
+collation, so a `GROUP BY status` can return two groups here and one there.
+To match them, run `SET default_collation = 'nocase.noaccent'; SET
+default_null_order = 'nulls_first_on_asc_last_on_desc';` in your session
+before the views; the state views themselves compare keys as bytes
+(`COLLATE C`) either way, so no row is lost under a folding collation.
+
 ## What stays current, and what does not
 
 - **Rows follow the schedule.** Each scheduled snapshot moves the `current`

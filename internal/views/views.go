@@ -2141,7 +2141,10 @@ func writeSnapshotPreflight(b *strings.Builder, in Input, wanted []statePlan) {
 	// perfectly healthy file is refused before it creates anything, which is
 	// the worst outcome this code has. `**` is a superset at every depth
 	// (verified: it matches one, two and three levels), so it cannot.
-	fmt.Fprintf(b, "  WHERE %s || t NOT IN (SELECT file FROM glob(%s || '**/*.parquet')));\n", dir, globDir)
+	// COLLATE C: file names are bytes, and a session default collation that
+	// folds case (the SQL sandbox) must not make ORDER_ITEMS.parquet pass
+	// for order_items.parquet on a case-sensitive file system.
+	fmt.Fprintf(b, "  WHERE (%s || t) COLLATE C NOT IN (SELECT file COLLATE C FROM glob(%s || '**/*.parquet')));\n", dir, globDir)
 	// Raised through a SET rather than a bare SELECT so a clean file prints
 	// nothing. A SELECT here puts a one-row NULL table in front of every reader
 	// who has nothing wrong.

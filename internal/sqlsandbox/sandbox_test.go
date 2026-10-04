@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1018,4 +1019,42 @@ func testExe(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return exe
+}
+
+// Text compares and NULLs sort the way MySQL's defaults do (#2038): case-
+// and accent-insensitive equality, grouping and ordering; NULL first on an
+// ascending sort. The settings are part of the lock-down, so the query
+// cannot change them.
+func TestRun_textComparesLikeMySQL(t *testing.T) {
+	f := newCopyFixture(t)
+	r := newTestRunner(t, testLimits())
+	res, err := r.Run(context.Background(), f.job(`SELECT
+		'Paid' = 'paid', 'Café' = 'cafe', 'a' IN ('A'),
+		(SELECT count(*) FROM (SELECT s FROM (VALUES ('live'), ('LIVE'), ('Live')) v(s) GROUP BY s)),
+		(SELECT string_agg(COALESCE(x::VARCHAR, 'NULL'), ',') FROM (SELECT x FROM (VALUES (2), (NULL), (1)) v(x) ORDER BY x)),
+		(SELECT string_agg(COALESCE(x::VARCHAR, 'NULL'), ',') FROM (SELECT x FROM (VALUES (2), (NULL), (1)) v(x) ORDER BY x DESC)),
+		(SELECT string_agg(s, ',') FROM (SELECT s FROM (VALUES ('b'), ('a'), ('C')) v(s) ORDER BY s)),
+		(SELECT count(*) FROM (SELECT DISTINCT s FROM (VALUES ('a'), ('A')) v(s))),
+		(SELECT count(DISTINCT s) FROM (VALUES ('a'), ('A')) v(s)),
+		current_setting('default_collation')::VARCHAR,
+		current_setting('default_null_order')::VARCHAR`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Byte order of b/a/C would be C,a,b; NULL on DESC goes LAST, as on
+	// MySQL. count(DISTINCT) does NOT fold (2): the router vetoes it.
+	want := []string{"true", "true", "true", "1", "NULL,1,2", "2,1,NULL", "a,b,C", "1", "2", "nocase.noaccent", "NULLS_FIRST_ON_ASC_LAST_ON_DESC"}
+	for i, w := range want {
+		if got := fmt.Sprint(res.Rows[0][i]); got != w {
+			t.Errorf("cell %d = %s, want %s", i, got, w)
+		}
+	}
+	// LIKE is NOT folded by a collation (DuckDB #10416): the router vetoes it.
+	res, err = r.Run(context.Background(), f.job("SELECT 'abc' LIKE 'A%'"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Rows[0][0] != false {
+		t.Errorf("LIKE under nocase = %v; if DuckDB now folds it, drop the LIKE veto in internal/readrouter", res.Rows[0][0])
+	}
 }

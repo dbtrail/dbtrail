@@ -74,6 +74,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `slot_wait` phase in `phases_ms` and in the
   `bintrail_sql_statement_phase_seconds` histogram says how long each
   statement waited.
+- **SQL on the copy compares text and sorts NULLs close to the way MySQL's
+  defaults do** (#2038): the copy's locked DuckDB session now runs with
+  `default_collation = 'nocase.noaccent'` and `default_null_order =
+  'nulls_first_on_asc_last_on_desc'`, so `'Paid' = 'paid'` and `'café' =
+  'cafe'` are true, `GROUP BY`, `SELECT DISTINCT`, `IN` and `ORDER BY` fold
+  them, and NULL sorts first on ASC and last on DESC, as under
+  `utf8mb4_0900_ai_ci`. Before, a copy-served `GROUP BY status` could return
+  two groups where MySQL returned one, with no error anywhere; the SQL card
+  and the embedded port both change. The copy's own table views are immune:
+  the delta chain now partitions by `bintrail_pk COLLATE C`, so two keys
+  differing only in case stay two rows (a `views` file generated earlier
+  keeps working; regenerate it to pick this up). Not folded, and vetoed by
+  the read router: `LIKE`/`REGEXP`, `count(DISTINCT ...)`,
+  `INSTR`/`LOCATE`/`POSITION`. Still different: `'ß' = 'ss'`, a column MySQL
+  declares `_bin`/`_cs` (case-insensitive on the copy).
 - **SQL on the copy prepares only the tables a statement names** (#2029).
   Every statement used to install a view for every table of the copy before
   it ran: on a copy of 111 tables that was 50-60 ms, half of a short
