@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **`bintrail-console sql-compare`** (#2038): plays read statements against
+  the MySQL source and against the copy (through the embedded port with
+  routing off) and reports, per statement, `EQUAL`, `DIFFERENT` (rows,
+  order, case, null, precision, text), `NOT_ON_COPY`, `SOURCE_ERROR`,
+  `INCONCLUSIVE` or `SKIPPED`, together with what the read router would do
+  with it. Statements come from a file or from the source's own recent
+  `SELECT`s (`--sample N`, `performance_schema.events_statements_history_long`).
+  Exit 1 when a statement the router would send to the copy answers
+  differently: the list the router's vetoes grow from. Read-only.
 - **`watch --sql-max-in-flight`** (env `BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT`,
   #2030): how many SQL-on-the-copy statements run at once, the SQL card and
   the time-travel port together. The default stays 2, measured right for a
