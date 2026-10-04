@@ -71,6 +71,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to 32 s; 1.1: 77 s to 57 s). Same rows and column types.
 
 ### Fixed
+- **Read routing no longer leaks the plan's column into other results**
+  (#2036). After reading a statement's plan the router returned the
+  `EXPLAIN` result to the MySQL library's process-wide pool, which keeps
+  column definitions; the next result built in the process, on any
+  connection (a copy answer, a time-travel answer), could then go out with
+  its first column named `EXPLAIN` and typed as the plan, or fail to build
+  ("row types aren't consistent"). Intermittent, and only with read routing
+  on. The plan's result is no longer pooled.
 - **Prepared statements: a re-execution keeps its arguments, and an error
   keeps its code** (#2036). The port's command loop handed every argument
   over as `NULL` when a client re-executed a prepared statement without
