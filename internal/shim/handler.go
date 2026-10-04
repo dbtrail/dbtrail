@@ -515,7 +515,7 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 				// EXPLAIN's note, which the client never sent.
 				ctx, cancel := h.queryContext()
 				defer cancel()
-				return h.forward(ctx, qstr, "show warnings after a forwarded statement")
+				return h.forward(ctx, qstr, RouteReasonShowWarnings, "show warnings after a forwarded statement")
 			}
 			return h.showWarnings()
 		}
@@ -597,6 +597,13 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 	if m := useStatementRE.FindStringSubmatch(qstr); m != nil {
 		if err := h.UseDB(strings.Trim(m[1], "`")); err != nil {
 			return nil, err
+		}
+		// Under routing the USE ran on MySQL too (UseDB forwards it), so
+		// it is one of its statements. Counted HERE and not in UseDB: the
+		// serving layer calls UseDB for the DSN seed and the handshake's
+		// default schema, which no client sent.
+		if h.router != nil {
+			h.observeRoute(RouteMySQL, RouteReasonNotASelect)
 		}
 		return &mysql.Result{Status: 2}, nil
 	}

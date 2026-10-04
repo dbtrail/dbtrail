@@ -637,6 +637,17 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 // so an in-flight time-travel query never races the deferred db.Close.
 //
 // The bind is synchronous so a port conflict or a missing token fails `watch`
+// validateRoutePolicy refuses a read-routing setup under which no statement
+// could ever reach the copy: routing on (a max copy age) with both plan
+// thresholds at 0. Every statement would land under cheap_plan, which reads
+// as a tuning question rather than the misconfiguration it is.
+func validateRoutePolicy(maxCopyAge time.Duration, costThreshold float64, scanRows int64) error {
+	if maxCopyAge > 0 && costThreshold <= 0 && scanRows <= 0 {
+		return fmt.Errorf("read routing: --route-cost-threshold and --route-scan-rows are both 0, so no statement could ever go to the copy; set one of them, or drop --route-max-copy-age to serve the copy only")
+	}
+	return nil
+}
+
 // fast, exactly like the console bind. Serving runs on the daemon context: ctx
 // cancellation closes the listener and drains open connections. A mid-run crash
 // is logged, never propagated — the flashback port is strictly secondary to the
@@ -647,6 +658,9 @@ func startFlashbackPort(ctx context.Context, srv *console.Server) (func(), error
 	}
 	if srv.Token() == "" {
 		return nil, fmt.Errorf("--flashback-listen %s requires the access token: set --console-token or BINTRAIL_CONSOLE_TOKEN (MySQL-protocol auth cannot use the web interface password)", upConsoleFlashbackListen)
+	}
+	if err := validateRoutePolicy(upRouteMaxCopyAge, upRouteCostThreshold, upRouteScanRows); err != nil {
+		return nil, err
 	}
 	ln, err := net.Listen("tcp", upConsoleFlashbackListen)
 	if err != nil {
@@ -1581,6 +1595,10 @@ type consoleOpts struct {
 	FlashbackListen string
 	// SQLMaxInFlight is the resolved --sql-max-in-flight (#2030).
 	SQLMaxInFlight int
+	// ReadRouting is the port's read-routing policy (--route-max-copy-age and
+	// the threshold flags, #2038), reported by GET /api/flashback; the port
+	// itself is bound with the same values in startFlashbackPort.
+	ReadRouting console.ReadRoutingConfig
 }
 
 // upConsoleOpts snapshots the resolved upConsole* globals.
@@ -1598,7 +1616,12 @@ func upConsoleOpts() consoleOpts {
 		AllowedHosts:    upConsoleAllowedHost,
 		AllowSetup:      upConsoleAllowSetup,
 		FlashbackListen: upConsoleFlashbackListen,
-		SQLMaxInFlight:  upSQLMaxInFlight,
+		ReadRouting: console.ReadRoutingConfig{
+			MaxCopyAge:    upRouteMaxCopyAge,
+			CostThreshold: upRouteCostThreshold,
+			ScanRows:      upRouteScanRows,
+		},
+		SQLMaxInFlight: upSQLMaxInFlight,
 	}
 }
 
@@ -1692,6 +1715,7 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		TLSKey:          opts.TLSKey,
 		AllowedHosts:    opts.AllowedHosts,
 		FlashbackListen: opts.FlashbackListen,
+		ReadRouting:     opts.ReadRouting,
 		SQLMaxInFlight:  opts.SQLMaxInFlight,
 		// The daemon's --rotate-* defaults, so GET /api/rotation can report the
 		// effective policy (and the console panel prefill it) before the

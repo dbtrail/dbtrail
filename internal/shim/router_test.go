@@ -23,10 +23,12 @@ type fakeRouter struct {
 	decideErr error
 	inTxn     bool
 	useDBErr  error
-	forwarded []string
-	explained []string
-	useDBs    []string
-	closed    int
+	// forwardErr, when set, is what Forward answers (MySQL's own error).
+	forwardErr error
+	forwarded  []string
+	explained  []string
+	useDBs     []string
+	closed     int
 }
 
 func (r *fakeRouter) Decide(_ context.Context, stmt string) (bool, string, error) {
@@ -36,6 +38,9 @@ func (r *fakeRouter) Decide(_ context.Context, stmt string) (bool, string, error
 
 func (r *fakeRouter) Forward(_ context.Context, stmt string, _ readrouter.RowSink) (*mysql.Result, error) {
 	r.forwarded = append(r.forwarded, stmt)
+	if r.forwardErr != nil {
+		return nil, r.forwardErr
+	}
 	rs, err := mysql.BuildSimpleTextResultset([]string{"side"}, [][]any{{"mysql"}})
 	if err != nil {
 		return nil, err

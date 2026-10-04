@@ -174,6 +174,25 @@ func ObserveSQLStatementPhase(phase string, d time.Duration) {
 	sqlStatementPhase.WithLabelValues(phase).Observe(d.Seconds())
 }
 
+// readRoutingDecisions counts the read router's decisions on the embedded
+// time-travel port (#2038): per server (the registry id, bounded by the
+// registry), per side ("copy" or "mysql") and per reason (the shim's closed
+// RouteReason* vocabulary, fourteen values). It counts DECISIONS, not
+// successes: a statement MySQL then fails is still one the router sent to
+// MySQL. Only a daemon with --flashback-listen and --route-max-copy-age
+// ever increments it.
+var readRoutingDecisions = promauto.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "bintrail",
+	Subsystem: "read_routing",
+	Name:      "decisions_total",
+	Help:      "Read routing decisions on the embedded time-travel port, by server id, side (copy|mysql) and reason.",
+}, []string{"server", "route", "reason"})
+
+// ObserveRouteDecision counts one read-routing decision for a server.
+func ObserveRouteDecision(server, route, reason string) {
+	readRoutingDecisions.WithLabelValues(server, route, reason).Inc()
+}
+
 // StatementDMLDropped increments the statement-DML-dropped counter. Called from
 // the binlog parser's QUERY_EVENT handlers (file and stream paths) when a DML
 // statement — not DDL, not transaction-control — is observed, i.e. the

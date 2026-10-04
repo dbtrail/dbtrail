@@ -90,6 +90,52 @@ type RouterConfig struct {
 	// MaxCopyAge is how old the copy's snapshot may be for a statement to
 	// run there. Zero means never: every statement is forwarded.
 	MaxCopyAge time.Duration
+	// Observe, when set, is told every routing decision this connection
+	// makes: route is "copy" or "mysql", reason one of the RouteReason*
+	// constants (a closed vocabulary, so a caller can hang a metric label on
+	// it). Called once per statement, whatever the statement then does on
+	// the side it was sent to.
+	Observe func(route RouteSide, reason RouteReason)
+}
+
+// RouteSide is who answered a routed statement; RouteReason why. Both are
+// typed so a free-text detail (an error message, a host name) cannot be
+// passed where a bounded metric label is expected.
+type (
+	RouteSide   string
+	RouteReason string
+)
+
+// The routing decision vocabulary RouterConfig.Observe speaks. One constant
+// per rung of routeStatement's ladder, plus SHOW WARNINGS and USE: a counter
+// keyed on these answers "who answered, and why MySQL" without a label per
+// statement.
+const (
+	RouteCopy  RouteSide = "copy"
+	RouteMySQL RouteSide = "mysql"
+
+	RouteReasonNotASelect     RouteReason = "not_a_select"     // SHOW, BEGIN, COMMIT, a USE sent as a statement, …
+	RouteReasonWrite          RouteReason = "write"            // INSERT/UPDATE/DELETE/DDL
+	RouteReasonSessionSetting RouteReason = "session_setting"  // a SET statement
+	RouteReasonInTransaction  RouteReason = "in_transaction"   // read-your-writes
+	RouteReasonSettingsSet    RouteReason = "settings_set"     // a SET earlier on this connection
+	RouteReasonRoutingOff     RouteReason = "routing_off"      // MaxCopyAge is zero
+	RouteReasonVeto           RouteReason = "veto"             // a construct the copy answers differently
+	RouteReasonExplainFailed  RouteReason = "explain_failed"   // EXPLAIN did not run (MySQL refused it)
+	RouteReasonCheapPlan      RouteReason = "cheap_plan"       // below both thresholds
+	RouteReasonCopyAgeUnknown RouteReason = "copy_age_unknown" // no snapshot time
+	RouteReasonCopyTooOld     RouteReason = "copy_too_old"     // snapshot older than MaxCopyAge
+	RouteReasonCopyRefused    RouteReason = "copy_refused"     // the copy errored or cut the result
+	RouteReasonShowWarnings   RouteReason = "show_warnings"    // SHOW WARNINGS after a MySQL statement
+	RouteReasonUpstreamLost   RouteReason = "upstream_lost"    // nobody answered: the port's connection to the source is lost
+	RouteReasonExpensivePlan  RouteReason = "expensive_plan"   // the one reason a statement goes to the copy
+)
+
+// observeRoute reports one decision to the bound observer, if any.
+func (h *Handler) observeRoute(route RouteSide, reason RouteReason) {
+	if h.routerCfg.Observe != nil {
+		h.routerCfg.Observe(route, reason)
+	}
 }
 
 // BindRouter turns this connection into a routing one. Call once after the
@@ -126,29 +172,29 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 			h.routeSettingsSet = true
 			h.mu.Unlock()
 		}
-		return h.forward(ctx, qstr, "session setting")
+		return h.forward(ctx, qstr, RouteReasonSessionSetting, "session setting")
 	case readrouter.KindWrite:
 		// A write reaches the source with the registry's account, on the
 		// strength of the console token. Named in the log at info: the
 		// audit trail covers historical reads, and this is neither.
 		h.logger.Info("read routing: write forwarded to mysql", "statement", readrouter.LeadingKeyword(qstr))
-		return h.forward(ctx, qstr, "write")
+		return h.forward(ctx, qstr, RouteReasonWrite, "write")
 	case readrouter.KindTxnBegin, readrouter.KindTxnEnd, readrouter.KindOther:
-		return h.forward(ctx, qstr, "not a select")
+		return h.forward(ctx, qstr, RouteReasonNotASelect, "not a select")
 	}
 	h.mu.Lock()
 	settingsSet := h.routeSettingsSet
 	h.mu.Unlock()
 	switch {
 	case h.router.InTransaction():
-		return h.forward(ctx, qstr, "in transaction")
+		return h.forward(ctx, qstr, RouteReasonInTransaction, "in transaction")
 	case settingsSet:
-		return h.forward(ctx, qstr, "session settings were set on this connection")
+		return h.forward(ctx, qstr, RouteReasonSettingsSet, "session settings were set on this connection")
 	case h.routerCfg.MaxCopyAge <= 0:
-		return h.forward(ctx, qstr, "routing to the copy is off (no max copy age)")
+		return h.forward(ctx, qstr, RouteReasonRoutingOff, "routing to the copy is off (no max copy age)")
 	}
 	if v := readrouter.Veto(qstr); v != "" {
-		return h.forward(ctx, qstr, "veto: "+v)
+		return h.forward(ctx, qstr, RouteReasonVeto, "veto: "+v)
 	}
 	// The plan first, the copy's freshness second: freshness costs a
 	// snapshot listing (an S3 call on an S3 copy), and the cheap reads
@@ -156,18 +202,18 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 	toCopy, reason, err := h.router.Decide(ctx, qstr)
 	if err != nil {
 		h.routeWarn("explain", "read routing: could not explain, statement forwarded", err)
-		return h.forward(ctx, qstr, "could not explain: "+err.Error())
+		return h.forward(ctx, qstr, RouteReasonExplainFailed, "could not explain: "+err.Error())
 	}
 	if !toCopy {
-		return h.forward(ctx, qstr, reason)
+		return h.forward(ctx, qstr, RouteReasonCheapPlan, reason)
 	}
 	at := h.freeSQL.CopyUpdatedAt(ctx)
 	if at.IsZero() {
 		h.routeWarn("age", "read routing: copy age unknown, expensive statement forwarded", nil)
-		return h.forward(ctx, qstr, "copy age unknown")
+		return h.forward(ctx, qstr, RouteReasonCopyAgeUnknown, "copy age unknown")
 	}
 	if age := time.Since(at); age > h.routerCfg.MaxCopyAge {
-		return h.forward(ctx, qstr, fmt.Sprintf("copy is %s old, max %s", age.Round(time.Second), h.routerCfg.MaxCopyAge))
+		return h.forward(ctx, qstr, RouteReasonCopyTooOld, fmt.Sprintf("copy is %s old, max %s", age.Round(time.Second), h.routerCfg.MaxCopyAge))
 	}
 	res, err := h.runFreeSQLRouted(currentDB, qstr, reason)
 	if err != nil {
@@ -175,12 +221,13 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 		// (a construct DuckDB lacks, a missing table, busy, a timeout, a
 		// result over the cap), MySQL does.
 		h.routeWarn("copy", "read routing: copy refused an expensive statement, forwarded to mysql", err)
-		return h.forward(ctx, qstr, "copy refused: "+shortErr(err))
+		return h.forward(ctx, qstr, RouteReasonCopyRefused, "copy refused: "+shortErr(err))
 	}
 	// The copy's side of the trace: forwarded statements log their reason,
 	// so a copy-served one must too, or the log reads as if nothing ever
 	// reached the copy.
 	h.logger.Debug("read routing: served by the copy", "reason", reason)
+	h.observeRoute(RouteCopy, RouteReasonExpensivePlan)
 	h.mu.Lock()
 	h.routeLastForwarded = false
 	h.mu.Unlock()
@@ -212,10 +259,11 @@ func (h *Handler) routeWarn(key, msg string, err error) {
 // forward sends the statement to MySQL and hands its result back as is. A
 // resultset is streamed to the client as it arrives (the handler's conn is
 // the sink), so a forwarded SELECT * never sits whole in the capture
-// process. The reason is logged at debug: it is the trace a routing
-// decision leaves.
-func (h *Handler) forward(ctx context.Context, qstr, reason string) (*mysql.Result, error) {
-	h.logger.Debug("read routing: forwarded to mysql", "reason", reason)
+// process. The decision is observed under its closed-vocabulary reason
+// (RouteReason*) and the detail is logged at debug: it is the trace a
+// routing decision leaves.
+func (h *Handler) forward(ctx context.Context, qstr string, reason RouteReason, detail string) (*mysql.Result, error) {
+	h.logger.Debug("read routing: forwarded to mysql", "reason", detail)
 	h.mu.Lock()
 	h.routeLastForwarded = true
 	h.mu.Unlock()
@@ -228,8 +276,17 @@ func (h *Handler) forward(ctx context.Context, qstr, reason string) (*mysql.Resu
 		sink = buf
 	}
 	res, err := h.router.Forward(ctx, qstr, sink)
+	// Observed AFTER the forward, so a source nobody reached is counted as
+	// such: with the upstream lost (or never opened: wrong credentials, the
+	// source down) every statement fails with 2006, and tallying those under
+	// the rung's own reason would read as "MySQL answered N" while nothing
+	// did. Still exactly one observation per statement.
+	if err != nil && readrouter.IsLost(err) {
+		reason = RouteReasonUpstreamLost
+	}
+	h.observeRoute(RouteMySQL, reason)
 	if err != nil {
-		if readrouter.IsLost(err) {
+		if reason == RouteReasonUpstreamLost {
 			h.routeWarn("lost", "read routing: the connection to the source was lost; this client connection answers 2006 until it reconnects", err)
 		}
 		return nil, err

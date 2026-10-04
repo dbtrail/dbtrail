@@ -14,6 +14,7 @@ import (
 	"github.com/go-mysql-org/go-mysql/server"
 
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/readrouter"
 	"github.com/dbtrail/dbtrail/internal/shim"
 )
@@ -295,8 +296,10 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 		switch {
 		case tgt.SQL == nil:
 			logger.Warn("read routing off for this connection: SQL on the copy unavailable", "server", user, "reason", tgt.SQLUnavailable)
+			srv.RecordRouteUnavailable(tgt.ID, "SQL on the copy is unavailable ("+tgt.SQLUnavailable+")")
 		case tgt.SourceDSN == "":
 			logger.Warn("read routing off for this connection: the server has no source DSN to forward to", "server", user)
+			srv.RecordRouteUnavailable(tgt.ID, "the server has no source database to forward to")
 		default:
 			fw, err := readrouter.NewForwarder(tgt.SourceDSN, cfg.RoutePolicy, cfg.QueryTimeout)
 			if err != nil {
@@ -304,8 +307,20 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 				// source; a scheme the forwarder does not speak is the
 				// realistic cause. The message carries no secret.
 				logger.Warn("read routing off for this connection", "server", user, "err", err)
+				srv.RecordRouteUnavailable(tgt.ID, "the source address cannot be forwarded to ("+err.Error()+")")
 			} else {
-				h.BindRouter(fw, shim.RouterConfig{MaxCopyAge: cfg.RouteMaxCopyAge})
+				srv.RecordRouteAvailable(tgt.ID)
+				// Every decision is counted twice over, by the canonical
+				// server id: the Prometheus counter for dashboards and
+				// the console's tally for the Connect page (#2038).
+				id := tgt.ID
+				h.BindRouter(fw, shim.RouterConfig{
+					MaxCopyAge: cfg.RouteMaxCopyAge,
+					Observe: func(route shim.RouteSide, reason shim.RouteReason) {
+						observe.ObserveRouteDecision(id, string(route), string(reason))
+						srv.RecordRouteDecision(id, string(route), string(reason))
+					},
+				})
 			}
 		}
 	}

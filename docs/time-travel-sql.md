@@ -299,6 +299,45 @@ while a durable S3 copy remains, use the web interface's Time-travel tab or a st
 shim pointed at the S3 prefix for those tables. Single-source baseline configs —
 the common case — have full parity.
 
+#### Seeing who answered
+Two surfaces count every routing decision, per server, since the daemon
+started — decisions, not successes: a statement MySQL then fails was still
+MySQL's.
+
+- The web interface: on **Settings → MCP Server → Connect a SQL client**, the
+  block *Who answered* shows, for the server picked in the sidebar, how many
+  statements MySQL answered and how many the copy did, the rule in force, and
+  (under *Why each side*) a count per reason. With routing off it says so and
+  names the flag. **Refresh** re-reads the counts. The same numbers are in
+  `GET /api/flashback` under `routing`.
+- Prometheus (`watch --metrics-addr`):
+  `bintrail_read_routing_decisions_total{server, route, reason}` — `server`
+  is the registry id, `route` is `copy` or `mysql`, and `reason` is one of
+  a closed set: `expensive_plan` (the one reason a statement goes to the
+  copy), `cheap_plan`, `not_a_select`, `write`, `session_setting`,
+  `settings_set`, `in_transaction`, `veto`, `explain_failed`,
+  `copy_age_unknown`, `copy_too_old`, `copy_refused`, `show_warnings`,
+  `upstream_lost` (nobody answered: the port's connection to the source is
+  lost or could not be opened, and the client got error 2006), and
+  `routing_off` (listed for completeness: a daemon binds the router only
+  with routing on). A copy that never answers shows up as `copy_refused`,
+  `copy_too_old` or `copy_age_unknown` climbing while `expensive_plan` stays
+  flat; `explain_failed` climbing means MySQL refuses to `EXPLAIN` what the
+  client runs (a table it cannot see, a statement it cannot plan);
+  `upstream_lost` climbing means the source is unreachable or the registry's
+  source credentials are wrong. Each routed statement counts exactly once,
+  a `USE` sent as a statement included. Not counted, because they are no
+  routing decision: the schema seeded when the connection opens and the
+  mysql client's `\u` (sent as `COM_INIT_DB`, not as a statement), `SHOW
+  WARNINGS` right after a statement the copy answered (the copy's own
+  warnings), and the `_flashback`/`_snapshot`/`_diff` time-travel shapes.
+
+A server whose connections cannot route — no source database to forward to
+(the command-line boot entry, a server registered without a source), or no
+SQL on the copy — is served from the copy alone, as before. The block says
+so for that server once a connection has found it out, and the metric has no
+series for it.
+
 #### Finding where the copy answers differently: `sql-compare`
 Before turning routing on for a workload, play that workload through both
 sides and read the differences:
