@@ -50,6 +50,20 @@ CREATE OR REPLACE SECRET bintrail_s3_chain (TYPE s3, PROVIDER credential_chain, 
 -- RESET enable_http_metadata_cache;
 SET enable_http_metadata_cache = true;
 
+-- Reads the footer of every file the views below open, all at once, so
+-- creating them does not fetch those footers one after another. If this
+-- fails naming a file, that file was removed after this file was written:
+-- generate it again. Keeping footers covers this whole session, like the
+-- setting above; turn it off with RESET parquet_metadata_cache;
+SET parquet_metadata_cache = true;
+SET VARIABLE bintrail_footers_read = (SELECT count(*) FROM parquet_file_metadata([
+  's3://my-bucket/baselines/2026-04-30T03-00-00Z/Legacy-DB/Audit Log.parquet',
+  's3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/ORDER_ITEMS.parquet',
+  's3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/order_items.parquet',
+  's3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/orders.parquet',
+  's3://my-bucket/baselines/2026-04-30T03-00-00Z/shop_order/items.parquet'
+]));
+
 -- <schema>.<table>: each table's full contents as of the baseline snapshot.
 -- Each table keeps its own name: SELECT * FROM demo.prices, and a name DuckDB
 -- cannot read bare is quoted, as in demo."order.items".

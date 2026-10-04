@@ -513,6 +513,7 @@ func Generate(in Input) string {
 		writeS3Preamble(&b, region, in.S3Endpoint, in.RegionAmbiguous, in.BucketStores)
 		if in.cachesHTTPMetadata() {
 			writeHTTPMetadataCache(&b)
+			writeFooterPrefetch(&b, in)
 		}
 	}
 	// Ahead of every view, and after the S3 preamble only because nothing in
@@ -1101,6 +1102,69 @@ func writeTimeZone(b *strings.Builder) {
 	b.WriteString("-- boundary. Pinned to UTC here so the numbers match the web interface. Change\n")
 	b.WriteString("-- it if you would rather read in your own zone.\n")
 	b.WriteString("SET TimeZone = 'UTC';\n\n")
+}
+
+// prefetchVar holds the count the footer prefetch returns. Nothing reads it;
+// SET VARIABLE is how the statement runs without printing a row.
+const prefetchVar = "bintrail_footers_read"
+
+// prefetchFiles is every Parquet file the state views below open when they
+// are CREATED, in the order they name them: each table's file and, for a
+// chain named file by file, each posdel and upserts file. A chain read
+// through globs (legacy pairs, an unlisted chain) is left out: a glob is not
+// a file, and those views list it themselves.
+func prefetchFiles(in Input) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	for _, p := range selectedStatePlans(in) {
+		t := p.table
+		add(t.Path)
+		if t.Delta && !t.DeltaLegacy {
+			for _, f := range t.DeltaFiles {
+				add(f.Posdel)
+				add(f.Upserts)
+			}
+		}
+	}
+	return out
+}
+
+// writeFooterPrefetch reads the footer of every file the state views open, in
+// ONE statement, ahead of them (#2053). DuckDB binds a view when it is
+// created, and binding opens each file it names: one HEAD and one footer GET,
+// one view after another, so from outside AWS a 17-table snapshot took 43 s
+// to load (91 files at the internet's round trip). One multi-file read fetches
+// those footers in parallel, and the binds below find them in the caches the
+// statements above turned on, so the same file loads in about 8 s.
+//
+// Only where the HTTP metadata cache is on: without it every bind re-checks
+// each file with a HEAD of its own and the prefetch would buy nothing.
+func writeFooterPrefetch(b *strings.Builder, in Input) {
+	files := prefetchFiles(in)
+	if len(files) == 0 {
+		return
+	}
+	b.WriteString("-- Reads the footer of every file the views below open, all at once, so\n")
+	b.WriteString("-- creating them does not fetch those footers one after another. If this\n")
+	b.WriteString("-- fails naming a file, that file was removed after this file was written:\n")
+	b.WriteString("-- generate it again. Keeping footers covers this whole session, like the\n")
+	b.WriteString("-- setting above; turn it off with RESET parquet_metadata_cache;\n")
+	b.WriteString("SET parquet_metadata_cache = true;\n")
+	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT count(*) FROM parquet_file_metadata([\n", in.sessionName(prefetchVar))
+	for i, f := range files {
+		sep := ","
+		if i == len(files)-1 {
+			sep = ""
+		}
+		fmt.Fprintf(b, "  %s%s\n", sqlString(f), sep)
+	}
+	b.WriteString("]));\n\n")
 }
 
 // cachesHTTPMetadata reports whether the file turns on DuckDB's HTTP metadata
