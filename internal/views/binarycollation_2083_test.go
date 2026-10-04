@@ -174,12 +174,12 @@ func binaryCollationCases(t *testing.T, sqlText, collation string) {
 	}
 }
 
-// A view that FOLLOWS later snapshots carries no column collation. DuckDB
-// binds the REPLACE list against whichever file the view reads at query time,
-// so a _bin column dropped or retyped at the source would fail every query on
-// that table until the file was regenerated; and a following file is read by
-// a DuckDB of the reader's own, whose default collation already compares
-// bytes. The pinned views (what the copy's own SQL session runs) carry it.
+// A view that FOLLOWS later snapshots carries no column collation: the file
+// is generated once, so the collation in it would be the column's as of that
+// day while the source's can change, and a column retyped away from text
+// would fail every query on its table (writeStateViews has both in full). The
+// pinned views, which the copy's own SQL session regenerates for every
+// snapshot, carry it.
 func TestStateView_followingViewsCarryNoCollation(t *testing.T) {
 	table := BaselineTable{Schema: "shop", Table: "codes", Path: "/snap/2026-04-30T03-00-00Z/shop/codes.parquet",
 		Rel: "shop/codes.parquet", SchemaKnown: true, BinaryText: []string{"code"},

@@ -100,7 +100,15 @@ func writeDecimalNote(b *strings.Builder, in Input) {
 	}
 	if unknown {
 		b.WriteString("-- Some files carry no column types, so their views cast nothing and every\n")
-		b.WriteString("-- decimal column in them reads as text. Those tables are named below. A\n")
+		if in.Follow.follows() {
+			b.WriteString("-- decimal column in them reads as text. Those tables are named below. A\n")
+		} else {
+			// Only a pinned file gives _bin columns their collation
+			// (writeStateViews), so only there is its absence a loss to name.
+			b.WriteString("-- decimal column in them reads as text; and no collations, so a text column\n")
+			b.WriteString("-- MySQL declares _bin compares like any other, by the session's default\n")
+			b.WriteString("-- collation. Those tables are named below. A\n")
+		}
 		b.WriteString("-- baseline older than this feature gains the casts when it is next taken or\n")
 		b.WriteString("-- refreshed; a PostgreSQL-source baseline stores all its values as text and\n")
 		b.WriteString("-- will not gain them. If a footer could not be read at all, the bintrail log\n")
@@ -124,9 +132,14 @@ func writeBinaryCollationNote(b *strings.Builder, in Input) {
 }
 
 // decimalComments returns the per-view notes: the columns this table could not
-// have cast, and why. Silence would be the same bug in miniature, a column that
+// have cast, and why. pinned says the file gives _bin columns their collation
+// (a following file does not), so a table without column types loses that too. Silence would be the same bug in miniature, a column that
 // reads as text with nothing anywhere saying so.
-func decimalComments(t BaselineTable) []string {
+func decimalComments(t BaselineTable, pinned bool) []string {
+	if !t.SchemaKnown && pinned {
+		return []string{"this file carries no column types, so nothing is cast; " +
+			"decimal columns read as text and _bin columns compare by the session's collation"}
+	}
 	if !t.SchemaKnown {
 		// Deliberately does NOT say the footer could not be read. Three
 		// different things land here and only one of them is a fault: a

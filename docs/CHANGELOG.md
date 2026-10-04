@@ -35,9 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the `CREATE TABLE` stored in the snapshot's files, by the column's own
   collation or its table's default. `WHERE`, `IN`, `GROUP BY`, `DISTINCT`,
   `ORDER BY`, `MIN`/`MAX` and joins follow it, on the port, the routed reads,
-  the SQL card and the file `bintrail views` writes. Still different, and
-  documented: a `_cs` column stays case-insensitive on the copy, and a column
-  under a PAD SPACE collation ignores trailing spaces on MySQL only.
+  the SQL card and a file `bintrail views --pin-snapshot` writes. A views
+  file that follows new snapshots, which is what `bintrail views` writes by
+  default, does not carry it: it is generated once and the column's
+  collation can change after. Still different, and documented: a `_cs`
+  column stays case-insensitive on the copy, and a column under a PAD SPACE
+  collation ignores trailing spaces on MySQL only. A table whose snapshot
+  file carries no `CREATE TABLE` (a PostgreSQL source, a snapshot from
+  before 0.5) or whose footer cannot be read keeps the old behavior, and
+  that is now logged: once per table, by name, with what it costs. A footer
+  that could not be read is no longer remembered until the daemon restarts;
+  it is read again within five minutes.
 - **SQL on the copy: division by zero is `NULL`, as on MySQL** (#2083).
   `amount / qty` with a zero `qty` came back from the copy as `Infinity`,
   `-Infinity` or `NaN`, with no error, where MySQL returns `NULL`: a `COUNT`,
@@ -60,6 +68,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Go's `map[a:10]`, is now the JSON object its column is declared as. `AVG`
   and `/` are not part of this: they are doubles on the copy, and still
   print as such.
+- **Rotation: an hour held by a pending upload now counts as deferred in
+  both paths** (#2094). When an unconfirmed S3 upload blocked a drop, the
+  path that archives counted the hour as deferred and the path that only
+  drops did not, so there the built-in rotation reported a healthy cycle on
+  every tick and never escalated its warning, while the index kept growing.
+  Both count it now, and `bintrail_rotation_deferred_partitions` and
+  `bintrail_rotation_healthy` reflect it.
 - **Rotation: another source's pending S3 upload now blocks the drop** (#2088).
   On an index that several sources write to, a partition was dropped while
   another source's upload of that hour was still unconfirmed: the check for

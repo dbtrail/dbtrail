@@ -270,8 +270,8 @@ for an index the watcher cannot reach, so unknown can never read as no-gap).
 | `bintrail_continuity_gap_lost{server}` | gauge | 1 = the stream stamped a permanent capture gap (events in it are unrecoverable). Runs under `--notify-webhook` and/or `--metrics-addr` |
 | `bintrail_verify_last_run_timestamp_seconds{server}` | gauge | Unix time of the newest verify run that **succeeded and conclusively verified at least one table**, or found a table that differs from a snapshot read with no locks — failed and other all-inconclusive runs do not refresh it, so staleness means verification is broken. Re-seeded from the persisted run history at startup |
 | `bintrail_verify_tables{server,status}` | gauge | Per-status table counts (`match` / `mismatch` / `inconclusive` / `error` / `differs`) of that run. `differs` counts the tables that differ from a snapshot read with no locks: they are reported inconclusive, and they are ALSO counted in `mismatch`, so a rule on `mismatch` keeps firing while one stands. A run whose only findings are such tables is published too |
-| `bintrail_rotation_healthy` | gauge | 1 = the last built-in rotation cycle neither failed nor deferred unarchived partitions |
-| `bintrail_rotation_deferred_partitions` | gauge | Unarchived partitions the last cycle declined to drop |
+| `bintrail_rotation_healthy` | gauge | 1 = the last built-in rotation cycle neither failed nor declined to drop a partition past retention |
+| `bintrail_rotation_deferred_partitions` | gauge | Partitions past retention the last cycle declined to drop: unarchived, with an unconfirmed S3 upload, or changed since they were archived |
 
 ## SQL on the copy (`bintrail_sql_statement_phase_seconds`)
 

@@ -263,6 +263,11 @@ func TestPerformRotation_BulkDropSkipsPendingS3(t *testing.T) {
 	if res.Dropped != 1 {
 		t.Errorf("expected 1 partition dropped (h2 only), got %d", res.Dropped)
 	}
+	// The skip is an undropped hour, counted like the archive branch's
+	// (#2094).
+	if res.Deferred != 1 {
+		t.Errorf("expected 1 partition deferred (h1 pending S3 upload), got %d", res.Deferred)
+	}
 
 	partitions, err := listPartitions(context.Background(), db, dbName)
 	if err != nil {
@@ -328,8 +333,11 @@ func TestPerformRotation_ProtectUnarchivedDefers(t *testing.T) {
 	if res.Dropped != 1 {
 		t.Errorf("expected 1 partition dropped (archived+uploaded h3 only), got %d", res.Dropped)
 	}
-	if res.Deferred != 1 {
-		t.Errorf("expected 1 partition deferred (unarchived h1; pending-S3 h2 is a skip, not a guard deferral), got %d", res.Deferred)
+	// Both undropped hours count (#2094): the unarchived one and the one
+	// whose upload is unconfirmed. Either can last, and Deferred is what the
+	// loop escalates on.
+	if res.Deferred != 2 {
+		t.Errorf("expected 2 partitions deferred (unarchived h1, pending-S3 h2), got %d", res.Deferred)
 	}
 
 	partitions, err := listPartitions(context.Background(), db, dbName)
@@ -1134,11 +1142,10 @@ func TestPerformRotation_PendingUploadOfAnotherSourceBlocksDrop(t *testing.T) {
 			if res.Dropped != 0 {
 				t.Errorf("Dropped = %d, want 0", res.Dropped)
 			}
-			// The archive branch counts the skip as deferred; the drop-only
-			// branch does not (TestPerformRotation_ProtectUnarchivedDefers
-			// pins that). Unchanged here, either way.
-			if want := map[bool]int{true: 1, false: 0}[tc.archive]; res.Deferred != want {
-				t.Errorf("Deferred = %d, want %d", res.Deferred, want)
+			// Both branches count the skip (#2094), or a block that lasts
+			// never reaches the loop's escalation.
+			if res.Deferred != 1 {
+				t.Errorf("Deferred = %d, want 1", res.Deferred)
 			}
 			partitions, err := listPartitions(context.Background(), db, dbName)
 			if err != nil {

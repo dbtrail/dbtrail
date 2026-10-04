@@ -65,7 +65,9 @@ CREATE OR REPLACE SECRET bintrail_s3_chain (TYPE s3, PROVIDER credential_chain, 
 -- stay text. They are named below. Cast them yourself when you need
 -- arithmetic; DOUBLE works if an approximate result is acceptable.
 -- Some files carry no column types, so their views cast nothing and every
--- decimal column in them reads as text. Those tables are named below. A
+-- decimal column in them reads as text; and no collations, so a text column
+-- MySQL declares _bin compares like any other, by the session's default
+-- collation. Those tables are named below. A
 -- baseline older than this feature gains the casts when it is next taken or
 -- refreshed; a PostgreSQL-source baseline stores all its values as text and
 -- will not gain them. If a footer could not be read at all, the bintrail log
@@ -73,11 +75,11 @@ CREATE OR REPLACE SECRET bintrail_s3_chain (TYPE s3, PROVIDER credential_chain, 
 CREATE SCHEMA IF NOT EXISTS "Legacy-DB";
 CREATE SCHEMA IF NOT EXISTS "shop";
 CREATE SCHEMA IF NOT EXISTS "shop_order";
--- "Legacy-DB"."Audit Log": this file carries no column types, so nothing is cast; decimal columns read as text
+-- "Legacy-DB"."Audit Log": this file carries no column types, so nothing is cast; decimal columns read as text and _bin columns compare by the session's collation
 CREATE OR REPLACE VIEW "Legacy-DB"."Audit Log" AS
   SELECT * FROM read_parquet('s3://my-bucket/baselines/2026-04-30T03-00-00Z/Legacy-DB/Audit Log.parquet');
 -- shop.ORDER_ITEMS_945701: the table shop.ORDER_ITEMS. DuckDB does not tell names apart by letter case, and shop.order_items already has that name
--- shop.ORDER_ITEMS_945701: this file carries no column types, so nothing is cast; decimal columns read as text
+-- shop.ORDER_ITEMS_945701: this file carries no column types, so nothing is cast; decimal columns read as text and _bin columns compare by the session's collation
 CREATE OR REPLACE VIEW "shop"."ORDER_ITEMS_945701" AS
   SELECT * FROM read_parquet('s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/ORDER_ITEMS.parquet');
 CREATE OR REPLACE VIEW "shop"."order_items" AS

@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	_ "github.com/duckdb/duckdb-go/v2" // DuckDB driver for the footer read below
 
@@ -66,22 +68,55 @@ type TableFooter struct {
 // per-FILE failure is not one of those errors: it leaves that path absent and
 // is logged here, because the readable files' answers are still worth having.
 func TableFootersFor(ctx context.Context, paths []string) (map[string]TableFooter, error) {
+	r, err := ReadTableFooters(ctx, paths)
+	return r.Footers, err
+}
+
+// SchemaLossConsequence is what a table's state view does without its
+// CREATE TABLE, in the words every warning about it uses: the decimal columns
+// stay text, and a text column MySQL declares _bin is compared like every
+// other one, without regard to case (#2083).
+const SchemaLossConsequence = "will not cast decimal columns and will compare _bin text columns without regard to case"
+
+// FooterRead is ReadTableFooters' whole answer: what was read, and for every
+// other file which of two different things happened.
+type FooterRead struct {
+	// Footers holds the files whose embedded CREATE TABLE was read, keyed by
+	// the path as passed.
+	Footers map[string]TableFooter
+	// NoSchema are the files that were looked at and carry no usable CREATE
+	// TABLE: none in the footer (a snapshot of a PostgreSQL source, or one
+	// written before the key existed) or one that does not parse. A fact about
+	// an immutable file: looking again gives the same answer.
+	NoSchema []string
+	// Unread are the files that could not be looked at: the footer read
+	// failed, a row would not scan, or the read ended early. A fault, which
+	// may be gone on the next try; a caller that caches must not keep it.
+	Unread []string
+}
+
+// ReadTableFooters is TableFootersFor with the two kinds of absence told
+// apart. Both are also logged here, once: Unread as one Warn per call with the
+// count, NoSchema as one Warn per table for the life of the process, because
+// either one changes how that table's view answers (SchemaLossConsequence) and
+// the generated SQL is not where an operator looks.
+func ReadTableFooters(ctx context.Context, paths []string) (FooterRead, error) {
 	if len(paths) == 0 {
-		return nil, nil
+		return FooterRead{}, nil
 	}
 
 	db, err := sql.Open("duckdb", "")
 	if err != nil {
-		return nil, fmt.Errorf("open duckdb: %w", err)
+		return FooterRead{}, fmt.Errorf("open duckdb: %w", err)
 	}
 	defer db.Close()
 
 	if anyS3(paths) {
 		if err := duckdbutil.LoadHTTPFS(ctx, db); err != nil {
-			return nil, fmt.Errorf("load httpfs extension: %w", err)
+			return FooterRead{}, fmt.Errorf("load httpfs extension: %w", err)
 		}
 		if err := duckdbutil.EnableS3CredentialChain(ctx, db); err != nil {
-			return nil, err
+			return FooterRead{}, err
 		}
 	}
 
@@ -89,6 +124,7 @@ func TableFootersFor(ctx context.Context, paths []string) (map[string]TableFoote
 	// the result be keyed by the caller's own path. A path DuckDB reports
 	// differently would simply not be found by the caller and lose its casts,
 	// which is the same output this function existed to improve on.
+	st := footerScan{footers: make(map[string]TableFooter), unparsable: map[string]bool{}, failed: map[string]bool{}}
 	rows, err := db.QueryContext(ctx, decimalFooterQuery(paths))
 	if err != nil {
 		// DuckDB resolves the file list up front, so ONE unreadable file (a
@@ -100,13 +136,80 @@ func TableFootersFor(ctx context.Context, paths []string) (map[string]TableFoote
 		// The batch error travels into the fallback's own report. When the
 		// fault is session-wide instead of per-file (an S3 403, no httpfs) every
 		// per-file read fails too, and this is the one error that says why.
-		return decimalColumnsPerFile(ctx, db, paths, err), nil
+		decimalColumnsPerFile(ctx, db, paths, &st)
+	} else {
+		collectDecimalRows(rows, &st)
+		rows.Close()
 	}
-	defer rows.Close()
+	return st.result(paths, err), nil
+}
 
-	out := make(map[string]TableFooter)
-	collectDecimalRows(rows, out)
-	return out, nil
+// footerScan accumulates one ReadTableFooters call.
+type footerScan struct {
+	footers map[string]TableFooter
+	// unparsable are the files whose embedded CREATE TABLE would not parse.
+	unparsable map[string]bool
+	// failed are the files whose own footer read failed.
+	failed map[string]bool
+	// lostRows counts rows that would not scan, and incomplete says the read
+	// ended early: in both cases SOME file went unseen and nothing says which,
+	// so every file without an answer counts as unread.
+	lostRows   int
+	incomplete bool
+}
+
+// result sorts every path into read, no schema, or unread, and logs the last
+// two. batchErr is the batched read's error when the per-file fallback ran.
+func (st *footerScan) result(paths []string, batchErr error) FooterRead {
+	r := FooterRead{Footers: st.footers}
+	for _, p := range paths {
+		switch _, read := st.footers[p]; {
+		case read:
+		case st.unparsable[p]:
+			r.NoSchema = append(r.NoSchema, p)
+		case st.failed[p], st.incomplete, st.lostRows > 0:
+			r.Unread = append(r.Unread, p)
+		default:
+			r.NoSchema = append(r.NoSchema, p)
+			warnNoSchemaOnce(p)
+		}
+	}
+	if len(r.Unread) > 0 {
+		// batchErr is reported alongside the count because when EVERY file
+		// failed the cause is usually not any one file (no httpfs, an S3 403,
+		// a cancelled context) and the per-file errors are all the same
+		// downstream symptom.
+		slog.Warn("baseline: some Parquet footers could not be read for their column types; "+
+			"those tables' state views "+SchemaLossConsequence+" until a later read succeeds",
+			"unreadable_files", len(r.Unread), "total_files", len(paths),
+			"first", r.Unread[0], "rows_that_would_not_scan", st.lostRows, "ended_early", st.incomplete,
+			"error", batchErr)
+	}
+	return r
+}
+
+// warnedNoSchema holds the tables already warned about for carrying no CREATE
+// TABLE, by schema and table (the last two elements of the file's path), so a
+// later snapshot of the same table does not warn again.
+var warnedNoSchema sync.Map
+
+// warnNoSchemaOnce logs, once per table per process, that a snapshot file
+// carries no CREATE TABLE. It is not a fault (a PostgreSQL-source snapshot
+// never carries one, and neither does one older than the key), which is why
+// nothing was logged before; it is logged now because of what it costs.
+func warnNoSchemaOnce(path string) {
+	slashed := filepath.ToSlash(path)
+	table := strings.TrimSuffix(slashed[strings.LastIndex(slashed, "/")+1:], ".parquet")
+	if dir := strings.TrimSuffix(slashed, "/"+table+".parquet"); dir != slashed {
+		table = dir[strings.LastIndex(dir, "/")+1:] + "." + table
+	}
+	if _, seen := warnedNoSchema.LoadOrStore(table, struct{}{}); seen {
+		return
+	}
+	slog.Warn("baseline: this table's snapshot file carries no CREATE TABLE, so its column types and collations are unknown; "+
+		"its state view "+SchemaLossConsequence+". A new full snapshot of a MySQL or MariaDB source records them "+
+		"(a PostgreSQL source has none to record)",
+		"table", table, "path", path)
 }
 
 // decimalFooterQuery reads the embedded CREATE TABLE out of each listed file's
@@ -121,47 +224,34 @@ func decimalFooterQuery(paths []string) string {
 // from the map, which is how the caller reports "could not look" as distinct
 // from "nothing to cast".
 //
-// The failures are logged rather than returned. The caller's answer is the map
-// either way, an absent table already says so in the generated file, and a
-// snapshot with several unreadable footers should not turn into an error that
-// costs the readable tables their casts, which is the exact failure this
-// fallback exists to undo.
-func decimalColumnsPerFile(ctx context.Context, db *sql.DB, paths []string, batchErr error) map[string]TableFooter {
-	out := make(map[string]TableFooter)
-	var failed []string
+// The failures are recorded in the scan rather than returned as an error
+// (footerScan.result counts and logs them): a snapshot with several unreadable
+// footers should not turn into an error that costs the readable tables their
+// casts, which is the exact failure this fallback exists to undo.
+func decimalColumnsPerFile(ctx context.Context, db *sql.DB, paths []string, st *footerScan) {
 	for _, p := range paths {
 		rows, err := db.QueryContext(ctx, decimalFooterQuery([]string{p}))
 		if err != nil {
-			failed = append(failed, p)
+			st.failed[p] = true
 			slog.Debug("baseline: could not read a Parquet footer for its column types",
 				"path", p, "error", err)
 			continue
 		}
-		collectDecimalRows(rows, out)
+		collectDecimalRows(rows, st)
 		rows.Close()
 	}
-	if len(failed) > 0 {
-		// batchErr is reported alongside the count because when EVERY file
-		// failed the cause is usually not any one file (no httpfs, an S3 403,
-		// a cancelled context) and the per-file errors are all the same
-		// downstream symptom.
-		slog.Warn("baseline: some Parquet footers could not be read for their column types; "+
-			"those tables' state views will not cast decimal columns",
-			"unreadable_files", len(failed), "total_files", len(paths),
-			"first", failed[0], "error", batchErr)
-	}
-	return out
 }
 
 // collectDecimalRows folds one footer query's rows into the result map. Shared
 // by the batched read and the per-file fallback so the two cannot disagree
 // about what an entry means.
-func collectDecimalRows(rows *sql.Rows, out map[string]TableFooter) {
+func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 	for rows.Next() {
 		var file string
 		// parquet_kv_metadata types both key and value as BLOB.
 		var createSQL []byte
 		if err := rows.Scan(&file, &createSQL); err != nil {
+			st.lostRows++
 			slog.Debug("baseline: could not scan Parquet footer metadata", "error", err)
 			continue
 		}
@@ -176,8 +266,9 @@ func collectDecimalRows(rows *sql.Rows, out map[string]TableFooter) {
 			// reaching this branch means the key IS present and its value does
 			// not parse. That is always an anomaly worth naming, never the
 			// ordinary old-baseline case.
+			st.unparsable[file] = true
 			slog.Warn("baseline: the CREATE TABLE embedded in a Parquet footer would not parse; "+
-				"this table's state view will not cast decimal columns",
+				"this table's state view "+SchemaLossConsequence,
 				"path", file, "error", err)
 			continue
 		}
@@ -187,7 +278,7 @@ func collectDecimalRows(rows *sql.Rows, out map[string]TableFooter) {
 			// columns" rather than a nil that reads like an absent key.
 			decs = []DecimalColumn{}
 		}
-		out[file] = TableFooter{Decimals: decs, DeltaReserved: hasDeltaReservedColumn(cols), Datetimes: DatetimeColumns(cols),
+		st.footers[file] = TableFooter{Decimals: decs, DeltaReserved: hasDeltaReservedColumn(cols), Datetimes: DatetimeColumns(cols),
 			BinaryText: BinaryCollationColumns(string(createSQL), cols)}
 	}
 	if err := rows.Err(); err != nil {
@@ -201,8 +292,9 @@ func collectDecimalRows(rows *sql.Rows, out map[string]TableFooter) {
 		// carries the key, so counting would fire a fault on the two cases
 		// where nothing is wrong. rows.Err is the signal that something
 		// actually broke.
+		st.incomplete = true
 		slog.Warn("baseline: reading Parquet footer metadata ended early; "+
-			"some tables' state views will not cast decimal columns", "error", err)
+			"some tables' state views "+SchemaLossConsequence, "error", err)
 	}
 }
 

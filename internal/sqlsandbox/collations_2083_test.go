@@ -84,6 +84,25 @@ var collationPairs = []struct {
 	{"々", "〃", false, false, false},
 }
 
+// mariadbPadPairs are the pairs of collationPairs that MariaDB 11.4 answers
+// differently from MySQL 8.4, each under its default collation
+// (utf8mb4_uca1400_ai_ci against utf8mb4_0900_ai_ci), measured on live
+// servers: the two that differ by a trailing space, which MariaDB's default
+// ignores (PAD SPACE) and MySQL's does not. On the other 55 the two agree, so
+// what this table says about MySQL holds for a MariaDB source too, except
+// that neither DuckDB collation pads: against MariaDB the copy's default
+// differs on 3 pairs (these two and the one it differs from MySQL on).
+var mariadbPadPairs = []int{6, 37}
+
+func TestCollationPairs_mariadbDiffersOnlyOnTrailingSpaces(t *testing.T) {
+	for _, i := range mariadbPadPairs {
+		p := collationPairs[i]
+		if strings.TrimRight(p.a, " ") != strings.TrimRight(p.b, " ") || p.mysql {
+			t.Errorf("pair %d (%q, %q) is recorded as a trailing-space pair MySQL keeps apart; it is not", i, p.a, p.b)
+		}
+	}
+}
+
 func TestDefaultCollation_whereItDiffersFromMySQL(t *testing.T) {
 	// The default under test is the one the lock-down sets.
 	if script := strings.Join(lockdownStatements([]string{"/copy"}), "\n"); !strings.Contains(script, "SET default_collation = 'nocase.icu_noaccent'") {
