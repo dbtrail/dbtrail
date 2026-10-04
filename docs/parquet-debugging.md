@@ -295,11 +295,13 @@ takes 0.2 to 0.5 s, and a snapshot of 17 tables names 71 files.
 - **A file that follows the newest snapshot** (the default, and what the
   console's download gives) lists the snapshot it chose once, and reads the
   footers the same parallel way on DuckDB 1.5 or newer: 49 s before, 9 s now
-  for the same 17 tables, with the `_NEWEST` pointer in place. Queries no
-  longer ask S3 for a listing each time. The listing lives in a session
-  variable next to the one naming the snapshot; reading the file again
-  refreshes both. A session that has only the snapshot variable (set by hand,
-  or a reopened database file) reads the slower way, with the same rows.
+  for the same 17 tables, with the `_NEWEST` pointer in place (DuckDB 1.4:
+  47 s to 32 s; 1.1: 77 s to 57 s). Queries no longer list S3 for each
+  table's files. The listing lives in a session variable next to the one
+  naming the snapshot. To pick up a refresh in an open session, read the whole
+  file again: re-running one statement of it does not, because the file ends
+  with the cache below turned on. A session that set only the snapshot
+  variable, by hand, reads the slower way, with the same rows.
 
 Both kinds of file turn on DuckDB's `enable_http_metadata_cache`, so a
 query repeated in the same session does not ask S3 again whether each file

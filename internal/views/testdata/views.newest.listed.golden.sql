@@ -107,8 +107,9 @@ SET enable_http_metadata_cache = false;
 
 -- The snapshot every state view below reads through: the one _NEWEST names,
 -- read once, when this file is read. Each baseline publish moves that pointer,
--- so re-running this statement picks up a refresh without reopening the
--- session, and every view follows it together.
+-- so reading this whole file again picks up a refresh without reopening the
+-- session, and every view follows it together. Running this one statement
+-- again does not: the file ends with a cache on that remembers the pointer.
 SET VARIABLE bintrail_newest_snapshot = (
   SELECT CASE WHEN regexp_full_match(trim(content, chr(32) || chr(9) || chr(13) || chr(10)), '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z')
     THEN 's3://my-bucket/baselines/' || trim(content, chr(32) || chr(9) || chr(13) || chr(10)) || '/'
@@ -116,21 +117,11 @@ SET VARIABLE bintrail_newest_snapshot = (
   FROM read_text('s3://my-bucket/baselines/_NEWEST'));
 
 -- Every file of that snapshot, listed once. The views below pick their own
--- files out of this list instead of each asking the store again. Run it again
--- after the statement above when picking up a refresh; without it the views
--- still read the right snapshot, by asking the store each time.
+-- files out of this list instead of each asking the store again. To pick up
+-- a refresh, read this whole file again. A session that has the variable
+-- above and not this one still reads that snapshot, asking the store each
+-- time.
 SET VARIABLE bintrail_snapshot_files = (SELECT {'dir': getvariable('bintrail_newest_snapshot'), 'files': list(file ORDER BY file COLLATE C)} FROM glob(getvariable('bintrail_newest_snapshot') || '**/*'));
-
--- A published snapshot's files never change, so DuckDB need not ask S3 again
--- before every query whether each one changed. This setting covers this whole
--- DuckDB session, not only these views: if the same session also reads S3
--- objects of yours that do change, turn it back off with
--- RESET enable_http_metadata_cache;
-SET enable_http_metadata_cache = true;
--- Reads the footer of every file the views below open, all at once (DuckDB
--- 1.5 or newer; an older DuckDB reads one here and loads at its usual pace).
-SET VARIABLE bintrail_prefetch_all = (SELECT count(*) = 2 FROM duckdb_settings() WHERE name = 'validate_external_file_cache' OR (name = 'enable_external_file_cache' AND lower(value) = 'true'));
-SET VARIABLE bintrail_footers_read = (SELECT count(*) FROM parquet_file_metadata(CASE WHEN getvariable('bintrail_prefetch_all') THEN [f FOR f IN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files') IF regexp_matches(f, '\.parquet$|\.[0-9]{6}(-[0-9]{6})?\.(upserts|posdel)$')] ELSE [f FOR f IN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files') IF regexp_matches(f, '\.parquet$|\.[0-9]{6}(-[0-9]{6})?\.(upserts|posdel)$')][1:1] END));
 
 -- Every table below has to still be in that snapshot. A table dropped at the
 -- source leaves it, and DuckDB binds a view when it is created, so without
@@ -143,11 +134,22 @@ SET VARIABLE bintrail_missing_tables = (
     ('shop/orders.parquet'),
     ('shop_order/items.parquet')
   ) AS x(t)
-  WHERE (getvariable('bintrail_newest_snapshot') || t) COLLATE C NOT IN (SELECT file COLLATE C FROM glob(getvariable('bintrail_newest_snapshot') || '**/*.parquet')));
+  WHERE (getvariable('bintrail_newest_snapshot') || t) COLLATE C NOT IN (SELECT unnest(struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files')) COLLATE C));
 SET VARIABLE bintrail_tables_checked = (SELECT CASE WHEN getvariable('bintrail_missing_tables') IS NOT NULL
   THEN error('bintrail views: these tables are not in the newest snapshot any more: ' || getvariable('bintrail_missing_tables') ||
     '. Looked in ' || getvariable('bintrail_newest_snapshot') ||
     '. If they were dropped or renamed, download this file again.') END);
+
+-- A published snapshot's files never change, so DuckDB need not ask S3 again
+-- before every query whether each one changed. This setting covers this whole
+-- DuckDB session, not only these views: if the same session also reads S3
+-- objects of yours that do change, turn it back off with
+-- RESET enable_http_metadata_cache;
+SET enable_http_metadata_cache = true;
+-- Reads the footer of every file the views below open, all at once (DuckDB
+-- 1.5 or newer; an older DuckDB reads one here and loads at its usual pace).
+SET VARIABLE bintrail_prefetch_all = (SELECT count(*) = 2 FROM duckdb_settings() WHERE name = 'validate_external_file_cache' OR (name = 'enable_external_file_cache' AND lower(value) = 'true'));
+SET VARIABLE bintrail_footers_read = (SELECT count(*) FROM parquet_file_metadata(CASE WHEN getvariable('bintrail_prefetch_all') THEN [f FOR f IN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files') IF regexp_matches(f, '\.parquet$|\.[0-9]{6}(-[0-9]{6})?\.(upserts|posdel)$')] ELSE [f FOR f IN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files') IF regexp_matches(f, '\.parquet$|\.[0-9]{6}(-[0-9]{6})?\.(upserts|posdel)$')][1:1] END));
 
 CREATE SCHEMA IF NOT EXISTS "Legacy-DB";
 CREATE SCHEMA IF NOT EXISTS "shop";
@@ -172,38 +174,38 @@ CREATE OR REPLACE VIEW "shop"."order_items" AS
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')
     WHEN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'dir') IS DISTINCT FROM getvariable('bintrail_newest_snapshot')
     THEN [getvariable('bintrail_newest_snapshot') || 'shop/order_items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[ts]']
-    ELSE [f FOR f IN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files') IF f GLOB (getvariable('bintrail_newest_snapshot') || 'shop/order_items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[ts]')] END, filename=true, union_by_name=true) WHERE regexp_matches(filename, '(^|[/\\])order_items\.[0-9]{6}(-[0-9]{6})?\.upserts$') UNION ALL BY NAME SELECT NULL::VARCHAR AS "bintrail_pk", NULL::VARCHAR AS "bintrail_op" WHERE false), bintrail_latest AS (SELECT * EXCLUDE (filename) FROM bintrail_delta QUALIFY row_number() OVER (PARTITION BY "bintrail_pk" COLLATE C ORDER BY filename COLLATE C DESC) = 1) SELECT * FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
+    ELSE [f FOR f IN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files') IF f GLOB (getvariable('bintrail_newest_snapshot') || 'shop/order_items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[ts]') AND NOT contains(substr(f, length(getvariable('bintrail_newest_snapshot') || 'shop/') + 1), '/')] END, filename=true, union_by_name=true) WHERE regexp_matches(filename, '(^|[/\\])order_items\.[0-9]{6}(-[0-9]{6})?\.upserts$') UNION ALL BY NAME SELECT NULL::VARCHAR AS "bintrail_pk", NULL::VARCHAR AS "bintrail_op" WHERE false), bintrail_latest AS (SELECT * EXCLUDE (filename) FROM bintrail_delta QUALIFY row_number() OVER (PARTITION BY "bintrail_pk" COLLATE C ORDER BY filename COLLATE C DESC) = 1) SELECT * FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')
     ELSE getvariable('bintrail_newest_snapshot') || 'shop/order_items.parquet' END, file_row_number=true) WHERE file_row_number NOT IN (SELECT CAST("pos" AS BIGINT) FROM (SELECT * FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')
     WHEN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'dir') IS DISTINCT FROM getvariable('bintrail_newest_snapshot')
     THEN [getvariable('bintrail_newest_snapshot') || 'shop/order_items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[tl]']
-    ELSE [f FOR f IN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files') IF f GLOB (getvariable('bintrail_newest_snapshot') || 'shop/order_items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[tl]')] END, filename=true) WHERE regexp_matches(filename, '(^|[/\\])order_items\.[0-9]{6}(-[0-9]{6})?\.posdel$') UNION ALL BY NAME SELECT NULL::BIGINT AS "pos" WHERE false) WHERE "pos" IS NOT NULL) UNION ALL BY NAME SELECT * EXCLUDE ("bintrail_pk", "bintrail_op") FROM bintrail_latest WHERE "bintrail_op" = 'u');
+    ELSE [f FOR f IN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files') IF f GLOB (getvariable('bintrail_newest_snapshot') || 'shop/order_items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[tl]') AND NOT contains(substr(f, length(getvariable('bintrail_newest_snapshot') || 'shop/') + 1), '/')] END, filename=true) WHERE regexp_matches(filename, '(^|[/\\])order_items\.[0-9]{6}(-[0-9]{6})?\.posdel$') UNION ALL BY NAME SELECT NULL::BIGINT AS "pos" WHERE false) WHERE "pos" IS NOT NULL) UNION ALL BY NAME SELECT * EXCLUDE ("bintrail_pk", "bintrail_op") FROM bintrail_latest WHERE "bintrail_op" = 'u');
 CREATE OR REPLACE VIEW "shop"."orders" AS
   WITH bintrail_delta AS (SELECT * FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')
     WHEN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'dir') IS DISTINCT FROM getvariable('bintrail_newest_snapshot')
     THEN [getvariable('bintrail_newest_snapshot') || 'shop/orders.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[ts]']
-    ELSE [f FOR f IN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files') IF f GLOB (getvariable('bintrail_newest_snapshot') || 'shop/orders.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[ts]')] END, filename=true, union_by_name=true) WHERE regexp_matches(filename, '(^|[/\\])orders\.[0-9]{6}(-[0-9]{6})?\.upserts$') UNION ALL BY NAME SELECT NULL::VARCHAR AS "bintrail_pk", NULL::VARCHAR AS "bintrail_op" WHERE false), bintrail_latest AS (SELECT * EXCLUDE (filename) FROM bintrail_delta QUALIFY row_number() OVER (PARTITION BY "bintrail_pk" COLLATE C ORDER BY filename COLLATE C DESC) = 1) SELECT * REPLACE (CAST("total" AS DECIMAL(10,2)) AS "total", CAST("tax_rate" AS DECIMAL(6,4)) AS "tax_rate") FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
+    ELSE [f FOR f IN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files') IF f GLOB (getvariable('bintrail_newest_snapshot') || 'shop/orders.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[ts]') AND NOT contains(substr(f, length(getvariable('bintrail_newest_snapshot') || 'shop/') + 1), '/')] END, filename=true, union_by_name=true) WHERE regexp_matches(filename, '(^|[/\\])orders\.[0-9]{6}(-[0-9]{6})?\.upserts$') UNION ALL BY NAME SELECT NULL::VARCHAR AS "bintrail_pk", NULL::VARCHAR AS "bintrail_op" WHERE false), bintrail_latest AS (SELECT * EXCLUDE (filename) FROM bintrail_delta QUALIFY row_number() OVER (PARTITION BY "bintrail_pk" COLLATE C ORDER BY filename COLLATE C DESC) = 1) SELECT * REPLACE (CAST("total" AS DECIMAL(10,2)) AS "total", CAST("tax_rate" AS DECIMAL(6,4)) AS "tax_rate") FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')
     ELSE getvariable('bintrail_newest_snapshot') || 'shop/orders.parquet' END, file_row_number=true) WHERE file_row_number NOT IN (SELECT CAST("pos" AS BIGINT) FROM (SELECT * FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')
     WHEN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'dir') IS DISTINCT FROM getvariable('bintrail_newest_snapshot')
     THEN [getvariable('bintrail_newest_snapshot') || 'shop/orders.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[tl]']
-    ELSE [f FOR f IN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files') IF f GLOB (getvariable('bintrail_newest_snapshot') || 'shop/orders.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[tl]')] END, filename=true) WHERE regexp_matches(filename, '(^|[/\\])orders\.[0-9]{6}(-[0-9]{6})?\.posdel$') UNION ALL BY NAME SELECT NULL::BIGINT AS "pos" WHERE false) WHERE "pos" IS NOT NULL) UNION ALL BY NAME SELECT * EXCLUDE ("bintrail_pk", "bintrail_op") FROM bintrail_latest WHERE "bintrail_op" = 'u');
+    ELSE [f FOR f IN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files') IF f GLOB (getvariable('bintrail_newest_snapshot') || 'shop/orders.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[tl]') AND NOT contains(substr(f, length(getvariable('bintrail_newest_snapshot') || 'shop/') + 1), '/')] END, filename=true) WHERE regexp_matches(filename, '(^|[/\\])orders\.[0-9]{6}(-[0-9]{6})?\.posdel$') UNION ALL BY NAME SELECT NULL::BIGINT AS "pos" WHERE false) WHERE "pos" IS NOT NULL) UNION ALL BY NAME SELECT * EXCLUDE ("bintrail_pk", "bintrail_op") FROM bintrail_latest WHERE "bintrail_op" = 'u');
 -- shop_order.items: weight is DECIMAL(65,30), wider than DuckDB's 38 digits (left as text)
 CREATE OR REPLACE VIEW "shop_order"."items" AS
   WITH bintrail_delta AS (SELECT * FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')
     WHEN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'dir') IS DISTINCT FROM getvariable('bintrail_newest_snapshot')
     THEN [getvariable('bintrail_newest_snapshot') || 'shop_order/items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[ts]']
-    ELSE [f FOR f IN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files') IF f GLOB (getvariable('bintrail_newest_snapshot') || 'shop_order/items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[ts]')] END, filename=true, union_by_name=true) WHERE regexp_matches(filename, '(^|[/\\])items\.[0-9]{6}(-[0-9]{6})?\.upserts$') UNION ALL BY NAME SELECT NULL::VARCHAR AS "bintrail_pk", NULL::VARCHAR AS "bintrail_op" WHERE false), bintrail_latest AS (SELECT * EXCLUDE (filename) FROM bintrail_delta QUALIFY row_number() OVER (PARTITION BY "bintrail_pk" COLLATE C ORDER BY filename COLLATE C DESC) = 1) SELECT * FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
+    ELSE [f FOR f IN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files') IF f GLOB (getvariable('bintrail_newest_snapshot') || 'shop_order/items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[ts]') AND NOT contains(substr(f, length(getvariable('bintrail_newest_snapshot') || 'shop_order/') + 1), '/')] END, filename=true, union_by_name=true) WHERE regexp_matches(filename, '(^|[/\\])items\.[0-9]{6}(-[0-9]{6})?\.upserts$') UNION ALL BY NAME SELECT NULL::VARCHAR AS "bintrail_pk", NULL::VARCHAR AS "bintrail_op" WHERE false), bintrail_latest AS (SELECT * EXCLUDE (filename) FROM bintrail_delta QUALIFY row_number() OVER (PARTITION BY "bintrail_pk" COLLATE C ORDER BY filename COLLATE C DESC) = 1) SELECT * FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')
     ELSE getvariable('bintrail_newest_snapshot') || 'shop_order/items.parquet' END, file_row_number=true) WHERE file_row_number NOT IN (SELECT CAST("pos" AS BIGINT) FROM (SELECT * FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')
     WHEN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'dir') IS DISTINCT FROM getvariable('bintrail_newest_snapshot')
     THEN [getvariable('bintrail_newest_snapshot') || 'shop_order/items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[tl]']
-    ELSE [f FOR f IN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files') IF f GLOB (getvariable('bintrail_newest_snapshot') || 'shop_order/items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[tl]')] END, filename=true) WHERE regexp_matches(filename, '(^|[/\\])items\.[0-9]{6}(-[0-9]{6})?\.posdel$') UNION ALL BY NAME SELECT NULL::BIGINT AS "pos" WHERE false) WHERE "pos" IS NOT NULL) UNION ALL BY NAME SELECT * EXCLUDE ("bintrail_pk", "bintrail_op") FROM bintrail_latest WHERE "bintrail_op" = 'u');
+    ELSE [f FOR f IN struct_extract(CAST(getvariable('bintrail_snapshot_files') AS STRUCT(dir VARCHAR, files VARCHAR[])), 'files') IF f GLOB (getvariable('bintrail_newest_snapshot') || 'shop_order/items.[0-9p][0-9a][0-9r][0-9q][0-9u][0-9e]*[tl]') AND NOT contains(substr(f, length(getvariable('bintrail_newest_snapshot') || 'shop_order/') + 1), '/')] END, filename=true) WHERE regexp_matches(filename, '(^|[/\\])items\.[0-9]{6}(-[0-9]{6})?\.posdel$') UNION ALL BY NAME SELECT NULL::BIGINT AS "pos" WHERE false) WHERE "pos" IS NOT NULL) UNION ALL BY NAME SELECT * EXCLUDE ("bintrail_pk", "bintrail_op") FROM bintrail_latest WHERE "bintrail_op" = 'u');
 
 -- events: not included in this file.
 --

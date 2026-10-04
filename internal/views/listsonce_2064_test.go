@@ -110,3 +110,40 @@ func TestGenerate_newestListedGolden(t *testing.T) {
 		t.Errorf("generated SQL differs from %s.\n--- got ---\n%s\n--- want ---\n%s", golden, got, want)
 	}
 }
+
+// The GLOB operator lets `*` cross a "/", which the store's glob does not. A
+// file in a subdirectory named like the table's chain must stay out of the
+// list: the posdel read takes its columns from the list's first entry, and a
+// stray first entry with no "pos" column would make the dead rows read as
+// none, with no error.
+func TestListedView_ignoresAChainShapedSubdirectory_2064(t *testing.T) {
+	root, stamp := t.TempDir(), "2026-04-30T03-00-00Z"
+	base := writeSnapshot(t, root, stamp, true, "a", "b", "c")
+	writeDeltaPair(t, base, 1, []int64{0}, nil)
+	// shop/orders.000000x/y.posdel sorts before orders.000001.posdel.
+	stray := filepath.Join(filepath.Dir(base), "orders.000000x")
+	if err := os.MkdirAll(stray, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src, err := os.ReadFile(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stray, "y.posdel"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in := Input{
+		GeneratedAt: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC), Version: "test",
+		BaselineSource: root, BaselineSnapshot: time.Date(2026, 4, 30, 3, 0, 0, 0, time.UTC),
+		Follow:    FollowNewest,
+		Baselines: []BaselineTable{{Schema: "shop", Table: "orders", Path: base, Rel: "shop/orders.parquet", SchemaKnown: true, Delta: true}},
+	}
+	db := execViews(t, Generate(in))
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM shop.orders`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("%d rows, want 2: the chain's dead row was not applied", n)
+	}
+}

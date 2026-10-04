@@ -41,8 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and loads there at about the same speed as before. Same rows and column types either way.
 
 - **A views file that follows the newest S3 snapshot opens about five times
-  faster from outside AWS on DuckDB 1.5 or newer, and its queries stop asking
-  S3 for listings** (#2064). This is the default file and the one the console
+  faster from outside AWS on DuckDB 1.5 or newer, and its queries no longer
+  list S3 for each table's files** (#2064). This is the default file and the one the console
   downloads. Each view listed the store for its table's files, twice, at
   creation and again on every query: 36 listings one after another for 17
   tables, 18 s of a 49 s load from a laptop. The file now lists the chosen
@@ -50,9 +50,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the footers are read in one parallel request: 9 s. It turns on DuckDB's
   `enable_http_metadata_cache` for the session after choosing the snapshot
   (off while choosing, so reading the file again still sees a refresh); a file
-  whose `events` view reads archives from S3 keeps the old form. A session
-  that sets the snapshot by hand, or reopens a database file, has no listing
-  and reads the old way: slower, same rows. Same rows and column types.
+  whose `events` view reads archives from S3 keeps the old form, and so does
+  the rare view that reads its table's file alone (it still checks S3 on each
+  query for a delta beside it). A session that sets the snapshot variable by
+  hand has no listing and reads the old way: slower, same rows. To pick up a
+  refresh in an open session, read the whole file again; re-running its first
+  statement alone no longer does. Older DuckDB versions gain less (1.4: 47 s
+  to 32 s; 1.1: 77 s to 57 s). Same rows and column types.
 
 ### Fixed
 - **The embedded time-travel port notices a client that hangs up in the

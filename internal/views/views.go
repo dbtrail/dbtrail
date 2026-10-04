@@ -2114,10 +2114,18 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 		}
 		writeNewestSnapshotVar(b, in)
 		if in.listsOnce() {
-			writeSnapshotFilesVar(b, in, cached)
+			writeSnapshotFilesVar(b, in)
 		}
+		// The prefetch AFTER the preflight: over a snapshot that lost its
+		// tables the preflight names them, and a prefetch run first would
+		// put "needs at least one file" in front of that.
+		writeSnapshotPreflight(b, in, wanted)
+		if cached {
+			writeFollowedPrefetch(b, in)
+		}
+	} else {
+		writeSnapshotPreflight(b, in, wanted)
 	}
-	writeSnapshotPreflight(b, in, wanted)
 
 	writeNamingNotes(b, in)
 	writeStateSchemas(b, in, wanted)
@@ -2282,8 +2290,17 @@ func writeNewestPointerVar(b *strings.Builder, in Input, root string) {
 	name := "trim(content, chr(32) || chr(9) || chr(13) || chr(10))"
 	b.WriteString("-- The snapshot every state view below reads through: the one " + baseline.NewestPointerName + " names,\n")
 	b.WriteString("-- read once, when this file is read. Each baseline publish moves that pointer,\n")
-	b.WriteString("-- so re-running this statement picks up a refresh without reopening the\n")
-	b.WriteString("-- session, and every view follows it together.\n")
+	if in.listsOnce() {
+		// Not "re-run this statement": by the end of the file the HTTP
+		// metadata cache is on, and with it on DuckDB answers a second read
+		// of the pointer from the first, with no error.
+		b.WriteString("-- so reading this whole file again picks up a refresh without reopening the\n")
+		b.WriteString("-- session, and every view follows it together. Running this one statement\n")
+		b.WriteString("-- again does not: the file ends with a cache on that remembers the pointer.\n")
+	} else {
+		b.WriteString("-- so re-running this statement picks up a refresh without reopening the\n")
+		b.WriteString("-- session, and every view follows it together.\n")
+	}
 	fmt.Fprintf(b, "SET VARIABLE %s = (\n", in.sessionName(newestVar))
 	fmt.Fprintf(b, "  SELECT CASE WHEN regexp_full_match(%s, %s)\n", name, sqlString(snapshotNamePattern))
 	fmt.Fprintf(b, "    THEN %s || %s || '/'\n", sqlString(root+"/"), name)
@@ -2302,16 +2319,19 @@ func writeNewestPointerVar(b *strings.Builder, in Input, root string) {
 // COLLATE C on the sort: the posdel read takes its columns from the first file
 // in name order (baseline.TableDeltaFollowStateSQL), and that order must be
 // bytes whatever the session's default collation is.
-func writeSnapshotFilesVar(b *strings.Builder, in Input, cached bool) {
+func writeSnapshotFilesVar(b *strings.Builder, in Input) {
 	newest, files := in.sessionName(newestVar), in.sessionName(filesVar)
 	b.WriteString("-- Every file of that snapshot, listed once. The views below pick their own\n")
-	b.WriteString("-- files out of this list instead of each asking the store again. Run it again\n")
-	b.WriteString("-- after the statement above when picking up a refresh; without it the views\n")
-	b.WriteString("-- still read the right snapshot, by asking the store each time.\n")
+	b.WriteString("-- files out of this list instead of each asking the store again. To pick up\n")
+	b.WriteString("-- a refresh, read this whole file again. A session that has the variable\n")
+	b.WriteString("-- above and not this one still reads that snapshot, asking the store each\n")
+	b.WriteString("-- time.\n")
 	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT {'dir': getvariable('%s'), 'files': list(file ORDER BY file COLLATE C)} FROM glob(getvariable('%s') || '**/*'));\n\n", files, newest, newest)
-	if !cached {
-		return
-	}
+}
+
+// writeFollowedPrefetch turns the HTTP metadata cache on for the chosen
+// snapshot's files and reads their footers in one parallel statement.
+func writeFollowedPrefetch(b *strings.Builder, in Input) {
 	all, read := in.sessionName(prefetchAllVar), in.sessionName(prefetchVar)
 	b.WriteString("-- A published snapshot's files never change, so DuckDB need not ask S3 again\n")
 	b.WriteString("-- before every query whether each one changed. This setting covers this whole\n")
@@ -2436,7 +2456,13 @@ func writeSnapshotPreflight(b *strings.Builder, in Input, wanted []statePlan) {
 	// COLLATE C: file names are bytes, and a session default collation that
 	// folds case (the SQL sandbox) must not make ORDER_ITEMS.parquet pass
 	// for order_items.parquet on a case-sensitive file system.
-	fmt.Fprintf(b, "  WHERE (%s || t) COLLATE C NOT IN (SELECT file COLLATE C FROM glob(%s || '**/*.parquet')));\n", dir, globDir)
+	if in.listsOnce() {
+		// The session's one listing, taken by the statement just above, not a
+		// second listing of the same snapshot.
+		fmt.Fprintf(b, "  WHERE (%s || t) COLLATE C NOT IN (SELECT unnest(struct_extract(%s, 'files')) COLLATE C));\n", dir, filesVarExpr(in))
+	} else {
+		fmt.Fprintf(b, "  WHERE (%s || t) COLLATE C NOT IN (SELECT file COLLATE C FROM glob(%s || '**/*.parquet')));\n", dir, globDir)
+	}
 	// Raised through a SET rather than a bare SELECT so a clean file prints
 	// nothing. A SELECT here puts a one-row NULL table in front of every reader
 	// who has nothing wrong.
@@ -2569,10 +2595,15 @@ func writeNewestStateBody(b *strings.Builder, in Input, t BaselineTable) {
 	listed := func(glob string) string {
 		fv := filesVarExpr(in)
 		pattern := fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(glob))
+		// The GLOB operator lets `*` cross a "/", which the store's glob does
+		// not: a file in a subdirectory named like this table's chain would
+		// join the list, and the posdel read takes its columns from the first
+		// entry. Nothing after the table's own directory may hold a "/".
+		dirOf := fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(t.Rel[:strings.LastIndex(t.Rel, "/")+1]))
 		return fmt.Sprintf("CASE WHEN getvariable('%s') IS NULL\n    THEN error(%s)\n"+
 			"    WHEN struct_extract(%s, 'dir') IS DISTINCT FROM getvariable('%s')\n    THEN [%s]\n"+
-			"    ELSE [f FOR f IN struct_extract(%s, 'files') IF f GLOB (%s)] END",
-			newest, sqlString(newestVarUnsetMsg), fv, newest, pattern, fv, pattern)
+			"    ELSE [f FOR f IN struct_extract(%s, 'files') IF f GLOB (%s) AND NOT contains(substr(f, length(%s) + 1), '/')] END",
+			newest, sqlString(newestVarUnsetMsg), fv, newest, pattern, fv, pattern, dirOf)
 	}
 	if t.Delta || chainReady(in, t) {
 		if once {
