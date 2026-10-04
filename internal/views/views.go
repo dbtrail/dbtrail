@@ -2072,13 +2072,27 @@ func archiveGlob(base string) string {
 // returns whether it emitted any.
 func writeStateViews(b *strings.Builder, in Input) bool {
 	if in.Follow.follows() {
-		// A following view carries no column collation (BinaryText). DuckDB
-		// binds the REPLACE list against the file the view reads at query
-		// time, so a _bin column dropped or retyped at the source would fail
-		// every query on its table until this file was regenerated, and the
-		// reader of a following file is a DuckDB of their own, whose default
-		// collation already compares bytes. On a copy, so the caller's tables
-		// are left as they were.
+		// A following view carries no column collation (BinaryText), for two
+		// reasons, both about a file that is generated once and then reads
+		// snapshots taken later:
+		//
+		//   - The collation in it is the one the column had when the file was
+		//     generated. If the source later makes the column case-insensitive,
+		//     the view would go on comparing bytes and return fewer rows than
+		//     MySQL, without an error, until someone regenerates the file. The
+		//     copy's own session regenerates its views for every snapshot.
+		//   - A column retyped away from text fails every query on its table:
+		//     DuckDB refuses COLLATE on anything but a VARCHAR ("collations are
+		//     only supported for type varchar"), where the decimal cast beside
+		//     it still accepts an integer.
+		//
+		// What this is NOT about: a dropped column breaks the view whether or
+		// not it carries a collation (the decimal casts name columns too), and
+		// the reader's DuckDB does not always compare bytes (docs/dashboards.md
+		// shows how to make it fold like the console). That reader pays for
+		// this choice: under a folding default a _bin column folds in a
+		// following file, and the documentation says so and how to compare it
+		// by bytes. On a copy, so the caller's tables are left as they were.
 		tables := make([]BaselineTable, len(in.Baselines))
 		copy(tables, in.Baselines)
 		for i := range tables {
@@ -2188,7 +2202,7 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 		if p.renamed != "" {
 			fmt.Fprintf(b, "-- %s: %s\n", name, commentSafe(p.renamed))
 		}
-		for _, line := range decimalComments(t) {
+		for _, line := range decimalComments(t, !in.Follow.follows()) {
 			fmt.Fprintf(b, "-- %s: %s\n", name, line)
 		}
 		if line := fileAloneComment(in, t); line != "" {

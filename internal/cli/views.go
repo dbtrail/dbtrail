@@ -510,7 +510,7 @@ func resolveBaselineDecimals(ctx context.Context, in *views.Input) {
 	decimals, err := baseline.TableFootersFor(ctx, in.BaselinePaths())
 	if err != nil {
 		slog.Warn("views: could not read baseline column types from the Parquet footers; "+
-			"the state views will not cast decimal columns", "error", err)
+			"the state views "+baseline.SchemaLossConsequence, "error", err)
 		return
 	}
 	in.ApplyFooters(decimals)

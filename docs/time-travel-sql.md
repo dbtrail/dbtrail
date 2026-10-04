@@ -406,9 +406,18 @@ What this is and is not:
   - **A collation changed since the last full snapshot.** A column's
     collation is the one it had then: a refresh carries the table
     definition forward, so an `ALTER` that changes a collation is seen at
-    the next full snapshot. A snapshot that carries no `CREATE TABLE` (one
-    taken from PostgreSQL) has no collations to read, so all its text
-    columns fold case.
+    the next full snapshot.
+  - **A table with no definition to go by.** A table whose snapshot file
+    carries no `CREATE TABLE`, or one that cannot be read, has no
+    collations to go by, so all its text columns fold case, `_bin` ones
+    included, and its decimal columns read as text. That is every table of
+    a PostgreSQL source, a MySQL or MariaDB table whose snapshot was
+    written by a version before 0.5, and a file whose footer could not be
+    read at that moment. The daemon's log names each such table once
+    (`this table's snapshot file carries no CREATE TABLE`) and counts the
+    files it could not read; a new full snapshot of a MySQL or MariaDB
+    source records the definition, and an unreadable file is tried again
+    within minutes.
   - **`AVG` and `/` return a double** on the copy, where MySQL returns a
     `DECIMAL` with four decimals more than the operand has (for `DECIMAL`
     and integer operands; a `DOUBLE` operand gives a double on both):
