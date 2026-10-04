@@ -2101,7 +2101,21 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 	}
 	writeDecimalNote(b, in)
 	if in.Follow == FollowNewest {
+		cached := in.listsOnce() && isS3(in.BaselineSource)
+		if cached {
+			// OFF while the snapshot is chosen. With the cache on, DuckDB 1.4 and
+			// 1.5 answer a second read of _NEWEST in the same session from what
+			// they remembered of the first (measured), so re-reading this file
+			// would never see a refresh. Turned back on below, once the choice
+			// is made, for the snapshot's own files, which never change.
+			b.WriteString("-- Off while the newest snapshot is chosen, so reading this file again in the\n")
+			b.WriteString("-- same session sees a refresh; back on below for the snapshot's own files.\n")
+			b.WriteString("SET enable_http_metadata_cache = false;\n\n")
+		}
 		writeNewestSnapshotVar(b, in)
+		if in.listsOnce() {
+			writeSnapshotFilesVar(b, in, cached)
+		}
 	}
 	writeSnapshotPreflight(b, in, wanted)
 
@@ -2160,6 +2174,48 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 // shape could not: every view agrees on one snapshot, because there is one value
 // to disagree about.
 const newestVar = "bintrail_newest_snapshot"
+
+// filesVar is the session variable holding every file of the snapshot newestVar
+// names, sorted, from ONE listing taken when the file is read (#2063). The
+// state views pick their own files out of it instead of each listing the store
+// for its table: over S3 that was two listings per view, one after another, at
+// creation and again on every query (36 of them, 18 s of a 49 s load from a
+// laptop for 17 tables).
+//
+// A published snapshot's files do not change (a refresh, a table delta and a
+// compaction all publish a NEW directory), so the list is right for as long
+// as newestVar names that snapshot. The variable is a struct that records
+// which snapshot it listed, and the views use it only while that is still the
+// one newestVar names.
+const filesVar = "bintrail_snapshot_files"
+
+// filesVarExpr reads filesVar with its type spelled out. An unset variable is
+// an untyped NULL, and struct_extract over that is a binder error rather than
+// NULL: the cast is what lets a session with no listing (a reopened database
+// file, a snapshot named by hand) fall back to the glob instead of failing.
+func filesVarExpr(in Input) string {
+	return fmt.Sprintf("CAST(getvariable('%s') AS STRUCT(dir VARCHAR, files VARCHAR[]))", in.sessionName(filesVar))
+}
+
+// listsOnce reports whether a following file takes one listing of the snapshot
+// and reads through it: every FollowNewest file except one whose events view
+// reads archives from S3. Over S3 the shape needs DuckDB's HTTP metadata cache
+// (named files are otherwise checked with a HEAD each, which is slower than
+// the listings it replaces: 35 s against 49 s), and that cache is session-wide
+// and wrong for archives, which can be rewritten under one key (#2051).
+func (in Input) listsOnce() bool {
+	if in.Follow != FollowNewest {
+		return false
+	}
+	if in.rendersEvents() {
+		for _, s := range in.ArchiveSources {
+			if isS3(s) {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 // newestVarUnsetMsg is what a state view raises when it is read in a session
 // that never ran the SET VARIABLE statement above — the persisted-views case:
@@ -2235,6 +2291,41 @@ func writeNewestPointerVar(b *strings.Builder, in Input, root string) {
 		"bintrail views: "+ptr+" does not hold a snapshot name. Refresh or re-upload a baseline "+
 			"to rewrite it, or generate this file again."))
 	fmt.Fprintf(b, "  FROM read_text(%s));\n\n", sqlString(ptr))
+}
+
+// writeSnapshotFilesVar lists the chosen snapshot once into filesVar and, over
+// S3, turns the HTTP metadata cache on and reads every footer in one parallel
+// statement (the #2053 prefetch, with the list taken from the listing instead
+// of from generation: a following file meets snapshots it was not generated
+// against). Measured from a laptop, 17 tables on DuckDB 1.5: 49 s to 9 s.
+//
+// COLLATE C on the sort: the posdel read takes its columns from the first file
+// in name order (baseline.TableDeltaFollowStateSQL), and that order must be
+// bytes whatever the session's default collation is.
+func writeSnapshotFilesVar(b *strings.Builder, in Input, cached bool) {
+	newest, files := in.sessionName(newestVar), in.sessionName(filesVar)
+	b.WriteString("-- Every file of that snapshot, listed once. The views below pick their own\n")
+	b.WriteString("-- files out of this list instead of each asking the store again. Run it again\n")
+	b.WriteString("-- after the statement above when picking up a refresh; without it the views\n")
+	b.WriteString("-- still read the right snapshot, by asking the store each time.\n")
+	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT {'dir': getvariable('%s'), 'files': list(file ORDER BY file COLLATE C)} FROM glob(getvariable('%s') || '**/*'));\n\n", files, newest, newest)
+	if !cached {
+		return
+	}
+	all, read := in.sessionName(prefetchAllVar), in.sessionName(prefetchVar)
+	b.WriteString("-- A published snapshot's files never change, so DuckDB need not ask S3 again\n")
+	b.WriteString("-- before every query whether each one changed. This setting covers this whole\n")
+	b.WriteString("-- DuckDB session, not only these views: if the same session also reads S3\n")
+	b.WriteString("-- objects of yours that do change, turn it back off with\n")
+	b.WriteString("-- RESET enable_http_metadata_cache;\n")
+	b.WriteString("SET enable_http_metadata_cache = true;\n")
+	b.WriteString("-- Reads the footer of every file the views below open, all at once (DuckDB\n")
+	b.WriteString("-- 1.5 or newer; an older DuckDB reads one here and loads at its usual pace).\n")
+	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT count(*) = 2 FROM duckdb_settings() WHERE name = 'validate_external_file_cache' OR (name = 'enable_external_file_cache' AND lower(value) = 'true'));\n", all)
+	parquet := fmt.Sprintf("[f FOR f IN struct_extract(%s, 'files') IF regexp_matches(f, %s)]", filesVarExpr(in),
+		sqlString(`\.parquet$|\.[0-9]{6}(-[0-9]{6})?\.(upserts|posdel)$`))
+	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT count(*) FROM parquet_file_metadata(CASE WHEN getvariable('%s') THEN %s ELSE %s[1:1] END));\n\n",
+		read, all, parquet, parquet)
 }
 
 // selectedStatePlans is the state views this render will actually emit: the
@@ -2466,7 +2557,29 @@ func writeNewestStateBody(b *strings.Builder, in Input, t BaselineTable) {
 		return fmt.Sprintf("CASE WHEN getvariable('%s') IS NULL\n    THEN error(%s)\n    ELSE getvariable('%s') || %s END",
 			newest, sqlString(newestVarUnsetMsg), newest, sqlString(rel))
 	}
+	once := in.listsOnce()
+	// listed is path() for a glob under listsOnce: the files of the session's
+	// one listing that match it, in the listing's order, instead of the glob
+	// itself, which would list the store again.
+	//
+	// Only when that listing was taken for the snapshot newestVar names NOW.
+	// A session that re-ran the first statement alone, or set newestVar by
+	// hand, or reopened a database file, has no listing for it: the read then
+	// falls back to the glob, which is slower and never wrong.
+	listed := func(glob string) string {
+		fv := filesVarExpr(in)
+		pattern := fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(glob))
+		return fmt.Sprintf("CASE WHEN getvariable('%s') IS NULL\n    THEN error(%s)\n"+
+			"    WHEN struct_extract(%s, 'dir') IS DISTINCT FROM getvariable('%s')\n    THEN [%s]\n"+
+			"    ELSE [f FOR f IN struct_extract(%s, 'files') IF f GLOB (%s)] END",
+			newest, sqlString(newestVarUnsetMsg), fv, newest, pattern, fv, pattern)
+	}
 	if t.Delta || chainReady(in, t) {
+		if once {
+			posdel, upserts := baseline.TableDeltaFollowGlobs(t.Rel)
+			fmt.Fprintf(b, "  %s;\n", baseline.TableDeltaFollowStateSQL(path(t.Rel), listed(posdel), listed(upserts), t.Rel, decimalReplaceClause(t)))
+			return
+		}
 		fmt.Fprintf(b, "  %s;\n", deltaStateBody(t, t.Rel, path, false))
 		return
 	}
