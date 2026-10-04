@@ -189,8 +189,8 @@ The decision, in order, for every statement:
    least `--route-cost-threshold` (default 10,000; a point lookup costs about
    1, a full scan over 200,000 rows about 20,000) or that has a full table
    scan over at least `--route-scan-rows` rows (default 100,000): **the
-   copy**, with backtick names rewritten to double quotes; the copy refusing
-   it means **MySQL**. Anything cheaper: **MySQL**.
+   copy**, sent exactly as written; the copy refusing it means **MySQL**.
+   Anything cheaper: **MySQL**.
 
 What this is and is not:
 
@@ -202,6 +202,12 @@ What this is and is not:
 - **The copy's grants are nobody's; the forwarded ones are the registry's.**
   Forwarded statements run with the source DSN's account. Give this port to
   people who may do on MySQL whatever that account can.
+- **Nothing is translated.** The copy gets the statement as the client
+  wrote it. DuckDB does not read MySQL's backtick-quoted names, so a
+  statement that uses them (what most ORMs and drivers generate) is refused
+  by the copy and answered by MySQL, whatever its cost: it is correct, and it
+  gains nothing from routing. Only statements written without backticks can
+  be served by the copy.
 - **Where the copy answers differently without an error.** The veto list
   keeps the known cases on MySQL (`GROUP_CONCAT`, the `NOW()` family,
   `COLLATE`, `DIV`, `||`, `^`, double-quoted string literals, variables,

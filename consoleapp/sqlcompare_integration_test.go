@@ -82,7 +82,7 @@ SELECT id, NOW() FROM orders ORDER BY id;
 UPDATE orders SET status = 'x';
 WITH c AS (SELECT id FROM orders) DELETE FROM orders WHERE id IN (SELECT id FROM c);
 SELECT * FROM nope;
-`+"-- what an ORM sends: backtick names, which the router rewrites for the copy\nSELECT `status`, count(*) FROM `orders` GROUP BY `status`;\n"), 0o644); err != nil {
+`+"-- what an ORM sends: backtick names, which the copy refuses (nothing is translated)\nSELECT `status`, count(*) FROM `orders` GROUP BY `status`;\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	fh, err := os.Open(stmts)
@@ -115,7 +115,7 @@ SELECT * FROM nope;
 		"SELECT status, count(*) FROM orders GROUP BY status":                                 {sqlcompare.Different, "rows", "copy"},
 		"SELECT id FROM orders WHERE status = 'live'":                                         {sqlcompare.Different, "rows", "copy"},
 		"SELECT status FROM orders ORDER BY status, id":                                       {sqlcompare.Different, "order", "copy"},
-		"SELECT `status`, count(*) FROM `orders` GROUP BY `status`":                           {sqlcompare.Different, "rows", "copy"},
+		"SELECT `status`, count(*) FROM `orders` GROUP BY `status`":                           {sqlcompare.NotOnCopy, "", "copy"},
 		"SELECT CONVERT(status USING utf8mb4) s, count(*) FROM orders GROUP BY s":             {sqlcompare.NotOnCopy, "", "copy"},
 		"WITH c AS (SELECT id FROM orders) DELETE FROM orders WHERE id IN (SELECT id FROM c)": {sqlcompare.Skipped, "not_read_only", "mysql"},
 		"UPDATE orders SET status = 'x'":                                                      {sqlcompare.Skipped, "not_a_select", "mysql"},

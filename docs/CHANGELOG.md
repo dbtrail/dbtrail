@@ -32,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose `EXPLAIN FORMAT=JSON` is expensive (`--route-cost-threshold`, default
   10000, or a full scan over `--route-scan-rows` rows, default 100000), which
   runs on the copy when the copy's snapshot is at most that old, and runs on
-  MySQL when the copy rejects it. Writes, `SHOW`, transactions, a connection
+  MySQL when the copy rejects it. The statement reaches the copy exactly as
+  written, with nothing translated: one that quotes names with backticks is
+  refused by the copy and so answered by MySQL. Writes, `SHOW`, transactions, a connection
   after a `SET`, and constructs the copy would answer differently
   (`GROUP_CONCAT`, `NOW()`, `COLLATE`, variables, locking reads, ...) always
   go to MySQL. Forwarded resultsets are streamed to the client, never held

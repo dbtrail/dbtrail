@@ -235,10 +235,10 @@ func compareOne(ctx context.Context, src, cp *conn, opts Options, stmt string) R
 		return res
 	}
 	res.SourceRows = len(srcRows.Rows)
-	// The copy gets the statement the ROUTER would send it: backtick names
-	// rewritten to double quotes (readrouter.ForCopy); the report keeps the
-	// original text.
-	cpRows, cpOver, cpMS, cpErr := fetch(ctx, cp.c, readrouter.ForCopy(stmt), opts.MaxRows)
+	// The copy gets the statement the ROUTER would send it: the same text,
+	// untranslated. A statement with backtick names reads NOT_ON_COPY, which
+	// is what the router does with it too (the copy refuses, MySQL answers).
+	cpRows, cpOver, cpMS, cpErr := fetch(ctx, cp.c, stmt, opts.MaxRows)
 	res.CopyMS = cpMS
 	if cpErr != nil {
 		res.Verdict, res.Detail = NotOnCopy, cpErr.Error()

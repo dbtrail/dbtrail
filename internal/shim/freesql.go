@@ -169,7 +169,7 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 	if age := time.Since(at); age > h.routerCfg.MaxCopyAge {
 		return h.forward(ctx, qstr, fmt.Sprintf("copy is %s old, max %s", age.Round(time.Second), h.routerCfg.MaxCopyAge))
 	}
-	res, err := h.runFreeSQLRouted(currentDB, readrouter.ForCopy(qstr), qstr, reason)
+	res, err := h.runFreeSQLRouted(currentDB, qstr, reason)
 	if err != nil {
 		// The slow path is always right: whatever the copy could not do
 		// (a construct DuckDB lacks, a missing table, busy, a timeout, a
@@ -289,16 +289,17 @@ func (h *Handler) notTimeTravelError(qstr string) error {
 
 // runFreeSQL serves one ordinary statement through the bound FreeSQL.
 func (h *Handler) runFreeSQL(schema, qstr string) (*mysql.Result, error) {
-	return h.runFreeSQLRouted(schema, qstr, qstr, "")
+	return h.runFreeSQLRouted(schema, qstr, "")
 }
 
-// runFreeSQLRouted is runFreeSQL with the statement the copy runs (copyStmt,
-// backticks rewritten under routing) kept apart from the one the client sent
-// (qstr, what the audit records), and the routing reason when there is one.
-func (h *Handler) runFreeSQLRouted(schema, copyStmt, qstr, routeReason string) (*mysql.Result, error) {
+// runFreeSQLRouted is runFreeSQL with the routing reason when there is one.
+// The copy runs the statement as the client wrote it, under routing too:
+// nothing is translated from MySQL's dialect, and a statement the copy
+// refuses (backtick names among them) is the caller's to forward.
+func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string) (*mysql.Result, error) {
 	ctx, cancel := h.queryContext()
 	defer cancel()
-	stmt, schema := rewriteForDuckDB(copyStmt, schema)
+	stmt, schema := rewriteForDuckDB(qstr, schema)
 	res, err := h.freeSQL.Run(ctx, stmt, schema)
 	if err != nil {
 		return nil, h.freeSQLError(err)
