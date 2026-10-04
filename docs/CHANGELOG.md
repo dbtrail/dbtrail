@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Fixed
+- **SQL on the copy prints a `DECIMAL` with its trailing zeros** (#2083). A
+  `DECIMAL(10,2)` holding 10 came back as `10` from the copy (the port, the
+  routed reads and the SQL card) and as `10.00` from MySQL, and
+  `ROUND(SUM(amount), 2)` as `117329550` instead of `117329550.00`: the same
+  number in a different text, which a program comparing the two reads as a
+  different answer. Every result whose type is `DECIMAL(p,s)` now prints
+  exactly `s` decimals, a column, a sum, a `ROUND`, a `COALESCE` or a
+  `UNION` alike, on the text protocol and on the binary one. `AVG` and `/`
+  are not part of this: they are doubles on the copy, and still print as
+  such.
 - **A partial local archive no longer hides the S3 copy** (#2078). Every
   reader of archived changes (the Events page, the time-travel schemas,
   recover, SQL on the copy) read the local archive folder whenever it held

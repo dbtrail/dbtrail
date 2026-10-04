@@ -677,8 +677,8 @@ func freeSQLCell(v any, duckType string, loc *time.Location) any {
 	case nil:
 		return nil
 	case json.Number:
-		// The worker's own rendering, every digit kept: re-rendering through
-		// a float would turn a DECIMAL's 12.50 into 12.5.
+		// The worker's own rendering, every digit kept. (A DECIMAL is not
+		// here: it arrives as text, already carrying its scale's zeros.)
 		return []byte(x.String())
 	case bool:
 		if x {

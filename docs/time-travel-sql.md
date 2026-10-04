@@ -373,11 +373,15 @@ What this is and is not:
   equal under `utf8mb4_0900_ai_ci` and not on the copy; a column MySQL
   declares case-sensitive (`_bin`, `_cs`) is case-insensitive on the copy;
   a legacy `utf8mb4_general_ci` column ignores trailing spaces on MySQL and
-  not here; **`AVG` and `/` return full double precision** (MySQL
-  rounds to four decimals); and **numbers print without trailing zeros**:
-  `ROUND(AVG(points), 1)` is `0` on the copy and `0.0` on MySQL,
-  `ROUND(SUM(amount), 2)` is `117329550` and `117329550.00`, the same value
-  in a different text. None of these can be caught per statement. If a
+  not here; and **`AVG` and `/` return full double precision** (MySQL
+  rounds to four decimals past the operand's): `ROUND(AVG(points), 1)` is
+  `0` on the copy and `0.0` on MySQL, the same value in a different text. A
+  `DECIMAL` itself prints as on MySQL, with its scale and trailing zeros
+  (`ROUND(SUM(amount), 2)` is `117329550.00` on both), with one exception: a
+  `CASE` or `IF` that mixes a `DECIMAL` branch and an integer branch prints
+  the integer rows as `4.00` on the copy and as `4` on MySQL, which declares
+  the column with two decimals and does not pad them. None of these can be
+  caught per statement. If a
   workload depends on one, keep the copy for the reads where they do not
   matter, or leave routing off.
 - **The thresholds are knobs, not truths.** The optimizer's cost is its

@@ -213,7 +213,8 @@ type Column struct {
 // Result is what came back. Cells are JSON-shaped values a browser can show
 // as they are: nil, bool, string, json.Number (every digit kept), []any for
 // a LIST and map[string]any for a STRUCT or JSON. Dates are "2006-01-02",
-// timestamps RFC 3339 in UTC, HUGEINT and DECIMAL are text, a BLOB is its
+// timestamps RFC 3339 in UTC, HUGEINT and DECIMAL are text (a DECIMAL with
+// exactly its scale: "10.00" for a DECIMAL(10,2)), a BLOB is its
 // text when valid UTF-8 and "0x.." otherwise, NaN and infinities are text.
 // A text cell longer than MaxCellBytes is cut and ends with a marker;
 // TruncatedCells counts them.

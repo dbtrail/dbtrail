@@ -539,6 +539,8 @@ func (r *renderer) cell(v any, typ string) any {
 		return r.text("0x" + strings.ToUpper(hex.EncodeToString(x)))
 	case *big.Int:
 		return x.String()
+	case duckdb.Decimal:
+		return decimalText(x)
 	case duckdb.UUID:
 		return x.String()
 	case []any:
@@ -570,6 +572,30 @@ func (r *renderer) text(s string) string {
 	}
 	r.truncated++
 	return s[:cut] + cellTruncatedMarker
+}
+
+// decimalText prints a DECIMAL with exactly its scale, trailing zeros kept:
+// 10.00 for a DECIMAL(10,2), as MySQL prints one (#2083). The driver's own
+// Decimal.String trims them ("10"), which reads as a different answer to a
+// program that compares the returned text. The digits come from the unscaled
+// integer, so nothing is rounded whatever the width.
+func decimalText(d duckdb.Decimal) string {
+	if d.Value == nil {
+		return "0"
+	}
+	digits := d.Value.String()
+	sign := ""
+	if strings.HasPrefix(digits, "-") {
+		sign, digits = "-", digits[1:]
+	}
+	scale := int(d.Scale)
+	if scale == 0 {
+		return sign + digits
+	}
+	if len(digits) <= scale {
+		digits = strings.Repeat("0", scale-len(digits)+1) + digits
+	}
+	return sign + digits[:len(digits)-scale] + "." + digits[len(digits)-scale:]
 }
 
 // floatCell keeps a finite float as a number and renders the values JSON
