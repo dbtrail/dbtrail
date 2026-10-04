@@ -444,7 +444,8 @@ What this is and is not:
   empty `route_user` removes it; a password left out keeps the saved one;
   `route_dsn` takes a whole DSN instead, for an account reached at another
   address). It connects to the source's own address with the source's
-  connection settings, and follows the source when its address is edited.
+  connection settings, and follows the source when its address, database
+  or connection settings are edited.
   The password is stored in the registry file like the source's and never
   shown again. MySQL and MariaDB sources only. A change applies to
   connections opened after it. The **Connect a SQL client** panel names the

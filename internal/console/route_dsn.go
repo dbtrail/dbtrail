@@ -36,8 +36,9 @@ import (
 //     stored one; a NEW name with no password is refused rather than paired
 //     with the old account's password.
 //   - route_password alone replaces the stored account's password.
-//   - nothing sent keeps what is stored, moved to the source's new address
-//     when the source moved and the account lived on its old one.
+//   - nothing sent keeps what is stored. When this request changes the
+//     source's address, database or connection settings and the account
+//     lived on the source's old address, it takes the source's new ones.
 //
 // The structured fields never move an account that lives on another address
 // than the source's (one set by route_dsn): they change its user or password
@@ -112,6 +113,11 @@ func buildRouteDSN(req serverRequest, stored, oldSource, newSource, flavor strin
 		}
 	}
 
+	// The stored user sent again with no password changes nothing: it is
+	// what the web form sends on every save, and it is a keep.
+	if req.RouteUser != nil && req.RoutePassword == nil && cur != nil && strings.TrimSpace(*req.RouteUser) == cur.User {
+		req.RouteUser = nil
+	}
 	if req.RouteUser == nil && req.RoutePassword == nil {
 		// Keep. An account that lived on the source's address follows the
 		// source when this request moves it; one given as a DSN to another
@@ -119,9 +125,16 @@ func buildRouteDSN(req serverRequest, stored, oldSource, newSource, flavor strin
 		if cur == nil {
 			return "", nil
 		}
-		moved := onSourceAddr(cur, oldSource) && !sameAddr(cur.Addr, src.Addr)
+		// The same for the source's other connection settings (its TLS
+		// setting, its database): when this request changes them, the
+		// account takes the source's new ones, as a structured edit gives
+		// it. A request that changes none of them leaves the account as
+		// stored, whatever settings it carries.
+		moved := onSourceAddr(cur, oldSource) && sourceSettingsChanged(oldSource, src)
 		if moved {
-			cur.Addr = src.Addr
+			user, password := cur.User, cur.Passwd
+			cur = src.Clone()
+			cur.User, cur.Passwd = user, password
 		}
 		// The source may have been given the forwarding user's name by
 		// this same request.
@@ -191,6 +204,18 @@ func notTheCaptureAccount(route, source *mysql.Config) error {
 func onSourceAddr(route *mysql.Config, oldSource string) bool {
 	old, err := mysql.ParseDSN(oldSource)
 	return err == nil && sameAddr(route.Addr, old.Addr)
+}
+
+// sourceSettingsChanged reports whether the source's DSN changed in anything
+// but its account: its address, its database or a connection setting.
+func sourceSettingsChanged(oldSource string, src *mysql.Config) bool {
+	old, err := mysql.ParseDSN(oldSource)
+	if err != nil {
+		return false
+	}
+	a, b := old.Clone(), src.Clone()
+	a.User, a.Passwd, b.User, b.Passwd = "", "", "", ""
+	return a.FormatDSN() != b.FormatDSN()
 }
 
 // sameAddr compares two host[:port] addresses with the default port filled in.
