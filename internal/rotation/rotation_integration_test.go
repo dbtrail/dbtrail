@@ -22,13 +22,14 @@ import (
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
-// ─── hasPendingS3Upload ──────────────────────────────────────────────────────
+// ─── pendingS3Uploads ────────────────────────────────────────────────────────
 
-func TestHasPendingS3Upload_noRow(t *testing.T) {
+func TestPendingS3Uploads_noRow(t *testing.T) {
 	db, _ := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
 
-	pending, err := hasPendingS3Upload(context.Background(), db, "p_2026030100", "test-uuid")
+	by, err := pendingS3Uploads(context.Background(), db, "p_2026030100")
+	pending := len(by) > 0
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -37,7 +38,7 @@ func TestHasPendingS3Upload_noRow(t *testing.T) {
 	}
 }
 
-func TestHasPendingS3Upload_localOnly(t *testing.T) {
+func TestPendingS3Uploads_localOnly(t *testing.T) {
 	db, _ := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
 
@@ -46,7 +47,8 @@ func TestHasPendingS3Upload_localOnly(t *testing.T) {
 		(partition_name, bintrail_id, local_path, row_count)
 		VALUES ('p_2026030100', 'test-uuid', '/data/test.parquet', 42)`)
 
-	pending, err := hasPendingS3Upload(context.Background(), db, "p_2026030100", "test-uuid")
+	by, err := pendingS3Uploads(context.Background(), db, "p_2026030100")
+	pending := len(by) > 0
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -55,7 +57,7 @@ func TestHasPendingS3Upload_localOnly(t *testing.T) {
 	}
 }
 
-func TestHasPendingS3Upload_pendingUpload(t *testing.T) {
+func TestPendingS3Uploads_pendingUpload(t *testing.T) {
 	db, _ := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
 
@@ -64,7 +66,8 @@ func TestHasPendingS3Upload_pendingUpload(t *testing.T) {
 		(partition_name, bintrail_id, local_path, row_count, s3_bucket, s3_key)
 		VALUES ('p_2026030100', 'test-uuid', '/data/test.parquet', 42, 'my-bucket', 'archives/test.parquet')`)
 
-	pending, err := hasPendingS3Upload(context.Background(), db, "p_2026030100", "test-uuid")
+	by, err := pendingS3Uploads(context.Background(), db, "p_2026030100")
+	pending := len(by) > 0
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -73,7 +76,7 @@ func TestHasPendingS3Upload_pendingUpload(t *testing.T) {
 	}
 }
 
-func TestHasPendingS3Upload_completed(t *testing.T) {
+func TestPendingS3Uploads_completed(t *testing.T) {
 	db, _ := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
 
@@ -82,30 +85,13 @@ func TestHasPendingS3Upload_completed(t *testing.T) {
 		(partition_name, bintrail_id, local_path, row_count, s3_bucket, s3_key, s3_uploaded_at)
 		VALUES ('p_2026030100', 'test-uuid', '/data/test.parquet', 42, 'my-bucket', 'archives/test.parquet', UTC_TIMESTAMP())`)
 
-	pending, err := hasPendingS3Upload(context.Background(), db, "p_2026030100", "test-uuid")
+	by, err := pendingS3Uploads(context.Background(), db, "p_2026030100")
+	pending := len(by) > 0
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if pending {
 		t.Error("expected false when s3_uploaded_at is set")
-	}
-}
-
-func TestHasPendingS3Upload_emptyBintrailID(t *testing.T) {
-	db, _ := testutil.CreateTestDB(t)
-	testutil.InitIndexTables(t, db)
-
-	// Row with a specific bintrail_id but query uses empty string — should still detect.
-	testutil.MustExec(t, db, `INSERT INTO archive_state
-		(partition_name, bintrail_id, local_path, row_count, s3_bucket, s3_key)
-		VALUES ('p_2026030100', 'some-uuid', '/data/test.parquet', 42, 'my-bucket', 'archives/test.parquet')`)
-
-	pending, err := hasPendingS3Upload(context.Background(), db, "p_2026030100", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !pending {
-		t.Error("expected true when bintrailID is empty and any row has pending S3")
 	}
 }
 
@@ -634,7 +620,7 @@ func TestPerformRotation_S3UploadSuccessPrunesAndDrops(t *testing.T) {
 	}
 
 	// s3_uploaded_at must be stamped so a later drop-only cycle sees the S3 copy
-	// as durable (hasPendingS3Upload → false).
+	// as durable (pendingS3Uploads → false).
 	var uploadedAt sql.NullTime
 	if err := db.QueryRow(
 		`SELECT s3_uploaded_at FROM archive_state WHERE partition_name = ? AND bintrail_id = ?`,
@@ -1048,5 +1034,130 @@ func TestPerformRotation_BackfilledPartitionStaysTimeQueryable(t *testing.T) {
 	}
 	if !foundLabel {
 		t.Errorf("plan.MisfiledArchiveHours = %v, want to include the misfiled label hour %v", plan.MisfiledArchiveHours, h1)
+	}
+}
+
+// TestPendingS3Uploads_namesEverySource pins what the drop guards read
+// (#2088): every source with an unconfirmed upload for the partition, sorted,
+// whoever is asking. Rows that are uploaded, local-only, or about another
+// partition are not pending.
+func TestPendingS3Uploads_namesEverySource(t *testing.T) {
+	db, _ := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	ins := func(partition, id, bucket string, uploaded bool) {
+		t.Helper()
+		var b any
+		if bucket != "-" {
+			b = bucket
+		}
+		stamp := "NULL"
+		if uploaded {
+			stamp = "UTC_TIMESTAMP()"
+		}
+		testutil.MustExec(t, db, `INSERT INTO archive_state
+			(partition_name, bintrail_id, local_path, row_count, s3_bucket, s3_key, s3_uploaded_at)
+			VALUES (?, ?, '/data/x.parquet', 1, ?, 'k', `+stamp+`)`, partition, id, b)
+	}
+	ins("p_2026030100", "source-b", "bkt", false) // pending
+	ins("p_2026030100", "source-a", "bkt", false) // pending
+	ins("p_2026030100", "source-c", "bkt", true)  // uploaded
+	ins("p_2026030100", "source-d", "-", false)   // local-only (NULL bucket)
+	ins("p_2026030100", "source-e", "", false)    // local-only (empty bucket)
+	ins("p_2026030101", "source-f", "bkt", false) // another partition
+	ins("p_2026030100", "", "bkt", false)         // pending, written with no id
+	testutil.MustExec(t, db, `INSERT INTO archive_state
+		(partition_name, bintrail_id, local_path, row_count, s3_bucket, s3_key)
+		VALUES ('p_2026030100', NULL, '/data/x.parquet', 1, 'bkt', 'k')`) // pending, NULL id
+	got, err := pendingS3Uploads(context.Background(), db, "p_2026030100")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The two id-less rows are one name, never an empty one.
+	if len(got) != 3 || got[0] != "(no id)" || got[1] != "source-a" || got[2] != "source-b" {
+		t.Errorf("pending sources = %q, want [(no id) source-a source-b]", got)
+	}
+	if none, err := pendingS3Uploads(context.Background(), db, "p_2026030102"); err != nil || len(none) != 0 {
+		t.Errorf("a partition with no rows: (%q, %v), want none", none, err)
+	}
+}
+
+// TestPerformRotation_PendingUploadOfAnotherSourceBlocksDrop is #2088: the
+// partitions of an index are shared by every source that writes to it, so
+// one source's unconfirmed upload must keep the partition alive whoever
+// rotates, and by whichever branch.
+func TestPerformRotation_PendingUploadOfAnotherSourceBlocksDrop(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		id      string // the rotating source's bintrail_id
+		archive bool   // the rotating source archives (else drop-only)
+		protect bool
+	}{
+		{name: "drop-only, rotating as source A", id: "source-a"},
+		// Control: a rotating source with no identity.
+		{name: "drop-only, no identity", id: ""},
+		{name: "drop-only, rotating as source A, ProtectUnarchived", id: "source-a", protect: true},
+		{name: "archiving, rotating as source A", id: "source-a", archive: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, dbName := testutil.CreateTestDB(t)
+			testutil.InitIndexTables(t, db)
+			h1 := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Hour)
+			testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1})
+			ts := h1.Add(30 * time.Minute).Format("2006-01-02 15:04:05")
+			testutil.InsertEvent(t, db, "binlog.000001", 100, 200, ts, nil, "testdb", "users", 1, "1", nil, nil, []byte(`{"id":1}`))
+
+			// Source B: archived locally, upload unconfirmed.
+			bPath, _ := HiveArchivePath(t.TempDir(), "source-b", indexer.PartitionName(h1))
+			os.MkdirAll(filepath.Dir(bPath), 0o755)
+			os.WriteFile(bPath, []byte("parquet-data"), 0o644)
+			testutil.MustExec(t, db, `INSERT INTO archive_state
+				(partition_name, bintrail_id, local_path, row_count, s3_bucket, s3_key)
+				VALUES (?, 'source-b', ?, 1, 'my-bucket', 'archives/bintrail_id=source-b/p1.parquet')`,
+				indexer.PartitionName(h1), bPath)
+
+			opts := Options{
+				RetainDur:          24 * time.Hour,
+				BintrailID:         tc.id,
+				ArchiveCompression: "none",
+				Format:             "text",
+				NoReplace:          true,
+				ProtectUnarchived:  tc.protect,
+			}
+			if tc.archive {
+				opts.ArchiveDir = t.TempDir()
+			}
+			logs := captureSlog(t)
+			res, err := Perform(context.Background(), db, dbName, opts)
+			if err != nil {
+				t.Fatalf("Perform: %v", err)
+			}
+			if res.Dropped != 0 {
+				t.Errorf("Dropped = %d, want 0", res.Dropped)
+			}
+			// The archive branch counts the skip as deferred; the drop-only
+			// branch does not (TestPerformRotation_ProtectUnarchivedDefers
+			// pins that). Unchanged here, either way.
+			if want := map[bool]int{true: 1, false: 0}[tc.archive]; res.Deferred != want {
+				t.Errorf("Deferred = %d, want %d", res.Deferred, want)
+			}
+			partitions, err := listPartitions(context.Background(), db, dbName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			alive := false
+			for _, p := range partitions {
+				if p.Name == indexer.PartitionName(h1) {
+					alive = true
+				}
+			}
+			if !alive {
+				t.Errorf("the partition was dropped while source-b's upload of it is unconfirmed")
+			}
+			// The operator has to learn WHOSE upload is holding the hour.
+			if !logs.hasAttr("partition archived locally but not yet uploaded to S3; skipping drop", "pending_sources", "source-b") &&
+				!logs.hasAttr("partition has pending S3 upload from a previous run; skipping drop", "pending_sources", "source-b") {
+				t.Error("the skip does not name the source whose upload is pending")
+			}
+		})
 	}
 }

@@ -130,7 +130,7 @@ func MergeResultsReport(rows []ResultRow, limit int, order string) ([]ResultRow,
 			// comparison itself runs only on collision — usually rare, but
 			// NOT always: a partition that is archived and then blocked from
 			// dropping (a bucket-set/stamp-NULL archive_state row trips
-			// hasPendingS3Upload, and rotate then refuses to drop it) stays
+			// pendingS3Uploads, and rotate then refuses to drop it) stays
 			// duplicated in every query touching that hour until someone runs
 			// `archive reconcile --repair`. That is why the comparison must
 			// stay allocation-free.
