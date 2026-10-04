@@ -4,6 +4,7 @@ package consoleapp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -73,6 +75,17 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 		"CREATE TABLE big (id INT NOT NULL PRIMARY KEY, pad VARCHAR(64))",
 		bigRows(20000),
 		"ANALYZE TABLE big",
+		// One column per binary-protocol encoding, for the prepared
+		// statements below: a forwarded row must reach the client as the
+		// source sends it.
+		`CREATE TABLE types (id INT NOT NULL PRIMARY KEY, ti TINYINT, tu TINYINT UNSIGNED, si SMALLINT, mi MEDIUMINT,
+		 bi BIGINT, bu BIGINT UNSIGNED, f FLOAT, d DOUBLE, de DECIMAL(12,4), dt DATE, dtm DATETIME(6), ts TIMESTAMP NULL,
+		 tm TIME(3), yr YEAR, c CHAR(4), vc VARCHAR(64), tx TEXT, bl BLOB, bn BINARY(4), js JSON, en ENUM('a','b'),
+		 st SET('x','y'), bt BIT(8), nul INT NULL)`,
+		`INSERT INTO types VALUES
+		 (1,-128,255,-32768,-8388608,-9223372036854775808,18446744073709551615,1.1,-2.25,-12345678.9012,'2026-10-04','2026-10-04 13:05:09.250000','2026-10-04 13:05:09','-838:59:59.000',2026,'ab','it''s a\\b','ñandú',X'00ff27',X'01020304','{"k": [1, "x"]}','b','x,y',b'10100101',NULL),
+		 (2,0,0,0,0,0,0,0,0,0,'1000-01-01','1000-01-01 00:00:00.000001','1970-01-02 00:00:01','12:00:00.001',1901,'','','',X'',X'00000000','null','a','',b'0',7),
+		 (3,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL)`,
 	} {
 		if _, err := srcDB.Exec(q); err != nil {
 			t.Fatalf("%.80s: %v", q, err)
@@ -177,6 +190,141 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 	if got := side("SELECT status, count(*) FROM orders GROUP BY status"); got != "copy" {
 		t.Errorf("full scan after COMMIT answered %q, want copy", got)
 	}
+	// Prepared statements (#2036): prepared and executed on the source,
+	// which binds the arguments itself; only the expensive read is written
+	// out, for the copy alone.
+	arg := func(q string, args ...any) string {
+		t.Helper()
+		var first sql.NullString
+		rows, err := conn.Query(q, args...)
+		if err != nil {
+			t.Fatalf("%s %v: %v", q, args, err)
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			t.Fatalf("%s %v: no rows", q, args)
+		}
+		cols, _ := rows.Columns()
+		dest := make([]any, len(cols))
+		dest[0] = &first
+		for i := 1; i < len(dest); i++ {
+			dest[i] = new(sql.RawBytes)
+		}
+		if err := rows.Scan(dest...); err != nil {
+			t.Fatal(err)
+		}
+		return first.String
+	}
+	if got := arg("SELECT status FROM orders WHERE id = ?", 1); got != "live" {
+		t.Errorf("prepared point lookup answered %q, want live (MySQL)", got)
+	}
+	if got := arg("SELECT status, count(*) FROM orders WHERE status <> ? GROUP BY status", "zz"); got != "copy" {
+		t.Errorf("prepared full scan answered %q, want copy", got)
+	}
+	// A quote and a backslash in the argument reach the copy as the value.
+	if got := arg("SELECT status, count(*) FROM orders WHERE status <> ? GROUP BY status", `it's a\b`); got != "copy" {
+		t.Errorf("prepared full scan with a quote and a backslash answered %q, want copy", got)
+	}
+	// One statement, executed again with other arguments.
+	lookup, err := conn.Prepare("SELECT status FROM orders WHERE id = ?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[int]string{1: "live", 2: "live", 3: "edited"} {
+		var got string
+		if err := lookup.QueryRow(id).Scan(&got); err != nil || got != want {
+			t.Errorf("prepared lookup re-executed with %d = %q, %v; want %q", id, got, err, want)
+		}
+	}
+	lookup.Close()
+	// A write is bound by MySQL: the value is stored as given, whatever it holds.
+	const tricky = "it's a\\b \"q\" %_ \n ñ"
+	if res, err := conn.Exec("UPDATE orders SET status = ? WHERE id = ?", tricky, 3); err != nil {
+		t.Fatalf("prepared UPDATE: %v", err)
+	} else if n, _ := res.RowsAffected(); n != 1 {
+		t.Errorf("prepared UPDATE affected %d rows, want 1", n)
+	}
+	var stored string
+	if err := srcDB.QueryRow("SELECT status FROM orders WHERE id = 3").Scan(&stored); err != nil || stored != tricky {
+		t.Errorf("the source stored %q, %v; want the argument as given %q", stored, err, tricky)
+	}
+	if _, err := conn.Exec("UPDATE orders SET status = ? WHERE id = ?", "edited", 3); err != nil {
+		t.Fatal(err)
+	}
+	// A first execution whose arguments are all NULL (no types to send).
+	if res, err := conn.Exec("UPDATE orders SET status = ? WHERE id = ?", nil, nil); err != nil {
+		t.Errorf("prepared UPDATE with all-NULL arguments: %v", err)
+	} else if n, _ := res.RowsAffected(); n != 0 {
+		t.Errorf("prepared UPDATE ... WHERE id = NULL affected %d rows, want 0", n)
+	}
+	if _, err := conn.Exec("INSERT INTO orders VALUES (?, ?)", 1, "dup"); mysqlCode(err) != 1062 {
+		t.Errorf("prepared duplicate insert: err = %v, want MySQL's 1062", err)
+	}
+	if _, err := conn.Query("SELECT * FROM nope WHERE id = ?", 1); mysqlCode(err) != 1146 {
+		t.Errorf("prepared SELECT on a missing table: err = %v, want MySQL's 1146 at prepare", err)
+	}
+	// Every type: a forwarded row reaches the client as the source sends it.
+	allTypes := func(db *sql.DB) [][]string {
+		t.Helper()
+		rows, err := db.Query("SELECT * FROM types WHERE id >= ? ORDER BY id", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		cols, _ := rows.Columns()
+		var out [][]string
+		for rows.Next() {
+			raw := make([]sql.RawBytes, len(cols))
+			dest := make([]any, len(cols))
+			for i := range raw {
+				dest[i] = &raw[i]
+			}
+			if err := rows.Scan(dest...); err != nil {
+				t.Fatal(err)
+			}
+			row := make([]string, len(cols))
+			for i, b := range raw {
+				row[i] = cols[i] + "=" + fmt.Sprintf("%q", b)
+				if b == nil {
+					row[i] = cols[i] + "=NULL"
+				}
+			}
+			out = append(out, row)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	viaPort, direct := allTypes(conn), allTypes(srcDB)
+	if len(viaPort) != 3 || !reflect.DeepEqual(viaPort, direct) {
+		t.Errorf("types through the port:\n  %v\nstraight from MySQL:\n  %v", viaPort, direct)
+	}
+	// A forwarded prepared resultset is streamed whole too.
+	if rows, err := conn.Query("SELECT id FROM big WHERE id > ? ORDER BY id", 0); err != nil {
+		t.Errorf("prepared streamed forward: %v", err)
+	} else {
+		n := 0
+		for rows.Next() {
+			n++
+		}
+		rows.Close()
+		if n != 20000 {
+			t.Errorf("prepared streamed forward returned %d rows, want 20000", n)
+		}
+	}
+	// Inside a transaction a prepared read is MySQL's as well.
+	tx, err = conn.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.QueryRow("SELECT status, count(*) FROM orders WHERE status <> ? GROUP BY status ORDER BY status LIMIT 1", "zz").Scan(&s, new(int)); err != nil || s != "edited" {
+		t.Errorf("prepared full scan inside a transaction answered %q, %v; want MySQL's rows", s, err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
 	// ...until a session SET pins the connection to MySQL.
 	if _, err := conn.Exec("SET time_zone = '+00:00'"); err != nil {
 		t.Fatal(err)
@@ -205,8 +353,8 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 			t.Errorf("sql.run detail = %v, want route=copy with the scan reason", ev.Detail)
 		}
 	}
-	if copyServed != 2 {
-		t.Errorf("audited %d copy-served statements, want 2 (the two GROUP BYs the copy answered)", copyServed)
+	if copyServed != 4 {
+		t.Errorf("audited %d copy-served statements, want 4 (the GROUP BYs the copy answered: two as text, two prepared)", copyServed)
 	}
 
 	// The tally the Connect page reads: who answered, and why MySQL, per
@@ -243,27 +391,29 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 		t.Fatalf("no tally for server %s (keyed by id): %v", ent.ID, fb.Routing.Servers)
 	}
 	wantReasons := map[string]uint64{
-		"expensive_plan":  2, // the two GROUP BYs the copy answered
+		"expensive_plan":  4, // the GROUP BYs the copy answered: two as text, two prepared
 		"copy_refused":    1, // CONVERT … USING (expensive by plan, DuckDB syntax error)
 		"veto":            1, // GROUP_CONCAT
 		"explain_failed":  1, // SELECT * FROM nope
-		"write":           1, // the UPDATE
-		"in_transaction":  1,
+		"write":           5, // the UPDATE; prepared: three UPDATEs and the duplicate INSERT
+		"in_transaction":  2, // one as text, one prepared
 		"session_setting": 1, // SET time_zone
 		"settings_set":    1, // the GROUP BY after it
 		"copy_too_old":    1, // the strict port
 		// The two point lookups, and `SELECT id FROM big ORDER BY id`: MySQL
 		// walks the primary key (access_type index, not ALL), so with the cost
 		// rule off it is cheap and MySQL streams it — the copy never saw big.
-		"cheap_plan": 3,
+		// Prepared: the point lookup, its three re-executions, the types
+		// read and the big read. One observation per execution.
+		"cheap_plan": 9,
 	}
 	for reason, want := range wantReasons {
 		if got := tally.Reasons[reason]; got != want {
 			t.Errorf("reasons[%s] = %d, want %d (all: %v)", reason, got, want, tally.Reasons)
 		}
 	}
-	if tally.Copy != 2 {
-		t.Errorf("copy = %d, want 2", tally.Copy)
+	if tally.Copy != 4 {
+		t.Errorf("copy = %d, want 4", tally.Copy)
 	}
 	var mysqlSum uint64
 	for reason, n := range tally.Reasons {

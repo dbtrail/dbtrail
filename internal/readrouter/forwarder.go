@@ -172,6 +172,12 @@ func (f *Forwarder) Decide(ctx context.Context, stmt string) (Decision, error) {
 	}
 	defer f.watch(ctx)()
 	res, err := c.Execute("EXPLAIN FORMAT=JSON " + stmt)
+	return f.decideFromExplain(stmt, res, err)
+}
+
+// decideFromExplain reads the plan out of an EXPLAIN FORMAT=JSON answer and
+// applies the policy.
+func (f *Forwarder) decideFromExplain(stmt string, res *mysql.Result, err error) (Decision, error) {
 	if err != nil {
 		if !isMySQLError(err) {
 			f.lose(err)
@@ -223,9 +229,18 @@ func (f *Forwarder) Forward(ctx context.Context, stmt string, sink RowSink) (*my
 		return nil, err
 	}
 	defer f.watch(ctx)()
+	return f.stream(sink, func(res *mysql.Result, perRow client.SelectPerRowCallback, perRes client.SelectPerResultCallback) error {
+		return c.ExecuteSelectStreaming(stmt, res, perRow, perRes)
+	})
+}
+
+// stream runs one statement through run (the text or the prepared form of
+// go-mysql's streaming read) and hands its rows to sink; see Forward for
+// what comes back.
+func (f *Forwarder) stream(sink RowSink, run func(*mysql.Result, client.SelectPerRowCallback, client.SelectPerResultCallback) error) (*mysql.Result, error) {
 	var res mysql.Result
 	var cells []any
-	err = c.ExecuteSelectStreaming(stmt, &res,
+	err := run(&res,
 		func(row []mysql.FieldValue) error {
 			if cap(cells) < len(row) {
 				cells = make([]any, len(row))
@@ -256,7 +271,7 @@ func (f *Forwarder) Forward(ctx context.Context, stmt string, sink RowSink) (*my
 		case isMySQLError(err):
 			// The source answered with an error packet (before or between
 			// rows); the connection is in sync and stays usable.
-			return nil, err
+			return nil, unwrapMySQLError(err)
 		default:
 			f.lose(err)
 			return nil, lostError(err)
@@ -346,4 +361,143 @@ func (b *BufferSink) Row(values []any) error {
 	}
 	b.Rows = append(b.Rows, row)
 	return nil
+}
+
+// Stmt is a statement prepared on the source for one client connection: the
+// source keeps it, binds the arguments itself and answers in the binary
+// protocol, exactly as it would for a client connected to it. Nothing is
+// rebuilt from text, so no argument is ever escaped here.
+type Stmt interface {
+	// Params and Columns are the counts the source answered PREPARE with;
+	// ParamFields and ColumnFields its raw definitions, to relay as they are.
+	Params() int
+	Columns() int
+	ParamFields() [][]byte
+	ColumnFields() [][]byte
+	// Decide applies the policy to this execution: the plan comes from
+	// EXPLAIN on the same statement with the same arguments.
+	Decide(ctx context.Context, args []any) (Decision, error)
+	// Execute runs the statement on the source with args bound; rows and
+	// the returned Result are as in Forwarder.Forward.
+	Execute(ctx context.Context, args []any, sink RowSink) (*mysql.Result, error)
+	// Close frees the statement on the source.
+	Close()
+}
+
+// prepared is the Forwarder's Stmt.
+type prepared struct {
+	f     *Forwarder
+	c     *client.Conn
+	query string
+	st    *client.Stmt
+	// explain is the prepared EXPLAIN of the same statement, made on the
+	// first execution that needs a plan; explainErr remembers that the
+	// source would not prepare one (so it is not asked again).
+	explain    *client.Stmt
+	explainErr error
+}
+
+// Prepare prepares the statement on the source. MySQL's own refusal (a
+// syntax error, a statement that cannot be prepared) is returned as is.
+func (f *Forwarder) Prepare(ctx context.Context, query string) (Stmt, error) {
+	c, err := f.get(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer f.watch(ctx)()
+	st, err := c.Prepare(query)
+	if err != nil {
+		if isMySQLError(err) {
+			return nil, unwrapMySQLError(err)
+		}
+		f.lose(err)
+		return nil, lostError(err)
+	}
+	return &prepared{f: f, c: c, query: query, st: st}, nil
+}
+
+// unwrapMySQLError returns the *mysql.MyError inside err, so the port
+// writes the source's code and message back rather than a wrapped 1105.
+func unwrapMySQLError(err error) error {
+	var me *mysql.MyError
+	if errors.As(err, &me) {
+		return me
+	}
+	return err
+}
+
+func (p *prepared) Params() int            { return p.st.ParamNum() }
+func (p *prepared) Columns() int           { return p.st.ColumnNum() }
+func (p *prepared) ParamFields() [][]byte  { return p.st.RawParamFields }
+func (p *prepared) ColumnFields() [][]byte { return p.st.RawColumnFields }
+
+// live returns the connection the statement was prepared on, or the error
+// every statement gets once that connection is lost: a statement does not
+// survive its connection.
+func (p *prepared) live(ctx context.Context) error {
+	c, err := p.f.get(ctx)
+	if err != nil {
+		return err
+	}
+	if c != p.c {
+		return lostError(errors.New("the statement was prepared on a connection that is gone"))
+	}
+	return nil
+}
+
+func (p *prepared) Decide(ctx context.Context, args []any) (Decision, error) {
+	if d, ok := p.f.policy.Prejudge(p.query); ok {
+		return d, nil
+	}
+	if p.explainErr != nil {
+		return Decision{}, p.explainErr
+	}
+	if err := p.live(ctx); err != nil {
+		return Decision{}, err
+	}
+	defer p.f.watch(ctx)()
+	if p.explain == nil {
+		st, err := p.c.Prepare("EXPLAIN FORMAT=JSON " + p.query)
+		if err != nil {
+			if !isMySQLError(err) {
+				p.f.lose(err)
+				return Decision{}, fmt.Errorf("explain: %w", err)
+			}
+			p.explainErr = fmt.Errorf("explain: %w", err)
+			return Decision{}, p.explainErr
+		}
+		p.explain = st
+	}
+	res, err := p.explain.Execute(args...)
+	return p.f.decideFromExplain(p.query, res, err)
+}
+
+func (p *prepared) Execute(ctx context.Context, args []any, sink RowSink) (*mysql.Result, error) {
+	if err := p.live(ctx); err != nil {
+		return nil, err
+	}
+	defer p.f.watch(ctx)()
+	return p.f.stream(sink, func(res *mysql.Result, perRow client.SelectPerRowCallback, perRes client.SelectPerResultCallback) error {
+		return p.st.ExecuteSelectStreaming(res, perRow, perRes, args...)
+	})
+}
+
+// Close frees the statement (and its EXPLAIN) on the source. On a lost
+// connection there is nothing to free.
+func (p *prepared) Close() {
+	p.f.mu.Lock()
+	alive := p.f.conn == p.c && p.f.dead == nil
+	p.f.mu.Unlock()
+	if !alive {
+		return
+	}
+	for _, st := range []*client.Stmt{p.st, p.explain} {
+		if st == nil {
+			continue
+		}
+		if err := st.Close(); err != nil {
+			p.f.lose(err)
+			return
+		}
+	}
 }

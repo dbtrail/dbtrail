@@ -75,6 +75,9 @@ type Router interface {
 	// through sink and the returned Result is its tail (go-mysql writes the
 	// trailing EOF from it); an OK packet comes back whole.
 	Forward(ctx context.Context, statement string, sink readrouter.RowSink) (*mysql.Result, error)
+	// Prepare prepares the statement on the source, which then binds its
+	// arguments itself on every execution.
+	Prepare(ctx context.Context, statement string) (readrouter.Stmt, error)
 	// UseDB selects the database on the upstream connection.
 	UseDB(ctx context.Context, db string) error
 	// InTransaction reports whether the upstream connection is inside an
@@ -160,11 +163,38 @@ func (h *Handler) Close() {
 // count would take the cut result for the whole one.
 var errCopyTruncated = errors.New("the copy's result exceeded the port's row or cell cap")
 
+// routeOps is how one statement is run on each side of the routing ladder.
+// A text statement and a prepared one differ only in these: the ladder
+// itself (route) is one.
+type routeOps struct {
+	// forward runs the statement on the source and observes the decision.
+	forward func(reason RouteReason, detail string) (*mysql.Result, error)
+	// decide asks the source for the plan and applies the policy.
+	decide func() (readrouter.Decision, error)
+	// runCopy runs the statement on the copy; reason is the decision's.
+	runCopy func(reason string) (*mysql.Result, error)
+	// extraVeto, when set, names one more reason to keep the statement on
+	// MySQL (checked after the statement's own vetoes), or "".
+	extraVeto func() string
+}
+
 // routeStatement is HandleQuery's path with a Router bound: the time-travel
 // shapes were already served, so what arrives here is MySQL traffic.
 func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) {
 	ctx, cancel := h.queryContext()
 	defer cancel()
+	return h.route(ctx, qstr, routeOps{
+		forward: func(reason RouteReason, detail string) (*mysql.Result, error) {
+			return h.forward(ctx, qstr, reason, detail)
+		},
+		decide:  func() (readrouter.Decision, error) { return h.router.Decide(ctx, qstr) },
+		runCopy: func(reason string) (*mysql.Result, error) { return h.runFreeSQLRouted(currentDB, qstr, reason) },
+	})
+}
+
+// route is the routing ladder, one rung per reason a statement is MySQL's;
+// only an expensive SELECT on a fresh copy reaches the last one.
+func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.Result, error) {
 	kind := readrouter.Classify(qstr)
 	switch kind {
 	case readrouter.KindSet:
@@ -173,60 +203,65 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 			h.routeSettingsSet = true
 			h.mu.Unlock()
 		}
-		return h.forward(ctx, qstr, RouteReasonSessionSetting, "session setting")
+		return ops.forward(RouteReasonSessionSetting, "session setting")
 	case readrouter.KindWrite:
 		// A write reaches the source with the registry's account, on the
 		// strength of the console token. Named in the log at info: the
 		// audit trail covers historical reads, and this is neither.
 		h.logger.Info("read routing: write forwarded to mysql", "statement", readrouter.LeadingKeyword(qstr))
-		return h.forward(ctx, qstr, RouteReasonWrite, "write")
+		return ops.forward(RouteReasonWrite, "write")
 	case readrouter.KindTxnBegin, readrouter.KindTxnEnd, readrouter.KindOther:
-		return h.forward(ctx, qstr, RouteReasonNotASelect, "not a select")
+		return ops.forward(RouteReasonNotASelect, "not a select")
 	}
 	h.mu.Lock()
 	settingsSet := h.routeSettingsSet
 	h.mu.Unlock()
 	switch {
 	case h.router.InTransaction():
-		return h.forward(ctx, qstr, RouteReasonInTransaction, "in transaction")
+		return ops.forward(RouteReasonInTransaction, "in transaction")
 	case settingsSet:
-		return h.forward(ctx, qstr, RouteReasonSettingsSet, "session settings were set on this connection")
+		return ops.forward(RouteReasonSettingsSet, "session settings were set on this connection")
 	case h.routerCfg.MaxCopyAge <= 0:
-		return h.forward(ctx, qstr, RouteReasonRoutingOff, "routing to the copy is off (no max copy age)")
+		return ops.forward(RouteReasonRoutingOff, "routing to the copy is off (no max copy age)")
 	}
 	if v := readrouter.Veto(qstr); v != "" {
-		return h.forward(ctx, qstr, RouteReasonVeto, "veto: "+v)
+		return ops.forward(RouteReasonVeto, "veto: "+v)
+	}
+	if ops.extraVeto != nil {
+		if v := ops.extraVeto(); v != "" {
+			return ops.forward(RouteReasonVeto, "veto: "+v)
+		}
 	}
 	// The plan first, the copy's freshness second: freshness costs a
 	// snapshot listing (an S3 call on an S3 copy), and the cheap reads
 	// this exists to keep fast must not pay it.
-	d, err := h.router.Decide(ctx, qstr)
+	d, err := ops.decide()
 	if err != nil {
 		h.routeWarn("explain", "read routing: could not explain, statement forwarded", err)
-		return h.forward(ctx, qstr, RouteReasonExplainFailed, "could not explain: "+err.Error())
+		return ops.forward(RouteReasonExplainFailed, "could not explain: "+err.Error())
 	}
 	if !d.ToCopy {
 		reason := RouteReasonCheapPlan
 		if d.Rule == readrouter.RuleBoundedLimit {
 			reason = RouteReasonBoundedLimit
 		}
-		return h.forward(ctx, qstr, reason, d.Reason)
+		return ops.forward(reason, d.Reason)
 	}
 	at := h.freeSQL.CopyUpdatedAt(ctx)
 	if at.IsZero() {
 		h.routeWarn("age", "read routing: copy age unknown, expensive statement forwarded", nil)
-		return h.forward(ctx, qstr, RouteReasonCopyAgeUnknown, "copy age unknown")
+		return ops.forward(RouteReasonCopyAgeUnknown, "copy age unknown")
 	}
 	if age := time.Since(at); age > h.routerCfg.MaxCopyAge {
-		return h.forward(ctx, qstr, RouteReasonCopyTooOld, fmt.Sprintf("copy is %s old, max %s", age.Round(time.Second), h.routerCfg.MaxCopyAge))
+		return ops.forward(RouteReasonCopyTooOld, fmt.Sprintf("copy is %s old, max %s", age.Round(time.Second), h.routerCfg.MaxCopyAge))
 	}
-	res, err := h.runFreeSQLRouted(currentDB, qstr, d.Reason)
+	res, err := ops.runCopy(d.Reason)
 	if err != nil {
 		// The slow path is always right: whatever the copy could not do
 		// (a construct DuckDB lacks, a missing table, busy, a timeout, a
 		// result over the cap), MySQL does.
 		h.routeWarn("copy", "read routing: copy refused an expensive statement, forwarded to mysql", err)
-		return h.forward(ctx, qstr, RouteReasonCopyRefused, "copy refused: "+shortErr(err))
+		return ops.forward(RouteReasonCopyRefused, "copy refused: "+shortErr(err))
 	}
 	// The copy's side of the trace: forwarded statements log their reason,
 	// so a copy-served one must too, or the log reads as if nothing ever
@@ -268,6 +303,16 @@ func (h *Handler) routeWarn(key, msg string, err error) {
 // (RouteReason*) and the detail is logged at debug: it is the trace a
 // routing decision leaves.
 func (h *Handler) forward(ctx context.Context, qstr string, reason RouteReason, detail string) (*mysql.Result, error) {
+	return h.forwardWith(reason, detail, false, func(sink readrouter.RowSink) (*mysql.Result, error) {
+		return h.router.Forward(ctx, qstr, sink)
+	})
+}
+
+// forwardWith is forward for any way of running a statement on the source:
+// run executes it, streaming rows through the sink it is given. binary says
+// the client is reading a prepared statement's answer, so the rows go out in
+// the binary encoding.
+func (h *Handler) forwardWith(reason RouteReason, detail string, binary bool, run func(readrouter.RowSink) (*mysql.Result, error)) (*mysql.Result, error) {
 	h.logger.Debug("read routing: forwarded to mysql", "reason", detail)
 	h.mu.Lock()
 	h.routeLastForwarded = true
@@ -275,12 +320,14 @@ func (h *Handler) forward(ctx context.Context, qstr string, reason RouteReason, 
 	var sink readrouter.RowSink
 	var buf *readrouter.BufferSink
 	if h.conn != nil {
-		sink = newStreamWriterFields(h.conn, nil)
+		w := newStreamWriterFields(h.conn, nil)
+		w.binary = binary
+		sink = w
 	} else {
 		buf = &readrouter.BufferSink{}
 		sink = buf
 	}
-	res, err := h.router.Forward(ctx, qstr, sink)
+	res, err := run(sink)
 	// Observed AFTER the forward, so a source nobody reached is counted as
 	// such: with the upstream lost (or never opened: wrong credentials, the
 	// source down) every statement fails with 2006, and tallying those under
@@ -313,6 +360,16 @@ func (h *Handler) forward(ctx context.Context, qstr string, reason RouteReason, 
 			rs, err := mysql.BuildSimpleTextResultset(names, buf.Rows)
 			if err != nil {
 				return nil, err
+			}
+			if binary {
+				// The text builder guessed the types; the source's own
+				// definitions are the ones to encode under.
+				for i, f := range buf.Fields {
+					rs.Fields[i].Type, rs.Fields[i].Flag, rs.Fields[i].Charset = f.Type, f.Flag, f.Charset
+				}
+				if rs, err = binaryResultset(rs); err != nil {
+					return nil, err
+				}
 			}
 			return &mysql.Result{Status: res.Status, Warnings: res.Warnings, Resultset: rs}, nil
 		}

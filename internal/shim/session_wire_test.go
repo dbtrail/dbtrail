@@ -62,7 +62,7 @@ func TestSession_overTheWire(t *testing.T) {
 	if n, _ := res.GetInt(0, 0); n != 3 {
 		t.Errorf("first execution answered %d, want 3", n)
 	}
-	if !strings.HasSuffix(f.gotStmt, "id = 2") {
+	if !strings.HasSuffix(squash(f.gotStmt), "id = 2") {
 		t.Fatalf("first execution ran %q", f.gotStmt)
 	}
 
@@ -83,7 +83,7 @@ func TestSession_overTheWire(t *testing.T) {
 	if first[0] == mysql.ERR_HEADER {
 		t.Fatalf("the re-execution was refused: %q", first[3:])
 	}
-	if !strings.HasSuffix(f.gotStmt, "id = 7") {
+	if !strings.HasSuffix(squash(f.gotStmt), "id = 7") {
 		t.Errorf("the re-execution ran %q, want its own argument (id = 7)", f.gotStmt)
 	}
 	conn.Close()
