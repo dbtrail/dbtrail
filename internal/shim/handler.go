@@ -144,6 +144,10 @@ type Handler struct {
 	// never calls BindConn — keeps the bounded buffered+cap path, so streaming
 	// is strictly opt-in and cannot change behaviour for an unbound handler.
 	conn packetWriter
+	// buffered is set while a prepared statement executes (prepared.go):
+	// its rows go back in the binary encoding, so nothing may stream text
+	// rows to conn. Read and written on the connection's own goroutine.
+	buffered bool
 
 	// actor is the authenticated MySQL user this connection handshook as,
 	// set by BindActor. It is the audit identity for every time-travel

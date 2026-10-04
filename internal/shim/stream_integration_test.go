@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,14 +74,16 @@ func startShimServer(t *testing.T, db *sql.DB, cfg Config, defaultSchema string)
 // the full MySQL wire protocol end-to-end, so a streaming-framing or
 // packet-sequence bug surfaces here as a driver error rather than passing a
 // server-side-only assertion.
-func queryShim(t *testing.T, addr, schema, query string) ([]string, [][]string, error) {
+func queryShim(t *testing.T, addr, schema, query string, args ...any) ([]string, [][]string, error) {
 	t.Helper()
 	db, err := sql.Open("mysql", "u:p@tcp("+addr+")/"+schema)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer db.Close()
-	rows, err := db.Query(query)
+	// With args the driver sends COM_STMT_PREPARE + COM_STMT_EXECUTE (the
+	// binary protocol); without, a text COM_QUERY.
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -185,6 +188,44 @@ func TestStreamSnapshotFullTable_OverWire(t *testing.T) {
 		}
 		if _, resurrected := got["3"]; resurrected {
 			t.Errorf("streamed row set resurrected deleted id=3: %v", got)
+		}
+	})
+
+	// A prepared statement (#2036) cannot be answered with streamed text
+	// rows: its client reads binary ones. The same whole-table read must
+	// come back buffered and binary, so it returns the table on a server
+	// with the default cap and is refused by the 1-row cap the streamed
+	// read ignores.
+	t.Run("prepared_statement_is_buffered_not_streamed", func(t *testing.T) {
+		roomy := cfg
+		roomy.FullTableRowCap = 0
+		addr2 := startShimServer(t, db, roomy, "myapp")
+		cols, data, err := queryShim(t, addr2, "myapp", "SELECT * FROM _snapshot.users AS OF ?", asOfStr)
+		if err != nil {
+			t.Fatalf("prepared full-table _snapshot failed over the wire: %v", err)
+		}
+		if !slices.Equal(cols, []string{"id", "name"}) {
+			t.Errorf("columns = %v, want [id name]", cols)
+		}
+		got := byID(data)
+		want := map[string]string{"1": "alice", "2": "bob2", "4": "dave"}
+		if len(got) != len(want) {
+			t.Fatalf("prepared read returned %d rows %v, want %d %v", len(got), got, len(want), want)
+		}
+		for k, v := range want {
+			if got[k] != v {
+				t.Errorf("prepared row id=%s = %q, want %q (full: %v)", k, got[k], v, got)
+			}
+		}
+		if _, _, err := queryShim(t, addr, "myapp", "SELECT * FROM _snapshot.users AS OF ?", asOfStr); err == nil {
+			t.Error("the prepared read ignored the 1-row cap: it was streamed, not buffered")
+		} else if !strings.Contains(err.Error(), "1104") {
+			t.Errorf("the prepared read under a 1-row cap failed for another reason than the cap: %v", err)
+		}
+		// A point read with two arguments, one of them the PK.
+		_, one, err := queryShim(t, addr, "myapp", "SELECT * FROM _flashback.users AS OF ? WHERE id = ?", asOfStr, 2)
+		if err != nil || len(one) != 1 || one[0][1] != "bob2" {
+			t.Errorf("prepared _flashback point read = %v, %v; want bob2", one, err)
 		}
 	})
 

@@ -194,8 +194,7 @@ The decision, in order, for every statement:
    (`GROUP_CONCAT`, `NOW()` and the session-time-zone family, `STR_TO_DATE`,
    `DATEDIFF`, `COLLATE`, `CAST AS UNSIGNED`, `DIV`, `RAND`, user and system
    variables, locking reads, `information_schema`, full-text `MATCH`,
-   JSON functions and the `->`/`->>` operators, a backslash inside a string
-   literal, optimizer hints): **MySQL**.
+   JSON functions and the `->`/`->>` operators, optimizer hints): **MySQL**.
 4. The one shape that needs no plan: `SELECT <columns> FROM <one table>
    LIMIT <at most 1,000 rows, offset included>` with nothing else (no
    `WHERE`, join, `ORDER BY`, `GROUP BY`, subquery or function call):
@@ -246,9 +245,7 @@ What this is and is not:
 - **Where the copy answers differently without an error.** The veto list
   keeps the known cases on MySQL (`GROUP_CONCAT`, the `NOW()` family,
   `LIKE`/`REGEXP`, `COLLATE`, `DIV`, `||`, `^`, double-quoted string
-  literals, a backslash inside a string literal (an escape on MySQL, a
-  plain character on the copy: `'a\\b'` and `'it\'s'` name different
-  strings), `count(DISTINCT ...)`, `INSTR`/`LOCATE`, variables, ...). The
+  literals, `count(DISTINCT ...)`, `INSTR`/`LOCATE`, variables, ...). The
   copy itself compares text close to the way MySQL's default collation
   does: `'Paid'` and `'paid'`, `'café'` and `'cafe'` are equal in `WHERE`,
   `GROUP BY`, `SELECT DISTINCT`, `IN` and `ORDER BY`, and NULLs sort first
@@ -770,7 +767,14 @@ Every quoted time literal — in `AS OF`, `DBTRAIL_AT`, and the `BETWEEN` bounds
 
 **1-second granularity.** Timestamps are compared and stored at one-second resolution; a literal with sub-second precision has no finer effect than truncating to the second.
 
-**Server-side prepared statements are not supported.** The shim has no `COM_STMT_PREPARE` handling and returns error 1105 ("not supported now") for it. Drivers/ORMs that prepare statements by default against the shim's port — MySQL Connector/J with `useServerPrepStmts=true`, .NET's `MySqlConnector`, Perl's `DBD::mysql` with `mysql_server_prepare` — fail on the very first query unless configured to use client-side (text-protocol) statements instead.
+**Prepared statements are answered from a template.** A driver that prepares its statements (the binary protocol: Go's `database/sql` with arguments, Node's `mysql2` `execute`, .NET's `MySqlConnector`) works against the port and against `bintrail shim`: `PREPARE` counts the `?` placeholders, `EXECUTE` writes the arguments into the statement as SQL literals and runs it exactly as if it had been sent as text, and the rows come back in the binary encoding with typed columns. That holds for the time-travel shapes (`SELECT * FROM _flashback.orders AS OF ? WHERE id = ?`) and for ordinary SQL on the copy alike. What to know:
+
+- The prepare answer carries no column definitions (they are only known once the statement runs); drivers read them from the execute answer. A client that needs the result's shape before executing (the C API's `mysql_stmt_result_metadata`, PHP `mysqli` with native prepares) sees none.
+- A result is buffered, never streamed: a whole-table `_snapshot` read through a prepared statement is held to the 100,000-row cap (the 1104 refusal past it, arriving as 1105 like every execute error), where the same read as text streams past it.
+- An `EXECUTE` error always arrives with code 1105; the original code and message are in its text (`ERROR 1064 (42000): ...`). Errors at `PREPARE` keep their code.
+- A re-execution must re-send its argument types. Clients that send them only on the first execute (MySQL Connector/J with `useServerPrepStmts=true`, the C API, PHP's `mysqlnd`) are refused from the second execute on with error 1105 naming the cause, never answered with the wrong rows; the same refusal meets a statement whose every argument is `NULL`, which the port cannot tell apart. Use client-side prepares with those (Connector/J's default).
+- An argument whose bytes are not valid UTF-8 reaches the copy as a `BLOB`; the time-travel shapes refuse it.
+- With read routing on (`--route-max-copy-age`) the port refuses to prepare (error 1295): a statement forwarded to MySQL has to be bound by MySQL itself, which is the next step, not this one. Send those statements as text, or leave routing off for clients that prepare.
 
 On the `_flashback` / `_snapshot` shapes a column list may replace `*` and the optional `TIMESTAMP` keyword may follow `AS OF` (Oracle / SQL Server convention):
 
