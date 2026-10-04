@@ -34,7 +34,8 @@ duckdb -init views.sql team.duckdb
 In a DuckDB session that is already open, `.read views.sql` does the same.
 
 Run the file at the start of **every** session, not once. It sets up S3 for
-that session and picks the newest snapshot carrying a `_SUCCESS` marker, so
+that session and picks the newest snapshot (the one the root's `_NEWEST`
+object names, or on an older root the newest carrying a `_SUCCESS` marker), so
 each new session reads the newest one without a new file. A snapshot still
 uploading is not read until it completes. In Metabase, paste the file into the
 DuckDB connection's **Init SQL**; see the note in step 4 about what that costs
