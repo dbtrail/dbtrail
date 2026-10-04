@@ -296,6 +296,32 @@ statements that finished, not the slowest ones.
 histogram_quantile(0.9, sum by (le, phase) (rate(bintrail_sql_statement_phase_seconds_bucket[5m])))
 ```
 
+## Read routing (`bintrail_read_routing_decisions_total`)
+
+With read routing on the embedded port (`watch --flashback-listen` plus
+`--route-max-copy-age`), every routed statement is one decision, counted
+once:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `bintrail_read_routing_decisions_total{server,route,reason}` | counter | Routing decisions per server (`server` is the registry id), side (`route` is `copy` or `mysql`) and reason, a closed set: `expensive_plan` (the one reason a statement goes to the copy), `cheap_plan`, `not_a_select`, `write`, `session_setting`, `settings_set`, `in_transaction`, `veto`, `explain_failed`, `copy_age_unknown`, `copy_too_old`, `copy_refused`, `show_warnings`, `upstream_lost` (nobody answered: the connection to the source is lost, the client got 2006), `routing_off`. Decisions, not successes: a statement MySQL then fails was still MySQL's. Exported by `watch --metrics-addr` only; a daemon without routing never creates a series |
+
+The copy's share of the work is `route="copy"` over the total. A copy that
+never answers is visible as `copy_refused`, `copy_too_old` or
+`copy_age_unknown` climbing while `expensive_plan` stays flat; `explain_failed`
+climbing means the source account cannot `EXPLAIN` what the clients run.
+`upstream_lost` climbing means the source is unreachable or its credentials
+are wrong. `SHOW WARNINGS` after a copy-served statement and the schema
+seeded at connect are not decisions and are not counted. The same counts, per server since the daemon started,
+are on the web interface under Settings → MCP Server → Connect a SQL client.
+
+```promql
+# statements per second the copy takes off each source, by server
+sum by (server) (rate(bintrail_read_routing_decisions_total{route="copy"}[5m]))
+# why statements go to MySQL instead, by reason
+sum by (reason) (rate(bintrail_read_routing_decisions_total{route="mysql"}[5m]))
+```
+
 ## Example Prometheus alert rules
 
 The push-based sibling of these metrics is the watch daemon's

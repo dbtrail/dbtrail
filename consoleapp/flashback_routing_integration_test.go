@@ -4,8 +4,10 @@ package consoleapp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -64,8 +66,10 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 		"CREATE TABLE orders (id INT NOT NULL PRIMARY KEY, status VARCHAR(32))",
 		"INSERT INTO orders VALUES (1,'live'),(2,'live'),(3,'live')",
 		"ANALYZE TABLE orders",
-		// big is not in the copy: an expensive plan sends it there, the
-		// copy refuses, and MySQL streams the whole table back.
+		// big is not in the copy. Its ORDER BY id is a primary-key walk
+		// (access_type index, not ALL), so with the cost rule off it is a
+		// cheap plan and MySQL streams the whole table back — past any cap
+		// the copy has.
 		"CREATE TABLE big (id INT NOT NULL PRIMARY KEY, pad VARCHAR(64))",
 		bigRows(20000),
 		"ANALYZE TABLE big",
@@ -87,7 +91,10 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg})
+	// FlashbackListen and ReadRouting are display config (watch passes what
+	// it bound); the port below is served by hand on its own listener.
+	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg,
+		FlashbackListen: "127.0.0.1:3308", ReadRouting: console.ReadRoutingConfig{MaxCopyAge: time.Hour, ScanRows: 2}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,6 +207,72 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 	}
 	if copyServed != 2 {
 		t.Errorf("audited %d copy-served statements, want 2 (the two GROUP BYs the copy answered)", copyServed)
+	}
+
+	// The tally the Connect page reads: who answered, and why MySQL, per
+	// server id, through the real route. Counts are pinned per reason for
+	// the statements above (the driver's own BEGIN/COMMIT land under
+	// not_a_select, so the MySQL total is checked as the sum of its reasons
+	// rather than enumerated).
+	req := httptest.NewRequest("GET", "http://127.0.0.1/api/flashback", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, req)
+	if rec2.Code != 200 {
+		t.Fatalf("GET /api/flashback: %d %s", rec2.Code, rec2.Body.String())
+	}
+	var fb struct {
+		Routing struct {
+			Enabled    bool   `json:"enabled"`
+			MaxCopyAge string `json:"max_copy_age"`
+			Servers    map[string]struct {
+				Copy    uint64            `json:"copy"`
+				MySQL   uint64            `json:"mysql"`
+				Reasons map[string]uint64 `json:"reasons"`
+			} `json:"servers"`
+		} `json:"routing"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &fb); err != nil {
+		t.Fatalf("decode /api/flashback: %v (%s)", err, rec2.Body.String())
+	}
+	if !fb.Routing.Enabled || fb.Routing.MaxCopyAge != "1h0m0s" {
+		t.Errorf("routing = %+v, want enabled with max_copy_age 1h0m0s", fb.Routing)
+	}
+	tally, ok := fb.Routing.Servers[ent.ID]
+	if !ok {
+		t.Fatalf("no tally for server %s (keyed by id): %v", ent.ID, fb.Routing.Servers)
+	}
+	wantReasons := map[string]uint64{
+		"expensive_plan":  2, // the two GROUP BYs the copy answered
+		"copy_refused":    1, // CONVERT … USING (expensive by plan, DuckDB syntax error)
+		"veto":            1, // GROUP_CONCAT
+		"explain_failed":  1, // SELECT * FROM nope
+		"write":           1, // the UPDATE
+		"in_transaction":  1,
+		"session_setting": 1, // SET time_zone
+		"settings_set":    1, // the GROUP BY after it
+		"copy_too_old":    1, // the strict port
+		// The two point lookups, and `SELECT id FROM big ORDER BY id`: MySQL
+		// walks the primary key (access_type index, not ALL), so with the cost
+		// rule off it is cheap and MySQL streams it — the copy never saw big.
+		"cheap_plan": 3,
+	}
+	for reason, want := range wantReasons {
+		if got := tally.Reasons[reason]; got != want {
+			t.Errorf("reasons[%s] = %d, want %d (all: %v)", reason, got, want, tally.Reasons)
+		}
+	}
+	if tally.Copy != 2 {
+		t.Errorf("copy = %d, want 2", tally.Copy)
+	}
+	var mysqlSum uint64
+	for reason, n := range tally.Reasons {
+		if reason != "expensive_plan" {
+			mysqlSum += n
+		}
+	}
+	if tally.MySQL != mysqlSum || tally.MySQL < 12 {
+		t.Errorf("mysql = %d, want the sum of the non-copy reasons (%d) and at least 12", tally.MySQL, mysqlSum)
 	}
 
 	mysqlCLI, err := exec.LookPath("mysql")

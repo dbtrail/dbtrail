@@ -33,9 +33,9 @@ func TestFlashbackAPI_Off(t *testing.T) {
 	if got["enabled"] != false {
 		t.Errorf("enabled = %v, want false", got["enabled"])
 	}
-	for _, k := range []string{"listen", "host", "port"} {
+	for _, k := range []string{"listen", "host", "port", "routing"} {
 		if _, present := got[k]; present {
-			t.Errorf("off state serializes %q = %v; an address must not appear when the port is off", k, got[k])
+			t.Errorf("off state serializes %q = %v; neither an address nor a routing block may appear when the port is off", k, got[k])
 		}
 	}
 }

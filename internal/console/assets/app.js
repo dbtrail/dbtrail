@@ -13485,6 +13485,7 @@ function sqlClientPanel(servers, fb) {
   // The port does not filter by schema (#1685): say so, so it is not taken
   // for a path that scopes access per schema.
   body.append(el("p", { class: "cn-sql-row", text: "This password reads every schema on every server in the sidebar." }));
+  body.append(routingBlock(fb, cur));
   body.append(cnFine("What to run, and other machines",
     el("p", { class: "form-hint" }, "Ask for a table as it was: ",
       el("code", { text: "SELECT * FROM _flashback.orders AS OF '10 minutes ago' WHERE id = 1;" }),
@@ -13493,6 +13494,103 @@ function sqlClientPanel(servers, fb) {
       ? "The port answers on that address only. Run mysql where it can reach it (on the machine DBTrail runs on when it is 127.0.0.1), or open a tunnel to it."
       : "The port answers on every network address of the machine DBTrail runs on; the command uses the name the web interface was opened with. If that name is a reverse proxy in front of DBTrail, it does not pass this port through, so use that machine's own name or address instead." })));
   return panel;
+}
+
+// ROUTE_REASON_TEXT turns the server's closed reason vocabulary (the shim's
+// RouteReason* constants, also the metric's reason label) into a phrase. An
+// unknown key (a newer daemon) is shown as is rather than dropped.
+const ROUTE_REASON_TEXT = {
+  expensive_plan: "an expensive plan: the copy answered",
+  cheap_plan: "a cheap plan (a lookup or a small read)",
+  not_a_select: "not a SELECT (SHOW, BEGIN, COMMIT, …)",
+  write: "a write (INSERT, UPDATE, DELETE, DDL)",
+  session_setting: "a SET statement",
+  settings_set: "a SET ran earlier on that connection",
+  in_transaction: "inside a transaction",
+  veto: "uses something the copy answers differently (LIKE, NOW(), @variables, …)",
+  explain_failed: "MySQL could not explain it",
+  copy_age_unknown: "the copy's age is unknown",
+  copy_too_old: "the copy was older than the limit",
+  copy_refused: "the copy refused it (a construct it lacks, a table it does not have, the row cap)",
+  show_warnings: "SHOW WARNINGS after a MySQL statement",
+  upstream_lost: "nobody answered: the port's connection to the source was lost (the client got error 2006)",
+  routing_off: "routing off",
+};
+
+// fmtGoDuration shortens a Go duration string for display by dropping the
+// zero units Go prints after a non-zero one: "15m0s" → "15m", "10m0s" →
+// "10m", "1h0m0s" → "1h", "1h30m0s" → "1h30m"; "30s" and "1m30s" are shown
+// as sent. The unit must precede the dropped part, or the pattern eats the
+// trailing zero DIGIT of "10m0s".
+function fmtGoDuration(d) { return String(d || "").replace(/(\d[hm])(?:0m)?0s$/, "$1"); }
+
+// routingBlock (#2038) says who answers on the port: with read routing off,
+// the copy, always (and how to turn routing on); with it on, the rule and,
+// for the server picked in the sidebar, how many statements each side has
+// answered since the daemon started and why MySQL took the ones it took. The
+// counts travel with /api/flashback, so Refresh re-reads that one route and
+// repaints this block alone; nothing else on the page moves.
+function routingBlock(fb, cur) {
+  const wrap = el("div", { class: "cn-route" });
+  const paint = (status) => {
+    clear(wrap);
+    const r = status && status.routing;
+    if (!r) return;
+    if (!r.enabled) {
+      wrap.append(el("p", { class: "cn-sql-row", text: "Who answers: the copy, always. Read routing is off." }));
+      wrap.append(cnFine("How to let MySQL answer too",
+        el("p", { class: "form-hint" },
+          "Start DBTrail with a freshness limit for the copy (CLI: ", el("code", { text: "--route-max-copy-age 15m" }),
+          ", or the environment variable ", el("code", { text: "BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE" }),
+          "). Then everything sent to this port runs on the server's own MySQL, writes included, except the heavy SELECTs, which run on the copy while it is at most that old. The mysql line above stays the same. Experimental.")));
+      return;
+    }
+    const t = (cur && r.servers && r.servers[cur.id]) || { copy: 0, mysql: 0, reasons: {} };
+    const total = (t.copy || 0) + (t.mysql || 0);
+    const refresh = el("button", { class: "btn btn-sm", type: "button", text: "Refresh",
+      onclick: () => api("/api/flashback").then(paint, (e) => toastError("Could not refresh who answered: " + ((e && e.message) || e))) });
+    if (!cur) {
+      wrap.append(el("p", { class: "cn-sql-row", text: "Who answered: pick a server in the left sidebar to see its counts." }));
+      return;
+    }
+    if (t.unavailable) {
+      // A connection to this server found it cannot route (no source to
+      // forward to, or no SQL on the copy): the copy answers everything
+      // sent under its name, and the rule below does not apply to it.
+      const p = el("p", { class: "cn-sql-row" });
+      p.append("Who answered", cur ? " for " : "", cur ? el("code", { text: cur.name || cur.id }) : "",
+        ": the copy, always. Routing is off for this server: " + t.unavailable + ". ", refresh);
+      wrap.append(p);
+      return;
+    }
+    const since = r.since ? new Date(r.since) : null;
+    const sinceText = since && !isNaN(since) ? " since " + since.toLocaleString() : "";
+    const head = el("p", { class: "cn-sql-row" });
+    head.append("Who answered", cur ? " for " : "", cur ? el("code", { text: cur.name || cur.id }) : "", sinceText + ": ");
+    if (total === 0) {
+      head.append(el("b", { text: "no statements yet" }));
+    } else {
+      head.append(el("b", { text: String(t.mysql || 0) }), " by MySQL, ", el("b", { text: String(t.copy || 0) }), " by the copy");
+    }
+    head.append(" ", refresh);
+    wrap.append(head);
+    const rules = [];
+    if (r.cost_threshold > 0) rules.push("MySQL's plan costs at least " + r.cost_threshold);
+    if (r.scan_rows > 0) rules.push("it scans a whole table of at least " + r.scan_rows + " rows");
+    wrap.append(el("p", { class: "cn-sql-row" }, rules.length
+      ? "A SELECT runs on the copy when " + rules.join(" or ") + ", while the copy is at most " + fmtGoDuration(r.max_copy_age) + " old. Everything else, writes included, runs on MySQL."
+      : "No plan threshold is set (both are 0), so every statement runs on MySQL and nothing reaches the copy."));
+    if (total > 0) {
+      const reasons = Object.entries(t.reasons || {}).sort((x, y) => y[1] - x[1]);
+      const ul = el("ul", { class: "form-hint", style: "margin:4px 0 0 18px; padding:0" });
+      for (const [key, n] of reasons) {
+        ul.append(el("li", { text: n + " × " + (ROUTE_REASON_TEXT[key] || key) }));
+      }
+      wrap.append(cnFine("Why each side", ul));
+    }
+  };
+  paint(fb);
+  return wrap;
 }
 
 // ── capabilities gating ────────────────────────────────────────────────────

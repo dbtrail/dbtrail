@@ -241,6 +241,25 @@ type Config struct {
 	// that did not opt in; the page then reports the port as off. Display
 	// only: the console never opens or closes the port itself.
 	FlashbackListen string
+	// ReadRouting is the read-routing policy the time-travel port runs with
+	// (#2038, watch --route-max-copy-age and the two threshold flags),
+	// reported by GET /api/flashback beside the port's address so the
+	// Connect page can say whether MySQL answers and under which rule. Its
+	// zero value reads as routing off. Display only, like FlashbackListen:
+	// the serving layer binds the real policy itself.
+	ReadRouting ReadRoutingConfig
+}
+
+// ReadRoutingConfig is the read router's policy as the console reports it.
+type ReadRoutingConfig struct {
+	// MaxCopyAge > 0 means routing is on: a SELECT the policy calls
+	// expensive runs on the copy while the copy's snapshot is at most this
+	// old. Zero = off (every statement reads the copy, as before #2038).
+	MaxCopyAge time.Duration
+	// CostThreshold and ScanRows are the EXPLAIN thresholds
+	// (readrouter.Policy); 0 disables that rule.
+	CostThreshold float64
+	ScanRows      int64
 }
 
 // RotationDefaults is the daemon-side built-in-rotation policy, surfaced to the
@@ -440,6 +459,11 @@ type Server struct {
 	// flashbackListen: the embedded time-travel port's bind address
 	// (Config.FlashbackListen); empty = the port is off (or this is serve).
 	flashbackListen string
+	// readRouting is the port's routing policy (Config.ReadRouting), and
+	// routing the per-server tally of its decisions since start — both for
+	// GET /api/flashback.
+	readRouting ReadRoutingConfig
+	routing     *routingStats
 }
 
 // serverHeader selects the target server per request. Selection is stateless —
@@ -622,6 +646,8 @@ func New(cfg Config) (*Server, error) {
 		mcpTokenPath:            mcpTokenPath,
 		sessionProfiles:         newProfileRuleCache(),
 		flashbackListen:         cfg.FlashbackListen,
+		readRouting:             cfg.ReadRouting,
+		routing:                 newRoutingStats(time.Now()),
 		archiveFetcher:          parquetquery.Fetch,
 		capacityProbe:           doctor.ProbeCapacity,
 	}

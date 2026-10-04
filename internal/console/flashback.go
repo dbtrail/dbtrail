@@ -23,6 +23,10 @@ import (
 // server and consumes this plain struct; nothing here imports the protocol or
 // capture libraries.
 type FlashbackTarget struct {
+	// ID is the canonical registry id the selector resolved to (the boot id
+	// for the boot entry) — the key the routing tally and metric use, so a
+	// client connecting by display name and one by id count together.
+	ID string
 	// IndexDB is the open connection to the server's per-source index. It is
 	// owned by the connManager — the serving layer must not Close it.
 	IndexDB *sql.DB
@@ -144,6 +148,7 @@ func (s *Server) ResolveFlashback(ctx context.Context, selector string) (Flashba
 	dir, s3 := splitBaselineSource(b.baselineSrc)
 	sqlOnCopy, sqlWhyNot := s.sqlOnCopyFor(b, id)
 	return FlashbackTarget{
+		ID:             id,
 		IndexDB:        b.db,
 		IndexDBName:    b.dbName,
 		BaselineDir:    dir,

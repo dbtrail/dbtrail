@@ -32,6 +32,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frees the slot at once.
 
 ### Added
+- **Read routing says who answered** (#2038). On Settings → MCP Server →
+  Connect a SQL client, a *Who answered* block counts, per server and since
+  the daemon started, the statements MySQL answered and the ones the copy
+  did, with a count per reason (cheap plan, a write, inside a transaction,
+  the copy refused it, …) and a Refresh button; with routing off it says so
+  and names the flag. The same counts are in `GET /api/flashback` under
+  `routing` and, under `watch --metrics-addr`, in the new counter
+  `bintrail_read_routing_decisions_total{server, route, reason}`. Each
+  routed statement counts exactly once, as a decision: a statement MySQL
+  then fails was still MySQL's. A server whose connections cannot route (no
+  source to forward to) is named as served from the copy alone.
 - **`bintrail-console sql-compare`** (#2038): plays read statements against
   the MySQL source and against the copy (through the embedded port with
   routing off) and reports, per statement, `EQUAL`, `DIFFERENT` (rows,
