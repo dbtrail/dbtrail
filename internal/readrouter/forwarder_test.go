@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/go-mysql-org/go-mysql/mysql"
 )
 
 // A source that cannot be reached, or that drops the connection, is lost for
@@ -65,5 +67,37 @@ func TestNewForwarder_dsn(t *testing.T) {
 	}
 	if _, err := NewForwarder("not a dsn", Policy{}, 0); err == nil {
 		t.Error("garbage was accepted")
+	}
+}
+
+// Reading a plan must not hand the EXPLAIN result back to go-mysql's
+// resultset pool: the pool keeps column definitions, and the next result
+// built in the process would carry the plan's column (its name, its type)
+// as its own first column.
+func TestPlanFromExplain_doesNotPoisonTheResultsetPool(t *testing.T) {
+	const plan = `{"query_block": {"select_id": 1, "cost_info": {"query_cost": "1.00"}, "table": {"table_name": "t", "access_type": "ALL", "rows_examined_per_scan": 3}}}`
+	for range 20 {
+		rs, err := mysql.BuildSimpleTextResultset([]string{"EXPLAIN"}, [][]any{{plan}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// What the client's text reader fills in.
+		rs.Values = [][]mysql.FieldValue{{mysql.NewFieldValue(mysql.FieldValueTypeString, 0, []byte(plan))}}
+		p, err := planFromExplain(&mysql.Result{Resultset: rs})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.FullScans != 1 {
+			t.Fatalf("plan = %+v", p)
+		}
+	}
+	for i := range 50 {
+		rs, err := mysql.BuildSimpleTextResultset([]string{"n"}, [][]any{{int64(i)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := string(rs.Fields[0].Name); got != "n" || rs.Fields[0].Type != mysql.MYSQL_TYPE_LONGLONG {
+			t.Fatalf("result %d built after reading plans has column %q of type %d, want n / BIGINT", i, got, rs.Fields[0].Type)
+		}
 	}
 }

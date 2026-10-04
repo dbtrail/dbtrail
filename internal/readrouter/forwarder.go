@@ -178,19 +178,30 @@ func (f *Forwarder) Decide(ctx context.Context, stmt string) (Decision, error) {
 		}
 		return Decision{}, fmt.Errorf("explain: %w", err)
 	}
-	defer res.Close()
-	if res.Resultset == nil || res.RowNumber() == 0 {
-		return Decision{}, errors.New("explain: no plan returned")
-	}
-	raw, err := res.GetString(0, 0)
-	if err != nil {
-		return Decision{}, fmt.Errorf("explain: %w", err)
-	}
-	plan, err := ParsePlan([]byte(raw))
+	plan, err := planFromExplain(res)
 	if err != nil {
 		return Decision{}, err
 	}
 	return f.policy.DecideStatement(stmt, plan), nil
+}
+
+// planFromExplain reads the plan out of an EXPLAIN FORMAT=JSON answer.
+//
+// The result is NOT closed. Close returns its Resultset to go-mysql's
+// process-wide pool, and a pooled Resultset keeps its column definitions:
+// BuildSimpleTextResultset reuses a non-nil Field it finds there instead of
+// making one, so the next result built anywhere in this process (a copy
+// answer, a time-travel answer, on any connection) would go out with its
+// first column named EXPLAIN and typed as the plan was.
+func planFromExplain(res *mysql.Result) (Plan, error) {
+	if res == nil || res.Resultset == nil || res.RowNumber() == 0 {
+		return Plan{}, errors.New("explain: no plan returned")
+	}
+	raw, err := res.GetString(0, 0)
+	if err != nil {
+		return Plan{}, fmt.Errorf("explain: %w", err)
+	}
+	return ParsePlan([]byte(raw))
 }
 
 // sinkError marks an error raised by the caller's RowSink (the client went
