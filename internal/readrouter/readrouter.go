@@ -364,31 +364,3 @@ func (pol Policy) Decide(p Plan) (toCopy bool, reason string) {
 	}
 	return false, fmt.Sprintf("plan cost %.0f below %.0f, no full scan over %d rows", p.Cost, pol.CostThreshold, pol.ScanRows)
 }
-
-// ForCopy rewrites the statement for DuckDB: MySQL's backtick identifiers
-// become double-quoted ones. Backticks inside string literals are left
-// alone. Nothing else is translated: what DuckDB then rejects goes to MySQL.
-func ForCopy(stmt string) string {
-	var b strings.Builder
-	inSingle, inDouble := false, false
-	for i := 0; i < len(stmt); i++ {
-		c := stmt[i]
-		switch {
-		case c == '\\' && (inSingle || inDouble) && i+1 < len(stmt):
-			b.WriteByte(c)
-			i++
-			b.WriteByte(stmt[i])
-		case c == '\'' && !inDouble:
-			inSingle = !inSingle
-			b.WriteByte(c)
-		case c == '"' && !inSingle:
-			inDouble = !inDouble
-			b.WriteByte(c)
-		case c == '`' && !inSingle && !inDouble:
-			b.WriteByte('"')
-		default:
-			b.WriteByte(c)
-		}
-	}
-	return b.String()
-}

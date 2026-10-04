@@ -180,18 +180,3 @@ func TestParsePlan_shapes(t *testing.T) {
 		t.Error("JSON without query_block accepted")
 	}
 }
-
-func TestForCopy(t *testing.T) {
-	cases := map[string]string{
-		"SELECT `id`, `status` FROM `shop`.`orders`":     `SELECT "id", "status" FROM "shop"."orders"`,
-		"SELECT * FROM t WHERE note = 'a `tick` inside'": "SELECT * FROM t WHERE note = 'a `tick` inside'",
-		`SELECT * FROM t WHERE note = "x` + "`" + `y"`:   `SELECT * FROM t WHERE note = "x` + "`" + `y"`,
-		"SELECT * FROM t WHERE a = 'it\\'s `ok`'":        "SELECT * FROM t WHERE a = 'it\\'s `ok`'",
-		"SELECT 1": "SELECT 1",
-	}
-	for in, want := range cases {
-		if got := ForCopy(in); got != want {
-			t.Errorf("ForCopy(%q) = %q, want %q", in, got, want)
-		}
-	}
-}

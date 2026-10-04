@@ -158,9 +158,10 @@ func TestRouter_copyRefusalFallsBackToMySQL(t *testing.T) {
 	}
 }
 
-// The copy gets the statement with backticks rewritten; MySQL gets it as
-// the client wrote it. Both USE paths reach the router.
-func TestRouter_rewritesForTheCopyAndFollowsUSE(t *testing.T) {
+// The copy gets the statement exactly as the client wrote it, backticks
+// included: nothing is translated on the way, and what the copy then refuses
+// goes to MySQL. Both USE paths reach the router.
+func TestRouter_sendsTheCopyTheClientsTextAndFollowsUSE(t *testing.T) {
 	r := &fakeRouter{toCopy: true, reason: "expensive"}
 	f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
 	h := routingHandler(t, r, f, time.Minute)
@@ -176,14 +177,14 @@ func TestRouter_rewritesForTheCopyAndFollowsUSE(t *testing.T) {
 	if _, err := h.HandleQuery("SELECT `status`, count(*) FROM `orders` GROUP BY `status`"); err != nil {
 		t.Fatal(err)
 	}
-	if want := `SELECT "status", count(*) FROM "orders" GROUP BY "status"`; f.gotStmt != want {
-		t.Errorf("copy got %q, want %q", f.gotStmt, want)
+	if want := "SELECT `status`, count(*) FROM `orders` GROUP BY `status`"; f.gotStmt != want {
+		t.Errorf("copy got %q, want the client's text %q", f.gotStmt, want)
 	}
 	if f.gotSchema != "shop2" {
 		t.Errorf("copy schema = %q, want shop2", f.gotSchema)
 	}
 	if r.explained[0] != "SELECT `status`, count(*) FROM `orders` GROUP BY `status`" {
-		t.Errorf("EXPLAIN ran on the rewritten text: %q", r.explained[0])
+		t.Errorf("EXPLAIN did not get the client's text: %q", r.explained[0])
 	}
 	h.Close()
 	if r.closed != 1 {
