@@ -111,8 +111,8 @@ type RotateTarget struct {
 // banner are taken once from the initial read: a daemon started with rotation
 // off runs no loop (re-enabling needs a restart).
 // onCycle callbacks (optional) observe each cycle's health — failed reports a
-// rotation error, deferred counts unarchived partitions the cycle declined to
-// drop. They run inside the cycle's recover guard, so a panicking callback
+// rotation error, deferred counts partitions the cycle declined to drop
+// (Result.Deferred). They run inside the cycle's recover guard, so a panicking callback
 // cannot take down the loop.
 func StartLoop(ctx context.Context, settings func() Settings, targets func() []RotateTarget, onCycle ...func(failed bool, deferred int)) <-chan struct{} {
 	done := make(chan struct{})
@@ -174,7 +174,7 @@ func StartLoop(ctx context.Context, settings func() Settings, targets func() []R
 					unhealthyStreak = 0
 				}
 				if unhealthyStreak >= escalateAfter {
-					slog.Error("built-in rotation made no progress for consecutive cycles — the index is growing unbounded (rotation is failing and/or deferring unarchived partitions to a stalled archiving flow; archive the partitions, fix the failure, or set --rotate-retain off and rotate manually)",
+					slog.Error("built-in rotation made no progress for consecutive cycles — the index is growing unbounded (rotation is failing, deferring unarchived partitions to a stalled archiving flow, or waiting on an S3 upload that does not complete; archive the partitions, fix the failure or the upload, or set --rotate-retain off and rotate manually)",
 						"consecutive_cycles", unhealthyStreak,
 						"deferred_last_cycle", deferred,
 						"failed_last_cycle", failed)
@@ -215,8 +215,8 @@ var escalateAfter = 3
 
 // runCycle rotates each index database once. Errors are logged and
 // the cycle moves to the next target — a transient failure self-heals on the
-// next tick. Returns the total number of partitions the protect-unarchived
-// guard deferred this cycle, and whether any database's rotation failed.
+// next tick. Returns the total number of partitions the cycle declined to
+// drop (Result.Deferred, summed), and whether any database's rotation failed.
 func runCycle(ctx context.Context, s Settings, targets func() []RotateTarget) (deferred int, failed bool) {
 	for _, t := range dedupeTargets(targets()) {
 		d, err := rotateOneIndex(ctx, t, s)
@@ -286,7 +286,7 @@ func loopOptions(retain time.Duration, retainRaw string, s Settings, t RotateTar
 }
 
 // rotateOneIndex runs one Perform cycle against a single target's index DSN,
-// returning the guard-deferred partition count and any failure. Log messages
+// returning the deferred partition count and any failure. Log messages
 // are scrubbed: DSNs (and their passwords) never reach the log.
 func rotateOneIndex(ctx context.Context, t RotateTarget, s Settings) (int, error) {
 	dsn := t.DSN

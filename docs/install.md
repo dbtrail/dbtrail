@@ -248,10 +248,9 @@ go build ./cmd/bintrail
 `make build-console` builds `bintrail-console`, the web interface binary;
 `make build-pg` builds the `bintrail-pg` PostgreSQL-source binary.
 
-> macOS binaries and a Homebrew tap are tracked in
-> [#349](https://github.com/dbtrail/dbtrail/issues/349) — today the
-> supported paths on macOS are Docker (works great on Apple Silicon) and
-> `go install`/source builds.
+> **On macOS** there are no prebuilt binaries and no Homebrew tap: releases
+> ship Linux packages and container images. The supported paths on macOS are
+> Docker (works great on Apple Silicon) and `go install`/source builds.
 
 ## First run with the binary
 
