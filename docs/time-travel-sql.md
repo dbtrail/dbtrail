@@ -146,7 +146,9 @@ What to know before relying on it:
   ...)`, `instr`/`position`/`contains`, `'ß' = 'ss'`. A column MySQL
   declares under a `_bin` collation compares byte by byte here too
   (`code = 'ab'` does not match `'AB'`, and it groups and sorts by code
-  point); a `_cs` column is still case-insensitive here. The same applies
+  point; an `ENUM` or `SET` column is the exception in `ORDER BY`, where
+  MySQL sorts it by the position of the value in the column's definition
+  and the copy by the text); a `_cs` column is still case-insensitive here. The same applies
   to the SQL card; a DuckDB of your own over the same files (see
   [Dashboards](dashboards.md)) keeps DuckDB's defaults.
 - **`SET time_zone`, `SET sql_select_limit` and `SET sql_mode` are applied
@@ -396,10 +398,22 @@ What this is and is not:
     (`utf8mb4_0900_as_cs`) is case-insensitive on the copy. Bytes would
     compare it right and sort it wrong: `_cs` puts `a` before `B`, bytes
     do not.
-  - **Trailing spaces.** A column under a PAD SPACE collation (every
-    collation older than the `0900` ones: `utf8mb4_general_ci`,
-    `utf8mb4_unicode_ci`, `utf8mb4_bin`, `latin1_*`) ignores trailing
-    spaces on MySQL, so `'bob ' = 'bob'` there and not here.
+  - **Trailing spaces.** A column under a PAD SPACE collation ignores
+    trailing spaces on the source, so `'bob ' = 'bob'` there and not here.
+    On MySQL that is every collation older than the `0900` ones
+    (`utf8mb4_general_ci`, `utf8mb4_unicode_ci`, `utf8mb4_bin`,
+    `latin1_*`); the default, `utf8mb4_0900_ai_ci`, does not pad. On
+    MariaDB it includes the default collation (`utf8mb4_uca1400_ai_ci` on
+    11.4), so on a MariaDB source every text column that was not declared
+    with a `nopad` collation differs this way.
+  - **`ENUM` and `SET` in `ORDER BY`.** MySQL and MariaDB sort them by the
+    position of the value in the column's definition (`enum('z','a')`
+    gives `z`, `a`); the copy sorts the text (`a`, `z`).
+  - **MySQL against MariaDB.** The comparisons above were measured on
+    MySQL 8.4 and again on MariaDB 11.4 under its default collation. The
+    two agree on every equality measured except trailing spaces (the point
+    above), and on the order of every string except the empty one against
+    a single space.
   - **`_bin` outside UTF-8.** A `_bin` column in a multi-byte character
     set other than UTF-8 sorts by that character set's bytes on MySQL and
     by Unicode code point here. Equality is the same.
@@ -433,8 +447,8 @@ What this is and is not:
     (`ROUND(SUM(amount), 2)` is `117329550.00` on both), with one
     exception: a `CASE` or `IF` that mixes a `DECIMAL` branch and an
     integer branch prints the integer rows as `4.00` on the copy and as
-    `4` on MySQL, which declares the column with two decimals and does not
-    pad them.
+    `4` on MySQL 8.4, which declares the column with two decimals and does
+    not pad them. MariaDB 11.4 prints `4.00`, as the copy does.
 
   If a workload depends on one of these, keep the copy for the reads where
   they do not matter, or leave routing off.
