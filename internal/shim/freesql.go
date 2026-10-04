@@ -177,6 +177,10 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 		h.routeWarn("copy", "read routing: copy refused an expensive statement, forwarded to mysql", err)
 		return h.forward(ctx, qstr, "copy refused: "+shortErr(err))
 	}
+	// The copy's side of the trace: forwarded statements log their reason,
+	// so a copy-served one must too, or the log reads as if nothing ever
+	// reached the copy.
+	h.logger.Debug("read routing: served by the copy", "reason", reason)
 	h.mu.Lock()
 	h.routeLastForwarded = false
 	h.mu.Unlock()
