@@ -4,6 +4,7 @@ package consoleapp
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -51,8 +52,12 @@ func TestIntegrationFlashbackHangUpFreesTheSlot_2033(t *testing.T) {
 	defer a.Close()
 	aCtx, aLeave := context.WithCancel(context.Background())
 	aDone := make(chan error, 1)
+	aStart := time.Now()
 	go func() {
-		_, err := a.QueryContext(aCtx, "SELECT sum(i * i) FROM range(100000000000) t(i)")
+		rows, err := a.QueryContext(aCtx, "SELECT sum(i * i) FROM range(100000000000) t(i)")
+		if err == nil {
+			rows.Close()
+		}
 		aDone <- err
 	}()
 
@@ -60,18 +65,26 @@ func TestIntegrationFlashbackHangUpFreesTheSlot_2033(t *testing.T) {
 	defer b.Close()
 	ask := func() error {
 		var n int
-		return b.QueryRow("SELECT 41 + 1 AS n").Scan(&n)
+		return b.QueryRow("SELECT count(*) AS n FROM orders").Scan(&n)
 	}
 	// Control: while a runs, b is refused, so a really holds the slot.
 	held := false
+	var lastB error
 	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
-		if err := ask(); mysqlCode(err) == 1203 {
+		lastB = ask()
+		if mysqlCode(lastB) == 1203 {
 			held = true
 			break
 		}
 	}
 	if !held {
-		t.Fatal("control: the long statement never held the slot; the test below would prove nothing")
+		aState := "still running"
+		select {
+		case err := <-aDone:
+			aState = fmt.Sprintf("ended after %v with %v", time.Since(aStart).Round(time.Millisecond), err)
+		default:
+		}
+		t.Fatalf("control: the long statement never held the slot (a: %s; b's last answer: %v); the test below would prove nothing", aState, lastB)
 	}
 
 	// a's client hangs up: the driver closes the socket on cancel.
