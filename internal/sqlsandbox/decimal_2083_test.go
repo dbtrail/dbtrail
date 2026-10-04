@@ -3,6 +3,7 @@ package sqlsandbox
 import (
 	"context"
 	"math/big"
+	"reflect"
 	"testing"
 
 	"github.com/duckdb/duckdb-go/v2"
@@ -46,12 +47,38 @@ func TestCell_decimalKeepsItsScale(t *testing.T) {
 			}
 		})
 	}
-	// Inside a LIST the element is a Decimal too.
+	// Inside a LIST, a STRUCT, a MAP or a UNION the element is a Decimal too.
+	ten := duckdb.Decimal{Width: 10, Scale: 2, Value: big.NewInt(1000)}
 	var r renderer
-	got := r.cell([]any{duckdb.Decimal{Width: 10, Scale: 2, Value: big.NewInt(1000)}}, "DECIMAL(10,2)[]")
-	if l, ok := got.([]any); !ok || len(l) != 1 || l[0] != "10.00" {
-		t.Errorf("list cell = %#v, want [10.00]", got)
+	nested := []struct {
+		name string
+		in   any
+		want any
+	}{
+		{"LIST", []any{ten}, []any{"10.00"}},
+		{"STRUCT", map[string]any{"a": ten}, map[string]any{"a": "10.00"}},
+		{"MAP", duckdb.Map{"a": ten}, map[string]any{"a": "10.00"}},
+		{"MAP keyed by a DECIMAL", duckdb.Map{ten: int32(1)}, map[string]any{"10.00": int32(1)}},
+		{"UNION", duckdb.Union{Tag: "n", Value: ten}, "10.00"},
+		{"LIST of MAP", []any{duckdb.Map{"a": ten}}, []any{map[string]any{"a": "10.00"}}},
 	}
+	for _, c := range nested {
+		if got := r.cell(c.in, ""); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s cell = %#v, want %#v", c.name, got, c.want)
+		}
+	}
+}
+
+// A DECIMAL the driver could not read is an error for the statement, never a
+// zero that looks like data.
+func TestCell_decimalWithoutValueFails(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("a DECIMAL with no value was rendered instead of failing")
+		}
+	}()
+	var r renderer
+	t.Errorf("cell = %#v", r.cell(duckdb.Decimal{Width: 10, Scale: 2}, "DECIMAL(10,2)"))
 }
 
 // The same through the real engine: every expression whose DuckDB type is
@@ -130,5 +157,22 @@ func TestRun_decimalsPrintTheirScale(t *testing.T) {
 	}
 	if len(res.Rows) != 0 || res.Columns[1].Type != "DECIMAL(38,2)" {
 		t.Errorf("empty GROUP BY: %d rows, type %s; want 0 rows and DECIMAL(38,2)", len(res.Rows), res.Columns[1].Type)
+	}
+	// Nested, through the engine: the driver hands a MAP and a UNION over in
+	// types of its own, and their decimals must not fall back to its trimmed
+	// rendering.
+	res, err = r.Run(context.Background(), f.job(`SELECT
+		[10.00::DECIMAL(10,2)] AS l,
+		{'a': 10.00::DECIMAL(10,2)} AS s,
+		MAP {'a': 10.00::DECIMAL(10,2)} AS m,
+		union_value(n := 10.00::DECIMAL(10,2)) AS u`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNested := []any{[]any{"10.00"}, map[string]any{"a": "10.00"}, map[string]any{"a": "10.00"}, "10.00"}
+	for i, w := range wantNested {
+		if !reflect.DeepEqual(res.Rows[0][i], w) {
+			t.Errorf("%s = %#v, want %#v", res.Columns[i].Name, res.Rows[0][i], w)
+		}
 	}
 }

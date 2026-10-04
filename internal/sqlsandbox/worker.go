@@ -555,6 +555,23 @@ func (r *renderer) cell(v any, typ string) any {
 			out[k] = r.cell(e, "")
 		}
 		return out
+	case duckdb.Map:
+		// A MAP is the driver's own map type, keyed by any value. Rendered
+		// like a STRUCT, each key by its cell text, so the values inside go
+		// through the same rules (a DECIMAL keeps its scale) and the cell is
+		// the JSON object its column is declared as.
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			key, ok := r.cell(k, "").(string)
+			if !ok {
+				key = fmt.Sprint(r.cell(k, ""))
+			}
+			out[key] = r.cell(e, "")
+		}
+		return out
+	case duckdb.Union:
+		// A UNION holds one member: the cell is that member's value.
+		return r.cell(x.Value, "")
 	case fmt.Stringer:
 		return r.text(x.String())
 	default:
@@ -581,7 +598,10 @@ func (r *renderer) text(s string) string {
 // integer, so nothing is rounded whatever the width.
 func decimalText(d duckdb.Decimal) string {
 	if d.Value == nil {
-		return "0"
+		// The driver fills Value for every storage width it knows. A cell
+		// without one has no number to print, and a made-up "0" would read as
+		// data: fail the statement (runJob reports the panic as its error).
+		panic("a DECIMAL cell arrived from the driver without a value")
 	}
 	digits := d.Value.String()
 	sign := ""

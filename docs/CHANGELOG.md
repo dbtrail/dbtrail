@@ -14,9 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   number in a different text, which a program comparing the two reads as a
   different answer. Every result whose type is `DECIMAL(p,s)` now prints
   exactly `s` decimals, a column, a sum, a `ROUND`, a `COALESCE` or a
-  `UNION` alike, on the text protocol and on the binary one. `AVG` and `/`
-  are not part of this: they are doubles on the copy, and still print as
-  such.
+  `UNION` alike, on the text protocol and on the binary one, and inside a
+  list, a struct, a map or a union. A `MAP` cell, which used to arrive as
+  Go's `map[a:10]`, is now the JSON object its column is declared as. `AVG`
+  and `/` are not part of this: they are doubles on the copy, and still
+  print as such.
 - **A partial local archive no longer hides the S3 copy** (#2078). Every
   reader of archived changes (the Events page, the time-travel schemas,
   recover, SQL on the copy) read the local archive folder whenever it held
