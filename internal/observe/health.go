@@ -44,14 +44,14 @@ var (
 		Namespace: "bintrail",
 		Subsystem: "rotation",
 		Name:      "healthy",
-		Help:      "1 when the last built-in rotation cycle neither failed nor deferred unarchived partitions; 0 otherwise.",
+		Help:      "1 when the last built-in rotation cycle neither failed nor declined to drop a partition past retention; 0 otherwise.",
 	}, nil)
 
 	rotationDeferred = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "bintrail",
 		Subsystem: "rotation",
 		Name:      "deferred_partitions",
-		Help:      "Unarchived partitions the last built-in rotation cycle declined to drop.",
+		Help:      "Partitions past retention the last built-in rotation cycle declined to drop: unarchived, with an unconfirmed S3 upload, or changed since they were archived.",
 	}, nil)
 )
 

@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Go's `map[a:10]`, is now the JSON object its column is declared as. `AVG`
   and `/` are not part of this: they are doubles on the copy, and still
   print as such.
+- **Rotation: an hour held by a pending upload now counts as deferred in
+  both paths** (#2094). When an unconfirmed S3 upload blocked a drop, the
+  path that archives counted the hour as deferred and the path that only
+  drops did not, so there the built-in rotation reported a healthy cycle on
+  every tick and never escalated its warning, while the index kept growing.
+  Both count it now, and `bintrail_rotation_deferred_partitions` and
+  `bintrail_rotation_healthy` reflect it.
 - **Rotation: another source's pending S3 upload now blocks the drop** (#2088).
   On an index that several sources write to, a partition was dropped while
   another source's upload of that hour was still unconfirmed: the check for

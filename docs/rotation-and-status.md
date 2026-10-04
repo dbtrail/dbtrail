@@ -670,7 +670,7 @@ An index created before this record existed carries none, and that absence is ho
 
 The exemption from the upgrade guard is about the history, not about the record: an index created empty and then FILLED with older history (`restore-index` rebuilding it from the archives, or `bintrail index` over months of old binlog files) holds partitions older than its own record, so the guard still refuses to drop them until you choose a retention. Setting `--rotate-retain` (or `BINTRAIL_ROTATE_RETAIN`, or the web interface's rotation settings) overrides the record everywhere; an unreadable record falls back to the same 30 days and logs why.
 
-If rotation makes no progress it should have — failing, deferring partitions to a stalled archiving flow, or any mix of the two — for 3 consecutive cycles, the loop escalates to an explicit Error in the logs: the index is growing unbounded and needs attention. The explicit `bintrail rotate` command is unaffected by all of the above: it keeps its unguarded, operator-asked-for-it semantics.
+If rotation makes no progress it should have — failing, deferring partitions to a stalled archiving flow, waiting on an S3 upload that does not complete, or any mix of these — for 3 consecutive cycles, the loop escalates to an explicit Error in the logs: the index is growing unbounded and needs attention. The explicit `bintrail rotate` command is unaffected by all of the above: it keeps its unguarded, operator-asked-for-it semantics.
 
 ## Automating Rotation
 
