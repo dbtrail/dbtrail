@@ -194,7 +194,8 @@ The decision, in order, for every statement:
    (`GROUP_CONCAT`, `NOW()` and the session-time-zone family, `STR_TO_DATE`,
    `DATEDIFF`, `COLLATE`, `CAST AS UNSIGNED`, `DIV`, `RAND`, user and system
    variables, locking reads, `information_schema`, full-text `MATCH`,
-   JSON functions and the `->`/`->>` operators, optimizer hints): **MySQL**.
+   JSON functions and the `->`/`->>` operators, a backslash inside a string
+   literal, optimizer hints): **MySQL**.
 4. The one shape that needs no plan: `SELECT <columns> FROM <one table>
    LIMIT <at most 1,000 rows, offset included>` with nothing else (no
    `WHERE`, join, `ORDER BY`, `GROUP BY`, subquery or function call):
@@ -245,7 +246,9 @@ What this is and is not:
 - **Where the copy answers differently without an error.** The veto list
   keeps the known cases on MySQL (`GROUP_CONCAT`, the `NOW()` family,
   `LIKE`/`REGEXP`, `COLLATE`, `DIV`, `||`, `^`, double-quoted string
-  literals, `count(DISTINCT ...)`, `INSTR`/`LOCATE`, variables, ...). The
+  literals, a backslash inside a string literal (an escape on MySQL, a
+  plain character on the copy: `'a\\b'` and `'it\'s'` name different
+  strings), `count(DISTINCT ...)`, `INSTR`/`LOCATE`, variables, ...). The
   copy itself compares text close to the way MySQL's default collation
   does: `'Paid'` and `'paid'`, `'café'` and `'cafe'` are equal in `WHERE`,
   `GROUP BY`, `SELECT DISTINCT`, `IN` and `ORDER BY`, and NULLs sort first
