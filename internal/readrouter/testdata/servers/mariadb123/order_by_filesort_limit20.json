@@ -1,0 +1,23 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 33.2800856,
+    "nested_loop": [
+      {
+        "read_sorted_file": {
+          "filesort": {
+            "sort_key": "orders.total desc",
+            "table": {
+              "table_name": "orders",
+              "access_type": "ALL",
+              "loops": 1,
+              "rows": 200246,
+              "cost": 33.2800856,
+              "filtered": 100
+            }
+          }
+        }
+      }
+    ]
+  }
+}

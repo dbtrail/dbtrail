@@ -1,0 +1,70 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "11.76"
+    },
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "range",
+          "possible_keys": [
+            "PRIMARY"
+          ],
+          "key": "PRIMARY",
+          "used_key_parts": [
+            "id"
+          ],
+          "key_length": "4",
+          "rows_examined_per_scan": 2,
+          "rows_produced_per_join": 2,
+          "filtered": "100.00",
+          "cost_info": {
+            "read_cost": "0.71",
+            "eval_cost": "0.20",
+            "prefix_cost": "0.91",
+            "data_read_per_join": "672"
+          },
+          "used_columns": [
+            "id",
+            "name",
+            "tier"
+          ],
+          "attached_condition": "(`plans`.`c`.`id` < 3)"
+        }
+      },
+      {
+        "table": {
+          "table_name": "orders",
+          "access_type": "ref",
+          "possible_keys": [
+            "customer_id"
+          ],
+          "key": "customer_id",
+          "used_key_parts": [
+            "customer_id"
+          ],
+          "key_length": "4",
+          "ref": [
+            "plans.c.id"
+          ],
+          "rows_examined_per_scan": 51,
+          "rows_produced_per_join": 2,
+          "filtered": "100.00",
+          "using_index": true,
+          "first_match": "c",
+          "cost_info": {
+            "read_cost": "0.52",
+            "eval_cost": "0.20",
+            "prefix_cost": "11.76",
+            "data_read_per_join": "688"
+          },
+          "used_columns": [
+            "customer_id"
+          ]
+        }
+      }
+    ]
+  }
+}

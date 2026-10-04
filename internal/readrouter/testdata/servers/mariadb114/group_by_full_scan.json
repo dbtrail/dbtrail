@@ -1,0 +1,23 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 164.5344084,
+    "filesort": {
+      "sort_key": "orders.`status`",
+      "temporary_table": {
+        "nested_loop": [
+          {
+            "table": {
+              "table_name": "orders",
+              "access_type": "ALL",
+              "loops": 1,
+              "rows": 195573,
+              "cost": 32.5183866,
+              "filtered": 100
+            }
+          }
+        ]
+      }
+    }
+  }
+}

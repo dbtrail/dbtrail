@@ -1,0 +1,43 @@
+{
+  "query_block": {
+    "union_result": {
+      "table_name": "<union1,2>",
+      "access_type": "ALL",
+      "query_specifications": [
+        {
+          "query_block": {
+            "select_id": 1,
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "orders",
+                  "access_type": "ALL",
+                  "rows": 200246,
+                  "filtered": 100,
+                  "attached_condition": "orders.`status` = 'new'"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "query_block": {
+            "select_id": 2,
+            "operation": "UNION",
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "orders",
+                  "access_type": "ALL",
+                  "rows": 200246,
+                  "filtered": 100,
+                  "attached_condition": "orders.`status` = 'void'"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

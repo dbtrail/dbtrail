@@ -1,0 +1,49 @@
+{
+  "query_block": {
+    "union_result": {
+      "table_name": "<union1,2>",
+      "access_type": "ALL",
+      "query_specifications": [
+        {
+          "query_block": {
+            "select_id": 1,
+            "cost": 33.2800856,
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "orders",
+                  "access_type": "ALL",
+                  "loops": 1,
+                  "rows": 200246,
+                  "cost": 33.2800856,
+                  "filtered": 100,
+                  "attached_condition": "orders.`status` = 'new'"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "query_block": {
+            "select_id": 2,
+            "operation": "UNION",
+            "cost": 33.2800856,
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "orders",
+                  "access_type": "ALL",
+                  "loops": 1,
+                  "rows": 200246,
+                  "cost": 33.2800856,
+                  "filtered": 100,
+                  "attached_condition": "orders.`status` = 'void'"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

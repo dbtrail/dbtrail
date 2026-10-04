@@ -1,0 +1,23 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 0.07415152,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "orders",
+          "access_type": "ref",
+          "possible_keys": ["customer_id"],
+          "key": "customer_id",
+          "key_length": "4",
+          "used_key_parts": ["customer_id"],
+          "ref": ["const"],
+          "loops": 1,
+          "rows": 40,
+          "cost": 0.07415152,
+          "filtered": 100
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "orders",
+          "access_type": "range",
+          "possible_keys": ["created_at"],
+          "key": "created_at",
+          "key_length": "6",
+          "used_key_parts": ["created_at"],
+          "rows": 1440,
+          "filtered": 100,
+          "attached_condition": "orders.created_at >= '2026-03-01' and orders.created_at < '2026-03-02'",
+          "using_index": true
+        }
+      }
+    ]
+  }
+}

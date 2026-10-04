@@ -1,0 +1,19 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "orders",
+          "access_type": "index",
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "rows": 2,
+          "filtered": 100,
+          "attached_condition": "orders.note = 'nope'"
+        }
+      }
+    ]
+  }
+}

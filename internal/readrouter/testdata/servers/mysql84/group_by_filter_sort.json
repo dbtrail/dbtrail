@@ -1,0 +1,34 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "22156.15"
+    },
+    "ordering_operation": {
+      "using_filesort": true,
+      "grouping_operation": {
+        "using_temporary_table": true,
+        "using_filesort": false,
+        "table": {
+          "table_name": "orders",
+          "access_type": "ALL",
+          "rows_examined_per_scan": 217474,
+          "rows_produced_per_join": 21747,
+          "filtered": "10.00",
+          "cost_info": {
+            "read_cost": "19981.41",
+            "eval_cost": "2174.74",
+            "prefix_cost": "22156.15",
+            "data_read_per_join": "7M"
+          },
+          "used_columns": [
+            "id",
+            "status",
+            "note"
+          ],
+          "attached_condition": "(`plans`.`orders`.`note` = 'n7')"
+        }
+      }
+    }
+  }
+}

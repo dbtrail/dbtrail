@@ -1,0 +1,19 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 33.2800856,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "orders",
+          "access_type": "ALL",
+          "loops": 1,
+          "rows": 200246,
+          "cost": 33.2800856,
+          "filtered": 100,
+          "attached_condition": "orders.note = 'n7'"
+        }
+      }
+    ]
+  }
+}
