@@ -92,6 +92,12 @@ and without it the check SKIPs.
   Lock requires a content checksum on every write; the pinned AWS SDK
   computes one (CRC32) by default on both single-part and multipart uploads.
   Nothing to configure.
+- **The newest-snapshot pointer** (`<baselines root>/_NEWEST`, written by
+  every baseline upload): the one key bintrail writes again and again, once
+  per published snapshot. On a locked (hence versioned) bucket each write is
+  a new version, a few bytes each; the lifecycle rule above reaps the
+  noncurrent ones. Retention never blocks it: a new version is always
+  allowed, only deleting or overwriting a locked version is not.
 - **Reads** (`query`/`recover`/`reconstruct`/`restore-index`, the shim, the
   web interface): read-only GETs, unaffected.
 - **`archive reconcile --prune`**: deletes **registry rows only** — it never

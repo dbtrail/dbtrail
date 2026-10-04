@@ -144,8 +144,14 @@ func runPGBaseline(cmd *cobra.Command, args []string) error {
 		// internal/baseline's Upload is source-agnostic (it walks the local
 		// snapshot layout) — reused unchanged, exactly like 'bintrail baseline'.
 		uploaded, err = baseline.Upload(cmd.Context(), pgbOutput, pgbUpload, pgbUploadRegion, pgbRetry)
-		if err != nil {
-			return fmt.Errorf("S3 upload: %w", err)
+		warn, fatal := baseline.SplitPointerError(err)
+		if fatal != nil {
+			return fmt.Errorf("S3 upload: %w", fatal)
+		}
+		if warn != nil {
+			// See bintrail baseline: the snapshot is published (#2052).
+			slog.Warn("S3 upload: snapshot published, but the newest-snapshot pointer was not updated; views files "+
+				"that follow the newest snapshot read the previous one until the next upload", "error", warn)
 		}
 		slog.Info("pg baseline S3 upload complete", "files", uploaded, "destination", pgbUpload)
 	}

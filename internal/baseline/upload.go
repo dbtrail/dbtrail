@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
@@ -50,8 +52,13 @@ func Upload(ctx context.Context, outputDir, s3URL, region string, retry bool) (i
 		return 0, err
 	}
 
-	// Route the four S3 operations through an injectable seam so the ordering
-	// invariant can be unit-tested with a recording mock (#524 review).
+	return uploadWithOps(ctx, outputDir, prefix, retry, newS3UploadOps(client, bucket))
+}
+
+// newS3UploadOps routes the upload's S3 operations through an injectable seam
+// so the ordering invariant can be unit-tested with a recording mock (#524
+// review), and so a test can check every operation is wired.
+func newS3UploadOps(client *s3.Client, bucket string) s3UploadOps {
 	ops := s3UploadOps{
 		putEmpty: func(ctx context.Context, key string) error { return storage.PutEmptyObject(ctx, client, bucket, key) },
 		uploadFile: func(ctx context.Context, path, key string) error {
@@ -61,9 +68,15 @@ func Upload(ctx context.Context, outputDir, s3URL, region string, retry bool) (i
 			return storage.S3ObjectExists(ctx, client, bucket, key)
 		},
 		deleteObject: func(ctx context.Context, key string) error { return storage.DeleteObject(ctx, client, bucket, key) },
+		putObject: func(ctx context.Context, key string, body []byte) error {
+			return storage.PutSmallObject(ctx, client, bucket, key, body)
+		},
+		getObject: func(ctx context.Context, key string) ([]byte, bool, error) {
+			return storage.GetSmallObject(ctx, client, bucket, key, 4096)
+		},
 	}
 	ops.objectURL = func(key string) string { return "s3://" + bucket + "/" + key }
-	return uploadWithOps(ctx, outputDir, prefix, retry, ops)
+	return ops
 }
 
 // s3UploadOps abstracts the four S3 operations the baseline upload performs, so
@@ -80,6 +93,11 @@ type s3UploadOps struct {
 	// under. Optional in the same sense the respeller hook is: nil means the
 	// views file is skipped, never copied wrong.
 	objectURL func(key string) string
+	// putObject and getObject read and write the root's newest-snapshot
+	// pointer (#2052). getObject reports found=false for a missing key and an
+	// error for anything else. nil skips the pointer (tests of other steps).
+	putObject func(ctx context.Context, key string, body []byte) error
+	getObject func(ctx context.Context, key string) (body []byte, found bool, err error)
 }
 
 // snapshotViewsRespeller regenerates a snapshot's views file against a
@@ -264,6 +282,12 @@ func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, op
 			slog.Warn("could not remove S3 _INCOMPLETE marker after upload (harmless; _SUCCESS decides completeness)",
 				"key", key, "error", err)
 		}
+	}
+
+	// 5. Point the root at the newest snapshot just published (#2052). Last,
+	// so it never names a snapshot whose _SUCCESS is not there yet.
+	if err := publishNewestPointers(ctx, outputDir, prefix, snapDirs, ops); err != nil {
+		return count, err
 	}
 	return count, nil
 }

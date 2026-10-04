@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
@@ -376,4 +378,52 @@ func DeleteObject(ctx context.Context, client *s3.Client, bucket, key string) er
 		return fmt.Errorf("delete s3://%s/%s: %w", bucket, key, err)
 	}
 	return nil
+}
+
+// PutSmallObject writes body at key in one PutObject. For small objects the
+// code rewrites, such as a baselines root's newest-snapshot pointer.
+func PutSmallObject(ctx context.Context, client *s3.Client, bucket, key string, body []byte) error {
+	if _, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(body),
+	}); err != nil {
+		return fmt.Errorf("put s3://%s/%s: %w", bucket, key, err)
+	}
+	return nil
+}
+
+// GetSmallObject reads at most max bytes of the object at key. A missing key
+// is found=false with no error; any other failure is an error, so a caller
+// never mistakes an unreadable object for an absent one.
+func GetSmallObject(ctx context.Context, client *s3.Client, bucket, key string, max int64) ([]byte, bool, error) {
+	out, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	if err != nil {
+		var nsk *types.NoSuchKey
+		if errors.As(err, &nsk) {
+			return nil, false, nil
+		}
+		var re *smithyhttp.ResponseError
+		if errors.As(err, &re) && re.Response.StatusCode == 404 {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("get s3://%s/%s: %w", bucket, key, err)
+	}
+	defer out.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(out.Body, max))
+	if err != nil {
+		return nil, false, fmt.Errorf("read s3://%s/%s: %w", bucket, key, err)
+	}
+	return b, true, nil
+}
+
+// IsAccessDenied reports whether err is S3 refusing the request (403 /
+// AccessDenied), as opposed to a missing key or a network failure.
+func IsAccessDenied(err error) bool {
+	var ae smithy.APIError
+	if errors.As(err, &ae) && ae.ErrorCode() == "AccessDenied" {
+		return true
+	}
+	var re *smithyhttp.ResponseError
+	return errors.As(err, &re) && re.Response != nil && re.Response.StatusCode == 403
 }

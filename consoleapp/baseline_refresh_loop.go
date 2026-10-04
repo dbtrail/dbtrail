@@ -1547,6 +1547,18 @@ var foldTables = reconstruct.ReconstructTablesDetailed
 func uploadAndInvalidate(ctx context.Context, outputDir, s3URL, region string, retry bool) (int, error) {
 	n, err := baselineUpload(ctx, outputDir, s3URL, region, retry)
 	invalidateS3Inventory(s3URL)
+	if warn, _ := baseline.SplitPointerError(err); warn != nil {
+		// The snapshot is in S3, complete, and discoverable: only the root's
+		// newest-snapshot pointer (#2052) is behind. Reporting the upload as
+		// failed would send the callers down their "not uploaded" paths (keep
+		// it local, sweep it again) for a backup that is there. Said at ERROR
+		// so it is not lost: views that follow the pointer read the previous
+		// snapshot until the next publish moves it.
+		slog.Error("snapshot uploaded, but the newest-snapshot pointer was not updated; "+
+			"views files that follow the newest snapshot keep reading the previous one until the next upload",
+			"destination", s3URL, "error", err)
+		return n, nil
+	}
 	return n, err
 }
 

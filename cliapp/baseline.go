@@ -133,8 +133,16 @@ func runBaseline(cmd *cobra.Command, args []string) error {
 	if bslUpload != "" {
 		var err error
 		uploaded, err = baseline.Upload(cmd.Context(), bslOutput, bslUpload, bslUploadRegion, bslRetry)
-		if err != nil {
-			return fmt.Errorf("S3 upload: %w", err)
+		warn, fatal := baseline.SplitPointerError(err)
+		if fatal != nil {
+			return fmt.Errorf("S3 upload: %w", fatal)
+		}
+		if warn != nil {
+			// The snapshot is in S3 and complete; only the newest-snapshot
+			// pointer is behind (#2052). Not a failed backup: go on to prune
+			// and the summary, and say it.
+			slog.Warn("S3 upload: snapshot published, but the newest-snapshot pointer was not updated; views files "+
+				"that follow the newest snapshot read the previous one until the next upload", "error", warn)
 		}
 		if bslFormat != "json" {
 			fmt.Printf("  uploaded  : %d files → %s\n", uploaded, bslUpload)
