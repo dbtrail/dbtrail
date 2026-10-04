@@ -21,11 +21,11 @@ import (
 // Result is one rotation cycle's outcome. Deferred counts partitions past
 // retention that this cycle did NOT drop to avoid data loss: the
 // ProtectUnarchived guard refusing an unarchived partition, an S3 upload that
-// failed or is still pending (in either branch, whichever source it belongs
-// to), or a partition that changed after it was archived. The built-in loop
-// sums it across targets to drive escalation. The explicit `rotate` command
-// surfaces only Dropped/Added, but can still produce Deferred>0 when an
-// upload is unconfirmed. A named struct, not a positional tuple: three same-typed ints
+// failed in this run, an upload still pending (in either branch, whichever
+// source it belongs to), or a partition that changed after it was archived.
+// The built-in loop sums it across targets to drive escalation. The explicit
+// `rotate` command surfaces only Dropped/Added, but can still produce
+// Deferred>0 for the last three. A named struct, not a positional tuple: three same-typed ints
 // invite silent misordering at call sites.
 type Result struct {
 	Dropped, Added, Deferred int
