@@ -375,47 +375,58 @@ What this is and is not:
   (`utf8mb4_bin`, `utf8mb4_0900_bin`, `latin1_bin`, ...), by its own
   definition or by its table's default, is compared byte by byte on the
   copy as well: the copy reads each column's collation from the `CREATE
-  TABLE` stored with the snapshot. Close, not identical: `'ß' = 'ss'`,
-  full-width letters (`'Ａ' = 'A'`), ligatures and letters with a stroke
-  (`'æ' = 'ae'`, `'ø' = 'o'`, `'ł' = 'l'`), and hiragana against katakana
-  are equal under `utf8mb4_0900_ai_ci` and not on the copy, which folds
-  case and accents and nothing else; the other way round, the copy takes
-  the breve of Cyrillic `й` for an accent and equates it with `и`, which
-  MySQL keeps apart; and where MySQL sorts every
-  punctuation mark before the digits, the copy sorts them by their ASCII
-  code (`:` and `@` after the digits). One DuckDB
-  collation does all of that as MySQL does (`nocase.icu_noaccent`); the
-  copy does not use it because it makes every comparison of text about
-  twice as slow. A column MySQL declares `_cs` (`utf8mb4_0900_as_cs`) is
-  case-insensitive on the copy, because bytes would compare it right and
-  sort it wrong (`_cs` puts `a` before `B`, bytes do not); a column under a
-  PAD SPACE collation (every collation older than the `0900` ones:
-  `utf8mb4_general_ci`, `utf8mb4_unicode_ci`, `utf8mb4_bin`, `latin1_*`)
-  ignores trailing spaces on MySQL, so `'bob ' = 'bob'` there and not
-  here; a `_bin` column in a multi-byte character set other than UTF-8
-  sorts by that character set's bytes on MySQL and by Unicode code point
-  here; a column's collation is the one it had at the last full snapshot
-  (a refresh carries the table definition forward, so an `ALTER` that
-  changes a collation is seen at the next full snapshot); a snapshot that
-  carries no `CREATE TABLE` (one taken from PostgreSQL) has no collations
-  to read, so all its text columns fold case; and **`AVG` and `/` return a double** on the copy, where MySQL
-  returns a `DECIMAL` with four decimals more than the operand has (for
-  `DECIMAL` and integer operands; a `DOUBLE` operand gives a double on
-  both): `AVG(amount)` over a `DECIMAL(12,2)` is `1.8` on the copy and
-  `1.800000` on MySQL, `ROUND(AVG(points), 1)` is `0` and `0.0`, `qty / 3`
-  is `1.3333333333333333` and `1.3333`. The same value in a different text
-  and under a different column type, exact to about 15 significant digits
-  on the copy. It stays this way because nothing is rewritten for the copy
-  and a double carries no scale to print by. Division and modulo by zero
-  are `NULL` on both. A
-  `DECIMAL` itself prints as on MySQL, with its scale and trailing zeros
-  (`ROUND(SUM(amount), 2)` is `117329550.00` on both), with one exception: a
-  `CASE` or `IF` that mixes a `DECIMAL` branch and an integer branch prints
-  the integer rows as `4.00` on the copy and as `4` on MySQL, which declares
-  the column with two decimals and does not pad them. None of these can be
-  caught per statement. If a
-  workload depends on one, keep the copy for the reads where they do not
-  matter, or leave routing off.
+  TABLE` stored with the snapshot. Close, not identical. What still
+  differs, none of which can be caught per statement:
+  - **Equalities MySQL's default collation has and the copy lacks.**
+    `'ß' = 'ss'`, full-width letters (`'Ａ' = 'A'`), ligatures and letters
+    with a stroke (`'æ' = 'ae'`, `'ø' = 'o'`, `'ł' = 'l'`), and hiragana
+    against katakana are equal under `utf8mb4_0900_ai_ci` and not on the
+    copy, which folds case and accents and nothing else. The other way
+    round, the copy takes the breve of Cyrillic `й` for an accent and
+    equates it with `и`, which MySQL keeps apart.
+  - **Where punctuation sorts.** MySQL sorts every punctuation mark before
+    the digits; the copy sorts them by their ASCII code (`:` and `@` after
+    the digits). Letters sort the same.
+  - One DuckDB collation does both of the above as MySQL does
+    (`nocase.icu_noaccent`). The copy does not use it because it makes
+    every comparison of text about twice as slow.
+  - **`_cs` columns.** A column MySQL declares `_cs`
+    (`utf8mb4_0900_as_cs`) is case-insensitive on the copy. Bytes would
+    compare it right and sort it wrong: `_cs` puts `a` before `B`, bytes
+    do not.
+  - **Trailing spaces.** A column under a PAD SPACE collation (every
+    collation older than the `0900` ones: `utf8mb4_general_ci`,
+    `utf8mb4_unicode_ci`, `utf8mb4_bin`, `latin1_*`) ignores trailing
+    spaces on MySQL, so `'bob ' = 'bob'` there and not here.
+  - **`_bin` outside UTF-8.** A `_bin` column in a multi-byte character
+    set other than UTF-8 sorts by that character set's bytes on MySQL and
+    by Unicode code point here. Equality is the same.
+  - **A collation changed since the last full snapshot.** A column's
+    collation is the one it had then: a refresh carries the table
+    definition forward, so an `ALTER` that changes a collation is seen at
+    the next full snapshot. A snapshot that carries no `CREATE TABLE` (one
+    taken from PostgreSQL) has no collations to read, so all its text
+    columns fold case.
+  - **`AVG` and `/` return a double** on the copy, where MySQL returns a
+    `DECIMAL` with four decimals more than the operand has (for `DECIMAL`
+    and integer operands; a `DOUBLE` operand gives a double on both):
+    `AVG(amount)` over a `DECIMAL(12,2)` is `1.8` on the copy and
+    `1.800000` on MySQL, `ROUND(AVG(points), 1)` is `0` and `0.0`,
+    `qty / 3` is `1.3333333333333333` and `1.3333`. The same value in a
+    different text and under a different column type, exact to about 15
+    significant digits on the copy. It stays this way because nothing is
+    rewritten for the copy and a double carries no scale to print by.
+    Division and modulo by zero are `NULL` on both.
+  - **`CASE` and `IF` over a `DECIMAL` and an integer.** A `DECIMAL`
+    prints as on MySQL, with its scale and trailing zeros
+    (`ROUND(SUM(amount), 2)` is `117329550.00` on both), with one
+    exception: a `CASE` or `IF` that mixes a `DECIMAL` branch and an
+    integer branch prints the integer rows as `4.00` on the copy and as
+    `4` on MySQL, which declares the column with two decimals and does not
+    pad them.
+
+  If a workload depends on one of these, keep the copy for the reads where
+  they do not matter, or leave routing off.
 - **The thresholds are knobs, not truths.** The optimizer's cost is its
   own estimate; it misleads on cached data and on skewed values (and on
   `LIMIT`, which is why steps 4 and 5 read the statement, not the cost).
