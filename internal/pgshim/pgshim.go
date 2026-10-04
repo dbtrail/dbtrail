@@ -180,7 +180,7 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.Logger
 	// SIGTERM shutdown or the deferred cancel on return — so the parked read
 	// errors out and this goroutine exits; otherwise Serve's wg.Wait() would hang
 	// graceful shutdown on every idle psql session. Mirrors the MySQL shim's
-	// watchConn (internal/cli/shim.go). stopClose prevents the AfterFunc from
+	// shim.WatchConn (internal/shim/watchconn.go). stopClose prevents the AfterFunc from
 	// racing the normal-return path (it is a no-op once the func has run).
 	stopClose := context.AfterFunc(connCtx, func() { _ = c.Close() })
 	defer stopClose()

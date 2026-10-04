@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **The embedded time-travel port notices a client that hangs up in the
+  middle of a statement** (#2033). Nothing read the socket while a statement
+  ran, so a client that left kept its SQL worker running and held its
+  server's slot until the 60-second cap: every other client of that server
+  got error 1203 meanwhile. The port now reads the socket on its own the way
+  the standalone `bintrail shim` does, so a hang-up stops the statement and
+  frees the slot at once.
+
 ### Added
 - **`watch --sql-max-in-flight`** (env `BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT`,
   #2030): how many SQL-on-the-copy statements run at once, the SQL card and
