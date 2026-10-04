@@ -3187,7 +3187,11 @@ function addServerCard() {
 // change (#1606) as GET /api/servers/{id}/first-run computes them, or nothing
 // once the list is complete. Waiting is its own mark, so a step that has not
 // started never looks like one that failed.
-function firstRunCard(rep) {
+//
+// id and onStarted are for the snapshot step's own button: the server the
+// snapshot is taken of, and what to do once the run is accepted (ask for the
+// list again, which then shows the step running).
+function firstRunCard(rep, id, onStarted) {
   if (!rep || rep.complete || !Array.isArray(rep.steps)) return null;
   const marks = { done: "✓", running: "…", waiting: "○", failed: "✗" };
   const card = el("section", { class: "ov-panel fr-card" });
@@ -3221,14 +3225,23 @@ function firstRunCard(rep) {
       if (/\bServers\b/.test(s.fix)) {
         fix.append(" ", el("a", { class: "fr-go", href: "#servers", text: "Open Servers ›",
           onclick: (e) => { e.preventDefault(); openServersModal(); } }));
-      } else if (/^On the Snapshots page/.test(s.fix)) {
-        fix.append(" ", el("a", { class: "fr-go", href: "/snapshots", text: "Open Snapshots ›",
-          onclick: (e) => { e.preventDefault(); navigate("snapshots"); } }));
       } else if (/\bunder Set at startup\b/.test(s.fix)) {
         fix.append(" ", el("a", { class: "fr-go", href: DOCS_BASE + "settings/backups/#set-at-startup",
           target: "_blank", rel: "noopener", text: "Read the docs ›" }));
+      } else if (/\bthe Snapshots page\b/.test(s.fix)) {
+        fix.append(" ", el("a", { class: "fr-go", href: "/snapshots", text: "Open Snapshots ›",
+          onclick: (e) => { e.preventDefault(); navigate("snapshots"); } }));
       }
       body.append(fix);
+      // The step that only waits for someone to take the snapshot carries
+      // the button itself. The server sends this fix only when a snapshot
+      // can be written (blockedBackupStep covers the rest), and the button
+      // asks the same question as the one on the Snapshots page.
+      if (id && pressable && state === "waiting" && /^Create one on the Snapshots page/.test(s.fix)) {
+        const btn = el("button", { class: "btn btn-primary fr-snap", type: "button", text: "Take snapshot now" });
+        btn.onclick = () => { if (typeof window.confirm === "function" && window.confirm(READ_DB_CONFIRM)) createBaseline(id, btn, onStarted); };
+        body.append(btn);
+      }
     }
     list.append(el("li", { class: "fr-step " + state + (i === cur ? " fr-cur" : "") }, el("span", { class: "dc-mark", text: marks[state], "aria-label": state }), body));
   });
@@ -3300,7 +3313,7 @@ function watchFirstRun(f, live) {
       if (!live()) return;
       if (rep && rep.check_error) { stale(rep.check_error); again(); return; }
       failures = 0;
-      const card = firstRunCard(rep);
+      const card = firstRunCard(rep, id, () => { if (stopped || !live()) return; delay = 3000; arm(0); });
       if (!card) { stopped = true; clear(f.firstRunSlot); return; }
       const key = JSON.stringify(rep);
       if (key !== last) delay = 3000;
@@ -9624,9 +9637,10 @@ function snapshotFailureCard(failure, raw, where, note, name) {
   return box;
 }
 
-async function createBaseline(id, btn) {
+async function createBaseline(id, btn, onStarted) {
+  const label = btn ? btn.textContent : "";
   if (btn) { btn.disabled = true; btn.textContent = "Creating…"; }
-  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = "Read database now"; } };
+  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = label; } };
   try {
     await api("/api/servers/" + encodeURIComponent(id) + "/baseline", { method: "POST", body: {} });
   } catch (err) {
@@ -9635,6 +9649,7 @@ async function createBaseline(id, btn) {
     return;
   }
   toast("Snapshot started: copying your data and uploading it…");
+  if (onStarted) onStarted();
   if (backupsOnScreen()) renderSnapshots();
   let done = await pollBaseline(id, false);
   if (done && done.state === "succeeded" && done.uploading) {

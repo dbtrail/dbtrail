@@ -627,6 +627,7 @@ button { font-family: inherit; }
   color: var(--ink); text-decoration-color: var(--ink);
 }
 .fr-go { white-space: nowrap; }
+.fr-snap { display: block; margin-top: 10px; }
 
 /* ============================================================
    badges (type) — SACRED outlined look
