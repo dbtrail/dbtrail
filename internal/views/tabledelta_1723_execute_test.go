@@ -153,6 +153,7 @@ func TestStateView_followsARangePairAlone(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			relist(t, db, sqlText)
 			if err := db.QueryRow(`SELECT count(*) FROM shop.orders`).Scan(&n); err != nil || n != 2 {
 				t.Fatalf("after a range pair alone appeared: n=%d err=%v, want 2 (the chain's dead row gone)", n, err)
 			}

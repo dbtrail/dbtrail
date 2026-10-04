@@ -105,12 +105,12 @@ chain, so the file is safe to share or commit. The S3 secret it creates lasts
 one DuckDB session, so run the file again (`.read views.sql`) in each session
 that reads S3.
 
-**Opening it from outside AWS takes a while.** Creating the views reads a
-little of every file they name, and over the internet each read is a round
-trip. A followed file opens in about 50 s from a laptop for 17 tables. A pinned S3 file
-(`bintrail views --pin-snapshot`) opens much faster on DuckDB 1.5 or newer,
-because it reads all those files at once: 5.6 s instead of 43 s for a 17-table
-snapshot, measured from a laptop. Details and numbers:
+**Opening it from outside AWS takes a few seconds on DuckDB 1.5 or newer.**
+Creating the views reads a little of every file they name, and over the
+internet each read is a round trip. The file reads them all at once: about 9 s
+from a laptop for a 17-table snapshot (6 s for a file pinned with
+`--pin-snapshot`). Older DuckDB versions read them one after another, close to
+a minute. Details and numbers:
 [Opening the file from outside AWS](parquet-debugging.md#opening-the-file-from-outside-aws).
 
 **The web interface does not run the file.** Your DuckDB runs it, in your

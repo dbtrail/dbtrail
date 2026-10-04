@@ -49,7 +49,7 @@ func TestFooterPrefetch_namesEveryFileTheViewsOpen_2053(t *testing.T) {
 		t.Fatalf("prefetch at %d, first view at %d; want the prefetch first", pre, view)
 	}
 	// Every literal file a view names is in the prefetch list.
-	list := sql[pre:strings.Index(sql[pre:], "] ELSE")+pre]
+	list := sql[pre : strings.Index(sql[pre:], "] ELSE")+pre]
 	if strings.Contains(list, "log[2024]") {
 		t.Error("a path with a glob character is prefetched; it would abort the file before any view")
 	}
@@ -62,9 +62,11 @@ func TestFooterPrefetch_namesEveryFileTheViewsOpen_2053(t *testing.T) {
 		}
 	}
 
+	// A following file prefetches from its own listing of the snapshot, never
+	// from the files named at generation (#2064): it meets later snapshots.
 	in.Follow = FollowNewest
-	if strings.Contains(Generate(in), "parquet_file_metadata(") {
-		t.Error("a following file prefetches; it has no HTTP metadata cache, so the binds would HEAD again anyway")
+	if got := Generate(in); !strings.Contains(got, "parquet_file_metadata(") || strings.Contains(got, "'"+want[0]+"',") {
+		t.Error("a following file must prefetch from the session's listing, with no file named at generation")
 	}
 	local := prefetchInput()
 	local.BaselineSource = "/data/base"

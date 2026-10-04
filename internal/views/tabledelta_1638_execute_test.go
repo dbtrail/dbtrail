@@ -325,10 +325,12 @@ func TestFollowingStateView_readsADeltaThatAppearsLater(t *testing.T) {
 			// A sibling table whose name starts with this one's: its chain must
 			// not reach this view.
 			writeDeltaPairAt(t, filepath.Join(root, stamp, "shop", "orders_archive.parquet"), 0, []int64{0}, [][3]string{{"7", "x", baseline.TableDeltaOpUpsert}})
+			relist(t, db, sqlText)
 			if got := state(); got != before {
 				t.Fatalf("a delta beside ANOTHER table changed this view: %s, want %s", got, before)
 			}
 			writeDeltaPair(t, base, 0, []int64{0}, [][3]string{{"9", "z", baseline.TableDeltaOpUpsert}})
+			relist(t, db, sqlText)
 			if got := state(); got != "2=b,3=c,9=z" {
 				t.Fatalf("after the delta appeared: %s, want the chain applied (2=b,3=c,9=z)", got)
 			}
