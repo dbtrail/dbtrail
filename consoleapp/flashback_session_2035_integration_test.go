@@ -245,6 +245,23 @@ func TestIntegrationFlashbackSessionSettings(t *testing.T) {
 		t.Errorf("after the refusals the connection has %v, want what it had", got)
 	}
 
+	// Time travel answers in UTC. Under the zone this connection is in it is
+	// refused by name, and it is not refused for its zone once back in UTC.
+	const travel = "SELECT * FROM _flashback.orders AS OF '2026-10-04 10:00:00' WHERE id = 1"
+	if err := connExec(t, west, travel); mysqlCode(err) != 1235 || !strings.Contains(err.Error(), "-03:00") {
+		t.Errorf("time travel under -03:00: err = %v, want 1235 naming the zone", err)
+	}
+	// The connect statement Rails sends: accepted whole, the mode computed.
+	if err := connExec(t, west, "SET NAMES utf8mb4, @@SESSION.sql_mode = CONCAT(CONCAT(@@sql_mode, ',STRICT_ALL_TABLES'), ',NO_AUTO_VALUE_ON_ZERO'), @@SESSION.sql_auto_is_null = 0, @@SESSION.wait_timeout = 2147483, @@SESSION.time_zone = '+00:00'"); err != nil {
+		t.Fatalf("a driver's connect statement: %v", err)
+	}
+	if got := connStrings(t, west, "SELECT @@time_zone, @@sql_mode"); got[0][0] != "+00:00" || got[0][1] != "STRICT_TRANS_TABLES,NO_ZERO_DATE,STRICT_ALL_TABLES,NO_AUTO_VALUE_ON_ZERO" {
+		t.Errorf("after the connect statement the connection has %v", got)
+	}
+	if err := connExec(t, west, travel); mysqlCode(err) == 1235 {
+		t.Errorf("time travel under UTC is still refused for its zone: %v", err)
+	}
+
 	// A real driver's own SET: go-sql-driver sends the DSN's system variables
 	// as it connects.
 	viaDSN := oneConn(t, addr, user, "&time_zone="+url.QueryEscape("'Asia/Tokyo'")+"&sql_mode="+url.QueryEscape("'STRICT_ALL_TABLES'"))

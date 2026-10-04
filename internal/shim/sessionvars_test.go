@@ -74,13 +74,16 @@ func TestSessionSet_timeZoneSpellings(t *testing.T) {
 		{"SET time_zone = '-05:00'", "Etc/GMT+5", "-05:00"},
 		{"SET time_zone = '+14:00'", "Etc/GMT-14", "+14:00"},
 		{"SET time_zone = '-12:00'", "Etc/GMT+12", "-12:00"},
-		{"SET time_zone = '+3:00'", "Etc/GMT-3", "+3:00"},
+		{"SET time_zone = '+3:00'", "Etc/GMT-3", "+03:00"},
+		{"SET time_zone = '+01:00' /* set by the pool */", "Etc/GMT-1", "+01:00"},
+		{"SET time_zone = '+01:00' /* a */ /* b */ ;", "Etc/GMT-1", "+01:00"},
 		// UTC under every name is the copy's own zone: nothing to set.
 		{"SET time_zone = '+00:00'", "", "+00:00"},
 		{"SET time_zone = '-00:00'", "", "-00:00"},
 		{"SET time_zone = 'UTC'", "", "UTC"},
 		{"SET time_zone = 'utc'", "", "utc"},
 		{"SET time_zone = 'SYSTEM'", "", "SYSTEM"},
+		{"SET time_zone = 'system'", "", "SYSTEM"},
 		{"SET time_zone = SYSTEM", "", "SYSTEM"},
 		{"SET time_zone = DEFAULT", "", "UTC"},
 	} {
@@ -212,7 +215,12 @@ func TestSessionSet_sqlModeRefused(t *testing.T) {
 		{"SET sql_mode = 4", "sql_mode", "numeric"},
 		{"SET sql_mode = NULL", "NULL", unknown},
 		{"SET sql_mode = (SELECT 'ANSI')", "sql_mode", "cannot read"},
-		{"SET sql_mode = REPLACE(@@sql_mode, 'A', 'B')", "sql_mode", "cannot read"},
+		{"SET sql_mode = REPLACE(@@sql_mode, 'A', 'B')", "NO_ZERO_DBTE", unknown},
+		{"SET sql_mode = REPLACE(@@sql_mode, 'A')", "sql_mode", "cannot read"},
+		{"SET sql_mode = REPLACE(@@sql_mode, '', 'B')", "sql_mode", "cannot read"},
+		{"SET sql_mode = CONCAT(@@sql_mode, UPPER(',no_zero_date'))", "sql_mode", "cannot read"},
+		{"SET sql_mode = CONCAT(@@sql_mode, @@time_zone)", "sql_mode", "cannot read"},
+		{"SET sql_mode = CONCAT(CONCAT(@@sql_mode, ',STRICT_ALL_TABLES'), ',ANSI_QUOTES')", "ANSI_QUOTES", read},
 	} {
 		h, f := sessionHandler(t)
 		if _, err := h.HandleQuery("SET sql_mode = 'NO_ZERO_DATE'"); err != nil {
@@ -323,6 +331,13 @@ func TestSessionSet_combined(t *testing.T) {
 		"SET time_zone = 'Asia/Tokyo', SESSION sql_mode = '', collation_connection = utf8mb4_general_ci",
 		"SET @@session.time_zone = 'Asia/Tokyo', @@session.sql_select_limit = DEFAULT",
 		"SET CHARACTER SET utf8mb4, time_zone = 'Asia/Tokyo'",
+		// A statement the port answered with an empty OK before the three
+		// were applied keeps its other assignments as chatter: a driver's
+		// connect statement must go on opening the connection.
+		"SET time_zone = 'Asia/Tokyo', wait_timeout = 28800",
+		"SET time_zone = 'Asia/Tokyo', @x = 1",
+		"SET SESSION transaction_isolation = 'READ-COMMITTED', time_zone = 'Asia/Tokyo'",
+		"SET NAMES utf8mb4, @@SESSION.time_zone = 'Asia/Tokyo', @@SESSION.sql_auto_is_null = 0, @@SESSION.wait_timeout = 2147483",
 	} {
 		if sess, _ := sessAfter(t, stmt); sess.TimeZone != "Asia/Tokyo" {
 			t.Errorf("%s: the copy runs under %q, want Asia/Tokyo", stmt, sess.TimeZone)
@@ -339,9 +354,9 @@ func TestSessionSet_combined(t *testing.T) {
 		{"SET sql_select_limit = 5, time_zone = 'Nope/Zone'", mysql.ER_UNKNOWN_TIME_ZONE, "Nope/Zone"},
 		{"SET time_zone = 'Asia/Tokyo', sql_select_limit = 0", mysql.ER_WRONG_VALUE_FOR_VAR, "sql_select_limit"},
 		// A variable the port does not have, in the same statement.
-		{"SET time_zone = 'Asia/Tokyo', foo_bar = 1", mysql.ER_UNKNOWN_SYSTEM_VARIABLE, "foo_bar"},
+		{"SET foo_bar = 1, time_zone = 'Asia/Tokyo'", mysql.ER_UNKNOWN_SYSTEM_VARIABLE, "foo_bar"},
 		{"SET max_execution_time = 1000, time_zone = 'Asia/Tokyo'", mysql.ER_UNKNOWN_SYSTEM_VARIABLE, "max_execution_time"},
-		{"SET time_zone = 'Asia/Tokyo', @x = 1", mysql.ER_PARSE_ERROR, "@x = 1"},
+		{"SET @x = 1, time_zone = 'Asia/Tokyo'", mysql.ER_PARSE_ERROR, "@x = 1"},
 		// The scope keyword carries to the assignments after it.
 		{"SET GLOBAL autocommit = 1, time_zone = 'Asia/Tokyo'", mysql.ER_LOCAL_VARIABLE, "autocommit"},
 		{"SET time_zone = 'Asia/Tokyo', GLOBAL sql_mode = ''", mysql.ER_LOCAL_VARIABLE, "sql_mode"},
@@ -656,4 +671,54 @@ func sign(n int) string {
 		return "-"
 	}
 	return "+"
+}
+
+// The sql_mode a driver computes instead of spelling: Rails' connect
+// statement nests CONCAT, and ORMs drop one mode with REPLACE. Each is read to
+// the value MySQL would compute from the connection's current sql_mode.
+func TestSessionSet_sqlModeExpressions(t *testing.T) {
+	for _, tc := range []struct{ stmt, want string }{
+		{"SET sql_mode = CONCAT(@@sql_mode, ',STRICT_ALL_TABLES')", "NO_ZERO_DATE,STRICT_ALL_TABLES"},
+		{"SET NAMES utf8mb4, @@SESSION.sql_mode = CONCAT(CONCAT(@@sql_mode, ',STRICT_ALL_TABLES'), ',NO_AUTO_VALUE_ON_ZERO'), @@SESSION.sql_auto_is_null = 0, @@SESSION.wait_timeout = 2147483",
+			"NO_ZERO_DATE,STRICT_ALL_TABLES,NO_AUTO_VALUE_ON_ZERO"},
+		{"SET sql_mode = REPLACE(@@sql_mode, 'NO_ZERO_DATE', '')", ""},
+		{"SET sql_mode = concat( @@session.sql_mode , ',ONLY_FULL_GROUP_BY' )", "NO_ZERO_DATE,ONLY_FULL_GROUP_BY"},
+		{"SET sql_mode = REPLACE(CONCAT(@@sql_mode, ',ONLY_FULL_GROUP_BY'), 'ONLY_FULL_GROUP_BY', '')", "NO_ZERO_DATE"},
+		{"SET sql_mode = CONCAT('STRICT_ALL_TABLES', ',', 'NO_ZERO_IN_DATE')", "STRICT_ALL_TABLES,NO_ZERO_IN_DATE"},
+	} {
+		h, _ := sessionHandler(t)
+		if _, err := h.HandleQuery("SET sql_mode = 'NO_ZERO_DATE'"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.HandleQuery(tc.stmt); err != nil {
+			t.Errorf("%s: refused: %v", tc.stmt, err)
+			continue
+		}
+		if got := sysVar(t, h, "@@sql_mode"); got != tc.want {
+			t.Errorf("%s: @@sql_mode = %q, want %q", tc.stmt, got, tc.want)
+		}
+	}
+}
+
+// Time travel reads and prints in UTC. On a connection that SET another zone
+// it is refused by name, and the zone is the way out; under UTC, however it
+// was spelled, the statement is not refused for its zone.
+func TestSessionSet_timeTravelUnderAZone(t *testing.T) {
+	const stmt = "SELECT * FROM _flashback.orders AS OF '2026-01-01 10:00:00'"
+	for _, set := range []string{"SET time_zone = '-03:00'", "SET time_zone = 'Europe/Madrid'"} {
+		h, _ := sessionHandler(t)
+		h.db = "shop"
+		if _, err := h.HandleQuery(set); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Parse(stmt, "shop"); err != nil {
+			t.Fatalf("the probe statement is not time travel: %v", err)
+		}
+		_, err := h.HandleQuery(stmt)
+		if err == nil {
+			t.Errorf("%s: time travel answered; want it refused naming the zone", set)
+			continue
+		}
+		wantMyError(t, err, mysql.ER_NOT_SUPPORTED_YET, "UTC", strings.Split(set, "'")[1], "SET time_zone = '+00:00'")
+	}
 }

@@ -9,6 +9,11 @@ import (
 	"net"
 	"sync"
 	"time"
+	// The port resolves SET time_zone names (#2035). Embedded here, in the
+	// package every console binary is built from, so a host with no zoneinfo
+	// (a slim container image) still knows the zones; not in internal/shim,
+	// which the core CLI links too and which never resolves one there.
+	_ "time/tzdata"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/server"

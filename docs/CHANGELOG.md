@@ -98,7 +98,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing. **What changes for an existing client:** a connection that sets
   one of the refused values (a driver configured with `sql_mode=ANSI`, a
   `+05:30` offset, `sql_select_limit = 0`) used to get an OK and now gets an
-  error, at the `SET`. Under a session zone other than UTC the copy reads a
+  error, at the `SET`. The other assignments of a `SET` the port already
+  accepted (a driver's connect statement: `SET NAMES ..., @@SESSION.sql_mode
+  = CONCAT(...), @@SESSION.wait_timeout = ...`) stay ignored as before, and
+  `sql_mode` computed with `CONCAT` or `REPLACE` over `@@sql_mode` is read.
+  A time-travel statement on a connection whose zone is not UTC used to be
+  answered in UTC and is now refused with error 1235 naming the zone; `SET
+  time_zone = '+00:00'` runs it. The console binaries
+  now embed the time zone database (about 450 KB), so zone names resolve on
+  a host that has none installed. Under a session zone other than UTC the copy reads a
   `DATETIME` column as the wall clock MySQL holds and a `TIMESTAMP` column
   as an instant printed in that zone; it tells them apart from the column
   types the snapshot records, so a table whose snapshot does not record

@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	_ "time/tzdata" // named zones resolve on a host with no zoneinfo too
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 
@@ -113,6 +112,10 @@ var (
 		"(`[^`]+`|[a-z_][a-z0-9_$]*)\\s*:?=\\s*(.*)$")
 	// The three settings, as a word anywhere in an item this file could not
 	// read: such a SET is refused, never passed on as chatter.
+	// trailingCommentRE is one block comment closing the statement. It cannot
+	// start inside a quoted value: [^'"`] keeps it from spanning a quote.
+	trailingCommentRE = regexp.MustCompile("(?s)\\s*/\\*[^'\"`]*?\\*/\\s*;?\\s*$")
+
 	sessionVarWordRE = regexp.MustCompile(`(?i)\b(time_zone|sql_mode|sql_select_limit)\b`)
 )
 
@@ -130,6 +133,14 @@ func isGlobalScope(scope string) bool {
 // 2` sets both globally); the @@ form names its own scope.
 func parseSet(stmt string) (items []setItem, ok bool) {
 	stmt = leadingComment.ReplaceAllString(stmt, "")
+	// A comment after the last value is the client's, not part of the value.
+	for {
+		cut := trailingCommentRE.ReplaceAllString(stmt, "")
+		if cut == stmt {
+			break
+		}
+		stmt = cut
+	}
 	m := setStatementRE.FindStringSubmatch(stmt)
 	if m == nil {
 		return nil, false
@@ -209,7 +220,8 @@ const (
 
 var (
 	bareValueRE   = regexp.MustCompile(`^[A-Za-z0-9_+\-/:.]+$`)
-	concatModeRE  = regexp.MustCompile(`(?is)^concat\s*\(\s*@@(?:session\s*\.\s*)?sql_mode\s*,\s*('(?:[^'\\]|'')*')\s*\)$`)
+	modeVarRE     = regexp.MustCompile(`(?i)^@@(?:(?:session|local)\s*\.\s*)?sql_mode$`)
+	modeCallRE    = regexp.MustCompile(`(?is)^(concat|replace)\s*\((.*)\)$`)
 	offsetZoneRE  = regexp.MustCompile(`^([+-])(\d{1,2}):(\d{2})$`)
 	namedZoneRE   = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+\-/]*$`)
 	unsignedIntRE = regexp.MustCompile(`^\d+$`)
@@ -268,8 +280,16 @@ func (h *Handler) applySessionSet(qstr string) (res *mysql.Result, handled bool,
 	h.mu.Lock()
 	staged := h.sessVars
 	h.mu.Unlock()
+	// A statement the port answered with an empty OK before these three were
+	// applied (a driver's connect statement: SET NAMES ..., @@SESSION.sql_mode
+	// = ..., @@SESSION.wait_timeout = ...) keeps its other assignments as the
+	// chatter they were. Only the three are read; refusing the rest would turn
+	// a connection that worked into one that cannot open.
+	chatter := isHandshakeNoise(leadingComment.ReplaceAllString(qstr, ""))
 	for _, it := range items {
 		switch {
+		case !it.parsed && chatter && !sessionVarWordRE.MatchString(it.raw):
+			continue
 		case !it.parsed:
 			return nil, true, mysql.NewError(mysql.ER_PARSE_ERROR, fmt.Sprintf(
 				"cannot read %q in a SET of time_zone, sql_mode or sql_select_limit; the statement was not applied", it.raw))
@@ -284,7 +304,7 @@ func (h *Handler) applySessionSet(qstr string) (res *mysql.Result, handled bool,
 			err = staged.setSQLMode(it.value)
 		case it.name == "sql_select_limit":
 			err = staged.setSelectLimit(it.value)
-		case harmlessWithSettings[it.name]:
+		case harmlessWithSettings[it.name], chatter:
 			continue
 		default:
 			return nil, true, mysql.NewError(mysql.ER_UNKNOWN_SYSTEM_VARIABLE, fmt.Sprintf(
@@ -317,6 +337,14 @@ func (v *sessionVars) setTimeZone(raw string) error {
 	duck, loc, err := resolveTimeZone(val)
 	if err != nil {
 		return err
+	}
+	// @@time_zone answers MySQL's spelling, not the client's: '+3:00' reads
+	// back as '+03:00' and 'system' as 'SYSTEM'.
+	if m := offsetZoneRE.FindStringSubmatch(val); m != nil {
+		h, _ := strconv.Atoi(m[2])
+		val = fmt.Sprintf("%s%02d:%s", m[1], h, m[3])
+	} else if strings.EqualFold(val, "SYSTEM") {
+		val = "SYSTEM"
 	}
 	v.timeZone, v.duckZone, v.loc = val, duck, loc
 	return nil
@@ -410,12 +438,11 @@ func (v *sessionVars) setSQLMode(raw string) error {
 		return nil
 	case valueOther:
 		// The one expression a driver sends: the current modes plus some.
-		m := concatModeRE.FindStringSubmatch(raw)
-		if m == nil {
+		computed, ok := evalModeExpr(raw, v.sqlMode, 0)
+		if !ok {
 			return wrong(fmt.Sprintf("cannot read the value %s (give the list of modes as one quoted string)", raw))
 		}
-		add, _ := readSetValue(m[1])
-		val = v.sqlMode + add
+		val = computed
 	case valueBare:
 		if val == "0" {
 			val = ""
@@ -441,6 +468,51 @@ func (v *sessionVars) setSQLMode(raw string) error {
 	}
 	v.sqlMode, v.sqlModeSet = strings.Join(modes, ","), true
 	return nil
+}
+
+// evalModeExpr computes the sql_mode expressions drivers send instead of a
+// plain string: the current value (@@sql_mode), a quoted string, and CONCAT
+// and REPLACE over those, nested (Rails sends CONCAT(CONCAT(@@sql_mode,
+// ',STRICT_ALL_TABLES'), ',NO_AUTO_VALUE_ON_ZERO')). Anything else is not
+// guessed: ok is false and the SET is refused.
+func evalModeExpr(raw, current string, depth int) (val string, ok bool) {
+	raw = strings.TrimSpace(raw)
+	if depth > 8 {
+		return "", false
+	}
+	if modeVarRE.MatchString(raw) {
+		return current, true
+	}
+	if s, kind := readSetValue(raw); kind == valueString {
+		// A quote that closes before the end means this is not one string.
+		q := raw[:1]
+		if strings.Contains(strings.ReplaceAll(raw[1:len(raw)-1], q+q, ""), q) {
+			return "", false
+		}
+		return s, true
+	}
+	m := modeCallRE.FindStringSubmatch(raw)
+	if m == nil {
+		return "", false
+	}
+	var args []string
+	for _, a := range splitTopLevelCommas(m[2]) {
+		v, ok := evalModeExpr(a, current, depth+1)
+		if !ok {
+			return "", false
+		}
+		args = append(args, v)
+	}
+	switch strings.ToLower(m[1]) {
+	case "concat":
+		return strings.Join(args, ""), true
+	case "replace":
+		if len(args) != 3 || args[1] == "" {
+			return "", false
+		}
+		return strings.ReplaceAll(args[0], args[1], args[2]), true
+	}
+	return "", false
 }
 
 func (v *sessionVars) setSelectLimit(raw string) error {

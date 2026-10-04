@@ -184,10 +184,22 @@ What to know before relying on it:
   of the three is refused: the port keeps settings per connection. The other
   variables a driver sets as it connects (`SET NAMES`, `autocommit`,
   `character_set_results`) are accepted as before, and may share a `SET`
-  with these three; any other variable in the same `SET` refuses it. The
-  time-travel shapes on the same connection do not read these settings: an
-  `AS OF` literal without a zone is UTC, as described under
-  [Step 6](#step-6--run-a-time-travel-query). The standalone `bintrail
+  with these three. So may anything else in a `SET` the port already
+  answered with an empty OK (one that opens with `SET NAMES`, `SET SESSION`,
+  `SET @@session.` or one of the three, the shape a driver's connect
+  statement has): its other assignments stay connection chatter, read by
+  nothing, and only a `SET` the port refused before is still refused.
+  `sql_mode` may be given as a string or computed from the current one with
+  `CONCAT` and `REPLACE` over `@@sql_mode` and quoted strings, as Rails and
+  several ORMs send it; any other expression is refused. The time-travel
+  shapes read and print times in UTC (an `AS OF` literal without a zone is
+  UTC, see [Step 6](#step-6--run-a-time-travel-query)), so on a connection
+  whose `time_zone` is not UTC a time-travel statement is refused with error
+  1235 naming the zone, and `SET time_zone = '+00:00'` runs it again. The
+  zone reaches the tables and the `events` view by name: a statement that
+  reads a snapshot file directly (`read_parquet(...)`) under a zone other
+  than UTC gets its `DATETIME` columns as instants, shifted by the offset.
+  The standalone `bintrail
   shim`, which runs no ordinary SQL, accepts the three as connection chatter,
   as it always did.
 - **Read-only, one SELECT per statement.** Anything else is refused with

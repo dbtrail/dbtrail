@@ -549,6 +549,18 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 
 	q, perr := Parse(qstr, currentDB)
 	if perr == nil {
+		// Time travel reads its AS OF time in UTC and prints in UTC. On a
+		// connection that SET another zone (#2035) that would be a second
+		// clock on the same connection, with nothing saying so: refuse it by
+		// name instead. Only a connection with free SQL can hold a zone.
+		h.mu.Lock()
+		zone, nonUTC := h.sessVars.timeZone, h.sessVars.duckZone != ""
+		h.mu.Unlock()
+		if nonUTC {
+			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, fmt.Sprintf(
+				"time travel reads and prints times in UTC, and this connection is in time_zone '%s'; "+
+					"SET time_zone = '+00:00' before a time-travel statement and give its time in UTC", zone))
+		}
 		// Per-tenant schema authorization (#824), on the RESOLVED target
 		// schema at query execution — not only at USE time. Parse fills
 		// q.Schema from the USE'd schema for the virtual-schema shapes
