@@ -16,9 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the `CREATE TABLE` stored in the snapshot's files, by the column's own
   collation or its table's default. `WHERE`, `IN`, `GROUP BY`, `DISTINCT`,
   `ORDER BY`, `MIN`/`MAX` and joins follow it, on the port, the routed reads,
-  the SQL card and the file `bintrail views` writes. Still different, and
-  documented: a `_cs` column stays case-insensitive on the copy, and a column
-  under a PAD SPACE collation ignores trailing spaces on MySQL only.
+  the SQL card and a file `bintrail views --pin-snapshot` writes. A views
+  file that follows new snapshots, which is what `bintrail views` writes by
+  default, does not carry it: it is generated once and the column's
+  collation can change after. Still different, and documented: a `_cs`
+  column stays case-insensitive on the copy, and a column under a PAD SPACE
+  collation ignores trailing spaces on MySQL only. A table whose snapshot
+  file carries no `CREATE TABLE` (a PostgreSQL source, a snapshot from
+  before 0.5) or whose footer cannot be read keeps the old behavior, and
+  that is now logged: once per table, by name, with what it costs. A footer
+  that could not be read is no longer remembered until the daemon restarts;
+  it is read again within five minutes.
 - **SQL on the copy: division by zero is `NULL`, as on MySQL** (#2083).
   `amount / qty` with a zero `qty` came back from the copy as `Infinity`,
   `-Infinity` or `NaN`, with no error, where MySQL returns `NULL`: a `COUNT`,

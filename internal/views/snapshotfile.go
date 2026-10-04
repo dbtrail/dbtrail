@@ -164,7 +164,7 @@ func GenerateSnapshotViews(ctx context.Context, snapshotDir, root string) (strin
 	// file better, they are not what it is for.
 	if decimals, err := baseline.TableFootersFor(ctx, in.BaselinePaths()); err != nil {
 		slog.Warn("snapshot views: could not read column types from the Parquet footers; "+
-			"the state views will not cast decimal columns", "dir", snapshotDir, "error", err)
+			"the state views "+baseline.SchemaLossConsequence, "dir", snapshotDir, "error", err)
 	} else {
 		in.ApplyFooters(decimals)
 	}
