@@ -323,3 +323,35 @@ func TestStartFlashbackPort_SavedAddressTakenDoesNotStopTheDaemon(t *testing.T) 
 		t.Fatalf("status does not say why the port is off: %s", rec.Body.String())
 	}
 }
+
+// TestStartFlashbackPort_ReadOnlyWithoutAnAddress: with no address at startup
+// the port is the web interface's to turn on, so --route-read-only is not a
+// flag about a port that is off: it must be accepted (and then holds for a
+// port turned on later). It is still refused with routing off, where it would
+// guard nothing whoever turns the port on.
+func TestStartFlashbackPort_ReadOnlyWithoutAnAddress(t *testing.T) {
+	listen, age, ro, cost, rows := upConsoleFlashbackListen, upRouteMaxCopyAge, upRouteReadOnly, upRouteCostThreshold, upRouteScanRows
+	t.Cleanup(func() {
+		upConsoleFlashbackListen, upRouteMaxCopyAge, upRouteReadOnly, upRouteCostThreshold, upRouteScanRows = listen, age, ro, cost, rows
+	})
+	srv := newFlashbackConsole(t, "tok")
+
+	upConsoleFlashbackListen, upRouteReadOnly, upRouteMaxCopyAge, upRouteCostThreshold, upRouteScanRows = "", true, 15*time.Minute, 1000, 0
+	if got := flashbackConfigFromFlags(); !got.RouteReadOnly || got.RouteMaxCopyAge != 15*time.Minute {
+		t.Fatalf("setup: the port's configuration is %+v", got)
+	}
+	stop, err := startFlashbackPort(context.Background(), srv)
+	if err != nil {
+		t.Fatalf("read-only with routing on and no address at startup: %v; the web interface can still turn the port on", err)
+	}
+	stop()
+
+	upRouteMaxCopyAge = 0
+	_, err = startFlashbackPort(context.Background(), srv)
+	if err == nil || !strings.Contains(err.Error(), "read routing, which is off") {
+		t.Fatalf("read-only with routing off: err = %v, want the routing-off refusal", err)
+	}
+	if strings.Contains(err.Error(), "port, which is off") {
+		t.Fatalf("the refusal blames a port that the web interface can turn on: %v", err)
+	}
+}
