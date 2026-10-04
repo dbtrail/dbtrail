@@ -231,6 +231,9 @@ func (h *Handler) HandleStmtClose(context any) error {
 // the statement split the MySQL way, kept for the executions the routing
 // ladder sends to the copy.
 func (h *Handler) prepareRouted(query string, parts []string) (int, int, any, error) {
+	if err := h.readOnlyRefusal(query); err != nil {
+		return 0, 0, nil, err
+	}
 	ctx, cancel := h.queryContext()
 	defer cancel()
 	up, err := h.router.Prepare(ctx, query)

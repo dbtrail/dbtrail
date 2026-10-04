@@ -62,6 +62,9 @@ type flashbackConfig struct {
 	// never routes to the copy; watch passes readrouter.DefaultPolicy()
 	// adjusted by its flags.
 	RoutePolicy readrouter.Policy
+	// RouteReadOnly makes the routed port read-only (#2079): the handler
+	// refuses every statement that is not a read before the source sees it.
+	RouteReadOnly bool
 }
 
 const (
@@ -322,6 +325,7 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 				id := tgt.ID
 				h.BindRouter(fw, shim.RouterConfig{
 					MaxCopyAge: cfg.RouteMaxCopyAge,
+					ReadOnly:   cfg.RouteReadOnly,
 					Observe: func(route shim.RouteSide, reason shim.RouteReason) {
 						observe.ObserveRouteDecision(id, string(route), string(reason))
 						srv.RecordRouteDecision(id, string(route), string(reason))
