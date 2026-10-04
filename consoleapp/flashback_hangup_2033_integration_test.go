@@ -67,6 +67,10 @@ func TestIntegrationFlashbackHangUpFreesTheSlot_2033(t *testing.T) {
 		var n int
 		return b.QueryRow("SELECT count(*) AS n FROM orders").Scan(&n)
 	}
+	// Give a's statement the slot first: b's checks below take the slot
+	// themselves for a moment each, and one that started before a's would
+	// leave a refused instead of running.
+	time.Sleep(2 * time.Second)
 	// Control: while a runs, b is refused, so a really holds the slot.
 	held := false
 	var lastB error
