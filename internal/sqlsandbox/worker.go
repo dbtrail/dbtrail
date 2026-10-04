@@ -321,6 +321,7 @@ func sessionErr(format string, args ...any) wireResult {
 var sandboxSettings = []string{
 	"default_collation",
 	"default_null_order",
+	"ieee_floating_point_ops",
 	"allowed_directories",
 	"enable_external_access",
 	"autoinstall_known_extensions",
@@ -350,6 +351,12 @@ var sandboxSettings = []string{
 //     (baseline.tableDeltaStateSQL), or two keys differing only in case
 //     would fold into one row. Locked with the rest so a statement cannot
 //     undo them.
+//   - ieee_floating_point_ops = false: division and modulo by zero are NULL,
+//     as on MySQL (#2083). DuckDB's default answers +Infinity, -Infinity or
+//     NaN without an error, so `amount / qty` held a value on the copy for
+//     the rows where MySQL holds NULL, and every COUNT, SUM, AVG and WHERE
+//     over it answered differently. Nothing else changes: an overflow is
+//     still Infinity and a cast from 'nan' still NaN.
 //   - allowed_directories = [copy dirs]: the directories reads may touch
 //     while external access is off. A path outside them, including one that
 //     traverses out with "..", is a Permission Error. Note it admits WRITES
@@ -381,6 +388,7 @@ func lockdownStatements(copyDirs []string) []string {
 	return []string{
 		"SET default_collation = 'nocase.noaccent'",
 		"SET default_null_order = 'nulls_first_on_asc_last_on_desc'",
+		"SET ieee_floating_point_ops = false",
 		"SET allowed_directories = [" + strings.Join(quoted, ", ") + "]",
 		"SET temp_directory = ''",
 		"SET autoinstall_known_extensions = false",
