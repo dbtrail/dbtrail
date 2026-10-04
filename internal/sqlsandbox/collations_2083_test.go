@@ -23,7 +23,7 @@ import (
 // documentation lists the difference; this table is what keeps that list true
 // across an engine bump.
 var collationPairs = []struct {
-	a, b             string
+	a, b               string
 	mysql, onCopy, icu bool
 }{
 	{"Paid", "paid", true, true, true},
