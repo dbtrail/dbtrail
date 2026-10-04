@@ -57,7 +57,7 @@ func TestIntegrationSQLCompareValues(t *testing.T) {
 		{"1", "10.00", "1.5000000000", "4", "3", "AB", "x", "bob", "straße"},
 		{"2", "2.50", "2.2500000000", "5", "4", "ab", "X", "bob ", "Ａ"},
 		{"3", "-7.10", "0.0000000000", "0", "0", "Ab", "x", "BOB", "strasse"},
-		{"4", "117329550.00", "12345678901234567890.1234567890", "7", "9", "zz", "y", "al", "a"},
+		{"4", "117329550.00", "12345678901234567890.1234567890", "7", "9", "zz", "y", "AB", "a"},
 		{"5", "", "", "", "", "", "", "", ""},
 	}
 	nullRow := 4
@@ -180,11 +180,21 @@ func valuesFixtures() []valuesFixture {
 		{"SELECT COUNT(amount / qty), COUNT(qty / 0), COUNT(amount % 0) FROM sales", eq, "", "3, 0, 0"},
 		{"SELECT id, qty % 0, qty / 0 FROM sales ORDER BY id", eq, "", "NULL in every row"},
 
-		// Per-column collation.
-		{"SELECT id FROM sales WHERE code = 'ab'", diff, "rows", "utf8mb4_bin: only the exact 'ab'"},
-		{"SELECT code, COUNT(*) FROM sales GROUP BY code", diff, "", "utf8mb4_bin: AB, ab and Ab are three groups"},
-		{"SELECT id FROM sales WHERE tag = 'x'", diff, "rows", "utf8mb4_0900_as_cs: 'X' is not 'x'"},
-		{"SELECT id FROM sales WHERE name = 'bob'", diff, "rows", "utf8mb4_general_ci is PAD SPACE: 'bob ' matches"},
+		// A _bin column compares byte by byte, as MySQL declares it: the view
+		// gives it COLLATE C, read from the CREATE TABLE in the file's footer.
+		{"SELECT id FROM sales WHERE code = 'ab'", eq, "", "utf8mb4_bin: only the exact 'ab'"},
+		{"SELECT id FROM sales WHERE code IN ('ab', 'AB') ORDER BY id", eq, "", "two of the three spellings"},
+		{"SELECT id FROM sales WHERE code > 'a' ORDER BY id", eq, "", "code point order: upper case sorts before 'a'"},
+		{"SELECT code, COUNT(*) FROM sales GROUP BY code", eq, "", "AB, ab and Ab are three groups"},
+		{"SELECT DISTINCT code FROM sales", eq, "", "and three distinct values"},
+		{"SELECT id, code FROM sales ORDER BY code", eq, "", "NULL, AB, Ab, ab, zz"},
+		{"SELECT id, code FROM sales ORDER BY code DESC", eq, "", "and the reverse"},
+		{"SELECT MIN(code), MAX(code) FROM sales", eq, "", "AB and zz"},
+		{"SELECT a.id, b.id FROM sales a JOIN sales b ON a.code = b.name", eq, "", "_bin against _ci: bytes win on both"},
+		// What stays different, each with its line in docs/time-travel-sql.md.
+		{"SELECT id FROM sales WHERE code = 'ab '", diff, "rows", "utf8mb4_bin is PAD SPACE: MySQL ignores the trailing space"},
+		{"SELECT id FROM sales WHERE tag = 'x'", diff, "rows", "utf8mb4_0900_as_cs: 'X' is not 'x'; the copy folds it"},
+		{"SELECT id FROM sales WHERE name = 'bob'", diff, "rows", "utf8mb4_general_ci is PAD SPACE: 'bob ' matches on MySQL"},
 		{"SELECT id FROM sales WHERE note = 'strasse'", diff, "rows", "utf8mb4_0900_ai_ci: ß equals ss"},
 		{"SELECT id FROM sales WHERE note = 'A'", diff, "rows", "utf8mb4_0900_ai_ci: full-width A equals A"},
 	}

@@ -35,6 +35,9 @@ type TableFooter struct {
 	// instant; the embedded CREATE TABLE can, and a reader under a session
 	// time zone other than UTC needs to (views.BaselineTable.Datetimes).
 	Datetimes []string
+	// BinaryText are the table's text columns under a _bin collation, by
+	// name (BinaryCollationColumns): the ones MySQL compares byte by byte.
+	BinaryText []string
 }
 
 // TableFootersFor reports, for each baseline Parquet file, the decimal and
@@ -184,7 +187,8 @@ func collectDecimalRows(rows *sql.Rows, out map[string]TableFooter) {
 			// columns" rather than a nil that reads like an absent key.
 			decs = []DecimalColumn{}
 		}
-		out[file] = TableFooter{Decimals: decs, DeltaReserved: hasDeltaReservedColumn(cols), Datetimes: DatetimeColumns(cols)}
+		out[file] = TableFooter{Decimals: decs, DeltaReserved: hasDeltaReservedColumn(cols), Datetimes: DatetimeColumns(cols),
+			BinaryText: BinaryCollationColumns(string(createSQL), cols)}
 	}
 	if err := rows.Err(); err != nil {
 		// Warn: an iteration that dies partway leaves every file after the

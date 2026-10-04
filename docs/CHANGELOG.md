@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Fixed
+- **SQL on the copy: a `_bin` column compares byte by byte, as on MySQL**
+  (#2083). The copy compares text without case or accents, to match MySQL's
+  default collation, and it did so for every column, including the ones
+  MySQL declares `utf8mb4_bin`: `code = 'ab'` returned `AB` and `Ab` too,
+  `GROUP BY code` merged them, and `ORDER BY code` sorted them together. The
+  state views now give each such column byte comparison (`COLLATE C`), read
+  from the `CREATE TABLE` stored in the snapshot's files, by the column's own
+  collation or its table's default. `WHERE`, `IN`, `GROUP BY`, `DISTINCT`,
+  `ORDER BY`, `MIN`/`MAX` and joins follow it, on the port, the routed reads,
+  the SQL card and the file `bintrail views` writes. Still different, and
+  documented: a `_cs` column stays case-insensitive on the copy, and a column
+  under a PAD SPACE collation ignores trailing spaces on MySQL only.
 - **SQL on the copy: division by zero is `NULL`, as on MySQL** (#2083).
   `amount / qty` with a zero `qty` came back from the copy as `Infinity`,
   `-Infinity` or `NaN`, with no error, where MySQL returns `NULL`: a `COUNT`,

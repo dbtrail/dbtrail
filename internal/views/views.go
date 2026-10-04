@@ -110,6 +110,13 @@ type BaselineTable struct {
 	// time_zone); everything else leaves it off and the columns as they were.
 	Datetimes          []string
 	WallClockDatetimes bool
+	// BinaryText are the table's text columns MySQL declares under a _bin
+	// collation (set with SchemaKnown). The state view gives each one byte
+	// comparison (COLLATE C), so it compares, groups and sorts as on MySQL
+	// whatever the session's default collation is. Without it, a session that
+	// folds case and accents to match MySQL's default (the copy's SQL session
+	// does) folds these columns too, and `code = 'ab'` matches 'AB' (#2083).
+	BinaryText []string
 	// DeltaReserved says the table has a column under a name a table delta
 	// reserves (baseline.TableFooter says why). Set with SchemaKnown.
 	DeltaReserved bool
@@ -2129,6 +2136,7 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 		return false
 	}
 	writeDecimalNote(b, in)
+	writeBinaryCollationNote(b, in)
 	if in.Follow == FollowNewest {
 		cached := in.listsOnce() && isS3(in.BaselineSource)
 		if cached {
