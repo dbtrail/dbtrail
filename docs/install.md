@@ -9,6 +9,29 @@ it's the first section — the same four lines as the README.
 > `bintrail-console`, `ghcr.io/dbtrail/bintrail`, `BINTRAIL_*` env vars).
 > Existing installs, scripts, and services stay valid as-is.
 
+## Which one to pick
+
+Every path below runs the same program. What differs is how much comes with
+it, and that is what matters once it runs unattended.
+
+| Path | For production? | What it brings | What is left to you |
+|---|---|---|---|
+| [Docker Compose](#docker-compose-the-bundled-default) | Yes | Capture, the web interface, an index MySQL, mydumper for full reads, restart after a crash, a health check | Back up the index volumes and watch their disk. Re-download the compose file on every upgrade |
+| [Docker image](#docker-image-without-compose) | Yes | The binaries. The `bintrail-console` image also carries mydumper; the `bintrail` image does not | An index MySQL, a volume for the state, a restart policy |
+| [Linux packages](#linux-packages) | Yes | The binaries and their license texts, nothing else | A service unit so it starts at boot and restarts after a crash ([deployment.md](./deployment.md#5-deployment-options) has one), mydumper ([how to get it](./dump-and-baseline.md#getting-mydumper)), an index MySQL |
+| [Go install](#go-install), [source build](#build-from-source) | No | A binary built on your machine | Everything above, plus the build itself |
+
+Why the last row is not for production: a binary you build is not the release
+artifact that was signed, it needs Go and a C compiler on the host, and
+`go install` reports its version as `dev`, so nobody can later tell which code
+is running. Those two paths are for development and for running the CLI from
+a workstation.
+
+The three production paths differ in one way that is easy to miss. DBTrail
+only captures while it is running, so a process that stops and is not
+restarted leaves a gap in the history. The Compose stack restarts it for you.
+With the packages or a bare `docker run`, that restart is yours to set up.
+
 ## Requirements
 
 - A **source MySQL 8.0+** with `binlog_format = ROW` and
@@ -227,6 +250,13 @@ The `bintrail` package carries the core CLI + `bintrail-mcp`; the web interface
 is a separate `bintrail-console` package — install it only where an operator
 wants the UI. PostgreSQL-source capture is a separate `bintrail-pg`
 package — install it only on hosts that capture from PostgreSQL.
+
+The packages install the binaries and nothing around them: no service unit,
+no mydumper, no index MySQL. Write a unit so the process starts at boot and
+restarts after a crash ([deployment.md](./deployment.md#5-deployment-options)
+has one to copy). Full reads from the web interface run the `mydumper` found
+on the `PATH` of the `bintrail-console` process, so install it on that host
+([Getting mydumper](./dump-and-baseline.md#getting-mydumper)).
 
 ## Go install
 

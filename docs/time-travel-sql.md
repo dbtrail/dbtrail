@@ -354,7 +354,8 @@ What this is and is not:
   or behind a `SET`, both of which pin the connection to MySQL.
 - **The copy's grants are nobody's; the forwarded ones are the registry's.**
   Forwarded statements run with the source DSN's account. Give this port to
-  people who may do on MySQL whatever that account can.
+  people who may do on MySQL whatever that account can, or start it with
+  `--route-read-only` so that only reads are forwarded (see below).
 - **Nothing is translated.** The copy gets the statement as the client
   wrote it. DuckDB does not read MySQL's backtick-quoted names, so a
   statement that uses them (what most ORMs and drivers generate) is refused
@@ -470,7 +471,46 @@ What this is and is not:
   account can, including killing the capture's own connection or changing
   its password. Each forwarded write is logged at info level with its
   leading keyword (never the statement). Turn routing on only where the
-  token's holders may already do that.
+  token's holders may already do that, or make the port read-only (next
+  point).
+- **`--route-read-only` makes the routed port read-only.** With it (or
+  `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=1`), a statement that is not a read is
+  refused with MySQL error 1290 and a message that names the flag, and it is
+  never sent to the source, not even to be explained or prepared. `SHOW
+  WARNINGS` right after shows that refusal. The flag needs
+  `--route-max-copy-age`; `watch` refuses to start with it alone, before it
+  connects to anything.
+  - **Allowed**: `SELECT`, `WITH ... SELECT`, `TABLE`, `VALUES`, `SHOW`,
+    `DESCRIBE`, `EXPLAIN` (and `EXPLAIN ANALYZE`, or MariaDB's `ANALYZE`, of a
+    read), `USE`, `BEGIN`,
+    `START TRANSACTION`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE
+    SAVEPOINT`, `SET TRANSACTION`, and a `SET` of session settings and user
+    variables (`SET NAMES`, `SET autocommit`, `SET SESSION sql_mode`,
+    `SET @x = ...`), which covers what drivers send when they connect.
+    Prepared statements (the binary protocol) of those work too.
+  - **Refused**: everything else. `INSERT`, `UPDATE`, `DELETE`, `REPLACE`,
+    DDL (`CREATE TEMPORARY TABLE` included), `GRANT`, `KILL`, `CALL`, `DO`,
+    `HANDLER`, `LOCK TABLES`, `LOAD DATA`, `XA`, text `PREPARE` / `EXECUTE`,
+    and any statement the port does not recognise; `SET GLOBAL`, `SET
+    PERSIST`, `SET @@global.x`, `SET PASSWORD`, `SET ROLE` and `SET
+    gtid_next`; a read that writes or locks (`INTO OUTFILE`, `INTO
+    DUMPFILE`, `INTO @variable`, `FOR UPDATE`, `FOR SHARE`, `LOCK IN SHARE
+    MODE`, `GET_LOCK`, a sequence's `NEXTVAL`); `WITH ...` in front of a
+    `DELETE`, `UPDATE` or `INSERT`; `EXPLAIN ANALYZE` of a write (it runs
+    it); a line with more than one statement; and any statement holding
+    MySQL's executable comment (`/*!50000 ... */`), since the server runs
+    what is inside. A statement with `--` right before a non-ASCII byte is
+    refused as well: the server reads that as the start of a comment under
+    `latin1` and not under `utf8mb4`, and the port cannot know which. A `SET NAMES` to a character set other than `utf8mb4`,
+    `utf8`, `latin1`, `ascii` or `binary` is refused too: under `gbk` or
+    `sjis` the port could not tell where a string ends.
+  - **What it cannot see.** The check reads the statement's text. A
+    `SELECT` that calls a stored function, or reads a view built on one,
+    looks like a read and is forwarded; if the function writes, MySQL runs
+    it. The mode screens by statement class; the grants of the account the
+    port forwards with are what bounds the rest. Refusals are counted as
+    `route="refused"`, `reason="read_only"`, and the **Connect a SQL
+    client** panel says which mode the port is in.
 - **A lost connection to the source is not hidden.** If the upstream
   connection drops (the source closes an idle connection, a network error,
   the query deadline), every later statement on that client connection
@@ -528,14 +568,17 @@ MySQL's.
   `GET /api/flashback` under `routing`.
 - Prometheus (`watch --metrics-addr`):
   `bintrail_read_routing_decisions_total{server, route, reason}` — `server`
-  is the registry id, `route` is `copy` or `mysql`, and `reason` is one of
+  is the registry id, `route` is `copy`, `mysql` or `refused` (a statement
+  the read-only port did not run), and `reason` is one of
   a closed set: `expensive_plan` (the one reason a statement goes to the
   copy), `cheap_plan`, `bounded_limit` (a small `LIMIT` MySQL answers
   without reading past it), `not_a_select`, `write`, `session_setting`,
   `settings_set`, `in_transaction`, `veto`, `explain_failed`,
   `copy_age_unknown`, `copy_too_old`, `copy_refused`, `show_warnings`,
   `upstream_lost` (nobody answered: the port's connection to the source is
-  lost or could not be opened, and the client got error 2006), and
+  lost or could not be opened, and the client got error 2006),
+  `read_only` (refused: not a read, on a port started with
+  `--route-read-only`; the client got error 1290), and
   `routing_off` (listed for completeness: a daemon binds the router only
   with routing on). A copy that never answers shows up as `copy_refused`,
   `copy_too_old` or `copy_age_unknown` climbing while `expensive_plan` stays
