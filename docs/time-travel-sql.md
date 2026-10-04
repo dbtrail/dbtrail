@@ -106,8 +106,8 @@ What to know before relying on it:
   and removes the local file once the upload is confirmed, so on that stack a
   statement that reads `events` is refused with an error that says so, from
   the first uploaded hour on. (An hour whose upload is not confirmed yet is
-  still on local disk; some hours are not the change log, so the answer is
-  the same.) The tables are not affected. What to use
+  still on local disk; a folder with only some hours is not treated as the
+  change log, so `events` is still refused.) The tables are not affected. What to use
   instead: for one row's history, `_diff` on this same connection
   (`SELECT * FROM _diff.orders BETWEEN '2026-05-01' AND '2026-05-02' WHERE id = 12345`),
   which reads the archives in S3; for counts and grouping over the whole

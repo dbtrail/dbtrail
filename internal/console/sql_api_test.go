@@ -1728,7 +1728,7 @@ func TestSQLAPI_partialLocalChangeLogAndUnreadableRegistry(t *testing.T) {
 		}
 		f.mock.ExpectQuery(`MIN\(local_path\)`).WillReturnError(denied)
 		w := postSQL(t, f.s, `{"sql":"SELECT count(*) FROM events"}`)
-		if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "could not be read just now, so events cannot be read; the tables can") {
+		if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "could not be read, so events cannot be read; the tables can") {
 			t.Errorf("events with an unreadable registry: code=%d body=%s", w.Code, w.Body.String())
 		}
 		for _, leak := range []string{"Catalog Error", "denied", "archive_state"} {

@@ -13,12 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any file, even when most hours had been uploaded to S3 and removed from
   disk. That is the state `watch` with an S3 location is in while one hour's
   upload is unconfirmed, and stays in after a failed upload: reads returned
-  the hours left on disk and nothing else, with no error. The local folder is
-  now used only when it holds every file the index registered; otherwise the
-  S3 copy is read. Where neither holds everything (hours archived before the
+  the hours left on disk and nothing else, with no error. Where an S3 copy is
+  registered too, the local folder is now used only when it holds every file
+  the index registered; otherwise the S3 copy is read. Where neither holds everything (hours archived before the
   S3 location was set), the local folder is still read and the log says so.
-  SQL on the copy also says so when it cannot find out where the change log
-  is, instead of DuckDB's "table does not exist".
+  When SQL on the copy cannot find out where the change log is, it now says
+  that, instead of DuckDB's "table does not exist".
 
 
 ## [0.98.0] - 2026-10-04

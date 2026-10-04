@@ -1131,7 +1131,7 @@ What you can query is what the copy defines: one table per source table, named
 like the source table, `shop.orders` (the table as of the newest snapshot;
 a name DuckDB cannot read bare is quoted, `demo."order.items"`), and `events`,
 the change log, when archived changes exist on local disk. Under `watch` with
-an S3 location they do not, once the first hour has been uploaded: each archived
+an S3 location set from the start they do not, once the first hour has been uploaded: each archived
 hour is uploaded and the local file removed once the upload is confirmed, so the
 local folder no longer holds the whole change log, `events` is not listed, a
 note under the list says why, and a query

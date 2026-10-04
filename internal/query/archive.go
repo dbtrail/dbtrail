@@ -20,12 +20,14 @@ import (
 //
 // Local paths are preferred over S3 when the directory exists on disk AND
 // holds at least one .parquet file — an empty local tree (files pruned after
-// upload) falls back to the S3 copy instead of shadowing it (#383) — AND,
-// where an S3 copy is registered too, holds every file the registry names
-// (#2078, see completeCopy): a local base with some of the files is the
-// state `watch` leaves while one hour's upload is unconfirmed, and reading
-// it as the archive drops every hour already uploaded and pruned. A
-// registered source is never omitted from the result: the planner counts
+// upload) falls back to the S3 copy instead of shadowing it (#383). Where an
+// S3 copy is registered too, the local base must also hold every file the
+// registry names (#2078, see completeCopy): a local base with some of the
+// files is the state `watch` leaves while one hour's upload is unconfirmed,
+// and reading it as the archive drops every hour already uploaded and
+// pruned. The S3 copy is read then, unless the registry does not place every
+// file there either; in that case the local base is kept and a warning says
+// so. A registered source is never omitted from the result: the planner counts
 // archived hours straight from archive_state, so omission would make strict
 // mode (#377) silently miss the coverage hole.
 // Returns (nil, nil) when no archives are configured, the archive_state
@@ -78,9 +80,9 @@ func ResolveArchiveSources(ctx context.Context, db *sql.DB) ([]string, error) {
 					src = s3Source
 				case copyNeither:
 					// Nothing this function can hand back names every hour:
-					// one source per registered id is the contract. Keep the
-					// local base, as before, and say so where an operator
-					// looks; `bintrail archive reconcile` is the repair.
+					// one source per registered id is the contract. The
+					// local base is read, and the log says it is short;
+					// `bintrail archive reconcile` is the repair.
 					slog.Warn("neither the local archive base nor the S3 copy holds every registered file; reading the local base, hours missing from it will not be returned",
 						"bintrail_id", bintrailID, "local_base", localBase, "s3_source", s3Source)
 				}
@@ -234,17 +236,17 @@ const (
 // completeCopy reads every archive_state row of one source and reports
 // which copy is whole (#2078). It runs only for a source with BOTH a local
 // base that holds data and an S3 location, the one shape where the choice
-// can lose rows: readers glob the base they are handed, and the planner
-// counts hours from archive_state, so neither notices a file that is not
-// there.
+// can lose rows: readers read what is under the root they are handed, and
+// the planner counts hours from archive_state, so neither notices a file
+// that is not there.
 //
 // "Whole" is about the root the caller would hand back, not about the files
-// existing somewhere: readers glob localBase or s3Source and nothing else.
-// Local is whole when every row has a local_path UNDER localBase that is a
-// file on disk. A path that cannot be stat'ed (gone, unreadable, a
-// directory) is a file the reader would not get either; one that is there
-// and cannot be read is logged, since that is a misconfiguration and not a
-// prune. S3 is whole when every row carries a bucket and a key UNDER
+// existing somewhere: readers read under localBase or s3Source and nothing
+// else. Local is whole when every row has a local_path UNDER localBase that
+// is a regular file. One that is gone, or is not a regular file, is a file
+// the reader would not get either; one that cannot be reached (a parent
+// that cannot be traversed) is logged, since that is a misconfiguration and
+// not a prune. S3 is whole when every row carries a bucket and a key UNDER
 // s3Source; a row still waiting for its upload (s3_uploaded_at NULL)
 // counts, because rotation does not drop a partition whose upload it is
 // waiting for, so those rows are still in the live index.
@@ -286,9 +288,10 @@ func completeCopy(ctx context.Context, db *sql.DB, bintrailID, localBase, s3Sour
 }
 
 // localFileUnder reports whether path is a regular file below base. A file
-// that is there but cannot be reached (EACCES on a parent, a broken mount)
-// answers false like a pruned one, and is logged: the S3 copy then covers
-// for a local problem nobody would otherwise hear about.
+// that cannot be reached (EACCES on a parent, a broken mount) answers false
+// like a pruned one, and is logged: the S3 copy then covers for a local
+// problem nobody would otherwise hear about. A file that is reachable and
+// not readable (mode 000) still answers true: stat does not open it.
 func localFileUnder(path, base, bintrailID string) bool {
 	if !strings.HasPrefix(path, base) || len(path) <= len(base) ||
 		(path[len(base)] != '/' && path[len(base)] != filepath.Separator) {
@@ -297,7 +300,7 @@ func localFileUnder(path, base, bintrailID string) bool {
 	fi, err := os.Stat(path)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			slog.Warn("a registered local archive file cannot be read; the local archive base is treated as incomplete",
+			slog.Warn("a registered local archive file cannot be reached; the local archive base is treated as incomplete",
 				"bintrail_id", bintrailID, "path", path, "error", err)
 		}
 		return false

@@ -501,7 +501,7 @@ func consoleArchiveSources(ctx context.Context, db *sql.DB, portable bool) ([]st
 	}
 	sources, err := resolve(ctx, db)
 	if err != nil {
-		slog.Warn("console: could not resolve archive sources for views.sql",
+		slog.Warn("console: could not resolve archive sources",
 			"error", err)
 		return nil, err
 	}
