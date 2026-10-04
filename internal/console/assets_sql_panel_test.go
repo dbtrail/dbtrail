@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
 // sqlPanelHarnessJS calls the SQL panel's pure functions in the real app.js
@@ -135,7 +137,7 @@ func TestSQLPanelPureFunctions(t *testing.T) {
 			{"status": 409, "message": "archive access is disabled for this server, so its copy cannot be read"},
 			{"status": 422, "message": "Permission Error: Cannot access file \"/etc/passwd\""},
 			{"status": 422, "message": sqlEventsInS3Message},
-			{"status": 429, "message": "a query is already running"},
+			{"status": 429, "message": sqlBusyWaitedText},
 			{"status": 504, "message": "the query ran longer", "limits": c{"timeout_seconds": 60}},
 			{"status": 504, "message": "the query ran longer"},
 			{"status": 500, "message": "the SQL worker failed before it could answer; DBTrail's log has the details"},
@@ -271,7 +273,7 @@ func TestSQLPanelPureFunctions(t *testing.T) {
 		{"This copy cannot be queried from the web interface.", "archive access is disabled for this server, so its copy cannot be read"},
 		{"The query did not run.", `Permission Error: Cannot access file "/etc/passwd"`},
 		{"The query did not run.", sqlEventsInS3Message},
-		{"SQL on the copy is busy: other queries are running. Try again in a moment.", ""},
+		{"SQL on the copy is busy. Try again in a moment.", sqlBusyWaitedText},
 		{"The query ran longer than the 60 s limit and was stopped. Narrow it: a WHERE on a table, or a smaller window on events.", ""},
 		{"The query ran longer than the time limit and was stopped. Narrow it: a WHERE on a table, or a smaller window on events.", ""},
 		{"The query could not be run. DBTrail's log has the details.", ""},
@@ -397,3 +399,7 @@ func TestSQLPanelCopy(t *testing.T) {
 		t.Error("the stub sentence is still in app.js")
 	}
 }
+
+// sqlBusyWaitedText is the real 429 message after the wait (#2033), so the
+// card is checked against what the server sends, not a paraphrase of it.
+var sqlBusyWaitedText = (&sqlsandbox.BusyError{Waited: 30 * time.Second, MaxInFlight: 2}).Error()

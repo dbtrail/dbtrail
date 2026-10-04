@@ -1146,8 +1146,9 @@ The limits, so a query can never hurt capture:
   default (`watch --sql-max-in-flight`, see below; shared
   with the MySQL-protocol port, where the unit is one per server). One more
   statement waits for a free slot, up to 30 seconds, and runs as soon as one
-  is free, so a burst (a dashboard drawing its panels, two people at once)
-  turns slow instead of failing. Past 30 seconds, or with 16 statements
+  is free, so a burst turns slow instead of failing. One identity still runs
+  one statement at a time: a dashboard's panels come one after another, and
+  a panel that would wait more than 30 seconds is still refused. Past 30 seconds, or with 16 statements
   already waiting, it is refused as busy (HTTP 429). It never runs beside the
   others: the process that serves it is the one capturing changes. Waiting
   costs nothing, because the slot is taken before anything is read, and a
@@ -1514,6 +1515,9 @@ server {
 If a large export returns `504 Gateway Time-out`, that is nginx's
 `proxy_read_timeout` (60 seconds by default) elapsing while the daemon works
 before its first byte, not the daemon failing. Raise it on this `location`.
+The SQL card hits the same limit sooner than it looks: a query can wait up to
+30 seconds for a free slot and then run for up to 60, so set
+`proxy_read_timeout 120s;` if the card is used through the proxy.
 
 **4. The header rule, which is where the time goes.** With the vhost above the
 web interface answers:

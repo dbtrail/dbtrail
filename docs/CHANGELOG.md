@@ -61,10 +61,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SQL on the copy waits for a free slot instead of refusing at once**
   (#2033). When every slot is busy, a statement on the SQL card or the
   embedded MySQL port now waits up to 30 seconds and runs as soon as a slot
-  frees, so a dashboard that draws eight panels at once gets eight slow
-  panels instead of two panels and six errors. Past 30 seconds, or with 16
-  statements already waiting, it is refused as before (HTTP 429, MySQL 1203),
-  with a message that says it waited. A waiter whose own slot is busy (the
+  frees. A dashboard connects as one identity (one login on the card, one
+  server on the port), so it still runs one statement at a time: its panels
+  now come one after another instead of one panel and seven errors, as long
+  as each waits under 30 seconds. Past 30 seconds, or with 16 statements
+  already waiting, it is refused as before (HTTP 429, MySQL 1203), with a
+  message that says it waited. A waiter whose own slot is busy (the
   same person, or the same server on the port) never holds up anyone else,
   and a client that leaves while waiting leaves the line. The new
   `slot_wait` phase in `phases_ms` and in the

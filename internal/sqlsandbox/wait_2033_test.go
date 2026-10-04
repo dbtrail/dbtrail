@@ -54,13 +54,17 @@ func TestReserve_samePersonWaitsForTheirOwn_2033(t *testing.T) {
 func TestReserve_aBlockedWaiterDoesNotBlockOthers_2033(t *testing.T) {
 	r := waitRunner(2, 2*time.Second, 4)
 	first, _ := r.Reserve(context.Background(), "a")
-	defer first.Release()
+	waiterDone := make(chan struct{})
 	go func() {
+		defer close(waiterDone)
 		if s, err := r.Reserve(context.Background(), "a"); err == nil {
 			s.Release()
 		}
 	}()
-	time.Sleep(50 * time.Millisecond) // a's second is waiting
+	defer func() { first.Release(); <-waiterDone }()
+	for r.waitingNow() != 1 { // a's second is in line
+		time.Sleep(5 * time.Millisecond)
+	}
 	start := time.Now()
 	s, err := r.Reserve(context.Background(), "b")
 	if err != nil {
