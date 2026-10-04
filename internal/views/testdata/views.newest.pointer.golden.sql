@@ -30,8 +30,12 @@
 -- by reading this file again, which is already what an S3 session needs to do
 -- for the secret above.
 -- Which snapshot is newest comes from the root's `_NEWEST` pointer, which a
--- baseline upload moves. A snapshot published by a build that predates the
--- pointer, or copied into the root by hand, is not seen until it moves again.
+-- baseline upload moves. It stays on the previous snapshot (no error here) when
+-- a snapshot is published by a build that predates the pointer, copied into the
+-- root by hand, or uploaded while the pointer could not be written (the upload
+-- logs that as an ERROR); and two processes uploading to one root can move it
+-- back. If the pointer is deleted, reading this file fails with a 404 on it:
+-- generate the file again and it lists the root instead.
 -- That choice lives in a SESSION variable, and views persist while a session
 -- variable does not: a database file that saved these views lists them all in
 -- a new session, and every read raises until this file's SET VARIABLE

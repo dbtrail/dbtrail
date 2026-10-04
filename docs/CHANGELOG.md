@@ -25,8 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<root>/_NEWEST` instead of listing the whole root** (#2052, second half).
   Opening such a file cost one listing of every object under the root (54-59 s
   in-region on a root of a few months of hourly snapshots); it now costs one
-  small read, whatever the root holds. `bintrail views` and the console's
-  download, SQL panel and dashboards use it only when the pointer names exactly
+  small read, whatever the root holds. `bintrail views`, the console's
+  views download and the dashboards card use it only when the pointer names exactly
   the snapshot they just found; with no pointer, an older one, or a pointer
   they cannot read, the file lists the root as before. The trade, stated in
   the file's header: a snapshot published by a build that does not write the

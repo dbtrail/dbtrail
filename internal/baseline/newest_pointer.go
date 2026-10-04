@@ -164,5 +164,13 @@ func ReadNewestPointer(ctx context.Context, root string) (name string, found boo
 	if err != nil || !found {
 		return "", found, err
 	}
-	return strings.TrimSpace(string(body)), true, nil
+	if len(body) >= newestPointerMax {
+		// Possibly cut short, so a trimmed prefix could look like a clean name
+		// the generated file would then refuse. Returned whole, it matches no
+		// snapshot and the caller keeps the listing.
+		return string(body), true, nil
+	}
+	// The same four characters the generated SQL trims, and no others, so the
+	// producer never confirms content the file then refuses.
+	return strings.Trim(string(body), " \t\r\n"), true, nil
 }

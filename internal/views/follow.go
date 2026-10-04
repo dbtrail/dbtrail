@@ -3,11 +3,13 @@ package views
 import (
 	"context"
 	"log/slog"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
+	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
 // ApplyFollow decides how the state views will reach a snapshot published after
@@ -148,7 +150,16 @@ func UseNewestPointer(ctx context.Context, in *Input) {
 	}
 	// The pointer arm joins the RAW root into a path the preflight globs; the
 	// listing arm's value is a glob result and never has this problem.
-	if strings.ContainsAny(strings.TrimPrefix(in.BaselineSource, "s3://"), "*?[") {
+	if strings.ContainsAny(strings.TrimPrefix(in.BaselineSource, "s3://"), "*?[{") {
+		return
+	}
+	// The uploader derives the pointer's key with path.Dir, which CLEANS, and
+	// the file joins the root as typed. They agree only on a clean root: under
+	// "s3://b/bl//" the pointer lives at bl/_NEWEST while the file would read
+	// bl//_NEWEST and fail on open. Same class as #1558.
+	if _, prefix, err := storage.ParseS3URL(in.BaselineSource); err != nil ||
+		(strings.TrimSuffix(prefix, "/") != "" && strings.TrimSuffix(prefix, "/") != path.Clean(strings.TrimSuffix(prefix, "/"))) ||
+		strings.HasPrefix(prefix, "/") {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, newestPointerTimeout)

@@ -895,8 +895,12 @@ func writeHeader(b *strings.Builder, in Input) {
 			// The one way the pointer is weaker than the listing it replaces,
 			// stated where the reader decides whether to trust the rows.
 			b.WriteString("-- Which snapshot is newest comes from the root's `" + baseline.NewestPointerName + "` pointer, which a\n")
-			b.WriteString("-- baseline upload moves. A snapshot published by a build that predates the\n")
-			b.WriteString("-- pointer, or copied into the root by hand, is not seen until it moves again.\n")
+			b.WriteString("-- baseline upload moves. It stays on the previous snapshot (no error here) when\n")
+			b.WriteString("-- a snapshot is published by a build that predates the pointer, copied into the\n")
+			b.WriteString("-- root by hand, or uploaded while the pointer could not be written (the upload\n")
+			b.WriteString("-- logs that as an ERROR); and two processes uploading to one root can move it\n")
+			b.WriteString("-- back. If the pointer is deleted, reading this file fails with a 404 on it:\n")
+			b.WriteString("-- generate the file again and it lists the root instead.\n")
 		}
 		b.WriteString("-- That choice lives in a SESSION variable, and views persist while a session\n")
 		b.WriteString("-- variable does not: a database file that saved these views lists them all in\n")

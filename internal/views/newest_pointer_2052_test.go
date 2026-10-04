@@ -126,6 +126,14 @@ func TestUseNewestPointer(t *testing.T) {
 		{name: "pinned file", mutate: func(in *Input) { in.Follow = FollowNone }, ptr: discovered, found: true},
 		{name: "glob character in the root", mutate: func(in *Input) { in.BaselineSource = "s3://my-bucket/base[1]/" },
 			ptr: discovered, found: true},
+		{name: "brace in the root", mutate: func(in *Input) { in.BaselineSource = "s3://my-bucket/a{b,c}/" },
+			ptr: discovered, found: true},
+		{name: "doubled slash in the root", mutate: func(in *Input) { in.BaselineSource = "s3://my-bucket/baselines//" },
+			ptr: discovered, found: true},
+		{name: "dot segment in the root", mutate: func(in *Input) { in.BaselineSource = "s3://my-bucket/x/../baselines/" },
+			ptr: discovered, found: true},
+		{name: "bucket root", mutate: func(in *Input) { in.BaselineSource = "s3://my-bucket" },
+			ptr: discovered, found: true, want: discovered, wantRead: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
