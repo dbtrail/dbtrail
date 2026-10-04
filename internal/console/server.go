@@ -260,6 +260,9 @@ type ReadRoutingConfig struct {
 	// (readrouter.Policy); 0 disables that rule.
 	CostThreshold float64
 	ScanRows      int64
+	// ReadOnly: the routed port refuses every statement that is not a read
+	// (watch --route-read-only, #2079).
+	ReadOnly bool
 }
 
 // RotationDefaults is the daemon-side built-in-rotation policy, surfaced to the

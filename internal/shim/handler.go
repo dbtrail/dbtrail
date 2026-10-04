@@ -185,7 +185,11 @@ type Handler struct {
 	// is MySQL's too; after a copy-served one the warnings are ours.
 	// routeWarned keys the once-per-connection fallback warnings.
 	routeLastForwarded bool
-	routeWarned        map[string]bool
+	// routeRefusal is the message of the read-only refusal the last
+	// statement got, "" when it got none: what SHOW WARNINGS answers next,
+	// here, since the refused statement never reached the source.
+	routeRefusal string
+	routeWarned  map[string]bool
 
 	// allowedSchemas is the authenticated tenant's opt-in schema
 	// allowlist (issue #824), bound by BindAllowedSchemas after the
@@ -515,8 +519,14 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 	if h.freeSQL != nil {
 		if showWarningsRE.MatchString(qstr) {
 			h.mu.Lock()
-			forwarded := h.routeLastForwarded
+			forwarded, refusal := h.routeLastForwarded, h.routeRefusal
 			h.mu.Unlock()
+			if refusal != "" {
+				// The last statement was refused by read-only mode: its
+				// diagnostics are that refusal. Forwarding would return
+				// those of an earlier statement the source did run.
+				return refusalDiagnostics(refusal)
+			}
 			if h.router != nil && forwarded {
 				// Under read routing the last statement was MySQL's, so
 				// its warnings are MySQL's too. After a copy-served one

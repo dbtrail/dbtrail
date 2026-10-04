@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **A read-only mode for the routed port** (#2079). With read routing on
+  (`--route-max-copy-age`), `bintrail-console watch --route-read-only` (or
+  `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=1`) refuses every statement that is not
+  a read with MySQL error 1290 and a message that names the flag, and never
+  sends it to the source. Reads, `SHOW`, `DESCRIBE`, `EXPLAIN`, `USE`,
+  session `SET`s and transaction control keep working. Refused: writes and
+  DDL, `GRANT`, `KILL`, `SET GLOBAL` / `SET PERSIST` / `SET PASSWORD`,
+  `SELECT ... INTO OUTFILE`, locking reads (`FOR UPDATE`, `FOR SHARE`), a
+  `WITH` in front of a write, `EXPLAIN ANALYZE` of a write, a line with more
+  than one statement, statements holding an executable comment
+  (`/*!50000 ... */`), and anything else not recognised as a read. The check
+  reads the statement's text, so a `SELECT` that calls a stored function
+  that writes still runs: the source account's grants bound that. The
+  **Connect a SQL client** panel says whether the port is read-only or
+  read-write, and refusals are counted on their own
+  (`bintrail_read_routing_decisions_total{route="refused",reason="read_only"}`).
+  Without the flag nothing changes. See
+  [time-travel-sql.md](time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental).
+
 ### Fixed
 - **SQL on the copy prints a `DECIMAL` with its trailing zeros** (#2083). A
   `DECIMAL(10,2)` holding 10 came back as `10` from the copy (the port, the
