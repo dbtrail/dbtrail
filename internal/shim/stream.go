@@ -124,8 +124,9 @@ func (w *streamWriter) writeHeader() error {
 // writeRow encodes one already-coerced row (each cell a []byte text value or
 // nil for NULL) as a text-protocol row packet and writes it, emitting the
 // header first if this is the first row. The encoding mirrors
-// BuildSimpleTextResultset exactly: a length-encoded string per non-NULL cell,
-// 0xfb for NULL.
+// BuildSimpleTextResultset: a length-encoded string per non-NULL cell, 0xfb
+// for NULL — except that an empty Go string is an empty string here, where
+// the builder would write NULL.
 func (w *streamWriter) writeRow(cells []any) error {
 	if err := w.writeHeader(); err != nil {
 		return err
@@ -136,7 +137,11 @@ func (w *streamWriter) writeRow(cells []any) error {
 		if err != nil {
 			return fmt.Errorf("stream row %d: %w", w.rows, err)
 		}
-		if b == nil {
+		if s, isString := v.(string); b == nil && isString && s == "" {
+			// FormatTextValue renders a Go "" to a nil slice; it is an
+			// empty string, not NULL.
+			w.buf = append(w.buf, 0x00)
+		} else if b == nil {
 			w.buf = append(w.buf, 0xfb)
 		} else {
 			w.buf = append(w.buf, mysql.PutLengthEncodedString(b)...)
