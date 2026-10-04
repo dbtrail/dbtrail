@@ -13531,6 +13531,7 @@ const ROUTE_REASON_TEXT = {
   show_warnings: "SHOW WARNINGS after a MySQL statement",
   upstream_lost: "nobody answered: the port's connection to the source was lost (the client got error 2006)",
   routing_off: "routing off",
+  read_only: "refused: not a read, and this port is read-only",
 };
 
 // fmtGoDuration shortens a Go duration string for display by dropping the
@@ -13558,11 +13559,12 @@ function routingBlock(fb, cur) {
         el("p", { class: "form-hint" },
           "Start DBTrail with a freshness limit for the copy (CLI: ", el("code", { text: "--route-max-copy-age 15m" }),
           ", or the environment variable ", el("code", { text: "BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE" }),
-          "). Then everything sent to this port runs on the server's own MySQL, writes included, except the heavy SELECTs, which run on the copy while it is at most that old. The mysql line above stays the same. Experimental.")));
+          "). Then everything sent to this port runs on the server's own MySQL, writes included, except the heavy SELECTs, which run on the copy while it is at most that old. To refuse writes, add ", el("code", { text: "--route-read-only" }),
+          " (or ", el("code", { text: "BINTRAIL_CONSOLE_ROUTE_READ_ONLY=1" }), "). The mysql line above stays the same. Experimental.")));
       return;
     }
     const t = (cur && r.servers && r.servers[cur.id]) || { copy: 0, mysql: 0, reasons: {} };
-    const total = (t.copy || 0) + (t.mysql || 0);
+    const total = (t.copy || 0) + (t.mysql || 0) + (t.refused || 0);
     const refresh = el("button", { class: "btn btn-sm", type: "button", text: "Refresh",
       onclick: () => api("/api/flashback").then(paint, (e) => toastError("Could not refresh who answered: " + ((e && e.message) || e))) });
     if (!cur) {
@@ -13587,6 +13589,7 @@ function routingBlock(fb, cur) {
       head.append(el("b", { text: "no statements yet" }));
     } else {
       head.append(el("b", { text: String(t.mysql || 0) }), " by MySQL, ", el("b", { text: String(t.copy || 0) }), " by the copy");
+      if (t.refused) head.append(", ", el("b", { text: String(t.refused) }), " refused");
     }
     head.append(" ", refresh);
     wrap.append(head);
@@ -13594,8 +13597,16 @@ function routingBlock(fb, cur) {
     if (r.cost_threshold > 0) rules.push("MySQL's plan costs at least " + r.cost_threshold);
     if (r.scan_rows > 0) rules.push("it scans a whole table of at least " + r.scan_rows + " rows");
     wrap.append(el("p", { class: "cn-sql-row" }, rules.length
-      ? "A SELECT runs on the copy when " + rules.join(" or ") + ", while the copy is at most " + fmtGoDuration(r.max_copy_age) + " old. Everything else, writes included, runs on MySQL."
-      : "No plan threshold is set (both are 0), so every statement runs on MySQL and nothing reaches the copy."));
+      ? "A SELECT runs on the copy when " + rules.join(" or ") + ", while the copy is at most " + fmtGoDuration(r.max_copy_age) + " old. " +
+        (r.read_only ? "Every other read runs on MySQL." : "Everything else, writes included, runs on MySQL.")
+      : "No plan threshold is set (both are 0), so every " + (r.read_only ? "read" : "statement") + " runs on MySQL and nothing reaches the copy."));
+    // Which mode the port is in (#2079), said either way: read-write is the
+    // one a reader must not have to infer from a missing line.
+    wrap.append(r.read_only
+      ? el("p", { class: "cn-sql-row" }, el("b", { text: "This port is read-only." }),
+        " A statement that would change the server (INSERT, UPDATE, DELETE, CREATE, DROP, GRANT and the like) is refused and never sent to MySQL. The check reads the statement's text, so give the account DBTrail uses on that server only the permissions you want this port to have.")
+      : el("p", { class: "cn-sql-row" }, el("b", { text: "This port is read-write." }),
+        " Writes sent to it run on MySQL. To refuse them, start DBTrail with ", el("code", { text: "--route-read-only" }), "."));
     if (total > 0) {
       const reasons = Object.entries(t.reasons || {}).sort((x, y) => y[1] - x[1]);
       const ul = el("ul", { class: "form-hint", style: "margin:4px 0 0 18px; padding:0" });
