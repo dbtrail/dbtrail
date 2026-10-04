@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -280,7 +279,7 @@ func init() {
 	watchCmd.Flags().StringSliceVar(&upConsoleAllowedHost, "console-allowed-hosts", nil, "Extra hostnames allowed in the Host header (for a TLS-terminating reverse proxy); IP literals and localhost are always allowed")
 	watchCmd.Flags().BoolVar(&upConsoleAllowSetup, "console-allow-setup", false, "Allow browser first-run password setup on a non-loopback bind (assert the bind is access-controlled, e.g. published only on the host loopback)")
 	watchCmd.Flags().IntVar(&upSQLMaxInFlight, "sql-max-in-flight", sqlsandbox.DefaultMaxInFlight, "How many SQL-on-the-copy statements run at once, the SQL card and the --flashback-listen port together; one more waits up to 30 s for a free slot, then is refused. Each runs as its own process with 2 threads and up to 2 GB, on the host that captures, and every result is held in this process while it is sent, so raise it only with cores and memory to spare. Env BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT.")
-	watchCmd.Flags().StringVar(&upConsoleFlashbackListen, "flashback-listen", "", "Serve an embedded MySQL-protocol time-travel port (_flashback/_snapshot/_diff) for every monitored server, routed by the connection username (server id or name); e.g. 127.0.0.1:3308. Requires --console-token, which reads every schema of every server: the port does not filter by schema. Empty = off. Env BINTRAIL_CONSOLE_FLASHBACK_LISTEN.")
+	watchCmd.Flags().StringVar(&upConsoleFlashbackListen, "flashback-listen", "", "Serve an embedded MySQL-protocol time-travel port (_flashback/_snapshot/_diff) for every monitored server, routed by the connection username (server id or name); e.g. 127.0.0.1:3308. Requires --console-token, which reads every schema of every server: the port does not filter by schema. Empty = the web interface decides (Connect turns the port on and off, with its own password; off until then). Set, this address decides and the web interface cannot change it. Env BINTRAIL_CONSOLE_FLASHBACK_LISTEN.")
 	watchCmd.Flags().DurationVar(&upRouteMaxCopyAge, "route-max-copy-age", 0, "Experimental read routing on the --flashback-listen port: forward every statement, WRITES INCLUDED, to the server's source MySQL with the registry's source account, except SELECTs whose EXPLAIN FORMAT=JSON says they are expensive (see --route-cost-threshold, --route-scan-rows), which run on the copy while its snapshot is at most this old; a statement the copy rejects runs on MySQL. Anyone holding the access token can then do on the source whatever that account can, unless --route-read-only is set. 0 = off (the port serves the copy only). Env BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE.")
 	watchCmd.Flags().BoolVar(&upRouteReadOnly, "route-read-only", false, "Read routing: refuse every statement that is not a read (INSERT, UPDATE, DELETE, DDL, GRANT, KILL, SET GLOBAL, SELECT ... INTO OUTFILE, SELECT ... FOR UPDATE, more than one statement in a line and anything else not recognised as a read) with an error that names this flag, and never send it to the source. SELECT, SHOW, DESCRIBE, EXPLAIN, USE, session SETs and transaction control keep working. It reads the statement's text, so it cannot see a stored function that writes: the source account's grants are the guard for that. Requires --route-max-copy-age. Env BINTRAIL_CONSOLE_ROUTE_READ_ONLY.")
 	watchCmd.Flags().Float64Var(&upRouteCostThreshold, "route-cost-threshold", readrouter.DefaultPolicy().CostThreshold, "Read routing: a SELECT whose plan query_cost is at least this goes to the copy (a point lookup costs about 1; a full scan over 200k rows about 20000). 0 disables the cost rule. Env BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD.")
@@ -757,35 +756,47 @@ func routeStartupLine(cfg flashbackConfig) string {
 // is logged, never propagated — the flashback port is strictly secondary to the
 // console and the capture stream.
 func startFlashbackPort(ctx context.Context, srv *console.Server) (func(), error) {
+	cfg := flashbackConfigFromFlags()
+	control := &flashbackControl{ctx: ctx, srv: srv, cfg: cfg}
+	routeErr := validateRoutePolicy(upRouteMaxCopyAge, upRouteCostThreshold, upRouteScanRows)
+	if upConsoleFlashbackListen == "" {
+		// No address at startup: the web interface decides (#2101), so the
+		// port is not "off" for --route-read-only. The flag still guards
+		// nothing with routing off, whoever turns the port on.
+		if err := validateRouteReadOnly(upRouteReadOnly, "decided in the web interface", upRouteMaxCopyAge); err != nil {
+			return nil, err
+		}
+		// A port saved as on comes up here; one that cannot (its address was
+		// taken, the routing thresholds contradict each other) is reported in
+		// the web interface and the log and does NOT stop the daemon, which
+		// is also the capture process.
+		control.cfgErr = routeErr
+		srv.ManageFlashback(control)
+		if addr := control.boundAddr(); addr != nil {
+			fmt.Fprintf(os.Stderr, "Time-travel SQL (MySQL protocol) is listening on %s, as saved in the web interface; connect a MySQL client with user=<server id or name> and the port password created there.\n", addr)
+			if cfg.RouteMaxCopyAge > 0 {
+				fmt.Fprint(os.Stderr, routeStartupLine(cfg))
+			}
+		}
+		return control.Close, nil
+	}
 	if err := validateRouteReadOnly(upRouteReadOnly, upConsoleFlashbackListen, upRouteMaxCopyAge); err != nil {
 		return nil, err
-	}
-	if upConsoleFlashbackListen == "" {
-		return func() {}, nil
 	}
 	if srv.Token() == "" {
 		return nil, fmt.Errorf("--flashback-listen %s requires the access token: set --console-token or BINTRAIL_CONSOLE_TOKEN (MySQL-protocol auth cannot use the web interface password)", upConsoleFlashbackListen)
 	}
-	if err := validateRoutePolicy(upRouteMaxCopyAge, upRouteCostThreshold, upRouteScanRows); err != nil {
-		return nil, err
+	if routeErr != nil {
+		return nil, routeErr
 	}
-	ln, err := net.Listen("tcp", upConsoleFlashbackListen)
-	if err != nil {
-		return nil, fmt.Errorf("flashback: cannot bind %s: %w", upConsoleFlashbackListen, err)
+	if err := control.Apply(upConsoleFlashbackListen); err != nil {
+		return nil, fmt.Errorf("flashback: %w", err)
 	}
-	cfg := flashbackConfigFromFlags()
-	done := make(chan struct{})
-	go func() {
-		if err := serveFlashback(ctx, srv, ln, cfg); err != nil {
-			slog.Warn("flashback port exited with error", "error", err)
-		}
-		close(done)
-	}()
-	fmt.Fprintf(os.Stderr, "Time-travel SQL (MySQL protocol) is listening on %s; connect a MySQL client with user=<server id or name>, password=<access token> (--console-token).\n", ln.Addr())
+	fmt.Fprintf(os.Stderr, "Time-travel SQL (MySQL protocol) is listening on %s; connect a MySQL client with user=<server id or name>, password=<access token> (--console-token).\n", control.boundAddr())
 	if cfg.RouteMaxCopyAge > 0 {
 		fmt.Fprint(os.Stderr, routeStartupLine(cfg))
 	}
-	return func() { <-done }, nil
+	return control.Close, nil
 }
 
 // runUpStreamWithConsole serves the read-only web console in this same process,
@@ -1787,6 +1798,7 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		BaselineS3:      opts.BaselineS3,
 		AuthPath:        opts.AuthFile,
 		MCPTokenPath:    opts.MCPTokenFile,
+		FlashbackPath:   flashbackFilePath(opts),
 		TLSCert:         opts.TLSCert,
 		TLSKey:          opts.TLSKey,
 		AllowedHosts:    opts.AllowedHosts,
@@ -2125,4 +2137,16 @@ func resolveSQLMaxInFlight(cmd *cobra.Command) error {
 		return fmt.Errorf("--sql-max-in-flight %d: want at least 1 (how many SQL statements run at once; the default is %d)", upSQLMaxInFlight, sqlsandbox.DefaultMaxInFlight)
 	}
 	return nil
+}
+
+// flashbackFilePath is where the web interface saves the MySQL port's setting
+// (#2101): beside the servers file. That file's directory is the one place
+// every working installation already keeps across restarts (the compose stack
+// points it into its state volume), so the setting needs no path of its own.
+func flashbackFilePath(opts consoleOpts) string {
+	servers := opts.ServersFile
+	if servers == "" {
+		servers = console.DefaultRegistryPath()
+	}
+	return filepath.Join(filepath.Dir(servers), console.FlashbackFileName)
 }

@@ -251,6 +251,11 @@ var apiRoutePerms = []routePerm{
 	// Connect page, beside the MCP token status: settings vocabulary, no row
 	// data, and never the token that authenticates the port.
 	{"GET", "/api/flashback", ext.PermSettingsRead},
+	// Turning the port on, off, or giving it a new password opens (or
+	// re-keys) a network door onto every server's history: a settings
+	// mutation, and the response is the one place the password is shown.
+	{"PUT", "/api/flashback", ext.PermSettingsWrite},
+	{"POST", "/api/flashback/password", ext.PermSettingsWrite},
 
 	// The capabilities oracle and the session's own auth self-management: any
 	// authenticated session, regardless of policy.

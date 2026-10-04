@@ -112,11 +112,13 @@ func (c flashbackConfig) withDefaults() flashbackConfig {
 // Blocks until ctx is cancelled (which closes ln and drains in-flight
 // connections) or ln fails unrecoverably.
 func serveFlashback(ctx context.Context, srv *console.Server, ln net.Listener, cfg flashbackConfig) error {
-	if srv.Token() == "" {
+	if len(srv.FlashbackPasswords()) == 0 {
 		// The UI-managed MCP token (#1052) is deliberately NOT accepted here:
 		// only its SHA-256 is stored, which cannot drive mysql_native_password
-		// authentication — this port needs the STATIC token specifically.
-		return errors.New("flashback port requires the static automation token: set --token or BINTRAIL_CONSOLE_TOKEN (the web interface password store and the UI-managed MCP token cannot drive MySQL-protocol authentication)")
+		// authentication. This port needs a password it can read: the STATIC
+		// token, or the one the web interface generates for the port (#2101).
+		_ = closeListener(ln)
+		return errors.New("flashback port requires the static automation token, or a port password created in the web interface: set --token or BINTRAIL_CONSOLE_TOKEN (the web interface password store and the UI-managed MCP token cannot drive MySQL-protocol authentication)")
 	}
 	cfg = cfg.withDefaults()
 
@@ -385,14 +387,17 @@ type flashbackCreds struct {
 // an empty token is defence in depth behind serveFlashback's startup guard: an
 // empty token must never authorise a passwordless MySQL handshake.
 func (f flashbackCreds) GetCredential(username string) (server.Credential, bool, error) {
-	if f.srv.Token() == "" {
+	// Read per handshake, so a password replaced in the web interface is the
+	// one the next client needs.
+	passwords := f.srv.FlashbackPasswords()
+	if len(passwords) == 0 {
 		return server.Credential{}, false, nil
 	}
 	plugin := f.authMethod
 	if plugin == "" {
 		plugin = gomysql.AUTH_NATIVE_PASSWORD
 	}
-	return server.Credential{Passwords: []string{f.srv.Token()}, AuthPluginName: plugin}, true, nil
+	return server.Credential{Passwords: passwords, AuthPluginName: plugin}, true, nil
 }
 
 // OnAuthSuccess and OnAuthFailure are server.AuthenticationHandler lifecycle
@@ -502,4 +507,107 @@ func nextFlashbackBackoff(current time.Duration) time.Duration {
 		return next
 	}
 	return maxFlashbackBackoff
+}
+
+// closeListener closes ln if there is one (tests pass nil to reach the
+// password guard without binding).
+func closeListener(ln net.Listener) error {
+	if ln == nil {
+		return nil
+	}
+	return ln.Close()
+}
+
+// flashbackControl opens and closes the port while the daemon runs, so the
+// web interface can turn it on and off (#2101). It is console.FlashbackController.
+// One port at a time: each run serves on its own child of the daemon context,
+// and cancelling that child closes the listener and its connections.
+type flashbackControl struct {
+	ctx context.Context
+	srv *console.Server
+	cfg flashbackConfig
+	// cfgErr is a startup setting that makes the port unservable (the read
+	// routing flags contradict each other). It refuses every open, with the
+	// reason, instead of stopping a daemon whose port may never be turned on.
+	cfgErr error
+
+	mu     sync.Mutex
+	addr   string // as asked for; "" = closed
+	bound  net.Addr
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// Apply makes the port listen on listen, or closes it when listen is empty.
+// The new address is bound before the old one is given up, so a refused
+// address leaves the port as it was. The one case that cannot be done in that
+// order is a change of host on the same port number: there the old listener
+// goes first, and comes back if the new one is refused.
+func (c *flashbackControl) Apply(listen string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if listen == c.addr {
+		return nil
+	}
+	if listen == "" {
+		c.stopLocked()
+		return nil
+	}
+	if c.cfgErr != nil {
+		return c.cfgErr
+	}
+	ln, err := net.Listen("tcp", listen)
+	if err != nil && c.addr != "" {
+		was := c.addr
+		c.stopLocked()
+		if ln, err = net.Listen("tcp", listen); err != nil {
+			if old, oldErr := net.Listen("tcp", was); oldErr == nil {
+				c.serveLocked(was, old)
+			} else {
+				slog.Warn("flashback port could not be reopened on its previous address", "listen", was, "error", oldErr)
+			}
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("cannot bind %s: %w", listen, err)
+	}
+	c.stopLocked()
+	c.serveLocked(listen, ln)
+	return nil
+}
+
+func (c *flashbackControl) serveLocked(addr string, ln net.Listener) {
+	ctx, cancel := context.WithCancel(c.ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := serveFlashback(ctx, c.srv, ln, c.cfg); err != nil {
+			slog.Warn("flashback port exited with error", "error", err)
+		}
+	}()
+	c.addr, c.bound, c.cancel, c.done = addr, ln.Addr(), cancel, done
+}
+
+func (c *flashbackControl) stopLocked() {
+	if c.cancel == nil {
+		return
+	}
+	c.cancel()
+	<-c.done
+	c.addr, c.bound, c.cancel, c.done = "", nil, nil, nil
+}
+
+// Close stops the port and waits for its connections: the daemon's shutdown
+// drain.
+func (c *flashbackControl) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stopLocked()
+}
+
+// boundAddr is the address actually listened on (an ephemeral port resolved).
+func (c *flashbackControl) boundAddr() net.Addr {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.bound
 }

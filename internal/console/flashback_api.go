@@ -1,6 +1,9 @@
 package console
 
 import (
+	"encoding/json"
+	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -29,6 +32,27 @@ type flashbackStatusDTO struct {
 	// whenever the port is on (so the page can say "off" and name the flag),
 	// absent when the port itself is off.
 	Routing *routingStatusDTO `json:"routing,omitempty"`
+
+	// The rest is for turning the port on from the web interface (#2101).
+
+	// Source is who decided the port's address: "startup" (the flag or the
+	// environment variable, which the web interface cannot change) or
+	// "saved" (the setting saved here). Empty when the port is off.
+	Source string `json:"source,omitempty"`
+	// CanManage: this console can turn the port on and off itself. False on
+	// serve (it runs no port), when the address was set at startup, and when
+	// the saved setting was written by a newer version.
+	CanManage bool `json:"can_manage"`
+	// SuggestedListen is the address to offer in the form: the one saved
+	// last, else one with the web interface's own reach. Only with CanManage.
+	SuggestedListen string `json:"suggested_listen,omitempty"`
+	// HasPassword: a password generated here exists. The password itself is
+	// only ever in the response that creates it.
+	HasPassword       bool   `json:"has_password,omitempty"`
+	PasswordCreatedAt string `json:"password_created_at,omitempty"`
+	// Error is why a port saved as on is not listening (its address was
+	// taken, the settings file could not be read).
+	Error string `json:"error,omitempty"`
 }
 
 // routingStatusDTO: whether MySQL answers on the port, under which rule, and
@@ -82,14 +106,35 @@ func (s *Server) routingStatus() *routingStatusDTO {
 }
 
 func (s *Server) flashbackStatus() flashbackStatusDTO {
-	if s.flashbackListen == "" {
-		return flashbackStatusDTO{}
+	fb := &s.flashback
+	fb.mu.Lock()
+	listen, startup := fb.listen, fb.startup
+	manageable := !startup && fb.control != nil && fb.path != "" && !fb.saved.readOnly
+	saved, lastErr := fb.saved, fb.lastErr
+	fb.mu.Unlock()
+
+	dto := flashbackStatusDTO{CanManage: manageable, Error: lastErr}
+	if !startup {
+		dto.HasPassword, dto.PasswordCreatedAt = saved.Password != "", saved.PasswordCreatedAt
 	}
-	dto := flashbackStatusDTO{Enabled: true, Listen: s.flashbackListen, Routing: s.routingStatus()}
-	// A value net.Listen would have refused (no port) cannot reach here from
-	// watch, whose bind failure aborts startup; report the raw address alone
-	// rather than guess a split.
-	host, port, err := net.SplitHostPort(s.flashbackListen)
+	if manageable {
+		dto.SuggestedListen = saved.Listen
+		if dto.SuggestedListen == "" {
+			dto.SuggestedListen = defaultFlashbackListen(s.listen)
+		}
+	}
+	if listen == "" {
+		return dto
+	}
+	dto.Enabled, dto.Listen, dto.Routing = true, listen, s.routingStatus()
+	dto.Source = "saved"
+	if startup {
+		dto.Source = "startup"
+	}
+	// A value net.Listen would have refused (no port) cannot reach here:
+	// a bind failure aborts startup or refuses the save. Report the raw
+	// address alone rather than guess a split.
+	host, port, err := net.SplitHostPort(listen)
 	if err != nil {
 		return dto
 	}
@@ -104,8 +149,184 @@ func (s *Server) flashbackStatus() flashbackStatusDTO {
 }
 
 // handleFlashbackGet reports the time-travel port's state and address, never
-// the token that authenticates it. Behind tokenMiddleware like every /api
+// a password that authenticates it. Behind tokenMiddleware like every /api
 // route; classified settings:read (it is daemon configuration, not row data).
 func (s *Server) handleFlashbackGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.flashbackStatus())
+}
+
+// flashbackChangeDTO answers a change to the port: its new state and, in the
+// one response that created it, the password.
+type flashbackChangeDTO struct {
+	flashbackStatusDTO
+	Password string `json:"password,omitempty"`
+}
+
+// flashbackManageable says why this console cannot change the port, or
+// returns the pieces a change needs. Callers hold flashback.mutate.
+func (s *Server) flashbackManageable() (path string, control FlashbackController, saved FlashbackFile, listen string, refusal string) {
+	fb := &s.flashback
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	switch {
+	case fb.startup:
+		return "", nil, saved, "", "the MySQL port's address was set where DBTrail is started, so it is changed there, not here"
+	case fb.control == nil || fb.path == "":
+		return "", nil, saved, "", "this console does not run the MySQL port"
+	case fb.saved.readOnly:
+		return "", nil, saved, "", ErrFlashbackFileReadOnly.Error()
+	}
+	return fb.path, fb.control, fb.saved, fb.listen, ""
+}
+
+// flashbackRefuseRestricted refuses a session with a data access policy: the
+// port answers with every schema of every server and filters nothing, so the
+// password it would hand over reads past that session's own redaction. Same
+// posture as the MCP token.
+func flashbackRefuseRestricted(w http.ResponseWriter, r *http.Request) bool {
+	if pol := policyFrom(r.Context()); pol.DataRestricted() {
+		recordProfileGateDeny(r, "flashback")
+		writeJSONError(w, http.StatusForbidden,
+			"the MySQL port cannot be changed from a session with a data access policy: the port reads every server without your session's redaction. Ask an operator without data restrictions.")
+		return true
+	}
+	return false
+}
+
+// handleFlashbackPut turns the port on (at an address) or off. Turning it on
+// for the first time also creates its password, returned once.
+//
+// Order matters on the way up: the port is bound BEFORE the setting is saved,
+// so an address that cannot be opened is refused with nothing changed, and a
+// setting that cannot be saved closes the port again rather than leaving one
+// open that a restart would silently drop.
+func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
+	if flashbackRefuseRestricted(w, r) {
+		return
+	}
+	var req struct {
+		Enabled *bool  `json:"enabled"`
+		Listen  string `json:"listen"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if req.Enabled == nil {
+		writeJSONError(w, http.StatusBadRequest, `"enabled" is required: true to turn the port on, false to turn it off`)
+		return
+	}
+	fb := &s.flashback
+	fb.mutate.Lock()
+	defer fb.mutate.Unlock()
+	path, control, saved, was, refusal := s.flashbackManageable()
+	if refusal != "" {
+		writeJSONError(w, http.StatusConflict, refusal)
+		return
+	}
+	next := saved
+	next.Enabled = *req.Enabled
+
+	if !next.Enabled {
+		if err := saveFlashbackFile(path, &next); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := control.Apply(""); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "the port is saved as off but could not be closed: "+err.Error())
+			return
+		}
+		fb.mu.Lock()
+		fb.saved, fb.listen, fb.lastErr = next, "", ""
+		fb.mu.Unlock()
+		slog.Info("console: MySQL port turned off from the web interface")
+		writeJSON(w, http.StatusOK, flashbackChangeDTO{flashbackStatusDTO: s.flashbackStatus()})
+		return
+	}
+
+	addr := req.Listen
+	if addr == "" {
+		addr = saved.Listen
+	}
+	if addr == "" {
+		addr = defaultFlashbackListen(s.listen)
+	}
+	listen, err := NormalizeFlashbackListen(addr, s.listen)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	next.Listen = listen
+	created := ""
+	if next.Password == "" {
+		if created, err = newFlashbackPassword(); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		next.Password, next.PasswordCreatedAt = created, time.Now().UTC().Format(time.RFC3339)
+	}
+	// The password is in place before the port accepts its first handshake.
+	fb.mu.Lock()
+	fb.saved = next
+	fb.mu.Unlock()
+	restore := func() {
+		fb.mu.Lock()
+		fb.saved = saved
+		fb.mu.Unlock()
+	}
+	if err := control.Apply(listen); err != nil {
+		restore()
+		writeJSONError(w, http.StatusConflict, "the port could not be opened on "+listen+": "+err.Error())
+		return
+	}
+	if err := saveFlashbackFile(path, &next); err != nil {
+		if rerr := control.Apply(was); rerr != nil {
+			slog.Warn("console: MySQL port could not be put back after a failed save", "listen", was, "error", rerr)
+		}
+		restore()
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	fb.mu.Lock()
+	fb.listen, fb.lastErr = listen, ""
+	fb.mu.Unlock()
+	slog.Info("console: MySQL port turned on from the web interface", "listen", listen, "password_created", created != "")
+	writeJSON(w, http.StatusOK, flashbackChangeDTO{flashbackStatusDTO: s.flashbackStatus(), Password: created})
+}
+
+// handleFlashbackPassword replaces the port's password and returns the new
+// one, once. Connections already open stay open; the next handshake needs the
+// new password.
+func (s *Server) handleFlashbackPassword(w http.ResponseWriter, r *http.Request) {
+	if flashbackRefuseRestricted(w, r) {
+		return
+	}
+	fb := &s.flashback
+	fb.mutate.Lock()
+	defer fb.mutate.Unlock()
+	path, _, saved, _, refusal := s.flashbackManageable()
+	if refusal != "" {
+		writeJSONError(w, http.StatusConflict, refusal)
+		return
+	}
+	pw, err := newFlashbackPassword()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	next := saved
+	next.Password, next.PasswordCreatedAt = pw, time.Now().UTC().Format(time.RFC3339)
+	if err := saveFlashbackFile(path, &next); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ErrFlashbackFileReadOnly) {
+			status = http.StatusConflict
+		}
+		writeJSONError(w, status, err.Error())
+		return
+	}
+	fb.mu.Lock()
+	fb.saved = next
+	fb.mu.Unlock()
+	slog.Info("console: MySQL port password replaced from the web interface")
+	writeJSON(w, http.StatusOK, flashbackChangeDTO{flashbackStatusDTO: s.flashbackStatus(), Password: pw})
 }
