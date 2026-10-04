@@ -92,3 +92,30 @@ func TestFlashbackAPI_RoutingOn(t *testing.T) {
 		t.Errorf("servers = %v, want srv-1 alone", r.Servers)
 	}
 }
+
+// TestFlashbackAPI_RoutingReadOnly: the port's mode travels with the policy
+// (#2079), and a refused statement is counted on its own, under neither
+// side, since nobody ran it.
+func TestFlashbackAPI_RoutingReadOnly(t *testing.T) {
+	for _, readOnly := range []bool{true, false} {
+		s, err := New(Config{Listen: "127.0.0.1:8090", Token: "secret-tok", FlashbackListen: "127.0.0.1:3308",
+			ReadRouting: ReadRoutingConfig{MaxCopyAge: 15 * time.Minute, CostThreshold: 10000, ScanRows: 100000, ReadOnly: readOnly}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.RecordRouteDecision("srv-1", "mysql", "cheap_plan")
+		s.RecordRouteDecision("srv-1", "refused", "read_only")
+		s.RecordRouteDecision("srv-1", "refused", "read_only")
+		rec := doJSON(t, s, "GET", "/api/flashback", "secret-tok")
+		var got flashbackStatusDTO
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+		}
+		if got.Routing == nil || got.Routing.ReadOnly != readOnly {
+			t.Fatalf("read_only = %+v, want %v", got.Routing, readOnly)
+		}
+		if tally := got.Routing.Servers["srv-1"]; tally.MySQL != 1 || tally.Copy != 0 || tally.Refused != 2 || tally.Reasons["read_only"] != 2 {
+			t.Errorf("srv-1 = %+v, want mysql 1, copy 0, refused 2, read_only 2", tally)
+		}
+	}
+}
