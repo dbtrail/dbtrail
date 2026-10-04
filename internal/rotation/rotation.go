@@ -20,11 +20,12 @@ import (
 
 // Result is one rotation cycle's outcome. Deferred counts partitions past
 // retention that this cycle did NOT drop to avoid data loss: the
-// ProtectUnarchived guard refusing an unarchived partition, OR (in the archive
-// path) an S3 upload that failed or is still pending. The built-in loop sums it
-// across targets to drive escalation. The explicit `rotate` command surfaces
-// only Dropped/Added, but can still produce Deferred>0 when its --archive-s3
-// uploads fail. A named struct, not a positional tuple: three same-typed ints
+// ProtectUnarchived guard refusing an unarchived partition, an S3 upload that
+// failed or is still pending (in either branch, whichever source it belongs
+// to), or a partition that changed after it was archived. The built-in loop
+// sums it across targets to drive escalation. The explicit `rotate` command
+// surfaces only Dropped/Added, but can still produce Deferred>0 when an
+// upload is unconfirmed. A named struct, not a positional tuple: three same-typed ints
 // invite silent misordering at call sites.
 type Result struct {
 	Dropped, Added, Deferred int
@@ -469,6 +470,11 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 							fmt.Fprintf(os.Stdout, "skipped drop for %s (pending S3 upload for %s)\n", name, strings.Join(pendingBy, ", "))
 							fmt.Fprintf(os.Stdout, "  run 'bintrail rotate --retry --archive-dir ... --archive-s3 ... --bintrail-id <id>' with that source's values to retry\n")
 						}
+						// Counted like the archive branch's skip (#2094): an
+						// hour held by an upload that never completes must
+						// reach the loop's escalation, not read as a healthy
+						// cycle.
+						deferredCount++
 						continue
 					}
 					safeToDrop = append(safeToDrop, name)
