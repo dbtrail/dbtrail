@@ -178,19 +178,22 @@ func serveFlashback(ctx context.Context, srv *console.Server, ln net.Listener, c
 func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, mysrv *server.Server, creds server.AuthenticationHandler, gate *shim.Gate, cfg flashbackConfig, logger *slog.Logger) {
 	defer c.Close()
 
-	// Cancel + close the socket when the daemon context dies (SIGTERM) or this
-	// goroutine returns, so a graceful shutdown and a stalled handshake can't
-	// wedge serveFlashback's wg.Wait. BindConnContext(connCtx) below ties any
-	// in-flight fetch to the same context, so shutdown also aborts a running
-	// query — QueryTimeout remains the backstop for a client that simply
-	// disappears mid-query without a shutdown signal.
-	connCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// The connection context ends when the daemon context dies (SIGTERM), when
+	// this goroutine returns, or when the client hangs up, even in the middle
+	// of a statement (#2033): WatchConn reads the socket on its own goroutine,
+	// so the disconnect is seen while nothing else is reading. BindConnContext
+	// (connCtx) below ties every in-flight statement to it, so a client that
+	// leaves stops its SQL worker and frees the server's slot at once instead
+	// of holding it until the query cap. The socket is closed with it, so a
+	// graceful shutdown and a stalled handshake can't wedge serveFlashback's
+	// wg.Wait.
+	wc, connCtx, stop := shim.WatchConn(ctx, c)
+	defer stop()
 	stopCloser := context.AfterFunc(connCtx, func() { _ = c.Close() })
 	defer stopCloser()
 
 	proxy := &routingHandler{}
-	mysqlConn, err := server.NewCustomizedConn(c, mysrv, creds, proxy)
+	mysqlConn, err := server.NewCustomizedConn(wc, mysrv, creds, proxy)
 	if err != nil {
 		level := slog.LevelWarn
 		if isFlashbackProbe(err) {
