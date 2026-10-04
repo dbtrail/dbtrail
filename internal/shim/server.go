@@ -63,7 +63,7 @@ func NewMySQLServer(authMethod string) (*server.Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("shim: generate self-signed cert for %s: %w", authMethod, err)
 	}
-	return server.NewServer("8.0.11", mysql.DEFAULT_COLLATION_ID, authMethod, priv, tlsConfig), nil
+	return server.NewServer(portServerVersion, mysql.DEFAULT_COLLATION_ID, authMethod, priv, tlsConfig), nil
 }
 
 // generateSelfSignedTLS builds an RSA-2048 keypair and wraps it in a

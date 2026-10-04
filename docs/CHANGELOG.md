@@ -71,6 +71,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to 32 s; 1.1: 77 s to 57 s). Same rows and column types.
 
 ### Fixed
+- **MySQL Connector/J can connect to the time-travel port** (#2036). On
+  connect the Java driver sends one `SELECT` of nineteen system variables
+  (`@@session.auto_increment_increment`, `@@character_set_client`, ...)
+  behind a comment, and reads the row. Without read routing the port sent
+  that statement to the copy, which does not know the `@@` syntax, and the
+  driver could not connect. A `SELECT` made only of system variables the
+  port knows is now answered with one row describing the port (UTF-8, UTC,
+  no SQL mode, its packet size); the `mysql` client's
+  `select @@version_comment` gets a row too, where it got an empty OK. With
+  read routing on, MySQL answers these as before.
 - **Read routing no longer leaks the plan's column into other results**
   (#2036). After reading a statement's plan the router returned the
   `EXPLAIN` result to the MySQL library's process-wide pool, which keeps

@@ -146,7 +146,7 @@ func TestFreeSQL_timeTravelAndNoiseComeFirst(t *testing.T) {
 	}
 	_, err := h.HandleQuery("SELECT * FROM _flashback.orders AS OF 'not a time' WHERE id = 1")
 	wantMyError(t, err, mysql.ER_PARSE_ERROR)
-	for _, q := range []string{"select @@version_comment limit 1", "SET NAMES utf8mb4", "select database()"} {
+	for _, q := range []string{"SET NAMES utf8mb4", "select database()", "select @@session.some_unknown_variable"} {
 		res, err := h.HandleQuery(q)
 		if err != nil {
 			t.Errorf("%q: %v", q, err)
@@ -154,6 +154,10 @@ func TestFreeSQL_timeTravelAndNoiseComeFirst(t *testing.T) {
 		if res == nil || res.Resultset != nil {
 			t.Errorf("%q: want the empty OK the noise allowlist gives, got %+v", q, res)
 		}
+	}
+	// A select of system variables the port knows is answered with a row.
+	if res, err := h.HandleQuery("select @@version_comment limit 1"); err != nil || res == nil || res.Resultset == nil {
+		t.Errorf("select @@version_comment: want a row, got %+v, %v", res, err)
 	}
 	if f.calls != 0 {
 		t.Errorf("executor called %d times by time travel / noise statements", f.calls)
