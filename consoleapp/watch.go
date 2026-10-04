@@ -119,7 +119,11 @@ var (
 	// BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD / BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS.
 	upRouteCostThreshold float64
 	upRouteScanRows      int64
-	upArchiveStageDir    string
+	// upRouteReadOnly makes the routed port read-only (#2079): a statement
+	// that is not a read is refused and never sent to the source. Only
+	// meaningful with read routing on. Env BINTRAIL_CONSOLE_ROUTE_READ_ONLY.
+	upRouteReadOnly   bool
+	upArchiveStageDir string
 	// upConsoleBaselineTrigger opts into in-process baseline creation from the
 	// console (#613). Env-only (BINTRAIL_CONSOLE_BASELINE_TRIGGER=1) — off by
 	// default because it needs mydumper in the image and reaches the source DB.
@@ -277,7 +281,8 @@ func init() {
 	watchCmd.Flags().BoolVar(&upConsoleAllowSetup, "console-allow-setup", false, "Allow browser first-run password setup on a non-loopback bind (assert the bind is access-controlled, e.g. published only on the host loopback)")
 	watchCmd.Flags().IntVar(&upSQLMaxInFlight, "sql-max-in-flight", sqlsandbox.DefaultMaxInFlight, "How many SQL-on-the-copy statements run at once, the SQL card and the --flashback-listen port together; one more waits up to 30 s for a free slot, then is refused. Each runs as its own process with 2 threads and up to 2 GB, on the host that captures, and every result is held in this process while it is sent, so raise it only with cores and memory to spare. Env BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT.")
 	watchCmd.Flags().StringVar(&upConsoleFlashbackListen, "flashback-listen", "", "Serve an embedded MySQL-protocol time-travel port (_flashback/_snapshot/_diff) for every monitored server, routed by the connection username (server id or name); e.g. 127.0.0.1:3308. Requires --console-token, which reads every schema of every server: the port does not filter by schema. Empty = off. Env BINTRAIL_CONSOLE_FLASHBACK_LISTEN.")
-	watchCmd.Flags().DurationVar(&upRouteMaxCopyAge, "route-max-copy-age", 0, "Experimental read routing on the --flashback-listen port: forward every statement, WRITES INCLUDED, to the server's source MySQL with the registry's source account, except SELECTs whose EXPLAIN FORMAT=JSON says they are expensive (see --route-cost-threshold, --route-scan-rows), which run on the copy while its snapshot is at most this old; a statement the copy rejects runs on MySQL. Anyone holding the access token can then do on the source whatever that account can. 0 = off (the port serves the copy only). Env BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE.")
+	watchCmd.Flags().DurationVar(&upRouteMaxCopyAge, "route-max-copy-age", 0, "Experimental read routing on the --flashback-listen port: forward every statement, WRITES INCLUDED, to the server's source MySQL with the registry's source account, except SELECTs whose EXPLAIN FORMAT=JSON says they are expensive (see --route-cost-threshold, --route-scan-rows), which run on the copy while its snapshot is at most this old; a statement the copy rejects runs on MySQL. Anyone holding the access token can then do on the source whatever that account can, unless --route-read-only is set. 0 = off (the port serves the copy only). Env BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE.")
+	watchCmd.Flags().BoolVar(&upRouteReadOnly, "route-read-only", false, "Read routing: refuse every statement that is not a read (INSERT, UPDATE, DELETE, DDL, GRANT, KILL, SET GLOBAL, SELECT ... INTO OUTFILE, SELECT ... FOR UPDATE, more than one statement in a line and anything else not recognised as a read) with an error that names this flag, and never send it to the source. SELECT, SHOW, DESCRIBE, EXPLAIN, USE, session SETs and transaction control keep working. It reads the statement's text, so it cannot see a stored function that writes: the source account's grants are the guard for that. Requires --route-max-copy-age. Env BINTRAIL_CONSOLE_ROUTE_READ_ONLY.")
 	watchCmd.Flags().Float64Var(&upRouteCostThreshold, "route-cost-threshold", readrouter.DefaultPolicy().CostThreshold, "Read routing: a SELECT whose plan query_cost is at least this goes to the copy (a point lookup costs about 1; a full scan over 200k rows about 20000). 0 disables the cost rule. Env BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD.")
 	watchCmd.Flags().Int64Var(&upRouteScanRows, "route-scan-rows", readrouter.DefaultPolicy().ScanRows, "Read routing: a SELECT whose plan has a full table scan over at least this many rows goes to the copy (on a MariaDB source, whose plans carry no comparable cost, a full index scan too). 0 disables the scan rule. Env BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS.")
 	watchCmd.Flags().StringVar(&upArchiveStageDir, "archive-staging-dir", "", "Local staging directory for S3 archive uploads (default: OS temp dir). Rotated Parquet is written here, uploaded to a source's configured Archive S3 bucket, then pruned.")
@@ -317,6 +322,12 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 
 	if err := resolveSQLMaxInFlight(cmd); err != nil {
+		return err
+	}
+	// The port's flags, checked here, before the first connection: a
+	// read-only flag that cannot apply, or an environment value that does
+	// not parse, must not wait for the index to answer.
+	if err := resolveRouteFlags(cmd); err != nil {
 		return err
 	}
 
@@ -641,6 +652,89 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 // could ever reach the copy: routing on (a max copy age) with both plan
 // thresholds at 0. Every statement would land under cheap_plan, which reads
 // as a tuning question rather than the misconfiguration it is.
+// resolveRouteFlags applies the environment to the MySQL-protocol port's
+// flags (--flashback-listen and the --route-* family) and checks them
+// together. It opens nothing and starts nothing, so runWatch calls it before
+// the first connection: a typo in a safety setting stops the daemon at once,
+// not after the index answered. resolveUpConsoleEnv calls it again from the
+// console paths; it is idempotent.
+func resolveRouteFlags(cmd *cobra.Command) error {
+	if !cmd.Flags().Changed("flashback-listen") {
+		if v := os.Getenv("BINTRAIL_CONSOLE_FLASHBACK_LISTEN"); v != "" {
+			upConsoleFlashbackListen = v
+		}
+	}
+	if !cmd.Flags().Changed("route-max-copy-age") {
+		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE"); v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE: %w", err)
+			}
+			upRouteMaxCopyAge = d
+		}
+	}
+	if !cmd.Flags().Changed("route-read-only") {
+		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_READ_ONLY"); v != "" {
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_READ_ONLY=%q is not a yes or no: use 1 or true to make the routed port read-only, 0 or false (or leave it unset) for read-write", v)
+			}
+			upRouteReadOnly = b
+		}
+	}
+	if !cmd.Flags().Changed("route-cost-threshold") {
+		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD"); v != "" {
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD: %w", err)
+			}
+			upRouteCostThreshold = f
+		}
+	}
+	if !cmd.Flags().Changed("route-scan-rows") {
+		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS"); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS: %w", err)
+			}
+			upRouteScanRows = n
+		}
+	}
+	if err := validateRouteReadOnly(upRouteReadOnly, upConsoleFlashbackListen, upRouteMaxCopyAge); err != nil {
+		return err
+	}
+	if upConsoleFlashbackListen != "" {
+		return validateRoutePolicy(upRouteMaxCopyAge, upRouteCostThreshold, upRouteScanRows)
+	}
+	return nil
+}
+
+// flashbackConfigFromFlags is the port's serving configuration as the
+// resolved flags give it: what startFlashbackPort serves with.
+func flashbackConfigFromFlags() flashbackConfig {
+	return flashbackConfig{
+		RouteMaxCopyAge: upRouteMaxCopyAge,
+		RoutePolicy:     readrouter.Policy{CostThreshold: upRouteCostThreshold, ScanRows: upRouteScanRows},
+		RouteReadOnly:   upRouteReadOnly,
+	}
+}
+
+// validateRouteReadOnly refuses --route-read-only where it would guard
+// nothing: without the port, or with the port serving the copy only (routing
+// off sends nothing to the source). A safety flag that is silently ignored
+// reads as protection that is not there.
+func validateRouteReadOnly(readOnly bool, flashbackListen string, maxCopyAge time.Duration) error {
+	switch {
+	case !readOnly:
+		return nil
+	case flashbackListen == "":
+		return fmt.Errorf("--route-read-only applies to the MySQL-protocol port, which is off: set --flashback-listen and --route-max-copy-age too, or drop --route-read-only")
+	case maxCopyAge <= 0:
+		return fmt.Errorf("--route-read-only applies to read routing, which is off: set --route-max-copy-age too, or drop --route-read-only (with routing off the port serves the copy only and sends nothing to the source)")
+	}
+	return nil
+}
+
 func validateRoutePolicy(maxCopyAge time.Duration, costThreshold float64, scanRows int64) error {
 	if maxCopyAge > 0 && costThreshold <= 0 && scanRows <= 0 {
 		return fmt.Errorf("read routing: --route-cost-threshold and --route-scan-rows are both 0, so no statement could ever go to the copy; set one of them, or drop --route-max-copy-age to serve the copy only")
@@ -648,11 +742,24 @@ func validateRoutePolicy(maxCopyAge time.Duration, costThreshold float64, scanRo
 	return nil
 }
 
+// routeStartupLine is the stderr line that says, at startup, what read
+// routing sends to the source and whether the port is read-only.
+func routeStartupLine(cfg flashbackConfig) string {
+	rule := fmt.Sprintf("SELECTs with plan cost >= %.0f or a full scan over >= %d rows run on the copy while its snapshot is at most %s old", cfg.RoutePolicy.CostThreshold, cfg.RoutePolicy.ScanRows, cfg.RouteMaxCopyAge)
+	if cfg.RouteReadOnly {
+		return "Read routing (experimental) is on, read-only (--route-read-only): reads go to each server's source MySQL with the registry's source account; " + rule + ". A statement that is not a read is refused and never sent to the source. The check reads the statement's text: what a stored function does when a SELECT calls it is up to that account's grants.\n"
+	}
+	return "Read routing (experimental) is on, read-write: statements, writes included, go to each server's source MySQL with the registry's source account; " + rule + ". Anyone holding the access token can do on each source what that account can. Set --route-read-only to refuse writes.\n"
+}
+
 // fast, exactly like the console bind. Serving runs on the daemon context: ctx
 // cancellation closes the listener and drains open connections. A mid-run crash
 // is logged, never propagated — the flashback port is strictly secondary to the
 // console and the capture stream.
 func startFlashbackPort(ctx context.Context, srv *console.Server) (func(), error) {
+	if err := validateRouteReadOnly(upRouteReadOnly, upConsoleFlashbackListen, upRouteMaxCopyAge); err != nil {
+		return nil, err
+	}
 	if upConsoleFlashbackListen == "" {
 		return func() {}, nil
 	}
@@ -666,10 +773,7 @@ func startFlashbackPort(ctx context.Context, srv *console.Server) (func(), error
 	if err != nil {
 		return nil, fmt.Errorf("flashback: cannot bind %s: %w", upConsoleFlashbackListen, err)
 	}
-	cfg := flashbackConfig{
-		RouteMaxCopyAge: upRouteMaxCopyAge,
-		RoutePolicy:     readrouter.Policy{CostThreshold: upRouteCostThreshold, ScanRows: upRouteScanRows},
-	}
+	cfg := flashbackConfigFromFlags()
 	done := make(chan struct{})
 	go func() {
 		if err := serveFlashback(ctx, srv, ln, cfg); err != nil {
@@ -679,7 +783,7 @@ func startFlashbackPort(ctx context.Context, srv *console.Server) (func(), error
 	}()
 	fmt.Fprintf(os.Stderr, "Time-travel SQL (MySQL protocol) is listening on %s; connect a MySQL client with user=<server id or name>, password=<access token> (--console-token).\n", ln.Addr())
 	if cfg.RouteMaxCopyAge > 0 {
-		fmt.Fprintf(os.Stderr, "Read routing (experimental) is on: statements, writes included, go to each server's source MySQL with the registry's source account; SELECTs with plan cost >= %.0f or a full scan over >= %d rows run on the copy while its snapshot is at most %s old. Anyone holding the access token can do on each source what that account can.\n", cfg.RoutePolicy.CostThreshold, cfg.RoutePolicy.ScanRows, cfg.RouteMaxCopyAge)
+		fmt.Fprint(os.Stderr, routeStartupLine(cfg))
 	}
 	return func() { <-done }, nil
 }
@@ -1109,37 +1213,8 @@ func resolveUpConsoleEnv(cmd *cobra.Command) error {
 			upConsoleAllowSetup = true
 		}
 	}
-	if !cmd.Flags().Changed("flashback-listen") {
-		if v := os.Getenv("BINTRAIL_CONSOLE_FLASHBACK_LISTEN"); v != "" {
-			upConsoleFlashbackListen = v
-		}
-	}
-	if !cmd.Flags().Changed("route-max-copy-age") {
-		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE"); v != "" {
-			d, err := time.ParseDuration(v)
-			if err != nil {
-				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE: %w", err)
-			}
-			upRouteMaxCopyAge = d
-		}
-	}
-	if !cmd.Flags().Changed("route-cost-threshold") {
-		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD"); v != "" {
-			f, err := strconv.ParseFloat(v, 64)
-			if err != nil {
-				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD: %w", err)
-			}
-			upRouteCostThreshold = f
-		}
-	}
-	if !cmd.Flags().Changed("route-scan-rows") {
-		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS"); v != "" {
-			n, err := strconv.ParseInt(v, 10, 64)
-			if err != nil {
-				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS: %w", err)
-			}
-			upRouteScanRows = n
-		}
+	if err := resolveRouteFlags(cmd); err != nil {
+		return err
 	}
 	if !cmd.Flags().Changed("archive-staging-dir") {
 		if v := os.Getenv("BINTRAIL_CONSOLE_ARCHIVE_STAGING"); v != "" {
@@ -1620,6 +1695,7 @@ func upConsoleOpts() consoleOpts {
 			MaxCopyAge:    upRouteMaxCopyAge,
 			CostThreshold: upRouteCostThreshold,
 			ScanRows:      upRouteScanRows,
+			ReadOnly:      upRouteReadOnly,
 		},
 		SQLMaxInFlight: upSQLMaxInFlight,
 	}

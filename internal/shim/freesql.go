@@ -98,11 +98,16 @@ type RouterConfig struct {
 	// run there. Zero means never: every statement is forwarded.
 	MaxCopyAge time.Duration
 	// Observe, when set, is told every routing decision this connection
-	// makes: route is "copy" or "mysql", reason one of the RouteReason*
+	// makes: route is "copy", "mysql" or "refused", reason one of the RouteReason*
 	// constants (a closed vocabulary, so a caller can hang a metric label on
 	// it). Called once per statement, whatever the statement then does on
 	// the side it was sent to.
 	Observe func(route RouteSide, reason RouteReason)
+	// ReadOnly refuses every statement that is not a read or the session and
+	// transaction control around reads (readrouter.ReadOnlyRefusal), before
+	// anything is asked of the Router: a refused statement never reaches the
+	// source, not even as an EXPLAIN or a PREPARE (#2079).
+	ReadOnly bool
 }
 
 // RouteSide is who answered a routed statement; RouteReason why. Both are
@@ -120,6 +125,8 @@ type (
 const (
 	RouteCopy  RouteSide = "copy"
 	RouteMySQL RouteSide = "mysql"
+	// RouteRefused: nobody ran the statement, the port refused it.
+	RouteRefused RouteSide = "refused"
 
 	RouteReasonNotASelect     RouteReason = "not_a_select"     // SHOW, BEGIN, COMMIT, a USE sent as a statement, …
 	RouteReasonWrite          RouteReason = "write"            // INSERT/UPDATE/DELETE/DDL
@@ -137,6 +144,7 @@ const (
 	RouteReasonShowWarnings   RouteReason = "show_warnings"    // SHOW WARNINGS after a MySQL statement
 	RouteReasonUpstreamLost   RouteReason = "upstream_lost"    // nobody answered: the port's connection to the source is lost
 	RouteReasonExpensivePlan  RouteReason = "expensive_plan"   // the one reason a statement goes to the copy
+	RouteReasonReadOnly       RouteReason = "read_only"        // refused: not a read, and the port is read-only
 )
 
 // observeRoute reports one decision to the bound observer, if any.
@@ -199,6 +207,9 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 // route is the routing ladder, one rung per reason a statement is MySQL's;
 // only an expensive SELECT on a fresh copy reaches the last one.
 func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.Result, error) {
+	if err := h.readOnlyRefusal(qstr); err != nil {
+		return nil, err
+	}
 	kind := readrouter.Classify(qstr)
 	switch kind {
 	case readrouter.KindSet:
@@ -276,6 +287,51 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	h.routeLastForwarded = false
 	h.mu.Unlock()
 	return res, nil
+}
+
+// readOnlyRefusal is the read-only gate (RouterConfig.ReadOnly): nil when the
+// mode is off or the statement is a read, else the error the client gets. It
+// is called at the two places a statement's text can reach the Router (route,
+// for a text statement and for each execution of a prepared one, and
+// prepareRouted), BEFORE any of the Router's methods. The error is MySQL's
+// own code for "an option of this server prevents the statement" (1290) and
+// names the flag, so the reader knows what refused it and how to change it.
+func (h *Handler) readOnlyRefusal(qstr string) error {
+	if !h.routerCfg.ReadOnly {
+		return nil
+	}
+	why := readrouter.ReadOnlyRefusal(qstr)
+	if why == "" {
+		return nil
+	}
+	// The reason alone: it is fixed text and known keywords, where the
+	// statement's first word can be anything the client typed.
+	h.logger.Debug("read routing: refused by read-only mode", "reason", why)
+	h.observeRoute(RouteRefused, RouteReasonReadOnly)
+	msg := "this port is read-only (--route-read-only) and refused the statement: " + why + ". Nothing was sent to the source."
+	h.mu.Lock()
+	h.routeRefusal = msg
+	h.mu.Unlock()
+	return mysql.NewError(mysql.ER_OPTION_PREVENTS_STATEMENT, msg)
+}
+
+// clearRefusal forgets the last read-only refusal: the statement now
+// starting replaces it as "the last statement".
+func (h *Handler) clearRefusal() {
+	h.mu.Lock()
+	h.routeRefusal = ""
+	h.mu.Unlock()
+}
+
+// refusalDiagnostics is SHOW WARNINGS after a read-only refusal: one row,
+// the way MySQL shows the error of the statement before.
+func refusalDiagnostics(msg string) (*mysql.Result, error) {
+	rs, err := mysql.BuildSimpleTextResultset([]string{"Level", "Code", "Message"},
+		[][]any{{"Error", int64(mysql.ER_OPTION_PREVENTS_STATEMENT), msg}})
+	if err != nil {
+		return nil, fmt.Errorf("show warnings: %w", err)
+	}
+	return &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}, nil
 }
 
 // routeWarn logs a fallback that hides an operational problem (the feature
@@ -514,6 +570,9 @@ type warningsSetter interface{ SetWarnings(uint16) }
 func (h *Handler) setWarnings(msgs []string) {
 	h.mu.Lock()
 	h.lastWarnings = msgs
+	// Called when a statement starts and when the copy answered one: either
+	// way the refusal of an earlier statement is no longer the last word.
+	h.routeRefusal = ""
 	h.mu.Unlock()
 	if ws, ok := h.conn.(warningsSetter); ok {
 		ws.SetWarnings(uint16(len(msgs)))
