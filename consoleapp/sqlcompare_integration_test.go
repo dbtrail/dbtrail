@@ -82,7 +82,7 @@ SELECT id, NOW() FROM orders ORDER BY id;
 UPDATE orders SET status = 'x';
 WITH c AS (SELECT id FROM orders) DELETE FROM orders WHERE id IN (SELECT id FROM c);
 SELECT * FROM nope;
-`+"-- what an ORM sends: backtick names, which the router rewrites for the copy\nSELECT `status`, count(*) FROM `orders` GROUP BY `status`;\n"), 0o644); err != nil {
+`+"-- what an ORM sends: backtick names, which the copy refuses (nothing is translated)\nSELECT `status`, count(*) FROM `orders` GROUP BY `status`;\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	fh, err := os.Open(stmts)
@@ -115,7 +115,7 @@ SELECT * FROM nope;
 		"SELECT status, count(*) FROM orders GROUP BY status":                                 {sqlcompare.Different, "rows", "copy"},
 		"SELECT id FROM orders WHERE status = 'live'":                                         {sqlcompare.Different, "rows", "copy"},
 		"SELECT status FROM orders ORDER BY status, id":                                       {sqlcompare.Different, "order", "copy"},
-		"SELECT `status`, count(*) FROM `orders` GROUP BY `status`":                           {sqlcompare.Different, "rows", "copy"},
+		"SELECT `status`, count(*) FROM `orders` GROUP BY `status`":                           {sqlcompare.NotOnCopy, "", "copy"},
 		"SELECT CONVERT(status USING utf8mb4) s, count(*) FROM orders GROUP BY s":             {sqlcompare.NotOnCopy, "", "copy"},
 		"WITH c AS (SELECT id FROM orders) DELETE FROM orders WHERE id IN (SELECT id FROM c)": {sqlcompare.Skipped, "not_read_only", "mysql"},
 		"UPDATE orders SET status = 'x'":                                                      {sqlcompare.Skipped, "not_a_select", "mysql"},
@@ -137,8 +137,8 @@ SELECT * FROM nope;
 	if r := by["SELECT id, NOW() FROM orders ORDER BY id"]; r.Route != "mysql" || !strings.Contains(r.RouteReason, "veto: NOW") || (r.Verdict != sqlcompare.Different && r.Verdict != sqlcompare.Inconclusive) {
 		t.Errorf("NOW(): got %s route=%s (%s), want DIFFERENT or INCONCLUSIVE, vetoed", r.Verdict, r.Route, r.RouteReason)
 	}
-	if rep.CopyDiffers != 3 || rep.CopyOrderDiffers != 1 || !rep.Failed() {
-		t.Errorf("CopyDiffers = %d, CopyOrderDiffers = %d, want 3 and 1 (the collation differences the router would route to the copy; NOW() is vetoed; the ORDER BY one is counted apart)", rep.CopyDiffers, rep.CopyOrderDiffers)
+	if rep.CopyDiffers != 2 || rep.CopyOrderDiffers != 1 || !rep.Failed() {
+		t.Errorf("CopyDiffers = %d, CopyOrderDiffers = %d, want 2 and 1 (the collation differences the router would route to the copy; the backtick one is refused by the copy, so it is not a difference; NOW() is vetoed; the ORDER BY one is counted apart)", rep.CopyDiffers, rep.CopyOrderDiffers)
 	}
 	var status string
 	var n int
@@ -152,7 +152,7 @@ SELECT * FROM nope;
 	}
 	var out bytes.Buffer
 	sqlcompare.WriteText(&out, rep)
-	for _, s := range []string{"DIFFERENT    router=copy", "same rows in a different order", "NOT_ON_COPY", "SKIPPED", "3 statement(s) the router would send to the copy answer DIFFERENTLY", "1 copy-routed statement(s) return the same rows in a different order"} {
+	for _, s := range []string{"DIFFERENT    router=copy", "same rows in a different order", "NOT_ON_COPY", "SKIPPED", "2 statement(s) the router would send to the copy answer DIFFERENTLY", "1 copy-routed statement(s) return the same rows in a different order"} {
 		if !strings.Contains(out.String(), s) {
 			t.Errorf("text report lacks %q:\n%s", s, out.String())
 		}
