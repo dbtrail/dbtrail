@@ -323,6 +323,11 @@ type Input struct {
 	// the header. BaselineSnapshot is that snapshot's timestamp.
 	BaselineSource   string
 	BaselineSnapshot time.Time
+	// NewestPointer, under FollowNewest, is the snapshot name <root>/_NEWEST
+	// held at generation (#2052), set only by UseNewestPointer and only when it
+	// named the snapshot just discovered. Set, the file resolves the snapshot by
+	// reading that object instead of listing every _SUCCESS under the root.
+	NewestPointer string
 	// NewerElsewhere names a snapshot that is more recent than the one this
 	// file pins, found in the server's OTHER backup location (#1571).
 	//
@@ -779,6 +784,9 @@ func writeHeader(b *strings.Builder, in Input) {
 		how := "follow the `" + baseline.CurrentLinkName + "` pointer"
 		if in.Follow == FollowNewest {
 			how = "select the newest completed snapshot"
+			if in.NewestPointer != "" {
+				how = "follow the `" + baseline.NewestPointerName + "` pointer"
+			}
 		}
 		if in.rendersEvents() && grouped {
 			b.WriteString("The events view below\n")
@@ -883,6 +891,17 @@ func writeHeader(b *strings.Builder, in Input) {
 		b.WriteString("-- apart mid-session. A refresh published while you are working is picked up\n")
 		b.WriteString("-- by reading this file again, which is already what an S3 session needs to do\n")
 		b.WriteString("-- for the secret above.\n")
+		if in.NewestPointer != "" {
+			// The one way the pointer is weaker than the listing it replaces,
+			// stated where the reader decides whether to trust the rows.
+			b.WriteString("-- Which snapshot is newest comes from the root's `" + baseline.NewestPointerName + "` pointer, which a\n")
+			b.WriteString("-- baseline upload moves. It stays on the previous snapshot (no error here) when\n")
+			b.WriteString("-- a snapshot is published by a build that predates the pointer, copied into the\n")
+			b.WriteString("-- root by hand, or uploaded while the pointer could not be written (the upload\n")
+			b.WriteString("-- logs that as an ERROR); and two processes uploading to one root can move it\n")
+			b.WriteString("-- back. If the pointer is deleted, reading this file fails with a 404 on it:\n")
+			b.WriteString("-- generate the file again and it lists the root instead.\n")
+		}
 		b.WriteString("-- That choice lives in a SESSION variable, and views persist while a session\n")
 		b.WriteString("-- variable does not: a database file that saved these views lists them all in\n")
 		b.WriteString("-- a new session, and every read raises until this file's SET VARIABLE\n")
@@ -1026,7 +1045,12 @@ func writeHeader(b *strings.Builder, in Input) {
 			// Same job as the pointer line, and the same reason: the timestamp
 			// above is where the column types came from, not what the views
 			// open. What they open is decided per read.
-			b.WriteString("--   read through the newest `_SUCCESS` snapshot, which is that one right now\n")
+			if in.NewestPointer != "" {
+				fmt.Fprintf(b, "--   read through the snapshot %s/%s names, which is that one right now\n",
+					commentSafe(strings.TrimSuffix(in.BaselineSource, "/")), baseline.NewestPointerName)
+			} else {
+				b.WriteString("--   read through the newest `_SUCCESS` snapshot, which is that one right now\n")
+			}
 		}
 		// A local root resolves on ONE machine, and this file travels: the
 		// console serves it to a browser, and a generated file is meant to be
@@ -1937,6 +1961,11 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 		b.WriteString("-- " + shape + ": each table's full contents as of the snapshot the\n")
 		b.WriteString("-- `" + baseline.CurrentLinkName + "` pointer names, which is whichever one completed most recently.\n")
 	case FollowNewest:
+		if in.NewestPointer != "" {
+			b.WriteString("-- " + shape + ": each table's full contents as of the snapshot the\n")
+			b.WriteString("-- `" + baseline.NewestPointerName + "` pointer names, chosen when the view is read.\n")
+			break
+		}
 		b.WriteString("-- " + shape + ": each table's full contents as of the newest snapshot\n")
 		b.WriteString("-- carrying a `" + baseline.SuccessMarker + "` marker, chosen when the view is read.\n")
 	default:
@@ -2067,6 +2096,10 @@ const (
 // at the first query.
 func writeNewestSnapshotVar(b *strings.Builder, in Input) {
 	root := strings.TrimSuffix(in.BaselineSource, "/")
+	if in.NewestPointer != "" {
+		writeNewestPointerVar(b, in, root)
+		return
+	}
 	b.WriteString("-- The snapshot every state view below reads through, resolved once, when this\n")
 	b.WriteString("-- file is read. Re-run this statement to pick up a refresh without reopening\n")
 	b.WriteString("-- the session; every view follows it, so they never disagree about which\n")
@@ -2078,6 +2111,41 @@ func writeNewestSnapshotVar(b *strings.Builder, in Input) {
 			baseline.SuccessMarker+" marker). Take or refresh a baseline, then read this file again."))
 	fmt.Fprintf(b, "    ELSE max(regexp_replace(file, %s, '')) END\n", sqlString(baseline.SuccessMarker+"$"))
 	fmt.Fprintf(b, "  FROM glob(%s));\n\n", sqlString(root+"/*/"+baseline.SuccessMarker))
+}
+
+// snapshotNamePattern is the only pointer content the file accepts: the form
+// snapshotdir.Name writes, whole. Anything else (a path, two names, the
+// colon form) is refused rather than joined onto the root.
+const snapshotNamePattern = "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z"
+
+// writeNewestPointerVar is writeNewestSnapshotVar for a root whose _NEWEST
+// pointer the producer confirmed (#2052): one HEAD and one GET of that object,
+// where the glob lists every object under the root and grows with each
+// snapshot kept.
+//
+// The match sits in WHEN and error() in ELSE, never the reverse. A NULL from
+// any piece (an empty object, a regexp over NULL) then lands on the refusal
+// instead of on a NULL variable, which the dropped-table preflight below would
+// let through: it fails open on NULL because it trusts this statement to have
+// raised first.
+//
+// The trimmed characters are spelled with chr() so the newline the publisher
+// writes is stripped whatever string-escape mode the reader's session is in;
+// the one-argument trim removes spaces only.
+func writeNewestPointerVar(b *strings.Builder, in Input, root string) {
+	ptr := root + "/" + baseline.NewestPointerName
+	name := "trim(content, chr(32) || chr(9) || chr(13) || chr(10))"
+	b.WriteString("-- The snapshot every state view below reads through: the one " + baseline.NewestPointerName + " names,\n")
+	b.WriteString("-- read once, when this file is read. Each baseline publish moves that pointer,\n")
+	b.WriteString("-- so re-running this statement picks up a refresh without reopening the\n")
+	b.WriteString("-- session, and every view follows it together.\n")
+	fmt.Fprintf(b, "SET VARIABLE %s = (\n", in.sessionName(newestVar))
+	fmt.Fprintf(b, "  SELECT CASE WHEN regexp_full_match(%s, %s)\n", name, sqlString(snapshotNamePattern))
+	fmt.Fprintf(b, "    THEN %s || %s || '/'\n", sqlString(root+"/"), name)
+	fmt.Fprintf(b, "    ELSE error(%s) END\n", sqlString(
+		"bintrail views: "+ptr+" does not hold a snapshot name. Refresh or re-upload a baseline "+
+			"to rewrite it, or generate this file again."))
+	fmt.Fprintf(b, "  FROM read_text(%s));\n\n", sqlString(ptr))
 }
 
 // selectedStatePlans is the state views this render will actually emit: the
@@ -2237,7 +2305,9 @@ func writeSnapshotPreflight(b *strings.Builder, in Input, wanted []statePlan) {
 // DuckDB does not honour a backslash escape here; a single-character class does,
 // which is what globLiteral builds. FollowNewest needs no escaping: its value is
 // itself a glob RESULT, so a root that glob cannot express never reaches it —
-// writeNewestSnapshotVar's own glob raises first, naming the root.
+// writeNewestSnapshotVar's own glob raises first, naming the root. The pointer
+// variant (#2052) builds the value from the raw root instead, which is why
+// UseNewestPointer refuses a root carrying a glob character.
 func snapshotDirExpr(in Input) (dir, globDir string, ok bool) {
 	switch in.Follow {
 	case FollowNewest:

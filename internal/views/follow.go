@@ -1,9 +1,15 @@
 package views
 
 import (
+	"context"
+	"log/slog"
+	"path"
 	"strings"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/snapshotdir"
+	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
 // ApplyFollow decides how the state views will reach a snapshot published after
@@ -119,4 +125,53 @@ func snapshotRel(root, path string) (string, bool) {
 		return "", false
 	}
 	return rest, true
+}
+
+// readNewestPointer is baseline.ReadNewestPointer, swapped out by tests.
+var readNewestPointer = baseline.ReadNewestPointer
+
+// newestPointerTimeout bounds the one GET: a file generated without the
+// pointer is slower to open, never wrong, so a stalled store must not hold up
+// generation.
+const newestPointerTimeout = 10 * time.Second
+
+// UseNewestPointer lets a marker-followed file resolve its snapshot through
+// <root>/_NEWEST (#2052) instead of listing the whole root, when the pointer
+// names exactly the snapshot just discovered. Any other answer (no pointer,
+// an older or newer name, a read that failed) leaves the listing in place:
+// the pointer is a shortcut, and a producer that cannot confirm it is current
+// must not hand the reader a file that follows a stale one.
+//
+// Called by every producer right after ApplyFollow. It is separate only
+// because it reads the network and ApplyFollow does not.
+func UseNewestPointer(ctx context.Context, in *Input) {
+	if in.Follow != FollowNewest {
+		return
+	}
+	// The pointer arm joins the RAW root into a path the preflight globs; the
+	// listing arm's value is a glob result and never has this problem.
+	if strings.ContainsAny(strings.TrimPrefix(in.BaselineSource, "s3://"), "*?[{") {
+		return
+	}
+	// The uploader derives the pointer's key with path.Dir, which CLEANS, and
+	// the file joins the root as typed. They agree only on a clean root: under
+	// "s3://b/bl//" the pointer lives at bl/_NEWEST while the file would read
+	// bl//_NEWEST and fail on open. Same class as #1558.
+	if _, prefix, err := storage.ParseS3URL(in.BaselineSource); err != nil ||
+		(strings.TrimSuffix(prefix, "/") != "" && strings.TrimSuffix(prefix, "/") != path.Clean(strings.TrimSuffix(prefix, "/"))) ||
+		strings.HasPrefix(prefix, "/") {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, newestPointerTimeout)
+	defer cancel()
+	name, found, err := readNewestPointer(ctx, in.BaselineSource)
+	if err != nil {
+		slog.Warn("views: could not read the baselines root's newest-snapshot pointer; "+
+			"the file will list the root to find the newest snapshot instead, which is slower to open",
+			"root", in.BaselineSource, "error", err)
+		return
+	}
+	if found && name == snapshotdir.Name(in.BaselineSnapshot) {
+		in.NewestPointer = name
+	}
 }

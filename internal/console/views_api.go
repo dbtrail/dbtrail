@@ -226,6 +226,7 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 			// snapshot, so reading the pinned one costs nothing.
 			s.resolveBaselineDecimals(ctx, &in)
 			views.ApplyFollow(&in, baseSrc, pinSnapshot)
+			views.UseNewestPointer(ctx, &in)
 		}
 	}
 	if len(in.ArchiveSources) == 0 && len(in.Baselines) == 0 {

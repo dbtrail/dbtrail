@@ -39,3 +39,9 @@ func ParseTime(name string) (time.Time, bool) {
 	}
 	return t.UTC(), true
 }
+
+// Name is the directory name a snapshot taken at t is written under, the form
+// ParseTime reads back: RFC 3339 in UTC with the colons replaced.
+func Name(t time.Time) string {
+	return strings.ReplaceAll(t.UTC().Format(time.RFC3339), ":", "-")
+}

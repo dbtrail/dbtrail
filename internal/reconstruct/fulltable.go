@@ -34,6 +34,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/recovery"
 	"github.com/dbtrail/dbtrail/internal/serverid"
+	"github.com/dbtrail/dbtrail/internal/snapshotdir"
 )
 
 // FullTableConfig drives ReconstructTables — the full-table merge-on-read
@@ -95,7 +96,7 @@ const (
 // contract, not a display choice. Exported for the console's backup detail
 // and download surfaces, which resolve one snapshot's directory from its time.
 func SnapshotDirName(at time.Time) string {
-	return strings.ReplaceAll(at.UTC().Format(time.RFC3339), ":", "-")
+	return snapshotdir.Name(at)
 }
 
 type FullTableConfig struct {
