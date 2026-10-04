@@ -32,16 +32,16 @@ type routingStats struct {
 
 // routingTally is one server's counts.
 type routingTally struct {
-	copy, mysql uint64
-	reasons     map[string]uint64
+	copy, mysql, refused uint64
+	reasons              map[string]uint64
 }
 
 func newRoutingStats(now time.Time) *routingStats {
 	return &routingStats{since: now, perServer: map[string]*routingTally{}, unavailable: map[string]string{}}
 }
 
-// record tallies one decision. route is "copy" or "mysql" (the shim's
-// RouteCopy/RouteMySQL); any other value is counted under its reason only, so
+// record tallies one decision. route is "copy", "mysql" or "refused" (the
+// shim's RouteCopy/RouteMySQL/RouteRefused); any other value is counted under its reason only, so
 // a vocabulary drift shows up as a reason with no side rather than vanishing.
 func (r *routingStats) record(serverID, route, reason string) {
 	r.mu.Lock()
@@ -56,6 +56,8 @@ func (r *routingStats) record(serverID, route, reason string) {
 		t.copy++
 	case "mysql":
 		t.mysql++
+	case "refused":
+		t.refused++
 	}
 	t.reasons[reason]++
 }
@@ -79,7 +81,7 @@ func (r *routingStats) snapshot() map[string]routingServerDTO {
 	defer r.mu.Unlock()
 	out := make(map[string]routingServerDTO, len(r.perServer))
 	for id, t := range r.perServer {
-		out[id] = routingServerDTO{Copy: t.copy, MySQL: t.mysql, Reasons: maps.Clone(t.reasons), Unavailable: r.unavailable[id]}
+		out[id] = routingServerDTO{Copy: t.copy, MySQL: t.mysql, Refused: t.refused, Reasons: maps.Clone(t.reasons), Unavailable: r.unavailable[id]}
 	}
 	for id, why := range r.unavailable {
 		if _, ok := out[id]; !ok {

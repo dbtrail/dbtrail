@@ -176,8 +176,9 @@ func ObserveSQLStatementPhase(phase string, d time.Duration) {
 
 // readRoutingDecisions counts the read router's decisions on the embedded
 // time-travel port (#2038): per server (the registry id, bounded by the
-// registry), per side ("copy" or "mysql") and per reason (the shim's closed
-// RouteReason* vocabulary, fourteen values). It counts DECISIONS, not
+// registry), per side ("copy", "mysql", or "refused" for a statement the read-only
+// port did not run) and per reason (the shim's closed RouteReason*
+// vocabulary). It counts DECISIONS, not
 // successes: a statement MySQL then fails is still one the router sent to
 // MySQL. Only a daemon with --flashback-listen and --route-max-copy-age
 // ever increments it.
@@ -185,7 +186,7 @@ var readRoutingDecisions = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "bintrail",
 	Subsystem: "read_routing",
 	Name:      "decisions_total",
-	Help:      "Read routing decisions on the embedded time-travel port, by server id, side (copy|mysql) and reason.",
+	Help:      "Read routing decisions on the embedded time-travel port, by server id, side (copy|mysql|refused) and reason.",
 }, []string{"server", "route", "reason"})
 
 // ObserveRouteDecision counts one read-routing decision for a server.

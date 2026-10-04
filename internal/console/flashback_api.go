@@ -42,6 +42,9 @@ type routingStatusDTO struct {
 	// CostThreshold / ScanRows are the EXPLAIN thresholds; 0 = that rule off.
 	CostThreshold float64 `json:"cost_threshold,omitempty"`
 	ScanRows      int64   `json:"scan_rows,omitempty"`
+	// ReadOnly: the port refuses every statement that is not a read
+	// (--route-read-only). False = read-write: writes are sent to MySQL.
+	ReadOnly bool `json:"read_only,omitempty"`
 	// Since is when the tally started (daemon start), RFC 3339 UTC.
 	Since string `json:"since,omitempty"`
 	// Servers is the tally per registry id; a server with no decision yet
@@ -51,8 +54,11 @@ type routingStatusDTO struct {
 
 // routingServerDTO is one server's decisions since Since.
 type routingServerDTO struct {
-	Copy    uint64            `json:"copy"`
-	MySQL   uint64            `json:"mysql"`
+	Copy  uint64 `json:"copy"`
+	MySQL uint64 `json:"mysql"`
+	// Refused counts statements nobody ran: the port is read-only and they
+	// were not reads. Omitted while zero.
+	Refused uint64            `json:"refused,omitempty"`
 	Reasons map[string]uint64 `json:"reasons"`
 	// Unavailable, when set, is why connections to this server cannot route
 	// (the copy answers everything there), as the last connection found it.
@@ -69,6 +75,7 @@ func (s *Server) routingStatus() *routingStatusDTO {
 		MaxCopyAge:    rr.MaxCopyAge.String(),
 		CostThreshold: rr.CostThreshold,
 		ScanRows:      rr.ScanRows,
+		ReadOnly:      rr.ReadOnly,
 		Since:         s.routing.since.UTC().Format(time.RFC3339),
 		Servers:       s.routing.snapshot(),
 	}
