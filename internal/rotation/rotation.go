@@ -350,7 +350,7 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 							"partition", name, "pending_sources", strings.Join(pendingBy, ","))
 						if opts.Format != "json" {
 							fmt.Fprintf(os.Stdout, "skipped drop for %s (pending S3 upload for %s)\n", name, strings.Join(pendingBy, ", "))
-							fmt.Fprintf(os.Stdout, "  run 'bintrail rotate --retry --archive-s3 ...' for that source to retry\n")
+							fmt.Fprintf(os.Stdout, "  run 'bintrail rotate --retry --archive-dir ... --archive-s3 ... --bintrail-id <id>' with that source's values to retry\n")
 						}
 						// A still-pending upload is an undropped partition too — count it
 						// so the loop escalates rather than reporting a healthy cycle.
@@ -467,7 +467,7 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 							"partition", name, "pending_sources", strings.Join(pendingBy, ","))
 						if opts.Format != "json" {
 							fmt.Fprintf(os.Stdout, "skipped drop for %s (pending S3 upload for %s)\n", name, strings.Join(pendingBy, ", "))
-							fmt.Fprintf(os.Stdout, "  run 'bintrail rotate --retry --archive-s3 ...' for that source to retry\n")
+							fmt.Fprintf(os.Stdout, "  run 'bintrail rotate --retry --archive-dir ... --archive-s3 ... --bintrail-id <id>' with that source's values to retry\n")
 						}
 						continue
 					}
@@ -602,7 +602,7 @@ func indexHasArchives(ctx context.Context, db *sql.DB) (bool, error) {
 
 // partitionArchived reports whether archive_state records a local archive for
 // the partition under any bintrail_id. Completed-S3 status is checked
-// separately by hasPendingS3Upload.
+// separately by pendingS3Uploads.
 func partitionArchived(ctx context.Context, db *sql.DB, partition string) (bool, error) {
 	var has bool
 	err := db.QueryRowContext(ctx,

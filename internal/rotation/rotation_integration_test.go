@@ -95,25 +95,6 @@ func TestPendingS3Uploads_completed(t *testing.T) {
 	}
 }
 
-func TestPendingS3Uploads_whoeverTheSourceIs(t *testing.T) {
-	db, _ := testutil.CreateTestDB(t)
-	testutil.InitIndexTables(t, db)
-
-	// The check takes no source: a row under any bintrail_id is detected.
-	testutil.MustExec(t, db, `INSERT INTO archive_state
-		(partition_name, bintrail_id, local_path, row_count, s3_bucket, s3_key)
-		VALUES ('p_2026030100', 'some-uuid', '/data/test.parquet', 42, 'my-bucket', 'archives/test.parquet')`)
-
-	by, err := pendingS3Uploads(context.Background(), db, "p_2026030100")
-	pending := len(by) > 0
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !pending {
-		t.Error("expected a pending source: the row's upload is unconfirmed")
-	}
-}
-
 // ─── Perform S3 safety ───────────────────────────────────────────────────────
 
 // TestPerformRotation_PendingS3BlocksDrop verifies that when a previous
@@ -1112,7 +1093,7 @@ func TestPerformRotation_PendingUploadOfAnotherSourceBlocksDrop(t *testing.T) {
 		protect bool
 	}{
 		{name: "drop-only, rotating as source A", id: "source-a"},
-		// The control: with no identity the old check was already unscoped.
+		// Control: a rotating source with no identity.
 		{name: "drop-only, no identity", id: ""},
 		{name: "drop-only, rotating as source A, ProtectUnarchived", id: "source-a", protect: true},
 		{name: "archiving, rotating as source A", id: "source-a", archive: true},
