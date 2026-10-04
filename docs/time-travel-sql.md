@@ -90,7 +90,7 @@ mysql> SHOW TABLES;                          -- the views in the current schema
 mysql> SHOW COLUMNS FROM orders;
 mysql> SELECT status, count(*) FROM orders GROUP BY 1;
 mysql> SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 20;
-mysql> SELECT count(*) FROM events WHERE table_name = 'orders';
+mysql> SELECT count(*) FROM events WHERE table_name = 'orders';   -- only with the change log on local disk, see below
 ```
 
 What to know before relying on it:
@@ -101,6 +101,21 @@ What to know before relying on it:
   `strftime`, `string_agg` and double quotes are. `USE <schema>` works and sets
   where unqualified names resolve; the connection starts in the server's
   source database when the registry knows it.
+- **`events` needs the change log on local disk, and the bundled stack keeps
+  it in S3.** `watch` uploads each archived hour to the server's S3 location
+  and removes the local file once the upload is confirmed, so on that stack a
+  statement that reads `events` is normally refused with an error that says
+  so. (An hour whose upload has not been confirmed is still on local disk;
+  while one is, `events` answers from those hours alone.) The tables are not
+  affected. What to use
+  instead: for one row's history, `_diff` on this same connection
+  (`SELECT * FROM _diff.orders BETWEEN '2026-05-01' AND '2026-05-02' WHERE id = 12345`),
+  which reads the archives in S3; for counts and grouping over the whole
+  history, your own DuckDB reading the bucket, with a `views.sql` downloaded
+  with **Include the change log** and **Works on another machine** ticked
+  ([Dashboards](dashboards.md)). With read routing on, an ordinary
+  statement is planned on MySQL first, so `events` there means a table of
+  that name on the source, never the change log.
 - **Tested with the `mysql` command-line client.** A graphical client
   (DBeaver, Workbench) probes `information_schema` the MySQL way and may show
   an incomplete table tree; that has not been tested.

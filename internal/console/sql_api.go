@@ -325,7 +325,8 @@ type sqlInfoResponse struct {
 	Views []string `json:"views"`
 	// Notes name the tables listed under another name or not at all, and
 	// why (#2013): a table in a schema DuckDB keeps for itself has no view,
-	// and without this the list would just be one table short.
+	// and without this the list would just be one table short. The same for
+	// events when the change log is in S3 (#2028).
 	Notes         []string     `json:"notes,omitempty"`
 	CopyUpdatedAt *time.Time   `json:"copy_updated_at"`
 	Limits        sqlLimitsDTO `json:"limits"`
@@ -383,7 +384,12 @@ func (s *Server) handleSQLInfo(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusConflict, sqlCopyNotLocalMessage)
 		return
 	}
-	resp := sqlInfoResponse{Views: names, Notes: in.NamingNotes(), Limits: sqlLimitsDTO{
+	notes := in.NamingNotes()
+	if len(in.ArchiveSources) > 0 && !eventsLocal {
+		// There is a change log and it is not offered: say where it is.
+		notes = append(notes, sqlEventsInS3Note)
+	}
+	resp := sqlInfoResponse{Views: names, Notes: notes, Limits: sqlLimitsDTO{
 		TimeoutSeconds: int(s.sqlLimits.Timeout / time.Second),
 		MaxRows:        s.sqlLimits.MaxRows,
 		MaxCellBytes:   sqlsandbox.MaxCellBytes,
@@ -894,8 +900,20 @@ func (s *Server) sqlViewsFor(ctx context.Context, b *bundle, statement string) (
 var sqlEventsMissing = regexp.MustCompile(`(?i)table with name "?events"? does not exist`)
 
 // sqlEventsInS3Message answers a statement that reads events on a server
-// whose change log is in S3.
-const sqlEventsInS3Message = "the change history for this server is on S3, so events cannot be read here; the tables can"
+// whose change log is in S3, which is every server of the bundled stack:
+// rotation removes the local file once the upload is confirmed (#2028). It
+// names what does answer: the Events page for one row, the person's own
+// DuckDB for the whole history. The port has its own wording
+// (sqlEventsInS3PortMessage): a MySQL client has no page to open.
+const sqlEventsInS3Message = "the change history for this server is on S3, so events cannot be read here; the tables can. " +
+	"For one row's history, open the Events page. " +
+	"To query the whole history, download a DuckDB schema with the change log included (Settings, MCP Server) and run it in your own DuckDB"
+
+// sqlEventsInS3Note is the same fact on GET /api/sql, under the list of
+// tables: without it the list is one name short and reads as "this server
+// has no change log".
+const sqlEventsInS3Note = "events, the change log, is not listed: this server's change history is on S3. " +
+	"The Events page shows a row's history. Your own DuckDB reads all of it: Settings, MCP Server, Download a DuckDB schema."
 
 // sqlWorkerFailedMessage replaces a WorkerError on every wire: its text can
 // carry host paths, so the log gets it and the client gets this.
