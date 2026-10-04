@@ -55,7 +55,7 @@ SET enable_http_metadata_cache = true;
 -- DuckDB 1.5 or newer; an older DuckDB reads one file here and loads the
 -- views at its usual pace. If this fails naming a file, that file was removed
 -- after this file was written: generate it again.
-SET VARIABLE bintrail_prefetch_all = (SELECT count(*) > 0 FROM duckdb_settings() WHERE name = 'validate_external_file_cache');
+SET VARIABLE bintrail_prefetch_all = (SELECT count(*) = 2 FROM duckdb_settings() WHERE name = 'validate_external_file_cache' OR (name = 'enable_external_file_cache' AND lower(value) = 'true'));
 SET VARIABLE bintrail_footers_read = (SELECT count(*) FROM parquet_file_metadata(CASE WHEN getvariable('bintrail_prefetch_all') THEN [
   's3://my-bucket/baselines/2026-04-30T03-00-00Z/Legacy-DB/Audit Log.parquet',
   's3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/ORDER_ITEMS.parquet',

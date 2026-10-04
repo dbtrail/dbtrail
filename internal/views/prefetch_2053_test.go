@@ -21,6 +21,7 @@ func prefetchInput() Input {
 					{Seq: 1, SeqLo: 1, Posdel: snap + "shop/orders.000001.posdel", Upserts: snap + "shop/orders.000001.upserts"},
 				}},
 			{Schema: "shop", Table: "items", Path: snap + "shop/items.parquet", Rel: "shop/items.parquet"},
+			{Schema: "shop", Table: "odd", Path: snap + "shop/log[2024].parquet", Rel: "shop/log[2024].parquet"},
 			{Schema: "shop", Table: "legacy", Path: snap + "shop/legacy.parquet", Rel: "shop/legacy.parquet",
 				Delta: true, DeltaLegacy: true},
 		},
@@ -35,7 +36,7 @@ func TestFooterPrefetch_namesEveryFileTheViewsOpen_2053(t *testing.T) {
 	snap := "s3://b/base/2026-04-30T03-00-00Z/shop/"
 	want := []string{
 		snap + "orders.parquet", snap + "orders.000000.posdel", snap + "orders.000000.upserts",
-		snap + "orders.000001.posdel", snap + "orders.000001.upserts",
+		snap + "orders.000001.upserts",
 		snap + "items.parquet", snap + "legacy.parquet",
 	}
 	if got := prefetchFiles(in); !slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(want))) {
@@ -49,6 +50,12 @@ func TestFooterPrefetch_namesEveryFileTheViewsOpen_2053(t *testing.T) {
 	}
 	// Every literal file a view names is in the prefetch list.
 	list := sql[pre:strings.Index(sql[pre:], "] ELSE")+pre]
+	if strings.Contains(list, "log[2024]") {
+		t.Error("a path with a glob character is prefetched; it would abort the file before any view")
+	}
+	if strings.Contains(list, "orders.000001.posdel") {
+		t.Error("a second posdel file is prefetched; the bind never opens it")
+	}
 	for _, f := range want {
 		if !strings.Contains(list, "'"+f+"'") {
 			t.Errorf("prefetch list misses %s", f)

@@ -1114,13 +1114,21 @@ const (
 
 // prefetchFiles is every Parquet file the state views below open when they
 // are CREATED, in the order they name them: each table's file and, for a
-// chain named file by file, each posdel and upserts file. A chain read
-// through globs (legacy pairs, an unlisted chain) is left out: a glob is not
-// a file, and those views list it themselves.
+// chain named file by file, every upserts file (read with union_by_name, so
+// each footer is opened) and the FIRST posdel file only (read without it, so
+// the bind opens one; measured in the HTTP log). A chain read through globs
+// (legacy pairs, an unlisted chain) is left out: a glob is not a file.
+//
+// A path holding a glob character is left out too. The views name it the same
+// unescaped way and fail on it at their own statement; listed here, the same
+// failure would come first and cost the reader every view before it.
 func prefetchFiles(in Input) []string {
 	var out []string
 	seen := map[string]bool{}
 	add := func(p string) {
+		if strings.ContainsAny(p, "*?[{") {
+			return
+		}
 		if !seen[p] {
 			seen[p] = true
 			out = append(out, p)
@@ -1130,8 +1138,10 @@ func prefetchFiles(in Input) []string {
 		t := p.table
 		add(t.Path)
 		if t.Delta && !t.DeltaLegacy {
-			for _, f := range t.DeltaFiles {
-				add(f.Posdel)
+			for i, f := range t.DeltaFiles {
+				if i == 0 {
+					add(f.Posdel)
+				}
 				add(f.Upserts)
 			}
 		}
@@ -1145,13 +1155,15 @@ func prefetchFiles(in Input) []string {
 // one view after another, so from outside AWS a 17-table snapshot took 43 s
 // to load (91 files at the internet's round trip). One multi-file read fetches
 // those footers in parallel, and from DuckDB 1.5 on the binds below find them
-// in its external file cache: the same file loads in about 8 s.
+// in its external file cache: the same file loads in 5.6 s.
 //
 // Gated on that version, measured rather than assumed: 1.2 to 1.4 re-read
 // every file at bind anyway, so the prefetch only ADDED its own time (89 s
 // against 50 s), and 1.1 has no parquet_metadata_cache to fall back on. The
 // gate detects validate_external_file_cache, a setting that arrived with the
-// cache the gain comes from, instead of comparing version strings. Older
+// cache the gain comes from, instead of comparing version strings, and also
+// requires that cache to be ON: a 1.5 reader that turned it off pays what 1.4
+// pays. Older
 // readers read the first file only (parquet_file_metadata refuses an empty
 // list), which the first view opens anyway.
 //
@@ -1168,7 +1180,7 @@ func writeFooterPrefetch(b *strings.Builder, in Input) {
 	b.WriteString("-- DuckDB 1.5 or newer; an older DuckDB reads one file here and loads the\n")
 	b.WriteString("-- views at its usual pace. If this fails naming a file, that file was removed\n")
 	b.WriteString("-- after this file was written: generate it again.\n")
-	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT count(*) > 0 FROM duckdb_settings() WHERE name = 'validate_external_file_cache');\n", all)
+	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT count(*) = 2 FROM duckdb_settings() WHERE name = 'validate_external_file_cache' OR (name = 'enable_external_file_cache' AND lower(value) = 'true'));\n", all)
 	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT count(*) FROM parquet_file_metadata(CASE WHEN getvariable('%s') THEN [\n", read, all)
 	for i, f := range files {
 		sep := ","
