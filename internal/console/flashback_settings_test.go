@@ -20,12 +20,24 @@ import (
 type fakeFlashbackControl struct {
 	calls []string
 	fail  map[string]error
+	addr  string
+	// lose: a refused Apply also costs the address the port was on.
+	lose bool
 }
 
 func (f *fakeFlashbackControl) Apply(listen string) error {
 	f.calls = append(f.calls, listen)
-	return f.fail[listen]
+	if err := f.fail[listen]; err != nil {
+		if f.lose {
+			f.addr = ""
+		}
+		return err
+	}
+	f.addr = listen
+	return nil
 }
+
+func (f *fakeFlashbackControl) Listening() string { return f.addr }
 
 const fbTok = "secret-tok"
 
@@ -282,12 +294,14 @@ func TestFlashbackManage_AddressRefused(t *testing.T) {
 // TestFlashbackManage_SaveFails: a port that opened but could not be saved is
 // closed again; one that a restart would silently drop must not stay open.
 func TestFlashbackManage_SaveFails(t *testing.T) {
-	dir := t.TempDir()
-	blocker := filepath.Join(dir, "state")
-	if err := os.WriteFile(blocker, []byte("a file where the directory should be"), 0o600); err != nil {
+	// A directory nothing can be created in: the setting reads as never
+	// saved, and saving it fails.
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(dir, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	s, ctl, _ := newManagedFlashback(t, Config{FlashbackPath: filepath.Join(blocker, FlashbackFileName)})
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	s, ctl, _ := newManagedFlashback(t, Config{FlashbackPath: filepath.Join(dir, FlashbackFileName)})
 	code, _, raw := doFlashback(t, s, "PUT", "/api/flashback", `{"enabled":true}`)
 	if code != 500 {
 		t.Fatalf("unsaveable setting = %d %s, want 500", code, raw)
@@ -407,10 +421,21 @@ func TestManageFlashback_AtStartup(t *testing.T) {
 			t.Fatalf("calls %v, passwords %v; a port with no password must not open", ctl.calls, s.FlashbackPasswords())
 		}
 	})
-	t.Run("unreadable setting is reported", func(t *testing.T) {
-		_, ctl, got := boot(t, write(t, "{not yaml"), nil)
-		if len(ctl.calls) != 0 || got["error"] == nil {
+	t.Run("unreadable setting is reported and never overwritten", func(t *testing.T) {
+		path := write(t, "{not yaml")
+		s, ctl, got := boot(t, path, nil)
+		if len(ctl.calls) != 0 || got["error"] == nil || got["can_manage"] != false {
 			t.Fatalf("calls %v, status %v", ctl.calls, got)
+		}
+		for _, h := range []func(http.ResponseWriter, *http.Request){s.handleFlashbackPut, s.handleFlashbackPassword} {
+			rec := httptest.NewRecorder()
+			h(rec, httptest.NewRequest("PUT", "http://127.0.0.1:8090/api/flashback", strings.NewReader(`{"enabled":true}`)))
+			if rec.Code != 409 || !strings.Contains(rec.Body.String(), "could not be read") {
+				t.Fatalf("change over an unreadable file = %d %s, want 409", rec.Code, rec.Body.String())
+			}
+		}
+		if body, _ := os.ReadFile(path); string(body) != "{not yaml" {
+			t.Fatalf("the unreadable file was replaced: %q", body)
 		}
 	})
 	t.Run("written by a newer version: honoured, not changeable", func(t *testing.T) {
@@ -451,4 +476,100 @@ func TestFlashbackManage_RefusesDataRestrictedSession(t *testing.T) {
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the settings file was written (%v)", err)
 	}
+}
+
+// TestFlashbackManage_WhileOn: the same two failures with the port already
+// up. The status must follow what the port really did.
+func TestFlashbackManage_WhileOn(t *testing.T) {
+	on := func(t *testing.T, cfg Config) (*Server, *fakeFlashbackControl, string) {
+		s, ctl, path := newManagedFlashback(t, cfg)
+		if code, _, raw := doFlashback(t, s, "PUT", "/api/flashback", `{"enabled":true}`); code != 200 {
+			t.Fatalf("setup: %d %s", code, raw)
+		}
+		return s, ctl, path
+	}
+	status := func(t *testing.T, s *Server) map[string]any {
+		_, got, _ := doFlashback(t, s, "GET", "/api/flashback", "")
+		return got
+	}
+
+	t.Run("a refused move keeps the port and the setting", func(t *testing.T) {
+		s, ctl, path := on(t, Config{})
+		ctl.fail["127.0.0.1:3310"] = errors.New("cannot bind 127.0.0.1:3310: address already in use")
+		if code, _, raw := doFlashback(t, s, "PUT", "/api/flashback", `{"enabled":true,"listen":"127.0.0.1:3310"}`); code != 409 {
+			t.Fatalf("refused move = %d %s", code, raw)
+		}
+		got := status(t, s)
+		if got["enabled"] != true || got["listen"] != "127.0.0.1:3309" || got["error"] != nil {
+			t.Fatalf("status = %v; want still on 3309 with no error", got)
+		}
+		if f, _ := LoadFlashbackFile(path); f.Listen != "127.0.0.1:3309" || !f.Enabled {
+			t.Fatalf("saved = %+v", f)
+		}
+	})
+	t.Run("a refused move that also lost the old address says off", func(t *testing.T) {
+		s, ctl, _ := on(t, Config{})
+		ctl.fail["0.0.0.0:3309"] = errors.New("cannot bind 0.0.0.0:3309: address already in use")
+		ctl.lose = true
+		if code, _, raw := doFlashback(t, s, "PUT", "/api/flashback", `{"enabled":true,"listen":"0.0.0.0:3309"}`); code != 409 {
+			t.Fatalf("refused move = %d %s", code, raw)
+		}
+		got := status(t, s)
+		if got["enabled"] != false || got["error"] == nil {
+			t.Fatalf("status = %v; the port is closed, so it must say off and why", got)
+		}
+	})
+	t.Run("a move that cannot be saved goes back", func(t *testing.T) {
+		s, ctl, path := on(t, Config{})
+		// The directory turns read-only: the next save cannot create its temp file.
+		if err := os.Chmod(filepath.Dir(path), 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(filepath.Dir(path), 0o700) })
+		if code, _, raw := doFlashback(t, s, "PUT", "/api/flashback", `{"enabled":true,"listen":"127.0.0.1:3310"}`); code != 500 {
+			t.Fatalf("unsaveable move = %d %s", code, raw)
+		}
+		if !slices.Equal(ctl.calls, []string{"127.0.0.1:3309", "127.0.0.1:3310", "127.0.0.1:3309"}) {
+			t.Fatalf("controller calls = %v; want the move undone", ctl.calls)
+		}
+		if got := status(t, s); got["listen"] != "127.0.0.1:3309" || got["enabled"] != true {
+			t.Fatalf("status = %v", got)
+		}
+	})
+	t.Run("a move that can be neither saved nor undone ends closed", func(t *testing.T) {
+		s, ctl, path := on(t, Config{})
+		if err := os.Chmod(filepath.Dir(path), 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(filepath.Dir(path), 0o700) })
+		ctl.calls = nil
+		// The way back is refused once the port has moved.
+		moved := &refuseAfter{fakeFlashbackControl: ctl, refuse: "127.0.0.1:3309"}
+		s.flashback.mu.Lock()
+		s.flashback.control = moved
+		s.flashback.mu.Unlock()
+		if code, _, raw := doFlashback(t, s, "PUT", "/api/flashback", `{"enabled":true,"listen":"127.0.0.1:3310"}`); code != 500 {
+			t.Fatalf("unsaveable move = %d %s", code, raw)
+		}
+		if ctl.addr != "" {
+			t.Fatalf("the port is left open on %q, an address neither the file nor the status names", ctl.addr)
+		}
+		if got := status(t, s); got["enabled"] != false || got["error"] == nil {
+			t.Fatalf("status = %v; want off, with the reason", got)
+		}
+	})
+}
+
+// refuseAfter refuses one address, as a port that was taken meanwhile would.
+type refuseAfter struct {
+	*fakeFlashbackControl
+	refuse string
+}
+
+func (r *refuseAfter) Apply(listen string) error {
+	if listen == r.refuse {
+		r.calls = append(r.calls, listen)
+		return errors.New("cannot bind " + listen + ": address already in use")
+	}
+	return r.fakeFlashbackControl.Apply(listen)
 }

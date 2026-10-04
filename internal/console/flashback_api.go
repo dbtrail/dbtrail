@@ -109,7 +109,7 @@ func (s *Server) flashbackStatus() flashbackStatusDTO {
 	fb := &s.flashback
 	fb.mu.Lock()
 	listen, startup := fb.listen, fb.startup
-	manageable := !startup && fb.control != nil && fb.path != "" && !fb.saved.readOnly
+	manageable := !startup && fb.control != nil && fb.path != "" && !fb.saved.readOnly && fb.loadErr == ""
 	saved, lastErr := fb.saved, fb.lastErr
 	fb.mu.Unlock()
 
@@ -175,6 +175,8 @@ func (s *Server) flashbackManageable() (path string, control FlashbackController
 		return "", nil, saved, "", "this console does not run the MySQL port"
 	case fb.saved.readOnly:
 		return "", nil, saved, "", ErrFlashbackFileReadOnly.Error()
+	case fb.loadErr != "":
+		return "", nil, saved, "", "the MySQL port's settings file could not be read, so it is not changed: " + fb.loadErr + ". Fix or remove the file and restart DBTrail."
 	}
 	return fb.path, fb.control, fb.saved, fb.listen, ""
 }
@@ -232,12 +234,11 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if err := control.Apply(""); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "the port is saved as off but could not be closed: "+err.Error())
-			return
-		}
+		// Closing cannot fail; the address is read back all the same, so the
+		// status never names a port on trust.
+		_ = control.Apply("")
 		fb.mu.Lock()
-		fb.saved, fb.listen, fb.lastErr = next, "", ""
+		fb.saved, fb.listen, fb.lastErr = next, control.Listening(), ""
 		fb.mu.Unlock()
 		slog.Info("console: MySQL port turned off from the web interface")
 		writeJSON(w, http.StatusOK, flashbackChangeDTO{flashbackStatusDTO: s.flashbackStatus()})
@@ -269,9 +270,16 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 	fb.mu.Lock()
 	fb.saved = next
 	fb.mu.Unlock()
+	// restore puts the saved setting back and takes the port's address from
+	// the controller, not from what was asked: a move that was refused can
+	// have cost the old address too (same port number, taken in between).
 	restore := func() {
+		now := control.Listening()
 		fb.mu.Lock()
-		fb.saved = saved
+		fb.saved, fb.listen = saved, now
+		if now != was {
+			fb.lastErr = "the port was on " + was + " and could not be put back there"
+		}
 		fb.mu.Unlock()
 	}
 	if err := control.Apply(listen); err != nil {
@@ -280,8 +288,11 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := saveFlashbackFile(path, &next); err != nil {
+		// Back to where it was; if that address is gone, closed. Never left
+		// open on an address neither the file nor the status names.
 		if rerr := control.Apply(was); rerr != nil {
-			slog.Warn("console: MySQL port could not be put back after a failed save", "listen", was, "error", rerr)
+			slog.Warn("console: MySQL port could not be put back after a failed save; it is closed", "listen", was, "error", rerr)
+			_ = control.Apply("")
 		}
 		restore()
 		writeJSONError(w, http.StatusInternalServerError, err.Error())

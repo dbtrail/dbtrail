@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -124,6 +125,13 @@ func saveFlashbackFile(path string, f *FlashbackFile) error {
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		return fmt.Errorf("replace MySQL port settings %s: %w", path, err)
 	}
+	// Make the rename itself durable. A replaced password that came back
+	// after a power loss would be the old one working again, unannounced.
+	// Best effort: not every platform can sync a directory.
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		d.Close()
+	}
 	return nil
 }
 
@@ -188,8 +196,10 @@ func defaultFlashbackListen(consoleListen string) string {
 // has no port to manage.
 type FlashbackController interface {
 	// Apply makes the port listen on listen, or closes it when listen is
-	// empty. On an error the port is left as it was.
+	// empty. On an error the port is left as it was, when it can be.
 	Apply(listen string) error
+	// Listening is the address the port serves on now; empty = closed.
+	Listening() string
 }
 
 // flashbackState is the server's live view of the port.
@@ -213,6 +223,10 @@ type flashbackState struct {
 	saved   FlashbackFile
 	// lastErr is why a port saved as on is not up.
 	lastErr string
+	// loadErr: the settings file is there and could not be read. Nothing is
+	// changed until it is fixed or removed: saving would replace a file this
+	// process never saw the contents of, a password included.
+	loadErr string
 }
 
 // FlashbackPasswords returns every password that authenticates the MySQL
@@ -252,7 +266,10 @@ func (s *Server) ManageFlashback(control FlashbackController) {
 	}
 	f, err := LoadFlashbackFile(path)
 	if err != nil {
-		s.setFlashbackError(err.Error())
+		slog.Warn("console: the MySQL port's saved setting could not be read; the port stays off and cannot be changed in the web interface until the file is fixed or removed", "path", path, "error", err)
+		fb.mu.Lock()
+		fb.lastErr, fb.loadErr = err.Error(), err.Error()
+		fb.mu.Unlock()
 		return
 	}
 	fb.mu.Lock()
@@ -262,6 +279,7 @@ func (s *Server) ManageFlashback(control FlashbackController) {
 		return
 	}
 	if err := control.Apply(f.Listen); err != nil {
+		slog.Warn("console: the MySQL port is saved as on and could not be opened; it stays off", "listen", f.Listen, "error", err)
 		s.setFlashbackError(err.Error())
 		return
 	}

@@ -536,13 +536,16 @@ type flashbackControl struct {
 	bound  net.Addr
 	cancel context.CancelFunc
 	done   chan struct{}
+	// draining: runs told to stop whose connections outlasted the wait.
+	draining []chan struct{}
 }
 
 // Apply makes the port listen on listen, or closes it when listen is empty.
 // The new address is bound before the old one is given up, so a refused
-// address leaves the port as it was. The one case that cannot be done in that
-// order is a change of host on the same port number: there the old listener
-// goes first, and comes back if the new one is refused.
+// address leaves the port, and every client connected to it, untouched. The
+// one case that cannot be done in that order is a change of host on the same
+// port number: there the old listener goes first, and comes back if the new
+// one is refused.
 func (c *flashbackControl) Apply(listen string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -550,31 +553,56 @@ func (c *flashbackControl) Apply(listen string) error {
 		return nil
 	}
 	if listen == "" {
-		c.stopLocked()
+		c.stopLocked(flashbackStopWait)
 		return nil
 	}
 	if c.cfgErr != nil {
 		return c.cfgErr
 	}
-	ln, err := net.Listen("tcp", listen)
-	if err != nil && c.addr != "" {
-		was := c.addr
-		c.stopLocked()
-		if ln, err = net.Listen("tcp", listen); err != nil {
+	if was := c.addr; was != "" && samePort(was, listen) {
+		c.stopLocked(flashbackStopWait)
+		ln, err := net.Listen("tcp", listen)
+		if err != nil {
 			if old, oldErr := net.Listen("tcp", was); oldErr == nil {
 				c.serveLocked(was, old)
 			} else {
-				slog.Warn("flashback port could not be reopened on its previous address", "listen", was, "error", oldErr)
+				slog.Warn("flashback port could not be reopened on its previous address; it is closed", "listen", was, "error", oldErr)
 			}
+			return fmt.Errorf("cannot bind %s: %w", listen, err)
 		}
+		c.serveLocked(listen, ln)
+		return nil
 	}
+	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return fmt.Errorf("cannot bind %s: %w", listen, err)
 	}
-	c.stopLocked()
+	c.stopLocked(flashbackStopWait)
 	c.serveLocked(listen, ln)
 	return nil
 }
+
+// Listening is the address the port is serving on now, as it was asked for;
+// empty when it is closed. After a failed Apply this is the truth to report.
+func (c *flashbackControl) Listening() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.addr
+}
+
+// samePort reports two host:port addresses naming the same port number.
+func samePort(a, b string) bool {
+	_, pa, errA := net.SplitHostPort(a)
+	_, pb, errB := net.SplitHostPort(b)
+	return errA == nil && errB == nil && pa == pb
+}
+
+// flashbackStopWait bounds how long a change made from the web interface
+// waits for the old port's connections to end. Cancelling closes the listener
+// and every socket at once; the wait is for statements to notice. One that
+// does not must not hold the request, and the changes queued behind it, for
+// as long as it runs. Shutdown waits without a bound (Close).
+const flashbackStopWait = 10 * time.Second
 
 func (c *flashbackControl) serveLocked(addr string, ln net.Listener) {
 	ctx, cancel := context.WithCancel(c.ctx)
@@ -588,13 +616,28 @@ func (c *flashbackControl) serveLocked(addr string, ln net.Listener) {
 	c.addr, c.bound, c.cancel, c.done = addr, ln.Addr(), cancel, done
 }
 
-func (c *flashbackControl) stopLocked() {
+// stopLocked closes the port and waits up to wait for its connections (0 =
+// until they are gone). A run still draining when the wait ends is kept for
+// Close to wait on.
+func (c *flashbackControl) stopLocked(wait time.Duration) {
 	if c.cancel == nil {
 		return
 	}
 	c.cancel()
-	<-c.done
+	done := c.done
 	c.addr, c.bound, c.cancel, c.done = "", nil, nil, nil
+	if wait <= 0 {
+		<-done
+		return
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+		slog.Warn("flashback port closed; some of its connections are still ending", "waited", wait)
+		c.draining = append(c.draining, done)
+	}
 }
 
 // Close stops the port and waits for its connections: the daemon's shutdown
@@ -602,7 +645,11 @@ func (c *flashbackControl) stopLocked() {
 func (c *flashbackControl) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.stopLocked()
+	c.stopLocked(0)
+	for _, d := range c.draining {
+		<-d
+	}
+	c.draining = nil
 }
 
 // boundAddr is the address actually listened on (an ephemeral port resolved).

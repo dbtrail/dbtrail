@@ -91,14 +91,42 @@ func TestFlashbackControl_RefusedAddressKeepsThePort(t *testing.T) {
 	if err := c.Apply(a); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Apply(taken.Addr().String()); err == nil {
-		t.Fatal("a taken address was accepted")
+	// A client connected before the refusals must still be connected after:
+	// "still accepting" alone would also be true of a port torn down and
+	// rebuilt, which drops everyone on it.
+	held, err := net.Dial("tcp", a)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !accepts(a) {
-		t.Fatal("the port was lost when a new address was refused")
+	defer held.Close()
+	greeting := make([]byte, 1)
+	if _, err := held.Read(greeting); err != nil {
+		t.Fatalf("no handshake greeting from the port: %v", err)
 	}
-	if err := c.Apply("not-an-address"); err == nil || !accepts(a) {
-		t.Fatalf("a malformed address: err %v, port still accepting %v", err, accepts(a))
+	c.mu.Lock()
+	run := c.done
+	c.mu.Unlock()
+	for _, bad := range []string{taken.Addr().String(), "not-an-address"} {
+		if err := c.Apply(bad); err == nil {
+			t.Fatalf("%q was accepted", bad)
+		}
+		c.mu.Lock()
+		same := c.done == run
+		c.mu.Unlock()
+		if !same || c.Listening() != a || !accepts(a) {
+			t.Fatalf("after refusing %q: same run %v, listening on %q; a refused address must leave the port untouched", bad, same, c.Listening())
+		}
+	}
+	// Read past the rest of the greeting: an open connection then goes quiet
+	// (a timeout); a dropped one ends (EOF or a reset).
+	_ = held.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	var rerr error
+	for buf := make([]byte, 256); rerr == nil; {
+		_, rerr = held.Read(buf)
+	}
+	var ne net.Error
+	if !errors.As(rerr, &ne) || !ne.Timeout() {
+		t.Fatalf("the client connected before the refusals was dropped (read: %v)", rerr)
 	}
 }
 
@@ -225,6 +253,25 @@ func TestFlashbackTurnedOnFromTheWebInterface(t *testing.T) {
 	if accepts(addr) {
 		t.Fatal("the port outlived the daemon")
 	}
+	// A daemon with no token at all: the saved password is the only thing
+	// that opens the port, and it does.
+	bare, err := console.New(console.Config{Listen: "127.0.0.1:0", FlashbackPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bareCtx, bareCancel := context.WithCancel(context.Background())
+	bareStop, err := startFlashbackPort(bareCtx, bare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := mysqlLogin(t, addr, pw2); c == gomysql.ER_ACCESS_DENIED_ERROR {
+		t.Fatal("with no token, the saved password was refused")
+	}
+	if c := mysqlLogin(t, addr, ""); c != gomysql.ER_ACCESS_DENIED_ERROR {
+		t.Fatalf("with no token, an empty password: code %d, want access denied", c)
+	}
+	bareCancel()
+	bareStop()
 	srv, shutdown = start(t)
 	if c := mysqlLogin(t, addr, pw2); c == gomysql.ER_ACCESS_DENIED_ERROR {
 		t.Fatal("after a restart the saved password was refused")
