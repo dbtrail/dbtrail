@@ -142,7 +142,7 @@ var vetoes = []struct {
 	re   *regexp.Regexp
 }{
 	{"GROUP_CONCAT", regexp.MustCompile(`(?i)\bgroup_concat\s*\(`)}, // MySQL cuts at group_concat_max_len
-	{"NOW/CURDATE/CURTIME/CURRENT_TIMESTAMP", regexp.MustCompile(`(?i)\b(now|curdate|curtime|current_timestamp|current_date|current_time|sysdate|utc_timestamp|localtime|localtimestamp)\b`)}, // MySQL session time zone
+	{"NOW/CURDATE/CURTIME/CURRENT_TIMESTAMP", regexp.MustCompile(`(?i)\b(now|curdate|curtime|current_timestamp|current_date|current_time|sysdate|utc_timestamp|utc_date|utc_time|unix_timestamp|localtime|localtimestamp)\b`)}, // MySQL session time zone
 	{"STR_TO_DATE", regexp.MustCompile(`(?i)\bstr_to_date\s*\(`)},                                  // NULL in MySQL, error in DuckDB on a bad date
 	{"TIMESTAMPDIFF/DATEDIFF", regexp.MustCompile(`(?i)\b(timestampdiff|datediff|timediff)\s*\(`)}, // day counting differs
 	{"COLLATE", regexp.MustCompile(`(?i)\bcollate\b`)},                                             // collations do not exist on the copy
@@ -183,6 +183,14 @@ func Veto(stmt string) string {
 		}
 	}
 	return ""
+}
+
+// Scrub is scrub for other packages: the statement with comments removed
+// and string literals blanked, for structural checks such as "is there an
+// ORDER BY at the top level".
+func Scrub(stmt string) string {
+	s, _ := scrub(stmt)
+	return s
 }
 
 // scrub returns the statement with its comments removed (`/* */`, `-- `,

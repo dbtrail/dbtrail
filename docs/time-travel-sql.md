@@ -275,6 +275,49 @@ while a durable S3 copy remains, use the web interface's Time-travel tab or a st
 shim pointed at the S3 prefix for those tables. Single-source baseline configs —
 the common case — have full parity.
 
+#### Finding where the copy answers differently: `sql-compare`
+Before turning routing on for a workload, play that workload through both
+sides and read the differences:
+
+```
+bintrail-console sql-compare \
+  --source-dsn 'app:pw@tcp(db.internal:3306)/shop' \
+  --copy-dsn   '<server id or name>:<token>@tcp(127.0.0.1:3308)/shop' \
+  --sample 200            # or --statements queries.sql (';'-terminated)
+```
+
+`--copy-dsn` is this port with routing **off**, so every statement runs on
+the copy; `--sample N` takes the N most recent distinct `SELECT`s the source
+ran (`performance_schema.events_statements_history_long`; the error names
+the consumer to enable when it is off). The command is read-only: anything
+that is not a plain read is skipped before it runs (writes, a `WITH` that
+writes, `SELECT ... INTO`, locking reads, `GET_LOCK`/`SLEEP`/`BENCHMARK`,
+two statements in one line); a stored function with side effects cannot be
+screened by its text, so do not point `--sample` at a workload that calls
+one. The run refuses to start when the copy port has read routing on (it
+would be comparing MySQL with MySQL), and exits 1 when no statement reached
+a comparison at all.
+
+Per statement it prints `EQUAL`, `DIFFERENT` (and how: `rows`, `order`,
+`case`, `null`, `precision`, `text`, with the first differing cell),
+`NOT_ON_COPY` (the copy refused it: the router would forward it),
+`SOURCE_ERROR`, `INCONCLUSIVE` (the copy cut the result at its cap, the
+source returned more than `--max-rows`, or the source's own answer changed
+between two reads: a live write, not a difference) or `SKIPPED`, plus what
+the router would do with it and why. The number that matters is the last
+line: statements the router **would send to the copy** that answer
+differently. Each is a veto to add or a difference to document; the command
+exits 1 when there is at least one. `--format json` for scripts.
+
+The copy answers from its last snapshot, so run this on a quiet source or
+right after a snapshot: a copy that is behind the source shows up as a
+`DIFFERENT`, since the tool does not model the port's copy-age check (nor
+its "inside a transaction" and "after a SET" forwarding). A table written
+DURING the run shows up as `INCONCLUSIVE: source changed`. Same rows in a
+different order are counted apart and never fail the run: ties in an `ORDER
+BY` resolve differently on each engine, and so does a collation difference
+in the sort key; read those by hand.
+
 ### The dedicated terminal
 
 **With the Docker Compose stack**, the shim ships as the opt-in `flashback`
