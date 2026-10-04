@@ -927,9 +927,9 @@ const sqlEventsInS3Note = "events, the change log, is not listed: this server's 
 
 // sqlEventsLookupFailedMessage answers a statement that reads events when
 // the archive registry could not be read (#2078), so the view was not
-// installed and nothing here knows where the change log is. The cause stays
-// in the log, where consoleArchiveSources wrote it: the error text can carry
-// the index's host and user, which this answer must not.
+// installed and nothing here knows where the change log is. The cause is in
+// the log, where consoleArchiveSources wrote it; this answer does not repeat
+// it.
 const sqlEventsLookupFailedMessage = "where the change history for this server is kept could not be read, so events cannot be read; the tables can. DBTrail's log has the reason"
 
 // sqlEventsLookupFailedNote is the same fact under the list of tables.
