@@ -157,7 +157,7 @@ var (
 // one runner. Observed only for a statement that RAN to a result; a busy
 // refusal or a failed statement has no complete set of phases, and mixing
 // partial ones in would pull every quantile toward zero. The phase label is a
-// fixed set (view_build, spawn, open, lockdown, views, query, decode, total;
+// fixed set (slot_wait, view_build, spawn, open, lockdown, views, query, decode, total;
 // spawn contains open, lockdown, views and query), so the cardinality is
 // bounded. No server or user label on purpose: one series per phase answers
 // "where does the time go on this daemon" without growing with the registry.
@@ -165,7 +165,7 @@ var sqlStatementPhase = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Namespace: "bintrail",
 	Subsystem: "sql",
 	Name:      "statement_phase_seconds",
-	Help:      "Seconds per phase of a SQL-on-the-copy statement that ran to a result (view_build, spawn, open, lockdown, views, query, decode, total).",
+	Help:      "Seconds per phase of a SQL-on-the-copy statement that ran to a result (slot_wait, view_build, spawn, open, lockdown, views, query, decode, total).",
 	Buckets:   prometheus.ExponentialBuckets(0.001, 2, 17), // 1ms … ~65s; a statement past the 60s cap fails and is not observed
 }, []string{"phase"})
 

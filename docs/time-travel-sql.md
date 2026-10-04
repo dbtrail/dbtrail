@@ -108,9 +108,12 @@ What to know before relying on it:
   (`--sql-max-in-flight` raises it on a host with cores to spare), shared between
   the SQL card and this port, and **one at a time per server on this port**:
   two people querying the same server at the same moment means the second one
-  gets MySQL error 1203 ("a query is already running") at once, not a wait.
-  The daemon that serves them is the one capturing changes, which is why the
-  limits are small and a third statement is refused rather than queued. A
+  waits for the first to finish. A statement waits up to 30 seconds for its
+  slot and then gets MySQL error 1203 ("SQL on the copy is busy"); with 16
+  statements already waiting it gets 1203 at once. A client that disconnects
+  while waiting, or while its statement runs, leaves at once and frees its
+  place. The daemon that serves them is the one capturing changes, which is
+  why the limits are small. A
   statement past 2 GB fails instead of spilling to disk. For a team or a
   dashboard tool, each reader's own DuckDB on the bucket is the way to scale
   reads (see [Dashboards](dashboards.md)): it runs on the reader's machine and

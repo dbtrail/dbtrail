@@ -55,7 +55,7 @@ import (
 // FIRST (#2026): the views are built after it, so a statement refused as
 // busy has read nothing from the index and nothing from the copy.
 type sqlRunner interface {
-	Reserve(user string) (sqlSlot, error)
+	Reserve(ctx context.Context, user string) (sqlSlot, error)
 }
 
 // sqlSlot is one reserved worker slot: Run serves one job and releases it,
@@ -69,8 +69,8 @@ type sqlSlot interface {
 // the concrete *sqlsandbox.Slot).
 type sandboxRunner struct{ r *sqlsandbox.Runner }
 
-func (a sandboxRunner) Reserve(user string) (sqlSlot, error) {
-	slot, err := a.r.Reserve(user)
+func (a sandboxRunner) Reserve(ctx context.Context, user string) (sqlSlot, error) {
+	slot, err := a.r.Reserve(ctx, user)
 	if err != nil {
 		return nil, err
 	}
@@ -107,17 +107,17 @@ type sqlResponse struct {
 
 // sqlPhases names a statement's phases once, for the response, the log
 // and the histogram, so the three cannot disagree on a key.
-func sqlPhases(viewBuild time.Duration, p sqlsandbox.Phases) map[string]time.Duration {
+func sqlPhases(slotWait, viewBuild time.Duration, p sqlsandbox.Phases) map[string]time.Duration {
 	return map[string]time.Duration{
-		"view_build": viewBuild, "spawn": p.Spawn, "open": p.Open, "lockdown": p.Lockdown,
+		"slot_wait": slotWait, "view_build": viewBuild, "spawn": p.Spawn, "open": p.Open, "lockdown": p.Lockdown,
 		"views": p.Views, "query": p.Query, "decode": p.Decode, "total": p.Total,
 	}
 }
 
 // sqlPhasesMS renders the phases for the response and the log.
-func sqlPhasesMS(viewBuild time.Duration, p sqlsandbox.Phases) map[string]float64 {
+func sqlPhasesMS(slotWait, viewBuild time.Duration, p sqlsandbox.Phases) map[string]float64 {
 	out := map[string]float64{}
-	for k, d := range sqlPhases(viewBuild, p) {
+	for k, d := range sqlPhases(slotWait, viewBuild, p) {
 		out[k] = float64(d.Microseconds()) / 1000
 	}
 	return out
@@ -440,7 +440,7 @@ func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, sqlResponse{
 			Columns: res.Columns, Rows: res.Rows, Truncated: res.Truncated,
 			TruncatedCells: res.TruncatedCells, ElapsedMS: res.Elapsed.Milliseconds(),
-			CopyUpdatedAt: copyUpdatedAt, PhasesMS: sqlPhasesMS(out.ViewBuild, res.Phases),
+			CopyUpdatedAt: copyUpdatedAt, PhasesMS: sqlPhasesMS(out.SlotWait, out.ViewBuild, res.Phases),
 		})
 	}
 	// After the response, like the events surface: the rows were read and
@@ -481,6 +481,8 @@ type sqlOutcome struct {
 	// discovery, the archive reads when the statement names events, and the
 	// views script. The sandbox's phases are in Result.Phases.
 	ViewBuild time.Duration
+	// SlotWait is how long the statement waited for a worker slot (#2033).
+	SlotWait time.Duration
 }
 
 // runSQL is POST /api/sql without the HTTP: the gates that need the copy
@@ -503,10 +505,12 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 	// copy. An unused slot is given back on every early return, and said so
 	// at debug with how long it was held: the slot is one of a few (two by
 	// default), so a build that holds it for long is everybody else's "busy".
-	slot, err := s.sqlRunner.Reserve(user)
+	waitStart := time.Now()
+	slot, err := s.sqlRunner.Reserve(ctx, user)
 	if err != nil {
 		return sqlOutcome{}, err
 	}
+	slotWait := time.Since(waitStart)
 	ran := false
 	viewsStart := time.Now()
 	defer func() {
@@ -590,11 +594,11 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 	// The measurement #2026 asks for, per statement, at debug so a run under
 	// load can be read back from the log.
 	slog.Debug("console: sql statement phases", "user", user, "events", sqlMentionsEvents(statement),
-		"views_sql_bytes", len(viewsSQL), "phases_ms", sqlPhasesMS(viewBuild, res.Phases))
-	for phase, d := range sqlPhases(viewBuild, res.Phases) {
+		"views_sql_bytes", len(viewsSQL), "phases_ms", sqlPhasesMS(slotWait, viewBuild, res.Phases))
+	for phase, d := range sqlPhases(slotWait, viewBuild, res.Phases) {
 		observe.ObserveSQLStatementPhase(phase, d)
 	}
-	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, ViewBuild: viewBuild}, nil
+	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, ViewBuild: viewBuild, SlotWait: slotWait}, nil
 }
 
 // sqlWantedViews decides which of the copy's views a statement needs, from
