@@ -386,7 +386,9 @@ What this is and is not:
     equates it with `и`, which MySQL keeps apart.
   - **Where punctuation sorts.** MySQL sorts every punctuation mark before
     the digits; the copy sorts them by their ASCII code (`:` and `@` after
-    the digits). Letters sort the same.
+    the digits). Plain and accented letters sort the same on both; the
+    characters of the previous point (`ß`, `æ`, `ø`, full-width forms)
+    sort after `z` on the copy and beside their plain letters on MySQL.
   - One DuckDB collation does both of the above as MySQL does
     (`nocase.icu_noaccent`). The copy does not use it because it makes
     every comparison of text about twice as slow.
