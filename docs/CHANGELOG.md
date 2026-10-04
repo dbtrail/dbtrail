@@ -32,6 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the file's header: a snapshot published by a build that does not write the
   pointer, or copied in by hand, is not followed until the pointer moves.
 
+- **A views file pinned to an S3 snapshot opens about five times faster
+  from outside AWS on DuckDB 1.5 or newer** (#2053). Creating the views read
+  each file's footer one after another (91 files, 43 s from a laptop for a
+  17-table snapshot); the file now reads them all in one parallel request
+  first, and creating the views reuses them (8 s). DuckDB 1.1 to 1.4 do not
+  keep those footers between statements, so the file detects the version
+  and loads there exactly as before. Same rows and column types either way.
+
 ### Fixed
 - **The embedded time-travel port notices a client that hangs up in the
   middle of a statement** (#2033). Nothing read the socket while a statement

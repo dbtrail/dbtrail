@@ -42,13 +42,13 @@ func TestFooterPrefetch_namesEveryFileTheViewsOpen_2053(t *testing.T) {
 		t.Errorf("prefetchFiles = %v\nwant %v", got, want)
 	}
 	sql := Generate(in)
-	pre := strings.Index(sql, "parquet_file_metadata([")
+	pre := strings.Index(sql, "parquet_file_metadata(CASE")
 	view := strings.Index(sql, "CREATE OR REPLACE VIEW")
 	if pre < 0 || view < 0 || pre > view {
 		t.Fatalf("prefetch at %d, first view at %d; want the prefetch first", pre, view)
 	}
 	// Every literal file a view names is in the prefetch list.
-	list := sql[pre:strings.Index(sql[pre:], "]));")+pre]
+	list := sql[pre:strings.Index(sql[pre:], "] ELSE")+pre]
 	for _, f := range want {
 		if !strings.Contains(list, "'"+f+"'") {
 			t.Errorf("prefetch list misses %s", f)

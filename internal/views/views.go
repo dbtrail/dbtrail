@@ -1104,9 +1104,13 @@ func writeTimeZone(b *strings.Builder) {
 	b.WriteString("SET TimeZone = 'UTC';\n\n")
 }
 
-// prefetchVar holds the count the footer prefetch returns. Nothing reads it;
-// SET VARIABLE is how the statement runs without printing a row.
-const prefetchVar = "bintrail_footers_read"
+// prefetchVar holds the count the footer prefetch returns, and prefetchAllVar
+// whether this DuckDB is new enough to profit from it. Nothing else reads
+// them; SET VARIABLE is how a statement runs without printing a row.
+const (
+	prefetchVar    = "bintrail_footers_read"
+	prefetchAllVar = "bintrail_prefetch_all"
+)
 
 // prefetchFiles is every Parquet file the state views below open when they
 // are CREATED, in the order they name them: each table's file and, for a
@@ -1140,8 +1144,16 @@ func prefetchFiles(in Input) []string {
 // created, and binding opens each file it names: one HEAD and one footer GET,
 // one view after another, so from outside AWS a 17-table snapshot took 43 s
 // to load (91 files at the internet's round trip). One multi-file read fetches
-// those footers in parallel, and the binds below find them in the caches the
-// statements above turned on, so the same file loads in about 8 s.
+// those footers in parallel, and from DuckDB 1.5 on the binds below find them
+// in its external file cache: the same file loads in about 8 s.
+//
+// Gated on that version, measured rather than assumed: 1.2 to 1.4 re-read
+// every file at bind anyway, so the prefetch only ADDED its own time (89 s
+// against 50 s), and 1.1 has no parquet_metadata_cache to fall back on. The
+// gate detects validate_external_file_cache, a setting that arrived with the
+// cache the gain comes from, instead of comparing version strings. Older
+// readers read the first file only (parquet_file_metadata refuses an empty
+// list), which the first view opens anyway.
 //
 // Only where the HTTP metadata cache is on: without it every bind re-checks
 // each file with a HEAD of its own and the prefetch would buy nothing.
@@ -1150,13 +1162,14 @@ func writeFooterPrefetch(b *strings.Builder, in Input) {
 	if len(files) == 0 {
 		return
 	}
+	all, read := in.sessionName(prefetchAllVar), in.sessionName(prefetchVar)
 	b.WriteString("-- Reads the footer of every file the views below open, all at once, so\n")
-	b.WriteString("-- creating them does not fetch those footers one after another. If this\n")
-	b.WriteString("-- fails naming a file, that file was removed after this file was written:\n")
-	b.WriteString("-- generate it again. Keeping footers covers this whole session, like the\n")
-	b.WriteString("-- setting above; turn it off with RESET parquet_metadata_cache;\n")
-	b.WriteString("SET parquet_metadata_cache = true;\n")
-	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT count(*) FROM parquet_file_metadata([\n", in.sessionName(prefetchVar))
+	b.WriteString("-- creating them does not fetch those footers one after another. That needs\n")
+	b.WriteString("-- DuckDB 1.5 or newer; an older DuckDB reads one file here and loads the\n")
+	b.WriteString("-- views at its usual pace. If this fails naming a file, that file was removed\n")
+	b.WriteString("-- after this file was written: generate it again.\n")
+	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT count(*) > 0 FROM duckdb_settings() WHERE name = 'validate_external_file_cache');\n", all)
+	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT count(*) FROM parquet_file_metadata(CASE WHEN getvariable('%s') THEN [\n", read, all)
 	for i, f := range files {
 		sep := ","
 		if i == len(files)-1 {
@@ -1164,7 +1177,7 @@ func writeFooterPrefetch(b *strings.Builder, in Input) {
 		}
 		fmt.Fprintf(b, "  %s%s\n", sqlString(f), sep)
 	}
-	b.WriteString("]));\n\n")
+	fmt.Fprintf(b, "] ELSE [%s] END));\n\n", sqlString(files[0]))
 }
 
 // cachesHTTPMetadata reports whether the file turns on DuckDB's HTTP metadata
