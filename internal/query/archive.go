@@ -20,7 +20,11 @@ import (
 //
 // Local paths are preferred over S3 when the directory exists on disk AND
 // holds at least one .parquet file — an empty local tree (files pruned after
-// upload) falls back to the S3 copy instead of shadowing it (#383). A
+// upload) falls back to the S3 copy instead of shadowing it (#383) — AND,
+// where an S3 copy is registered too, holds every file the registry names
+// (#2078, see completeCopy): a local base with some of the files is the
+// state `watch` leaves while one hour's upload is unconfirmed, and reading
+// it as the archive drops every hour already uploaded and pruned. A
 // registered source is never omitted from the result: the planner counts
 // archived hours straight from archive_state, so omission would make strict
 // mode (#377) silently miss the coverage hole.
@@ -59,7 +63,29 @@ func ResolveArchiveSources(ctx context.Context, db *sql.DB) ([]string, error) {
 
 		switch {
 		case localUsable:
-			sources = append(sources, localBase)
+			src := localBase
+			if s3Source != "" {
+				// Two copies are registered and the local one holds data:
+				// it is the archive only if it holds ALL of it (#2078).
+				picked, err := completeCopy(ctx, db, bintrailID, localBase, s3Source)
+				if err != nil {
+					return nil, err
+				}
+				switch picked {
+				case copyS3:
+					slog.Debug("local archive base is missing registered files; reading the S3 copy",
+						"bintrail_id", bintrailID, "local_base", localBase, "s3_source", s3Source)
+					src = s3Source
+				case copyNeither:
+					// Nothing this function can hand back names every hour:
+					// one source per registered id is the contract. Keep the
+					// local base, as before, and say so where an operator
+					// looks; `bintrail archive reconcile` is the repair.
+					slog.Warn("neither the local archive base nor the S3 copy holds every registered file; reading the local base, hours missing from it will not be returned",
+						"bintrail_id", bintrailID, "local_base", localBase, "s3_source", s3Source)
+				}
+			}
+			sources = append(sources, src)
 		case s3Source != "":
 			// Warn only for the surprising cases: an UNREADABLE base (a
 			// real local misconfiguration the fallback would otherwise
@@ -194,6 +220,89 @@ func listArchiveRoots(ctx context.Context, db *sql.DB) ([]archiveRoot, error) {
 		return nil, fmt.Errorf("iterate archive_state rows: %w", err)
 	}
 	return roots, nil
+}
+
+// archiveCopy names which registered copy of one source holds every file.
+type archiveCopy int
+
+const (
+	copyLocal   archiveCopy = iota // every registered local file is on disk
+	copyS3                         // local is missing files; every row is registered in S3
+	copyNeither                    // local is missing files, and so is the S3 registration
+)
+
+// completeCopy reads every archive_state row of one source and reports
+// which copy is whole (#2078). It runs only for a source with BOTH a local
+// base that holds data and an S3 location, the one shape where the choice
+// can lose rows: readers glob the base they are handed, and the planner
+// counts hours from archive_state, so neither notices a file that is not
+// there.
+//
+// "Whole" is about the root the caller would hand back, not about the files
+// existing somewhere: readers glob localBase or s3Source and nothing else.
+// Local is whole when every row has a local_path UNDER localBase that is a
+// file on disk. A path that cannot be stat'ed (gone, unreadable, a
+// directory) is a file the reader would not get either; one that is there
+// and cannot be read is logged, since that is a misconfiguration and not a
+// prune. S3 is whole when every row carries a bucket and a key UNDER
+// s3Source; a row still waiting for its upload (s3_uploaded_at NULL)
+// counts, because rotation does not drop a partition whose upload it is
+// waiting for, so those rows are still in the live index.
+//
+// A read failure is returned: guessing either copy here is the silent
+// short read this exists to stop (#383's contract for the registry).
+func completeCopy(ctx context.Context, db *sql.DB, bintrailID, localBase, s3Source string) (archiveCopy, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT local_path, s3_bucket, s3_key FROM archive_state WHERE bintrail_id = ?`, bintrailID)
+	if err != nil {
+		return copyNeither, fmt.Errorf("query archive_state files of %s: %w", bintrailID, err)
+	}
+	defer rows.Close()
+	localWhole, s3Whole := true, true
+	for rows.Next() {
+		var localPath, s3Bucket, s3Key sql.NullString
+		if err := rows.Scan(&localPath, &s3Bucket, &s3Key); err != nil {
+			return copyNeither, fmt.Errorf("scan archive_state file row of %s: %w", bintrailID, err)
+		}
+		if s3Bucket.String == "" || s3Key.String == "" ||
+			"s3://"+s3Bucket.String+"/"+extractBasePath(s3Key.String) != s3Source {
+			s3Whole = false
+		}
+		// One missing file settles the local side; stop paying for stats.
+		if localWhole {
+			localWhole = localFileUnder(localPath.String, localBase, bintrailID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return copyNeither, fmt.Errorf("iterate archive_state file rows of %s: %w", bintrailID, err)
+	}
+	switch {
+	case localWhole:
+		return copyLocal, nil
+	case s3Whole:
+		return copyS3, nil
+	}
+	return copyNeither, nil
+}
+
+// localFileUnder reports whether path is a regular file below base. A file
+// that is there but cannot be reached (EACCES on a parent, a broken mount)
+// answers false like a pruned one, and is logged: the S3 copy then covers
+// for a local problem nobody would otherwise hear about.
+func localFileUnder(path, base, bintrailID string) bool {
+	if !strings.HasPrefix(path, base) || len(path) <= len(base) ||
+		(path[len(base)] != '/' && path[len(base)] != filepath.Separator) {
+		return false
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("a registered local archive file cannot be read; the local archive base is treated as incomplete",
+				"bintrail_id", bintrailID, "path", path, "error", err)
+		}
+		return false
+	}
+	return fi.Mode().IsRegular()
 }
 
 // errFoundParquet is the sentinel localBaseHasParquet uses to stop the walk

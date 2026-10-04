@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **A partial local archive no longer hides the S3 copy** (#2078). Every
+  reader of archived changes (the Events page, the time-travel schemas,
+  recover, SQL on the copy) read the local archive folder whenever it held
+  any file, even when most hours had been uploaded to S3 and removed from
+  disk. That is the state `watch` with an S3 location is in while one hour's
+  upload is unconfirmed, and stays in after a failed upload: reads returned
+  the hours left on disk and nothing else, with no error. The local folder is
+  now used only when it holds every file the index registered; otherwise the
+  S3 copy is read. Where neither holds everything (hours archived before the
+  S3 location was set), the local folder is still read and the log says so.
+  SQL on the copy also says so when it cannot find out where the change log
+  is, instead of DuckDB's "table does not exist".
+
 ### Changed
 - **SQL on the copy says what to use when `events` is in S3** (#2028). On the
   bundled stack the change log is only in S3, so `events` was never readable

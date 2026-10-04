@@ -1642,3 +1642,105 @@ func TestSQL_waitFollowsTheRequest_2033(t *testing.T) {
 		t.Error("cancelling the request did not reach the context Reserve waits on")
 	}
 }
+
+// #2078 on the SQL card: a change log registered on local disk AND in S3,
+// with only some of its files on disk (the state `watch` is in while an
+// hour's upload is unconfirmed), is not a local change log. And a registry
+// that cannot be read is not "no change log".
+func TestSQLAPI_partialLocalChangeLogAndUnreadableRegistry(t *testing.T) {
+	const detailQ = `SELECT local_path, s3_bucket, s3_key FROM archive_state WHERE bintrail_id = \?`
+	key := func(hour string) string {
+		return "arch/bintrail_id=" + sqlArchiveID + "/event_date=2026-05-01/event_hour=" + hour + "/events.parquet"
+	}
+	catalog := &sqlsandbox.QueryError{Message: "Catalog Error: Table with name events does not exist!"}
+	info := func(f *sqlFixture) sqlInfoResponse {
+		t.Helper()
+		w := httptest.NewRecorder()
+		f.s.handleSQLInfo(w, httptest.NewRequest("GET", "/api/sql", nil))
+		var out sqlInfoResponse
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET /api/sql: code=%d body=%s", w.Code, w.Body.String())
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	listsEvents := func(views []string) bool {
+		for _, v := range views {
+			if v == "events" {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, tc := range []struct {
+		name     string
+		missing  bool // an older hour's local file is gone
+		wantNote string
+	}{
+		{name: "one hour pruned after its upload", missing: true, wantNote: sqlEventsInS3Note},
+		{name: "every registered file on disk", missing: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSQLFixture(t, &fakeSQLRunner{err: catalog}, true)
+			onDisk := filepath.Join(f.archiveDir, "event_date=2026-05-01", "event_hour=03", "events.parquet")
+			expect := func() {
+				f.mock.ExpectQuery(`MIN\(local_path\)`).WillReturnRows(
+					sqlmock.NewRows([]string{"bintrail_id", "sample_local", "sample_bucket", "sample_key"}).
+						AddRow(sqlArchiveID, onDisk, "e2e-bucket", key("03")))
+				files := sqlmock.NewRows([]string{"local_path", "s3_bucket", "s3_key"}).AddRow(onDisk, "e2e-bucket", key("03"))
+				if tc.missing {
+					files.AddRow(filepath.Join(f.archiveDir, "event_date=2026-05-01", "event_hour=02", "events.parquet"), "e2e-bucket", key("02"))
+				}
+				f.mock.ExpectQuery(detailQ).WithArgs(sqlArchiveID).WillReturnRows(files)
+			}
+			expect()
+			got := info(f)
+			if listsEvents(got.Views) == tc.missing {
+				t.Errorf("views = %v: events listed = %v, want %v", got.Views, !tc.missing, !tc.missing)
+			}
+			if tc.wantNote == "" && len(got.Notes) != 0 || tc.wantNote != "" && (len(got.Notes) != 1 || got.Notes[0] != tc.wantNote) {
+				t.Errorf("notes = %q, want %q", got.Notes, tc.wantNote)
+			}
+			if !tc.missing {
+				return
+			}
+			expect()
+			w := postSQL(t, f.s, `{"sql":"SELECT count(*) FROM events"}`)
+			if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "on S3, so events cannot be read here") {
+				t.Errorf("events over a partial local change log: code=%d body=%s", w.Code, w.Body.String())
+			}
+			if job := f.runner.last(t); strings.Contains(job.ViewsSQL, f.archiveDir) {
+				t.Errorf("the events view was built over the partial local folder:\n%s", job.ViewsSQL)
+			}
+		})
+	}
+
+	t.Run("the registry cannot be read", func(t *testing.T) {
+		f := newSQLFixture(t, &fakeSQLRunner{err: catalog}, true)
+		denied := errors.New("SELECT command denied to user for table 'archive_state'")
+		f.mock.ExpectQuery(`MIN\(local_path\)`).WillReturnError(denied)
+		got := info(f)
+		if listsEvents(got.Views) || len(got.Notes) != 1 || got.Notes[0] != sqlEventsLookupFailedNote {
+			t.Errorf("listing: views=%v notes=%q, want the tables and the lookup note", got.Views, got.Notes)
+		}
+		f.mock.ExpectQuery(`MIN\(local_path\)`).WillReturnError(denied)
+		w := postSQL(t, f.s, `{"sql":"SELECT count(*) FROM events"}`)
+		if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "could not be read just now, so events cannot be read; the tables can") {
+			t.Errorf("events with an unreadable registry: code=%d body=%s", w.Code, w.Body.String())
+		}
+		for _, leak := range []string{"Catalog Error", "denied", "archive_state"} {
+			if strings.Contains(w.Body.String(), leak) {
+				t.Errorf("the answer carries %q: %s", leak, w.Body.String())
+			}
+		}
+		// A statement on the tables is not touched by any of it.
+		f.runner.err = nil
+		f.runner.res = oneRowResult()
+		if w := postSQL(t, f.s, `{"sql":"SELECT id FROM shop.orders"}`); w.Code != http.StatusOK {
+			t.Errorf("tables with an unreadable registry: code=%d body=%s", w.Code, w.Body.String())
+		}
+	})
+}
