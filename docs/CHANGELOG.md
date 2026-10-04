@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.98.0] - 2026-10-04
 ### Changed
 - **SQL on the copy says what to use when `events` is in S3** (#2028). On the
   bundled stack the change log is only in S3, so `events` was never readable
