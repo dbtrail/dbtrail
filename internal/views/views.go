@@ -506,6 +506,9 @@ func Generate(in Input) string {
 		// baselines are local and whose archives are on S3. The degrade
 		// documented below is about the ATTACH, not about credentials.
 		writeS3Preamble(&b, region, in.S3Endpoint, in.RegionAmbiguous, in.BucketStores)
+		if in.cachesHTTPMetadata() {
+			writeHTTPMetadataCache(&b)
+		}
 	}
 	// Ahead of every view, and after the S3 preamble only because nothing in
 	// that preamble lives in a schema.
@@ -1074,6 +1077,47 @@ func writeTimeZone(b *strings.Builder) {
 	b.WriteString("-- boundary. Pinned to UTC here so the numbers match the web interface. Change\n")
 	b.WriteString("-- it if you would rather read in your own zone.\n")
 	b.WriteString("SET TimeZone = 'UTC';\n\n")
+}
+
+// cachesHTTPMetadata reports whether the file turns on DuckDB's HTTP metadata
+// cache (#2051): its state views are pinned and read S3, and it reads no
+// archive from S3. The setting covers the whole DuckDB session, not this
+// file's views, so the events view rules it out: an hour's archive keeps one
+// key and is uploaded again when a partition is archived a second time
+// before it is dropped, and with the cache on a reader would keep the first
+// upload's size and bytes.
+func (in Input) cachesHTTPMetadata() bool {
+	if in.Follow.follows() {
+		return false
+	}
+	if in.rendersEvents() {
+		for _, s := range in.ArchiveSources {
+			if isS3(s) {
+				return false
+			}
+		}
+	}
+	// Only reached from inside NeedsS3, so a state view here reads S3.
+	return len(selectedStatePlans(in)) > 0
+}
+
+// writeHTTPMetadataCache turns on DuckDB's HTTP metadata cache for a file
+// pinned to one snapshot (#2051). DuckDB keeps the bytes it reads from S3 for
+// the session, but by default re-checks every cached file with a HEAD before
+// each query, one after another: ~0.5 s per file from outside AWS, so a query
+// over data already in memory still took seconds. A pinned file only names
+// files that never change once published, so the check can only ever say
+// "unchanged". Not for a following file, whose views move to a newer
+// snapshot. This setting exists since DuckDB 1.1; validate_external_file_cache
+// would do the same but only exists from 1.5, and an unknown setting stops
+// the whole file from loading.
+func writeHTTPMetadataCache(b *strings.Builder) {
+	b.WriteString("-- The snapshot files below never change once published, so DuckDB need not\n")
+	b.WriteString("-- ask S3 again before every query whether each one changed. This setting\n")
+	b.WriteString("-- covers this whole DuckDB session, not only these views: if the same session\n")
+	b.WriteString("-- also reads S3 objects of yours that do change, turn it back off with\n")
+	b.WriteString("-- RESET enable_http_metadata_cache;\n")
+	b.WriteString("SET enable_http_metadata_cache = true;\n\n")
 }
 
 func writeS3Preamble(b *strings.Builder, region string, ep storage.S3Endpoint, ambiguousRegion bool, stores map[string]storage.BucketStore) {

@@ -43,6 +43,13 @@ CREATE OR REPLACE SECRET bintrail_s3_chain (TYPE s3, PROVIDER credential_chain, 
 --   CREATE OR REPLACE SECRET bintrail_s3_chain (
 --     TYPE s3, KEY_ID '…', SECRET '…', REGION '…');
 
+-- The snapshot files below never change once published, so DuckDB need not
+-- ask S3 again before every query whether each one changed. This setting
+-- covers this whole DuckDB session, not only these views: if the same session
+-- also reads S3 objects of yours that do change, turn it back off with
+-- RESET enable_http_metadata_cache;
+SET enable_http_metadata_cache = true;
+
 -- <schema>.<table>: each table's full contents as of the baseline snapshot.
 -- Each table keeps its own name: SELECT * FROM demo.prices, and a name DuckDB
 -- cannot read bare is quoted, as in demo."order.items".
