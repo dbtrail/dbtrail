@@ -495,6 +495,7 @@ func resolveBaselineViews(ctx context.Context, in *views.Input) error {
 	// unreadable footer that was never read.
 	resolveBaselineDecimals(ctx, in)
 	views.ApplyFollow(in, in.BaselineSource, vPinSnapshot)
+	views.UseNewestPointer(ctx, in)
 	return nil
 }
 

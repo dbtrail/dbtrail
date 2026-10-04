@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pointer without reading it first. Creating it needs `s3:ListBucket` too:
   without it S3 answers 403 for a missing key (docs/s3-iam-policy.md). On a versioned bucket each write is a
   new version of a few bytes (see docs/object-lock.md).
+- **A views file that follows the newest S3 snapshot now finds it by reading
+  `<root>/_NEWEST` instead of listing the whole root** (#2052, second half).
+  Opening such a file cost one listing of every object under the root (54-59 s
+  in-region on a root of a few months of hourly snapshots); it now costs one
+  small read, whatever the root holds. `bintrail views` and the console's
+  download, SQL panel and dashboards use it only when the pointer names exactly
+  the snapshot they just found; with no pointer, an older one, or a pointer
+  they cannot read, the file lists the root as before. The trade, stated in
+  the file's header: a snapshot published by a build that does not write the
+  pointer, or copied in by hand, is not followed until the pointer moves.
 
 ### Fixed
 - **The embedded time-travel port notices a client that hangs up in the

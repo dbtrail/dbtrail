@@ -141,3 +141,28 @@ func publishNewestPointer(ctx context.Context, root, name string, ops s3UploadOp
 	}
 	return nil
 }
+
+// newestPointerMax bounds the read: the object holds one snapshot name, so
+// anything near this size is not a pointer this build wrote.
+const newestPointerMax = 256
+
+// ReadNewestPointer returns the snapshot name an S3 baselines root's pointer
+// holds, trimmed, or found=false when the root has none (a root published
+// before #2052, or by a build that does not write it). The name is returned
+// unvalidated: the caller compares it against the snapshot it discovered,
+// which is a stricter test than any parse.
+func ReadNewestPointer(ctx context.Context, root string) (name string, found bool, err error) {
+	bucket, prefix, err := storage.ParseS3URL(root)
+	if err != nil {
+		return "", false, err
+	}
+	client, err := storage.NewS3ClientForBucket(ctx, bucket, "")
+	if err != nil {
+		return "", false, err
+	}
+	body, found, err := storage.GetSmallObject(ctx, client, bucket, path.Join(prefix, NewestPointerName), newestPointerMax)
+	if err != nil || !found {
+		return "", found, err
+	}
+	return strings.TrimSpace(string(body)), true, nil
+}
