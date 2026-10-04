@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -427,7 +428,7 @@ func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := s.runSQL(r.Context(), b, consoleActor(r), req.SQL, "", req.MaxRows)
+	out, err := s.runSQL(r.Context(), b, consoleActor(r), req.SQL, "", req.MaxRows, sqlsandbox.Session{})
 	if err != nil {
 		var refusal *sqlRefusal
 		if errors.As(err, &refusal) {
@@ -495,11 +496,12 @@ type sqlOutcome struct {
 // (local, defines a view, holds no console configuration), the views, the
 // job and the run. user keys the one-query-at-a-time gate; schema, when
 // set, is where unqualified names resolve (the port's USE); maxRows 0 is
-// the server's cap. The data-profile and archive gates are the caller's:
-// they need the request, or the target, which this does not see. The
-// errors are a *sqlRefusal or the runner's own typed errors, so each caller
-// maps them to its wire.
-func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema string, maxRows int) (sqlOutcome, error) {
+// the server's cap; sess is the client connection's own settings (the
+// port's SET time_zone and sql_select_limit, zero for the browser). The
+// data-profile and archive gates are the caller's: they need the request,
+// or the target, which this does not see. The errors are a *sqlRefusal or
+// the runner's own typed errors, so each caller maps them to its wire.
+func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema string, maxRows int, sess sqlsandbox.Session) (sqlOutcome, error) {
 	// What is known without any I/O is refused before the slot: a copy that
 	// lives only on S3 is never served here, and listing it would hold one
 	// of the daemon's two slots while it waits on the network.
@@ -570,6 +572,9 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 	// time on a copy of a hundred tables. CopyDirs stay the whole copy's: they
 	// bound what the worker may read, the script only what it defines.
 	var viewsSQL string
+	// zoneRefusal is ViewsFor's own refusal: its error reaches the runner as
+	// a worker failure, so the reason is kept here and returned instead.
+	var zoneRefusal *sqlRefusal
 	job := sqlsandbox.Job{
 		// One query at a time per identity: the login identity, or the
 		// shared automation token as one identity.
@@ -578,16 +583,35 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 		ViewsFor: func(refs sqlsandbox.Refs) (string, error) {
 			narrowed := in
 			narrowed.OnlyViews = sqlWantedViews(in, refs)
+			if sess.TimeZone != "" {
+				// A session zone other than UTC: every DATETIME the statement
+				// can read must be the wall clock MySQL holds, or it would be
+				// shifted by the zone (views.BaselineTable.Datetimes).
+				tables, unknown := sqlWallClockDatetimes(narrowed)
+				if unknown != "" {
+					zoneRefusal = &sqlRefusal{http.StatusConflict, fmt.Sprintf(
+						"the session time zone (SET time_zone) cannot be applied to %s: that table's column types are not available "+
+							"(its snapshot does not record them, or they could not be read just now: DBTrail's log says), "+
+							"so a DATETIME cannot be told from a TIMESTAMP; SET time_zone = 'UTC' to read it", unknown)}
+					return "", zoneRefusal
+				}
+				narrowed.Baselines = tables
+				narrowed.NonUTCSession = true
+			}
 			viewsSQL = views.Generate(narrowed) + sqlUsedSchema(in, narrowed.OnlyViews, schema)
 			return viewsSQL, nil
 		},
-		SQL:    statement,
-		Schema: schema,
-		Limits: sqlsandbox.Limits{MaxRows: maxRows},
+		SQL:     statement,
+		Schema:  schema,
+		Session: sess,
+		Limits:  sqlsandbox.Limits{MaxRows: maxRows},
 	}
 	ran = true
 	res, err := slot.Run(ctx, job)
 	if err != nil {
+		if zoneRefusal != nil {
+			return sqlOutcome{}, zoneRefusal
+		}
 		var qerr *sqlsandbox.QueryError
 		if eventsInS3 && errors.As(err, &qerr) && sqlEventsMissing.MatchString(qerr.Message) {
 			// The statement really read events, which was not installed
@@ -665,6 +689,31 @@ func sqlUsedSchema(in views.Input, wanted views.ViewSet, schema string) string {
 		}
 	}
 	return ""
+}
+
+// sqlWallClockDatetimes returns in's tables with every one this render will
+// define marked to read its DATETIME columns as wall clocks, for a statement
+// run under a session time zone other than UTC. unknown names the first such
+// table whose column types the copy does not record (a snapshot older than
+// the embedded CREATE TABLE, a PostgreSQL source): its DATETIME columns
+// cannot be found, so the caller refuses instead of printing them shifted.
+// The slice is a copy: in is shared with the caller's other uses.
+func sqlWallClockDatetimes(in views.Input) (tables []views.BaselineTable, unknown string) {
+	selected := map[string]bool{}
+	for _, t := range in.SelectedBaselines() {
+		selected[t.Path] = true
+	}
+	tables = slices.Clone(in.Baselines)
+	for i := range tables {
+		if !selected[tables[i].Path] {
+			continue
+		}
+		if !tables[i].SchemaKnown {
+			return nil, tables[i].Schema + "." + tables[i].Table
+		}
+		tables[i].WallClockDatetimes = true
+	}
+	return tables, ""
 }
 
 // sqlFoldName folds A-Z only, as DuckDB does when it compares names: Ñ and ñ

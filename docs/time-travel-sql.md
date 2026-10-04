@@ -147,9 +147,95 @@ What to know before relying on it:
   declares `_bin` or `_cs` is case-insensitive here too. The same applies to
   the SQL card; a DuckDB of your own over the same files (see
   [Dashboards](dashboards.md)) keeps DuckDB's defaults.
+- **`SET time_zone`, `SET sql_select_limit` and `SET sql_mode` are applied
+  or refused, never ignored.** They used to be answered with an empty OK and
+  read by nothing, so a client that had set its zone got answers computed in
+  UTC. On a connection that runs ordinary SQL on the copy (not under read
+  routing, where every `SET` is MySQL's) each one is now handled, in every
+  spelling (`SET time_zone = ...`, `SET SESSION ...`, `SET @@session....`,
+  several assignments in one `SET`, a prepared `SET`), and `SELECT
+  @@time_zone`, `@@sql_mode` and `@@sql_select_limit` answer what the
+  connection set:
+  - **`time_zone`** becomes the copy's session zone for that connection.
+    `NOW()` and the columns that are instants (a MySQL `TIMESTAMP`, the
+    `events` view's `event_timestamp` and `commit_time`) are printed in it,
+    a literal compared with one is read in it, and a `DATETIME` column stays
+    the wall clock MySQL holds, in any zone. Applied: a zone name
+    (`'America/Argentina/Buenos_Aires'`, case as in the time zone database),
+    a whole-hour offset from `'-12:00'` to `'+14:00'`, `'UTC'`, `'SYSTEM'`
+    (the port's own zone, UTC) and `DEFAULT`. Refused with error 1298: an
+    offset with minutes (`'+05:30'`; use the zone name, `'Asia/Kolkata'`),
+    `'-13:00'` and beyond, and a name that is not a zone. (A name this
+    port's time zone database has and the copy's engine does not is accepted
+    at the `SET` and refused, by name, by each statement that then runs on
+    the copy.) Under a zone other
+    than UTC, a table whose snapshot does not record its column types (a
+    snapshot written before column types were embedded in it, or a
+    PostgreSQL source) is refused with an
+    error naming the table, because its `DATETIME` columns cannot be told
+    from its `TIMESTAMP` ones; `SET time_zone = 'UTC'` reads it again. A
+    statement that may read any table (`SHOW TABLES`, a query of the
+    catalog) is refused the same way while the copy has such a table;
+    `SHOW DATABASES` always answers.
+  - **`sql_select_limit = N`** cuts a `SELECT` that has no `LIMIT` of its
+    own at N rows, with no warning: the client asked for the cut. A `LIMIT`
+    in the statement takes precedence, as on MySQL, and `SHOW` and
+    `DESCRIBE` are not limited. It never raises the server's row cap: with N
+    above the cap, the cap applies as if nothing were set (see the row cap
+    below). `DEFAULT` and
+    MySQL's own "no limit" value (18446744073709551615) remove it; 0 is
+    refused.
+  - **`sql_mode`** is recorded and reported back; no mode changes how the
+    copy computes (the dialect is DuckDB's). A mode that changes how a
+    statement's text is read is refused with error 1231, alone or in a list:
+    `ANSI_QUOTES`, `PIPES_AS_CONCAT`, `NO_BACKSLASH_ESCAPES`,
+    `HIGH_NOT_PRECEDENCE`, and the combinations that contain them (`ANSI`,
+    `ORACLE`, `MSSQL`, `DB2`, `MAXDB`, `POSTGRESQL`). So is a name that is
+    not a mode. `REAL_AS_FLOAT`, `ONLY_FULL_GROUP_BY`, the strict modes and
+    the rest are accepted.
+
+  A `SET` with several assignments is all or nothing: one refused assignment
+  refuses the statement and applies none of it. `SET GLOBAL` (and `PERSIST`)
+  of the three is refused: the port keeps settings per connection. The other
+  variables a driver sets as it connects (`SET NAMES`, `autocommit`,
+  `character_set_results`) are accepted as before, and may share a `SET`
+  with these three. So may anything else in a `SET` the port already
+  answered with an empty OK (one that opens with `SET NAMES`, `SET SESSION`,
+  `SET @@session.` or one of the three, the shape a driver's connect
+  statement has): its other assignments stay connection chatter, read by
+  nothing, and only a `SET` the port refused before is still refused.
+  `sql_mode` may be given as a string or computed from the current one with
+  `CONCAT` and `REPLACE` over `@@sql_mode` and quoted strings, as Rails and
+  several ORMs send it; any other expression is refused. The time-travel
+  shapes read and print times in UTC (an `AS OF` literal without a zone is
+  UTC, see [Step 6](#step-6--run-a-time-travel-query)), so on a connection
+  whose `time_zone` is not UTC a time-travel statement is refused with error
+  1235 naming the zone, and `SET time_zone = '+00:00'` runs it again. The
+  zone reaches the tables and the `events` view by name: a statement that
+  reads a snapshot file directly (`read_parquet(...)`) under a zone other
+  than UTC gets its `DATETIME` columns as instants, shifted by the offset.
+  The standalone `bintrail
+  shim`, which runs no ordinary SQL, accepts the three as connection chatter,
+  as it always did.
 - **Read-only, one SELECT per statement.** Anything else is refused with
-  1064. A result cut at the row cap, or a cell cut at the cell cap, raises a
-  warning the client counts; `SHOW WARNINGS` says which.
+  1064.
+- **A result with more rows than the row cap is an error, not a short
+  answer.** The statement fails with error 1104, which names the cap (1,000
+  rows by default) and the way out: add a `LIMIT` at or under the cap, or
+  narrow the statement. Nothing is returned, so an application cannot take
+  the first 1,000 rows for the whole result. A result of exactly the cap's
+  size is whole and is returned. The one cut that is not an error is the one
+  the connection asked for: after `SET sql_select_limit = N`, with N at or
+  under the cap, a `SELECT` with no `LIMIT` of its own returns its first N
+  rows, silently. With N above the cap the cap still applies, and a result
+  past it is the same error, which says the limit is above the cap. A
+  listing (`SHOW TABLES`, `DESCRIBE`) takes neither a `LIMIT` nor the select
+  limit, so its error points at `information_schema`, which does. (Under
+  read routing a result past the cap is not an error: MySQL answers that
+  statement instead.) A cell longer than the cell cap (1 MiB) is cut and
+  marked, and raises a warning the client counts; `SHOW WARNINGS` reports
+  it. The console's SQL card keeps its own behaviour: it returns the first
+  rows up to the cap and says on the page that there were more.
 - **The copy has to be on local disk**, as for the SQL card. A server whose
   copy is only on S3, or with archive access disabled, or whose copy defines
   no view yet, keeps the time-travel shapes and refuses ordinary SQL with

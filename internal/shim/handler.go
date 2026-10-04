@@ -162,11 +162,16 @@ type Handler struct {
 
 	// freeSQL, when non-nil, serves ordinary statements over the Parquet
 	// copy (see freesql.go); freeSQLWhyNot is the reason shown when it is
-	// nil and one is known. lastWarning is what SHOW WARNINGS answers
-	// after a free-SQL result cut at the row cap; guarded by mu.
+	// nil and one is known. lastWarnings is what SHOW WARNINGS answers
+	// after a free-SQL result with cells cut at the cell cap; guarded by mu.
 	freeSQL       FreeSQL
 	freeSQLWhyNot string
 	lastWarnings  []string
+	// sessVars is what this connection SET for itself (time_zone, sql_mode,
+	// sql_select_limit) while free SQL is bound and no router is: applied to
+	// every statement on the copy and answered by SELECT @@... (#2035, see
+	// sessionvars.go); guarded by mu.
+	sessVars sessionVars
 
 	// router, when non-nil, makes this a routing connection (#2038, see
 	// freesql.go): MySQL answers by default, the copy takes expensive
@@ -504,7 +509,7 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 	currentDB := h.db
 	h.mu.Unlock()
 
-	// With free SQL bound, SHOW WARNINGS is a real statement (the row-cap
+	// With free SQL bound, SHOW WARNINGS is a real statement (the cell-cap
 	// warning, freesql.go), answered before the noise allowlist would
 	// swallow it; every other statement clears it, as on MySQL.
 	if h.freeSQL != nil {
@@ -515,7 +520,7 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 			if h.router != nil && forwarded {
 				// Under read routing the last statement was MySQL's, so
 				// its warnings are MySQL's too. After a copy-served one
-				// they are ours (the row cap), and MySQL's would be the
+				// they are ours (the cell cap), and MySQL's would be the
 				// EXPLAIN's note, which the client never sent.
 				ctx, cancel := h.queryContext()
 				defer cancel()
@@ -544,6 +549,18 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 
 	q, perr := Parse(qstr, currentDB)
 	if perr == nil {
+		// Time travel reads its AS OF time in UTC and prints in UTC. On a
+		// connection that SET another zone (#2035) that would be a second
+		// clock on the same connection, with nothing saying so: refuse it by
+		// name instead. Only a connection with free SQL can hold a zone.
+		h.mu.Lock()
+		zone, nonUTC := h.sessVars.timeZone, h.sessVars.duckZone != ""
+		h.mu.Unlock()
+		if nonUTC {
+			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, fmt.Sprintf(
+				"time travel reads and prints times in UTC, and this connection is in time_zone '%s'; "+
+					"SET time_zone = '+00:00' before a time-travel statement and give its time in UTC", zone))
+		}
 		// Per-tenant schema authorization (#824), on the RESOLVED target
 		// schema at query execution — not only at USE time. Parse fills
 		// q.Schema from the USE'd schema for the virtual-schema shapes
@@ -617,8 +634,20 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 		// answer), except the expensive SELECTs the copy takes.
 		return h.routeStatement(currentDB, qstr)
 	}
-	if res, ok := sysVarSelect(qstr); ok {
-		// A driver asking the server about itself as it connects.
+	if h.freeSQL != nil {
+		// A SET of time_zone, sql_mode or sql_select_limit is applied or
+		// refused by name (#2035), before the allowlist below would answer
+		// it with an empty OK. Without free SQL it stays chatter.
+		if res, handled, err := h.applySessionSet(qstr); handled {
+			return res, err
+		}
+	}
+	h.mu.Lock()
+	overrides := h.sessVars.overrides()
+	h.mu.Unlock()
+	if res, ok := sysVarSelect(qstr, overrides); ok {
+		// A driver asking the server about itself as it connects, or reading
+		// back what it set.
 		return res, nil
 	}
 	if isHandshakeNoise(qstr) {
@@ -2024,6 +2053,10 @@ func emptyResult() *mysql.Result {
 // PASSWORD, SET ROLE, SET GLOBAL) falls through to the rejection
 // path so a customer / attacker cannot pretend their privileged
 // statement succeeded by exploiting an over-broad `SET ` prefix.
+//
+// The time_zone, sql_mode and sql_select_limit entries are chatter only on a
+// connection with no free SQL bound (time travel reads none of them). With
+// free SQL bound, applySessionSet answers those statements first (#2035).
 //
 // Each prefix MUST end with a delimiter (' ' or '=') so a longer
 // keyword cannot smuggle itself in: e.g. `set autocommitfoo` no

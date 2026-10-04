@@ -33,7 +33,8 @@ import (
 // does three MySQL-shaped things on top: USE selects the schema unqualified
 // names resolve in (sqlsandbox.Job.Schema), SHOW DATABASES / SHOW COLUMNS
 // are rewritten to their DuckDB equivalents (rewriteForDuckDB), and a
-// result cut at the row cap raises a warning SHOW WARNINGS returns. The
+// result with more rows than the row cap is an error (1104, rowCapError)
+// unless the connection asked for the cut with SET sql_select_limit. The
 // standalone `bintrail shim` binds nothing and keeps refusing as before.
 //
 // The order in HandleQuery is load-bearing: time travel first (a parse
@@ -47,7 +48,10 @@ import (
 // worker failure, whose text can carry host paths, before it gets here
 // (freeSQLError does so again, as a belt).
 type FreeSQL interface {
-	Run(ctx context.Context, statement, schema string) (sqlsandbox.Result, error)
+	// sess is what the connection set for itself (#2035): the statement
+	// runs under that time zone and select limit, or fails; it never runs
+	// under other ones.
+	Run(ctx context.Context, statement, schema string, sess sqlsandbox.Session) (sqlsandbox.Result, error)
 	// CopyUpdatedAt is the time of the snapshot the copy's tables answer
 	// from; zero when there is none or it cannot be read. The router
 	// compares it with the server's maximum copy age before it sends a
@@ -423,29 +427,78 @@ func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string) (*mysql.Res
 	ctx, cancel := h.queryContext()
 	defer cancel()
 	stmt, schema := rewriteForDuckDB(qstr, schema)
-	res, err := h.freeSQL.Run(ctx, stmt, schema)
+	// What the connection set for itself (#2035). Always zero under routing:
+	// there a SET is MySQL's and never reaches sessVars.
+	h.mu.Lock()
+	vars := h.sessVars
+	h.mu.Unlock()
+	sess := vars.session()
+	if stmt != qstr {
+		// A SHOW this port rewrote into a SELECT: sql_select_limit limits
+		// SELECTs, and the client did not send one.
+		sess.SelectLimit = 0
+		if showDatabasesRE.MatchString(qstr) {
+			// The schema list holds no time and reads no table, and it is
+			// the way out of every dead end (rewriteForDuckDB): it must not
+			// be refused because some table cannot be read under the
+			// connection's zone.
+			sess = sqlsandbox.Session{}
+		}
+	}
+	res, err := h.freeSQL.Run(ctx, stmt, schema, sess)
 	if err != nil {
 		return nil, h.freeSQLError(err)
 	}
 	if routeReason != "" && (res.Truncated || res.TruncatedCells > 0) {
 		return nil, errCopyTruncated
 	}
-	rs, err := freeSQLResultset(res)
+	if res.Truncated {
+		// The result did not fit the row cap (#2037). It is refused, not
+		// returned short: a client that does not read warnings would take the
+		// first rows for the whole answer. The one cut that is NOT an error
+		// never gets here: a connection that SET sql_select_limit at or under
+		// the cap asked for it, and the executor does not report that cut as
+		// Truncated (sqlsandbox.Session.SelectLimit).
+		return nil, rowCapError(qstr, len(res.Rows), vars.selectLimit)
+	}
+	rs, err := freeSQLResultset(res, vars.loc)
 	if err != nil {
 		// Only a worker bug (a row with the wrong column count) gets here.
 		h.logger.Error("free sql: build resultset", "err", err)
 		return nil, fmt.Errorf("free sql: build resultset: %w", err)
 	}
 	var warnings []string
-	if res.Truncated {
-		warnings = append(warnings, fmt.Sprintf("the result was cut at %d rows, this server's cap; add a LIMIT or narrow the query", len(res.Rows)))
-	}
 	if res.TruncatedCells > 0 {
 		warnings = append(warnings, fmt.Sprintf("%d cell(s) longer than this server's cap were cut; each ends with a marker", res.TruncatedCells))
 	}
 	h.setWarnings(warnings)
 	h.recordFreeSQL(qstr, schema, res, routeReason)
 	return &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}, nil
+}
+
+// rowCapError is the refusal for a result with more rows than the port's row
+// cap: MySQL's own code for a SELECT it will not run to the end (1104), the
+// cap, and the ways out. rowCap is the cap itself: a result cut there holds
+// exactly that many rows. The ways out depend on the statement: a SELECT
+// takes a LIMIT, or the connection's sql_select_limit; a listing (SHOW,
+// DESCRIBE, SUMMARIZE) takes neither, so it is pointed at the catalog, which
+// does. selectLimit is the connection's sql_select_limit (0 when not set),
+// named when it is above the cap, because the client that set it expects it
+// to have covered this.
+func rowCapError(qstr string, rowCap int, selectLimit uint64) error {
+	msg := fmt.Sprintf("the result has more than %d rows, the row cap for SQL on the copy on this server, and is not returned cut; ", rowCap)
+	switch readrouter.LeadingKeyword(qstr) {
+	case "SHOW", "DESCRIBE", "DESC", "SUMMARIZE":
+		msg += fmt.Sprintf("this statement takes no LIMIT: read the same from the catalog with one "+
+			"(SELECT ... FROM information_schema.tables, or information_schema.columns, WHERE ... LIMIT %d)", rowCap)
+	default:
+		msg += fmt.Sprintf("add a LIMIT of %d or less to the statement, or narrow it. To have a SELECT with no LIMIT of its own cut "+
+			"without an error, SET sql_select_limit to %d or less on the connection", rowCap, rowCap)
+		if selectLimit > uint64(rowCap) {
+			msg += fmt.Sprintf(" (it is %d now, above the cap, so the cap applied)", selectLimit)
+		}
+	}
+	return mysql.NewError(mysql.ER_TOO_BIG_SELECT, msg)
 }
 
 // warningsSetter is the part of go-mysql's server.Conn that carries the
@@ -468,7 +521,8 @@ func (h *Handler) setWarnings(msgs []string) {
 }
 
 // showWarnings answers SHOW WARNINGS the way MySQL does: Level, Code,
-// Message rows, none when the last statement raised nothing. Only a
+// Message rows, none when the last statement raised nothing. The one warning
+// a copy result raises is a cell cut at the cell cap. Only a
 // handler with free SQL bound answers this way; without it SHOW WARNINGS
 // stays handshake noise (an empty OK), as it always was.
 func (h *Handler) showWarnings() (*mysql.Result, error) {
@@ -579,7 +633,8 @@ func (h *Handler) freeSQLError(err error) error {
 // shows numbers as numbers and dates as dates. Every cell is sent as text
 // bytes: BuildSimpleTextResultset fixes a column's wire type from its first
 // non-null row, and a column mixing Go types across rows is an error there.
-func freeSQLResultset(res sqlsandbox.Result) (*mysql.Resultset, error) {
+// loc is the session's time zone, nil for UTC: an instant is printed in it.
+func freeSQLResultset(res sqlsandbox.Result, loc *time.Location) (*mysql.Resultset, error) {
 	names := make([]string, len(res.Columns))
 	for i, c := range res.Columns {
 		names[i] = c.Name
@@ -592,7 +647,7 @@ func freeSQLResultset(res sqlsandbox.Result) (*mysql.Resultset, error) {
 			if j < len(res.Columns) {
 				typ = res.Columns[j].Type
 			}
-			out[j] = freeSQLCell(cell, typ)
+			out[j] = freeSQLCell(cell, typ, loc)
 		}
 		values[i] = out
 	}
@@ -612,9 +667,12 @@ func freeSQLResultset(res sqlsandbox.Result) (*mysql.Resultset, error) {
 // freeSQLCell renders one JSON-shaped cell to the text the wire carries,
 // nil staying NULL. A timestamp arrives RFC 3339 in UTC and leaves in
 // MySQL's DATETIME spelling, because that is what the column is declared
-// as; a nested value (LIST, STRUCT, MAP, JSON) is its JSON text; a boolean
+// as. An INSTANT (TIMESTAMP WITH TIME ZONE: now(), a MySQL TIMESTAMP column)
+// is printed in the session's zone, loc, as MySQL prints one; a zone-less
+// TIMESTAMP is a wall clock and is printed as it is, whatever the zone. A
+// nested value (LIST, STRUCT, MAP, JSON) is its JSON text; a boolean
 // is 1 or 0, as MySQL's own BOOLEAN reads back.
-func freeSQLCell(v any, duckType string) any {
+func freeSQLCell(v any, duckType string, loc *time.Location) any {
 	switch x := v.(type) {
 	case nil:
 		return nil
@@ -630,7 +688,11 @@ func freeSQLCell(v any, duckType string) any {
 	case string:
 		if isTimestampType(duckType) {
 			if t, err := time.Parse(time.RFC3339Nano, x); err == nil {
-				return []byte(t.UTC().Format("2006-01-02 15:04:05.999999"))
+				t = t.UTC()
+				if loc != nil && isInstantType(duckType) {
+					t = t.In(loc)
+				}
+				return []byte(t.Format("2006-01-02 15:04:05.999999"))
 			}
 		}
 		return []byte(x)
@@ -647,6 +709,16 @@ func freeSQLCell(v any, duckType string) any {
 
 func isTimestampType(duckType string) bool {
 	return strings.HasPrefix(strings.ToUpper(duckType), "TIMESTAMP")
+}
+
+// isInstantType: DuckDB's TIMESTAMP WITH TIME ZONE, under either of the names
+// the driver reports it by. Every other TIMESTAMP flavour has no zone.
+func isInstantType(duckType string) bool {
+	switch strings.ToUpper(strings.TrimSpace(duckType)) {
+	case "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE":
+		return true
+	}
+	return false
 }
 
 // applyDuckType sets the MySQL column type a DuckDB type maps to. Text

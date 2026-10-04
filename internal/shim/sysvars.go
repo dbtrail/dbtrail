@@ -1,6 +1,7 @@
 package shim
 
 import (
+	"math"
 	"regexp"
 	"strings"
 
@@ -42,6 +43,7 @@ var sysVars = map[string]any{
 	"net_write_timeout":        int64(60),
 	"performance_schema":       int64(0),
 	"sql_mode":                 "",
+	"sql_select_limit":         uint64(math.MaxUint64), // MySQL's "no limit"
 	"system_time_zone":         "UTC",
 	"time_zone":                "UTC",
 	"transaction_isolation":    "REPEATABLE-READ",
@@ -56,7 +58,8 @@ var sysVars = map[string]any{
 // portServerVersion is the version the port's handshake announces.
 const portServerVersion = "8.0.11"
 
-const sysVarItem = `@@(?:(?:session|global|local)\.)?([a-z_0-9]+)(?:\s+as\s+` + "`?" + `([a-z_0-9]+)` + "`?" + `)?`
+// Three groups per item: the scope, the variable, the alias.
+const sysVarItem = `@@(?:(session|global|local)\.)?([a-z_0-9]+)(?:\s+as\s+` + "`?" + `([a-z_0-9]+)` + "`?" + `)?`
 
 var (
 	sysVarItemRE   = regexp.MustCompile(`(?i)` + sysVarItem)
@@ -66,7 +69,9 @@ var (
 
 // sysVarSelect answers a SELECT of system variables this port knows. ok is
 // false for any other statement, and for one naming an unknown variable.
-func sysVarSelect(stmt string) (res *mysql.Result, ok bool) {
+// session holds the variables this connection SET (sessionVars.overrides):
+// @@name and @@session.name answer from it first, @@global.name never does.
+func sysVarSelect(stmt string, session map[string]any) (res *mysql.Result, ok bool) {
 	stmt = leadingComment.ReplaceAllString(stmt, "")
 	if !sysVarSelectRE.MatchString(stmt) {
 		return nil, false
@@ -75,12 +80,16 @@ func sysVarSelect(stmt string) (res *mysql.Result, ok bool) {
 	names := make([]string, len(items))
 	row := make([]any, len(items))
 	for i, m := range items {
-		v, known := sysVars[strings.ToLower(m[1])]
+		name := strings.ToLower(m[2])
+		v, known := sysVars[name]
 		if !known {
 			return nil, false
 		}
+		if set, ok := session[name]; ok && !strings.EqualFold(m[1], "global") {
+			v = set
+		}
 		// MySQL names an unaliased column by its expression text.
-		names[i] = m[2]
+		names[i] = m[3]
 		if names[i] == "" {
 			names[i] = strings.TrimSpace(m[0])
 		}
