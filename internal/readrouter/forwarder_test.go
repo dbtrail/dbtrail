@@ -38,7 +38,7 @@ func TestForwarder_lostStaysLost(t *testing.T) {
 	if _, err := f.Forward(ctx, "SELECT 1", &BufferSink{}); !IsLost(err) {
 		t.Fatalf("first statement: err = %v, want the lost error", err)
 	}
-	if _, _, err := f.Decide(ctx, "SELECT 1"); !IsLost(err) {
+	if _, err := f.Decide(ctx, "SELECT 1"); !IsLost(err) {
 		t.Errorf("Decide after the loss: err = %v, want the lost error", err)
 	}
 	if err := f.UseDB(ctx, "x"); !IsLost(err) {

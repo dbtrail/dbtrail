@@ -146,6 +146,18 @@ SELECT * FROM nope;
 	if rep.CopyDiffers != 1 || rep.CopyOrderDiffers != 0 || !rep.Failed() {
 		t.Errorf("CopyDiffers = %d, CopyOrderDiffers = %d, want 1 and 0: the case differences are gone (the copy's default collation matches MySQL's), LIKE and NOW() are vetoed, and the ß/ss one is the documented remainder the harness must still catch", rep.CopyDiffers, rep.CopyOrderDiffers)
 	}
+	// The rule travels beside the reason, so a JSON consumer never parses
+	// prose: a veto, a failed EXPLAIN and the plan's own rule each name
+	// themselves, and the EXPLAIN-failed count is taken from it.
+	if r := by["SELECT * FROM nope"]; r.RouteRule != "explain_failed" || rep.ExplainFailed != 1 {
+		t.Errorf("nope: route_rule = %q, ExplainFailed = %d; want explain_failed and 1", r.RouteRule, rep.ExplainFailed)
+	}
+	if r := by["SELECT id FROM orders WHERE status LIKE 'L%'"]; r.RouteRule != "veto" {
+		t.Errorf("LIKE: route_rule = %q, want veto", r.RouteRule)
+	}
+	if r := by["SELECT id FROM orders WHERE status = 'live'"]; r.RouteRule != "scan" {
+		t.Errorf("full scan: route_rule = %q (%s), want scan (the policy's scan rule, 2 rows)", r.RouteRule, r.RouteReason)
+	}
 	if r := by["SELECT id FROM orders WHERE status LIKE 'L%'"]; !strings.Contains(r.RouteReason, "veto: LIKE") || r.SourceRows != 3 || r.CopyRows != 1 {
 		t.Errorf("LIKE: got %s route=%s (%s) source %d copy %d; want the veto, 3 rows on MySQL and 1 on the copy", r.Verdict, r.Route, r.RouteReason, r.SourceRows, r.CopyRows)
 	}
