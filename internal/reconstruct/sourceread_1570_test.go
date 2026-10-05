@@ -135,7 +135,7 @@ func TestSourceRead_throughATableDeltaChain(t *testing.T) {
 		t.Fatalf("the rewritten base's own footer = %+v, want the dump's instant and 3 folds", got)
 	}
 
-	at5 := t0.Add(5 * time.Hour)
+	at5 := at4.Add(time.Hour)
 	b5, _, err := deltaWindow(t, root, b4, at4, changeMap(upd(4, "v4")), at5, pos(500), nil)
 	if err != nil {
 		t.Fatal(err)

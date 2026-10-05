@@ -263,7 +263,7 @@ func TestTableDelta_spilledGroupOverTheLimitIsRefused(t *testing.T) {
 			}
 		}
 		if !two {
-			t.Skip("no group of this fixture holds two keys")
+			t.Fatal("no group of this fixture holds two keys: the refusal below would be tested by nothing")
 		}
 		p.fold.Spill = s
 	})
@@ -307,5 +307,132 @@ func TestTableDelta_spilledWindowOverAnOldChainIsStillRewritten(t *testing.T) {
 	chain, err := baseline.ListTableDelta(context.Background(), base2)
 	if err != nil || chain == nil || len(chain.Files) != 1 || chain.Files[0].Seq != 0 {
 		t.Fatalf("chain after the rewrite = %+v, %v", chain, err)
+	}
+}
+
+// The rewrite a spilled window used to get asked the disk for room for the
+// whole table. The pair asks for the size of the changes on disk, also when it
+// starts a chain and there is no previous pair to estimate from.
+func TestTableDelta_spilledWindowChecksTheDiskAgainstItsOwnSize(t *testing.T) {
+	noDisk := errors.New("no room")
+	for _, startsChain := range []bool{false, true} {
+		name := "over a chain"
+		if startsChain {
+			name = "starting a chain"
+		}
+		t.Run(name, func(t *testing.T) {
+			noCompaction(t)
+			rows, nulls := zooRows()
+			src := writeZooBaseline(t, rows, nulls)
+			root := t.TempDir()
+			t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+			prevBase, prevAt := src, t0
+			if !startsChain {
+				at1 := t0.Add(5 * time.Minute)
+				b, _, err := deltaWindow(t, root, src, t0, changeMap(upd(1, "v1")), at1, &query.BinlogPos{File: "binlog.000009", Pos: 1000}, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				prevBase, prevAt = b, at1
+			}
+			var asked, onDisk int64
+			base, _, err := deltaWindow(t, root, prevBase, prevAt, map[string]*query.ResultRow{}, t0.Add(10*time.Minute),
+				&query.BinlogPos{File: "binlog.000009", Pos: 2000}, func(p *tableDeltaPublish) {
+					s := spillOf(t, 4, bigWindow("x"))
+					onDisk = s.diskBytes()
+					p.fold.Spill = s
+					p.cfg.SpaceCheck = func(_ string, need int64) error {
+						asked = max(asked, need)
+						return noDisk
+					}
+				})
+			if !errors.Is(err, noDisk) {
+				t.Fatalf("err = %v, want the disk check's refusal", err)
+			}
+			if onDisk == 0 || asked < onDisk {
+				t.Errorf("the disk was asked for %d bytes with %d bytes of changes on disk", asked, onDisk)
+			}
+			if left := snapshotFilesOf(t, base); len(left) != 0 {
+				t.Errorf("a refused table left %v in the new snapshot", left)
+			}
+		})
+	}
+}
+
+// foldedToDisk runs changes through the fold's own admission a page at a
+// time, as foldEventWindow does, and returns the result it would hand on.
+func foldedToDisk(t *testing.T, limit int64, pages ...map[string]*query.ResultRow) *foldResult {
+	t.Helper()
+	res := &foldResult{Changes: map[string]*query.ResultRow{}}
+	t.Cleanup(res.close)
+	for _, page := range pages {
+		for pk, ev := range page {
+			res.Changes[pk] = ev
+		}
+		if err := res.admitPage(limit, 1, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if res.Spill == nil {
+		t.Fatal("the fixture did not pass the limit: nothing went to disk")
+	}
+	if err := res.Spill.finish(); err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+// The hand-off from the fold itself: what admitPage moved to disk, a row
+// changed on two pages included, is published as a pair, and closing the fold
+// afterwards removes the changes from disk.
+func TestTableDelta_aFoldThatWentToDiskPublishesAPair(t *testing.T) {
+	noCompaction(t)
+	rows, nulls := zooRows()
+	src := writeZooBaseline(t, rows, nulls)
+	t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	at, cut := t0.Add(5*time.Minute), &query.BinlogPos{File: "binlog.000009", Pos: 1000}
+	w := bigWindow("final")
+	_, ref, _ := emitSnapshot(t, src, cloneChanges(w), cut, at)
+	res := foldedToDisk(t, 4, changeMap(upd(3, "three-early"), ins(10, "new-early"), ins(11, "x"), ins(12, "x"), ins(13, "x")), cloneChanges(w))
+	dir := res.Spill.dir
+	base, rep, err := deltaWindow(t, t.TempDir(), src, t0, nil, at, cut, func(p *tableDeltaPublish) { p.fold = res })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.TableDelta || rep.DeltaCompacted != "" || rep.DeltaSpillPasses < 3 {
+		t.Fatalf("report = TableDelta %v compacted %q passes %d; want a pair from the fold's spill", rep.TableDelta, rep.DeltaCompacted, rep.DeltaSpillPasses)
+	}
+	want, got := byID(readSnapshotRows(t, ref)), byID(deltaState(t, base))
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("state differs from the full rewrite\n got: %v\nwant: %v", got, want)
+	}
+	res.close()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the changes are still on disk at %s after the fold was closed (err=%v)", dir, err)
+	}
+}
+
+// The dropped-column guard (#843) reads what the fold recorded about the
+// window's images, not the change map, so it holds for a window on disk.
+func TestTableDelta_aFoldThatWentToDiskStillRefusesADroppedColumn(t *testing.T) {
+	noCompaction(t)
+	rows, nulls := zooRows()
+	src := writeZooBaseline(t, rows, nulls)
+	t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	res := foldedToDisk(t, 4, bigWindow("x"))
+	res.SawImage = true
+	res.ImageColumns = map[string]struct{}{}
+	for _, c := range zooColumns(t) {
+		if c.Name != "name" {
+			res.ImageColumns[c.Name] = struct{}{}
+		}
+	}
+	base, _, err := deltaWindow(t, t.TempDir(), src, t0, nil, t0.Add(5*time.Minute), &query.BinlogPos{File: "binlog.000009", Pos: 1000},
+		func(p *tableDeltaPublish) { p.fold = res })
+	if !errors.Is(err, ErrSchemaChanged) {
+		t.Fatalf("err = %v, want the dropped-column refusal (ErrSchemaChanged)", err)
+	}
+	if left := snapshotFilesOf(t, base); len(left) != 0 {
+		t.Errorf("a refused table left %v in the new snapshot", left)
 	}
 }

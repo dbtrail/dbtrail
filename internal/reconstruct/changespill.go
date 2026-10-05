@@ -191,6 +191,22 @@ func (s *changeSpill) load(b int) (map[string]*query.ResultRow, error) {
 	}
 }
 
+// diskBytes is how much the groups take on disk, or zero for what cannot be
+// sized. It is the estimate a pair written from the spill gives the disk
+// check (#2126): the rows are the same ones, in a format that packs less.
+func (s *changeSpill) diskBytes() int64 {
+	var n int64
+	for b := range spillBuckets {
+		if !s.written[b] {
+			continue
+		}
+		if fi, err := os.Stat(s.path(b)); err == nil {
+			n += fi.Size()
+		}
+	}
+	return n
+}
+
 // eachPass reads the groups back in order and hands them to run a pass at a
 // time: as many groups as fit under the limit, the next group's size predicted
 // from the last one (the hash spreads rows evenly). Every group belongs to
