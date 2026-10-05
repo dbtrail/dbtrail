@@ -172,6 +172,13 @@ func TestFetch_streamShapeNamesTheMissingIndex(t *testing.T) {
 	defer db.Close()
 	missing := &drivermysql.MySQLError{Number: 1176, Message: "Key 'idx_row_lookup' doesn't exist in table 'binlog_events'"}
 
+	// As the merged fetch hands a page to the engine: its start already
+	// settled (#2138), so the first statement is the events query.
+	streamOpts := func() Options {
+		o := streamOpts()
+		o.sinceSettled = true
+		return o
+	}
 	mock.ExpectQuery("FORCE INDEX").WillReturnError(missing)
 	_, err = New(db).Fetch(context.Background(), streamOpts())
 	if err == nil || !strings.Contains(err.Error(), "ALTER TABLE binlog_events ADD INDEX idx_row_lookup") || !errors.Is(err, missing) {

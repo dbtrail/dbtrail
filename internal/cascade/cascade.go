@@ -410,6 +410,10 @@ func SynthesizeVictims(
 	opts Options,
 ) (Result, error) {
 	opts = opts.withDefaults()
+	// One picture of the index for the whole run: scanChildren below fetches
+	// once per (foreign key, parent row), and each of those fetches would
+	// otherwise load its own (#2138, query.ForRun).
+	eng = query.ForRun(eng)
 
 	var (
 		victims          []query.ResultRow

@@ -69,6 +69,9 @@ type MergedFetcher struct {
 	// SourceResolver); nil = archive_state via ResolveArchiveSources.
 	SourceResolver SourceResolver
 
+	// picture is the PartitionHeads the fetcher's fetches share (#2138).
+	picture runPicture
+
 	once    sync.Once
 	sources []string
 	srcErr  error
@@ -208,7 +211,18 @@ func (m *MergedFetcher) resolveOnce(ctx context.Context, db *sql.DB) ([]string, 
 
 // Fetch implements Fetcher.
 func (m *MergedFetcher) Fetch(ctx context.Context, opts Options) ([]ResultRow, error) {
+	// One picture of the index for the fetcher's lifetime, like the archive
+	// sources above: a fetcher serves one run (see runPicture).
+	var heads *PartitionHeads
+	if needsPicture(opts) {
+		var err error
+		if heads, err = m.picture.get(ctx, m.DB); err != nil {
+			return nil, fmt.Errorf("cannot tell how far back the changes after %s:%d reach: %w",
+				opts.SincePos.File, opts.SincePos.Pos, err)
+		}
+	}
 	rows, plan, skipped, _, elided, err := FetchMergedFull(ctx, m.DB, m.Engine, FetchMergedOptions{
+		PartitionHeads: heads,
 		Opts:           opts,
 		DBName:         m.DBName,
 		NoArchive:      m.NoArchive,

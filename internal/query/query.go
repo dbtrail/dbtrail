@@ -284,6 +284,12 @@ type Options struct {
 	// index entries, not clustered-page reads. Measured on 8.4.9: the floor
 	// appears in the range itself ("... AND 4500 < event_id").
 	SinceEventID uint64
+	// sinceSettled records that Since already is the time this fetch must
+	// start from, read off the index for its SincePos (#2138, settleSince).
+	// The merged fetch sets it once for all its pages; Engine.Fetch settles
+	// any options that reach it without it, so no caller that pairs a time
+	// with a position can run on the time alone.
+	sinceSettled bool
 	// AfterEvent, when set, restricts results to events strictly AFTER this
 	// point in the (event_timestamp, event_id) sort order — the keyset cursor
 	// that makes a windowed fetch pageable without OFFSET (#1097).
@@ -468,6 +474,9 @@ func OrderDirection(order string) string {
 // Engine executes queries against the index database.
 type Engine struct {
 	db *sql.DB
+	// run, when set, is the one picture of the index this engine's fetches
+	// share (#2138): see ForRun. nil = each fetch that needs one loads it.
+	run *runPicture
 }
 
 // New creates a query Engine backed by db.
@@ -483,6 +492,19 @@ func (e *Engine) Fetch(ctx context.Context, opts Options) ([]ResultRow, error) {
 		return nil, err
 	}
 	if err := opts.ValidatePKRange(); err != nil {
+		return nil, err
+	}
+	// A caller that reaches the engine directly with a time and a position
+	// (the cascade's baseline window) gets the same start as the merged fetch.
+	var heads *PartitionHeads
+	if e.run != nil && needsPicture(opts) {
+		var err error
+		if heads, err = e.run.get(ctx, e.db); err != nil {
+			return nil, fmt.Errorf("cannot tell how far back the changes after %s:%d reach: %w",
+				opts.SincePos.File, opts.SincePos.Pos, err)
+		}
+	}
+	if _, _, err := settleSince(ctx, e.db, &opts, heads); err != nil {
 		return nil, err
 	}
 	q, args := buildQuery(opts)
@@ -834,7 +856,7 @@ func buildQuery(opts Options) (string, []any) {
 			// #1689): the function form leaves the range bounded above only,
 			// this form bounds both. No test pins that half; the integration
 			// test says why it declines to.
-			floor := since.Truncate(time.Hour).Add(-time.Hour)
+			floor := CoarseSinceFloor(since)
 			where = append(where, "event_timestamp >= ?")
 			args = append(args, floor)
 			// Still deliberately NOT the exact Since instant — see SincePos.

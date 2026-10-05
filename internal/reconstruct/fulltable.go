@@ -142,6 +142,10 @@ type FullTableConfig struct {
 	// anchored at (nil when the index holds no events); see ResolveSnapshotCut.
 	snapshotDir string
 	cut         *query.BinlogPos
+	// heads is the live index as the run saw it right after resolving cut:
+	// what each table's fetch reads its time floor from (#2138). nil outside
+	// Parquet mode, where each fetch reads its own.
+	heads *query.PartitionHeads
 	// ddlMark is the run's DDL mark, encoded (ddl_mark.go): the newest
 	// schema_changes row, read before the cut and so before any table's
 	// check. "" when the index was not written by a stream or holds no row.
@@ -385,6 +389,17 @@ type TableReport struct {
 // chain's start, and a floor derived from it would sit after events the
 // base's anchor has yet to see, which the fetch would then drop without an
 // error (#1718). Pure, so the rule is testable without an index.
+//
+// The time returned here is NOT where the fetch ends up starting (#2138). It
+// is a wall clock: a refresh stamps its files with its own time and a dump
+// with the dump host's, while the index files every event under the time its
+// statement ran on the source. An event the index receives later than it ran
+// (capture catching up after an outage, a source that is a delayed replica)
+// is after the anchor's position and hours before this time, and a floor
+// taken from this time alone left it out of every later snapshot, silently.
+// The merged fetch therefore settles the floor itself, from the index: see
+// query.PartitionHeads. What this function still decides is the anchor, and
+// the latest instant that floor may be.
 func fetchFloor(snapshotTime time.Time, bmeta baseline.DumpMetadata, prev *tableDelta) (since time.Time, anchor baseline.DumpMetadata) {
 	since, anchor = snapshotTime, bmeta
 	switch {
@@ -773,6 +788,12 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 			return nil, cutErr
 		}
 		cfg.cut = cut
+		// Read AFTER the cut, for every table of the run: each fetch below is
+		// bounded above by the cut, so everything it may return was indexed
+		// before this read and is in the picture (#2138, query.PartitionHeads).
+		if cfg.heads, err = query.LoadPartitionHeads(ctx, db); err != nil {
+			return nil, fmt.Errorf("cannot tell how far back the changes after each table's snapshot reach: %w", err)
+		}
 		if cut == nil {
 			slog.Warn("index holds no events; the emitted snapshot will carry its source baseline's coordinates unchanged",
 				"at", cfg.At.UTC().Format(time.RFC3339))
@@ -1416,6 +1437,7 @@ func ReconstructTable(
 		ArchiveFetcher: fetcher,
 		// This path merges over a baseline, the one merge that reads a spill.
 		SpillOverBudget: true,
+		Heads:           cfg.heads,
 	})
 	fold := &foldResult{Changes: map[string]*query.ResultRow{}}
 	if windowEmptyByPosition(fetchOpts.SincePos, fetchOpts.UntilPos) {
