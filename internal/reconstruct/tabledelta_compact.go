@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 )
 
 // MinorCompaction is what CompactTableDeltaMinor produced: the range pair,
@@ -62,6 +63,10 @@ func CompactTableDeltaMinor(ctx context.Context, basePath string, chain *baselin
 		return nil, fmt.Errorf("open duckdb: %w", err)
 	}
 	defer ddb.Close()
+	// The daemon's budget and a directory to spill to, as every other DuckDB
+	// session of a refresh: without them this one took DuckDB's own default,
+	// most of the host's memory, on a host that also runs capture.
+	applyDuckDBTuning(ctx, ddb, duckdbutil.Tuning{})
 	lit := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 	list := func(paths []string) string {
 		q := make([]string, len(paths))

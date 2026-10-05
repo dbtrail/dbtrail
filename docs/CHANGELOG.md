@@ -362,6 +362,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     as read does not. So it repeats, at most once per cut-over age, only on a
     server whose only writes are rows that get dropped. A server with any
     other indexed write keeps its normal updates.
+- **The job that merges a long chain of table changes now runs** (#1723).
+  Since v0.84.0 a table's chain was meant to be merged into one pair by a
+  background job once it listed 16 entries. The job never ran in a daemon: it
+  read "table deltas are on" from the refresh request, and that was only
+  written on a copy of the request inside the refresh, so the job saw "off"
+  and returned without a log line. The same reading made every refresh remove
+  the job's staging directory. Measured on a chain that reached 24 plain
+  pairs with no merge. The setting is now written on the request before the
+  cycle starts, and the job runs under the daemon's DuckDB memory limit (it
+  had none of its own). Nothing was lost while it did not run: a chain reads
+  the same merged or not; it only listed more files.
 - **Read routing: a statement that names a generated column is answered by
   MySQL** (#2123). A snapshot holds no generated column, so the copy does
   not have it, and a statement that named one was not always refused there:
