@@ -54,6 +54,11 @@ func TestPreparedRouted_ladder(t *testing.T) {
 		{"a write", "UPDATE t SET a = ? WHERE id = ?", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonWrite},
 		{"not a select", "SHOW COLUMNS FROM t WHERE a = ? OR b = ?", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonNotASelect},
 		{"vetoed", "SELECT NOW(), ?, ?", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonVeto},
+		// The vetoes of #2122 read the template, placeholders and all.
+		{"vetoed: ~", "SELECT ~?, ?", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonVeto},
+		{"vetoed: hexadecimal literal", "SELECT count(*) FROM t WHERE a = ? AND k = 0x10 AND b > ?", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonVeto},
+		{"vetoed: hexadecimal string", "SELECT count(*) FROM t WHERE a = ? AND k = x'41' AND b > ?", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonVeto},
+		{"vetoed: date arithmetic", "SELECT count(*) FROM t WHERE d > CAST(? AS DATE) + ?", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonVeto},
 		{"in transaction", "SELECT count(*) FROM t WHERE a = ? AND b > ?", fakeRouter{toCopy: true, inTxn: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonInTransaction},
 		{"routing off", "SELECT count(*) FROM t WHERE a = ? AND b > ?", fakeRouter{toCopy: true}, fresh, 0, nil, "mysql", false, RouteReasonRoutingOff},
 		{"cheap plan", "SELECT * FROM t WHERE a = ? AND id = ?", fakeRouter{toCopy: false, reason: "cheap"}, fresh, time.Minute, nil, "mysql", true, RouteReasonCheapPlan},
