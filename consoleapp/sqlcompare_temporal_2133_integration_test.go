@@ -36,11 +36,11 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	}
 	t.Logf("source: %s", version)
 	rows := [][]string{
-		{"1", "2026-01-01", "2026-01-01 10:00:00", "2026-01-01 10:00:00", "10:00:00", "2026", "-8", "10.50"},
-		{"2", "2026-01-15", "2026-01-15 11:30:00", "2026-01-15 11:30:00", "11:30:00", "2026", "5", "2.00"},
-		{"3", "2026-02-03", "2026-02-03 12:00:01", "2026-02-03 12:00:01", "12:00:01", "2025", "-1", "7.25"},
+		{"1", "2026-01-01", "2026-01-01 10:00:00", "2026-01-01 10:00:00", "10:00:00", "2026", "-8", "10.50", "2026-01-01 10:00:00.600000"},
+		{"2", "2026-01-15", "2026-01-15 11:30:00", "2026-01-15 11:30:00", "11:30:00", "2026", "5", "2.00", "2026-01-15 11:30:00.400000"},
+		{"3", "2026-02-03", "2026-02-03 12:00:01", "2026-02-03 12:00:01", "12:00:01", "2025", "-1", "7.25", "2026-02-03 12:00:01.000000"},
 	}
-	if _, err := srcDB.Exec("CREATE TABLE ev (id INT NOT NULL PRIMARY KEY, created_on DATE, dt DATETIME, ts TIMESTAMP NULL, tm TIME, yr YEAR, n INT, amount DECIMAL(10,2))"); err != nil {
+	if _, err := srcDB.Exec("CREATE TABLE ev (id INT NOT NULL PRIMARY KEY, created_on DATE, dt DATETIME, ts TIMESTAMP NULL, tm TIME, yr YEAR, n INT, amount DECIMAL(10,2), dt6 DATETIME(6))"); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range rows {
@@ -79,7 +79,7 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	served := make(chan struct{})
 	go func() { _ = serveFlashback(ctx, srv, ln, flashbackConfig{}); close(served) }()
 	defer func() { cancel(); <-served }()
-	src := openRaw(t, sourceDSN)
+	src := openRaw(t, strings.Replace(sourceDSN, "parseTime=true", "parseTime=false", 1))
 	cp := openRaw(t, fmt.Sprintf("%s:tok@tcp(%s)/%s", ent.ID, ln.Addr(), srcName))
 
 	exprs := []string{
@@ -115,6 +115,19 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		"SELECT DATE '26-01-15'", "SELECT TIMESTAMP '26-01-15 10:00:00'", "SELECT DATE '2026-1-5'", "SELECT DATE '20260115'", "SELECT DATE '260115'", "SELECT TIME '10:00'", "SELECT TIME '100000'", "SELECT DATE '2026/01/15'",
 		"SELECT TIMESTAMP '2026-01-15'", "SELECT TIMESTAMP '20260115100000'", "SELECT TIMESTAMP '2026-01-01 10:00:00.6'", "SELECT TIMESTAMP '2026-01-01T10:00:00'",
 		"SELECT CAST('26-01-15' AS DATE)", "SELECT DATE('26-01-15')", "SELECT CAST('2026-01-01 10:00:00.6' AS DATETIME)", "SELECT CAST('2026-01-01 10:00:00.6' AS TIME)", "SELECT CAST('2026-01-01 10:00:00' AS DATETIME)",
+		"SELECT CONCAT(dt, '') FROM ev ORDER BY id", "SELECT CONCAT(ts, '') FROM ev ORDER BY id", "SELECT CAST(dt AS CHAR) FROM ev ORDER BY id", "SELECT LEFT(dt, 10) FROM ev ORDER BY id", "SELECT LENGTH(dt) FROM ev ORDER BY id",
+		"SELECT id FROM ev WHERE created_on = '26/01/15'", "SELECT id FROM ev WHERE created_on = '26.01.15'", "SELECT id FROM ev WHERE created_on = '1-2-3'", "SELECT DATE '1-2-3'", "SELECT id FROM ev WHERE dt >= '26-01-15' ORDER BY id",
+		"SELECT id FROM ev WHERE created_on = '2026-01-15 00:00:00'", "SELECT id FROM ev WHERE created_on = '2026-01-15T00:00:00'", "SELECT id FROM ev WHERE dt = '2026-01-15T11:30:00'", "SELECT id FROM ev WHERE created_on = '15-01-2026'", "SELECT id FROM ev WHERE created_on = '01/15/2026'",
+		"SELECT CAST(dt AS DATETIME) FROM ev ORDER BY id", "SELECT CAST(dt6 AS DATETIME) FROM ev ORDER BY id", "SELECT CAST(dt6 AS TIME) FROM ev ORDER BY id", "SELECT CAST(dt6 AS DATE) FROM ev ORDER BY id", "SELECT CAST(created_on AS DATETIME) FROM ev ORDER BY id", "SELECT CAST(tm AS TIME) FROM ev ORDER BY id",
+		"SELECT CAST('2026-01-01 10:00:00.6' AS DATETIME(3))", "SELECT CAST('2026-01-01 10:00:00.6666' AS DATETIME(3))", "SELECT CAST('10:00:00.6' AS TIME(1))", "SELECT CONVERT('2026-01-01 10:00:00.6', DATETIME)", "SELECT CAST('2026-01-01 10:00:00.6' AS DATETIME(6))", "SELECT CAST(dt6 AS DATETIME(3)) FROM ev ORDER BY id",
+		"SELECT dt6 FROM ev ORDER BY id", "SELECT dt6 + 1 FROM ev ORDER BY id", "SELECT id FROM ev WHERE dt6 > '2026-01-01 10:00:00' ORDER BY id", "SELECT id FROM ev WHERE dt6 = '2026-01-01 10:00:00.6' ORDER BY id",
+		"SELECT id FROM ev WHERE tm >= '9:00:00' ORDER BY id", "SELECT id FROM ev WHERE tm BETWEEN '10:00' AND '12:00' ORDER BY id", "SELECT id FROM ev WHERE tm = '10:00:00' ORDER BY id", "SELECT id FROM ev ORDER BY tm DESC", "SELECT MAX(tm) FROM ev", "SELECT id FROM ev WHERE tm > '09:00:00' ORDER BY id",
+		"SELECT id FROM ev WHERE yr = '2026' ORDER BY id", "SELECT id FROM ev WHERE yr BETWEEN 25 AND 26 ORDER BY id", "SELECT id FROM ev WHERE yr IN (26) ORDER BY id", "SELECT MAX(yr) FROM ev", "SELECT id FROM ev ORDER BY yr, id",
+		"SELECT 3 << 62", "SELECT id << 62 FROM ev ORDER BY id", "SELECT id << 63 FROM ev ORDER BY id", "SELECT 1 << 64", "SELECT 1 << 63", "SELECT id >> 64 FROM ev ORDER BY id", "SELECT id >> -1 FROM ev ORDER BY id", "SELECT id << -1 FROM ev ORDER BY id", "SELECT 4611686018427387904 << 1", "SELECT id << 31 FROM ev ORDER BY id", "SELECT id << 32 FROM ev ORDER BY id",
+		"SELECT BIT_AND(id) FROM ev WHERE id > 100", "SELECT BIT_OR(id) FROM ev WHERE id > 100", "SELECT BIT_XOR(id) FROM ev WHERE id > 100", "SELECT -1 & -1", "SELECT 5 & -1", "SELECT n & n FROM ev ORDER BY id", "SELECT 5 | 2.6", "SELECT '5' | 2", "SELECT id & 2.6 FROM ev ORDER BY id", "SELECT 18446744073709551615 & 1", "SELECT 9223372036854775808 | 0",
+		"SELECT MAX(created_on) - MIN(created_on) FROM ev WHERE id < 3", "SELECT d + 1 FROM (SELECT MAX(created_on) d FROM ev) x", "SELECT (SELECT MAX(created_on) FROM ev) + 1", "SELECT id, created_on - INTERVAL 1 DAY FROM ev ORDER BY id", "SELECT id FROM ev WHERE created_on + INTERVAL 1 DAY > '2026-01-15' ORDER BY id",
+		"SELECT id FROM ev WHERE created_on - INTERVAL 1 DAY = '2026-01-14' ORDER BY id", "SELECT id FROM ev WHERE dt - INTERVAL 1 DAY < '2026-01-14 11:30:00' ORDER BY id", "SELECT CONCAT(created_on + INTERVAL 1 DAY, '') FROM ev ORDER BY id", "SELECT created_on + INTERVAL 1 MONTH FROM ev ORDER BY id", "SELECT dt + INTERVAL 1 MONTH FROM ev ORDER BY id",
+		"SELECT created_on + INTERVAL 1 HOUR FROM ev ORDER BY id", "SELECT id FROM ev WHERE created_on + INTERVAL 1 DAY = '2026-01-16' ORDER BY id", "SELECT id FROM ev GROUP BY created_on + INTERVAL 1 DAY, id ORDER BY id", "SELECT MAX(created_on + INTERVAL 1 DAY) FROM ev",
 		"SELECT -1 | 0", "SELECT -8 >> 1", "SELECT 5 | 2", "SELECT 7 >> 1", "SELECT 1 << 3", "SELECT bit_count(-1)", "SELECT bit_count(7)", "SELECT 5 & 3", "SELECT 6 & 3 = 2", "SELECT 1 | 2 = 3",
 	)
 	for _, s := range stmts {
