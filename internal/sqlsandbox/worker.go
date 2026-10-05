@@ -660,10 +660,16 @@ func floatCell(f float64) any {
 // schemaExists reports whether the views created a schema of that name, as
 // DuckDB compares names: ASCII case folded. A lookup failure reads as absent,
 // which is the safe side (the default stays).
+//
+// COLLATE C on both sides: this runs in the copy's session, whose default
+// collation equates much more than case ('ß' with 'ss', full-width with
+// ASCII, accents, a zero-width space). Without it the probe says a schema
+// exists under a name DuckDB's own lookup then refuses, and SET search_path
+// fails every statement on the connection.
 func schemaExists(ctx context.Context, conn *sql.Conn, schema string) bool {
 	var n int
 	err := conn.QueryRowContext(ctx,
-		"SELECT count(*) FROM information_schema.schemata WHERE lower(schema_name) = lower(?)", schema).Scan(&n)
+		"SELECT count(*) FROM information_schema.schemata WHERE lower(schema_name) COLLATE C = lower(?) COLLATE C", schema).Scan(&n)
 	return err == nil && n > 0
 }
 
