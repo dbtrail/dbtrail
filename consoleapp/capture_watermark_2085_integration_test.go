@@ -64,30 +64,47 @@ func TestIntegrationCaptureWatermark_realGTIDSets_2085(t *testing.T) {
 		return c.CaptureWatermark(ctx, e)
 	}
 
+	// The server is shared with other tests, which write to it too: what the
+	// source has executed is read from it each time, never assumed.
+	executedNow := func() string {
+		t.Helper()
+		executed, err := readExecutedGTIDs(ctx, src)
+		if err != nil || executed == "" {
+			t.Fatalf("the source's executed set = %q, %v", executed, err)
+		}
+		return executed
+	}
+
 	// The source is ahead of the saved position: nothing proven yet.
 	saved(write())
 	write()
-	ahead := write()
+	write()
 	first := ask()
 	firstAsked := now
 	if !first.Through.IsZero() || !strings.HasPrefix(first.Detail, "the source is ahead") {
 		t.Fatalf("source ahead on a first read: %+v, want no watermark and why", first)
 	}
-	// Capture reaches what the source had at that read, and the source has
-	// moved on again: complete as of the FIRST read.
-	saved(ahead)
+	// Capture reaches what the source had at that read (and whatever it has
+	// executed since), and the source moves on again: complete as of the
+	// FIRST read, not of this one.
+	saved(executedNow())
 	write()
-	latest := write()
+	write()
 	second := ask()
 	if !second.Through.Equal(firstAsked) {
 		t.Fatalf("after capture reached the first sample: through = %v (%s), want the instant of the first read %v", second.Through, second.Detail, firstAsked)
 	}
 	// Capture holds everything the source has: complete as of this read.
-	saved(latest)
-	third := ask()
+	// Another test may write between the save and the read, so a few tries.
+	var third console.CaptureWatermark
+	for try := 0; try < 10 && !third.Through.Equal(now); try++ {
+		saved(executedNow())
+		third = ask()
+	}
 	if !third.Through.Equal(now) {
 		t.Fatalf("with equal sets: through = %v (%s), want the instant of this read %v", third.Through, third.Detail, now)
 	}
+	latest := executedNow()
 	// A saved position with a transaction the source never executed: the
 	// source was reset or replaced, and nothing proven about the old one
 	// holds.
