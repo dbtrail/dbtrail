@@ -154,6 +154,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   account, as before. MySQL and MariaDB sources.
 
 ### Fixed
+- **A table with more than a million changed rows in one update is no longer
+  written again in full** (#2126). With table deltas on, an update keeps the
+  changed rows of each table in memory up to a limit (1,000,000 per table in
+  the `watch` daemon) and past it moves them to disk. Only the full rewrite
+  could read them back from there, so such a window ended the table's chain
+  and wrote the whole table. On a busy table one skipped slot was enough:
+  measured on 130 million rows at 300 transactions a second, a 5-minute window
+  of 785,000 changed rows wrote its changes in under 30 seconds, a 10-minute
+  window of 1.5 to 1.9 million rewrote the table in 10 to 14 minutes, that
+  update outran its slot, and the schedule read the whole source again, over
+  and over. The changes are now written beside the table from disk, in passes
+  that each read the table's key columns. A chain still ends for the other
+  reasons (a day old, a quarter of the table's size, a capture gap).
 - **The MySQL port tells a driver the truth about its session, so a
   `rollback()` through read routing undoes the write** (#2110). MySQL sends
   status flags with its handshake and with every answer (autocommit, in a

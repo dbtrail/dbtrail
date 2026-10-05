@@ -176,7 +176,9 @@ func TestTableDelta_pairFootersCarryLastEventID(t *testing.T) {
 	if footer(upserts) != 77 {
 		t.Fatalf("second pair: %d, want 77", footer(upserts))
 	}
-	at4 := t0.Add(20 * time.Minute)
+	// A chain past its day is written in full; from a spill here, so the
+	// rewrite reads its changes from disk as well.
+	at4 := t0.Add(tableDeltaMaxAge + time.Hour)
 	base4, rep, err := deltaWindow(t, root, base3, at3, changeMap(upd(3, "v3")), at4, &query.BinlogPos{File: "binlog.000009", Pos: 4000},
 		func(p *tableDeltaPublish) {
 			p.fold.LastEventID = 0
@@ -187,7 +189,7 @@ func TestTableDelta_pairFootersCarryLastEventID(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rep.TableDelta {
-		t.Fatal("the spilled window was not compacted")
+		t.Fatal("the day-old chain was not compacted")
 	}
 	posdel, upserts = baseline.TableDeltaPaths(base4, 0)
 	if footer(base4) != 77 || footer(posdel) != 77 || footer(upserts) != 77 {

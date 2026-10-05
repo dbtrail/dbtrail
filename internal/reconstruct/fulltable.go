@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -368,6 +367,10 @@ type TableReport struct {
 	DeltaChainFiles  int
 	DeltaChainCopied int
 	DeltaCompacted   string
+	// DeltaSpillPasses is how many passes this run's pair was written in when
+	// the window's changes were on disk (#2126); zero for a pair written from
+	// memory, and for a rewrite.
+	DeltaSpillPasses int
 	// DeltaCompactedRange is "<lo>-<hi>" when this run adopted a compaction
 	// job's range pair in place of the chain's first pairs (#1723).
 	DeltaCompactedRange string
@@ -2016,9 +2019,8 @@ func mergeBaselineImages(ctx context.Context, in mergeCore, emit func(map[string
 }
 
 // mergeSpilledPasses is the merge over a fold whose changes went to disk
-// (#1107). It reads the groups in order into one pass map while they fit under
-// the fold's in-memory limit, predicting the next group's size from the last
-// one (the hash spreads rows evenly), then runs the pass: the per-pass check,
+// (#1107). It takes the groups a pass at a time (changeSpill.eachPass) and
+// runs each pass: the per-pass check,
 // one scan of the baseline limited to the pass's groups, and that pass's
 // leftover inserts. Every group belongs to exactly one pass, empty ones
 // included, so every baseline row is emitted exactly once.
@@ -2030,43 +2032,17 @@ func mergeBaselineImages(ctx context.Context, in mergeCore, emit func(map[string
 // every row group over the whole key range, so a later single-row read of that
 // snapshot, or of one folded from it, prunes fewer row groups.
 func mergeSpilledPasses(ctx context.Context, ddb *sql.DB, in mergeCore, emit func(map[string]any) error, stats *mergeStats) error {
-	var owns [spillBuckets]bool
-	pass := map[string]*query.ResultRow{}
-	run := func() error {
+	passes, err := in.Spill.eachPass(ctx, func(pass map[string]*query.ResultRow, owns *[spillBuckets]bool) error {
 		if err := in.CheckPass(pass); err != nil {
 			return err
 		}
-		if err := scanBaselinePass(ctx, ddb, in, pass, &owns, emit, stats); err != nil {
+		if err := scanBaselinePass(ctx, ddb, in, pass, owns, emit, stats); err != nil {
 			return err
 		}
-		if err := emitLeftoverChanges(in, pass, emit, stats); err != nil {
-			return err
-		}
-		stats.Passes++
-		owns = [spillBuckets]bool{}
-		pass = map[string]*query.ResultRow{}
-		return nil
-	}
-	last := 0
-	for b := range spillBuckets {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if len(pass) > 0 && int64(len(pass)+last) > in.Spill.limit {
-			if err := run(); err != nil {
-				return err
-			}
-		}
-		group, err := in.Spill.load(b)
-		if err != nil {
-			return err
-		}
-		last = len(group)
-		// Groups hold disjoint keys, so nothing here overwrites.
-		maps.Copy(pass, group)
-		owns[b] = true
-	}
-	if err := run(); err != nil {
+		return emitLeftoverChanges(in, pass, emit, stats)
+	})
+	stats.Passes += passes
+	if err != nil {
 		return err
 	}
 	slog.Info("reconstruct: merged the changes from disk", "schema", in.Schema, "table", in.Table, "passes", stats.Passes)

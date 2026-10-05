@@ -113,7 +113,9 @@ func TestSourceRead_throughATableDeltaChain(t *testing.T) {
 
 	// A compaction folds the chain into a new base: one fold past the chain,
 	// and the empty pair it starts the next chain with adds none.
-	at4 := t0.Add(4 * time.Hour)
+	// Forced by the chain's age, with the window's changes on disk so the
+	// rewrite reads them from there.
+	at4 := t0.Add(tableDeltaMaxAge + time.Hour)
 	b4, rep, err := deltaWindow(t, root, b3, at3, changeMap(upd(3, "v3")), at4, pos(400), func(p *tableDeltaPublish) {
 		p.fold.Spill = spillOf(t, 1, changeMap(upd(3, "v3")))
 		p.fold.Changes = nil

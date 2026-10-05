@@ -47,11 +47,19 @@ import (
 // tableDeltaCompactReason: the chain is a day old, or it started too close to
 // the oldest events the index keeps (FullTableConfig.ChainStartFloor); every pair together has
 // passed tableDeltaMaxFraction of the base (and tableDeltaMinCompactBytes, so
-// small tables are left alone); the window's changes spilled to disk; the run
+// small tables are left alone); the run
 // crossed a known capture gap; the previous snapshot is on S3; the table has
 // no binlog anchor to resume from or a column whose name a delta reserves;
 // the previous pair was written by v0.83.0; the sequence is exhausted. A
 // rewrite leaves with the EMPTY sequence-0 pair that starts the next chain.
+//
+// A window whose changes went to disk (#1107) is NOT one of them (#2126). It
+// was, because the pair was written from the in-memory map and only the
+// rewrite could read the spill; one skipped slot then doubled a busy table's
+// window past the limit, the table was written in full, that update outran
+// its own slot, and the schedule fell back to full reads of the source. The
+// pair is now written a pass at a time (writeTableDelta), each pass reading
+// the key columns of the base where the rewrite read and wrote all of it.
 const tableDeltaMaxAge = 24 * time.Hour
 
 // The size rule: rewrite once the chain's files together pass
@@ -260,7 +268,7 @@ func readDeltaChainStart(ctx context.Context, basePath string) (time.Time, error
 // yet is checked on newStart: a chain begun over an old base starts at that
 // base's time, not at this run, and would otherwise carry an already too old
 // start forward for a whole cycle.
-func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, spilled bool, capGap *CaptureGap, at time.Time, hasAnchor bool, reserved string, chainFloor, newStart time.Time) string {
+func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, capGap *CaptureGap, at time.Time, hasAnchor bool, reserved string, chainFloor, newStart time.Time) string {
 	switch {
 	case strings.HasPrefix(basePath, "s3://"):
 		return "the previous snapshot is read from S3"
@@ -276,8 +284,6 @@ func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, 
 		return "the table has a column named " + reserved
 	case capGap != nil:
 		return "the run proceeded over a known capture gap"
-	case spilled:
-		return "the window's changes did not fit in memory"
 	}
 	if prev == nil {
 		if !chainFloor.IsZero() && !newStart.IsZero() && !newStart.After(chainFloor) {
@@ -334,9 +340,13 @@ func reservedDeltaColumn(cols []baseline.Column) string {
 // upserts writer runs after this and needs every entry.
 func lookupBasePositions(ctx context.Context, basePath, schema, table string, pkCols []metadata.ColumnMeta,
 	changes map[string]*query.ResultRow, tuning duckdbutil.Tuning) ([]int64, error) {
-	out, _, err := lookupBasePositionsWith(ctx, basePath, schema, table, pkCols, changes, tuning, true)
+	out, _, err := lookupBasePositionsWith(ctx, basePath, schema, table, pkCols, changes, tuning, tableDeltaJoinKeys)
 	return out, err
 }
+
+// tableDeltaJoinKeys lets lookupBasePositions take the DuckDB join; a variable
+// so a test can hold a whole publish to the scan.
+var tableDeltaJoinKeys = true
 
 // lookupStats says how a lookup went: whether the join was taken and how
 // many base rows crossed into Go. A test pins Examined, because a join that
@@ -667,22 +677,33 @@ type tableDeltaInput struct {
 	// pair's sequence plus one.
 	seq        int
 	chainStart time.Time
-	// newDead are the base rows this window's changes touch, ascending.
+	// newDead are the base rows this window's changes touch, ascending. Unset
+	// when the changes are on disk (merge.Spill): spillPass finds them.
 	newDead []int64
+	// spillPass is called with each pass of a spilled window before its rows
+	// are written, and returns the base rows that pass touches (#2126). It is
+	// also where the #602 column check runs: prepareMerge ran it over the
+	// in-memory map, which is empty when the changes are on disk, and a check
+	// over an empty map passes on everything. Required with merge.Spill; it
+	// must not drain the map.
+	spillPass func(pass map[string]*query.ResultRow) ([]int64, error)
 	// spaceHint is the previous pair's upserts size, the estimate the space
 	// check is given for this one; 0 skips the check.
 	spaceHint int64
 }
 
 // writeTableDelta writes ONE pair of sequence in.seq beside in.basePath from
-// the change map and returns how many dead positions and upsert rows it holds
-// (tombstones included). On any error both files are removed: half a pair is
-// worse than none (baseline.ErrHalfTableDelta).
+// the window's changes and returns how many dead positions and upsert rows it
+// holds (tombstones included), and in how many passes the changes were read
+// when they were on disk (0 from memory). On any error both files are removed:
+// half a pair is worse than none (baseline.ErrHalfTableDelta).
 //
 // The upserts are the window's changes and nothing else: an image with op "u"
-// for every INSERT/UPDATE, a tombstone with op "d" for every DELETE, in key
-// order. Drains in.merge.Changes.
-func writeTableDelta(ctx context.Context, in tableDeltaInput) (dead, upsertRows int64, retErr error) {
+// for every INSERT/UPDATE, a tombstone with op "d" for every DELETE. From
+// memory they are in key order; from a spill, in key order within each pass
+// (#2126), which no reader depends on: the state and the compaction both
+// partition by key and order by file. Drains in.merge.Changes.
+func writeTableDelta(ctx context.Context, in tableDeltaInput) (dead, upsertRows int64, passes int, retErr error) {
 	posdelPath, upsertsPath := baseline.TableDeltaPaths(in.basePath, in.seq)
 	defer func() {
 		if retErr == nil {
@@ -694,10 +715,20 @@ func writeTableDelta(ctx context.Context, in tableDeltaInput) (dead, upsertRows 
 			}
 		}
 	}()
+	spilled := in.merge.Spill != nil
+	switch {
+	case spilled && in.spillPass == nil:
+		return 0, 0, 0, fmt.Errorf("internal: %s.%s would write a table delta from disk without the per-pass check", in.merge.Schema, in.merge.Table)
+	case spilled && len(in.merge.Changes) > 0:
+		// A spilled window is read from the disk only: a change still in the
+		// map would be left out without a word.
+		return 0, 0, 0, fmt.Errorf("internal: %s.%s has %d changes in memory beside the ones on disk, which the table delta would leave out",
+			in.merge.Schema, in.merge.Table, len(in.merge.Changes))
+	}
 
 	baseInfo, err := os.Stat(in.basePath)
 	if err != nil {
-		return 0, 0, fmt.Errorf("size the base of a table delta: %w", err)
+		return 0, 0, 0, fmt.Errorf("size the base of a table delta: %w", err)
 	}
 	md := snapshotFileMetadata(in.merge)
 	md[baseline.MetaKeyDeltaChainStart] = in.chainStart.UTC().Format(time.RFC3339)
@@ -707,40 +738,69 @@ func writeTableDelta(ctx context.Context, in tableDeltaInput) (dead, upsertRows 
 
 	if in.merge.SpaceCheck != nil && in.spaceHint > 0 {
 		if err := in.merge.SpaceCheck(filepath.Dir(in.basePath), in.spaceHint); err != nil {
-			return 0, 0, err
+			return 0, 0, 0, err
 		}
-	}
-
-	if dead, err = baseline.WritePosdel(posdelPath, md, in.newDead); err != nil {
-		return 0, 0, err
 	}
 
 	cols, err := baseline.ParseSchemaText(in.merge.CreateTableSQL)
 	if err != nil {
-		return 0, 0, fmt.Errorf("parse the baseline's embedded CREATE TABLE for %s.%s: %w", in.merge.Schema, in.merge.Table, err)
+		return 0, 0, 0, fmt.Errorf("parse the baseline's embedded CREATE TABLE for %s.%s: %w", in.merge.Schema, in.merge.Table, err)
 	}
 	upsCols, err := baseline.TableDeltaColumns(cols)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	w, err := newParquetTableWriter(upsertsPath, upsCols, md)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	defer func() {
 		if retErr != nil {
 			_ = w.Discard()
 		}
 	}()
-	if err := emitWindowChanges(in.merge, cols, in.merge.Changes, func(row map[string]any) error {
-		return w.WriteRow(row, in.merge.Schema, in.merge.Table)
-	}); err != nil {
-		return 0, 0, err
+	emit := func(changes map[string]*query.ResultRow) error {
+		return emitWindowChanges(in.merge, cols, changes, func(row map[string]any) error {
+			return w.WriteRow(row, in.merge.Schema, in.merge.Table)
+		})
+	}
+	newDead := in.newDead
+	if !spilled {
+		if err := emit(in.merge.Changes); err != nil {
+			return 0, 0, 0, err
+		}
+	} else {
+		newDead = nil
+		passes, err = in.merge.Spill.eachPass(ctx, func(pass map[string]*query.ResultRow, _ *[spillBuckets]bool) error {
+			// Before emit, which drains the pass.
+			pos, err := in.spillPass(pass)
+			if err != nil {
+				return err
+			}
+			newDead = append(newDead, pos...)
+			return emit(pass)
+		})
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		// A base row has one key and a key is in one group, so no position
+		// can come back from two passes. WritePosdel takes them ascending and
+		// distinct, and a repeat dropped here would hide whatever produced it.
+		slices.Sort(newDead)
+		for i := 1; i < len(newDead); i++ {
+			if newDead[i] == newDead[i-1] {
+				return 0, 0, 0, fmt.Errorf("internal: base row %d of %s.%s was found by two passes of the changes on disk",
+					newDead[i], in.merge.Schema, in.merge.Table)
+			}
+		}
 	}
 	if err := w.Close(); err != nil {
-		return 0, 0, fmt.Errorf("close table delta for %s.%s: %w", in.merge.Schema, in.merge.Table, err)
+		return 0, 0, 0, fmt.Errorf("close table delta for %s.%s: %w", in.merge.Schema, in.merge.Table, err)
 	}
-	return dead, w.Rows(), nil
+	if dead, err = baseline.WritePosdel(posdelPath, md, newDead); err != nil {
+		return 0, 0, 0, err
+	}
+	return dead, w.Rows(), passes, nil
 }
 
 // emitWindowChanges renders the change map as delta rows, in key order: the
@@ -918,7 +978,7 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	if cols, err := baseline.ParseSchemaText(in.CreateTableSQL); err == nil {
 		reserved = reservedDeltaColumn(cols)
 	}
-	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.fold.Spill != nil, p.capGap, p.cfg.At, hasAnchor, reserved, p.cfg.ChainStartFloor, newChainStart(p)); reason != "" {
+	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.capGap, p.cfg.At, hasAnchor, reserved, p.cfg.ChainStartFloor, newChainStart(p)); reason != "" {
 		return rewriteWithEmptyDelta(ctx, p, in, newBase, reason, reserved != "", rep)
 	}
 	// A base written before a type joined the binary list (VECTOR) stores that
@@ -955,10 +1015,22 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	}
 
 	// Positions BEFORE anything is written, and before the upserts writer
-	// drains the change map.
+	// drains the change map. A window that went to disk has none here: its
+	// rows are read back a pass at a time while the pair is written, and each
+	// pass is checked and looked up then (#2126).
+	if in.Spill != nil && len(in.Changes) > 0 {
+		return fmt.Errorf("internal: %s.%s has %d changes in memory beside the ones on disk, which the table delta would leave out",
+			p.schema, p.table, len(in.Changes))
+	}
 	newDead, err := lookupBasePositions(ctx, p.basePath, p.schema, p.table, p.pkCols, in.Changes, p.cfg.DuckDBTuning)
 	if err != nil {
 		return err
+	}
+	spillPass := func(pass map[string]*query.ResultRow) ([]int64, error) {
+		if err := checkPostBaselineColumns(in, pass, colNames); err != nil {
+			return nil, err
+		}
+		return lookupBasePositions(ctx, p.basePath, p.schema, p.table, p.pkCols, pass, p.cfg.DuckDBTuning)
 	}
 
 	// Carry the base and every earlier pair forward. What was published in the
@@ -1023,15 +1095,16 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	// A refresh that STARTS a chain writes sequence 0 even when empty: that
 	// pair is the chain's start marker.
 	var dead, ups int64
+	var passes int
 	written := !(p.prev != nil && len(in.Changes) == 0 && in.Spill == nil)
 	if !written {
 		seq = p.prev.Meta.DeltaSeq
 	} else {
 		newPosdel, newUpserts := baseline.TableDeltaPaths(newBase, seq)
 		published = append(published, newPosdel, newUpserts)
-		if dead, ups, err = writeTableDelta(ctx, tableDeltaInput{
+		if dead, ups, passes, err = writeTableDelta(ctx, tableDeltaInput{
 			merge: in, basePath: newBase, baseMeta: p.baseMeta, seq: seq, chainStart: chainStart,
-			newDead: newDead, spaceHint: spaceHint,
+			newDead: newDead, spaceHint: spaceHint, spillPass: spillPass,
 		}); err != nil {
 			return fail(err)
 		}
@@ -1054,6 +1127,7 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	rep.TableDelta, rep.DeltaPairWritten = true, written
 	rep.DeltaSeq = seq
 	rep.DeltaDeadRows, rep.DeltaUpsertRows = dead, ups
+	rep.DeltaSpillPasses = passes
 	rep.DeltaChainFiles, rep.DeltaChainCopied = len(chain.Files), copied
 	rep.Files = []string{filepath.Join(p.schema, p.table+".parquet")}
 	if !written {
@@ -1067,7 +1141,10 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		"schema", p.schema, "table", p.table, "events_applied", rep.EventsApplied,
 		"seq", seq, "dead_rows", dead, "upsert_rows", ups, "chain_files", len(chain.Files), "chain_copied", copied,
 		"base_linked", linked, "chain_start", chainStart.UTC().Format(time.RFC3339),
-		"fetch_ms", rep.FetchDuration.Milliseconds(), "fold_ms", rep.FoldDuration.Milliseconds())
+		"fetch_ms", rep.FetchDuration.Milliseconds(), "fold_ms", rep.FoldDuration.Milliseconds(),
+		// Above zero: the window's changes did not fit in memory and were
+		// read back from disk in that many passes.
+		"spill_passes", passes)
 	return nil
 }
 
@@ -1110,7 +1187,7 @@ func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInp
 	}
 	empty := in
 	empty.Changes, empty.Spill = map[string]*query.ResultRow{}, nil
-	if _, _, err := writeTableDelta(ctx, tableDeltaInput{
+	if _, _, _, err := writeTableDelta(ctx, tableDeltaInput{
 		merge: empty, basePath: newBase, baseMeta: newMeta, seq: 0, chainStart: p.cfg.At,
 	}); err != nil {
 		if rerr := os.Remove(newBase); rerr != nil && !os.IsNotExist(rerr) {
