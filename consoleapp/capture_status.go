@@ -72,6 +72,20 @@ type captureSlot struct {
 	prev   *captureSample
 	flight chan struct{} // closed when the read in flight has stored its answer
 	logged string
+	// The watermark (#2085, capture_watermark.go): through is the newest
+	// instant at which the source was asked and capture was later seen to
+	// hold all it had then, pending the sample still waiting for that.
+	through time.Time
+	pending *captureSample
+	// throughWhy says why through is zero, for the reader of a trace.
+	throughWhy string
+	// lastCaptured is the capture's saved GTID set at the last read that
+	// reached the source: a later one that does not include it went
+	// backward.
+	lastCaptured string
+	// proven is the GTID set capture was shown to hold at through: what the
+	// source had executed then. "" with no watermark.
+	proven string
 }
 
 // captureStatusReporter is console.CaptureStatusReporter for the watch
@@ -88,6 +102,10 @@ type captureStatusReporter struct {
 	// bootSSL is the TLS of the daemon's own capture (watch's --ssl-*
 	// flags); zero reads as console.DefaultSourceSSLMode.
 	bootSSL config.SSL
+
+	// bootSchemas and bootTables are the filters of the daemon's own capture
+	// (--schemas, --tables); a server in the registry carries its own.
+	bootSchemas, bootTables string
 
 	mu    sync.Mutex
 	slots map[string]*captureSlot
@@ -200,6 +218,7 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 	done := make(chan struct{})
 	slot.flight = done
 	prev := slot.prev
+	through, pending, lastCaptured, proven := slot.through, slot.pending, slot.lastCaptured, slot.proven
 	c.mu.Unlock()
 	// Deferred, so that whatever happens below, the next load reads again
 	// instead of waiting on a read that is over.
@@ -211,6 +230,10 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 		c.mu.Unlock()
 		close(done)
 	}()
+	// Before the read, not after: the watermark may only name an instant at
+	// which the source had not yet been asked. After the defer above, so a
+	// clock that fails here releases the read like any other failure.
+	asked := now()
 
 	// Detached from the request: a tab that closes mid-read must not leave
 	// "the request was cancelled" behind as the state of the capture.
@@ -229,9 +252,16 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 	at := now()
 	answer, next := captureStatusFrom(r, prev, at)
 	answer.ServerID = e.ID
+	was, sample := through, pending
+	through, pending, throughWhy := advanceWatermark(r, through, pending, lastCaptured, asked)
+	proven = provenAfter(proven, was, through, asked, sample, r)
+	if r.executed != "" {
+		lastCaptured = r.captured
+	}
 
 	c.mu.Lock()
 	slot.answer, slot.at, slot.has, slot.prev = answer, at, true, next
+	slot.through, slot.pending, slot.throughWhy, slot.lastCaptured, slot.proven = through, pending, throughWhy, lastCaptured, proven
 	slot.ttl = captureStatusTTL
 	if answer.RetryInSeconds > 0 {
 		slot.ttl = captureStatusPendingTTL
@@ -440,7 +470,18 @@ func captureHeadFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl con
 // verdict the checkpoint settles on its own.
 func headFromState(ctx context.Context, idx *sql.DB, st *status.StreamStateInfo, openSource func() (*sql.DB, error)) (captureProbeResult, error) {
 	if ok, detail := checkpointComparable(st); !ok {
-		return captureProbeResult{detail: detail}, nil
+		return captureProbeResult{detail: detail, uncomparable: true}, nil
 	}
-	return compareWithSource(ctx, idx, st, openSource, readExecutedAndPurgedGTIDs)
+	// The binary log's filters ride along with the GTID sets: a source that
+	// leaves writes out of its binlog has no watermark (#2085).
+	logsAll, logFilter := false, ""
+	r, err := compareWithSource(ctx, idx, st, openSource, func(ctx context.Context, db *sql.DB) (string, string, error) {
+		executed, purged, err := readExecutedAndPurgedGTIDs(ctx, db)
+		if err == nil {
+			logsAll, logFilter = readBinlogFilters(ctx, db)
+		}
+		return executed, purged, err
+	})
+	r.logsAll, r.logFilter = logsAll, logFilter
+	return r, err
 }

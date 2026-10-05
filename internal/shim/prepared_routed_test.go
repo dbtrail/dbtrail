@@ -124,8 +124,14 @@ func TestPreparedRouted_ladder(t *testing.T) {
 				if !strings.Contains(squash(f.gotStmt), `a = 'it''s a\b'`) || strings.Contains(f.gotStmt, "--") {
 					t.Errorf("the copy got %s", f.gotStmt)
 				}
-			} else if f.calls != 0 {
+			} else if f.calls != f.unchangedAsks {
+				// The one MySQL rung that asks the copy first: a snapshot past
+				// the limit, asked for an answer only over unchanged tables
+				// (#2085), which this copy does not give.
 				t.Errorf("the copy was asked on a MySQL rung: %s", f.gotStmt)
+			}
+			if wantAsks := map[bool]int{true: 1}[tc.wantReason == RouteReasonCopyTooOld]; f.unchangedAsks != wantAsks {
+				t.Errorf("the copy was asked for unchanged tables %d times, want %d", f.unchangedAsks, wantAsks)
 			}
 			if err := h.HandleStmtClose(ctx); err != nil || up.closed != 1 {
 				t.Errorf("close: %v, the source's statement closed %d times", err, up.closed)

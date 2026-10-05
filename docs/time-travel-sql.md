@@ -450,10 +450,15 @@ The decision, in order, for every statement:
    `LIMIT` with a filter no index serves. The study of which statements the copy answers the same way
    (the vetoes of step 4) was run against MySQL; on a MariaDB source read
    routing is as experimental, and less measured.
-6. For a plan the copy should take: the copy's snapshot older than
-   `--route-max-copy-age`, or its age unknown: **MySQL**. (Freshness is
-   checked after the plan on purpose: it costs a snapshot listing, which
-   the cheap reads must not pay.)
+6. For a plan the copy should take, how fresh the copy is. Its snapshot's
+   age unknown: **MySQL**. Its snapshot at most `--route-max-copy-age` old:
+   on to the next step. Older than that: the copy still answers when every
+   table the statement reads has had no change since its snapshot, and
+   **MySQL** answers otherwise (see
+   [Past the limit](#past-the-limit-tables-that-have-not-changed) below).
+   (Freshness is checked after the plan on purpose: it costs a snapshot
+   listing, and past the limit a few reads of the index, which the cheap
+   reads must not pay.)
 7. The session. MySQL answers a statement under the connection's session
    settings (its time zone, its SQL mode and so on); the copy answers the
    same only when it runs under the same ones. So before a statement goes
@@ -558,13 +563,188 @@ asked:
   time travel is answered from the index alone. This is what keeps time
   travel working while the source is down.
 
+#### Past the limit: tables that have not changed
+
+`--route-max-copy-age` is one age for the whole server: the age of the newest
+snapshot. A table nobody has written since its snapshot reads the same on the
+copy as on MySQL however old that snapshot is, and a table written a second
+ago does not, whatever the server's age says. So when the snapshot is older
+than the limit, the port does not send every heavy read to MySQL. It asks,
+for that statement, whether the tables it reads have changed since their
+snapshot, and the copy answers when none has.
+
+The tables are the ones the statement names, as the copy reads it. Every one
+of these must hold, and when any does not the statement goes to MySQL, as it
+did before:
+
+- **Capture is known to be up to date, as of a moment within the limit.**
+  The index only knows the changes capture has delivered, so "the index holds
+  no change of this table" means nothing while capture is behind or stopped.
+  DBTrail asks the source what it has executed (its GTID set) and compares it
+  with the position capture has saved. When capture's position includes
+  everything the source had at one of those reads, capture was complete as of
+  that read. That moment has to be at most `--route-max-copy-age` ago. The
+  limit therefore keeps its meaning: the copy's answer is never older than
+  it.
+- **The index holds no change of the table since its snapshot.** "Since" is
+  decided by binlog position, not by time: each table file of a snapshot
+  records the position it was read at, and the index is asked for a row
+  change of that table at or after that position, the same question a
+  snapshot refresh asks. A transaction that ran shortly before the snapshot
+  and committed after it counts as a change. (The index is searched from an
+  hour before the last change the snapshot holds of that table, or before
+  the full read its rows came from, on the source's own clock, so a refresh
+  taken while capture was behind does not hide what capture indexed later.
+  A statement that began earlier still, and committed after the snapshot, is
+  dated before that hour: when the index holds any change of that kind, the
+  table's older changes are searched too, by position alone. An index that
+  `bintrail index` has ever loaded binlog files into cannot tell that from
+  one row, so there the older changes are searched on every statement: a
+  table with a long history in the index then runs into the two-second
+  budget and follows the age rule.) So does any
+  schema change that names the table (`ALTER`,
+  `TRUNCATE`, `DROP`, `RENAME`), which changes a table without a row change:
+  those are placed by position alone, however long the statement ran.
+- **The index still holds everything since that position.** If rotation has
+  already dropped the partitions that cover it, changes may exist that the
+  index no longer has. A table whose file was carried over from an older
+  snapshot is judged from that file's own position, not from the newest
+  snapshot's. This is the limit to know: a snapshot refresh leaves a table
+  with no changes exactly as it was, position included, so a table that has
+  been quiet for longer than the index keeps its changes (`--rotate-retain`,
+  48 hours unless set) cannot be vouched for from the index, and follows the
+  age rule. A full snapshot gives every table a new position.
+- **Capture lost nothing in between.** A binlog gap, or an event capture read
+  and dropped (the capture health on the Overview), since the table's rows
+  were last read from the source, and the copy does not answer.
+- **The table can only change through its own row changes.** A table with a
+  foreign key that says `ON DELETE` or `ON UPDATE` `CASCADE`, `SET NULL` or
+  `SET DEFAULT` changes when its parent does, and MySQL does not write those
+  changes to the binlog. Such a table always follows the age rule. So does a
+  table outside what capture records (`--schemas`, `--tables`, a server's
+  schema filter).
+- **The snapshot is one DBTrail can vouch for**: taken at one point in time
+  (not with the `no-lock` mode, which reads each table at a different
+  moment), with its binlog position recorded, and not built over a known gap
+  in capture.
+
+What the answer is, then: what MySQL held for those tables at the moment
+capture was last confirmed complete. A change the source makes after that
+moment is not in it, exactly as a change made after a young snapshot is not
+in the copy's answer under the age rule. The next statement over that table
+goes to MySQL once the change reaches the index.
+
+This rule trusts the index to hold every change capture was given. What the
+index never received, and has no record of not receiving, it cannot see:
+
+- a write made with binary logging off (`SET sql_log_bin = 0`);
+- a statement-format write issued while the default database is a system
+  schema or one outside the capture's filters;
+- a table excluded from capture and included again in between, and a capture
+  restarted from a later position than it had reached;
+- a row capture could not decode and skipped with only a warning in the log
+  (a value in a legacy character set that does not convert);
+- a schema change (`TRUNCATE` included) whose record could not be written to
+  the index at that moment, which is also only a warning in the log;
+- a gap in capture whose record was cleared by stopping capture on that
+  server (Stop clears it) before a new full snapshot was taken;
+- a change a snapshot refresh itself left out of the file it wrote: a
+  refresh that ran while capture was more than about two hours behind can
+  miss changes it should have folded in. The position in that file's footer
+  says they are in it, so nothing after it looks changed;
+- a statement that began before the oldest hour the index still holds and
+  committed after the table's snapshot. While the hour it began in is in the
+  index the statement is found, however long it ran; once rotation drops
+  that hour, and until rotation also drops the hour of the snapshot, it is
+  not. The same goes for a change dated that far back because the source's
+  clock runs behind.
+
+None of these is new, and the copy was already wrong about such a change
+before this rule. The copy's age is the stamp of its newest snapshot, and a
+scheduled snapshot is, whenever it can be, a refresh built from the index
+with no read of the source. A refresh renews the age and still lacks what
+the index never received. So such a change stays missing from the copy until
+the next FULL snapshot, the one that reads the source again, under the age
+rule and under this one alike.
+
+What this rule adds is the stretch in which the copy answers at all. Under
+the age rule alone the copy stops answering heavy reads when its newest
+snapshot passes the limit, and starts again at the next snapshot. Under this
+rule it also answers in between, for tables the index shows no change of.
+Where every scheduled snapshot is a refresh, this makes no difference to how
+long such a change is missing. Where every snapshot is a full read, or
+nothing is scheduled, it does make one: the limit used to cap how stale the copy's
+answer about such a change could be, and for these tables it no longer
+does. On a source where those changes happen, taking FULL snapshots more
+often is what shortens it; refreshing more often does not, under either
+rule. A source that filters its binary log (`binlog-do-db`,
+`binlog-ignore-db`) is detected, and this rule is never applied to it.
+
+When it applies and what it costs:
+
+- Only a MySQL source captured in GTID mode (checked on every statement: a
+  capture restarted in binlog-position mode, or from an earlier point and
+  not yet back where it was, stops being vouched for at once),
+  whose index is not on the source server itself. A MariaDB source, a source in binlog-position mode, one with
+  tagged GTIDs, one that filters its binary log, and one that executed
+  transactions capture never read (a dump loaded with
+  `SET @@GLOBAL.gtid_purged`) always follow the age rule. The account DBTrail
+  captures with needs `REPLICATION CLIENT` on the source, which capture
+  already requires, to read the binary log's filters.
+- Only statements whose plan is expensive, and only past the limit. A cheap
+  read, and any read while the snapshot is within the limit, costs nothing
+  more than before.
+- The source is asked for its GTID set at most once every 30 seconds per
+  server, the same read the Overview makes to say whether capture is up to
+  date. The statement that triggers a read waits for it (two short
+  connections, bounded at three seconds) before it is decided. On a source that is being written, one read is not enough: capture
+  saves its position every few seconds, so the source is always a little
+  ahead. The first read leaves a sample and a later read confirms capture
+  reached it. The first heavy read after a quiet spell therefore goes to
+  MySQL, and the ones that follow half a minute later go to the copy. With a
+  limit under about a minute this rule rarely applies.
+- Each such statement reads the index a few times (capture's state, the
+  partition list, the schema changes since the snapshot, and two lookups per
+  table). Measured on an index of 3 million events over a week of hourly
+  partitions, on MySQL 8.4: about 5 ms in all for one table and 7.5 ms for
+  three, whether they changed or not. There are two slow cases. One is a
+  table that received a very large load in the two hours before its
+  snapshot and nothing since: the lookup walks those index entries every
+  time. For half a million of them that took 0.25 s when the table's file
+  came from a snapshot refresh and 1.5 s when it came from a full read of
+  the source (a refresh records how far into the index it got, which lets
+  MySQL skip the rows without reading them; a full read has nothing to
+  record). The other only exists while the index holds a statement that
+  began long before some snapshot and committed after it: then each table's
+  older changes are searched as well, across everything the index still
+  holds of that table. That costs nothing for a table with few of them and
+  grows with their number: 1.5 s for half a million with a full read's file
+  (0.25 s with a refresh's), so a table with more than about 700,000 older
+  changes and a full read's file does not fit. All the reads of one
+  statement share a two-second budget; past it the statement goes to MySQL,
+  so a statement over two such tables at once is not vouched for either.
+  Once a table is found changed after its snapshot, that is remembered for
+  that snapshot file and the index is not asked again: the statements that
+  follow go to MySQL at once.
+- The statement takes one of the copy's slots while it is checked, as a heavy
+  read within the limit does.
+
+A statement the copy answers this way is counted under `tables_unchanged`
+(below), apart from `expensive_plan`, so a copy that keeps answering from an
+old snapshot is visible. One that goes to MySQL is counted under
+`copy_too_old` as before, and the debug log line of that decision says which
+table changed or what could not be confirmed.
+
 What this is and is not:
 
 - **The copy's answer is as fresh as its snapshot.** A heavy read served
   from the copy does not see what changed since the last snapshot; that is
   what `--route-max-copy-age` bounds, and why there is no default that turns
-  this on. A `SELECT` that must see the last second belongs in a
-  transaction, which MySQL always answers.
+  this on. Past that age the copy only answers over tables with no change
+  since their snapshot, and then its answer is what the source held at a
+  moment no longer ago than the same limit (next section). A `SELECT` that
+  must see the last second belongs in a transaction, which MySQL always
+  answers.
 - **The copy's grants are nobody's; the forwarded ones are the registry's.**
   Forwarded statements run with the server's forwarding account, or with
   the source DSN's account when the server has none. Give this port to
@@ -1314,8 +1494,10 @@ MySQL's.
   `bintrail_read_routing_decisions_total{server, route, reason}` — `server`
   is the registry id, `route` is `copy`, `mysql` or `refused` (a statement
   the read-only port did not run), and `reason` is one of
-  a closed set: `expensive_plan` (the one reason a statement goes to the
-  copy), `cheap_plan`, `bounded_limit` (a small `LIMIT` MySQL answers
+  a closed set: `expensive_plan` (the copy answered, its snapshot within
+  the limit), `tables_unchanged` (the copy answered although its snapshot is
+  older than the limit, because the tables the statement reads have not
+  changed since their snapshot), `cheap_plan`, `bounded_limit` (a small `LIMIT` MySQL answers
   without reading past it), `not_a_select`, `write`, `session_setting`,
   `session_differs` (the source's session on that connection holds a setting
   the copy does not reproduce; DBTrail's log names the setting and its
@@ -1333,7 +1515,7 @@ MySQL's.
   `routing_off` (listed for completeness: a daemon binds the router only
   with routing on). A copy that never answers shows up as `copy_refused`,
   `copy_too_old`, `copy_age_unknown` or `session_differs` climbing while
-  `expensive_plan` stays flat; `explain_failed` climbing means MySQL refuses to `EXPLAIN` what the
+  `expensive_plan` and `tables_unchanged` stay flat; `explain_failed` climbing means MySQL refuses to `EXPLAIN` what the
   client runs (a table it cannot see, a statement it cannot plan);
   `upstream_lost` climbing means the source is unreachable or the registry's
   source credentials are wrong. Each routed statement counts exactly once,

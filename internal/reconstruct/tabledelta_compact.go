@@ -129,9 +129,9 @@ func CompactTableDeltaMinor(ctx context.Context, basePath string, chain *baselin
 	}
 	// Upserts: the newest version of every key across the merged pairs, in
 	// the order the state SQL uses (file name, which is sequence order).
-	q = fmt.Sprintf("COPY (SELECT * EXCLUDE (filename) FROM read_parquet(%s, filename=true, union_by_name=true) "+
-		"QUALIFY row_number() OVER (PARTITION BY \"%s\" COLLATE C ORDER BY filename COLLATE C DESC) = 1) TO %s %s",
-		list(upserts), baseline.TableDeltaPKColumn, lit(tmpUpserts), opts)
+	q = fmt.Sprintf("COPY (%s) TO %s %s",
+		baseline.TableDeltaLatestSQL(fmt.Sprintf("SELECT * FROM read_parquet(%s, filename=true, union_by_name=true)", list(upserts))),
+		lit(tmpUpserts), opts)
 	if _, err := ddb.ExecContext(ctx, q); err != nil {
 		return fail(fmt.Errorf("compact upserts %d..%d of %s: %w", lo, hi, basePath, err))
 	}

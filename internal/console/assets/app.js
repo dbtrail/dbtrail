@@ -13629,6 +13629,7 @@ function sqlClientPanel(servers, fb, reveal, live) {
 // unknown key (a newer daemon) is shown as is rather than dropped.
 const ROUTE_REASON_TEXT = {
   expensive_plan: "an expensive plan: the copy answered",
+  tables_unchanged: "an expensive plan over tables with no change since their snapshot: the copy answered, though it is older than the limit",
   cheap_plan: "a cheap plan (a lookup or a small read)",
   bounded_limit: "a small LIMIT MySQL answers without reading past it",
   not_a_select: "not a SELECT (SHOW, BEGIN, COMMIT, …)",
@@ -13640,7 +13641,7 @@ const ROUTE_REASON_TEXT = {
   veto: "uses something the copy answers differently (LIKE, NOW(), @variables, …)",
   explain_failed: "MySQL could not explain it",
   copy_age_unknown: "the copy's age is unknown",
-  copy_too_old: "the copy was older than the limit",
+  copy_too_old: "the copy was older than the limit, and a table the statement reads changed since its snapshot (or nothing could confirm that none did)",
   copy_refused: "the copy refused it (a construct it lacks, a table it does not have, the row cap)",
   copy_columns_differ: "SELECT *, NATURAL JOIN or a column name over a table whose columns on the copy are not MySQL's, or the snapshot holds no table definition: take a new full snapshot",
   show_warnings: "SHOW WARNINGS after a MySQL statement",
@@ -13674,7 +13675,7 @@ function routingBlock(fb, cur) {
         el("p", { class: "form-hint" },
           "Start DBTrail with a freshness limit for the copy (CLI: ", el("code", { text: "--route-max-copy-age 15m" }),
           ", or the environment variable ", el("code", { text: "BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE" }),
-          "). Then everything sent to this port runs on the server's own MySQL, writes included, except the heavy SELECTs, which run on the copy while it is at most that old. To refuse writes, add ", el("code", { text: "--route-read-only" }),
+          "). Then everything sent to this port runs on the server's own MySQL, writes included, except the heavy SELECTs, which run on the copy while it is at most that old, or over tables that have not changed since their snapshot. To refuse writes, add ", el("code", { text: "--route-read-only" }),
           " (or ", el("code", { text: "BINTRAIL_CONSOLE_ROUTE_READ_ONLY=1" }), "). The mysql line above stays the same. Experimental.")));
       return;
     }
@@ -13713,6 +13714,7 @@ function routingBlock(fb, cur) {
     if (r.scan_rows > 0) rules.push("it scans a whole table of at least " + r.scan_rows + " rows");
     wrap.append(el("p", { class: "cn-sql-row" }, rules.length
       ? "A SELECT runs on the copy when " + rules.join(" or ") + ", while the copy is at most " + fmtGoDuration(r.max_copy_age) + " old. " +
+        "Past that age the copy still answers one whose tables have not changed since their snapshot. " +
         (r.read_only ? "Every other read runs on MySQL." : "Everything else, writes included, runs on MySQL.")
       : "No plan threshold is set (both are 0), so every " + (r.read_only ? "read" : "statement") + " runs on MySQL and nothing reaches the copy."));
     // Which mode the port is in (#2079), said either way: read-write is the

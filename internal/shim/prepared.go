@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
@@ -320,8 +321,10 @@ func (h *Handler) executeRouted(st *preparedStmt, args []any) (*mysql.Result, er
 				return st.up.Execute(ctx, args, sink)
 			})
 		},
-		decide:  func() (readrouter.Decision, error) { return st.up.Decide(ctx, args) },
-		runCopy: func(reason string) (*mysql.Result, error) { return h.runPreparedOnCopy(st, args, currentDB, reason) },
+		decide: func() (readrouter.Decision, error) { return st.up.Decide(ctx, args) },
+		runCopy: func(reason string, unchangedWithin time.Duration) (*mysql.Result, error) {
+			return h.runPreparedOnCopy(st, args, currentDB, reason, unchangedWithin)
+		},
 		extraVeto: func() string {
 			switch {
 			case st.parts == nil:
@@ -372,12 +375,12 @@ func copyUnsafeArgument(args []any) string {
 // The template's names are already in double quotes (copyParts).
 // The text never goes anywhere else: MySQL's rungs execute the statement
 // prepared on the source.
-func (h *Handler) runPreparedOnCopy(st *preparedStmt, args []any, db, reason string) (*mysql.Result, error) {
+func (h *Handler) runPreparedOnCopy(st *preparedStmt, args []any, db, reason string, unchangedWithin time.Duration) (*mysql.Result, error) {
 	text, err := st.interpolate(args)
 	if err != nil {
 		return nil, err
 	}
-	res, err := h.runFreeSQLRouted(db, text, reason)
+	res, err := h.runFreeSQLRouted(db, text, reason, unchangedWithin)
 	if err != nil {
 		return nil, err
 	}

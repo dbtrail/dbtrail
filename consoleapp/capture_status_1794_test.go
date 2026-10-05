@@ -558,6 +558,11 @@ func TestHeadFromState(t *testing.T) {
 			if (err != nil) != c.wantErr || r.verdict != c.verdict || !strings.HasPrefix(r.detail, c.detail) || opened != c.opened {
 				t.Fatalf("got %+v err=%v opened=%v, want verdict %q detail %q… err=%v opened=%v", r, err, opened, c.verdict, c.detail, c.wantErr, c.opened)
 			}
+			// A checkpoint that cannot be compared is said apart from a
+			// source that was not reached (#2085: the watermark is void).
+			if comparable, _ := checkpointComparable(c.st); r.uncomparable == comparable {
+				t.Fatalf("uncomparable = %v for a checkpoint whose comparable is %v", r.uncomparable, comparable)
+			}
 			if c.verdict != "" && (r.captured == "" || r.executed != c.executed || r.purged != c.wantPurge || !r.checkpoint.Equal(checkpoint)) {
 				t.Fatalf("a verdict without what it was read from: %+v", r)
 			}
@@ -683,7 +688,7 @@ func TestCaptureStatus_aFailureAfterTheReadHoldsNothing(t *testing.T) {
 	}
 	c.now = func() time.Time {
 		calls++
-		if calls == 1 { // the clock read after the source answered
+		if calls == 2 { // the clock read after the source answered (the first is before the read, #2085)
 			panic("clock")
 		}
 		return captureT0.Add(time.Duration(calls) * time.Hour)

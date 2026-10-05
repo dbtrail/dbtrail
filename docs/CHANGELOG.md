@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **Read routing: past the freshness limit, the copy answers over tables
+  that have not changed since their snapshot** (#2085).
+  `--route-max-copy-age` is one age for the whole server, so once the newest
+  snapshot was older than the limit every heavy read went to MySQL, including
+  the ones over tables nobody had written since. Past the limit the port now
+  asks, for each expensive statement, whether the tables it reads changed
+  since their snapshot, and the copy answers when none did. Nothing changes
+  while the snapshot is within the limit, and nothing changes for a cheap
+  read. A table counts as unchanged only when all of this holds, and the
+  statement goes to MySQL as before when any of it does not: capture is
+  known to have read everything the source had executed at a moment within
+  the limit (the source's GTID set against capture's saved position, asked
+  at most once every 30 seconds per server); the index holds no row change
+  and no schema change of the table at or after the binlog position its
+  snapshot file records (by position, so a statement that began before the
+  snapshot and committed after it counts, however long it ran, while the
+  hour it began in is still in the index; an `ALTER` likewise); the index still holds that whole
+  window; capture recorded no gap and no dropped event since the table was
+  last read from the source; the table has no foreign key that cascades
+  into it and is not outside the capture's filters; and the snapshot was
+  taken at one point in time with its position on record. The copy's answer is then
+  what MySQL held at the moment capture was last confirmed complete, never
+  older than the limit. Applies to a MySQL source captured in GTID mode
+  whose index is not on the source server and which does not filter its
+  binary log; a MariaDB source follows the age rule alone. A table quiet for longer
+  than the index keeps its changes (`--rotate-retain`) follows the age rule
+  too: a refresh leaves its position where it was, and the index no longer
+  reaches back to it. A change the index never received and has no record
+  of (a write with `SET sql_log_bin = 0`, a row capture skipped with only a
+  warning) is missing from the copy until the next full snapshot, as it
+  already was: a refresh is built from the index and renews the copy's age
+  without it. What is new is that the copy also answers between the limit
+  and the next snapshot, so where every snapshot is a full read the limit no
+  longer caps how stale its answer about such a change is; the docs list
+  those cases. On a source that is being written the first heavy read after
+  a quiet spell still goes to MySQL (confirming capture takes two reads of
+  the source about half a minute apart). A statement answered this way is
+  counted under the new reason `tables_unchanged`, apart from
+  `expensive_plan`, on the Connect page and in
+  `bintrail_read_routing_decisions_total`; `copy_too_old` keeps counting
+  the ones that went to MySQL, and its debug log line names the table that
+  changed or what could not be confirmed. Measured on an index of 3
+  million events over a week of hourly partitions (MySQL 8.4): the whole
+  check takes about 5 ms for one table and 7.5 ms for three. The slow case
+  is a table that took a very large load in the two hours before its
+  snapshot and none since: 0.25 s for half a million changes when its file
+  came from a refresh, 1.5 s when it came from a full read; a table with
+  that many older changes costs the same again while the index holds a
+  statement that began long before a snapshot and committed after it, and
+  always on an index `bintrail index` has loaded binlog files into. Past
+  a two-second budget the statement goes to MySQL; a table found changed is
+  remembered for that snapshot file and not looked up again. See
+  [Past the limit](time-travel-sql.md#past-the-limit-tables-that-have-not-changed).
 - **Read routing: hexadecimal and bit literals, `~` and date arithmetic
   stay on MySQL** (#2122). Five shapes passed `EXPLAIN` on the source and
   were answered by the copy with another value and no error. Each now keeps
@@ -310,6 +363,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different column names at one position when they hold letters outside
   ASCII (`año` against `niño`), which it left to the cells and called
   `EQUAL` when no cell disagreed.
+- **Writing a large table again in full no longer fails for lack of memory
+  when its chain of changes is long** (#2126). When the changes beside a table
+  pass a quarter of its size the table is written again, and that starts by
+  applying the chain to the table in one DuckDB statement under the daemon's
+  4 GB memory limit. On a table of 100 million rows with 15 million changed
+  rows in 24 pairs the statement failed with `Out of Memory Error ... (3.7
+  GiB/3.7 GiB used)`, the update was refused and the schedule read the whole
+  source instead, every two hours or so at 300 transactions a second. The step
+  that picks the newest version of each row was a window function, which on
+  those files failed at 4 GB and passed at 1 GB; it is now a join that passes
+  from 500 MB to 8 GB and gives the same rows. The job that merges a long
+  chain into one pair uses the same join. What reads a snapshot (the views,
+  SQL on the copy) is unchanged.
 - **Snapshots: an update no longer leaves out the changes that reached the
   index late** (#2138). An update of a snapshot continues from the exact
   binlog position the previous one stopped at, and to avoid reading the whole

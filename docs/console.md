@@ -1343,7 +1343,9 @@ one release and warns that it no longer does anything. Remove it.
   `--route-max-copy-age` (e.g. `15m`): experimental read routing on the
   flashback port. Statements are forwarded to each server's source MySQL;
   SELECTs whose plan is expensive run on the copy while its snapshot is at
-  most this old, and fall back to MySQL when the copy rejects them. Off by
+  most this old (past that age, the ones whose tables have not changed since
+  their snapshot still do), and fall back to MySQL when the copy rejects
+  them. Off by
   default (`0`). `BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD` and
   `BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS` set the plan thresholds
   (`--route-cost-threshold`, default 10000; `--route-scan-rows`, default

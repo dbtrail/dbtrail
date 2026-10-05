@@ -276,7 +276,9 @@ type Config struct {
 type ReadRoutingConfig struct {
 	// MaxCopyAge > 0 means routing is on: a SELECT the policy calls
 	// expensive runs on the copy while the copy's snapshot is at most this
-	// old. Zero = off (every statement reads the copy, as before #2038).
+	// old, and past that when the tables it reads are unchanged since their
+	// snapshot (#2085). Zero = off (every statement reads the copy, as
+	// before #2038).
 	MaxCopyAge time.Duration
 	// CostThreshold and ScanRows are the EXPLAIN thresholds
 	// (readrouter.Policy); 0 disables that rule.
@@ -357,6 +359,12 @@ type Server struct {
 	// resolveBaselineDecimals.
 	baselineDecimalMu sync.Mutex
 	baselineDecimals  map[string]baselineDecimalEntry
+	// copyCuts memoizes snapshot files' footers for the read router's
+	// "unchanged since the snapshot" question (#2085, copy_unchanged.go).
+	copyCuts copyCutMemo
+	// copyFaults limits the warnings of that question's faults.
+	copyFaults  copyFaultLog
+	copyChanged copyChangedMemo
 
 	listen     string
 	token      string

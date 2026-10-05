@@ -595,6 +595,60 @@ func TableDeltaStateSQL(base, posdelGlob, upsertsGlob, basePath, replace string)
 	return tableDeltaStateSQL(base, upserts, dead, replace)
 }
 
+// TableDeltaLatestSQL selects the newest version of every key from delta, a
+// relation with the columns of the chain's .upserts files plus filename: one
+// row per key, tombstones included, the technical columns kept, filename
+// dropped. It is the rule tableDeltaStateSQL states with a window (newest by
+// file name), written as a join for the daemon's own merges, which run under a
+// memory limit:
+//
+// Measured on the files of a 100 M row table with 15.1 M upserts in 24 pairs
+// (DuckDB as vendored at the time, 2 threads, a temp directory to spill to):
+// the window failed with an out-of-memory error at a 4 GB limit and PASSED at
+// 1 GB, so it is not a matter of size; this join passed at every limit tried
+// from 500 MB to 8 GB. With COLLATE C on its keys the same join failed at
+// every limit, which is why the keys are compared as their UTF-8 bytes
+// instead: bytes, whatever the session's default collation (the reason the
+// window carries COLLATE C), and what the join needs to stay out of core.
+//
+// encode(), NOT a cast to BLOB. The cast parses its input: it reads `\x41`
+// as the byte for "A", refuses any other backslash and refuses every byte
+// outside ASCII, and pk_values escapes a pipe as `\|` and a backslash as
+// `\\`. With the cast, a table whose key holds either, or an accent, or
+// that lives under a path outside ASCII, could not be merged at all.
+//
+// It relies on a key appearing at most once in one file, which every writer
+// guarantees (a change map, disjoint spill groups, this function's own
+// output): the window would return one row for a file that broke that, this
+// returns each of them.
+//
+// delta is read twice. Not a CTE: DuckDB materializes one that is referenced
+// twice, in memory.
+func TableDeltaLatestSQL(delta string) string {
+	pk := `"` + TableDeltaPKColumn + `"`
+	return fmt.Sprintf("SELECT bintrail_u.* EXCLUDE (filename) FROM (%[1]s) AS bintrail_u "+
+		"JOIN (SELECT encode(%[2]s) AS bintrail_k, max(encode(filename)) AS bintrail_f FROM (%[1]s) GROUP BY 1) AS bintrail_m "+
+		"ON encode(bintrail_u.%[2]s) = bintrail_m.bintrail_k AND encode(bintrail_u.filename) = bintrail_m.bintrail_f",
+		delta, pk)
+}
+
+// TableDeltaMergeStateSQL is TableDeltaStateSQL for the daemon's compaction
+// (reconstruct.materializeBaseWithDelta): the same state, with the newest
+// version of each key read through TableDeltaLatestSQL. The views keep the
+// window; a test holds the two to the same rows.
+func TableDeltaMergeStateSQL(base, posdelGlob, upsertsGlob, basePath string) string {
+	upserts := fmt.Sprintf("SELECT * FROM read_parquet(%s, filename=true, union_by_name=true) WHERE %s",
+		upsertsGlob, TableDeltaNameFilter(basePath, TableDeltaUpsertsSuffix))
+	dead := fmt.Sprintf("SELECT \"%s\" FROM read_parquet(%s, filename=true) WHERE %s AND \"%s\" IS NOT NULL",
+		TableDeltaPosColumn, posdelGlob, TableDeltaNameFilter(basePath, TableDeltaPosdelSuffix), TableDeltaPosColumn)
+	return fmt.Sprintf("WITH bintrail_latest AS (%s) "+
+		"SELECT * FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet(%s, file_row_number=true) "+
+		"WHERE file_row_number NOT IN (%s) "+
+		"UNION ALL BY NAME SELECT * EXCLUDE (\"%s\", \"%s\") FROM bintrail_latest WHERE \"%s\" = '%s')",
+		TableDeltaLatestSQL(upserts), base, dead,
+		TableDeltaPKColumn, TableDeltaOpColumn, TableDeltaOpColumn, TableDeltaOpUpsert)
+}
+
 // TableDeltaFollowGlobs returns the patterns TableDeltaFollowStateSQL reads
 // the chain through: TableDeltaGlobs widened to ALSO match the table's own
 // .parquet file (#1918).
