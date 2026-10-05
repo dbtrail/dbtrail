@@ -389,6 +389,89 @@ func TestPreparedRouted_copyReadsTheSameStatement(t *testing.T) {
 	}
 }
 
+// A prepared statement's backtick-quoted names reach the copy in double
+// quotes, like a text statement's (#2081). The arguments are written in
+// AFTER the rewrite and never rescanned: they are spelled the copy's way,
+// where a backslash is a character, and a scanner reading MySQL's escapes
+// would take the quote after it for part of the string and rewrite a
+// backtick inside the next argument.
+func TestPreparedRouted_backtickNames(t *testing.T) {
+	r := &fakeRouter{toCopy: true}
+	f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
+	h := routingHandler(t, r, f, time.Minute)
+	if err := h.UseDB("shop"); err != nil {
+		t.Fatal(err)
+	}
+	const stmt = "SELECT `o`.`id` FROM `orders` `o` WHERE `o`.`path` = ? AND `o`.`note` = ? AND `o`.`tag` = 'a `b` ?' ORDER BY `o`.`id`"
+	n, _, ctx, err := h.HandleStmtPrepare(stmt)
+	if err != nil || n != 2 {
+		t.Fatalf("prepare: %d params, err %v", n, err)
+	}
+	if r.prepared[0].query != stmt {
+		t.Errorf("the source prepared %q, want the client's text", r.prepared[0].query)
+	}
+	res, err := h.HandleStmtExecute(ctx, "", []any{strArg(`C:\`), strArg("a `name` b")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := binaryFirstCell(t, res); got != "copy" {
+		t.Fatalf("answered by %s, want the copy", got)
+	}
+	want := "SELECT \"o\".\"id\" FROM \"orders\" \"o\" WHERE \"o\".\"path\" = 'C:\\' AND \"o\".\"note\" = 'a `name` b' AND \"o\".\"tag\" = 'a `b` ?' ORDER BY \"o\".\"id\""
+	if squash(f.gotStmt) != want {
+		t.Errorf("the copy got\n %q\nwant\n %q", squash(f.gotStmt), want)
+	}
+
+	// A template the rewrite refuses is MySQL's on every execution.
+	for _, refused := range []string{
+		"SELECT `a``b` FROM `t` WHERE `c` = ?",
+		"SELECT `sum`(`a`) FROM `t` WHERE `c` = ?",
+		"SELECT `a` AS `x\"y` FROM `t` WHERE `c` = ?",
+	} {
+		_, _, ctx, err := h.HandleStmtPrepare(refused)
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls := f.calls
+		res, err := h.HandleStmtExecute(ctx, "", []any{int64(1)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := binaryFirstCell(t, res); got != "mysql" || f.calls != calls {
+			t.Errorf("%q: answered by %s with %d copy calls, want mysql and none", refused, got, f.calls-calls)
+		}
+	}
+}
+
+// copyParts and the ladder's veto are two readers of one template: whatever
+// one refuses the other must, or a template would be vetoed on one path and
+// written out on the other.
+func TestCopyParts_agreesWithTheVeto(t *testing.T) {
+	for _, stmt := range []string{
+		"SELECT `a` FROM `t` WHERE `b` = ? AND `c` = ?",
+		"SELECT `a``b` FROM `t` WHERE `c` = ?",
+		"SELECT `a` FROM `t` WHERE `c` = ? AND `d` = \"x\"",
+		"SELECT `a` FROM `t` WHERE `c` = ? AND `d` = 'x\\n'",
+		"SELECT `f`(?) FROM `t`",
+		"SELECT `a` FROM `t` WHERE `c` = ? /* x /* y */",
+		"SELECT `a` FROM `t` WHERE `c` = ? AND `d` = 'open",
+		"SELECT /*+ MAX_EXECUTION_TIME(1) */ `a` FROM `t` WHERE `c` = ?",
+	} {
+		parts := splitPlaceholders(stmt, true)
+		out, refusal := copyParts(parts)
+		_, why := readrouter.ForCopy(stmt)
+		if (refusal == "") != (why == "") {
+			t.Errorf("%q: copyParts refusal %q, ForCopy refusal %q", stmt, refusal, why)
+		}
+		if refusal == "" {
+			whole, _ := readrouter.ForCopy(stmt)
+			if got := strings.Join(out, "?"); got != whole {
+				t.Errorf("%q: pieces rewrite to %q, the whole statement to %q", stmt, got, whole)
+			}
+		}
+	}
+}
+
 // Text and prepared statements go down ONE ladder: the same statement, on
 // the same connection state, is observed the same way on both paths.
 func TestPreparedRouted_sameLadderAsText(t *testing.T) {

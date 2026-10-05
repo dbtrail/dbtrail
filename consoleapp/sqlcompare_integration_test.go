@@ -89,7 +89,7 @@ SELECT id, NOW() FROM orders ORDER BY id;
 UPDATE orders SET status = 'x';
 WITH c AS (SELECT id FROM orders) DELETE FROM orders WHERE id IN (SELECT id FROM c);
 SELECT * FROM nope;
-`+"-- what an ORM sends: backtick names, which the copy refuses (nothing is translated)\nSELECT `status`, count(*) FROM `orders` GROUP BY `status`;\n"), 0o644); err != nil {
+`+"-- what an ORM sends: backtick names, which reach the copy in double quotes (#2081)\nSELECT `status`, count(*) FROM `orders` GROUP BY `status`;\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	fh, err := os.Open(stmts)
@@ -122,7 +122,7 @@ SELECT * FROM nope;
 		"SELECT status, count(*) FROM orders GROUP BY status":                                 {sqlcompare.Equal, "", "copy"},
 		"SELECT id FROM orders WHERE status = 'live'":                                         {sqlcompare.Equal, "", "copy"},
 		"SELECT status FROM orders ORDER BY status, id":                                       {sqlcompare.Equal, "", "copy"},
-		"SELECT `status`, count(*) FROM `orders` GROUP BY `status`":                           {sqlcompare.NotOnCopy, "", "copy"},
+		"SELECT `status`, count(*) FROM `orders` GROUP BY `status`":                           {sqlcompare.Equal, "", "copy"},
 		"SELECT id FROM orders WHERE status LIKE 'L%'":                                        {sqlcompare.Different, "rows", "mysql"},
 		"SELECT id FROM orders WHERE status = 'strasse'":                                      {sqlcompare.Equal, "", "copy"},
 		"SELECT AVG(id) FROM orders WHERE status <> 'x'":                                      {sqlcompare.Different, "precision", "copy"},

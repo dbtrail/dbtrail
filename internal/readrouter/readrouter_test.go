@@ -104,7 +104,6 @@ func TestVeto(t *testing.T) {
 		"SELECT count(*) FROM t WHERE distinct_id = 1",
 		"SELECT user_id FROM t", // not user(
 		"SELECT * FROM t WHERE note = '#not a comment -- nor this' AND a = 1",
-		"SELECT `a\"b` FROM t",                              // a double quote inside a backtick identifier is not a string
 		"SELECT 'it''s' FROM t",                             // a doubled quote does not end the literal
 		"SELECT * FROM t WHERE path = 'C:/tmp' -- not a\\b", // a backslash in a comment is not in a literal
 		"SELECT `a\\b` FROM t WHERE c = 'x'",                // nor one in a backtick identifier

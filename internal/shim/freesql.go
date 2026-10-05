@@ -222,8 +222,14 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 		forward: func(reason RouteReason, detail string) (*mysql.Result, error) {
 			return h.forward(ctx, qstr, reason, detail)
 		},
-		decide:  func() (readrouter.Decision, error) { return h.router.Decide(ctx, qstr) },
-		runCopy: func(reason string) (*mysql.Result, error) { return h.runFreeSQLRouted(currentDB, qstr, reason) },
+		decide: func() (readrouter.Decision, error) { return h.router.Decide(ctx, qstr) },
+		runCopy: func(reason string) (*mysql.Result, error) {
+			text, err := copyText(qstr)
+			if err != nil {
+				return nil, err
+			}
+			return h.runFreeSQLRouted(currentDB, text, reason)
+		},
 	})
 }
 
@@ -531,10 +537,25 @@ func (h *Handler) runFreeSQL(schema, qstr string) (*mysql.Result, error) {
 	return h.runFreeSQLRouted(schema, qstr, "")
 }
 
+// copyText is the statement the routing ladder sends the copy: the client's
+// text with its backtick-quoted names in double quotes (readrouter.ForCopy),
+// the one thing translated from MySQL's dialect. The ladder vetoes every
+// statement the rewrite refuses before it gets here; the error is for a
+// caller that did not, and reads as one more refusal by the copy.
+func copyText(qstr string) (string, error) {
+	text, why := readrouter.ForCopy(qstr)
+	if why != "" {
+		return "", fmt.Errorf("not sent to the copy: %s", why)
+	}
+	return text, nil
+}
+
 // runFreeSQLRouted is runFreeSQL with the routing reason when there is one.
-// The copy runs the statement as the client wrote it, under routing too:
-// nothing is translated from MySQL's dialect, and a statement the copy
-// refuses (backtick names among them) is the caller's to forward.
+// The copy runs the statement it is given: the routing ladder hands it the
+// client's text with backtick-quoted names rewritten (copyText), a client
+// on the port without routing its own text. Nothing else is translated from
+// MySQL's dialect, and a statement the copy refuses is the caller's to
+// forward.
 func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string) (*mysql.Result, error) {
 	ctx, cancel := h.queryContext()
 	defer cancel()

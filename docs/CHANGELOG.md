@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **Read routing: statements with backtick-quoted names can be served by
+  the copy** (#2081). Most ORMs and drivers quote every name with
+  backticks, which the copy does not read, so those statements were always
+  refused by the copy and answered by MySQL after a failed attempt. A routed
+  statement now reaches the copy with each backtick-quoted name written in
+  double quotes (``SELECT `orders`.`id` FROM `orders` `` is sent as
+  `SELECT "orders"."id" FROM "orders"`), outside string literals and
+  comments, for text and prepared statements alike. It is the only thing
+  translated: every other byte is the client's, MySQL always gets the
+  statement as written, and a function or clause the copy lacks is still
+  answered by MySQL. Statements the rewrite would have to guess at stay on
+  MySQL without trying the copy, each under a veto of its own: a name that
+  holds a backtick or a double quote, an empty name, a quoted name right
+  before a parenthesis or right after `U&`, a string, name or comment that
+  never ends, and a comment with another `/*` inside it. Double-quoted
+  strings and backslashes in strings stay vetoed as before. The
+  `information_schema` veto now also matches the quoted spelling
+  (`` `information_schema`.`tables` ``), which the copy would otherwise
+  answer from its own catalog. `sql-compare` sends the copy the same
+  rewritten text, so a driver-generated workload is compared instead of
+  reading `NOT_ON_COPY`. On a set of 69 statements shaped like what GORM
+  and Django send, run against MySQL 8.4 and MariaDB 11.4, 45 now compare
+  `EQUAL` (2 before); the ones that still differ or are refused are listed
+  in [Time-travel SQL](time-travel-sql.md) and in #2114. The plain port
+  without read routing translates nothing, as before.
 - **Read routing on a MariaDB source sends heavy joins to the copy**
   (#2113). MariaDB's plan has no cost the router can use, so only a full
   scan of a table or an index over `--route-scan-rows` rows sent a

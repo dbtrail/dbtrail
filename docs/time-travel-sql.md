@@ -356,7 +356,8 @@ The decision, in order, for every statement:
    CTE (`WITH RECURSIVE`), `COLLATE`, `CAST AS UNSIGNED`, `DIV`, `RAND`, user and system
    variables, locking reads, `information_schema`, full-text `MATCH`,
    JSON functions and the `->`/`->>` operators, a backslash inside a string
-   literal, optimizer hints): **MySQL**.
+   literal, optimizer hints), and a backtick-quoted name the port will not
+   rewrite for the copy (see "One thing is translated" below): **MySQL**.
 4. The one shape that needs no plan: `SELECT <columns> FROM <one table>
    LIMIT <at most 1,000 rows, offset included>` with nothing else (no
    `WHERE`, join, `ORDER BY`, `GROUP BY`, subquery or function call):
@@ -470,7 +471,8 @@ The decision, in order, for every statement:
    sent right after a statement read what MySQL has for that statement.
 
    If the copy reproduces the session, it runs under it: **the copy**, sent
-   exactly as written; the copy refusing it means **MySQL**. If it does
+   as written except for backtick-quoted names, which go in double quotes;
+   the copy refusing it means **MySQL**. If it does
    not: **MySQL**, for this statement and the next ones, until the session
    changes again. The connection is not kept on MySQL for good: put the
    setting back and the copy answers again. The reason is counted as
@@ -569,12 +571,41 @@ What this is and is not:
   people who may do on MySQL whatever that account can. To bound it, give
   the server a forwarding account with only the grants the port should have
   and start the port with `--route-read-only` (both below).
-- **Nothing is translated.** The copy gets the statement as the client
-  wrote it. DuckDB does not read MySQL's backtick-quoted names, so a
-  statement that uses them (what most ORMs and drivers generate) is refused
-  by the copy and answered by MySQL, whatever its cost: it is correct, and it
-  gains nothing from routing. Only statements written without backticks can
-  be served by the copy.
+- **One thing is translated: backtick-quoted names.** DuckDB does not read
+  MySQL's backtick-quoted names, and most ORMs and drivers quote every name
+  that way. So a routed statement reaches the copy with each
+  `` `name` `` written `"name"`, which is how the copy quotes a name:
+  ``SELECT `orders`.`id` FROM `orders` `` is sent as
+  `SELECT "orders"."id" FROM "orders"`. Every other byte is the client's.
+  A backtick inside a string literal or a comment is left alone. MySQL
+  always gets the statement as the client wrote it. Nothing else of MySQL's
+  dialect is translated: a function, an operator or a clause the copy does
+  not have is still refused by the copy and answered by MySQL. The rewrite
+  is not attempted, and the statement stays on MySQL without trying the
+  copy, when it would be a guess:
+  - a name that holds a backtick (written doubled, `` `a``b` ``) or a double
+    quote (`` `a"b` ``), or an empty name (` `` `);
+  - a quoted name right before a parenthesis (`` `sum`(x) ``): MySQL
+    refuses a quoted `COUNT` and takes a quoted `sum` for a stored
+    function, where the copy would call its own. A common table expression
+    with a column list (``WITH `t` (`a`) AS ...``) has the same shape and
+    stays on MySQL too;
+  - a quoted name right after `U&` (two columns and an operator on MySQL,
+    one Unicode-escaped name on the copy);
+  - a string, a quoted name or a comment that never ends, and a comment
+    with another `/*` inside it (MySQL ends it at the first `*/`, the copy
+    at the matching one);
+  - a double-quoted string or a backslash inside a string, which were
+    already kept on MySQL. A double-quoted name under the source's
+    `ANSI_QUOTES` is not recognized as one: it stays on MySQL as well.
+
+  What a client can still see through the rewrite: the copy finds a column
+  whatever the case it is written in, as MySQL does, but names the result
+  column as the table stores it, where MySQL names it as the statement
+  wrote it (``SELECT `ID` `` returns a column called `ID` on MySQL and `id`
+  on the copy; the same holds without quotes). An alias keeps the case it
+  was written in on both. The plain port without read routing translates
+  nothing: a client there writes the copy's dialect.
 - **Where the copy answers differently without an error.** The veto list
   keeps the known cases on MySQL (`GROUP_CONCAT`, the `NOW()` family,
   `LIKE`/`REGEXP`, `COLLATE`, `DIV`, `||`, `^`, double-quoted string
@@ -1190,7 +1221,9 @@ different plain column names; it is checked before any cell, so that two
 columns holding equal values, or a result with no rows, cannot hide it. A
 position where either side's name is an expression's text is left to the
 cells, since each engine names an expression its own way),
-`NOT_ON_COPY` (the copy refused it: the router would forward it),
+`NOT_ON_COPY` (the copy refused it: the router would forward it; the copy
+is sent what the router would send it, backtick-quoted names in double
+quotes, so a statement an ORM wrote is compared and not just refused),
 `SOURCE_ERROR`, `INCONCLUSIVE` (the copy cut the result at its cap, the
 source returned more than `--max-rows`, or the source's own answer changed
 between two reads: a live write, not a difference) or `SKIPPED`, plus what
