@@ -153,7 +153,11 @@ func routingLimits(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, cases
 		t.Fatal(err)
 	}
 	const rowCap = 50
-	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg, SQLLimits: sqlsandbox.Limits{MaxRows: rowCap}})
+	// FlashbackListen and ReadRouting are display config (the tally is
+	// reported only for a console that says it routes); the port below is
+	// served by hand on its own listener.
+	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg, SQLLimits: sqlsandbox.Limits{MaxRows: rowCap},
+		FlashbackListen: "127.0.0.1:3308", ReadRouting: console.ReadRoutingConfig{MaxCopyAge: time.Hour, CostThreshold: 20, ScanRows: 1000}})
 	if err != nil {
 		t.Fatal(err)
 	}
