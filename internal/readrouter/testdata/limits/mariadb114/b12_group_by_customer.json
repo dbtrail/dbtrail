@@ -1,0 +1,1 @@
+{"query_block":{"select_id":1,"cost":1662.280647,"nested_loop":[{"table":{"table_name":"orders","access_type":"index","key":"k_cust_created","key_length":"9","used_key_parts":["customer_id","created_at"],"loops":1,"rows":1998694,"cost":294.9921225,"filtered":100,"using_index":true}}]}}

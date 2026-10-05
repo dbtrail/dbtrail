@@ -305,6 +305,7 @@ func (routeTestFreeSQL) Run(context.Context, string, string, sqlsandbox.Session)
 	return sqlsandbox.Result{}, errors.New("the copy was asked")
 }
 func (routeTestFreeSQL) CopyUpdatedAt(context.Context) time.Time { return time.Now() }
+func (routeTestFreeSQL) RowCap() int                             { return 0 }
 
 // TestBindReadRouterCarriesReadOnly: a connection bound from a port
 // configured read-only refuses a write, and one bound from a read-write port

@@ -61,7 +61,9 @@ func TestDecideStatement_acrossServers(t *testing.T) {
 		// sends it to the copy; on MariaDB an index scan inside a subquery
 		// is not counted, and it stays on the source.
 		{"exists_subquery", "SELECT * FROM customers WHERE id = 5 AND EXISTS (SELECT 1 FROM orders)", toCopy, RuleCost, toMySQL, RuleCheap},
-		{"index_limit_no_order", "SELECT concat(customer_id) FROM orders LIMIT 10", toCopy, RuleCost, toCopy, RuleScan},
+		// An index walked with no condition and no sort stops at the LIMIT
+		// (#2115); the plan still counts the whole index.
+		{"index_limit_no_order", "SELECT concat(customer_id) FROM orders LIMIT 10", toMySQL, RuleBoundedLimit, toMySQL, RuleBoundedLimit},
 		{"scalar_subquery_no_tables", "SELECT (SELECT count(*) FROM orders WHERE note = 'x')", toMySQL, RuleTrivial, toMySQL, RuleTrivial},
 		{"semi_join_in", "SELECT * FROM customers c WHERE c.id IN (SELECT customer_id FROM orders) AND c.id < 3", toMySQL, RuleCheap, toMySQL, RuleCheap},
 		// MariaDB reports the few groups the LIMIT needs; MySQL's cost is
@@ -128,7 +130,8 @@ func TestParsePlan_mariaDB(t *testing.T) {
 		}
 		got.scans, got.conditions, got.costInfo = false, false, false
 		got.RowsRead, got.Joined, got.RowsReadUnknown = 0, false, ""
-		got.topSort, got.sortedFirstRows = 0, 0 // joinrows_test.go
+		got.topSort, got.sortedFirstRows = 0, 0     // joinrows_test.go
+		got.ReadIsResult, got.ResultRows = false, 0 // exactread_2115_test.go
 		if got != tc.want {
 			t.Errorf("%s:\n  got  %+v\n  want %+v", tc.name, got, tc.want)
 		}

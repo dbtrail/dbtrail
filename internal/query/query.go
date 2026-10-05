@@ -231,7 +231,9 @@ func (p BinlogPos) AtOrBefore(q BinlogPos) bool {
 // end position there, #1117), which is a number and not a place in the file.
 //
 // MySQL and MariaDB only. A PostgreSQL row carries an LSN as text in
-// BinlogFile, which this rule does not order.
+// BinlogFile ("0/16B3748", hasBinlogCoordinate), which this rule does not
+// order: such a row has no coordinate here and arrival order stands, which
+// for PostgreSQL is commit order (its event_timestamp is the commit time).
 func LaterInBinlog(a, b *ResultRow) bool {
 	if !hasBinlogCoordinate(a) || !hasBinlogCoordinate(b) {
 		return false
@@ -247,8 +249,16 @@ func LaterInBinlog(a, b *ResultRow) bool {
 // hasBinlogCoordinate reports whether r's start is a real place in a binary
 // log file. No file can reach 2^63 bytes; the underflowed start positions of
 // LaterInBinlog's comment are all above it.
+//
+// A "file" with a slash is a PostgreSQL LSN (pgcapture writes the commit LSN
+// as unpadded %X/%X): by length and then name, "1/5" sorts before
+// "0/FFFFFFFF", which is backwards. No fold that calls LaterInBinlog reads
+// PostgreSQL rows today (the full-table reconstruct and the Iceberg export
+// refuse the source first); this keeps a later caller from ordering them by
+// accident. A binary log base name cannot hold a slash: the server stores
+// only the name after the last one.
 func hasBinlogCoordinate(r *ResultRow) bool {
-	return r.BinlogFile != "" && r.StartPos < 1<<63
+	return r.BinlogFile != "" && r.StartPos < 1<<63 && !strings.Contains(r.BinlogFile, "/")
 }
 
 // Options specifies the filter criteria for querying binlog_events.

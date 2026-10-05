@@ -1,0 +1,1 @@
+{"query_block":{"select_id":1,"nested_loop":[{"table":{"table_name":"orders","access_type":"index","key":"k_cust_created","key_length":"9","used_key_parts":["customer_id","created_at"],"rows":1976287,"filtered":100,"using_index":true}}]}}

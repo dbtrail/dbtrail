@@ -1,0 +1,1 @@
+{"query_block":{"select_id":1,"nested_loop":[{"table":{"table_name":"orders","access_type":"ALL","possible_keys":["k_status","k_created"],"rows":1976287,"filtered":13.28092194,"attached_condition":"orders.created_at >= '2026-01-01' and orders.created_at < '2026-04-01' and orders.`status` <> 'refunded'"}}]}}

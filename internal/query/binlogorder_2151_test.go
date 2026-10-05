@@ -25,6 +25,9 @@ func TestLaterInBinlog(t *testing.T) {
 		// MariaDB 11.4 rows from a build before #1180: 2^64 - event size.
 		{"underflowed start against a real one", at("binlog.000007", 1<<64-60), at("binlog.000007", 300), false},
 		{"a real start against an underflowed one", at("binlog.000007", 300), at("binlog.000007", 1<<64-60), false},
+		// PostgreSQL: the "file" is an LSN, and the later one is the shorter text.
+		{"a later LSN, shorter text", at("1/5", 0x100000005), at("0/FFFFFFFF", 0xFFFFFFFF), false},
+		{"an earlier LSN, longer text", at("0/FFFFFFFF", 0xFFFFFFFF), at("1/5", 0x100000005), false},
 		{"two underflowed starts", at("binlog.000007", 1<<64-40), at("binlog.000007", 1<<64-60), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
