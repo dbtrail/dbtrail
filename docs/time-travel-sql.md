@@ -801,7 +801,9 @@ MySQL's.
   copy), `cheap_plan`, `bounded_limit` (a small `LIMIT` MySQL answers
   without reading past it), `not_a_select`, `write`, `session_setting`,
   `settings_set`, `in_transaction`, `veto`, `explain_failed`,
-  `copy_age_unknown`, `copy_too_old`, `copy_refused`, `show_warnings`,
+  `copy_age_unknown`, `copy_too_old`, `copy_refused`, `copy_columns_differ`
+  (the copy works and declined a `SELECT *` or a `NATURAL JOIN` over a table
+  whose columns there are not MySQL's), `show_warnings`,
   `upstream_lost` (nobody answered: the port's connection to the source is
   lost or could not be opened, and the client got error 2006),
   `read_only` (refused: not a read, on a port started with

@@ -5,8 +5,10 @@ package consoleapp
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -200,7 +202,8 @@ func TestIntegrationSQLCompareColumnOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg})
+	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg,
+		FlashbackListen: "127.0.0.1:3308", ReadRouting: console.ReadRoutingConfig{MaxCopyAge: time.Hour, ScanRows: 2}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,5 +315,28 @@ func TestIntegrationSQLCompareColumnOrder(t *testing.T) {
 		if !reflect.DeepEqual(cols, c.cols) || first != c.first {
 			t.Errorf("routed %q (%s):\n  got  %v %q\n  want %v %q", c.stmt, c.why, cols, first, c.cols, c.first)
 		}
+	}
+
+	// Who answered, and why MySQL: the copy declining a star or a NATURAL
+	// JOIN is counted under its own reason, never with the copy's faults,
+	// and the # comment under the vetoes.
+	req := httptest.NewRequest("GET", "http://127.0.0.1/api/flashback", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	var fb struct {
+		Routing struct {
+			Servers map[string]struct {
+				Reasons map[string]uint64 `json:"reasons"`
+			} `json:"servers"`
+		} `json:"routing"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &fb); err != nil {
+		t.Fatalf("decode /api/flashback: %v (%s)", err, rec.Body.String())
+	}
+	reasons := fb.Routing.Servers[ent.ID].Reasons
+	t.Logf("routing reasons: %v", reasons)
+	if reasons["copy_columns_differ"] != 9 || reasons["copy_refused"] != 0 || reasons["veto"] != 1 || reasons["expensive_plan"] != 6 {
+		t.Errorf("reasons = %v, want copy_columns_differ 9, copy_refused 0, veto 1 (the # comment), expensive_plan 6", reasons)
 	}
 }

@@ -153,8 +153,8 @@ func TestSQL_realWorkerSelectStar_2111(t *testing.T) {
 	// On the port's wire it is a refusal the client is shown, which read
 	// routing answers by sending the statement to MySQL.
 	_, err = (&SQLOnCopy{s: f.s, b: f.s.cm.boot, user: "server:x"}).Run(ctx, "SELECT * FROM shop.orders", "", strict)
-	var shape *sqlsandbox.RefusedError
-	if !errors.As(err, &shape) || !strings.Contains(shape.Reason, "shop.orders") {
-		t.Errorf("port: err = %v (%T), want a RefusedError naming the table", err, err)
+	var differ *sqlsandbox.ColumnsDifferError
+	if !errors.As(err, &differ) || !strings.Contains(differ.Reason, "shop.orders") {
+		t.Errorf("port: err = %v (%T), want a ColumnsDifferError naming the table", err, err)
 	}
 }

@@ -105,7 +105,7 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 		switch {
 		case errors.As(err, &star):
 			// The statement's shape, not a fault of the copy (#2111).
-			return sqlsandbox.Result{}, &sqlsandbox.RefusedError{Reason: star.Message}
+			return sqlsandbox.Result{}, &sqlsandbox.ColumnsDifferError{Reason: star.Message}
 		case errors.As(err, &werr):
 			slog.Error("console: the SQL worker failed", "error", err, "surface", "flashback port")
 			return sqlsandbox.Result{}, errors.New(sqlWorkerFailedMessage)

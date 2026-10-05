@@ -289,6 +289,15 @@ type RefusedError struct{ Reason string }
 
 func (e *RefusedError) Error() string { return "query refused: " + e.Reason }
 
+// ColumnsDifferError: the statement was not run because the caller asked for
+// MySQL's answer (Session.StrictStar) and the copy's would hold other columns
+// or other rows: a star, or a NATURAL JOIN, over a table whose columns on the
+// copy are not MySQL's (#2111). A decision about the statement, not a fault
+// of the copy: read routing sends the statement to MySQL and counts it apart.
+type ColumnsDifferError struct{ Reason string }
+
+func (e *ColumnsDifferError) Error() string { return e.Reason }
+
 // QueryError: DuckDB ran (or tried to run) the statement inside the sandbox
 // and failed. Message is DuckDB's own text: a Permission Error for a path
 // outside the copy, an Out of Memory Error past the cap, a Binder Error for
