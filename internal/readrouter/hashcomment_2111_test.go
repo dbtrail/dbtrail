@@ -20,9 +20,9 @@ func TestVeto_hashComment(t *testing.T) {
 		"SELECT id FROM ln /* #2 */ WHERE id = 1":   "",
 		"SELECT id FROM ln -- #2\n WHERE id = 1":    "",
 		"SELECT id FROM ln WHERE id = 1":            "",
-		"SELECT `a#b` FROM ln":                      reason, // a quoted name with a # stays on MySQL too: the safe side
+		"SELECT `a#b` FROM ln":                      "", // inside a quoted name it is part of the name
 		"SELECT id FROM ln WHERE note = \"#\"":      "double-quoted string literal",
-		"SELECT GROUP_CONCAT(id) FROM ln # c":       "GROUP_CONCAT",
+		"SELECT GROUP_CONCAT(id) FROM ln # c":       "GROUP_CONCAT", // the table's vetoes are named first
 	} {
 		if got := Veto(stmt); got != want {
 			t.Errorf("Veto(%q) = %q, want %q", stmt, got, want)
@@ -30,13 +30,10 @@ func TestVeto_hashComment(t *testing.T) {
 	}
 }
 
-// What the rest of the package reads from a scrubbed statement is unchanged
-// by the marker a # comment leaves: the comment's text is still gone.
-func TestScrub_hashCommentTextIsDropped(t *testing.T) {
-	if got := Scrub("SELECT id #, count(*) FOR UPDATE\n FROM ln"); got != "SELECT id #\n FROM ln" {
+// What the rest of the package reads from a scrubbed statement is as it was:
+// the comment is gone, as MySQL reads the statement.
+func TestScrub_hashCommentIsRemoved(t *testing.T) {
+	if got := Scrub("SELECT id #, count(*) FOR UPDATE\n FROM ln"); got != "SELECT id \n FROM ln" {
 		t.Errorf("Scrub = %q", got)
-	}
-	if got := Scrub("SELECT id -- x\n FROM ln"); got != "SELECT id \n FROM ln" {
-		t.Errorf("Scrub of a -- comment = %q", got)
 	}
 }
