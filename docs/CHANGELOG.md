@@ -64,6 +64,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   account, as before. MySQL and MariaDB sources.
 
 ### Fixed
+- **SQL on the copy: a `_bin` column compares byte by byte, as on MySQL**
+  (#2083). The copy compares text without case or accents, to match MySQL's
+  default collation, and it did so for every column, including the ones
+  MySQL declares `utf8mb4_bin`: `code = 'ab'` returned `AB` and `Ab` too,
+  `GROUP BY code` merged them, and `ORDER BY code` sorted them together. The
+  state views now give each such column byte comparison (`COLLATE C`), read
+  from the `CREATE TABLE` stored in the snapshot's files, by the column's own
+  collation or its table's default. `WHERE`, `IN`, `GROUP BY`, `DISTINCT`,
+  `ORDER BY`, `MIN`/`MAX` and joins follow it, on the port, the routed reads,
+  the SQL card and a file `bintrail views --pin-snapshot` writes. A views
+  file that follows new snapshots, which is what `bintrail views` writes by
+  default, does not carry it: it is generated once and the column's
+  collation can change after. Still different, and documented: a `_cs`
+  column stays case-insensitive on the copy, and a column under a PAD SPACE
+  collation ignores trailing spaces on MySQL only. A table whose snapshot
+  file carries no `CREATE TABLE` (a PostgreSQL source, a snapshot from
+  before 0.5) or whose footer cannot be read keeps the old behavior, and
+  that is now logged with what it costs: once per table, the first ten by
+  name at warning level and the rest in the debug log. A footer
+  that could not be read is no longer remembered until the daemon restarts;
+  it is read again within five minutes.
+- **SQL on the copy: division by zero is `NULL`, as on MySQL** (#2083).
+  `amount / qty` with a zero `qty` came back from the copy as `Infinity`,
+  `-Infinity` or `NaN`, with no error, where MySQL returns `NULL`: a `COUNT`,
+  a `SUM`, an `AVG` or a `WHERE ... IS NULL` over it answered differently.
+  Division and modulo by zero are now `NULL` on the port, the routed reads
+  and the SQL card (DuckDB's `ieee_floating_point_ops`, off in the copy's
+  locked session). What does not change: `AVG` and `/` are doubles on the
+  copy and `DECIMAL`s with four more decimals on MySQL, the same value in a
+  different text; the documentation now says exactly how they differ and
+  why it stays.
 - **SQL on the copy prints a `DECIMAL` with its trailing zeros** (#2083). A
   `DECIMAL(10,2)` holding 10 came back as `10` from the copy (the port, the
   routed reads and the SQL card) and as `10.00` from MySQL, and
@@ -97,6 +128,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs the statement does the rest. A source DSN written by hand with
   `tls=preferred` now reaches a source that offers no TLS, as capture
   does, instead of answering error 2006.
+- **Read routing: an empty string came back as NULL** (#2079). With read
+  routing on (`--route-max-copy-age`), a statement sent as plain text that
+  MySQL answered returned `NULL` in every cell where MySQL returns an empty
+  string: `SELECT ''`, an empty `VARCHAR` or `BLOB` column, the value of
+  `SHOW VARIABLES LIKE 'init_connect'`. Prepared statements were not
+  affected, and neither was anything the copy answered. Forwarded results
+  now keep the empty string.
 - **Rotation: an hour held by a pending upload now counts as deferred in
   both paths** (#2094). When an unconfirmed S3 upload blocked a drop, the
   path that archives counted the hour as deferred and the path that only

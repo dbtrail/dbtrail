@@ -57,7 +57,7 @@ func TestIntegrationSQLCompareValues(t *testing.T) {
 		{"1", "10.00", "1.5000000000", "4", "3", "AB", "x", "bob", "straße"},
 		{"2", "2.50", "2.2500000000", "5", "4", "ab", "X", "bob ", "Ａ"},
 		{"3", "-7.10", "0.0000000000", "0", "0", "Ab", "x", "BOB", "strasse"},
-		{"4", "117329550.00", "12345678901234567890.1234567890", "7", "9", "zz", "y", "al", "a"},
+		{"4", "117329550.00", "12345678901234567890.1234567890", "7", "9", "zz", "Z", "AB", "a"},
 		{"5", "", "", "", "", "", "", "", ""},
 	}
 	nullRow := 4
@@ -166,19 +166,38 @@ func valuesFixtures() []valuesFixture {
 		{"SELECT SUM(qty), COUNT(*) FROM sales", eq, "", "an integer sum prints no point"},
 		{"SELECT CAST(qty AS DECIMAL(10,3)) FROM sales WHERE id = 1", eq, "", "3.000"},
 
-		// AVG and division.
-		{"SELECT AVG(amount) FROM sales", diff, "", "MySQL: DECIMAL, operand scale + 4; the copy: DOUBLE"},
-		{"SELECT ROUND(AVG(amount), 1) FROM sales", diff, "", "MySQL keeps one decimal"},
-		{"SELECT AVG(qty) FROM sales", diff, "", "MySQL: four decimals"},
-		{"SELECT id, amount / 3 FROM sales ORDER BY id", diff, "", "MySQL: six decimals"},
-		{"SELECT id, qty / 3 FROM sales ORDER BY id", diff, "", "MySQL: four decimals"},
-		{"SELECT id, amount / qty FROM sales ORDER BY id", diff, "", "division by zero is NULL on MySQL"},
+		// AVG and division: a DOUBLE on the copy, a DECIMAL with the operand's
+		// scale plus four on MySQL. Documented; nothing is rewritten for the
+		// copy, and no result type carries the operand's scale.
+		{"SELECT AVG(amount) FROM sales", diff, "precision", "MySQL: DECIMAL, operand scale + 4; the copy: DOUBLE"},
+		{"SELECT ROUND(AVG(amount), 1) FROM sales", diff, "precision", "MySQL keeps one decimal"},
+		{"SELECT AVG(qty) FROM sales", diff, "precision", "MySQL: four decimals"},
+		{"SELECT id, amount / 3 FROM sales ORDER BY id", diff, "precision", "MySQL: six decimals"},
+		{"SELECT id, qty / 3 FROM sales ORDER BY id", diff, "precision", "MySQL: four decimals"},
+		{"SELECT id, amount / qty FROM sales ORDER BY id", diff, "precision", "MySQL: six decimals; the zero divisor is NULL on both"},
+		// Division and modulo by zero are NULL on both sides.
+		{"SELECT id FROM sales WHERE amount / qty IS NULL ORDER BY id", eq, "", "the zero divisor and the NULL row"},
+		{"SELECT COUNT(amount / qty), COUNT(qty / 0), COUNT(amount % 0) FROM sales", eq, "", "3, 0, 0"},
+		{"SELECT id, qty % 0, qty / 0 FROM sales ORDER BY id", eq, "", "NULL in every row"},
 
-		// Per-column collation.
-		{"SELECT id FROM sales WHERE code = 'ab'", diff, "rows", "utf8mb4_bin: only the exact 'ab'"},
-		{"SELECT code, COUNT(*) FROM sales GROUP BY code", diff, "", "utf8mb4_bin: AB, ab and Ab are three groups"},
-		{"SELECT id FROM sales WHERE tag = 'x'", diff, "rows", "utf8mb4_0900_as_cs: 'X' is not 'x'"},
-		{"SELECT id FROM sales WHERE name = 'bob'", diff, "rows", "utf8mb4_general_ci is PAD SPACE: 'bob ' matches"},
+		// A _bin column compares byte by byte, as MySQL declares it: the view
+		// gives it COLLATE C, read from the CREATE TABLE in the file's footer.
+		{"SELECT id FROM sales WHERE code = 'ab'", eq, "", "utf8mb4_bin: only the exact 'ab'"},
+		{"SELECT id FROM sales WHERE code IN ('ab', 'AB') ORDER BY id", eq, "", "two of the three spellings"},
+		{"SELECT id FROM sales WHERE code > 'a' ORDER BY id", eq, "", "code point order: upper case sorts before 'a'"},
+		{"SELECT code, COUNT(*) FROM sales GROUP BY code", eq, "", "AB, ab and Ab are three groups"},
+		{"SELECT DISTINCT code FROM sales", eq, "", "and three distinct values"},
+		{"SELECT id, code FROM sales ORDER BY code", eq, "", "NULL, AB, Ab, ab, zz"},
+		{"SELECT id, code FROM sales ORDER BY code DESC", eq, "", "and the reverse"},
+		{"SELECT MIN(code), MAX(code) FROM sales", eq, "", "AB and zz"},
+		{"SELECT a.id, b.id FROM sales a JOIN sales b ON a.code = b.name", eq, "", "_bin against _ci: bytes win on both"},
+		// What stays different, each with its line in docs/time-travel-sql.md.
+		{"SELECT id FROM sales WHERE code = 'ab '", diff, "rows", "utf8mb4_bin is PAD SPACE: MySQL ignores the trailing space"},
+		{"SELECT id FROM sales WHERE tag = 'x'", diff, "rows", "utf8mb4_0900_as_cs: 'X' is not 'x'; the copy folds it"},
+		// Why a _cs column is not given COLLATE C: it sorts alphabetically
+		// ('x' before 'Z'), the copy's folding default does too, bytes do not.
+		{"SELECT id, tag FROM sales WHERE id IN (1, 4) ORDER BY tag", eq, "", "x before Z on both"},
+		{"SELECT id FROM sales WHERE name = 'bob'", diff, "rows", "utf8mb4_general_ci is PAD SPACE: 'bob ' matches on MySQL"},
 		{"SELECT id FROM sales WHERE note = 'strasse'", diff, "rows", "utf8mb4_0900_ai_ci: ß equals ss"},
 		{"SELECT id FROM sales WHERE note = 'A'", diff, "rows", "utf8mb4_0900_ai_ci: full-width A equals A"},
 	}
