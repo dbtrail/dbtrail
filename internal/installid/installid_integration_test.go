@@ -1,6 +1,6 @@
 //go:build integration
 
-package serverid_test
+package installid_test
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/installid"
 	"github.com/dbtrail/dbtrail/internal/serverid"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -29,13 +30,13 @@ func TestIntegrationInstallSalt_AsksARealIndexServer(t *testing.T) {
 	const noSuchDB = "bintrail_install_salt_no_such_database"
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	salt, err := serverid.InstallSalt(ctx, testutil.IntegrationDSN(noSuchDB))
+	salt, err := installid.InstallSalt(ctx, testutil.IntegrationDSN(noSuchDB))
 	if err != nil || salt != strings.ToLower(want)+"|"+noSuchDB {
 		t.Fatalf("InstallSalt = %q, %v; want the server's own id and the database named, with the database absent", salt, err)
 	}
 
 	const source = "u:p@tcp(source.example.com:3306)/"
-	id, sourceOnly, err := serverid.DeriveForInstall(ctx, source, testutil.IntegrationDSN(noSuchDB))
+	id, sourceOnly, err := installid.DeriveForInstall(ctx, source, testutil.IntegrationDSN(noSuchDB))
 	shared, _ := serverid.DeriveServerID(source)
 	if err != nil || sourceOnly != nil || id == shared {
 		t.Fatalf("DeriveForInstall = %d (source-only because %v), %v; the shared id is %d", id, sourceOnly, err, shared)

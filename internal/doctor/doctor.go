@@ -17,8 +17,8 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/config"
+	"github.com/dbtrail/dbtrail/internal/installid"
 	"github.com/dbtrail/dbtrail/internal/metadata"
-	"github.com/dbtrail/dbtrail/internal/serverid"
 	"github.com/dbtrail/dbtrail/internal/status"
 )
 
@@ -730,7 +730,7 @@ func rdsBinlogRetentionVerdict(name string, raw sql.NullString) CheckResult {
 // never FAIL): a topology property to surface, not to block boot on.
 func checkServerIDCollision(ctx context.Context, db *sql.DB, sourceDSN, indexDSN string) CheckResult {
 	const name = "Replication server-id collision"
-	derived, sourceOnly, err := serverid.DeriveForInstall(ctx, sourceDSN, indexDSN)
+	derived, sourceOnly, err := installid.DeriveForInstall(ctx, sourceDSN, indexDSN)
 	if err != nil {
 		return CheckResult{
 			Name:   name,

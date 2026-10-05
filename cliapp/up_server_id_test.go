@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dbtrail/dbtrail/internal/serverid"
+	"github.com/dbtrail/dbtrail/internal/installid"
 )
 
 // TestAutoServerID_AsksThisCommandsIndex: `up` with no --server-id derives
@@ -16,13 +16,13 @@ func TestAutoServerID_AsksThisCommandsIndex(t *testing.T) {
 	t.Cleanup(func() { upSourceDSN, upIndexDSN = src, idx })
 	upSourceDSN, upIndexDSN = "u:p@tcp(h:3306)/", "root:pw@tcp(index-mysql:3306)/bintrail_index"
 	var asked string
-	t.Cleanup(serverid.SetIndexServerUUIDForTest(func(_ context.Context, dsn string) (string, error) {
+	t.Cleanup(installid.SetIndexServerUUIDForTest(func(_ context.Context, dsn string) (string, error) {
 		asked = dsn
 		return "8b0c2f3e-7a11-4d5e-9c1a-000000000001", nil
 	}))
 	var out strings.Builder
 	id, err := autoServerID(context.Background(), &out)
-	want, sourceOnly, _ := serverid.DeriveForInstall(context.Background(), upSourceDSN, upIndexDSN)
+	want, sourceOnly, _ := installid.DeriveForInstall(context.Background(), upSourceDSN, upIndexDSN)
 	if err != nil || id != want || sourceOnly != nil || asked != upIndexDSN {
 		t.Fatalf("autoServerID = %d, %v (index asked: %q); want %d from %q", id, err, asked, want, upIndexDSN)
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
 
+	"github.com/dbtrail/dbtrail/internal/installid"
 	"github.com/dbtrail/dbtrail/internal/serverid"
 )
 
@@ -1192,10 +1193,10 @@ func TestCheckSchemaVisibility_emptyVsInvisible(t *testing.T) {
 func TestCheckServerIDCollision_PerInstallation(t *testing.T) {
 	const dsn = "user:pass@tcp(db.example.com:3306)/appdb"
 	const index = "root:pw@tcp(index-mysql:3306)/bintrail_idx_ab12"
-	t.Cleanup(serverid.SetIndexServerUUIDForTest(func(context.Context, string) (string, error) {
+	t.Cleanup(installid.SetIndexServerUUIDForTest(func(context.Context, string) (string, error) {
 		return "8b0c2f3e-7a11-4d5e-9c1a-000000000001", nil
 	}))
-	used, why, err := serverid.DeriveForInstall(t.Context(), dsn, index)
+	used, why, err := installid.DeriveForInstall(t.Context(), dsn, index)
 	sourceOnly, _ := serverid.DeriveServerID(dsn)
 	if err != nil || why != nil || used == sourceOnly {
 		t.Fatalf("setup: used %d (source-only because %v), source-only %d, %v", used, why, sourceOnly, err)

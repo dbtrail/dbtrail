@@ -28,11 +28,11 @@ import (
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/installid"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/readrouter"
 	"github.com/dbtrail/dbtrail/internal/rotation"
-	"github.com/dbtrail/dbtrail/internal/serverid"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/status"
 	"github.com/dbtrail/dbtrail/internal/streamdeps"
@@ -2155,5 +2155,5 @@ func flashbackFilePath(opts consoleOpts) string {
 // given: from the source connection AND this installation's index, so a
 // second installation capturing the same source gets another id.
 func autoServerID(ctx context.Context, w io.Writer) (uint32, error) {
-	return serverid.AutoDerive(ctx, w, upSourceDSN, upIndexDSN)
+	return installid.AutoDerive(ctx, w, upSourceDSN, upIndexDSN)
 }

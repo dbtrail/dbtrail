@@ -14,8 +14,8 @@ import (
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/installid"
 	"github.com/dbtrail/dbtrail/internal/rotation"
-	"github.com/dbtrail/dbtrail/internal/serverid"
 	"github.com/dbtrail/dbtrail/internal/streamrun"
 )
 
@@ -294,5 +294,5 @@ func upPreflight(ctx context.Context) *doctor.Report {
 // given: from the source connection AND this installation's index, so a
 // second installation capturing the same source gets another id.
 func autoServerID(ctx context.Context, w io.Writer) (uint32, error) {
-	return serverid.AutoDerive(ctx, w, upSourceDSN, upIndexDSN)
+	return installid.AutoDerive(ctx, w, upSourceDSN, upIndexDSN)
 }

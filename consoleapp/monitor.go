@@ -19,9 +19,9 @@ import (
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/installid"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/pgstreamrun"
-	"github.com/dbtrail/dbtrail/internal/serverid"
 	"github.com/dbtrail/dbtrail/internal/streamdeps"
 	"github.com/dbtrail/dbtrail/internal/streamrun"
 )
@@ -745,12 +745,12 @@ func (m *monitorSupervisor) deriveSourceIdentity(e console.ServerEntry, flavor s
 	}
 	ctx, cancel := context.WithTimeout(base, 15*time.Second)
 	defer cancel()
-	id, sourceOnly, err := serverid.DeriveForInstall(ctx, e.SourceDSN, e.DSN)
+	id, sourceOnly, err := installid.DeriveForInstall(ctx, e.SourceDSN, e.DSN)
 	if err != nil {
 		return 0, fmt.Errorf("derive server id: %w", err)
 	}
 	if sourceOnly != nil {
-		serverid.WarnSourceOnly(id, e.Name, sourceOnly)
+		installid.WarnSourceOnly(id, e.Name, sourceOnly)
 	}
 	return id, nil
 }
