@@ -44,6 +44,7 @@ console.log(JSON.stringify({
   none: draw(on, srv),
   counts: draw({ ...on, servers: { s1: { copy: 3, mysql: 7, reasons: { expensive_plan: 3, cheap_plan: 5, write: 2 } } } }, srv),
   limits: draw({ ...on, servers: { s1: { copy: 1, mysql: 6, reasons: { expensive_plan: 1, bounded_limit: 4, result_over_row_cap: 2 } } } }, srv),
+  busy: draw({ ...on, servers: { s1: { copy: 40, mysql: 5, reasons: { expensive_plan: 40, copy_queue_full: 3, copy_wait_timeout: 2 } } } }, srv),
   other: draw({ ...on, servers: { s2: { copy: 3, mysql: 7, reasons: { expensive_plan: 3 } } } }, srv),
   unavailable: draw({ ...on, servers: { s1: { copy: 0, mysql: 0, reasons: {}, unavailable: "the server has no source database to forward to" } } }, srv),
   noRule: draw({ ...on, cost_threshold: 0, scan_rows: 0 }, srv),
@@ -74,6 +75,7 @@ console.log(JSON.stringify({
 	var got struct {
 		Off, NoServer, None, Counts, Other, Unavailable, NoRule string
 		Limits                                                  string
+		Busy                                                    string
 		ReadOnly, ReadOnlyOnlyRefusals, ReadOnlyNoRule          string
 		Forwarding, ForwardingReadOnly, ForwardingNoName        string
 		NoSource, Hint                                          string
@@ -108,6 +110,11 @@ console.log(JSON.stringify({
 	// The two reasons a LIMIT and the copy's row cap keep a statement on
 	// MySQL (#2061, #2115), as the page words them.
 	t.Logf("%-12s %s", "limits:", got.Limits)
+	// #2112: a busy copy has its own two lines, in plain words.
+	t.Logf("%-12s %s", "busy:", got.Busy)
+	must("busy", got.Busy, "5 by MySQL", "40 by the copy",
+		"3 × the copy was busy and 16 statements were already waiting for it: MySQL answered at once",
+		"2 × the copy was busy: the statement waited 30 seconds for its turn, then MySQL answered")
 	must("limits", got.Limits, "6 by MySQL", "1 by the copy", "4 × a small LIMIT MySQL answers without reading past it",
 		"2 × an expensive plan whose result is over the copy's row cap: MySQL answered, and the copy was not tried")
 	// Another server's counts never show under the picked one.
