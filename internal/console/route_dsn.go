@@ -106,15 +106,23 @@ func buildRouteDSN(req serverRequest, stored, oldSource, newSource, flavor strin
 	var cur *mysql.Config
 	if stored != "" {
 		if cur, err = mysql.ParseDSN(stored); err != nil {
+			// A stored value that cannot be read (a hand-edited registry
+			// file). A request that says nothing about the account must
+			// still go through, and leaves the value exactly as it is: the
+			// port already treats it as "cannot route". Naming a user
+			// replaces it; a password alone has no account to go with.
+			if req.RouteUser == nil && req.RoutePassword == nil {
+				return stored, nil
+			}
 			if req.RouteUser == nil {
-				return "", errors.New("the stored forwarding account is invalid; send route_user and route_password again, or an empty route_user to remove it")
+				return "", errors.New("the stored forwarding account cannot be read; send route_user with the password to replace it, or an empty route_user to remove it")
 			}
 			cur = nil
 		}
 	}
 
 	// The stored user sent again with no password changes nothing: it is
-	// what the web form sends on every save, and it is a keep.
+	// a keep (an API client that sends back what it read).
 	if req.RouteUser != nil && req.RoutePassword == nil && cur != nil && strings.TrimSpace(*req.RouteUser) == cur.User {
 		req.RouteUser = nil
 	}
@@ -137,9 +145,14 @@ func buildRouteDSN(req serverRequest, stored, oldSource, newSource, flavor strin
 			cur.User, cur.Passwd = user, password
 		}
 		// The source may have been given the forwarding user's name by
-		// this same request.
-		if err := notTheCaptureAccount(cur, src); err != nil {
-			return "", err
+		// this same request: refused. A stored value that already was the
+		// capture account before it (a hand-edited file) is not this
+		// request's doing and does not stop it; the API reports it as
+		// route_is_capture.
+		if old, err := mysql.ParseDSN(oldSource); err != nil || !sameAccount(stillStored(stored), old) {
+			if err := notTheCaptureAccount(cur, src); err != nil {
+				return "", err
+			}
 		}
 		if moved {
 			return cur.FormatDSN(), nil
@@ -163,6 +176,11 @@ func buildRouteDSN(req serverRequest, stored, oldSource, newSource, flavor strin
 	if user == "" {
 		return "", errors.New("route_user is required to set a forwarding account")
 	}
+	if strings.Contains(user, ":") {
+		// user:password is how a DSN is written, so "a:b" would be stored
+		// as user a with a password starting with b.
+		return "", errors.New("route_user cannot contain a colon")
+	}
 	var password string
 	switch {
 	case req.RoutePassword != nil:
@@ -172,12 +190,14 @@ func buildRouteDSN(req serverRequest, stored, oldSource, newSource, flavor strin
 	default:
 		return "", errors.New("route_password is required for a new forwarding user (send an empty one for an account with no password)")
 	}
-	// The source's address, database and connection settings (TLS among
-	// them), with the account swapped. An account that was put on another
-	// address (a raw route_dsn) keeps that address and its own settings:
-	// only a route_dsn moves it. The web form resends the user on every
-	// save, so without this a plain save would move such an account onto
-	// the source.
+	// The source's address, database and DSN parameters, with the account
+	// swapped. TLS is not decided here: the port takes it from the server's
+	// TLS settings (ServerEntry.SourceSSL), the same for either account,
+	// unless the DSN itself carries a tls= parameter.
+	//
+	// An account that was put on another address (a raw route_dsn) keeps
+	// that address and its own settings when its user or password is
+	// changed here: only a route_dsn moves it.
 	base := src
 	if cur != nil && !onSourceAddr(cur, oldSource) {
 		base = cur
@@ -187,16 +207,37 @@ func buildRouteDSN(req serverRequest, stored, oldSource, newSource, flavor strin
 	if err := notTheCaptureAccount(out, src); err != nil {
 		return "", err
 	}
-	return out.FormatDSN(), nil
+	return formatRouteDSN(out)
+}
+
+// formatRouteDSN writes the account as the DSN that is stored, and refuses
+// one that would not read back as what was asked: a user name or a password
+// the DSN syntax splits differently would be saved as another account. The
+// colon refusal above is the one known case; this is the net under it.
+func formatRouteDSN(out *mysql.Config) (string, error) {
+	dsn := out.FormatDSN()
+	if back, err := mysql.ParseDSN(dsn); err != nil || back.User != out.User || back.Passwd != out.Passwd || back.Addr != out.Addr {
+		return "", errors.New("that route_user or route_password cannot be stored as written (the connection string would read back as a different account)")
+	}
+	return dsn, nil
 }
 
 // notTheCaptureAccount refuses a forwarding account that is the source
 // account itself: saved, it would read as a separation that is not there.
 func notTheCaptureAccount(route, source *mysql.Config) error {
-	if route.User == source.User && sameAddr(route.Addr, source.Addr) {
+	if sameAccount(route, source) {
 		return errors.New("that is the account DBTrail captures with, not a separate one; leave the forwarding account empty to forward with the capture account, or name another user")
 	}
 	return nil
+}
+
+// stillStored parses a stored forwarding DSN already known to parse.
+func stillStored(stored string) *mysql.Config {
+	cfg, err := mysql.ParseDSN(stored)
+	if err != nil {
+		return &mysql.Config{}
+	}
+	return cfg
 }
 
 // onSourceAddr reports whether the stored forwarding account connects to the
@@ -218,47 +259,127 @@ func sourceSettingsChanged(oldSource string, src *mysql.Config) bool {
 	return a.FormatDSN() != b.FormatDSN()
 }
 
-// sameAddr compares two host[:port] addresses with the default port filled in.
+// sameAccount reports whether two DSNs name one account: the same user
+// (MySQL user names are case-sensitive) at the same address.
+func sameAccount(a, b *mysql.Config) bool {
+	return a.User == b.User && sameAddr(a.Addr, b.Addr)
+}
+
+// sameAddr compares two host[:port] addresses the way they name one server:
+// the default port filled in, host names without regard to case, and the
+// loopback spellings (localhost, 127.0.0.1, ::1) as one host.
 func sameAddr(a, b string) bool {
 	norm := func(s string) string {
-		if _, _, err := net.SplitHostPort(s); err != nil {
-			return net.JoinHostPort(s, "3306")
+		host, port, err := net.SplitHostPort(s)
+		if err != nil {
+			host, port = strings.Trim(s, "[]"), "3306"
 		}
-		return s
+		host = strings.ToLower(host)
+		switch host {
+		case "localhost", "127.0.0.1", "::1":
+			host = "localhost"
+		}
+		return net.JoinHostPort(host, port)
 	}
 	return norm(a) == norm(b)
 }
 
-// fillRouteDSNParts is the masked view of the forwarding account: that there
-// is one, its user and where it connects. Never the password or the DSN.
-func fillRouteDSNParts(dto *serverDTO, dsn string) {
-	if dsn == "" {
+// routeState is what a server's forwarding account amounts to once it is
+// compared with its source: the one place that decides it, for the API's
+// view (fillRouteDSNParts) and for the port (flashbackForwardDSN) alike.
+type routeState int
+
+const (
+	// routeNone: no forwarding account, or no source to forward to.
+	routeNone routeState = iota
+	// routeSeparate: an account of its own. The port uses it and the
+	// capture account is not opened.
+	routeSeparate
+	// routeIsCapture: the field holds the capture account itself (a
+	// hand-edited file, or one written by a build that did not check):
+	// nothing is separated, and nothing may say it is.
+	routeIsCapture
+	// routeUnreadable: the stored value does not parse. The port cannot
+	// route with it.
+	routeUnreadable
+)
+
+// routeAccountState classifies routeDSN against sourceDSN; cfg is the parsed
+// forwarding DSN when it reads.
+func routeAccountState(routeDSN, sourceDSN string) (routeState, *mysql.Config) {
+	if routeDSN == "" || sourceDSN == "" {
+		return routeNone, nil
+	}
+	cfg, err := mysql.ParseDSN(routeDSN)
+	if err != nil {
+		return routeUnreadable, nil
+	}
+	if src, err := mysql.ParseDSN(sourceDSN); err == nil && sameAccount(cfg, src) {
+		return routeIsCapture, cfg
+	}
+	return routeSeparate, cfg
+}
+
+// fillRouteDSNParts is the masked view of the forwarding account. has_route
+// is true only for an account that is really a separate one; a value that is
+// the capture account, or that cannot be read, is reported as that. The
+// address is given only when it is not the source's: statements then go to
+// another MySQL than the captured one. Never the password or the DSN.
+func fillRouteDSNParts(dto *serverDTO, routeDSN, sourceDSN string) {
+	state, cfg := routeAccountState(routeDSN, sourceDSN)
+	switch state {
+	case routeNone:
+		return
+	case routeUnreadable:
+		dto.RouteUnreadable = true
+		return
+	case routeIsCapture:
+		dto.RouteIsCapture = true
+		dto.RouteUser = cfg.User
 		return
 	}
 	dto.HasRoute = true
-	cfg, err := mysql.ParseDSN(dsn)
-	if err != nil {
-		return
-	}
-	if h, p, err := net.SplitHostPort(cfg.Addr); err == nil {
-		dto.RouteHost, dto.RoutePort = h, p
-	} else {
-		dto.RouteHost = cfg.Addr
-	}
 	dto.RouteUser = cfg.User
 	dto.HasRoutePassword = cfg.Passwd != ""
+	if src, err := mysql.ParseDSN(sourceDSN); err != nil || !sameAddr(cfg.Addr, src.Addr) {
+		if h, p, err := net.SplitHostPort(cfg.Addr); err == nil {
+			dto.RouteHost, dto.RoutePort = h, p
+		} else {
+			dto.RouteHost = cfg.Addr
+		}
+	}
 }
 
-// flashbackForwardDSN is the DSN read routing forwards with for a server: its
-// forwarding account when one is set (separate is then true), else its source
-// DSN; "" when the server has no source (the boot entry, a view-only server).
-func (s *Server) flashbackForwardDSN(id string) (dsn string, separate bool) {
+// forwardDSNOf is the DSN the port forwards with for an entry: its forwarding
+// account when it has one, else its source DSN; "" with no source.
+func forwardDSNOf(e ServerEntry) string {
+	switch {
+	case e.SourceDSN == "":
+		return ""
+	case e.RouteDSN != "":
+		return e.RouteDSN
+	}
+	return e.SourceDSN
+}
+
+// flashbackForwardDSN is the DSN read routing forwards with for a server, ""
+// when the server has no source (the boot entry, a view-only server).
+// fromRouteField says the DSN is the entry's forwarding account (route_dsn)
+// and not its source DSN. separate says it is an account of its own: false
+// when there is none, and also when the field holds the capture account
+// itself or cannot be read, so nothing downstream reports a separation that
+// is not there.
+func (s *Server) flashbackForwardDSN(id string) (dsn string, separate, fromRouteField bool) {
 	entry, ok := s.cm.reg.Get(id)
-	if !ok || entry.SourceDSN == "" {
-		return "", false
+	if !ok {
+		return "", false, false
 	}
-	if entry.RouteDSN != "" {
-		return entry.RouteDSN, true
+	// forwardDSNOf is the one place that says an entry with no source has
+	// nothing to forward with, whatever else is stored on it.
+	dsn = forwardDSNOf(entry)
+	if dsn == "" {
+		return "", false, false
 	}
-	return entry.SourceDSN, false
+	state, _ := routeAccountState(entry.RouteDSN, entry.SourceDSN)
+	return dsn, state == routeSeparate, state != routeNone
 }

@@ -53,6 +53,11 @@ console.log(JSON.stringify({
   forwardingReadOnly: draw({ ...on, read_only: true }, fwd),
   forwardingNoName: draw(on, { ...srv, has_route: true }),
   noSource: draw(on, { id: "s1", name: "shop" }),
+  elsewhere: draw(on, { ...fwd, route_host: "replica.internal", route_port: "3307" }),
+  unreadable: draw(on, { ...srv, route_unreadable: true }),
+  isCapture: draw(on, { ...srv, route_is_capture: true, route_user: "repl" }),
+  refused: draw({ ...on, servers: { s1: { copy: 0, mysql: 4, reasons: { upstream_lost: 4 }, account_refused: "the forwarding account report_ro: MySQL error 1045, Access denied for user 'report_ro'@'10.0.0.5' (using password: YES)" } } }, fwd),
+  refusedNoCounts: draw({ ...on, servers: { s1: { copy: 0, mysql: 0, reasons: {}, account_refused: "the source account repl (this server has no forwarding account): MySQL error 1045, Access denied" } } }, srv),
   hint: vm.runInContext("FORWARDING_HINT", ctx),
   durations: ["15m0s", "10m0s", "1h0m0s", "1h30m0s", "1m30s", "30s", "24h0m0s"].map(fmt),
 }));
@@ -70,6 +75,8 @@ console.log(JSON.stringify({
 		ReadOnly, ReadOnlyOnlyRefusals, ReadOnlyNoRule          string
 		Forwarding, ForwardingReadOnly, ForwardingNoName        string
 		NoSource, Hint                                          string
+		Elsewhere, Unreadable, IsCapture                        string
+		Refused, RefusedNoCounts                                string
 		Durations                                               []string
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
@@ -77,7 +84,8 @@ console.log(JSON.stringify({
 	}
 	for name, text := range map[string]string{"off": got.Off, "no server": got.NoServer, "none": got.None, "counts": got.Counts, "unavailable": got.Unavailable, "no rule": got.NoRule,
 		"read-only": got.ReadOnly, "only refusals": got.ReadOnlyOnlyRefusals, "ro no rule": got.ReadOnlyNoRule,
-		"forwarding": got.Forwarding, "forwarding ro": got.ForwardingReadOnly, "fwd no name": got.ForwardingNoName, "no source": got.NoSource, "form hint": got.Hint} {
+		"forwarding": got.Forwarding, "forwarding ro": got.ForwardingReadOnly, "fwd no name": got.ForwardingNoName, "no source": got.NoSource, "form hint": got.Hint,
+		"elsewhere": got.Elsewhere, "unreadable": got.Unreadable, "is capture": got.IsCapture, "refused": got.Refused, "refused 0": got.RefusedNoCounts} {
 		t.Logf("%-12s %s", name+":", text)
 	}
 	must := func(name, text string, wants ...string) {
@@ -128,6 +136,26 @@ console.log(JSON.stringify({
 	must("forwarding ro", got.ForwardingReadOnly, "This port is read-only.", "statements run as report_ro")
 	must("fwd no name", got.ForwardingNoName, "statements run as this server's forwarding account")
 	must("form hint", got.Hint, "Forwarding user", "SELECT only", "Blank forwards with the source user")
+	// An account that connects somewhere else than the source says where.
+	must("elsewhere", got.Elsewhere, "statements run as report_ro", "replica.internal:3307", "not the source's address")
+	if strings.Contains(got.Forwarding, "address") {
+		t.Errorf("an account on the source's own address talks about an address: %s", got.Forwarding)
+	}
+	// A stored account that cannot be read, or that is the capture account,
+	// is never presented as a separate account.
+	must("unreadable", got.Unreadable, "saved forwarding account cannot be read", "Edit the server")
+	must("is capture", got.IsCapture, "On MySQL, statements run as repl", "the account DBTrail captures with", "saved forwarding account is that same account")
+	for name, text := range map[string]string{"unreadable": got.Unreadable, "is capture": got.IsCapture} {
+		if strings.Contains(text, "is not used by this port") {
+			t.Errorf("%s: says the capture account is not used: %s", name, text)
+		}
+	}
+	// What the source said when it turned the port's login away.
+	must("refused", got.Refused, "MySQL refused the login of the forwarding account report_ro", "MySQL error 1045", "error 2006", "Test connection")
+	must("refused 0", got.RefusedNoCounts, "MySQL refused the login of the source account repl")
+	if strings.Contains(got.Forwarding, "refused the login") {
+		t.Errorf("a server with no refusal shows one: %s", got.Forwarding)
+	}
 	for name, text := range map[string]string{"forwarding": got.Forwarding, "forwarding ro": got.ForwardingReadOnly, "fwd no name": got.ForwardingNoName} {
 		if strings.Contains(text, "repl") || strings.Contains(text, "whatever that account can") {
 			t.Errorf("%s: a server with a forwarding account still names the capture account as the one that runs statements: %s", name, text)

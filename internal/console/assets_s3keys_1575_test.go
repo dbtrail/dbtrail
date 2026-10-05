@@ -65,6 +65,7 @@ func TestTestResultTextExecuted(t *testing.T) {
 	js := string(raw)
 	script := strings.Join([]string{
 		functionBody(t, js, "function s3TestText("),
+		functionBody(t, js, "function routeTestText("),
 		functionBody(t, js, "function testResultText("),
 		functionBody(t, js, "function testResultClass("),
 	}, "\n") + `
@@ -81,6 +82,11 @@ const cases = {
   noLocation: { ...db, s3: [{ bucket: "", ok: false, error: "no Archive to S3 or Snapshots S3 location to test the store with", latency_ms: 0 }] },
   dbDown: { ok: false, error: "dial tcp: refused", latency_ms: 1, s3: [{ bucket: "arch", ok: true, latency_ms: 2 }] },
   pending: { ok: false, provision_pending: true, error: "index database \"x\" not provisioned yet", latency_ms: 1, s3: [{ bucket: "arch", ok: true, latency_ms: 2 }] },
+  routeOk: { ...db, route: { ok: true, user: "report_ro", latency_ms: 9 } },
+  routeRefused: { ...db, route: { ok: false, user: "report_ro", error: "Access denied for user 'report_ro'@'10.0.0.5' (using password: YES)", latency_ms: 4 }, s3: [{ bucket: "arch", ok: true, latency_ms: 2 }] },
+  routeNeedsPassword: { ...db, route: { ok: false, user: "report_ro", needs_password: true, latency_ms: 0 } },
+  routeNoUser: { ...db, route: { ok: false, error: "route_user cannot contain a colon", latency_ms: 0 } },
+  routeOkDbDown: { ok: false, error: "dial tcp: refused", latency_ms: 1, route: { ok: true, user: "report_ro", latency_ms: 9 } },
   pendingS3fail: { ok: false, provision_pending: true, latency_ms: 1, s3: [{ bucket: "arch", ok: false, error: "NoSuchBucket", latency_ms: 2 }] },
 };
 const out = {};
@@ -122,6 +128,13 @@ console.log(JSON.stringify(out));
 		"dbDown":         {"err", []string{"✗ dial tcp: refused", "✓ S3 arch · 2 ms"}, nil},
 		"pending":        {"pending", []string{"○ index database", "✓ S3 arch · 2 ms"}, nil},
 		"pendingS3fail":  {"err", []string{"✗ S3 arch: NoSuchBucket"}, nil},
+		// The forwarding account (#2079) is named in its own result, so a
+		// failure of it is not read as the index's.
+		"routeOk":            {"ok", []string{"✓ index ok · 5 ms", "✓ forwarding account report_ro logs in · 9 ms"}, []string{"✗"}},
+		"routeRefused":       {"err", []string{"✓ index ok", "✗ forwarding account report_ro: Access denied for user 'report_ro'", "✓ S3 arch · 2 ms"}, nil},
+		"routeNeedsPassword": {"pending", []string{"○ forwarding account report_ro: type its password to test it"}, []string{"✗"}},
+		"routeNoUser":        {"err", []string{"✗ forwarding account: route_user cannot contain a colon"}, nil},
+		"routeOkDbDown":      {"err", []string{"✗ dial tcp: refused", "✓ forwarding account report_ro logs in"}, nil},
 	}
 	for k, w := range want {
 		g, ok := got[k]

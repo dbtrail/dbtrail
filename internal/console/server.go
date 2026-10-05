@@ -471,7 +471,10 @@ type Server struct {
 	// routing the per-server tally of its decisions since start — both for
 	// GET /api/flashback.
 	readRouting ReadRoutingConfig
-	routing     *routingStats
+	// routed tracks the port's client connections bound to a read router,
+	// per server, to close them when the account they forward with changes.
+	routed  *routedConns
+	routing *routingStats
 }
 
 // serverHeader selects the target server per request. Selection is stateless —
@@ -656,6 +659,7 @@ func New(cfg Config) (*Server, error) {
 		flashback:               flashbackState{startup: cfg.FlashbackListen != "", listen: cfg.FlashbackListen, path: cfg.FlashbackPath},
 		readRouting:             cfg.ReadRouting,
 		routing:                 newRoutingStats(time.Now()),
+		routed:                  newRoutedConns(),
 		archiveFetcher:          parquetquery.Fetch,
 		capacityProbe:           doctor.ProbeCapacity,
 	}

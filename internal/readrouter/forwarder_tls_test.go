@@ -158,3 +158,44 @@ func TestForwarder_tlsSettingsCheckedUpFront(t *testing.T) {
 		}
 	}
 }
+
+// The caller is told how the connection attempt ended, with the source's own
+// error: a refused account is told apart from an unreachable source.
+func TestForwarder_onConnectSaysWhy(t *testing.T) {
+	src := newFakeSource(t, true)
+	attempt := func(dsn string) (connectErr error, called int, forwardErr error) {
+		f, err := NewForwarder(dsn, config.SSL{Mode: "preferred"}, DefaultPolicy(), 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		f.connectTimeout = 2 * time.Second
+		f.OnConnect = func(err error) { connectErr = err; called++ }
+		_, forwardErr = f.Forward(context.Background(), "SELECT 1", &BufferSink{})
+		_, _ = f.Forward(context.Background(), "SELECT 1", &BufferSink{}) // a second statement dials nothing
+		return connectErr, called, forwardErr
+	}
+	if cerr, n, ferr := attempt("u:p@tcp(" + src.addr + ")/"); cerr != nil || n != 1 || ferr != nil {
+		t.Errorf("good account: OnConnect(%v) called %d time(s), Forward err %v; want nil, once, nil", cerr, n, ferr)
+	}
+	cerr, n, ferr := attempt("u:wrong@tcp(" + src.addr + ")/")
+	if n != 1 || !IsLost(ferr) {
+		t.Fatalf("wrong password: OnConnect called %d time(s), Forward err %v", n, ferr)
+	}
+	if code, refused := AccountRefused(cerr); !refused || code != mysql.ER_ACCESS_DENIED_ERROR {
+		t.Errorf("wrong password: AccountRefused(%v) = %d, %v; want 1045, true", cerr, code, refused)
+	}
+	if strings.Contains(cerr.Error(), "wrong") {
+		t.Errorf("the connect error carries the password: %v", cerr)
+	}
+	cerr, n, _ = attempt("u:p@tcp(127.0.0.1:1)/")
+	if _, refused := AccountRefused(cerr); n != 1 || cerr == nil || refused {
+		t.Errorf("unreachable source: OnConnect(%v) called %d time(s), refused=%v; want an error that is not a refusal", cerr, n, refused)
+	}
+	if _, refused := AccountRefused(nil); refused {
+		t.Error("nil is a refusal")
+	}
+	if _, refused := AccountRefused(mysql.NewError(mysql.ER_PARSE_ERROR, "x")); refused {
+		t.Error("a syntax error is a refusal")
+	}
+}

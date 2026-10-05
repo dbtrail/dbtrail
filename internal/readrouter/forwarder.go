@@ -66,7 +66,14 @@ type Forwarder struct {
 	// WITHOUT encryption because the mode is "preferred" and the source
 	// offers no TLS, with the error that proved it: the caller's chance to
 	// say so in the log, as capture does for its own connection.
-	OnCleartext    func(error)
+	OnCleartext func(error)
+	// OnConnect, when set, is told how the one attempt to open the
+	// connection ended: nil when it opened, else the error as the source or
+	// the network gave it (before it is turned into CodeUpstreamLost for
+	// the client). It is how a caller learns WHY a source could not be
+	// reached, an account the source refuses among the reasons
+	// (AccountRefused).
+	OnConnect      func(error)
 	policy         Policy
 	connectTimeout time.Duration
 	// queryTimeout bounds each round trip on the upstream socket (read and
@@ -154,6 +161,9 @@ func (f *Forwarder) get(ctx context.Context) (*client.Conn, error) {
 			return nil
 		})
 	})
+	if f.OnConnect != nil {
+		f.OnConnect(err)
+	}
 	if err != nil {
 		f.dead = lostError(fmt.Errorf("connect to the source: %w", err))
 		return nil, f.dead
@@ -178,6 +188,28 @@ func (f *Forwarder) lose(cause error) {
 
 func lostError(cause error) error {
 	return mysql.NewError(CodeUpstreamLost, fmt.Sprintf("MySQL server has gone away (the port's connection to the source was lost: %v); reconnect to continue", cause))
+}
+
+// AccountRefused reports whether err is the source turning the ACCOUNT away
+// when the connection was opened (a wrong password, a host the account may
+// not connect from, a locked or expired account, a database it may not use),
+// as opposed to the source being unreachable. code is MySQL's error number.
+func AccountRefused(err error) (code uint16, refused bool) {
+	var me *mysql.MyError
+	if !errors.As(err, &me) {
+		return 0, false
+	}
+	switch me.Code {
+	case mysql.ER_ACCESS_DENIED_ERROR, // 1045: wrong user or password
+		mysql.ER_DBACCESS_DENIED_ERROR, // 1044: no access to the DSN's database
+		mysql.ER_HOST_NOT_PRIVILEGED,   // 1130: host not allowed to connect
+		mysql.ER_MUST_CHANGE_PASSWORD,  // 1820
+		1698,                           // access denied (no password, or the auth plugin)
+		1862,                           // the password has expired
+		3118:                           // the account is locked
+		return me.Code, true
+	}
+	return 0, false
 }
 
 // IsLost reports whether err is the Forwarder's "connection to the source

@@ -28,6 +28,13 @@ type routingStats struct {
 	// everything there instead of showing a rule that does not apply.
 	// Cleared when a connection binds a router.
 	unavailable map[string]string
+	// accountRefused holds, per server id, what the source answered the
+	// LAST time a connection of the port tried to log in and was turned
+	// away (a wrong password, a host not allowed, a locked account), in the
+	// words the page shows. Cleared when a connection logs in. Clients of
+	// such a connection get error 2006 on every statement; without this the
+	// only trace would be the upstream_lost count.
+	accountRefused map[string]string
 }
 
 // routingTally is one server's counts.
@@ -37,7 +44,7 @@ type routingTally struct {
 }
 
 func newRoutingStats(now time.Time) *routingStats {
-	return &routingStats{since: now, perServer: map[string]*routingTally{}, unavailable: map[string]string{}}
+	return &routingStats{since: now, perServer: map[string]*routingTally{}, unavailable: map[string]string{}, accountRefused: map[string]string{}}
 }
 
 // record tallies one decision. route is "copy", "mysql" or "refused" (the
@@ -74,6 +81,18 @@ func (r *routingStats) setUnavailable(serverID, reason string) {
 	r.unavailable[serverID] = reason
 }
 
+// setAccountRefused records what the source said when it turned the port's
+// account away; an empty text clears the note (a connection just logged in).
+func (r *routingStats) setAccountRefused(serverID, text string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if text == "" {
+		delete(r.accountRefused, serverID)
+		return
+	}
+	r.accountRefused[serverID] = text
+}
+
 // snapshot copies the tally for the wire; the caller owns the result. A
 // server with only an unavailable note gets an entry with zero counts.
 func (r *routingStats) snapshot() map[string]routingServerDTO {
@@ -81,12 +100,23 @@ func (r *routingStats) snapshot() map[string]routingServerDTO {
 	defer r.mu.Unlock()
 	out := make(map[string]routingServerDTO, len(r.perServer))
 	for id, t := range r.perServer {
-		out[id] = routingServerDTO{Copy: t.copy, MySQL: t.mysql, Refused: t.refused, Reasons: maps.Clone(t.reasons), Unavailable: r.unavailable[id]}
+		out[id] = routingServerDTO{Copy: t.copy, MySQL: t.mysql, Refused: t.refused, Reasons: maps.Clone(t.reasons)}
+	}
+	// The notes: a server with a note and no decision yet still gets an
+	// entry, with zero counts.
+	note := func(id string, set func(*routingServerDTO)) {
+		d, ok := out[id]
+		if !ok {
+			d = routingServerDTO{Reasons: map[string]uint64{}}
+		}
+		set(&d)
+		out[id] = d
 	}
 	for id, why := range r.unavailable {
-		if _, ok := out[id]; !ok {
-			out[id] = routingServerDTO{Reasons: map[string]uint64{}, Unavailable: why}
-		}
+		note(id, func(d *routingServerDTO) { d.Unavailable = why })
+	}
+	for id, text := range r.accountRefused {
+		note(id, func(d *routingServerDTO) { d.AccountRefused = text })
 	}
 	return out
 }
@@ -106,6 +136,17 @@ func (s *Server) RecordRouteDecision(serverID, route, reason string) {
 func (s *Server) RecordRouteUnavailable(serverID, reason string) {
 	s.routing.setUnavailable(serverID, reason)
 }
+
+// RecordRouteAccountRefused notes that the source turned away the account a
+// connection of the port tried to log in with, in the words the page shows
+// (which account, the user name, MySQL's error number and message; never a
+// password). RecordRouteAccountOK clears the note: a connection logged in.
+func (s *Server) RecordRouteAccountRefused(serverID, text string) {
+	s.routing.setAccountRefused(serverID, text)
+}
+
+// RecordRouteAccountOK: see RecordRouteAccountRefused.
+func (s *Server) RecordRouteAccountOK(serverID string) { s.routing.setAccountRefused(serverID, "") }
 
 // RecordRouteAvailable: see RecordRouteUnavailable.
 func (s *Server) RecordRouteAvailable(serverID string) { s.routing.setUnavailable(serverID, "") }

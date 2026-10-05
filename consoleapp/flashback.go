@@ -218,7 +218,9 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 		return
 	}
 
-	if err := bindFlashbackHandler(connCtx, srv, proxy, mysqlConn, gate, cfg, logger); err != nil {
+	untrack, err := bindFlashbackHandler(connCtx, srv, proxy, mysqlConn, gate, cfg, logger, func() { _ = c.Close() })
+	defer untrack()
+	if err != nil {
 		// Auth already succeeded; surface the routing failure on the client's
 		// first query (a typed MySQL error) rather than a bare disconnect.
 		proxy.fail = err
@@ -247,7 +249,13 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 // shim.Handler bound to that server's per-source index + baseline. A returned
 // error is a typed *mysql.MyError the caller stores on the proxy so the client
 // sees it on the first query.
-func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routingHandler, mysqlConn *server.Conn, gate *shim.Gate, cfg flashbackConfig, logger *slog.Logger) error {
+//
+// closeConn closes the client connection. A connection bound to a read router
+// is registered with the console under its server (untrack undoes it), so
+// that a change to the account the port forwards with closes it instead of
+// leaving it on the previous account (#2079).
+func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routingHandler, mysqlConn *server.Conn, gate *shim.Gate, cfg flashbackConfig, logger *slog.Logger, closeConn func()) (untrack func(), err error) {
+	untrack = func() {}
 	user := mysqlConn.GetUser()
 	tgt, err := srv.ResolveFlashback(ctx, user)
 	if err != nil {
@@ -255,10 +263,10 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 			// Auth is the token alone (CheckUsername accepts any username), so an
 			// unknown or typo'd server name is the normal way we land here —
 			// report it as a missing database on the client's first query.
-			return gomysql.NewError(gomysql.ER_BAD_DB_ERROR, fmt.Sprintf("flashback: no such server %q", user))
+			return untrack, gomysql.NewError(gomysql.ER_BAD_DB_ERROR, fmt.Sprintf("flashback: no such server %q", user))
 		}
 		// The connManager already scrubbed DSN secrets from the open error.
-		return gomysql.NewError(gomysql.ER_UNKNOWN_ERROR, fmt.Sprintf("flashback: cannot open server %q: %s", user, err))
+		return untrack, gomysql.NewError(gomysql.ER_UNKNOWN_ERROR, fmt.Sprintf("flashback: cannot open server %q: %s", user, err))
 	}
 
 	shimCfg := shim.Config{
@@ -305,7 +313,17 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	// BEFORE the schema seeds below so the upstream follows them. A server that cannot route stays copy-only and says so
 	// once per connection: silently serving the copy to a client who was
 	// promised MySQL semantics is the one thing this must not do.
-	bindReadRouter(h, srv, tgt, user, cfg, logger)
+	if bindReadRouter(h, srv, tgt, user, cfg, logger) {
+		// tgt was read at generation tgt.ForwardGen. If the account changed
+		// since, this handler may carry the previous one: the connection is
+		// closed here, and the client reconnects into the account in force.
+		var ok bool
+		if untrack, ok = srv.TrackRoutedConn(tgt.ID, tgt.ForwardGen, closeConn); !ok {
+			h.Close()
+			closeConn()
+			return untrack, gomysql.NewError(gomysql.ER_UNKNOWN_ERROR, "flashback: this server's forwarding account changed while connecting; reconnect")
+		}
+	}
 	// Seed the source schema so fully qualified `_flashback.<table>` queries
 	// work without a prior `USE <db>` (mirrors the standalone shim's #263
 	// behaviour). Best-effort: the boot entry has no registry SourceDSN.
@@ -320,7 +338,7 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 		_ = h.UseDB(proxy.pendingDB)
 	}
 	proxy.inner = h
-	return nil
+	return untrack, nil
 }
 
 // bindReadRouter turns h into a routing handler when read routing is on and
@@ -329,9 +347,12 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 // cannot route stays copy-only, and the Connect page is told why. Its own
 // function so the wiring from the port's configuration to the handler is
 // tested without a database: nothing here opens a connection.
-func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackTarget, user string, cfg flashbackConfig, logger *slog.Logger) {
+//
+// It reports whether a router was bound: such a connection holds an account
+// on the source for as long as it lives.
+func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackTarget, user string, cfg flashbackConfig, logger *slog.Logger) (bound bool) {
 	if cfg.RouteMaxCopyAge <= 0 {
-		return
+		return false
 	}
 	switch {
 	case tgt.SQL == nil:
@@ -354,7 +375,7 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 			// setting that cannot be used, is the realistic cause. The
 			// message carries no secret.
 			logger.Warn("read routing off for this connection", "server", user, "err", err)
-			why := forwardAddressUnavailable(tgt.ForwardSeparate, err)
+			why := forwardAddressUnavailable(tgt.ForwardFromRouteField, err)
 			if problem, isTLS := strings.CutPrefix(err.Error(), "source TLS settings: "); isTLS {
 				why = "this server's TLS settings cannot be used (" + problem + ")"
 			}
@@ -373,6 +394,23 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 			// server id: the Prometheus counter for dashboards and
 			// the console's tally for the Connect page (#2038).
 			id := tgt.ID
+			// A login the source refuses reaches the client as error 2006
+			// on every statement. The page is told what the source said and
+			// about which of the two accounts, so the cause is not left to
+			// an upstream_lost count (#2079).
+			account := accountLabel(tgt.ForwardSeparate, config.DSNUser(tgt.ForwardDSN))
+			fw.OnConnect = func(err error) {
+				if err == nil {
+					srv.RecordRouteAccountOK(id)
+					return
+				}
+				if _, refused := readrouter.AccountRefused(err); refused {
+					text := accountRefusedText(account, err)
+					logger.Warn("read routing: the source refused the port's login", "server", user, "account", account, "error", text)
+					srv.RecordRouteAccountRefused(id, text)
+				}
+			}
+			bound = true
 			h.BindRouter(fw, shim.RouterConfig{
 				MaxCopyAge: cfg.RouteMaxCopyAge,
 				ReadOnly:   cfg.RouteReadOnly,
@@ -383,6 +421,28 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 			})
 		}
 	}
+	return bound
+}
+
+// accountLabel names which of a server's two accounts the port logs in
+// with, and its user name.
+func accountLabel(separate bool, user string) string {
+	if separate {
+		return "the forwarding account " + user
+	}
+	return "the source account " + user + " (this server has no forwarding account)"
+}
+
+// accountRefusedText is what the Connect page shows when the source turned
+// the port's login away: the account, then MySQL's own error number and
+// message. MySQL's message names user and client host and whether a
+// password was sent, never the password.
+func accountRefusedText(account string, err error) string {
+	var me *gomysql.MyError
+	if errors.As(err, &me) {
+		return fmt.Sprintf("%s: MySQL error %d, %s", account, me.Code, me.Message)
+	}
+	return account
 }
 
 // forwardAddressUnavailable says, in the words the Connect page shows, that

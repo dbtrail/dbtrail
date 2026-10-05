@@ -439,18 +439,48 @@ What this is and is not:
   ```
 
   Set it on the server: in the web interface, **Forwarding user** and
-  **Forwarding password** on the server's edit form; in the API,
-  `route_user` and `route_password` on `POST` / `PUT /api/servers` (an
-  empty `route_user` removes it; a password left out keeps the saved one;
-  `route_dsn` takes a whole DSN instead, for an account reached at another
-  address). It connects to the source's own address with the source's
-  connection settings, and follows the source when its address, database
-  or connection settings are edited.
+  **Forwarding password** on the server's edit form (to remove it, tick
+  **Remove the forwarding account** there; a save that does not touch
+  these fields leaves the account as it is); in the API, `route_user` and
+  `route_password` on `POST` / `PUT /api/servers` (fields left out keep
+  what is saved; an empty `route_user` removes it; a password left out
+  keeps the saved one; `route_dsn` takes a whole DSN instead, for an
+  account reached at another address). The user name cannot contain a
+  colon, and it cannot be the account the server captures with: that
+  would separate nothing.
+
+  It connects to the source's own address and database, and follows the
+  source when those are edited. Whether the connection is encrypted is
+  not part of the account: the port uses the server's TLS settings, the
+  ones capture uses, with either account. An account given as a
+  `route_dsn` to another address keeps that address, and the edit form and
+  the **Connect a SQL client** panel show it.
+
+  **Saving, changing or removing the forwarding account closes that
+  server's open connections on the port**, and so does any other edit
+  that changes the address or account the port forwards with (the
+  source's own, on a server with no forwarding account), or deleting the
+  server. No connection
+  stays on the previous account: clients see a lost connection, reconnect,
+  and get the account in force. An edit that changes neither closes
+  nothing.
+
+  **Test connection** on the server's form logs in with the forwarding
+  account too, the saved one or the one being typed, and names it in its
+  answer. If the source later turns the port's login away (a changed
+  password, a host that is not allowed, a locked account), clients get
+  error 2006 on every statement, and the **Connect a SQL client** panel
+  says which account was refused and MySQL's own error, until a
+  connection logs in again.
+
   The password is stored in the registry file like the source's and never
-  shown again. MySQL and MariaDB sources only. A change applies to
-  connections opened after it. The **Connect a SQL client** panel names the
-  user the port runs statements as. The server given on the command line
-  (`--source-dsn`) is not routed, so it has no such setting.
+  shown again. MySQL and MariaDB sources only. The **Connect a SQL
+  client** panel names the user the port runs statements as. If the saved
+  value cannot be read (a registry file edited by hand), the port does not
+  forward for that server and never falls back to the capture account;
+  the form and the panel say so, and other edits of the server still
+  save. The server given on the command line (`--source-dsn`) is not
+  routed, so it has no such setting.
 - **`--route-read-only` makes the routed port read-only.** With it (or
   `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=1`), a statement that is not a read is
   refused with MySQL error 1290 and a message that names the flag, and it is

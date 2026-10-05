@@ -2,6 +2,7 @@ package console
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -89,6 +90,8 @@ func TestBuildRouteDSN(t *testing.T) {
 		{name: "empty user clears even over a source DSN that does not parse", req: serverRequest{RouteUser: strPtr("")}, stored: stored, oldSource: "not a dsn(", newSource: "not a dsn("},
 		{name: "empty dsn clears even over a source DSN that does not parse", req: serverRequest{RouteDSN: strPtr("")}, stored: stored, oldSource: "not a dsn(", newSource: "not a dsn("},
 		{name: "nothing sent over a source DSN that does not parse keeps it", stored: stored, oldSource: "not a dsn(", newSource: "not a dsn(", want: "fwd:fwdpw@db.prod:3306/shop?tls=skip-verify"},
+		{name: "a stored account that already is the capture account does not stop an unrelated edit", stored: "repl:replpw@tcp(db.prod:3306)/", oldSource: src, newSource: src,
+			want: "repl:replpw@db.prod:3306/?tls="},
 		{name: "raw dsn is used as given", req: serverRequest{RouteDSN: strPtr(other)}, oldSource: src, newSource: src, want: "fwd:fwdpw@replica.prod:3306/?tls="},
 
 		{name: "new user without a password", req: serverRequest{RouteUser: strPtr("fwd")}, oldSource: src, newSource: src, wantErr: "route_password"},
@@ -99,6 +102,13 @@ func TestBuildRouteDSN(t *testing.T) {
 		{name: "raw dsn naming the capture account", req: serverRequest{RouteDSN: strPtr("repl:replpw@tcp(db.prod:3306)/")}, oldSource: src, newSource: src, wantErr: "capture"},
 		{name: "the source user becomes the forwarding user", stored: stored, oldSource: src, newSource: "fwd:other@tcp(db.prod:3306)/shop", wantErr: "capture"},
 		{name: "empty dsn with a structured user", req: serverRequest{RouteDSN: strPtr(""), RouteUser: strPtr("fwd")}, stored: stored, oldSource: src, newSource: src, wantErr: "either"},
+		{name: "a colon in the user would be stored as another account", req: serverRequest{RouteUser: strPtr("fwd:x"), RoutePassword: strPtr("pw")}, oldSource: src, newSource: src, wantErr: "cannot contain a colon"},
+		{name: "a colon in the user that hides the capture account", req: serverRequest{RouteUser: strPtr("repl:x"), RoutePassword: strPtr("pw")}, oldSource: src, newSource: src, wantErr: "cannot contain a colon"},
+		{name: "the capture account under another spelling of the host", req: serverRequest{RouteDSN: strPtr("repl:replpw@tcp(DB.PROD:3306)/")}, oldSource: src, newSource: src, wantErr: "capture"},
+		{name: "the capture account with the default port left out", req: serverRequest{RouteDSN: strPtr("repl:replpw@tcp(db.prod)/")}, oldSource: src, newSource: src, wantErr: "capture"},
+		{name: "the capture account under a loopback alias", req: serverRequest{RouteDSN: strPtr("repl:replpw@tcp(127.0.0.1:3306)/")}, oldSource: "repl:replpw@tcp(localhost:3306)/", newSource: "repl:replpw@tcp(localhost:3306)/", wantErr: "capture"},
+		{name: "the capture account under the IPv6 loopback", req: serverRequest{RouteDSN: strPtr("repl:replpw@tcp([::1]:3306)/")}, oldSource: "repl:replpw@tcp(LOCALHOST:3306)/", newSource: "repl:replpw@tcp(LOCALHOST:3306)/", wantErr: "capture"},
+		{name: "a password alone over a stored account that cannot be read", req: serverRequest{RoutePassword: strPtr("pw")}, stored: "not a dsn(", oldSource: src, newSource: src, wantErr: "route_user"},
 		{name: "raw dsn and structured fields", req: serverRequest{RouteDSN: strPtr(other), RouteUser: strPtr("fwd")}, oldSource: src, newSource: src, wantErr: "either"},
 		{name: "raw dsn and structured password", req: serverRequest{RouteDSN: strPtr(other), RoutePassword: strPtr("x")}, oldSource: src, newSource: src, wantErr: "either"},
 		{name: "raw dsn over a unix socket", req: serverRequest{RouteDSN: strPtr("fwd:pw@unix(/tmp/mysql.sock)/")}, oldSource: src, newSource: src, wantErr: "TCP"},
@@ -168,8 +178,8 @@ func TestServersAPI_ForwardingAccount(t *testing.T) {
 		}
 		return d
 	}
-	if d := masked("create", body); !d.HasRoute || d.RouteUser != "fwd" || !d.HasRoutePassword || d.RouteHost != "db.prod" || d.RoutePort != "3307" {
-		t.Errorf("create DTO = %+v, want has_route, fwd@db.prod:3307, has_route_password", d)
+	if d := masked("create", body); !d.HasRoute || d.RouteUser != "fwd" || !d.HasRoutePassword || d.RouteHost != "" || d.RoutePort != "" {
+		t.Errorf("create DTO = %+v, want has_route, user fwd, has_route_password and no address (it is the source's)", d)
 	}
 	if got := stored(); got != "fwd:"+secret+"@tcp(db.prod:3307)/" {
 		t.Errorf("stored route DSN = %q", got)
@@ -283,19 +293,150 @@ func TestFlashbackForwardDSN(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dsn, separate := srv.flashbackForwardDSN(with.ID); dsn != "fwd:pw2@tcp(s:3306)/shop" || !separate {
-		t.Errorf("with a forwarding account: %q, separate=%v", dsn, separate)
+	isCapture, err := reg.Add(ServerEntry{Name: "iscapture", DSN: "u:p@tcp(i:3306)/idx5", SourceDSN: "repl:pw@tcp(s:3306)/shop", RouteDSN: "repl:pw@tcp(S:3306)/shop"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if dsn, separate := srv.flashbackForwardDSN(without.ID); dsn != "repl:pw@tcp(s:3306)/shop" || separate {
-		t.Errorf("without one: %q, separate=%v", dsn, separate)
+	unreadable, err := reg.Add(ServerEntry{Name: "unreadable", DSN: "u:p@tcp(i:3306)/idx6", SourceDSN: "repl:pw@tcp(s:3306)/shop", RouteDSN: "fwd:pw@tcp(s:3306"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if dsn, separate := srv.flashbackForwardDSN(view.ID); dsn != "" || separate {
-		t.Errorf("no source: %q, separate=%v", dsn, separate)
+	type fwd struct {
+		dsn                  string
+		separate, routeField bool
 	}
-	if dsn, separate := srv.flashbackForwardDSN(orphan.ID); dsn != "" || separate {
-		t.Errorf("a forwarding account with no source: %q, separate=%v", dsn, separate)
+	for name, tc := range map[string]struct {
+		id   string
+		want fwd
+	}{
+		"a forwarding account":                {with.ID, fwd{"fwd:pw2@tcp(s:3306)/shop", true, true}},
+		"none":                                {without.ID, fwd{"repl:pw@tcp(s:3306)/shop", false, false}},
+		"no source":                           {view.ID, fwd{}},
+		"a forwarding account with no source": {orphan.ID, fwd{}},
+		"the capture account in the field":    {isCapture.ID, fwd{"repl:pw@tcp(S:3306)/shop", false, true}},
+		"a value that cannot be read":         {unreadable.ID, fwd{"fwd:pw@tcp(s:3306", false, true}},
+		"unknown server":                      {"nope", fwd{}},
+	} {
+		dsn, separate, routeField := srv.flashbackForwardDSN(tc.id)
+		if got := (fwd{dsn, separate, routeField}); got != tc.want {
+			t.Errorf("%s: %+v, want %+v", name, got, tc.want)
+		}
 	}
-	if dsn, separate := srv.flashbackForwardDSN("nope"); dsn != "" || separate {
-		t.Errorf("unknown server: %q, separate=%v", dsn, separate)
+}
+
+// TestFormatRouteDSN: what is stored reads back as the account that was
+// asked for, or it is not stored.
+func TestFormatRouteDSN(t *testing.T) {
+	ok := mysql.NewConfig()
+	ok.User, ok.Passwd, ok.Net, ok.Addr = "fwd", "p@ss:w/rd(1)", "tcp", "db.prod:3306"
+	dsn, err := formatRouteDSN(ok)
+	if err != nil {
+		t.Fatalf("a plain account with an awkward password: %v", err)
+	}
+	if back, err := mysql.ParseDSN(dsn); err != nil || back.User != "fwd" || back.Passwd != "p@ss:w/rd(1)" || back.Addr != "db.prod:3306" {
+		t.Errorf("stored %+v (%v), want it back as asked", back, err)
+	}
+	// "a:b" as a user reads back as user a with a password that starts
+	// with b: another account.
+	bad := ok.Clone()
+	bad.User = "fwd:x"
+	if dsn, err := formatRouteDSN(bad); err == nil || dsn != "" || strings.Contains(err.Error(), "p@ss") {
+		t.Errorf("a user that reads back as another account was stored: %q, %v", dsn, err)
+	}
+}
+
+// TestBuildRouteDSN_unreadableStoredIsLeftAlone: a stored forwarding account
+// that cannot be read (a hand-edited registry file) does not stop an edit
+// that says nothing about it, and that edit leaves it exactly as it is. It
+// can still be replaced or removed.
+func TestBuildRouteDSN_unreadableStoredIsLeftAlone(t *testing.T) {
+	const src, broken = "repl:replpw@tcp(db.prod:3306)/shop", "fwd:pw@tcp(db.prod:3306"
+	for name, newSource := range map[string]string{"an unrelated edit": src, "the source moves": "repl:replpw@tcp(db2.prod:3306)/shop"} {
+		got, err := buildRouteDSN(serverRequest{}, broken, src, newSource, FlavorMySQL)
+		if err != nil || got != broken {
+			t.Errorf("%s: got %q, %v; want the stored value untouched and no error", name, got, err)
+		}
+	}
+	if got, err := buildRouteDSN(serverRequest{RouteUser: strPtr("")}, broken, src, src, FlavorMySQL); err != nil || got != "" {
+		t.Errorf("remove: got %q, %v", got, err)
+	}
+	if got, err := buildRouteDSN(serverRequest{RouteUser: strPtr("fwd"), RoutePassword: strPtr("pw")}, broken, src, src, FlavorMySQL); err != nil || got != "fwd:pw@tcp(db.prod:3306)/shop" {
+		t.Errorf("replace: got %q, %v", got, err)
+	}
+}
+
+// TestBuildRouteDSN_storesWhatWasAsked: whatever user and password are
+// accepted come back out of the stored DSN exactly as they went in; anything
+// that would not is refused. A name the DSN syntax splits differently would
+// otherwise be saved as another account.
+func TestBuildRouteDSN_storesWhatWasAsked(t *testing.T) {
+	const src = "repl:replpw@tcp(db.prod:3306)/shop"
+	for _, user := range []string{"fwd", "fwd@host", "fwd/x", "fwd(x)", "f?w=d", "fwd x", "ünï", "a:b", ":", "fwd:", "@", "(", "fwd@tcp(evil:3306)/"} {
+		for _, password := range []string{"pw", "", "p:w", "p@w", "p@tcp(x)/w", "pass word", "/?&="} {
+			got, err := buildRouteDSN(serverRequest{RouteUser: &user, RoutePassword: &password}, "", src, src, FlavorMySQL)
+			if err != nil {
+				continue
+			}
+			cfg, perr := mysql.ParseDSN(got)
+			if perr != nil || cfg.User != user || cfg.Passwd != password || cfg.Addr != "db.prod:3306" {
+				t.Errorf("user %q password %q was accepted and stored as user %q password %q address %q (%v)", user, password, cfgUser(cfg), cfgPass(cfg), cfgAddr(cfg), perr)
+			}
+		}
+	}
+	// The plain cases are accepted, so the loop above is not vacuous.
+	if _, err := buildRouteDSN(serverRequest{RouteUser: strPtr("fwd"), RoutePassword: strPtr("p:w@x")}, "", src, src, FlavorMySQL); err != nil {
+		t.Errorf("a plain user with an odd password was refused: %v", err)
+	}
+}
+
+func cfgUser(c *mysql.Config) string {
+	if c == nil {
+		return ""
+	}
+	return c.User
+}
+func cfgPass(c *mysql.Config) string {
+	if c == nil {
+		return ""
+	}
+	return c.Passwd
+}
+func cfgAddr(c *mysql.Config) string {
+	if c == nil {
+		return ""
+	}
+	return c.Addr
+}
+
+// TestRouteAccountView: what the API says about a server's forwarding
+// account, decided from the account the port would actually use and not
+// from the field being filled in.
+func TestRouteAccountView(t *testing.T) {
+	const src = "repl:replpw@tcp(db.prod:3306)/shop"
+	cases := []struct {
+		name, route, source string
+		want                serverDTO
+	}{
+		{name: "none", source: src},
+		{name: "separate, on the source's address", route: "fwd:pw@tcp(db.prod:3306)/shop", source: src,
+			want: serverDTO{HasRoute: true, RouteUser: "fwd", HasRoutePassword: true}},
+		{name: "separate, no password", route: "fwd@tcp(db.prod:3306)/", source: src,
+			want: serverDTO{HasRoute: true, RouteUser: "fwd"}},
+		{name: "separate, on another address: the address is shown", route: "fwd:pw@tcp(replica.prod:3307)/", source: src,
+			want: serverDTO{HasRoute: true, RouteUser: "fwd", HasRoutePassword: true, RouteHost: "replica.prod", RoutePort: "3307"}},
+		{name: "the same user on another address is a separate account there", route: "repl:pw@tcp(replica.prod:3306)/", source: src,
+			want: serverDTO{HasRoute: true, RouteUser: "repl", HasRoutePassword: true, RouteHost: "replica.prod", RoutePort: "3306"}},
+		{name: "the capture account itself is not a separate one", route: "repl:other@tcp(DB.prod)/", source: src,
+			want: serverDTO{RouteIsCapture: true, RouteUser: "repl"}},
+		{name: "a value that cannot be read", route: "fwd:pw@tcp(db.prod:3306", source: src,
+			want: serverDTO{RouteUnreadable: true}},
+		{name: "no source: nothing to forward to, so no account", route: "fwd:pw@tcp(db.prod:3306)/"},
+	}
+	for _, tc := range cases {
+		var got serverDTO
+		fillRouteDSNParts(&got, tc.route, tc.source)
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s:\n got  %+v\n want %+v", tc.name, got, tc.want)
+		}
 	}
 }

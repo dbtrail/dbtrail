@@ -50,9 +50,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the port cannot change the source even through a stored function, which
   the read-only mode above, a check of the statement's text, cannot
   promise alone. The password is stored like the source's and never
-  returned; an empty user removes the account; the account follows the
-  source when its address changes. The **Connect a SQL client** panel names
-  the user statements run as. Servers without one forward with the source
+  returned; the account follows the source when its address or database
+  changes, and uses the server's TLS settings. Saving, changing or removing
+  it closes that server's open connections on the port, so none stays on
+  the previous account. Removing it is its own control on the form
+  (**Remove the forwarding account**), and a save that does not touch the
+  fields never changes it. **Test connection** logs in with it and names it
+  in the answer; when the source later refuses the port's login, the
+  **Connect a SQL client** panel says which account and MySQL's error
+  instead of leaving clients with a bare error 2006. The panel names the
+  user statements run as. Servers without one forward with the source
   account, as before. MySQL and MariaDB sources.
 
 ### Fixed

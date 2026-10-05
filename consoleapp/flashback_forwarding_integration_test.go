@@ -4,9 +4,12 @@ package consoleapp
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -144,5 +147,128 @@ func TestIntegrationFlashbackForwardingAccount(t *testing.T) {
 		t.Fatal("the control server answered: its source DSN is not refused, so the checks above prove nothing")
 	} else if !strings.Contains(err.Error(), "2006") && !strings.Contains(err.Error(), "gone away") {
 		t.Logf("control server failed with: %v", err)
+	}
+
+	// The page is told what the source said and about which account: the
+	// control server's clients only ever see error 2006.
+	api := func(method, path, body string) (int, string) {
+		t.Helper()
+		req := httptest.NewRequest(method, "http://127.0.0.1"+path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer tok")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+	refusedNote := func(id string) string {
+		t.Helper()
+		code, body := api("GET", "/api/flashback", "")
+		var fb struct {
+			Routing struct {
+				Servers map[string]struct {
+					AccountRefused string `json:"account_refused"`
+				} `json:"servers"`
+			} `json:"routing"`
+		}
+		if err := json.Unmarshal([]byte(body), &fb); err != nil || code != 200 {
+			t.Fatalf("GET /api/flashback: %d %s (%v)", code, body, err)
+		}
+		if strings.Contains(body, fwdPass) || strings.Contains(body, ":wrong@") {
+			t.Fatalf("the page's data carries a password: %s", body)
+		}
+		return fb.Routing.Servers[id].AccountRefused
+	}
+	note := refusedNote(control.ID)
+	t.Logf("control server, on the page: %s", note)
+	if !strings.Contains(note, "the source account dbtrail_no_such_capture_user") || !strings.Contains(note, "1045") {
+		t.Errorf("the page says %q about the control server, want the source account and MySQL's 1045", note)
+	}
+	if note := refusedNote(withFwd.ID); note != "" {
+		t.Errorf("the server whose forwarding account logs in carries a refusal: %q", note)
+	}
+
+	// A connection that is OPEN when the account changes does not keep the
+	// previous account: it is closed, and the next one logs in as the new
+	// account. A dedicated connection, so database/sql cannot hide the loss
+	// by retrying on a fresh one.
+	fwd2 := fwdUser + "_b"
+	if _, err := srcDB.Exec(fmt.Sprintf("CREATE USER '%s'@'%%' IDENTIFIED BY '%s'", fwd2, fwdPass)); err != nil {
+		t.Fatalf("create the second forwarding user: %v", err)
+	}
+	t.Cleanup(func() { _, _ = srcDB.Exec(fmt.Sprintf("DROP USER IF EXISTS '%s'@'%%'", fwd2)) })
+	if _, err := srcDB.Exec(fmt.Sprintf("GRANT SELECT ON `%s`.* TO '%s'@'%%'", srcName, fwd2)); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	idx, err := drivermysql.ParseDSN(indexDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ih, ip, _ := net.SplitHostPort(idx.Addr)
+	entryBody := func(extra string) string {
+		return fmt.Sprintf(`{"name":"withfwd","host":%q,"port":%q,"user":%q,"dbname":%q,"baseline_dir":%q%s}`, ih, ip, idx.User, idx.DBName, baseDir, extra)
+	}
+	held, err := conn.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	currentUser := func(c *sql.Conn) (string, error) {
+		qctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		var who string
+		err := c.QueryRowContext(qctx, "SELECT CURRENT_USER()").Scan(&who)
+		return who, err
+	}
+	if who, err := currentUser(held); err != nil || who != wantUser {
+		t.Fatalf("before the edit: %q (%v), want %s", who, err, wantUser)
+	}
+	// An edit that leaves the account alone leaves the connection alone.
+	if code, body := api("PUT", "/api/servers/"+withFwd.ID, entryBody(``)); code != 200 {
+		t.Fatalf("unrelated PUT: %d %s", code, body)
+	}
+	if who, err := currentUser(held); err != nil || who != wantUser {
+		t.Fatalf("after an edit that changed no account: %q (%v), want the same open connection as %s", who, err, wantUser)
+	}
+	// The account changes.
+	if code, body := api("PUT", "/api/servers/"+withFwd.ID, entryBody(fmt.Sprintf(`,"route_user":%q,"route_password":%q`, fwd2, fwdPass))); code != 200 {
+		t.Fatalf("PUT the new account: %d %s", code, body)
+	}
+	start := time.Now()
+	who, err = currentUser(held)
+	t.Logf("the connection open across the edit: %q, %v (after %s)", who, err, time.Since(start).Round(time.Millisecond))
+	if err == nil {
+		t.Fatalf("a connection open across the edit still answers, as %q: it kept the previous account", who)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("the open connection took %s to fail: a hang, not a clean connection loss", time.Since(start))
+	}
+	again := openFlashback(t, addr, withFwd.ID, "tok", srcName)
+	defer again.Close()
+	if got := scanStrings(t, again, "SELECT CURRENT_USER()"); len(got) != 1 || got[0] != fwd2+"@%" {
+		t.Fatalf("after the edit a new connection ran as %v, want %s@%%", got, fwd2)
+	}
+	// The account is removed: the open connection goes, and the port is
+	// back on the source account (which this entry's source refuses).
+	held2, err := again.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held2.Close()
+	if who, err := currentUser(held2); err != nil || who != fwd2+"@%" {
+		t.Fatalf("before the removal: %q (%v)", who, err)
+	}
+	if code, body := api("PUT", "/api/servers/"+withFwd.ID, entryBody(`,"route_user":""`)); code != 200 {
+		t.Fatalf("PUT removing the account: %d %s", code, body)
+	}
+	if who, err := currentUser(held2); err == nil {
+		t.Fatalf("a connection open across the removal still answers, as %q", who)
+	}
+	after := openFlashback(t, addr, withFwd.ID, "tok", srcName)
+	defer after.Close()
+	if _, err := after.Query("SELECT CURRENT_USER()"); err == nil {
+		t.Fatal("after the removal the port still reaches the source: it is not on the source account")
+	}
+	if note := refusedNote(withFwd.ID); !strings.Contains(note, "the source account dbtrail_no_such_capture_user") {
+		t.Errorf("after the removal the page says %q, want the source account refused", note)
 	}
 }

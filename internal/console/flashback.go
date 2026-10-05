@@ -63,6 +63,16 @@ type FlashbackTarget struct {
 	// with no source.
 	ForwardDSN      string
 	ForwardSeparate bool
+	// ForwardFromRouteField: ForwardDSN is the entry's forwarding account
+	// field and not its source DSN. True without ForwardSeparate when that
+	// field holds the capture account itself or a value that cannot be
+	// read: the port then says what is wrong with that field, and never
+	// that a separate account is in use.
+	ForwardFromRouteField bool
+	// ForwardGen is the server's routed-connection generation, read before
+	// the fields above: hand it to Server.TrackRoutedConn, which refuses a
+	// connection whose target was read before the account last changed.
+	ForwardGen uint64
 	// SourceSSL is how the connection to the source uses TLS: the entry's
 	// ssl_* fields (ServerEntry.SourceSSL), the value capture connects
 	// with. The read router's connection must decide TLS from it, for the
@@ -170,20 +180,24 @@ func (s *Server) ResolveFlashback(ctx context.Context, selector string) (Flashba
 	}
 	dir, s3 := splitBaselineSource(b.baselineSrc)
 	sqlOnCopy, sqlWhyNot := s.sqlOnCopyFor(b, id)
-	forwardDSN, forwardSeparate := s.flashbackForwardDSN(id)
+	// The generation first, the entry second: see routedConns.gen.
+	forwardGen := s.routed.generation(id)
+	forwardDSN, forwardSeparate, forwardFromRouteField := s.flashbackForwardDSN(id)
 	return FlashbackTarget{
-		ID:              id,
-		IndexDB:         b.db,
-		IndexDBName:     b.dbName,
-		BaselineDir:     dir,
-		BaselineS3:      s3,
-		NoArchive:       b.noArchive,
-		DefaultSchema:   s.flashbackDefaultSchema(id),
-		SQL:             sqlOnCopy,
-		SQLUnavailable:  sqlWhyNot,
-		ForwardDSN:      forwardDSN,
-		ForwardSeparate: forwardSeparate,
-		SourceSSL:       s.flashbackSourceSSL(id),
+		ID:                    id,
+		IndexDB:               b.db,
+		IndexDBName:           b.dbName,
+		BaselineDir:           dir,
+		BaselineS3:            s3,
+		NoArchive:             b.noArchive,
+		DefaultSchema:         s.flashbackDefaultSchema(id),
+		SQL:                   sqlOnCopy,
+		SQLUnavailable:        sqlWhyNot,
+		ForwardDSN:            forwardDSN,
+		ForwardSeparate:       forwardSeparate,
+		ForwardFromRouteField: forwardFromRouteField,
+		ForwardGen:            forwardGen,
+		SourceSSL:             s.flashbackSourceSSL(id),
 	}, nil
 }
 

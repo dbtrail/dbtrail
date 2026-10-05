@@ -11,8 +11,10 @@ import (
 
 // TestServerFormForwardingAccount runs the real server form (#2079): what it
 // shows for a server with and without a forwarding account, and the body it
-// sends in each case. The user is always sent, so emptying it removes the
-// account; the password is sent only when typed, so a plain save keeps it.
+// sends in each case. The forwarding fields are sent only when the reader
+// changed them, so a save about something else can never remove an account
+// the form did not show (one saved meanwhile by somebody else, or one the
+// form could not read). Removing is its own control.
 func TestServerFormForwardingAccount(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -32,22 +34,44 @@ func TestServerFormForwardingAccount(t *testing.T) {
 	script := renderHarnessJS + harness + `
 const saved = { id: "x", name: "x", flavor: "mysql", source_host: "db", source_user: "repl", has_source: true, has_source_password: true,
   has_route: true, route_user: "report_ro", has_route_password: true };
-const pick = (b) => ({ has_user: "route_user" in b, user: b.route_user, has_password: "route_password" in b, password: b.route_password });
+const bare = { id: "y", name: "y", flavor: "mysql", source_host: "db", source_user: "repl", has_source: true };
+const pick = (b) => ({ has_user: "route_user" in b, user: b.route_user, has_password: "route_password" in b, password: b.route_password, has_dsn: "route_dsn" in b });
+const problem = (f) => { ctx.__f = f; return vm.runInContext("routeFormProblem(__f)", ctx); };
+const extra = (f) => { const n = f.querySelector("div#route-extra"); return n ? n.textContent.replace(/\s+/g, " ").trim() : "(no route-extra)"; };
 const out = {};
 let f = show({ monitor: true }, saved);
-out.prefill = { user: f.elements.route_user.value, password: f.elements.route_password.value, placeholder: f.elements.route_password.placeholder };
+out.prefill = { user: f.elements.route_user.value, password: f.elements.route_password.value, placeholder: f.elements.route_password.placeholder, extra: extra(f), remove: !!f.elements.route_remove };
 out.plainSave = pick(body(f));
 f.elements.route_password.value = "new-pw";
 out.newPassword = pick(body(f));
 f = show({ monitor: true }, saved);
+f.elements.route_user.value = " other_ro "; f.elements.route_password.value = "pw2";
+out.newUser = pick(body(f));
+f = show({ monitor: true }, saved);
 f.elements.route_user.value = "  ";
-out.cleared = pick(body(f));
-f = show({ monitor: true }, { id: "y", name: "y", flavor: "mysql", source_host: "db", source_user: "repl", has_source: true });
-out.none = { user: f.elements.route_user.value, placeholder: f.elements.route_password.placeholder, body: pick(body(f)) };
+out.emptied = { body: pick(body(f)), problem: problem(f) };
+f = show({ monitor: true }, saved);
+out.untouchedProblem = problem(f);
+f.elements.route_remove.checked = true;
+f.elements.route_password.value = "ignored";
+out.removed = { body: pick(body(f)), problem: problem(f) };
+f = show({ monitor: true }, bare);
+out.none = { user: f.elements.route_user.value, placeholder: f.elements.route_password.placeholder, body: pick(body(f)), extra: extra(f), remove: !!f.elements.route_remove, problem: problem(f) };
 f.elements.route_user.value = "report_ro"; f.elements.route_password.value = "pw";
 out.set = pick(body(f));
 f.elements.flavor.value = "postgres"; f.elements.flavor.fire("change");
 out.postgres = pick(body(f));
+f = show({ monitor: true }, { ...bare, route_unreadable: true });
+out.unreadable = { user: f.elements.route_user.value, extra: extra(f), plain: pick(body(f)), problem: problem(f), remove: !!f.elements.route_remove };
+f.elements.route_remove.checked = true;
+out.unreadableRemoved = pick(body(f));
+f = show({ monitor: true }, { ...bare, route_is_capture: true, route_user: "repl" });
+out.isCapture = { user: f.elements.route_user.value, extra: extra(f), plain: pick(body(f)), remove: !!f.elements.route_remove };
+f = show({ monitor: true }, { ...saved, route_host: "replica.internal", route_port: "3307" });
+out.elsewhere = { extra: extra(f), plain: pick(body(f)) };
+f = show({ monitor: true }, null);
+out.fresh = { extra: extra(f), remove: !!f.elements.route_remove, body: pick(body(f)) };
+out.hint = vm.runInContext("FORWARDING_HINT", ctx);
 console.log(JSON.stringify(out));
 `
 	path := filepath.Join(t.TempDir(), "forwarding.js")
@@ -63,34 +87,60 @@ console.log(JSON.stringify(out));
 		User        string `json:"user"`
 		HasPassword bool   `json:"has_password"`
 		Password    string `json:"password"`
+		HasDSN      bool   `json:"has_dsn"`
+	}
+	type shown struct {
+		User, Placeholder, Extra, Problem string
+		Remove                            bool
+		Body, Plain                       sent
 	}
 	var got struct {
-		Prefill                              struct{ User, Password, Placeholder string }
-		PlainSave, NewPassword, Cleared, Set sent
-		Postgres                             sent
-		None                                 struct {
-			User, Placeholder string
-			Body              sent
+		Prefill struct {
+			User, Password, Placeholder, Extra string
+			Remove                             bool
 		}
+		PlainSave, NewPassword, NewUser, Set sent
+		Postgres, UnreadableRemoved          sent
+		Emptied, Removed                     struct {
+			Body    sent
+			Problem string
+		}
+		UntouchedProblem, Hint                        string
+		None, Unreadable, IsCapture, Elsewhere, Fresh shown
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
 	}
 	t.Logf("%s", raw)
-	if got.Prefill.User != "report_ro" || got.Prefill.Password != "" || !strings.Contains(got.Prefill.Placeholder, "leave blank to keep") {
-		t.Errorf("edit form prefill = %+v, want the user, an empty password and the keep placeholder", got.Prefill)
+	nothing := sent{}
+	if got.Prefill.User != "report_ro" || got.Prefill.Password != "" || !strings.Contains(got.Prefill.Placeholder, "leave blank to keep") || !got.Prefill.Remove {
+		t.Errorf("edit form prefill = %+v, want the user, an empty password, the keep placeholder and the remove control", got.Prefill)
 	}
-	if got.PlainSave != (sent{HasUser: true, User: "report_ro"}) {
-		t.Errorf("plain save sends %+v, want the user and no password", got.PlainSave)
+	// A save about something else says nothing about the account.
+	if got.PlainSave != nothing {
+		t.Errorf("a save that did not touch the account sends %+v, want no forwarding field", got.PlainSave)
 	}
+	// A typed password goes with the user the form shows, so it can never
+	// land on an account the reader did not see.
 	if got.NewPassword != (sent{HasUser: true, User: "report_ro", HasPassword: true, Password: "new-pw"}) {
 		t.Errorf("typed password sends %+v", got.NewPassword)
 	}
-	if got.Cleared != (sent{HasUser: true, User: ""}) {
-		t.Errorf("emptied user sends %+v, want an empty user (which removes the account)", got.Cleared)
+	if got.NewUser != (sent{HasUser: true, User: "other_ro", HasPassword: true, Password: "pw2"}) {
+		t.Errorf("a new user sends %+v", got.NewUser)
 	}
-	if got.None.User != "" || got.None.Placeholder != "" || got.None.Body != (sent{HasUser: true, User: ""}) {
-		t.Errorf("server with no forwarding account = %+v", got.None)
+	// Emptying the field is not how an account is removed: nothing is sent,
+	// and the form says what to do instead of saving.
+	if got.Emptied.Body != nothing || !strings.Contains(got.Emptied.Problem, "Remove the forwarding account") {
+		t.Errorf("an emptied user: sends %+v and says %q, want nothing sent and a pointer to the remove control", got.Emptied.Body, got.Emptied.Problem)
+	}
+	if got.UntouchedProblem != "" {
+		t.Errorf("an untouched form is stopped: %q", got.UntouchedProblem)
+	}
+	if got.Removed.Body != (sent{HasUser: true, User: ""}) || got.Removed.Problem != "" {
+		t.Errorf("the remove control sends %+v (%q), want an empty user and nothing else", got.Removed.Body, got.Removed.Problem)
+	}
+	if got.None.User != "" || got.None.Placeholder != "" || got.None.Body != nothing || got.None.Remove || got.None.Extra != "" || got.None.Problem != "" {
+		t.Errorf("server with no forwarding account = %+v, want empty fields, nothing sent, no remove control", got.None)
 	}
 	if got.Set != (sent{HasUser: true, User: "report_ro", HasPassword: true, Password: "pw"}) {
 		t.Errorf("setting one sends %+v", got.Set)
@@ -98,7 +148,32 @@ console.log(JSON.stringify(out));
 	// The fields are hidden for a PostgreSQL source: what was typed before
 	// the source type changed must not be sent, or the save fails on a field
 	// the reader cannot see.
-	if got.Postgres != (sent{HasUser: true, User: ""}) {
-		t.Errorf("a PostgreSQL source sends %+v, want an empty user and no password", got.Postgres)
+	if got.Postgres != nothing {
+		t.Errorf("a PostgreSQL source sends %+v, want no forwarding field", got.Postgres)
+	}
+	// A stored value the server could not read is SHOWN, kept by a plain
+	// save, and removable.
+	if !strings.Contains(got.Unreadable.Extra, "cannot be read") || got.Unreadable.Plain != nothing || !got.Unreadable.Remove || got.Unreadable.Problem != "" {
+		t.Errorf("unreadable account = %+v, want it said, nothing sent on a plain save, and the remove control", got.Unreadable)
+	}
+	if got.UnreadableRemoved != (sent{HasUser: true, User: ""}) {
+		t.Errorf("removing an unreadable account sends %+v", got.UnreadableRemoved)
+	}
+	if !strings.Contains(got.IsCapture.Extra, "same account DBTrail captures with") || got.IsCapture.Plain != nothing || !got.IsCapture.Remove {
+		t.Errorf("an account that is the capture account = %+v", got.IsCapture)
+	}
+	if !strings.Contains(got.Elsewhere.Extra, "replica.internal:3307") || got.Elsewhere.Plain != nothing {
+		t.Errorf("an account on another address = %+v, want the address shown", got.Elsewhere)
+	}
+	if got.Fresh.Extra != "" || got.Fresh.Remove || got.Fresh.Body != nothing {
+		t.Errorf("a new server's form = %+v", got.Fresh)
+	}
+	if !strings.Contains(got.Hint, "closes the connections") {
+		t.Errorf("the form hint does not say a change closes the open connections: %s", got.Hint)
+	}
+	for name, text := range map[string]string{"prefill": got.Prefill.Extra, "unreadable": got.Unreadable.Extra, "capture": got.IsCapture.Extra, "elsewhere": got.Elsewhere.Extra, "emptied": got.Emptied.Problem, "hint": got.Hint} {
+		if strings.Contains(text, "—") || strings.Contains(text, "undefined") {
+			t.Errorf("%s: holds an em dash or undefined: %s", name, text)
+		}
 	}
 }
