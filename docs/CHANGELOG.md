@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **Read routing: a `LIMIT` over a wide range stays on MySQL, and a result
+  over the copy's row cap is not tried on the copy** (#2115). Two kinds of
+  read were sent to the copy and should not have been. The first is a few
+  hundred rows out of a large range: `SELECT * FROM orders WHERE created_at`
+  in a three-month range `LIMIT 500` has a plan cost of 544,000 on MySQL,
+  because the cost ignores `LIMIT`, so the copy took it (65 ms) although
+  MySQL reads it through the index and stops at 500 rows (24 ms; 1.6 ms
+  with `ORDER BY created_at`). Such a read now stays on MySQL when the plan
+  shows one table read through an index with nothing left to check row by
+  row and no sort. A `LIMIT` with a second condition no index serves, with
+  a sort no index serves, under a `GROUP BY`, `DISTINCT` or aggregate, or
+  with a large `OFFSET` goes to the copy as before: there MySQL reads the
+  whole range (400 to 600 ms measured). The second is a read whose result is
+  larger than the copy's row cap (1,000 rows by default): the copy ran it,
+  refused the result for its size, and MySQL ran it again. When the plan's
+  estimate of the result is above the cap, MySQL now runs it at once and the
+  copy is not tried. That estimate is trusted only where the rows MySQL
+  reads are the rows it returns (one table, through an index or whole, no
+  other filter, no aggregate): an aggregate over a million rows still goes
+  to the copy, and so does a filter no index serves, whose estimate is a
+  guess. A join, a `GROUP BY` with many groups and a full scan with a filter
+  are tried on the copy as before. New reason in the "Who answered" block
+  and in `bintrail_read_routing_decisions_total`: `result_over_row_cap`;
+  the first rule counts under `bounded_limit`. On a MariaDB source the
+  `LIMIT` read already stayed on the source; the row cap rule applies there
+  to a table or an index read whole. Nothing changes in what a statement
+  answers, only in who answers it.
 - **Read routing: arithmetic on a date column, bit operators and two-digit
   years stay on MySQL** (#2133). Each of these was answered by MySQL and by
   the copy with different values and no error; measured on MySQL 8.4.9 and

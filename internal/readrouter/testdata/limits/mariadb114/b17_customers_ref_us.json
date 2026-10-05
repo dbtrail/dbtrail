@@ -1,0 +1,1 @@
+{"query_block":{"select_id":1,"cost":16.571116,"nested_loop":[{"table":{"table_name":"customers","access_type":"ALL","possible_keys":["k_country"],"loops":1,"rows":100422,"cost":16.571116,"filtered":100,"attached_condition":"customers.country_code = 'US'"}}]}}

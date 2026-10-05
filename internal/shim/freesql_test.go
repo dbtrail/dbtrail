@@ -25,6 +25,8 @@ type fakeFreeSQL struct {
 	gotSess   sqlsandbox.Session
 	updatedAt time.Time
 	ageCalls  int
+	// rowCap is what RowCap answers: 0 is a copy that names no cap.
+	rowCap int
 	// A statement sent with Session.UnchangedWithin (the snapshot is older
 	// than the limit, #2085): unchangedAsks counts them, and unchanged says
 	// whether the copy answers. The zero value refuses, as a copy that
@@ -40,6 +42,7 @@ type fakeFreeSQL struct {
 }
 
 func (f *fakeFreeSQL) CopyUpdatedAt(context.Context) time.Time { f.ageCalls++; return f.updatedAt }
+func (f *fakeFreeSQL) RowCap() int                             { return f.rowCap }
 
 func (f *fakeFreeSQL) Run(_ context.Context, statement, schema string, sess sqlsandbox.Session) (sqlsandbox.Result, error) {
 	if strings.HasPrefix(statement, copyZoneProbePrefix) {

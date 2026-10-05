@@ -773,6 +773,8 @@ jobs:
             TestIntegrationMonitorRegistrySourceMariaDBDetected \
             TestIntegrationMonitorRegistrySourceMariaDBRelabeled \
             TestIntegrationWatchMariaDBSource \
+            TestIntegrationFlashbackReadRoutingMariaDBSource \
+            TestIntegrationFlashbackRoutingLimitsMariaDBSource_2115 \
             TestIntegrationSQLCompareGeneratedNamesMariaDB \
             TestIntegrationSQLCompareTemporalColumnsMariaDB \
             TestIntegrationSQLCompareBacktickNamesMariaDB \

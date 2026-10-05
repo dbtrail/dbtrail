@@ -1,0 +1,1 @@
+{"query_block":{"select_id":1,"cost":3.63461912,"nested_loop":[{"table":{"table_name":"orders","access_type":"ref","possible_keys":["k_status"],"key":"k_status","key_length":"66","used_key_parts":["status"],"ref":["const"],"loops":1,"rows":2000,"cost":3.63461912,"filtered":100,"index_condition":"orders.`status` = 'refunded'"}}]}}

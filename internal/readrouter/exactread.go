@@ -1,0 +1,461 @@
+package readrouter
+
+import (
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+)
+
+// A plan that reads only its result (#2115).
+//
+// Two questions the policy asks have the same answer in the plan. "Can the
+// source return the first n rows by reading about n?" and "how many rows
+// does the statement return?" are both settled when the plan is ONE table,
+// read alone, where every row the access path reads is a row of the result:
+//
+//   - the table or an index read whole with no condition at all, or
+//   - an index read by key or by range (ref, range) where the
+//     whole condition is the key's own bounds: nothing is left to check row
+//     by row.
+//
+// Then a LIMIT with no sort stops the read once it has its rows, whatever
+// the size of the range behind it; and the plan's row estimate for the table
+// is an estimate of the result, off by what an index dive is off (measured
+// 0.6x to 3.2x) and not by a guessed selectivity.
+//
+// What tells it is measured, in testdata/limits (MySQL 8.4.9, MariaDB
+// 11.4.13 and 10.11.19 over the same 2,000,000 rows):
+//
+//   - `filtered` alone does not. MySQL reports 100 for a condition it has no
+//     estimate for: a function of a column, arithmetic, a column compared
+//     with a column (a07, a08, a28), each of which read the whole range for
+//     500 rows. MariaDB reports 100 for a filter no index serves at all (b05).
+//     So the condition's text is read, and only `column <comparison>
+//     constant` joined by AND is taken.
+//   - Every column of the condition must be one of the key parts the plan
+//     says it used: a condition on another column is checked row by row
+//     (a06, a26, p10), and so is one on a later column of the same key
+//     (p01, p02: `used_key_parts` lists the first column only).
+//   - A range on a column that is not the last key part used leaves the
+//     later parts checked entry by entry, were a server to list them: only
+//     the last part may carry a range.
+//   - A condition MySQL keeps in attached_condition under a secondary index
+//     that does not cover the statement is one it could not push down to the
+//     index, which is what an index on a PREFIX of the column looks like
+//     (p04 to p06: 222,000 rows read for none). Under the primary key, where
+//     nothing is ever pushed down, a text value could be that same prefix
+//     case and is refused; a number or a date cannot.
+//   - A full scan, or an index walked whole, with ANY condition is never
+//     this: the rows that match may all sit at the end (a15: 1,668,158 rows
+//     read for 500).
+//
+// The reader takes MySQL's spelling of a condition (every name in
+// backticks), and a read by key or by range is recognised in a MySQL plan
+// only: one that carries a cost. MariaDB quotes a name only when it has to,
+// so some of its conditions would parse and most would not; its range reads
+// were not measured under this rule and do not need it, since with no cost
+// in its plans a range read was never the copy's. On MariaDB the property
+// is seen for a table or an index read whole.
+//
+// A condition anywhere else than the two places read (MariaDB's
+// having_condition on the block, any other *_condition on the table) is a
+// filter applied after the read, and refuses.
+//
+// One more refusal is reasoned, not measured: a column compared with a text
+// in one place and with a number in another (`s > 'a' AND s = 5`). One of
+// the two is not the column's type and cannot be a bound of its index.
+//
+// Anything the reader does not know (a node, an access type, an operator)
+// leaves the plan unrecognised, and the statement where it was.
+
+// planWrappers are the nodes that may sit between the top block and its one
+// table without changing what is read: MySQL's ordering_operation (which
+// says by using_filesort whether it sorts), MariaDB's nested_loop list and
+// its read_sorted_file/filesort pair.
+var planWrappers = map[string]bool{"ordering_operation": true, "nested_loop": true, "read_sorted_file": true, "filesort": true}
+
+// planNotes are the object- and list-valued keys that describe a node and
+// hold no part of the plan.
+var planNotes = map[string]bool{"cost_info": true, "possible_keys": true, "used_key_parts": true, "used_columns": true, "ref": true}
+
+// readIsResult fills Plan.ReadIsResult and Plan.ResultRows from the top
+// query block.
+func readIsResult(qb map[string]any, p *Plan) {
+	var table map[string]any
+	if !loneTable(qb, &table) || table == nil {
+		return
+	}
+	// Both engines say 100 when the access path alone decides the rows.
+	if _, ok := table["filtered"]; !ok || number(table["filtered"]) != 100 {
+		return
+	}
+	index, _ := table["index_condition"].(string)
+	attached, _ := table["attached_condition"].(string)
+	switch at, _ := table["access_type"].(string); at {
+	case "ALL", "index":
+		if index != "" || attached != "" {
+			return
+		}
+	case "range", "ref":
+		if p.CostUnknown {
+			return
+		}
+		if !keyServes(table, index, attached) {
+			return
+		}
+	default:
+		return
+	}
+	// MySQL cuts rows_examined_per_scan to the LIMIT under an ordered index
+	// walk and keeps the whole count in rows_produced_per_join; MariaDB has
+	// the one number.
+	rows := max(number(table["rows_examined_per_scan"]), number(table["rows_produced_per_join"]), number(table["rows"]))
+	p.ReadIsResult, p.ResultRows = true, int64(rows)
+}
+
+// loneTable walks v, which must hold exactly one table under nothing but
+// planWrappers; the table is left in *table. False for a second table and
+// for any object or list it does not know: a subquery, a UNION, a derived
+// table, a grouping, a window, a temporary table, a partition list.
+func loneTable(v any, table *map[string]any) bool {
+	switch x := v.(type) {
+	case map[string]any:
+		for key, child := range x {
+			switch c := child.(type) {
+			case bool:
+				if key == "using_temporary_table" && c {
+					return false
+				}
+			case string:
+				if strings.HasSuffix(key, "_condition") {
+					return false
+				}
+			case map[string]any, []any:
+				switch {
+				case planNotes[key]:
+				case planWrappers[key]:
+					if !loneTable(c, table) {
+						return false
+					}
+				case key == "table":
+					t, _ := c.(map[string]any)
+					if t == nil || *table != nil {
+						return false
+					}
+					for k, tc := range t {
+						switch on := tc.(type) {
+						case map[string]any, []any:
+							if !planNotes[k] {
+								return false
+							}
+						case string:
+							if strings.HasSuffix(k, "_condition") && k != "index_condition" && k != "attached_condition" {
+								return false
+							}
+						case bool:
+							// MySQL's skip scan and loose index scan read an
+							// index in jumps: not the read described above.
+							if on && strings.HasPrefix(k, "using_index_for_") {
+								return false
+							}
+						}
+					}
+					*table = t
+				default:
+					return false
+				}
+			}
+		}
+	case []any:
+		for _, child := range x {
+			if !loneTable(child, table) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// keyServes reports whether the conditions of a table read by key or by
+// range are all bounds of the key it is read by.
+func keyServes(table map[string]any, index, attached string) bool {
+	var parts []string
+	list, _ := table["used_key_parts"].([]any)
+	for _, v := range list {
+		s, ok := v.(string)
+		if !ok {
+			return false
+		}
+		parts = append(parts, s)
+	}
+	if len(parts) == 0 {
+		return false
+	}
+	covering, _ := table["using_index"].(bool)
+	key, _ := table["key"].(string)
+	if attached != "" && !covering && key != "PRIMARY" {
+		return false
+	}
+	kinds := map[string]uint8{}
+	for i, cond := range []string{index, attached} {
+		if cond == "" {
+			continue
+		}
+		preds, ok := readCondition(cond)
+		if !ok {
+			return false
+		}
+		for _, pr := range preds {
+			kinds[pr.col] |= pr.kinds()
+			if kinds[pr.col] == textKind|numberKind {
+				return false
+			}
+			at := slices.Index(parts, pr.col)
+			switch {
+			case at < 0:
+				return false
+			case at < len(parts)-1 && !pr.point:
+				return false
+			case pr.str && i == 1 && !covering:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// condPred is one `column <comparison> constant` of a condition.
+type condPred struct {
+	col   string // the column's own name, without its table
+	point bool   // =, <=> or IN: a value, not a range
+	str   bool   // compared with a plain text value
+	num   bool   // compared with a number
+}
+
+const (
+	textKind uint8 = 1 << iota
+	numberKind
+)
+
+func (p condPred) kinds() (k uint8) {
+	if p.str {
+		k |= textKind
+	}
+	if p.num {
+		k |= numberKind
+	}
+	return k
+}
+
+// condToken is one token of a condition as MySQL prints it.
+var condToken = regexp.MustCompile("^(?:" +
+	"(?P<name>(?:`(?:[^`]|``)*`\\.)*`(?:[^`]|``)*`)" + // `db`.`table`.`column`
+	"|(?P<typed>(?:TIMESTAMP|DATE|TIME)'(?:[^'\\\\]|''|\\\\.)*')" +
+	"|(?P<text>'(?:[^'\\\\]|''|\\\\.)*')" +
+	"|(?P<num>-?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][-+]?\\d+)?)" +
+	"|(?P<op><=>|<=|>=|=|<|>)" +
+	"|(?P<word>and|between|in)\\b" +
+	"|(?P<punct>[(),])" +
+	")")
+
+// condNamePart is one backtick-quoted part of a name.
+var condNamePart = regexp.MustCompile("`(?:[^`]|``)*`")
+
+// readCondition reads a condition as MySQL prints it in a plan:
+// comparisons of a column with a constant (=, <=>, <, <=, >, >=, BETWEEN,
+// IN), joined by AND, in any parentheses. ok is false for anything else: a
+// function, arithmetic, OR, NOT, <>, IS NULL, LIKE, a subquery, a column
+// on both sides, the constant on the left, a cached expression.
+func readCondition(cond string) (preds []condPred, ok bool) {
+	type token struct{ kind, text string }
+	var toks []token
+	names := condToken.SubexpNames()
+	for s := strings.TrimSpace(cond); s != ""; s = strings.TrimSpace(s) {
+		m := condToken.FindStringSubmatch(s)
+		if m == nil {
+			return nil, false
+		}
+		for i := 1; i < len(m); i++ {
+			if m[i] != "" {
+				toks = append(toks, token{names[i], m[i]})
+				break
+			}
+		}
+		s = s[len(m[0]):]
+	}
+	pos := 0
+	peek := func() token {
+		if pos < len(toks) {
+			return toks[pos]
+		}
+		return token{}
+	}
+	take := func(kind, text string) bool {
+		if t := peek(); t.kind == kind && (text == "" || t.text == text) {
+			pos++
+			return true
+		}
+		return false
+	}
+	// constant takes one constant into pr: a plain text, a number, or a
+	// typed value (a date, a time), which is neither.
+	constant := func(pr *condPred) bool {
+		switch t := peek(); t.kind {
+		case "text":
+			pr.str = true
+		case "num":
+			pr.num = true
+		case "typed":
+		default:
+			return false
+		}
+		pos++
+		return true
+	}
+	var and func() bool
+	term := func() bool {
+		if take("punct", "(") {
+			return and() && take("punct", ")")
+		}
+		name := peek()
+		if !take("name", "") {
+			return false
+		}
+		parts := condNamePart.FindAllString(name.text, -1)
+		part := parts[len(parts)-1]
+		pr := condPred{col: strings.ReplaceAll(part[1:len(part)-1], "``", "`")}
+		switch op := peek(); {
+		case take("op", ""):
+			if !constant(&pr) {
+				return false
+			}
+			pr.point = op.text == "=" || op.text == "<=>"
+		case take("word", "between"):
+			if !constant(&pr) || !take("word", "and") || !constant(&pr) {
+				return false
+			}
+		case take("word", "in"):
+			if !take("punct", "(") {
+				return false
+			}
+			for {
+				if !constant(&pr) {
+					return false
+				}
+				if !take("punct", ",") {
+					break
+				}
+			}
+			if !take("punct", ")") {
+				return false
+			}
+			pr.point = true
+		default:
+			return false
+		}
+		preds = append(preds, pr)
+		return true
+	}
+	and = func() bool {
+		for {
+			if !term() {
+				return false
+			}
+			if !take("word", "and") {
+				return true
+			}
+		}
+	}
+	if !and() || pos != len(toks) || len(preds) == 0 {
+		return nil, false
+	}
+	return preds, true
+}
+
+// resultLimit is a LIMIT of numbers that ends the statement: "LIMIT n",
+// "LIMIT offset, n", "LIMIT n OFFSET offset".
+var resultLimit = regexp.MustCompile(`(?i)\blimit\s+(\d+)(?:\s*,\s*(\d+)|\s+offset\s+(\d+))?\s*;?\s*$`)
+
+// call matches what is written before an opening parenthesis: a name, bare
+// or in backticks.
+var call = regexp.MustCompile("(`[^`]*`|[A-Za-z_$][\\w$]*)\\s*\\(")
+
+// rowFunctions are the words that may stand before a parenthesis in a
+// statement the two rules above take: the keywords that open a list or a
+// group, and functions that return one value for each row. Short on
+// purpose: the list is not there to know every function, only to make sure
+// that a call nobody vouched for is not taken for one of these.
+var rowFunctions = map[string]bool{
+	"in": true, "and": true, "or": true, "not": true, "where": true, "on": true, "index": true, "key": true,
+	"concat": true, "concat_ws": true, "upper": true, "lower": true, "ucase": true, "lcase": true,
+	"coalesce": true, "ifnull": true, "nullif": true, "if": true,
+	"length": true, "char_length": true, "substr": true, "substring": true, "left": true, "right": true,
+	"trim": true, "ltrim": true, "rtrim": true, "round": true, "abs": true, "floor": true, "ceil": true, "ceiling": true,
+	"cast": true, "date": true, "year": true, "month": true, "hex": true,
+}
+
+// callsOnlyRowFunctions reports whether every function the scrubbed
+// statement calls is one of rowFunctions. An aggregate with no GROUP BY
+// reads one table like any other statement and returns one row: the plan
+// does not show it, so the text has to, and unboundedWork only knows the
+// aggregates it lists. A user-defined aggregate, or one added by a later
+// server version, is a call this list does not hold either: the statement
+// is then decided as it was before these rules.
+func callsOnlyRowFunctions(blanked string) bool {
+	for _, m := range call.FindAllStringSubmatch(blanked, -1) {
+		if !rowFunctions[strings.ToLower(m[1])] {
+			return false
+		}
+	}
+	return true
+}
+
+// fetchFirst is the other spelling of a LIMIT: FETCH FIRST (or NEXT) n ROWS
+// ONLY. MariaDB takes it and so does the copy.
+var fetchFirst = regexp.MustCompile(`(?i)\bfetch\s+(first|next)\b`)
+
+// resultRows is the plan's estimate of the rows the statement returns, or 0
+// when there is none to trust: the plan does not read only its result
+// (Plan.ReadIsResult), or the statement returns something else than the rows
+// it reads (an aggregate, GROUP BY, DISTINCT, a window: unboundedWork), or
+// its LIMIT is not a number known here (a placeholder, or the standard's
+// FETCH FIRST n ROWS ONLY, which MariaDB takes). A LIMIT cuts the estimate:
+// it bounds the result whatever the plan says.
+func resultRows(stmt string, p Plan) int64 {
+	if !p.ReadIsResult || hintComment.MatchString(stmt) {
+		return 0
+	}
+	blanked, _, _, _ := scrub(stmt)
+	if unboundedWork.MatchString(blanked) || fetchFirst.MatchString(blanked) || !callsOnlyRowFunctions(blanked) {
+		return 0
+	}
+	est := uint64(max(p.ResultRows, 0))
+	switch len(anyLimit.FindAllStringIndex(blanked, 2)) {
+	case 0:
+		return int64(est)
+	case 1:
+	default:
+		return 0
+	}
+	m := resultLimit.FindStringSubmatch(blanked)
+	if m == nil {
+		return 0
+	}
+	limit, offset := m[1], m[3]
+	if m[2] != "" {
+		limit, offset = m[2], m[1]
+	}
+	n, err := strconv.ParseUint(limit, 10, 64)
+	if err != nil {
+		return 0
+	}
+	if offset != "" {
+		off, err := strconv.ParseUint(offset, 10, 64)
+		if err != nil {
+			return 0
+		}
+		est -= min(off, est)
+	}
+	return int64(min(n, est))
+}
