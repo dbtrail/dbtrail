@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/ext"
@@ -207,11 +208,25 @@ func (j *monitorJob) fail(lastErr, code string, retrying bool) {
 	j.mu.Unlock()
 }
 
+// mariadbErrSlaveSameID is MariaDB's ER_SLAVE_SAME_ID: the error packet a
+// binlog reader receives when another one connects with its server id.
+const mariadbErrSlaveSameID = 4052
+
 // monitorErrorCode maps a stream's error to the code the console sends with
-// it. Matched on the error's type, never on its text.
+// it. Matched on the error's type or number, never on its text.
 func monitorErrorCode(err error) string {
 	if errors.Is(err, streamrun.ErrEarlierCleanupRunning) {
 		return console.MonitorErrEarlierCleanup
+	}
+	// *gomysql.MyError is an error packet from the replication connection;
+	// index statements fail with the SQL driver's own type. MySQL numbers a
+	// different error 4052 (an account statement's, which a binlog stream
+	// never receives), and has no counterpart to classify here: it tells
+	// readers apart by the UUID go-mysql generates per connection, so two
+	// with one server id are not disconnected.
+	var my *gomysql.MyError
+	if errors.As(err, &my) && my != nil && my.Code == mariadbErrSlaveSameID {
+		return console.MonitorErrSameReplicationID
 	}
 	return ""
 }
