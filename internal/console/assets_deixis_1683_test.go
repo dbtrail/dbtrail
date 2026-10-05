@@ -78,7 +78,7 @@ console.log(JSON.stringify(out));
 // source list at the end covers only as far as its exact old wording.
 func TestScreenTextNamesThePlace(t *testing.T) {
 	fb, err := json.Marshal(map[string]flashbackStatusDTO{
-		"wildcard": (&Server{flashbackListen: ":3308"}).flashbackStatus(),
+		"wildcard": (&Server{flashback: flashbackState{startup: true, listen: ":3308"}}).flashbackStatus(),
 		"off":      (&Server{}).flashbackStatus(),
 	})
 	if err != nil {

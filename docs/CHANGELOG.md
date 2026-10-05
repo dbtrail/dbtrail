@@ -26,6 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fold, and stay on MySQL under routing.
 
 ### Added
+- **The MySQL port can be turned on from the web interface** (#2101). The port
+  a `mysql` client, a BI tool or a driver connects to was off unless DBTrail
+  was started with `--flashback-listen` and an access token. The **Connect a
+  SQL client** panel now has an address field and a **Turn on** button: no
+  flag, no restart. Turning it on creates the port's own password, shown
+  once; **New password** replaces it and **Turn off** closes the port. The
+  setting survives a restart. An address given at startup still decides, and
+  the panel shows it as fixed. The Docker Compose file publishes the port on
+  the host loopback as 3309 (the installer leaves it out when 3309 is taken);
+  an existing install keeps its compose file, so add the `ports:` line by
+  hand to reach the port from outside the container. Changing the port needs
+  `settings:write`.
 - **A read-only mode for the routed port** (#2079). With read routing on
   (`--route-max-copy-age`), `bintrail-console watch --route-read-only` (or
   `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=1`) refuses every statement that is not
@@ -63,7 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collation ignores trailing spaces on MySQL only. A table whose snapshot
   file carries no `CREATE TABLE` (a PostgreSQL source, a snapshot from
   before 0.5) or whose footer cannot be read keeps the old behavior, and
-  that is now logged: once per table, by name, with what it costs. A footer
+  that is now logged with what it costs: once per table, the first ten by
+  name at warning level and the rest in the debug log. A footer
   that could not be read is no longer remembered until the daemon restarts;
   it is read again within five minutes.
 - **SQL on the copy: division by zero is `NULL`, as on MySQL** (#2083).

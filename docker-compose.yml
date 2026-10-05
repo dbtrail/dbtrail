@@ -256,6 +256,13 @@ services:
       # If you disable metrics (METRICS_ADDR= empty in .env) this mapping stays
       # but nothing listens behind it — connections are simply refused.
       - "127.0.0.1:9090:9090"
+      # The MySQL-protocol port, on the host loopback. Nothing listens behind
+      # it until it is turned on in the web interface (Connect), and then a
+      # MySQL client on this machine reaches it with the password shown there.
+      # For another machine, open a tunnel, or widen to "3309:3309" behind a
+      # firewall: the port's password reads every server. If 3309 is taken on
+      # this machine, delete this line (install.sh does it for you).
+      - "127.0.0.1:3309:3309"
     environment:
       # Optional: a source MySQL to start watching immediately. Leave unset
       # and add servers from the console UI instead (the zero-config path).

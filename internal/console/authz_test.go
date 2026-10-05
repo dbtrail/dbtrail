@@ -95,6 +95,8 @@ var registeredAPIPatterns = []struct{ method, pattern string }{
 	{"GET", "/api/flashback"},
 	{"POST", "/api/sql"},
 	{"GET", "/api/sql"},
+	{"PUT", "/api/flashback"},
+	{"POST", "/api/flashback/password"},
 }
 
 // concretePath turns a table pattern into a real path by giving every "{}" a
