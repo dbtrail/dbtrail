@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,9 +90,14 @@ func TestIntegrationSQLCompareValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ent, err := reg.Add(console.ServerEntry{Name: "srva", DSN: indexDSN, SourceDSN: sourceDSN, BaselineDir: baseDir})
-	if err != nil {
-		t.Fatal(err)
+	// Two registered servers over the same copy: see compareInHalves.
+	var ids [2]string
+	for i, name := range []string{"srva", "srvb"} {
+		ent, err := reg.Add(console.ServerEntry{Name: name, DSN: indexDSN, SourceDSN: sourceDSN, BaselineDir: baseDir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[i] = ent.ID
 	}
 	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg})
 	if err != nil {
@@ -105,37 +111,14 @@ func TestIntegrationSQLCompareValues(t *testing.T) {
 	served := make(chan struct{})
 	go func() { _ = serveFlashback(ctx, srv, ln, flashbackConfig{}); close(served) }()
 	defer func() { cancel(); <-served }()
-	copyDSN := fmt.Sprintf("%s:tok@tcp(%s)/%s", ent.ID, ln.Addr(), srcName)
+	var copies [2]string
+	for i, id := range ids {
+		copies[i] = fmt.Sprintf("%s:tok@tcp(%s)/%s", id, ln.Addr(), srcName)
+	}
 
 	fixtures := valuesFixtures()
-	statements := make([]string, len(fixtures))
-	for i, f := range fixtures {
-		statements[i] = f.stmt
-	}
-	rep, err := sqlcompare.Run(context.Background(), sqlcompare.Options{
-		SourceDSN: sourceDSN, CopyDSN: copyDSN, Policy: readrouter.Policy{ScanRows: 2},
-	}, statements)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	by := map[string]sqlcompare.Result{}
-	for _, r := range rep.Results {
-		by[r.Statement] = r
-	}
-	src := openRaw(t, sourceDSN)
-	cp := openRaw(t, copyDSN)
-	for _, f := range fixtures {
-		r, ok := by[f.stmt]
-		if !ok {
-			t.Errorf("no result for %q", f.stmt)
-			continue
-		}
-		t.Logf("%-12s %-9s route=%-5s %s\n    mysql: %s\n    copy:  %s\n    %s",
-			r.Verdict, r.Kind, r.Route, f.stmt, rawAnswer(src, f.stmt), rawAnswer(cp, f.stmt), r.Detail)
-		if r.Verdict != f.verdict || (f.kind != "" && r.Kind != f.kind) {
-			t.Errorf("%q: got %s/%s (%s), want %s/%s: %s", f.stmt, r.Verdict, r.Kind, r.Detail, f.verdict, f.kind, f.why)
-		}
-	}
+	by := compareInHalves(t, sourceDSN, copies, readrouter.Policy{ScanRows: 2}, fixtures)
+	checkValuesFixtures(t, sourceDSN, copies[0], fixtures, by)
 	// The set operations that remove duplicates answer differently on the
 	// copy, and never reach it under routing: the veto names itself.
 	for _, stmt := range []string{"SELECT note FROM sales WHERE id = 4 UNION SELECT 'A'", "SELECT note FROM sales WHERE id = 4 INTERSECT SELECT 'A'"} {
@@ -145,6 +128,71 @@ func TestIntegrationSQLCompareValues(t *testing.T) {
 	}
 	if r := by["SELECT amount x FROM sales WHERE id = 1 UNION ALL SELECT qty FROM sales WHERE id = 2"]; r.RouteRule == "veto" {
 		t.Errorf("UNION ALL was vetoed: %s", r.RouteReason)
+	}
+}
+
+// compareInHalves runs sql-compare over the fixtures' statements and returns
+// each statement's result. Every statement sent to the copy starts a worker,
+// and the port runs one statement at a time per server: the statements are
+// compared in two halves side by side, the even positions through copies[0]
+// and the odd ones through copies[1], two registered servers over the same
+// copy (#2132).
+func compareInHalves(t *testing.T, sourceDSN string, copies [2]string, policy readrouter.Policy, fixtures []valuesFixture) map[string]sqlcompare.Result {
+	t.Helper()
+	var halves [2][]string
+	for i, f := range fixtures {
+		halves[i%2] = append(halves[i%2], f.stmt)
+	}
+	var reps [2]*sqlcompare.Report
+	var errs [2]error
+	var wg sync.WaitGroup
+	for i := range halves {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			reps[i], errs[i] = sqlcompare.Run(context.Background(), sqlcompare.Options{
+				SourceDSN: sourceDSN, CopyDSN: copies[i], Policy: policy,
+			}, halves[i])
+		}()
+	}
+	wg.Wait()
+	by := map[string]sqlcompare.Result{}
+	for i, rep := range reps {
+		if errs[i] != nil {
+			t.Fatalf("Run (half %d): %v", i, errs[i])
+		}
+		if len(rep.Results) != len(halves[i]) {
+			t.Fatalf("half %d: %d results for %d statements", i, len(rep.Results), len(halves[i]))
+		}
+		for _, r := range rep.Results {
+			by[r.Statement] = r
+		}
+	}
+	// A statement listed twice would be checked once and counted twice.
+	if len(by) != len(fixtures) {
+		t.Fatalf("%d distinct results for %d fixtures: a statement is listed twice", len(by), len(fixtures))
+	}
+	return by
+}
+
+// checkValuesFixtures holds every fixture to its pinned verdict. The two
+// answers as the wire carried them are read (one more worker on the copy)
+// only for a fixture that fails.
+func checkValuesFixtures(t *testing.T, sourceDSN, copyDSN string, fixtures []valuesFixture, by map[string]sqlcompare.Result) {
+	t.Helper()
+	src := openRaw(t, sourceDSN)
+	cp := openRaw(t, copyDSN)
+	for _, f := range fixtures {
+		r, ok := by[f.stmt]
+		if !ok {
+			t.Errorf("no result for %q", f.stmt)
+			continue
+		}
+		t.Logf("%-12s %-9s route=%-5s %s\n    %s", r.Verdict, r.Kind, r.Route, f.stmt, r.Detail)
+		if r.Verdict != f.verdict || (f.kind != "" && r.Kind != f.kind) {
+			t.Logf("    mysql: %s\n    copy:  %s", rawAnswer(src, f.stmt), rawAnswer(cp, f.stmt))
+			t.Errorf("%q: got %s/%s (%s), want %s/%s: %s", f.stmt, r.Verdict, r.Kind, r.Detail, f.verdict, f.kind, f.why)
+		}
 	}
 }
 
