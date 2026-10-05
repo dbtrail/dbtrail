@@ -118,6 +118,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   account, as before. MySQL and MariaDB sources.
 
 ### Fixed
+- **The MySQL port tells a driver the truth about its session, so a
+  `rollback()` through read routing undoes the write** (#2110). MySQL sends
+  status flags with its handshake and with every answer (autocommit, in a
+  transaction), and drivers act on them. The port announced status 0 in its
+  handshake. PyMySQL, whose default is autocommit off, read that as "already
+  off" and did not send `SET AUTOCOMMIT = 0`, so under read routing the
+  session on the source stayed in autocommit: `INSERT` followed by
+  `rollback()` left the row in the table, where the same code against MySQL
+  left none. The handshake now announces autocommit, as MySQL and MariaDB
+  do, and every answer carries the state of the session on the source as the
+  source last reported it, including the answers the port writes itself (a
+  `SELECT` the copy served, a time-travel statement, `SHOW WARNINGS`, `USE`,
+  `PING`), which used to say "autocommit off, no transaction" in the middle
+  of a transaction. A connection that is not routed always says autocommit.
+  The flags that announce something the port does not deliver (more result
+  sets, a cursor, session-state data) are never passed on. The standalone
+  `bintrail shim` announces autocommit too. The handshake cannot know the
+  source, so a source configured to open sessions with autocommit off is
+  the one case it does not cover, and the version it announces stays
+  `8.0.11` whatever the source is; both, and what each driver does with
+  them, are in "What the port tells a driver about its session and about the
+  server" in docs/time-travel-sql.md.
 - **SQL on the copy: a `_bin` column compares byte by byte, as on MySQL**
   (#2083). The copy compares text without case or accents, to match MySQL's
   default collation, and it did so for every column, including the ones

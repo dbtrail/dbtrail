@@ -25,7 +25,10 @@ import (
 // error keeps its MySQL code (the library wraps it first, which turns every
 // one into 1105).
 //
-// Every other command is answered the way the library answers it.
+// Every other command is answered the way the library answers it, with one
+// addition: before each answer is written the session's status flags are put
+// on it (stampStatus, status.go), so the client is told the state its session
+// really has.
 type Session struct {
 	conn  *server.Conn
 	h     server.Handler
@@ -90,6 +93,10 @@ func (s *Session) HandleCommand() error {
 		c.Conn = nil
 		return nil
 	} else if v := s.dispatch(data[0], data[1:]); v != (noReply{}) {
+		// The session's status flags as they are now that the command ran
+		// (#2110): on this answer, and on the connection for the EOF and OK
+		// packets the library writes from it.
+		s.stampStatus(v)
 		err = c.WriteValue(v)
 	}
 	if c.Conn != nil {

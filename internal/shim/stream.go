@@ -48,6 +48,10 @@ type streamWriter struct {
 	// binary writes each row in the binary protocol's encoding (the answer
 	// to a prepared statement) under the header's column types.
 	binary bool
+	// status is the session's status flags when the statement started
+	// (Handler.SessionStatus), written in the EOF that closes the column
+	// definitions.
+	status uint16
 }
 
 // newStreamWriter builds a text-protocol streamer for the given column names.
@@ -110,13 +114,14 @@ func (w *streamWriter) writeHeader() error {
 		}
 	}
 	// Intermediate EOF (EOF_HEADER + warnings=0 + status). go-sql-driver's
-	// readColumns loops until it sees this; the status is not acted on for a
-	// single resultset, so AUTOCOMMIT (the shim's steady state) is correct. The
-	// TRAILING EOF is written by go-mysql for the StreamingDone result finish()
-	// returns, using the connection's real status/warnings.
+	// readColumns loops until it sees this. Its status is the session's as
+	// it was when the statement started: a client that tracks the flags
+	// (#2110) must not be told "autocommit, no transaction" in the middle of
+	// a transaction. The TRAILING EOF is written by go-mysql for the
+	// StreamingDone result finish() returns, with the status the Session
+	// puts on the connection once the statement is done.
 	eof := make([]byte, 4, 9)
-	eof = append(eof, mysql.EOF_HEADER, 0x00, 0x00,
-		byte(mysql.SERVER_STATUS_AUTOCOMMIT), byte(mysql.SERVER_STATUS_AUTOCOMMIT>>8))
+	eof = append(eof, mysql.EOF_HEADER, 0x00, 0x00, byte(w.status), byte(w.status>>8))
 	if err := w.conn.WritePacket(eof); err != nil {
 		return fmt.Errorf("stream column-list EOF: %w", err)
 	}

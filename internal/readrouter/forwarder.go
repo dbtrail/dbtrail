@@ -95,6 +95,9 @@ type Forwarder struct {
 	// from the handshake: what a KILL names.
 	threadID uint32
 	dead     error
+	// lastStatus is the status of the last answer the source gave to a
+	// statement run here (see Status).
+	lastStatus uint16
 }
 
 // NewForwarder parses a go-sql-driver DSN (the registry's forwarding or
@@ -381,6 +384,7 @@ func (f *Forwarder) decideFromExplain(stmt string, res *mysql.Result, err error)
 		}
 		return Decision{}, fmt.Errorf("explain: %w", err)
 	}
+	f.noteStatus(res)
 	plan, err := planFromExplain(res)
 	if err != nil {
 		return Decision{}, err
@@ -483,6 +487,7 @@ func (f *Forwarder) stream(sink RowSink, run func(*mysql.Result, client.SelectPe
 			return nil, f.lost()
 		}
 	}
+	f.noteStatus(&res)
 	if res.Resultset != nil && len(res.Fields) == 0 {
 		// An OK packet: the client library leaves an empty Resultset on
 		// it, which the server would mistake for a resultset.
@@ -530,6 +535,53 @@ func (f *Forwarder) InTransaction() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.conn != nil && f.conn.IsInTransaction()
+}
+
+// noteStatus keeps the status flags of an answer the source just gave.
+func (f *Forwarder) noteStatus(res *mysql.Result) {
+	if res == nil {
+		return
+	}
+	f.mu.Lock()
+	f.lastStatus = res.Status
+	f.mu.Unlock()
+}
+
+// SessionStatusFlags are the MySQL status flags that describe a session and
+// outlive the statement that set them: autocommit, in a transaction, in a
+// read-only transaction, NO_BACKSLASH_ESCAPES. The other flags are about one
+// statement or one result.
+const SessionStatusFlags = mysql.SERVER_STATUS_IN_TRANS | mysql.SERVER_STATUS_AUTOCOMMIT |
+	mysql.SERVER_STATUS_NO_BACKSLASH_ESCAPED | mysql.SERVER_STATUS_IN_TRANS_READONLY
+
+// Status is the state of the session on the source as the source last
+// reported it, in MySQL's status flags (SessionStatusFlags, and no other
+// flag). known is false while there is
+// no session to speak of: before the connection is opened, and once it is
+// lost.
+//
+// The autocommit and in-transaction flags are read from the connection, which
+// follows every packet the source sends (the EXPLAIN of a decision and a USE
+// included). The other flags come from the last answer to a statement.
+// MySQL's error packet carries no status, so after a statement the source
+// refused the flags are those of the answer before it, exactly what a client
+// connected to the source would hold.
+func (f *Forwarder) Status() (status uint16, known bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.conn == nil {
+		return 0, false
+	}
+	status = f.lastStatus & SessionStatusFlags &^ (mysql.SERVER_STATUS_AUTOCOMMIT | mysql.SERVER_STATUS_IN_TRANS)
+	if f.conn.IsAutoCommit() {
+		status |= mysql.SERVER_STATUS_AUTOCOMMIT
+	}
+	if f.conn.IsInTransaction() {
+		status |= mysql.SERVER_STATUS_IN_TRANS
+	} else {
+		status &^= mysql.SERVER_STATUS_IN_TRANS_READONLY
+	}
+	return status, true
 }
 
 // Close drops the upstream connection; the Forwarder is not reused after.

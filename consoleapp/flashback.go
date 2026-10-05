@@ -206,7 +206,8 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 	defer stopCloser()
 
 	proxy := &routingHandler{}
-	mysqlConn, err := server.NewCustomizedConn(wc, mysrv, creds, proxy)
+	// shim.NewConn: the handshake announces autocommit (#2110).
+	mysqlConn, err := shim.NewConn(wc, mysrv, creds, proxy)
 	if err != nil {
 		level := slog.LevelWarn
 		if isFlashbackProbe(err) {
@@ -601,6 +602,16 @@ func (r *routingHandler) UseDB(dbName string) error {
 		r.pendingDB = dbName
 		return nil
 	}
+}
+
+// SessionStatus is the state of the client's session in MySQL's status flags
+// (#2110), which the Session puts on every answer: the bound handler's, and a
+// new session's (autocommit) while none is bound.
+func (r *routingHandler) SessionStatus() uint16 {
+	if r.inner == nil {
+		return gomysql.SERVER_STATUS_AUTOCOMMIT
+	}
+	return r.inner.SessionStatus()
 }
 
 func (r *routingHandler) HandleQuery(query string) (*gomysql.Result, error) {

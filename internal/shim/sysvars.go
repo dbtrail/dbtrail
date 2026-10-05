@@ -55,7 +55,15 @@ var sysVars = map[string]any{
 	"wait_timeout":             int64(28800),
 }
 
-// portServerVersion is the version the port's handshake announces.
+// portServerVersion is the version the port's handshake announces, whatever
+// the source is. It is fixed on purpose (#2110): the handshake is written
+// before the port knows which server the client asked for, and one port
+// serves every server, so it cannot be the source's. It is also the version
+// go-mysql's default server announces (the native-password path uses that
+// server), so both auth paths say the same; TestStatus_handshakeAnnounces*
+// pin it. Under read routing SELECT VERSION() and @@version are forwarded
+// and answer the source's own. What a driver that reads the handshake
+// version does with the difference is in docs/time-travel-sql.md.
 const portServerVersion = "8.0.11"
 
 // Three groups per item: the scope, the variable, the alias.

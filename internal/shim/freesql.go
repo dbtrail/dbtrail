@@ -87,6 +87,12 @@ type Router interface {
 	// InTransaction reports whether the upstream connection is inside an
 	// explicit transaction (from MySQL's status flags).
 	InTransaction() bool
+	// Status is the state of the session on the source in MySQL's status
+	// flags, as the source last reported it; known is false while there is
+	// no session (the connection not opened yet, or lost). It is what the
+	// port tells the client about its session, whoever answered the
+	// statement (see SessionStatus).
+	Status() (status uint16, known bool)
 	// Close drops the upstream connection.
 	Close()
 }
@@ -394,6 +400,7 @@ func (h *Handler) forwardWith(reason RouteReason, detail string, binary bool, ru
 	var buf *readrouter.BufferSink
 	if h.conn != nil {
 		w := newStreamWriterFields(h.conn, nil)
+		w.status = h.SessionStatus()
 		w.binary = binary
 		sink = w
 	} else {
