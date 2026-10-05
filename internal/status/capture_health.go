@@ -36,6 +36,7 @@ const (
 	CaptureSkipReasonTableExcludedFromSnapshot = "table_excluded_from_snapshot"
 	CaptureSkipReasonColumnCountMismatch       = "column_count_mismatch"
 	CaptureSkipReasonNoResolver                = "no_resolver"
+	CaptureSkipReasonRowMapFailed              = "row_map_failed"
 )
 
 // ExplainCaptureSkips renders the DEGRADED verdict's explanation: one
@@ -192,6 +193,12 @@ func causeLine(reason string, st CaptureSkipStat) string {
 		return subject + " " + hasHave(st) + " a different number of columns in the binlog than in the " +
 			"schema snapshot, so values would map to the wrong column names. Capture drops the rows rather " +
 			"than index them under wrong names — the snapshot is behind a schema change on the source."
+	case CaptureSkipReasonRowMapFailed:
+		return subject + " had rows with text that could not be read safely: a CHAR or VARCHAR value was " +
+			"not valid UTF-8, and either its column uses a character set DBTrail cannot convert yet (only " +
+			"latin1 is converted) or the schema snapshot is too old to record the column's character set. " +
+			"Capture drops such a row instead of indexing damaged text. The other rows of the same event " +
+			"were indexed."
 	case CaptureSkipReasonNoResolver:
 		return "Capture ran with no schema snapshot loaded at all, so no row event could be decoded."
 	case CaptureSkipReasonStatementFormatDML:
@@ -220,6 +227,13 @@ func remedyLine(reason string) string {
 		return "Fix: give each table this reason covers an explicit PRIMARY KEY on an InnoDB engine at the source. " +
 			"Re-snapshotting is NOT the fix here — validation excludes these tables again every time, so a " +
 			"fresh snapshot would leave capture exactly as it is now."
+	case CaptureSkipReasonRowMapFailed:
+		return "Fix: the log lines for this reason name the column and the cause. If they say the schema " +
+			"snapshot has no character set for the column, refresh the schema snapshot: in the console, " +
+			"Overview → \"Refresh schema snapshot\"; on the command line, `bintrail snapshot --source-dsn " +
+			"<source> --index-dsn <index>`, then restart the stream. If they name a character set that " +
+			"cannot be converted, a fresh snapshot changes nothing: convert that column to utf8mb4 on the " +
+			"source, or its rows with non-ASCII text keep being skipped."
 	case CaptureSkipReasonStatementFormatDML:
 		return "Fix: set binlog_format=ROW server-wide on the source (a session-level override can also " +
 			"produce row-less events)."
@@ -240,6 +254,7 @@ func logLine(reason string) string {
 		CaptureSkipReasonTableExcludedFromSnapshot: "table not in snapshot — skipping",
 		CaptureSkipReasonColumnCountMismatch:       "column count mismatch — skipping",
 		CaptureSkipReasonNoResolver:                "no resolver available — skipping",
+		CaptureSkipReasonRowMapFailed:              "failed to map",
 	}[reason]
 	s := "Per-event detail is in the log of the process capturing this source — `bintrail stream` or " +
 		"`bintrail-console watch` (with the bundled compose file: `docker compose logs bintrail`)"

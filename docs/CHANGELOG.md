@@ -270,6 +270,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `cte_max_recursion_depth` with an error and MariaDB cuts it at
     `max_recursive_iterations`, where the copy runs it to the end.
 ### Fixed
+- **Capture: a row that could not be read is now on record** (#2139). When one
+  row of a change could not be matched to its table's columns, capture wrote a
+  warning to its log, left that row out of the index and carried on. Nothing
+  else knew: `status` kept saying no events were skipped, and the checks that
+  ask "did capture drop anything?" before trusting the index (the scheduled
+  snapshot update, the Iceberg export, `status --fail-on-gap`) saw a clean
+  record for a table that was missing a change. The cause in practice is a
+  `CHAR` or `VARCHAR` value that is not valid UTF-8 in a column whose character
+  set is not converted (only `latin1` is), or whose character set an old schema
+  snapshot never recorded. Capture still carries on and still indexes the other
+  rows of the same change, and it now records the drop under a new reason,
+  `row_map_failed`, with the table and the binlog position, counted once per
+  change however many of its rows were dropped. `status` and the web interface
+  explain it and say what fixes it. If every row of every change is dropped,
+  the single "capture is effectively stopped" error now fires for this case
+  too; before, it could not. A change of a kind capture cannot decode
+  (`unhandled_row_event`) now names its table as well.
 - **Read routing: a statement that names a generated column is answered by
   MySQL** (#2123). A snapshot holds no generated column, so the copy does
   not have it, and a statement that named one was not always refused there:

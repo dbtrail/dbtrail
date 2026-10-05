@@ -45,6 +45,15 @@ const (
 	// SkipUnhandledRowEvent — a RowsEvent type bintrail does not decode
 	// (e.g. PARTIAL_UPDATE_ROWS_EVENT under binlog_row_value_options).
 	SkipUnhandledRowEvent = "unhandled_row_event"
+	// SkipRowMapFailed — a rows event whose table and column count matched the
+	// snapshot, but at least one of its rows could not be mapped to the
+	// columns (#2139). In practice a CHAR/VARCHAR value that is not valid
+	// UTF-8 in a column whose character set bintrail does not transcode, or
+	// whose character set a pre-#756 snapshot never captured
+	// (metadata.coerceTextEncoding). Counted once per rows event, like every
+	// other reason, however many of its rows failed; the rows that map are
+	// still indexed.
+	SkipRowMapFailed = "row_map_failed"
 	// SkipStatementFormatDML — a STATEMENT/MIXED-format DML whose row image
 	// is not in the binlog (#999); the change cannot be captured.
 	SkipStatementFormatDML = "statement_format_dml"
@@ -217,6 +226,8 @@ func (c *SkipCounters) RecordSkipAttributed(reason string, attr SkipAttribution)
 		switch reason {
 		case SkipStatementFormatDML:
 			remediation = "set binlog_format=ROW server-wide on the source (a STATEMENT/MIXED format or a session-level override is producing row-less events)"
+		case SkipRowMapFailed:
+			remediation = "rows are being dropped because a text value is not valid UTF-8 and cannot be converted; the `failed to map` warnings name the column and the cause — if they say the snapshot has no character set for the column, run `bintrail snapshot` against the source and restart the stream; if they name a character set, convert that column to utf8mb4 at the source (re-snapshotting alone will not capture these rows)"
 		case SkipTableExcludedFromSnapshot:
 			// Never point this reason at `bintrail snapshot`: the validator
 			// excludes the same table on every re-run (#1051/#1199), so that
