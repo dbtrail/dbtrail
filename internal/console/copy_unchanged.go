@@ -410,14 +410,6 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 	if changedServer > 0 {
 		return "the source server's identity changed since the snapshot, so binlog positions before and after cannot be compared"
 	}
-	parts, err := status.LoadPartitionStats(ctx, b.db, b.dbName)
-	if err != nil {
-		return unreadable("the index's partitions", err)
-	}
-	oldest := status.OldestLivePartitionHour(parts)
-	if oldest.IsZero() || oldest.After(floor) {
-		return "the index no longer holds every change since the snapshot (older partitions were rotated out), so it cannot say nothing changed"
-	}
 	ddl, complete, err := loadDDLSince(ctx, b.db, floor)
 	if err != nil {
 		return unreadable("the schema changes", err)
@@ -443,6 +435,18 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 		if len(rows) > 0 {
 			return fmt.Sprintf("%s.%s changed since its snapshot", t.Schema, t.Table)
 		}
+	}
+	// Last, and after the lookups on purpose: rotation only ever drops the
+	// oldest partitions, so a window the index still holds now is one it
+	// held while it was being read. Asked first, a partition dropped between
+	// the two would turn its events into "none found".
+	parts, err := status.LoadPartitionStats(ctx, b.db, b.dbName)
+	if err != nil {
+		return unreadable("the index's partitions", err)
+	}
+	oldest := status.OldestLivePartitionHour(parts)
+	if oldest.IsZero() || oldest.After(floor) {
+		return "the index no longer holds every change since the snapshot (older partitions were rotated out), so it cannot say nothing changed"
 	}
 	return ""
 }

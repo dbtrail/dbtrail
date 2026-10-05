@@ -203,3 +203,36 @@ func TestCaptureWatermark_noWatermarkAndFilters_2085(t *testing.T) {
 		t.Errorf("boot capture filtered to shop.orders: %+v", boot)
 	}
 }
+
+// The clock is read before the source is (the watermark's instant). A
+// failure there must release the read in flight like any other, or the next
+// load waits on a channel nobody closes.
+func TestCaptureStatus_aFailureBeforeTheReadHoldsNothing_2085(t *testing.T) {
+	var reads, calls int
+	c := newCaptureStatusReporter("")
+	c.read = func(context.Context, string, string) captureProbeResult {
+		reads++
+		return captureProbeResult{verdict: console.CaptureCaughtUp, captured: uuidB + ":1-10", executed: uuidB + ":1-10"}
+	}
+	c.now = func() time.Time {
+		calls++
+		if calls == 1 { // the clock read before the source is asked
+			panic("clock")
+		}
+		return captureT0.Add(time.Duration(calls) * time.Hour)
+	}
+	func() {
+		defer func() { _ = recover() }()
+		c.CaptureStatus(context.Background(), captureEntryA)
+	}()
+	done := make(chan console.CaptureStatus, 1)
+	go func() { done <- c.CaptureStatus(context.Background(), captureEntryA) }()
+	select {
+	case got := <-done:
+		if reads != 1 || got.State != console.CaptureStateUpToDate {
+			t.Fatalf("the load after it: %+v, %d reads", got, reads)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the load after a failure waited on a read that was over")
+	}
+}
