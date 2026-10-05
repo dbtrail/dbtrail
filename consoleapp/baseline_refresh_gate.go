@@ -181,14 +181,15 @@ func (r coverageRule) reanchorBy(liveFloor, now time.Time) (time.Time, bool) {
 
 // floorHolds reports whether rotation is known to leave the oldest live hour
 // alone until after the next cycle has looked (#2121): that hour is dropped
-// once it is older than the index's window, so while the window ends more than
-// an hour and an interval before it, the floor does not move and the third
-// bound has nothing to guard. The same hour and interval the bound itself
-// keeps, so a cycle that runs late is covered as far here as it is there.
+// once it is older than the index's window, so while that hour is at least an
+// hour and an interval inside the window, the floor does not move and the
+// third bound has nothing to guard. The same hour and interval the bound
+// itself keeps, so a cycle that runs late is covered as far here as it is
+// there.
 //
-// The shorter of the two retentions the rule holds: they come from different
-// reads, and a retention saved in the panel is in retain before any partition
-// or record shows it.
+// The shorter of the two retentions the rule holds: with no retention chosen,
+// retain is the daemon default and dropsAfter the window this index was
+// created under, and the two are read by separate calls.
 func (r coverageRule) floorHolds(liveFloor, now time.Time) bool {
 	window := r.dropsAfter
 	if r.retain > 0 && r.retain < window {

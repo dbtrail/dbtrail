@@ -792,10 +792,12 @@ func (s *baselineSupervisor) coverageRuleFor(ctx context.Context, req refreshReq
 		return e
 	})
 	if asked {
-		s.reportGateBlind("retention", !unreadable, req,
-			"cannot read the retention this index was created under, so a chain of table deltas that "+
-				"starts within an hour and a cycle of the oldest events the index keeps is ended as a "+
-				"precaution; on an index that new, every update writes its tables in full")
+		why := "cannot read the retention this index was created under, so a snapshot that reads from within " +
+			"an hour and a cycle of the oldest events the index keeps is replaced as a precaution"
+		if s.tableDeltas {
+			why += "; on an index that new, every update writes its tables in full"
+		}
+		s.reportGateBlind("retention", !unreadable, req, why)
 	}
 	return rule
 }
@@ -805,23 +807,24 @@ func (s *baselineSupervisor) coverageRuleFor(ctx context.Context, req refreshReq
 // very next refresh cycle rather than only taking effect once partitions have
 // already been dropped.
 //
-// loopRuns is whether this daemon's rotation loop is running, which is decided
-// once at boot (rotation.StartLoop) and which the live settings cannot say: a
-// retention saved in the panel of a daemon started with rotation off reads as
-// enabled and drops nothing until a restart. Such a daemon's index is rotated,
-// if at all, on a schedule nothing here can read, so the settings still cap
-// how long a snapshot goes unreplaced (retainInForce) and vouch for nothing
-// about when the floor moves (rotationInForce stays nil).
-func (s *baselineSupervisor) followRotation(settings func() rotation.Settings, loopRuns bool) {
+// Called at boot, before rotation.StartLoop, and it reads the settings once
+// as StartLoop does: whether this daemon's rotation loop runs is decided there
+// and then, and the live settings cannot say it afterwards. A retention saved
+// in the panel of a daemon started with rotation off reads as enabled and
+// drops nothing until a restart. Such a daemon's index is rotated, if at all,
+// on a schedule nothing here can read, so the settings still cap how long a
+// snapshot goes unreplaced (retainInForce) and vouch for nothing about when
+// the floor moves (rotationInForce stays nil).
+func (s *baselineSupervisor) followRotation(settings func() rotation.Settings) {
 	s.retainInForce = func() time.Duration { return settings().Retain }
 	s.rotationInForce = nil
-	if loopRuns {
+	if settings().Enabled {
 		s.rotationInForce = settings
 	}
 }
 
 // reportGateBlind says, at most once a day per server, that the gate cannot
-// answer one of its two questions — and resolves the condition when it can
+// answer one of its questions — and resolves the condition when it can
 // again.
 //
 // At Warn, and this is the whole point of it. Failing toward folding is safe,

@@ -542,10 +542,9 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 		// same provider rotation reads, and because a supervisor without one
 		// still works: no policy cap, the observed partitions as the only
 		// bound.
-		// Read here as StartLoop reads it below: nothing can save a policy
-		// in between, the console is not serving yet.
-		rotationSettings := rotationSettingsProvider(registry)
-		baselineSup.followRotation(rotationSettings, rotationSettings().Enabled)
+		// Before StartLoop below, which followRotation depends on: nothing
+		// can save a policy in between, the console is not serving yet.
+		baselineSup.followRotation(rotationSettingsProvider(registry))
 	}
 	if upConsoleBaselineTrigger {
 		cfg.BaselineCtrl = baselineSup
@@ -894,10 +893,9 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 		// same provider rotation reads, and because a supervisor without one
 		// still works: no policy cap, the observed partitions as the only
 		// bound.
-		// Read here as StartLoop reads it below: nothing can save a policy
-		// in between, the console is not serving yet.
-		rotationSettings := rotationSettingsProvider(registry)
-		baselineSup.followRotation(rotationSettings, rotationSettings().Enabled)
+		// Before StartLoop below, which followRotation depends on: nothing
+		// can save a policy in between, the console is not serving yet.
+		baselineSup.followRotation(rotationSettingsProvider(registry))
 	}
 	if upConsoleBaselineTrigger {
 		cfg.BaselineCtrl = baselineSup

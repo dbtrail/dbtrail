@@ -177,8 +177,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a margin of one hour plus one schedule interval. On an index younger
   than that margin every chain was "too close", so every update of the first
   hour wrote all tables, unchanged ones included (measured on 102 million
-  rows: 10 minutes per update on a 5-minute schedule, and a copy 10 to 20
-  minutes behind). The margin is now skipped while rotation cannot reach the
+  rows: updates of 7 to 10 minutes on a 5-minute schedule). The margin is now skipped while rotation cannot reach the
   oldest hour before the next update, which the retention says: 48 hours by
   default. An index that has been running for its retention is graded as
   before, and so is one whose rotation is off or whose retention cannot be

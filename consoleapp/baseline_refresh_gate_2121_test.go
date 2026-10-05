@@ -79,14 +79,17 @@ func TestCoverageRule_whenTheMarginComesBack(t *testing.T) {
 	}{
 		{"retention lowered to 2h in the panel, an hour before the drop: still out of reach",
 			coverageRule{retain: 2 * time.Hour, interval: interval, dropsAfter: 2 * time.Hour}, floor.Add(50 * time.Minute), false},
-		{"the same, once the drop is an hour and an interval away",
-			coverageRule{retain: 2 * time.Hour, interval: interval, dropsAfter: 2 * time.Hour}, floor.Add(time.Hour), true},
+		{"the same, with the drop exactly an hour and an interval away",
+			coverageRule{retain: 2 * time.Hour, interval: interval, dropsAfter: 2 * time.Hour}, floor.Add(55 * time.Minute), false},
+		{"the same, a nanosecond closer",
+			coverageRule{retain: 2 * time.Hour, interval: interval, dropsAfter: 2 * time.Hour}, floor.Add(55*time.Minute + time.Nanosecond), true},
 		{"a retention no chain fits in: the margin never left",
 			coverageRule{retain: time.Hour, interval: interval, dropsAfter: time.Hour}, floor.Add(45 * time.Minute), true},
 		{"the daemon was down for 47h: rotation is about to reach the oldest hour",
 			coverageRule{retain: 48 * time.Hour, interval: interval, dropsAfter: 48 * time.Hour}, floor.Add(47 * time.Hour), true},
-		// The two retentions come from different reads and the shorter one
-		// bounds: a panel save is in retain before the index's record says so.
+		// The two retentions come from separate reads (the daemon default and
+		// the index's own record, when no retention was chosen) and the
+		// shorter one bounds.
 		{"the configured retention is the shorter of the two",
 			coverageRule{retain: 2 * time.Hour, interval: interval, dropsAfter: 48 * time.Hour}, floor.Add(time.Hour), true},
 		{"the index's own window is the shorter of the two",
@@ -218,7 +221,7 @@ func TestRunRefresh_theGateAndTheFoldShareTheIndexsWindow(t *testing.T) {
 	// loop drops on is the record.
 	sup.followRotation(func() rotation.Settings {
 		return rotation.Settings{Enabled: true, Retain: 12 * time.Hour, RetainRaw: "12h"}
-	}, true)
+	})
 
 	run(refreshAt)
 	want := coverageRule{retain: 12 * time.Hour, interval: 5 * time.Minute, dropsAfter: 48 * time.Hour}
@@ -284,7 +287,16 @@ func TestCoverageRuleFor(t *testing.T) {
 			reads := stubIndexRetention(t, tc.effective)
 			sup := newBaselineSupervisor(context.Background(), t.TempDir(), "")
 			if tc.settings != nil {
-				sup.followRotation(tc.settings, !tc.loopOff)
+				// What the daemon's boot does: the settings are read once
+				// there, and whatever they say later is a panel save.
+				booted := false
+				sup.followRotation(func() rotation.Settings {
+					if tc.loopOff && !booted {
+						return rotation.Settings{}
+					}
+					return tc.settings()
+				})
+				booted = true
 			}
 			req := refreshRequest{ServerID: "s", ServerName: "shop", IndexDSN: "d"}
 			if got := sup.coverageRuleFor(context.Background(), req, time.Minute); got != tc.want {
