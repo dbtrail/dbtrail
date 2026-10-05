@@ -204,8 +204,10 @@ type Session struct {
 	// StrictStar asks for a refusal instead of an answer when the statement
 	// holds a star over a table whose `SELECT *` on the copy is not MySQL's:
 	// the order of its columns is not known, or MySQL returns a different set
-	// of columns (#2111). Set under read routing, where the caller answers a
-	// refusal by sending the statement to MySQL. The browser and a port with
+	// of columns (#2111); and when the statement names a column the copy does
+	// not hold, or reads a table whose missing columns are not known (#2123):
+	// the name could bind to something else there. Set under read routing,
+	// where the caller answers a refusal by sending the statement to MySQL. The browser and a port with
 	// no routing leave it off and get the copy's answer. The worker never
 	// sees it: the caller's ViewsFor decides, from what the statement names.
 	StrictStar bool
@@ -292,7 +294,8 @@ func (e *RefusedError) Error() string { return "query refused: " + e.Reason }
 // ColumnsDifferError: the statement was not run because the caller asked for
 // MySQL's answer (Session.StrictStar) and the copy's would hold other columns
 // or other rows: a star, or a NATURAL JOIN, over a table whose columns on the
-// copy are not MySQL's (#2111). A decision about the statement, not a fault
+// copy are not MySQL's (#2111), or the name of a column the copy does not
+// hold (#2123). A decision about the statement, not a fault
 // of the copy: read routing sends the statement to MySQL and counts it apart.
 type ColumnsDifferError struct{ Reason string }
 

@@ -124,11 +124,11 @@ func TestSQL_realWorkerSelectStar_2111(t *testing.T) {
 	// Only the tables a star really expands count, and the refusal names them.
 	// Answered: MySQL returns the same columns as the copy for each of these.
 	answered("SELECT l.id FROM shop.lines l WHERE EXISTS (SELECT * FROM shop.gen g WHERE g.id = l.id)", strict)
-	answered("SELECT l.id FROM shop.lines l WHERE NOT EXISTS (SELECT * FROM shop.orders o WHERE o.id = l.id)", strict)
+	answered("SELECT l.id FROM shop.lines l WHERE NOT EXISTS (SELECT * FROM shop.inv o WHERE o.id = l.id)", strict)
 	answered("SELECT * FROM (SELECT id, a FROM shop.gen) x", strict)
 	answered("SELECT x.* FROM (SELECT id, a FROM shop.gen) x", strict)
 	answered("SELECT l.*, g.id FROM shop.lines l JOIN shop.gen g ON g.id = l.id", strict)
-	answered("SELECT l.* FROM shop.lines l JOIN shop.orders o ON o.id = l.id", strict)
+	answered("SELECT l.* FROM shop.lines l JOIN shop.inv o ON o.id = l.id", strict)
 	answered("SELECT l.* FROM shop.lines l JOIN shop.lines m USING (id)", strict)
 	answered("WITH q AS (SELECT id, a FROM shop.gen) SELECT * FROM q", strict)
 	answered("SELECT id FROM shop.gen UNION ALL SELECT * FROM (SELECT id FROM shop.lines) x", strict)
@@ -165,10 +165,15 @@ func TestSQL_realWorkerSelectStar_2111(t *testing.T) {
 	answered("SELECT gen.a, g2.b FROM shop.gen JOIN shop.g2 USING (id)", strict)
 	// And outside routing nothing is refused.
 	answered("SELECT gen.a, g2.b FROM shop.gen NATURAL JOIN shop.g2", sqlsandbox.Session{})
-	// Without a star the same tables answer.
-	answered("SELECT id, status FROM shop.orders", strict)
-	answered("SELECT count(*) FROM shop.orders", strict)
+	// Without a star the tables whose columns are known answer. One with no
+	// table definition does not, star or not (#2123): what it lacks on the
+	// copy is not known, and a name could then mean something else there.
 	answered("SELECT id, a FROM shop.gen", strict)
+	answered("SELECT id, a FROM shop.inv", strict)
+	refused("SELECT id, status FROM shop.orders", "shop.orders", "no table definition")
+	refused("SELECT count(*) FROM shop.orders", "shop.orders")
+	refused("SELECT l.id FROM shop.lines l WHERE NOT EXISTS (SELECT * FROM shop.orders o WHERE o.id = l.id)", "shop.orders")
+	refused("SELECT l.* FROM shop.lines l JOIN shop.orders o ON o.id = l.id", "shop.orders")
 	// A star over a table that is not the problem is not held back by one the statement does not read.
 	answered("SELECT * FROM shop.lines WHERE id IN (SELECT id FROM shop.lines)", strict)
 	// And nothing is refused for a caller that did not ask: the SQL card and a port with no routing.
