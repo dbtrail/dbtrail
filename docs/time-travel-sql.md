@@ -116,7 +116,13 @@ What to know before relying on it:
   MySQL spells them, and backtick-quoted names are not understood; DuckDB's
   `strftime`, `string_agg` and double quotes are. `USE <schema>` works and sets
   where unqualified names resolve; the connection starts in the server's
-  source database when the registry knows it.
+  source database when the registry knows it. Schema and table names match
+  without regard to the case of ASCII letters (`USE SHOP` and `FROM Orders`
+  find `shop` and `orders`), which MySQL on Linux does not do by default
+  (`lower_case_table_names=0`), so a statement that names a table in the
+  wrong case works here and fails there. Letters outside ASCII are not
+  folded: a schema `Été` is not found as `été`, and a `USE` of a name that
+  is not found leaves the connection where it was.
 - **`events` needs the change log on local disk, and the bundled stack keeps
   it in S3.** `watch` uploads each archived hour to the server's S3 location
   and removes the local file once the upload is confirmed, so on that stack a
@@ -406,7 +412,7 @@ What this is and is not:
   strings sort in the same order on both. ICU, which provides it, is part
   of the binary; nothing is downloaded. It has a price: comparing,
   grouping or sorting text costs about twice what DuckDB's built-in
-  case-and-accent folding does, and up to ten times on a column where
+  case-and-accent folding does, and about ten times on a column where
   every value is different (5 million rows of 32-character tokens on
   disk: an equality filter takes 1.8 s instead of 0.2 s). Columns with
   few distinct values, numbers, dates and `_bin` columns are not
@@ -433,11 +439,18 @@ What this is and is not:
     gives `z`, `a`); the copy sorts the text (`a`, `z`).
   - **MySQL against MariaDB.** The comparisons above were measured on
     MySQL 8.4 and again on MariaDB 11.4 under its default collation. The
-    two agree on every equality measured except trailing spaces (the point
-    above), and on the order of every string except the empty one against
-    a single space. So on a MariaDB source the copy differs on 3 of the 57
-    pairs (the bold letter and the two that differ by a trailing space)
-    where it differs on 1 on a MySQL source.
+    two agree on each of those 57 pairs except the two that differ by a
+    trailing space (the point above), and on the order of every one of the
+    48 strings except the empty one against a single space. So on a
+    MariaDB source the copy differs on 3 of the 57 pairs (the bold letter
+    and the two that differ by a trailing space) where it differs on 1 on
+    a MySQL source. That holds for those pairs, not for all text. One case
+    outside them: a Hangul syllable written as one character (U+AC00) and
+    the same syllable written as its two parts (U+1100 U+1161) are equal
+    on MySQL and on the copy and different on MariaDB 11.4. Other
+    characters written in parts (`e` followed by a combining acute accent
+    against `é`, and the same for `Å`, `ñ`, a voiced kana) are equal on
+    all three.
   - **`_bin` outside UTF-8.** A `_bin` column in a multi-byte character
     set other than UTF-8 sorts by that character set's bytes on MySQL and
     by Unicode code point here. Equality is the same.

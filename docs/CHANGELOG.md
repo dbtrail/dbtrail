@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `nocase.noaccent` to `nocase.icu_noaccent`; ICU is part of the binary, so
   nothing is downloaded and an air-gapped install is unaffected. **It is
   slower on text**: comparing, grouping or sorting a text column costs
-  about twice as much as before, and up to ten times on a column where
+  about twice as much as before, and about ten times on a column where
   every value is different (an equality filter over 5 million 32-character
   tokens on disk: 0.2 s before, 1.8 s now). Columns with few distinct
   values, numbers, dates and columns MySQL declares `_bin` are not
