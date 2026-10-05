@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/go-sql-driver/mysql"
 )
 
 // #2085: the watermark is the newest instant at which the source was asked
@@ -258,5 +260,62 @@ func TestCaptureStatus_aFailureBeforeTheReadHoldsNothing_2085(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the load after a failure waited on a read that was over")
+	}
+}
+
+// The binary log's filters, read by column name from whichever statement the
+// server has. Only "the statement answered and both are empty" is logsAll.
+func TestReadBinlogFilters_2085(t *testing.T) {
+	cols := []string{"File", "Position", "Binlog_Do_DB", "Binlog_Ignore_DB", "Executed_Gtid_Set"}
+	row := func(do, ignore string) *sqlmock.Rows {
+		return sqlmock.NewRows(cols).AddRow("binlog.000004", 4604766, do, ignore, "")
+	}
+	cases := []struct {
+		name    string
+		expect  func(m sqlmock.Sqlmock)
+		logsAll bool
+		why     string
+	}{
+		{"no filter (8.4)", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery("SHOW BINARY LOG STATUS").WillReturnRows(row("", ""))
+		}, true, ""},
+		{"no filter, on a server that only has the older statement", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery("SHOW BINARY LOG STATUS").WillReturnError(&mysql.MySQLError{Number: 1064, Message: "You have an error in your SQL syntax"})
+			m.ExpectQuery("SHOW MASTER STATUS").WillReturnRows(row("", ""))
+		}, true, ""},
+		{"binlog-do-db", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery("SHOW BINARY LOG STATUS").WillReturnRows(row("shop", ""))
+		}, false, "binlog-do-db"},
+		{"binlog-ignore-db", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery("SHOW BINARY LOG STATUS").WillReturnRows(row("", "scratch,tmp"))
+		}, false, "binlog-ignore-db"},
+		{"the account may not ask", func(m sqlmock.Sqlmock) {
+			denied := &mysql.MySQLError{Number: 1227, Message: "Access denied; you need (at least one of) the SUPER, REPLICATION CLIENT privilege(s)"}
+			m.ExpectQuery("SHOW BINARY LOG STATUS").WillReturnError(denied)
+			m.ExpectQuery("SHOW MASTER STATUS").WillReturnError(denied)
+		}, false, "could not be read"},
+		{"binary logging off: an empty answer", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery("SHOW BINARY LOG STATUS").WillReturnRows(sqlmock.NewRows(cols))
+			m.ExpectQuery("SHOW MASTER STATUS").WillReturnError(&mysql.MySQLError{Number: 1064, Message: "syntax"})
+		}, false, "could not be read"},
+		{"an answer without the two columns is not 'no filter'", func(m sqlmock.Sqlmock) {
+			two := sqlmock.NewRows([]string{"File", "Position"}).AddRow("binlog.000004", 4)
+			m.ExpectQuery("SHOW BINARY LOG STATUS").WillReturnRows(two)
+			m.ExpectQuery("SHOW MASTER STATUS").WillReturnRows(sqlmock.NewRows([]string{"File", "Position"}).AddRow("binlog.000004", 4))
+		}, false, "could not be read"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			c.expect(mock)
+			logsAll, why := readBinlogFilters(context.Background(), db)
+			if logsAll != c.logsAll || !strings.Contains(why, c.why) || (logsAll && why != "") {
+				t.Errorf("readBinlogFilters = %v, %q; want %v and %q", logsAll, why, c.logsAll, c.why)
+			}
+		})
 	}
 }
