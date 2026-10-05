@@ -416,7 +416,7 @@ func listS3ParquetScoped(ctx context.Context, source string, since, until *time.
 func sinceLowerBoundHint(opts query.Options) *time.Time {
 	hint := opts.Since
 	if opts.Since != nil && opts.SincePos != nil {
-		t := opts.Since.Truncate(time.Hour).Add(-time.Hour)
+		t := query.CoarseSinceFloor(*opts.Since)
 		hint = &t
 	}
 	if opts.AfterEvent != nil {

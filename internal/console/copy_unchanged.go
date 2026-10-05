@@ -647,11 +647,16 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 		if f := copyTimeFloor(since); floor.IsZero() || f.Before(floor) {
 			floor = f
 		}
+		// Marked as searching below its own floor (#2138): the engine would
+		// otherwise look at the newest row of every partition for each table
+		// of each statement, to learn what the second lookup below already
+		// establishes, with its own one-row proof on an index only a stream
+		// wrote and by a search of every older hour otherwise.
 		rows, err := b.engine.Fetch(ctx, query.Options{
 			Schema: t.Schema, Table: t.Table,
 			Since: &since, SincePos: &cuts[i].anchor, SinceEventID: cuts[i].lastEventID,
 			Limit: 1,
-		})
+		}.SearchesBelowItsOwnFloor())
 		if err != nil {
 			return unreadable("the events of "+t.Schema+"."+t.Table, err)
 		}

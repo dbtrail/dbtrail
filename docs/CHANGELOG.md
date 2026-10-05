@@ -372,6 +372,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `cte_max_recursion_depth` with an error and MariaDB cuts it at
     `max_recursive_iterations`, where the copy runs it to the end.
 ### Fixed
+- **Snapshots: an update no longer leaves out the changes that reached the
+  index late** (#2138). An update of a snapshot continues from the exact
+  binlog position the previous one stopped at, and to avoid reading the whole
+  index it also started its scan at a time: the time the previous snapshot
+  was written, less one to two hours. That time comes from the clock of the
+  machine that wrote the snapshot. The index files each change under the time
+  its statement ran on the source. So when the index received changes later
+  than they ran, they were after the position and before that time, the scan
+  never reached them, and every later snapshot was missing them with no error
+  anywhere. Reproduced with the capture 3, 5 and 26 hours behind when an
+  update ran (the daemon back after an outage and a scheduled update firing
+  while it caught up), with a table written again, a table kept with a pair
+  of changes beside it and a table carried forward unchanged, and on the
+  first update after a full snapshot when the source is a delayed replica.
+  The scan now reads where to start from the index: it looks at the newest
+  change of each hourly partition older than that time, and when one comes
+  at or after the snapshot's position it starts at the table's oldest change
+  there. The start only ever moves earlier. Every other reader that continues
+  from a snapshot started from its time the same way and reads its start the
+  new way too: `verify`, the MySQL port's `_snapshot` tables, point-in-time
+  restore of a row, `export iceberg`, and `recover-cascade` when it looks for
+  the child rows changed since their snapshot (there a missed change meant
+  recovery SQL that restored an outdated row).
+  - **Cost**, measured on MySQL 8.4.9 with 1.5 million changes over 720
+    hourly partitions: 34 to 47 ms for the look at every partition (three
+    statements; one statement per partition took 100 to 167 ms), once per
+    update, nothing more per table when no hour holds a late change, and
+    1 ms per table when 26 hours do. The look is per hour, not per table:
+    one late change of any table makes every table with changes in that
+    hour start its scan there, and the exact position then discards what is
+    not after its snapshot. Reading a table with no time bound at all, the
+    alternative, took 86 ms for a table whose bounded read takes 10 ms, and
+    grows with the size of the index. `recover-cascade` looks once per run,
+    however many child rows it searches for; `verify`, the MySQL port's
+    `_snapshot` tables, the restore of a row and `export iceberg` look on
+    each read.
+  - **Snapshots already written.** Nothing has to be converted: an update
+    over an existing snapshot reads its start the new way. What an earlier
+    update already left out stays out, because the snapshots after it start
+    past those changes. Only a snapshot updated while the capture was more
+    than an hour or two behind is affected. `bintrail verify` shows it the
+    next time it compares the snapshots with a read of the database: the
+    table reports `mismatch`. The remedy is a new full snapshot of the
+    source.
+  - **An outage longer than the index keeps its hours still needs a new
+    full snapshot.** Only the hours still in the index are looked at. A late
+    change lands in an old hour, and old hours are the next to be rotated
+    out. When that hour was already moved to an archive before the update
+    ran (a short `--retain`, or an outage longer than the retention),
+    nothing in the index points at it. It is still found when the scan
+    starts at or before it for another reason, because archives from the
+    start onward are read and filtered by position like the index: that is
+    the case inside the old time bound, and whenever another late change
+    still in the index moved the start further back. Otherwise it is left
+    out, as before. The archive record does not say which positions an
+    archive holds (#2152).
+  - **What a moved start costs.** The scan reads the index, and every
+    archive, from the moved start: once for each update that finds a late
+    change, and on every update while a `bintrail index` run is unfinished.
+  - **`bintrail index` into an index a stream also writes.** While it adds
+    binlog files, the newest change of an hour says nothing about the rest
+    of it, so an update of a snapshot older than that run looks in every
+    older hour and can start at the table's oldest change in the index, with
+    no bound (slower, never less). A run recorded as unfinished counts as
+    still going. If it crashed, that record stays, and the daemon now warns
+    every ten minutes with the file, when it started and the way out: mark
+    the record as ended with the `UPDATE index_state ...` statement the
+    warning prints. That keeps what the run had indexed. Do not run
+    `bintrail index` on that file again: it starts the file from its
+    beginning and indexes the same changes a second time.
+  - If the index cannot be read for this, the update stops and publishes
+    nothing, also under `--allow-gaps`.
+  - **Hours older than the first hour of the index cannot be checked.** The
+    index keeps a late change older than its first hour in its first
+    partition, and the update reads it there. The hours in between have no
+    partition and no archive of their own, so the update cannot tell an
+    hour that never had one from an hour that was rotated out without an
+    archive. It does not refuse over them (they were not examined before
+    either, and a refusal would stop every later update of the table); it
+    logs one warning with how many hours and from when to when. A change
+    that was rotated out without an archive stays lost.
 - **Capture: a row that could not be read is now on record** (#2139). When one
   row of a change could not be matched to its table's columns, capture wrote a
   warning to its log, left that row out of the index and carried on. Nothing

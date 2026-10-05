@@ -131,6 +131,14 @@ type FetchMergedOptions struct {
 	// is a discovery failure with the same semantics as a failed
 	// archive_state read. nil = ResolveArchiveSources.
 	SourceResolver SourceResolver
+
+	// PartitionHeads is the picture of the live index a fetch anchored on a
+	// binlog position (Opts.SincePos) reads its time floor from (#2138): see
+	// PartitionHeads. nil = loaded by the fetch itself, one primary-key seek
+	// per partition. A caller that runs many fetches under ONE upper bound (a
+	// refresh folds every table up to the same cut) loads it once, AFTER that
+	// bound is fixed, and passes it to each.
+	PartitionHeads *PartitionHeads
 }
 
 // SourceResolver names the archive sources a merged read will open.
@@ -232,7 +240,7 @@ func FetchMergedFull(
 	if err := o.validate(); err != nil {
 		return nil, nil, nil, 0, false, err
 	}
-	src, err := resolveMergeSources(ctx, db, o)
+	src, err := resolveMergeSources(ctx, db, &o)
 	if err != nil {
 		return nil, src.plan, nil, 0, false, err
 	}
@@ -692,7 +700,7 @@ func FetchMergedStream(
 		batchSize = DefaultStreamBatchSize
 	}
 
-	src, err := resolveMergeSources(ctx, db, o)
+	src, err := resolveMergeSources(ctx, db, &o)
 	if err != nil {
 		return src.plan, err
 	}
@@ -860,15 +868,29 @@ func VerifyMergedCoverage(ctx context.Context, db *sql.DB, o FetchMergedOptions)
 	if err := o.validate(); err != nil {
 		return err
 	}
-	_, err := resolveMergeSources(ctx, db, o)
+	_, err := resolveMergeSources(ctx, db, &o)
 	return err
 }
 
 // resolveMergeSources discovers archive sources, runs the coverage planner and
 // enforces gaps according to o.AllowGaps. The returned plan is non-nil whenever
 // the planner ran, INCLUDING on the error path, so callers can surface it.
-func resolveMergeSources(ctx context.Context, db *sql.DB, o FetchMergedOptions) (mergeSources, error) {
+//
+// It also settles the window's time floor, which is why o is a pointer: a
+// fetch anchored on a binlog position starts from where the index shows an
+// event after that position can be, not from the caller's own clock (#2138,
+// see PartitionHeads). The planner below, every page and every archive read
+// then work from that one floor. A failure to settle it is returned whatever
+// AllowGaps says: going on with the caller's time is how a refresh came to
+// publish a snapshot without the changes capture indexed late.
+func resolveMergeSources(ctx context.Context, db *sql.DB, o *FetchMergedOptions) (mergeSources, error) {
 	var src mergeSources
+
+	origSince := o.Opts.Since
+	moved, firstEnd, err := settleSince(ctx, db, &o.Opts, o.PartitionHeads)
+	if err != nil {
+		return src, err
+	}
 
 	if !o.NoArchive {
 		resolve := o.SourceResolver
@@ -930,6 +952,13 @@ func resolveMergeSources(ctx context.Context, db *sql.DB, o FetchMergedOptions) 
 			slog.Warn("query planner failed; coverage gaps may not be detected", "error", err)
 		} else {
 			src.plan = p
+			if p != nil && moved {
+				var unchecked []time.Time
+				p.GapHours, unchecked = withoutFirstPartitionHours(p.GapHours, firstEnd, *origSince)
+				if len(unchecked) > 0 {
+					slog.Warn(uncheckedHoursWarning(o.Opts.Schema, o.Opts.Table, unchecked))
+				}
+			}
 			if p != nil {
 				// Archives whose content escapes their hour label but overlaps
 				// the window (#1037): every archive fetch below must be told to
@@ -1054,4 +1083,63 @@ func fetchPage(
 
 	rows, diverged = MergeAndTrimReport(rows, o.Opts.Limit, o.Opts.LimitPerPK, o.Opts.Order)
 	return rows, skipped, exhausted, diverged, false, nil
+}
+
+// withoutFirstPartitionHours removes from a plan's gap hours the ones that
+// are a gap only on paper after settleSince moved a fetch's start (#2138).
+//
+// The planner calls an hour a gap when no live partition is NAMED after it
+// and no archive covers it. settleSince moves the start to the table's oldest
+// row in a live partition, and that row can be older than the first
+// partition's own hour: the first partition has no lower bound, so MySQL
+// files every older row into it (#1037). The hours between that row and the
+// first partition are then "gaps" although the rows are right there, in the
+// live index, and the fetch reads them. Left in, a refresh would refuse with
+// "rotated and not archived" for as long as such a row exists.
+//
+// Only those hours go: below the first partition's end AND below the start
+// the caller asked for. An hour the caller's own window covered is judged as
+// it always was, so a window that really crosses a rotated, unarchived hour
+// still refuses.
+//
+// What this cannot do is tell the two kinds of hour below the first partition
+// apart: one that never had a partition of its own, and one whose partition
+// was rotated out with no archive. The second is a real hole, and it is let
+// through here. It is not refused because it was not examined before either
+// (the fetch used to start after it), the hole is permanent, and a refusal
+// would stop every later refresh of the table for good. The removed hours are
+// returned so the caller can say so (uncheckedHoursWarning).
+func withoutFirstPartitionHours(gaps []time.Time, firstEnd time.Time, origSince time.Time) (kept, unchecked []time.Time) {
+	if firstEnd.IsZero() {
+		return gaps, nil
+	}
+	asked := origSince.Truncate(time.Hour)
+	for _, h := range gaps {
+		if h.Before(firstEnd) && h.Before(asked) {
+			unchecked = append(unchecked, h)
+			continue
+		}
+		kept = append(kept, h)
+	}
+	return kept, unchecked
+}
+
+// uncheckedHoursWarning is the one line a fetch logs for the hours
+// withoutFirstPartitionHours let through: how many and from when to when,
+// never one line per hour.
+func uncheckedHoursWarning(schema, table string, hours []time.Time) string {
+	first, last := hours[0], hours[0]
+	for _, h := range hours {
+		if h.Before(first) {
+			first = h
+		}
+		if h.After(last) {
+			last = h
+		}
+	}
+	return fmt.Sprintf("%s.%s: the index received changes late that are older than its first hour, and the read went back for them. "+
+		"%d hour(s) between %s and %s have no partition and no archive of their own, so they cannot be checked: "+
+		"changes of those hours that are still in the index were read; any that were rotated out without an archive are gone and are not in the result. "+
+		"A new full snapshot of the table is the way to be sure.",
+		schema, table, len(hours), first.UTC().Format(time.RFC3339), last.UTC().Add(time.Hour).Format(time.RFC3339))
 }
