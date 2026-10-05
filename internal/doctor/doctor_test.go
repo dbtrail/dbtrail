@@ -14,6 +14,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
 
+	"github.com/dbtrail/dbtrail/internal/installid"
 	"github.com/dbtrail/dbtrail/internal/serverid"
 )
 
@@ -473,7 +474,7 @@ func TestCheckServerIDCollision(t *testing.T) {
 			exp := mock.ExpectQuery("SELECT @@server_id")
 			tt.serverID.apply(exp, "@@server_id")
 
-			got := checkServerIDCollision(t.Context(), db, dsn)
+			got := checkServerIDCollision(t.Context(), db, dsn, "")
 			if got.Status != tt.wantStatus {
 				t.Errorf("Status = %q, want %q (detail=%q)", got.Status, tt.wantStatus, got.Detail)
 			}
@@ -500,7 +501,7 @@ func TestCheckServerIDCollisionBadDSN(t *testing.T) {
 	}
 	defer db.Close()
 
-	got := checkServerIDCollision(t.Context(), db, "not-a-dsn")
+	got := checkServerIDCollision(t.Context(), db, "not-a-dsn", "")
 	if got.Status != StatusWarn {
 		t.Errorf("Status = %q, want %q", got.Status, StatusWarn)
 	}
@@ -1184,4 +1185,57 @@ func TestCheckSchemaVisibility_emptyVsInvisible(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCheckServerIDCollision_PerInstallation: with an index to ask, the id
+// compared against the source's own is the one capture will really use, and
+// the detail no longer warns of another DBTrail deriving the same id.
+func TestCheckServerIDCollision_PerInstallation(t *testing.T) {
+	const dsn = "user:pass@tcp(db.example.com:3306)/appdb"
+	const index = "root:pw@tcp(index-mysql:3306)/bintrail_idx_ab12"
+	t.Cleanup(installid.SetIndexServerUUIDForTest(func(context.Context, string) (string, error) {
+		return "8b0c2f3e-7a11-4d5e-9c1a-000000000001", nil
+	}))
+	used, why, err := installid.DeriveForInstall(t.Context(), dsn, index)
+	sourceOnly, _ := serverid.DeriveServerID(dsn)
+	if err != nil || why != nil || used == sourceOnly {
+		t.Fatalf("setup: used %d (source-only because %v), source-only %d, %v", used, why, sourceOnly, err)
+	}
+	check := func(srcID uint32) CheckResult {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		mock.ExpectQuery("SELECT @@server_id").WillReturnRows(sqlmock.NewRows([]string{"@@server_id"}).AddRow(fmt.Sprintf("%d", srcID)))
+		return checkServerIDCollision(t.Context(), db, dsn, index)
+	}
+	if c := check(1); c.Status != StatusPass || !strings.Contains(c.Detail, fmt.Sprintf("derived server-id %d ", used)) || strings.Contains(c.Detail, "alone") {
+		t.Errorf("no collision: %s %q; want PASS naming %d as the id in use", c.Status, c.Detail, used)
+	}
+	if c := check(used); c.Status != StatusWarn {
+		t.Errorf("the source's own id equals the id capture will use: %s %q, want WARN", c.Status, c.Detail)
+	}
+	// The source-only id is not the one in use here, so equalling it is no collision.
+	if c := check(sourceOnly); c.Status != StatusPass {
+		t.Errorf("the source's own id equals the id this installation does NOT use: %s %q, want PASS", c.Status, c.Detail)
+	}
+}
+
+// TestCheckServerIDCollision_NoIndexSaysTheIDIsNotTheOneInUse: without an
+// index the check can only compute the source-only id, which capture will not
+// use. It must not present that number as the one to put in an allow list.
+func TestCheckServerIDCollision_NoIndexSaysTheIDIsNotTheOneInUse(t *testing.T) {
+	const dsn = "user:pass@tcp(db.example.com:3306)/appdb"
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SELECT @@server_id").WillReturnRows(sqlmock.NewRows([]string{"@@server_id"}).AddRow("1"))
+	c := checkServerIDCollision(t.Context(), db, dsn, "")
+	if c.Status != StatusPass || !strings.Contains(c.Detail, "from the source connection alone") || !strings.Contains(c.Detail, "the id in use is another one") {
+		t.Errorf("no index: %s %q", c.Status, c.Detail)
+	}
+	assertConsoleWording(t, "no index", c)
 }

@@ -131,12 +131,44 @@ const MON_PHASES = {
   resume_cleanup_waiting: { text: "WAITING FOR CLEANUP", title: "an earlier cleanup is still running on the index; capture starts when it finishes." },
 };
 
+// A failed state whose cause the daemon names (monitor_error_code) says that
+// cause instead of the generic line. Keyed by the code, never by error text.
+const MON_ERROR_TITLES = {
+  same_replication_id: "something else is reading this database's changes with the same replication id, so the two keep disconnecting each other; stop capture for this server in one of the two installations",
+};
+
 // monitorChip renders the monitoring chip for a server row, phase included.
 // Both the Servers list and the Settings list call it, so the two cannot drift.
 function monitorChip(s) {
   const phase = s.monitor_phase && MON_PHASES[s.monitor_phase];
   if (phase) return el("span", { class: "chip chip-mon", text: phase.text, title: phase.title + (s.monitor_phase_detail ? " (" + s.monitor_phase_detail + ")" : "") });
-  return el("span", { class: "chip chip-mon", text: s.monitor_state.replace("_", " ").toUpperCase(), title: MON_STATE_TITLES[s.monitor_state] || ("monitoring " + s.monitor_state) });
+  const cause = s.monitor_state === "failed" && MON_ERROR_TITLES[s.monitor_error_code];
+  return el("span", { class: "chip chip-mon", text: s.monitor_state.replace("_", " ").toUpperCase(), title: cause || MON_STATE_TITLES[s.monitor_state] || ("monitoring " + s.monitor_state) });
+}
+
+// sameReplicationIdLines are the words for a stream the source dropped
+// because another reader connected with its replication id (error code
+// "same_replication_id"): what is going on, what it means, what to do. One
+// place, so the Overview card and the first-run list cannot drift. The cause
+// is named as likely, never as certain: any reader with the same id gets the
+// source to send this error. retrying false is a supervisor that gave up, so
+// nothing is interrupting anyone any more and capture waits for Start.
+function sameReplicationIdLines(retrying) {
+  return [
+    "Something else is reading this database's changes with the same replication id, the number a reader gives the database to identify itself. Most likely it is another DBTrail installation pointed at the same database.",
+    retrying
+      ? "The database keeps one reader per id, so each one disconnects the other when it reconnects. Capture keeps being interrupted on both sides while both are connected. Nothing is lost: each one resumes where it stopped."
+      : "The database keeps one reader per id, so each one disconnected the other when it reconnected. After hours of that, this installation stopped trying. Capture resumes where it stopped once it starts again.",
+    retrying
+      ? "To fix it, stop capture for this server in one of the two installations."
+      : "To fix it, stop capture for this server in one of the two installations. If this is the one you keep, start it again.",
+  ];
+}
+
+// rawErrorFold keeps an error as the daemon reported it one click away, under
+// the words that explain it.
+function rawErrorFold(text) {
+  return el("details", { class: "flow-recipe" }, el("summary", { text: "Technical details" }), el("div", { class: "fr-detail", text: text }));
 }
 
 // Static decorative SVGs (module constants — parsed by svgEl via DOMParser).
@@ -1952,14 +1984,22 @@ function ovFlowModel(inp) {
     // No Start for this cause: starting again does not end the cleanup it is
     // waiting on. "On its own" is said only when the daemon says it retries.
     const earlierCleanup = mon.error_code === "earlier_cleanup_running";
-    cards.push({ kind: "capture-failed", key: sid + "|failed|" + (mon.since || "") + "|" + (mon.last_error || ""), tone: "bad",
+    // Another reader with this stream's replication id. The stream fails,
+    // reconnects and fails again with a new position in its text each time,
+    // so the key leaves the stamp and the text out: a card closed once stays
+    // closed. No Start while the daemon retries: starting here only
+    // disconnects the other reader sooner.
+    const sameId = mon.error_code === "same_replication_id";
+    cards.push({ kind: "capture-failed", key: sameId ? sid + "|failed|same_replication_id" : sid + "|failed|" + (mon.since || "") + "|" + (mon.last_error || ""), tone: "bad",
       title: "Capture stopped" + (lastIndexed ? " " + lastIndexed : ""),
-      lines: earlierCleanup
+      lines: sameId ? sameReplicationIdLines(!!mon.retrying)
+        : earlierCleanup
         ? ["An earlier cleanup is still running on the index. " + (mon.retrying
           ? "DBTrail checks again on its own, and capture starts when it finishes."
           : "Capture stays stopped. Start it from Servers once the cleanup finishes.")].concat(mon.last_error ? [mon.last_error] : [])
         : [mon.last_error || "DBTrail reported no error text."],
-      actions: earlierCleanup ? [{ label: "Details", run: "status" }]
+      raw: sameId ? (mon.last_error || "") : "",
+      actions: earlierCleanup || (sameId && mon.retrying) ? [{ label: "Details", run: "status" }]
         : [{ label: "Start", primary: true, run: "start" }, { label: "Details", run: "status" }] });
   } else if (mstate === "stalled" || mstate === "lost_position") {
     capture = piece("binlog", "bad", mstate === "stalled" ? "stalled" : "position lost", lastIndexed ? "last change " + lastIndexed : "");
@@ -2345,6 +2385,7 @@ function flowCard(card, ctx, close) {
   const box = el("div", { class: "flow-card " + (card.tone === "bad" ? "bad-box" : card.tone === "warn" ? "warn-box" : "muted-box"), role: "region", "aria-label": card.title });
   box.append(el("b", { text: card.title }));
   (card.lines || []).forEach((l) => box.append(el("div", { class: "warn-line", text: l })));
+  if (card.raw) box.append(rawErrorFold(card.raw));
   if (card.recipe) {
     const d = el("details", { class: "flow-recipe" });
     d.append(el("summary", { text: "See what to check" }));
@@ -3213,11 +3254,21 @@ function firstRunCard(rep, id, onStarted) {
     // The button is named only when this session could press it, for a run
     // a person started; otherwise the next try is the schedule's.
     const pressable = !!capsCache.baseline_trigger && sessionMay(PERM_SNAPSHOT_CREATE) && !(s.failure && s.failure.scheduled);
+    // A capture failure the daemon names by code is said in the Overview
+    // card's words, the last of which is the fix, with the error as reported
+    // in a fold. The server's generic fix would send the operator to Start.
+    const sameId = state === "failed" && s.error_code === "same_replication_id";
     if (s.snapshot_failed) body.append(snapshotFailureCard(s.failure, s.detail || "", pressable ? "overview" : "scheduled", s.note || ""));
-    else if (s.detail) body.append(el("div", { class: "fr-detail", text: s.detail }));
+    else if (sameId) {
+      const lines = sameReplicationIdLines(!!s.retrying);
+      lines.slice(0, -1).forEach((l) => body.append(el("div", { class: "fr-detail", text: l })));
+      body.append(el("div", { class: "fr-fix", text: lines[lines.length - 1] }, " ",
+        el("a", { class: "fr-go", href: "#servers", text: "Open Servers ›", onclick: (e) => { e.preventDefault(); openServersModal(); } })));
+      if (s.detail) body.append(rawErrorFold(s.detail));
+    } else if (s.detail) body.append(el("div", { class: "fr-detail", text: s.detail }));
     // A card that names its fix, or names the schedule as the next try,
     // already says where to try again.
-    if (s.fix && !known && !(s.snapshot_failed && !pressable)) {
+    if (s.fix && !known && !sameId && !(s.snapshot_failed && !pressable)) {
       // A fix that names a page carries the way there: "press Start in
       // Servers" opens the Servers dialog, "on the Snapshots page" goes to
       // that page. The sentence itself is the server's and stays as sent.

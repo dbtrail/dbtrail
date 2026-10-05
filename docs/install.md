@@ -300,7 +300,8 @@ bintrail up \
 
 `bintrail up` runs preflight + creates index tables + auto-snapshots + starts
 streaming, all in one. It resumes from the last checkpoint on restart and
-auto-derives a unique `server-id` from your source DSN. Want the web UI in
+auto-derives a `server-id` from your source DSN and this installation's index,
+so a second installation capturing the same database gets its own. Want the web UI in
 the same process? Run `bintrail-console watch` (same flags) instead — it is
 `up` plus the web interface and the multi-server control plane.
 

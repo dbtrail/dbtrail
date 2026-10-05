@@ -101,6 +101,9 @@ type serverDTO struct {
 	// MonitorPhaseDetail qualifies MonitorPhase for display (#1708), see
 	// MonitorStatus.PhaseDetail.
 	MonitorPhaseDetail string `json:"monitor_phase_detail,omitempty"`
+	// MonitorErrorCode is MonitorStatus.ErrorCode, so a row can name the
+	// cause of a failed state the same way the Overview does.
+	MonitorErrorCode string `json:"monitor_error_code,omitempty"`
 	// MonitorWarning is MonitorStatus.FlavorWarning: the server contradicts
 	// the Source type saved with this entry, and capture follows the server.
 	MonitorWarning string `json:"monitor_warning,omitempty"`
@@ -1553,7 +1556,7 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 	if s.monitorCtrl != nil && e.SourceDSN != "" {
 		st := s.monitorCtrl.Status(e.ID)
 		dto.MonitorState, dto.MonitorPhase, dto.MonitorPhaseDetail = st.State, st.Phase, st.PhaseDetail
-		dto.MonitorWarning = st.FlavorWarning
+		dto.MonitorWarning, dto.MonitorErrorCode = st.FlavorWarning, st.ErrorCode
 	}
 	return dto
 }

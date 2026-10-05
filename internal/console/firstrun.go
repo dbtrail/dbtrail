@@ -31,6 +31,11 @@ type FirstRunStep struct {
 	State  string `json:"state"`
 	Detail string `json:"detail,omitempty"`
 	Fix    string `json:"fix,omitempty"`
+	// ErrorCode is MonitorStatus.ErrorCode for a failed capture step, and
+	// Retrying its Retrying: the page explains a cause it knows in its own
+	// words and keeps Detail, the error as reported, in a fold.
+	ErrorCode string `json:"error_code,omitempty"`
+	Retrying  bool   `json:"retrying,omitempty"`
 	// SnapshotFailed marks the snapshot step failed by its last run (#1986):
 	// the page draws the snapshot failure card for it, with Detail inside its
 	// "Technical details" fold. Failure is why, when the cause is one the
@@ -147,6 +152,7 @@ func firstRunSteps(in firstRunInput) FirstRunReport {
 			switch in.Monitor.State {
 			case "failed":
 				step.State, step.Detail = firstRunFailed, in.Monitor.LastError
+				step.ErrorCode, step.Retrying = in.Monitor.ErrorCode, in.Monitor.Retrying
 				// Only a failure the supervisor will retry says so; one it gave
 				// up on, or a Start that failed while setting up, waits for Start.
 				step.Fix = "Fix the cause above, then press Start on this server in Servers."
