@@ -112,6 +112,17 @@ func (s *Session) HandleCommand() error {
 // dispatch answers one command: nil is OK, an error is sent as an error
 // packet, noReply as nothing.
 func (s *Session) dispatch(cmd byte, data []byte) any {
+	if src, ok := s.h.(sourceSession); ok {
+		switch cmd {
+		case mysql.COM_STMT_CLOSE, mysql.COM_STMT_SEND_LONG_DATA:
+			// No answer to put the loss in; a close still frees the statement.
+		default:
+			statement := cmd == mysql.COM_QUERY || cmd == mysql.COM_STMT_PREPARE || cmd == mysql.COM_STMT_EXECUTE
+			if err := src.SourceLost(statement); err != nil {
+				return err
+			}
+		}
+	}
 	switch cmd {
 	case mysql.COM_QUERY:
 		r, err := s.h.HandleQuery(string(data))
@@ -120,6 +131,11 @@ func (s *Session) dispatch(cmd byte, data []byte) any {
 		}
 		return r
 	case mysql.COM_PING:
+		if src, ok := s.h.(sourceSession); ok {
+			if err := src.PingSource(); err != nil {
+				return err
+			}
+		}
 		return nil
 	case mysql.COM_INIT_DB:
 		if err := s.h.UseDB(string(data)); err != nil {

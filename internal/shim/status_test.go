@@ -1,15 +1,21 @@
 package shim
 
 import (
+	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/server"
 
+	"github.com/dbtrail/dbtrail/internal/readrouter"
 	"github.com/dbtrail/dbtrail/internal/testutil/mysqlwire"
 )
 
@@ -464,5 +470,180 @@ func TestHandler_SessionStatus(t *testing.T) {
 		if got := h.SessionStatus(); got != tc.want {
 			t.Errorf("source 0x%04x: 0x%04x, want 0x%04x", tc.source, got, tc.want)
 		}
+	}
+}
+
+// firstWrite records what reaches the socket.
+type firstWrite struct {
+	net.Conn
+	wrote [][]byte
+}
+
+func (f *firstWrite) Write(p []byte) (int, error) {
+	f.wrote = append(f.wrote, bytes.Clone(p))
+	return len(p), nil
+}
+
+// A first packet that is not the handshake this code knows (a library that
+// writes it another way) goes out as written, and is said in the log, once
+// per process: the status it announces is then most likely 0, which is the
+// bug of #2110, and nothing else would show it at run time. An error sent in
+// place of the handshake is not that case and is not logged.
+func TestHandshakeConn_unrecognisedHandshakeIsLogged(t *testing.T) {
+	var logged bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	handshakeNotSet = sync.Once{}
+	t.Cleanup(func() { slog.SetDefault(old); handshakeNotSet = sync.Once{} })
+
+	write := func(first []byte) *firstWrite {
+		t.Helper()
+		under := &firstWrite{}
+		c := &handshakeConn{Conn: under}
+		for _, p := range [][]byte{first, {1, 0, 0, 1, 0x00}} {
+			if n, err := c.Write(p); err != nil || n != len(p) {
+				t.Fatalf("Write = %d, %v", n, err)
+			}
+		}
+		if len(under.wrote) != 2 || !bytes.Equal(under.wrote[0], first) || !bytes.Equal(under.wrote[1], []byte{1, 0, 0, 1, 0x00}) {
+			t.Fatalf("an unrecognised first packet was changed on its way out: %v", under.wrote)
+		}
+		return under
+	}
+
+	write([]byte{3, 0, 0, 0, 0xff, 0x10, 0x04}) // an error packet in place of the handshake
+	if logged.Len() != 0 {
+		t.Fatalf("an error packet sent in place of the handshake was logged: %s", logged.String())
+	}
+	write([]byte{2, 0, 0, 0, 11, 'x'}) // a protocol this code does not know
+	if !strings.Contains(logged.String(), "level=WARN") || !strings.Contains(logged.String(), handshakeNotSetWarning) {
+		t.Fatalf("the unrecognised handshake was not logged as a warning with its text; log: %q", logged.String())
+	}
+	for _, want := range []string{"handshake was not recognised", "autocommit is off", "logged once"} {
+		if !strings.Contains(handshakeNotSetWarning, want) {
+			t.Errorf("the warning no longer says %q: %s", want, handshakeNotSetWarning)
+		}
+	}
+	write([]byte{2, 0, 0, 0, 11, 'x'})
+	if n := strings.Count(logged.String(), "level=WARN"); n != 1 {
+		t.Errorf("logged %d times, want once per process", n)
+	}
+}
+
+// A PING on a routed connection is the source's to answer: the port only
+// remembers the last status it was sent, and a statement the source refused
+// (an error packet, no status) can have opened a transaction since.
+func TestStatus_routedPingAsksTheSource(t *testing.T) {
+	r := &fakeRouter{sessStatus: stNone, sessKnown: true}
+	r.onPing = func() { r.sessStatus = stTrans } // what the source's OK says
+	addr := servePort(t, "", func() server.Handler {
+		h := NewHandler(nil, nil)
+		h.BindFreeSQL(&fakeFreeSQL{})
+		h.BindRouter(r, RouterConfig{MaxCopyAge: time.Hour, ReadOnly: true})
+		return h
+	})
+	c := dialPort(t, addr)
+	rep, err := c.Ping()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.pings != 1 {
+		t.Fatalf("the source was sent %d PINGs, want 1", r.pings)
+	}
+	wantStatus(t, "PING", rep.Status, stTrans)
+
+	// A PING the source does not answer is the loss of the session.
+	r.pingErr = mysql.NewError(readrouter.CodeUpstreamLost, "MySQL server has gone away")
+	if _, err := c.Ping(); !isWireError(err, readrouter.CodeUpstreamLost) {
+		t.Errorf("PING with the source gone: err = %v, want error %d", err, readrouter.CodeUpstreamLost)
+	}
+}
+
+func isWireError(err error, code uint16) bool {
+	var me *mysqlwire.Error
+	return errors.As(err, &me) && me.Code == code
+}
+
+// Once the session on the source is lost, every command answers with that
+// loss, the ones the port would answer itself included, and nothing more is
+// asked of the source.
+func TestStatus_routedLostAnswersEveryCommand(t *testing.T) {
+	r := &fakeRouter{sessStatus: stAutoTrans, sessKnown: true, inTxn: true}
+	f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
+	var observed []string
+	addr := servePort(t, "", func() server.Handler {
+		h := NewHandler(nil, nil)
+		h.BindFreeSQL(f)
+		h.BindRouter(r, RouterConfig{MaxCopyAge: time.Hour, Observe: func(side RouteSide, reason RouteReason) {
+			observed = append(observed, string(side)+"/"+string(reason))
+		}})
+		return h
+	})
+	c := dialPort(t, addr)
+	id, _, err := c.Prepare("SELECT side FROM t WHERE id = 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Exec("SELECT side FROM t WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
+
+	r.lostErr = mysql.NewError(readrouter.CodeUpstreamLost, "MySQL server has gone away (the port's connection to the source was lost: test); reconnect to continue")
+	r.sessKnown, r.inTxn = false, false // what a real lost connection reports
+	forwarded, pings, useDBs, copyRuns, executed := len(r.forwarded), r.pings, len(r.useDBs), f.calls, len(r.prepared[0].executed)
+	observed = nil
+
+	lost := func(what string, err error) {
+		t.Helper()
+		if !isWireError(err, readrouter.CodeUpstreamLost) {
+			t.Errorf("%s: err = %v, want error %d", what, err, readrouter.CodeUpstreamLost)
+		}
+	}
+	_, err = c.Ping()
+	lost("PING", err)
+	for _, q := range []string{"SELECT side FROM t WHERE id = 1", "SHOW WARNINGS", "USE shop", "COMMIT", "SELECT 1"} {
+		_, err := c.Exec(q)
+		lost(q, err)
+	}
+	_, err = c.InitDB("shop")
+	lost("COM_INIT_DB", err)
+	_, err = c.FieldList("t")
+	lost("COM_FIELD_LIST", err)
+	_, _, err = c.Prepare("SELECT 1")
+	lost("COM_STMT_PREPARE", err)
+	_, err = c.Execute(id)
+	lost("COM_STMT_EXECUTE", err)
+	_, err = c.ResetStmt(id)
+	lost("COM_STMT_RESET", err)
+
+	if len(r.forwarded) != forwarded || r.pings != pings || len(r.useDBs) != useDBs || f.calls != copyRuns || len(r.prepared[0].executed) != executed || len(r.prepared) != 1 {
+		t.Errorf("a lost connection still asked the source or the copy for something: forwarded %d->%d, pings %d->%d, USE %d->%d, copy %d->%d",
+			forwarded, len(r.forwarded), pings, r.pings, useDBs, len(r.useDBs), copyRuns, f.calls)
+	}
+	// Seven statements (five texts, a PREPARE, an EXECUTE): each counted
+	// once as one nobody answered. The other commands are not statements.
+	if want := strings.TrimSuffix(strings.Repeat("mysql/upstream_lost,", 7), ","); strings.Join(observed, ",") != want {
+		t.Errorf("observed %v, want seven mysql/upstream_lost", observed)
+	}
+	// Closing a statement has no answer, and still frees it.
+	if err := c.CloseStmt(id); err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Ping()
+	lost("PING after COM_STMT_CLOSE", err)
+	if r.prepared[0].closed != 1 {
+		t.Errorf("the statement was closed %d times, want 1", r.prepared[0].closed)
+	}
+}
+
+// A connection that is not routed has no session on the source to lose or to
+// ping: the port answers.
+func TestHandler_noRouterHasNoSourceSession(t *testing.T) {
+	h := NewHandler(nil, nil)
+	if err := h.SourceLost(true); err != nil {
+		t.Errorf("SourceLost = %v", err)
+	}
+	if err := h.PingSource(); err != nil {
+		t.Errorf("PingSource = %v", err)
 	}
 }

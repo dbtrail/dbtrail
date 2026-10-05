@@ -93,6 +93,13 @@ type Router interface {
 	// port tells the client about its session, whoever answered the
 	// statement (see SessionStatus).
 	Status() (status uint16, known bool)
+	// Ping asks the source whether the session this connection holds is
+	// still there, which also refreshes what Status reports. It never opens
+	// a connection: with none opened yet it returns nil and sends nothing.
+	Ping(ctx context.Context) error
+	// Lost is the error every command gets once the connection to the
+	// source is gone (readrouter.CodeUpstreamLost), nil while it is not.
+	Lost() error
 	// Close drops the upstream connection.
 	Close()
 }

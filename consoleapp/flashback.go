@@ -418,6 +418,10 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 					srv.RecordRouteAccountRefused(id, gen, text)
 				}
 			}
+			// The port's handshake announced a session in autocommit with
+			// backslash escapes, before it knew the server. A source that
+			// opens its sessions otherwise is said in the log (#2110).
+			fw.OnSession = func(status uint16) { warnSessionDefaults(logger, id, user, status) }
 			warnDSNOverridesTLS(logger, id, user, tgt.ForwardDSN, tgt.SourceSSL.Mode)
 			bound = fw
 			h.BindRouter(fw, shim.RouterConfig{
@@ -458,6 +462,57 @@ func warnDSNOverridesTLS(logger *slog.Logger, id, server, dsn, mode string) {
 	}
 	logger.Warn("read routing: the DSN the port forwards with sets its own tls= parameter, which takes precedence over this server's TLS mode; verify it meets your security requirement",
 		"server", server, "ssl_mode", mode)
+}
+
+// sessionDefaultsWarned: the servers already told that their sessions do not
+// open as the port's handshake announces (warnSessionDefaults), per
+// difference, so it is said once per server and not once per connection.
+var sessionDefaultsWarned sync.Map
+
+// sessionDefaultsDiffer names how a session the source just opened (its
+// status flags at login) differs from what the port's handshake told the
+// client, which is "autocommit on, backslash escapes read": the difference,
+// what follows from it and what to do. "" when it does not differ.
+//
+// The handshake is written before the port knows the server, and a driver
+// may act on it for good. PyMySQL reads the autocommit flag once, when it
+// connects: asked for autocommit and told it is already on, it sends no SET,
+// and with a source that opens sessions with autocommit off every write it
+// forwards is discarded when the connection closes. A driver that escapes
+// strings itself picks the rule from the NO_BACKSLASH_ESCAPES flag.
+//
+// MySQL does not show an autocommit=0 from its configuration here: it
+// announces autocommit all the same (MySQL bug 66884). MariaDB does, and
+// both do when init_connect turns it off.
+func sessionDefaultsDiffer(status uint16) (difference, consequence string) {
+	var diffs, cons []string
+	if status&gomysql.SERVER_STATUS_AUTOCOMMIT == 0 {
+		diffs = append(diffs, "autocommit off")
+		cons = append(cons, "a driver that reads the autocommit flag only when it connects (PyMySQL) and is asked for autocommit sends no SET, "+
+			"and its writes are discarded when the connection closes: have clients send SET autocommit=1 (or 0) themselves, "+
+			"or make autocommit the source's default")
+	}
+	if status&gomysql.SERVER_STATUS_NO_BACKSLASH_ESCAPED != 0 {
+		diffs = append(diffs, "NO_BACKSLASH_ESCAPES in sql_mode")
+		cons = append(cons, "a driver that escapes strings itself writes the first statement of a connection with backslash escapes the source "+
+			"does not read as escapes: use server-side prepared statements, or start each connection with a statement that has no string argument")
+	}
+	return strings.Join(diffs, " and "), strings.Join(cons, "; ")
+}
+
+// warnSessionDefaults says, once per server and difference, that the source
+// opens its sessions in another state than the port's handshake announces.
+func warnSessionDefaults(logger *slog.Logger, id, server string, status uint16) {
+	difference, consequence := sessionDefaultsDiffer(status)
+	if difference == "" {
+		return
+	}
+	if _, told := sessionDefaultsWarned.LoadOrStore(id+"\x00"+difference, true); told {
+		return
+	}
+	logger.Warn("read routing: the source opens its sessions with "+difference+", and the port's handshake tells every client autocommit on and backslash escapes; "+
+		"the port reports the session's real state from the first answer on, which a driver that decided at connect does not read",
+		"server", server, "sessions_open_with", difference, "consequence", consequence, "note", "logged once per server")
 }
 
 // killSourceThreads is console.Config.KillSourceThreads: the statements of
@@ -612,6 +667,24 @@ func (r *routingHandler) SessionStatus() uint16 {
 		return gomysql.SERVER_STATUS_AUTOCOMMIT
 	}
 	return r.inner.SessionStatus()
+}
+
+// SourceLost and PingSource are the bound handler's (the session on the
+// source of a routed connection: once it is lost every command answers
+// 2006, and a PING is the source's to answer). With nothing bound there is
+// no such session.
+func (r *routingHandler) SourceLost(statement bool) error {
+	if r.inner == nil {
+		return nil
+	}
+	return r.inner.SourceLost(statement)
+}
+
+func (r *routingHandler) PingSource() error {
+	if r.inner == nil {
+		return nil
+	}
+	return r.inner.PingSource()
 }
 
 func (r *routingHandler) HandleQuery(query string) (*gomysql.Result, error) {

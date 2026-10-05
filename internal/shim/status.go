@@ -67,6 +67,61 @@ const newSessionStatus = mysql.SERVER_STATUS_AUTOCOMMIT
 // the console's routing proxy implements it by asking the handler it bound.
 type sessionStatuser interface{ SessionStatus() uint16 }
 
+// sourceSession is the part of a Handler the Session asks about the session
+// on the source that a routed connection holds; the console's routing proxy
+// implements it the same way. A handler without it has no such session.
+type sourceSession interface {
+	// SourceLost is the error to answer a command with when the connection
+	// to the source is gone, nil when it is not (or there is none to lose).
+	// statement says the command is a statement the client sent, which is
+	// counted as one nobody answered.
+	SourceLost(statement bool) error
+	// PingSource answers COM_PING.
+	PingSource() error
+}
+
+// SourceLost: once a routed connection has lost its connection to the source,
+// every command on it is answered with that loss (error 2006), the ones the
+// port would answer itself included: a time-travel statement, SHOW WARNINGS,
+// USE, PING. The client's session on the source is gone, and its transaction
+// with it; an OK from the port, which can only say "autocommit, no
+// transaction" then, would tell a driver that follows the flags that there
+// is nothing to commit, and a pool that validates with PING that the
+// connection is healthy. The client must reconnect, and 2006 is what makes
+// every driver do so.
+func (h *Handler) SourceLost(statement bool) error {
+	if h.router == nil {
+		return nil
+	}
+	err := h.router.Lost()
+	if err == nil {
+		return nil
+	}
+	if statement {
+		h.observeRoute(RouteMySQL, RouteReasonUpstreamLost)
+	}
+	h.routeWarn("lost", "read routing: the connection to the source was lost; this client connection answers 2006 until it reconnects", err)
+	return err
+}
+
+// PingSource answers COM_PING. On a routed connection with a session on the
+// source the PING is the source's to answer: only the source knows whether
+// that session is still there, and its OK carries the session's state as it
+// is now, where the port only remembers the last status it was sent (an
+// INSERT refused with autocommit off leaves a transaction open that no
+// packet announced). Before the first forwarded statement there is no session
+// on the source, nothing is sent and none is opened: the answer is the
+// port's own OK, "autocommit, no transaction", which is what a client that
+// has run nothing holds. Without a router the port answers.
+func (h *Handler) PingSource() error {
+	if h.router == nil {
+		return nil
+	}
+	ctx, cancel := h.queryContext()
+	defer cancel()
+	return h.router.Ping(ctx)
+}
+
 // SessionStatus is the state of the client's session in MySQL's status flags:
 // the source session's under read routing, as the source last reported it,
 // and "autocommit, no transaction" otherwise (no router, or no session on the
@@ -112,12 +167,7 @@ func (s *Session) stampStatus(v any) {
 // written fails there and not in a driver; a handshake that is not
 // recognised at run time is logged.
 func NewConn(conn net.Conn, srv *server.Server, auth server.AuthenticationHandler, h server.Handler) (*server.Conn, error) {
-	c, err := srv.NewCustomizedConn(&handshakeConn{Conn: conn}, announceStatus{auth}, h)
-	if err != nil {
-		return nil, err
-	}
-	c.SetStatus(newSessionStatus)
-	return c, nil
+	return srv.NewCustomizedConn(&handshakeConn{Conn: conn}, announceStatus{auth}, h)
 }
 
 // announceStatus sets the new session's status on the connection once the
@@ -147,10 +197,7 @@ func (c *handshakeConn) Write(p []byte) (int, error) {
 		// The first packet is neither the handshake this knows nor an error
 		// sent in its place: the status it announces is whatever the library
 		// wrote, most likely 0, which a driver reads as "autocommit off".
-		handshakeNotSet.Do(func() {
-			slog.Warn("mysql port: the server handshake was not recognised, so its status flags were left as written; " +
-				"a driver that trusts them may believe autocommit is off (logged once)")
-		})
+		handshakeNotSet.Do(func() { slog.Warn(handshakeNotSetWarning) })
 	}
 	return c.Conn.Write(out)
 }
@@ -158,6 +205,9 @@ func (c *handshakeConn) Write(p []byte) (int, error) {
 // handshakeNotSet makes the warning above a one-time one: the cause is the
 // build (a library that writes its handshake differently), not a connection.
 var handshakeNotSet sync.Once
+
+const handshakeNotSetWarning = "mysql port: the server handshake was not recognised, so its status flags were left as written; " +
+	"a driver that trusts them may believe autocommit is off (logged once)"
 
 // setHandshakeStatus returns a copy of the protocol 10 handshake packet p
 // (with its 4-byte header) announcing status. Anything that is not exactly

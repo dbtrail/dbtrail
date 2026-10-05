@@ -45,6 +45,7 @@ const (
 	comQuit        = 0x01
 	comInitDB      = 0x02
 	comQuery       = 0x03
+	comFieldList   = 0x04
 	comPing        = 0x0e
 	comStmtPrepare = 0x16
 	comStmtExecute = 0x17
@@ -225,6 +226,29 @@ func (c *Conn) Ping() (Reply, error) { return c.command([]byte{comPing}, false) 
 // InitDB sends COM_INIT_DB.
 func (c *Conn) InitDB(db string) (Reply, error) {
 	return c.command(append([]byte{comInitDB}, db...), false)
+}
+
+// FieldList sends COM_FIELD_LIST (deprecated, still sent by some clients) and
+// reads its answer: column definitions closed by an EOF, or an error.
+func (c *Conn) FieldList(table string) (Reply, error) {
+	c.seq = 0
+	if err := c.write(append(append([]byte{comFieldList}, table...), 0)); err != nil {
+		return Reply{}, err
+	}
+	for {
+		data, err := c.read()
+		if err != nil {
+			return Reply{}, err
+		}
+		if len(data) > 0 && data[0] == 0xff {
+			return Reply{}, parseErr(data)
+		}
+		if isEOF(data) {
+			rep := Reply{Status: binary.LittleEndian.Uint16(data[3:]), Warnings: binary.LittleEndian.Uint16(data[1:])}
+			c.Status = rep.Status
+			return rep, nil
+		}
+	}
 }
 
 // Prepare sends COM_STMT_PREPARE and returns the statement id and its

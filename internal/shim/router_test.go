@@ -46,9 +46,23 @@ type fakeRouter struct {
 	resultStatus *uint16
 	forwardOK    bool
 	onForward    func(stmt string)
+	// lostErr is what Lost answers; pings counts the PINGs sent to the
+	// source, pingErr is what they answer, onPing runs on each.
+	lostErr error
+	pings   int
+	pingErr error
+	onPing  func()
 }
 
 func (r *fakeRouter) Status() (uint16, bool) { return r.sessStatus, r.sessKnown }
+func (r *fakeRouter) Lost() error            { return r.lostErr }
+func (r *fakeRouter) Ping(context.Context) error {
+	r.pings++
+	if r.onPing != nil {
+		r.onPing()
+	}
+	return r.pingErr
+}
 
 func (r *fakeRouter) answerStatus() uint16 {
 	if r.resultStatus != nil {

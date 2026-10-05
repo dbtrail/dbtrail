@@ -1,8 +1,11 @@
 package consoleapp
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,5 +82,64 @@ func TestRoutingHandlerSessionStatus(t *testing.T) {
 	r.inner = h
 	if got := r.SessionStatus(); got != inTransaction {
 		t.Errorf("bound to a session in a transaction with autocommit off: status 0x%04x, want 0x%04x", got, inTransaction)
+	}
+}
+
+// A source that opens its sessions in another state than the port's
+// handshake announces is said in the log, once per server: the handshake
+// cannot know the server, and PyMySQL decides from it once, for good.
+func TestWarnSessionDefaults(t *testing.T) {
+	const auto, noBackslash = gomysql.SERVER_STATUS_AUTOCOMMIT, gomysql.SERVER_STATUS_NO_BACKSLASH_ESCAPED
+	if d, c := sessionDefaultsDiffer(auto); d != "" || c != "" {
+		t.Errorf("a session in autocommit differs: %q, %q", d, c)
+	}
+	// In a transaction or not is not a default.
+	if d, _ := sessionDefaultsDiffer(auto | gomysql.SERVER_STATUS_IN_TRANS); d != "" {
+		t.Errorf("a flag that is not a default differs: %q", d)
+	}
+	for _, tc := range []struct {
+		status uint16
+		diff   string
+		says   []string
+	}{
+		{0, "autocommit off", []string{"SET autocommit", "discarded", "PyMySQL"}},
+		{auto | noBackslash, "NO_BACKSLASH_ESCAPES in sql_mode", []string{"escapes", "prepared statements"}},
+		{noBackslash, "autocommit off and NO_BACKSLASH_ESCAPES in sql_mode", []string{"SET autocommit", "prepared statements"}},
+	} {
+		d, c := sessionDefaultsDiffer(tc.status)
+		if d != tc.diff {
+			t.Errorf("status 0x%04x: difference %q, want %q", tc.status, d, tc.diff)
+		}
+		for _, want := range tc.says {
+			if !strings.Contains(c, want) {
+				t.Errorf("status 0x%04x: the consequence does not mention %q: %s", tc.status, want, c)
+			}
+		}
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	id := t.Name() // the once-per-server memory is the process's
+	warnSessionDefaults(logger, id, "srva", auto)
+	if buf.Len() != 0 {
+		t.Fatalf("a source whose sessions open as announced was logged: %s", buf.String())
+	}
+	for range 3 {
+		warnSessionDefaults(logger, id, "srva", 0)
+	}
+	out := buf.String()
+	if strings.Count(out, "level=WARN") != 1 {
+		t.Fatalf("logged %d times for one server, want once:\n%s", strings.Count(out, "level=WARN"), out)
+	}
+	for _, want := range []string{"server=srva", "autocommit off", "SET autocommit", "logged once per server"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the warning does not say %q:\n%s", want, out)
+		}
+	}
+	// Another server, and another difference on the same one, are told too.
+	warnSessionDefaults(logger, id+"-other", "srvb", 0)
+	warnSessionDefaults(logger, id, "srva", auto|noBackslash)
+	if n := strings.Count(buf.String(), "level=WARN"); n != 3 {
+		t.Errorf("logged %d times, want 3 (two servers, two differences)", n)
 	}
 }
