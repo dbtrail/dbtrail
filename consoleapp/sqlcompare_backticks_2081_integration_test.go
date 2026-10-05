@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -30,10 +29,6 @@ type backtickFixture struct {
 	kind string
 	// names: the result's column names must be the same on both sides.
 	names bool
-	// star: a SELECT * whose only accepted difference is the order of the
-	// columns (#2111): EQUAL, or DIFFERENT with the same names in another
-	// order.
-	star bool
 	// veto, when set, is text the router's reason must hold: the statement
 	// is kept on MySQL and the copy is not tried.
 	veto string
@@ -163,12 +158,7 @@ func runBacktickFixtures(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string)
 		srcNames, cpNames := columnNames(src, f.stmt), columnNames(cp, copyStmt)
 		t.Logf("%-12s %-9s route=%-5s (%s) %s\n    mysql: %s %s\n    copy:  %s %s\n    %s",
 			r.Verdict, r.Kind, r.Route, r.RouteReason, f.stmt, srcNames, rawAnswer(src, f.stmt), cpNames, rawAnswer(cp, copyStmt), r.Detail)
-		switch {
-		case f.star && r.Verdict == sqlcompare.Different:
-			if strings.Join(srcNames, ",") == strings.Join(cpNames, ",") || sortedJoin(srcNames) != sortedJoin(cpNames) {
-				t.Errorf("%q: DIFFERENT (%s) with columns %q on MySQL and %q on the copy; the one difference accepted for SELECT * is the order of the same columns", f.stmt, r.Detail, srcNames, cpNames)
-			}
-		case r.Verdict != f.verdict || (f.kind != "" && r.Kind != f.kind):
+		if r.Verdict != f.verdict || (f.kind != "" && r.Kind != f.kind) {
 			t.Errorf("%q: got %s/%s (%s), want %s/%s: %s", f.stmt, r.Verdict, r.Kind, r.Detail, f.verdict, f.kind, f.why)
 		}
 		if f.names && strings.Join(srcNames, "\x00") != strings.Join(cpNames, "\x00") {
@@ -187,17 +177,11 @@ func runBacktickFixtures(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string)
 		}
 		// The bar of #2081: nothing the router would send to the copy may
 		// answer differently, beyond the differences listed as such.
-		if r.Verdict == sqlcompare.Different && r.Route == "copy" && f.verdict != sqlcompare.Different && !f.star {
+		if r.Verdict == sqlcompare.Different && r.Route == "copy" && f.verdict != sqlcompare.Different {
 			t.Errorf("%q: a copy-routed statement answers differently: %s", f.stmt, r.Detail)
 		}
 	}
 	t.Logf("tally: %d EQUAL, %d DIFFERENT, %d NOT_ON_COPY, %d SOURCE_ERROR of %d", tally[sqlcompare.Equal], tally[sqlcompare.Different], tally[sqlcompare.NotOnCopy], tally[sqlcompare.SourceError], len(fixtures))
-}
-
-func sortedJoin(names []string) string {
-	out := slices.Clone(names)
-	slices.Sort(out)
-	return strings.Join(out, "\x00")
 }
 
 // columnNames is the result's column names as the client sees them; nil
@@ -248,9 +232,8 @@ func backtickFixtures(db string) []backtickFixture {
 	same := func(stmt, why string) backtickFixture {
 		return backtickFixture{stmt: stmt, verdict: eq, names: true, why: why}
 	}
-	// star: a SELECT *, see backtickFixture.star.
 	star := func(stmt string) backtickFixture {
-		return backtickFixture{stmt: stmt, verdict: eq, star: true, why: "SELECT *: the copy lists the columns in another order until #2111"}
+		return same(stmt, "SELECT *: the columns come in the table's order on both sides (#2111)")
 	}
 	// kept: the router keeps it on MySQL under the named veto.
 	kept := func(stmt string, verdict sqlcompare.Verdict, veto, why string) backtickFixture {

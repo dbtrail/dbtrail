@@ -443,6 +443,29 @@ func TestPreparedRouted_backtickNames(t *testing.T) {
 	}
 }
 
+// A statement whose template could not be written for the copy never
+// reaches it, even if the ladder's own veto were to let it through.
+func TestPreparedRouted_copyRefusalKeepsItOnMySQL(t *testing.T) {
+	r := &fakeRouter{toCopy: true}
+	f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
+	h := routingHandler(t, r, f, time.Minute)
+	if err := h.UseDB("shop"); err != nil {
+		t.Fatal(err)
+	}
+	_, _, ctx, err := h.HandleStmtPrepare("SELECT a FROM t WHERE c = ?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx.(*preparedStmt).copyRefusal = "not written for the copy"
+	res, err := h.HandleStmtExecute(ctx, "", []any{int64(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := binaryFirstCell(t, res); got != "mysql" || f.calls != 0 {
+		t.Errorf("answered by %s with %d copy calls, want mysql and none", got, f.calls)
+	}
+}
+
 // copyParts and the ladder's veto are two readers of one template: whatever
 // one refuses the other must, or a template would be vetoed on one path and
 // written out on the other.

@@ -2,6 +2,7 @@ package readrouter
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -235,34 +236,31 @@ func TestVetoPatterns_treatBothQuotesAlike(t *testing.T) {
 	}
 }
 
-// Veto reads the text the copy would get: for any statement ForCopy accepts,
-// the verdict is the same whether the client wrote backticks or the double
-// quotes they become. (Double quotes typed by the client are vetoed, so the
-// second form is fed to the pattern list directly.)
+// Veto reads the text the copy would get. A pattern that only a double-quoted
+// name can match is added to the list for the length of the test: it must
+// fire on the client's backtick-quoted name, which it can only do if the list
+// is run on the rewritten text.
 func TestVeto_runsOnTheRewrittenText(t *testing.T) {
-	for _, stmt := range []string{
-		"SELECT `a` FROM `t` UNION SELECT `a` FROM `u`",
-		"SELECT `union` FROM `t`",
-		"SELECT `a` FROM `t` WHERE BINARY `name` = 'A'",
-		"SELECT `now` FROM `t`",
-		"SELECT `orders`.`id` FROM `orders` WHERE `orders`.`status` = 'x`y'",
-	} {
-		sc := scan(stmt)
-		if sc.refusal != "" {
-			t.Fatalf("scan(%q) refused: %s", stmt, sc.refusal)
+	saved := vetoes
+	defer func() { vetoes = saved }()
+	vetoes = append(slices.Clone(saved), struct {
+		name string
+		re   *regexp.Regexp
+	}{"probe", regexp.MustCompile(`"probe_name"`)})
+	if got := Veto("SELECT `probe_name` FROM `t`"); got != "probe" {
+		t.Errorf("Veto = %q, want the probe: the list did not read the names in double quotes", got)
+	}
+	// A backtick in a string or a comment is not a name and is not rewritten
+	// in what the list reads either.
+	for _, stmt := range []string{"SELECT 'x `probe_name` y' FROM `t`", "SELECT `a` /* `probe_name` */ FROM `t`"} {
+		if got := Veto(stmt); got != "" {
+			t.Errorf("Veto(%q) = %q, want none", stmt, got)
 		}
-		if strings.Contains(sc.blankedCopy, "`") {
-			t.Errorf("scan(%q): the text the vetoes read still holds a backtick: %q", stmt, sc.blankedCopy)
-		}
-		want := ""
-		for _, v := range vetoes {
-			if v.re.MatchString(sc.blankedCopy) {
-				want = v.name
-				break
-			}
-		}
-		if got := Veto(stmt); got != want {
-			t.Errorf("Veto(%q) = %q, but the list on the rewritten text says %q", stmt, got, want)
+	}
+	// No backtick survives in the text the list reads, whatever is left open.
+	for _, stmt := range []string{"SELECT `a` FROM `t", "SELECT `a` FROM `t` WHERE b = 'x`", "SELECT `a` /* `b", "SELECT `a` -- `b", "SELECT `a``b`", "`"} {
+		if sc := scan(stmt); strings.Contains(sc.blankedCopy, "`") && sc.refusal == "" {
+			t.Errorf("scan(%q): a backtick reaches the veto list with no refusal: %q", stmt, sc.blankedCopy)
 		}
 	}
 }

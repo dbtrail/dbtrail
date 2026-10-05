@@ -55,8 +55,9 @@ type scanned struct {
 // a string, name or comment that never ends, a comment with another one
 // opened inside it, a double-quoted string, a backslash in a string, a `#`
 // comment, a MySQL hint or version comment. text is then the
-// statement as the client wrote it. Veto reports the same refusals, so a
-// statement that passed Veto is never refused here.
+// statement as the client wrote it. Veto keeps every such statement on
+// MySQL too (it may name another reason first), so a statement that passed
+// Veto is never refused here.
 func ForCopy(stmt string) (text, refusal string) {
 	if hintComment.MatchString(stmt) {
 		return stmt, vetoHintComment
