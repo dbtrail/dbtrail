@@ -191,6 +191,9 @@ To match them, run `SET default_collation = 'nocase.noaccent'; SET
 default_null_order = 'nulls_first_on_asc_last_on_desc';` in your session
 before the views; the state views themselves compare keys as bytes
 (`COLLATE C`) either way, so no row is lost under a folding collation.
+Division by zero is the same kind of difference: DuckDB answers `Infinity`
+or `NaN`, the console's SQL card and port answer `NULL` as MySQL does. `SET
+ieee_floating_point_ops = false;` gives your session the same.
 
 ## What stays current, and what does not
 

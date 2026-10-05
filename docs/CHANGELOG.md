@@ -39,6 +39,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [time-travel-sql.md](time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental).
 
 ### Fixed
+- **SQL on the copy: division by zero is `NULL`, as on MySQL** (#2083).
+  `amount / qty` with a zero `qty` came back from the copy as `Infinity`,
+  `-Infinity` or `NaN`, with no error, where MySQL returns `NULL`: a `COUNT`,
+  a `SUM`, an `AVG` or a `WHERE ... IS NULL` over it answered differently.
+  Division and modulo by zero are now `NULL` on the port, the routed reads
+  and the SQL card (DuckDB's `ieee_floating_point_ops`, off in the copy's
+  locked session). What does not change: `AVG` and `/` are doubles on the
+  copy and `DECIMAL`s with four more decimals on MySQL, the same value in a
+  different text; the documentation now says exactly how they differ and
+  why it stays.
 - **SQL on the copy prints a `DECIMAL` with its trailing zeros** (#2083). A
   `DECIMAL(10,2)` holding 10 came back as `10` from the copy (the port, the
   routed reads and the SQL card) and as `10.00` from MySQL, and

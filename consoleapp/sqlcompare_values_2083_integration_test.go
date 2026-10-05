@@ -166,13 +166,19 @@ func valuesFixtures() []valuesFixture {
 		{"SELECT SUM(qty), COUNT(*) FROM sales", eq, "", "an integer sum prints no point"},
 		{"SELECT CAST(qty AS DECIMAL(10,3)) FROM sales WHERE id = 1", eq, "", "3.000"},
 
-		// AVG and division.
-		{"SELECT AVG(amount) FROM sales", diff, "", "MySQL: DECIMAL, operand scale + 4; the copy: DOUBLE"},
-		{"SELECT ROUND(AVG(amount), 1) FROM sales", diff, "", "MySQL keeps one decimal"},
-		{"SELECT AVG(qty) FROM sales", diff, "", "MySQL: four decimals"},
-		{"SELECT id, amount / 3 FROM sales ORDER BY id", diff, "", "MySQL: six decimals"},
-		{"SELECT id, qty / 3 FROM sales ORDER BY id", diff, "", "MySQL: four decimals"},
-		{"SELECT id, amount / qty FROM sales ORDER BY id", diff, "", "division by zero is NULL on MySQL"},
+		// AVG and division: a DOUBLE on the copy, a DECIMAL with the operand's
+		// scale plus four on MySQL. Documented; nothing is rewritten for the
+		// copy, and no result type carries the operand's scale.
+		{"SELECT AVG(amount) FROM sales", diff, "precision", "MySQL: DECIMAL, operand scale + 4; the copy: DOUBLE"},
+		{"SELECT ROUND(AVG(amount), 1) FROM sales", diff, "precision", "MySQL keeps one decimal"},
+		{"SELECT AVG(qty) FROM sales", diff, "precision", "MySQL: four decimals"},
+		{"SELECT id, amount / 3 FROM sales ORDER BY id", diff, "precision", "MySQL: six decimals"},
+		{"SELECT id, qty / 3 FROM sales ORDER BY id", diff, "precision", "MySQL: four decimals"},
+		{"SELECT id, amount / qty FROM sales ORDER BY id", diff, "precision", "MySQL: six decimals; the zero divisor is NULL on both"},
+		// Division and modulo by zero are NULL on both sides.
+		{"SELECT id FROM sales WHERE amount / qty IS NULL ORDER BY id", eq, "", "the zero divisor and the NULL row"},
+		{"SELECT COUNT(amount / qty), COUNT(qty / 0), COUNT(amount % 0) FROM sales", eq, "", "3, 0, 0"},
+		{"SELECT id, qty % 0, qty / 0 FROM sales ORDER BY id", eq, "", "NULL in every row"},
 
 		// Per-column collation.
 		{"SELECT id FROM sales WHERE code = 'ab'", diff, "rows", "utf8mb4_bin: only the exact 'ab'"},

@@ -390,9 +390,16 @@ What this is and is not:
   equal under `utf8mb4_0900_ai_ci` and not on the copy; a column MySQL
   declares case-sensitive (`_bin`, `_cs`) is case-insensitive on the copy;
   a legacy `utf8mb4_general_ci` column ignores trailing spaces on MySQL and
-  not here; and **`AVG` and `/` return full double precision** (MySQL
-  rounds to four decimals past the operand's): `ROUND(AVG(points), 1)` is
-  `0` on the copy and `0.0` on MySQL, the same value in a different text. A
+  not here; and **`AVG` and `/` return a double** on the copy, where MySQL
+  returns a `DECIMAL` with four decimals more than the operand has (for
+  `DECIMAL` and integer operands; a `DOUBLE` operand gives a double on
+  both): `AVG(amount)` over a `DECIMAL(12,2)` is `1.8` on the copy and
+  `1.800000` on MySQL, `ROUND(AVG(points), 1)` is `0` and `0.0`, `qty / 3`
+  is `1.3333333333333333` and `1.3333`. The same value in a different text
+  and under a different column type, exact to about 15 significant digits
+  on the copy. It stays this way because nothing is rewritten for the copy
+  and a double carries no scale to print by. Division and modulo by zero
+  are `NULL` on both. A
   `DECIMAL` itself prints as on MySQL, with its scale and trailing zeros
   (`ROUND(SUM(amount), 2)` is `117329550.00` on both), with one exception: a
   `CASE` or `IF` that mixes a `DECIMAL` branch and an integer branch prints
