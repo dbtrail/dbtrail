@@ -667,9 +667,9 @@ What this rule adds is the stretch in which the copy answers at all. Under
 the age rule alone the copy stops answering heavy reads when its newest
 snapshot passes the limit, and starts again at the next snapshot. Under this
 rule it also answers in between, for tables the index shows no change of.
-Where every scheduled snapshot is a refresh that makes no difference to how
+Where every scheduled snapshot is a refresh, this makes no difference to how
 long such a change is missing. Where every snapshot is a full read, or
-nothing is scheduled, it does: the limit used to cap how stale the copy's
+nothing is scheduled, it does make one: the limit used to cap how stale the copy's
 answer about such a change could be, and for these tables it no longer
 does. On a source where those changes happen, taking FULL snapshots more
 often is what shortens it; refreshing more often does not, under either
