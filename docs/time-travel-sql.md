@@ -631,7 +631,7 @@ What this is and is not:
   `UNION`, `INTERSECT` and `EXCEPT` when they remove duplicates (the copy
   compares the rows by bytes there, so `SELECT 'a' UNION SELECT 'A'` is one
   row on MySQL and two on the copy; `UNION ALL` is not kept back),
-  variables, ...). Four more shapes are kept on MySQL, for text and
+  variables, ...). Five more shapes are kept on MySQL, for text and
   prepared statements alike; each was measured on MySQL 8.4 and MariaDB
   11.4 against the copy:
   - a word that starts with a digit and is not a number. `0x10` and `0b101`
@@ -639,12 +639,22 @@ What this is and is not:
     be the name of a column; the copy reads the digits as a number and the
     rest as its alias, so `SELECT 0x10` is `0` in a column named `x10`
     there and `SELECT 2fa FROM users` is the number 2 in a column named
-    `fa`. Numbers (`10`, `1.5`, `1e5`, `1e-5`) and the same name in
-    backticks (`` `2fa` ``) are not kept back;
+    `fa`. The same goes for an underscore inside a number, which the copy
+    takes for a digit separator (`1.5_5` is 1.5 under the alias `_5` on
+    MySQL and 1.55 on the copy), and for a decimal that ends in a bare `e`
+    (`1.5e`: MySQL refuses it, the copy answers 1.5 under the alias `e`).
+    Numbers (`10`, `1.5`, `1e5`, `1e-5`) and the same name in backticks
+    (`` `2fa` ``) are not kept back;
   - `x`, `b` or `e` written right against a string: `x'41'` is a
     hexadecimal string and `b'1'` a bit string on MySQL, the texts `x41`
     and `b1` on the copy, and `e'x'` is the column `e` under the alias `x`
     on MySQL and an escaped string on the copy;
+  - `INTERVAL` with a quoted amount and a two-part unit: `d + INTERVAL
+    '1:30' MINUTE_SECOND` is one minute and thirty seconds later on MySQL.
+    The copy has no two-part units: it reads `INTERVAL '1:30'` as an hour
+    and a half and `MINUTE_SECOND` as the column's alias. With the amount
+    unquoted (`INTERVAL 1 DAY_HOUR`) the copy refuses the statement, and a
+    one-word unit (`INTERVAL '1' DAY`) is not kept back;
   - `~`: bitwise NOT over 64 unsigned bits on MySQL (`~1` is
     18446744073709551614), `-2` on the copy, where between two operands it
     is also a regular expression match;
@@ -653,10 +663,21 @@ What this is and is not:
     `CAST(... AS DATETIME)`, with or without parentheses around it. MySQL
     turns the date into the number its digits spell (`DATE '2026-01-01' +
     1` is 20260102, and `DATE '2026-02-01' - DATE '2026-01-31'` is 70); the
-    copy answers the date `2026-01-02`, one day, or an interval. A date
-    plus or minus `INTERVAL` is not kept back. Neither is the same
-    arithmetic on a column, which the statement's text does not show: see
-    "Arithmetic on a date column" below.
+    copy answers the date `2026-01-02`, one day, or an interval. The date
+    may sit inside something that is added to as a whole: `GREATEST(DATE
+    '...', d) + 1`, `(SELECT DATE(ts) FROM t) + 1`, `CASE WHEN a THEN
+    DATE(ts) END + 1`, `MAX(DATE(ts)) OVER () - 1`. So a `+` or `-` next to
+    any pair of parentheses or any `CASE ... END` that holds such a date
+    keeps the statement on MySQL too, and so does `AVG` over one (`AVG` of
+    a date is a number on MySQL and a date and time on the copy). That
+    rule does not know what the group returns, so it also keeps back
+    statements both sides would answer alike, such as `SUM(IF(d >= DATE
+    '...', amount, 0)) - 1` or `YEAR(DATE '...') + 1`. A `+` or `-`
+    elsewhere in the statement does not count (`WHERE d >= DATE
+    '2026-01-01' AND qty + 1 > 2` goes to the copy), and a date plus or
+    minus `INTERVAL` is not kept back. Neither is the same arithmetic on a
+    column, which the statement's text does not show: see "Arithmetic on a
+    date column" below.
 
   The
   copy itself compares text close to the way MySQL's default collation
@@ -806,8 +827,11 @@ What this is and is not:
     always answers.
   - **A `DATE` plus or minus `INTERVAL`, selected.** `created_on + INTERVAL
     1 DAY` over a `DATE` column is the date `2026-01-02` on MySQL and the
-    date and time `2026-01-02 00:00:00` on the copy. The same day: inside a
-    `WHERE` it compares the same on both.
+    date and time `2026-01-02 00:00:00` on the copy, and so is
+    `DATE_ADD(created_on, INTERVAL 1 DAY)`. The same day: inside a `WHERE`
+    it compares the same on both. A quoted amount with a fraction of a
+    second prints with six decimals on MySQL and as written on the copy
+    (`INTERVAL '1.5' SECOND` gives `00:00:01.500000` and `00:00:01.5`).
   - **`&`, `|`, `>>` and the `BIT_` functions on a negative number.** MySQL
     computes them over 64 unsigned bits and the copy over signed ones:
     `-1 | 0` is 18446744073709551615 on MySQL and `-1` on the copy,
