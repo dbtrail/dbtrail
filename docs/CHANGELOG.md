@@ -14,8 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL 8.4 and MariaDB 11.4, on a statement the source answers in under
   1 ms. They are now recognized in the text and go straight to MySQL (about
   0.4 ms through the port), as text and as prepared statements (`LIMIT ?,
-  ?`). In the "Who answered" counter they show as `veto` where they showed
-  as `copy_refused`. Nothing is translated for the copy: `LIMIT 20 OFFSET 0`
+  ?`). In the "Who answered" counter they show as `veto`: before,
+  `copy_refused` when the plan was expensive, and `cheap_plan` or
+  `bounded_limit` when MySQL answered anyway (a plain `SELECT ... FROM t
+  LIMIT 0, 20` moves from `bounded_limit` to `veto`, at the same speed).
+  Nothing is translated for the copy: `LIMIT 20 OFFSET 0`
   still reaches it, and SQLAlchemy's `LIMIT 0, 20` never did. `LIKE BINARY`,
   named in the issue, was already kept on MySQL by an older rule. A window
   written `OVER (ORDER BY NULL)` still reaches the copy, which answers it

@@ -358,6 +358,10 @@ The decision, in order, for every statement:
    JSON functions and the `->`/`->>` operators, a backslash inside a string
    literal, optimizer hints), and a backtick-quoted name the port will not
    rewrite for the copy (see "One thing is translated" below): **MySQL**.
+   So are three spellings the copy always refuses, so that it is not tried
+   in vain: `LIMIT offset, count`, `ORDER BY NULL` and `_binary'x'` (same
+   section below). This step comes before the next two, so a `LIMIT 0, 20`
+   the `LIMIT` rules would have kept on MySQL is counted as `veto`.
 4. The one shape that needs no plan: `SELECT <columns> FROM <one table>
    LIMIT <at most 1,000 rows, offset included>` with nothing else (no
    `WHERE`, join, `ORDER BY`, `GROUP BY`, subquery or function call):
@@ -764,8 +768,10 @@ What this is and is not:
   the failed attempt on the copy before MySQL answers (37 to 55 ms measured
   on a statement MySQL answers in under 1 ms), so three spellings that ORMs
   and drivers send, and that the copy always refuses, stay on MySQL without
-  trying the copy (`mysql` / `veto` in the counter, where they used to show
-  as `copy_refused`), as text and as prepared statements:
+  trying the copy, as text and as prepared statements. The counter shows
+  them as `mysql` / `veto`: before, `copy_refused` when the plan was
+  expensive, and `cheap_plan` or `bounded_limit` when MySQL answered
+  anyway.
   - `LIMIT` with the offset first and a comma: `LIMIT 0, 20`, `LIMIT ?, ?`
     (what SQLAlchemy sends), in the statement or in a subquery. The copy
     only reads `LIMIT 20 OFFSET 0`, which is not kept back;
