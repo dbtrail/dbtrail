@@ -399,5 +399,37 @@ func backtickFixtures(db string, dollarNames bool) []backtickFixture {
 		kept("SELECT `text`\u00a0'Label' FROM (SELECT 'body' AS `text`) `t`", serr, "right before a string literal", "a no-break space between the name and the string: white space on the copy, which would answer the constant; both servers refuse the statement"),
 		kept("SELECT `text` E'Label' FROM (SELECT 'body' AS `text`) `t`", serr, "right before a string literal", "E'..' is an escaped string on the copy, which would answer the constant; both servers refuse the statement"),
 		kept("SELECT `text` N'Label' FROM (SELECT 'body' AS `text`) `t`", serr, "right before a string literal", "N'..' after a name: refused by both servers too"),
+		// Literals and operators both sides answer, each with another value
+		// (#2122): kept on MySQL, with or without quoted names.
+		kept("SELECT 0x10", diff, "starts with a digit", "the byte 0x10 on MySQL; the number 0 in a column named x10 on the copy"),
+		kept("SELECT 0b101", diff, "starts with a digit", "the byte 0x05 on MySQL; 0 in a column named b101 on the copy"),
+		kept("SELECT 2fa FROM (SELECT 7 AS `2fa`) `t`", diff, "starts with a digit", "a name may start with a digit on MySQL (7); the copy reads the number 2 under the alias fa"),
+		same("SELECT `2fa` FROM (SELECT 7 AS `2fa`) `t`", "the same name quoted is a name on both"),
+		kept("SELECT b'1'", diff, "right against a string literal", "a bit string on MySQL (the byte 0x01); the text b1 on the copy"),
+		kept("SELECT x'41'", diff, "right against a string literal", "a hexadecimal string on MySQL (A); the text x41 on the copy"),
+		kept("SELECT `id` FROM `orders` WHERE `status` = X'70616964' ORDER BY `id`", diff, "right against a string literal", "X'70616964' is 'paid' on MySQL (three rows) and the text x70616964 on the copy (none)"),
+		kept("SELECT e'x' FROM (SELECT 1 AS e) `t`", diff, "right against a string literal", "the column e under the alias x on MySQL (1); an escaped string on the copy (x)"),
+		kept("SELECT ~1", diff, "~ (bitwise NOT", "18446744073709551614 on MySQL, -2 on the copy"),
+		kept("SELECT DATE '2026-01-01' + 1", diff, "next to + or -", "the number 20260102 on MySQL, the date 2026-01-02 on the copy"),
+		kept("SELECT `created_on` - DATE '2025-12-31' FROM `orders` WHERE `id` = 1", diff, "next to + or -", "20260101 - 20251231 = 8870 on MySQL; one day on the copy"),
+		kept("SELECT TIMESTAMP '2026-01-01 10:00:00' - TIMESTAMP '2026-01-01 09:00:00'", diff, "next to + or -", "10000 on MySQL; an interval of one hour on the copy"),
+		kept("SELECT GREATEST(DATE '2026-02-01', DATE '2026-01-01') + 1", diff, "next to + or -", "a date inside a call: 20260202 on MySQL, 2026-02-02 on the copy"),
+		kept("SELECT CASE WHEN `id` = 1 THEN DATE(`created_on`) END + 1 FROM `orders` WHERE `id` = 1", diff, "next to + or -", "a date inside a CASE: 20260102 on MySQL, 2026-01-02 on the copy"),
+		kept("SELECT AVG(DATE(`created_on`)) FROM `orders`", diff, "under AVG", "20260103.5000 on MySQL, 2026-01-03 12:00:00 on the copy"),
+		kept("SELECT created_on + INTERVAL '1:30' MINUTE_SECOND FROM orders WHERE id = 1", diff, "quoted amount that is not a whole number", "00:01:30 on MySQL; the copy adds an hour and a half and names the column MINUTE_SECOND"),
+		kept("SELECT DATE '2026-01-01' + INTERVAL '1e2' DAY", diff, "quoted amount that is not a whole number", "MySQL cuts the amount at the e (one day); the copy reads a hundred"),
+		kept("SELECT `created_on` + INTERVAL (1.5) DAY FROM `orders` WHERE `id` = 1", diff, "in parentheses or a placeholder", "MySQL rounds the expression (two days later), the copy cuts it (one)"),
+		kept("SELECT AVG(TIME '10:00:00')", diff, "under AVG", "100000.0000 on MySQL, the time 10:00:00 on the copy"),
+		kept("SELECT 1.5_5", diff, "starts with a digit", "1.5 under the alias _5 on MySQL; 1.55 on the copy"),
+		same("SELECT `id` FROM `orders` WHERE `created_on` >= DATE '2026-01-05' - INTERVAL 1 DAY ORDER BY `id`", "a date minus INTERVAL is the same day on both: not kept back"),
+		// What the text does not show (#2122): the same arithmetic on a column
+		// is not vetoed, because nothing the router reads says the column is a
+		// date. A known difference, listed in docs/time-travel-sql.md.
+		{stmt: "SELECT `created_on` + 1 FROM `orders` WHERE `id` = 1", verdict: diff, why: "a DATE column plus a number: 20260102 on MySQL, 2026-01-02 on the copy; not seen in the text"},
+		{stmt: "SELECT `created_on` + INTERVAL 1 DAY FROM `orders` WHERE `id` = 1", verdict: diff, why: "a DATE on MySQL (2026-01-02), a date and time on the copy (2026-01-02 00:00:00)"},
+		{stmt: "SELECT -1 | 0", verdict: diff, why: "bit operators are unsigned on MySQL (18446744073709551615) and signed on the copy (-1); they agree on numbers that are not negative, and are not vetoed"},
+		// A NUL byte is not a veto: no statement was found that both answer
+		// differently. Inside a comment the copy stops reading there.
+		{stmt: "SELECT 1 /* \x00 */ + 1", verdict: noc, why: "2 on MySQL; the copy reads an unterminated comment"},
 	}
 }
