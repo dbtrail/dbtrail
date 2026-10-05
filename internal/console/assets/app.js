@@ -13448,11 +13448,12 @@ function flashbackHost(fb) {
 }
 
 // changeSQLPort sends one change to the port (on, off, new password) and
-// draws the panel again from the answer, in place. reveal is the password,
-// present only in the answer that created it.
-function changeSQLPort(panel, servers, method, path, body, btn) {
+// draws the panel again from the answer, in place. send makes the request:
+// each caller spells its own method and path, so the list of everything the
+// page writes (test/console-e2e/save_controls.mjs) can see them.
+function changeSQLPort(panel, servers, send, btn) {
   if (btn) btn.disabled = true;
-  return api(path, { method, body }).then((rep) => {
+  return send().then((rep) => {
     // The fresh render's buttons are wired to panel, the element on the
     // page, not to the detached section they were built in: otherwise the
     // second press would redraw something nobody is looking at.
@@ -13502,7 +13503,7 @@ function sqlClientPanel(servers, fb, reveal, live) {
       if (fb.error) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: "It was on and did not start: " + fb.error }));
       const addr = el("input", { class: "input cn-sql-addr", type: "text", value: fb.suggested_listen || "", "aria-label": "Port address", spellcheck: "false", autocomplete: "off" });
       const on = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Turn on" });
-      on.onclick = () => changeSQLPort(live, servers, "PUT", "/api/flashback", { enabled: true, listen: addr.value }, on);
+      on.onclick = () => changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { enabled: true, listen: addr.value } }), on);
       body.append(el("div", { class: "cn-urlrow" }, el("span", { class: "cn-sql-lbl", text: "Address" }), addr, on));
       body.append(cnFine("Which address, and the password",
         el("p", { class: "form-hint", text: "127.0.0.1 answers only on the machine DBTrail runs on. 0.0.0.0 answers on every network address of that machine. In the Docker install keep 0.0.0.0. Who can reach the port is then decided by docker-compose.yml: a new install publishes it to the machine itself only, and one installed before this existed does not publish it until its ports line is added." }),
@@ -13556,9 +13557,9 @@ function sqlClientPanel(servers, fb, reveal, live) {
   if (fb.can_manage && sessionMay("settings:write")) {
     const ask = (q) => typeof window.confirm !== "function" || window.confirm(q);
     const fresh = el("button", { class: "btn btn-sm", type: "button", text: "New password" });
-    fresh.onclick = () => { if (ask("Create a new password?\n\nThe current one stops working for new connections.")) changeSQLPort(live, servers, "POST", "/api/flashback/password", {}, fresh); };
+    fresh.onclick = () => { if (ask("Create a new password?\n\nThe current one stops working for new connections.")) changeSQLPort(live, servers, () => api("/api/flashback/password", { method: "POST", body: {} }), fresh); };
     const off = el("button", { class: "btn btn-sm btn-danger", type: "button", text: "Turn off" });
-    off.onclick = () => { if (ask("Turn the port off?\n\nMySQL clients connected to it are disconnected.")) changeSQLPort(live, servers, "PUT", "/api/flashback", { enabled: false }, off); };
+    off.onclick = () => { if (ask("Turn the port off?\n\nMySQL clients connected to it are disconnected.")) changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { enabled: false } }), off); };
     body.append(el("div", { class: "cn-links" }, fresh, off));
   }
   body.append(routingBlock(fb, cur));

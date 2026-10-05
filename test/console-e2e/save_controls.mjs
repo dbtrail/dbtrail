@@ -26,6 +26,7 @@
 //     scene did not report, so a scene that stops early cannot pass quietly.
 
 import { execSync } from "node:child_process";
+import net from "node:net";
 import { mkdirSync } from "node:fs";
 
 // ── the list ────────────────────────────────────────────────────────────────
@@ -47,6 +48,9 @@ export const WRITES = [
   { method: "POST", path: "/api/telemetry", count: 1, kind: "scene", id: "telemetry" },
   { method: "POST", path: "/api/mcp-token", count: 1, kind: "scene", id: "mcp-token" },
   { method: "DELETE", path: "/api/mcp-token", count: 1, kind: "scene", id: "mcp-token" },
+  // The MySQL port, turned on and off from the Connect panel (#2101).
+  { method: "PUT", path: "/api/flashback", count: 2, kind: "scene", id: "mysql-port" },
+  { method: "POST", path: "/api/flashback/password", count: 1, kind: "scene", id: "mysql-port" },
   { method: "PUT", path: "/api/servers/draft", count: 1, kind: "scene", id: "draft" },
   { method: "DELETE", path: "/api/servers/draft", count: 2, kind: "scene", id: "draft" },
   { method: "POST", path: "/api/capture-skips/ack", count: 1, kind: "scene", id: "capture-skips" },
@@ -861,6 +865,94 @@ export async function runSaveScenes(ctx) {
       const auth3 = minted2 ? await mcpStatus(minted2) : 0;
       check("mcp-token", "Delete token removes the stored token and it stops working", !!st3 && auth3 === 401,
         JSON.stringify({ st3, auth3 }));
+    });
+
+    // ── the MySQL port ──────────────────────────────────────────────────
+    // On a SECOND daemon, started by run.sh with no port address: the main
+    // one is given its address at startup, where the panel shows it as fixed
+    // and has no switch. Everything is pressed on one panel, in a row, so a
+    // redraw that left the buttons acting on a detached copy fails here.
+    await scene("mysql-port", async () => {
+      const url2 = process.env.E2E_PORT2_URL || "", sqlPort = process.env.E2E_SQLPORT || "";
+      if (!url2 || !sqlPort) throw new Error("E2E_PORT2_URL / E2E_SQLPORT not passed by run.sh");
+      const want = "127.0.0.1:" + sqlPort;
+      // listening: something accepts on the port and speaks first, as a
+      // MySQL server does (the handshake greeting).
+      const listening = () => new Promise((res) => {
+        const c = net.connect({ host: "127.0.0.1", port: Number(sqlPort) });
+        const done = (v) => { c.destroy(); res(v); };
+        c.setTimeout(3000, () => done(false));
+        c.once("data", () => done(true));
+        c.once("error", () => done(false));
+        c.once("close", () => res(false));
+      });
+      const tab = await browser.newPage({ viewport: { width: 1300, height: 1000 } });
+      tab.on("pageerror", (e) => jsErrors.push("mysql-port tab: " + String(e)));
+      tab.on("dialog", acceptDialog);
+      try {
+        await tab.goto(`${url2}/?token=${encodeURIComponent(token)}`, { waitUntil: "networkidle" });
+        await tab.waitForFunction(() => typeof navigate === "function" && typeof capsCache !== "undefined" && capsCache.monitor === true);
+        const status = async () => (await readAs(tab, "/api/flashback")).body;
+        const press = (label) => until(() => tab.evaluate((label) => {
+          const b = Array.from(document.querySelectorAll(".cn-sql:not(.cn-ice) button")).find((x) => x.textContent === label && !x.disabled);
+          if (b) { b.click(); return true; }
+          return false;
+        }, label));
+        const shown = () => tab.evaluate(() => {
+          const p = document.querySelector(".cn-sql:not(.cn-ice)");
+          const codes = p ? Array.from(p.querySelectorAll(".cn-urlrow code.cn-url")).map((c) => c.textContent) : [];
+          return { password: codes.find((c) => /^bfp_/.test(c)) || "", line: codes.find((c) => /^mysql /.test(c)) || "", text: p ? p.innerText : "" };
+        });
+
+        const before = await status();
+        const wasOpen = await listening();
+        await tab.evaluate(() => navigate("connect"));
+        const typed = await until(() => tab.evaluate((want) => {
+          const i = document.querySelector(".cn-sql:not(.cn-ice) input.cn-sql-addr");
+          if (!i) return false;
+          i.value = want;
+          return true;
+        }, want));
+        const on = typed && await press("Turn on");
+        const pw1 = await until(async () => (await shown()).password);
+        const st1 = await status();
+        const s1 = await shown();
+        check("mysql-port", "Turn on opens the port at the address typed, saves it, and shows the password and the mysql line",
+          before && before.enabled === false && before.can_manage === true && !wasOpen && !!on && !!pw1 &&
+          st1 && st1.enabled === true && st1.listen === want && st1.source === "saved" && st1.has_password === true &&
+          !JSON.stringify(st1).includes(pw1) && s1.line === "mysql -h 127.0.0.1 -P " + sqlPort + " -u <server-name> -p" && await listening(),
+          JSON.stringify({ before, wasOpen, typed, on, pw1: !!pw1, st1, line: s1.line, listening: await listening() }));
+
+        // The same panel, pressed again: a second password replaces the first.
+        const fresh = await press("New password");
+        const pw2 = await until(async () => { const p = (await shown()).password; return p && p !== pw1 ? p : ""; });
+        const st2 = await status();
+        check("mysql-port", "New password shows a different password on the same panel",
+          !!fresh && !!pw2 && st2 && st2.enabled === true && st2.password_created_at && st2.password_created_at >= st1.password_created_at,
+          JSON.stringify({ fresh, pw2: !!pw2, st2 }));
+
+        // A second tab has only what the server stored: on, and no password.
+        const other = await browser.newPage({ viewport: { width: 1300, height: 1000 } });
+        try {
+          await other.goto(`${url2}/?token=${encodeURIComponent(token)}`, { waitUntil: "networkidle" });
+          await other.waitForFunction(() => typeof navigate === "function" && typeof capsCache !== "undefined" && capsCache.monitor === true);
+          await other.evaluate(() => navigate("connect"));
+          const seen = await until(() => other.evaluate(() => {
+            const p = document.querySelector(".cn-sql:not(.cn-ice)");
+            return p && /It cannot be shown again\./.test(p.innerText) ? p.innerText : "";
+          }));
+          check("mysql-port", "a fresh tab says the port is on and never shows the password",
+            !!seen && seen.includes(want) && !seen.includes(pw1) && !seen.includes(pw2), JSON.stringify({ seen }));
+        } finally { await other.close(); }
+
+        // And a third press, still on the first panel.
+        const off = await press("Turn off");
+        const st3 = await until(async () => { const b = await status(); return b && b.enabled === false ? b : null; });
+        const back = await until(() => tab.evaluate(() => !!Array.from(document.querySelectorAll(".cn-sql:not(.cn-ice) button")).find((x) => x.textContent === "Turn on")));
+        check("mysql-port", "Turn off closes the port, saves it as off, and the panel offers Turn on again",
+          !!off && !!st3 && st3.has_password === true && st3.suggested_listen === want && !!back && !(await listening()),
+          JSON.stringify({ off, st3, back, listening: await listening() }));
+      } finally { await tab.close(); }
     });
 
     // ── telemetry ───────────────────────────────────────────────────────
