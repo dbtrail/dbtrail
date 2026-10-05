@@ -2376,6 +2376,9 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 .cn-sql-body { padding: 0 14px 14px; }
 .cn-sql-row { margin: 0 0 8px; font-size: 13px; color: var(--ink-2); }
 .cn-sql-row code { font-family: var(--f-mono); font-size: 12px; }
+.cn-sql-lbl { font-size: 13px; color: var(--ink-2); }
+.cn-sql-addr { max-width: 220px; font-family: var(--f-mono); font-size: 12px; }
+.cn-sql-err { color: var(--error); }
 .cn-sql .cn-fine { margin-top: 4px; }
 
 /* Telemetry sample event (#1447): the daemon's bytes, shown as they are. */

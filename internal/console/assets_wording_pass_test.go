@@ -95,9 +95,9 @@ const run = (s) => vm.runInContext(s, ctx);
 // first-run step. A new sentence that says "console" anywhere else passes.
 func TestWordingPassTheseSentences(t *testing.T) {
 	status := map[string]flashbackStatusDTO{
-		"named":    (&Server{flashbackListen: "127.0.0.1:3308"}).flashbackStatus(),
-		"wildcard": (&Server{flashbackListen: ":3308"}).flashbackStatus(),
-		"noPort":   (&Server{flashbackListen: "not-an-address"}).flashbackStatus(),
+		"named":    (&Server{flashback: flashbackState{startup: true, listen: "127.0.0.1:3308"}}).flashbackStatus(),
+		"wildcard": (&Server{flashback: flashbackState{startup: true, listen: ":3308"}}).flashbackStatus(),
+		"noPort":   (&Server{flashback: flashbackState{startup: true, listen: "not-an-address"}}).flashbackStatus(),
 		"off":      (&Server{}).flashbackStatus(),
 	}
 	if !status["named"].Enabled || status["named"].Port != "3308" || status["wildcard"].Host != "" ||
