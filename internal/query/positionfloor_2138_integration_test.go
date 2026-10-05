@@ -176,16 +176,28 @@ func TestMeasurePartitionHeads(t *testing.T) {
 		VALUES (1, 'position', 'binlog.000001', 4, NOW(), 1)`)
 	span := int64((parts - 2) * 3600)
 	const chunk = 100000
+	// One pinned connection with its binary log off: the test server keeps
+	// its data directory in memory, and logging the load would double it.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "SET SESSION sql_log_bin = 0"); err != nil {
+		t.Fatal(err)
+	}
 	for off := 0; off < n; off += chunk {
-		testutil.MustExec(t, db, fmt.Sprintf(`INSERT /*+ SET_VAR(cte_max_recursion_depth = 200000) */ INTO binlog_events
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf(`INSERT /*+ SET_VAR(cte_max_recursion_depth = 200000) */ INTO binlog_events
 			(binlog_file, start_pos, end_pos, event_timestamp, schema_name, table_name, event_type, pk_values, row_before, row_after)
 			WITH RECURSIVE s (i) AS (SELECT %d UNION ALL SELECT i + 1 FROM s WHERE i + 1 < %d)
 			SELECT 'binlog.000001', i * 100, i * 100 + 99,
 			       TIMESTAMPADD(SECOND, FLOOR(i * %d / %d), '%s'),
 			       'shop', CONCAT('t', i %% 50), 2, i %% 100000,
-			       JSON_OBJECT('id', i %% 100000, 'status', 'before', 'note', REPEAT('x', 120)),
-			       JSON_OBJECT('id', i %% 100000, 'status', 'after', 'note', REPEAT('y', 120))
-			FROM s`, off, min(off+chunk, n), span, n, first.Format("2006-01-02 15:04:05")))
+			       JSON_OBJECT('id', i %% 100000, 'status', 'before'),
+			       JSON_OBJECT('id', i %% 100000, 'status', 'after')
+			FROM s`, off, min(off+chunk, n), span, n, first.Format("2006-01-02 15:04:05"))); err != nil {
+			t.Fatalf("load at %d: %v", off, err)
+		}
 	}
 	testutil.MustExec(t, db, "ANALYZE TABLE binlog_events")
 	timeIt := func(what string, f func() string) {
