@@ -133,6 +133,35 @@ func ResolveEffective(ctx context.Context, db *sql.DB, dbName string) Effective 
 	}
 }
 
+// DropWindow is the window the loop drops ONE index's partitions on under s,
+// and whether that is known. It is for a caller that has to bound something
+// against what rotation WILL drop rather than report it, so every doubt
+// answers not known:
+//
+//   - rotation off: this loop drops nothing, and an operator who turned it off
+//     usually rotates on a schedule of their own that nothing here can read;
+//   - an explicit window: every index drops on it;
+//   - no explicit window: the index's own (effective is ResolveEffective for
+//     it, asked only in this case). A record that could not be read is not
+//     known, although the loop then keeps the legacy window: the loop's own
+//     read, a cycle later, may succeed and drop on a shorter one.
+//
+// The loop can drop LESS than this says (the upgrade guard, a partition not
+// archived yet), never more.
+func DropWindow(s Settings, effective func() Effective) (time.Duration, bool) {
+	switch {
+	case !s.Enabled:
+		return 0, false
+	case s.Explicit:
+		return s.Retain, s.Retain > 0
+	}
+	e := effective()
+	if e.Source == RetainUnreadable || e.Retain <= 0 {
+		return 0, false
+	}
+	return e.Retain, true
+}
+
 // DescribeSource is the one sentence a surface puts beside the window, so the
 // three of them cannot drift into three wordings.
 func (e Effective) DescribeSource() string {

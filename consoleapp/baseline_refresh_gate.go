@@ -9,6 +9,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/rotation"
 	"github.com/dbtrail/dbtrail/internal/status"
 )
 
@@ -108,6 +109,12 @@ type foldMemo struct {
 type coverageRule struct {
 	retain   time.Duration
 	interval time.Duration
+	// dropsAfter is how old THIS index's oldest partition has to be before
+	// rotation drops it (#2121, rotation.DropWindow), zero when that is not
+	// known. Not retain under another name: with no retention chosen each
+	// index drops on the window it was created under, which the daemon-wide
+	// setting does not say.
+	dropsAfter time.Duration
 }
 
 // reanchorBy is THE line, for the gate and for the fold alike (#1904): a
@@ -138,14 +145,14 @@ type coverageRule struct {
 //     cycle. On a long retention the band is wider and this never binds. It
 //     assumes the next cycle does come one interval later: a cycle skipped
 //     because another job holds the server, or a daemon that is down, stretches
-//     the gap past what the margin covers.
+//     the gap past what the margin covers. Not drawn while rotation is known
+//     to be out of reach of the floor (floorHolds): on an index younger than
+//     its retention this bound ended every chain of the first hour, and each
+//     of those updates wrote every table in full (#2121).
 //
 // A busy table does not rewrite on every cycle: a rewrite starts a new chain
 // at the run, and the next cycle only ends it again when the retention is
 // shorter than two intervals plus an hour, where no chain could live anyway.
-// The same holds, for the same arithmetic, while the index itself is younger
-// than an hour plus an interval: every refresh of that first stretch writes its
-// tables in full.
 func (r coverageRule) reanchorBy(liveFloor, now time.Time) (time.Time, bool) {
 	if liveFloor.IsZero() {
 		return time.Time{}, false
@@ -166,16 +173,51 @@ func (r coverageRule) reanchorBy(liveFloor, now time.Time) (time.Time, bool) {
 			floor = p
 		}
 	}
-	if m := floor.Add(time.Hour + r.interval); m.After(line) {
+	if m := floor.Add(time.Hour + r.interval); m.After(line) && !r.floorHolds(liveFloor, now) {
 		line = m
 	}
 	return line, true
+}
+
+// floorHolds reports whether rotation is known to leave the oldest live hour
+// alone until after the next cycle has looked (#2121): that hour is dropped
+// once it is older than the index's window, so while the window ends more than
+// an hour and an interval before it, the floor does not move and the third
+// bound has nothing to guard. The same hour and interval the bound itself
+// keeps, so a cycle that runs late is covered as far here as it is there.
+//
+// The shorter of the two retentions the rule holds: they come from different
+// reads, and a retention saved in the panel is in retain before any partition
+// or record shows it.
+func (r coverageRule) floorHolds(liveFloor, now time.Time) bool {
+	window := r.dropsAfter
+	if r.retain > 0 && r.retain < window {
+		window = r.retain
+	}
+	if window <= 0 {
+		return false
+	}
+	return !liveFloor.Before(now.Add(-window).Add(time.Hour + r.interval))
 }
 
 // readLiveFloor reads the oldest hour the index's live partitions still hold,
 // and whether it could; a package variable so the refresh cycle's use of it can
 // be driven without an index.
 var readLiveFloor = readLiveFloorFromDB
+
+// readIndexRetention reads the window one index rotates on while the operator
+// sets none; a package variable for the reason readLiveFloor is.
+var readIndexRetention = readIndexRetentionFromDB
+
+func readIndexRetentionFromDB(ctx context.Context, dsn string) rotation.Effective {
+	db, err := config.Connect(dsn)
+	if err != nil {
+		slog.Debug("snapshot refresh: could not open the index to read the retention it was created under", "error", err)
+		return rotation.Effective{Source: rotation.RetainUnreadable, Err: err}
+	}
+	defer db.Close()
+	return rotation.ResolveEffective(ctx, db, indexDBName(dsn))
+}
 
 func readLiveFloorFromDB(ctx context.Context, dsn string) (time.Time, bool) {
 	db, err := config.Connect(dsn)
