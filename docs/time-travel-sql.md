@@ -459,6 +459,17 @@ What this is and is not:
     port forwards with are what bounds the rest. Refusals are counted as
     `route="refused"`, `reason="read_only"`, and the **Connect a SQL
     client** panel says which mode the port is in.
+- **The port reaches the source over the TLS capture uses.** Its
+  connection to a server's MySQL follows that server's `ssl_mode` (and
+  `ssl_ca`, `ssl_cert`, `ssl_key`), the same settings capture connects
+  with: by default (`preferred`) it is encrypted whenever the source offers
+  TLS and falls back to an unencrypted connection only when the source
+  offers none, with a warning in the log; with `required`, `verify-ca` or
+  `verify-identity` it is encrypted or it fails, and the client gets error
+  2006. A `tls=` parameter inside the source DSN wins over `ssl_mode`, as
+  it does for capture. A TLS setting that cannot be used (a misspelled
+  mode, a CA file that cannot be read) turns routing off for that server,
+  and the **Connect a SQL client** panel says so.
 - **A lost connection to the source is not hidden.** If the upstream
   connection drops (the source closes an idle connection, a network error,
   the query deadline), every later statement on that client connection

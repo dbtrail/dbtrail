@@ -87,9 +87,22 @@ func ConnectSSL(dsn string, ssl SSL, onCleartext func(error)) (*sql.DB, error) {
 // connectSSL is ConnectSSL with the connect step injected, so the retry rule
 // is tested without a server that lacks TLS.
 func connectSSL(dsn string, ssl SSL, onCleartext func(error), open func(string, *tls.Config) (*sql.DB, error)) (*sql.DB, error) {
+	return ConnectSSLWith(dsn, ssl, onCleartext, open)
+}
+
+// ConnectSSLWith is ConnectSSL's rule for a connection of any kind: open is
+// handed the DSN and the tls.Config the mode asks for (nil for cleartext) and
+// makes the connection its own way. It exists so a second client library to
+// the same source (the read router's MySQL-protocol connection, which is not
+// database/sql) decides TLS by this one rule instead of a copy of it. open
+// must let a tls= inside the DSN win over the config it is handed, as
+// ConnectWithTLS does (applyTLS); the no-retry rule for such a DSN is
+// applied here.
+func ConnectSSLWith[T any](dsn string, ssl SSL, onCleartext func(error), open func(string, *tls.Config) (T, error)) (T, error) {
+	var none T
 	tlsCfg, err := BuildTLSConfig(ssl.Mode, ssl.CA, ssl.Cert, ssl.Key, DSNHost(dsn))
 	if err != nil {
-		return nil, err
+		return none, err
 	}
 	db, err := open(dsn, tlsCfg)
 	if err == nil {
@@ -99,12 +112,12 @@ func connectSSL(dsn string, ssl SSL, onCleartext func(error), open func(string, 
 	// "retry in cleartext" would re-run the DSN's own setting: no retry, and
 	// no claim that the connection went out unencrypted.
 	if ssl.Mode != "preferred" || !IsTLSUnsupportedError(err) || DSNHasExplicitTLS(dsn) {
-		return nil, err
+		return none, err
 	}
 	noTLS := err
 	db, err = open(dsn, nil)
 	if err != nil {
-		return nil, fmt.Errorf("cleartext retry after the server offered no TLS: %w", err)
+		return none, fmt.Errorf("cleartext retry after the server offered no TLS: %w", err)
 	}
 	// Reported only once the cleartext connection exists: a failed retry read
 	// nothing, and its error already says the retry was in cleartext.
