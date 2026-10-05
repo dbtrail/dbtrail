@@ -12,6 +12,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
+	"github.com/dbtrail/dbtrail/internal/views"
 )
 
 // FlashbackTarget is the go-mysql-free resolution of a flashback connection's
@@ -86,6 +87,8 @@ type SQLOnCopy struct {
 	s    *Server
 	b    *bundle
 	user string
+	// id is the server's registry id (the boot id for the daemon's own).
+	id string
 }
 
 // Run runs one statement; schema is where unqualified names resolve (the
@@ -97,12 +100,28 @@ type SQLOnCopy struct {
 // browser, and a worker failure, whose text can carry host paths, is logged
 // here and replaced.
 func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqlsandbox.Session) (sqlsandbox.Result, error) {
-	out, err := q.s.runSQL(ctx, q.b, q.user, statement, schema, 0, sess)
+	var unchanged sqlUnchanged
+	if sess.UnchangedWithin > 0 {
+		// Before the slot (#2085): a capture that is not known to be up to
+		// date settles it for every statement, and one that will be refused
+		// must not wait in line for the copy first. The statement's own
+		// tables are asked about once the worker has parsed it.
+		if why := captureBehind(q.s.captureWatermarkFor(ctx, q.id, q.b), time.Now(), sess.UnchangedWithin); why != "" {
+			return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: why}
+		}
+		unchanged = func(ctx context.Context, tables []views.BaselineTable) string {
+			return q.s.copyUnchanged(ctx, q.b, q.id, tables, sess.UnchangedWithin)
+		}
+	}
+	out, err := q.s.runSQLVouched(ctx, q.b, q.user, statement, schema, 0, sess, unchanged)
 	if err != nil {
 		var werr *sqlsandbox.WorkerError
 		var refusal *sqlRefusal
 		var star *sqlStarRefusal
+		var changed *sqlChangedRefusal
 		switch {
+		case errors.As(err, &changed):
+			return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: changed.Message}
 		case errors.As(err, &star):
 			// The statement's shape, not a fault of the copy (#2111).
 			return sqlsandbox.Result{}, &sqlsandbox.ColumnsDifferError{Reason: star.Message}
@@ -163,7 +182,7 @@ func (s *Server) sqlOnCopyFor(b *bundle, id string) (*SQLOnCopy, string) {
 	case b.noArchive:
 		return nil, "archive access is disabled for this server, so its copy cannot be read"
 	}
-	return &SQLOnCopy{s: s, b: b, user: "server:" + id}, ""
+	return &SQLOnCopy{s: s, b: b, user: "server:" + id, id: id}, ""
 }
 
 // ResolveFlashback maps a flashback connection username to its target server's

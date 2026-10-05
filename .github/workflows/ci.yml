@@ -355,6 +355,48 @@ jobs:
           docker logs bintrail-test-mysql >&2 || true
           exit 1
 
+      # A second MySQL, with GTIDs on, for the read-routing tests that need a
+      # GTID source captured into an index on ANOTHER server (#2085): the
+      # index of a source is never compared with it when both are one server,
+      # and the main server above runs without GTIDs. Only in the shard that
+      # runs the consoleapp TestIntegrationFlashback tests (SPLIT_RUN in
+      # scripts/mysql-integration-shard.sh); if that split moves to another
+      # shard, this step and the two variables below move with it, and the
+      # `integration` job's "Key tests ran" step is what notices if they did
+      # not (the tests skip without the server unless told it is required).
+      - name: Start the GTID source (bintrail-test-mysql-gtid, ${{ matrix.mysql }})
+        if: env.RUN == 'true' && matrix.shard == 2
+        run: |
+          docker run -d --name bintrail-test-mysql-gtid \
+            -e MYSQL_ROOT_PASSWORD=testroot \
+            -p 13316:3306 \
+            mysql:${{ matrix.mysql }} \
+            --binlog-format=ROW \
+            --binlog-row-image=FULL \
+            --log-bin=binlog \
+            --server-id=3 \
+            --gtid-mode=ON \
+            --enforce-gtid-consistency=ON
+          # Three consecutive answers over the path the tests use, for the
+          # reason given at the main server's start above.
+          consecutive=0
+          for i in $(seq 1 60); do
+            if docker run --rm --network host "mysql:${{ matrix.mysql }}" \
+                 mysql --protocol=TCP -h 127.0.0.1 -P 13316 -u root -ptestroot -e "SELECT 1" >/dev/null 2>&1; then
+              consecutive=$((consecutive + 1))
+              if [ "$consecutive" -ge 3 ]; then
+                echo "The GTID source is ready (3 consecutive successful probes)."
+                exit 0
+              fi
+            else
+              consecutive=0
+            fi
+            sleep 2
+          done
+          echo "The GTID source did not become ready in time" >&2
+          docker logs bintrail-test-mysql-gtid >&2 || true
+          exit 1
+
       # An S3-compatible store for the #1453/#1454 leg: the SDK half uploads
       # through BINTRAIL_S3_ENDPOINT and the DuckDB half reads the object back
       # through the session's endpoint settings. The image, its pin and its
@@ -384,6 +426,10 @@ jobs:
           BINTRAIL_TEST_MINIO_ENDPOINT: ${{ steps.s3store.outputs.endpoint }}
           BINTRAIL_TEST_MINIO_ACCESS_KEY: bintrail
           BINTRAIL_TEST_MINIO_SECRET_KEY: bintrail-it-secret
+          # The GTID source started above, in the shard that has it. There a
+          # test that needs it FAILS when it is missing instead of skipping.
+          BINTRAIL_TEST_GTID_SOURCE_DSN: ${{ matrix.shard == 2 && 'root:testroot@tcp(127.0.0.1:13316)' || '' }}
+          BINTRAIL_REQUIRE_GTID_SOURCE: ${{ matrix.shard == 2 && '1' || '' }}
         run: |
           mkdir -p /tmp/mysql-it-shard
           bash scripts/mysql-integration-shard.sh run ${{ matrix.shard }} /tmp/mysql-it-shard/mysql-it.out
@@ -531,6 +577,10 @@ jobs:
             || { echo "FATAL: source-flavor refusal test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestOne_SourceFlavor_mysqlDetectedWhenUndeclared ' /tmp/mysql-it.out \
             || { echo "FATAL: source-flavor detection test did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationFlashbackRoutedUnchangedRealCapture_2085 ' /tmp/mysql-it.out \
+            || { echo "FATAL: read routing by table over a real capture did not run: is the GTID source in the shard that runs it? (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationFlashbackCaptureWatermark_realGTIDSets_2085 ' /tmp/mysql-it.out \
+            || { echo "FATAL: the capture watermark test over real GTID sets did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationSQLCompareGeneratedNames ' /tmp/mysql-it.out \
             || { echo "FATAL: read-routing generated-column names test did not run (false-green tripwire)" >&2; exit 1; }
 
