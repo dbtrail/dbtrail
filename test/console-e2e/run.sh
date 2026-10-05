@@ -50,8 +50,12 @@ export E2E_ARTIFACT_DIR="${E2E_ARTIFACT_DIR:-${RUNNER_TEMP:-/tmp}}"
 mysql_exec() { docker exec -i "$MYSQL_CONTAINER" mysql -uroot -ptestroot "$@" 2>/dev/null; }
 
 DAEMON_PID=""
+DAEMON2_PID=""
+STATE_DIR2=""
 cleanup() {
   [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null || true
+  [ -n "$DAEMON2_PID" ] && kill "$DAEMON2_PID" 2>/dev/null || true
+  [ -n "$STATE_DIR2" ] && rm -rf "$STATE_DIR2" 2>/dev/null || true
   mysql_exec -e "DROP DATABASE IF EXISTS $IDX_DB;" >/dev/null 2>&1 || true
   mysql_exec -e "DROP DATABASE IF EXISTS $ARC_DB;" >/dev/null 2>&1 || true
   rm -f "$SERVERS_FILE" 2>/dev/null || true
@@ -241,6 +245,32 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
+# A second daemon with NO --flashback-listen, for the scene that turns the
+# MySQL port on from the web interface (#2101): the main one is given the
+# port's address at startup, where the panel shows it as fixed. It has its own
+# state files and no servers; it shares the index database, which a daemon
+# with nothing to supervise only reads.
+PORT2="${E2E_PORT2:-8092}"
+SQLPORT="${E2E_SQLPORT:-13319}"
+STATE_DIR2="$(mktemp -d -t console-e2e-state2.XXXXXX)"
+echo "==> launch a second watch daemon on :$PORT2 (no MySQL port at startup)"
+"$CONSOLE_BIN" watch \
+  --index-dsn "${BASE_DSN}/${IDX_DB}" \
+  --console-listen "127.0.0.1:$PORT2" \
+  --console-token "$TOKEN" \
+  --console-servers-file "$STATE_DIR2/console-servers.yaml" \
+  --console-auth-file "$STATE_DIR2/console-auth.yaml" \
+  --console-mcp-token-file "$STATE_DIR2/console-mcp-token.yaml" \
+  --console-allow-setup >"$E2E_ARTIFACT_DIR/console-e2e-daemon2.log" 2>&1 &
+DAEMON2_PID=$!
+for i in $(seq 1 30); do
+  if curl -fsS -o /dev/null "http://127.0.0.1:$PORT2/api/healthz" 2>/dev/null; then break; fi
+  if ! kill -0 "$DAEMON2_PID" 2>/dev/null; then
+    echo "second daemon exited early; log:" >&2; cat "$E2E_ARTIFACT_DIR/console-e2e-daemon2.log" >&2; exit 1
+  fi
+  sleep 1
+done
+
 echo "==> seed a monitored source (per-source index left unprovisioned)"
 curl -fsS -X POST \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -259,4 +289,5 @@ cd "$HERE"
 CONSOLE_URL="http://127.0.0.1:$PORT" E2E_ARC_DB="$ARC_DB" \
   E2E_ARC_GAP_SINCE="$ARC_GAP_SINCE" E2E_ARC_GAP_UNTIL="$ARC_GAP_UNTIL" CONSOLE_TOKEN="$TOKEN" \
   E2E_FIX_SCHEMA="$FIX_SCHEMA" E2E_TT_AT="$TT_AT" E2E_BASELINE_DIR="$BASELINE_ROOT" \
-  E2E_IDX_DB="$IDX_DB" E2E_MYSQL_CONTAINER="$MYSQL_CONTAINER" E2E_FLASHBACK_PORT="$FLASHBACK_PORT" node console_e2e.mjs
+  E2E_IDX_DB="$IDX_DB" E2E_MYSQL_CONTAINER="$MYSQL_CONTAINER" E2E_FLASHBACK_PORT="$FLASHBACK_PORT" \
+  E2E_PORT2_URL="http://127.0.0.1:$PORT2" E2E_SQLPORT="$SQLPORT" node console_e2e.mjs
