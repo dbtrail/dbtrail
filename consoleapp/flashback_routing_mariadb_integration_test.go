@@ -125,13 +125,18 @@ func TestIntegrationFlashbackReadRoutingMariaDBSource(t *testing.T) {
 	if got := first("SELECT status, count(*) FROM orders WHERE status <> ? GROUP BY status", "zz"); got != "copy" {
 		t.Errorf("prepared full scan answered %q, want copy", got)
 	}
-	// A join with no scan in it: two rows read by primary key, one per
-	// table. Only the rows read across the join (2, the threshold here)
-	// send it to the copy; each table alone is a one-row lookup.
-	if got := first("SELECT a.status FROM orders a JOIN orders b ON b.id = a.id WHERE a.id = 1"); got != "copy" {
+	// A join with no scan in it: a primary key range of two rows, then one
+	// row by key for each. Only the rows read across the join (4, over the
+	// threshold of 2) send it to the copy; neither table is scanned whole.
+	if got := first("SELECT a.status FROM orders a JOIN orders b ON b.id = a.id WHERE a.id BETWEEN 2 AND 3"); got != "copy" {
 		t.Errorf("join answered %q, want copy: the rows read across a MariaDB join were not counted", got)
 	}
-	if got := first("SELECT a.status FROM orders a JOIN orders b ON b.id = a.id WHERE a.id = ?", 2); got != "copy" {
+	if got := first("SELECT a.status FROM orders a JOIN orders b ON b.id = a.id WHERE a.id BETWEEN ? AND ?", 2, 3); got != "copy" {
 		t.Errorf("prepared join answered %q, want copy", got)
+	}
+	// The same lookup by one whole key reads each table once before the
+	// plan starts: no join to count, the source answers.
+	if got := first("SELECT a.status FROM orders a JOIN orders b ON b.id = a.id WHERE a.id = 1"); got != "live" {
+		t.Errorf("point lookup joined to itself answered %q, want live (the source)", got)
 	}
 }
