@@ -644,13 +644,16 @@ When it applies and what it costs:
   limit under about a minute this rule rarely applies.
 - Each such statement reads the index a few times (capture's state, the
   partition list, the schema changes since the snapshot, and one lookup per
-  table). On an index of two million events over a week of hourly partitions
-  the lookup took 0.4 ms for a table never written and 2 ms for a table with
-  changes. The slow case is a table that received a very large load in the
-  two hours before its snapshot and nothing since: the lookup walks those
-  index entries each time (0.24 s for half a million of them). All the reads
-  of one statement share a two-second budget; past it the statement goes to
-  MySQL.
+  table). Measured on an index of 2.5 million events over a week of hourly
+  partitions, on MySQL 8.4: about 5 ms in all for one table and 6 ms for
+  three, whether they changed or not. The slow case is a table that received
+  a very large load in the two hours before its snapshot and nothing since:
+  the lookup walks those index entries every time. For half a million of
+  them that took 0.25 s when the table's file came from a snapshot refresh
+  and 1.5 s when it came from a full read of the source (a refresh records
+  how far into the index it got, which lets MySQL skip the rows without
+  reading them; a full read has nothing to record). All the reads of one
+  statement share a two-second budget; past it the statement goes to MySQL.
 - The statement takes one of the copy's slots while it is checked, as a heavy
   read within the limit does.
 

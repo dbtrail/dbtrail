@@ -37,11 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `expensive_plan`, on the Connect page and in
   `bintrail_read_routing_decisions_total`; `copy_too_old` keeps counting
   the ones that went to MySQL, and its debug log line names the table that
-  changed or what could not be confirmed. Measured on an index of two
-  million events over a week of hourly partitions: the per-table lookup
-  takes 0.4 ms for a table never written and 2 ms for one with changes;
-  0.24 s for a table that took half a million changes in the two hours
-  before its snapshot and none since, the slow case. See
+  changed or what could not be confirmed. Measured on an index of 2.5
+  million events over a week of hourly partitions (MySQL 8.4): the whole
+  check takes about 5 ms for one table and 6 ms for three. The slow case is
+  a table that took a very large load in the two hours before its snapshot
+  and none since: 0.25 s for half a million changes when its file came from
+  a refresh, 1.5 s when it came from a full read. Past a two-second budget
+  the statement goes to MySQL. See
   [Past the limit](time-travel-sql.md#past-the-limit-tables-that-have-not-changed).
 - **Read routing: statements with backtick-quoted names can be served by
   the copy** (#2081). Most ORMs and drivers quote every name with
