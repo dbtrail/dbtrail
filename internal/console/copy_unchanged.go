@@ -3,6 +3,7 @@ package console
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -41,7 +42,8 @@ import (
 //     file), which is exactly where a refresh would resume it from;
 //   - the index holds no row event of the table at or after that position,
 //     asked the way the refresh asks (query.Options.SincePos, with its coarse
-//     time floor and its event-id floor), and no DDL that names it;
+//     time floor and its event-id floor), and no DDL that names it, placed
+//     by position alone;
 //   - the index still holds that whole window (no partition of it rotated
 //     away), captured it without a loss (no gap, no dropped event since the
 //     table's rows were last read from the source), from the same server;
@@ -51,10 +53,19 @@ import (
 //   - the snapshot was taken at one point in time and is not knowingly
 //     incomplete.
 //
-// What is NOT covered, because no record of it exists anywhere: a write made
-// with binary logging off (SET sql_log_bin = 0), and a statement-format
-// write issued under a system schema as default database. Neither reaches
-// the index, here or for any other reader of it.
+// What is NOT covered:
+//
+//   - a write no record of exists anywhere: one made with binary logging off
+//     (SET sql_log_bin = 0), and a statement-format write issued under a
+//     system schema as default database. Neither reaches the index, for any
+//     reader of it. Under the age rule such a write is missing from the
+//     copy's answer for at most the limit; here, for as long as the snapshot
+//     is not refreshed. A source that filters its binlog (binlog-do-db,
+//     binlog-ignore-db) has no watermark for that reason;
+//   - a row event that ran more than the lookup's time floor before the
+//     snapshot (the stamp's hour, minus one hour) and committed after it.
+//     The refresh has the same margin (#797), so the copy itself would not
+//     fold that event in either.
 
 // CaptureWatermark is what is known about how far capture has read a
 // server's source.
@@ -83,23 +94,57 @@ type CaptureWatermarkReporter interface {
 // index). Past it the answer is "cannot say".
 const copyUnchangedTimeout = 2 * time.Second
 
+// copyFaultEvery is how often one server's faults are logged at Warn: the
+// question is asked per statement, and a fault that lasts would otherwise
+// write a line for each.
+const copyFaultEvery = time.Minute
+
+// copyFaultLog logs a fault of the question at Warn once per copyFaultEvery
+// and server, and at Debug in between.
+type copyFaultLog struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+func (l *copyFaultLog) warn(server, msg string, args ...any) {
+	now := time.Now()
+	l.mu.Lock()
+	quiet := now.Sub(l.last[server]) < copyFaultEvery
+	if !quiet {
+		if l.last == nil {
+			l.last = map[string]time.Time{}
+		}
+		l.last[server] = now
+	}
+	l.mu.Unlock()
+	if quiet {
+		slog.Debug(msg, args...)
+		return
+	}
+	slog.Warn(msg, append(args, "note", "logged at most once a minute per server")...)
+}
+
 // copyCutMemoMax bounds the memo of footers; past it the memo starts over.
 const copyCutMemoMax = 4096
 
 // copyCut is where one table's view stops: the position a refresh would
 // resume it from, and what else its files say that the question needs.
 type copyCut struct {
-	// anchor is the binlog coordinate; since the coarse time floor beside it
-	// (the writing run's stamp); lastEventID the index floor (0: none).
+	// anchor is the binlog coordinate, and lastEventID the id of the last
+	// event of the table folded into these files (0: none on record).
 	anchor      query.BinlogPos
-	since       time.Time
 	lastEventID uint64
+	// stamp is when the files were written, on the WRITER's clock. Not a
+	// time the index can be searched from: see copyLookupSince.
+	stamp time.Time
 	// sourceRead is when the table's rows last came from a real read of the
 	// source: a dropped event older than that was read again.
 	sourceRead time.Time
 	// refusal says why this table cannot be vouched for, whatever the index
-	// holds; "" when it can.
+	// holds; "" when it can. fault is set with it when the reason is a file
+	// that could not be read, which is worth a line in the log.
 	refusal string
+	fault   error
 }
 
 // copyCutKey identifies the bytes a cut was read from: a snapshot's files are
@@ -159,9 +204,7 @@ func copyCutOf(t views.BaselineTable, footer func(path string) (baseline.DumpMet
 	name := t.Schema + "." + t.Table
 	base, err := footer(t.Path)
 	if err != nil {
-		slog.Warn("read routing: a snapshot file's footer could not be read; its table is not vouched for as unchanged",
-			"table", name, "path", t.Path, "error", err)
-		return refuse("the snapshot file of %s could not be read", name)
+		return copyCut{refusal: fmt.Sprintf("the snapshot file of %s could not be read", name), fault: fmt.Errorf("%s: %w", t.Path, err)}
 	}
 	at := base
 	var last *baseline.DumpMetadata
@@ -173,9 +216,8 @@ func copyCutOf(t views.BaselineTable, footer func(path string) (baseline.DumpMet
 	case t.Delta:
 		pair, err := footer(t.DeltaFiles[len(t.DeltaFiles)-1].Upserts)
 		if err != nil {
-			slog.Warn("read routing: a snapshot file's footer could not be read; its table is not vouched for as unchanged",
-				"table", name, "path", t.DeltaFiles[len(t.DeltaFiles)-1].Upserts, "error", err)
-			return refuse("the snapshot files of %s could not be read", name)
+			return copyCut{refusal: fmt.Sprintf("the snapshot files of %s could not be read", name),
+				fault: fmt.Errorf("%s: %w", t.DeltaFiles[len(t.DeltaFiles)-1].Upserts, err)}
 		}
 		at, last = pair, &pair
 	}
@@ -199,18 +241,67 @@ func copyCutOf(t views.BaselineTable, footer func(path string) (baseline.DumpMet
 	}
 	return copyCut{
 		anchor:      query.BinlogPos{File: at.BinlogFile, Pos: uint64(at.BinlogPos)},
-		since:       at.SnapshotTimestamp,
+		stamp:       at.SnapshotTimestamp,
 		lastEventID: at.LastEventID,
 		sourceRead:  read.At,
 	}
 }
 
-// copyTimeFloor is the oldest event_timestamp the lookup for a cut can
-// reach: buildQuery's own floor for a position-anchored fetch (the stamp's
-// hour, minus one more hour). Everything from there on must still be in the
-// index for "no event found" to mean "no event".
+// copyTimeFloor is the oldest event_timestamp the lookup that starts from
+// since can reach: buildQuery's own floor for a position-anchored fetch
+// (since's hour, minus one more hour). Everything from there on must still
+// be in the index for "no event found" to mean "no event".
 func copyTimeFloor(since time.Time) time.Time {
 	return since.UTC().Truncate(time.Hour).Add(-time.Hour)
+}
+
+// copyLookupSince is the time the lookup for one table starts from: an
+// instant on the SOURCE's clock that no event positioned after the cut can
+// have run more than the engine's margin before.
+//
+// The writer's stamp is not that instant. A refresh stamps its own wall
+// clock, and cuts where the index stood: when capture was hours behind, the
+// cut sits at an event that ran hours before the stamp, and the events
+// capture indexed afterwards ran between the two. A lookup that starts at
+// the stamp never sees them. So the time comes from the source's side:
+//
+//   - a table with a last folded event on record: that event's own
+//     execution time, read from the index. Every event after it in the
+//     binlog committed after it, so none ran earlier than it by more than
+//     the length of its own transaction, which is the margin the engine
+//     keeps. The event must still be in the index, be this table's, and sit
+//     before the cut; otherwise nothing places the cut in time;
+//   - a table with none: when its rows were last read from the source, a
+//     dump's own start. A dump reads the source itself, so capture's lag
+//     plays no part. For a file a refresh rewrote without ever folding an
+//     event that is an earlier instant than the cut needs, which only
+//     widens the search.
+//
+// The stamp still caps the result: it cannot be later than the files.
+func copyLookupSince(ctx context.Context, db *sql.DB, t views.BaselineTable, cut copyCut) (since time.Time, refusal string, err error) {
+	name := t.Schema + "." + t.Table
+	since = cut.sourceRead
+	if cut.lastEventID > 0 {
+		var schema, table string
+		var at query.BinlogPos
+		err := db.QueryRowContext(ctx,
+			`SELECT event_timestamp, schema_name, table_name, binlog_file, start_pos FROM binlog_events WHERE event_id = ?`,
+			cut.lastEventID).Scan(&since, &schema, &table, &at.File, &at.Pos)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return time.Time{}, fmt.Sprintf("the index no longer holds the last change the snapshot of %s includes, so later ones cannot be placed", name), nil
+		case err != nil:
+			return time.Time{}, "", err
+		case !strings.EqualFold(schema, t.Schema) || !strings.EqualFold(table, t.Table):
+			return time.Time{}, fmt.Sprintf("the last change the snapshot of %s records is another table's in this index", name), nil
+		case cut.anchor.AtOrBefore(at):
+			return time.Time{}, fmt.Sprintf("the last change the snapshot of %s records is not before its binlog position in this index", name), nil
+		}
+	}
+	if cut.stamp.Before(since) {
+		since = cut.stamp
+	}
+	return since, "", nil
 }
 
 // captureLossSince says why the capture's own record rules out vouching for
@@ -252,7 +343,8 @@ type ddlRow struct {
 // written by an older build) matches any. The statement's text is searched
 // too: ALTER TABLE a RENAME TO b is recorded under a alone.
 func ddlTouches(r ddlRow, schema, table string, cut query.BinlogPos) bool {
-	if r.at.AtOrBefore(cut) {
+	// A row with no binlog file cannot be placed: it counts as after.
+	if r.at.File != "" && r.at.AtOrBefore(cut) {
 		return false
 	}
 	if strings.EqualFold(r.table, table) && (r.schema == "" || strings.EqualFold(r.schema, schema)) {
@@ -285,15 +377,28 @@ func containsIdentifier(text, name string) bool {
 }
 
 // copyDDLScanMax bounds the schema_changes rows one question reads; more
-// than that since the oldest cut is answered "cannot say".
+// than that after the oldest cut is answered "cannot say".
 const copyDDLScanMax = 2000
 
-// loadDDLSince reads the schema_changes rows detected at or after floor,
-// which is a time floor only: the caller places each by position.
-func loadDDLSince(ctx context.Context, db *sql.DB, floor time.Time) (rows []ddlRow, complete bool, err error) {
+// loadDDLAfter reads the schema_changes rows positioned after cut, which is
+// the oldest cut of the tables asked about (and any row with no position at
+// all): the caller places each row against each table's own. By position
+// and by nothing else. A row's
+// detected_at is when its statement STARTED, and an ALTER that ran for hours
+// before the snapshot and finished after it carries a time far below any
+// time floor, while its position is after the cut. The table is small (one
+// row per DDL statement and table), so reading it with no index costs
+// little; "later file" is length first, then name, as in
+// query.BinlogPos.
+func loadDDLAfter(ctx context.Context, db *sql.DB, cut query.BinlogPos) (rows []ddlRow, complete bool, err error) {
 	rs, err := db.QueryContext(ctx,
 		`SELECT schema_name, table_name, ddl_query, binlog_file, binlog_pos
-		   FROM schema_changes WHERE detected_at >= ? ORDER BY id LIMIT ?`, floor, copyDDLScanMax+1)
+		   FROM schema_changes
+		  WHERE binlog_file = ''
+		     OR CHAR_LENGTH(binlog_file) > CHAR_LENGTH(?)
+		     OR (CHAR_LENGTH(binlog_file) = CHAR_LENGTH(?) AND binlog_file > ?)
+		     OR (binlog_file = ? AND binlog_pos > ?)
+		  ORDER BY id LIMIT ?`, cut.File, cut.File, cut.File, cut.File, cut.Pos, copyDDLScanMax+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -311,9 +416,9 @@ func loadDDLSince(ctx context.Context, db *sql.DB, floor time.Time) (rows []ddlR
 	return rows, len(rows) <= copyDDLScanMax, nil
 }
 
-// captureWatermarkFor asks the reporter about server id, or says why nobody
-// can be asked.
-func (s *Server) captureWatermarkFor(ctx context.Context, id string) CaptureWatermark {
+// captureWatermarkFor asks the reporter about server id, whose index b is a
+// connection to, or says why nobody can be asked.
+func (s *Server) captureWatermarkFor(ctx context.Context, id string, b *bundle) CaptureWatermark {
 	reporter, ok := s.captureStatus.(CaptureWatermarkReporter)
 	if !ok {
 		return CaptureWatermark{Detail: "this process is not connected to the source"}
@@ -333,6 +438,12 @@ func (s *Server) captureWatermarkFor(ctx context.Context, id string) CaptureWate
 		if !found {
 			return CaptureWatermark{Detail: "the server is not known"}
 		}
+	}
+	if b != nil && b.dsn != "" && entry.DSN != b.dsn {
+		// The watermark is read through the server's index as it is
+		// registered now, and the events through the connection this caller
+		// holds: after an edit of the index they are two indexes.
+		return CaptureWatermark{Detail: "the server's index connection changed; reconnect"}
 	}
 	return reporter.CaptureWatermark(ctx, entry)
 }
@@ -359,37 +470,44 @@ func captureBehind(wm CaptureWatermark, now time.Time, within time.Duration) str
 // it, as of an instant no longer ago than within; else why not. tables are
 // the ones the statement's views read, from the views input that will run.
 func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables []views.BaselineTable, within time.Duration) string {
-	ctx, cancel := context.WithTimeout(ctx, copyUnchangedTimeout)
-	defer cancel()
 	// The watermark FIRST, and the index after: what capture had recorded at
-	// the watermark is in the index by the time it is asked.
+	// the watermark is in the index by the time it is asked. Outside the
+	// budget below: the answer is normally a remembered one, and when it is
+	// not, the read of the source has its own bound.
 	now := time.Now()
-	wm := s.captureWatermarkFor(ctx, id)
+	wm := s.captureWatermarkFor(ctx, id, b)
 	if why := captureBehind(wm, now, within); why != "" {
 		return why
 	}
 	if len(tables) == 0 {
 		return ""
 	}
+	ctx, cancel := context.WithTimeout(ctx, copyUnchangedTimeout)
+	defer cancel()
 	cuts := make([]copyCut, len(tables))
-	var floor, sourceRead time.Time
+	var sourceRead time.Time
+	var oldestCut query.BinlogPos
 	for i, t := range tables {
 		if wm.Captures != nil && !wm.Captures(t.Schema, t.Table) {
 			return fmt.Sprintf("%s.%s is outside what capture records", t.Schema, t.Table)
 		}
 		cuts[i] = copyCutOf(t, s.copyCuts.footer)
+		if cuts[i].fault != nil {
+			s.copyFaults.warn(id, "read routing: a snapshot file's footer could not be read; statements over its table are not vouched for and follow the age rule",
+				"server", id, "table", t.Schema+"."+t.Table, "error", cuts[i].fault)
+		}
 		if cuts[i].refusal != "" {
 			return cuts[i].refusal
 		}
-		if f := copyTimeFloor(cuts[i].since); floor.IsZero() || f.Before(floor) {
-			floor = f
+		if i == 0 || cuts[i].anchor.AtOrBefore(oldestCut) {
+			oldestCut = cuts[i].anchor
 		}
 		if r := cuts[i].sourceRead; sourceRead.IsZero() || r.Before(sourceRead) {
 			sourceRead = r
 		}
 	}
 	unreadable := func(what string, err error) string {
-		slog.Warn("read routing: the index could not answer whether a statement's tables changed since their snapshot; the statement is not vouched for",
+		s.copyFaults.warn(id, "read routing: the index could not answer whether a statement's tables changed since their snapshot; such statements are not vouched for and follow the age rule",
 			"server", id, "reading", what, "error", err)
 		return "the index could not be read (" + what + ")"
 	}
@@ -397,33 +515,35 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 	if err != nil {
 		return unreadable("the capture's state", err)
 	}
+	// A row in stream_state is also what makes the event-id floor an order:
+	// a stream wrote this index (query.StreamCaptured).
 	if why := captureLossSince(st, sourceRead); why != "" {
 		return why
 	}
-	// The event-id floor is only an order where a stream wrote the index.
-	// LoadStreamState found its row, so one did.
-	var changedServer int
-	err = b.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM bintrail_server_changes WHERE detected_at >= ?`, floor).Scan(&changedServer)
-	if err != nil {
-		return unreadable("the source's identity record", err)
-	}
-	if changedServer > 0 {
-		return "the source server's identity changed since the snapshot, so binlog positions before and after cannot be compared"
-	}
-	ddl, complete, err := loadDDLSince(ctx, b.db, floor)
+	ddl, complete, err := loadDDLAfter(ctx, b.db, oldestCut)
 	if err != nil {
 		return unreadable("the schema changes", err)
 	}
 	if !complete {
 		return "too many schema changes since the snapshot to check each one"
 	}
+	var floor time.Time
 	for i, t := range tables {
 		for _, r := range ddl {
 			if ddlTouches(r, t.Schema, t.Table, cuts[i].anchor) {
 				return fmt.Sprintf("%s.%s had a schema change since its snapshot", t.Schema, t.Table)
 			}
 		}
-		since := cuts[i].since
+		since, refusal, err := copyLookupSince(ctx, b.db, t, cuts[i])
+		if err != nil {
+			return unreadable("the last change of "+t.Schema+"."+t.Table, err)
+		}
+		if refusal != "" {
+			return refusal
+		}
+		if f := copyTimeFloor(since); floor.IsZero() || f.Before(floor) {
+			floor = f
+		}
 		rows, err := b.engine.Fetch(ctx, query.Options{
 			Schema: t.Schema, Table: t.Table,
 			Since: &since, SincePos: &cuts[i].anchor, SinceEventID: cuts[i].lastEventID,
@@ -435,6 +555,19 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 		if len(rows) > 0 {
 			return fmt.Sprintf("%s.%s changed since its snapshot", t.Schema, t.Table)
 		}
+	}
+	// A source that was replaced since the oldest of those times: its binlog
+	// files are numbered anew, and a position on one server says nothing
+	// about the other. Compared as an instant, not as the session's wall
+	// clock: detected_at is a TIMESTAMP, which the index server reads in its
+	// own time zone.
+	var changedServer int
+	err = b.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM bintrail_server_changes WHERE UNIX_TIMESTAMP(detected_at) >= ?`, floor.Unix()).Scan(&changedServer)
+	if err != nil {
+		return unreadable("the source's identity record", err)
+	}
+	if changedServer > 0 {
+		return "the source server's identity changed since the snapshot, so binlog positions before and after cannot be compared"
 	}
 	// Last, and after the lookups on purpose: rotation only ever drops the
 	// oldest partitions, so a window the index still holds now is one it

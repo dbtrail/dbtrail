@@ -106,7 +106,7 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 		// date settles it for every statement, and one that will be refused
 		// must not wait in line for the copy first. The statement's own
 		// tables are asked about once the worker has parsed it.
-		if why := captureBehind(q.s.captureWatermarkFor(ctx, q.id), time.Now(), sess.UnchangedWithin); why != "" {
+		if why := captureBehind(q.s.captureWatermarkFor(ctx, q.id, q.b), time.Now(), sess.UnchangedWithin); why != "" {
 			return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: why}
 		}
 		unchanged = func(ctx context.Context, tables []views.BaselineTable) string {

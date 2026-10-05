@@ -362,6 +362,8 @@ type Server struct {
 	// copyCuts memoizes snapshot files' footers for the read router's
 	// "unchanged since the snapshot" question (#2085, copy_unchanged.go).
 	copyCuts copyCutMemo
+	// copyFaults limits the warnings of that question's faults.
+	copyFaults copyFaultLog
 
 	listen     string
 	token      string

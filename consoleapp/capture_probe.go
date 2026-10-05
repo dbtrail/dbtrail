@@ -140,6 +140,12 @@ type captureProbeResult struct {
 	// transactions it counts as executed that no binlog carries, so capture
 	// can never read them (#1794).
 	purged string
+	// logsAll is true when the source was asked for its binary log filters
+	// and has none; logFilter says otherwise why not (a filter, or the read
+	// that failed). Only the capture status read asks, for the watermark
+	// (#2085, capture_watermark.go).
+	logsAll   bool
+	logFilter string
 }
 
 // probeCapture is a package variable for the reason readIndexMark is: it

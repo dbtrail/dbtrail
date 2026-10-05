@@ -79,6 +79,10 @@ type captureSlot struct {
 	pending *captureSample
 	// throughWhy says why through is zero, for the reader of a trace.
 	throughWhy string
+	// lastCaptured is the capture's saved GTID set at the last read that
+	// reached the source: a later one that does not include it went
+	// backward.
+	lastCaptured string
 }
 
 // captureStatusReporter is console.CaptureStatusReporter for the watch
@@ -211,7 +215,7 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 	done := make(chan struct{})
 	slot.flight = done
 	prev := slot.prev
-	through, pending := slot.through, slot.pending
+	through, pending, lastCaptured := slot.through, slot.pending, slot.lastCaptured
 	c.mu.Unlock()
 	// Deferred, so that whatever happens below, the next load reads again
 	// instead of waiting on a read that is over.
@@ -245,11 +249,14 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 	at := now()
 	answer, next := captureStatusFrom(r, prev, at)
 	answer.ServerID = e.ID
-	through, pending, throughWhy := advanceWatermark(r, through, pending, asked)
+	through, pending, throughWhy := advanceWatermark(r, through, pending, lastCaptured, asked)
+	if r.executed != "" {
+		lastCaptured = r.captured
+	}
 
 	c.mu.Lock()
 	slot.answer, slot.at, slot.has, slot.prev = answer, at, true, next
-	slot.through, slot.pending, slot.throughWhy = through, pending, throughWhy
+	slot.through, slot.pending, slot.throughWhy, slot.lastCaptured = through, pending, throughWhy, lastCaptured
 	slot.ttl = captureStatusTTL
 	if answer.RetryInSeconds > 0 {
 		slot.ttl = captureStatusPendingTTL
@@ -460,5 +467,16 @@ func headFromState(ctx context.Context, idx *sql.DB, st *status.StreamStateInfo,
 	if ok, detail := checkpointComparable(st); !ok {
 		return captureProbeResult{detail: detail}, nil
 	}
-	return compareWithSource(ctx, idx, st, openSource, readExecutedAndPurgedGTIDs)
+	// The binary log's filters ride along with the GTID sets: a source that
+	// leaves writes out of its binlog has no watermark (#2085).
+	logsAll, logFilter := false, ""
+	r, err := compareWithSource(ctx, idx, st, openSource, func(ctx context.Context, db *sql.DB) (string, string, error) {
+		executed, purged, err := readExecutedAndPurgedGTIDs(ctx, db)
+		if err == nil {
+			logsAll, logFilter = readBinlogFilters(ctx, db)
+		}
+		return executed, purged, err
+	})
+	r.logsAll, r.logFilter = logsAll, logFilter
+	return r, err
 }

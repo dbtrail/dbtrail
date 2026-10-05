@@ -21,16 +21,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the limit (the source's GTID set against capture's saved position, asked
   at most once every 30 seconds per server); the index holds no row change
   and no schema change of the table at or after the binlog position its
-  snapshot file records (by position, so a transaction that ran before the
-  snapshot and committed after it counts); the index still holds that whole
+  snapshot file records (by position, so a transaction that ran shortly
+  before the snapshot and committed after it counts, within the hour of
+  margin a refresh uses, and an `ALTER` counts however long it ran); the index still holds that whole
   window; capture recorded no gap and no dropped event since the table was
   last read from the source; the table has no foreign key that cascades
   into it and is not outside the capture's filters; and the snapshot was
   taken at one point in time with its position on record. The copy's answer is then
   what MySQL held at the moment capture was last confirmed complete, never
   older than the limit. Applies to a MySQL source captured in GTID mode
-  whose index is not on the source server; a MariaDB source follows the age
-  rule alone. On a source that is being written the first heavy read after
+  whose index is not on the source server and which does not filter its
+  binary log; a MariaDB source follows the age rule alone. A table quiet for longer
+  than the index keeps its changes (`--rotate-retain`) follows the age rule
+  too: a refresh leaves its position where it was, and the index no longer
+  reaches back to it. A change the index never received and has no record
+  of (a write with `SET sql_log_bin = 0`, a row capture skipped with only a
+  warning) was missing from the copy's answers for at most the limit under
+  the age rule, and under this rule it is missing until that table's
+  snapshot is replaced; the docs list those cases. On a source that is being written the first heavy read after
   a quiet spell still goes to MySQL (confirming capture takes two reads of
   the source about half a minute apart). A statement answered this way is
   counted under the new reason `tables_unchanged`, apart from

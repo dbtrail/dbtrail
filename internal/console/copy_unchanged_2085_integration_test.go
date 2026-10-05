@@ -50,10 +50,9 @@ func newUnchangedRig(t *testing.T) *unchangedRig {
 	r := &unchangedRig{t: t, db: db, root: t.TempDir(),
 		stamp:  time.Now().UTC().Add(-72 * time.Hour).Truncate(time.Second),
 		anchor: query.BinlogPos{File: "binlog.000007", Pos: 4200}}
-	// Hourly partitions from two hours before the snapshot's hour to now:
-	// the index still holds the whole window. One statement, as the daemon's
-	// own index is partitioned.
-	r.partitionFrom(r.stamp.Truncate(time.Hour).Add(-2 * time.Hour))
+	// Hourly partitions from eight hours before the snapshot's hour to now:
+	// the index still holds the whole window, and some hours before it.
+	r.partitionFrom(r.stamp.Truncate(time.Hour).Add(-8 * time.Hour))
 	testutil.MustExec(t, db, `INSERT INTO stream_state (id, mode, binlog_file, binlog_position, gtid_set, events_indexed, last_checkpoint, server_id, capture_skips)
 		VALUES (1, 'gtid', 'binlog.000009', 100, '3e11fa47-71ca-11e1-9e33-c80aa9429562:1-50', 0, UTC_TIMESTAMP(), 1, '{}')`)
 	r.wm = &fakeWatermark{ago: 5 * time.Second}
@@ -124,6 +123,32 @@ func (r *unchangedRig) event(schema, table, file string, pos uint64, at time.Tim
 		schema, table, 2, "1", []byte(`["status"]`), []byte(`{"id":1,"status":"new"}`), []byte(`{"id":1,"status":"paid"}`))
 }
 
+// lastID is the id of the newest indexed event of shop.table.
+func (r *unchangedRig) lastID(table string) string {
+	r.t.Helper()
+	var id uint64
+	if err := r.db.QueryRow("SELECT MAX(event_id) FROM binlog_events WHERE schema_name = 'shop' AND table_name = ?", table).Scan(&id); err != nil {
+		r.t.Fatal(err)
+	}
+	return strconv.FormatUint(id, 10)
+}
+
+// rewrite replaces t's file with one whose footer is edited: what a refresh
+// writes over a table it already holds.
+func (r *unchangedRig) rewrite(t views.BaselineTable, edit func(md map[string]string)) {
+	r.t.Helper()
+	ddl := "CREATE TABLE `" + t.Table + "` (\n  `id` int NOT NULL,\n  `status` varchar(32) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n"
+	stamp := r.stamp.Format(time.RFC3339)
+	md := map[string]string{
+		baseline.MetaKeyBinlogFile: r.anchor.File, baseline.MetaKeyBinlogPos: strconv.FormatUint(r.anchor.Pos, 10),
+		baseline.MetaKeySnapshotTimestamp: stamp, baseline.MetaKeyLastDumpAt: r.stamp.Add(-6 * time.Hour).Format(time.RFC3339), baseline.MetaKeyFoldGeneration: "1",
+		baseline.MetaKeySnapshotProducer: baseline.ProducerReconstruct, baseline.MetaKeyLockMode: string(baseline.LockModeFTWRL),
+		baseline.MetaKeyCreateTableSQL: ddl,
+	}
+	edit(md)
+	r.write(t.Path, ddl, md)
+}
+
 func (r *unchangedRig) ask(tables ...views.BaselineTable) string {
 	r.t.Helper()
 	return r.s.copyUnchanged(context.Background(), r.b, bootServerID, tables, time.Minute)
@@ -186,15 +211,41 @@ func TestIntegrationCopyUnchanged_2085(t *testing.T) {
 		r.wantNot("shop."+busy.Table+" changed", quiet, busy)
 		r.wantNot("shop."+busy.Table+" changed", busy, quiet)
 	})
-	t.Run("the event-id floor in the footer does not hide a later change", func(t *testing.T) {
-		var maxID uint64
-		if err := r.db.QueryRow("SELECT COALESCE(MAX(event_id), 0) FROM binlog_events").Scan(&maxID); err != nil {
-			t.Fatal(err)
-		}
-		tb := r.table(func(md map[string]string) { md[baseline.MetaKeyLastEventID] = strconv.FormatUint(maxID, 10) })
+	t.Run("a refresh that ran while capture was hours behind", func(t *testing.T) {
+		// The refresh stamps its own clock and cuts where the index stood:
+		// at an event that ran five hours before the stamp. What capture
+		// indexes afterwards ran between the two, hours below any time
+		// derived from the stamp, and it is positioned after the cut.
+		tb := r.table(nil)
+		r.event("shop", tb.Table, "binlog.000008", 3000, r.stamp.Add(-5*time.Hour))
+		r.rewrite(tb, func(md map[string]string) {
+			md[baseline.MetaKeyBinlogFile], md[baseline.MetaKeyBinlogPos] = "binlog.000008", "3050"
+			md[baseline.MetaKeyLastEventID] = r.lastID(tb.Table)
+		})
 		r.wantUnchanged(tb)
-		r.event("shop", tb.Table, "binlog.000008", 700, after)
-		r.wantNot("changed since its snapshot", tb)
+		r.event("shop", tb.Table, "binlog.000008", 3100, r.stamp.Add(-4*time.Hour))
+		r.wantNot("shop."+tb.Table+" changed since its snapshot", tb)
+	})
+	t.Run("a last folded event that does not place the cut", func(t *testing.T) {
+		gone, other, late, never := r.table(nil), r.table(nil), r.table(nil), r.table(nil)
+		// No longer in the index (rotated away with its partition).
+		r.rewrite(gone, func(md map[string]string) { md[baseline.MetaKeyLastEventID] = "999999999" })
+		r.wantNot("no longer holds the last change the snapshot of shop."+gone.Table, gone)
+		// In the index, and another table's: this footer is not this index's.
+		r.event("shop", "elsewhere", r.anchor.File, r.anchor.Pos-300, r.stamp.Add(-time.Hour))
+		r.rewrite(other, func(md map[string]string) { md[baseline.MetaKeyLastEventID] = r.lastID("elsewhere") })
+		r.wantNot("another table's", other)
+		// Positioned after the cut it is supposed to be before.
+		r.event("shop", late.Table, "binlog.000008", 200, after)
+		r.rewrite(late, func(md map[string]string) { md[baseline.MetaKeyLastEventID] = r.lastID(late.Table) })
+		r.wantNot("not before its binlog position", late)
+		// Rewritten by a refresh that never folded an event into it: only
+		// the dump it descends from dates it, and that one is older than
+		// the index reaches.
+		r.rewrite(never, func(md map[string]string) {
+			md[baseline.MetaKeyLastDumpAt] = r.stamp.Add(-96 * time.Hour).Format(time.RFC3339)
+		})
+		r.wantNot("no longer holds every change", never)
 	})
 	t.Run("a chain of deltas is cut at its last pair", func(t *testing.T) {
 		tb := r.table(nil)
@@ -217,11 +268,17 @@ func TestIntegrationCopyUnchanged_2085(t *testing.T) {
 	})
 
 	t.Run("schema changes", func(t *testing.T) {
-		ddl := func(schema, table, stmt, file string, pos uint64) {
+		ddlAt := func(at time.Time, schema, table, stmt, file string, pos uint64) {
 			testutil.MustExec(t, r.db, `INSERT INTO schema_changes (detected_at, binlog_file, binlog_pos, schema_name, table_name, ddl_type, ddl_query) VALUES (?, ?, ?, ?, ?, 'ALTER TABLE', ?)`,
-				after.Format("2006-01-02 15:04:05"), file, pos, schema, table, stmt)
+				at.Format("2006-01-02 15:04:05"), file, pos, schema, table, stmt)
 		}
-		before, truncated, renamedInto, typed, bystander := r.table(nil), r.table(nil), r.table(nil), r.table(nil), r.table(nil)
+		ddl := func(schema, table, stmt, file string, pos uint64) { ddlAt(after, schema, table, stmt, file, pos) }
+		before, truncated, renamedInto, typed, bystander, slow := r.table(nil), r.table(nil), r.table(nil), r.table(nil), r.table(nil), r.table(nil)
+		// An ALTER that started six hours before the snapshot and finished
+		// after it: its row carries the time it STARTED, far below any time
+		// floor, and a position after the snapshot's.
+		ddlAt(r.stamp.Add(-6*time.Hour), "shop", slow.Table, "ALTER TABLE "+slow.Table+" MODIFY status varchar(64)", "binlog.000008", 40)
+		r.wantNot("shop."+slow.Table+" had a schema change", slow)
 		// A change no row event carries: TRUNCATE empties the table.
 		ddl("shop", truncated.Table, "TRUNCATE TABLE "+truncated.Table, "binlog.000008", 50)
 		// Recorded under the OLD name only.
@@ -230,6 +287,10 @@ func TestIntegrationCopyUnchanged_2085(t *testing.T) {
 		ddl("", strings.ToUpper(typed.Table), "alter table "+strings.ToUpper(typed.Table)+" add c int", "binlog.000008", 70)
 		// Before the position: already in the snapshot.
 		ddl("shop", before.Table, "ALTER TABLE "+before.Table+" ADD c int", r.anchor.File, r.anchor.Pos-10)
+		// A row with no position at all cannot be placed before anything.
+		unplaced := r.table(nil)
+		ddl("shop", unplaced.Table, "ALTER TABLE "+unplaced.Table+" ADD c int", "", 0)
+		r.wantNot("shop."+unplaced.Table+" had a schema change", unplaced)
 		r.wantNot("shop."+truncated.Table+" had a schema change", truncated)
 		r.wantNot("shop."+renamedInto.Table+" had a schema change", renamedInto)
 		r.wantNot("shop."+typed.Table+" had a schema change", typed)
@@ -340,7 +401,7 @@ func TestIntegrationCopyUnchanged_2085(t *testing.T) {
 	t.Run("the index rotated the window away", func(t *testing.T) {
 		// Last: it drops the partitions every other case reads.
 		r.partitionFrom(r.stamp.Truncate(time.Hour))
-		r.wantNot("no longer holds every change", quiet)
+		r.wantNot("no longer holds", quiet)
 	})
 	t.Run("an index that cannot be read", func(t *testing.T) {
 		testutil.MustExec(t, r.db, "DROP TABLE bintrail_server_changes")

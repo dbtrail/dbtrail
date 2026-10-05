@@ -590,15 +590,22 @@ did before:
   decided by binlog position, not by time: each table file of a snapshot
   records the position it was read at, and the index is asked for a row
   change of that table at or after that position, the same question a
-  snapshot refresh asks. A transaction that ran before the snapshot and
-  committed after it counts as a change. So does any schema change that
-  names the table (`ALTER`, `TRUNCATE`, `DROP`, `RENAME`), which changes a
-  table without a row change.
+  snapshot refresh asks. A transaction that ran shortly before the snapshot
+  and committed after it counts as a change (the index is searched from the
+  hour before the snapshot's hour, the margin a refresh uses; a transaction
+  that stayed open longer than that before committing is missed, by the
+  refresh too). So does any schema change that names the table (`ALTER`,
+  `TRUNCATE`, `DROP`, `RENAME`), which changes a table without a row change:
+  those are placed by position alone, however long the statement ran.
 - **The index still holds everything since that position.** If rotation has
   already dropped the partitions that cover it, changes may exist that the
   index no longer has. A table whose file was carried over from an older
-  snapshot is judged from that file's own position and date, not from the
-  newest snapshot's.
+  snapshot is judged from that file's own position, not from the newest
+  snapshot's. This is the limit to know: a snapshot refresh leaves a table
+  with no changes exactly as it was, position included, so a table that has
+  been quiet for longer than the index keeps its changes (`--rotate-retain`,
+  48 hours unless set) cannot be vouched for from the index, and follows the
+  age rule. A full snapshot gives every table a new position.
 - **Capture lost nothing in between.** A binlog gap, or an event capture read
   and dropped (the capture health on the Overview), since the table's rows
   were last read from the source, and the copy does not answer.
@@ -619,24 +626,45 @@ moment is not in it, exactly as a change made after a young snapshot is not
 in the copy's answer under the age rule. The next statement over that table
 goes to MySQL once the change reaches the index.
 
-Three things this does not see, because nothing records them: a write made
-with binary logging off (`SET sql_log_bin = 0`), a statement-format write
-issued while the default database is a system schema, and a table excluded
-from capture and included again in between. Use the age rule alone (a
-snapshot refreshed more often than the limit) on a source where those happen.
+This rule trusts the index to hold every change capture was given. What the
+index never received, and has no record of not receiving, it cannot see:
+
+- a write made with binary logging off (`SET sql_log_bin = 0`);
+- a statement-format write issued while the default database is a system
+  schema or one outside the capture's filters;
+- a table excluded from capture and included again in between, and a capture
+  restarted from a later position than it had reached;
+- a row capture could not decode and skipped with only a warning in the log
+  (a value in a legacy character set that does not convert);
+- a schema change (`TRUNCATE` included) whose record could not be written to
+  the index at that moment, which is also only a warning in the log;
+- a gap in capture whose record was cleared by stopping capture on that
+  server (Stop clears it) before a new full snapshot was taken.
+
+Under the age rule a change of that kind is missing from the copy's answers
+for at most the limit, until the next snapshot is within it. Under this rule
+it stays missing for as long as the snapshot of that table is not replaced,
+because nothing tells the port the table changed. On a source where those
+happen, refresh the snapshot more often than the limit so that only the age
+rule applies. A source that filters its binary log (`binlog-do-db`,
+`binlog-ignore-db`) is detected, and this rule is never applied to it.
 
 When it applies and what it costs:
 
 - Only a MySQL source captured in GTID mode, whose index is not on the source
   server itself. A MariaDB source, a source in binlog-position mode, one with
-  tagged GTIDs, and one that executed transactions capture never read (a dump
-  loaded with `SET @@GLOBAL.gtid_purged`) always follow the age rule.
+  tagged GTIDs, one that filters its binary log, and one that executed
+  transactions capture never read (a dump loaded with
+  `SET @@GLOBAL.gtid_purged`) always follow the age rule. The account DBTrail
+  captures with needs `REPLICATION CLIENT` on the source, which capture
+  already requires, to read the binary log's filters.
 - Only statements whose plan is expensive, and only past the limit. A cheap
   read, and any read while the snapshot is within the limit, costs nothing
   more than before.
 - The source is asked for its GTID set at most once every 30 seconds per
   server, the same read the Overview makes to say whether capture is up to
-  date. On a source that is being written, one read is not enough: capture
+  date. The statement that triggers a read waits for it (two short
+  connections, bounded at three seconds) before it is decided. On a source that is being written, one read is not enough: capture
   saves its position every few seconds, so the source is always a little
   ahead. The first read leaves a sample and a later read confirms capture
   reached it. The first heavy read after a quiet spell therefore goes to

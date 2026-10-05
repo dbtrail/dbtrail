@@ -59,12 +59,12 @@ func TestCopyCutOf(t *testing.T) {
 		want    copyCut
 	}{
 		{name: "a locked dump", table: table,
-			want: copyCut{anchor: query.BinlogPos{File: "binlog.000007", Pos: 4200}, since: cutStamp, sourceRead: cutStamp}},
+			want: copyCut{anchor: query.BinlogPos{File: "binlog.000007", Pos: 4200}, stamp: cutStamp, sourceRead: cutStamp}},
 		{name: "a chain: the LAST pair's position, stamp and event id; the base's read of the source", table: withChain,
-			want: copyCut{anchor: query.BinlogPos{File: "binlog.000009", Pos: 900}, since: pairStamp, lastEventID: 5150, sourceRead: cutStamp}},
+			want: copyCut{anchor: query.BinlogPos{File: "binlog.000009", Pos: 900}, stamp: pairStamp, lastEventID: 5150, sourceRead: cutStamp}},
 		{name: "a carried-forward file answers with its own stamp, not the directory's", table: table,
 			base: func(md *baseline.DumpMetadata) { md.SnapshotTimestamp = cutStamp.Add(-72 * time.Hour) },
-			want: copyCut{anchor: query.BinlogPos{File: "binlog.000007", Pos: 4200}, since: cutStamp.Add(-72 * time.Hour), sourceRead: cutStamp.Add(-72 * time.Hour)}},
+			want: copyCut{anchor: query.BinlogPos{File: "binlog.000007", Pos: 4200}, stamp: cutStamp.Add(-72 * time.Hour), sourceRead: cutStamp.Add(-72 * time.Hour)}},
 
 		{name: "the file cannot be read", table: table, baseErr: errors.New("permission denied"), refusal: "could not be read"},
 		{name: "the chain's last pair cannot be read", table: withChain, lastErr: errors.New("gone"), refusal: "could not be read"},
@@ -116,6 +116,9 @@ func TestCopyCutOf(t *testing.T) {
 				return baseline.DumpMetadata{}, nil
 			}
 			got := copyCutOf(c.table, footer)
+			if wantFault := c.baseErr != nil || c.lastErr != nil; wantFault != (got.fault != nil) {
+				t.Errorf("fault = %v, want one only for a file that could not be read", got.fault)
+			}
 			if c.refusal != "" {
 				if !strings.Contains(got.refusal, c.refusal) || !strings.Contains(got.refusal, "shop.orders") {
 					t.Fatalf("refusal = %q, want one naming shop.orders and %q", got.refusal, c.refusal)
@@ -228,6 +231,7 @@ func TestDDLTouches(t *testing.T) {
 		// only: the others are found by their name alone.
 		{"a later row of a multi-table statement, typed in another case", ddlRow{"shop", "ORDERS", "(same DROP TABLE statement as the row for shop.lines)", after}, true},
 		{"a later row of a multi-table statement, with no schema", ddlRow{"", "orders", "(same DROP TABLE statement as the row for shop.lines)", after}, true},
+		{"a row with no binlog file cannot be placed before the cut", ddlRow{"shop", "orders", "ALTER TABLE orders ADD c int", query.BinlogPos{}}, true},
 		{"the same table name in another schema", ddlRow{"crm", "orders", "ALTER TABLE crm.t ADD c int", after}, false},
 		{"another table", ddlRow{"shop", "lines", "ALTER TABLE `lines` ADD c int", after}, false},
 		{"another table whose name contains this one", ddlRow{"shop", "orders_archive", "DROP TABLE orders_archive", after}, false},
@@ -450,6 +454,13 @@ func TestSQLOnCopy_unchangedWithin_2085(t *testing.T) {
 	wm.wm.Captures = func(schema, table string) bool { return schema != "shop" }
 	_, err = q.Run(ctx, "SELECT count(*) FROM shop.orders", "", asking)
 	changedErr(err, "shop.orders is outside what capture records")
+	// The server's index was edited under this connection: the watermark
+	// would be read from one index and the events from another.
+	wm.wm.Captures = nil
+	f.s.cm.boot.dsn = "u:p@tcp(old-index:3306)/idx"
+	_, err = q.Run(ctx, "SELECT count(*) FROM shop.orders", "", asking)
+	changedErr(err, "index connection changed")
+	f.s.cm.boot.dsn = ""
 	// A session that does not ask reaches nobody.
 	before := len(wm.asked)
 	if _, err := q.Run(ctx, "SELECT count(*) FROM shop.orders", "", sqlsandbox.Session{}); err != nil {

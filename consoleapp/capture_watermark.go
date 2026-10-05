@@ -2,6 +2,10 @@ package consoleapp
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/cliutil"
@@ -38,6 +42,12 @@ import (
 // record). A read that learns nothing about the source leaves it as it was:
 // what was proven stays proven, and it grows old on its own.
 //
+// A source that filters its binary log (binlog-do-db, binlog-ignore-db) has
+// no watermark: a write it leaves out carries no GTID, so the two sets stay
+// equal over a change the index never received. The same is true of a write
+// made with SET sql_log_bin = 0, which nothing can see; the filters can be
+// read, so they are.
+//
 // Nothing here runs on a timer. A read happens when somebody asks and the
 // last answer is older than captureStatusTTL, so the first statement after a
 // quiet spell on a busy source finds no watermark and leaves the sample the
@@ -50,8 +60,9 @@ func (c *captureStatusReporter) withBootFilters(schemas, tables string) *capture
 }
 
 // advanceWatermark is the watermark after one read r: through and pending
-// are the slot's, asked when this read began. Pure.
-func advanceWatermark(r captureProbeResult, through time.Time, pending *captureSample, asked time.Time) (time.Time, *captureSample, string) {
+// are the slot's, lastCaptured the capture's saved set at the previous read
+// that reached the source ("" when none), asked when this read began. Pure.
+func advanceWatermark(r captureProbeResult, through time.Time, pending *captureSample, lastCaptured string, asked time.Time) (time.Time, *captureSample, string) {
 	if r.executed == "" {
 		// The source was not read, or reported no GTID set: nothing was
 		// learned about it.
@@ -64,12 +75,31 @@ func advanceWatermark(r captureProbeResult, through time.Time, pending *captureS
 		}
 		return through, pending, why
 	}
+	if !r.logsAll {
+		// A write the source leaves out of its binary log has no GTID and
+		// reaches nobody: the sets stay equal over it.
+		why := r.logFilter
+		if why == "" {
+			why = "the source's binary log filters were not read"
+		}
+		return time.Time{}, nil, why
+	}
 	have, wrote, ok := parseGTIDPair(r.captured, r.executed)
 	if !ok {
 		return time.Time{}, nil, "the GTID sets do not parse"
 	}
 	if hasTaggedGTIDs(wrote) {
 		return time.Time{}, nil, "the source has tagged GTIDs, which capture does not record"
+	}
+	if lastCaptured != "" {
+		// A saved position that went BACKWARD: the capture was restarted
+		// from an earlier point and is reading its way forward again, and a
+		// restart of that kind removes the rows past that point before it
+		// indexes them anew. What was proven about the index no longer
+		// holds until it is proven again.
+		if before, err := gomysql.ParseMysqlGTIDSet(lastCaptured); err != nil || !have.Contain(before) {
+			through, pending = time.Time{}, nil
+		}
 	}
 	// Strictly what capture holds. The capture status counts what the source
 	// purged as reachable so as not to call a healthy capture behind; here
@@ -139,4 +169,72 @@ func (c *captureStatusReporter) CaptureWatermark(ctx context.Context, e console.
 		wm.Captures = filters.Matches
 	}
 	return wm
+}
+
+// readBinlogFilters asks the source whether it leaves any database out of
+// its binary log: the Binlog_Do_DB and Binlog_Ignore_DB columns of SHOW
+// BINARY LOG STATUS (MySQL 8.2 and later) or SHOW MASTER STATUS (before).
+// logsAll is true only when the statement answered and both are empty;
+// otherwise why says what was found, in words for a trace. The account needs
+// REPLICATION CLIENT, which capture's account has.
+func readBinlogFilters(ctx context.Context, db *sql.DB) (logsAll bool, why string) {
+	var lastErr error
+	for _, stmt := range []string{"SHOW BINARY LOG STATUS", "SHOW MASTER STATUS"} {
+		do, ignore, err := scanBinlogFilters(ctx, db, stmt)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		switch {
+		case do != "":
+			return false, "the source writes only some databases to its binary log (binlog-do-db)"
+		case ignore != "":
+			return false, "the source leaves some databases out of its binary log (binlog-ignore-db)"
+		}
+		return true, ""
+	}
+	if errors.Is(lastErr, sql.ErrNoRows) {
+		return false, "the source has no binary log"
+	}
+	return false, "the source's binary log filters could not be read"
+}
+
+// scanBinlogFilters reads the two filter columns of one SHOW statement by
+// name. An empty result (binary logging off) is sql.ErrNoRows; a result
+// without the two columns is an error, never "no filter".
+func scanBinlogFilters(ctx context.Context, db *sql.DB, stmt string) (do, ignore string, err error) {
+	rows, err := db.QueryContext(ctx, stmt)
+	if err != nil {
+		return "", "", err
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return "", "", err
+	}
+	dest := make([]any, len(cols))
+	found := 0
+	for i, c := range cols {
+		switch strings.ToLower(c) {
+		case "binlog_do_db":
+			dest[i], found = &do, found+1
+		case "binlog_ignore_db":
+			dest[i], found = &ignore, found+1
+		default:
+			dest[i] = new(sql.RawBytes)
+		}
+	}
+	if found != 2 {
+		return "", "", fmt.Errorf("%s does not report the binary log's filters", stmt)
+	}
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return "", "", err
+		}
+		return "", "", sql.ErrNoRows
+	}
+	if err := rows.Scan(dest...); err != nil {
+		return "", "", err
+	}
+	return strings.TrimSpace(do), strings.TrimSpace(ignore), rows.Err()
 }

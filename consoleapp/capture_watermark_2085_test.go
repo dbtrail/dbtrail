@@ -21,13 +21,16 @@ func TestAdvanceWatermark(t *testing.T) {
 		return &captureSample{executed: executed, at: at}
 	}
 	read := func(captured, executed string) captureProbeResult {
-		return behindRead(captured, executed, captureT0)
+		r := behindRead(captured, executed, captureT0)
+		r.logsAll = true
+		return r
 	}
 	cases := []struct {
 		name        string
 		r           captureProbeResult
 		through     time.Time
 		pending     *captureSample
+		last        string // the capture's saved set at the previous read
 		wantThrough time.Time
 		// wantPending: "" none, "kept" the one passed in, else the executed
 		// set of a new sample taken at this read.
@@ -59,6 +62,16 @@ func TestAdvanceWatermark(t *testing.T) {
 			r: read(uuidB+":1-50", uuidA+":1-5,"+uuidB+":1-60"), pending: sample(uuidA+":1-5,"+uuidB+":1-20", before),
 			wantPending: "kept", wantWhy: "the source is ahead"},
 
+		// The capture's saved position went backward since the last read: it
+		// was restarted from an earlier point, and what was proven is void.
+		{name: "capture's position went backward: an older proof is dropped",
+			r: read(uuidB+":1-15", uuidB+":1-40"), last: uuidB + ":1-30", through: before, pending: sample(uuidB+":1-35", before),
+			wantPending: uuidB + ":1-40", wantWhy: "the source is ahead"},
+		{name: "capture's position went backward and now equals the source: proven anew, as of this read",
+			r: read(uuidB+":1-20", uuidB+":1-20"), last: uuidB + ":1-30", through: long, wantThrough: asked},
+		{name: "capture's position moved forward: the proof stands",
+			r: read(uuidB+":1-35", uuidB+":1-40"), last: uuidB + ":1-30", through: before, wantThrough: before, wantPending: uuidB + ":1-40"},
+
 		// Nothing learned: what was proven stays, and ages.
 		{name: "the source did not answer",
 			r: captureProbeResult{detail: "the source did not answer"}, through: long, pending: sample(uuidB+":1-20", before),
@@ -76,7 +89,15 @@ func TestAdvanceWatermark(t *testing.T) {
 		{name: "tagged GTIDs on the source",
 			r: read(uuidB+":1-10", uuidB+":1-10:audit:1-50"), through: before, wantWhy: "the source has tagged GTIDs"},
 		{name: "sets that do not parse",
-			r: captureProbeResult{captured: "0-1-100", executed: "0-1-200"}, through: before, wantWhy: "the GTID sets do not parse"},
+			r: captureProbeResult{captured: "0-1-100", executed: "0-1-200", logsAll: true}, through: before, wantWhy: "the GTID sets do not parse"},
+		{name: "the source filters its binary log: equal sets prove nothing",
+			r: func() captureProbeResult {
+				r := read(uuidB+":1-10", uuidB+":1-10")
+				r.logsAll, r.logFilter = false, "the source leaves some databases out of its binary log (binlog-ignore-db)"
+				return r
+			}(), through: before, pending: sample(uuidB+":1-5", before), wantWhy: "the source leaves some databases out"},
+		{name: "the binary log's filters were not read: equal sets prove nothing",
+			r: behindRead(uuidB+":1-10", uuidB+":1-10", captureT0), through: before, wantWhy: "the source's binary log filters were not read"},
 
 		// The source purged transactions capture never held (a dump loaded
 		// with SET @@GLOBAL.gtid_purged): the status read allows for them,
@@ -90,7 +111,7 @@ func TestAdvanceWatermark(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			through, pending, why := advanceWatermark(c.r, c.through, c.pending, asked)
+			through, pending, why := advanceWatermark(c.r, c.through, c.pending, c.last, asked)
 			if !through.Equal(c.wantThrough) {
 				t.Errorf("through = %v, want %v", through, c.wantThrough)
 			}
@@ -124,9 +145,10 @@ func TestAdvanceWatermark(t *testing.T) {
 // instant is the one BEFORE the read began.
 func TestCaptureWatermark_busySourceNeedsTwoReads_2085(t *testing.T) {
 	now := captureT0
+	logged := func(r captureProbeResult) captureProbeResult { r.logsAll = true; return r }
 	reads := []captureProbeResult{
-		behindRead(uuidB+":1-10", uuidB+":1-30", captureT0),
-		behindRead(uuidB+":1-35", uuidB+":1-60", captureT0),
+		logged(behindRead(uuidB+":1-10", uuidB+":1-30", captureT0)),
+		logged(behindRead(uuidB+":1-35", uuidB+":1-60", captureT0)),
 		{detail: "the source did not answer", cause: "dial tcp: i/o timeout"},
 	}
 	n := 0
@@ -175,7 +197,9 @@ func TestCaptureWatermark_noWatermarkAndFilters_2085(t *testing.T) {
 	c := newCaptureStatusReporter("boot-src").withBootFilters("shop,crm", "shop.orders")
 	c.now = func() time.Time { return captureT0 }
 	c.read = func(context.Context, string, string) captureProbeResult {
-		return behindRead(uuidB+":1-10", uuidB+":1-10", captureT0)
+		r := behindRead(uuidB+":1-10", uuidB+":1-10", captureT0)
+		r.logsAll = true
+		return r
 	}
 	c.readMariaDB = func(context.Context, string, string) captureProbeResult {
 		t.Fatal("a MariaDB source was read for a watermark")
