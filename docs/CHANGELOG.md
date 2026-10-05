@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **SQL on the copy: the text differences from MySQL are listed in full**
+  (#2083). The documentation named `'ß' = 'ss'` as the one equality the copy
+  does not share with MySQL's default collation. Measured against MySQL 8.4,
+  there are more of the same kind (full-width letters, `'æ' = 'ae'`,
+  `'ø' = 'o'`, hiragana against katakana) and one in `ORDER BY` (punctuation
+  sorts by ASCII code on the copy, before the digits on MySQL).
+  `docs/time-travel-sql.md` now lists them, and says which DuckDB collation
+  would close them and what it costs. Nothing in the copy's behavior changes.
+
 - **Two installations capturing the same database no longer interrupt each
   other.** Capture connects to the source as a replica, and each replica
   needs its own replication server id. DBTrail chose it from the source's

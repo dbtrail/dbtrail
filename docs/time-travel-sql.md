@@ -162,7 +162,9 @@ What to know before relying on it:
   ...)`, `instr`/`position`/`contains`, `'ß' = 'ss'`. A column MySQL
   declares under a `_bin` collation compares byte by byte here too
   (`code = 'ab'` does not match `'AB'`, and it groups and sorts by code
-  point); a `_cs` column is still case-insensitive here. The same applies
+  point; an `ENUM` or `SET` column is the exception in `ORDER BY`, where
+  MySQL sorts it by the position of the value in the column's definition
+  and the copy by the text); a `_cs` column is still case-insensitive here. The same applies
   to the SQL card; a DuckDB of your own over the same files (see
   [Dashboards](dashboards.md)) keeps DuckDB's defaults.
 - **`SET time_zone`, `SET sql_select_limit` and `SET sql_mode` are applied
@@ -395,46 +397,82 @@ What this is and is not:
   (`utf8mb4_bin`, `utf8mb4_0900_bin`, `latin1_bin`, ...), by its own
   definition or by its table's default, is compared byte by byte on the
   copy as well: the copy reads each column's collation from the `CREATE
-  TABLE` stored with the snapshot. Close, not identical: `'ß' = 'ss'` and
-  full-width letters are equal under `utf8mb4_0900_ai_ci` and not on the
-  copy; a column MySQL declares `_cs` (`utf8mb4_0900_as_cs`) is
-  case-insensitive on the copy, because bytes would compare it right and
-  sort it wrong (`_cs` puts `a` before `B`, bytes do not); a column under a
-  PAD SPACE collation (every collation older than the `0900` ones:
-  `utf8mb4_general_ci`, `utf8mb4_unicode_ci`, `utf8mb4_bin`, `latin1_*`)
-  ignores trailing spaces on MySQL, so `'bob ' = 'bob'` there and not
-  here; a `_bin` column in a multi-byte character set other than UTF-8
-  sorts by that character set's bytes on MySQL and by Unicode code point
-  here; a column's collation is the one it had at the last full snapshot
-  (a refresh carries the table definition forward, so an `ALTER` that
-  changes a collation is seen at the next full snapshot); a table whose
-  snapshot file carries no `CREATE TABLE`, or one that cannot be read, has
-  no collations to go by, so all its text columns fold case, `_bin` ones
-  included, and its decimal columns read as text. That is every table of a
-  PostgreSQL source, a MySQL or MariaDB table whose snapshot was written
-  by a version before 0.5, and a file whose footer could not be read at
-  that moment. The daemon's log says so once per table (`this table's
-  snapshot file carries no CREATE TABLE`), naming the first ten at warning
-  level and the rest in the debug log, and counts the files it could not
-  read; a new full snapshot of a MySQL or MariaDB source records the
-  definition, and an unreadable file is tried again within minutes; and **`AVG` and `/` return a double** on the copy, where MySQL
-  returns a `DECIMAL` with four decimals more than the operand has (for
-  `DECIMAL` and integer operands; a `DOUBLE` operand gives a double on
-  both): `AVG(amount)` over a `DECIMAL(12,2)` is `1.8` on the copy and
-  `1.800000` on MySQL, `ROUND(AVG(points), 1)` is `0` and `0.0`, `qty / 3`
-  is `1.3333333333333333` and `1.3333`. The same value in a different text
-  and under a different column type, exact to about 15 significant digits
-  on the copy. It stays this way because nothing is rewritten for the copy
-  and a double carries no scale to print by. Division and modulo by zero
-  are `NULL` on both. A
-  `DECIMAL` itself prints as on MySQL, with its scale and trailing zeros
-  (`ROUND(SUM(amount), 2)` is `117329550.00` on both), with one exception: a
-  `CASE` or `IF` that mixes a `DECIMAL` branch and an integer branch prints
-  the integer rows as `4.00` on the copy and as `4` on MySQL, which declares
-  the column with two decimals and does not pad them. None of these can be
-  caught per statement. If a
-  workload depends on one, keep the copy for the reads where they do not
-  matter, or leave routing off.
+  TABLE` stored with the snapshot. Close, not identical. What still
+  differs, none of which can be caught per statement:
+  - **Equalities MySQL's default collation has and the copy lacks.**
+    `'ß' = 'ss'`, full-width letters (`'Ａ' = 'A'`), ligatures and letters
+    with a stroke (`'æ' = 'ae'`, `'ø' = 'o'`, `'ł' = 'l'`), and hiragana
+    against katakana are equal under `utf8mb4_0900_ai_ci` and not on the
+    copy, which folds case and accents and nothing else. The other way
+    round, the copy takes the breve of Cyrillic `й` for an accent and
+    equates it with `и`, which MySQL keeps apart.
+  - **Where punctuation sorts.** MySQL sorts every punctuation mark before
+    the digits; the copy sorts them by their ASCII code (`:` and `@` after
+    the digits). Plain and accented letters sort the same on both; the
+    characters of the previous point (`ß`, `æ`, `ø`, full-width forms)
+    sort after `z` on the copy and beside their plain letters on MySQL.
+  - One DuckDB collation does both of the above as MySQL does
+    (`nocase.icu_noaccent`). The copy does not use it because it makes
+    every comparison of text about twice as slow.
+  - **`_cs` columns.** A column MySQL declares `_cs`
+    (`utf8mb4_0900_as_cs`) is case-insensitive on the copy. Bytes would
+    compare it right and sort it wrong: `_cs` puts `a` before `B`, bytes
+    do not.
+  - **Trailing spaces.** A column under a PAD SPACE collation ignores
+    trailing spaces on the source, so `'bob ' = 'bob'` there and not here.
+    On MySQL that is every collation older than the `0900` ones
+    (`utf8mb4_general_ci`, `utf8mb4_unicode_ci`, `utf8mb4_bin`,
+    `latin1_*`); the default, `utf8mb4_0900_ai_ci`, does not pad. On
+    MariaDB it includes the default collation (`utf8mb4_uca1400_ai_ci` on
+    11.4), so on a MariaDB source every text column that was not declared
+    with a `nopad` collation differs this way.
+  - **`ENUM` and `SET` in `ORDER BY`.** MySQL and MariaDB sort them by the
+    position of the value in the column's definition (`enum('z','a')`
+    gives `z`, `a`); the copy sorts the text (`a`, `z`).
+  - **MySQL against MariaDB.** The comparisons above were measured on
+    MySQL 8.4 and again on MariaDB 11.4 under its default collation. The
+    two agree on every equality measured except trailing spaces (the point
+    above), and on the order of every string except the empty one against
+    a single space.
+  - **`_bin` outside UTF-8.** A `_bin` column in a multi-byte character
+    set other than UTF-8 sorts by that character set's bytes on MySQL and
+    by Unicode code point here. Equality is the same.
+  - **A collation changed since the last full snapshot.** A column's
+    collation is the one it had then: a refresh carries the table
+    definition forward, so an `ALTER` that changes a collation is seen at
+    the next full snapshot.
+  - **A table with no definition to go by.** A table whose snapshot file
+    carries no `CREATE TABLE`, or one that cannot be read, has no
+    collations to go by, so all its text columns fold case, `_bin` ones
+    included, and its decimal columns read as text. That is every table of
+    a PostgreSQL source, a MySQL or MariaDB table whose snapshot was
+    written by a version before 0.5, and a file whose footer could not be
+    read at that moment. The daemon's log says so once per table (`this
+    table's snapshot file carries no CREATE TABLE`), naming the first ten
+    at warning level and the rest in the debug log, and counts the files
+    it could not read; a new full snapshot of a MySQL or MariaDB source
+    records the definition, and an unreadable file is tried again within
+    minutes.
+  - **`AVG` and `/` return a double** on the copy, where MySQL returns a
+    `DECIMAL` with four decimals more than the operand has (for `DECIMAL`
+    and integer operands; a `DOUBLE` operand gives a double on both):
+    `AVG(amount)` over a `DECIMAL(12,2)` is `1.8` on the copy and
+    `1.800000` on MySQL, `ROUND(AVG(points), 1)` is `0` and `0.0`,
+    `qty / 3` is `1.3333333333333333` and `1.3333`. The same value in a
+    different text and under a different column type, exact to about 15
+    significant digits on the copy. It stays this way because nothing is
+    rewritten for the copy and a double carries no scale to print by.
+    Division and modulo by zero are `NULL` on both.
+  - **`CASE` and `IF` over a `DECIMAL` and an integer.** A `DECIMAL`
+    prints as on MySQL, with its scale and trailing zeros
+    (`ROUND(SUM(amount), 2)` is `117329550.00` on both), with one
+    exception: a `CASE` or `IF` that mixes a `DECIMAL` branch and an
+    integer branch prints the integer rows as `4.00` on the copy and as
+    `4` on MySQL 8.4, which declares the column with two decimals and does
+    not pad them. MariaDB 11.4 prints `4.00`, as the copy does.
+
+  If a workload depends on one of these, keep the copy for the reads where
+  they do not matter, or leave routing off.
 - **The thresholds are knobs, not truths.** The optimizer's cost is its
   own estimate; it misleads on cached data and on skewed values (and on
   `LIMIT`, which is why steps 4 and 5 read the statement, not the cost).
