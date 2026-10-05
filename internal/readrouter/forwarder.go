@@ -81,8 +81,9 @@ type Forwarder struct {
 	// init_connect did (it runs after the login is answered). It is how a
 	// caller learns that the source's sessions do not start as the port's
 	// handshake announced. When the first statement is itself a SET of
-	// autocommit or sql_mode, the state after it is the client's doing and
-	// nothing is told; any other SET (SET NAMES) changes neither.
+	// autocommit or of sql_mode, the flag that statement sets is the
+	// client's doing and is reported as the default (autocommit on, no
+	// NO_BACKSLASH_ESCAPES); the other flag is still the source's.
 	OnSession      func(status uint16)
 	policy         Policy
 	connectTimeout time.Duration
@@ -392,7 +393,7 @@ func (f *Forwarder) Decide(ctx context.Context, stmt string) (Decision, error) {
 // applies the policy.
 func (f *Forwarder) decideFromExplain(stmt string, res *mysql.Result, err error) (Decision, error) {
 	if err != nil {
-		if !isMySQLError(err) {
+		if !stillInSession(err) {
 			f.lose(err)
 		}
 		return Decision{}, fmt.Errorf("explain: %w", err)
@@ -491,9 +492,11 @@ func (f *Forwarder) stream(sink RowSink, run func(*mysql.Result, client.SelectPe
 			// be reused.
 			f.lose(se)
 			return nil, se.err
-		case isMySQLError(err):
+		case stillInSession(err):
 			// The source answered with an error packet (before or between
-			// rows); the connection is in sync and stays usable.
+			// rows); the connection is in sync and stays usable. An error
+			// packet that ends the session (sessionEnded) falls through to
+			// the loss below instead.
 			return nil, unwrapMySQLError(err)
 		default:
 			// When the statement was interrupted (its context ended), the
@@ -531,7 +534,7 @@ func (f *Forwarder) UseDB(ctx context.Context, db string) error {
 	f.mu.Unlock()
 	defer f.watch(ctx)()
 	if err := c.UseDB(db); err != nil {
-		if !isMySQLError(err) {
+		if !stillInSession(err) {
 			f.lose(err)
 			return lostError(err)
 		}
@@ -599,8 +602,12 @@ func (f *Forwarder) tellSession(stmt string) {
 	status := connSessionStatus(f.conn)
 	f.mu.Unlock()
 	if Classify(stmt) == KindSet {
-		if low := strings.ToLower(stmt); strings.Contains(low, "autocommit") || strings.Contains(low, "sql_mode") {
-			return
+		low := strings.ToLower(stmt)
+		if strings.Contains(low, "autocommit") {
+			status |= mysql.SERVER_STATUS_AUTOCOMMIT
+		}
+		if strings.Contains(low, "sql_mode") {
+			status &^= mysql.SERVER_STATUS_NO_BACKSLASH_ESCAPED
 		}
 	}
 	f.OnSession(status)
@@ -646,9 +653,9 @@ func (f *Forwarder) Ping(ctx context.Context) error {
 	}
 	defer f.watch(ctx)()
 	if err := c.Ping(); err != nil {
-		if isMySQLError(err) {
-			return unwrapMySQLError(err)
-		}
+		// Any error: a server whose session is alive never refuses a PING
+		// (what MySQL answers with after an idle timeout is an error
+		// packet, and the session is gone with it).
 		f.lose(err)
 		return f.lost()
 	}
@@ -686,6 +693,27 @@ func (f *Forwarder) Close() {
 		f.conn = nil
 	}
 	f.mu.Unlock()
+}
+
+// stillInSession reports whether err is an error packet from a source whose
+// session goes on: the statement failed, the connection is in sync and stays
+// usable. An error packet that says the source ENDED the session is not
+// that (sessionEnded), and neither is anything that is not an error packet.
+func stillInSession(err error) bool { return isMySQLError(err) && !sessionEnded(err) }
+
+// codeIdleTimeout is MySQL's ER_CLIENT_INTERACTION_TIMEOUT (8.0.24 and
+// later): the answer to the first command sent after wait_timeout, followed
+// by the socket closing.
+const codeIdleTimeout = 4031
+
+// sessionEnded reports whether err is the source saying it has ended this
+// session. The number alone is not trusted: MariaDB numbers its own errors
+// from 4000 up, so 4031 can be an unrelated error there, and MySQL's wording
+// is matched too. A server that closes an idle connection without any answer
+// needs nothing here: the next read sees a broken socket, which is a loss.
+func sessionEnded(err error) bool {
+	var me *mysql.MyError
+	return errors.As(err, &me) && me.Code == codeIdleTimeout && strings.Contains(me.Message, "disconnected by the server")
 }
 
 func isMySQLError(err error) bool {
@@ -759,7 +787,7 @@ func (f *Forwarder) Prepare(ctx context.Context, query string) (Stmt, error) {
 	defer f.watch(ctx)()
 	st, err := c.Prepare(query)
 	if err != nil {
-		if isMySQLError(err) {
+		if stillInSession(err) {
 			return nil, unwrapMySQLError(err)
 		}
 		f.lose(err)
@@ -811,7 +839,7 @@ func (p *prepared) Decide(ctx context.Context, args []any) (Decision, error) {
 	if p.explain == nil {
 		st, err := p.c.Prepare("EXPLAIN FORMAT=JSON " + p.query)
 		if err != nil {
-			if !isMySQLError(err) {
+			if !stillInSession(err) {
 				p.f.lose(err)
 				return Decision{}, fmt.Errorf("explain: %w", err)
 			}

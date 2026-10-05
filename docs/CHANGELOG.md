@@ -141,9 +141,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   port's statement deadline cut a statement), every command answers error
   2006, the ones the port answers itself included; before, a time-travel
   statement or a `PING` kept answering OK on a connection whose transaction
-  was gone. (A source that never let the connection in lost nothing: time
-  travel keeps answering there, as before.) The version the handshake announces stays `8.0.11` whatever the
+  was gone. (A source that never let the connection in lost nothing: a
+  time-travel statement still answers there, as before, for a client that
+  got as far as sending one; a driver that sends a `SET` when it connects
+  cannot finish connecting to a routed server whose source is down.) The version the handshake announces stays `8.0.11` whatever the
   source is.
+  **Under read routing the copy no longer answers a PyMySQL connection left
+  on its defaults.** PyMySQL's default is autocommit off; told the truth, it
+  now sends `SET AUTOCOMMIT = 0` when it connects, so all its statements run
+  inside a transaction on the source, where nothing is sent to the copy, and
+  it opens its source connection at connect. Before, the wrong flag kept
+  such a connection in autocommit, which let the copy answer its heavy reads
+  and made its `rollback()` do nothing. Open reporting connections with
+  `autocommit=True` to have the copy answer them.
   **One case gets worse, and is now logged.** The handshake is written
   before the port knows the server, so it announces a default session. With
   a source that opens its sessions with autocommit off, a PyMySQL client

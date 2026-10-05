@@ -847,8 +847,13 @@ string. The port's flags describe the session the client really has:
   let the connection in (unreachable, or the login refused) is a different
   case, because no session existed and nothing was lost: forwarded
   statements and `PING` answer 2006, and the time-travel statements, which
-  need no source, keep answering. Time travel stays available while the
-  source is down.
+  need no source, keep answering. That helps only a client whose connect
+  sequence forwards nothing: under routing every `SET` goes to the source,
+  so with the source unreachable a driver that sends a `SET` when it
+  connects (PyMySQL with its default settings, Connector/J, mysqlclient)
+  gets 2006 and cannot finish connecting to a routed server. What works
+  while the source is down: the `mysql` client, a driver that sends no `SET`
+  when it connects, or a port started without read routing.
 - **The handshake** announces autocommit and no `NO_BACKSLASH_ESCAPES`, as
   MySQL and MariaDB do by default. It is written before the port knows which
   server the client asked for, so it cannot carry that server's state, and
@@ -877,8 +882,18 @@ string. The port's flags describe the session the client really has:
     announces autocommit when the client logs in (an `init_connect` runs
     after that, and MySQL announces autocommit whatever its configuration,
     MySQL bug 66884), so PyMySQL loses the row connected directly too.
-    PyMySQL's default (`autocommit=False`) is not affected: told "on", it
-    sends `SET AUTOCOMMIT = 0`.
+  - **PyMySQL with its default (`autocommit=False`) now sends
+    `SET AUTOCOMMIT = 0` when it connects**, because the handshake says
+    autocommit is on, as it does connected to MySQL. Its writes and its
+    `rollback()` then behave as on MySQL. Two things follow under read
+    routing. Every statement of such a connection, reads included, runs
+    inside a transaction on the source, and inside a transaction nothing
+    goes to the copy: **the copy does not answer a PyMySQL connection left
+    on its defaults**. (Before the fix it did, by accident of the wrong
+    flag, and that connection's `rollback()` undid nothing.) And each such
+    connection opens its connection to the source when it connects, not at
+    its first query. To let the copy answer the heavy reads of a reporting
+    client, open its connection with `autocommit=True`.
   - **mysqlclient (and Django on it) is corrected**: it sends `SET NAMES`
     before it looks, the port forwards it, and the source's answer carries
     the real flag. Read from its source, not run.
@@ -904,8 +919,9 @@ string. The port's flags describe the session the client really has:
   answer of a session on the source shows a state that differs: `read
   routing: the source opens its sessions with autocommit off, and the
   port's handshake tells every client autocommit on and backslash escapes`.
-  (A connection whose first statement is itself a `SET` of `autocommit` or
-  `sql_mode` is not counted: that state is the client's.) MySQL's
+  (When a connection's first statement is itself a `SET` of `autocommit`
+  or of `sql_mode`, the setting it sets is the client's and is not counted;
+  the other one still is.) MySQL's
   `autocommit=0` cannot be detected, for the reason above.
 
 Until this was fixed (#2110) the handshake announced status 0, and so did

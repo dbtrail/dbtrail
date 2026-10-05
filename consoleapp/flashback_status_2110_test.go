@@ -3,6 +3,8 @@ package consoleapp
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"strings"
@@ -63,11 +65,18 @@ func TestFlashbackPortAnnouncesAutocommit(t *testing.T) {
 // statusRouter is a shim.Router that only reports a session state.
 type statusRouter struct {
 	shim.Router
-	status uint16
+	status        uint16
+	lost, pingErr error
+	pings         *int
 }
 
 func (r statusRouter) Status() (uint16, bool) { return r.status, true }
-func (statusRouter) Close()                   {}
+func (r statusRouter) Lost() error            { return r.lost }
+func (r statusRouter) Ping(context.Context) error {
+	*r.pings++
+	return r.pingErr
+}
+func (statusRouter) Close() {}
 
 // The proxy the port hands go-mysql before the server is known reports the
 // bound handler's session state, and a new session's while none is bound.
@@ -78,8 +87,24 @@ func TestRoutingHandlerSessionStatus(t *testing.T) {
 	}
 	h := shim.NewHandler(nil, nil)
 	const inTransaction = gomysql.SERVER_STATUS_IN_TRANS
-	h.BindRouter(statusRouter{status: inTransaction}, shim.RouterConfig{})
+	if err := r.SourceLost(true); err != nil {
+		t.Errorf("nothing bound: SourceLost = %v", err)
+	}
+	if err := r.PingSource(); err != nil {
+		t.Errorf("nothing bound: PingSource = %v", err)
+	}
+	lost, refused := errors.New("the session is lost"), errors.New("the ping failed")
+	pings := 0
+	h.BindRouter(statusRouter{status: inTransaction, lost: lost, pingErr: refused, pings: &pings}, shim.RouterConfig{})
 	r.inner = h
+	// The loss and the PING are the bound handler's too: the Session asks
+	// the proxy, never the handler behind it.
+	if err := r.SourceLost(false); !errors.Is(err, lost) {
+		t.Errorf("SourceLost = %v, want the bound handler's", err)
+	}
+	if err := r.PingSource(); !errors.Is(err, refused) || pings != 1 {
+		t.Errorf("PingSource = %v after %d pings, want the bound handler's, after 1", err, pings)
+	}
 	if got := r.SessionStatus(); got != inTransaction {
 		t.Errorf("bound to a session in a transaction with autocommit off: status 0x%04x, want 0x%04x", got, inTransaction)
 	}
@@ -119,7 +144,8 @@ func TestWarnSessionDefaults(t *testing.T) {
 
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	id := t.Name() // the once-per-server memory is the process's
+	// The once-per-server memory is the process's: an id of this run's own.
+	id := fmt.Sprintf("%s-%d", t.Name(), time.Now().UnixNano())
 	warnSessionDefaults(logger, id, "srva", auto)
 	if buf.Len() != 0 {
 		t.Fatalf("a source whose sessions open as announced was logged: %s", buf.String())

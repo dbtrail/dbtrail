@@ -20,7 +20,15 @@ type statusSource struct {
 	server.EmptyHandler
 	conn   *server.Conn
 	onPing func()
+	// idleOut, when set, makes the source answer its next command the way
+	// MySQL answers the first command after wait_timeout: error 4031, then
+	// the socket closed.
+	idleOut *atomic.Bool
+	raw     net.Conn
 }
+
+// errIdleTimeout is MySQL's ER_CLIENT_INTERACTION_TIMEOUT, as it sends it.
+var errIdleTimeout = mysql.NewError(4031, "The client was disconnected by the server because of inactivity. See wait_timeout and interactive_timeout for configuring this behavior.")
 
 // HandleOtherCommand is never reached by COM_PING (the library answers it),
 // so the pings are counted where the test can see them: see serve.
@@ -43,6 +51,13 @@ func (h *statusSource) set(status uint16) {
 }
 
 func (h *statusSource) HandleQuery(q string) (*mysql.Result, error) {
+	if h.idleOut != nil && h.idleOut.Load() {
+		return nil, errIdleTimeout
+	}
+	if q == "SELECT a json error numbered 4031" {
+		// Another server's error under the same number: not a disconnect.
+		return nil, mysql.NewError(4031, "some other error that shares the number")
+	}
 	const auto, trans = mysql.SERVER_STATUS_AUTOCOMMIT, mysql.SERVER_STATUS_IN_TRANS
 	switch q {
 	case "BEGIN":
@@ -52,9 +67,9 @@ func (h *statusSource) HandleQuery(q string) (*mysql.Result, error) {
 	case "COMMIT":
 		h.set(auto)
 	case "SET autocommit=0":
-		h.set(0)
+		h.conn.UnsetStatus(auto)
 	case "SET sql_mode='NO_BACKSLASH_ESCAPES'":
-		h.set(auto | mysql.SERVER_STATUS_NO_BACKSLASH_ESCAPED)
+		h.conn.SetStatus(mysql.SERVER_STATUS_NO_BACKSLASH_ESCAPED)
 	case "INSERT fails and opens a transaction":
 		// What a duplicate key does with autocommit off: an error packet,
 		// which has no status, and a transaction left open.
@@ -95,6 +110,17 @@ func (p *pingCounter) Read(b []byte) (int, error) {
 			}
 			if size == 1 && p.head[4] == mysql.COM_PING {
 				p.h.ping()
+				if p.h.idleOut != nil && p.h.idleOut.Load() {
+					// The library answers a PING with OK itself: answer in
+					// its place with the error, then hang up.
+					msg := errIdleTimeout
+					pkt := append([]byte{0, 0, 0, 1, 0xff, byte(msg.Code), byte(msg.Code >> 8), '#'}, msg.State...)
+					pkt = append(pkt, msg.Message...)
+					pkt[0], pkt[1] = byte(len(pkt)-4), byte((len(pkt)-4)>>8)
+					_, _ = p.Conn.Write(pkt)
+					p.Conn.Close()
+					return 0, net.ErrClosed
+				}
 			}
 			p.head = p.head[4+size:]
 		}
@@ -141,7 +167,7 @@ func newStatusSourceWith(t *testing.T, atLogin uint16, prepare func(*statusSourc
 			go func() {
 				defer c.Close()
 				_ = c.SetDeadline(time.Now().Add(30 * time.Second))
-				h := &statusSource{}
+				h := &statusSource{raw: c}
 				pc := &pingCounter{Conn: c, h: h}
 				mc, err := server.NewCustomizedConn(pc, conf, statusAtLogin{auth, atLogin}, h)
 				if err != nil {
@@ -153,6 +179,9 @@ func newStatusSourceWith(t *testing.T, atLogin uint16, prepare func(*statusSourc
 				}
 				pc.live = true
 				for mc.HandleCommand() == nil {
+					if h.idleOut != nil && h.idleOut.Load() {
+						return // the error went out; the socket closes
+					}
 				}
 			}()
 		}
@@ -195,7 +224,7 @@ func TestForwarder_Status(t *testing.T) {
 		{stmt: "START TRANSACTION READ ONLY", want: auto | trans | readOnly, inTrans: true},
 		{stmt: "COMMIT", want: auto},
 		{stmt: "SET autocommit=0", want: 0},
-		{stmt: "SET sql_mode='NO_BACKSLASH_ESCAPES'", want: auto | noBack},
+		{stmt: "SET sql_mode='NO_BACKSLASH_ESCAPES'", want: noBack},
 	} {
 		_, err := f.Forward(ctx, step.stmt, &BufferSink{})
 		if (err != nil) != step.wantErr {
@@ -398,16 +427,29 @@ func TestForwarder_OnSession(t *testing.T) {
 	})
 
 	t.Run("a first statement that is a SET of autocommit", func(t *testing.T) {
-		// The state after it is the client's own doing, not the source's
-		// default; nothing is told, then or later.
-		f, got := open(t, auto, nil)
+		// The autocommit flag after it is the client's own doing, not the
+		// source's default: it is reported as the default. The other flag
+		// that statement does not touch is still the source's.
+		f, got := open(t, noBack, nil)
 		for _, q := range []string{"SET autocommit=0", "DO 1"} {
 			if _, err := f.Forward(ctx, q, &BufferSink{}); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if len(*got) != 0 {
-			t.Errorf("OnSession was told %#v about a state the client set itself", *got)
+		if len(*got) != 1 || (*got)[0] != auto|noBack {
+			t.Errorf("OnSession calls = %#v, want one, with 0x%04x: autocommit as the default, NO_BACKSLASH_ESCAPES as the source has it", *got, auto|noBack)
+		}
+	})
+
+	t.Run("a first statement that is a SET of sql_mode", func(t *testing.T) {
+		// The reverse: the source opens sessions with autocommit off, and
+		// the client's own sql_mode is not the source's default.
+		f, got := open(t, 0, nil)
+		if _, err := f.Forward(ctx, "SET sql_mode='NO_BACKSLASH_ESCAPES'", &BufferSink{}); err != nil {
+			t.Fatal(err)
+		}
+		if len(*got) != 1 || (*got)[0] != 0 {
+			t.Errorf("OnSession calls = %#v, want one, with 0x0000: autocommit off as the source has it, the client's sql_mode not counted", *got)
 		}
 	})
 
@@ -424,4 +466,55 @@ func TestForwarder_OnSession(t *testing.T) {
 			t.Errorf("OnSession calls = %#v, want one, with 0x0000", *got)
 		}
 	})
+}
+
+// MySQL ends an idle session by answering the NEXT command with error 4031
+// and closing the socket. The session, and the transaction it was in, are
+// gone with that answer: it is a loss, at once, not on the command after. A
+// healthy server never refuses a PING, so any error answering one is a loss.
+func TestForwarder_idleTimeoutIsALoss(t *testing.T) {
+	for _, viaPing := range []bool{true, false} {
+		name := "a forwarded statement"
+		if viaPing {
+			name = "a PING"
+		}
+		t.Run(name, func(t *testing.T) {
+			var idle atomic.Bool
+			addr := newStatusSourceWith(t, mysql.SERVER_STATUS_AUTOCOMMIT, func(h *statusSource) { h.idleOut = &idle })
+			f, err := NewForwarder("u:p@tcp("+addr+")/db?tls=false", config.SSL{Mode: "disabled"}, DefaultPolicy(), 10*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			ctx := context.Background()
+			if _, err := f.Forward(ctx, "BEGIN", &BufferSink{}); err != nil {
+				t.Fatal(err)
+			}
+			// Another server's error under the same number changes nothing.
+			if _, err := f.Forward(ctx, "SELECT a json error numbered 4031", &BufferSink{}); err == nil || IsLost(err) {
+				t.Fatalf("an unrelated error 4031: err = %v, want the source's own error", err)
+			}
+			if err := f.Lost(); err != nil {
+				t.Fatalf("an unrelated error 4031 lost the session: %v", err)
+			}
+			idle.Store(true)
+			if viaPing {
+				err = f.Ping(ctx)
+			} else {
+				_, err = f.Forward(ctx, "SELECT 1", &BufferSink{})
+			}
+			if !IsLost(err) {
+				t.Errorf("the command the source answered with 4031: err = %v, want the lost error (2006)", err)
+			}
+			if err := f.Lost(); !IsLost(err) {
+				t.Errorf("Lost() = %v right after the 4031, want the lost error", err)
+			}
+			if st, known := f.Status(); known {
+				t.Errorf("Status() = 0x%04x, known, for a session the source ended", st)
+			}
+			if f.InTransaction() {
+				t.Error("a session the source ended reports a transaction")
+			}
+		})
+	}
 }
