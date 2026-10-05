@@ -224,6 +224,10 @@ func TestDDLTouches(t *testing.T) {
 		{"past the .999999 rollover", ddlRow{"shop", "orders", "TRUNCATE TABLE orders", query.BinlogPos{File: "binlog.1000000", Pos: 4}}, true},
 		{"typed in another case", ddlRow{"SHOP", "Orders", "alter table Orders add c int", after}, true},
 		{"recorded with no schema", ddlRow{"", "orders", "ALTER TABLE orders ADD c int", after}, true},
+		// A statement over several tables keeps its text on the first row
+		// only: the others are found by their name alone.
+		{"a later row of a multi-table statement, typed in another case", ddlRow{"shop", "ORDERS", "(same DROP TABLE statement as the row for shop.lines)", after}, true},
+		{"a later row of a multi-table statement, with no schema", ddlRow{"", "orders", "(same DROP TABLE statement as the row for shop.lines)", after}, true},
 		{"the same table name in another schema", ddlRow{"crm", "orders", "ALTER TABLE crm.t ADD c int", after}, false},
 		{"another table", ddlRow{"shop", "lines", "ALTER TABLE `lines` ADD c int", after}, false},
 		{"another table whose name contains this one", ddlRow{"shop", "orders_archive", "DROP TABLE orders_archive", after}, false},
@@ -453,5 +457,31 @@ func TestSQLOnCopy_unchangedWithin_2085(t *testing.T) {
 	}
 	if len(wm.asked) != before {
 		t.Error("the watermark was asked for by a session that did not ask for unchanged tables")
+	}
+}
+
+// A statement that reads the change history is never vouched for, even when
+// every table it also reads is unchanged: the history grows with each event,
+// and the copy's holds only what was archived.
+func TestSQL_changeHistoryIsNeverVouchedFor_2085(t *testing.T) {
+	runner := &fakeSQLRunner{res: oneRowResult(), refs: &sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{{Name: "events"}, {Schema: "shop", Name: "orders"}}}}
+	f := newSQLFixture(t, runner, true)
+	asked := 0
+	unchanged := func(context.Context, []views.BaselineTable) string { asked++; return "" }
+	f.expectArchive()
+	_, err := f.s.runSQLVouched(context.Background(), f.s.cm.boot, "u", "SELECT count(*) FROM events e JOIN shop.orders o ON o.id = e.pk_values",
+		"", 0, sqlsandbox.Session{UnchangedWithin: time.Minute}, unchanged)
+	var refusal *sqlChangedRefusal
+	if !errors.As(err, &refusal) || !strings.Contains(refusal.Message, "change history") {
+		t.Fatalf("err = %v, want a refusal naming the change history", err)
+	}
+	if asked != 0 {
+		t.Errorf("the tables were asked about %d time(s) for a statement that reads the change history", asked)
+	}
+	// The same statement with nothing asked of it runs.
+	f.expectArchive()
+	if _, err := f.s.runSQLVouched(context.Background(), f.s.cm.boot, "u", "SELECT count(*) FROM events e JOIN shop.orders o ON o.id = e.pk_values",
+		"", 0, sqlsandbox.Session{}, unchanged); err != nil {
+		t.Fatalf("with no question asked: %v", err)
 	}
 }
