@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/dbtrail/dbtrail/internal/config"
 )
 
 // TestRoutingStats_tallyPerServer: counts land under the server they were
@@ -117,5 +119,37 @@ func TestFlashbackAPI_RoutingReadOnly(t *testing.T) {
 		if tally := got.Routing.Servers["srv-1"]; tally.MySQL != 1 || tally.Copy != 0 || tally.Refused != 2 || tally.Reasons["read_only"] != 2 {
 			t.Errorf("srv-1 = %+v, want mysql 1, copy 0, refused 2, read_only 2", tally)
 		}
+	}
+}
+
+// TestFlashbackSourceSSL: the TLS the port's connection to a source
+// must use is the entry's own (ssl_mode and the files beside it), with the
+// default mode when the entry sets none: what capture connects with.
+func TestFlashbackSourceSSL(t *testing.T) {
+	reg, err := LoadRegistry(t.TempDir() + "/servers.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := reg.Add(ServerEntry{Name: "plain", DSN: "u:p@tcp(i:3306)/idx", SourceDSN: "repl:pw@tcp(s:3306)/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict, err := reg.Add(ServerEntry{Name: "strict", DSN: "u:p@tcp(i:3306)/idx2", SourceDSN: "repl:pw@tcp(s2:3306)/",
+		SSLMode: "verify-ca", SSLCA: "/etc/ca.pem", SSLCert: "/etc/c.pem", SSLKey: "/etc/k.pem"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := srv.flashbackSourceSSL(plain.ID); got != (config.SSL{Mode: config.DefaultSourceSSLMode}) {
+		t.Errorf("entry with no ssl_mode: %+v, want the default mode alone", got)
+	}
+	if got := srv.flashbackSourceSSL(strict.ID); got != (config.SSL{Mode: "verify-ca", CA: "/etc/ca.pem", Cert: "/etc/c.pem", Key: "/etc/k.pem"}) {
+		t.Errorf("entry with ssl_* fields: %+v", got)
+	}
+	if got := srv.flashbackSourceSSL(strict.ID); got != strict.SourceSSL() {
+		t.Errorf("the port's TLS %+v differs from what capture reads %+v", got, strict.SourceSSL())
 	}
 }

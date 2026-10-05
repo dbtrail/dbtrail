@@ -2,8 +2,10 @@ package consoleapp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,7 @@ import (
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/spf13/cobra"
 
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/readrouter"
 	"github.com/dbtrail/dbtrail/internal/shim"
@@ -313,7 +316,7 @@ func TestBindReadRouterCarriesReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tgt := console.FlashbackTarget{ID: "s1", SQL: &console.SQLOnCopy{}, SourceDSN: "nobody:x@tcp(127.0.0.1:1)/none"}
+	tgt := console.FlashbackTarget{ID: "s1", SQL: &console.SQLOnCopy{}, SourceDSN: "nobody:x@tcp(127.0.0.1:1)/none", SourceSSL: console.ServerEntry{}.SourceSSL()}
 	bind := func(readOnly bool) *shim.Handler {
 		h := shim.NewHandler(nil, nil)
 		h.BindFreeSQL(routeTestFreeSQL{})
@@ -343,5 +346,62 @@ func TestBindReadRouterCarriesReadOnly(t *testing.T) {
 	bindReadRouter(h, srv, tgt, "s1", flashbackConfig{RouteReadOnly: true}, slog.Default())
 	if _, err := h.HandleQuery("DELETE FROM t"); code(err) == gomysql.ER_OPTION_PREVENTS_STATEMENT || code(err) == readrouter.CodeUpstreamLost {
 		t.Errorf("routing off: DELETE got %v, want the copy's own answer", err)
+	}
+}
+
+// TestBindReadRouterUsesTheServersTLS: the connection's TLS comes from the
+// target (the entry's ssl_* fields). A setting that cannot be used keeps the
+// connection copy-only and tells the Connect page why, in the entry's own
+// words, instead of connecting some other way.
+func TestBindReadRouterUsesTheServersTLS(t *testing.T) {
+	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", FlashbackListen: "127.0.0.1:3308",
+		ReadRouting: console.ReadRoutingConfig{MaxCopyAge: time.Hour, ScanRows: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unavailable := func() string {
+		req := httptest.NewRequest("GET", "http://127.0.0.1/api/flashback", nil)
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		var fb struct {
+			Routing struct {
+				Servers map[string]struct {
+					Unavailable string `json:"unavailable"`
+				} `json:"servers"`
+			} `json:"routing"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &fb); err != nil {
+			t.Fatalf("decode %s: %v", rec.Body.String(), err)
+		}
+		return fb.Routing.Servers["s1"].Unavailable
+	}
+	bind := func(ssl config.SSL) *shim.Handler {
+		h := shim.NewHandler(nil, nil)
+		h.BindFreeSQL(routeTestFreeSQL{})
+		bindReadRouter(h, srv, console.FlashbackTarget{ID: "s1", SQL: &console.SQLOnCopy{}, SourceDSN: "nobody:x@tcp(127.0.0.1:1)/none", SourceSSL: ssl},
+			"s1", flashbackConfig{RouteMaxCopyAge: time.Hour, RoutePolicy: readrouter.DefaultPolicy(), QueryTimeout: 5 * time.Second}, slog.Default())
+		t.Cleanup(h.Close)
+		return h
+	}
+	// An unknown mode: not bound (the write gets the copy's answer, not the
+	// source's 2006), and the page says why without a command-line flag.
+	_, err = bind(config.SSL{Mode: "prefered"}).HandleQuery("DELETE FROM t")
+	var me *gomysql.MyError
+	if errors.As(err, &me) && me.Code == readrouter.CodeUpstreamLost {
+		t.Errorf("an unusable TLS mode still bound a router: %v", err)
+	}
+	why := unavailable()
+	t.Log(why)
+	if !strings.Contains(why, "prefered") || !strings.Contains(why, "this server's TLS settings cannot be used") || strings.Contains(why, "--ssl") {
+		t.Errorf("the page says %q, want the bad TLS mode named without a flag", why)
+	}
+	// A usable one: bound (the forward is attempted), and the note is gone.
+	_, err = bind(config.SSL{Mode: "required"}).HandleQuery("DELETE FROM t")
+	if !errors.As(err, &me) || me.Code != readrouter.CodeUpstreamLost {
+		t.Errorf("a usable TLS mode did not bind a router: %v", err)
+	}
+	if why := unavailable(); why != "" {
+		t.Errorf("after a connection bound, the page still says %q", why)
 	}
 }

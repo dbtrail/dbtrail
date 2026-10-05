@@ -96,6 +96,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Go's `map[a:10]`, is now the JSON object its column is declared as. `AVG`
   and `/` are not part of this: they are doubles on the copy, and still
   print as such.
+- **Read routing: the port's connection to the source was not encrypted**
+  (#2079). With read routing on (`--route-max-copy-age`), the connection
+  the MySQL-protocol port opens to a server's source ignored that server's
+  TLS settings and used TLS only when the source DSN itself carried a
+  `tls=` parameter, which a server added from the web interface never
+  does. Statements and their results crossed the network in clear on a
+  source where capture connects over TLS, also with `ssl_mode: required`.
+  The port now decides TLS by the rule capture uses for the same server:
+  encrypted by default whenever the source offers TLS, a logged fallback to
+  an unencrypted connection only under `preferred` against a source with
+  no TLS, and encrypted or refused under `required`, `verify-ca` and
+  `verify-identity`.
 - **Read routing: an empty string came back as NULL** (#2079). With read
   routing on (`--route-max-copy-age`), a statement sent as plain text that
   MySQL answered returned `NULL` in every cell where MySQL returns an empty

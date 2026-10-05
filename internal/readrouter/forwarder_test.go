@@ -10,6 +10,8 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/client"
 	"github.com/go-mysql-org/go-mysql/mysql"
+
+	"github.com/dbtrail/dbtrail/internal/config"
 )
 
 // A source that cannot be reached, or that drops the connection, is lost for
@@ -33,7 +35,7 @@ func TestForwarder_lostStaysLost(t *testing.T) {
 			c.Close() // no handshake: the dial succeeds, the protocol fails
 		}
 	}()
-	f, err := NewForwarder("u:p@tcp("+ln.Addr().String()+")/db?tls=false", DefaultPolicy(), time.Second)
+	f, err := NewForwarder("u:p@tcp("+ln.Addr().String()+")/db?tls=false", config.SSL{Mode: "disabled"}, DefaultPolicy(), time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,17 +59,17 @@ func TestForwarder_lostStaysLost(t *testing.T) {
 }
 
 func TestNewForwarder_dsn(t *testing.T) {
-	f, err := NewForwarder("root:pw@tcp(db.example)/shop?tls=skip-verify&parseTime=true", Policy{}, 0)
+	f, err := NewForwarder("root:pw@tcp(db.example)/shop?tls=skip-verify&parseTime=true", config.SSL{Mode: "disabled"}, Policy{}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if f.addr != "db.example:3306" || f.db != "shop" || f.tls == nil || !f.tls.InsecureSkipVerify {
 		t.Errorf("parsed addr=%q db=%q tls=%v, want the default port, the database and the DSN's TLS", f.addr, f.db, f.tls)
 	}
-	if _, err := NewForwarder("root@unix(/tmp/sock)/x", Policy{}, 0); err == nil {
+	if _, err := NewForwarder("root@unix(/tmp/sock)/x", config.SSL{Mode: "disabled"}, Policy{}, 0); err == nil {
 		t.Error("a unix-socket DSN was accepted")
 	}
-	if _, err := NewForwarder("not a dsn", Policy{}, 0); err == nil {
+	if _, err := NewForwarder("not a dsn", config.SSL{Mode: "disabled"}, Policy{}, 0); err == nil {
 		t.Error("garbage was accepted")
 	}
 }
