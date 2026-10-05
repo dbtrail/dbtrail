@@ -76,6 +76,17 @@ func TestNamesUnlikeMySQL(t *testing.T) {
 		{"_rowid with a dotless i", known, "SELECT _rowıd FROM gen", "_rowid"},
 		{"_rowid over a table with a generated column", with("twice"), "SELECT _rowid FROM gen", "_rowid"},
 		{"rowid without the underscore is a name like any other", known, "SELECT rowid, row_id FROM gen", ""},
+		// my_row_id is the key MySQL generates for a table created without
+		// one. A server told not to show it lists it in no definition, and a
+		// dump of it holds no such column.
+		{"my_row_id, which the table does not list", known, "SELECT a AS my_row_id FROM gen WHERE my_row_id = 3", "my_row_id"},
+		{"my_row_id in another case", known, "SELECT MY_ROW_ID FROM gen", "my_row_id"},
+		{"my_row_id with a dotless i", known, "SELECT my_row_ıd FROM gen", "my_row_id"},
+		{"my_row_id, which the table lists and the file holds", func() BaselineTable {
+			t := known
+			t.Columns = []string{"My_Row_ID", "a"}
+			return t
+		}(), "SELECT a AS my_row_id FROM gen WHERE my_row_id = 3", ""},
 		// Not known is not "none".
 		{"no table definition", BaselineTable{Schema: "shop", Table: "old"}, "SELECT id FROM old", "no table definition"},
 		{"no table definition, though a list is set", BaselineTable{Schema: "shop", Table: "old", Columns: []string{"id"}}, "SELECT id FROM old", "no table definition"},
@@ -96,6 +107,59 @@ func TestNamesUnlikeMySQL(t *testing.T) {
 				t.Errorf("NamesUnlikeMySQL(%q) = %q, want a reason holding %q", c.stmt, got, c.want)
 			}
 		})
+	}
+}
+
+// Two tables whose names differ only by letter case (a source that tells them
+// apart) share one name on the copy: one keeps it, the other's view is
+// renamed. A statement that names either is then read against the one that
+// kept the name, whichever the source would read.
+func TestSelectedCaseTwin(t *testing.T) {
+	in := Input{Baselines: []BaselineTable{
+		{Schema: "shop", Table: "gen", Path: "/c/shop/gen.parquet"},
+		{Schema: "shop", Table: "Gen", Path: "/c/shop/Gen.parquet"},
+		{Schema: "shop", Table: "lines", Path: "/c/shop/lines.parquet"},
+		{Schema: "Shop", Table: "other", Path: "/c/Shop/other.parquet"},
+		{Schema: "shop", Table: "other", Path: "/c/shop/other.parquet"},
+	}}
+	keys := map[string]string{}
+	for _, n := range in.ViewNames() {
+		keys[n.Schema+"."+n.View] = n.Key
+	}
+	only := func(views ...string) Input {
+		out := in
+		out.OnlyViews = ViewSet{}
+		for _, v := range views {
+			k, ok := keys[v]
+			if !ok {
+				t.Fatalf("no view %s among %v", v, keys)
+			}
+			out.OnlyViews[k] = true
+		}
+		return out
+	}
+	for _, c := range []struct {
+		name string
+		in   Input
+		want []string // both spellings, or none
+	}{
+		{"the table that kept the name", only("shop.gen"), []string{"shop.gen", "shop.Gen"}},
+		{"a table with no twin", only("shop.lines"), nil},
+		{"a twin by its schema's case", only("shop.other"), []string{"shop.other", "Shop.other"}},
+		{"every view", in, []string{"shop.other", "Shop.other"}}, // the first in the plan's order
+		{"no view", only(), nil},
+	} {
+		table, twin := c.in.SelectedCaseTwin()
+		if len(c.want) == 0 {
+			if table != "" || twin != "" {
+				t.Errorf("%s: twin %q / %q, want none", c.name, table, twin)
+			}
+			continue
+		}
+		got := map[string]bool{table: true, twin: true}
+		if !got[c.want[0]] || !got[c.want[1]] {
+			t.Errorf("%s: twin %q / %q, want %v", c.name, table, twin, c.want)
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package views
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -159,8 +160,10 @@ func (t BaselineTable) StarUnlikeMySQL() string {
 // ASCII one when it compares names (a Kelvin sign for k, an accented letter)
 // depends on the server and its version, and is not followed here.
 //
-// One name is looked for over every table: _rowid, which a server answers for
-// a table with a key of one integer column and no definition lists.
+// Two names are looked for over every table: _rowid, which a server answers
+// for a table with a key of one integer column and no definition lists, and
+// my_row_id, the key MySQL generates for a table created without one, where
+// the table's columns do not hold it.
 //
 // Three tables are refused whatever the statement says, because what they
 // lack on the copy is not known by name: one with no table definition (a
@@ -188,6 +191,17 @@ func (t BaselineTable) NamesUnlikeMySQL(statement string) string {
 	// to i, as a server that compares names without case may.
 	if strings.Contains(strings.ToLower(strings.ToUpper(statement)), "_rowid") {
 		return "the statement names _rowid, which MySQL answers for a table with a key of one integer column and a snapshot does not hold"
+	}
+	// my_row_id is the key MySQL generates for a table created without one
+	// (sql_generate_invisible_primary_key). A server told not to show it
+	// (show_gipk_in_create_table_and_information_schema=OFF) lists it in no
+	// definition, and a snapshot read from that definition does not hold it,
+	// while a statement can still name it. Whether this table has one is not
+	// known here, so the name is looked for unless the table's own columns
+	// hold it.
+	if !slices.ContainsFunc(t.Columns, func(c string) bool { return strings.EqualFold(c, "my_row_id") }) &&
+		strings.Contains(strings.ToLower(strings.ToUpper(statement)), "my_row_id") {
+		return "the statement names my_row_id, the key MySQL generates for a table created without one, which this table's snapshot does not hold"
 	}
 	if len(t.NotHeld) == 0 {
 		return ""

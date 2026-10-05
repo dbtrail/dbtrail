@@ -823,21 +823,34 @@ What this is and is not:
     or look-alike letters a server takes for an ASCII one when it compares
     names depends on the server, so such a statement is not searched;
   - **any statement that reads a table whose missing columns are not known
-    by name**: a table whose snapshot carries no `CREATE TABLE` (a snapshot
-    older than 0.5, a file whose footer could not be read at that moment), a
+    by name**: a table whose snapshot carries no `CREATE TABLE` (a full
+    snapshot taken before v0.5.0, every refresh that builds on one, since a
+    refresh keeps the definition of the snapshot it started from, and a file
+    whose footer could not be read at that moment), a
     file that does not hold exactly the columns its `CREATE TABLE` lists, a
     column whose definition could not be read (a name holding a backtick),
     and a generated column whose name is not plain ASCII letters, digits,
     `_` and `$`. Not known is never read as "nothing is missing". Such a
     table used to be answered by the copy whenever the statement had no
     star: it is MySQL's now, until a new full snapshot records its
-    definition;
+    definition. The Connect page counts those statements under "the snapshot
+    holds no table definition", and DBTrail's log names each such table
+    once (`carries no CREATE TABLE`);
   - a MariaDB table created `WITH SYSTEM VERSIONING` answers to `row_start`
     and `row_end` whether or not it declares them, and the copy holds
     neither: a statement over it that holds one of those names is MySQL's;
   - `_rowid`, the other name MySQL and MariaDB give a key made of one
     integer column, is in no snapshot: a statement that holds it is MySQL's,
-    over any table.
+    over any table. So is one that holds `my_row_id`, the key MySQL
+    generates for a table created without one
+    (`sql_generate_invisible_primary_key`), over a table whose snapshot does
+    not hold that column: with
+    `show_gipk_in_create_table_and_information_schema=OFF` the server lists
+    it in no definition;
+  - **a statement that reads a table whose name differs from another
+    table's only by letter case** (`Gen` and `gen`, on a source with
+    `lower_case_table_names=0`): the copy does not tell the two names apart
+    and would read one table for both.
 
   An invisible column is not part of this: a snapshot holds it, and both
   sides resolve its name the same way (only `SELECT *` and `NATURAL JOIN`

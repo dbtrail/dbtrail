@@ -266,3 +266,34 @@ func typedIdent(s string) string {
 	}
 	return s
 }
+
+// SelectedCaseTwin names a table this render reads and another table of the
+// copy whose name differs from it only by letter case, both as schema.table,
+// or "" twice when no table it reads has such a twin.
+//
+// Only a source that tells such names apart has them (lower_case_table_names
+// = 0). DuckDB does not, so one table keeps the name and the other's view is
+// renamed (stateViewPlan). A statement written for the source names either
+// one by its own spelling, and on the copy both spellings are the table that
+// kept the name: the other's rows are never what it reads. A caller that
+// must answer as the source would (read routing) keeps a statement over such
+// a name away from the copy.
+func (in Input) SelectedCaseTwin() (table, twin string) {
+	spellings := map[string][]string{}
+	for _, t := range in.Baselines {
+		if in.reservedSchema(t.Schema) != "" {
+			continue
+		}
+		k := nameKey(t.Schema, t.Table)
+		spellings[k] = append(spellings[k], t.Schema+"."+t.Table)
+	}
+	for _, t := range in.SelectedBaselines() {
+		own := t.Schema + "." + t.Table
+		for _, other := range spellings[nameKey(t.Schema, t.Table)] {
+			if other != own {
+				return own, other
+			}
+		}
+	}
+	return "", ""
+}

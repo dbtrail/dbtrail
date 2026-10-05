@@ -265,7 +265,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name is not plain ASCII. A new full snapshot records the definition. A
   statement that holds `_rowid` (MySQL's other name for a key of one integer
   column) or, over a MariaDB table created `WITH SYSTEM VERSIONING`,
-  `row_start` or `row_end`, is MySQL's too. The
+  `row_start` or `row_end`, is MySQL's too; so is one that holds
+  `my_row_id` over a table whose snapshot does not hold MySQL's generated
+  key, and one that reads a table whose name differs from another's only by
+  letter case (the copy read one table for both). The Connect page and the
+  log line about a snapshot with no table definition now say what to do:
+  take a new full snapshot. The
   SQL card and a port with routing off answer as before. Also: `bintrail
   baseline` reads a generated column whose expression ends in a string
   ending in a backslash as generated again (it stopped the conversion with

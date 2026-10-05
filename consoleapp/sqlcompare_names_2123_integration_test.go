@@ -134,6 +134,40 @@ func generatedNames(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		}
 		order = append(order, orderTable{name: tb.name, ddl: ddl + ";\n", rows: tb.rows, copyRows: tb.copyRows, footer: true})
 	}
+	// MySQL's generated invisible primary key, on a server told not to show
+	// it: the table has a column my_row_id that its definition does not
+	// list, so a snapshot read from that definition does not hold it. MySQL
+	// 8.0.30 and later; MariaDB has no such setting, and the table is then
+	// left out.
+	hasGIPK := false
+	if conn, err := srcDB.Conn(context.Background()); err != nil {
+		t.Fatal(err)
+	} else {
+		if _, err := conn.ExecContext(context.Background(), "SET SESSION sql_generate_invisible_primary_key = ON"); err != nil {
+			t.Logf("no generated invisible primary key on this server: %v", err)
+		} else {
+			hasGIPK = true
+			var name, ddl string
+			for _, q := range []string{
+				"CREATE TABLE gipk (a INT, b INT)",
+				"INSERT INTO gipk (a, b) VALUES (5, 1), (2, 1), (7, 1)",
+				"ANALYZE TABLE gipk",
+				"SET SESSION show_gipk_in_create_table_and_information_schema = OFF",
+			} {
+				if _, err := conn.ExecContext(context.Background(), q); err != nil {
+					t.Fatalf("%s: %v", q, err)
+				}
+			}
+			if err := conn.QueryRowContext(context.Background(), "SHOW CREATE TABLE gipk").Scan(&name, &ddl); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(ddl, "my_row_id") {
+				t.Fatalf("the definition lists my_row_id with the setting off:\n%s", ddl)
+			}
+			order = append(order, orderTable{name: "gipk", ddl: ddl + ";\n", rows: [][]string{{"5", "1"}, {"2", "1"}, {"7", "1"}}, footer: true})
+		}
+		conn.Close()
+	}
 	baseDir := t.TempDir()
 	writeOrderSnapshot(t, baseDir, srcName, order)
 
@@ -235,6 +269,9 @@ func generatedNames(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		// which no definition lists. The copy would filter on the alias
 		// (a >= 2: three rows) where the server filters on id (two).
 		rowid = "SELECT a AS _rowid FROM gen WHERE _rowid + 0 >= 2 ORDER BY a"
+		// The same shape with the generated key: rows 2 and 3 on the
+		// server, the rows whose a is 2 or more on the copy.
+		gipk = "SELECT a AS my_row_id FROM gipk WHERE my_row_id + 0 >= 2 ORDER BY a"
 	)
 
 	// 1. The source's answers. gen.twice is 2, 4, 6; g2.twice is 99.
@@ -286,6 +323,12 @@ func generatedNames(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{invInner, eq, "", "an invisible column is held and resolved the same on both"},
 		{invJoin, sqlcompare.SourceError, "", "ambiguous on both"},
 	}
+	if hasGIPK {
+		if got := answerText(src, gipk); got != "2 / 7" {
+			t.Errorf("source: %s\n  got  %s\n  want 2 / 7 (the rows whose generated key is 2 and 3)", gipk, got)
+		}
+		fixtures = append(fixtures, valuesFixture{gipk, diff, "", "the copy filters on the alias: 2, 5, 7"})
+	}
 	by := compareInHalves(t, sourceDSN, copies, policy, fixtures)
 	checkValuesFixtures(t, sourceDSN, copies[0], fixtures, by)
 
@@ -329,6 +372,14 @@ func generatedNames(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		}
 	}
 
+	if hasGIPK {
+		got := answerText(routed, gipk)
+		t.Logf("routed  %-40s %s", got, gipk)
+		if got != "2 / 7" {
+			t.Errorf("routed %q: got %s, want 2 / 7: the source's answer, by its generated key", gipk, got)
+		}
+	}
+
 	// Who answered, and why the source: eight statements declined by the copy
 	// for their names, under the reason a star declined for its columns has;
 	// the ambiguous one never got that far; two served by the copy; and the
@@ -360,6 +411,9 @@ func generatedNames(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		} else {
 			differ++
 		}
+	}
+	if hasGIPK {
+		differ++
 	}
 	if reasons["copy_columns_differ"] != differ || reasons["copy_refused"] != 0 || reasons["explain_failed"] != unexplained || reasons["expensive_plan"] != 2 {
 		t.Errorf("reasons = %v, want copy_columns_differ %d, copy_refused 0, explain_failed %d, expensive_plan 2", reasons, differ, unexplained)

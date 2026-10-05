@@ -241,3 +241,35 @@ func TestSQLStarRefusalFor_starTableThatMatchesNoView(t *testing.T) {
 		}
 	}
 }
+
+// Two tables whose names differ only by letter case (a source with
+// lower_case_table_names = 0): the copy has one view under that name, so a
+// statement written for either is read against the one that kept it. A
+// caller that wants MySQL's answer is refused for both spellings, and for
+// nothing else.
+func TestSQLStrictRefusalFor_caseTwinTables(t *testing.T) {
+	known := func(schema, table string) views.BaselineTable {
+		return views.BaselineTable{Schema: schema, Table: table, Path: "/c/" + schema + "/" + table + ".parquet", SchemaKnown: true, Columns: []string{"id", "a"}}
+	}
+	in := views.Input{Baselines: []views.BaselineTable{known("shop", "gen"), known("shop", "Gen"), known("shop", "lines")}}
+	for _, c := range []struct {
+		stmt string
+		refs sqlsandbox.Refs
+		want string
+	}{
+		{"SELECT a FROM shop.Gen", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{{Schema: "shop", Name: "Gen"}}}, "differ only by letter case"},
+		{"SELECT a FROM shop.gen", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{{Schema: "shop", Name: "gen"}}}, "differ only by letter case"},
+		{"SELECT a FROM GEN", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{{Name: "GEN"}}}, "shop.Gen"},
+		{"SELECT l.a FROM shop.lines l JOIN shop.Gen g ON g.id = l.id", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{{Schema: "shop", Name: "lines"}, {Schema: "shop", Name: "Gen"}}}, "shop.gen"},
+		{"SELECT a FROM shop.lines, range(3)", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{{Schema: "shop", Name: "lines"}}, Unsure: true}, "differ only by letter case"},
+		{"SELECT a FROM shop.lines", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{{Schema: "shop", Name: "lines"}}}, ""},
+		{"SELECT 1", sqlsandbox.Refs{}, ""},
+	} {
+		narrowed := in
+		narrowed.OnlyViews = sqlWantedViews(in, c.refs)
+		got := sqlStrictRefusalFor(in, narrowed, c.refs, c.stmt)
+		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
+			t.Errorf("%s: refusal %q, want one saying %q", c.stmt, got, c.want)
+		}
+	}
+}

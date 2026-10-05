@@ -607,14 +607,7 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 				// A star returns what a view's column list says. Where that
 				// is not what MySQL returns, a caller that asked for MySQL's
 				// answer gets a refusal and sends the statement there (#2111).
-				if msg := sqlStarRefusalFor(in, narrowed, refs); msg != "" {
-					viewsRefusal = &sqlStarRefusal{msg}
-					return "", viewsRefusal
-				}
-				// A name returns what the copy's columns bind it to. Where a
-				// table lacks a column MySQL has, a statement that names it
-				// may be answered with something else of that name (#2123).
-				if msg := sqlNamesRefusalFor(narrowed, statement); msg != "" {
+				if msg := sqlStrictRefusalFor(in, narrowed, refs, statement); msg != "" {
 					viewsRefusal = &sqlStarRefusal{msg}
 					return "", viewsRefusal
 				}
@@ -800,6 +793,26 @@ func sqlStarRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs) string {
 			"with a star over it; name the columns to read it here", table, why)
 	}
 	return ""
+}
+
+// sqlStrictRefusalFor is every reason the copy declines a statement a caller
+// wants MySQL's answer to (sqlsandbox.Session.StrictStar), apart from the
+// NATURAL JOIN one, or "" when the copy may answer:
+//
+//   - two tables the statement may read differ only by letter case. They are
+//     one name on the copy, so the statement would read the one that kept the
+//     name, whichever the source reads (views.Input.SelectedCaseTwin);
+//   - a star returns other columns than MySQL's (sqlStarRefusalFor, #2111);
+//   - a name could bind to something else (sqlNamesRefusalFor, #2123).
+func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, statement string) string {
+	if table, twin := narrowed.SelectedCaseTwin(); table != "" {
+		return fmt.Sprintf("the copy does not answer this statement: %s and %s differ only by letter case, "+
+			"which the copy does not tell apart, so it could read the other table", table, twin)
+	}
+	if msg := sqlStarRefusalFor(in, narrowed, refs); msg != "" {
+		return msg
+	}
+	return sqlNamesRefusalFor(narrowed, statement)
 }
 
 // sqlNamesRefusalFor says why the copy must not answer a statement because of
