@@ -293,6 +293,7 @@ func TestIntegrationSQLCompareColumnOrder(t *testing.T) {
 		{"SELECT * FROM who_legacy l JOIN who w USING (alpha) ORDER BY alpha", "a star over USING, by the join alone: MySQL answers", []string{"alpha", "id", "side", "id", "side"}, "1|1|live|1|live"},
 		{"SELECT * FROM who a JOIN who w USING (alpha) ORDER BY alpha", "a star over USING, both orders known: still MySQL", []string{"alpha", "id", "side", "id", "side"}, "1|1|live|1|live"},
 		{"SELECT a.side, w.alpha FROM who a JOIN who w USING (alpha) ORDER BY w.alpha", "USING without a star is the copy's", []string{"side", "alpha"}, "copy|1"},
+		{"SELECT #2\n alpha FROM who ORDER BY alpha", "# is a comment on MySQL and the second column on the copy: MySQL answers", []string{"alpha"}, "1"},
 		{"SELECT count(*) AS n FROM gen NATURAL JOIN g2", "NATURAL JOIN over a table with a generated column: MySQL answers", []string{"n"}, "0"},
 		{"SELECT count(*) AS n FROM invis NATURAL JOIN inv2", "NATURAL JOIN over a table with an invisible column: MySQL answers", []string{"n"}, "3"},
 		{"SELECT count(*) AS n FROM who NATURAL JOIN who_legacy", "NATURAL JOIN over a table with no definition: MySQL answers", []string{"n"}, "3"},

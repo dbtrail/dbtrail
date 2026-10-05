@@ -173,6 +173,7 @@ var vetoes = []struct {
 	// them. A leading backtick, word character or dot means a quoted name, a
 	// longer word or a column of that name, not the operator.
 	{"UNION/INTERSECT/EXCEPT without ALL (duplicates removed by bytes on the copy, by collation on MySQL)", regexp.MustCompile(`(?i)(^|[^\x60\w.])(intersect|except)([^\x60\w]|$)|(^|[^\x60\w.])union\s*(distinct\b|select\b|values\b|table\b|\()`)},
+	{"# starts a comment on MySQL and a column-position reference on the copy", regexp.MustCompile(`#`)}, // scrub drops the comment's text and keeps its `#`: `SELECT #2<newline> alpha FROM t` is column alpha on MySQL and the second column, named alpha, on the copy
 }
 
 var hintComment = regexp.MustCompile(`/\*[!+]`)
@@ -234,6 +235,11 @@ func scrub(stmt string) (blanked string, doubleQuoted, backslash bool) {
 			b.WriteByte(' ')
 			i += end + 4
 		case c == '#', c == '-' && i+1 < n && stmt[i+1] == '-' && (i+2 >= n || stmt[i+2] == ' ' || stmt[i+2] == '\t' || stmt[i+2] == '\n'):
+			if c == '#' {
+				// The comment's text goes, its `#` stays, for the veto that
+				// keeps such a statement on MySQL (see the vetoes table).
+				b.WriteByte('#')
+			}
 			nl := strings.IndexByte(stmt[i:], '\n')
 			if nl < 0 {
 				return b.String(), doubleQuoted, backslash
