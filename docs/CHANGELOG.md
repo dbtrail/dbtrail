@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Go's `map[a:10]`, is now the JSON object its column is declared as. `AVG`
   and `/` are not part of this: they are doubles on the copy, and still
   print as such.
+- **Read routing: an empty string came back as NULL** (#2079). With read
+  routing on (`--route-max-copy-age`), a statement sent as plain text that
+  MySQL answered returned `NULL` in every cell where MySQL returns an empty
+  string: `SELECT ''`, an empty `VARCHAR` or `BLOB` column, the value of
+  `SHOW VARIABLES LIKE 'init_connect'`. Prepared statements were not
+  affected, and neither was anything the copy answered. Forwarded results
+  now keep the empty string.
 - **Rotation: an hour held by a pending upload now counts as deferred in
   both paths** (#2094). When an unconfirmed S3 upload blocked a drop, the
   path that archives counted the hour as deferred and the path that only
