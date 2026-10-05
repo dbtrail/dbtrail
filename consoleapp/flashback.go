@@ -424,6 +424,27 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 	return bound
 }
 
+// probeRouteAccount is console.Config.RouteAccountProbe: one login and one
+// trivial statement through the forwarder the port uses, with the same TLS
+// rule. It returns the error of the login as the source or the network gave
+// it, not the error 2006 a client of the port would see.
+func probeRouteAccount(ctx context.Context, dsn string, ssl config.SSL, timeout time.Duration) error {
+	fw, err := readrouter.NewForwarder(dsn, ssl, readrouter.Policy{}, timeout)
+	if err != nil {
+		return err
+	}
+	defer fw.Close()
+	var connectErr error
+	fw.OnConnect = func(err error) { connectErr = err }
+	if _, err := fw.Forward(ctx, "SELECT 1", &readrouter.BufferSink{}); err != nil {
+		if connectErr != nil {
+			return connectErr
+		}
+		return err
+	}
+	return nil
+}
+
 // accountLabel names which of a server's two accounts the port logs in
 // with, and its user name.
 func accountLabel(separate bool, user string) string {

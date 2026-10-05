@@ -1,6 +1,7 @@
 package consoleapp
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net"
@@ -24,7 +25,8 @@ func (oneRowHandler) HandleQuery(string) (*gomysql.Result, error) {
 	return gomysql.NewResultReserveResultset(0), nil
 }
 
-// fakeSourceAddr serves the MySQL protocol with one account, fwd / pw.
+// fakeSourceAddr serves the MySQL protocol, without TLS, with one account,
+// fwd / pw.
 func fakeSourceAddr(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -32,7 +34,8 @@ func fakeSourceAddr(t *testing.T) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	conf := server.NewDefaultServer()
+	// No TLS on offer, so a login that requires it must be refused.
+	conf := server.NewServer("8.0.11", gomysql.DEFAULT_COLLATION_ID, gomysql.AUTH_NATIVE_PASSWORD, nil, nil)
 	auth := server.NewInMemoryAuthenticationHandler(gomysql.AUTH_NATIVE_PASSWORD)
 	if err := auth.AddUser("fwd", "pw"); err != nil {
 		t.Fatal(err)
@@ -131,5 +134,48 @@ func TestBindReadRouterSaysWhichAccountWasRefused(t *testing.T) {
 	}
 	if bindReadRouter(h, srv, console.FlashbackTarget{ID: "s1", SQL: &console.SQLOnCopy{}}, "s1", cfg, slog.Default()) {
 		t.Error("a server with no source reported a bound router")
+	}
+}
+
+// TestProbeRouteAccount: Test connection's login for a forwarding account
+// goes through the port's own client and answers with the source's words,
+// not with the error 2006 a client of the port would get; and the daemon
+// hands that probe to the console.
+func TestProbeRouteAccount(t *testing.T) {
+	addr := fakeSourceAddr(t)
+	off := config.SSL{Mode: "disabled"}
+	ctx := context.Background()
+	if err := probeRouteAccount(ctx, "fwd:pw@tcp("+addr+")/", off, 5*time.Second); err != nil {
+		t.Errorf("the right password: %v", err)
+	}
+	err := probeRouteAccount(ctx, "fwd:wrong-pw@tcp("+addr+")/", off, 5*time.Second)
+	t.Logf("wrong password: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "Access denied") || strings.Contains(err.Error(), "gone away") || strings.Contains(err.Error(), "wrong-pw") {
+		t.Errorf("wrong password: %v, want the source's Access denied, without the port's 2006 and without the password", err)
+	}
+	if _, refused := readrouter.AccountRefused(err); !refused {
+		t.Errorf("the error is not the source's own refusal: %v", err)
+	}
+	if err := probeRouteAccount(ctx, "fwd:pw@tcp(127.0.0.1:1)/", off, 5*time.Second); err == nil {
+		t.Error("an unreachable source logged in")
+	}
+	// The source refuses TLS it does not offer: the server's TLS mode is
+	// what the probe connects with.
+	if err := probeRouteAccount(ctx, "fwd:pw@tcp("+addr+")/", config.SSL{Mode: "required"}, 5*time.Second); err == nil {
+		t.Error("ssl_mode required against a source with no TLS logged in: the probe does not use the server's TLS settings")
+	}
+	if err := probeRouteAccount(ctx, "fwd:pw@tcp("+addr+")/", config.SSL{Mode: "no-such-mode"}, 5*time.Second); err == nil {
+		t.Error("an unusable TLS mode logged in")
+	}
+
+	cfg, err := upConsoleConfig(nil, "u:p@tcp(127.0.0.1:1)/idx", consoleOpts{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RouteAccountProbe == nil {
+		t.Fatal("the daemon does not give the console its login probe: Test connection would say nothing about the forwarding account")
+	}
+	if err := cfg.RouteAccountProbe(ctx, "fwd:wrong-pw@tcp("+addr+")/", off, 5*time.Second); err == nil {
+		t.Error("the probe the console got accepts a wrong password")
 	}
 }

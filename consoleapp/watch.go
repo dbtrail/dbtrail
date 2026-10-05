@@ -1804,7 +1804,10 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		AllowedHosts:    opts.AllowedHosts,
 		FlashbackListen: opts.FlashbackListen,
 		ReadRouting:     opts.ReadRouting,
-		SQLMaxInFlight:  opts.SQLMaxInFlight,
+		// Test connection tries a forwarding account with the port's own
+		// client (#2079).
+		RouteAccountProbe: probeRouteAccount,
+		SQLMaxInFlight:    opts.SQLMaxInFlight,
 		// The daemon's --rotate-* defaults, so GET /api/rotation can report the
 		// effective policy (and the console panel prefill it) before the
 		// operator saves an override.

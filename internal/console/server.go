@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/ext"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/dbtrail/dbtrail/internal/parquetquery"
 	"github.com/dbtrail/dbtrail/internal/query"
@@ -252,6 +253,15 @@ type Config struct {
 	// zero value reads as routing off. Display only, like FlashbackListen:
 	// the serving layer binds the real policy itself.
 	ReadRouting ReadRoutingConfig
+	// RouteAccountProbe logs in to a source with dsn exactly as the
+	// MySQL-protocol port's forwarder would (its client, the server's TLS
+	// settings) and runs one trivial statement; the error is the source's
+	// or the network's own. It is how Test connection tries a server's
+	// forwarding account (#2079). Supplied by the serving layer, which
+	// owns the MySQL client: this package must not link one. nil = this
+	// process has no port to forward from (the read-only serve), and Test
+	// connection then says nothing about that login.
+	RouteAccountProbe func(ctx context.Context, dsn string, ssl config.SSL, timeout time.Duration) error
 }
 
 // ReadRoutingConfig is the read router's policy as the console reports it.
@@ -475,6 +485,8 @@ type Server struct {
 	// per server, to close them when the account they forward with changes.
 	routed  *routedConns
 	routing *routingStats
+	// routeAccountProbe is Config.RouteAccountProbe.
+	routeAccountProbe func(ctx context.Context, dsn string, ssl config.SSL, timeout time.Duration) error
 }
 
 // serverHeader selects the target server per request. Selection is stateless —
@@ -660,6 +672,7 @@ func New(cfg Config) (*Server, error) {
 		readRouting:             cfg.ReadRouting,
 		routing:                 newRoutingStats(time.Now()),
 		routed:                  newRoutedConns(),
+		routeAccountProbe:       cfg.RouteAccountProbe,
 		archiveFetcher:          parquetquery.Fetch,
 		capacityProbe:           doctor.ProbeCapacity,
 	}

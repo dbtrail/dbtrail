@@ -955,7 +955,7 @@ func (s *Server) handleServersTest(w http.ResponseWriter, r *http.Request) {
 	resp := probeServer(r, dsn, monitored)
 	candidate, typed, hold := s3ProbeCandidate(req, sent, saved, hasSaved)
 	resp.S3 = probeS3Store(r.Context(), candidate, typed && !sameSavedStore(candidate, saved, hasSaved), hold)
-	resp.Route = probeRouteAccount(r.Context(), req, saved, hasSaved)
+	resp.Route = s.probeRouteAccount(r.Context(), req, saved, hasSaved)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1006,7 +1006,7 @@ func (s *Server) testUnsavedSource(w http.ResponseWriter, r *http.Request, req s
 	resp := testResponse{OK: report.Failed == 0, Doctor: report}
 	candidate, typed, hold := s3ProbeCandidate(req, sent, ServerEntry{}, false)
 	resp.S3 = probeS3Store(r.Context(), candidate, typed, hold)
-	resp.Route = probeRouteAccount(r.Context(), req, ServerEntry{}, false)
+	resp.Route = s.probeRouteAccount(r.Context(), req, ServerEntry{}, false)
 	writeJSON(w, http.StatusOK, resp)
 }
 

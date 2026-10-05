@@ -4,8 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"time"
-
-	"github.com/dbtrail/dbtrail/internal/readrouter"
 )
 
 // routeProbeResult is Test connection's answer for the server's forwarding
@@ -31,9 +29,11 @@ const routeProbeTimeout = 8 * time.Second
 // probeRouteAccount tries the forwarding account the request would leave the
 // server with: the saved one, or the one being typed. nil when there is none
 // (and nothing wrong to report about one). It connects with the port's own
-// client and the server's own TLS settings, so it cannot pass what the port
-// would fail, and reports the source's answer, not the port's 2006.
-func probeRouteAccount(ctx context.Context, req serverRequest, saved ServerEntry, hasSaved bool) *routeProbeResult {
+// client and the server's own TLS settings (Config.RouteAccountProbe), so it
+// cannot pass what the port would fail, and reports the source's answer, not
+// the port's 2006. In a process with no such client, a request the server
+// would refuse is still reported; the login is not tried.
+func (s *Server) probeRouteAccount(ctx context.Context, req serverRequest, saved ServerEntry, hasSaved bool) *routeProbeResult {
 	flavor := saved.SourceFlavor()
 	if !hasSaved {
 		f, err := NormalizeFlavor(req.Flavor)
@@ -65,25 +65,17 @@ func probeRouteAccount(ctx context.Context, req serverRequest, saved ServerEntry
 		res.NeedsPassword = true
 		return res
 	}
-	fw, err := readrouter.NewForwarder(candidate, saved.SourceSSL(), readrouter.Policy{}, routeProbeTimeout)
-	if err != nil {
-		res.Error = scrubDSNError(err, candidate)
-		return res
+	if s.routeAccountProbe == nil {
+		return nil
 	}
-	defer fw.Close()
-	var connectErr error
-	fw.OnConnect = func(err error) { connectErr = err }
 	ctx, cancel := context.WithTimeout(ctx, routeProbeTimeout)
 	defer cancel()
 	start := time.Now()
-	_, err = fw.Forward(ctx, "SELECT 1", &readrouter.BufferSink{})
+	err = s.routeAccountProbe(ctx, candidate, saved.SourceSSL(), routeProbeTimeout)
 	res.LatencyMS = time.Since(start).Milliseconds()
-	switch {
-	case connectErr != nil:
-		res.Error = scrubDSNError(connectErr, candidate)
-	case err != nil:
+	if err != nil {
 		res.Error = scrubDSNError(err, candidate)
-	default:
+	} else {
 		res.OK = true
 	}
 	slog.Info("console: forwarding account test probe", "addr", cfg.Addr, "user", cfg.User, "ok", res.OK, "latency_ms", res.LatencyMS, "error", res.Error)

@@ -1,15 +1,18 @@
 package console
 
 import (
+	"context"
 	"encoding/json"
-	"net"
+	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	gomysql "github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/go-mysql-org/go-mysql/server"
+	"github.com/go-sql-driver/mysql"
+
+	"github.com/dbtrail/dbtrail/internal/config"
 )
 
 // TestRoutedConns: a tracked connection is closed by a drop, once; one that
@@ -146,56 +149,30 @@ func TestFlashbackAPI_AccountRefused(t *testing.T) {
 	}
 }
 
-// fakeMySQL is a MySQL-protocol endpoint that knows one account (fwd / pw)
-// and counts the logins it accepted and the connections it saw.
-type fakeMySQL struct {
-	addr          string
-	conns, logins atomic.Int32
+// fakeSource stands for the serving layer's login probe
+// (Config.RouteAccountProbe): it knows one account, fwd / pw, at any
+// address, and records every login it was asked to try.
+type fakeSource struct {
+	mu     sync.Mutex
+	tried  map[string]int // address -> attempts
+	logins map[string]int // address -> accepted
+	ssl    []config.SSL
 }
 
-type fakeMySQLHandler struct{ server.EmptyHandler }
-
-func (fakeMySQLHandler) HandleQuery(string) (*gomysql.Result, error) {
-	rs, err := gomysql.BuildSimpleTextResultset([]string{"x"}, [][]any{{"1"}})
+func (f *fakeSource) probe(_ context.Context, dsn string, ssl config.SSL, _ time.Duration) error {
+	cfg, err := mysql.ParseDSN(dsn)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return gomysql.NewResult(rs), nil
-}
-
-func newFakeMySQL(t *testing.T) *fakeMySQL {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tried[cfg.Addr]++
+	f.ssl = append(f.ssl, ssl)
+	if cfg.User != "fwd" || cfg.Passwd != "pw" {
+		return fmt.Errorf("ERROR 1045 (28000): Access denied for user '%s'@'10.0.0.5' (using password: YES)", cfg.User)
 	}
-	t.Cleanup(func() { ln.Close() })
-	conf := server.NewDefaultServer()
-	auth := server.NewInMemoryAuthenticationHandler(gomysql.AUTH_NATIVE_PASSWORD)
-	if err := auth.AddUser("fwd", "pw"); err != nil {
-		t.Fatal(err)
-	}
-	f := &fakeMySQL{addr: ln.Addr().String()}
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			f.conns.Add(1)
-			go func() {
-				defer c.Close()
-				mc, err := server.NewCustomizedConn(c, conf, auth, fakeMySQLHandler{})
-				if err != nil {
-					return
-				}
-				f.logins.Add(1)
-				for mc.HandleCommand() == nil {
-				}
-			}()
-		}
-	}()
-	return f
+	f.logins[cfg.Addr]++
+	return nil
 }
 
 // TestServersAPI_TestConnectionTriesTheForwardingAccount: Test connection
@@ -203,11 +180,11 @@ func newFakeMySQL(t *testing.T) *fakeMySQL {
 // account failed and why. A saved password is never sent to a host or user
 // it was not saved for.
 func TestServersAPI_TestConnectionTriesTheForwardingAccount(t *testing.T) {
-	src := newFakeMySQL(t)
-	elsewhere := newFakeMySQL(t)
-	host, port, _ := net.SplitHostPort(src.addr)
-	_, otherPort, _ := net.SplitHostPort(elsewhere.addr)
+	src := &fakeSource{tried: map[string]int{}, logins: map[string]int{}}
+	const host, port, otherPort = "db.prod", "3306", "3307"
+	srcAddr, elsewhere := host+":"+port, host+":"+otherPort
 	srv := newRegistryServer(t)
+	srv.routeAccountProbe = src.probe
 	const secret = "pw"
 	base := `"name":"prod","dsn":"u:p@tcp(127.0.0.1:1)/db","source_host":"` + host + `","source_port":"` + port + `","source_user":"repl","source_password":"replpw"`
 	rec, body := doServersReq(t, srv, "POST", "/api/servers", `{`+base+`,"route_user":"fwd","route_password":"`+secret+`"}`)
@@ -216,6 +193,12 @@ func TestServersAPI_TestConnectionTriesTheForwardingAccount(t *testing.T) {
 	}
 	var dto serverDTO
 	if err := json.Unmarshal(body, &dto); err != nil {
+		t.Fatal(err)
+	}
+	// The server's TLS mode lives in the registry file, not in the API.
+	entry, _ := srv.cm.reg.Get(dto.ID)
+	entry.SSLMode = "required"
+	if err := srv.cm.reg.Update(entry); err != nil {
 		t.Fatal(err)
 	}
 	probe := func(what, reqBody string) *routeProbeResult {
@@ -237,8 +220,12 @@ func TestServersAPI_TestConnectionTriesTheForwardingAccount(t *testing.T) {
 	if r := probe("saved", `{}`); r == nil || !r.OK || r.User != "fwd" || r.Error != "" {
 		t.Errorf("saved account: %+v, want ok for user fwd", r)
 	}
-	if src.logins.Load() != 1 {
-		t.Errorf("the source saw %d login(s), want 1", src.logins.Load())
+	if src.logins[srcAddr] != 1 {
+		t.Errorf("the source saw %d login(s), want 1", src.logins[srcAddr])
+	}
+	// With the server's own TLS settings, the ones the port uses.
+	if len(src.ssl) != 1 || src.ssl[0].Mode != "required" {
+		t.Errorf("the login was tried with TLS settings %+v, want the server's (required)", src.ssl)
 	}
 	// A wrong password being typed: refused by the source, said as such.
 	r := probe("wrong password", `{"route_user":"fwd","route_password":"wrong-pw"}`)
@@ -255,20 +242,20 @@ func TestServersAPI_TestConnectionTriesTheForwardingAccount(t *testing.T) {
 	}
 	// The source moved in the form, the forwarding password not re-typed:
 	// the saved password must not go to the new address.
-	before := elsewhere.conns.Load()
+	before := src.tried[elsewhere]
 	r = probe("moved, password not typed", `{"source_host":"`+host+`","source_port":"`+otherPort+`","route_user":"fwd"}`)
 	if r == nil || !r.NeedsPassword || r.OK || r.Error != "" {
 		t.Errorf("moved without the password: %+v, want needs_password", r)
 	}
-	if elsewhere.conns.Load() != before {
+	if src.tried[elsewhere] != before {
 		t.Error("the saved forwarding password was sent to an address it was not saved for")
 	}
 	// Typed again, it is tried there.
 	if r := probe("moved, password typed", `{"source_host":"`+host+`","source_port":"`+otherPort+`","route_user":"fwd","route_password":"pw"}`); r == nil || !r.OK {
 		t.Errorf("moved with the password: %+v, want ok", r)
 	}
-	if elsewhere.logins.Load() != 1 {
-		t.Errorf("the new address saw %d login(s), want 1", elsewhere.logins.Load())
+	if src.logins[elsewhere] != 1 {
+		t.Errorf("the new address saw %d login(s), want 1", src.logins[elsewhere])
 	}
 	// A request the server would refuse to save says why here too.
 	if r := probe("capture account", `{"route_user":"repl","route_password":"x"}`); r == nil || r.OK || !strings.Contains(r.Error, "capture") {
@@ -291,5 +278,36 @@ func TestServersAPI_TestConnectionTriesTheForwardingAccount(t *testing.T) {
 	}
 	if resp.Route == nil || !resp.Route.OK || resp.Route.User != "fwd" {
 		t.Errorf("unsaved server: %+v, want ok for user fwd", resp.Route)
+	}
+	// A process with no port to forward from tries no login, and still says
+	// what the server would refuse to save.
+	srv.routeAccountProbe = nil
+	tried := len(src.ssl)
+	doServersReq(t, srv, "PUT", "/api/servers/"+dto.ID, `{`+base+`,"route_user":"fwd","route_password":"pw"}`)
+	if r := probe("no client", `{}`); r != nil {
+		t.Errorf("with no client a login result was invented: %+v", r)
+	}
+	if r := probe("no client, capture account", `{"route_user":"repl","route_password":"x"}`); r == nil || !strings.Contains(r.Error, "capture") {
+		t.Errorf("with no client the refusal is lost: %+v", r)
+	}
+	if len(src.ssl) != tried {
+		t.Error("a login was tried with no client configured")
+	}
+}
+
+// TestConfigRouteAccountProbeReachesTheServer: the probe the serving layer
+// supplies is the one Test connection calls.
+func TestConfigRouteAccountProbeReachesTheServer(t *testing.T) {
+	called := 0
+	s, err := New(Config{Listen: "127.0.0.1:8090", Token: "tok", RouteAccountProbe: func(context.Context, string, config.SSL, time.Duration) error {
+		called++
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := serverRequest{SourceHost: "db.prod", SourceUser: "repl", SourcePassword: strPtr("x"), RouteUser: strPtr("fwd"), RoutePassword: strPtr("pw")}
+	if r := s.probeRouteAccount(context.Background(), req, ServerEntry{}, false); r == nil || !r.OK || called != 1 {
+		t.Errorf("probe result %+v after %d call(s), want one call and ok", r, called)
 	}
 }
