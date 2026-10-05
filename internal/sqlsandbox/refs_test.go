@@ -88,8 +88,54 @@ func TestCollectRefs(t *testing.T) {
 	}
 	for _, c := range cases {
 		got := parseForRefs(t, c.sql)
+		got.Star, got.NamedJoin = false, false // TestCollectRefs_star has them
 		if !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s:\n got %+v\nwant %+v", c.sql, got, c.want)
+		}
+	}
+}
+
+// #2111: a statement that holds a star returns what the relation's column
+// list says, in its order. The caller needs to know, because that order is
+// not always the table's.
+func TestCollectRefs_star(t *testing.T) {
+	for sqlText, want := range map[string]bool{
+		"SELECT * FROM shop.orders":                                  true,
+		"SELECT o.* FROM shop.orders o":                              true,
+		"SELECT id, o.* FROM shop.orders o":                          true,
+		"SELECT DISTINCT * FROM shop.orders":                         true,
+		"SELECT * EXCLUDE (id) FROM shop.orders":                     true,
+		"SELECT COLUMNS('a.*') FROM shop.orders":                     true,
+		"FROM shop.orders":                                           true,
+		"TABLE shop.orders":                                          true,
+		"SELECT id FROM (SELECT * FROM shop.orders)":                 true,
+		"WITH q AS (SELECT * FROM shop.orders) SELECT id FROM q":     true,
+		"SELECT id FROM shop.orders WHERE id IN (SELECT * FROM a.x)": true,
+		"SELECT id FROM a.x UNION ALL SELECT * FROM b.y":             true,
+		"SELECT count(*) FROM shop.orders":                           false,
+		"SELECT COUNT( * ) FROM shop.orders":                         false,
+		"SELECT id * 2, qty*price FROM shop.orders":                  false,
+		"SELECT id, status FROM shop.orders WHERE note = '*'":        false,
+		"SELECT count(*), sum(a * b) FROM shop.orders GROUP BY id":   false,
+		"SELECT 1": false,
+	} {
+		if got := parseForRefs(t, sqlText).Star; got != want {
+			t.Errorf("%s: Star = %v, want %v", sqlText, got, want)
+		}
+	}
+	for sqlText, want := range map[string]bool{
+		"SELECT * FROM a.x JOIN b.y USING (id)":                       true,
+		"SELECT * FROM a.x NATURAL JOIN b.y":                          true,
+		"SELECT * FROM a.x LEFT JOIN b.y USING (id, k)":               true,
+		"SELECT * FROM (SELECT * FROM a.x NATURAL LEFT JOIN b.y) q":   true,
+		"SELECT * FROM a.x JOIN b.y ON x.id = y.id":                   false,
+		"SELECT * FROM a.x, b.y":                                      false,
+		"SELECT * FROM a.x CROSS JOIN b.y":                            false,
+		"SELECT * FROM a.x":                                           false,
+		"SELECT id FROM a.x WHERE note = 'natural join b using (id)'": false,
+	} {
+		if got := parseForRefs(t, sqlText).NamedJoin; got != want {
+			t.Errorf("%s: NamedJoin = %v, want %v", sqlText, got, want)
 		}
 	}
 }

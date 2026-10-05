@@ -225,7 +225,8 @@ func isWordByte(b byte) bool {
 // statement has a top-level ORDER BY); without it rows are compared as a
 // multiset.
 //
-// Kind, when Different: "columns" (column counts differ), "rows" (row
+// Kind, when Different: "columns" (column counts differ, or the same column
+// names come back in a different order), "rows" (row
 // counts differ, or rows present on one side only), "order" (same rows,
 // different order; with the NULL position named when that is the whole
 // difference), and for a differing cell: "case" (equal ignoring case: a
@@ -234,6 +235,13 @@ func isWordByte(b byte) bool {
 func Compare(src, cp Rows, ordered bool) (Verdict, string, string) {
 	if len(src.Columns) != len(cp.Columns) {
 		return Different, "columns", fmt.Sprintf("source returned %d columns, copy %d", len(src.Columns), len(cp.Columns))
+	}
+	if reordered(src.Columns, cp.Columns) {
+		// Before the cells: a client that reads by position gets other
+		// columns whatever they hold, and two columns with equal cells (or a
+		// result with no rows) would otherwise read as equal (#2111).
+		return Different, "columns", fmt.Sprintf("same columns in a different order (source: %s; copy: %s)",
+			strings.Join(src.Columns, ", "), strings.Join(cp.Columns, ", "))
 	}
 	if len(src.Rows) != len(cp.Rows) {
 		return Different, "rows", fmt.Sprintf("source returned %d rows, copy %d", len(src.Rows), len(cp.Rows))
@@ -273,6 +281,33 @@ func Compare(src, cp Rows, ordered bool) (Verdict, string, string) {
 		}
 	}
 	return Different, "rows", fmt.Sprintf("%d row(s) only in the source (first: %s); %d only in the copy (first: %s)", len(missing), showRow(missing), len(extra), showRow(extra))
+}
+
+// reordered reports whether b holds exactly a's column names in another
+// order, names compared without regard to case (MySQL's rule for column
+// names). Only that: when the two sides name a column differently, as they do
+// for most expressions (count(*) and count_star()), the names say nothing
+// about order and the cells decide.
+func reordered(a, b []string) bool {
+	count := map[string]int{}
+	same := true
+	for i := range a {
+		x, y := strings.ToLower(a[i]), strings.ToLower(b[i])
+		if x != y {
+			same = false
+		}
+		count[x]++
+		count[y]--
+	}
+	if same {
+		return false
+	}
+	for _, n := range count {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // multisetDiff returns the rows only in a (missing from b) and only in b.

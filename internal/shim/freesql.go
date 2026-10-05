@@ -501,6 +501,10 @@ func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string) (*mysql.Res
 			sess = sqlsandbox.Session{}
 		}
 	}
+	// Under routing the client expects MySQL's answer: a star over a table
+	// whose columns the copy cannot return as MySQL does is refused there,
+	// and the refusal is the caller's to forward (#2111).
+	sess.StrictStar = routeReason != ""
 	res, err := h.freeSQL.Run(ctx, stmt, schema, sess)
 	if err != nil {
 		return nil, h.freeSQLError(err)

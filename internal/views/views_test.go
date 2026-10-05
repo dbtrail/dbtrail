@@ -28,20 +28,28 @@ func goldenInput() Input {
 		BaselineSource:   "s3://my-bucket/baselines/",
 		BaselineSnapshot: time.Date(2026, 4, 30, 3, 0, 0, 0, time.UTC),
 		Baselines: []BaselineTable{
-			// Money columns of the ordinary shape: both get cast.
+			// Money columns of the ordinary shape: both get cast. The columns
+			// are listed in the table's own order, which is not the order the
+			// file holds them in (#2111).
 			{Schema: "shop", Table: "orders", Path: "s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/orders.parquet",
 				SchemaKnown: true,
+				Columns:     []string{"id", "customer_id", "status", "total", "tax_rate", "created_at"},
 				Decimals: []DecimalColumn{
 					{Name: "total", Precision: 10, Scale: 2},
 					{Name: "tax_rate", Precision: 6, Scale: 4},
 				}},
 			// No decimal columns at all: nothing to cast, and nothing to say.
+			// MySQL's SELECT * also returns a generated column the file does
+			// not hold, which the file says.
 			{Schema: "shop", Table: "order_items", Path: "s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/order_items.parquet",
-				SchemaKnown: true},
+				SchemaKnown: true, Columns: []string{"order_id", "line", "sku", "qty"},
+				StarDiffers: "MySQL also returns generated column line_total, which a snapshot does not hold"},
 			// Collapsed onto shop.order_items above under the old
 			// state_<schema>_<table> names; named after the source it is its own
 			// view (#2013). Its DECIMAL(65,30) is past DuckDB's ceiling, so it stays text and the
 			// file has to say which column and why.
+			// Its schema was read and its column order was not (the file and
+			// its CREATE TABLE list different columns), so it keeps the star.
 			{Schema: "shop_order", Table: "items", Path: "s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop_order/items.parquet",
 				SchemaKnown: true,
 				Decimals:    []DecimalColumn{{Name: "weight", Precision: 65, Scale: 30}}},

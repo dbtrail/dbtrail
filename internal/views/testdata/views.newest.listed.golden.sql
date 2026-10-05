@@ -101,6 +101,13 @@ CREATE OR REPLACE SECRET bintrail_s3_chain (TYPE s3, PROVIDER credential_chain, 
 -- refreshed; a PostgreSQL-source baseline stores all its values as text and
 -- will not gain them. If a footer could not be read at all, the bintrail log
 -- has the error.
+--
+-- SELECT * on these views returns each table's columns sorted by name, the
+-- order the snapshot files hold them in, not the order the table declares
+-- them in. Name the columns wherever their position matters. A file that
+-- follows later snapshots carries no column list on purpose: a column dropped
+-- at the source would stop every query on its table until the file is
+-- generated again.
 -- Off while the newest snapshot is chosen, so reading this file again in the
 -- same session sees a refresh; back on below for the snapshot's own files.
 SET enable_http_metadata_cache = false;

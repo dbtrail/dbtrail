@@ -201,6 +201,14 @@ type Session struct {
 	// top-level LIMIT ignores it, as on MySQL, and so do SHOW, DESCRIBE and
 	// SUMMARIZE, which are not SELECTs there.
 	SelectLimit int
+	// StrictStar asks for a refusal instead of an answer when the statement
+	// holds a star over a table whose `SELECT *` on the copy is not MySQL's:
+	// the order of its columns is not known, or MySQL returns a different set
+	// of columns (#2111). Set under read routing, where the caller answers a
+	// refusal by sending the statement to MySQL. The browser and a port with
+	// no routing leave it off and get the copy's answer. The worker never
+	// sees it: the caller's ViewsFor decides, from what the statement names.
+	StrictStar bool
 }
 
 // Column is one result column with DuckDB's type name (INTEGER, VARCHAR,

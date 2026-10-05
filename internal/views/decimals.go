@@ -59,6 +59,8 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 		in.Baselines[i].Datetimes = f.Datetimes
 		in.Baselines[i].BinaryText = f.BinaryText
 		in.Baselines[i].DeltaReserved = f.DeltaReserved
+		in.Baselines[i].Columns = f.Columns
+		in.Baselines[i].StarDiffers = f.StarDiffers
 		in.Baselines[i].SchemaKnown = true
 	}
 }
@@ -105,9 +107,10 @@ func writeDecimalNote(b *strings.Builder, in Input) {
 		} else {
 			// Only a pinned file gives _bin columns their collation
 			// (writeStateViews), so only there is its absence a loss to name.
-			b.WriteString("-- decimal column in them reads as text; and no collations, so a text column\n")
+			b.WriteString("-- decimal column in them reads as text; no collations, so a text column\n")
 			b.WriteString("-- MySQL declares _bin compares like any other, by the session's default\n")
-			b.WriteString("-- collation. Those tables are named below. A\n")
+			b.WriteString("-- collation; and no column order, so SELECT * returns their columns sorted\n")
+			b.WriteString("-- by name. Those tables are named below. A\n")
 		}
 		b.WriteString("-- baseline older than this feature gains the casts when it is next taken or\n")
 		b.WriteString("-- refreshed; a PostgreSQL-source baseline stores all its values as text and\n")
@@ -138,7 +141,8 @@ func writeBinaryCollationNote(b *strings.Builder, in Input) {
 func decimalComments(t BaselineTable, pinned bool) []string {
 	if !t.SchemaKnown && pinned {
 		return []string{"this file carries no column types, so nothing is cast; " +
-			"decimal columns read as text and _bin columns compare by the session's collation"}
+			"decimal columns read as text, _bin columns compare by the session's collation " +
+			"and SELECT * returns the columns in alphabetical order"}
 	}
 	if !t.SchemaKnown {
 		// Deliberately does NOT say the footer could not be read. Three
@@ -217,32 +221,46 @@ func decimalComments(t BaselineTable, pinned bool) []string {
 // baseline.BinaryCollationColumns lists only the types the writer stores as
 // Parquet strings.
 func replaceClause(t BaselineTable) string {
-	if !t.SchemaKnown {
-		return ""
-	}
 	var parts []string
+	for _, p := range replaceParts(t) {
+		parts = append(parts, p.expr+" AS "+quoteIdent(p.name))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// retyped is one column a state view reads through an expression instead of
+// bare: its name, and the expression (without the alias).
+type retyped struct{ name, expr string }
+
+// replaceParts lists the columns replaceClause re-types, in its order. The
+// pinned views' explicit select list (selectList) places the same expressions
+// on the columns where they stand.
+func replaceParts(t BaselineTable) []retyped {
+	if !t.SchemaKnown {
+		return nil
+	}
+	var parts []retyped
 	if t.WallClockDatetimes {
 		for _, name := range t.Datetimes {
 			// The file holds the wall clock labelled UTC, so reading it back
 			// AT TIME ZONE 'UTC' gives that wall clock whatever the session's
 			// zone is.
-			parts = append(parts, fmt.Sprintf("%s AT TIME ZONE 'UTC' AS %s", quoteIdent(name), quoteIdent(name)))
+			parts = append(parts, retyped{name, quoteIdent(name) + " AT TIME ZONE 'UTC'"})
 		}
 	}
 	for _, d := range t.Decimals {
 		if !castableDecimal(d) {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("CAST(%s AS DECIMAL(%d,%d)) AS %s",
-			quoteIdent(d.Name), d.Precision, d.Scale, quoteIdent(d.Name)))
+		parts = append(parts, retyped{d.Name, fmt.Sprintf("CAST(%s AS DECIMAL(%d,%d))", quoteIdent(d.Name), d.Precision, d.Scale)})
 	}
 	for _, name := range t.BinaryText {
 		// COLLATE C is byte comparison whatever the session's default
 		// collation is, and it travels with the column: through a subquery,
 		// a CTE, a function over it, GROUP BY, ORDER BY and a join.
-		parts = append(parts, fmt.Sprintf("%s COLLATE C AS %s", quoteIdent(name), quoteIdent(name)))
+		parts = append(parts, retyped{name, quoteIdent(name) + " COLLATE C"})
 	}
-	return strings.Join(parts, ", ")
+	return parts
 }
 
 // castableDecimal reports whether DuckDB has a DECIMAL that can hold this

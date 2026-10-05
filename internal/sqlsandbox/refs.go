@@ -20,6 +20,17 @@ type Refs struct {
 	// reads the catalog), or a tree this walk cannot read. The caller then
 	// installs every view.
 	Unsure bool `json:"unsure,omitempty"`
+	// Star is set when the statement holds a star anywhere: `*`, `t.*`,
+	// `* EXCLUDE (...)`, `COLUMNS(...)`. What such a statement returns depends
+	// on the order (and the set) of a relation's columns, which its text does
+	// not name (#2111). `count(*)` is not one: the parser reads it as a
+	// function with no argument.
+	Star bool `json:"star,omitempty"`
+	// NamedJoin is set when the statement joins with USING or NATURAL. A star
+	// over such a join is ordered by the join itself, and not the same way
+	// everywhere: MySQL returns the join's columns first, DuckDB leaves them
+	// where the left table has them.
+	NamedJoin bool `json:"named_join,omitempty"`
 }
 
 // collectRefs walks a json_serialize_sql statement tree. A shape this walk
@@ -50,7 +61,15 @@ func collectRefs(stmt any) Refs {
 func walkRefs(node any, scope map[string]bool, r *Refs) {
 	switch v := node.(type) {
 	case map[string]any:
+		if v["class"] == "STAR" {
+			r.Star = true
+		}
 		switch v["type"] {
+		case "JOIN":
+			using, _ := v["using_columns"].([]any)
+			if len(using) > 0 || v["ref_type"] == "NATURAL" {
+				r.NamedJoin = true
+			}
 		case "BASE_TABLE":
 			name, ok := v["table_name"].(string)
 			schema, ok2 := v["schema_name"].(string)

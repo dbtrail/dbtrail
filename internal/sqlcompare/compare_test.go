@@ -77,6 +77,28 @@ func TestCompare(t *testing.T) {
 		{"unordered case pair", rows(cols, []*string{s("B"), s("1")}, []*string{s("a"), s("2")}), rows(cols, []*string{s("b"), s("1")}, []*string{s("a"), s("2")}), false, Different, "case", `source "B", copy "b"`},
 		{"unordered missing and extra", rows(cols, []*string{s("1"), s("x")}, []*string{s("2"), s("x")}, []*string{s("3"), s("x")}), rows(cols, []*string{s("1"), s("x")}, []*string{s("3"), s("x")}, []*string{s("4"), s("x")}), false, Different, "rows", `only in the source (first: ("2", "x")); 1 only in the copy (first: ("4", "x"))`},
 	}
+	// #2111: the same columns in another order is a difference of its own,
+	// whatever the cells hold. Before, only the COUNT was compared: with equal
+	// cells in the swapped columns, or no rows, the two answers read as equal.
+	one, two := s("1"), s("1")
+	cases = append(cases, []struct {
+		name     string
+		src, cp  Rows
+		ordered  bool
+		verdict  Verdict
+		kind     string
+		contains string
+	}{
+		{"same names, another order, cells that happen to agree", rows([]string{"id", "amount"}, []*string{one, two}), rows([]string{"amount", "id"}, []*string{one, two}), false, Different, "columns", "source: id, amount; copy: amount, id"},
+		{"same names, another order, no rows", rows([]string{"id", "amount"}), rows([]string{"amount", "id"}), true, Different, "columns", "different order"},
+		{"same names, another order, different cells", rows([]string{"id", "amount"}, []*string{s("1"), s("9.50")}), rows([]string{"amount", "id"}, []*string{s("9.50"), s("1")}), true, Different, "columns", "different order"},
+		{"names differ only in case", rows([]string{"ID", "Amount"}, []*string{one, two}), rows([]string{"id", "amount"}, []*string{one, two}), true, Equal, "", ""},
+		{"a name twice, as a join returns it", rows([]string{"id", "id", "x"}, []*string{one, two, one}), rows([]string{"id", "x", "id"}, []*string{one, two, one}), true, Different, "columns", "different order"},
+		// An expression is named differently by each side: that is not an
+		// order, and the cells decide.
+		{"different names are not an order", rows([]string{"count(*)"}, []*string{one}), rows([]string{"count_star()"}, []*string{one}), true, Equal, "", ""},
+		{"one name differs", rows([]string{"id", "SUM(a)"}, []*string{one, two}), rows([]string{"sum(a)", "id2"}, []*string{one, two}), true, Equal, "", ""},
+	}...)
 	for _, tc := range cases {
 		v, kind, detail := Compare(tc.src, tc.cp, tc.ordered)
 		if v != tc.verdict || kind != tc.kind || !strings.Contains(detail, tc.contains) {

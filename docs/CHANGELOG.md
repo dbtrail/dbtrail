@@ -231,7 +231,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   S3 location was set), the local folder is still read and the log says so.
   When SQL on the copy cannot find out where the change log is, it now says
   that, instead of DuckDB's "table does not exist".
-
+- **`SELECT *` on the copy returns a table's columns in the table's own
+  order** (#2111). The snapshot files hold a table's columns sorted by name,
+  and the copy returned them that way: `SELECT * FROM orders` answered
+  `amount, created_at, customer_id, id, ...` where MySQL answers `id,
+  customer_id, status, amount, ...`. A client that reads a row by position,
+  an `INSERT ... SELECT *` and a CSV export got other columns, with no
+  error; with read routing on, the same statement changed its column order
+  depending on who answered. The SQL card, the MySQL port, `SHOW COLUMNS`
+  and a views file written with `bintrail views --pin-snapshot` now list
+  each table's columns in the order its `CREATE TABLE` declares them, read
+  from the definition stored with every snapshot, so it works on the
+  snapshots already on disk: for a full snapshot, after a refresh, and for
+  a column added with `AFTER` or `FIRST`. Where MySQL's `SELECT *` cannot be
+  matched, the table's view says so in a comment and, under read routing,
+  a statement with a star over that table is answered by MySQL: a table
+  whose snapshot carries no `CREATE TABLE` (every table of a PostgreSQL
+  source, a snapshot older than 0.5), which keeps the alphabetical order; a
+  table with a generated column, which a snapshot does not hold; and a table
+  with an invisible column, which a snapshot holds and MySQL's star leaves
+  out. A star over a join written with `USING` or `NATURAL` is MySQL's under
+  routing too: MySQL returns the join's columns first, the copy where the
+  left table has them. A views file that follows later snapshots (the default of `bintrail
+  views`) keeps the alphabetical order for every table and now says so: a
+  column list in it would stop every query on a table the day the source
+  drops a column. `bintrail-console sql-compare` compared only the NUMBER of
+  columns, so it reported two answers with the same columns in another
+  order as `EQUAL` whenever the cells happened to agree or there were no
+  rows; it now reports `DIFFERENT (columns)`.
 
 ## [0.98.0] - 2026-10-04
 ### Changed

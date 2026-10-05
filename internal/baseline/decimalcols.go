@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -40,6 +41,17 @@ type TableFooter struct {
 	// BinaryText are the table's text columns under a _bin collation, by
 	// name (BinaryCollationColumns): the ones MySQL compares byte by byte.
 	BinaryText []string
+	// Columns are the table's columns in the order its CREATE TABLE declares
+	// them, which is the order MySQL's `SELECT *` returns. The file itself
+	// holds them sorted by name. Nil when the order is not known: the file
+	// does not hold exactly the columns the CREATE TABLE lists, or its own
+	// column list could not be read (confirmColumnOrder). Never a guess.
+	Columns []string
+	// StarDiffers says, in words, why MySQL's `SELECT *` on this table returns
+	// a different set of columns from the one the file holds (a generated
+	// column, an invisible one, a definition that could not be read), or ""
+	// when it returns the same set (starDifference). No ordering fixes it.
+	StarDiffers string
 }
 
 // TableFootersFor reports, for each baseline Parquet file, the decimal and
@@ -74,9 +86,11 @@ func TableFootersFor(ctx context.Context, paths []string) (map[string]TableFoote
 
 // SchemaLossConsequence is what a table's state view does without its
 // CREATE TABLE, in the words every warning about it uses: the decimal columns
-// stay text, and a text column MySQL declares _bin is compared like every
-// other one, without regard to case (#2083).
-const SchemaLossConsequence = "will not cast decimal columns and will compare _bin text columns without regard to case"
+// stay text, a text column MySQL declares _bin is compared like every other
+// one, without regard to case (#2083), and `SELECT *` returns the columns in
+// the file's order, alphabetical, instead of the table's (#2111).
+const SchemaLossConsequence = "will not cast decimal columns, will compare _bin text columns without regard to case " +
+	"and will return the columns of SELECT * in alphabetical order instead of the table's"
 
 // FooterRead is ReadTableFooters' whole answer: what was read, and for every
 // other file which of two different things happened.
@@ -92,6 +106,10 @@ type FooterRead struct {
 	// Unread are the files that could not be looked at: the footer read
 	// failed, a row would not scan, or the read ended early. A fault, which
 	// may be gone on the next try; a caller that caches must not keep it.
+	//
+	// A file can be in Footers AND here: its CREATE TABLE was read and its
+	// own column list was not, so it has its casts and not its column order
+	// (TableFooter.Columns). Asking again is how it gets the order.
 	Unread []string
 }
 
@@ -141,6 +159,7 @@ func ReadTableFooters(ctx context.Context, paths []string) (FooterRead, error) {
 		collectDecimalRows(rows, &st)
 		rows.Close()
 	}
+	confirmColumnOrder(ctx, db, &st)
 	return st.result(paths, err), nil
 }
 
@@ -156,6 +175,11 @@ type footerScan struct {
 	// so every file without an answer counts as unread.
 	lostRows   int
 	incomplete bool
+	// orderUnread are the files whose CREATE TABLE was read and whose own
+	// column list was not (confirmColumnOrder).
+	orderUnread []string
+	// orderErr is the last error of that read, for the one warning about it.
+	orderErr error
 }
 
 // result sorts every path into read, no schema, or unread, and logs the last
@@ -186,6 +210,13 @@ func (st *footerScan) result(paths []string, batchErr error) FooterRead {
 			"unreadable_files", len(r.Unread), "total_files", len(paths),
 			"first", r.Unread[0], "rows_that_would_not_scan", st.lostRows, "ended_early", st.incomplete,
 			"error", batchErr)
+	}
+	if len(st.orderUnread) > 0 {
+		sort.Strings(st.orderUnread)
+		r.Unread = append(r.Unread, st.orderUnread...)
+		slog.Warn("baseline: some snapshot files' column lists could not be read, so those tables' column order is not known; "+
+			"their state views return SELECT * in alphabetical order until a later read succeeds",
+			"files", len(st.orderUnread), "first", st.orderUnread[0], "error", st.orderErr)
 	}
 	return r
 }
@@ -314,8 +345,11 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 			// columns" rather than a nil that reads like an absent key.
 			decs = []DecimalColumn{}
 		}
+		// Columns is the DECLARED order here; confirmColumnOrder keeps it only
+		// for a file that holds exactly these columns.
 		st.footers[file] = TableFooter{Decimals: decs, DeltaReserved: hasDeltaReservedColumn(cols), Datetimes: DatetimeColumns(cols),
-			BinaryText: BinaryCollationColumns(string(createSQL), cols)}
+			BinaryText: BinaryCollationColumns(string(createSQL), cols),
+			Columns:    columnNames(cols), StarDiffers: starDifference(string(createSQL))}
 	}
 	if err := rows.Err(); err != nil {
 		// Warn: an iteration that dies partway leaves every file after the

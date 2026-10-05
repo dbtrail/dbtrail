@@ -119,6 +119,18 @@ type BaselineTable struct {
 	// Only a pinned view carries it; writeStateViews says why a following
 	// one does not.
 	BinaryText []string
+	// Columns are the table's columns in the order its CREATE TABLE declares
+	// them, the order MySQL's `SELECT *` returns (set with SchemaKnown; nil
+	// when that order is not known, baseline.TableFooter.Columns says when).
+	// The files hold the columns sorted by name, so a view that reads them
+	// with a bare star returns them in that order; a pinned view lists these
+	// instead (selectList, #2111). Only a pinned view: writeStateViews says
+	// why a following one does not.
+	Columns []string
+	// StarDiffers says why MySQL's `SELECT *` on the table returns a different
+	// set of columns from the one the file holds, or "" when it returns the
+	// same set (baseline.TableFooter.StarDiffers). Set with SchemaKnown.
+	StarDiffers string
 	// DeltaReserved says the table has a column under a name a table delta
 	// reserves (baseline.TableFooter says why). Set with SchemaKnown.
 	DeltaReserved bool
@@ -2095,8 +2107,23 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 		// by bytes. On a copy, so the caller's tables are left as they were.
 		tables := make([]BaselineTable, len(in.Baselines))
 		copy(tables, in.Baselines)
+		//
+		// Nor the table's column list (Columns, #2111), for the same kind of
+		// reason and a heavier one. A pinned view lists its columns so that
+		// SELECT * returns them in the table's order; DuckDB binds that list
+		// on every read, so in a file that follows, a column the source drops
+		// or renames later would stop EVERY query on its table until the file
+		// is generated again, where today only a query naming the column
+		// fails. And the list would go stale without an error: a column added
+		// AFTER another would be missing from a list that names every column,
+		// or, with a star appended for what the list does not name, show up
+		// last, in neither MySQL's order nor the file's. A following file
+		// keeps the star, returns the columns in the file's order (sorted by
+		// name) and says so (writeColumnOrderNote); the copy's own session,
+		// which regenerates its views for every snapshot, gets the list.
 		for i := range tables {
 			tables[i].BinaryText = nil
+			tables[i].Columns = nil
 		}
 		in.Baselines = tables
 	}
@@ -2168,6 +2195,7 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 	}
 	writeDecimalNote(b, in)
 	writeBinaryCollationNote(b, in)
+	writeColumnOrderNote(b, in)
 	if in.Follow == FollowNewest {
 		cached := in.listsOnce() && isS3(in.BaselineSource)
 		if cached {
@@ -2208,6 +2236,11 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 		if line := fileAloneComment(in, t); line != "" {
 			fmt.Fprintf(b, "-- %s: %s\n", name, line)
 		}
+		if !in.Follow.follows() {
+			for _, line := range columnOrderComments(t) {
+				fmt.Fprintf(b, "-- %s: %s\n", name, line)
+			}
+		}
 		fmt.Fprintf(b, "CREATE OR REPLACE VIEW %s AS\n", in.stateRef(p))
 		if in.Follow == FollowNewest {
 			writeNewestStateBody(b, in, t)
@@ -2223,6 +2256,13 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 		if in.Follow.follows() {
 			plain, rng := deltaAppearedPatterns(t.Path)
 			guard = "\n  " + deltaAppearedGuard(sqlString(plain), sqlString(rng), t)
+		}
+		if list := selectList(t); list != "" {
+			// The table's columns in the table's order (#2111); the casts
+			// and collations stand on their columns in the list.
+			fmt.Fprintf(b, "  SELECT %s\n", list)
+			fmt.Fprintf(b, "  FROM read_parquet(%s)%s;\n", sqlString(t.Path), guard)
+			continue
 		}
 		if replace := replaceClause(t); replace != "" {
 			fmt.Fprintf(b, "  SELECT * REPLACE (%s)\n", replace)
@@ -2676,7 +2716,9 @@ func writeNewestStateBody(b *strings.Builder, in Input, t BaselineTable) {
 	if t.Delta || chainReady(in, t) {
 		if once {
 			posdel, upserts := baseline.TableDeltaFollowGlobs(t.Rel)
-			fmt.Fprintf(b, "  %s;\n", baseline.TableDeltaFollowStateSQL(path(t.Rel), listed(posdel), listed(upserts), t.Rel, replaceClause(t)))
+			fmt.Fprintf(b, "  %s;\n", ordered(t, func(replace string) string {
+				return baseline.TableDeltaFollowStateSQL(path(t.Rel), listed(posdel), listed(upserts), t.Rel, replace)
+			}))
 			return
 		}
 		fmt.Fprintf(b, "  %s;\n", deltaStateBody(t, t.Rel, path, false))
@@ -2757,10 +2799,16 @@ func chainReady(in Input, t BaselineTable) bool {
 // the chain through globs that also match the table's file, so it keeps
 // answering when a later snapshot holds the table with no chain.
 func deltaStateBody(t BaselineTable, p string, expr func(string) string, pinned bool) string {
+	return ordered(t, func(replace string) string { return deltaStateStar(t, p, expr, pinned, replace) })
+}
+
+// deltaStateStar is deltaStateBody around a star, with the REPLACE list to
+// apply to it; ordered decides whether the star is what the view returns.
+func deltaStateStar(t BaselineTable, p string, expr func(string) string, pinned bool, replace string) string {
 	if t.DeltaLegacy {
 		stem := strings.TrimSuffix(p, ".parquet")
 		return baseline.LegacyTableDeltaStateSQL(expr(p), expr(stem+baseline.TableDeltaPosdelSuffix),
-			expr(stem+baseline.TableDeltaUpsertsSuffix), replaceClause(t))
+			expr(stem+baseline.TableDeltaUpsertsSuffix), replace)
 	}
 	if pinned && len(t.DeltaFiles) > 0 {
 		posdels := make([]string, 0, len(t.DeltaFiles))
@@ -2769,11 +2817,11 @@ func deltaStateBody(t BaselineTable, p string, expr func(string) string, pinned 
 			posdels = append(posdels, expr(f.Posdel))
 			upserts = append(upserts, expr(f.Upserts))
 		}
-		return baseline.TableDeltaStateSQL(expr(p), "["+strings.Join(posdels, ", ")+"]", "["+strings.Join(upserts, ", ")+"]", p, replaceClause(t))
+		return baseline.TableDeltaStateSQL(expr(p), "["+strings.Join(posdels, ", ")+"]", "["+strings.Join(upserts, ", ")+"]", p, replace)
 	}
 	if pinned {
 		posdel, upserts := baseline.TableDeltaGlobs(p)
-		return baseline.TableDeltaStateSQL(expr(p), expr(posdel), expr(upserts), p, replaceClause(t))
+		return baseline.TableDeltaStateSQL(expr(p), expr(posdel), expr(upserts), p, replace)
 	}
 	// A following view outlives the snapshot it was generated against, and a
 	// later one can hold this table rewritten in full with no chain beside it
@@ -2781,7 +2829,7 @@ func deltaStateBody(t BaselineTable, p string, expr func(string) string, pinned 
 	// also match the table's own file, so the view reads the base alone then
 	// instead of failing on a glob that matches nothing.
 	posdel, upserts := baseline.TableDeltaFollowGlobs(p)
-	return baseline.TableDeltaFollowStateSQL(expr(p), expr(posdel), expr(upserts), p, replaceClause(t))
+	return baseline.TableDeltaFollowStateSQL(expr(p), expr(posdel), expr(upserts), p, replace)
 }
 
 // deltaAppearedPatterns are the two globs deltaAppearedGuard counts: the
