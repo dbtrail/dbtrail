@@ -133,6 +133,9 @@ jobs:
               # The S3 test store actions run inside the integration job
               # (#1884): a change to one must be able to run that job.
               - '.github/actions/**'
+              # What runs in which shard, and how one package is split by
+              # test name: a change to it must run the shards.
+              - 'scripts/mysql-integration-shard.sh'
               - '!internal/console/assets_*_test.go'
             console:
               - 'internal/console/**'
@@ -145,6 +148,7 @@ jobs:
               - 'docs/migrations/**'
               - '.github/workflows/ci.yml'
               - '.github/actions/**'
+              - 'scripts/mysql-integration-shard.sh'
               - '!internal/console/**'
               - '!consoleapp/**'
               - '!cmd/bintrail-console/**'
