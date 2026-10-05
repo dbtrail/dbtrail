@@ -250,6 +250,11 @@ func TestCaptureWatermark_noWatermarkAndFilters_2085(t *testing.T) {
 	if reg.Through.IsZero() || reg.Captures == nil || !reg.Captures("shop", "lines") || reg.Captures("crm", "people") {
 		t.Errorf("registry server filtered to shop: %+v", reg)
 	}
+	// Proven by equal sets: the watermark stands on what the source had at
+	// that read.
+	if reg.StillHolds == nil || !reg.StillHolds(uuidB+":1-10") || reg.StillHolds(uuidB+":1-9") {
+		t.Error("a watermark proven by equal sets must stand on that set")
+	}
 	// No filter at all: every table.
 	if all := c.CaptureWatermark(context.Background(), console.ServerEntry{ID: "a2", DSN: "idx", SourceDSN: "src"}); all.Captures != nil {
 		t.Error("a capture with no filter must report it records every table (nil Captures)")
