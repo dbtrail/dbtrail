@@ -1195,10 +1195,10 @@ func TestCheckServerIDCollision_PerInstallation(t *testing.T) {
 	t.Cleanup(serverid.SetIndexServerUUIDForTest(func(context.Context, string) (string, error) {
 		return "8b0c2f3e-7a11-4d5e-9c1a-000000000001", nil
 	}))
-	used, perInstall, err := serverid.DeriveForInstall(t.Context(), dsn, index)
+	used, why, err := serverid.DeriveForInstall(t.Context(), dsn, index)
 	sourceOnly, _ := serverid.DeriveServerID(dsn)
-	if err != nil || !perInstall || used == sourceOnly {
-		t.Fatalf("setup: used %d (per installation %v), source-only %d, %v", used, perInstall, sourceOnly, err)
+	if err != nil || why != nil || used == sourceOnly {
+		t.Fatalf("setup: used %d (source-only because %v), source-only %d, %v", used, why, sourceOnly, err)
 	}
 	check := func(srcID uint32) CheckResult {
 		db, mock, err := sqlmock.New()
@@ -1209,8 +1209,8 @@ func TestCheckServerIDCollision_PerInstallation(t *testing.T) {
 		mock.ExpectQuery("SELECT @@server_id").WillReturnRows(sqlmock.NewRows([]string{"@@server_id"}).AddRow(fmt.Sprintf("%d", srcID)))
 		return checkServerIDCollision(t.Context(), db, dsn, index)
 	}
-	if c := check(1); c.Status != StatusPass || !strings.Contains(c.Detail, fmt.Sprintf("derived server-id %d ", used)) || strings.Contains(c.Detail, "any other DBTrail") {
-		t.Errorf("no collision: %s %q; want PASS naming %d and no shared-id warning", c.Status, c.Detail, used)
+	if c := check(1); c.Status != StatusPass || !strings.Contains(c.Detail, fmt.Sprintf("derived server-id %d ", used)) || strings.Contains(c.Detail, "alone") {
+		t.Errorf("no collision: %s %q; want PASS naming %d as the id in use", c.Status, c.Detail, used)
 	}
 	if c := check(used); c.Status != StatusWarn {
 		t.Errorf("the source's own id equals the id capture will use: %s %q, want WARN", c.Status, c.Detail)
@@ -1219,4 +1219,22 @@ func TestCheckServerIDCollision_PerInstallation(t *testing.T) {
 	if c := check(sourceOnly); c.Status != StatusPass {
 		t.Errorf("the source's own id equals the id this installation does NOT use: %s %q, want PASS", c.Status, c.Detail)
 	}
+}
+
+// TestCheckServerIDCollision_NoIndexSaysTheIDIsNotTheOneInUse: without an
+// index the check can only compute the source-only id, which capture will not
+// use. It must not present that number as the one to put in an allow list.
+func TestCheckServerIDCollision_NoIndexSaysTheIDIsNotTheOneInUse(t *testing.T) {
+	const dsn = "user:pass@tcp(db.example.com:3306)/appdb"
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SELECT @@server_id").WillReturnRows(sqlmock.NewRows([]string{"@@server_id"}).AddRow("1"))
+	c := checkServerIDCollision(t.Context(), db, dsn, "")
+	if c.Status != StatusPass || !strings.Contains(c.Detail, "from the source connection alone") || !strings.Contains(c.Detail, "the id in use is another one") {
+		t.Errorf("no index: %s %q", c.Status, c.Detail)
+	}
+	assertConsoleWording(t, "no index", c)
 }

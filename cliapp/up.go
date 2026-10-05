@@ -3,6 +3,7 @@ package cliapp
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -189,18 +190,11 @@ func runUpInit(cmd *cobra.Command) error {
 func runUpStream(cmd *cobra.Command, args []string) error {
 	serverID := upServerID
 	if serverID == 0 {
-		// From the source connection AND this installation's index, so a
-		// second installation capturing the same source gets another id.
-		id, perInstall, err := serverid.DeriveForInstall(cmd.Context(), upSourceDSN, upIndexDSN)
+		id, err := autoServerID(cmd.Context(), os.Stderr)
 		if err != nil {
-			return fmt.Errorf("cannot auto-derive --server-id from --source-dsn: %w (pass --server-id explicitly to bypass)", err)
+			return err
 		}
 		serverID = id
-		if perInstall {
-			fmt.Fprintf(os.Stderr, "Auto-derived server-id from the source connection and this installation's index: %d\n", serverID)
-		} else {
-			fmt.Fprintf(os.Stderr, "Auto-derived server-id from source DSN: %d\n", serverID)
-		}
 	}
 	populateStreamFlags(serverID)
 
@@ -294,4 +288,11 @@ func upStreamSSL() config.SSL {
 func upPreflight(ctx context.Context) *doctor.Report {
 	return doctor.Build(ctx, upSourceDSN, upIndexDSN, upSchemas, upRotationCfg.Retain,
 		doctor.WithSourceSSL(upStreamSSL()))
+}
+
+// autoServerID derives the replication server-id when --server-id was not
+// given: from the source connection AND this installation's index, so a
+// second installation capturing the same source gets another id.
+func autoServerID(ctx context.Context, w io.Writer) (uint32, error) {
+	return serverid.AutoDerive(ctx, w, upSourceDSN, upIndexDSN)
 }

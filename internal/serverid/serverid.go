@@ -14,8 +14,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
@@ -384,6 +386,14 @@ var readIndexServerUUID = func(ctx context.Context, indexDSN string) (string, er
 // MySQL generates once and keeps with the data, and the index database's
 // name. Two installations have two index servers, or two databases on one.
 // It is stable across restarts, so the id derived with it is too.
+//
+// Not told apart: an installation cloned WITH its index's data directory (a
+// machine image, a volume snapshot) carries the same @@server_uuid, and the
+// two then derive the same id, as every installation did before.
+//
+// The read is tried a few times: the id chosen at startup is kept for the
+// life of the process, and one dropped connection (a MySQL still finishing
+// its first start) must not decide it.
 func InstallSalt(ctx context.Context, indexDSN string) (string, error) {
 	if strings.TrimSpace(indexDSN) == "" {
 		return "", errors.New("no index DSN")
@@ -392,7 +402,17 @@ func InstallSalt(ctx context.Context, indexDSN string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse index DSN: %w", err)
 	}
-	id, err := readIndexServerUUID(ctx, indexDSN)
+	var id string
+	for attempt := 1; ; attempt++ {
+		if id, err = readIndexServerUUID(ctx, indexDSN); err == nil || attempt == installSaltAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return "", err
+		case <-time.After(installSaltRetryWait):
+		}
+	}
 	if err != nil {
 		return "", err
 	}
@@ -403,26 +423,54 @@ func InstallSalt(ctx context.Context, indexDSN string) (string, error) {
 	return id + "|" + cfg.DBName, nil
 }
 
+const installSaltAttempts = 3
+
+// installSaltRetryWait is a variable so tests do not wait.
+var installSaltRetryWait = time.Second
+
 // DeriveForInstall returns the replication server-id for capturing sourceDSN
 // from the installation whose index is indexDSN: stable across restarts, and
 // different from the one another installation derives for the same source.
 //
-// perInstall is false when the index could not say who it is (no index DSN,
-// an index server that is not reachable yet or has no @@server_uuid). The id
-// is then DeriveServerID's, which works and is shared by every installation;
-// that is logged, never an error: capture must not wait on this.
-func DeriveForInstall(ctx context.Context, sourceDSN, indexDSN string) (id uint32, perInstall bool, err error) {
+// sourceOnly is nil when the index said who it is. Otherwise it is why not
+// (no index DSN, an index server that does not answer or has no
+// @@server_uuid), and the id is DeriveServerID's: it works, and every
+// installation capturing this source through the same connection shares it.
+// That is never an error, because capture must not wait on this; a caller
+// that is about to capture logs it (WarnSourceOnly), and one that only
+// reports (doctor) says it.
+func DeriveForInstall(ctx context.Context, sourceDSN, indexDSN string) (id uint32, sourceOnly error, err error) {
 	salt, saltErr := InstallSalt(ctx, indexDSN)
 	if saltErr != nil {
 		id, err = deriveServerID(sourceDSN, "")
-		if err == nil {
-			slog.Warn("replication server-id derived from the source connection alone; another DBTrail capturing this source through the same connection would use the same id and the two would interrupt each other",
-				"server_id", id, "reason", saltErr.Error())
-		}
-		return id, false, err
+		return id, saltErr, err
 	}
 	id, err = deriveServerID(sourceDSN, salt)
-	return id, true, err
+	return id, nil, err
+}
+
+// WarnSourceOnly logs that capture is about to use the id every installation
+// shares, and why. server names the source when the caller has a name for it.
+func WarnSourceOnly(id uint32, server string, why error) {
+	slog.Warn("replication server-id derived from the source connection alone; another DBTrail capturing this source through the same connection would use the same id and the two would interrupt each other. It is chosen again at the next start",
+		"server_id", id, "server", server, "reason", why.Error())
+}
+
+// AutoDerive is the derivation for a command that was given no --server-id:
+// it derives, says on w which id it chose and from what, and warns when the
+// id is the shared one.
+func AutoDerive(ctx context.Context, w io.Writer, sourceDSN, indexDSN string) (uint32, error) {
+	id, sourceOnly, err := DeriveForInstall(ctx, sourceDSN, indexDSN)
+	if err != nil {
+		return 0, fmt.Errorf("cannot auto-derive --server-id from --source-dsn: %w (pass --server-id explicitly to bypass)", err)
+	}
+	if sourceOnly != nil {
+		WarnSourceOnly(id, "", sourceOnly)
+		fmt.Fprintf(w, "Auto-derived server-id from source DSN: %d\n", id)
+		return id, nil
+	}
+	fmt.Fprintf(w, "Auto-derived server-id from the source connection and this installation's index: %d\n", id)
+	return id, nil
 }
 
 // SetIndexServerUUIDForTest replaces the query that reads the index server's
@@ -431,4 +479,12 @@ func SetIndexServerUUIDForTest(read func(ctx context.Context, indexDSN string) (
 	prev := readIndexServerUUID
 	readIndexServerUUID = read
 	return func() { readIndexServerUUID = prev }
+}
+
+// SetInstallSaltRetryWaitForTest shortens the wait between reads of the index
+// server's identity.
+func SetInstallSaltRetryWaitForTest(d time.Duration) (restore func()) {
+	prev := installSaltRetryWait
+	installSaltRetryWait = d
+	return func() { installSaltRetryWait = prev }
 }

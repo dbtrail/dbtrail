@@ -745,9 +745,12 @@ func (m *monitorSupervisor) deriveSourceIdentity(e console.ServerEntry, flavor s
 	}
 	ctx, cancel := context.WithTimeout(base, 15*time.Second)
 	defer cancel()
-	id, _, err := serverid.DeriveForInstall(ctx, e.SourceDSN, e.DSN)
+	id, sourceOnly, err := serverid.DeriveForInstall(ctx, e.SourceDSN, e.DSN)
 	if err != nil {
 		return 0, fmt.Errorf("derive server id: %w", err)
+	}
+	if sourceOnly != nil {
+		serverid.WarnSourceOnly(id, e.Name, sourceOnly)
 	}
 	return id, nil
 }

@@ -725,12 +725,12 @@ func rdsBinlogRetentionVerdict(name string, raw sql.NullString) CheckResult {
 // 1/2^32 hash collision that would kick the source off its own replica
 // identity. With the index's identity in the id, two installations capturing
 // the same source no longer derive the same one; when the index cannot be
-// asked (no index DSN, or it does not answer) the id is the source-only one
-// every installation shares, and the detail says so. Advisory only (WARN,
+// asked (no index DSN, or it does not answer) the id shown is the source-only
+// one, which capture will not use, and the detail says so. Advisory only (WARN,
 // never FAIL): a topology property to surface, not to block boot on.
 func checkServerIDCollision(ctx context.Context, db *sql.DB, sourceDSN, indexDSN string) CheckResult {
 	const name = "Replication server-id collision"
-	derived, perInstall, err := serverid.DeriveForInstall(ctx, sourceDSN, indexDSN)
+	derived, sourceOnly, err := serverid.DeriveForInstall(ctx, sourceDSN, indexDSN)
 	if err != nil {
 		return CheckResult{
 			Name:   name,
@@ -765,8 +765,11 @@ func checkServerIDCollision(ctx context.Context, db *sql.DB, sourceDSN, indexDSN
 		}
 	}
 	detail := fmt.Sprintf("derived server-id %d (source @@server_id=%d)", derived, srcID)
-	if !perInstall {
-		detail += "; any other DBTrail capturing through this same source connection derives the same id, and the two would collide on the replication connection"
+	if sourceOnly != nil {
+		// Not the id capture will use: capture adds its index, which this
+		// run could not ask. Said, so the number is not copied as the one
+		// in use.
+		detail = fmt.Sprintf("derived server-id %d from the source connection alone (source @@server_id=%d); capture also uses the index it writes to, so the id in use is another one, shown when this check is run with that index", derived, srcID)
 	}
 	return CheckResult{Name: name, Status: StatusPass, Detail: detail}
 }
