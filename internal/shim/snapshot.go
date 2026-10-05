@@ -419,6 +419,7 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 // no terminating EOF and reads it as an unambiguous failure (see streamWriter).
 func (h *Handler) streamSnapshotFullTable(ctx context.Context, q TimeTravelQuery, input reconstruct.SnapshotFullTableInput, cols []string) (*mysql.Result, error) {
 	sw := newStreamWriter(h.conn, cols)
+	sw.status = h.SessionStatus()
 	cells := make([]any, len(cols)) // reused per row; writeRow encodes synchronously
 
 	// SELECT * degrades LOUDLY, not silently, for the #600 dropped-column case.

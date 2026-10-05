@@ -25,7 +25,10 @@ import (
 // error keeps its MySQL code (the library wraps it first, which turns every
 // one into 1105).
 //
-// Every other command is answered the way the library answers it.
+// Every other command is answered the way the library answers it, with one
+// addition: before each answer is written the session's status flags are put
+// on it (stampStatus, status.go), so the client is told the state its session
+// really has.
 type Session struct {
 	conn  *server.Conn
 	h     server.Handler
@@ -90,6 +93,10 @@ func (s *Session) HandleCommand() error {
 		c.Conn = nil
 		return nil
 	} else if v := s.dispatch(data[0], data[1:]); v != (noReply{}) {
+		// The session's status flags as they are now that the command ran
+		// (#2110): on this answer, and on the connection for the EOF and OK
+		// packets the library writes from it.
+		s.stampStatus(v)
 		err = c.WriteValue(v)
 	}
 	if c.Conn != nil {
@@ -105,6 +112,17 @@ func (s *Session) HandleCommand() error {
 // dispatch answers one command: nil is OK, an error is sent as an error
 // packet, noReply as nothing.
 func (s *Session) dispatch(cmd byte, data []byte) any {
+	if src, ok := s.h.(sourceSession); ok {
+		switch cmd {
+		case mysql.COM_STMT_CLOSE, mysql.COM_STMT_SEND_LONG_DATA:
+			// No answer to put the loss in; a close still frees the statement.
+		default:
+			statement := cmd == mysql.COM_QUERY || cmd == mysql.COM_STMT_PREPARE || cmd == mysql.COM_STMT_EXECUTE
+			if err := src.SourceLost(statement); err != nil {
+				return err
+			}
+		}
+	}
 	switch cmd {
 	case mysql.COM_QUERY:
 		r, err := s.h.HandleQuery(string(data))
@@ -113,6 +131,11 @@ func (s *Session) dispatch(cmd byte, data []byte) any {
 		}
 		return r
 	case mysql.COM_PING:
+		if src, ok := s.h.(sourceSession); ok {
+			if err := src.PingSource(); err != nil {
+				return err
+			}
+		}
 		return nil
 	case mysql.COM_INIT_DB:
 		if err := s.h.UseDB(string(data)); err != nil {

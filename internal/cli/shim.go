@@ -757,7 +757,8 @@ func handleConn(ctx context.Context, c net.Conn, db *sql.DB, srv *server.Server,
 
 	handler := shim.NewHandlerWithConfig(db, cfg, slog.Default())
 	handler.BindConnContext(connCtx)
-	mysqlConn, err := server.NewCustomizedConn(wc, srv, auth, handler)
+	// shim.NewConn: the handshake announces autocommit (#2110).
+	mysqlConn, err := shim.NewConn(wc, srv, auth, handler)
 	if err != nil {
 		level, msg, isMonitor := classifyHandshakeErr(err)
 		if isMonitor {

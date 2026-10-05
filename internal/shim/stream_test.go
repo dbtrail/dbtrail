@@ -219,3 +219,27 @@ func TestStreamWriter_EmptyStringIsNotNull(t *testing.T) {
 		t.Errorf("row payload = % x, want % x (two empty strings, then NULL)", row, want)
 	}
 }
+
+// The EOF that closes the column definitions carries the session's status
+// flags the writer was given (#2110): a streamed result inside a transaction
+// must not tell the client "autocommit, no transaction" halfway.
+func TestStreamWriter_HeaderEOFCarriesTheSessionStatus(t *testing.T) {
+	for _, status := range []uint16{0x0002, 0x0003, 0x0000, 0x2003, 0x0202} {
+		pw := &capturePW{}
+		sw := newStreamWriter(pw, []string{"a"})
+		sw.status = status
+		if _, err := sw.finish(); err != nil {
+			t.Fatal(err)
+		}
+		eof := pw.packets[len(pw.packets)-1]
+		if len(eof) != 5 || eof[0] != 0xfe {
+			t.Fatalf("last header packet is not an EOF: %v", eof)
+		}
+		if got := uint16(eof[3]) | uint16(eof[4])<<8; got != status {
+			t.Errorf("column EOF status 0x%04x, want 0x%04x", got, status)
+		}
+		if eof[1] != 0 || eof[2] != 0 {
+			t.Errorf("column EOF warnings %v, want 0", eof[1:3])
+		}
+	}
+}

@@ -798,6 +798,163 @@ while a durable S3 copy remains, use the web interface's Time-travel tab or a st
 shim pointed at the S3 prefix for those tables. Single-source baseline configs —
 the common case — have full parity.
 
+#### What the port tells a driver about its session and about the server
+MySQL sends two bytes of status with its handshake and with every answer:
+whether the session is in autocommit mode, whether it is inside a
+transaction, and a few more. Drivers act on them. PyMySQL and mysqlclient
+send `SET AUTOCOMMIT` only when the last status says the mode differs from
+the one they want; Connector/J with `useLocalTransactionState` skips a
+`COMMIT` the flags say is not needed; Connector/J, the C library and the Go
+driver read `NO_BACKSLASH_ESCAPES` from them to decide how to escape a
+string. The port's flags describe the session the client really has:
+
+- **Under read routing**, the session on the source, as the source last
+  reported it, on every answer, whoever produced it. A `SELECT` the copy
+  answered, a time-travel statement, a `SHOW WARNINGS` or `USE` the port
+  answered itself and a `PING` all say "in a transaction" between `BEGIN`
+  and `COMMIT`, and "autocommit off" after `SET autocommit=0`. (One packet
+  is a statement behind: the end-of-columns marker in the middle of a result
+  forwarded from the source carries the state from before that statement;
+  the packet that ends the result carries the state after it.) The flags
+  passed on from the source are autocommit, in a transaction, in a read-only
+  transaction, `NO_BACKSLASH_ESCAPES`, and four about the statement itself
+  (no index used, no good index used, slow query, database dropped). The
+  flags that announce something the port does not deliver are never sent:
+  more result sets, an open cursor, session-state data.
+- **On a connection that is not routed**, autocommit and never in a
+  transaction. The copy has no transactions: `SET autocommit=0` is accepted
+  as connection chatter and changes nothing, `SELECT @@autocommit` keeps
+  answering 1 and the flags keep saying autocommit.
+- **A `PING` on a routed connection is answered by the source** once the
+  connection has a session there (from its first forwarded statement on).
+  Only the source knows whether that session is still alive, and its answer
+  carries the state as it is now: after an `INSERT` the source refused with
+  autocommit off, an error that carries no flags, the source has opened a
+  transaction and the `PING` says so. Before the first forwarded statement
+  there is no session on the source; a `PING` then opens none and is
+  answered by the port ("autocommit, no transaction", which is what a
+  connection that has run nothing holds). A `PING` costs one round trip to
+  the source and is bound by the port's statement deadline.
+- **Once the connection to the source is lost, every command answers error
+  2006** ("MySQL server has gone away"), not only the forwarded ones: the
+  time-travel statements, `SHOW WARNINGS`, `USE` and `PING` too. The source
+  ended the session (a `KILL`, a restart, an idle timeout), or the port's own
+  statement deadline cut a statement, and the transaction the client was in
+  went with it. An OK from the port could only say "autocommit, no
+  transaction", which tells a driver that there is nothing to roll back and
+  a connection pool that the connection is healthy. Reconnect to continue;
+  on a connection that is not routed nothing changes. A source that never
+  let the connection in (unreachable, or the login refused) is a different
+  case, because no session existed and nothing was lost: forwarded
+  statements and `PING` answer 2006, and the time-travel statements, which
+  need no source, keep answering. That helps only a client whose connect
+  sequence forwards nothing: under routing every `SET` goes to the source,
+  so with the source unreachable a driver that sends a `SET` when it
+  connects (PyMySQL with its default settings, Connector/J, mysqlclient)
+  gets 2006 and cannot finish connecting to a routed server. What works
+  while the source is down: the `mysql` client, a driver that sends no `SET`
+  when it connects, or a port started without read routing.
+- **The handshake** announces autocommit and no `NO_BACKSLASH_ESCAPES`, as
+  MySQL and MariaDB do by default. It is written before the port knows which
+  server the client asked for, so it cannot carry that server's state, and
+  the port opens its own connection to the source only for the first
+  statement it forwards. For a source configured to open its sessions in
+  another state the announcement is therefore wrong, and the port's answers
+  carry the real state from that first forwarded statement on. Whether that
+  is enough depends on when the driver looks:
+  - **PyMySQL looks once, when it connects**, and compares the flag with the
+    mode it was asked for. Against a source that opens sessions with
+    autocommit off, a PyMySQL connection opened with `autocommit=True` is
+    told "already on", sends no `SET`, and the session on the source stays
+    with autocommit off: **every write is discarded when the connection
+    closes, with no error**. Measured with PyMySQL 2.2.8, `autocommit=True`,
+    one `INSERT`, then `close()`:
+
+    | Source opens sessions with autocommit off through | Connected directly | Through the port | Through the port, with `init_command="SET autocommit=1"` |
+    | --- | --- | --- | --- |
+    | MariaDB 11.4, `autocommit=0` in its configuration | row kept | **row lost** | row kept |
+    | MariaDB 11.4, `init_connect='SET autocommit=0'` | row lost | row lost | row kept |
+    | MySQL 8.4, `init_connect='SET autocommit=0'` | row lost | row lost | row kept |
+    | MySQL 8.4, `autocommit=0` in its configuration | row lost | row lost | row kept |
+
+    Only the first row is the port's doing: MariaDB's own handshake says
+    "off" there, and the port's cannot. In the other three the server itself
+    announces autocommit when the client logs in (an `init_connect` runs
+    after that, and MySQL announces autocommit whatever its configuration,
+    MySQL bug 66884), so PyMySQL loses the row connected directly too.
+  - **PyMySQL with its default (`autocommit=False`) now sends
+    `SET AUTOCOMMIT = 0` when it connects**, because the handshake says
+    autocommit is on, as it does connected to MySQL. Its writes and its
+    `rollback()` then behave as on MySQL. Two things follow under read
+    routing. Every statement of such a connection, reads included, runs
+    inside a transaction on the source, and inside a transaction nothing
+    goes to the copy: **the copy does not answer a PyMySQL connection left
+    on its defaults**. (Before the fix it did, by accident of the wrong
+    flag, and that connection's `rollback()` undid nothing.) And each such
+    connection opens its connection to the source when it connects, not at
+    its first query. To let the copy answer the heavy reads of a reporting
+    client, open its connection with `autocommit=True`.
+  - **mysqlclient (and Django on it) is corrected**: it sends `SET NAMES`
+    before it looks, the port forwards it, and the source's answer carries
+    the real flag. Read from its source, not run.
+  - **Connector/J** always sends `SET autocommit=1` when it connects, and
+    the Go driver never looks; neither depends on the announcement.
+  - **MySQL with `autocommit=0` in its configuration** announces autocommit
+    in its handshake and in its first answer although `@@autocommit` is 0
+    (measured on 8.4), so the port has nothing truer to pass on and cannot
+    detect it.
+  - **`NO_BACKSLASH_ESCAPES` in the source's global `sql_mode`**: MySQL and
+    MariaDB announce it in their handshake, the port only from the first
+    forwarded statement on. A driver that escapes strings itself by this
+    flag (PyMySQL, mysqlclient, the C library, the Go driver with
+    `interpolateParams`, Connector/J with client-side prepared statements)
+    writes the first statement of a connection with backslash escapes the
+    source does not read as escapes.
+
+  What to do with such a source: have every client send `SET autocommit=1`
+  (or `0`) itself when it connects (PyMySQL: `init_command`), which also
+  makes the first statement one without string arguments; or make
+  autocommit, and a `sql_mode` without `NO_BACKSLASH_ESCAPES`, the source's
+  default. The port says it in its log, once per server, when the first
+  answer of a session on the source shows a state that differs: `read
+  routing: the source opens its sessions with autocommit off, and the
+  port's handshake tells every client autocommit on and backslash escapes`.
+  (When a connection's first statement is itself a `SET` of `autocommit`
+  or of `sql_mode`, the setting it sets is the client's and is not counted;
+  the other one still is.) MySQL's
+  `autocommit=0` cannot be detected, for the reason above.
+
+Until this was fixed (#2110) the handshake announced status 0, and so did
+most answers the port wrote itself. PyMySQL, whose default is autocommit off, read
+that as "already off", did not send `SET AUTOCOMMIT = 0`, and the session on
+the source stayed in autocommit: an `INSERT` followed by `rollback()` left
+the row in the table.
+
+**The server version in the handshake is always `8.0.11`**, whatever the
+source is. It is fixed on purpose, for the same reason: the handshake is
+written before the server is chosen, and one port serves every server.
+What a client reads by asking is the source's own under read routing
+(`SELECT VERSION()`, `@@version` and `@@version_comment` are forwarded, so a
+MariaDB source answers `11.4.x-MariaDB`), and the port's own on a
+connection that is not routed (`@@version` is `8.0.11`, `@@version_comment`
+is `DBTrail time-travel port`). The consequence is for a driver that
+chooses its behaviour from the handshake version rather than from a query:
+
+- Connector/J picks the names of the variables it reads when it connects
+  from that version: told 8.0.11 it asks for `@@transaction_isolation` and
+  not `@@tx_isolation`, and leaves out the query cache variables. MySQL 5.7.20
+  and later, MySQL 8 and MariaDB 11.1 and later know that name; under read
+  routing, an older MariaDB (10.11 for example) or MySQL source does not,
+  and Connector/J's connect statement fails there with error 1193. Not
+  measured; read from the driver's source.
+- A driver that recognises MariaDB by the `-MariaDB` suffix of the handshake
+  version (mysql2 for Node, MariaDB's own connectors) treats the port as
+  MySQL even when the source is MariaDB, and does not use its MariaDB-only
+  protocol extensions. The port does not offer those extensions anyway.
+- PyMySQL, mysqlclient, the Go driver and the frameworks on top of them
+  (SQLAlchemy, Django, GORM) either ignore the handshake version or ask
+  with `SELECT VERSION()`, and get the source's.
+
 #### Seeing who answered
 Two surfaces count every routing decision, per server, since the daemon
 started — decisions, not successes: a statement MySQL then fails was still

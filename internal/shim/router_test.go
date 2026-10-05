@@ -36,6 +36,39 @@ type fakeRouter struct {
 	prepared       []*fakeStmt
 	prepareErr     error
 	paramsOverride int
+	// The source session's status flags (Status): sessStatus when sessKnown.
+	// resultStatus, when set, is the status the source's answers carry in
+	// place of plain autocommit; forwardOK makes Forward answer an OK packet
+	// instead of a row; onForward runs before each forwarded statement is
+	// answered (to move the session's state the way the statement would).
+	sessStatus   uint16
+	sessKnown    bool
+	resultStatus *uint16
+	forwardOK    bool
+	onForward    func(stmt string)
+	// lostErr is what Lost answers; pings counts the PINGs sent to the
+	// source, pingErr is what they answer, onPing runs on each.
+	lostErr error
+	pings   int
+	pingErr error
+	onPing  func()
+}
+
+func (r *fakeRouter) Status() (uint16, bool) { return r.sessStatus, r.sessKnown }
+func (r *fakeRouter) Lost() error            { return r.lostErr }
+func (r *fakeRouter) Ping(context.Context) error {
+	r.pings++
+	if r.onPing != nil {
+		r.onPing()
+	}
+	return r.pingErr
+}
+
+func (r *fakeRouter) answerStatus() uint16 {
+	if r.resultStatus != nil {
+		return *r.resultStatus
+	}
+	return mysql.SERVER_STATUS_AUTOCOMMIT
 }
 
 // fakeStmt is a statement "prepared on the source": it records every
@@ -75,7 +108,7 @@ func (s *fakeStmt) Execute(_ context.Context, args []any, sink readrouter.RowSin
 	rs := mysql.NewResultset(1)
 	rs.Fields = []*mysql.Field{f}
 	rs.Streaming, rs.StreamingDone = mysql.StreamingSelect, true
-	return &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}, nil
+	return &mysql.Result{Status: s.r.answerStatus(), Resultset: rs}, nil
 }
 
 func (r *fakeRouter) Prepare(_ context.Context, stmt string) (readrouter.Stmt, error) {
@@ -101,11 +134,17 @@ func (r *fakeRouter) Forward(_ context.Context, stmt string, _ readrouter.RowSin
 	if r.forwardErr != nil {
 		return nil, r.forwardErr
 	}
+	if r.onForward != nil {
+		r.onForward(stmt)
+	}
+	if r.forwardOK {
+		return &mysql.Result{Status: r.answerStatus(), AffectedRows: 1}, nil
+	}
 	rs, err := mysql.BuildSimpleTextResultset([]string{"side"}, [][]any{{"mysql"}})
 	if err != nil {
 		return nil, err
 	}
-	return &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}, nil
+	return &mysql.Result{Status: r.answerStatus(), Resultset: rs}, nil
 }
 
 func (r *fakeRouter) UseDB(_ context.Context, db string) error {

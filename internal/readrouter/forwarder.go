@@ -74,7 +74,17 @@ type Forwarder struct {
 	// the client). It is how a caller learns WHY a source could not be
 	// reached, an account the source refuses among the reasons
 	// (AccountRefused).
-	OnConnect      func(error)
+	OnConnect func(error)
+	// OnSession, when set, is told the state the source opened the session
+	// in (SessionStatusFlags), at most once: with the source's first answer
+	// to a statement, because that is the first packet that shows what an
+	// init_connect did (it runs after the login is answered). It is how a
+	// caller learns that the source's sessions do not start as the port's
+	// handshake announced. When the first statement is itself a SET of
+	// autocommit or of sql_mode, the flag that statement sets is the
+	// client's doing and is reported as the default (autocommit on, no
+	// NO_BACKSLASH_ESCAPES); the other flag is still the source's.
+	OnSession      func(status uint16)
 	policy         Policy
 	connectTimeout time.Duration
 	// queryTimeout bounds each round trip on the upstream socket (read and
@@ -95,6 +105,11 @@ type Forwarder struct {
 	// from the handshake: what a KILL names.
 	threadID uint32
 	dead     error
+	// sessionUntold: OnSession has not been told yet about this session.
+	sessionUntold bool
+	// hadSession: the source accepted the login at least once, so there was
+	// a session (and maybe a transaction) to lose. See Lost.
+	hadSession bool
 }
 
 // NewForwarder parses a go-sql-driver DSN (the registry's forwarding or
@@ -205,6 +220,8 @@ func (f *Forwarder) get(ctx context.Context) (*client.Conn, error) {
 	f.conn = c
 	f.raw = c.Conn.Conn
 	f.threadID = c.GetConnectionID()
+	f.sessionUntold = f.OnSession != nil
+	f.hadSession = true
 	return c, nil
 }
 
@@ -376,7 +393,7 @@ func (f *Forwarder) Decide(ctx context.Context, stmt string) (Decision, error) {
 // applies the policy.
 func (f *Forwarder) decideFromExplain(stmt string, res *mysql.Result, err error) (Decision, error) {
 	if err != nil {
-		if !isMySQLError(err) {
+		if !stillInSession(err) {
 			f.lose(err)
 		}
 		return Decision{}, fmt.Errorf("explain: %w", err)
@@ -426,9 +443,13 @@ func (f *Forwarder) Forward(ctx context.Context, stmt string, sink RowSink) (*my
 		return nil, err
 	}
 	defer f.watch(ctx)()
-	return f.stream(sink, func(res *mysql.Result, perRow client.SelectPerRowCallback, perRes client.SelectPerResultCallback) error {
+	res, err := f.stream(sink, func(res *mysql.Result, perRow client.SelectPerRowCallback, perRes client.SelectPerResultCallback) error {
 		return c.ExecuteSelectStreaming(stmt, res, perRow, perRes)
 	})
+	if err == nil {
+		f.tellSession(stmt)
+	}
+	return res, err
 }
 
 // stream runs one statement through run (the text or the prepared form of
@@ -471,9 +492,11 @@ func (f *Forwarder) stream(sink RowSink, run func(*mysql.Result, client.SelectPe
 			// be reused.
 			f.lose(se)
 			return nil, se.err
-		case isMySQLError(err):
+		case stillInSession(err):
 			// The source answered with an error packet (before or between
-			// rows); the connection is in sync and stays usable.
+			// rows); the connection is in sync and stays usable. An error
+			// packet that ends the session (sessionEnded) falls through to
+			// the loss below instead.
 			return nil, unwrapMySQLError(err)
 		default:
 			// When the statement was interrupted (its context ended), the
@@ -511,7 +534,7 @@ func (f *Forwarder) UseDB(ctx context.Context, db string) error {
 	f.mu.Unlock()
 	defer f.watch(ctx)()
 	if err := c.UseDB(db); err != nil {
-		if !isMySQLError(err) {
+		if !stillInSession(err) {
 			f.lose(err)
 			return lostError(err)
 		}
@@ -532,6 +555,136 @@ func (f *Forwarder) InTransaction() bool {
 	return f.conn != nil && f.conn.IsInTransaction()
 }
 
+// SessionStatusFlags are the MySQL status flags that describe a session and
+// outlive the statement that set them: autocommit, in a transaction, in a
+// read-only transaction, NO_BACKSLASH_ESCAPES. The other flags are about one
+// statement or one result.
+const SessionStatusFlags = mysql.SERVER_STATUS_IN_TRANS | mysql.SERVER_STATUS_AUTOCOMMIT |
+	mysql.SERVER_STATUS_NO_BACKSLASH_ESCAPED | mysql.SERVER_STATUS_IN_TRANS_READONLY
+
+// Status is the state of the session on the source as the source last
+// reported it, in MySQL's status flags (SessionStatusFlags, and no other
+// flag). known is false while there is no session to speak of: before the
+// connection is opened, and once it is lost and let go of.
+//
+// It is read from the connection, which keeps the status of the last packet
+// the source sent that carried one: the OK that ended the login (so a source
+// that opens its sessions with NO_BACKSLASH_ESCAPES, or with autocommit off,
+// is reported from the first answer on), every statement's answer, the
+// EXPLAIN of a decision and a USE. MySQL's error packet carries no status, so
+// after a statement the source refused the flags are those of the packet
+// before it, exactly what a client connected to the source would hold.
+func (f *Forwarder) Status() (status uint16, known bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// A connection interrupted from another goroutine (dead set, the socket
+	// closed under it) is still held here until its statement's goroutine
+	// lets go of it, and still answers: when the interrupt lands just as a
+	// statement succeeded, that statement's answer must carry the flags the
+	// source sent with it, not those of a session that never ran anything.
+	// Every command AFTER it is refused (Lost), so nothing else is stamped
+	// from a session that is gone.
+	if f.conn == nil {
+		return 0, false
+	}
+	return connSessionStatus(f.conn), true
+}
+
+// tellSession reports the session's opening state to OnSession after the
+// source's first answer, to the statement stmt (see OnSession).
+func (f *Forwarder) tellSession(stmt string) {
+	f.mu.Lock()
+	if !f.sessionUntold || f.conn == nil {
+		f.mu.Unlock()
+		return
+	}
+	f.sessionUntold = false
+	status := connSessionStatus(f.conn)
+	f.mu.Unlock()
+	if Classify(stmt) == KindSet {
+		low := strings.ToLower(stmt)
+		if strings.Contains(low, "autocommit") {
+			status |= mysql.SERVER_STATUS_AUTOCOMMIT
+		}
+		if strings.Contains(low, "sql_mode") {
+			status &^= mysql.SERVER_STATUS_NO_BACKSLASH_ESCAPED
+		}
+	}
+	f.OnSession(status)
+}
+
+// Lost returns the error every command gets once a session this connection
+// had on the source is gone (CodeUpstreamLost), nil while it is not. It turns
+// non-nil the moment the connection is interrupted, before the statement in
+// flight has returned.
+//
+// A source that never let this connection in (unreachable, the login
+// refused) is not that case and answers nil: no session existed, so there is
+// no transaction the client could wrongly believe it still has, and what the
+// port answers without the source (time travel) must keep working while the
+// source is down. Forwarded statements and Ping still answer the lost error
+// there.
+func (f *Forwarder) Lost() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.hadSession {
+		return nil
+	}
+	return f.dead
+}
+
+// Ping sends COM_PING to the source on the session this connection holds, so
+// the answer tells whether that session is still there and carries its state
+// as it is now (the source's OK updates what Status reports). It never opens
+// a connection: with none opened yet there is no session to ask about, and
+// nil is returned without anything being sent. A lost connection answers the
+// lost error; a ping that fails loses it. The round trip is bounded like a
+// statement's (the query deadline, and ctx).
+func (f *Forwarder) Ping(ctx context.Context) error {
+	f.mu.Lock()
+	if f.dead != nil {
+		f.mu.Unlock()
+		return f.dead
+	}
+	c := f.conn
+	f.mu.Unlock()
+	if c == nil {
+		return nil
+	}
+	defer f.watch(ctx)()
+	if err := c.Ping(); err != nil {
+		// Any error: a server whose session is alive never refuses a PING
+		// (what MySQL answers with after an idle timeout is an error
+		// packet, and the session is gone with it).
+		f.lose(err)
+		return f.lost()
+	}
+	return nil
+}
+
+// connSessionStatus reads the session flags the client library holds for c.
+// The library exposes autocommit and in-transaction as methods and the whole
+// status only as text (StatusString: the flag's name, or "(<value>)" for one
+// it has no name for), so the other two flags are read from that text.
+// TestForwarder_Status pins both spellings against the library.
+func connSessionStatus(c *client.Conn) (status uint16) {
+	if c.IsAutoCommit() {
+		status |= mysql.SERVER_STATUS_AUTOCOMMIT
+	}
+	if c.IsInTransaction() {
+		status |= mysql.SERVER_STATUS_IN_TRANS
+	}
+	for flag := range strings.SplitSeq(c.StatusString(), "|") {
+		switch flag {
+		case "SERVER_STATUS_NO_BACKSLASH_ESCAPED":
+			status |= mysql.SERVER_STATUS_NO_BACKSLASH_ESCAPED
+		case "SERVER_STATUS_IN_TRANS_READONLY", fmt.Sprintf("(%d)", mysql.SERVER_STATUS_IN_TRANS_READONLY):
+			status |= mysql.SERVER_STATUS_IN_TRANS_READONLY
+		}
+	}
+	return status
+}
+
 // Close drops the upstream connection; the Forwarder is not reused after.
 func (f *Forwarder) Close() {
 	f.mu.Lock()
@@ -540,6 +693,27 @@ func (f *Forwarder) Close() {
 		f.conn = nil
 	}
 	f.mu.Unlock()
+}
+
+// stillInSession reports whether err is an error packet from a source whose
+// session goes on: the statement failed, the connection is in sync and stays
+// usable. An error packet that says the source ENDED the session is not
+// that (sessionEnded), and neither is anything that is not an error packet.
+func stillInSession(err error) bool { return isMySQLError(err) && !sessionEnded(err) }
+
+// codeIdleTimeout is MySQL's ER_CLIENT_INTERACTION_TIMEOUT (8.0.24 and
+// later): the answer to the first command sent after wait_timeout, followed
+// by the socket closing.
+const codeIdleTimeout = 4031
+
+// sessionEnded reports whether err is the source saying it has ended this
+// session. The number alone is not trusted: MariaDB numbers its own errors
+// from 4000 up, so 4031 can be an unrelated error there, and MySQL's wording
+// is matched too. A server that closes an idle connection without any answer
+// needs nothing here: the next read sees a broken socket, which is a loss.
+func sessionEnded(err error) bool {
+	var me *mysql.MyError
+	return errors.As(err, &me) && me.Code == codeIdleTimeout && strings.Contains(me.Message, "disconnected by the server")
 }
 
 func isMySQLError(err error) bool {
@@ -613,7 +787,7 @@ func (f *Forwarder) Prepare(ctx context.Context, query string) (Stmt, error) {
 	defer f.watch(ctx)()
 	st, err := c.Prepare(query)
 	if err != nil {
-		if isMySQLError(err) {
+		if stillInSession(err) {
 			return nil, unwrapMySQLError(err)
 		}
 		f.lose(err)
@@ -665,7 +839,7 @@ func (p *prepared) Decide(ctx context.Context, args []any) (Decision, error) {
 	if p.explain == nil {
 		st, err := p.c.Prepare("EXPLAIN FORMAT=JSON " + p.query)
 		if err != nil {
-			if !isMySQLError(err) {
+			if !stillInSession(err) {
 				p.f.lose(err)
 				return Decision{}, fmt.Errorf("explain: %w", err)
 			}
@@ -683,9 +857,13 @@ func (p *prepared) Execute(ctx context.Context, args []any, sink RowSink) (*mysq
 		return nil, err
 	}
 	defer p.f.watch(ctx)()
-	return p.f.stream(sink, func(res *mysql.Result, perRow client.SelectPerRowCallback, perRes client.SelectPerResultCallback) error {
+	res, err := p.f.stream(sink, func(res *mysql.Result, perRow client.SelectPerRowCallback, perRes client.SelectPerResultCallback) error {
 		return p.st.ExecuteSelectStreaming(res, perRow, perRes, args...)
 	})
+	if err == nil {
+		p.f.tellSession(p.query)
+	}
+	return res, err
 }
 
 // Close frees the statement (and its EXPLAIN) on the source. On a lost

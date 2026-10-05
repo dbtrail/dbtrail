@@ -56,6 +56,18 @@ func TestForwarder_lostStaysLost(t *testing.T) {
 	if f.InTransaction() {
 		t.Error("a lost connection reports a transaction")
 	}
+	// No session ever existed on this source: forwarded statements and a
+	// PING say the source is gone, but there is nothing the client lost, so
+	// what the port answers without the source is not refused (Lost).
+	if err := f.Ping(ctx); !IsLost(err) {
+		t.Errorf("Ping with a source that never answered: err = %v, want the lost error", err)
+	}
+	if err := f.Lost(); err != nil {
+		t.Errorf("Lost() = %v for a source that never let the connection in, want nil", err)
+	}
+	if _, known := f.Status(); known {
+		t.Error("a source that never answered reports a session")
+	}
 }
 
 func TestNewForwarder_dsn(t *testing.T) {
