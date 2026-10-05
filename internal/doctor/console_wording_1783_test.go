@@ -125,7 +125,7 @@ func TestServerIDCollisionWording(t *testing.T) {
 			}
 			defer db.Close()
 			mock.ExpectQuery("SELECT @@server_id").WillReturnRows(sqlmock.NewRows([]string{"@@server_id"}).AddRow(tc.srcID))
-			c := checkServerIDCollision(t.Context(), db, dsn)
+			c := checkServerIDCollision(t.Context(), db, dsn, "")
 			if c.Status != tc.want || (tc.want == StatusWarn && c.Remediation == "") {
 				t.Fatalf("status = %s with remediation %q, want %s", c.Status, c.Remediation, tc.want)
 			}
@@ -133,7 +133,7 @@ func TestServerIDCollisionWording(t *testing.T) {
 		})
 	}
 	// A DSN that cannot be parsed never reaches the query.
-	c := checkServerIDCollision(t.Context(), nil, "not a dsn")
+	c := checkServerIDCollision(t.Context(), nil, "not a dsn", "")
 	if c.Status != StatusWarn {
 		t.Fatalf("underivable = %s: %s", c.Status, c.Detail)
 	}

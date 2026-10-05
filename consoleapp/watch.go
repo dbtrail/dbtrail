@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -27,11 +28,11 @@ import (
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/installid"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/readrouter"
 	"github.com/dbtrail/dbtrail/internal/rotation"
-	"github.com/dbtrail/dbtrail/internal/serverid"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/status"
 	"github.com/dbtrail/dbtrail/internal/streamdeps"
@@ -807,12 +808,11 @@ func startFlashbackPort(ctx context.Context, srv *console.Server) (func(), error
 func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	serverID := upServerID
 	if serverID == 0 {
-		id, err := serverid.DeriveServerID(upSourceDSN)
+		id, err := autoServerID(cmd.Context(), os.Stderr)
 		if err != nil {
-			return fmt.Errorf("cannot auto-derive --server-id from --source-dsn: %w (pass --server-id explicitly to bypass)", err)
+			return err
 		}
 		serverID = id
-		fmt.Fprintf(os.Stderr, "Auto-derived server-id from source DSN: %d\n", serverID)
 	}
 
 	if err := resolveUpConsoleEnv(cmd); err != nil {
@@ -2149,4 +2149,11 @@ func flashbackFilePath(opts consoleOpts) string {
 		servers = console.DefaultRegistryPath()
 	}
 	return filepath.Join(filepath.Dir(servers), console.FlashbackFileName)
+}
+
+// autoServerID derives the replication server-id when --server-id was not
+// given: from the source connection AND this installation's index, so a
+// second installation capturing the same source gets another id.
+func autoServerID(ctx context.Context, w io.Writer) (uint32, error) {
+	return installid.AutoDerive(ctx, w, upSourceDSN, upIndexDSN)
 }

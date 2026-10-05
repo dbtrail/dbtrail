@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **Two installations capturing the same database no longer interrupt each
+  other.** Capture connects to the source as a replica, and each replica
+  needs its own replication server id. DBTrail chose it from the source's
+  address, user and database alone, so two installations pointed at the same
+  database through the same login chose the same id, and each reconnect of
+  one dropped the other: on a MariaDB source capture on both went up and down
+  for as long as both ran (error 4052, "A slave with the same server_id is
+  already connected"). The id now also depends on the installation's own
+  index, so each installation has its own, and keeps it across restarts.
+  **On upgrade every installation moves to a new id, once.** Capture resumes
+  from DBTrail's own checkpoint, not from the id, so nothing is lost; a
+  monitor or an allow list on the source that names the old id needs the new
+  one (`bintrail doctor` with `--index-dsn` prints it; without the index it
+  cannot know it and says so). Two installations made from one machine image
+  or volume copy, index included, still share an id. An id set explicitly (`--server-id`, or
+  a server's own setting) is untouched.
 ### Added
 - **The MySQL port can be turned on from the web interface** (#2101). The port
   a `mysql` client, a BI tool or a driver connects to was off unless DBTrail
