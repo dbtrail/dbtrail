@@ -141,6 +141,7 @@ func restOf(rows [][]string) [][]string {
 type routedSessionRig struct {
 	srv     *console.Server
 	entID   string
+	deadID  string // a server whose source is unreachable
 	addr    string
 	srcName string
 	srcDSN  string // straight to the source's schema
@@ -205,6 +206,13 @@ func newRoutedSessionRig(t *testing.T, baseDSN string) *routedSessionRig {
 		t.Fatal(err)
 	}
 	rig.entID = ent.ID
+	// The same index and copy behind a source nobody answers at: a
+	// connection the source never lets in.
+	dead, err := reg.Add(console.ServerEntry{Name: "srvdead", DSN: indexDSN, SourceDSN: "root:testroot@tcp(127.0.0.1:1)/" + rig.srcName, BaselineDir: baseDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rig.deadID = dead.ID
 	rig.srv, err = console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg,
 		FlashbackListen: "127.0.0.1:3308", ReadRouting: console.ReadRoutingConfig{MaxCopyAge: time.Hour, ScanRows: 2}})
 	if err != nil {
@@ -796,4 +804,60 @@ func TestIntegrationFlashbackRoutedSessionMariaDB(t *testing.T) {
 		t.Fatalf("time travel back in UTC: %v", err)
 	}
 	rows.Close()
+}
+
+// Time travel on a routed port when the source cannot be asked for the
+// session's zone. A session that existed and is lost answers 2006, like
+// every command, whether or not the port had read the session; a source that
+// never let the connection in leaves time travel running under UTC.
+func TestIntegrationFlashbackRoutedTimeTravelSourceGone(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	rig := newRoutedSessionRig(t, testutil.BaseDSN())
+	ctx := context.Background()
+	tt := fmt.Sprintf("SELECT * FROM _flashback.users AS OF '%s' WHERE id = 1", rig.now.Add(10*time.Minute).Format("2006-01-02 15:04:05"))
+	travel := func(c *sql.Conn) error {
+		rows, err := c.QueryContext(ctx, tt)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			return fmt.Errorf("no row: %v", rows.Err())
+		}
+		return nil
+	}
+	// killUpstream ends the port's session on the source for this client
+	// connection, from the source's side.
+	killUpstream := func(c *sql.Conn) {
+		t.Helper()
+		id := connStrings(t, c, "SELECT CONNECTION_ID()") // vetoed: MySQL answers with the upstream session's id
+		if _, err := rig.src.Exec("KILL " + id[0][0]); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	for _, known := range []bool{false, true} {
+		c := rig.conn(t, "")
+		if known {
+			// A copy-bound statement: the port reads and keeps the session.
+			if got := connStrings(t, c, visitsScan); sidesOf(got) != "copy" {
+				t.Fatalf("the scan was answered by %q", sidesOf(got))
+			}
+		}
+		killUpstream(c)
+		if err := travel(c); mysqlCode(err) != 2006 {
+			t.Errorf("session lost (session read before: %v): time travel = %v, want error 2006", known, err)
+		}
+	}
+	// The source never let the connection in.
+	c := routedConn(t, rig.addr, rig.deadID, rig.srcName, "")
+	for range 2 {
+		if err := travel(c); err != nil {
+			t.Errorf("source unreachable from the start: time travel = %v, want it to run", err)
+		}
+	}
+	// And an ordinary statement on that connection is the 2006 it always was.
+	if _, err := c.QueryContext(ctx, "SELECT 1"); mysqlCode(err) != 2006 {
+		t.Errorf("SELECT 1 with the source unreachable = %v, want 2006", err)
+	}
 }
