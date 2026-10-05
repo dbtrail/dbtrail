@@ -36,8 +36,8 @@ import (
 // through the index. No FORCE INDEX: MySQL then skips its index dive and
 // estimates one row for the range, whatever it holds.
 const (
-	limitsRange = "at >= '2026-01-02 00:00:00' AND at < '2026-01-03 01:00:00'"
-	limitsDDL   = "CREATE TABLE `ev` (\n  `id` int NOT NULL,\n  `at` datetime NOT NULL,\n  `status` varchar(32) DEFAULT NULL,\n  `note` varchar(32) DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `k_at` (`at`)\n);\n"
+	limitsRange = "made >= '2026-01-02 00:00:00' AND made < '2026-01-03 01:00:00'"
+	limitsDDL   = "CREATE TABLE `ev` (\n  `id` int NOT NULL,\n  `made` datetime NOT NULL,\n  `status` varchar(32) DEFAULT NULL,\n  `note` varchar(32) DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `k_made` (`made`)\n);\n"
 )
 
 func TestIntegrationFlashbackRoutingLimits_2115(t *testing.T) {
@@ -46,7 +46,7 @@ func TestIntegrationFlashbackRoutingLimits_2115(t *testing.T) {
 	routingLimits(t, srcDB, srcName, testutil.IntegrationDSN(srcName), []limitsCase{
 		// The statement of the issue: a few rows of a wide range.
 		{"a LIMIT over a wide range", "SELECT status FROM ev WHERE " + limitsRange + " LIMIT 5", nil, "live", "bounded_limit"},
-		{"the same, prepared", "SELECT status FROM ev WHERE at >= ? AND at < ? LIMIT 5", []any{"2026-01-02 00:00:00", "2026-01-03 01:00:00"}, "live", "bounded_limit"},
+		{"the same, prepared", "SELECT status FROM ev WHERE made >= ? AND made < ? LIMIT 5", []any{"2026-01-02 00:00:00", "2026-01-03 01:00:00"}, "live", "bounded_limit"},
 		// 1,500 rows, the copy returns 50 at most: not tried there.
 		{"a result over the copy's row cap", "SELECT status FROM ev WHERE " + limitsRange, nil, "live", "result_over_row_cap"},
 		// The copy's, as before.
@@ -79,7 +79,7 @@ func TestIntegrationFlashbackRoutingLimitsMariaDBSource_2115(t *testing.T) {
 	defer srcDB.Close()
 	routingLimits(t, srcDB, srcName, testutil.MariaDBBaseDSN()+"/"+srcName+"?parseTime=true", []limitsCase{
 		{"a LIMIT over a wide range", "SELECT status FROM ev WHERE " + limitsRange + " LIMIT 5", nil, "live", "cheap_plan"},
-		{"the same, prepared", "SELECT status FROM ev WHERE at >= ? AND at < ? LIMIT 5", []any{"2026-01-02 00:00:00", "2026-01-03 01:00:00"}, "live", "cheap_plan"},
+		{"the same, prepared", "SELECT status FROM ev WHERE made >= ? AND made < ? LIMIT 5", []any{"2026-01-02 00:00:00", "2026-01-03 01:00:00"}, "live", "cheap_plan"},
 		// 40,000 rows, the copy returns 50 at most: not tried there.
 		{"a result over the copy's row cap", "SELECT status FROM ev", nil, "live", "result_over_row_cap"},
 		// The copy's, as before.
