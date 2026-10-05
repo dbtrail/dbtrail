@@ -49,6 +49,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copy and `DECIMAL`s with four more decimals on MySQL, the same value in a
   different text; the documentation now says exactly how they differ and
   why it stays.
+- **Two readers sharing one replication id are explained in plain words**
+  (#2092). When two DBTrail installations capture the same MariaDB database,
+  both can identify themselves to it with the same replication id, and the
+  database keeps one reader per id: each one disconnects the other when it
+  reconnects. The web interface showed only the database's raw error (4052),
+  appearing and clearing. The Overview's **Capture stopped** box, the
+  Getting started list and the server row's tooltip now say what is going on,
+  that nothing is lost, and what to do: stop capture for this server in one
+  of the two installations. The raw error stays under **Technical details**.
+  The cause is recognised by the error's number, sent as
+  `error_code: "same_replication_id"` in the monitor status. The box is
+  shown while the stream is disconnected and clears while it is briefly
+  connected, as before. A MySQL source does not disconnect DBTrail's reader
+  this way, so nothing changes there.
 - **SQL on the copy prints a `DECIMAL` with its trailing zeros** (#2083). A
   `DECIMAL(10,2)` holding 10 came back as `10` from the copy (the port, the
   routed reads and the SQL card) and as `10.00` from MySQL, and

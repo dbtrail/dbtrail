@@ -105,6 +105,12 @@ type MonitorStatus struct {
 // (#1708).
 const MonitorErrEarlierCleanup = "earlier_cleanup_running"
 
+// MonitorErrSameReplicationID is the ErrorCode of a stream the source dropped
+// because another reader connected with the same replication server id. The
+// source keeps one reader per id, so two of them disconnect each other in
+// turn for as long as both run.
+const MonitorErrSameReplicationID = "same_replication_id"
+
 // MonitorController is the control-plane supervisor as the console sees it.
 // All methods must be safe for concurrent use. Errors returned to handlers
 // are written into HTTP responses — implementations must pre-scrub DSN
