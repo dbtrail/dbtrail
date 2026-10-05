@@ -57,6 +57,7 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 		}
 		in.Baselines[i].Decimals = f.Decimals
 		in.Baselines[i].Datetimes = f.Datetimes
+		in.Baselines[i].BinaryText = f.BinaryText
 		in.Baselines[i].DeltaReserved = f.DeltaReserved
 		in.Baselines[i].SchemaKnown = true
 	}
@@ -99,7 +100,15 @@ func writeDecimalNote(b *strings.Builder, in Input) {
 	}
 	if unknown {
 		b.WriteString("-- Some files carry no column types, so their views cast nothing and every\n")
-		b.WriteString("-- decimal column in them reads as text. Those tables are named below. A\n")
+		if in.Follow.follows() {
+			b.WriteString("-- decimal column in them reads as text. Those tables are named below. A\n")
+		} else {
+			// Only a pinned file gives _bin columns their collation
+			// (writeStateViews), so only there is its absence a loss to name.
+			b.WriteString("-- decimal column in them reads as text; and no collations, so a text column\n")
+			b.WriteString("-- MySQL declares _bin compares like any other, by the session's default\n")
+			b.WriteString("-- collation. Those tables are named below. A\n")
+		}
 		b.WriteString("-- baseline older than this feature gains the casts when it is next taken or\n")
 		b.WriteString("-- refreshed; a PostgreSQL-source baseline stores all its values as text and\n")
 		b.WriteString("-- will not gain them. If a footer could not be read at all, the bintrail log\n")
@@ -107,10 +116,30 @@ func writeDecimalNote(b *strings.Builder, in Input) {
 	}
 }
 
+// writeBinaryCollationNote says, once, why some text columns carry COLLATE C:
+// a reader who finds it in their own state view should learn here that it is
+// the column's MySQL collation, not a choice made for them.
+func writeBinaryCollationNote(b *strings.Builder, in Input) {
+	for _, t := range in.Baselines {
+		if t.SchemaKnown && len(t.BinaryText) > 0 {
+			b.WriteString("--\n")
+			b.WriteString("-- Text columns MySQL declares under a _bin collation are given byte\n")
+			b.WriteString("-- comparison (COLLATE C) in the views below, so they compare, group and sort\n")
+			b.WriteString("-- as on MySQL whatever the session's default collation is.\n")
+			return
+		}
+	}
+}
+
 // decimalComments returns the per-view notes: the columns this table could not
-// have cast, and why. Silence would be the same bug in miniature, a column that
+// have cast, and why. pinned says the file gives _bin columns their collation
+// (a following file does not), so a table without column types loses that too. Silence would be the same bug in miniature, a column that
 // reads as text with nothing anywhere saying so.
-func decimalComments(t BaselineTable) []string {
+func decimalComments(t BaselineTable, pinned bool) []string {
+	if !t.SchemaKnown && pinned {
+		return []string{"this file carries no column types, so nothing is cast; " +
+			"decimal columns read as text and _bin columns compare by the session's collation"}
+	}
 	if !t.SchemaKnown {
 		// Deliberately does NOT say the footer could not be read. Three
 		// different things land here and only one of them is a fault: a
@@ -181,6 +210,12 @@ func decimalComments(t BaselineTable) []string {
 // The same list carries the DATETIME columns of a table read under a session
 // time zone (WallClockDatetimes): each becomes a zone-less TIMESTAMP holding
 // the wall clock MySQL stored. The same two invariants apply to those names.
+//
+// And the text columns MySQL declares under a _bin collation (BinaryText):
+// each is given byte comparison. Same invariants; a third one is theirs alone:
+// the column must read as a VARCHAR, which holds because
+// baseline.BinaryCollationColumns lists only the types the writer stores as
+// Parquet strings.
 func replaceClause(t BaselineTable) string {
 	if !t.SchemaKnown {
 		return ""
@@ -200,6 +235,12 @@ func replaceClause(t BaselineTable) string {
 		}
 		parts = append(parts, fmt.Sprintf("CAST(%s AS DECIMAL(%d,%d)) AS %s",
 			quoteIdent(d.Name), d.Precision, d.Scale, quoteIdent(d.Name)))
+	}
+	for _, name := range t.BinaryText {
+		// COLLATE C is byte comparison whatever the session's default
+		// collation is, and it travels with the column: through a subquery,
+		// a CTE, a function over it, GROUP BY, ORDER BY and a join.
+		parts = append(parts, fmt.Sprintf("%s COLLATE C AS %s", quoteIdent(name), quoteIdent(name)))
 	}
 	return strings.Join(parts, ", ")
 }

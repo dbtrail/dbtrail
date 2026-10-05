@@ -93,6 +93,15 @@ type Column struct {
 	// A producer that carries this CREATE TABLE forward compares it with the
 	// source's IS_NULLABLE, because a restore loads the carried definition.
 	NotNull bool
+
+	// Collation is the collation the column's own definition names, lower
+	// case, and ExplicitCharset says it names a character set. SHOW CREATE
+	// TABLE prints a column's collation only when it differs from the
+	// table's, so empty means "the table's" unless ExplicitCharset is set, in
+	// which case it means that character set's default. BinaryCollationColumns
+	// resolves the three.
+	Collation       string
+	ExplicitCharset bool
 }
 
 // DecimalColumn names one decimal/numeric column of a baseline table and the
@@ -234,6 +243,7 @@ func parseSchemaFrom(r io.Reader) ([]Column, error) {
 		unsigned := strings.EqualFold(m[4], "unsigned")
 		precision, scale := decimalPrecisionScale(typeToken, m[3])
 		declared := declaredType(line[loc[4]:])
+		collation, explicitCharset := declaredCollation(line[loc[4]+len(declared):])
 		cols = append(cols, Column{
 			Name:             name,
 			MySQLType:        typeToken,
@@ -243,6 +253,8 @@ func parseSchemaFrom(r io.Reader) ([]Column, error) {
 			DecimalScale:     scale,
 			DeclaredType:     declared,
 			NotNull:          declaredNotNull(line[loc[4]+len(declared):]),
+			Collation:        collation,
+			ExplicitCharset:  explicitCharset,
 		})
 	}
 	if err := scanner.Err(); err != nil {
@@ -262,6 +274,22 @@ func parseSchemaFrom(r io.Reader) ([]Column, error) {
 // MariaDB column CHECK (`c` is not null) or an expression DEFAULT is not read as
 // the attribute.
 func declaredNotNull(attrs string) bool {
+	words := topLevelWords(attrs)
+	for i := 0; i+1 < len(words); i++ {
+		if words[i] == "NOT" && words[i+1] == "NULL" {
+			return true
+		}
+	}
+	return false
+}
+
+// topLevelWords splits a column's attributes (or a table's options) into its
+// top-level words, upper-cased. Words inside single-quoted strings (a doubled
+// quote or a backslash escape stays inside the string), backticked names and
+// parentheses are skipped, and each of those leaves an empty word behind as a
+// separator, so two words are adjacent in the result only when nothing but
+// blanks or punctuation stood between them.
+func topLevelWords(attrs string) []string {
 	var words []string
 	var w strings.Builder
 	depth := 0
@@ -319,12 +347,7 @@ func declaredNotNull(attrs string) bool {
 		}
 	}
 	flush()
-	for i := 0; i+1 < len(words); i++ {
-		if words[i] == "NOT" && words[i+1] == "NULL" {
-			return true
-		}
-	}
-	return false
+	return words
 }
 
 // declaredType reads a column's declared type from the text that starts at its

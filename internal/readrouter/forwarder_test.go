@@ -3,10 +3,12 @@ package readrouter
 import (
 	"context"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-mysql-org/go-mysql/client"
 	"github.com/go-mysql-org/go-mysql/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/config"
@@ -102,4 +104,55 @@ func TestPlanFromExplain_doesNotPoisonTheResultsetPool(t *testing.T) {
 			t.Fatalf("result %d built after reading plans has column %q of type %d, want n / BIGINT", i, got, rs.Fields[0].Type)
 		}
 	}
+}
+
+// An empty string from the source reaches the sink as an empty string, not
+// as NULL. go-mysql's text-row parser hands an empty string over as a nil
+// byte slice (it appends zero bytes to a nil buffer), which a sink cannot
+// tell from NULL unless the cell's own type says which it is.
+func TestForwarder_emptyStringIsNotNull(t *testing.T) {
+	fields := []*mysql.Field{{Name: []byte("a"), Type: mysql.MYSQL_TYPE_VAR_STRING}, {Name: []byte("b"), Type: mysql.MYSQL_TYPE_VAR_STRING},
+		{Name: []byte("c"), Type: mysql.MYSQL_TYPE_VAR_STRING}, {Name: []byte("d"), Type: mysql.MYSQL_TYPE_BLOB}}
+	// One text-protocol row as the source sends it: '', NULL, 'x', ''.
+	row := mysql.RowData{0x00, 0xfb, 0x01, 'x', 0x00}
+	parsed, err := row.ParseText(fields, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed[0].Type != mysql.FieldValueTypeString || parsed[0].AsString() != nil {
+		t.Skip("go-mysql no longer hands an empty string over as a nil slice; this test's premise is gone")
+	}
+	f := &Forwarder{}
+	sink := &kindSink{}
+	if _, err := f.stream(sink, func(res *mysql.Result, perRow client.SelectPerRowCallback, perRes client.SelectPerResultCallback) error {
+		res.Resultset = &mysql.Resultset{Fields: fields}
+		if err := perRes(res); err != nil {
+			return err
+		}
+		return perRow(parsed)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(sink.kinds, " "), "empty NULL bytes:x empty"; got != want {
+		t.Errorf("cells reached the sink as %q, want %q", got, want)
+	}
+}
+
+// kindSink records, per cell, what a sink can tell: NULL (a nil value), an
+// empty string (a non-nil empty slice) or bytes.
+type kindSink struct{ kinds []string }
+
+func (k *kindSink) Header([]*mysql.Field) error { return nil }
+func (k *kindSink) Row(values []any) error {
+	for _, v := range values {
+		switch b, isBytes := v.([]byte); {
+		case v == nil, isBytes && b == nil:
+			k.kinds = append(k.kinds, "NULL")
+		case isBytes && len(b) == 0:
+			k.kinds = append(k.kinds, "empty")
+		default:
+			k.kinds = append(k.kinds, "bytes:"+string(b))
+		}
+	}
+	return nil
 }
