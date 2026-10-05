@@ -1,0 +1,59 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "range",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "rows": 11,
+          "filtered": 100,
+          "attached_condition": "c.`id` between 100 and 110"
+        }
+      },
+      {
+        "table": {
+          "table_name": "<derived2>",
+          "access_type": "ref",
+          "possible_keys": ["key0"],
+          "key": "key0",
+          "key_length": "4",
+          "used_key_parts": ["customer_id"],
+          "ref": ["shop.c.id"],
+          "rows": 10,
+          "filtered": 100,
+          "materialized": {
+            "query_block": {
+              "select_id": 2,
+              "filesort": {
+                "sort_key": "orders.customer_id",
+                "temporary_table": {
+                  "nested_loop": [
+                    {
+                      "table": {
+                        "table_name": "orders",
+                        "access_type": "range",
+                        "possible_keys": ["customer_id"],
+                        "key": "customer_id",
+                        "key_length": "4",
+                        "used_key_parts": ["customer_id"],
+                        "rows": 220,
+                        "filtered": 100,
+                        "attached_condition": "orders.customer_id between 100 and 110",
+                        "using_index": true
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}

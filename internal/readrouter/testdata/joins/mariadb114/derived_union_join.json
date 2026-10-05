@@ -1,0 +1,88 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 0.359906595,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "<derived2>",
+          "access_type": "ALL",
+          "loops": 1,
+          "rows": 199,
+          "cost": 0.018892235,
+          "filtered": 100,
+          "materialized": {
+            "query_block": {
+              "union_result": {
+                "query_specifications": [
+                  {
+                    "query_block": {
+                      "select_id": 2,
+                      "cost": 0.02314177,
+                      "nested_loop": [
+                        {
+                          "table": {
+                            "table_name": "orders",
+                            "access_type": "range",
+                            "possible_keys": ["PRIMARY"],
+                            "key": "PRIMARY",
+                            "key_length": "4",
+                            "used_key_parts": ["id"],
+                            "loops": 1,
+                            "rows": 99,
+                            "cost": 0.02314177,
+                            "filtered": 100,
+                            "attached_condition": "orders.`id` < 100"
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "query_block": {
+                      "select_id": 3,
+                      "operation": "UNION",
+                      "cost": 0.02333364,
+                      "nested_loop": [
+                        {
+                          "table": {
+                            "table_name": "orders",
+                            "access_type": "range",
+                            "possible_keys": ["PRIMARY"],
+                            "key": "PRIMARY",
+                            "key_length": "4",
+                            "used_key_parts": ["id"],
+                            "loops": 1,
+                            "rows": 100,
+                            "cost": 0.02333364,
+                            "filtered": 100,
+                            "attached_condition": "orders.`id` > 1999900"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "eq_ref",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "ref": ["u.customer_id"],
+          "loops": 199,
+          "rows": 1,
+          "cost": 0.34101436,
+          "filtered": 100
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "<derived2>",
+          "access_type": "ALL",
+          "rows": 199,
+          "filtered": 100,
+          "materialized": {
+            "query_block": {
+              "union_result": {
+                "query_specifications": [
+                  {
+                    "query_block": {
+                      "select_id": 2,
+                      "nested_loop": [
+                        {
+                          "table": {
+                            "table_name": "orders",
+                            "access_type": "range",
+                            "possible_keys": ["PRIMARY"],
+                            "key": "PRIMARY",
+                            "key_length": "4",
+                            "used_key_parts": ["id"],
+                            "rows": 99,
+                            "filtered": 100,
+                            "attached_condition": "orders.`id` < 100"
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "query_block": {
+                      "select_id": 3,
+                      "operation": "UNION",
+                      "nested_loop": [
+                        {
+                          "table": {
+                            "table_name": "orders",
+                            "access_type": "range",
+                            "possible_keys": ["PRIMARY"],
+                            "key": "PRIMARY",
+                            "key_length": "4",
+                            "used_key_parts": ["id"],
+                            "rows": 100,
+                            "filtered": 100,
+                            "attached_condition": "orders.`id` > 1999900"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "eq_ref",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "ref": ["u.customer_id"],
+          "rows": 1,
+          "filtered": 100
+        }
+      }
+    ]
+  }
+}

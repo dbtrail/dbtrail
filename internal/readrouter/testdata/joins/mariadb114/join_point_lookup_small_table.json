@@ -1,0 +1,33 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "const",
+          "possible_keys": ["PRIMARY", "country_code"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "ref": ["const"],
+          "rows": 1,
+          "filtered": 100
+        }
+      },
+      {
+        "table": {
+          "table_name": "co",
+          "access_type": "const",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "8",
+          "used_key_parts": ["code"],
+          "ref": ["const"],
+          "rows": 1,
+          "filtered": 100
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 0.58283395,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "o",
+          "access_type": "range",
+          "possible_keys": ["PRIMARY", "customer_id"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "loops": 1,
+          "rows": 301,
+          "cost": 0.06702831,
+          "filtered": 100,
+          "attached_condition": "o.`id` between 1000 and 1300"
+        }
+      },
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "eq_ref",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "ref": ["shop.o.customer_id"],
+          "loops": 301,
+          "rows": 1,
+          "cost": 0.51580564,
+          "filtered": 100
+        }
+      }
+    ]
+  }
+}

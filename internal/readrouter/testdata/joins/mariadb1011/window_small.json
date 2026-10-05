@@ -1,0 +1,32 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "window_functions_computation": {
+      "sorts": [
+        {
+          "filesort": {
+            "sort_key": "orders.customer_id, orders.`id`"
+          }
+        }
+      ],
+      "temporary_table": {
+        "nested_loop": [
+          {
+            "table": {
+              "table_name": "orders",
+              "access_type": "range",
+              "possible_keys": ["customer_id"],
+              "key": "customer_id",
+              "key_length": "4",
+              "used_key_parts": ["customer_id"],
+              "rows": 980,
+              "filtered": 100,
+              "attached_condition": "orders.customer_id < 50",
+              "using_index": true
+            }
+          }
+        ]
+      }
+    }
+  }
+}

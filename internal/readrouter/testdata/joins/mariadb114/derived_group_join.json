@@ -1,0 +1,62 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 32.09520664,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "<derived2>",
+          "access_type": "ALL",
+          "loops": 1,
+          "rows": 5759,
+          "cost": 26.55009148,
+          "filtered": 100,
+          "materialized": {
+            "query_block": {
+              "select_id": 2,
+              "cost": 0.03793501,
+              "filesort": {
+                "sort_key": "orders.customer_id",
+                "temporary_table": {
+                  "nested_loop": [
+                    {
+                      "table": {
+                        "table_name": "orders",
+                        "access_type": "range",
+                        "possible_keys": ["customer_id", "created_at"],
+                        "key": "created_at",
+                        "key_length": "6",
+                        "used_key_parts": ["created_at"],
+                        "loops": 1,
+                        "rows": 5759,
+                        "cost": 10.4431404,
+                        "filtered": 100,
+                        "index_condition": "orders.created_at < '2024-01-03'"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "eq_ref",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "ref": ["t.customer_id"],
+          "loops": 5759,
+          "rows": 1,
+          "cost": 5.54511516,
+          "filtered": 100,
+          "attached_condition": "c.tier = 'gold'"
+        }
+      }
+    ]
+  }
+}

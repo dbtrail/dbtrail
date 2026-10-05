@@ -1,0 +1,52 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 496.9326687,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "ALL",
+          "possible_keys": ["PRIMARY"],
+          "loops": 1,
+          "rows": 99615,
+          "cost": 16.6584038,
+          "filtered": 100
+        }
+      },
+      {
+        "table": {
+          "table_name": "<subquery2>",
+          "access_type": "eq_ref",
+          "possible_keys": ["distinct_key"],
+          "key": "distinct_key",
+          "key_length": "4",
+          "used_key_parts": ["customer_id"],
+          "ref": ["func"],
+          "rows": 1,
+          "filtered": 100,
+          "materialized": {
+            "unique": 1,
+            "query_block": {
+              "select_id": 2,
+              "nested_loop": [
+                {
+                  "table": {
+                    "table_name": "orders",
+                    "access_type": "ALL",
+                    "possible_keys": ["customer_id"],
+                    "loops": 1,
+                    "rows": 1991571,
+                    "cost": 330.5786426,
+                    "filtered": 100,
+                    "attached_condition": "orders.amount > 499"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}

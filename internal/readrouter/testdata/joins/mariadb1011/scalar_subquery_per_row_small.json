@@ -1,0 +1,47 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "range",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "rows": 21,
+          "filtered": 100,
+          "attached_condition": "c.`id` between 100 and 120",
+          "using_index": true
+        }
+      }
+    ],
+    "subqueries": [
+      {
+        "expression_cache": {
+          "state": "uninitialized",
+          "query_block": {
+            "select_id": 2,
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "o",
+                  "access_type": "ref",
+                  "possible_keys": ["customer_id"],
+                  "key": "customer_id",
+                  "key_length": "4",
+                  "used_key_parts": ["customer_id"],
+                  "ref": ["shop.c.id"],
+                  "rows": 10,
+                  "filtered": 100,
+                  "using_index": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

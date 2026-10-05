@@ -1,0 +1,69 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "ref",
+          "possible_keys": ["PRIMARY", "country_code"],
+          "key": "country_code",
+          "key_length": "8",
+          "used_key_parts": ["country_code"],
+          "ref": ["const"],
+          "rows": 2000,
+          "filtered": 100,
+          "attached_condition": "c.country_code = 'AR'",
+          "using_index": true
+        }
+      },
+      {
+        "table": {
+          "table_name": "<subquery2>",
+          "access_type": "eq_ref",
+          "possible_keys": ["distinct_key"],
+          "key": "distinct_key",
+          "key_length": "4",
+          "used_key_parts": ["customer_id"],
+          "ref": ["func"],
+          "rows": 1,
+          "filtered": 100,
+          "materialized": {
+            "unique": 1,
+            "query_block": {
+              "select_id": 2,
+              "nested_loop": [
+                {
+                  "table": {
+                    "table_name": "oi",
+                    "access_type": "ref",
+                    "possible_keys": ["order_id", "product_id"],
+                    "key": "product_id",
+                    "key_length": "4",
+                    "used_key_parts": ["product_id"],
+                    "ref": ["const"],
+                    "rows": 2000,
+                    "filtered": 100
+                  }
+                },
+                {
+                  "table": {
+                    "table_name": "o",
+                    "access_type": "eq_ref",
+                    "possible_keys": ["PRIMARY", "customer_id"],
+                    "key": "PRIMARY",
+                    "key_length": "4",
+                    "used_key_parts": ["id"],
+                    "ref": ["shop.oi.order_id"],
+                    "rows": 1,
+                    "filtered": 100
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}

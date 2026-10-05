@@ -127,6 +127,8 @@ func TestParsePlan_mariaDB(t *testing.T) {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
 		got.scans, got.conditions, got.costInfo = false, false, false
+		got.RowsRead, got.Joined, got.RowsReadUnknown = 0, false, ""
+		got.topSort, got.sortedFirstRows = 0, 0 // joinrows_test.go
 		if got != tc.want {
 			t.Errorf("%s:\n  got  %+v\n  want %+v", tc.name, got, tc.want)
 		}

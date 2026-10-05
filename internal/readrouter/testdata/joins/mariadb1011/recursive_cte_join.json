@@ -1,0 +1,65 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "<derived2>",
+          "access_type": "ALL",
+          "rows": 2,
+          "filtered": 100,
+          "attached_condition": "r.n is not null",
+          "materialized": {
+            "query_block": {
+              "recursive_union": {
+                "table_name": "<union2,3>",
+                "access_type": "ALL",
+                "query_specifications": [
+                  {
+                    "query_block": {
+                      "select_id": 2,
+                      "table": {
+                        "message": "No tables used"
+                      }
+                    }
+                  },
+                  {
+                    "query_block": {
+                      "select_id": 3,
+                      "operation": "UNION",
+                      "nested_loop": [
+                        {
+                          "table": {
+                            "table_name": "<derived2>",
+                            "access_type": "ALL",
+                            "rows": 2,
+                            "filtered": 100,
+                            "attached_condition": "r.n < 100"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "eq_ref",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "ref": ["r.n"],
+          "rows": 1,
+          "filtered": 100,
+          "using_index": true
+        }
+      }
+    ]
+  }
+}

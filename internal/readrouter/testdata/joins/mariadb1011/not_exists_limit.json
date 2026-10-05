@@ -1,0 +1,43 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "index",
+          "key": "country_code",
+          "key_length": "8",
+          "used_key_parts": ["country_code"],
+          "rows": 97208,
+          "filtered": 100,
+          "attached_condition": "!<in_optimizer>(c.`id`,<exists>(subquery#2))",
+          "using_index": true
+        }
+      }
+    ],
+    "subqueries": [
+      {
+        "query_block": {
+          "select_id": 2,
+          "nested_loop": [
+            {
+              "table": {
+                "table_name": "o",
+                "access_type": "index_subquery",
+                "possible_keys": ["customer_id"],
+                "key": "customer_id",
+                "key_length": "4",
+                "used_key_parts": ["customer_id"],
+                "ref": ["func"],
+                "rows": 10,
+                "filtered": 100,
+                "using_index": true
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

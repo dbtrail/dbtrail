@@ -1,0 +1,49 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 45.44659812,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "o",
+          "access_type": "range",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "loops": 1,
+          "rows": 210724,
+          "cost": 45.44659812,
+          "filtered": 100,
+          "attached_condition": "o.`id` <= 100000 and !<in_optimizer>(o.`id`,<exists>(subquery#2))"
+        }
+      }
+    ],
+    "subqueries": [
+      {
+        "query_block": {
+          "select_id": 2,
+          "cost": 0.001792605,
+          "nested_loop": [
+            {
+              "table": {
+                "table_name": "oi",
+                "access_type": "index_subquery",
+                "possible_keys": ["order_id"],
+                "key": "order_id",
+                "key_length": "4",
+                "used_key_parts": ["order_id"],
+                "ref": ["func"],
+                "loops": 1,
+                "rows": 1,
+                "cost": 0.001792605,
+                "filtered": 100,
+                "using_index": true
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

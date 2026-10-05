@@ -1,0 +1,33 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "p",
+          "access_type": "index",
+          "possible_keys": ["PRIMARY"],
+          "key": "category_id",
+          "key_length": "4",
+          "used_key_parts": ["category_id"],
+          "rows": 2000,
+          "filtered": 100,
+          "using_index": true
+        }
+      },
+      {
+        "table": {
+          "table_name": "oi",
+          "access_type": "ref",
+          "possible_keys": ["product_id"],
+          "key": "product_id",
+          "key_length": "4",
+          "used_key_parts": ["product_id"],
+          "ref": ["shop.p.id"],
+          "rows": 996,
+          "filtered": 100
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "range",
+          "possible_keys": ["country_code"],
+          "key": "country_code",
+          "key_length": "8",
+          "used_key_parts": ["country_code"],
+          "rows": 8000,
+          "filtered": 100,
+          "attached_condition": "c.country_code in ('AR','BR','CL','UY')",
+          "using_index": true
+        }
+      }
+    ],
+    "subqueries": [
+      {
+        "query_block": {
+          "select_id": 2,
+          "nested_loop": [
+            {
+              "table": {
+                "table_name": "o",
+                "access_type": "ref",
+                "possible_keys": ["customer_id"],
+                "key": "customer_id",
+                "key_length": "4",
+                "used_key_parts": ["customer_id"],
+                "ref": ["shop.c.id"],
+                "rows": 10,
+                "filtered": 100,
+                "using_index": true
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "ALL",
+          "possible_keys": ["PRIMARY"],
+          "rows": 97208,
+          "filtered": 100
+        }
+      },
+      {
+        "table": {
+          "table_name": "<derived2>",
+          "access_type": "ref",
+          "possible_keys": ["key0"],
+          "key": "key0",
+          "key_length": "4",
+          "used_key_parts": ["customer_id"],
+          "ref": ["shop.c.id"],
+          "rows": 2,
+          "filtered": 100,
+          "materialized": {
+            "lateral": 1,
+            "query_block": {
+              "select_id": 2,
+              "nested_loop": [
+                {
+                  "table": {
+                    "table_name": "orders",
+                    "access_type": "ref",
+                    "possible_keys": ["customer_id"],
+                    "key": "customer_id",
+                    "key_length": "4",
+                    "used_key_parts": ["customer_id"],
+                    "ref": ["shop.c.id"],
+                    "rows": 10,
+                    "filtered": 100,
+                    "using_index": true
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}

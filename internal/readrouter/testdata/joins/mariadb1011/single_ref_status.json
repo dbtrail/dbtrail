@@ -1,0 +1,22 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "orders",
+          "access_type": "ref",
+          "possible_keys": ["status"],
+          "key": "status",
+          "key_length": "67",
+          "used_key_parts": ["status"],
+          "ref": ["const"],
+          "rows": 727938,
+          "filtered": 100,
+          "attached_condition": "orders.`status` = 'refunded'",
+          "using_index": true
+        }
+      }
+    ]
+  }
+}

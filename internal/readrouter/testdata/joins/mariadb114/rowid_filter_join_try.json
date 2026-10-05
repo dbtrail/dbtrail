@@ -1,0 +1,40 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 5.547459527,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "o",
+          "access_type": "range",
+          "possible_keys": ["customer_id", "created_at"],
+          "key": "created_at",
+          "key_length": "6",
+          "used_key_parts": ["created_at"],
+          "loops": 1,
+          "rows": 2880,
+          "cost": 5.22284024,
+          "filtered": 6.577520847,
+          "index_condition": "o.created_at >= '2024-03-01' and o.created_at < '2024-03-02'",
+          "attached_condition": "o.customer_id < 3000"
+        }
+      },
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "eq_ref",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "ref": ["shop.o.customer_id"],
+          "loops": 189.4326037,
+          "rows": 1,
+          "cost": 0.324619287,
+          "filtered": 100,
+          "attached_condition": "c.tier = 'gold'"
+        }
+      }
+    ]
+  }
+}

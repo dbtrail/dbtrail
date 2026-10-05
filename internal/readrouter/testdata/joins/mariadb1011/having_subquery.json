@@ -1,0 +1,44 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "having_condition": "count(0) > (subquery#2)",
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "orders",
+          "access_type": "range",
+          "possible_keys": ["customer_id"],
+          "key": "customer_id",
+          "key_length": "4",
+          "used_key_parts": ["customer_id"],
+          "rows": 380,
+          "filtered": 100,
+          "attached_condition": "orders.customer_id < 20",
+          "using_index": true
+        }
+      }
+    ],
+    "subqueries": [
+      {
+        "query_block": {
+          "select_id": 2,
+          "nested_loop": [
+            {
+              "table": {
+                "table_name": "order_items",
+                "access_type": "ref",
+                "possible_keys": ["order_id"],
+                "key": "order_id",
+                "key_length": "4",
+                "used_key_parts": ["order_id"],
+                "ref": ["const"],
+                "rows": 2,
+                "filtered": 100
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

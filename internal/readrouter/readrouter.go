@@ -334,6 +334,25 @@ type Plan struct {
 	scans, conditions bool
 	// costInfo records that some node of the plan carries MySQL's cost_info.
 	costInfo bool
+	// RowsRead estimates the rows the plan reads across its joins and its
+	// per-row subqueries (joinrows.go): the parts that multiply. A table
+	// read alone is not in it. Only for a plan with no cost (CostUnknown),
+	// which has nothing else to tell a heavy join by; 0 on a MySQL plan
+	// and when RowsReadUnknown says why there is no estimate.
+	RowsRead int64
+	// Joined is true when the plan has such a part: a table read once per
+	// row of the tables before it, or a subquery or derived table run once
+	// per outer row. False for one table, and for a UNION of single
+	// tables.
+	Joined bool
+	// topSort is how the top block sorts (sortNone, sortFirstTable,
+	// sortWholeJoin) and sortedFirstRows the rows of the table sorted
+	// alone: what decides whether a LIMIT can end the join early.
+	topSort         int8
+	sortedFirstRows int64
+	// RowsReadUnknown is why a plan with no cost has no RowsRead: a shape
+	// the estimate does not know. The scan rules alone decide that plan.
+	RowsReadUnknown string
 }
 
 // ParsePlan reads the two things the decision needs from EXPLAIN FORMAT=JSON.
@@ -374,6 +393,9 @@ func ParsePlan(explainJSON []byte) (Plan, error) {
 	// MySQL's.
 	p.CostUnknown = !p.costInfo
 	p.ScanFilter = p.scans && p.conditions
+	if p.CostUnknown && p.Message == "" {
+		estimateRowsRead(qb, &p)
+	}
 	return p, nil
 }
 
@@ -445,7 +467,8 @@ func number(v any) float64 {
 
 // Policy is the threshold: a statement goes to the copy when its plan costs
 // at least CostThreshold, OR when a full scan examines at least ScanRows
-// rows. Both zero means "never to the copy".
+// rows, OR, for a plan with no cost (MariaDB), when its joins read at least
+// ScanRows rows in all. Both zero means "never to the copy".
 type Policy struct {
 	CostThreshold float64
 	ScanRows      int64
@@ -525,6 +548,7 @@ const (
 	RuleTrivial      Rule = "trivial"       // the optimizer short-circuited the plan
 	RuleCost         Rule = "cost"          // query_cost at or above CostThreshold
 	RuleScan         Rule = "scan"          // a full scan over ScanRows rows or more
+	RuleJoinRows     Rule = "join_rows"     // a plan with no cost whose joins read ScanRows rows or more in all
 	RuleCheap        Rule = "cheap"         // below both thresholds
 	RuleBoundedLimit Rule = "bounded_limit" // a small LIMIT MySQL answers without reading past it
 )
@@ -565,11 +589,64 @@ func (pol Policy) Prejudge(stmt string) (d Decision, ok bool) {
 // to Decide, as before: under a full scan its estimate is the table; under
 // an index-served order its estimate is only a guess from the filter's
 // assumed selectivity, and a rare value walks the whole index.
+//
+// The rows a plan with no cost reads across its joins (Plan.RowsRead) are
+// left out when the statement's LIMIT can end the join early
+// (limitEndsJoin); the scan rules then decide alone.
 func (pol Policy) DecideStatement(stmt string, p Plan) Decision {
-	if n, ok := limitBounded(stmt); ok && !p.Filesort && !p.ScanFilter && p.Message == "" && p.MaxScanRows <= limitBoundRows {
+	n, bounded := limitBounded(stmt)
+	if bounded && !p.Filesort && !p.ScanFilter && p.Message == "" && p.MaxScanRows <= limitBoundRows {
 		return Decision{Reason: fmt.Sprintf("LIMIT %d served without a sort or an unindexed filter: at most %d rows per table scan", n, p.MaxScanRows), Rule: RuleBoundedLimit}
 	}
-	return pol.Decide(p)
+	return pol.decide(p, pol.limitEndsJoin(stmt, p))
+}
+
+// joinLimit is topLimit accepting a placeholder for either number: the
+// prepared path decides on the statement's text.
+var joinLimit = regexp.MustCompile(`(?i)\blimit\s+(\d+|\?)(?:\s*,\s*(\d+|\?)|\s+offset\s+(\d+|\?))?\s*;?\s*$`)
+
+// limitEndsJoin says why the rows read across a join are not to be counted
+// for this statement, or "" when they are. They are what the join reads
+// when run to its end, and MariaDB does not cut them for a LIMIT; a
+// top-level LIMIT (offset included) under the scan threshold, with nothing
+// in the statement that reads everything first (unboundedWork) and no sort
+// or temporary table over the join in the plan, ends the nested loop after
+// about that many rows. A table sorted alone before the join is read whole
+// and counts with the LIMIT. A placeholder is a bound not known here: the
+// statement is decided as it was before the estimate existed. This is for
+// the join estimate only: the bounded-limit rule and the scan rules are not
+// touched. A LIMIT inside a derived table is not seen (it does not end the
+// statement), and that block is counted whole.
+func (pol Policy) limitEndsJoin(stmt string, p Plan) string {
+	if p.topSort == sortWholeJoin || hintComment.MatchString(stmt) {
+		return ""
+	}
+	blanked, _, _, _ := scrub(stmt)
+	m := joinLimit.FindStringSubmatch(blanked)
+	if m == nil || unboundedWork.MatchString(blanked) || len(anyLimit.FindAllStringIndex(blanked, 2)) > 1 {
+		return ""
+	}
+	var total int64
+	for _, part := range m[1:] {
+		switch part {
+		case "":
+		case "?":
+			return "LIMIT ? with no sort over the join can stop it early, by a bound not known here: the rows read across it are not counted"
+		default:
+			n, err := strconv.ParseInt(part, 10, 64)
+			if err != nil || n >= pol.ScanRows || total+n >= pol.ScanRows {
+				return ""
+			}
+			total += n
+		}
+	}
+	if p.topSort == sortFirstTable {
+		if p.sortedFirstRows+total >= pol.ScanRows {
+			return ""
+		}
+		return fmt.Sprintf("%s rows sorted, then LIMIT %d stops the join early: the rows read across it are not counted", groupDigits(p.sortedFirstRows), total)
+	}
+	return fmt.Sprintf("LIMIT %d with no sort over the join can stop it early: the rows read across it are not counted", total)
 }
 
 // DefaultPolicy: 10,000 cost units (a point lookup is about 1; a full scan
@@ -579,7 +656,11 @@ func DefaultPolicy() Policy { return Policy{CostThreshold: 10000, ScanRows: 1000
 
 // Decide reports whether the plan is expensive enough for the copy, and why
 // either way, in words an operator can read in the audit trail.
-func (pol Policy) Decide(p Plan) Decision {
+func (pol Policy) Decide(p Plan) Decision { return pol.decide(p, "") }
+
+// decide is Decide; a non-empty rowsLeftOut is why the rows read across
+// joins are not to be counted for this statement (DecideStatement).
+func (pol Policy) decide(p Plan, rowsLeftOut string) Decision {
 	if p.Message != "" {
 		return Decision{Reason: "trivial plan: " + p.Message, Rule: RuleTrivial}
 	}
@@ -595,7 +676,27 @@ func (pol Policy) Decide(p Plan) Decision {
 		return Decision{ToCopy: true, Reason: fmt.Sprintf("full index scan over %d rows >= %d", p.MaxIndexScanRows, pol.ScanRows), Rule: RuleScan}
 	}
 	if p.CostUnknown {
-		return Decision{Reason: fmt.Sprintf("no full scan over %d rows (the plan carries no cost: the cost rule does not apply)", pol.ScanRows), Rule: RuleCheap}
+		// With no cost, a join that walks a small table and probes a big
+		// one by key shows no scan at all: the rows it reads in all are
+		// compared with the same threshold.
+		cheap := fmt.Sprintf("no full scan over %d rows (the plan carries no cost: the cost rule does not apply)", pol.ScanRows)
+		switch {
+		case pol.ScanRows <= 0:
+		case p.RowsReadUnknown != "":
+			cheap += "; rows read across joins not estimated: " + p.RowsReadUnknown
+		case !p.Joined:
+		case rowsLeftOut != "":
+			cheap += "; " + rowsLeftOut
+		case p.RowsRead >= pol.ScanRows:
+			return Decision{ToCopy: true, Reason: fmt.Sprintf("plan reads about %s rows across a join (threshold %s)", groupDigits(roundRows(p.RowsRead)), groupDigits(pol.ScanRows)), Rule: RuleJoinRows}
+		default:
+			shown := roundRows(p.RowsRead)
+			if shown >= pol.ScanRows {
+				shown = p.RowsRead // rounding must not print the threshold for a plan under it
+			}
+			cheap += fmt.Sprintf("; about %s rows read across a join", groupDigits(shown))
+		}
+		return Decision{Reason: cheap, Rule: RuleCheap}
 	}
 	return Decision{Reason: fmt.Sprintf("plan cost %.0f below %.0f, no full scan over %d rows", p.Cost, pol.CostThreshold, pol.ScanRows), Rule: RuleCheap}
 }

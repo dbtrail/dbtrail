@@ -1,0 +1,36 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "o",
+          "access_type": "ref",
+          "possible_keys": ["PRIMARY", "status"],
+          "key": "status",
+          "key_length": "67",
+          "used_key_parts": ["status"],
+          "ref": ["const"],
+          "rows": 727938,
+          "filtered": 100,
+          "attached_condition": "o.`status` = 'refunded'",
+          "using_index": true
+        }
+      },
+      {
+        "table": {
+          "table_name": "oi",
+          "access_type": "ref",
+          "possible_keys": ["order_id"],
+          "key": "order_id",
+          "key_length": "4",
+          "used_key_parts": ["order_id"],
+          "ref": ["shop.o.id"],
+          "rows": 1,
+          "filtered": 100,
+          "using_index": true
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 77.28516125,
+    "filesort": {
+      "sort_key": "o.amount desc",
+      "temporary_table": {
+        "nested_loop": [
+          {
+            "table": {
+              "table_name": "c",
+              "access_type": "ref",
+              "possible_keys": ["PRIMARY", "country_code"],
+              "key": "country_code",
+              "key_length": "8",
+              "used_key_parts": ["country_code"],
+              "ref": ["const"],
+              "loops": 1,
+              "rows": 2000,
+              "cost": 2.38341592,
+              "filtered": 100,
+              "index_condition": "c.country_code = 'AR'"
+            }
+          },
+          {
+            "table": {
+              "table_name": "o",
+              "access_type": "ref",
+              "possible_keys": ["customer_id"],
+              "key": "customer_id",
+              "key_length": "4",
+              "used_key_parts": ["customer_id"],
+              "ref": ["shop.c.id"],
+              "loops": 2000,
+              "rows": 20,
+              "cost": 48.1486208,
+              "filtered": 100
+            }
+          }
+        ]
+      }
+    }
+  }
+}

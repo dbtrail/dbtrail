@@ -1,0 +1,49 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 0.00171364,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "orders",
+          "access_type": "const",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "ref": ["const"],
+          "loops": 1,
+          "rows": 1,
+          "cost": 0.00171364,
+          "filtered": 100,
+          "attached_condition": "orders.`id` = (subquery#2)"
+        }
+      }
+    ],
+    "subqueries": [
+      {
+        "query_block": {
+          "select_id": 2,
+          "cost": 3.62778072,
+          "nested_loop": [
+            {
+              "table": {
+                "table_name": "order_items",
+                "access_type": "ref",
+                "possible_keys": ["product_id"],
+                "key": "product_id",
+                "key_length": "4",
+                "used_key_parts": ["product_id"],
+                "ref": ["const"],
+                "loops": 1,
+                "rows": 2000,
+                "cost": 3.62778072,
+                "filtered": 100
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "customers",
+          "access_type": "index",
+          "key": "country_code",
+          "key_length": "8",
+          "used_key_parts": ["country_code"],
+          "rows": 97208,
+          "filtered": 100,
+          "attached_condition": "!<in_optimizer>(customers.`id`,customers.`id` in (subquery#2))",
+          "using_index": true
+        }
+      }
+    ],
+    "subqueries": [
+      {
+        "materialization": {
+          "query_block": {
+            "select_id": 2,
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "orders",
+                  "access_type": "ALL",
+                  "possible_keys": ["customer_id"],
+                  "rows": 1993302,
+                  "filtered": 100,
+                  "attached_condition": "orders.amount > 499"
+                }
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

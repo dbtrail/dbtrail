@@ -1,0 +1,39 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 1867.292292,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "p",
+          "access_type": "ALL",
+          "loops": 1,
+          "rows": 2000,
+          "cost": 0.3428384,
+          "filtered": 100,
+          "attached_condition": "p.`name` is not null"
+        }
+      },
+      {
+        "block-nl-join": {
+          "table": {
+            "table_name": "c",
+            "access_type": "hash_ALL",
+            "key": "#hash#$hj",
+            "key_length": "67",
+            "used_key_parts": ["tier"],
+            "ref": ["shop.p.name"],
+            "loops": 2000,
+            "rows": 99615,
+            "cost": 1866.949454,
+            "filtered": 10
+          },
+          "buffer_type": "flat",
+          "buffer_size": "256KiB",
+          "join_type": "BNLH",
+          "attached_condition": "c.tier = p.`name`"
+        }
+      }
+    ]
+  }
+}

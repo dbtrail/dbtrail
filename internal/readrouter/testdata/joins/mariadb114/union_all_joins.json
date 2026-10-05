@@ -1,0 +1,83 @@
+{
+  "query_block": {
+    "union_result": {
+      "query_specifications": [
+        {
+          "query_block": {
+            "select_id": 1,
+            "cost": 0.00457962,
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "c",
+                  "access_type": "const",
+                  "possible_keys": ["PRIMARY"],
+                  "key": "PRIMARY",
+                  "key_length": "4",
+                  "used_key_parts": ["id"],
+                  "ref": ["const"],
+                  "rows": 1,
+                  "filtered": 100
+                }
+              },
+              {
+                "table": {
+                  "table_name": "o",
+                  "access_type": "ref",
+                  "possible_keys": ["customer_id"],
+                  "key": "customer_id",
+                  "key_length": "4",
+                  "used_key_parts": ["customer_id"],
+                  "ref": ["const"],
+                  "loops": 1,
+                  "rows": 20,
+                  "cost": 0.00457962,
+                  "filtered": 100,
+                  "using_index": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "query_block": {
+            "select_id": 2,
+            "operation": "UNION",
+            "cost": 0.00457962,
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "c",
+                  "access_type": "const",
+                  "possible_keys": ["PRIMARY"],
+                  "key": "PRIMARY",
+                  "key_length": "4",
+                  "used_key_parts": ["id"],
+                  "ref": ["const"],
+                  "rows": 1,
+                  "filtered": 100
+                }
+              },
+              {
+                "table": {
+                  "table_name": "o",
+                  "access_type": "ref",
+                  "possible_keys": ["customer_id"],
+                  "key": "customer_id",
+                  "key_length": "4",
+                  "used_key_parts": ["customer_id"],
+                  "ref": ["const"],
+                  "loops": 1,
+                  "rows": 20,
+                  "cost": 0.00457962,
+                  "filtered": 100,
+                  "using_index": true
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

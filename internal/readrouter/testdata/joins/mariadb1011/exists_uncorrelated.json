@@ -1,0 +1,40 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "const_condition": "<cache>(<in_optimizer>(1,exists(subquery#2)))",
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "range",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "rows": 9,
+          "filtered": 100,
+          "attached_condition": "c.`id` < 10",
+          "using_index": true
+        }
+      }
+    ],
+    "subqueries": [
+      {
+        "query_block": {
+          "select_id": 2,
+          "nested_loop": [
+            {
+              "table": {
+                "table_name": "orders",
+                "access_type": "ALL",
+                "rows": 1993302,
+                "filtered": 100,
+                "attached_condition": "orders.amount > 499.99"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

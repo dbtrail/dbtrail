@@ -1,0 +1,37 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 0.03789872,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "const",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "ref": ["const"],
+          "rows": 1,
+          "filtered": 100
+        }
+      },
+      {
+        "table": {
+          "table_name": "o",
+          "access_type": "ref",
+          "possible_keys": ["customer_id", "created_at"],
+          "key": "customer_id",
+          "key_length": "4",
+          "used_key_parts": ["customer_id"],
+          "ref": ["const"],
+          "loops": 1,
+          "rows": 20,
+          "cost": 0.03789872,
+          "filtered": 100,
+          "attached_condition": "o.created_at >= '2024-03-01'"
+        }
+      }
+    ]
+  }
+}
