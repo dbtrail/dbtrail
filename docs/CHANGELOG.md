@@ -15,12 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   customers and grouped by country (2,000,000 and 100,000 rows) stayed on
   MariaDB for 6.9 s. The rows a plan reads in all are now estimated from
   `EXPLAIN FORMAT=JSON` (down each list of joined tables, a table's `rows`
-  times the rows the tables before it produce; a subquery or derived table
-  once, or once per outer row when it depends on it) and a join that reads
+  times the rows the tables before it produce; the joins of a subquery or
+  derived table once, or all it reads once per outer row when it depends
+  on it) and a join that reads
   at least `--route-scan-rows` rows (default 100,000) goes to the copy.
   Measured on MariaDB 11.4 and 10.11 over 72 statements: the three joins of
   the report (6.9 s, 12.5 s and 8.2 s on the source) and eleven more
-  shapes of the same kind (0.2 s to 16.6 s) now go to the copy on both,
+  shapes of the same kind (0.3 s to 16.6 s) now go to the copy on both,
   with two fast ones whose plans read 100,000 rows by the estimate (9 ms
   and 25 ms: a join of two small tables with no index, and a first table
   scanned under a filter no index serves); a point lookup joined to another table, a primary key range of a few

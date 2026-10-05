@@ -397,8 +397,9 @@ The decision, in order, for every statement:
    compared with `--route-scan-rows`: down a list of joined tables, each
    table's `rows` (the rows read each time the table is entered) times
    the rows the tables before it produce (their `rows` times `filtered`),
-   added up. A derived table, a materialized subquery or a subquery that
-   does not depend on the outer row is added once; a subquery that does
+   added up. The joins inside a derived table, a materialized subquery or
+   a subquery that does not depend on the outer row are added once (one
+   that reads a single table adds nothing); a subquery that does
    (MariaDB puts it behind a subquery cache), an `IN` probe and a lateral
    derived table are counted once per outer row; a join with no index
    counts every pair of rows it compares, a hash join reads its table
