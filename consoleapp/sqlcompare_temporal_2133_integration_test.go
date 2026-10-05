@@ -5,45 +5,69 @@ package consoleapp
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/readrouter"
+	"github.com/dbtrail/dbtrail/internal/sqlcompare"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
+// #2133 against a real MySQL: arithmetic on a date column, bit operators and
+// a two-digit year are answered by both sides, each with another value and
+// no error. See temporalColumns.
 func TestIntegrationSQLCompareTemporalColumns(t *testing.T) {
 	srcDB, srcName := testutil.CreateTestDB(t)
 	temporalColumns(t, srcDB, srcName, testutil.IntegrationDSN(srcName))
 }
 
+// The same against a MariaDB source. A test of its own, with MariaDB in its
+// name: the MariaDB job picks its tests by name.
 func TestIntegrationSQLCompareTemporalColumnsMariaDB(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	srcDB, srcName := testutil.CreateTestMariaDB(t)
 	temporalColumns(t, srcDB, srcName, testutil.MariaDBBaseDSN()+"/"+srcName+"?parseTime=true")
 }
 
+// temporalColumns is the body of both tests. One table, created on the
+// source in plain DDL; the copy's file carries what that server's own SHOW
+// CREATE TABLE prints, as a dump does, so the column types the copy reads
+// are the ones that server writes. The rows are the same on both sides but
+// for the column side, which says who answered: "live" on the source, "copy"
+// on the copy.
+//
+// Two parts. What the copy answers when nobody asked for MySQL's answer
+// (sql-compare, a port with no routing): every statement here is DIFFERENT,
+// which is the bug's shape, and the ones the text alone can tell are vetoed.
+// Then the same shapes under read routing, where each must be the source's
+// answer, but for the two listed as known differences.
 func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	now := time.Now().UTC().Truncate(time.Hour)
 	indexDSN := seedFlashbackIndex(t, "alice", now)
+
 	var version string
 	if err := srcDB.QueryRow("SELECT VERSION()").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("source: %s", version)
-	rows := [][]string{
-		{"1", "2026-01-01", "2026-01-01 10:00:00", "2026-01-01 10:00:00", "10:00:00", "2026", "-8", "10.50", "2026-01-01 10:00:00.600000"},
-		{"2", "2026-01-15", "2026-01-15 11:30:00", "2026-01-15 11:30:00", "11:30:00", "2026", "5", "2.00", "2026-01-15 11:30:00.400000"},
-		{"3", "2026-02-03", "2026-02-03 12:00:01", "2026-02-03 12:00:01", "12:00:01", "2025", "-1", "7.25", "2026-02-03 12:00:01.000000"},
+
+	row := func(side string) [][]string {
+		return [][]string{
+			{"1", "2026-01-01", "2026-01-01 10:00:00", "10:00:00", "2026", "-8", side},
+			{"2", "2026-01-15", "2026-01-15 11:30:00", "11:30:00", "2026", "5", side},
+			{"3", "2026-02-03", "2026-02-03 12:00:01", "12:00:01", "2025", "-1", side},
+		}
 	}
-	if _, err := srcDB.Exec("CREATE TABLE ev (id INT NOT NULL PRIMARY KEY, created_on DATE, dt DATETIME, ts TIMESTAMP NULL, tm TIME, yr YEAR, n INT, amount DECIMAL(10,2), dt6 DATETIME(6))"); err != nil {
+	if _, err := srcDB.Exec("CREATE TABLE ev (id INT NOT NULL PRIMARY KEY, created_on DATE, dt DATETIME, tm TIME, yr YEAR, n INT, side VARCHAR(8))"); err != nil {
 		t.Fatal(err)
 	}
-	for _, r := range rows {
+	for _, r := range row("live") {
 		if _, err := srcDB.Exec("INSERT INTO ev VALUES ('" + strings.Join(r, "','") + "')"); err != nil {
 			t.Fatal(err)
 		}
@@ -56,7 +80,7 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		t.Fatal(err)
 	}
 	baseDir := t.TempDir()
-	writeOrderSnapshot(t, baseDir, srcName, []orderTable{{name: "ev", ddl: ddl + ";\n", rows: rows, footer: true}})
+	writeOrderSnapshot(t, baseDir, srcName, []orderTable{{name: "ev", ddl: ddl + ";\n", rows: row("live"), copyRows: row("copy"), footer: true}})
 
 	reg, err := console.LoadRegistry(t.TempDir() + "/servers.yaml")
 	if err != nil {
@@ -66,86 +90,148 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A second server over the same copy, for the comparison only (see
+	// compareInHalves).
+	entB, err := reg.Add(console.ServerEntry{Name: "srvb", DSN: indexDSN, SourceDSN: sourceDSN, BaselineDir: baseDir})
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg,
 		FlashbackListen: "127.0.0.1:3308", ReadRouting: console.ReadRoutingConfig{MaxCopyAge: time.Hour, ScanRows: 2}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	serve := func(cfg flashbackConfig) string {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		served := make(chan struct{})
+		go func() { _ = serveFlashback(ctx, srv, ln, cfg); close(served) }()
+		t.Cleanup(func() { cancel(); <-served })
+		return ln.Addr().String()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	served := make(chan struct{})
-	go func() { _ = serveFlashback(ctx, srv, ln, flashbackConfig{}); close(served) }()
-	defer func() { cancel(); <-served }()
-	src := openRaw(t, strings.Replace(sourceDSN, "parseTime=true", "parseTime=false", 1))
-	cp := openRaw(t, fmt.Sprintf("%s:tok@tcp(%s)/%s", ent.ID, ln.Addr(), srcName))
+	policy := readrouter.Policy{ScanRows: 2}
 
-	exprs := []string{
-		"created_on + 1", "created_on - 1", "created_on * 1", "-created_on", "created_on + 0", "created_on + 0.5", "created_on / 2", "created_on % 7",
-		"dt + 1", "ts + 1", "tm + 1", "yr + 1", "yr * 2", "created_on - created_on", "ts - ts", "dt - dt", "tm - tm", "yr - yr",
-		"created_on + INTERVAL 1 DAY", "dt + INTERVAL 1 DAY", "ts + INTERVAL 1 DAY", "tm + INTERVAL 1 HOUR", "DATE_ADD(created_on, INTERVAL 1 DAY)", "DATE_SUB(dt, INTERVAL 1 DAY)",
-		"COALESCE(created_on, 0)", "IFNULL(created_on, '')", "CONCAT(created_on, '')", "CONCAT(dt, '')", "CONCAT(tm, '')", "CONCAT(yr, '')",
-		"ROUND(created_on)", "ABS(created_on)", "FLOOR(created_on)", "GREATEST(created_on, 0)", "GREATEST(created_on, created_on) + 1", "LAST_DAY(created_on) + 1",
-		"LEAST(created_on, '2026-01-10')", "IF(created_on, 1, 0)", "CASE WHEN id = 1 THEN created_on ELSE 0 END", "created_on < 5", "created_on = dt", "NOT created_on",
-		"n | 0", "n & 255", "n << 1", "n >> 1", "BIT_COUNT(n)", "id | 0", "id & 1", "id << 1", "id >> 1", "BIT_COUNT(id)", "id | n", "amount | 0", "amount & 3", "1 && 1", "id && n",
-		"YEAR(created_on) + 1", "created_on", "dt", "ts", "tm", "yr", "HOUR(tm) + 1", "DATE(dt) + 1", "TIME(dt)", "MONTH(created_on) - 1", "DAY(created_on) * 2",
-	}
-	var stmts []string
-	for _, e := range exprs {
-		stmts = append(stmts, "SELECT "+e+" FROM ev ORDER BY id")
-	}
-	for _, e := range []string{"SUM(created_on)", "MIN(created_on)", "MAX(created_on)", "AVG(created_on)", "AVG(dt)", "AVG(ts)", "AVG(tm)", "SUM(tm)", "SUM(yr)", "AVG(yr)", "SUM(dt)",
-		"MAX(created_on) - MIN(created_on)", "MAX(dt) - MIN(dt)", "STDDEV(created_on)", "BIT_AND(n)", "BIT_OR(n)", "BIT_XOR(n)", "BIT_AND(id)", "BIT_OR(id)", "BIT_XOR(id)", "COUNT(DISTINCT created_on)"} {
-		stmts = append(stmts, "SELECT "+e+" FROM ev")
-	}
-	for _, w := range []string{"created_on = 20260101", "created_on > 20260101", "created_on BETWEEN 20260101 AND 20260131", "created_on IN (20260101)", "dt = 20260101100000", "dt > 20260101", "tm = 100000", "tm > 100000",
-		"yr = 2026", "yr = 26", "yr = '26'", "yr > 2025", "created_on = '26-01-15'", "created_on = '2026-1-1'", "created_on = '20260101'", "created_on > '2026-01-01 00:00:00'", "created_on >= '2026-01-15'",
-		"dt = '2026-01-01'", "dt >= '2026-01-15'", "dt = '2026-01-01 10:00:00.0'", "dt = '26-01-01 10:00:00'", "ts = '26-01-01 10:00:00'", "tm = '10:00'", "tm = '100000'", "created_on = dt", "created_on = DATE(dt)",
-		"n & 1", "id & 1 = 1", "n | 0 > 0", "created_on", "created_on + 0 > 20260110", "created_on - 1 = 20260100", "created_on BETWEEN '2026-01-01' AND '2026-01-31'", "created_on IN ('2026-01-01', '2026-01-15')",
-		"created_on < '2026-01-15' + INTERVAL 1 DAY", "created_on > dt - INTERVAL 1 DAY", "dt >= '2026-01-15' - INTERVAL 1 DAY"} {
-		stmts = append(stmts, "SELECT id FROM ev WHERE "+w+" ORDER BY id")
-	}
-	stmts = append(stmts,
-		"SELECT id FROM ev ORDER BY created_on + 0 DESC", "SELECT created_on + 0, COUNT(*) FROM ev GROUP BY created_on + 0 ORDER BY 1", "SELECT id FROM ev ORDER BY -yr, id",
-		"SELECT d + 1 FROM (SELECT created_on AS d FROM ev WHERE id = 1) x", "WITH c AS (SELECT created_on AS d FROM ev WHERE id = 1) SELECT d + 1 FROM c",
-		"SELECT d + 1 FROM (SELECT DATE(dt) AS d FROM ev WHERE id = 1) x", "SELECT x.created_on + 1 FROM ev x WHERE id = 1", "SELECT `created_on`+1 FROM ev WHERE id = 1", "SELECT (created_on) + 1 FROM ev WHERE id = 1",
-		"SELECT created_on FROM ev WHERE id = 1 UNION ALL SELECT 5", "SELECT id + 1, created_on FROM ev ORDER BY id", "SELECT amount - 1 FROM ev WHERE created_on >= '2026-01-15' ORDER BY id",
-		"SELECT DATE '26-01-15'", "SELECT TIMESTAMP '26-01-15 10:00:00'", "SELECT DATE '2026-1-5'", "SELECT DATE '20260115'", "SELECT DATE '260115'", "SELECT TIME '10:00'", "SELECT TIME '100000'", "SELECT DATE '2026/01/15'",
-		"SELECT TIMESTAMP '2026-01-15'", "SELECT TIMESTAMP '20260115100000'", "SELECT TIMESTAMP '2026-01-01 10:00:00.6'", "SELECT TIMESTAMP '2026-01-01T10:00:00'",
-		"SELECT CAST('26-01-15' AS DATE)", "SELECT DATE('26-01-15')", "SELECT CAST('2026-01-01 10:00:00.6' AS DATETIME)", "SELECT CAST('2026-01-01 10:00:00.6' AS TIME)", "SELECT CAST('2026-01-01 10:00:00' AS DATETIME)",
-		"SELECT CONCAT(dt, '') FROM ev ORDER BY id", "SELECT CONCAT(ts, '') FROM ev ORDER BY id", "SELECT CAST(dt AS CHAR) FROM ev ORDER BY id", "SELECT LEFT(dt, 10) FROM ev ORDER BY id", "SELECT LENGTH(dt) FROM ev ORDER BY id",
-		"SELECT id FROM ev WHERE created_on = '26/01/15'", "SELECT id FROM ev WHERE created_on = '26.01.15'", "SELECT id FROM ev WHERE created_on = '1-2-3'", "SELECT DATE '1-2-3'", "SELECT id FROM ev WHERE dt >= '26-01-15' ORDER BY id",
-		"SELECT id FROM ev WHERE created_on = '2026-01-15 00:00:00'", "SELECT id FROM ev WHERE created_on = '2026-01-15T00:00:00'", "SELECT id FROM ev WHERE dt = '2026-01-15T11:30:00'", "SELECT id FROM ev WHERE created_on = '15-01-2026'", "SELECT id FROM ev WHERE created_on = '01/15/2026'",
-		"SELECT CAST(dt AS DATETIME) FROM ev ORDER BY id", "SELECT CAST(dt6 AS DATETIME) FROM ev ORDER BY id", "SELECT CAST(dt6 AS TIME) FROM ev ORDER BY id", "SELECT CAST(dt6 AS DATE) FROM ev ORDER BY id", "SELECT CAST(created_on AS DATETIME) FROM ev ORDER BY id", "SELECT CAST(tm AS TIME) FROM ev ORDER BY id",
-		"SELECT CAST('2026-01-01 10:00:00.6' AS DATETIME(3))", "SELECT CAST('2026-01-01 10:00:00.6666' AS DATETIME(3))", "SELECT CAST('10:00:00.6' AS TIME(1))", "SELECT CONVERT('2026-01-01 10:00:00.6', DATETIME)", "SELECT CAST('2026-01-01 10:00:00.6' AS DATETIME(6))", "SELECT CAST(dt6 AS DATETIME(3)) FROM ev ORDER BY id",
-		"SELECT dt6 FROM ev ORDER BY id", "SELECT dt6 + 1 FROM ev ORDER BY id", "SELECT id FROM ev WHERE dt6 > '2026-01-01 10:00:00' ORDER BY id", "SELECT id FROM ev WHERE dt6 = '2026-01-01 10:00:00.6' ORDER BY id",
-		"SELECT id FROM ev WHERE tm >= '9:00:00' ORDER BY id", "SELECT id FROM ev WHERE tm BETWEEN '10:00' AND '12:00' ORDER BY id", "SELECT id FROM ev WHERE tm = '10:00:00' ORDER BY id", "SELECT id FROM ev ORDER BY tm DESC", "SELECT MAX(tm) FROM ev", "SELECT id FROM ev WHERE tm > '09:00:00' ORDER BY id",
-		"SELECT id FROM ev WHERE yr = '2026' ORDER BY id", "SELECT id FROM ev WHERE yr BETWEEN 25 AND 26 ORDER BY id", "SELECT id FROM ev WHERE yr IN (26) ORDER BY id", "SELECT MAX(yr) FROM ev", "SELECT id FROM ev ORDER BY yr, id",
-		"SELECT 3 << 62", "SELECT id << 62 FROM ev ORDER BY id", "SELECT id << 63 FROM ev ORDER BY id", "SELECT 1 << 64", "SELECT 1 << 63", "SELECT id >> 64 FROM ev ORDER BY id", "SELECT id >> -1 FROM ev ORDER BY id", "SELECT id << -1 FROM ev ORDER BY id", "SELECT 4611686018427387904 << 1", "SELECT id << 31 FROM ev ORDER BY id", "SELECT id << 32 FROM ev ORDER BY id",
-		"SELECT BIT_AND(id) FROM ev WHERE id > 100", "SELECT BIT_OR(id) FROM ev WHERE id > 100", "SELECT BIT_XOR(id) FROM ev WHERE id > 100", "SELECT -1 & -1", "SELECT 5 & -1", "SELECT n & n FROM ev ORDER BY id", "SELECT 5 | 2.6", "SELECT '5' | 2", "SELECT id & 2.6 FROM ev ORDER BY id", "SELECT 18446744073709551615 & 1", "SELECT 9223372036854775808 | 0",
-		"SELECT MAX(created_on) - MIN(created_on) FROM ev WHERE id < 3", "SELECT d + 1 FROM (SELECT MAX(created_on) d FROM ev) x", "SELECT (SELECT MAX(created_on) FROM ev) + 1", "SELECT id, created_on - INTERVAL 1 DAY FROM ev ORDER BY id", "SELECT id FROM ev WHERE created_on + INTERVAL 1 DAY > '2026-01-15' ORDER BY id",
-		"SELECT id FROM ev WHERE created_on - INTERVAL 1 DAY = '2026-01-14' ORDER BY id", "SELECT id FROM ev WHERE dt - INTERVAL 1 DAY < '2026-01-14 11:30:00' ORDER BY id", "SELECT CONCAT(created_on + INTERVAL 1 DAY, '') FROM ev ORDER BY id", "SELECT created_on + INTERVAL 1 MONTH FROM ev ORDER BY id", "SELECT dt + INTERVAL 1 MONTH FROM ev ORDER BY id",
-		"SELECT created_on + INTERVAL 1 HOUR FROM ev ORDER BY id", "SELECT id FROM ev WHERE created_on + INTERVAL 1 DAY = '2026-01-16' ORDER BY id", "SELECT id FROM ev GROUP BY created_on + INTERVAL 1 DAY, id ORDER BY id", "SELECT MAX(created_on + INTERVAL 1 DAY) FROM ev",
-		"SELECT -1 | 0", "SELECT -8 >> 1", "SELECT 5 | 2", "SELECT 7 >> 1", "SELECT 1 << 3", "SELECT bit_count(-1)", "SELECT bit_count(7)", "SELECT 5 & 3", "SELECT 6 & 3 = 2", "SELECT 1 | 2 = 3",
+	const (
+		plus     = "SELECT created_on + 1 FROM ev ORDER BY n"
+		minus    = "SELECT MAX(created_on) - MIN(created_on) FROM ev"
+		avg      = "SELECT AVG(dt) FROM ev"
+		alias    = "SELECT d + 1 FROM (SELECT created_on AS d, n FROM ev) x ORDER BY n"
+		timeText = "SELECT n FROM ev WHERE tm >= '9:00:00' ORDER BY n"
+		bitOr    = "SELECT n | 0 FROM ev ORDER BY n"
+		yearTwo  = "SELECT n FROM ev WHERE created_on = '26-01-15' ORDER BY n"
+		castFrac = "SELECT CAST('2026-01-01 10:00:00.6' AS DATETIME)"
+		// The two known differences this change leaves, each with its line in
+		// docs/time-travel-sql.md.
+		interval = "SELECT created_on + INTERVAL 1 DAY FROM ev ORDER BY n"
+		concat   = "SELECT CONCAT(dt, '') FROM ev ORDER BY n"
 	)
-	for _, s := range stmts {
-		a, b := rawAnswer(src, s), rawAnswer(cp, s)
-		tag := "SAME"
-		switch {
-		case strings.Contains(a, "ERROR") && strings.Contains(b, "ERROR"):
-			tag = "BOTHERR"
-		case strings.Contains(a, "ERROR"):
-			tag = "SRCERR"
-		case strings.Contains(b, "ERROR"):
-			tag = "COPYERR"
-		case a[strings.Index(a, "]"):] != b[strings.Index(b, "]"):]:
-			tag = "DIFF"
+
+	// 1. The copy, asked as a port with no routing answers: another value
+	// with no error.
+	copyAddr := serve(flashbackConfig{})
+	copies := [2]string{
+		fmt.Sprintf("%s:tok@tcp(%s)/%s", ent.ID, copyAddr, srcName),
+		fmt.Sprintf("%s:tok@tcp(%s)/%s", entB.ID, copyAddr, srcName),
+	}
+	diff := sqlcompare.Different
+	fixtures := []valuesFixture{
+		{plus, diff, "", "a DATE plus a number: 20260102 on the source, 2026-01-02 on the copy"},
+		{minus, diff, "", "the difference of two numbers on the source (102), a count of days on the copy (33)"},
+		{avg, diff, "", "a number on the source, a date and time on the copy"},
+		{alias, diff, "", "the same date under an alias, from outside its subquery"},
+		{timeText, diff, "rows", "a TIME is text on the copy: '10:00:00' sorts before '9:00:00' there"},
+		{bitOr, diff, "", "64 unsigned bits on the source (18446744073709551608), signed on the copy (-8)"},
+		{yearTwo, diff, "rows", "the year 2026 on the source (one row), the year 26 on the copy (none)"},
+		{castFrac, diff, "", "the fraction is rounded by MySQL, cut by MariaDB and kept by the copy"},
+		{interval, diff, "", "the same day: a DATE on the source, a date and time on the copy"},
+		{concat, diff, "", "a DATETIME as text ends in +00 on the copy"},
+	}
+	by := compareInHalves(t, sourceDSN, copies, policy, fixtures)
+	checkValuesFixtures(t, sourceDSN, copies[0], fixtures, by)
+	// What the text alone can tell is kept on the source before the plan is
+	// asked for; the rest is the table's to tell, which sql-compare does not
+	// ask (part 2 does).
+	for stmt, veto := range map[string]string{
+		bitOr: "bit operator", yearTwo: "two-digit year", castFrac: "CAST to DATETIME or TIME",
+		plus: "", minus: "", avg: "", alias: "", timeText: "", interval: "", concat: "",
+	} {
+		r := by[stmt]
+		if veto == "" && r.RouteRule == "veto" {
+			t.Errorf("%q: vetoed from the text (%s); it is the table's column types that tell", stmt, r.RouteReason)
 		}
-		if len(b) > 130 {
-			b = b[:130]
+		if veto != "" && (r.Route != "mysql" || r.RouteRule != "veto" || !strings.Contains(r.RouteReason, veto)) {
+			t.Errorf("%q: route=%s rule=%s (%s), want it kept on the source by the veto %q", stmt, r.Route, r.RouteRule, r.RouteReason, veto)
 		}
-		t.Logf("M\t%s\t%s\t%s\t%s\t%s", tag, s, strings.ReplaceAll(a, "\n", " "), strings.ReplaceAll(b, "\n", " "), readrouter.Veto(s))
+	}
+
+	// 2. The same server with read routing on. The table has three rows and
+	// the scan rule is at two, and no statement here reads by the key, so
+	// each plan is the copy's unless something keeps the statement on the
+	// source. Every statement selects side, which says who answered.
+	src := openRaw(t, sourceDSN)
+	routed := openFlashback(t, serve(flashbackConfig{RouteMaxCopyAge: time.Hour, RoutePolicy: policy}), ent.ID, "tok", srcName)
+	defer routed.Close()
+	for _, c := range []struct {
+		stmt, who, why string
+		args           []any
+	}{
+		{stmt: "SELECT side, created_on + 1 FROM ev ORDER BY n", who: "live", why: "a DATE column next to +"},
+		{stmt: "SELECT side, `ev`.`created_on` - 1 FROM `ev` ORDER BY `n`", who: "live", why: "the same, the way an ORM quotes it"},
+		{stmt: "SELECT MIN(side), MAX(created_on) - MIN(created_on) FROM ev", who: "live", why: "one date minus another, each inside a call"},
+		{stmt: "SELECT MIN(side), AVG(dt) FROM ev", who: "live", why: "AVG of a DATETIME column"},
+		{stmt: "SELECT side, d + 1 FROM (SELECT created_on AS d, n, side FROM ev) x ORDER BY n", who: "live", why: "an alias of the date, used outside its subquery"},
+		{stmt: "SELECT side, n FROM ev WHERE tm >= '9:00:00' ORDER BY n", who: "live", why: "a TIME column named"},
+		{stmt: "SELECT side, n FROM ev WHERE yr = 26 ORDER BY n", who: "live", why: "a YEAR column named"},
+		{stmt: "SELECT side, n | 0 FROM ev ORDER BY n", who: "live", why: "a bit operator: kept on the source from the text"},
+		{stmt: "SELECT side, created_on + ? FROM ev ORDER BY n", args: []any{1}, who: "live", why: "as a prepared statement: the number is bound, the + is in the template"},
+		{stmt: "SELECT side, n FROM ev WHERE created_on = ? ORDER BY n", args: []any{"26-01-15"}, who: "live", why: "a two-digit year bound to a prepared statement"},
+		// What the copy goes on answering over the same table.
+		{stmt: "SELECT side, n + 1, created_on FROM ev WHERE created_on >= '2026-01-15' ORDER BY n", who: "copy", why: "a + that is not next to the date"},
+		{stmt: "SELECT side, n FROM ev WHERE created_on = ? ORDER BY n", args: []any{"2026-01-15"}, who: "copy", why: "a date with its whole year bound to a prepared statement"},
+		{stmt: "SELECT side, created_on + INTERVAL 1 DAY FROM ev ORDER BY n", who: "copy", why: "a date plus INTERVAL: the same day, a known difference in how it is shown"},
+	} {
+		got := answerText(routed, c.stmt, c.args...)
+		t.Logf("routed  %-60s %s", got, c.stmt)
+		if strings.HasPrefix(got, "ERROR ") || !strings.HasPrefix(got, c.who+"|") {
+			t.Errorf("routed %q (%s):\n  got  %s\n  want it answered by %s", c.stmt, c.why, got, c.who)
+			continue
+		}
+		if c.who == "live" {
+			if want := answerText(src, c.stmt, c.args...); got != want {
+				t.Errorf("routed %q (%s):\n  got  %s\n  want %s, the source's own answer", c.stmt, c.why, got, want)
+			}
+		}
+	}
+	// The values this is about, on every server: a number built from the
+	// date's digits, where the copy would have said 2026-01-02.
+	if got := answerText(routed, "SELECT created_on + 1 FROM ev ORDER BY n"); got != "20260102 / 20260204 / 20260116" {
+		t.Errorf("routed created_on + 1: got %s, want 20260102 / 20260204 / 20260116", got)
+	}
+
+	// Who answered, and why the source: nine statements declined by the
+	// copy for a column's type (eight above and the one just now), two kept on
+	// the source from the text (the bit operator, the bound two-digit year),
+	// three answered by the copy, and the copy at fault in none.
+	req := httptest.NewRequest("GET", "http://127.0.0.1/api/flashback", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	var fb struct {
+		Routing struct {
+			Servers map[string]struct {
+				Reasons map[string]uint64 `json:"reasons"`
+			} `json:"servers"`
+		} `json:"routing"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &fb); err != nil {
+		t.Fatalf("decode /api/flashback: %v (%s)", err, rec.Body.String())
+	}
+	reasons := fb.Routing.Servers[ent.ID].Reasons
+	t.Logf("routing reasons: %v", reasons)
+	if reasons["copy_columns_differ"] != 9 || reasons["veto"] != 2 || reasons["expensive_plan"] != 3 || reasons["copy_refused"] != 0 || reasons["explain_failed"] != 0 {
+		t.Errorf("reasons = %v, want copy_columns_differ 9, veto 2, expensive_plan 3, copy_refused 0, explain_failed 0", reasons)
 	}
 }

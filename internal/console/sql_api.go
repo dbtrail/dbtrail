@@ -17,6 +17,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/ext"
 	"github.com/dbtrail/dbtrail/internal/observe"
+	"github.com/dbtrail/dbtrail/internal/readrouter"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/views"
@@ -630,7 +631,7 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 				// A star returns what a view's column list says. Where that
 				// is not what MySQL returns, a caller that asked for MySQL's
 				// answer gets a refusal and sends the statement there (#2111).
-				if msg := sqlStrictRefusalFor(in, narrowed, refs, statement); msg != "" {
+				if msg := sqlStrictRefusalFor(in, narrowed, refs, statement, sess.Shape); msg != "" {
 					viewsRefusal = &sqlStarRefusal{msg}
 					return "", viewsRefusal
 				}
@@ -855,8 +856,12 @@ func sqlStarRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs) string {
 //     one name on the copy, so the statement would read the one that kept the
 //     name, whichever the source reads (views.Input.SelectedCaseTwin);
 //   - a star returns other columns than MySQL's (sqlStarRefusalFor, #2111);
-//   - a name could bind to something else (sqlNamesRefusalFor, #2123).
-func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, statement string) string {
+//   - a name could bind to something else (sqlNamesRefusalFor, #2123);
+//   - a date, time or year column is used where the copy's type for it
+//     answers differently (sqlTypesRefusalFor, #2133).
+//
+// shape is sqlsandbox.Session.Shape.
+func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, statement, shape string) string {
 	if table, twin := narrowed.SelectedCaseTwin(); table != "" {
 		return fmt.Sprintf("the copy does not answer this statement: %s and %s differ only by letter case, "+
 			"which the copy does not tell apart, so it could read the other table", table, twin)
@@ -864,7 +869,33 @@ func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, stateme
 	if msg := sqlStarRefusalFor(in, narrowed, refs); msg != "" {
 		return msg
 	}
-	return sqlNamesRefusalFor(narrowed, statement)
+	if msg := sqlNamesRefusalFor(narrowed, statement); msg != "" {
+		return msg
+	}
+	return sqlTypesRefusalFor(narrowed, shape)
+}
+
+// sqlTypesRefusalFor says why the copy must not answer a statement because of
+// the TYPE of a column it names, or "" when it can (#2133). narrowed is the
+// views the statement reads (every view, when the walk was not certain of
+// them) and shape the statement as the routing layer read it.
+//
+// The copy holds a DATE, a DATETIME and a TIMESTAMP as what they are, where
+// MySQL turns one into a number wherever a number is asked for: created_on +
+// 1 is 20260102 on MySQL and 2026-01-02 on the copy, both answered with no
+// error. It holds a TIME as text and a YEAR as a plain number.
+// readrouter.ColumnVeto is the rule, given each table's columns of those
+// types from its snapshot's table definition. A table with no definition
+// never gets here: sqlNamesRefusalFor has refused the statement already.
+func sqlTypesRefusalFor(narrowed views.Input, shape string) string {
+	for _, t := range narrowed.SelectedBaselines() {
+		dates, whole := t.TypedColumns()
+		if why := readrouter.ColumnVeto(shape, dates, whole); why != "" {
+			return fmt.Sprintf("the copy does not answer this statement: over %s.%s a date, time or year column would be read "+
+				"another way than on MySQL (%s)", t.Schema, t.Table, why)
+		}
+	}
+	return ""
 }
 
 // sqlNamesRefusalFor says why the copy must not answer a statement because of

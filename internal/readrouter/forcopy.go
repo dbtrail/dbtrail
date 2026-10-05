@@ -205,6 +205,16 @@ func scan(stmt string) scanned {
 				refuse(vetoUnterminated)
 				j = n - 1
 			}
+			if closed && TwoDigitYear(stmt[i+1:j]) {
+				// MySQL and MariaDB read a year of two digits as 2000 to
+				// 2069 or 1970 to 1999; the copy takes the digits for the
+				// year. DATE '26-01-15' is 2026-01-15 on the source and
+				// 0026-01-15 on the copy, and created_on = '26-01-15' finds
+				// the row on one and nothing on the other (#2133). Whether
+				// the string is used as a date is not read: any string
+				// written this way keeps the statement on the source.
+				refuse(vetoTwoDigitYear)
+			}
 			if amountOfInterval && closed && !wholeNumber(stmt[i+1:j]) {
 				// MySQL cuts a quoted amount at the first character that
 				// is not a digit: INTERVAL '1e2' DAY is one day and '1.5'
@@ -316,6 +326,23 @@ func wholeNumber(s string) bool {
 		}
 	}
 	return true
+}
+
+// TwoDigitYear reports whether s is written as a date with a year of two
+// digits: two digits, a - or a /, one or two digits, a - or a /, and a digit
+// (26-01-15, 26/1/5, 26-01-15 10:00:00), with or without spaces before it.
+// A year of one digit or of four is the same year on both sides, and with
+// dots (26.01.15) or no separator (260115) the copy refuses the string.
+func TwoDigitYear(s string) bool {
+	s = strings.TrimLeft(s, " \t\n\r")
+	if len(s) < 6 || !asciiDigit(s[0]) || !asciiDigit(s[1]) || s[2] != '-' && s[2] != '/' {
+		return false
+	}
+	i := 3
+	for i < len(s) && i < 5 && asciiDigit(s[i]) {
+		i++
+	}
+	return i > 3 && i+1 < len(s) && (s[i] == '-' || s[i] == '/') && asciiDigit(s[i+1])
 }
 
 // wordByte reports whether c can be part of an unquoted word: a letter, a

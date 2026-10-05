@@ -242,7 +242,7 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 			if err != nil {
 				return nil, err
 			}
-			return h.runFreeSQLRouted(currentDB, text, reason, unchangedWithin)
+			return h.runFreeSQLRouted(currentDB, text, readrouter.Shape(qstr), reason, unchangedWithin)
 		},
 	})
 }
@@ -573,7 +573,7 @@ func (h *Handler) notTimeTravelError(qstr string) error {
 
 // runFreeSQL serves one ordinary statement through the bound FreeSQL.
 func (h *Handler) runFreeSQL(schema, qstr string) (*mysql.Result, error) {
-	return h.runFreeSQLRouted(schema, qstr, "", 0)
+	return h.runFreeSQLRouted(schema, qstr, "", "", 0)
 }
 
 // copyText is the statement the routing ladder sends the copy: the client's
@@ -595,7 +595,10 @@ func copyText(qstr string) (string, error) {
 // on the port without routing its own text. Nothing else is translated from
 // MySQL's dialect, and a statement the copy refuses is the caller's to
 // forward. unchangedWithin is sqlsandbox.Session.UnchangedWithin (#2085).
-func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string, unchangedWithin time.Duration) (*mysql.Result, error) {
+//
+// shape is sqlsandbox.Session.Shape: the client's own statement as the
+// routing layer read it, "" for a port without routing.
+func (h *Handler) runFreeSQLRouted(schema, qstr, shape, routeReason string, unchangedWithin time.Duration) (*mysql.Result, error) {
 	ctx, cancel := h.queryContext()
 	defer cancel()
 	stmt, schema := rewriteForDuckDB(qstr, schema)
@@ -624,6 +627,7 @@ func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string, unchangedWi
 	// Asked of the connection, not of the reason text: a routing connection
 	// only ever gets here from the ladder.
 	sess.StrictStar = h.router != nil
+	sess.Shape = shape
 	sess.UnchangedWithin = unchangedWithin
 	res, err := h.freeSQL.Run(ctx, stmt, schema, sess)
 	var differ *sqlsandbox.ColumnsDifferError

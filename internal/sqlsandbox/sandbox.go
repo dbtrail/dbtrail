@@ -211,6 +211,16 @@ type Session struct {
 	// no routing leave it off and get the copy's answer. The worker never
 	// sees it: the caller's ViewsFor decides, from what the statement names.
 	StrictStar bool
+	// Shape is the statement as the client sent it, read the way the routing
+	// layer reads it (readrouter.Shape: comments removed, string literals
+	// blanked, names in double quotes); for a prepared statement, of its
+	// template. Set with StrictStar. The caller's ViewsFor looks in it for
+	// arithmetic on the date columns of the tables the statement reads, and
+	// for their TIME and YEAR columns (#2133): the statement it is given to
+	// run has already been written for the copy, and its arguments written
+	// into it. Empty under StrictStar means "not known", and a statement over
+	// a table with such a column is then refused.
+	Shape string
 	// UnchangedWithin, when not zero, asks for a refusal instead of an answer
 	// unless every table the statement reads has had no change on the source
 	// since the snapshot the copy holds of it, as far as that can be known:
