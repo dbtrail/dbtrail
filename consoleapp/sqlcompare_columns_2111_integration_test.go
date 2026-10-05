@@ -296,6 +296,12 @@ func TestIntegrationSQLCompareColumnOrder(t *testing.T) {
 		{"SELECT * FROM who_legacy l JOIN who w USING (alpha) ORDER BY alpha", "a star over USING, by the join alone: MySQL answers", []string{"alpha", "id", "side", "id", "side"}, "1|1|live|1|live"},
 		{"SELECT * FROM who a JOIN who w USING (alpha) ORDER BY alpha", "a star over USING, both orders known: still MySQL", []string{"alpha", "id", "side", "id", "side"}, "1|1|live|1|live"},
 		{"SELECT a.side, w.alpha FROM who a JOIN who w USING (alpha) ORDER BY w.alpha", "USING without a star is the copy's", []string{"side", "alpha"}, "copy|1"},
+		// Only the table a star expands counts.
+		{"SELECT w.*, l.id FROM who w JOIN who_legacy l ON l.id = w.id ORDER BY w.alpha", "the star is over who, whose order is known: the copy answers", []string{"id", "side", "alpha", "id"}, "1|copy|1|1"},
+		{"SELECT l.*, w.id FROM who w JOIN who_legacy l ON l.id = w.id ORDER BY w.alpha", "the star is over who_legacy: MySQL answers", []string{"id", "side", "alpha", "id"}, "1|live|1|1"},
+		{"SELECT w.side FROM who w WHERE EXISTS (SELECT * FROM who_legacy l WHERE l.id = w.id) ORDER BY w.alpha", "a star under EXISTS expands nothing that matters: the copy answers", []string{"side"}, "copy"},
+		{"SELECT w.* FROM who w JOIN who x USING (alpha) ORDER BY w.alpha", "a qualified star is not reordered by USING: the copy answers", []string{"id", "side", "alpha"}, "1|copy|1"},
+		{"SELECT * FROM (SELECT id, a FROM gen) x ORDER BY a", "a star over a derived table with its columns named: the copy answers", []string{"id", "a"}, "1|5"},
 		{"SELECT #2\n alpha FROM who ORDER BY alpha", "# is a comment on MySQL and the second column on the copy: MySQL answers", []string{"alpha"}, "1"},
 		{"SELECT count(*) AS n FROM gen NATURAL JOIN g2", "NATURAL JOIN over a table with a generated column: MySQL answers", []string{"n"}, "0"},
 		{"SELECT count(*) AS n FROM invis NATURAL JOIN inv2", "NATURAL JOIN over a table with an invisible column: MySQL answers", []string{"n"}, "3"},
@@ -336,7 +342,7 @@ func TestIntegrationSQLCompareColumnOrder(t *testing.T) {
 	}
 	reasons := fb.Routing.Servers[ent.ID].Reasons
 	t.Logf("routing reasons: %v", reasons)
-	if reasons["copy_columns_differ"] != 9 || reasons["copy_refused"] != 0 || reasons["veto"] != 1 || reasons["expensive_plan"] != 6 {
-		t.Errorf("reasons = %v, want copy_columns_differ 9, copy_refused 0, veto 1 (the # comment), expensive_plan 6", reasons)
+	if reasons["copy_columns_differ"] != 10 || reasons["copy_refused"] != 0 || reasons["veto"] != 1 || reasons["expensive_plan"] != 10 {
+		t.Errorf("reasons = %v, want copy_columns_differ 10, copy_refused 0, veto 1 (the # comment), expensive_plan 10", reasons)
 	}
 }

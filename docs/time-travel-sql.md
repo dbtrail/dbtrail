@@ -426,7 +426,7 @@ What this is and is not:
   literals, a backslash inside a string literal (an escape on MySQL, a
   plain character on the copy: `'a\\b'` and `'it\'s'` name different
   strings), `--` with no space after it (two minus signs on MySQL, where
-  `5--3` is 8; a comment on the copy), `count(DISTINCT ...)`, `INSTR`/`LOCATE`,
+  `5--3` is 8; a comment on the copy), a `#` comment (a comment on MySQL; on the copy `#2` is the table's second column), `count(DISTINCT ...)`, `INSTR`/`LOCATE`,
   `UNION`, `INTERSECT` and `EXCEPT` when they remove duplicates (the copy
   compares the rows by bytes there, so `SELECT 'a' UNION SELECT 'A'` is one
   row on MySQL and two on the copy; `UNION ALL` is not kept back),
@@ -569,18 +569,33 @@ What this is and is not:
   they do not matter, or leave routing off.
 - **`SELECT *` is the copy's only where it returns MySQL's columns.** The
   copy lists a table's columns in the order its `CREATE TABLE` declares
-  them. A statement with a star (`*`, `t.*`; not `count(*)`) that reads a
-  table for which that is not what MySQL returns is refused by the copy and
-  answered by MySQL, like any other refusal (`mysql` / `copy_refused` in the
-  counter): a table whose snapshot carries no `CREATE TABLE` (so every
-  table of a PostgreSQL source), a table with a generated column, and a
-  table with an invisible column. So is any statement with a star over a
-  join written with `USING` or `NATURAL`, where MySQL puts the join's
-  columns first and the copy does not. The same statement with its columns
-  named can still go to the copy. The order is the one the table had at its last
-  full snapshot: a column moved or added since by an `ALTER` is seen at the
-  next one, and until then a statement with a star over that table can
-  return the columns as they were declared at that snapshot.
+  them. Three kinds of table do not have MySQL's columns on the copy: a
+  table whose snapshot carries no `CREATE TABLE` (so every table of a
+  PostgreSQL source), a table with a generated column, and a table with an
+  invisible column. Over such a table the copy declines, and MySQL answers
+  (`mysql` / `copy_columns_differ` in the counter, apart from the copy's
+  faults under `copy_refused`):
+  - **a star that expands that table**: `SELECT *` or `t.*` over it, in the
+    statement or in a subquery or derived table of it. A star over ANOTHER
+    table of the same statement does not count (`SELECT l.*, g.id FROM lines
+    l JOIN gen g ...` is the copy's when `lines` has MySQL's columns), nor
+    does a star directly under `EXISTS (...)`, nor a star over a derived
+    table whose own columns are named (`SELECT * FROM (SELECT id, a FROM gen)
+    x`). `count(*)` is not a star. Where the port cannot tell which table a
+    star expands, every table the statement reads counts;
+  - **a `NATURAL JOIN` anywhere in a statement that reads that table**, with
+    or without a star: it pairs on every column the tables share by name, so
+    over other columns it returns other ROWS. Write the join with `ON` or
+    `USING` to keep it on the copy.
+
+  Whatever the tables, an unqualified star over a join written with `USING`
+  or `NATURAL` is MySQL's: MySQL puts the join's columns first and the copy
+  does not (`t.*` over such a join is the same on both). The same statement
+  with its columns named can still go to the copy. The order is the one the
+  table had at its last full snapshot: a column moved or added since by an
+  `ALTER` is seen at the next one, and until then a statement with a star
+  over that table can return the columns as they were declared at that
+  snapshot.
 - **The thresholds are knobs, not truths.** The optimizer's cost is its
   own estimate; it misleads on cached data and on skewed values (and on
   `LIMIT`, which is why steps 4 and 5 read the statement, not the cost).

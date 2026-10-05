@@ -88,39 +88,89 @@ func TestCollectRefs(t *testing.T) {
 	}
 	for _, c := range cases {
 		got := parseForRefs(t, c.sql)
-		got.Star, got.NamedJoin, got.Natural = false, false, false // TestCollectRefs_star has them
+		got.Star, got.NamedJoin, got.Natural, got.StarTables, got.StarNamedJoin = false, false, false, nil, false // TestCollectRefs_star has them
 		if !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s:\n got %+v\nwant %+v", c.sql, got, c.want)
 		}
 	}
 }
 
-// #2111: a statement that holds a star returns what the relation's column
-// list says, in its order. The caller needs to know, because that order is
-// not always the table's.
+// #2111: a star returns what a relation's column list says, in its order,
+// and that is not always what MySQL returns. The caller needs to know WHICH
+// tables a statement's stars expand, exactly: StarTables when the walk is
+// certain, Star when it is not (then every table the statement reads counts).
 func TestCollectRefs_star(t *testing.T) {
-	for sqlText, want := range map[string]bool{
-		"SELECT * FROM shop.orders":                                  true,
-		"SELECT o.* FROM shop.orders o":                              true,
-		"SELECT id, o.* FROM shop.orders o":                          true,
-		"SELECT DISTINCT * FROM shop.orders":                         true,
-		"SELECT * EXCLUDE (id) FROM shop.orders":                     true,
-		"SELECT COLUMNS('a.*') FROM shop.orders":                     true,
-		"FROM shop.orders":                                           true,
-		"TABLE shop.orders":                                          true,
-		"SELECT id FROM (SELECT * FROM shop.orders)":                 true,
-		"WITH q AS (SELECT * FROM shop.orders) SELECT id FROM q":     true,
-		"SELECT id FROM shop.orders WHERE id IN (SELECT * FROM a.x)": true,
-		"SELECT id FROM a.x UNION ALL SELECT * FROM b.y":             true,
-		"SELECT count(*) FROM shop.orders":                           false,
-		"SELECT COUNT( * ) FROM shop.orders":                         false,
-		"SELECT id * 2, qty*price FROM shop.orders":                  false,
-		"SELECT id, status FROM shop.orders WHERE note = '*'":        false,
-		"SELECT count(*), sum(a * b) FROM shop.orders GROUP BY id":   false,
-		"SELECT 1": false,
+	type want struct {
+		tables    string // the tables a star expands, "schema.name" sorted and joined by a space
+		unsure    bool   // Star: a star the walk could not attribute
+		namedJoin bool   // StarNamedJoin: an unqualified star over USING or NATURAL
+	}
+	for sqlText, w := range map[string]want{
+		// An unqualified star expands the tables of its own FROM.
+		"SELECT * FROM shop.orders":                                 {tables: "shop.orders"},
+		"SELECT DISTINCT * FROM shop.orders":                        {tables: "shop.orders"},
+		"SELECT * EXCLUDE (id) FROM shop.orders":                    {tables: "shop.orders"},
+		"SELECT COLUMNS('a.*') FROM shop.orders":                    {tables: "shop.orders"},
+		"FROM shop.orders":                                          {tables: "shop.orders"},
+		"TABLE shop.orders":                                         {tables: "shop.orders"},
+		"SELECT * FROM a.x JOIN b.y ON x.id = y.id":                 {tables: "a.x b.y"},
+		"SELECT * FROM a.x, b.y":                                    {tables: "a.x b.y"},
+		"SELECT *, 1 FROM a.x LEFT JOIN b.y ON true CROSS JOIN c.z": {tables: "a.x b.y c.z"},
+		// A qualified star expands the one table it names, by alias or by name.
+		"SELECT o.* FROM shop.orders o":                              {tables: "shop.orders"},
+		"SELECT id, o.* FROM shop.orders o":                          {tables: "shop.orders"},
+		"SELECT l.*, g.id FROM shop.lines l JOIN shop.gen g ON true": {tables: "shop.lines"},
+		"SELECT orders.* FROM shop.orders JOIN shop.gen g ON true":   {tables: "shop.orders"},
+		"SELECT ORDERS.* FROM shop.orders":                           {tables: "shop.orders"},
+		"SELECT l.*, g.* FROM shop.lines l JOIN shop.gen g ON true":  {tables: "shop.gen shop.lines"},
+		// ... and is not reordered by USING or NATURAL (MySQL 8.4, MariaDB 11.4 and DuckDB agree).
+		"SELECT l.* FROM shop.lines l JOIN shop.lines m USING (id)": {tables: "shop.lines"},
+		"SELECT * FROM shop.lines l JOIN shop.lines m USING (id)":   {tables: "shop.lines shop.lines", namedJoin: true},
+		"SELECT * FROM a.x NATURAL JOIN b.y":                        {tables: "a.x b.y", namedJoin: true},
+		// A derived table or a WITH is what its own select lists say: each
+		// is read on its own, so a star OVER one adds nothing.
+		"SELECT * FROM (SELECT id, a FROM shop.gen) x":           {},
+		"SELECT x.* FROM (SELECT id, a FROM shop.gen) x":         {},
+		"SELECT * FROM (SELECT * FROM shop.gen) x":               {tables: "shop.gen"},
+		"SELECT id FROM (SELECT * FROM shop.orders)":             {tables: "shop.orders"},
+		"SELECT count(*) FROM (SELECT * FROM shop.gen) x":        {tables: "shop.gen"}, // conservative: only the count is read
+		"WITH q AS (SELECT * FROM shop.orders) SELECT id FROM q": {tables: "shop.orders"},
+		"WITH q AS (SELECT id FROM shop.orders) SELECT * FROM q": {},
+		"SELECT * FROM (SELECT id FROM a.x) q JOIN b.y ON true":  {tables: "b.y"},
+		// Every select of a statement is read: a subquery's star counts...
+		"SELECT id FROM shop.orders WHERE id IN (SELECT * FROM a.x)": {tables: "a.x"},
+		"SELECT id FROM a.x UNION ALL SELECT * FROM b.y":             {tables: "b.y"},
+		"SELECT (SELECT * FROM a.x LIMIT 1) FROM b.y":                {tables: "a.x"},
+		// ... except directly under EXISTS, which asks only whether a row exists.
+		"SELECT id FROM a.x WHERE EXISTS (SELECT * FROM b.y WHERE y.id = x.id)": {},
+		"SELECT id FROM a.x WHERE NOT EXISTS (SELECT * FROM b.y)":               {},
+		"SELECT x.* FROM a.x WHERE EXISTS (SELECT * FROM b.y)":                  {tables: "a.x"},
+		"SELECT id FROM a.x WHERE EXISTS (SELECT * FROM (SELECT * FROM b.y) q)": {tables: "b.y"},
+		// With a LIMIT or OFFSET the number of rows decides, and DISTINCT * makes that depend on the columns.
+		"SELECT id FROM a.x WHERE EXISTS (SELECT DISTINCT * FROM b.y LIMIT 1 OFFSET 3)": {tables: "b.y"},
+		// What the walk cannot attribute stays a star over everything.
+		"SELECT nope.* FROM shop.orders o": {unsure: true},
+		"SELECT o.* FROM shop.orders o JOIN shop.gen o2 ON true WHERE EXISTS (SELECT o.* FROM a.x)": {tables: "shop.orders"},
+		"SELECT (SELECT o.* FROM a.x LIMIT 1) FROM shop.orders o":                                   {unsure: true},
+		"SELECT t.* FROM a.t JOIN b.t ON true":                                                      {unsure: true},
+		"SELECT COLUMNS('a.*') + 1 FROM shop.orders":                                                {unsure: true},
+		// Not stars.
+		"SELECT count(*) FROM shop.orders":                         {},
+		"SELECT COUNT( * ) FROM shop.orders":                       {},
+		"SELECT id * 2, qty*price FROM shop.orders":                {},
+		"SELECT id, status FROM shop.orders WHERE note = '*'":      {},
+		"SELECT count(*), sum(a * b) FROM shop.orders GROUP BY id": {},
+		"SELECT 1": {},
 	} {
-		if got := parseForRefs(t, sqlText).Star; got != want {
-			t.Errorf("%s: Star = %v, want %v", sqlText, got, want)
+		refs := parseForRefs(t, sqlText)
+		var names []string
+		for _, tb := range refs.StarTables {
+			names = append(names, tb.Schema+"."+tb.Name)
+		}
+		sort.Strings(names)
+		if got := strings.Join(names, " "); got != w.tables || refs.Star != w.unsure || refs.StarNamedJoin != w.namedJoin {
+			t.Errorf("%s:\n  got  tables %q, Star %v, StarNamedJoin %v\n  want tables %q, Star %v, StarNamedJoin %v",
+				sqlText, got, refs.Star, refs.StarNamedJoin, w.tables, w.unsure, w.namedJoin)
 		}
 	}
 	for sqlText, want := range map[string]bool{

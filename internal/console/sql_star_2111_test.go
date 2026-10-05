@@ -121,6 +121,32 @@ func TestSQL_realWorkerSelectStar_2111(t *testing.T) {
 	answered("SELECT * FROM shop.lines a JOIN shop.lines b ON a.id = b.id", strict)
 	answered("SELECT * FROM shop.lines a JOIN shop.lines b USING (id)", sqlsandbox.Session{})
 
+	// Only the tables a star really expands count, and the refusal names them.
+	// Answered: MySQL returns the same columns as the copy for each of these.
+	answered("SELECT l.id FROM shop.lines l WHERE EXISTS (SELECT * FROM shop.gen g WHERE g.id = l.id)", strict)
+	answered("SELECT l.id FROM shop.lines l WHERE NOT EXISTS (SELECT * FROM shop.orders o WHERE o.id = l.id)", strict)
+	answered("SELECT * FROM (SELECT id, a FROM shop.gen) x", strict)
+	answered("SELECT x.* FROM (SELECT id, a FROM shop.gen) x", strict)
+	answered("SELECT l.*, g.id FROM shop.lines l JOIN shop.gen g ON g.id = l.id", strict)
+	answered("SELECT l.* FROM shop.lines l JOIN shop.orders o ON o.id = l.id", strict)
+	answered("SELECT l.* FROM shop.lines l JOIN shop.lines m USING (id)", strict)
+	answered("WITH q AS (SELECT id, a FROM shop.gen) SELECT * FROM q", strict)
+	answered("SELECT id FROM shop.gen UNION ALL SELECT * FROM (SELECT id FROM shop.lines) x", strict)
+	// Refused: the star expands the table that differs, and the message says which.
+	refused("SELECT g.*, l.id FROM shop.lines l JOIN shop.gen g ON g.id = l.id", "SELECT * on shop.gen", "generated column twice")
+	refused("SELECT l.*, g.* FROM shop.lines l JOIN shop.gen g ON g.id = l.id", "SELECT * on shop.gen")
+	refused("SELECT * FROM shop.lines l JOIN shop.gen g ON g.id = l.id", "SELECT * on shop.gen")
+	refused("SELECT * FROM (SELECT * FROM shop.gen) x", "SELECT * on shop.gen")
+	refused("SELECT count(*) FROM (SELECT * FROM shop.gen) x", "SELECT * on shop.gen") // conservative: only the count is read
+	refused("SELECT id FROM shop.lines WHERE id IN (SELECT * FROM shop.gen)", "SELECT * on shop.gen")
+	refused("SELECT l.id FROM shop.lines l WHERE EXISTS (SELECT * FROM (SELECT * FROM shop.gen) g)", "SELECT * on shop.gen")
+	refused("SELECT l.id FROM shop.lines l WHERE EXISTS (SELECT DISTINCT * FROM shop.gen LIMIT 1 OFFSET 1)", "SELECT * on shop.gen")
+	refused("SELECT id FROM shop.lines UNION ALL SELECT * FROM shop.orders", "SELECT * on shop.orders")
+	// A star the walk cannot attribute counts over every table the statement reads.
+	refused("SELECT (SELECT g.* FROM shop.lines LIMIT 1) FROM shop.gen g", "shop.gen")
+	// A name with no schema is every table of that name: refused when one of them differs.
+	refused("SELECT * FROM gen", "shop.gen")
+
 	// A NATURAL JOIN pairs on every column the two tables share by name, so
 	// it depends on each table's column SET with or without a star. Measured
 	// on MySQL 8.4 and MariaDB 11.4: gen NATURAL JOIN g2 pairs on (id, twice)

@@ -588,7 +588,7 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 		ViewsFor: func(refs sqlsandbox.Refs) (string, error) {
 			narrowed := in
 			narrowed.OnlyViews = sqlWantedViews(in, refs)
-			if sess.StrictStar && refs.Natural && !refs.Star {
+			if sess.StrictStar && refs.Natural {
 				// A NATURAL JOIN pairs on every column its tables share by
 				// name: it depends on their column SETS as a star does, with
 				// no star in the statement. The copy holds no generated
@@ -603,20 +603,12 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 					return "", viewsRefusal
 				}
 			}
-			if sess.StrictStar && (refs.Star || refs.Unsure) {
-				// A star returns what the view's column list says. Where that
+			if sess.StrictStar {
+				// A star returns what a view's column list says. Where that
 				// is not what MySQL returns, a caller that asked for MySQL's
 				// answer gets a refusal and sends the statement there (#2111).
-				// Unsure counts as a star: the walk could not read the tree.
-				if refs.NamedJoin {
-					viewsRefusal = &sqlStarRefusal{"a star over a join with USING or NATURAL returns its columns in another order than MySQL, " +
-						"which puts the join's columns first; name the columns to read it here"}
-					return "", viewsRefusal
-				}
-				if table, why := sqlStarUnlikeMySQL(narrowed); table != "" {
-					viewsRefusal = &sqlStarRefusal{fmt.Sprintf(
-						"SELECT * on %s would not return the columns MySQL returns (%s), so the copy does not answer a statement "+
-							"that can depend on them; name the columns to read it here", table, why)}
+				if msg := sqlStarRefusalFor(in, narrowed, refs); msg != "" {
+					viewsRefusal = &sqlStarRefusal{msg}
 					return "", viewsRefusal
 				}
 			}
@@ -768,6 +760,40 @@ func sqlWallClockDatetimes(in views.Input) (tables []views.BaselineTable, unknow
 type sqlStarRefusal struct{ Message string }
 
 func (e *sqlStarRefusal) Error() string { return e.Message }
+
+// sqlStarRefusalFor says why the copy must not answer a statement's stars as
+// MySQL would, or "" when it can. in is every view of the copy, narrowed the
+// ones the statement reads.
+//
+// The tables that count are the ones a star expands (sqlsandbox.Refs.
+// StarTables), and nothing else the statement reads: `SELECT l.*, g.id FROM
+// lines l JOIN gen g` expands lines alone. Three things widen that back to
+// every table the statement reads, because then the walk was not certain: a
+// star it could not attribute (Refs.Star), a statement it could not read
+// (Refs.Unsure), and a star table that matches no view of the copy.
+func sqlStarRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs) string {
+	const namedJoin = "a star over a join with USING or NATURAL returns its columns in another order than MySQL, " +
+		"which puts the join's columns first; name the columns to read it here"
+	uncertain := refs.Star || refs.Unsure
+	if refs.StarNamedJoin || (uncertain && refs.NamedJoin) {
+		return namedJoin
+	}
+	over := narrowed
+	if !uncertain {
+		if len(refs.StarTables) == 0 {
+			return ""
+		}
+		if want := sqlWantedViews(in, sqlsandbox.Refs{Tables: refs.StarTables}); want != nil {
+			over = in
+			over.OnlyViews = want
+		}
+	}
+	if table, why := sqlStarUnlikeMySQL(over); table != "" {
+		return fmt.Sprintf("SELECT * on %s would not return the columns MySQL returns (%s), so the copy does not answer a statement "+
+			"with a star over it; name the columns to read it here", table, why)
+	}
+	return ""
+}
 
 // sqlStarUnlikeMySQL names the first table this render defines whose
 // `SELECT *` on the copy is not MySQL's, and why (views.BaselineTable.

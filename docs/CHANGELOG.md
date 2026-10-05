@@ -245,20 +245,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshots already on disk: for a full snapshot, after a refresh, and for
   a column added with `AFTER` or `FIRST`. Where MySQL's `SELECT *` cannot be
   matched, the table's view says so in a comment and, under read routing,
-  a statement with a star over that table is answered by MySQL: a table
+  a statement whose star expands that table (`SELECT *` or `t.*` over it,
+  also inside a subquery; a star over another table of the statement, or
+  directly under `EXISTS`, does not count), or that reads it and holds a
+  `NATURAL JOIN`, is answered by MySQL and counted as `copy_columns_differ`:
+  a table
   whose snapshot carries no `CREATE TABLE` (every table of a PostgreSQL
   source, a snapshot older than 0.5), which keeps the alphabetical order; a
   table with a generated column, which a snapshot does not hold; and a table
   with an invisible column, which a snapshot holds and MySQL's star leaves
-  out. A star over a join written with `USING` or `NATURAL` is MySQL's under
-  routing too: MySQL returns the join's columns first, the copy where the
-  left table has them. A views file that follows later snapshots (the default of `bintrail
+  out. An unqualified star over a join written with `USING` or `NATURAL` is
+  MySQL's under routing too: MySQL returns the join's columns first, the
+  copy where the left table has them. So is a statement with a `#` comment:
+  `SELECT #2` followed by a new line is a comment on MySQL and the table's
+  second column on the copy. A views file that follows later snapshots (the default of `bintrail
   views`) keeps the alphabetical order for every table and now says so: a
   column list in it would stop every query on a table the day the source
   drops a column. `bintrail-console sql-compare` compared only the NUMBER of
   columns, so it reported two answers with the same columns in another
-  order as `EQUAL` whenever the cells happened to agree or there were no
-  rows; it now reports `DIFFERENT (columns)`.
+  order, or with other columns, as `EQUAL` whenever the cells happened to
+  agree or there were no rows; it now reports `DIFFERENT (columns)`. A table
+  with a column whose `COMMENT` reads like a generation clause (`AS (x)
+  STORED`) was refused when a snapshot was taken; it now converts.
 
 ## [0.98.0] - 2026-10-04
 ### Changed

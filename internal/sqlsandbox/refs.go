@@ -26,6 +26,12 @@ type Refs struct {
 	// not name (#2111). `count(*)` is not one: the parser reads it as a
 	// function with no argument.
 	Star bool `json:"star,omitempty"`
+	// StarTables are the base tables a star certainly expands, and
+	// StarNamedJoin says an unqualified star stands over a join with USING
+	// or NATURAL (attributeStars has the rules). Star is then left for the
+	// stars the walk could not attribute.
+	StarTables    []TableRef `json:"star_tables,omitempty"`
+	StarNamedJoin bool       `json:"star_named_join,omitempty"`
 	// NamedJoin is set when the statement joins with USING or NATURAL. A star
 	// over such a join is ordered by the join itself, and not the same way
 	// everywhere: MySQL returns the join's columns first, DuckDB leaves them
@@ -65,8 +71,14 @@ func collectRefs(stmt any) Refs {
 func walkRefs(node any, scope map[string]bool, r *Refs) {
 	switch v := node.(type) {
 	case map[string]any:
-		if v["class"] == "STAR" {
+		if v["class"] == "STAR" && v[starSeen] == nil {
+			// A star attributeStars did not account for: inside an
+			// expression, in an ORDER BY, anywhere this walk has no rule
+			// for. It counts over every table the statement reads.
 			r.Star = true
+		}
+		if v["class"] == "SUBQUERY" && v["subquery_type"] == "EXISTS" {
+			markExists(v)
 		}
 		switch v["type"] {
 		case "JOIN":
@@ -122,6 +134,9 @@ func walkRefs(node any, scope map[string]bool, r *Refs) {
 				walkRefs(entry["value"], scope, r) // the body: outer scope only
 			}
 		}
+		if v["type"] == "SELECT_NODE" {
+			attributeStars(v, inner, r)
+		}
 		for k, child := range v {
 			if k != "cte_map" {
 				walkRefs(child, inner, r)
@@ -132,6 +147,145 @@ func walkRefs(node any, scope map[string]bool, r *Refs) {
 			walkRefs(child, scope, r)
 		}
 	}
+}
+
+// starSeen and existsOnly are marks this walk leaves on the decoded tree: a
+// star attributeStars accounted for, and a select that stands directly under
+// EXISTS.
+const (
+	starSeen   = "\x00star_seen"
+	existsOnly = "\x00exists_only"
+)
+
+// markExists marks the select an EXISTS asks about, when what it returns
+// cannot matter: EXISTS only asks whether a row exists, and which columns a
+// row has does not change that. With a LIMIT or an OFFSET it can (DISTINCT *
+// over other columns is another number of rows, and an OFFSET counts them),
+// so a select with any modifier is not marked, nor is a set operation.
+func markExists(sub map[string]any) {
+	q, _ := sub["subquery"].(map[string]any)
+	node, _ := q["node"].(map[string]any)
+	if node == nil || node["type"] != "SELECT_NODE" {
+		return
+	}
+	if mods, ok := node["modifiers"].([]any); !ok || len(mods) != 0 {
+		return
+	}
+	node[existsOnly] = true
+}
+
+// attributeStars decides, for the stars standing directly in one select's
+// list, which tables' column lists they expand (#2111). Only what is certain
+// is attributed; a star left unmarked is picked up by walkRefs as a star
+// over everything.
+//
+//   - Directly under EXISTS (markExists) a star expands nothing that matters.
+//   - An unqualified star expands every base table of this select's own FROM.
+//     Over a join with USING or NATURAL it is also reordered by the join, and
+//     not the same way everywhere (MySQL puts the join's columns first):
+//     StarNamedJoin.
+//   - A qualified star (t.*) expands the one FROM item called t, by its alias
+//     or, with no alias, by its table name. No such item, or two, and the star
+//     is left unattributed: it may name a table of an outer select. A
+//     qualified star is not reordered by USING or NATURAL (measured on MySQL
+//     8.4, MariaDB 11.4 and DuckDB).
+//   - A FROM item that is a derived table, or the name of a WITH in scope,
+//     adds nothing: its columns are what its own select lists say, and each of
+//     those is a select this walk reads on its own.
+//
+// scope is the WITH names visible in this select.
+func attributeStars(sel map[string]any, scope map[string]bool, r *Refs) {
+	list, _ := sel["select_list"].([]any)
+	var stars []map[string]any
+	for _, e := range list {
+		if m, ok := e.(map[string]any); ok && m["class"] == "STAR" {
+			stars = append(stars, m)
+		}
+	}
+	if len(stars) == 0 {
+		return
+	}
+	if sel[existsOnly] != nil {
+		for _, st := range stars {
+			st[starSeen] = true
+		}
+		return
+	}
+	items, named, ok := fromItems(sel["from_table"])
+	if !ok {
+		return // a FROM this walk cannot read: the stars stay unattributed
+	}
+	for _, st := range stars {
+		rel, isString := st["relation_name"].(string)
+		if !isString {
+			continue
+		}
+		var expands []fromItem
+		if rel == "" {
+			expands = items
+			if named {
+				r.StarNamedJoin = true
+			}
+		} else {
+			for _, it := range items {
+				if foldName(it.called) == foldName(rel) {
+					expands = append(expands, it)
+				}
+			}
+			if len(expands) != 1 {
+				continue
+			}
+		}
+		for _, it := range expands {
+			if it.derived || (it.ref.Catalog == "" && it.ref.Schema == "" && scope[foldName(it.ref.Name)]) {
+				continue
+			}
+			r.StarTables = append(r.StarTables, it.ref)
+		}
+		st[starSeen] = true
+	}
+}
+
+// fromItem is one relation of a FROM clause: a base table (ref) or a derived
+// table, and the name a qualified star reaches it by.
+type fromItem struct {
+	called  string
+	derived bool
+	ref     TableRef
+}
+
+// fromItems flattens a FROM clause into its relations. named says one of its
+// joins is written with USING or NATURAL. ok is false for a shape this walk
+// has no rule for (a table function, PIVOT, a VALUES list, a field of the
+// wrong type): the caller then attributes nothing.
+func fromItems(from any) (items []fromItem, named, ok bool) {
+	v, isMap := from.(map[string]any)
+	if !isMap {
+		return nil, false, false
+	}
+	alias, _ := v["alias"].(string)
+	switch v["type"] {
+	case "JOIN":
+		left, ln, lok := fromItems(v["left"])
+		right, rn, rok := fromItems(v["right"])
+		using, _ := v["using_columns"].([]any)
+		return append(left, right...), ln || rn || len(using) > 0 || v["ref_type"] == "NATURAL", lok && rok
+	case "BASE_TABLE":
+		name, ok1 := v["table_name"].(string)
+		schema, ok2 := v["schema_name"].(string)
+		catalog, ok3 := v["catalog_name"].(string)
+		if !ok1 || !ok2 || !ok3 || name == "" {
+			return nil, false, false
+		}
+		called := alias
+		if called == "" {
+			called = name
+		}
+		return []fromItem{{called: called, ref: TableRef{Catalog: catalog, Schema: schema, Name: name}}}, false, true
+	case "SUBQUERY":
+		return []fromItem{{called: alias, derived: true}}, false, true
+	}
+	return nil, false, false
 }
 
 // foldName folds A-Z only, as DuckDB does when it compares names.
