@@ -35,6 +35,13 @@ import (
 // merged. A variable so a test can hit the rule with a short chain.
 var compactMinPairs = 16
 
+// compactRetryEvery is how long a server's job waits after a run that failed
+// before it is tried again. The job is looked at after every refresh, and a
+// merge that cannot succeed (no room, a pair that fails its checksum) would
+// otherwise checksum every pair, run DuckDB and hold the server's slot at
+// every one of them. A variable for the tests.
+var compactRetryEvery = time.Hour
+
 // compactDirFor is the staging root beside a server's snapshots: the SAME
 // filesystem, so the refresh links the result forward instead of copying it,
 // and a dot name that no listing reads as a snapshot.
@@ -65,7 +72,20 @@ type compactCandidate struct {
 // snapshot holds a chain of compactMinPairs pairs or more with no result
 // staged for it yet. Quiet otherwise: most refreshes find nothing to do.
 func (s *baselineSupervisor) maybeCompact(req refreshRequest) {
+	// This runs on the refresh's goroutine after the refresh's own guard has
+	// returned, and runCompact's guard starts only with the job: a panic in
+	// the scan below (a footer the reader cannot take) would end the process,
+	// which is also the capture.
+	defer s.recoverBaselineJob(baselineJobCompact, req.ServerID, req.ServerName)
 	if !req.TableDeltas || req.BaselineDir == "" || s.ctx.Err() != nil {
+		return
+	}
+	s.mu.Lock()
+	wait := time.Until(s.compactRetry[req.ServerID])
+	s.mu.Unlock()
+	if wait > 0 {
+		slog.Debug("snapshot compaction: not looked at; the last run failed and is tried again later",
+			"server", req.ServerName, "id", req.ServerID, "in", wait.Round(time.Second).String())
 		return
 	}
 	at, _, err := reconstruct.NewestSnapshot(s.ctx, req.BaselineDir)
@@ -214,8 +234,10 @@ func (s *baselineSupervisor) runCompact(req refreshRequest, due []compactCandida
 	}
 	if runErr != nil {
 		st.State, st.LastError = "failed", runErr.Error()
+		s.compactRetry[req.ServerID] = time.Now().Add(compactRetryEvery)
 		return
 	}
+	delete(s.compactRetry, req.ServerID)
 	st.State, st.LastError = "succeeded", ""
 	slog.Info("baseline compact: done; the next refresh links each range in place of the pairs it merged",
 		"server", req.ServerName, "id", req.ServerID, "chains_merged", merged, "chains_failed", failed,
@@ -267,6 +289,19 @@ func (s *baselineSupervisor) compactOne(req refreshRequest, root string, c compa
 	// A previous attempt's leftovers (no _SUCCESS, or one the refresh did
 	// not adopt) are replaced whole.
 	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	// The range pair is a second copy of the pairs it merges, on the
+	// snapshots' own filesystem, which is often the capture host's.
+	var need int64
+	for _, f := range files[:len(files)-1] {
+		for _, p := range []string{f.Posdel, f.Upserts} {
+			if fi, err := os.Stat(p); err == nil {
+				need += fi.Size()
+			}
+		}
+	}
+	if err := newDiskSpaceCheck()(root, need); err != nil {
 		return err
 	}
 	mc, err := compactMinor(s.ctx, c.base, c.chain, lo, hi, dir)

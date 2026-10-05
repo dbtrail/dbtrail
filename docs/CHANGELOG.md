@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **Read routing: `LIMIT offset, count`, `ORDER BY NULL` and `_binary'x'`
+  stay on MySQL without trying the copy first** (#2114). The copy refuses
+  all three, so each such statement was sent to it, failed there, and was
+  answered by MySQL afterwards: 37 to 55 ms of failed attempt, measured on
+  MySQL 8.4 and MariaDB 11.4, on a statement the source answers in under
+  1 ms. They are now recognized in the text and go straight to MySQL (about
+  0.4 ms through the port), as text and as prepared statements (`LIMIT ?,
+  ?`). In the "Who answered" counter they show as `veto`: before,
+  `copy_refused` when the plan was expensive, and `cheap_plan` or
+  `bounded_limit` when MySQL answered anyway (a plain `SELECT ... FROM t
+  LIMIT 0, 20` moves from `bounded_limit` to `veto`, at the same speed).
+  Nothing is translated for the copy: `LIMIT 20 OFFSET 0`
+  still reaches it, and SQLAlchemy's `LIMIT 0, 20` never did. `LIKE BINARY`,
+  named in the issue, was already kept on MySQL by an older rule. A window
+  written `OVER (ORDER BY NULL)` still reaches the copy, which answers it
+  with the same rows. Not
+  covered, and still answered by MySQL after a failed attempt: `NULL` that
+  is not the first sort key (`ORDER BY id, NULL`), other constants (`ORDER
+  BY 'x'`), `CAST(col AS BINARY(4))` and `CONVERT(col, BINARY)`.
 - **Read routing: past the freshness limit, the copy answers over tables
   that have not changed since their snapshot** (#2085).
   `--route-max-copy-age` is one age for the whole server, so once the newest
@@ -443,6 +462,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     as read does not. So it repeats, at most once per cut-over age, only on a
     server whose only writes are rows that get dropped. A server with any
     other indexed write keeps its normal updates.
+- **The job that merges a long chain of table changes now runs** (#1723).
+  Since v0.84.0 a table's chain was meant to be merged into one pair by a
+  background job once it listed 16 entries. The job never ran in a daemon: it
+  read "table deltas are on" from the refresh request, and that was only
+  written on a copy of the request inside the refresh, so the job saw "off"
+  and returned without a log line. The same reading made every refresh remove
+  the job's staging directory. Measured on a chain that reached 24 plain
+  pairs with no merge. The setting is now written on the request before the
+  cycle starts. Since the job now really runs after every refresh: it runs
+  under the daemon's DuckDB memory limit (it had none of its own), it checks
+  the disk for room for the merged pair before writing it, a run that failed
+  is tried again after an hour and not at every refresh, a failure that
+  repeats is one line in the run history, and an internal error while it
+  looks for chains no longer ends the process. Nothing was lost while it did
+  not run: a chain reads the same merged or not; it only listed more files.
 - **Read routing: a statement that names a generated column is answered by
   MySQL** (#2123). A snapshot holds no generated column, so the copy does
   not have it, and a statement that named one was not always refused there:

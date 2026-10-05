@@ -358,6 +358,10 @@ The decision, in order, for every statement:
    JSON functions and the `->`/`->>` operators, a backslash inside a string
    literal, optimizer hints), and a backtick-quoted name the port will not
    rewrite for the copy (see "One thing is translated" below): **MySQL**.
+   So are three spellings the copy always refuses, so that it is not tried
+   in vain: `LIMIT offset, count`, `ORDER BY NULL` and `_binary'x'` (same
+   section below). This step comes before the next two, so a `LIMIT 0, 20`
+   the `LIMIT` rules would have kept on MySQL is counted as `veto`.
 4. The one shape that needs no plan: `SELECT <columns> FROM <one table>
    LIMIT <at most 1,000 rows, offset included>` with nothing else (no
    `WHERE`, join, `ORDER BY`, `GROUP BY`, subquery or function call):
@@ -760,7 +764,31 @@ What this is and is not:
   A backtick inside a string literal or a comment is left alone. MySQL
   always gets the statement as the client wrote it. Nothing else of MySQL's
   dialect is translated: a function, an operator or a clause the copy does
-  not have is still refused by the copy and answered by MySQL. The rewrite
+  not have is still refused by the copy and answered by MySQL. That costs
+  the failed attempt on the copy before MySQL answers (37 to 55 ms measured
+  on a statement MySQL answers in under 1 ms), so three spellings that ORMs
+  and drivers send, and that the copy always refuses, stay on MySQL without
+  trying the copy, as text and as prepared statements. The counter shows
+  them as `mysql` / `veto`: before, `copy_refused` when the plan was
+  expensive, and `cheap_plan` or `bounded_limit` when MySQL answered
+  anyway.
+  - `LIMIT` with the offset first and a comma: `LIMIT 0, 20`, `LIMIT ?, ?`
+    (what SQLAlchemy sends), in the statement or in a subquery. The copy
+    only reads `LIMIT 20 OFFSET 0`, which is not kept back;
+  - `ORDER BY NULL` (what Django sends after `GROUP BY`, to ask for no
+    sort), also as `ORDER BY NULL, id` and `ORDER BY NULL DESC`. The copy
+    refuses to sort by a constant. A window written `OVER (ORDER BY NULL)`
+    or `OVER (PARTITION BY a ORDER BY NULL)` is not kept back: the copy
+    answers it, with the same rows. `NULL` further down the list (`ORDER BY id, NULL`) and
+    other constants (`ORDER BY 'x'`, `ORDER BY 1.5`) are not recognized:
+    the copy refuses them and MySQL answers after the attempt, as before;
+  - `_binary` before a string (`= _binary'x'`, how some drivers write a
+    bytes argument). `LIKE BINARY`, `BINARY col` and `= BINARY 'x'` were
+    already kept on MySQL. A cast (`CAST(col AS BINARY)`) is not kept
+    back: the copy answered the same in every statement compared, and
+    refuses a cast of a number, a date or text outside ASCII.
+
+  The rewrite
   is not attempted, and the statement stays on MySQL without trying the
   copy, when it would be a guess:
   - a name that holds a backtick (written doubled, `` `a``b` ``) or a double

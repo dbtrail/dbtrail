@@ -81,7 +81,12 @@ func TestTriggerRefresh_runsTheCompactionAfterTheRefresh(t *testing.T) {
 	if err := os.MkdirAll(half, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	req := refreshRequest{ServerID: "s", ServerName: "s", IndexDSN: "d", BaselineDir: root, TableDeltas: true}
+	// The request as the schedule and the interval loop build it: neither
+	// sets TableDeltas, which is the daemon's own setting. Handing
+	// TriggerRefresh a request with it already set is what let this test pass
+	// while the job never ran in a daemon.
+	sup.tableDeltas = true
+	req := refreshRequest{ServerID: "s", ServerName: "s", IndexDSN: "d", BaselineDir: root}
 	if _, err := sup.TriggerRefresh(req, time.Minute); err != nil {
 		t.Fatal(err)
 	}
@@ -173,6 +178,10 @@ func TestCompactJob_shutdownStopsAndSaysSo(t *testing.T) {
 // be all compaction failures within four hours.)
 func TestCompactJob_repeatedFailureIsOneRecord(t *testing.T) {
 	sup, req, cs, _ := compactRig(t, compactMinPairs)
+	// No wait between tries: this is about what two tries record.
+	prevRetry := compactRetryEvery
+	compactRetryEvery = 0
+	t.Cleanup(func() { compactRetryEvery = prevRetry })
 	cs.err = errors.New("duckdb: out of memory")
 	run := func() console.BaselineStatus {
 		t.Helper()
