@@ -802,7 +802,8 @@ What this is and is not:
     `EXPLAIN` returns, and neither says what type a column or an
     expression has, so only the spellings that name the type themselves
     (`DATE '...'`, `DATE(...)`, `CAST(... AS DATE)`) are kept on MySQL.
-    Use `DATEDIFF`, `TO_DAYS` or `+ INTERVAL n DAY`, which mean one thing.
+    To count the days between two dates write `DATEDIFF`, which MySQL
+    always answers.
   - **A `DATE` plus or minus `INTERVAL`, selected.** `created_on + INTERVAL
     1 DAY` over a `DATE` column is the date `2026-01-02` on MySQL and the
     date and time `2026-01-02 00:00:00` on the copy. The same day: inside a
