@@ -327,8 +327,10 @@ func TestSinceFor_readsAgainWhenAPartitionWasDropped(t *testing.T) {
 			mock.ExpectQuery("PARTITION \\(`p1`\\) WHERE event_timestamp").WillReturnError(gone)
 		}
 		got, err := headsAt(h0, 700, 700).SinceFor(context.Background(), db, opts)
-		if err == nil {
-			t.Fatalf("SinceFor = %v and no error; it must refuse", got)
+		// The partition error itself, after exactly this many reads: one
+		// read more would ask the mock for a listing it does not expect.
+		if !isUnknownPartitionErr(err) {
+			t.Fatalf("SinceFor = %v, err=%v; it must refuse with the partition error", got, err)
 		}
 		if merr := mock.ExpectationsWereMet(); merr != nil {
 			t.Fatal(merr)
