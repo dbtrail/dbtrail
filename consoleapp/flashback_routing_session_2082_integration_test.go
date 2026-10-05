@@ -762,11 +762,23 @@ func TestIntegrationFlashbackRoutedSessionMariaDB(t *testing.T) {
 	if err := rig.src.QueryRow("SELECT @@global.system_time_zone, @@global.time_zone").Scan(&systemZone, &globalZone); err != nil {
 		t.Fatal(err)
 	}
-	c := rig.conn(t, "")
+	// A connection that sent nothing: the port asks for MySQL's default
+	// collation, which MariaDB 11.4 knows and 10.11 does not. There the
+	// connection gets utf8mb4_general_ci, which does not compare like the
+	// copy, and MySQL answers until the connection names another.
 	if globalZone == "SYSTEM" && systemZone == "UTC" {
-		// A connection that sent nothing: MariaDB's defaults.
-		rig.scan(t, c, "copy")
+		d := rig.conn(t, "")
+		// What the source gave the port's session (a variable: MySQL answers).
+		given := connStrings(t, d, "SELECT @@collation_connection")[0][0]
+		want := "copy"
+		if strings.Contains(given, "general") {
+			want = "live"
+		}
+		t.Logf("a connection that names no collation is in %s: the full scan is the %s's", given, want)
+		rig.scan(t, d, want)
 	}
+	c := rig.conn(t, "")
+	must(c, "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci")
 	must(c, "SET time_zone = 'Europe/Madrid'")
 	if got, want := rig.scan(t, c, "copy"), inZone(t, "Europe/Madrid"); !reflect.DeepEqual(got, want) {
 		t.Errorf("under Europe/Madrid = %v, want %v", got, want)

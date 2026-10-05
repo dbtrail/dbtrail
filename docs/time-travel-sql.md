@@ -516,6 +516,15 @@ The decision, in order, for every statement:
    inside one week, and a past rule that held for less than five years and
    missed both months. An offset (`+02:00`) needs none of this.
 
+   **MariaDB 10.11.** The port asks the source for MySQL's default
+   collation, `utf8mb4_0900_ai_ci`. MariaDB 11.4 knows it; 10.11 does not
+   and gives the connection its server default, `utf8mb4_general_ci`, under
+   which the copy does not answer (the log says so, once per connection,
+   with the fix). Name a collation that compares like the copy on the
+   connection (`SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci`, or the
+   driver's own option for it), or set the server's `collation_server` to
+   it.
+
    Two things the port does not see. A session setting changed by a stored
    function that a `SELECT` calls: the statement is a read by its text, so
    do not change session settings inside a function on a source this port

@@ -329,7 +329,9 @@ func sessionFromReadBack(cells []any, instants []time.Time, copyZone func(duckZo
 		return differ("character_set_connection", csConnection, "the copy reads the statement's literals as utf8mb4")
 	case !collationReproducible(collation):
 		return differ("collation_connection", "(not one that compares like utf8mb4_0900_ai_ci)",
-			"the copy compares text as MySQL's default collation does: without case or accents, ß as ss, a full-width letter as the plain one")
+			"the copy compares text as MySQL's default collation does: without case or accents, ß as ss, a full-width letter as the plain one. "+
+				"utf8mb4_unicode_ci and utf8mb4_0900_ai_ci do; utf8mb4_general_ci (what MariaDB 10.11 gives a connection by default) does not: "+
+				"SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci on the connection, or change the server's collation_server")
 	}
 	return rs, nil
 }
