@@ -32,7 +32,8 @@ type refreshRequest struct {
 	// carries is the one in force when it was built.
 	CarryForwardUnchanged bool
 	// TableDeltas is the daemon's --baseline-table-deltas (#1638), stamped onto
-	// the request by executeRefresh. Not resolved per server and not read by a
+	// the request by TriggerRefresh (and again by executeRefresh, for a cycle
+	// run without it). Not resolved per server and not read by a
 	// restore: it changes how a REFRESH stores a table, nothing else.
 	TableDeltas bool
 	// Trigger is stamped onto the history record: BaselineRunTriggerScheduled
@@ -99,6 +100,13 @@ type refreshRequest struct {
 // cycle, after the gate has read the index marks (#1705); see anchorRefresh.
 // The claim therefore carries no At until the cycle has one.
 func (s *baselineSupervisor) TriggerRefresh(req refreshRequest, interval time.Duration) (string, error) {
+	// Here, on the request every step of the cycle is handed, and not only
+	// inside the fold: the staging sweep at the top of the cycle and the
+	// compaction after it read it too. Stamped only in executeRefresh, on
+	// that function's own copy, it reached neither, so the sweep removed the
+	// staging directory on every cycle and the compaction job (#1723)
+	// returned before looking at a chain, in every daemon.
+	req.TableDeltas = s.tableDeltas
 	s.mu.Lock()
 	if s.busyLocked(req.ServerID) {
 		s.mu.Unlock()

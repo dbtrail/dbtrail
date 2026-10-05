@@ -696,22 +696,31 @@ func (h *BaselineRunHistory) LastFullCopy(serverID string) (run, skip *BaselineR
 }
 
 // AppendCompact records a table-delta compaction run (#1723). When the run
-// failed and the newest record for the server is a compaction that failed
-// the same way, that record's end moves to this run instead of a new record
-// being added, for the reason AppendSkip gives: the job is retried at every
-// refresh, so a persistent failure would otherwise append an identical
-// record every cycle and push the refreshes off the capped history. A
-// success, or a different error, is a new record. Returns whether a NEW
-// record was added.
+// failed and the server's newest COMPACTION record failed the same way, that
+// record's end moves to this run instead of a new record being added, for
+// the reason AppendSkip gives: the job is retried, so a persistent failure
+// would otherwise append an identical record every time and push the
+// refreshes off the capped history. The newest compaction record, not the
+// newest record: in a daemon a refresh always records itself between two
+// tries, and comparing with the newest record folded nothing. A success, or
+// a different error, is a new record. Returns whether a NEW record was added.
 func (h *BaselineRunHistory) AppendCompact(rec BaselineRunRecord) (bool, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	rec.Kind = BaselineRunCompact
 	recs := h.servers[rec.ServerID]
-	if n := len(recs); n > 0 && rec.Error != "" && recs[n-1].Kind == BaselineRunCompact && recs[n-1].Error == rec.Error {
-		recs[n-1].FinishedAt = rec.FinishedAt
-		recs[n-1].Tables, recs[n-1].Refused = rec.Tables, rec.Refused
-		return false, h.save()
+	if rec.Error != "" {
+		for i := len(recs) - 1; i >= 0; i-- {
+			if recs[i].Kind != BaselineRunCompact {
+				continue
+			}
+			if recs[i].Error == rec.Error {
+				recs[i].FinishedAt = rec.FinishedAt
+				recs[i].Tables, recs[i].Refused = rec.Tables, rec.Refused
+				return false, h.save()
+			}
+			break
+		}
 	}
 	h.servers[rec.ServerID] = capRecords(append(recs, rec))
 	return true, h.save()
