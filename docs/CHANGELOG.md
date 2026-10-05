@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `INTERVAL` still goes to the copy. Not covered, because the statement's
   text does not show it: the same arithmetic on a `DATE` column
   (`created_on + 1`), which is listed with the other known differences in
-  [Time-travel SQL](time-travel-sql.md).
+  [Time-travel SQL](time-travel-sql.md) and tracked in #2133.
 - **Read routing: statements with backtick-quoted names can be served by
   the copy** (#2081). Most ORMs and drivers quote every name with
   backticks, which the copy does not read, so those statements were always
