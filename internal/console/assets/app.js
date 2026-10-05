@@ -13642,6 +13642,7 @@ const ROUTE_REASON_TEXT = {
   explain_failed: "MySQL could not explain it",
   copy_age_unknown: "the copy's age is unknown",
   copy_too_old: "the copy was older than the limit, and a table the statement reads changed since its snapshot (or nothing could confirm that none did)",
+  result_over_row_cap: "an expensive plan whose result is over the copy's row cap: MySQL answered, and the copy was not tried",
   copy_refused: "the copy refused it (a construct it lacks, a table it does not have, the row cap)",
   copy_columns_differ: "SELECT *, NATURAL JOIN or a column name over a table whose columns on the copy are not MySQL's, or the snapshot holds no table definition: take a new full snapshot",
   show_warnings: "SHOW WARNINGS after a MySQL statement",

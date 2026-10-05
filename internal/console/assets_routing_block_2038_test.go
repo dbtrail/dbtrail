@@ -43,6 +43,7 @@ console.log(JSON.stringify({
   noServer: draw(on, null),
   none: draw(on, srv),
   counts: draw({ ...on, servers: { s1: { copy: 3, mysql: 7, reasons: { expensive_plan: 3, cheap_plan: 5, write: 2 } } } }, srv),
+  limits: draw({ ...on, servers: { s1: { copy: 1, mysql: 6, reasons: { expensive_plan: 1, bounded_limit: 4, result_over_row_cap: 2 } } } }, srv),
   other: draw({ ...on, servers: { s2: { copy: 3, mysql: 7, reasons: { expensive_plan: 3 } } } }, srv),
   unavailable: draw({ ...on, servers: { s1: { copy: 0, mysql: 0, reasons: {}, unavailable: "the server has no source database to forward to" } } }, srv),
   noRule: draw({ ...on, cost_threshold: 0, scan_rows: 0 }, srv),
@@ -72,6 +73,7 @@ console.log(JSON.stringify({
 	}
 	var got struct {
 		Off, NoServer, None, Counts, Other, Unavailable, NoRule string
+		Limits                                                  string
 		ReadOnly, ReadOnlyOnlyRefusals, ReadOnlyNoRule          string
 		Forwarding, ForwardingReadOnly, ForwardingNoName        string
 		NoSource, Hint                                          string
@@ -103,6 +105,11 @@ console.log(JSON.stringify({
 	must("no server", got.NoServer, "pick a server in the left sidebar")
 	must("none", got.None, "shop", "no statements yet", "at most 10m old", "plan costs at least 10000", "at least 100000 rows", "Refresh")
 	must("counts", got.Counts, "7 by MySQL", "3 by the copy", "3 × an expensive plan", "5 × a cheap plan", "2 × a write", "Why each side")
+	// The two reasons a LIMIT and the copy's row cap keep a statement on
+	// MySQL (#2061, #2115), as the page words them.
+	t.Logf("%-12s %s", "limits:", got.Limits)
+	must("limits", got.Limits, "6 by MySQL", "1 by the copy", "4 × a small LIMIT MySQL answers without reading past it",
+		"2 × an expensive plan whose result is over the copy's row cap: MySQL answered, and the copy was not tried")
 	// Another server's counts never show under the picked one.
 	must("other server", got.Other, "no statements yet")
 	if strings.Contains(got.Other, "7 by MySQL") {
