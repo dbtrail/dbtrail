@@ -266,11 +266,6 @@ func backtickFixtures(db string, mariadb bool) []backtickFixture {
 		dollarCJK.kind = "columns"
 	}
 	return []backtickFixture{
-		dollar,
-		dollarCJK,
-		kept("SELECT `text`\u00a0'Label' FROM (SELECT 'body' AS `text`) `t`", serr, "right before a string literal", "a no-break space between the name and the string: white space on the copy, which would answer the constant"),
-		kept("SELECT `text` E'Label' FROM (SELECT 'body' AS `text`) `t`", serr, "right before a string literal", "E'..' is an escaped string on the copy, which would answer the constant"),
-		kept("SELECT `text` N'Label' FROM (SELECT 'body' AS `text`) `t`", noc, "right before a string literal", "N'..' is a string on both"),
 		// What GORM sends.
 		star("SELECT * FROM `orders` WHERE `orders`.`id` = 1 ORDER BY `orders`.`id` LIMIT 1"),
 		star("SELECT * FROM `orders` WHERE `orders`.`customer_id` IN (1,2,3)"),
@@ -354,5 +349,10 @@ func backtickFixtures(db string, mariadb bool) []backtickFixture {
 		kept("SELECT `int`\n'5' FROM (SELECT 9 AS `int`) `t`", noc, "right before a string literal", "9 on MySQL, 5 on the copy"),
 		kept("SELECT `a` -- x\r+1\n FROM (SELECT 1 AS `a`) `t`", noc, "carriage return inside a line comment", "the comment runs to the line feed on MySQL (1) and stops at the carriage return on the copy (2)"),
 		kept("SELECT `a` /*M! +1 */ FROM (SELECT 1 AS `a`) `t`", noc, "optimizer hint or MySQL comment", "MariaDB runs the comment's text (2); MySQL and the copy do not (1)"),
+		dollar,
+		dollarCJK,
+		kept("SELECT `text`\u00a0'Label' FROM (SELECT 'body' AS `text`) `t`", serr, "right before a string literal", "a no-break space between the name and the string: white space on the copy, which would answer the constant"),
+		kept("SELECT `text` E'Label' FROM (SELECT 'body' AS `text`) `t`", serr, "right before a string literal", "E'..' is an escaped string on the copy, which would answer the constant"),
+		kept("SELECT `text` N'Label' FROM (SELECT 'body' AS `text`) `t`", noc, "right before a string literal", "N'..' is a string on both"),
 	}
 }
