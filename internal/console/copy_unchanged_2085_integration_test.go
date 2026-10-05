@@ -340,6 +340,19 @@ func TestIntegrationCopyUnchanged_2085(t *testing.T) {
 		testutil.MustExec(t, r.db, "UPDATE stream_state SET mode = 'position' WHERE id = 1")
 		r.wantNot("not in GTID mode", quiet)
 	})
+	t.Run("a capture restarted from an earlier point, still in GTID mode", func(t *testing.T) {
+		// The reporter's watermark stands on a GTID set; the index's saved
+		// set is handed to it on every statement.
+		defer func() { r.wm.wm = CaptureWatermark{} }()
+		var asked string
+		r.wm.wm.StillHolds = func(saved string) bool { asked = saved; return false }
+		r.wantNot("restarted from an earlier point", quiet)
+		if asked != "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-50" {
+			t.Errorf("the saved set handed over = %q, want the index's stream_state.gtid_set", asked)
+		}
+		r.wm.wm.StillHolds = func(string) bool { return true }
+		r.wantUnchanged(quiet)
+	})
 	t.Run("no capture on record", func(t *testing.T) {
 		var gtid string
 		if err := r.db.QueryRow("SELECT gtid_set FROM stream_state WHERE id = 1").Scan(&gtid); err != nil {
@@ -459,4 +472,51 @@ func TestIntegrationCopyUnchanged_startedLongBeforeCommittedAfter_2085(t *testin
 	// with no event at all is still unchanged.
 	r.wantUnchanged(history)
 	r.wantUnchanged(bystander)
+
+	// `bintrail index` loads OLDER binlog files into this index: old dates,
+	// old positions, and the newest ids. "The event with the highest id" is
+	// now one of those, before every cut, and says nothing about the long
+	// statements above, which must still be found. (The verdicts already
+	// reached are forgotten first, as a restarted daemon forgets them.)
+	r.event("shop", history.Table, "binlog.000006", 250, floor.Add(-90*time.Minute))
+	r.event("shop", history.Table, "binlog.000006", 260, foldedFloor.Add(-90*time.Minute))
+	testutil.MustExec(t, r.db, `INSERT INTO index_state (binlog_file, file_size, last_position, events_indexed, status, started_at, completed_at)
+		VALUES ('binlog.000006', 1000, 1000, 2, 'completed', UTC_TIMESTAMP(), UTC_TIMESTAMP())`)
+	r.s.copyChanged.seen = nil
+	r.wantNot("shop."+nightly.Table+" changed since its snapshot", nightly)
+	r.wantNot("shop."+folded.Table+" changed since its snapshot", folded)
+	r.wantUnchanged(history)
+	r.wantUnchanged(bystander)
+	// An index_state that cannot be read is not "no file was ever indexed".
+	r.s.copyChanged.seen = nil
+	testutil.MustExec(t, r.db, "RENAME TABLE index_state TO index_state_gone")
+	r.wantNot("shop."+nightly.Table+" changed since its snapshot", nightly)
+}
+
+// "Changed after this cut" cannot become false again, so it is remembered per
+// table and cut and the index is not asked a second time: the search of the
+// older hours can take the whole budget on every statement otherwise.
+// "Unchanged" is never remembered.
+func TestIntegrationCopyUnchanged_changedIsRemembered_2085(t *testing.T) {
+	r := newUnchangedRig(t)
+	tb, other := r.table(nil), r.table(nil)
+	r.wantUnchanged(tb)
+	r.wantUnchanged(tb) // and asked again: nothing was remembered
+	r.event("shop", tb.Table, "binlog.000008", 500, r.stamp.Add(time.Hour))
+	r.wantNot("shop."+tb.Table+" changed since its snapshot", tb)
+	// The index can no longer say so, and is not asked.
+	testutil.MustExec(t, r.db, "DELETE FROM binlog_events WHERE table_name = ?", tb.Table)
+	r.wantNot("shop."+tb.Table+" changed since its snapshot", tb)
+	r.wantNot("shop."+tb.Table+" changed since its snapshot", other, tb)
+	r.wantUnchanged(other)
+	// The same name on another server is another table.
+	if why := r.s.copyChanged.get("another-server", tb, r.anchor); why != "" {
+		t.Errorf("remembered for a server it was not decided for: %s", why)
+	}
+	// A newer file of the table has a new cut: asked afresh.
+	r.rewrite(tb, func(md map[string]string) {
+		md[baseline.MetaKeyBinlogFile], md[baseline.MetaKeyBinlogPos] = "binlog.000008", "900"
+		md[baseline.MetaKeyLastDumpAt] = md[baseline.MetaKeySnapshotTimestamp]
+	})
+	r.wantUnchanged(tb)
 }

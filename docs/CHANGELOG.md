@@ -55,8 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot and none since: 0.25 s for half a million changes when its file
   came from a refresh, 1.5 s when it came from a full read; a table with
   that many older changes costs the same again while the index holds a
-  statement that began long before a snapshot and committed after it. Past
-  a two-second budget the statement goes to MySQL. See
+  statement that began long before a snapshot and committed after it, and
+  always on an index `bintrail index` has loaded binlog files into. Past
+  a two-second budget the statement goes to MySQL; a table found changed is
+  remembered for that snapshot file and not looked up again. See
   [Past the limit](time-travel-sql.md#past-the-limit-tables-that-have-not-changed).
 - **Read routing: statements with backtick-quoted names can be served by
   the copy** (#2081). Most ORMs and drivers quote every name with

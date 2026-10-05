@@ -83,6 +83,9 @@ type captureSlot struct {
 	// reached the source: a later one that does not include it went
 	// backward.
 	lastCaptured string
+	// proven is the GTID set capture was shown to hold at through: what the
+	// source had executed then. "" with no watermark.
+	proven string
 }
 
 // captureStatusReporter is console.CaptureStatusReporter for the watch
@@ -215,7 +218,7 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 	done := make(chan struct{})
 	slot.flight = done
 	prev := slot.prev
-	through, pending, lastCaptured := slot.through, slot.pending, slot.lastCaptured
+	through, pending, lastCaptured, proven := slot.through, slot.pending, slot.lastCaptured, slot.proven
 	c.mu.Unlock()
 	// Deferred, so that whatever happens below, the next load reads again
 	// instead of waiting on a read that is over.
@@ -249,14 +252,16 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 	at := now()
 	answer, next := captureStatusFrom(r, prev, at)
 	answer.ServerID = e.ID
+	was, sample := through, pending
 	through, pending, throughWhy := advanceWatermark(r, through, pending, lastCaptured, asked)
+	proven = provenAfter(proven, was, through, asked, sample, r)
 	if r.executed != "" {
 		lastCaptured = r.captured
 	}
 
 	c.mu.Lock()
 	slot.answer, slot.at, slot.has, slot.prev = answer, at, true, next
-	slot.through, slot.pending, slot.throughWhy, slot.lastCaptured = through, pending, throughWhy, lastCaptured
+	slot.through, slot.pending, slot.throughWhy, slot.lastCaptured, slot.proven = through, pending, throughWhy, lastCaptured, proven
 	slot.ttl = captureStatusTTL
 	if answer.RetryInSeconds > 0 {
 		slot.ttl = captureStatusPendingTTL

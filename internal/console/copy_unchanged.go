@@ -84,6 +84,13 @@ type CaptureWatermark struct {
 	// records every table. A table outside the capture's filters has no
 	// event in the index however much it changes.
 	Captures func(schema, table string) bool
+	// StillHolds reports whether a GTID set capture has saved (the index's
+	// stream_state.gtid_set, read now) still contains what capture was
+	// shown to hold at Through. A capture restarted from an earlier point
+	// deletes the rows past it and saves a smaller set: until it has read
+	// its way back, the index is short of what the watermark was proven
+	// for. nil: not checked (a reporter that keeps no set).
+	StillHolds func(savedGTIDSet string) bool
 }
 
 // CaptureWatermarkReporter is the optional half of a CaptureStatusReporter
@@ -308,16 +315,72 @@ func copyLookupSince(ctx context.Context, db *sql.DB, t views.BaselineTable, cut
 	return since, "", nil
 }
 
+// copyChangedMemo remembers, per server and table, that the table changed
+// after one cut. That verdict cannot become false: the cut is a fixed binlog
+// position and the change is positioned after it. Without it every heavy
+// statement over such a table repeats the lookups, and the one over the
+// older hours can take the whole budget each time. "Unchanged" is never
+// remembered: it is only true until the next change. A new cut for the table
+// (a newer snapshot file) replaces the entry.
+type copyChangedMemo struct {
+	mu   sync.Mutex
+	seen map[copyChangedKey]copyChangedAt
+}
+
+type copyChangedKey struct{ server, schema, table string }
+
+type copyChangedAt struct {
+	cut query.BinlogPos
+	why string
+}
+
+// copyChangedMemoMax bounds the memo; past it the memo starts over.
+const copyChangedMemoMax = 4096
+
+func (m *copyChangedMemo) get(server string, t views.BaselineTable, cut query.BinlogPos) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if at, ok := m.seen[copyChangedKey{server, t.Schema, t.Table}]; ok && at.cut == cut {
+		return at.why
+	}
+	return ""
+}
+
+func (m *copyChangedMemo) put(server string, t views.BaselineTable, cut query.BinlogPos, why string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.seen == nil || len(m.seen) >= copyChangedMemoMax {
+		m.seen = map[copyChangedKey]copyChangedAt{}
+	}
+	m.seen[copyChangedKey{server, t.Schema, t.Table}] = copyChangedAt{cut, why}
+	return why
+}
+
+// indexBackfilled reports whether `bintrail index` ever wrote into this
+// index: it is the only writer of index_state. Files indexed that way get
+// the NEWEST ids whatever their position, so "the event with the highest id"
+// is no longer "the event furthest into the binlog". A read that fails
+// counts as yes.
+func indexBackfilled(ctx context.Context, db *sql.DB) bool {
+	var one int
+	err := db.QueryRowContext(ctx, `SELECT 1 FROM index_state LIMIT 1`).Scan(&one)
+	return !errors.Is(err, sql.ErrNoRows)
+}
+
 // newestEventOlderThan is the binlog position of the event with the highest
 // id among those that ran before floor, in any table; found is false when
 // the index holds none.
 //
-// It answers, in one row, whether the slow search below is needed at all. A
-// stream writes the index in binlog order, so ids rise with position
-// (query.StreamCaptured, the premise Options.SinceEventID already rests
-// on): when the newest of the events that ran before floor sits before a
-// cut, every one of them does. The primary key leads with event_id and the
-// time predicate prunes partitions, so the server reads the last row of
+// It answers, in one row, whether the slow search below is needed at all,
+// and only on an index written by a stream ALONE. There ids rise with
+// position over the whole index, so when the newest of the events that ran
+// before floor sits before a cut, every one of them does. That is a stronger
+// premise than the one Options.SinceEventID rests on (events indexed later
+// have higher ids), and `bintrail index` breaks it: older binlog files loaded
+// into a stream's index carry old dates, old positions and the newest ids.
+// The caller does not ask this on such an index (indexBackfilled) and
+// searches by position every time. The primary key leads with event_id and
+// the time predicate prunes partitions, so the server reads the last row of
 // each partition older than floor and nothing else.
 func newestEventOlderThan(ctx context.Context, db *sql.DB, floor time.Time) (at query.BinlogPos, found bool, err error) {
 	err = db.QueryRowContext(ctx,
@@ -530,6 +593,9 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 		if cuts[i].refusal != "" {
 			return cuts[i].refusal
 		}
+		if why := s.copyChanged.get(id, t, cuts[i].anchor); why != "" {
+			return why
+		}
 		if i == 0 || cuts[i].anchor.AtOrBefore(oldestCut) {
 			oldestCut = cuts[i].anchor
 		}
@@ -551,6 +617,11 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 	if why := captureLossSince(st, sourceRead); why != "" {
 		return why
 	}
+	if wm.StillHolds != nil && !wm.StillHolds(st.GTIDSet.String) {
+		// The reporter learns of a restart at its next read of the source,
+		// up to its answer's lifetime away; the index says so now.
+		return "capture's saved position no longer includes what it was confirmed to hold: it was restarted from an earlier point and has not read its way back yet"
+	}
 	ddl, complete, err := loadDDLAfter(ctx, b.db, oldestCut)
 	if err != nil {
 		return unreadable("the schema changes", err)
@@ -558,6 +629,7 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 	if !complete {
 		return "too many schema changes since the snapshot to check each one"
 	}
+	backfilled := indexBackfilled(ctx, b.db)
 	var floor time.Time
 	for i, t := range tables {
 		for _, r := range ddl {
@@ -584,22 +656,28 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 			return unreadable("the events of "+t.Schema+"."+t.Table, err)
 		}
 		if len(rows) > 0 {
-			return fmt.Sprintf("%s.%s changed since its snapshot", t.Schema, t.Table)
+			return s.copyChanged.put(id, t, cuts[i].anchor, fmt.Sprintf("%s.%s changed since its snapshot", t.Schema, t.Table))
 		}
 		// The lookup above starts at a time floor, as the engine requires
 		// of a search by position (#797). A statement or transaction that
 		// began before that floor and committed after the cut is positioned
 		// after the cut and dated before the floor: a DELETE that starts at
 		// 00:30, a snapshot at 02:00, a commit at 03:00. So the hours
-		// before the floor are searched too, by position alone. Almost
-		// never needed, which one row settles: the newest event that ran
-		// before the floor is positioned before the cut.
+		// before the floor are searched too, by position alone. On an
+		// index only a stream wrote that is almost never needed, which one
+		// row settles: the newest event that ran before the floor is
+		// positioned before the cut. On an index `bintrail index` also
+		// wrote, that row says nothing, and the search always runs.
 		tableFloor := copyTimeFloor(since)
-		newest, found, err := newestEventOlderThan(ctx, b.db, tableFloor)
-		if err != nil {
-			return unreadable("the events older than the snapshot of "+t.Schema+"."+t.Table, err)
+		search := backfilled
+		if !search {
+			newest, found, err := newestEventOlderThan(ctx, b.db, tableFloor)
+			if err != nil {
+				return unreadable("the events older than the snapshot of "+t.Schema+"."+t.Table, err)
+			}
+			search = found && cuts[i].anchor.AtOrBefore(newest)
 		}
-		if found && cuts[i].anchor.AtOrBefore(newest) {
+		if search {
 			rows, err := b.engine.Fetch(ctx, query.Options{
 				Schema: t.Schema, Table: t.Table,
 				Until: &tableFloor, SincePos: &cuts[i].anchor, SinceEventID: cuts[i].lastEventID,
@@ -609,7 +687,7 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 				return unreadable("the older events of "+t.Schema+"."+t.Table, err)
 			}
 			if len(rows) > 0 {
-				return fmt.Sprintf("%s.%s changed since its snapshot (a change that began long before it and committed after)", t.Schema, t.Table)
+				return s.copyChanged.put(id, t, cuts[i].anchor, fmt.Sprintf("%s.%s changed since its snapshot (a change that began long before it and committed after)", t.Schema, t.Table))
 			}
 		}
 	}

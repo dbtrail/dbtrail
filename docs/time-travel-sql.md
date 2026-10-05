@@ -597,7 +597,11 @@ did before:
   taken while capture was behind does not hide what capture indexed later.
   A statement that began earlier still, and committed after the snapshot, is
   dated before that hour: when the index holds any change of that kind, the
-  table's older changes are searched too, by position alone.) So does any
+  table's older changes are searched too, by position alone. An index that
+  `bintrail index` has ever loaded binlog files into cannot tell that from
+  one row, so there the older changes are searched on every statement: a
+  table with a long history in the index then runs into the two-second
+  budget and follows the age rule.) So does any
   schema change that names the table (`ALTER`,
   `TRUNCATE`, `DROP`, `RENAME`), which changes a table without a row change:
   those are placed by position alone, however long the statement ran.
@@ -679,7 +683,8 @@ rule. A source that filters its binary log (`binlog-do-db`,
 When it applies and what it costs:
 
 - Only a MySQL source captured in GTID mode (checked on every statement: a
-  capture restarted in binlog-position mode stops being vouched for at once),
+  capture restarted in binlog-position mode, or from an earlier point and
+  not yet back where it was, stops being vouched for at once),
   whose index is not on the source server itself. A MariaDB source, a source in binlog-position mode, one with
   tagged GTIDs, one that filters its binary log, and one that executed
   transactions capture never read (a dump loaded with
@@ -711,11 +716,16 @@ When it applies and what it costs:
   MySQL skip the rows without reading them; a full read has nothing to
   record). The other only exists while the index holds a statement that
   began long before some snapshot and committed after it: then each table's
-  older changes are searched as well, which costs nothing for a table with
-  few of them and about the same again (1.5 s for half a million with a full
-  read's file, 0.25 s with a refresh's) for a table with many. All the reads
-  of one statement share a two-second budget; past it the statement goes to
-  MySQL, so a statement over two such tables at once is not vouched for.
+  older changes are searched as well, across everything the index still
+  holds of that table. That costs nothing for a table with few of them and
+  grows with their number: 1.5 s for half a million with a full read's file
+  (0.25 s with a refresh's), so a table with more than about 700,000 older
+  changes and a full read's file does not fit. All the reads of one
+  statement share a two-second budget; past it the statement goes to MySQL,
+  so a statement over two such tables at once is not vouched for either.
+  Once a table is found changed after its snapshot, that is remembered for
+  that snapshot file and the index is not asked again: the statements that
+  follow go to MySQL at once.
 - The statement takes one of the copy's slots while it is checked, as a heavy
   read within the limit does.
 

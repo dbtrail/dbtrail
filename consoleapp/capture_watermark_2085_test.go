@@ -187,6 +187,16 @@ func TestCaptureWatermark_busySourceNeedsTwoReads_2085(t *testing.T) {
 	if !second.Through.Equal(captureT0) {
 		t.Fatalf("second read: through = %v, want the instant the first read began (%v)", second.Through, captureT0)
 	}
+	// The watermark stands on what the source had at that first read: a
+	// saved set that contains it still holds, and one cut back short of it
+	// (a capture restarted from an earlier point) does not.
+	if second.StillHolds == nil || !second.StillHolds(uuidB+":1-35") || !second.StillHolds(uuidB+":1-30") ||
+		second.StillHolds(uuidB+":1-29") || second.StillHolds("") || second.StillHolds("not a set") {
+		t.Fatalf("StillHolds after a watermark proven for %s:1-30 answers wrongly", uuidB)
+	}
+	if first.StillHolds != nil {
+		t.Fatal("no watermark, yet a set to hold")
+	}
 	// A read that fails keeps what was proven.
 	now = now.Add(captureStatusTTL)
 	third := c.CaptureWatermark(context.Background(), e)
@@ -338,5 +348,30 @@ func TestReadBinlogFilters_2085(t *testing.T) {
 				t.Errorf("readBinlogFilters = %v, %q; want %v and %q", logsAll, why, c.logsAll, c.why)
 			}
 		})
+	}
+}
+
+// What the watermark stands on after each kind of read.
+func TestProvenAfter_2085(t *testing.T) {
+	asked, before := captureT0, captureT0.Add(-time.Minute)
+	sample := &captureSample{executed: uuidB + ":1-20", at: before}
+	r := captureProbeResult{executed: uuidB + ":1-40"}
+	cases := []struct {
+		name     string
+		was, now time.Time
+		sample   *captureSample
+		want     string
+	}{
+		{"dropped", before, time.Time{}, sample, ""},
+		{"did not move", before, before, sample, "kept"},
+		{"moved to the earlier sample", time.Time{}, before, sample, uuidB + ":1-20"},
+		{"moved to this read", before.Add(-time.Hour), asked, sample, uuidB + ":1-40"},
+		{"moved to this read, no sample", time.Time{}, asked, nil, uuidB + ":1-40"},
+		{"an instant nothing explains", time.Time{}, asked.Add(time.Second), nil, ""},
+	}
+	for _, c := range cases {
+		if got := provenAfter("kept", c.was, c.now, asked, c.sample, r); got != c.want {
+			t.Errorf("%s: proven = %q, want %q", c.name, got, c.want)
+		}
 	}
 }

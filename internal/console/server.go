@@ -363,7 +363,8 @@ type Server struct {
 	// "unchanged since the snapshot" question (#2085, copy_unchanged.go).
 	copyCuts copyCutMemo
 	// copyFaults limits the warnings of that question's faults.
-	copyFaults copyFaultLog
+	copyFaults  copyFaultLog
+	copyChanged copyChangedMemo
 
 	listen     string
 	token      string

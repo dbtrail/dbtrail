@@ -145,6 +145,35 @@ func advanceWatermark(r captureProbeResult, through time.Time, pending *captureS
 	return through, pending, why
 }
 
+// provenAfter is the GTID set the watermark stands on after one read: what
+// the source had executed at the instant the watermark names. was and now
+// are the watermark before and after the read (advanceWatermark), sample the
+// one that was waiting, r the read. A watermark that did not move keeps its
+// set; one that was dropped has none.
+func provenAfter(proven string, was, now, asked time.Time, sample *captureSample, r captureProbeResult) string {
+	switch {
+	case now.IsZero():
+		return ""
+	case now.Equal(was):
+		return proven
+	case sample != nil && now.Equal(sample.at):
+		return sample.executed
+	case now.Equal(asked):
+		return r.executed
+	}
+	return ""
+}
+
+// stillHolds is CaptureWatermark.StillHolds for a watermark that stands on
+// proven: whether a saved GTID set contains it. A set that does not parse
+// does not.
+func stillHolds(proven string) func(saved string) bool {
+	return func(saved string) bool {
+		have, want, ok := parseGTIDPair(strings.Join(strings.Fields(saved), ""), proven)
+		return ok && proven != "" && have.Contain(want)
+	}
+}
+
 // CaptureWatermark is console.CaptureWatermarkReporter: the capture status
 // read for e (kept and single-flight like every other), and the watermark
 // its reads have established.
@@ -158,12 +187,15 @@ func (c *captureStatusReporter) CaptureWatermark(ctx context.Context, e console.
 	status := c.CaptureStatus(ctx, e)
 	c.mu.Lock()
 	var through time.Time
-	why := ""
+	why, proven := "", ""
 	if slot := c.slots[e.ID]; slot != nil {
-		through, why = slot.through, slot.throughWhy
+		through, why, proven = slot.through, slot.throughWhy, slot.proven
 	}
 	c.mu.Unlock()
 	wm := console.CaptureWatermark{Through: through, Detail: why}
+	if !through.IsZero() {
+		wm.StillHolds = stillHolds(proven)
+	}
 	if through.IsZero() && wm.Detail == "" {
 		wm.Detail = status.Detail
 	}
