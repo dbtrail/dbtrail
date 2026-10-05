@@ -21,8 +21,6 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
-
-	"github.com/dbtrail/dbtrail/internal/config"
 )
 
 // DDLBintrailServers is the canonical CREATE TABLE statement for bintrail_servers.
@@ -369,10 +367,17 @@ var readIndexServerUUID = func(ctx context.Context, indexDSN string) (string, er
 		return "", fmt.Errorf("parse index DSN: %w", err)
 	}
 	cfg.DBName = ""
-	db, err := config.Connect(cfg.FormatDSN())
+	// Opened with the driver directly, not config.Connect: that package's
+	// integration tests reach this one, and one query needs none of its
+	// session setup. The same 10s bound on the dial, unless the DSN sets one.
+	if cfg.Timeout == 0 {
+		cfg.Timeout = 10 * time.Second
+	}
+	conn, err := mysql.NewConnector(cfg)
 	if err != nil {
 		return "", err
 	}
+	db := sql.OpenDB(conn)
 	defer db.Close()
 	var id sql.NullString
 	if err := db.QueryRowContext(ctx, "SELECT @@server_uuid").Scan(&id); err != nil {
