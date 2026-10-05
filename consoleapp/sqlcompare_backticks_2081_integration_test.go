@@ -416,7 +416,10 @@ func backtickFixtures(db string, dollarNames bool) []backtickFixture {
 		kept("SELECT GREATEST(DATE '2026-02-01', DATE '2026-01-01') + 1", diff, "next to + or -", "a date inside a call: 20260202 on MySQL, 2026-02-02 on the copy"),
 		kept("SELECT CASE WHEN `id` = 1 THEN DATE(`created_on`) END + 1 FROM `orders` WHERE `id` = 1", diff, "next to + or -", "a date inside a CASE: 20260102 on MySQL, 2026-01-02 on the copy"),
 		kept("SELECT AVG(DATE(`created_on`)) FROM `orders`", diff, "under AVG", "20260103.5000 on MySQL, 2026-01-03 12:00:00 on the copy"),
-		kept("SELECT `created_on` + INTERVAL '1:30' MINUTE_SECOND FROM `orders` WHERE `id` = 1", diff, "two-part unit", "00:01:30 on MySQL; the copy adds an hour and a half and names the column MINUTE_SECOND"),
+		kept("SELECT `created_on` + INTERVAL '1:30' MINUTE_SECOND FROM `orders` WHERE `id` = 1", diff, "quoted amount that is not a whole number", "00:01:30 on MySQL; the copy adds an hour and a half and names the column MINUTE_SECOND"),
+		kept("SELECT DATE '2026-01-01' + INTERVAL '1e2' DAY", diff, "quoted amount that is not a whole number", "MySQL cuts the amount at the e (one day); the copy reads a hundred"),
+		kept("SELECT `created_on` + INTERVAL (1.5) DAY FROM `orders` WHERE `id` = 1", diff, "in parentheses or a placeholder", "MySQL rounds the expression (two days later), the copy cuts it (one)"),
+		kept("SELECT AVG(TIME '10:00:00')", diff, "under AVG", "100000.0000 on MySQL, the time 10:00:00 on the copy"),
 		kept("SELECT 1.5_5", diff, "starts with a digit", "1.5 under the alias _5 on MySQL; 1.55 on the copy"),
 		same("SELECT `id` FROM `orders` WHERE `created_on` >= DATE '2026-01-05' - INTERVAL 1 DAY ORDER BY `id`", "a date minus INTERVAL is the same day on both: not kept back"),
 		// What the text does not show (#2122): the same arithmetic on a column

@@ -116,8 +116,17 @@ func scan(stmt string) scanned {
 	// prefixAfterName is true while reading the word that follows a name
 	// with nothing but white space between.
 	prefixAfterName := false
+	// word is where the unquoted word being read started, or -1; lastWord
+	// is the word before this point when only white space, comments,
+	// string literals and quoted names came after it. Together they say
+	// whether a string literal is the amount of an INTERVAL ('1' '5', two
+	// literals, is one amount on MySQL).
+	word, lastWord := -1, ""
 	for i := 0; i < n; {
 		c := stmt[i]
+		if word >= 0 && !wordByte(c) {
+			lastWord, word = stmt[word:i], -1
+		}
 		switch {
 		case c == '/' && i+1 < n && stmt[i+1] == '*':
 			end := strings.Index(stmt[i+2:], "*/")
@@ -169,6 +178,7 @@ func scan(stmt string) scanned {
 				refuse(vetoNameString)
 			}
 			afterName, prefixAfterName = false, false
+			amountOfInterval := strings.EqualFold(lastWord, "interval")
 			if c == '"' {
 				sc.doubleQuoted = true
 			}
@@ -193,6 +203,14 @@ func scan(stmt string) scanned {
 			if !closed {
 				refuse(vetoUnterminated)
 				j = n - 1
+			}
+			if amountOfInterval && closed && !wholeNumber(stmt[i+1:j]) {
+				// MySQL cuts a quoted amount at the first character that
+				// is not a digit: INTERVAL '1e2' DAY is one day and '1.5'
+				// one. The copy reads the text as a number: a hundred
+				// days. Measured on MySQL 8.4, MariaDB 11.4 and the copy
+				// (#2122); a whole number is the same on both.
+				refuse(vetoIntervalAmount)
 			}
 			cp.WriteString(stmt[i : j+1])
 			bl.WriteString("''")
@@ -260,6 +278,14 @@ func scan(stmt string) scanned {
 				prefixAfterName = wordByte(c)
 				afterName = false
 			}
+			switch {
+			case wordByte(c):
+				if word < 0 {
+					word = i
+				}
+			case c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\f' && c != '\v':
+				lastWord = ""
+			}
 			cp.WriteByte(c)
 			bl.WriteByte(c)
 			i++
@@ -271,6 +297,24 @@ func scan(stmt string) scanned {
 	// left in it quotes a name.
 	sc.blankedCopy = strings.ReplaceAll(sc.blanked, "`", `"`)
 	return sc
+}
+
+// wholeNumber reports whether s is digits alone, with or without a sign
+// before them and spaces around them.
+func wholeNumber(s string) bool {
+	s = strings.Trim(s, " ")
+	if s != "" && (s[0] == '+' || s[0] == '-') {
+		s = s[1:]
+	}
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // wordByte reports whether c can be part of an unquoted word: a letter, a

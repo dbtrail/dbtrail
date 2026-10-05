@@ -3,7 +3,6 @@ package readrouter
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 // An underscore inside a number: the copy takes it for a digit separator
@@ -62,22 +61,116 @@ func TestVeto_decimalThatEndsInABareE(t *testing.T) {
 // half) and takes MINUTE_SECOND for the column's alias.
 func TestVeto_intervalWithATwoPartUnit(t *testing.T) {
 	for stmt, want := range map[string]string{
-		"SELECT DATE '2026-01-01' + INTERVAL '1:30' MINUTE_SECOND":      vetoIntervalUnit,
-		"SELECT ts + interval '1:30' minute_second FROM t":              vetoIntervalUnit,
-		"SELECT ts - INTERVAL'1 2'DAY_HOUR FROM t":                      vetoIntervalUnit,
-		"SELECT ts + INTERVAL\n'1.5'\nSECOND_MICROSECOND FROM t":        vetoIntervalUnit,
-		"SELECT DATE_ADD(ts, INTERVAL '1:30' HOUR_MINUTE) FROM t":       vetoIntervalUnit,
-		"SELECT id FROM t WHERE ts > x - INTERVAL '0:30' MINUTE_SECOND": vetoIntervalUnit,
-		"SELECT ts + INTERVAL ? MINUTE_SECOND FROM t":                   vetoIntervalUnit, // a prepared statement's template: the argument arrives quoted
-		"SELECT ts + INTERVAL '1' DAY FROM t":                           "",
-		"SELECT ts + INTERVAL 1 DAY FROM t":                             "",
-		"SELECT ts + INTERVAL ? DAY FROM t":                             "",
-		"SELECT ts + INTERVAL 1 DAY_HOUR FROM t":                        "", // the copy refuses it
-		"SELECT ts + INTERVAL '1' DAY day_one FROM t":                   "",
-		"SELECT ts + INTERVAL '1' DAY AS day_one FROM t":                "",
-		"SELECT interval_days, 'x' my_alias FROM t":                     "",
-		"SELECT 'INTERVAL ''1:30'' MINUTE_SECOND'":                      "",
-		"SELECT 1 /* INTERVAL '1:30' MINUTE_SECOND */":                  "",
+		"SELECT ts + INTERVAL '90' MINUTE_SECOND FROM t":           vetoIntervalUnit,
+		"SELECT ts + interval '90' minute_second FROM t":           vetoIntervalUnit,
+		"SELECT ts - INTERVAL'1'DAY_HOUR FROM t":                   vetoIntervalUnit,
+		"SELECT ts + INTERVAL\n'15'\nSECOND_MICROSECOND FROM t":    vetoIntervalUnit,
+		"SELECT DATE_ADD(ts, INTERVAL '130' HOUR_MINUTE) FROM t":   vetoIntervalUnit,
+		"SELECT DATE '2026-01-01' + INTERVAL '1:30' MINUTE_SECOND": vetoIntervalAmount, // named first: the amount is not a whole number
+		"SELECT ts + INTERVAL '1' DAY FROM t":                      "",
+		"SELECT ts + INTERVAL 1 DAY FROM t":                        "",
+		"SELECT ts + INTERVAL 1 DAY_HOUR FROM t":                   "", // the copy refuses it
+		"SELECT ts + INTERVAL '1' DAY day_one FROM t":              "",
+		"SELECT ts + INTERVAL '1' DAY AS day_one FROM t":           "",
+		"SELECT interval_days, 'x' my_alias FROM t":                "",
+		"SELECT 'INTERVAL ''90'' MINUTE_SECOND'":                   "",
+		"SELECT 1 /* INTERVAL '90' MINUTE_SECOND */":               "",
+	} {
+		if got := Veto(stmt); got != want {
+			t.Errorf("Veto(%q) = %q, want %q", stmt, got, want)
+		}
+	}
+}
+
+// An amount in parentheses is an expression: MySQL rounds it (INTERVAL (1.5)
+// DAY is two days) and the copy cuts it (one day). A placeholder is kept
+// back too: a text bound to it is rounded by MySQL 8.4 ('1.5' is two days)
+// and reaches the copy as the quoted '1.5', one day.
+func TestVeto_intervalWithAnExpressionOrAPlaceholder(t *testing.T) {
+	for stmt, want := range map[string]string{
+		"SELECT d + INTERVAL (1.5) DAY FROM t":                       vetoIntervalExpr,
+		"SELECT d + INTERVAL (a/2) DAY FROM t":                       vetoIntervalExpr,
+		"SELECT ts + interval(0.5) minute FROM t":                    vetoIntervalExpr,
+		"SELECT DATE_ADD(d, INTERVAL (1.5) DAY) FROM t":              vetoIntervalExpr,
+		"SELECT d + INTERVAL ('1:30') MINUTE_SECOND FROM t":          vetoIntervalExpr,
+		"SELECT d + INTERVAL /* n */ (1.5) DAY FROM t":               vetoIntervalExpr,
+		"SELECT d + INTERVAL\n\t( 1 ) DAY FROM t":                    vetoIntervalExpr,
+		"SELECT d + INTERVAL -- n\n (1.5) DAY FROM t":                vetoIntervalExpr,
+		"SELECT d + INTERVAL (?) DAY FROM t":                         vetoIntervalExpr,
+		"SELECT d + INTERVAL ? DAY FROM t":                           vetoIntervalExpr,
+		"SELECT d + INTERVAL ? MINUTE_SECOND FROM t":                 vetoIntervalExpr,
+		"SELECT id FROM t WHERE d > ? - interval\n? day":             vetoIntervalExpr,
+		"SELECT d + INTERVAL 1 DAY FROM t WHERE (a) = ?":             "",
+		"SELECT d + INTERVAL a DAY FROM t":                           "", // the copy refuses it
+		"SELECT intervals (1), xinterval(2), t.interval_ (3) FROM t": "",
+		"SELECT 'INTERVAL (1.5) DAY', 1 /* INTERVAL ? DAY */":        "",
+	} {
+		if got := Veto(stmt); got != want {
+			t.Errorf("Veto(%q) = %q, want %q", stmt, got, want)
+		}
+	}
+}
+
+// A quoted amount is cut at the first character that is not a digit on
+// MySQL ('1e2' is 1, '1.5e1' is 1) and read as a number on the copy (100,
+// 15). Only a whole number, signed or not, means the same on both.
+func TestVeto_intervalWithAQuotedAmountThatIsNotAWholeNumber(t *testing.T) {
+	for stmt, want := range map[string]string{
+		"SELECT d + INTERVAL '1e2' DAY FROM t":             vetoIntervalAmount,
+		"SELECT d + interval '1.5e1' day FROM t":           vetoIntervalAmount,
+		"SELECT d + INTERVAL '1E1' HOUR FROM t":            vetoIntervalAmount,
+		"SELECT d + INTERVAL'1e2'DAY FROM t":               vetoIntervalAmount,
+		"SELECT d + INTERVAL\n '1e2' DAY FROM t":           vetoIntervalAmount,
+		"SELECT d + INTERVAL /* n */ '1e2' DAY FROM t":     vetoIntervalAmount,
+		"SELECT d + INTERVAL -- n\n '1e2' DAY FROM t":      vetoIntervalAmount,
+		"SELECT DATE_ADD(d, INTERVAL '1e2' DAY) FROM t":    vetoIntervalAmount,
+		"SELECT d + INTERVAL '1.5' DAY FROM t":             vetoIntervalAmount, // the same day on both: kept back with the rest
+		"SELECT d + INTERVAL '1.5' SECOND FROM t":          vetoIntervalAmount,
+		"SELECT d + INTERVAL '' DAY FROM t":                vetoIntervalAmount,
+		"SELECT d + INTERVAL '1''2' DAY FROM t":            vetoIntervalAmount,
+		"SELECT d + INTERVAL '1 2' DAY FROM t":             vetoIntervalAmount,
+		"SELECT d + INTERVAL '1'\n'e2' DAY FROM t":         vetoIntervalAmount, // two literals, one amount
+		"SELECT d + INTERVAL '+' DAY FROM t":               vetoIntervalAmount,
+		"SELECT d + INTERVAL \"1e2\" DAY FROM t":           vetoDoubleQuoted,
+		"SELECT d + INTERVAL '1' DAY FROM t":               "",
+		"SELECT d + INTERVAL '12' MONTH FROM t":            "",
+		"SELECT d + INTERVAL '-2' DAY FROM t":              "",
+		"SELECT d + INTERVAL '+2' DAY FROM t":              "",
+		"SELECT d + INTERVAL ' 2 ' DAY FROM t":             "",
+		"SELECT d + INTERVAL '02' DAY FROM t":              "",
+		"SELECT d + INTERVAL 1 DAY, '1e2' FROM t":          "",
+		"SELECT d + INTERVAL 1 DAY '1e2' FROM t":           "", // an alias
+		"SELECT xinterval '1e2', t.interval_ '1e2' FROM t": "",
+		"SELECT `interval` '1e2' FROM t":                   vetoNameString,
+		"SELECT interval, '1e2' FROM t":                    "",
+		"SELECT 'interval' '1e2'":                          "",
+		"SELECT d FROM t WHERE x = 'interval ''1e2'' day'": "",
+	} {
+		if got := Veto(stmt); got != want {
+			t.Errorf("Veto(%q) = %q, want %q", stmt, got, want)
+		}
+		// The rewrite for the copy refuses what the veto names.
+		if _, refusal := ForCopy(stmt); want == vetoIntervalAmount && refusal != want {
+			t.Errorf("ForCopy(%q) refusal = %q, want %q", stmt, refusal, want)
+		}
+	}
+}
+
+// AVG of a time is a number on MySQL (100000.0000 for ten o'clock) and a
+// time on the copy. The copy refuses + and - on a time, so naming TIME as a
+// shape keeps nothing else back that the copy would have answered.
+func TestVeto_avgOfATime(t *testing.T) {
+	for stmt, want := range map[string]string{
+		"SELECT AVG(TIME '10:00:00')":                          vetoDateArithmetic,
+		"SELECT AVG(CAST(ts AS TIME)) FROM t":                  vetoDateArithmetic,
+		"SELECT avg(cast(ts as time(3))) FROM t":               vetoDateArithmetic,
+		"SELECT AVG(GREATEST(TIME '10:00:00', x)) FROM t":      vetoDateArithmetic,
+		"SELECT TIME '10:00:00' + 1":                           vetoDateArithmetic, // the copy refuses it: kept back at no cost
+		"SELECT CAST(ts AS TIME) - 1 FROM t":                   vetoDateArithmetic,
+		"SELECT TIME '10:00:00' + INTERVAL 1 HOUR":             "",
+		"SELECT MAX(TIME '10:00:00'), CAST(ts AS TIME) FROM t": "",
+		"SELECT AVG(amount), runtime '10' FROM t":              "",
+		"SELECT AVG(TIME(ts)) FROM t":                          "", // the copy refuses TIME(...)
 	} {
 		if got := Veto(stmt); got != want {
 			t.Errorf("Veto(%q) = %q, want %q", stmt, got, want)
@@ -164,15 +257,15 @@ func TestVeto_dateInsideAGroup(t *testing.T) {
 }
 
 // Veto runs on every statement, in the process that captures, and nothing
-// caps a statement's length before it: the time these checks take must grow
+// caps a statement's length before it: the work these checks do must grow
 // with the statement's length and no faster. Reading a group again for each
 // match inside it took 12.9 s on 8,000 nested CASTs (112 KB).
 //
-// The shape checks are timed on their own, at 2,000 and at 8,000 levels:
-// four times the text may take about four times as long, and sixteen times
-// as long is the quadratic curve. A wall-clock bound on the whole of Veto
-// would not hold under the race detector, where the pattern list alone
-// (linear too) takes seconds on 100 KB.
+// The work is counted, not timed: every byte of the text and every group
+// the checks look at goes through shapeText, which counts it. Four times
+// the nesting is four times the text and may be about four times the work
+// (the search for a window's parenthesis adds a logarithm); sixteen times
+// is the quadratic curve.
 func TestVeto_deepNestingIsLinear(t *testing.T) {
 	shapes := map[string]func(depth int) string{
 		"cast": func(d int) string {
@@ -204,13 +297,15 @@ func TestVeto_deepNestingIsLinear(t *testing.T) {
 		"intervals": func(d int) string { return "SELECT " + strings.Repeat("d + interval '1' day, ", d) + "1 FROM t" },
 	}
 	for name, build := range shapes {
-		if got := shapeVeto(scan(build(8000)).blankedCopy); got != "" {
-			t.Errorf("%s: vetoed as %q, want none", name, got)
+		why, small := shapeVetoWork(scan(build(2000)).blankedCopy)
+		if why != "" {
+			t.Errorf("%s: vetoed as %q, want none", name, why)
 		}
-		small, large := shapeVetoTime(build(2000)), shapeVetoTime(build(8000))
-		// Linear is 4; the allowance is for a clock this short.
-		if large > 9*small+20*time.Millisecond {
-			t.Errorf("%s: the shape checks took %s on 2,000 and %s on 8,000: faster than linear growth", name, small, large)
+		_, large := shapeVetoWork(scan(build(8000)).blankedCopy)
+		ratio := float64(large) / float64(small)
+		t.Logf("%-12s %9d steps at 2,000, %9d at 8,000: x%.2f", name, small, large, ratio)
+		if ratio > 4.5 {
+			t.Errorf("%s: %d steps at 2,000 levels and %d at 8,000 (x%.2f): the work grows faster than the text", name, small, large, ratio)
 		}
 	}
 	// The same shapes with arithmetic at the far end are still found.
@@ -225,18 +320,4 @@ func TestVeto_deepNestingIsLinear(t *testing.T) {
 			t.Errorf("%s with arithmetic: Veto = %q, want the date veto", name, got)
 		}
 	}
-}
-
-// shapeVetoTime is the faster of two runs of the shape checks over stmt.
-func shapeVetoTime(stmt string) time.Duration {
-	text := scan(stmt).blankedCopy
-	best := time.Duration(0)
-	for range 2 {
-		start := time.Now()
-		shapeVeto(text)
-		if d := time.Since(start); best == 0 || d < best {
-			best = d
-		}
-	}
-	return best
 }
