@@ -147,6 +147,11 @@ const (
 	RouteReasonReadOnly       RouteReason = "read_only"        // refused: not a read, and the port is read-only
 )
 
+// RouteReasonCopyColumnsDiffer: the copy declined a star or a NATURAL JOIN
+// over a table whose columns there are not MySQL's (#2111). A decision, not a
+// fault, which is why it is not counted under RouteReasonCopyRefused.
+const RouteReasonCopyColumnsDiffer RouteReason = "copy_columns_differ"
+
 // observeRoute reports one decision to the bound observer, if any.
 func (h *Handler) observeRoute(route RouteSide, reason RouteReason) {
 	if h.routerCfg.Observe != nil {
@@ -271,6 +276,14 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		return ops.forward(RouteReasonCopyTooOld, fmt.Sprintf("copy is %s old, max %s", age.Round(time.Second), h.routerCfg.MaxCopyAge))
 	}
 	res, err := ops.runCopy(d.Reason)
+	var differ *sqlsandbox.ColumnsDifferError
+	if errors.As(err, &differ) {
+		// The copy works; it declined this statement because its answer would
+		// not have MySQL's columns (#2111). Its own reason and its own
+		// warning, so it does not read as a fault nor use up a fault's.
+		h.routeWarn("columns", "read routing: the copy's columns are not MySQL's for a statement with * or NATURAL JOIN, forwarded to mysql", err)
+		return ops.forward(RouteReasonCopyColumnsDiffer, "copy's columns differ: "+differ.Reason)
+	}
 	if err != nil {
 		// The slow path is always right: whatever the copy could not do
 		// (a construct DuckDB lacks, a missing table, busy, a timeout, a
@@ -501,7 +514,18 @@ func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string) (*mysql.Res
 			sess = sqlsandbox.Session{}
 		}
 	}
+	// Under routing the client expects MySQL's answer: a star over a table
+	// whose columns the copy cannot return as MySQL does is refused there,
+	// and the refusal is the caller's to forward (#2111).
+	// Asked of the connection, not of the reason text: a routing connection
+	// only ever gets here from the ladder.
+	sess.StrictStar = h.router != nil
 	res, err := h.freeSQL.Run(ctx, stmt, schema, sess)
+	var differ *sqlsandbox.ColumnsDifferError
+	if errors.As(err, &differ) {
+		// Handed back as it is: the routing ladder tells it from a fault.
+		return nil, err
+	}
 	if err != nil {
 		return nil, h.freeSQLError(err)
 	}

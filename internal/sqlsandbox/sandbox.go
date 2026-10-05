@@ -201,6 +201,14 @@ type Session struct {
 	// top-level LIMIT ignores it, as on MySQL, and so do SHOW, DESCRIBE and
 	// SUMMARIZE, which are not SELECTs there.
 	SelectLimit int
+	// StrictStar asks for a refusal instead of an answer when the statement
+	// holds a star over a table whose `SELECT *` on the copy is not MySQL's:
+	// the order of its columns is not known, or MySQL returns a different set
+	// of columns (#2111). Set under read routing, where the caller answers a
+	// refusal by sending the statement to MySQL. The browser and a port with
+	// no routing leave it off and get the copy's answer. The worker never
+	// sees it: the caller's ViewsFor decides, from what the statement names.
+	StrictStar bool
 }
 
 // Column is one result column with DuckDB's type name (INTEGER, VARCHAR,
@@ -280,6 +288,15 @@ func (e *UnavailableError) Error() string { return e.Reason }
 type RefusedError struct{ Reason string }
 
 func (e *RefusedError) Error() string { return "query refused: " + e.Reason }
+
+// ColumnsDifferError: the statement was not run because the caller asked for
+// MySQL's answer (Session.StrictStar) and the copy's would hold other columns
+// or other rows: a star, or a NATURAL JOIN, over a table whose columns on the
+// copy are not MySQL's (#2111). A decision about the statement, not a fault
+// of the copy: read routing sends the statement to MySQL and counts it apart.
+type ColumnsDifferError struct{ Reason string }
+
+func (e *ColumnsDifferError) Error() string { return e.Reason }
 
 // QueryError: DuckDB ran (or tried to run) the statement inside the sandbox
 // and failed. Message is DuckDB's own text: a Permission Error for a path

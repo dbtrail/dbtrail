@@ -65,29 +65,37 @@ CREATE OR REPLACE SECRET bintrail_s3_chain (TYPE s3, PROVIDER credential_chain, 
 -- stay text. They are named below. Cast them yourself when you need
 -- arithmetic; DOUBLE works if an approximate result is acceptable.
 -- Some files carry no column types, so their views cast nothing and every
--- decimal column in them reads as text; and no collations, so a text column
+-- decimal column in them reads as text; no collations, so a text column
 -- MySQL declares _bin compares like any other, by the session's default
--- collation. Those tables are named below. A
+-- collation; and no column order, so SELECT * returns their columns sorted
+-- by name. Those tables are named below. A
 -- baseline older than this feature gains the casts when it is next taken or
 -- refreshed; a PostgreSQL-source baseline stores all its values as text and
 -- will not gain them. If a footer could not be read at all, the bintrail log
 -- has the error.
+--
+-- Each view lists its table's columns in the order the table declares them,
+-- so SELECT * returns them as MySQL does. The snapshot files hold them sorted
+-- by name; a table whose order could not be read is named below.
 CREATE SCHEMA IF NOT EXISTS "Legacy-DB";
 CREATE SCHEMA IF NOT EXISTS "shop";
 CREATE SCHEMA IF NOT EXISTS "shop_order";
--- "Legacy-DB"."Audit Log": this file carries no column types, so nothing is cast; decimal columns read as text and _bin columns compare by the session's collation
+-- "Legacy-DB"."Audit Log": this file carries no column types, so nothing is cast; decimal columns read as text, _bin columns compare by the session's collation and SELECT * returns the columns in alphabetical order
 CREATE OR REPLACE VIEW "Legacy-DB"."Audit Log" AS
   SELECT * FROM read_parquet('s3://my-bucket/baselines/2026-04-30T03-00-00Z/Legacy-DB/Audit Log.parquet');
 -- shop.ORDER_ITEMS_945701: the table shop.ORDER_ITEMS. DuckDB does not tell names apart by letter case, and shop.order_items already has that name
--- shop.ORDER_ITEMS_945701: this file carries no column types, so nothing is cast; decimal columns read as text and _bin columns compare by the session's collation
+-- shop.ORDER_ITEMS_945701: this file carries no column types, so nothing is cast; decimal columns read as text, _bin columns compare by the session's collation and SELECT * returns the columns in alphabetical order
 CREATE OR REPLACE VIEW "shop"."ORDER_ITEMS_945701" AS
   SELECT * FROM read_parquet('s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/ORDER_ITEMS.parquet');
+-- shop.order_items: SELECT * differs from MySQL's: MySQL also returns generated column line_total, which a snapshot does not hold
 CREATE OR REPLACE VIEW "shop"."order_items" AS
-  SELECT * FROM read_parquet('s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/order_items.parquet');
+  SELECT "order_id", "line", "sku", "qty"
+  FROM read_parquet('s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/order_items.parquet');
 CREATE OR REPLACE VIEW "shop"."orders" AS
-  SELECT * REPLACE (CAST("total" AS DECIMAL(10,2)) AS "total", CAST("tax_rate" AS DECIMAL(6,4)) AS "tax_rate")
+  SELECT "id", "customer_id", "status", CAST("total" AS DECIMAL(10,2)) AS "total", CAST("tax_rate" AS DECIMAL(6,4)) AS "tax_rate", "created_at"
   FROM read_parquet('s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop/orders.parquet');
 -- shop_order.items: weight is DECIMAL(65,30), wider than DuckDB's 38 digits (left as text)
+-- shop_order.items: SELECT * returns the columns in alphabetical order, not the table's: the columns this file holds could not be read, or are not the ones its CREATE TABLE lists
 CREATE OR REPLACE VIEW "shop_order"."items" AS
   SELECT * FROM read_parquet('s3://my-bucket/baselines/2026-04-30T03-00-00Z/shop_order/items.parquet');
 

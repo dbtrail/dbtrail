@@ -30,6 +30,7 @@ import (
 	"io"
 	"math"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -225,7 +226,9 @@ func isWordByte(b byte) bool {
 // statement has a top-level ORDER BY); without it rows are compared as a
 // multiset.
 //
-// Kind, when Different: "columns" (column counts differ), "rows" (row
+// Kind, when Different: "columns" (column counts differ, a column both sides
+// name stands at another position, or a position holds two different plain
+// column names: columnsDiffer), "rows" (row
 // counts differ, or rows present on one side only), "order" (same rows,
 // different order; with the NULL position named when that is the whole
 // difference), and for a differing cell: "case" (equal ignoring case: a
@@ -234,6 +237,13 @@ func isWordByte(b byte) bool {
 func Compare(src, cp Rows, ordered bool) (Verdict, string, string) {
 	if len(src.Columns) != len(cp.Columns) {
 		return Different, "columns", fmt.Sprintf("source returned %d columns, copy %d", len(src.Columns), len(cp.Columns))
+	}
+	if detail := columnsDiffer(src.Columns, cp.Columns); detail != "" {
+		// Before the cells: a client that reads by position gets other
+		// columns whatever they hold, and two columns with equal cells (or a
+		// result with no rows) would otherwise read as equal (#2111).
+		return Different, "columns", fmt.Sprintf("%s (source: %s; copy: %s)", detail,
+			strings.Join(src.Columns, ", "), strings.Join(cp.Columns, ", "))
 	}
 	if len(src.Rows) != len(cp.Rows) {
 		return Different, "rows", fmt.Sprintf("source returned %d rows, copy %d", len(src.Rows), len(cp.Rows))
@@ -274,6 +284,65 @@ func Compare(src, cp Rows, ordered bool) (Verdict, string, string) {
 	}
 	return Different, "rows", fmt.Sprintf("%d row(s) only in the source (first: %s); %d only in the copy (first: %s)", len(missing), showRow(missing), len(extra), showRow(extra))
 }
+
+// columnsDiffer says how two answers with the same number of columns differ
+// in their columns, or "" when they do not. Names compare without regard to
+// case, MySQL's rule for column names. Two rules, and nothing else:
+//
+//   - A name both sides return must stand at the same positions on both. One
+//     column named differently by each side does not switch this off for the
+//     others.
+//   - Where the two sides name a position differently and BOTH names are
+//     plain identifiers, they are two different columns.
+//
+// A position where either name is not a plain identifier is left to the
+// cells: each engine names an expression its own way (COUNT(*) and
+// count_star(), n+1 and (n + 1)), and MySQL names a string literal by its
+// value (abc) where DuckDB quotes it ('abc'), so one plain name against one
+// that is not says nothing.
+func columnsDiffer(src, cp []string) string {
+	at := func(cols []string) map[string][]int {
+		m := map[string][]int{}
+		for i, c := range cols {
+			k := strings.ToLower(c)
+			m[k] = append(m[k], i)
+		}
+		return m
+	}
+	srcAt, cpAt := at(src), at(cp)
+	for i, name := range src {
+		there, ok := cpAt[strings.ToLower(name)]
+		if !ok {
+			continue
+		}
+		here := srcAt[strings.ToLower(name)]
+		if slices.Equal(here, there) {
+			continue
+		}
+		// Name the first position the two lists disagree on.
+		j := there[0]
+		for k := 0; k < len(here) && k < len(there); k++ {
+			if here[k] != there[k] {
+				i, j = here[k], there[k]
+				break
+			}
+		}
+		if len(here) != len(there) && i == j {
+			return fmt.Sprintf("%s is %d column(s) on the source and %d on the copy", name, len(here), len(there))
+		}
+		return fmt.Sprintf("%s is column %d on the source and column %d on the copy", name, i+1, j+1)
+	}
+	for i := range src {
+		if !strings.EqualFold(src[i], cp[i]) && plainName.MatchString(src[i]) && plainName.MatchString(cp[i]) {
+			return fmt.Sprintf("column %d is %s on the source and %s on the copy", i+1, src[i], cp[i])
+		}
+	}
+	return ""
+}
+
+// plainName is a column name that can only be a column or an alias: a bare
+// identifier, not an expression's text.
+var plainName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
 
 // multisetDiff returns the rows only in a (missing from b) and only in b.
 func multisetDiff(a, b [][]*string) (onlyA, onlyB [][]*string) {

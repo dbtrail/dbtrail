@@ -176,6 +176,36 @@ What to know before relying on it:
   and the copy by the text); a `_cs` column is still case-insensitive here. The same applies
   to the SQL card; a DuckDB of your own over the same files (see
   [Dashboards](dashboards.md)) keeps DuckDB's defaults.
+- **`SELECT *` returns a table's columns in the table's own order**, the
+  one MySQL returns, and so do `t.*`, a star over a join and `SHOW COLUMNS`.
+  The snapshot files hold the columns sorted by name, and the copy used to
+  return them that way, so a client that reads a row by position got other
+  columns with no error. The order comes from the `CREATE TABLE` stored with
+  each snapshot, so it is the order the table had at its last full snapshot,
+  a column added with `AFTER` or `FIRST` included. Three kinds of table still differ
+  from MySQL, and each table's view says which applies to it (in the file
+  `bintrail views --pin-snapshot` writes, as a comment above the view):
+  - **A table whose snapshot carries no `CREATE TABLE`** (every table of a
+    PostgreSQL source, a snapshot written by a version before 0.5, a file
+    whose footer cannot be read) has no order to go by: `SELECT *` returns
+    its columns sorted by name. Name the columns to read it by position.
+  - **A generated column** (`GENERATED ALWAYS AS ... STORED` or `VIRTUAL`,
+    and a MariaDB system-versioning period column) is not in a snapshot, so
+    the copy's `SELECT *` has one column fewer than MySQL's and naming the
+    column is an error here.
+  - **An invisible column** (MySQL 8.0.23+, MariaDB 10.3+) is in the
+    snapshot and has no such attribute here: the copy's `SELECT *` returns
+    it, in its declared place, where MySQL's leaves it out.
+
+  One more difference is the join's and not the table's: a star over a join
+  written with `USING` or `NATURAL` returns the join's columns first on
+  MySQL, and where the left table has them here.
+
+  Under read routing none of these reaches the client, because MySQL
+  answers such a statement: see below. The SQL card has no routing: it
+  answers from the copy, with these differences. A views file that follows later snapshots
+  (the default of `bintrail views`, see [Dashboards](dashboards.md)) keeps
+  the files' order, sorted by name, for every table.
 - **`SET time_zone`, `SET sql_select_limit` and `SET sql_mode` are applied
   or refused, never ignored.** They used to be answered with an empty OK and
   read by nothing, so a client that had set its zone got answers computed in
@@ -396,7 +426,7 @@ What this is and is not:
   literals, a backslash inside a string literal (an escape on MySQL, a
   plain character on the copy: `'a\\b'` and `'it\'s'` name different
   strings), `--` with no space after it (two minus signs on MySQL, where
-  `5--3` is 8; a comment on the copy), `count(DISTINCT ...)`, `INSTR`/`LOCATE`,
+  `5--3` is 8; a comment on the copy), a `#` comment (a comment on MySQL; on the copy `#2` is the table's second column), `count(DISTINCT ...)`, `INSTR`/`LOCATE`,
   `UNION`, `INTERSECT` and `EXCEPT` when they remove duplicates (the copy
   compares the rows by bytes there, so `SELECT 'a' UNION SELECT 'A'` is one
   row on MySQL and two on the copy; `UNION ALL` is not kept back),
@@ -537,6 +567,35 @@ What this is and is not:
 
   If a workload depends on one of these, keep the copy for the reads where
   they do not matter, or leave routing off.
+- **`SELECT *` is the copy's only where it returns MySQL's columns.** The
+  copy lists a table's columns in the order its `CREATE TABLE` declares
+  them. Three kinds of table do not have MySQL's columns on the copy: a
+  table whose snapshot carries no `CREATE TABLE` (so every table of a
+  PostgreSQL source), a table with a generated column, and a table with an
+  invisible column. Over such a table the copy declines, and MySQL answers
+  (`mysql` / `copy_columns_differ` in the counter, apart from the copy's
+  faults under `copy_refused`):
+  - **a star that expands that table**: `SELECT *` or `t.*` over it, in the
+    statement or in a subquery or derived table of it. A star over ANOTHER
+    table of the same statement does not count (`SELECT l.*, g.id FROM lines
+    l JOIN gen g ...` is the copy's when `lines` has MySQL's columns), nor
+    does a star directly under `EXISTS (...)`, nor a star over a derived
+    table whose own columns are named (`SELECT * FROM (SELECT id, a FROM gen)
+    x`). `count(*)` is not a star. Where the port cannot tell which table a
+    star expands, every table the statement reads counts;
+  - **a `NATURAL JOIN` anywhere in a statement that reads that table**, with
+    or without a star: it pairs on every column the tables share by name, so
+    over other columns it returns other ROWS. Write the join with `ON` or
+    `USING` to keep it on the copy.
+
+  Whatever the tables, an unqualified star over a join written with `USING`
+  or `NATURAL` is MySQL's: MySQL puts the join's columns first and the copy
+  does not (`t.*` over such a join is the same on both). The same statement
+  with its columns named can still go to the copy. The order is the one the
+  table had at its last full snapshot: a column moved or added since by an
+  `ALTER` is seen at the next one, and until then a statement with a star
+  over that table can return the columns as they were declared at that
+  snapshot.
 - **The thresholds are knobs, not truths.** The optimizer's cost is its
   own estimate; it misleads on cached data and on skewed values (and on
   `LIMIT`, which is why steps 4 and 5 read the statement, not the cost).
@@ -758,7 +817,9 @@ MySQL's.
   copy), `cheap_plan`, `bounded_limit` (a small `LIMIT` MySQL answers
   without reading past it), `not_a_select`, `write`, `session_setting`,
   `settings_set`, `in_transaction`, `veto`, `explain_failed`,
-  `copy_age_unknown`, `copy_too_old`, `copy_refused`, `show_warnings`,
+  `copy_age_unknown`, `copy_too_old`, `copy_refused`, `copy_columns_differ`
+  (the copy works and declined a `SELECT *` or a `NATURAL JOIN` over a table
+  whose columns there are not MySQL's), `show_warnings`,
   `upstream_lost` (nobody answered: the port's connection to the source is
   lost or could not be opened, and the client got error 2006),
   `read_only` (refused: not a read, on a port started with
@@ -805,8 +866,14 @@ one. The run refuses to start when the copy port has read routing on (it
 would be comparing MySQL with MySQL), and exits 1 when no statement reached
 a comparison at all.
 
-Per statement it prints `EQUAL`, `DIFFERENT` (and how: `rows`, `order`,
-`case`, `null`, `precision`, `text`, with the first differing cell),
+Per statement it prints `EQUAL`, `DIFFERENT` (and how: `columns`, `rows`,
+`order`, `case`, `null`, `precision`, `text`, with the first differing cell;
+`columns` is a different number of columns, a column both sides name
+standing at another position, or a position where the two sides return two
+different plain column names; it is checked before any cell, so that two
+columns holding equal values, or a result with no rows, cannot hide it. A
+position where either side's name is an expression's text is left to the
+cells, since each engine names an expression its own way),
 `NOT_ON_COPY` (the copy refused it: the router would forward it),
 `SOURCE_ERROR`, `INCONCLUSIVE` (the copy cut the result at its cap, the
 source returned more than `--max-rows`, or the source's own answer changed
@@ -819,7 +886,10 @@ exits 1 when there is at least one. `--format json` for scripts.
 The copy answers from its last snapshot, so run this on a quiet source or
 right after a snapshot: a copy that is behind the source shows up as a
 `DIFFERENT`, since the tool does not model the port's copy-age check (nor
-its "inside a transaction" and "after a SET" forwarding). A table written
+its "inside a transaction" and "after a SET" forwarding, nor the copy
+refusing a `SELECT *` it cannot answer with MySQL's columns: such a
+statement is reported `DIFFERENT (columns)` here and is MySQL's under
+routing). A table written
 DURING the run shows up as `INCONCLUSIVE: source changed`. Same rows in a
 different order are counted apart and never fail the run: ties in an `ORDER
 BY` resolve differently on each engine, and so does a collation difference

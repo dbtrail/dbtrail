@@ -367,22 +367,22 @@ func TestProcessTableRowColumnCountMismatchFailsLoud(t *testing.T) {
 	}
 }
 
-// TestProcessTableCommentFalsePositiveFailsLoud pins the accepted trade-off
-// documented on generatedRe (schema.go): a COMMENT string that happens to
-// contain "as (...) stored" wrongly drops a real, dumped column from the
-// schema's column list. This must never re-corrupt data the way the original
-// #767 bug did — it must instead trip the arity check and fail loud, because
-// the dump's actual value count no longer matches the (wrongly shortened)
-// column list.
-func TestProcessTableCommentFalsePositiveFailsLoud(t *testing.T) {
+// A COMMENT (or a DEFAULT) whose text looks like a generation clause is not
+// one. The pattern used to be matched over the whole line, so such a column
+// was dropped from the schema's column list while the dump carried its value,
+// and the arity check refused the whole table. The clause is now looked for
+// outside quoted strings, and the table converts with every column.
+func TestProcessTableCommentIsNotAGenerationClause(t *testing.T) {
 	const schema = "CREATE TABLE `orders` (\n" +
 		"  `id` int NOT NULL,\n" +
 		"  `price` decimal(10,2) NOT NULL,\n" +
 		"  `note` varchar(64) DEFAULT NULL COMMENT 'compute as (x) stored value later',\n" +
+		"  `tag` varchar(64) DEFAULT 'it''s AS (y) VIRTUAL' COMMENT 'GENERATED ALWAYS AS ROW START',\n" +
+		"  `real_one` int GENERATED ALWAYS AS (`id` + length(') STORED')) VIRTUAL COMMENT 'not ) stored',\n" +
 		"  PRIMARY KEY (`id`)\n" +
 		") ENGINE=InnoDB;\n"
-	// The dump carries all three real values — `note` is not actually generated.
-	const data = "INSERT INTO `orders` (`id`,`price`,`note`) VALUES(1,10.50,'hello');\n"
+	// The dump carries the four stored columns; the generated one has no value.
+	const data = "INSERT INTO `orders` (`id`,`price`,`note`,`tag`) VALUES(1,10.50,'hello','t');\n"
 
 	dir := t.TempDir()
 	schemaPath := filepath.Join(dir, "shop.orders-schema.sql")
@@ -393,32 +393,21 @@ func TestProcessTableCommentFalsePositiveFailsLoud(t *testing.T) {
 	if err := os.WriteFile(dataPath, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	// Confirm the false-positive actually happens at the ParseSchema level —
-	// otherwise this test would pass for the wrong reason.
 	cols, err := ParseSchema(schemaPath)
 	if err != nil {
 		t.Fatalf("ParseSchema: %v", err)
 	}
-	if len(cols) != 2 {
-		t.Fatalf("got %d columns %v, want 2 (id, price) — expected the COMMENT false-positive to drop `note`", len(cols), colNames(cols))
+	if got := strings.Join(colNames(cols), ","); got != "id,price,note,tag" {
+		t.Fatalf("columns = %s, want id,price,note,tag: the commented columns kept, the generated one dropped", got)
+	}
+	// And the reader of MySQL's SELECT * names the generated column alone.
+	if got := starDifference(schema); !strings.Contains(got, "generated column real_one") || strings.Contains(got, "note") || strings.Contains(got, "tag") {
+		t.Errorf("starDifference = %q, want only real_one named as generated", got)
 	}
 
-	tf := TableFiles{
-		Database:   "shop",
-		Table:      "orders",
-		SchemaFile: schemaPath,
-		DataFiles:  []string{dataPath},
-		Format:     "sql",
-	}
+	tf := TableFiles{Database: "shop", Table: "orders", SchemaFile: schemaPath, DataFiles: []string{dataPath}, Format: "sql"}
 	outPath := filepath.Join(dir, "orders.parquet")
-	_, err = processTable(context.Background(), tf, outPath, WriterConfig{Compression: "none", RowGroupSize: 100})
-	if err == nil {
-		t.Fatal("processTable with a COMMENT-triggered false-positive column drop: got nil error, want loud failure (silent-corruption regression)")
-	}
-	for _, want := range []string{"2", "3", "orders"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not mention %q", err.Error(), want)
-		}
+	if _, err = processTable(context.Background(), tf, outPath, WriterConfig{Compression: "none", RowGroupSize: 100}); err != nil {
+		t.Fatalf("processTable: %v, want the table converted with its four stored columns", err)
 	}
 }

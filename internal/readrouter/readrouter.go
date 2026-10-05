@@ -185,7 +185,7 @@ func Veto(stmt string) string {
 	if hintComment.MatchString(stmt) {
 		return "optimizer hint or MySQL comment"
 	}
-	blanked, doubleQuoted, backslash := scrub(stmt)
+	blanked, doubleQuoted, backslash, hash := scrub(stmt)
 	if doubleQuoted {
 		// MySQL reads "x" as a string; DuckDB as an identifier, which
 		// resolves without an error whenever a column has that name.
@@ -203,6 +203,13 @@ func Veto(stmt string) string {
 			return v.name
 		}
 	}
+	if hash {
+		// MySQL reads `#` to the end of the line as a comment, which scrub
+		// has removed as MySQL does; DuckDB reads `#2` as the second column
+		// of the select. `SELECT #2<newline> alpha FROM t` is column alpha on
+		// MySQL and the table's second column, named alpha, on the copy.
+		return "# starts a comment on MySQL and a column-position reference on the copy"
+	}
 	return ""
 }
 
@@ -210,7 +217,7 @@ func Veto(stmt string) string {
 // and string literals blanked, for structural checks such as "is there an
 // ORDER BY at the top level".
 func Scrub(stmt string) string {
-	s, _, _ := scrub(stmt)
+	s, _, _, _ := scrub(stmt)
 	return s
 }
 
@@ -220,7 +227,7 @@ func Scrub(stmt string) string {
 // any string literal held a backslash. One pass over the bytes, tracking
 // what is open, so a quote inside a comment (`-- don't`) does not blank the
 // statement after it and a `#` inside a string does not start a comment.
-func scrub(stmt string) (blanked string, doubleQuoted, backslash bool) {
+func scrub(stmt string) (blanked string, doubleQuoted, backslash, hash bool) {
 	var b strings.Builder
 	n := len(stmt)
 	for i := 0; i < n; {
@@ -229,14 +236,17 @@ func scrub(stmt string) (blanked string, doubleQuoted, backslash bool) {
 		case c == '/' && i+1 < n && stmt[i+1] == '*':
 			end := strings.Index(stmt[i+2:], "*/")
 			if end < 0 {
-				return b.String(), doubleQuoted, backslash
+				return b.String(), doubleQuoted, backslash, hash
 			}
 			b.WriteByte(' ')
 			i += end + 4
 		case c == '#', c == '-' && i+1 < n && stmt[i+1] == '-' && (i+2 >= n || stmt[i+2] == ' ' || stmt[i+2] == '\t' || stmt[i+2] == '\n'):
+			if c == '#' {
+				hash = true
+			}
 			nl := strings.IndexByte(stmt[i:], '\n')
 			if nl < 0 {
-				return b.String(), doubleQuoted, backslash
+				return b.String(), doubleQuoted, backslash, hash
 			}
 			b.WriteByte('\n')
 			i += nl + 1
@@ -266,7 +276,7 @@ func scrub(stmt string) (blanked string, doubleQuoted, backslash bool) {
 			j := strings.IndexByte(stmt[i+1:], '`')
 			if j < 0 {
 				b.WriteString(stmt[i:])
-				return b.String(), doubleQuoted, backslash
+				return b.String(), doubleQuoted, backslash, hash
 			}
 			b.WriteString(stmt[i : i+j+2])
 			i += j + 2
@@ -275,7 +285,7 @@ func scrub(stmt string) (blanked string, doubleQuoted, backslash bool) {
 			i++
 		}
 	}
-	return b.String(), doubleQuoted, backslash
+	return b.String(), doubleQuoted, backslash, hash
 }
 
 // Plan is what the router reads out of EXPLAIN FORMAT=JSON.
@@ -485,7 +495,7 @@ func limitBoundedScrubbed(stmt string) (rows int64, blanked string, ok bool) {
 	if hintComment.MatchString(stmt) {
 		return 0, "", false
 	}
-	blanked, _, _ = scrub(stmt)
+	blanked, _, _, _ = scrub(stmt)
 	m := topLimit.FindStringSubmatch(blanked)
 	if m == nil || unboundedWork.MatchString(blanked) || len(anyLimit.FindAllStringIndex(blanked, 2)) > 1 {
 		return 0, "", false

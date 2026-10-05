@@ -77,6 +77,39 @@ func TestCompare(t *testing.T) {
 		{"unordered case pair", rows(cols, []*string{s("B"), s("1")}, []*string{s("a"), s("2")}), rows(cols, []*string{s("b"), s("1")}, []*string{s("a"), s("2")}), false, Different, "case", `source "B", copy "b"`},
 		{"unordered missing and extra", rows(cols, []*string{s("1"), s("x")}, []*string{s("2"), s("x")}, []*string{s("3"), s("x")}), rows(cols, []*string{s("1"), s("x")}, []*string{s("3"), s("x")}, []*string{s("4"), s("x")}), false, Different, "rows", `only in the source (first: ("2", "x")); 1 only in the copy (first: ("4", "x"))`},
 	}
+	// #2111: the same columns in another order is a difference of its own,
+	// whatever the cells hold. Before, only the COUNT was compared: with equal
+	// cells in the swapped columns, or no rows, the two answers read as equal.
+	one, two := s("1"), s("1")
+	cases = append(cases, []struct {
+		name     string
+		src, cp  Rows
+		ordered  bool
+		verdict  Verdict
+		kind     string
+		contains string
+	}{
+		{"same names, another order, cells that happen to agree", rows([]string{"id", "amount"}, []*string{one, two}), rows([]string{"amount", "id"}, []*string{one, two}), false, Different, "columns", "id is column 1 on the source and column 2 on the copy"},
+		{"same names, another order, no rows", rows([]string{"id", "amount"}), rows([]string{"amount", "id"}), true, Different, "columns", "on the source and column"},
+		{"same names, another order, different cells", rows([]string{"id", "amount"}, []*string{s("1"), s("9.50")}), rows([]string{"amount", "id"}, []*string{s("9.50"), s("1")}), true, Different, "columns", "on the source and column"},
+		{"names differ only in case", rows([]string{"ID", "Amount"}, []*string{one, two}), rows([]string{"id", "amount"}, []*string{one, two}), true, Equal, "", ""},
+		{"a name twice, as a join returns it", rows([]string{"id", "id", "x"}, []*string{one, two, one}), rows([]string{"id", "x", "id"}, []*string{one, two, one}), true, Different, "columns", "on the source and column"},
+		// An expression is named differently by each side: that is not an
+		// order, and the cells decide.
+		{"different names are not an order", rows([]string{"count(*)"}, []*string{one}), rows([]string{"count_star()"}, []*string{one}), true, Equal, "", ""},
+		// One expression named differently by each side must not switch the
+		// check off for the columns both sides do name.
+		{"reordered columns beside an expression, no rows", rows([]string{"id", "zeta", "alpha", "count(*) OVER ()"}), rows([]string{"alpha", "id", "zeta", "count_star() OVER ()"}), false, Different, "columns", "id is column 1 on the source and column 2 on the copy"},
+		{"swapped columns whose cells agree, beside an expression", rows([]string{"b", "a", "n+1"}, []*string{one, two, one}), rows([]string{"a", "b", "(n + 1)"}, []*string{one, two, one}), true, Different, "columns", "b is column 1 on the source and column 2 on the copy"},
+		{"another set of the same size, no rows", rows([]string{"id", "twice", "a"}), rows([]string{"id", "a", "secret"}), false, Different, "columns", "a is column 3 on the source and column 2 on the copy"},
+		{"a column each side names differently, no rows", rows([]string{"id", "twice"}), rows([]string{"id", "secret"}), false, Different, "columns", "column 2 is twice on the source and secret on the copy"},
+		{"a name on one side twice", rows([]string{"id", "id"}, []*string{one, two}), rows([]string{"id", "x"}, []*string{one, two}), true, Different, "columns", "id is 2 column(s) on the source and 1 on the copy"},
+		// What stays EQUAL: each side names an expression its own way, and
+		// MySQL names a literal by its value where DuckDB quotes it.
+		{"an aggregate named by each engine", rows([]string{"id", "COUNT(*)"}, []*string{one, two}), rows([]string{"id", "count_star()"}, []*string{one, two}), true, Equal, "", ""},
+		{"a string literal: abc on MySQL, 'abc' on DuckDB", rows([]string{"id", "abc", "TRUE"}, []*string{one, two, one}), rows([]string{"id", "'abc'", "CAST('t' AS BOOLEAN)"}, []*string{one, two, one}), true, Equal, "", ""},
+		{"an expression against an alias-less column on the other side", rows([]string{"id", "SUM(a)"}, []*string{one, two}), rows([]string{"id", "sum(a)"}, []*string{one, two}), true, Equal, "", ""},
+	}...)
 	for _, tc := range cases {
 		v, kind, detail := Compare(tc.src, tc.cp, tc.ordered)
 		if v != tc.verdict || kind != tc.kind || !strings.Contains(detail, tc.contains) {

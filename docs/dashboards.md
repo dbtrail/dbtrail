@@ -204,6 +204,20 @@ Division by zero is the same kind of difference: DuckDB answers `Infinity`
 or `NaN`, the console's SQL card and port answer `NULL` as MySQL does. `SET
 ieee_floating_point_ops = false;` gives your session the same.
 
+## `SELECT *` returns columns sorted by name here
+A snapshot file holds its table's columns sorted by name, and a views file
+that follows new snapshots reads them with a plain star, so `SELECT * FROM
+shop.orders` returns `amount, created_at, customer_id, id, ...` here where
+MySQL returns them in the order the table declares. Charts and queries that
+name their columns are not affected. Where the position matters (a
+positional `INSERT ... SELECT *`, a CSV export, a tool that maps columns by
+number), name the columns. The console's SQL card and MySQL-protocol port
+return the table's order, and so does a file written with `bintrail views
+--pin-snapshot`, which is bound to one snapshot. A following file leaves the
+column list out on purpose: with it, a column dropped or renamed at the
+source would stop every query on that table until the file is generated
+again, where today only a query that names the column fails.
+
 ## What stays current, and what does not
 
 - **Rows follow the schedule.** Each scheduled snapshot moves the `current`

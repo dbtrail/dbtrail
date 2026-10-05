@@ -576,9 +576,10 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 	// time on a copy of a hundred tables. CopyDirs stay the whole copy's: they
 	// bound what the worker may read, the script only what it defines.
 	var viewsSQL string
-	// zoneRefusal is ViewsFor's own refusal: its error reaches the runner as
-	// a worker failure, so the reason is kept here and returned instead.
-	var zoneRefusal *sqlRefusal
+	// viewsRefusal is ViewsFor's own refusal (the session's time zone, or its
+	// StrictStar): its error reaches the runner as a worker failure, so the
+	// reason is kept here and returned instead.
+	var viewsRefusal error
 	job := sqlsandbox.Job{
 		// One query at a time per identity: the login identity, or the
 		// shared automation token as one identity.
@@ -587,17 +588,41 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 		ViewsFor: func(refs sqlsandbox.Refs) (string, error) {
 			narrowed := in
 			narrowed.OnlyViews = sqlWantedViews(in, refs)
+			if sess.StrictStar && refs.Natural {
+				// A NATURAL JOIN pairs on every column its tables share by
+				// name: it depends on their column SETS as a star does, with
+				// no star in the statement. The copy holds no generated
+				// column and holds the invisible ones, so over such a table
+				// it would pair on other columns and return other ROWS. Every
+				// table the statement reads has to have MySQL's set, not only
+				// the joined ones: the parse does not say which is which.
+				if table, why := sqlStarUnlikeMySQL(narrowed); table != "" {
+					viewsRefusal = &sqlStarRefusal{fmt.Sprintf(
+						"a NATURAL JOIN pairs on the columns its tables share, and %s does not have the columns MySQL has (%s), "+
+							"so the copy does not answer it; write the join with ON or USING to read it here", table, why)}
+					return "", viewsRefusal
+				}
+			}
+			if sess.StrictStar {
+				// A star returns what a view's column list says. Where that
+				// is not what MySQL returns, a caller that asked for MySQL's
+				// answer gets a refusal and sends the statement there (#2111).
+				if msg := sqlStarRefusalFor(in, narrowed, refs); msg != "" {
+					viewsRefusal = &sqlStarRefusal{msg}
+					return "", viewsRefusal
+				}
+			}
 			if sess.TimeZone != "" {
 				// A session zone other than UTC: every DATETIME the statement
 				// can read must be the wall clock MySQL holds, or it would be
 				// shifted by the zone (views.BaselineTable.Datetimes).
 				tables, unknown := sqlWallClockDatetimes(narrowed)
 				if unknown != "" {
-					zoneRefusal = &sqlRefusal{http.StatusConflict, fmt.Sprintf(
+					viewsRefusal = &sqlRefusal{http.StatusConflict, fmt.Sprintf(
 						"the session time zone (SET time_zone) cannot be applied to %s: that table's column types are not available "+
 							"(its snapshot does not record them, or they could not be read just now: DBTrail's log says), "+
 							"so a DATETIME cannot be told from a TIMESTAMP; SET time_zone = 'UTC' to read it", unknown)}
-					return "", zoneRefusal
+					return "", viewsRefusal
 				}
 				narrowed.Baselines = tables
 				narrowed.NonUTCSession = true
@@ -613,8 +638,8 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 	ran = true
 	res, err := slot.Run(ctx, job)
 	if err != nil {
-		if zoneRefusal != nil {
-			return sqlOutcome{}, zoneRefusal
+		if viewsRefusal != nil {
+			return sqlOutcome{}, viewsRefusal
 		}
 		var qerr *sqlsandbox.QueryError
 		if errors.As(err, &qerr) && sqlEventsMissing.MatchString(qerr.Message) {
@@ -724,6 +749,62 @@ func sqlWallClockDatetimes(in views.Input) (tables []views.BaselineTable, unknow
 		tables[i].WallClockDatetimes = true
 	}
 	return tables, ""
+}
+
+// sqlStarRefusal is the copy declining a statement under
+// sqlsandbox.Session.StrictStar: what it would return for a star is not what
+// MySQL returns. Its own type, apart from sqlRefusal, because it is about the
+// statement's shape and not about the copy: the port answers it as a
+// statement it does not take, without a warning per statement, and read
+// routing sends the statement to MySQL.
+type sqlStarRefusal struct{ Message string }
+
+func (e *sqlStarRefusal) Error() string { return e.Message }
+
+// sqlStarRefusalFor says why the copy must not answer a statement's stars as
+// MySQL would, or "" when it can. in is every view of the copy, narrowed the
+// ones the statement reads.
+//
+// The tables that count are the ones a star expands (sqlsandbox.Refs.
+// StarTables), and nothing else the statement reads: `SELECT l.*, g.id FROM
+// lines l JOIN gen g` expands lines alone. Three things widen that back to
+// every table the statement reads, because then the walk was not certain: a
+// star it could not attribute (Refs.Star), a statement it could not read
+// (Refs.Unsure), and a star table that matches no view of the copy.
+func sqlStarRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs) string {
+	const namedJoin = "a star over a join with USING or NATURAL returns its columns in another order than MySQL, " +
+		"which puts the join's columns first; name the columns to read it here"
+	uncertain := refs.Star || refs.Unsure
+	if refs.StarNamedJoin || (uncertain && refs.NamedJoin) {
+		return namedJoin
+	}
+	over := narrowed
+	if !uncertain {
+		if len(refs.StarTables) == 0 {
+			return ""
+		}
+		if want := sqlWantedViews(in, sqlsandbox.Refs{Tables: refs.StarTables}); want != nil {
+			over = in
+			over.OnlyViews = want
+		}
+	}
+	if table, why := sqlStarUnlikeMySQL(over); table != "" {
+		return fmt.Sprintf("SELECT * on %s would not return the columns MySQL returns (%s), so the copy does not answer a statement "+
+			"with a star over it; name the columns to read it here", table, why)
+	}
+	return ""
+}
+
+// sqlStarUnlikeMySQL names the first table this render defines whose
+// `SELECT *` on the copy is not MySQL's, and why (views.BaselineTable.
+// StarUnlikeMySQL); "" when every one answers a star as MySQL does.
+func sqlStarUnlikeMySQL(in views.Input) (table, why string) {
+	for _, t := range in.SelectedBaselines() {
+		if why := t.StarUnlikeMySQL(); why != "" {
+			return t.Schema + "." + t.Table, why
+		}
+	}
+	return "", ""
 }
 
 // sqlFoldName folds A-Z only, as DuckDB does when it compares names: Ñ and ñ
