@@ -46,9 +46,9 @@ func TestRefresh_lastChangeOfARowIsTheLastInTheBinlog(t *testing.T) {
 		{"delete then insert: the row is there", 3, "", 1, `{"id":1,"status":"B"}`, true, true,
 			[]string{"1=B", "2=paid", "3=shipped"}, false},
 		{"ids against positions, table rewritten", 2, `{"id":1,"status":"A"}`, 2, `{"id":1,"status":"B"}`, false, false,
-			[]string{"1=B", "2=paid", "3=shipped"}, true},
+			[]string{"1=B", "2=x", "3=shipped"}, true},
 		{"ids against positions, delta pair", 2, `{"id":1,"status":"A"}`, 2, `{"id":1,"status":"B"}`, true, false,
-			[]string{"1=B", "2=paid", "3=shipped"}, true},
+			[]string{"1=B", "2=x", "3=shipped"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var T time.Time
@@ -63,6 +63,10 @@ func TestRefresh_lastChangeOfARowIsTheLastInTheBinlog(t *testing.T) {
 			firstID, lastID := uint64(10), uint64(20)
 			if tc.backfilled {
 				firstID, lastID = 20, 10
+				// The refresh cuts at the end of the event with the highest
+				// id. A change of another row, further on and with a higher
+				// id still, keeps both changes of row 1 inside the cut.
+				insertTableEvent(t, r.db, r.schema, "orders", 30, 500, started.Add(time.Second), 2, "2", `{"id":2,"status":"x"}`)
 			}
 			insertTableEvent(t, r.db, r.schema, "orders", firstID, 100, started.Add(2*time.Second), tc.firstType, "1", tc.firstAfter)
 			insertTableEvent(t, r.db, r.schema, "orders", lastID, 300, started, tc.lastType, "1", tc.lastAfter)
