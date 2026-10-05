@@ -109,7 +109,10 @@ type Router interface {
 // asking the Router.
 type RouterConfig struct {
 	// MaxCopyAge is how old the copy's snapshot may be for a statement to
-	// run there. Zero means never: every statement is forwarded.
+	// run there. Zero means never: every statement is forwarded. Past it the
+	// copy is asked for an answer only over tables unchanged since their
+	// snapshot, and MaxCopyAge is then how long ago capture must be known to
+	// have been complete (#2085).
 	MaxCopyAge time.Duration
 	// Observe, when set, is told every routing decision this connection
 	// makes: route is "copy", "mysql" or "refused", reason one of the RouteReason*
@@ -153,11 +156,11 @@ const (
 	RouteReasonCheapPlan      RouteReason = "cheap_plan"       // below both thresholds
 	RouteReasonBoundedLimit   RouteReason = "bounded_limit"    // a small LIMIT MySQL answers without reading past it
 	RouteReasonCopyAgeUnknown RouteReason = "copy_age_unknown" // no snapshot time
-	RouteReasonCopyTooOld     RouteReason = "copy_too_old"     // snapshot older than MaxCopyAge
+	RouteReasonCopyTooOld     RouteReason = "copy_too_old"     // snapshot older than MaxCopyAge, and its tables not vouched for as unchanged (#2085)
 	RouteReasonCopyRefused    RouteReason = "copy_refused"     // the copy errored or cut the result
 	RouteReasonShowWarnings   RouteReason = "show_warnings"    // SHOW WARNINGS after a MySQL statement
 	RouteReasonUpstreamLost   RouteReason = "upstream_lost"    // nobody answered: the port's connection to the source is lost
-	RouteReasonExpensivePlan  RouteReason = "expensive_plan"   // the one reason a statement goes to the copy
+	RouteReasonExpensivePlan  RouteReason = "expensive_plan"   // the copy answered, its snapshot within MaxCopyAge (past it: tables_unchanged)
 	RouteReasonReadOnly       RouteReason = "read_only"        // refused: not a read, and the port is read-only
 )
 

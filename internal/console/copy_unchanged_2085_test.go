@@ -74,8 +74,8 @@ func TestCopyCutOf(t *testing.T) {
 		{name: "no stamp", table: table, base: func(md *baseline.DumpMetadata) { md.SnapshotTimestamp = time.Time{} }, refusal: "does not record when it was written"},
 		{name: "built across a capture gap", table: table, base: func(md *baseline.DumpMetadata) { md.CaptureGap = "2026-04-29: 3 files lost" }, refusal: "gap in capture"},
 		{name: "the pair was built across a capture gap", table: withChain, last: func(md *baseline.DumpMetadata) { md.CaptureGap = "lost" }, refusal: "gap in capture"},
-		{name: "a dump taken with no locks", table: table, base: func(md *baseline.DumpMetadata) { md.LockMode = string(baseline.LockModeNoLock) }, refusal: "lock mode is torn"},
-		{name: "no lock mode on record", table: table, base: func(md *baseline.DumpMetadata) { md.LockMode = "" }, refusal: "lock mode is unknown"},
+		{name: "a dump taken with no locks", table: table, base: func(md *baseline.DumpMetadata) { md.LockMode = string(baseline.LockModeNoLock) }, refusal: "its read is torn"},
+		{name: "no lock mode on record", table: table, base: func(md *baseline.DumpMetadata) { md.LockMode = "" }, refusal: "its read is unknown"},
 		{name: "no table definition", table: table, base: func(md *baseline.DumpMetadata) { md.CreateTableSQL = "" }, refusal: "does not record the table's definition"},
 		{name: "a foreign key that cascades deletes into the table", table: table,
 			base: func(md *baseline.DumpMetadata) {

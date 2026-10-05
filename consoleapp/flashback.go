@@ -58,7 +58,9 @@ type flashbackConfig struct {
 	// a connection to a server that has a source DSN forwards every
 	// statement to that MySQL except SELECTs whose EXPLAIN says they are
 	// expensive, which run on the copy when the copy's snapshot is at most
-	// this old. Zero (default) = the port serves the copy only, as before.
+	// this old, or when the tables they read are unchanged since their
+	// snapshot (#2085). Zero (default) = the port serves the copy only, as
+	// before.
 	RouteMaxCopyAge time.Duration
 	// RoutePolicy is the threshold EXPLAIN is read against. The zero value
 	// never routes to the copy; watch passes readrouter.DefaultPolicy()

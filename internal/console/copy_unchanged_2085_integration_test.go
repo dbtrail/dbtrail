@@ -301,8 +301,8 @@ func TestIntegrationCopyUnchanged_2085(t *testing.T) {
 	})
 	t.Run("a snapshot that cannot be vouched for", func(t *testing.T) {
 		r.wantNot("does not record its binlog position", r.table(func(md map[string]string) { delete(md, baseline.MetaKeyBinlogPos) }))
-		r.wantNot("lock mode is torn", r.table(func(md map[string]string) { md[baseline.MetaKeyLockMode] = string(baseline.LockModeNoLock) }))
-		r.wantNot("lock mode is unknown", r.table(func(md map[string]string) { delete(md, baseline.MetaKeyLockMode) }))
+		r.wantNot("its read is torn", r.table(func(md map[string]string) { md[baseline.MetaKeyLockMode] = string(baseline.LockModeNoLock) }))
+		r.wantNot("its read is unknown", r.table(func(md map[string]string) { delete(md, baseline.MetaKeyLockMode) }))
 		r.wantNot("gap in capture", r.table(func(md map[string]string) { md[baseline.MetaKeyCaptureGap] = "3 files lost" }))
 		r.wantNot("foreign key", r.table(func(md map[string]string) {
 			md[baseline.MetaKeyCreateTableSQL] = strings.Replace(md[baseline.MetaKeyCreateTableSQL], "PRIMARY KEY (`id`)",

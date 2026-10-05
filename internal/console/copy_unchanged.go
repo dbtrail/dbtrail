@@ -48,8 +48,8 @@ import (
 //   - the table is one capture records (not outside the capture's filters)
 //     and one whose rows only change through its own events (no foreign key
 //     that cascades into it: InnoDB applies a cascade without logging it);
-//   - the snapshot was read at one point of the source (locked) and is not
-//     knowingly incomplete.
+//   - the snapshot was taken at one point in time and is not knowingly
+//     incomplete.
 //
 // What is NOT covered, because no record of it exists anywhere: a write made
 // with binary logging off (SET sql_log_bin = 0), and a statement-format
@@ -187,7 +187,7 @@ func copyCutOf(t views.BaselineTable, footer func(path string) (baseline.DumpMet
 	case base.CaptureGap != "" || at.CaptureGap != "":
 		return refuse("the snapshot of %s was built across a gap in capture", name)
 	case baseline.ReadConsistencyOf(base) != baseline.ReadConsistent:
-		return refuse("the snapshot of %s was not read at one point of the source (its lock mode is %s)", name, baseline.ReadConsistencyOf(base))
+		return refuse("the snapshot of %s was not taken at one point in time (its read is %s)", name, baseline.ReadConsistencyOf(base))
 	case base.CreateTableSQL == "":
 		return refuse("the snapshot of %s does not record the table's definition", name)
 	case cascadingForeignKey.MatchString(base.CreateTableSQL):
