@@ -158,6 +158,47 @@ func TestIntegrationFlashbackRoutedUnchangedTables_2085(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// A table with a generated column, which a snapshot file does not hold
+	// (#2123): its file has the stored columns and the table's definition.
+	func() {
+		ddl := "CREATE TABLE `gen` (\n  `id` int NOT NULL,\n  `side` varchar(8) DEFAULT NULL,\n  `twice` int GENERATED ALWAYS AS ((`id` * 2)) STORED,\n  PRIMARY KEY (`id`)\n);\n"
+		testutil.MustExec(t, src, strings.TrimSuffix(strings.TrimSpace(ddl), ";"))
+		for id := 1; id <= 3; id++ {
+			testutil.MustExec(t, src, "INSERT INTO gen (id, side) VALUES (?, 'live')", id)
+		}
+		testutil.MustExec(t, src, "ANALYZE TABLE gen")
+		all, err := baseline.ParseSchemaText(ddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cols []baseline.Column
+		for _, c := range all {
+			if c.Name != "twice" {
+				cols = append(cols, c)
+			}
+		}
+		if len(cols) != 2 {
+			t.Fatalf("stored columns of gen = %d, want id and side", len(cols))
+		}
+		at := snapAt.Format(time.RFC3339)
+		w, err := baseline.NewWriter(filepath.Join(snapDir, srcName, "gen.parquet"), cols, baseline.WriterConfig{
+			Compression: "none", RowGroupSize: 100, Metadata: map[string]string{
+				baseline.MetaKeyCreateTableSQL: ddl, baseline.MetaKeyBinlogFile: anchorFile, baseline.MetaKeyBinlogPos: strconv.FormatUint(anchorPos, 10),
+				baseline.MetaKeySnapshotTimestamp: at, baseline.MetaKeyLastDumpAt: at, baseline.MetaKeyFoldGeneration: "0",
+				baseline.MetaKeySnapshotProducer: baseline.ProducerDump, baseline.MetaKeyLockMode: string(baseline.LockModeFTWRL),
+			}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for id := 1; id <= 3; id++ {
+			if err := w.WriteRow([]string{strconv.Itoa(id), "copy"}, []bool{false, false}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
 	// One table changed since the snapshot, as far as the index knows.
 	indexed("busy", 500, snapAt.Add(time.Hour))
 
@@ -260,6 +301,17 @@ func TestIntegrationFlashbackRoutedUnchangedTables_2085(t *testing.T) {
 	// still reaches back to it, and not vouched for once it does not.
 	expect(scan("carried"), "copy", "tables_unchanged")
 	expect(scan("ancient"), "live", "copy_too_old")
+
+	// Unchanged is not the only thing the copy must be sure of. A statement
+	// that names a generated column still goes to MySQL past the limit, over
+	// a table the copy otherwise answers for (#2123 on this path).
+	expect(scan("gen"), "copy", "tables_unchanged")
+	if _, reason := heavy("SELECT twice, count(*) FROM gen GROUP BY twice"); reason != "copy_columns_differ" {
+		t.Errorf("a generated column named over an unchanged table past the limit: counted under %q, want copy_columns_differ (MySQL answers)", reason)
+	}
+	if got := connStrings(t, c, "SELECT twice FROM gen WHERE twice > 0 ORDER BY twice"); len(got) != 3 || got[0][0] != "2" {
+		t.Errorf("the generated column through the port: %v, want MySQL's 2, 4, 6", got)
+	}
 
 	// A cheap read pays for none of it: the watermark is not even asked.
 	asks := wm.asks()

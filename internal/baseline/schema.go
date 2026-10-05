@@ -199,22 +199,43 @@ func generatedColumnLine(line string) bool {
 // removed, the quotes kept. A doubled quote and a backslash escape stay
 // inside the string, as SHOW CREATE TABLE writes them; a backticked name is
 // copied as it is, so a quote inside a name does not open a string.
+//
+// A server under NO_BACKSLASH_ESCAPES prints a backslash as an ordinary
+// character, so a string that ends in one closes at the quote right after it
+// (`concat(a,'\')`). Read as an escape, that quote stays inside the string and
+// the string swallows the rest of the line, with any STORED or VIRTUAL in it
+// (#2123). So when the escape reading leaves a string open at the end of the
+// line, which nothing a server prints does, the line is read again with the
+// backslash as an ordinary character. A line both readings close is read
+// with the escape, as before.
 func emptyQuoted(s string) string {
+	out, closed := emptyQuotedAs(s, true)
+	if !closed {
+		out, _ = emptyQuotedAs(s, false)
+	}
+	return out
+}
+
+// emptyQuotedAs is emptyQuoted under one reading of the backslash; closed is
+// false when the line ended inside a string.
+func emptyQuotedAs(s string, backslashEscapes bool) (out string, closed bool) {
 	var b strings.Builder
+	closed = true
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
 		case '`':
 			j := strings.IndexByte(s[i+1:], '`')
 			if j < 0 {
 				b.WriteString(s[i:])
-				return b.String()
+				return b.String(), closed
 			}
 			b.WriteString(s[i : i+j+2])
 			i += j + 1
 		case '\'':
 			b.WriteByte('\'')
+			ended := false
 			for i++; i < len(s); i++ {
-				if s[i] == '\\' {
+				if s[i] == '\\' && backslashEscapes {
 					i++
 					continue
 				}
@@ -223,15 +244,19 @@ func emptyQuoted(s string) string {
 						i++
 						continue
 					}
+					ended = true
 					break
 				}
+			}
+			if !ended {
+				closed = false
 			}
 			b.WriteByte('\'')
 		default:
 			b.WriteByte(s[i])
 		}
 	}
-	return b.String()
+	return b.String(), closed
 }
 
 // ParseSchema reads a mydumper <db>.<table>-schema.sql file and returns the

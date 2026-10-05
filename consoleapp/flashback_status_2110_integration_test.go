@@ -162,7 +162,10 @@ func writeStatusBaseline(t *testing.T, dir string, snap time.Time, schema, table
 	if err != nil {
 		t.Fatal(err)
 	}
-	w, err := baseline.NewWriter(path, cols, baseline.WriterConfig{Compression: "none", RowGroupSize: 100})
+	// With the definition in the footer: under routing the copy answers
+	// nothing for a table whose definition it does not have (#2123).
+	w, err := baseline.NewWriter(path, cols, baseline.WriterConfig{Compression: "none", RowGroupSize: 100,
+		Metadata: map[string]string{baseline.MetaKeyCreateTableSQL: ddl}})
 	if err != nil {
 		t.Fatal(err)
 	}

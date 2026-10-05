@@ -1059,6 +1059,67 @@ What this is and is not:
   `ALTER` is seen at the next one, and until then a statement with a star
   over that table can return the columns as they were declared at that
   snapshot.
+- **A statement that names a generated column is MySQL's.** A snapshot
+  holds no generated column (`STORED` or `VIRTUAL`, invisible or not), so
+  the copy does not have it. A statement that names one does not always
+  fail on the copy: the name is taken by whatever else answers to it there,
+  and the copy returns other rows with no error. Measured on the copy with
+  `gen(id, twice GENERATED ALWAYS AS (id * 2), a)` and `g2(id, twice, b)`:
+  `SELECT o.id, (SELECT twice FROM gen g WHERE g.id = o.id) FROM g2 o`
+  returns `g2.twice` for every row; `SELECT a AS twice FROM gen WHERE twice
+  = 2` filters on the alias; `SELECT twice FROM gen AS twice` returns the
+  whole row as one value; and a generated column named `user` or
+  `current_date` is answered by the function of that name. One table is
+  enough for the last three. So, under read routing, the copy declines and
+  MySQL answers (`copy_columns_differ`):
+  - **a statement whose text holds the name of a generated column of a
+    table it reads**, anywhere: in the select list, `WHERE`, `ORDER BY`,
+    `GROUP BY`, `HAVING`, a window, `USING`, a subquery, with or without
+    the table's name in front. The text is searched, not parsed, so the name
+    inside a longer word, a string or a comment keeps the statement on MySQL
+    too (a table with a generated column called `a` sends nearly every
+    statement over it to MySQL). A statement over the same table that does
+    not hold the name is the copy's, alone or joined to other tables;
+  - **a statement with any character outside ASCII that reads a table with
+    a generated column**, in a name, a string or a comment: which accented
+    or look-alike letters a server takes for an ASCII one when it compares
+    names depends on the server, so such a statement is not searched;
+  - **any statement that reads a table whose missing columns are not known
+    by name**: a table whose snapshot carries no `CREATE TABLE` (a full
+    snapshot taken before v0.5.0, every refresh that builds on one, since a
+    refresh keeps the definition of the snapshot it started from, and a file
+    whose footer could not be read at that moment), a
+    file that does not hold exactly the columns its `CREATE TABLE` lists, a
+    column whose definition could not be read (a name holding a backtick),
+    and a generated column whose name is not plain ASCII letters, digits,
+    `_` and `$`. Not known is never read as "nothing is missing". Such a
+    table used to be answered by the copy whenever the statement had no
+    star: it is MySQL's now, until a new full snapshot records its
+    definition. The Connect page counts those statements under "the snapshot
+    holds no table definition", and DBTrail's log names each such table
+    once (`carries no CREATE TABLE`);
+  - a MariaDB table created `WITH SYSTEM VERSIONING` answers to `row_start`
+    and `row_end` whether or not it declares them, and the copy holds
+    neither: a statement over it that holds one of those names is MySQL's;
+  - `_rowid`, the other name MySQL and MariaDB give a key made of one
+    integer column, is in no snapshot: a statement that holds it is MySQL's,
+    over any table. So is one that holds `my_row_id`, the key MySQL
+    generates for a table created without one
+    (`sql_generate_invisible_primary_key`), over a table whose snapshot does
+    not hold that column: with
+    `show_gipk_in_create_table_and_information_schema=OFF` the server lists
+    it in no definition;
+  - **a statement that reads a table whose name differs from another
+    table's only by letter case** (`Gen` and `gen`, on a source with
+    `lower_case_table_names=0`): the copy does not tell the two names apart
+    and would read one table for both.
+
+  An invisible column is not part of this: a snapshot holds it, and both
+  sides resolve its name the same way (only `SELECT *` and `NATURAL JOIN`
+  differ, above). The port with routing off and the SQL card decline
+  nothing: there the copy answers as it always did, and a statement that
+  names a generated column either fails (`column not found`) or is answered
+  as described here.
 - **The thresholds are knobs, not truths.** The optimizer's cost is its
   own estimate; it misleads on cached data and on skewed values (and on
   `LIMIT`, which is why steps 4 and 5 read the statement, not the cost).
@@ -1445,7 +1506,8 @@ MySQL's.
   `in_transaction`, `veto`, `explain_failed`,
   `copy_age_unknown`, `copy_too_old`, `copy_refused`, `copy_columns_differ`
   (the copy works and declined a `SELECT *` or a `NATURAL JOIN` over a table
-  whose columns there are not MySQL's), `show_warnings`,
+  whose columns there are not MySQL's, or a statement that names a column
+  the copy does not hold), `show_warnings`,
   `upstream_lost` (nobody answered: the port's connection to the source is
   lost or could not be opened, and the client got error 2006),
   `read_only` (refused: not a read, on a port started with
