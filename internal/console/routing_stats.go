@@ -141,12 +141,19 @@ func (s *Server) RecordRouteUnavailable(serverID, reason string) {
 // connection of the port tried to log in with, in the words the page shows
 // (which account, the user name, MySQL's error number and message; never a
 // password). RecordRouteAccountOK clears the note: a connection logged in.
-func (s *Server) RecordRouteAccountRefused(serverID, text string) {
-	s.routing.setAccountRefused(serverID, text)
+//
+// gen is the generation the reporting connection was bound at
+// (FlashbackTarget.ForwardGen). A connection bound before the server's
+// account changed, or before the server was deleted, speaks of an account
+// that is no longer the server's: what it reports is dropped.
+func (s *Server) RecordRouteAccountRefused(serverID string, gen uint64, text string) {
+	s.routed.whileCurrent(serverID, gen, func() { s.routing.setAccountRefused(serverID, text) })
 }
 
 // RecordRouteAccountOK: see RecordRouteAccountRefused.
-func (s *Server) RecordRouteAccountOK(serverID string) { s.routing.setAccountRefused(serverID, "") }
+func (s *Server) RecordRouteAccountOK(serverID string, gen uint64) {
+	s.routed.whileCurrent(serverID, gen, func() { s.routing.setAccountRefused(serverID, "") })
+}
 
 // RecordRouteAvailable: see RecordRouteUnavailable.
 func (s *Server) RecordRouteAvailable(serverID string) { s.routing.setUnavailable(serverID, "") }

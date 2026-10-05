@@ -81,7 +81,9 @@ func TestIntegrationFlashbackForwardingAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg, FlashbackListen: "127.0.0.1:3308",
-		ReadRouting: console.ReadRoutingConfig{MaxCopyAge: time.Hour, ScanRows: 2}})
+		ReadRouting: console.ReadRoutingConfig{MaxCopyAge: time.Hour, ScanRows: 2},
+		// As the daemon wires them (upConsoleConfigFor).
+		RouteAccountProbe: probeRouteAccount, KillSourceThreads: killSourceThreads})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,11 +231,58 @@ func TestIntegrationFlashbackForwardingAccount(t *testing.T) {
 	if who, err := currentUser(held); err != nil || who != wantUser {
 		t.Fatalf("after an edit that changed no account: %q (%v), want the same open connection as %s", who, err, wantUser)
 	}
+	// A statement is RUNNING on the source, inside a transaction, when the
+	// account changes: the client is cut, and the statement is ended on the
+	// source too, where it would otherwise run to its end as the previous
+	// account.
+	running := func(user string) int {
+		t.Helper()
+		var n int
+		if err := srcDB.QueryRow("SELECT COUNT(*) FROM information_schema.processlist WHERE user = ? AND info LIKE 'SELECT SLEEP(25)%'", user).Scan(&n); err != nil {
+			t.Fatalf("processlist: %v", err)
+		}
+		return n
+	}
+	if _, err := held.ExecContext(context.Background(), "BEGIN"); err != nil {
+		t.Fatalf("BEGIN: %v", err)
+	}
+	slept := make(chan error, 1)
+	go func() {
+		var x sql.NullInt64
+		slept <- held.QueryRowContext(context.Background(), "SELECT SLEEP(25)").Scan(&x)
+	}()
+	for deadline := time.Now().Add(15 * time.Second); running(fwdUser) == 0; time.Sleep(100 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the SLEEP never showed up on the source as the forwarding user")
+		}
+	}
 	// The account changes.
+	start := time.Now()
 	if code, body := api("PUT", "/api/servers/"+withFwd.ID, entryBody(fmt.Sprintf(`,"route_user":%q,"route_password":%q`, fwd2, fwdPass))); code != 200 {
 		t.Fatalf("PUT the new account: %d %s", code, body)
 	}
-	start := time.Now()
+	t.Logf("the PUT answered after %s", time.Since(start).Round(time.Millisecond))
+	select {
+	case err := <-slept:
+		t.Logf("the statement in flight, at the client: %v (after %s)", err, time.Since(start).Round(time.Millisecond))
+		if err == nil {
+			t.Error("a statement in flight across the edit completed for the client")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the client of a statement in flight was not cut within 5 s of the edit")
+	}
+	gone := false
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		if running(fwdUser) == 0 {
+			gone = true
+			break
+		}
+	}
+	t.Logf("on the source the statement was gone: %v, %s after the edit", gone, time.Since(start).Round(time.Millisecond))
+	if !gone {
+		t.Error("10 s after the edit the source still runs the statement as the previous account")
+	}
+	start = time.Now()
 	who, err = currentUser(held)
 	t.Logf("the connection open across the edit: %q, %v (after %s)", who, err, time.Since(start).Round(time.Millisecond))
 	if err == nil {

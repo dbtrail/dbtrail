@@ -660,7 +660,7 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 	// its open connections on the port still hold the previous account's
 	// connection to the source, so they are closed and reconnect.
 	if forwardDSNOf(entry) != forwardDSNOf(old) {
-		s.dropRoutedConns(id, "the account the port forwards with changed")
+		s.dropRoutedConns(id, "the account the port forwards with changed", forwardDSNOf(old), old.SourceSSL())
 	}
 	if dsn != old.DSN {
 		s.cm.evict(id)                   // connection points at the old DSN; close and reopen lazily
@@ -682,13 +682,14 @@ func (s *Server) handleServersDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusConflict, "this server is being monitored; stop monitoring before deleting it")
 		return
 	}
+	deleted, _ := s.cm.reg.Get(id)
 	if err := s.cm.reg.Delete(id); err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())
 		return
 	}
 	s.cm.evict(id)
 	s.sessionProfiles.invalidate(id) // purge its cached profile rules (#1075)
-	s.dropRoutedConns(id, "the server was deleted")
+	s.dropRoutedConns(id, "the server was deleted", forwardDSNOf(deleted), deleted.SourceSSL())
 	w.WriteHeader(http.StatusNoContent)
 }
 

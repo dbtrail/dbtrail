@@ -519,7 +519,8 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
   empty `route_user` removes it, and clearing the source removes it too; a
   change closes that server's open connections on the MySQL-protocol port;
   `POST /api/servers[/{id}]/test` answers with a `route` object, the login
-  tried with it: `ok`, `user`, `error`, `needs_password`; and
+  tried with it: `ok`, `user`, `error`, `needs_password`, or `skipped` with
+  the reason in a process that has no port (`serve`); and
   `GET /api/flashback` carries `account_refused` per server when the
   source turned the port's login away; see
   [time-travel-sql.md](time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental)),

@@ -52,8 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   promise alone. The password is stored like the source's and never
   returned; the account follows the source when its address or database
   changes, and uses the server's TLS settings. Saving, changing or removing
-  it closes that server's open connections on the port, so none stays on
-  the previous account. Removing it is its own control on the form
+  it closes that server's open connections on the port and ends, on the
+  source, the statements they were running (a `KILL` sent with the
+  previous account), so nothing keeps running as the previous account. Removing it is its own control on the form
   (**Remove the forwarding account**), and a save that does not touch the
   fields never changes it. **Test connection** logs in with it and names it
   in the answer; when the source later refuses the port's login, the
@@ -87,6 +88,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an unencrypted connection only under `preferred` against a source with
   no TLS, and encrypted or refused under `required`, `verify-ca` and
   `verify-identity`.
+- **Read routing: a statement interrupted in flight** (#2079). When a
+  client of the routed port left, or its statement passed the deadline,
+  while the statement was running on the source, the port closed its
+  connection to the source from a second goroutine while the first was
+  still using it: a data race inside the MySQL client library. The
+  interrupt now closes only the network socket, and the goroutine that
+  runs the statement does the rest. A source DSN written by hand with
+  `tls=preferred` now reaches a source that offers no TLS, as capture
+  does, instead of answering error 2006.
 - **Rotation: an hour held by a pending upload now counts as deferred in
   both paths** (#2094). When an unconfirmed S3 upload blocked a drop, the
   path that archives counted the hour as deferred and the path that only

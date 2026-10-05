@@ -85,6 +85,7 @@ const cases = {
   routeOk: { ...db, route: { ok: true, user: "report_ro", latency_ms: 9 } },
   routeRefused: { ...db, route: { ok: false, user: "report_ro", error: "Access denied for user 'report_ro'@'10.0.0.5' (using password: YES)", latency_ms: 4 }, s3: [{ bucket: "arch", ok: true, latency_ms: 2 }] },
   routeNeedsPassword: { ...db, route: { ok: false, user: "report_ro", needs_password: true, latency_ms: 0 } },
+  routeSkipped: { ...db, route: { ok: false, user: "report_ro", skipped: "this DBTrail process serves no MySQL port to forward from, so it cannot try this login", latency_ms: 0 } },
   routeNoUser: { ...db, route: { ok: false, error: "route_user cannot contain a colon", latency_ms: 0 } },
   routeOkDbDown: { ok: false, error: "dial tcp: refused", latency_ms: 1, route: { ok: true, user: "report_ro", latency_ms: 9 } },
   pendingS3fail: { ok: false, provision_pending: true, latency_ms: 1, s3: [{ bucket: "arch", ok: false, error: "NoSuchBucket", latency_ms: 2 }] },
@@ -133,6 +134,7 @@ console.log(JSON.stringify(out));
 		"routeOk":            {"ok", []string{"✓ index ok · 5 ms", "✓ forwarding account report_ro logs in · 9 ms"}, []string{"✗"}},
 		"routeRefused":       {"err", []string{"✓ index ok", "✗ forwarding account report_ro: Access denied for user 'report_ro'", "✓ S3 arch · 2 ms"}, nil},
 		"routeNeedsPassword": {"pending", []string{"○ forwarding account report_ro: type its password to test it"}, []string{"✗"}},
+		"routeSkipped":       {"ok", []string{"✓ index ok", "○ forwarding account report_ro: not tried", "serves no MySQL port"}, []string{"✗", "logs in"}},
 		"routeNoUser":        {"err", []string{"✗ forwarding account: route_user cannot contain a colon"}, nil},
 		"routeOkDbDown":      {"err", []string{"✗ dial tcp: refused", "✓ forwarding account report_ro logs in"}, nil},
 	}

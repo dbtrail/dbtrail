@@ -53,8 +53,18 @@ out.emptied = { body: pick(body(f)), problem: problem(f) };
 f = show({ monitor: true }, saved);
 out.untouchedProblem = problem(f);
 f.elements.route_remove.checked = true;
-f.elements.route_password.value = "ignored";
 out.removed = { body: pick(body(f)), problem: problem(f) };
+f.elements.route_password.value = "typed-pw";
+out.removedWithPassword = { body: pick(body(f)), problem: problem(f) };
+f = show({ monitor: true }, saved);
+f.elements.route_remove.checked = true; f.elements.route_user.value = "other_ro";
+out.removedWithUser = { body: pick(body(f)), problem: problem(f) };
+f = show({ monitor: true }, saved);
+f.elements.route_user.value = ""; f.elements.route_password.value = "typed-pw";
+out.emptiedWithPassword = { body: pick(body(f)), problem: problem(f) };
+f = show({ monitor: true }, { ...bare, route_unreadable: true });
+f.elements.route_password.value = "typed-pw";
+out.unreadablePasswordOnly = { body: pick(body(f)), problem: problem(f) };
 f = show({ monitor: true }, bare);
 out.none = { user: f.elements.route_user.value, placeholder: f.elements.route_password.placeholder, body: pick(body(f)), extra: extra(f), remove: !!f.elements.route_remove, problem: problem(f) };
 f.elements.route_user.value = "report_ro"; f.elements.route_password.value = "pw";
@@ -99,9 +109,9 @@ console.log(JSON.stringify(out));
 			User, Password, Placeholder, Extra string
 			Remove                             bool
 		}
-		PlainSave, NewPassword, NewUser, Set sent
-		Postgres, UnreadableRemoved          sent
-		Emptied, Removed                     struct {
+		PlainSave, NewPassword, NewUser, Set                                                                sent
+		Postgres, UnreadableRemoved                                                                         sent
+		Emptied, Removed, RemovedWithPassword, RemovedWithUser, EmptiedWithPassword, UnreadablePasswordOnly struct {
 			Body    sent
 			Problem string
 		}
@@ -138,6 +148,24 @@ console.log(JSON.stringify(out));
 	}
 	if got.Removed.Body != (sent{HasUser: true, User: ""}) || got.Removed.Problem != "" {
 		t.Errorf("the remove control sends %+v (%q), want an empty user and nothing else", got.Removed.Body, got.Removed.Problem)
+	}
+	// Remove ticked AND something typed: one of the two would be thrown
+	// away without a word, so the save is stopped and nothing is sent.
+	for name, g := range map[string]struct {
+		Body    sent
+		Problem string
+	}{"remove + a typed password": got.RemovedWithPassword, "remove + a changed user": got.RemovedWithUser} {
+		if g.Body != nothing || !strings.Contains(g.Problem, "Remove the forwarding account") || strings.Contains(g.Problem, "typed-pw") {
+			t.Errorf("%s: sends %+v and says %q, want nothing sent and the save stopped", name, g.Body, g.Problem)
+		}
+	}
+	// An emptied user with a typed password would set that password on the
+	// saved user, which the form no longer shows.
+	if got.EmptiedWithPassword.Body != nothing || !strings.Contains(got.EmptiedWithPassword.Problem, "report_ro") || strings.Contains(got.EmptiedWithPassword.Problem, "typed-pw") {
+		t.Errorf("emptied user + typed password: sends %+v and says %q, want nothing sent and the save stopped", got.EmptiedWithPassword.Body, got.EmptiedWithPassword.Problem)
+	}
+	if got.UnreadablePasswordOnly.Body != nothing || !strings.Contains(got.UnreadablePasswordOnly.Problem, "Forwarding user") {
+		t.Errorf("a password with no user over an unreadable account: sends %+v and says %q", got.UnreadablePasswordOnly.Body, got.UnreadablePasswordOnly.Problem)
 	}
 	if got.None.User != "" || got.None.Placeholder != "" || got.None.Body != nothing || got.None.Remove || got.None.Extra != "" || got.None.Problem != "" {
 		t.Errorf("server with no forwarding account = %+v, want empty fields, nothing sent, no remove control", got.None)

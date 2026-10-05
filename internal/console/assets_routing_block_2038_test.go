@@ -152,7 +152,12 @@ console.log(JSON.stringify({
 	}
 	// What the source said when it turned the port's login away.
 	must("refused", got.Refused, "MySQL refused the login of the forwarding account report_ro", "MySQL error 1045", "error 2006", "Test connection")
-	must("refused 0", got.RefusedNoCounts, "MySQL refused the login of the source account repl")
+	must("refused 0", got.RefusedNoCounts, "MySQL refused the login of the source account repl", "source user")
+	// Test connection tries the forwarding account, and a login that works
+	// clears this; it does not try the source account through the port.
+	if strings.Contains(got.RefusedNoCounts, "Test connection") {
+		t.Errorf("the source account's refusal points at Test connection, which does not try it: %s", got.RefusedNoCounts)
+	}
 	if strings.Contains(got.Forwarding, "refused the login") {
 		t.Errorf("a server with no refusal shows one: %s", got.Forwarding)
 	}

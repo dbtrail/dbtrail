@@ -1807,6 +1807,9 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		// Test connection tries a forwarding account with the port's own
 		// client (#2079).
 		RouteAccountProbe: probeRouteAccount,
+		// A statement in flight on a connection dropped by an account
+		// change is ended on the source too.
+		KillSourceThreads: killSourceThreads,
 		SQLMaxInFlight:    opts.SQLMaxInFlight,
 		// The daemon's --rotate-* defaults, so GET /api/rotation can report the
 		// effective policy (and the console panel prefill it) before the

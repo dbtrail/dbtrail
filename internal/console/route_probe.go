@@ -19,8 +19,12 @@ type routeProbeResult struct {
 	// NeedsPassword: not probed. The request would have sent the SAVED
 	// password to another host or user than the one it was saved for; it
 	// has to be typed again for that.
-	NeedsPassword bool  `json:"needs_password,omitempty"`
-	LatencyMS     int64 `json:"latency_ms"`
+	NeedsPassword bool `json:"needs_password,omitempty"`
+	// Skipped: not tried, and why. This process has no MySQL port to
+	// forward from (the read-only serve), so it has no client to log in
+	// with; the account is tried by the process that runs the port.
+	Skipped   string `json:"skipped,omitempty"`
+	LatencyMS int64  `json:"latency_ms"`
 }
 
 // routeProbeTimeout bounds the login attempt of Test connection.
@@ -32,7 +36,9 @@ const routeProbeTimeout = 8 * time.Second
 // client and the server's own TLS settings (Config.RouteAccountProbe), so it
 // cannot pass what the port would fail, and reports the source's answer, not
 // the port's 2006. In a process with no such client, a request the server
-// would refuse is still reported; the login is not tried.
+// would refuse is still reported; the login is not tried, and the answer
+// says so (Skipped). A login that works with the account in force clears the
+// refusal the Connect page shows for the server.
 func (s *Server) probeRouteAccount(ctx context.Context, req serverRequest, saved ServerEntry, hasSaved bool) *routeProbeResult {
 	flavor := saved.SourceFlavor()
 	if !hasSaved {
@@ -66,7 +72,8 @@ func (s *Server) probeRouteAccount(ctx context.Context, req serverRequest, saved
 		return res
 	}
 	if s.routeAccountProbe == nil {
-		return nil
+		res.Skipped = "this DBTrail process serves no MySQL port to forward from, so it cannot try this login; Test connection in the process that runs the port (watch) tries it"
+		return res
 	}
 	ctx, cancel := context.WithTimeout(ctx, routeProbeTimeout)
 	defer cancel()
@@ -77,6 +84,12 @@ func (s *Server) probeRouteAccount(ctx context.Context, req serverRequest, saved
 		res.Error = scrubDSNError(err, candidate)
 	} else {
 		res.OK = true
+		// The login the port makes for this server works: whatever the
+		// page says about the source having refused it is over. Only for
+		// the account in force, not for one being typed in the form.
+		if hasSaved && candidate == forwardDSNOf(saved) {
+			s.routing.setAccountRefused(saved.ID, "")
+		}
 	}
 	slog.Info("console: forwarding account test probe", "addr", cfg.Addr, "user", cfg.User, "ok", res.OK, "latency_ms", res.LatencyMS, "error", res.Error)
 	return res

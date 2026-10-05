@@ -13694,7 +13694,9 @@ function routingBlock(fb, cur) {
     // such a connection fails with error 2006, which says nothing of why.
     if (t.account_refused) {
       wrap.append(el("p", { class: "cn-sql-row" }, el("b", { text: "MySQL refused the login of " + t.account_refused + "." }),
-        " Clients of this port get error 2006 for this server until that is fixed. Edit the server to correct the account, and use Test connection there to try it."));
+        " Clients of this port get error 2006 for this server until that is fixed. " +
+        (cur.has_route ? "Edit the server to correct the forwarding account. Test connection on that form tries its login, and one that works clears this message."
+          : "Edit the server to correct the source user or its password. This message goes when a client of the port logs in.")));
     }
     if (total > 0) {
       const reasons = Object.entries(t.reasons || {}).sort((x, y) => y[1] - x[1]);
@@ -14267,14 +14269,27 @@ const FORWARDING_HINT = "Forwarding user and password are optional. They only ma
 const routePrefill = new WeakMap();
 
 // routeFormProblem stops a save or a test that would do something else than
-// the reader meant with the forwarding account. Emptying the user of a saved
-// account is not a removal (nothing is sent for it): the control below the
-// fields is.
+// the reader meant with the forwarding account; serverFormBody sends nothing
+// about the account while it answers. Emptying the user of a saved account
+// is not a removal: the control below the fields is. Remove ticked beside a
+// typed user or password would throw one of the two away. A password typed
+// with the user emptied would be set on the saved user, which the form no
+// longer shows.
 function routeFormProblem(form) {
-  const f = form.elements, was = routePrefill.get(form);
-  if (!was || !was.user || !f.route_user || f.flavor.value === "postgres") return "";
-  if (f.route_remove && f.route_remove.checked) return "";
-  if (f.route_user.value.trim() === "" && f.route_password.value === "") {
+  const f = form.elements, was = routePrefill.get(form) || { user: "" };
+  if (!f.route_user || f.flavor.value === "postgres") return "";
+  const user = f.route_user.value.trim(), typedPassword = f.route_password.value !== "";
+  if (f.route_remove && f.route_remove.checked) {
+    return typedPassword || (user !== "" && user !== was.user)
+      ? "Remove the forwarding account is ticked, and a forwarding user or password was typed too. Untick it to save what you typed, or clear what you typed to remove the account."
+      : "";
+  }
+  if (user === "" && typedPassword) {
+    return was.user
+      ? "Forwarding user is empty and a forwarding password was typed. Put " + was.user + " back to change its password, or type the user the password belongs to."
+      : "A forwarding password was typed with no Forwarding user. Type the user it belongs to.";
+  }
+  if (user === "" && was.user) {
     return "Forwarding user is empty. To remove the forwarding account, tick Remove the forwarding account; to keep it, put " + was.user + " back.";
   }
   return "";
@@ -15646,11 +15661,12 @@ function serverFormBody(form) {
   // out, the server keeps what it has, including an account this form never
   // showed (saved by somebody else since it opened, or one it could not
   // read). A typed password goes with the user the form shows. Removing is
-  // the remove control alone; an emptied user sends nothing
-  // (routeFormProblem stops that save). A PostgreSQL source has none: its
+  // the remove control alone. A form routeFormProblem would stop (an
+  // emptied user, Remove beside something typed) sends nothing about the
+  // account. A PostgreSQL source has none: its
   // fields are hidden, and what was typed in them before the source type
   // changed is not sent.
-  if (f.route_user && f.flavor.value !== "postgres") {
+  if (f.route_user && f.flavor.value !== "postgres" && !routeFormProblem(form)) {
     const was = routePrefill.get(form) || { user: "" };
     const user = f.route_user.value.trim();
     if (f.route_remove && f.route_remove.checked) {
@@ -15854,6 +15870,8 @@ function routeTestText(res) {
   if (!r) return "";
   const name = "forwarding account" + (r.user ? " " + r.user : "");
   if (r.needs_password) return "○ " + name + ": type its password to test it with these settings";
+  // Not a failure and not a pass: this process has no port, so no login.
+  if (r.skipped) return "○ " + name + ": not tried here (" + r.skipped + ")";
   return r.ok ? "✓ " + name + " logs in · " + r.latency_ms + " ms" : "✗ " + name + ": " + (r.error || "could not log in");
 }
 
@@ -15886,7 +15904,7 @@ function testResultClass(res) {
   const s3 = res.s3 || [];
   const route = res.route;
   if (s3.some((b) => b.not_applied || (!b.ok && !b.needs_secret && !b.needs_keys))) return "err";
-  if (route && !route.ok && !route.needs_password) return "err";
+  if (route && !route.ok && !route.needs_password && !route.skipped) return "err";
   if (!res.ok && !res.provision_pending) return "err";
   if (res.provision_pending || (route && route.needs_password) || s3.some((b) => b.needs_secret || b.needs_keys)) return "pending";
   return "ok";

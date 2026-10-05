@@ -262,6 +262,14 @@ type Config struct {
 	// process has no port to forward from (the read-only serve), and Test
 	// connection then says nothing about that login.
 	RouteAccountProbe func(ctx context.Context, dsn string, ssl config.SSL, timeout time.Duration) error
+	// KillSourceThreads ends, on a source, the connections with the given
+	// thread ids: one short-lived connection with dsn (and ssl, as the
+	// port connects), a KILL for each id. Used when a server's routed
+	// connections are dropped because its forwarding account changed, so a
+	// statement in flight does not run on as the previous account. An id
+	// the source no longer knows is not an error. Supplied by the serving
+	// layer like RouteAccountProbe; nil = no port, nothing to end.
+	KillSourceThreads func(ctx context.Context, dsn string, ssl config.SSL, ids []uint32) error
 }
 
 // ReadRoutingConfig is the read router's policy as the console reports it.
@@ -487,6 +495,10 @@ type Server struct {
 	routing *routingStats
 	// routeAccountProbe is Config.RouteAccountProbe.
 	routeAccountProbe func(ctx context.Context, dsn string, ssl config.SSL, timeout time.Duration) error
+	// killSourceThreads is Config.KillSourceThreads; routedKills counts the
+	// background runs of it still going (tests wait on it).
+	killSourceThreads func(ctx context.Context, dsn string, ssl config.SSL, ids []uint32) error
+	routedKills       sync.WaitGroup
 }
 
 // serverHeader selects the target server per request. Selection is stateless —
@@ -673,6 +685,7 @@ func New(cfg Config) (*Server, error) {
 		routing:                 newRoutingStats(time.Now()),
 		routed:                  newRoutedConns(),
 		routeAccountProbe:       cfg.RouteAccountProbe,
+		killSourceThreads:       cfg.KillSourceThreads,
 		archiveFetcher:          parquetquery.Fetch,
 		capacityProbe:           doctor.ProbeCapacity,
 	}

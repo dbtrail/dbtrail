@@ -447,7 +447,13 @@ What this is and is not:
   keeps the saved one; `route_dsn` takes a whole DSN instead, for an
   account reached at another address). The user name cannot contain a
   colon, and it cannot be the account the server captures with: that
-  would separate nothing.
+  would separate nothing. That check compares user and address as they
+  are written (host names without case or a trailing dot, IP addresses by
+  value, `localhost`, `127.0.0.1` and `::1` as one); it does not resolve
+  names, so the same server written as a name in one place and as an IP
+  address in the other is not recognised. A source reached over a unix
+  socket cannot carry a forwarding account: statements are forwarded over
+  the network.
 
   It connects to the source's own address and database, and follows the
   source when those are edited. Whether the connection is encrypted is
@@ -460,18 +466,40 @@ What this is and is not:
   server's open connections on the port**, and so does any other edit
   that changes the address or account the port forwards with (the
   source's own, on a server with no forwarding account), or deleting the
-  server. No connection
-  stays on the previous account: clients see a lost connection, reconnect,
-  and get the account in force. An edit that changes neither closes
-  nothing.
+  server. Clients see a lost connection at once, reconnect, and get the
+  account in force. An edit that changes neither closes nothing.
+
+  A statement that was running on the source when its connection was
+  closed does not stop there by itself: the source only notices a closed
+  connection when the statement next touches the network, so a long
+  statement would run to its end as the previous account, and a write
+  would complete. The port therefore ends them: right after the edit it
+  opens one short-lived connection with the PREVIOUS account and sends
+  `KILL` for the source thread of each connection it closed (an account
+  may kill its own threads). This takes about a second, runs in the
+  background, and never delays or fails the edit. It cannot be done when
+  the previous account can no longer log in (its password was changed on
+  the source first, or it was dropped or locked) or the source cannot be
+  reached: the log then says so at warning level, and a statement that
+  was running keeps running as the previous account until it finishes or
+  the source notices the closed connection. To be certain in that case,
+  look at the source's process list. A transaction that was open is
+  rolled back by the source in every case.
 
   **Test connection** on the server's form logs in with the forwarding
   account too, the saved one or the one being typed, and names it in its
-  answer. If the source later turns the port's login away (a changed
-  password, a host that is not allowed, a locked account), clients get
-  error 2006 on every statement, and the **Connect a SQL client** panel
-  says which account was refused and MySQL's own error, until a
-  connection logs in again.
+  answer. A console started as `serve` has no port and so no client to
+  log in with: there the answer says the login was not tried. If the
+  source later turns the port's login away (a changed password, a host
+  that is not allowed, a locked account, on MySQL an expired password),
+  clients get error 2006 on every statement, and the **Connect a SQL
+  client** panel says which account was refused and the source's own
+  error, until a connection logs in again or a **Test connection** of
+  that forwarding account works. An expired password on MariaDB is
+  different: MariaDB lets the account log in and answers every statement
+  with its own error 1820 ("You must SET PASSWORD before executing this
+  statement"), which the port passes to the client as it is, so nothing
+  is shown on the panel.
 
   The password is stored in the registry file like the source's and never
   shown again. MySQL and MariaDB sources only. The **Connect a SQL
@@ -527,8 +555,12 @@ What this is and is not:
   TLS and falls back to an unencrypted connection only when the source
   offers none, with a warning in the log; with `required`, `verify-ca` or
   `verify-identity` it is encrypted or it fails, and the client gets error
-  2006. A `tls=` parameter inside the source DSN wins over `ssl_mode`, as
-  it does for capture. A TLS setting that cannot be used (a misspelled
+  2006. A `tls=` parameter inside the source DSN (only a DSN written by
+  hand has one) wins over `ssl_mode`, as it does for capture, and when
+  `ssl_mode` demands encryption the log says once per server that the
+  DSN decides instead. `tls=preferred` there means the same as the mode
+  `preferred`: encrypted when the source offers TLS, the logged fallback
+  when it offers none. A TLS setting that cannot be used (a misspelled
   mode, a CA file that cannot be read) turns routing off for that server,
   and the **Connect a SQL client** panel says so.
 - **A lost connection to the source is not hidden.** If the upstream

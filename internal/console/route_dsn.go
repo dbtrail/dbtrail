@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 
 	"github.com/go-sql-driver/mysql"
@@ -92,7 +93,7 @@ func buildRouteDSN(req serverRequest, stored, oldSource, newSource, flavor strin
 			return "", fmt.Errorf("invalid route_dsn: %s", scrubDSNError(err, raw))
 		}
 		if cfg.Net != "tcp" && cfg.Net != "" {
-			return "", errors.New("route_dsn must be a TCP address; statements are forwarded over the network")
+			return "", errors.New("route_dsn must be a TCP address; " + routeOverNetwork)
 		}
 		if cfg.User == "" {
 			return "", errors.New("route_dsn names no user")
@@ -139,6 +140,9 @@ func buildRouteDSN(req serverRequest, stored, oldSource, newSource, flavor strin
 		// it. A request that changes none of them leaves the account as
 		// stored, whatever settings it carries.
 		moved := onSourceAddr(cur, oldSource) && sourceSettingsChanged(oldSource, src)
+		if moved && !tcpAddr(src) {
+			return "", errors.New("the forwarding account cannot follow the source onto a unix socket; " + routeOverNetwork + ". Remove the forwarding account, or keep the source on a TCP address")
+		}
 		if moved {
 			user, password := cur.User, cur.Passwd
 			cur = src.Clone()
@@ -202,6 +206,11 @@ func buildRouteDSN(req serverRequest, stored, oldSource, newSource, flavor strin
 	if cur != nil && !onSourceAddr(cur, oldSource) {
 		base = cur
 	}
+	if !tcpAddr(base) {
+		// Refused here, with the reason, and not when a client of the port
+		// connects: the forwarder speaks TCP only.
+		return "", errors.New("a forwarding account needs a source reached over TCP, and this one is a unix socket; " + routeOverNetwork)
+	}
 	out := base.Clone()
 	out.User, out.Passwd = user, password
 	if err := notTheCaptureAccount(out, src); err != nil {
@@ -209,6 +218,14 @@ func buildRouteDSN(req serverRequest, stored, oldSource, newSource, flavor strin
 	}
 	return formatRouteDSN(out)
 }
+
+// routeOverNetwork ends every refusal of an address the port cannot forward
+// to.
+const routeOverNetwork = "statements are forwarded over the network"
+
+// tcpAddr reports whether the DSN connects over TCP (the driver's default
+// when no network is written).
+func tcpAddr(cfg *mysql.Config) bool { return cfg.Net == "tcp" || cfg.Net == "" }
 
 // formatRouteDSN writes the account as the DSN that is stored, and refuses
 // one that would not read back as what was asked: a user name or a password
@@ -265,16 +282,31 @@ func sameAccount(a, b *mysql.Config) bool {
 	return a.User == b.User && sameAddr(a.Addr, b.Addr)
 }
 
-// sameAddr compares two host[:port] addresses the way they name one server:
-// the default port filled in, host names without regard to case, and the
-// loopback spellings (localhost, 127.0.0.1, ::1) as one host.
+// sameAddr reports whether two host:port addresses are the same one, as far
+// as that can be told from how they are written.
+//
+// Compared: the port, 3306 when left out; a host name without regard to case
+// and to ONE trailing dot (db.example.com. is db.example.com); an IP address
+// by its value, whatever its spelling ([0:0:0:0:0:0:0:1] is [::1], an
+// IPv4-mapped IPv6 address is its IPv4 one); and localhost, 127.0.0.1 and
+// ::1 as one host.
+//
+// Not compared, because it cannot be decided without resolving names and
+// knowing the host's interfaces: another loopback address (127.0.0.2), an IP
+// address against a name of the same host, two names of one host. Those read
+// as two addresses, so an account written that way passes as separate; the
+// source's own grants remain what bounds it.
 func sameAddr(a, b string) bool {
 	norm := func(s string) string {
 		host, port, err := net.SplitHostPort(s)
 		if err != nil {
 			host, port = strings.Trim(s, "[]"), "3306"
 		}
-		host = strings.ToLower(host)
+		host = strings.TrimSuffix(strings.ToLower(host), ".")
+		if ip, err := netip.ParseAddr(host); err == nil {
+			ip = ip.Unmap().WithZone("")
+			host = ip.String()
+		}
 		switch host {
 		case "localhost", "127.0.0.1", "::1":
 			host = "localhost"

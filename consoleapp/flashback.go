@@ -313,12 +313,15 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	// BEFORE the schema seeds below so the upstream follows them. A server that cannot route stays copy-only and says so
 	// once per connection: silently serving the copy to a client who was
 	// promised MySQL semantics is the one thing this must not do.
-	if bindReadRouter(h, srv, tgt, user, cfg, logger) {
+	if fw := bindReadRouter(h, srv, tgt, user, cfg, logger); fw != nil {
 		// tgt was read at generation tgt.ForwardGen. If the account changed
 		// since, this handler may carry the previous one: the connection is
 		// closed here, and the client reconnects into the account in force.
+		// The console is also given the id of this connection's thread on
+		// the source, so that a statement in flight when the connection is
+		// dropped is ended there too.
 		var ok bool
-		if untrack, ok = srv.TrackRoutedConn(tgt.ID, tgt.ForwardGen, closeConn); !ok {
+		if untrack, ok = srv.TrackRoutedConn(tgt.ID, tgt.ForwardGen, closeConn, fw.ThreadID); !ok {
 			h.Close()
 			closeConn()
 			return untrack, gomysql.NewError(gomysql.ER_UNKNOWN_ERROR, "flashback: this server's forwarding account changed while connecting; reconnect")
@@ -348,11 +351,11 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 // function so the wiring from the port's configuration to the handler is
 // tested without a database: nothing here opens a connection.
 //
-// It reports whether a router was bound: such a connection holds an account
-// on the source for as long as it lives.
-func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackTarget, user string, cfg flashbackConfig, logger *slog.Logger) (bound bool) {
+// It returns the forwarder of the router it bound, nil when it bound none:
+// such a connection holds an account on the source for as long as it lives.
+func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackTarget, user string, cfg flashbackConfig, logger *slog.Logger) (bound *readrouter.Forwarder) {
 	if cfg.RouteMaxCopyAge <= 0 {
-		return false
+		return nil
 	}
 	switch {
 	case tgt.SQL == nil:
@@ -399,18 +402,23 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 			// about which of the two accounts, so the cause is not left to
 			// an upstream_lost count (#2079).
 			account := accountLabel(tgt.ForwardSeparate, config.DSNUser(tgt.ForwardDSN))
+			// Recorded with the generation this connection was bound at:
+			// a login that ends after the server's account was changed, or
+			// the server deleted, says nothing about the account in force.
+			gen := tgt.ForwardGen
 			fw.OnConnect = func(err error) {
 				if err == nil {
-					srv.RecordRouteAccountOK(id)
+					srv.RecordRouteAccountOK(id, gen)
 					return
 				}
 				if _, refused := readrouter.AccountRefused(err); refused {
 					text := accountRefusedText(account, err)
 					logger.Warn("read routing: the source refused the port's login", "server", user, "account", account, "error", text)
-					srv.RecordRouteAccountRefused(id, text)
+					srv.RecordRouteAccountRefused(id, gen, text)
 				}
 			}
-			bound = true
+			warnDSNOverridesTLS(logger, id, user, tgt.ForwardDSN, tgt.SourceSSL.Mode)
+			bound = fw
 			h.BindRouter(fw, shim.RouterConfig{
 				MaxCopyAge: cfg.RouteMaxCopyAge,
 				ReadOnly:   cfg.RouteReadOnly,
@@ -422,6 +430,44 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 		}
 	}
 	return bound
+}
+
+// tlsOverrideWarned: the servers already told that their DSN overrides a
+// mandatory TLS mode (warnDSNOverridesTLS), so it is said once per server
+// and not once per client connection.
+var tlsOverrideWarned sync.Map
+
+// warnDSNOverridesTLS says, once per server, that the DSN the port forwards
+// with sets its own tls= parameter while the server's TLS mode is one that
+// demands encryption. The DSN wins, and it may be weaker than the mode (a
+// tls=false connects in clear text under ssl_mode required). Capture says
+// the same about its own connection when it starts; the port's connection is
+// opened here.
+func warnDSNOverridesTLS(logger *slog.Logger, id, server, dsn, mode string) {
+	switch mode {
+	case "required", "verify-ca", "verify-identity":
+	default:
+		return
+	}
+	if !config.DSNHasExplicitTLS(dsn) {
+		return
+	}
+	if _, told := tlsOverrideWarned.LoadOrStore(id+"\x00"+mode, true); told {
+		return
+	}
+	logger.Warn("read routing: the DSN the port forwards with sets its own tls= parameter, which takes precedence over this server's TLS mode; verify it meets your security requirement",
+		"server", server, "ssl_mode", mode)
+}
+
+// killSourceThreads is console.Config.KillSourceThreads: the statements of
+// routed connections that were just dropped are ended on the source, over
+// one connection made as the port makes its own.
+func killSourceThreads(ctx context.Context, dsn string, ssl config.SSL, ids []uint32) error {
+	err := readrouter.KillThreads(ctx, dsn, ssl, ids, 10*time.Second)
+	if _, refused := readrouter.AccountRefused(err); refused {
+		return fmt.Errorf("the previous account can no longer log in to the source, so its statements could not be ended there: %w", err)
+	}
+	return err
 }
 
 // probeRouteAccount is console.Config.RouteAccountProbe: one login and one

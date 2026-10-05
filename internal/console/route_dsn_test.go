@@ -104,6 +104,9 @@ func TestBuildRouteDSN(t *testing.T) {
 		{name: "empty dsn with a structured user", req: serverRequest{RouteDSN: strPtr(""), RouteUser: strPtr("fwd")}, stored: stored, oldSource: src, newSource: src, wantErr: "either"},
 		{name: "a colon in the user would be stored as another account", req: serverRequest{RouteUser: strPtr("fwd:x"), RoutePassword: strPtr("pw")}, oldSource: src, newSource: src, wantErr: "cannot contain a colon"},
 		{name: "a colon in the user that hides the capture account", req: serverRequest{RouteUser: strPtr("repl:x"), RoutePassword: strPtr("pw")}, oldSource: src, newSource: src, wantErr: "cannot contain a colon"},
+		{name: "the capture account with a trailing dot on the host", req: serverRequest{RouteDSN: strPtr("repl:replpw@tcp(db.prod.:3306)/")}, oldSource: src, newSource: src, wantErr: "capture"},
+		{name: "a unix-socket source cannot carry a forwarding account", req: serverRequest{RouteUser: strPtr("fwd"), RoutePassword: strPtr("pw")}, oldSource: "repl:replpw@unix(/tmp/mysql.sock)/shop", newSource: "repl:replpw@unix(/tmp/mysql.sock)/shop", wantErr: "forwarded over the network"},
+		{name: "a kept account does not follow the source onto a unix socket", stored: stored, oldSource: src, newSource: "repl:replpw@unix(/tmp/mysql.sock)/shop", wantErr: "forwarded over the network"},
 		{name: "the capture account under another spelling of the host", req: serverRequest{RouteDSN: strPtr("repl:replpw@tcp(DB.PROD:3306)/")}, oldSource: src, newSource: src, wantErr: "capture"},
 		{name: "the capture account with the default port left out", req: serverRequest{RouteDSN: strPtr("repl:replpw@tcp(db.prod)/")}, oldSource: src, newSource: src, wantErr: "capture"},
 		{name: "the capture account under a loopback alias", req: serverRequest{RouteDSN: strPtr("repl:replpw@tcp(127.0.0.1:3306)/")}, oldSource: "repl:replpw@tcp(localhost:3306)/", newSource: "repl:replpw@tcp(localhost:3306)/", wantErr: "capture"},
@@ -320,6 +323,40 @@ func TestFlashbackForwardDSN(t *testing.T) {
 		dsn, separate, routeField := srv.flashbackForwardDSN(tc.id)
 		if got := (fwd{dsn, separate, routeField}); got != tc.want {
 			t.Errorf("%s: %+v, want %+v", name, got, tc.want)
+		}
+	}
+}
+
+// TestSameAddr: what the capture-account check treats as one address, and
+// what it cannot decide and so leaves as two.
+func TestSameAddr(t *testing.T) {
+	same := [][2]string{
+		{"db.prod:3306", "DB.Prod:3306"},
+		{"db.prod:3306", "db.prod"},
+		{"db.example.com.:3306", "db.example.com:3306"},
+		{"localhost:3306", "127.0.0.1:3306"},
+		{"[::1]:3306", "127.0.0.1"},
+		{"[0:0:0:0:0:0:0:1]:3306", "[::1]:3306"},
+		{"[2001:DB8::1]:3306", "[2001:db8:0:0:0:0:0:1]:3306"},
+		{"[::ffff:10.0.0.5]:3306", "10.0.0.5:3306"},
+		{"LOCALHOST.:3306", "[::1]:3306"},
+	}
+	for _, p := range same {
+		if !sameAddr(p[0], p[1]) || !sameAddr(p[1], p[0]) {
+			t.Errorf("%s and %s are one address", p[0], p[1])
+		}
+	}
+	different := [][2]string{
+		{"db.prod:3306", "db.prod:3307"},
+		{"db.prod:3306", "db2.prod:3306"},
+		{"db.example.com..:3306", "db.example.com:3306"}, // one trailing dot, not two
+		{"127.0.0.2:3306", "127.0.0.1:3306"},             // cannot be decided here: left as two
+		{"10.0.0.5:3306", "db.prod:3306"},                // an address and a name: not resolved
+		{"[2001:db8::1]:3306", "[2001:db8::2]:3306"},
+	}
+	for _, p := range different {
+		if sameAddr(p[0], p[1]) {
+			t.Errorf("%s and %s are taken for one address", p[0], p[1])
 		}
 	}
 }

@@ -22,31 +22,41 @@ func TestRoutedConns(t *testing.T) {
 	r := newRoutedConns()
 	var a, b, c, other atomic.Int32
 	gen := r.generation("s1")
-	untrackA, ok := r.track("s1", gen, func() { a.Add(1) })
+	untrackA, ok := r.track("s1", gen, func() { a.Add(1) }, func() uint32 { return 11 })
 	if !ok {
 		t.Fatal("first track refused")
 	}
-	if _, ok := r.track("s1", gen, func() { b.Add(1) }); !ok {
+	if _, ok := r.track("s1", gen, func() { b.Add(1) }, func() uint32 { return 12 }); !ok {
 		t.Fatal("second track refused")
 	}
-	if _, ok := r.track("s2", r.generation("s2"), func() { other.Add(1) }); !ok {
+	if _, ok := r.track("s2", r.generation("s2"), func() { other.Add(1) }, func() uint32 { return 13 }); !ok {
 		t.Fatal("other server's track refused")
 	}
 	untrackA() // ended on its own
-	if n := r.drop("s1"); n != 1 || a.Load() != 0 || b.Load() != 1 || other.Load() != 0 {
-		t.Fatalf("drop closed %d (a=%d b=%d other=%d), want only b", n, a.Load(), b.Load(), other.Load())
+	underLock := 0
+	threads := r.drop("s1", func() { underLock++ })
+	if len(threads) != 1 || threads[0]() != 12 || a.Load() != 0 || b.Load() != 1 || other.Load() != 0 || underLock != 1 {
+		t.Fatalf("drop closed %d (a=%d b=%d other=%d), want only b, and its source thread", len(threads), a.Load(), b.Load(), other.Load())
 	}
-	if n := r.drop("s1"); n != 0 || b.Load() != 1 {
+	if n := len(r.drop("s1", nil)); n != 0 || b.Load() != 1 {
 		t.Errorf("a second drop closed %d again (b=%d)", n, b.Load())
 	}
+	// Something recorded for a connection of a previous generation is not
+	// recorded: the account it speaks of is no longer the server's.
+	ran := 0
+	r.whileCurrent("s1", gen, func() { ran++ })
+	r.whileCurrent("s1", r.generation("s1"), func() { ran += 10 })
+	if ran != 10 {
+		t.Errorf("whileCurrent ran %d, want only the current generation's (10)", ran)
+	}
 	// Read before the drops, registering after: refused, never tracked.
-	if _, ok := r.track("s1", gen, func() { c.Add(1) }); ok {
+	if _, ok := r.track("s1", gen, func() { c.Add(1) }, nil); ok {
 		t.Error("a connection bound from a target read before the drop was accepted")
 	}
-	if _, ok := r.track("s1", r.generation("s1"), func() { c.Add(1) }); !ok {
+	if _, ok := r.track("s1", r.generation("s1"), func() { c.Add(1) }, nil); !ok {
 		t.Error("a connection bound after the drop was refused")
 	}
-	if r.drop("s1") != 1 || c.Load() != 1 {
+	if len(r.drop("s1", nil)) != 1 || c.Load() != 1 {
 		t.Errorf("the connection bound after the drop was not tracked (c=%d)", c.Load())
 	}
 }
@@ -57,6 +67,23 @@ func TestRoutedConns(t *testing.T) {
 // alone closes nothing.
 func TestServersAPI_AccountChangeDropsRoutedConns(t *testing.T) {
 	srv := newRegistryServer(t)
+	// The serving layer's KILL: what it was asked to end, and as whom.
+	type kill struct {
+		user, addr string
+		ids        []uint32
+	}
+	var killMu sync.Mutex
+	var kills []kill
+	srv.killSourceThreads = func(_ context.Context, dsn string, _ config.SSL, ids []uint32) error {
+		cfg, err := mysql.ParseDSN(dsn)
+		if err != nil {
+			return err
+		}
+		killMu.Lock()
+		kills = append(kills, kill{cfg.User, cfg.Addr, ids})
+		killMu.Unlock()
+		return nil
+	}
 	rec, body := doServersReq(t, srv, "POST", "/api/servers",
 		`{"name":"prod","host":"h","user":"u","dbname":"db","source_host":"db.prod","source_user":"repl","source_password":"replpw"}`)
 	if rec.Code != 201 {
@@ -71,27 +98,38 @@ func TestServersAPI_AccountChangeDropsRoutedConns(t *testing.T) {
 		t.Helper()
 		// As the port does: the generation from the target, then track.
 		gen := srv.routed.generation(dto.ID)
-		if _, ok := srv.TrackRoutedConn(dto.ID, gen, func() { dropped.Add(1) }); !ok {
+		if _, ok := srv.TrackRoutedConn(dto.ID, gen, func() { dropped.Add(1) }, func() uint32 { return 77 }); !ok {
+			t.Fatal("track refused")
+		}
+		// One that never opened a connection to the source: nothing to end.
+		if _, ok := srv.TrackRoutedConn(dto.ID, gen, func() {}, func() uint32 { return 0 }); !ok {
 			t.Fatal("track refused")
 		}
 	}
+	// killAs: the account whose statements are ended on the source, the one
+	// the connections were opened with BEFORE the edit.
 	steps := []struct {
 		name, method, body string
 		wantDrop           bool
+		killAs             string
 	}{
-		{"an unrelated edit", "PUT", `{"name":"prod-2","host":"h","user":"u","dbname":"db"}`, false},
-		{"saving a forwarding account", "PUT", `{"name":"prod-2","host":"h","user":"u","dbname":"db","route_user":"fwd","route_password":"pw"}`, true},
-		{"the form's plain save", "PUT", `{"name":"prod-2","host":"h","user":"u","dbname":"db","route_user":"fwd"}`, false},
-		{"changing its password", "PUT", `{"name":"prod-2","host":"h","user":"u","dbname":"db","route_password":"pw2"}`, true},
-		{"removing it", "PUT", `{"name":"prod-2","host":"h","user":"u","dbname":"db","route_user":""}`, true},
-		{"removing it again", "PUT", `{"name":"prod-2","host":"h","user":"u","dbname":"db","route_user":""}`, false},
-		{"changing the source's password", "PUT", `{"name":"prod-2","host":"h","user":"u","dbname":"db","source_password":"other"}`, true},
-		{"deleting the server", "DELETE", ``, true},
+		{"an unrelated edit", "PUT", `{"name":"prod-2","host":"h","user":"u","dbname":"db"}`, false, ""},
+		{"saving a forwarding account", "PUT", `{"name":"prod-2","host":"h","user":"u","dbname":"db","route_user":"fwd","route_password":"pw"}`, true, "repl"},
+		{"the form's plain save", "PUT", `{"name":"prod-2","host":"h","user":"u","dbname":"db","route_user":"fwd"}`, false, ""},
+		{"changing its password", "PUT", `{"name":"prod-2","host":"h","user":"u","dbname":"db","route_password":"pw2"}`, true, "fwd"},
+		{"removing it", "PUT", `{"name":"prod-2","host":"h","user":"u","dbname":"db","route_user":""}`, true, "fwd"},
+		{"removing it again", "PUT", `{"name":"prod-2","host":"h","user":"u","dbname":"db","route_user":""}`, false, ""},
+		{"changing the source's password", "PUT", `{"name":"prod-2","host":"h","user":"u","dbname":"db","source_password":"other"}`, true, "repl"},
+		{"deleting the server", "DELETE", ``, true, "repl"},
 	}
 	for _, st := range steps {
 		open()
-		srv.RecordRouteAccountRefused(dto.ID, "the forwarding account fwd: MySQL error 1045")
+		gen := srv.routed.generation(dto.ID)
+		srv.RecordRouteAccountRefused(dto.ID, gen, "the forwarding account fwd: MySQL error 1045")
 		before := dropped.Load()
+		killMu.Lock()
+		kills = nil
+		killMu.Unlock()
 		rec, body := doServersReq(t, srv, st.method, "/api/servers/"+dto.ID, st.body)
 		if rec.Code >= 300 {
 			t.Fatalf("%s: %d %s", st.name, rec.Code, body)
@@ -112,8 +150,38 @@ func TestServersAPI_AccountChangeDropsRoutedConns(t *testing.T) {
 		if !st.wantDrop && note == "" {
 			t.Errorf("%s: an edit that changed no account forgot that this one is refused", st.name)
 		}
+		// The statements those connections were running are ended on the
+		// source, as the account they ran as, in one go; a connection that
+		// never reached the source is not named.
+		srv.routedKills.Wait()
+		killMu.Lock()
+		got2 := append([]kill(nil), kills...)
+		killMu.Unlock()
+		switch {
+		case !st.wantDrop && len(got2) != 0:
+			t.Errorf("%s: asked the source to end statements (%+v) for an edit that changed no account", st.name, got2)
+		case st.wantDrop && (len(got2) != 1 || got2[0].user != st.killAs || got2[0].addr != "db.prod:3306" || len(got2[0].ids) != 1 || got2[0].ids[0] != 77):
+			t.Errorf("%s: asked the source to end %+v, want thread 77 as %s at db.prod:3306, once", st.name, got2, st.killAs)
+		}
+		// A connection bound before the edit that reports its login only
+		// now speaks of the previous account: not recorded.
+		if st.wantDrop {
+			srv.RecordRouteAccountRefused(dto.ID, gen, "the previous account: MySQL error 1045")
+			if note := srv.routing.snapshot()[dto.ID].AccountRefused; note != "" {
+				t.Errorf("%s: a connection bound before the edit recorded a refusal after it: %q", st.name, note)
+			}
+			srv.RecordRouteAccountRefused(dto.ID, gen+1, "the new account: MySQL error 1045")
+			if note := srv.routing.snapshot()[dto.ID].AccountRefused; note == "" && st.method != "DELETE" {
+				t.Errorf("%s: a connection bound after the edit could not record a refusal", st.name)
+			}
+			srv.RecordRouteAccountOK(dto.ID, gen) // the old connection's late login clears nothing
+			if note := srv.routing.snapshot()[dto.ID].AccountRefused; note == "" && st.method != "DELETE" {
+				t.Errorf("%s: a login of the previous account cleared the new account's refusal", st.name)
+			}
+			srv.RecordRouteAccountOK(dto.ID, gen+1)
+		}
 		if !st.wantDrop {
-			srv.routed.drop(dto.ID) // start the next step clean
+			srv.routed.drop(dto.ID, nil) // start the next step clean
 		}
 	}
 }
@@ -135,7 +203,7 @@ func TestFlashbackAPI_AccountRefused(t *testing.T) {
 		}
 		return got.Routing.Servers["srv-1"]
 	}
-	s.RecordRouteAccountRefused("srv-1", "the forwarding account report_ro (MySQL error 1045: Access denied)")
+	s.RecordRouteAccountRefused("srv-1", 0, "the forwarding account report_ro (MySQL error 1045: Access denied)")
 	if got := read(); got.AccountRefused != "the forwarding account report_ro (MySQL error 1045: Access denied)" || got.Reasons == nil {
 		t.Errorf("after a refusal: %+v", got)
 	}
@@ -143,7 +211,7 @@ func TestFlashbackAPI_AccountRefused(t *testing.T) {
 	if got := read(); got.AccountRefused == "" || got.MySQL != 1 {
 		t.Errorf("a refusal beside a tally: %+v", got)
 	}
-	s.RecordRouteAccountOK("srv-1")
+	s.RecordRouteAccountOK("srv-1", 0)
 	if got := read(); got.AccountRefused != "" {
 		t.Errorf("after a login the note is still there: %+v", got)
 	}
@@ -157,6 +225,8 @@ type fakeSource struct {
 	tried  map[string]int // address -> attempts
 	logins map[string]int // address -> accepted
 	ssl    []config.SSL
+	// alsoKnows is a second user the source accepts (password pw).
+	alsoKnows string
 }
 
 func (f *fakeSource) probe(_ context.Context, dsn string, ssl config.SSL, _ time.Duration) error {
@@ -168,7 +238,7 @@ func (f *fakeSource) probe(_ context.Context, dsn string, ssl config.SSL, _ time
 	defer f.mu.Unlock()
 	f.tried[cfg.Addr]++
 	f.ssl = append(f.ssl, ssl)
-	if cfg.User != "fwd" || cfg.Passwd != "pw" {
+	if (cfg.User != "fwd" && cfg.User != f.alsoKnows) || cfg.Passwd != "pw" {
 		return fmt.Errorf("ERROR 1045 (28000): Access denied for user '%s'@'10.0.0.5' (using password: YES)", cfg.User)
 	}
 	f.logins[cfg.Addr]++
@@ -224,8 +294,29 @@ func TestServersAPI_TestConnectionTriesTheForwardingAccount(t *testing.T) {
 		t.Errorf("the source saw %d login(s), want 1", src.logins[srcAddr])
 	}
 	// With the server's own TLS settings, the ones the port uses.
-	if len(src.ssl) != 1 || src.ssl[0].Mode != "required" {
+	if len(src.ssl) < 1 || src.ssl[0].Mode != "required" {
 		t.Errorf("the login was tried with TLS settings %+v, want the server's (required)", src.ssl)
+	}
+	// The page said the source had refused this account; a login that works
+	// takes that back. One for an account only typed in the form does not:
+	// it says nothing about the saved one.
+	gen := srv.routed.generation(dto.ID)
+	refusal := func() string { return srv.routing.snapshot()[dto.ID].AccountRefused }
+	srv.RecordRouteAccountRefused(dto.ID, gen, "the forwarding account fwd: MySQL error 1045")
+	src.mu.Lock()
+	src.alsoKnows = "typed"
+	src.mu.Unlock()
+	if r := probe("typed, not saved", `{"route_user":"typed","route_password":"pw"}`); r == nil || !r.OK {
+		t.Fatalf("typed account: %+v", r)
+	}
+	if refusal() == "" {
+		t.Error("a login with an account that is not the saved one cleared the saved one's refusal")
+	}
+	if r := probe("wrong, saved stays refused", `{"route_user":"fwd","route_password":"wrong-pw"}`); r == nil || r.OK || refusal() == "" {
+		t.Errorf("a failed login cleared the refusal: %+v", r)
+	}
+	if r := probe("saved again", `{}`); r == nil || !r.OK || refusal() != "" {
+		t.Errorf("a login with the saved account left the refusal on the page: %+v, %q", r, refusal())
 	}
 	// A wrong password being typed: refused by the source, said as such.
 	r := probe("wrong password", `{"route_user":"fwd","route_password":"wrong-pw"}`)
@@ -284,8 +375,8 @@ func TestServersAPI_TestConnectionTriesTheForwardingAccount(t *testing.T) {
 	srv.routeAccountProbe = nil
 	tried := len(src.ssl)
 	doServersReq(t, srv, "PUT", "/api/servers/"+dto.ID, `{`+base+`,"route_user":"fwd","route_password":"pw"}`)
-	if r := probe("no client", `{}`); r != nil {
-		t.Errorf("with no client a login result was invented: %+v", r)
+	if r := probe("no client", `{}`); r == nil || r.OK || r.Error != "" || r.User != "fwd" || !strings.Contains(r.Skipped, "no MySQL port") {
+		t.Errorf("with no client: %+v, want the account named and said as not tried", r)
 	}
 	if r := probe("no client, capture account", `{"route_user":"repl","route_password":"x"}`); r == nil || !strings.Contains(r.Error, "capture") {
 		t.Errorf("with no client the refusal is lost: %+v", r)
