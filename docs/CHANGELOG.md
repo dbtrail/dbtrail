@@ -270,6 +270,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `cte_max_recursion_depth` with an error and MariaDB cuts it at
     `max_recursive_iterations`, where the copy runs it to the end.
 ### Fixed
+- **Read routing: a statement that names a generated column is answered by
+  MySQL** (#2123). A snapshot holds no generated column, so the copy does
+  not have it, and a statement that named one was not always refused there:
+  the copy answered with whatever else had that name, and returned other
+  rows with no error. With `gen(id, twice GENERATED ALWAYS AS (id * 2), a)`
+  and `g2(id, twice, b)`, `SELECT o.id, (SELECT twice FROM gen g WHERE g.id =
+  o.id) FROM g2 o` returned `g2.twice` (99) where MySQL 8.4 and MariaDB 11.4
+  return 2; the same statement with `EXISTS (... AND twice = 2)` returned no
+  row where they return one; `SELECT twice FROM g2 JOIN gen ...` returned 99
+  where they fail with "ambiguous". One table is enough: `SELECT a AS twice
+  FROM gen WHERE twice = 2` filtered on the alias, and a generated column
+  named `user` was answered by the function of that name. Under read routing
+  the copy now declines, and MySQL answers under `copy_columns_differ`, a
+  statement whose text holds the name of a generated column (`STORED` or
+  `VIRTUAL`, invisible or not) of a table it reads. The text is searched,
+  not parsed, so the name inside a longer word, a string or a comment keeps
+  the statement on MySQL too, and so does any character outside ASCII in a
+  statement over such a table; a statement over the same table that does not
+  hold the name still goes to the copy, alone or in a join. **A table whose
+  snapshot carries no `CREATE TABLE` is no longer answered by the copy
+  under routing at all** (before, only its `SELECT *` was held back): which
+  columns it lacks is not known, and that is not read as "none". The same
+  for a file that does not hold exactly the columns its definition lists, a
+  column definition that could not be read, and a generated column whose
+  name is not plain ASCII. A new full snapshot records the definition. A
+  statement that holds `_rowid` (MySQL's other name for a key of one integer
+  column) or, over a MariaDB table created `WITH SYSTEM VERSIONING`,
+  `row_start` or `row_end`, is MySQL's too; so is one that holds
+  `my_row_id` over a table whose snapshot does not hold MySQL's generated
+  key, and one that reads a table whose name differs from another's only by
+  letter case (the copy read one table for both). The Connect page and the
+  log line about a snapshot with no table definition now say what to do:
+  take a new full snapshot. The
+  SQL card and a port with routing off answer as before. Also: `bintrail
+  baseline` reads a generated column whose expression ends in a string
+  ending in a backslash as generated again (it stopped the conversion with
+  a column-count error), and `bintrail-console sql-compare` reports two
+  different column names at one position when they hold letters outside
+  ASCII (`año` against `niño`), which it left to the cells and called
+  `EQUAL` when no cell disagreed.
 - **A table with more than a million changed rows in one update is no longer
   written again in full** (#2126). With table deltas on, an update keeps the
   changed rows of each table in memory up to a limit (1,000,000 per table in

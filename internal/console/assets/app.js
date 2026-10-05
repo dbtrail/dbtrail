@@ -13642,7 +13642,7 @@ const ROUTE_REASON_TEXT = {
   copy_age_unknown: "the copy's age is unknown",
   copy_too_old: "the copy was older than the limit",
   copy_refused: "the copy refused it (a construct it lacks, a table it does not have, the row cap)",
-  copy_columns_differ: "SELECT * or NATURAL JOIN over a table whose columns on the copy are not MySQL's",
+  copy_columns_differ: "SELECT *, NATURAL JOIN or a column name over a table whose columns on the copy are not MySQL's, or the snapshot holds no table definition: take a new full snapshot",
   show_warnings: "SHOW WARNINGS after a MySQL statement",
   upstream_lost: "nobody answered: the port's connection to the source was lost (the client got error 2006)",
   routing_off: "routing off",

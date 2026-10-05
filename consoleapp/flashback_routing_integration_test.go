@@ -41,7 +41,11 @@ func writeRoutingBaseline(t *testing.T, dir, schema string, age time.Duration, n
 	if err != nil {
 		t.Fatal(err)
 	}
-	w, err := baseline.NewWriter(path, cols, baseline.WriterConfig{Compression: "none", RowGroupSize: 100})
+	// With its CREATE TABLE in the footer, as every snapshot of a MySQL or
+	// MariaDB source carries it: the copy answers nothing under routing for a
+	// table whose definition it does not have (#2123).
+	w, err := baseline.NewWriter(path, cols, baseline.WriterConfig{Compression: "none", RowGroupSize: 100,
+		Metadata: map[string]string{baseline.MetaKeyCreateTableSQL: ddl}})
 	if err != nil {
 		t.Fatal(err)
 	}
