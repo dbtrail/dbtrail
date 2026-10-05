@@ -499,7 +499,14 @@ Skip reasons include `column_count_mismatch` (stale/corrupt snapshot),
 snapshot), `table_excluded_from_snapshot` (a table snapshot validation left out
 because it has no explicit primary key or is not InnoDB — a fresh snapshot
 excludes it again, so the fix is on the source's DDL), `no_resolver`,
-`unhandled_row_event`, and `statement_format_dml` (a STATEMENT/MIXED-format DML whose row image is not in
+`unhandled_row_event`, `row_map_failed` (a rows event with at least one row
+that could not be mapped to the table's columns: a `CHAR`/`VARCHAR` value that
+is not valid UTF-8 and cannot be converted, because the column's character set
+is not one that is converted (only `latin1` is), because a `latin1` value holds
+a byte `latin1` assigns no character to, or because an old schema snapshot
+never recorded the column's character set; the other rows of the event are
+indexed, the event is counted once however many of its rows were dropped, and
+reading the binlogs again drops the same rows), and `statement_format_dml` (a STATEMENT/MIXED-format DML whose row image is not in
 the binlog — requires `binlog_format=ROW`). Routine skips of system schemas
 the snapshot deliberately excludes (e.g. RDS's `mysql.rds_heartbeat2`) are
 **not** counted.

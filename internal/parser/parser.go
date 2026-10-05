@@ -497,7 +497,8 @@ func isSnapshotExcludedSchema(schema string) bool {
 // stream_state.capture_skips so `status` can render the discards — every
 // warn-and-skip return below records a per-reason counter, and every event
 // that clears the guards records a capture (breaking the consecutive-skip run
-// that escalates to one ERROR). The FILE path passes the Parser's optional
+// that escalates to one ERROR). A row the emit functions cannot map is
+// recorded too, once per event (#2139, see recordUnmappedRows). The FILE path passes the Parser's optional
 // run-scoped counters (#1199, see SetSkipCounters): stale-snapshot skips still
 // fail the whole file via gapTracker, but validation-excluded tables are
 // carved out of that failure and the tally is their aggregate signal.
@@ -747,27 +748,36 @@ func handleRows(
 	// (mysql.DecompressMariadbData in RowsEvent.DecodeData), so by the time the
 	// event reaches handleRows its Rows/SkippedColumns are fully decoded — only
 	// the header EventType still says "compressed".
+	//
+	// Each emit function returns how many of the event's rows could NOT be
+	// mapped to the snapshot's columns and were left out (#2139); that is
+	// recorded once per event by recordUnmappedRows, after the rows that do map
+	// have been sent.
+	var (
+		unmapped int
+		emitErr  error
+	)
 	switch binlogEv.Header.EventType {
 	case replication.WRITE_ROWS_EVENTv0,
 		replication.WRITE_ROWS_EVENTv1,
 		replication.WRITE_ROWS_EVENTv2,
 		replication.MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1:
 		skips.RecordCaptured()
-		return emitInserts(ctx, logger, resolver, rowsEv.Rows, schema, table, filename, currentGTID, connectionID, commitTsUS, queryText, startPos, endPos, ts, pkCols, schemaVersion, stmtEnd, out)
+		unmapped, emitErr = emitInserts(ctx, logger, resolver, rowsEv.Rows, schema, table, filename, currentGTID, connectionID, commitTsUS, queryText, startPos, endPos, ts, pkCols, schemaVersion, stmtEnd, out)
 
 	case replication.DELETE_ROWS_EVENTv0,
 		replication.DELETE_ROWS_EVENTv1,
 		replication.DELETE_ROWS_EVENTv2,
 		replication.MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1:
 		skips.RecordCaptured()
-		return emitDeletes(ctx, logger, resolver, rowsEv.Rows, schema, table, filename, currentGTID, connectionID, commitTsUS, queryText, startPos, endPos, ts, pkCols, schemaVersion, stmtEnd, out)
+		unmapped, emitErr = emitDeletes(ctx, logger, resolver, rowsEv.Rows, schema, table, filename, currentGTID, connectionID, commitTsUS, queryText, startPos, endPos, ts, pkCols, schemaVersion, stmtEnd, out)
 
 	case replication.UPDATE_ROWS_EVENTv0,
 		replication.UPDATE_ROWS_EVENTv1,
 		replication.UPDATE_ROWS_EVENTv2,
 		replication.MARIADB_UPDATE_ROWS_COMPRESSED_EVENT_V1:
 		skips.RecordCaptured()
-		return emitUpdates(ctx, logger, resolver, rowsEv.Rows, schema, table, filename, currentGTID, connectionID, commitTsUS, queryText, startPos, endPos, ts, pkCols, schemaVersion, stmtEnd, out)
+		unmapped, emitErr = emitUpdates(ctx, logger, resolver, rowsEv.Rows, schema, table, filename, currentGTID, connectionID, commitTsUS, queryText, startPos, endPos, ts, pkCols, schemaVersion, stmtEnd, out)
 
 	default:
 		// A RowsEvent whose type matches none of the above — e.g.
@@ -784,10 +794,48 @@ func handleRows(
 			"event_type", binlogEv.Header.EventType,
 			"rows_skipped", len(rowsEv.Rows))
 		observe.UnhandledRowsDropped(len(rowsEv.Rows))
-		skips.RecordSkip(SkipUnhandledRowEvent)
+		// Attributed like the other table-level drops (#2139): the readers
+		// that decide per table treat a reason with no table as "any table".
+		skips.RecordSkipAttributed(SkipUnhandledRowEvent, SkipAttribution{
+			File:   filename,
+			Pos:    uint64(binlogEv.Header.LogPos),
+			Schema: schema,
+			Table:  table,
+		})
+		return nil
 	}
 
-	return nil
+	if unmapped > 0 {
+		recordUnmappedRows(skips, filename, uint64(binlogEv.Header.LogPos), schema, table)
+	}
+	return emitErr
+}
+
+// recordUnmappedRows puts a rows event that lost at least one row to a mapping
+// failure into the skip ledger: ONE attributed skip for the event, the unit
+// every other drop site counts in, so a statement touching a million
+// unmappable rows does not turn into a million ledger writes. Before #2139
+// this drop left only a WARN: the scheduled snapshot update, the Iceberg
+// export and `status --fail-on-gap` all read the ledger and saw a clean record
+// for a table that was missing changes.
+//
+// The detail is deliberately left empty: MapRow's error names
+// schema.table.column, and LastDetail is shown to readers whose data access
+// hides that table (only the Tables list is scoped). The per-row WARN carries it.
+//
+// The event keeps counting as captured (handleRows marks it before the rows are
+// emitted, as it always has), so this reason never feeds the consecutive-skip
+// run behind the "capture is effectively stopped" ERROR. That line is about
+// the whole stream discarding everything, usually a stale snapshot; one table
+// with a character set that cannot be converted is a different condition, and
+// the ledger entry is what reports it.
+func recordUnmappedRows(skips *SkipCounters, filename string, pos uint64, schema, table string) {
+	skips.RecordSkipAttributed(SkipRowMapFailed, SkipAttribution{
+		File:   filename,
+		Pos:    pos,
+		Schema: schema,
+		Table:  table,
+	})
 }
 
 func emitInserts(
@@ -805,12 +853,13 @@ func emitInserts(
 	schemaVersion uint32,
 	stmtEnd bool,
 	out emitter,
-) error {
+) (unmapped int, err error) {
 	for _, row := range rows {
 		named, err := resolver.MapRow(schema, table, row)
 		if err != nil {
 			logger.Warn("failed to map INSERT row — skipping",
 				"schema", schema, "table", table, "error", err)
+			unmapped++
 			continue
 		}
 		ev := Event{
@@ -823,10 +872,10 @@ func emitInserts(
 			StmtEnd:       stmtEnd,
 		}
 		if err := out.send(ctx, ev); err != nil {
-			return err
+			return unmapped, err
 		}
 	}
-	return nil
+	return unmapped, nil
 }
 
 func emitDeletes(
@@ -844,12 +893,13 @@ func emitDeletes(
 	schemaVersion uint32,
 	stmtEnd bool,
 	out emitter,
-) error {
+) (unmapped int, err error) {
 	for _, row := range rows {
 		named, err := resolver.MapRow(schema, table, row)
 		if err != nil {
 			logger.Warn("failed to map DELETE row — skipping",
 				"schema", schema, "table", table, "error", err)
+			unmapped++
 			continue
 		}
 		ev := Event{
@@ -862,10 +912,10 @@ func emitDeletes(
 			StmtEnd:       stmtEnd,
 		}
 		if err := out.send(ctx, ev); err != nil {
-			return err
+			return unmapped, err
 		}
 	}
-	return nil
+	return unmapped, nil
 }
 
 func emitUpdates(
@@ -883,7 +933,7 @@ func emitUpdates(
 	schemaVersion uint32,
 	stmtEnd bool,
 	out emitter,
-) error {
+) (unmapped int, err error) {
 	// go-mysql delivers UPDATE rows as interleaved before/after pairs:
 	//   rows[0]=before0, rows[1]=after0, rows[2]=before1, rows[3]=after1, ...
 	for i := 0; i+1 < len(rows); i += 2 {
@@ -891,12 +941,14 @@ func emitUpdates(
 		if err != nil {
 			logger.Warn("failed to map UPDATE before-row — skipping",
 				"schema", schema, "table", table, "error", err)
+			unmapped++
 			continue
 		}
 		after, err := resolver.MapRow(schema, table, rows[i+1])
 		if err != nil {
 			logger.Warn("failed to map UPDATE after-row — skipping",
 				"schema", schema, "table", table, "error", err)
+			unmapped++
 			continue
 		}
 		ev := Event{
@@ -910,10 +962,10 @@ func emitUpdates(
 			StmtEnd:       stmtEnd,
 		}
 		if err := out.send(ctx, ev); err != nil {
-			return err
+			return unmapped, err
 		}
 	}
-	return nil
+	return unmapped, nil
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

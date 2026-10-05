@@ -271,8 +271,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		"failed_files", failedFiles)
 	if total := runSkips.Total(); total > 0 {
 		snap, _ := runSkips.Snapshot()
-		slog.Warn("events were read from the binlogs but NOT indexed this run — a restore window over them is incomplete; "+
-			"see the per-event WARNs above for each table (validation-excluded tables need a PK + InnoDB and a re-snapshot, or exclude them via --schemas/--tables)",
+		slog.Warn(indexSkipSummary(runSkips.Count(parser.SkipRowMapFailed) > 0),
 			"skipped_total", total,
 			"skipped_by_reason", snap)
 	}
@@ -310,6 +309,22 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		return indexFailureSummary(failedFiles, len(files), firstErr)
 	}
 	return nil
+}
+
+// indexSkipSummary is the end-of-run warning for events read and not indexed.
+// The hint in parentheses is about validation-excluded tables, the reason this
+// tally was added for (#1199); a row that could not be mapped (#2139) has a
+// different cause and a different fix, so it gets its own sentence instead of
+// being read under that one.
+func indexSkipSummary(rowMapFailed bool) string {
+	msg := "events were read from the binlogs but NOT indexed this run — a restore window over them is incomplete; " +
+		"see the per-event WARNs above for each table (validation-excluded tables need a PK + InnoDB and a re-snapshot, or exclude them via --schemas/--tables)"
+	if rowMapFailed {
+		msg += "; " + parser.SkipRowMapFailed + " is a different cause: rows whose text was not valid UTF-8 and could not be " +
+			"converted were left out while the rest of their event was indexed, the `failed to map` warnings above " +
+			"name the column and the cause, and this does not mark the file failed"
+	}
+	return msg
 }
 
 // indexFailureSummary is the non-zero-exit error for a partially failed run.
