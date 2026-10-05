@@ -15,7 +15,7 @@ import (
 // read alone, where every row the access path reads is a row of the result:
 //
 //   - the table or an index read whole with no condition at all, or
-//   - an index read by key or by range (ref, eq_ref, const, range) where the
+//   - an index read by key or by range (ref, range) where the
 //     whole condition is the key's own bounds: nothing is left to check row
 //     by row.
 //
@@ -50,10 +50,15 @@ import (
 //     this: the rows that match may all sit at the end (a15: 1,668,158 rows
 //     read for 500).
 //
-// The reader takes MySQL's spelling of a condition (names in backticks). A
-// MariaDB range read is not recognised, and does not need to be: with no
-// cost in its plans, a range read was never the copy's. On MariaDB the
-// property is seen for a table or an index read whole.
+// The reader takes MySQL's spelling of a condition (every name in
+// backticks). MariaDB quotes a name only when it has to, so its range reads
+// are as good as never recognised, and do not need to be: with no cost in
+// its plans, a range read was never the copy's. On MariaDB the property is
+// seen for a table or an index read whole.
+//
+// One more refusal is reasoned, not measured: a column compared with a text
+// in one place and with a number in another (`s > 'a' AND s = 5`). One of
+// the two is not the column's type and cannot be a bound of its index.
 //
 // Anything the reader does not know (a node, an access type, an operator)
 // leaves the plan unrecognised, and the statement where it was.
@@ -86,7 +91,7 @@ func readIsResult(qb map[string]any, p *Plan) {
 		if index != "" || attached != "" {
 			return
 		}
-	case "range", "ref", "eq_ref", "const":
+	case "range", "ref":
 		if !keyServes(table, index, attached) {
 			return
 		}
@@ -175,6 +180,7 @@ func keyServes(table map[string]any, index, attached string) bool {
 	if attached != "" && !covering && key != "PRIMARY" {
 		return false
 	}
+	kinds := map[string]uint8{}
 	for i, cond := range []string{index, attached} {
 		if cond == "" {
 			continue
@@ -184,6 +190,10 @@ func keyServes(table map[string]any, index, attached string) bool {
 			return false
 		}
 		for _, pr := range preds {
+			kinds[pr.col] |= pr.kinds()
+			if kinds[pr.col] == textKind|numberKind {
+				return false
+			}
 			at := slices.Index(parts, pr.col)
 			switch {
 			case at < 0:
@@ -203,6 +213,22 @@ type condPred struct {
 	col   string // the column's own name, without its table
 	point bool   // =, <=> or IN: a value, not a range
 	str   bool   // compared with a plain text value
+	num   bool   // compared with a number
+}
+
+const (
+	textKind uint8 = 1 << iota
+	numberKind
+)
+
+func (p condPred) kinds() (k uint8) {
+	if p.str {
+		k |= textKind
+	}
+	if p.num {
+		k |= numberKind
+	}
+	return k
 }
 
 // condToken is one token of a condition as MySQL prints it.
@@ -255,17 +281,20 @@ func readCondition(cond string) (preds []condPred, ok bool) {
 		}
 		return false
 	}
-	// constant takes one constant and says whether it is a plain text.
-	constant := func() (str, ok bool) {
+	// constant takes one constant into pr: a plain text, a number, or a
+	// typed value (a date, a time), which is neither.
+	constant := func(pr *condPred) bool {
 		switch t := peek(); t.kind {
 		case "text":
-			pos++
-			return true, true
-		case "typed", "num":
-			pos++
-			return false, true
+			pr.str = true
+		case "num":
+			pr.num = true
+		case "typed":
+		default:
+			return false
 		}
-		return false, false
+		pos++
+		return true
 	}
 	var and func() bool
 	term := func() bool {
@@ -281,31 +310,22 @@ func readCondition(cond string) (preds []condPred, ok bool) {
 		pr := condPred{col: strings.ReplaceAll(part[1:len(part)-1], "``", "`")}
 		switch op := peek(); {
 		case take("op", ""):
-			str, ok := constant()
-			if !ok {
+			if !constant(&pr) {
 				return false
 			}
-			pr.point, pr.str = op.text == "=" || op.text == "<=>", str
+			pr.point = op.text == "=" || op.text == "<=>"
 		case take("word", "between"):
-			lo, ok1 := constant()
-			if !ok1 || !take("word", "and") {
+			if !constant(&pr) || !take("word", "and") || !constant(&pr) {
 				return false
 			}
-			hi, ok2 := constant()
-			if !ok2 {
-				return false
-			}
-			pr.str = lo || hi
 		case take("word", "in"):
 			if !take("punct", "(") {
 				return false
 			}
 			for {
-				str, ok := constant()
-				if !ok {
+				if !constant(&pr) {
 					return false
 				}
-				pr.str = pr.str || str
 				if !take("punct", ",") {
 					break
 				}
@@ -340,18 +360,23 @@ func readCondition(cond string) (preds []condPred, ok bool) {
 // "LIMIT offset, n", "LIMIT n OFFSET offset".
 var resultLimit = regexp.MustCompile(`(?i)\blimit\s+(\d+)(?:\s*,\s*(\d+)|\s+offset\s+(\d+))?\s*;?\s*$`)
 
+// fetchFirst is the other spelling of a LIMIT: FETCH FIRST (or NEXT) n ROWS
+// ONLY. MariaDB takes it and so does the copy.
+var fetchFirst = regexp.MustCompile(`(?i)\bfetch\s+(first|next)\b`)
+
 // resultRows is the plan's estimate of the rows the statement returns, or 0
 // when there is none to trust: the plan does not read only its result
 // (Plan.ReadIsResult), or the statement returns something else than the rows
 // it reads (an aggregate, GROUP BY, DISTINCT, a window: unboundedWork), or
-// its LIMIT is not a number known here (a placeholder). A LIMIT cuts the
-// estimate: it bounds the result whatever the plan says.
+// its LIMIT is not a number known here (a placeholder, or the standard's
+// FETCH FIRST n ROWS ONLY, which MariaDB takes). A LIMIT cuts the estimate:
+// it bounds the result whatever the plan says.
 func resultRows(stmt string, p Plan) int64 {
 	if !p.ReadIsResult || hintComment.MatchString(stmt) {
 		return 0
 	}
 	blanked, _, _, _ := scrub(stmt)
-	if unboundedWork.MatchString(blanked) {
+	if unboundedWork.MatchString(blanked) || fetchFirst.MatchString(blanked) {
 		return 0
 	}
 	est := uint64(max(p.ResultRows, 0))

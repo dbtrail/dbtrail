@@ -215,13 +215,14 @@ func TestReadCondition_2115(t *testing.T) {
 		want []pred
 		ok   bool
 	}{
-		{"(`d`.`t`.`id` > 5)", []pred{{col: "id"}}, true},
+		{"(`d`.`t`.`id` > 5)", []pred{{col: "id", num: true}}, true},
 		{"((`d`.`t`.`a` >= TIMESTAMP'2026-01-01 00:00:00') and (`d`.`t`.`a` < DATE'2026-04-01'))", []pred{{col: "a"}, {col: "a"}}, true},
 		{"(`d`.`t`.`a` between '2026-01-01' and '2026-03-31')", []pred{{col: "a", str: true}}, true},
-		{"((`d`.`t`.`a` in (1,2,3)) and (`d`.`t`.`b` = 'x''y\\'z'))", []pred{{col: "a", point: true}, {col: "b", point: true, str: true}}, true},
-		{"(`d`.`t`.`a` <=> 1.5e3)", []pred{{col: "a", point: true}}, true},
-		{"(`d`.`t`.`we``ird` = -7)", []pred{{col: "we`ird", point: true}}, true},
-		{"(`t`.`a` = 1) and (`t`.`b` <= 2)", []pred{{col: "a", point: true}, {col: "b"}}, true},
+		{"((`d`.`t`.`a` in (1,2,3)) and (`d`.`t`.`b` = 'x''y\\'z'))", []pred{{col: "a", point: true, num: true}, {col: "b", point: true, str: true}}, true},
+		{"(`d`.`t`.`a` <=> 1.5e3)", []pred{{col: "a", point: true, num: true}}, true},
+		{"(`d`.`t`.`we``ird` = -7)", []pred{{col: "we`ird", point: true, num: true}}, true},
+		{"(`t`.`a` = 1) and (`t`.`b` <= 2)", []pred{{col: "a", point: true, num: true}, {col: "b", num: true}}, true},
+		{"(`d`.`t`.`a` between 1 and '9')", []pred{{col: "a", str: true, num: true}}, true},
 		// Not read.
 		{"(length(`d`.`t`.`note`) > 100)", nil, false},
 		{"((`d`.`t`.`amount` + 0) > 99999)", nil, false},
@@ -310,6 +311,14 @@ func TestReadIsResult_refusals_2115(t *testing.T) {
 			tb["used_key_parts"] = []any{"created_at", "id"}
 			tb["index_condition"] = "((`r`.`orders`.`created_at` >= TIMESTAMP'2026-01-01 00:00:00') and (`r`.`orders`.`id` > 5))"
 		},
+		// A column held against a text and against a number: one of the two
+		// is not its type, and is no bound of the index.
+		"a text and a number for one column": func(_, tb map[string]any) {
+			tb["index_condition"] = "((`r`.`orders`.`created_at` > 'a') and (`r`.`orders`.`created_at` = 5))"
+		},
+		"a text and a number in one BETWEEN": func(_, tb map[string]any) {
+			tb["index_condition"] = "(`r`.`orders`.`created_at` between 5 and 'a')"
+		},
 		// A text compared under the primary key, with no index condition
 		// pushdown to tell a prefix key from a whole one.
 		"a text under the primary key": func(_, tb map[string]any) {
@@ -368,6 +377,11 @@ func TestResultRows_2115(t *testing.T) {
 		{"select * from orders limit 5000", exact, 5000},
 		{"SELECT 'limit 5' FROM orders", exact, 599380},
 		{"SELECT * FROM orders /* limit 5 */", exact, 599380},
+		// The standard's spelling of a LIMIT (MariaDB, and the copy): the
+		// bound is not read, so nothing is said about the result.
+		{"SELECT * FROM orders ORDER BY amount FETCH FIRST 5 ROWS ONLY", exact, 0},
+		{"SELECT * FROM orders OFFSET 10 ROWS FETCH NEXT 5 ROWS ONLY", exact, 0},
+		{"SELECT fetch, first FROM orders", exact, 599380},
 		// A bound not known here.
 		{"SELECT * FROM orders LIMIT ?", exact, 0},
 		{"SELECT * FROM orders LIMIT ?, 5000", exact, 0},
