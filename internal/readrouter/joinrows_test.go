@@ -78,7 +78,7 @@ func TestDecideStatement_cheapJoinsStayOnMariaDB(t *testing.T) {
 		{"join_selective_outer_three_levels", "SELECT c.name, o.id, oi.product_id FROM customers c JOIN orders o ON o.customer_id = c.id JOIN order_items oi ON oi.order_id = o.id WHERE c.email = 'c777@example.com'", RuleCheap, 41},
 		{"join_outer_pk_range_three_levels", "SELECT c.name, o.id, oi.product_id FROM customers c JOIN orders o ON o.customer_id = c.id JOIN order_items oi ON oi.order_id = o.id WHERE c.id BETWEEN 100 AND 110", RuleCheap, 11 + 220 + 220},
 		{"left_join_small", "SELECT c.id, o.id FROM customers c LEFT JOIN orders o ON o.customer_id = c.id AND o.amount > 400 WHERE c.id BETWEEN 1 AND 20", RuleCheap, 420},
-		{"semi_join_small_outer", "SELECT c.id, c.name FROM customers c WHERE c.id IN (SELECT customer_id FROM orders) AND c.id < 30", RuleCheap, 29 + 29*20},
+		{"semi_join_small_outer", "SELECT c.id, c.name FROM customers c WHERE c.id IN (SELECT customer_id FROM orders) AND c.id < 30", RuleCheap, 29 + 29},
 		{"union_all_joins", "SELECT c.country_code, o.id FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.id = 5 UNION ALL SELECT c.country_code, o.id FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.id = 6", RuleCheap, 42},
 		// One country of fifty: 2,000 customers, 40,000 orders.
 		{"join_one_country", "SELECT count(*), sum(o.amount) FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.country_code = 'AR'", RuleCheap, 42000},
@@ -143,11 +143,11 @@ func TestDecide_singleTableIsNotAJoin(t *testing.T) {
 	for _, name := range []string{"single_range_year", "single_ref_status", "single_range_limit500", "union_single_ranges"} {
 		for _, server := range mariaServers {
 			p := joinPlan(t, server, name)
-			if p.Joined || p.RowsReadUnknown != "" || p.RowsRead < 100000 {
-				t.Errorf("%s/%s: joined=%v unknown=%q rows=%d, want a counted read over the threshold that is no join", server, name, p.Joined, p.RowsReadUnknown, p.RowsRead)
+			if p.Joined || p.RowsReadUnknown != "" || p.RowsRead != 0 || p.MaxScanRows < 100000 {
+				t.Errorf("%s/%s: joined=%v unknown=%q rows=%d scan=%d, want a read over the threshold that is no join and counts no rows across one", server, name, p.Joined, p.RowsReadUnknown, p.RowsRead, p.MaxScanRows)
 			}
-			if d := DefaultPolicy().Decide(p); d.ToCopy || d.Rule != RuleCheap {
-				t.Errorf("%s/%s: toCopy=%v by %s (%s), want the source", server, name, d.ToCopy, d.Rule, d.Reason)
+			if d := DefaultPolicy().Decide(p); d.ToCopy || d.Rule != RuleCheap || strings.Contains(d.Reason, "join") {
+				t.Errorf("%s/%s: toCopy=%v by %s (%s), want the source, with no join named", server, name, d.ToCopy, d.Rule, d.Reason)
 			}
 		}
 	}
@@ -268,7 +268,7 @@ func TestParsePlan_rowsReadArithmetic(t *testing.T) {
 		rows       int64
 		joined     bool
 	}{
-		{"one table", top(tbl("a", "range", 300, `,"filtered":100`), ""), 300, false},
+		{"one table", top(tbl("a", "range", 300, `,"filtered":100`), ""), 0, false},
 		{"two tables: rows of the first times rows per entry of the second",
 			top(tbl("a", "range", 300, "")+","+tbl("b", "ref", 20, ""), ""), 300 + 300*20, true},
 		{"filtered of the first cuts the entries into the second",
@@ -285,29 +285,43 @@ func TestParsePlan_rowsReadArithmetic(t *testing.T) {
 		{"duplicates_removal is part of the same list",
 			top(tbl("a", "ref", 100, "")+`,{"duplicates_removal":[`+tbl("b", "ref", 10, "")+","+tbl("c", "eq_ref", 1, "")+`]}`, ""), 100 + 1000 + 1000, true},
 		{"a derived table is built once, then probed per row",
-			top(tbl("a", "range", 100, "")+","+tbl("<derived2>", "ref", 4, `,"materialized":{"query_block":`+block(tbl("x", "index", 7000, ""))+`}`), ""), 100 + 100*4 + 7000, true},
+			top(tbl("a", "range", 100, "")+","+tbl("<derived2>", "ref", 4, `,"materialized":{"query_block":`+block(tbl("x", "index", 7000, ""))+`}`), ""), 100 + 100*4, true},
 		{"a lateral derived table is built for each row before it",
 			top(tbl("a", "range", 100, "")+","+tbl("<derived2>", "ref", 4, `,"materialized":{"lateral":1,"query_block":`+block(tbl("x", "ref", 30, ""))+`}`), ""), 100 + 100*4 + 100*30, true},
-		{"a subquery with no reference outward runs once",
-			top(tbl("a", "range", 100, ""), `,"subqueries":[{"query_block":`+block(tbl("x", "ref", 3000, `,"ref":["const"]`))+`}]`), 100 + 3000, false},
+		{"a subquery with no reference outward runs once: one table, not counted",
+			top(tbl("a", "range", 100, ""), `,"subqueries":[{"query_block":`+block(tbl("x", "ref", 3000, `,"ref":["const"]`))+`}]`), 0, false},
 		{"a materialized IN subquery runs once",
-			top(tbl("a", "range", 100, ""), `,"subqueries":[{"materialization":{"query_block":`+block(tbl("x", "ALL", 3000, ""))+`}}]`), 100 + 3000, false},
+			top(tbl("a", "range", 100, ""), `,"subqueries":[{"materialization":{"query_block":`+block(tbl("x", "ALL", 3000, ""))+`}}]`), 0, false},
 		{"a cached subquery runs for each row of its block (11.x spelling)",
-			top(tbl("a", "range", 100, ""), `,"subqueries":[{"subquery_cache":{"state":"uninitialized","query_block":`+block(tbl("x", "ref", 30, ""))+`}}]`), 100 + 100*30, true},
+			top(tbl("a", "range", 100, ""), `,"subqueries":[{"subquery_cache":{"state":"uninitialized","query_block":`+block(tbl("x", "ref", 30, ""))+`}}]`), 100 * 30, true},
 		{"a cached subquery runs for each row of its block (10.x spelling)",
-			top(tbl("a", "range", 100, ""), `,"subqueries":[{"expression_cache":{"state":"uninitialized","query_block":`+block(tbl("x", "ref", 30, ""))+`}}]`), 100 + 100*30, true},
+			top(tbl("a", "range", 100, ""), `,"subqueries":[{"expression_cache":{"state":"uninitialized","query_block":`+block(tbl("x", "ref", 30, ""))+`}}]`), 100 * 30, true},
 		{"a per-row subquery runs at least once, however few rows its block produces",
-			top(tbl("a", "ref", 1, `,"filtered":10`), `,"subqueries":[{"subquery_cache":{"query_block":`+block(tbl("x", "ref", 30, ""))+`}}]`), 1 + 30, true},
+			top(tbl("a", "ref", 1, `,"filtered":10`), `,"subqueries":[{"subquery_cache":{"query_block":`+block(tbl("x", "ref", 30, ""))+`}}]`), 30, true},
 		{"a UNION branch the optimizer answered without a table reads nothing",
 			`{"query_block":{"union_result":{"query_specifications":[{"query_block":{"select_id":1,"table":{"message":"Impossible WHERE"}}},{"query_block":` + block(tbl("a", "range", 300, "")+","+tbl("b", "ref", 20, "")) + `}]}}}`, 300 + 300*20, true},
 		{"a subquery reading by an outer table's column runs per row",
-			top(tbl("a", "range", 100, ""), `,"subqueries":[{"query_block":`+block(tbl("x", "ref", 30, `,"ref":["shop.a.id"]`))+`}]`), 100 + 100*30, true},
+			top(tbl("a", "range", 100, ""), `,"subqueries":[{"query_block":`+block(tbl("x", "ref", 30, `,"ref":["shop.a.id"]`))+`}]`), 100 * 30, true},
 		{"a reference to a table of the subquery itself is not outward",
-			top(tbl("a", "range", 100, ""), `,"subqueries":[{"query_block":`+block(tbl("x", "range", 30, "")+","+tbl("y", "eq_ref", 1, `,"ref":["shop.x.id"]`))+`}]`), 100 + 30 + 30, true},
+			top(tbl("a", "range", 100, ""), `,"subqueries":[{"query_block":`+block(tbl("x", "range", 30, "")+","+tbl("y", "eq_ref", 1, `,"ref":["shop.x.id"]`))+`}]`), 30 + 30, true},
 		{"an IN probe runs per row",
-			top(tbl("a", "range", 100, ""), `,"subqueries":[{"query_block":`+block(tbl("x", "index_subquery", 30, `,"ref":["func"]`))+`}]`), 100 + 100*30, true},
+			top(tbl("a", "range", 100, ""), `,"subqueries":[{"query_block":`+block(tbl("x", "index_subquery", 30, `,"ref":["func"]`))+`}]`), 100 * 30, true},
 		{"the branches of a UNION add up",
-			`{"query_block":{"union_result":{"query_specifications":[{"query_block":` + block(tbl("a", "range", 300, "")) + `},{"query_block":` + block(tbl("b", "range", 500, "")) + `}]}}}`, 800, false},
+			`{"query_block":{"union_result":{"query_specifications":[{"query_block":` + block(tbl("a", "range", 300, "")) + `},{"query_block":` + block(tbl("b", "range", 500, "")) + `}]}}}`, 0, false},
+		{"a join inside a derived table built once is counted once",
+			top(tbl("a", "range", 100, "")+","+tbl("<derived2>", "ref", 4, `,"materialized":{"query_block":`+block(tbl("x", "range", 50, "")+","+tbl("y", "ref", 6, ""))+`}`), ""), 100 + 100*4 + 50 + 50*6, true},
+		{"a small join does not make the single table beside it count",
+			`{"query_block":{"union_result":{"query_specifications":[{"query_block":` + block(tbl("o", "range", 564692, "")) + `},{"query_block":` + block(tbl("o", "const", 1, "")+","+tbl("c", "const", 1, "")) + `}]}}}`, 2, true},
+		{"a single table with a per-row subquery: the subquery's rows only",
+			top(tbl("a", "range", 564692, `,"filtered":0.001`), `,"subqueries":[{"subquery_cache":{"query_block":`+block(tbl("x", "ref", 3, ""))+`}}]`), 16, true},
+		{"a ref to a derived table's alias inside a subquery is not an outer reference",
+			top(tbl("a", "range", 5000, ""), `,"subqueries":[{"query_block":`+block(tbl("<derived3>", "ALL", 100, `,"materialized":{"query_block":{"select_id":3,"nested_loop":[`+tbl("customers", "range", 100, "")+`]}}`)+","+tbl("o", "ref", 20, `,"ref":["t.id"]`))+`}]`), 100 + 100*20, true},
+		{"a semi-join table with nothing to test stops at its first row",
+			top(tbl("c", "range", 6000, "")+","+tbl("orders", "ref", 20, `,"filtered":5,"first_match":"c"`), ""), 6000 + 6000, true},
+		{"a semi-join table with a condition of its own is read in full",
+			top(tbl("c", "range", 6000, "")+","+tbl("orders", "ref", 20, `,"filtered":5,"first_match":"c","attached_condition":"orders.amount > 490"`), ""), 6000 + 6000*20, true},
+		{"an anti-join table stops at its first row",
+			top(tbl("c", "range", 6000, "")+","+tbl("orders", "ref", 20, `,"not_exists":true,"attached_condition":"trigcond(o.id is null)"`), ""), 6000 + 6000, true},
 		{"wrappers around the list read nothing",
 			`{"query_block":{"select_id":1,"filesort":{"sort_key":"x","temporary_table":{"nested_loop":[` + tbl("a", "range", 300, "") + "," + tbl("b", "ref", 20, "") + `]}}}}`, 300 + 300*20, true},
 		{"a table read through its own sort",
@@ -347,6 +361,15 @@ func TestParsePlan_rowsReadDoesNotOverflow(t *testing.T) {
 	d := DefaultPolicy().Decide(p)
 	if !d.ToCopy || d.Rule != RuleJoinRows || !strings.Contains(d.Reason, "1,000,000,000,000,000,000 rows") {
 		t.Errorf("decided toCopy=%v by %s (%s)", d.ToCopy, d.Rule, d.Reason)
+	}
+	// Row counts a float cannot multiply without reaching +Inf, with a
+	// filtered of 0 between them (Inf x 0 is NaN): still the cap or under.
+	huge, err := ParsePlan([]byte(`{"query_block":{"select_id":1,"nested_loop":[{"table":{"table_name":"a","access_type":"ref","rows":1e300}},{"table":{"table_name":"b","access_type":"ref","rows":1e300,"filtered":0}},{"table":{"table_name":"c","access_type":"ref","rows":1e300}}]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if huge.RowsReadUnknown != "" || huge.RowsRead != int64(maxRowsRead) {
+		t.Errorf("huge rows: rows=%d unknown=%q", huge.RowsRead, huge.RowsReadUnknown)
 	}
 	// A filtered of 0 on every table: nothing multiplies to NaN.
 	zero, err := ParsePlan([]byte(`{"query_block":{"select_id":1,"nested_loop":[{"table":{"table_name":"a","access_type":"ALL","rows":0,"filtered":0}},{"table":{"table_name":"b","access_type":"ref","rows":0,"filtered":0}}]}}`))

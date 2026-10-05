@@ -32,13 +32,20 @@ import (
 //
 // The estimate: down a list of joined tables, the rows read by a table are
 // the rows the tables before it produce (the product of their rows x
-// filtered, never taken below one entry) times its rows; the plan reads
-// the sum. A subquery or derived table is a block of its own, estimated the
+// filtered, never taken below one entry) times its rows; the list reads
+// the sum. A table the server leaves at the first match (first_match with
+// no condition of its own to test, not_exists) reads one row per entry. A subquery or derived table is a block of its own, estimated the
 // same way and added once when the server builds it once (materialized, a
 // derived table, a subquery with no reference outward) and once per row of
 // the block around it when it is run for each row (inside a subquery
 // cache, an IN probe, a reference to an outer table, a lateral derived
 // table).
+//
+// Only the parts that multiply are counted (Plan.RowsRead): a list of two
+// tables or more, and what is run once per row. A table read alone, as a
+// whole statement, a UNION branch or a derived table built once, is the
+// scan rules' business, however many rows it reads through an index, and
+// a small join beside it does not change that.
 //
 // A shape this file does not know is never guessed: the estimate is
 // withheld with the reason (Plan.RowsReadUnknown), and the plan is decided
@@ -61,7 +68,7 @@ type rowsEstimator struct {
 // Plan.RowsReadUnknown from the top query block.
 func estimateRowsRead(qb map[string]any, p *Plan) {
 	var e rowsEstimator
-	read, _, err := e.block(qb)
+	sum, err := e.block(qb)
 	if err == nil && e.tables != p.Tables {
 		err = fmt.Errorf("the plan has %d table reads, %d of them where a join step is expected", p.Tables, e.tables)
 	}
@@ -69,7 +76,7 @@ func estimateRowsRead(qb map[string]any, p *Plan) {
 		p.RowsReadUnknown = err.Error()
 		return
 	}
-	p.RowsRead = int64(capRows(read))
+	p.RowsRead = int64(capRows(sum.across))
 	p.Joined = e.joined
 }
 
@@ -84,39 +91,45 @@ func capRows(n float64) float64 {
 // or buffer what the tables below produce and read nothing themselves.
 var blockWrappers = []string{"filesort", "temporary_table", "window_functions_computation"}
 
-// block estimates one query block: read is the rows it reads, out the rows
-// it produces.
-func (e *rowsEstimator) block(qb map[string]any) (read, out float64, err error) {
-	read, out, err = e.tablesOf(qb, 0)
+// estimate is what one block or list of tables adds up to: read is every
+// row it reads, across the rows read by its parts that multiply (the
+// number the rule compares), out the rows it produces.
+type estimate struct{ read, across, out float64 }
+
+// block estimates one query block.
+func (e *rowsEstimator) block(qb map[string]any) (estimate, error) {
+	sum, err := e.tablesOf(qb, 0)
 	if err != nil {
-		return 0, 0, err
+		return estimate{}, err
 	}
 	subs, present := qb["subqueries"]
 	if !present {
-		return read, out, nil
+		return sum, nil
 	}
 	list, ok := subs.([]any)
 	if !ok {
-		return 0, 0, fmt.Errorf("subqueries is not a list")
+		return estimate{}, fmt.Errorf("subqueries is not a list")
 	}
 	for _, s := range list {
 		sub, perRow, err := subqueryBlock(s)
 		if err != nil {
-			return 0, 0, err
+			return estimate{}, err
 		}
-		subRead, _, err := e.block(sub)
+		subSum, err := e.block(sub)
 		if err != nil {
-			return 0, 0, err
+			return estimate{}, err
 		}
 		if perRow {
 			// Run for each row of this block (an upper bound: a subquery
 			// cache answers a repeated value without running it).
 			e.joined = true
-			subRead *= math.Max(out, 1)
+			subSum.read = capRows(subSum.read * math.Max(sum.out, 1))
+			subSum.across = subSum.read
 		}
-		read = capRows(read + subRead)
+		sum.read = capRows(sum.read + subSum.read)
+		sum.across = capRows(sum.across + subSum.across)
 	}
-	return read, out, nil
+	return sum, nil
 }
 
 // subqueryBlock unwraps one entry of a block's "subqueries" list and says
@@ -157,7 +170,11 @@ func subqueryBlock(s any) (qb map[string]any, perRow bool, err error) {
 
 // refersOutward reports whether a subquery block reads a table by a value
 // from outside itself: an IN probe (access_type index_subquery or
-// unique_subquery), or a "ref" naming a table the block does not contain.
+// unique_subquery), or a "ref" naming a base table the block does not
+// contain ("schema.table.column"; table_name is the alias the ref uses).
+// A ref to a derived table ("alias.column") names an alias the plan shows
+// nowhere else (its table_name is "<derived2>"), so it cannot be placed
+// and is not taken for an outer one.
 // A subquery tied to the outer row only by a condition no index serves has
 // neither; MariaDB puts that one behind a subquery cache unless the cache
 // is switched off (optimizer_switch subquery_cache=off), and then it is
@@ -198,10 +215,8 @@ func refersOutward(qb map[string]any) bool {
 		return true
 	}
 	for _, r := range refs {
-		// "const", "func", or "schema.table.column" ("table.column" for a
-		// derived table).
 		parts := strings.Split(r, ".")
-		if len(parts) >= 2 && !names[parts[len(parts)-2]] {
+		if len(parts) == 3 && !names[parts[1]] {
 			return true
 		}
 	}
@@ -210,43 +225,44 @@ func refersOutward(qb map[string]any) bool {
 
 // tablesOf finds the tables of a block under the wrappers MariaDB puts
 // around them and estimates them.
-func (e *rowsEstimator) tablesOf(node map[string]any, depth int) (read, out float64, err error) {
+func (e *rowsEstimator) tablesOf(node map[string]any, depth int) (estimate, error) {
 	if depth > 8 {
-		return 0, 0, fmt.Errorf("wrappers nested too deep")
+		return estimate{}, fmt.Errorf("wrappers nested too deep")
 	}
 	if steps, ok := node["nested_loop"].([]any); ok {
 		c := chain{e: e, fanout: 1}
 		if err := c.steps(steps); err != nil {
-			return 0, 0, err
+			return estimate{}, err
 		}
-		return c.read, c.fanout, nil
+		return c.sum(), nil
 	}
 	if t, ok := node["table"].(map[string]any); ok {
 		// A block with one table and no list around it.
 		c := chain{e: e, fanout: 1}
 		if err := c.table(t, false); err != nil {
-			return 0, 0, err
+			return estimate{}, err
 		}
-		return c.read, c.fanout, nil
+		return c.sum(), nil
 	}
 	if u, ok := node["union_result"].(map[string]any); ok {
 		specs, ok := u["query_specifications"].([]any)
 		if !ok {
-			return 0, 0, fmt.Errorf("union_result has no query_specifications")
+			return estimate{}, fmt.Errorf("union_result has no query_specifications")
 		}
+		var sum estimate
 		for _, s := range specs {
 			m, _ := s.(map[string]any)
 			qb, ok := m["query_block"].(map[string]any)
 			if !ok || len(m) != 1 {
-				return 0, 0, fmt.Errorf("a UNION branch is not a query_block")
+				return estimate{}, fmt.Errorf("a UNION branch is not a query_block")
 			}
-			r, o, err := e.block(qb)
+			b, err := e.block(qb)
 			if err != nil {
-				return 0, 0, err
+				return estimate{}, err
 			}
-			read, out = capRows(read+r), capRows(out+o)
+			sum = estimate{capRows(sum.read + b.read), capRows(sum.across + b.across), capRows(sum.out + b.out)}
 		}
-		return read, out, nil
+		return sum, nil
 	}
 	for _, w := range blockWrappers {
 		if inner, ok := node[w].(map[string]any); ok {
@@ -254,18 +270,29 @@ func (e *rowsEstimator) tablesOf(node map[string]any, depth int) (read, out floa
 		}
 	}
 	if _, ok := node["recursive_union"]; ok {
-		return 0, 0, fmt.Errorf("a recursive CTE runs its block an unknown number of times")
+		return estimate{}, fmt.Errorf("a recursive CTE runs its block an unknown number of times")
 	}
-	return 0, 0, fmt.Errorf("no list of tables found in a query block")
+	return estimate{}, fmt.Errorf("no list of tables found in a query block")
 }
 
-// chain is one list of joined tables being walked: read is the rows read
-// so far, fanout the rows the tables so far produce.
+// chain is one list of joined tables being walked: own is the rows its
+// tables read so far, fanout the rows they produce; subRead and subAcross
+// are what the derived tables among them read to be built.
 type chain struct {
-	e      *rowsEstimator
-	read   float64
-	fanout float64
-	n      int // tables in this chain
+	e                  *rowsEstimator
+	own, fanout        float64
+	subRead, subAcross float64
+	n                  int // tables in this chain
+}
+
+// sum is the chain's total. Its own tables count as rows read across a
+// join only when there are two or more of them.
+func (c *chain) sum() estimate {
+	across := c.subAcross
+	if c.n > 1 {
+		across = capRows(across + c.own)
+	}
+	return estimate{read: capRows(c.own + c.subRead), across: across, out: c.fanout}
 }
 
 func (c *chain) steps(steps []any) error {
@@ -352,7 +379,18 @@ func (c *chain) table(t map[string]any, buffered bool) error {
 	}
 	// Without a hash, a buffered join compares every buffered row with
 	// every row of the table: counted like any other entry per row.
-	c.read = capRows(c.read + entries*rows)
+	perEntry := rows
+	_, firstMatch := t["first_match"]
+	_, notExists := t["not_exists"]
+	cond, _ := t["attached_condition"].(string)
+	if notExists || (firstMatch && cond == "") {
+		// The server leaves the table at the first row it finds for each
+		// entry: a semi-join with nothing more to test on the row, or an
+		// anti-join. (A first_match table with a condition of its own
+		// reads on until a row passes it: counted in full.)
+		perEntry = math.Min(rows, 1)
+	}
+	c.own = capRows(c.own + entries*perEntry)
 	if rf, present := t["rowid_filter"]; present {
 		// The filter is built once from a range of another index.
 		m, _ := rf.(map[string]any)
@@ -360,7 +398,7 @@ func (c *chain) table(t map[string]any, buffered bool) error {
 		if !ok {
 			return fmt.Errorf("table %s has a rowid_filter with no rows estimate", name)
 		}
-		c.read = capRows(c.read + n)
+		c.own = capRows(c.own + n)
 	}
 	if mat, present := t["materialized"]; present {
 		m, _ := mat.(map[string]any)
@@ -368,16 +406,18 @@ func (c *chain) table(t map[string]any, buffered bool) error {
 		if !ok {
 			return fmt.Errorf("table %s is materialized from no query_block", name)
 		}
-		subRead, _, err := c.e.block(qb)
+		sub, err := c.e.block(qb)
 		if err != nil {
 			return err
 		}
 		if _, lateral := m["lateral"]; lateral {
 			// Built again for each row of the tables before it.
 			c.e.joined = true
-			subRead *= entries
+			sub.read = capRows(sub.read * entries)
+			sub.across = sub.read
 		}
-		c.read = capRows(c.read + subRead)
+		c.subRead = capRows(c.subRead + sub.read)
+		c.subAcross = capRows(c.subAcross + sub.across)
 	}
 	c.fanout = capRows(c.fanout * rows * filtered / 100)
 	c.n++

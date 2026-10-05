@@ -401,8 +401,9 @@ The decision, in order, for every statement:
    does not depend on the outer row is added once; a subquery that does
    (MariaDB puts it behind a subquery cache), an `IN` probe and a lateral
    derived table are counted once per outer row; a join with no index
-   counts every pair of rows it compares, and a hash join reads its table
-   once. Orders joined to customers and grouped by country reads about
+   counts every pair of rows it compares, a hash join reads its table
+   once, and a table the server leaves at the first match (a semi-join
+   with nothing more to test, an anti-join) counts one row per entry. Orders joined to customers and grouped by country reads about
    2,090,000 rows by this count and goes to the copy; a point lookup
    joined to another table reads 2, a join whose first table an index
    cuts to a few rows reads tens, and both stay on MariaDB. Three limits:

@@ -334,15 +334,16 @@ type Plan struct {
 	scans, conditions bool
 	// costInfo records that some node of the plan carries MySQL's cost_info.
 	costInfo bool
-	// RowsRead estimates the rows the plan reads in all, across its joins
-	// and subqueries (joinrows.go). Only for a plan with no cost
-	// (CostUnknown), which has nothing else to tell a heavy join by; 0 on
-	// a MySQL plan and when RowsReadUnknown says why there is no estimate.
+	// RowsRead estimates the rows the plan reads across its joins and its
+	// per-row subqueries (joinrows.go): the parts that multiply. A table
+	// read alone is not in it. Only for a plan with no cost (CostUnknown),
+	// which has nothing else to tell a heavy join by; 0 on a MySQL plan
+	// and when RowsReadUnknown says why there is no estimate.
 	RowsRead int64
-	// Joined is true when the estimate multiplies anywhere: a table read
-	// once per row of the tables before it, or a subquery or derived table
-	// run once per outer row. False for one table, and for a UNION of
-	// single tables.
+	// Joined is true when the plan has such a part: a table read once per
+	// row of the tables before it, or a subquery or derived table run once
+	// per outer row. False for one table, and for a UNION of single
+	// tables.
 	Joined bool
 	// RowsReadUnknown is why a plan with no cost has no RowsRead: a shape
 	// the estimate does not know. The scan rules alone decide that plan.
