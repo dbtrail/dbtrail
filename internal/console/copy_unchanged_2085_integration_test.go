@@ -325,6 +325,18 @@ func TestIntegrationCopyUnchanged_2085(t *testing.T) {
 		testutil.MustExec(t, r.db, "RENAME TABLE schema_changes_gone TO schema_changes")
 		r.wantUnchanged(quiet)
 	})
+	t.Run("more schema changes than one question reads", func(t *testing.T) {
+		// None of them names the table. Reading only the first ones and
+		// calling the rest clean would be a guess.
+		testutil.MustExec(t, r.db, "SET SESSION cte_max_recursion_depth = 5000")
+		testutil.MustExec(t, r.db, `INSERT INTO schema_changes (detected_at, binlog_file, binlog_pos, schema_name, table_name, ddl_type, ddl_query)
+			WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+			SELECT /*+ SET_VAR(cte_max_recursion_depth = 5000) */ ?, 'binlog.000008', 2000 + i, 'crm', CONCAT('churn', i), 'ALTER TABLE', CONCAT('ALTER TABLE churn', i, ' ADD c int') FROM n`,
+			copyDDLScanMax+1, after.Format("2006-01-02 15:04:05"))
+		r.wantNot("too many schema changes", quiet)
+		testutil.MustExec(t, r.db, "DELETE FROM schema_changes WHERE schema_name = 'crm' AND table_name LIKE 'churn%'")
+		r.wantUnchanged(quiet)
+	})
 	t.Run("the index rotated the window away", func(t *testing.T) {
 		// Last: it drops the partitions every other case reads.
 		r.partitionFrom(r.stamp.Truncate(time.Hour))
