@@ -1,6 +1,7 @@
 package views
 
 import (
+	"regexp"
 	"strings"
 )
 
@@ -131,4 +132,71 @@ func (t BaselineTable) StarUnlikeMySQL() string {
 		return t.StarDiffers
 	}
 	return ""
+}
+
+// NamesUnlikeMySQL says why a NAME in statement could resolve on this table's
+// pinned view to something other than what it is on MySQL, or "" when no name
+// can: the question read routing asks of every table a statement reads
+// (#2123).
+//
+// A snapshot holds no generated column. A statement that names one does not
+// always fail on the copy: the name binds to whatever else answers to it
+// there. Measured on DuckDB 1.5: another table's column of that name, in the
+// same FROM or in an outer query; a select-list alias, from WHERE, GROUP BY,
+// HAVING and from a later item of the same list; a table alias (the whole row
+// comes back as one value); and, for a name such as user or current_date,
+// the function DuckDB calls without parentheses. One table is enough for the
+// last three. So the rule does not look at how many tables the statement
+// reads: a statement whose text holds the name of a column this table lacks
+// on the copy is not the copy's to answer.
+//
+// The text is searched, not parsed. A name that stands in a string, in a
+// comment or inside a longer word keeps the statement on the source too:
+// that costs a statement the copy could have answered, and no reading of the
+// statement can be wrong about it. The search folds case as widely as MySQL
+// does when it compares column names, and a little wider.
+//
+// Three tables are refused whatever the statement says, because what they
+// lack on the copy is not known by name: one with no table definition (a
+// snapshot written before the definition was embedded may or may not hold
+// what MySQL holds), one whose file was not confirmed to hold exactly the
+// columns its definition lists, and one with a column definition that could
+// not be read. Not known is never read as "nothing is missing". The same for
+// a missing column whose name is not plain ASCII letters, digits, _ and $:
+// MySQL folds letters outside ASCII in ways this search does not follow, and
+// a name with a quote in it is written doubled in a statement.
+func (t BaselineTable) NamesUnlikeMySQL(statement string) string {
+	switch {
+	case !t.SchemaKnown:
+		return "its snapshot carries no table definition, or it could not be read just now, so the columns it lacks on the copy are not known"
+	case len(t.Columns) == 0:
+		return "the columns its snapshot holds could not be checked against its table definition"
+	case t.NotHeldUnread:
+		return "a column definition in its snapshot could not be read, so the columns it lacks on the copy are not all known"
+	}
+	if len(t.NotHeld) == 0 {
+		return ""
+	}
+	folded := foldForNames(statement)
+	for _, name := range t.NotHeld {
+		if !searchableName.MatchString(name) {
+			return "MySQL computes its column " + name + ", which a snapshot does not hold, and that name cannot be looked for in a statement"
+		}
+		if strings.Contains(folded, foldForNames(name)) {
+			return "the statement names " + name + ", a column MySQL computes and a snapshot does not hold"
+		}
+	}
+	return ""
+}
+
+// searchableName is a column name a statement can only spell one way, up to
+// case: no quote to double, no letter MySQL folds onto another.
+var searchableName = regexp.MustCompile(`^[A-Za-z0-9_$]+$`)
+
+// foldForNames folds a statement so that a search for an ASCII name finds it
+// however MySQL would accept it written: upper and then lower, which also
+// brings the few letters outside ASCII that fold onto ASCII ones (the Kelvin
+// sign, the long s, the dotless i, the dotted capital I) down to them.
+func foldForNames(s string) string {
+	return strings.ToLower(strings.ToUpper(s))
 }
