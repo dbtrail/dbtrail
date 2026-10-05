@@ -262,6 +262,71 @@ func TestFreeSQLResultset_typesAndCells(t *testing.T) {
 	}
 }
 
+// A DECIMAL travels as the worker printed it, scale and trailing zeros
+// intact, on the text protocol and on the binary one a prepared statement is
+// answered in, and the column says how many decimals it has (#2083).
+func TestFreeSQLResultset_decimalKeepsItsScale(t *testing.T) {
+	res := sqlsandbox.Result{
+		Columns: []sqlsandbox.Column{
+			{Name: "total", Type: "DECIMAL(38,2)"}, {Name: "whole", Type: "DECIMAL(12,0)"}, {Name: "rate", Type: "DECIMAL(38,10)"},
+		},
+		Rows: [][]any{
+			{"117329550.00", "7", "0.0000000000"},
+			{nil, nil, nil},
+			{"-0.05", "-42", "12345678901234567890.1234567890"},
+		},
+	}
+	rs, err := freeSQLResultset(res, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{
+		{"117329550.00", "7", "0.0000000000"},
+		{"<NULL>", "<NULL>", "<NULL>"},
+		{"-0.05", "-42", "12345678901234567890.1234567890"},
+	}
+	check := func(proto string, rs *mysql.Resultset, rows [][]string) {
+		t.Helper()
+		for i, d := range []uint8{2, 0, 10} {
+			if rs.Fields[i].Type != mysql.MYSQL_TYPE_NEWDECIMAL || rs.Fields[i].Decimal != d {
+				t.Errorf("%s: %s is type %d with %d decimals, want NEWDECIMAL with %d", proto, res.Columns[i].Name, rs.Fields[i].Type, rs.Fields[i].Decimal, d)
+			}
+		}
+		for r := range want {
+			for c := range want[r] {
+				if rows[r][c] != want[r][c] {
+					t.Errorf("%s: row %d %s = %q, want %q", proto, r, res.Columns[c].Name, rows[r][c], want[r][c])
+				}
+			}
+		}
+	}
+	check("text", rs, textRows(t, rs))
+	bin, err := binaryResultset(rs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var binRows [][]string
+	for r, data := range bin.RowDatas {
+		vals, err := data.ParseBinary(bin.Fields, nil)
+		if err != nil {
+			t.Fatalf("row %d does not parse as binary: %v", r, err)
+		}
+		row := make([]string, len(vals))
+		for c := range vals {
+			switch v := vals[c].Value().(type) {
+			case nil:
+				row[c] = "<NULL>"
+			case []byte:
+				row[c] = string(v)
+			default:
+				row[c] = fmt.Sprint(v)
+			}
+		}
+		binRows = append(binRows, row)
+	}
+	check("binary", bin, binRows)
+}
+
 // A result with more rows than the cap is an error naming the cap and the
 // ways out (#2037), never the first rows with a warning: nothing is
 // returned, nothing is audited as served, and no warning is left behind.

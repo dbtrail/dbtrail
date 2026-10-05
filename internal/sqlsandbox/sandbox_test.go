@@ -485,7 +485,8 @@ func TestRun_oneQueryAtATimePerUser(t *testing.T) {
 
 // Cells come back as JSON scalars a browser can show: numbers keep every
 // digit (json.Number), dates and timestamps are ISO text, wide integers and
-// decimals are text, NaN is text, nested values stay nested.
+// decimals are text (a decimal with its scale's trailing zeros), NaN is text,
+// nested values stay nested.
 func TestRun_cellsAreJSONScalars(t *testing.T) {
 	f := newCopyFixture(t)
 	r := newTestRunner(t, testLimits())
@@ -508,7 +509,7 @@ func TestRun_cellsAreJSONScalars(t *testing.T) {
 	}
 	row := res.Rows[0]
 	want := []any{
-		"1", "1.5", "2026-01-01", "2026-01-01T10:00:00Z", "x", "0xFF",
+		"1", "1.50", "2026-01-01", "2026-01-01T10:00:00Z", "x", "0xFF",
 		[]any{json.Number("1"), json.Number("2")}, map[string]any{"a": json.Number("1")},
 		nil, "NaN", json.Number("9223372036854775807"), "é", true,
 	}

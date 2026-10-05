@@ -539,6 +539,8 @@ func (r *renderer) cell(v any, typ string) any {
 		return r.text("0x" + strings.ToUpper(hex.EncodeToString(x)))
 	case *big.Int:
 		return x.String()
+	case duckdb.Decimal:
+		return decimalText(x)
 	case duckdb.UUID:
 		return x.String()
 	case []any:
@@ -553,6 +555,23 @@ func (r *renderer) cell(v any, typ string) any {
 			out[k] = r.cell(e, "")
 		}
 		return out
+	case duckdb.Map:
+		// A MAP is the driver's own map type, keyed by any value. Rendered
+		// like a STRUCT, each key by its cell text, so the values inside go
+		// through the same rules (a DECIMAL keeps its scale) and the cell is
+		// the JSON object its column is declared as.
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			key, ok := r.cell(k, "").(string)
+			if !ok {
+				key = fmt.Sprint(r.cell(k, ""))
+			}
+			out[key] = r.cell(e, "")
+		}
+		return out
+	case duckdb.Union:
+		// A UNION holds one member: the cell is that member's value.
+		return r.cell(x.Value, "")
 	case fmt.Stringer:
 		return r.text(x.String())
 	default:
@@ -570,6 +589,33 @@ func (r *renderer) text(s string) string {
 	}
 	r.truncated++
 	return s[:cut] + cellTruncatedMarker
+}
+
+// decimalText prints a DECIMAL with exactly its scale, trailing zeros kept:
+// 10.00 for a DECIMAL(10,2), as MySQL prints one (#2083). The driver's own
+// Decimal.String trims them ("10"), which reads as a different answer to a
+// program that compares the returned text. The digits come from the unscaled
+// integer, so nothing is rounded whatever the width.
+func decimalText(d duckdb.Decimal) string {
+	if d.Value == nil {
+		// The driver fills Value for every storage width it knows. A cell
+		// without one has no number to print, and a made-up "0" would read as
+		// data: fail the statement (runJob reports the panic as its error).
+		panic("a DECIMAL cell arrived from the driver without a value")
+	}
+	digits := d.Value.String()
+	sign := ""
+	if strings.HasPrefix(digits, "-") {
+		sign, digits = "-", digits[1:]
+	}
+	scale := int(d.Scale)
+	if scale == 0 {
+		return sign + digits
+	}
+	if len(digits) <= scale {
+		digits = strings.Repeat("0", scale-len(digits)+1) + digits
+	}
+	return sign + digits[:len(digits)-scale] + "." + digits[len(digits)-scale:]
 }
 
 // floatCell keeps a finite float as a number and renders the values JSON

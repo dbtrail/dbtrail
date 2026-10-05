@@ -27,6 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [time-travel-sql.md](time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental).
 
 ### Fixed
+- **SQL on the copy prints a `DECIMAL` with its trailing zeros** (#2083). A
+  `DECIMAL(10,2)` holding 10 came back as `10` from the copy (the port, the
+  routed reads and the SQL card) and as `10.00` from MySQL, and
+  `ROUND(SUM(amount), 2)` as `117329550` instead of `117329550.00`: the same
+  number in a different text, which a program comparing the two reads as a
+  different answer. Every result whose type is `DECIMAL(p,s)` now prints
+  exactly `s` decimals, a column, a sum, a `ROUND`, a `COALESCE` or a
+  `UNION` alike, on the text protocol and on the binary one, and inside a
+  list, a struct, a map or a union. A `MAP` cell, which used to arrive as
+  Go's `map[a:10]`, is now the JSON object its column is declared as. `AVG`
+  and `/` are not part of this: they are doubles on the copy, and still
+  print as such.
 - **Rotation: an hour held by a pending upload now counts as deferred in
   both paths** (#2094). When an unconfirmed S3 upload blocked a drop, the
   path that archives counted the hour as deferred and the path that only
