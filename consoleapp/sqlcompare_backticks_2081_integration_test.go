@@ -336,10 +336,16 @@ func backtickFixtures(db string, dollarNames bool) []backtickFixture {
 		same("SELECT DISTINCT `orders`.`status` FROM `orders` ORDER BY `orders`.`status` ASC", "distinct()"),
 		same("SELECT `orders`.`id` FROM `orders` WHERE (`orders`.`created_on` >= '2026-01-02' AND `orders`.`created_on` < '2026-01-05' AND NOT (`orders`.`status` = 'void')) ORDER BY `orders`.`created_on` ASC, `orders`.`id` ASC", "a date range with exclude()"),
 		{stmt: "SELECT AVG(`orders`.`amount`) AS `amount__avg` FROM `orders`", verdict: diff, kind: "precision", names: true, why: "AVG is a DECIMAL with four more decimals on MySQL and a DOUBLE on the copy (#2083), backticks or not"},
-		// What still fails on the copy with the names out of the way (#2114).
-		{stmt: "SELECT `orders`.`status`, COUNT(`orders`.`id`) AS `n` FROM `orders` GROUP BY `orders`.`status` ORDER BY NULL", verdict: noc, why: "ORDER BY NULL: a binder error on the copy (#2114)"},
-		{stmt: "SELECT `orders`.`id`, `orders`.`amount` FROM `orders` ORDER BY `orders`.`id` LIMIT 0, 3", verdict: noc, why: "LIMIT offset, count: a syntax error on the copy (#2114)"},
-		kept("SELECT `orders`.`id` FROM `orders` WHERE `orders`.`status` LIKE BINARY 'pa%'", noc, "binary string comparison", "LIKE BINARY: vetoed, and refused by the copy (#2114)"),
+		// What the copy refuses with the names out of the way (#2114): kept on
+		// MySQL from the text, so the failed attempt on the copy is not paid.
+		kept("SELECT `orders`.`status`, COUNT(`orders`.`id`) AS `n` FROM `orders` GROUP BY `orders`.`status` ORDER BY NULL", noc, "ORDER BY NULL", "what Django sends after GROUP BY: a binder error on the copy"),
+		kept("SELECT `orders`.`id`, `orders`.`amount` FROM `orders` ORDER BY `orders`.`id` LIMIT 0, 3", noc, "LIMIT offset, count", "what SQLAlchemy sends: a syntax error on the copy"),
+		kept("SELECT `orders`.`id` FROM `orders` WHERE `orders`.`status` LIKE BINARY 'pa%'", noc, "binary string comparison", "what Django sends: kept on MySQL by an older rule, and refused by the copy"),
+		kept("SELECT `orders`.`id` FROM `orders` WHERE `orders`.`status` = _binary'paid' ORDER BY `orders`.`id`", noc, "_binary before a string literal", "how a driver writes a bytes argument: the copy has no type named _binary"),
+		// The neighbours that are not kept back.
+		same("SELECT (SELECT `id` FROM `customers` ORDER BY `id` LIMIT 1) AS `first`, `status` FROM `orders` WHERE `id` < 3 ORDER BY `id`", "the comma after a subquery's LIMIT belongs to the list around it"),
+		same("SELECT `status`, COUNT(*) AS `n` FROM `orders` GROUP BY `status` ORDER BY NULLIF(`status`, 'paid'), `status`", "ORDER BY NULLIF(...) is not ORDER BY NULL"),
+		same("SELECT `id`, COUNT(*) OVER (PARTITION BY `status` ORDER BY NULL) AS `c` FROM `orders` ORDER BY `id`", "a window ordered by NULL is answered by the copy, with the same rows"),
 		{stmt: "SELECT `id` FROM `orders` USE INDEX (`idx_customer`) WHERE `customer_id` = 1 ORDER BY `id`", verdict: noc, why: "an index hint is MySQL syntax"},
 		kept("SELECT `id` # by `id`\nFROM `orders` WHERE `id` < 3 ORDER BY `id`", noc, "# starts a comment", "# opens a comment on MySQL only: vetoed, the backtick inside it left alone, and the copy refuses the text"),
 		// Qualified with the database, and names that only exist quoted.

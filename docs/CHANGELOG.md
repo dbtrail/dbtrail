@@ -6,61 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.99.0] - 2026-10-05
 ### Changed
-- **Read routing: a `LIMIT` over a wide range stays on MySQL, and a result
-  over the copy's row cap is not tried on the copy** (#2115). Two kinds of
-  read were sent to the copy and should not have been. The first is a few
-  hundred rows out of a large range: `SELECT * FROM orders WHERE created_at`
-  in a three-month range `LIMIT 500` has a plan cost of 544,000 on MySQL,
-  because the cost ignores `LIMIT`, so the copy took it (65 ms) although
-  MySQL reads it through the index and stops at 500 rows (24 ms; 1.6 ms
-  with `ORDER BY created_at`). Such a read now stays on MySQL when the plan
-  shows one table read through an index with nothing left to check row by
-  row and no sort. A `LIMIT` with a second condition no index serves, with
-  a sort no index serves, under a `GROUP BY`, `DISTINCT` or aggregate, or
-  with a large `OFFSET` goes to the copy as before: there MySQL reads the
-  whole range (400 to 600 ms measured). The second is a read whose result is
-  larger than the copy's row cap (1,000 rows by default): the copy ran it,
-  refused the result for its size, and MySQL ran it again. When the plan's
-  estimate of the result is above the cap, MySQL now runs it at once and the
-  copy is not tried. That estimate is trusted only where the rows MySQL
-  reads are the rows it returns (one table, through an index or whole, no
-  other filter, no aggregate): an aggregate over a million rows still goes
-  to the copy, and so does a filter no index serves, whose estimate is a
-  guess. A join, a `GROUP BY` with many groups and a full scan with a filter
-  are tried on the copy as before. New reason in the "Who answered" block
-  and in `bintrail_read_routing_decisions_total`: `result_over_row_cap`;
-  the first rule counts under `bounded_limit`. On a MariaDB source the
-  `LIMIT` read already stayed on the source; the row cap rule applies there
-  to a table or an index read whole. Nothing changes in what a statement
-  answers, only in who answers it.
-- **Read routing: a `LIMIT` over a wide range stays on MySQL, and a result
-  over the copy's row cap is not tried on the copy** (#2115). Two kinds of
-  read were sent to the copy and should not have been. The first is a few
-  hundred rows out of a large range: `SELECT * FROM orders WHERE created_at`
-  in a three-month range `LIMIT 500` has a plan cost of 544,000 on MySQL,
-  because the cost ignores `LIMIT`, so the copy took it (65 ms) although
-  MySQL reads it through the index and stops at 500 rows (24 ms; 1.6 ms
-  with `ORDER BY created_at`). Such a read now stays on MySQL when the plan
-  shows one table read through an index with nothing left to check row by
-  row and no sort. A `LIMIT` with a second condition no index serves, with
-  a sort no index serves, under a `GROUP BY`, `DISTINCT` or aggregate, or
-  with a large `OFFSET` goes to the copy as before: there MySQL reads the
-  whole range (400 to 600 ms measured). The second is a read whose result is
-  larger than the copy's row cap (1,000 rows by default): the copy ran it,
-  refused the result for its size, and MySQL ran it again. When the plan's
-  estimate of the result is above the cap, MySQL now runs it at once and the
-  copy is not tried. That estimate is trusted only where the rows MySQL
-  reads are the rows it returns (one table, through an index or whole, no
-  other filter, no aggregate): an aggregate over a million rows still goes
-  to the copy, and so does a filter no index serves, whose estimate is a
-  guess. A join, a `GROUP BY` with many groups and a full scan with a filter
-  are tried on the copy as before. New reason in the "Who answered" block
-  and in `bintrail_read_routing_decisions_total`: `result_over_row_cap`;
-  the first rule counts under `bounded_limit`. On a MariaDB source the
-  `LIMIT` read already stayed on the source; the row cap rule applies there
-  to a table or an index read whole. Nothing changes in what a statement
-  answers, only in who answers it.
+- **Read routing: `LIMIT offset, count`, `ORDER BY NULL` and `_binary'x'`
+  stay on MySQL without trying the copy first** (#2114). The copy refuses
+  all three, so each such statement was sent to it, failed there, and was
+  answered by MySQL afterwards: 37 to 55 ms of failed attempt, measured on
+  MySQL 8.4 and MariaDB 11.4, on a statement the source answers in under
+  1 ms. They are now recognized in the text and go straight to MySQL (about
+  0.4 ms through the port), as text and as prepared statements (`LIMIT ?,
+  ?`). In the "Who answered" counter they show as `veto`: before,
+  `copy_refused` when the plan was expensive, and `cheap_plan` or
+  `bounded_limit` when MySQL answered anyway (a plain `SELECT ... FROM t
+  LIMIT 0, 20` moves from `bounded_limit` to `veto`, at the same speed).
+  Nothing is translated for the copy: `LIMIT 20 OFFSET 0`
+  still reaches it, and SQLAlchemy's `LIMIT 0, 20` never did. `LIKE BINARY`,
+  named in the issue, was already kept on MySQL by an older rule. A window
+  written `OVER (ORDER BY NULL)` still reaches the copy, which answers it
+  with the same rows. Not
+  covered, and still answered by MySQL after a failed attempt: `NULL` that
+  is not the first sort key (`ORDER BY id, NULL`), other constants (`ORDER
+  BY 'x'`), `CAST(col AS BINARY(4))` and `CONVERT(col, BINARY)`.
 - **Read routing: past the freshness limit, the copy answers over tables
   that have not changed since their snapshot** (#2085).
   `--route-max-copy-age` is one age for the whole server, so once the newest
@@ -416,6 +383,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     as read does not. So it repeats, at most once per cut-over age, only on a
     server whose only writes are rows that get dropped. A server with any
     other indexed write keeps its normal updates.
+- **The job that merges a long chain of table changes now runs** (#1723).
+  Since v0.84.0 a table's chain was meant to be merged into one pair by a
+  background job once it listed 16 entries. The job never ran in a daemon: it
+  read "table deltas are on" from the refresh request, and that was only
+  written on a copy of the request inside the refresh, so the job saw "off"
+  and returned without a log line. The same reading made every refresh remove
+  the job's staging directory. Measured on a chain that reached 24 plain
+  pairs with no merge. The setting is now written on the request before the
+  cycle starts. Since the job now really runs after every refresh: it runs
+  under the daemon's DuckDB memory limit (it had none of its own), it checks
+  the disk for room for the merged pair before writing it, a run that failed
+  is tried again after an hour and not at every refresh, a failure that
+  repeats is one line in the run history, and an internal error while it
+  looks for chains no longer ends the process. Nothing was lost while it did
+  not run: a chain reads the same merged or not; it only listed more files.
 - **Read routing: a statement that names a generated column is answered by
   MySQL** (#2123). A snapshot holds no generated column, so the copy does
   not have it, and a statement that named one was not always refused there:

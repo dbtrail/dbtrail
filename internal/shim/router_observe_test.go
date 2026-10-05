@@ -45,6 +45,12 @@ func TestRouter_observesEveryRungOnce(t *testing.T) {
 		{"a set", "SET time_zone = '+00:00'", fakeRouter{toCopy: true}, nil, fresh, time.Minute, "mysql/session_setting"},
 		{"a harmless set", "SET NAMES utf8mb4", fakeRouter{toCopy: true}, nil, fresh, time.Minute, "mysql/session_setting"},
 		{"vetoed", "SELECT NOW()", fakeRouter{toCopy: true}, nil, fresh, time.Minute, "mysql/veto"},
+		// What the copy refuses (#2114) is counted as a veto, not as a copy
+		// that refused: the copy is not tried.
+		{"vetoed: LIMIT offset, count", "SELECT a, count(*) FROM t GROUP BY a ORDER BY a LIMIT 0, 20", fakeRouter{toCopy: true}, errors.New("syntax error"), fresh, time.Minute, "mysql/veto"},
+		{"vetoed: ORDER BY NULL", "SELECT a, count(*) FROM t GROUP BY a ORDER BY NULL", fakeRouter{toCopy: true}, errors.New("Binder Error"), fresh, time.Minute, "mysql/veto"},
+		{"vetoed: _binary string", "SELECT count(*) FROM t WHERE k = _binary'x'", fakeRouter{toCopy: true}, errors.New("Catalog Error"), fresh, time.Minute, "mysql/veto"},
+		{"LIMIT count OFFSET offset reaches the copy", "SELECT a, count(*) FROM t GROUP BY a ORDER BY a LIMIT 20 OFFSET 0", fakeRouter{toCopy: true}, nil, fresh, time.Minute, "copy/expensive_plan"},
 		{"in transaction", "SELECT count(*) FROM t", fakeRouter{toCopy: true, inTxn: true}, nil, fresh, time.Minute, "mysql/in_transaction"},
 		{"routing off", "SELECT count(*) FROM t", fakeRouter{toCopy: true}, nil, fresh, 0, "mysql/routing_off"},
 		{"explain failed", "SELECT * FROM t WHERE id = 1", fakeRouter{decideErr: errors.New("boom")}, nil, fresh, time.Minute, "mysql/explain_failed"},

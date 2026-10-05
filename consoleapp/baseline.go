@@ -94,6 +94,9 @@ type baselineSupervisor struct {
 	// server, sharing the single-flight: it reads the chain a refresh would
 	// extend and a full backup would replace.
 	compacts map[string]*console.BaselineStatus
+	// compactRetry is when a server's compaction job may be tried again after
+	// a run that failed (compactRetryEvery). Guarded by mu.
+	compactRetry map[string]time.Time
 	// exportRuns is each server's CURRENT build: its directory (unique per
 	// build; see sqlExportRoot for why builds never share a path), the
 	// downloads streaming it, and the removal it is owed.
@@ -239,6 +242,7 @@ func newBaselineSupervisor(ctx context.Context, stagingDir string, lockMode base
 		restores:         make(map[string]*console.BaselineStatus),
 		exports:          make(map[string]*console.BaselineStatus),
 		compacts:         make(map[string]*console.BaselineStatus),
+		compactRetry:     make(map[string]time.Time),
 		exportRuns:       make(map[string]*sqlExportRun),
 		exportOrphans:    make(map[string]map[string]string),
 	}

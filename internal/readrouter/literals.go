@@ -10,13 +10,16 @@ import (
 // single words cannot name (#2122). Each was measured on MySQL 8.4, MariaDB
 // 11.4 and the copy before it was added.
 const (
-	vetoDigitWord      = "word that starts with a digit (a hexadecimal or bit literal, or a name, on MySQL; a number and an alias on the copy)"
-	vetoPrefixString   = "x, b or e right against a string literal (a hexadecimal or bit string, or an aliased column, on MySQL; another string on the copy)"
-	vetoIntervalAmount = "INTERVAL with a quoted amount that is not a whole number (cut at the first character that is not a digit on MySQL; read as a number on the copy)"
-	vetoIntervalExpr   = "INTERVAL with an amount in parentheses or a placeholder (rounded on MySQL, cut on the copy)"
-	vetoIntervalUnit   = "INTERVAL with a quoted amount and a two-part unit (the copy reads the unit as an alias)"
-	vetoTilde          = "~ (bitwise NOT over 64 unsigned bits on MySQL; signed, or a regular expression match, on the copy)"
-	vetoDateArithmetic = "date or timestamp, or a group that holds one, next to + or -, or under AVG (a number built from its digits on MySQL; a date, a count of days or an interval on the copy)"
+	vetoDigitWord        = "word that starts with a digit (a hexadecimal or bit literal, or a name, on MySQL; a number and an alias on the copy)"
+	vetoPrefixString     = "x, b or e right against a string literal (a hexadecimal or bit string, or an aliased column, on MySQL; another string on the copy)"
+	vetoIntervalAmount   = "INTERVAL with a quoted amount that is not a whole number (cut at the first character that is not a digit on MySQL; read as a number on the copy)"
+	vetoIntervalExpr     = "INTERVAL with an amount in parentheses or a placeholder (rounded on MySQL, cut on the copy)"
+	vetoIntervalUnit     = "INTERVAL with a quoted amount and a two-part unit (the copy reads the unit as an alias)"
+	vetoTilde            = "~ (bitwise NOT over 64 unsigned bits on MySQL; signed, or a regular expression match, on the copy)"
+	vetoDateArithmetic   = "date or timestamp, or a group that holds one, next to + or -, or under AVG (a number built from its digits on MySQL; a date, a count of days or an interval on the copy)"
+	vetoLimitComma       = "LIMIT offset, count (the copy only reads LIMIT count OFFSET offset)"
+	vetoOrderByNull      = "ORDER BY NULL (the copy refuses to sort by a constant)"
+	vetoBinaryIntroducer = "_binary before a string literal (the copy has no such thing)"
 )
 
 // shapeText is the text the shape checks read: the statement with string
@@ -71,7 +74,49 @@ var shapeVetoes = []struct {
 	{vetoIntervalUnit, func(t *shapeText) bool { return intervalUnit.MatchString(t.all()) }},
 	{vetoTilde, func(t *shapeText) bool { return strings.IndexByte(t.all(), '~') >= 0 }},
 	{vetoDateArithmetic, dateArithmetic},
+	{vetoLimitComma, func(t *shapeText) bool { return limitComma.MatchString(t.all()) }},
+	{vetoOrderByNull, orderByNullKey},
+	{vetoBinaryIntroducer, func(t *shapeText) bool { return binaryIntroducer.MatchString(t.all()) }},
 }
+
+// The three below are not differences: the copy REFUSES each of them, so
+// without the veto the statement is sent there, fails, and MySQL answers
+// after the failed attempt (37 to 55 ms measured against 0.2 ms, #2114).
+// Kept on MySQL from the text, the attempt is not made. A statement one of
+// them misses is still answered by MySQL, the slow way.
+
+// limitComma is LIMIT with the offset first and a comma (`LIMIT 0, 20`,
+// what SQLAlchemy sends), with numbers or placeholders: a syntax error on
+// the copy, which only reads `LIMIT 20 OFFSET 0`. A comma that follows a
+// subquery's LIMIT comes after its closing parenthesis and is not matched.
+var limitComma = regexp.MustCompile(`(?i)\blimit\s+(?:\d+|\?)\s*,`)
+
+// orderByNull is ORDER BY with the constant NULL as its first key (what
+// Django sends after GROUP BY, to ask for no sort): the copy refuses to
+// sort by a constant that is not a column position. NULL further down the
+// list (`ORDER BY a, NULL`) is refused there too and not matched here.
+//
+// The first group is what tells a window apart: `OVER (ORDER BY NULL)` and
+// `OVER (PARTITION BY a ORDER BY NULL)` are answered by the copy, with the
+// same rows, and are not kept back. A window's ORDER BY comes right after
+// the opening parenthesis or after its PARTITION BY list; a statement's or
+// a subquery's never does. A PARTITION BY list with parentheses in it is
+// not followed, and that window stays on MySQL.
+var orderByNull = regexp.MustCompile(`(?i)(\(\s*|\bpartition\s+by\b[^()]*)?\border\s+by\s+(?:\(\s*)*null\b`)
+
+func orderByNullKey(t *shapeText) bool {
+	for _, m := range orderByNull.FindAllStringSubmatchIndex(t.all(), -1) {
+		if m[2] < 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// binaryIntroducer is the _binary that MySQL reads before a string literal
+// (`= _binary'x'`, how drivers write a bytes argument): the copy takes it
+// for a type it does not have.
+var binaryIntroducer = regexp.MustCompile(`(?i)\b_binary\b`)
 
 // quotedName is a name in the text the pattern list reads: scan has written
 // every one in double quotes, refused a name that holds a double quote, and
