@@ -100,7 +100,8 @@ type SkipStat struct {
 	// rather than present an empty list as "none".
 	Tables []string `json:"tables,omitempty"`
 	// TablesTruncated records that more distinct tables were skipped than
-	// Tables holds. The list is capped because this document is persisted in a
+	// Tables holds, or that the list is incomplete because part of Count was
+	// recorded before this reason carried table names. The list is capped because this document is persisted in a
 	// single stream_state column and grows monotonically — an unfiltered source
 	// with thousands of unsnapshotted tables would grow it without bound. With
 	// no flag, a capped list would read as the complete set.
@@ -215,6 +216,16 @@ func (c *SkipCounters) RecordSkipAttributed(reason string, attr SkipAttribution)
 			st.LastDetail = attr.Detail
 		}
 		if attr.Table != "" {
+			// A count with no table list was written before this reason
+			// carried table names (a ledger persisted by an older daemon, or
+			// an unattributed RecordSkip). Readers take "no tables" to mean
+			// "any table"; a list that starts now would narrow that to the
+			// tables seen from here on and clear the ones dropped earlier.
+			// Mark the list incomplete so it keeps reading as "these and
+			// others" (#2139).
+			if st.Count > 1 && len(st.Tables) == 0 {
+				st.TablesTruncated = true
+			}
 			addLedgerTable(&st, attr.Schema, attr.Table)
 		}
 	}
@@ -226,8 +237,6 @@ func (c *SkipCounters) RecordSkipAttributed(reason string, attr SkipAttribution)
 		switch reason {
 		case SkipStatementFormatDML:
 			remediation = "set binlog_format=ROW server-wide on the source (a STATEMENT/MIXED format or a session-level override is producing row-less events)"
-		case SkipRowMapFailed:
-			remediation = "rows are being dropped because a text value is not valid UTF-8 and cannot be converted; the `failed to map` warnings name the column and the cause — if they say the snapshot has no character set for the column, run `bintrail snapshot` against the source and restart the stream; if they name a character set, convert that column to utf8mb4 at the source (re-snapshotting alone will not capture these rows)"
 		case SkipTableExcludedFromSnapshot:
 			// Never point this reason at `bintrail snapshot`: the validator
 			// excludes the same table on every re-run (#1051/#1199), so that
@@ -268,6 +277,16 @@ func (c *SkipCounters) RecordCaptured() {
 	defer c.mu.Unlock()
 	c.consecutive = 0
 	c.escalated = false
+}
+
+// Count returns how many events were skipped under reason so far.
+func (c *SkipCounters) Count(reason string) int64 {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.byReason[reason].Count
 }
 
 // Snapshot returns the JSON document persisted to stream_state.capture_skips:

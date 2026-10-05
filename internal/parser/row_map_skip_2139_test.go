@@ -200,41 +200,32 @@ func TestHandleRows_mappableRowsRecordNothing(t *testing.T) {
 	}
 }
 
-// A source where EVERY row fails to map is the 100% drop the escalation ERROR
-// exists for (#1034): the events must count as a consecutive run, not be reset
-// by a "captured" mark for an event that emitted nothing.
-func TestHandleRows_everyRowUnmappableEscalates(t *testing.T) {
-	var skipLog bytes.Buffer
-	skips := NewSkipCounters(newTestLogger(&skipLog))
-	for range SkipEscalationThreshold {
-		runNotesEvent(t, notesRowsEvent(replication.WRITE_ROWS_EVENTv2, badRow(1)), skips, &bytes.Buffer{})
+// This reason never feeds the "capture is effectively stopped" ERROR, for
+// INSERT, DELETE and UPDATE alike: that line is about the whole stream
+// discarding everything, and one table whose text cannot be converted is not
+// that. The ledger entry is what reports it.
+func TestHandleRows_unmappableRowsNeverEscalate(t *testing.T) {
+	events := map[string]func() *replication.BinlogEvent{
+		"insert": func() *replication.BinlogEvent { return notesRowsEvent(replication.WRITE_ROWS_EVENTv2, badRow(1)) },
+		"delete": func() *replication.BinlogEvent { return notesRowsEvent(replication.DELETE_ROWS_EVENTv2, badRow(1)) },
+		"update": func() *replication.BinlogEvent {
+			return notesRowsEvent(replication.UPDATE_ROWS_EVENTv2, badRow(1), goodRow(1))
+		},
 	}
-	if !strings.Contains(skipLog.String(), "sustained event skipping") {
-		t.Fatal("100 consecutive events with no row captured did not escalate")
-	}
-	if !strings.Contains(skipLog.String(), SkipRowMapFailed) {
-		t.Errorf("escalation does not name the reason:\n%s", skipLog.String())
-	}
-	// The default remediation sends the operator to re-snapshot, which does
-	// not fix a character set bintrail cannot transcode.
-	if strings.Contains(skipLog.String(), "likely stale or corrupt") {
-		t.Errorf("escalation carries the stale-snapshot remediation for a mapping failure:\n%s", skipLog.String())
-	}
-}
-
-// An event that captured at least one row breaks the run: capture is degraded,
-// not stopped, and the single ERROR is reserved for "nothing is getting through".
-func TestHandleRows_partlyUnmappableEventsDoNotEscalate(t *testing.T) {
-	var skipLog bytes.Buffer
-	skips := NewSkipCounters(newTestLogger(&skipLog))
-	for range SkipEscalationThreshold + 10 {
-		runNotesEvent(t, notesRowsEvent(replication.WRITE_ROWS_EVENTv2, badRow(1), goodRow(2)), skips, &bytes.Buffer{})
-	}
-	if strings.Contains(skipLog.String(), "sustained event skipping") {
-		t.Fatal("events that each captured a row escalated as if capture had stopped")
-	}
-	if st := decodeLedger(t, skips)[SkipRowMapFailed]; st.Count != int64(SkipEscalationThreshold+10) {
-		t.Errorf("count = %d, want one per event", st.Count)
+	for name, ev := range events {
+		t.Run(name, func(t *testing.T) {
+			var skipLog bytes.Buffer
+			skips := NewSkipCounters(newTestLogger(&skipLog))
+			for range SkipEscalationThreshold + 10 {
+				runNotesEvent(t, ev(), skips, &bytes.Buffer{})
+			}
+			if skipLog.Len() != 0 {
+				t.Fatalf("a table with unmappable rows was announced as capture having stopped:\n%s", skipLog.String())
+			}
+			if st := decodeLedger(t, skips)[SkipRowMapFailed]; st.Count != int64(SkipEscalationThreshold+10) {
+				t.Errorf("count = %d, want one per event", st.Count)
+			}
+		})
 	}
 }
 
@@ -290,18 +281,67 @@ func TestHandleRows_unhandledRowEventNamesTheTable(t *testing.T) {
 	}
 }
 
-// The per-event bookkeeping sits on the capture hot path: when every row maps
-// it must allocate nothing, with a ledger or without one.
-func TestRecordRowsOutcome_noAllocationWhenEveryRowMaps(t *testing.T) {
-	skips := NewSkipCounters(newTestLogger(&bytes.Buffer{}))
-	for name, c := range map[string]*SkipCounters{"ledger": skips, "no ledger": nil} {
-		if n := testing.AllocsPerRun(200, func() {
-			recordRowsOutcome(c, 3, 0, "binlog.000007", 200, "shop", "notes")
-		}); n != 0 {
-			t.Errorf("%s: %v allocations per event with no unmappable row, want 0", name, n)
-		}
+// A ledger written before a reason carried table names holds a count and no
+// table list, which every per-table reader takes to mean "any table". The
+// first attributed skip after an upgrade must not turn that into a list of one
+// table and clear all the others: the list has to say it is incomplete.
+func TestRecordSkipAttributed_olderLedgerWithoutTablesStaysEveryTable(t *testing.T) {
+	const seededAt = "2026-01-01T10:00:00Z"
+	for _, reason := range []string{SkipUnhandledRowEvent, SkipColumnCountMismatch, SkipTableNotInSnapshot} {
+		t.Run(reason, func(t *testing.T) {
+			skips := NewSkipCounters(newTestLogger(&bytes.Buffer{}))
+			if err := skips.Seed(`{"` + reason + `":{"count":7,"last_at":"` + seededAt + `"}}`); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			skips.RecordSkipAttributed(reason, SkipAttribution{File: "binlog.000007", Pos: 200, Schema: "shop", Table: "notes"})
+			st := decodeLedger(t, skips)[reason]
+			if st.Count != 8 || len(st.Tables) != 1 || st.Tables[0] != "shop.notes" {
+				t.Fatalf("ledger = %+v, want count 8 naming shop.notes", st)
+			}
+			if !st.TablesTruncated {
+				t.Fatal("7 earlier drops for unnamed tables now read as drops for shop.notes only")
+			}
+			// A second table keeps the marker.
+			skips.RecordSkipAttributed(reason, SkipAttribution{Schema: "shop", Table: "orders"})
+			if st := decodeLedger(t, skips)[reason]; !st.TablesTruncated || len(st.Tables) != 2 {
+				t.Errorf("after a second table: %+v", st)
+			}
+		})
 	}
-	if m := decodeLedger(t, skips); len(m) != 0 {
-		t.Errorf("ledger not empty: %v", m)
+}
+
+// The same through the real parse path and a real reader: an old ledger, one
+// unhandled rows event after the upgrade, and `status` must still say the
+// named table is not the only one.
+func TestHandleRows_olderLedgerThenAttributedSkipReadsAsAndOthers(t *testing.T) {
+	skips := NewSkipCounters(newTestLogger(&bytes.Buffer{}))
+	if err := skips.Seed(`{"unhandled_row_event":{"count":7,"last_at":"2026-01-01T10:00:00Z"}}`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	runNotesEvent(t, notesRowsEvent(replication.PARTIAL_UPDATE_ROWS_EVENT, goodRow(1), goodRow(1)), skips, &bytes.Buffer{})
+	raw, err := skips.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	stream := &status.StreamStateInfo{CaptureSkips: sql.NullString{String: raw, Valid: true}}
+	ledger, _ := stream.ParseCaptureSkips()
+	if st := ledger[SkipUnhandledRowEvent]; st.Count != 8 || !st.TablesTruncated {
+		t.Fatalf("reader sees %+v, want count 8 with an incomplete table list", st)
+	}
+	var text bytes.Buffer
+	status.WriteStatus(&text, nil, nil, nil, nil, nil, stream)
+	if got := strings.Join(strings.Fields(text.String()), " "); !strings.Contains(got, "shop.notes and others") {
+		t.Errorf("status names shop.notes as the only table:\n%s", text.String())
+	}
+}
+
+// A ledger that carried names from the start is complete: no marker.
+func TestRecordSkipAttributed_freshLedgerIsNotMarkedIncomplete(t *testing.T) {
+	skips := NewSkipCounters(newTestLogger(&bytes.Buffer{}))
+	for range 3 {
+		skips.RecordSkipAttributed(SkipRowMapFailed, SkipAttribution{Schema: "shop", Table: "notes"})
+	}
+	if st := decodeLedger(t, skips)[SkipRowMapFailed]; st.TablesTruncated || len(st.Tables) != 1 {
+		t.Errorf("ledger = %+v, want one table and no incomplete marker", st)
 	}
 }

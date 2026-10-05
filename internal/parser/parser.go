@@ -496,10 +496,9 @@ func isSnapshotExcludedSchema(schema string) bool {
 // skips (#1034): on the STREAM path the counters persist to
 // stream_state.capture_skips so `status` can render the discards — every
 // warn-and-skip return below records a per-reason counter, and every event
-// that clears the guards and gets at least one row through records a capture
-// (breaking the consecutive-skip run that escalates to one ERROR). A row the
-// emit functions cannot map is recorded too, once per event (#2139, see
-// recordRowsOutcome). The FILE path passes the Parser's optional
+// that clears the guards records a capture (breaking the consecutive-skip run
+// that escalates to one ERROR). A row the emit functions cannot map is
+// recorded too, once per event (#2139, see recordUnmappedRows). The FILE path passes the Parser's optional
 // run-scoped counters (#1199, see SetSkipCounters): stale-snapshot skips still
 // fail the whole file via gapTracker, but validation-excluded tables are
 // carved out of that failure and the tally is their aggregate signal.
@@ -751,33 +750,33 @@ func handleRows(
 	// the header EventType still says "compressed".
 	//
 	// Each emit function returns how many of the event's rows could NOT be
-	// mapped to the snapshot's columns and were left out (#2139); the outcome
-	// is recorded once per event by recordRowsOutcome, after the rows that do
-	// map have been sent.
+	// mapped to the snapshot's columns and were left out (#2139); that is
+	// recorded once per event by recordUnmappedRows, after the rows that do map
+	// have been sent.
 	var (
-		total, unmapped int
-		emitErr         error
+		unmapped int
+		emitErr  error
 	)
 	switch binlogEv.Header.EventType {
 	case replication.WRITE_ROWS_EVENTv0,
 		replication.WRITE_ROWS_EVENTv1,
 		replication.WRITE_ROWS_EVENTv2,
 		replication.MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1:
-		total = len(rowsEv.Rows)
+		skips.RecordCaptured()
 		unmapped, emitErr = emitInserts(ctx, logger, resolver, rowsEv.Rows, schema, table, filename, currentGTID, connectionID, commitTsUS, queryText, startPos, endPos, ts, pkCols, schemaVersion, stmtEnd, out)
 
 	case replication.DELETE_ROWS_EVENTv0,
 		replication.DELETE_ROWS_EVENTv1,
 		replication.DELETE_ROWS_EVENTv2,
 		replication.MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1:
-		total = len(rowsEv.Rows)
+		skips.RecordCaptured()
 		unmapped, emitErr = emitDeletes(ctx, logger, resolver, rowsEv.Rows, schema, table, filename, currentGTID, connectionID, commitTsUS, queryText, startPos, endPos, ts, pkCols, schemaVersion, stmtEnd, out)
 
 	case replication.UPDATE_ROWS_EVENTv0,
 		replication.UPDATE_ROWS_EVENTv1,
 		replication.UPDATE_ROWS_EVENTv2,
 		replication.MARIADB_UPDATE_ROWS_COMPRESSED_EVENT_V1:
-		total = len(rowsEv.Rows) / 2 // before/after pairs
+		skips.RecordCaptured()
 		unmapped, emitErr = emitUpdates(ctx, logger, resolver, rowsEv.Rows, schema, table, filename, currentGTID, connectionID, commitTsUS, queryText, startPos, endPos, ts, pkCols, schemaVersion, stmtEnd, out)
 
 	default:
@@ -806,17 +805,17 @@ func handleRows(
 		return nil
 	}
 
-	recordRowsOutcome(skips, total, unmapped, filename, uint64(binlogEv.Header.LogPos), schema, table)
+	if unmapped > 0 {
+		recordUnmappedRows(skips, filename, uint64(binlogEv.Header.LogPos), schema, table)
+	}
 	return emitErr
 }
 
-// recordRowsOutcome tells the skip ledger how a decoded rows event ended.
-//
-// unmapped > 0: at least one row was dropped because it could not be mapped to
-// the snapshot's columns. That is recorded as ONE attributed skip for the
-// event, the unit every other drop site counts in, so a statement touching a
-// million unmappable rows does not turn into a million ledger writes. Before
-// #2139 this drop left only a WARN: the scheduled snapshot update, the Iceberg
+// recordUnmappedRows puts a rows event that lost at least one row to a mapping
+// failure into the skip ledger: ONE attributed skip for the event, the unit
+// every other drop site counts in, so a statement touching a million
+// unmappable rows does not turn into a million ledger writes. Before #2139
+// this drop left only a WARN: the scheduled snapshot update, the Iceberg
 // export and `status --fail-on-gap` all read the ledger and saw a clean record
 // for a table that was missing changes.
 //
@@ -824,22 +823,19 @@ func handleRows(
 // schema.table.column, and LastDetail is shown to readers whose data access
 // hides that table (only the Tables list is scoped). The per-row WARN carries it.
 //
-// The event counts as captured, which ends a run of consecutive skips, only
-// when it got at least one row through (or had no rows to lose). An event that
-// lost every row must NOT reset the run: a source where no row can be mapped is
-// the 100% drop the escalation ERROR exists to announce.
-func recordRowsOutcome(skips *SkipCounters, total, unmapped int, filename string, pos uint64, schema, table string) {
-	if unmapped > 0 {
-		skips.RecordSkipAttributed(SkipRowMapFailed, SkipAttribution{
-			File:   filename,
-			Pos:    pos,
-			Schema: schema,
-			Table:  table,
-		})
-	}
-	if unmapped == 0 || unmapped < total {
-		skips.RecordCaptured()
-	}
+// The event keeps counting as captured (handleRows marks it before the rows are
+// emitted, as it always has), so this reason never feeds the consecutive-skip
+// run behind the "capture is effectively stopped" ERROR. That line is about
+// the whole stream discarding everything, usually a stale snapshot; one table
+// with a character set that cannot be converted is a different condition, and
+// the ledger entry is what reports it.
+func recordUnmappedRows(skips *SkipCounters, filename string, pos uint64, schema, table string) {
+	skips.RecordSkipAttributed(SkipRowMapFailed, SkipAttribution{
+		File:   filename,
+		Pos:    pos,
+		Schema: schema,
+		Table:  table,
+	})
 }
 
 func emitInserts(
