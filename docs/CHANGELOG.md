@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **Read routing: a heavy read that finds the copy busy waits for it, and
+  the wait is now documented and visible** (#2112). The documentation said
+  such a read runs on MySQL. It does not, and nothing changes in what it
+  does: it waits its turn on the copy. Up to 16 statements wait, for the
+  whole daemon (every server on the port and the web interface's SQL card
+  together), for at most 30 seconds each; the 17th, and one that waited the
+  30 seconds, are run by MySQL. Waiting is the rule because it is far
+  faster: measured with 16 connections on one server (#2080), a heavy read
+  took a median of 1.2 seconds through the port, wait included, against 22
+  seconds on MySQL. What is new is how to see it. Two metrics on `watch
+  --metrics-addr`: `bintrail_sql_slot_wait_seconds{outcome}`, a histogram
+  of how long each statement waited for a place on the copy and how the
+  wait ended (`slot`, `queue_full`, `timeout`, `cancelled`), observed for
+  every statement that asked, not only the ones that ran to a result; and
+  `bintrail_sql_slot_waiting`, how many wait right now. Two reasons in the
+  "Who answered" block and in `bintrail_read_routing_decisions_total`:
+  `copy_queue_full` (the line was full, MySQL answered at once) and
+  `copy_wait_timeout` (the read waited 30 seconds, then MySQL answered).
+  Both were counted under `copy_refused` before, where a busy copy read as
+  a broken one; a dashboard or alert that sums `copy_refused` no longer
+  includes them. The log line for the two is its own, once per connection.
+  `docs/time-travel-sql.md` has the rule in full under "A busy copy: the
+  read waits its turn".
 - **Read routing: a `LIMIT` over a wide range stays on MySQL, and a result
   over the copy's row cap is not tried on the copy** (#2115). Two kinds of
   read were sent to the copy and should not have been. The first is a few

@@ -509,6 +509,33 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 	return s.runSQLVouched(ctx, b, user, statement, schema, maxRows, sess, nil)
 }
 
+// reserveSQLSlot takes a slot from the runner, waiting for one as the runner
+// does, and reports the wait (#2112): how long it was and how it ended, plus
+// the count of statements waiting meanwhile. The SQL card and the port both
+// get their slot here, so the numbers are the daemon's, not one surface's.
+// The error is the runner's own, untouched.
+func reserveSQLSlot(ctx context.Context, runner sqlRunner, user string) (sqlSlot, time.Duration, error) {
+	observe.SQLSlotWaiting(1)
+	start := time.Now()
+	slot, err := runner.Reserve(ctx, user)
+	waited := time.Since(start)
+	observe.SQLSlotWaiting(-1)
+	var timedOut *sqlsandbox.BusyError
+	outcome := observe.SQLSlotWaitGotSlot
+	switch {
+	case err == nil:
+	case errors.As(err, &timedOut):
+		outcome = observe.SQLSlotWaitTimeout
+	case errors.Is(err, sqlsandbox.ErrBusy):
+		outcome = observe.SQLSlotWaitQueueFull
+	default:
+		// The runner returns nothing else but the caller's own ctx error.
+		outcome = observe.SQLSlotWaitCancelled
+	}
+	observe.ObserveSQLSlotWait(outcome, waited)
+	return slot, waited, err
+}
+
 // sqlUnchanged answers, for the tables a statement's views read, why they
 // cannot be vouched for as unchanged since their snapshot ("" when they
 // can): Server.copyUnchanged bound to a server.
@@ -532,12 +559,10 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 	// copy. An unused slot is given back on every early return, and said so
 	// at debug with how long it was held: the slot is one of a few (two by
 	// default), so a build that holds it for long is everybody else's "busy".
-	waitStart := time.Now()
-	slot, err := s.sqlRunner.Reserve(ctx, user)
+	slot, slotWait, err := reserveSQLSlot(ctx, s.sqlRunner, user)
 	if err != nil {
 		return sqlOutcome{}, err
 	}
-	slotWait := time.Since(waitStart)
 	ran := false
 	viewsStart := time.Now()
 	defer func() {
