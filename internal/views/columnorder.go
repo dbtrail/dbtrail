@@ -159,6 +159,9 @@ func (t BaselineTable) StarUnlikeMySQL() string {
 // ASCII one when it compares names (a Kelvin sign for k, an accented letter)
 // depends on the server and its version, and is not followed here.
 //
+// One name is looked for over every table: _rowid, which a server answers for
+// a table with a key of one integer column and no definition lists.
+//
 // Three tables are refused whatever the statement says, because what they
 // lack on the copy is not known by name: one with no table definition (a
 // snapshot written before the definition was embedded may or may not hold
@@ -176,6 +179,15 @@ func (t BaselineTable) NamesUnlikeMySQL(statement string) string {
 		return "the columns its snapshot holds could not be checked against its table definition"
 	case t.NotHeldUnread:
 		return "a column definition in its snapshot could not be read, so the columns it lacks on the copy are not all known"
+	}
+	// Whatever the table: _rowid is MySQL's and MariaDB's other name for a
+	// key made of one integer column. No CREATE TABLE lists it and no
+	// snapshot holds it, and whether this table has such a key is not read
+	// here, so the name keeps a statement over any table on the source.
+	// Searched after upper and lower, which also brings the dotless i down
+	// to i, as a server that compares names without case may.
+	if strings.Contains(strings.ToLower(strings.ToUpper(statement)), "_rowid") {
+		return "the statement names _rowid, which MySQL answers for a table with a key of one integer column and a snapshot does not hold"
 	}
 	if len(t.NotHeld) == 0 {
 		return ""

@@ -834,7 +834,10 @@ What this is and is not:
     definition;
   - a MariaDB table created `WITH SYSTEM VERSIONING` answers to `row_start`
     and `row_end` whether or not it declares them, and the copy holds
-    neither: a statement over it that holds one of those names is MySQL's.
+    neither: a statement over it that holds one of those names is MySQL's;
+  - `_rowid`, the other name MySQL and MariaDB give a key made of one
+    integer column, is in no snapshot: a statement that holds it is MySQL's,
+    over any table.
 
   An invisible column is not part of this: a snapshot holds it, and both
   sides resolve its name the same way (only `SELECT *` and `NATURAL JOIN`

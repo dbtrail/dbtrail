@@ -126,6 +126,18 @@ func scanColumnLines(createSQL string) columnScan {
 // looked for outside quoted strings.
 var systemVersioningRe = regexp.MustCompile(`(?i)\bWITH\s+SYSTEM\s+VERSIONING\b`)
 
+// tableOptions is what follows a CREATE TABLE's column and key list: from the
+// last line that starts with the closing parenthesis on. The column lines are
+// left out so that nothing on one of them (a comment, a string whose quotes
+// are read wrong) can hide the table's own options or pass for one. A text
+// with no such line is returned whole.
+func tableOptions(createSQL string) string {
+	if i := strings.LastIndex(createSQL, "\n)"); i >= 0 {
+		return createSQL[i:]
+	}
+	return createSQL
+}
+
 // columnsNotHeld names the columns a statement on MySQL can NAME and a
 // snapshot file does not hold (#2123): every generated column, the INVISIBLE
 // ones included (MySQL's `SELECT *` leaves those out, a statement that names
@@ -145,7 +157,7 @@ var systemVersioningRe = regexp.MustCompile(`(?i)\bWITH\s+SYSTEM\s+VERSIONING\b`
 func columnsNotHeld(createSQL string) (names []string, unread bool) {
 	sc := scanColumnLines(createSQL)
 	names = sc.notHeld
-	if systemVersioningRe.MatchString(emptyQuoted(createSQL)) {
+	if systemVersioningRe.MatchString(emptyQuoted(tableOptions(createSQL))) {
 		for _, implicit := range []string{"row_start", "row_end"} {
 			if !slices.Contains(names, implicit) {
 				names = append(names, implicit)

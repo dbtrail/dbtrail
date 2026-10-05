@@ -231,6 +231,10 @@ func generatedNames(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		// column, or no column of that name), the copy must not be the one
 		// to answer: it would filter on the alias.
 		accent = "SELECT a AS tw\u00edce FROM gen WHERE tw\u00edce = 2 ORDER BY a"
+		// _rowid, a server's other name for a key of one integer column,
+		// which no definition lists. The copy would filter on the alias
+		// (a >= 2: three rows) where the server filters on id (two).
+		rowid = "SELECT a AS _rowid FROM gen WHERE _rowid + 0 >= 2 ORDER BY a"
 	)
 
 	// 1. The source's answers. gen.twice is 2, 4, 6; g2.twice is 99.
@@ -261,6 +265,8 @@ func generatedNames(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 
 	accentOnSource := answerText(src, accent)
 	t.Logf("source  %-40s %s", accentOnSource, accent)
+	rowidOnSource := answerText(src, rowid)
+	t.Logf("source  %-40s %s", rowidOnSource, rowid)
 
 	// 2. The copy, asked as a port with no routing answers: other rows with
 	// no error, which is the bug's shape.
@@ -300,6 +306,7 @@ func generatedNames(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{stmt: single, want: "4 / 2 / 6", why: "one table, nothing else of that name: kept off the copy before it fails there"},
 		{stmt: orderBy, want: "3 / 2 / 1", why: "named only in ORDER BY"},
 		{stmt: accent, want: accentOnSource, why: "a letter outside ASCII over a table that lacks a column: not searched, the source answers"},
+		{stmt: rowid, want: rowidOnSource, why: "_rowid: the source answers, whatever it makes of the name"},
 		{stmt: "SELECT o.id, (SELECT twice FROM gen g WHERE g.id = o.id) AS t FROM g2 o WHERE o.b > ? ORDER BY o.b", args: []any{7},
 			want: "2|4 / 3|6", why: "as a prepared statement"},
 		// The rule is the name, not the company: these read the same tables.
@@ -311,7 +318,7 @@ func generatedNames(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	} {
 		got := answerText(routed, c.stmt, c.args...)
 		t.Logf("routed  %-40s %s", got, c.stmt)
-		if strings.HasPrefix(c.want, "ERROR ") && c.stmt != accent {
+		if strings.HasPrefix(c.want, "ERROR ") && c.stmt != accent && c.stmt != rowid {
 			if !strings.HasPrefix(got, "ERROR ") || !strings.Contains(got, strings.TrimPrefix(c.want, "ERROR ")) {
 				t.Errorf("routed %q (%s):\n  got  %s\n  want an error saying %q", c.stmt, c.why, got, strings.TrimPrefix(c.want, "ERROR "))
 			}
@@ -342,14 +349,17 @@ func generatedNames(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	}
 	reasons := fb.Routing.Servers[ent.ID].Reasons
 	t.Logf("routing reasons: %v", reasons)
-	// The accented statement is one more of either kind: a server that does
-	// not know the name cannot explain it, one that takes it for the column
-	// plans it, and the copy declines it.
+	// The accented statement and the _rowid one are each one more of either
+	// kind: a server that does not know the name cannot explain the
+	// statement, one that takes it for a column plans it, and the copy
+	// declines it.
 	differ, unexplained := uint64(8), uint64(1)
-	if strings.HasPrefix(accentOnSource, "ERROR ") {
-		unexplained++
-	} else {
-		differ++
+	for _, onSource := range []string{accentOnSource, rowidOnSource} {
+		if strings.HasPrefix(onSource, "ERROR ") {
+			unexplained++
+		} else {
+			differ++
+		}
 	}
 	if reasons["copy_columns_differ"] != differ || reasons["copy_refused"] != 0 || reasons["explain_failed"] != unexplained || reasons["expensive_plan"] != 2 {
 		t.Errorf("reasons = %v, want copy_columns_differ %d, copy_refused 0, explain_failed %d, expensive_plan 2", reasons, differ, unexplained)

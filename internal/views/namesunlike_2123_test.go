@@ -69,6 +69,13 @@ func TestNamesUnlikeMySQL(t *testing.T) {
 		{"a name with a dollar and a digit is plain", with("t$1"), "SELECT id FROM gen", ""},
 		{"a name with a dollar and a digit, named", with("t$1"), "SELECT T$1 FROM gen", "t$1"},
 		{"an empty statement names nothing", with("twice"), "", ""},
+		// _rowid is MySQL's other name for a single integer key column. No
+		// definition lists it and no snapshot holds it, for any table.
+		{"_rowid, over a table that lacks nothing else", known, "SELECT a AS _rowid FROM gen WHERE _rowid = 1", "_rowid"},
+		{"_rowid in another case", known, "SELECT _RowID FROM gen", "_rowid"},
+		{"_rowid with a dotless i", known, "SELECT _rowıd FROM gen", "_rowid"},
+		{"_rowid over a table with a generated column", with("twice"), "SELECT _rowid FROM gen", "_rowid"},
+		{"rowid without the underscore is a name like any other", known, "SELECT rowid, row_id FROM gen", ""},
 		// Not known is not "none".
 		{"no table definition", BaselineTable{Schema: "shop", Table: "old"}, "SELECT id FROM old", "no table definition"},
 		{"no table definition, though a list is set", BaselineTable{Schema: "shop", Table: "old", Columns: []string{"id"}}, "SELECT id FROM old", "no table definition"},

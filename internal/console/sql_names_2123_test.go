@@ -56,6 +56,9 @@ func TestSQL_realWorkerGeneratedColumnNames_2123(t *testing.T) {
 		{"SELECT 99 AS twice, twice + 1 AS n FROM shop.gen", "[[99 100]]"},
 		{"SELECT id AS twice FROM shop.gen GROUP BY twice", "[[1]]"},
 		{"SELECT \"user\" = 'u1' AS mine FROM shop.kw", "[[false]]"},
+		// _rowid is MySQL's other name for gen's key: the row whose id is 3
+		// there (none), the row whose a is 3 here.
+		{"SELECT a AS _rowid FROM shop.gen WHERE _rowid = 3", "[[3]]"},
 		// The plain case does fail on the copy, as does the qualified one.
 		{"SELECT twice FROM shop.gen", "error"},
 		{"SELECT g.twice FROM shop.gen g", "error"},
@@ -89,6 +92,9 @@ func TestSQL_realWorkerGeneratedColumnNames_2123(t *testing.T) {
 			t.Errorf("%s under StrictStar: err = %v, want a refusal", stmt, err)
 			return
 		}
+		// The refusal for a NAME, not the star check's for some other
+		// reason: both name the table.
+		wantInMessage = append(wantInMessage, "a name could mean something else")
 		for _, w := range wantInMessage {
 			if !strings.Contains(refusal.Message, w) {
 				t.Errorf("%s: refusal %q does not say %q", stmt, refusal.Message, w)
@@ -117,6 +123,8 @@ func TestSQL_realWorkerGeneratedColumnNames_2123(t *testing.T) {
 	refused("", "SELECT twice FROM shop.gen AS twice", "shop.gen")
 	refused("", "SELECT \"user\" = 'u1' AS mine FROM shop.kw", "shop.kw", "user")
 	refused("", "SELECT twice FROM shop.hid", "shop.hid", "twice")
+	refused("", "SELECT a AS _rowid FROM shop.gen WHERE _rowid = 3", "shop.gen", "_rowid")
+	refused("", "SELECT _rowid FROM shop.g2", "shop.g2", "_rowid")
 	// The ones the copy fails anyway are refused before it tries.
 	refused("", "SELECT twice FROM shop.gen", "shop.gen")
 	refused("", "SELECT id FROM shop.gen ORDER BY twice", "shop.gen")
@@ -150,8 +158,6 @@ func TestSQL_realWorkerGeneratedColumnNames_2123(t *testing.T) {
 	refused("", "SELECT id, status FROM shop.orders", "shop.orders", "no table definition")
 	refused("", "SELECT count(*) FROM shop.orders", "shop.orders")
 	refused("", "SELECT g.b FROM shop.g2 g JOIN shop.orders o ON o.id = g.id", "shop.orders")
-	// A statement the walk is not sure about may read any table.
-	refused("", "SELECT range FROM range(3)", "shop.")
 
 	// Nothing is refused for a caller that did not ask.
 	if _, err := f.s.runSQL(ctx, f.s.cm.boot, "u", "SELECT id, status FROM shop.orders", "", 0, sqlsandbox.Session{}); err != nil {
@@ -163,6 +169,43 @@ func TestSQL_realWorkerGeneratedColumnNames_2123(t *testing.T) {
 	var differ *sqlsandbox.ColumnsDifferError
 	if !errors.As(err, &differ) || !strings.Contains(differ.Reason, "shop.gen") || !strings.Contains(differ.Reason, "twice") {
 		t.Errorf("port: err = %v (%T), want a ColumnsDifferError naming the table and the column", err, err)
+	}
+}
+
+// A statement the walk is not sure about (a table function reads what it does
+// not name) or that names something the copy has no view for is held to
+// every table of the copy: narrowed then selects them all. Over tables the
+// star check has nothing to say about, so that only the names can refuse.
+func TestSQLNamesRefusalFor_everyTableWhenTheWalkIsNotSure(t *testing.T) {
+	in := views.Input{Baselines: []views.BaselineTable{
+		{Schema: "shop", Table: "lines", Path: "/c/shop/lines.parquet", SchemaKnown: true, Columns: []string{"id"}},
+		// Generated and invisible: MySQL's star leaves it out, so StarDiffers is empty.
+		{Schema: "shop", Table: "hid", Path: "/c/shop/hid.parquet", SchemaKnown: true, Columns: []string{"id", "a"}, NotHeld: []string{"twice"}},
+	}}
+	lines := sqlsandbox.TableRef{Schema: "shop", Name: "lines"}
+	for _, c := range []struct {
+		name string
+		refs sqlsandbox.Refs
+		stmt string
+		want string
+	}{
+		{"reads lines alone", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{lines}}, "SELECT twice FROM shop.lines", ""},
+		{"reads hid", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{{Schema: "shop", Name: "hid"}}}, "SELECT twice FROM shop.hid", "shop.hid"},
+		{"reads hid by a name with no schema, in another case", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{{Name: "HID"}}}, "SELECT twice FROM HID", "shop.hid"},
+		{"not sure what it reads", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{lines}, Unsure: true}, "SELECT twice FROM shop.lines, range(3)", "shop.hid"},
+		{"names a relation the copy has no view for", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{lines, {Name: "elsewhere"}}}, "SELECT twice FROM shop.lines, elsewhere", "shop.hid"},
+		{"another catalog", sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{{Catalog: "other", Schema: "shop", Name: "lines"}}}, "SELECT twice FROM other.shop.lines", "shop.hid"},
+		{"not sure, and the name is not in the statement", sqlsandbox.Refs{Unsure: true}, "SELECT range FROM range(3)", ""},
+	} {
+		narrowed := in
+		narrowed.OnlyViews = sqlWantedViews(in, c.refs)
+		if star := sqlStarRefusalFor(in, narrowed, c.refs); star != "" {
+			t.Fatalf("%s: the star check refused (%s); this fixture is for the names alone", c.name, star)
+		}
+		got := sqlNamesRefusalFor(narrowed, c.stmt)
+		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
+			t.Errorf("%s: refusal %q, want one naming %q", c.name, got, c.want)
+		}
 	}
 }
 

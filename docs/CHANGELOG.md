@@ -262,7 +262,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   columns it lacks is not known, and that is not read as "none". The same
   for a file that does not hold exactly the columns its definition lists, a
   column definition that could not be read, and a generated column whose
-  name is not plain ASCII. A new full snapshot records the definition. The
+  name is not plain ASCII. A new full snapshot records the definition. A
+  statement that holds `_rowid` (MySQL's other name for a key of one integer
+  column) or, over a MariaDB table created `WITH SYSTEM VERSIONING`,
+  `row_start` or `row_end`, is MySQL's too. The
   SQL card and a port with routing off answer as before. Also: `bintrail
   baseline` reads a generated column whose expression ends in a string
   ending in a backslash as generated again (it stopped the conversion with

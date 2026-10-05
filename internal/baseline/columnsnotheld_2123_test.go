@@ -31,6 +31,14 @@ func TestColumnsNotHeld(t *testing.T) {
 			want: []string{"row_start", "row_end"}},
 		{name: "the words in a comment are not versioning", body: "  `id` int NOT NULL COMMENT 'WITH SYSTEM VERSIONING',\n",
 			tail: ") ENGINE=InnoDB COMMENT='with system versioning';\n"},
+		// Only the table's own options are read for it: a column line whose
+		// quotes are read wrong cannot hide it, nor invent it.
+		{name: "versioning after a column whose string ends in a backslash", body: "  `id` int NOT NULL,\n  `s` varchar(9) DEFAULT 'a\\' COMMENT 'it`s',\n",
+			tail: ") ENGINE=InnoDB WITH SYSTEM VERSIONING;\n", want: []string{"row_start", "row_end"}},
+		{name: "the words outside a string on a column line", body: "  `id` int NOT NULL,\n  `s` varchar(40) DEFAULT 'a\\' /* WITH SYSTEM VERSIONING */,\n"},
+		{name: "versioning of a partitioned table", body: "  `id` int NOT NULL,\n",
+			tail: ") ENGINE=InnoDB WITH SYSTEM VERSIONING\n PARTITION BY SYSTEM_TIME\n(PARTITION `p_hist` HISTORY ENGINE = InnoDB,\n PARTITION `p_cur` CURRENT ENGINE = InnoDB);\n",
+			want: []string{"row_start", "row_end"}},
 		{name: "a definition that cannot be read", body: "  `id` int NOT NULL,\n  `we``ird` int AS (1) STORED,\n", unread: true},
 		{name: "several, in declared order", body: "  `z` int AS (1) STORED,\n  `id` int,\n  `a` int AS (2) VIRTUAL,\n", want: []string{"z", "a"}},
 		{name: "the clause in a comment or a default", body: "  `id` int NOT NULL COMMENT 'x AS (1) STORED',\n  `s` varchar(32) DEFAULT 'AS (1) VIRTUAL',\n"},
