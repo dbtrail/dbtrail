@@ -59,6 +59,54 @@ type TableFooter struct {
 	// could not be read, so its name is not known.
 	NotHeld       []string
 	NotHeldUnread bool
+	// Temporal are the table's DATE, DATETIME, TIMESTAMP, TIME and YEAR
+	// columns, each with its type, and every column whose type is not one
+	// this package knows, with an empty type (TemporalColumns). Read routing
+	// keeps a statement that does arithmetic on one, or names a TIME or a
+	// YEAR, on the source (#2133).
+	Temporal []TemporalColumn
+}
+
+// TemporalColumn is a column MySQL holds as a date, a time or a year, and the
+// copy under a type that computes or compares another way. Type is the MySQL
+// type in lower case (date, datetime, timestamp, time, year), or "" for a
+// column whose type is not known here: such a column is treated as a date
+// could be, because not known is never read as "not a date".
+type TemporalColumn struct {
+	Name, Type string
+}
+
+// knownOtherTypes are the column types this package knows and that are not
+// temporal: every type MySQL 8.4 and MariaDB 11.4 print in SHOW CREATE TABLE
+// that is not DATE, DATETIME, TIMESTAMP, TIME or YEAR.
+var knownOtherTypes = map[string]bool{
+	"tinyint": true, "smallint": true, "mediumint": true, "int": true, "integer": true, "bigint": true,
+	"decimal": true, "numeric": true, "float": true, "double": true, "real": true, "bit": true, "bool": true, "boolean": true,
+	"char": true, "varchar": true, "tinytext": true, "text": true, "mediumtext": true, "longtext": true,
+	"binary": true, "varbinary": true, "tinyblob": true, "blob": true, "mediumblob": true, "longblob": true,
+	"enum": true, "set": true, "json": true,
+	"geometry": true, "point": true, "linestring": true, "polygon": true, "multipoint": true, "multilinestring": true,
+	"multipolygon": true, "geometrycollection": true, "geomcollection": true,
+	"uuid": true, "inet4": true, "inet6": true, "vector": true,
+}
+
+// TemporalColumns picks out of a parsed schema the columns read routing must
+// know the type of (#2133): the DATE, DATETIME, TIMESTAMP, TIME and YEAR
+// ones, and any column of a type that is neither one of those nor in
+// knownOtherTypes, listed with an empty type.
+func TemporalColumns(cols []Column) []TemporalColumn {
+	var out []TemporalColumn
+	for _, c := range cols {
+		switch c.MySQLType {
+		case "date", "datetime", "timestamp", "time", "year":
+			out = append(out, TemporalColumn{Name: c.Name, Type: c.MySQLType})
+		default:
+			if !knownOtherTypes[c.MySQLType] {
+				out = append(out, TemporalColumn{Name: c.Name})
+			}
+		}
+	}
+	return out
 }
 
 // TableFootersFor reports, for each baseline Parquet file, the decimal and
@@ -359,7 +407,7 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 		st.footers[file] = TableFooter{Decimals: decs, DeltaReserved: hasDeltaReservedColumn(cols), Datetimes: DatetimeColumns(cols),
 			BinaryText: BinaryCollationColumns(string(createSQL), cols),
 			Columns:    columnNames(cols), StarDiffers: starDifference(string(createSQL)),
-			NotHeld: notHeld, NotHeldUnread: notHeldUnread}
+			NotHeld: notHeld, NotHeldUnread: notHeldUnread, Temporal: TemporalColumns(cols)}
 	}
 	if err := rows.Err(); err != nil {
 		// Warn: an iteration that dies partway leaves every file after the

@@ -6,6 +6,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **Read routing: arithmetic on a date column, bit operators and two-digit
+  years stay on MySQL** (#2133). Each of these was answered by MySQL and by
+  the copy with different values and no error; measured on MySQL 8.4.9 and
+  MariaDB 11.4 against the copy.
+  - A `DATE`, `DATETIME` or `TIMESTAMP` column next to `+` or `-`, or under
+    `AVG`: `created_on + 1` is the number 20260102 on MySQL and the date
+    `2026-01-02` on the copy, `MAX(created_on) - MIN(created_on)` is 102 and
+    33. The statement's text does not say the column is a date, so the copy
+    now reads each table's column types from the `CREATE TABLE` stored with
+    its snapshot and declines such a statement (`copy_columns_differ` in
+    the "Who answered" counter), through parentheses, calls and `CASE`, with
+    the name quoted or not, as text and as a prepared statement
+    (`created_on + ?`). Two more are declined because the date can stand
+    under another name: a statement with a subquery or a `WITH` that holds
+    any `+`, `-` or `AVG` and names a date column or has a star, and one
+    that names a date column and has a `+` or `-` in its `GROUP BY`,
+    `HAVING` or `ORDER BY`, where MySQL takes an alias for its expression.
+    A `+` or `-` elsewhere (`SELECT amount + tax ... WHERE created_on >=
+    ...`) and a date plus or minus `INTERVAL` still reach the copy.
+  - A statement that names a `TIME` or a `YEAR` column, or has a star over
+    a table with one, is declined: the copy
+    holds a `TIME` as text (`tm >= '9:00:00'` returned no row there, three
+    on MySQL) and a `YEAR` as a plain number (`yr = 26` is not 2026 there).
+  - `|`, `&`, `>>`, `BIT_COUNT`, `BIT_AND`, `BIT_OR` and `BIT_XOR` are kept
+    on MySQL from the text (`veto`): 64 unsigned bits on MySQL, signed on
+    the copy (`-1 | 0` is 18446744073709551615 and `-1`), and over no rows a
+    number on MySQL and `NULL` on the copy.
+  - A string with a two-digit year (`'26-01-15'`, `'26/1/5'`), written in
+    the statement or bound to a prepared one, is kept on MySQL (`veto`):
+    the year 2026 there, the year 26 on the copy.
+  - `CAST(... AS DATETIME)` and `CAST(... AS TIME)` are kept on MySQL
+    (`veto`): a fraction of a second is rounded by MySQL, cut by MariaDB and
+    kept by the copy.
+
+  What this costs: of 535 statements in the repository's comparison and
+  routing fixtures that no older rule kept on MySQL, one newly stays there
+  under the date rules, the `created_on + 1` this is about. Those fixtures
+  have no `TIME` or `YEAR` column, so that rule is not in the count: over a
+  table that has one, most of what an ORM sends names the column or uses
+  `SELECT *`, and stays on MySQL. Still different, and listed in
+  `docs/time-travel-sql.md`: a `DATE` plus `INTERVAL` is shown as a date and
+  time by the copy (the same day), and a `DATETIME` turned into text
+  (`CONCAT(dt, '')`) ends in `+00` there. A table whose snapshot has no
+  `CREATE TABLE` was already answered by MySQL for every statement.
+
 
 ## [0.99.0] - 2026-10-05
 ### Changed
