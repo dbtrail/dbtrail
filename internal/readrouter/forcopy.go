@@ -29,7 +29,8 @@ type scanned struct {
 	// is empty.
 	forCopy string
 	// blanked is the statement with comments removed and string literals
-	// replaced by ''; names keep the client's backticks.
+	// replaced by ''; names keep the client's backticks, and a name written
+	// against a word is set apart from it by a space.
 	blanked string
 	// blankedCopy is blanked with the names in double quotes: forCopy as the
 	// veto list reads it.
@@ -200,11 +201,21 @@ func scan(stmt string) scanned {
 			cp.WriteByte('"')
 			cp.WriteString(name)
 			cp.WriteByte('"')
+			// In the text the checks read, a name glued to a word stands
+			// apart from it: `t`union is the table t and the operator, and
+			// a pattern that takes a quote next to a word for "this word is
+			// a quoted name" must not take the operator for one.
+			if i > 0 && wordByte(stmt[i-1]) {
+				bl.WriteByte(' ')
+			}
 			bl.WriteString(stmt[i:next])
+			if next < n && wordByte(stmt[next]) {
+				bl.WriteByte(' ')
+			}
 			i = next
 			afterName = true
 		default:
-			if afterName && c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+			if afterName && c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\f' && c != '\v' {
 				if c == '(' {
 					// `f`(x) is a call on both sides, but not of the same
 					// thing: MySQL refuses `count`(*) and takes `sum`(x) for
@@ -225,4 +236,10 @@ func scan(stmt string) scanned {
 	// left in it quotes a name.
 	sc.blankedCopy = strings.ReplaceAll(sc.blanked, "`", `"`)
 	return sc
+}
+
+// wordByte reports whether c can be part of an unquoted word: a letter, a
+// digit, an underscore, a dollar sign or a byte of a multi-byte character.
+func wordByte(c byte) bool {
+	return c == '_' || c == '$' || c >= 0x80 || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
 }
