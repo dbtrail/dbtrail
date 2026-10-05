@@ -52,6 +52,13 @@ type TableFooter struct {
 	// column, an invisible one, a definition that could not be read), or ""
 	// when it returns the same set (starDifference). No ordering fixes it.
 	StarDiffers string
+	// NotHeld names the columns a statement on MySQL can name and the file
+	// does not hold: the generated ones, invisible or not, and a MariaDB
+	// versioned table's implicit row_start and row_end (columnsNotHeld).
+	// NotHeldUnread says the list may be short of one: a column definition
+	// could not be read, so its name is not known.
+	NotHeld       []string
+	NotHeldUnread bool
 }
 
 // TableFootersFor reports, for each baseline Parquet file, the decimal and
@@ -347,9 +354,11 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 		}
 		// Columns is the DECLARED order here; confirmColumnOrder keeps it only
 		// for a file that holds exactly these columns.
+		notHeld, notHeldUnread := columnsNotHeld(string(createSQL))
 		st.footers[file] = TableFooter{Decimals: decs, DeltaReserved: hasDeltaReservedColumn(cols), Datetimes: DatetimeColumns(cols),
 			BinaryText: BinaryCollationColumns(string(createSQL), cols),
-			Columns:    columnNames(cols), StarDiffers: starDifference(string(createSQL))}
+			Columns:    columnNames(cols), StarDiffers: starDifference(string(createSQL)),
+			NotHeld: notHeld, NotHeldUnread: notHeldUnread}
 	}
 	if err := rows.Err(); err != nil {
 		// Warn: an iteration that dies partway leaves every file after the

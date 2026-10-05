@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -45,8 +47,41 @@ import (
 //
 // The scan stops where parseSchemaFrom stops, so both read the same lines.
 func starDifference(createSQL string) string {
-	var generated, invisible []string
-	unreadable := 0
+	sc := scanColumnLines(createSQL)
+	var parts []string
+	if len(sc.generated) > 0 {
+		parts = append(parts, "MySQL also returns "+columnsPhrase("generated column", sc.generated)+", which a snapshot does not hold")
+	}
+	if len(sc.invisible) > 0 {
+		parts = append(parts, "MySQL leaves out "+columnsPhrase("invisible column", sc.invisible))
+	}
+	if sc.unreadable > 0 {
+		parts = append(parts, fmt.Sprintf("%d column definition(s) could not be read", sc.unreadable))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// columnScan is what an embedded CREATE TABLE says about the columns a
+// snapshot file and MySQL treat differently, each list in declared order.
+type columnScan struct {
+	// generated: a dump carries no value for them, so the file does not hold
+	// them; MySQL's `SELECT *` returns them.
+	generated []string
+	// hiddenGenerated: generated and INVISIBLE. Neither the file nor MySQL's
+	// `SELECT *` has them, and a statement can still name them.
+	hiddenGenerated []string
+	// invisible: the file holds them, MySQL's `SELECT *` leaves them out.
+	invisible []string
+	// notHeld is generated and hiddenGenerated together, in declared order.
+	notHeld []string
+	// unreadable counts the column definitions colRe cannot read.
+	unreadable int
+}
+
+// scanColumnLines reads a CREATE TABLE's column lines. The scan stops where
+// parseSchemaFrom stops, so both read the same lines.
+func scanColumnLines(createSQL string) columnScan {
+	var sc columnScan
 	for _, line := range strings.Split(createSQL, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "PRIMARY") ||
@@ -61,7 +96,7 @@ func starDifference(createSQL string) string {
 		}
 		loc := colRe.FindStringSubmatchIndex(line)
 		if loc == nil {
-			unreadable++
+			sc.unreadable++
 			continue
 		}
 		name := line[loc[2]:loc[3]]
@@ -72,24 +107,52 @@ func starDifference(createSQL string) string {
 			}
 		}
 		isGenerated := generatedColumnLine(line)
+		if isGenerated {
+			sc.notHeld = append(sc.notHeld, name)
+		}
 		switch {
 		case isGenerated && !hidden:
-			generated = append(generated, name)
-		case hidden && !isGenerated:
-			invisible = append(invisible, name)
+			sc.generated = append(sc.generated, name)
+		case isGenerated:
+			sc.hiddenGenerated = append(sc.hiddenGenerated, name)
+		case hidden:
+			sc.invisible = append(sc.invisible, name)
 		}
 	}
-	var parts []string
-	if len(generated) > 0 {
-		parts = append(parts, "MySQL also returns "+columnsPhrase("generated column", generated)+", which a snapshot does not hold")
+	return sc
+}
+
+// systemVersioningRe is the table option of a MariaDB system-versioned table,
+// looked for outside quoted strings.
+var systemVersioningRe = regexp.MustCompile(`(?i)\bWITH\s+SYSTEM\s+VERSIONING\b`)
+
+// columnsNotHeld names the columns a statement on MySQL can NAME and a
+// snapshot file does not hold (#2123): every generated column, the INVISIBLE
+// ones included (MySQL's `SELECT *` leaves those out, a statement that names
+// one still reads it), and the row_start and row_end a MariaDB table versioned
+// without declaring its period columns answers to, which its CREATE TABLE
+// does not list.
+//
+// unread says the list is not the whole of them: a column definition the
+// parser could not read (a name holding a backtick) may be one, and its name
+// is not known. A caller that needs the whole list treats the table as one
+// whose columns are not known.
+//
+// A statement that names one of these on the copy does not always fail: the
+// name can bind to another table's column, to an alias, or to a function
+// DuckDB calls without parentheses, and the copy then answers with other
+// rows. Read routing keeps such a statement on the source.
+func columnsNotHeld(createSQL string) (names []string, unread bool) {
+	sc := scanColumnLines(createSQL)
+	names = sc.notHeld
+	if systemVersioningRe.MatchString(emptyQuoted(createSQL)) {
+		for _, implicit := range []string{"row_start", "row_end"} {
+			if !slices.Contains(names, implicit) {
+				names = append(names, implicit)
+			}
+		}
 	}
-	if len(invisible) > 0 {
-		parts = append(parts, "MySQL leaves out "+columnsPhrase("invisible column", invisible))
-	}
-	if unreadable > 0 {
-		parts = append(parts, fmt.Sprintf("%d column definition(s) could not be read", unreadable))
-	}
-	return strings.Join(parts, "; ")
+	return names, sc.unreadable > 0
 }
 
 // columnsPhrase is "generated column total" or "generated columns a, b".
