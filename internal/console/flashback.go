@@ -10,6 +10,7 @@ import (
 
 	drivermysql "github.com/go-sql-driver/mysql"
 
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
@@ -57,6 +58,11 @@ type FlashbackTarget struct {
 	// for the serving layer's read router (#2038) to EXPLAIN on and forward
 	// to; empty for the boot entry and for a server with no source.
 	SourceDSN string
+	// SourceSSL is how that source connection uses TLS: the entry's ssl_*
+	// fields (ServerEntry.SourceSSL), the value capture connects with. The
+	// read router's connection to the same server must decide TLS from it,
+	// or it would cross the network in clear where capture is encrypted.
+	SourceSSL config.SSL
 }
 
 // SQLOnCopy is the free-SQL executor the embedded port hands each connection.
@@ -169,6 +175,7 @@ func (s *Server) ResolveFlashback(ctx context.Context, selector string) (Flashba
 		SQL:            sqlOnCopy,
 		SQLUnavailable: sqlWhyNot,
 		SourceDSN:      s.flashbackSourceDSN(id),
+		SourceSSL:      s.flashbackSourceSSL(id),
 	}, nil
 }
 
@@ -202,6 +209,14 @@ func (s *Server) flashbackSourceDSN(id string) string {
 		return ""
 	}
 	return entry.SourceDSN
+}
+
+// flashbackSourceSSL is the TLS the entry's source connection uses (its ssl_*
+// fields, an empty mode meaning the default), the same value capture reads.
+// An unknown id gets the default mode: nothing routes there anyway.
+func (s *Server) flashbackSourceSSL(id string) config.SSL {
+	entry, _ := s.cm.reg.Get(id)
+	return entry.SourceSSL()
 }
 
 // flashbackDefaultSchema derives the source database name for a target server

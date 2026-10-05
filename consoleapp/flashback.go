@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
 	// The port resolves SET time_zone names (#2035). Embedded here, in the
@@ -18,6 +19,7 @@ import (
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/server"
 
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/readrouter"
@@ -339,15 +341,29 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 		logger.Warn("read routing off for this connection: the server has no source DSN to forward to", "server", user)
 		srv.RecordRouteUnavailable(tgt.ID, "the server has no source database to forward to")
 	default:
-		fw, err := readrouter.NewForwarder(tgt.SourceDSN, cfg.RoutePolicy, cfg.QueryTimeout)
+		// The connection is opened with the TLS capture uses for this
+		// server (tgt.SourceSSL), by capture's own rule.
+		fw, err := readrouter.NewForwarder(tgt.SourceDSN, tgt.SourceSSL, cfg.RoutePolicy, cfg.QueryTimeout)
 		if err != nil {
 			// The DSN is the registry's own and was parsed to open the
-			// source; a scheme the forwarder does not speak is the
-			// realistic cause. The message carries no secret.
+			// source; a scheme the forwarder does not speak, or a TLS
+			// setting that cannot be used, is the realistic cause. The
+			// message carries no secret.
 			logger.Warn("read routing off for this connection", "server", user, "err", err)
-			srv.RecordRouteUnavailable(tgt.ID, "the source address cannot be forwarded to ("+err.Error()+")")
+			why := "the source address cannot be forwarded to (" + err.Error() + ")"
+			if problem, isTLS := strings.CutPrefix(err.Error(), "source TLS settings: "); isTLS {
+				why = "this server's TLS settings cannot be used (" + problem + ")"
+			}
+			srv.RecordRouteUnavailable(tgt.ID, why)
 		} else {
 			srv.RecordRouteAvailable(tgt.ID)
+			host := config.DSNHost(tgt.SourceDSN)
+			fw.OnCleartext = func(err error) {
+				// The same thing capture says when its own connection to
+				// this source falls back, once per client connection.
+				logger.Warn("read routing: the source offers no TLS; this connection forwards to it WITHOUT encryption, as capture does",
+					"server", user, "host", host, "error", err)
+			}
 			// Every decision is counted twice over, by the canonical
 			// server id: the Prometheus counter for dashboards and
 			// the console's tally for the Connect page (#2038).

@@ -3,11 +3,15 @@ package readrouter
 import (
 	"context"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-mysql-org/go-mysql/client"
 	"github.com/go-mysql-org/go-mysql/mysql"
+
+	"github.com/dbtrail/dbtrail/internal/config"
 )
 
 // A source that cannot be reached, or that drops the connection, is lost for
@@ -31,7 +35,7 @@ func TestForwarder_lostStaysLost(t *testing.T) {
 			c.Close() // no handshake: the dial succeeds, the protocol fails
 		}
 	}()
-	f, err := NewForwarder("u:p@tcp("+ln.Addr().String()+")/db?tls=false", DefaultPolicy(), time.Second)
+	f, err := NewForwarder("u:p@tcp("+ln.Addr().String()+")/db?tls=false", config.SSL{Mode: "disabled"}, DefaultPolicy(), time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,17 +59,17 @@ func TestForwarder_lostStaysLost(t *testing.T) {
 }
 
 func TestNewForwarder_dsn(t *testing.T) {
-	f, err := NewForwarder("root:pw@tcp(db.example)/shop?tls=skip-verify&parseTime=true", Policy{}, 0)
+	f, err := NewForwarder("root:pw@tcp(db.example)/shop?tls=skip-verify&parseTime=true", config.SSL{Mode: "disabled"}, Policy{}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if f.addr != "db.example:3306" || f.db != "shop" || f.tls == nil || !f.tls.InsecureSkipVerify {
 		t.Errorf("parsed addr=%q db=%q tls=%v, want the default port, the database and the DSN's TLS", f.addr, f.db, f.tls)
 	}
-	if _, err := NewForwarder("root@unix(/tmp/sock)/x", Policy{}, 0); err == nil {
+	if _, err := NewForwarder("root@unix(/tmp/sock)/x", config.SSL{Mode: "disabled"}, Policy{}, 0); err == nil {
 		t.Error("a unix-socket DSN was accepted")
 	}
-	if _, err := NewForwarder("not a dsn", Policy{}, 0); err == nil {
+	if _, err := NewForwarder("not a dsn", config.SSL{Mode: "disabled"}, Policy{}, 0); err == nil {
 		t.Error("garbage was accepted")
 	}
 }
@@ -100,4 +104,55 @@ func TestPlanFromExplain_doesNotPoisonTheResultsetPool(t *testing.T) {
 			t.Fatalf("result %d built after reading plans has column %q of type %d, want n / BIGINT", i, got, rs.Fields[0].Type)
 		}
 	}
+}
+
+// An empty string from the source reaches the sink as an empty string, not
+// as NULL. go-mysql's text-row parser hands an empty string over as a nil
+// byte slice (it appends zero bytes to a nil buffer), which a sink cannot
+// tell from NULL unless the cell's own type says which it is.
+func TestForwarder_emptyStringIsNotNull(t *testing.T) {
+	fields := []*mysql.Field{{Name: []byte("a"), Type: mysql.MYSQL_TYPE_VAR_STRING}, {Name: []byte("b"), Type: mysql.MYSQL_TYPE_VAR_STRING},
+		{Name: []byte("c"), Type: mysql.MYSQL_TYPE_VAR_STRING}, {Name: []byte("d"), Type: mysql.MYSQL_TYPE_BLOB}}
+	// One text-protocol row as the source sends it: '', NULL, 'x', ''.
+	row := mysql.RowData{0x00, 0xfb, 0x01, 'x', 0x00}
+	parsed, err := row.ParseText(fields, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed[0].Type != mysql.FieldValueTypeString || parsed[0].AsString() != nil {
+		t.Skip("go-mysql no longer hands an empty string over as a nil slice; this test's premise is gone")
+	}
+	f := &Forwarder{}
+	sink := &kindSink{}
+	if _, err := f.stream(sink, func(res *mysql.Result, perRow client.SelectPerRowCallback, perRes client.SelectPerResultCallback) error {
+		res.Resultset = &mysql.Resultset{Fields: fields}
+		if err := perRes(res); err != nil {
+			return err
+		}
+		return perRow(parsed)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(sink.kinds, " "), "empty NULL bytes:x empty"; got != want {
+		t.Errorf("cells reached the sink as %q, want %q", got, want)
+	}
+}
+
+// kindSink records, per cell, what a sink can tell: NULL (a nil value), an
+// empty string (a non-nil empty slice) or bytes.
+type kindSink struct{ kinds []string }
+
+func (k *kindSink) Header([]*mysql.Field) error { return nil }
+func (k *kindSink) Row(values []any) error {
+	for _, v := range values {
+		switch b, isBytes := v.([]byte); {
+		case v == nil, isBytes && b == nil:
+			k.kinds = append(k.kinds, "NULL")
+		case isBytes && len(b) == 0:
+			k.kinds = append(k.kinds, "empty")
+		default:
+			k.kinds = append(k.kinds, "bytes:"+string(b))
+		}
+	}
+	return nil
 }

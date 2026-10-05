@@ -96,6 +96,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copy and `DECIMAL`s with four more decimals on MySQL, the same value in a
   different text; the documentation now says exactly how they differ and
   why it stays.
+- **Two readers sharing one replication id are explained in plain words**
+  (#2092). When two DBTrail installations capture the same MariaDB database,
+  both can identify themselves to it with the same replication id, and the
+  database keeps one reader per id: each one disconnects the other when it
+  reconnects. The web interface showed only the database's raw error (4052),
+  appearing and clearing. The Overview's **Capture stopped** box, the
+  Getting started list and the server row's tooltip now say what is going on,
+  that nothing is lost, and what to do: stop capture for this server in one
+  of the two installations. The raw error stays under **Technical details**.
+  The cause is recognised by the error's number, sent as
+  `error_code: "same_replication_id"` in the monitor status. The box is
+  shown while the stream is disconnected and clears while it is briefly
+  connected, as before. A MySQL source does not disconnect DBTrail's reader
+  this way, so nothing changes there.
 - **SQL on the copy prints a `DECIMAL` with its trailing zeros** (#2083). A
   `DECIMAL(10,2)` holding 10 came back as `10` from the copy (the port, the
   routed reads and the SQL card) and as `10.00` from MySQL, and
@@ -108,6 +122,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Go's `map[a:10]`, is now the JSON object its column is declared as. `AVG`
   and `/` are not part of this: they are doubles on the copy, and still
   print as such.
+- **Read routing: the port's connection to the source was not encrypted**
+  (#2079). With read routing on (`--route-max-copy-age`), the connection
+  the MySQL-protocol port opens to a server's source ignored that server's
+  TLS settings and used TLS only when the source DSN itself carried a
+  `tls=` parameter, which a server added from the web interface never
+  does. Statements and their results crossed the network in clear on a
+  source where capture connects over TLS, also with `ssl_mode: required`.
+  The port now decides TLS by the rule capture uses for the same server:
+  encrypted by default whenever the source offers TLS, a logged fallback to
+  an unencrypted connection only under `preferred` against a source with
+  no TLS, and encrypted or refused under `required`, `verify-ca` and
+  `verify-identity`.
+- **Read routing: an empty string came back as NULL** (#2079). With read
+  routing on (`--route-max-copy-age`), a statement sent as plain text that
+  MySQL answered returned `NULL` in every cell where MySQL returns an empty
+  string: `SELECT ''`, an empty `VARCHAR` or `BLOB` column, the value of
+  `SHOW VARIABLES LIKE 'init_connect'`. Prepared statements were not
+  affected, and neither was anything the copy answered. Forwarded results
+  now keep the empty string.
 - **Rotation: an hour held by a pending upload now counts as deferred in
   both paths** (#2094). When an unconfirmed S3 upload blocked a drop, the
   path that archives counted the hour as deferred and the path that only
