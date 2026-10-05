@@ -408,8 +408,10 @@ What this is and is not:
   (`'ß' = 'ss'`, full-width letters, `'æ' = 'ae'`, `'ø' = 'o'`, hiragana
   against katakana) and sorts as it does (punctuation before the digits):
   of 57 pairs of strings measured against MySQL 8.4 one differs (a
-  mathematical bold `𝐀` is an `A` on MySQL and not on the copy), and 48
-  strings sort in the same order on both. ICU, which provides it, is part
+  mathematical bold `𝐀` is an `A` on MySQL and not on the copy), and a
+  list of 48 strings sorts in the same order on both. Those numbers hold
+  for those pairs and that list, not for all text: the differences found
+  outside them are listed below. ICU, which provides it, is part
   of the binary; nothing is downloaded. It has a price: comparing,
   grouping or sorting text costs about twice what DuckDB's built-in
   case-and-accent folding does, and about ten times on a column where
@@ -422,6 +424,48 @@ What this is and is not:
   copy as well: the copy reads each column's collation from the `CREATE
   TABLE` stored with the snapshot. Close, not identical. What still
   differs, none of which can be caught per statement:
+  - **The copy can return MORE rows than MySQL for these texts.** The
+    copy holds them equal and MySQL's `utf8mb4_0900_ai_ci` does not, so a
+    filter or a join on them matches rows MySQL leaves out, and a `GROUP
+    BY` merges groups MySQL keeps apart, with no error:
+    - `l` or `L` followed by a middle dot, against `l` alone: `'l·l' =
+      'll'`, so `'col·lecció' = 'collecció'`.
+    - A Thai or Lao consonant and a leading vowel, in either order:
+      `'กเ' = 'เก'`, `'ກເ' = 'ເກ'`.
+    - A letter written in two parts against the same letter in one:
+      Cyrillic `и` followed by a combining breve against `й`, Arabic alef
+      followed by a combining madda or hamza against `آ`, `أ`, `إ`.
+    - One Javanese pair, the vowel sign tarung (U+A9B4) against its long
+      form (U+A9B5).
+    - 86 combining and format marks that the copy ignores and MySQL does
+      not, all added to Unicode after version 9: the Gujarati sign shadda
+      (U+0AFB), the Bengali sandhi mark (U+09FE), the combining dot above
+      left (U+1DF8). `'a' || chr(7672) = 'a'` here.
+    - Characters added to Unicode after version 9, which MySQL's `0900`
+      collations do not know and so give a weight of their own each: 1,463
+      of them are equal to another character on the copy. A Georgian
+      Mtavruli capital (U+1CA0) is equal to the ordinary Georgian letter
+      (U+10E0) here and not on MySQL.
+
+    A MariaDB source agrees with the copy on every one of these (measured
+    on 11.4 under `utf8mb4_uca1400_ai_ci`); the difference is against
+    MySQL only. It is not new either: the collation the copy used before
+    this one (`nocase.noaccent`) was wider in this direction (it ignored 1,327 combining marks MySQL does
+    not, the Indic vowel signs among them; of 75,900 strings of one or two characters
+    tested, it held 25,725 equal to another one that MySQL keeps apart,
+    against 2,613 now). The first two families are the ones it did not
+    have.
+  - **Equalities MySQL has and the copy lacks, beyond the 57 pairs.** The
+    copy returns fewer rows for these, never more: a small kana against
+    the normal one (`'ぁ' = 'あ'`, `'ッ' = 'ツ'`), enclosed and
+    mathematical letters (`'🅰' = 'a'`, `'𝒜' = 'A'`), a symbol against its
+    spelling (`'℃' = '°C'`, `'№' = 'No'`), and the katakana middle dot in
+    full width against half width (`'・' = '･'`) are equal on MySQL and on
+    MariaDB and different here.
+  - **Han characters outside the main block sort differently.** MySQL
+    and MariaDB put `𠀀` (U+20000) after `中`, the copy before: over
+    `𠀀`, `中` and `z`, `max(x)` is `𠀀` on MySQL and `中` on the
+    copy. `ORDER BY`, `MIN`, `MAX` and `<` on such text differ.
   - **`_cs` columns.** A column MySQL declares `_cs`
     (`utf8mb4_0900_as_cs`) is case-insensitive on the copy. Bytes would
     compare it right and sort it wrong: `_cs` puts `a` before `B`, bytes

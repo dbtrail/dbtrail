@@ -201,3 +201,105 @@ func TestDefaultCollation_ordersLikeMySQL(t *testing.T) {
 		t.Error("nocase.noaccent now sorts like MySQL too; the comparison in the documentation is out of date")
 	}
 }
+
+// copyEquatesMoreThanMySQL is the dangerous direction: texts the copy's
+// collation holds equal and MySQL's utf8mb4_0900_ai_ci does not, so a filter,
+// a join or a GROUP BY on them returns MORE rows on the copy (or fewer
+// groups) with no error. One pair per family; the families and their sizes
+// are in docs/time-travel-sql.md. Each pair was measured on MySQL 8.4.9
+// (false on every one) and on MariaDB 11.4 under utf8mb4_uca1400_ai_ci (true
+// on every one: a MariaDB source agrees with the copy here). plain is what
+// DuckDB's built-in nocase.noaccent answers, the copy's default before
+// nocase.icu_noaccent.
+var copyEquatesMoreThanMySQL = []struct {
+	family, a, b string
+	plain        bool
+}{
+	{"l followed by a middle dot", "l·l", "ll", false},
+	{"Thai consonant and leading vowel in either order", "กเ", "เก", false},
+	{"Lao consonant and leading vowel in either order", "ກເ", "ເກ", false},
+	{"Cyrillic i with a combining breve against short i", "й", "й", true},
+	{"Arabic alef with a combining madda against alef with madda", "آ", "آ", true},
+	{"Javanese tarung against its long form", "ꦴ", "ꦵ", true},
+	{"combining mark newer than Unicode 9 (U+1DF8)", "a᷸", "a", true},
+	{"letter newer than Unicode 9 (Georgian Mtavruli against Mkhedruli)", "Რ", "რ", true},
+}
+
+// mysqlEquatesMoreThanCopy is the safe direction, beyond the 57 pairs above:
+// texts MySQL 8.4.9 holds equal (measured: true on every one, on MariaDB 11.4
+// as well) and the copy does not, under either collation. The copy returns
+// FEWER rows for them, never more.
+var mysqlEquatesMoreThanCopy = [][2]string{
+	{"ぁ", "あ"},  // small kana against the normal one
+	{"ッ", "ツ"},  // the same in katakana
+	{"🅰", "a"},  // an enclosed letter
+	{"𝒜", "A"},  // a mathematical letter
+	{"℃", "°C"}, // a symbol against its spelling
+	{"№", "No"},
+	{"・", "･"}, // the katakana middle dot, full width against half width
+}
+
+// The pairs in the two lists above stay as recorded. A change here means
+// DuckDB's collation moved: re-measure against MySQL and update the list of
+// differences in docs/time-travel-sql.md.
+func TestDefaultCollation_pairsBeyondTheMeasuredList(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	equal := func(collation, a, b string) bool {
+		t.Helper()
+		if _, err := db.Exec("SET default_collation = '" + collation + "'"); err != nil {
+			t.Fatal(err)
+		}
+		var got bool
+		q := "SELECT a = b FROM (SELECT '" + a + "'::VARCHAR AS a, '" + b + "'::VARCHAR AS b)"
+		if err := db.QueryRow(q).Scan(&got); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		return got
+	}
+	for _, p := range copyEquatesMoreThanMySQL {
+		if !equal("nocase.icu_noaccent", p.a, p.b) {
+			t.Errorf("%s: %q = %q is false on the copy now; MySQL says false too, so this difference is gone: drop it from the documentation", p.family, p.a, p.b)
+		}
+		if got := equal("nocase.noaccent", p.a, p.b); got != p.plain {
+			t.Errorf("%s: %q = %q under nocase.noaccent is %v, recorded %v", p.family, p.a, p.b, got, p.plain)
+		}
+	}
+	for _, p := range mysqlEquatesMoreThanCopy {
+		for _, collation := range []string{"nocase.icu_noaccent", "nocase.noaccent"} {
+			if equal(collation, p[0], p[1]) {
+				t.Errorf("%q = %q is true under %s now, as on MySQL: drop it from the documentation", p[0], p[1], collation)
+			}
+		}
+	}
+}
+
+// Order outside the 48 strings above is not the same everywhere. A Han
+// character beyond the main block (U+20000) sorts after one inside it
+// (U+4E2D) on MySQL 8.4.9 and on MariaDB 11.4, and before it on the copy, so
+// max() over the three values below is U+20000 there and U+4E2D here.
+func TestDefaultCollation_hanOutsideTheMainBlockSortsDifferently(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	const mysqlMax = "\U00020000"
+	for collation, want := range map[string]string{"nocase.icu_noaccent": "中", "nocase.noaccent": mysqlMax} {
+		if _, err := db.Exec("SET default_collation = '" + collation + "'"); err != nil {
+			t.Fatal(err)
+		}
+		var got string
+		if err := db.QueryRow("SELECT max(x) FROM (VALUES ('" + mysqlMax + "'), ('中'), ('z')) t(x)").Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("%s: max is %q (%+q), recorded %q; MySQL answers %+q", collation, got, got, want, mysqlMax)
+		}
+	}
+}

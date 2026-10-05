@@ -13,8 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   they are under `utf8mb4_0900_ai_ci`, in `WHERE`, `IN`, `GROUP BY`,
   `SELECT DISTINCT` and joins, and `ORDER BY` sorts punctuation before the
   digits as MySQL does. Of 57 pairs of strings measured against MySQL 8.4
-  the copy now differs on one (26 before), and 48 strings sort in the same
-  order on both. The copy's session default goes from DuckDB's built-in
+  the copy now differs on one (26 before), and a list of 48 strings sorts
+  in the same order on both. **The copy can return MORE rows than MySQL
+  for some texts**, because it holds equal what `utf8mb4_0900_ai_ci` does
+  not: `l` followed by a middle dot against `l` (`'l·l' = 'll'`), a Thai
+  or Lao consonant and a leading vowel in either order, a Cyrillic `й` or
+  an Arabic alef with madda or hamza written in two parts, one Javanese
+  pair, 86 combining and format marks and 1,463 characters added to
+  Unicode after version 9. A MariaDB source agrees with the copy on all of
+  them, and the previous collation was wider in this direction (of 75,900 strings of one
+  or two characters tested it held 25,725 equal to another one that
+  MySQL keeps apart, against 2,613 now); only the middle dot and the Thai
+  and Lao cases are new. The full list, with what MySQL equates and the
+  copy does not, is in [Time-travel SQL](time-travel-sql.md). The copy's
+  session default goes from DuckDB's built-in
   `nocase.noaccent` to `nocase.icu_noaccent`; ICU is part of the binary, so
   nothing is downloaded and an air-gapped install is unaffected. **It is
   slower on text**: comparing, grouping or sorting a text column costs
