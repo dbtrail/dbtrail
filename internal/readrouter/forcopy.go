@@ -57,7 +57,8 @@ type scanned struct {
 // an empty name, a quoted name right before a parenthesis or right after U&,
 // a string, name or comment that never ends, a comment with another one
 // opened inside it, a quoted name right before a string literal, a carriage
-// return inside a line comment, a double-quoted string, a backslash in a string, a `#`
+// return inside a line comment, a quoted INTERVAL amount that is not a whole
+// number, a double-quoted string, a backslash in a string, a `#`
 // comment, a MySQL hint or version comment. text is then the
 // statement as the client wrote it. Veto keeps every such statement on
 // MySQL too (it may name another reason first), so a statement that passed
