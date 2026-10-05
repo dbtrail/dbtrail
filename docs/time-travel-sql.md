@@ -279,7 +279,8 @@ What to know before relying on it:
 With `--route-max-copy-age` set (for example `--route-max-copy-age 15m`), a
 connection on this port to a server that has a source DSN forwards every
 statement to that MySQL over one upstream connection per client connection,
-with the source DSN's credentials, and MySQL's own answer comes back, errors
+with the server's forwarding account when it has one and the source DSN's
+credentials otherwise, and MySQL's own answer comes back, errors
 included; resultsets are streamed to the client as they arrive, never held
 in the daemon. The one exception is a `SELECT` whose plan says it is
 expensive: it runs on the copy, and if the copy rejects it (DuckDB does not
@@ -369,9 +370,11 @@ What this is and is not:
   this on. A `SELECT` that must see the last second belongs in a transaction
   or behind a `SET`, both of which pin the connection to MySQL.
 - **The copy's grants are nobody's; the forwarded ones are the registry's.**
-  Forwarded statements run with the source DSN's account. Give this port to
-  people who may do on MySQL whatever that account can, or start it with
-  `--route-read-only` so that only reads are forwarded (see below).
+  Forwarded statements run with the server's forwarding account, or with
+  the source DSN's account when the server has none. Give this port to
+  people who may do on MySQL whatever that account can. To bound it, give
+  the server a forwarding account with only the grants the port should have
+  and start the port with `--route-read-only` (both below).
 - **Nothing is translated.** The copy gets the statement as the client
   wrote it. DuckDB does not read MySQL's backtick-quoted names, so a
   statement that uses them (what most ORMs and drivers generate) is refused
@@ -482,14 +485,99 @@ What this is and is not:
   arrives while the copy is busy is not refused: it runs on MySQL. The
   limits of the section above are the copy's; MySQL's are MySQL's.
 - **The port accepts writes under routing.** `INSERT`, `UPDATE`, `DELETE`,
-  DDL, `GRANT`: everything that is not a `SELECT` reaches the source with
-  the registry's source account, which is the account the daemon captures
-  with. Anyone holding the access token can do on the source what that
-  account can, including killing the capture's own connection or changing
-  its password. Each forwarded write is logged at info level with its
-  leading keyword (never the statement). Turn routing on only where the
-  token's holders may already do that, or make the port read-only (next
-  point).
+  DDL, `GRANT`: everything that is not a `SELECT` reaches the source. On a
+  server with no forwarding account that is the registry's source account,
+  the one the daemon captures with: anyone holding the access token can
+  then do on the source what that account can, including killing the
+  capture's own connection or changing its password. Each forwarded write
+  is logged at info level with its leading keyword (never the statement).
+  Two settings close this, and they are meant to be used together: a
+  forwarding account, so the port has its own grants, and
+  `--route-read-only`, so a write is refused before it is sent (the next
+  two points).
+- **A forwarding account gives the port its own grants.** Each server can
+  carry an optional second account on its source, used only by this port.
+  With one set, everything the port does on that server's MySQL (forwarded
+  statements, the `EXPLAIN` the decision reads, prepared statements, `USE`)
+  runs as that account, and the capture account is never opened by the
+  port. Its grants are then the most the port can do there:
+
+  ```sql
+  CREATE USER 'report_ro'@'%' IDENTIFIED BY <choose a password>;
+  GRANT SELECT ON shop.* TO 'report_ro'@'%';
+  ```
+
+  Set it on the server: in the web interface, **Forwarding user** and
+  **Forwarding password** on the server's edit form (to remove it, tick
+  **Remove the forwarding account** there; a save that does not touch
+  these fields leaves the account as it is); in the API, `route_user` and
+  `route_password` on `POST` / `PUT /api/servers` (fields left out keep
+  what is saved; an empty `route_user` removes it; a password left out
+  keeps the saved one; `route_dsn` takes a whole DSN instead, for an
+  account reached at another address). The user name cannot contain a
+  colon, and it cannot be the account the server captures with: that
+  would separate nothing. That check compares user and address as they
+  are written (host names without case or a trailing dot, IP addresses by
+  value, `localhost`, `127.0.0.1` and `::1` as one); it does not resolve
+  names, so the same server written as a name in one place and as an IP
+  address in the other is not recognised. A source reached over a unix
+  socket cannot carry a forwarding account: statements are forwarded over
+  the network.
+
+  It connects to the source's own address and database, and follows the
+  source when those are edited. Whether the connection is encrypted is
+  not part of the account: the port uses the server's TLS settings, the
+  ones capture uses, with either account. An account given as a
+  `route_dsn` to another address keeps that address, and the edit form and
+  the **Connect a SQL client** panel show it.
+
+  **Saving, changing or removing the forwarding account closes that
+  server's open connections on the port**, and so does any other edit
+  that changes the address or account the port forwards with (the
+  source's own, on a server with no forwarding account), or deleting the
+  server. Clients see a lost connection at once, reconnect, and get the
+  account in force. An edit that changes neither closes nothing.
+
+  A statement that was running on the source when its connection was
+  closed does not stop there by itself: the source only notices a closed
+  connection when the statement next touches the network, so a long
+  statement would run to its end as the previous account, and a write
+  would complete. The port therefore ends them: right after the edit it
+  opens one short-lived connection with the PREVIOUS account and sends
+  `KILL` for the source thread of each connection it closed (an account
+  may kill its own threads). This takes about a second, runs in the
+  background, and never delays or fails the edit. It cannot be done when
+  the previous account can no longer log in (its password was changed on
+  the source first, or it was dropped or locked) or the source cannot be
+  reached: the log then says so at warning level, and a statement that
+  was running keeps running as the previous account until it finishes or
+  the source notices the closed connection. To be certain in that case,
+  look at the source's process list. A transaction that was open is
+  rolled back by the source in every case.
+
+  **Test connection** on the server's form logs in with the forwarding
+  account too, the saved one or the one being typed, and names it in its
+  answer. A console started as `serve` has no port and so no client to
+  log in with: there the answer says the login was not tried. If the
+  source later turns the port's login away (a changed password, a host
+  that is not allowed, a locked account, on MySQL an expired password),
+  clients get error 2006 on every statement, and the **Connect a SQL
+  client** panel says which account was refused and the source's own
+  error, until a connection logs in again or a **Test connection** of
+  that forwarding account works. An expired password on MariaDB is
+  different: MariaDB lets the account log in and answers every statement
+  with its own error 1820 ("You must SET PASSWORD before executing this
+  statement"), which the port passes to the client as it is, so nothing
+  is shown on the panel.
+
+  The password is stored in the registry file like the source's and never
+  shown again. MySQL and MariaDB sources only. The **Connect a SQL
+  client** panel names the user the port runs statements as. If the saved
+  value cannot be read (a registry file edited by hand), the port does not
+  forward for that server and never falls back to the capture account;
+  the form and the panel say so, and other edits of the server still
+  save. The server given on the command line (`--source-dsn`) is not
+  routed, so it has no such setting.
 - **`--route-read-only` makes the routed port read-only.** With it (or
   `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=1`), a statement that is not a read is
   refused with MySQL error 1290 and a message that names the flag, and it is
@@ -525,7 +613,8 @@ What this is and is not:
     `SELECT` that calls a stored function, or reads a view built on one,
     looks like a read and is forwarded; if the function writes, MySQL runs
     it. The mode screens by statement class; the grants of the account the
-    port forwards with are what bounds the rest. Refusals are counted as
+    port forwards with are what bounds the rest, which is what the
+    forwarding account above is for. Refusals are counted as
     `route="refused"`, `reason="read_only"`, and the **Connect a SQL
     client** panel says which mode the port is in.
 - **The port reaches the source over the TLS capture uses.** Its
@@ -535,8 +624,12 @@ What this is and is not:
   TLS and falls back to an unencrypted connection only when the source
   offers none, with a warning in the log; with `required`, `verify-ca` or
   `verify-identity` it is encrypted or it fails, and the client gets error
-  2006. A `tls=` parameter inside the source DSN wins over `ssl_mode`, as
-  it does for capture. A TLS setting that cannot be used (a misspelled
+  2006. A `tls=` parameter inside the source DSN (only a DSN written by
+  hand has one) wins over `ssl_mode`, as it does for capture, and when
+  `ssl_mode` demands encryption the log says once per server that the
+  DSN decides instead. `tls=preferred` there means the same as the mode
+  `preferred`: encrypted when the source offers TLS, the logged fallback
+  when it offers none. A TLS setting that cannot be used (a misspelled
   mode, a CA file that cannot be read) turns routing off for that server,
   and the **Connect a SQL client** panel says so.
 - **A lost connection to the source is not hidden.** If the upstream

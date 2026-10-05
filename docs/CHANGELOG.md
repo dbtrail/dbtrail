@@ -16,6 +16,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/time-travel-sql.md` now lists them, and says which DuckDB collation
   would close them and what it costs. Nothing in the copy's behavior changes.
 
+- **Two installations capturing the same database no longer interrupt each
+  other.** Capture connects to the source as a replica, and each replica
+  needs its own replication server id. DBTrail chose it from the source's
+  address, user and database alone, so two installations pointed at the same
+  database through the same login chose the same id, and each reconnect of
+  one dropped the other: on a MariaDB source capture on both went up and down
+  for as long as both ran (error 4052, "A slave with the same server_id is
+  already connected"). The id now also depends on the installation's own
+  index, so each installation has its own, and keeps it across restarts.
+  **On upgrade every installation moves to a new id, once.** Capture resumes
+  from DBTrail's own checkpoint, not from the id, so nothing is lost; a
+  monitor or an allow list on the source that names the old id needs the new
+  one (`bintrail doctor` with `--index-dsn` prints it; without the index it
+  cannot know it and says so). Two installations made from one machine image
+  or volume copy, index included, still share an id. An id set explicitly (`--server-id`, or
+  a server's own setting) is untouched.
 ### Added
 - **The MySQL port can be turned on from the web interface** (#2101). The port
   a `mysql` client, a BI tool or a driver connects to was off unless DBTrail
@@ -47,6 +63,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`bintrail_read_routing_decisions_total{route="refused",reason="read_only"}`).
   Without the flag nothing changes. See
   [time-travel-sql.md](time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental).
+- **A separate account for what the routed port sends to MySQL** (#2079).
+  Until now read routing forwarded every statement with the account the
+  daemon captures with, so anyone holding the port's token could do on the
+  source whatever that account can. A server can now carry a forwarding
+  account: **Forwarding user** and **Forwarding password** on the server's
+  edit form, or `route_user` / `route_password` (or a whole `route_dsn`) on
+  `POST` / `PUT /api/servers`. With one set, everything the port does on
+  that server's MySQL (forwarded statements, the `EXPLAIN` behind each
+  decision, prepared statements, `USE`) runs as that account, and the
+  capture account is never opened by the port. Give it `SELECT` only and
+  the port cannot change the source even through a stored function, which
+  the read-only mode above, a check of the statement's text, cannot
+  promise alone. The password is stored like the source's and never
+  returned; the account follows the source when its address or database
+  changes, and uses the server's TLS settings. Saving, changing or removing
+  it closes that server's open connections on the port and ends, on the
+  source, the statements they were running (a `KILL` sent with the
+  previous account), so nothing keeps running as the previous account. Removing it is its own control on the form
+  (**Remove the forwarding account**), and a save that does not touch the
+  fields never changes it. **Test connection** logs in with it and names it
+  in the answer; when the source later refuses the port's login, the
+  **Connect a SQL client** panel says which account and MySQL's error
+  instead of leaving clients with a bare error 2006. The panel names the
+  user statements run as. Servers without one forward with the source
+  account, as before. MySQL and MariaDB sources.
 
 ### Fixed
 - **SQL on the copy: a `_bin` column compares byte by byte, as on MySQL**
@@ -118,6 +159,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an unencrypted connection only under `preferred` against a source with
   no TLS, and encrypted or refused under `required`, `verify-ca` and
   `verify-identity`.
+- **Read routing: a statement interrupted in flight** (#2079). When a
+  client of the routed port left, or its statement passed the deadline,
+  while the statement was running on the source, the port closed its
+  connection to the source from a second goroutine while the first was
+  still using it: a data race inside the MySQL client library. The
+  interrupt now closes only the network socket, and the goroutine that
+  runs the statement does the rest. A source DSN written by hand with
+  `tls=preferred` now reaches a source that offers no TLS, as capture
+  does, instead of answering error 2006.
 - **Read routing: an empty string came back as NULL** (#2079). With read
   routing on (`--route-max-copy-age`), a statement sent as plain text that
   MySQL answered returned `NULL` in every cell where MySQL returns an empty

@@ -319,19 +319,30 @@ func SyntheticServerUUID(host string, port uint16) string {
 
 // DeriveServerID returns a deterministic uint32 server-id by hashing the
 // source DSN's host:user:dbname triple. The same DSN always produces the same
-// ID, so `bintrail up` resumes cleanly across restarts without the user
-// remembering what server-id they used last time.
+// ID on every machine, which is its flaw as a replication identity: two
+// installations capturing one source through the same connection derive the
+// same id and displace each other in a loop. Capture uses
+// installid.DeriveForInstall; this remains for callers with no index to tell
+// installations apart, and as the value that falls back to.
 //
 // Returns an error when the DSN cannot be parsed — callers must handle this
-// rather than silently substituting a non-deterministic value, because a
-// per-invocation ID breaks the resume-from-checkpoint contract (MySQL would
-// treat each restart as a new replica).
+// rather than silently substituting a non-deterministic value.
 func DeriveServerID(dsn string) (uint32, error) {
+	return DeriveServerIDSalted(dsn, "")
+}
+
+// DeriveServerIDSalted hashes the source triple and, when salt is not empty,
+// the salt with it. An empty salt gives DeriveServerID's value exactly.
+// internal/installid supplies the salt that tells installations apart.
+func DeriveServerIDSalted(dsn, salt string) (uint32, error) {
 	cfg, err := mysql.ParseDSN(dsn)
 	if err != nil {
 		return 0, fmt.Errorf("parse DSN: %w", err)
 	}
 	seed := fmt.Sprintf("%s|%s|%s", cfg.Addr, cfg.User, cfg.DBName)
+	if salt != "" {
+		seed += "|" + salt
+	}
 	sum := sha256.Sum256([]byte(seed))
 	raw := binary.BigEndian.Uint32(sum[:4])
 	// Map into [100000000, 4294967294]: subtract floor from uint32 range, mod

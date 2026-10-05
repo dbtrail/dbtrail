@@ -1,11 +1,13 @@
 package consoleapp
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/installid"
 )
 
 func TestSourcePGStreamConfig(t *testing.T) {
@@ -66,8 +68,59 @@ func TestDeriveSourceIdentity(t *testing.T) {
 		t.Errorf("distinct entry ids collided on %d", a)
 	}
 
-	// MySQL with 0 delegates to DeriveServerID (needs a parseable MySQL DSN).
+	// MySQL with 0 delegates to DeriveForInstall (needs a parseable MySQL DSN).
 	if _, err := m.deriveSourceIdentity(console.ServerEntry{SourceDSN: "u:p@tcp(h:3306)/"}, console.FlavorMySQL); err != nil {
 		t.Errorf("mysql identity: %v", err)
+	}
+
+	// The same source registered in two installations: the entry's own index
+	// database is what tells them apart, so the ids differ. One installation
+	// keeps its id from one start to the next.
+	entry := console.ServerEntry{SourceDSN: "u:p@tcp(h:3306)/", DSN: "root:pw@tcp(index-mysql:3306)/bintrail_idx_ab12"}
+	var asked []string
+	derive := func(indexUUID string) uint32 {
+		t.Helper()
+		restore := installid.SetIndexServerUUIDForTest(func(_ context.Context, dsn string) (string, error) {
+			asked = append(asked, dsn)
+			return indexUUID, nil
+		})
+		defer restore()
+		id, err := m.deriveSourceIdentity(entry, console.FlavorMySQL)
+		if err != nil {
+			t.Fatalf("mysql identity: %v", err)
+		}
+		return id
+	}
+	here, again, there := derive("8b0c2f3e-7a11-4d5e-9c1a-000000000001"), derive("8b0c2f3e-7a11-4d5e-9c1a-000000000001"), derive("8b0c2f3e-7a11-4d5e-9c1a-000000000002")
+	if here != again || here == there {
+		t.Errorf("ids: this installation %d then %d, another installation %d; want stable here and different there", here, again, there)
+	}
+	if len(asked) != 3 || asked[0] != entry.DSN {
+		t.Errorf("the index asked was %q; want this entry's own index DSN", asked)
+	}
+	// An id the operator chose is theirs: the index is not even asked.
+	entry.SourceServerID = 4242
+	if id := derive("8b0c2f3e-7a11-4d5e-9c1a-000000000003"); id != 4242 || len(asked) != 3 {
+		t.Errorf("explicit id: got %d after %d index reads; want 4242 and no new read", id, len(asked))
+	}
+}
+
+// TestAutoServerID_AsksThisDaemonsIndex: watch with no --server-id derives
+// from ITS source and ITS index. A call that dropped the index would give
+// every installation the same id again, and no other test would notice.
+func TestAutoServerID_AsksThisDaemonsIndex(t *testing.T) {
+	src, idx := upSourceDSN, upIndexDSN
+	t.Cleanup(func() { upSourceDSN, upIndexDSN = src, idx })
+	upSourceDSN, upIndexDSN = "u:p@tcp(h:3306)/", "root:pw@tcp(index-mysql:3306)/bintrail_index"
+	var asked string
+	t.Cleanup(installid.SetIndexServerUUIDForTest(func(_ context.Context, dsn string) (string, error) {
+		asked = dsn
+		return "8b0c2f3e-7a11-4d5e-9c1a-000000000001", nil
+	}))
+	var out strings.Builder
+	id, err := autoServerID(context.Background(), &out)
+	want, sourceOnly, _ := installid.DeriveForInstall(context.Background(), upSourceDSN, upIndexDSN)
+	if err != nil || id != want || sourceOnly != nil || asked != upIndexDSN {
+		t.Fatalf("autoServerID = %d, %v (index asked: %q); want %d from %q", id, err, asked, want, upIndexDSN)
 	}
 }

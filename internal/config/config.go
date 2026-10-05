@@ -368,6 +368,17 @@ func DSNHost(dsn string) string {
 	return cfg.Addr
 }
 
+// DSNUser returns the user name of a go-sql-driver DSN, or "" when the DSN
+// does not parse. For messages and logs that name an account; the password
+// is never returned by anything here.
+func DSNUser(dsn string) string {
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return ""
+	}
+	return cfg.User
+}
+
 // DSNHasExplicitTLS reports whether the DSN sets its own tls= parameter (any
 // value). Used to warn when a DSN's own TLS choice silently overrides a stronger
 // --ssl-mode on the same connection (#946).

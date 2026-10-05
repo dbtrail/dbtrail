@@ -87,6 +87,11 @@ type routingServerDTO struct {
 	// Unavailable, when set, is why connections to this server cannot route
 	// (the copy answers everything there), as the last connection found it.
 	Unavailable string `json:"unavailable,omitempty"`
+	// AccountRefused, when set, is what the source answered the last time a
+	// connection of the port tried to log in and was turned away: which
+	// account, its user name and MySQL's error. Clients of such a
+	// connection get error 2006. Cleared when a connection logs in.
+	AccountRefused string `json:"account_refused,omitempty"`
 }
 
 func (s *Server) routingStatus() *routingStatusDTO {
