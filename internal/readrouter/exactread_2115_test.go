@@ -311,6 +311,17 @@ func TestReadIsResult_refusals_2115(t *testing.T) {
 			tb["used_key_parts"] = []any{"created_at", "id"}
 			tb["index_condition"] = "((`r`.`orders`.`created_at` >= TIMESTAMP'2026-01-01 00:00:00') and (`r`.`orders`.`id` > 5))"
 		},
+		// A condition on the block and not on the table (MariaDB's HAVING)
+		// filters after the read, and so does any table-level condition
+		// other than the two that are read.
+		"a condition on the block":                 func(qb, _ map[string]any) { qb["having_condition"] = "t.v > 1" },
+		"a condition of another kind on the table": func(_, tb map[string]any) { tb["pushed_condition"] = "(`r`.`orders`.`note` = 'x')" },
+		// A plan with no cost is MariaDB's: its range and key reads were
+		// not measured under this rule, and never needed it.
+		"a range read in a plan with no cost": func(qb, tb map[string]any) {
+			delete(qb, "cost_info")
+			delete(tb, "cost_info")
+		},
 		// A column held against a text and against a number: one of the two
 		// is not its type, and is no bound of the index.
 		"a text and a number for one column": func(_, tb map[string]any) {
@@ -402,5 +413,79 @@ func TestResultRows_2115(t *testing.T) {
 		if got := resultRows(tc.stmt, tc.p); got != tc.want {
 			t.Errorf("resultRows(%q) = %d, want %d", tc.stmt, got, tc.want)
 		}
+	}
+}
+
+// MariaDB 11.4.13's own plan for `SELECT * FROM t HAVING v > 1 LIMIT 5`:
+// one table read whole with no condition on it, and the filter on the
+// block. Not a plan that reads only its result.
+func TestReadIsResult_mariaDBHaving_2115(t *testing.T) {
+	const plan = `{"query_block":{"select_id":1,"cost":0.0113438,"having_condition":"h2115.t.v > 1","nested_loop":[{"table":{"table_name":"t","access_type":"ALL","loops":1,"rows":3,"cost":0.0113438,"filtered":100}}]}}`
+	p, err := ParsePlan([]byte(plan))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ReadIsResult {
+		t.Error("a plan with a having_condition is said to read only its result")
+	}
+	// The same plan without it is one: the table read whole.
+	p, err = ParsePlan([]byte(strings.Replace(plan, `"having_condition":"h2115.t.v > 1",`, "", 1)))
+	if err != nil || !p.ReadIsResult {
+		t.Errorf("the table read whole with no condition: reads only its result %v, %v; want true", p.ReadIsResult, err)
+	}
+}
+
+// A function call the router does not know may be an aggregate: one row out
+// of the whole table, which the plan does not show (an aggregate with no
+// GROUP BY is one table read like any other). Only the calls on a short
+// list of functions that return one value per row keep a statement under
+// the two rules.
+func TestCallsOnlyRowFunctions_2115(t *testing.T) {
+	for stmt, want := range map[string]bool{
+		"SELECT * FROM orders WHERE id > 5 LIMIT 500":                       true,
+		"SELECT id, upper(note) FROM orders LIMIT 500":                      true,
+		"SELECT concat(customer_id) FROM orders LIMIT 10":                   true,
+		"SELECT CONCAT (a, b), coalesce(c, 0) FROM orders LIMIT 10":         true,
+		"SELECT * FROM orders WHERE id IN (1, 2) AND (a = 1) LIMIT 10":      true,
+		"SELECT * FROM orders FORCE INDEX (k_created) WHERE a > 1 LIMIT 10": true,
+		"SELECT * FROM orders USE INDEX (k) IGNORE KEY (j) WHERE a > 1":     true,
+		"SELECT 'myagg(x)' FROM orders /* myagg(x) */ LIMIT 10":             true,
+		"SELECT `myagg`, a FROM orders LIMIT 10":                            true,
+		"SELECT myagg(amount) FROM orders LIMIT 1":                          false,
+		"SELECT myagg (amount) FROM orders LIMIT 1":                         false,
+		"SELECT st_collect(g) FROM orders LIMIT 1":                          false,
+		"SELECT db.myagg(amount) FROM orders LIMIT 1":                       false,
+		"SELECT upper(myagg(amount)) FROM orders LIMIT 1":                   false,
+		"SELECT id FROM orders WHERE a > 1 ORDER BY somefn(a) LIMIT 1":      false,
+		"SELECT MYAGG(amount) FROM orders":                                  false,
+		"SELECT `db`.`myagg`(amount) FROM orders":                           false,
+	} {
+		if got := callsOnlyRowFunctions(Scrub(stmt)); got != want {
+			t.Errorf("callsOnlyRowFunctions(%q) = %v, want %v", stmt, got, want)
+		}
+	}
+	// Through the policy, on the real plan of a table read whole (p18).
+	raw, err := os.ReadFile(filepath.Join("testdata", "limits", "mysql84", "p18_select_expr_no_where.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := ParsePlan(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol := DefaultPolicy()
+	if d := pol.DecideStatement("SELECT id, upper(note) FROM orders LIMIT 500", p); d.ToCopy || d.Rule != RuleBoundedLimit {
+		t.Errorf("a row function in the select list: %+v, want the source by bounded_limit", d)
+	}
+	for _, stmt := range []string{"SELECT myagg(amount) FROM orders LIMIT 1", "SELECT st_collect(note) FROM orders LIMIT 1"} {
+		if d := pol.DecideStatement(stmt, p); !d.ToCopy || d.ResultRows != 0 {
+			t.Errorf("%s: %+v, want the copy tried as before, with no estimate of the result", stmt, d)
+		}
+	}
+	if d := pol.DecideStatement("SELECT myagg(amount) FROM orders", p); !d.ToCopy || d.ResultRows != 0 {
+		t.Errorf("an unknown function with no LIMIT: %+v, want no estimate of the result", d)
+	}
+	if d := pol.DecideStatement("SELECT id, upper(note) FROM orders", p); !d.ToCopy || d.ResultRows < 2000000 {
+		t.Errorf("a row function with no LIMIT: %+v, want the table's rows as the estimate", d)
 	}
 }

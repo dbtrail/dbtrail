@@ -51,10 +51,16 @@ import (
 //     read for 500).
 //
 // The reader takes MySQL's spelling of a condition (every name in
-// backticks). MariaDB quotes a name only when it has to, so its range reads
-// are as good as never recognised, and do not need to be: with no cost in
-// its plans, a range read was never the copy's. On MariaDB the property is
-// seen for a table or an index read whole.
+// backticks), and a read by key or by range is recognised in a MySQL plan
+// only: one that carries a cost. MariaDB quotes a name only when it has to,
+// so some of its conditions would parse and most would not; its range reads
+// were not measured under this rule and do not need it, since with no cost
+// in its plans a range read was never the copy's. On MariaDB the property
+// is seen for a table or an index read whole.
+//
+// A condition anywhere else than the two places read (MariaDB's
+// having_condition on the block, any other *_condition on the table) is a
+// filter applied after the read, and refuses.
 //
 // One more refusal is reasoned, not measured: a column compared with a text
 // in one place and with a number in another (`s > 'a' AND s = 5`). One of
@@ -92,6 +98,9 @@ func readIsResult(qb map[string]any, p *Plan) {
 			return
 		}
 	case "range", "ref":
+		if p.CostUnknown {
+			return
+		}
 		if !keyServes(table, index, attached) {
 			return
 		}
@@ -118,6 +127,10 @@ func loneTable(v any, table *map[string]any) bool {
 				if key == "using_temporary_table" && c {
 					return false
 				}
+			case string:
+				if strings.HasSuffix(key, "_condition") {
+					return false
+				}
 			case map[string]any, []any:
 				switch {
 				case planNotes[key]:
@@ -134,6 +147,10 @@ func loneTable(v any, table *map[string]any) bool {
 						switch on := tc.(type) {
 						case map[string]any, []any:
 							if !planNotes[k] {
+								return false
+							}
+						case string:
+							if strings.HasSuffix(k, "_condition") && k != "index_condition" && k != "attached_condition" {
 								return false
 							}
 						case bool:
@@ -360,6 +377,40 @@ func readCondition(cond string) (preds []condPred, ok bool) {
 // "LIMIT offset, n", "LIMIT n OFFSET offset".
 var resultLimit = regexp.MustCompile(`(?i)\blimit\s+(\d+)(?:\s*,\s*(\d+)|\s+offset\s+(\d+))?\s*;?\s*$`)
 
+// call matches what is written before an opening parenthesis: a name, bare
+// or in backticks.
+var call = regexp.MustCompile("(`[^`]*`|[A-Za-z_$][\\w$]*)\\s*\\(")
+
+// rowFunctions are the words that may stand before a parenthesis in a
+// statement the two rules above take: the keywords that open a list or a
+// group, and functions that return one value for each row. Short on
+// purpose: the list is not there to know every function, only to make sure
+// that a call nobody vouched for is not taken for one of these.
+var rowFunctions = map[string]bool{
+	"in": true, "and": true, "or": true, "not": true, "where": true, "on": true, "index": true, "key": true,
+	"concat": true, "concat_ws": true, "upper": true, "lower": true, "ucase": true, "lcase": true,
+	"coalesce": true, "ifnull": true, "nullif": true, "if": true,
+	"length": true, "char_length": true, "substr": true, "substring": true, "left": true, "right": true,
+	"trim": true, "ltrim": true, "rtrim": true, "round": true, "abs": true, "floor": true, "ceil": true, "ceiling": true,
+	"cast": true, "date": true, "year": true, "month": true, "hex": true,
+}
+
+// callsOnlyRowFunctions reports whether every function the scrubbed
+// statement calls is one of rowFunctions. An aggregate with no GROUP BY
+// reads one table like any other statement and returns one row: the plan
+// does not show it, so the text has to, and unboundedWork only knows the
+// aggregates it lists. A user-defined aggregate, or one added by a later
+// server version, is a call this list does not hold either: the statement
+// is then decided as it was before these rules.
+func callsOnlyRowFunctions(blanked string) bool {
+	for _, m := range call.FindAllStringSubmatch(blanked, -1) {
+		if !rowFunctions[strings.ToLower(m[1])] {
+			return false
+		}
+	}
+	return true
+}
+
 // fetchFirst is the other spelling of a LIMIT: FETCH FIRST (or NEXT) n ROWS
 // ONLY. MariaDB takes it and so does the copy.
 var fetchFirst = regexp.MustCompile(`(?i)\bfetch\s+(first|next)\b`)
@@ -376,7 +427,7 @@ func resultRows(stmt string, p Plan) int64 {
 		return 0
 	}
 	blanked, _, _, _ := scrub(stmt)
-	if unboundedWork.MatchString(blanked) || fetchFirst.MatchString(blanked) {
+	if unboundedWork.MatchString(blanked) || fetchFirst.MatchString(blanked) || !callsOnlyRowFunctions(blanked) {
 		return 0
 	}
 	est := uint64(max(p.ResultRows, 0))

@@ -599,7 +599,8 @@ func (pol Policy) Prejudge(stmt string) (d Decision, ok bool) {
 // bounded by the index.
 //
 // Two (#2115): the plan reads only its result (Plan.ReadIsResult), however
-// many rows its range holds. A range of 246,857 rows with LIMIT 500 is
+// many rows its range holds, and the statement calls no function that could
+// be an aggregate (callsOnlyRowFunctions). A range of 246,857 rows with LIMIT 500 is
 // estimated whole (rows_examined_per_scan: 599,380, cost 544,453) and read
 // for 500: every row the index hands over is returned, so the read stops
 // when the LIMIT is met. Measured at 24 ms on MySQL 8.4 against 65 ms on
@@ -617,12 +618,12 @@ func (pol Policy) Prejudge(stmt string) (d Decision, ok bool) {
 // A statement sent to the copy carries the plan's estimate of its result
 // (Decision.ResultRows), for the caller to hold against the copy's row cap.
 func (pol Policy) DecideStatement(stmt string, p Plan) Decision {
-	n, bounded := limitBounded(stmt)
+	n, blanked, bounded := limitBoundedScrubbed(stmt)
 	if bounded && !p.Filesort && p.Message == "" {
 		if !p.ScanFilter && p.MaxScanRows <= limitBoundRows {
 			return Decision{Reason: fmt.Sprintf("LIMIT %d served without a sort or an unindexed filter: at most %d rows per table scan", n, p.MaxScanRows), Rule: RuleBoundedLimit}
 		}
-		if p.ReadIsResult {
+		if p.ReadIsResult && callsOnlyRowFunctions(blanked) {
 			return Decision{Reason: fmt.Sprintf("LIMIT %d over one table with no sort and no filter left to check row by row: the read stops once it has %d rows, of about %s behind it", n, n, groupDigits(p.ResultRows)), Rule: RuleBoundedLimit}
 		}
 	}

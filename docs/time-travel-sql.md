@@ -396,7 +396,9 @@ The decision, in order, for every statement:
    `>=`, `BETWEEN`, `IN`), joined by `AND`, on a column of the index the
    plan uses, with a range on the last of those columns only. A second
    condition on any other column, a function, arithmetic, `OR`, `<>`, an
-   index on a prefix of a text column, a join, a subquery, a view with a
+   index on a prefix of a text column, a call to a function the router
+   does not know returns one value per row (it could be an aggregate, which
+   reads everything for one row), a join, a subquery, a view with a
    filter of its own and a partitioned table are not read, and are decided
    as before: with a condition no index serves that matches nothing, the
    same statement reads the whole range (400 ms). Then a plan whose `query_cost` is at least
