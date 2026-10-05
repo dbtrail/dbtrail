@@ -241,6 +241,10 @@ type Config struct {
 	// that did not opt in; the page then reports the port as off. Display
 	// only: the console never opens or closes the port itself.
 	FlashbackListen string
+	// FlashbackPath is the file the web interface saves the MySQL port's
+	// setting and password in (#2101). Empty = this console keeps none, and
+	// the port can only be set where DBTrail is started.
+	FlashbackPath string
 	// ReadRouting is the read-routing policy the time-travel port runs with
 	// (#2038, watch --route-max-copy-age and the two threshold flags),
 	// reported by GET /api/flashback beside the port's address so the
@@ -459,9 +463,10 @@ type Server struct {
 	// data-profile enforcement (#1075). Inert in OSS (no session ever carries a
 	// profile); populated lazily on the first profiled request.
 	sessionProfiles *profileRuleCache
-	// flashbackListen: the embedded time-travel port's bind address
-	// (Config.FlashbackListen); empty = the port is off (or this is serve).
-	flashbackListen string
+	// flashback: the embedded MySQL-protocol port's state: where it listens
+	// (Config.FlashbackListen at startup, or the setting saved from the web
+	// interface) and the password that setting carries.
+	flashback flashbackState
 	// readRouting is the port's routing policy (Config.ReadRouting), and
 	// routing the per-server tally of its decisions since start — both for
 	// GET /api/flashback.
@@ -648,7 +653,7 @@ func New(cfg Config) (*Server, error) {
 		tlsConf:                 tlsConf,
 		mcpTokenPath:            mcpTokenPath,
 		sessionProfiles:         newProfileRuleCache(),
-		flashbackListen:         cfg.FlashbackListen,
+		flashback:               flashbackState{startup: cfg.FlashbackListen != "", listen: cfg.FlashbackListen, path: cfg.FlashbackPath},
 		readRouting:             cfg.ReadRouting,
 		routing:                 newRoutingStats(time.Now()),
 		archiveFetcher:          parquetquery.Fetch,
@@ -878,6 +883,8 @@ func (s *Server) buildHandler() http.Handler {
 	// on, so the Connect page can show a ready-to-copy mysql line. Read-only;
 	// the token that authenticates the port is never serialized.
 	api.HandleFunc("GET /api/flashback", s.handleFlashbackGet)
+	api.HandleFunc("PUT /api/flashback", s.handleFlashbackPut)
+	api.HandleFunc("POST /api/flashback/password", s.handleFlashbackPassword)
 
 	root := http.NewServeMux()
 	root.HandleFunc("GET /api/healthz", s.handleHealthz) // unauthenticated liveness
