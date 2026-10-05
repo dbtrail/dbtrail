@@ -342,6 +342,16 @@ type Plan struct {
 	// RowsReadUnknown is why a plan with no cost has no RowsRead: a shape
 	// the estimate does not know. The scan rules alone decide that plan.
 	RowsReadUnknown string
+	// ReadIsResult is true when the plan is one table, read alone, where
+	// every row the access path reads is a row of the result: the table or
+	// an index read whole with no condition, or an index read by key or by
+	// range with nothing left to check row by row (exactread.go). With no
+	// sort, a LIMIT then stops the read once it has its rows.
+	ReadIsResult bool
+	// ResultRows is the plan's row estimate for that table: an estimate of
+	// the rows the statement returns, before any LIMIT, aggregate or
+	// DISTINCT. Only meaningful with ReadIsResult.
+	ResultRows int64
 }
 
 // ParsePlan reads the two things the decision needs from EXPLAIN FORMAT=JSON.
@@ -384,6 +394,9 @@ func ParsePlan(explainJSON []byte) (Plan, error) {
 	p.ScanFilter = p.scans && p.conditions
 	if p.CostUnknown && p.Message == "" {
 		estimateRowsRead(qb, &p)
+	}
+	if p.Message == "" {
+		readIsResult(qb, &p)
 	}
 	return p, nil
 }
@@ -549,6 +562,14 @@ type Decision struct {
 	// trail and the debug log.
 	Reason string
 	Rule   Rule
+	// ResultRows, on a statement the plan sends to the copy, is the plan's
+	// estimate of the rows the statement returns (Plan.ResultRows cut by the
+	// statement's own LIMIT), or 0 when the plan has no estimate to trust: a
+	// join, a filter checked row by row, an aggregate, GROUP BY or DISTINCT,
+	// a LIMIT given as a placeholder. The copy returns no result over its
+	// row cap, which the caller knows and this package does not: a statement
+	// whose ResultRows is over the cap is not worth trying there (#2115).
+	ResultRows int64
 }
 
 // Prejudge decides the one statement shape that needs no plan: a select
@@ -569,25 +590,47 @@ func (pol Policy) Prejudge(stmt string) (d Decision, ok bool) {
 
 // DecideStatement is Decide with the statement text in hand. A
 // LIMIT-bounded statement (limitBounded) whose plan sorts nothing
-// (Filesort), filters nothing while scanning (ScanFilter) and examines at
-// most limitBoundRows rows per table scan is MySQL's, whatever the plan's
-// cost says: the cost ignores LIMIT, the row estimate does not, so an ORDER
-// BY served from an index reads n rows (rows_examined_per_scan: n) and a
-// filter an index serves (ref access) is bounded by the index. A filter no
-// index serves, on the scanned table or on one joined to it, falls through
-// to Decide, as before: under a full scan its estimate is the table; under
-// an index-served order its estimate is only a guess from the filter's
-// assumed selectivity, and a rare value walks the whole index.
+// (Filesort) is MySQL's, whatever the plan's cost says, in two cases.
+//
+// One: the plan filters nothing while scanning (ScanFilter) and examines at
+// most limitBoundRows rows per table scan. The cost ignores LIMIT, the row
+// estimate does not, so an ORDER BY served from an index reads n rows
+// (rows_examined_per_scan: n) and a filter an index serves (ref access) is
+// bounded by the index.
+//
+// Two (#2115): the plan reads only its result (Plan.ReadIsResult), however
+// many rows its range holds. A range of 246,857 rows with LIMIT 500 is
+// estimated whole (rows_examined_per_scan: 599,380, cost 544,453) and read
+// for 500: every row the index hands over is returned, so the read stops
+// when the LIMIT is met. Measured at 24 ms on MySQL 8.4 against 65 ms on
+// the copy, and 1.6 ms when an ORDER BY follows the same index.
+//
+// A filter no index serves, on the scanned table or on one joined to it,
+// falls through to Decide, as before: under a full scan its estimate is the
+// table; under an index-served order its estimate is only a guess from the
+// filter's assumed selectivity, and a rare value walks the whole index.
 //
 // The rows a plan with no cost reads across its joins (Plan.RowsRead) are
 // left out when the statement's LIMIT can end the join early
 // (limitEndsJoin); the scan rules then decide alone.
+//
+// A statement sent to the copy carries the plan's estimate of its result
+// (Decision.ResultRows), for the caller to hold against the copy's row cap.
 func (pol Policy) DecideStatement(stmt string, p Plan) Decision {
 	n, bounded := limitBounded(stmt)
-	if bounded && !p.Filesort && !p.ScanFilter && p.Message == "" && p.MaxScanRows <= limitBoundRows {
-		return Decision{Reason: fmt.Sprintf("LIMIT %d served without a sort or an unindexed filter: at most %d rows per table scan", n, p.MaxScanRows), Rule: RuleBoundedLimit}
+	if bounded && !p.Filesort && p.Message == "" {
+		if !p.ScanFilter && p.MaxScanRows <= limitBoundRows {
+			return Decision{Reason: fmt.Sprintf("LIMIT %d served without a sort or an unindexed filter: at most %d rows per table scan", n, p.MaxScanRows), Rule: RuleBoundedLimit}
+		}
+		if p.ReadIsResult {
+			return Decision{Reason: fmt.Sprintf("LIMIT %d over one table with no sort and no filter left to check row by row: the read stops once it has %d rows, of about %s behind it", n, n, groupDigits(p.ResultRows)), Rule: RuleBoundedLimit}
+		}
 	}
-	return pol.decide(p, pol.limitEndsJoin(stmt, p))
+	d := pol.decide(p, pol.limitEndsJoin(stmt, p))
+	if d.ToCopy {
+		d.ResultRows = resultRows(stmt, p)
+	}
+	return d
 }
 
 // joinLimit is topLimit accepting a placeholder for either number: the

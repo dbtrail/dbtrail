@@ -1,0 +1,1 @@
+{"query_block":{"select_id":1,"cost_info":{"query_cost":"318424.24"},"table":{"table_name":"orders","access_type":"ALL","rows_examined_per_scan":3009617,"rows_produced_per_join":3009617,"filtered":"100.00","cost_info":{"read_cost":"17462.54","eval_cost":"300961.70","prefix_cost":"318424.24","data_read_per_join":"987M"},"used_columns":["id","note"]}}}

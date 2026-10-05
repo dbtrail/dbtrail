@@ -1,0 +1,1 @@
+{"query_block":{"select_id":1,"cost":331.413158,"nested_loop":[{"table":{"table_name":"orders","access_type":"ALL","loops":1,"rows":1998694,"cost":331.413158,"filtered":100,"attached_condition":"orders.amount > 999.5"}}]}}

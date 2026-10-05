@@ -1,0 +1,1 @@
+{"query_block":{"select_id":1,"nested_loop":[{"table":{"table_name":"orders","access_type":"ALL","possible_keys":["k_status"],"rows":1976287,"filtered":22.2342205,"attached_condition":"orders.`status` = 'pending'"}}]}}

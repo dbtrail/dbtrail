@@ -1,0 +1,1 @@
+{"query_block":{"select_id":1,"nested_loop":[{"table":{"table_name":"orders","access_type":"range","possible_keys":["k_created","k_cust_created"],"key":"k_cust_created","key_length":"9","used_key_parts":["customer_id","created_at"],"rows":52,"filtered":100,"index_condition":"orders.customer_id in (1,2,3) and orders.created_at >= '2025-01-01'"}}]}}

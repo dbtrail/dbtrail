@@ -1,0 +1,79 @@
+a01_range_limit500	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' LIMIT 500
+a02_range_between_limit500	SELECT * FROM orders WHERE created_at BETWEEN '2026-01-01' AND '2026-03-31' LIMIT 500
+a03_range_order_indexed_limit500	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' ORDER BY created_at LIMIT 500
+a04_range_order_indexed_desc_limit500	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' ORDER BY created_at DESC LIMIT 500
+a05_range_order_unindexed_limit500	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' ORDER BY amount DESC LIMIT 500
+a06_range_residual_absent_limit500	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' AND note = 'nope' LIMIT 500
+a07_range_residual_func_limit500	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' AND length(note) > 100 LIMIT 500
+a08_range_residual_arith_limit500	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' AND amount + 0 > 99999 LIMIT 500
+a09_range_covering_limit500	SELECT id, created_at FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' LIMIT 500
+a10_pk_range_limit500	SELECT * FROM orders WHERE id > 1000000 LIMIT 500
+a11_pk_range_residual_limit500	SELECT * FROM orders WHERE id > 1000000 AND note = 'nope' LIMIT 500
+a12_ref_status_limit500	SELECT * FROM orders WHERE status = 'paid' LIMIT 500
+a13_ref_status_order_pk_limit500	SELECT * FROM orders WHERE status = 'paid' ORDER BY id LIMIT 500
+a14_wide_range_limit500	SELECT * FROM orders WHERE created_at >= '2025-01-01' LIMIT 500
+a15_tail_range_order_pk_limit500	SELECT * FROM orders WHERE created_at >= '2026-06-01' ORDER BY id LIMIT 500
+a16_range_limit500_offset100000	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' LIMIT 500 OFFSET 100000
+a17_group_by_limit500	SELECT customer_id, count(*) FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' GROUP BY customer_id LIMIT 500
+a18_distinct_limit500	SELECT DISTINCT customer_id FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' LIMIT 500
+a19_aggregate_limit500	SELECT count(*), sum(amount) FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' LIMIT 500
+a20_limit_in_derived	SELECT count(*) FROM (SELECT id FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' LIMIT 500) t
+a21_union_limit500	(SELECT id FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01') UNION ALL (SELECT id FROM orders WHERE status = 'refunded') LIMIT 500
+a22_join_limit500	SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.created_at >= '2026-01-01' AND o.created_at < '2026-04-01' LIMIT 500
+a23_range_limit0	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' LIMIT 0
+a24_range_limit5000000	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' LIMIT 5000000
+a25_composite_all_key_parts_limit500	SELECT * FROM orders WHERE customer_id IN (1,2,3) AND created_at >= '2025-01-01' LIMIT 500
+a26_composite_residual_key_part_limit500	SELECT * FROM orders WHERE customer_id > 50000 AND created_at >= '2026-09-30' LIMIT 500
+a27_range_or_limit500	SELECT * FROM orders WHERE (created_at >= '2026-01-01' AND created_at < '2026-04-01') OR created_at < '2024-10-02' LIMIT 500
+a28_range_col_eq_col_limit500	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' AND id = customer_id LIMIT 500
+a29_order_indexed_no_where_limit500	SELECT * FROM orders ORDER BY created_at DESC LIMIT 500
+a30_range_estimated_filter_limit500	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' AND status <> 'refunded' LIMIT 500
+b01_pk_range_10k	SELECT id FROM orders WHERE id > 1990000
+b02_range_3m	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01'
+b03_full_table	SELECT * FROM orders
+b04_full_table_order_unindexed	SELECT id, amount FROM orders ORDER BY amount DESC
+b05_unindexed_eq_rare	SELECT * FROM orders WHERE note = 'rare'
+b06_unindexed_eq_2000	SELECT * FROM orders WHERE note = 'n5'
+b07_ref_refunded	SELECT * FROM orders WHERE status = 'refunded'
+b08_ref_paid	SELECT * FROM orders WHERE status = 'paid'
+b09_ref_pending	SELECT * FROM orders WHERE status = 'pending'
+b10_aggregate_range	SELECT count(*), sum(amount) FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01'
+b11_group_by_status	SELECT status, count(*) FROM orders GROUP BY status
+b12_group_by_customer	SELECT customer_id, count(*) FROM orders GROUP BY customer_id
+b13_join_country	SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.country_code = 'JP'
+b14_join_country_rare	SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.country_code = 'JP' AND o.note = 'rare'
+b15_range_limit5000	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' LIMIT 5000
+b16_range_estimated_filter	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' AND status <> 'refunded'
+b17_customers_ref_us	SELECT * FROM customers WHERE country_code = 'US'
+b18_range_order_unindexed	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' ORDER BY amount DESC
+b19_point	SELECT * FROM orders WHERE customer_id = 5
+b20_range_900	SELECT * FROM orders WHERE id > 1999100
+b21_range_1500	SELECT * FROM orders WHERE id > 1998500
+b22_unindexed_range	SELECT * FROM orders WHERE amount > 999.5
+p01_composite_between_then_eq	SELECT * FROM orders FORCE INDEX (k_cust_created) WHERE customer_id BETWEEN 100 AND 60000 AND created_at = '2026-01-01 00:00:10' LIMIT 500
+p02_composite_range_then_range	SELECT * FROM orders FORCE INDEX (k_cust_created) WHERE customer_id >= 100 AND customer_id <= 60000 AND created_at >= '2026-09-29' LIMIT 500
+p03_composite_eq_then_range	SELECT * FROM orders WHERE customer_id = 77 AND created_at >= '2025-01-01' LIMIT 500
+p04_prefix_ref	SELECT * FROM orders WHERE note = 'n5' LIMIT 500
+p05_prefix_ref_absent	SELECT * FROM orders FORCE INDEX (k_note2) WHERE note = 'n5zz' LIMIT 500
+p06_prefix_range_in	SELECT * FROM orders FORCE INDEX (k_note2) WHERE note IN ('n5zz','n6zz') LIMIT 500
+p07_string_in	SELECT * FROM orders WHERE status IN ('pending','refunded') LIMIT 500
+p08_string_range	SELECT * FROM orders WHERE status > 'pb' LIMIT 500
+p09_ref_datetime	SELECT * FROM orders WHERE created_at = '2026-01-01 00:00:10' LIMIT 500
+p10_ref_plus_pk_range	SELECT * FROM orders WHERE status = 'paid' AND id > 1000000 LIMIT 500
+p11_pk_in	SELECT * FROM orders WHERE id IN (5, 6, 7000) LIMIT 500
+p12_pk_between	SELECT * FROM orders WHERE id BETWEEN 5 AND 500000 LIMIT 500
+p13_pk_const	SELECT * FROM orders WHERE id = 5 LIMIT 500
+p14_ne	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at <> '2026-01-01 00:00:10' LIMIT 500
+p15_is_null	SELECT * FROM orders WHERE note IS NULL LIMIT 500
+p16_range_order_other_index	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' ORDER BY customer_id LIMIT 500
+p17_ref_order_unindexed	SELECT * FROM orders WHERE status = 'pending' ORDER BY amount LIMIT 500
+p18_select_expr_no_where	SELECT id, upper(note) FROM orders LIMIT 500
+p19_sql_buffer_result	SELECT SQL_BUFFER_RESULT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' LIMIT 500
+p20_window	SELECT id, row_number() OVER (ORDER BY id) FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' LIMIT 500
+p21_scalar_subquery_select	SELECT id, (SELECT name FROM customers c WHERE c.id = o.customer_id) FROM orders o WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' LIMIT 500
+p22_in_subquery	SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' AND customer_id IN (SELECT id FROM customers WHERE country_code = 'JP') LIMIT 500
+p23_range_date_literal	SELECT * FROM orders WHERE created_at >= DATE'2026-01-01' AND created_at < '2026-04-01 00:00:00.5' LIMIT 500
+p24_negative	SELECT * FROM orders WHERE id > -5 AND id < 1.5e6 LIMIT 500
+p25_const_on_left	SELECT * FROM orders WHERE '2026-01-01' <= created_at AND created_at < '2026-04-01' LIMIT 500
+p26_view	SELECT * FROM v_orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' LIMIT 500
+p27_partitioned	SELECT * FROM porders WHERE id > 1000 LIMIT 500

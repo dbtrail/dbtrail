@@ -1,0 +1,1 @@
+{"query_block":{"select_id":1,"nested_loop":[{"table":{"table_name":"orders","access_type":"range","possible_keys":["k_status"],"key":"k_status","key_length":"66","used_key_parts":["status"],"rows":988143,"filtered":100,"index_condition":"orders.`status` = 'paid'"}}]}}
