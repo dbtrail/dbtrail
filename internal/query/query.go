@@ -834,7 +834,7 @@ func buildQuery(opts Options) (string, []any) {
 			// #1689): the function form leaves the range bounded above only,
 			// this form bounds both. No test pins that half; the integration
 			// test says why it declines to.
-			floor := since.Truncate(time.Hour).Add(-time.Hour)
+			floor := CoarseSinceFloor(since)
 			where = append(where, "event_timestamp >= ?")
 			args = append(args, floor)
 			// Still deliberately NOT the exact Since instant — see SincePos.

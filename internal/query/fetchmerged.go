@@ -131,6 +131,14 @@ type FetchMergedOptions struct {
 	// is a discovery failure with the same semantics as a failed
 	// archive_state read. nil = ResolveArchiveSources.
 	SourceResolver SourceResolver
+
+	// PartitionHeads is the picture of the live index a fetch anchored on a
+	// binlog position (Opts.SincePos) reads its time floor from (#2138): see
+	// PartitionHeads. nil = loaded by the fetch itself, one primary-key seek
+	// per partition. A caller that runs many fetches under ONE upper bound (a
+	// refresh folds every table up to the same cut) loads it once, AFTER that
+	// bound is fixed, and passes it to each.
+	PartitionHeads *PartitionHeads
 }
 
 // SourceResolver names the archive sources a merged read will open.
@@ -232,7 +240,7 @@ func FetchMergedFull(
 	if err := o.validate(); err != nil {
 		return nil, nil, nil, 0, false, err
 	}
-	src, err := resolveMergeSources(ctx, db, o)
+	src, err := resolveMergeSources(ctx, db, &o)
 	if err != nil {
 		return nil, src.plan, nil, 0, false, err
 	}
@@ -692,7 +700,7 @@ func FetchMergedStream(
 		batchSize = DefaultStreamBatchSize
 	}
 
-	src, err := resolveMergeSources(ctx, db, o)
+	src, err := resolveMergeSources(ctx, db, &o)
 	if err != nil {
 		return src.plan, err
 	}
@@ -860,15 +868,39 @@ func VerifyMergedCoverage(ctx context.Context, db *sql.DB, o FetchMergedOptions)
 	if err := o.validate(); err != nil {
 		return err
 	}
-	_, err := resolveMergeSources(ctx, db, o)
+	_, err := resolveMergeSources(ctx, db, &o)
 	return err
 }
 
 // resolveMergeSources discovers archive sources, runs the coverage planner and
 // enforces gaps according to o.AllowGaps. The returned plan is non-nil whenever
 // the planner ran, INCLUDING on the error path, so callers can surface it.
-func resolveMergeSources(ctx context.Context, db *sql.DB, o FetchMergedOptions) (mergeSources, error) {
+//
+// It also settles the window's time floor, which is why o is a pointer: a
+// fetch anchored on a binlog position starts from where the index shows an
+// event after that position can be, not from the caller's own clock (#2138,
+// see PartitionHeads). The planner below, every page and every archive read
+// then work from that one floor. A failure to settle it is returned whatever
+// AllowGaps says: going on with the caller's time is how a refresh came to
+// publish a snapshot without the changes capture indexed late.
+func resolveMergeSources(ctx context.Context, db *sql.DB, o *FetchMergedOptions) (mergeSources, error) {
 	var src mergeSources
+
+	if o.Opts.Since != nil && o.Opts.SincePos != nil {
+		heads := o.PartitionHeads
+		if heads == nil {
+			var err error
+			if heads, err = LoadPartitionHeads(ctx, db); err != nil {
+				return src, fmt.Errorf("cannot tell how far back the changes after %s:%d reach: %w",
+					o.Opts.SincePos.File, o.Opts.SincePos.Pos, err)
+			}
+		}
+		since, err := heads.SinceFor(ctx, db, o.Opts)
+		if err != nil {
+			return src, err
+		}
+		o.Opts.Since = since
+	}
 
 	if !o.NoArchive {
 		resolve := o.SourceResolver

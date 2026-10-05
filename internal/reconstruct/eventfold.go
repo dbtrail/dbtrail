@@ -211,6 +211,10 @@ type foldConfig struct {
 	// binlog-only fallback keeps the refusal.
 	SpillOverBudget bool
 
+	// Heads is the run's query.PartitionHeads, passed to the fetch so every
+	// table reads the same picture of the index; nil has the fetch load one.
+	Heads *query.PartitionHeads
+
 	// RemediationHint is the advice attached to that warning; empty uses the
 	// attended-CLI wording. See FullTableConfig.RemediationHint.
 	RemediationHint string
@@ -394,6 +398,7 @@ func foldFetchOptions(fc foldConfig) query.FetchMergedOptions {
 		NoArchive:      false,
 		AllowGaps:      fc.AllowGaps,
 		ArchiveFetcher: fc.ArchiveFetcher,
+		PartitionHeads: fc.Heads,
 	}
 }
 
