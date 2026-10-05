@@ -607,9 +607,15 @@ func TableDeltaStateSQL(base, posdelGlob, upsertsGlob, basePath, replace string)
 // the window failed with an out-of-memory error at a 4 GB limit and PASSED at
 // 1 GB, so it is not a matter of size; this join passed at every limit tried
 // from 500 MB to 8 GB. With COLLATE C on its keys the same join failed at
-// every limit, which is why the keys are compared as BLOBs instead: bytes,
-// whatever the session's default collation (the reason the window carries
-// COLLATE C), and what the join needs to stay out of core.
+// every limit, which is why the keys are compared as their UTF-8 bytes
+// instead: bytes, whatever the session's default collation (the reason the
+// window carries COLLATE C), and what the join needs to stay out of core.
+//
+// encode(), NOT a cast to BLOB. The cast parses its input: it reads `\x41`
+// as the byte for "A", refuses any other backslash and refuses every byte
+// outside ASCII, and pk_values escapes a pipe as `\|` and a backslash as
+// `\\`. With the cast, a table whose key holds either, or an accent, or
+// that lives under a path outside ASCII, could not be merged at all.
 //
 // It relies on a key appearing at most once in one file, which every writer
 // guarantees (a change map, disjoint spill groups, this function's own
@@ -621,8 +627,8 @@ func TableDeltaStateSQL(base, posdelGlob, upsertsGlob, basePath, replace string)
 func TableDeltaLatestSQL(delta string) string {
 	pk := `"` + TableDeltaPKColumn + `"`
 	return fmt.Sprintf("SELECT bintrail_u.* EXCLUDE (filename) FROM (%[1]s) AS bintrail_u "+
-		"JOIN (SELECT %[2]s::BLOB AS bintrail_k, max(filename::BLOB) AS bintrail_f FROM (%[1]s) GROUP BY 1) AS bintrail_m "+
-		"ON bintrail_u.%[2]s::BLOB = bintrail_m.bintrail_k AND bintrail_u.filename::BLOB = bintrail_m.bintrail_f",
+		"JOIN (SELECT encode(%[2]s) AS bintrail_k, max(encode(filename)) AS bintrail_f FROM (%[1]s) GROUP BY 1) AS bintrail_m "+
+		"ON encode(bintrail_u.%[2]s) = bintrail_m.bintrail_k AND encode(bintrail_u.filename) = bintrail_m.bintrail_f",
 		delta, pk)
 }
 
