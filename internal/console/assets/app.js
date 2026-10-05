@@ -13717,9 +13717,38 @@ function routingBlock(fb, cur) {
     // one a reader must not have to infer from a missing line.
     wrap.append(r.read_only
       ? el("p", { class: "cn-sql-row" }, el("b", { text: "This port is read-only." }),
-        " A statement that would change the server (INSERT, UPDATE, DELETE, CREATE, DROP, GRANT and the like) is refused and never sent to MySQL. The check reads the statement's text, so give the account DBTrail uses on that server only the permissions you want this port to have.")
+        " A statement that would change the server (INSERT, UPDATE, DELETE, CREATE, DROP, GRANT and the like) is refused and never sent to MySQL. The check reads the statement's text; the permissions of the account below bound everything else.")
       : el("p", { class: "cn-sql-row" }, el("b", { text: "This port is read-write." }),
         " Writes sent to it run on MySQL. To refuse them, start DBTrail with ", el("code", { text: "--route-read-only" }), "."));
+    // Which account runs what MySQL answers (#2079): the user name only.
+    // has_route is the server's own verdict that the account is a separate
+    // one: a saved value that is the capture account itself, or that cannot
+    // be read, is said as what it is and never as a separation.
+    if (cur.has_route) {
+      // route_host is sent only when the account connects somewhere else
+      // than the source.
+      const where = cur.route_host ? " It connects to " + cur.route_host + (cur.route_port ? ":" + cur.route_port : "") + ", not the source's address." : "";
+      wrap.append(el("p", { class: "cn-sql-row" }, "On MySQL, statements run as ",
+        cur.route_user ? el("code", { text: cur.route_user }) : "this server's forwarding account",
+        (cur.route_user ? ", this server's forwarding user." : ".") + where + " The account DBTrail captures with is not used by this port."));
+    } else if (cur.route_unreadable) {
+      wrap.append(el("p", { class: "cn-sql-row" }, el("b", { text: "This server's saved forwarding account cannot be read," }),
+        " so this port cannot forward for it and does not fall back to the account DBTrail captures with. Edit the server and type the forwarding user and password again, or remove the forwarding account."));
+    } else if (cur.has_source) {
+      wrap.append(el("p", { class: "cn-sql-row" }, "On MySQL, statements run as ",
+        cur.source_user ? el("code", { text: cur.source_user }) : "the source user",
+        ", the account DBTrail captures with: this port can do whatever that account can. " +
+        (cur.route_is_capture ? "The saved forwarding account is that same account, so nothing is separated. To separate them, edit the server and set another forwarding user."
+          : "To use another one, edit the server and set a forwarding user.")));
+    }
+    // The source turned the port's login away (#2079): every statement of
+    // such a connection fails with error 2006, which says nothing of why.
+    if (t.account_refused) {
+      wrap.append(el("p", { class: "cn-sql-row" }, el("b", { text: "MySQL refused the login of " + t.account_refused + "." }),
+        " Clients of this port get error 2006 for this server until that is fixed. " +
+        (cur.has_route ? "Edit the server to correct the forwarding account. Test connection on that form tries its login, and one that works clears this message."
+          : "Edit the server to correct the source user or its password. This message goes when a client of the port logs in.")));
+    }
     if (total > 0) {
       const reasons = Object.entries(t.reasons || {}).sort((x, y) => y[1] - x[1]);
       const ul = el("ul", { class: "form-hint", style: "margin:4px 0 0 18px; padding:0" });
@@ -14281,6 +14310,42 @@ function serverRow(s) {
 // server form (add/edit) ------------------------------------------------------
 
 // srvField builds a labeled input row: <label class="field"><span/><input/></label>.
+// FORWARDING_HINT explains the two optional forwarding fields of the server
+// form (#2079) in the form's own words.
+const FORWARDING_HINT = "Forwarding user and password are optional. They only matter when DBTrail was started with read routing: what a SQL client sends to the MySQL port then runs on this server as the forwarding user, not as the source user, so the forwarding user's permissions are all that port can do here. Give it SELECT only for a port that cannot change anything. Blank forwards with the source user. Saving a change to the forwarding account closes the connections open on that port for this server, so that none stays on the previous account; clients reconnect.";
+
+// routePrefill remembers, per form, the forwarding account its server had
+// when the form opened: serverFormBody sends the forwarding fields only when
+// they differ from it.
+const routePrefill = new WeakMap();
+
+// routeFormProblem stops a save or a test that would do something else than
+// the reader meant with the forwarding account; serverFormBody sends nothing
+// about the account while it answers. Emptying the user of a saved account
+// is not a removal: the control below the fields is. Remove ticked beside a
+// typed user or password would throw one of the two away. A password typed
+// with the user emptied would be set on the saved user, which the form no
+// longer shows.
+function routeFormProblem(form) {
+  const f = form.elements, was = routePrefill.get(form) || { user: "" };
+  if (!f.route_user || f.flavor.value === "postgres") return "";
+  const user = f.route_user.value.trim(), typedPassword = f.route_password.value !== "";
+  if (f.route_remove && f.route_remove.checked) {
+    return typedPassword || (user !== "" && user !== was.user)
+      ? "Remove the forwarding account is ticked, and a forwarding user or password was typed too. Untick it to save what you typed, or clear what you typed to remove the account."
+      : "";
+  }
+  if (user === "" && typedPassword) {
+    return was.user
+      ? "Forwarding user is empty and a forwarding password was typed. Put " + was.user + " back to change its password, or type the user the password belongs to."
+      : "A forwarding password was typed with no Forwarding user. Type the user it belongs to.";
+  }
+  if (user === "" && was.user) {
+    return "Forwarding user is empty. To remove the forwarding account, tick Remove the forwarding account; to keep it, put " + was.user + " back.";
+  }
+  return "";
+}
+
 function srvField(label, name, opts) {
   opts = opts || {};
   return el("label", { class: "field" },
@@ -14538,6 +14603,12 @@ function buildServerForm() {
   monGrid.append(srvField("Source port", "source_port", { placeholder: "3306" }));
   monGrid.append(srvField("Source user", "source_user", { placeholder: "repl" }));
   monGrid.append(srvField("Source password", "source_password", { type: "password", autocomplete: "new-password" }));
+  // The forwarding account (#2079): optional, MySQL and MariaDB only. Sent
+  // by serverFormBody only when changed; the password is never prefilled
+  // and blank keeps the saved one. Removing a saved account is the control
+  // in #route-extra, filled in when the form opens on a server that has one.
+  monGrid.append(tagFlavor(srvField("Forwarding user", "route_user", { placeholder: "(optional) blank forwards with the source user", autocomplete: "off" }), "mysql mariadb"));
+  monGrid.append(tagFlavor(srvField("Forwarding password", "route_password", { type: "password", autocomplete: "new-password" }), "mysql mariadb"));
   // PostgreSQL-only: a logical-replication connection is per-database, and the
   // slot/publication are operator-created (validate-don't-create).
   monGrid.append(tagFlavor(srvField("Database", "source_database", { placeholder: "appdb" }), "postgres"));
@@ -14559,6 +14630,8 @@ function buildServerForm() {
   monGrid.append(srvField("S3 access key", "s3_access_key_id", { placeholder: "(optional) blank uses DBTrail's own credentials", autocomplete: "off" }));
   monGrid.append(srvField("S3 secret key", "s3_secret_access_key", { type: "password", autocomplete: "new-password" }));
   mon.append(monGrid);
+  mon.append(tagFlavor(el("div", { id: "route-extra" }), "mysql mariadb"));
+  mon.append(tagFlavor(el("p", { class: "form-hint", text: FORWARDING_HINT }), "mysql mariadb"));
   mon.append(el("p", { class: "form-hint", text: "Leave the S3 fields blank for AWS. They apply to the Archive and Snapshots locations set on this server, for uploads and reads alike, not to the default Snapshots location DBTrail was started with. A bucket has one store and one pair of keys, so two servers sharing a bucket must agree. Clearing the access key removes both keys." }));
   // The source user is the #1 friction point — spell out the grant inline,
   // never behind a <details>. REPLICATION SLAVE/CLIENT drive the stream;
@@ -14682,9 +14755,11 @@ function showServerForm(prefill, opts) {
 
   if (prefill) {
     form.elements.id.value = prefill.id || "";
-    ["name", "host", "port", "user", "dbname", "archive_s3", "s3_endpoint", "s3_path_style", "s3_region", "s3_access_key_id", "source_host", "source_port", "source_user", "schemas", "source_database", "source_slot", "source_publication"].forEach((k) => {
+    ["name", "host", "port", "user", "dbname", "archive_s3", "s3_endpoint", "s3_path_style", "s3_region", "s3_access_key_id", "source_host", "source_port", "source_user", "route_user", "schemas", "source_database", "source_slot", "source_publication"].forEach((k) => {
       if (form.elements[k] && prefill[k] != null) form.elements[k].value = prefill[k];
     });
+    form.elements.route_password.placeholder = prefill.has_route_password ? "(unchanged; leave blank to keep)" : "";
+    fillRouteExtra(form, prefill);
     form.elements.password.placeholder = prefill.has_password ? "(unchanged; leave blank to keep)" : "(none)";
     form.elements.source_password.placeholder = prefill.has_source_password ? "(unchanged; leave blank to keep)" : "";
     if (prefill.has_source_password) savedSourcePasswords.set(form, true);
@@ -15595,6 +15670,26 @@ function formMsg(text, isError, reopen) {
   if (reopen) m.append(" ", el("button", { class: "btn btn-sm btn-ghost", type: "button", id: "server-form-reopen", text: "Show", onclick: reopen }));
 }
 
+// fillRouteExtra says, under the forwarding fields, what the server has
+// saved when that is more than the user name the field shows, and adds the
+// control that removes a saved account.
+function fillRouteExtra(form, prefill) {
+  routePrefill.set(form, { user: prefill.route_user || "" });
+  const box = form.querySelector("div#route-extra");
+  if (!box) return;
+  const stored = prefill.has_route || prefill.route_unreadable || prefill.route_is_capture;
+  if (!stored) return;
+  if (prefill.route_unreadable) {
+    box.append(el("p", { class: "form-msg err", text: "The forwarding account saved for this server cannot be read (was the servers file edited by hand?), so the MySQL port cannot forward for this server. Type the forwarding user and password again, or remove it below. Saving this form without doing either leaves it as it is." }));
+  } else if (prefill.route_is_capture) {
+    box.append(el("p", { class: "form-hint", text: "The forwarding account saved for this server is the same account DBTrail captures with, so the port is not on a separate account. Set another forwarding user, or remove it below." }));
+  } else if (prefill.route_host) {
+    box.append(el("p", { class: "form-hint", text: "This forwarding account connects to " + prefill.route_host + (prefill.route_port ? ":" + prefill.route_port : "") + ", not to the source's address. It keeps that address when its user or password is changed here." }));
+  }
+  box.append(el("label", { class: "check" }, el("input", { type: "checkbox", name: "route_remove" }),
+    el("span", { text: "Remove the forwarding account (the port then forwards with the source user)" })));
+}
+
 // keep-password semantics: omit password fields when blank (= keep stored).
 function serverFormBody(form) {
   const f = form.elements;
@@ -15613,6 +15708,27 @@ function serverFormBody(form) {
   if (f.password.value !== "") body.password = f.password.value;
   if (f.source_password.value !== "") body.source_password = f.source_password.value;
   if (f.s3_secret_access_key.value !== "") body.s3_secret_access_key = f.s3_secret_access_key.value;
+  // The forwarding account is sent only when the reader changed it: left
+  // out, the server keeps what it has, including an account this form never
+  // showed (saved by somebody else since it opened, or one it could not
+  // read). A typed password goes with the user the form shows. Removing is
+  // the remove control alone. A form routeFormProblem would stop (an
+  // emptied user, Remove beside something typed) sends nothing about the
+  // account. A PostgreSQL source has none: its
+  // fields are hidden, and what was typed in them before the source type
+  // changed is not sent.
+  if (f.route_user && f.flavor.value !== "postgres" && !routeFormProblem(form)) {
+    const was = routePrefill.get(form) || { user: "" };
+    const user = f.route_user.value.trim();
+    if (f.route_remove && f.route_remove.checked) {
+      body.route_user = "";
+    } else if (f.route_password.value !== "") {
+      if (user !== "") body.route_user = user;
+      body.route_password = f.route_password.value;
+    } else if (user !== "" && user !== was.user) {
+      body.route_user = user;
+    }
+  }
   // No source host: the account the grant block filled in is not a source the
   // user asked for, so it stays behind and the entry saves as index-only.
   // Values somebody typed are sent, so a forgotten host still gets its error.
@@ -15636,6 +15752,8 @@ async function saveServer(form) {
   const id = form.elements.id.value;
   refreshGrants(form);
   if (missingSourceHost(form)) { formMsg("Fill in Source host, the database you want DBTrail to watch.", true); form.elements.source_host.focus(); return; }
+  const routeProblem = routeFormProblem(form);
+  if (routeProblem) { formMsg(routeProblem, true); form.elements.route_user.focus(); return; }
   const body = serverFormBody(form);
   let saved;
   try {
@@ -15794,8 +15912,22 @@ function s3TestText(res) {
   }).join(" · ");
 }
 
+// routeTestText renders Test connection's login with the forwarding account
+// (#2079), named as such so a failure is not read as the index's or the
+// source user's. needs_password: not tried, because the saved password would
+// have gone to an address or a user it was not saved for.
+function routeTestText(res) {
+  const r = res.route;
+  if (!r) return "";
+  const name = "forwarding account" + (r.user ? " " + r.user : "");
+  if (r.needs_password) return "○ " + name + ": type its password to test it with these settings";
+  // Not a failure and not a pass: this process has no port, so no login.
+  if (r.skipped) return "○ " + name + ": not tried here (" + r.skipped + ")";
+  return r.ok ? "✓ " + name + " logs in · " + r.latency_ms + " ms" : "✗ " + name + ": " + (r.error || "could not log in");
+}
+
 function testResultText(res) {
-  const s3 = s3TestText(res);
+  const s3 = [routeTestText(res), s3TestText(res)].filter(Boolean).join(" · ");
   const withS3 = (text) => (s3 ? text + " · " + s3 : text);
   // provision_pending: a monitored source whose per-source index isn't created
   // yet (Start creates it). Reachable server, normal pre-Start state — render
@@ -15815,14 +15947,17 @@ function testResultText(res) {
   return withS3(s);
 }
 
-// testResultClass colors a Test connection result: red when the index or any
+// testResultClass colors a Test connection result: red when the index, the
+// forwarding account or any
 // bucket failed, neutral while something waits on the operator (index not
 // created yet, a secret to type), green otherwise.
 function testResultClass(res) {
   const s3 = res.s3 || [];
+  const route = res.route;
   if (s3.some((b) => b.not_applied || (!b.ok && !b.needs_secret && !b.needs_keys))) return "err";
+  if (route && !route.ok && !route.needs_password && !route.skipped) return "err";
   if (!res.ok && !res.provision_pending) return "err";
-  if (res.provision_pending || s3.some((b) => b.needs_secret || b.needs_keys)) return "pending";
+  if (res.provision_pending || (route && route.needs_password) || s3.some((b) => b.needs_secret || b.needs_keys)) return "pending";
   return "ok";
 }
 
@@ -15832,6 +15967,8 @@ async function testServerForm(form) {
   const id = form.elements.id.value;
   refreshGrants(form);
   if (missingSourceHost(form)) { formMsg("Fill in Source host, the database you want DBTrail to watch.", true); form.elements.source_host.focus(); return; }
+  const routeProblem = routeFormProblem(form);
+  if (routeProblem) { formMsg(routeProblem, true); form.elements.route_user.focus(); return; }
   const body = serverFormBody(form);
   const btn = form.querySelector("#server-test");
   // Dropped when the form that asked is gone (Cancel, or another server's
@@ -15858,14 +15995,14 @@ function unsavedTestNotice(res) {
   const all = el("details", { class: "notice-all" },
     el("summary", { text: "All " + count(checks.length, "check", "checks") }), doctorCards(checks));
   const opt = optionalSection(checks);
-  const s3 = s3TestText(res);
+  const s3 = [routeTestText(res), s3TestText(res)].filter(Boolean).join(" · ");
   const s3Line = s3 ? [s3] : [];
   if (fails.length) {
     return { tone: "err", lines: [(fails.length === 1 ? "Capture cannot start from this database yet. Fix this first:" : "Capture cannot start from this database yet. Fix these first:")].concat(s3Line),
       content: [doctorCards(fails), opt, all].filter(Boolean) };
   }
   // A clean database with an S3 store that failed is still a red answer.
-  const s3Bad = testResultClass({ ok: true, s3: res.s3 }) === "err";
+  const s3Bad = testResultClass({ ok: true, s3: res.s3, route: res.route }) === "err";
   if (warns.length) {
     return { tone: s3Bad ? "err" : "warn", lines: ["✓ The database is ready to capture. Check these when you can:"].concat(s3Line),
       content: [doctorCards(warns), opt, all].filter(Boolean) };

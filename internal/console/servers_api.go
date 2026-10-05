@@ -64,9 +64,21 @@ type serverDTO struct {
 	SourcePort        string `json:"source_port,omitempty"`
 	SourceUser        string `json:"source_user,omitempty"`
 	HasSourcePassword bool   `json:"has_source_password,omitempty"`
-	SourceServerID    uint32 `json:"source_server_id,omitempty"`
-	Schemas           string `json:"schemas,omitempty"`
-	MonitorDesired    bool   `json:"monitor_desired"`
+	// The forwarding account (#2079), masked like the source: whether one
+	// is set, its user and where it connects. Never its password.
+	HasRoute         bool   `json:"has_route,omitempty"`
+	RouteUser        string `json:"route_user,omitempty"`
+	RouteHost        string `json:"route_host,omitempty"`
+	RoutePort        string `json:"route_port,omitempty"`
+	HasRoutePassword bool   `json:"has_route_password,omitempty"`
+	// RouteIsCapture: the stored forwarding account is the capture account
+	// itself, so nothing is separated. RouteUnreadable: a value is stored
+	// and cannot be read; the port cannot route with it.
+	RouteIsCapture  bool   `json:"route_is_capture,omitempty"`
+	RouteUnreadable bool   `json:"route_unreadable,omitempty"`
+	SourceServerID  uint32 `json:"source_server_id,omitempty"`
+	Schemas         string `json:"schemas,omitempty"`
+	MonitorDesired  bool   `json:"monitor_desired"`
 	// Flavor is the source family ("mysql" | "mariadb" | "postgres"); the
 	// frontend gates per-server without opening the index. SourceDatabase /
 	// SourceSlot / SourcePublication are the PostgreSQL-only source parts (the
@@ -103,8 +115,8 @@ type serverDTO struct {
 	// instead of offering Read database now and the restore, which would
 	// answer 409. Empty when it may write.
 	WriteRefusal string `json:"write_refusal,omitempty"`
-	Editable    bool `json:"editable"`
-	Deletable   bool `json:"deletable"`
+	Editable     bool   `json:"editable"`
+	Deletable    bool   `json:"deletable"`
 	// Connected reports whether a live connection is currently cached.
 	Connected bool `json:"connected"`
 }
@@ -161,6 +173,11 @@ type serverRequest struct {
 	SourcePort     string  `json:"source_port"`
 	SourceUser     string  `json:"source_user"`
 	SourcePassword *string `json:"source_password"`
+	// The forwarding account (#2079, buildRouteDSN): every field omitted
+	// keeps what is stored; route_user "" (or route_dsn "") removes it.
+	RouteDSN       *string `json:"route_dsn"`
+	RouteUser      *string `json:"route_user"`
+	RoutePassword  *string `json:"route_password"`
 	SourceServerID uint32  `json:"source_server_id"`
 	Schemas        string  `json:"schemas"`
 	// Source family + PostgreSQL-only source config (#1019). Flavor is
@@ -206,6 +223,9 @@ type testResponse struct {
 	// checks Save runs (#1767), in place of an index probe it has nothing to
 	// aim at. OK is then "no check failed".
 	Doctor *DoctorReport `json:"doctor,omitempty"`
+	// Route: the forwarding account's own login (#2079), when the server
+	// has one or the request sets one. Independent of OK.
+	Route *routeProbeResult `json:"route,omitempty"`
 }
 
 // s3ProbeResult is Test connection's answer for one bucket of the server's S3
@@ -304,6 +324,10 @@ func (s *Server) buildNewEntry(req serverRequest) (ServerEntry, bool, error) {
 	if err := validatePGSourceMonitorConfig(flavor, sourceDSN, req.SourceSlot, req.SourcePublication); err != nil {
 		return ServerEntry{}, false, err
 	}
+	routeDSN, err := buildRouteDSN(req, "", "", sourceDSN, flavor)
+	if err != nil {
+		return ServerEntry{}, false, err
+	}
 	deriveIndex := indexIsDerived(req) && sourceDSN != "" && s.monitorCtrl != nil
 	var dsn string
 	if !deriveIndex {
@@ -340,6 +364,7 @@ func (s *Server) buildNewEntry(req serverRequest) (ServerEntry, bool, error) {
 		S3AccessKeyID:     s3KeyID,
 		S3SecretAccessKey: s3Secret,
 		SourceDSN:         sourceDSN,
+		RouteDSN:          routeDSN,
 		SourceServerID:    req.SourceServerID,
 		Schemas:           req.Schemas,
 		Flavor:            flavor,
@@ -560,6 +585,14 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusConflict, "this server is being monitored; stop monitoring before changing its source")
 		return
 	}
+	// The forwarding account (#2079). No monitoring guard: it is read when a
+	// client connects to the port, so a change applies to connections opened
+	// after it and capture never uses it.
+	routeDSN, err := buildRouteDSN(req, old.RouteDSN, old.SourceDSN, sourceDSN, flavor)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	s3KeyID, s3Secret, err := resolveS3Keys(req, old.S3AccessKeyID, old.S3SecretAccessKey)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -596,6 +629,7 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 		S3AccessKeyID:     s3KeyID,
 		S3SecretAccessKey: s3Secret,
 		SourceDSN:         sourceDSN,
+		RouteDSN:          routeDSN,
 		// The verbs that flip monitoring intent arrive with the supervisor
 		// (phase 3); a plain edit must not silently start or stop anything.
 		MonitorDesired: old.MonitorDesired,
@@ -624,6 +658,13 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, registryErrStatus(err), err.Error())
 		return
 	}
+	// The account the port forwards with for this server changed (a
+	// forwarding account saved, changed or removed, or the source itself):
+	// its open connections on the port still hold the previous account's
+	// connection to the source, so they are closed and reconnect.
+	if forwardDSNOf(entry) != forwardDSNOf(old) {
+		s.dropRoutedConns(id, "the account the port forwards with changed", forwardDSNOf(old), old.SourceSSL())
+	}
 	if dsn != old.DSN {
 		s.cm.evict(id)                   // connection points at the old DSN; close and reopen lazily
 		s.sessionProfiles.invalidate(id) // its cached profile rules were resolved against the old index (#1075)
@@ -644,12 +685,14 @@ func (s *Server) handleServersDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusConflict, "this server is being monitored; stop monitoring before deleting it")
 		return
 	}
+	deleted, _ := s.cm.reg.Get(id)
 	if err := s.cm.reg.Delete(id); err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())
 		return
 	}
 	s.cm.evict(id)
 	s.sessionProfiles.invalidate(id) // purge its cached profile rules (#1075)
+	s.dropRoutedConns(id, "the server was deleted", forwardDSNOf(deleted), deleted.SourceSSL())
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -916,6 +959,7 @@ func (s *Server) handleServersTest(w http.ResponseWriter, r *http.Request) {
 	resp := probeServer(r, dsn, monitored)
 	candidate, typed, hold := s3ProbeCandidate(req, sent, saved, hasSaved)
 	resp.S3 = probeS3Store(r.Context(), candidate, typed && !sameSavedStore(candidate, saved, hasSaved), hold)
+	resp.Route = s.probeRouteAccount(r.Context(), req, saved, hasSaved)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -966,6 +1010,7 @@ func (s *Server) testUnsavedSource(w http.ResponseWriter, r *http.Request, req s
 	resp := testResponse{OK: report.Failed == 0, Doctor: report}
 	candidate, typed, hold := s3ProbeCandidate(req, sent, ServerEntry{}, false)
 	resp.S3 = probeS3Store(r.Context(), candidate, typed, hold)
+	resp.Route = s.probeRouteAccount(r.Context(), req, ServerEntry{}, false)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1507,6 +1552,7 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 	}
 	fillDSNParts(&dto, e.DSN)
 	fillSourceDSNParts(&dto, e.SourceDSN, e.SourceFlavor())
+	fillRouteDSNParts(&dto, e.RouteDSN, e.SourceDSN)
 	if s.monitorCtrl != nil && e.SourceDSN != "" {
 		st := s.monitorCtrl.Status(e.ID)
 		dto.MonitorState, dto.MonitorPhase, dto.MonitorPhaseDetail = st.State, st.Phase, st.PhaseDetail
