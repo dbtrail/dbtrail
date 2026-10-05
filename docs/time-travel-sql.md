@@ -604,8 +604,8 @@ What this is and is not:
   - a carriage return inside a `-- ` comment that is not the end of the
     line (MySQL ends the comment at the line feed, the copy at the carriage
     return), MariaDB's executable comment `/*M! ... */`, and a `$...$`
-    pair such as `$$` (a name on MariaDB, the start of a dollar-quoted
-    string on the copy; MySQL 8.4 refuses it). These three stay on MySQL with or without quoted names;
+    pair such as `$$` (a name on MariaDB and MySQL 8.0, the start of a
+    dollar-quoted string on the copy; MySQL 8.4 refuses it). These three stay on MySQL with or without quoted names;
   - a double-quoted string or a backslash inside a string, which were
     already kept on MySQL. A double-quoted name under the source's
     `ANSI_QUOTES` is not recognized as one: it stays on MySQL as well.

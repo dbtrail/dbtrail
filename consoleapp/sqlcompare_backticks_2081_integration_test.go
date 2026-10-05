@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -78,14 +79,23 @@ var backtickTables = []struct {
 }
 
 func runBacktickFixtures(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mariadb bool) {
-	copyDSN := backtickRig(t, srcDB, srcName, sourceDSN)
-	fixtures := backtickFixtures(srcName, mariadb)
-	backtickCompare(t, sourceDSN, copyDSN, fixtures)
+	copies := backtickRig(t, srcDB, srcName, sourceDSN)
+	// A name that starts with $ is refused by MySQL 8.4 and accepted by
+	// MySQL 8.0 and MariaDB.
+	var version string
+	if err := srcDB.QueryRow("SELECT VERSION()").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	dollarNames := mariadb || strings.HasPrefix(version, "8.0.")
+	backtickCompare(t, sourceDSN, copies, backtickFixtures(srcName, dollarNames))
 }
 
-// backtickRig loads the tables into the source and into a snapshot, serves
-// the copy on a port without routing and returns its DSN.
-func backtickRig(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) string {
+// backtickRig loads the tables into the source and into a snapshot and serves
+// the copy on a port without routing. It returns two DSNs for that copy, one
+// per registered server: the port runs one statement at a time per server
+// and each statement starts a worker, so the fixtures are compared in two
+// halves side by side.
+func backtickRig(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) [2]string {
 	t.Helper()
 	now := time.Now().UTC().Truncate(time.Hour)
 	indexDSN := seedFlashbackIndex(t, "alice", now)
@@ -120,9 +130,13 @@ func backtickRig(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) string 
 	if err != nil {
 		t.Fatal(err)
 	}
-	ent, err := reg.Add(console.ServerEntry{Name: "srva", DSN: indexDSN, SourceDSN: sourceDSN, BaselineDir: baseDir})
-	if err != nil {
-		t.Fatal(err)
+	var ids [2]string
+	for i, name := range []string{"srva", "srvb"} {
+		ent, err := reg.Add(console.ServerEntry{Name: name, DSN: indexDSN, SourceDSN: sourceDSN, BaselineDir: baseDir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[i] = ent.ID
 	}
 	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg})
 	if err != nil {
@@ -136,27 +150,44 @@ func backtickRig(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) string 
 	served := make(chan struct{})
 	go func() { _ = serveFlashback(ctx, srv, ln, flashbackConfig{}); close(served) }()
 	t.Cleanup(func() { cancel(); <-served })
-	return fmt.Sprintf("%s:tok@tcp(%s)/%s", ent.ID, ln.Addr(), srcName)
+	var copies [2]string
+	for i, id := range ids {
+		copies[i] = fmt.Sprintf("%s:tok@tcp(%s)/%s", id, ln.Addr(), srcName)
+	}
+	return copies
 }
 
-func backtickCompare(t *testing.T, sourceDSN, copyDSN string, fixtures []backtickFixture) {
+func backtickCompare(t *testing.T, sourceDSN string, copies [2]string, fixtures []backtickFixture) {
 	t.Helper()
-	statements := make([]string, len(fixtures))
+	// Two halves, one per copy server, at the same time.
+	var halves [2][]string
 	for i, f := range fixtures {
-		statements[i] = f.stmt
+		halves[i%2] = append(halves[i%2], f.stmt)
 	}
-	rep, err := sqlcompare.Run(context.Background(), sqlcompare.Options{
-		SourceDSN: sourceDSN, CopyDSN: copyDSN, Policy: readrouter.Policy{ScanRows: 2},
-	}, statements)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	var reps [2]*sqlcompare.Report
+	var errs [2]error
+	var wg sync.WaitGroup
+	for i := range halves {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			reps[i], errs[i] = sqlcompare.Run(context.Background(), sqlcompare.Options{
+				SourceDSN: sourceDSN, CopyDSN: copies[i], Policy: readrouter.Policy{ScanRows: 2},
+			}, halves[i])
+		}()
 	}
+	wg.Wait()
 	by := map[string]sqlcompare.Result{}
-	for _, r := range rep.Results {
-		by[r.Statement] = r
+	for i, rep := range reps {
+		if errs[i] != nil {
+			t.Fatalf("Run: %v", errs[i])
+		}
+		for _, r := range rep.Results {
+			by[r.Statement] = r
+		}
 	}
 	src := openRaw(t, sourceDSN)
-	cp := openRaw(t, copyDSN)
+	cp := openRaw(t, copies[0])
 	tally := map[sqlcompare.Verdict]int{}
 	for _, f := range fixtures {
 		r, ok := by[f.stmt]
@@ -166,9 +197,17 @@ func backtickCompare(t *testing.T, sourceDSN, copyDSN string, fixtures []backtic
 		}
 		tally[r.Verdict]++
 		copyStmt, refusal := readrouter.ForCopy(f.stmt)
-		srcNames, cpNames := columnNames(src, f.stmt), columnNames(cp, copyStmt)
-		t.Logf("%-12s %-9s route=%-5s (%s) %s\n    mysql: %s %s\n    copy:  %s %s\n    %s",
-			r.Verdict, r.Kind, r.Route, r.RouteReason, f.stmt, srcNames, rawAnswer(src, f.stmt), cpNames, rawAnswer(cp, copyStmt), r.Detail)
+		t.Logf("%-12s %-9s route=%-5s (%s) %s\n    %s", r.Verdict, r.Kind, r.Route, r.RouteReason, f.stmt, r.Detail)
+		// Each further statement on the copy starts a worker: the raw
+		// answers are read only for a fixture that fails, and the column
+		// names only where the fixture is about them.
+		var srcNames, cpNames []string
+		if f.names {
+			srcNames, cpNames = columnNames(src, f.stmt), columnNames(cp, copyStmt)
+		}
+		if r.Verdict != f.verdict || (f.kind != "" && r.Kind != f.kind) {
+			t.Logf("    mysql: %s\n    copy:  %s", rawAnswer(src, f.stmt), rawAnswer(cp, copyStmt))
+		}
 		if r.Verdict != f.verdict || (f.kind != "" && r.Kind != f.kind) {
 			t.Errorf("%q: got %s/%s (%s), want %s/%s: %s", f.stmt, r.Verdict, r.Kind, r.Detail, f.verdict, f.kind, f.why)
 		}
@@ -237,11 +276,17 @@ func writeBacktickBaseline(t *testing.T, path, ddl string, rows [][]string) {
 
 // backtickFixtures: the verdicts are the same on MySQL 8.4 and MariaDB 11.4,
 // but for the one statement only MariaDB accepts.
-func backtickFixtures(db string, mariadb bool) []backtickFixture {
+func backtickFixtures(db string, dollarNames bool) []backtickFixture {
 	eq, diff, noc, serr := sqlcompare.Equal, sqlcompare.Different, sqlcompare.NotOnCopy, sqlcompare.SourceError
 	q := func(s string) string { return strings.ReplaceAll(s, "{db}", db) }
-	// same: EQUAL, and the client reads the same column names.
+	// same: EQUAL. sql-compare itself reports a plain column name that
+	// differs between the two sides.
 	same := func(stmt, why string) backtickFixture {
+		return backtickFixture{stmt: stmt, verdict: eq, why: why}
+	}
+	// named: EQUAL, and the client reads exactly the same column names, case
+	// and spaces included.
+	named := func(stmt, why string) backtickFixture {
 		return backtickFixture{stmt: stmt, verdict: eq, names: true, why: why}
 	}
 	star := func(stmt string) backtickFixture {
@@ -255,14 +300,14 @@ func backtickFixtures(db string, mariadb bool) []backtickFixture {
 	// (not the rewrite), so the copy is sent the rewritten text here, and
 	// answers: one column named ", 2 AS ".
 	dollar := kept("SELECT `a` AS $$, 2 AS $$ FROM (SELECT 1 AS `a`) `t`", serr, "$...$", "MySQL 8.4 refuses a name that starts with $")
-	if mariadb {
-		dollar = kept(dollar.stmt, diff, "$...$", "two columns named $$ on MariaDB, one on the copy")
+	if dollarNames {
+		dollar = kept(dollar.stmt, diff, "$...$", "two columns named $$ on MariaDB and MySQL 8.0, one on the copy")
 		dollar.kind = "columns"
 	}
 	// The same with a name outside ASCII between the dollar signs.
 	dollarCJK := kept("SELECT 1 AS $中$, 2 AS $中$", serr, "$...$", "MySQL 8.4 refuses a name that starts with $")
-	if mariadb {
-		dollarCJK = kept(dollarCJK.stmt, diff, "$...$", "two columns named $中$ on MariaDB, one on the copy")
+	if dollarNames {
+		dollarCJK = kept(dollarCJK.stmt, diff, "$...$", "two columns named $中$ on MariaDB and MySQL 8.0, one on the copy")
 		dollarCJK.kind = "columns"
 	}
 	return []backtickFixture{
@@ -274,18 +319,18 @@ func backtickFixtures(db string, mariadb bool) []backtickFixture {
 		same("SELECT `orders`.`id`,`orders`.`customer_id`,`orders`.`status`,`orders`.`amount` FROM `orders` WHERE `orders`.`status` = 'paid' ORDER BY `orders`.`id` LIMIT 20", "a paginated list"),
 		same("SELECT `id`,`status` FROM `orders` WHERE status = 'paid' AND `amount` > 2 ORDER BY `id` LIMIT 3 OFFSET 2", "the second page; quoted and bare names mixed"),
 		{stmt: "SELECT count(*) FROM `orders` WHERE `orders`.`status` = 'paid'", verdict: eq, why: "the count is equal; an aggregate without an alias is named count(*) on MySQL and count_star() on the copy, quoted table or not"},
-		same("SELECT `orders`.`id`,`orders`.`amount`,`Customer`.`id` AS `Customer__id`,`Customer`.`name` AS `Customer__name` FROM `orders` LEFT JOIN `customers` `Customer` ON `orders`.`customer_id` = `Customer`.`id` WHERE `Customer`.`country_code` = 'US' ORDER BY `orders`.`id`", "a joined preload: quoted table alias with upper case"),
-		same("SELECT `status`, count(*) AS `n`, sum(`amount`) AS `total amount` FROM `orders` GROUP BY `status` ORDER BY `status`", "a report; an alias with a space"),
+		named("SELECT `orders`.`id`,`orders`.`amount`,`Customer`.`id` AS `Customer__id`,`Customer`.`name` AS `Customer__name` FROM `orders` LEFT JOIN `customers` `Customer` ON `orders`.`customer_id` = `Customer`.`id` WHERE `Customer`.`country_code` = 'US' ORDER BY `orders`.`id`", "a joined preload: quoted table alias with upper case"),
+		named("SELECT `status`, count(*) AS `n`, sum(`amount`) AS `total amount` FROM `orders` GROUP BY `status` ORDER BY `status`", "a report; an alias with a space"),
 		same("SELECT `customers`.`country_code`, sum(`orders`.`amount`) AS `revenue` FROM `orders` JOIN `customers` ON `customers`.`id` = `orders`.`customer_id` GROUP BY `customers`.`country_code` HAVING sum(`orders`.`amount`) > 5 ORDER BY `revenue` DESC", "a joined report with HAVING, ordered by the alias"),
 		// What Django sends.
 		same("SELECT `orders`.`id`, `orders`.`customer_id`, `orders`.`status`, `orders`.`amount`, `orders`.`created_on` FROM `orders` WHERE `orders`.`status` = 'paid' ORDER BY `orders`.`id` ASC LIMIT 20", "every column named, a DATE among them"),
 		same("SELECT `orders`.`id`, `orders`.`status` FROM `orders` ORDER BY `orders`.`id` DESC LIMIT 3 OFFSET 3", "pagination"),
-		same("SELECT COUNT(*) AS `__count` FROM `orders`", "the paginator's count"),
+		named("SELECT COUNT(*) AS `__count` FROM `orders`", "the paginator's count"),
 		same("SELECT (1) AS `a` FROM `orders` WHERE `orders`.`id` = 3 LIMIT 1", "exists()"),
 		same("SELECT `orders`.`id`, `orders`.`amount`, `customers`.`id`, `customers`.`name` FROM `orders` INNER JOIN `customers` ON (`orders`.`customer_id` = `customers`.`id`) WHERE `customers`.`country_code` = 'AR' ORDER BY `orders`.`id` ASC", "select_related: two columns both named id"),
 		same("SELECT `orders`.`id` FROM `orders` WHERE `orders`.`id` IN (SELECT U0.`order_id` FROM `order_items` U0 WHERE U0.`quantity` > 1) ORDER BY `orders`.`id` ASC", "an IN subquery with Django's bare U0 alias"),
 		same("SELECT `orders`.`status`, COUNT(`orders`.`id`) AS `n`, SUM(`orders`.`amount`) AS `total` FROM `orders` GROUP BY `orders`.`status` ORDER BY `total` DESC", "an annotated report"),
-		same("SELECT MAX(`orders`.`amount`) AS `amount__max`, MIN(`orders`.`amount`) AS `amount__min`, SUM(`order_items`.`quantity`) AS `q` FROM `orders` LEFT OUTER JOIN `order_items` ON (`orders`.`id` = `order_items`.`order_id`)", "aggregate()"),
+		named("SELECT MAX(`orders`.`amount`) AS `amount__max`, MIN(`orders`.`amount`) AS `amount__min`, SUM(`order_items`.`quantity`) AS `q` FROM `orders` LEFT OUTER JOIN `order_items` ON (`orders`.`id` = `order_items`.`order_id`)", "aggregate()"),
 		same("SELECT DISTINCT `orders`.`status` FROM `orders` ORDER BY `orders`.`status` ASC", "distinct()"),
 		same("SELECT `orders`.`id` FROM `orders` WHERE (`orders`.`created_on` >= '2026-01-02' AND `orders`.`created_on` < '2026-01-05' AND NOT (`orders`.`status` = 'void')) ORDER BY `orders`.`created_on` ASC, `orders`.`id` ASC", "a date range with exclude()"),
 		{stmt: "SELECT AVG(`orders`.`amount`) AS `amount__avg` FROM `orders`", verdict: diff, kind: "precision", names: true, why: "AVG is a DECIMAL with four more decimals on MySQL and a DOUBLE on the copy (#2083), backticks or not"},
@@ -299,10 +344,10 @@ func backtickFixtures(db string, mariadb bool) []backtickFixture {
 		same(q("SELECT `{db}`.`orders`.`id`, `{db}`.`orders`.`status` FROM `{db}`.`orders` WHERE `{db}`.`orders`.`id` < 4 ORDER BY `{db}`.`orders`.`id`"), "database.table.column: the copy keeps each source database as a schema"),
 		same(q("SELECT `o`.`id`, `c`.`name` FROM `{db}`.`orders` AS `o`, `{db}`.`customers` AS `c` WHERE `c`.`id` = `o`.`customer_id` ORDER BY `o`.`id`"), "qualified tables with quoted aliases"),
 		same("SELECT `id`, `select`, `total amount`, `año`, `Mixed`, `count` FROM `odd names` ORDER BY `id`", "a keyword, a space, a non-ASCII letter, upper case; a table name with a space"),
-		same("SELECT `odd names`.`select` AS `from`, `odd names`.`año` AS `名前` FROM `odd names` WHERE `odd names`.`total amount` > 2 ORDER BY `from`", "keywords and non-ASCII as aliases"),
-		same("SELECT sum(`count`) AS `sum`, max(`select`) AS `max`, count(`count`) AS `count` FROM `odd names`", "names that spell functions of the copy, as columns and as aliases"),
-		same("SELECT `id` AS `order`, `amount` AS `group` FROM `orders` WHERE `id` < 3 ORDER BY `order`", "keyword aliases, one used in ORDER BY"),
-		same("SELECT `id` AS `Total`, `amount` AS `total2` FROM `orders` WHERE `id` = 1", "an alias keeps the case it was written in on both sides"),
+		named("SELECT `odd names`.`select` AS `from`, `odd names`.`año` AS `名前` FROM `odd names` WHERE `odd names`.`total amount` > 2 ORDER BY `from`", "keywords and non-ASCII as aliases"),
+		named("SELECT sum(`count`) AS `sum`, max(`select`) AS `max`, count(`count`) AS `count` FROM `odd names`", "names that spell functions of the copy, as columns and as aliases"),
+		named("SELECT `id` AS `order`, `amount` AS `group` FROM `orders` WHERE `id` < 3 ORDER BY `order`", "keyword aliases, one used in ORDER BY"),
+		named("SELECT `id` AS `Total`, `amount` AS `total2` FROM `orders` WHERE `id` = 1", "an alias keeps the case it was written in on both sides"),
 		// Case. A column is found whatever its case on both sides, but the
 		// client reads the name as written on MySQL and as stored on the copy.
 		{stmt: "SELECT `ID`, `Status` FROM `orders` WHERE `ID` < 3 ORDER BY `ID`", verdict: eq, why: "found on both; named ID and Status on MySQL, id and status on the copy (the same without quotes)"},

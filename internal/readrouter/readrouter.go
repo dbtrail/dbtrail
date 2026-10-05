@@ -215,8 +215,8 @@ var vetoes = []struct {
 	// MySQL takes a$b$ for one); the copy opens a dollar-quoted string
 	// there, which runs to the next one. The class is "not ASCII" by code
 	// point: \x80-\xff in a pattern would mean U+0080 to U+00FF only. Measured: `SELECT a AS $$, 2 AS $$`
-	// is two columns on MariaDB 11.4 and one on the copy; MySQL 8.4 refuses
-	// a name that starts with $.
+	// is two columns on MariaDB 11.4 and on MySQL 8.0, and one on the copy;
+	// MySQL 8.4 refuses a name that starts with $.
 	{"$...$ (a name on the source, a dollar-quoted string on the copy)", regexp.MustCompile(`\$(?:\w|[^\x00-\x7f])*\$`)},
 }
 
