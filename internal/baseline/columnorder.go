@@ -33,7 +33,7 @@ import (
 //
 //   - A generated column (STORED or VIRTUAL) and a MariaDB system-versioning
 //     period column are returned by MySQL and are not in the file, because a
-//     dump does not carry their values (generatedRe, rowPeriodRe).
+//     dump does not carry their values (generatedColumnLine).
 //   - An INVISIBLE column (MySQL 8.0.23+, MariaDB 10.3+) is in the file and is
 //     not returned by MySQL's `SELECT *`.
 //   - A column definition the parser cannot read (colRe: a name holding a
@@ -71,7 +71,7 @@ func starDifference(createSQL string) string {
 				hidden = true
 			}
 		}
-		isGenerated := generatedRe.MatchString(line) || rowPeriodRe.MatchString(line)
+		isGenerated := generatedColumnLine(line)
 		switch {
 		case isGenerated && !hidden:
 			generated = append(generated, name)

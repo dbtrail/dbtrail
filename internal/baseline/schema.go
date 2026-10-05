@@ -140,12 +140,11 @@ var colRe = regexp.MustCompile("^\\s+`([^`]+)`\\s+(\\w+)(?:\\s*\\(([^)]*)\\))?\\
 // so a schema that still lists them shifts every subsequent column's
 // positional mapping in WriteRow (issue #767).
 //
-// Requiring the trailing VIRTUAL/STORED/PERSISTENT keyword (not just "AS (")
-// is a deliberate, accepted trade-off: it is possible in principle for a
-// COMMENT string to contain " as (...) stored" and false-trip this, but
-// unlike the #506 UNSIGNED false-positive (which silently mis-typed a real
-// column), the consequence here is the arity check in baseline.go failing
-// loud on a column-count mismatch — never silent corruption.
+// Both this pattern and rowPeriodRe are matched through generatedColumnLine,
+// over the line with its quoted strings emptied, so a COMMENT or a DEFAULT
+// that holds " as (...) stored" is not read as the clause. Should a line
+// still false-trip, the consequence is the arity check in baseline.go
+// failing loud on a column-count mismatch, never silent corruption.
 var generatedRe = regexp.MustCompile(`(?i)\bAS\s*\(.*\)\s*(?:VIRTUAL|STORED|PERSISTENT)\b`)
 
 // rowPeriodRe matches a MariaDB system-versioned table's explicit temporal
@@ -182,6 +181,58 @@ var generatedRe = regexp.MustCompile(`(?i)\bAS\s*\(.*\)\s*(?:VIRTUAL|STORED|PERS
 // shim's full-table views and the cascade baseline still refuse such a table,
 // and the CLI's single-row reconstruct refuses it too.
 var rowPeriodRe = regexp.MustCompile(`(?i)\bGENERATED\s+ALWAYS\s+AS\s+ROW\s+(?:START|END)\b`)
+
+// generatedColumnLine reports whether a column definition line declares a
+// column a dump carries no value for: a STORED or VIRTUAL generated column, or
+// a system-versioning period column. The clause is looked for outside quoted
+// strings (emptyQuoted), so the same words inside a COMMENT or a DEFAULT are
+// not the clause, and a string inside the generation expression cannot end it
+// early. One function for every reader of the line: the column list
+// (parseSchemaFrom) and what MySQL's SELECT * returns beyond it
+// (starDifference) must agree on which columns are generated.
+func generatedColumnLine(line string) bool {
+	line = emptyQuoted(line)
+	return generatedRe.MatchString(line) || rowPeriodRe.MatchString(line)
+}
+
+// emptyQuoted returns s with the content of every single-quoted string
+// removed, the quotes kept. A doubled quote and a backslash escape stay
+// inside the string, as SHOW CREATE TABLE writes them; a backticked name is
+// copied as it is, so a quote inside a name does not open a string.
+func emptyQuoted(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '`':
+			j := strings.IndexByte(s[i+1:], '`')
+			if j < 0 {
+				b.WriteString(s[i:])
+				return b.String()
+			}
+			b.WriteString(s[i : i+j+2])
+			i += j + 1
+		case '\'':
+			b.WriteByte('\'')
+			for i++; i < len(s); i++ {
+				if s[i] == '\\' {
+					i++
+					continue
+				}
+				if s[i] == '\'' {
+					if i+1 < len(s) && s[i+1] == '\'' {
+						i++
+						continue
+					}
+					break
+				}
+			}
+			b.WriteByte('\'')
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
 
 // ParseSchema reads a mydumper <db>.<table>-schema.sql file and returns the
 // ordered list of columns with their Parquet type mappings.
@@ -232,7 +283,7 @@ func parseSchemaFrom(r io.Reader) ([]Column, error) {
 			continue
 		}
 		m := colRe.FindStringSubmatch(line)
-		if generatedRe.MatchString(line) || rowPeriodRe.MatchString(line) {
+		if generatedColumnLine(line) {
 			// STORED/VIRTUAL generated column, or a system-versioning period
 			// column (#863) — mydumper never dumps its value, so it must not
 			// occupy a slot in the positional column list either.

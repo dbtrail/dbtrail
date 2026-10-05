@@ -116,8 +116,11 @@ func columnOrderComments(t BaselineTable) []string {
 // order. A caller that must answer as MySQL would (read routing) keeps a
 // statement with a star over such a table away from the copy.
 //
-// It asks selectList, not the fields, so the answer cannot drift from what
-// the view is generated with.
+// The answer is about the PINNED view, the one the console's SQL session
+// always generates: it asks selectList, as that view's generation does. A
+// file that follows later snapshots carries no column list at all
+// (writeStateViews), so there SELECT * is the file's order for every table,
+// whatever this says.
 func (t BaselineTable) StarUnlikeMySQL() string {
 	switch {
 	case !t.SchemaKnown:

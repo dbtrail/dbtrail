@@ -201,8 +201,9 @@ What to know before relying on it:
   written with `USING` or `NATURAL` returns the join's columns first on
   MySQL, and where the left table has them here.
 
-  Under read routing none of these reaches the client: see below. The
-  same applies to the SQL card. A views file that follows later snapshots
+  Under read routing none of these reaches the client, because MySQL
+  answers such a statement: see below. The SQL card has no routing: it
+  answers from the copy, with these differences. A views file that follows later snapshots
   (the default of `bintrail views`, see [Dashboards](dashboards.md)) keeps
   the files' order, sorted by name, for every table.
 - **`SET time_zone`, `SET sql_select_limit` and `SET sql_mode` are applied
