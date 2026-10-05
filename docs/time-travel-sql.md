@@ -642,6 +642,10 @@ index never received, and has no record of not receiving, it cannot see:
   the index at that moment, which is also only a warning in the log;
 - a gap in capture whose record was cleared by stopping capture on that
   server (Stop clears it) before a new full snapshot was taken.
+- a change made right after a full snapshot on a source whose clock runs
+  more than about an hour behind the clock of the machine the snapshot was
+  taken from: the index is searched from the snapshot's start, and that
+  change is dated before it.
 
 Under the age rule a change of that kind is missing from the copy's answers
 for at most the limit, until the next snapshot is within it. Under this rule
