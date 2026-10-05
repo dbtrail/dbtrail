@@ -345,8 +345,10 @@ var sandboxSettings = []string{
 //     identical: LIKE/REGEXP, count(DISTINCT ...) and the string-search
 //     functions (instr, position, contains) do NOT fold (DuckDB #10416 for
 //     LIKE), which the read router vetoes; 'ß' = 'ss' and full-width forms
-//     stay unequal; a column MySQL declares _bin or _cs becomes
-//     case-insensitive here. The copy's OWN views are immune on purpose:
+//     stay unequal; a column MySQL declares _cs becomes case-insensitive
+//     here. A _bin column does not: its state view gives it COLLATE C
+//     (views.BaselineTable.BinaryText, #2083), which outranks this default.
+//     The copy's OWN views are immune on purpose:
 //     the delta chain partitions by "bintrail_pk" COLLATE C
 //     (baseline.tableDeltaStateSQL), or two keys differing only in case
 //     would fold into one row. Locked with the rest so a statement cannot

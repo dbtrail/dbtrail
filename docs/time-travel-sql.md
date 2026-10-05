@@ -159,9 +159,11 @@ What to know before relying on it:
   DISTINCT` fold them, `ORDER BY` sorts them together, and NULLs sort first
   on an ascending `ORDER BY` and last on a descending one, as on MySQL
   (`utf8mb4_0900_ai_ci`). Not folded: `LIKE`, `REGEXP`, `count(DISTINCT
-  ...)`, `instr`/`position`/`contains`, `'ß' = 'ss'`; and a column MySQL
-  declares `_bin` or `_cs` is case-insensitive here too. The same applies to
-  the SQL card; a DuckDB of your own over the same files (see
+  ...)`, `instr`/`position`/`contains`, `'ß' = 'ss'`. A column MySQL
+  declares under a `_bin` collation compares byte by byte here too
+  (`code = 'ab'` does not match `'AB'`, and it groups and sorts by code
+  point); a `_cs` column is still case-insensitive here. The same applies
+  to the SQL card; a DuckDB of your own over the same files (see
   [Dashboards](dashboards.md)) keeps DuckDB's defaults.
 - **`SET time_zone`, `SET sql_select_limit` and `SET sql_mode` are applied
   or refused, never ignored.** They used to be answered with an empty OK and
@@ -386,11 +388,33 @@ What this is and is not:
   `GROUP BY`, `SELECT DISTINCT`, `IN` and `ORDER BY`, and NULLs sort first
   on an ascending `ORDER BY` and last on a descending one (DuckDB's
   `default_collation` and `default_null_order`, fixed in the copy's locked
-  session). Close, not identical: `'ß' = 'ss'` and full-width letters are
-  equal under `utf8mb4_0900_ai_ci` and not on the copy; a column MySQL
-  declares case-sensitive (`_bin`, `_cs`) is case-insensitive on the copy;
-  a legacy `utf8mb4_general_ci` column ignores trailing spaces on MySQL and
-  not here; and **`AVG` and `/` return a double** on the copy, where MySQL
+  session). A column MySQL declares under a `_bin` collation
+  (`utf8mb4_bin`, `utf8mb4_0900_bin`, `latin1_bin`, ...), by its own
+  definition or by its table's default, is compared byte by byte on the
+  copy as well: the copy reads each column's collation from the `CREATE
+  TABLE` stored with the snapshot. Close, not identical: `'ß' = 'ss'` and
+  full-width letters are equal under `utf8mb4_0900_ai_ci` and not on the
+  copy; a column MySQL declares `_cs` (`utf8mb4_0900_as_cs`) is
+  case-insensitive on the copy, because bytes would compare it right and
+  sort it wrong (`_cs` puts `a` before `B`, bytes do not); a column under a
+  PAD SPACE collation (every collation older than the `0900` ones:
+  `utf8mb4_general_ci`, `utf8mb4_unicode_ci`, `utf8mb4_bin`, `latin1_*`)
+  ignores trailing spaces on MySQL, so `'bob ' = 'bob'` there and not
+  here; a `_bin` column in a multi-byte character set other than UTF-8
+  sorts by that character set's bytes on MySQL and by Unicode code point
+  here; a column's collation is the one it had at the last full snapshot
+  (a refresh carries the table definition forward, so an `ALTER` that
+  changes a collation is seen at the next full snapshot); a table whose
+  snapshot file carries no `CREATE TABLE`, or one that cannot be read, has
+  no collations to go by, so all its text columns fold case, `_bin` ones
+  included, and its decimal columns read as text. That is every table of a
+  PostgreSQL source, a MySQL or MariaDB table whose snapshot was written
+  by a version before 0.5, and a file whose footer could not be read at
+  that moment. The daemon's log says so once per table (`this table's
+  snapshot file carries no CREATE TABLE`), naming the first ten at warning
+  level and the rest in the debug log, and counts the files it could not
+  read; a new full snapshot of a MySQL or MariaDB source records the
+  definition, and an unreadable file is tried again within minutes; and **`AVG` and `/` return a double** on the copy, where MySQL
   returns a `DECIMAL` with four decimals more than the operand has (for
   `DECIMAL` and integer operands; a `DOUBLE` operand gives a double on
   both): `AVG(amount)` over a `DECIMAL(12,2)` is `1.8` on the copy and
