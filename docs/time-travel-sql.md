@@ -852,9 +852,12 @@ a comparison at all.
 
 Per statement it prints `EQUAL`, `DIFFERENT` (and how: `columns`, `rows`,
 `order`, `case`, `null`, `precision`, `text`, with the first differing cell;
-`columns` is a different number of columns, or the same column names in a
-different order, which is checked before any cell so that two columns
-holding equal values cannot hide it),
+`columns` is a different number of columns, a column both sides name
+standing at another position, or a position where the two sides return two
+different plain column names; it is checked before any cell, so that two
+columns holding equal values, or a result with no rows, cannot hide it. A
+position where either side's name is an expression's text is left to the
+cells, since each engine names an expression its own way),
 `NOT_ON_COPY` (the copy refused it: the router would forward it),
 `SOURCE_ERROR`, `INCONCLUSIVE` (the copy cut the result at its cap, the
 source returned more than `--max-rows`, or the source's own answer changed
