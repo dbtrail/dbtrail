@@ -410,11 +410,14 @@ func backtickFixtures(db string, dollarNames bool) []backtickFixture {
 		kept("SELECT `id` FROM `orders` WHERE `status` = X'70616964' ORDER BY `id`", diff, "right against a string literal", "X'70616964' is 'paid' on MySQL (three rows) and the text x70616964 on the copy (none)"),
 		kept("SELECT e'x' FROM (SELECT 1 AS e) `t`", diff, "right against a string literal", "the column e under the alias x on MySQL (1); an escaped string on the copy (x)"),
 		kept("SELECT ~1", diff, "~ (bitwise NOT", "18446744073709551614 on MySQL, -2 on the copy"),
-		kept("SELECT ~`id` FROM `orders` WHERE `id` = 1", diff, "~ (bitwise NOT", "the same over a column"),
 		kept("SELECT DATE '2026-01-01' + 1", diff, "next to + or -", "the number 20260102 on MySQL, the date 2026-01-02 on the copy"),
 		kept("SELECT `created_on` - DATE '2025-12-31' FROM `orders` WHERE `id` = 1", diff, "next to + or -", "20260101 - 20251231 = 8870 on MySQL; one day on the copy"),
-		kept("SELECT CAST(`created_on` AS DATE) + 1 FROM `orders` WHERE `id` = 1", diff, "next to + or -", "a CAST to DATE says what it is; 20260102 on MySQL, 2026-01-02 on the copy"),
 		kept("SELECT TIMESTAMP '2026-01-01 10:00:00' - TIMESTAMP '2026-01-01 09:00:00'", diff, "next to + or -", "10000 on MySQL; an interval of one hour on the copy"),
+		kept("SELECT GREATEST(DATE '2026-02-01', DATE '2026-01-01') + 1", diff, "next to + or -", "a date inside a call: 20260202 on MySQL, 2026-02-02 on the copy"),
+		kept("SELECT CASE WHEN `id` = 1 THEN DATE(`created_on`) END + 1 FROM `orders` WHERE `id` = 1", diff, "next to + or -", "a date inside a CASE: 20260102 on MySQL, 2026-01-02 on the copy"),
+		kept("SELECT AVG(DATE(`created_on`)) FROM `orders`", diff, "under AVG", "20260103.5000 on MySQL, 2026-01-03 12:00:00 on the copy"),
+		kept("SELECT `created_on` + INTERVAL '1:30' MINUTE_SECOND FROM `orders` WHERE `id` = 1", diff, "two-part unit", "00:01:30 on MySQL; the copy adds an hour and a half and names the column MINUTE_SECOND"),
+		kept("SELECT 1.5_5", diff, "starts with a digit", "1.5 under the alias _5 on MySQL; 1.55 on the copy"),
 		same("SELECT `id` FROM `orders` WHERE `created_on` >= DATE '2026-01-05' - INTERVAL 1 DAY ORDER BY `id`", "a date minus INTERVAL is the same day on both: not kept back"),
 		// What the text does not show (#2122): the same arithmetic on a column
 		// is not vetoed, because nothing the router reads says the column is a

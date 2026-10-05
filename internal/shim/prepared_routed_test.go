@@ -58,6 +58,7 @@ func TestPreparedRouted_ladder(t *testing.T) {
 		{"vetoed: ~", "SELECT ~?, ?", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonVeto},
 		{"vetoed: hexadecimal literal", "SELECT count(*) FROM t WHERE a = ? AND k = 0x10 AND b > ?", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonVeto},
 		{"vetoed: hexadecimal string", "SELECT count(*) FROM t WHERE a = ? AND k = x'41' AND b > ?", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonVeto},
+		{"vetoed: two-part interval unit", "SELECT count(*) FROM t WHERE d > ? + INTERVAL ? MINUTE_SECOND", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonVeto},
 		{"vetoed: date arithmetic", "SELECT count(*) FROM t WHERE d > CAST(? AS DATE) + ?", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonVeto},
 		{"in transaction", "SELECT count(*) FROM t WHERE a = ? AND b > ?", fakeRouter{toCopy: true, inTxn: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonInTransaction},
 		{"routing off", "SELECT count(*) FROM t WHERE a = ? AND b > ?", fakeRouter{toCopy: true}, fresh, 0, nil, "mysql", false, RouteReasonRoutingOff},
