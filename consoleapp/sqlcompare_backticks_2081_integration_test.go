@@ -78,6 +78,19 @@ var backtickTables = []struct {
 }
 
 func runBacktickFixtures(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
+	copyDSN := backtickRig(t, srcDB, srcName, sourceDSN)
+	if os.Getenv("BINTRAIL_2081_PROBE") != "" {
+		probe2081(t, sourceDSN, copyDSN)
+		return
+	}
+	fixtures := backtickFixtures(srcName)
+	backtickCompare(t, sourceDSN, copyDSN, fixtures)
+}
+
+// backtickRig loads the tables into the source and into a snapshot, serves
+// the copy on a port without routing and returns its DSN.
+func backtickRig(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) string {
+	t.Helper()
 	now := time.Now().UTC().Truncate(time.Hour)
 	indexDSN := seedFlashbackIndex(t, "alice", now)
 
@@ -126,10 +139,12 @@ func runBacktickFixtures(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string)
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan struct{})
 	go func() { _ = serveFlashback(ctx, srv, ln, flashbackConfig{}); close(served) }()
-	defer func() { cancel(); <-served }()
-	copyDSN := fmt.Sprintf("%s:tok@tcp(%s)/%s", ent.ID, ln.Addr(), srcName)
+	t.Cleanup(func() { cancel(); <-served })
+	return fmt.Sprintf("%s:tok@tcp(%s)/%s", ent.ID, ln.Addr(), srcName)
+}
 
-	fixtures := backtickFixtures(srcName)
+func backtickCompare(t *testing.T, sourceDSN, copyDSN string, fixtures []backtickFixture) {
+	t.Helper()
 	statements := make([]string, len(fixtures))
 	for i, f := range fixtures {
 		statements[i] = f.stmt
@@ -320,4 +335,32 @@ func backtickFixtures(db string) []backtickFixture {
 		kept("SELECT `id` FROM `orders` WHERE `id` = 1 /* a /* nested */ OR `id` = 2 -- */", noc, "/* inside a comment", "MySQL ends the comment at the first */ and returns two rows; the copy nests comments and, given the names in double quotes, would return one"),
 		kept("SELECT 1 /* a /* b */ + 1 -- */", diff, "/* inside a comment", "the same without names: 2 on MySQL, 1 on the copy"),
 	}
+}
+
+// PROBE2081 (temporary): what each side answers, the copy given the names in
+// double quotes whatever the rewrite would refuse.
+func probe2081(t *testing.T, sourceDSN, copyDSN string) {
+	s, c := openRaw(t, sourceDSN), openRaw(t, copyDSN)
+	for _, stmt := range []string{
+		"SELECT `text` 'Label' FROM (SELECT 'body' AS `text`) `t`",
+		"SELECT `int` '5' FROM (SELECT 9 AS `int`) `t`",
+		"SELECT `date`\n'2024-01-01' FROM (SELECT 5 AS `date`) `t`",
+		"SELECT text 'Label' FROM (SELECT 'body' AS text) t",
+		"SELECT `a` -- x\r+1\n FROM (SELECT 1 AS `a`) `t`",
+		"SELECT `a` /*M! +1 */ FROM (SELECT 1 AS `a`) `t`",
+		"SELECT `a` /*m! +1 */ FROM (SELECT 1 AS `a`) `t`",
+		"SELECT `a` /*M!100100 +1 */ FROM (SELECT 1 AS `a`) `t`",
+		"SELECT `a` AS $$, 2 AS $$ FROM (SELECT 1 AS `a`) `t`",
+		"SELECT `a` AS $x$, 2 AS $x$ FROM (SELECT 1 AS `a`) `t`",
+		"SELECT `a` -- \x00\n +1 FROM (SELECT 1 AS `a`) `t`",
+		"SELECT `a` FROM (SELECT 1 AS `a`) `t` WHERE 1=1 \x00 AND 1=0",
+		"SELECT `a` FROM (SELECT 1 AS `a`) `t` WHERE 'x\x00y' = 'x'",
+		"SELECT `a` FROM (SELECT 1 AS `a`) `t` /* \x00 */ WHERE 1=0",
+		"SELECT 1 AS ` a`",
+		"SELECT `a` FROM (SELECT 1 AS `A`) `t`",
+	} {
+		cs := strings.ReplaceAll(stmt, "`", "\"")
+		fmt.Printf("PROBE %q\n  src  %q %.150s\n  copy %q %.150s\n", stmt, columnNames(s, stmt), rawAnswer(s, stmt), columnNames(c, cs), rawAnswer(c, cs))
+	}
+	t.Fail()
 }

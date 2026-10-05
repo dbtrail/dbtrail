@@ -182,3 +182,17 @@ func TestReadOnlyVeto(t *testing.T) {
 		}
 	}
 }
+
+// The copy is sent what the router would send it: backtick-quoted names in
+// double quotes (#2081), and the client's text when the rewrite refuses it.
+func TestCopyStatement(t *testing.T) {
+	for stmt, want := range map[string]string{
+		"SELECT `status`, count(*) FROM `orders` GROUP BY `status`": `SELECT "status", count(*) FROM "orders" GROUP BY "status"`,
+		"SELECT status FROM orders WHERE note = 'a `b`'":            "SELECT status FROM orders WHERE note = 'a `b`'",
+		"SELECT `a``b` FROM `orders`":                               "SELECT `a``b` FROM `orders`",
+	} {
+		if got := copyStatement(stmt); got != want {
+			t.Errorf("copyStatement(%q) = %q, want %q", stmt, got, want)
+		}
+	}
+}

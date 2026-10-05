@@ -6,6 +6,9 @@ import "strings"
 // is a veto of its own: the statement stays on MySQL and the copy is not
 // tried.
 const (
+	vetoNameString    = "backtick-quoted name right before a string literal (an alias on MySQL, a typed constant on the copy)"
+	vetoCommentCR     = "carriage return inside a line comment (the comment ends there on the copy)"
+	vetoNUL           = "NUL byte (the copy stops reading the statement there)"
 	vetoNameQuote     = "backtick-quoted name that holds a backtick or a double quote (not rewritten for the copy)"
 	vetoNameEmpty     = "empty backtick-quoted name"
 	vetoNameCall      = "backtick-quoted name right before a parenthesis (a function call on the copy)"
@@ -54,7 +57,8 @@ type scanned struct {
 // its literals another way: a name that holds a backtick or a double quote,
 // an empty name, a quoted name right before a parenthesis or right after U&,
 // a string, name or comment that never ends, a comment with another one
-// opened inside it, a double-quoted string, a backslash in a string, a `#`
+// opened inside it, a quoted name right before a string literal, a carriage
+// return inside a line comment, a NUL byte, a double-quoted string, a backslash in a string, a `#`
 // comment, a MySQL hint or version comment. text is then the
 // statement as the client wrote it. Veto keeps every such statement on
 // MySQL too (it may name another reason first), so a statement that passed
@@ -110,6 +114,11 @@ func scan(stmt string) scanned {
 	// afterName is true from the closing backtick of a name until the next
 	// byte that is neither white space nor a comment.
 	afterName := false
+	if strings.IndexByte(stmt, 0) >= 0 {
+		// The copy's engine takes the statement as a C string and stops at
+		// the first NUL; MySQL reads on.
+		refuse(vetoNUL)
+	}
 	for i := 0; i < n; {
 		c := stmt[i]
 		switch {
@@ -135,6 +144,17 @@ func scan(stmt string) scanned {
 				sc.hash = true
 			}
 			nl := strings.IndexByte(stmt[i:], '\n')
+			line := stmt[i:]
+			if nl >= 0 {
+				line = stmt[i : i+nl]
+			}
+			if cr := strings.IndexByte(line, '\r'); cr >= 0 && cr != len(line)-1 || cr >= 0 && nl < 0 {
+				// MySQL ends a line comment at the line feed; the copy ends
+				// it at a carriage return too, and runs what follows. A
+				// carriage return right before the line feed is a line end
+				// on both.
+				refuse(vetoCommentCR)
+			}
 			if nl < 0 {
 				cp.WriteString(stmt[i:])
 				i = n
@@ -144,6 +164,13 @@ func scan(stmt string) scanned {
 			bl.WriteByte('\n')
 			i += nl + 1
 		case c == '\'' || c == '"':
+			if afterName {
+				// `text` 'Label' is the column text under the alias Label
+				// on MySQL; "text" 'Label' is the constant 'Label' of type
+				// text on the copy. Measured on MySQL 8.4, MariaDB 11.4 and
+				// the copy (#2081).
+				refuse(vetoNameString)
+			}
 			afterName = false
 			if c == '"' {
 				sc.doubleQuoted = true

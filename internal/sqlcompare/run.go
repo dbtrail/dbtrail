@@ -245,8 +245,7 @@ func compareOne(ctx context.Context, src, cp *conn, opts Options, stmt string) R
 	// backtick-quoted names in double quotes, nothing else translated. A
 	// statement the rewrite refuses is one the router vetoes; the copy gets it
 	// as written, and what it says then does not count.
-	copyStmt, _ := readrouter.ForCopy(stmt)
-	cpRows, cpOver, cpMS, cpErr := fetch(ctx, cp.c, copyStmt, opts.MaxRows)
+	cpRows, cpOver, cpMS, cpErr := fetch(ctx, cp.c, copyStatement(stmt), opts.MaxRows)
 	res.CopyMS = cpMS
 	if cpErr != nil {
 		res.Verdict, res.Detail = NotOnCopy, cpErr.Error()
@@ -294,6 +293,15 @@ func compareOne(ctx context.Context, src, cp *conn, opts Options, stmt string) R
 		}
 	}
 	return res
+}
+
+// copyStatement is the text the copy is sent for a statement: what the
+// router would send it. For a statement the rewrite refuses that is the
+// client's text; the router vetoes those, so what the copy says does not
+// count.
+func copyStatement(stmt string) string {
+	text, _ := readrouter.ForCopy(stmt)
+	return text
 }
 
 // route is the read router's decision for the statement, taken the same way

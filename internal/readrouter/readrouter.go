@@ -211,9 +211,14 @@ var vetoes = []struct {
 	// MariaDB cuts it at max_recursive_iterations (1000 by default on both);
 	// the copy runs it to the end.
 	{"WITH RECURSIVE", regexp.MustCompile(`(?i)\bwith\s+recursive\b`)},
+	// MySQL takes $ for a character of a name ($$ and $x$ are names); the
+	// copy opens a dollar-quoted string there, which runs to the next one.
+	{"$...$ (a name on MySQL, a quoted string on the copy)", regexp.MustCompile(`\$[\w\x80-\xff]*\$`)},
 }
 
-var hintComment = regexp.MustCompile(`/\*[!+]`)
+// hintComment matches an optimizer hint (`/*+`) and a comment the server
+// executes: MySQL's and MariaDB's `/*!`, and MariaDB's `/*M!`.
+var hintComment = regexp.MustCompile(`/\*([mM]?!|\+)`)
 
 // Veto returns the name of the first construct that keeps the statement on
 // MySQL, or "" when none applies. The statement is read once (scan): comments
