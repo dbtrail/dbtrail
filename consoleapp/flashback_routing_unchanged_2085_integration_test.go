@@ -238,7 +238,7 @@ func TestIntegrationFlashbackRoutedUnchangedTables_2085(t *testing.T) {
 	func() {
 		t.Helper()
 		before := reasons()
-		rows, err := c.QueryContext(ctx, "SELECT side, count(*) FROM quiet WHERE id > ? GROUP BY side", 0)
+		rows, err := c.QueryContext(ctx, "SELECT side, count(*) FROM quiet WHERE side <> ? GROUP BY side", "x")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -287,18 +287,19 @@ func TestIntegrationFlashbackRoutedUnchangedTables_2085(t *testing.T) {
 	// rows on both sides, read through the routed port and straight from the
 	// source.
 	direct := directConn(t, sourceDSN+"?timeout=5s")
-	viaPort := connStrings(t, c, "SELECT id, side FROM same WHERE side <> 'x' ORDER BY id")
-	if got := reasons()["tables_unchanged"]; got < 5 {
-		t.Errorf("tables_unchanged = %d after the scan of `same`, want it counted", got)
+	before := reasons()["tables_unchanged"]
+	viaPort := connStrings(t, c, scan("same"))
+	if got := reasons()["tables_unchanged"]; got != before+1 {
+		t.Errorf("tables_unchanged went %d -> %d over the scan of `same`, want the copy to have answered it", before, got)
 	}
-	if fromSource := connStrings(t, direct, "SELECT id, side FROM same WHERE side <> 'x' ORDER BY id"); !reflect.DeepEqual(viaPort, fromSource) {
+	if fromSource := connStrings(t, direct, scan("same")); !reflect.DeepEqual(viaPort, fromSource) || len(viaPort) != 1 {
 		t.Errorf("the copy's answer differs from MySQL's:\n copy:  %v\n mysql: %v", viaPort, fromSource)
 	}
 	// And sql-compare's verdict for it, over a port that only serves the copy.
 	copyOnly := serveRouting(t, srv, flashbackConfig{})
 	rep, err := sqlcompare.Run(ctx, sqlcompare.Options{
 		SourceDSN: sourceDSN, CopyDSN: fmt.Sprintf("%s:tok@tcp(%s)/%s", ent.ID, copyOnly, srcName), Policy: readrouter.Policy{ScanRows: 2},
-	}, []string{"SELECT side, count(*) FROM same GROUP BY side", "SELECT id, side FROM same WHERE side <> 'x' ORDER BY id"})
+	}, []string{scan("same"), "SELECT side FROM same WHERE side <> 'x' ORDER BY side, id"})
 	if err != nil {
 		t.Fatalf("sql-compare: %v", err)
 	}
