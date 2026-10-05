@@ -226,7 +226,7 @@ func TestVeto_everyVetoStillFiresOnBacktickStatements(t *testing.T) {
 	}
 }
 
-const vetoDollar = "$...$ (a name on MySQL, a quoted string on the copy)"
+const vetoDollar = "$...$ (a name on the source, a dollar-quoted string on the copy)"
 
 const vetoSetOps = "UNION/INTERSECT/EXCEPT without ALL (duplicates removed by bytes on the copy, by collation on MySQL)"
 

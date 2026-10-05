@@ -211,9 +211,12 @@ var vetoes = []struct {
 	// MariaDB cuts it at max_recursive_iterations (1000 by default on both);
 	// the copy runs it to the end.
 	{"WITH RECURSIVE", regexp.MustCompile(`(?i)\bwith\s+recursive\b`)},
-	// MySQL takes $ for a character of a name ($$ and $x$ are names); the
-	// copy opens a dollar-quoted string there, which runs to the next one.
-	{"$...$ (a name on MySQL, a quoted string on the copy)", regexp.MustCompile(`\$[\w\x80-\xff]*\$`)},
+	// MariaDB takes $ for a character of a name ($$ and $x$ are names, and
+	// MySQL takes a$b$ for one); the copy opens a dollar-quoted string
+	// there, which runs to the next one. Measured: `SELECT a AS $$, 2 AS $$`
+	// is two columns on MariaDB 11.4 and one on the copy; MySQL 8.4 refuses
+	// a name that starts with $.
+	{"$...$ (a name on the source, a dollar-quoted string on the copy)", regexp.MustCompile(`\$[\w\x80-\xff]*\$`)},
 }
 
 // hintComment matches an optimizer hint (`/*+`) and a comment the server

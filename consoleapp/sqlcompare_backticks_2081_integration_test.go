@@ -43,11 +43,11 @@ func TestIntegrationSQLCompareBacktickNames(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	t.Run("mysql", func(t *testing.T) {
 		srcDB, srcName := testutil.CreateTestDB(t)
-		runBacktickFixtures(t, srcDB, srcName, testutil.BaseDSN()+"/"+srcName)
+		runBacktickFixtures(t, srcDB, srcName, testutil.BaseDSN()+"/"+srcName, false)
 	})
 	t.Run("mariadb", func(t *testing.T) {
 		srcDB, srcName := testutil.CreateTestMariaDB(t)
-		runBacktickFixtures(t, srcDB, srcName, testutil.MariaDBBaseDSN()+"/"+srcName)
+		runBacktickFixtures(t, srcDB, srcName, testutil.MariaDBBaseDSN()+"/"+srcName, true)
 	})
 }
 
@@ -77,9 +77,9 @@ var backtickTables = []struct {
 	}},
 }
 
-func runBacktickFixtures(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
+func runBacktickFixtures(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mariadb bool) {
 	copyDSN := backtickRig(t, srcDB, srcName, sourceDSN)
-	fixtures := backtickFixtures(srcName)
+	fixtures := backtickFixtures(srcName, mariadb)
 	backtickCompare(t, sourceDSN, copyDSN, fixtures)
 }
 
@@ -235,8 +235,9 @@ func writeBacktickBaseline(t *testing.T, path, ddl string, rows [][]string) {
 	}
 }
 
-// backtickFixtures: the verdicts are the same on MySQL 8.4 and MariaDB 11.4.
-func backtickFixtures(db string) []backtickFixture {
+// backtickFixtures: the verdicts are the same on MySQL 8.4 and MariaDB 11.4,
+// but for the one statement only MariaDB accepts.
+func backtickFixtures(db string, mariadb bool) []backtickFixture {
 	eq, diff, noc, serr := sqlcompare.Equal, sqlcompare.Different, sqlcompare.NotOnCopy, sqlcompare.SourceError
 	q := func(s string) string { return strings.ReplaceAll(s, "{db}", db) }
 	// same: EQUAL, and the client reads the same column names.
@@ -250,7 +251,16 @@ func backtickFixtures(db string) []backtickFixture {
 	kept := func(stmt string, verdict sqlcompare.Verdict, veto, why string) backtickFixture {
 		return backtickFixture{stmt: stmt, verdict: verdict, veto: veto, why: why}
 	}
+	// $$ is a name on MariaDB and refused by MySQL 8.4. The list vetoes it
+	// (not the rewrite), so the copy is sent the rewritten text here, and
+	// answers: one column named ", 2 AS ".
+	dollar := kept("SELECT `a` AS $$, 2 AS $$ FROM (SELECT 1 AS `a`) `t`", serr, "$...$", "MySQL 8.4 refuses a name that starts with $")
+	if mariadb {
+		dollar = kept(dollar.stmt, diff, "$...$", "two columns named $$ on MariaDB, one on the copy")
+		dollar.kind = "columns"
+	}
 	return []backtickFixture{
+		dollar,
 		// What GORM sends.
 		star("SELECT * FROM `orders` WHERE `orders`.`id` = 1 ORDER BY `orders`.`id` LIMIT 1"),
 		star("SELECT * FROM `orders` WHERE `orders`.`customer_id` IN (1,2,3)"),
@@ -334,6 +344,5 @@ func backtickFixtures(db string) []backtickFixture {
 		kept("SELECT `int`\n'5' FROM (SELECT 9 AS `int`) `t`", noc, "right before a string literal", "9 on MySQL, 5 on the copy"),
 		kept("SELECT `a` -- x\r+1\n FROM (SELECT 1 AS `a`) `t`", noc, "carriage return inside a line comment", "the comment runs to the line feed on MySQL (1) and stops at the carriage return on the copy (2)"),
 		kept("SELECT `a` /*M! +1 */ FROM (SELECT 1 AS `a`) `t`", noc, "optimizer hint or MySQL comment", "MariaDB runs the comment's text (2); MySQL and the copy do not (1)"),
-		kept("SELECT `a` AS $$, 2 AS $$ FROM (SELECT 1 AS `a`) `t`", diff, "$...$", "the list vetoes it, so the copy is sent the rewritten text here and answers: two columns named $$ on MySQL; one column named ', 2 AS ' on the copy"),
 	}
 }
