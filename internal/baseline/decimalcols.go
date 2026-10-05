@@ -162,6 +162,7 @@ type footerScan struct {
 // two. batchErr is the batched read's error when the per-file fallback ran.
 func (st *footerScan) result(paths []string, batchErr error) FooterRead {
 	r := FooterRead{Footers: st.footers}
+	var legacy []string
 	for _, p := range paths {
 		switch _, read := st.footers[p]; {
 		case read:
@@ -171,9 +172,10 @@ func (st *footerScan) result(paths []string, batchErr error) FooterRead {
 			r.Unread = append(r.Unread, p)
 		default:
 			r.NoSchema = append(r.NoSchema, p)
-			warnNoSchemaOnce(p)
+			legacy = append(legacy, p)
 		}
 	}
+	warnNoSchema(legacy)
 	if len(r.Unread) > 0 {
 		// batchErr is reported alongside the count because when EVERY file
 		// failed the cause is usually not any one file (no httpfs, an S3 403,
@@ -189,27 +191,61 @@ func (st *footerScan) result(paths []string, batchErr error) FooterRead {
 }
 
 // warnedNoSchema holds the tables already warned about for carrying no CREATE
-// TABLE, by schema and table (the last two elements of the file's path), so a
-// later snapshot of the same table does not warn again.
+// TABLE. The key is the table within its snapshot root (noSchemaKey), so a
+// later snapshot of the same table does not warn again and the same table
+// name under another source's root does.
 var warnedNoSchema sync.Map
 
-// warnNoSchemaOnce logs, once per table per process, that a snapshot file
-// carries no CREATE TABLE. It is not a fault (a PostgreSQL-source snapshot
-// never carries one, and neither does one older than the key), which is why
-// nothing was logged before; it is logged now because of what it costs.
-func warnNoSchemaOnce(path string) {
-	slashed := filepath.ToSlash(path)
-	table := strings.TrimSuffix(slashed[strings.LastIndex(slashed, "/")+1:], ".parquet")
-	if dir := strings.TrimSuffix(slashed, "/"+table+".parquet"); dir != slashed {
-		table = dir[strings.LastIndex(dir, "/")+1:] + "." + table
+// noSchemaWarnCap is how many tables one read names. A source where no table
+// carries a CREATE TABLE (every PostgreSQL source) has as many of these as it
+// has tables, and a one-shot command would print them all on every run.
+const noSchemaWarnCap = 10
+
+// noSchemaKey splits a snapshot file's path, <root>/<snapshot>/<schema>/
+// <table>.parquet, into what identifies the table across snapshots (the root
+// and "schema.table") and the name to print.
+func noSchemaKey(path string) (key, table string) {
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	table = strings.TrimSuffix(parts[len(parts)-1], ".parquet")
+	if len(parts) < 2 {
+		return table, table
 	}
-	if _, seen := warnedNoSchema.LoadOrStore(table, struct{}{}); seen {
-		return
+	table = parts[len(parts)-2] + "." + table
+	if len(parts) < 4 {
+		return table, table
 	}
-	slog.Warn("baseline: this table's snapshot file carries no CREATE TABLE, so its column types and collations are unknown; "+
-		"its state view "+SchemaLossConsequence+". A new full snapshot of a MySQL or MariaDB source records them "+
-		"(a PostgreSQL source has none to record)",
-		"table", table, "path", path)
+	return strings.Join(parts[:len(parts)-3], "/") + "|" + table, table
+}
+
+// warnNoSchema logs, once per table per process, that a snapshot file carries
+// no CREATE TABLE. It is not a fault (a PostgreSQL-source snapshot never
+// carries one, and neither does one older than the key), which is why nothing
+// was logged before; it is logged now because of what it costs. The first
+// noSchemaWarnCap tables of a read are named; the rest are counted in one
+// line and named at Debug.
+func warnNoSchema(paths []string) {
+	more := 0
+	named := 0
+	for _, p := range paths {
+		key, table := noSchemaKey(p)
+		if _, seen := warnedNoSchema.LoadOrStore(key, struct{}{}); seen {
+			continue
+		}
+		if named == noSchemaWarnCap {
+			more++
+			slog.Debug("baseline: this table's snapshot file carries no CREATE TABLE", "table", table, "path", p)
+			continue
+		}
+		named++
+		slog.Warn("baseline: this table's snapshot file carries no CREATE TABLE, so its column types and collations are unknown; "+
+			"its state view "+SchemaLossConsequence+". A new full snapshot of a MySQL or MariaDB source records them "+
+			"(a PostgreSQL source has none to record)",
+			"table", table, "path", p)
+	}
+	if more > 0 {
+		slog.Warn("baseline: more tables' snapshot files carry no CREATE TABLE, with the same consequence; "+
+			"the debug log names each", "more_tables", more)
+	}
 }
 
 // decimalFooterQuery reads the embedded CREATE TABLE out of each listed file's
