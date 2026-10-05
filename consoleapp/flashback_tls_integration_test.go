@@ -94,24 +94,52 @@ func TestIntegrationFlashbackForwardsOverTheServersTLS(t *testing.T) {
 }
 
 // TestIntegrationForwarderTLSMariaDBSource: the same rule against a MariaDB
-// source, at the forwarder itself.
+// source, at the forwarder itself. Whether the source offers TLS depends on
+// the server (11.4 does out of the box, 10.11 does not unless configured),
+// so the test asks it and checks the rule for the case it finds: with TLS,
+// preferred and required are encrypted; without, preferred falls back to an
+// unencrypted connection and required is refused, never downgraded.
 func TestIntegrationForwarderTLSMariaDBSource(t *testing.T) {
 	testutil.SkipIfNoMariaDB(t)
 	dsn := testutil.MariaDBBaseDSN() + "/"
-	for mode, wantTLS := range map[string]bool{"preferred": true, "required": true, "disabled": false} {
+	// ask runs one statement and returns the second column of its one row,
+	// or the error the forwarder gave.
+	ask := func(mode, q string) (string, error) {
 		fw, err := readrouter.NewForwarder(dsn, config.SSL{Mode: mode}, readrouter.DefaultPolicy(), 10*time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer fw.Close()
 		buf := &readrouter.BufferSink{}
-		if _, err := fw.Forward(context.Background(), "SHOW SESSION STATUS LIKE 'Ssl_cipher'", buf); err != nil {
-			t.Fatalf("%s: %v", mode, err)
+		if _, err := fw.Forward(context.Background(), q, buf); err != nil {
+			return "", err
 		}
-		fw.Close()
-		cipher, _ := buf.Rows[0][1].([]byte)
-		t.Logf("MariaDB, ssl_mode %-9s: Ssl_cipher=%q", mode, cipher)
-		if wantTLS != (len(cipher) > 0) {
-			t.Errorf("MariaDB, ssl_mode %s: Ssl_cipher=%q, want encrypted=%v", mode, cipher, wantTLS)
+		if len(buf.Rows) != 1 || len(buf.Rows[0]) < 2 {
+			t.Fatalf("%s: %q answered %v", mode, q, buf.Rows)
+		}
+		v, _ := buf.Rows[0][1].([]byte)
+		return string(v), nil
+	}
+	haveSSL, err := ask("disabled", "SHOW GLOBAL VARIABLES LIKE 'have_ssl'")
+	if err != nil {
+		t.Fatalf("asking the source whether it offers TLS: %v", err)
+	}
+	offers := haveSSL == "YES"
+	t.Logf("MariaDB source: have_ssl=%s", haveSSL)
+	for _, mode := range []string{"preferred", "required", "disabled"} {
+		cipher, err := ask(mode, "SHOW SESSION STATUS LIKE 'Ssl_cipher'")
+		t.Logf("MariaDB, ssl_mode %-9s: Ssl_cipher=%q err=%v", mode, cipher, err)
+		switch {
+		case mode == "required" && !offers:
+			if err == nil {
+				t.Errorf("ssl_mode required against a source with no TLS connected (Ssl_cipher=%q); it must be refused", cipher)
+			}
+		case err != nil:
+			t.Errorf("ssl_mode %s: %v", mode, err)
+		default:
+			if want := offers && mode != "disabled"; want != (cipher != "") {
+				t.Errorf("ssl_mode %s (source offers TLS: %v): Ssl_cipher=%q, want encrypted=%v", mode, offers, cipher, want)
+			}
 		}
 	}
 }
