@@ -103,6 +103,14 @@ func TestCompare(t *testing.T) {
 		{"swapped columns whose cells agree, beside an expression", rows([]string{"b", "a", "n+1"}, []*string{one, two, one}), rows([]string{"a", "b", "(n + 1)"}, []*string{one, two, one}), true, Different, "columns", "b is column 1 on the source and column 2 on the copy"},
 		{"another set of the same size, no rows", rows([]string{"id", "twice", "a"}), rows([]string{"id", "a", "secret"}), false, Different, "columns", "a is column 3 on the source and column 2 on the copy"},
 		{"a column each side names differently, no rows", rows([]string{"id", "twice"}), rows([]string{"id", "secret"}), false, Different, "columns", "column 2 is twice on the source and secret on the copy"},
+		// #2123: a name with a letter outside ASCII is as plain as any other.
+		{"two names with letters outside ASCII, cells that agree", rows([]string{"id", "año"}, []*string{one, two}), rows([]string{"id", "niño"}, []*string{one, two}), true, Different, "columns", "column 2 is año on the source and niño on the copy"},
+		{"two names with letters outside ASCII, no rows", rows([]string{"año"}), rows([]string{"niño"}), false, Different, "columns", "column 1 is año on the source and niño on the copy"},
+		{"the same name outside ASCII in another case", rows([]string{"AÑO"}, []*string{one}), rows([]string{"año"}, []*string{one}), true, Equal, "", ""},
+		{"a name outside ASCII against an ASCII one", rows([]string{"año"}, []*string{one}), rows([]string{"ano"}, []*string{one}), true, Different, "columns", "column 1 is año on the source and ano on the copy"},
+		// A name with a hyphen is also what MySQL calls the expression
+		// total-a, so it stays with the cells.
+		{"names that read as an expression's text", rows([]string{"total-a"}, []*string{one}), rows([]string{"inv-b"}, []*string{one}), true, Equal, "", ""},
 		{"a name on one side twice", rows([]string{"id", "id"}, []*string{one, two}), rows([]string{"id", "x"}, []*string{one, two}), true, Different, "columns", "id is 2 column(s) on the source and 1 on the copy"},
 		// What stays EQUAL: each side names an expression its own way, and
 		// MySQL names a literal by its value where DuckDB quotes it.
