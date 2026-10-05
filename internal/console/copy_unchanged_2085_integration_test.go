@@ -312,6 +312,19 @@ func TestIntegrationCopyUnchanged_2085(t *testing.T) {
 		gone.Path += ".missing"
 		r.wantNot("could not be read", gone)
 	})
+	t.Run("a lookup the index cannot serve is not an empty answer", func(t *testing.T) {
+		// Without the index the lookup is forced onto, MySQL refuses the
+		// statement: no rows came back, and that must not read as "no
+		// change".
+		testutil.MustExec(t, r.db, "ALTER TABLE binlog_events DROP INDEX idx_row_lookup")
+		r.wantNot("could not be read (the events of shop."+quiet.Table+")", quiet)
+		testutil.MustExec(t, r.db, "ALTER TABLE binlog_events ADD INDEX idx_row_lookup (schema_name, table_name, event_timestamp)")
+		r.wantUnchanged(quiet)
+		testutil.MustExec(t, r.db, "RENAME TABLE schema_changes TO schema_changes_gone")
+		r.wantNot("could not be read (the schema changes)", quiet)
+		testutil.MustExec(t, r.db, "RENAME TABLE schema_changes_gone TO schema_changes")
+		r.wantUnchanged(quiet)
+	})
 	t.Run("the index rotated the window away", func(t *testing.T) {
 		// Last: it drops the partitions every other case reads.
 		r.partitionFrom(r.stamp.Truncate(time.Hour))
