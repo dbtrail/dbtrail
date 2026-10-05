@@ -640,7 +640,11 @@ func (pol Policy) decide(p Plan, rowsLeftOut string) Decision {
 		case p.RowsRead >= pol.ScanRows:
 			return Decision{ToCopy: true, Reason: fmt.Sprintf("plan reads about %s rows across a join (threshold %s)", groupDigits(roundRows(p.RowsRead)), groupDigits(pol.ScanRows)), Rule: RuleJoinRows}
 		default:
-			cheap += fmt.Sprintf("; about %s rows read across a join", groupDigits(roundRows(p.RowsRead)))
+			shown := roundRows(p.RowsRead)
+			if shown >= pol.ScanRows {
+				shown = p.RowsRead // rounding must not print the threshold for a plan under it
+			}
+			cheap += fmt.Sprintf("; about %s rows read across a join", groupDigits(shown))
 		}
 		return Decision{Reason: cheap, Rule: RuleCheap}
 	}
