@@ -370,9 +370,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and returned without a log line. The same reading made every refresh remove
   the job's staging directory. Measured on a chain that reached 24 plain
   pairs with no merge. The setting is now written on the request before the
-  cycle starts, and the job runs under the daemon's DuckDB memory limit (it
-  had none of its own). Nothing was lost while it did not run: a chain reads
-  the same merged or not; it only listed more files.
+  cycle starts. Since the job now really runs after every refresh: it runs
+  under the daemon's DuckDB memory limit (it had none of its own), it checks
+  the disk for room for the merged pair before writing it, a run that failed
+  is tried again after an hour and not at every refresh, a failure that
+  repeats is one line in the run history, and an internal error while it
+  looks for chains no longer ends the process. Nothing was lost while it did
+  not run: a chain reads the same merged or not; it only listed more files.
 - **Read routing: a statement that names a generated column is answered by
   MySQL** (#2123). A snapshot holds no generated column, so the copy does
   not have it, and a statement that named one was not always refused there:

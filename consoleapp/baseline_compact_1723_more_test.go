@@ -178,6 +178,10 @@ func TestCompactJob_shutdownStopsAndSaysSo(t *testing.T) {
 // be all compaction failures within four hours.)
 func TestCompactJob_repeatedFailureIsOneRecord(t *testing.T) {
 	sup, req, cs, _ := compactRig(t, compactMinPairs)
+	// No wait between tries: this is about what two tries record.
+	prevRetry := compactRetryEvery
+	compactRetryEvery = 0
+	t.Cleanup(func() { compactRetryEvery = prevRetry })
 	cs.err = errors.New("duckdb: out of memory")
 	run := func() console.BaselineStatus {
 		t.Helper()
