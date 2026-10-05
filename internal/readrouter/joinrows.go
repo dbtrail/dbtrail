@@ -34,8 +34,14 @@ import (
 // the rows the tables before it produce (the product of their rows x
 // filtered, never taken below one entry) times its rows; the list reads
 // the sum. A table the server leaves at the first match (first_match with
-// no condition of its own to test, not_exists) reads one row per entry. A subquery or derived table is a block of its own, estimated the
-// same way and added once when the server builds it once (materialized, a
+// no condition of its own to test, not_exists, the index probe of an IN or
+// EXISTS subquery) reads one row per entry and passes on at most one row
+// per row that came in. A const or system table is a value read before
+// the plan starts, not a table of the join. A table read whole under a
+// condition, with filtered reported as 100, is taken to pass a tenth.
+//
+// A subquery or derived table is a block of its own, estimated the same
+// way and added once when the server builds it once (materialized, a
 // derived table, a subquery with no reference outward) and once per row of
 // the block around it when it is run for each row (inside a subquery
 // cache, an IN probe, a reference to an outer table, a lateral derived
@@ -410,7 +416,7 @@ func (c *chain) table(t map[string]any, buffered bool) error {
 	}
 	cond, _ := t["attached_condition"].(string)
 	passed := filtered
-	if (at == "ALL" || at == "index") && !buffered && cond != "" && filtered == 100 && !strings.Contains(cond, "subquery#") {
+	if (at == "ALL" || at == "index") && cond != "" && filtered == 100 && !strings.Contains(cond, "subquery#") {
 		// A condition on a table read whole, with every row reported as
 		// passing it: MariaDB has no statistics on the column and says
 		// 100. Taken as a tenth, the guess MySQL makes for the same

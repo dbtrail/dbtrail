@@ -91,7 +91,7 @@ func TestRouteStartupLine(t *testing.T) {
 	ro := routeStartupLine(cfg)
 	t.Log(rw)
 	t.Log(ro)
-	for _, want := range []string{"read-write", "writes included", "--route-read-only", "plan cost >= 10000", "15m0s"} {
+	for _, want := range []string{"read-write", "writes included", "--route-read-only", "plan cost >= 10000", "a full scan over >= 100000 rows (on a MariaDB source, also joins that read that many rows in all)", "15m0s"} {
 		if !strings.Contains(rw, want) {
 			t.Errorf("read-write line misses %q: %s", want, rw)
 		}

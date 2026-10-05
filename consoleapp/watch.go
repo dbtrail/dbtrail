@@ -745,7 +745,7 @@ func validateRoutePolicy(maxCopyAge time.Duration, costThreshold float64, scanRo
 // routeStartupLine is the stderr line that says, at startup, what read
 // routing sends to the source and whether the port is read-only.
 func routeStartupLine(cfg flashbackConfig) string {
-	rule := fmt.Sprintf("SELECTs with plan cost >= %.0f or a full scan over >= %d rows run on the copy while its snapshot is at most %s old", cfg.RoutePolicy.CostThreshold, cfg.RoutePolicy.ScanRows, cfg.RouteMaxCopyAge)
+	rule := fmt.Sprintf("SELECTs with plan cost >= %.0f or a full scan over >= %d rows (on a MariaDB source, also joins that read that many rows in all) run on the copy while its snapshot is at most %s old", cfg.RoutePolicy.CostThreshold, cfg.RoutePolicy.ScanRows, cfg.RouteMaxCopyAge)
 	if cfg.RouteReadOnly {
 		return "Read routing (experimental) is on, read-only (--route-read-only): reads go to each server's source MySQL with that server's forwarding account when it has one, else with its source account; " + rule + ". A statement that is not a read is refused and never sent to the source. The check reads the statement's text: what a stored function does when a SELECT calls it is up to that account's grants.\n"
 	}

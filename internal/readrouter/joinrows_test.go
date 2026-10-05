@@ -569,6 +569,8 @@ func TestDecideStatement_limitOverJoinOfAnySize(t *testing.T) {
 		{"join_limit_1001", joinNoOrder + " LIMIT 99999", false, "LIMIT 99999 with no sort"},
 		// An aggregate reads the whole join before the LIMIT applies.
 		{"join_limit_1001", "SELECT c.name, count(*) FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY c.name LIMIT 1001", true, ""},
+		// A second LIMIT belongs to a derived table, built whole first.
+		{"join_limit_1001", "SELECT d.id, c.name FROM (SELECT id, customer_id FROM orders LIMIT 500000) d JOIN customers c ON c.id = d.customer_id LIMIT 10", true, ""},
 		// No LIMIT: counted.
 		{"join_limit_1001", joinNoOrder, true, ""},
 	} {
@@ -616,6 +618,15 @@ func TestDecideStatement_sortedFirstTableUnderLimit(t *testing.T) {
 	}
 	if d := DefaultPolicy().DecideStatement(stmt, p); !d.ToCopy || d.Rule != RuleJoinRows {
 		t.Errorf("no LIMIT: toCopy=%v by %s (%s)", d.ToCopy, d.Rule, d.Reason)
+	}
+	// A table sorted further down the list is fed by the join before it:
+	// the LIMIT stops nothing of that part, and the estimate stands.
+	later, err := ParsePlan([]byte(`{"query_block":{"select_id":1,"nested_loop":[{"table":{"table_name":"c","access_type":"range","rows":6000}},{"read_sorted_file":{"filesort":{"sort_key":"o.x","table":{"table_name":"o","access_type":"ref","rows":20}}}}]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := DefaultPolicy().DecideStatement(stmt+" LIMIT 10", later); !d.ToCopy || d.Rule != RuleJoinRows {
+		t.Errorf("a sort further down the list: toCopy=%v by %s (%s)", d.ToCopy, d.Rule, d.Reason)
 	}
 	// A sort over the whole join (a filesort around the list) is not this:
 	// the LIMIT applies after everything is read.
@@ -669,6 +680,13 @@ func TestParsePlan_constTableIsNotAJoin(t *testing.T) {
 	keyed := joinPlan(t, "mariadb114", "const_then_range_keyed")
 	if keyed.Joined || keyed.RowsRead != 0 {
 		t.Errorf("const then ref: joined=%v rows=%d", keyed.Joined, keyed.RowsRead)
+	}
+	system, err := ParsePlan([]byte(`{"query_block":{"select_id":1,"nested_loop":[{"table":{"table_name":"a","access_type":"system","rows":1}},{"table":{"table_name":"b","access_type":"range","rows":564692}}]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if system.Joined || system.RowsRead != 0 {
+		t.Errorf("system then range: joined=%v rows=%d", system.Joined, system.RowsRead)
 	}
 	// Two tables after the const one are a join.
 	three, err := ParsePlan([]byte(`{"query_block":{"select_id":1,"nested_loop":[{"table":{"table_name":"k","access_type":"const","rows":1,"filtered":100}},{"table":{"table_name":"a","access_type":"system","rows":1}},{"table":{"table_name":"b","access_type":"range","rows":300}},{"table":{"table_name":"c","access_type":"ref","rows":20}}]}}`))
