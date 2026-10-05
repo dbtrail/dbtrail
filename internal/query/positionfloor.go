@@ -116,6 +116,7 @@ const partitionReadAttempts = 3
 
 // LoadPartitionHeads reads the picture PartitionHeads answers from.
 func LoadPartitionHeads(ctx context.Context, db *sql.DB) (*PartitionHeads, error) {
+	pictureLoads.Add(1)
 	var h *PartitionHeads
 	var err error
 	for range partitionReadAttempts {
@@ -384,6 +385,32 @@ type runPicture struct {
 	heads *PartitionHeads
 	err   error
 }
+
+// SearchesBelowItsOwnFloor returns o marked as a fetch whose caller covers
+// the hours below its time floor itself, so the engine must not look at the
+// partitions for it (#2138).
+//
+// Legitimate for exactly one shape: the caller runs a SECOND fetch for the
+// same table and position with no Since and Until at CoarseSinceFloor(Since),
+// which searches every older hour by position alone, or proves from the index
+// that no such search can find anything, and treats any failure of either as
+// "changed" or as a refusal. The routed port's "did this table change since
+// its snapshot" check is that caller: it asks per statement inside the
+// capture process, under a two-second budget, and has its own one-row proof
+// that makes the look at every partition a cost with nothing to add. A caller
+// that only wants to skip the cost must not use this: without the second
+// search it is the silent loss #2138 was.
+func (o Options) SearchesBelowItsOwnFloor() Options {
+	o.sinceSettled = true
+	return o
+}
+
+// pictureLoads counts the pictures loaded by this process.
+var pictureLoads atomic.Int64
+
+// PictureLoads is how many times this process has loaded a PartitionHeads:
+// a diagnostic, and what a test reads to show that a path loads none, or one.
+func PictureLoads() int64 { return pictureLoads.Load() }
 
 func (r *runPicture) get(ctx context.Context, db *sql.DB) (*PartitionHeads, error) {
 	r.once.Do(func() { r.heads, r.err = LoadPartitionHeads(ctx, db) })

@@ -541,3 +541,29 @@ func TestFetchMergedStream_settlesItsStartOnce(t *testing.T) {
 		t.Fatal(merr)
 	}
 }
+
+// A caller that searches below its own floor is not looked up for: the
+// events query is the only statement, and no picture is loaded.
+func TestEngineFetch_callerThatSearchesBelowItsOwnFloor(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	since := time.Date(2026, 3, 1, 12, 30, 0, 0, time.UTC)
+	opts := Options{Schema: "shop", Table: "orders", Since: &since, SincePos: &BinlogPos{File: "binlog.000001", Pos: 800}, Limit: 1}
+	mock.ExpectQuery("FROM binlog_events").WillReturnRows(sqlmock.NewRows([]string{"event_id"}))
+	before := PictureLoads()
+	if _, err := New(db).Fetch(context.Background(), opts.SearchesBelowItsOwnFloor()); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if got := PictureLoads() - before; got != 0 {
+		t.Fatalf("pictures loaded = %d, want 0", got)
+	}
+	if opts.sinceSettled {
+		t.Fatal("the mark changed the caller's own options")
+	}
+	if merr := mock.ExpectationsWereMet(); merr != nil {
+		t.Fatal(merr)
+	}
+}
