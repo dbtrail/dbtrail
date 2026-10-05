@@ -19,12 +19,14 @@ import (
 // canned verdicts; forwarded statements come back as a one-cell "mysql" row
 // so a test can tell which side answered.
 type fakeRouter struct {
-	toCopy    bool
-	reason    string
-	rule      readrouter.Rule
-	decideErr error
-	inTxn     bool
-	useDBErr  error
+	toCopy bool
+	reason string
+	rule   readrouter.Rule
+	// resultRows is the plan's estimate of the statement's result (#2115).
+	resultRows int64
+	decideErr  error
+	inTxn      bool
+	useDBErr   error
 	// forwardErr, when set, is what Forward answers (MySQL's own error).
 	forwardErr error
 	forwarded  []string
@@ -99,7 +101,7 @@ func (s *fakeStmt) Close()                 { s.closed++ }
 
 func (s *fakeStmt) Decide(_ context.Context, args []any) (readrouter.Decision, error) {
 	s.decided = append(s.decided, args)
-	return readrouter.Decision{ToCopy: s.r.toCopy, Reason: s.r.reason, Rule: s.r.rule}, s.r.decideErr
+	return readrouter.Decision{ToCopy: s.r.toCopy, Reason: s.r.reason, Rule: s.r.rule, ResultRows: s.r.resultRows}, s.r.decideErr
 }
 
 func (s *fakeStmt) Execute(_ context.Context, args []any, sink readrouter.RowSink) (*mysql.Result, error) {
@@ -135,7 +137,7 @@ func (r *fakeRouter) Prepare(_ context.Context, stmt string) (readrouter.Stmt, e
 
 func (r *fakeRouter) Decide(_ context.Context, stmt string) (readrouter.Decision, error) {
 	r.explained = append(r.explained, stmt)
-	return readrouter.Decision{ToCopy: r.toCopy, Reason: r.reason, Rule: r.rule}, r.decideErr
+	return readrouter.Decision{ToCopy: r.toCopy, Reason: r.reason, Rule: r.rule, ResultRows: r.resultRows}, r.decideErr
 }
 
 func (r *fakeRouter) Forward(_ context.Context, stmt string, sink readrouter.RowSink) (*mysql.Result, error) {

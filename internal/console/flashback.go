@@ -170,6 +170,10 @@ func (q *SQLOnCopy) CopyUpdatedAt(ctx context.Context) time.Time {
 	return in.BaselineSnapshot
 }
 
+// RowCap is this server's row cap for one statement on the copy: the same
+// number runSQL hands the worker when the caller asks for no lower one.
+func (q *SQLOnCopy) RowCap() int { return q.s.sqlLimits.MaxRows }
+
 // sqlOnCopyFor decides, once per connection, whether the port can offer
 // free SQL on this server: the console has a sandbox runner, and archive
 // access is on. The same two gates POST /api/sql applies before it looks at

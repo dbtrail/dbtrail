@@ -1,0 +1,1 @@
+{"query_block":{"select_id":1,"cost":0.32528884,"nested_loop":[{"table":{"table_name":"orders","access_type":"range","possible_keys":["PRIMARY"],"key":"PRIMARY","key_length":"4","used_key_parts":["id"],"loops":1,"rows":1500,"cost":0.32528884,"filtered":100,"attached_condition":"orders.`id` > 1998500"}}]}}

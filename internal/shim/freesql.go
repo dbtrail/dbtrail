@@ -57,6 +57,11 @@ type FreeSQL interface {
 	// compares it with the server's maximum copy age before it sends a
 	// statement to the copy.
 	CopyUpdatedAt(ctx context.Context) time.Time
+	// RowCap is the most rows the copy returns for one statement on this
+	// server: a result with more is refused, not cut. 0 when the copy names
+	// no cap. The router holds a plan's estimate of the result against it
+	// (#2115).
+	RowCap() int
 }
 
 // Router is the read-routing seam (#2038): with one bound, an ordinary
@@ -180,6 +185,12 @@ const RouteReasonCopyColumnsDiffer RouteReason = "copy_columns_differ"
 // to have been complete within MaxCopyAge (#2085). Apart from
 // expensive_plan, so the two can be told apart in the tally.
 const RouteReasonTablesUnchanged RouteReason = "tables_unchanged"
+
+// RouteReasonResultOverCap: the plan is expensive, and says the statement
+// returns more rows than the copy's row cap. MySQL answered and the copy was
+// not tried: it would have run the statement, refused the result for its
+// size (copy_refused), and MySQL would have run it again (#2115).
+const RouteReasonResultOverCap RouteReason = "result_over_row_cap"
 
 // observeRoute reports one decision to the bound observer, if any.
 func (h *Handler) observeRoute(route RouteSide, reason RouteReason) {
@@ -323,6 +334,9 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		}
 		return ops.forward(reason, d.Reason)
 	}
+	if why := h.resultOverRowCap(ctx, d); why != "" {
+		return ops.forward(RouteReasonResultOverCap, why+"; "+d.Reason)
+	}
 	at := h.freeSQL.CopyUpdatedAt(ctx)
 	if at.IsZero() {
 		h.routeWarn("age", "read routing: copy age unknown, expensive statement forwarded", nil)
@@ -387,6 +401,32 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	h.routeLastForwarded = false
 	h.mu.Unlock()
 	return res, nil
+}
+
+// resultOverRowCap says why an expensive statement is not worth trying on
+// the copy, or "" when it is: the plan estimates its result
+// (readrouter.Decision.ResultRows) above the copy's row cap, so the copy
+// would run it and refuse the result. Asked before the copy's snapshot time
+// is read, which such a statement then never pays for.
+//
+// The source's session is read first (what the copy would run under), for
+// its sql_select_limit: at or under the cap, the copy cuts the result there
+// without an error, as the client asked, so the statement is the copy's as
+// before. A session that cannot be read, or one the copy does not
+// reproduce, is left to the rungs that own those cases.
+func (h *Handler) resultOverRowCap(ctx context.Context, d readrouter.Decision) string {
+	rowCap := h.freeSQL.RowCap()
+	if rowCap <= 0 || d.ResultRows <= int64(rowCap) {
+		return ""
+	}
+	rs, err := h.ensureSession(ctx)
+	if err != nil || rs.differs != "" {
+		return ""
+	}
+	if limit := rs.vars.selectLimit; limit > 0 && limit <= uint64(rowCap) {
+		return ""
+	}
+	return fmt.Sprintf("the plan returns about %d rows, over the copy's row cap of %d: not tried on the copy", d.ResultRows, rowCap)
 }
 
 // readOnlyRefusal is the read-only gate (RouterConfig.ReadOnly): nil when the

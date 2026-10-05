@@ -382,7 +382,26 @@ The decision, in order, for every statement:
    index serves falls through: under a full scan its estimate is the whole
    table, and under an index-served `ORDER BY` the estimate is only the
    `LIMIT` over a guessed selectivity, while a rare value walks the whole
-   index. Then a plan whose `query_cost` is at least
+   index. The same `LIMIT`, with no sort, is also **MySQL**'s when the plan
+   reads only its result, however many rows sit behind it: one table,
+   read through an index by key or by range with nothing left to check
+   row by row (or read whole with no condition at all). Every row the
+   index hands over is then a row of the answer, so the read stops once
+   the `LIMIT` is met. `SELECT * FROM orders WHERE created_at >=
+   '2026-01-01' AND created_at < '2026-04-01' LIMIT 500` over 246,857
+   rows in the range carries a cost of 544,000 and took 24 ms on MySQL 8.4
+   (1.6 ms with `ORDER BY created_at`), against 65 ms on the copy. The
+   router takes this only when it can read it off the plan: every
+   condition is a column compared with a constant (`=`, `<`, `<=`, `>`,
+   `>=`, `BETWEEN`, `IN`), joined by `AND`, on a column of the index the
+   plan uses, with a range on the last of those columns only. A second
+   condition on any other column, a function, arithmetic, `OR`, `<>`, an
+   index on a prefix of a text column, a call to a function the router
+   does not know returns one value per row (it could be an aggregate, which
+   reads everything for one row), a join, a subquery, a view with a
+   filter of its own and a partitioned table are not read, and are decided
+   as before: with a condition no index serves that matches nothing, the
+   same statement reads the whole range (400 ms). Then a plan whose `query_cost` is at least
    `--route-cost-threshold` (default 10,000; a point lookup costs about 1, a
    full scan over 200,000 rows about 20,000) or that has a full table scan
    over at least `--route-scan-rows` rows (default 100,000) is the copy's
@@ -454,6 +473,27 @@ The decision, in order, for every statement:
    `LIMIT` with a filter no index serves. The study of which statements the copy answers the same way
    (the vetoes of step 4) was run against MySQL; on a MariaDB source read
    routing is as experimental, and less measured.
+   Last, for a plan the copy should take, **the size of the result**. The
+   copy returns at most its row cap (1,000 rows by default) and refuses a
+   larger result, so a statement that returns more would run on the copy,
+   be refused, and run again on MySQL. When the plan reads only its result
+   (as above; here a sort is allowed) and the statement has no aggregate,
+   `GROUP BY`, `DISTINCT`, window function or `UNION`, the plan's row
+   estimate is an estimate of the result, cut by the statement's own
+   `LIMIT` when it has one. Above the row cap: **MySQL**, and the copy is
+   not tried (`result_over_row_cap`). The estimate comes from the index
+   itself and was off by 0.6 to 3.2 times in our measurements, in both
+   directions; that is harmless here, because in this shape MySQL reads
+   exactly the rows it returns: a result that turns out small was a small
+   read. Where the result is not the rows read, nothing is assumed and the
+   copy is tried as before: an aggregate over a million rows returns one
+   row, and a filter no index serves is estimated by a fixed guess (MySQL
+   put 221,203 rows on a statement that returned one). A join, a `GROUP
+   BY` with many groups and a full scan under a filter can therefore still
+   be tried on the copy, refused for size and run on MySQL
+   (`copy_refused`). A connection that set `sql_select_limit` at or under
+   the cap asked for the cut, and the copy answers it as before. On a
+   **MariaDB** source this is seen for a table or an index read whole.
 6. For a plan the copy should take, how fresh the copy is. Its snapshot's
    age unknown: **MySQL**. Its snapshot at most `--route-max-copy-age` old:
    on to the next step. Older than that: the copy still answers when every
@@ -1526,7 +1566,9 @@ MySQL's.
   the limit), `tables_unchanged` (the copy answered although its snapshot is
   older than the limit, because the tables the statement reads have not
   changed since their snapshot), `cheap_plan`, `bounded_limit` (a small `LIMIT` MySQL answers
-  without reading past it), `not_a_select`, `write`, `session_setting`,
+  without reading past it), `result_over_row_cap` (an expensive plan whose
+  result is estimated above the copy's row cap: MySQL answered, and the copy
+  was not tried), `not_a_select`, `write`, `session_setting`,
   `session_differs` (the source's session on that connection holds a setting
   the copy does not reproduce; DBTrail's log names the setting and its
   value once per connection), `connection_pinned` (a `CREATE TEMPORARY
