@@ -89,6 +89,60 @@ func TestColumnVeto_arithmeticOnADateColumn(t *testing.T) {
 	}
 }
 
+// A date can reach a + or an AVG under another name: an alias used where
+// MySQL takes one for its expression, an alias given inside a subquery, a
+// column list over a star. And a TIME or YEAR column can be reached with no
+// name at all, through a star.
+func TestColumnVeto_aDateUnderAnotherName(t *testing.T) {
+	dates, whole := []string{"d", "d2"}, []string{"tm"}
+	for stmt, kept := range map[string]bool{
+		// An alias in GROUP BY, HAVING and ORDER BY.
+		"SELECT d AS x, d2 AS y FROM t GROUP BY x, y HAVING x - y > 5": true,
+		"SELECT d AS x, d2 AS y FROM t ORDER BY x - y":                 true,
+		"SELECT d x, COUNT(*) FROM t GROUP BY x + 0":                   true,
+		"SELECT status, MAX(d) FROM t GROUP BY status ORDER BY n - 1":  true, // for nothing
+		"SELECT a - b, d FROM t GROUP BY d ORDER BY d":                 false,
+		"SELECT a + 1 FROM t WHERE d >= '' ORDER BY d DESC":            false,
+		"SELECT d FROM t ORDER BY d - INTERVAL 1 DAY":                  false,
+		// AVG of an alias from a subquery or a WITH.
+		"SELECT AVG(x) FROM (SELECT d AS x FROM t) q":           true,
+		"WITH q AS (SELECT d AS x FROM t) SELECT AVG(x) FROM q": true,
+		"SELECT AVG(n) FROM (SELECT n, d FROM t) q":             true, // for nothing
+		"SELECT AVG(n), MAX(d) FROM t":                          false,
+		// A column list over a star: the date's name is nowhere.
+		"SELECT z - y FROM (SELECT * FROM t) AS q(x, y, z)":          true,
+		"WITH q(i, x, y) AS (SELECT * FROM t) SELECT x - y FROM q":   true,
+		"SELECT b - a FROM (TABLE t) q(i, a, b)":                     true,
+		"SELECT AVG(x) FROM (SELECT t.* FROM t) q(i, x)":             true,
+		"SELECT x FROM (SELECT * FROM t) AS q(x, y, z)":              false,
+		"SELECT a - 1 FROM (SELECT a, COUNT(*) FROM t GROUP BY a) q": false, // no star and no date named
+		"SELECT COUNT(*) - 1 FROM t WHERE a IN (SELECT 2 * 3)":       false, // count(*) and a product are not stars
+	} {
+		if got := ColumnVeto(Shape(stmt), dates, nil); (got != "") != kept {
+			t.Errorf("ColumnVeto(%q) = %q, want kept on the source: %v", stmt, got, kept)
+		}
+	}
+	for stmt, kept := range map[string]bool{
+		"SELECT * FROM t ORDER BY 2":         true,
+		"SELECT t.* FROM t":                  true,
+		"SELECT a, * FROM t":                 true,
+		"SELECT DISTINCT * FROM t":           true,
+		"SELECT x FROM (TABLE t) q(x)":       true,
+		"SELECT COUNT(*), a * 2 FROM t":      false,
+		"SELECT a FROM t WHERE b IN (1 , 2)": false,
+	} {
+		if got := ColumnVeto(Shape(stmt), nil, whole); (got != "") != kept {
+			t.Errorf("a TIME column: ColumnVeto(%q) = %q, want kept on the source: %v", stmt, got, kept)
+		}
+	}
+	// A date column whose own name starts with $, quoted or not.
+	for _, stmt := range []string{"SELECT $d + 1 FROM t", "SELECT `$d` + 1 FROM t"} {
+		if got := ColumnVeto(Shape(stmt), []string{"$d"}, nil); got == "" {
+			t.Errorf("ColumnVeto(%q) with a column named $d: not kept back", stmt)
+		}
+	}
+}
+
 // A quoted column can be called what the group and sign checks take for a
 // keyword: it is read as a name, not as that word.
 func TestColumnVeto_columnNamedLikeAKeyword(t *testing.T) {
@@ -249,6 +303,7 @@ func TestVeto_twoDigitYear(t *testing.T) {
 		"SELECT id FROM t WHERE d = '1-2-3'":               "", // the year 1 on both
 		"SELECT id FROM t WHERE d = '26.01.15'":            "", // the copy refuses it
 		"SELECT id FROM t WHERE d = '260115'":              "", // and this
+		"SELECT id FROM t WHERE d = '26 01 15'":            vetoTwoDigitYear,
 		"SELECT id FROM t WHERE code = '12-34'":            "",
 		"SELECT id FROM t WHERE code = '12-AB-34'":         "",
 		"SELECT id FROM t WHERE tm = '10:00:00'":           "",
@@ -264,7 +319,7 @@ func TestVeto_twoDigitYear(t *testing.T) {
 		}
 	}
 	for s, want := range map[string]bool{
-		"26-01-15": true, "26/1/5": true, "  26-01-15 10:00:00": true, "00-1-1": true,
+		"26-01-15": true, "26/1/5": true, "26 01 15": true, "\v26-01-15": true, "  26-01-15 10:00:00": true, "00-1-1": true,
 		"2026-01-15": false, "1-2-3": false, "26-01": false, "26-01-": false, "26-111-1": false, "": false, "26": false, "ab-01-15": false, "26.01.15": false,
 	} {
 		if got := TwoDigitYear(s); got != want {

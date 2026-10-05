@@ -56,12 +56,20 @@ func (s StatementShape) ColumnVeto(dates, whole []string) string {
 // year keeps every statement that calls YEAR() off the copy). That costs a
 // statement the copy could have answered and never a wrong answer.
 //
-// What the text cannot follow is a date under another name: an alias of the
-// column, or of an expression of it, used from outside the subquery or the
-// WITH that gives it (SELECT d + 1 FROM (SELECT created_on AS d FROM t) x).
-// So a statement that names one of the dates AND holds a subquery or a WITH
-// is kept on the source for any + or - in it that INTERVAL does not follow,
-// wherever it stands.
+// What the text cannot follow is a date under another name, so three more
+// statements are kept on the source:
+//
+//   - one that holds a subquery, a derived table or a WITH, and a + or -
+//     that INTERVAL does not follow, or an AVG, anywhere, when it names one
+//     of the dates or has a star that could bring one in. An alias given
+//     inside (SELECT d + 1 FROM (SELECT created_on AS d FROM t) x) or a
+//     column list over a star (FROM (SELECT * FROM t) AS q(a, b)) is the
+//     date outside;
+//   - one that names one of the dates and has such a + or - at or after its
+//     first GROUP BY, HAVING or ORDER BY: MySQL takes a select-list alias
+//     for its expression there (SELECT d AS x, d2 AS y ... HAVING x - y > 5);
+//   - one with a star (SELECT *, t.*, TABLE t) over a table with a TIME or
+//     YEAR column: the column is reached without its name (ORDER BY 2).
 //
 // Three statements are refused without being searched, because the search
 // could miss: one with a character outside ASCII outside its string literals
@@ -77,8 +85,20 @@ func ColumnVeto(shape string, dates, whole []string) string {
 // plainName is a column name a statement can only spell one way, up to case.
 var plainName = regexp.MustCompile(`^[A-Za-z0-9_$]+$`)
 
-// subquery is the opening of a subquery or of a WITH.
-var subquery = regexp.MustCompile(`(?i)\(\s*select\b|\bwith\b`)
+var (
+	// subquery is the opening of a subquery, of a derived table written
+	// TABLE t, or of a WITH.
+	subquery = regexp.MustCompile(`(?i)\(\s*(?:select|table|values)\b|\bwith\b`)
+	// starItem is a star that stands for columns (SELECT *, t.*, a list's
+	// next item) and not count(*) or a product, or the TABLE t that stands
+	// for one.
+	starItem = regexp.MustCompile(`(?i)(?:\bselect\s+(?:all\s+|distinct\s+)?|,\s*|\.\s*)\*|\(\s*table\b`)
+	// avgCall is AVG called on anything.
+	avgCall = regexp.MustCompile(`(?i)\bavg\s*\(`)
+	// aliasClause opens a clause where MySQL lets a select-list alias stand
+	// for its expression.
+	aliasClause = regexp.MustCompile(`(?i)\b(?:having|group\s+by|order\s+by)\b`)
+)
 
 // columnVetoWork is ColumnVeto with the work it took, counted by shapeText.
 func columnVetoWork(shape string, dates, whole []string) (why string, steps int) {
@@ -115,8 +135,12 @@ func columnVetoWork(shape string, dates, whole []string) (why string, steps int)
 		for j < n && wordByte(t.at(j)) {
 			j++
 		}
-		word := strings.TrimPrefix(t.sub(i, j), "$")
-		switch kinds[strings.ToLower(word)] {
+		word := strings.ToLower(t.sub(i, j))
+		if kinds[word] == 0 {
+			// A quoted name is written with a $ before it (namesKept).
+			word = strings.TrimPrefix(word, "$")
+		}
+		switch kinds[word] {
 		case 1:
 			shapes = append(shapes, temporal{start: i, left: qualifiedStart(t, i), end: j, paren: -1, in: -1})
 		case 2:
@@ -124,14 +148,29 @@ func columnVetoWork(shape string, dates, whole []string) (why string, steps int)
 		}
 		i = j
 	}
+	text := t.all()
+	derived, star := subquery.MatchString(text), starItem.MatchString(text)
+	if len(whole) > 0 && star {
+		return "the statement has a star over a table with a TIME or YEAR column (" + whole[0] + "), which the copy holds as text or as a plain number", t.steps
+	}
+	const arithmetic = " (a number built from the date's digits on MySQL; a date, a count of days or an interval on the copy)"
+	if len(dates) == 0 || len(shapes) == 0 && !(derived && star) {
+		return "", t.steps
+	}
+	if derived && (anySignFrom(t, 0) || avgCall.MatchString(text)) {
+		// The date can reach the + or the AVG under another name: an alias
+		// given inside the subquery, or a column list after it over a star.
+		return "the statement reads a table with a date column (" + dates[0] + "), holds a subquery or a WITH, and has a +, a - or an AVG in it: " +
+			"the date could stand there under another name" + arithmetic, t.steps
+	}
 	if len(shapes) == 0 {
 		return "", t.steps
 	}
-	const arithmetic = " (a number built from the date's digits on MySQL; a date, a count of days or an interval on the copy)"
 	name := strings.ToLower(strings.TrimPrefix(lastWord(t, shapes[0].end), "$"))
-	if subquery.MatchString(t.all()) && anySign(t) {
-		return "the statement names the date column " + name + ", holds a subquery or a WITH, and has a + or a - in it: " +
-			"an alias of the date could stand next to it" + arithmetic, t.steps
+	if loc := aliasClause.FindStringIndex(text); loc != nil && anySignFrom(t, loc[1]) {
+		// GROUP BY, HAVING and ORDER BY take a select-list alias for its
+		// expression on MySQL: SELECT d AS x ... HAVING x - y > 5.
+		return "the statement names the date column " + name + " and has a + or a - in its GROUP BY, HAVING or ORDER BY, where an alias of the date could stand" + arithmetic, t.steps
 	}
 	if shapesInArithmetic(t, shapes) {
 		return "a date column of the table (" + name + " is the first the statement names) stands next to + or -, or under AVG" + arithmetic, t.steps
@@ -212,11 +251,11 @@ func lastWord(t *shapeText, end int) string {
 	return t.sub(i, end)
 }
 
-// anySign reports a + or a - anywhere in the text that INTERVAL does not
+// anySignFrom reports a + or a - at or after from that INTERVAL does not
 // follow.
-func anySign(t *shapeText) bool {
+func anySignFrom(t *shapeText, from int) bool {
 	n := t.len()
-	for i := 0; i < n; i++ {
+	for i := from; i < n; i++ {
 		if c := t.at(i); (c == '+' || c == '-') && signAfter(t, i) {
 			return true
 		}

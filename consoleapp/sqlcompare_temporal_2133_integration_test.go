@@ -183,6 +183,7 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{stmt: "SELECT MIN(side), MAX(created_on) - MIN(created_on) FROM ev", who: "live", why: "one date minus another, each inside a call"},
 		{stmt: "SELECT MIN(side), AVG(dt) FROM ev", who: "live", why: "AVG of a DATETIME column"},
 		{stmt: "SELECT side, d + 1 FROM (SELECT created_on AS d, n, side FROM ev) x ORDER BY n", who: "live", why: "an alias of the date, used outside its subquery"},
+		{stmt: "SELECT MIN(side), AVG(x) FROM (SELECT created_on AS x, side FROM ev) q", who: "live", why: "AVG of an alias of the date, from outside its subquery"},
 		{stmt: "SELECT side, n FROM ev WHERE tm >= '9:00:00' ORDER BY n", who: "live", why: "a TIME column named"},
 		{stmt: "SELECT side, n FROM ev WHERE yr = 26 ORDER BY n", who: "live", why: "a YEAR column named"},
 		{stmt: "SELECT side, n | 0 FROM ev ORDER BY n", who: "live", why: "a bit operator: kept on the source from the text"},
@@ -211,8 +212,8 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		t.Errorf("routed created_on + 1: got %s, want 20260102 / 20260204 / 20260116", got)
 	}
 
-	// Who answered, and why the source: nine statements declined by the
-	// copy for a column's type (eight above and the one just now), two kept on
+	// Who answered, and why the source: ten statements declined by the
+	// copy for a column's type (nine above and the one just now), two kept on
 	// the source from the text (the bit operator, the bound two-digit year),
 	// three answered by the copy, and the copy at fault in none.
 	req := httptest.NewRequest("GET", "http://127.0.0.1/api/flashback", nil)
@@ -231,7 +232,7 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	}
 	reasons := fb.Routing.Servers[ent.ID].Reasons
 	t.Logf("routing reasons: %v", reasons)
-	if reasons["copy_columns_differ"] != 9 || reasons["veto"] != 2 || reasons["expensive_plan"] != 3 || reasons["copy_refused"] != 0 || reasons["explain_failed"] != 0 {
-		t.Errorf("reasons = %v, want copy_columns_differ 9, veto 2, expensive_plan 3, copy_refused 0, explain_failed 0", reasons)
+	if reasons["copy_columns_differ"] != 10 || reasons["veto"] != 2 || reasons["expensive_plan"] != 3 || reasons["copy_refused"] != 0 || reasons["explain_failed"] != 0 {
+		t.Errorf("reasons = %v, want copy_columns_differ 10, veto 2, expensive_plan 3, copy_refused 0, explain_failed 0", reasons)
 	}
 }

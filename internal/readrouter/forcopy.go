@@ -329,20 +329,22 @@ func wholeNumber(s string) bool {
 }
 
 // TwoDigitYear reports whether s is written as a date with a year of two
-// digits: two digits, a - or a /, one or two digits, a - or a /, and a digit
-// (26-01-15, 26/1/5, 26-01-15 10:00:00), with or without spaces before it.
+// digits: two digits, a separator (-, / or a space), one or two digits, a
+// separator and a digit (26-01-15, 26/1/5, 26-01-15 10:00:00), with or
+// without white space before it.
 // A year of one digit or of four is the same year on both sides, and with
 // dots (26.01.15) or no separator (260115) the copy refuses the string.
 func TwoDigitYear(s string) bool {
-	s = strings.TrimLeft(s, " \t\n\r")
-	if len(s) < 6 || !asciiDigit(s[0]) || !asciiDigit(s[1]) || s[2] != '-' && s[2] != '/' {
+	s = strings.TrimLeft(s, " \t\n\r\v\f")
+	sep := func(c byte) bool { return c == '-' || c == '/' || c == ' ' }
+	if len(s) < 6 || !asciiDigit(s[0]) || !asciiDigit(s[1]) || !sep(s[2]) {
 		return false
 	}
 	i := 3
 	for i < len(s) && i < 5 && asciiDigit(s[i]) {
 		i++
 	}
-	return i > 3 && i+1 < len(s) && (s[i] == '-' || s[i] == '/') && asciiDigit(s[i+1])
+	return i > 3 && i+1 < len(s) && sep(s[i]) && asciiDigit(s[i+1])
 }
 
 // wordByte reports whether c can be part of an unquoted word: a letter, a

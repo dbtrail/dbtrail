@@ -19,12 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     its snapshot and declines such a statement (`copy_columns_differ` in
     the "Who answered" counter), through parentheses, calls and `CASE`, with
     the name quoted or not, as text and as a prepared statement
-    (`created_on + ?`). A statement that names a date column, has a subquery
-    or a `WITH`, and holds any `+` or `-` is declined too, because an alias
-    of the date can be used from outside its subquery. A `+` or `-`
-    elsewhere (`SELECT amount + tax ... WHERE created_on >= ...`) and a date
-    plus or minus `INTERVAL` still reach the copy.
-  - A statement that names a `TIME` or a `YEAR` column is declined: the copy
+    (`created_on + ?`). Two more are declined because the date can stand
+    under another name: a statement with a subquery or a `WITH` that holds
+    any `+`, `-` or `AVG` and names a date column or has a star, and one
+    that names a date column and has a `+` or `-` in its `GROUP BY`,
+    `HAVING` or `ORDER BY`, where MySQL takes an alias for its expression.
+    A `+` or `-` elsewhere (`SELECT amount + tax ... WHERE created_on >=
+    ...`) and a date plus or minus `INTERVAL` still reach the copy.
+  - A statement that names a `TIME` or a `YEAR` column, or has a star over
+    a table with one, is declined: the copy
     holds a `TIME` as text (`tm >= '9:00:00'` returned no row there, three
     on MySQL) and a `YEAR` as a plain number (`yr = 26` is not 2026 there).
   - `|`, `&`, `>>`, `BIT_COUNT`, `BIT_AND`, `BIT_OR` and `BIT_XOR` are kept

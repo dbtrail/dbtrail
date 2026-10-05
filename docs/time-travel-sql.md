@@ -919,8 +919,8 @@ What this is and is not:
     is the same day on both and is not kept back, and neither is an alias
     written `AS time`;
   - a string written as a date with a two-digit year: two digits, `-` or
-    `/`, one or two digits, `-` or `/`, a digit (`'26-01-15'`, `'26/1/5'`,
-    `'26-01-15 10:00:00'`). MySQL and MariaDB read the year as 2026 (00 to
+    `/` or a space, one or two digits, the same again, a digit
+    (`'26-01-15'`, `'26/1/5'`, `'26-01-15 10:00:00'`). MySQL and MariaDB read the year as 2026 (00 to
     69 are 2000 to 2069, 70 to 99 are 1970 to 1999) and the copy as the
     year 26: `DATE '26-01-15'` is `2026-01-15` on MySQL and `0026-01-15` on
     the copy, and `WHERE created_on = '26-01-15'` finds the row on one and
@@ -1140,14 +1140,22 @@ What this is and is not:
     `COUNT(created_on) - 1` stay on MySQL too, for nothing. `*`, `/`, `%`,
     `SUM`, `ABS`, `ROUND` and a comparison with a number are not part of
     it: the copy refuses those over a date, and MySQL answers;
-  - **a statement that names such a column, has a subquery or a `WITH`, and
-    holds a `+` or a `-` anywhere** that `INTERVAL` does not follow. An
-    alias of the date used from outside its subquery (`SELECT d + 1 FROM
-    (SELECT created_on AS d FROM orders) x`) is a date under a name the
-    text cannot follow, so with a subquery in the statement every `+` and
-    `-` counts;
+  - **a statement with a subquery, a derived table or a `WITH` that holds
+    a `+` or a `-`** that `INTERVAL` does not follow, **or an `AVG`,
+    anywhere**, when it names such a column or has a star (`SELECT *`,
+    `t.*`) that could bring one in. An alias of the date used from outside
+    its subquery (`SELECT d + 1 FROM (SELECT created_on AS d FROM orders)
+    x`, `SELECT AVG(d) FROM (...) x`) and a column list over a star (`FROM
+    (SELECT * FROM orders) AS q(a, b, c)`) are a date under a name the text
+    cannot follow, so with a subquery in the statement every `+`, `-` and
+    `AVG` counts;
+  - **a statement that names such a column and has a `+` or a `-` at or
+    after its first `GROUP BY`, `HAVING` or `ORDER BY`**: MySQL takes a
+    select-list alias for its expression there (`SELECT d1 AS x, d2 AS y
+    ... HAVING x - y > 5`);
   - **a statement that names a `TIME` or a `YEAR` column of a table it
-    reads**, anywhere. The copy holds a `TIME` as text, so `tm >=
+    reads**, anywhere, **or has a star over such a table** (the column is
+    then reached without its name). The copy holds a `TIME` as text, so `tm >=
     '9:00:00'` compares letters there and finds nothing where MySQL finds
     every row after nine, and a `YEAR` as a plain number, so `yr = 26` is
     not the year 2026 there;
