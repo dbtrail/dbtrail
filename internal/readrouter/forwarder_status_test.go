@@ -53,7 +53,20 @@ func (h *statusSource) HandleQuery(q string) (*mysql.Result, error) {
 	return mysql.NewResultReserveResultset(0), nil
 }
 
-func newStatusSource(t *testing.T) string {
+// statusAtLogin makes the source announce a session state in the OK that ends
+// the login, as MySQL does for a session its configuration opens that way.
+type statusAtLogin struct {
+	server.AuthenticationHandler
+	status uint16
+}
+
+func (a statusAtLogin) OnAuthSuccess(c *server.Conn) error {
+	c.SetStatus(a.status)
+	return a.AuthenticationHandler.OnAuthSuccess(c)
+}
+
+// newStatusSource starts a source whose sessions open in the state atLogin.
+func newStatusSource(t *testing.T, atLogin uint16) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -75,13 +88,11 @@ func newStatusSource(t *testing.T) string {
 				defer c.Close()
 				_ = c.SetDeadline(time.Now().Add(30 * time.Second))
 				h := &statusSource{}
-				mc, err := server.NewCustomizedConn(c, conf, auth, h)
+				mc, err := server.NewCustomizedConn(c, conf, statusAtLogin{auth, atLogin}, h)
 				if err != nil {
 					return
 				}
 				h.conn = mc
-				// This source opens its sessions in autocommit.
-				h.set(mysql.SERVER_STATUS_AUTOCOMMIT)
 				for mc.HandleCommand() == nil {
 				}
 			}()
@@ -99,7 +110,7 @@ func TestForwarder_Status(t *testing.T) {
 		readOnly = mysql.SERVER_STATUS_IN_TRANS_READONLY
 		noBack   = mysql.SERVER_STATUS_NO_BACKSLASH_ESCAPED
 	)
-	f, err := NewForwarder("u:p@tcp("+newStatusSource(t)+")/db?tls=false", config.SSL{Mode: "disabled"}, DefaultPolicy(), 10*time.Second)
+	f, err := NewForwarder("u:p@tcp("+newStatusSource(t, auto)+")/db?tls=false", config.SSL{Mode: "disabled"}, DefaultPolicy(), 10*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,18 +151,49 @@ func TestForwarder_Status(t *testing.T) {
 		}
 	}
 
-	// A read-only-transaction flag left from an answer seen earlier does not
-	// outlive the transaction: the connection's own "in a transaction" is the
-	// fresher of the two.
-	f.mu.Lock()
-	f.lastStatus = auto | trans | readOnly
-	f.mu.Unlock()
-	if st, _ := f.Status(); st != auto {
-		t.Errorf("stale flags of an ended transaction: status 0x%04x, want 0x%04x", st, auto)
-	}
-
 	f.lose(context.Canceled)
 	if st, known := f.Status(); known {
 		t.Errorf("after the connection is lost: status 0x%04x reported as known", st)
+	}
+}
+
+// A source that opens its sessions in another state than "autocommit" says so
+// in the OK that ends the login. The port must report it from the first
+// answer after the connection is opened, whatever that first statement is:
+// a driver escapes its strings by the NO_BACKSLASH_ESCAPES flag, and a
+// statement the source refuses carries no status of its own.
+func TestForwarder_Status_fromTheLogin(t *testing.T) {
+	const atLogin = mysql.SERVER_STATUS_NO_BACKSLASH_ESCAPED // and autocommit off
+	f, err := NewForwarder("u:p@tcp("+newStatusSource(t, atLogin)+")/db?tls=false", config.SSL{Mode: "disabled"}, DefaultPolicy(), 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Forward(context.Background(), "SELECT nope", &BufferSink{}); err == nil {
+		t.Fatal("the statement did not fail")
+	}
+	if st, known := f.Status(); !known || st != atLogin {
+		t.Errorf("after a first statement the source refused: status 0x%04x (known %v), want 0x%04x", st, known, atLogin)
+	}
+}
+
+// A connection interrupted from another goroutine (the query deadline, the
+// client hanging up) is marked lost before its statement's goroutine lets go
+// of it. Its session is gone, and so is whatever transaction it was in.
+func TestForwarder_Status_interrupted(t *testing.T) {
+	f, err := NewForwarder("u:p@tcp("+newStatusSource(t, mysql.SERVER_STATUS_AUTOCOMMIT)+")/db?tls=false", config.SSL{Mode: "disabled"}, DefaultPolicy(), 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Forward(context.Background(), "BEGIN", &BufferSink{}); err != nil {
+		t.Fatal(err)
+	}
+	if st, known := f.Status(); !known || st&mysql.SERVER_STATUS_IN_TRANS == 0 {
+		t.Fatalf("in a transaction: status 0x%04x (known %v)", st, known)
+	}
+	f.interrupt(context.DeadlineExceeded)
+	if st, known := f.Status(); known {
+		t.Errorf("after an interrupt: status 0x%04x reported as known", st)
 	}
 }

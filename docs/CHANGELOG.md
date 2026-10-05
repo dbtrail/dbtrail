@@ -135,9 +135,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The flags that announce something the port does not deliver (more result
   sets, a cursor, session-state data) are never passed on. The standalone
   `bintrail shim` announces autocommit too. The handshake cannot know the
-  source, so a source configured to open sessions with autocommit off is
-  the one case it does not cover, and the version it announces stays
-  `8.0.11` whatever the source is; both, and what each driver does with
+  source, so a source configured to open its sessions with autocommit off
+  or with `NO_BACKSLASH_ESCAPES` is announced as a default one until the
+  first answer, and the version it announces stays `8.0.11` whatever the
+  source is; both, and what each driver does with
   them, are in "What the port tells a driver about its session and about the
   server" in docs/time-travel-sql.md.
 - **SQL on the copy: a `_bin` column compares byte by byte, as on MySQL**

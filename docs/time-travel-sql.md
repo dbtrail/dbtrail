@@ -812,7 +812,10 @@ string. The port's flags describe the session the client really has:
   reported it, on every answer, whoever produced it. A `SELECT` the copy
   answered, a time-travel statement, a `SHOW WARNINGS` or `USE` the port
   answered itself and a `PING` all say "in a transaction" between `BEGIN`
-  and `COMMIT`, and "autocommit off" after `SET autocommit=0`. The flags
+  and `COMMIT`, and "autocommit off" after `SET autocommit=0`. (One packet
+  is a statement behind: the end-of-columns marker in the middle of a result
+  forwarded from the source carries the state from before that statement;
+  the packet that ends the result carries the state after it.) The flags
   passed on from the source are autocommit, in a transaction, in a read-only
   transaction, `NO_BACKSLASH_ESCAPES`, and four about the statement itself
   (no index used, no good index used, slow query, database dropped). The
@@ -824,15 +827,31 @@ string. The port's flags describe the session the client really has:
   answering 1 and the flags keep saying autocommit.
 - **The handshake** announces autocommit, as MySQL and MariaDB do. It is
   written before the port knows which server the client asked for, so it
-  cannot carry that server's state. Two cases follow from that. A source
-  set to open its sessions with autocommit off (`autocommit=0` in its
-  configuration, or an `init_connect` that turns it off) is announced as
-  autocommit until its first answer: a MariaDB source then reports
-  "autocommit off" with that first answer and the driver is corrected; a
-  MySQL source never reports it (MySQL opens every session announcing
-  autocommit whatever its configuration, and connecting to it directly
-  behaves the same). A driver that must not depend on the announcement can
-  send `SET autocommit` itself when it connects.
+  cannot carry that server's state. It is wrong for a source configured to
+  open its sessions in another state, until the first answer after the port
+  has opened its own connection to the source (which it does for the first
+  statement it forwards), and that answer corrects a driver that follows the
+  flags:
+  - **Autocommit off through `init_connect`** (`SET autocommit=0`): MySQL
+    and MariaDB announce autocommit in their own handshake too and report
+    "off" from the first answer on. The port does the same.
+  - **Autocommit off through the configuration** (`autocommit=0`): MariaDB
+    announces "off" in its handshake, and the port only from the first
+    answer. MySQL announces autocommit and keeps reporting it although
+    `@@autocommit` is 0 (MySQL bug 66884), so through the port a driver
+    sees what it sees connected to MySQL directly.
+  - **`NO_BACKSLASH_ESCAPES` in the source's global `sql_mode`**: MySQL and
+    MariaDB announce it in their handshake, and the port only from the
+    first answer. A driver that escapes strings itself by this flag
+    (PyMySQL, mysqlclient, the C library, the Go driver with
+    `interpolateParams`, Connector/J with client-side prepared statements)
+    would write its first statement with backslash escapes the source does
+    not read as escapes. With such a source, use server-side prepared
+    statements or make the connection's first statement one without string
+    arguments (a `SELECT 1`, or the `SET` the driver sends anyway).
+
+  A driver that must not depend on the announcement can send
+  `SET autocommit` itself when it connects.
 
 Until this was fixed (#2110) the handshake announced status 0, and so did
 most answers the port wrote itself. PyMySQL, whose default is autocommit off, read

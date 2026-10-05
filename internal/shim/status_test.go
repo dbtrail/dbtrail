@@ -334,10 +334,12 @@ func TestStatus_routedConnection(t *testing.T) {
 			r.forwardOK = false
 
 			// Forwarded, a prepared statement streamed in the binary protocol.
+			c.Status = 0xffff
 			id, _, err := c.Prepare("SELECT side FROM t WHERE id = 1")
 			if err != nil {
 				t.Fatal(err)
 			}
+			wantStatus(t, "COM_STMT_PREPARE (EOF after the definitions)", c.Status, st)
 			rep, err = c.Execute(id)
 			if err != nil {
 				t.Fatal(err)

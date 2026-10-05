@@ -228,7 +228,8 @@ func (c *Conn) InitDB(db string) (Reply, error) {
 }
 
 // Prepare sends COM_STMT_PREPARE and returns the statement id and its
-// parameter count.
+// parameter count. The answer's first packet has no status; the EOF after
+// its parameter or column definitions has, and is kept in Status.
 func (c *Conn) Prepare(query string) (id uint32, params int, err error) {
 	c.seq = 0
 	if err := c.write(append([]byte{comStmtPrepare}, query...)); err != nil {
@@ -256,11 +257,14 @@ func (c *Conn) Prepare(query string) (id uint32, params int, err error) {
 				return 0, 0, err
 			}
 		}
-		if eof, err := c.read(); err != nil {
+		eof, err := c.read()
+		if err != nil {
 			return 0, 0, err
-		} else if !isEOF(eof) {
+		}
+		if !isEOF(eof) {
 			return 0, 0, errors.New("mysqlwire: definitions of a prepared statement not closed by EOF")
 		}
+		c.Status = binary.LittleEndian.Uint16(eof[3:])
 	}
 	return id, params, nil
 }

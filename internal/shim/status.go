@@ -3,7 +3,9 @@ package shim
 import (
 	"bytes"
 	"encoding/binary"
+	"log/slog"
 	"net"
+	"sync"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/server"
@@ -35,8 +37,10 @@ import (
 //   - The handshake and the OK that ends authentication are written before
 //     the port knows which server the client wants, so they announce what a
 //     new MySQL session is: autocommit, no transaction. (A source configured
-//     to open sessions otherwise is the one case they cannot cover; the first
-//     answer from the source corrects the flags. See docs/time-travel-sql.md.)
+//     to open sessions otherwise, with autocommit off or with
+//     NO_BACKSLASH_ESCAPES in its sql_mode, is the case they cannot cover;
+//     the first answer after the port opens its connection to the source
+//     corrects the flags. See docs/time-travel-sql.md.)
 //
 // Session writes them (stampStatus), once per command, so no answer leaves
 // with the flags of an earlier one.
@@ -105,7 +109,8 @@ func (s *Session) stampStatus(v any) {
 // has no hook: its two status bytes are set in the packet as it is written
 // (handshakeConn). TestStatus_handshakeAnnouncesAutocommit pins the result
 // against the library, so an upgrade that changes how the handshake is
-// written fails there and not in a driver.
+// written fails there and not in a driver; a handshake that is not
+// recognised at run time is logged.
 func NewConn(conn net.Conn, srv *server.Server, auth server.AuthenticationHandler, h server.Handler) (*server.Conn, error) {
 	c, err := srv.NewCustomizedConn(&handshakeConn{Conn: conn}, announceStatus{auth}, h)
 	if err != nil {
@@ -137,9 +142,22 @@ func (c *handshakeConn) Write(p []byte) (int, error) {
 		return c.Conn.Write(p)
 	}
 	c.written = true
-	out, _ := setHandshakeStatus(p, newSessionStatus)
+	out, ok := setHandshakeStatus(p, newSessionStatus)
+	if !ok && len(p) > 4 && p[4] != mysql.ERR_HEADER {
+		// The first packet is neither the handshake this knows nor an error
+		// sent in its place: the status it announces is whatever the library
+		// wrote, most likely 0, which a driver reads as "autocommit off".
+		handshakeNotSet.Do(func() {
+			slog.Warn("mysql port: the server handshake was not recognised, so its status flags were left as written; " +
+				"a driver that trusts them may believe autocommit is off (logged once)")
+		})
+	}
 	return c.Conn.Write(out)
 }
+
+// handshakeNotSet makes the warning above a one-time one: the cause is the
+// build (a library that writes its handshake differently), not a connection.
+var handshakeNotSet sync.Once
 
 // setHandshakeStatus returns a copy of the protocol 10 handshake packet p
 // (with its 4-byte header) announcing status. Anything that is not exactly
