@@ -12,10 +12,15 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
+
+	"github.com/dbtrail/dbtrail/internal/config"
 )
 
 // DDLBintrailServers is the canonical CREATE TABLE statement for bintrail_servers.
@@ -319,19 +324,29 @@ func SyntheticServerUUID(host string, port uint16) string {
 
 // DeriveServerID returns a deterministic uint32 server-id by hashing the
 // source DSN's host:user:dbname triple. The same DSN always produces the same
-// ID, so `bintrail up` resumes cleanly across restarts without the user
-// remembering what server-id they used last time.
+// ID on every machine, which is its flaw as a replication identity: two
+// installations capturing one source through the same connection derive the
+// same id and displace each other in a loop. Capture uses DeriveForInstall;
+// this remains for callers with no index to tell installations apart, and as
+// the value DeriveForInstall falls back to.
 //
 // Returns an error when the DSN cannot be parsed — callers must handle this
-// rather than silently substituting a non-deterministic value, because a
-// per-invocation ID breaks the resume-from-checkpoint contract (MySQL would
-// treat each restart as a new replica).
+// rather than silently substituting a non-deterministic value.
 func DeriveServerID(dsn string) (uint32, error) {
+	return deriveServerID(dsn, "")
+}
+
+// deriveServerID hashes the source triple and, when salt is not empty, the
+// salt with it. An empty salt gives DeriveServerID's value exactly.
+func deriveServerID(dsn, salt string) (uint32, error) {
 	cfg, err := mysql.ParseDSN(dsn)
 	if err != nil {
 		return 0, fmt.Errorf("parse DSN: %w", err)
 	}
 	seed := fmt.Sprintf("%s|%s|%s", cfg.Addr, cfg.User, cfg.DBName)
+	if salt != "" {
+		seed += "|" + salt
+	}
 	sum := sha256.Sum256([]byte(seed))
 	raw := binary.BigEndian.Uint32(sum[:4])
 	// Map into [100000000, 4294967294]: subtract floor from uint32 range, mod
@@ -341,4 +356,79 @@ func DeriveServerID(dsn string) (uint32, error) {
 	const floor = uint32(100000000)
 	const width = uint32(4294967295 - floor) // 4194967295
 	return (raw % width) + floor, nil
+}
+
+// readIndexServerUUID asks the index's MySQL server for its @@server_uuid.
+// It connects to the server, not to the index database: the id is needed
+// before that database is sure to exist. A variable for tests.
+var readIndexServerUUID = func(ctx context.Context, indexDSN string) (string, error) {
+	cfg, err := mysql.ParseDSN(indexDSN)
+	if err != nil {
+		return "", fmt.Errorf("parse index DSN: %w", err)
+	}
+	cfg.DBName = ""
+	db, err := config.Connect(cfg.FormatDSN())
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+	var id sql.NullString
+	if err := db.QueryRowContext(ctx, "SELECT @@server_uuid").Scan(&id); err != nil {
+		return "", err
+	}
+	return id.String, nil
+}
+
+// InstallSalt is what tells one installation apart from another capturing the
+// same source: the @@server_uuid of the MySQL server its index lives on, which
+// MySQL generates once and keeps with the data, and the index database's
+// name. Two installations have two index servers, or two databases on one.
+// It is stable across restarts, so the id derived with it is too.
+func InstallSalt(ctx context.Context, indexDSN string) (string, error) {
+	if strings.TrimSpace(indexDSN) == "" {
+		return "", errors.New("no index DSN")
+	}
+	cfg, err := mysql.ParseDSN(indexDSN)
+	if err != nil {
+		return "", fmt.Errorf("parse index DSN: %w", err)
+	}
+	id, err := readIndexServerUUID(ctx, indexDSN)
+	if err != nil {
+		return "", err
+	}
+	id = strings.ToLower(strings.TrimSpace(id))
+	if id == "" {
+		return "", errors.New("the index server reports no @@server_uuid")
+	}
+	return id + "|" + cfg.DBName, nil
+}
+
+// DeriveForInstall returns the replication server-id for capturing sourceDSN
+// from the installation whose index is indexDSN: stable across restarts, and
+// different from the one another installation derives for the same source.
+//
+// perInstall is false when the index could not say who it is (no index DSN,
+// an index server that is not reachable yet or has no @@server_uuid). The id
+// is then DeriveServerID's, which works and is shared by every installation;
+// that is logged, never an error: capture must not wait on this.
+func DeriveForInstall(ctx context.Context, sourceDSN, indexDSN string) (id uint32, perInstall bool, err error) {
+	salt, saltErr := InstallSalt(ctx, indexDSN)
+	if saltErr != nil {
+		id, err = deriveServerID(sourceDSN, "")
+		if err == nil {
+			slog.Warn("replication server-id derived from the source connection alone; another DBTrail capturing this source through the same connection would use the same id and the two would interrupt each other",
+				"server_id", id, "reason", saltErr.Error())
+		}
+		return id, false, err
+	}
+	id, err = deriveServerID(sourceDSN, salt)
+	return id, true, err
+}
+
+// SetIndexServerUUIDForTest replaces the query that reads the index server's
+// @@server_uuid, so a test can derive ids without a MySQL to ask.
+func SetIndexServerUUIDForTest(read func(ctx context.Context, indexDSN string) (string, error)) (restore func()) {
+	prev := readIndexServerUUID
+	readIndexServerUUID = read
+	return func() { readIndexServerUUID = prev }
 }

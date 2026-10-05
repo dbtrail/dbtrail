@@ -329,7 +329,7 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 	report.add(checkRowMetadata(ctx, sourceDB))
 	report.add(checkBinlogRowValueOptions(ctx, sourceDB))
 	report.add(checkReplicationGrants(ctx, sourceDB))
-	report.add(checkServerIDCollision(ctx, sourceDB, sourceDSN))
+	report.add(checkServerIDCollision(ctx, sourceDB, sourceDSN, indexDSN))
 	if !cfg.console {
 		report.add(checkFKCascades(sourceDB, schemas))
 	}
@@ -719,18 +719,18 @@ func rdsBinlogRetentionVerdict(name string, raw sql.NullString) CheckResult {
 	}
 }
 
-// checkServerIDCollision warns when the replication server-id bintrail derives
-// from --source-dsn (serverid.DeriveServerID, a deterministic sha256 of the
-// host:user:dbname triple) collides with the source's own @@server_id (#819).
-// The derivation is deterministic on purpose (clean resume across restarts),
-// but that means two bintrail instances pointed at the SAME source with the
-// same user derive the SAME server-id and MySQL disconnects the duplicate in a
-// reconnect loop — and a 1/2^32 hash collision with the source's own id kicks
-// the source off its own replica identity. Advisory only (WARN, never FAIL):
-// this is a topology property bintrail can surface but must not block boot on.
-func checkServerIDCollision(ctx context.Context, db *sql.DB, sourceDSN string) CheckResult {
+// checkServerIDCollision warns when the replication server-id capture will use
+// (serverid.DeriveForInstall: the source's host:user:dbname and this
+// installation's index) collides with the source's own @@server_id (#819): a
+// 1/2^32 hash collision that would kick the source off its own replica
+// identity. With the index's identity in the id, two installations capturing
+// the same source no longer derive the same one; when the index cannot be
+// asked (no index DSN, or it does not answer) the id is the source-only one
+// every installation shares, and the detail says so. Advisory only (WARN,
+// never FAIL): a topology property to surface, not to block boot on.
+func checkServerIDCollision(ctx context.Context, db *sql.DB, sourceDSN, indexDSN string) CheckResult {
 	const name = "Replication server-id collision"
-	derived, err := serverid.DeriveServerID(sourceDSN)
+	derived, perInstall, err := serverid.DeriveForInstall(ctx, sourceDSN, indexDSN)
 	if err != nil {
 		return CheckResult{
 			Name:   name,
@@ -764,11 +764,11 @@ func checkServerIDCollision(ctx context.Context, db *sql.DB, sourceDSN string) C
 				"On the command line, --server-id sets one explicitly.",
 		}
 	}
-	return CheckResult{
-		Name:   name,
-		Status: StatusPass,
-		Detail: fmt.Sprintf("derived server-id %d (source @@server_id=%d); any other DBTrail capturing through this same source connection derives the same id, and the two would collide on the replication connection", derived, srcID),
+	detail := fmt.Sprintf("derived server-id %d (source @@server_id=%d)", derived, srcID)
+	if !perInstall {
+		detail += "; any other DBTrail capturing through this same source connection derives the same id, and the two would collide on the replication connection"
 	}
+	return CheckResult{Name: name, Status: StatusPass, Detail: detail}
 }
 
 // checkSyncBinlog warns when the source's sync_binlog is not 1: with

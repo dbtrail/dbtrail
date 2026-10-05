@@ -720,8 +720,8 @@ func (m *monitorSupervisor) DiscardNew(ctx context.Context, e console.ServerEntr
 }
 
 // deriveSourceIdentity resolves the stream's server_id. MySQL/MariaDB derive it
-// from the source DSN (serverid.DeriveServerID parses a MySQL DSN and fails on a
-// postgres:// connstring). PostgreSQL identity is the replication slot, so
+// from the source DSN and this installation's index (serverid.DeriveForInstall
+// parses a MySQL DSN and fails on a postgres:// connstring). PostgreSQL identity is the replication slot, so
 // server_id is only a stream_state label — an explicit SourceServerID wins,
 // else a stable non-zero hash of the (registry-unique) entry id.
 func (m *monitorSupervisor) deriveSourceIdentity(e console.ServerEntry, flavor string) (uint32, error) {
@@ -736,7 +736,16 @@ func (m *monitorSupervisor) deriveSourceIdentity(e console.ServerEntry, flavor s
 		}
 		return 1, nil
 	}
-	id, err := serverid.DeriveServerID(e.SourceDSN)
+	// e.DSN is this source's own index database: with the index server's
+	// identity it makes the id this installation's, so another installation
+	// capturing the same source does not derive the same one.
+	base := m.baseCtx
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(base, 15*time.Second)
+	defer cancel()
+	id, _, err := serverid.DeriveForInstall(ctx, e.SourceDSN, e.DSN)
 	if err != nil {
 		return 0, fmt.Errorf("derive server id: %w", err)
 	}

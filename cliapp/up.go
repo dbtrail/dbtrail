@@ -189,12 +189,18 @@ func runUpInit(cmd *cobra.Command) error {
 func runUpStream(cmd *cobra.Command, args []string) error {
 	serverID := upServerID
 	if serverID == 0 {
-		id, err := serverid.DeriveServerID(upSourceDSN)
+		// From the source connection AND this installation's index, so a
+		// second installation capturing the same source gets another id.
+		id, perInstall, err := serverid.DeriveForInstall(cmd.Context(), upSourceDSN, upIndexDSN)
 		if err != nil {
 			return fmt.Errorf("cannot auto-derive --server-id from --source-dsn: %w (pass --server-id explicitly to bypass)", err)
 		}
 		serverID = id
-		fmt.Fprintf(os.Stderr, "Auto-derived server-id from source DSN: %d\n", serverID)
+		if perInstall {
+			fmt.Fprintf(os.Stderr, "Auto-derived server-id from the source connection and this installation's index: %d\n", serverID)
+		} else {
+			fmt.Fprintf(os.Stderr, "Auto-derived server-id from source DSN: %d\n", serverID)
+		}
 	}
 	populateStreamFlags(serverID)
 
