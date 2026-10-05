@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -160,23 +161,52 @@ func loadPartitionHeadsOnce(ctx context.Context, db *sql.DB) (*PartitionHeads, e
 		return nil, errors.New("binlog_events is not in this index database")
 	}
 
+	// The newest row of every partition, a few statements for all of them:
+	// one statement per partition is one round trip per partition, about 720
+	// on an index that keeps a month, and that is paid by every reader that
+	// loads its own picture (measured: see the #2138 entry in the changelog).
 	for i := range h.parts {
-		p := &h.parts[i]
-		var file string
-		var pos uint64
-		// The primary key leads with event_id, so this is one seek from the
-		// end of the partition's own index.
-		err := db.QueryRowContext(ctx, "SELECT binlog_file, start_pos FROM binlog_events"+
-			partitionClause([]string{p.name})+" ORDER BY event_id DESC LIMIT 1").Scan(&file, &pos)
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			p.empty = true
-		case err != nil:
-			return nil, fmt.Errorf("read the newest event of partition %s: %w", p.name, err)
-		case file == "":
-			p.unknown = true
-		default:
-			p.pos = BinlogPos{File: file, Pos: pos}
+		h.parts[i].empty = true
+	}
+	for lo := 0; lo < len(h.parts); lo += headsPerStatement {
+		hi := min(lo+headsPerStatement, len(h.parts))
+		var q strings.Builder
+		for i := lo; i < hi; i++ {
+			if i > lo {
+				q.WriteString(" UNION ALL ")
+			}
+			// The primary key leads with event_id, so each branch is one
+			// seek from the end of its partition's own index.
+			fmt.Fprintf(&q, "(SELECT %d AS part, binlog_file, start_pos FROM binlog_events%s ORDER BY event_id DESC LIMIT 1)",
+				i, partitionClause([]string{h.parts[i].name}))
+		}
+		rows, err := db.QueryContext(ctx, q.String())
+		if err != nil {
+			return nil, fmt.Errorf("read the newest event of each partition: %w", err)
+		}
+		for rows.Next() {
+			var i int
+			var file string
+			var pos uint64
+			if err := rows.Scan(&i, &file, &pos); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("read the newest event of each partition: %w", err)
+			}
+			if i < lo || i >= hi {
+				rows.Close()
+				return nil, fmt.Errorf("read the newest event of each partition: the server answered for partition %d, outside %d to %d", i, lo, hi-1)
+			}
+			h.parts[i].empty = false
+			if file == "" {
+				h.parts[i].unknown = true
+			} else {
+				h.parts[i].pos = BinlogPos{File: file, Pos: pos}
+			}
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read the newest event of each partition: %w", err)
 		}
 	}
 
@@ -185,6 +215,9 @@ func loadPartitionHeadsOnce(ctx context.Context, db *sql.DB) (*PartitionHeads, e
 	if h.streamCaptured, err = StreamCaptured(ctx, db); err != nil {
 		return nil, err
 	}
+	// A run with no completed_at is still going as far as the index knows,
+	// so it counts as now: while files are being indexed is exactly when the
+	// newest row of a partition says nothing about the others.
 	var last sql.NullTime
 	err = db.QueryRowContext(ctx, "SELECT MAX(COALESCE(completed_at, UTC_TIMESTAMP())) FROM index_state").Scan(&last)
 	if err != nil && !isMissingTableErr(err) {
@@ -193,7 +226,62 @@ func loadPartitionHeadsOnce(ctx context.Context, db *sql.DB) (*PartitionHeads, e
 	if err == nil && last.Valid {
 		h.lastFileIndexed = last.Time.UTC()
 	}
+	if err == nil && h.streamCaptured {
+		warnFileIndexingInProgress(ctx, db)
+	}
 	return h, nil
+}
+
+// headsPerStatement is how many partitions one statement of
+// loadPartitionHeadsOnce reads the newest row of.
+const headsPerStatement = 250
+
+// fileIndexingWarnEvery spaces the warning below: every fetch that loads a
+// picture would otherwise repeat it.
+const fileIndexingWarnEvery = 10 * time.Minute
+
+var fileIndexingWarned atomic.Int64 // unix seconds of the last warning
+
+// warnFileIndexingInProgress tells the operator that a `bintrail index` run
+// is recorded as still going on an index a stream writes. It is not an error
+// while the run really is going. A run that crashed leaves the same record
+// for good, and from then on every fetch looks through every older partition:
+// correct, slower, and invisible without this line.
+func warnFileIndexingInProgress(ctx context.Context, db *sql.DB) {
+	var file string
+	var started, now time.Time
+	err := db.QueryRowContext(ctx, `SELECT binlog_file, started_at, UTC_TIMESTAMP() FROM index_state
+		WHERE status = 'in_progress' ORDER BY started_at LIMIT 1`).Scan(&file, &started, &now)
+	if err != nil {
+		// No such run (the usual answer), or the read failed: the warning is
+		// advice, and the widening it explains happens either way.
+		return
+	}
+	last := fileIndexingWarned.Load()
+	if now.Unix()-last < int64(fileIndexingWarnEvery/time.Second) || !fileIndexingWarned.CompareAndSwap(last, now.Unix()) {
+		return
+	}
+	slog.Warn(fileIndexingInProgressWarning(file, started, now))
+}
+
+// fileIndexingInProgressWarning is the text of that warning.
+func fileIndexingInProgressWarning(file string, started, now time.Time) string {
+	return fmt.Sprintf("the index records a `bintrail index` run that has not finished: file %s, started %s (%s ago). "+
+		"While it is recorded as running, every snapshot update and every read that continues from a snapshot looks through all the older hours of the index instead of the few it needs, which is slower and loses nothing. "+
+		"If that run is still going, this stops by itself when it ends. If it crashed or was stopped, run `bintrail index` on that file again until it completes, "+
+		"or remove its record: DELETE FROM index_state WHERE binlog_file = '%s' AND status = 'in_progress';",
+		file, started.UTC().Format(time.RFC3339), now.Sub(started).Round(time.Minute), strings.ReplaceAll(file, "'", "''"))
+}
+
+// firstPartitionEnd is the upper bound of the first partition: every row
+// older than it is stored in that partition, whatever hour it belongs to,
+// because the first partition has no lower bound. ok is false when the table
+// has one partition or none.
+func (h *PartitionHeads) firstPartitionEnd() (time.Time, bool) {
+	if len(h.parts) < 2 {
+		return time.Time{}, false
+	}
+	return h.parts[1].lower, true
 }
 
 // partitionClause is the ` PARTITION (...)` selector for names, or "" for a
@@ -250,15 +338,49 @@ func (h *PartitionHeads) below(since time.Time, anchor BinlogPos) []string {
 // from a fresh picture: what the dropped partition held is in an archive now
 // and out of any picture's sight, the limit PartitionHeads states.
 func (h *PartitionHeads) SinceFor(ctx context.Context, db *sql.DB, opts Options) (*time.Time, error) {
+	since, _, err := h.sinceForWith(ctx, db, opts)
+	return since, err
+}
+
+// sinceForWith is SinceFor plus the picture the answer was read from: h, or
+// the fresh one a dropped partition made it load.
+func (h *PartitionHeads) sinceForWith(ctx context.Context, db *sql.DB, opts Options) (*time.Time, *PartitionHeads, error) {
+	used := h
 	since, err := h.sinceFor(ctx, db, opts)
 	for i := 1; isUnknownPartitionErr(err) && i < partitionReadAttempts; i++ {
 		fresh, lerr := LoadPartitionHeads(ctx, db)
 		if lerr != nil {
-			return nil, lerr
+			return nil, nil, lerr
 		}
+		used = fresh
 		since, err = fresh.sinceFor(ctx, db, opts)
 	}
-	return since, err
+	return since, used, err
+}
+
+// settleSince is what every fetch runs before it reads: it replaces
+// opts.Since with SinceFor's answer and marks the options so the same fetch
+// does not ask again further down. heads may be nil (a picture is loaded).
+// moved reports that the time changed, and firstEnd is the picture's
+// firstPartitionEnd (zero when it has none).
+func settleSince(ctx context.Context, db *sql.DB, opts *Options, heads *PartitionHeads) (moved bool, firstEnd time.Time, err error) {
+	if opts.sinceSettled || opts.Since == nil || opts.SincePos == nil {
+		return false, time.Time{}, nil
+	}
+	if heads == nil {
+		if heads, err = LoadPartitionHeads(ctx, db); err != nil {
+			return false, time.Time{}, fmt.Errorf("cannot tell how far back the changes after %s:%d reach: %w",
+				opts.SincePos.File, opts.SincePos.Pos, err)
+		}
+	}
+	since, used, err := heads.sinceForWith(ctx, db, *opts)
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	moved = since != opts.Since
+	opts.Since, opts.sinceSettled = since, true
+	firstEnd, _ = used.firstPartitionEnd()
+	return moved, firstEnd, nil
 }
 
 func (h *PartitionHeads) sinceFor(ctx context.Context, db *sql.DB, opts Options) (*time.Time, error) {

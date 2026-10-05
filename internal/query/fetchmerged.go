@@ -886,20 +886,10 @@ func VerifyMergedCoverage(ctx context.Context, db *sql.DB, o FetchMergedOptions)
 func resolveMergeSources(ctx context.Context, db *sql.DB, o *FetchMergedOptions) (mergeSources, error) {
 	var src mergeSources
 
-	if o.Opts.Since != nil && o.Opts.SincePos != nil {
-		heads := o.PartitionHeads
-		if heads == nil {
-			var err error
-			if heads, err = LoadPartitionHeads(ctx, db); err != nil {
-				return src, fmt.Errorf("cannot tell how far back the changes after %s:%d reach: %w",
-					o.Opts.SincePos.File, o.Opts.SincePos.Pos, err)
-			}
-		}
-		since, err := heads.SinceFor(ctx, db, o.Opts)
-		if err != nil {
-			return src, err
-		}
-		o.Opts.Since = since
+	origSince := o.Opts.Since
+	moved, firstEnd, err := settleSince(ctx, db, &o.Opts, o.PartitionHeads)
+	if err != nil {
+		return src, err
 	}
 
 	if !o.NoArchive {
@@ -962,6 +952,9 @@ func resolveMergeSources(ctx context.Context, db *sql.DB, o *FetchMergedOptions)
 			slog.Warn("query planner failed; coverage gaps may not be detected", "error", err)
 		} else {
 			src.plan = p
+			if p != nil && moved {
+				p.GapHours = withoutFirstPartitionHours(p.GapHours, firstEnd, *origSince)
+			}
 			if p != nil {
 				// Archives whose content escapes their hour label but overlaps
 				// the window (#1037): every archive fetch below must be told to
@@ -1086,4 +1079,35 @@ func fetchPage(
 
 	rows, diverged = MergeAndTrimReport(rows, o.Opts.Limit, o.Opts.LimitPerPK, o.Opts.Order)
 	return rows, skipped, exhausted, diverged, false, nil
+}
+
+// withoutFirstPartitionHours removes from a plan's gap hours the ones that
+// are a gap only on paper after settleSince moved a fetch's start (#2138).
+//
+// The planner calls an hour a gap when no live partition is NAMED after it
+// and no archive covers it. settleSince moves the start to the table's oldest
+// row in a live partition, and that row can be older than the first
+// partition's own hour: the first partition has no lower bound, so MySQL
+// files every older row into it (#1037). The hours between that row and the
+// first partition are then "gaps" although the rows are right there, in the
+// live index, and the fetch reads them. Left in, a refresh would refuse with
+// "rotated and not archived" for as long as such a row exists.
+//
+// Only those hours go: below the first partition's end AND below the start
+// the caller asked for. An hour the caller's own window covered is judged as
+// it always was, so a window that really crosses a rotated, unarchived hour
+// still refuses.
+func withoutFirstPartitionHours(gaps []time.Time, firstEnd time.Time, origSince time.Time) []time.Time {
+	if firstEnd.IsZero() {
+		return gaps
+	}
+	asked := origSince.Truncate(time.Hour)
+	var kept []time.Time
+	for _, h := range gaps {
+		if h.Before(firstEnd) && h.Before(asked) {
+			continue
+		}
+		kept = append(kept, h)
+	}
+	return kept
 }

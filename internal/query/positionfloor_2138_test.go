@@ -176,12 +176,10 @@ func TestFetchMerged_refusesWhenTheFloorCannotBeSettled(t *testing.T) {
 		m.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(
 			sqlmock.NewRows(partCols).AddRow("p_2026030100", secs(1)).AddRow("p_future", "MAXVALUE"))
 	}
+	// One statement answers for both partitions; p_future holds nothing.
 	head := func(m sqlmock.Sqlmock, file string, pos uint64) {
-		m.ExpectQuery("ORDER BY event_id DESC LIMIT 1").WillReturnRows(
-			sqlmock.NewRows([]string{"binlog_file", "start_pos"}).AddRow(file, pos))
-	}
-	noHead := func(m sqlmock.Sqlmock) {
-		m.ExpectQuery("ORDER BY event_id DESC LIMIT 1").WillReturnRows(sqlmock.NewRows([]string{"binlog_file", "start_pos"}))
+		m.ExpectQuery("UNION ALL").WillReturnRows(
+			sqlmock.NewRows([]string{"part", "binlog_file", "start_pos"}).AddRow(0, file, pos))
 	}
 	for _, tc := range []struct {
 		name  string
@@ -199,25 +197,27 @@ func TestFetchMerged_refusesWhenTheFloorCannotBeSettled(t *testing.T) {
 		}},
 		{"a partition's newest row does not read", func(m sqlmock.Sqlmock) {
 			twoParts(m)
-			m.ExpectQuery("ORDER BY event_id DESC LIMIT 1").WillReturnError(forced)
+			m.ExpectQuery("UNION ALL").WillReturnError(forced)
+		}},
+		{"the server answers for a partition that was not asked", func(m sqlmock.Sqlmock) {
+			twoParts(m)
+			m.ExpectQuery("UNION ALL").WillReturnRows(
+				sqlmock.NewRows([]string{"part", "binlog_file", "start_pos"}).AddRow(7, "binlog.000001", 900))
 		}},
 		{"stream_state does not read", func(m sqlmock.Sqlmock) {
 			twoParts(m)
 			head(m, "binlog.000001", 900)
-			noHead(m)
 			m.ExpectQuery("FROM stream_state").WillReturnError(forced)
 		}},
 		{"index_state does not read", func(m sqlmock.Sqlmock) {
 			twoParts(m)
 			head(m, "binlog.000001", 900)
-			noHead(m)
 			m.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}))
 			m.ExpectQuery("FROM index_state").WillReturnError(forced)
 		}},
 		{"the oldest event of the table does not read", func(m sqlmock.Sqlmock) {
 			twoParts(m)
 			head(m, "binlog.000001", 900)
-			noHead(m)
 			m.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}))
 			m.ExpectQuery("FROM index_state").WillReturnRows(sqlmock.NewRows([]string{"m"}).AddRow(nil))
 			m.ExpectQuery("ORDER BY event_timestamp LIMIT 1").WillReturnError(forced)
@@ -263,7 +263,7 @@ func TestLoadPartitionHeads_missingIndexStateIsNoFileIndexing(t *testing.T) {
 	mock.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(
 		sqlmock.NewRows([]string{"PARTITION_NAME", "PARTITION_DESCRIPTION"}).AddRow(nil, nil))
 	mock.ExpectQuery("FROM binlog_events ORDER BY event_id DESC LIMIT 1").WillReturnRows(
-		sqlmock.NewRows([]string{"binlog_file", "start_pos"}).AddRow("", 0))
+		sqlmock.NewRows([]string{"part", "binlog_file", "start_pos"}).AddRow(0, "", 0))
 	mock.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 	mock.ExpectQuery("FROM index_state").WillReturnError(&mysql.MySQLError{Number: 1146, Message: "no such table"})
 	h, err := LoadPartitionHeads(context.Background(), db)
@@ -285,15 +285,14 @@ func TestSinceFor_readsAgainWhenAPartitionWasDropped(t *testing.T) {
 	opts := Options{Schema: "shop", Table: "orders", Since: &since, SincePos: &BinlogPos{File: "binlog.000001", Pos: 500}}
 	gone := &mysql.MySQLError{Number: 1735, Message: "Unknown partition 'p0' in table 'binlog_events'"}
 	partCols := []string{"PARTITION_NAME", "PARTITION_DESCRIPTION"}
-	headCols := []string{"binlog_file", "start_pos"}
+	headCols := []string{"part", "binlog_file", "start_pos"}
 	// The fresh picture: p0 is gone, p1 is now the first partition and holds
 	// the late row.
 	fresh := func(m sqlmock.Sqlmock) {
 		m.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(sqlmock.NewRows(partCols).
 			AddRow("p1", strconv.FormatInt(mysqlToSeconds(h0.Add(2*time.Hour)), 10)).AddRow("p_future", "MAXVALUE"))
-		m.ExpectQuery("PARTITION \\(`p1`\\) ORDER BY event_id DESC").WillReturnRows(sqlmock.NewRows(headCols).AddRow("binlog.000001", 700))
-		m.ExpectQuery("PARTITION \\(`p_future`\\) ORDER BY event_id DESC").WillReturnRows(sqlmock.NewRows(headCols))
-		m.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+		m.ExpectQuery("PARTITION \\(`p1`\\) ORDER BY event_id DESC.*UNION ALL.*`p_future`").WillReturnRows(sqlmock.NewRows(headCols).AddRow(0, "binlog.000001", 700))
+		m.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}))
 		m.ExpectQuery("FROM index_state").WillReturnRows(sqlmock.NewRows([]string{"m"}).AddRow(nil))
 	}
 	late := h0.Add(90 * time.Minute)
@@ -344,11 +343,58 @@ func TestSinceFor_readsAgainWhenAPartitionWasDropped(t *testing.T) {
 		defer db.Close()
 		mock.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(sqlmock.NewRows(partCols).
 			AddRow("p0", strconv.FormatInt(mysqlToSeconds(h0.Add(time.Hour)), 10)).AddRow("p_future", "MAXVALUE"))
-		mock.ExpectQuery("PARTITION \\(`p0`\\) ORDER BY event_id DESC").WillReturnError(gone)
+		mock.ExpectQuery("PARTITION \\(`p0`\\) ORDER BY event_id DESC.*UNION ALL").WillReturnError(gone)
 		fresh(mock)
 		h, err := LoadPartitionHeads(context.Background(), db)
 		if err != nil || len(h.parts) != 2 || h.parts[0].name != "p1" {
 			t.Fatalf("LoadPartitionHeads = %+v, err=%v; want the second listing", h, err)
 		}
 	})
+}
+
+// Item by item, what the moved start does to the planner's gap hours. The
+// first partition is p_first, named after hour 10 and holding everything
+// older; the caller asked for hour 14.
+func TestWithoutFirstPartitionHours(t *testing.T) {
+	day := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	hr := func(n int) time.Time { return day.Add(time.Duration(n) * time.Hour) }
+	firstEnd, asked := hr(11), hr(14).Add(30*time.Minute)
+	for _, tc := range []struct {
+		name     string
+		gaps     []time.Time
+		firstEnd time.Time
+		want     []time.Time
+	}{
+		{"window fully live: nothing to remove", nil, firstEnd, nil},
+		{"hours below the first partition, reached only because the start moved", []time.Time{hr(7), hr(8), hr(9)}, firstEnd, nil},
+		{"a rotated, unarchived hour inside what the caller asked stays", []time.Time{hr(8), hr(15)}, firstEnd, []time.Time{hr(15)}},
+		{"a missing hour between live partitions below what the caller asked stays", []time.Time{hr(8), hr(12)}, firstEnd, []time.Time{hr(12)}},
+		// The caller's own window reached below the first partition before
+		// anything moved: those hours were gaps before and still are.
+		{"hours the caller asked for below the first partition stay", []time.Time{hr(12), hr(13)}, hr(14), []time.Time{hr(13)}},
+		{"no first partition bound known: nothing is removed", []time.Time{hr(7)}, time.Time{}, []time.Time{hr(7)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			as := asked
+			if tc.name == "hours the caller asked for below the first partition stay" {
+				as = hr(13).Add(10 * time.Minute)
+			}
+			if got := withoutFirstPartitionHours(tc.gaps, tc.firstEnd, as); !slices.Equal(got, tc.want) {
+				t.Fatalf("kept = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The warning's text, with a real file name and real times.
+func TestFileIndexingInProgressWarning(t *testing.T) {
+	started := time.Date(2026, 3, 1, 9, 15, 0, 0, time.UTC)
+	got := fileIndexingInProgressWarning("binlog.000042", started, started.Add(49*time.Hour+20*time.Minute))
+	want := "the index records a `bintrail index` run that has not finished: file binlog.000042, started 2026-03-01T09:15:00Z (49h20m0s ago). " +
+		"While it is recorded as running, every snapshot update and every read that continues from a snapshot looks through all the older hours of the index instead of the few it needs, which is slower and loses nothing. " +
+		"If that run is still going, this stops by itself when it ends. If it crashed or was stopped, run `bintrail index` on that file again until it completes, " +
+		"or remove its record: DELETE FROM index_state WHERE binlog_file = 'binlog.000042' AND status = 'in_progress';"
+	if got != want {
+		t.Fatalf("warning =\n%s\nwant\n%s", got, want)
+	}
 }

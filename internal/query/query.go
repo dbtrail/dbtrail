@@ -284,6 +284,12 @@ type Options struct {
 	// index entries, not clustered-page reads. Measured on 8.4.9: the floor
 	// appears in the range itself ("... AND 4500 < event_id").
 	SinceEventID uint64
+	// sinceSettled records that Since already is the time this fetch must
+	// start from, read off the index for its SincePos (#2138, settleSince).
+	// The merged fetch sets it once for all its pages; Engine.Fetch settles
+	// any options that reach it without it, so no caller that pairs a time
+	// with a position can run on the time alone.
+	sinceSettled bool
 	// AfterEvent, when set, restricts results to events strictly AFTER this
 	// point in the (event_timestamp, event_id) sort order — the keyset cursor
 	// that makes a windowed fetch pageable without OFFSET (#1097).
@@ -483,6 +489,11 @@ func (e *Engine) Fetch(ctx context.Context, opts Options) ([]ResultRow, error) {
 		return nil, err
 	}
 	if err := opts.ValidatePKRange(); err != nil {
+		return nil, err
+	}
+	// A caller that reaches the engine directly with a time and a position
+	// (the cascade's baseline window) gets the same start as the merged fetch.
+	if _, _, err := settleSince(ctx, e.db, &opts, nil); err != nil {
 		return nil, err
 	}
 	q, args := buildQuery(opts)

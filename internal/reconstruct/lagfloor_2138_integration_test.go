@@ -174,25 +174,69 @@ func TestRefresh_afterALaggingRefresh_appliesWhatCaptureIndexedLater(t *testing.
 // partition is one of them, before the previous cut. The refresh must not
 // read that as "nothing after the cut in here".
 func TestRefresh_filesIndexedIntoAStreamIndex_doNotHideALateEvent(t *testing.T) {
-	var T time.Time
-	r, _ := newLagRig(t, func(first time.Time) time.Time {
-		T = first.Add(30*time.Hour + 30*time.Minute)
-		return T.Add(-8 * time.Hour)
-	})
-	markStreamCaptured(t, r.db)
-	insertTableEvent(t, r.db, r.schema, "orders", 10, 1000, T.Add(-5*time.Hour), 2, "1", `{"id":1,"status":"A"}`)
-	r.refresh(t, T, true, false)
-	late := T.Add(-4 * time.Hour)
-	insertTableEvent(t, r.db, r.schema, "orders", 20, 1300, late, 3, "2", "")
-	// The file's row: a higher id, the same hour, a position before the cut.
-	insertTableEvent(t, r.db, r.schema, "items", 30, 50, late.Add(time.Minute), 2, "9", `{"id":9,"status":"old"}`)
-	testutil.MustExec(t, r.db, `INSERT INTO index_state (binlog_file, file_size, last_position, events_indexed, status, started_at, completed_at)
-		VALUES ('binlog.000001', 1, 150, 1, 'completed', '`+T.Add(5*time.Minute).Format("2006-01-02 15:04:05")+`', '`+T.Add(10*time.Minute).Format("2006-01-02 15:04:05")+`')`)
-	// The stream goes on: this fixes the cut after the late event.
-	insertTableEvent(t, r.db, r.schema, "items", 40, 1500, T.Add(20*time.Minute), 2, "9", `{"id":9,"status":"new"}`)
-	base, rep := r.refresh(t, T.Add(time.Hour), true, false)
-	if got, want := lagState(t, base, true), []string{"1=A", "3=shipped"}; !equalStrings(got, want) {
-		t.Fatalf("refresh applied %d events; state = %v, want %v", rep.EventsApplied, got, want)
+	for _, tc := range []struct {
+		name string
+		// state is the file's record in index_state, given T.
+		state func(T time.Time) string
+	}{
+		{"the run completed after the previous refresh", func(T time.Time) string {
+			return "'completed', '" + T.Add(5*time.Minute).Format("2006-01-02 15:04:05") + "', '" + T.Add(10*time.Minute).Format("2006-01-02 15:04:05") + "'"
+		}},
+		// No completed_at: as far as the index knows the run is still going,
+		// however long ago it started.
+		{"the run is still in progress", func(T time.Time) string {
+			return "'in_progress', '2020-01-01 00:00:00', NULL"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var T time.Time
+			r, _ := newLagRig(t, func(first time.Time) time.Time {
+				T = first.Add(30*time.Hour + 30*time.Minute)
+				return T.Add(-8 * time.Hour)
+			})
+			markStreamCaptured(t, r.db)
+			insertTableEvent(t, r.db, r.schema, "orders", 10, 1000, T.Add(-5*time.Hour), 2, "1", `{"id":1,"status":"A"}`)
+			r.refresh(t, T, true, false)
+			late := T.Add(-4 * time.Hour)
+			insertTableEvent(t, r.db, r.schema, "orders", 20, 1300, late, 3, "2", "")
+			// The file's row: a higher id, the same hour, a position before the cut.
+			insertTableEvent(t, r.db, r.schema, "items", 30, 50, late.Add(time.Minute), 2, "9", `{"id":9,"status":"old"}`)
+			testutil.MustExec(t, r.db, `INSERT INTO index_state (binlog_file, file_size, last_position, events_indexed, status, started_at, completed_at)
+				VALUES ('binlog.000001', 1, 150, 1, `+tc.state(T)+`)`)
+			// The stream goes on: this fixes the cut after the late event.
+			insertTableEvent(t, r.db, r.schema, "items", 40, 1500, T.Add(20*time.Minute), 2, "9", `{"id":9,"status":"new"}`)
+			base, rep := r.refresh(t, T.Add(time.Hour), true, false)
+			if got, want := lagState(t, base, true), []string{"1=A", "3=shipped"}; !equalStrings(got, want) {
+				t.Fatalf("refresh applied %d events; state = %v, want %v", rep.EventsApplied, got, want)
+			}
+		})
+	}
+}
+
+// TestRefresh_lateEventOlderThanTheFirstPartition: the index's first
+// partition has no lower bound, so an event older than its hour is stored in
+// it. When such an event arrives late, the fetch starts at its time, hours
+// below any partition's name. Those hours are not missing: the refresh must
+// apply the event, not refuse with a coverage gap.
+func TestRefresh_lateEventOlderThanTheFirstPartition(t *testing.T) {
+	for _, deltas := range []bool{true, false} {
+		t.Run(map[bool]string{true: "pair", false: "table rewritten"}[deltas], func(t *testing.T) {
+			var T time.Time
+			r, first := newLagRig(t, func(first time.Time) time.Time {
+				T = first.Add(12*time.Hour + 30*time.Minute)
+				return T.Add(-8 * time.Hour)
+			})
+			markStreamCaptured(t, r.db)
+			insertTableEvent(t, r.db, r.schema, "orders", 10, 100, T.Add(-5*time.Hour), 2, "1", `{"id":1,"status":"A"}`)
+			r.refresh(t, T, deltas, false)
+			// Indexed after the first refresh; it ran five hours before the
+			// first partition's own hour.
+			insertTableEvent(t, r.db, r.schema, "orders", 20, 300, first.Add(-5*time.Hour), 3, "2", "")
+			base, rep := r.refresh(t, T.Add(time.Hour), deltas, false)
+			if got, want := lagState(t, base, deltas), []string{"1=A", "3=shipped"}; !equalStrings(got, want) {
+				t.Fatalf("refresh applied %d events; state = %v, want %v", rep.EventsApplied, got, want)
+			}
+		})
 	}
 }
 

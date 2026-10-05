@@ -3,9 +3,11 @@
 package query
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -136,6 +138,59 @@ func TestPartitionHeads_readsTheNewestRowOfEachPartition(t *testing.T) {
 	}
 	if !h.streamCaptured || time.Since(h.lastFileIndexed) > 5*time.Minute {
 		t.Fatalf("streamCaptured=%v lastFileIndexed=%s, want a stream and a run in progress now", h.streamCaptured, h.lastFileIndexed)
+	}
+	// So a fetch for a snapshot written before now trusts no partition's
+	// newest row: every one below its floor that holds anything is reached.
+	// (Hours 2, 5 and 8 hold rows; the floor of hour 9 leaves all three out.)
+	if got := h.below(hour(9), BinlogPos{File: "binlog.000001", Pos: 5000}); len(got) != 3 {
+		t.Fatalf("with a file indexing run in progress, partitions reached = %v, want the three that hold rows", got)
+	}
+
+	// The operator is told, once, with the row's own file and start time.
+	var logged bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	defer slog.SetDefault(prev)
+	fileIndexingWarned.Store(0)
+	for range 3 {
+		if _, err := LoadPartitionHeads(ctx, db); err != nil {
+			t.Fatalf("LoadPartitionHeads: %v", err)
+		}
+	}
+	out := logged.String()
+	if strings.Count(out, "level=WARN") != 1 || !strings.Contains(out, "file binlog.000001, started 2020-01-01T00:00:00Z") ||
+		!strings.Contains(out, "DELETE FROM index_state WHERE binlog_file = 'binlog.000001' AND status = 'in_progress';") {
+		t.Fatalf("want one warning naming the run in progress, got:\n%s", out)
+	}
+	// A finished run is not warned about.
+	testutil.MustExec(t, db, "UPDATE index_state SET status = 'completed', completed_at = UTC_TIMESTAMP()")
+	logged.Reset()
+	fileIndexingWarned.Store(0)
+	if _, err := LoadPartitionHeads(ctx, db); err != nil {
+		t.Fatalf("LoadPartitionHeads: %v", err)
+	}
+	if strings.Contains(logged.String(), "level=WARN") {
+		t.Fatalf("a completed run was warned about:\n%s", logged.String())
+	}
+}
+
+// TestEngineFetch_settlesItsOwnStart: a caller that goes to the engine
+// directly with a time and a position, as the cascade does for a child
+// table's window after its baseline, gets the late event too.
+func TestEngineFetch_settlesItsOwnStart(t *testing.T) {
+	ctx := context.Background()
+	db, first := headsRig(t, 12)
+	hour := func(n int) time.Time { return first.Add(time.Duration(n)*time.Hour + 10*time.Minute) }
+	insertHeadEvent(t, db, "items", 100, hour(2))
+	insertHeadEvent(t, db, "items", 300, hour(8))
+	insertHeadEvent(t, db, "items", 900, hour(2).Add(time.Minute)) // indexed late
+	since, until := hour(9), hour(10)
+	rows, err := New(db).Fetch(ctx, Options{
+		Schema: "shop", Table: "items", Since: &since, Until: &until,
+		SincePos: &BinlogPos{File: "binlog.000001", Pos: 800}, Order: "DESC", LimitPerPK: 1, Limit: 10,
+	})
+	if err != nil || len(rows) != 1 || rows[0].StartPos != 900 {
+		t.Fatalf("Engine.Fetch: %d rows, err=%v; want the one event at position 900, indexed after the snapshot and run before it", len(rows), err)
 	}
 }
 
