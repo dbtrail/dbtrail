@@ -177,6 +177,48 @@ func SkipIfNoMariaDB(t *testing.T) {
 	}
 }
 
+// GTIDSourceBaseDSN is the base DSN (no database name) of a second MySQL
+// server that runs with gtid_mode=ON, from BINTRAIL_TEST_GTID_SOURCE_DSN; ""
+// when none is set. It exists for the tests that need a GTID source captured
+// into an index on ANOTHER server: an index on the source server itself is
+// never compared with it (its own checkpoint writes keep the source ahead),
+// and the main test server runs without GTIDs.
+func GTIDSourceBaseDSN() string {
+	return os.Getenv("BINTRAIL_TEST_GTID_SOURCE_DSN")
+}
+
+// SkipIfNoGTIDSource returns GTIDSourceBaseDSN after checking that the server
+// answers and has gtid_mode=ON. Without one the test skips, or fails where
+// BINTRAIL_REQUIRE_GTID_SOURCE=1 says the server is guaranteed (the CI shard
+// that starts it), so a missing container there cannot pass as a skip.
+func SkipIfNoGTIDSource(t *testing.T) string {
+	t.Helper()
+	miss := func(format string, args ...any) {
+		t.Helper()
+		if os.Getenv("BINTRAIL_REQUIRE_GTID_SOURCE") == "1" {
+			t.Fatalf(format, args...)
+		}
+		t.Skipf(format, args...)
+	}
+	base := GTIDSourceBaseDSN()
+	if base == "" {
+		miss("no GTID source server (BINTRAIL_TEST_GTID_SOURCE_DSN is not set)")
+	}
+	db, err := sql.Open("mysql", base+"/")
+	if err != nil {
+		miss("GTID source server: %v", err)
+	}
+	defer db.Close()
+	var mode string
+	if err := db.QueryRow("SELECT @@GLOBAL.gtid_mode").Scan(&mode); err != nil {
+		miss("GTID source server not reachable: %v", err)
+	}
+	if !strings.EqualFold(mode, "ON") {
+		miss("the GTID source server runs with gtid_mode=%s, want ON", mode)
+	}
+	return base
+}
+
 // CreateTestMariaDB creates a unique database on the MariaDB SOURCE server,
 // returning a connected *sql.DB, the database name, and registering cleanup.
 // It mirrors CreateTestDB but targets the MariaDB container (13307).

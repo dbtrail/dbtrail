@@ -181,7 +181,11 @@ func TestCaptureLossSince(t *testing.T) {
 		// position mode now (a --reset since) is not that capture, whatever
 		// the reporter still remembers.
 		{"a capture in position mode", func() *status.StreamStateInfo { st := healthy(); st.Mode = "position"; return st }(), "not in GTID mode"},
-		{"a capture with no GTID set saved", func() *status.StreamStateInfo { st := healthy(); st.GTIDSet = sql.NullString{String: "  ", Valid: true}; return st }(), "not in GTID mode"},
+		{"a capture with no GTID set saved", func() *status.StreamStateInfo {
+			st := healthy()
+			st.GTIDSet = sql.NullString{String: "  ", Valid: true}
+			return st
+		}(), "not in GTID mode"},
 		{"a capture whose GTID set is NULL", func() *status.StreamStateInfo { st := healthy(); st.GTIDSet = sql.NullString{}; return st }(), "not in GTID mode"},
 		{"an index older than the loss record", func() *status.StreamStateInfo { st := healthy(); st.GapColumnsPresent = false; return st }(), "predates"},
 		{"a gap before the read of the source", func() *status.StreamStateInfo {

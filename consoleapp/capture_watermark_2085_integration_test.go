@@ -4,6 +4,8 @@ package consoleapp
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -17,26 +19,28 @@ import (
 // of a real stream_state, with nothing replaced but the clock.
 //
 // The index must not be on the source server (an index there is never
-// compared), so its stream_state lives on the MariaDB test server, which has
-// no server_uuid to be confused with the source's. The capture's saved
-// position is written by hand: what is under test is what the reporter makes
-// of the two sets, not the stream.
-func TestIntegrationCaptureWatermark_realGTIDSets_2085(t *testing.T) {
+// compared), so the source is the second MySQL the routed-port tests are
+// given (testutil.SkipIfNoGTIDSource) and the stream_state lives on the main
+// test server. The capture's saved position is written by hand: what is
+// under test is what the reporter makes of the two sets, not the stream
+// (TestIntegrationFlashbackRoutedUnchangedRealCapture_2085 has a real one).
+//
+// Named with the TestIntegrationFlashback prefix so that it runs in the CI
+// shard that has that server; under its first name it needed MariaDB and
+// skipped in every job.
+func TestIntegrationFlashbackCaptureWatermark_realGTIDSets_2085(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
-	testutil.SkipIfNoMariaDB(t)
+	sourceBase := testutil.SkipIfNoGTIDSource(t)
 	ctx := context.Background()
-	src, _ := testutil.CreateTestDB(t)
-	if !stepGTIDModeOnForProbe(t, src) {
-		return
+	src, err := sql.Open("mysql", sourceBase+"/")
+	if err != nil {
+		t.Fatal(err)
 	}
-	idx, idxName := testutil.CreateTestMariaDB(t)
-	testutil.MustExec(t, idx, `CREATE TABLE stream_state (
-		id INT UNSIGNED PRIMARY KEY DEFAULT 1, mode ENUM('position','gtid') NOT NULL,
-		binlog_file VARCHAR(255) NOT NULL DEFAULT '', binlog_position BIGINT UNSIGNED NOT NULL DEFAULT 0,
-		gtid_set TEXT DEFAULT NULL, flavor VARCHAR(16) NOT NULL DEFAULT 'mysql', events_indexed BIGINT UNSIGNED NOT NULL DEFAULT 0,
-		last_event_time DATETIME DEFAULT NULL, last_checkpoint DATETIME NOT NULL, server_id INT UNSIGNED NOT NULL,
-		bintrail_id CHAR(36) NULL DEFAULT NULL, gap_lost_at DATETIME DEFAULT NULL, gap_lost_detail TEXT DEFAULT NULL,
-		capture_skips TEXT DEFAULT NULL)`)
+	srcName := fmt.Sprintf("wm_real_%d", time.Now().UnixNano())
+	testutil.MustExec(t, src, "CREATE DATABASE `"+srcName+"`")
+	t.Cleanup(func() { _, _ = src.Exec("DROP DATABASE IF EXISTS `" + srcName + "`"); src.Close() })
+	idx, idxName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, idx)
 	saved := func(gtidSet string) {
 		t.Helper()
 		testutil.MustExec(t, idx, `REPLACE INTO stream_state (id, mode, binlog_file, binlog_position, gtid_set, last_checkpoint, server_id, capture_skips)
@@ -46,7 +50,7 @@ func TestIntegrationCaptureWatermark_realGTIDSets_2085(t *testing.T) {
 	write := func() string {
 		t.Helper()
 		n++
-		testutil.MustExec(t, src, "CREATE TABLE wm_"+string(rune('a'+n))+" (id INT PRIMARY KEY)")
+		testutil.MustExec(t, src, "CREATE TABLE `"+srcName+"`.wm_"+string(rune('a'+n))+" (id INT PRIMARY KEY)")
 		executed, err := readExecutedGTIDs(ctx, src)
 		if err != nil || executed == "" {
 			t.Fatalf("the source's executed set = %q, %v", executed, err)
@@ -57,7 +61,7 @@ func TestIntegrationCaptureWatermark_realGTIDSets_2085(t *testing.T) {
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	c := newCaptureStatusReporter("")
 	c.now = func() time.Time { return now }
-	e := console.ServerEntry{ID: "a1", Name: "prod", DSN: testutil.MariaDBBaseDSN() + "/" + idxName, SourceDSN: testutil.BaseDSN() + "/"}
+	e := console.ServerEntry{ID: "a1", Name: "prod", DSN: testutil.IntegrationDSN(idxName), SourceDSN: sourceBase + "/"}
 	ask := func() console.CaptureWatermark {
 		t.Helper()
 		now = now.Add(captureStatusTTL + time.Second) // past the last answer's lifetime: a real read
