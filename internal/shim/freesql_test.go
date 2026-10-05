@@ -25,6 +25,12 @@ type fakeFreeSQL struct {
 	gotSess   sqlsandbox.Session
 	updatedAt time.Time
 	ageCalls  int
+	// A statement sent with Session.UnchangedWithin (the snapshot is older
+	// than the limit, #2085): unchangedAsks counts them, and unchanged says
+	// whether the copy answers. The zero value refuses, as a copy that
+	// cannot tell does.
+	unchangedAsks int
+	unchanged     bool
 	// The copy's own zone conversion, asked once per zone before the copy
 	// runs under a named zone (routedsession.go): zoneProbes counts the
 	// asks, zoneErr fails them, zoneOffsets replaces the answer.
@@ -50,6 +56,12 @@ func (f *fakeFreeSQL) Run(_ context.Context, statement, schema string, sess sqls
 	}
 	f.calls++
 	f.gotStmt, f.gotSchema, f.gotSess = statement, schema, sess
+	if sess.UnchangedWithin > 0 {
+		f.unchangedAsks++
+		if !f.unchanged {
+			return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: "shop.orders changed since its snapshot"}
+		}
+	}
 	return f.res, f.err
 }
 

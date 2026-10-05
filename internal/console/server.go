@@ -357,6 +357,9 @@ type Server struct {
 	// resolveBaselineDecimals.
 	baselineDecimalMu sync.Mutex
 	baselineDecimals  map[string]baselineDecimalEntry
+	// copyCuts memoizes snapshot files' footers for the read router's
+	// "unchanged since the snapshot" question (#2085, copy_unchanged.go).
+	copyCuts copyCutMemo
 
 	listen     string
 	token      string

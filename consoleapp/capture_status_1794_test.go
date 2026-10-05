@@ -683,7 +683,7 @@ func TestCaptureStatus_aFailureAfterTheReadHoldsNothing(t *testing.T) {
 	}
 	c.now = func() time.Time {
 		calls++
-		if calls == 1 { // the clock read after the source answered
+		if calls == 2 { // the clock read after the source answered (the first is before the read, #2085)
 			panic("clock")
 		}
 		return captureT0.Add(time.Duration(calls) * time.Hour)

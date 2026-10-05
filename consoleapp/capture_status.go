@@ -72,6 +72,13 @@ type captureSlot struct {
 	prev   *captureSample
 	flight chan struct{} // closed when the read in flight has stored its answer
 	logged string
+	// The watermark (#2085, capture_watermark.go): through is the newest
+	// instant at which the source was asked and capture was later seen to
+	// hold all it had then, pending the sample still waiting for that.
+	through time.Time
+	pending *captureSample
+	// throughWhy says why through is zero, for the reader of a trace.
+	throughWhy string
 }
 
 // captureStatusReporter is console.CaptureStatusReporter for the watch
@@ -88,6 +95,10 @@ type captureStatusReporter struct {
 	// bootSSL is the TLS of the daemon's own capture (watch's --ssl-*
 	// flags); zero reads as console.DefaultSourceSSLMode.
 	bootSSL config.SSL
+
+	// bootSchemas and bootTables are the filters of the daemon's own capture
+	// (--schemas, --tables); a server in the registry carries its own.
+	bootSchemas, bootTables string
 
 	mu    sync.Mutex
 	slots map[string]*captureSlot
@@ -200,6 +211,7 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 	done := make(chan struct{})
 	slot.flight = done
 	prev := slot.prev
+	through, pending := slot.through, slot.pending
 	c.mu.Unlock()
 	// Deferred, so that whatever happens below, the next load reads again
 	// instead of waiting on a read that is over.
@@ -211,6 +223,10 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 		c.mu.Unlock()
 		close(done)
 	}()
+	// Before the read, not after: the watermark may only name an instant at
+	// which the source had not yet been asked. After the defer above, so a
+	// clock that fails here releases the read like any other failure.
+	asked := now()
 
 	// Detached from the request: a tab that closes mid-read must not leave
 	// "the request was cancelled" behind as the state of the capture.
@@ -229,9 +245,11 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 	at := now()
 	answer, next := captureStatusFrom(r, prev, at)
 	answer.ServerID = e.ID
+	through, pending, throughWhy := advanceWatermark(r, through, pending, asked)
 
 	c.mu.Lock()
 	slot.answer, slot.at, slot.has, slot.prev = answer, at, true, next
+	slot.through, slot.pending, slot.throughWhy = through, pending, throughWhy
 	slot.ttl = captureStatusTTL
 	if answer.RetryInSeconds > 0 {
 		slot.ttl = captureStatusPendingTTL

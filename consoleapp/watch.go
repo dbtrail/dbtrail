@@ -1795,7 +1795,7 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		// The Overview asks the source whether capture is caught up (#1794).
 		// Here because both watch entry points reach this function; the
 		// read-only serve does not, and answers unknown.
-		CaptureStatus:    newCaptureStatusReporter(upSourceDSN).withBootFlavor(bootFlavor.get).withBootSSL(bootSourceSSL()),
+		CaptureStatus:    newCaptureStatusReporter(upSourceDSN).withBootFlavor(bootFlavor.get).withBootSSL(bootSourceSSL()).withBootFilters(upSchemas, upTables),
 		BootSourceFlavor: bootSourceFlavor,
 
 		BaselineDir:     opts.BaselineDir,

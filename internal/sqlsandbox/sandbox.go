@@ -209,6 +209,17 @@ type Session struct {
 	// no routing leave it off and get the copy's answer. The worker never
 	// sees it: the caller's ViewsFor decides, from what the statement names.
 	StrictStar bool
+	// UnchangedWithin, when not zero, asks for a refusal instead of an answer
+	// unless every table the statement reads has had no change on the source
+	// since the snapshot the copy holds of it, as far as that can be known:
+	// capture must be known to have read everything the source had written
+	// at some moment no longer ago than this (#2085). Set under read routing
+	// for a statement whose snapshot is older than the port's freshness
+	// limit, with that limit: the copy's answer is then the source's as of
+	// that moment, whatever the snapshot's age. Zero asks nothing, and costs
+	// nothing. Like StrictStar, the worker never sees it: the caller decides,
+	// from the tables the statement names.
+	UnchangedWithin time.Duration
 }
 
 // Column is one result column with DuckDB's type name (INTEGER, VARCHAR,
@@ -297,6 +308,17 @@ func (e *RefusedError) Error() string { return "query refused: " + e.Reason }
 type ColumnsDifferError struct{ Reason string }
 
 func (e *ColumnsDifferError) Error() string { return e.Reason }
+
+// MayHaveChangedError: the statement was not run because the caller asked
+// for an answer only over tables with no change since their snapshot
+// (Session.UnchangedWithin), and that does not hold or could not be
+// established (#2085). Reason says which: a table that changed, or what kept
+// the question from being answered. Like ColumnsDifferError, a decision
+// about the statement and not a fault of the copy: read routing sends the
+// statement to MySQL under the freshness rule it had before asking.
+type MayHaveChangedError struct{ Reason string }
+
+func (e *MayHaveChangedError) Error() string { return e.Reason }
 
 // QueryError: DuckDB ran (or tried to run) the statement inside the sandbox
 // and failed. Message is DuckDB's own text: a Permission Error for a path

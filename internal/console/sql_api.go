@@ -506,6 +506,21 @@ type sqlOutcome struct {
 // or the target, which this does not see. The errors are a *sqlRefusal or
 // the runner's own typed errors, so each caller maps them to its wire.
 func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema string, maxRows int, sess sqlsandbox.Session) (sqlOutcome, error) {
+	return s.runSQLVouched(ctx, b, user, statement, schema, maxRows, sess, nil)
+}
+
+// sqlUnchanged answers, for the tables a statement's views read, why they
+// cannot be vouched for as unchanged since their snapshot ("" when they
+// can): Server.copyUnchanged bound to a server.
+type sqlUnchanged func(ctx context.Context, tables []views.BaselineTable) string
+
+// runSQLVouched is runSQL for a caller that can answer Session.
+// UnchangedWithin (#2085): unchanged is asked once the statement's tables
+// are known, and anything but "" refuses the statement with a
+// *sqlChangedRefusal. A session that asks with no unchanged to answer it is
+// refused too: an answer nobody vouched for is not the one that was asked
+// for.
+func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, schema string, maxRows int, sess sqlsandbox.Session, unchanged sqlUnchanged) (sqlOutcome, error) {
 	// What is known without any I/O is refused before the slot: a copy that
 	// lives only on S3 is never served here, and listing it would hold one
 	// of the daemon's two slots while it waits on the network.
@@ -588,6 +603,14 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 		ViewsFor: func(refs sqlsandbox.Refs) (string, error) {
 			narrowed := in
 			narrowed.OnlyViews = sqlWantedViews(in, refs)
+			if sess.UnchangedWithin > 0 {
+				// Before anything else: a statement that is not vouched for
+				// is MySQL's, whatever its stars or its zone.
+				if why := sqlNotVouched(ctx, narrowed, refs, unchanged); why != "" {
+					viewsRefusal = &sqlChangedRefusal{why}
+					return "", viewsRefusal
+				}
+			}
 			if sess.StrictStar && refs.Natural {
 				// A NATURAL JOIN pairs on every column its tables share by
 				// name: it depends on their column SETS as a star does, with
@@ -758,6 +781,35 @@ func sqlWallClockDatetimes(in views.Input) (tables []views.BaselineTable, unknow
 // statement it does not take, without a warning per statement, and read
 // routing sends the statement to MySQL.
 type sqlStarRefusal struct{ Message string }
+
+// sqlChangedRefusal is runSQLVouched's refusal for a session that asked for
+// an answer only over tables unchanged since their snapshot
+// (sqlsandbox.Session.UnchangedWithin, #2085): Message says what changed, or
+// why nobody can say. The port turns it into a
+// sqlsandbox.MayHaveChangedError.
+type sqlChangedRefusal struct{ Message string }
+
+func (e *sqlChangedRefusal) Error() string { return e.Message }
+
+// sqlNotVouched says why a statement's answer on the copy cannot be vouched
+// for as the source's, or "": narrowed is the views input the statement will
+// run over and refs what the worker's parse of it names. The tables asked
+// about are the ones narrowed renders, so the question and the answer read
+// the same files. A statement whose tables are not certain is never vouched
+// for: one that may read what it does not name (every view is installed
+// then), and one that reads the change history, which grows with every
+// event.
+func sqlNotVouched(ctx context.Context, narrowed views.Input, refs sqlsandbox.Refs, unchanged sqlUnchanged) string {
+	switch {
+	case unchanged == nil:
+		return "nothing here can tell whether the statement's tables changed since their snapshot"
+	case refs.Unsure || narrowed.OnlyViews == nil:
+		return "the statement may read tables it does not name"
+	case narrowed.RendersEventsView():
+		return "the statement reads the change history, which is never as of the snapshot"
+	}
+	return unchanged(ctx, narrowed.SelectedBaselines())
+}
 
 func (e *sqlStarRefusal) Error() string { return e.Message }
 

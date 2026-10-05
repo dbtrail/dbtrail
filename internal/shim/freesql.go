@@ -170,6 +170,13 @@ const RouteReasonPinned RouteReason = "connection_pinned"
 // fault, which is why it is not counted under RouteReasonCopyRefused.
 const RouteReasonCopyColumnsDiffer RouteReason = "copy_columns_differ"
 
+// RouteReasonTablesUnchanged is the copy answering an expensive statement
+// although its snapshot is older than MaxCopyAge, because every table the
+// statement reads has had no change since its snapshot and capture is known
+// to have been complete within MaxCopyAge (#2085). Apart from
+// expensive_plan, so the two can be told apart in the tally.
+const RouteReasonTablesUnchanged RouteReason = "tables_unchanged"
+
 // observeRoute reports one decision to the bound observer, if any.
 func (h *Handler) observeRoute(route RouteSide, reason RouteReason) {
 	if h.routerCfg.Observe != nil {
@@ -207,7 +214,10 @@ type routeOps struct {
 	// decide asks the source for the plan and applies the policy.
 	decide func() (readrouter.Decision, error)
 	// runCopy runs the statement on the copy; reason is the decision's.
-	runCopy func(reason string) (*mysql.Result, error)
+	// unchangedWithin, when not zero, asks the copy to answer only if the
+	// tables the statement reads are unchanged since their snapshot
+	// (sqlsandbox.Session.UnchangedWithin, #2085).
+	runCopy func(reason string, unchangedWithin time.Duration) (*mysql.Result, error)
 	// extraVeto, when set, names one more reason to keep the statement on
 	// MySQL (checked after the statement's own vetoes), or "".
 	extraVeto func() string
@@ -223,12 +233,12 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 			return h.forward(ctx, qstr, reason, detail)
 		},
 		decide: func() (readrouter.Decision, error) { return h.router.Decide(ctx, qstr) },
-		runCopy: func(reason string) (*mysql.Result, error) {
+		runCopy: func(reason string, unchangedWithin time.Duration) (*mysql.Result, error) {
 			text, err := copyText(qstr)
 			if err != nil {
 				return nil, err
 			}
-			return h.runFreeSQLRouted(currentDB, text, reason)
+			return h.runFreeSQLRouted(currentDB, text, reason, unchangedWithin)
 		},
 	})
 }
@@ -314,8 +324,19 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		h.routeWarn("age", "read routing: copy age unknown, expensive statement forwarded", nil)
 		return ops.forward(RouteReasonCopyAgeUnknown, "copy age unknown")
 	}
-	if age := time.Since(at); age > h.routerCfg.MaxCopyAge {
-		return ops.forward(RouteReasonCopyTooOld, fmt.Sprintf("copy is %s old, max %s", age.Round(time.Second), h.routerCfg.MaxCopyAge))
+	// A snapshot older than the limit is not the end (#2085): a table with
+	// no change since its snapshot reads the same on the copy as on MySQL,
+	// whatever the snapshot's age. The copy is asked for an answer only over
+	// such tables, and only if capture is known to have read everything the
+	// source had written at some moment within the limit, so the answer is
+	// never older than the limit allows. It decides from the tables the
+	// statement names, which only it knows; when it cannot say so, the
+	// statement is MySQL's as before.
+	age := time.Since(at)
+	var unchangedWithin time.Duration
+	tooOld := fmt.Sprintf("copy is %s old, max %s", age.Round(time.Second), h.routerCfg.MaxCopyAge)
+	if age > h.routerCfg.MaxCopyAge {
+		unchangedWithin = h.routerCfg.MaxCopyAge
 	}
 	// Last, the source's session: the copy answers only under one it
 	// reproduces. Asked here and not earlier, so only a statement that
@@ -323,7 +344,13 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	if why := h.sessionKeepsCopyFromAnswering(ctx); why != "" {
 		return ops.forward(RouteReasonSessionDiffers, "session differs: "+why)
 	}
-	res, err := ops.runCopy(d.Reason)
+	res, err := ops.runCopy(d.Reason, unchangedWithin)
+	var changed *sqlsandbox.MayHaveChangedError
+	if errors.As(err, &changed) {
+		// Not a fault and not a warning: the rule the port had before it
+		// asked, under the reason it always had.
+		return ops.forward(RouteReasonCopyTooOld, tooOld+"; "+changed.Reason)
+	}
 	var differ *sqlsandbox.ColumnsDifferError
 	if errors.As(err, &differ) {
 		// The copy works; it declined this statement because its answer would
@@ -342,8 +369,15 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	// The copy's side of the trace: forwarded statements log their reason,
 	// so a copy-served one must too, or the log reads as if nothing ever
 	// reached the copy.
-	h.logger.Debug("read routing: served by the copy", "reason", d.Reason)
-	h.observeRoute(RouteCopy, RouteReasonExpensivePlan)
+	if unchangedWithin > 0 {
+		// Its own reason: the copy answering past the limit has to show in
+		// the tally, or a snapshot that is never refreshed reads as fresh.
+		h.logger.Debug("read routing: served by the copy", "reason", d.Reason+"; "+tooOld+", and the statement's tables are unchanged since their snapshot")
+		h.observeRoute(RouteCopy, RouteReasonTablesUnchanged)
+	} else {
+		h.logger.Debug("read routing: served by the copy", "reason", d.Reason)
+		h.observeRoute(RouteCopy, RouteReasonExpensivePlan)
+	}
 	h.mu.Lock()
 	h.routeLastForwarded = false
 	h.mu.Unlock()
@@ -534,7 +568,7 @@ func (h *Handler) notTimeTravelError(qstr string) error {
 
 // runFreeSQL serves one ordinary statement through the bound FreeSQL.
 func (h *Handler) runFreeSQL(schema, qstr string) (*mysql.Result, error) {
-	return h.runFreeSQLRouted(schema, qstr, "")
+	return h.runFreeSQLRouted(schema, qstr, "", 0)
 }
 
 // copyText is the statement the routing ladder sends the copy: the client's
@@ -555,8 +589,8 @@ func copyText(qstr string) (string, error) {
 // client's text with backtick-quoted names rewritten (copyText), a client
 // on the port without routing its own text. Nothing else is translated from
 // MySQL's dialect, and a statement the copy refuses is the caller's to
-// forward.
-func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string) (*mysql.Result, error) {
+// forward. unchangedWithin is sqlsandbox.Session.UnchangedWithin (#2085).
+func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string, unchangedWithin time.Duration) (*mysql.Result, error) {
 	ctx, cancel := h.queryContext()
 	defer cancel()
 	stmt, schema := rewriteForDuckDB(qstr, schema)
@@ -585,9 +619,11 @@ func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string) (*mysql.Res
 	// Asked of the connection, not of the reason text: a routing connection
 	// only ever gets here from the ladder.
 	sess.StrictStar = h.router != nil
+	sess.UnchangedWithin = unchangedWithin
 	res, err := h.freeSQL.Run(ctx, stmt, schema, sess)
 	var differ *sqlsandbox.ColumnsDifferError
-	if errors.As(err, &differ) {
+	var changed *sqlsandbox.MayHaveChangedError
+	if errors.As(err, &differ) || errors.As(err, &changed) {
 		// Handed back as it is: the routing ladder tells it from a fault.
 		return nil, err
 	}
