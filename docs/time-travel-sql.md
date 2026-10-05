@@ -25,8 +25,9 @@ There are three ways to put `AS OF` SQL in front of your data; they differ only
 in *how the client connects*:
 
 1. **Embedded in `bintrail-console watch` — one port for every monitored server
-   (multi-source).** If you already run the daemon, add `--flashback-listen`
-   and it serves `_flashback` / `_snapshot` / `_diff` for *every* server in the
+   (multi-source).** If you already run the daemon, turn the port on in the
+   web interface (**Connect a SQL client**), or start it with
+   `--flashback-listen`, and it serves `_flashback` / `_snapshot` / `_diff` for *every* server in the
    web interface, routed by the connection username. No separate `bintrail shim`
    process, no hand-built index DSN. See [the embedded port](#the-embedded-port-multi-source)
    below. Start here if you run `watch`. This port also answers **ordinary
@@ -65,6 +66,21 @@ bintrail-console watch \
   --console-token "$BINTRAIL_CONSOLE_TOKEN" \
   --flashback-listen 127.0.0.1:3308            # or env BINTRAIL_CONSOLE_FLASHBACK_LISTEN
 ```
+
+**Or turn it on in the web interface, with no flag and no restart.** When the
+daemon was started without `--flashback-listen`, the **Connect a SQL client**
+panel has an address field and a **Turn on** button. Turning it on creates the
+port's own password and shows it once; **New password** replaces it, and
+**Turn off** closes the port. The setting and the password are kept in
+`console-mysql-port.yaml` beside the servers file, so they survive a restart.
+That file holds the password as the client types it (MySQL-protocol
+authentication needs it that way), readable only by the user DBTrail runs as.
+An address given with the flag or the environment variable decides instead,
+and the panel then shows it as fixed. A newly installed Docker Compose stack publishes the port
+on the host loopback as 3309 (an older install needs the `ports:` line added to
+its docker-compose.yml); turn it on with the address
+`0.0.0.0:3309` (the default offered there) and connect from that machine, or
+through a tunnel from another one.
 
 **Routing is by username, auth is the access token.** Connect as the target
 server — its registry **ID** (robust; the `X-Bintrail-Server` value shown in the
@@ -474,9 +490,8 @@ application and an `allowed_schemas` list on each (see
 The web interface shows all of this on **Settings → MCP Server**, in the **Connect a
 SQL client** panel: whether the port is on, its address, the user and password
 rules, and a ready-to-copy `mysql` line for the server picked in the sidebar
-(the token itself is never displayed). When the port is off, the panel names
-`--flashback-listen` / `BINTRAIL_CONSOLE_FLASHBACK_LISTEN` as the daemon
-setting that opens it.
+(the token itself is never displayed). When the port is off, the panel turns
+it on; when its address was given at startup, the panel shows it as fixed.
 
 `_snapshot.*` parity: each server reads the baseline configured on its registry
 entry (or the daemon's `--baseline-dir` / `--baseline-s3`), exactly as the
