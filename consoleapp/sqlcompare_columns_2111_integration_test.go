@@ -202,6 +202,13 @@ func TestIntegrationSQLCompareColumnOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A second server over the same copy, for the comparison only (see
+	// compareInHalves). The routed half below, and the reasons it counts,
+	// stay on the first.
+	entB, err := reg.Add(console.ServerEntry{Name: "srvb", DSN: indexDSN, SourceDSN: sourceDSN, BaselineDir: baseDir})
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg,
 		FlashbackListen: "127.0.0.1:3308", ReadRouting: console.ReadRoutingConfig{MaxCopyAge: time.Hour, ScanRows: 2}})
 	if err != nil {
@@ -219,7 +226,11 @@ func TestIntegrationSQLCompareColumnOrder(t *testing.T) {
 		return ln.Addr().String()
 	}
 	policy := readrouter.Policy{ScanRows: 2}
-	copyDSN := fmt.Sprintf("%s:tok@tcp(%s)/%s", ent.ID, serve(flashbackConfig{}), srcName)
+	copyAddr := serve(flashbackConfig{})
+	copies := [2]string{
+		fmt.Sprintf("%s:tok@tcp(%s)/%s", ent.ID, copyAddr, srcName),
+		fmt.Sprintf("%s:tok@tcp(%s)/%s", entB.ID, copyAddr, srcName),
+	}
 
 	eq, diff := sqlcompare.Equal, sqlcompare.Different
 	fixtures := []valuesFixture{
@@ -248,30 +259,22 @@ func TestIntegrationSQLCompareColumnOrder(t *testing.T) {
 		{"SELECT id, zeta, alpha FROM legacy ORDER BY id", eq, "", "named columns are the same everywhere"},
 		{"SELECT id, a FROM gen ORDER BY id", eq, "", "named columns are the same everywhere"},
 	}
-	statements := make([]string, len(fixtures))
-	for i, f := range fixtures {
-		statements[i] = f.stmt
-	}
-	rep, err := sqlcompare.Run(context.Background(), sqlcompare.Options{SourceDSN: sourceDSN, CopyDSN: copyDSN, Policy: policy}, statements)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	by := map[string]sqlcompare.Result{}
-	for _, r := range rep.Results {
-		by[r.Statement] = r
-	}
+	by := compareInHalves(t, sourceDSN, copies, policy, fixtures)
 	src := openRaw(t, sourceDSN)
-	cp := openRaw(t, copyDSN)
+	cp := openRaw(t, copies[0])
 	for _, f := range fixtures {
 		r, ok := by[f.stmt]
 		if !ok {
 			t.Errorf("no result for %q", f.stmt)
 			continue
 		}
-		srcCols, _ := answerColumns(t, src, f.stmt)
-		cpCols, _ := answerColumns(t, cp, f.stmt)
-		t.Logf("%-12s %-9s route=%-5s %s\n    mysql: %v\n    copy:  %v\n    %s", r.Verdict, r.Kind, r.Route, f.stmt, srcCols, cpCols, r.Detail)
+		t.Logf("%-12s %-9s route=%-5s %s\n    %s", r.Verdict, r.Kind, r.Route, f.stmt, r.Detail)
+		// Every verdict pinned here is EQUAL or DIFFERENT, which sql-compare
+		// only reaches once both sides answered. The column names each side
+		// returns are read (one more worker on the copy) only for a fixture
+		// that fails.
 		if r.Verdict != f.verdict || (f.kind != "" && r.Kind != f.kind) {
+			t.Logf("    mysql: %v\n    copy:  %v", columnNames(src, f.stmt), columnNames(cp, f.stmt))
 			t.Errorf("%q: got %s/%s (%s), want %s/%s: %s", f.stmt, r.Verdict, r.Kind, r.Detail, f.verdict, f.kind, f.why)
 		}
 	}

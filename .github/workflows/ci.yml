@@ -133,6 +133,9 @@ jobs:
               # The S3 test store actions run inside the integration job
               # (#1884): a change to one must be able to run that job.
               - '.github/actions/**'
+              # What runs in which shard, and how one package is split by
+              # test name: a change to it must run the shards.
+              - 'scripts/mysql-integration-shard.sh'
               - '!internal/console/assets_*_test.go'
             console:
               - 'internal/console/**'
@@ -145,6 +148,7 @@ jobs:
               - 'docs/migrations/**'
               - '.github/workflows/ci.yml'
               - '.github/actions/**'
+              - 'scripts/mysql-integration-shard.sh'
               - '!internal/console/**'
               - '!consoleapp/**'
               - '!cmd/bintrail-console/**'
@@ -231,7 +235,9 @@ jobs:
   # share that server's binlog) while the shards overlap. What runs where, and
   # why only packages with integration-tagged tests, is in
   # scripts/mysql-integration-shard.sh: the last shard takes every package the
-  # others do not name, so a new package can never go unrun.
+  # others do not name, so a new package can never go unrun. One package runs
+  # in two shards, split by test name; the `integration` job checks that the
+  # two parts add up to the package.
   #
   # These cells are NOT the required checks. `integration (8.0)` and
   # `integration (8.4)` are, and they are the `integration` job below, which
@@ -489,6 +495,15 @@ jobs:
           echo "ready=$ready" >> "$GITHUB_OUTPUT"
           grep -E '^(ok  |FAIL)'$'\t' /tmp/mysql-it.out || true
           exit "$bad"
+
+      # One package (consoleapp) runs in two shards, split by test name: one
+      # shard runs the tests a pattern matches, another the rest. Over both
+      # logs together, every test its binary lists must have run exactly
+      # once, so a change to the split can neither drop a test nor run it
+      # twice (scripts/mysql-integration-shard.sh, SPLIT_PKG).
+      - name: The split package ran whole
+        if: env.RUN == 'true'
+        run: bash scripts/mysql-integration-shard.sh check-split /tmp/mysql-it.out
 
       # The false-green tripwires: these tests must have PASSED in some shard,
       # not merely not failed. They live in different shards, so they are
