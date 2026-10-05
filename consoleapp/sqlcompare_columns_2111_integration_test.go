@@ -138,6 +138,17 @@ func TestIntegrationSQLCompareColumnOrder(t *testing.T) {
 			ddl: "CREATE TABLE `invis` (\n  `id` int NOT NULL,\n  `secret` int DEFAULT NULL /*!80023 INVISIBLE */,\n" +
 				"  `a` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;\n",
 			rows: [][]string{{"1", "9", "5"}, {"2", "9", "6"}, {"3", "9", "7"}}},
+		// Partners for NATURAL JOIN. MySQL pairs gen with g2 on (id, twice)
+		// and finds no row; the copy holds no `twice` in gen, pairs on id
+		// alone and finds three. MySQL pairs invis with inv2 on id alone
+		// (the invisible column is left out) and finds three; the copy pairs
+		// on (id, secret) and finds none.
+		{name: "g2", footer: true,
+			ddl:  "CREATE TABLE `g2` (\n  `id` int NOT NULL,\n  `twice` int DEFAULT NULL,\n  `b` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;\n",
+			rows: [][]string{{"1", "99", "7"}, {"2", "99", "8"}, {"3", "99", "9"}}},
+		{name: "inv2", footer: true,
+			ddl:  "CREATE TABLE `inv2` (\n  `id` int NOT NULL,\n  `secret` int DEFAULT NULL,\n  `b` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;\n",
+			rows: [][]string{{"1", "6", "7"}, {"2", "6", "8"}, {"3", "6", "9"}}},
 		// For the routing half: the copy's rows say "copy", the source's
 		// "live", so a statement tells which side answered it.
 		{name: "who", footer: true,
@@ -227,6 +238,10 @@ func TestIntegrationSQLCompareColumnOrder(t *testing.T) {
 		// column first, the copy leaves it where the left table has it.
 		{"SELECT * FROM altered a JOIN altered b USING (name) ORDER BY name", diff, "columns", "a star over USING: MySQL puts the join column first"},
 		{"SELECT * FROM orders o JOIN orders p USING (customer_id, id) ORDER BY id", eq, "", "the join columns already lead the left table: the same on both"},
+		// NATURAL JOIN with no star: other ROWS, not other columns.
+		{"SELECT count(*) FROM gen NATURAL JOIN g2", diff, "", "the copy pairs on id alone: 3 against MySQL's 0"},
+		{"SELECT count(*) FROM invis NATURAL JOIN inv2", diff, "", "the copy pairs on (id, secret): 0 against MySQL's 3"},
+		{"SELECT count(*) FROM g2 NATURAL JOIN inv2", eq, "", "both tables have MySQL's columns"},
 		{"SELECT id, zeta, alpha FROM legacy ORDER BY id", eq, "", "named columns are the same everywhere"},
 		{"SELECT id, a FROM gen ORDER BY id", eq, "", "named columns are the same everywhere"},
 	}
@@ -278,6 +293,10 @@ func TestIntegrationSQLCompareColumnOrder(t *testing.T) {
 		{"SELECT * FROM who_legacy l JOIN who w USING (alpha) ORDER BY alpha", "a star over USING, by the join alone: MySQL answers", []string{"alpha", "id", "side", "id", "side"}, "1|1|live|1|live"},
 		{"SELECT * FROM who a JOIN who w USING (alpha) ORDER BY alpha", "a star over USING, both orders known: still MySQL", []string{"alpha", "id", "side", "id", "side"}, "1|1|live|1|live"},
 		{"SELECT a.side, w.alpha FROM who a JOIN who w USING (alpha) ORDER BY w.alpha", "USING without a star is the copy's", []string{"side", "alpha"}, "copy|1"},
+		{"SELECT count(*) AS n FROM gen NATURAL JOIN g2", "NATURAL JOIN over a table with a generated column: MySQL answers", []string{"n"}, "0"},
+		{"SELECT count(*) AS n FROM invis NATURAL JOIN inv2", "NATURAL JOIN over a table with an invisible column: MySQL answers", []string{"n"}, "3"},
+		{"SELECT count(*) AS n FROM who NATURAL JOIN who_legacy", "NATURAL JOIN over a table with no definition: MySQL answers", []string{"n"}, "3"},
+		{"SELECT max(w.side) AS s FROM who w NATURAL JOIN who x", "NATURAL JOIN over tables with MySQL's columns: the copy answers", []string{"s"}, "copy"},
 		{"SELECT * FROM gen ORDER BY a", "MySQL returns the generated column: MySQL answers", []string{"id", "twice", "a"}, "1|2|5"},
 		{"SELECT * FROM invis ORDER BY a", "MySQL leaves the invisible column out: MySQL answers", []string{"id", "a"}, "1|5"},
 	} {

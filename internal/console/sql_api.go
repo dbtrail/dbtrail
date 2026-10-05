@@ -588,6 +588,21 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 		ViewsFor: func(refs sqlsandbox.Refs) (string, error) {
 			narrowed := in
 			narrowed.OnlyViews = sqlWantedViews(in, refs)
+			if sess.StrictStar && refs.Natural && !refs.Star {
+				// A NATURAL JOIN pairs on every column its tables share by
+				// name: it depends on their column SETS as a star does, with
+				// no star in the statement. The copy holds no generated
+				// column and holds the invisible ones, so over such a table
+				// it would pair on other columns and return other ROWS. Every
+				// table the statement reads has to have MySQL's set, not only
+				// the joined ones: the parse does not say which is which.
+				if table, why := sqlStarUnlikeMySQL(narrowed); table != "" {
+					viewsRefusal = &sqlStarRefusal{fmt.Sprintf(
+						"a NATURAL JOIN pairs on the columns its tables share, and %s does not have the columns MySQL has (%s), "+
+							"so the copy does not answer it; write the join with ON or USING to read it here", table, why)}
+					return "", viewsRefusal
+				}
+			}
 			if sess.StrictStar && (refs.Star || refs.Unsure) {
 				// A star returns what the view's column list says. Where that
 				// is not what MySQL returns, a caller that asked for MySQL's

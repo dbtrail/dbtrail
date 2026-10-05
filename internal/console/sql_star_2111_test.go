@@ -52,6 +52,11 @@ func TestSQL_realWorkerSelectStar_2111(t *testing.T) {
 		"  `alpha` decimal(6,2) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n", []string{"1", "26", "1.50"})
 	writeSQLStarTable(t, f.root, "gen", "CREATE TABLE `gen` (\n  `id` int NOT NULL,\n  `twice` int GENERATED ALWAYS AS (`id` * 2) STORED,\n"+
 		"  `a` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n", []string{"1", "3"})
+	// Every table before the first statement: the console remembers a
+	// snapshot's table definitions once it has read them.
+	writeSQLStarTable(t, f.root, "g2", "CREATE TABLE `g2` (\n  `id` int NOT NULL,\n  `twice` int DEFAULT NULL,\n  `b` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n", []string{"1", "99", "7"})
+	writeSQLStarTable(t, f.root, "inv", "CREATE TABLE `inv` (\n  `id` int NOT NULL,\n  `secret` int DEFAULT NULL /*!80023 INVISIBLE */,\n  `a` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n", []string{"1", "5", "3"})
+	writeSQLStarTable(t, f.root, "inv2", "CREATE TABLE `inv2` (\n  `id` int NOT NULL,\n  `secret` int DEFAULT NULL,\n  `b` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n", []string{"1", "6", "7"})
 	ctx := context.Background()
 	strict := sqlsandbox.Session{StrictStar: true}
 	names := func(res sqlsandbox.Result) []string {
@@ -115,6 +120,25 @@ func TestSQL_realWorkerSelectStar_2111(t *testing.T) {
 	answered("SELECT a.id, b.zeta FROM shop.lines a JOIN shop.lines b USING (id)", strict)
 	answered("SELECT * FROM shop.lines a JOIN shop.lines b ON a.id = b.id", strict)
 	answered("SELECT * FROM shop.lines a JOIN shop.lines b USING (id)", sqlsandbox.Session{})
+
+	// A NATURAL JOIN pairs on every column the two tables share by name, so
+	// it depends on each table's column SET with or without a star. Measured
+	// on MySQL 8.4 and MariaDB 11.4: gen NATURAL JOIN g2 pairs on (id, twice)
+	// there and returns no row, where the copy, which holds no generated
+	// column, pairs on id alone and returns one; inv NATURAL JOIN inv2 pairs
+	// on id alone there (the invisible column is left out) and returns a row,
+	// where the copy pairs on (id, secret) and returns none.
+	refused("SELECT gen.a, g2.b FROM shop.gen NATURAL JOIN shop.g2", "shop.gen", "NATURAL")
+	refused("SELECT count(*) FROM shop.gen NATURAL JOIN shop.g2", "shop.gen")
+	refused("SELECT inv.a, inv2.b FROM shop.inv NATURAL JOIN shop.inv2", "shop.inv", "invisible column secret")
+	refused("SELECT count(*) FROM shop.g2 NATURAL LEFT JOIN shop.orders", "shop.orders")
+	refused("SELECT id FROM shop.lines WHERE id IN (SELECT g2.id FROM shop.g2 NATURAL JOIN shop.gen)", "shop.gen")
+	// Every table's column set is MySQL's: the copy answers.
+	answered("SELECT g2.b, inv2.b FROM shop.g2 NATURAL JOIN shop.inv2", strict)
+	// USING names its columns, so with a select list it does not depend on the set.
+	answered("SELECT gen.a, g2.b FROM shop.gen JOIN shop.g2 USING (id)", strict)
+	// And outside routing nothing is refused.
+	answered("SELECT gen.a, g2.b FROM shop.gen NATURAL JOIN shop.g2", sqlsandbox.Session{})
 	// Without a star the same tables answer.
 	answered("SELECT id, status FROM shop.orders", strict)
 	answered("SELECT count(*) FROM shop.orders", strict)

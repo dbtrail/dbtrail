@@ -88,7 +88,7 @@ func TestCollectRefs(t *testing.T) {
 	}
 	for _, c := range cases {
 		got := parseForRefs(t, c.sql)
-		got.Star, got.NamedJoin = false, false // TestCollectRefs_star has them
+		got.Star, got.NamedJoin, got.Natural = false, false, false // TestCollectRefs_star has them
 		if !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s:\n got %+v\nwant %+v", c.sql, got, c.want)
 		}
@@ -134,8 +134,12 @@ func TestCollectRefs_star(t *testing.T) {
 		"SELECT * FROM a.x":                                           false,
 		"SELECT id FROM a.x WHERE note = 'natural join b using (id)'": false,
 	} {
-		if got := parseForRefs(t, sqlText).NamedJoin; got != want {
-			t.Errorf("%s: NamedJoin = %v, want %v", sqlText, got, want)
+		refs := parseForRefs(t, sqlText)
+		if refs.NamedJoin != want {
+			t.Errorf("%s: NamedJoin = %v, want %v", sqlText, refs.NamedJoin, want)
+		}
+		if wantNatural := want && strings.Contains(sqlText, "NATURAL"); refs.Natural != wantNatural {
+			t.Errorf("%s: Natural = %v, want %v", sqlText, refs.Natural, wantNatural)
 		}
 	}
 }

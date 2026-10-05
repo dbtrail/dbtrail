@@ -107,6 +107,18 @@ func TestIntegrationFlashbackReadRoutingMariaDBSource(t *testing.T) {
 	if got := first("SELECT status, count(*) FROM orders GROUP BY status"); got != "copy" {
 		t.Errorf("full scan answered %q, want copy: MariaDB's plan was not read", got)
 	}
+	// The copy's file of orders carries no table definition, so its column
+	// set is not known: a NATURAL JOIN, which pairs on that set, and a star
+	// are the source's (#2111). The same join with its columns named is not.
+	if got := first("SELECT max(a.status) FROM orders a NATURAL JOIN orders b"); got != "live" {
+		t.Errorf("NATURAL JOIN over a table with no definition answered %q, want live (the source)", got)
+	}
+	if got := first("SELECT max(a.status) FROM orders a JOIN orders b USING (id)"); got != "copy" {
+		t.Errorf("JOIN ... USING with named columns answered %q, want copy", got)
+	}
+	if got := first("SELECT a.* FROM orders a ORDER BY a.status"); got != "1" {
+		t.Errorf("star over a table with no definition answered %q first, want 1: the source's id column", got)
+	}
 	if got := first("SELECT status FROM orders WHERE id = ?", 2); got != "live" {
 		t.Errorf("prepared point lookup answered %q, want live (the source)", got)
 	}

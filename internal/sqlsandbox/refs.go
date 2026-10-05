@@ -31,6 +31,10 @@ type Refs struct {
 	// everywhere: MySQL returns the join's columns first, DuckDB leaves them
 	// where the left table has them.
 	NamedJoin bool `json:"named_join,omitempty"`
+	// Natural is set when one of those joins is NATURAL. Such a join pairs on
+	// every column the two tables share by name, so what it returns depends
+	// on each table's column SET whether or not the statement holds a star.
+	Natural bool `json:"natural,omitempty"`
 }
 
 // collectRefs walks a json_serialize_sql statement tree. A shape this walk
@@ -69,6 +73,9 @@ func walkRefs(node any, scope map[string]bool, r *Refs) {
 			using, _ := v["using_columns"].([]any)
 			if len(using) > 0 || v["ref_type"] == "NATURAL" {
 				r.NamedJoin = true
+			}
+			if v["ref_type"] == "NATURAL" {
+				r.Natural = true
 			}
 		case "BASE_TABLE":
 			name, ok := v["table_name"].(string)
