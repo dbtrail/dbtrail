@@ -70,6 +70,14 @@ type ServerEntry struct {
 	// a secret exactly like DSN, never serialized to any HTTP response.
 	// Empty = a view-only entry (no monitoring configured).
 	SourceDSN string `yaml:"source_dsn,omitempty"`
+	// RouteDSN is the forwarding account (#2079): the DSN read routing on
+	// the MySQL-protocol port connects to the source with, instead of
+	// SourceDSN, so forwarded statements do not run as the capture account.
+	// Empty = forward with SourceDSN. A secret exactly like SourceDSN, never
+	// serialized to any HTTP response. Meaningless without a SourceDSN.
+	// Additive at registryVersion 1: on binaries that predate it, it
+	// round-trips untouched through Extra.
+	RouteDSN string `yaml:"route_dsn,omitempty"`
 	// SourceServerID overrides the auto-derived replica server id (0 = derive
 	// from the source DSN, the same rule as `bintrail up`).
 	SourceServerID uint32 `yaml:"source_server_id,omitempty"`

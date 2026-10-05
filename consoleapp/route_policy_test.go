@@ -316,7 +316,7 @@ func TestBindReadRouterCarriesReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tgt := console.FlashbackTarget{ID: "s1", SQL: &console.SQLOnCopy{}, SourceDSN: "nobody:x@tcp(127.0.0.1:1)/none", SourceSSL: console.ServerEntry{}.SourceSSL()}
+	tgt := console.FlashbackTarget{ID: "s1", SQL: &console.SQLOnCopy{}, ForwardDSN: "nobody:x@tcp(127.0.0.1:1)/none", SourceSSL: console.ServerEntry{}.SourceSSL()}
 	bind := func(readOnly bool) *shim.Handler {
 		h := shim.NewHandler(nil, nil)
 		h.BindFreeSQL(routeTestFreeSQL{})
@@ -379,7 +379,7 @@ func TestBindReadRouterUsesTheServersTLS(t *testing.T) {
 	bind := func(ssl config.SSL) *shim.Handler {
 		h := shim.NewHandler(nil, nil)
 		h.BindFreeSQL(routeTestFreeSQL{})
-		bindReadRouter(h, srv, console.FlashbackTarget{ID: "s1", SQL: &console.SQLOnCopy{}, SourceDSN: "nobody:x@tcp(127.0.0.1:1)/none", SourceSSL: ssl},
+		bindReadRouter(h, srv, console.FlashbackTarget{ID: "s1", SQL: &console.SQLOnCopy{}, ForwardDSN: "nobody:x@tcp(127.0.0.1:1)/none", SourceSSL: ssl},
 			"s1", flashbackConfig{RouteMaxCopyAge: time.Hour, RoutePolicy: readrouter.DefaultPolicy(), QueryTimeout: 5 * time.Second}, slog.Default())
 		t.Cleanup(h.Close)
 		return h

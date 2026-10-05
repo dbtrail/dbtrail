@@ -508,7 +508,23 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
   in [upload.md → A store per server](upload.md#a-store-per-server-from-the-web-interface).
 - Registry fields: `source_dsn` (replication credentials — a secret with the
   same masking/keep-password discipline as the index DSN; `source_dsn: ""`
-  clears it), `source_server_id` (0 = derived), `schemas`, `monitor_desired`,
+  clears it), `route_dsn` (the optional forwarding account read routing
+  connects to the source with instead of `source_dsn`: a secret with the
+  same discipline, set through `route_user` / `route_password` or a raw
+  `route_dsn`, shown as `has_route` / `route_user` / `has_route_password`,
+  plus `route_host` / `route_port` only when it connects to another address
+  than the source; `route_is_capture` marks a saved value that is the
+  capture account itself and `route_unreadable` one that cannot be parsed,
+  neither counts as `has_route`; fields left out of a `PUT` keep it, an
+  empty `route_user` removes it, and clearing the source removes it too; a
+  change closes that server's open connections on the MySQL-protocol port;
+  `POST /api/servers[/{id}]/test` answers with a `route` object, the login
+  tried with it: `ok`, `user`, `error`, `needs_password`, or `skipped` with
+  the reason in a process that has no port (`serve`); and
+  `GET /api/flashback` carries `account_refused` per server when the
+  source turned the port's login away; see
+  [time-travel-sql.md](time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental)),
+  `source_server_id` (0 = derived), `schemas`, `monitor_desired`,
   `archive_s3` (the bucket above — non-secret, round-trips in the masked DTO),
   `s3_endpoint` / `s3_path_style` (`path`, `vhost` or empty = path with an
   endpoint) / `s3_region` (the S3 store above — non-secret, round-trip too),

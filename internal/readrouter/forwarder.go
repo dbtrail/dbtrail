@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,10 +42,10 @@ type RowSink interface {
 // upstream connection, exactly as if the client had connected to MySQL
 // itself. It also runs the EXPLAIN the decision reads.
 //
-// The credentials are the registry's source DSN (the operator's), not the
-// client's: the port authenticates on the console token, so a forwarded
-// statement has the operator's grants, the same way the copy has no grants
-// at all.
+// The credentials are the operator's, not the client's: the server's
+// forwarding account when the registry holds one, else its source DSN. The
+// port authenticates on the console token, so a forwarded statement has that
+// account's grants, the same way the copy has no grants at all.
 //
 // The connection is never replaced behind the client's back. Once it is lost
 // (a network error, the source closing an idle connection, the query
@@ -66,7 +67,14 @@ type Forwarder struct {
 	// WITHOUT encryption because the mode is "preferred" and the source
 	// offers no TLS, with the error that proved it: the caller's chance to
 	// say so in the log, as capture does for its own connection.
-	OnCleartext    func(error)
+	OnCleartext func(error)
+	// OnConnect, when set, is told how the one attempt to open the
+	// connection ended: nil when it opened, else the error as the source or
+	// the network gave it (before it is turned into CodeUpstreamLost for
+	// the client). It is how a caller learns WHY a source could not be
+	// reached, an account the source refuses among the reasons
+	// (AccountRefused).
+	OnConnect      func(error)
 	policy         Policy
 	connectTimeout time.Duration
 	// queryTimeout bounds each round trip on the upstream socket (read and
@@ -77,10 +85,20 @@ type Forwarder struct {
 	mu   sync.Mutex
 	db   string
 	conn *client.Conn
-	dead error
+	// raw is conn's socket (the TLS connection when it is encrypted), kept
+	// so that another goroutine can interrupt a statement in flight by
+	// closing IT. A net.Conn may be closed from any goroutine; the client
+	// library's Conn may not (its Close writes packet state the statement's
+	// goroutine is writing too). See interrupt.
+	raw net.Conn
+	// threadID is the source's id for this connection (CONNECTION_ID()),
+	// from the handshake: what a KILL names.
+	threadID uint32
+	dead     error
 }
 
-// NewForwarder parses a go-sql-driver DSN (the registry's source DSN) and
+// NewForwarder parses a go-sql-driver DSN (the registry's forwarding or
+// source DSN) and
 // returns a Forwarder that connects on first use. ssl is the TLS the server's
 // source connection uses, the value capture connects to the same server
 // with: the upstream connection is encrypted, or refused, or falls back to
@@ -109,11 +127,27 @@ func NewForwarder(sourceDSN string, ssl config.SSL, policy Policy, queryTimeout 
 	if _, _, err := net.SplitHostPort(addr); err != nil {
 		addr = net.JoinHostPort(addr, "3306")
 	}
+	dsnTLS, tlsInDSN := cfg.TLS, cfg.TLS != nil || cfg.TLSConfig != ""
+	if strings.EqualFold(cfg.TLSConfig, "preferred") {
+		// tls=preferred in the DSN is the MODE preferred, written in the
+		// DSN: encrypted when the source offers TLS, and when it offers
+		// none, the one fallback to an unencrypted connection, reported
+		// through OnCleartext. The driver capture connects with does that
+		// fallback itself for such a DSN; the client used here has none, so
+		// taking the DSN's tls.Config as it stands would refuse a source
+		// that capture reaches. Like every tls= in a DSN it wins over the
+		// server's mode, so the mode's CA and certificate are not used.
+		ssl = config.SSL{Mode: "preferred"}
+		dsnTLS, tlsInDSN = nil, false
+		plain := cfg.Clone()
+		plain.TLSConfig, plain.TLS = "", nil
+		sourceDSN = plain.FormatDSN()
+	}
 	return &Forwarder{
 		dsn:  sourceDSN,
 		addr: addr, user: cfg.User, pass: cfg.Passwd, db: cfg.DBName,
-		tls:            cfg.TLS,
-		tlsInDSN:       cfg.TLS != nil || cfg.TLSConfig != "",
+		tls:            dsnTLS,
+		tlsInDSN:       tlsInDSN,
 		ssl:            ssl,
 		policy:         policy,
 		connectTimeout: 10 * time.Second,
@@ -153,16 +187,31 @@ func (f *Forwarder) get(ctx context.Context) (*client.Conn, error) {
 			return nil
 		})
 	})
+	var se *config.TLSSettingsError
+	if errors.As(err, &se) {
+		// A setting that was usable when the forwarder was made and is not
+		// now (a CA file removed since). This text reaches the port's
+		// client and the console's pages: worded from the server's setting,
+		// not from the command-line flag the settings error names.
+		err = fmt.Errorf("this server's TLS settings cannot be used: %s", se.Problem)
+	}
+	if f.OnConnect != nil {
+		f.OnConnect(err)
+	}
 	if err != nil {
 		f.dead = lostError(fmt.Errorf("connect to the source: %w", err))
 		return nil, f.dead
 	}
 	f.conn = c
+	f.raw = c.Conn.Conn
+	f.threadID = c.GetConnectionID()
 	return c, nil
 }
 
 // lose records that the upstream connection is gone, closes it, and makes
-// every later statement fail with CodeUpstreamLost naming the cause.
+// every later statement fail with CodeUpstreamLost naming the cause. It is
+// called by the goroutine that runs the connection's statements, never by
+// another one: see interrupt for that.
 func (f *Forwarder) lose(cause error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -175,8 +224,115 @@ func (f *Forwarder) lose(cause error) {
 	}
 }
 
+// lost returns the error every statement gets once the connection is gone,
+// with the cause that was recorded first.
+func (f *Forwarder) lost() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dead
+}
+
+// interrupt ends the upstream connection from ANOTHER goroutine than the one
+// running its statements: it marks the connection lost and closes the socket
+// under it, which makes a blocked read or write in the client library return
+// with an error; the statement's goroutine then does the library's own close
+// (lose, or Close). The library's Conn is not touched here: its Close resets
+// the packet sequence, which a statement being written is updating at the
+// same moment.
+func (f *Forwarder) interrupt(cause error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.dead == nil {
+		f.dead = lostError(cause)
+	}
+	if f.raw != nil {
+		_ = f.raw.Close()
+	}
+}
+
+// ThreadID is the source's id for the upstream connection (what a KILL
+// names), or 0 when none was opened.
+func (f *Forwarder) ThreadID() uint32 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.threadID
+}
+
 func lostError(cause error) error {
 	return mysql.NewError(CodeUpstreamLost, fmt.Sprintf("MySQL server has gone away (the port's connection to the source was lost: %v); reconnect to continue", cause))
+}
+
+// AccountRefused reports whether err is the source turning the ACCOUNT away
+// when the connection was opened (a wrong password, a host the account may
+// not connect from, a locked or expired account, a database it may not use),
+// as opposed to the source being unreachable. code is MySQL's error number.
+func AccountRefused(err error) (code uint16, refused bool) {
+	var me *mysql.MyError
+	if !errors.As(err, &me) {
+		return 0, false
+	}
+	switch me.Code {
+	case mysql.ER_ACCESS_DENIED_ERROR, // 1045: wrong user or password
+		mysql.ER_DBACCESS_DENIED_ERROR, // 1044: no access to the DSN's database
+		mysql.ER_HOST_NOT_PRIVILEGED,   // 1130: host not allowed to connect
+		mysql.ER_MUST_CHANGE_PASSWORD,  // 1820
+		1698,                           // access denied (no password, or the auth plugin)
+		1862,                           // the password has expired
+		3118,                           // the account is locked (MySQL)
+		4151:                           // the account is locked (MariaDB)
+		return me.Code, true
+	}
+	return 0, false
+}
+
+// KillThreads ends, on the source, the connections with the given thread
+// ids: one connection of its own, opened with dsn by the rule every
+// Forwarder connects with (ssl), sends KILL for each. It is how the
+// statements of client connections that were just dropped are stopped on the
+// source, where they would otherwise run to their end. An account may kill
+// its own threads, so dsn is the account those connections used.
+//
+// An id the source does not know is a connection that already ended: not an
+// error. The error of a login the source refuses is the source's own (see
+// AccountRefused); any other KILL the source would not do is reported after
+// all of them were sent.
+func KillThreads(ctx context.Context, dsn string, ssl config.SSL, ids []uint32, timeout time.Duration) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	f, err := NewForwarder(dsn, ssl, Policy{}, timeout)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	var connectErr error
+	f.OnConnect = func(err error) { connectErr = err }
+	err = killEach(ids, func(q string) error {
+		_, err := f.Forward(ctx, q, &BufferSink{})
+		return err
+	})
+	if connectErr != nil {
+		return connectErr
+	}
+	return err
+}
+
+// killEach sends one KILL per id through run and gathers what failed,
+// leaving out the source's "no such thread".
+func killEach(ids []uint32, run func(string) error) error {
+	var failed []error
+	for _, id := range ids {
+		err := run(fmt.Sprintf("KILL %d", id))
+		var me *mysql.MyError
+		if err == nil || errors.As(err, &me) && me.Code == mysql.ER_NO_SUCH_THREAD {
+			continue
+		}
+		failed = append(failed, fmt.Errorf("thread %d: %w", id, err))
+		if IsLost(err) {
+			break // nothing more can be sent on this connection
+		}
+	}
+	return errors.Join(failed...)
 }
 
 // IsLost reports whether err is the Forwarder's "connection to the source
@@ -189,10 +345,11 @@ func IsLost(err error) bool {
 // watch ties the upstream socket to ctx for the duration of one statement:
 // when ctx ends (the query deadline, the client connection closing, daemon
 // shutdown) the socket is closed, which is the only way to make go-mysql's
-// blocking read return. The returned stop must be called when the statement
-// is done.
+// blocking read return. That happens on another goroutine than the
+// statement's, hence interrupt and not lose. The returned stop must be called
+// when the statement is done.
 func (f *Forwarder) watch(ctx context.Context) func() bool {
-	return context.AfterFunc(ctx, func() { f.lose(ctx.Err()) })
+	return context.AfterFunc(ctx, func() { f.interrupt(ctx.Err()) })
 }
 
 // Decide applies the policy to the statement: the one shape that needs no
@@ -319,8 +476,11 @@ func (f *Forwarder) stream(sink RowSink, run func(*mysql.Result, client.SelectPe
 			// rows); the connection is in sync and stays usable.
 			return nil, unwrapMySQLError(err)
 		default:
+			// When the statement was interrupted (its context ended), the
+			// error here is only the closed socket; the client is told
+			// the first cause, the one interrupt recorded.
 			f.lose(err)
-			return nil, lostError(err)
+			return nil, f.lost()
 		}
 	}
 	if res.Resultset != nil && len(res.Fields) == 0 {
