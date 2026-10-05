@@ -49,6 +49,9 @@ type preparedStmt struct {
 	// template. query is its text, which the routing ladder reads.
 	up    readrouter.Stmt
 	query string
+	// copyRefusal, when set, is why the template cannot be written for the
+	// copy (readrouter.ForCopy refused it): every execution is MySQL's.
+	copyRefusal string
 	// db is the database selected when the statement was prepared: the
 	// source resolves the statement's unqualified names in it for good.
 	db string
@@ -255,11 +258,30 @@ func (h *Handler) prepareRouted(query string, parts []string) (int, int, any, er
 	h.mu.Unlock()
 	st := &preparedStmt{up: up, query: query, db: db}
 	if len(parts)-1 == up.Params() {
-		st.parts = parts
+		st.parts, st.copyRefusal = copyParts(parts)
 	}
 	// Otherwise the source counted other placeholders than this port did:
 	// the statement still runs there, and is never written out for the copy.
 	return up.Params(), up.Columns(), st, nil
+}
+
+// copyParts is a routed template as the copy is sent it: each piece of text
+// around the placeholders with its backtick-quoted names in double quotes
+// (readrouter.ForCopy). A placeholder is never inside a string, a name or a
+// comment, so every piece is whole and can be rewritten on its own; the
+// arguments are written in afterwards and are never rescanned, since they
+// are spelled the copy's way (a backslash is a character there) and this
+// scanner reads MySQL's. With a refusal the pieces come back as written.
+func copyParts(parts []string) (out []string, refusal string) {
+	out = make([]string, len(parts))
+	for i, part := range parts {
+		text, why := readrouter.ForCopy(part)
+		if why != "" {
+			return parts, why
+		}
+		out[i] = text
+	}
+	return out, ""
 }
 
 // executeRouted runs one execution of a statement prepared on the source
@@ -304,6 +326,8 @@ func (h *Handler) executeRouted(st *preparedStmt, args []any) (*mysql.Result, er
 			switch {
 			case st.parts == nil:
 				return "the source counts other placeholders than the port"
+			case st.copyRefusal != "":
+				return st.copyRefusal
 			case currentDB != st.db:
 				// The source runs the statement in the database it was
 				// prepared in; the copy would resolve its names in the
@@ -345,6 +369,7 @@ func copyUnsafeArgument(args []any) string {
 
 // runPreparedOnCopy writes the arguments into the statement the copy's way
 // (standard SQL: a quote doubled, a backslash a character) and runs it there.
+// The template's names are already in double quotes (copyParts).
 // The text never goes anywhere else: MySQL's rungs execute the statement
 // prepared on the source.
 func (h *Handler) runPreparedOnCopy(st *preparedStmt, args []any, db, reason string) (*mysql.Result, error) {

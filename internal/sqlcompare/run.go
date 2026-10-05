@@ -241,10 +241,11 @@ func compareOne(ctx context.Context, src, cp *conn, opts Options, stmt string) R
 		return res
 	}
 	res.SourceRows = len(srcRows.Rows)
-	// The copy gets the statement the ROUTER would send it: the same text,
-	// untranslated. A statement with backtick names reads NOT_ON_COPY, which
-	// is what the router does with it too (the copy refuses, MySQL answers).
-	cpRows, cpOver, cpMS, cpErr := fetch(ctx, cp.c, stmt, opts.MaxRows)
+	// The copy gets the statement the ROUTER would send it (readrouter.ForCopy):
+	// backtick-quoted names in double quotes, nothing else translated. A
+	// statement the rewrite refuses is one the router vetoes; the copy gets it
+	// as written, and what it says then does not count.
+	cpRows, cpOver, cpMS, cpErr := fetch(ctx, cp.c, copyStatement(stmt), opts.MaxRows)
 	res.CopyMS = cpMS
 	if cpErr != nil {
 		res.Verdict, res.Detail = NotOnCopy, cpErr.Error()
@@ -292,6 +293,15 @@ func compareOne(ctx context.Context, src, cp *conn, opts Options, stmt string) R
 		}
 	}
 	return res
+}
+
+// copyStatement is the text the copy is sent for a statement: what the
+// router would send it. For a statement the rewrite refuses that is the
+// client's text; the router vetoes those, so what the copy says does not
+// count.
+func copyStatement(stmt string) string {
+	text, _ := readrouter.ForCopy(stmt)
+	return text
 }
 
 // route is the read router's decision for the statement, taken the same way

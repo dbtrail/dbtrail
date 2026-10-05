@@ -272,7 +272,7 @@ func TestRouter_copyRefusalFallsBackToMySQL(t *testing.T) {
 // The copy gets the statement exactly as the client wrote it, backticks
 // included: nothing is translated on the way, and what the copy then refuses
 // goes to MySQL. Both USE paths reach the router.
-func TestRouter_sendsTheCopyTheClientsTextAndFollowsUSE(t *testing.T) {
+func TestRouter_sendsTheCopyRewrittenNamesAndFollowsUSE(t *testing.T) {
 	r := &fakeRouter{toCopy: true, reason: "expensive"}
 	f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
 	h := routingHandler(t, r, f, time.Minute)
@@ -288,8 +288,9 @@ func TestRouter_sendsTheCopyTheClientsTextAndFollowsUSE(t *testing.T) {
 	if _, err := h.HandleQuery("SELECT `status`, count(*) FROM `orders` GROUP BY `status`"); err != nil {
 		t.Fatal(err)
 	}
-	if want := "SELECT `status`, count(*) FROM `orders` GROUP BY `status`"; f.gotStmt != want {
-		t.Errorf("copy got %q, want the client's text %q", f.gotStmt, want)
+	// The one thing translated for the copy: backtick-quoted names (#2081).
+	if want := `SELECT "status", count(*) FROM "orders" GROUP BY "status"`; f.gotStmt != want {
+		t.Errorf("copy got %q, want the client's text with its names in double quotes %q", f.gotStmt, want)
 	}
 	if f.gotSchema != "shop2" {
 		t.Errorf("copy schema = %q, want shop2", f.gotSchema)
@@ -303,6 +304,99 @@ func TestRouter_sendsTheCopyTheClientsTextAndFollowsUSE(t *testing.T) {
 	}
 	// Close on a handler with no router is a no-op.
 	NewHandler(nil, nil).Close()
+}
+
+// Backtick-quoted names under routing (#2081): the copy gets them in double
+// quotes and every other byte as written; MySQL always gets the client's
+// text; a name the rewrite will not guess is a veto, so the copy is not
+// tried and no failed attempt is paid.
+func TestRouter_backtickNames(t *testing.T) {
+	type obs struct {
+		side   RouteSide
+		reason RouteReason
+	}
+	newH := func(toCopy bool) (*Handler, *fakeRouter, *fakeFreeSQL, *[]obs) {
+		r := &fakeRouter{toCopy: toCopy, reason: "expensive"}
+		f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
+		h := NewHandler(nil, nil)
+		h.BindFreeSQL(f)
+		var seen []obs
+		h.BindRouter(r, RouterConfig{MaxCopyAge: time.Minute, Observe: func(side RouteSide, reason RouteReason) {
+			seen = append(seen, obs{side, reason})
+		}})
+		return h, r, f, &seen
+	}
+
+	const stmt = "SELECT `o`.`id` AS `the id` FROM `shop`.`orders` `o` WHERE `o`.`note` = 'a `b` c' /* `d` */ ORDER BY `o`.`id` LIMIT 20"
+	h, r, f, seen := newH(true)
+	res, err := h.HandleQuery(stmt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := firstCell(t, res); got != "copy" {
+		t.Fatalf("answered by %s, want the copy", got)
+	}
+	if want := "SELECT \"o\".\"id\" AS \"the id\" FROM \"shop\".\"orders\" \"o\" WHERE \"o\".\"note\" = 'a `b` c' /* `d` */ ORDER BY \"o\".\"id\" LIMIT 20"; f.gotStmt != want {
+		t.Errorf("copy got\n %q\nwant\n %q", f.gotStmt, want)
+	}
+	if len(r.explained) != 1 || r.explained[0] != stmt {
+		t.Errorf("EXPLAIN got %q, want the client's text", r.explained)
+	}
+	if len(*seen) != 1 || (*seen)[0] != (obs{RouteCopy, RouteReasonExpensivePlan}) {
+		t.Errorf("observed %v, want one copy/expensive_plan", *seen)
+	}
+
+	// A cheap plan: MySQL gets the client's bytes, backticks and all.
+	h, r, f, _ = newH(false)
+	if _, err := h.HandleQuery(stmt); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.forwarded) != 1 || r.forwarded[0] != stmt || f.calls != 0 {
+		t.Errorf("forwarded %q with %d copy calls, want the client's text and no copy call", r.forwarded, f.calls)
+	}
+
+	// What the rewrite refuses stays on MySQL without trying the copy.
+	for _, refused := range []string{
+		"SELECT `a``b` FROM `t`",
+		"SELECT `a` AS `x\"y` FROM `t`",
+		"SELECT `a` AS `` FROM `t`",
+		"SELECT `sum`(`a`) FROM `t`",
+		"SELECT U&`a` FROM `t`",
+		"SELECT `a` FROM `t` /* x /* y */ WHERE `a` = 1 -- */",
+		"SELECT `a` FROM `t` WHERE `b` = \"x\"",
+		"SELECT `a` FROM `t` WHERE `b` = 'x\\'y'",
+		"SELECT `a` FROM `information_schema`.`tables`",
+	} {
+		h, r, f, seen = newH(true)
+		res, err := h.HandleQuery(refused)
+		if err != nil {
+			t.Fatalf("%q: %v", refused, err)
+		}
+		if got := firstCell(t, res); got != "mysql" || f.calls != 0 || len(r.explained) != 0 {
+			t.Errorf("%q: answered by %s, %d copy calls, %d EXPLAINs; want mysql, 0, 0", refused, got, f.calls, len(r.explained))
+		}
+		if len(r.forwarded) != 1 || r.forwarded[0] != refused {
+			t.Errorf("%q: MySQL got %q, want the client's text", refused, r.forwarded)
+		}
+		if len(*seen) != 1 || (*seen)[0] != (obs{RouteMySQL, RouteReasonVeto}) {
+			t.Errorf("%q: observed %v, want one mysql/veto", refused, *seen)
+		}
+	}
+}
+
+// Without routing the port translates nothing: a client there writes the
+// copy's own dialect, and its text reaches the copy untouched.
+func TestRouter_unboundPortDoesNotRewriteNames(t *testing.T) {
+	f := &fakeFreeSQL{res: oneCell("x", "INTEGER", json.Number("1"))}
+	h := NewHandler(nil, nil)
+	h.BindFreeSQL(f)
+	const stmt = "SELECT `x` FROM `t` WHERE id = 1"
+	if _, err := h.HandleQuery(stmt); err != nil {
+		t.Fatal(err)
+	}
+	if f.gotStmt != stmt {
+		t.Errorf("copy got %q, want the client's text %q", f.gotStmt, stmt)
+	}
 }
 
 // Without a router nothing changes: the copy answers, as since #2025.

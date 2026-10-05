@@ -187,7 +187,7 @@ var vetoes = []struct {
 	{"user or system variable", regexp.MustCompile(`@`)},
 	{"locking read", regexp.MustCompile(`(?i)\b(for\s+update|lock\s+in\s+share\s+mode|for\s+share)\b`)},
 	{"INTO (OUTFILE/DUMPFILE/variables)", regexp.MustCompile(`(?i)\binto\s+(outfile|dumpfile|@)`)},
-	{"system schema", regexp.MustCompile(`(?i)\b(information_schema|performance_schema|mysql|sys)\s*\.`)},
+	{"system schema", regexp.MustCompile(`(?i)\b(information_schema|performance_schema|mysql|sys)[\x60"]?\s*\.`)}, // quoted or not: the copy has an information_schema of its own, and would answer
 	{"MATCH AGAINST", regexp.MustCompile(`(?i)\bmatch\s*\(.*\)\s*against\b`)},
 	{"binary string comparison", regexp.MustCompile(`(?i)\bbinary\s+[\w\x60'"(]`)},
 	{"LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)", regexp.MustCompile(`(?i)\b(like|regexp|rlike)\b`)}, // the copy's default collation (nocase.icu_noaccent) does not reach LIKE (DuckDB #10416)
@@ -203,49 +203,55 @@ var vetoes = []struct {
 	// UNION is vetoed when what follows it is DISTINCT or the next query
 	// (SELECT, VALUES, TABLE, an opening parenthesis). INTERSECT and EXCEPT
 	// are vetoed with ALL too, since ALL still pairs rows up by comparing
-	// them. A leading backtick, word character or dot means a quoted name, a
+	// them. A leading quote (a backtick, or the double quote it is rewritten
+	// to for the copy), word character or dot means a quoted name, a
 	// longer word or a column of that name, not the operator.
-	{"UNION/INTERSECT/EXCEPT without ALL (duplicates removed by bytes on the copy, by collation on MySQL)", regexp.MustCompile(`(?i)(^|[^\x60\w.])(intersect|except)([^\x60\w]|$)|(^|[^\x60\w.])union\s*(distinct\b|select\b|values\b|table\b|\()`)},
+	{"UNION/INTERSECT/EXCEPT without ALL (duplicates removed by bytes on the copy, by collation on MySQL)", regexp.MustCompile(`(?i)(^|[^\x60"\w.])(intersect|except)([^\x60"\w]|$)|(^|[^\x60"\w.])union\s*(distinct\b|select\b|values\b|table\b|\()`)},
 	// MySQL stops a recursion at cte_max_recursion_depth with an error and
 	// MariaDB cuts it at max_recursive_iterations (1000 by default on both);
 	// the copy runs it to the end.
 	{"WITH RECURSIVE", regexp.MustCompile(`(?i)\bwith\s+recursive\b`)},
+	// MariaDB takes $ for a character of a name ($$ and $x$ are names, and
+	// MySQL takes a$b$ for one); the copy opens a dollar-quoted string
+	// there, which runs to the next one. The class is "not ASCII" by code
+	// point: \x80-\xff in a pattern would mean U+0080 to U+00FF only. Measured: `SELECT a AS $$, 2 AS $$`
+	// is two columns on MariaDB 11.4 and on MySQL 8.0, and one on the copy;
+	// MySQL 8.4 refuses a name that starts with $.
+	{"$...$ (a name on the source, a dollar-quoted string on the copy)", regexp.MustCompile(`\$(?:\w|[^\x00-\x7f])*\$`)},
 }
 
-var hintComment = regexp.MustCompile(`/\*[!+]`)
+// hintComment matches an optimizer hint (`/*+`) and a comment the server
+// executes: MySQL's and MariaDB's `/*!`, and MariaDB's `/*M!` (with a capital M:
+// MariaDB 11.4 reads `/*m!` as a plain comment). It is matched on the raw
+// text, so `SELECT '/*!'` is kept on MySQL too: an over-veto on purpose, since
+// it means a hint cannot hide inside what only looks like a literal.
+var hintComment = regexp.MustCompile(`/\*(M?!|\+)`)
 
 // Veto returns the name of the first construct that keeps the statement on
-// MySQL, or "" when none applies. Comments are removed and string literals
-// blanked first (scrub), so a keyword inside a string or a quote inside a
-// comment cannot hide or fake a match.
+// MySQL, or "" when none applies. The statement is read once (scan): comments
+// are removed and string literals blanked, so a keyword inside a string or a
+// quote inside a comment cannot hide or fake a match, and backtick-quoted
+// names are written the way the copy gets them (ForCopy), so the list runs
+// on the text the copy would run.
 func Veto(stmt string) string {
 	if hintComment.MatchString(stmt) {
-		return "optimizer hint or MySQL comment"
+		return vetoHintComment
 	}
-	blanked, doubleQuoted, backslash, hash := scrub(stmt)
-	if doubleQuoted {
-		// MySQL reads "x" as a string; DuckDB as an identifier, which
-		// resolves without an error whenever a column has that name.
-		return "double-quoted string literal"
-	}
-	if backslash {
-		// MySQL reads a backslash inside a string as an escape ('a\\b' is
-		// a\b, '\_' in LIKE is a literal underscore); DuckDB reads it as a
-		// plain character, so the same text names a different value and
-		// the copy answers, silently, about another string.
-		return "backslash in a string literal (an escape on MySQL, a plain character on the copy)"
+	sc := scan(stmt)
+	if why := sc.literalVeto(); why != "" {
+		return why
 	}
 	for _, v := range vetoes {
-		if v.re.MatchString(blanked) {
+		if v.re.MatchString(sc.blankedCopy) {
 			return v.name
 		}
 	}
-	if hash {
-		// MySQL reads `#` to the end of the line as a comment, which scrub
+	if sc.hash {
+		// MySQL reads `#` to the end of the line as a comment, which scan
 		// has removed as MySQL does; DuckDB reads `#2` as the second column
 		// of the select. `SELECT #2<newline> alpha FROM t` is column alpha on
 		// MySQL and the table's second column, named alpha, on the copy.
-		return "# starts a comment on MySQL and a column-position reference on the copy"
+		return vetoHash
 	}
 	return ""
 }
@@ -261,68 +267,11 @@ func Scrub(stmt string) string {
 // scrub returns the statement with its comments removed (`/* */`, `-- `,
 // `#`), its string literals replaced by ” and its backtick identifiers
 // kept, plus whether a double-quoted string literal occurred and whether
-// any string literal held a backslash. One pass over the bytes, tracking
-// what is open, so a quote inside a comment (`-- don't`) does not blank the
-// statement after it and a `#` inside a string does not start a comment.
+// any string literal held a backslash, and whether a `#` comment occurred.
+// See scan.
 func scrub(stmt string) (blanked string, doubleQuoted, backslash, hash bool) {
-	var b strings.Builder
-	n := len(stmt)
-	for i := 0; i < n; {
-		c := stmt[i]
-		switch {
-		case c == '/' && i+1 < n && stmt[i+1] == '*':
-			end := strings.Index(stmt[i+2:], "*/")
-			if end < 0 {
-				return b.String(), doubleQuoted, backslash, hash
-			}
-			b.WriteByte(' ')
-			i += end + 4
-		case c == '#', c == '-' && i+1 < n && stmt[i+1] == '-' && (i+2 >= n || stmt[i+2] == ' ' || stmt[i+2] == '\t' || stmt[i+2] == '\n'):
-			if c == '#' {
-				hash = true
-			}
-			nl := strings.IndexByte(stmt[i:], '\n')
-			if nl < 0 {
-				return b.String(), doubleQuoted, backslash, hash
-			}
-			b.WriteByte('\n')
-			i += nl + 1
-		case c == '\'' || c == '"':
-			if c == '"' {
-				doubleQuoted = true
-			}
-			j := i + 1
-			for j < n {
-				if stmt[j] == '\\' {
-					backslash = true
-					j += 2
-					continue
-				}
-				if stmt[j] == c {
-					if j+1 < n && stmt[j+1] == c {
-						j += 2
-						continue
-					}
-					break
-				}
-				j++
-			}
-			b.WriteString("''")
-			i = j + 1
-		case c == '`':
-			j := strings.IndexByte(stmt[i+1:], '`')
-			if j < 0 {
-				b.WriteString(stmt[i:])
-				return b.String(), doubleQuoted, backslash, hash
-			}
-			b.WriteString(stmt[i : i+j+2])
-			i += j + 2
-		default:
-			b.WriteByte(c)
-			i++
-		}
-	}
-	return b.String(), doubleQuoted, backslash, hash
+	sc := scan(stmt)
+	return sc.blanked, sc.doubleQuoted, sc.backslash, sc.hash
 }
 
 // Plan is what the router reads out of EXPLAIN FORMAT=JSON.
