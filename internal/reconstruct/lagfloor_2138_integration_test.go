@@ -6,12 +6,15 @@ import (
 	"context"
 	"database/sql"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/testutil"
+	"github.com/dbtrail/dbtrail/internal/verify"
 )
 
 // #2138 through the real refresh and a real index: a refresh that runs while
@@ -92,34 +95,44 @@ func lagState(t *testing.T, base string, deltas bool) []string {
 	return out
 }
 
-// TestRefresh_afterALaggingRefresh_appliesWhatCaptureIndexedLater: the dump is
-// old, the first refresh runs at wall clock T with the index `lag` behind, and
-// the event indexed afterwards ran on the source at T-lag+1h.
+// TestRefresh_afterALaggingRefresh_appliesWhatCaptureIndexedLater: the first
+// refresh runs at wall clock T with the index `lag` behind, and the event
+// indexed afterwards ran on the source at T-lag+1h.
 func TestRefresh_afterALaggingRefresh_appliesWhatCaptureIndexedLater(t *testing.T) {
+	const old = 30*time.Hour + 30*time.Minute
 	for _, tc := range []struct {
-		name   string
-		lag    time.Duration
-		deltas bool
-		// carried: the first refresh finds nothing for orders and carries its
-		// file forward; the event that moves the cut belongs to another table.
-		carried bool
-		stream  bool
+		name string
+		lag  time.Duration
+		// dumpAge is how long before T the dump was taken. Past a day the
+		// second refresh rewrites the table (the chain is too old); under it,
+		// it continues the chain with a second pair.
+		dumpAge time.Duration
+		deltas  bool
+		// carried: the first refresh finds nothing for orders and keeps its
+		// file; the event that moves the cut belongs to another table.
+		carried  bool
+		stream   bool
+		wantPair bool
 	}{
-		{"pair, 5 h behind", 5 * time.Hour, true, false, true},
-		{"pair, 3 h behind", 3 * time.Hour, true, false, true},
-		{"pair, 26 h behind", 26 * time.Hour, true, false, true},
-		{"pair, 5 h behind, index not written by a stream", 5 * time.Hour, true, false, false},
-		{"table rewritten, 5 h behind", 5 * time.Hour, false, false, true},
-		{"table rewritten, 26 h behind", 26 * time.Hour, false, false, true},
-		{"table carried forward, deltas on, 5 h behind", 5 * time.Hour, true, true, true},
-		{"table carried forward, deltas off, 5 h behind", 5 * time.Hour, false, true, true},
+		{"second pair of a chain, 5 h behind", 5 * time.Hour, 8 * time.Hour, true, false, true, true},
+		{"second pair of a chain, 3 h behind", 3 * time.Hour, 8 * time.Hour, true, false, true, true},
+		{"second pair of a chain, index not written by a stream", 5 * time.Hour, 8 * time.Hour, true, false, false, true},
+		{"chain rewritten for its age, 5 h behind", 5 * time.Hour, old, true, false, true, false},
+		{"chain rewritten for its age, 26 h behind", 26 * time.Hour, old, true, false, true, false},
+		{"table rewritten, 5 h behind", 5 * time.Hour, old, false, false, true, false},
+		{"table rewritten, 26 h behind", 26 * time.Hour, old, false, false, true, false},
+		{"untouched table with deltas on, 5 h behind", 5 * time.Hour, 8 * time.Hour, true, true, true, true},
+		{"table carried forward, 5 h behind", 5 * time.Hour, old, false, true, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r, first := newLagRig(t, func(first time.Time) time.Time { return first })
+			var T time.Time
+			r, _ := newLagRig(t, func(first time.Time) time.Time {
+				T = first.Add(old)
+				return T.Add(-tc.dumpAge)
+			})
 			if tc.stream {
 				markStreamCaptured(t, r.db)
 			}
-			T := first.Add(30*time.Hour + 30*time.Minute)
 			// e1: already indexed when the first refresh runs.
 			e1Table := "orders"
 			if tc.carried {
@@ -128,7 +141,7 @@ func TestRefresh_afterALaggingRefresh_appliesWhatCaptureIndexedLater(t *testing.
 			insertTableEvent(t, r.db, r.schema, e1Table, 10, 100, T.Add(-tc.lag), 2, "1", `{"id":1,"status":"A"}`)
 			_, rep := r.refresh(t, T, tc.deltas, tc.carried)
 			// With deltas on, an untouched table is published as its previous
-			// file with no pair; with them off it is carried forward.
+			// file; with them off it is carried forward.
 			if tc.carried && !tc.deltas && !rep.CarriedForward {
 				t.Fatalf("first refresh: the untouched table was not carried forward")
 			}
@@ -148,7 +161,75 @@ func TestRefresh_afterALaggingRefresh_appliesWhatCaptureIndexedLater(t *testing.
 				t.Fatalf("second refresh applied %d events; state = %v, want %v: the delete of id 2 was indexed after the first refresh and is not in the snapshot",
 					rep.EventsApplied, got, want)
 			}
+			if rep.DeltaPairWritten != tc.wantPair {
+				t.Fatalf("second refresh: DeltaPairWritten = %v (%q), want %v", rep.DeltaPairWritten, rep.DeltaCompacted, tc.wantPair)
+			}
 		})
+	}
+}
+
+// TestRefresh_filesIndexedIntoAStreamIndex_doNotHideALateEvent: `bintrail
+// index` adds an older binlog file to an index a stream writes. Its rows get
+// the newest ids with old positions, so the newest row of the late event's
+// partition is one of them, before the previous cut. The refresh must not
+// read that as "nothing after the cut in here".
+func TestRefresh_filesIndexedIntoAStreamIndex_doNotHideALateEvent(t *testing.T) {
+	var T time.Time
+	r, _ := newLagRig(t, func(first time.Time) time.Time {
+		T = first.Add(30*time.Hour + 30*time.Minute)
+		return T.Add(-8 * time.Hour)
+	})
+	markStreamCaptured(t, r.db)
+	insertTableEvent(t, r.db, r.schema, "orders", 10, 1000, T.Add(-5*time.Hour), 2, "1", `{"id":1,"status":"A"}`)
+	r.refresh(t, T, true, false)
+	late := T.Add(-4 * time.Hour)
+	insertTableEvent(t, r.db, r.schema, "orders", 20, 1300, late, 3, "2", "")
+	// The file's row: a higher id, the same hour, a position before the cut.
+	insertTableEvent(t, r.db, r.schema, "items", 30, 50, late.Add(time.Minute), 2, "9", `{"id":9,"status":"old"}`)
+	testutil.MustExec(t, r.db, `INSERT INTO index_state (binlog_file, file_size, last_position, events_indexed, status, started_at, completed_at)
+		VALUES ('binlog.000001', 1, 150, 1, 'completed', '`+T.Add(5*time.Minute).Format("2006-01-02 15:04:05")+`', '`+T.Add(10*time.Minute).Format("2006-01-02 15:04:05")+`')`)
+	// The stream goes on: this fixes the cut after the late event.
+	insertTableEvent(t, r.db, r.schema, "items", 40, 1500, T.Add(20*time.Minute), 2, "9", `{"id":9,"status":"new"}`)
+	base, rep := r.refresh(t, T.Add(time.Hour), true, false)
+	if got, want := lagState(t, base, true), []string{"1=A", "3=shipped"}; !equalStrings(got, want) {
+		t.Fatalf("refresh applied %d events; state = %v, want %v", rep.EventsApplied, got, want)
+	}
+}
+
+// TestVerify_afterALaggingRefresh_agreesWithARealRead: the check an operator
+// has. `verify` compares the newest real read of a table with the snapshot
+// before it plus the index. Over the chain above, a read of the true state
+// must match: before #2138 the refresh had left the delete out, the read did
+// not hold the row, and this reported a mismatch (which is how a snapshot
+// that already lost a change shows up).
+func TestVerify_afterALaggingRefresh_agreesWithARealRead(t *testing.T) {
+	var T time.Time
+	r, _ := newLagRig(t, func(first time.Time) time.Time {
+		T = first.Add(30*time.Hour + 30*time.Minute)
+		return first
+	})
+	markStreamCaptured(t, r.db)
+	insertTableEvent(t, r.db, r.schema, "orders", 10, 100, T.Add(-5*time.Hour), 2, "1", `{"id":1,"status":"A"}`)
+	r.refresh(t, T, false, false)
+	insertTableEvent(t, r.db, r.schema, "orders", 20, 300, T.Add(-4*time.Hour), 3, "2", "")
+	r.refresh(t, T.Add(time.Hour), false, false)
+	// A third change, late as well, between the last refresh and the read:
+	// verify's own fetch has the same floor to get right.
+	insertTableEvent(t, r.db, r.schema, "orders", 30, 500, T.Add(-3*time.Hour), 2, "3", `{"id":3,"status":"sent"}`)
+	writeReadOfOrders(t, r.root, T.Add(2*time.Hour), r.schema, 600, [][]string{{"1", "A"}, {"3", "sent"}})
+
+	pairs, _, err := verify.FindBaselinePair(r.ctx, r.root)
+	if err != nil || len(pairs) != 1 {
+		t.Fatalf("FindBaselinePair: pairs=%d err=%v", len(pairs), err)
+	}
+	resolver, err := metadata.NewResolver(r.db, 0)
+	if err != nil {
+		t.Fatalf("NewResolver: %v", err)
+	}
+	dbName := r.dsn[strings.LastIndex(r.dsn, "/")+1:]
+	res, err := verify.VerifyBaselinePair(r.ctx, verify.BaselineConfig{IndexDB: r.db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}, pairs[0])
+	if err != nil || res.Status != verify.StatusMatch {
+		t.Fatalf("verify over the chain: %s (%q), err=%v; want a match with the read of the true state", res.Status, res.Detail, err)
 	}
 }
 
