@@ -590,11 +590,22 @@ What this is and is not:
     function, where the copy would call its own. A common table expression
     with a column list (``WITH `t` (`a`) AS ...``) has the same shape and
     stays on MySQL too;
+  - a quoted name right before a string literal (`` `text` 'Label' ``):
+    the column `text` under the alias `Label` on MySQL, the constant
+    `'Label'` of type `text` on the copy, and both answer. The same holds
+    for `` `int` '5' ``, `` `date` '2024-01-01' `` and every other name the
+    copy has a type for. The unquoted spelling (`text 'Label'`) has the
+    same difference and is not caught: write the alias with `AS`;
   - a quoted name right after `U&` (two columns and an operator on MySQL,
     one Unicode-escaped name on the copy);
   - a string, a quoted name or a comment that never ends, and a comment
     with another `/*` inside it (MySQL ends it at the first `*/`, the copy
     at the matching one);
+  - a carriage return inside a `-- ` comment that is not the end of the
+    line (MySQL ends the comment at the line feed, the copy at the carriage
+    return), MariaDB's executable comment `/*M! ... */`, and a `$...$`
+    pair such as `$$` (a name on MySQL, the start of a dollar-quoted string
+    on the copy). These three stay on MySQL with or without quoted names;
   - a double-quoted string or a backslash inside a string, which were
     already kept on MySQL. A double-quoted name under the source's
     `ANSI_QUOTES` is not recognized as one: it stays on MySQL as well.
@@ -604,7 +615,11 @@ What this is and is not:
   column as the table stores it, where MySQL names it as the statement
   wrote it (``SELECT `ID` `` returns a column called `ID` on MySQL and `id`
   on the copy; the same holds without quotes). An alias keeps the case it
-  was written in on both. The plain port without read routing translates
+  was written in on both, with two exceptions: MySQL drops the spaces at
+  the start of an alias (``AS ` a` `` is `a` on MySQL and ` a` on the copy),
+  and a column of a subquery selected in another case than its alias was
+  declared in (`` `a` `` over ``AS `A` ``) is named as selected on MySQL and
+  as declared on the copy. The plain port without read routing translates
   nothing: a client there writes the copy's dialect.
 - **Where the copy answers differently without an error.** The veto list
   keeps the known cases on MySQL (`GROUP_CONCAT`, the `NOW()` family,

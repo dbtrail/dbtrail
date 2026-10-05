@@ -217,8 +217,9 @@ var vetoes = []struct {
 }
 
 // hintComment matches an optimizer hint (`/*+`) and a comment the server
-// executes: MySQL's and MariaDB's `/*!`, and MariaDB's `/*M!`.
-var hintComment = regexp.MustCompile(`/\*([mM]?!|\+)`)
+// executes: MySQL's and MariaDB's `/*!`, and MariaDB's `/*M!` (with a capital M:
+// MariaDB 11.4 reads `/*m!` as a plain comment).
+var hintComment = regexp.MustCompile(`/\*(M?!|\+)`)
 
 // Veto returns the name of the first construct that keeps the statement on
 // MySQL, or "" when none applies. The statement is read once (scan): comments

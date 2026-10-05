@@ -20,14 +20,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answered by MySQL. Statements the rewrite would have to guess at stay on
   MySQL without trying the copy, each under a veto of its own: a name that
   holds a backtick or a double quote, an empty name, a quoted name right
-  before a parenthesis or right after `U&`, a string, name or comment that
-  never ends, and a comment with another `/*` inside it. Double-quoted
+  before a parenthesis, right before a string literal (`` `text` 'Label' ``
+  is an aliased column on MySQL and a typed constant on the copy) or right
+  after `U&`, a string, name or comment that never ends, and a comment with
+  another `/*` inside it. Three shapes the copy answered differently
+  without an error now stay on MySQL too, with or without quoted names: a
+  carriage return inside a `-- ` comment, MariaDB's `/*M! ... */` and a
+  `$...$` pair such as `$$`. Double-quoted
   strings and backslashes in strings stay vetoed as before. The
   `information_schema` veto now also matches the quoted spelling
   (`` `information_schema`.`tables` ``), which the copy would otherwise
   answer from its own catalog. `sql-compare` sends the copy the same
   rewritten text, so a driver-generated workload is compared instead of
-  reading `NOT_ON_COPY`. On a set of 69 statements shaped like what GORM
+  reading `NOT_ON_COPY`. On a set of 74 statements shaped like what GORM
   and Django send, run against MySQL 8.4 and MariaDB 11.4, 49 now compare
   `EQUAL` (2 before) on both; the ones that still differ or are refused are listed
   in [Time-travel SQL](time-travel-sql.md) and in #2114. The plain port

@@ -79,10 +79,6 @@ var backtickTables = []struct {
 
 func runBacktickFixtures(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	copyDSN := backtickRig(t, srcDB, srcName, sourceDSN)
-	if os.Getenv("BINTRAIL_2081_PROBE") != "" {
-		probe2081(t, sourceDSN, copyDSN)
-		return
-	}
 	fixtures := backtickFixtures(srcName)
 	backtickCompare(t, sourceDSN, copyDSN, fixtures)
 }
@@ -334,33 +330,10 @@ func backtickFixtures(db string) []backtickFixture {
 		kept("SELECT `table_name` FROM `information_schema`.`tables` WHERE `table_schema` = 'main' LIMIT 1", eq, "system schema", "the copy has an information_schema of its own and answers (here both find nothing): the veto must see through the quotes"),
 		kept("SELECT `id` FROM `orders` WHERE `id` = 1 /* a /* nested */ OR `id` = 2 -- */", noc, "/* inside a comment", "MySQL ends the comment at the first */ and returns two rows; the copy nests comments and, given the names in double quotes, would return one"),
 		kept("SELECT 1 /* a /* b */ + 1 -- */", diff, "/* inside a comment", "the same without names: 2 on MySQL, 1 on the copy"),
+		kept("SELECT `text` 'Label' FROM (SELECT 'body' AS `text`) `t`", noc, "right before a string literal", "the column text under the alias Label on MySQL (body); the constant 'Label' of type text on the copy"),
+		kept("SELECT `int`\n'5' FROM (SELECT 9 AS `int`) `t`", noc, "right before a string literal", "9 on MySQL, 5 on the copy"),
+		kept("SELECT `a` -- x\r+1\n FROM (SELECT 1 AS `a`) `t`", noc, "carriage return inside a line comment", "the comment runs to the line feed on MySQL (1) and stops at the carriage return on the copy (2)"),
+		kept("SELECT `a` /*M! +1 */ FROM (SELECT 1 AS `a`) `t`", noc, "optimizer hint or MySQL comment", "MariaDB runs the comment's text (2); MySQL and the copy do not (1)"),
+		kept("SELECT `a` AS $$, 2 AS $$ FROM (SELECT 1 AS `a`) `t`", noc, "$...$", "two columns named $$ on MySQL; one column named ', 2 AS ' on the copy"),
 	}
-}
-
-// PROBE2081 (temporary): what each side answers, the copy given the names in
-// double quotes whatever the rewrite would refuse.
-func probe2081(t *testing.T, sourceDSN, copyDSN string) {
-	s, c := openRaw(t, sourceDSN), openRaw(t, copyDSN)
-	for _, stmt := range []string{
-		"SELECT `text` 'Label' FROM (SELECT 'body' AS `text`) `t`",
-		"SELECT `int` '5' FROM (SELECT 9 AS `int`) `t`",
-		"SELECT `date`\n'2024-01-01' FROM (SELECT 5 AS `date`) `t`",
-		"SELECT text 'Label' FROM (SELECT 'body' AS text) t",
-		"SELECT `a` -- x\r+1\n FROM (SELECT 1 AS `a`) `t`",
-		"SELECT `a` /*M! +1 */ FROM (SELECT 1 AS `a`) `t`",
-		"SELECT `a` /*m! +1 */ FROM (SELECT 1 AS `a`) `t`",
-		"SELECT `a` /*M!100100 +1 */ FROM (SELECT 1 AS `a`) `t`",
-		"SELECT `a` AS $$, 2 AS $$ FROM (SELECT 1 AS `a`) `t`",
-		"SELECT `a` AS $x$, 2 AS $x$ FROM (SELECT 1 AS `a`) `t`",
-		"SELECT `a` -- \x00\n +1 FROM (SELECT 1 AS `a`) `t`",
-		"SELECT `a` FROM (SELECT 1 AS `a`) `t` WHERE 1=1 \x00 AND 1=0",
-		"SELECT `a` FROM (SELECT 1 AS `a`) `t` WHERE 'x\x00y' = 'x'",
-		"SELECT `a` FROM (SELECT 1 AS `a`) `t` /* \x00 */ WHERE 1=0",
-		"SELECT 1 AS ` a`",
-		"SELECT `a` FROM (SELECT 1 AS `A`) `t`",
-	} {
-		cs := strings.ReplaceAll(stmt, "`", "\"")
-		fmt.Printf("PROBE %q\n  src  %q %.150s\n  copy %q %.150s\n", stmt, columnNames(s, stmt), rawAnswer(s, stmt), columnNames(c, cs), rawAnswer(c, cs))
-	}
-	t.Fail()
 }

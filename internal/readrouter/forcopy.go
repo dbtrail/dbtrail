@@ -8,7 +8,6 @@ import "strings"
 const (
 	vetoNameString    = "backtick-quoted name right before a string literal (an alias on MySQL, a typed constant on the copy)"
 	vetoCommentCR     = "carriage return inside a line comment (the comment ends there on the copy)"
-	vetoNUL           = "NUL byte (the copy stops reading the statement there)"
 	vetoNameQuote     = "backtick-quoted name that holds a backtick or a double quote (not rewritten for the copy)"
 	vetoNameEmpty     = "empty backtick-quoted name"
 	vetoNameCall      = "backtick-quoted name right before a parenthesis (a function call on the copy)"
@@ -58,7 +57,7 @@ type scanned struct {
 // an empty name, a quoted name right before a parenthesis or right after U&,
 // a string, name or comment that never ends, a comment with another one
 // opened inside it, a quoted name right before a string literal, a carriage
-// return inside a line comment, a NUL byte, a double-quoted string, a backslash in a string, a `#`
+// return inside a line comment, a double-quoted string, a backslash in a string, a `#`
 // comment, a MySQL hint or version comment. text is then the
 // statement as the client wrote it. Veto keeps every such statement on
 // MySQL too (it may name another reason first), so a statement that passed
@@ -114,11 +113,6 @@ func scan(stmt string) scanned {
 	// afterName is true from the closing backtick of a name until the next
 	// byte that is neither white space nor a comment.
 	afterName := false
-	if strings.IndexByte(stmt, 0) >= 0 {
-		// The copy's engine takes the statement as a C string and stops at
-		// the first NUL; MySQL reads on.
-		refuse(vetoNUL)
-	}
 	for i := 0; i < n; {
 		c := stmt[i]
 		switch {
