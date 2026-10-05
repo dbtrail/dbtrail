@@ -310,6 +310,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different column names at one position when they hold letters outside
   ASCII (`año` against `niño`), which it left to the cells and called
   `EQUAL` when no cell disagreed.
+- **Writing a large table again in full no longer fails for lack of memory
+  when its chain of changes is long** (#2126). When the changes beside a table
+  pass a quarter of its size the table is written again, and that starts by
+  applying the chain to the table in one DuckDB statement under the daemon's
+  4 GB memory limit. On a table of 100 million rows with 15 million changed
+  rows in 24 pairs the statement failed with `Out of Memory Error ... (3.7
+  GiB/3.7 GiB used)`, the update was refused and the schedule read the whole
+  source instead, every two hours or so at 300 transactions a second. The step
+  that picks the newest version of each row was a window function, which on
+  those files failed at 4 GB and passed at 1 GB; it is now a join that passes
+  from 500 MB to 8 GB and gives the same rows. The job that merges a long
+  chain into one pair uses the same join. What reads a snapshot (the views,
+  SQL on the copy) is unchanged.
 - **A table with more than a million changed rows in one update is no longer
   written again in full** (#2126). With table deltas on, an update keeps the
   changed rows of each table in memory up to a limit (1,000,000 per table in

@@ -875,7 +875,10 @@ func materializeBaseWithDelta(ctx context.Context, basePath string, d *tableDelt
 			posdels = append(posdels, lit(f.Posdel))
 			upserts = append(upserts, lit(f.Upserts))
 		}
-		state = baseline.TableDeltaStateSQL(lit(basePath), "["+strings.Join(posdels, ", ")+"]", "["+strings.Join(upserts, ", ")+"]", basePath, "")
+		// The merge's form of the state, not the views': the window the
+		// views read the newest version of a key through fails under this
+		// session's memory limit on a long chain (baseline.TableDeltaLatestSQL).
+		state = baseline.TableDeltaMergeStateSQL(lit(basePath), "["+strings.Join(posdels, ", ")+"]", "["+strings.Join(upserts, ", ")+"]", basePath)
 	}
 	q := fmt.Sprintf("COPY (%s) TO %s (FORMAT PARQUET, COMPRESSION '%s')", state, lit(tmpPath), ParquetWriterCompression)
 	if _, err := ddb.ExecContext(ctx, q); err != nil {
