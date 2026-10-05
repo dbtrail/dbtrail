@@ -11,7 +11,7 @@ import (
 )
 
 // The state view partitions upserts by bintrail_pk, a text column. The
-// console's SQL sandbox runs with default_collation = 'nocase.noaccent'
+// console's SQL sandbox runs with default_collation = 'nocase.icu_noaccent'
 // (#2038); without COLLATE C on the partition, two keys that differ only in
 // case ('abc' and 'ABC', a _bin or VARBINARY primary key) fold into one
 // partition and the older upsert vanishes from the table, with no error.
@@ -61,7 +61,7 @@ func TestTableDeltaState_keysDifferingInCaseSurviveNocaseSession(t *testing.T) {
 	}
 	posdel, upserts := TableDeltaGlobs(base)
 	q := "SELECT count(*) FROM (" + TableDeltaStateSQL("'"+base+"'", "'"+posdel+"'", "'"+upserts+"'", base, "") + ")"
-	for _, session := range []string{"", "SET default_collation = 'nocase.noaccent'"} {
+	for _, session := range []string{"", "SET default_collation = 'nocase.noaccent'", "SET default_collation = 'nocase.icu_noaccent'"} {
 		ddb, err := sql.Open("duckdb", "")
 		if err != nil {
 			t.Fatal(err)

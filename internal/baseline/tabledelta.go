@@ -662,7 +662,7 @@ func TableDeltaFollowStateSQL(base, posdelGlob, upsertsGlob, basePath, replace s
 //
 // The window partitions by "bintrail_pk" COLLATE C: the key is text, and a
 // session whose default collation folds case or accents (the console's SQL
-// sandbox runs under nocase.noaccent, #2038) would otherwise fold two keys
+// sandbox runs under nocase.icu_noaccent, #2038 and #2083) would otherwise fold two keys
 // that differ only that way into ONE partition and drop a row, silently.
 // COLLATE C is byte comparison whatever the session default; the filename
 // order is pinned the same way.

@@ -24,7 +24,8 @@ import (
 // holds the SAME rows as the source, so every difference the run reports is a
 // semantic one. With the copy's default collation matching MySQL's
 // (sqlsandbox lock-down), the mixed-case rows compare EQUAL in GROUP BY,
-// WHERE and ORDER BY; LIKE is the difference that remains, and it is vetoed.
+// WHERE and ORDER BY, and so does 'straße' against 'strasse'; LIKE is the
+// difference that remains, and it is vetoed.
 func TestIntegrationSQLCompare(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	now := time.Now().UTC().Truncate(time.Hour)
@@ -77,8 +78,10 @@ SELECT id FROM orders WHERE status = 'live';
 SELECT status FROM orders ORDER BY status, id;
 -- LIKE is not folded on the copy (DuckDB #10416): DIFFERENT, but vetoed
 SELECT id FROM orders WHERE status LIKE 'L%';
--- utf8mb4_0900_ai_ci equates ß and ss; the copy's collation does not: a copy-routed DIFFERENT
+-- utf8mb4_0900_ai_ci equates ß and ss, and so does the copy's collation (#2083): EQUAL
 SELECT id FROM orders WHERE status = 'strasse';
+-- AVG is a DECIMAL with four more decimals on MySQL and a DOUBLE on the copy: a copy-routed DIFFERENT
+SELECT AVG(id) FROM orders WHERE status <> 'x';
 -- MySQL syntax the copy lacks
 SELECT CONVERT(status USING utf8mb4) s, count(*) FROM orders GROUP BY s;
 -- the router vetoes NOW(): a difference here does not count
@@ -121,7 +124,8 @@ SELECT * FROM nope;
 		"SELECT status FROM orders ORDER BY status, id":                                       {sqlcompare.Equal, "", "copy"},
 		"SELECT `status`, count(*) FROM `orders` GROUP BY `status`":                           {sqlcompare.NotOnCopy, "", "copy"},
 		"SELECT id FROM orders WHERE status LIKE 'L%'":                                        {sqlcompare.Different, "rows", "mysql"},
-		"SELECT id FROM orders WHERE status = 'strasse'":                                      {sqlcompare.Different, "rows", "copy"},
+		"SELECT id FROM orders WHERE status = 'strasse'":                                      {sqlcompare.Equal, "", "copy"},
+		"SELECT AVG(id) FROM orders WHERE status <> 'x'":                                      {sqlcompare.Different, "precision", "copy"},
 		"SELECT CONVERT(status USING utf8mb4) s, count(*) FROM orders GROUP BY s":             {sqlcompare.NotOnCopy, "", "copy"},
 		"WITH c AS (SELECT id FROM orders) DELETE FROM orders WHERE id IN (SELECT id FROM c)": {sqlcompare.Skipped, "not_read_only", "mysql"},
 		"UPDATE orders SET status = 'x'":                                                      {sqlcompare.Skipped, "not_a_select", "mysql"},
@@ -144,7 +148,7 @@ SELECT * FROM nope;
 		t.Errorf("NOW(): got %s route=%s (%s), want DIFFERENT or INCONCLUSIVE, vetoed", r.Verdict, r.Route, r.RouteReason)
 	}
 	if rep.CopyDiffers != 1 || rep.CopyOrderDiffers != 0 || !rep.Failed() {
-		t.Errorf("CopyDiffers = %d, CopyOrderDiffers = %d, want 1 and 0: the case differences are gone (the copy's default collation matches MySQL's), LIKE and NOW() are vetoed, and the ß/ss one is the documented remainder the harness must still catch", rep.CopyDiffers, rep.CopyOrderDiffers)
+		t.Errorf("CopyDiffers = %d, CopyOrderDiffers = %d, want 1 and 0: the case and ß/ss differences are gone (the copy's default collation matches MySQL's), LIKE and NOW() are vetoed, and the AVG one is the documented remainder the harness must still catch", rep.CopyDiffers, rep.CopyOrderDiffers)
 	}
 	// The rule travels beside the reason, so a JSON consumer never parses
 	// prose: a veto, a failed EXPLAIN and the plan's own rule each name

@@ -157,13 +157,22 @@ var vetoes = []struct {
 	{"system schema", regexp.MustCompile(`(?i)\b(information_schema|performance_schema|mysql|sys)\s*\.`)},
 	{"MATCH AGAINST", regexp.MustCompile(`(?i)\bmatch\s*\(.*\)\s*against\b`)},
 	{"binary string comparison", regexp.MustCompile(`(?i)\bbinary\s+[\w\x60'"(]`)},
-	{"LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)", regexp.MustCompile(`(?i)\b(like|regexp|rlike)\b`)}, // the copy's nocase collation does not reach LIKE (DuckDB #10416)
+	{"LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)", regexp.MustCompile(`(?i)\b(like|regexp|rlike)\b`)}, // the copy's default collation (nocase.icu_noaccent) does not reach LIKE (DuckDB #10416)
 	{"DISTINCT inside an aggregate (not folded by the copy's collation)", regexp.MustCompile(`(?i)\b(count|sum|avg|min|max|group_concat)\s*\(\s*distinct\b`)},
 	{"INSTR/LOCATE/POSITION/STRCMP (case-sensitive on the copy)", regexp.MustCompile(`(?i)\b(instr|locate|position|strcmp|field|find_in_set)\s*\(`)},
 	{"|| (string concatenation on the copy, logical OR on MySQL)", regexp.MustCompile(`\|\|`)},
 	{"JSON function or -> operator (missing or different on the copy)", regexp.MustCompile(`(?i)\bjson_[a-z_]+\s*\(|->>?`)}, // JSON_UNQUOTE does not exist on the copy; JSON_EXTRACT paths and quoting differ
 	{"^ (power on the copy, bitwise XOR on MySQL)", regexp.MustCompile(`\^`)},
 	{"-- without a space after it (two minus signs on MySQL, a comment on the copy)", regexp.MustCompile(`--`)}, // scrub already removed what MySQL reads as a comment, so any `--` left is arithmetic there (5--3 is 8) and the copy would drop the rest of the line
+	// UNION, INTERSECT and EXCEPT that remove duplicates: the copy compares
+	// the rows by bytes there, whatever its collation ('a' and 'A' stay two
+	// rows; MySQL keeps one). UNION ALL removes nothing and is not matched: a
+	// UNION is vetoed when what follows it is DISTINCT or the next query
+	// (SELECT, VALUES, TABLE, an opening parenthesis). INTERSECT and EXCEPT
+	// are vetoed with ALL too, since ALL still pairs rows up by comparing
+	// them. A leading backtick, word character or dot means a quoted name, a
+	// longer word or a column of that name, not the operator.
+	{"UNION/INTERSECT/EXCEPT without ALL (duplicates removed by bytes on the copy, by collation on MySQL)", regexp.MustCompile(`(?i)(^|[^\x60\w.])(intersect|except)([^\x60\w]|$)|(^|[^\x60\w.])union\s*(distinct\b|select\b|values\b|table\b|\()`)},
 }
 
 var hintComment = regexp.MustCompile(`/\*[!+]`)

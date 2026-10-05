@@ -7,14 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
-- **SQL on the copy: the text differences from MySQL are listed in full**
-  (#2083). The documentation named `'ß' = 'ss'` as the one equality the copy
-  does not share with MySQL's default collation. Measured against MySQL 8.4,
-  there are more of the same kind (full-width letters, `'æ' = 'ae'`,
-  `'ø' = 'o'`, hiragana against katakana) and one in `ORDER BY` (punctuation
-  sorts by ASCII code on the copy, before the digits on MySQL).
-  `docs/time-travel-sql.md` now lists them, and says which DuckDB collation
-  would close them and what it costs. Nothing in the copy's behavior changes.
+- **SQL on the copy compares text as MySQL's default collation does, beyond
+  case and accents** (#2083). `'ß' = 'ss'`, full-width letters, `'æ' = 'ae'`,
+  `'ø' = 'o'` and hiragana against katakana are now equal on the copy as
+  they are under `utf8mb4_0900_ai_ci`, in `WHERE`, `IN`, `GROUP BY`,
+  `SELECT DISTINCT` and joins, and `ORDER BY` sorts punctuation before the
+  digits as MySQL does. Of 57 pairs of strings measured against MySQL 8.4
+  the copy now differs on one (26 before), and a list of 48 strings sorts
+  in the same order on both. **The copy can return MORE rows than MySQL
+  for some texts**, because it holds equal what `utf8mb4_0900_ai_ci` does
+  not: `l` followed by a middle dot against `l` (`'l·l' = 'll'`), a Thai
+  or Lao consonant and a leading vowel in either order, a Cyrillic `й` or
+  an Arabic alef with madda or hamza written in two parts, one Javanese
+  pair, 86 combining and format marks and 1,463 characters added to
+  Unicode after version 9. A MariaDB source agrees with the copy on all of
+  them, and the previous collation was wider in this direction (of 75,900 strings of one
+  or two characters tested it held 25,725 equal to another one that
+  MySQL keeps apart, against 2,613 now); only the middle dot and the Thai
+  and Lao cases are new. The full list, with what MySQL equates and the
+  copy does not, is in [Time-travel SQL](time-travel-sql.md). The copy's
+  session default goes from DuckDB's built-in
+  `nocase.noaccent` to `nocase.icu_noaccent`; ICU is part of the binary, so
+  nothing is downloaded and an air-gapped install is unaffected. **It is
+  slower on text**: comparing, grouping or sorting a text column costs
+  about twice as much as before, and about ten times on a column where
+  every value is different (an equality filter over 5 million 32-character
+  tokens on disk: 0.2 s before, 1.8 s now). Columns with few distinct
+  values, numbers, dates and columns MySQL declares `_bin` are not
+  affected. `LIKE`, `REGEXP`, `count(DISTINCT ...)` and `INSTR` still do not
+  fold, and stay on MySQL under routing.
+- **Read routing keeps `UNION`, `INTERSECT` and `EXCEPT` on MySQL when they
+  remove duplicates** (#2083). The copy compares the rows by bytes there,
+  whatever its collation: `SELECT status FROM a UNION SELECT status FROM b`
+  returned `paid` and `Paid` as two rows where MySQL returns one, with no
+  error. Such a statement is now kept on MySQL, like `LIKE` and
+  `count(DISTINCT ...)`; `UNION ALL` is still routed. On the port without
+  routing and on the SQL card the difference remains, and is documented.
 
 - **Two installations capturing the same database no longer interrupt each
   other.** Capture connects to the source as a replica, and each replica

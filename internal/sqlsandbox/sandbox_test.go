@@ -1031,6 +1031,8 @@ func TestRun_textComparesLikeMySQL(t *testing.T) {
 	r := newTestRunner(t, testLimits())
 	res, err := r.Run(context.Background(), f.job(`SELECT
 		'Paid' = 'paid', 'Café' = 'cafe', 'a' IN ('A'),
+		'ß' = 'ss', 'Ａ' = 'a', 'æ' = 'AE', 'a ' = 'a',
+		(SELECT string_agg(s, ',' ORDER BY s) FROM (VALUES ('b'), ('a'), ('C'), ('_'), ('1'), (':')) v(s)),
 		(SELECT count(*) FROM (SELECT s FROM (VALUES ('live'), ('LIVE'), ('Live')) v(s) GROUP BY s)),
 		(SELECT string_agg(COALESCE(x::VARCHAR, 'NULL'), ',') FROM (SELECT x FROM (VALUES (2), (NULL), (1)) v(x) ORDER BY x)),
 		(SELECT string_agg(COALESCE(x::VARCHAR, 'NULL'), ',') FROM (SELECT x FROM (VALUES (2), (NULL), (1)) v(x) ORDER BY x DESC)),
@@ -1043,8 +1045,13 @@ func TestRun_textComparesLikeMySQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Byte order of b/a/C would be C,a,b; NULL on DESC goes LAST, as on
-	// MySQL. count(DISTINCT) does NOT fold (2): the router vetoes it.
-	want := []string{"true", "true", "true", "1", "NULL,1,2", "2,1,NULL", "a,b,C", "1", "2", "nocase.noaccent", "NULLS_FIRST_ON_ASC_LAST_ON_DESC"}
+	// MySQL. count(DISTINCT) does NOT fold (2): the router vetoes it. The
+	// second row of cells is what the ICU collation adds over plain
+	// nocase.noaccent (#2083): 'ß' = 'ss', full-width forms, ligatures, a
+	// trailing space still counts (utf8mb4_0900_ai_ci is NO PAD), and
+	// punctuation sorts before the digits.
+	want := []string{"true", "true", "true", "true", "true", "true", "false", "_,:,1,a,b,C",
+		"1", "NULL,1,2", "2,1,NULL", "a,b,C", "1", "2", "nocase.icu_noaccent", "NULLS_FIRST_ON_ASC_LAST_ON_DESC"}
 	for i, w := range want {
 		if got := fmt.Sprint(res.Rows[0][i]); got != w {
 			t.Errorf("cell %d = %s, want %s", i, got, w)
