@@ -213,15 +213,18 @@ var vetoes = []struct {
 	{"WITH RECURSIVE", regexp.MustCompile(`(?i)\bwith\s+recursive\b`)},
 	// MariaDB takes $ for a character of a name ($$ and $x$ are names, and
 	// MySQL takes a$b$ for one); the copy opens a dollar-quoted string
-	// there, which runs to the next one. Measured: `SELECT a AS $$, 2 AS $$`
+	// there, which runs to the next one. The class is "not ASCII" by code
+	// point: \x80-\xff in a pattern would mean U+0080 to U+00FF only. Measured: `SELECT a AS $$, 2 AS $$`
 	// is two columns on MariaDB 11.4 and one on the copy; MySQL 8.4 refuses
 	// a name that starts with $.
-	{"$...$ (a name on the source, a dollar-quoted string on the copy)", regexp.MustCompile(`\$[\w\x80-\xff]*\$`)},
+	{"$...$ (a name on the source, a dollar-quoted string on the copy)", regexp.MustCompile(`\$(?:\w|[^\x00-\x7f])*\$`)},
 }
 
 // hintComment matches an optimizer hint (`/*+`) and a comment the server
 // executes: MySQL's and MariaDB's `/*!`, and MariaDB's `/*M!` (with a capital M:
-// MariaDB 11.4 reads `/*m!` as a plain comment).
+// MariaDB 11.4 reads `/*m!` as a plain comment). It is matched on the raw
+// text, so `SELECT '/*!'` is kept on MySQL too: an over-veto on purpose, since
+// it means a hint cannot hide inside what only looks like a literal.
 var hintComment = regexp.MustCompile(`/\*(M?!|\+)`)
 
 // Veto returns the name of the first construct that keeps the statement on

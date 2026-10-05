@@ -113,6 +113,9 @@ func scan(stmt string) scanned {
 	// afterName is true from the closing backtick of a name until the next
 	// byte that is neither white space nor a comment.
 	afterName := false
+	// prefixAfterName is true while reading the word that follows a name
+	// with nothing but white space between.
+	prefixAfterName := false
 	for i := 0; i < n; {
 		c := stmt[i]
 		switch {
@@ -158,14 +161,14 @@ func scan(stmt string) scanned {
 			bl.WriteByte('\n')
 			i += nl + 1
 		case c == '\'' || c == '"':
-			if afterName {
+			if afterName || prefixAfterName {
 				// `text` 'Label' is the column text under the alias Label
 				// on MySQL; "text" 'Label' is the constant 'Label' of type
 				// text on the copy. Measured on MySQL 8.4, MariaDB 11.4 and
 				// the copy (#2081).
 				refuse(vetoNameString)
 			}
-			afterName = false
+			afterName, prefixAfterName = false, false
 			if c == '"' {
 				sc.doubleQuoted = true
 			}
@@ -234,9 +237,16 @@ func scan(stmt string) scanned {
 				bl.WriteByte(' ')
 			}
 			i = next
-			afterName = true
+			afterName, prefixAfterName = true, false
 		default:
-			if afterName && c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\f' && c != '\v' {
+			switch {
+			case prefixAfterName:
+				prefixAfterName = wordByte(c)
+			case !afterName, c == ' ', c == '\t', c == '\n', c == '\r', c == '\f', c == '\v', c >= 0x80:
+				// White space keeps the state, and so does a byte outside
+				// ASCII: the copy takes a no-break space or an ideographic
+				// space for white space.
+			default:
 				if c == '(' {
 					// `f`(x) is a call on both sides, but not of the same
 					// thing: MySQL refuses `count`(*) and takes `sum`(x) for
@@ -244,6 +254,10 @@ func scan(stmt string) scanned {
 					// and sum. Measured on MySQL 8.4 and the copy (#2081).
 					refuse(vetoNameCall)
 				}
+				// A word right after the name may be a prefix of a string
+				// literal (E'..', N'..', _utf8mb4'..', x'..'), which the
+				// string case below refuses when the quote follows it.
+				prefixAfterName = wordByte(c)
 				afterName = false
 			}
 			cp.WriteByte(c)

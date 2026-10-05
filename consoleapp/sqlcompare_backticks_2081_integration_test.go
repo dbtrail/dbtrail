@@ -259,8 +259,18 @@ func backtickFixtures(db string, mariadb bool) []backtickFixture {
 		dollar = kept(dollar.stmt, diff, "$...$", "two columns named $$ on MariaDB, one on the copy")
 		dollar.kind = "columns"
 	}
+	// The same with a name outside ASCII between the dollar signs.
+	dollarCJK := kept("SELECT 1 AS $中$, 2 AS $中$", serr, "$...$", "MySQL 8.4 refuses a name that starts with $")
+	if mariadb {
+		dollarCJK = kept(dollarCJK.stmt, diff, "$...$", "two columns named $中$ on MariaDB, one on the copy")
+		dollarCJK.kind = "columns"
+	}
 	return []backtickFixture{
 		dollar,
+		dollarCJK,
+		kept("SELECT `text`\u00a0'Label' FROM (SELECT 'body' AS `text`) `t`", serr, "right before a string literal", "a no-break space between the name and the string: white space on the copy, which would answer the constant"),
+		kept("SELECT `text` E'Label' FROM (SELECT 'body' AS `text`) `t`", serr, "right before a string literal", "E'..' is an escaped string on the copy, which would answer the constant"),
+		kept("SELECT `text` N'Label' FROM (SELECT 'body' AS `text`) `t`", noc, "right before a string literal", "N'..' is a string on both"),
 		// What GORM sends.
 		star("SELECT * FROM `orders` WHERE `orders`.`id` = 1 ORDER BY `orders`.`id` LIMIT 1"),
 		star("SELECT * FROM `orders` WHERE `orders`.`customer_id` IN (1,2,3)"),
