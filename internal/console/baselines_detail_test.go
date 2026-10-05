@@ -270,7 +270,7 @@ func TestBaselineDownload_s3RoundTrip(t *testing.T) {
 	// no bucket here, and letting DuckDB discover that costs this test ten
 	// seconds of httpfs retries. A successful empty answer is the "no embedded
 	// schema" shape a real S3 read of these fake bytes would settle on anyway.
-	srv.rememberBaselineDecimals("s3://bkt/baselines@2026-06-10T12:00:00Z", nil, false)
+	srv.rememberBaselineDecimals("s3://bkt/baselines@2026-06-10T12:00:00Z", nil, false, nil)
 	rec, body := doServersReq(t, srv, "GET", "/api/baselines/download"+detailQuery(detailSnapAt), "")
 	if rec.Code != 200 {
 		t.Fatalf("code = %d, body = %s", rec.Code, body)
@@ -403,7 +403,7 @@ func TestBaselineDownload_midStreamAbort(t *testing.T) {
 	srv := newBaselineServer(t, "s3://bkt/baselines", true)
 	// Same memo seed as the round-trip test, same reason: there is no bucket
 	// for the views file's footer read to reach.
-	srv.rememberBaselineDecimals("s3://bkt/baselines@2026-06-10T12:00:00Z", nil, false)
+	srv.rememberBaselineDecimals("s3://bkt/baselines@2026-06-10T12:00:00Z", nil, false, nil)
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/baselines/download"+detailQuery(detailSnapAt), nil)
 	panicked := false

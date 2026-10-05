@@ -86,6 +86,14 @@ func TestResolveBaselineDecimals_retriesAPartialRead(t *testing.T) {
 		t.Error("the readable table lost its columns on the cached path")
 	}
 
+	// The retry reads only what went unread. The file that was read is not
+	// asked for again: it is made unreadable here, and must keep its columns.
+	// One permanently corrupt file would otherwise cost every table's footer,
+	// one query each, every five minutes, inside somebody's statement.
+	if err := os.WriteFile(good, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	// After it, the read is tried again and the table gets its columns.
 	s.baselineDecimalMu.Lock()
 	for k, e := range s.baselineDecimals {
@@ -97,6 +105,9 @@ func TestResolveBaselineDecimals_retriesAPartialRead(t *testing.T) {
 	s.resolveBaselineDecimals(context.Background(), &in)
 	if !in.Baselines[1].SchemaKnown || len(in.Baselines[1].BinaryText) != 1 {
 		t.Errorf("a partial read was remembered as final: the table still has no columns after the retry delay: %+v", in.Baselines[1])
+	}
+	if !in.Baselines[0].SchemaKnown || len(in.Baselines[0].BinaryText) != 1 {
+		t.Errorf("the retry read the already-read file again (and lost it): %+v", in.Baselines[0])
 	}
 
 	// And a complete read is final: aged the same way, it is not read again.
