@@ -28,8 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answer from its own catalog. `sql-compare` sends the copy the same
   rewritten text, so a driver-generated workload is compared instead of
   reading `NOT_ON_COPY`. On a set of 69 statements shaped like what GORM
-  and Django send, run against MySQL 8.4 and MariaDB 11.4, 45 now compare
-  `EQUAL` (2 before); the ones that still differ or are refused are listed
+  and Django send, run against MySQL 8.4 and MariaDB 11.4, 49 now compare
+  `EQUAL` (2 before) on both; the ones that still differ or are refused are listed
   in [Time-travel SQL](time-travel-sql.md) and in #2114. The plain port
   without read routing translates nothing, as before.
 - **Read routing on a MariaDB source sends heavy joins to the copy**
