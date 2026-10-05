@@ -41,15 +41,17 @@ type backtickFixture struct {
 // copy holds the same rows, so every DIFFERENT is the copy answering
 // differently. Before the rewrite all of these read NOT_ON_COPY.
 func TestIntegrationSQLCompareBacktickNames(t *testing.T) {
+	srcDB, srcName := testutil.CreateTestDB(t)
+	runBacktickFixtures(t, srcDB, srcName, testutil.BaseDSN()+"/"+srcName, false)
+}
+
+// The same against a MariaDB source. A test of its own, with MariaDB in its
+// name: the MariaDB job picks its tests by name, and a subtest of the test
+// above never ran there (#2137).
+func TestIntegrationSQLCompareBacktickNamesMariaDB(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
-	t.Run("mysql", func(t *testing.T) {
-		srcDB, srcName := testutil.CreateTestDB(t)
-		runBacktickFixtures(t, srcDB, srcName, testutil.BaseDSN()+"/"+srcName, false)
-	})
-	t.Run("mariadb", func(t *testing.T) {
-		srcDB, srcName := testutil.CreateTestMariaDB(t)
-		runBacktickFixtures(t, srcDB, srcName, testutil.MariaDBBaseDSN()+"/"+srcName, true)
-	})
+	srcDB, srcName := testutil.CreateTestMariaDB(t)
+	runBacktickFixtures(t, srcDB, srcName, testutil.MariaDBBaseDSN()+"/"+srcName, true)
 }
 
 // backtickTables are the source's tables: the DDL without a collation, so

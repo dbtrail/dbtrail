@@ -721,6 +721,8 @@ jobs:
             TestIntegrationMonitorRegistrySourceMariaDBRelabeled \
             TestIntegrationWatchMariaDBSource \
             TestIntegrationSQLCompareGeneratedNamesMariaDB \
+            TestIntegrationSQLCompareBacktickNamesMariaDB \
+            TestTakeSnapshot_pkLessVersionedTableRefused_mariadb \
             TestIntegrationReplicaCheckMariaDB \
             TestBuild_MariaDBVersionRow \
             TestBuild_MariaDBMinimalPrivilegeUser \
