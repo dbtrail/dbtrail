@@ -871,7 +871,7 @@ func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, stateme
 	if msg := sqlNamesRefusalFor(narrowed, statement); msg != "" {
 		return msg
 	}
-	return sqlTypesRefusalFor(narrowed, types)
+	return sqlTypesRefusalFor(narrowed, refs, types)
 }
 
 // sqlTypesRefusalFor says why the copy must not answer a statement because of
@@ -890,22 +890,34 @@ func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, stateme
 // sqlNamesRefusalFor has refused the statement already. With no reading of
 // the statement to ask (types is nil), a statement over a table with such a
 // column is refused: not known is never "nothing to find".
-func sqlTypesRefusalFor(narrowed views.Input, types sqlsandbox.ColumnTypes) string {
+func sqlTypesRefusalFor(narrowed views.Input, refs sqlsandbox.Refs, types sqlsandbox.ColumnTypes) string {
+	// Every table's columns in one question, so the statement is read once
+	// however many tables it reads (every table of the copy, when the walk
+	// was not certain of them).
+	var dates, whole, tables []string
 	for _, t := range narrowed.SelectedBaselines() {
-		dates, whole := t.TypedColumns()
-		if len(dates) == 0 && len(whole) == 0 {
+		d, w := t.TypedColumns()
+		if len(d) == 0 && len(w) == 0 {
 			continue
 		}
-		why := "the statement could not be searched for its date, time and year columns"
-		if types != nil {
-			why = types.ColumnVeto(dates, whole)
-		}
-		if why != "" {
-			return fmt.Sprintf("the copy does not answer this statement: over %s.%s a date, time or year column would be read "+
-				"another way than on MySQL (%s)", t.Schema, t.Table, why)
+		dates, whole = append(dates, d...), append(whole, w...)
+		if len(tables) < 3 {
+			tables = append(tables, t.Schema+"."+t.Table)
 		}
 	}
-	return ""
+	if len(tables) == 0 {
+		return ""
+	}
+	why := "the statement could not be searched for its date, time and year columns"
+	if types != nil {
+		star := refs.Star || refs.StarNamedJoin || len(refs.StarTables) > 0
+		why = types.ColumnVeto(dates, whole, star)
+	}
+	if why == "" {
+		return ""
+	}
+	return fmt.Sprintf("the copy does not answer this statement: a date, time or year column of the tables it reads (%s among them) "+
+		"would be read another way than on MySQL (%s)", strings.Join(tables, ", "), why)
 }
 
 // sqlNamesRefusalFor says why the copy must not answer a statement because of

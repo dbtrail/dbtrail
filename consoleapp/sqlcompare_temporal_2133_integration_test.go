@@ -123,6 +123,9 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		bitOr    = "SELECT n | 0 FROM ev ORDER BY n"
 		yearTwo  = "SELECT n FROM ev WHERE created_on = '26-01-15' ORDER BY n"
 		castFrac = "SELECT CAST('2026-01-01 10:00:00.6' AS DATETIME)"
+		// The date under a name a column list gives it, over a star written
+		// with no space: its own name is nowhere in the statement.
+		renamed = "WITH q(i, a, b, c, e, f, g) AS (SELECT*FROM ev) SELECT a - 1 FROM q ORDER BY f"
 		// The two known differences this change leaves, each with its line in
 		// docs/time-travel-sql.md.
 		interval = "SELECT created_on + INTERVAL 1 DAY FROM ev ORDER BY n"
@@ -146,6 +149,7 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{bitOr, diff, "", "64 unsigned bits on the source (18446744073709551608), signed on the copy (-8)"},
 		{yearTwo, diff, "rows", "the year 2026 on the source (one row), the year 26 on the copy (none)"},
 		{castFrac, diff, "", "the fraction is rounded by MySQL, cut by MariaDB and kept by the copy"},
+		{renamed, diff, "", "20260100 on the source, 2025-12-31 on the copy"},
 		{interval, diff, "", "the same day: a DATE on the source, a date and time on the copy"},
 		{concat, diff, "", "a DATETIME as text ends in +00 on the copy"},
 	}
@@ -156,7 +160,7 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	// ask (part 2 does).
 	for stmt, veto := range map[string]string{
 		bitOr: "bit operator", yearTwo: "two-digit year", castFrac: "CAST to DATETIME or TIME",
-		plus: "", minus: "", avg: "", alias: "", timeText: "", interval: "", concat: "",
+		plus: "", minus: "", avg: "", alias: "", renamed: "", timeText: "", interval: "", concat: "",
 	} {
 		r := by[stmt]
 		if veto == "" && r.RouteRule == "veto" {
@@ -184,6 +188,8 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{stmt: "SELECT MIN(side), AVG(dt) FROM ev", who: "live", why: "AVG of a DATETIME column"},
 		{stmt: "SELECT side, d + 1 FROM (SELECT created_on AS d, n, side FROM ev) x ORDER BY n", who: "live", why: "an alias of the date, used outside its subquery"},
 		{stmt: "SELECT MIN(side), AVG(x) FROM (SELECT created_on AS x, side FROM ev) q", who: "live", why: "AVG of an alias of the date, from outside its subquery"},
+		{stmt: "WITH q(i, a, b, c, e, f, side) AS (SELECT*FROM ev) SELECT side, a - 1 FROM q ORDER BY f", who: "live", why: "the date renamed by a column list over a star"},
+		{stmt: "SELECT side, YEAR(created_on) + 1, n - -1 FROM ev WHERE n > -9 ORDER BY n", who: "copy", why: "a number out of the date, and the sign of a number: not arithmetic on a date"},
 		{stmt: "SELECT side, n FROM ev WHERE tm >= '9:00:00' ORDER BY n", who: "live", why: "a TIME column named"},
 		{stmt: "SELECT side, n FROM ev WHERE yr = 26 ORDER BY n", who: "live", why: "a YEAR column named"},
 		{stmt: "SELECT side, n | 0 FROM ev ORDER BY n", who: "live", why: "a bit operator: kept on the source from the text"},
@@ -212,10 +218,10 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		t.Errorf("routed created_on + 1: got %s, want 20260102 / 20260204 / 20260116", got)
 	}
 
-	// Who answered, and why the source: ten statements declined by the
-	// copy for a column's type (nine above and the one just now), two kept on
+	// Who answered, and why the source: eleven statements declined by the
+	// copy for a column's type (ten above and the one just now), two kept on
 	// the source from the text (the bit operator, the bound two-digit year),
-	// three answered by the copy, and the copy at fault in none.
+	// four answered by the copy, and the copy at fault in none.
 	req := httptest.NewRequest("GET", "http://127.0.0.1/api/flashback", nil)
 	req.Header.Set("Authorization", "Bearer tok")
 	rec := httptest.NewRecorder()
@@ -232,7 +238,7 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	}
 	reasons := fb.Routing.Servers[ent.ID].Reasons
 	t.Logf("routing reasons: %v", reasons)
-	if reasons["copy_columns_differ"] != 10 || reasons["veto"] != 2 || reasons["expensive_plan"] != 3 || reasons["copy_refused"] != 0 || reasons["explain_failed"] != 0 {
-		t.Errorf("reasons = %v, want copy_columns_differ 10, veto 2, expensive_plan 3, copy_refused 0, explain_failed 0", reasons)
+	if reasons["copy_columns_differ"] != 11 || reasons["veto"] != 2 || reasons["expensive_plan"] != 4 || reasons["copy_refused"] != 0 || reasons["explain_failed"] != 0 {
+		t.Errorf("reasons = %v, want copy_columns_differ 11, veto 2, expensive_plan 4, copy_refused 0, explain_failed 0", reasons)
 	}
 }

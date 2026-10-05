@@ -289,7 +289,7 @@ func TestVeto_weekNumbering(t *testing.T) {
 			t.Errorf("Veto(%q) = %q, want EXTRACT(WEEK ...)", stmt, Veto(stmt))
 		}
 	}
-	for _, stmt := range []string{"SELECT WEEKOFYEAR(d) FROM t", "SELECT week FROM t", "SELECT 'week(' FROM t", "SELECT weekday(d) FROM t",
+	for _, stmt := range []string{"SELECT WEEKOFYEAR(d) FROM t", "SELECT week FROM t", "SELECT 'week(' FROM t", "SELECT weekday FROM t",
 		"SELECT EXTRACT(YEAR FROM d) FROM t", "SELECT EXTRACT(DAY FROM week_start) FROM t"} {
 		if Veto(stmt) != "" {
 			t.Errorf("Veto(%q) = %q, want none", stmt, Veto(stmt))

@@ -42,7 +42,7 @@ console.log(flat(block({ enabled: true, listen: "127.0.0.1:3308", port: "3308", 
 	}
 	text := string(raw)
 	t.Logf("drawn: %s", text)
-	for _, want := range []string{"4 × the copy declined it", "SELECT *", "NATURAL JOIN", "a column the copy lacks", "+ or -, or AVG, on a date column",
+	for _, want := range []string{"4 × the copy declined it", "SELECT *", "NATURAL JOIN", "a column the copy lacks", "+ or -, or AVG, on a date column or one of unknown type", "anywhere beside a subquery over such a table",
 		"a TIME or YEAR column named", "no table definition", "take a new full snapshot"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in: %s", want, text)

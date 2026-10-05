@@ -44,8 +44,13 @@ func TestColumnVeto_arithmeticOnADateColumn(t *testing.T) {
 		"SELECT MAX(created_on) OVER () - 1 FROM orders":                      true,
 		"SELECT -created_on FROM orders":                                      true, // the copy refuses it: kept back at no cost
 		// A group that holds the column is added to: kept back, for nothing
-		// when what the group returns is a number.
-		"SELECT YEAR(created_on) + 1 FROM orders": true,
+		// when what the group returns is a number, unless the function is
+		// one known to return a number whatever it is given.
+		"SELECT IFNULL(created_on, seen_at) + 1 FROM orders":         true,
+		"SELECT TO_DAYS(created_on) - 1 FROM orders":                 true, // the copy refuses it
+		"SELECT MEDIAN(created_on) OVER () FROM orders":              true, // MariaDB's: a number there, a date and time on the copy
+		"SELECT MAX(YEAR(created_on) + created_on) FROM orders":      true,
+		"SELECT YEAR(COALESCE(created_on, seen_at) + 1) FROM orders": true,
 		// An alias of the date can be used from outside a subquery or a WITH,
 		// where the text does not say it is one.
 		"SELECT d + 1 FROM (SELECT created_on AS d FROM orders) x":                            true,
@@ -53,6 +58,14 @@ func TestColumnVeto_arithmeticOnADateColumn(t *testing.T) {
 		"WITH c AS (SELECT created_on AS d FROM orders) SELECT d + 1 FROM c":                  true,
 		"SELECT (SELECT MAX(created_on) FROM orders) + 1":                                     true,
 		"SELECT id - 1 FROM orders WHERE id IN (SELECT id FROM orders WHERE created_on > '')": true, // for nothing
+		"SELECT x -1 FROM (SELECT created_on AS x FROM orders) q":                             true, // x minus one, not minus-one
+		"SELECT x - -1 FROM (SELECT created_on AS x FROM orders) q":                           true,
+		"SELECT YEAR(d) + x FROM (SELECT created_on AS x, d FROM orders) q":                   true,
+		"SELECT COALESCE(x, y) - 1 FROM (SELECT created_on AS x, y FROM orders) q":            true,
+		"SELECT (x) + 1 FROM (SELECT created_on AS x FROM orders) q":                          true,
+		"SELECT 1 - year FROM (SELECT created_on AS year FROM orders) q":                      true, // a name, not a call of YEAR
+		"SELECT MEDIAN(x) OVER () FROM (SELECT created_on AS x FROM orders) q":                true,
+		"SELECT offset - 1 FROM (SELECT created_on AS offset FROM orders) q":                  true, // offset is not a reserved word
 		// What both sides answer alike.
 		"SELECT created_on FROM orders":                                                               false,
 		"SELECT id, created_on, seen_at FROM orders ORDER BY created_on DESC":                         false,
@@ -72,6 +85,22 @@ func TestColumnVeto_arithmeticOnADateColumn(t *testing.T) {
 		"SELECT id FROM orders WHERE id IN (SELECT id FROM orders WHERE created_on > '')":             false, // a subquery and no + or -
 		"SELECT id FROM (SELECT id, created_on FROM orders) x WHERE created_on > '' - INTERVAL 1 DAY": false,
 		"SELECT COUNT(*) FROM orders WHERE created_on IS NOT NULL":                                    false,
+		// A call that is a number on both sides whatever it is given.
+		"SELECT YEAR(created_on) + 1 FROM orders":                                                false,
+		"SELECT MAX(YEAR(created_on)) + 1 FROM orders":                                           false,
+		"SELECT YEAR(created_on) * 100 + MONTH(created_on) FROM orders":                          false,
+		"SELECT EXTRACT(YEAR FROM created_on) - 2000 FROM orders":                                false,
+		"SELECT COUNT(*) - COUNT(seen_at), HOUR(seen_at) + 1 FROM orders":                        false,
+		"SELECT SUM(CASE WHEN created_on >= '' THEN amount END) - SUM(amount) FROM orders":       false,
+		"SELECT DAY(created_on) - DAYOFYEAR(seen_at), QUARTER(created_on) + 1 FROM orders":       false,
+		"SELECT status FROM orders GROUP BY YEAR(created_on) - YEAR(seen_at)":                    false,
+		"SELECT status, MAX(created_on) FROM orders GROUP BY status HAVING SUM(a) - SUM(b) > -1": false,
+		"SELECT id FROM orders WHERE created_on >= '' ORDER BY amount DESC LIMIT 10":             false,
+		// The sign of a number is not arithmetic, with a subquery or not.
+		"SELECT id FROM orders WHERE id IN (SELECT id FROM orders WHERE created_on > '' AND amount > -1)":    false,
+		"SELECT id FROM (SELECT id, created_on FROM orders) x WHERE a BETWEEN -5 AND +5 AND b * 1e-2 > (-1)": false,
+		"SELECT CASE WHEN a THEN -1 ELSE - 2 END, f(a, -3) FROM (SELECT a, created_on FROM orders) x":        false,
+		"SELECT YEAR(d) + 1, SUM(a) - COUNT(*) FROM (SELECT created_on AS d, a FROM orders) x":               false,
 		// Another word that holds the name is not the name.
 		"SELECT created_on_utc + 1, xcreated_on - 1 FROM orders": false,
 		"SELECT `created_on x` + 1 FROM orders":                  false,
@@ -79,7 +108,7 @@ func TestColumnVeto_arithmeticOnADateColumn(t *testing.T) {
 		"SELECT id + 1 FROM orders": false,
 		"SELECT 1":                  false,
 	} {
-		got := ColumnVeto(Shape(stmt), dates, nil)
+		got := ColumnVeto(Shape(stmt), dates, nil, false)
 		if (got != "") != kept {
 			t.Errorf("ColumnVeto(%q) = %q, want kept on the source: %v", stmt, got, kept)
 		}
@@ -118,26 +147,41 @@ func TestColumnVeto_aDateUnderAnotherName(t *testing.T) {
 		"SELECT a - 1 FROM (SELECT a, COUNT(*) FROM t GROUP BY a) q": false, // no star and no date named
 		"SELECT COUNT(*) - 1 FROM t WHERE a IN (SELECT 2 * 3)":       false, // count(*) and a product are not stars
 	} {
-		if got := ColumnVeto(Shape(stmt), dates, nil); (got != "") != kept {
+		if got := ColumnVeto(Shape(stmt), dates, nil, false); (got != "") != kept {
 			t.Errorf("ColumnVeto(%q) = %q, want kept on the source: %v", stmt, got, kept)
 		}
 	}
-	for stmt, kept := range map[string]bool{
-		"SELECT * FROM t ORDER BY 2":         true,
-		"SELECT t.* FROM t":                  true,
-		"SELECT a, * FROM t":                 true,
-		"SELECT DISTINCT * FROM t":           true,
-		"SELECT x FROM (TABLE t) q(x)":       true,
-		"SELECT COUNT(*), a * 2 FROM t":      false,
-		"SELECT a FROM t WHERE b IN (1 , 2)": false,
+	// A star with no space after SELECT, and a bare TABLE t, are stars too.
+	for _, stmt := range []string{
+		"WITH q(i, a, b) AS (SELECT*FROM t) SELECT a - 1 FROM q",
+		"WITH q(i, a, b) AS (select*from t) SELECT AVG(a) FROM q",
+		"WITH q(i, a, b) AS (SELECT ALL*FROM t) SELECT a - b FROM q",
+		"WITH q(i, a, b) AS (SELECT DISTINCT*FROM t) SELECT a - b FROM q",
+		"WITH q(i, a, b) AS (TABLE t) SELECT a - b FROM q",
+		"SELECT a - b FROM (SELECT x.*FROM t x) q(i, a, b)",
 	} {
-		if got := ColumnVeto(Shape(stmt), nil, whole); (got != "") != kept {
-			t.Errorf("a TIME column: ColumnVeto(%q) = %q, want kept on the source: %v", stmt, got, kept)
+		if got := ColumnVeto(Shape(stmt), dates, nil, false); got == "" {
+			t.Errorf("ColumnVeto(%q): not kept back", stmt)
+		}
+	}
+	// A star the caller's parse saw and the text search would not.
+	const hidden = "WITH q(i, a, b) AS (SELECT COLUMNS(c) FROM t) SELECT a - b FROM q"
+	if got := ColumnVeto(Shape(hidden), dates, nil, false); got != "" {
+		t.Errorf("ColumnVeto(%q) with no star known: %q, want none", hidden, got)
+	}
+	if got := ColumnVeto(Shape(hidden), dates, nil, true); got == "" {
+		t.Errorf("ColumnVeto(%q) with a star the parse saw: not kept back", hidden)
+	}
+	// A star over a table with a TIME or YEAR column is not kept back: the
+	// values and their order measured equal on both sides.
+	for _, stmt := range []string{"SELECT * FROM t ORDER BY 2", "SELECT t.* FROM t"} {
+		if got := ColumnVeto(Shape(stmt), nil, whole, true); got != "" {
+			t.Errorf("a TIME column: ColumnVeto(%q) = %q, want none", stmt, got)
 		}
 	}
 	// A date column whose own name starts with $, quoted or not.
 	for _, stmt := range []string{"SELECT $d + 1 FROM t", "SELECT `$d` + 1 FROM t"} {
-		if got := ColumnVeto(Shape(stmt), []string{"$d"}, nil); got == "" {
+		if got := ColumnVeto(Shape(stmt), []string{"$d"}, nil, false); got == "" {
 			t.Errorf("ColumnVeto(%q) with a column named $d: not kept back", stmt)
 		}
 	}
@@ -160,7 +204,7 @@ func TestColumnVeto_columnNamedLikeAKeyword(t *testing.T) {
 		"SELECT CASE WHEN a THEN 1 ELSE 2 END + 1, `end` FROM t":   true,
 		"SELECT `end`, id FROM t WHERE `over` > '' ORDER BY `avg`": false,
 	} {
-		if got := ColumnVeto(Shape(stmt), dates, nil); (got != "") != kept {
+		if got := ColumnVeto(Shape(stmt), dates, nil, false); (got != "") != kept {
 			t.Errorf("ColumnVeto(%q) = %q, want kept on the source: %v", stmt, got, kept)
 		}
 	}
@@ -177,7 +221,7 @@ func TestColumnVeto_stringsAndCommentsAreNotRead(t *testing.T) {
 		"SELECT created_on, '+' FROM orders",
 		"SELECT created_on /* + */ FROM orders",
 	} {
-		if got := ColumnVeto(Shape(stmt), []string{"created_on"}, []string{"tm"}); got != "" {
+		if got := ColumnVeto(Shape(stmt), []string{"created_on"}, []string{"tm"}, false); got != "" {
 			t.Errorf("ColumnVeto(%q) = %q, want none", stmt, got)
 		}
 	}
@@ -199,40 +243,65 @@ func TestColumnVeto_aTimeOrYearColumnNamed(t *testing.T) {
 		"SELECT tmx, yr2, `tm yr` FROM ev":        false,
 		"SELECT 'tm', id /* yr */ FROM ev":        false,
 	} {
-		if got := ColumnVeto(Shape(stmt), nil, whole); (got != "") != kept {
+		if got := ColumnVeto(Shape(stmt), nil, whole, false); (got != "") != kept {
 			t.Errorf("ColumnVeto(%q) = %q, want kept on the source: %v", stmt, got, kept)
 		}
 	}
 }
 
-// Not known is never read as "nothing to find": a statement that cannot be
-// searched, a column whose name cannot be looked for and a shape that was
+// Names are matched the way MySQL compares the names of columns: the same
+// letters up to case, accents kept, in whatever script. A name outside ASCII
+// that is not a column keeps nothing back.
+func TestColumnVeto_namesOutsideASCII(t *testing.T) {
+	dates := []string{"año", "fecha_creación", "created_at", "İd", "kind"}
+	for stmt, kept := range map[string]bool{
+		"SELECT año + 1 FROM t":                                            true,
+		"SELECT AÑO + 1 FROM t":                                            true,
+		"SELECT `Año`+1 FROM t":                                            true,
+		"SELECT t.fecha_creación - 1 FROM t":                               true,
+		"SELECT FECHA_CREACIÓN - 1 FROM t":                                 true,
+		"SELECT AVG(`fecha_creación`) FROM t":                              true,
+		"SELECT \u212aind + 1 FROM t":                                      true,  // a Kelvin sign for the k
+		"SELECT k\u0131nd + 1 FROM t":                                      true,  // a dotless i, which a server that compares without case takes for i
+		"SELECT ano + 1, fecha_creacion - 1 FROM t":                        false, // no accent is dropped
+		"SELECT total AS `número` FROM t WHERE created_at >= ''":           false,
+		"SELECT total AS número, precio + 1 FROM t WHERE created_at >= ''": false,
+		"SELECT `año`, `fecha_creación` FROM t ORDER BY `año`":             false,
+		"SELECT 名前 + 1 FROM t WHERE created_at >= ''":                      false,
+	} {
+		if got := ColumnVeto(Shape(stmt), dates, nil, false); (got != "") != kept {
+			t.Errorf("ColumnVeto(%q) = %q, want kept on the source: %v", stmt, got, kept)
+		}
+	}
+	if got := ColumnVeto(Shape("SELECT hora FROM t WHERE DÍA = 1"), nil, []string{"día"}, false); got == "" {
+		t.Error("a YEAR column named día, written DÍA: not kept back")
+	}
+}
+
+// Not known is never read as "nothing to find": a statement that is not
+// valid UTF-8, a column whose name cannot be looked for and a shape that was
 // not handed over each keep the statement on the source, and a table with no
 // such column asks nothing.
 func TestColumnVeto_whatCannotBeSearchedIsRefused(t *testing.T) {
 	dates := []string{"created_on"}
-	if got := ColumnVeto(Shape("SELECT id FROM orders WHERE créated_on > 1"), dates, nil); !strings.Contains(got, "outside ASCII") {
-		t.Errorf("a name outside ASCII: %q, want refused", got)
+	if got := ColumnVeto("SELECT id FROM orders WHERE a\xff > 1", dates, nil, false); !strings.Contains(got, "not valid UTF-8") {
+		t.Errorf("a statement that is not UTF-8: %q, want refused", got)
 	}
-	// Outside ASCII inside a string is not a name: the shape has blanked it.
-	if got := ColumnVeto(Shape("SELECT id FROM orders WHERE city = 'Bogotá'"), dates, nil); got != "" {
-		t.Errorf("a string outside ASCII: %q, want none", got)
-	}
-	for _, name := range []string{"fecha de alta", "día", "a`b", `a"b`, ""} {
-		if got := ColumnVeto(Shape("SELECT id FROM orders"), []string{name}, nil); !strings.Contains(got, "cannot be looked for") {
+	for _, name := range []string{"fecha de alta", "a`b", `a"b`, "a.b", "d\xff", ""} {
+		if got := ColumnVeto(Shape("SELECT id FROM orders"), []string{name}, nil, false); !strings.Contains(got, "cannot be looked for") {
 			t.Errorf("a date column named %q: %q, want every statement refused", name, got)
 		}
-		if got := ColumnVeto(Shape("SELECT id FROM orders"), nil, []string{name}); !strings.Contains(got, "cannot be looked for") {
+		if got := ColumnVeto(Shape("SELECT id FROM orders"), nil, []string{name}, false); !strings.Contains(got, "cannot be looked for") {
 			t.Errorf("a TIME column named %q: %q, want every statement refused", name, got)
 		}
 	}
-	if got := ColumnVeto("", dates, nil); got == "" {
+	if got := ColumnVeto("", dates, nil, false); got == "" {
 		t.Error("no shape and a date column: answered, want refused")
 	}
-	if got := ColumnVeto("", nil, nil); got != "" {
+	if got := ColumnVeto("", nil, nil, false); got != "" {
 		t.Errorf("no shape and no such column: %q, want none", got)
 	}
-	if got := ColumnVeto(Shape("SELECT créated_on + 1 FROM orders"), nil, nil); got != "" {
+	if got := ColumnVeto("SELECT a\xff + 1 FROM orders", nil, nil, false); got != "" {
 		t.Errorf("a table with no such column: %q, want none", got)
 	}
 }
@@ -258,6 +327,13 @@ func TestVeto_bitOperators(t *testing.T) {
 		"SELECT bit_count, bit_or FROM t":          "", // columns
 		"SELECT rabbit_count(n), `bit_and` FROM t": "",
 		"SELECT id FROM t WHERE a > 1 AND b >= 2":  "",
+		// The days of the week are numbered another way on the copy, and its
+		// microseconds hold the seconds.
+		"SELECT DAYOFWEEK(d) FROM t":                     vetoDayNumbering,
+		"SELECT weekday (d) FROM t":                      vetoDayNumbering,
+		"SELECT MICROSECOND(ts) FROM t":                  vetoDayNumbering,
+		"SELECT EXTRACT( MICROSECOND FROM ts) FROM t":    vetoDayNumbering,
+		"SELECT EXTRACT(SECOND FROM ts), weekday FROM t": "",
 	} {
 		if got := Veto(stmt); got != want {
 			t.Errorf("Veto(%q) = %q, want %q", stmt, got, want)
@@ -356,13 +432,22 @@ func TestColumnVeto_isLinear(t *testing.T) {
 			return "SELECT d" + strings.Repeat(" ", 10*n) + ", " + strings.Repeat("( ", n) + "d" + strings.Repeat(" )", n) + " FROM t"
 		},
 		"unclosed": func(n int) string { return "SELECT " + strings.Repeat("max(d, (", n) },
+		"signs": func(n int) string {
+			return "SELECT d, " + strings.Repeat("sum(a) - sum(b), a > -1, year(x) + 1, ", n) + "1 FROM (SELECT d FROM t) x ORDER BY 1"
+		},
+		"long words": func(n int) string {
+			return "SELECT d, " + strings.Repeat("a", 10*n) + strings.Repeat(" * -1", n) + " FROM (SELECT d FROM t) x"
+		},
+		"many names": func(n int) string {
+			return "SELECT " + strings.Repeat("`d`, created_on, t.d, año, ", n) + "1 FROM t ORDER BY 1"
+		},
 	}
 	for name, build := range shapes {
-		why, small := columnVetoWork(Shape(build(2000)), dates, whole)
+		why, small := columnVetoWork(Shape(build(2000)), dates, whole, false)
 		if why != "" {
 			t.Errorf("%s: kept back as %q, want none", name, why)
 		}
-		_, large := columnVetoWork(Shape(build(8000)), dates, whole)
+		_, large := columnVetoWork(Shape(build(8000)), dates, whole, false)
 		ratio := float64(large) / float64(small)
 		t.Logf("%-12s %9d steps at 2,000, %9d at 8,000: x%.2f", name, small, large, ratio)
 		if small == 0 || ratio > 4.5 {
@@ -375,7 +460,7 @@ func TestColumnVeto_isLinear(t *testing.T) {
 		"windows": "SELECT " + strings.Repeat("max(", depth) + "d" + strings.Repeat(") over ()", depth) + " - 1 FROM t",
 		"case":    "SELECT 1 + " + strings.Repeat("case when a then ", depth) + "d" + strings.Repeat(" end", depth) + " FROM t",
 	} {
-		if got := ColumnVeto(Shape(stmt), dates, whole); got == "" {
+		if got := ColumnVeto(Shape(stmt), dates, whole, false); got == "" {
 			t.Errorf("%s with arithmetic at the far end: not kept back", name)
 		}
 	}

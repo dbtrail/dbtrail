@@ -23,6 +23,7 @@ const (
 	vetoBitOperator      = "bit operator or function: |, &, >>, BIT_COUNT, BIT_AND, BIT_OR, BIT_XOR (64 unsigned bits on MySQL, signed on the copy; over no rows, a number on MySQL and NULL on the copy)"
 	vetoCastDatetime     = "CAST to DATETIME or TIME (a fraction of a second is rounded on MySQL, cut on MariaDB and kept on the copy)"
 	vetoTwoDigitYear     = "string that starts with a two-digit year (year 2026 or 1970 on MySQL; year 26 or 70 on the copy)"
+	vetoDayNumbering     = "DAYOFWEEK, WEEKDAY or MICROSECOND (the days of the week are numbered another way on the copy, and its microseconds hold the seconds too)"
 )
 
 // shapeText is the text the shape checks read: the statement with string
@@ -82,7 +83,16 @@ var shapeVetoes = []struct {
 	{vetoBinaryIntroducer, func(t *shapeText) bool { return binaryIntroducer.MatchString(t.all()) }},
 	{vetoBitOperator, func(t *shapeText) bool { return bitOperator.MatchString(t.all()) }},
 	{vetoCastDatetime, func(t *shapeText) bool { return castDatetime.MatchString(t.all()) }},
+	{vetoDayNumbering, func(t *shapeText) bool { return dayNumbering.MatchString(t.all()) }},
 }
+
+// dayNumbering is a call of DAYOFWEEK, WEEKDAY or MICROSECOND, or
+// EXTRACT(MICROSECOND ...) (#2133). Measured on MySQL 8.4 and MariaDB 11.4
+// against the copy over the same dates: DAYOFWEEK of a Thursday is 5 on the
+// source (Sunday is 1) and 4 on the copy (Sunday is 0); WEEKDAY of it is 3
+// on the source (Monday is 0) and 4 on the copy; MICROSECOND of 10:20:30 is
+// 0 on the source and 30000000 on the copy, which counts the seconds in.
+var dayNumbering = regexp.MustCompile(`(?i)\b(?:dayofweek|weekday|microsecond)\s*\(|\bextract\s*\(\s*microsecond\b`)
 
 // bitOperator is |, & or >> anywhere, or a call of BIT_COUNT, BIT_AND, BIT_OR
 // or BIT_XOR (#2133). MySQL and MariaDB compute them over 64 unsigned bits and
@@ -343,6 +353,15 @@ func dateArithmetic(t *shapeText) bool {
 // INTERVAL does not follow, or under AVG. shapes are in the order written.
 func shapesInArithmetic(t *shapeText, shapes []temporal) bool {
 	readGroups(t, shapes)
+	return groupsInArithmetic(t, shapes, nil)
+}
+
+// groupsInArithmetic is shapesInArithmetic once the groups are read. A group
+// that is a call of a function in numeric is not looked at, and neither is
+// anything around it on that shape's account: what such a call returns is a
+// number whatever it is given, so a + or a - next to it is not arithmetic
+// on a date.
+func groupsInArithmetic(t *shapeText, shapes []temporal, numeric map[string]bool) bool {
 	seen := make([]bool, len(t.groups))
 	for _, sh := range shapes {
 		if !sh.word {
@@ -361,6 +380,9 @@ func shapesInArithmetic(t *shapeText, shapes []temporal) bool {
 		}
 		for gi := sh.in; gi >= 0 && !seen[gi]; gi = t.group(gi).parent {
 			seen[gi] = true
+			if numeric != nil && numeric[groupFunc(t, gi)] {
+				break
+			}
 			if groupInArithmetic(t, gi) {
 				return true
 			}
@@ -465,7 +487,7 @@ func groupInArithmetic(t *shapeText, gi int) bool {
 			w--
 		}
 		if w < l {
-			if strings.EqualFold(t.sub(w+1, l+1), "avg") {
+			if f := t.sub(w+1, l+1); strings.EqualFold(f, "avg") || strings.EqualFold(f, "median") {
 				return true
 			}
 			left = w + 1
@@ -473,6 +495,27 @@ func groupInArithmetic(t *shapeText, gi int) bool {
 		right = afterWindow(t, right)
 	}
 	return signBefore(t, left) || signAfter(t, right)
+}
+
+// groupFunc is the name of the function a pair of parentheses is the call
+// of, in lower case, or "" for a CASE, a bare pair, or a group left open.
+func groupFunc(t *shapeText, gi int) string {
+	g := *t.group(gi)
+	if g.isCase || g.end < 0 {
+		return ""
+	}
+	l := g.open - 1
+	for l >= 0 && sqlSpace(t.at(l)) {
+		l--
+	}
+	w := l
+	for w >= 0 && wordByte(t.at(w)) {
+		w--
+	}
+	if w == l {
+		return ""
+	}
+	return strings.ToLower(t.sub(w+1, l+1))
 }
 
 // afterWindow returns where the call that ends at pos ends once its window

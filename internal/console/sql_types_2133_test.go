@@ -110,7 +110,7 @@ func TestSQLTypesRefusalFor(t *testing.T) {
 		{"SELECT id + 1 FROM plain", ""},
 		{"SELECT created_on FROM orders", ""},
 	} {
-		got := sqlTypesRefusalFor(in, readrouter.ShapeOf(c.stmt))
+		got := sqlTypesRefusalFor(in, sqlsandbox.Refs{}, readrouter.ShapeOf(c.stmt))
 		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
 			t.Errorf("%s: refusal %q, want one naming %q", c.stmt, got, c.want)
 		}
@@ -118,10 +118,57 @@ func TestSQLTypesRefusalFor(t *testing.T) {
 	// Only the tables the statement reads are asked.
 	narrowed := in
 	narrowed.OnlyViews = sqlWantedViews(in, sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{{Schema: "shop", Name: "plain"}}})
-	if got := sqlTypesRefusalFor(narrowed, readrouter.ShapeOf("SELECT created_on + 1 FROM plain")); got != "" {
+	if got := sqlTypesRefusalFor(narrowed, sqlsandbox.Refs{}, readrouter.ShapeOf("SELECT created_on + 1 FROM plain")); got != "" {
 		t.Errorf("a statement that reads only plain: %q, want none", got)
 	}
 	if got := sqlStrictRefusalFor(in, in, sqlsandbox.Refs{}, "SELECT created_on + 1 FROM orders", readrouter.ShapeOf("SELECT created_on + 1 FROM orders")); !strings.Contains(got, "shop.orders") {
 		t.Errorf("sqlStrictRefusalFor does not ask the types: %q", got)
+	}
+}
+
+// askedTypes records what the statement's reading is asked.
+type askedTypes struct {
+	calls        int
+	dates, whole []string
+	star         bool
+}
+
+func (a *askedTypes) ColumnVeto(dates, whole []string, star bool) string {
+	a.calls++
+	a.dates, a.whole, a.star = dates, whole, star
+	return ""
+}
+
+// The statement is read once however many tables it reads: every table's
+// columns go in one question (a walk that is not certain of the tables asks
+// about every table of the copy), with the star the parse saw.
+func TestSQLTypesRefusalFor_oneQuestionForEveryTable(t *testing.T) {
+	var in views.Input
+	for i := 0; i < 40; i++ {
+		tb := views.BaselineTable{Schema: "shop", Table: fmt.Sprintf("t%d", i), Path: fmt.Sprintf("/c/shop/t%d.parquet", i), SchemaKnown: true, Columns: []string{"id"}}
+		if i%2 == 0 {
+			tb.Temporal = []baseline.TemporalColumn{{Name: fmt.Sprintf("d%d", i), Type: "date"}, {Name: fmt.Sprintf("y%d", i), Type: "year"}}
+		}
+		in.Baselines = append(in.Baselines, tb)
+	}
+	asked := &askedTypes{}
+	if got := sqlTypesRefusalFor(in, sqlsandbox.Refs{StarTables: []sqlsandbox.TableRef{{Name: "t0"}}}, asked); got != "" {
+		t.Fatalf("refusal %q, want none", got)
+	}
+	if asked.calls != 1 || len(asked.dates) != 20 || len(asked.whole) != 20 || !asked.star {
+		t.Errorf("asked %d time(s) with %d dates, %d TIME or YEAR columns, star %v; want once, 20, 20, true", asked.calls, len(asked.dates), len(asked.whole), asked.star)
+	}
+	for _, refs := range []sqlsandbox.Refs{{}, {Star: true}, {StarNamedJoin: true}} {
+		asked = &askedTypes{}
+		sqlTypesRefusalFor(in, refs, asked)
+		if want := refs.Star || refs.StarNamedJoin; asked.star != want {
+			t.Errorf("refs %+v: star = %v, want %v", refs, asked.star, want)
+		}
+	}
+	// No table with such a column: nothing is asked.
+	asked = &askedTypes{}
+	plain := views.Input{Baselines: []views.BaselineTable{{Schema: "shop", Table: "p", Path: "/c/shop/p.parquet", SchemaKnown: true, Columns: []string{"id"}}}}
+	if got := sqlTypesRefusalFor(plain, sqlsandbox.Refs{}, asked); got != "" || asked.calls != 0 {
+		t.Errorf("no such column: refusal %q after %d question(s), want none and none", got, asked.calls)
 	}
 }

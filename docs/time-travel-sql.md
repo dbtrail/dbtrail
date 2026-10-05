@@ -967,7 +967,12 @@ What this is and is not:
     nothing on the other. Whether the string is used as a date is not
     read: any string written that way keeps the statement on MySQL, and so
     does one bound to a prepared statement. A year of four digits is not
-    kept back.
+    kept back;
+  - `DAYOFWEEK`, `WEEKDAY`, `MICROSECOND` and `EXTRACT(MICROSECOND ...)`.
+    The copy numbers the days of the week another way (`DAYOFWEEK` of a
+    Thursday is 5 on MySQL and 4 on the copy, `WEEKDAY` of it 3 and 4), and
+    its microseconds hold the seconds too (`MICROSECOND` of `10:20:30` is 0
+    on MySQL and 30000000 on the copy).
 
   The
   copy itself compares text close to the way MySQL's default collation
@@ -1171,55 +1176,63 @@ What this is and is not:
   (`copy_columns_differ`):
   - **a statement where the name of a `DATE`, `DATETIME` or `TIMESTAMP`
     column of a table it reads stands next to a `+` or a `-`, or under
-    `AVG`**, directly or inside something that is added to as a whole:
-    `created_on + 1`, `1 + o.created_on`, `(created_on) - 1`,
-    `GREATEST(created_on, d2) + 1`, `LAST_DAY(created_on) + 1`,
-    `MAX(created_on) - MIN(created_on)`, `CASE WHEN a THEN created_on END +
-    1`, `AVG(created_on)`, with the name quoted or not and with or without
-    the table's name in front. A `+` or `-` that `INTERVAL` follows does not
-    count, nor one elsewhere in the statement: `SELECT amount + tax FROM
-    orders WHERE created_on >= '2026-01-01'` is the copy's. The rule does
-    not know what a group returns, so `YEAR(created_on) + 1` and
-    `COUNT(created_on) - 1` stay on MySQL too, for nothing. `*`, `/`, `%`,
-    `SUM`, `ABS`, `ROUND` and a comparison with a number are not part of
-    it: the copy refuses those over a date, and MySQL answers;
+    `AVG`** (or MariaDB's `MEDIAN`), directly or inside something that is
+    added to as a whole: `created_on + 1`, `1 + o.created_on`,
+    `(created_on) - 1`, `GREATEST(created_on, d2) + 1`,
+    `LAST_DAY(created_on) + 1`, `MAX(created_on) - MIN(created_on)`, `CASE
+    WHEN a THEN created_on END + 1`, `AVG(created_on)`, with the name quoted
+    or not and with or without the table's name in front. A `+` or `-` that
+    `INTERVAL` follows does not count, nor one elsewhere in the statement:
+    `SELECT amount + tax FROM orders WHERE created_on >= '2026-01-01'` is
+    the copy's. Neither does one around a call that is a number on both
+    sides whatever it is given: `YEAR`, `MONTH`, `DAY`, `DAYOFMONTH`,
+    `DAYOFYEAR`, `QUARTER`, `HOUR`, `MINUTE`, `SECOND`, `EXTRACT`, `COUNT`
+    and `SUM` (each measured equal on MySQL 8.4 and MariaDB 11.4; the copy
+    refuses `SUM` of a date). So `YEAR(created_on) * 100 +
+    MONTH(created_on)`, `COUNT(*) - COUNT(paid_at)` and `SUM(CASE WHEN
+    created_on >= ... THEN amount END) - SUM(amount)` reach the copy. Any
+    other call counts, so `IFNULL(created_on, d2) + 1` stays on MySQL, and
+    so does one both sides would answer alike. `*`, `/`, `%`, `ABS`, `ROUND`
+    and a comparison with a number are not part of it: the copy refuses
+    those over a date, and MySQL answers;
   - **a statement with a subquery, a derived table or a `WITH` that holds
-    a `+` or a `-`** that `INTERVAL` does not follow, **or an `AVG`,
-    anywhere**, when it names such a column or has a star (`SELECT *`,
-    `t.*`) that could bring one in. An alias of the date used from outside
-    its subquery (`SELECT d + 1 FROM (SELECT created_on AS d FROM orders)
-    x`, `SELECT AVG(d) FROM (...) x`) and a column list over a star (`FROM
-    (SELECT * FROM orders) AS q(a, b, c)`) are a date under a name the text
-    cannot follow, so with a subquery in the statement every `+`, `-` and
-    `AVG` counts;
-  - **a statement that names such a column and has a `+` or a `-` at or
-    after its first `GROUP BY`, `HAVING` or `ORDER BY`**: MySQL takes a
+    a `+` or a `-`, or an `AVG`, anywhere**, when it names such a column or
+    has a star (`SELECT *`, `t.*`, `TABLE t`) that could bring one in. An
+    alias of the date used from outside its subquery (`SELECT d + 1 FROM
+    (SELECT created_on AS d FROM orders) x`, `SELECT AVG(d) FROM (...) x`)
+    and a column list over a star (`WITH q(a, b, c) AS (SELECT * FROM
+    orders) SELECT b - 1 FROM q`: 20260100 on MySQL, 2025-12-31 on the copy)
+    are a date under a name the text cannot follow. Three kinds of `+` and
+    `-` do not count here: one that `INTERVAL` follows, the sign of a number
+    (`amount > -1`, `BETWEEN -5 AND 5`, `1e-5`), and one between two things
+    that are numbers whatever the names in them mean (a number, or a call of
+    one of the functions above: `SUM(a) - SUM(b)`, `YEAR(x) + 1`). `amount -
+    tax` counts: either name could be the date;
+  - **a statement that names such a column and has a counted `+` or `-` at
+    or after its first `GROUP BY`, `HAVING` or `ORDER BY`**: MySQL takes a
     select-list alias for its expression there (`SELECT d1 AS x, d2 AS y
-    ... HAVING x - y > 5`);
+    ... HAVING x - y > 5`). `ORDER BY total - 1` stays on MySQL for that
+    reason, whatever `total` is;
   - **a statement that names a `TIME` or a `YEAR` column of a table it
-    reads**, anywhere, **or has a star over such a table** (the column is
-    then reached without its name; a precaution, no difference was
-    measured through a star). On a table with a `TIME` or `YEAR` column
-    that is most of what an ORM sends, since it names every column or
-    sends `SELECT *`: reads over such a table mostly stay on MySQL. The
-    copy holds a `TIME` as text, so `tm >=
+    reads**, anywhere. The copy holds a `TIME` as text, so `tm >=
     '9:00:00'` compares letters there and finds nothing where MySQL finds
     every row after nine, and a `YEAR` as a plain number, so `yr = 26` is
-    not the year 2026 there;
-  - **a statement with a character outside ASCII outside its strings and
-    comments** (in a name) **that reads a table with a date, time or year
-    column**: which look-alike letters a server takes for an ASCII one
-    when it compares names depends on the server, so such a statement is
-    not searched. A string with such characters (`WHERE city = 'Bogotá'`)
-    does not count;
+    not the year 2026 there. On a table with such a column that is most of
+    what an ORM that names every column sends. A star over such a table is
+    not kept back: `SELECT *` returned the same values and the same order
+    on both sides, times over 24 hours and negative ones included;
   - **any statement that reads a table with a date, time or year column
-    whose name is not plain ASCII letters, digits, `_` and `$`**, and a
-    column of a type DBTrail does not know is treated as a date could be.
+    whose name is not made of letters, digits, `_` and `$` alone** (a
+    space, a dot), and a statement that is not valid UTF-8; a column of a
+    type DBTrail does not know is treated as a date could be.
 
-  The names are looked for as whole words, so another table's column of
+  The names are looked for as whole words, the way MySQL compares the names
+  of columns: the same letters up to case, in any script, with accents kept
+  (`AÑO` is the column `año`, `ano` is not). So another table's column of
   the same name, an alias or a function called that (a `YEAR` column named
   `year` keeps every statement that calls `YEAR()` over its table on MySQL)
-  keeps the statement back too. A prepared statement is read by its
+  keeps the statement back too, and a name outside ASCII that is not such a
+  column (an alias `número`) keeps nothing back. A prepared statement is read by its
   template, so `created_on + ?` stays on MySQL whatever is bound. To count
   the days between two dates write `DATEDIFF`, which MySQL always answers.
   On the port without routing, and in the browser, the copy answers these

@@ -140,7 +140,7 @@ type BaselineTable struct {
 	NotHeldUnread bool
 	// Temporal are the table's date, time and year columns with their MySQL
 	// types, and the columns whose type is not known, with none
-	// (baseline.TableFooter.Temporal). Set with SchemaKnown. TypesUnlikeMySQL
+	// (baseline.TableFooter.Temporal). Set with SchemaKnown. TypedColumns
 	// is the reader.
 	Temporal []baseline.TemporalColumn
 	// DeltaReserved says the table has a column under a name a table delta

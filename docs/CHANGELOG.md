@@ -51,10 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     any `+`, `-` or `AVG` and names a date column or has a star, and one
     that names a date column and has a `+` or `-` in its `GROUP BY`,
     `HAVING` or `ORDER BY`, where MySQL takes an alias for its expression.
-    A `+` or `-` elsewhere (`SELECT amount + tax ... WHERE created_on >=
-    ...`) and a date plus or minus `INTERVAL` still reach the copy.
-  - A statement that names a `TIME` or a `YEAR` column, or has a star over
-    a table with one, is declined: the copy
+    What still reaches the copy: a `+` or `-` elsewhere (`SELECT amount +
+    tax ... WHERE created_on >= ...`), a date plus or minus `INTERVAL`, the
+    sign of a number (`amount > -1`), and arithmetic on a number taken out
+    of the date (`YEAR(created_on) * 100 + MONTH(created_on)`, `COUNT(*) -
+    COUNT(paid_at)`, `SUM(...) - SUM(...)`). Column names are matched in
+    any script, by letters and without regard to case, so a table with a
+    column `año` or an alias `número` is treated like any other.
+  - A statement that names a `TIME` or a `YEAR` column is declined: the copy
     holds a `TIME` as text (`tm >= '9:00:00'` returned no row there, three
     on MySQL) and a `YEAR` as a plain number (`yr = 26` is not 2026 there).
   - `|`, `&`, `>>`, `BIT_COUNT`, `BIT_AND`, `BIT_OR` and `BIT_XOR` are kept
@@ -67,13 +71,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `CAST(... AS DATETIME)` and `CAST(... AS TIME)` are kept on MySQL
     (`veto`): a fraction of a second is rounded by MySQL, cut by MariaDB and
     kept by the copy.
+  - `DAYOFWEEK`, `WEEKDAY`, `MICROSECOND` and `EXTRACT(MICROSECOND ...)` are
+    kept on MySQL (`veto`): the copy numbers the days of the week another
+    way and counts the seconds into the microseconds.
 
   What this costs: of 535 statements in the repository's comparison and
   routing fixtures that no older rule kept on MySQL, one newly stays there
   under the date rules, the `created_on + 1` this is about. Those fixtures
   have no `TIME` or `YEAR` column, so that rule is not in the count: over a
-  table that has one, most of what an ORM sends names the column or uses
-  `SELECT *`, and stays on MySQL. Still different, and listed in
+  table that has one, an ORM that names every column keeps its reads on
+  MySQL. Of 30 report-shaped statements written for this (year and month
+  buckets, sums and counts subtracted, negative thresholds, subqueries), 4
+  stay on MySQL: an alias in `ORDER BY total - 1`, `amount - tax` and `AVG`
+  beside a subquery, and `MAX(created_on) - MIN(created_on)`. Still different, and listed in
   `docs/time-travel-sql.md`: a `DATE` plus `INTERVAL` is shown as a date and
   time by the copy (the same day), and a `DATETIME` turned into text
   (`CONCAT(dt, '')`) ends in `+00` there. A table whose snapshot has no

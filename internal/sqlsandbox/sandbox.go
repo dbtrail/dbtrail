@@ -218,8 +218,8 @@ type Session struct {
 	// statement the question needs (readrouter.ShapeOf: of the client's own
 	// text, or of a prepared statement's template); the statement handed over
 	// to run has already been written for the copy, with its arguments in
-	// it. The caller's ViewsFor asks it about each table the statement
-	// reads, with that table's column types. Nil under StrictStar means "not
+	// it. The caller's ViewsFor asks it once, with the column types of the
+	// tables the statement reads. Nil under StrictStar means "not
 	// known", and a statement over a table with such a column is then
 	// refused.
 	Types ColumnTypes
@@ -236,13 +236,13 @@ type Session struct {
 	UnchangedWithin time.Duration
 }
 
-// ColumnTypes is the question Session.Types answers about one table a
-// statement reads: dates are that table's DATE, DATETIME and TIMESTAMP
-// columns (and those of a type that is not known), whole its TIME and YEAR
-// columns, by name. The answer is why the copy must not answer the
-// statement, or "".
+// ColumnTypes is the question Session.Types answers about the tables a
+// statement reads, all together: dates are their DATE, DATETIME and
+// TIMESTAMP columns (and those of a type that is not known), whole their
+// TIME and YEAR columns, by name, and star says the statement holds a star
+// (Refs). The answer is why the copy must not answer the statement, or "".
 type ColumnTypes interface {
-	ColumnVeto(dates, whole []string) string
+	ColumnVeto(dates, whole []string, star bool) string
 }
 
 // Column is one result column with DuckDB's type name (INTEGER, VARCHAR,
