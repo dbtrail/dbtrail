@@ -154,13 +154,21 @@ func runJob(job wireJob, ask func(Refs) (string, error), stderr io.Writer) (res 
 	// statement on the connection would take down SHOW DATABASES, the one
 	// statement that shows the way out. The default stays, and a name that
 	// then fails to resolve carries the hint.
+	//
+	// The path is set to the name as the CATALOG spells it, found by the
+	// rule DuckDB itself resolves names by (catalogSchema), so the probe and
+	// the SET cannot disagree; and if the SET is refused all the same, that
+	// is one more schema that was not applied, not a failed session.
 	missingSchema := ""
 	if job.Schema != "" {
-		if schemaExists(ctx, conn, job.Schema) {
-			if _, err := conn.ExecContext(ctx, "SET search_path = "+searchPathLiteral(job.Schema)); err != nil {
-				return sessionErr("SET search_path: %v", err)
+		name, ok := catalogSchema(ctx, conn, job.Schema)
+		if ok {
+			if _, err := conn.ExecContext(ctx, "SET search_path = "+searchPathLiteral(name)); err != nil {
+				fmt.Fprintf(stderr, "sql worker: USE %q was not applied: SET search_path: %v\n", job.Schema, err)
+				ok = false
 			}
-		} else {
+		}
+		if !ok {
 			missingSchema = job.Schema
 		}
 	}
@@ -657,20 +665,61 @@ func floatCell(f float64) any {
 	return f
 }
 
-// schemaExists reports whether the views created a schema of that name, as
-// DuckDB compares names: ASCII case folded. A lookup failure reads as absent,
-// which is the safe side (the default stays).
+// catalogSchema finds the schema the views created under that name and
+// returns it as the catalog spells it. Names match the way DuckDB's own
+// lookup matches them: ASCII letters without regard to case, every other
+// byte exactly. So "SHOP" finds shop, and "été" does not find Été.
 //
-// COLLATE C on both sides: this runs in the copy's session, whose default
-// collation equates much more than case ('ß' with 'ss', full-width with
-// ASCII, accents, a zero-width space). Without it the probe says a schema
-// exists under a name DuckDB's own lookup then refuses, and SET search_path
-// fails every statement on the connection.
-func schemaExists(ctx context.Context, conn *sql.Conn, schema string) bool {
-	var n int
-	err := conn.QueryRowContext(ctx,
-		"SELECT count(*) FROM information_schema.schemata WHERE lower(schema_name) COLLATE C = lower(?) COLLATE C", schema).Scan(&n)
-	return err == nil && n > 0
+// The comparison is done here and not in SQL on purpose. In SQL it would run
+// under the session's default collation, which equates far more than that
+// ('ß' with 'ss', accents, full-width forms), and lower() folds all of
+// Unicode: both said a schema existed under a name SET search_path then
+// refused, which failed every statement on the connection. A lookup failure
+// reads as absent, which is the safe side (the default stays).
+func catalogSchema(ctx context.Context, conn *sql.Conn, schema string) (string, bool) {
+	rows, err := conn.QueryContext(ctx, "SELECT schema_name FROM information_schema.schemata")
+	if err != nil {
+		return "", false
+	}
+	defer rows.Close()
+	found, ok := "", false
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return "", false
+		}
+		switch {
+		case name == schema:
+			return name, true
+		case !ok && asciiEqualFold(name, schema):
+			found, ok = name, true
+		}
+	}
+	if rows.Err() != nil {
+		return "", false
+	}
+	return found, ok
+}
+
+// asciiEqualFold reports whether two names are equal once ASCII letters are
+// folded, comparing every other byte as it is.
+func asciiEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		x, y := a[i], b[i]
+		if 'A' <= x && x <= 'Z' {
+			x += 'a' - 'A'
+		}
+		if 'A' <= y && y <= 'Z' {
+			y += 'a' - 'A'
+		}
+		if x != y {
+			return false
+		}
+	}
+	return true
 }
 
 // searchPathLiteral renders one schema name as the string literal SET
