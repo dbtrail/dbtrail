@@ -16,6 +16,9 @@ import (
 type netOp struct {
 	PK  map[string]any
 	Row map[string]any
+	// at is where the event this op came from starts in the binary log, kept
+	// so a later page can tell whether its change of the key is the newer one.
+	at query.ResultRow
 }
 
 // deleted reports whether the key does not exist at the cut.
@@ -24,10 +27,12 @@ func (o *netOp) deleted() bool { return o.Row == nil }
 // fold reduces an ascending event window to one netOp per primary key, in
 // first-touched order. It holds one entry per DISTINCT touched key for the
 // whole window, whatever the page size: paging bounds the fetch, not the map
-// (the same shape as reconstruct's change map, #1107). Last write wins, page after page, because pages arrive
-// in (event_timestamp, event_id) order: the same rule the full-table
-// reconstruct applies, so the exported table equals `reconstruct` at the same
-// cut.
+// (the same shape as reconstruct's change map, #1107). The change kept for a key is the one the binary log
+// holds last (query.LaterInBinlog), which is not always the one that arrives
+// last: pages come in (event_timestamp, event_id) order, and a statement that
+// waited on a row lock is written after the change it waited for with an
+// earlier time (#2151). The same rule the full-table reconstruct applies, so
+// the exported table equals `reconstruct` at the same cut.
 //
 // It is this package's own fold rather than reconstruct's because the delete
 // file needs the TYPED key columns of a DELETE, which live in its before-image,
@@ -83,11 +88,17 @@ func (f *fold) addPage(page []query.ResultRow) error {
 			// Not skippable: a skipped event is a silently wrong table.
 			return fmt.Errorf("event %d for %s.%s pk %q has event type %d, which the export cannot apply", ev.EventID, f.schema, f.table, ev.PKValues, ev.EventType)
 		}
-		if _, seen := f.ops[ev.PKValues]; !seen {
+		f.events++
+		op.at = query.ResultRow{BinlogFile: ev.BinlogFile, StartPos: ev.StartPos}
+		cur, seen := f.ops[ev.PKValues]
+		if !seen {
 			f.order = append(f.order, ev.PKValues)
+		} else if query.LaterInBinlog(&cur.at, &op.at) {
+			// Every guard above has read this event; the key keeps the change
+			// from further on in the binary log.
+			continue
 		}
 		f.ops[ev.PKValues] = op
-		f.events++
 	}
 	return nil
 }

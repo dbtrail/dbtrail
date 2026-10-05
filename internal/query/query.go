@@ -204,6 +204,29 @@ func (p BinlogPos) AtOrBefore(q BinlogPos) bool {
 	return p.Pos <= q.Pos
 }
 
+// LaterInBinlog reports whether a is strictly after b in the source's binary
+// log, by where each event starts: (binlog_file, start_pos) under the BinlogPos
+// rule. The binary log holds changes in commit order, so of two changes of one
+// row the later one here is the one whose values the row kept.
+//
+// event_timestamp does not say that (#2151). It is the time the change's
+// STATEMENT STARTED: an UPDATE that waited on a row lock, or reached the row
+// late in a long statement, is in the binary log AFTER the change it waited
+// for and carries an EARLIER time. Every fetch returns rows in
+// (event_timestamp, event_id) order, which is how they are paged and pruned;
+// a caller that keeps "the last change of a row" must ask this, not rely on
+// the order rows arrive in.
+//
+// Two events at the same coordinate are the images of one rows event (or rows
+// with no coordinate at all); neither is later, and the caller's arrival order
+// (ascending event_id within one event) stands.
+//
+// MySQL and MariaDB only. A PostgreSQL row carries an LSN as text in
+// BinlogFile, which this rule does not order.
+func LaterInBinlog(a, b *ResultRow) bool {
+	return !BinlogPos{File: a.BinlogFile, Pos: a.StartPos}.AtOrBefore(BinlogPos{File: b.BinlogFile, Pos: b.StartPos})
+}
+
 // Options specifies the filter criteria for querying binlog_events.
 // All fields are optional; nil / zero values are ignored when building SQL.
 type Options struct {

@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **Snapshots: a row keeps its last change, not the change whose statement
+  started last** (#2151). An update of a snapshot keeps, for each row, the
+  last change since the previous one. It took "last" from the time recorded
+  with each change, which is when its statement STARTED on the source. The
+  binary log holds changes in the order they were committed, and for one row
+  the two can disagree: an UPDATE that waits on a row lock is committed after
+  the change it waited for and carries an earlier time. Reproduced on MySQL
+  8.4.9 and MariaDB 11.4.13 with four shapes: a wait behind `SELECT ... FOR
+  UPDATE`, a wait behind an earlier UPDATE of the same transaction, a long
+  UPDATE that reaches a row after a quick one committed, and a session with
+  `SET TIMESTAMP` in the past. When the two times fell in different seconds,
+  the snapshot kept the older value, a deleted row came back, or a row that
+  exists was left out, with no error. The update now compares where the two
+  changes are in the binary log (file, then position), in memory and when the
+  changes of a large update are written to disk. `export iceberg` had the
+  same rule and has the same fix. Nothing changes in how changes are read
+  from the index, and no memory is added: the position was already kept.
+
+  A snapshot written by an earlier version can hold such a row. Its value
+  stays wrong until the row changes again or the table is read again from
+  the database, so take a full snapshot of the tables where two sessions
+  update the same rows. `verify` does not find these rows reliably: it still
+  orders a row's changes by time, as do `recover`, the `_snapshot` schema of
+  the MySQL port and single-row `reconstruct` (#2156).
 
 ## [0.99.0] - 2026-10-05
 ### Changed
