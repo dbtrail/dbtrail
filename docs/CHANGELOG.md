@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   values, numbers, dates and columns MySQL declares `_bin` are not
   affected. `LIKE`, `REGEXP`, `count(DISTINCT ...)` and `INSTR` still do not
   fold, and stay on MySQL under routing.
+- **Read routing keeps `UNION`, `INTERSECT` and `EXCEPT` on MySQL when they
+  remove duplicates** (#2083). The copy compares the rows by bytes there,
+  whatever its collation: `SELECT status FROM a UNION SELECT status FROM b`
+  returned `paid` and `Paid` as two rows where MySQL returns one, with no
+  error. Such a statement is now kept on MySQL, like `LIKE` and
+  `count(DISTINCT ...)`; `UNION ALL` is still routed. On the port without
+  routing and on the SQL card the difference remains, and is documented.
 
 ### Added
 - **The MySQL port can be turned on from the web interface** (#2101). The port

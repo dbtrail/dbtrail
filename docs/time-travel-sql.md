@@ -387,7 +387,11 @@ What this is and is not:
   literals, a backslash inside a string literal (an escape on MySQL, a
   plain character on the copy: `'a\\b'` and `'it\'s'` name different
   strings), `--` with no space after it (two minus signs on MySQL, where
-  `5--3` is 8; a comment on the copy), `count(DISTINCT ...)`, `INSTR`/`LOCATE`, variables, ...). The
+  `5--3` is 8; a comment on the copy), `count(DISTINCT ...)`, `INSTR`/`LOCATE`,
+  `UNION`, `INTERSECT` and `EXCEPT` when they remove duplicates (the copy
+  compares the rows by bytes there, so `SELECT 'a' UNION SELECT 'A'` is one
+  row on MySQL and two on the copy; `UNION ALL` is not kept back),
+  variables, ...). The
   copy itself compares text close to the way MySQL's default collation
   does: `'Paid'` and `'paid'`, `'café'` and `'cafe'` are equal in `WHERE`,
   `GROUP BY`, `SELECT DISTINCT`, `IN` and `ORDER BY`, and NULLs sort first
@@ -412,10 +416,6 @@ What this is and is not:
   copy as well: the copy reads each column's collation from the `CREATE
   TABLE` stored with the snapshot. Close, not identical. What still
   differs, none of which can be caught per statement:
-  - **Duplicate removal in `UNION`, `INTERSECT` and `EXCEPT`** compares
-    bytes on the copy: `SELECT 'a' UNION SELECT 'A'` is one row on MySQL
-    and two on the copy. `SELECT DISTINCT` and `GROUP BY` fold as on
-    MySQL.
   - **`_cs` columns.** A column MySQL declares `_cs`
     (`utf8mb4_0900_as_cs`) is case-insensitive on the copy. Bytes would
     compare it right and sort it wrong: `_cs` puts `a` before `B`, bytes

@@ -136,6 +136,16 @@ func TestIntegrationSQLCompareValues(t *testing.T) {
 			t.Errorf("%q: got %s/%s (%s), want %s/%s: %s", f.stmt, r.Verdict, r.Kind, r.Detail, f.verdict, f.kind, f.why)
 		}
 	}
+	// The set operations that remove duplicates answer differently on the
+	// copy, and never reach it under routing: the veto names itself.
+	for _, stmt := range []string{"SELECT note FROM sales WHERE id = 4 UNION SELECT 'A'", "SELECT note FROM sales WHERE id = 4 INTERSECT SELECT 'A'"} {
+		if r := by[stmt]; r.Route != "mysql" || r.RouteRule != "veto" || !strings.Contains(r.RouteReason, "UNION/INTERSECT/EXCEPT") {
+			t.Errorf("%q: route=%s rule=%s (%s), want it kept on MySQL by the set-operation veto", stmt, r.Route, r.RouteRule, r.RouteReason)
+		}
+	}
+	if r := by["SELECT amount x FROM sales WHERE id = 1 UNION ALL SELECT qty FROM sales WHERE id = 2"]; r.RouteRule == "veto" {
+		t.Errorf("UNION ALL was vetoed: %s", r.RouteReason)
+	}
 }
 
 // valuesFixtures is the #2083 statement set.
@@ -208,8 +218,10 @@ func valuesFixtures() []valuesFixture {
 		// A _bin column next to folded ones, under the new default.
 		{"SELECT COUNT(*) FROM (SELECT code k FROM sales UNION ALL SELECT name FROM sales) t WHERE k = 'ab'", eq, "", "_bin and _ci in one UNION ALL column: bytes on both"},
 		// UNION's own duplicate removal does not fold on the copy, under this
-		// collation or the one before it. Documented.
+		// collation or the one before it: the router keeps such a statement
+		// on MySQL (asserted below), and UNION ALL goes on being routed.
 		{"SELECT note FROM sales WHERE id = 4 UNION SELECT 'A'", diff, "rows", "one row on MySQL ('a' and 'A' are duplicates), two on the copy"},
+		{"SELECT note FROM sales WHERE id = 4 INTERSECT SELECT 'A'", diff, "rows", "one row on MySQL, none on the copy"},
 	}
 }
 
