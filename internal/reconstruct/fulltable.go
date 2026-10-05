@@ -389,6 +389,17 @@ type TableReport struct {
 // chain's start, and a floor derived from it would sit after events the
 // base's anchor has yet to see, which the fetch would then drop without an
 // error (#1718). Pure, so the rule is testable without an index.
+//
+// The time returned here is NOT where the fetch ends up starting (#2138). It
+// is a wall clock: a refresh stamps its files with its own time and a dump
+// with the dump host's, while the index files every event under the time its
+// statement ran on the source. An event the index receives later than it ran
+// (capture catching up after an outage, a source that is a delayed replica)
+// is after the anchor's position and hours before this time, and a floor
+// taken from this time alone left it out of every later snapshot, silently.
+// The merged fetch therefore settles the floor itself, from the index: see
+// query.PartitionHeads. What this function still decides is the anchor, and
+// the latest instant that floor may be.
 func fetchFloor(snapshotTime time.Time, bmeta baseline.DumpMetadata, prev *tableDelta) (since time.Time, anchor baseline.DumpMetadata) {
 	since, anchor = snapshotTime, bmeta
 	switch {

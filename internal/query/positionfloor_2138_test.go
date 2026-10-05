@@ -1,9 +1,17 @@
 package query
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/go-sql-driver/mysql"
 )
 
 // #2138, the rule on its own: which partitions a fetch anchored on a position
@@ -151,5 +159,118 @@ func TestCoarseSinceFloor_isTheBoundBuildQueryApplies(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("buildQuery did not bind %s as its time floor; args = %v", want, args)
+	}
+}
+
+// Every way the picture can fail to load, or the oldest-row lookup can fail,
+// must stop the fetch. Going on with the caller's own time is the silent loss
+// this exists to stop, so AllowGaps does not soften it.
+func TestFetchMerged_refusesWhenTheFloorCannotBeSettled(t *testing.T) {
+	since := time.Date(2026, 3, 1, 12, 30, 0, 0, time.UTC)
+	forced := errors.New("forced")
+	partCols := []string{"PARTITION_NAME", "PARTITION_DESCRIPTION"}
+	secs := func(h int) string {
+		return strconv.FormatInt(mysqlToSeconds(time.Date(2026, 3, 1, h, 0, 0, 0, time.UTC)), 10)
+	}
+	twoParts := func(m sqlmock.Sqlmock) {
+		m.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(
+			sqlmock.NewRows(partCols).AddRow("p_2026030100", secs(1)).AddRow("p_future", "MAXVALUE"))
+	}
+	head := func(m sqlmock.Sqlmock, file string, pos uint64) {
+		m.ExpectQuery("ORDER BY event_id DESC LIMIT 1").WillReturnRows(
+			sqlmock.NewRows([]string{"binlog_file", "start_pos"}).AddRow(file, pos))
+	}
+	noHead := func(m sqlmock.Sqlmock) {
+		m.ExpectQuery("ORDER BY event_id DESC LIMIT 1").WillReturnRows(sqlmock.NewRows([]string{"binlog_file", "start_pos"}))
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(m sqlmock.Sqlmock)
+	}{
+		{"the partition list does not read", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery("information_schema.PARTITIONS").WillReturnError(forced)
+		}},
+		{"binlog_events is not there", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(sqlmock.NewRows(partCols))
+		}},
+		{"a partition bound that is not a number of seconds", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(
+				sqlmock.NewRows(partCols).AddRow("p_2026030100", "'2026-03-01'"))
+		}},
+		{"a partition's newest row does not read", func(m sqlmock.Sqlmock) {
+			twoParts(m)
+			m.ExpectQuery("ORDER BY event_id DESC LIMIT 1").WillReturnError(forced)
+		}},
+		{"stream_state does not read", func(m sqlmock.Sqlmock) {
+			twoParts(m)
+			head(m, "binlog.000001", 900)
+			noHead(m)
+			m.ExpectQuery("FROM stream_state").WillReturnError(forced)
+		}},
+		{"index_state does not read", func(m sqlmock.Sqlmock) {
+			twoParts(m)
+			head(m, "binlog.000001", 900)
+			noHead(m)
+			m.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}))
+			m.ExpectQuery("FROM index_state").WillReturnError(forced)
+		}},
+		{"the oldest event of the table does not read", func(m sqlmock.Sqlmock) {
+			twoParts(m)
+			head(m, "binlog.000001", 900)
+			noHead(m)
+			m.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}))
+			m.ExpectQuery("FROM index_state").WillReturnRows(sqlmock.NewRows([]string{"m"}).AddRow(nil))
+			m.ExpectQuery("ORDER BY event_timestamp LIMIT 1").WillReturnError(forced)
+		}},
+	} {
+		for _, allowGaps := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, AllowGaps=%v", tc.name, allowGaps), func(t *testing.T) {
+				db, mock, err := sqlmock.New()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				tc.setup(mock)
+				// No expectation for the events query: reaching it is the bug.
+				rows, _, err := FetchMerged(context.Background(), db, New(db), FetchMergedOptions{
+					Opts:      Options{Schema: "shop", Table: "orders", Since: &since, SincePos: &BinlogPos{File: "binlog.000001", Pos: 800}},
+					DBName:    "idx",
+					NoArchive: true,
+					AllowGaps: allowGaps,
+				})
+				if err == nil {
+					t.Fatalf("FetchMerged returned %d rows and no error; it must refuse", len(rows))
+				}
+				if strings.Contains(err.Error(), "was not expected") {
+					t.Fatalf("the fetch went on to another query: %v", err)
+				}
+				if merr := mock.ExpectationsWereMet(); merr != nil {
+					t.Fatalf("the fetch stopped before the failing step: %v", merr)
+				}
+			})
+		}
+	}
+}
+
+// With no index_state table at all (an index no file was ever indexed into)
+// the picture loads, and a fetch with nothing late keeps its own time.
+func TestLoadPartitionHeads_missingIndexStateIsNoFileIndexing(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(
+		sqlmock.NewRows([]string{"PARTITION_NAME", "PARTITION_DESCRIPTION"}).AddRow(nil, nil))
+	mock.ExpectQuery("FROM binlog_events ORDER BY event_id DESC LIMIT 1").WillReturnRows(
+		sqlmock.NewRows([]string{"binlog_file", "start_pos"}).AddRow("", 0))
+	mock.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	mock.ExpectQuery("FROM index_state").WillReturnError(&mysql.MySQLError{Number: 1146, Message: "no such table"})
+	h, err := LoadPartitionHeads(context.Background(), db)
+	if err != nil {
+		t.Fatalf("LoadPartitionHeads: %v", err)
+	}
+	if len(h.parts) != 1 || !h.parts[0].unknown || !h.parts[0].open || !h.streamCaptured || !h.lastFileIndexed.IsZero() {
+		t.Fatalf("heads = %+v", h)
 	}
 }

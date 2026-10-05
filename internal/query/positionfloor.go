@@ -136,8 +136,8 @@ func LoadPartitionHeads(ctx context.Context, db *sql.DB) (*PartitionHeads, error
 
 	for i := range h.parts {
 		p := &h.parts[i]
-		var file sql.NullString
-		var pos sql.NullInt64
+		var file string
+		var pos uint64
 		// The primary key leads with event_id, so this is one seek from the
 		// end of the partition's own index.
 		err := db.QueryRowContext(ctx, "SELECT binlog_file, start_pos FROM binlog_events"+
@@ -147,10 +147,10 @@ func LoadPartitionHeads(ctx context.Context, db *sql.DB) (*PartitionHeads, error
 			p.empty = true
 		case err != nil:
 			return nil, fmt.Errorf("read the newest event of partition %s: %w", p.name, err)
-		case file.String == "" || pos.Int64 < 0:
+		case file == "":
 			p.unknown = true
 		default:
-			p.pos = BinlogPos{File: file.String, Pos: uint64(pos.Int64)}
+			p.pos = BinlogPos{File: file, Pos: pos}
 		}
 	}
 
