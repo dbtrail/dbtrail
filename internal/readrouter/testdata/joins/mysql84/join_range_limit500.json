@@ -1,0 +1,70 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "1172968.49"
+    },
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "o",
+          "access_type": "range",
+          "possible_keys": [
+            "customer_id",
+            "created_at"
+          ],
+          "key": "created_at",
+          "used_key_parts": [
+            "created_at"
+          ],
+          "key_length": "6",
+          "rows_examined_per_scan": 518816,
+          "rows_produced_per_join": 518816,
+          "filtered": "100.00",
+          "index_condition": "((`shop`.`o`.`created_at` >= TIMESTAMP'2024-03-01 00:00:00') and (`shop`.`o`.`created_at` < TIMESTAMP'2024-06-01 00:00:00'))",
+          "cost_info": {
+            "read_cost": "569350.26",
+            "eval_cost": "51881.60",
+            "prefix_cost": "621231.86",
+            "data_read_per_join": "170M"
+          },
+          "used_columns": [
+            "id",
+            "customer_id",
+            "created_at"
+          ]
+        }
+      },
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "eq_ref",
+          "possible_keys": [
+            "PRIMARY"
+          ],
+          "key": "PRIMARY",
+          "used_key_parts": [
+            "id"
+          ],
+          "key_length": "4",
+          "ref": [
+            "shop.o.customer_id"
+          ],
+          "rows_examined_per_scan": 1,
+          "rows_produced_per_join": 518816,
+          "filtered": "100.00",
+          "cost_info": {
+            "read_cost": "499855.03",
+            "eval_cost": "51881.60",
+            "prefix_cost": "1172968.49",
+            "data_read_per_join": "296M"
+          },
+          "used_columns": [
+            "id",
+            "name"
+          ]
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,146 @@
+{
+  "query_block": {
+    "union_result": {
+      "using_temporary_table": true,
+      "select_id": 3,
+      "table_name": "<union1,2>",
+      "access_type": "ALL",
+      "query_specifications": [
+        {
+          "dependent": false,
+          "cacheable": true,
+          "query_block": {
+            "select_id": 1,
+            "cost_info": {
+              "query_cost": "902541.08"
+            },
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "o",
+                  "access_type": "ALL",
+                  "possible_keys": [
+                    "customer_id"
+                  ],
+                  "rows_examined_per_scan": 1993995,
+                  "rows_produced_per_join": 664598,
+                  "filtered": "33.33",
+                  "cost_info": {
+                    "read_cost": "139872.07",
+                    "eval_cost": "66459.85",
+                    "prefix_cost": "206331.93",
+                    "data_read_per_join": "218M"
+                  },
+                  "used_columns": [
+                    "customer_id",
+                    "amount"
+                  ],
+                  "attached_condition": "(`shop`.`o`.`amount` > 499.00)"
+                }
+              },
+              {
+                "table": {
+                  "table_name": "c",
+                  "access_type": "eq_ref",
+                  "possible_keys": [
+                    "PRIMARY"
+                  ],
+                  "key": "PRIMARY",
+                  "used_key_parts": [
+                    "id"
+                  ],
+                  "key_length": "4",
+                  "ref": [
+                    "shop.o.customer_id"
+                  ],
+                  "rows_examined_per_scan": 1,
+                  "rows_produced_per_join": 664598,
+                  "filtered": "100.00",
+                  "cost_info": {
+                    "read_cost": "629749.30",
+                    "eval_cost": "66459.85",
+                    "prefix_cost": "902541.08",
+                    "data_read_per_join": "380M"
+                  },
+                  "used_columns": [
+                    "id",
+                    "country_code"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "dependent": false,
+          "cacheable": true,
+          "query_block": {
+            "select_id": 2,
+            "cost_info": {
+              "query_cost": "10543.55"
+            },
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "co",
+                  "access_type": "index",
+                  "possible_keys": [
+                    "PRIMARY"
+                  ],
+                  "key": "idx",
+                  "used_key_parts": [
+                    "idx"
+                  ],
+                  "key_length": "4",
+                  "rows_examined_per_scan": 50,
+                  "rows_produced_per_join": 50,
+                  "filtered": "100.00",
+                  "using_index": true,
+                  "cost_info": {
+                    "read_cost": "0.25",
+                    "eval_cost": "5.00",
+                    "prefix_cost": "5.25",
+                    "data_read_per_join": "16K"
+                  },
+                  "used_columns": [
+                    "code"
+                  ]
+                }
+              },
+              {
+                "table": {
+                  "table_name": "c",
+                  "access_type": "ref",
+                  "possible_keys": [
+                    "country_code"
+                  ],
+                  "key": "country_code",
+                  "used_key_parts": [
+                    "country_code"
+                  ],
+                  "key_length": "8",
+                  "ref": [
+                    "shop.co.code"
+                  ],
+                  "rows_examined_per_scan": 2077,
+                  "rows_produced_per_join": 103864,
+                  "filtered": "100.00",
+                  "using_index": true,
+                  "cost_info": {
+                    "read_cost": "151.84",
+                    "eval_cost": "10386.46",
+                    "prefix_cost": "10543.55",
+                    "data_read_per_join": "59M"
+                  },
+                  "used_columns": [
+                    "country_code"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

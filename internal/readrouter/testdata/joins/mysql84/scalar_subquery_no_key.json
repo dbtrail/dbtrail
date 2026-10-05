@@ -1,0 +1,65 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "5.18"
+    },
+    "table": {
+      "table_name": "c",
+      "access_type": "range",
+      "possible_keys": [
+        "PRIMARY",
+        "country_code",
+        "email"
+      ],
+      "key": "PRIMARY",
+      "used_key_parts": [
+        "id"
+      ],
+      "key_length": "4",
+      "rows_examined_per_scan": 21,
+      "rows_produced_per_join": 21,
+      "filtered": "100.00",
+      "using_index": true,
+      "cost_info": {
+        "read_cost": "3.08",
+        "eval_cost": "2.10",
+        "prefix_cost": "5.18",
+        "data_read_per_join": "12K"
+      },
+      "used_columns": [
+        "id"
+      ],
+      "attached_condition": "(`shop`.`c`.`id` between 100 and 120)"
+    },
+    "select_list_subqueries": [
+      {
+        "dependent": true,
+        "cacheable": false,
+        "query_block": {
+          "select_id": 2,
+          "cost_info": {
+            "query_cost": "202.00"
+          },
+          "table": {
+            "table_name": "p",
+            "access_type": "ALL",
+            "rows_examined_per_scan": 2000,
+            "rows_produced_per_join": 666,
+            "filtered": "33.33",
+            "cost_info": {
+              "read_cost": "2.00",
+              "eval_cost": "66.66",
+              "prefix_cost": "202.00",
+              "data_read_per_join": "182K"
+            },
+            "used_columns": [
+              "price"
+            ],
+            "attached_condition": "(`shop`.`p`.`price` > `shop`.`c`.`id`)"
+          }
+        }
+      }
+    ]
+  }
+}

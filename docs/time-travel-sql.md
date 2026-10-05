@@ -390,9 +390,41 @@ The decision, in order, for every statement:
    cannot be compared with. The scan rule applies, and so does one more: an
    index walked end to end over at least `--route-scan-rows` rows is the
    copy's (an index scan inside a subquery is not counted: for `EXISTS` it
-   stops at the first entry). A statement only the cost would have sent to
-   the copy stays on the source: for example an index walked in order
-   under a `LIMIT` with a filter no index serves. The study of which statements the copy answers the same way
+   stops at the first entry). And a third, for joins: MariaDB answers a
+   heavy join by walking the small table and reading the big one by key,
+   so no table of the plan shows a scan while the join reads millions of
+   rows. The rows the plan reads **in all** are estimated from it and
+   compared with `--route-scan-rows`: down a list of joined tables, each
+   table's `rows` (the rows read each time the table is entered) times
+   the rows the tables before it produce (their `rows` times `filtered`),
+   added up. A derived table, a materialized subquery or a subquery that
+   does not depend on the outer row is added once; a subquery that does
+   (MariaDB puts it behind a subquery cache), an `IN` probe and a lateral
+   derived table are counted once per outer row; a join with no index
+   counts every pair of rows it compares, and a hash join reads its table
+   once. Orders joined to customers and grouped by country reads about
+   2,090,000 rows by this count and goes to the copy; a point lookup
+   joined to another table reads 2, a join whose first table an index
+   cuts to a few rows reads tens, and both stay on MariaDB. Three limits:
+   - **One table alone is not counted this way**, however many rows it
+     reads through an index (a `count(*)` over a one-year range of an
+     indexed date stays on MariaDB, where MySQL's cost sends it to the
+     copy).
+   - **A statement ending in a small `LIMIT` with no sort keeps the scan
+     rules only**: the plan's rows are what the join reads to its end,
+     and the `LIMIT` ends it early.
+   - **A plan shape the estimate does not know is not guessed**: a
+     recursive CTE is the one known today. The scan rules alone decide it,
+     and the reason in the debug log says the rows were not estimated and
+     why.
+
+   The estimate is the optimizer's: a filter no index serves on the first
+   table is assumed to keep every row, and MariaDB 10.11 reports about
+   half the rows per key that 11.4 does for the same index, so a join near
+   the threshold can be routed differently by the two. A statement only
+   the cost would have sent to the copy still stays on the source: for
+   example an index walked in order under a `LIMIT` with a filter no index
+   serves. The study of which statements the copy answers the same way
    (the vetoes of step 4) was run against MySQL; on a MariaDB source read
    routing is as experimental, and less measured.
 6. For a plan the copy should take: the copy's snapshot older than

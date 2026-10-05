@@ -1,0 +1,39 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 383.299211,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "o",
+          "access_type": "range",
+          "possible_keys": ["PRIMARY", "created_at"],
+          "key": "created_at",
+          "key_length": "6",
+          "used_key_parts": ["created_at"],
+          "loops": 1,
+          "rows": 189288,
+          "cost": 27.89807692,
+          "filtered": 100,
+          "attached_condition": "o.created_at >= '2024-03-01' and o.created_at < '2024-04-01'",
+          "using_index": true
+        }
+      },
+      {
+        "table": {
+          "table_name": "oi",
+          "access_type": "ref",
+          "possible_keys": ["order_id"],
+          "key": "order_id",
+          "key_length": "4",
+          "used_key_parts": ["order_id"],
+          "ref": ["shop.o.id"],
+          "loops": 189288,
+          "rows": 1,
+          "cost": 355.4011341,
+          "filtered": 100
+        }
+      }
+    ]
+  }
+}

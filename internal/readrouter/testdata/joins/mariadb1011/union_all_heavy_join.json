@@ -1,0 +1,79 @@
+{
+  "query_block": {
+    "union_result": {
+      "query_specifications": [
+        {
+          "query_block": {
+            "select_id": 1,
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "p",
+                  "access_type": "ref",
+                  "possible_keys": ["PRIMARY", "category_id"],
+                  "key": "category_id",
+                  "key_length": "4",
+                  "used_key_parts": ["category_id"],
+                  "ref": ["const"],
+                  "rows": 50,
+                  "filtered": 100,
+                  "using_index": true
+                }
+              },
+              {
+                "table": {
+                  "table_name": "oi",
+                  "access_type": "ref",
+                  "possible_keys": ["product_id"],
+                  "key": "product_id",
+                  "key_length": "4",
+                  "used_key_parts": ["product_id"],
+                  "ref": ["shop.p.id"],
+                  "rows": 996,
+                  "filtered": 100,
+                  "using_index": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "query_block": {
+            "select_id": 2,
+            "operation": "UNION",
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "c",
+                  "access_type": "const",
+                  "possible_keys": ["PRIMARY"],
+                  "key": "PRIMARY",
+                  "key_length": "4",
+                  "used_key_parts": ["id"],
+                  "ref": ["const"],
+                  "rows": 1,
+                  "filtered": 100,
+                  "using_index": true
+                }
+              },
+              {
+                "table": {
+                  "table_name": "o",
+                  "access_type": "ref",
+                  "possible_keys": ["customer_id"],
+                  "key": "customer_id",
+                  "key_length": "4",
+                  "used_key_parts": ["customer_id"],
+                  "ref": ["const"],
+                  "rows": 20,
+                  "filtered": 100,
+                  "using_index": true
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

@@ -334,6 +334,19 @@ type Plan struct {
 	scans, conditions bool
 	// costInfo records that some node of the plan carries MySQL's cost_info.
 	costInfo bool
+	// RowsRead estimates the rows the plan reads in all, across its joins
+	// and subqueries (joinrows.go). Only for a plan with no cost
+	// (CostUnknown), which has nothing else to tell a heavy join by; 0 on
+	// a MySQL plan and when RowsReadUnknown says why there is no estimate.
+	RowsRead int64
+	// Joined is true when the estimate multiplies anywhere: a table read
+	// once per row of the tables before it, or a subquery or derived table
+	// run once per outer row. False for one table, and for a UNION of
+	// single tables.
+	Joined bool
+	// RowsReadUnknown is why a plan with no cost has no RowsRead: a shape
+	// the estimate does not know. The scan rules alone decide that plan.
+	RowsReadUnknown string
 }
 
 // ParsePlan reads the two things the decision needs from EXPLAIN FORMAT=JSON.
@@ -374,6 +387,9 @@ func ParsePlan(explainJSON []byte) (Plan, error) {
 	// MySQL's.
 	p.CostUnknown = !p.costInfo
 	p.ScanFilter = p.scans && p.conditions
+	if p.CostUnknown && p.Message == "" {
+		estimateRowsRead(qb, &p)
+	}
 	return p, nil
 }
 
@@ -445,7 +461,8 @@ func number(v any) float64 {
 
 // Policy is the threshold: a statement goes to the copy when its plan costs
 // at least CostThreshold, OR when a full scan examines at least ScanRows
-// rows. Both zero means "never to the copy".
+// rows, OR, for a plan with no cost (MariaDB), when its joins read at least
+// ScanRows rows in all. Both zero means "never to the copy".
 type Policy struct {
 	CostThreshold float64
 	ScanRows      int64
@@ -525,6 +542,7 @@ const (
 	RuleTrivial      Rule = "trivial"       // the optimizer short-circuited the plan
 	RuleCost         Rule = "cost"          // query_cost at or above CostThreshold
 	RuleScan         Rule = "scan"          // a full scan over ScanRows rows or more
+	RuleJoinRows     Rule = "join_rows"     // a plan with no cost whose joins read ScanRows rows or more in all
 	RuleCheap        Rule = "cheap"         // below both thresholds
 	RuleBoundedLimit Rule = "bounded_limit" // a small LIMIT MySQL answers without reading past it
 )
@@ -565,11 +583,20 @@ func (pol Policy) Prejudge(stmt string) (d Decision, ok bool) {
 // to Decide, as before: under a full scan its estimate is the table; under
 // an index-served order its estimate is only a guess from the filter's
 // assumed selectivity, and a rare value walks the whole index.
+//
+// The rows a plan with no cost reads across its joins (Plan.RowsRead) are
+// what the join reads when run to its end. A LIMIT-bounded statement with
+// no sort ends it early, so that estimate is left out for it and the scan
+// rules alone decide, as they did before the estimate existed.
 func (pol Policy) DecideStatement(stmt string, p Plan) Decision {
-	if n, ok := limitBounded(stmt); ok && !p.Filesort && !p.ScanFilter && p.Message == "" && p.MaxScanRows <= limitBoundRows {
+	n, bounded := limitBounded(stmt)
+	if bounded && !p.Filesort && !p.ScanFilter && p.Message == "" && p.MaxScanRows <= limitBoundRows {
 		return Decision{Reason: fmt.Sprintf("LIMIT %d served without a sort or an unindexed filter: at most %d rows per table scan", n, p.MaxScanRows), Rule: RuleBoundedLimit}
 	}
-	return pol.Decide(p)
+	if bounded && !p.Filesort {
+		return pol.decide(p, fmt.Sprintf("LIMIT %d with no sort can stop the join early: the rows read across it are not counted", n))
+	}
+	return pol.decide(p, "")
 }
 
 // DefaultPolicy: 10,000 cost units (a point lookup is about 1; a full scan
@@ -579,7 +606,11 @@ func DefaultPolicy() Policy { return Policy{CostThreshold: 10000, ScanRows: 1000
 
 // Decide reports whether the plan is expensive enough for the copy, and why
 // either way, in words an operator can read in the audit trail.
-func (pol Policy) Decide(p Plan) Decision {
+func (pol Policy) Decide(p Plan) Decision { return pol.decide(p, "") }
+
+// decide is Decide; a non-empty rowsLeftOut is why the rows read across
+// joins are not to be counted for this statement (DecideStatement).
+func (pol Policy) decide(p Plan, rowsLeftOut string) Decision {
 	if p.Message != "" {
 		return Decision{Reason: "trivial plan: " + p.Message, Rule: RuleTrivial}
 	}
@@ -595,7 +626,23 @@ func (pol Policy) Decide(p Plan) Decision {
 		return Decision{ToCopy: true, Reason: fmt.Sprintf("full index scan over %d rows >= %d", p.MaxIndexScanRows, pol.ScanRows), Rule: RuleScan}
 	}
 	if p.CostUnknown {
-		return Decision{Reason: fmt.Sprintf("no full scan over %d rows (the plan carries no cost: the cost rule does not apply)", pol.ScanRows), Rule: RuleCheap}
+		// With no cost, a join that walks a small table and probes a big
+		// one by key shows no scan at all: the rows it reads in all are
+		// compared with the same threshold.
+		cheap := fmt.Sprintf("no full scan over %d rows (the plan carries no cost: the cost rule does not apply)", pol.ScanRows)
+		switch {
+		case pol.ScanRows <= 0:
+		case p.RowsReadUnknown != "":
+			cheap += "; rows read across joins not estimated: " + p.RowsReadUnknown
+		case !p.Joined:
+		case rowsLeftOut != "":
+			cheap += "; " + rowsLeftOut
+		case p.RowsRead >= pol.ScanRows:
+			return Decision{ToCopy: true, Reason: fmt.Sprintf("plan reads about %s rows across a join (threshold %s)", groupDigits(roundRows(p.RowsRead)), groupDigits(pol.ScanRows)), Rule: RuleJoinRows}
+		default:
+			cheap += fmt.Sprintf("; about %s rows read across a join", groupDigits(roundRows(p.RowsRead)))
+		}
+		return Decision{Reason: cheap, Rule: RuleCheap}
 	}
 	return Decision{Reason: fmt.Sprintf("plan cost %.0f below %.0f, no full scan over %d rows", p.Cost, pol.CostThreshold, pol.ScanRows), Rule: RuleCheap}
 }

@@ -1,0 +1,36 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "a",
+          "access_type": "index",
+          "key": "idx",
+          "key_length": "4",
+          "used_key_parts": ["idx"],
+          "rows": 50,
+          "filtered": 100,
+          "using_index": true
+        }
+      },
+      {
+        "block-nl-join": {
+          "table": {
+            "table_name": "b",
+            "access_type": "index",
+            "key": "idx",
+            "key_length": "4",
+            "used_key_parts": ["idx"],
+            "rows": 50,
+            "filtered": 100,
+            "using_index": true
+          },
+          "buffer_type": "flat",
+          "buffer_size": "714",
+          "join_type": "BNL"
+        }
+      }
+    ]
+  }
+}

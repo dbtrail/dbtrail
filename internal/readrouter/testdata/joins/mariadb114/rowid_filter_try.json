@@ -1,0 +1,32 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 2.066870917,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "orders",
+          "access_type": "range",
+          "possible_keys": ["customer_id", "created_at"],
+          "key": "created_at",
+          "key_length": "6",
+          "used_key_parts": ["created_at"],
+          "rowid_filter": {
+            "range": {
+              "key": "customer_id",
+              "used_key_parts": ["customer_id"]
+            },
+            "rows": 6020,
+            "selectivity_pct": 0.302273933
+          },
+          "loops": 1,
+          "rows": 5760,
+          "cost": 2.066870917,
+          "filtered": 0.302273929,
+          "index_condition": "orders.created_at >= '2024-03-01' and orders.created_at < '2024-03-03'",
+          "attached_condition": "orders.customer_id between 100 and 400"
+        }
+      }
+    ]
+  }
+}

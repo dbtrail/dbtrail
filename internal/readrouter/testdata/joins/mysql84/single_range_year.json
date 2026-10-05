@@ -1,0 +1,34 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "200587.57"
+    },
+    "table": {
+      "table_name": "orders",
+      "access_type": "range",
+      "possible_keys": [
+        "created_at"
+      ],
+      "key": "created_at",
+      "used_key_parts": [
+        "created_at"
+      ],
+      "key_length": "6",
+      "rows_examined_per_scan": 996997,
+      "rows_produced_per_join": 996997,
+      "filtered": "100.00",
+      "using_index": true,
+      "cost_info": {
+        "read_cost": "100887.87",
+        "eval_cost": "99699.70",
+        "prefix_cost": "200587.57",
+        "data_read_per_join": "327M"
+      },
+      "used_columns": [
+        "created_at"
+      ],
+      "attached_condition": "((`shop`.`orders`.`created_at` >= TIMESTAMP'2024-01-01 00:00:00') and (`shop`.`orders`.`created_at` < TIMESTAMP'2025-01-01 00:00:00'))"
+    }
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "filesort": {
+      "sort_key": "c.`id`",
+      "temporary_table": {
+        "nested_loop": [
+          {
+            "table": {
+              "table_name": "co",
+              "access_type": "ALL",
+              "possible_keys": ["PRIMARY"],
+              "rows": 50,
+              "filtered": 100
+            }
+          },
+          {
+            "table": {
+              "table_name": "c",
+              "access_type": "ref",
+              "possible_keys": ["country_code"],
+              "key": "country_code",
+              "key_length": "8",
+              "used_key_parts": ["country_code"],
+              "ref": ["shop.co.code"],
+              "rows": 1012,
+              "filtered": 100,
+              "using_index": true
+            }
+          }
+        ]
+      }
+    }
+  }
+}

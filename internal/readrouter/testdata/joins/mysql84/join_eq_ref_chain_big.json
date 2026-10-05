@@ -1,0 +1,101 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "12268.49"
+    },
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "oi",
+          "access_type": "range",
+          "possible_keys": [
+            "order_id",
+            "product_id"
+          ],
+          "key": "product_id",
+          "used_key_parts": [
+            "product_id"
+          ],
+          "key_length": "4",
+          "rows_examined_per_scan": 4000,
+          "rows_produced_per_join": 4000,
+          "filtered": "100.00",
+          "index_condition": "(`shop`.`oi`.`product_id` in (17,18))",
+          "using_MRR": true,
+          "cost_info": {
+            "read_cost": "3289.50",
+            "eval_cost": "400.00",
+            "prefix_cost": "3689.50",
+            "data_read_per_join": "93K"
+          },
+          "used_columns": [
+            "order_id",
+            "product_id"
+          ]
+        }
+      },
+      {
+        "table": {
+          "table_name": "o",
+          "access_type": "eq_ref",
+          "possible_keys": [
+            "PRIMARY",
+            "customer_id"
+          ],
+          "key": "PRIMARY",
+          "used_key_parts": [
+            "id"
+          ],
+          "key_length": "4",
+          "ref": [
+            "shop.oi.order_id"
+          ],
+          "rows_examined_per_scan": 1,
+          "rows_produced_per_join": 4000,
+          "filtered": "100.00",
+          "cost_info": {
+            "read_cost": "3988.74",
+            "eval_cost": "400.00",
+            "prefix_cost": "8078.24",
+            "data_read_per_join": "1M"
+          },
+          "used_columns": [
+            "id",
+            "customer_id"
+          ]
+        }
+      },
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "eq_ref",
+          "possible_keys": [
+            "PRIMARY"
+          ],
+          "key": "PRIMARY",
+          "used_key_parts": [
+            "id"
+          ],
+          "key_length": "4",
+          "ref": [
+            "shop.o.customer_id"
+          ],
+          "rows_examined_per_scan": 1,
+          "rows_produced_per_join": 4000,
+          "filtered": "100.00",
+          "using_index": true,
+          "cost_info": {
+            "read_cost": "3790.25",
+            "eval_cost": "400.00",
+            "prefix_cost": "12268.49",
+            "data_read_per_join": "2M"
+          },
+          "used_columns": [
+            "id"
+          ]
+        }
+      }
+    ]
+  }
+}

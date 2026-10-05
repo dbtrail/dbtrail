@@ -1,0 +1,53 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 1.1868384,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "range",
+          "possible_keys": ["country_code"],
+          "key": "country_code",
+          "key_length": "8",
+          "used_key_parts": ["country_code"],
+          "loops": 1,
+          "rows": 8000,
+          "cost": 1.1868384,
+          "filtered": 100,
+          "attached_condition": "c.country_code in ('AR','BR','CL','UY')",
+          "using_index": true
+        }
+      }
+    ],
+    "subqueries": [
+      {
+        "subquery_cache": {
+          "state": "uninitialized",
+          "query_block": {
+            "select_id": 2,
+            "cost": 0.00457962,
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "o",
+                  "access_type": "ref",
+                  "possible_keys": ["customer_id"],
+                  "key": "customer_id",
+                  "key_length": "4",
+                  "used_key_parts": ["customer_id"],
+                  "ref": ["shop.c.id"],
+                  "loops": 1,
+                  "rows": 20,
+                  "cost": 0.00457962,
+                  "filtered": 100,
+                  "using_index": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

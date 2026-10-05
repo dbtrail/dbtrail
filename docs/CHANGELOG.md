@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **Read routing on a MariaDB source sends heavy joins to the copy**
+  (#2113). MariaDB's plan has no cost the router can use, so only a full
+  scan of a table or an index over `--route-scan-rows` rows sent a
+  statement to the copy. MariaDB answers a heavy join by walking the small
+  table and reading the big one by key, which is neither: orders joined to
+  customers and grouped by country (2,000,000 and 100,000 rows) stayed on
+  MariaDB for 6.9 s. The rows a plan reads in all are now estimated from
+  `EXPLAIN FORMAT=JSON` (down each list of joined tables, a table's `rows`
+  times the rows the tables before it produce; a subquery or derived table
+  once, or once per outer row when it depends on it) and a join that reads
+  at least `--route-scan-rows` rows (default 100,000) goes to the copy.
+  Measured on MariaDB 11.4 and 10.11 over 77 statements: the three joins of
+  the report (6.9 s, 12.5 s and 8.2 s on the source) and thirteen more
+  shapes of the same kind (0.2 s to 16.6 s) now go to the copy on both,
+  with two fast ones whose plans read 100,000 rows by the estimate (9 ms
+  and 25 ms: a join of two small tables with no index, and a first table
+  scanned under a filter no index serves); a point lookup joined to another table, a primary key range of a few
+  hundred rows and a join whose first table an index cuts to a few rows
+  stay on MariaDB, as does every statement that reads one table. Statements
+  near the threshold can change side too: five that take 40 ms to 90 ms on
+  the source now go to the copy on 11.4 and not on 10.11, which reports
+  about half the rows per key for the same index. A statement ending in a
+  small `LIMIT` with no sort is decided as before (the `LIMIT` ends the
+  join early), and so is a plan whose shape the estimate does not know (a
+  recursive CTE), with the reason in the debug log. A MySQL source is not
+  affected: its plans carry a cost. `sql-compare` reports the new rule as
+  `join_rows`. See [Time-travel SQL](time-travel-sql.md).
 - **SQL on the copy compares text as MySQL's default collation does, beyond
   case and accents** (#2083). `'ß' = 'ss'`, full-width letters, `'æ' = 'ae'`,
   `'ø' = 'o'` and hiragana against katakana are now equal on the copy as

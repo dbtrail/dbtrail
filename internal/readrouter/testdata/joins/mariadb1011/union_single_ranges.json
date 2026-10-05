@@ -1,0 +1,51 @@
+{
+  "query_block": {
+    "union_result": {
+      "query_specifications": [
+        {
+          "query_block": {
+            "select_id": 1,
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "orders",
+                  "access_type": "range",
+                  "possible_keys": ["created_at"],
+                  "key": "created_at",
+                  "key_length": "6",
+                  "used_key_parts": ["created_at"],
+                  "rows": 114314,
+                  "filtered": 100,
+                  "attached_condition": "orders.created_at >= '2024-01-01' and orders.created_at < '2024-01-20'",
+                  "using_index": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "query_block": {
+            "select_id": 2,
+            "operation": "UNION",
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "orders",
+                  "access_type": "range",
+                  "possible_keys": ["created_at"],
+                  "key": "created_at",
+                  "key_length": "6",
+                  "used_key_parts": ["created_at"],
+                  "rows": 116268,
+                  "filtered": 100,
+                  "attached_condition": "orders.created_at >= '2025-01-01' and orders.created_at < '2025-01-20'",
+                  "using_index": true
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

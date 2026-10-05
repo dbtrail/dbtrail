@@ -1,0 +1,48 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "10007.35"
+    },
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "co",
+          "access_type": "ALL",
+          "rows_examined_per_scan": 50,
+          "rows_produced_per_join": 50,
+          "filtered": "100.00",
+          "cost_info": {
+            "read_cost": "0.25",
+            "eval_cost": "5.00",
+            "prefix_cost": "5.25",
+            "data_read_per_join": "16K"
+          },
+          "used_columns": [
+            "name"
+          ]
+        }
+      },
+      {
+        "table": {
+          "table_name": "p",
+          "access_type": "ALL",
+          "rows_examined_per_scan": 2000,
+          "rows_produced_per_join": 10000,
+          "filtered": "10.00",
+          "using_join_buffer": "hash join",
+          "cost_info": {
+            "read_cost": "2.10",
+            "eval_cost": "1000.00",
+            "prefix_cost": "10007.35",
+            "data_read_per_join": "2M"
+          },
+          "used_columns": [
+            "name"
+          ],
+          "attached_condition": "(`shop`.`p`.`name` = `shop`.`co`.`name`)"
+        }
+      }
+    ]
+  }
+}

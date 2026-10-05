@@ -1,0 +1,62 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 87.33847266,
+    "filesort": {
+      "sort_key": "t.`id`",
+      "temporary_table": {
+        "nested_loop": [
+          {
+            "table": {
+              "table_name": "<derived2>",
+              "access_type": "ALL",
+              "loops": 1,
+              "rows": 5000,
+              "cost": 0.233423,
+              "filtered": 100,
+              "materialized": {
+                "query_block": {
+                  "select_id": 2,
+                  "cost": 2.42926262,
+                  "nested_loop": [
+                    {
+                      "table": {
+                        "table_name": "customers",
+                        "access_type": "range",
+                        "possible_keys": ["PRIMARY"],
+                        "key": "PRIMARY",
+                        "key_length": "4",
+                        "used_key_parts": ["id"],
+                        "loops": 1,
+                        "rows": 10394,
+                        "cost": 2.42926262,
+                        "filtered": 100,
+                        "attached_condition": "customers.`id` <= 5000"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "table": {
+              "table_name": "o",
+              "access_type": "ref",
+              "possible_keys": ["customer_id"],
+              "key": "customer_id",
+              "key_length": "4",
+              "used_key_parts": ["customer_id"],
+              "ref": ["t.id"],
+              "loops": 5000,
+              "rows": 20,
+              "cost": 19.8646024,
+              "filtered": 100,
+              "using_index": true
+            }
+          }
+        ]
+      }
+    }
+  }
+}

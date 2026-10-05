@@ -1,0 +1,102 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "708325.03"
+    },
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "ALL",
+          "possible_keys": [
+            "PRIMARY"
+          ],
+          "rows_examined_per_scan": 99710,
+          "rows_produced_per_join": 99710,
+          "filtered": "100.00",
+          "cost_info": {
+            "read_cost": "455.78",
+            "eval_cost": "9971.00",
+            "prefix_cost": "10426.78",
+            "data_read_per_join": "57M"
+          },
+          "used_columns": [
+            "id",
+            "name"
+          ]
+        }
+      },
+      {
+        "table": {
+          "table_name": "t",
+          "access_type": "ref",
+          "possible_keys": [
+            "<auto_key0>"
+          ],
+          "key": "<auto_key0>",
+          "used_key_parts": [
+            "customer_id"
+          ],
+          "key_length": "4",
+          "ref": [
+            "shop.c.id"
+          ],
+          "rows_examined_per_scan": 19,
+          "rows_produced_per_join": 1993995,
+          "filtered": "100.00",
+          "cost_info": {
+            "read_cost": "498498.75",
+            "eval_cost": "199399.50",
+            "prefix_cost": "708325.03",
+            "data_read_per_join": "45M"
+          },
+          "used_columns": [
+            "customer_id",
+            "n"
+          ],
+          "materialized_from_subquery": {
+            "using_temporary_table": true,
+            "dependent": false,
+            "cacheable": true,
+            "query_block": {
+              "select_id": 2,
+              "cost_info": {
+                "query_cost": "206331.93"
+              },
+              "grouping_operation": {
+                "using_filesort": false,
+                "table": {
+                  "table_name": "orders",
+                  "access_type": "index",
+                  "possible_keys": [
+                    "customer_id"
+                  ],
+                  "key": "customer_id",
+                  "used_key_parts": [
+                    "customer_id"
+                  ],
+                  "key_length": "4",
+                  "rows_examined_per_scan": 1993995,
+                  "rows_produced_per_join": 1993995,
+                  "filtered": "100.00",
+                  "using_index": true,
+                  "cost_info": {
+                    "read_cost": "6932.43",
+                    "eval_cost": "199399.50",
+                    "prefix_cost": "206331.93",
+                    "data_read_per_join": "654M"
+                  },
+                  "used_columns": [
+                    "id",
+                    "customer_id"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}

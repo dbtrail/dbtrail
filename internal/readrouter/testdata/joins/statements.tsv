@@ -1,0 +1,77 @@
+join_group_by_country	SELECT c.country_code, count(*), sum(o.amount) FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY c.country_code
+join_items_products_group_by_category	SELECT p.category_id, count(*), sum(oi.qty * oi.price) FROM order_items oi JOIN products p ON p.id = oi.product_id GROUP BY p.category_id
+join_three_tables_group_by	SELECT o.status, co.region, count(*) FROM orders o JOIN customers c ON c.id = o.customer_id JOIN countries co ON co.code = c.country_code GROUP BY o.status, co.region
+join_point_lookup	SELECT o.id, o.amount, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.id = 42
+join_point_lookup_small_table	SELECT c.name, co.name FROM customers c JOIN countries co ON co.code = c.country_code WHERE c.id = 42
+join_pk_range	SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.id BETWEEN 1000 AND 1300
+join_selective_outer_by_index	SELECT c.name, o.id, o.amount FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.email = 'c777@example.com'
+join_selective_outer_three_levels	SELECT c.name, o.id, oi.product_id FROM customers c JOIN orders o ON o.customer_id = c.id JOIN order_items oi ON oi.order_id = o.id WHERE c.email = 'c777@example.com'
+join_outer_pk_range_three_levels	SELECT c.name, o.id, oi.product_id FROM customers c JOIN orders o ON o.customer_id = c.id JOIN order_items oi ON oi.order_id = o.id WHERE c.id BETWEEN 100 AND 110
+join_limit_index_order	SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id DESC LIMIT 10
+join_const_customer	SELECT c.name, o.id FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.id = 7
+join_one_country	SELECT count(*), sum(o.amount) FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.country_code = 'AR'
+join_one_region	SELECT count(*), sum(o.amount) FROM countries co JOIN customers c ON c.country_code = co.code JOIN orders o ON o.customer_id = c.id WHERE co.region = 'africa'
+join_outer_filter_no_index	SELECT c.name, o.id FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.name = 'customer 5'
+join_range_month_items	SELECT count(*), sum(oi.qty) FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE o.created_at >= '2024-03-01' AND o.created_at < '2024-04-01'
+join_range_day_items	SELECT count(*), sum(oi.qty) FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE o.created_at >= '2024-03-01' AND o.created_at < '2024-03-02'
+join_items_orders_status	SELECT count(*) FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE o.status = 'refunded'
+join_no_index_block	SELECT count(*) FROM products p JOIN customers c ON c.tier = p.name
+join_no_index_small	SELECT count(*) FROM products p JOIN countries co ON co.name = p.name
+join_range_limit500	SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.created_at >= '2024-03-01' AND o.created_at < '2024-06-01' LIMIT 500
+in_subquery_order_limit	SELECT id, amount FROM orders WHERE customer_id IN (SELECT id FROM customers WHERE country_code = 'AR') ORDER BY amount DESC LIMIT 10
+in_subquery_materialized	SELECT count(*) FROM orders WHERE customer_id IN (SELECT id FROM customers WHERE tier = 'gold')
+semi_join_big_inner	SELECT c.id, c.name FROM customers c WHERE c.id IN (SELECT customer_id FROM orders WHERE amount > 499)
+semi_join_small_outer	SELECT c.id, c.name FROM customers c WHERE c.id IN (SELECT customer_id FROM orders) AND c.id < 30
+not_exists_limit	SELECT c.id FROM customers c WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id) LIMIT 20
+exists_dependent	SELECT c.id FROM customers c WHERE c.country_code = 'AR' AND EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND o.amount > 490)
+scalar_subquery_per_row_small	SELECT c.id, (SELECT count(*) FROM orders o WHERE o.customer_id = c.id) FROM customers c WHERE c.id BETWEEN 100 AND 120
+scalar_subquery_per_row_big	SELECT c.id, (SELECT count(*) FROM orders o WHERE o.customer_id = c.id) FROM customers c WHERE c.country_code IN ('AR', 'BR', 'CL', 'UY')
+scalar_subquery_uncorrelated	SELECT id, amount FROM orders WHERE id = (SELECT max(order_id) FROM order_items WHERE product_id = 17)
+derived_group_join	SELECT c.tier, t.n FROM customers c JOIN (SELECT customer_id, count(*) n FROM orders WHERE created_at < '2024-01-03' GROUP BY customer_id) t ON t.customer_id = c.id WHERE c.tier = 'gold'
+derived_small_join_big	SELECT t.id, count(*) FROM (SELECT id FROM customers WHERE id <= 5000 ORDER BY id LIMIT 5000) t JOIN orders o ON o.customer_id = t.id GROUP BY t.id
+union_all_joins	SELECT c.country_code, o.id FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.id = 5 UNION ALL SELECT c.country_code, o.id FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.id = 6
+union_all_heavy_join	SELECT p.category_id, oi.id FROM products p JOIN order_items oi ON oi.product_id = p.id WHERE p.category_id = 3 UNION ALL SELECT c.id, o.id FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.id = 6
+cte_join	WITH big AS (SELECT customer_id, sum(amount) s FROM orders WHERE created_at < '2024-01-03' GROUP BY customer_id) SELECT c.name, big.s FROM big JOIN customers c ON c.id = big.customer_id
+window_small	SELECT id, row_number() OVER (PARTITION BY customer_id ORDER BY id) FROM orders WHERE customer_id < 50
+window_join	SELECT c.country_code, o.id, rank() OVER (PARTITION BY c.country_code ORDER BY o.amount DESC) FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.country_code = 'UY'
+index_merge_join	SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.customer_id = 5 OR o.created_at = '2024-02-02 00:00:00'
+single_range_year	SELECT count(*) FROM orders WHERE created_at >= '2024-01-01' AND created_at < '2025-01-01'
+single_ref_status	SELECT count(*) FROM orders WHERE status = 'refunded'
+single_range_limit500	SELECT * FROM orders WHERE created_at >= '2024-03-01' AND created_at < '2024-06-01' LIMIT 500
+single_point	SELECT * FROM orders WHERE id = 42
+left_join_small	SELECT c.id, o.id FROM customers c LEFT JOIN orders o ON o.customer_id = c.id AND o.amount > 400 WHERE c.id BETWEEN 1 AND 20
+straight_join_big_outer	SELECT STRAIGHT_JOIN count(*) FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.created_at >= '2024-01-01' AND o.created_at < '2024-02-01'
+join_distinct	SELECT DISTINCT c.country_code FROM customers c JOIN orders o ON o.customer_id = c.id WHERE o.amount > 499.5
+join_order_by_filesort_limit	SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.country_code = 'AR' ORDER BY o.amount DESC LIMIT 10
+join_limit_outer_index_order	SELECT c.id, o.id FROM customers c JOIN orders o ON o.customer_id = c.id ORDER BY c.id LIMIT 10
+join_limit_no_order	SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 10
+join_limit_pk_order_straight	SELECT STRAIGHT_JOIN o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id DESC LIMIT 10
+join_no_index_hash	SET join_cache_level = 8; SELECT count(*) FROM products p JOIN customers c ON c.tier = p.name
+join_keyed_batched	SET join_cache_level = 8; SELECT c.country_code, count(*), sum(o.amount) FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY c.country_code
+scalar_subquery_per_row_cache_off	SET optimizer_switch = 'subquery_cache=off'; SELECT c.id, (SELECT count(*) FROM orders o WHERE o.customer_id = c.id) FROM customers c WHERE c.country_code IN ('AR', 'BR', 'CL', 'UY')
+scalar_subquery_per_row_all	SELECT c.id, (SELECT count(*) FROM orders o WHERE o.customer_id = c.id) FROM customers c
+scalar_subquery_no_key	SELECT c.id, (SELECT count(*) FROM products p WHERE p.price > c.id) FROM customers c WHERE c.id BETWEEN 100 AND 120
+recursive_cte_join	WITH RECURSIVE r AS (SELECT 1 n UNION ALL SELECT n + 1 FROM r WHERE n < 100) SELECT c.id FROM r JOIN customers c ON c.id = r.n
+not_in_subquery	SELECT count(*) FROM customers WHERE id NOT IN (SELECT customer_id FROM orders WHERE amount > 499)
+semi_join_duplicate_weedout	SET optimizer_switch = 'firstmatch=off,materialization=off,loosescan=off'; SELECT c.id FROM customers c WHERE c.country_code = 'AR' AND c.id IN (SELECT o.customer_id FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE oi.product_id = 17)
+semi_join_default	SELECT c.id FROM customers c WHERE c.country_code = 'AR' AND c.id IN (SELECT o.customer_id FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE oi.product_id = 17)
+rowid_filter_candidate	SELECT * FROM orders WHERE status = 'refunded' AND created_at >= '2024-03-01' AND created_at < '2024-03-08'
+rowid_filter_join	SELECT o.id, c.name FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.country_code = 'AR' AND o.created_at >= '2024-03-01' AND o.created_at < '2024-03-08'
+derived_union_join	SELECT c.name, u.id FROM customers c JOIN (SELECT customer_id, id FROM orders WHERE id < 100 UNION ALL SELECT customer_id, id FROM orders WHERE id > 1999900) u ON u.customer_id = c.id
+union_distinct_heavy_joins	SELECT c.country_code FROM customers c JOIN orders o ON o.customer_id = c.id WHERE o.amount > 499 UNION SELECT co.code FROM countries co JOIN customers c ON c.country_code = co.code
+join_group_order_limit	SELECT c.country_code, count(*) n FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY c.country_code ORDER BY n DESC LIMIT 5
+single_full_scan	SELECT count(*) FROM orders WHERE amount > 400
+anti_join_left	SELECT c.id FROM customers c LEFT JOIN orders o ON o.customer_id = c.id WHERE o.id IS NULL
+join_outer_two_filters	SELECT count(*) FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.country_code = 'AR' AND c.tier = 'gold'
+cross_join_small	SELECT count(*) FROM countries a, countries b
+exists_uncorrelated	SELECT c.id FROM customers c WHERE c.id < 10 AND EXISTS (SELECT 1 FROM orders WHERE amount > 499.99)
+in_list_join	SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.id IN (5, 50, 500, 5000)
+having_subquery	SELECT customer_id, count(*) FROM orders WHERE customer_id < 20 GROUP BY customer_id HAVING count(*) > (SELECT avg(qty) FROM order_items WHERE order_id = 7)
+derived_dependent_exists_in_select	SELECT c.id, EXISTS (SELECT 1 FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE o.customer_id = c.id AND oi.qty = 5) FROM customers c WHERE c.id BETWEEN 100 AND 120
+join_eq_ref_chain_big	SELECT count(*) FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN customers c ON c.id = o.customer_id WHERE oi.product_id IN (17, 18)
+order_by_pk_limit_join_small	SELECT c.id, co.name FROM customers c JOIN countries co ON co.code = c.country_code ORDER BY c.id LIMIT 10
+derived_split_lateral	SELECT c.name, t.n FROM customers c JOIN (SELECT customer_id, count(*) n FROM orders GROUP BY customer_id) t ON t.customer_id = c.id WHERE c.id BETWEEN 100 AND 110
+derived_group_all_join	SELECT c.name, t.n FROM customers c JOIN (SELECT customer_id, count(*) n FROM orders GROUP BY customer_id) t ON t.customer_id = c.id
+rowid_filter_try	SELECT * FROM orders WHERE customer_id BETWEEN 100 AND 400 AND created_at >= '2024-03-01' AND created_at < '2024-03-03'
+rowid_filter_join_try	SELECT o.id FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.tier = 'gold' AND c.id < 3000 AND o.created_at >= '2024-03-01' AND o.created_at < '2024-03-02'
+union_single_ranges	SELECT id FROM orders WHERE created_at >= '2024-01-01' AND created_at < '2024-01-20' UNION ALL SELECT id FROM orders WHERE created_at >= '2025-01-01' AND created_at < '2025-01-20'

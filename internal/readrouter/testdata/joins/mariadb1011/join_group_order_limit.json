@@ -1,0 +1,39 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "filesort": {
+      "sort_key": "count(0) desc",
+      "temporary_table": {
+        "nested_loop": [
+          {
+            "table": {
+              "table_name": "c",
+              "access_type": "index",
+              "possible_keys": ["PRIMARY"],
+              "key": "country_code",
+              "key_length": "8",
+              "used_key_parts": ["country_code"],
+              "rows": 97208,
+              "filtered": 100,
+              "using_index": true
+            }
+          },
+          {
+            "table": {
+              "table_name": "o",
+              "access_type": "ref",
+              "possible_keys": ["customer_id"],
+              "key": "customer_id",
+              "key_length": "4",
+              "used_key_parts": ["customer_id"],
+              "ref": ["shop.c.id"],
+              "rows": 10,
+              "filtered": 100,
+              "using_index": true
+            }
+          }
+        ]
+      }
+    }
+  }
+}

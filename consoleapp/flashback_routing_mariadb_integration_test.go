@@ -125,4 +125,13 @@ func TestIntegrationFlashbackReadRoutingMariaDBSource(t *testing.T) {
 	if got := first("SELECT status, count(*) FROM orders WHERE status <> ? GROUP BY status", "zz"); got != "copy" {
 		t.Errorf("prepared full scan answered %q, want copy", got)
 	}
+	// A join with no scan in it: two rows read by primary key, one per
+	// table. Only the rows read across the join (2, the threshold here)
+	// send it to the copy; each table alone is a one-row lookup.
+	if got := first("SELECT a.status FROM orders a JOIN orders b ON b.id = a.id WHERE a.id = 1"); got != "copy" {
+		t.Errorf("join answered %q, want copy: the rows read across a MariaDB join were not counted", got)
+	}
+	if got := first("SELECT a.status FROM orders a JOIN orders b ON b.id = a.id WHERE a.id = ?", 2); got != "copy" {
+		t.Errorf("prepared join answered %q, want copy", got)
+	}
 }

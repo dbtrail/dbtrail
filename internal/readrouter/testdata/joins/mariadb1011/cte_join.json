@@ -1,0 +1,53 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "<derived2>",
+          "access_type": "ALL",
+          "rows": 5759,
+          "filtered": 100,
+          "materialized": {
+            "query_block": {
+              "select_id": 2,
+              "filesort": {
+                "sort_key": "orders.customer_id",
+                "temporary_table": {
+                  "nested_loop": [
+                    {
+                      "table": {
+                        "table_name": "orders",
+                        "access_type": "range",
+                        "possible_keys": ["customer_id", "created_at"],
+                        "key": "created_at",
+                        "key_length": "6",
+                        "used_key_parts": ["created_at"],
+                        "rows": 5759,
+                        "filtered": 100,
+                        "index_condition": "orders.created_at < '2024-01-03'"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "eq_ref",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "ref": ["big.customer_id"],
+          "rows": 1,
+          "filtered": 100
+        }
+      }
+    ]
+  }
+}

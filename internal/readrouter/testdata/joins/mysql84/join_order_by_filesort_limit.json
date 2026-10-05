@@ -1,0 +1,81 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "85947.17"
+    },
+    "ordering_operation": {
+      "using_temporary_table": true,
+      "using_filesort": true,
+      "cost_info": {
+        "sort_cost": "40232.74"
+      },
+      "nested_loop": [
+        {
+          "table": {
+            "table_name": "c",
+            "access_type": "ref",
+            "possible_keys": [
+              "PRIMARY",
+              "country_code"
+            ],
+            "key": "country_code",
+            "used_key_parts": [
+              "country_code"
+            ],
+            "key_length": "8",
+            "ref": [
+              "const"
+            ],
+            "rows_examined_per_scan": 2000,
+            "rows_produced_per_join": 2000,
+            "filtered": "100.00",
+            "index_condition": "(`shop`.`c`.`country_code` = 'AR')",
+            "cost_info": {
+              "read_cost": "1367.33",
+              "eval_cost": "200.00",
+              "prefix_cost": "1567.33",
+              "data_read_per_join": "1M"
+            },
+            "used_columns": [
+              "id",
+              "name",
+              "country_code"
+            ]
+          }
+        },
+        {
+          "table": {
+            "table_name": "o",
+            "access_type": "ref",
+            "possible_keys": [
+              "customer_id"
+            ],
+            "key": "customer_id",
+            "used_key_parts": [
+              "customer_id"
+            ],
+            "key_length": "4",
+            "ref": [
+              "shop.c.id"
+            ],
+            "rows_examined_per_scan": 20,
+            "rows_produced_per_join": 40232,
+            "filtered": "100.00",
+            "cost_info": {
+              "read_cost": "40123.82",
+              "eval_cost": "4023.27",
+              "prefix_cost": "45714.43",
+              "data_read_per_join": "13M"
+            },
+            "used_columns": [
+              "id",
+              "customer_id",
+              "amount"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

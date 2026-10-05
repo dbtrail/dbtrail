@@ -1,0 +1,29 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "co",
+          "access_type": "ALL",
+          "rows": 50,
+          "filtered": 100
+        }
+      },
+      {
+        "block-nl-join": {
+          "table": {
+            "table_name": "p",
+            "access_type": "ALL",
+            "rows": 2000,
+            "filtered": 100
+          },
+          "buffer_type": "flat",
+          "buffer_size": "12KiB",
+          "join_type": "BNL",
+          "attached_condition": "p.`name` = co.`name`"
+        }
+      }
+    ]
+  }
+}

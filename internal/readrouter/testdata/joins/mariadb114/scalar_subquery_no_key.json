@@ -1,0 +1,47 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 0.00732111,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "range",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "loops": 1,
+          "rows": 21,
+          "cost": 0.00732111,
+          "filtered": 100,
+          "attached_condition": "c.`id` between 100 and 120"
+        }
+      }
+    ],
+    "subqueries": [
+      {
+        "subquery_cache": {
+          "state": "uninitialized",
+          "query_block": {
+            "select_id": 2,
+            "cost": 0.3428384,
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "p",
+                  "access_type": "ALL",
+                  "loops": 1,
+                  "rows": 2000,
+                  "cost": 0.3428384,
+                  "filtered": 100,
+                  "attached_condition": "p.price > c.`id`"
+                }
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

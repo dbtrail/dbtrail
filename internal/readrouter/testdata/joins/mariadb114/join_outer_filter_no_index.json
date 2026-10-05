@@ -1,0 +1,36 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 392.3151445,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "ALL",
+          "possible_keys": ["PRIMARY"],
+          "loops": 1,
+          "rows": 99615,
+          "cost": 16.6584038,
+          "filtered": 100,
+          "attached_condition": "c.`name` = 'customer 5'"
+        }
+      },
+      {
+        "table": {
+          "table_name": "o",
+          "access_type": "ref",
+          "possible_keys": ["customer_id"],
+          "key": "customer_id",
+          "key_length": "4",
+          "used_key_parts": ["customer_id"],
+          "ref": ["shop.c.id"],
+          "loops": 99615,
+          "rows": 20,
+          "cost": 375.6567407,
+          "filtered": 100,
+          "using_index": true
+        }
+      }
+    ]
+  }
+}

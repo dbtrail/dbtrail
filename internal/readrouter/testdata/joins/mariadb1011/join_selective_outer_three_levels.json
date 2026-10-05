@@ -1,0 +1,48 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "ref",
+          "possible_keys": ["PRIMARY", "email"],
+          "key": "email",
+          "key_length": "259",
+          "used_key_parts": ["email"],
+          "ref": ["const"],
+          "rows": 1,
+          "filtered": 100,
+          "index_condition": "c.email = 'c777@example.com'"
+        }
+      },
+      {
+        "table": {
+          "table_name": "o",
+          "access_type": "ref",
+          "possible_keys": ["PRIMARY", "customer_id"],
+          "key": "customer_id",
+          "key_length": "4",
+          "used_key_parts": ["customer_id"],
+          "ref": ["shop.c.id"],
+          "rows": 10,
+          "filtered": 100,
+          "using_index": true
+        }
+      },
+      {
+        "table": {
+          "table_name": "oi",
+          "access_type": "ref",
+          "possible_keys": ["order_id"],
+          "key": "order_id",
+          "key_length": "4",
+          "used_key_parts": ["order_id"],
+          "ref": ["shop.o.id"],
+          "rows": 1,
+          "filtered": 100
+        }
+      }
+    ]
+  }
+}

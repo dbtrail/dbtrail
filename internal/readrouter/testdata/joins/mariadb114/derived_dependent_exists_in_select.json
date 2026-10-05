@@ -1,0 +1,68 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 0.00732111,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "range",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "loops": 1,
+          "rows": 21,
+          "cost": 0.00732111,
+          "filtered": 100,
+          "attached_condition": "c.`id` between 100 and 120"
+        }
+      }
+    ],
+    "subqueries": [
+      {
+        "subquery_cache": {
+          "state": "uninitialized",
+          "query_block": {
+            "select_id": 2,
+            "cost": 0.07375082,
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "o",
+                  "access_type": "ref",
+                  "possible_keys": ["PRIMARY", "customer_id"],
+                  "key": "customer_id",
+                  "key_length": "4",
+                  "used_key_parts": ["customer_id"],
+                  "ref": ["shop.c.id"],
+                  "loops": 1,
+                  "rows": 20,
+                  "cost": 0.00457962,
+                  "filtered": 100,
+                  "using_index": true
+                }
+              },
+              {
+                "table": {
+                  "table_name": "oi",
+                  "access_type": "ref",
+                  "possible_keys": ["order_id"],
+                  "key": "order_id",
+                  "key_length": "4",
+                  "used_key_parts": ["order_id"],
+                  "ref": ["shop.o.id"],
+                  "loops": 20,
+                  "rows": 1,
+                  "cost": 0.0691712,
+                  "filtered": 100,
+                  "attached_condition": "oi.qty = 5"
+                }
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

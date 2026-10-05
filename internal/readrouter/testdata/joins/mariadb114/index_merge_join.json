@@ -1,0 +1,52 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 0.079311058,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "o",
+          "access_type": "index_merge",
+          "possible_keys": ["customer_id", "created_at"],
+          "key_length": "4,6",
+          "index_merge": {
+            "union": [
+              {
+                "range": {
+                  "key": "customer_id",
+                  "used_key_parts": ["customer_id"]
+                }
+              },
+              {
+                "range": {
+                  "key": "created_at",
+                  "used_key_parts": ["created_at"]
+                }
+              }
+            ]
+          },
+          "loops": 1,
+          "rows": 21,
+          "cost": 0.043324618,
+          "filtered": 100,
+          "attached_condition": "o.customer_id = 5 or o.created_at = TIMESTAMP'2024-02-02 00:00:00'"
+        }
+      },
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "eq_ref",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "ref": ["shop.o.customer_id"],
+          "loops": 21,
+          "rows": 1,
+          "cost": 0.03598644,
+          "filtered": 100
+        }
+      }
+    ]
+  }
+}

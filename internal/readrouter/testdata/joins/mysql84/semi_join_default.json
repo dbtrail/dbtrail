@@ -1,0 +1,124 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "4500.70"
+    },
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "ref",
+          "possible_keys": [
+            "PRIMARY",
+            "country_code"
+          ],
+          "key": "country_code",
+          "used_key_parts": [
+            "country_code"
+          ],
+          "key_length": "8",
+          "ref": [
+            "const"
+          ],
+          "rows_examined_per_scan": 2000,
+          "rows_produced_per_join": 2000,
+          "filtered": "100.00",
+          "using_index": true,
+          "cost_info": {
+            "read_cost": "2.95",
+            "eval_cost": "200.00",
+            "prefix_cost": "202.95",
+            "data_read_per_join": "1M"
+          },
+          "used_columns": [
+            "id",
+            "country_code"
+          ],
+          "attached_condition": "(`shop`.`c`.`country_code` = 'AR')"
+        }
+      },
+      {
+        "table": {
+          "table_name": "<subquery2>",
+          "access_type": "eq_ref",
+          "key": "<auto_distinct_key>",
+          "key_length": "4",
+          "ref": [
+            "shop.c.id"
+          ],
+          "rows_examined_per_scan": 1,
+          "materialized_from_subquery": {
+            "using_temporary_table": true,
+            "query_block": {
+              "nested_loop": [
+                {
+                  "table": {
+                    "table_name": "oi",
+                    "access_type": "ref",
+                    "possible_keys": [
+                      "order_id",
+                      "product_id"
+                    ],
+                    "key": "product_id",
+                    "used_key_parts": [
+                      "product_id"
+                    ],
+                    "key_length": "4",
+                    "ref": [
+                      "const"
+                    ],
+                    "rows_examined_per_scan": 2000,
+                    "rows_produced_per_join": 2000,
+                    "filtered": "100.00",
+                    "cost_info": {
+                      "read_cost": "1502.16",
+                      "eval_cost": "200.00",
+                      "prefix_cost": "1702.16",
+                      "data_read_per_join": "46K"
+                    },
+                    "used_columns": [
+                      "order_id",
+                      "product_id"
+                    ]
+                  }
+                },
+                {
+                  "table": {
+                    "table_name": "o",
+                    "access_type": "eq_ref",
+                    "possible_keys": [
+                      "PRIMARY",
+                      "customer_id"
+                    ],
+                    "key": "PRIMARY",
+                    "used_key_parts": [
+                      "id"
+                    ],
+                    "key_length": "4",
+                    "ref": [
+                      "shop.oi.order_id"
+                    ],
+                    "rows_examined_per_scan": 1,
+                    "rows_produced_per_join": 2000,
+                    "filtered": "100.00",
+                    "cost_info": {
+                      "read_cost": "1994.59",
+                      "eval_cost": "200.00",
+                      "prefix_cost": "3896.75",
+                      "data_read_per_join": "671K"
+                    },
+                    "used_columns": [
+                      "id",
+                      "customer_id"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}
