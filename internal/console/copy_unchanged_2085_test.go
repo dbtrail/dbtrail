@@ -289,6 +289,9 @@ func TestCaptureBehind(t *testing.T) {
 type fakeWatermark struct {
 	wm    CaptureWatermark
 	asked []string
+	// ago, when set, makes every answer complete as of that long ago: a
+	// capture that keeps up, however long the test runs.
+	ago time.Duration
 }
 
 func (f *fakeWatermark) CaptureStatus(context.Context, ServerEntry) CaptureStatus {
@@ -297,7 +300,11 @@ func (f *fakeWatermark) CaptureStatus(context.Context, ServerEntry) CaptureStatu
 
 func (f *fakeWatermark) CaptureWatermark(_ context.Context, e ServerEntry) CaptureWatermark {
 	f.asked = append(f.asked, e.ID)
-	return f.wm
+	wm := f.wm
+	if f.ago > 0 {
+		wm.Through = time.Now().Add(-f.ago)
+	}
+	return wm
 }
 
 // Through runSQLVouched and the real worker: the question is asked about

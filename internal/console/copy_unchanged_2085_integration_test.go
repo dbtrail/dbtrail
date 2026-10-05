@@ -56,7 +56,7 @@ func newUnchangedRig(t *testing.T) *unchangedRig {
 	r.partitionFrom(r.stamp.Truncate(time.Hour).Add(-2 * time.Hour))
 	testutil.MustExec(t, db, `INSERT INTO stream_state (id, mode, binlog_file, binlog_position, gtid_set, events_indexed, last_checkpoint, server_id, capture_skips)
 		VALUES (1, 'gtid', 'binlog.000009', 100, '3e11fa47-71ca-11e1-9e33-c80aa9429562:1-50', 0, UTC_TIMESTAMP(), 1, '{}')`)
-	r.wm = &fakeWatermark{wm: CaptureWatermark{Through: time.Now().Add(-5 * time.Second)}}
+	r.wm = &fakeWatermark{ago: 5 * time.Second}
 	r.s = &Server{cm: newConnManager(nil, false), captureStatus: r.wm}
 	r.b = &bundle{db: db, dbName: dbName, engine: query.New(db), baselineSrc: r.root}
 	r.s.cm.boot = r.b
@@ -244,16 +244,14 @@ func TestIntegrationCopyUnchanged_2085(t *testing.T) {
 		return func() { testutil.MustExec(t, r.db, "UPDATE stream_state SET "+col+" WHERE id = 1") }
 	}
 	t.Run("capture not known to be up to date", func(t *testing.T) {
-		keep := r.wm.wm
-		defer func() { r.wm.wm = keep }()
-		r.wm.wm = CaptureWatermark{Detail: "the source did not answer"}
+		defer func() { r.wm.wm, r.wm.ago = CaptureWatermark{}, 5*time.Second }()
+		r.wm.wm, r.wm.ago = CaptureWatermark{Detail: "the source did not answer"}, 0
 		r.wantNot("the source did not answer", quiet)
-		r.wm.wm = CaptureWatermark{Through: time.Now().Add(-2 * time.Minute)}
+		r.wm.ago = 2 * time.Minute
 		r.wantNot("more than the limit", quiet)
 	})
 	t.Run("a table outside what capture records", func(t *testing.T) {
-		keep := r.wm.wm
-		defer func() { r.wm.wm = keep }()
+		defer func() { r.wm.wm = CaptureWatermark{} }()
 		r.wm.wm.Captures = func(schema, _ string) bool { return schema == "crm" }
 		r.wantNot("outside what capture records", quiet)
 	})
