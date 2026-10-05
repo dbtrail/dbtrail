@@ -591,10 +591,12 @@ did before:
   records the position it was read at, and the index is asked for a row
   change of that table at or after that position, the same question a
   snapshot refresh asks. A transaction that ran shortly before the snapshot
-  and committed after it counts as a change (the index is searched from the
-  hour before the snapshot's hour, the margin a refresh uses; a transaction
-  that stayed open longer than that before committing is missed, by the
-  refresh too). So does any schema change that names the table (`ALTER`,
+  and committed after it counts as a change. (The index is searched from an
+  hour before the last change the snapshot holds of that table, or before
+  the full read its rows came from, on the source's own clock, so a refresh
+  taken while capture was behind does not hide what capture indexed later.
+  A transaction that stayed open for longer than that hour before
+  committing is missed, as a refresh misses it.) So does any schema change that names the table (`ALTER`,
   `TRUNCATE`, `DROP`, `RENAME`), which changes a table without a row change:
   those are placed by position alone, however long the statement ran.
 - **The index still holds everything since that position.** If rotation has
