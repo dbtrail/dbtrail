@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **Read routing: `LIMIT offset, count`, `ORDER BY NULL` and `_binary'x'`
+  stay on MySQL without trying the copy first** (#2114). The copy refuses
+  all three, so each such statement was sent to it, failed there, and was
+  answered by MySQL afterwards: 37 to 55 ms of failed attempt, measured on
+  MySQL 8.4 and MariaDB 11.4, on a statement the source answers in under
+  1 ms. They are now recognized in the text and go straight to MySQL (about
+  0.4 ms through the port), as text and as prepared statements (`LIMIT ?,
+  ?`). In the "Who answered" counter they show as `veto`: before,
+  `copy_refused` when the plan was expensive, and `cheap_plan` or
+  `bounded_limit` when MySQL answered anyway (a plain `SELECT ... FROM t
+  LIMIT 0, 20` moves from `bounded_limit` to `veto`, at the same speed).
+  Nothing is translated for the copy: `LIMIT 20 OFFSET 0`
+  still reaches it, and SQLAlchemy's `LIMIT 0, 20` never did. `LIKE BINARY`,
+  named in the issue, was already kept on MySQL by an older rule. A window
+  written `OVER (ORDER BY NULL)` still reaches the copy, which answers it
+  with the same rows. Not
+  covered, and still answered by MySQL after a failed attempt: `NULL` that
+  is not the first sort key (`ORDER BY id, NULL`), other constants (`ORDER
+  BY 'x'`), `CAST(col AS BINARY(4))` and `CONVERT(col, BINARY)`.
 - **Read routing: past the freshness limit, the copy answers over tables
   that have not changed since their snapshot** (#2085).
   `--route-max-copy-age` is one age for the whole server, so once the newest

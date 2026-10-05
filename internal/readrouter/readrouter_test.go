@@ -96,7 +96,7 @@ func TestVeto(t *testing.T) {
 		"SELECT status, count(*) FROM orders GROUP BY status",
 		"SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.amount > 100",
 		"SELECT * FROM t WHERE note = 'call NOW() at @home DIV user()'", // inside a string literal
-		"SELECT `id`, `status` FROM `shop`.`orders` LIMIT 10, 20",
+		"SELECT `id`, `status` FROM `shop`.`orders` LIMIT 20 OFFSET 10",
 		"SELECT nowhere FROM t",         // not the function
 		"SELECT divisor FROM t",         // not the keyword
 		"SELECT likes, unlike FROM t",   // not the operator
