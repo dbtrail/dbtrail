@@ -273,6 +273,10 @@ func TestForwarder_Status_interrupted(t *testing.T) {
 	if st, known := f.Status(); known {
 		t.Errorf("after the connection is let go of: status 0x%04x reported as known", st)
 	}
+	// With no connection held, a PING must not read "nothing opened yet".
+	if err := f.Ping(context.Background()); !IsLost(err) {
+		t.Errorf("Ping after the connection is let go of = %v, want the lost error", err)
+	}
 }
 
 // A PING is the source's to answer once there is a session on it: it tells
