@@ -20,6 +20,9 @@ type baselineDecimalEntry struct {
 	decimals map[string]baseline.TableFooter
 	at       time.Time
 	failed   bool
+	// unread are the files a read that otherwise worked could not look at
+	// (baseline.FooterRead.Unread). The retry asks for these alone.
+	unread []string
 }
 
 // resolveBaselineDecimals fills in the state views' decimal casts, memoized per
@@ -60,9 +63,30 @@ func (s *Server) resolveBaselineDecimals(ctx context.Context, in *views.Input) {
 	// is not context-aware, so a goroutine blocked on it could not be released
 	// by the panel's setup deadline. Two callers racing the same snapshot just
 	// do the same read twice, which is harmless.
-	read, err := baseline.ReadTableFooters(ctx, in.BaselinePaths())
+	// A retry after a PARTIAL read asks only for the files that went unread
+	// and adds them to what is already known. Asking for everything again
+	// would send a snapshot with one permanently unreadable file down the
+	// one-query-per-table path every negativeDecimalTTL, inside whichever
+	// statement arrives first.
+	paths := in.BaselinePaths()
+	known := map[string]baseline.TableFooter{}
+	if ok && len(e.unread) > 0 {
+		paths = e.unread
+		for k, v := range e.decimals {
+			known[k] = v
+		}
+	}
+	read, err := baseline.ReadTableFooters(ctx, paths)
 	decimals := read.Footers
 	if err == nil {
+		for k, v := range decimals {
+			known[k] = v
+		}
+		decimals = known
+		in.ApplyFooters(decimals)
+	} else if len(known) > 0 {
+		// The retry itself failed outright: keep serving the earlier part.
+		decimals, read.Unread = known, e.unread
 		in.ApplyFooters(decimals)
 	}
 	// A canceled or expired context is the CALLER's state, never a fact about
@@ -84,14 +108,14 @@ func (s *Server) resolveBaselineDecimals(ctx context.Context, in *views.Input) {
 	// collations) and tried again after the same delay as a total failure, or
 	// one transient fault on one object would cost that table its columns
 	// until the daemon restarts. The read itself has logged the count.
-	s.rememberBaselineDecimals(key, decimals, err != nil || len(read.Unread) > 0)
+	s.rememberBaselineDecimals(key, decimals, err != nil || len(read.Unread) > 0, read.Unread)
 }
 
-func (s *Server) rememberBaselineDecimals(key string, decimals map[string]baseline.TableFooter, failed bool) {
+func (s *Server) rememberBaselineDecimals(key string, decimals map[string]baseline.TableFooter, failed bool, unread []string) {
 	s.baselineDecimalMu.Lock()
 	defer s.baselineDecimalMu.Unlock()
 	if s.baselineDecimals == nil {
 		s.baselineDecimals = map[string]baselineDecimalEntry{}
 	}
-	s.baselineDecimals[key] = baselineDecimalEntry{decimals: decimals, at: time.Now(), failed: failed}
+	s.baselineDecimals[key] = baselineDecimalEntry{decimals: decimals, at: time.Now(), failed: failed, unread: unread}
 }
