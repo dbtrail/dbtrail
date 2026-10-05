@@ -188,10 +188,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     saving) is MySQL's.
   - A connection whose `character_set_results` or collation the copy does
     not reproduce (`SET NAMES latin1`, `SET NAMES utf8`, `utf8mb4_general_ci`,
-    a `_bin` collation) is MySQL's. On MariaDB 10.11 that includes
-    every connection that names no collation, since the server default
-    there is `utf8mb4_general_ci`: name `utf8mb4_unicode_ci` on the
-    connection or as the server's `collation_server`.
+    a `_bin` collation) is MySQL's.
+  - MariaDB 10.11 does not know the collation the port's login asks for
+    (`utf8mb4_0900_ai_ci`) and would leave every connection in
+    `utf8mb4_general_ci`, where the copy never answers. The port now names
+    `utf8mb4_unicode_ci` on a new connection to such a source, so the copy
+    answers a default connection on 10.11 as it does on 11.4 and MySQL.
+    A client that sends `SET NAMES utf8mb4` with no `COLLATE` puts the
+    session back in `utf8mb4_general_ci` there, and MySQL answers.
   - A time-travel statement on a routed connection runs only when the
     source's session is in UTC, and is refused with error 1235 naming the
     zone otherwise. It used to run as UTC whatever the session's zone was.

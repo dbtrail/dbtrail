@@ -518,12 +518,17 @@ The decision, in order, for every statement:
 
    **MariaDB 10.11.** The port asks the source for MySQL's default
    collation, `utf8mb4_0900_ai_ci`. MariaDB 11.4 knows it; 10.11 does not
-   and gives the connection its server default, `utf8mb4_general_ci`, under
-   which the copy does not answer (the log says so, once per connection,
-   with the fix). Name a collation that compares like the copy on the
-   connection (`SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci`, or the
-   driver's own option for it), or set the server's `collation_server` to
-   it.
+   and would leave the connection in `utf8mb4_general_ci`, under which the
+   copy does not answer. So on a new connection to a MariaDB source the
+   port asks which collation the session got, and when it is not the one
+   it asked for it sends `SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci`
+   before anything of the client's: one extra statement per connection on
+   MariaDB 11.4 and later, two on 10.11, none on MySQL. The copy then
+   answers a connection that names no collation on every supported
+   version. A client that sets a collation itself keeps it: `SET NAMES
+   utf8mb4` with no `COLLATE` means `utf8mb4_general_ci` on 10.11, and
+   MySQL answers that connection (the log says so, once, with the
+   setting). Send `SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci` instead.
 
    Two things the port does not see. A session setting changed by a stored
    function that a `SELECT` calls: the statement is a read by its text, so

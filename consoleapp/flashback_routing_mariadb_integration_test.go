@@ -77,13 +77,7 @@ func TestIntegrationFlashbackReadRoutingMariaDBSource(t *testing.T) {
 	}()
 	t.Cleanup(func() { cancel(); <-served })
 
-	// The connection names a collation that compares like the copy does.
-	// What MariaDB 10.11 gives by default (utf8mb4_general_ci) does not, and under
-	// it the copy does not answer (flashback_routing_session_2082).
-	conn, err := sql.Open("mysql", fmt.Sprintf("%s:tok@tcp(%s)/%s?parseTime=true&timeout=5s&collation_connection=utf8mb4_unicode_ci", ent.ID, ln.Addr(), srcName))
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := openFlashback(t, ln.Addr().String(), ent.ID, "tok", srcName)
 	defer conn.Close()
 	first := func(q string, args ...any) string {
 		t.Helper()

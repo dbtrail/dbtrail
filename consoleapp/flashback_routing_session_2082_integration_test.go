@@ -762,23 +762,29 @@ func TestIntegrationFlashbackRoutedSessionMariaDB(t *testing.T) {
 	if err := rig.src.QueryRow("SELECT @@global.system_time_zone, @@global.time_zone").Scan(&systemZone, &globalZone); err != nil {
 		t.Fatal(err)
 	}
-	// A connection that sent nothing: the port asks for MySQL's default
-	// collation, which MariaDB 11.4 knows and 10.11 does not. There the
-	// connection gets utf8mb4_general_ci, which does not compare like the
-	// copy, and MySQL answers until the connection names another.
+	// A connection that sent nothing. The port's login asks for MySQL's
+	// default collation, which MariaDB 11.4 knows and 10.11 does not: 10.11
+	// would leave the session in utf8mb4_general_ci, which does not compare
+	// like the copy, so the port names utf8mb4_unicode_ci on its new
+	// connection. Either way the copy answers a default connection.
 	if globalZone == "SYSTEM" && systemZone == "UTC" {
 		d := rig.conn(t, "")
-		// What the source gave the port's session (a variable: MySQL answers).
+		// What the port's session has (a variable: MySQL answers).
 		given := connStrings(t, d, "SELECT @@collation_connection")[0][0]
-		want := "copy"
+		t.Logf("a connection that names no collation is in %s", given)
 		if strings.Contains(given, "general") {
-			want = "live"
+			t.Errorf("the port's session is in %s, which the copy does not reproduce", given)
 		}
-		t.Logf("a connection that names no collation is in %s: the full scan is the %s's", given, want)
-		rig.scan(t, d, want)
+		rig.scan(t, d, "copy")
+		// A client that asks for another collation gets it, and MySQL's
+		// answers with it.
+		must(d, "SET NAMES utf8mb4 COLLATE utf8mb4_general_ci")
+		if got := connStrings(t, d, "SELECT @@collation_connection")[0][0]; got != "utf8mb4_general_ci" {
+			t.Errorf("after the client's SET NAMES the session is in %s", got)
+		}
+		rig.scan(t, d, "live")
 	}
 	c := rig.conn(t, "")
-	must(c, "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci")
 	must(c, "SET time_zone = 'Europe/Madrid'")
 	if got, want := rig.scan(t, c, "copy"), inZone(t, "Europe/Madrid"); !reflect.DeepEqual(got, want) {
 		t.Errorf("under Europe/Madrid = %v, want %v", got, want)
