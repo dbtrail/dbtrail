@@ -342,18 +342,18 @@ mysql> UPDATE orders SET status = 'paid' WHERE id = 42;      -- MySQL
 The decision, in order, for every statement:
 
 1. Not a `SELECT` (a write, `SHOW`, `BEGIN`, `SET`, `USE`, a client's
-   connection chatter): **MySQL**. After a `SET` on the connection nothing on
-   that connection goes to the copy any more, because the copy does not
-   honour session settings; the same for `CREATE TEMPORARY TABLE`, `LOCK
-   TABLES` and `PREPARE`, and for a `SET` inside MySQL's executable comment
-   (`/*!40101 SET ... */`). The settings a driver sends when it connects
-   (`SET NAMES`, `SET character_set_*`, `SET autocommit=1`) are forwarded
-   without pinning the connection.
+   connection chatter): **MySQL**. A `SET` does not keep the connection on
+   MySQL: what it did to the session is read when a statement next heads
+   for the copy (step 7). Three statements do, for the rest of the
+   connection, because they change what later statements mean in a way the
+   port cannot read back: `CREATE TEMPORARY TABLE`, `LOCK TABLES` and
+   `PREPARE`.
 2. Inside an explicit transaction (`BEGIN` ... `COMMIT`): **MySQL**, so a
    transaction reads its own writes.
 3. A construct the copy would answer *differently* without an error
    (`GROUP_CONCAT`, `NOW()` and the session-time-zone family, `STR_TO_DATE`,
-   `DATEDIFF`, `COLLATE`, `CAST AS UNSIGNED`, `DIV`, `RAND`, user and system
+   `DATEDIFF`, `WEEK`, `YEARWEEK` and `EXTRACT(WEEK ...)`, a recursive
+   CTE (`WITH RECURSIVE`), `COLLATE`, `CAST AS UNSIGNED`, `DIV`, `RAND`, user and system
    variables, locking reads, `information_schema`, full-text `MATCH`,
    JSON functions and the `->`/`->>` operators, a backslash inside a string
    literal, optimizer hints): **MySQL**.
@@ -450,18 +450,105 @@ The decision, in order, for every statement:
    (the vetoes of step 4) was run against MySQL; on a MariaDB source read
    routing is as experimental, and less measured.
 6. For a plan the copy should take: the copy's snapshot older than
-   `--route-max-copy-age`, or its age unknown: **MySQL**. Otherwise **the
-   copy**, sent exactly as written; the copy refusing it means **MySQL**.
-   (Freshness is checked after the plan on purpose: it costs a snapshot
-   listing, which the cheap reads must not pay.)
+   `--route-max-copy-age`, or its age unknown: **MySQL**. (Freshness is
+   checked after the plan on purpose: it costs a snapshot listing, which
+   the cheap reads must not pay.)
+7. The session. MySQL answers a statement under the connection's session
+   settings (its time zone, its SQL mode and so on); the copy answers the
+   same only when it runs under the same ones. So before a statement goes
+   to the copy, the port must know the source's session on that connection.
+   It asks MySQL for it (one extra round trip, on the same connection to
+   the source) when it does not know: on the first such statement of a
+   connection, and on the first one after any statement that could have
+   changed the session, which is every statement that is not a plain read
+   (a `SET` of anything, a write, `CALL`, transaction control, a statement
+   the port does not recognise). A cheap statement never pays for it, and
+   neither does a run of statements the copy answers. The question is never
+   sent on the heels of a `SET` or a write: it goes out just before a
+   statement that is headed for the copy (or before a time-travel
+   statement, below), so `FOUND_ROWS()`, `ROW_COUNT()` and `SHOW WARNINGS`
+   sent right after a statement read what MySQL has for that statement.
+
+   If the copy reproduces the session, it runs under it: **the copy**, sent
+   exactly as written; the copy refusing it means **MySQL**. If it does
+   not: **MySQL**, for this statement and the next ones, until the session
+   changes again. The connection is not kept on MySQL for good: put the
+   setting back and the copy answers again. The reason is counted as
+   `session_differs`, and DBTrail's log names the setting and its value
+   once per connection (`read routing: the copy does not answer on this
+   connection ...`).
+
+   What is read, and what the copy reproduces:
+
+   | Setting | The copy answers under | Otherwise MySQL answers |
+   |---|---|---|
+   | `time_zone` | `UTC`; a whole-hour offset from `-12:00` to `+14:00`; a zone name, when MySQL's time zone tables, the zone data on DBTrail's host and the copy's own agree on it (below); `SYSTEM` when the source host is in UTC | an offset with minutes (`+05:30`: use `Asia/Kolkata`); `SYSTEM` on a host in any other zone (MySQL does not name that zone in a way the copy can be set to: set `time_zone` to a zone name on the connection, or as the server's default); a zone the three do not agree on |
+   | `sql_select_limit` | any limit of 1 or more, applied to the copy's answer | `0` |
+   | `sql_mode` | any combination of `ONLY_FULL_GROUP_BY`, `STRICT_TRANS_TABLES`, `STRICT_ALL_TABLES`, `NO_ZERO_DATE`, `NO_ZERO_IN_DATE`, `ERROR_FOR_DIVISION_BY_ZERO`, `NO_ENGINE_SUBSTITUTION`, `NO_UNSIGNED_SUBTRACTION`, `NO_AUTO_VALUE_ON_ZERO`, `NO_DIR_IN_CREATE`, `TRADITIONAL` (and MariaDB's `NO_AUTO_CREATE_USER`, `NO_FIELD_OPTIONS`, `NO_KEY_OPTIONS`, `NO_TABLE_OPTIONS`, `SIMULTANEOUS_ASSIGNMENT`), the empty mode included | any other flag: `PAD_CHAR_TO_FULL_LENGTH`, `HIGH_NOT_PRECEDENCE`, `REAL_AS_FLOAT`, `TIME_TRUNCATE_FRACTIONAL`, `ALLOW_INVALID_DATES`, `IGNORE_SPACE`, `ANSI_QUOTES`, `PIPES_AS_CONCAT`, `NO_BACKSLASH_ESCAPES`, `ANSI`, MariaDB's `EMPTY_STRING_IS_NULL`, `TIME_ROUND_FRACTIONAL`, `ORACLE` |
+   | `lc_time_names` | `en_US` | any other locale (`MONTHNAME`, `DAYNAME`) |
+   | `div_precision_increment` | `4` (the default). The copy's `/` and `AVG` still return more decimals than MySQL's there: that is the documented precision difference, not something this setting removes | any other value: it moves MySQL's answer further from the copy's |
+   | `sql_auto_is_null` | `0` | `1` |
+   | `sql_big_selects` | `1` | `0` (MySQL refuses large reads; with `max_join_size` at its default it is 1) |
+   | `character_set_results` | `utf8mb4`; `NULL` or `binary` (no conversion: each column comes in its own character set and says so, as from the copy) | `latin1`, `utf8mb3` and the rest: MySQL converts, the copy answers in utf8mb4 |
+   | the connection's collation (`SET NAMES ... COLLATE`, `collation_connection`), which decides comparisons between two literals (a column carries its own) | one that compares like `utf8mb4_0900_ai_ci`: no case, no accents, `ß` equal to `ss`, a full-width letter equal to the plain one. Measured: `utf8mb4_0900_ai_ci`, `utf8mb4_unicode_ci`, `utf8mb4_unicode_520_ci`, MariaDB's `utf8mb4_uca1400_ai_ci` and the `_nopad_` variants of those. Under the ones that pad (`unicode_ci`, `unicode_520_ci`, `uca1400_ai_ci`, MariaDB's default) one difference stays: `'a' = 'a '` is true on MySQL and false on the copy, as for a column under a PAD SPACE collation | `utf8mb4_general_ci` and `utf8mb4_general_nopad_ci` (`ß` equals `s`, a full-width letter is another letter), `_bin`, `_cs`, `_as_cs` |
+
+   These are session settings whose value MySQL reads when it answers a
+   `SELECT` the vetoes of step 3 let through. `group_concat_max_len` and
+   `timestamp` are not in the table because step 3 already keeps
+   `GROUP_CONCAT` and `NOW()` and its family on MySQL; `default_week_format`
+   because `WEEK` and `YEARWEEK` stay there too. `max_execution_time` is not
+   read: under it MySQL stops a long `SELECT` that the copy would answer.
+
+   **Zone names.** MySQL converts times with its own `mysql.time_zone`
+   tables, the port prints them with the zone data of the host DBTrail runs
+   on, and the copy's engine computes with the data built into it. The
+   three are updated at different times, and a country that changes its
+   daylight saving puts them an hour apart for months. So with the session
+   the port asks MySQL for the zone's offset from UTC at noon UTC of one
+   day in every week, from the start of last year to the end of the year
+   after next, and uses the zone only if its own data and the copy's give
+   the same offset at each of them. It asks the same for January and July
+   of every fifth year from 1970 to 2020, because zone data also differs on
+   the past (measured: MariaDB 11.4's tables and the host's on `EET` in
+   1975 and `WET` in 1970, the copy's engine and the host's on
+   `Africa/Monrovia` before 1972), and under such a zone an old `TIMESTAMP`
+   would print one hour off. Not seen: a difference that begins and ends
+   inside one week, and a past rule that held for less than five years and
+   missed both months. An offset (`+02:00`) needs none of this.
+
+   Two things the port does not see. A session setting changed by a stored
+   function that a `SELECT` calls: the statement is a read by its text, so
+   do not change session settings inside a function on a source this port
+   routes. And a prepared statement keeps, on MySQL, the reading it got
+   under the SQL mode in force when it was prepared; the copy runs each
+   execution under the session of that moment. They differ only for a
+   statement prepared under a mode that changes how it is read
+   (`HIGH_NOT_PRECEDENCE`, `ANSI_QUOTES`, ...) and executed after the mode
+   was set back.
+
+A time-travel statement on a routed connection reads and prints its times
+in UTC, so it runs only when the source's session on that connection is in
+UTC (the port asks, as in step 7, when it does not know); otherwise it is
+refused with error 1235 naming the zone, whatever the connection did
+before, and `SET time_zone = '+00:00'` runs it. When the source cannot be
+asked:
+
+- The connection had a session on the source and it is lost: the statement
+  gets error 2006, like every statement on that connection, and the client
+  reconnects.
+- The source never let the connection in (it is down, or the forwarding
+  account is refused): the statement runs, under UTC. Nothing the client
+  sent ever reached MySQL, so there is no session there to differ from, and
+  time travel is answered from the index alone. This is what keeps time
+  travel working while the source is down.
 
 What this is and is not:
 
 - **The copy's answer is as fresh as its snapshot.** A heavy read served
   from the copy does not see what changed since the last snapshot; that is
   what `--route-max-copy-age` bounds, and why there is no default that turns
-  this on. A `SELECT` that must see the last second belongs in a transaction
-  or behind a `SET`, both of which pin the connection to MySQL.
+  this on. A `SELECT` that must see the last second belongs in a
+  transaction, which MySQL always answers.
 - **The copy's grants are nobody's; the forwarded ones are the registry's.**
   Forwarded statements run with the server's forwarding account, or with
   the source DSN's account when the server has none. Give this port to
@@ -1027,7 +1114,11 @@ MySQL's.
   a closed set: `expensive_plan` (the one reason a statement goes to the
   copy), `cheap_plan`, `bounded_limit` (a small `LIMIT` MySQL answers
   without reading past it), `not_a_select`, `write`, `session_setting`,
-  `settings_set`, `in_transaction`, `veto`, `explain_failed`,
+  `session_differs` (the source's session on that connection holds a setting
+  the copy does not reproduce; DBTrail's log names the setting and its
+  value once per connection), `connection_pinned` (a `CREATE TEMPORARY
+  TABLE`, `LOCK TABLES` or `PREPARE` ran earlier on that connection),
+  `in_transaction`, `veto`, `explain_failed`,
   `copy_age_unknown`, `copy_too_old`, `copy_refused`, `copy_columns_differ`
   (the copy works and declined a `SELECT *` or a `NATURAL JOIN` over a table
   whose columns there are not MySQL's), `show_warnings`,
@@ -1037,8 +1128,8 @@ MySQL's.
   `--route-read-only`; the client got error 1290), and
   `routing_off` (listed for completeness: a daemon binds the router only
   with routing on). A copy that never answers shows up as `copy_refused`,
-  `copy_too_old` or `copy_age_unknown` climbing while `expensive_plan` stays
-  flat; `explain_failed` climbing means MySQL refuses to `EXPLAIN` what the
+  `copy_too_old`, `copy_age_unknown` or `session_differs` climbing while
+  `expensive_plan` stays flat; `explain_failed` climbing means MySQL refuses to `EXPLAIN` what the
   client runs (a table it cannot see, a statement it cannot plan);
   `upstream_lost` climbing means the source is unreachable or the registry's
   source credentials are wrong. Each routed statement counts exactly once,
@@ -1097,10 +1188,13 @@ exits 1 when there is at least one. `--format json` for scripts.
 The copy answers from its last snapshot, so run this on a quiet source or
 right after a snapshot: a copy that is behind the source shows up as a
 `DIFFERENT`, since the tool does not model the port's copy-age check (nor
-its "inside a transaction" and "after a SET" forwarding, nor the copy
-refusing a `SELECT *` it cannot answer with MySQL's columns: such a
-statement is reported `DIFFERENT (columns)` here and is MySQL's under
-routing). A table written
+its "inside a transaction" forwarding or its check of the session's
+settings, nor the copy refusing a `SELECT *` it cannot answer with MySQL's
+columns: such a statement is reported `DIFFERENT (columns)` here and is
+MySQL's under routing). To compare under a session time zone, give it to
+both sides in the DSNs, the way a driver sets it when it connects
+(`...?time_zone=%27Europe%2FMadrid%27` on `--source-dsn` and on
+`--copy-dsn`). A table written
 DURING the run shows up as `INCONCLUSIVE: source changed`. Same rows in a
 different order are counted apart and never fail the run: ties in an `ORDER
 BY` resolve differently on each engine, and so does a collation difference

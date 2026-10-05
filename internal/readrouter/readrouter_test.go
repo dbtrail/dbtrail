@@ -110,20 +110,6 @@ func TestVeto(t *testing.T) {
 		"SELECT `a\\b` FROM t WHERE c = 'x'",                // nor one in a backtick identifier
 		"SELECT json_col, jsonish FROM t",                   // a column named like the functions, no call
 	}
-	harmless := map[string]bool{
-		"SET NAMES utf8mb4":                            true,
-		"SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci": true,
-		"SET character_set_results = utf8mb4":          true,
-		"SET autocommit = 1":                           true,
-		"SET autocommit = 0":                           false,
-		"SET time_zone = '+00:00'":                     false,
-		"SET sql_mode = ''":                            false,
-	}
-	for stmt, want := range harmless {
-		if got := HarmlessSet(stmt); got != want {
-			t.Errorf("HarmlessSet(%q) = %v, want %v", stmt, got, want)
-		}
-	}
 	if got := LeadingKeyword("/*!40101 drop table t */"); got != "DROP" {
 		t.Errorf("LeadingKeyword = %q", got)
 	}
@@ -203,5 +189,131 @@ func TestParsePlan_shapes(t *testing.T) {
 	}
 	if _, err := ParsePlan([]byte(`{"x": 1}`)); err == nil {
 		t.Error("JSON without query_block accepted")
+	}
+}
+
+// An empty comment in front of a statement that has another comment later
+// used to swallow the whole statement: it classified as "other", so a SET
+// was forwarded without the port noticing it was one.
+func TestClassify_emptyLeadingComment(t *testing.T) {
+	cases := map[string]Kind{
+		"/**/SET time_zone='+05:00'/**/":         KindSet,
+		"/**/ SET time_zone = '+05:00' /* x */":  KindSet,
+		"/**//**/SELECT 1 /* x */":               KindSelect,
+		"/**/UPDATE t SET a = 1 /**/":            KindWrite,
+		"/**/ /* a */ BEGIN /* b */":             KindTxnBegin,
+		"/***/SET time_zone='+05:00'/**/":        KindSet,
+		"/**/ /*!40101 SET time_zone='+05:00'*/": KindSet,
+		// An executable comment that only opens the statement.
+		"/*!50000 SET max_join_size = 1, */ time_zone = '+05:00'": KindSet,
+		"/*!50000 SEL*/ECT 1": KindSet,
+		// MariaDB's executable comment: the same code to MariaDB, a comment
+		// to MySQL. Read as the code it may be.
+		"/*M! SET time_zone = '+05:00' */":       KindSet,
+		"/*M!100100 SET time_zone = '+05:00' */": KindSet,
+		"/*M!100100 SET */ time_zone = '+05:00'": KindSet,
+		"/*M*/SET time_zone = '+05:00' /* x */":  KindSet,
+		"/* Mx */ /*M x*/ SELECT 1 /* y */":      KindSelect,
+		// A control byte MySQL reads as white space.
+		"\vSET time_zone = '+05:00'":    KindSet,
+		"\f\v SET time_zone = '+05:00'": KindSet,
+		"\x01SELECT 1":                  KindSelect,
+		"\v/* c */\vUPDATE t SET a = 1": KindWrite,
+		"\vBEGIN":                       KindTxnBegin,
+	}
+	for stmt, want := range cases {
+		if got := Classify(stmt); got != want {
+			t.Errorf("Classify(%q) = %s, want %s", stmt, got, want)
+		}
+	}
+	if got := LeadingKeyword("/**/UPDATE t SET a = 1 /**/"); got != "UPDATE" {
+		t.Errorf("LeadingKeyword = %q, want UPDATE", got)
+	}
+	if ReadOnlyRefusal("/**/UPDATE t SET a = 1 /**/") == "" {
+		t.Error("a write behind an empty comment is not refused by read-only mode")
+	}
+}
+
+// PlainRead: only what is positively a read leaves the session known. The
+// read-only screen allows more (SET, USE, transaction control), and none of
+// that is a read.
+func TestPlainRead(t *testing.T) {
+	reads := []string{
+		"SELECT 1", "select * from t where a = 'x'", "(SELECT 1) UNION (SELECT 2)", "WITH c AS (SELECT 1) SELECT * FROM c",
+		"TABLE t", "VALUES ROW(1)", "SHOW TABLES", "SHOW WARNINGS", "SHOW COUNT(*) WARNINGS", "DESCRIBE t", "DESC t",
+		"EXPLAIN SELECT * FROM t", "EXPLAIN FORMAT=JSON SELECT * FROM t", "EXPLAIN ANALYZE SELECT * FROM t",
+		"/* c */ SELECT 1 -- x", "\vSELECT 1", "SELECT @a := 1", "SELECT 'it''s; SET x = 1'", "ANALYZE SELECT * FROM t",
+	}
+	for _, stmt := range reads {
+		if !PlainRead(stmt) {
+			t.Errorf("PlainRead(%q) = false, want true", stmt)
+		}
+	}
+	notReads := []string{
+		"XA START 'x'", "XA COMMIT 'x'", "XA RECOVER", "FROBNICATE the session", "SELEKT 1", "SHOWW TABLES", "TABLEAU t",
+		"SET time_zone = '+00:00'", "SET NAMES utf8mb4", "SET autocommit = 1", "SET @x = 1", "\vSET time_zone = 'UTC'",
+		"/*!40101 SET time_zone = 'UTC' */", "/*M! SET time_zone = 'UTC' */", "/*M!100100 SET time_zone = 'UTC' */",
+		"SELECT /*!40001 SQL_NO_CACHE */ * FROM t", "SELECT /*M! 1, */ 2",
+		"USE shop", "BEGIN", "START TRANSACTION", "COMMIT", "ROLLBACK", "SAVEPOINT a", "RELEASE SAVEPOINT a",
+		"BEGIN NOT ATOMIC SET time_zone = 'UTC'; END", "EXECUTE IMMEDIATE 'SET time_zone = ''UTC'''", "EXECUTE s", "PREPARE s FROM 'SELECT 1'",
+		"CALL p()", "DO f()", "INSERT INTO t VALUES (1)", "UPDATE t SET a = 1", "DELETE FROM t", "REPLACE INTO t VALUES (1)",
+		"CREATE TEMPORARY TABLE x (id INT)", "LOCK TABLES t READ", "UNLOCK TABLES", "HANDLER t OPEN", "FLUSH TABLES", "ANALYZE TABLE t",
+		"SELECT 1 INTO @x", "SELECT * FROM t INTO OUTFILE '/tmp/x'", "SELECT * FROM t FOR UPDATE", "SELECT GET_LOCK('a', 1)",
+		"SELECT 1; SET time_zone = 'UTC'", "WITH c AS (SELECT 1) DELETE FROM t", "EXPLAIN ANALYZE DELETE FROM t",
+		"FROBNICATE", "", "SELECT 'unterminated", "SELECT 1 /* unterminated",
+	}
+	for _, stmt := range notReads {
+		if PlainRead(stmt) {
+			t.Errorf("PlainRead(%q) = true, want false: it can change the session, or is not known to be a read", stmt)
+		}
+	}
+	// The read-only screen and this agree on every statement that is a read:
+	// nothing is a plain read that the screen refuses.
+	for _, stmt := range append(reads, notReads...) {
+		if PlainRead(stmt) && ReadOnlyRefusal(stmt) != "" {
+			t.Errorf("%q is a plain read and refused by read-only mode at once", stmt)
+		}
+	}
+}
+
+// WEEK and YEARWEEK number weeks by default_week_format on MySQL and by ISO
+// weeks on the copy, which differ at the default: they stay on MySQL.
+// WEEKOFYEAR is ISO on both.
+func TestVeto_weekNumbering(t *testing.T) {
+	for _, stmt := range []string{"SELECT WEEK(d), count(*) FROM t GROUP BY 1", "SELECT yearweek (d) FROM t", "SELECT YEARWEEK(d, 3) FROM t"} {
+		if Veto(stmt) != "WEEK/YEARWEEK" {
+			t.Errorf("Veto(%q) = %q, want WEEK/YEARWEEK", stmt, Veto(stmt))
+		}
+	}
+	for _, stmt := range []string{"SELECT EXTRACT(WEEK FROM d), count(*) FROM t GROUP BY 1", "SELECT extract ( week\nFROM d) FROM t"} {
+		if Veto(stmt) != "EXTRACT(WEEK ...)" {
+			t.Errorf("Veto(%q) = %q, want EXTRACT(WEEK ...)", stmt, Veto(stmt))
+		}
+	}
+	for _, stmt := range []string{"SELECT WEEKOFYEAR(d) FROM t", "SELECT week FROM t", "SELECT 'week(' FROM t", "SELECT weekday(d) FROM t",
+		"SELECT EXTRACT(YEAR FROM d) FROM t", "SELECT EXTRACT(DAY FROM week_start) FROM t"} {
+		if Veto(stmt) != "" {
+			t.Errorf("Veto(%q) = %q, want none", stmt, Veto(stmt))
+		}
+	}
+}
+
+// A recursive CTE runs to the end on the copy, where MySQL stops with an
+// error at cte_max_recursion_depth and MariaDB cuts the result at
+// max_recursive_iterations (1000 by default on both): it stays on MySQL.
+func TestVeto_recursiveCTE(t *testing.T) {
+	for _, stmt := range []string{
+		"WITH RECURSIVE n AS (SELECT 1 AS i UNION ALL SELECT i + 1 FROM n WHERE i < 50) SELECT count(*) FROM n",
+		"with\n recursive n AS (SELECT 1) SELECT * FROM n",
+		"SELECT * FROM t WHERE id IN (WITH RECURSIVE n AS (SELECT 1) SELECT * FROM n)",
+	} {
+		if got := Veto(stmt); got != "WITH RECURSIVE" {
+			t.Errorf("Veto(%q) = %q, want WITH RECURSIVE", stmt, got)
+		}
+	}
+	for _, stmt := range []string{"WITH n AS (SELECT 1) SELECT * FROM n", "SELECT recursive FROM t", "SELECT 'with recursive' FROM t"} {
+		if got := Veto(stmt); got != "" {
+			t.Errorf("Veto(%q) = %q, want none", stmt, got)
+		}
 	}
 }

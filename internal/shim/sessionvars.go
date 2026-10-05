@@ -36,7 +36,8 @@ import (
 //
 // Two modes do not come through here. With no free SQL bound (time travel
 // only) the three stay chatter, as before. Under read routing every SET is
-// MySQL's: it is forwarded and pins the connection to MySQL (route).
+// MySQL's and only forwarded; the source's session is read back from MySQL
+// when a statement next heads for the copy (routedsession.go).
 
 // sessionVars is what one connection set. The zero value is the port's own
 // defaults: UTC, no SQL mode, no select limit.

@@ -61,8 +61,8 @@ type FreeSQL interface {
 
 // Router is the read-routing seam (#2038): with one bound, an ordinary
 // statement is no longer run on the copy by default. Everything that is not
-// a SELECT, everything inside a transaction or after a session SET, every
-// vetoed construct and every statement whose plan is cheap is FORWARDED to
+// a SELECT, everything inside a transaction, every vetoed construct and every
+// statement whose plan is cheap is FORWARDED to
 // MySQL and answered with MySQL's own result; only a SELECT whose plan is
 // expensive runs on the copy, and when the copy refuses it MySQL runs it
 // instead. The implementation (internal/readrouter) holds one upstream
@@ -146,7 +146,7 @@ const (
 	RouteReasonWrite          RouteReason = "write"            // INSERT/UPDATE/DELETE/DDL
 	RouteReasonSessionSetting RouteReason = "session_setting"  // a SET statement
 	RouteReasonInTransaction  RouteReason = "in_transaction"   // read-your-writes
-	RouteReasonSettingsSet    RouteReason = "settings_set"     // a SET earlier on this connection
+	RouteReasonSessionDiffers RouteReason = "session_differs"  // the source's session holds a setting the copy does not reproduce
 	RouteReasonRoutingOff     RouteReason = "routing_off"      // MaxCopyAge is zero
 	RouteReasonVeto           RouteReason = "veto"             // a construct the copy answers differently
 	RouteReasonExplainFailed  RouteReason = "explain_failed"   // EXPLAIN did not run (MySQL refused it)
@@ -160,6 +160,10 @@ const (
 	RouteReasonExpensivePlan  RouteReason = "expensive_plan"   // the one reason a statement goes to the copy
 	RouteReasonReadOnly       RouteReason = "read_only"        // refused: not a read, and the port is read-only
 )
+
+// RouteReasonPinned: a CREATE TEMPORARY TABLE, LOCK TABLES or PREPARE ran
+// earlier on this connection, and nothing on it goes to the copy any more.
+const RouteReasonPinned RouteReason = "connection_pinned"
 
 // RouteReasonCopyColumnsDiffer: the copy declined a star or a NATURAL JOIN
 // over a table whose columns there are not MySQL's (#2111). A decision, not a
@@ -229,12 +233,30 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	if err := h.readOnlyRefusal(qstr); err != nil {
 		return nil, err
 	}
+	// Whatever is forwarded and is not positively a plain read may change
+	// the source's session: the port stops assuming it knows it
+	// (routedsession.go). Marked after the statement ran, whatever it
+	// answered: a failed CALL may have set half of what it meant to.
+	if !readrouter.PlainRead(qstr) {
+		forward := ops.forward
+		ops.forward = func(reason RouteReason, detail string) (*mysql.Result, error) {
+			res, err := forward(reason, detail)
+			h.markSessionUnknown()
+			return res, err
+		}
+	}
 	kind := readrouter.Classify(qstr)
 	switch kind {
 	case readrouter.KindSet:
-		if !readrouter.HarmlessSet(qstr) {
+		// A SET is MySQL's and nothing more: what it did to the session is
+		// read back when a statement next heads for the copy. The other
+		// statements of this kind (CREATE TEMPORARY TABLE, LOCK TABLES,
+		// PREPARE, and anything opening with an executable comment) change
+		// what later statements mean in ways no read-back shows: they keep
+		// the connection on MySQL for good.
+		if readrouter.LeadingKeyword(qstr) != "SET" {
 			h.mu.Lock()
-			h.routeSettingsSet = true
+			h.routePinned = true
 			h.mu.Unlock()
 		}
 		return ops.forward(RouteReasonSessionSetting, "session setting")
@@ -248,13 +270,13 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		return ops.forward(RouteReasonNotASelect, "not a select")
 	}
 	h.mu.Lock()
-	settingsSet := h.routeSettingsSet
+	pinned := h.routePinned
 	h.mu.Unlock()
 	switch {
 	case h.router.InTransaction():
 		return ops.forward(RouteReasonInTransaction, "in transaction")
-	case settingsSet:
-		return ops.forward(RouteReasonSettingsSet, "session settings were set on this connection")
+	case pinned:
+		return ops.forward(RouteReasonPinned, "a temporary table, a table lock or a PREPARE earlier on this connection")
 	case h.routerCfg.MaxCopyAge <= 0:
 		return ops.forward(RouteReasonRoutingOff, "routing to the copy is off (no max copy age)")
 	}
@@ -288,6 +310,12 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	}
 	if age := time.Since(at); age > h.routerCfg.MaxCopyAge {
 		return ops.forward(RouteReasonCopyTooOld, fmt.Sprintf("copy is %s old, max %s", age.Round(time.Second), h.routerCfg.MaxCopyAge))
+	}
+	// Last, the source's session: the copy answers only under one it
+	// reproduces. Asked here and not earlier, so only a statement that
+	// would otherwise go to the copy pays the read-back.
+	if why := h.sessionKeepsCopyFromAnswering(ctx); why != "" {
+		return ops.forward(RouteReasonSessionDiffers, "session differs: "+why)
 	}
 	res, err := ops.runCopy(d.Reason)
 	var differ *sqlsandbox.ColumnsDifferError
@@ -511,8 +539,9 @@ func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string) (*mysql.Res
 	ctx, cancel := h.queryContext()
 	defer cancel()
 	stmt, schema := rewriteForDuckDB(qstr, schema)
-	// What the connection set for itself (#2035). Always zero under routing:
-	// there a SET is MySQL's and never reaches sessVars.
+	// What the connection set for itself (#2035). Under routing: the
+	// source's session as read back just before this statement was sent
+	// here (#2082, routedsession.go).
 	h.mu.Lock()
 	vars := h.sessVars
 	h.mu.Unlock()

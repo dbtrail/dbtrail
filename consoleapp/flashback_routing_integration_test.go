@@ -325,12 +325,20 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// ...until a session SET pins the connection to MySQL.
+	// ...until a statement that changes what later ones mean in a way the
+	// port cannot read back (here a temporary table) pins the connection to
+	// MySQL. A SET does not: flashback_routing_session_2082.
 	if _, err := conn.Exec("SET time_zone = '+00:00'"); err != nil {
 		t.Fatal(err)
 	}
+	if got := side("SELECT status, count(*) FROM orders GROUP BY status ORDER BY status LIMIT 1"); got != "copy" {
+		t.Errorf("full scan after a session SET answered %q, want copy", got)
+	}
+	if _, err := conn.Exec("CREATE TEMPORARY TABLE pin_me (id INT)"); err != nil {
+		t.Fatal(err)
+	}
 	if got := side("SELECT status, count(*) FROM orders GROUP BY status ORDER BY status LIMIT 1"); got == "copy" {
-		t.Error("full scan after a session SET still answered from the copy")
+		t.Error("full scan after CREATE TEMPORARY TABLE still answered from the copy")
 	}
 
 	// A copy older than the max age never answers: same server, a port
@@ -353,8 +361,8 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 			t.Errorf("sql.run detail = %v, want route=copy with the scan reason", ev.Detail)
 		}
 	}
-	if copyServed != 4 {
-		t.Errorf("audited %d copy-served statements, want 4 (the GROUP BYs the copy answered: two as text, two prepared)", copyServed)
+	if copyServed != 5 {
+		t.Errorf("audited %d copy-served statements, want 5 (the GROUP BYs the copy answered: three as text, two prepared)", copyServed)
 	}
 
 	// The tally the Connect page reads: who answered, and why MySQL, per
@@ -391,15 +399,15 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 		t.Fatalf("no tally for server %s (keyed by id): %v", ent.ID, fb.Routing.Servers)
 	}
 	wantReasons := map[string]uint64{
-		"expensive_plan":  4, // the GROUP BYs the copy answered: two as text, two prepared
-		"copy_refused":    1, // CONVERT … USING (expensive by plan, DuckDB syntax error)
-		"veto":            1, // GROUP_CONCAT
-		"explain_failed":  1, // SELECT * FROM nope
-		"write":           5, // the UPDATE; prepared: three UPDATEs and the duplicate INSERT
-		"in_transaction":  2, // one as text, one prepared
-		"session_setting": 1, // SET time_zone
-		"settings_set":    1, // the GROUP BY after it
-		"copy_too_old":    1, // the strict port
+		"expensive_plan":    5, // the GROUP BYs the copy answered: three as text (one after the SET), two prepared
+		"copy_refused":      1, // CONVERT … USING (expensive by plan, DuckDB syntax error)
+		"veto":              1, // GROUP_CONCAT
+		"explain_failed":    1, // SELECT * FROM nope
+		"write":             5, // the UPDATE; prepared: three UPDATEs and the duplicate INSERT
+		"in_transaction":    2, // one as text, one prepared
+		"session_setting":   2, // SET time_zone, CREATE TEMPORARY TABLE
+		"connection_pinned": 1, // the GROUP BY after the temporary table
+		"copy_too_old":      1, // the strict port
 		// The two point lookups, and `SELECT id FROM big ORDER BY id`: MySQL
 		// walks the primary key (access_type index, not ALL), so with the cost
 		// rule off it is cheap and MySQL streams it — the copy never saw big.
@@ -412,8 +420,8 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 			t.Errorf("reasons[%s] = %d, want %d (all: %v)", reason, got, want, tally.Reasons)
 		}
 	}
-	if tally.Copy != 4 {
-		t.Errorf("copy = %d, want 4", tally.Copy)
+	if tally.Copy != 5 {
+		t.Errorf("copy = %d, want 5", tally.Copy)
 	}
 	var mysqlSum uint64
 	for reason, n := range tally.Reasons {

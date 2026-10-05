@@ -271,6 +271,10 @@ jobs:
       # coverage of the flagship capture->index->query->recover pipeline.
       # Mirrors BINTRAIL_REQUIRE_MARIADB / BINTRAIL_REQUIRE_POSTGRES (#949).
       BINTRAIL_REQUIRE_MYSQL: "1"
+      # This job's MySQL is its own, and its packages run one at a time, so a
+      # test may change the server's GLOBAL time_zone and sql_mode (and put
+      # them back): the read router's "source defaults" test needs it.
+      BINTRAIL_TEST_ALLOW_SET_GLOBAL: "1"
       # The Iceberg export's integration leg reads its tables back with
       # DuckDB's iceberg extension; require it so the read-back never skips.
       BINTRAIL_REQUIRE_DUCKDB_ICEBERG: "1"

@@ -25,11 +25,29 @@ type fakeFreeSQL struct {
 	gotSess   sqlsandbox.Session
 	updatedAt time.Time
 	ageCalls  int
+	// The copy's own zone conversion, asked once per zone before the copy
+	// runs under a named zone (routedsession.go): zoneProbes counts the
+	// asks, zoneErr fails them, zoneOffsets replaces the answer.
+	zoneProbes  int
+	zoneErr     error
+	zoneOffsets func(zone string, at []time.Time, fromZone []string) []string
 }
 
 func (f *fakeFreeSQL) CopyUpdatedAt(context.Context) time.Time { f.ageCalls++; return f.updatedAt }
 
 func (f *fakeFreeSQL) Run(_ context.Context, statement, schema string, sess sqlsandbox.Session) (sqlsandbox.Result, error) {
+	if strings.HasPrefix(statement, copyZoneProbePrefix) {
+		f.zoneProbes++
+		if f.zoneErr != nil {
+			return sqlsandbox.Result{}, f.zoneErr
+		}
+		at := probeInstantsIn(statement)
+		offs := zoneOffsets(sess.TimeZone, at)
+		if f.zoneOffsets != nil {
+			offs = f.zoneOffsets(sess.TimeZone, at, offs)
+		}
+		return oneCell("offsets", "VARCHAR", strings.Join(offs, ",")), nil
+	}
 	f.calls++
 	f.gotStmt, f.gotSchema, f.gotSess = statement, schema, sess
 	return f.res, f.err
