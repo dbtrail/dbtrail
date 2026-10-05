@@ -22,6 +22,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/parser"
+	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -52,6 +53,7 @@ import (
 // stmtTimeRow is one indexed change of one row, in the order the index holds.
 type stmtTimeRow struct {
 	id       uint64
+	file     string
 	pos      uint64
 	at       time.Time
 	commitUS sql.NullInt64
@@ -60,7 +62,7 @@ type stmtTimeRow struct {
 
 func stmtTimeRows(t *testing.T, indexDB *sql.DB, schema, pk string) []stmtTimeRow {
 	t.Helper()
-	rows, err := indexDB.Query(`SELECT event_id, start_pos, event_timestamp, commit_ts_us,
+	rows, err := indexDB.Query(`SELECT event_id, binlog_file, start_pos, event_timestamp, commit_ts_us,
 			JSON_UNQUOTE(JSON_EXTRACT(row_after, '$.v'))
 		FROM binlog_events WHERE schema_name = ? AND table_name = 't' AND pk_values = ?
 		ORDER BY event_id`, schema, pk)
@@ -71,7 +73,7 @@ func stmtTimeRows(t *testing.T, indexDB *sql.DB, schema, pk string) []stmtTimeRo
 	var out []stmtTimeRow
 	for rows.Next() {
 		var r stmtTimeRow
-		if err := rows.Scan(&r.id, &r.pos, &r.at, &r.commitUS, &r.v); err != nil {
+		if err := rows.Scan(&r.id, &r.file, &r.pos, &r.at, &r.commitUS, &r.v); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
 		out = append(out, r)
@@ -155,8 +157,9 @@ func runStatementTimeShapes(t *testing.T, sourceDB *sql.DB) {
 		t.Fatalf("twice-B: %v", err)
 	}
 
-	// long: rows 41, 42, 43 are read in key order, 1.5 s each.
-	done = blocked("UPDATE t SET v = 'long' WHERE id BETWEEN 41 AND 43 AND SLEEP(1.5) = 0")
+	// long: rows 41, 42, 43 are read in key order, 2.5 s each, so row 43 is
+	// free for four seconds after the quick update is sent.
+	done = blocked("UPDATE t SET v = 'long' WHERE id BETWEEN 41 AND 43 AND SLEEP(2.5) = 0")
 	waitStatementAge(t, sourceDB, "'long'", 1)
 	stmtTimeExec(t, ctx, a, "UPDATE t SET v = 'quick' WHERE id = 43")
 	if err := <-done; err != nil {
@@ -200,16 +203,20 @@ func assertStatementTimeShapes(t *testing.T, sourceDB, indexDB *sql.DB, schema s
 				if r.commitUS.Valid {
 					commit = time.UnixMicro(r.commitUS.Int64).UTC().Format("15:04:05.000000")
 				}
-				t.Logf("row %s change %d: event_id=%d start_pos=%d event_timestamp=%s commit_ts_us=%s v=%s",
-					tc.pk, i, r.id, r.pos, r.at.UTC().Format("15:04:05"), commit, r.v)
+				t.Logf("row %s change %d: event_id=%d at=%s:%d event_timestamp=%s commit_ts_us=%s v=%s",
+					tc.pk, i, r.id, r.file, r.pos, r.at.UTC().Format("15:04:05"), commit, r.v)
 			}
 
 			// The index a stream writes holds one row's changes in binlog
 			// order: ids and positions both ascend, and the last is the truth.
+			// By file and position (another test may rotate the log of a
+			// shared server), which is the rule the snapshot fold uses.
 			for i := 1; i < len(rows); i++ {
-				if rows[i].pos <= rows[i-1].pos {
-					t.Errorf("row %s: event_id %d is at position %d, not after event_id %d at %d",
-						tc.pk, rows[i].id, rows[i].pos, rows[i-1].id, rows[i-1].pos)
+				prev := &query.ResultRow{EventID: rows[i-1].id, BinlogFile: rows[i-1].file, StartPos: rows[i-1].pos}
+				cur := &query.ResultRow{EventID: rows[i].id, BinlogFile: rows[i].file, StartPos: rows[i].pos}
+				if !query.LaterInBinlog(cur, prev) {
+					t.Errorf("row %s: event_id %d at %s:%d is not after event_id %d at %s:%d",
+						tc.pk, rows[i].id, rows[i].file, rows[i].pos, rows[i-1].id, rows[i-1].file, rows[i-1].pos)
 				}
 			}
 			last := rows[len(rows)-1]

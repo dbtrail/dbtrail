@@ -105,6 +105,30 @@ func TestFoldPage_keepsTheChangeTheBinlogHoldsLast(t *testing.T) {
 			}
 		}
 	})
+	t.Run("positions that are not places: the one that arrives last", func(t *testing.T) {
+		// MariaDB 11.4 rows from a build before #1180 hold 2^64 - event size
+		// as their start. A bigger event gives a smaller number; neither says
+		// where the event is.
+		x := orderEvent(1, 0, f, 1<<64-40, "1", "first")
+		y := orderEvent(2, 2, f, 1<<64-60, "1", "second")
+		if got := keptValue(t, foldPages(t, []query.ResultRow{x}, []query.ResultRow{y}), "1"); got != "second" {
+			t.Fatalf("row 1 = %v, want second", got)
+		}
+		z := orderEvent(3, 4, f, 300, "1", "third")
+		if got := keptValue(t, foldPages(t, []query.ResultRow{x}, []query.ResultRow{z}), "1"); got != "third" {
+			t.Fatalf("row 1 = %v, want third", got)
+		}
+	})
+	t.Run("one compressed transaction: the higher id", func(t *testing.T) {
+		// Every row event of a compressed transaction carries the payload
+		// event's coordinate. A statement of it that ran under an earlier
+		// SET TIMESTAMP arrives first; capture read it second.
+		second := orderEvent(2, 0, f, 100, "1", "second")
+		first := orderEvent(1, 3, f, 100, "1", "first")
+		if got := keptValue(t, foldPages(t, []query.ResultRow{second}, []query.ResultRow{first}), "1"); got != "second" {
+			t.Fatalf("row 1 = %v, want second", got)
+		}
+	})
 	t.Run("other rows are untouched", func(t *testing.T) {
 		other := orderEvent(3, 1, f, 50, "2", "other")
 		res := foldPages(t, []query.ResultRow{b, other, a})

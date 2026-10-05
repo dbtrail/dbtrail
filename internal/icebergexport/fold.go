@@ -89,7 +89,7 @@ func (f *fold) addPage(page []query.ResultRow) error {
 			return fmt.Errorf("event %d for %s.%s pk %q has event type %d, which the export cannot apply", ev.EventID, f.schema, f.table, ev.PKValues, ev.EventType)
 		}
 		f.events++
-		op.at = query.ResultRow{BinlogFile: ev.BinlogFile, StartPos: ev.StartPos}
+		op.at = query.ResultRow{EventID: ev.EventID, BinlogFile: ev.BinlogFile, StartPos: ev.StartPos}
 		cur, seen := f.ops[ev.PKValues]
 		if !seen {
 			f.order = append(f.order, ev.PKValues)

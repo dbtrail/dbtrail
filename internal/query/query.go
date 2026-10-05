@@ -217,14 +217,38 @@ func (p BinlogPos) AtOrBefore(q BinlogPos) bool {
 // a caller that keeps "the last change of a row" must ask this, not rely on
 // the order rows arrive in.
 //
-// Two events at the same coordinate are the images of one rows event (or rows
-// with no coordinate at all); neither is later, and the caller's arrival order
-// (ascending event_id within one event) stands.
+// Two events at the same coordinate came out of one binary log event: the
+// images of one rows event, or the statements of one compressed transaction
+// (binlog_transaction_compression), whose row events all carry the
+// coordinate of the payload event around them. Capture gave them ascending
+// event_ids in the order it read them, on any kind of index, so the higher
+// id is the later one.
+//
+// When either event has no coordinate to compare, the answer is false both
+// ways and the caller's arrival order stands, as it did before this rule. That
+// is a row with no file, and a row indexed from MariaDB 11.4 by a build before
+// #1180: those stored start_pos = 2^64 - event size (the server writes a zero
+// end position there, #1117), which is a number and not a place in the file.
 //
 // MySQL and MariaDB only. A PostgreSQL row carries an LSN as text in
 // BinlogFile, which this rule does not order.
 func LaterInBinlog(a, b *ResultRow) bool {
-	return !BinlogPos{File: a.BinlogFile, Pos: a.StartPos}.AtOrBefore(BinlogPos{File: b.BinlogFile, Pos: b.StartPos})
+	if !hasBinlogCoordinate(a) || !hasBinlogCoordinate(b) {
+		return false
+	}
+	pa := BinlogPos{File: a.BinlogFile, Pos: a.StartPos}
+	pb := BinlogPos{File: b.BinlogFile, Pos: b.StartPos}
+	if pa == pb {
+		return a.EventID > b.EventID
+	}
+	return !pa.AtOrBefore(pb)
+}
+
+// hasBinlogCoordinate reports whether r's start is a real place in a binary
+// log file. No file can reach 2^63 bytes; the underflowed start positions of
+// LaterInBinlog's comment are all above it.
+func hasBinlogCoordinate(r *ResultRow) bool {
+	return r.BinlogFile != "" && r.StartPos < 1<<63
 }
 
 // Options specifies the filter criteria for querying binlog_events.
