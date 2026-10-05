@@ -254,7 +254,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   statement whose text holds the name of a generated column (`STORED` or
   `VIRTUAL`, invisible or not) of a table it reads. The text is searched,
   not parsed, so the name inside a longer word, a string or a comment keeps
-  the statement on MySQL too; a statement over the same table that does not
+  the statement on MySQL too, and so does any character outside ASCII in a
+  statement over such a table; a statement over the same table that does not
   hold the name still goes to the copy, alone or in a join. **A table whose
   snapshot carries no `CREATE TABLE` is no longer answered by the copy
   under routing at all** (before, only its `SELECT *` was held back): which

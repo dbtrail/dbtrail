@@ -818,6 +818,10 @@ What this is and is not:
     too (a table with a generated column called `a` sends nearly every
     statement over it to MySQL). A statement over the same table that does
     not hold the name is the copy's, alone or joined to other tables;
+  - **a statement with any character outside ASCII that reads a table with
+    a generated column**, in a name, a string or a comment: which accented
+    or look-alike letters a server takes for an ASCII one when it compares
+    names depends on the server, so such a statement is not searched;
   - **any statement that reads a table whose missing columns are not known
     by name**: a table whose snapshot carries no `CREATE TABLE` (a snapshot
     older than 0.5, a file whose footer could not be read at that moment), a

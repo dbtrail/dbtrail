@@ -45,11 +45,21 @@ func TestNamesUnlikeMySQL(t *testing.T) {
 		{"inside a longer word", with("twice"), "SELECT twice_as_much FROM gen", "twice"},
 		{"inside a string", with("twice"), "SELECT id FROM gen WHERE a = 'twice'", "twice"},
 		{"inside a comment", with("twice"), "SELECT id /* not twice */ FROM gen", "twice"},
-		// Letters MySQL folds onto ASCII ones when it compares names.
-		{"a Kelvin sign for k", with("mark"), "SELECT marK FROM gen", "mark"},
-		{"a long s for s", with("st"), "SELECT ſt FROM gen", "st"},
-		{"a dotless i for i", with("twice"), "SELECT twıce FROM gen", "twice"},
-		{"a dotted capital I for i", with("twice"), "SELECT twİce FROM gen", "twice"},
+		// A statement with any character outside ASCII is not searched at
+		// all: which letters a server folds onto ASCII ones when it compares
+		// names depends on the server and its version.
+		{"a Kelvin sign for k", with("mark"), "SELECT marK FROM gen", "outside ASCII"},
+		{"a long s for s", with("st"), "SELECT ſt FROM gen", "outside ASCII"},
+		{"a dotless i for i", with("twice"), "SELECT twıce FROM gen", "outside ASCII"},
+		{"a dotted capital I for i", with("twice"), "SELECT twİce FROM gen", "outside ASCII"},
+		{"an accented letter, precomposed", with("twice"), "SELECT a AS twíce FROM gen WHERE twíce = 2", "outside ASCII"},
+		{"an accent as a combining mark", with("twice"), "SELECT a AS twíce FROM gen WHERE twíce = 2", "outside ASCII"},
+		{"the reason names the columns", with("v", "twice"), "SELECT twíce FROM gen", "v, twice"},
+		// The cost: a string outside ASCII keeps the statement on the source.
+		{"a string outside ASCII", with("twice"), "SELECT id FROM gen WHERE a = 'señor'", "outside ASCII"},
+		{"a byte that is not UTF-8", with("twice"), "SELECT id FROM gen WHERE a = '\xff'", "outside ASCII"},
+		// Only for a table that lacks a column: nothing to mistake otherwise.
+		{"outside ASCII over a table that lacks nothing", known, "SELECT twíce, 'señor' FROM gen", ""},
 		// A name that is not plain ASCII letters, digits, _ and $ could be
 		// written in the statement in a way a search does not find.
 		{"a name with a letter outside ASCII", with("año"), "SELECT id FROM gen", "año"},

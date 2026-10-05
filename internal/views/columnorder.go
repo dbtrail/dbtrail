@@ -153,8 +153,11 @@ func (t BaselineTable) StarUnlikeMySQL() string {
 // The text is searched, not parsed. A name that stands in a string, in a
 // comment or inside a longer word keeps the statement on the source too:
 // that costs a statement the copy could have answered, and no reading of the
-// statement can be wrong about it. The search folds case as widely as MySQL
-// does when it compares column names, and a little wider.
+// statement can be wrong about it. The search folds ASCII case only, and a
+// statement with any character outside ASCII over such a table is refused
+// without being searched: which letters outside ASCII a server takes for an
+// ASCII one when it compares names (a Kelvin sign for k, an accented letter)
+// depends on the server and its version, and is not followed here.
 //
 // Three tables are refused whatever the statement says, because what they
 // lack on the copy is not known by name: one with no table definition (a
@@ -163,8 +166,8 @@ func (t BaselineTable) StarUnlikeMySQL() string {
 // columns its definition lists, and one with a column definition that could
 // not be read. Not known is never read as "nothing is missing". The same for
 // a missing column whose name is not plain ASCII letters, digits, _ and $:
-// MySQL folds letters outside ASCII in ways this search does not follow, and
-// a name with a quote in it is written doubled in a statement.
+// a server folds letters outside ASCII in ways this search does not follow,
+// and a name with a quote in it is written doubled in a statement.
 func (t BaselineTable) NamesUnlikeMySQL(statement string) string {
 	switch {
 	case !t.SchemaKnown:
@@ -177,26 +180,34 @@ func (t BaselineTable) NamesUnlikeMySQL(statement string) string {
 	if len(t.NotHeld) == 0 {
 		return ""
 	}
-	folded := foldForNames(statement)
 	for _, name := range t.NotHeld {
 		if !searchableName.MatchString(name) {
 			return "MySQL computes its column " + name + ", which a snapshot does not hold, and that name cannot be looked for in a statement"
 		}
-		if strings.Contains(folded, foldForNames(name)) {
+	}
+	if !isASCII(statement) {
+		return "the statement holds characters outside ASCII, so it cannot be searched for " + strings.Join(t.NotHeld, ", ") +
+			", which MySQL computes and a snapshot does not hold"
+	}
+	folded := strings.ToLower(statement)
+	for _, name := range t.NotHeld {
+		if strings.Contains(folded, strings.ToLower(name)) {
 			return "the statement names " + name + ", a column MySQL computes and a snapshot does not hold"
 		}
 	}
 	return ""
 }
 
+// isASCII reports whether every byte of s is an ASCII one.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
 // searchableName is a column name a statement can only spell one way, up to
 // case: no quote to double, no letter MySQL folds onto another.
 var searchableName = regexp.MustCompile(`^[A-Za-z0-9_$]+$`)
-
-// foldForNames folds a statement so that a search for an ASCII name finds it
-// however MySQL would accept it written: upper and then lower, which also
-// brings the few letters outside ASCII that fold onto ASCII ones (the Kelvin
-// sign, the long s, the dotless i, the dotted capital I) down to them.
-func foldForNames(s string) string {
-	return strings.ToLower(strings.ToUpper(s))
-}
