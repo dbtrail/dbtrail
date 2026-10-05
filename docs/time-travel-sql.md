@@ -760,7 +760,29 @@ What this is and is not:
   A backtick inside a string literal or a comment is left alone. MySQL
   always gets the statement as the client wrote it. Nothing else of MySQL's
   dialect is translated: a function, an operator or a clause the copy does
-  not have is still refused by the copy and answered by MySQL. The rewrite
+  not have is still refused by the copy and answered by MySQL. That costs
+  the failed attempt on the copy before MySQL answers (37 to 55 ms measured
+  on a statement MySQL answers in under 1 ms), so three spellings that ORMs
+  and drivers send, and that the copy always refuses, stay on MySQL without
+  trying the copy (`mysql` / `veto` in the counter, where they used to show
+  as `copy_refused`), as text and as prepared statements:
+  - `LIMIT` with the offset first and a comma: `LIMIT 0, 20`, `LIMIT ?, ?`
+    (what SQLAlchemy sends), in the statement or in a subquery. The copy
+    only reads `LIMIT 20 OFFSET 0`, which is not kept back;
+  - `ORDER BY NULL` (what Django sends after `GROUP BY`, to ask for no
+    sort), also as `ORDER BY NULL, id` and `ORDER BY NULL DESC`. The copy
+    refuses to sort by a constant. A window written `OVER (ORDER BY NULL)`
+    or `OVER (PARTITION BY a ORDER BY NULL)` is not kept back: the copy
+    answers it, with the same rows. `NULL` further down the list (`ORDER BY id, NULL`) and
+    other constants (`ORDER BY 'x'`, `ORDER BY 1.5`) are not recognized:
+    the copy refuses them and MySQL answers after the attempt, as before;
+  - `_binary` before a string (`= _binary'x'`, how some drivers write a
+    bytes argument). `LIKE BINARY`, `BINARY col` and `= BINARY 'x'` were
+    already kept on MySQL. A cast (`CAST(col AS BINARY)`) is not kept
+    back: the copy answered the same in every statement compared, and
+    refuses a cast of a number, a date or text outside ASCII.
+
+  The rewrite
   is not attempted, and the statement stays on MySQL without trying the
   copy, when it would be a guess:
   - a name that holds a backtick (written doubled, `` `a``b` ``) or a double

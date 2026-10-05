@@ -60,6 +60,11 @@ func TestPreparedRouted_ladder(t *testing.T) {
 		{"vetoed: hexadecimal string", "SELECT count(*) FROM t WHERE a = ? AND k = x'41' AND b > ?", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonVeto},
 		{"vetoed: two-part interval unit", "SELECT count(*) FROM t WHERE d > ? + INTERVAL ? MINUTE_SECOND", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonVeto},
 		{"vetoed: date arithmetic", "SELECT count(*) FROM t WHERE d > CAST(? AS DATE) + ?", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonVeto},
+		// What the copy refuses (#2114): kept on MySQL from the template, so
+		// no plan is asked for and the copy is not tried.
+		{"vetoed: LIMIT offset, count", "SELECT a, count(*) FROM t WHERE b = ? GROUP BY a ORDER BY a LIMIT ?, 20", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonVeto},
+		{"vetoed: ORDER BY NULL", "SELECT a, count(*) FROM t WHERE b = ? AND c > ? GROUP BY a ORDER BY NULL", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonVeto},
+		{"vetoed: _binary string", "SELECT count(*) FROM t WHERE a = ? AND b > ? AND k = _binary'x'", fakeRouter{toCopy: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonVeto},
 		{"in transaction", "SELECT count(*) FROM t WHERE a = ? AND b > ?", fakeRouter{toCopy: true, inTxn: true}, fresh, time.Minute, nil, "mysql", false, RouteReasonInTransaction},
 		{"routing off", "SELECT count(*) FROM t WHERE a = ? AND b > ?", fakeRouter{toCopy: true}, fresh, 0, nil, "mysql", false, RouteReasonRoutingOff},
 		{"cheap plan", "SELECT * FROM t WHERE a = ? AND id = ?", fakeRouter{toCopy: false, reason: "cheap"}, fresh, time.Minute, nil, "mysql", true, RouteReasonCheapPlan},
