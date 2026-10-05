@@ -31,7 +31,7 @@ D SELECT c.tier, count(*) AS orders, round(sum(o.total), 2) AS revenue
 
 <p align="center">
 Minutes behind the source. Not high availability, not a backup.
-<a href="#where-it-stops">Where it stops</a>
+<a href="#limits">Limits</a>
 </p>
 
 ---
@@ -56,7 +56,7 @@ DBTrail gives those queries a copy of their own, in a columnar format, outside
 3. **On your schedule, the copy is updated.** DBTrail folds the recorded
    changes into a new Parquet snapshot, from every 5 minutes to once a day.
    The source is not read again, unless a table changes shape
-   (see [Where it stops](#where-it-stops)).
+   (see [Limits](#limits)).
 4. **You query it with DuckDB.** A generated `views.sql` gives you one view
    per table, named like the source table (`shop.orders`), that follows
    the newest snapshot.
@@ -136,7 +136,7 @@ docker run --rm -p 6033:6033 ghcr.io/dbtrail/bintrail-demo
 
 See [the demo image](docs/demo.md).
 
-## Where it stops
+## Limits
 
 A copy you can trust is one whose edges you know.
 
