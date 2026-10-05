@@ -18,19 +18,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `e` (`1.5e`, which MySQL refuses);
   - `x`, `b` or `e` written right against a string (`x'41'` and `b'1'` were
     the texts `x41` and `b1` on the copy);
-  - `INTERVAL` with a quoted amount and a two-part unit (`INTERVAL '1:30'
+  - an `INTERVAL` amount the two sides read differently: a quoted amount
+    that is not a whole number (`INTERVAL '1e2' DAY` is one day on MySQL
+    and was a hundred on the copy), an amount in parentheses or a
+    placeholder (`INTERVAL (1.5) DAY` is two days on MySQL and was one on
+    the copy; a prepared statement with `INTERVAL ?` now always stays on
+    MySQL), and a quoted amount with a two-part unit (`INTERVAL '1:30'
     MINUTE_SECOND` added an hour and a half on the copy, which read the
     unit as an alias);
   - `~` (`~1` is 18446744073709551614 on MySQL and was `-2` on the copy);
-  - a `+` or `-` next to `DATE '...'`, `TIMESTAMP '...'`, `DATE(...)` or a
-    `CAST` to `DATE` or `DATETIME`, or next to any parentheses or `CASE ...
-    END` that hold one, and `AVG` over one (`DATE '2026-01-01' + 1` is
+  - a `+` or `-` next to `DATE '...'`, `TIMESTAMP '...'`, `TIME '...'`,
+    `DATE(...)` or a `CAST` to `DATE`, `DATETIME` or `TIME`, or next to any
+    parentheses or `CASE ... END` that hold one, and `AVG` over one (`DATE '2026-01-01' + 1` is
     20260102 on MySQL and was the date `2026-01-02` on the copy;
     `GREATEST(DATE '...', d) + 1` likewise). This one keeps back some
     statements both sides answer alike (`YEAR(DATE '...') + 1`).
 
-  A date plus or minus `INTERVAL` with a one-word unit still goes to the
-  copy. Not covered, because the statement's text does not show it: the
+  A date plus or minus `INTERVAL` with a bare number and a one-word unit
+  (`INTERVAL 7 DAY`) still goes to the copy. Not covered, because the statement's text does not show it: the
   same arithmetic on a `DATE` column (`created_on + 1`), which is listed
   with the other known differences in [Time-travel SQL](time-travel-sql.md)
   and tracked in #2133.

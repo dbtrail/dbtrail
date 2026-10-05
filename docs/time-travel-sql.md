@@ -649,18 +649,29 @@ What this is and is not:
     hexadecimal string and `b'1'` a bit string on MySQL, the texts `x41`
     and `b1` on the copy, and `e'x'` is the column `e` under the alias `x`
     on MySQL and an escaped string on the copy;
-  - `INTERVAL` with a quoted amount and a two-part unit: `d + INTERVAL
-    '1:30' MINUTE_SECOND` is one minute and thirty seconds later on MySQL.
-    The copy has no two-part units: it reads `INTERVAL '1:30'` as an hour
-    and a half and `MINUTE_SECOND` as the column's alias. With the amount
-    unquoted (`INTERVAL 1 DAY_HOUR`) the copy refuses the statement, and a
-    one-word unit (`INTERVAL '1' DAY`) is not kept back;
+  - an `INTERVAL` whose amount the two sides read differently, in three
+    spellings. A quoted amount that is not a whole number: MySQL cuts it at
+    the first character that is not a digit and the copy reads a number,
+    so `INTERVAL '1e2' DAY` is one day on MySQL and a hundred on the copy
+    (`'1.5'`, which both cut to one, is kept back with the rest; `'1'`,
+    `'-2'` and `' 12 '` are not). An amount in parentheses, or a
+    placeholder: MySQL rounds it and the copy cuts it, so `d + INTERVAL
+    (1.5) DAY` is two days later on MySQL and one on the copy, and a
+    prepared `INTERVAL ? DAY` bound to the text `'1.5'` is two days on
+    MySQL 8.4 and one on the copy. So a prepared statement with `INTERVAL
+    ?` always stays on MySQL. And a quoted amount with a two-part unit
+    (`INTERVAL '90' MINUTE_SECOND`): the copy has no two-part units and
+    reads the unit as the column's alias (`d + INTERVAL '1:30'
+    MINUTE_SECOND` is 00:01:30 on MySQL and 01:30:00 on the copy). A bare
+    number with a one-word unit (`INTERVAL 1 DAY`, `INTERVAL 7 DAY`) is
+    not kept back;
   - `~`: bitwise NOT over 64 unsigned bits on MySQL (`~1` is
     18446744073709551614), `-2` on the copy, where between two operands it
     is also a regular expression match;
-  - a `+` or a `-` next to something the statement itself says is a date:
-    `DATE '...'`, `TIMESTAMP '...'`, `DATE(...)`, `CAST(... AS DATE)` or
-    `CAST(... AS DATETIME)`, with or without parentheses around it. MySQL
+  - a `+` or a `-` next to something the statement itself says is a date
+    or a time: `DATE '...'`, `TIMESTAMP '...'`, `TIME '...'`, `DATE(...)`,
+    or a `CAST` to `DATE`, `DATETIME` or `TIME`, with or without
+    parentheses around it. MySQL
     turns the date into the number its digits spell (`DATE '2026-01-01' +
     1` is 20260102, and `DATE '2026-02-01' - DATE '2026-01-31'` is 70); the
     copy answers the date `2026-01-02`, one day, or an interval. The date
@@ -669,7 +680,8 @@ What this is and is not:
     DATE(ts) END + 1`, `MAX(DATE(ts)) OVER () - 1`. So a `+` or `-` next to
     any pair of parentheses or any `CASE ... END` that holds such a date
     keeps the statement on MySQL too, and so does `AVG` over one (`AVG` of
-    a date is a number on MySQL and a date and time on the copy). That
+    a date or a time is a number on MySQL, 100000.0000 for ten o'clock,
+    and a date and time or a time on the copy). That
     rule does not know what the group returns, so it also keeps back
     statements both sides would answer alike, such as `SUM(IF(d >= DATE
     '...', amount, 0)) - 1` or `YEAR(DATE '...') + 1`. A `+` or `-`
@@ -829,9 +841,7 @@ What this is and is not:
     1 DAY` over a `DATE` column is the date `2026-01-02` on MySQL and the
     date and time `2026-01-02 00:00:00` on the copy, and so is
     `DATE_ADD(created_on, INTERVAL 1 DAY)`. The same day: inside a `WHERE`
-    it compares the same on both. A quoted amount with a fraction of a
-    second prints with six decimals on MySQL and as written on the copy
-    (`INTERVAL '1.5' SECOND` gives `00:00:01.500000` and `00:00:01.5`).
+    it compares the same on both.
   - **`&`, `|`, `>>` and the `BIT_` functions on a negative number.** MySQL
     computes them over 64 unsigned bits and the copy over signed ones:
     `-1 | 0` is 18446744073709551615 on MySQL and `-1` on the copy,
