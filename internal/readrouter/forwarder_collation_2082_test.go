@@ -27,6 +27,10 @@ type collationSource struct {
 	// drop: the connection is closed under the SET instead of answering it.
 	drop bool
 	conn net.Conn
+	// askErr answers the question about the session's collation.
+	askErr error
+	// stall, when set, holds that question until it is closed.
+	stall chan struct{}
 }
 
 func (h *collationSource) statements() []string {
@@ -41,6 +45,14 @@ func (h *collationSource) HandleQuery(q string) (*mysql.Result, error) {
 	h.seen = append(h.seen, q)
 	switch q {
 	case "SELECT @@collation_connection":
+		if h.stall != nil {
+			h.mu.Unlock()
+			<-h.stall
+			h.mu.Lock()
+		}
+		if h.askErr != nil {
+			return nil, h.askErr
+		}
 		rs, err := mysql.BuildSimpleTextResultset([]string{"@@collation_connection"}, [][]any{{h.collation}})
 		if err != nil {
 			return nil, err
@@ -126,6 +138,9 @@ func TestForwarder_collationTheSourceDidNotKnow(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f, src := newCollationForwarder(t, tc.version, tc.collation)
+			f.OnCollation = func(collation string, err error) {
+				t.Errorf("OnCollation(%q, %v) on a source that refused nothing", collation, err)
+			}
 			var told []uint16
 			f.OnSession = func(st uint16) { told = append(told, st) }
 			if len(src.statements()) != 0 {
@@ -134,7 +149,7 @@ func TestForwarder_collationTheSourceDidNotKnow(t *testing.T) {
 			if _, err := f.Forward(ctx, "DO 1", &BufferSink{}); err != nil {
 				t.Fatal(err)
 			}
-			// A second statement, and another way in: nothing is repeated.
+			// A second statement: nothing is repeated.
 			if _, err := f.Forward(ctx, "DO 2", &BufferSink{}); err != nil {
 				t.Fatal(err)
 			}
@@ -180,13 +195,94 @@ func TestForwarder_collationTheSourceDidNotKnow(t *testing.T) {
 		if len(connect) != 1 || connect[0] == nil {
 			t.Errorf("OnConnect was told %v, want the one failure", connect)
 		}
+		// Nothing of the client's ran on a session: there is none to have
+		// lost (time travel goes on, as with a source that was never up).
+		if f.Lost() != nil {
+			t.Errorf("Lost() = %v after a connection that never opened", f.Lost())
+		}
 		for _, q := range src.statements() {
 			if q == "DO 1" {
 				t.Error("the client's statement reached the source")
 			}
 		}
 	})
-	t.Run("the first use is a prepare or a plan", func(t *testing.T) {
+	t.Run("the source will not say the collation", func(t *testing.T) {
+		f, src := newCollationForwarder(t, "10.11.9-MariaDB", "utf8mb4_general_ci")
+		src.askErr = mysql.NewError(mysql.ER_UNKNOWN_SYSTEM_VARIABLE, "Unknown system variable 'collation_connection'")
+		var said []string
+		f.OnCollation = func(collation string, err error) { said = append(said, collation+": "+err.Error()) }
+		if _, err := f.Forward(ctx, "DO 1", &BufferSink{}); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := src.statements(), []string{ask, "DO 1"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("the source saw %q, want %q", got, want)
+		}
+		if len(said) != 1 || !strings.HasPrefix(said[0], ": ") || !strings.Contains(said[0], "Unknown system variable") {
+			t.Errorf("OnCollation was told %q, want once, with no collation and the source's refusal", said)
+		}
+	})
+	t.Run("the source ends the session instead of answering", func(t *testing.T) {
+		f, src := newCollationForwarder(t, "10.11.9-MariaDB", "utf8mb4_general_ci")
+		src.askErr = mysql.NewError(codeIdleTimeout, "The client was disconnected by the server because of inactivity.")
+		f.OnCollation = func(collation string, err error) {
+			t.Errorf("a session that ended was reported as a collation refusal: %v", err)
+		}
+		if _, err := f.Forward(ctx, "DO 1", &BufferSink{}); err == nil {
+			t.Fatal("a statement was answered on a session the source had ended")
+		}
+		if got, want := src.statements(), []string{ask}; !reflect.DeepEqual(got, want) {
+			t.Errorf("the source saw %q, want %q", got, want)
+		}
+	})
+	t.Run("the client leaves while the source is asked", func(t *testing.T) {
+		f, src := newCollationForwarder(t, "10.11.9-MariaDB", "utf8mb4_general_ci")
+		src.stall = make(chan struct{})
+		defer close(src.stall)
+		cctx, cancel := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		go func() {
+			_, err := f.Forward(cctx, "DO 1", &BufferSink{})
+			done <- err
+		}()
+		for len(src.statements()) == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Error("a statement was answered for a client that had left")
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("the connection kept waiting on the source after its client left")
+		}
+	})
+	// A result is not handed back to go-mysql's pool: the next resultset
+	// the port builds itself would take its column over, name and type.
+	t.Run("the answer is not returned to the result pool", func(t *testing.T) {
+		for range 50 {
+			f, _ := newCollationForwarder(t, "11.4.13-MariaDB", "utf8mb4_0900_ai_ci")
+			if _, err := f.get(ctx); err != nil {
+				t.Fatal(err)
+			}
+			rs, err := mysql.BuildSimpleTextResultset([]string{"x"}, [][]any{{int64(1)}})
+			if err != nil {
+				t.Fatalf("a resultset built after the connection opened: %v", err)
+			}
+			if name := string(rs.Fields[0].Name); name != "x" {
+				t.Fatalf("a resultset built after the connection opened has a column named %q", name)
+			}
+		}
+	})
+	t.Run("the first use is a prepare", func(t *testing.T) {
+		f, src := newCollationForwarder(t, "10.11.9-MariaDB", "utf8mb4_general_ci")
+		_, _ = f.Prepare(ctx, "SELECT 1") // the fake prepares nothing; what it was sent first is the point
+		got := src.statements()
+		if len(got) < 2 || got[0] != ask || got[1] != set {
+			t.Errorf("the source saw %q, want the collation settled before the prepare", got)
+		}
+	})
+	t.Run("the first use is a plan", func(t *testing.T) {
 		f, src := newCollationForwarder(t, "10.11.9-MariaDB", "utf8mb4_general_ci")
 		if err := f.UseDB(ctx, "db"); err != nil {
 			t.Fatal(err)
