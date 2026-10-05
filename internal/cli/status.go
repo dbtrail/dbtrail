@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -289,8 +290,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 				}
 			}
 			if dropped > 0 {
-				sort.Strings(reasons)
-				return fmt.Errorf("capture health: %d event(s) read from the stream and permanently dropped (%s); most often the schema snapshot is stale or corrupt; run `bintrail snapshot` against the source and restart the stream, then acknowledge this tally with `bintrail status --index-dsn <index> --ack-capture-skips` (it is monotonic and never clears itself; acknowledging erases nothing and a later skip fails this check again); failing closed under --fail-on-gap", dropped, strings.Join(reasons, ", "))
+				return droppedEventsError(dropped, reasons)
 			}
 		case data.Stream.CaptureSkips.Valid && strings.TrimSpace(data.Stream.CaptureSkips.String) != "":
 			return fmt.Errorf("capture health: capture_skips ledger present but unreadable; cannot confirm statement-format DML drops; failing closed under --fail-on-gap")
@@ -392,4 +392,22 @@ func unreadableNewestBaseline(baselines []baseline.BaselineInfo, unreadable []ti
 		}
 	}
 	return nil
+}
+
+// droppedEventsError is the --fail-on-gap error for events the capture read
+// and dropped under any reason without a sharper message of its own.
+//
+// row_map_failed (#2139) is not a stale snapshot, and a fresh one does not fix
+// it: the message says what it is instead of sending the operator to a remedy
+// that changes nothing.
+func droppedEventsError(dropped int64, reasons []string) error {
+	sort.Strings(reasons)
+	if len(reasons) == 1 && reasons[0] == status.CaptureSkipReasonRowMapFailed {
+		return fmt.Errorf("capture health: %d event(s) had rows read from the stream and permanently dropped (%s): a text value was not valid UTF-8 and could not be converted; the `failed to map` lines in the capture log name the column and the cause, and `bintrail status` without this flag says what fixes each; then acknowledge this tally with `bintrail status --index-dsn <index> --ack-capture-skips` (it is monotonic and never clears itself; acknowledging erases nothing and a later skip fails this check again); failing closed under --fail-on-gap", dropped, reasons[0])
+	}
+	also := ""
+	if slices.Contains(reasons, status.CaptureSkipReasonRowMapFailed) {
+		also = " (" + status.CaptureSkipReasonRowMapFailed + " is a different cause: a text value that could not be converted, which a fresh snapshot does not fix; see `bintrail status` without this flag)"
+	}
+	return fmt.Errorf("capture health: %d event(s) read from the stream and permanently dropped (%s); most often the schema snapshot is stale or corrupt"+also+"; run `bintrail snapshot` against the source and restart the stream, then acknowledge this tally with `bintrail status --index-dsn <index> --ack-capture-skips` (it is monotonic and never clears itself; acknowledging erases nothing and a later skip fails this check again); failing closed under --fail-on-gap", dropped, strings.Join(reasons, ", "))
 }

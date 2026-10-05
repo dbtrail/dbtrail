@@ -323,6 +323,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `cte_max_recursion_depth` with an error and MariaDB cuts it at
     `max_recursive_iterations`, where the copy runs it to the end.
 ### Fixed
+- **Capture: a row that could not be read is now on record** (#2139). When one
+  row of a change could not be matched to its table's columns, capture wrote a
+  warning to its log, left that row out of the index and carried on. Nothing
+  else knew: `status` kept saying no events were skipped, and the checks that
+  ask "did capture drop anything?" before trusting the index (the scheduled
+  snapshot update, the Iceberg export, `status --fail-on-gap`) saw a clean
+  record for a table that was missing a change. The cause in practice is a
+  `CHAR` or `VARCHAR` value that is not valid UTF-8 and cannot be converted:
+  the column's character set is not one that is converted (only `latin1` is),
+  a `latin1` value holds a byte `latin1` assigns no character to, or an old
+  schema snapshot never recorded the column's character set. Capture still
+  carries on and still indexes the other rows of the same change, and it now
+  records the drop under a new reason, `row_map_failed`, with the table and
+  the binlog position, counted once per change however many of its rows were
+  dropped. `status`, `status --fail-on-gap`, the web interface and the summary
+  at the end of `bintrail index` say what it is and what fixes it; for this
+  reason they no longer suggest a fresh schema snapshot or reading the binlogs
+  again where that would change nothing. A change of a kind capture cannot
+  decode (`unhandled_row_event`) now names its table as well; a record written
+  by an older version, which has a count and no table names, keeps reading as
+  "any table" after the upgrade.
+
+  What it costs once a table has such an entry. These are the same
+  consequences every other dropped change already has:
+  - `status` shows `DEGRADED` and `status --fail-on-gap` exits non-zero until
+    the count is marked as read (`--ack-capture-skips`, or "Mark as read" in
+    the web interface). A later drop brings both back.
+  - The Iceberg export refuses the next window of that one table: its
+    position does not move, and the error asks for the table to be reloaded
+    from a fresh baseline. Other tables are not affected.
+  - The scheduled snapshot consults the record for the whole server, not per
+    table, and only in one situation: nothing at all was indexed since the
+    previous snapshot AND that snapshot is older than the cut-over age (two
+    hours, or six schedule intervals if that is longer). Then, instead of
+    concluding the source did not change, it takes a full read of the source.
+    A full read that starts after the last drop settles it; marking the count
+    as read does not. So it repeats, at most once per cut-over age, only on a
+    server whose only writes are rows that get dropped. A server with any
+    other indexed write keeps its normal updates.
 - **Read routing: a statement that names a generated column is answered by
   MySQL** (#2123). A snapshot holds no generated column, so the copy does
   not have it, and a statement that named one was not always refused there:

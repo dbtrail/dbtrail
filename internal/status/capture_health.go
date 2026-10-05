@@ -36,6 +36,7 @@ const (
 	CaptureSkipReasonTableExcludedFromSnapshot = "table_excluded_from_snapshot"
 	CaptureSkipReasonColumnCountMismatch       = "column_count_mismatch"
 	CaptureSkipReasonNoResolver                = "no_resolver"
+	CaptureSkipReasonRowMapFailed              = "row_map_failed"
 )
 
 // ExplainCaptureSkips renders the DEGRADED verdict's explanation: one
@@ -59,9 +60,7 @@ func ExplainCaptureSkips(skips map[string]CaptureSkipStat, snapshotAt time.Time)
 	// The scope caveat is unconditional and deliberately blunt: without it an
 	// operator applies the remedy, sees capture go green, and assumes the hole
 	// closed. It never did — the remedy is forward-only.
-	lines = append(lines, "None of this recovers what was already skipped: those changes are absent "+
-		"from the index for good unless the source still has the binlogs covering that window, in "+
-		"which case `bintrail index --binlog-dir <dir> --files <file>` can re-read them.")
+	lines = append(lines, scopeLines(active)...)
 	// Say that the verdict itself persists. The tallies are monotonic and
 	// re-seeded across restarts precisely so a skip episode cannot be laundered
 	// away by a restart — which means a WORKING fix does not turn this banner
@@ -70,6 +69,39 @@ func ExplainCaptureSkips(skips map[string]CaptureSkipStat, snapshotAt time.Time)
 	lines = append(lines, acknowledgementLine(skips, snapshotAt))
 	lines = append(lines, logLine(active[0]))
 	return lines
+}
+
+// scopeLines says what the remedies above do NOT bring back. Re-reading the
+// binlogs is offered only for the reasons it can work for: a row dropped under
+// row_map_failed is dropped again by the same read (#2139), so sending that
+// operator to `bintrail index` would cost them a re-index for nothing.
+func scopeLines(active []string) []string {
+	rowMap, other := false, false
+	for _, r := range active {
+		if r == CaptureSkipReasonRowMapFailed {
+			rowMap = true
+		} else {
+			other = true
+		}
+	}
+	const reRead = "None of this recovers what was already skipped: those changes are absent " +
+		"from the index for good unless the source still has the binlogs covering that window, in " +
+		"which case `bintrail index --binlog-dir <dir> --files <file>` can re-read them."
+	const rowMapOnly = "None of this recovers what was already skipped: those changes are absent " +
+		"from the index. Reading the binlogs again does not bring them back, because the same rows " +
+		"fail the same way, unless the cause was a schema snapshot too old to record the column's " +
+		"character set and that snapshot has been refreshed since."
+	const rowMapToo = "That does not apply to " + CaptureSkipReasonRowMapFailed + ": reading the binlogs " +
+		"again drops the same rows the same way, unless the cause was a schema snapshot too old to " +
+		"record the column's character set and that snapshot has been refreshed since."
+	switch {
+	case rowMap && !other:
+		return []string{rowMapOnly}
+	case rowMap:
+		return []string{reRead, rowMapToo}
+	default:
+		return []string{reRead}
+	}
 }
 
 // SkipsPredateSnapshot reports whether every recorded skip happened BEFORE the
@@ -192,6 +224,13 @@ func causeLine(reason string, st CaptureSkipStat) string {
 		return subject + " " + hasHave(st) + " a different number of columns in the binlog than in the " +
 			"schema snapshot, so values would map to the wrong column names. Capture drops the rows rather " +
 			"than index them under wrong names — the snapshot is behind a schema change on the source."
+	case CaptureSkipReasonRowMapFailed:
+		return subject + " had rows with text that could not be read safely: a CHAR or VARCHAR value was " +
+			"not valid UTF-8 and could not be converted. That happens when the column's character set is " +
+			"one DBTrail does not convert (it converts latin1 only), when a latin1 value holds a byte " +
+			"that latin1 assigns no character to, or when the schema snapshot is too old to have recorded " +
+			"the column's character set. Capture drops such a row instead of indexing damaged text. The " +
+			"other rows of the same event were indexed."
 	case CaptureSkipReasonNoResolver:
 		return "Capture ran with no schema snapshot loaded at all, so no row event could be decoded."
 	case CaptureSkipReasonStatementFormatDML:
@@ -220,6 +259,13 @@ func remedyLine(reason string) string {
 		return "Fix: give each table this reason covers an explicit PRIMARY KEY on an InnoDB engine at the source. " +
 			"Re-snapshotting is NOT the fix here — validation excludes these tables again every time, so a " +
 			"fresh snapshot would leave capture exactly as it is now."
+	case CaptureSkipReasonRowMapFailed:
+		return "Fix: the log lines for this reason name the column and the cause. If they say the schema " +
+			"snapshot has no character set for the column, refresh the schema snapshot: in the console, " +
+			"Overview → \"Refresh schema snapshot\"; on the command line, `bintrail snapshot --source-dsn " +
+			"<source> --index-dsn <index>`, then restart the stream. In the other cases a fresh snapshot " +
+			"changes nothing: correct the text or convert that column to utf8mb4 on the source, or rows " +
+			"holding such text keep being skipped."
 	case CaptureSkipReasonStatementFormatDML:
 		return "Fix: set binlog_format=ROW server-wide on the source (a session-level override can also " +
 			"produce row-less events)."
@@ -240,6 +286,7 @@ func logLine(reason string) string {
 		CaptureSkipReasonTableExcludedFromSnapshot: "table not in snapshot — skipping",
 		CaptureSkipReasonColumnCountMismatch:       "column count mismatch — skipping",
 		CaptureSkipReasonNoResolver:                "no resolver available — skipping",
+		CaptureSkipReasonRowMapFailed:              "failed to map",
 	}[reason]
 	s := "Per-event detail is in the log of the process capturing this source — `bintrail stream` or " +
 		"`bintrail-console watch` (with the bundled compose file: `docker compose logs bintrail`)"
