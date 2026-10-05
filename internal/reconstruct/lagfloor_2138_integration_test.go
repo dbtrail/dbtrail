@@ -5,6 +5,7 @@ package reconstruct_test
 import (
 	"context"
 	"database/sql"
+	"sort"
 	"testing"
 	"time"
 
@@ -79,6 +80,18 @@ func (r *floorRig) refresh(t *testing.T, at time.Time, deltas, carry bool) (stri
 	return p, reps[0]
 }
 
+// lagState reads the table the way its layout is read: through the chain's
+// state query with deltas on, as one file with them off.
+func lagState(t *testing.T, base string, deltas bool) []string {
+	t.Helper()
+	if deltas {
+		return readOrdersState(t, base)
+	}
+	out := readOrders(t, base)
+	sort.Strings(out)
+	return out
+}
+
 // TestRefresh_afterALaggingRefresh_appliesWhatCaptureIndexedLater: the dump is
 // old, the first refresh runs at wall clock T with the index `lag` behind, and
 // the event indexed afterwards ran on the source at T-lag+1h.
@@ -114,11 +127,13 @@ func TestRefresh_afterALaggingRefresh_appliesWhatCaptureIndexedLater(t *testing.
 			}
 			insertTableEvent(t, r.db, r.schema, e1Table, 10, 100, T.Add(-tc.lag), 2, "1", `{"id":1,"status":"A"}`)
 			_, rep := r.refresh(t, T, tc.deltas, tc.carried)
-			if tc.carried != rep.CarriedForward {
-				t.Fatalf("first refresh: CarriedForward = %v, want %v", rep.CarriedForward, tc.carried)
+			// With deltas on, an untouched table is published as its previous
+			// file with no pair; with them off it is carried forward.
+			if tc.carried && !tc.deltas && !rep.CarriedForward {
+				t.Fatalf("first refresh: the untouched table was not carried forward")
 			}
-			if !tc.carried && rep.EventsApplied != 1 {
-				t.Fatalf("first refresh applied %d events, want 1", rep.EventsApplied)
+			if want := map[bool]int64{false: 1, true: 0}[tc.carried]; rep.EventsApplied != want {
+				t.Fatalf("first refresh applied %d events, want %d", rep.EventsApplied, want)
 			}
 			// e2: indexed AFTER the first refresh, later position, and it ran
 			// on the source an hour after e1: still hours before T.
@@ -128,7 +143,7 @@ func TestRefresh_afterALaggingRefresh_appliesWhatCaptureIndexedLater(t *testing.
 			if tc.carried {
 				want = []string{"1=new", "3=shipped"}
 			}
-			got := readOrdersState(t, base)
+			got := lagState(t, base, tc.deltas)
 			if !equalStrings(got, want) {
 				t.Fatalf("second refresh applied %d events; state = %v, want %v: the delete of id 2 was indexed after the first refresh and is not in the snapshot",
 					rep.EventsApplied, got, want)
@@ -157,7 +172,7 @@ func TestRefresh_firstAfterADump_appliesEventsOlderThanTheDumpStamp(t *testing.T
 			markStreamCaptured(t, r.db)
 			insertTableEvent(t, r.db, r.schema, "orders", 20, 300, T.Add(-4*time.Hour), 3, "2", "")
 			base, rep := r.refresh(t, T.Add(time.Hour), deltas, false)
-			if got, want := readOrdersState(t, base), []string{"1=new", "3=shipped"}; !equalStrings(got, want) {
+			if got, want := lagState(t, base, deltas), []string{"1=new", "3=shipped"}; !equalStrings(got, want) {
 				t.Fatalf("refresh applied %d events; state = %v, want %v", rep.EventsApplied, got, want)
 			}
 		})
