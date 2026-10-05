@@ -351,8 +351,8 @@ func backtickFixtures(db string, mariadb bool) []backtickFixture {
 		kept("SELECT `a` /*M! +1 */ FROM (SELECT 1 AS `a`) `t`", noc, "optimizer hint or MySQL comment", "MariaDB runs the comment's text (2); MySQL and the copy do not (1)"),
 		dollar,
 		dollarCJK,
-		kept("SELECT `text`\u00a0'Label' FROM (SELECT 'body' AS `text`) `t`", serr, "right before a string literal", "a no-break space between the name and the string: white space on the copy, which would answer the constant"),
-		kept("SELECT `text` E'Label' FROM (SELECT 'body' AS `text`) `t`", serr, "right before a string literal", "E'..' is an escaped string on the copy, which would answer the constant"),
-		kept("SELECT `text` N'Label' FROM (SELECT 'body' AS `text`) `t`", noc, "right before a string literal", "N'..' is a string on both"),
+		kept("SELECT `text`\u00a0'Label' FROM (SELECT 'body' AS `text`) `t`", serr, "right before a string literal", "a no-break space between the name and the string: white space on the copy, which would answer the constant; both servers refuse the statement"),
+		kept("SELECT `text` E'Label' FROM (SELECT 'body' AS `text`) `t`", serr, "right before a string literal", "E'..' is an escaped string on the copy, which would answer the constant; both servers refuse the statement"),
+		kept("SELECT `text` N'Label' FROM (SELECT 'body' AS `text`) `t`", serr, "right before a string literal", "N'..' after a name: refused by both servers too"),
 	}
 }
