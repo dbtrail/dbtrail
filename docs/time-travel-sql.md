@@ -895,9 +895,39 @@ What this is and is not:
     '...', amount, 0)) - 1` or `YEAR(DATE '...') + 1`. A `+` or `-`
     elsewhere in the statement does not count (`WHERE d >= DATE
     '2026-01-01' AND qty + 1 > 2` goes to the copy), and a date plus or
-    minus `INTERVAL` is not kept back. Neither is the same arithmetic on a
-    column, which the statement's text does not show: see "Arithmetic on a
-    date column" below.
+    minus `INTERVAL` is not kept back. The same arithmetic on a column is
+    not in the statement's text: the copy declines it from the column's
+    type, see "A statement that does arithmetic on a date column" below;
+  - `|`, `&`, `>>` and the functions `BIT_COUNT`, `BIT_AND`, `BIT_OR` and
+    `BIT_XOR`. MySQL and MariaDB compute them over 64 unsigned bits and the
+    copy over signed numbers: `-1 | 0` is 18446744073709551615 on MySQL and
+    `-1` on the copy, `-8 >> 1` is 9223372036854775804 and `-4`,
+    `BIT_COUNT(-1)` is 64 and 32, and `WHERE n | 0 > 0` keeps other rows.
+    Over no rows `BIT_AND` is 18446744073709551615 and `BIT_OR` and
+    `BIT_XOR` are 0 on MySQL, and all three are `NULL` on the copy. On
+    numbers that are not negative both sides agree, and the text does not
+    say what a column holds, so every statement with one of them stays on
+    MySQL. `<<` is not kept back: where it would differ (a negative
+    number, a result past 31 bits) the copy refuses the statement and
+    MySQL answers;
+  - `CAST(... AS DATETIME)` and `CAST(... AS TIME)`, with or without a
+    precision. A value with more decimals of a second than the type keeps
+    is rounded by MySQL, cut by MariaDB and kept whole by the copy:
+    `CAST('2026-01-01 10:00:00.6' AS DATETIME)` is `10:00:01` on MySQL 8.4,
+    `10:00:00` on MariaDB 11.4 and `10:00:00.6` on the copy, and a
+    `DATETIME(6)` column under the same cast likewise. `CAST(... AS DATE)`
+    is the same day on both and is not kept back, and neither is an alias
+    written `AS time`;
+  - a string written as a date with a two-digit year: two digits, `-` or
+    `/`, one or two digits, `-` or `/`, a digit (`'26-01-15'`, `'26/1/5'`,
+    `'26-01-15 10:00:00'`). MySQL and MariaDB read the year as 2026 (00 to
+    69 are 2000 to 2069, 70 to 99 are 1970 to 1999) and the copy as the
+    year 26: `DATE '26-01-15'` is `2026-01-15` on MySQL and `0026-01-15` on
+    the copy, and `WHERE created_on = '26-01-15'` finds the row on one and
+    nothing on the other. Whether the string is used as a date is not
+    read: any string written that way keeps the statement on MySQL, and so
+    does one bound to a prepared statement. A year of four digits is not
+    kept back.
 
   The
   copy itself compares text close to the way MySQL's default collation
@@ -1033,28 +1063,24 @@ What this is and is not:
     integer branch prints the integer rows as `4.00` on the copy and as
     `4` on MySQL 8.4, which declares the column with two decimals and does
     not pad them. MariaDB 11.4 prints `4.00`, as the copy does.
-  - **Arithmetic on a date column.** `created_on + 1` over a `DATE`
-    column is the number 20260102 on MySQL and the date `2026-01-02` on
-    the copy; `created_on + 0` is 20260101 and `2026-01-01`; a `DATE`
-    column minus a date is the difference of two such numbers on MySQL
-    (70 from January 31 to February 1) and a count of days on the copy
-    (1); `AVG` of a `DATE` column is a number on MySQL and a date and time
-    on the copy. The router reads the statement's text and the plan
-    `EXPLAIN` returns, and neither says what type a column or an
-    expression has, so only the spellings that name the type themselves
-    (`DATE '...'`, `DATE(...)`, `CAST(... AS DATE)`) are kept on MySQL.
-    To count the days between two dates write `DATEDIFF`, which MySQL
-    always answers.
   - **A `DATE` plus or minus `INTERVAL`, selected.** `created_on + INTERVAL
     1 DAY` over a `DATE` column is the date `2026-01-02` on MySQL and the
     date and time `2026-01-02 00:00:00` on the copy, and so is
     `DATE_ADD(created_on, INTERVAL 1 DAY)`. The same day: inside a `WHERE`
-    it compares the same on both.
-  - **`&`, `|`, `>>` and the `BIT_` functions on a negative number.** MySQL
-    computes them over 64 unsigned bits and the copy over signed ones:
-    `-1 | 0` is 18446744073709551615 on MySQL and `-1` on the copy,
-    `BIT_COUNT(-1)` is 64 and 32. On the numbers measured that are not
-    negative they agree.
+    it compares the same on both, and a client that reads the value as a
+    date and time gets the same one. It is not kept on MySQL: a date plus
+    an interval is how most reports write a range, and keeping it back
+    would keep them all off the copy.
+  - **A `DATETIME` or a `TIMESTAMP` column turned into text.**
+    `CONCAT(dt, '')` and `CAST(dt AS CHAR)` are `2026-01-01 10:00:00` on
+    MySQL and `2026-01-01 10:00:00+00` on the copy, which holds the column
+    as a moment with a zone. A `DATE` column gives the same text on both,
+    and `LEFT`, `SUBSTRING` and `DATE_FORMAT` over a date are refused by
+    the copy, so MySQL answers those.
+  - **A two-digit year the text does not show.** A string with a two-digit
+    year keeps a statement on MySQL when it is written in the statement or
+    bound to it. One that comes out of a column or of an expression
+    (`CONCAT('26', '-01-15')`) is read as the year 26 by the copy.
 
   If a workload depends on one of these, keep the copy for the reads where
   they do not matter, or leave routing off.
@@ -1087,6 +1113,62 @@ What this is and is not:
   `ALTER` is seen at the next one, and until then a statement with a star
   over that table can return the columns as they were declared at that
   snapshot.
+- **A statement that does arithmetic on a date column is MySQL's, and so
+  is one that names a `TIME` or a `YEAR` column.** The copy holds a `DATE`,
+  a `DATETIME` and a `TIMESTAMP` as what they are, where MySQL and MariaDB
+  turn one into the number its digits spell wherever a number is asked for.
+  Both answer, with no error: `created_on + 1` over a `DATE` column is the
+  number 20260102 on MySQL and the date `2026-01-02` on the copy;
+  `MAX(created_on) - MIN(created_on)` is the difference of two such numbers
+  (102 from January 1 to February 3) and a count of days (33); `AVG` of a
+  date column is a number on MySQL and a date and time on the copy. The
+  statement's text does not say that `created_on` is a date, so the copy
+  reads each table's column types from the `CREATE TABLE` stored with its
+  snapshot, and under read routing it declines and MySQL answers
+  (`copy_columns_differ`):
+  - **a statement where the name of a `DATE`, `DATETIME` or `TIMESTAMP`
+    column of a table it reads stands next to a `+` or a `-`, or under
+    `AVG`**, directly or inside something that is added to as a whole:
+    `created_on + 1`, `1 + o.created_on`, `(created_on) - 1`,
+    `GREATEST(created_on, d2) + 1`, `LAST_DAY(created_on) + 1`,
+    `MAX(created_on) - MIN(created_on)`, `CASE WHEN a THEN created_on END +
+    1`, `AVG(created_on)`, with the name quoted or not and with or without
+    the table's name in front. A `+` or `-` that `INTERVAL` follows does not
+    count, nor one elsewhere in the statement: `SELECT amount + tax FROM
+    orders WHERE created_on >= '2026-01-01'` is the copy's. The rule does
+    not know what a group returns, so `YEAR(created_on) + 1` and
+    `COUNT(created_on) - 1` stay on MySQL too, for nothing. `*`, `/`, `%`,
+    `SUM`, `ABS`, `ROUND` and a comparison with a number are not part of
+    it: the copy refuses those over a date, and MySQL answers;
+  - **a statement that names such a column, has a subquery or a `WITH`, and
+    holds a `+` or a `-` anywhere** that `INTERVAL` does not follow. An
+    alias of the date used from outside its subquery (`SELECT d + 1 FROM
+    (SELECT created_on AS d FROM orders) x`) is a date under a name the
+    text cannot follow, so with a subquery in the statement every `+` and
+    `-` counts;
+  - **a statement that names a `TIME` or a `YEAR` column of a table it
+    reads**, anywhere. The copy holds a `TIME` as text, so `tm >=
+    '9:00:00'` compares letters there and finds nothing where MySQL finds
+    every row after nine, and a `YEAR` as a plain number, so `yr = 26` is
+    not the year 2026 there;
+  - **a statement with a character outside ASCII outside its strings and
+    comments** (in a name) **that reads a table with a date, time or year
+    column**: which look-alike letters a server takes for an ASCII one
+    when it compares names depends on the server, so such a statement is
+    not searched. A string with such characters (`WHERE city = 'Bogotá'`)
+    does not count;
+  - **any statement that reads a table with a date, time or year column
+    whose name is not plain ASCII letters, digits, `_` and `$`**, and a
+    column of a type DBTrail does not know is treated as a date could be.
+
+  The names are looked for as whole words, so another table's column of
+  the same name, an alias or a function called that (a `YEAR` column named
+  `year` keeps every statement that calls `YEAR()` over its table on MySQL)
+  keeps the statement back too. A prepared statement is read by its
+  template, so `created_on + ?` stays on MySQL whatever is bound. To count
+  the days between two dates write `DATEDIFF`, which MySQL always answers.
+  On the port without routing, and in the browser, the copy answers these
+  as it always did, with its own values.
 - **A statement that names a generated column is MySQL's.** A snapshot
   holds no generated column (`STORED` or `VIRTUAL`, invisible or not), so
   the copy does not have it. A statement that names one does not always
@@ -1534,8 +1616,9 @@ MySQL's.
   `in_transaction`, `veto`, `explain_failed`,
   `copy_age_unknown`, `copy_too_old`, `copy_refused`, `copy_columns_differ`
   (the copy works and declined a `SELECT *` or a `NATURAL JOIN` over a table
-  whose columns there are not MySQL's, or a statement that names a column
-  the copy does not hold), `show_warnings`,
+  whose columns there are not MySQL's, a statement that names a column
+  the copy does not hold, one that does arithmetic on a date column, or one
+  that names a `TIME` or `YEAR` column), `show_warnings`,
   `upstream_lost` (nobody answered: the port's connection to the source is
   lost or could not be opened, and the client got error 2006),
   `read_only` (refused: not a read, on a port started with

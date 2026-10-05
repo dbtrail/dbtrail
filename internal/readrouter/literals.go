@@ -328,7 +328,8 @@ type temporal struct {
 // so SUM(IF(d >= DATE '...', amount, 0)) - 1 and YEAR(DATE '...') + 1 are
 // kept on MySQL too, for nothing. And a column, or an expression of one
 // (created_on + 1, max(d) - min(d)), is not seen: nothing in the text or in
-// the plan says what type it has.
+// the plan says what type it has. ColumnVeto is the same rule for a column,
+// asked by the side that knows the table's column types (#2133).
 func dateArithmetic(t *shapeText) bool {
 	shapes := temporalShapes(t)
 	if len(shapes) == 0 {

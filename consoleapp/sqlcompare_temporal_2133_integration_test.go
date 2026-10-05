@@ -167,24 +167,6 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		}
 	}
 
-	// PROBE-START
-	{
-		psrc := openRaw(t, strings.Replace(sourceDSN, "parseTime=true", "parseTime=false", 1))
-		pcp := openRaw(t, copies[0])
-		for _, s := range []string{
-			"SELECT LAST_DAY('2026-01-15') + 1", "SELECT MAKEDATE(2026, 1) + 1", "SELECT ADDDATE('2026-01-15', 1) + 0", "SELECT FROM_DAYS(739000) + 1",
-			"SELECT created_on AS d FROM ev ORDER BY d + 0 DESC", "SELECT created_on AS d FROM ev HAVING d + 0 > 20260110", "SELECT created_on AS d, COUNT(*) FROM ev GROUP BY d + 0",
-			"SELECT DATE_FORMAT(created_on, '%Y-%m') FROM ev ORDER BY n", "SELECT DATE_FORMAT(dt, '%Y-%m-%d %H:%i') FROM ev ORDER BY n", "SELECT IF(n > 0, created_on, dt) FROM ev ORDER BY n",
-			"SELECT created_on FROM ev UNION ALL SELECT dt FROM ev", "SELECT n FROM ev WHERE created_on = dt - INTERVAL 10 HOUR ORDER BY n", "SELECT LEFT(created_on, 7) FROM ev ORDER BY n",
-			"SELECT SUBSTRING(created_on, 1, 4) FROM ev ORDER BY n", "SELECT created_on, dt FROM ev WHERE dt > created_on ORDER BY n", "SELECT TO_DAYS(created_on) FROM ev ORDER BY n",
-			"SELECT YEAR(created_on) * 100 + MONTH(created_on) FROM ev ORDER BY n", "SELECT n FROM ev WHERE yr = 2026 ORDER BY n", "SELECT UNIX_TIMESTAMP(dt) FROM ev",
-			"SELECT TIMESTAMP(created_on) FROM ev ORDER BY n", "SELECT created_on + 1 FROM ev e WHERE EXISTS (SELECT 1) ORDER BY n", "SELECT STR_TO_DATE('2026-01-15', '%Y-%m-%d') + 1",
-		} {
-			t.Logf("PROBE\t%s\t%s\t%s\t%s", s, strings.ReplaceAll(rawAnswer(psrc, s), "\n", " "), strings.ReplaceAll(rawAnswer(pcp, s), "\n", " "), readrouter.Veto(s))
-		}
-	}
-	// PROBE-END
-
 	// 2. The same server with read routing on. The table has three rows and
 	// the scan rule is at two, and no statement here reads by the key, so
 	// each plan is the copy's unless something keeps the statement on the
