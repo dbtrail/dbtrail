@@ -334,6 +334,6 @@ func backtickFixtures(db string) []backtickFixture {
 		kept("SELECT `int`\n'5' FROM (SELECT 9 AS `int`) `t`", noc, "right before a string literal", "9 on MySQL, 5 on the copy"),
 		kept("SELECT `a` -- x\r+1\n FROM (SELECT 1 AS `a`) `t`", noc, "carriage return inside a line comment", "the comment runs to the line feed on MySQL (1) and stops at the carriage return on the copy (2)"),
 		kept("SELECT `a` /*M! +1 */ FROM (SELECT 1 AS `a`) `t`", noc, "optimizer hint or MySQL comment", "MariaDB runs the comment's text (2); MySQL and the copy do not (1)"),
-		kept("SELECT `a` AS $$, 2 AS $$ FROM (SELECT 1 AS `a`) `t`", noc, "$...$", "two columns named $$ on MySQL; one column named ', 2 AS ' on the copy"),
+		kept("SELECT `a` AS $$, 2 AS $$ FROM (SELECT 1 AS `a`) `t`", diff, "$...$", "the list vetoes it, so the copy is sent the rewritten text here and answers: two columns named $$ on MySQL; one column named ', 2 AS ' on the copy"),
 	}
 }
