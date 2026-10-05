@@ -13,6 +13,8 @@ import (
 	"github.com/go-mysql-org/go-mysql/client"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	drivermysql "github.com/go-sql-driver/mysql"
+
+	"github.com/dbtrail/dbtrail/internal/config"
 )
 
 // CodeUpstreamLost is the MySQL client error code a Forwarder answers with
@@ -51,10 +53,22 @@ type RowSink interface {
 // the transaction rolled back, the settings gone and the database reset,
 // while the client believes nothing happened.
 type Forwarder struct {
+	dsn              string
 	addr, user, pass string
-	tls              *tls.Config
-	policy           Policy
-	connectTimeout   time.Duration
+	// tls is the DSN's own tls= setting, tlsInDSN whether it has one. A
+	// DSN that sets it wins over ssl, as it does for capture's connections.
+	tls      *tls.Config
+	tlsInDSN bool
+	// ssl is how the server's source connection uses TLS (the registry
+	// entry's ssl_* fields): the same value capture connects with.
+	ssl config.SSL
+	// OnCleartext, when set, is called once the connection has been opened
+	// WITHOUT encryption because the mode is "preferred" and the source
+	// offers no TLS, with the error that proved it: the caller's chance to
+	// say so in the log, as capture does for its own connection.
+	OnCleartext    func(error)
+	policy         Policy
+	connectTimeout time.Duration
 	// queryTimeout bounds each round trip on the upstream socket (read and
 	// write deadline), the same deadline the port applies to a copy
 	// statement; a statement past it loses the connection.
@@ -67,12 +81,26 @@ type Forwarder struct {
 }
 
 // NewForwarder parses a go-sql-driver DSN (the registry's source DSN) and
-// returns a Forwarder that connects on first use. queryTimeout is the
-// deadline for each statement on the upstream connection; 0 means none.
-func NewForwarder(sourceDSN string, policy Policy, queryTimeout time.Duration) (*Forwarder, error) {
+// returns a Forwarder that connects on first use. ssl is the TLS the server's
+// source connection uses, the value capture connects to the same server
+// with: the upstream connection is encrypted, or refused, or falls back to
+// cleartext by the same rule (config.ConnectSSLWith). A setting that cannot
+// be used (an unknown mode, an unreadable CA file) is an error here, before
+// anything dials. queryTimeout is the deadline for each statement on the
+// upstream connection; 0 means none.
+func NewForwarder(sourceDSN string, ssl config.SSL, policy Policy, queryTimeout time.Duration) (*Forwarder, error) {
 	cfg, err := drivermysql.ParseDSN(sourceDSN)
 	if err != nil {
 		return nil, fmt.Errorf("source DSN: %w", err)
+	}
+	if _, err := config.BuildTLSConfig(ssl.Mode, ssl.CA, ssl.Cert, ssl.Key, config.DSNHost(sourceDSN)); err != nil {
+		var se *config.TLSSettingsError
+		if errors.As(err, &se) {
+			// Worded without the command-line flags: this value comes from
+			// a registry entry's ssl_* fields.
+			return nil, fmt.Errorf("source TLS settings: %s", se.Problem)
+		}
+		return nil, fmt.Errorf("source TLS settings: %w", err)
 	}
 	if cfg.Net != "tcp" && cfg.Net != "" {
 		return nil, fmt.Errorf("source DSN: only tcp addresses are forwarded, not %q", cfg.Net)
@@ -82,8 +110,11 @@ func NewForwarder(sourceDSN string, policy Policy, queryTimeout time.Duration) (
 		addr = net.JoinHostPort(addr, "3306")
 	}
 	return &Forwarder{
+		dsn:  sourceDSN,
 		addr: addr, user: cfg.User, pass: cfg.Passwd, db: cfg.DBName,
 		tls:            cfg.TLS,
+		tlsInDSN:       cfg.TLS != nil || cfg.TLSConfig != "",
+		ssl:            ssl,
 		policy:         policy,
 		connectTimeout: 10 * time.Second,
 		queryTimeout:   queryTimeout,
@@ -101,17 +132,26 @@ func (f *Forwarder) get(ctx context.Context) (*client.Conn, error) {
 	if f.conn != nil {
 		return f.conn, nil
 	}
-	c, err := client.ConnectWithContext(ctx, f.addr, f.user, f.pass, f.db, f.connectTimeout, func(c *client.Conn) error {
-		c.ReadTimeout = f.queryTimeout
-		c.WriteTimeout = f.queryTimeout
-		if f.tls != nil {
-			// The DSN asked for TLS (tls=true, skip-verify, preferred or a
-			// registered config): forwarding honours it, or the live rows
-			// would cross the network in clear where the operator asked
-			// for encryption.
-			c.SetTLSConfig(f.tls)
-		}
-		return nil
+	// TLS is decided by capture's own rule for this server
+	// (config.ConnectSSLWith): the mode's tls.Config first; a retry in
+	// cleartext only for "preferred" against a source that offers no TLS at
+	// all; never for required or the verify modes.
+	c, err := config.ConnectSSLWith(f.dsn, f.ssl, f.OnCleartext, func(_ string, modeTLS *tls.Config) (*client.Conn, error) {
+		return client.ConnectWithContext(ctx, f.addr, f.user, f.pass, f.db, f.connectTimeout, func(c *client.Conn) error {
+			c.ReadTimeout = f.queryTimeout
+			c.WriteTimeout = f.queryTimeout
+			switch {
+			case f.tlsInDSN:
+				// A tls= inside the DSN wins over the mode (tls=false
+				// included), as it does for capture (config.applyTLS).
+				if f.tls != nil {
+					c.SetTLSConfig(f.tls)
+				}
+			case modeTLS != nil:
+				c.SetTLSConfig(modeTLS)
+			}
+			return nil
+		})
 	})
 	if err != nil {
 		f.dead = lostError(fmt.Errorf("connect to the source: %w", err))
@@ -248,6 +288,12 @@ func (f *Forwarder) stream(sink RowSink, run func(*mysql.Result, client.SelectPe
 			cells = cells[:len(row)]
 			for i := range row {
 				cells[i] = row[i].Value()
+				// An empty string arrives from go-mysql's row parser as a
+				// nil byte slice, which a sink reads as NULL. The cell's
+				// own type is what says it is a string.
+				if b, isBytes := cells[i].([]byte); isBytes && b == nil && row[i].Type == mysql.FieldValueTypeString {
+					cells[i] = []byte{}
+				}
 			}
 			if err := sink.Row(cells); err != nil {
 				return sinkError{err}

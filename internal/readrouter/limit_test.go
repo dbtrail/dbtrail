@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dbtrail/dbtrail/internal/config"
 )
 
 // TestLimitBounded: a top-level LIMIT of a few rows with nothing that forces
@@ -215,7 +217,7 @@ func TestForwarder_bareLimitDecidedWithoutExplain(t *testing.T) {
 			c.Close()
 		}
 	}()
-	f, err := NewForwarder("u:p@tcp("+ln.Addr().String()+")/db?tls=false", DefaultPolicy(), time.Second)
+	f, err := NewForwarder("u:p@tcp("+ln.Addr().String()+")/db?tls=false", config.SSL{Mode: "disabled"}, DefaultPolicy(), time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
