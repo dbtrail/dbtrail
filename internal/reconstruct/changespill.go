@@ -2,6 +2,7 @@ package reconstruct
 
 import (
 	"bufio"
+	"context"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 
@@ -187,6 +189,70 @@ func (s *changeSpill) load(b int) (map[string]*query.ResultRow, error) {
 			return nil, TouchedRowBudgetError(s.limit, s.tables, true)
 		}
 	}
+}
+
+// diskBytes is how much the groups take on disk, or zero for what cannot be
+// sized. It is the estimate a pair written from the spill gives the disk
+// check (#2126): the rows are the same ones, in a format that packs less.
+func (s *changeSpill) diskBytes() int64 {
+	var n int64
+	for b := range spillBuckets {
+		if !s.written[b] {
+			continue
+		}
+		if fi, err := os.Stat(s.path(b)); err == nil {
+			n += fi.Size()
+		}
+	}
+	return n
+}
+
+// eachPass reads the groups back in order and hands them to run a pass at a
+// time: as many groups as fit under the limit, the next group's size predicted
+// from the last one (the hash spreads rows evenly). Every group belongs to
+// exactly one pass, the empty ones included, and owns marks the groups of the
+// pass being run; neither it nor the map outlives the call. It returns how
+// many passes ran.
+//
+// The one place the grouping is decided, for the merge that rewrites a table
+// (mergeSpilledPasses) and for the pair written beside one (writeTableDelta,
+// #2126): two loops would drift on the limit.
+func (s *changeSpill) eachPass(ctx context.Context, run func(pass map[string]*query.ResultRow, owns *[spillBuckets]bool) error) (int, error) {
+	var owns [spillBuckets]bool
+	pass := map[string]*query.ResultRow{}
+	passes := 0
+	flush := func() error {
+		if err := run(pass, &owns); err != nil {
+			return err
+		}
+		passes++
+		owns = [spillBuckets]bool{}
+		pass = map[string]*query.ResultRow{}
+		return nil
+	}
+	last := 0
+	for b := range spillBuckets {
+		if err := ctx.Err(); err != nil {
+			return passes, err
+		}
+		if len(pass) > 0 && int64(len(pass)+last) > s.limit {
+			if err := flush(); err != nil {
+				return passes, err
+			}
+		}
+		group, err := s.load(b)
+		if err != nil {
+			return passes, err
+		}
+		last = len(group)
+		// Groups hold disjoint keys, so nothing here overwrites.
+		maps.Copy(pass, group)
+		owns[b] = true
+	}
+	if err := flush(); err != nil {
+		return passes, err
+	}
+	return passes, nil
 }
 
 // restoreEmpty undoes gob's one loss on a row image: it can send an empty

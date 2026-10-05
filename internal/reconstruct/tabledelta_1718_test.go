@@ -289,33 +289,31 @@ func TestTableDeltaCompactReason_1718(t *testing.T) {
 	}
 	legacy := &tableDelta{Meta: baseline.DumpMetadata{DeltaChainStart: at.Add(-time.Hour)}, PairSize: 1, Legacy: true}
 	cases := []struct {
-		name    string
-		prev    *tableDelta
-		base    string
-		spilled bool
-		gap     *CaptureGap
-		want    string
+		name string
+		prev *tableDelta
+		base string
+		gap  *CaptureGap
+		want string
 		// zero values are the ordinary table: it has an anchor, and no
 		// reserved column name.
 		noAnchor bool
 		reserved string
 	}{
-		{"start a chain", nil, "/b/t.parquet", false, nil, "", false, ""},
-		{"extend", chain(time.Hour, 100), "/b/t.parquet", false, nil, "", false, ""},
-		{"past a quarter", chain(time.Hour, 251), "/b/t.parquet", false, nil, "passed 25%", false, ""},
-		{"past a day", chain(24*time.Hour+time.Minute, 1), "/b/t.parquet", false, nil, "old", false, ""},
-		{"s3 source", nil, "s3://b/t.parquet", false, nil, "S3", false, ""},
-		{"spilled fold", nil, "/b/t.parquet", true, nil, "did not fit in memory", false, ""},
-		{"capture gap", chain(time.Hour, 1), "/b/t.parquet", false, &CaptureGap{}, "capture gap", false, ""},
-		{"nothing to resume from", nil, "/b/t.parquet", false, nil, "no binlog position", true, ""},
-		{"a column named file_row_number", nil, "/b/t.parquet", false, nil, "file_row_number", false, "file_row_number"},
-		{"a column named bintrail_pk", nil, "/b/t.parquet", false, nil, "bintrail_pk", false, "bintrail_pk"},
-		{"the v0.83.0 layout", legacy, "/b/t.parquet", false, nil, "older layout", false, ""},
+		{"start a chain", nil, "/b/t.parquet", nil, "", false, ""},
+		{"extend", chain(time.Hour, 100), "/b/t.parquet", nil, "", false, ""},
+		{"past a quarter", chain(time.Hour, 251), "/b/t.parquet", nil, "passed 25%", false, ""},
+		{"past a day", chain(24*time.Hour+time.Minute, 1), "/b/t.parquet", nil, "old", false, ""},
+		{"s3 source", nil, "s3://b/t.parquet", nil, "S3", false, ""},
+		{"capture gap", chain(time.Hour, 1), "/b/t.parquet", &CaptureGap{}, "capture gap", false, ""},
+		{"nothing to resume from", nil, "/b/t.parquet", nil, "no binlog position", true, ""},
+		{"a column named file_row_number", nil, "/b/t.parquet", nil, "file_row_number", false, "file_row_number"},
+		{"a column named bintrail_pk", nil, "/b/t.parquet", nil, "bintrail_pk", false, "bintrail_pk"},
+		{"the v0.83.0 layout", legacy, "/b/t.parquet", nil, "older layout", false, ""},
 		{"the sequence is exhausted", &tableDelta{Meta: baseline.DumpMetadata{DeltaChainStart: at.Add(-time.Hour), DeltaSeq: baseline.TableDeltaMaxSeq}},
-			"/b/t.parquet", false, nil, "sequence", false, ""},
+			"/b/t.parquet", nil, "sequence", false, ""},
 	}
 	for _, c := range cases {
-		got := tableDeltaCompactReason(c.prev, c.base, 1000, c.spilled, c.gap, at, !c.noAnchor, c.reserved, time.Time{}, time.Time{})
+		got := tableDeltaCompactReason(c.prev, c.base, 1000, c.gap, at, !c.noAnchor, c.reserved, time.Time{}, time.Time{})
 		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
 			t.Errorf("%s: reason = %q, want it to contain %q", c.name, got, c.want)
 		}
@@ -646,44 +644,6 @@ func TestFetchFloor(t *testing.T) {
 	since, anchor = fetchFloor(t0, base, prev)
 	if !since.Equal(t0.Add(2*time.Hour)) || anchor.BinlogPos != 3000 || anchor.BinlogFile != "binlog.000009" {
 		t.Fatalf("with chain: since=%s anchor=%s:%d", since, anchor.BinlogFile, anchor.BinlogPos)
-	}
-}
-
-// TestTableDelta_spilledWindowCompactsFromTheSpill: a window whose changes did
-// not fit in memory (#1107) is folded through the spill into a full rewrite,
-// and the chain restarts at 0.
-func TestTableDelta_spilledWindowCompactsFromTheSpill(t *testing.T) {
-	noCompaction(t)
-	rows, nulls := zooRows()
-	src := writeZooBaseline(t, rows, nulls)
-	root := t.TempDir()
-	t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
-	at1 := t0.Add(5 * time.Minute)
-	base1, _, err := deltaWindow(t, root, src, t0, changeMap(upd(1, "v1")), at1, &query.BinlogPos{File: "binlog.000009", Pos: 1000}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	at2 := t0.Add(10 * time.Minute)
-	w2 := changeMap(upd(3, "three"), ins(10, "ten"))
-	_, ref2, _ := emitSnapshot(t, func() string {
-		_, r, _ := emitSnapshot(t, src, changeMap(upd(1, "v1")), &query.BinlogPos{File: "binlog.000009", Pos: 1000}, at1)
-		return r
-	}(), cloneChanges(w2), &query.BinlogPos{File: "binlog.000009", Pos: 2000}, at2)
-	base2, rep, err := deltaWindow(t, root, base1, at1, map[string]*query.ResultRow{}, at2, &query.BinlogPos{File: "binlog.000009", Pos: 2000},
-		func(p *tableDeltaPublish) { p.fold.Spill = spillOf(t, 1, cloneChanges(w2)) })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rep.TableDelta || !strings.Contains(rep.DeltaCompacted, "did not fit in memory") {
-		t.Fatalf("want a compaction for the spill, got TableDelta=%v compacted=%q", rep.TableDelta, rep.DeltaCompacted)
-	}
-	want, got := byID(readSnapshotRows(t, ref2)), byID(readSnapshotRows(t, base2))
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("state after a spilled compaction differs from the full rewrite\n got: %v\nwant: %v", got, want)
-	}
-	chain, err := baseline.ListTableDelta(context.Background(), base2)
-	if err != nil || chain == nil || len(chain.Files) != 1 || chain.Files[0].Seq != 0 {
-		t.Fatalf("chain after a spilled compaction = %+v, %v", chain, err)
 	}
 }
 

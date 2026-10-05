@@ -48,7 +48,7 @@ func TestTableDeltaCompactReason_chainStartFloor(t *testing.T) {
 			"a chain begun over this base would start on the line: written in full, the new chain starts at this run"},
 	}
 	for _, c := range cases {
-		got := tableDeltaCompactReason(c.prev, "/b/t.parquet", 1000, false, nil, at, true, "", c.floor, start)
+		got := tableDeltaCompactReason(c.prev, "/b/t.parquet", 1000, nil, at, true, "", c.floor, start)
 		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
 			t.Errorf("%s: reason = %q, want it to contain %q (%s)", c.name, got, c.want, c.why)
 		}
