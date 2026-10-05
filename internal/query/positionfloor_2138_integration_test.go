@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -159,7 +160,7 @@ func TestPartitionHeads_readsTheNewestRowOfEachPartition(t *testing.T) {
 	}
 	out := logged.String()
 	if strings.Count(out, "level=WARN") != 1 || !strings.Contains(out, "file binlog.000001, started 2020-01-01T00:00:00Z") ||
-		!strings.Contains(out, "DELETE FROM index_state WHERE binlog_file = 'binlog.000001' AND completed_at IS NULL;") {
+		!strings.Contains(out, "UPDATE index_state SET status = 'failed', completed_at = UTC_TIMESTAMP() WHERE binlog_file = 'binlog.000001' AND completed_at IS NULL;") {
 		t.Fatalf("want one warning naming the run in progress, got:\n%s", out)
 	}
 	// A finished run is not warned about.
@@ -215,6 +216,62 @@ func TestPartitionHeads_notPartitioned(t *testing.T) {
 	got, err := h.SinceFor(ctx, db, Options{Schema: "shop", Table: "items", Since: &since, SincePos: &BinlogPos{File: "binlog.000001", Pos: 800}})
 	if err != nil || !got.Equal(first.Add(10*time.Minute)) {
 		t.Fatalf("SinceFor = %v, err=%v; want the event's own time", got, err)
+	}
+}
+
+// TestFetchMerged_lateEventInAnArchiveBelowTheFirstPartition: the gap filter
+// with an archive tier. The index's first partition holds an old row of the
+// table that arrived late, so the start moves back ten hours below the first
+// partition. One of those hours has an archive, and the archive holds
+// another late event. Strict mode must not refuse (the unarchived hours in
+// between never had a partition), the archive must be read from the moved
+// start, and both events must come back.
+func TestFetchMerged_lateEventInAnArchiveBelowTheFirstPartition(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	ctx := context.Background()
+	db, dbName := testutil.CreateTestDB(t)
+	if err := indexer.CreateIndexTables(ctx, db, 12, false, nil); err != nil {
+		t.Fatalf("CreateIndexTables: %v", err)
+	}
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	first := time.Now().UTC().Truncate(time.Hour).Add(time.Hour)
+	insertHeadEvent(t, db, "items", 900, first.Add(-10*time.Hour+10*time.Minute)) // in the first partition
+	archivedHour := first.Add(-5 * time.Hour)
+	base := filepath.Join(t.TempDir(), "bintrail_id=one")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testutil.MustExec(t, db, fmt.Sprintf(`INSERT INTO archive_state (partition_name, bintrail_id, local_path)
+		VALUES ('%s', 'one', '%s')`, indexer.PartitionName(archivedHour), filepath.Join(base, "x.parquet")))
+	archived := ResultRow{EventID: 1 << 40, EventTimestamp: archivedHour.Add(10 * time.Minute), SchemaName: "shop", TableName: "items",
+		BinlogFile: "binlog.000001", StartPos: 950, EndPos: 1050, PKValues: "2"}
+
+	since := first.Add(9*time.Hour + 10*time.Minute)
+	var archiveSince time.Time
+	rows, _, err := FetchMerged(ctx, db, New(db), FetchMergedOptions{
+		Opts:           Options{Schema: "shop", Table: "items", Since: &since, SincePos: &BinlogPos{File: "binlog.000001", Pos: 800}},
+		DBName:         dbName,
+		AllowGaps:      false,
+		SourceResolver: func(context.Context, *sql.DB) ([]string, error) { return []string{base}, nil },
+		ArchiveFetcher: func(_ context.Context, o Options, _ string) ([]ResultRow, error) {
+			archiveSince = *o.Since
+			return []ResultRow{archived}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("FetchMerged refused: %v", err)
+	}
+	var got []uint64
+	for _, r := range rows {
+		got = append(got, r.StartPos)
+	}
+	if len(got) != 2 || got[0] != 900 || got[1] != 950 {
+		t.Fatalf("positions returned = %v, want the late live event (900) and the archived one (950)", got)
+	}
+	if archiveSince.After(archivedHour) {
+		t.Fatalf("the archive was read from %s, after the archived hour %s", archiveSince.Format(time.RFC3339), archivedHour.Format(time.RFC3339))
 	}
 }
 

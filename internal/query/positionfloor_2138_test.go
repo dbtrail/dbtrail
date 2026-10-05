@@ -2,8 +2,11 @@ package query
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -389,8 +392,13 @@ func TestWithoutFirstPartitionHours(t *testing.T) {
 			if tc.name == "hours the caller asked for below the first partition stay" {
 				as = hr(13).Add(10 * time.Minute)
 			}
-			if got := withoutFirstPartitionHours(tc.gaps, tc.firstEnd, as); !slices.Equal(got, tc.want) {
+			got, unchecked := withoutFirstPartitionHours(tc.gaps, tc.firstEnd, as)
+			if !slices.Equal(got, tc.want) {
 				t.Fatalf("kept = %v, want %v", got, tc.want)
+			}
+			// Every hour is either kept or reported, never silently gone.
+			if len(got)+len(unchecked) != len(tc.gaps) {
+				t.Fatalf("kept %d + unchecked %d of %d gap hours", len(got), len(unchecked), len(tc.gaps))
 			}
 		})
 	}
@@ -402,9 +410,134 @@ func TestFileIndexingInProgressWarning(t *testing.T) {
 	got := fileIndexingInProgressWarning("binlog.000042", started, started.Add(49*time.Hour+20*time.Minute))
 	want := "the index records a `bintrail index` run that has not finished: file binlog.000042, started 2026-03-01T09:15:00Z (49h20m0s ago). " +
 		"While it is recorded as running, every snapshot update and every read that continues from a snapshot looks through all the older hours of the index instead of the few it needs, which is slower and loses nothing. " +
-		"If that run is still going, this stops by itself when it ends. If it crashed or was stopped, run `bintrail index` on that file again until it completes, " +
-		"or remove its record: DELETE FROM index_state WHERE binlog_file = 'binlog.000042' AND completed_at IS NULL;"
+		"If that run is still going, this stops by itself when it ends. If it crashed or was stopped, mark it as ended: " +
+		"UPDATE index_state SET status = 'failed', completed_at = UTC_TIMESTAMP() WHERE binlog_file = 'binlog.000042' AND completed_at IS NULL; " +
+		"That keeps every change the run had already indexed and only records that it stopped; the rest of that file stays unindexed. " +
+		"Do not run `bintrail index` on that file again: it starts the file from its beginning and would index the same changes a second time."
 	if got != want {
 		t.Fatalf("warning =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// The line a fetch logs for the hours it could not check: a count and a
+// range, with real hours.
+func TestUncheckedHoursWarning(t *testing.T) {
+	day := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	var hours []time.Time
+	for i := 5; i < 10; i++ {
+		hours = append(hours, day.Add(time.Duration(i)*time.Hour))
+	}
+	got := uncheckedHoursWarning("shop", "orders", hours)
+	want := "shop.orders: the index received changes late that are older than its first hour, and the read went back for them. " +
+		"5 hour(s) between 2026-03-01T05:00:00Z and 2026-03-01T10:00:00Z have no partition and no archive of their own, so they cannot be checked: " +
+		"changes of those hours that are still in the index were read; any that were rotated out without an archive are gone and are not in the result. " +
+		"A new full snapshot of the table is the way to be sure."
+	if got != want {
+		t.Fatalf("warning =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// expectPicture registers the statements of ONE load of the picture, for a
+// table with no partitions whose newest row is before any anchor used here.
+func expectPicture(m sqlmock.Sqlmock) {
+	m.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(
+		sqlmock.NewRows([]string{"PARTITION_NAME", "PARTITION_DESCRIPTION"}).AddRow(nil, nil))
+	m.ExpectQuery("ORDER BY event_id DESC LIMIT 1").WillReturnRows(
+		sqlmock.NewRows([]string{"part", "binlog_file", "start_pos"}).AddRow(0, "binlog.000001", 100))
+	m.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}))
+	m.ExpectQuery("FROM index_state").WillReturnRows(sqlmock.NewRows([]string{"m", "n"}).AddRow(nil, 0))
+}
+
+// A recover-cascade fetches once per (foreign key, parent row). For one run
+// the picture of the index is loaded ONCE, on either kind of fetcher; a bare
+// engine outside a run loads it per fetch.
+func TestForRun_loadsThePictureOnce(t *testing.T) {
+	since := time.Date(2026, 3, 1, 12, 30, 0, 0, time.UTC)
+	opts := Options{Schema: "shop", Table: "orders", Since: &since, SincePos: &BinlogPos{File: "binlog.000001", Pos: 800}}
+	const scans = 5
+	events := func(m sqlmock.Sqlmock) {
+		m.ExpectQuery("FROM binlog_events").WillReturnRows(sqlmock.NewRows([]string{"event_id"}))
+	}
+	for _, tc := range []struct {
+		name    string
+		fetcher func(db *sql.DB) Fetcher
+		loads   int
+	}{
+		{"an engine for one run", func(db *sql.DB) Fetcher { return ForRun(New(db)) }, 1},
+		{"a merged fetcher", func(db *sql.DB) Fetcher {
+			return ForRun(&MergedFetcher{DB: db, Engine: New(db), NoArchive: true})
+		}, 1},
+		{"a bare engine, fetch by fetch", func(db *sql.DB) Fetcher { return New(db) }, scans},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			for i := range scans {
+				if i < tc.loads {
+					expectPicture(mock)
+				}
+				events(mock)
+			}
+			f := tc.fetcher(db)
+			for i := range scans {
+				if _, err := f.Fetch(context.Background(), opts); err != nil {
+					t.Fatalf("scan %d: %v", i+1, err)
+				}
+			}
+			if merr := mock.ExpectationsWereMet(); merr != nil {
+				t.Fatal(merr)
+			}
+		})
+	}
+	// ForRun leaves anything else as it is, and does not wrap twice.
+	e := ForRun(New(nil))
+	if ForRun(e) != e {
+		t.Fatal("ForRun made a second run out of an engine that already is one")
+	}
+}
+
+// A paged fetch settles its start once, before the first page. Page 2 must
+// not ask the index again: the sqlmock below holds one load of the picture,
+// and a second one fails the fetch.
+func TestFetchMergedStream_settlesItsStartOnce(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "bintrail_id=one")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	expectPicture(mock)
+	mock.ExpectQuery("FROM archive_state").WillReturnRows(
+		sqlmock.NewRows([]string{"bintrail_id", "sample_local", "sample_bucket", "sample_key"}).
+			AddRow("one", filepath.Join(base, "events.parquet"), nil, nil))
+	const pages = 3 // two full pages and the short one that ends the walk
+	for range pages {
+		mock.ExpectQuery("FROM binlog_events").WillReturnRows(sqlmock.NewRows([]string{"event_id"}))
+	}
+	all := streamRows(5)
+	since := streamBase.Add(-time.Minute)
+	var got, calls int
+	_, err = FetchMergedStream(context.Background(), db, New(db), FetchMergedOptions{
+		Opts:      Options{Schema: "mydb", Table: "orders", Since: &since, SincePos: &BinlogPos{File: "binlog.000001", Pos: 800}},
+		AllowGaps: true,
+		ArchiveFetcher: func(_ context.Context, o Options, _ string) ([]ResultRow, error) {
+			calls++
+			return pageOf(all, o), nil
+		},
+	}, 2, func(page []ResultRow) error {
+		got += len(page)
+		return nil
+	})
+	if err != nil || got != len(all) || calls != pages {
+		t.Fatalf("stream: %d rows over %d pages, err=%v; want %d rows over %d pages", got, calls, err, len(all), pages)
+	}
+	if merr := mock.ExpectationsWereMet(); merr != nil {
+		t.Fatal(merr)
 	}
 }

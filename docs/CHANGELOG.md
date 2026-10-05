@@ -349,11 +349,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Cost**, measured on MySQL 8.4.9 with 1.5 million changes over 720
     hourly partitions: 34 to 47 ms for the look at every partition (three
     statements; one statement per partition took 100 to 167 ms), once per
-    update, nothing more per table when no change is late, and 1 ms per
-    table when 26 partitions hold late ones. Reading a table with no time
-    bound at all, the alternative, took 86 ms for a table whose bounded read
-    takes 10 ms, and grows with the size of the index. The other readers
-    above pay those 34 to 47 ms on each read.
+    update, nothing more per table when no hour holds a late change, and
+    1 ms per table when 26 hours do. The look is per hour, not per table:
+    one late change of any table makes every table with changes in that
+    hour start its scan there, and the exact position then discards what is
+    not after its snapshot. Reading a table with no time bound at all, the
+    alternative, took 86 ms for a table whose bounded read takes 10 ms, and
+    grows with the size of the index. `recover-cascade` looks once per run,
+    however many child rows it searches for; `verify`, the MySQL port's
+    `_snapshot` tables, the restore of a row and `export iceberg` look on
+    each read.
   - **Snapshots already written.** Nothing has to be converted: an update
     over an existing snapshot reads its start the new way. What an earlier
     update already left out stays out, because the snapshots after it start
@@ -365,22 +370,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **An outage longer than the index keeps its hours still needs a new
     full snapshot.** Only the hours still in the index are looked at. A late
     change lands in an old hour, and old hours are the next to be rotated
-    out: when that hour was already moved to an archive before the update
-    ran (a short `--retain`, or an outage longer than the retention), the
-    change is found only if it falls inside the old time bound, as before.
-    The archive record does not say which positions an archive holds, so
-    there is nothing cheap to read this from yet.
+    out. When that hour was already moved to an archive before the update
+    ran (a short `--retain`, or an outage longer than the retention),
+    nothing in the index points at it. It is still found when the scan
+    starts at or before it for another reason, because archives from the
+    start onward are read and filtered by position like the index: that is
+    the case inside the old time bound, and whenever another late change
+    still in the index moved the start further back. Otherwise it is left
+    out, as before. The archive record does not say which positions an
+    archive holds (#2152).
+  - **What a moved start costs.** The scan reads the index, and every
+    archive, from the moved start: once for each update that finds a late
+    change, and on every update while a `bintrail index` run is unfinished.
   - **`bintrail index` into an index a stream also writes.** While it adds
     binlog files, the newest change of an hour says nothing about the rest
     of it, so an update of a snapshot older than that run looks in every
-    older hour (slower, never less). A run recorded as unfinished counts as
+    older hour and can start at the table's oldest change in the index, with
+    no bound (slower, never less). A run recorded as unfinished counts as
     still going. If it crashed, that record stays, and the daemon now warns
-    every ten minutes with the file, when it started and the two ways out:
-    run `bintrail index` on that file to the end, or delete its record.
+    every ten minutes with the file, when it started and the way out: mark
+    the record as ended with the `UPDATE index_state ...` statement the
+    warning prints. That keeps what the run had indexed. Do not run
+    `bintrail index` on that file again: it starts the file from its
+    beginning and indexes the same changes a second time.
   - If the index cannot be read for this, the update stops and publishes
-    nothing, also under `--allow-gaps`. An hour older than the first hour
-    of the index is not a missing hour for this purpose: the index keeps
-    such changes in its first partition, and the update reads them there.
+    nothing, also under `--allow-gaps`.
+  - **Hours older than the first hour of the index cannot be checked.** The
+    index keeps a late change older than its first hour in its first
+    partition, and the update reads it there. The hours in between have no
+    partition and no archive of their own, so the update cannot tell an
+    hour that never had one from an hour that was rotated out without an
+    archive. It does not refuse over them (they were not examined before
+    either, and a refusal would stop every later update of the table); it
+    logs one warning with how many hours and from when to when. A change
+    that was rotated out without an archive stays lost.
 - **Capture: a row that could not be read is now on record** (#2139). When one
   row of a change could not be matched to its table's columns, capture wrote a
   warning to its log, left that row out of the index and carried on. Nothing

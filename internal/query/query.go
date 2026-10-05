@@ -474,6 +474,9 @@ func OrderDirection(order string) string {
 // Engine executes queries against the index database.
 type Engine struct {
 	db *sql.DB
+	// run, when set, is the one picture of the index this engine's fetches
+	// share (#2138): see ForRun. nil = each fetch that needs one loads it.
+	run *runPicture
 }
 
 // New creates a query Engine backed by db.
@@ -493,7 +496,15 @@ func (e *Engine) Fetch(ctx context.Context, opts Options) ([]ResultRow, error) {
 	}
 	// A caller that reaches the engine directly with a time and a position
 	// (the cascade's baseline window) gets the same start as the merged fetch.
-	if _, _, err := settleSince(ctx, e.db, &opts, nil); err != nil {
+	var heads *PartitionHeads
+	if e.run != nil && needsPicture(opts) {
+		var err error
+		if heads, err = e.run.get(ctx, e.db); err != nil {
+			return nil, fmt.Errorf("cannot tell how far back the changes after %s:%d reach: %w",
+				opts.SincePos.File, opts.SincePos.Pos, err)
+		}
+	}
+	if _, _, err := settleSince(ctx, e.db, &opts, heads); err != nil {
 		return nil, err
 	}
 	q, args := buildQuery(opts)

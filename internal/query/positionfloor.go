@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -276,8 +277,10 @@ func warnFileIndexingInProgress(ctx context.Context, db *sql.DB) {
 func fileIndexingInProgressWarning(file string, started, now time.Time) string {
 	return fmt.Sprintf("the index records a `bintrail index` run that has not finished: file %s, started %s (%s ago). "+
 		"While it is recorded as running, every snapshot update and every read that continues from a snapshot looks through all the older hours of the index instead of the few it needs, which is slower and loses nothing. "+
-		"If that run is still going, this stops by itself when it ends. If it crashed or was stopped, run `bintrail index` on that file again until it completes, "+
-		"or remove its record: DELETE FROM index_state WHERE binlog_file = '%s' AND completed_at IS NULL;",
+		"If that run is still going, this stops by itself when it ends. If it crashed or was stopped, mark it as ended: "+
+		"UPDATE index_state SET status = 'failed', completed_at = UTC_TIMESTAMP() WHERE binlog_file = '%s' AND completed_at IS NULL; "+
+		"That keeps every change the run had already indexed and only records that it stopped; the rest of that file stays unindexed. "+
+		"Do not run `bintrail index` on that file again: it starts the file from its beginning and would index the same changes a second time.",
 		file, started.UTC().Format(time.RFC3339), now.Sub(started).Round(time.Minute), strings.ReplaceAll(file, "'", "''"))
 }
 
@@ -367,6 +370,41 @@ func (h *PartitionHeads) sinceForWith(ctx context.Context, db *sql.DB, opts Opti
 		since, err = fresh.sinceFor(ctx, db, opts)
 	}
 	return since, used, err
+}
+
+// runPicture is one PartitionHeads for the length of ONE short run: a
+// recover-cascade asks for the children of every (foreign key, parent row),
+// and loading the picture for each of those fetches cost more than the
+// fetches (1,000 parents and three keys: about two minutes). It is loaded on
+// first need and never refreshed, which is why it must not outlive a run: a
+// picture older than a fetch's upper bound can miss a late event. A daemon
+// that serves reads for hours loads its own per fetch instead.
+type runPicture struct {
+	once  sync.Once
+	heads *PartitionHeads
+	err   error
+}
+
+func (r *runPicture) get(ctx context.Context, db *sql.DB) (*PartitionHeads, error) {
+	r.once.Do(func() { r.heads, r.err = LoadPartitionHeads(ctx, db) })
+	return r.heads, r.err
+}
+
+// needsPicture reports whether a fetch with these options will read a
+// PartitionHeads.
+func needsPicture(opts Options) bool {
+	return !opts.sinceSettled && opts.Since != nil && opts.SincePos != nil
+}
+
+// ForRun returns f for the use of one short run (one recover-cascade): when
+// f is an *Engine, a copy that loads its PartitionHeads once and shares it
+// between that run's fetches. A *MergedFetcher already does. Anything else
+// is returned as it is.
+func ForRun(f Fetcher) Fetcher {
+	if e, ok := f.(*Engine); ok && e.run == nil {
+		return &Engine{db: e.db, run: &runPicture{}}
+	}
+	return f
 }
 
 // settleSince is what every fetch runs before it reads: it replaces
