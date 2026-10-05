@@ -106,6 +106,11 @@ func TestPartitionHeads_filesIndexedSinceTheSnapshotVoidTheShortcut(t *testing.T
 		h.streamCaptured, h.lastFileIndexed = stream, lastFile
 		return h
 	}
+	running := func(stream bool, lastFile time.Time) *PartitionHeads {
+		h := mk(stream, lastFile)
+		h.fileIndexingUnfinished = true
+		return h
+	}
 	all := []string{"p0", "p2", "p3"}
 	for _, tc := range []struct {
 		name string
@@ -117,6 +122,11 @@ func TestPartitionHeads_filesIndexedSinceTheSnapshotVoidTheShortcut(t *testing.T
 		{"stream, files indexed after the snapshot", mk(true, since.Add(time.Minute)), all},
 		{"stream, files indexed inside the clock margin before it", mk(true, since.Add(-fileIndexingMargin)), all},
 		{"stream, files indexed well before it", mk(true, since.Add(-fileIndexingMargin-time.Second)), nil},
+		// A run still going voids it whatever the last finished one says,
+		// and with no finished one at all.
+		{"stream, a run still going, the last finished one long ago", running(true, since.Add(-30*24*time.Hour)), all},
+		{"stream, a run still going and none finished", running(true, time.Time{}), all},
+		{"files alone, a run still going", running(false, time.Time{}), nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.h.below(since, anchor); !slices.Equal(got, tc.want) {
@@ -219,7 +229,7 @@ func TestFetchMerged_refusesWhenTheFloorCannotBeSettled(t *testing.T) {
 			twoParts(m)
 			head(m, "binlog.000001", 900)
 			m.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}))
-			m.ExpectQuery("FROM index_state").WillReturnRows(sqlmock.NewRows([]string{"m"}).AddRow(nil))
+			m.ExpectQuery("FROM index_state").WillReturnRows(sqlmock.NewRows([]string{"m", "n"}).AddRow(nil, 0))
 			m.ExpectQuery("ORDER BY event_timestamp LIMIT 1").WillReturnError(forced)
 		}},
 	} {
@@ -293,7 +303,7 @@ func TestSinceFor_readsAgainWhenAPartitionWasDropped(t *testing.T) {
 			AddRow("p1", strconv.FormatInt(mysqlToSeconds(h0.Add(2*time.Hour)), 10)).AddRow("p_future", "MAXVALUE"))
 		m.ExpectQuery("PARTITION \\(`p1`\\) ORDER BY event_id DESC.*UNION ALL.*`p_future`").WillReturnRows(sqlmock.NewRows(headCols).AddRow(0, "binlog.000001", 700))
 		m.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}))
-		m.ExpectQuery("FROM index_state").WillReturnRows(sqlmock.NewRows([]string{"m"}).AddRow(nil))
+		m.ExpectQuery("FROM index_state").WillReturnRows(sqlmock.NewRows([]string{"m", "n"}).AddRow(nil, 0))
 	}
 	late := h0.Add(90 * time.Minute)
 
@@ -393,7 +403,7 @@ func TestFileIndexingInProgressWarning(t *testing.T) {
 	want := "the index records a `bintrail index` run that has not finished: file binlog.000042, started 2026-03-01T09:15:00Z (49h20m0s ago). " +
 		"While it is recorded as running, every snapshot update and every read that continues from a snapshot looks through all the older hours of the index instead of the few it needs, which is slower and loses nothing. " +
 		"If that run is still going, this stops by itself when it ends. If it crashed or was stopped, run `bintrail index` on that file again until it completes, " +
-		"or remove its record: DELETE FROM index_state WHERE binlog_file = 'binlog.000042' AND status = 'in_progress';"
+		"or remove its record: DELETE FROM index_state WHERE binlog_file = 'binlog.000042' AND completed_at IS NULL;"
 	if got != want {
 		t.Fatalf("warning =\n%s\nwant\n%s", got, want)
 	}

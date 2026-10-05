@@ -136,13 +136,13 @@ func TestPartitionHeads_readsTheNewestRowOfEachPartition(t *testing.T) {
 	if h, err = LoadPartitionHeads(ctx, db); err != nil {
 		t.Fatalf("LoadPartitionHeads: %v", err)
 	}
-	if !h.streamCaptured || time.Since(h.lastFileIndexed) > 5*time.Minute {
-		t.Fatalf("streamCaptured=%v lastFileIndexed=%s, want a stream and a run in progress now", h.streamCaptured, h.lastFileIndexed)
+	if !h.streamCaptured || !h.fileIndexingUnfinished || !h.lastFileIndexed.IsZero() {
+		t.Fatalf("streamCaptured=%v unfinished=%v lastFileIndexed=%s, want a stream, a run in progress and none finished", h.streamCaptured, h.fileIndexingUnfinished, h.lastFileIndexed)
 	}
 	// So a fetch for a snapshot written before now trusts no partition's
 	// newest row: every one below its floor that holds anything is reached.
-	// (Hours 2, 5 and 8 hold rows; the floor of hour 9 leaves all three out.)
-	if got := h.below(hour(9), BinlogPos{File: "binlog.000001", Pos: 5000}); len(got) != 3 {
+	// (Hours 2, 5 and 8 hold rows; the floor of hour 10 leaves all three out.)
+	if got := h.below(hour(10), BinlogPos{File: "binlog.000001", Pos: 5000}); len(got) != 3 {
 		t.Fatalf("with a file indexing run in progress, partitions reached = %v, want the three that hold rows", got)
 	}
 
@@ -159,7 +159,7 @@ func TestPartitionHeads_readsTheNewestRowOfEachPartition(t *testing.T) {
 	}
 	out := logged.String()
 	if strings.Count(out, "level=WARN") != 1 || !strings.Contains(out, "file binlog.000001, started 2020-01-01T00:00:00Z") ||
-		!strings.Contains(out, "DELETE FROM index_state WHERE binlog_file = 'binlog.000001' AND status = 'in_progress';") {
+		!strings.Contains(out, "DELETE FROM index_state WHERE binlog_file = 'binlog.000001' AND completed_at IS NULL;") {
 		t.Fatalf("want one warning naming the run in progress, got:\n%s", out)
 	}
 	// A finished run is not warned about.
@@ -171,6 +171,9 @@ func TestPartitionHeads_readsTheNewestRowOfEachPartition(t *testing.T) {
 	}
 	if strings.Contains(logged.String(), "level=WARN") {
 		t.Fatalf("a completed run was warned about:\n%s", logged.String())
+	}
+	if h, err = LoadPartitionHeads(ctx, db); err != nil || h.fileIndexingUnfinished || time.Since(h.lastFileIndexed) > 5*time.Minute {
+		t.Fatalf("after the run completed: unfinished=%v lastFileIndexed=%s err=%v", h.fileIndexingUnfinished, h.lastFileIndexed, err)
 	}
 }
 

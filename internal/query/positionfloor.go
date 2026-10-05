@@ -90,6 +90,8 @@ type PartitionHeads struct {
 	// file was last being indexed into it (zero: never).
 	streamCaptured  bool
 	lastFileIndexed time.Time
+	// fileIndexingUnfinished: index_state holds a run with no completed_at.
+	fileIndexingUnfinished bool
 }
 
 // fileIndexingMargin is how much earlier than a fetch's own time a file
@@ -215,19 +217,25 @@ func loadPartitionHeadsOnce(ctx context.Context, db *sql.DB) (*PartitionHeads, e
 	if h.streamCaptured, err = StreamCaptured(ctx, db); err != nil {
 		return nil, err
 	}
-	// A run with no completed_at is still going as far as the index knows,
-	// so it counts as now: while files are being indexed is exactly when the
-	// newest row of a partition says nothing about the others.
+	// A run with no completed_at is still going as far as the index knows.
+	// It is kept apart from the time of the last finished one, not folded
+	// into it as "now": while files are being indexed is exactly when the
+	// newest row of a partition says nothing about the others, for a fetch
+	// of any age.
 	var last sql.NullTime
-	err = db.QueryRowContext(ctx, "SELECT MAX(COALESCE(completed_at, UTC_TIMESTAMP())) FROM index_state").Scan(&last)
+	var unfinished int64
+	err = db.QueryRowContext(ctx, "SELECT MAX(completed_at), COUNT(*) - COUNT(completed_at) FROM index_state").Scan(&last, &unfinished)
 	if err != nil && !isMissingTableErr(err) {
 		return nil, fmt.Errorf("read index_state: %w", err)
 	}
-	if err == nil && last.Valid {
-		h.lastFileIndexed = last.Time.UTC()
-	}
-	if err == nil && h.streamCaptured {
-		warnFileIndexingInProgress(ctx, db)
+	if err == nil {
+		h.fileIndexingUnfinished = unfinished > 0
+		if last.Valid {
+			h.lastFileIndexed = last.Time.UTC()
+		}
+		if h.streamCaptured && h.fileIndexingUnfinished {
+			warnFileIndexingInProgress(ctx, db)
+		}
 	}
 	return h, nil
 }
@@ -251,7 +259,7 @@ func warnFileIndexingInProgress(ctx context.Context, db *sql.DB) {
 	var file string
 	var started, now time.Time
 	err := db.QueryRowContext(ctx, `SELECT binlog_file, started_at, UTC_TIMESTAMP() FROM index_state
-		WHERE status = 'in_progress' ORDER BY started_at LIMIT 1`).Scan(&file, &started, &now)
+		WHERE completed_at IS NULL ORDER BY started_at LIMIT 1`).Scan(&file, &started, &now)
 	if err != nil {
 		// No such run (the usual answer), or the read failed: the warning is
 		// advice, and the widening it explains happens either way.
@@ -269,7 +277,7 @@ func fileIndexingInProgressWarning(file string, started, now time.Time) string {
 	return fmt.Sprintf("the index records a `bintrail index` run that has not finished: file %s, started %s (%s ago). "+
 		"While it is recorded as running, every snapshot update and every read that continues from a snapshot looks through all the older hours of the index instead of the few it needs, which is slower and loses nothing. "+
 		"If that run is still going, this stops by itself when it ends. If it crashed or was stopped, run `bintrail index` on that file again until it completes, "+
-		"or remove its record: DELETE FROM index_state WHERE binlog_file = '%s' AND status = 'in_progress';",
+		"or remove its record: DELETE FROM index_state WHERE binlog_file = '%s' AND completed_at IS NULL;",
 		file, started.UTC().Format(time.RFC3339), now.Sub(started).Round(time.Minute), strings.ReplaceAll(file, "'", "''"))
 }
 
@@ -300,10 +308,13 @@ func partitionClause(names []string) string {
 // orderProven reports whether, for a fetch whose own time is since, the
 // newest row of a partition is known to carry its highest position.
 func (h *PartitionHeads) orderProven(since time.Time) bool {
-	if !h.streamCaptured || h.lastFileIndexed.IsZero() {
+	if !h.streamCaptured || (h.lastFileIndexed.IsZero() && !h.fileIndexingUnfinished) {
 		// One writer kind only: a stream alone, or files alone (indexed in
 		// order, the input a refresh chain supports).
 		return true
+	}
+	if h.fileIndexingUnfinished {
+		return false
 	}
 	return h.lastFileIndexed.Before(since.Add(-fileIndexingMargin))
 }
