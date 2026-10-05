@@ -106,6 +106,9 @@ type Forwarder struct {
 	dead     error
 	// sessionUntold: OnSession has not been told yet about this session.
 	sessionUntold bool
+	// hadSession: the source accepted the login at least once, so there was
+	// a session (and maybe a transaction) to lose. See Lost.
+	hadSession bool
 }
 
 // NewForwarder parses a go-sql-driver DSN (the registry's forwarding or
@@ -217,6 +220,7 @@ func (f *Forwarder) get(ctx context.Context) (*client.Conn, error) {
 	f.raw = c.Conn.Conn
 	f.threadID = c.GetConnectionID()
 	f.sessionUntold = f.OnSession != nil
+	f.hadSession = true
 	return c, nil
 }
 
@@ -602,11 +606,25 @@ func (f *Forwarder) tellSession(stmt string) {
 	f.OnSession(status)
 }
 
-// Lost returns the error every statement gets once the connection to the
-// source is gone (CodeUpstreamLost), nil while it is not. It turns non-nil the
-// moment the connection is interrupted, before the statement in flight has
-// returned.
-func (f *Forwarder) Lost() error { return f.lost() }
+// Lost returns the error every command gets once a session this connection
+// had on the source is gone (CodeUpstreamLost), nil while it is not. It turns
+// non-nil the moment the connection is interrupted, before the statement in
+// flight has returned.
+//
+// A source that never let this connection in (unreachable, the login
+// refused) is not that case and answers nil: no session existed, so there is
+// no transaction the client could wrongly believe it still has, and what the
+// port answers without the source (time travel) must keep working while the
+// source is down. Forwarded statements and Ping still answer the lost error
+// there.
+func (f *Forwarder) Lost() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.hadSession {
+		return nil
+	}
+	return f.dead
+}
 
 // Ping sends COM_PING to the source on the session this connection holds, so
 // the answer tells whether that session is still there and carries its state

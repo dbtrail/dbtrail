@@ -30,7 +30,10 @@ import (
 type statusPorts struct {
 	routed, timed, copyOnly string
 	user, db                string
-	src                     *sql.DB
+	// downUser selects a second server with the same index and copy whose
+	// source cannot be reached.
+	downUser string
+	src      *sql.DB
 	// asOf is an instant after the copy's snapshot.
 	asOf string
 }
@@ -110,6 +113,18 @@ func newStatusPorts(t *testing.T, mariadb bool) statusPorts {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A source nobody listens on: the port was free a moment ago.
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	downAddr := closed.Addr().String()
+	closed.Close()
+	down, err := reg.Add(console.ServerEntry{Name: "srvdown", DSN: testutil.IntegrationDSN(indexName),
+		SourceDSN: "u:p@tcp(" + downAddr + ")/" + srcName, BaselineDir: baseDir})
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg})
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +145,7 @@ func newStatusPorts(t *testing.T, mariadb bool) statusPorts {
 		routed:   serve(flashbackConfig{RouteMaxCopyAge: time.Hour, RoutePolicy: policy}),
 		timed:    serve(flashbackConfig{RouteMaxCopyAge: time.Hour, RoutePolicy: policy, QueryTimeout: statusTimedDeadline}),
 		copyOnly: serve(flashbackConfig{}),
-		user:     ent.ID, db: srcName, src: srcDB,
+		user:     ent.ID, db: srcName, src: srcDB, downUser: down.ID,
 		asOf: time.Now().UTC().Add(time.Second).Format("2006-01-02 15:04:05"),
 	}
 }
@@ -550,6 +565,35 @@ func testFlashbackSourceSessionLost(t *testing.T, p statusPorts) {
 			t.Fatalf("the deadline of %s took %s to end the statement", statusTimedDeadline, took)
 		}
 		everyCommandIsLost(t, c, id)
+	})
+
+	// A source that never let the connection in is another case: no session
+	// existed, so nothing was lost. Forwarded statements and a PING say the
+	// source is gone; time travel, which needs no source, keeps working.
+	// That is what the port is for while the source is down.
+	t.Run("a source that cannot be reached", func(t *testing.T) {
+		c, err := mysqlwire.Dial(p.routed, p.downUser, "tok", p.db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		_, err = c.Exec("SELECT status FROM orders WHERE id = 1")
+		wantLost(t, "a forwarded statement", err)
+		_, err = c.Ping()
+		wantLost(t, "PING", err)
+		for _, q := range []string{timeTravel, snapshot} {
+			rep, err := c.Exec(q)
+			if err != nil {
+				t.Errorf("%s: %v, want an answer: time travel needs no source", q, err)
+				continue
+			}
+			if rep.RowCount == 0 {
+				t.Errorf("%s: no rows", q)
+			}
+			if got := rep.Status & sessionBits; got != mysqlwire.StatusAutocommit {
+				t.Errorf("%s: status 0x%04x, want autocommit and no transaction", q, got)
+			}
+		}
 	})
 
 	// A new connection starts over, and the lost transaction left nothing.

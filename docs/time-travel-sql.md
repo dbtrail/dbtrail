@@ -842,9 +842,13 @@ string. The port's flags describe the session the client really has:
   statement deadline cut a statement, and the transaction the client was in
   went with it. An OK from the port could only say "autocommit, no
   transaction", which tells a driver that there is nothing to roll back and
-  a connection pool that the connection is healthy. The same holds for a
-  connection whose login the source refused. Reconnect to continue; on a
-  connection that is not routed nothing changes.
+  a connection pool that the connection is healthy. Reconnect to continue;
+  on a connection that is not routed nothing changes. A source that never
+  let the connection in (unreachable, or the login refused) is a different
+  case, because no session existed and nothing was lost: forwarded
+  statements and `PING` answer 2006, and the time-travel statements, which
+  need no source, keep answering. Time travel stays available while the
+  source is down.
 - **The handshake** announces autocommit and no `NO_BACKSLASH_ESCAPES`, as
   MySQL and MariaDB do by default. It is written before the port knows which
   server the client asked for, so it cannot carry that server's state, and
@@ -880,9 +884,10 @@ string. The port's flags describe the session the client really has:
     the real flag. Read from its source, not run.
   - **Connector/J** always sends `SET autocommit=1` when it connects, and
     the Go driver never looks; neither depends on the announcement.
-  - **MySQL with `autocommit=0` in its configuration** keeps announcing
-    autocommit in every answer although `@@autocommit` is 0, so the port has
-    nothing truer to pass on and cannot detect it.
+  - **MySQL with `autocommit=0` in its configuration** announces autocommit
+    in its handshake and in its first answer although `@@autocommit` is 0
+    (measured on 8.4), so the port has nothing truer to pass on and cannot
+    detect it.
   - **`NO_BACKSLASH_ESCAPES` in the source's global `sql_mode`**: MySQL and
     MariaDB announce it in their handshake, the port only from the first
     forwarded statement on. A driver that escapes strings itself by this

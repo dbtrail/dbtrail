@@ -97,8 +97,9 @@ type Router interface {
 	// still there, which also refreshes what Status reports. It never opens
 	// a connection: with none opened yet it returns nil and sends nothing.
 	Ping(ctx context.Context) error
-	// Lost is the error every command gets once the connection to the
-	// source is gone (readrouter.CodeUpstreamLost), nil while it is not.
+	// Lost is the error every command gets once a session this connection
+	// had on the source is gone (readrouter.CodeUpstreamLost), nil while it
+	// is not, and nil for a source that never let the connection in.
 	Lost() error
 	// Close drops the upstream connection.
 	Close()

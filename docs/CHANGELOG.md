@@ -141,7 +141,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   port's statement deadline cut a statement), every command answers error
   2006, the ones the port answers itself included; before, a time-travel
   statement or a `PING` kept answering OK on a connection whose transaction
-  was gone. The version the handshake announces stays `8.0.11` whatever the
+  was gone. (A source that never let the connection in lost nothing: time
+  travel keeps answering there, as before.) The version the handshake announces stays `8.0.11` whatever the
   source is.
   **One case gets worse, and is now logged.** The handshake is written
   before the port knows the server, so it announces a default session. With

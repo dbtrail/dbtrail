@@ -80,8 +80,8 @@ type sourceSession interface {
 	PingSource() error
 }
 
-// SourceLost: once a routed connection has lost its connection to the source,
-// every command on it is answered with that loss (error 2006), the ones the
+// SourceLost: once a routed connection has lost the session it had on the
+// source, every command on it is answered with that loss (error 2006), the ones the
 // port would answer itself included: a time-travel statement, SHOW WARNINGS,
 // USE, PING. The client's session on the source is gone, and its transaction
 // with it; an OK from the port, which can only say "autocommit, no
@@ -89,6 +89,10 @@ type sourceSession interface {
 // is nothing to commit, and a pool that validates with PING that the
 // connection is healthy. The client must reconnect, and 2006 is what makes
 // every driver do so.
+//
+// A source that never let the connection in is not that case (Router.Lost):
+// forwarded statements answer 2006, and time travel keeps working, which is
+// what the port is for when the source is down.
 func (h *Handler) SourceLost(statement bool) error {
 	if h.router == nil {
 		return nil
