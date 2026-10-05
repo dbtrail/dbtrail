@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http/httptest"
@@ -144,7 +145,7 @@ func TestBindReadRouterSaysWhichAccountWasRefused(t *testing.T) {
 	hh := shim.NewHandler(nil, nil)
 	hh.BindFreeSQL(routeTestFreeSQL{})
 	t.Cleanup(hh.Close)
-	bindReadRouter(hh, srv, console.FlashbackTarget{ID: t.Name(), SQL: &console.SQLOnCopy{}, ForwardDSN: "fwd:pw@tcp(" + addr + ")/?tls=false",
+	bindReadRouter(hh, srv, console.FlashbackTarget{ID: fmt.Sprintf("%s-%d", t.Name(), time.Now().UnixNano()), SQL: &console.SQLOnCopy{}, ForwardDSN: "fwd:pw@tcp(" + addr + ")/?tls=false",
 		SourceSSL: config.SSL{Mode: "required"}}, "s1", cfg, slog.New(slog.NewTextHandler(&logged, nil)))
 	if !strings.Contains(logged.String(), "takes precedence over this server's TLS mode") {
 		t.Errorf("a DSN with tls=false under ssl_mode required was bound without a word: %s", logged.String())
@@ -241,7 +242,9 @@ func TestWarnDSNOverridesTLS(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	count := func() int { return strings.Count(buf.String(), "takes precedence over this server's TLS mode") }
-	id := t.Name()
+	// The "already said" memory is the process's: a fresh id per run, so
+	// -count=N says the same thing each time.
+	id := fmt.Sprintf("%s-%d", t.Name(), time.Now().UnixNano())
 	warnDSNOverridesTLS(logger, id+"-a", "a", "u:secret-pw@tcp(h:3306)/?tls=false", "preferred")
 	warnDSNOverridesTLS(logger, id+"-a", "a", "u:secret-pw@tcp(h:3306)/?tls=false", "disabled")
 	warnDSNOverridesTLS(logger, id+"-a", "a", "u:secret-pw@tcp(h:3306)/", "required")
