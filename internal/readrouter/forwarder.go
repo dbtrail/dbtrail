@@ -248,6 +248,12 @@ func (f *Forwarder) stream(sink RowSink, run func(*mysql.Result, client.SelectPe
 			cells = cells[:len(row)]
 			for i := range row {
 				cells[i] = row[i].Value()
+				// An empty string arrives from go-mysql's row parser as a
+				// nil byte slice, which a sink reads as NULL. The cell's
+				// own type is what says it is a string.
+				if b, isBytes := cells[i].([]byte); isBytes && b == nil && row[i].Type == mysql.FieldValueTypeString {
+					cells[i] = []byte{}
+				}
 			}
 			if err := sink.Row(cells); err != nil {
 				return sinkError{err}
