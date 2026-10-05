@@ -595,8 +595,10 @@ did before:
   hour before the last change the snapshot holds of that table, or before
   the full read its rows came from, on the source's own clock, so a refresh
   taken while capture was behind does not hide what capture indexed later.
-  A transaction that stayed open for longer than that hour before
-  committing is missed, as a refresh misses it.) So does any schema change that names the table (`ALTER`,
+  A statement that began earlier still, and committed after the snapshot, is
+  dated before that hour: when the index holds any change of that kind, the
+  table's older changes are searched too, by position alone.) So does any
+  schema change that names the table (`ALTER`,
   `TRUNCATE`, `DROP`, `RENAME`), which changes a table without a row change:
   those are placed by position alone, however long the statement ran.
 - **The index still holds everything since that position.** If rotation has
@@ -641,24 +643,44 @@ index never received, and has no record of not receiving, it cannot see:
 - a schema change (`TRUNCATE` included) whose record could not be written to
   the index at that moment, which is also only a warning in the log;
 - a gap in capture whose record was cleared by stopping capture on that
-  server (Stop clears it) before a new full snapshot was taken.
-- a change made right after a full snapshot on a source whose clock runs
-  more than about an hour behind the clock of the machine the snapshot was
-  taken from: the index is searched from the snapshot's start, and that
-  change is dated before it.
+  server (Stop clears it) before a new full snapshot was taken;
+- a change a snapshot refresh itself left out of the file it wrote: a
+  refresh that ran while capture was more than about two hours behind can
+  miss changes it should have folded in. The position in that file's footer
+  says they are in it, so nothing after it looks changed;
+- a statement that began before the oldest hour the index still holds and
+  committed after the table's snapshot. While the hour it began in is in the
+  index the statement is found, however long it ran; once rotation drops
+  that hour, and until rotation also drops the hour of the snapshot, it is
+  not. The same goes for a change dated that far back because the source's
+  clock runs behind.
 
-Under the age rule a change of that kind is missing from the copy's answers
-for at most the limit, until the next snapshot is within it. Under this rule
-it stays missing for as long as the snapshot of that table is not replaced,
-because nothing tells the port the table changed. On a source where those
-happen, refresh the snapshot more often than the limit so that only the age
-rule applies. A source that filters its binary log (`binlog-do-db`,
+None of these is new, and the copy was already wrong about such a change
+before this rule. The copy's age is the stamp of its newest snapshot, and a
+scheduled snapshot is, whenever it can be, a refresh built from the index
+with no read of the source. A refresh renews the age and still lacks what
+the index never received. So such a change stays missing from the copy until
+the next FULL snapshot, the one that reads the source again, under the age
+rule and under this one alike.
+
+What this rule adds is the stretch in which the copy answers at all. Under
+the age rule alone the copy stops answering heavy reads when its newest
+snapshot passes the limit, and starts again at the next snapshot. Under this
+rule it also answers in between, for tables the index shows no change of.
+Where every scheduled snapshot is a refresh that makes no difference to how
+long such a change is missing. Where every snapshot is a full read, or
+nothing is scheduled, it does: the limit used to cap how stale the copy's
+answer about such a change could be, and for these tables it no longer
+does. On a source where those changes happen, taking FULL snapshots more
+often is what shortens it; refreshing more often does not, under either
+rule. A source that filters its binary log (`binlog-do-db`,
 `binlog-ignore-db`) is detected, and this rule is never applied to it.
 
 When it applies and what it costs:
 
-- Only a MySQL source captured in GTID mode, whose index is not on the source
-  server itself. A MariaDB source, a source in binlog-position mode, one with
+- Only a MySQL source captured in GTID mode (checked on every statement: a
+  capture restarted in binlog-position mode stops being vouched for at once),
+  whose index is not on the source server itself. A MariaDB source, a source in binlog-position mode, one with
   tagged GTIDs, one that filters its binary log, and one that executed
   transactions capture never read (a dump loaded with
   `SET @@GLOBAL.gtid_purged`) always follow the age rule. The account DBTrail
@@ -677,17 +699,23 @@ When it applies and what it costs:
   MySQL, and the ones that follow half a minute later go to the copy. With a
   limit under about a minute this rule rarely applies.
 - Each such statement reads the index a few times (capture's state, the
-  partition list, the schema changes since the snapshot, and one lookup per
-  table). Measured on an index of 2.5 million events over a week of hourly
-  partitions, on MySQL 8.4: about 5 ms in all for one table and 6 ms for
-  three, whether they changed or not. The slow case is a table that received
-  a very large load in the two hours before its snapshot and nothing since:
-  the lookup walks those index entries every time. For half a million of
-  them that took 0.25 s when the table's file came from a snapshot refresh
-  and 1.5 s when it came from a full read of the source (a refresh records
-  how far into the index it got, which lets MySQL skip the rows without
-  reading them; a full read has nothing to record). All the reads of one
-  statement share a two-second budget; past it the statement goes to MySQL.
+  partition list, the schema changes since the snapshot, and two lookups per
+  table). Measured on an index of 3 million events over a week of hourly
+  partitions, on MySQL 8.4: about 5 ms in all for one table and 7.5 ms for
+  three, whether they changed or not. There are two slow cases. One is a
+  table that received a very large load in the two hours before its
+  snapshot and nothing since: the lookup walks those index entries every
+  time. For half a million of them that took 0.25 s when the table's file
+  came from a snapshot refresh and 1.5 s when it came from a full read of
+  the source (a refresh records how far into the index it got, which lets
+  MySQL skip the rows without reading them; a full read has nothing to
+  record). The other only exists while the index holds a statement that
+  began long before some snapshot and committed after it: then each table's
+  older changes are searched as well, which costs nothing for a table with
+  few of them and about the same again (1.5 s for half a million with a full
+  read's file, 0.25 s with a refresh's) for a table with many. All the reads
+  of one statement share a two-second budget; past it the statement goes to
+  MySQL, so a statement over two such tables at once is not vouched for.
 - The statement takes one of the copy's slots while it is checked, as a heavy
   read within the limit does.
 

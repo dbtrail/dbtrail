@@ -58,14 +58,18 @@ import (
 //   - a write no record of exists anywhere: one made with binary logging off
 //     (SET sql_log_bin = 0), and a statement-format write issued under a
 //     system schema as default database. Neither reaches the index, for any
-//     reader of it. Under the age rule such a write is missing from the
-//     copy's answer for at most the limit; here, for as long as the snapshot
-//     is not refreshed. A source that filters its binlog (binlog-do-db,
-//     binlog-ignore-db) has no watermark for that reason;
-//   - a row event that ran more than the lookup's time floor before the
-//     snapshot (the stamp's hour, minus one hour) and committed after it.
-//     The refresh has the same margin (#797), so the copy itself would not
-//     fold that event in either.
+//     reader of it, and a snapshot refresh is built from the index: the copy
+//     lacks such a write until the next FULL snapshot under the age rule
+//     too. What this rule changes is that the copy also answers between the
+//     limit and the next snapshot, so where every snapshot is a full read
+//     the limit no longer caps how stale that answer is. A source that
+//     filters its binlog (binlog-do-db, binlog-ignore-db) has no watermark
+//     for that reason;
+//   - a statement that began before the oldest partition the index still
+//     holds and committed after the cut. The lookup by position starts at a
+//     time floor (the engine's, #797), and a second one covers the hours
+//     before it (newestEventOlderThan), so a long statement is found while
+//     the hour it began in is in the index, and not after rotation drops it.
 
 // CaptureWatermark is what is known about how far capture has read a
 // server's source.

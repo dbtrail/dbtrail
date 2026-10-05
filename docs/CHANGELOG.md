@@ -21,9 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the limit (the source's GTID set against capture's saved position, asked
   at most once every 30 seconds per server); the index holds no row change
   and no schema change of the table at or after the binlog position its
-  snapshot file records (by position, so a transaction that ran shortly
-  before the snapshot and committed after it counts, within the hour of
-  margin a refresh uses, and an `ALTER` counts however long it ran); the index still holds that whole
+  snapshot file records (by position, so a statement that began before the
+  snapshot and committed after it counts, however long it ran, while the
+  hour it began in is still in the index; an `ALTER` likewise); the index still holds that whole
   window; capture recorded no gap and no dropped event since the table was
   last read from the source; the table has no foreign key that cascades
   into it and is not outside the capture's filters; and the snapshot was
@@ -36,22 +36,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   too: a refresh leaves its position where it was, and the index no longer
   reaches back to it. A change the index never received and has no record
   of (a write with `SET sql_log_bin = 0`, a row capture skipped with only a
-  warning) was missing from the copy's answers for at most the limit under
-  the age rule, and under this rule it is missing until that table's
-  snapshot is replaced; the docs list those cases. On a source that is being written the first heavy read after
+  warning) is missing from the copy until the next full snapshot, as it
+  already was: a refresh is built from the index and renews the copy's age
+  without it. What is new is that the copy also answers between the limit
+  and the next snapshot, so where every snapshot is a full read the limit no
+  longer caps how stale its answer about such a change is; the docs list
+  those cases. On a source that is being written the first heavy read after
   a quiet spell still goes to MySQL (confirming capture takes two reads of
   the source about half a minute apart). A statement answered this way is
   counted under the new reason `tables_unchanged`, apart from
   `expensive_plan`, on the Connect page and in
   `bintrail_read_routing_decisions_total`; `copy_too_old` keeps counting
   the ones that went to MySQL, and its debug log line names the table that
-  changed or what could not be confirmed. Measured on an index of 2.5
+  changed or what could not be confirmed. Measured on an index of 3
   million events over a week of hourly partitions (MySQL 8.4): the whole
-  check takes about 5 ms for one table and 6 ms for three. The slow case is
-  a table that took a very large load in the two hours before its snapshot
-  and none since: 0.25 s for half a million changes when its file came from
-  a refresh, 1.5 s when it came from a full read. Past a two-second budget
-  the statement goes to MySQL. See
+  check takes about 5 ms for one table and 7.5 ms for three. The slow case
+  is a table that took a very large load in the two hours before its
+  snapshot and none since: 0.25 s for half a million changes when its file
+  came from a refresh, 1.5 s when it came from a full read; a table with
+  that many older changes costs the same again while the index holds a
+  statement that began long before a snapshot and committed after it. Past
+  a two-second budget the statement goes to MySQL. See
   [Past the limit](time-travel-sql.md#past-the-limit-tables-that-have-not-changed).
 - **Read routing: statements with backtick-quoted names can be served by
   the copy** (#2081). Most ORMs and drivers quote every name with
