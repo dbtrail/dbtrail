@@ -39,7 +39,8 @@ import (
 // The watermark only moves forward, and it is dropped when the two sets stop
 // being comparable (the capture holds a transaction the source does not, so
 // the source was reset or replaced; a tagged GTID, which capture does not
-// record). A read that learns nothing about the source leaves it as it was:
+// record; a checkpoint that is no longer a GTID one, as after a --reset to
+// position mode). A read that learns nothing about the source leaves it as it was:
 // what was proven stays proven, and it grows old on its own.
 //
 // A source that filters its binary log (binlog-do-db, binlog-ignore-db) has
@@ -63,6 +64,12 @@ func (c *captureStatusReporter) withBootFilters(schemas, tables string) *capture
 // are the slot's, lastCaptured the capture's saved set at the previous read
 // that reached the source ("" when none), asked when this read began. Pure.
 func advanceWatermark(r captureProbeResult, through time.Time, pending *captureSample, lastCaptured string, asked time.Time) (time.Time, *captureSample, string) {
+	if r.uncomparable {
+		// The checkpoint is not one a source can be compared with any more
+		// (position mode after a --reset, no capture on record, no GTID set
+		// saved). What was proven was about the capture as it was.
+		return time.Time{}, nil, r.detail
+	}
 	if r.executed == "" {
 		// The source was not read, or reported no GTID set: nothing was
 		// learned about it.

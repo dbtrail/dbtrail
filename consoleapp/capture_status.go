@@ -465,7 +465,7 @@ func captureHeadFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl con
 // verdict the checkpoint settles on its own.
 func headFromState(ctx context.Context, idx *sql.DB, st *status.StreamStateInfo, openSource func() (*sql.DB, error)) (captureProbeResult, error) {
 	if ok, detail := checkpointComparable(st); !ok {
-		return captureProbeResult{detail: detail}, nil
+		return captureProbeResult{detail: detail, uncomparable: true}, nil
 	}
 	// The binary log's filters ride along with the GTID sets: a source that
 	// leaves writes out of its binlog has no watermark (#2085).

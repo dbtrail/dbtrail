@@ -332,6 +332,14 @@ func TestIntegrationCopyUnchanged_2085(t *testing.T) {
 			`{"statement_format_dml":{"count":2,"last_at":"`+after.Format(time.RFC3339)+`"}}`)
 		r.wantNot("dropped events", quiet)
 	})
+	t.Run("a capture reset to position mode since the watermark was proven", func(t *testing.T) {
+		// The reporter still remembers a watermark (its next read of the
+		// source is up to 30 seconds away); the index already says the
+		// capture is not the one it was proven for.
+		defer restore("mode = 'gtid'")()
+		testutil.MustExec(t, r.db, "UPDATE stream_state SET mode = 'position' WHERE id = 1")
+		r.wantNot("not in GTID mode", quiet)
+	})
 	t.Run("no capture on record", func(t *testing.T) {
 		var gtid string
 		if err := r.db.QueryRow("SELECT gtid_set FROM stream_state WHERE id = 1").Scan(&gtid); err != nil {
@@ -407,4 +415,48 @@ func TestIntegrationCopyUnchanged_2085(t *testing.T) {
 		testutil.MustExec(t, r.db, "DROP TABLE bintrail_server_changes")
 		r.wantNot("the index could not be read", quiet)
 	})
+}
+
+// A statement that starts long before the snapshot and commits after it
+// (#2085 review): a nightly DELETE that begins at 00:30, a snapshot at 02:00,
+// the commit at 03:00. Its rows are positioned after the snapshot's cut and
+// dated with the time the statement STARTED, more than an hour before the
+// floor a search by position starts from, so that search never reaches them.
+//
+// The events are indexed here in binlog order, as a stream indexes them: the
+// one row that decides whether the older hours need searching relies on it.
+func TestIntegrationCopyUnchanged_startedLongBeforeCommittedAfter_2085(t *testing.T) {
+	r := newUnchangedRig(t)
+	floor := r.stamp.Truncate(time.Hour).Add(-time.Hour) // where the search by position starts for a file read at r.stamp
+	longAgo := floor.Add(-30 * time.Minute)
+
+	// Before the cut, in binlog order: a table whose only events are old
+	// and already in its snapshot, and a table a refresh folded once.
+	history, nightly, folded, bystander := r.table(nil), r.table(nil), r.table(nil), r.table(nil)
+	r.event("shop", history.Table, "binlog.000006", 100, floor.Add(-3*time.Hour))
+	r.event("shop", history.Table, "binlog.000006", 200, floor.Add(-2*time.Hour))
+	r.event("shop", folded.Table, "binlog.000006", 300, floor.Add(-2*time.Hour))
+	r.rewrite(folded, func(md map[string]string) { md[baseline.MetaKeyLastEventID] = r.lastID(folded.Table) })
+	foldedFloor := floor.Add(-2 * time.Hour).Truncate(time.Hour).Add(-time.Hour) // its search starts from its last folded event
+
+	// Nothing straddles the cut yet: all four are unchanged, old events and
+	// all.
+	r.wantUnchanged(history)
+	r.wantUnchanged(nightly, folded, bystander)
+
+	// The long statements commit: positioned after the cut, dated before
+	// each table's floor. Indexed last, like anything that commits last.
+	r.event("shop", nightly.Table, r.anchor.File, r.anchor.Pos+900, longAgo)
+	r.wantNot("shop."+nightly.Table+" changed since its snapshot", nightly)
+	r.wantNot("shop."+nightly.Table+" changed since its snapshot", bystander, nightly)
+	// With an event-id floor in the footer (a file a refresh wrote).
+	r.wantUnchanged(folded)
+	r.event("shop", folded.Table, r.anchor.File, r.anchor.Pos+1900, foldedFloor.Add(-30*time.Minute))
+	r.wantNot("shop."+folded.Table+" changed since its snapshot", folded)
+
+	// The older hours are now searched for every table, by position: old
+	// events that sit before the cut are still not a change, and a table
+	// with no event at all is still unchanged.
+	r.wantUnchanged(history)
+	r.wantUnchanged(bystander)
 }

@@ -83,6 +83,14 @@ func TestAdvanceWatermark(t *testing.T) {
 		{name: "position mode", r: captureProbeResult{detail: "the capture runs in binlog-position mode, which is not compared"},
 			wantWhy: "the capture runs in binlog-position mode"},
 		{name: "a read that says nothing at all", r: captureProbeResult{}, wantWhy: "the source was not read"},
+		// The checkpoint itself stopped being comparable (a --reset to
+		// position mode, a capture stopped and its record gone): not the
+		// same as a source that did not answer. What was proven was about a
+		// capture that no longer exists in that form.
+		{name: "the checkpoint is no longer comparable: what was proven is void",
+			r:       captureProbeResult{detail: "the capture runs in binlog-position mode, which is not compared", uncomparable: true},
+			through: long, pending: sample(uuidB+":1-20", before), last: uuidB + ":1-15",
+			wantWhy: "the capture runs in binlog-position mode"},
 
 		// No longer comparable: everything is dropped.
 		{name: "the capture holds more than the source: the source was replaced",
@@ -184,6 +192,19 @@ func TestCaptureWatermark_busySourceNeedsTwoReads_2085(t *testing.T) {
 	third := c.CaptureWatermark(context.Background(), e)
 	if !third.Through.Equal(captureT0) || n != 3 {
 		t.Fatalf("after a failed read: through = %v (%d reads), want it kept", third.Through, n)
+	}
+	// A capture reset to position mode: the proof does not outlive it, and
+	// a later GTID capture starts from nothing (its first read finds the
+	// source ahead, with no earlier saved set to measure against).
+	now = now.Add(captureStatusTTL)
+	reads = append(reads, captureProbeResult{detail: "the capture runs in binlog-position mode, which is not compared", uncomparable: true})
+	if reset := c.CaptureWatermark(context.Background(), e); !reset.Through.IsZero() || !strings.Contains(reset.Detail, "position mode") {
+		t.Fatalf("after the checkpoint stopped being comparable: %+v, want no watermark and why", reset)
+	}
+	now = now.Add(captureStatusTTL)
+	reads = append(reads, logged(behindRead(uuidB+":1-5", uuidB+":1-70", captureT0)))
+	if back := c.CaptureWatermark(context.Background(), e); !back.Through.IsZero() || !strings.HasPrefix(back.Detail, "the source is ahead") {
+		t.Fatalf("a GTID capture again, behind the source: %+v, want no watermark yet", back)
 	}
 	// An edited server starts over: the proof was about another source.
 	e.SourceDSN = "other"

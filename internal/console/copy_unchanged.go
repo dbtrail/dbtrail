@@ -304,6 +304,27 @@ func copyLookupSince(ctx context.Context, db *sql.DB, t views.BaselineTable, cut
 	return since, "", nil
 }
 
+// newestEventOlderThan is the binlog position of the event with the highest
+// id among those that ran before floor, in any table; found is false when
+// the index holds none.
+//
+// It answers, in one row, whether the slow search below is needed at all. A
+// stream writes the index in binlog order, so ids rise with position
+// (query.StreamCaptured, the premise Options.SinceEventID already rests
+// on): when the newest of the events that ran before floor sits before a
+// cut, every one of them does. The primary key leads with event_id and the
+// time predicate prunes partitions, so the server reads the last row of
+// each partition older than floor and nothing else.
+func newestEventOlderThan(ctx context.Context, db *sql.DB, floor time.Time) (at query.BinlogPos, found bool, err error) {
+	err = db.QueryRowContext(ctx,
+		`SELECT binlog_file, start_pos FROM binlog_events FORCE INDEX (PRIMARY)
+		  WHERE event_timestamp < ? ORDER BY event_id DESC LIMIT 1`, floor.UTC()).Scan(&at.File, &at.Pos)
+	if errors.Is(err, sql.ErrNoRows) {
+		return query.BinlogPos{}, false, nil
+	}
+	return at, err == nil, err
+}
+
 // captureLossSince says why the capture's own record rules out vouching for
 // tables last read from the source at sourceRead, or "": a loss on record at
 // or after it, or a record that cannot be read. The rule is the snapshot
@@ -316,6 +337,12 @@ func captureLossSince(st *status.StreamStateInfo, sourceRead time.Time) string {
 		return "the index has no live capture on record"
 	case !st.GapColumnsPresent:
 		return "the index predates the capture's record of lost events"
+	case st.Mode != "gtid" || !st.GTIDSet.Valid || strings.TrimSpace(st.GTIDSet.String) == "":
+		// The watermark compares GTID sets. A capture that is not saving
+		// one now (a --reset to position mode since the watermark was
+		// proven) is not the capture it was proven for, and the reporter
+		// only learns that at its next read of the source.
+		return "the capture is not in GTID mode, so how far it has read cannot be compared with the source"
 	case st.GapLostAt.Valid && !st.GapLostAt.Time.Before(sourceRead):
 		return "capture lost events to a binlog gap since the snapshot"
 	}
@@ -554,6 +581,32 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 		}
 		if len(rows) > 0 {
 			return fmt.Sprintf("%s.%s changed since its snapshot", t.Schema, t.Table)
+		}
+		// The lookup above starts at a time floor, as the engine requires
+		// of a search by position (#797). A statement or transaction that
+		// began before that floor and committed after the cut is positioned
+		// after the cut and dated before the floor: a DELETE that starts at
+		// 00:30, a snapshot at 02:00, a commit at 03:00. So the hours
+		// before the floor are searched too, by position alone. Almost
+		// never needed, which one row settles: the newest event that ran
+		// before the floor is positioned before the cut.
+		tableFloor := copyTimeFloor(since)
+		newest, found, err := newestEventOlderThan(ctx, b.db, tableFloor)
+		if err != nil {
+			return unreadable("the events older than the snapshot of "+t.Schema+"."+t.Table, err)
+		}
+		if found && cuts[i].anchor.AtOrBefore(newest) {
+			rows, err := b.engine.Fetch(ctx, query.Options{
+				Schema: t.Schema, Table: t.Table,
+				Until: &tableFloor, SincePos: &cuts[i].anchor, SinceEventID: cuts[i].lastEventID,
+				Limit: 1,
+			})
+			if err != nil {
+				return unreadable("the older events of "+t.Schema+"."+t.Table, err)
+			}
+			if len(rows) > 0 {
+				return fmt.Sprintf("%s.%s changed since its snapshot (a change that began long before it and committed after)", t.Schema, t.Table)
+			}
 		}
 	}
 	// A source that was replaced since the oldest of those times: its binlog

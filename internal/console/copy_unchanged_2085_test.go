@@ -162,6 +162,7 @@ func TestCaptureLossSince(t *testing.T) {
 	read := cutStamp
 	healthy := func() *status.StreamStateInfo {
 		return &status.StreamStateInfo{Mode: "gtid", GapColumnsPresent: true,
+			GTIDSet:      sql.NullString{String: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-50", Valid: true},
 			CaptureSkips: sql.NullString{String: "{}", Valid: true}}
 	}
 	skips := func(json string) *status.StreamStateInfo {
@@ -176,6 +177,12 @@ func TestCaptureLossSince(t *testing.T) {
 	}{
 		{"healthy", healthy(), ""},
 		{"no capture on record", nil, "no live capture"},
+		// The watermark was proven for a GTID capture. One that runs in
+		// position mode now (a --reset since) is not that capture, whatever
+		// the reporter still remembers.
+		{"a capture in position mode", func() *status.StreamStateInfo { st := healthy(); st.Mode = "position"; return st }(), "not in GTID mode"},
+		{"a capture with no GTID set saved", func() *status.StreamStateInfo { st := healthy(); st.GTIDSet = sql.NullString{String: "  ", Valid: true}; return st }(), "not in GTID mode"},
+		{"a capture whose GTID set is NULL", func() *status.StreamStateInfo { st := healthy(); st.GTIDSet = sql.NullString{}; return st }(), "not in GTID mode"},
 		{"an index older than the loss record", func() *status.StreamStateInfo { st := healthy(); st.GapColumnsPresent = false; return st }(), "predates"},
 		{"a gap before the read of the source", func() *status.StreamStateInfo {
 			st := healthy()

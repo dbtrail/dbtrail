@@ -146,6 +146,11 @@ type captureProbeResult struct {
 	// (#2085, capture_watermark.go).
 	logsAll   bool
 	logFilter string
+	// uncomparable is true when the capture's checkpoint itself cannot be
+	// compared with a source (checkpointComparable refused): no capture on
+	// record, position mode, no GTID set saved. Not the same as a source
+	// that was not reached: here what was proven before is void (#2085).
+	uncomparable bool
 }
 
 // probeCapture is a package variable for the reason readIndexMark is: it
