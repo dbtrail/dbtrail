@@ -75,6 +75,11 @@ type Forwarder struct {
 	// reached, an account the source refuses among the reasons
 	// (AccountRefused).
 	OnConnect func(error)
+	// OnCollation, when set, is told that a new connection's collation
+	// could not be settled (settleCollation): the collation the source gave
+	// the session, and the source's refusal to change it. The connection
+	// works; the copy does not answer on it.
+	OnCollation func(collation string, err error)
 	// OnSession, when set, is told the state the source opened the session
 	// in (SessionStatusFlags), at most once: with the source's first answer
 	// to a statement, because that is the first packet that shows what an
@@ -210,6 +215,13 @@ func (f *Forwarder) get(ctx context.Context) (*client.Conn, error) {
 		// not from the command-line flag the settings error names.
 		err = fmt.Errorf("this server's TLS settings cannot be used: %s", se.Problem)
 	}
+	if err == nil {
+		// Part of opening the connection: one that breaks here did not open.
+		if serr := f.settleCollation(ctx, c); serr != nil {
+			_ = c.Close()
+			err = fmt.Errorf("settle the session's collation: %w", serr)
+		}
+	}
 	if f.OnConnect != nil {
 		f.OnConnect(err)
 	}
@@ -229,6 +241,82 @@ func (f *Forwarder) get(ctx context.Context) (*client.Conn, error) {
 // every later statement fail with CodeUpstreamLost naming the cause. It is
 // called by the goroutine that runs the connection's statements, never by
 // another one: see interrupt for that.
+// settledCollation is what settleCollation names on a connection whose
+// source did not know the collation the handshake asked for. Both MySQL and
+// MariaDB have it, and it compares text the way the copy does.
+const settledCollation = "utf8mb4_unicode_ci"
+
+// settleCollation runs on a connection the source has just accepted, before
+// anything of the client's. The handshake asks for utf8mb4_0900_ai_ci
+// (mysql.DEFAULT_COLLATION_NAME), which is MySQL's own. A MariaDB that does
+// not have it (10.11) does not refuse: it gives the session its default for
+// utf8mb4, utf8mb4_general_ci, a collation no client asked for and under
+// which the copy cannot give MySQL's answers, so the copy would never answer
+// on a default connection. Such a session is given utf8mb4_unicode_ci
+// instead.
+//
+// What decides is the collation the source says the session has, never a
+// version number. Whether to ask at all is read from the greeting: only a
+// source that greets as MariaDB is asked, since MySQL has had the collation
+// for as long as this port supports it. MySQL pays nothing, MariaDB one
+// statement per connection, and a MariaDB that did not know the collation a
+// second one. A MariaDB behind a proxy that greets as MySQL is not asked; its
+// session stays as the source gave it and the copy does not answer there.
+//
+// These are the port's statements, not the client's. They go around Forward,
+// so the session's first-statement report (OnSession) still waits for the
+// client's own, and the read-only mode, which judges the client's
+// statements, does not see them. They leave no warning; what FOUND_ROWS()
+// and ROW_COUNT() say before the client's first statement is the one thing
+// of theirs a client could read. A client that later sets a collation of its
+// own gets it.
+//
+// A source that answers either statement with an error and keeps the
+// session (stillInSession) leaves the connection as it is: the client still
+// gets its answers from MySQL, and OnCollation is told. Anything else (a
+// broken connection, a session the source ended, a client that left: ctx)
+// is a connection that did not open.
+//
+// The result is not closed: that would hand it back to go-mysql's pool with
+// its column still set, for the next resultset built in this process to
+// inherit (see planFromExplain).
+func (f *Forwarder) settleCollation(ctx context.Context, c *client.Conn) error {
+	if !strings.Contains(strings.ToLower(c.GetServerVersion()), "mariadb") {
+		return nil
+	}
+	// f.mu is held and f.raw is not set yet, so watch cannot reach this
+	// connection: a client that leaves closes it here.
+	defer context.AfterFunc(ctx, func() { _ = c.Conn.Conn.Close() })()
+	refused := func(collation string, err error) error {
+		if !stillInSession(err) {
+			if cause := ctx.Err(); cause != nil {
+				return cause
+			}
+			return err
+		}
+		if f.OnCollation != nil {
+			f.OnCollation(collation, err)
+		}
+		return nil
+	}
+	res, err := c.Execute("SELECT @@collation_connection")
+	if err != nil {
+		return refused("", err)
+	}
+	cell, err := res.GetString(0, 0)
+	if err != nil {
+		return refused("", &mysql.MyError{Code: mysql.ER_UNKNOWN_ERROR, Message: "the source did not say the session's collation: " + err.Error()})
+	}
+	got := strings.Clone(cell) // cell is a view of the packet's bytes
+	if strings.EqualFold(got, mysql.DEFAULT_COLLATION_NAME) {
+		return nil
+	}
+	if _, err := c.Execute("SET NAMES utf8mb4 COLLATE " + settledCollation); err != nil {
+		return refused(got, err)
+	}
+	return nil
+}
+
 func (f *Forwarder) lose(cause error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

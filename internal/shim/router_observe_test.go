@@ -72,7 +72,7 @@ func TestRouter_observesEveryRungOnce(t *testing.T) {
 }
 
 // The two decisions that depend on what came BEFORE on the connection: a
-// SELECT after a session SET (settings_set), and SHOW WARNINGS after a
+// SELECT after a LOCK TABLES (connection_pinned), and SHOW WARNINGS after a
 // forwarded statement (show_warnings); SHOW WARNINGS after a copy-served
 // statement is answered locally and is no routing decision at all.
 func TestRouter_observesConnectionStateReasons(t *testing.T) {
@@ -86,14 +86,16 @@ func TestRouter_observesConnectionStateReasons(t *testing.T) {
 		"SELECT * FROM t WHERE id = 1",         // cheap → mysql (fake says toCopy, but the ladder is what we test)
 		"SHOW WARNINGS",                        // after a MySQL statement → forwarded
 		"SET time_zone = '+00:00'",
-		"SELECT a, count(*) FROM t GROUP BY a", // pinned by the SET
+		"SELECT a, count(*) FROM t GROUP BY a", // a SET does not pin: the copy again
+		"LOCK TABLES t READ",
+		"SELECT a, count(*) FROM t GROUP BY a", // pinned by the lock
 	} {
 		r.toCopy = !strings.HasPrefix(q, "SELECT * FROM t WHERE")
 		if _, err := h.HandleQuery(q); err != nil {
 			t.Fatalf("%s: %v", q, err)
 		}
 	}
-	want := []string{"copy/expensive_plan", "mysql/cheap_plan", "mysql/show_warnings", "mysql/session_setting", "mysql/settings_set"}
+	want := []string{"copy/expensive_plan", "mysql/cheap_plan", "mysql/show_warnings", "mysql/session_setting", "copy/expensive_plan", "mysql/session_setting", "mysql/connection_pinned"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Errorf("observed\n  %v\nwant\n  %v", got, want)
 	}

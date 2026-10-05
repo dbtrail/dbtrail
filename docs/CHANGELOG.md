@@ -153,6 +153,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user statements run as. Servers without one forward with the source
   account, as before. MySQL and MariaDB sources.
 
+### Changed
+- **Read routing: the copy answers under the source's session, or not at
+  all** (#2082). With `--route-max-copy-age` set, any `SET` on a connection
+  (other than `SET NAMES`, `character_set_*` and `autocommit=1`) sent every
+  later statement of that connection to MySQL, so the connections of a
+  driver that sets `time_zone` or `sql_mode` when it connects never reached
+  the copy; and a connection that did reach it was answered under the
+  copy's own defaults, whatever the source's were. Now, before a statement
+  goes to the copy, the port reads the session's settings from MySQL on
+  that connection when it does not know them: on the first such statement,
+  and on the first one after anything that could have changed them (a `SET`,
+  a write, `CALL`, transaction control). One extra round trip, paid only by
+  a statement that would go to the copy. If the copy reproduces the session
+  (the time zone, `sql_select_limit`, the SQL mode, `lc_time_names`,
+  `div_precision_increment`, `sql_auto_is_null`, `sql_big_selects`,
+  `character_set_results`, the connection's character set and collation),
+  it answers under
+  it: a `TIMESTAMP` column prints in the session's zone on both sides. If
+  not, MySQL answers, until the session changes again; the new routing
+  reason `session_differs` counts it and the log names the setting and its
+  value once per connection. The table of what the copy reproduces is in
+  the guide. What changes for an existing setup:
+  - A `SET` no longer keeps a connection on MySQL. `CREATE TEMPORARY TABLE`,
+    `LOCK TABLES` and `PREPARE` still do, counted as `connection_pinned`;
+    the reason `settings_set` is gone.
+  - A source whose default `time_zone` is `SYSTEM` on a host that is not in
+    UTC, or an offset with minutes: the copy no longer answers until the
+    connection (or the server default) names a zone such as `Asia/Kolkata`.
+    It used to answer in UTC, which was not what MySQL answered.
+  - A zone name is used only when MySQL's time zone tables, the zone data
+    on DBTrail's host and the copy's own agree on it over a four-year
+    window; a zone they disagree on (after a country changes its daylight
+    saving) is MySQL's.
+  - A connection whose `character_set_results` or collation the copy does
+    not reproduce (`SET NAMES latin1`, `SET NAMES utf8`, `utf8mb4_general_ci`,
+    a `_bin` collation) is MySQL's.
+  - MariaDB 10.11 does not know the collation the port's login asks for
+    (`utf8mb4_0900_ai_ci`) and would leave every connection in
+    `utf8mb4_general_ci`, where the copy never answers. The port now names
+    `utf8mb4_unicode_ci` on a new connection to such a source, so the copy
+    answers a default connection on 10.11 as it does on 11.4 and MySQL.
+    A client that sends `SET NAMES utf8mb4` with no `COLLATE` puts the
+    session back in `utf8mb4_general_ci` there, and MySQL answers.
+  - A time-travel statement on a routed connection runs only when the
+    source's session is in UTC, and is refused with error 1235 naming the
+    zone otherwise. It used to run as UTC whatever the session's zone was.
+    With the source down it still runs, under UTC, on a connection the
+    source never let in; a connection whose session on the source was lost
+    gets error 2006 and reconnects.
+  - `WEEK()`, `YEARWEEK()` and `EXTRACT(WEEK ...)` stay on MySQL: it
+    numbers weeks from Sunday by default and the copy by ISO weeks. So does
+    a recursive CTE (`WITH RECURSIVE`): MySQL stops one at
+    `cte_max_recursion_depth` with an error and MariaDB cuts it at
+    `max_recursive_iterations`, where the copy runs it to the end.
 ### Fixed
 - **The MySQL port tells a driver the truth about its session, so a
   `rollback()` through read routing undoes the write** (#2110). MySQL sends
@@ -239,6 +293,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name at warning level and the rest in the debug log. A footer
   that could not be read is no longer remembered until the daemon restarts;
   it is read again within five minutes.
+- **Read routing: statements the port misread** (#2082). A statement that
+  opened with `/**/` and had another comment later, one that opened with a
+  vertical tab or a form feed, MariaDB's executable comment (`/*M! ... */`)
+  and an executable comment holding only a statement's first words
+  (`/*!50000 SET */ time_zone = ...`) were all read as "some other
+  statement" and forwarded without the port knowing what they were. They
+  are read as what they are.
 - **SQL on the copy: division by zero is `NULL`, as on MySQL** (#2083).
   `amount / qty` with a zero `qty` came back from the copy as `Infinity`,
   `-Infinity` or `NaN`, with no error, where MySQL returns `NULL`: a `COUNT`,

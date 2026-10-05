@@ -150,6 +150,31 @@ func ReadOnlyRefusal(stmt string) string {
 	return ""
 }
 
+// PlainRead reports whether the statement is positively recognised as a read
+// that leaves the session as it found it: a SELECT (or WITH, TABLE, VALUES),
+// SHOW, DESCRIBE or EXPLAIN that ReadOnlyRefusal lets through, so with no
+// INTO, no lock, no executable comment and nothing after it on the line. The
+// same reading of the text as the read-only screen, so the two cannot
+// disagree on what a statement is. Everything else is not a plain read: SET,
+// USE and transaction control (allowed by the read-only screen, but they are
+// not reads), every write, CALL, and every statement this file does not
+// know. Like the screen, it cannot see what a stored function does when a
+// SELECT calls it.
+func PlainRead(stmt string) bool {
+	if ReadOnlyRefusal(stmt) != "" {
+		return false
+	}
+	clean, state := roClean(stmt, true, true, false)
+	if state != roClosed {
+		return false
+	}
+	switch roLeadingWord.FindString(strings.TrimLeft(clean, " (")) {
+	case "select", "table", "values", "with", "show", "explain", "describe", "desc", "analyze":
+		return true
+	}
+	return false
+}
+
 const (
 	roClosed = iota
 	roUnterminatedString

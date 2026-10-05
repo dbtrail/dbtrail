@@ -168,19 +168,23 @@ type Handler struct {
 	freeSQLWhyNot string
 	lastWarnings  []string
 	// sessVars is what this connection SET for itself (time_zone, sql_mode,
-	// sql_select_limit) while free SQL is bound and no router is: applied to
-	// every statement on the copy and answered by SELECT @@... (#2035, see
-	// sessionvars.go); guarded by mu.
+	// sql_select_limit) while free SQL is bound: applied to every statement
+	// on the copy and, with no router, answered by SELECT @@... (#2035, see
+	// sessionvars.go). With a router it is the part of the source's session
+	// the copy runs under, read back from MySQL (#2082, routedsession.go);
+	// guarded by mu.
 	sessVars sessionVars
 
 	// router, when non-nil, makes this a routing connection (#2038, see
 	// freesql.go): MySQL answers by default, the copy takes expensive
-	// plans. routeSettingsSet remembers a SET on this connection, after
-	// which nothing goes to the copy (it does not honour session
-	// settings); guarded by mu.
-	router           Router
-	routerCfg        RouterConfig
-	routeSettingsSet bool
+	// plans. routeSess is what the port knows of the source's session on
+	// this connection (routedsession.go); routePinned remembers a CREATE
+	// TEMPORARY TABLE, LOCK TABLES or PREPARE, after which nothing goes to
+	// the copy; guarded by mu.
+	router      Router
+	routerCfg   RouterConfig
+	routeSess   routeSession
+	routePinned bool
 	// routeLastForwarded: the last statement was MySQL's, so a SHOW WARNINGS
 	// is MySQL's too; after a copy-served one the warnings are ours.
 	// routeWarned keys the once-per-connection fallback warnings.
@@ -563,10 +567,20 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 		// connection that SET another zone (#2035) that would be a second
 		// clock on the same connection, with nothing saying so: refuse it by
 		// name instead. Only a connection with free SQL can hold a zone.
+		if h.router != nil && h.freeSQL != nil {
+			// On a routing connection the zone is the source's session's,
+			// read back when the port does not know it (routedsession.go).
+			ctx, cancel := h.queryContext()
+			zerr := h.timeTravelZoneRefusal(ctx)
+			cancel()
+			if zerr != nil {
+				return nil, zerr
+			}
+		}
 		h.mu.Lock()
 		zone, nonUTC := h.sessVars.timeZone, h.sessVars.duckZone != ""
 		h.mu.Unlock()
-		if nonUTC {
+		if nonUTC && h.router == nil {
 			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, fmt.Sprintf(
 				"time travel reads and prints times in UTC, and this connection is in time_zone '%s'; "+
 					"SET time_zone = '+00:00' before a time-travel statement and give its time in UTC", zone))

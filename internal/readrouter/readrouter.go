@@ -71,30 +71,40 @@ func (k Kind) String() string {
 
 var (
 	// leadingComment strips ordinary comments; an executable comment
-	// (`/*! ... */`) is MySQL code, so Classify looks inside it instead.
-	leadingComment = regexp.MustCompile(`^(?s)(\s*(/\*[^!].*?\*/|--[^\n]*\n|#[^\n]*\n))*`)
-	execComment    = regexp.MustCompile(`(?s)^\s*/\*!\d*\s*(.*?)\*/\s*$`)
+	// (`/*! ... */`, and MariaDB's `/*M! ... */`) is code the server may
+	// run, so Classify looks inside it instead. The empty comment `/**/`
+	// and `/*M*/` are spelled out: read as `/*`, the characters that rule
+	// out an executable comment, and the rest, their `*` would be one of
+	// those characters and the comment would run on to the next `*/`,
+	// anywhere in the statement, taking the statement with it.
+	leadingComment = regexp.MustCompile(`^(?s)(\s*(/\*\*/|/\*M\*/|/\*(?:[^!M]|M[^!]).*?\*/|--[^\n]*\n|#[^\n]*\n))*`)
+	execComment    = regexp.MustCompile(`(?s)^\s*/\*M?!\d*\s*(.*?)\*/\s*$`)
 	selectRE       = regexp.MustCompile(`(?is)^\s*\(*\s*(select|with)\b`)
 	pinRE          = regexp.MustCompile(`(?is)^\s*(set|create\s+temporary|lock\s+tables|unlock\s+tables|prepare)\b`)
 	beginRE        = regexp.MustCompile(`(?is)^\s*(begin|start\s+transaction)\b`)
 	endRE          = regexp.MustCompile(`(?is)^\s*(commit|rollback)\b`)
 	writeRE        = regexp.MustCompile(`(?is)^\s*(insert|update|delete|replace|create|alter|drop|truncate|rename|grant|revoke|load|call|flush|kill|optimize|analyze|repair|install|uninstall|reset|purge)\b`)
-	// harmlessSet: session settings a driver sends when it connects, which
-	// change nothing the copy answers differently (the connection's
-	// character set, autocommit left on). Forwarded, but they do not pin
-	// the connection to MySQL.
-	harmlessSet = regexp.MustCompile(`(?is)^\s*set\s+(names\b|character_set_\w+\s*=|autocommit\s*=\s*(1|on|true)\s*$)`)
 )
+
+// execCommentStart: an executable comment opens the statement.
+var execCommentStart = regexp.MustCompile(`^\s*/\*M?!`)
 
 // Classify names the statement's class from its leading keyword, comments
 // stripped. It never looks past the first keyword: a SELECT that writes
 // (SELECT ... INTO OUTFILE) is caught by Veto, not here.
 func Classify(stmt string) Kind {
-	s := leadingComment.ReplaceAllString(stmt, "")
+	s := leadingComment.ReplaceAllString(mysqlSpaces(stmt), "")
 	if m := execComment.FindStringSubmatch(s); m != nil {
 		return Classify(m[1])
 	}
 	switch {
+	case execCommentStart.MatchString(s):
+		// An executable comment that is only the statement's beginning
+		// (`/*!50000 SET x = 1, */ time_zone = '...'`): MySQL runs its
+		// content as part of what follows, and this function reads no
+		// keyword there. Classified as the kind that keeps the connection
+		// on MySQL, which is right whatever the statement turns out to be.
+		return KindSet
 	case pinRE.MatchString(s):
 		return KindSet
 	case beginRE.MatchString(s):
@@ -115,7 +125,7 @@ var keywordRE = regexp.MustCompile(`(?i)^\s*([a-z]+)`)
 // LeadingKeyword is the statement's first word, upper-cased, for a log line
 // that must not carry the statement (its literals may be data).
 func LeadingKeyword(stmt string) string {
-	s := leadingComment.ReplaceAllString(stmt, "")
+	s := leadingComment.ReplaceAllString(mysqlSpaces(stmt), "")
 	if m := execComment.FindStringSubmatch(s); m != nil {
 		s = m[1]
 	}
@@ -125,10 +135,29 @@ func LeadingKeyword(stmt string) string {
 	return "?"
 }
 
-// HarmlessSet reports whether a KindSet statement is one of the connect-time
-// settings that need not pin the connection to MySQL (see harmlessSet).
-func HarmlessSet(stmt string) bool {
-	return harmlessSet.MatchString(leadingComment.ReplaceAllString(stmt, ""))
+// mysqlSpaces returns the statement with the control bytes MySQL reads as
+// white space turned into spaces (a vertical tab, a form feed and the rest
+// below 0x20), except the ones `\s` already matches. A statement that opens
+// with a vertical tab is the statement after it to the server, and was an
+// unknown one to the patterns above.
+func mysqlSpaces(stmt string) string {
+	clean := true
+	for i := 0; i < len(stmt); i++ {
+		if c := stmt[i]; c < ' ' && c != '\t' && c != '\n' && c != '\r' {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return stmt
+	}
+	b := []byte(stmt)
+	for i, c := range b {
+		if c < ' ' && c != '\t' && c != '\n' && c != '\r' {
+			b[i] = ' '
+		}
+	}
+	return string(b)
 }
 
 // vetoes are constructs the copy would answer DIFFERENTLY without an error
@@ -143,6 +172,10 @@ var vetoes = []struct {
 }{
 	{"GROUP_CONCAT", regexp.MustCompile(`(?i)\bgroup_concat\s*\(`)}, // MySQL cuts at group_concat_max_len
 	{"NOW/CURDATE/CURTIME/CURRENT_TIMESTAMP", regexp.MustCompile(`(?i)\b(now|curdate|curtime|current_timestamp|current_date|current_time|sysdate|utc_timestamp|utc_date|utc_time|unix_timestamp|localtime|localtimestamp)\b`)}, // MySQL session time zone
+	// MySQL numbers weeks by default_week_format (from Sunday by default),
+	// the copy by ISO weeks.
+	{"WEEK/YEARWEEK", regexp.MustCompile(`(?i)\b(week|yearweek)\s*\(`)},
+	{"EXTRACT(WEEK ...)", regexp.MustCompile(`(?i)\bextract\s*\(\s*week\b`)},
 	{"STR_TO_DATE", regexp.MustCompile(`(?i)\bstr_to_date\s*\(`)},                                  // NULL in MySQL, error in DuckDB on a bad date
 	{"TIMESTAMPDIFF/DATEDIFF", regexp.MustCompile(`(?i)\b(timestampdiff|datediff|timediff)\s*\(`)}, // day counting differs
 	{"COLLATE", regexp.MustCompile(`(?i)\bcollate\b`)},                                             // collations do not exist on the copy
@@ -173,6 +206,10 @@ var vetoes = []struct {
 	// them. A leading backtick, word character or dot means a quoted name, a
 	// longer word or a column of that name, not the operator.
 	{"UNION/INTERSECT/EXCEPT without ALL (duplicates removed by bytes on the copy, by collation on MySQL)", regexp.MustCompile(`(?i)(^|[^\x60\w.])(intersect|except)([^\x60\w]|$)|(^|[^\x60\w.])union\s*(distinct\b|select\b|values\b|table\b|\()`)},
+	// MySQL stops a recursion at cte_max_recursion_depth with an error and
+	// MariaDB cuts it at max_recursive_iterations (1000 by default on both);
+	// the copy runs it to the end.
+	{"WITH RECURSIVE", regexp.MustCompile(`(?i)\bwith\s+recursive\b`)},
 }
 
 var hintComment = regexp.MustCompile(`/\*[!+]`)

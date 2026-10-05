@@ -422,6 +422,12 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 			// backslash escapes, before it knew the server. A source that
 			// opens its sessions otherwise is said in the log (#2110).
 			fw.OnSession = func(status uint16) { warnSessionDefaults(logger, id, user, status) }
+			// A MariaDB that did not know the collation the port's login
+			// asked for, and would not take the one the port names instead.
+			fw.OnCollation = func(collation string, err error) {
+				logger.Warn("read routing: the source would not give this connection a collation the copy reproduces; MySQL answers every statement on it",
+					"server", user, "collation", collation, "error", err.Error())
+			}
 			warnDSNOverridesTLS(logger, id, user, tgt.ForwardDSN, tgt.SourceSSL.Mode)
 			bound = fw
 			h.BindRouter(fw, shim.RouterConfig{

@@ -191,35 +191,6 @@ func TestPreparedRouted_showWarnings(t *testing.T) {
 	}
 }
 
-// A prepared SET pins the connection to MySQL like a text one: the copy
-// would not honour the setting.
-func TestPreparedRouted_sessionSettingPinsTheConnection(t *testing.T) {
-	r := &fakeRouter{toCopy: true}
-	f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
-	h := routingHandler(t, r, f, time.Minute)
-	_, _, sel, err := h.HandleStmtPrepare("SELECT count(*) FROM t WHERE a = ?")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res, err := h.HandleStmtExecute(sel, "", []any{int64(1)}); err != nil || binaryFirstCell(t, res) != "copy" {
-		t.Fatalf("before the SET: %v", err)
-	}
-	_, _, set, err := h.HandleStmtPrepare("SET time_zone = ?")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.HandleStmtExecute(set, "", []any{strArg("+03:00")}); err != nil {
-		t.Fatal(err)
-	}
-	res, err := h.HandleStmtExecute(sel, "", []any{int64(1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := binaryFirstCell(t, res); got != "mysql" {
-		t.Errorf("after a prepared SET the read was answered by %s, want mysql", got)
-	}
-}
-
 func TestPreparedRouted_errorsAndTimeTravel(t *testing.T) {
 	f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
 

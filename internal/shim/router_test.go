@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,14 @@ type fakeRouter struct {
 	resultStatus *uint16
 	forwardOK    bool
 	onForward    func(stmt string)
+	// src is the source's session, as the read-back reports it; nil is a
+	// stock MySQL 8.4 on a UTC host. The read-back is the port's own
+	// statement: it is counted in readBacks and kept out of forwarded.
+	// sessionErr fails it; sessionRows answers it with other rows.
+	src         *fakeSource
+	readBacks   int
+	sessionErr  error
+	sessionRows [][]any
 	// lostErr is what Lost answers; pings counts the PINGs sent to the
 	// source, pingErr is what they answer, onPing runs on each.
 	lostErr error
@@ -129,7 +138,29 @@ func (r *fakeRouter) Decide(_ context.Context, stmt string) (readrouter.Decision
 	return readrouter.Decision{ToCopy: r.toCopy, Reason: r.reason, Rule: r.rule}, r.decideErr
 }
 
-func (r *fakeRouter) Forward(_ context.Context, stmt string, _ readrouter.RowSink) (*mysql.Result, error) {
+func (r *fakeRouter) Forward(_ context.Context, stmt string, sink readrouter.RowSink) (*mysql.Result, error) {
+	if isSessionReadBack(stmt) {
+		r.readBacks++
+		switch {
+		case r.forwardErr != nil:
+			return nil, r.forwardErr
+		case r.sessionErr != nil:
+			return nil, r.sessionErr
+		case r.sessionRows != nil:
+			names := make([]string, 0, 11)
+			if len(r.sessionRows) > 0 {
+				for i := range r.sessionRows[0] {
+					names = append(names, "c"+strconv.Itoa(i))
+				}
+			}
+			return sourceRows(sink, names, r.sessionRows)
+		}
+		src := r.src
+		if src == nil {
+			src = stockSource()
+		}
+		return sourceRows(sink, []string{"tz", "mode", "lim", "lc", "div", "ain", "big", "cs", "csconn", "coll", "probe"}, [][]any{src.sessionRow(stmt)})
+	}
 	r.forwarded = append(r.forwarded, stmt)
 	if r.forwardErr != nil {
 		return nil, r.forwardErr
@@ -217,30 +248,6 @@ func TestRouter_forwardsEverythingButExpensiveSelects(t *testing.T) {
 				t.Errorf("copy ran %d times, want 1", f.calls)
 			}
 		})
-	}
-}
-
-// A SET stops this connection's routing for good: the copy does not honour
-// session settings, and what the client set must apply to every later read.
-func TestRouter_sessionSetPinsTheConnectionToMySQL(t *testing.T) {
-	r := &fakeRouter{toCopy: true, reason: "expensive"}
-	f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
-	h := routingHandler(t, r, f, time.Minute)
-	if res, _ := h.HandleQuery("SELECT status, count(*) FROM t GROUP BY status"); firstCell(t, res) != "copy" {
-		t.Fatal("the expensive select did not go to the copy before the SET")
-	}
-	if _, err := h.HandleQuery("SET time_zone = '+00:00'"); err != nil {
-		t.Fatal(err)
-	}
-	res, err := h.HandleQuery("SELECT status, count(*) FROM t GROUP BY status")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if firstCell(t, res) != "mysql" {
-		t.Error("after a SET the expensive select still went to the copy")
-	}
-	if want := []string{"SET time_zone = '+00:00'", "SELECT status, count(*) FROM t GROUP BY status"}; strings.Join(r.forwarded, "|") != strings.Join(want, "|") {
-		t.Errorf("forwarded = %v, want %v", r.forwarded, want)
 	}
 }
 
@@ -381,28 +388,6 @@ func TestRouter_refusedUSEKeepsTheSchema(t *testing.T) {
 	h.mu.Unlock()
 	if db != "shop" {
 		t.Errorf("after a refused USE the schema is %q, want shop", db)
-	}
-}
-
-// Connect-time settings a driver sends do not pin the connection; a SET
-// inside MySQL's executable comment does, like a bare one.
-func TestRouter_harmlessAndCommentedSets(t *testing.T) {
-	r := &fakeRouter{toCopy: true, reason: "expensive"}
-	f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
-	h := routingHandler(t, r, f, time.Minute)
-	for _, s := range []string{"SET NAMES utf8mb4", "SET autocommit=1"} {
-		if _, err := h.HandleQuery(s); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if res, _ := h.HandleQuery("SELECT a, count(*) FROM t GROUP BY a"); firstCell(t, res) != "copy" {
-		t.Error("a harmless connect-time SET pinned the connection to MySQL")
-	}
-	if _, err := h.HandleQuery("/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE */"); err != nil {
-		t.Fatal(err)
-	}
-	if res, _ := h.HandleQuery("SELECT a, count(*) FROM t GROUP BY a"); firstCell(t, res) != "mysql" {
-		t.Error("a SET inside an executable comment did not pin the connection")
 	}
 }
 
