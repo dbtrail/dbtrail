@@ -323,59 +323,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `cte_max_recursion_depth` with an error and MariaDB cuts it at
     `max_recursive_iterations`, where the copy runs it to the end.
 ### Fixed
-- **Read routing: a statement that names a generated column is answered by
-  MySQL** (#2123). A snapshot holds no generated column, so the copy does
-  not have it, and a statement that named one was not always refused there:
-  the copy answered with whatever else had that name, and returned other
-  rows with no error. With `gen(id, twice GENERATED ALWAYS AS (id * 2), a)`
-  and `g2(id, twice, b)`, `SELECT o.id, (SELECT twice FROM gen g WHERE g.id =
-  o.id) FROM g2 o` returned `g2.twice` (99) where MySQL 8.4 and MariaDB 11.4
-  return 2; the same statement with `EXISTS (... AND twice = 2)` returned no
-  row where they return one; `SELECT twice FROM g2 JOIN gen ...` returned 99
-  where they fail with "ambiguous". One table is enough: `SELECT a AS twice
-  FROM gen WHERE twice = 2` filtered on the alias, and a generated column
-  named `user` was answered by the function of that name. Under read routing
-  the copy now declines, and MySQL answers under `copy_columns_differ`, a
-  statement whose text holds the name of a generated column (`STORED` or
-  `VIRTUAL`, invisible or not) of a table it reads. The text is searched,
-  not parsed, so the name inside a longer word, a string or a comment keeps
-  the statement on MySQL too, and so does any character outside ASCII in a
-  statement over such a table; a statement over the same table that does not
-  hold the name still goes to the copy, alone or in a join. **A table whose
-  snapshot carries no `CREATE TABLE` is no longer answered by the copy
-  under routing at all** (before, only its `SELECT *` was held back): which
-  columns it lacks is not known, and that is not read as "none". The same
-  for a file that does not hold exactly the columns its definition lists, a
-  column definition that could not be read, and a generated column whose
-  name is not plain ASCII. A new full snapshot records the definition. A
-  statement that holds `_rowid` (MySQL's other name for a key of one integer
-  column) or, over a MariaDB table created `WITH SYSTEM VERSIONING`,
-  `row_start` or `row_end`, is MySQL's too; so is one that holds
-  `my_row_id` over a table whose snapshot does not hold MySQL's generated
-  key, and one that reads a table whose name differs from another's only by
-  letter case (the copy read one table for both). The Connect page and the
-  log line about a snapshot with no table definition now say what to do:
-  take a new full snapshot. The
-  SQL card and a port with routing off answer as before. Also: `bintrail
-  baseline` reads a generated column whose expression ends in a string
-  ending in a backslash as generated again (it stopped the conversion with
-  a column-count error), and `bintrail-console sql-compare` reports two
-  different column names at one position when they hold letters outside
-  ASCII (`año` against `niño`), which it left to the cells and called
-  `EQUAL` when no cell disagreed.
-- **Writing a large table again in full no longer fails for lack of memory
-  when its chain of changes is long** (#2126). When the changes beside a table
-  pass a quarter of its size the table is written again, and that starts by
-  applying the chain to the table in one DuckDB statement under the daemon's
-  4 GB memory limit. On a table of 100 million rows with 15 million changed
-  rows in 24 pairs the statement failed with `Out of Memory Error ... (3.7
-  GiB/3.7 GiB used)`, the update was refused and the schedule read the whole
-  source instead, every two hours or so at 300 transactions a second. The step
-  that picks the newest version of each row was a window function, which on
-  those files failed at 4 GB and passed at 1 GB; it is now a join that passes
-  from 500 MB to 8 GB and gives the same rows. The job that merges a long
-  chain into one pair uses the same join. What reads a snapshot (the views,
-  SQL on the copy) is unchanged.
 - **Snapshots: an update no longer leaves out the changes that reached the
   index late** (#2138). An update of a snapshot continues from the exact
   binlog position the previous one stopped at, and to avoid reading the whole
@@ -474,55 +421,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different column names at one position when they hold letters outside
   ASCII (`año` against `niño`), which it left to the cells and called
   `EQUAL` when no cell disagreed.
-- **Snapshots: an update no longer leaves out the changes that reached the
-  index late** (#2138). An update of a snapshot continues from the exact
-  binlog position the previous one stopped at, and to avoid reading the whole
-  index it also started its scan at a time: the time the previous snapshot
-  was written, less one to two hours. That time comes from the clock of the
-  machine that wrote the snapshot. The index files each change under the time
-  its statement ran on the source. So when the index received changes later
-  than they ran, they were after the position and before that time, the scan
-  never reached them, and every later snapshot was missing them with no error
-  anywhere. Reproduced with the capture 3, 5 and 26 hours behind when an
-  update ran (the daemon back after an outage and a scheduled update firing
-  while it caught up), with a table written again, a table kept with a pair
-  of changes beside it and a table carried forward unchanged, and on the
-  first update after a full snapshot when the source is a delayed replica.
-  The scan now reads where to start from the index: it looks at the newest
-  change of each hourly partition older than that time, and when one comes
-  at or after the snapshot's position it starts at the table's oldest change
-  there. The start only ever moves earlier. Every other reader that continues
-  from a snapshot started from its time the same way and reads its start the
-  new way too: `verify`, the MySQL port's `_snapshot` tables, point-in-time
-  restore of a row, `export iceberg`, and `recover-cascade` when it looks for
-  the child rows changed since their snapshot (there a missed change meant
-  recovery SQL that restored an outdated row).
-  - **Cost**, measured on MySQL 8.4.9 with 1.5 million changes over 720
-    hourly partitions: 34 to 47 ms for the look at every partition (three
-    statements; one statement per partition took 100 to 167 ms), once per
-    update, nothing more per table when no change is late, and 1 ms per
-    table when 26 partitions hold late ones. Reading a table with no time
-    bound at all, the alternative, took 86 ms for a table whose bounded read
-    takes 10 ms, and grows with the size of the index. The other readers
-    above pay those 34 to 47 ms on each read.
-  - **Snapshots already written.** Nothing has to be converted: an update
-    over an existing snapshot reads its start the new way. What an earlier
-    update already left out stays out, because the snapshots after it start
-    past those changes. Only a snapshot updated while the capture was more
-    than an hour or two behind is affected. `bintrail verify` shows it the
-    next time it compares the snapshots with a read of the database: the
-    table reports `mismatch`. The remedy is a new full snapshot of the
-    source.
-  - **Two limits.** While `bintrail index` adds binlog files to an index
-    that a stream also writes, the newest change of a partition says nothing
-    about the rest, so an update of a snapshot older than that run looks in
-    every older partition (slower, never less). A change whose hour was
-    rotated out of the index into an archive before the update ran is found
-    only when it falls inside the old time bound, as before.
-  - If the index cannot be read for this, the update stops and publishes
-    nothing, also under `--allow-gaps`. A start that moved earlier can also
-    reach an hour that was rotated out without an archive; the update then
-    refuses with the capture gap error instead of skipping that hour.
+- **Writing a large table again in full no longer fails for lack of memory
+  when its chain of changes is long** (#2126). When the changes beside a table
+  pass a quarter of its size the table is written again, and that starts by
+  applying the chain to the table in one DuckDB statement under the daemon's
+  4 GB memory limit. On a table of 100 million rows with 15 million changed
+  rows in 24 pairs the statement failed with `Out of Memory Error ... (3.7
+  GiB/3.7 GiB used)`, the update was refused and the schedule read the whole
+  source instead, every two hours or so at 300 transactions a second. The step
+  that picks the newest version of each row was a window function, which on
+  those files failed at 4 GB and passed at 1 GB; it is now a join that passes
+  from 500 MB to 8 GB and gives the same rows. The job that merges a long
+  chain into one pair uses the same join. What reads a snapshot (the views,
+  SQL on the copy) is unchanged.
 - **A table with more than a million changed rows in one update is no longer
   written again in full** (#2126). With table deltas on, an update keeps the
   changed rows of each table in memory up to a limit (1,000,000 per table in
