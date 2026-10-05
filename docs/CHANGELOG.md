@@ -134,13 +134,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of a transaction. A connection that is not routed always says autocommit.
   The flags that announce something the port does not deliver (more result
   sets, a cursor, session-state data) are never passed on. The standalone
-  `bintrail shim` announces autocommit too. The handshake cannot know the
-  source, so a source configured to open its sessions with autocommit off
-  or with `NO_BACKSLASH_ESCAPES` is announced as a default one until the
-  first answer, and the version it announces stays `8.0.11` whatever the
-  source is; both, and what each driver does with
-  them, are in "What the port tells a driver about its session and about the
-  server" in docs/time-travel-sql.md.
+  `bintrail shim` announces autocommit too. A `PING` on a routed connection
+  is now answered by the source once the connection has a session there, so
+  it tells whether that session is alive and its state as it is now. Once
+  the connection to the source is lost (the source ended the session, or the
+  port's statement deadline cut a statement), every command answers error
+  2006, the ones the port answers itself included; before, a time-travel
+  statement or a `PING` kept answering OK on a connection whose transaction
+  was gone. The version the handshake announces stays `8.0.11` whatever the
+  source is.
+  **One case gets worse, and is now logged.** The handshake is written
+  before the port knows the server, so it announces a default session. With
+  a source that opens its sessions with autocommit off, a PyMySQL client
+  opened with `autocommit=True` is told autocommit is already on and sends
+  no `SET`: its writes are discarded when the connection closes, with no
+  error. Before this change the wrong status 0 happened to make PyMySQL
+  send the `SET`. For a MariaDB source with `autocommit=0` in its
+  configuration this is new with the port (connected directly the row is
+  kept); with an `init_connect` that turns autocommit off, or MySQL with
+  `autocommit=0`, PyMySQL loses the row connected directly as well.
+  Have such clients send `SET autocommit=1` when they connect (PyMySQL:
+  `init_command`), or make autocommit the source's default. The port logs a
+  warning, once per server, when it opens a session on a source that differs
+  from what the handshake announced (autocommit off, or
+  `NO_BACKSLASH_ESCAPES` in `sql_mode`). What each driver does is in "What
+  the port tells a driver about its session and about the server" in
+  docs/time-travel-sql.md.
 - **SQL on the copy: a `_bin` column compares byte by byte, as on MySQL**
   (#2083). The copy compares text without case or accents, to match MySQL's
   default collation, and it did so for every column, including the ones
