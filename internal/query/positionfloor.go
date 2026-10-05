@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // CoarseSinceFloor is the time bound a fetch anchored on a binlog position
@@ -95,8 +97,32 @@ type PartitionHeads struct {
 // the snapshot), and erring long only widens a fetch.
 const fileIndexingMargin = time.Hour
 
+// isUnknownPartitionErr reports MySQL's ER_UNKNOWN_PARTITION (1735): a
+// statement named a partition that is no longer there. Rotation drops old
+// partitions while a refresh runs, and the old ones are the ones read here.
+func isUnknownPartitionErr(err error) bool {
+	var me *mysql.MySQLError
+	return errors.As(err, &me) && me.Number == 1735
+}
+
+// partitionReadAttempts bounds the re-reads after a partition went away
+// between being listed and being read. One rotation pass drops its
+// partitions in a single statement, so a second read sees the new list.
+const partitionReadAttempts = 3
+
 // LoadPartitionHeads reads the picture PartitionHeads answers from.
 func LoadPartitionHeads(ctx context.Context, db *sql.DB) (*PartitionHeads, error) {
+	var h *PartitionHeads
+	var err error
+	for range partitionReadAttempts {
+		if h, err = loadPartitionHeadsOnce(ctx, db); !isUnknownPartitionErr(err) {
+			break
+		}
+	}
+	return h, err
+}
+
+func loadPartitionHeadsOnce(ctx context.Context, db *sql.DB) (*PartitionHeads, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT PARTITION_NAME, PARTITION_DESCRIPTION
 		FROM information_schema.PARTITIONS
@@ -218,7 +244,24 @@ func (h *PartitionHeads) below(since time.Time, anchor BinlogPos) []string {
 //
 // An error means the question could not be answered. The caller must not go
 // on with its own time: that is the silent loss this exists to stop.
+//
+// h may be a picture several fetches share, taken earlier in a run. When a
+// partition it names was dropped since (rotation), the answer is read again
+// from a fresh picture: what the dropped partition held is in an archive now
+// and out of any picture's sight, the limit PartitionHeads states.
 func (h *PartitionHeads) SinceFor(ctx context.Context, db *sql.DB, opts Options) (*time.Time, error) {
+	since, err := h.sinceFor(ctx, db, opts)
+	for i := 1; isUnknownPartitionErr(err) && i < partitionReadAttempts; i++ {
+		fresh, lerr := LoadPartitionHeads(ctx, db)
+		if lerr != nil {
+			return nil, lerr
+		}
+		since, err = fresh.sinceFor(ctx, db, opts)
+	}
+	return since, err
+}
+
+func (h *PartitionHeads) sinceFor(ctx context.Context, db *sql.DB, opts Options) (*time.Time, error) {
 	if opts.Since == nil || opts.SincePos == nil {
 		return opts.Since, nil
 	}

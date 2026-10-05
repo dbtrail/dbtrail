@@ -274,3 +274,79 @@ func TestLoadPartitionHeads_missingIndexStateIsNoFileIndexing(t *testing.T) {
 		t.Fatalf("heads = %+v", h)
 	}
 }
+
+// Rotation drops an old partition between the picture and the lookup that
+// names it. The answer is read again from a fresh picture instead of
+// refusing the table (and every table after it in the same run); a failure
+// that is still there after the re-reads does refuse.
+func TestSinceFor_readsAgainWhenAPartitionWasDropped(t *testing.T) {
+	h0 := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	since := h0.Add(5*time.Hour + 30*time.Minute)
+	opts := Options{Schema: "shop", Table: "orders", Since: &since, SincePos: &BinlogPos{File: "binlog.000001", Pos: 500}}
+	gone := &mysql.MySQLError{Number: 1735, Message: "Unknown partition 'p0' in table 'binlog_events'"}
+	partCols := []string{"PARTITION_NAME", "PARTITION_DESCRIPTION"}
+	headCols := []string{"binlog_file", "start_pos"}
+	// The fresh picture: p0 is gone, p1 is now the first partition and holds
+	// the late row.
+	fresh := func(m sqlmock.Sqlmock) {
+		m.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(sqlmock.NewRows(partCols).
+			AddRow("p1", strconv.FormatInt(mysqlToSeconds(h0.Add(2*time.Hour)), 10)).AddRow("p_future", "MAXVALUE"))
+		m.ExpectQuery("PARTITION \\(`p1`\\) ORDER BY event_id DESC").WillReturnRows(sqlmock.NewRows(headCols).AddRow("binlog.000001", 700))
+		m.ExpectQuery("PARTITION \\(`p_future`\\) ORDER BY event_id DESC").WillReturnRows(sqlmock.NewRows(headCols))
+		m.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+		m.ExpectQuery("FROM index_state").WillReturnRows(sqlmock.NewRows([]string{"m"}).AddRow(nil))
+	}
+	late := h0.Add(90 * time.Minute)
+
+	t.Run("the second read answers", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		mock.ExpectQuery("PARTITION \\(`p0`, `p1`\\) WHERE event_timestamp").WillReturnError(gone)
+		fresh(mock)
+		mock.ExpectQuery("PARTITION \\(`p1`\\) WHERE event_timestamp").WillReturnRows(sqlmock.NewRows([]string{"event_timestamp"}).AddRow(late))
+		got, err := headsAt(h0, 700, 700).SinceFor(context.Background(), db, opts)
+		if err != nil || !got.Equal(late) {
+			t.Fatalf("SinceFor = %v, err=%v; want %s from the fresh picture", got, err, late)
+		}
+		if merr := mock.ExpectationsWereMet(); merr != nil {
+			t.Fatal(merr)
+		}
+	})
+	t.Run("a partition that keeps vanishing refuses", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		mock.ExpectQuery("PARTITION \\(`p0`, `p1`\\) WHERE event_timestamp").WillReturnError(gone)
+		for range partitionReadAttempts - 1 {
+			fresh(mock)
+			mock.ExpectQuery("PARTITION \\(`p1`\\) WHERE event_timestamp").WillReturnError(gone)
+		}
+		got, err := headsAt(h0, 700, 700).SinceFor(context.Background(), db, opts)
+		if err == nil {
+			t.Fatalf("SinceFor = %v and no error; it must refuse", got)
+		}
+		if merr := mock.ExpectationsWereMet(); merr != nil {
+			t.Fatal(merr)
+		}
+	})
+	t.Run("a partition dropped while the picture loads", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		mock.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(sqlmock.NewRows(partCols).
+			AddRow("p0", strconv.FormatInt(mysqlToSeconds(h0.Add(time.Hour)), 10)).AddRow("p_future", "MAXVALUE"))
+		mock.ExpectQuery("PARTITION \\(`p0`\\) ORDER BY event_id DESC").WillReturnError(gone)
+		fresh(mock)
+		h, err := LoadPartitionHeads(context.Background(), db)
+		if err != nil || len(h.parts) != 2 || h.parts[0].name != "p1" {
+			t.Fatalf("LoadPartitionHeads = %+v, err=%v; want the second listing", h, err)
+		}
+	})
+}
