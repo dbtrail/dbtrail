@@ -207,6 +207,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NO_BACKSLASH_ESCAPES` in `sql_mode`). What each driver does is in "What
   the port tells a driver about its session and about the server" in
   docs/time-travel-sql.md.
+- **A new install no longer rewrites every table on each update of its first
+  hour** (#2121). With table deltas on, an update writes a table in full when
+  its chain of changes starts too close to the oldest hour the index keeps,
+  with a margin of one hour plus one schedule interval. On an index younger
+  than that margin every chain was "too close", so every update of the first
+  hour wrote all tables, unchanged ones included (measured on 102 million
+  rows: updates of 7 to 10 minutes on a 5-minute schedule). The margin is now skipped while rotation cannot reach the
+  oldest hour before the next update, which the retention says: 48 hours by
+  default. An index that has been running for its retention is graded as
+  before, and so is one whose rotation is off or whose retention cannot be
+  read.
 - **SQL on the copy: a `_bin` column compares byte by byte, as on MySQL**
   (#2083). The copy compares text without case or accents, to match MySQL's
   default collation, and it did so for every column, including the ones

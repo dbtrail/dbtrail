@@ -799,8 +799,10 @@ it.
 A chain of deltas lives for up to 24 hours before the table is written whole
 again. The `watch` daemon also writes a table whole when the start of its
 chain comes close to the oldest hour the index keeps: inside the last fifth of
-the retention, or less than an hour plus one refresh interval above it. It
-does this on a quiet server too, where nothing was indexed, so a snapshot the
+the retention, or less than an hour plus one refresh interval above it. The
+second applies only once rotation is within that distance of dropping the
+oldest hour, so not on an index younger than its retention. It does this on a
+quiet server too, where nothing was indexed, so a snapshot the
 daemon keeps up to date reads at most `aging`, and only until its next refresh.
 
 A `bintrail baseline refresh` run by hand or from cron has only the 24 hour

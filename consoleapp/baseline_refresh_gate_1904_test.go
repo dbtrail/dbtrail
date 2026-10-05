@@ -78,7 +78,8 @@ func TestCoverageRule_isTheGatesVerdictWithAMargin(t *testing.T) {
 
 // The floor moves in hour steps (partitions are hourly) and the next look is a
 // whole interval away, so the line keeps at least that much above the floor even
-// where the aging band is thinner.
+// where the aging band is thinner. For a rule that does not know when rotation
+// reaches the floor, which these are (#2121: floorHolds).
 func TestCoverageRule_keepsANextCycleAboveTheFloor(t *testing.T) {
 	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
 	floor := now.Add(-3 * time.Hour) // aging band: 0.2 of 3h = 36 minutes

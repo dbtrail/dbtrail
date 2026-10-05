@@ -17,6 +17,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/rotation"
 )
 
 // refreshRequest is one server's periodic baseline refresh.
@@ -437,7 +438,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 // the same read, folds every cycle and says so too.
 func (s *baselineSupervisor) chainStartFloor(req refreshRequest, at time.Time, interval time.Duration) time.Time {
 	floor, known := readLiveFloor(s.ctx, req.IndexDSN)
-	line, ok := coverageRule{retain: s.retainPolicy(), interval: interval}.reanchorBy(floor, at)
+	line, ok := s.coverageRuleFor(s.ctx, req, interval).reanchorBy(floor, at)
 	known = known && ok
 	s.reportGateBlind("chain-floor", known, req,
 		"cannot tell how far back the index keeps events, so this cycle ends no chain of table deltas "+
@@ -718,7 +719,7 @@ func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequ
 	// the one the fold ends chains with, so the fold this releases moves the
 	// instant graded here.
 	covered, known := snapshotStillCovered(ctx, req.IndexDSN, prev.readsFrom, now,
-		coverageRule{retain: s.retainPolicy(), interval: interval})
+		s.coverageRuleFor(ctx, req, interval))
 	s.reportGateBlind("coverage", known, req,
 		"cannot tell how far the index still reaches, so every cycle folds; this server is not "+
 			"being skipped and will not be until the index answers")
@@ -772,8 +773,58 @@ func (s *baselineSupervisor) retainPolicy() time.Duration {
 	return max(s.retainInForce(), 0)
 }
 
+// coverageRuleFor is the rule for one index, and the ONLY place one is built:
+// the gate and the fold have to draw the same line (coverageRule.reanchorBy),
+// so neither assembles its own.
+//
+// An index whose own retention had to be asked and did not answer keeps the
+// rule's full margin, which is safe and is also #2121's symptom on a new
+// index, so it is said (reportGateBlind) rather than left to a Debug line.
+func (s *baselineSupervisor) coverageRuleFor(ctx context.Context, req refreshRequest, interval time.Duration) coverageRule {
+	rule := coverageRule{retain: s.retainPolicy(), interval: interval}
+	if s.rotationInForce == nil {
+		return rule
+	}
+	asked, unreadable := false, false
+	rule.dropsAfter, _ = rotation.DropWindow(s.rotationInForce(), func() rotation.Effective {
+		e := readIndexRetention(ctx, req.IndexDSN)
+		asked, unreadable = true, e.Source == rotation.RetainUnreadable
+		return e
+	})
+	if asked {
+		why := "cannot read the retention this index was created under, so a snapshot that reads from within " +
+			"an hour and a cycle of the oldest events the index keeps is replaced as a precaution"
+		if s.tableDeltas {
+			why += "; on an index that new, every update writes its tables in full"
+		}
+		s.reportGateBlind("retention", !unreadable, req, why)
+	}
+	return rule
+}
+
+// followRotation points the supervisor at the settings the rotation loop
+// reads, fresh per call, so an edit in the console's rotation panel bounds the
+// very next refresh cycle rather than only taking effect once partitions have
+// already been dropped.
+//
+// Called at boot, before rotation.StartLoop, and it reads the settings once
+// as StartLoop does: whether this daemon's rotation loop runs is decided there
+// and then, and the live settings cannot say it afterwards. A retention saved
+// in the panel of a daemon started with rotation off reads as enabled and
+// drops nothing until a restart. Such a daemon's index is rotated, if at all,
+// on a schedule nothing here can read, so the settings still cap how long a
+// snapshot goes unreplaced (retainInForce) and vouch for nothing about when
+// the floor moves (rotationInForce stays nil).
+func (s *baselineSupervisor) followRotation(settings func() rotation.Settings) {
+	s.retainInForce = func() time.Duration { return settings().Retain }
+	s.rotationInForce = nil
+	if settings().Enabled {
+		s.rotationInForce = settings
+	}
+}
+
 // reportGateBlind says, at most once a day per server, that the gate cannot
-// answer one of its two questions — and resolves the condition when it can
+// answer one of its questions — and resolves the condition when it can
 // again.
 //
 // At Warn, and this is the whole point of it. Failing toward folding is safe,

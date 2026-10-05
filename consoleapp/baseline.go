@@ -26,6 +26,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/pgbaseline"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/rotation"
 	"github.com/dbtrail/dbtrail/internal/serverid"
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
@@ -207,6 +208,11 @@ type baselineSupervisor struct {
 	// supervisor that does not run rotation, which means no policy cap and the
 	// observed partitions as the only bound. See withinRetentionPolicy.
 	retainInForce func() time.Duration
+	// rotationInForce is the whole of those settings, for what retainInForce
+	// cannot say: whether the operator chose that retention, or each index
+	// drops on its own (coverageRuleFor). nil too when this daemon's rotation
+	// loop is not running. Both are set by followRotation.
+	rotationInForce func() rotation.Settings
 }
 
 // newBaselineSupervisor builds a supervisor bound to the daemon context. The
