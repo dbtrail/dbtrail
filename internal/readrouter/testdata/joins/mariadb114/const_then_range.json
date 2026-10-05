@@ -1,0 +1,37 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 83.22492666,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "co",
+          "access_type": "const",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "8",
+          "used_key_parts": ["code"],
+          "ref": ["const"],
+          "rows": 1,
+          "filtered": 100
+        }
+      },
+      {
+        "table": {
+          "table_name": "o",
+          "access_type": "range",
+          "possible_keys": ["created_at"],
+          "key": "created_at",
+          "key_length": "6",
+          "used_key_parts": ["created_at"],
+          "loops": 1,
+          "rows": 564692,
+          "cost": 83.22492666,
+          "filtered": 100,
+          "attached_condition": "o.created_at >= '2024-03-01' and o.created_at < '2024-06-01'",
+          "using_index": true
+        }
+      }
+    ]
+  }
+}

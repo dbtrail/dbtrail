@@ -77,6 +77,7 @@ func estimateRowsRead(qb map[string]any, p *Plan) {
 		return
 	}
 	p.RowsRead = int64(capRows(sum.across))
+	p.topSort, p.sortedFirstRows = topSortOf(qb)
 	p.Joined = e.joined
 }
 
@@ -85,6 +86,42 @@ func capRows(n float64) float64 {
 		return maxRowsRead
 	}
 	return n
+}
+
+// How the top block sorts, for a statement whose LIMIT could end its join
+// early (DecideStatement).
+const (
+	sortNone       = iota // nothing sorts or buffers the joined rows
+	sortFirstTable        // the first table is sorted alone, then joined
+	sortWholeJoin         // a sort or a temporary table takes the whole join
+)
+
+// topSortOf reads how the top block sorts. For sortFirstTable, rows is the
+// sorted table's row estimate.
+func topSortOf(qb map[string]any) (kind int8, rows int64) {
+	for _, w := range blockWrappers {
+		if _, ok := qb[w]; ok {
+			return sortWholeJoin, 0
+		}
+	}
+	steps, _ := qb["nested_loop"].([]any)
+	for i, s := range steps {
+		m, _ := s.(map[string]any)
+		f, ok := m["read_sorted_file"].(map[string]any)
+		if !ok {
+			continue
+		}
+		fs, _ := f["filesort"].(map[string]any)
+		t, _ := fs["table"].(map[string]any)
+		n, ok := planNumber(t["rows"])
+		if i > 0 || !ok {
+			// A sort further down the list is fed by the tables before
+			// it: taken as a sort of the whole join.
+			return sortWholeJoin, 0
+		}
+		kind, rows = sortFirstTable, int64(capRows(n))
+	}
+	return kind, rows
 }
 
 // blockWrappers are the nodes MariaDB wraps a block's tables in: they sort
@@ -282,7 +319,7 @@ type chain struct {
 	e                  *rowsEstimator
 	own, fanout        float64
 	subRead, subAcross float64
-	n                  int // tables in this chain
+	n                  int // tables in this chain, const and system ones left out
 }
 
 // sum is the chain's total. Its own tables count as rows read across a
@@ -371,6 +408,16 @@ func (c *chain) table(t map[string]any, buffered bool) error {
 			return fmt.Errorf("table %s has no usable filtered percentage", name)
 		}
 	}
+	cond, _ := t["attached_condition"].(string)
+	passed := filtered
+	if (at == "ALL" || at == "index") && !buffered && cond != "" && filtered == 100 && !strings.Contains(cond, "subquery#") {
+		// A condition on a table read whole, with every row reported as
+		// passing it: MariaDB has no statistics on the column and says
+		// 100. Taken as a tenth, the guess MySQL makes for the same
+		// filter, so that a small table scanned under a selective filter
+		// is not counted as if each of its rows were joined.
+		passed = 10
+	}
 	entries := math.Max(c.fanout, 1) // a table is entered at least once
 	if buffered && strings.HasPrefix(at, "hash_") {
 		// A hash join reads the table once to build the hash and probes
@@ -382,12 +429,13 @@ func (c *chain) table(t map[string]any, buffered bool) error {
 	perEntry := rows
 	_, firstMatch := t["first_match"]
 	_, notExists := t["not_exists"]
-	cond, _ := t["attached_condition"].(string)
-	if notExists || (firstMatch && cond == "") {
+	probe := at == "index_subquery" || at == "unique_subquery"
+	if notExists || probe || (firstMatch && cond == "") {
 		// The server leaves the table at the first row it finds for each
-		// entry: a semi-join with nothing more to test on the row, or an
-		// anti-join. (A first_match table with a condition of its own
-		// reads on until a row passes it: counted in full.)
+		// entry: a semi-join with nothing more to test on the row, an
+		// anti-join, or the index probe of an IN or EXISTS subquery. (A
+		// first_match table with a condition of its own reads on until a
+		// row passes it: counted in full.)
 		perEntry = math.Min(rows, 1)
 	}
 	c.own = capRows(c.own + entries*perEntry)
@@ -419,9 +467,19 @@ func (c *chain) table(t map[string]any, buffered bool) error {
 		c.subRead = capRows(c.subRead + sub.read)
 		c.subAcross = capRows(c.subAcross + sub.across)
 	}
-	c.fanout = capRows(c.fanout * rows * filtered / 100)
-	c.n++
+	out := rows * passed / 100
+	if notExists || firstMatch || probe {
+		// At most one row goes on for each row that came in.
+		out = math.Min(out, 1)
+	}
+	c.fanout = capRows(c.fanout * out)
 	c.e.tables++
+	if at == "const" || at == "system" {
+		// One row the optimizer read before the plan started: a value,
+		// not a table of the join.
+		return nil
+	}
+	c.n++
 	if c.n > 1 {
 		c.e.joined = true
 	}

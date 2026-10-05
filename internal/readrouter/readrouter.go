@@ -345,6 +345,11 @@ type Plan struct {
 	// per outer row. False for one table, and for a UNION of single
 	// tables.
 	Joined bool
+	// topSort is how the top block sorts (sortNone, sortFirstTable,
+	// sortWholeJoin) and sortedFirstRows the rows of the table sorted
+	// alone: what decides whether a LIMIT can end the join early.
+	topSort         int8
+	sortedFirstRows int64
 	// RowsReadUnknown is why a plan with no cost has no RowsRead: a shape
 	// the estimate does not know. The scan rules alone decide that plan.
 	RowsReadUnknown string
@@ -586,18 +591,62 @@ func (pol Policy) Prejudge(stmt string) (d Decision, ok bool) {
 // assumed selectivity, and a rare value walks the whole index.
 //
 // The rows a plan with no cost reads across its joins (Plan.RowsRead) are
-// what the join reads when run to its end. A LIMIT-bounded statement with
-// no sort ends it early, so that estimate is left out for it and the scan
-// rules alone decide, as they did before the estimate existed.
+// left out when the statement's LIMIT can end the join early
+// (limitEndsJoin); the scan rules then decide alone.
 func (pol Policy) DecideStatement(stmt string, p Plan) Decision {
 	n, bounded := limitBounded(stmt)
 	if bounded && !p.Filesort && !p.ScanFilter && p.Message == "" && p.MaxScanRows <= limitBoundRows {
 		return Decision{Reason: fmt.Sprintf("LIMIT %d served without a sort or an unindexed filter: at most %d rows per table scan", n, p.MaxScanRows), Rule: RuleBoundedLimit}
 	}
-	if bounded && !p.Filesort {
-		return pol.decide(p, fmt.Sprintf("LIMIT %d with no sort can stop the join early: the rows read across it are not counted", n))
+	return pol.decide(p, pol.limitEndsJoin(stmt, p))
+}
+
+// joinLimit is topLimit accepting a placeholder for either number: the
+// prepared path decides on the statement's text.
+var joinLimit = regexp.MustCompile(`(?i)\blimit\s+(\d+|\?)(?:\s*,\s*(\d+|\?)|\s+offset\s+(\d+|\?))?\s*;?\s*$`)
+
+// limitEndsJoin says why the rows read across a join are not to be counted
+// for this statement, or "" when they are. They are what the join reads
+// when run to its end, and MariaDB does not cut them for a LIMIT; a
+// top-level LIMIT (offset included) under the scan threshold, with nothing
+// in the statement that reads everything first (unboundedWork) and no sort
+// or temporary table over the join in the plan, ends the nested loop after
+// about that many rows. A table sorted alone before the join is read whole
+// and counts with the LIMIT. A placeholder is a bound not known here: the
+// statement is decided as it was before the estimate existed. This is for
+// the join estimate only: the bounded-limit rule and the scan rules are not
+// touched. A LIMIT inside a derived table is not seen (it does not end the
+// statement), and that block is counted whole.
+func (pol Policy) limitEndsJoin(stmt string, p Plan) string {
+	if p.topSort == sortWholeJoin || hintComment.MatchString(stmt) {
+		return ""
 	}
-	return pol.decide(p, "")
+	blanked, _, _, _ := scrub(stmt)
+	m := joinLimit.FindStringSubmatch(blanked)
+	if m == nil || unboundedWork.MatchString(blanked) || len(anyLimit.FindAllStringIndex(blanked, 2)) > 1 {
+		return ""
+	}
+	var total int64
+	for _, part := range m[1:] {
+		switch part {
+		case "":
+		case "?":
+			return "LIMIT ? with no sort over the join can stop it early, by a bound not known here: the rows read across it are not counted"
+		default:
+			n, err := strconv.ParseInt(part, 10, 64)
+			if err != nil || n >= pol.ScanRows || total+n >= pol.ScanRows {
+				return ""
+			}
+			total += n
+		}
+	}
+	if p.topSort == sortFirstTable {
+		if p.sortedFirstRows+total >= pol.ScanRows {
+			return ""
+		}
+		return fmt.Sprintf("%s rows sorted, then LIMIT %d stops the join early: the rows read across it are not counted", groupDigits(p.sortedFirstRows), total)
+	}
+	return fmt.Sprintf("LIMIT %d with no sort over the join can stop it early: the rows read across it are not counted", total)
 }
 
 // DefaultPolicy: 10,000 cost units (a point lookup is about 1; a full scan

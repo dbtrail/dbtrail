@@ -39,7 +39,7 @@ func TestDecideStatement_acrossServers(t *testing.T) {
 		{"order_by_pk_limit2", "SELECT id FROM orders ORDER BY id DESC LIMIT 2", toMySQL, RuleBoundedLimit, toMySQL, RuleBoundedLimit},
 		{"order_by_filesort_limit20", "SELECT id, total FROM orders ORDER BY total DESC LIMIT 20", toCopy, RuleCost, toCopy, RuleScan},
 		{"order_by_pk_limit2_filtered", "SELECT id FROM orders WHERE note = 'nope' ORDER BY id LIMIT 2", toCopy, RuleCost, toMySQL, RuleCheap},
-		{"order_by_pk_limit2_join_filtered", "SELECT o.id FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.name = 'nope' ORDER BY o.id LIMIT 2", toCopy, RuleCost, toCopy, RuleJoinRows},
+		{"order_by_pk_limit2_join_filtered", "SELECT o.id FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.name = 'nope' ORDER BY o.id LIMIT 2", toCopy, RuleCost, toMySQL, RuleCheap},
 		{"impossible_where", "SELECT * FROM orders WHERE 1 = 0", toMySQL, RuleTrivial, toMySQL, RuleTrivial},
 		{"no_matching_const", "SELECT * FROM orders WHERE id = -1", toMySQL, RuleTrivial, toMySQL, RuleTrivial},
 		{"no_tables", "SELECT 1 + 1", toMySQL, RuleTrivial, toMySQL, RuleTrivial},
@@ -127,7 +127,8 @@ func TestParsePlan_mariaDB(t *testing.T) {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
 		got.scans, got.conditions, got.costInfo = false, false, false
-		got.RowsRead, got.Joined, got.RowsReadUnknown = 0, false, "" // joinrows_test.go
+		got.RowsRead, got.Joined, got.RowsReadUnknown = 0, false, ""
+		got.topSort, got.sortedFirstRows = 0, 0 // joinrows_test.go
 		if got != tc.want {
 			t.Errorf("%s:\n  got  %+v\n  want %+v", tc.name, got, tc.want)
 		}
