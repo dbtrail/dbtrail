@@ -383,7 +383,7 @@ func (h *Handler) runPreparedOnCopy(st *preparedStmt, args []any, db, reason str
 	if err != nil {
 		return nil, err
 	}
-	res, err := h.runFreeSQLRouted(db, text, readrouter.Shape(st.query), reason, unchangedWithin)
+	res, err := h.runFreeSQLRouted(db, text, readrouter.ShapeOf(st.query), reason, unchangedWithin)
 	if err != nil {
 		return nil, err
 	}

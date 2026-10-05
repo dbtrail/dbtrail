@@ -267,7 +267,7 @@ func TestSQLStrictRefusalFor_caseTwinTables(t *testing.T) {
 	} {
 		narrowed := in
 		narrowed.OnlyViews = sqlWantedViews(in, c.refs)
-		got := sqlStrictRefusalFor(in, narrowed, c.refs, c.stmt, "")
+		got := sqlStrictRefusalFor(in, narrowed, c.refs, c.stmt, nil)
 		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
 			t.Errorf("%s: refusal %q, want one saying %q", c.stmt, got, c.want)
 		}

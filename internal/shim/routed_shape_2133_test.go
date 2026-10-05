@@ -20,8 +20,8 @@ func TestRouter_handsTheCopyTheStatementsShape(t *testing.T) {
 	if _, err := h.HandleQuery(text); err != nil {
 		t.Fatal(err)
 	}
-	if want := readrouter.Shape(text); f.calls != 1 || f.gotSess.Shape != want || want != `SELECT "created_on" + 1, '' FROM orders  ` {
-		t.Errorf("text: copy calls = %d, shape = %q; want one call with %q", f.calls, f.gotSess.Shape, want)
+	if want := readrouter.ShapeOf(text); f.calls != 1 || f.gotSess.Types != want || want != `SELECT "created_on" + 1, '' FROM orders  ` {
+		t.Errorf("text: copy calls = %d, shape = %q; want one call with %q", f.calls, f.gotSess.Types, want)
 	}
 
 	const template = "SELECT `created_on` + ? FROM orders WHERE id > ?"
@@ -34,8 +34,8 @@ func TestRouter_handsTheCopyTheStatementsShape(t *testing.T) {
 	}
 	// The template's shape, with its placeholders: the arguments are not in
 	// it, so a number bound next to a date column still reads as arithmetic.
-	if want := readrouter.Shape(template); f.calls != 2 || f.gotSess.Shape != want || want != `SELECT "created_on" + ? FROM orders WHERE id > ?` {
-		t.Errorf("prepared: copy calls = %d, shape = %q; want a second call with %q", f.calls, f.gotSess.Shape, want)
+	if want := readrouter.ShapeOf(template); f.calls != 2 || f.gotSess.Types != want || want != `SELECT "created_on" + ? FROM orders WHERE id > ?` {
+		t.Errorf("prepared: copy calls = %d, shape = %q; want a second call with %q", f.calls, f.gotSess.Types, want)
 	}
 
 	// A port with no routing asks for nothing.
@@ -45,7 +45,7 @@ func TestRouter_handsTheCopyTheStatementsShape(t *testing.T) {
 	if _, err := h.HandleQuery("SELECT created_on + 1 FROM orders"); err != nil {
 		t.Fatal(err)
 	}
-	if plain.calls != 1 || plain.gotSess.Shape != "" || plain.gotSess.StrictStar {
+	if plain.calls != 1 || plain.gotSess.Types != nil || plain.gotSess.StrictStar {
 		t.Errorf("no router: copy calls = %d, session = %+v; want one call with no shape", plain.calls, plain.gotSess)
 	}
 }

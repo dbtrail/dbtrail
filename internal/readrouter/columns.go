@@ -12,6 +12,19 @@ import (
 // built on.
 func Shape(stmt string) string { return scan(stmt).blankedCopy }
 
+// StatementShape is a statement's Shape, kept to be asked about the columns
+// of the tables the statement reads once those are known
+// (sqlsandbox.Session.Types).
+type StatementShape string
+
+// ShapeOf is Shape as a StatementShape.
+func ShapeOf(stmt string) StatementShape { return StatementShape(Shape(stmt)) }
+
+// ColumnVeto is ColumnVeto over this shape.
+func (s StatementShape) ColumnVeto(dates, whole []string) string {
+	return ColumnVeto(string(s), dates, whole)
+}
+
 // ColumnVeto says why the copy must not answer a statement because of the
 // TYPE of a column it names, or "" when no column's type is in the way
 // (#2133). shape is Shape of the statement as the client sent it (of the

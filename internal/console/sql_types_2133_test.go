@@ -31,7 +31,7 @@ func TestSQL_realWorkerDateColumnArithmetic_2133(t *testing.T) {
 	writeSQLStarTable(t, f.root, "plain", "CREATE TABLE `plain` (\n  `id` int NOT NULL,\n  `created_on` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n", []string{"1", "7"})
 	ctx := context.Background()
 	strict := func(stmt string) sqlsandbox.Session {
-		return sqlsandbox.Session{StrictStar: true, Shape: readrouter.Shape(stmt)}
+		return sqlsandbox.Session{StrictStar: true, Types: readrouter.ShapeOf(stmt)}
 	}
 
 	// Not asked for MySQL's answer, the copy gives its own: a date.
@@ -110,7 +110,7 @@ func TestSQLTypesRefusalFor(t *testing.T) {
 		{"SELECT id + 1 FROM plain", ""},
 		{"SELECT created_on FROM orders", ""},
 	} {
-		got := sqlTypesRefusalFor(in, readrouter.Shape(c.stmt))
+		got := sqlTypesRefusalFor(in, readrouter.ShapeOf(c.stmt))
 		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
 			t.Errorf("%s: refusal %q, want one naming %q", c.stmt, got, c.want)
 		}
@@ -118,10 +118,10 @@ func TestSQLTypesRefusalFor(t *testing.T) {
 	// Only the tables the statement reads are asked.
 	narrowed := in
 	narrowed.OnlyViews = sqlWantedViews(in, sqlsandbox.Refs{Tables: []sqlsandbox.TableRef{{Schema: "shop", Name: "plain"}}})
-	if got := sqlTypesRefusalFor(narrowed, readrouter.Shape("SELECT created_on + 1 FROM plain")); got != "" {
+	if got := sqlTypesRefusalFor(narrowed, readrouter.ShapeOf("SELECT created_on + 1 FROM plain")); got != "" {
 		t.Errorf("a statement that reads only plain: %q, want none", got)
 	}
-	if got := sqlStrictRefusalFor(in, in, sqlsandbox.Refs{}, "SELECT created_on + 1 FROM orders", readrouter.Shape("SELECT created_on + 1 FROM orders")); !strings.Contains(got, "shop.orders") {
+	if got := sqlStrictRefusalFor(in, in, sqlsandbox.Refs{}, "SELECT created_on + 1 FROM orders", readrouter.ShapeOf("SELECT created_on + 1 FROM orders")); !strings.Contains(got, "shop.orders") {
 		t.Errorf("sqlStrictRefusalFor does not ask the types: %q", got)
 	}
 }
