@@ -270,6 +270,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `cte_max_recursion_depth` with an error and MariaDB cuts it at
     `max_recursive_iterations`, where the copy runs it to the end.
 ### Fixed
+- **Snapshots: an update no longer leaves out the changes that reached the
+  index late** (#2138). An update of a snapshot continues from the exact
+  binlog position the previous one stopped at, and to avoid reading the whole
+  index it also started its scan at a time: the time the previous snapshot
+  was written, less one to two hours. That time comes from the clock of the
+  machine that wrote the snapshot. The index files each change under the time
+  its statement ran on the source. So when the index received changes later
+  than they ran, they were after the position and before that time, the scan
+  never reached them, and every later snapshot was missing them with no error
+  anywhere. Reproduced with the capture 3, 5 and 26 hours behind when an
+  update ran (the daemon back after an outage and a scheduled update firing
+  while it caught up), with a table written again, a table kept with a pair
+  of changes beside it and a table carried forward unchanged, and on the
+  first update after a full snapshot when the source is a delayed replica.
+  The scan now reads where to start from the index: it looks at the newest
+  change of each hourly partition older than that time, and when one comes
+  at or after the snapshot's position it starts at the table's oldest change
+  there. The start only ever moves earlier. The same read is behind `verify`,
+  the MySQL port's `_snapshot` tables, point-in-time restore of a row and
+  `export iceberg`, which started from a snapshot's time the same way.
+  - **Cost**, measured on MySQL 8.4.9 with 1.5 million changes over 720
+    hourly partitions: about 100 ms once per update for the look at every
+    partition, nothing more per table when no change is late, and 1 ms per
+    table when 26 partitions hold late ones. Reading a table with no time
+    bound at all, the alternative, took 90 ms for a table whose bounded read
+    takes 10 ms, and grows with the size of the index. The other readers
+    above take the 100 ms on each read.
+  - **Snapshots already written.** Nothing has to be converted: an update
+    over an existing snapshot reads its start the new way. What an earlier
+    update already left out stays out, because the snapshots after it start
+    past those changes. Only a snapshot updated while the capture was more
+    than an hour or two behind is affected. `bintrail verify` shows it the
+    next time it compares the snapshots with a read of the database: the
+    table reports `mismatch`. The remedy is a new full snapshot of the
+    source.
+  - **Two limits.** While `bintrail index` adds binlog files to an index
+    that a stream also writes, the newest change of a partition says nothing
+    about the rest, so an update of a snapshot older than that run looks in
+    every older partition (slower, never less). A change whose hour was
+    rotated out of the index into an archive before the update ran is found
+    only when it falls inside the old time bound, as before.
+  - If the index cannot be read for this, the update stops and publishes
+    nothing, also under `--allow-gaps`. A start that moved earlier can also
+    reach an hour that was rotated out without an archive; the update then
+    refuses with the capture gap error instead of skipping that hour.
 - **A table with more than a million changed rows in one update is no longer
   written again in full** (#2126). With table deltas on, an update keeps the
   changed rows of each table in memory up to a limit (1,000,000 per table in
