@@ -182,7 +182,7 @@ func TestVeto_dateArithmetic(t *testing.T) {
 		"SELECT YEAR(DATE '2026-01-01') + 1":        vetoDateArithmetic,
 		"SELECT MONTH(DATE(created_on)) - 1 FROM t": vetoDateArithmetic,
 		"SELECT INTERVAL 1 DAY + DATE '2026-01-01'": vetoDateArithmetic,
-		// A date and an interval: a date on both.
+		// A date and an interval: the same day on both.
 		"SELECT DATE '2026-01-01' + INTERVAL 1 DAY":                                    "",
 		"SELECT DATE '2026-01-01' - interval 1 month":                                  "",
 		"SELECT DATE '2026-01-01'+INTERVAL 1 DAY":                                      "",

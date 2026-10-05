@@ -631,7 +631,34 @@ What this is and is not:
   `UNION`, `INTERSECT` and `EXCEPT` when they remove duplicates (the copy
   compares the rows by bytes there, so `SELECT 'a' UNION SELECT 'A'` is one
   row on MySQL and two on the copy; `UNION ALL` is not kept back),
-  variables, ...). The
+  variables, ...). Four more shapes are kept on MySQL, for text and
+  prepared statements alike; each was measured on MySQL 8.4 and MariaDB
+  11.4 against the copy:
+  - a word that starts with a digit and is not a number. `0x10` and `0b101`
+    are a hexadecimal and a bit literal on MySQL, and `2fa` or `1_000` can
+    be the name of a column; the copy reads the digits as a number and the
+    rest as its alias, so `SELECT 0x10` is `0` in a column named `x10`
+    there and `SELECT 2fa FROM users` is the number 2 in a column named
+    `fa`. Numbers (`10`, `1.5`, `1e5`, `1e-5`) and the same name in
+    backticks (`` `2fa` ``) are not kept back;
+  - `x`, `b` or `e` written right against a string: `x'41'` is a
+    hexadecimal string and `b'1'` a bit string on MySQL, the texts `x41`
+    and `b1` on the copy, and `e'x'` is the column `e` under the alias `x`
+    on MySQL and an escaped string on the copy;
+  - `~`: bitwise NOT over 64 unsigned bits on MySQL (`~1` is
+    18446744073709551614), `-2` on the copy, where between two operands it
+    is also a regular expression match;
+  - a `+` or a `-` next to something the statement itself says is a date:
+    `DATE '...'`, `TIMESTAMP '...'`, `DATE(...)`, `CAST(... AS DATE)` or
+    `CAST(... AS DATETIME)`, with or without parentheses around it. MySQL
+    turns the date into the number its digits spell (`DATE '2026-01-01' +
+    1` is 20260102, and `DATE '2026-02-01' - DATE '2026-01-31'` is 70); the
+    copy answers the date `2026-01-02`, one day, or an interval. A date
+    plus or minus `INTERVAL` is not kept back. Neither is the same
+    arithmetic on a column, which the statement's text does not show: see
+    "Arithmetic on a date column" below.
+
+  The
   copy itself compares text close to the way MySQL's default collation
   does: `'Paid'` and `'paid'`, `'café'` and `'cafe'` are equal in `WHERE`,
   `GROUP BY`, `SELECT DISTINCT`, `IN` and `ORDER BY`, and NULLs sort first
@@ -765,6 +792,26 @@ What this is and is not:
     integer branch prints the integer rows as `4.00` on the copy and as
     `4` on MySQL 8.4, which declares the column with two decimals and does
     not pad them. MariaDB 11.4 prints `4.00`, as the copy does.
+  - **Arithmetic on a date column.** `created_on + 1` over a `DATE`
+    column is the number 20260102 on MySQL and the date `2026-01-02` on
+    the copy; `created_on + 0` is 20260101 and `2026-01-01`; a `DATE`
+    column minus a date is the difference of two such numbers on MySQL
+    (70 from January 31 to February 1) and a count of days on the copy
+    (1); `AVG` of a `DATE` column is a number on MySQL and a date and time
+    on the copy. The router reads the statement's text and the plan
+    `EXPLAIN` returns, and neither says what type a column or an
+    expression has, so only the spellings that name the type themselves
+    (`DATE '...'`, `DATE(...)`, `CAST(... AS DATE)`) are kept on MySQL.
+    Use `DATEDIFF`, `TO_DAYS` or `+ INTERVAL n DAY`, which mean one thing.
+  - **A `DATE` plus or minus `INTERVAL`, selected.** `created_on + INTERVAL
+    1 DAY` over a `DATE` column is the date `2026-01-02` on MySQL and the
+    date and time `2026-01-02 00:00:00` on the copy. The same day: inside a
+    `WHERE` it compares the same on both.
+  - **`&`, `|`, `>>` and the `BIT_` functions on a negative number.** MySQL
+    computes them over 64 unsigned bits and the copy over signed ones:
+    `-1 | 0` is 18446744073709551615 on MySQL and `-1` on the copy,
+    `BIT_COUNT(-1)` is 64 and 32. On the numbers measured that are not
+    negative they agree.
 
   If a workload depends on one of these, keep the copy for the reads where
   they do not matter, or leave routing off.

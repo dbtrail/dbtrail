@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **Read routing: hexadecimal and bit literals, `~` and date arithmetic
+  stay on MySQL** (#2122). Four shapes passed `EXPLAIN` on the source and
+  were answered by the copy with another value and no error. Each now keeps
+  the statement on MySQL, for text and prepared statements: a word that
+  starts with a digit and is not a number (`SELECT 0x10` was the byte 0x10
+  on MySQL and `0` in a column named `x10` on the copy; `0b101` and a
+  column named `2fa` likewise); `x`, `b` or `e` written right against a
+  string (`x'41'` and `b'1'` were the texts `x41` and `b1` on the copy);
+  `~` (`~1` is 18446744073709551614 on MySQL and was `-2` on the copy); and
+  a `+` or `-` next to `DATE '...'`, `TIMESTAMP '...'`, `DATE(...)` or a
+  `CAST` to `DATE` or `DATETIME` (`DATE '2026-01-01' + 1` is 20260102 on
+  MySQL and was the date `2026-01-02` on the copy). A date plus or minus
+  `INTERVAL` still goes to the copy. Not covered, because the statement's
+  text does not show it: the same arithmetic on a `DATE` column
+  (`created_on + 1`), which is listed with the other known differences in
+  [Time-travel SQL](time-travel-sql.md).
 - **Read routing: statements with backtick-quoted names can be served by
   the copy** (#2081). Most ORMs and drivers quote every name with
   backticks, which the copy does not read, so those statements were always

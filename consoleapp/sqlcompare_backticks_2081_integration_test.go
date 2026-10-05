@@ -415,12 +415,13 @@ func backtickFixtures(db string, dollarNames bool) []backtickFixture {
 		kept("SELECT `created_on` - DATE '2025-12-31' FROM `orders` WHERE `id` = 1", diff, "next to + or -", "20260101 - 20251231 = 8870 on MySQL; one day on the copy"),
 		kept("SELECT CAST(`created_on` AS DATE) + 1 FROM `orders` WHERE `id` = 1", diff, "next to + or -", "a CAST to DATE says what it is; 20260102 on MySQL, 2026-01-02 on the copy"),
 		kept("SELECT TIMESTAMP '2026-01-01 10:00:00' - TIMESTAMP '2026-01-01 09:00:00'", diff, "next to + or -", "10000 on MySQL; an interval of one hour on the copy"),
-		same("SELECT `id` FROM `orders` WHERE `created_on` >= DATE '2026-01-05' - INTERVAL 1 DAY ORDER BY `id`", "a date minus INTERVAL is a date on both: not kept back"),
+		same("SELECT `id` FROM `orders` WHERE `created_on` >= DATE '2026-01-05' - INTERVAL 1 DAY ORDER BY `id`", "a date minus INTERVAL is the same day on both: not kept back"),
 		// What the text does not show (#2122): the same arithmetic on a column
 		// is not vetoed, because nothing the router reads says the column is a
 		// date. A known difference, listed in docs/time-travel-sql.md.
 		{stmt: "SELECT `created_on` + 1 FROM `orders` WHERE `id` = 1", verdict: diff, why: "a DATE column plus a number: 20260102 on MySQL, 2026-01-02 on the copy; not seen in the text"},
 		{stmt: "SELECT `created_on` + INTERVAL 1 DAY FROM `orders` WHERE `id` = 1", verdict: diff, why: "a DATE on MySQL (2026-01-02), a date and time on the copy (2026-01-02 00:00:00)"},
+		{stmt: "SELECT -1 | 0", verdict: diff, why: "bit operators are unsigned on MySQL (18446744073709551615) and signed on the copy (-1); they agree on numbers that are not negative, and are not vetoed"},
 		// A NUL byte is not a veto: no statement was found that both answer
 		// differently. Inside a comment the copy stops reading there.
 		{stmt: "SELECT 1 /* \x00 */ + 1", verdict: noc, why: "2 on MySQL; the copy reads an unterminated comment"},

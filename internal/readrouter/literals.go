@@ -122,7 +122,9 @@ var (
 // number its digits spell (DATE '2026-01-01' + 1 is 20260102, and one date
 // minus another is the difference of two such numbers); the copy answers a
 // date (2026-01-02), a count of days or an interval. A date plus or minus
-// INTERVAL is a date on both and is left alone.
+// INTERVAL is the same day on both and is left alone (selected, MySQL shows
+// a date and the copy a date and time: a difference listed in the docs, and
+// one the text cannot show for a column either).
 //
 // It is the text's shape and no more. A column, or an expression of one
 // (created_on + 1, max(d) - min(d)), is not seen: nothing in the text or in
