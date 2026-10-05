@@ -811,7 +811,67 @@ What this is and is not:
   `UNION`, `INTERSECT` and `EXCEPT` when they remove duplicates (the copy
   compares the rows by bytes there, so `SELECT 'a' UNION SELECT 'A'` is one
   row on MySQL and two on the copy; `UNION ALL` is not kept back),
-  variables, ...). The
+  variables, ...). Five more shapes are kept on MySQL, for text and
+  prepared statements alike; each was measured on MySQL 8.4 and MariaDB
+  11.4 against the copy:
+  - a word that starts with a digit and is not a number. `0x10` and `0b101`
+    are a hexadecimal and a bit literal on MySQL, and `2fa` or `1_000` can
+    be the name of a column; the copy reads the digits as a number and the
+    rest as its alias, so `SELECT 0x10` is `0` in a column named `x10`
+    there and `SELECT 2fa FROM users` is the number 2 in a column named
+    `fa`. The same goes for an underscore inside a number, which the copy
+    takes for a digit separator (`1.5_5` is 1.5 under the alias `_5` on
+    MySQL and 1.55 on the copy), and for a decimal that ends in a bare `e`
+    (`1.5e`: MySQL refuses it, the copy answers 1.5 under the alias `e`).
+    Numbers (`10`, `1.5`, `1e5`, `1e-5`) and the same name in backticks
+    (`` `2fa` ``) are not kept back;
+  - `x`, `b` or `e` written right against a string: `x'41'` is a
+    hexadecimal string and `b'1'` a bit string on MySQL, the texts `x41`
+    and `b1` on the copy, and `e'x'` is the column `e` under the alias `x`
+    on MySQL and an escaped string on the copy;
+  - an `INTERVAL` whose amount the two sides read differently, in three
+    spellings. A quoted amount that is not a whole number: MySQL cuts it at
+    the first character that is not a digit and the copy reads a number,
+    so `INTERVAL '1e2' DAY` is one day on MySQL and a hundred on the copy
+    (`'1.5'`, which both cut to one, is kept back with the rest; `'1'`,
+    `'-2'` and `' 12 '` are not). An amount in parentheses, or a
+    placeholder: MySQL rounds it and the copy cuts it, so `d + INTERVAL
+    (1.5) DAY` is two days later on MySQL and one on the copy, and a
+    prepared `INTERVAL ? DAY` bound to the text `'1.5'` is two days on
+    MySQL 8.4 and one on the copy. So a prepared statement with `INTERVAL
+    ?` always stays on MySQL. And a quoted amount with a two-part unit
+    (`INTERVAL '90' MINUTE_SECOND`): the copy has no two-part units and
+    reads the unit as the column's alias (`d + INTERVAL '1:30'
+    MINUTE_SECOND` is 00:01:30 on MySQL and 01:30:00 on the copy). A bare
+    number with a one-word unit (`INTERVAL 1 DAY`, `INTERVAL 7 DAY`) is
+    not kept back;
+  - `~`: bitwise NOT over 64 unsigned bits on MySQL (`~1` is
+    18446744073709551614), `-2` on the copy, where between two operands it
+    is also a regular expression match;
+  - a `+` or a `-` next to something the statement itself says is a date
+    or a time: `DATE '...'`, `TIMESTAMP '...'`, `TIME '...'`, `DATE(...)`,
+    or a `CAST` to `DATE`, `DATETIME` or `TIME`, with or without
+    parentheses around it. MySQL
+    turns the date into the number its digits spell (`DATE '2026-01-01' +
+    1` is 20260102, and `DATE '2026-02-01' - DATE '2026-01-31'` is 70); the
+    copy answers the date `2026-01-02`, one day, or an interval. The date
+    may sit inside something that is added to as a whole: `GREATEST(DATE
+    '...', d) + 1`, `(SELECT DATE(ts) FROM t) + 1`, `CASE WHEN a THEN
+    DATE(ts) END + 1`, `MAX(DATE(ts)) OVER () - 1`. So a `+` or `-` next to
+    any pair of parentheses or any `CASE ... END` that holds such a date
+    keeps the statement on MySQL too, and so does `AVG` over one (`AVG` of
+    a date or a time is a number on MySQL, 100000.0000 for ten o'clock,
+    and a date and time or a time on the copy). That
+    rule does not know what the group returns, so it also keeps back
+    statements both sides would answer alike, such as `SUM(IF(d >= DATE
+    '...', amount, 0)) - 1` or `YEAR(DATE '...') + 1`. A `+` or `-`
+    elsewhere in the statement does not count (`WHERE d >= DATE
+    '2026-01-01' AND qty + 1 > 2` goes to the copy), and a date plus or
+    minus `INTERVAL` is not kept back. Neither is the same arithmetic on a
+    column, which the statement's text does not show: see "Arithmetic on a
+    date column" below.
+
+  The
   copy itself compares text close to the way MySQL's default collation
   does: `'Paid'` and `'paid'`, `'café'` and `'cafe'` are equal in `WHERE`,
   `GROUP BY`, `SELECT DISTINCT`, `IN` and `ORDER BY`, and NULLs sort first
@@ -945,6 +1005,28 @@ What this is and is not:
     integer branch prints the integer rows as `4.00` on the copy and as
     `4` on MySQL 8.4, which declares the column with two decimals and does
     not pad them. MariaDB 11.4 prints `4.00`, as the copy does.
+  - **Arithmetic on a date column.** `created_on + 1` over a `DATE`
+    column is the number 20260102 on MySQL and the date `2026-01-02` on
+    the copy; `created_on + 0` is 20260101 and `2026-01-01`; a `DATE`
+    column minus a date is the difference of two such numbers on MySQL
+    (70 from January 31 to February 1) and a count of days on the copy
+    (1); `AVG` of a `DATE` column is a number on MySQL and a date and time
+    on the copy. The router reads the statement's text and the plan
+    `EXPLAIN` returns, and neither says what type a column or an
+    expression has, so only the spellings that name the type themselves
+    (`DATE '...'`, `DATE(...)`, `CAST(... AS DATE)`) are kept on MySQL.
+    To count the days between two dates write `DATEDIFF`, which MySQL
+    always answers.
+  - **A `DATE` plus or minus `INTERVAL`, selected.** `created_on + INTERVAL
+    1 DAY` over a `DATE` column is the date `2026-01-02` on MySQL and the
+    date and time `2026-01-02 00:00:00` on the copy, and so is
+    `DATE_ADD(created_on, INTERVAL 1 DAY)`. The same day: inside a `WHERE`
+    it compares the same on both.
+  - **`&`, `|`, `>>` and the `BIT_` functions on a negative number.** MySQL
+    computes them over 64 unsigned bits and the copy over signed ones:
+    `-1 | 0` is 18446744073709551615 on MySQL and `-1` on the copy,
+    `BIT_COUNT(-1)` is 64 and 32. On the numbers measured that are not
+    negative they agree.
 
   If a workload depends on one of these, keep the copy for the reads where
   they do not matter, or leave routing off.
