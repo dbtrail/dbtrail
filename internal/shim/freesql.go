@@ -166,7 +166,8 @@ const (
 const RouteReasonPinned RouteReason = "connection_pinned"
 
 // RouteReasonCopyColumnsDiffer: the copy declined a star or a NATURAL JOIN
-// over a table whose columns there are not MySQL's (#2111). A decision, not a
+// over a table whose columns there are not MySQL's (#2111), or a statement
+// that names a column the copy does not hold (#2123). A decision, not a
 // fault, which is why it is not counted under RouteReasonCopyRefused.
 const RouteReasonCopyColumnsDiffer RouteReason = "copy_columns_differ"
 
@@ -327,9 +328,10 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	var differ *sqlsandbox.ColumnsDifferError
 	if errors.As(err, &differ) {
 		// The copy works; it declined this statement because its answer would
-		// not have MySQL's columns (#2111). Its own reason and its own
+		// not have MySQL's columns (#2111), or one of its names could mean
+		// something else there (#2123). Its own reason and its own
 		// warning, so it does not read as a fault nor use up a fault's.
-		h.routeWarn("columns", "read routing: the copy's columns are not MySQL's for a statement with * or NATURAL JOIN, forwarded to mysql", err)
+		h.routeWarn("columns", "read routing: the copy's columns are not MySQL's for a statement (a star, a NATURAL JOIN, or the name of a column the copy does not hold), forwarded to mysql", err)
 		return ops.forward(RouteReasonCopyColumnsDiffer, "copy's columns differ: "+differ.Reason)
 	}
 	if err != nil {

@@ -341,8 +341,12 @@ func columnsDiffer(src, cp []string) string {
 }
 
 // plainName is a column name that can only be a column or an alias: a bare
-// identifier, not an expression's text.
-var plainName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
+// identifier, not an expression's text. Letters and digits of any script
+// count (año, niño): limited to ASCII, two different names with a letter
+// outside it were left to the cells and read as equal when no cell disagreed
+// (#2123). A name with any other character stays out, though a quoted column
+// name can hold one: total-a is also what MySQL calls the expression total-a.
+var plainName = regexp.MustCompile(`^[\p{L}_][\p{L}\p{N}_$]*$`)
 
 // multisetDiff returns the rows only in a (missing from b) and only in b.
 func multisetDiff(a, b [][]*string) (onlyA, onlyB [][]*string) {

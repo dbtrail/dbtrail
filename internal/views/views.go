@@ -131,6 +131,13 @@ type BaselineTable struct {
 	// set of columns from the one the file holds, or "" when it returns the
 	// same set (baseline.TableFooter.StarDiffers). Set with SchemaKnown.
 	StarDiffers string
+	// NotHeld names the columns a statement on MySQL can name and the file
+	// does not hold (its generated columns, invisible or not), and
+	// NotHeldUnread says that list may be short of one
+	// (baseline.TableFooter.NotHeld). Set with SchemaKnown. NamesUnlikeMySQL
+	// is the reader.
+	NotHeld       []string
+	NotHeldUnread bool
 	// DeltaReserved says the table has a column under a name a table delta
 	// reserves (baseline.TableFooter says why). Set with SchemaKnown.
 	DeltaReserved bool

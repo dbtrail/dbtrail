@@ -61,6 +61,8 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 		in.Baselines[i].DeltaReserved = f.DeltaReserved
 		in.Baselines[i].Columns = f.Columns
 		in.Baselines[i].StarDiffers = f.StarDiffers
+		in.Baselines[i].NotHeld = f.NotHeld
+		in.Baselines[i].NotHeldUnread = f.NotHeldUnread
 		in.Baselines[i].SchemaKnown = true
 	}
 }

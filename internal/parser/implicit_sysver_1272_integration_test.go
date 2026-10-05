@@ -120,14 +120,15 @@ func TestParseFile_implicitSystemVersioning_mariadb(t *testing.T) {
 	}
 }
 
-// TestTakeSnapshot_pkLessVersionedTableRefused pins the validation-bypass fix
+// TestTakeSnapshot_pkLessVersionedTableRefused_mariadb pins the validation-bypass fix
 // against a real MariaDB: `CREATE TABLE t (x INT) WITH SYSTEM VERSIONING` is
 // legal and PK-less, and MariaDB reports it as TABLE_TYPE 'SYSTEM VERSIONED'
 // — before the widened scan it bypassed the no-PK validation entirely, and
 // the synthesis would have fabricated a one-column generated PK whose
 // sentinel row_end collapses every live row onto one pk_values. Strict
-// TakeSnapshot must refuse it like any other PK-less table.
-func TestTakeSnapshot_pkLessVersionedTableRefused(t *testing.T) {
+// TakeSnapshot must refuse it like any other PK-less table. The name ends in
+// _mariadb because the MariaDB job picks its tests by name (#2137).
+func TestTakeSnapshot_pkLessVersionedTableRefused_mariadb(t *testing.T) {
 	sourceDB, sourceName := testutil.CreateTestMariaDB(t)
 	indexDB, _ := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
