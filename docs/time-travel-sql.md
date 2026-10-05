@@ -410,9 +410,10 @@ What this is and is not:
   included, and its decimal columns read as text. That is every table of a
   PostgreSQL source, a MySQL or MariaDB table whose snapshot was written
   by a version before 0.5, and a file whose footer could not be read at
-  that moment. The daemon's log names each such table once (`this table's
-  snapshot file carries no CREATE TABLE`) and counts the files it could
-  not read; a new full snapshot of a MySQL or MariaDB source records the
+  that moment. The daemon's log says so once per table (`this table's
+  snapshot file carries no CREATE TABLE`), naming the first ten at warning
+  level and the rest in the debug log, and counts the files it could not
+  read; a new full snapshot of a MySQL or MariaDB source records the
   definition, and an unreadable file is tried again within minutes; and **`AVG` and `/` return a double** on the copy, where MySQL
   returns a `DECIMAL` with four decimals more than the operand has (for
   `DECIMAL` and integer operands; a `DOUBLE` operand gives a double on

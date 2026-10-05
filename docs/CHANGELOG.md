@@ -56,7 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collation ignores trailing spaces on MySQL only. A table whose snapshot
   file carries no `CREATE TABLE` (a PostgreSQL source, a snapshot from
   before 0.5) or whose footer cannot be read keeps the old behavior, and
-  that is now logged: once per table, by name, with what it costs. A footer
+  that is now logged with what it costs: once per table, the first ten by
+  name at warning level and the rest in the debug log. A footer
   that could not be read is no longer remembered until the daemon restarts;
   it is read again within five minutes.
 - **SQL on the copy: division by zero is `NULL`, as on MySQL** (#2083).
