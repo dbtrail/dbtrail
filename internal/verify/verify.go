@@ -229,7 +229,7 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	// below that position and the reconstruction would miss it, reading as a
 	// mismatch with no cause. The refresh's check (#2160) names the cause
 	// instead (#2174). A snapshot without an event mark: no check.
-	if err := reconstruct.CheckNumberingFrom(ctx, cfg.IndexDB, sincePos, eventMark, time.Time{}); err != nil {
+	if err := reconstruct.CheckNumberingFrom(ctx, cfg.IndexDB, sincePos, eventMark, reconstruct.ReadWindow{Notice: renumberNotices.To(nil)}); err != nil {
 		if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
 			return inconclusive(res, err.Error()), nil
 		}

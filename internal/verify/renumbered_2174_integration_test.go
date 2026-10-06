@@ -47,8 +47,16 @@ type renumberCase struct {
 	startOverLater bool
 	// backfilled leaves a row in index_state, as `bintrail index` does.
 	backfilled bool
+	// otherTable indexes a change of another table in binlog.000001 inside
+	// the window: the numbering started over, this table's read did not.
+	otherTable bool
 	// captureReads, when set, is the server_uuid capture reads now.
 	captureReads string
+	// switchVia records when capture moved to captureReads: "change" (a
+	// bintrail_server_changes row) or "record" (a new bintrail_servers
+	// record); "" records nothing. switchAfter puts it after the window.
+	switchVia   string
+	switchAfter bool
 	// want is the status; refused cases are inconclusive.
 	want Status
 }
@@ -64,14 +72,19 @@ func renumberCases(withoutCheck Status) []renumberCase {
 		{name: "mark, numbering started over after the window", mark: sameServer, startOverLater: true, want: StatusMatch},
 		{name: "mark, backfilled index", mark: sameServer, startOver: true, backfilled: true, want: withoutCheck},
 		{name: "mark names the server, capture reads it", mark: withServer, captureReads: renumberedOldUUID, want: StatusMatch},
-		{name: "mark names the server, capture reads another", mark: withServer, captureReads: renumberedNewUUID, want: StatusInconclusive},
+		{name: "mark names the server, capture reads another, no record of when", mark: withServer, captureReads: renumberedNewUUID, want: StatusInconclusive},
+		{name: "same address, new server inside the window", mark: withServer, captureReads: renumberedNewUUID, switchVia: "change", want: StatusInconclusive},
+		{name: "same address, new server after the window", mark: withServer, captureReads: renumberedNewUUID, switchVia: "change", switchAfter: true, want: StatusMatch},
+		{name: "new address inside the window", mark: withServer, captureReads: renumberedNewUUID, switchVia: "record", want: StatusInconclusive},
+		{name: "new address after the window", mark: withServer, captureReads: renumberedNewUUID, switchVia: "record", switchAfter: true, want: StatusMatch},
+		{name: "numbering started over in another table only", mark: sameServer, otherTable: true, want: StatusMatch},
 	}
 }
 
 // renumberIndex seeds the index side shared by both modes: the orders schema,
 // the mark's own row (event 10, before the snapshot), the change after it
 // (event 20, id 1 a→zzz), and what the case says about backfill and capture.
-func renumberIndex(t *testing.T, db *sql.DB, dbName string, tc renumberCase, hours []time.Time, markAt, changeAt, laterAt time.Time) {
+func renumberIndex(t *testing.T, db *sql.DB, dbName string, tc renumberCase, hours []time.Time, markAt, changeAt, laterAt, windowEnd time.Time) {
 	t.Helper()
 	testutil.InitIndexTables(t, db)
 	if err := indexer.EnsureSchema(db); err != nil {
@@ -103,13 +116,35 @@ func renumberIndex(t *testing.T, db *sql.DB, dbName string, tc renumberCase, hou
 	if tc.startOverLater {
 		insert(30, "binlog.000001", 100, laterAt, "2", "b", "later")
 	}
+	if tc.otherTable {
+		testutil.MustExec(t, db, `INSERT INTO binlog_events
+			(event_id, binlog_file, start_pos, end_pos, event_timestamp, schema_name, table_name, event_type, pk_values, row_before, row_after)
+			VALUES (25, 'binlog.000001', 100, 200, ?, ?, 'other', 2, '1', '{"id":1}', '{"id":1}')`,
+			changeAt.Add(time.Minute).Format("2006-01-02 15:04:05"), dbName)
+	}
 	if tc.backfilled {
 		testutil.MustExec(t, db, `INSERT INTO index_state (binlog_file, file_size, last_position, events_indexed, status, started_at, completed_at)
 			VALUES ('binlog.000005', 1, 150, 1, 'completed', UTC_TIMESTAMP(), UTC_TIMESTAMP())`)
 	}
 	if tc.captureReads != "" {
 		testutil.MustExec(t, db, serverid.DDLBintrailServers)
-		testutil.MustExec(t, db, `INSERT INTO bintrail_servers (bintrail_id, server_uuid, host, port, username) VALUES ('b1', ?, 'db', 3306, 'u')`, tc.captureReads)
+		switchAt := windowEnd.Add(-10 * time.Minute)
+		if tc.switchAfter {
+			switchAt = windowEnd.Add(10 * time.Minute)
+		}
+		created := time.Now()
+		if tc.switchVia == "record" {
+			created = switchAt
+			testutil.MustExec(t, db, `INSERT INTO bintrail_servers (bintrail_id, server_uuid, host, port, username, created_at)
+				VALUES ('b0', ?, 'db-old', 3306, 'u', FROM_UNIXTIME(?))`, renumberedOldUUID, markAt.Add(-time.Hour).Unix())
+		}
+		testutil.MustExec(t, db, `INSERT INTO bintrail_servers (bintrail_id, server_uuid, host, port, username, created_at)
+			VALUES ('b1', ?, 'db', 3306, 'u', FROM_UNIXTIME(?))`, tc.captureReads, created.Unix())
+		if tc.switchVia == "change" {
+			testutil.MustExec(t, db, serverid.DDLBintrailServerChanges)
+			testutil.MustExec(t, db, `INSERT INTO bintrail_server_changes (bintrail_id, field_changed, old_value, new_value, detected_at)
+				VALUES ('b1', 'server_uuid', ?, ?, FROM_UNIXTIME(?))`, renumberedOldUUID, tc.captureReads, switchAt.Unix())
+		}
 	}
 }
 
@@ -186,7 +221,7 @@ func TestVerifyBaselinePair_afterTheBinlogNumberingStartsOver_2174(t *testing.T)
 			db, dbName := testutil.CreateTestDB(t)
 			prevTS := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
 			newTS := prevTS.Add(time.Hour)
-			renumberIndex(t, db, dbName, tc, []time.Time{prevTS.Add(-time.Hour), prevTS, newTS}, prevTS.Add(-5*time.Minute), prevTS.Add(30*time.Minute), newTS.Add(10*time.Minute))
+			renumberIndex(t, db, dbName, tc, []time.Time{prevTS.Add(-time.Hour), prevTS, newTS}, prevTS.Add(-5*time.Minute), prevTS.Add(30*time.Minute), newTS.Add(10*time.Minute), newTS)
 			if tc.captureReads != "" {
 				testutil.MustExec(t, db, `INSERT INTO stream_state (id, mode, binlog_file, binlog_position, last_checkpoint, server_id, bintrail_id)
 					VALUES (1, 'position', 'binlog.000007', 400, UTC_TIMESTAMP(), 1, 'b1')`)
@@ -232,11 +267,12 @@ func TestVerifyTable_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 			db, dbName := testutil.CreateTestDB(t)
 			now := time.Now().UTC()
 			h1 := now.Truncate(time.Hour).Add(-time.Hour)
-			if tc.startOverLater {
-				// Live mode reads up to now: there is no "after the window".
+			if tc.startOverLater || tc.switchAfter || tc.otherTable {
+				// Live mode reads up to now and checks the whole index, as the
+				// refresh does: there is no "after the window".
 				t.Skip("live mode reads up to now")
 			}
-			renumberIndex(t, db, dbName, tc, []time.Time{h1.Add(-time.Hour), h1, h1.Add(time.Hour)}, h1.Add(-5*time.Minute), now.Add(-time.Minute), time.Time{})
+			renumberIndex(t, db, dbName, tc, []time.Time{h1.Add(-time.Hour), h1, h1.Add(time.Hour)}, h1.Add(-5*time.Minute), now.Add(-time.Minute), time.Time{}, now)
 
 			// The source table holds the change.
 			testutil.MustExec(t, db, fmt.Sprintf("CREATE TABLE `%s`.`orders` (`id` INT PRIMARY KEY, `status` VARCHAR(64))", dbName))

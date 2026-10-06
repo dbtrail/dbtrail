@@ -60,15 +60,31 @@ func snapshotAnchor(ctx context.Context, baselinePath string, logger *slog.Logge
 // MySQL refusal. A timeout or cancel during the check is classified the way
 // a fetch's is (a *ResolveError).
 func (h *Handler) checkSnapshotNumbering(ctx context.Context, q TimeTravelQuery, anchor *query.BinlogPos, eventMark string) error {
-	err := reconstruct.CheckNumberingFrom(ctx, h.indexDB, anchor, eventMark, q.AsOf)
+	err := reconstruct.CheckNumberingFrom(ctx, h.indexDB, anchor, eventMark, reconstruct.ReadWindow{
+		Schema: q.Schema, Table: q.Table, Until: q.AsOf, Notice: snapshotNotices.To(h.logger),
+	})
 	if err == nil {
 		return nil
 	}
 	if ctx.Err() != nil {
 		return classifyFetchError(ctx, q.Type, err, h.logger)
 	}
+	if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+		return fmt.Errorf("resolve %s: %w %s", q.Type, err, snapshotRenumberedRemedy)
+	}
 	return fmt.Errorf("resolve %s: %w", q.Type, err)
 }
+
+// snapshotRenumberedRemedy follows the refusal's own "A new full snapshot is
+// needed.": how to take one, and the read that still answers meanwhile, like
+// the neighbouring "no baseline" refusal.
+const snapshotRenumberedRemedy = "Take one (the web interface's full snapshot; a server with a backup schedule takes it by itself; " +
+	"or `bintrail dump` and `bintrail baseline`), or use _flashback for a binlog-only view, which reads by time and is not affected"
+
+// snapshotNotices logs each of the renumbering check's lasting conditions
+// once per process: the check runs on every _snapshot statement, and a
+// handler lives for one connection.
+var snapshotNotices reconstruct.NoticeOnce
 
 // renumberedRefusal maps an ErrBinlogRenumbered refusal to the code the other
 // "this history cannot be read" refusals of _snapshot use (a coverage gap, no

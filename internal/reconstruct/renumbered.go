@@ -75,12 +75,16 @@ func (m EventMark) Encode() string {
 // ParseEventMark reads a footer's mark. "" is no mark; one that does not read
 // is no mark too, said out loud.
 func ParseEventMark(raw string) *EventMark {
+	return parseEventMark(raw, nil)
+}
+
+func parseEventMark(raw string, w *ReadWindow) *EventMark {
 	if raw == "" {
 		return nil
 	}
 	var m EventMark
 	if err := json.Unmarshal([]byte(raw), &m); err != nil || m.ID == 0 || m.File == "" {
-		slog.Warn("baseline footer: unreadable event mark; a binlog numbering that started over is not detected from it",
+		w.notice(slog.LevelWarn, "baseline footer: unreadable event mark; a binlog numbering that started over is not detected from it",
 			"value", raw, "error", err)
 		return nil
 	}
@@ -311,16 +315,12 @@ func startedOverAfter(e indexedEvent, m *EventMark) bool {
 //   - Gone with every older row (rotation dropped its hour): the events after
 //     it are still in order. Checked.
 func CheckNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anchor query.BinlogPos) error {
-	return checkNumberingContinues(ctx, db, m, anchor, time.Time{})
+	return checkNumberingContinues(ctx, db, m, anchor, nil)
 }
 
-// checkNumberingContinues is CheckNumberingContinues for a window that ends at
-// until (zero: now). Only events whose recorded time is at or before until are
-// probed (#2174): a numbering that started over after the window's end leaves
-// the window in one numbering, readable by position. A change recorded at or
-// before until was committed after its statement started, so every change
-// committed inside the window is still probed.
-func checkNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anchor query.BinlogPos, until time.Time) error {
+// checkNumberingContinues is CheckNumberingContinues; w, when it bounds a
+// read (ReadWindow.bounded), narrows the two probes to it.
+func checkNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anchor query.BinlogPos, w *ReadWindow) error {
 	if m == nil {
 		return nil
 	}
@@ -332,24 +332,25 @@ func checkNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 	// the new one: reading the window from that position is right, and the
 	// mark says nothing about it.
 	if BinlogBaseName(anchor.File) != BinlogBaseName(m.File) || sortsBefore(anchor, query.BinlogPos{File: m.File, Pos: m.End}) {
-		slog.Info("the snapshot's event mark is from before its own binlog position's numbering; it is not used",
+		w.notice(slog.LevelInfo, "the snapshot's event mark is from before its own binlog position's numbering; it is not used",
 			"mark", m.Encode(), "anchor", fmt.Sprintf("%s:%d", anchor.File, anchor.Pos))
 		return nil
 	}
 	// Rows `bintrail index` backfilled get ids above the mark with positions
 	// below it, which reads exactly like a numbering that started over.
 	if query.IndexBackfilled(ctx, db) {
-		slog.Warn("`bintrail index` also wrote into this index, so its ids do not follow the binary log; a binlog numbering that started over is not checked",
+		w.notice(slog.LevelWarn, "`bintrail index` also wrote into this index, so its ids do not follow the binary log; a binlog numbering that started over is not checked",
 			"mark", m.Encode())
 		return nil
 	}
 	var file string
 	var end uint64
-	err := db.QueryRowContext(ctx, `SELECT binlog_file, end_pos FROM binlog_events WHERE event_id = ?`, m.ID).Scan(&file, &end)
+	var markAt time.Time
+	err := db.QueryRowContext(ctx, `SELECT binlog_file, end_pos, event_timestamp FROM binlog_events WHERE event_id = ?`, m.ID).Scan(&file, &end, &markAt)
 	switch {
 	case err == nil:
 		if file != m.File || end != m.End {
-			slog.Warn("the event the snapshot's event mark names is now another event (the index was rebuilt?); a binlog numbering that started over is not checked from it",
+			w.notice(slog.LevelWarn, "the event the snapshot's event mark names is now another event (the index was rebuilt?); a binlog numbering that started over is not checked from it",
 				"mark", m.Encode(), "now", fmt.Sprintf("%s:%d", file, end))
 			return nil
 		}
@@ -362,25 +363,25 @@ func checkNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 			return nil
 		}
 		if uint64(oldest.Int64) < m.ID {
-			slog.Warn("the event the snapshot's event mark names was deleted while older ones remain (a restarted stream's cleanup); a binlog numbering that started over is not checked from it",
+			w.notice(slog.LevelWarn, "the event the snapshot's event mark names was deleted while older ones remain (a restarted stream's cleanup); a binlog numbering that started over is not checked from it",
 				"mark", m.Encode())
 			return nil
 		}
 	default:
 		return fmt.Errorf("read the event the snapshot's event mark names: %w", err)
 	}
-	bound, args := "", []any{m.ID}
-	if !until.IsZero() {
-		bound, args = " AND event_timestamp <= ?", append(args, until)
-	}
-	for _, q := range []string{
+	queries, args := []string{
 		`SELECT event_id, binlog_file, end_pos FROM binlog_events
-			WHERE event_id > ? AND binlog_file IS NOT NULL AND end_pos IS NOT NULL` + bound + `
+			WHERE event_id > ? AND binlog_file IS NOT NULL AND end_pos IS NOT NULL
 			ORDER BY event_id ASC LIMIT 1`,
 		`SELECT event_id, binlog_file, end_pos FROM binlog_events
-			WHERE event_id > ? AND binlog_file IS NOT NULL AND end_pos IS NOT NULL` + bound + `
+			WHERE event_id > ? AND binlog_file IS NOT NULL AND end_pos IS NOT NULL
 			ORDER BY event_id DESC LIMIT 1`,
-	} {
+	}, []any{m.ID}
+	if w.bounded() {
+		queries, args = w.probes(m, markAt)
+	}
+	for _, q := range queries {
 		var e indexedEvent
 		err := db.QueryRowContext(ctx, q, args...).Scan(&e.id, &e.file, &e.end)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -416,18 +417,24 @@ func CheckSourceReplaced(ctx context.Context, db *sql.DB, since time.Time) error
 
 // CheckNumberingFrom runs the two checks that read a snapshot's event mark
 // (rawMark, its footer value) against the index, for a window read by
-// position from anchor (nil: the snapshot records none) up to until (zero:
-// now): CheckNumberingContinues, bounded by until, then CheckSameServer. A
-// snapshot without a mark: nil, whatever happened.
+// position from anchor (nil: the snapshot records none): CheckNumberingContinues,
+// then CheckSameServer. A snapshot without a mark: nil, whatever happened.
 // Shared by every reader that starts at a snapshot's position: the refresh,
 // verify and the shim's _snapshot (#2174). CheckSourceReplaced stays with the
 // refresh, which alone also refuses on a snapshot without a mark.
-func CheckNumberingFrom(ctx context.Context, db *sql.DB, anchor *query.BinlogPos, rawMark string, until time.Time) error {
-	m := ParseEventMark(rawMark)
+//
+// w describes the read. A zero w (the refresh, live verify) checks the whole
+// index up to now. A w with Until set (a read that stops in the past: AS OF, a
+// verify pair) checks only what that read can see; see ReadWindow.
+func CheckNumberingFrom(ctx context.Context, db *sql.DB, anchor *query.BinlogPos, rawMark string, w ReadWindow) error {
+	m := parseEventMark(rawMark, &w)
 	if anchor != nil && anchor.File != "" && anchor.Pos > 0 {
-		if err := checkNumberingContinues(ctx, db, m, *anchor, until); err != nil {
+		if err := checkNumberingContinues(ctx, db, m, *anchor, &w); err != nil {
 			return err
 		}
+	}
+	if w.bounded() {
+		return checkSameServerUntil(ctx, db, m, w.Until)
 	}
 	return CheckSameServer(ctx, db, m)
 }
@@ -446,6 +453,10 @@ func CheckSameServer(ctx context.Context, db *sql.DB, m *EventMark) error {
 	if err != nil || now == "" || now == m.ServerUUID {
 		return err
 	}
+	return anotherServerErr(now, m)
+}
+
+func anotherServerErr(now string, m *EventMark) error {
 	return fmt.Errorf("%w: capture now reads another server (server_uuid %s) than when the snapshot was taken (%s), and two servers number their binary logs apart. %s",
 		ErrBinlogRenumbered, now, m.ServerUUID, renumberedRemedy)
 }

@@ -190,12 +190,19 @@ func pairComparesNothing(p BaselinePair) bool {
 const renumberedPairRemedy = "verify compares a table's last read with the snapshot before it, " +
 	"so the table is checkable again from the second full snapshot taken after that."
 
+// renumberNotices logs each of the renumbering check's lasting conditions
+// once per process: the console's verify engine runs the check per table on
+// every run.
+var renumberNotices reconstruct.NoticeOnce
+
 // pairNumbering runs the refresh's binlog-renumbering check (#2160) on the
 // window a pair reads: from the previous snapshot's position up to the newer
 // snapshot, against the previous snapshot's event mark (#2174). A previous
 // snapshot without a mark: nil. A refusal carries renumberedPairRemedy.
 func pairNumbering(ctx context.Context, cfg BaselineConfig, p BaselinePair) error {
-	if err := reconstruct.CheckNumberingFrom(ctx, cfg.IndexDB, &p.PrevAnchor, p.PrevEventMark, p.NewSnapshot); err != nil {
+	if err := reconstruct.CheckNumberingFrom(ctx, cfg.IndexDB, &p.PrevAnchor, p.PrevEventMark, reconstruct.ReadWindow{
+		Schema: p.Schema, Table: p.Table, Until: p.NewSnapshot, Notice: renumberNotices.To(nil),
+	}); err != nil {
 		if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
 			return fmt.Errorf("%w %s", err, renumberedPairRemedy)
 		}
