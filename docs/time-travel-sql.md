@@ -520,7 +520,10 @@ The decision, in order, for every statement:
    connection, and on the first one after any statement that could have
    changed the session, which is every statement that is not a plain read
    (a `SET` of anything, a write, `CALL`, transaction control, a statement
-   the port does not recognise). A cheap statement never pays for it, and
+   the port does not recognise), and, where MySQL reports its session
+   changes (a stored function, below), a read that MySQL itself said
+   changed one of these settings or a statement that failed there. A cheap
+   statement never pays for it, and
    neither does a run of statements the copy answers. The question is never
    sent on the heels of a `SET` or a write: it goes out just before a
    statement that is headed for the copy (or before a time-travel
@@ -582,17 +585,64 @@ The decision, in order, for every statement:
    port asks which collation the session got, and when it is not the one
    it asked for it sends `SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci`
    before anything of the client's: one extra statement per connection on
-   MariaDB 11.4 and later, two on 10.11, none on MySQL. The copy then
+   MariaDB 11.4 and later, two on 10.11, none on MySQL (the statement that
+   asks for session tracking, below, is one more on all of them). The copy then
    answers a connection that names no collation on every supported
    version. A client that sets a collation itself keeps it: `SET NAMES
    utf8mb4` with no `COLLATE` means `utf8mb4_general_ci` on 10.11, and
    MySQL answers that connection (the log says so, once, with the
    setting). Send `SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci` instead.
 
-   Two things the port does not see. A session setting changed by a stored
-   function that a `SELECT` calls: the statement is a read by its text, so
-   do not change session settings inside a function on a source this port
-   routes. And a prepared statement keeps, on MySQL, the reading it got
+   **A setting changed inside a stored function.** A `SELECT` that calls a
+   stored function is a read by its text, and the function can run `SET`
+   (measured: a function sets `time_zone = '+05:00'`, and the next expensive
+   read was answered by the copy five hours off). So the port asks the
+   source to say so itself. On each new connection to the source it sends
+   one statement, `SET SESSION session_track_system_variables = '...'`,
+   naming the settings of the table above (and `max_join_size`, which is
+   one of the ways `sql_big_selects` changes). From then on the source marks
+   the answer to any statement that changed one of them, on the packet that
+   ends the answer, which it sends anyway: a statement that changes nothing
+   costs no extra round trip. After a marked answer the port reads the
+   session back before the copy answers again, as it does after a `SET`.
+   It does the same after a statement that failed on the source: an error
+   says nothing about the session, and a function that ran `SET` and then
+   failed has set it. The `EXPLAIN` of step 5 is heard the same
+   way, because a server can run a function while it plans (MariaDB does,
+   for a deterministic function with constant arguments). Measured on MySQL
+   8.0 and 8.4 and MariaDB 10.11, 11.4, 11.8 and 12.3; the account needs no
+   privilege for it.
+
+   When the source does not do this (a server, or a proxy in front of it,
+   that does not offer session tracking, refuses the statement, or does
+   not pass the marks on), the connection works as it did before and this
+   one change is not seen on it: do not change session settings inside a
+   function there. The port finds out on every connection, from the answer
+   to its own statement: a source that tracks marks that answer too.
+   DBTrail's log says so once per server, at warn level (`read routing:
+   this source does not tell the port when a statement changes a session
+   setting ...`, with the reason), and `GET /api/flashback` carries the
+   reason as `session_untracked` for that server.
+
+   A source, or a proxy in front of it, can also agree to session tracking
+   and then send data about the session that the port cannot read. A
+   connection that fails that way while it opens is opened once more
+   without asking, and works as before; one that fails later is lost like
+   any connection whose packets cannot be read (error 2006), and the
+   client's next connection works. Either way the port stops asking that
+   server for session tracking until DBTrail restarts, and says so in the
+   same warning.
+
+   A client that sets `session_track_system_variables` itself (some
+   connectors do when they connect) replaces the port's list. The port
+   sees it the next time it reads the session and, when any of its
+   settings is missing from the list, adds them back to the client's,
+   with one more statement.
+
+   Two things the port still does not see. A stored function that changes
+   `session_track_system_variables` itself, inside a `SELECT`: from then
+   on the source no longer marks its answers on that connection. And a
+   prepared statement keeps, on MySQL, the reading it got
    under the SQL mode in force when it was prepared; the copy runs each
    execution under the session of that moment. They differ only for a
    statement prepared under a mode that changes how it is read

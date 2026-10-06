@@ -583,6 +583,8 @@ jobs:
             || { echo "FATAL: the capture watermark test over real GTID sets did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationSQLCompareGeneratedNames ' /tmp/mysql-it.out \
             || { echo "FATAL: read-routing generated-column names test did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationFlashbackRoutedSessionFunction_2127 ' /tmp/mysql-it.out \
+            || { echo "FATAL: read routing after a session change inside a stored function did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationSQLCompareTemporalColumns ' /tmp/mysql-it.out \
             || { echo "FATAL: read-routing date-column arithmetic test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationBinlogOrderRecoverAndReconstruct2156_mysql ' /tmp/mysql-it.out \
@@ -776,6 +778,7 @@ jobs:
             TestIntegrationMonitorRegistrySourceMariaDBRelabeled \
             TestIntegrationWatchMariaDBSource \
             TestIntegrationFlashbackReadRoutingMariaDBSource \
+            TestIntegrationFlashbackRoutedSessionFunctionMariaDB_2127 \
             TestIntegrationFlashbackRoutingLimitsMariaDBSource_2115 \
             TestIntegrationSQLCompareGeneratedNamesMariaDB \
             TestIntegrationSQLCompareTemporalColumnsMariaDB \

@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -89,7 +90,27 @@ type Forwarder struct {
 	// autocommit or of sql_mode, the flag that statement sets is the
 	// client's doing and is reported as the default (autocommit on, no
 	// NO_BACKSLASH_ESCAPES); the other flag is still the source's.
-	OnSession      func(status uint16)
+	OnSession func(status uint16)
+	// TrackSession asks the source to say, with each answer, that one of the
+	// session settings the copy has to reproduce was changed
+	// (SessionTrackedVariables), so that a change no reader of the
+	// statement's text sees (a stored function that runs SET inside a
+	// SELECT) is heard (#2127). Set before the first statement. See
+	// trackSession for what it costs and when the source does not do it.
+	TrackSession bool
+	// OnUntracked, when set, is told that the source does not report session
+	// changes on this connection though TrackSession asked for it, and why:
+	// at most once when the connection opens, and once more if the session
+	// stops reporting later (TrackSessionAgain). The connection works; a
+	// setting changed inside a stored function is not seen on it.
+	//
+	// unusable says more: asking for tracking is what broke a connection to
+	// this source (see open, lose). The caller should not ask on the next
+	// connections to it (leave TrackSession unset); this one was opened
+	// again without asking, or is lost.
+	OnUntracked func(why string, unusable bool)
+	// capabilities reads what the handshake settled on; a test's seam.
+	capabilities   func(*client.Conn) string
 	policy         Policy
 	connectTimeout time.Duration
 	// queryTimeout bounds each round trip on the upstream socket (read and
@@ -115,6 +136,17 @@ type Forwarder struct {
 	// hadSession: the source accepted the login at least once, so there was
 	// a session (and maybe a transaction) to lose. See Lost.
 	hadSession bool
+	// tracked: the source reports changes to SessionTrackedVariables on this
+	// session (trackSession).
+	tracked bool
+	// asked: the connection that is open asked its handshake for session
+	// tracking (it was not opened again without asking: see get).
+	asked bool
+	// sessionChanged: since TakeSessionChanged was last called, an answer
+	// from the source said a tracked setting changed, or the source answered
+	// a tracked session with an error (which says nothing either way). See
+	// heard.
+	sessionChanged bool
 }
 
 // NewForwarder parses a go-sql-driver DSN (the registry's forwarding or
@@ -186,6 +218,51 @@ func (f *Forwarder) get(ctx context.Context) (*client.Conn, error) {
 	if f.conn != nil {
 		return f.conn, nil
 	}
+	c, tracked, err := f.open(ctx, f.TrackSession)
+	f.asked = f.TrackSession
+	if err != nil && f.TrackSession && protocolError(err) && ctx.Err() == nil {
+		// The source and this connection do not speak the same protocol
+		// once session tracking is asked for (see open). One more attempt,
+		// without asking: what worked before tracking existed still works.
+		// When the second attempt fails too, tracking was not the cause, and
+		// its error is the one reported.
+		first := err
+		f.asked = false
+		if c, _, err = f.open(ctx, false); err == nil {
+			f.unusable(first)
+		}
+	}
+	f.tracked = tracked && err == nil
+	if f.OnConnect != nil {
+		f.OnConnect(err)
+	}
+	if err != nil {
+		f.dead = lostError(fmt.Errorf("connect to the source: %w", err))
+		return nil, f.dead
+	}
+	f.conn = c
+	f.raw = c.Conn.Conn
+	f.threadID = c.GetConnectionID()
+	f.sessionUntold = f.OnSession != nil
+	f.hadSession = true
+	return c, nil
+}
+
+// open makes one attempt at the upstream connection: the login, the
+// collation (settleCollation) and, when track is set, session tracking
+// (trackSession). It reports whether the session is tracked. Called with f.mu
+// held.
+//
+// Asking for session tracking changes what the client library reads: from
+// the answer to the login on, it decodes the session-state data of every OK
+// packet, and it returns an error for data it does not understand (a tracker
+// type it does not know, a length that does not add up). A source, or
+// something between the port and it (a proxy, a router), that agrees to
+// CLIENT_SESSION_TRACK and then writes such data would fail every connection
+// of the port where it worked before tracking was asked for. get tells that
+// case from the others by the error (protocolError) and opens the connection
+// once more without asking.
+func (f *Forwarder) open(ctx context.Context, track bool) (*client.Conn, bool, error) {
 	// TLS is decided by capture's own rule for this server
 	// (config.ConnectSSLWith): the mode's tls.Config first; a retry in
 	// cleartext only for "preferred" against a source that offers no TLS at
@@ -194,6 +271,12 @@ func (f *Forwarder) get(ctx context.Context) (*client.Conn, error) {
 		return client.ConnectWithContext(ctx, f.addr, f.user, f.pass, f.db, f.connectTimeout, func(c *client.Conn) error {
 			c.ReadTimeout = f.queryTimeout
 			c.WriteTimeout = f.queryTimeout
+			if track {
+				// Only asked for: what the source agreed to is read after
+				// the handshake (trackSession). The one error this returns
+				// is for a capability the library does not know.
+				_ = c.SetCapability(mysql.CLIENT_SESSION_TRACK)
+			}
 			switch {
 			case f.tlsInDSN:
 				// A tls= inside the DSN wins over the mode (tls=false
@@ -222,19 +305,18 @@ func (f *Forwarder) get(ctx context.Context) (*client.Conn, error) {
 			err = fmt.Errorf("settle the session's collation: %w", serr)
 		}
 	}
-	if f.OnConnect != nil {
-		f.OnConnect(err)
+	tracked := false
+	if err == nil && track {
+		var terr error
+		if tracked, terr = f.trackSession(ctx, c); terr != nil {
+			_ = c.Close()
+			err = fmt.Errorf("ask the source to report session changes: %w", terr)
+		}
 	}
 	if err != nil {
-		f.dead = lostError(fmt.Errorf("connect to the source: %w", err))
-		return nil, f.dead
+		return nil, false, err
 	}
-	f.conn = c
-	f.raw = c.Conn.Conn
-	f.threadID = c.GetConnectionID()
-	f.sessionUntold = f.OnSession != nil
-	f.hadSession = true
-	return c, nil
+	return c, tracked, nil
 }
 
 // lose records that the upstream connection is gone, closes it, and makes
@@ -317,9 +399,296 @@ func (f *Forwarder) settleCollation(ctx context.Context, c *client.Conn) error {
 	return nil
 }
 
+// SessionTrackedVariables is what the source is asked to report changes of
+// (session_track_system_variables): every session variable the port reads
+// back before the copy answers (shim's sessionReadBackSQL; a test there holds
+// the two together), and three more.
+//
+// collation_connection, which the read-back reads by what it does (its
+// collation probe). max_join_size, because setting it is one of the ways
+// sql_big_selects changes. session_track_system_variables itself, so that
+// the SET that asks for the list is itself a change the source reports: its
+// answer proves that the source's marks reach this connection (trackSession).
+//
+// A client can replace the list (a connector that asks for the variables it
+// follows). The port reads the list with the session and, when a name of its
+// own is gone (TracksSession), adds its names back (TrackSessionAgain).
+//
+// Measured on MySQL 8.0 and 8.4 and MariaDB 10.11, 11.4, 11.8 and 12.3: each
+// of these, set inside a stored function a SELECT calls, is reported with
+// that SELECT's answer; so is one set to the value it already had. All of
+// them exist on every one of those servers, which matters: MariaDB refuses
+// the whole list for one name it does not know (MySQL only warns).
+const SessionTrackedVariables = "time_zone,sql_mode,sql_select_limit,lc_time_names,div_precision_increment,sql_auto_is_null," +
+	"sql_big_selects,max_join_size,character_set_results,character_set_connection,collation_connection,session_track_system_variables"
+
+// trackSessionMark is the entry of SessionTrackedVariables that makes the SET
+// of the list a change the source reports (trackSession).
+const trackSessionMark = "session_track_system_variables"
+
+// trackSessionAliases are the names of SessionTrackedVariables that MariaDB
+// 11.4 and later leave out when they print the list back, while still
+// reporting their changes (measured): there they are other variables' names.
+var trackSessionAliases = map[string]bool{"collation_connection": true, "sql_big_selects": true}
+
+// TracksSession reports whether a session whose session_track_system_variables
+// is list still reports everything the port asked for: every name of
+// SessionTrackedVariables is in it (in any order and case, as MariaDB prints
+// the list sorted), but for the two a server may leave out of what it prints
+// (trackSessionAliases); or the list is "*", which is everything. A list that
+// kept the port's mark and lost a setting is not that: a change to the
+// setting would not be reported.
+func TracksSession(list string) bool {
+	has := map[string]bool{}
+	for name := range strings.SplitSeq(list, ",") {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "*" {
+			return true
+		}
+		has[name] = true
+	}
+	for name := range strings.SplitSeq(SessionTrackedVariables, ",") {
+		if !has[name] && !trackSessionAliases[name] {
+			return false
+		}
+	}
+	return true
+}
+
+// trackSessionSQL sets the session's tracked list to SessionTrackedVariables
+// added to what the session tracks now (has), each name once: MySQL refuses a
+// list that names a variable twice.
+func trackSessionSQL(has string) string {
+	var names []string
+	seen := map[string]bool{}
+	for _, list := range []string{has, SessionTrackedVariables} {
+		for name := range strings.SplitSeq(list, ",") {
+			name = strings.TrimSpace(name)
+			if key := strings.ToLower(name); name != "" && !seen[key] && !strings.ContainsAny(name, "'\\") {
+				seen[key] = true
+				names = append(names, name)
+			}
+		}
+	}
+	return "SET SESSION session_track_system_variables = '" + strings.Join(names, ",") + "'"
+}
+
+// trackSession runs on a connection the source has just accepted, after
+// settleCollation and before anything of the client's, when TrackSession is
+// set. It asks the source to report changes to SessionTrackedVariables: one
+// statement per connection, on every source. From then on the source marks
+// the answer to any statement that changed one of them (the
+// SERVER_SESSION_STATE_CHANGED status flag, on a packet it sends anyway), and
+// a statement that changed nothing costs nothing more.
+//
+// It reports whether the session is tracked. It is not, and the connection
+// opens all the same (OnUntracked is told why), when:
+//
+//   - the source did not agree to CLIENT_SESSION_TRACK in the handshake (a
+//     server or a proxy without session tracking), or to CLIENT_DEPRECATE_EOF.
+//     Without the second, a resultset ends in an EOF packet, and MySQL does
+//     not mark that one: it keeps the change for the next OK packet, which
+//     may be many statements later (measured on 8.0 and 8.4; MariaDB marks
+//     the EOF too);
+//   - the source refuses the SET and keeps the session;
+//   - the source takes the SET and does not mark its answer. The list names
+//     itself (trackSessionMark), so a source that tracks reports the SET as
+//     a change to a tracked setting, in the very answer to it (measured on
+//     all six). An answer without the mark is from a source whose marks do
+//     not reach this connection, a proxy that answers the SET itself or
+//     drops the flag among them: every connection proves the whole path
+//     once, with the statement it sends anyway.
+//
+// Anything else (a broken connection, a client that left: ctx) is a
+// connection that did not open, as in settleCollation. No privilege is
+// needed: an account granted SELECT, INSERT and EXECUTE on one schema sets
+// it (measured on all six).
+//
+// Like settleCollation's, the statement goes around Forward.
+func (f *Forwarder) trackSession(ctx context.Context, c *client.Conn) (bool, error) {
+	capabilities := f.capabilities
+	if capabilities == nil {
+		capabilities = (*client.Conn).CapabilityString
+	}
+	agreed := "|" + capabilities(c) + "|"
+	for _, need := range []string{"CLIENT_SESSION_TRACK", "CLIENT_DEPRECATE_EOF"} {
+		if !strings.Contains(agreed, "|"+need+"|") {
+			f.untracked("the source did not agree to " + need + " when the connection opened")
+			return false, nil
+		}
+	}
+	// f.mu is held and f.raw is not set yet: see settleCollation.
+	defer context.AfterFunc(ctx, func() { _ = c.Conn.Conn.Close() })()
+	res, err := c.Execute(trackSessionSQL(""))
+	if err != nil {
+		if !stillInSession(err) {
+			if cause := ctx.Err(); cause != nil {
+				return false, cause
+			}
+			return false, err
+		}
+		f.untracked("the source refused to: " + err.Error())
+		return false, nil
+	}
+	if !markedChanged(res) {
+		f.untracked(notMarked)
+		return false, nil
+	}
+	return true, nil
+}
+
+// notMarked is why a source that took the tracked list is not tracked.
+const notMarked = "the source took the list of settings to report and did not report that change itself"
+
+// markedChanged reports whether the source marked an answer as having
+// changed a tracked setting.
+func markedChanged(res *mysql.Result) bool {
+	return res != nil && res.Status&mysql.SERVER_SESSION_STATE_CHANGED != 0
+}
+
+// untracked tells OnUntracked. Called with f.mu held.
+func (f *Forwarder) untracked(why string) {
+	if f.OnUntracked != nil {
+		f.OnUntracked(why, false)
+	}
+}
+
+// unusable tells OnUntracked that asking this source for session tracking
+// broke a connection, with the error that showed it. Called with f.mu held.
+func (f *Forwarder) unusable(cause error) {
+	if f.OnUntracked != nil {
+		f.OnUntracked("with session tracking asked for, the source's answers could not be read: "+cause.Error(), true)
+	}
+}
+
+// protocolError reports whether err says the two ends of the connection do
+// not speak the same protocol: an error the client library made up while
+// reading a packet. It is not an error packet from the source (a refused
+// login, a refused statement), not a connection that could not be made or
+// that broke (a dial error, a timeout, a closed socket, an end of file), not
+// a client that left (the context), and not a TLS setting.
+func protocolError(err error) bool {
+	if err == nil || isMySQLError(err) {
+		return false
+	}
+	for _, not := range []error{mysql.ErrBadConn, io.EOF, io.ErrUnexpectedEOF, net.ErrClosed, context.Canceled, context.DeadlineExceeded} {
+		if errors.Is(err, not) {
+			return false
+		}
+	}
+	var ne net.Error
+	var se *config.TLSSettingsError
+	return !errors.As(err, &ne) && !errors.As(err, &se)
+}
+
+// SessionTracked reports whether the source says, with its answers, that a
+// setting of SessionTrackedVariables changed on this session. False before
+// the connection is opened.
+func (f *Forwarder) SessionTracked() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.tracked && f.conn != nil
+}
+
+// TrackSessionAgain puts SessionTrackedVariables back in the session's
+// tracked list, keeping what the list has now (has, as the source printed
+// it): for a session whose list a statement of the client replaced
+// (TracksSession). One statement, and it never opens a connection. When the
+// source refuses it and keeps the session, or takes it without marking its
+// answer (trackSession), the session is no longer tracked (SessionTracked,
+// OnUntracked) and an error is returned; any other failure loses the
+// connection.
+func (f *Forwarder) TrackSessionAgain(ctx context.Context, has string) error {
+	f.mu.Lock()
+	if f.dead != nil {
+		f.mu.Unlock()
+		return f.dead
+	}
+	c := f.conn
+	f.mu.Unlock()
+	if c == nil {
+		return nil
+	}
+	defer f.watch(ctx)()
+	res, err := c.Execute(trackSessionSQL(has))
+	if err != nil && !stillInSession(err) {
+		f.lose(err)
+		return f.lost()
+	}
+	why := ""
+	switch {
+	case err != nil:
+		why = "the source refused to report them again after the session's list was replaced: " + err.Error()
+	case !markedChanged(res):
+		why, err = "after the session's list was replaced, "+notMarked, errors.New(notMarked)
+	default:
+		return nil
+	}
+	f.mu.Lock()
+	f.tracked = false
+	f.untracked(why)
+	f.mu.Unlock()
+	return err
+}
+
+// heard takes in one answer from the source: its status flags, or the error
+// it answered with. It is how a change to the session reaches
+// TakeSessionChanged.
+//
+//   - A status with SERVER_SESSION_STATE_CHANGED: on a tracked session, the
+//     statement changed a tracked setting. It is the flag that is read, never
+//     the list of changes: for a resultset the library keeps the status of
+//     the closing packet and drops the rest of it.
+//   - An error packet carries no status, so it cannot say. A statement that
+//     changed a setting and then failed (a function that runs SET, then
+//     SIGNAL) is reported by MySQL with the NEXT answer, whatever statement
+//     that is, and by MariaDB never (measured). So on a tracked session an
+//     error counts as a change. On one that is not tracked it does not: a
+//     function that succeeds is not seen there either, and that connection
+//     behaves as it did before tracking was asked for.
+//
+// The answer to every statement goes through here (Forward, a prepared
+// statement's execution), and so does the EXPLAIN of a decision: MariaDB
+// runs a deterministic function with constant arguments while it plans, and
+// MySQL a scalar subquery with an aggregate (measured), so an EXPLAIN can
+// change the session as its statement would. The answers that run nothing of
+// the client's do not: a PREPARE (measured: neither server runs a function
+// while it prepares), a USE, a PING, and the port's own SETs.
+func (f *Forwarder) heard(status uint16, err error) {
+	marked, failed := status&mysql.SERVER_SESSION_STATE_CHANGED != 0, isMySQLError(err)
+	if !marked && !failed {
+		return
+	}
+	f.mu.Lock()
+	if marked || f.tracked {
+		f.sessionChanged = true
+	}
+	f.mu.Unlock()
+}
+
+// TakeSessionChanged reports whether, since it was last called, the source
+// said that a tracked session setting changed, or (on a tracked session)
+// answered a statement with an error; and forgets it. A caller that reads the session back afterwards
+// calls it once more when that is done: the read-back saw everything
+// reported up to its own answer.
+func (f *Forwarder) TakeSessionChanged() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	changed := f.sessionChanged
+	f.sessionChanged = false
+	return changed
+}
+
 func (f *Forwarder) lose(cause error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.asked && protocolError(cause) {
+		// A packet the library could not read, on a connection that asked
+		// for session tracking. It cannot be put right in place: the
+		// connection is lost like any other. The caller is told, so that
+		// the client's next connection does not ask.
+		f.unusable(cause)
+	}
 	if f.conn != nil {
 		_ = f.conn.Close()
 		f.conn = nil
@@ -484,7 +853,11 @@ func (f *Forwarder) decideFromExplain(stmt string, res *mysql.Result, err error)
 		if !stillInSession(err) {
 			f.lose(err)
 		}
+		f.heard(0, err)
 		return Decision{}, fmt.Errorf("explain: %w", err)
+	}
+	if res != nil {
+		f.heard(res.Status, nil)
 	}
 	plan, err := planFromExplain(res)
 	if err != nil {
@@ -585,6 +958,7 @@ func (f *Forwarder) stream(sink RowSink, run func(*mysql.Result, client.SelectPe
 			// rows); the connection is in sync and stays usable. An error
 			// packet that ends the session (sessionEnded) falls through to
 			// the loss below instead.
+			f.heard(0, err)
 			return nil, unwrapMySQLError(err)
 		default:
 			// When the statement was interrupted (its context ended), the
@@ -594,6 +968,7 @@ func (f *Forwarder) stream(sink RowSink, run func(*mysql.Result, client.SelectPe
 			return nil, f.lost()
 		}
 	}
+	f.heard(res.Status, nil)
 	if res.Resultset != nil && len(res.Fields) == 0 {
 		// An OK packet: the client library leaves an empty Resultset on
 		// it, which the server would mistake for a resultset.

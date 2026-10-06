@@ -214,7 +214,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again there, and for a row changed on both sides the older numbering's
   change can be kept where the time order was right. Take a new full
   snapshot after such an event before a `reconstruct` across it.
-
+- **Read routing: a session setting changed inside a stored function is
+  seen** (#2127). A `SELECT` that calls a stored function is a read by its
+  text, and the function can run `SET`. Measured before this change: a
+  function set `time_zone = '+05:00'`, and the next expensive read on that
+  connection was answered by the copy under the old zone, five hours off.
+  The port now asks the source to report such changes itself (session
+  tracking): on each new connection to the source it sends one statement
+  naming the settings the copy has to reproduce, and from then on the source
+  marks the answer to any statement that changed one of them, on a packet
+  it sends anyway. After a marked answer the port reads the session back
+  before the copy answers again, exactly as after a `SET`. It does the same
+  after a statement that failed on the source (a function that ran `SET`
+  and then failed has set it, and an error says nothing about the
+  session), and it hears the `EXPLAIN` it sends for a plan the same way,
+  since MariaDB and MySQL can run a function while they plan. A statement
+  that changes nothing costs no extra round trip; the cost is one statement
+  when the port opens its connection to the source. Works on MySQL 8.0 and
+  8.4 and on MariaDB 10.11, 11.4, 11.8 and 12.3, with no extra privilege.
+  When the source does not offer session tracking (an older server, or a
+  proxy in front of it), the connection works as before, this one change is
+  still not seen there, and DBTrail's log says so once per server at warn
+  level (`GET /api/flashback` carries the reason as `session_untracked`). A
+  source or proxy that agrees to session tracking and then sends data the
+  port cannot read is not asked again: the connection is opened once more
+  without it. A panic on one client connection of the port now ends that
+  connection alone, logged with its stack, instead of the process. A client
+  that replaces `session_track_system_variables` with its own list, as some
+  connectors do when they connect, gets the port's settings added back to
+  it the next time the port reads the session.
+  Details in docs/time-travel-sql.md, "A setting changed inside a stored
+  function".
 
 ## [0.99.0] - 2026-10-05
 ### Changed
