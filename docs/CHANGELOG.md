@@ -393,6 +393,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a detail naming the binlog file that was gone; compare the changes
   indexed just before that time with the source's own data (`bintrail
   verify`, or a read of the rows on the source).
+- **`recover-cascade`, `verify --check recover` and the MySQL port's
+  `_flashback` and one-row `_snapshot` reads: a row changed by two sessions
+  is taken in the order the binary log holds its changes** (#2156, last
+  part). These still took a row's changes in the order of the time recorded
+  with each one, which is when its statement STARTED. For a row that two
+  sessions changed at once (one waited on the other's row lock) that order
+  is wrong, and reproduced on MySQL 8.4 and MariaDB 11.4 through the real
+  capture it gave: a `recover-cascade` script that put a cascade-deleted
+  child back with the first session's value (applied, the child held a
+  value it no longer had when its parent was deleted); a `verify --check
+  recover` mismatch on a chain that is whole; and `SELECT ... FROM
+  _flashback.t AS OF ...` (one row or the whole table) and a one-row
+  `_snapshot` read answering the first session's value, or bringing back a
+  row the second session had deleted.
+
+  All of them now take the rule `recover` uses (entries below), decided row
+  by row. `recover-cascade` (the command, the web interface, including its
+  undo of a table with cascading children, and the MCP tool) puts the
+  parent changes in binary log order and says so in the script's header
+  and the response's warnings (`Order of the changes: ...`), and puts each
+  child back with its last change in that order. The web interface's
+  warning at the top of such a script, which said the script kept
+  statement-time order, is gone with the cause. Where the order cannot be
+  established (the same cases as for `recover`), the statement-time answer
+  stands, as before, and the reader is told: a `verify --check recover`
+  mismatch ends with "order of changes unproven: ...", the time-travel read
+  raises one warning with that text (`SHOW WARNINGS`, code 1105, the
+  PostgreSQL wire front-end logs it), and a `recover-cascade` script carries
+  one advisory note per child table. The full-table `_flashback` read keeps
+  its row cap: it reads which rows to answer as before and then asks for
+  those rows' last change in binary log order, which is one more query, and
+  the changes it reads for that are bounded by the same cap (past it, the
+  same "would return more than N rows" refusal). A row that second query
+  does not find keeps its old answer and is counted in the note.
+  `recover-cascade` still ends a child's window at the parent DELETE's
+  statement time: a change of the child that started after the DELETE
+  started and committed before it is left out.
+  Still by statement time: the range itself (a change that started before
+  the `AS OF` instant or `--until` and was committed after it is inside),
+  `--limit`/`--limit-per-pk`, and the order changes are listed in by
+  `query` and `_diff`.
 - **`verify` and a whole-table `_snapshot` read: a row changed by two
   sessions is taken at its last change** (#2156, second part). Both put on a
   snapshot the latest change of each row after it. They took "latest" from

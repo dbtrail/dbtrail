@@ -345,15 +345,9 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 // data's. A match needs no note, and neither does an inconclusive verdict,
 // which already says why it is not one.
 func withOrderNote(res *TableResult, order query.LatestPerPKOrder) {
-	note := order.Note()
-	if note == "" || res.Status != StatusMismatch {
-		return
+	if res.Status == StatusMismatch {
+		res.Detail = withNote(res.Detail, order.Note())
 	}
-	if d := strings.TrimSuffix(strings.TrimSpace(res.Detail), "."); d != "" {
-		res.Detail = d + ". " + note
-		return
-	}
-	res.Detail = note
 }
 
 // classify is the pure comparison core. Row count is checked first: a difference

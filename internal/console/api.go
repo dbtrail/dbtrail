@@ -822,17 +822,6 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 			// response's Warnings list, but never framed as "provably partial"
 			// and never gating CascadeDetected/complete-ness above.
 			cw = append(cw, cres.Warnings...)
-			// This branch answers /api/recover with a recover-cascade script,
-			// which stays in statement-time order (#2156, its own slice). The
-			// same request on a table without children gets binary log order
-			// or a warning, so say it here too when the two orders differ.
-			if notice := query.StatementTimeOrderNotice(rows, query.BinlogOrderProof(r.Context(), b.db)); notice != "" {
-				cw = append(cw, "Order of the changes: "+notice)
-				// And ahead of the script, which is what gets saved and
-				// applied. A comment before its first line: the statements and
-				// their order are untouched.
-				cres.SQL = recovery.CommentParagraph("-- WARNING: ", "order of the changes: "+notice) + cres.SQL
-			}
 			// Notes carries the same info list as the plain path below. NB:
 			// the positive notes wiring test (the recover subtest on the
 			// short-circuit fixture) exercises the PLAIN write site only —

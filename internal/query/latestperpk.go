@@ -24,6 +24,35 @@ type LatestPerPKOrder struct {
 	Refused int
 	// warning is the first refused key's reason.
 	warning string
+	// refused holds the keys counted in Refused, so Add counts a key
+	// refused by two reads once (recover-cascade scans one child under
+	// every parent that reaches it). A pointer keeps the struct comparable.
+	refused *map[string]bool
+}
+
+// RefusedRow is the decision for one row kept at its statement-time answer,
+// with why: for a reader that refuses a row on grounds of its own and
+// reports it with LatestPerPKInBinlog's (query.RepickLatestInBinlog).
+func RefusedRow(pk, why string) LatestPerPKOrder {
+	var o LatestPerPKOrder
+	o.refuse(pk, why)
+	return o
+}
+
+// refuse counts pk as kept at its statement-time answer for why.
+func (o *LatestPerPKOrder) refuse(pk, why string) {
+	if o.refused == nil {
+		m := map[string]bool{}
+		o.refused = &m
+	}
+	if (*o.refused)[pk] {
+		return
+	}
+	(*o.refused)[pk] = true
+	o.Refused++
+	if o.warning == "" {
+		o.warning = why + ". " + statementTimeTail
+	}
 }
 
 // Note is the text for the reader of a result some of whose keys kept
@@ -36,6 +65,18 @@ func (o LatestPerPKOrder) Note() string {
 	return fmt.Sprintf("order of changes unproven: for %d row(s) the order of the changes in the binary log could not be established, "+
 		"so each of those rows was taken at its change with the latest statement time. "+
 		"A mismatch on a row that two sessions changed at once may be a false alarm. The first such row: %s", o.Refused, upperFirst(o.warning))
+}
+
+// ReadNote is Note for a reader that serves the rows it took (a time-travel
+// read, a recovery script) rather than comparing them: the same refusal,
+// without the word about a mismatch.
+func (o LatestPerPKOrder) ReadNote() string {
+	if o.Refused == 0 {
+		return ""
+	}
+	return fmt.Sprintf("order of changes unproven: for %d row(s) the order of the changes in the binary log could not be established, "+
+		"so each of those rows was taken at its change with the latest statement time, which may be wrong for a row two sessions changed at once. "+
+		"The first such row: %s", o.Refused, upperFirst(o.warning))
 }
 
 func upperFirst(s string) string {
@@ -156,12 +197,6 @@ func LatestPerPKInBinlog(rows []ResultRow, n int, idsFollowBinlog func([]ResultR
 		}
 		byKey[pk] = append(byKey[pk], i)
 	}
-	refuse := func(why string) {
-		o.Refused++
-		if o.warning == "" {
-			o.warning = why + ". " + statementTimeTail
-		}
-	}
 
 	type keyCand struct {
 		cand     []ResultRow
@@ -222,10 +257,10 @@ func LatestPerPKInBinlog(rows []ResultRow, n int, idsFollowBinlog func([]ResultR
 			if !hasCoord(byTime, last) && ask(cand) == IDsFollowFileIndexing {
 				first, _ := keySpan(rows, byKey[pk])
 				if ff, lf := decodeKeySpanFile(first), decodeKeySpanFile(last); ff != lf {
-					refuse(fmt.Sprintf("this index was built with `bintrail index` only and this row's changes are in more than one binary log file (%s to %s), "+
+					o.refuse(pk, fmt.Sprintf("this index was built with `bintrail index` only and this row's changes are in more than one binary log file (%s to %s), "+
 						"so its ids follow the order the files were indexed in, which is not shown to be the order the source wrote them in", ff, lf))
 				} else {
-					refuse(fmt.Sprintf("the change at this row's last binary log position (in %s) was received by an index built with `bintrail index` only "+
+					o.refuse(pk, fmt.Sprintf("the change at this row's last binary log position (in %s) was received by an index built with `bintrail index` only "+
 						"before the change kept: the file may have been indexed out of order or twice", lf))
 				}
 			}
@@ -254,10 +289,10 @@ func LatestPerPKInBinlog(rows []ResultRow, n int, idsFollowBinlog func([]ResultR
 			// positions with times), so it is said here.
 			if latestByID.EventID == latestByTime.EventID {
 				// n > 1: the two latest sets differ below their top.
-				refuse("the index received this row's changes in a different order than their binary log positions and statement times: " +
+				o.refuse(pk, "the index received this row's changes in a different order than their binary log positions and statement times: "+
 					"the source's binary log numbering may have restarted between them (a failover, RESET MASTER), or binary log files were indexed out of order")
 			} else {
-				refuse(fmt.Sprintf("the index received event %d (at %s:%d) after event %d (at %s:%d), "+
+				o.refuse(pk, fmt.Sprintf("the index received event %d (at %s:%d) after event %d (at %s:%d), "+
 					"while the binary log position and the statement time both put event %d last: the source's binary log numbering may have restarted between them "+
 					"(a failover, RESET MASTER), or binary log files were indexed out of order",
 					latestByID.EventID, latestByID.BinlogFile, latestByID.StartPos,
@@ -265,12 +300,44 @@ func LatestPerPKInBinlog(rows []ResultRow, n int, idsFollowBinlog func([]ResultR
 					latestByTime.EventID))
 			}
 		default:
-			refuse(rowRefusal(d))
+			o.refuse(pk, rowRefusal(d))
 		}
 		out = append(out, all[len(all)-n:]...)
 	}
 	slices.SortStableFunc(out, compareStatementTime)
 	return out, o, nil
+}
+
+// RowReason is why OrderByBinlog kept one row's changes in statement-time
+// order, worded for that row, and "" when it did not refuse.
+func (o BinlogOrder) RowReason() string {
+	if o.Warning() == "" {
+		return ""
+	}
+	return rowRefusal(o)
+}
+
+// MayDiffer reports, for a decision OrderByBinlog took over rows (left in
+// the order they were handed in, (event_timestamp, event_id), since it kept
+// that order), that it kept statement-time order where binary log order may
+// be different: positions disagreed with the times (every refusal but one),
+// or, with a change that has no position, the ids (the order capture indexed
+// them in) disagree with the times. A row whose times agree with its ids and
+// that has no positions gives nothing to doubt, and a reader is not told so
+// on every row an older build indexed.
+func (o BinlogOrder) MayDiffer(rows []ResultRow) bool {
+	if o.Warning() == "" {
+		return false
+	}
+	if o.Reason != OrderNoCoordinate {
+		return true
+	}
+	for i := 1; i < len(rows); i++ {
+		if rows[i].EventID < rows[i-1].EventID {
+			return true
+		}
+	}
+	return false
 }
 
 // rowRefusal says why OrderByBinlog refused one row's changes, in words

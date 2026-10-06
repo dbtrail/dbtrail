@@ -1622,17 +1622,26 @@ func TestRunFullTable_Limit(t *testing.T) {
 		mock.MatchExpectationsInOrder(false)
 		mock.ExpectQuery("information_schema.PARTITIONS").
 			WillReturnRows(sqlmock.NewRows([]string{"PARTITION_NAME", "PARTITION_DESCRIPTION"}))
-		rows := sqlmock.NewRows(binlogEventsColumns())
 		now := time.Now().UTC()
-		for i := 0; i < nRows; i++ {
-			rows.AddRow(
-				int64(i+1), "binlog.000001", int64(100), int64(200), now,
-				nil, nil, "myapp", "orders", parser.EventInsert,
-				fmt.Sprintf("%d", i+1), nil, nil,
-				fmt.Sprintf(`{"id":%d,"sku":"X"}`, i+1), 0, nil, nil, nil,
-			)
+		events := func(n int) *sqlmock.Rows {
+			rows := sqlmock.NewRows(binlogEventsColumns())
+			for i := 0; i < n; i++ {
+				rows.AddRow(
+					int64(i+1), "binlog.000001", int64(100*(i+1)), int64(100*(i+1)+50), now,
+					nil, nil, "myapp", "orders", parser.EventInsert,
+					fmt.Sprintf("%d", i+1), nil, nil,
+					fmt.Sprintf(`{"id":%d,"sku":"X"}`, i+1), 0, nil, nil, nil,
+				)
+			}
+			return rows
 		}
-		mock.ExpectQuery("FROM binlog_events").WillReturnRows(rows)
+		// The read under the cap fixes the keys; the second one (#2156) asks
+		// for those keys' latest change in binary log order and runs only
+		// when the first one fit.
+		if nRows <= cap {
+			mock.ExpectQuery("pk_values IN").WillReturnRows(events(nRows))
+		}
+		mock.ExpectQuery("FROM binlog_events").WillReturnRows(events(nRows))
 		h := &Handler{
 			indexDB: db,
 			cfg: Config{AllowGaps: true, IndexDBName: "bintrail_index",
@@ -1643,9 +1652,15 @@ func TestRunFullTable_Limit(t *testing.T) {
 			},
 		}
 		h.UseDB("myapp")
-		return h.runFullTable(TimeTravelQuery{
+		res, err := h.runFullTable(TimeTravelQuery{
 			Type: TypeFlashback, Schema: "myapp", Table: "orders", AsOf: now, Limit: limit,
 		})
+		if err == nil {
+			if merr := mock.ExpectationsWereMet(); merr != nil {
+				t.Errorf("reads: %v", merr)
+			}
+		}
+		return res, err
 	}
 
 	t.Run("under_cap_succeeds", func(t *testing.T) {

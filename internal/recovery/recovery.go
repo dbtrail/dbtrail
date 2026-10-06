@@ -135,11 +135,11 @@ func (g *Generator) SetMaxScriptBytes(n int64) { g.maxScriptBytes = n }
 // confirms the order.
 //
 // It is OPT-IN because two callers depend on the order they hand in being
-// reversed and nothing else. recover-cascade merges parent DELETE and UPDATE
-// roots by (event_timestamp, event_id) (cascaderecover.MergeParentRoots) and
-// writes the child statements around them by the same order; it takes the
-// rule in its own slice of #2156. The BYOS agent mixes rows of its in-memory
-// buffer, whose ids are its own, with rows of the index.
+// reversed and nothing else. recover-cascade puts its parent changes in
+// binary log order itself (cascaderecover.MergeParentRoots) and appends the
+// synthesized children, which carry no position; this rule over the whole
+// list would see "no position" and keep it. The BYOS agent mixes rows of its
+// in-memory buffer, whose ids are its own, with rows of the index.
 //
 // Inert under PostgresDialect: a PostgreSQL row's event_timestamp is its
 // commit time, so the order handed in is commit order already.
@@ -609,14 +609,6 @@ func (g *Generator) generate(rows []query.ResultRow, w *countingWriter) (int, []
 
 // commentWidth is where writeCommentParagraph breaks a line.
 const commentWidth = 100
-
-// CommentParagraph is writeCommentParagraph into a string, for a caller that
-// puts a paragraph ahead of a script it did not generate here.
-func CommentParagraph(lead, text string) string {
-	var b strings.Builder
-	writeCommentParagraph(&b, lead, text)
-	return b.String()
-}
 
 // writeCommentParagraph writes text as SQL comment lines: the first one starts
 // with lead ("-- NOTE: "), the following ones are indented under it. The text

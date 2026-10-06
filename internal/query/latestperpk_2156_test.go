@@ -205,6 +205,7 @@ func TestLatestPerPKInBinlog_decisionTable(t *testing.T) {
 			}
 			gotOrder := order
 			gotOrder.warning = ""
+			gotOrder.refused = nil
 			if gotOrder != tc.wantOrder {
 				t.Fatalf("order = %+v, want %+v", gotOrder, tc.wantOrder)
 			}
@@ -372,7 +373,7 @@ func permutations(n int) [][]int {
 	return out
 }
 
-// binlogOrderProofOnce reads stream_state and index_state once, whatever
+// BinlogOrderProofOnce reads stream_state and index_state once, whatever
 // the number of sets it is asked about, and answers per set.
 func TestBinlogOrderProofOnce_readsOnce(t *testing.T) {
 	db, mock, err := sqlmock.New()
@@ -383,7 +384,7 @@ func TestBinlogOrderProofOnce_readsOnce(t *testing.T) {
 	mock.ExpectQuery("stream_state").WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
 	// A file indexing run that ended 10 minutes after orderT0.
 	mock.ExpectQuery("index_state").WillReturnRows(sqlmock.NewRows([]string{"m", "u"}).AddRow(orderT0.Add(10*time.Minute), 0))
-	proof := binlogOrderProofOnce(context.Background(), db)
+	proof := BinlogOrderProofOnce(context.Background(), db)
 	early := []ResultRow{orderRow(1, "f.000001", 4, orderT0)}
 	late := []ResultRow{orderRow(1, "f.000001", 4, orderT0.Add(48*time.Hour))}
 	if got := proof(early); got != IDsUnproven {
@@ -407,7 +408,7 @@ func TestBinlogOrderProofOnce_readFails(t *testing.T) {
 	}
 	defer db.Close()
 	mock.ExpectQuery("stream_state").WillReturnError(errors.New("connection refused"))
-	proof := binlogOrderProofOnce(context.Background(), db)
+	proof := BinlogOrderProofOnce(context.Background(), db)
 	rows := []ResultRow{orderRow(1, "f.000001", 4, orderT0)}
 	for range 2 {
 		if got := proof(rows); got != IDsUnproven {

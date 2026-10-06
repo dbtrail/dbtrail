@@ -609,6 +609,10 @@ jobs:
             || { echo "FATAL: the verify and _snapshot latest-change test over a real capture did not run: is binary logging on? (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationLatestPerPKThreePlacesAgree2156 ' /tmp/mysql-it.out \
             || { echo "FATAL: the latest-per-key agreement test (MySQL, DuckDB, Go) did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationRemainingSites2156_mysql ' /tmp/mysql-it.out \
+            || { echo "FATAL: the verify --check recover and _flashback binary-log-order test over a real capture did not run: is binary logging on? (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationCascadeBinlogOrder2156_mysql ' /tmp/mysql-it.out \
+            || { echo "FATAL: the applied recover-cascade binary-log-order test over a real capture did not run: is binary logging on? (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestStreamLoop_unmappableRowReachesThePersistedLedger ' /tmp/mysql-it.out || { echo "FATAL: unmappable-row skip ledger test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestRefresh_archivedHours_quietTableReadsNoArchive_lateChangeApplied_2152 ' /tmp/mysql-it.out \
             || { echo "FATAL: the refresh over archived hours (quiet table, late change) did not run (false-green tripwire)" >&2; exit 1; }
@@ -857,7 +861,9 @@ jobs:
             TestIntegrationReconstruct_MariaDBUUIDKeyWithoutIndexTypesRefuses \
             TestIntegrationReconstructTool_MariaDBUUIDKeyWithoutIndexTypesRefuses \
             TestIntegrationBinlogOrderRecoverAndReconstruct2156_mariadb \
-            TestIntegrationLatestPerKeyBinlogOrder2156_mariadb; do
+            TestIntegrationLatestPerKeyBinlogOrder2156_mariadb \
+            TestIntegrationRemainingSites2156_mariadb \
+            TestIntegrationCascadeBinlogOrder2156_mariadb; do
             grep -q -- "--- PASS: $name " /tmp/mariadb-it.out \
               || { echo "FATAL: $name did not run and pass in the MariaDB-source job (false-green tripwire)" >&2; exit 1; }
           done

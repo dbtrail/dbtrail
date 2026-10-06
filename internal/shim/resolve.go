@@ -147,7 +147,20 @@ func mysqlRenderErr(err error) error {
 // The MySQL renderer (runPointInTime) and the pgwire renderer share this method,
 // so the transaction-atomic cut (#988), the raw-vs-encoded PK routing (#826),
 // and the ENUM/SET epoch mapping (#472/#475) live in exactly one place.
+//
+// The row's changes are folded in binary log order where the index can show
+// it (#2156); where it cannot, the statement-time answer stands and the note
+// is logged. The MySQL renderer also hands it to the client (SHOW WARNINGS)
+// through resolveFlashbackRow.
 func (h *Handler) ResolveFlashbackRow(ctx context.Context, q TimeTravelQuery) (map[string]any, error) {
+	image, note, err := h.resolveFlashbackRow(ctx, q)
+	h.logOrderNote(q, note)
+	return image, err
+}
+
+// resolveFlashbackRow is ResolveFlashbackRow, with the order note (#2156)
+// returned for the caller to deliver: "" when there is none.
+func (h *Handler) resolveFlashbackRow(ctx context.Context, q TimeTravelQuery) (map[string]any, string, error) {
 	opts := query.Options{
 		Schema: q.Schema,
 		Table:  q.Table,
@@ -175,28 +188,68 @@ func (h *Handler) ResolveFlashbackRow(ctx context.Context, q TimeTravelQuery) (m
 		ArchiveFetcher: h.archiveFetcher,
 	}, q.AsOf)
 	if err != nil {
-		return nil, classifyFetchError(ctx, q.Type, err, h.logger)
+		return nil, "", classifyFetchError(ctx, q.Type, err, h.logger)
 	}
 
 	// ENUM/SET ordinals → labels (#472/#475) BEFORE the fold: ApplyAt replaces
 	// the image wholesale per event, so pre-mapped events make the final state
 	// carry labels the way the live table did when the event happened.
 	h.mapEventImages(q.Schema, q.Table, rows)
-	image, err := reconstruct.ApplyAt(nil, rows, q.AsOf)
+	image, ordered, note, err := foldRowInBinlogOrder(nil, rows, q.AsOf, query.BinlogOrderProof(ctx, h.indexDB))
 	if err != nil {
 		// Residual unchanged-TOAST marker (#592) — a capture-invariant
 		// violation, i.e. a server-side data fault. Raw error → the caller's
 		// "internal fault" branch. Refusing beats serving the marker's JSON.
-		return nil, err
+		return nil, "", err
 	}
 	if len(image) == 0 {
 		// Row never existed at AsOf (no event in the window), or its latest
 		// surviving event was a DELETE. A non-DELETE tail that folds to empty is
 		// a corrupt/partial row image — surfaced as a Warn, not silently.
-		h.warnCorruptImageDrop(q.Schema, q.Table, rows)
-		return nil, nil
+		h.warnCorruptImageDrop(q.Schema, q.Table, ordered)
+		return nil, note, nil
 	}
-	return image, nil
+	return image, note, nil
+}
+
+// foldRowInBinlogOrder folds ONE row's changes onto initial as of asOf, in
+// the order the source's binary log holds them where that can be established
+// (#2156), and returns the state, the changes in the order folded, and the
+// note owed to the reader ("" when there is none).
+//
+// The changes come in (event_timestamp, event_id) order, and event_timestamp
+// is the time a change's STATEMENT STARTED: when session B waits on a row
+// lock A holds, A is in the binary log first and carries the later time, and
+// folded as fetched the row ends on A's value where the database holds B's.
+// reconstruct.EventsInBinlogOrder is the rule single-row `reconstruct` uses
+// (#2162): the cut stays at asOf by statement time, then query.OrderByBinlog.
+//
+// The note is for a row whose order could not be established where the two
+// orders may differ (query.BinlogOrder.MayDiffer): the answer is then the
+// statement-time one, as before. A reordered row gets no note, as in the
+// full-table `_snapshot` read: the shim has no "AS OF was given" to tell
+// apart from "AS OF is now", which is what reconstruct.PastCutWarning keys
+// on, and the limit of a cut by statement time is in docs/time-travel-sql.md.
+//
+// rows is not modified. idsFollowBinlog is query.BinlogOrderProof.
+func foldRowInBinlogOrder(initial map[string]any, rows []query.ResultRow, asOf time.Time,
+	idsFollowBinlog func([]query.ResultRow) query.IDProof) (map[string]any, []query.ResultRow, string, error) {
+	ordered, order := reconstruct.EventsInBinlogOrder(rows, asOf, idsFollowBinlog)
+	note := ""
+	if order.MayDiffer(ordered) {
+		note = "order of changes unproven: " + order.RowReason() +
+			". The row was taken at its changes in the order their statements started, which may be wrong for a row two sessions changed at once."
+	}
+	state, err := reconstruct.ApplyAt(initial, ordered, asOf)
+	return state, ordered, note, err
+}
+
+// logOrderNote logs the order note of a single-row read (#2156) for a
+// front-end with no place to hand it to the client.
+func (h *Handler) logOrderNote(q TimeTravelQuery, note string) {
+	if note != "" {
+		h.logger.Warn(q.Type.String()+": "+note, "schema", q.Schema, "table", q.Table)
+	}
 }
 
 // ResolveSnapshotRow resolves a single-row _snapshot query (baseline-aware) to
@@ -211,11 +264,19 @@ func (h *Handler) ResolveFlashbackRow(ctx context.Context, q TimeTravelQuery) (m
 // lives here, the pgwire front-end inherits it for free — a second renderer must
 // NOT re-derive it.
 func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (map[string]any, error) {
+	state, note, err := h.resolveSnapshotRow(ctx, q)
+	h.logOrderNote(q, note)
+	return state, err
+}
+
+// resolveSnapshotRow is ResolveSnapshotRow, with the order note (#2156)
+// returned for the caller to deliver, as resolveFlashbackRow.
+func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (map[string]any, string, error) {
 	src := h.baselineSource()
 	if src == "" {
 		h.logger.Debug("shim: _snapshot has no baseline source configured; using binlog-only path",
 			"schema", q.Schema, "table", q.Table)
-		return h.ResolveFlashbackRow(ctx, q)
+		return h.resolveFlashbackRow(ctx, q)
 	}
 
 	// Guard the PK type before attempting a baseline match. ReadBaselineRow
@@ -227,7 +288,7 @@ func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	if !ok {
 		h.logger.Debug("shim: _snapshot cannot resolve PK type; using binlog-only path",
 			"schema", q.Schema, "table", q.Table, "pk_column", q.PKColumn)
-		return h.ResolveFlashbackRow(ctx, q)
+		return h.resolveFlashbackRow(ctx, q)
 	}
 	// PostgreSQL baselines store every column as raw pgoutput text (#593), so
 	// ReadBaselineRow's string-bound match is a string-identity join that can
@@ -246,7 +307,7 @@ func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 				h.logger.Warn("shim: _snapshot PK type not safe for baseline lookup; using binlog-only path",
 					"schema", q.Schema, "table", q.Table, "pk_column", q.PKColumn, "pk_type", dataType)
 			}
-			return h.ResolveFlashbackRow(ctx, q)
+			return h.resolveFlashbackRow(ctx, q)
 		}
 	}
 
@@ -256,11 +317,11 @@ func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 		if errors.Is(err, reconstruct.ErrNoBaseline) {
 			h.logger.Debug("shim: _snapshot found no baseline at-or-before AsOf; using binlog-only path",
 				"schema", q.Schema, "table", q.Table)
-			return h.ResolveFlashbackRow(ctx, q)
+			return h.resolveFlashbackRow(ctx, q)
 		}
 		// A real baseline-source failure (unreadable dir, S3 outage) is a
 		// server-side fault: raw error → the caller's "internal fault" branch.
-		return nil, err
+		return nil, "", err
 	}
 
 	// Refuse if a TRUNCATE/DROP/RENAME hit this table in the window: same blind
@@ -271,10 +332,10 @@ func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	sincePos, ddlMark, eventMark := snapshotAnchor(ctx, baselinePath, h.logger, q.Schema, q.Table)
 	if err := reconstruct.CheckDestructiveDDL(ctx, h.indexDB, q.Schema, q.Table,
 		reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos, Mark: ddlMark}); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if err := h.checkSnapshotNumbering(ctx, q, snapshotTime, sincePos, eventMark); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	// q.PKValue is passed RAW here — Parquet baseline rows store actual column
@@ -288,7 +349,7 @@ func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	pkMetas := []metadata.ColumnMeta{{Name: q.PKColumn, DataType: dataType, IsPK: true}}
 	baselineRow, err := reconstruct.ReadBaselineRow(ctx, baselinePath, map[string]string{q.PKColumn: q.PKValue}, pkMetas)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	opts := query.Options{
@@ -317,19 +378,19 @@ func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 		ArchiveFetcher: h.archiveFetcher,
 	}, q.AsOf)
 	if err != nil {
-		return nil, classifyFetchError(ctx, q.Type, err, h.logger)
+		return nil, "", classifyFetchError(ctx, q.Type, err, h.logger)
 	}
 
 	h.mapEventImages(q.Schema, q.Table, rows)
-	state, err := reconstruct.ApplyAt(baselineRow, rows, q.AsOf)
+	state, ordered, note, err := foldRowInBinlogOrder(baselineRow, rows, q.AsOf, query.BinlogOrderProof(ctx, h.indexDB))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if len(state) == 0 {
-		h.warnCorruptImageDrop(q.Schema, q.Table, rows)
-		return nil, nil
+		h.warnCorruptImageDrop(q.Schema, q.Table, ordered)
+		return nil, note, nil
 	}
-	return state, nil
+	return state, note, nil
 }
 
 // ColumnsFor returns the wire column list for a single-row time-travel result,

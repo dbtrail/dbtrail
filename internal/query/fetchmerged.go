@@ -155,6 +155,25 @@ type FetchMergedOptions struct {
 	// some keys kept statement-time order because binary log order could
 	// not be established.
 	LatestOrder *LatestPerPKOrder
+
+	// HistoryRowCap, with LatestInBinlog, bounds the rows the history read
+	// buffers: LatestPerPKInBinlog reads every change in the window of a row
+	// whose two latest sets disagree, and a read with no start (the shim's
+	// `_flashback`) reaches back over the whole retention, where a contended
+	// row can hold hundreds of thousands of changes. Each batch asks for at
+	// most what is left plus one; past the cap the fetch fails with a
+	// *HistoryCapError. 0 = no bound (a window with a start: a baseline, a
+	// lookback).
+	HistoryRowCap int
+}
+
+// HistoryCapError is FetchMerged's refusal when the history read of
+// FetchMergedOptions.LatestInBinlog would buffer more than HistoryRowCap
+// rows.
+type HistoryCapError struct{ Cap int }
+
+func (e *HistoryCapError) Error() string {
+	return fmt.Sprintf("the changes of the rows whose order has to be read hold more than %d rows", e.Cap)
 }
 
 // SourceResolver names the archive sources a merged read will open.
@@ -1064,7 +1083,7 @@ func fetchPage(
 		return nil, nil, nil, 0, false, err
 	}
 	var order LatestPerPKOrder
-	rows, order, err = LatestPerPKInBinlog(rows, o.Opts.LimitPerPK, binlogOrderProofOnce(ctx, engine.db),
+	rows, order, err = LatestPerPKInBinlog(rows, o.Opts.LimitPerPK, BinlogOrderProofOnce(ctx, engine.db),
 		func(pks []string) ([]ResultRow, error) { return fetchKeyHistory(ctx, engine, o, src, pks) })
 	if err != nil {
 		return nil, nil, nil, 0, false, err
@@ -1092,11 +1111,19 @@ func fetchKeyHistory(ctx context.Context, engine *Engine, o FetchMergedOptions, 
 		h.LatestInBinlog, h.LatestOrder = false, nil
 		h.Opts.LimitPerPK, h.Opts.LatestPerPKCandidates = 0, false
 		h.Opts.PKValues, h.Opts.PKValuesIn = "", k
+		if o.HistoryRowCap > 0 {
+			// One more than what is left: getting it proves the cap is
+			// passed without reading the rest (o.HistoryRowCap).
+			h.Opts.Limit = o.HistoryRowCap - len(out) + 1
+		}
 		rows, _, _, _, _, err := fetchPageRows(ctx, engine, h, src)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, rows...)
+		if o.HistoryRowCap > 0 && len(out) > o.HistoryRowCap {
+			return nil, &HistoryCapError{Cap: o.HistoryRowCap}
+		}
 	}
 	return out, nil
 }

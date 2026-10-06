@@ -93,21 +93,6 @@ func (o BinlogOrder) Note() string {
 		o.Moved, o.Total)
 }
 
-// StatementTimeOrderNotice is for a caller that does NOT take the rule and
-// keeps its rows in statement-time order whatever the binary log says
-// (recover-cascade, until its own slice of #2156): the text to show when that
-// order is known or suspected to differ from binary log order, and "" when the
-// two agree. rows are not modified.
-func StatementTimeOrderNotice(rows []ResultRow, idsFollowBinlog func([]ResultRow) IDProof) string {
-	o := OrderByBinlog(slices.Clone(rows), idsFollowBinlog)
-	if o.Sorted() {
-		return fmt.Sprintf("the binary log holds %d of %d changes in a different order than their statements started (a statement that waited for a row lock, or ran long), "+
-			"and this script undoes them in statement-time order. For a row that two sessions changed close together it can leave the first session's value: check such rows by hand.",
-			o.Moved, o.Total)
-	}
-	return o.Warning()
-}
-
 // statementTimeTail is what every refusal ends with: what order was kept and
 // what it means for the reader.
 const statementTimeTail = "The changes are in the order their statements started, as before. " +
@@ -446,11 +431,11 @@ func BinlogOrderProof(ctx context.Context, db *sql.DB) func([]ResultRow) IDProof
 	}
 }
 
-// binlogOrderProofOnce is BinlogOrderProof for a caller that asks about many
+// BinlogOrderProofOnce is BinlogOrderProof for a caller that asks about many
 // sets of rows of one fetch: stream_state and index_state are read at the
 // first question and the answer for each set is computed from that one read.
 // A failed read is logged once and answers IDsUnproven for every set.
-func binlogOrderProofOnce(ctx context.Context, db *sql.DB) func([]ResultRow) IDProof {
+func BinlogOrderProofOnce(ctx context.Context, db *sql.DB) func([]ResultRow) IDProof {
 	var (
 		w    indexWriters
 		read bool

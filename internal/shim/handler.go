@@ -164,7 +164,8 @@ type Handler struct {
 	// copy (see freesql.go); freeSQLWhyNot is the reason shown when it is
 	// nil and one is known. lastWarnings is what SHOW WARNINGS answers
 	// after a free-SQL result with cells cut at the cell cap, or after a
-	// `_snapshot` read whose order of changes is unproven (#2156), each with
+	// `_snapshot` or `_flashback` read whose order of changes is unproven
+	// (#2156), each with
 	// lastWarningCode; guarded by mu.
 	freeSQL         FreeSQL
 	freeSQLWhyNot   string
@@ -547,7 +548,8 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 		}
 		h.setWarnings(nil)
 	} else if showWarningsRE.MatchString(qstr) {
-		// Without free SQL the one warning is a `_snapshot` note (#2156).
+		// Without free SQL the one warning is a time-travel order note
+		// (#2156).
 		// With none pending SHOW WARNINGS stays the handshake noise it
 		// always was below.
 		h.mu.Lock()
@@ -881,12 +883,12 @@ func (h *Handler) runPointInTime(q TimeTravelQuery) (*mysql.Result, error) {
 	// at AsOf (never created, or a DELETE tail); a fetch/coverage failure is a
 	// *ResolveError; an ApplyAt data-fault is raw. mysqlRenderErr maps both to
 	// the same wire codes the pre-#1008 inline path produced.
-	image, err := h.ResolveFlashbackRow(ctx, q)
+	image, note, err := h.resolveFlashbackRow(ctx, q)
 	if err != nil {
 		return nil, mysqlRenderErr(err)
 	}
 	if image == nil {
-		return emptyResult(), nil
+		return h.finishWithOrderNote(q, note, emptyResult(), nil)
 	}
 	// When q.Columns is set (#313 user-supplied projection), bypass
 	// imageToResult's orderColumns step — orderColumns is designed for
@@ -896,9 +898,11 @@ func (h *Handler) runPointInTime(q TimeTravelQuery) (*mysql.Result, error) {
 	// multi-row path makes the same split via fullTableResult
 	// (imagesToResultVerbatim vs imagesToResult).
 	if q.Columns != nil {
-		return imageToResultVerbatim(image, q.Columns)
+		res, err := imageToResultVerbatim(image, q.Columns)
+		return h.finishWithOrderNote(q, note, res, err)
 	}
-	return imageToResult(image, h.columnOrderFor(q.Schema, q.Table))
+	res, err := imageToResult(image, h.columnOrderFor(q.Schema, q.Table))
+	return h.finishWithOrderNote(q, note, res, err)
 }
 
 // imageToResultVerbatim is the user-projection sibling of imageToResult.
@@ -1066,7 +1070,9 @@ func (h *Handler) runFullTable(q TimeTravelQuery) (*mysql.Result, error) {
 	// SUCCEEDS instead of tripping the cap — the "add a LIMIT to browse" remedy
 	// the cap error suggests. A LIMIT never RAISES the cap (conservative
 	// default): a LIMIT above the cap keeps the cap+1 overflow probe, so the
-	// binlog full-table path can never buffer more than the cap. This path
+	// first read buffers at most cap+1 rows. The second read (#2156, below)
+	// buffers at most two candidates per row read here plus cap rows of
+	// history, so the whole path stays bounded by a few times the cap. This path
 	// stays buffered (unlike the streaming _snapshot path, #998) because
 	// query.FetchMerged materialises the whole fetch regardless — streaming the
 	// wire without a cursor-based fetch would only relocate the OOM.
@@ -1078,7 +1084,7 @@ func (h *Handler) runFullTable(q TimeTravelQuery) (*mysql.Result, error) {
 	}
 
 	engine := query.New(h.indexDB)
-	rows, _, err := query.FetchMerged(ctx, h.indexDB, engine, query.FetchMergedOptions{
+	fetch := query.FetchMergedOptions{
 		Opts: query.Options{
 			Schema:     q.Schema,
 			Table:      q.Table,
@@ -1090,22 +1096,60 @@ func (h *Handler) runFullTable(q TimeTravelQuery) (*mysql.Result, error) {
 		NoArchive:      h.cfg.NoArchive,
 		AllowGaps:      h.cfg.AllowGaps,
 		ArchiveFetcher: h.archiveFetcher,
-	})
+	}
+	rows, _, err := query.FetchMerged(ctx, h.indexDB, engine, fetch)
 	if err != nil {
 		return nil, wrapFetchError(ctx, q.Type, err, h.logger)
 	}
 
 	if capped && len(rows) > cap {
-		return nil, mysql.NewError(mysql.ER_TOO_BIG_SELECT, fmt.Sprintf(
-			"resolve %s: %s.%s at %s would return more than %d rows; add a LIMIT (e.g. LIMIT %d) to browse, narrow the AS OF range, or filter by PK",
-			q.Type, q.Schema, q.Table, q.AsOf.Format("2006-01-02 15:04:05"), cap, cap,
-		))
+		return nil, fullTableCapError(q, cap, nil)
+	}
+
+	// The read above is each row's latest change by statement time, under
+	// the cap (and a LIMIT, which picks some rows of the window, as it did
+	// before). Each row's latest change is then taken in binary log order
+	// where the index can show it (#2156), by query.RepickLatestInBinlog:
+	// one more read of the window, or of the rows a LIMIT kept. Taken by
+	// statement time, a row two sessions changed at once comes back at
+	// the change the database does not hold. Where the order cannot be shown
+	// the statement-time answer stands and the client gets a warning, as
+	// `_snapshot` does.
+	//
+	// That read buffers at most two candidates per row, plus the changes of
+	// each row whose two latest sets disagree, read from the start of the
+	// window. `_flashback` has no start (only AS OF), so for a contended row
+	// that is its whole retention: HistoryRowCap bounds those changes by the
+	// same cap, and passing it is the same refusal.
+	fetch.HistoryRowCap = cap
+	rows, order, err := query.RepickLatestInBinlog(ctx, h.indexDB, engine, fetch, rows)
+	if err != nil {
+		if capErr := fullTableCapError(q, cap, err); capErr != err {
+			return nil, capErr
+		}
+		return nil, wrapFetchError(ctx, q.Type, err, h.logger)
 	}
 
 	// ENUM/SET ordinals → labels per event's snapshot epoch (#472/#475),
 	// before the images are extracted.
 	h.mapEventImages(q.Schema, q.Table, rows)
-	return h.fullTableResult(q, extractFullTableImages(rows))
+	res, err := h.fullTableResult(q, extractFullTableImages(rows))
+	return h.finishWithOrderNote(q, order.ReadNote(), res, err)
+}
+
+// fullTableCapError is the refusal of a full-table read past the row cap
+// (ER_TOO_BIG_SELECT, 1104): for the first read when cause is nil, and for
+// the second one when cause is a *query.HistoryCapError. Any other cause is
+// returned as it is.
+func fullTableCapError(q TimeTravelQuery, cap int, cause error) error {
+	var capErr *query.HistoryCapError
+	if cause != nil && !errors.As(cause, &capErr) {
+		return cause
+	}
+	return mysql.NewError(mysql.ER_TOO_BIG_SELECT, fmt.Sprintf(
+		"resolve %s: %s.%s at %s would return more than %d rows; add a LIMIT (e.g. LIMIT %d) to browse, narrow the AS OF range, or filter by PK",
+		q.Type, q.Schema, q.Table, q.AsOf.Format("2006-01-02 15:04:05"), cap, cap,
+	))
 }
 
 // extractFullTableImages picks the post-image of every non-DELETE

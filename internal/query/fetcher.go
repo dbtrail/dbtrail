@@ -211,6 +211,13 @@ func (m *MergedFetcher) resolveOnce(ctx context.Context, db *sql.DB) ([]string, 
 
 // Fetch implements Fetcher.
 func (m *MergedFetcher) Fetch(ctx context.Context, opts Options) ([]ResultRow, error) {
+	return m.fetch(ctx, opts, nil)
+}
+
+// fetch is Fetch, and with latest set the read takes each key's latest
+// LimitPerPK changes in binary log order (FetchMergedOptions.LatestInBinlog,
+// #2156) and fills latest with what was decided.
+func (m *MergedFetcher) fetch(ctx context.Context, opts Options, latest *LatestPerPKOrder) ([]ResultRow, error) {
 	// One picture of the index for the fetcher's lifetime, like the archive
 	// sources above: a fetcher serves one run (see runPicture).
 	var heads *PartitionHeads
@@ -229,6 +236,8 @@ func (m *MergedFetcher) Fetch(ctx context.Context, opts Options) ([]ResultRow, e
 		AllowGaps:      true,
 		ArchiveFetcher: m.ArchiveFetcher,
 		SourceResolver: m.resolveOnce,
+		LatestInBinlog: latest != nil,
+		LatestOrder:    latest,
 	})
 	if err != nil {
 		return nil, err
