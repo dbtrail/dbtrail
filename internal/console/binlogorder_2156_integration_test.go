@@ -142,10 +142,10 @@ func TestIntegrationBinlogOrder2156_unprovenOrderIsSaid(t *testing.T) {
 }
 
 // /api/recover answers with a recover-cascade script when the table has
-// cascading children. That script stays in statement-time order; when the
-// binary log holds the parent's changes in another order the response says so
-// in its warnings AND ahead of the script, which is what gets saved.
-func TestIntegrationBinlogOrder2156_autoCascadeSaysItsOrder(t *testing.T) {
+// cascading children. That script takes the changes in binary log order too
+// (#2156, cascaderecover.MergeParentRoots), and says so in its header and in
+// the response's warnings.
+func TestIntegrationBinlogOrder2156_autoCascadeTakesBinlogOrder(t *testing.T) {
 	srv, dbName := seedCascadeConsole(t, nil)
 	post := func() recoverResponse {
 		t.Helper()
@@ -180,23 +180,24 @@ func TestIntegrationBinlogOrder2156_autoCascadeSaysItsOrder(t *testing.T) {
 		dbName, "parent", 1, "2", nil, nil, []byte(`{"id":2}`))
 
 	resp := post()
-	if !strings.HasPrefix(resp.SQL, "-- WARNING: order of the changes: the binary log holds 2 of 3 changes in a different order") {
-		t.Fatalf("the script does not start with the order warning:\n%s", resp.SQL)
+	// Binary log order is A (delete, 500) then B (insert, 600): B is undone
+	// first. Statement-time order would undo A first, re-inserting a row B's
+	// insert already holds.
+	first := strings.Index(resp.SQL, "\n-- [")
+	if first < 0 || !strings.Contains(strings.SplitN(resp.SQL[first+1:], "\n", 2)[0], "reverse INSERT") {
+		t.Fatalf("the first statement does not undo B's insert:\n%s", resp.SQL)
+	}
+	if !strings.Contains(resp.SQL, "--   - Order of the changes: 2 of 3 changes were written to the binary log in a different order") {
+		t.Fatalf("the script header does not carry the order note:\n%s", resp.SQL)
+	}
+	if strings.HasPrefix(resp.SQL, "-- WARNING: order of the changes") {
+		t.Fatalf("the statement-time notice is still put ahead of the script:\n%s", resp.SQL)
 	}
 	found := false
 	for _, w := range resp.Warnings {
-		found = found || strings.HasPrefix(w, "Order of the changes: the binary log holds 2 of 3 changes")
+		found = found || strings.HasPrefix(w, "Order of the changes: 2 of 3 changes were written")
 	}
 	if !found {
-		t.Fatalf("order warning missing from the response: %v", resp.Warnings)
-	}
-	// The statements are the same ones in the same order as a script built
-	// without the notice: only the leading comment was added.
-	_, body, ok := strings.Cut(resp.SQL, "\n-- bintrail recover")
-	if !ok {
-		t.Fatalf("no cascade preamble after the warning:\n%s", resp.SQL)
-	}
-	if strings.Contains(body, "order of the changes") {
-		t.Fatalf("the notice appears twice:\n%s", resp.SQL)
+		t.Fatalf("order note missing from the response: %v", resp.Warnings)
 	}
 }

@@ -860,7 +860,7 @@ func SynthesizeVictims(
 		// baseSincePos, when the baseline recorded one (#797), anchors the lower
 		// bound on the baseline's exact binlog position instead of its imprecise
 		// SnapshotTime DATETIME — see BaselineLookup.SincePos.
-		cands, qerr := eng.Fetch(ctx, query.Options{
+		candOpts := query.Options{
 			Schema:     fk.Schema,
 			Table:      fk.Table,
 			ColumnEq:   []query.ColumnEq{{Column: fk.Column, Value: parentKey}},
@@ -870,7 +870,11 @@ func SynthesizeVictims(
 			Order:      "DESC",
 			LimitPerPK: 1,
 			Limit:      opts.CandidateLimit + 1,
-		})
+		}
+		cands, qerr := eng.Fetch(ctx, candOpts)
+		if qerr == nil && len(cands) > 0 {
+			cands, qerr = repickChildren(ctx, eng, candOpts, cands, opts.CandidateLimit, fk, addWarning)
+		}
 		if qerr != nil {
 			// Operational failure: we never learned whether children existed, so
 			// the result is provably partial. Record it AND surface a non-nil
@@ -1532,6 +1536,45 @@ func SynthesizeVictims(
 		Incomplete:       incomplete,
 		Warnings:         warnings,
 	}, errors.Join(errs...)
+}
+
+// repickChildren puts in place of each child candidate its latest change in
+// binary log order (#2156), when eng can (query.LatestRepicker): the scan
+// above reads each child's latest change by statement time, and
+// event_timestamp is the time a change's STATEMENT STARTED. When session B
+// waited on a row lock A held, A is in the binary log first and carries the
+// later time; re-inserting the child with A's image puts back a value the
+// database no longer held when the parent was deleted.
+//
+// The scan keeps its Limit (the overflow check, and the bound on how many
+// children one parent reads), which fixes WHICH children are read; that does
+// not depend on the order of their changes. Only the first limit candidates
+// are repicked: the extra one only proves the overflow and is cut below. A
+// child whose order cannot be established keeps the statement-time pick, and
+// the table gets one advisory warning (the recovery is not partial: every
+// child found is re-inserted).
+//
+// Every newest-wins choice made later from these candidates (the victims of
+// two roots, dedupVictimsNewest; the SET NULL and key restorations) compares
+// their event_timestamp, and keeps doing so on purpose: two scans of one
+// child under two roots read windows that end at their roots, and the later
+// window holds every change of the earlier one, so the binary log's latest
+// change in it is the same change or a later one in both orders.
+func repickChildren(ctx context.Context, eng query.Fetcher, o query.Options, cands []query.ResultRow, limit int,
+	fk CascadeFK, addWarning func(key, msg string)) ([]query.ResultRow, error) {
+	r, ok := eng.(query.LatestRepicker)
+	if !ok {
+		return cands, nil
+	}
+	head := cands[:min(len(cands), limit)]
+	picked, order, err := r.RepickLatestInBinlog(ctx, o, head)
+	if err != nil {
+		return nil, err
+	}
+	if note := order.ReadNote(); note != "" {
+		addWarning("binlog-order:"+fk.Schema+"."+fk.Table, fk.Schema+"."+fk.Table+": "+note)
+	}
+	return append(picked, cands[len(head):]...), nil
 }
 
 // dedupVictimsNewest collapses victims of the same (schema, table, pk) emitted

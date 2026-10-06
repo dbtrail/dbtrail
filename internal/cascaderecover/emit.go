@@ -81,15 +81,16 @@ func EmitSQL(w io.Writer, gen *recovery.Generator, rows []query.ResultRow, setNu
 // recovery.GenerateSQLFromRowsIndexed for why a scanner over the rendered text
 // cannot do this safely. The script is byte-identical either way.
 func EmitSQLIndexed(w io.Writer, gen *recovery.Generator, rows []query.ResultRow, setNullRows []cascade.SetNullRestore, keyUpdates []cascade.FKKeyRestore, resolver *metadata.Resolver, hdr Header) (int, []int, error) {
-	// This script is built on statement-time order end to end: MergeParentRoots
-	// below, the cascade detection that picked the rows, and the SET NULL and
-	// key restorations written after them. A generator that reorders its rows
-	// by binary log position (recovery.SetBinlogOrder, #2156) would move the
-	// parents under statements placed by the other order. recover-cascade
-	// takes that rule as a whole in its own slice of #2156; until then a
-	// caller that opts in by accident is refused, not half-applied.
+	// The rows are in their final order already: the parents in binary log
+	// order where it can be established (MergeParentRoots, #2156), then the
+	// synthesized children, which carry no binary log position. A generator
+	// that reorders its rows by position (recovery.SetBinlogOrder) would
+	// treat the children as "no coordinate" and keep the whole list in the
+	// order handed in, with a warning about rows that never had a position.
+	// So the order is decided by the caller and a generator that opts in is
+	// refused, not half-applied.
 	if gen.BinlogOrderEnabled() {
-		return 0, nil, fmt.Errorf("internal error: recover-cascade was handed a generator that orders by binary log position; its script is built on statement-time order (#2156). Nothing was written; report this")
+		return 0, nil, fmt.Errorf("internal error: recover-cascade was handed a generator that orders by binary log position; its rows are put in binary log order before they reach it (cascaderecover.MergeParentRoots, #2156). Nothing was written; report this")
 	}
 	// Enforce the recover script-size budget first (#654). GenerateSQLFromRows
 	// re-checks it before rendering, but checking here keeps the refusal
@@ -293,23 +294,34 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 }
 
 // MergeParentRoots combines the parent DELETE roots with the parent key-UPDATE
-// roots into ONE chronological list, which is what EmitSQL's generator requires.
+// roots into ONE list in the order the source's binary log holds them, which
+// is what EmitSQL's generator requires, and returns what was decided about
+// that order.
 //
-// recovery.GenerateSQLFromRows does not sort: it trusts the caller's order and
-// reverses it, so the most recent change is undone first. (A generator with
-// recovery.SetBinlogOrder does reorder; EmitSQLIndexed refuses one. The order
-// here is by statement time, which is not always commit order: #2156.) Concatenating the two
-// root sets — DELETEs, then UPDATEs — throws that away. A parent key-UPDATEd at
-// t1 and DELETEd at t2 (both in the window) would emit the UPDATE-undo first,
-// against a row the later-emitted INSERT has not re-created yet: it matches 0
-// rows, and the INSERT then restores the POST-update image. The parent is left
-// silently wrong.
+// recovery.GenerateSQLFromRows does not sort here: it trusts the caller's
+// order and reverses it, so the most recent change is undone first (EmitSQL
+// refuses a generator with recovery.SetBinlogOrder, see there). Concatenating
+// the two root sets (DELETEs, then UPDATEs) throws that order away. A parent
+// key-UPDATEd and then DELETEd (both in the window) would emit the UPDATE-undo
+// first, against a row the later-emitted INSERT has not re-created yet: it
+// matches 0 rows, and the INSERT then restores the POST-update image. The
+// parent is left silently wrong.
 //
-// sort.SliceStable over the concatenation, rather than a two-list merge, so the
-// result is correct even if a caller ever hands over a set that is not itself
-// ascending; ties keep DELETEs before UPDATEs of the same (timestamp, id), which
-// only synthetic rows without a real EventID can produce.
-func MergeParentRoots(deletes, keyUpdates []query.ResultRow) []query.ResultRow {
+// Two steps. First (event_timestamp, event_id), sort.SliceStable over the
+// concatenation rather than a two-list merge, so the result is right even if
+// a caller hands over a set that is not itself ascending; ties keep DELETEs
+// before UPDATEs of the same (timestamp, id), which only synthetic rows
+// without a real EventID can produce. Then query.OrderByBinlog (#2156), the
+// rule `recover` applies: event_timestamp is the time a change's STATEMENT
+// STARTED, so a DELETE that waited on a row lock an UPDATE of the same parent
+// held is in the binary log after that UPDATE and carries the earlier time.
+// Where binary log order cannot be established the first order stands, and
+// the decision's Warning says why; OrderNotes words both cases for the
+// script header and the response.
+//
+// idsFollowBinlog is query.BinlogOrderProof for a caller that holds the
+// index; nil never proves the order. The inputs are not modified.
+func MergeParentRoots(deletes, keyUpdates []query.ResultRow, idsFollowBinlog func([]query.ResultRow) query.IDProof) ([]query.ResultRow, query.BinlogOrder) {
 	out := make([]query.ResultRow, 0, len(deletes)+len(keyUpdates))
 	out = append(out, deletes...)
 	out = append(out, keyUpdates...)
@@ -319,5 +331,22 @@ func MergeParentRoots(deletes, keyUpdates []query.ResultRow) []query.ResultRow {
 		}
 		return out[i].EventID < out[j].EventID
 	})
-	return out
+	return out, query.OrderByBinlog(out, idsFollowBinlog)
+}
+
+// OrderNotes is what a recover-cascade script and its response say about the
+// order MergeParentRoots decided (#2156): nothing when the two orders agree,
+// a note when the parents' changes were put in binary log order, and the
+// decision's warning when that order could not be established. They are
+// advisory (Header.Warnings): no row is missing because of them.
+func OrderNotes(o query.BinlogOrder) []string {
+	if o.Sorted() {
+		return []string{fmt.Sprintf("Order of the changes: %d of %d changes were written to the binary log in a different order than their statements started "+
+			"(a statement that waited for a row lock, or ran long). They are undone in the reverse of binary log order, which is commit order, "+
+			"so the `at` times of the statements below are not all in sequence.", o.Moved, o.Total)}
+	}
+	if w := o.Warning(); w != "" {
+		return []string{"Order of the changes: " + w}
+	}
+	return nil
 }

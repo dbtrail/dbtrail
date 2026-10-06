@@ -284,10 +284,8 @@ func TestOrderByBinlog_neverAThirdOrder(t *testing.T) {
 	}
 }
 
-// Note is said only for a reordered set, and StatementTimeOrderNotice, for a
-// caller that keeps statement-time order, speaks whenever the two orders
-// differ or cannot be compared, and never touches the rows.
-func TestBinlogOrderNoteAndStatementTimeOrderNotice(t *testing.T) {
+// Note is said only for a reordered set.
+func TestBinlogOrderNote(t *testing.T) {
 	const f = "binlog.000007"
 	rows := lockWait(f)
 	if got := OrderByBinlog(slices.Clone(rows), unproven).Note(); got != "" {
@@ -295,25 +293,6 @@ func TestBinlogOrderNoteAndStatementTimeOrderNotice(t *testing.T) {
 	}
 	if got := OrderByBinlog(slices.Clone(rows), proven).Note(); !strings.Contains(got, "2 of 2 changes were written to the binary log in a different order") {
 		t.Fatalf("note = %q", got)
-	}
-	for name, tc := range map[string]struct {
-		rows  []ResultRow
-		proof func([]ResultRow) IDProof
-		want  string
-	}{
-		"binlog order differs":  {lockWait(f), proven, "this script undoes them in statement-time order"},
-		"order cannot be shown": {lockWait(f), unproven, "cannot show which one is right"},
-		"no position":           {lockWait(""), proven, "carry no binary log position"},
-		"the orders agree":      {[]ResultRow{orderRow(1, f, 4, orderT0), orderRow(2, f, 9, orderT0.Add(time.Second))}, proven, ""},
-	} {
-		before := orderIDs(tc.rows)
-		got := StatementTimeOrderNotice(tc.rows, tc.proof)
-		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
-			t.Fatalf("%s: notice = %q, want one holding %q", name, got, tc.want)
-		}
-		if !slices.Equal(before, orderIDs(tc.rows)) {
-			t.Fatalf("%s: the caller's rows were reordered", name)
-		}
 	}
 }
 

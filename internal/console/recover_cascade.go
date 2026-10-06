@@ -198,7 +198,8 @@ func (s *Server) handleRecoverCascade(w http.ResponseWriter, r *http.Request) {
 	// script (#1002). Merged chronologically, NOT concatenated: the generator
 	// reverses the input order, so DELETEs-then-UPDATEs would undo a key UPDATE
 	// before re-inserting the parent it belongs to (see MergeParentRoots).
-	parents := cascaderecover.MergeParentRoots(synth.ParentDeletes, synth.KeyUpdateParents)
+	parents, order := cascaderecover.MergeParentRoots(synth.ParentDeletes, synth.KeyUpdateParents, query.BinlogOrderProof(r.Context(), b.db))
+	synth.Warnings = append(synth.Warnings, cascaderecover.OrderNotes(order)...)
 	rows := append(append([]query.ResultRow{}, parents...), synth.Victims...)
 
 	var buf bytes.Buffer
@@ -619,8 +620,12 @@ func (s *Server) cascadeRecover(ctx context.Context, b *bundle, body recoverRequ
 
 	// baseRows ALREADY contains every parent root (cascadeRootsOnTable derived
 	// the parent set from it), so synth.KeyUpdateParents must NOT be appended
-	// here — that would reverse the parent UPDATE twice.
-	rows := append(append([]query.ResultRow{}, baseRows...), synth.Victims...)
+	// here — that would reverse the parent UPDATE twice. baseRows is put in
+	// binary log order where it can be established (#2156), the order the
+	// same request on a table without children gets from the generator.
+	ordered, order := cascaderecover.MergeParentRoots(baseRows, nil, query.BinlogOrderProof(ctx, b.db))
+	warnings := append(append([]string{}, synth.Warnings...), cascaderecover.OrderNotes(order)...)
+	rows := append(ordered, synth.Victims...)
 	var buf bytes.Buffer
 	gen := recovery.NewForDialect(b.db, b.resolver, recovery.DialectForIndex(b.db))
 	// #849: same shared-daemon budget as handleRecover (see recoverMaxScriptBytes
@@ -632,7 +637,7 @@ func (s *Server) cascadeRecover(ctx context.Context, b *bundle, body recoverRequ
 		Table:          body.Table,
 		Children:       len(synth.Victims),
 		Caveats:        caveats,
-		Warnings:       synth.Warnings,
+		Warnings:       warnings,
 		BaselineActive: synth.BaselineActive,
 		Combined:       true,
 	})
@@ -646,7 +651,7 @@ func (s *Server) cascadeRecover(ctx context.Context, b *bundle, body recoverRequ
 		SetNullCount:    len(setNull),
 		KeyRestoreCount: len(keyUpdates),
 		Caveats:         caveats,
-		Warnings:        synth.Warnings,
+		Warnings:        warnings,
 	}, nil
 }
 

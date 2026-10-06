@@ -38,6 +38,18 @@ func (o LatestPerPKOrder) Note() string {
 		"A mismatch on a row that two sessions changed at once may be a false alarm. The first such row: %s", o.Refused, upperFirst(o.warning))
 }
 
+// ReadNote is Note for a reader that serves the rows it took (a time-travel
+// read, a recovery script) rather than comparing them: the same refusal,
+// without the word about a mismatch.
+func (o LatestPerPKOrder) ReadNote() string {
+	if o.Refused == 0 {
+		return ""
+	}
+	return fmt.Sprintf("order of changes unproven: for %d row(s) the order of the changes in the binary log could not be established, "+
+		"so each of those rows was taken at its change with the latest statement time, which is wrong for a row two sessions changed at once. "+
+		"The first such row: %s", o.Refused, upperFirst(o.warning))
+}
+
 func upperFirst(s string) string {
 	if s == "" {
 		return s
@@ -276,6 +288,38 @@ func LatestPerPKInBinlog(rows []ResultRow, n int, idsFollowBinlog func([]ResultR
 // rowRefusal says why OrderByBinlog refused one row's changes, in words
 // about the row and without OrderByBinlog's counts, which a reader of a
 // whole table would take for counts over the table.
+// RowReason is why OrderByBinlog kept one row's changes in statement-time
+// order, worded for that row, and "" when it did not refuse.
+func (o BinlogOrder) RowReason() string {
+	if o.Warning() == "" {
+		return ""
+	}
+	return rowRefusal(o)
+}
+
+// MayDiffer reports, for a decision OrderByBinlog took over rows (left in
+// the order they were handed in, (event_timestamp, event_id), since it kept
+// that order), that it kept statement-time order where binary log order may
+// be different: positions disagreed with the times (every refusal but one),
+// or, with a change that has no position, the ids (the order capture indexed
+// them in) disagree with the times. A row whose times agree with its ids and
+// that has no positions gives nothing to doubt, and a reader is not told so
+// on every row an older build indexed.
+func (o BinlogOrder) MayDiffer(rows []ResultRow) bool {
+	if o.Warning() == "" {
+		return false
+	}
+	if o.Reason != OrderNoCoordinate {
+		return true
+	}
+	for i := 1; i < len(rows); i++ {
+		if rows[i].EventID < rows[i-1].EventID {
+			return true
+		}
+	}
+	return false
+}
+
 func rowRefusal(d BinlogOrder) string {
 	switch d.Reason {
 	case OrderNoCoordinate:

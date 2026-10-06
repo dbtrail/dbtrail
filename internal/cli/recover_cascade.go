@@ -380,10 +380,12 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 	// (KeyUpdateParents ⊆ parentUpdates); the rest of the UPDATE fetch was
 	// candidate material for that decision and never reaches the script.
 	//
-	// Merged chronologically, NOT concatenated: the generator reverses the input
+	// Merged in order, NOT concatenated: the generator reverses the input
 	// order, so DELETEs-then-UPDATEs would undo a key UPDATE before re-inserting
-	// the parent that UPDATE's row belongs to (see MergeParentRoots).
-	parents := cascaderecover.MergeParentRoots(parentDeletes, res.KeyUpdateParents)
+	// the parent that UPDATE's row belongs to. The order is the binary log's
+	// where it can be established (#2156); see MergeParentRoots.
+	parents, order := cascaderecover.MergeParentRoots(parentDeletes, res.KeyUpdateParents, query.BinlogOrderProof(cmd.Context(), db))
+	warnings = append(warnings, cascaderecover.OrderNotes(order)...)
 	rows := append(append([]query.ResultRow{}, parents...), res.Victims...)
 
 	// ── Emit ──────────────────────────────────────────────────────────────────

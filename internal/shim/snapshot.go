@@ -347,7 +347,7 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 	// The note becomes this statement's warning only once the read has
 	// succeeded (finishWithOrderNote): a later step that fails must leave
 	// SHOW WARNINGS with nothing, not with a note about a result never sent.
-	orderNote := order.Note()
+	orderNote := order.ReadNote()
 	// ENUM/SET ordinals → labels per event's snapshot epoch (#472/#475),
 	// BEFORE the merge: the merged rowMap reaching the callback below has
 	// no per-row timestamp, and fullTableTextCell would coerce a delta's
@@ -460,12 +460,12 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 	return h.finishWithOrderNote(q, orderNote, res, err)
 }
 
-// finishWithOrderNote makes the `_snapshot` order note (#2156) the warning of
-// a statement that succeeded, and passes res and err through. On an error it
+// finishWithOrderNote makes the order note (#2156) of a `_snapshot` or
+// `_flashback` read the warning of a statement that succeeded, and passes res and err through. On an error it
 // sets nothing: the statement's diagnostics are the error.
 func (h *Handler) finishWithOrderNote(q TimeTravelQuery, note string, res *mysql.Result, err error) (*mysql.Result, error) {
 	if err == nil && note != "" {
-		h.logger.Warn("_snapshot: "+note, "schema", q.Schema, "table", q.Table)
+		h.logger.Warn(q.Type.String()+": "+note, "schema", q.Schema, "table", q.Table)
 		h.setWarningsCoded(mysql.ER_UNKNOWN_ERROR, []string{note})
 	}
 	return res, err
@@ -743,20 +743,22 @@ func (h *Handler) runSnapshotPointInTime(q TimeTravelQuery) (*mysql.Result, erro
 	// A nil state means the row did not exist at AsOf; a fetch/coverage failure
 	// is a *ResolveError; a baseline/ApplyAt data-fault is raw. mysqlRenderErr
 	// keeps this byte-identical to the pre-#1008 inline path.
-	state, err := h.ResolveSnapshotRow(ctx, q)
+	state, note, err := h.resolveSnapshotRow(ctx, q)
 	if err != nil {
 		return nil, mysqlRenderErr(err)
 	}
 	if state == nil {
-		return emptyResult(), nil
+		return h.finishWithOrderNote(q, note, emptyResult(), nil)
 	}
 
 	// Same projection handling as runPointInTime: an explicit column list
 	// is emitted verbatim; SELECT * uses the DDL column order.
 	if q.Columns != nil {
-		return imageToResultVerbatim(state, q.Columns)
+		res, err := imageToResultVerbatim(state, q.Columns)
+		return h.finishWithOrderNote(q, note, res, err)
 	}
-	return imageToResult(state, h.columnOrderFor(q.Schema, q.Table))
+	res, err := imageToResult(state, h.columnOrderFor(q.Schema, q.Table))
+	return h.finishWithOrderNote(q, note, res, err)
 }
 
 // pkDataType returns the DATA_TYPE of pkCol in schema.table from its

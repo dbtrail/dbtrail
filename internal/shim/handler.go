@@ -164,7 +164,8 @@ type Handler struct {
 	// copy (see freesql.go); freeSQLWhyNot is the reason shown when it is
 	// nil and one is known. lastWarnings is what SHOW WARNINGS answers
 	// after a free-SQL result with cells cut at the cell cap, or after a
-	// `_snapshot` read whose order of changes is unproven (#2156), each with
+	// `_snapshot` or `_flashback` read whose order of changes is unproven
+	// (#2156), each with
 	// lastWarningCode; guarded by mu.
 	freeSQL         FreeSQL
 	freeSQLWhyNot   string
@@ -547,7 +548,8 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 		}
 		h.setWarnings(nil)
 	} else if showWarningsRE.MatchString(qstr) {
-		// Without free SQL the one warning is a `_snapshot` note (#2156).
+		// Without free SQL the one warning is a time-travel order note
+		// (#2156).
 		// With none pending SHOW WARNINGS stays the handshake noise it
 		// always was below.
 		h.mu.Lock()
@@ -881,12 +883,12 @@ func (h *Handler) runPointInTime(q TimeTravelQuery) (*mysql.Result, error) {
 	// at AsOf (never created, or a DELETE tail); a fetch/coverage failure is a
 	// *ResolveError; an ApplyAt data-fault is raw. mysqlRenderErr maps both to
 	// the same wire codes the pre-#1008 inline path produced.
-	image, err := h.ResolveFlashbackRow(ctx, q)
+	image, note, err := h.resolveFlashbackRow(ctx, q)
 	if err != nil {
 		return nil, mysqlRenderErr(err)
 	}
 	if image == nil {
-		return emptyResult(), nil
+		return h.finishWithOrderNote(q, note, emptyResult(), nil)
 	}
 	// When q.Columns is set (#313 user-supplied projection), bypass
 	// imageToResult's orderColumns step — orderColumns is designed for
@@ -896,9 +898,11 @@ func (h *Handler) runPointInTime(q TimeTravelQuery) (*mysql.Result, error) {
 	// multi-row path makes the same split via fullTableResult
 	// (imagesToResultVerbatim vs imagesToResult).
 	if q.Columns != nil {
-		return imageToResultVerbatim(image, q.Columns)
+		res, err := imageToResultVerbatim(image, q.Columns)
+		return h.finishWithOrderNote(q, note, res, err)
 	}
-	return imageToResult(image, h.columnOrderFor(q.Schema, q.Table))
+	res, err := imageToResult(image, h.columnOrderFor(q.Schema, q.Table))
+	return h.finishWithOrderNote(q, note, res, err)
 }
 
 // imageToResultVerbatim is the user-projection sibling of imageToResult.
@@ -1078,7 +1082,7 @@ func (h *Handler) runFullTable(q TimeTravelQuery) (*mysql.Result, error) {
 	}
 
 	engine := query.New(h.indexDB)
-	rows, _, err := query.FetchMerged(ctx, h.indexDB, engine, query.FetchMergedOptions{
+	fetch := query.FetchMergedOptions{
 		Opts: query.Options{
 			Schema:     q.Schema,
 			Table:      q.Table,
@@ -1090,7 +1094,8 @@ func (h *Handler) runFullTable(q TimeTravelQuery) (*mysql.Result, error) {
 		NoArchive:      h.cfg.NoArchive,
 		AllowGaps:      h.cfg.AllowGaps,
 		ArchiveFetcher: h.archiveFetcher,
-	})
+	}
+	rows, _, err := query.FetchMerged(ctx, h.indexDB, engine, fetch)
 	if err != nil {
 		return nil, wrapFetchError(ctx, q.Type, err, h.logger)
 	}
@@ -1102,10 +1107,23 @@ func (h *Handler) runFullTable(q TimeTravelQuery) (*mysql.Result, error) {
 		))
 	}
 
+	// The read above is each row's latest change by statement time, under
+	// the cap: it fixes which rows are read. Each one's latest change is
+	// then taken in binary log order where the index can show it (#2156):
+	// by statement time, a row two sessions changed at once comes back at
+	// the change the database does not hold. Where the order cannot be shown
+	// the statement-time answer stands and the client gets a warning, as
+	// `_snapshot` does.
+	rows, order, err := query.RepickLatestInBinlog(ctx, h.indexDB, engine, fetch, rows)
+	if err != nil {
+		return nil, wrapFetchError(ctx, q.Type, err, h.logger)
+	}
+
 	// ENUM/SET ordinals → labels per event's snapshot epoch (#472/#475),
 	// before the images are extracted.
 	h.mapEventImages(q.Schema, q.Table, rows)
-	return h.fullTableResult(q, extractFullTableImages(rows))
+	res, err := h.fullTableResult(q, extractFullTableImages(rows))
+	return h.finishWithOrderNote(q, order.ReadNote(), res, err)
 }
 
 // extractFullTableImages picks the post-image of every non-DELETE

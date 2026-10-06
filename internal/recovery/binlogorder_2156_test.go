@@ -297,9 +297,3 @@ func TestBinlogOrder_warningIsLogged(t *testing.T) {
 	}
 }
 
-func TestCommentParagraph(t *testing.T) {
-	got := CommentParagraph("-- WARNING: ", "one\ntwo")
-	if got != "-- WARNING: \"one\\ntwo\"\n" {
-		t.Fatalf("CommentParagraph = %q", got)
-	}
-}

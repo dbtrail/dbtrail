@@ -432,11 +432,13 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 		}
 
 		// Only the parent UPDATEs the synthesis confirmed as cascading join the
-		// DELETE roots. Merged chronologically, NOT concatenated: the generator
+		// DELETE roots. Merged in order, NOT concatenated: the generator
 		// reverses its input order without sorting, so DELETEs-then-UPDATEs
 		// would undo a key UPDATE before re-inserting the parent that UPDATE's
-		// row belongs to (see cascaderecover.MergeParentRoots).
-		parents := cascaderecover.MergeParentRoots(parentDeletes, res.KeyUpdateParents)
+		// row belongs to. The order is the binary log's where it can be
+		// established (#2156); see cascaderecover.MergeParentRoots.
+		parents, order := cascaderecover.MergeParentRoots(parentDeletes, res.KeyUpdateParents, query.BinlogOrderProof(ctx, t.DB))
+		res.Warnings = append(res.Warnings, cascaderecover.OrderNotes(order)...)
 		rows := append(append([]query.ResultRow{}, parents...), res.Victims...)
 
 		gen := recovery.NewForDialect(t.DB, resolver, recovery.DialectForIndex(t.DB))

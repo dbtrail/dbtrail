@@ -33,8 +33,8 @@ import (
 // The input is not modified. idsFollowBinlog is query.BinlogOrderProof for a
 // caller that holds the index.
 //
-// The shim's single-row reads call ApplyAt directly and still fold in fetched
-// order; they take the rule in their own slice of #2156.
+// The shim's single-row `_flashback` and `_snapshot` reads use it as well
+// (shim.foldRowInBinlogOrder).
 func EventsInBinlogOrder(events []query.ResultRow, at time.Time, idsFollowBinlog func([]query.ResultRow) query.IDProof) ([]query.ResultRow, query.BinlogOrder) {
 	selected := make([]query.ResultRow, 0, len(events))
 	for _, ev := range events {

@@ -199,6 +199,18 @@ each `UPDATE`/`DELETE` **`row_before` equals the state the previous event on
 that same key left behind**. Events superseded by a newer event on the same key
 are walked too; that is precisely the class `--check content` skips.
 
+Each key's changes are walked in binary log order (commit order), not by the
+time their statement started, so a row that two sessions changed at once (one
+waited on the other's row lock) reads as the whole chain it is
+([#2156](https://github.com/dbtrail/dbtrail/issues/2156)). When that order
+cannot be established for some rows (see "Most recent" is the order of the
+binary log in [query-and-recovery.md](query-and-recovery.md)), those rows are
+walked by time, and a mismatch's detail ends with `order of changes unproven:
+...`: the break can then be a false alarm on such a row. The window itself is
+cut by statement time, so a change that started outside it and was committed
+between two changes inside it is not walked, and the change after it reads as
+a break.
+
 It reads **the index only** — no baseline, no live source — so
 `--baseline-dir`/`--baseline-s3` are not required, and `--source-dsn` and
 `--explain` (a content-mode drill-down it could never print) are rejected.

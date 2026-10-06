@@ -172,6 +172,10 @@ func VerifyRecoverInputs(ctx context.Context, cfg RecoverInputsConfig, schema, t
 		ColByName:     colByName,
 		BinariesTyped: binariesTyped,
 		Truncated:     truncated,
+		// Each row's changes in binary log order where the index can show
+		// it (#2156): by statement time, a row two sessions changed at once
+		// reads as a broken chain.
+		IDsFollowBinlog: query.BinlogOrderProof(ctx, cfg.IndexDB),
 	})
 
 	res.Status = out.Status
@@ -361,6 +365,10 @@ type recoverChainInput struct {
 	// Truncated reports that the window did not fit the event budget, so the
 	// events here are a PREFIX of it.
 	Truncated bool
+	// IDsFollowBinlog is query.OrderByBinlog's argument for each row's
+	// changes (query.BinlogOrderProof for a caller that holds the index; nil
+	// never proves the order). See orderChainsByBinlog.
+	IDsFollowBinlog func([]query.ResultRow) query.IDProof
 }
 
 // recoverChainOutcome is the walk's verdict plus the counts that make an
@@ -434,6 +442,7 @@ type chainState struct {
 // run did not earn.
 func checkRecoverChains(in recoverChainInput) recoverChainOutcome {
 	out := recoverChainOutcome{Events: len(in.Events)}
+	order := orderChainsByBinlog(in.Events, in.IDsFollowBinlog)
 	states := make(map[string]*chainState)
 
 	// Only the FIRST mismatch detail and the total are ever reported
@@ -553,6 +562,9 @@ func checkRecoverChains(in recoverChainInput) recoverChainOutcome {
 	out.Events = len(in.Events) - out.UnwalkableEvents
 	out.ChainsNoPredecessor = len(noPredecessor)
 	out.Status, out.Detail, out.InconclusiveKind = recoverChainVerdict(out, mismatchCount, firstMismatch, unresolved, firstUnresolved, in.Truncated)
+	if out.Status == StatusMismatch {
+		out.Detail = withNote(out.Detail, order.note())
+	}
 	return out
 }
 
@@ -875,4 +887,100 @@ func eventTypeLabel(t event.EventType) string {
 	default:
 		return "UNKNOWN"
 	}
+}
+
+// chainOrder is what orderChainsByBinlog decided over a table's rows.
+type chainOrder struct {
+	// refused counts rows whose changes stayed in statement-time order where
+	// binary log order could not be established and may differ.
+	refused int
+	// warning is the first refused row's reason.
+	warning string
+}
+
+// note is the text a mismatch carries when some rows were walked in
+// statement-time order where that order may be wrong: there the mismatch can
+// be the order's, not the data's. It starts with "order of changes unproven",
+// as query.LatestPerPKOrder.Note does for the other verify modes.
+func (o chainOrder) note() string {
+	if o.refused == 0 {
+		return ""
+	}
+	return fmt.Sprintf("order of changes unproven: for %d row(s) the order of the changes in the binary log could not be established, "+
+		"so those rows were walked in the order their statements started. "+
+		"A break on a row that two sessions changed at once may be a false alarm. The first such row: %s", o.refused, o.warning)
+}
+
+// withNote appends note to detail as a sentence of its own.
+func withNote(detail, note string) string {
+	if note == "" {
+		return detail
+	}
+	if d := strings.TrimSuffix(strings.TrimSpace(detail), "."); d != "" {
+		return d + ". " + note
+	}
+	return note
+}
+
+// orderChainsByBinlog puts each row's changes in the order the source's
+// binary log holds them, in place, where that can be established (#2156).
+//
+// The walk checks that a change's before-image is what the change before it
+// left, and the fetch hands the changes in (event_timestamp, event_id) order.
+// event_timestamp is the time a change's STATEMENT STARTED: when session B
+// waits on a row lock A holds, A is in the binary log first and carries the
+// later time, so walked by time B's before-image (A's value) reads as a hole
+// in a chain that is whole.
+//
+// Each row is decided on its own by query.OrderByBinlog, the rule `recover`
+// applies (#2162), and its changes are put back in the places its changes
+// held: no other row's change moves, and a change with no primary key on
+// record is its own row and never moves. A row the rule keeps in time order
+// (no position on a change, two binary log names, a numbering that started
+// again, an index whose ids do not prove the order) is counted as refused
+// when the two orders may differ for it (query.BinlogOrder.MayDiffer). A
+// PostgreSQL row (an LSN as file) is in commit order already.
+//
+// What this cannot see is a change outside the rows handed in: the window is
+// cut by statement time, so at either edge (since, until, or the event cap)
+// a change that is in the binary log before one inside the window can be
+// left out, and the change after it reads as a break. That was so before
+// this rule as well.
+func orderChainsByBinlog(events []query.ResultRow, idsFollowBinlog func([]query.ResultRow) query.IDProof) chainOrder {
+	slots := make(map[string][]int)
+	var keys []string
+	for i := range events {
+		pk := events[i].PKValues
+		if pk == "" {
+			continue
+		}
+		if _, ok := slots[pk]; !ok {
+			keys = append(keys, pk)
+		}
+		slots[pk] = append(slots[pk], i)
+	}
+	var o chainOrder
+	for _, pk := range keys {
+		idx := slots[pk]
+		if len(idx) < 2 {
+			continue
+		}
+		rows := make([]query.ResultRow, len(idx))
+		for j, i := range idx {
+			rows[j] = events[i]
+		}
+		d := query.OrderByBinlog(rows, idsFollowBinlog)
+		if d.MayDiffer(rows) {
+			if o.refused == 0 {
+				o.warning = fmt.Sprintf("pk=%s: %s", pk, d.RowReason())
+			}
+			o.refused++
+		}
+		if d.Sorted() {
+			for j, i := range idx {
+				events[i] = rows[j]
+			}
+		}
+	}
+	return o
 }
