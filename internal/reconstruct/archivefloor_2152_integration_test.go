@@ -327,6 +327,11 @@ func TestRefresh_aRunThatDidNotCheckKeepsEachTablesPosition_2152(t *testing.T) {
 		t.Fatalf("rotation.Perform: %v", err)
 	}
 
+	// A change still in the live index, so R2 has a cut of its own (ahead of
+	// both tables' positions): the one a run that did not check must not
+	// record.
+	insertTableEvent(t, db, "shop", "items", 104, 500, N.Add(-31*time.Hour), 2, "1", `{"id":1,"status":"c"}`)
+
 	failArchives = true
 	R2 := N.Add(-30 * time.Hour)
 	refresh(R2, both, true) // cannot read the archive; carries both forward
