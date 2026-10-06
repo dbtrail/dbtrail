@@ -324,20 +324,26 @@ Results are **per table**, one of:
   happened. In the baseline pair mode the snapshot checked is the older one
   of the pair, so the table is checkable again from the **second** full
   snapshot taken after the restart; the live-source mode needs one. In pair
-  mode the check looks only at what the pair reads: this table's changes
-  recorded up to the newer snapshot. A pair whose two snapshots both come
-  before the restart, or a restart whose later changes touched only other
-  tables, is still checked; capture moving to another server counts only
-  when capture recorded the move at or before the newer snapshot. The
+  mode the check asks only about what the pair reads: a change of this table
+  indexed after the older snapshot's mark, recorded between the earliest
+  time the read reaches back to and the newer snapshot, that sorts before
+  the mark. A pair whose two snapshots both come before the restart, or a
+  restart whose later changes touched only other tables, is still checked;
+  capture moving to another server counts only when capture recorded the
+  move after the older snapshot and at or before the newer one. The
   live-source mode reads up to now and checks the whole index, as a snapshot
   update does. `--explain` refuses the same way.
 
   Not checked: a snapshot without that record, which includes every snapshot
   made with the CLI `bintrail baseline` (only the web interface's and the
-  daemon's snapshots and snapshot updates record it); changes already moved
-  to Parquet archives, since the check reads the index table only; and an
-  index that `bintrail index` also wrote into, whose event ids do not follow
-  the binary log (a warning is logged once).
+  daemon's snapshots and snapshot updates record it); a pair whose whole
+  window has already been moved out of the index to Parquet archives (the
+  check looks at nothing there and passes, while verify reads that window
+  from the archives with the same position filter, so a new-numbering change
+  in it is dropped and the table reads as a mismatch); and an index that
+  `bintrail index` also wrote into, whose event ids do not follow the binary
+  log (a warning is logged once). A failed read of whether `bintrail index`
+  wrote into the index is reported as an error, not skipped.
 
   Under `--check recover`, inconclusive is subdivided by `inconclusive_kind`
   so a summary can be read: `no-activity` (nothing changed in the window),
