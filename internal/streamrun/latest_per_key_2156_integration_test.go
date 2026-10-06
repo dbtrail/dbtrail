@@ -150,8 +150,13 @@ func runLatestPerKey2156(t *testing.T, flavor, sourceDSN string, sourceDB, index
 	if err := sourceDB.QueryRow("SELECT " + gtidVar).Scan(&gtid); err != nil {
 		t.Fatalf("read %s: %v", gtidVar, err)
 	}
-	testutil.MustExec(t, indexDB, `INSERT INTO stream_state (id, mode, binlog_file, binlog_position, gtid_set, last_checkpoint, server_id)
-		VALUES (1, 'gtid', 'binlog.000001', 4, ?, UTC_TIMESTAMP(), 1)`, gtid)
+	sflavor := "mysql"
+	if flavor == gomysql.MariaDBFlavor {
+		sflavor = "mariadb"
+	}
+	testutil.MustExec(t, indexDB, `INSERT INTO stream_state (id, mode, binlog_file, binlog_position, gtid_set, flavor, last_checkpoint, server_id)
+		VALUES (1, 'gtid', 'binlog.000001', 4, ?, ?, UTC_TIMESTAMP(), 1)
+		ON DUPLICATE KEY UPDATE mode = 'gtid', gtid_set = VALUES(gtid_set), flavor = VALUES(flavor)`, gtid, sflavor)
 	if proof, err := query.IDsFollowBinlog(ctx, indexDB, snapTime); err != nil || proof != query.IDsFollowStream {
 		t.Fatalf("IDsFollowBinlog on the captured index = %v, %v; want IDsFollowStream", proof, err)
 	}
