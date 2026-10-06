@@ -54,6 +54,7 @@ var checkLights = map[string]string{
 	"Index DSN database name":      LightOther,
 	"Index database":               LightOther,
 	CapacityCheckName:              LightOther,
+	BufferPoolCheckName:            LightOther,
 	SnapshotExpiryCheckName:        LightOther,
 	ObjectLockCheckName:            LightOther,
 	proxySQLRulesCheckName:         LightOther,

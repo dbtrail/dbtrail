@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **The bundled index MySQL gets a buffer pool sized to the machine, and
+  `doctor` warns when an index still runs with the 128 MB default** (#2141).
+  `index-mysql` in `docker-compose.yml` ran with InnoDB's 128 MB
+  `innodb_buffer_pool_size` on every host. Measured on a 16-core, 128 GB host
+  with a busy source (about 5,200 row changes per second): capture topped out
+  near 1,400 row changes per second and the lag grew without end (65 minutes
+  behind after 89 minutes); with a sized pool it kept up at 16,000 to 17,000.
+  The compose file now passes `--innodb-buffer-pool-size=${INDEX_BUFFER_POOL:-128M}`,
+  and `install.sh` writes `INDEX_BUFFER_POOL` into `.env` on a fresh install:
+  a quarter of the memory `docker info` reports (on Docker Desktop that is
+  its VM, which is all the container can use), whole GB from 1G up, 128 MB
+  steps below, at most 32G; under about 1 GB the default stays. A quarter
+  because the web console's SQL engine and often the source share the
+  machine. A value already in `.env`, or set in the installing shell, is
+  never changed. A re-run over an existing stack writes nothing (a new value
+  would restart the index MySQL mid-capture on the `up -d` that follows) and
+  prints the line to add instead. A new doctor check, "Index buffer pool",
+  reads `@@innodb_buffer_pool_size` and WARNs when it is still 128 MB on a
+  machine whose memory it can see and that has about 4 GB or more: the
+  bundled container (same host), or a loopback DSN whose server
+  `@@hostname` is this machine. An index elsewhere, whose memory is not
+  visible from here, is a SKIP with the sizing advice, never a warning. It
+  never FAILS, so it cannot stop `watch` or `up` from booting, and it only
+  reads: DBTrail never changes a setting on the index. It shows in
+  `bintrail doctor`, in the preflight `watch` and `up` print at startup, and
+  on the console's server checks. `innodb_io_capacity` is not changed: the
+  `mysql:8.4` image already defaults it to 10000.
 - **`verify --source-dsn` works on a table that takes writes during the
   check** (#2150). The reconstruction was cut at the time the source scan
   ended, so every write committed while the table was read showed as a

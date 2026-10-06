@@ -221,6 +221,7 @@ if [ -f docker-compose.yml ]; then
   [ -n "${DBTRAIL_METRICS_PORT:-}" ] && warn \
     "DBTRAIL_METRICS_PORT=${DBTRAIL_METRICS_PORT} ignored: the existing docker-compose.yml is reused (edit its ports: line by hand)."
 else
+  FRESH=1
   fetch "$COMPOSE_URL" docker-compose.yml \
     || die "Failed to download $COMPOSE_URL"
   say "${DIM}    downloaded docker-compose.yml${RST}"
@@ -285,6 +286,59 @@ fi
 grep -q '^services:' docker-compose.yml || die \
   "${DIR}/docker-compose.yml doesn't look like a compose file (truncated download,
     or a network proxy/captive portal returned something else). Delete it and re-run."
+
+# ── memory for the MySQL that keeps the history ─────────────────────────
+# InnoDB's buffer pool defaults to 128 MB on any machine, which caps capture
+# at about 1,400 row changes per second on a busy server (#2141). The compose
+# file passes INDEX_BUFFER_POOL to it; a fresh install writes that into .env
+# as a quarter of the memory Docker reports (Docker Desktop on a Mac reports
+# its VM, which is all the container can use), whole GB from 1G up, 128 MB
+# steps below, at most 32G; under about 1 GB the default stays. A quarter,
+# because the web interface's SQL engine and often the MySQL being followed
+# share the machine. internal/doctor RecommendedBufferPool is the same rule
+# and test/installer holds the two together.
+#
+# Only a fresh install writes: on a re-run a new line would change the
+# MySQL's configuration and the `up -d` below would restart it in the middle
+# of capture, so the line is printed instead. A value already in .env, in any
+# form compose reads, is never touched.
+pool_setting() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le 18 ] || return 1
+  q=$(( $1 / 1048576 / 4 ))            # a quarter, in MiB
+  if [ "$q" -ge 1024 ]; then
+    g=$(( q / 1024 )); [ "$g" -gt 32 ] && g=32
+    printf '%sG' "$g"
+  elif [ "$q" -ge 256 ]; then
+    printf '%sM' "$(( q / 128 * 128 ))"
+  else
+    printf 'default'
+  fi
+}
+env_has_pool() {
+  [ -f .env ] && grep -Eq '^[[:space:]]*(export[[:space:]]+)?INDEX_BUFFER_POOL[[:space:]]*=' .env
+}
+mem=$(docker info --format '{{.MemTotal}}' 2>/dev/null) || mem=""
+[ "$mem" = 0 ] && mem=""
+pool=$(pool_setting "$mem") || pool=""
+if [ -n "${INDEX_BUFFER_POOL:-}" ]; then
+  say "${DIM}    INDEX_BUFFER_POOL is set in this shell (${INDEX_BUFFER_POOL}), so .env was left alone${RST}"
+elif env_has_pool; then
+  say "${DIM}    INDEX_BUFFER_POOL is already in .env, so it was left as you set it${RST}"
+elif [ "$pool" = default ]; then
+  say "${DIM}    this machine is small, so DBTrail's MySQL keeps the 128 MB memory default${RST}"
+elif [ -n "$pool" ] && [ -n "${FRESH:-}" ]; then
+  if [ -s .env ] && [ -n "$(tail -c 1 .env)" ]; then printf '\n' >> .env; fi
+  printf 'INDEX_BUFFER_POOL=%s\n' "$pool" >> .env || die "Couldn't write ${DIR}/.env."
+  say "${DIM}    DBTrail's MySQL gets ${pool} of memory, a quarter of what Docker has (INDEX_BUFFER_POOL in .env)${RST}"
+elif [ -n "$pool" ]; then
+  warn "DBTrail's MySQL may still run with the 128 MB memory default, which slows capture on a busy server."
+  if grep -q 'INDEX_BUFFER_POOL' docker-compose.yml; then
+    warn "To give it ${pool}, add INDEX_BUFFER_POOL=${pool} to ${DIR}/.env and run: ${COMPOSE} up -d"
+  else
+    warn "To give it ${pool}, take the current docker-compose.yml (docs/docker.md 'Upgrading the stack'), then add INDEX_BUFFER_POOL=${pool} to ${DIR}/.env and run: ${COMPOSE} up -d"
+  fi
+fi
 
 # ── 3. bring it up ──────────────────────────────────────────────────────
 step "Downloading the newest images (the first run can take a minute)"

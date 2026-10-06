@@ -108,7 +108,18 @@ Budget roughly **1.2–1.6 KB per indexed event** (INSERT/DELETE ≈ 1.2 KB, UPD
 
 ### InnoDB tuning
 
-The **bundled** index (the `index-mysql` service in `docker-compose.yml`) already applies the write-throughput overrides below except `innodb_buffer_pool_size`, which is host-RAM dependent and left to you. The settings here are for a **BYO** index (`INDEX_DSN` pointing at your own MySQL):
+The **bundled** index (the `index-mysql` service in `docker-compose.yml`) already applies the write-throughput overrides below. Its `innodb_buffer_pool_size` comes from `INDEX_BUFFER_POOL` in the `.env` next to the compose file (default `128M` when unset). `install.sh` writes it on a fresh install: a quarter of the memory Docker reports (on Docker Desktop, the memory of its VM), rounded down to whole GB from `1G` up, in 128 MB steps below that, at most `32G`; under about 1 GB of memory it writes nothing and the default stays. A quarter, not the usual 50-70%, because the bundled index rarely has the machine to itself: the console's SQL engine takes up to 4 GB, and the source MySQL may run on the same host. Raise it when the machine runs nothing else heavy.
+
+To set or change it on a stack you already have (the installer never rewrites an existing `.env` value, and a re-run only prints the line to add):
+
+```bash
+echo 'INDEX_BUFFER_POOL=8G' >> .env     # whole GB, or e.g. 512M
+docker compose up -d                    # restarts index-mysql; capture resumes from its checkpoint
+```
+
+A `docker-compose.yml` from before this setting does not pass it on; take the current file first ([Upgrading the stack](docker.md#upgrading-the-stack)). Why it matters: with the 128 MB default, a measured 16-core, 128 GB host captured about 1,400 row changes per second from a busy source and fell further behind every minute; with a sized pool it kept up at 16,000 to 17,000. `bintrail doctor` (and the preflight `watch` runs at startup) warns when an index runs with the 128 MB default on a machine with about 4 GB or more whose memory it can see: the bundled container, or a MySQL on this same machine. It only reads the setting; DBTrail never changes it on your index.
+
+The settings here are for a **BYO** index (`INDEX_DSN` pointing at your own MySQL):
 
 ```ini
 [mysqld]
