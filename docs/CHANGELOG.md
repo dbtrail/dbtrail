@@ -60,7 +60,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writing, in case the previous holder lost it without knowing yet. A batch
   already on its way to the index when the lock went can still commit, so a
   cut connection can still leave a few rows twice. The source given at
-  startup (`--source-dsn`) takes no lock yet.
+  startup (`--source-dsn`) takes the same kind of lock, named after the index
+  database it writes to: before, two daemons started with the same
+  `--source-dsn` and `--index-dsn` both captured it (3,082 duplicate events
+  in 60 seconds, measured). The second one now keeps serving the web
+  interface and logs that it waits; it captures once the first one stops.
+  The extension source jobs of that source now stop with the lock and start
+  again with it. One effect on a slow index: a lock check that takes more
+  than 5 seconds counts as a lost lock, so capture stops and resumes from its
+  checkpoint about 11 seconds later, where it used to ride out a stall of up
+  to `--write-timeout`; nothing is lost. `bintrail stream` and `bintrail up`
+  still take no lock: run one of them per source.
   **Upgrading:** a daemon from before this change does not keep its lock, so
   stop it before starting the new one, once. **Rows already indexed twice**
   stay: to see whether a server has any, run on its index database
@@ -292,6 +302,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   although the copy might have answered: `AT TIME ZONE`. An alias named
   with one of the 44 words and used later (`SELECT made AS at ... ORDER BY
   at`) stays on MySQL too, which is right: the copy would refuse it.
+### Added
+- **A guide for Amazon ECS** (#2105): [ecs.md](ecs.md) has a Fargate task
+  definition for the `bintrail-console` image running `watch`, servers added
+  from the web interface, the state on EFS, the index in your own MySQL, and
+  what each deployment setting does. Checked on Fargate: a server added from
+  the web interface, a full read, and three deployments with the ECS default
+  (new task first), after which the servers, the login and the snapshots were
+  still there and every change was in the index once. The Kubernetes example
+  in deployment.md now uses `strategy: Recreate`: the default starts a second
+  `bintrail stream` beside the first for a moment, and it takes no lock.
+
 ### Fixed
 - **The binlog-renumbering check reads the archived hours of a read**
   (#2186). `verify`, the `_snapshot` schema of the MySQL port and cascade

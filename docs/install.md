@@ -17,6 +17,7 @@ it, and that is what matters once it runs unattended.
 | Path | For production? | What it brings | What is left to you |
 |---|---|---|---|
 | [Docker Compose](#docker-compose-the-bundled-default) | Yes | Capture, the web interface, an index MySQL, mydumper for full reads, restart after a crash, a health check | Back up the index volumes and watch their disk. Re-download the compose file on every upgrade |
+| [Amazon ECS](./ecs.md) | Yes | The `bintrail-console` image as one Fargate task: capture, the web interface, mydumper, a health check | An index MySQL (RDS), EFS for the saved state, a load balancer |
 | [Docker image](#docker-image-without-compose) | Yes | The binaries. The `bintrail-console` image also carries mydumper; the `bintrail` image does not | An index MySQL, a volume for the state, a restart policy |
 | [Linux packages](#linux-packages) | Yes | The binaries and their license texts, nothing else | A service unit so it starts at boot and restarts after a crash ([deployment.md](./deployment.md#5-deployment-options) has one), mydumper ([how to get it](./dump-and-baseline.md#getting-mydumper)), an index MySQL |
 | [Go install](#go-install), [source build](#build-from-source) | No | A binary built on your machine | Everything above, plus the build itself |
