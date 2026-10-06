@@ -274,6 +274,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   although the copy might have answered: `AT TIME ZONE`. An alias named
   with one of the 44 words and used later (`SELECT made AS at ... ORDER BY
   at`) stays on MySQL too, which is right: the copy would refuse it.
+### Added
+- **A guide for Amazon ECS** (#2105): [ecs.md](ecs.md) has a Fargate task
+  definition for the `bintrail-console` image running `watch`, servers added
+  from the web interface, the state on EFS, the index in your own MySQL, and
+  what each deployment setting does. Checked on Fargate: a server added from
+  the web interface, a full read, and three deployments with the ECS default
+  (new task first), after which the servers, the login and the snapshots were
+  still there and every change was in the index once. The Kubernetes example
+  in deployment.md now uses `strategy: Recreate`: the default starts a second
+  `bintrail stream` beside the first for a moment, and it takes no lock.
+
 ### Fixed
 - **The routed MySQL port no longer answers from the copy after a late change
   whose hour was archived and dropped** (#2187). The check that lets the copy
