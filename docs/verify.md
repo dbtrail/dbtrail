@@ -343,19 +343,48 @@ Results are **per table**, one of:
   restart whose later changes touched only other tables, is still checked;
   capture moving to another server counts only when capture recorded the
   move after the older snapshot and at or before the newer one. The
-  live-source mode reads up to now and checks the whole index, as a snapshot
-  update does. `--explain` refuses the same way.
+  live-source mode asks the same question of what it reads: from the
+  snapshot up to the moment of the comparison
+  ([#2186](https://github.com/dbtrail/dbtrail/issues/2186)). `--explain`
+  refuses the same way.
+
+  In both modes, hours of the window that rotation already moved into Parquet
+  archives are checked too ([#2186](https://github.com/dbtrail/dbtrail/issues/2186)):
+  verify reads them from the archives with the same position filter, so the
+  check reads them as well, and a snapshot older than the index's retention
+  (a quiet table keeps its old snapshot file) is checked like a recent one.
+  When the snapshot's mark itself has been archived, the check first finds
+  it in the archives, so it reads the archives only from a mark they still
+  hold. An archive whose newest change was indexed at or before the
+  snapshot's mark is skipped (`archive_state` records it); every other
+  archive file of the window is read for this table, once per snapshot and
+  table (what it holds is remembered). An archive with
+  no `archive_state` row is not checked: `bintrail archive reconcile --prune`
+  removes the row of an archive whose file is gone from every backend, and
+  from then on nothing records that the hour held a change, so a late change
+  there is no longer seen (the read cannot read it either).
 
   Not checked: a snapshot without that record, which includes every snapshot
   made with the CLI `bintrail baseline` (only the web interface's and the
-  daemon's snapshots and snapshot updates record it); a pair whose whole
-  window has already been moved out of the index to Parquet archives (the
-  check looks at nothing there and passes, while verify reads that window
-  from the archives with the same position filter, so a new-numbering change
-  in it is dropped and the table reads as a mismatch); and an index that
-  `bintrail index` also wrote into, whose event ids do not follow the binary
-  log (a warning is logged once). A failed read of whether `bintrail index`
-  wrote into the index is reported as an error, not skipped.
+  daemon's snapshots and snapshot updates record it). A failed read of
+  whether `bintrail index` wrote into the index is reported as an error, not
+  skipped.
+
+  When the check **cannot tell** whether the binary log started again, the
+  table is inconclusive and the detail starts with "binlog numbering not
+  checked:" and the reason ([#2186](https://github.com/dbtrail/dbtrail/issues/2186)):
+  `bintrail index` also wrote into the index, so its event ids do not follow
+  the binary log; the event the snapshot's mark names was deleted while older
+  ones remain (a restarted capture's cleanup), in the index or, once its hour
+  was archived, in the archives; the mark's id now names another event (the
+  index was rebuilt); the mark does not read, or comes from an older binlog
+  numbering than the snapshot's own position; or an archived hour of the
+  window has no file this process can open (no local copy, and no S3 copy or
+  one that is not there). S3 says an object is not there only to a reader
+  that may list the bucket (`s3:ListBucket`); without that permission it
+  answers "access denied", which verify reports as an error. A match over such a
+  window would prove nothing, so it is not reported as one. `--explain` still
+  shows the rows of such a pair.
 
   Under `--check recover`, inconclusive is subdivided by `inconclusive_kind`
   so a summary can be read: `no-activity` (nothing changed in the window),

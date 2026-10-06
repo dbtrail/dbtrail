@@ -52,6 +52,7 @@ func TestCascade_afterTheBinlogNumberingStartsOver_2177(t *testing.T) {
 		renumbered                // the renumbering is named, child 10 not restored
 		checkFail                 // the check failed: named as a failed lookup
 		untilLater                // the move is after the recovery's time: 10 and 11, complete
+		unchecked                 // #2186: the check could not tell; 10 and 11, incomplete with its note
 	)
 	for _, tc := range []struct {
 		name        string
@@ -62,13 +63,23 @@ func TestCascade_afterTheBinlogNumberingStartsOver_2177(t *testing.T) {
 		noIndexSt   bool
 		captureRead string
 		switchAfter bool
-		want        outcome
+		// markGone / markMoved: the mark's event deleted while an older row
+		// remains / its id now another event (#2186). note: what the
+		// incomplete marker must say.
+		markGone, markMoved bool
+		note                string
+		want                outcome
 	}{
 		{name: "no event mark: today's behavior", moveFile: "mysql-bin.000001", want: stale},
 		{name: "mark, same numbering", mark: sameServer, moveFile: "mysql-bin.000009", want: correct},
 		{name: "mark, numbering started over inside the window", mark: sameServer, moveFile: "mysql-bin.000001", want: renumbered},
 		{name: "mark, numbering started over after the window", mark: sameServer, moveFile: "mysql-bin.000001", moveAfter: true, want: untilLater},
-		{name: "mark, backfilled index: not checked", mark: sameServer, moveFile: "mysql-bin.000001", backfilled: true, want: stale},
+		{name: "mark, backfilled index: not checked", mark: sameServer, moveFile: "mysql-bin.000001", backfilled: true, want: unchecked,
+			note: "`bintrail index` also wrote into this index"},
+		{name: "mark's event deleted while older rows remain", mark: sameServer, moveFile: "mysql-bin.000001", markGone: true, want: unchecked,
+			note: "was deleted from the index while older ones remain"},
+		{name: "mark's id names another event", mark: sameServer, moveFile: "mysql-bin.000001", markMoved: true, want: unchecked,
+			note: "is now another event"},
 		{name: "mark, index_state unreadable", mark: sameServer, moveFile: "mysql-bin.000009", noIndexSt: true, want: checkFail},
 		{name: "mark names the server capture still reads", mark: withServer, moveFile: "mysql-bin.000009", captureRead: renumberedOldUUID, want: correct},
 		{name: "capture moved to another server, no record of when", mark: withServer, moveFile: "mysql-bin.000009", captureRead: renumberedNewUUID, want: renumbered},
@@ -99,7 +110,14 @@ func TestCascade_afterTheBinlogNumberingStartsOver_2177(t *testing.T) {
 				[][]string{{"10", "1"}, {"11", "1"}}, md)
 
 			// The event the mark names: child 11, before the snapshot.
-			insertChildEventAt(t, db, dbName, 10, "mysql-bin.000009", 400, snapTime.Add(-time.Minute), "11", 1, 1)
+			switch {
+			case tc.markGone:
+				insertChildEventAt(t, db, dbName, 9, "mysql-bin.000009", 400, snapTime.Add(-time.Minute), "11", 1, 1)
+			case tc.markMoved:
+				insertChildEventAt(t, db, dbName, 10, "mysql-bin.000009", 300, snapTime.Add(-time.Minute), "11", 1, 1)
+			default:
+				insertChildEventAt(t, db, dbName, 10, "mysql-bin.000009", 400, snapTime.Add(-time.Minute), "11", 1, 1)
+			}
 			moveAt := snapTime.Add(2 * time.Minute)
 			if tc.moveAfter {
 				moveAt = rootTS.Add(2 * time.Minute)
@@ -149,7 +167,11 @@ func TestCascade_afterTheBinlogNumberingStartsOver_2177(t *testing.T) {
 				got[v.PKValues] = true
 			}
 			var named, failed bool
+			var uncheckedMsg string
 			for _, msg := range res.Incomplete {
+				if strings.Contains(msg, "binlog numbering not checked") {
+					uncheckedMsg = msg
+				}
 				if strings.HasPrefix(msg, dbName+".child's baseline snapshot is not used") {
 					named = true
 					if tc.captureRead == "" && !strings.Contains(msg, "binary log started again") {
@@ -190,10 +212,27 @@ func TestCascade_afterTheBinlogNumberingStartsOver_2177(t *testing.T) {
 				if !got["11"] {
 					t.Errorf("child 11 is in the binlog inside the lookback window and must still be recovered: %v", got)
 				}
+			case unchecked:
+				// The baseline is used as before, and the result says the window
+				// could not be checked: never reported complete.
+				if res.Complete() || !got["10"] || !got["11"] {
+					t.Fatalf("victims %v, incomplete %v; want 10 and 11, incomplete", got, res.Incomplete)
+				}
+				for _, w := range []string{dbName + ".child's baseline snapshot is used", tc.note, "may be partial"} {
+					if !strings.Contains(uncheckedMsg, w) {
+						t.Errorf("the marker does not say %q: %v", w, res.Incomplete)
+					}
+				}
+				if strings.Contains(uncheckedMsg, "--") {
+					t.Errorf("the marker names a flag (MCP clients get it): %s", uncheckedMsg)
+				}
 			case checkFail:
 				if !failed || named {
 					t.Fatalf("incomplete %v; want the failed check as a failed baseline lookup", res.Incomplete)
 				}
+			}
+			if tc.want != unchecked && uncheckedMsg != "" {
+				t.Errorf("unexpected cannot-check marker: %v", res.Incomplete)
 			}
 			if tc.want != renumbered && named {
 				t.Errorf("unexpected renumbering caveat: %v", res.Incomplete)

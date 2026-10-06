@@ -636,6 +636,10 @@ jobs:
             || { echo "FATAL: read routing after a late change was archived and dropped did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestCascade_afterTheBinlogNumberingStartsOver_2177 ' /tmp/mysql-it.out \
             || { echo "FATAL: cascade recovery after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestCheckNumbering_archivedWindow_2186 ' /tmp/mysql-it.out \
+            || { echo "FATAL: the binlog renumbering check over archived hours did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestSnapshot_archivedWindow_2186 ' /tmp/mysql-it.out \
+            || { echo "FATAL: _snapshot over archived hours after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestCheckNumberingContinues_2160 ' /tmp/mysql-it.out || { echo "FATAL: the binlog renumbering check did not run (false-green tripwire)" >&2; exit 1; }
 
       # The S3 tripwire, kept apart from the steps above so a store that did

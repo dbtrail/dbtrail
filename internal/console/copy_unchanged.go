@@ -777,7 +777,9 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 //
 // Two rules, either one enough to send the statement to MySQL:
 //   - The snapshot's event mark: an event indexed after it sorts before it,
-//     the check the refresh refuses on (reconstruct.CheckNumberingContinues).
+//     the check the refresh refuses on (reconstruct.CheckNumberingContinues),
+//     or a check that cannot tell from it (a backfilled or rebuilt index, the
+//     mark's event deleted while older ones remain, #2186).
 //   - For a snapshot a refresh wrote, whose position is the end of an event
 //     the index held: the newest event sorts before that position, or carries
 //     another base name. The index only grows past an event it holds, so this
@@ -806,10 +808,16 @@ func numberingStartedOver(ctx context.Context, db *sql.DB, tables []views.Baseli
 			continue
 		}
 		checked[m] = true
-		if err := reconstruct.CheckNumberingContinues(ctx, db, &m, at); errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+		note, err := reconstruct.CheckNumberingContinuesNote(ctx, db, &m, at)
+		if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
 			return fmt.Sprintf("the source's binary log started again from another numbering after the snapshot of %s.%s was taken, so no change since can be ruled out by position", t.Schema, t.Table), nil
 		} else if err != nil {
 			return "", err
+		}
+		if note != "" {
+			// The check could not tell (#2186): "cannot say" is not
+			// "unchanged", so MySQL answers.
+			return fmt.Sprintf("the snapshot of %s.%s: %s", t.Schema, t.Table, note), nil
 		}
 	}
 	return "", nil

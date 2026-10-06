@@ -1400,9 +1400,11 @@ func ReconstructTable(
 	// of the first change past At, and after a restart past At that position
 	// is in the new numbering, where it sorts before changes the read needs.
 	boundedAt := cfg.ExplicitAt && cfg.OutputFormat != OutputFormatParquet
-	numberingCheck := func(w ReadWindow) error {
-		return CheckNumberingFrom(ctx, db, AnchorOf(anchorMeta), anchorMeta.EventMark, w)
-	}
+	// A check that could not tell (#2186) is said out loud under an explicit
+	// --at, where a person reads the run's output; a refresh keeps its log
+	// line (the check's own notice) and its capturedBackBelow guard below.
+	var unchecked string
+	numberingCheck := numberingCheckFor(ctx, db, AnchorOf(anchorMeta), anchorMeta.EventMark, cfg.ExplicitAt, &unchecked)
 	if boundedAt {
 		// Bounded only while the live binlog_events holds all the read
 		// reaches, before and after the check (checkNumberingForRead).
@@ -1413,6 +1415,9 @@ func ReconstructTable(
 	}
 	if err != nil {
 		return nil, err
+	}
+	if cfg.ExplicitAt && unchecked != "" {
+		slog.Warn(fmt.Sprintf("reconstruct %s.%s at %s: %s", schema, table, cfg.At.UTC().Format(time.RFC3339), unchecked))
 	}
 	// For a snapshot whose mark names no server (written before marks did),
 	// and only for a position a refresh cut from the index: capture records the
@@ -3490,4 +3495,22 @@ func checkMariaDBFixedTypesAgree(createSQL string, snapshotCols []metadata.Colum
 		}
 	}
 	return nil
+}
+
+// numberingCheckFor is the binlog-renumbering check a full-table run makes,
+// for checkNumberingForRead or a whole-index call. Under an explicit --at it
+// is the readers' form (CheckNumberingFromRead) and keeps the last note in
+// *unchecked; otherwise (a snapshot refresh) it is CheckNumberingFrom, which
+// reads nothing the refresh did not read before #2186.
+func numberingCheckFor(ctx context.Context, db *sql.DB, anchor *query.BinlogPos, rawMark string, explicitAt bool, unchecked *string) func(ReadWindow) error {
+	return func(w ReadWindow) error {
+		if !explicitAt {
+			return CheckNumberingFrom(ctx, db, anchor, rawMark, w)
+		}
+		note, err := CheckNumberingFromRead(ctx, db, anchor, rawMark, w)
+		if note != "" {
+			*unchecked = note
+		}
+		return err
+	}
 }

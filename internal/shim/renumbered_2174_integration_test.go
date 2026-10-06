@@ -79,12 +79,21 @@ func TestSnapshot_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 		switchVia   string
 		switchAfter bool
 		refuse      bool
+		// markGone writes an older row in place of the mark's own (the
+		// resume cleanup of a restarted capture deleted it); markMoved gives
+		// the mark's id another event (a rebuilt index). #2186: these and a
+		// backfilled index cannot be checked, which must reach the client as
+		// a warning (unchecked: what it must say).
+		markGone, markMoved bool
+		unchecked           string
 	}{
 		{name: "no event mark: today's behavior", startOver: true},
 		{name: "mark, same numbering", mark: sameServer},
 		{name: "mark, numbering started over", mark: sameServer, startOver: true, refuse: true},
 		{name: "mark, numbering started over after AS OF", mark: sameServer, startOverLater: true},
-		{name: "mark, backfilled index", mark: sameServer, startOver: true, backfilled: true},
+		{name: "mark, backfilled index", mark: sameServer, startOver: true, backfilled: true, unchecked: "`bintrail index` also wrote into this index"},
+		{name: "mark's event deleted while older rows remain", mark: sameServer, markGone: true, unchecked: "was deleted from the index while older ones remain"},
+		{name: "mark's id names another event", mark: sameServer, markMoved: true, unchecked: "is now another event"},
 		{name: "mark names the server, capture reads it", mark: withServer, captureReads: renumberedOldUUID},
 		{name: "mark names the server, capture reads another, no record of when", mark: withServer, captureReads: renumberedNewUUID, refuse: true},
 		{name: "same address, new server before AS OF", mark: withServer, captureReads: renumberedNewUUID, switchVia: "change", refuse: true},
@@ -138,7 +147,14 @@ func TestSnapshot_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 
 			// The mark's own row (the snapshot holds it), then a change after
 			// the snapshot in the same numbering.
-			insertUsersEventAt(t, db, 10, "mysql-bin.000009", 400, snapTime.Add(-time.Minute), "2", "x", "dave")
+			switch {
+			case tc.markGone:
+				insertUsersEventAt(t, db, 9, "mysql-bin.000009", 400, snapTime.Add(-time.Minute), "2", "x", "dave")
+			case tc.markMoved:
+				insertUsersEventAt(t, db, 10, "mysql-bin.000009", 300, snapTime.Add(-time.Minute), "2", "x", "dave")
+			default:
+				insertUsersEventAt(t, db, 10, "mysql-bin.000009", 400, snapTime.Add(-time.Minute), "2", "x", "dave")
+			}
 			insertUsersEventAt(t, db, 11, "mysql-bin.000009", 500, snapTime.Add(time.Minute), "1", "alice", "bob")
 			if tc.startOver {
 				insertUsersEventAt(t, db, 12, "mysql-bin.000001", 100, snapTime.Add(2*time.Minute), "1", "bob", "carol")
@@ -223,6 +239,7 @@ func TestSnapshot_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 
 			// What a MySQL client gets, for one row and for the table.
 			for _, q := range []TimeTravelQuery{row, table} {
+				h.setWarnings(nil)
 				res, err := h.runSnapshot(q)
 				if !tc.refuse {
 					if err != nil {
@@ -233,6 +250,20 @@ func TestSnapshot_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 						if len(cells) != 2 || cells[0][1] != "bob" || cells[1][1] != "dave" {
 							t.Fatalf("the table = %v; want [[1 bob] [2 dave]]", cells)
 						}
+					}
+					// #2186: a check that could not tell is the statement's
+					// warning (SHOW WARNINGS); one that ran leaves none of its own.
+					var numbering []string
+					for _, w := range h.lastWarnings {
+						if strings.Contains(w, "binlog numbering not checked") {
+							numbering = append(numbering, w)
+						}
+					}
+					switch {
+					case tc.unchecked == "" && len(numbering) > 0:
+						t.Errorf("pk column %q: a checked read warns %q", q.PKColumn, numbering)
+					case tc.unchecked != "" && (len(numbering) != 1 || !strings.Contains(numbering[0], tc.unchecked)):
+						t.Errorf("pk column %q: warnings %q; want one saying %q", q.PKColumn, h.lastWarnings, tc.unchecked)
 					}
 					continue
 				}
@@ -250,6 +281,29 @@ func TestSnapshot_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 				}
 				if tc.captureReads != "" && !strings.Contains(me.Message, renumberedNewUUID) {
 					t.Errorf("pk column %q: the refusal does not name the server capture reads now: %s", q.PKColumn, me.Message)
+				}
+			}
+
+			// The streamed full-table path (a bound connection, no LIMIT)
+			// carries the same warning on its closing packet (#2186).
+			if !tc.refuse {
+				conn := &warningsConn{}
+				h.BindConn(conn)
+				h.setWarnings(nil)
+				if _, err := h.runSnapshot(table); err != nil {
+					t.Fatalf("streamed table: %v", err)
+				}
+				got := 0
+				for _, w := range h.lastWarnings {
+					if strings.Contains(w, "binlog numbering not checked") {
+						got++
+						if !strings.Contains(w, tc.unchecked) || tc.unchecked == "" {
+							t.Errorf("streamed table: warning %q; want %q", w, tc.unchecked)
+						}
+					}
+				}
+				if (got == 1) != (tc.unchecked != "") || int(conn.warnings) != len(h.lastWarnings) {
+					t.Errorf("streamed table: warnings %q (count on the connection %d); want the note: %v", h.lastWarnings, conn.warnings, tc.unchecked != "")
 				}
 			}
 		})

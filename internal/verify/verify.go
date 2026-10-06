@@ -228,12 +228,25 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	// source's binary log started again after it, every later change sorts
 	// below that position and the reconstruction would miss it, reading as a
 	// mismatch with no cause. The refresh's check (#2160) names the cause
-	// instead (#2174). A snapshot without an event mark: no check.
-	if err := reconstruct.CheckNumberingFrom(ctx, cfg.IndexDB, sincePos, eventMark, reconstruct.ReadWindow{Notice: renumberNotices.To(nil)}); err != nil {
+	// instead (#2174). A snapshot without an event mark: no check. A check
+	// that could not tell (#2186: the index was rebuilt or backfilled, the
+	// mark's event is gone) is inconclusive too, with its reason: a match or
+	// mismatch over a window nobody could check would be reported as proof.
+	// Bounded by the read itself, from the snapshot up to asOf (#2186): the
+	// check then also reads the hours rotation moved into archives, which the
+	// fetch below reads too, so a snapshot older than the index's retention
+	// is checked, not reported as uncheckable.
+	unchecked, err := reconstruct.CheckNumberingFromRead(ctx, cfg.IndexDB, sincePos, eventMark, reconstruct.ReadWindow{
+		Schema: schema, Table: table, Since: snapshotTime, Until: asOf, Notice: renumberNotices.To(nil),
+	})
+	if err != nil {
 		if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
 			return inconclusive(res, err.Error()), nil
 		}
 		return res, fmt.Errorf("check the binlog numbering since the snapshot of %s.%s: %w", schema, table, err)
+	}
+	if unchecked != "" {
+		return inconclusive(res, unchecked), nil
 	}
 
 	// 4. Latest event per PK in (baseline, asOf] — the change map the merge needs.
