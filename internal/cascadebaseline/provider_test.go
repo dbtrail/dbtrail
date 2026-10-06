@@ -77,7 +77,7 @@ func TestProvider_staleFallbackPropagates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	provider := New(Source(dir), childResolver(schema))
+	provider := New(Source(dir), childResolver(schema), nil)
 
 	// `at` is after both snapshots, so the newer (childless) one is the
 	// "newest eligible" snapshot and the older one is a stale fallback.
@@ -128,7 +128,7 @@ func TestProvider_sincePosFromBaselineFooter(t *testing.T) {
 		baseline.MetaKeyBinlogFile: "binlog.000042",
 		baseline.MetaKeyBinlogPos:  "12345",
 	})
-	lookup, ok, err := New(Source(withPos), childResolver(schema)).
+	lookup, ok, err := New(Source(withPos), childResolver(schema), nil).
 		BaselineChildren(context.Background(), schema, "child", "pid", "1", at, 100)
 	if err != nil || !ok {
 		t.Fatalf("BaselineChildren = (ok=%v, err=%v), want ok with no error", ok, err)
@@ -142,7 +142,7 @@ func TestProvider_sincePosFromBaselineFooter(t *testing.T) {
 
 	noPos := t.TempDir()
 	writeChildBaselineParquet(t, noPos, "2026-01-01T00-00-00Z", schema, [][]string{{"10", "1"}}, nil)
-	lookup2, ok2, err := New(Source(noPos), childResolver(schema)).
+	lookup2, ok2, err := New(Source(noPos), childResolver(schema), nil).
 		BaselineChildren(context.Background(), schema, "child", "pid", "1", at, 100)
 	if err != nil || !ok2 {
 		t.Fatalf("BaselineChildren (no footer position) = (ok=%v, err=%v), want ok with no error", ok2, err)
@@ -171,7 +171,7 @@ func TestProvider_metadataReadFailureDoesNotBlockScan(t *testing.T) {
 	find := func(ctx context.Context, sch, table string, at time.Time) (string, time.Time, reconstruct.StaleWarning, error) {
 		return glob, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), reconstruct.StaleWarning{}, nil
 	}
-	lookup, ok, err := New(find, childResolver(schema)).
+	lookup, ok, err := New(find, childResolver(schema), nil).
 		BaselineChildren(context.Background(), schema, "child", "pid", "1", time.Now(), 100)
 	if err != nil {
 		t.Fatalf("BaselineChildren: %v, want the unreadable footer to be logged and ignored", err)
@@ -206,7 +206,7 @@ func TestProvider_usesInjectedLookup(t *testing.T) {
 		return reconstruct.FindBaseline(ctx, dir, sch, table, at)
 	}
 
-	lookup, ok, err := New(find, childResolver(schema)).
+	lookup, ok, err := New(find, childResolver(schema), nil).
 		BaselineChildren(context.Background(), schema, "child", "pid", "1", time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC), 100)
 	if err != nil {
 		t.Fatalf("BaselineChildren: %v", err)
@@ -223,7 +223,7 @@ func TestProvider_usesInjectedLookup(t *testing.T) {
 // cover degrades to Phase-1 (ok=false, nil error) instead of failing the whole
 // cascade recovery.
 func TestProvider_noBaselineIsPhase1Only(t *testing.T) {
-	lookup, ok, err := New(Source(t.TempDir()), childResolver("shop")).
+	lookup, ok, err := New(Source(t.TempDir()), childResolver("shop"), nil).
 		BaselineChildren(context.Background(), "shop", "child", "pid", "1", time.Now(), 100)
 	if err != nil {
 		t.Fatalf("BaselineChildren on an empty baseline dir: %v, want nil (Phase-1 only)", err)
@@ -241,7 +241,7 @@ func TestProvider_aFailedLookupIsNotPhase1Only(t *testing.T) {
 	find := func(context.Context, string, string, time.Time) (string, time.Time, reconstruct.StaleWarning, error) {
 		return "", time.Time{}, reconstruct.StaleWarning{}, failed
 	}
-	_, ok, err := New(find, childResolver("shop")).
+	_, ok, err := New(find, childResolver("shop"), nil).
 		BaselineChildren(context.Background(), "shop", "child", "pid", "1", time.Now(), 100)
 	if !errors.Is(err, failed) || ok {
 		t.Fatalf("ok = %v err = %v, want the lookup's own error", ok, err)
