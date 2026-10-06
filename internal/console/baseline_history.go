@@ -388,6 +388,14 @@ type baselineHistoryFile struct {
 	// behind the daemon's per-day bound on them, written as each starts for
 	// the same reason as EmergencyStarted. Older binaries ignore the key.
 	NewTablesStarted map[string][]string `json:"new_tables_started,omitempty"`
+	// Jobs is the journal of the snapshot jobs running now, keyed by run id
+	// (#2180): what each one is and every directory it created. A job that
+	// ends removes its entry; one whose process was killed leaves it, and
+	// the next daemon to start reads it to clean up and to record the run.
+	// Older binaries ignore the key (and drop it on their next save, which
+	// only makes the directories it named unreclaimable, never wrongly
+	// reclaimed).
+	Jobs map[string]BaselineJob `json:"jobs,omitempty"`
 }
 
 const baselineHistoryVersion = 1
@@ -402,6 +410,7 @@ type BaselineRunHistory struct {
 	servers   map[string][]BaselineRunRecord
 	emergency map[string]string
 	newTables map[string][]string
+	jobs      map[string]BaselineJob
 }
 
 // DefaultBaselineHistoryPath returns the history file path as a sibling of
@@ -414,7 +423,7 @@ func DefaultBaselineHistoryPath(serversPath string) string {
 // history; a corrupt or newer-versioned file is an error for the caller to
 // decide on, never silently truncated.
 func OpenBaselineHistory(path string) (*BaselineRunHistory, error) {
-	h := &BaselineRunHistory{path: path, servers: make(map[string][]BaselineRunRecord), emergency: make(map[string]string), newTables: make(map[string][]string)}
+	h := &BaselineRunHistory{path: path, servers: make(map[string][]BaselineRunRecord), emergency: make(map[string]string), newTables: make(map[string][]string), jobs: make(map[string]BaselineJob)}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return h, nil
@@ -440,6 +449,9 @@ func OpenBaselineHistory(path string) (*BaselineRunHistory, error) {
 	}
 	if f.NewTablesStarted != nil {
 		h.newTables = f.NewTablesStarted
+	}
+	if f.Jobs != nil {
+		h.jobs = f.Jobs
 	}
 	return h, nil
 }
@@ -758,7 +770,7 @@ func (h *BaselineRunHistory) List(serverID string) []BaselineRunRecord {
 }
 
 func (h *BaselineRunHistory) save() error {
-	b, err := json.Marshal(baselineHistoryFile{Version: baselineHistoryVersion, Servers: h.servers, EmergencyStarted: h.emergency, NewTablesStarted: h.newTables})
+	b, err := json.Marshal(baselineHistoryFile{Version: baselineHistoryVersion, Servers: h.servers, EmergencyStarted: h.emergency, NewTablesStarted: h.newTables, Jobs: h.jobs})
 	if err != nil {
 		// The only step here whose failure names nothing on its own: every
 		// other one returns an *os.PathError/*os.LinkError already carrying

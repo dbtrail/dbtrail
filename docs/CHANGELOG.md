@@ -314,6 +314,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bintrail stream` beside the first for a moment, and it takes no lock.
 
 ### Fixed
+- **A snapshot job killed with DBTrail no longer leaves its files behind
+  for good** (#2180). When `bintrail-console watch` was killed (SIGKILL, the
+  kernel's out-of-memory killer) during a snapshot update or a full read,
+  what the job had written stayed on disk after the restart: the update's
+  half-written snapshot folder (marked `_INCOMPLETE`), and the full read's
+  mydumper dump in the staging folder (often gigabytes). Nothing removed
+  them: retention never touches an `_INCOMPLETE` snapshot, and nothing walks
+  the staging folder. Every snapshot listing (each page load, each statement
+  on the time-travel port) logged a warning per leftover, and the killed run
+  was missing from the run history. Now each snapshot job writes down, as
+  it goes, every folder it creates (in the run history file) and holds a lock
+  file beside it for as long as it runs. The operating system releases that
+  lock the moment the process dies, however it dies. At the next start
+  DBTrail cleans up after every job whose lock is free: it removes the
+  folders that job wrote down, records the run as interrupted (with when it
+  started and its last sign of progress), and says so in one warning per job.
+  A job whose lock another process still holds (a second DBTrail on the same
+  state folder) is left alone, and so is a job another host ran: each job
+  records its host (the kernel boot id, else the host name), because an
+  `flock` is not seen across hosts on NFS with local locks or on a folder a
+  host and Docker Desktop's VM share. mydumper is started with a death signal
+  on Linux, so it cannot outlive DBTrail and go on writing into a folder the
+  next start removes. And every snapshot producer now publishes (`_SUCCESS`)
+  only if the `_INCOMPLETE` marker it wrote at the start is still there:
+  otherwise the run fails and the marker is put back, so a folder removed
+  and partly recreated under a running writer is never published complete.
+  Only folders the job itself wrote down are ever removed, and of those never a finished snapshot (`_SUCCESS`), a
+  snapshot with no marker that holds files, a symbolic link, or a folder
+  whose parent now points somewhere else. The listing warning about an
+  `_INCOMPLETE` snapshot is now said once per folder per process.
+  **Not cleaned up:** folders left by a version before this one (nothing
+  wrote them down; delete them by hand, the warning names them once), a
+  PostgreSQL full read's snapshot folder in a local backup directory (its
+  name is chosen by the database, so it cannot be written down before it
+  exists; its staging folder is), and a partial upload in S3 (it stays
+  excluded from every listing by its `_INCOMPLETE` marker; nothing in DBTrail
+  deletes snapshot data from a bucket). A point-in-time restore, a custom
+  `.sql` build and table-delta compaction keep their own cleanup rules.
 - **The binlog-renumbering check reads the archived hours of a read**
   (#2186). `verify`, the `_snapshot` schema of the MySQL port and cascade
   recovery read the changes since a snapshot from its binlog position, and

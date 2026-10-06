@@ -208,6 +208,13 @@ func wireBaselineExtras(cfg *console.Config, sup *baselineSupervisor, serversPat
 		history = nil
 	}
 	sup.history = history
+	if history != nil {
+		sup.jobsDir = baselineJobsDir(history.Path())
+		// Here, after the history is attached and before any loop or the
+		// HTTP server can start a job: what a killed process left is
+		// cleaned up once, at boot (#2180).
+		sup.reclaimInterruptedJobs()
+	}
 	cfg.BaselineHistory = history
 	cfg.BaselineRestore = sup
 	cfg.SQLExport = sup

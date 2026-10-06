@@ -1,10 +1,12 @@
 package baseline
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // Snapshot completeness markers (#467).
@@ -149,4 +151,62 @@ func SnapshotComplete(snapshotDir string) bool {
 	}
 	// Neither marker: a pre-marker (legacy) snapshot — complete by default.
 	return true
+}
+
+// incompleteWarned is every incomplete snapshot directory a listing has
+// already warned about in this process (#2180).
+var incompleteWarned sync.Map
+
+// WarnIncompleteSnapshotOnce is the listings' "skipping incomplete snapshot"
+// warning, said once per directory per process and at Debug after that.
+// Listings run on every page load and on every statement on the time-travel
+// port, so a per-listing warning for one leftover was hundreds of identical
+// lines an hour, which teaches an operator to stop reading the log. The
+// directory is still skipped every time; only the repetition is quieter. A
+// new leftover is a new path and is still said.
+func WarnIncompleteSnapshotOnce(msg, path string) {
+	if _, seen := incompleteWarned.LoadOrStore(path, struct{}{}); seen {
+		slog.Debug(msg, "path", path)
+		return
+	}
+	slog.Warn(msg, "path", path)
+}
+
+// ErrIncompleteMarkerVanished is CompleteSnapshot refusing to publish a
+// folder whose _INCOMPLETE marker is gone (#2180).
+var ErrIncompleteMarkerVanished = errors.New("the snapshot's _INCOMPLETE marker disappeared while it was being written")
+
+// beforeSnapshotComplete runs just before CompleteSnapshot checks the marker;
+// tests use it to stage the folder being removed under a running writer.
+var beforeSnapshotComplete = func(string) {}
+
+// CompleteSnapshot is how a producer that flagged its folder _INCOMPLETE at
+// the start publishes it at the end: it writes _SUCCESS only if that marker
+// is still there. A marker that vanished means something removed the folder
+// under the writer (a cleanup that took it for a dead job's, or an operator),
+// and the writers recreate missing directories as they go, so the folder may
+// now hold only some of its tables. Marking that complete would publish a
+// snapshot with tables missing. Refusing has to put the marker BACK, though:
+// a folder with neither marker is complete by default to every reader, so a
+// bare refusal would publish the same partial snapshot by omission. The
+// caller treats the refusal as a failed run.
+func CompleteSnapshot(snapshotDir string) error {
+	beforeSnapshotComplete(snapshotDir)
+	if _, err := os.Lstat(filepath.Join(snapshotDir, IncompleteMarker)); err != nil {
+		if os.IsNotExist(err) {
+			if werr := WriteIncompleteMarker(snapshotDir); werr != nil {
+				if _, gone := os.Lstat(snapshotDir); os.IsNotExist(gone) {
+					// The whole folder went, so there is nothing to mark and
+					// nothing a reader could find.
+					return fmt.Errorf("%w: the folder is gone (%s), so nothing was published", ErrIncompleteMarkerVanished, snapshotDir)
+				}
+				return fmt.Errorf("%w in %s, and it could not be put back, so this folder now reads as a complete snapshot "+
+					"although tables may be missing; delete it: %w", ErrIncompleteMarkerVanished, snapshotDir, werr)
+			}
+			return fmt.Errorf("%w in %s; refusing to mark it complete, since another process may have removed it while it was written",
+				ErrIncompleteMarkerVanished, snapshotDir)
+		}
+		return fmt.Errorf("check %s marker in %s: %w", IncompleteMarker, snapshotDir, err)
+	}
+	return WriteSuccessMarker(snapshotDir)
 }

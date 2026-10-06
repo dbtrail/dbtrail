@@ -99,6 +99,17 @@ type BaselineRequest struct {
 	// before it starts, so the update that follows this full backup is
 	// measured (#1737); empty means no mark is read.
 	IndexDSN string
+	// Journal, when set, is told about every directory the run creates,
+	// after it is known to be the run's own and before data goes into it
+	// (#2180), so a daemon that starts after this one was killed can find and
+	// remove it. Set by the supervisor for the run; nil means no journal.
+	Journal BaselineDirJournal
+}
+
+// BaselineDirJournal receives the directories a snapshot run creates: name,
+// directly under root. Implementations are nil-safe and never fail the run.
+type BaselineDirJournal interface {
+	Created(root, name string)
 }
 
 // BaselineRequestFor builds the in-process job description for a registry

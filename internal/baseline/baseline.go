@@ -4,6 +4,7 @@ package baseline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -394,7 +395,10 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	if err := baselineintegrity.WriteManifest(snapDir); err != nil {
 		return stats, fmt.Errorf("snapshot complete but could not write integrity manifest: %w", err)
 	}
-	if err := WriteSuccessMarker(snapDir); err != nil {
+	if err := CompleteSnapshot(snapDir); err != nil {
+		if errors.Is(err, ErrIncompleteMarkerVanished) {
+			return stats, err
+		}
 		// The snapshot is complete on disk but unmarked; without the _SUCCESS
 		// marker (and absent _INCOMPLETE) discovery still treats it as
 		// complete-by-default, so this is a degraded-observability failure, not

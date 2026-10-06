@@ -93,7 +93,7 @@ var oldVocabulary = regexp.MustCompile(`(?i)\b(backups?|baselines?)\b`)
 const (
 	assetVocabularyPin      = 64 // string literals in assets/app.js (includes the frozen docs slug "guides/backup-strategy" a second time, in the Connect screen's point-in-time fold (#1986): docsMore needs the literal so the site check reaches its section; plus the frozen routes "/api/baselines" and "/baseline/restore" the Restore page reads for the restore-to-a-moment card since the Snapshots cut, the frozen permission name baseline:create, PERM_SNAPSHOT_CREATE, the frozen docs slug "guides/backup-strategy" each server block links since #1681 removed the card that carried it, and the frozen route "/api/baselines" the Overview flow reads for the copy arrow)
 	goVocabularyPin         = 110 // string literals in this package's non-test .go files; #1681's frozen names (two import paths of internal/baseline) balance the refresh endpoint's it removed; #2085 adds one more import path of internal/baseline (copy_unchanged.go reads snapshot footers)
-	consoleappVocabularyPin = 174 // string literals in consoleapp's non-test .go files
+	consoleappVocabularyPin = 176 // string literals in consoleapp's non-test .go files; #2180 adds two frozen names: an import path of internal/baseline (the killed-job reclaim checks completeness markers) and the "baseline-" staging prefix os.MkdirTemp has always used, which the reclaim must match
 	vocabularySlack         = 3   // how far under a pin may drift before it must be lowered
 
 	// Regular expressions in app.js that carry a quote character. Pinned

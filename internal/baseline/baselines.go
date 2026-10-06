@@ -75,7 +75,7 @@ func DiscoverBaselinesReport(dir string) ([]BaselineInfo, []time.Time, error) {
 		// without _SUCCESS means a run failed mid-way. Pre-marker (legacy)
 		// snapshots have neither and stay complete-by-default.
 		if !SnapshotComplete(snapshotDir) {
-			slog.Warn("skipping incomplete baseline snapshot", "path", snapshotDir)
+			WarnIncompleteSnapshotOnce("skipping incomplete baseline snapshot", snapshotDir)
 			continue
 		}
 		dbEntries, err := os.ReadDir(snapshotDir)

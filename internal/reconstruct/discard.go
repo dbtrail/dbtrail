@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/snapshotdir"
 )
 
 // ErrSnapshotNotDiscardable marks a DELIBERATE refusal by
@@ -161,7 +162,12 @@ func SweepDiscardedSnapshots(root string) (removed int, err error) {
 // isDiscardingName recognizes a staging directory this package wrote. Both
 // halves are required: a directory an operator happens to have named
 // ".backups.discarding" is not one of ours, and neither is a snapshot directory
-// whose name merely ends in the suffix.
+// whose name merely ends in the suffix. So the part between the dot and the
+// suffix must parse as a snapshot time, the exact shape discardingName makes.
 func isDiscardingName(name string) bool {
-	return strings.HasPrefix(name, ".") && strings.HasSuffix(name, discardingSuffix)
+	if !strings.HasPrefix(name, ".") || !strings.HasSuffix(name, discardingSuffix) {
+		return false
+	}
+	_, ok := snapshotdir.ParseTime(strings.TrimSuffix(strings.TrimPrefix(name, "."), discardingSuffix))
+	return ok
 }

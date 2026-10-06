@@ -276,6 +276,15 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// snapshot directory holds anything this run did not write, and once the
 	// fold has run its own files are in there too. See claimSnapshotDir.
 	unclaimed := claimSnapshotDir(refreshSnapshotDir(req, at))
+	// Journaled from here (#2180), below the #1689 gate so a skipped cycle
+	// still leaves no trace, and the snapshot directory only when it was
+	// proven this run's own: a kill must never make somebody else's files
+	// reclaimable.
+	job := s.beginJob(console.BaselineRunRefresh, req.ServerID, req.ServerName, req.Trigger, "", started)
+	defer job.release()
+	if unclaimed == "" {
+		job.Created(req.BaselineDir, reconstruct.SnapshotDirName(at))
+	}
 	req.FoldSource = resolveFoldSource(s.ctx, req)
 	prev, tables, refused, reuse, gap, err := s.executeRefresh(req, at)
 	if !foldPublished(err) {
@@ -347,7 +356,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	}
 	rec.NewTables, rec.NewTablesOmitted, rec.NewTablesUnchecked = gap.tables, gap.omitted, gap.unchecked
 	rec.NewTablesAction, rec.NewTablesActionReason = gap.action, gap.reason
-	s.recordRun(req.ServerID, req.ServerName, foldRunCounts(rec, tables, refused, reuse), err)
+	s.recordJobRun(job, req.ServerID, req.ServerName, foldRunCounts(rec, tables, refused, reuse), err)
 	s.reportNewTables(req, gap)
 	// Where the readers of what this cycle published start (#1904), for the
 	// gate to grade next. Outside s.mu: it reads the snapshot's files.
