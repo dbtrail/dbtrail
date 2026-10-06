@@ -31,66 +31,96 @@ func TestPartitionHeads_archivesBelow_2152(t *testing.T) {
 	h0 := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	since := h0.Add(10*time.Hour + 30*time.Minute) // floor: h0+9h
 	anchor := BinlogPos{File: "binlog.000001", Pos: 500}
-	old := since.Add(-48 * time.Hour) // written long before the snapshot
+	cut := &BinlogPos{File: "binlog.000001", Pos: 800} // the previous refresh's cut
+	old := since.Add(-48 * time.Hour)                  // written long before the snapshot
+	after := since.Add(time.Hour)                      // written after it
 	for _, tc := range []struct {
 		name     string
+		checked  *BinlogPos // nil: no cut known, the time-bounded rule
 		archives []archiveHead
 		want     time.Time // zero: the start does not move
 	}{
-		{"no archives", nil, time.Time{}},
-		{"the issue's case: the archive's newest change is after the anchor",
-			[]archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000001", 600), since.Add(time.Hour))},
+		{"no archives", cut, nil, time.Time{}},
+
+		// The previous refresh's cut is known (#2152, option b).
+		{"the issue's case: the archive's newest change is after the cut", cut,
+			[]archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000001", 900), after)},
 			h0.Add(2 * time.Hour)},
-		{"steady state: archived after the snapshot, newest change before the anchor",
-			[]archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000001", 499), since.Add(time.Hour))},
+		{"a newest change exactly at the cut counts", cut,
+			[]archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000001", 800), after)},
+			h0.Add(2 * time.Hour)},
+		{"a quiet table: after its own anchor but before the cut, the refresh already looked", cut,
+			[]archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000001", 799), after)},
 			time.Time{}},
-		{"a newest change exactly at the anchor counts (start_pos >= anchor)",
-			[]archiveHead{recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000001", 500)},
+		{"a later binlog file is after the cut whatever its offset", cut,
+			[]archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000002", 4), old)},
 			h0.Add(2 * time.Hour)},
-		{"a later binlog file is after the anchor whatever its offset",
-			[]archiveHead{recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000002", 4)},
+		{"with a cut, a recorded position decides whenever the archive was written", cut,
+			[]archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000001", 900), old)},
 			h0.Add(2 * time.Hour)},
-		{"a recorded position decides whenever the archive was written",
-			[]archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000001", 600), old)},
-			h0.Add(2 * time.Hour)},
-		{"recorded with no coordinate: nothing an anchored fetch can return",
-			[]archiveHead{func() archiveHead { a := archiveAt(h0.Add(2 * time.Hour)); a.recorded = true; return a }()},
+		{"a cut before the table's own anchor: the anchor is the bound", &BinlogPos{File: "binlog.000001", Pos: 100},
+			[]archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000001", 300), after)},
 			time.Time{}},
-		{"not recorded, written after the snapshot: looked at",
-			[]archiveHead{writtenAt(archiveAt(h0.Add(2*time.Hour)), since.Add(time.Hour))},
+		{"recorded with no coordinate: nothing an anchored fetch can return", cut,
+			[]archiveHead{writtenAt(func() archiveHead { a := archiveAt(h0.Add(2 * time.Hour)); a.recorded = true; return a }(), after)},
+			time.Time{}},
+		{"not recorded, written after the snapshot: looked at", cut,
+			[]archiveHead{writtenAt(archiveAt(h0.Add(2*time.Hour)), after)},
 			h0.Add(2 * time.Hour)},
-		{"not recorded, written inside the clock margin before the snapshot: looked at",
+		{"not recorded, written inside the clock margin before the snapshot: looked at", cut,
 			[]archiveHead{writtenAt(archiveAt(h0.Add(2*time.Hour)), since.Add(-archiveWrittenMargin))},
 			h0.Add(2 * time.Hour)},
-		{"not recorded, written before the margin: cannot hold a change the snapshot missed",
+		{"not recorded, written before the margin: cannot hold a change the snapshot missed", cut,
 			[]archiveHead{writtenAt(archiveAt(h0.Add(2*time.Hour)), since.Add(-archiveWrittenMargin-time.Second))},
 			time.Time{}},
-		{"an archive the floor already reaches is not a reason to move",
-			[]archiveHead{recorded(archiveAt(h0.Add(9*time.Hour)), "binlog.000001", 600)},
+		{"an archive the floor already reaches is not a reason to move", cut,
+			[]archiveHead{writtenAt(recorded(archiveAt(h0.Add(9*time.Hour)), "binlog.000001", 900), after)},
 			time.Time{}},
-		{"the archive just below the floor is",
-			[]archiveHead{recorded(archiveAt(h0.Add(8*time.Hour)), "binlog.000001", 600)},
+		{"the archive just below the floor is", cut,
+			[]archiveHead{writtenAt(recorded(archiveAt(h0.Add(8*time.Hour)), "binlog.000001", 900), after)},
 			h0.Add(8 * time.Hour)},
-		{"content older than the label (a first-partition archive) moves the start to it",
+		{"content older than the label (a first-partition archive) moves the start to it", cut,
 			[]archiveHead{func() archiveHead {
-				a := recorded(archiveAt(h0.Add(9*time.Hour)), "binlog.000001", 600)
+				a := writtenAt(recorded(archiveAt(h0.Add(9*time.Hour)), "binlog.000001", 900), after)
 				a.lower = h0.Add(-20 * time.Hour)
 				return a
 			}()},
 			h0.Add(-20 * time.Hour)},
-		{"several: the oldest qualifying one, and only qualifying ones",
+		{"several: the oldest qualifying one, and only qualifying ones", cut,
 			[]archiveHead{
-				recorded(archiveAt(h0), "binlog.000001", 100), // before the anchor
-				recorded(archiveAt(h0.Add(1*time.Hour)), "binlog.000001", 700),
+				writtenAt(recorded(archiveAt(h0), "binlog.000001", 700), after), // before the cut
+				writtenAt(recorded(archiveAt(h0.Add(1*time.Hour)), "binlog.000001", 900), after),
 				writtenAt(archiveAt(h0.Add(3*time.Hour)), since.Add(time.Minute)),
 				writtenAt(archiveAt(h0.Add(-5*time.Hour)), old), // not recorded, old
 			},
 			h0.Add(1 * time.Hour)},
+
+		// No cut known (an index `bintrail index` also wrote, a snapshot with
+		// no usable cut): the table's own anchor, bounded to archives written
+		// after the snapshot's time (option a).
+		{"no cut: after the anchor, written after the snapshot", nil,
+			[]archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000001", 600), after)},
+			h0.Add(2 * time.Hour)},
+		{"no cut: after the anchor, written before the snapshot", nil,
+			[]archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000001", 600), old)},
+			time.Time{}},
+		{"no cut: before the anchor", nil,
+			[]archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000001", 499), after)},
+			time.Time{}},
+		{"no cut: a newest change exactly at the anchor counts", nil,
+			[]archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000001", 500), after)},
+			h0.Add(2 * time.Hour)},
+		{"no cut: not recorded, written after the snapshot", nil,
+			[]archiveHead{writtenAt(archiveAt(h0.Add(2*time.Hour)), after)},
+			h0.Add(2 * time.Hour)},
+		{"no cut: not recorded, written before it", nil,
+			[]archiveHead{writtenAt(archiveAt(h0.Add(2*time.Hour)), old)},
+			time.Time{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := headsAt(h0.Add(9*time.Hour), 100, 200)
 			h.archives = tc.archives
-			got, n := h.archivesBelow(since, anchor)
+			got, n := h.archivesBelow(since, anchor, tc.checked)
 			if !got.Equal(tc.want) {
 				t.Fatalf("archivesBelow = %v (%d archives), want %v", got, n, tc.want)
 			}
@@ -110,7 +140,7 @@ func TestPartitionHeads_archivesBelow_doNotFollowTheIDPremise_2152(t *testing.T)
 	h := headsAt(h0.Add(9*time.Hour), 100)
 	h.streamCaptured, h.fileIndexingUnfinished = true, true
 	h.archives = []archiveHead{recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000001", 400)}
-	if got, _ := h.archivesBelow(since, BinlogPos{File: "binlog.000001", Pos: 500}); !got.IsZero() {
+	if got, _ := h.archivesBelow(since, BinlogPos{File: "binlog.000001", Pos: 500}, &BinlogPos{File: "binlog.000001", Pos: 450}); !got.IsZero() {
 		t.Fatalf("archivesBelow = %v; a recorded archive before the anchor must not move the start", got)
 	}
 }
@@ -120,7 +150,8 @@ func TestPartitionHeads_archivesBelow_doNotFollowTheIDPremise_2152(t *testing.T)
 func TestSinceFor_archives_2152(t *testing.T) {
 	h0 := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	since := h0.Add(10*time.Hour + 30*time.Minute)
-	opts := Options{Schema: "shop", Table: "orders", Since: &since, SincePos: &BinlogPos{File: "binlog.000001", Pos: 500}}
+	opts := Options{Schema: "shop", Table: "orders", Since: &since, SincePos: &BinlogPos{File: "binlog.000001", Pos: 500},
+		ArchivesCheckedThrough: &BinlogPos{File: "binlog.000001", Pos: 550}}
 	arch := recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000001", 600)
 
 	t.Run("archive only: no query", func(t *testing.T) {
@@ -163,6 +194,31 @@ func TestSinceFor_archives_2152(t *testing.T) {
 			}
 		})
 	}
+	t.Run("the cut reaches the fetch: a quiet table does not move", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		h := headsAt(h0.Add(9*time.Hour), 100, 200)
+		h.archives = []archiveHead{writtenAt(arch, since.Add(time.Hour))}
+		quiet := opts
+		quiet.ArchivesCheckedThrough = &BinlogPos{File: "binlog.000001", Pos: 601}
+		got, err := h.SinceFor(context.Background(), db, quiet)
+		if err != nil || got != quiet.Since {
+			t.Fatalf("SinceFor = %v, err=%v; the refresh before already looked through 601", got, err)
+		}
+		// The same archive with no cut known: written after the snapshot and
+		// after the anchor, so it is read.
+		quiet.ArchivesCheckedThrough = nil
+		got, err = h.SinceFor(context.Background(), db, quiet)
+		if err != nil || got == nil || !got.Equal(h0.Add(2*time.Hour)) {
+			t.Fatalf("SinceFor with no cut = %v, err=%v; want the archive's hour", got, err)
+		}
+		if merr := mock.ExpectationsWereMet(); merr != nil {
+			t.Fatal(merr)
+		}
+	})
 	t.Run("the live partitions hold no row of the table", func(t *testing.T) {
 		db, mock, err := sqlmock.New()
 		if err != nil {

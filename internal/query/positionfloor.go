@@ -86,12 +86,15 @@ type partitionHead struct {
 // shows it (#2152). The archive's own record in archive_state does: rotation
 // records the newest binlog coordinate each file holds (folded over every
 // row, so it does not depend on the event_id premise above), and an archive
-// whose newest coordinate is at or after the anchor makes the fetch reach its
-// hour. An archive with no record (written before the record existed, or
-// registered by a path that did not read the file) is reached when it was
-// written after the fetch's own time, less a clock margin: the only archives
-// that can hold an event indexed after the snapshot. Older ones cannot, and
-// counting them would move every update back by the whole retention.
+// whose newest coordinate is at or after what the snapshot already saw makes
+// the fetch reach its hour. archivesBelow says what "already saw" is, and why
+// it is the previous refresh's cut when the caller knows it rather than the
+// table's own anchor. An archive with no record (written before the record
+// existed, or registered by a path that did not read the file) is reached
+// when it was written after the fetch's own time, less a clock margin: the
+// only archives that can hold an event indexed after the snapshot. Older ones
+// cannot, and counting them would move every update back by the whole
+// retention.
 //
 // What it still cannot see: an hour rotated out WITHOUT an archive, and an
 // archive whose archive_state row is gone (`archive reconcile --repair`
@@ -449,20 +452,44 @@ func (h *PartitionHeads) below(since time.Time, anchor BinlogPos) []string {
 
 // archivesBelow is below for the archives (#2152): the oldest time an
 // archive the floor of a fetch at since leaves out can hold, among those that
-// may hold an event at or after anchor, and how many there are. Zero time: no
-// such archive.
-func (h *PartitionHeads) archivesBelow(since time.Time, anchor BinlogPos) (from time.Time, n int) {
+// may hold an event at or after anchor that the snapshot has not seen, and how
+// many there are. Zero time: no such archive.
+//
+// checked is Options.ArchivesCheckedThrough, the cut of the refresh that
+// published the snapshot. Capture indexes in commit order, so every row
+// indexed after that refresh ran sits after its cut, and every row between the
+// table's own anchor and the cut was already in the index when that refresh
+// looked. A recorded archive is then read only when its newest change is at
+// or after the cut, whenever it was written: that is what keeps a table with
+// no changes, whose anchor stays old, from reading the archives rotation
+// writes after every refresh.
+//
+// With no cut (an index `bintrail index` also wrote, where rows with old
+// positions are indexed late; a snapshot that recorded none), a recorded
+// archive is read when its newest change is at or after the anchor AND it was
+// written after since, less the clock margin: any row the snapshot has not
+// seen was indexed after it, into a file written after it. An archive with no
+// record is read when it was written after since, in both cases.
+func (h *PartitionHeads) archivesBelow(since time.Time, anchor BinlogPos, checked *BinlogPos) (from time.Time, n int) {
 	floor := CoarseSinceFloor(since)
 	writtenAfter := since.Add(-archiveWrittenMargin)
+	seen := anchor
+	if checked != nil && anchor.AtOrBefore(*checked) {
+		seen = *checked
+	}
 	for _, a := range h.archives {
 		if !a.lower.Before(floor) {
 			continue
 		}
+		written := !a.archivedAt.Before(writtenAfter)
 		var may bool
-		if a.recorded {
-			may = a.hasPos && anchor.AtOrBefore(a.pos)
-		} else {
-			may = !a.archivedAt.Before(writtenAfter)
+		switch {
+		case !a.recorded:
+			may = written
+		case checked != nil:
+			may = a.hasPos && seen.AtOrBefore(a.pos)
+		default:
+			may = written && a.hasPos && anchor.AtOrBefore(a.pos)
 		}
 		if !may {
 			continue
@@ -600,7 +627,7 @@ func (h *PartitionHeads) sinceFor(ctx context.Context, db *sql.DB, opts Options)
 	}
 	since := *opts.Since
 	names := h.below(since, *opts.SincePos)
-	archFrom, archN := h.archivesBelow(since, *opts.SincePos)
+	archFrom, archN := h.archivesBelow(since, *opts.SincePos, opts.ArchivesCheckedThrough)
 	if len(names) == 0 {
 		if archN == 0 {
 			return opts.Since, nil

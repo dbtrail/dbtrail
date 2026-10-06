@@ -146,6 +146,10 @@ type FullTableConfig struct {
 	// what each table's fetch reads its time floor from (#2138). nil outside
 	// Parquet mode, where each fetch reads its own.
 	heads *query.PartitionHeads
+	// archiveCuts is where each table's fetch reads the cut it was last
+	// checked through, so archives before it are not read again (#2152). nil
+	// for a direct ReconstructTable caller: no cut, the time-bounded rule.
+	archiveCuts *archiveCuts
 	// ddlMark is the run's DDL mark, encoded (ddl_mark.go): the newest
 	// schema_changes row, read before the cut and so before any table's
 	// check. "" when the index was not written by a stream or holds no row.
@@ -815,6 +819,19 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 		cfg.schemaAt, cfg.schemaAtTime = schemaSnapshotAt(db, cfg.At, resolver)
 	}
 
+	// The cut each table was last checked through, for the archives (#2152).
+	// Not on an index `bintrail index` also wrote: there a row with an old
+	// position can be indexed after the refresh that published the snapshot,
+	// so that refresh's cut says nothing about it.
+	backfilled := query.IndexBackfilled(ctx, db)
+	if backfilled {
+		backfilledArchivesWarned.Do(func() {
+			slog.Warn("`bintrail index` also wrote into this index, so a snapshot update cannot skip an archive by the position the previous update searched through; " +
+				"each table reads every archive written since its snapshot that holds a change after the table's own position, which on a table with no changes is every archive rotation writes between two updates")
+		})
+	}
+	cfg.archiveCuts = newArchiveCuts(backfilled)
+
 	// Resolve archive sources once — the same set is used for every table.
 	archSources, archErr := query.ResolveArchiveSources(ctx, db)
 	if archErr != nil {
@@ -1437,6 +1454,9 @@ func ReconstructTable(
 	// window is empty either way.
 	if cfg.OutputFormat == OutputFormatParquet && cfg.cut != nil {
 		fetchOpts.UntilPos = cfg.cut
+	}
+	if fetchOpts.SincePos != nil {
+		fetchOpts.ArchivesCheckedThrough = cfg.archiveCuts.forBaseline(baselinePath)
 	}
 	// nil ArchiveFetcher → the container-safe parquetquery.Fetch. Resolved here
 	// at the point of use so both ReconstructTables and any direct

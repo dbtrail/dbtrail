@@ -341,6 +341,18 @@ type Options struct {
 	// index entries, not clustered-page reads. Measured on 8.4.9: the floor
 	// appears in the range itself ("... AND 4500 < event_id").
 	SinceEventID uint64
+	// ArchivesCheckedThrough, when set, is the binlog position up to which the
+	// caller already looked through every event of this table, archived or
+	// not (#2152): the cut of the refresh that published the snapshot SincePos
+	// comes from. A table with no changes keeps its old position in the next
+	// snapshot, so SincePos can be far older than what that refresh actually
+	// searched; without this the archives after SincePos would be read again
+	// on every refresh of a quiet table. PartitionHeads then reads an archive
+	// only when it holds an event at or after this position. Set it only when
+	// every event up to it was in the index when that refresh ran, which holds
+	// for an index only a stream writes (query.IndexBackfilled false). nil:
+	// the archives after SincePos written after Since are read.
+	ArchivesCheckedThrough *BinlogPos
 	// sinceSettled records that Since already is the time this fetch must
 	// start from, read off the index for its SincePos (#2138, settleSince).
 	// The merged fetch sets it once for all its pages; Engine.Fetch settles
