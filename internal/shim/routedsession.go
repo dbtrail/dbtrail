@@ -160,7 +160,8 @@ type sessionTracker interface {
 	// changed one of the settings the read-back reads.
 	SessionTracked() bool
 	// TakeSessionChanged: since the last call, an answer was so marked, or
-	// the source answered with an error (which says nothing either way).
+	// a source that marks answered with an error (which says nothing
+	// either way).
 	TakeSessionChanged() bool
 	// TrackSessionAgain asks the source for the marks again on a session
 	// whose list of tracked settings (has) was replaced.

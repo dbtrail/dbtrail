@@ -135,7 +135,8 @@ type Forwarder struct {
 	tracked bool
 	// sessionChanged: since TakeSessionChanged was last called, an answer
 	// from the source said a tracked setting changed, or the source answered
-	// with an error (which says nothing either way). See heard.
+	// a tracked session with an error (which says nothing either way). See
+	// heard.
 	sessionChanged bool
 }
 
@@ -551,8 +552,10 @@ func (f *Forwarder) TrackSessionAgain(ctx context.Context, has string) error {
 //   - An error packet carries no status, so it cannot say. A statement that
 //     changed a setting and then failed (a function that runs SET, then
 //     SIGNAL) is reported by MySQL with the NEXT answer, whatever statement
-//     that is, and by MariaDB never (measured). So an error counts as a
-//     change, tracked or not.
+//     that is, and by MariaDB never (measured). So on a tracked session an
+//     error counts as a change. On one that is not tracked it does not: a
+//     function that succeeds is not seen there either, and that connection
+//     behaves as it did before tracking was asked for.
 //
 // The answer to every statement goes through here (Forward, a prepared
 // statement's execution), and so does the EXPLAIN of a decision: MariaDB
@@ -562,17 +565,20 @@ func (f *Forwarder) TrackSessionAgain(ctx context.Context, has string) error {
 // the client's do not: a PREPARE (measured: neither server runs a function
 // while it prepares), a USE, a PING, and the port's own SETs.
 func (f *Forwarder) heard(status uint16, err error) {
-	if status&mysql.SERVER_SESSION_STATE_CHANGED == 0 && !isMySQLError(err) {
+	marked, failed := status&mysql.SERVER_SESSION_STATE_CHANGED != 0, isMySQLError(err)
+	if !marked && !failed {
 		return
 	}
 	f.mu.Lock()
-	f.sessionChanged = true
+	if marked || f.tracked {
+		f.sessionChanged = true
+	}
 	f.mu.Unlock()
 }
 
 // TakeSessionChanged reports whether, since it was last called, the source
-// said that a tracked session setting changed, or answered a statement with
-// an error; and forgets it. A caller that reads the session back afterwards
+// said that a tracked session setting changed, or (on a tracked session)
+// answered a statement with an error; and forgets it. A caller that reads the session back afterwards
 // calls it once more when that is done: the read-back saw everything
 // reported up to its own answer.
 func (f *Forwarder) TakeSessionChanged() bool {

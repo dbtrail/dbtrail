@@ -512,9 +512,10 @@ The decision, in order, for every statement:
    connection, and on the first one after any statement that could have
    changed the session, which is every statement that is not a plain read
    (a `SET` of anything, a write, `CALL`, transaction control, a statement
-   the port does not recognise), or a read that MySQL itself said changed
-   one of these settings (a stored function, below), or a statement that
-   failed on MySQL. A cheap statement never pays for it, and
+   the port does not recognise), and, where MySQL reports its session
+   changes (a stored function, below), a read that MySQL itself said
+   changed one of these settings or a statement that failed there. A cheap
+   statement never pays for it, and
    neither does a run of statements the copy answers. The question is never
    sent on the heels of a `SET` or a write: it goes out just before a
    statement that is headed for the copy (or before a time-travel

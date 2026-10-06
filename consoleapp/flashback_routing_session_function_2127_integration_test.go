@@ -81,6 +81,13 @@ func routedSessionFunction(t *testing.T, baseDSN string) {
 		return n
 	}
 
+	// The statement the port sends when it opens its connection to the
+	// source leaves nothing a client could read: no warning before the
+	// client's first statement.
+	t.Run("the port's own statement leaves no warning", func(t *testing.T) {
+		call(t, rig.conn(t, ""), "SELECT @@warning_count", "0")
+	})
+
 	// The issue's acceptance, for time_zone.
 	t.Run("a function sets time_zone", func(t *testing.T) {
 		c := rig.conn(t, "")

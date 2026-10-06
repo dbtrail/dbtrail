@@ -367,6 +367,27 @@ func TestForwarder_heardSessionChanges(t *testing.T) {
 	}
 }
 
+// On a session that is not tracked an error is not a change: nothing else is
+// heard there, and the connection behaves as it did before tracking was
+// asked for.
+func TestForwarder_untrackedSessionHearsNothing(t *testing.T) {
+	ctx := context.Background()
+	f, src := newTrackForwarder(t, "8.4.9", bothAgreed)
+	src.unmarked = true
+	if _, err := f.Forward(ctx, "SELECT fails()", &BufferSink{}); err == nil {
+		t.Fatal("the source's error did not come back")
+	}
+	if _, err := f.Decide(ctx, "SELECT fails() FROM t"); err == nil {
+		t.Fatal("the EXPLAIN's error did not come back")
+	}
+	if f.SessionTracked() {
+		t.Fatal("tracked: this case tests nothing")
+	}
+	if f.TakeSessionChanged() {
+		t.Error("an error on a session that is not tracked was taken for a change")
+	}
+}
+
 func TestTracksSession(t *testing.T) {
 	for list, want := range map[string]bool{
 		SessionTrackedVariables: true,
