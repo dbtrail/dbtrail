@@ -389,7 +389,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot's mark and was recorded up to `--at`, or capture moving to
   another server at or before `--at`. Without `--at`, with `--output-format
   parquet` (its window also ends at a binlog position taken after `--at`),
-  and for snapshot updates, the check is unchanged. A snapshot an update wrote without naming
+  when rotation already moved part of the read out of the index, and for
+  snapshot updates, the check is unchanged. A snapshot an update wrote without naming
   the server capture read keeps refusing after a later move to another
   server.
 - **The binlog-renumbering check no longer switches itself off when it cannot
