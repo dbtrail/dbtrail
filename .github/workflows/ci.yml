@@ -593,6 +593,10 @@ jobs:
             || { echo "FATAL: read-routing copy-reserved words test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationBinlogOrderRecoverAndReconstruct2156_mysql ' /tmp/mysql-it.out \
             || { echo "FATAL: the applied-recovery-script test over a real capture did not run: is binary logging on? (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationLatestPerKeyBinlogOrder2156_mysql ' /tmp/mysql-it.out \
+            || { echo "FATAL: the verify and _snapshot latest-change test over a real capture did not run: is binary logging on? (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationLatestPerPKThreePlacesAgree2156 ' /tmp/mysql-it.out \
+            || { echo "FATAL: the latest-per-key agreement test (MySQL, DuckDB, Go) did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestStreamLoop_unmappableRowReachesThePersistedLedger ' /tmp/mysql-it.out || { echo "FATAL: unmappable-row skip ledger test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestRefresh_afterTheBinlogNumberingStartsOver_refusesUntilAFullSnapshot ' /tmp/mysql-it.out \
             || { echo "FATAL: the refresh after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
@@ -820,7 +824,8 @@ jobs:
             TestRunReconstruct_MariaDBUUIDKeyWithoutIndexTypesRefuses \
             TestIntegrationReconstruct_MariaDBUUIDKeyWithoutIndexTypesRefuses \
             TestIntegrationReconstructTool_MariaDBUUIDKeyWithoutIndexTypesRefuses \
-            TestIntegrationBinlogOrderRecoverAndReconstruct2156_mariadb; do
+            TestIntegrationBinlogOrderRecoverAndReconstruct2156_mariadb \
+            TestIntegrationLatestPerKeyBinlogOrder2156_mariadb; do
             grep -q -- "--- PASS: $name " /tmp/mariadb-it.out \
               || { echo "FATAL: $name did not run and pass in the MariaDB-source job (false-green tripwire)" >&2; exit 1; }
           done

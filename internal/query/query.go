@@ -458,6 +458,15 @@ type Options struct {
 	// selects "latest N per PK"); only the outer ORDER BY direction follows
 	// Order.
 	LimitPerPK int
+	// LatestPerPKCandidates, with LimitPerPK, returns for each pk_values its
+	// latest LimitPerPK events by statement time AND its latest LimitPerPK by
+	// event_id: up to twice LimitPerPK rows per key, from which
+	// LatestPerPKInBinlog picks the latest LimitPerPK in binary log order
+	// (#2156). FetchMerged sets it under FetchMergedOptions.LatestInBinlog;
+	// a caller that sets it itself must apply LatestPerPKInBinlog to the
+	// result, or it reads more than LimitPerPK rows per key. Not combined
+	// with Limit: a LIMIT would cut candidates, not the picked rows.
+	LatestPerPKCandidates bool
 	// Order controls the direction of the outer ORDER BY applied before
 	// LIMIT. "DESC" (case-insensitive) selects descending order; any other
 	// value (including empty) defaults to ascending — this preserves the
@@ -512,6 +521,13 @@ type ResultRow struct {
 	// 8.0.1) — so a consumer must treat nil as "only the one-second
 	// EventTimestamp is known here", never as an ordering tie.
 	CommitTsUS *uint64
+	// KeySpanFirst and KeySpanLast are set only on rows fetched with
+	// Options.LatestPerPKCandidates: the first binary log file and the last
+	// coordinate among ALL the changes of this row's pk_values that the
+	// fetch matched in its source, encoded for LatestPerPKInBinlog (see
+	// keySpanFile there). "" otherwise.
+	KeySpanFirst string `json:"-"`
+	KeySpanLast  string `json:"-"`
 }
 
 // OrderDirection normalises an Options.Order value to a SQL direction keyword
@@ -1170,10 +1186,29 @@ func buildQuery(opts Options) (string, []any) {
 		// Per-PK cap via ROW_NUMBER over the narrow keys only. Inner ORDER BY
 		// DESC is fixed: it selects "latest N events per pk_values" regardless
 		// of the requested final direction.
-		window := "SELECT event_id, event_timestamp, ROW_NUMBER() OVER (PARTITION BY pk_values" +
-			" ORDER BY event_timestamp DESC, event_id DESC) AS bt_rn FROM binlog_events" + whereSQL
-		keys = "SELECT event_id, event_timestamp FROM (" + window + ") AS w WHERE bt_rn <= ?"
+		//
+		// Under LatestPerPKCandidates a second rank by event_id keeps each
+		// key's latest N in the order the index received them too, and the
+		// row is a candidate when either rank keeps it: LatestPerPKInBinlog
+		// chooses among them (#2156). parquetquery.limitPerPKClause is the
+		// DuckDB twin of both shapes.
+		// It also carries the key's span, LatestPerPKInBinlog's view of the
+		// key's changes beyond its candidates: the first file and the last
+		// coordinate, as bytes (CAST ... AS BINARY) so MIN and MAX compare
+		// as Go does, not under the column's collation.
+		rank, span, filter := "", "", "bt_rn <= ?"
 		args = append(args, opts.LimitPerPK)
+		if opts.LatestPerPKCandidates {
+			rank = ", ROW_NUMBER() OVER (PARTITION BY pk_values ORDER BY event_id DESC) AS bt_rn_id" +
+				", MIN(" + mysqlKeySpanFile + ") OVER (PARTITION BY pk_values) AS bt_kf" +
+				", MAX(" + mysqlKeySpanCoord + ") OVER (PARTITION BY pk_values) AS bt_kc"
+			span = ", bt_kf, bt_kc"
+			filter += " OR bt_rn_id <= ?"
+			args = append(args, opts.LimitPerPK)
+		}
+		window := "SELECT event_id, event_timestamp, ROW_NUMBER() OVER (PARTITION BY pk_values" +
+			" ORDER BY event_timestamp DESC, event_id DESC) AS bt_rn" + rank + " FROM binlog_events" + whereSQL
+		keys = "SELECT event_id, event_timestamp" + span + " FROM (" + window + ") AS w WHERE " + filter
 	} else {
 		keys = "SELECT event_id, event_timestamp FROM binlog_events" + whereSQL
 	}
@@ -1185,6 +1220,9 @@ func buildQuery(opts Options) (string, []any) {
 		args = append(args, opts.Limit)
 	}
 
+	if opts.LimitPerPK > 0 && opts.LatestPerPKCandidates {
+		cols += ", k.bt_kf, k.bt_kc"
+	}
 	q := "SELECT " + cols + " FROM binlog_events AS be" +
 		" JOIN (" + keys + ") AS k" +
 		" ON be.event_id = k.event_id AND be.event_timestamp = k.event_timestamp"
@@ -1295,6 +1333,10 @@ func applyRedaction(rows []ResultRow, redact, allow []SchemaTableColumn) {
 
 func scanRows(rows *sql.Rows) ([]ResultRow, error) {
 	var results []ResultRow
+	withSpan, err := HasKeySpanColumns(rows)
+	if err != nil {
+		return nil, err
+	}
 	for rows.Next() {
 		var r ResultRow
 		// Every NOT NULL column is scanned defensively. The migrations
@@ -1334,12 +1376,17 @@ func scanRows(rows *sql.Rows) ([]ResultRow, error) {
 		)
 		var changedCols, rowBefore, rowAfter []byte
 
-		if err := rows.Scan(
+		dest := []any{
 			&r.EventID, &binlogFile, &startPos, &endPos, &eventTimestamp,
 			&gtid, &connID, &schemaName, &tableName, &eventType, &pkValues,
 			&changedCols, &rowBefore, &rowAfter, &schemaVersion, &queryText, &queryHash,
 			&commitTsUS,
-		); err != nil {
+		}
+		var spanFirst, spanLast sql.NullString
+		if withSpan {
+			dest = append(dest, &spanFirst, &spanLast)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("failed to scan result row: %w", err)
 		}
 		if binlogFile.Valid {
@@ -1388,6 +1435,7 @@ func scanRows(rows *sql.Rows) ([]ResultRow, error) {
 			v := uint64(commitTsUS.Int64)
 			r.CommitTsUS = &v
 		}
+		r.KeySpanFirst, r.KeySpanLast = spanFirst.String, spanLast.String
 		if changedCols != nil {
 			_ = json.Unmarshal(changedCols, &r.ChangedColumns)
 		}
@@ -1614,4 +1662,24 @@ func eventTypeName(et event.EventType) string {
 	default:
 		return "UNKNOWN"
 	}
+}
+
+// The key span of LatestPerPKInBinlog, as MySQL computes it per row: the
+// encoding of keySpanFile and keySpanCoord, in bytes. DuckDB's twin is in
+// parquetquery.
+const (
+	mysqlKeySpanFile  = "CAST(CONCAT(LPAD(LENGTH(COALESCE(binlog_file, '')), 4, '0'), COALESCE(binlog_file, '')) AS BINARY)"
+	mysqlKeySpanCoord = "CAST(CONCAT(LPAD(LENGTH(COALESCE(binlog_file, '')), 4, '0'), COALESCE(binlog_file, ''), " +
+		"LPAD(COALESCE(start_pos, 0), 20, '0')) AS BINARY)"
+)
+
+// HasKeySpanColumns reports whether a result set carries the two key span
+// columns after the 18 columns of binlog_events (bt_kf, bt_kc), which a fetch
+// with Options.LatestPerPKCandidates selects. Shared by both scanners.
+func HasKeySpanColumns(rows *sql.Rows) (bool, error) {
+	cols, err := rows.Columns()
+	if err != nil {
+		return false, fmt.Errorf("read result columns: %w", err)
+	}
+	return len(cols) == 20 && cols[18] == "bt_kf" && cols[19] == "bt_kc", nil
 }

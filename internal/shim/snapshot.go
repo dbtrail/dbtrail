@@ -267,7 +267,14 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 	// already supersedes. No global Limit here — the cap is enforced on the
 	// merged output below, since the table can have far more baseline rows
 	// than changed rows.
+	//
+	// "Latest" is in binary log order where the index can show it (#2156):
+	// by statement time, a row two sessions changed at once comes back at the
+	// change the database does not hold. Where the order cannot be shown the
+	// statement-time answer stands and the client gets a warning (SHOW
+	// WARNINGS): MySQL's protocol has no other place for a note.
 	engine := query.New(h.indexDB)
+	var order query.LatestPerPKOrder
 	rows, _, err := query.FetchMerged(ctx, h.indexDB, engine, query.FetchMergedOptions{
 		Opts: query.Options{
 			Schema:     q.Schema,
@@ -281,10 +288,16 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 		NoArchive:      h.cfg.NoArchive,
 		AllowGaps:      h.cfg.AllowGaps,
 		ArchiveFetcher: h.archiveFetcher,
+		LatestInBinlog: true,
+		LatestOrder:    &order,
 	})
 	if err != nil {
 		return nil, wrapFetchError(ctx, q.Type, err, h.logger)
 	}
+	// The note becomes this statement's warning only once the read has
+	// succeeded (finishWithOrderNote): a later step that fails must leave
+	// SHOW WARNINGS with nothing, not with a note about a result never sent.
+	orderNote := order.Note()
 	// ENUM/SET ordinals → labels per event's snapshot epoch (#472/#475),
 	// BEFORE the merge: the merged rowMap reaching the callback below has
 	// no per-row timestamp, and fullTableTextCell would coerce a delta's
@@ -329,7 +342,7 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 		streamCols = h.columnOrderFor(q.Schema, q.Table)
 	}
 	if h.conn != nil && !h.buffered && q.Limit == 0 && len(streamCols) > 0 {
-		return h.streamSnapshotFullTable(ctx, q, input, streamCols)
+		return h.streamSnapshotFullTable(ctx, q, input, streamCols, orderNote)
 	}
 
 	rowCap := h.cfg.FullTableRowCap
@@ -393,7 +406,19 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 		return nil, err
 	}
 
-	return h.fullTableResult(q, images)
+	res, err := h.fullTableResult(q, images)
+	return h.finishWithOrderNote(q, orderNote, res, err)
+}
+
+// finishWithOrderNote makes the `_snapshot` order note (#2156) the warning of
+// a statement that succeeded, and passes res and err through. On an error it
+// sets nothing: the statement's diagnostics are the error.
+func (h *Handler) finishWithOrderNote(q TimeTravelQuery, note string, res *mysql.Result, err error) (*mysql.Result, error) {
+	if err == nil && note != "" {
+		h.logger.Warn("_snapshot: "+note, "schema", q.Schema, "table", q.Table)
+		h.setWarningsCoded(mysql.ER_UNKNOWN_ERROR, []string{note})
+	}
+	return res, err
 }
 
 // streamSnapshotFullTable streams a full-table _snapshot resultset row-by-row
@@ -417,7 +442,7 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 // first-packet ERR). A failure once rows are already on the wire returns an
 // error that go-mysql renders as an ERR packet mid-resultset — the client sees
 // no terminating EOF and reads it as an unambiguous failure (see streamWriter).
-func (h *Handler) streamSnapshotFullTable(ctx context.Context, q TimeTravelQuery, input reconstruct.SnapshotFullTableInput, cols []string) (*mysql.Result, error) {
+func (h *Handler) streamSnapshotFullTable(ctx context.Context, q TimeTravelQuery, input reconstruct.SnapshotFullTableInput, cols []string, orderNote string) (*mysql.Result, error) {
 	sw := newStreamWriter(h.conn, cols)
 	sw.status = h.SessionStatus()
 	cells := make([]any, len(cols)) // reused per row; writeRow encodes synchronously
@@ -464,6 +489,9 @@ func (h *Handler) streamSnapshotFullTable(ctx context.Context, q TimeTravelQuery
 	if err != nil {
 		return nil, wrapFetchError(ctx, q.Type, err, h.logger)
 	}
+	// Every row was written; the closing packet carries the warning count,
+	// so the note is set before it.
+	h.finishWithOrderNote(q, orderNote, nil, nil)
 	return sw.finish()
 }
 

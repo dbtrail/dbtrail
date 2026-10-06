@@ -63,6 +63,11 @@ type MismatchExplanation struct {
 	Total                 int            // total differing rows (Diffs is capped at maxExplainRows)
 	byKind                map[string]int // per-kind totals, for the overflow breakdown
 	deferredSeen          bool           // a deferred-type column appeared in a diff (drives the caveat)
+	// OrderNote is query.LatestPerPKOrder.Note for the changes the drill-down
+	// replayed: some rows were taken at their latest change by statement time
+	// because binary log order could not be established (#2156), so a diff on
+	// such a row can be the order's, not the data's. "" when there is none.
+	OrderNote string
 }
 
 func (ex *MismatchExplanation) add(d RowDiff) {
@@ -131,13 +136,8 @@ func ExplainBaselinePairMismatch(ctx context.Context, cfg BaselineConfig, p Base
 	engine := query.New(cfg.IndexDB)
 	// Same window as VerifyBaselinePair (time-bounded, position cut for MySQL
 	// only) so the drill-down sees exactly the rows the verdict's digest saw.
-	fetchOpts := baselineFetchOptions(p, pg)
-	rows, _, err := query.FetchMerged(ctx, cfg.IndexDB, engine, query.FetchMergedOptions{
-		Opts:           fetchOpts,
-		DBName:         cfg.IndexDBName,
-		NoArchive:      cfg.NoArchive,
-		ArchiveFetcher: cfg.ArchiveFetcher,
-	})
+	var order query.LatestPerPKOrder
+	rows, _, err := query.FetchMerged(ctx, cfg.IndexDB, engine, baselineFetchMerged(cfg, p, pg, &order))
 	if err != nil {
 		return nil, fmt.Errorf("fetch changes %s.%s: %w", p.Schema, p.Table, err)
 	}
@@ -159,7 +159,7 @@ func ExplainBaselinePairMismatch(ctx context.Context, cfg BaselineConfig, p Base
 		return nil, fmt.Errorf("read new baseline %s.%s: %w", p.Schema, p.Table, err)
 	}
 
-	ex := &MismatchExplanation{Schema: p.Schema, Table: p.Table, Anchor: anchorLabel(pg, p)}
+	ex := &MismatchExplanation{Schema: p.Schema, Table: p.Table, Anchor: anchorLabel(pg, p), OrderNote: order.Note()}
 	seen := make(map[string]bool, len(truth))
 	err = streamRowsByPK(ctx, p.PrevPath, p.Schema, p.Table, pkCols, orderedCols, changes, rows, pg, cfg.DuckDBTuning, func(key string, rec rowCells) error {
 		seen[key] = true
@@ -292,6 +292,9 @@ func (ex *MismatchExplanation) Write(w io.Writer) {
 	fmt.Fprintln(w, "  recovery = previous baseline reconstructed to the anchor; baseline = the new baseline (truth)")
 	if ex.deferredSeen {
 		fmt.Fprintln(w, deferredCaveat)
+	}
+	if ex.OrderNote != "" {
+		fmt.Fprintln(w, "  "+ex.OrderNote)
 	}
 	if ex.Total == 0 {
 		// A mismatch can be flagged on row COUNT while every matched PK lines up

@@ -134,6 +134,8 @@ func MergeResultsReport(rows []ResultRow, limit int, order string) ([]ResultRow,
 			// duplicated in every query touching that hour until someone runs
 			// `archive reconcile --repair`. That is why the comparison must
 			// stay allocation-free.
+			// The dropped copy's key span came from its own source (#2156).
+			unique[kept].WidenKeySpan(&r)
 			if !sameEvent(unique[kept], r) {
 				diverged++
 				if reported < maxDivergenceReports {
