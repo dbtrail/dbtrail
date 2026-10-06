@@ -173,7 +173,10 @@ func TestIntegrationPositionResetMasterKeepsCapturedRows(t *testing.T) {
 	// one, so the floor it persisted is what the next cleanup runs on.
 	resetSourceBinlogs(t, sourceDB)
 	lift = freezeCheckpointAfterJump(t, indexDB)
-	if err := runOneUntil(t, cfg(5), true, insert(15, 17), indexedThrough(17)); err != nil {
+	// Not waiting for a checkpoint: none can succeed after the jump. The
+	// writes are safe to issue at once, because the jump starts at :4 of the
+	// new numbering, before every one of them.
+	if err := runOneUntil(t, cfg(5), false, insert(15, 17), indexedThrough(17)); err != nil {
 		t.Fatalf("run 6 (restart after the second reset, crash after the jump): %v", err)
 	}
 	frozen, err := loadStreamState(indexDB)
@@ -193,9 +196,10 @@ func TestIntegrationPositionResetMasterKeepsCapturedRows(t *testing.T) {
 }
 
 // freezeCheckpointAfterJump lets the gap stamp and the jump to :4 through,
-// then refuses every checkpoint that would move off :4: a crash right after
-// the advance, which blockCheckpoints cannot model (it refuses the advance's
-// own write too).
+// then refuses every later checkpoint, even one that stays at :4 (that one
+// would persist the running state's floor over the jump's): a crash right
+// after the advance, which blockCheckpoints cannot model (it refuses the
+// advance's own write too).
 func freezeCheckpointAfterJump(t *testing.T, indexDB *sql.DB) func() {
 	t.Helper()
 	const name = "bintrail_test_freeze_after_jump"
@@ -203,7 +207,7 @@ func freezeCheckpointAfterJump(t *testing.T, indexDB *sql.DB) func() {
 	testutil.MustExec(t, indexDB, `
 		CREATE TRIGGER `+name+` BEFORE UPDATE ON stream_state
 		FOR EACH ROW BEGIN
-		  IF OLD.binlog_position = 4 AND NEW.binlog_position <> 4 THEN
+		  IF OLD.binlog_position = 4 THEN
 		    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'simulated crash right after the jump';
 		  END IF;
 		END`)
