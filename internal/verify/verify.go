@@ -209,7 +209,10 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	if wait == 0 {
 		wait = DefaultCoverageWait
 	}
-	covered, coverageNote := waitIndexCovers(ctx, cfg.IndexDB, src.GTIDSet, src.GTIDFlavor, wait)
+	covered, coverageNote, err := waitIndexCovers(ctx, cfg.IndexDB, src.GTIDSet, src.GTIDFlavor, wait)
+	if err != nil {
+		return res, fmt.Errorf("wait for the index to reach the snapshot of %s.%s: %w", schema, table, err)
+	}
 	if !covered {
 		return inconclusive(res, coverageNote), nil
 	}

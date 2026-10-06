@@ -36,28 +36,50 @@ var (
 // the index does not cover the snapshot is that it has not reached it yet and
 // the capture is running (its checkpoint is fresh). Any other verdict, a
 // stale checkpoint, or the end of the wait returns the last verdict as is.
-func waitIndexCovers(ctx context.Context, indexDB *sql.DB, set, flavor string, wait time.Duration) (bool, string) {
+//
+// A cancelled ctx is an error, not a verdict: the index was not found behind,
+// the check was stopped.
+func waitIndexCovers(ctx context.Context, indexDB *sql.DB, set, flavor string, wait time.Duration) (bool, string, error) {
 	deadline := time.Now().Add(wait)
 	for {
 		covered, note := indexCovers(ctx, indexDB, set, flavor)
-		if covered || !strings.HasPrefix(note, indexBehind) || !time.Now().Before(deadline) || !captureRunning(ctx, indexDB) {
-			return covered, note
+		if err := ctx.Err(); err != nil {
+			return false, "", err
+		}
+		if covered || !strings.HasPrefix(note, indexBehind) {
+			return covered, note, nil
+		}
+		running, why := captureRunning(ctx, indexDB)
+		if !running {
+			return covered, note + ". " + why, nil
+		}
+		if !time.Now().Before(deadline) {
+			return covered, note, nil
 		}
 		select {
 		case <-ctx.Done():
-			return covered, note
+			return false, "", ctx.Err()
 		case <-time.After(coveragePoll):
 		}
 	}
 }
 
 // captureRunning reports whether the index's checkpoint was saved within
-// coverageStale, by the index server's clock (the one that stamped it).
-func captureRunning(ctx context.Context, indexDB *sql.DB) bool {
+// coverageStale, by the index server's clock (the one that stamped it); when
+// not, why says what was seen, for the verdict.
+func captureRunning(ctx context.Context, indexDB *sql.DB) (bool, string) {
 	var age sql.NullInt64
 	err := indexDB.QueryRowContext(ctx,
 		"SELECT TIMESTAMPDIFF(SECOND, last_checkpoint, UTC_TIMESTAMP()) FROM stream_state WHERE id = 1").Scan(&age)
-	return err == nil && age.Valid && time.Duration(age.Int64)*time.Second <= coverageStale
+	switch {
+	case err != nil:
+		return false, "The capture's last checkpoint could not be read (" + err.Error() + "), so it was not waited for"
+	case !age.Valid:
+		return false, "The capture has no checkpoint time, so it was not waited for"
+	case time.Duration(age.Int64)*time.Second > coverageStale:
+		return false, fmt.Sprintf("The capture's last checkpoint is %ds old: is the capture running?", age.Int64)
+	}
+	return true, ""
 }
 
 // liveCut is how the reconstruction of one live-source check is bounded.
@@ -85,7 +107,7 @@ func resolveLiveCut(ctx context.Context, indexDB *sql.DB, src consistency.TableC
 	if src.Anchor == "" {
 		switch {
 		case strings.TrimSpace(src.GTIDSet) == "" && src.GTIDFlavor == consistency.GTIDFlavorMySQL:
-			return liveCut{note: unanchoredNote("the source has GTIDs disabled")}, nil
+			return liveCut{note: unanchoredNote("the source reports no executed GTIDs: gtid_mode=OFF")}, nil
 		case src.AnchorLockRefused:
 			return liveCut{note: unanchoredNote("pinning the position on this server needs LOCK TABLES on the table, which the source account does not have")}, nil
 		case src.GTIDFlavor == consistency.GTIDFlavorMariaDB:
@@ -110,19 +132,24 @@ func resolveLiveCut(ctx context.Context, indexDB *sql.DB, src consistency.TableC
 	if proof != query.IDsFollowStream {
 		return liveCut{note: unanchoredNote("the index's change ids do not follow the binary log order, because a stream did not write all of it")}, nil
 	}
-	pos, why, err := snapshotCut(ctx, indexDB, member)
+	pos, firstOut, why, err := snapshotCut(ctx, indexDB, member)
 	if err != nil {
 		return liveCut{}, err
 	}
 	if why != "" {
 		return liveCut{inconclusive: why}, nil
 	}
-	// The snapshot the reconstruction starts from must be older than the
-	// read: one taken while the table was read is past the cut, and the
-	// reconstruction would start after the point it is compared at.
-	if sincePos != nil && !sincePos.AtOrBefore(*pos) {
-		return liveCut{inconclusive: fmt.Sprintf("the snapshot the reconstruction starts from (%s:%d) is newer than the read of the table (%s:%d); run the check again",
-			sincePos.File, sincePos.Pos, pos.File, pos.Pos)}, nil
+	// The snapshot the reconstruction starts from must not hold a change the
+	// read does not: one taken while the table was read would start the
+	// reconstruction past the point it is compared at. Its position may sit
+	// past the cut without that (the cut ends at the last ROW event the
+	// snapshot holds, the baseline's position after that transaction's
+	// commit), so only a baseline at or past the first change the snapshot
+	// does NOT hold is newer than the read. Then the delta window is empty
+	// and the reconstruction is the baseline, which is right.
+	if sincePos != nil && firstOut != nil && firstOut.AtOrBefore(*sincePos) && *firstOut != *sincePos {
+		return liveCut{inconclusive: fmt.Sprintf("the snapshot the reconstruction starts from (%s:%d) holds changes the read of the table does not (from %s:%d); run the check again",
+			sincePos.File, sincePos.Pos, firstOut.File, firstOut.Pos)}, nil
 	}
 	return liveCut{pos: pos}, nil
 }

@@ -6,10 +6,12 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
 
+	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-sql-driver/mysql"
 )
 
@@ -21,8 +23,9 @@ const (
 	// BINLOG_GTID_POS). Exact, and takes no lock.
 	AnchorNative = "native"
 	// AnchorTableLock: the snapshot opened, and the position was read, while
-	// a second connection held LOCK TABLES <table> READ, so no transaction
-	// writing the table was in flight. Exact for that table.
+	// a second connection held a read lock on the table (FLUSH TABLES <table>
+	// WITH READ LOCK, or LOCK TABLES <table> READ), so no transaction writing
+	// the table was in flight. Exact for that table.
 	AnchorTableLock = "table-lock"
 )
 
@@ -67,9 +70,10 @@ type snapshotAnchor struct {
 // regularly sees transactions that @@gtid_executed does not list yet, also
 // when the two reads around it are equal: InnoDB makes a commit visible before
 // the server adds its GTID to the executed set. So on stock MySQL only a lock
-// makes the position exact: LOCK TABLES <table> READ is granted once no
-// transaction that wrote the table is open, and a transaction's metadata lock
-// is released only after its commit is complete, GTID included. With it held,
+// makes the position exact: a read lock on the table (flushLockStmt, else
+// readLockStmt) is granted once no transaction that wrote the table is open,
+// and a transaction's metadata lock is released only after its commit is
+// complete, GTID included. With it held,
 // every change to the table the snapshot sees is in the set read under it, and
 // none can commit until it is released. It is per table and held for the time
 // the snapshot takes to open; see anchorLockAttempts for the worst case.
@@ -91,7 +95,13 @@ func openAnchoredSnapshot(ctx context.Context, db *sql.DB, conn *sql.Conn, schem
 	}
 	native, ok, err := nativeSnapshotPosition(ctx, conn, flavor)
 	if err != nil {
-		return snapshotAnchor{}, err
+		if ctx.Err() != nil {
+			return snapshotAnchor{}, err
+		}
+		// A server that cannot report it is one without it: degrade to
+		// the next way, never fail the table over it.
+		slog.Warn("could not read the snapshot's own binlog position; pinning it another way", "error", err)
+		ok = false
 	}
 	if ok {
 		a.set, a.method = native, AnchorNative
@@ -105,8 +115,16 @@ func openAnchoredSnapshot(ctx context.Context, db *sql.DB, conn *sql.Conn, schem
 	if _, err := conn.ExecContext(ctx, "ROLLBACK"); err != nil {
 		return snapshotAnchor{}, fmt.Errorf("close the unanchored snapshot: %w", err)
 	}
+	stmt := flushLockStmt
 	for attempt := 1; ; attempt++ {
-		a, err = lockedSnapshot(ctx, db, conn, schema, table)
+		a, err = lockedSnapshot(ctx, db, conn, schema, table, stmt)
+		if errors.Is(err, errLockNeedsReload) {
+			// No RELOAD / FLUSH_TABLES: the plain read lock, which a table
+			// with steady writes can starve (see flushLockStmt).
+			stmt = readLockStmt
+			attempt--
+			continue
+		}
 		if !errors.Is(err, errLockWaitTimeout) {
 			return a, err
 		}
@@ -121,13 +139,33 @@ func openAnchoredSnapshot(ctx context.Context, db *sql.DB, conn *sql.Conn, schem
 	}
 }
 
-var errLockWaitTimeout = errors.New("lock wait timeout")
+var (
+	errLockWaitTimeout = errors.New("lock wait timeout")
+	errLockNeedsReload = errors.New("FLUSH TABLES needs RELOAD or FLUSH_TABLES")
+)
+
+// The two table locks, in the order they are tried.
+//
+// flushLockStmt takes the table's metadata lock as SHARED_NO_WRITE, a lock
+// MySQL queues AHEAD of new writers, so it is granted as soon as the
+// transactions already writing the table finish, however steady the writes.
+// It needs RELOAD (or FLUSH_TABLES) besides LOCK TABLES, the grants mydumper
+// also asks for.
+//
+// readLockStmt (LOCK TABLES ... READ) needs only LOCK TABLES, but its
+// SHARED_READ_ONLY lock does not hold new writers back: measured (#2150), a
+// table with six writers kept it waiting past every attempt. It is the
+// fallback when RELOAD is missing.
+const (
+	flushLockStmt = "FLUSH TABLES %s WITH READ LOCK"
+	readLockStmt  = "LOCK TABLES %s READ"
+)
 
 // lockedSnapshot is one attempt: take the table's read lock on a connection
 // of its own, open the snapshot on conn and read the position, release the
 // lock. The lock's connection is discarded, never returned to the pool, so
 // neither the lock nor its session timeout can outlive the attempt.
-func lockedSnapshot(ctx context.Context, db *sql.DB, conn *sql.Conn, schema, table string) (snapshotAnchor, error) {
+func lockedSnapshot(ctx context.Context, db *sql.DB, conn *sql.Conn, schema, table, lockStmt string) (snapshotAnchor, error) {
 	lk, err := db.Conn(ctx)
 	if err != nil {
 		return snapshotAnchor{}, fmt.Errorf("open the lock connection: %w", err)
@@ -139,13 +177,15 @@ func lockedSnapshot(ctx context.Context, db *sql.DB, conn *sql.Conn, schema, tab
 	if _, err := lk.ExecContext(ctx, fmt.Sprintf("SET SESSION lock_wait_timeout = %d", anchorLockWait)); err != nil {
 		return snapshotAnchor{}, fmt.Errorf("set lock_wait_timeout: %w", err)
 	}
-	if _, err := lk.ExecContext(ctx, "LOCK TABLES "+quoteIdent(schema)+"."+quoteIdent(table)+" READ"); err != nil {
+	if _, err := lk.ExecContext(ctx, fmt.Sprintf(lockStmt, quoteIdent(schema)+"."+quoteIdent(table))); err != nil {
 		var me *mysql.MySQLError
 		if errors.As(err, &me) {
-			switch me.Number {
-			case 1205: // ER_LOCK_WAIT_TIMEOUT
+			switch {
+			case me.Number == 1205: // ER_LOCK_WAIT_TIMEOUT
 				return snapshotAnchor{}, errLockWaitTimeout
-			case 1044, 1142, 1227: // DB / table access denied, missing privilege
+			case me.Number == 1227 && lockStmt == flushLockStmt: // ER_SPECIFIC_ACCESS_DENIED: no RELOAD
+				return snapshotAnchor{}, errLockNeedsReload
+			case me.Number == 1044 || me.Number == 1142 || me.Number == 1227: // no LOCK TABLES
 				return unlockedSnapshot(ctx, conn)
 			}
 		}
@@ -159,7 +199,9 @@ func lockedSnapshot(ctx context.Context, db *sql.DB, conn *sql.Conn, schema, tab
 		return snapshotAnchor{}, err
 	}
 	if _, err := lk.ExecContext(ctx, "UNLOCK TABLES"); err != nil {
-		return snapshotAnchor{}, fmt.Errorf("unlock %s.%s: %w", schema, table, err)
+		// The position is already read under the lock; discarding the
+		// connection (deferred above) releases the lock anyway.
+		slog.Warn("could not unlock the table after pinning the snapshot's position; closing its connection releases it", "table", schema+"."+table, "error", err)
 	}
 	return snapshotAnchor{set: set, flavor: flavor, method: AnchorTableLock}, nil
 }
@@ -210,7 +252,15 @@ func nativeSnapshotPosition(ctx context.Context, conn *sql.Conn, flavor string) 
 	}
 	if flavor == GTIDFlavorMySQL {
 		set := strings.Join(strings.Fields(st["binlog_snapshot_gtid_executed"]), "")
-		return set, set != "", nil
+		if set == "" {
+			return "", false, nil
+		}
+		// Only a value that is a GTID set is a position; anything else
+		// (a placeholder outside a snapshot) is no native position.
+		if _, err := gomysql.ParseMysqlGTIDSet(set); err != nil {
+			return "", false, nil
+		}
+		return set, true, nil
 	}
 	file, posText := st["binlog_snapshot_file"], st["binlog_snapshot_position"]
 	if file == "" || posText == "" {

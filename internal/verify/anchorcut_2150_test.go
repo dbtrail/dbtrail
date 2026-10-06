@@ -97,9 +97,14 @@ func TestSnapshotMembership_MariaDB(t *testing.T) {
 
 // cutRows is one page of the descending walk.
 func cutRows(rows ...[4]any) *sqlmock.Rows {
-	r := sqlmock.NewRows([]string{"event_id", "gtid", "binlog_file", "end_pos"})
+	r := sqlmock.NewRows([]string{"event_id", "gtid", "binlog_file", "start_pos", "end_pos"})
 	for _, x := range rows {
-		r.AddRow(x[0], x[1], x[2], x[3])
+		// start_pos: 50 bytes before the end, enough for these cases.
+		var start any
+		if e, ok := x[3].(int64); ok {
+			start = e - 50
+		}
+		r.AddRow(x[0], x[1], x[2], start, x[3])
 	}
 	return r
 }
@@ -214,7 +219,7 @@ func TestSnapshotCut(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, unplaced, err := snapshotCutPaged(context.Background(), db, in, c.page)
+			got, _, unplaced, err := snapshotCutPaged(context.Background(), db, in, c.page)
 			if err != nil {
 				t.Fatalf("snapshotCut: %v", err)
 			}
@@ -238,7 +243,7 @@ func TestResolveLiveCut_unanchored(t *testing.T) {
 		src  consistency.TableChecksum
 		want string
 	}{
-		{"gtid off", consistency.TableChecksum{GTIDFlavor: consistency.GTIDFlavorMySQL}, "GTIDs disabled"},
+		{"gtid off", consistency.TableChecksum{GTIDFlavor: consistency.GTIDFlavorMySQL}, "gtid_mode=OFF"},
 		{"no lock grant", consistency.TableChecksum{GTIDFlavor: consistency.GTIDFlavorMySQL, GTIDSet: uuidA + ":1-3", AnchorLockRefused: true}, "LOCK TABLES"},
 		{"mariadb without a coordinate", consistency.TableChecksum{GTIDFlavor: consistency.GTIDFlavorMariaDB, GTIDSet: "0-1-3"}, "binary log position"},
 		{"tagged set", consistency.TableChecksum{GTIDFlavor: consistency.GTIDFlavorMySQL, GTIDSet: uuidA + ":t:1-3", Anchor: consistency.AnchorTableLock}, "tagged"},
@@ -286,16 +291,31 @@ func TestResolveLiveCut_anchored(t *testing.T) {
 			t.Fatalf("got %+v, %v", cut, err)
 		}
 	})
-	t.Run("a baseline newer than the read", func(t *testing.T) {
-		db, m, _ := sqlmock.New()
-		defer db.Close()
-		stream(m)
-		walk(m)
-		cut, err := resolveLiveCut(context.Background(), db, src, time.Now(), &query.BinlogPos{File: "binlog.000003", Pos: 750})
-		if err != nil || cut.pos != nil || !strings.Contains(cut.inconclusive, "newer than the read") {
-			t.Fatalf("got %+v, %v; want inconclusive", cut, err)
-		}
-	})
+	// The walk above skipped uuidA:11, which starts at 750 (800 - 50); the
+	// cut is 700, the end of uuidA:10's row event.
+	for _, c := range []struct {
+		name     string
+		sincePos uint64
+		newer    bool
+	}{
+		{"a baseline past the cut but before the first change the read lacks: the quiet-source shape", 720, false},
+		{"a baseline at the first change the read lacks: that change is not in it", 750, false},
+		{"a baseline past the first change the read lacks", 760, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db, m, _ := sqlmock.New()
+			defer db.Close()
+			stream(m)
+			walk(m)
+			cut, err := resolveLiveCut(context.Background(), db, src, time.Now(), &query.BinlogPos{File: "binlog.000003", Pos: c.sincePos})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.newer != (cut.inconclusive != "") || (c.newer && !strings.Contains(cut.inconclusive, "holds changes the read")) || (!c.newer && cut.pos == nil) {
+				t.Fatalf("got %+v; want newer=%v", cut, c.newer)
+			}
+		})
+	}
 	t.Run("ids not proven to be binlog order", func(t *testing.T) {
 		db, m, _ := sqlmock.New()
 		defer db.Close()
@@ -324,8 +344,8 @@ func TestWaitIndexCovers(t *testing.T) {
 		behind(m)
 		age(m, 1)
 		m.ExpectQuery("SELECT gtid_set FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"g"}).AddRow(uuidA + ":1-12"))
-		ok, note := waitIndexCovers(context.Background(), db, src, consistency.GTIDFlavorMySQL, time.Minute)
-		if !ok || note != "" {
+		ok, note, err := waitIndexCovers(context.Background(), db, src, consistency.GTIDFlavorMySQL, time.Minute)
+		if err != nil || !ok || note != "" {
 			t.Fatalf("got %v %q", ok, note)
 		}
 		if err := m.ExpectationsWereMet(); err != nil {
@@ -337,20 +357,45 @@ func TestWaitIndexCovers(t *testing.T) {
 		defer db.Close()
 		behind(m)
 		age(m, 3600)
-		ok, note := waitIndexCovers(context.Background(), db, src, consistency.GTIDFlavorMySQL, time.Minute)
-		if ok || !strings.HasPrefix(note, indexBehind) {
+		ok, note, err := waitIndexCovers(context.Background(), db, src, consistency.GTIDFlavorMySQL, time.Minute)
+		if err != nil || ok || !strings.HasPrefix(note, indexBehind) || !strings.Contains(note, "3600s old") {
 			t.Fatalf("got %v %q", ok, note)
 		}
 		if err := m.ExpectationsWereMet(); err != nil {
 			t.Fatal(err)
 		}
 	})
+	t.Run("a cancelled check is an error, not a verdict", func(t *testing.T) {
+		db, m, _ := sqlmock.New()
+		defer db.Close()
+		behind(m)
+		age(m, 1)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer func(p time.Duration) { coveragePoll = p }(coveragePoll)
+		coveragePoll = time.Hour
+		go func() { time.Sleep(20 * time.Millisecond); cancel() }()
+		ok, note, err := waitIndexCovers(ctx, db, src, consistency.GTIDFlavorMySQL, time.Minute)
+		if !errors.Is(err, context.Canceled) || ok || note != "" {
+			t.Fatalf("got %v %q %v; want the cancellation", ok, note, err)
+		}
+	})
+	t.Run("a check cancelled before the coverage read is an error", func(t *testing.T) {
+		db, m, _ := sqlmock.New()
+		defer db.Close()
+		m.ExpectQuery("SELECT gtid_set FROM stream_state").WillReturnError(context.Canceled)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		ok, note, err := waitIndexCovers(ctx, db, src, consistency.GTIDFlavorMySQL, time.Minute)
+		if !errors.Is(err, context.Canceled) || ok || note != "" {
+			t.Fatalf("got %v %q %v; want the cancellation, not a coverage verdict", ok, note, err)
+		}
+	})
 	t.Run("another verdict is not waited for", func(t *testing.T) {
 		db, m, _ := sqlmock.New()
 		defer db.Close()
 		m.ExpectQuery("SELECT gtid_set FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"g"}).AddRow("garbage"))
-		ok, note := waitIndexCovers(context.Background(), db, src, consistency.GTIDFlavorMySQL, time.Minute)
-		if ok || !strings.Contains(note, "unparseable") {
+		ok, note, err := waitIndexCovers(context.Background(), db, src, consistency.GTIDFlavorMySQL, time.Minute)
+		if err != nil || ok || !strings.Contains(note, "unparseable") {
 			t.Fatalf("got %v %q", ok, note)
 		}
 		if err := m.ExpectationsWereMet(); err != nil {
@@ -361,8 +406,9 @@ func TestWaitIndexCovers(t *testing.T) {
 		db, m, _ := sqlmock.New()
 		defer db.Close()
 		behind(m)
-		ok, _ := waitIndexCovers(context.Background(), db, src, consistency.GTIDFlavorMySQL, -1)
-		if ok {
+		age(m, 1)
+		ok, _, err := waitIndexCovers(context.Background(), db, src, consistency.GTIDFlavorMySQL, -1)
+		if err != nil || ok {
 			t.Fatal("covered")
 		}
 		if err := m.ExpectationsWereMet(); err != nil {

@@ -133,19 +133,22 @@ const snapshotCutPage = 1000
 // before it; and a change the capture wrote at or before it was indexed
 // before the checkpoint was saved, so the walk that found nothing would have
 // found it.
-func snapshotCut(ctx context.Context, db *sql.DB, member snapshotMember) (*query.BinlogPos, string, error) {
+//
+// firstOut is where the oldest change the walk skipped (the first one the
+// snapshot does not hold) starts; nil when it skipped none.
+func snapshotCut(ctx context.Context, db *sql.DB, member snapshotMember) (cut, firstOut *query.BinlogPos, why string, err error) {
 	return snapshotCutPaged(ctx, db, member, snapshotCutPage)
 }
 
-func snapshotCutPaged(ctx context.Context, db *sql.DB, member snapshotMember, page int) (*query.BinlogPos, string, error) {
+func snapshotCutPaged(ctx context.Context, db *sql.DB, member snapshotMember, page int) (cut, firstOut *query.BinlogPos, why string, err error) {
 	var ckFile sql.NullString
 	var ckPos sql.NullInt64
-	err := db.QueryRowContext(ctx, "SELECT binlog_file, binlog_position FROM stream_state WHERE id = 1").Scan(&ckFile, &ckPos)
+	err = db.QueryRowContext(ctx, "SELECT binlog_file, binlog_position FROM stream_state WHERE id = 1").Scan(&ckFile, &ckPos)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, "", fmt.Errorf("read the capture's checkpoint: %w", err)
+		return nil, nil, "", fmt.Errorf("read the capture's checkpoint: %w", err)
 	}
 
-	const cols = "SELECT event_id, gtid, binlog_file, end_pos FROM binlog_events"
+	const cols = "SELECT event_id, gtid, binlog_file, start_pos, end_pos FROM binlog_events"
 	var (
 		last    uint64
 		skipped int
@@ -159,41 +162,42 @@ func snapshotCutPaged(ctx context.Context, db *sql.DB, member snapshotMember, pa
 			rows, err = db.QueryContext(ctx, cols+fmt.Sprintf(" WHERE event_id < ? ORDER BY event_id DESC LIMIT %d", page), last)
 		}
 		if err != nil {
-			return nil, "", fmt.Errorf("walk the index from its newest change: %w", err)
+			return nil, nil, "", fmt.Errorf("walk the index from its newest change: %w", err)
 		}
 		n := 0
 		for rows.Next() {
 			n++
 			var (
-				id   uint64
-				gtid sql.NullString
-				file string
-				end  uint64
+				id         uint64
+				gtid       sql.NullString
+				file       string
+				start, end uint64
 			)
-			if err := rows.Scan(&id, &gtid, &file, &end); err != nil {
+			if err := rows.Scan(&id, &gtid, &file, &start, &end); err != nil {
 				rows.Close()
-				return nil, "", fmt.Errorf("walk the index from its newest change: %w", err)
+				return nil, nil, "", fmt.Errorf("walk the index from its newest change: %w", err)
 			}
 			last = id
 			if !gtid.Valid || strings.TrimSpace(gtid.String) == "" {
 				rows.Close()
-				return nil, fmt.Sprintf("the read cannot be cut at the snapshot: indexed change %d (%s:%d) has no GTID, so whether the snapshot holds it cannot be told", id, file, end), nil
+				return nil, nil, fmt.Sprintf("the read cannot be cut at the snapshot: indexed change %d (%s:%d) has no GTID, so whether the snapshot holds it cannot be told", id, file, end), nil
 			}
 			in, err := member(gtid.String)
 			if err != nil {
 				rows.Close()
-				return nil, "the read cannot be cut at the snapshot: " + err.Error(), nil
+				return nil, nil, "the read cannot be cut at the snapshot: " + err.Error(), nil
 			}
 			if in {
 				rows.Close()
-				return &query.BinlogPos{File: file, Pos: end}, "", nil
+				return &query.BinlogPos{File: file, Pos: end}, firstOut, "", nil
 			}
 			skipped++
+			firstOut = &query.BinlogPos{File: file, Pos: start}
 		}
 		err := rows.Err()
 		rows.Close()
 		if err != nil {
-			return nil, "", fmt.Errorf("walk the index from its newest change: %w", err)
+			return nil, nil, "", fmt.Errorf("walk the index from its newest change: %w", err)
 		}
 		first = false
 		if n < page {
@@ -201,10 +205,10 @@ func snapshotCutPaged(ctx context.Context, db *sql.DB, member snapshotMember, pa
 		}
 	}
 	if skipped > 0 {
-		return nil, fmt.Sprintf("the read cannot be cut at the snapshot: all %d changes in the live index are newer than the snapshot, and the ones it holds are archived", skipped), nil
+		return nil, nil, fmt.Sprintf("the read cannot be cut at the snapshot: all %d changes in the live index are newer than the snapshot, and the ones it holds are archived", skipped), nil
 	}
 	if !ckFile.Valid || ckFile.String == "" || !ckPos.Valid || ckPos.Int64 <= 0 {
-		return nil, "the read cannot be cut at the snapshot: the index holds no change and its checkpoint has no position", nil
+		return nil, nil, "the read cannot be cut at the snapshot: the index holds no change and its checkpoint has no position", nil
 	}
-	return &query.BinlogPos{File: ckFile.String, Pos: uint64(ckPos.Int64)}, "", nil
+	return &query.BinlogPos{File: ckFile.String, Pos: uint64(ckPos.Int64)}, nil, "", nil
 }

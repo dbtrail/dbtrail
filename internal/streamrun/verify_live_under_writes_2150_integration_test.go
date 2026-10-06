@@ -59,10 +59,11 @@ func (u underWrites) gtidVar() string {
 	return "@@global.gtid_executed"
 }
 
-// setup creates and seeds the table, writes the baseline at the seeded state
-// with its binlog coordinates, and starts the capture. It returns the verify
+// setup creates and seeds the table, starts the capture, makes
+// preBaselineWrites changes and waits for them to be indexed, then writes the
+// baseline at that state with its binlog coordinates. It returns the verify
 // config and a stop func for the capture.
-func (u underWrites) setup(t *testing.T) (verify.Config, func()) {
+func (u underWrites) setup(t *testing.T, preBaselineWrites int) (verify.Config, func()) {
 	t.Helper()
 	testutil.MustExec(t, u.sourceDB, "CREATE TABLE t (id INT PRIMARY KEY, v INT NOT NULL, note VARCHAR(32) NOT NULL) ENGINE=InnoDB")
 	var vals []string
@@ -75,43 +76,6 @@ func (u underWrites) setup(t *testing.T) (verify.Config, func()) {
 	testutil.SetupPartitionedTable(t, u.indexDB, u.indexName, []time.Time{hour.Add(-time.Hour), hour, hour.Add(time.Hour), hour.Add(2 * time.Hour)})
 	if _, err := metadata.TakeSnapshot(u.sourceDB, u.indexDB, []string{u.sourceName}); err != nil {
 		t.Fatalf("TakeSnapshot: %v", err)
-	}
-
-	// The baseline: the seeded table, at the binlog position nothing has
-	// been written past yet.
-	file, pos, err := config.CurrentBinlogPosition(u.sourceDB)
-	if err != nil {
-		t.Fatalf("CurrentBinlogPosition: %v", err)
-	}
-	snapTime := time.Now().UTC().Truncate(time.Second).Add(-time.Second)
-	root := t.TempDir()
-	dir := filepath.Join(root, snapTime.Format("2006-01-02T15-04-05")+"Z", u.sourceName)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	ddl := "CREATE TABLE `t` (\n  `id` INT NOT NULL,\n  `v` INT NOT NULL,\n  `note` VARCHAR(32) NOT NULL,\n  PRIMARY KEY (`id`)\n);\n"
-	cols, err := baseline.ParseSchemaText(ddl)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w, err := baseline.NewWriter(filepath.Join(dir, "t.parquet"), cols, baseline.WriterConfig{
-		Compression: "none", RowGroupSize: 1000,
-		Metadata: map[string]string{
-			baseline.MetaKeyCreateTableSQL: ddl,
-			baseline.MetaKeyBinlogFile:     file,
-			baseline.MetaKeyBinlogPos:      strconv.FormatUint(uint64(pos), 10),
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for id := 1; id <= underWritesSeed; id++ {
-		if err := w.WriteRow([]string{strconv.Itoa(id), "0", "seed"}, []bool{false, false, false}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
 	}
 
 	// The capture, from the source's current position, checkpointing every
@@ -158,6 +122,63 @@ func (u underWrites) setup(t *testing.T) (verify.Config, func()) {
 			t.Fatal("the capture saved no checkpoint in 60s")
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+
+	// Changes indexed before the baseline: the snapshot then starts after
+	// the capture's last change, the shape of a quiet source.
+	for i := range preBaselineWrites {
+		testutil.MustExec(t, u.sourceDB, "UPDATE t SET v = v + 1, note = 'pre' WHERE id = ?", 1+i%underWritesSeed)
+	}
+	if preBaselineWrites > 0 {
+		waitIndexedCount(t, u.indexDB, u.sourceName, preBaselineWrites, 60*time.Second)
+	}
+
+	// The baseline: the table as it is now, at the binlog position nothing
+	// has been written past yet (no writer runs here).
+	file, pos, err := config.CurrentBinlogPosition(u.sourceDB)
+	if err != nil {
+		t.Fatalf("CurrentBinlogPosition: %v", err)
+	}
+	snapTime := time.Now().UTC().Truncate(time.Second).Add(-time.Second)
+	root := t.TempDir()
+	dir := filepath.Join(root, snapTime.Format("2006-01-02T15-04-05")+"Z", u.sourceName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ddl := "CREATE TABLE `t` (\n  `id` INT NOT NULL,\n  `v` INT NOT NULL,\n  `note` VARCHAR(32) NOT NULL,\n  PRIMARY KEY (`id`)\n);\n"
+	cols, err := baseline.ParseSchemaText(ddl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := baseline.NewWriter(filepath.Join(dir, "t.parquet"), cols, baseline.WriterConfig{
+		Compression: "none", RowGroupSize: 1000,
+		Metadata: map[string]string{
+			baseline.MetaKeyCreateTableSQL: ddl,
+			baseline.MetaKeyBinlogFile:     file,
+			baseline.MetaKeyBinlogPos:      strconv.FormatUint(uint64(pos), 10),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := u.sourceDB.Query("SELECT id, v, note FROM t ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var id, v, note string
+		if err := rows.Scan(&id, &v, &note); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.WriteRow([]string{id, v, note}, []bool{false, false, false}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	resolver, err := metadata.NewResolver(u.indexDB, 0)
@@ -220,7 +241,7 @@ func (u underWrites) writers(t *testing.T, commits *atomic.Int64) (stop func()) 
 }
 
 func runVerifyUnderWrites(t *testing.T, u underWrites) {
-	cfg, stopCapture := u.setup(t)
+	cfg, stopCapture := u.setup(t, 0)
 	defer stopCapture()
 
 	var commits atomic.Int64
@@ -303,7 +324,7 @@ func TestIntegrationVerifyLiveSourceAnchorFallbacks2150(t *testing.T) {
 	u := gtidSourceDB(t, base)
 	u.indexDB, u.indexName = testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, u.indexDB)
-	cfg, stopCapture := u.setup(t)
+	cfg, stopCapture := u.setup(t, 0)
 	defer stopCapture()
 	ctx := context.Background()
 
@@ -317,6 +338,10 @@ func TestIntegrationVerifyLiveSourceAnchorFallbacks2150(t *testing.T) {
 		testutil.MustExec(t, root, "CREATE USER '"+user+"'@'%' IDENTIFIED BY 'pw2150'")
 		defer func() { _, _ = root.Exec("DROP USER '" + user + "'@'%'") }()
 		testutil.MustExec(t, root, "GRANT SELECT ON `"+u.sourceName+"`.* TO '"+user+"'@'%'")
+		// A statement with no row change (the GRANT) reaches the capture's
+		// saved position only with the next transaction: one, elsewhere.
+		testutil.MustExec(t, u.sourceDB, "CREATE TABLE IF NOT EXISTS beat (id INT PRIMARY KEY)")
+		testutil.MustExec(t, u.sourceDB, "INSERT INTO beat VALUES (1)")
 		cfgNoLock := cfg
 		addr := strings.TrimPrefix(base[strings.Index(base, "@"):], "@")
 		cfgNoLock.SourceDB, err = sql.Open("mysql", user+":pw2150@"+addr+"/"+u.sourceName+"?parseTime=true")
@@ -352,4 +377,26 @@ func TestIntegrationVerifyLiveSourceAnchorFallbacks2150(t *testing.T) {
 			t.Fatalf("status %s, detail %q; want inconclusive because the position could not be pinned", res.Status, res.Detail)
 		}
 	})
+}
+
+// TestIntegrationVerifyLiveSourceQuietAfterBaseline2150: changes captured,
+// then a baseline, then nothing. The snapshot's last change ends before the
+// baseline's position (which is past that transaction's commit), and the
+// check must still compare, and match, with the read cut.
+func TestIntegrationVerifyLiveSourceQuietAfterBaseline2150(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	base := testutil.SkipIfNoGTIDSource(t)
+	u := gtidSourceDB(t, base)
+	u.indexDB, u.indexName = testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, u.indexDB)
+	cfg, stopCapture := u.setup(t, 25)
+	defer stopCapture()
+	res, err := verify.VerifyTable(context.Background(), cfg, u.sourceName, "t")
+	if err != nil {
+		t.Fatalf("VerifyTable: %v", err)
+	}
+	t.Logf("%s: anchor %.80s, detail %q", res.Status, res.Anchor, res.Detail)
+	if res.Status != verify.StatusMatch || res.Detail != "" {
+		t.Fatalf("status %s, detail %q; want a plain match on a quiet source", res.Status, res.Detail)
+	}
 }
