@@ -416,7 +416,9 @@ of that file, with the capture's own connection settings and `server_id`,
 reads its first event and compares:
 
 - **Same identity:** the restart resumes from the checkpoint as before, and
-  prints `Source: binlog file <name> is the one the checkpoint was read from`.
+  prints `Source: binlog file <name> has the identity the checkpoint recorded
+  (fde:<time>:<server_id> ...)`. That says the file was created at the same
+  second by the same `server_id`, not that its content is the same.
   The "cannot verify the source was not rebuilt" warning is not printed.
 - **Different identity:** the restart deletes nothing, records a capture loss
   that names both identities, and restarts from the start of the source's
@@ -429,8 +431,8 @@ reads its first event and compares:
 
 If the source serves another file under a name the running stream already
 read (its numbering started over under a reconnect), the stream logs a warning
-and keeps the first identity for that name, so the next restart's check sees
-the difference instead of verifying the new file.
+and keeps the first identity for that name, so a restart while the checkpoint
+still names that file sees the difference instead of verifying the new file.
 
 The dump needs only `REPLICATION SLAVE`, which capture already has. `SHOW
 BINLOG EVENTS` does not show the time, so it cannot replace the dump.
@@ -454,6 +456,17 @@ Cases this check cannot see, and what the restart says about them:
   or `--reset`, until the stream
   reads its file and writes the next checkpoint (within one checkpoint
   interval).
+- A numbering that starts over under a running stream (a reconnect after a
+  reset) is caught at the next restart only while the checkpoint still names a
+  file the stream had already read under the old numbering. Once the stream
+  moves on to a name it never read before, that file's identity belongs to the
+  new numbering, the restart verifies it, and the warning logged when the
+  stream met the reused name is the only record of the break.
+- A self-hosted source rolled back to a VM or disk snapshot: its binary logs
+  and its identity roll back together, so the checkpoint's file comes back with
+  the same creation time and `server_id`. Once it grows past the checkpoint,
+  the identity matches and the ordinary cleanup deletes the indexed rows of the
+  discarded timeline at or after the checkpoint.
 - The time has one-second resolution: a reset that regrows a file of the same
   name within the second the old one was created is not seen.
 - A new numbering that grew past the checkpoint's file name and whose files up

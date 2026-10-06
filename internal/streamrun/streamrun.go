@@ -2839,7 +2839,8 @@ func oneRun(ctx context.Context, cfg Config) error {
 		// Escalate loudly rather than resume silently. Non-blocking: a hard error
 		// here would break every legitimate position-mode resume.
 		if posCheck.verified {
-			fmt.Printf("Source: binlog file %s is the one the checkpoint was read from \u2713\n", saved.binlogFile)
+			fmt.Printf("Source: binlog file %s has the identity the checkpoint recorded (%s: created at that time by that "+
+				"server_id; the content is not compared) \u2713\n", saved.binlogFile, saved.fileIdentity)
 		} else if gap != nil && gap.RebuildUndetectable {
 			slog.Warn("position-mode resume cannot detect a source rebuild: if the source was "+
 				"rebuilt (RESET MASTER + restore) and a same-named binlog regrew past the checkpoint "+

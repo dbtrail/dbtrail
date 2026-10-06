@@ -52,12 +52,17 @@ func (f *fileIdentities) set(file, identity string) {
 	if prev, ok := f.m[file]; ok && prev != identity {
 		// The source serves another file under a name this run already read:
 		// its numbering started over under the stream (a reconnect after a
-		// reset). The first identity is kept on purpose: a checkpoint then
-		// pairs the old identity with the new file's positions, and the next
-		// restart's probe reads the difference as a replaced file (no
-		// cleanup, a capture loss) instead of verifying it.
+		// reset). The first identity is kept on purpose: while the checkpoint
+		// still names this file, it pairs the old identity with the new
+		// file's positions, and the next restart's probe reads the difference
+		// as a replaced file (no cleanup, a capture loss). That holds only
+		// while the checkpoint stays on this reused name: once the stream
+		// moves on to a name it never read before, that file's identity is
+		// the new numbering's own, the next restart verifies it, and this
+		// warning is the only trace of the break.
 		slog.Warn("the source now serves another binlog file under a name this capture already read: its binary log "+
-			"numbering started over; the next restart checks the file and records the break",
+			"numbering started over under the stream; a restart while the checkpoint still names this file records the "+
+			"break, but once capture moves past it this warning is the only record",
 			"file", file, "identity_first_seen", prev, "identity_now", identity)
 		return
 	}
