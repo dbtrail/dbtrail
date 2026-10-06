@@ -322,6 +322,9 @@ func snapshotFileMetadata(in mergeInput) map[string]string {
 	case in.Cut != nil:
 		md[baseline.MetaKeyBinlogFile] = in.Cut.File
 		md[baseline.MetaKeyBinlogPos] = strconv.FormatUint(in.Cut.Pos, 10)
+		if in.EventMark != "" {
+			md[baseline.MetaKeyEventMark] = in.EventMark
+		}
 	case in.SourceBaseline.Metadata.BinlogFile != "":
 		// No cut means the index holds no events, so nothing was folded and the
 		// source's anchor is still exactly where deltas resume. Carrying it over
@@ -330,6 +333,9 @@ func snapshotFileMetadata(in mergeInput) map[string]string {
 		// timestamp bound (#797).
 		md[baseline.MetaKeyBinlogFile] = in.SourceBaseline.Metadata.BinlogFile
 		md[baseline.MetaKeyBinlogPos] = strconv.FormatInt(in.SourceBaseline.Metadata.BinlogPos, 10)
+		if m := in.SourceBaseline.Metadata.EventMark; m != "" {
+			md[baseline.MetaKeyEventMark] = m
+		}
 	}
 	return md
 }

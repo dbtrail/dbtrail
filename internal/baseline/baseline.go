@@ -43,6 +43,10 @@ type Config struct {
 	// that read it before starting the dump, from the index of the source it
 	// dumped, may set it. Empty leaves the key out.
 	DDLMark string
+	// EventMark is stamped as MetaKeyEventMark on every file (#2160): the
+	// newest binlog_events row in the index before the dump started, read under
+	// the same rule as DDLMark. Empty leaves the key out.
+	EventMark string
 }
 
 // Stats describes the outcome of a baseline run.
@@ -312,6 +316,9 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 			}
 			if cfg.DDLMark != "" {
 				md[MetaKeyDDLMark] = cfg.DDLMark
+			}
+			if cfg.EventMark != "" {
+				md[MetaKeyEventMark] = cfg.EventMark
 			}
 			// Embed the raw mydumper <db>.<table>-schema.sql bytes so that
 			// full-table reconstruct (#187) can emit a faithful schema file

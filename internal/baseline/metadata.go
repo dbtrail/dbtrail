@@ -103,6 +103,14 @@ const (
 	// Absent on a dump taken without access to the index, and on any file
 	// written before this key existed.
 	MetaKeyDDLMark = "bintrail.ddl_mark"
+	// MetaKeyEventMark names one binlog_events row that was in the index when
+	// this file's run started, or, on a dump, when the dump started (#2160).
+	// Every event indexed after it sorts at or after its end, unless the
+	// source's binlog numbering started over, which is what the next run checks
+	// with it. Its value is opaque here; reconstruct.EventMark reads and writes
+	// it. Absent on an index no stream wrote, and on any file written before
+	// this key existed.
+	MetaKeyEventMark = "bintrail.event_mark"
 )
 
 // RenderGUCsPinned is the canonical value the capture side stamps under
@@ -143,6 +151,8 @@ type DumpMetadata struct {
 	LastEventID uint64
 	// DDLMark is MetaKeyDDLMark, verbatim; "" when absent.
 	DDLMark string
+	// EventMark is MetaKeyEventMark, verbatim; "" when absent.
+	EventMark string
 	// Producer is MetaKeySnapshotProducer: which code path wrote these bytes
 	// ("dump" | "reconstruct"). Empty on any snapshot written before #1545
 	// stamped it on the dump path; see ProvenanceOf, which does not guess.
@@ -495,6 +505,9 @@ func ReadParquetMetadata(path string) (DumpMetadata, error) {
 	if v, ok := pf.Lookup(MetaKeyDDLMark); ok {
 		m.DDLMark = v
 	}
+	if v, ok := pf.Lookup(MetaKeyEventMark); ok {
+		m.EventMark = v
+	}
 	if v, ok := pf.Lookup(MetaKeyLastEventID); ok {
 		m.LastEventID = parseLastEventID(path, v)
 	}
@@ -650,6 +663,8 @@ func applyS3FooterKV(m *DumpMetadata, path, key, val string) (corrupt bool) {
 		m.DeltaSeqLo = parseDeltaSeq(path, val)
 	case MetaKeyDDLMark:
 		m.DDLMark = val
+	case MetaKeyEventMark:
+		m.EventMark = val
 	case MetaKeyLastEventID:
 		m.LastEventID = parseLastEventID(path, val)
 	case MetaKeyRowCount:

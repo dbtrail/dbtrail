@@ -1,0 +1,296 @@
+package reconstruct
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/dbtrail/dbtrail/internal/query"
+	mysqldriver "github.com/go-sql-driver/mysql"
+)
+
+// A binlog numbering that started over (#2160).
+//
+// A refresh reads the changes after a snapshot by binlog POSITION: every event
+// at or after the snapshot's file and offset. That holds only while the source
+// keeps one numbering. A RESET MASTER (RESET BINARY LOGS AND GTIDS), a
+// failover to another server, or a shorter log_bin base name starts a new one,
+// and every change after it sorts BELOW the snapshot's position. A window read
+// by position then looks empty, the refresh publishes the old rows, and every
+// later refresh does the same: the copy stops moving and nothing says so.
+//
+// Capture does not always leave a trace of it. In position mode a restart
+// finds its saved file gone and stamps a capture loss (stream_state.gap_lost_at),
+// which already refuses the refresh. In GTID mode on MySQL the source refuses
+// the stream until its new numbering passes the old one, then streams on from
+// binlog.000001 with no stamp at all. A failover to a server that already
+// holds the GTIDs streams on at once.
+//
+// The event mark is the index-side record that tells the two apart, on the
+// model of the DDL mark (ddl_mark.go). binlog_events.event_id says in which
+// order rows reached the index. A run records the newest row it saw; every
+// event indexed after that row sorts at or after its end, while the source
+// keeps one numbering. An event indexed after it that sorts BEFORE it is a
+// numbering that started over, and the run refuses: positions on the two
+// sides cannot be compared, so no window can be read between them. The
+// remedy is a new full snapshot, anchored in the new numbering.
+
+// ErrBinlogRenumbered: the source's binlog numbering started over since the
+// snapshot a run is anchored on (a RESET MASTER, a failover to another
+// server, a change of the log_bin base name), so the changes since cannot be
+// found by binlog position. Remedy: a new full snapshot. Not bypassed by
+// --allow-gaps: nothing was lost that a flag could accept, the window is
+// unreadable.
+var ErrBinlogRenumbered = errors.New("the source's binlog numbering started over since the snapshot")
+
+// renumberedRemedy ends every ErrBinlogRenumbered message. It names the
+// remedy in words a scheduled refresh and the command line share: the daemon
+// takes the full snapshot by itself after a refused update.
+const renumberedRemedy = "a new full snapshot is needed; the changes since cannot be found by binlog position"
+
+// EventMark names one binlog_events row: its id, and where it ends, so the
+// check can tell a row that is gone from a row whose id now names another
+// event.
+type EventMark struct {
+	ID   uint64 `json:"id"`
+	File string `json:"binlog_file"`
+	End  uint64 `json:"end_pos"`
+}
+
+// Encode is the mark as baseline.MetaKeyEventMark stores it.
+func (m EventMark) Encode() string {
+	b, _ := json.Marshal(m) // a struct of a string and two numbers: cannot fail
+	return string(b)
+}
+
+// ParseEventMark reads a footer's mark. "" is no mark; one that does not read
+// is no mark too, said out loud.
+func ParseEventMark(raw string) *EventMark {
+	if raw == "" {
+		return nil
+	}
+	var m EventMark
+	if err := json.Unmarshal([]byte(raw), &m); err != nil || m.ID == 0 || m.File == "" {
+		slog.Warn("baseline footer: unreadable event mark; a binlog numbering that started over is not detected from it",
+			"value", raw, "error", err)
+		return nil
+	}
+	return &m
+}
+
+// ReadEventMark reads the newest indexed event that carries a coordinate. nil
+// when the index holds none.
+func ReadEventMark(ctx context.Context, db *sql.DB) (*EventMark, error) {
+	var m EventMark
+	err := db.QueryRowContext(ctx, `SELECT event_id, binlog_file, end_pos FROM binlog_events
+		WHERE binlog_file IS NOT NULL AND end_pos IS NOT NULL
+		ORDER BY event_id DESC LIMIT 1`).Scan(&m.ID, &m.File, &m.End)
+	switch {
+	case err == nil:
+		return &m, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("read the newest indexed event: %w", err)
+	}
+}
+
+// ReadStreamEventMark is ReadEventMark on an index a stream wrote, encoded:
+// "" anywhere else, where ascending id is not the order rows were indexed in
+// and a mark would prove nothing. A failed read leaves the snapshot without
+// one, which only means the next run cannot use it.
+func ReadStreamEventMark(ctx context.Context, db *sql.DB) string {
+	captured, err := query.StreamCaptured(ctx, db)
+	if err != nil || !captured {
+		return ""
+	}
+	m, err := ReadEventMark(ctx, db)
+	if err != nil {
+		slog.Warn("could not read the newest indexed event; the snapshot is published without an event mark", "error", err)
+		return ""
+	}
+	if m == nil {
+		return ""
+	}
+	return m.Encode()
+}
+
+// readRunEventMark is a fold's mark. Read BEFORE the cut: the mark is a row
+// at or before the cut's own, so a numbering that starts over between the two
+// is an event indexed after the mark that sorts before it, which the next run
+// finds. Read after the cut, such a change could sit between a cut in the old
+// numbering and a mark in the new one, where no comparison sees it.
+func readRunEventMark(ctx context.Context, db *sql.DB) string {
+	return ReadStreamEventMark(ctx, db)
+}
+
+// BinlogBaseName is a binlog file name without its numeric extension:
+// "binlog.000007" is "binlog". A name with no numeric extension is its own
+// base name.
+func BinlogBaseName(file string) string {
+	i := strings.LastIndexByte(file, '.')
+	if i < 0 || i == len(file)-1 {
+		return file
+	}
+	for _, c := range file[i+1:] {
+		if c < '0' || c > '9' {
+			return file
+		}
+	}
+	return file[:i]
+}
+
+// sortsBefore reports whether p is strictly before q in binlog order.
+func sortsBefore(p, q query.BinlogPos) bool {
+	return !q.AtOrBefore(p)
+}
+
+// indexedEvent is one row read for the check.
+type indexedEvent struct {
+	id    uint64
+	file  string
+	start uint64
+}
+
+func (e indexedEvent) String() string {
+	return fmt.Sprintf("%s:%d", e.file, e.start)
+}
+
+// startedOverAfter reports whether e, indexed after the mark, shows the
+// numbering started over: a different base name, or a start before the
+// mark's end.
+func startedOverAfter(e indexedEvent, m *EventMark) bool {
+	if BinlogBaseName(e.file) != BinlogBaseName(m.File) {
+		return true
+	}
+	return sortsBefore(query.BinlogPos{File: e.file, Pos: e.start}, query.BinlogPos{File: m.File, Pos: m.End})
+}
+
+// CheckNumberingContinues returns an error wrapping ErrBinlogRenumbered when
+// an event indexed after the mark sorts before it. nil mark, no event after
+// it, or a mark this index can no longer vouch for: nil.
+//
+// Two events are read, both by primary key: the first one indexed after the
+// mark, and the newest. The first catches a numbering that started over and
+// has since grown past the mark; the newest catches one that started over
+// later. A numbering that started over in between, and passed the mark again
+// before either was read, is not seen; nor is one that started ABOVE the mark
+// (a new server whose files are numbered higher), which is what the check of
+// the source's identity is for (CheckSourceReplaced).
+//
+// The mark's own row decides whether the ids can be trusted:
+//   - Present and the same event: yes.
+//   - Present and another event: the index was rebuilt and its ids name
+//     other rows. No check.
+//   - Gone, with older rows still in the index: deleted by the resume cleanup
+//     of a restarted stream, which captures those events again under new
+//     ids, AT their old positions, so they sort before the mark without any
+//     renumbering. No check: capture records the loss that comes with a reset
+//     in that mode (gap_lost_at), and the refresh refuses on it.
+//   - Gone with every older row (rotation dropped its hour): the events after
+//     it are still in order. Checked.
+func CheckNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark) error {
+	if m == nil {
+		return nil
+	}
+	var file string
+	var end uint64
+	err := db.QueryRowContext(ctx, `SELECT binlog_file, end_pos FROM binlog_events WHERE event_id = ?`, m.ID).Scan(&file, &end)
+	switch {
+	case err == nil:
+		if file != m.File || end != m.End {
+			return nil
+		}
+	case errors.Is(err, sql.ErrNoRows):
+		var oldest sql.NullInt64
+		if err := db.QueryRowContext(ctx, `SELECT MIN(event_id) FROM binlog_events`).Scan(&oldest); err != nil {
+			return fmt.Errorf("read the oldest indexed event: %w", err)
+		}
+		if !oldest.Valid || uint64(oldest.Int64) < m.ID {
+			return nil
+		}
+	default:
+		return fmt.Errorf("read the event the snapshot's event mark names: %w", err)
+	}
+	for _, q := range []string{
+		`SELECT event_id, binlog_file, start_pos FROM binlog_events
+			WHERE event_id > ? AND binlog_file IS NOT NULL AND start_pos IS NOT NULL
+			ORDER BY event_id ASC LIMIT 1`,
+		`SELECT event_id, binlog_file, start_pos FROM binlog_events
+			WHERE event_id > ? AND binlog_file IS NOT NULL AND start_pos IS NOT NULL
+			ORDER BY event_id DESC LIMIT 1`,
+	} {
+		var e indexedEvent
+		err := db.QueryRowContext(ctx, q, m.ID).Scan(&e.id, &e.file, &e.start)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read the events indexed after the snapshot's event mark: %w", err)
+		}
+		if startedOverAfter(e, m) {
+			return fmt.Errorf("%w: a change at %s was captured after one at %s:%d, which it should follow in the binary log, so the source's binary log starts again from another numbering (RESET MASTER, a failover, or a new log_bin name); %s",
+				ErrBinlogRenumbered, e, m.File, m.End, renumberedRemedy)
+		}
+	}
+	return nil
+}
+
+// CheckSourceReplaced returns an error wrapping ErrBinlogRenumbered when
+// capture recorded, at or after since, that the source answering at its
+// address is another server (a new server_uuid). The two servers' binlog files
+// are numbered apart, even when the new one's numbers are higher, which the
+// event mark cannot tell. A change of host, port or user keeps the same server
+// and the same files, so it does not count. A zero since, or an index without
+// the table: nil.
+//
+// MariaDB has no server_uuid: capture derives its identity from the address,
+// so a failover behind the same address records nothing here.
+func CheckSourceReplaced(ctx context.Context, db *sql.DB, since time.Time) error {
+	if since.IsZero() {
+		return nil
+	}
+	var oldUUID, newUUID string
+	var at time.Time
+	// Compared as an instant: detected_at is a TIMESTAMP the index server
+	// reads in its own time zone.
+	err := db.QueryRowContext(ctx, `SELECT old_value, new_value, detected_at FROM bintrail_server_changes
+		WHERE field_changed = 'server_uuid' AND UNIX_TIMESTAMP(detected_at) >= ?
+		ORDER BY id DESC LIMIT 1`, since.Unix()).Scan(&oldUUID, &newUUID, &at)
+	switch {
+	case err == nil:
+		return fmt.Errorf("%w: capture found another server at the source's address at %s (server_uuid %s, before it %s), and the two servers' binary logs are numbered apart; %s",
+			ErrBinlogRenumbered, at.UTC().Format(time.RFC3339), newUUID, oldUUID, renumberedRemedy)
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	default:
+		var me *mysqldriver.MySQLError
+		if errors.As(err, &me) && me.Number == 1146 {
+			return nil
+		}
+		return fmt.Errorf("read the source's identity changes: %w", err)
+	}
+}
+
+// capturedBackBelow returns an error wrapping ErrBinlogRenumbered for a
+// window that holds a recorded capture loss and whose cut sorts strictly
+// before its anchor: capture restarted from a position lower than the one the
+// snapshot already holds. That is how a position-mode stream comes back after
+// a RESET MASTER (its saved file is gone, it starts at the oldest file the
+// source has, which is binlog.000001 again), and when the resume cleanup took
+// the event mark's own row, this is all that is left to see it by. It runs
+// only where the loss was accepted (--allow-gaps): without it the loss itself
+// refuses. A loss that left capture behind a full snapshot's position looks
+// the same and is refused the same way, with the same remedy.
+func capturedBackBelow(gap *CaptureGap, anchor, cut *query.BinlogPos) error {
+	if gap == nil || gap.Unevaluable || anchor == nil || cut == nil || !sortsBefore(*cut, *anchor) {
+		return nil
+	}
+	return fmt.Errorf("%w: capture recorded a loss at %s and restarted at %s:%d, below the snapshot's %s:%d, so the source's binary log may start again from another numbering; %s",
+		ErrBinlogRenumbered, gap.At.UTC().Format(time.RFC3339), cut.File, cut.Pos, anchor.File, anchor.Pos, renumberedRemedy)
+}

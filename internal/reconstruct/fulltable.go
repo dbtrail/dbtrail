@@ -150,6 +150,12 @@ type FullTableConfig struct {
 	// schema_changes row, read before the cut and so before any table's
 	// check. "" when the index was not written by a stream or holds no row.
 	ddlMark string
+	// eventMark is the run's event mark, encoded (renumbered.go): the newest
+	// binlog_events row, read before the cut. It is stamped beside the cut on
+	// every file this run writes, so the next run can tell a binlog numbering
+	// that started over from an empty window. "" when the index was not
+	// written by a stream or holds no event.
+	eventMark string
 	// schemaAt is the schema snapshot in effect at At, and schemaAtTime when it
 	// was taken (#1651): the column-type check compares against it, not the
 	// latest snapshot, and only for a baseline older than it. nil when the
@@ -409,6 +415,9 @@ func fetchFloor(snapshotTime time.Time, bmeta baseline.DumpMetadata, prev *table
 		// id applied up to that position, and pairing it with another file's
 		// position would floor the fetch on an id that position never saw.
 		anchor.BinlogFile, anchor.BinlogPos, anchor.LastEventID = prev.Meta.BinlogFile, prev.Meta.BinlogPos, prev.Meta.LastEventID
+		// The event mark too (#2160): it says where events stood when THAT
+		// position was taken, so it is only meaningful beside it.
+		anchor.EventMark = prev.Meta.EventMark
 	case !bmeta.SnapshotTimestamp.IsZero() && bmeta.SnapshotTimestamp.Before(since):
 		since = bmeta.SnapshotTimestamp
 	}
@@ -783,6 +792,7 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 		// The DDL mark first: every table's check below reads schema_changes
 		// after it, so every row up to it is one those checks placed.
 		cfg.ddlMark = readRunDDLMark(ctx, db)
+		cfg.eventMark = readRunEventMark(ctx, db)
 		cut, cutErr := ResolveSnapshotCut(ctx, db, cfg.At)
 		if cutErr != nil {
 			return nil, cutErr
@@ -1333,6 +1343,19 @@ func ReconstructTable(
 	afterDestructiveDDLCheck()
 	stampMark := markToStamp(cfg.ddlMark, ddlWin)
 
+	// ── 3b'. Refuse when the source's binlog numbering started over (#2160) ──
+	// Before the capture-gap check, and outside --allow-gaps: the window is
+	// read by position from the anchor, and positions from before and after
+	// a new numbering cannot be compared, so no flag can make it readable. A
+	// proven renumbering names its own remedy (a new full snapshot) rather
+	// than the gap message's flag. See renumbered.go.
+	if err := CheckNumberingContinues(ctx, db, ParseEventMark(anchorMeta.EventMark)); err != nil {
+		return nil, fmt.Errorf("%s.%s: %w", schema, table, err)
+	}
+	if err := CheckSourceReplaced(ctx, db, fetchSince); err != nil {
+		return nil, fmt.Errorf("%s.%s: %w", schema, table, err)
+	}
+
 	// ── 3c. Refuse/warn on a stamped capture gap inside the window (#765) ──
 	// stream_state.gap_lost_at records an irreparable capture gap (source
 	// binlogs purged before the stream caught up); unlike the archive-coverage
@@ -1346,6 +1369,15 @@ func ReconstructTable(
 	capGap, err := CheckCaptureGapStatus(ctx, db, schema, table, snapshotTime, cfg.At, cfg.AllowGaps)
 	if err != nil {
 		return nil, err
+	}
+	// An accepted loss that left capture BELOW the anchor (#2160): what a
+	// position-mode stream does after a RESET MASTER. The flag accepts lost
+	// events, not a window that can no longer be read by position.
+	if anchorMeta.BinlogFile != "" && anchorMeta.BinlogPos > 0 {
+		anchor := query.BinlogPos{File: anchorMeta.BinlogFile, Pos: uint64(anchorMeta.BinlogPos)}
+		if err := capturedBackBelow(capGap, &anchor, cfg.cut); err != nil {
+			return nil, fmt.Errorf("%s.%s: %w", schema, table, err)
+		}
 	}
 
 	// ── 4. Fetch events via the shared helper (gap-aware) ──────────────────
@@ -1569,6 +1601,7 @@ func ReconstructTable(
 		in.SnapshotAt = cfg.At
 		in.Cut = cfg.cut
 		in.DDLMark = stampMark
+		in.EventMark = cfg.eventMark
 		in.CaptureGap = capGap
 		in.SourceBaseline = baselineMeta{
 			Path:     baselinePath,
@@ -1771,6 +1804,10 @@ type mergeInput struct {
 	LastEventID uint64
 	// DDLMark is stamped as baseline.MetaKeyDDLMark (#1912); "" leaves it out.
 	DDLMark string
+	// EventMark is stamped as baseline.MetaKeyEventMark beside Cut (#2160);
+	// "" leaves it out. Without a cut the source's own mark is kept with its
+	// own position instead.
+	EventMark string
 	// ImageColumns/SawImage come from foldResult and carry the #843 signal the
 	// trimmed Changes map can no longer provide (see droppedBaselineColumns).
 	ImageColumns map[string]struct{}
