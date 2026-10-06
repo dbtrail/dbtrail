@@ -156,8 +156,8 @@ What to know before relying on it:
   metrics: `bintrail_sql_slot_wait_seconds` and `bintrail_sql_slot_waiting`
   ([Observability](observability.md)). The daemon that serves them is the one
   capturing changes, which is why the limits are small. A
-  statement past 2 GB fails instead of spilling to disk, and one that reads a
-  table with more than 48 MB of changes not merged into it yet is refused
+  statement past 2 GB fails instead of spilling to disk, and one whose
+  tables have more than 48 MB of changes not merged into them yet is refused
   before it runs (under read routing it goes to MySQL like any other refusal). For a team or a
   dashboard tool, each reader's own DuckDB on the bucket is the way to scale
   reads (see [Dashboards](dashboards.md)): it runs on the reader's machine and

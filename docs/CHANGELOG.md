@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and no disk to spill to, on purpose: it runs on the host that captures.
   On a 100 million row table that stopped fitting at about 86 MB of such
   files, and the query failed with DuckDB's out-of-memory text. Past 48 MB
-  the query is now refused up front with the table's name and the way out:
-  your own DuckDB (Settings, MCP Server, Download a DuckDB schema). A query
+  (over all the tables a query names) the query is now refused up front with
+  the table's name and the way out: your own DuckDB (Settings, MCP Server,
+  Download a DuckDB schema). A query
   that does run and hits the memory cap gets the same pointer after DuckDB's
   message. On the MySQL port with read routing, the refused statement goes
   to MySQL, as the failed one did.

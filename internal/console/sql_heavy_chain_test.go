@@ -51,42 +51,55 @@ func TestSQLChainTooHeavy(t *testing.T) {
 	}
 	legacy := views.BaselineTable{Schema: "shop", Table: "old", Path: "/snap/shop/old.parquet", Delta: true, DeltaLegacy: true}
 	cases := []struct {
-		name      string
-		tables    []views.BaselineTable
-		wantTable string
-		wantBytes int64
+		name   string
+		tables []views.BaselineTable
+		want   sqlHeavyChain
 	}{
-		{"no tables", nil, "", 0},
-		{"a table with no chain", []views.BaselineTable{chainTable("shop", "plain")}, "", 0},
-		{"exactly at the limit", []views.BaselineTable{chainTable("shop", "a", 0, 1)}, "", 0},
-		{"one byte past", []views.BaselineTable{chainTable("shop", "big", 0)}, "shop.big", 101},
-		{"two tables under it, together past it: the heavier is named", []views.BaselineTable{chainTable("shop", "b", 0), chainTable("shop", "a", 0, 1)}, "shop.a", 161},
-		{"a v0.83.0 pair", []views.BaselineTable{legacy}, "shop.old", 500},
-		{"a file that is gone counts as nothing", []views.BaselineTable{chainTable("shop", "gone", 0, 1)}, "", 0},
-		{"a file that cannot be read counts as nothing", []views.BaselineTable{chainTable("shop", "denied", 0)}, "", 0},
-		{"a copy on S3 is not this check's", []views.BaselineTable{{Schema: "shop", Table: "s", Path: "s3://b/shop/s.parquet", Delta: true, DeltaLegacy: true}}, "", 0},
+		{"no tables", nil, sqlHeavyChain{}},
+		{"a table with no chain", []views.BaselineTable{chainTable("shop", "plain")}, sqlHeavyChain{}},
+		{"exactly at the limit", []views.BaselineTable{chainTable("shop", "a", 0, 1)}, sqlHeavyChain{}},
+		{"one byte past", []views.BaselineTable{chainTable("shop", "big", 0)}, sqlHeavyChain{"shop.big", 101, 101, 1}},
+		{"two tables under it, together past it: the heavier is named with its own share",
+			[]views.BaselineTable{chainTable("shop", "b", 0), chainTable("shop", "a", 0, 1)}, sqlHeavyChain{"shop.a", 100, 161, 2}},
+		{"a table with nothing waiting beside a heavy one is not counted",
+			[]views.BaselineTable{chainTable("shop", "gone", 0), chainTable("shop", "big", 0), chainTable("shop", "plain")}, sqlHeavyChain{"shop.big", 101, 101, 1}},
+		{"a v0.83.0 pair", []views.BaselineTable{legacy}, sqlHeavyChain{"shop.old", 500, 500, 1}},
+		{"a file that is gone counts as nothing", []views.BaselineTable{chainTable("shop", "gone", 0, 1)}, sqlHeavyChain{}},
+		{"a file that cannot be read counts as nothing", []views.BaselineTable{chainTable("shop", "denied", 0)}, sqlHeavyChain{}},
+		{"a copy on S3 is not this check's", []views.BaselineTable{{Schema: "shop", Table: "s", Path: "s3://b/shop/s.parquet", Delta: true, DeltaLegacy: true}}, sqlHeavyChain{}},
 	}
 	for _, c := range cases {
-		table, total := sqlChainTooHeavy(c.tables, limit, size)
-		if table != c.wantTable || (c.wantTable != "" && total != c.wantBytes) {
-			t.Errorf("%s: got (%q, %d), want (%q, %d)", c.name, table, total, c.wantTable, c.wantBytes)
+		if got := sqlChainTooHeavy(c.tables, limit, size); got != c.want {
+			t.Errorf("%s: got %+v, want %+v", c.name, got, c.want)
 		}
 	}
 }
 
-// The sentence a user reads, built from real values: it names the table, says
-// how much is waiting and what the limit is, and where to go instead.
+// The sentence a user reads, built from real values: one table, and several.
+// It names the table with ITS megabytes, says the limit and where to go, and
+// fits what a MySQL client shows of an error.
 func TestSQLChainTooHeavyMessage(t *testing.T) {
-	got := sqlChainTooHeavyMessage("tpcc.order_line1", 86<<20, 48<<20)
-	want := "tpcc.order_line1 has 86 MB of changes not merged into it yet, and a query here reads at most 48 MB of them: " +
-		"it runs with 2 GB of memory on the host that captures changes, which is enough for a quick look and not for this. " +
-		"Read this table with your own DuckDB instead (Settings, MCP Server, Download a DuckDB schema). " +
-		"DBTrail merges the changes into the table on its own, and the table can be read here again after that."
-	if got != want {
-		t.Errorf("message:\n got %q\nwant %q", got, want)
+	one := sqlChainTooHeavyMessage(sqlHeavyChain{"tpcc.order_line1", 86 << 20, 86 << 20, 1}, 48<<20)
+	want := "tpcc.order_line1 has 86 MB of changes not merged into it yet, and SQL on the copy merges at most 48 MB: " +
+		"it runs with 2 GB of memory on the capture host, for quick looks. " +
+		"Read it with your own DuckDB instead (in the web interface: Settings, MCP Server, Download a DuckDB schema). " +
+		"DBTrail merges them on its own, within a day while updates run."
+	if one != want {
+		t.Errorf("one table:\n got %q\nwant %q", one, want)
+	}
+	several := sqlChainTooHeavyMessage(sqlHeavyChain{"shop.orders", 30 << 20, 55 << 20, 2}, 48<<20)
+	if !strings.HasPrefix(several, "the tables this statement reads have 55 MB of changes not merged into them yet (shop.orders has 30 MB), and SQL on the copy merges at most 48 MB: ") ||
+		!strings.Contains(several, "Read them with your own DuckDB") {
+		t.Errorf("several tables: %q", several)
+	}
+	long := sqlChainTooHeavyMessage(sqlHeavyChain{strings.Repeat("s", 64) + "." + strings.Repeat("t", 64), 9999 << 20, 99999 << 20, 2}, 48<<20)
+	for name, msg := range map[string]string{"one": one, "several": several, "longest names": long} {
+		if len(msg) > 512 {
+			t.Errorf("%s: %d bytes, past the 512 a MySQL client shows", name, len(msg))
+		}
 	}
 	// Under a megabyte past a round limit must not print the same number twice.
-	if got := sqlChainTooHeavyMessage("a.b", 48<<20+1, 48<<20); !strings.Contains(got, "has 49 MB") {
+	if got := sqlChainTooHeavyMessage(sqlHeavyChain{"a.b", 48<<20 + 1, 48<<20 + 1, 1}, 48<<20); !strings.Contains(got, "has 49 MB") {
 		t.Errorf("just past the limit: %q", got)
 	}
 }
@@ -140,6 +153,17 @@ func TestSQLAPI_refusesATableWithTooManyChangesWaiting(t *testing.T) {
 	}
 	if w := f.post(t, `{"sql":"SELECT 1 AS one"}`); w.Code != http.StatusOK {
 		t.Fatalf("a statement that reads no table: code=%d body=%s", w.Code, w.Body.String())
+	}
+	// Shapes whose table set is not certain still read the table they name.
+	for _, q := range []string{
+		"SELECT count(*) FROM shop.orders, range(3)",
+		"SELECT count(*) FROM shop.orders JOIN information_schema.columns c ON true",
+		"WITH a AS (SELECT * FROM shop.orders), b AS (SELECT * FROM a) SELECT count(*) FROM b",
+		"SELECT count(*) FROM ORDERS",
+	} {
+		if w := f.post(t, `{"sql":"`+q+`"}`); w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "not merged") {
+			t.Errorf("%s: code=%d body=%s", q, w.Code, w.Body.String())
+		}
 	}
 	if w := f.post(t, `{"sql":"SHOW TABLES"}`); strings.Contains(w.Body.String(), "not merged") {
 		t.Fatalf("a statement whose tables are not known was refused: code=%d body=%s", w.Code, w.Body.String())

@@ -506,52 +506,108 @@ func sqlFileSize(path string) (int64, error) {
 	return fi.Size(), nil
 }
 
+// sqlNamedTables is the tables a statement names, whatever else it reads:
+// unlike sqlWantedViews it does not give up on a name that matches no view
+// (a table function beside the table, a system table in a join, a WITH that
+// reads another WITH), because the render then defines every view and the
+// statement still reads the ones it named. nil when it names none.
+func sqlNamedTables(in views.Input, refs sqlsandbox.Refs) []views.BaselineTable {
+	want := views.ViewSet{}
+	for _, r := range refs.Tables {
+		schema, name := sqlFoldName(r.Schema), sqlFoldName(r.Name)
+		for _, n := range in.ViewNames() {
+			if sqlFoldName(n.View) == name && (schema == "" || sqlFoldName(n.Schema) == schema) {
+				want[n.Key] = true
+			}
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	in.OnlyViews = want
+	return in.SelectedBaselines()
+}
+
+// sqlChainRefusalFor is the refusal for a statement whose tables hold more
+// unmerged changes than a query here can merge, "" when it may run.
+func sqlChainRefusalFor(in views.Input, refs sqlsandbox.Refs) string {
+	heavy := sqlChainTooHeavy(sqlNamedTables(in, refs), sqlMaxChainBytes, sqlFileSize)
+	if heavy.Table == "" {
+		return ""
+	}
+	return sqlChainTooHeavyMessage(heavy, sqlMaxChainBytes)
+}
+
+// sqlHeavyChain is what sqlChainTooHeavy found: the table that holds the
+// most, how much it holds, how much every table of the statement holds
+// together, and how many of them hold anything.
+type sqlHeavyChain struct {
+	Table       string
+	Own, Total  int64
+	WithChanges int
+}
+
 // sqlChainTooHeavy adds up the upserts files of the tables a statement reads
-// and, past limit, names the table that holds the most with the total. The
-// posdel files are row numbers, a few bytes each, and are not counted.
+// and, past limit, reports them. The posdel files are row numbers, a few
+// bytes each, and are not counted.
 //
 // A file that is gone counts as nothing: the chain was merged or the table
 // rewritten since the listing, and the statement then reads less than was
-// feared. One that cannot be read is logged and also counts as nothing: the
-// statement is about to open it and will say so better than a guess here.
-func sqlChainTooHeavy(tables []views.BaselineTable, limit int64, size func(string) (int64, error)) (string, int64) {
-	var total, most int64
-	var heaviest string
+// feared. One that cannot be read is logged, once per table, and also counts
+// as nothing: the statement is about to open it and will say so better than
+// a guess here.
+func sqlChainTooHeavy(tables []views.BaselineTable, limit int64, size func(string) (int64, error)) sqlHeavyChain {
+	var out sqlHeavyChain
 	for _, t := range tables {
 		if !t.Delta || strings.Contains(t.Path, "://") {
 			continue
 		}
 		var sum int64
+		var unread error
 		for _, f := range t.DeltaUpsertsFiles() {
 			n, err := size(f)
 			if err != nil {
-				if !errors.Is(err, fs.ErrNotExist) {
-					slog.Warn("console: sql: could not size a table's changes; the statement runs unchecked for it",
-						"table", t.Schema+"."+t.Table, "error", err)
+				if !errors.Is(err, fs.ErrNotExist) && unread == nil {
+					unread = err
 				}
 				continue
 			}
 			sum += n
 		}
-		total += sum
-		if sum > most {
-			most, heaviest = sum, t.Schema+"."+t.Table
+		if unread != nil {
+			slog.Warn("console: sql: could not size a table's changes; the statement runs unchecked for it",
+				"table", t.Schema+"."+t.Table, "error", unread)
+		}
+		if sum == 0 {
+			continue
+		}
+		out.Total += sum
+		out.WithChanges++
+		if sum > out.Own {
+			out.Own, out.Table = sum, t.Schema+"."+t.Table
 		}
 	}
-	if total <= limit {
-		return "", 0
+	if out.Total <= limit {
+		return sqlHeavyChain{}
 	}
-	return heaviest, total
+	return out
 }
 
-// sqlChainTooHeavyMessage is the refusal. Megabytes waiting are rounded up so
-// a chain just past the limit never prints the limit's own number.
-func sqlChainTooHeavyMessage(table string, total, limit int64) string {
-	return fmt.Sprintf("%s has %d MB of changes not merged into it yet, and a query here reads at most %d MB of them: "+
-		"it runs with 2 GB of memory on the host that captures changes, which is enough for a quick look and not for this. "+
-		"Read this table with your own DuckDB instead (Settings, MCP Server, Download a DuckDB schema). "+
-		"DBTrail merges the changes into the table on its own, and the table can be read here again after that.",
-		table, (total+(1<<20)-1)>>20, limit>>20)
+// sqlChainTooHeavyMessage is the refusal, for the web page and for a MySQL
+// client alike (which cuts a message at 512 bytes). Megabytes waiting are
+// rounded up so a chain just past the limit never prints the limit's own
+// number.
+func sqlChainTooHeavyMessage(h sqlHeavyChain, limit int64) string {
+	mb := func(n int64) int64 { return (n + (1 << 20) - 1) >> 20 }
+	what := fmt.Sprintf("%s has %d MB of changes not merged into it yet", h.Table, mb(h.Own))
+	read := "Read it"
+	if h.WithChanges > 1 {
+		what = fmt.Sprintf("the tables this statement reads have %d MB of changes not merged into them yet (%s has %d MB)", mb(h.Total), h.Table, mb(h.Own))
+		read = "Read them"
+	}
+	return fmt.Sprintf("%s, and SQL on the copy merges at most %d MB: it runs with 2 GB of memory on the capture host, for quick looks. "+
+		"%s with your own DuckDB instead (in the web interface: Settings, MCP Server, Download a DuckDB schema). "+
+		"DBTrail merges them on its own, within a day while updates run.", what, limit>>20, read)
 }
 
 // sqlWithMemoryHint adds the way out to a statement that ran and hit the
@@ -561,8 +617,8 @@ func sqlWithMemoryHint(err error) error {
 	if !errors.As(err, &qerr) || !strings.Contains(qerr.Message, "Out of Memory Error") {
 		return err
 	}
-	return &sqlsandbox.QueryError{Message: qerr.Message + " A query here runs with 2 GB of memory on the host that captures changes, " +
-		"for quick looks. For heavier reads use your own DuckDB (Settings, MCP Server, Download a DuckDB schema)."}
+	return &sqlsandbox.QueryError{Message: qerr.Message + " SQL on the copy runs with 2 GB of memory on the host that captures changes, " +
+		"for quick looks. For heavier reads use your own DuckDB (the web interface has the file for it: Settings, MCP Server, Download a DuckDB schema)."}
 }
 
 // sqlOutcome is a statement that ran.
@@ -719,16 +775,12 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 					return "", viewsRefusal
 				}
 			}
-			if narrowed.OnlyViews != nil {
-				// Refused before the views are installed (#1735): a chain
-				// this long does not fit the worker's memory, and the
-				// statement would fail there after reading for a while.
-				// Not when the tables are unknown (SHOW TABLES, a typo):
-				// that render defines every view and reads none of them.
-				if table, total := sqlChainTooHeavy(narrowed.SelectedBaselines(), sqlMaxChainBytes, sqlFileSize); table != "" {
-					viewsRefusal = &sqlRefusal{http.StatusUnprocessableEntity, sqlChainTooHeavyMessage(table, total, sqlMaxChainBytes)}
-					return "", viewsRefusal
-				}
+			// Refused before the views are installed (#1735): a chain this
+			// long does not fit the worker's memory, and the statement
+			// would fail there after reading for a while.
+			if msg := sqlChainRefusalFor(in, refs); msg != "" {
+				viewsRefusal = &sqlRefusal{http.StatusUnprocessableEntity, msg}
+				return "", viewsRefusal
 			}
 			if sess.StrictStar && refs.Natural {
 				// A NATURAL JOIN pairs on every column its tables share by
