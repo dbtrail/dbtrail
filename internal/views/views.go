@@ -165,6 +165,20 @@ type BaselineTable struct {
 	DeltaLegacy bool
 }
 
+// DeltaUpsertsFiles is the upserts file of every pair of the table's chain, as
+// the state view reads them: the listed chain, or the one v0.83.0 file. For a
+// caller that sizes what a read of the table has to merge.
+func (t BaselineTable) DeltaUpsertsFiles() []string {
+	if t.DeltaLegacy {
+		return []string{strings.TrimSuffix(t.Path, ".parquet") + baseline.TableDeltaUpsertsSuffix}
+	}
+	files := make([]string, 0, len(t.DeltaFiles))
+	for _, f := range t.DeltaFiles {
+		files = append(files, f.Upserts)
+	}
+	return files
+}
+
 // MarkTableDeltas sets Delta on every table that has one, with one listing per
 // snapshot. Call it while Path is still the REAL path: a producer that respells
 // Path afterwards (the `current` pointer, a relative root) keeps the mark.
