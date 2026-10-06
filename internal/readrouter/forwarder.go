@@ -425,7 +425,14 @@ func trackSessionSQL(has string) string {
 //     not mark that one: it keeps the change for the next OK packet, which
 //     may be many statements later (measured on 8.0 and 8.4; MariaDB marks
 //     the EOF too);
-//   - the source refuses the SET and keeps the session.
+//   - the source refuses the SET and keeps the session;
+//   - the source takes the SET and does not mark its answer. The list names
+//     itself (trackSessionMark), so a source that tracks reports the SET as
+//     a change to a tracked setting, in the very answer to it (measured on
+//     all six). An answer without the mark is from a source whose marks do
+//     not reach this connection, a proxy that answers the SET itself or
+//     drops the flag among them: every connection proves the whole path
+//     once, with the statement it sends anyway.
 //
 // Anything else (a broken connection, a client that left: ctx) is a
 // connection that did not open, as in settleCollation. No privilege is
@@ -446,7 +453,8 @@ func (f *Forwarder) trackSession(ctx context.Context, c *client.Conn) (bool, err
 	}
 	// f.mu is held and f.raw is not set yet: see settleCollation.
 	defer context.AfterFunc(ctx, func() { _ = c.Conn.Conn.Close() })()
-	if _, err := c.Execute(trackSessionSQL("")); err != nil {
+	res, err := c.Execute(trackSessionSQL(""))
+	if err != nil {
 		if !stillInSession(err) {
 			if cause := ctx.Err(); cause != nil {
 				return false, cause
@@ -456,7 +464,20 @@ func (f *Forwarder) trackSession(ctx context.Context, c *client.Conn) (bool, err
 		f.untracked("the source refused to: " + err.Error())
 		return false, nil
 	}
+	if !markedChanged(res) {
+		f.untracked(notMarked)
+		return false, nil
+	}
 	return true, nil
+}
+
+// notMarked is why a source that took the tracked list is not tracked.
+const notMarked = "the source took the list of settings to report and did not report that change itself"
+
+// markedChanged reports whether the source marked an answer as having
+// changed a tracked setting.
+func markedChanged(res *mysql.Result) bool {
+	return res != nil && res.Status&mysql.SERVER_SESSION_STATE_CHANGED != 0
 }
 
 // untracked tells OnUntracked. Called with f.mu held.
@@ -479,9 +500,10 @@ func (f *Forwarder) SessionTracked() bool {
 // tracked list, keeping what the list has now (has, as the source printed
 // it): for a session whose list a statement of the client replaced
 // (TracksSession). One statement, and it never opens a connection. When the
-// source refuses it and keeps the session, the session is no longer tracked
-// (SessionTracked, OnUntracked) and the error is returned; any other failure
-// loses the connection.
+// source refuses it and keeps the session, or takes it without marking its
+// answer (trackSession), the session is no longer tracked (SessionTracked,
+// OnUntracked) and an error is returned; any other failure loses the
+// connection.
 func (f *Forwarder) TrackSessionAgain(ctx context.Context, has string) error {
 	f.mu.Lock()
 	if f.dead != nil {
@@ -494,18 +516,25 @@ func (f *Forwarder) TrackSessionAgain(ctx context.Context, has string) error {
 		return nil
 	}
 	defer f.watch(ctx)()
-	if _, err := c.Execute(trackSessionSQL(has)); err != nil {
-		if !stillInSession(err) {
-			f.lose(err)
-			return f.lost()
-		}
-		f.mu.Lock()
-		f.tracked = false
-		f.untracked("the source refused to report them again after the session's list was replaced: " + err.Error())
-		f.mu.Unlock()
-		return err
+	res, err := c.Execute(trackSessionSQL(has))
+	if err != nil && !stillInSession(err) {
+		f.lose(err)
+		return f.lost()
 	}
-	return nil
+	why := ""
+	switch {
+	case err != nil:
+		why = "the source refused to report them again after the session's list was replaced: " + err.Error()
+	case !markedChanged(res):
+		why, err = "after the session's list was replaced, "+notMarked, errors.New(notMarked)
+	default:
+		return nil
+	}
+	f.mu.Lock()
+	f.tracked = false
+	f.untracked(why)
+	f.mu.Unlock()
+	return err
 }
 
 // heard takes in one answer from the source: its status flags, or the error

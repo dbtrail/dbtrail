@@ -628,7 +628,6 @@ func (h *Handler) sessionKeepsCopyFromAnswering(ctx context.Context) string {
 // and print in UTC, so they run only when the source's session is in UTC,
 // by any name. nil lets the statement run.
 func (h *Handler) timeTravelZoneRefusal(ctx context.Context) error {
-	h.heedSessionChanges()
 	h.mu.Lock()
 	cached := h.routeSess.known
 	h.mu.Unlock()

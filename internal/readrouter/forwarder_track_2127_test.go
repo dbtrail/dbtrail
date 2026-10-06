@@ -30,8 +30,11 @@ type trackSource struct {
 	// under it instead.
 	setErr error
 	drop   bool
-	conn   net.Conn
-	mc     *server.Conn
+	// unmarked: the SET is answered without the mark a server that tracks
+	// puts on it.
+	unmarked bool
+	conn     net.Conn
+	mc       *server.Conn
 }
 
 func (h *trackSource) statements() []string {
@@ -57,6 +60,7 @@ func (h *trackSource) HandleQuery(q string) (*mysql.Result, error) {
 		if h.setErr != nil {
 			return nil, h.setErr
 		}
+		marked = !h.unmarked
 	case strings.Contains(q, "fails"):
 		return nil, mysql.NewError(mysql.ER_SIGNAL_EXCEPTION, "raised")
 	case strings.HasPrefix(q, "SELECT"), strings.HasPrefix(q, "EXPLAIN"):
@@ -276,6 +280,31 @@ func TestForwarder_trackSession_sourceThatRefuses(t *testing.T) {
 	}
 }
 
+// A source that takes the list and does not report that change in its answer
+// is one whose marks do not reach the port (a proxy that answers the SET
+// itself, or drops the flag): not tracked, and said so.
+func TestForwarder_trackSession_sourceThatDoesNotMark(t *testing.T) {
+	ctx := context.Background()
+	f, src := newTrackForwarder(t, "8.4.9", bothAgreed)
+	src.unmarked = true
+	var told []string
+	f.OnUntracked = func(why string) { told = append(told, why) }
+	for range 2 {
+		if _, err := f.Forward(ctx, "DO 1", &BufferSink{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := src.statements(); !reflect.DeepEqual(got, []string{trackSET, "DO 1", "DO 1"}) {
+		t.Errorf("the source saw %q", got)
+	}
+	if len(told) != 1 || !strings.Contains(told[0], "did not report that change") {
+		t.Errorf("OnUntracked told %q, want once", told)
+	}
+	if f.SessionTracked() {
+		t.Error("tracked on a source that marks nothing")
+	}
+}
+
 // A connection that breaks under the SET did not open.
 func TestForwarder_trackSession_connectionLost(t *testing.T) {
 	ctx := context.Background()
@@ -415,11 +444,29 @@ func TestForwarder_trackSessionAgain(t *testing.T) {
 	if _, err := f.Forward(ctx, "DO 1", &BufferSink{}); err != nil {
 		t.Errorf("a statement after the refusal: %v", err)
 	}
+	// Taken, and not marked: untracked too.
+	src.mu.Lock()
+	src.setErr, src.unmarked = nil, true
+	src.mu.Unlock()
+	f.mu.Lock()
+	f.tracked = true
+	f.mu.Unlock()
+	if err := f.TrackSessionAgain(ctx, "time_zone"); err == nil || IsLost(err) {
+		t.Fatalf("err = %v, want an error that keeps the session", err)
+	}
+	if f.SessionTracked() || len(told) != 2 || !strings.Contains(told[1], "did not report that change") {
+		t.Errorf("after an answer without the mark: tracked = %v, told %q", f.SessionTracked(), told)
+	}
 	// A connection that breaks under it is lost.
 	src.mu.Lock()
 	src.setErr, src.drop = nil, true
 	src.mu.Unlock()
 	if err := f.TrackSessionAgain(ctx, "time_zone"); !IsLost(err) {
 		t.Errorf("err = %v, want the lost error", err)
+	}
+	// And stays lost: nothing is sent, and the caller is not told all is well.
+	sent := len(src.statements())
+	if err := f.TrackSessionAgain(ctx, "time_zone"); !IsLost(err) || len(src.statements()) != sent {
+		t.Errorf("on a lost connection: err = %v, %d more statement(s) sent", err, len(src.statements())-sent)
 	}
 }

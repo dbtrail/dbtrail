@@ -605,10 +605,11 @@ The decision, in order, for every statement:
    privilege for it.
 
    When the source does not do this (a server, or a proxy in front of it,
-   that does not offer session tracking, or one that refuses the
-   statement), the connection works as it did before and this one change
-   is not seen on it: do not change session settings inside a function
-   there. DBTrail's log says so once per connection, at debug level (`read
+   that does not offer session tracking, refuses the statement, or does
+   not pass the marks on), the connection works as it did before and this
+   one change is not seen on it: do not change session settings inside a
+   function there. The port finds out on every connection, from the answer
+   to its own statement: a source that tracks marks that answer too. DBTrail's log says so once per connection, at debug level (`read
    routing: the source does not report session changes on this connection
    ...`, with the reason).
 
