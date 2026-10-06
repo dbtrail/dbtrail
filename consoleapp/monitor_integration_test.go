@@ -298,11 +298,12 @@ func waitStreamLive(t *testing.T, srcDB, idxDB *sql.DB, schema, table, pkCol str
 }
 
 // TestIntegrationMonitorSupervisor exercises the control plane end to end
-// against real MySQL: provision a per-source index DB, take the advisory
-// lock, stream real binlog events into it, refuse a second daemon, and stop
-// cleanly releasing the lock.
+// against real MySQL: provision a per-source index DB, take the capture lock,
+// stream real binlog events into it, make a second daemon wait (#2105), stop
+// cleanly releasing the lock, and see the second daemon take over.
 func TestIntegrationMonitorSupervisor(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
+	shortCaptureLockTimings(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -390,10 +391,24 @@ func TestIntegrationMonitorSupervisor(t *testing.T) {
 	// attaching — gate on real liveness before writing the rows under test.
 	waitStreamLive(t, srcDB, idxDB, srcSchema, "items", "id")
 
-	// The advisory lock: a second supervisor (second daemon) must refuse.
+	// The capture lock: a second supervisor (second daemon) must wait for it,
+	// not capture beside the first and not fail for good (#2105).
 	sup2 := newMonitorSupervisor(ctx, bootDSN, nil, 0)
-	if err := sup2.Start(ctx, entry); err == nil || !strings.Contains(err.Error(), "already monitoring") {
-		t.Fatalf("second daemon Start: err=%v, want advisory-lock refusal", err)
+	if err := sup2.Start(ctx, entry); err != nil {
+		t.Fatalf("second daemon Start: %v, want it to wait for the lock", err)
+	}
+	t.Cleanup(func() { _ = sup2.Stop(context.Background(), entry.ID) })
+	time.Sleep(time.Second) // several lock polls
+	if st := sup2.Status(entry.ID); st.State != "pending" || st.Phase != monitorPhaseLockWaiting {
+		t.Fatalf("second daemon while the first captures: %+v, want pending/%s", st, monitorPhaseLockWaiting)
+	}
+	// A schema reload on the waiting daemon reloads nothing: the stream it
+	// would claim to restart is the first daemon's.
+	if reloaded, err := sup2.ReloadSchema(ctx, entry); err != nil || reloaded {
+		t.Fatalf("ReloadSchema on a waiting daemon: reloaded=%v err=%v, want false, nil", reloaded, err)
+	}
+	if st := sup2.Status(entry.ID); st.State != "pending" || st.Phase != monitorPhaseLockWaiting {
+		t.Fatalf("waiting daemon after ReloadSchema: %+v, want still waiting", st)
 	}
 
 	// Real events flow into the per-source index.
@@ -413,12 +428,46 @@ func TestIntegrationMonitorSupervisor(t *testing.T) {
 		t.Fatalf("expected >=3 events in the per-source index, got %d", count)
 	}
 
-	// Stop: drains the stream and releases the advisory lock.
+	// Stop: drains the stream and releases the capture lock.
 	if err := sup.Stop(ctx, entry.ID); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	if st := sup.Status(entry.ID); st.State != "stopped" {
 		t.Errorf("after Stop: state=%+v, want stopped", st)
+	}
+
+	// The waiting daemon takes over on its own and captures from the
+	// checkpoint the first one left.
+	deadline = time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) && sup2.Status(entry.ID).State != "running" {
+		time.Sleep(200 * time.Millisecond)
+	}
+	if st := sup2.Status(entry.ID); st.State != "running" {
+		t.Fatalf("second daemon after the first stopped: %+v, want running", st)
+	}
+	mustExec("INSERT INTO " + srcSchema + ".items VALUES (3, 1)")
+	deadline = time.Now().Add(45 * time.Second)
+	var taken int
+	for time.Now().Before(deadline) {
+		_ = idxDB.QueryRow("SELECT COUNT(*) FROM binlog_events WHERE schema_name = ? AND pk_values = '3'", srcSchema).Scan(&taken)
+		if taken > 0 {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if taken != 1 {
+		t.Fatalf("row written after the handover indexed %d times, want 1", taken)
+	}
+	var dups int
+	if err := idxDB.QueryRow(`SELECT COUNT(*) FROM (SELECT 1 FROM binlog_events WHERE schema_name = ?
+		GROUP BY pk_values, event_type, binlog_file, start_pos HAVING COUNT(*) > 1) d`, srcSchema).Scan(&dups); err != nil {
+		t.Fatal(err)
+	}
+	if dups != 0 {
+		t.Fatalf("%d events indexed twice across the handover", dups)
+	}
+	if err := sup2.Stop(ctx, entry.ID); err != nil {
+		t.Fatalf("second daemon Stop: %v", err)
 	}
 	// Stop returns once the run goroutine has closed lockDB on the client
 	// side, but mysqld releases a GET_LOCK held by a closing session only
@@ -770,5 +819,111 @@ func TestIntegrationReplicaOverlapSQL(t *testing.T) {
 	}
 	if candUUID == "" {
 		t.Error("candidate server_uuid came back empty")
+	}
+}
+
+// TestIntegrationMonitorLockLossStopsThenResumes: a supervised stream whose
+// capture lock vanishes (here its session is killed, as wait_timeout or a cut
+// connection would) must stop writing and start again holding a lock, on a
+// new session, with no row indexed twice (#2105).
+func TestIntegrationMonitorLockLossStopsThenResumes(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	shortCaptureLockTimings(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, bootName := testutil.CreateTestDB(t)
+	bootDSN := testutil.IntegrationDSN(bootName)
+
+	srcDB, err := sql.Open("mysql", testutil.BaseDSN()+"/?parseTime=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srcDB.Close()
+	srcSchema := fmt.Sprintf("lockloss_%d", time.Now().UnixNano()%1e9)
+	mustExec := func(q string) {
+		t.Helper()
+		if _, err := srcDB.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	mustExec("CREATE DATABASE " + srcSchema)
+	t.Cleanup(func() { _, _ = srcDB.Exec("DROP DATABASE IF EXISTS " + srcSchema) })
+	mustExec("CREATE TABLE " + srcSchema + ".items (id INT PRIMARY KEY, qty INT)")
+
+	sup := newMonitorSupervisor(ctx, bootDSN, nil, 0)
+	entry := console.ServerEntry{
+		ID:        fmt.Sprintf("lockloss%d", time.Now().UnixNano()%1e9),
+		Name:      "lockloss",
+		SourceDSN: testutil.BaseDSN() + "/",
+		Schemas:   srcSchema,
+	}
+	derived, err := sup.DeriveIndexDSN(entry.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.DSN = derived
+	t.Cleanup(func() { _, _ = srcDB.Exec("DROP DATABASE IF EXISTS bintrail_idx_" + entry.ID) })
+	if err := sup.Start(ctx, entry); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop(context.Background(), entry.ID) })
+	waitRunning := func(what string) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) && sup.Status(entry.ID).State != "running" {
+			time.Sleep(100 * time.Millisecond)
+		}
+		if st := sup.Status(entry.ID); st.State != "running" {
+			t.Fatalf("%s: %+v, want running", what, st)
+		}
+	}
+	waitRunning("first start")
+	idxDB, err := sql.Open("mysql", derived)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idxDB.Close()
+	waitStreamLive(t, srcDB, idxDB, srcSchema, "items", "id")
+
+	lockName := monitorLockName(entry.ID)
+	var holder int64
+	if err := idxDB.QueryRow("SELECT IS_USED_LOCK(?)", lockName).Scan(&holder); err != nil || holder == 0 {
+		t.Fatalf("lock holder: %d %v", holder, err)
+	}
+	if _, err := idxDB.Exec(fmt.Sprintf("KILL %d", holder)); err != nil {
+		t.Fatal(err)
+	}
+	// The job must leave "running" (the stream was told to stop writing) ...
+	deadline := time.Now().Add(10 * time.Second)
+	left := false
+	for time.Now().Before(deadline) {
+		if sup.Status(entry.ID).State != "running" {
+			left = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !left {
+		t.Fatal("the lock's session was killed and the stream kept running")
+	}
+	// ... and come back holding the lock again, on another session.
+	waitRunning("after the lock was lost")
+	var again int64
+	if err := idxDB.QueryRow("SELECT IS_USED_LOCK(?)", lockName).Scan(&again); err != nil || again == 0 || again == holder {
+		t.Fatalf("lock holder after resuming: %d (before %d) %v, want a new session", again, holder, err)
+	}
+	mustExec("INSERT INTO " + srcSchema + ".items VALUES (7, 7)")
+	var n int
+	deadline = time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		_ = idxDB.QueryRow("SELECT COUNT(*) FROM binlog_events WHERE schema_name = ? AND pk_values = '7'", srcSchema).Scan(&n)
+		if n > 0 {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if n != 1 {
+		t.Fatalf("row written after resuming indexed %d times, want 1", n)
 	}
 }

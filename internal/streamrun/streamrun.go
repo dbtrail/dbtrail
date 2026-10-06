@@ -1791,6 +1791,21 @@ func mariadbCheckpointCoversFloor(checkpoint, floor *gomysql.MariadbGTIDSet) boo
 // and, for a new table, skipped — the rows that followed the DDL in the
 // binlog. That work lives in the parser's synchronous DDL hook
 // (StreamParser.SetSyncDDLHook, #396).
+// ErrStopWithoutFlush, as the cause a caller cancels One's context with
+// (context.WithCancelCause), stops the stream WITHOUT writing what it holds:
+// neither the pending batch nor the position. A process that lost its
+// capture lock must not write after it knows, because another process may be
+// capturing into the same index by then. Nothing is lost: the events after
+// the last durable checkpoint are read again by whoever captures next, whose
+// resume cleanup drops any row of a batch that was already in flight.
+// One returns this error when it stopped this way.
+var ErrStopWithoutFlush = errors.New("capture stopped without writing its pending batch or position: this process lost its capture lock")
+
+// stopWithoutFlush reports whether ctx was cancelled with ErrStopWithoutFlush.
+func stopWithoutFlush(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), ErrStopWithoutFlush)
+}
+
 func streamLoop(
 	ctx context.Context,
 	events <-chan parser.Event,
@@ -1806,6 +1821,12 @@ func streamLoop(
 	defer ticker.Stop()
 
 	flush := func() error {
+		// Checked on every write, not only on the ctx.Done branch below: a
+		// full batch, a DDL or the parser's closed channel can win the select
+		// against a cancellation that already happened.
+		if stopWithoutFlush(ctx) {
+			return ErrStopWithoutFlush
+		}
 		if len(batch) == 0 {
 			return nil
 		}
