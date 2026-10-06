@@ -143,6 +143,11 @@ type archiveHead struct {
 // snapshot), and erring long only widens a fetch.
 const archiveWrittenMargin = time.Hour
 
+// archiveWrittenSlack widens the server-side filter of
+// LoadArchivesWrittenSince by a few seconds: the filter is in whole seconds
+// and the exact rule runs on what it returns.
+const archiveWrittenSlack = 5
+
 // fileIndexingMargin is how much earlier than a fetch's own time a file
 // indexing run must have ended to be counted as over before it. The two times
 // come from different clocks (the index server's and the host that stamped
@@ -265,7 +270,7 @@ func loadPartitionHeadsOnce(ctx context.Context, db *sql.DB) (*PartitionHeads, e
 	// After the partitions, on purpose (#2152): rotation registers an archive
 	// BEFORE it drops the partition, so a partition dropped between the two
 	// reads is in this one. Read the other way round, it would be in neither.
-	if h.archives, err = loadArchiveHeads(ctx, db); err != nil {
+	if h.archives, _, err = loadArchiveHeads(ctx, db, time.Time{}); err != nil {
 		return nil, err
 	}
 
@@ -301,13 +306,24 @@ func loadPartitionHeadsOnce(ctx context.Context, db *sql.DB) (*PartitionHeads, e
 // backend holds the file (a local path, an S3 object, both). The time of each
 // row is computed by the server as an age, so the session time zone the
 // DATETIME was written in cancels out. No archive_state table is an index
-// that never archived; an archive_state an older build created and nothing
-// migrated yet (1054) is read without the record, every row "not recorded".
-func loadArchiveHeads(ctx context.Context, db *sql.DB) ([]archiveHead, error) {
+// that never archived (present false); an archive_state an older build
+// created and nothing migrated yet (1054) is read without the record, every
+// row "not recorded".
+//
+// A non-zero writtenSince reads only the rows written at or after it, less
+// archiveWrittenMargin and archiveWrittenSlack: the only ones the rule with
+// no cut can count (ArchiveHeads). The comparison is an age on the server
+// against the server's own epoch, so neither time zone plays a part.
+func loadArchiveHeads(ctx context.Context, db *sql.DB, writtenSince time.Time) (_ []archiveHead, present bool, _ error) {
+	where, args := "", []any(nil)
+	if !writtenSince.IsZero() {
+		where = " WHERE TIMESTAMPDIFF(SECOND, archived_at, NOW()) <= UNIX_TIMESTAMP() - ?"
+		args = []any{writtenSince.Add(-archiveWrittenMargin).Unix() - archiveWrittenSlack}
+	}
 	rows, err := db.QueryContext(ctx, `
 		SELECT partition_name, min_event_ts, max_event_id, max_binlog_file, max_start_pos,
 		       TIMESTAMPDIFF(SECOND, archived_at, NOW()), UTC_TIMESTAMP()
-		FROM archive_state`)
+		FROM archive_state`+where, args...)
 	legacy := false
 	if err != nil {
 		var me *mysql.MySQLError
@@ -315,14 +331,14 @@ func loadArchiveHeads(ctx context.Context, db *sql.DB) ([]archiveHead, error) {
 			legacy = true
 			rows, err = db.QueryContext(ctx, `
 				SELECT partition_name, TIMESTAMPDIFF(SECOND, archived_at, NOW()), UTC_TIMESTAMP()
-				FROM archive_state`)
+				FROM archive_state`+where, args...)
 		}
 	}
 	if err != nil {
 		if isMissingTableErr(err) {
-			return nil, nil
+			return nil, false, nil
 		}
-		return nil, fmt.Errorf("read archive_state: %w", err)
+		return nil, false, fmt.Errorf("read archive_state: %w", err)
 	}
 	defer rows.Close()
 	var out []archiveHead
@@ -339,7 +355,7 @@ func loadArchiveHeads(ctx context.Context, db *sql.DB) ([]archiveHead, error) {
 			err = rows.Scan(&name, &minTS, &maxID, &maxFile, &maxPos, &age, &now)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("read archive_state: %w", err)
+			return nil, false, fmt.Errorf("read archive_state: %w", err)
 		}
 		// A name that is not an hour is skipped, as the planner skips it: no
 		// fetch routes such a file by hour either.
@@ -358,9 +374,9 @@ func loadArchiveHeads(ctx context.Context, db *sql.DB) ([]archiveHead, error) {
 		out = append(out, a)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read archive_state: %w", err)
+		return nil, false, fmt.Errorf("read archive_state: %w", err)
 	}
-	return out, nil
+	return out, true, nil
 }
 
 // headsPerStatement is how many partitions one statement of
@@ -473,15 +489,25 @@ func (h *PartitionHeads) below(since time.Time, anchor BinlogPos) []string {
 // written after since, less the clock margin: any row the snapshot has not
 // seen was indexed after it, into a file written after it. An archive with no
 // record is read when it was written after since, in both cases.
+//
+// A recorded newest position on another binlog base name than the anchor's
+// (#2187) cannot be placed against it or the cut: names of different lengths
+// sort by length, whatever they hold. It is judged by the time rule, as an
+// archive with no record is.
 func (h *PartitionHeads) archivesBelow(since time.Time, anchor BinlogPos, checked, until *BinlogPos) (from time.Time, n int) {
+	return archivesMayHold(h.archives, since, anchor, usableCheckedThrough(anchor, checked, until))
+}
+
+// archivesMayHold is archivesBelow's rule over archives, with checked already
+// made usable (nil: the rule with no cut).
+func archivesMayHold(archives []archiveHead, since time.Time, anchor BinlogPos, checked *BinlogPos) (from time.Time, n int) {
 	floor := CoarseSinceFloor(since)
 	writtenAfter := since.Add(-archiveWrittenMargin)
-	checked = usableCheckedThrough(anchor, checked, until)
 	seen := anchor
 	if checked != nil && anchor.AtOrBefore(*checked) {
 		seen = *checked
 	}
-	for _, a := range h.archives {
+	for _, a := range archives {
 		if !a.lower.Before(floor) {
 			continue
 		}
@@ -489,6 +515,8 @@ func (h *PartitionHeads) archivesBelow(since time.Time, anchor BinlogPos, checke
 		var may bool
 		switch {
 		case !a.recorded:
+			may = written
+		case a.hasPos && binlogBaseName(a.pos.File) != binlogBaseName(anchor.File):
 			may = written
 		case checked != nil:
 			may = a.hasPos && seen.AtOrBefore(a.pos)
@@ -504,6 +532,39 @@ func (h *PartitionHeads) archivesBelow(since time.Time, anchor BinlogPos, checke
 		}
 	}
 	return from, n
+}
+
+// ArchiveHeads is the part of archive_state that the rule with no cut can
+// count for snapshots taken at or after some time (#2187): what the routed
+// port's "unchanged since the snapshot" check reads per statement, instead of
+// a whole PartitionHeads.
+type ArchiveHeads struct {
+	rows []archiveHead
+}
+
+// LoadArchivesWrittenSince reads the archive_state rows MayHoldAfter can
+// count for any since at or after writtenSince: those written at or after it,
+// less the clock margin. present is false when the index has no
+// archive_state table, which the caller must not read as "no archives".
+//
+// On an index that archives on schedule the answer is the few rows rotation
+// wrote since then; the server still scans the table (archived_at has no
+// index), which costs about as much as a cache's own validity check would.
+func LoadArchivesWrittenSince(ctx context.Context, db *sql.DB, writtenSince time.Time) (heads ArchiveHeads, present bool, err error) {
+	heads.rows, present, err = loadArchiveHeads(ctx, db, writtenSince)
+	return heads, present, err
+}
+
+// MayHoldAfter is how many of the archives may hold an event at or after
+// anchor that a snapshot at since has not seen, by the rule a fetch with no
+// cut moves its start by (archivesBelow): an archive of an hour below the
+// fetch's time floor, written after since less the clock margin, whose
+// recorded newest position is at or after anchor, or which has no record, or
+// whose position is on another binlog base name. Archives are not narrowed to
+// a table: any table's change counts.
+func (a ArchiveHeads) MayHoldAfter(since time.Time, anchor BinlogPos) int {
+	_, n := archivesMayHold(a.rows, since, anchor, nil)
+	return n
 }
 
 // usableCheckedThrough is checked when it can be a position an earlier
