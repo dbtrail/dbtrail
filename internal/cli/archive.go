@@ -246,6 +246,9 @@ func runArchiveReconcile(cmd *cobra.Command, args []string) error {
 	// monitor.
 	deepUnverified := report.DeepUnverified
 
+	if arcRepair {
+		report.Actions = addInsertContent(ctx, report.Actions, arcDeep, arcRegion)
+	}
 	executed, execErrs := executeReconcileActions(ctx, db, report.Actions, arcRepair, arcPrune)
 
 	if err := writeReconcileReport(os.Stdout, arcFormat, &report, deepUnverified, executed, execErrs, arcRepair, arcPrune); err != nil {
@@ -552,6 +555,86 @@ var reconcileColumns = map[string]bool{
 	"local_path": true, "file_size_bytes": true, "row_count": true,
 	"s3_bucket": true, "s3_key": true, "s3_uploaded_at": true,
 	"column_set": true,
+	// Written on INSERT only, by addInsertContent (#2152). The newest-change
+	// columns (max_event_id, max_binlog_file, max_start_pos) are deliberately
+	// NOT here: see addInsertContent.
+	"min_event_ts": true, "max_event_ts": true,
+}
+
+// addInsertContent reads each file a --repair is about to REGISTER and adds
+// its content time range (min_event_ts / max_event_ts), as rotation records
+// it: a first-partition archive holds rows older than its hour, and a time
+// range read from the file is what lets a fetch reach them (#1037).
+//
+// It does NOT record the file's newest change (#2152), although rotation
+// does. A snapshot update skips an archive whose newest change is before the
+// cut it last searched through, because that search already saw it. A row
+// that went missing from archive_state was seen by no search, so recording a
+// position below the later cuts would hide it from every update for good.
+// Left unrecorded, with archived_at = now, it is read by every update of a
+// snapshot taken before it was registered, or less than an hour after
+// (query's archiveWrittenMargin): the next update of each older snapshot, and
+// of any snapshot under an hour newer.
+//
+// Inserts only. A row that already exists keeps what it has: filling it would
+// report every archive written before as drift and fail the dry run
+// documented as a cron drift monitor. A local file is always read, as its
+// footer already is; an S3 object only under --deep, the flag that allows S3
+// reads. A file that cannot be read is registered as before, with a warning.
+func addInsertContent(ctx context.Context, actions []archive.Action, deep bool, region string) []archive.Action {
+	var s3db *sql.DB
+	defer func() {
+		if s3db != nil {
+			s3db.Close()
+		}
+	}()
+	for i, a := range actions {
+		if a.Kind != archive.ActionInsert {
+			continue
+		}
+		var local, bucket, key string
+		for _, c := range a.Changes {
+			v, _ := c.Value.(string)
+			switch c.Column {
+			case "local_path":
+				local = v
+			case "s3_bucket":
+				bucket = v
+			case "s3_key":
+				key = v
+			}
+		}
+		var content archive.Content
+		var err error
+		switch {
+		case local != "":
+			content, err = archive.ReadContent(ctx, local)
+		case deep && bucket != "" && key != "":
+			if s3db == nil {
+				if s3db, err = openS3FooterSession(ctx, region); err != nil {
+					s3db = nil
+					slog.Warn("reconcile: cannot open DuckDB session to read the archives it registers; their time range is left unrecorded", "error", err)
+					return actions
+				}
+			}
+			content, err = archive.ReadContentWith(ctx, s3db, "s3://"+bucket+"/"+key)
+		default:
+			continue
+		}
+		if err != nil {
+			slog.Warn("reconcile: cannot read the archive it registers; its time range is left unrecorded",
+				"partition", a.PartitionName, "error", err)
+			continue
+		}
+		if !content.MinEventTS.IsZero() {
+			a.Changes = append(a.Changes, archive.FieldChange{Column: "min_event_ts", Value: content.MinEventTS})
+		}
+		if !content.MaxEventTS.IsZero() {
+			a.Changes = append(a.Changes, archive.FieldChange{Column: "max_event_ts", Value: content.MaxEventTS})
+		}
+		actions[i] = a
+	}
+	return actions
 }
 
 // executeReconcileActions applies insert/update actions under --repair and

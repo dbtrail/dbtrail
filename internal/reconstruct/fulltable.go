@@ -156,6 +156,13 @@ type FullTableConfig struct {
 	// what each table's fetch reads its time floor from (#2138). nil outside
 	// Parquet mode, where each fetch reads its own.
 	heads *query.PartitionHeads
+	// archiveCuts is where each table's fetch reads the cut it was last
+	// checked through, so archives before it are not read again (#2152). nil
+	// for a direct ReconstructTable caller: no cut, the time-bounded rule.
+	archiveCuts *archiveCuts
+	// archivesChecked is runChecksArchives for this run: whether its cut is
+	// what its snapshot directory records for its tables (archiveCuts).
+	archivesChecked bool
 	// ddlMark is the run's DDL mark, encoded (ddl_mark.go): the newest
 	// schema_changes row, read before the cut and so before any table's
 	// check. "" when the index was not written by a stream or holds no row.
@@ -825,6 +832,25 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 		cfg.schemaAt, cfg.schemaAtTime = schemaSnapshotAt(db, cfg.At, resolver)
 	}
 
+	// The cut each table was last checked through, for the archives (#2152).
+	// Not on an index `bintrail index` also wrote: there a row with an old
+	// position can be indexed after the refresh that published the snapshot,
+	// so that refresh's cut says nothing about it.
+	// A read that fails refuses the run: guessing either way would be wrong
+	// (yes reads every recent archive for nothing, no can skip one that holds
+	// a change the snapshot has not seen).
+	backfilled, err := query.IndexBackfilled(ctx, db)
+	if err != nil {
+		return nil, fmt.Errorf("cannot tell which archives each table must read: %w", err)
+	}
+	if backfilled {
+		backfilledArchivesWarned.Do(func() {
+			slog.Warn("`bintrail index` also wrote into this index, so a snapshot update cannot skip an archive by the position the previous update searched through; " +
+				"each table reads every archive written since its snapshot that holds a change after the table's own position, which on a table with no changes is every archive rotation writes between two updates")
+		})
+	}
+	cfg.archiveCuts = newArchiveCuts(backfilled)
+
 	// Resolve archive sources once — the same set is used for every table.
 	archSources, archErr := query.ResolveArchiveSources(ctx, db)
 	if archErr != nil {
@@ -833,6 +859,7 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 		}
 		slog.Warn("archive source discovery failed; proceeding without archives", "error", archErr)
 	}
+	cfg.archivesChecked = runChecksArchives(backfilled, cfg.AllowGaps, archErr)
 
 	// Report slice is protected by a mutex for the parallel goroutines.
 	reports := make([]*TableReport, 0, len(cfg.Tables))
@@ -948,6 +975,13 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// the run is otherwise clean; a failed run stays _INCOMPLETE and needs no
 	// manifest.
 	if parquetMode && ctx.Err() == nil && len(errs) == 0 {
+		// How far each table has been checked through the archives (#2152).
+		// A record that cannot be written leaves the next refresh without
+		// it: that refresh then reads more archives, never fewer.
+		if err := cfg.archiveCuts.write(cfg.snapshotDir); err != nil {
+			slog.Warn("could not record how far each table was checked through the archives; the next refresh of this snapshot will read more archives",
+				"snapshot", cfg.snapshotDir, "error", err)
+		}
 		baseline.SignSnapshot(cfg.snapshotDir, cfg.WriterID)
 		carryViewsSkipped(ctx, cfg.snapshotDir, reports)
 		st, err := manifestWriter(cfg.snapshotDir, manifestPriorDirs(reports))
@@ -1475,6 +1509,14 @@ func ReconstructTable(
 	// window is empty either way.
 	if cfg.OutputFormat == OutputFormatParquet && cfg.cut != nil {
 		fetchOpts.UntilPos = cfg.cut
+	}
+	if fetchOpts.SincePos != nil {
+		inherited := cfg.archiveCuts.forBaseline(baselinePath, schema, table)
+		fetchOpts.ArchivesCheckedThrough = inherited
+		// What this run's directory will say for the table: this run's cut
+		// when it checked the archives itself, otherwise the folder's value
+		// it was read with. Written only if the whole run completes.
+		cfg.archiveCuts.record(schema, table, cfg.archivesChecked, cfg.cut, inherited)
 	}
 	// nil ArchiveFetcher → the container-safe parquetquery.Fetch. Resolved here
 	// at the point of use so both ReconstructTables and any direct

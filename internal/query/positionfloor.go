@@ -77,9 +77,31 @@ type partitionHead struct {
 // as one that may hold a later event.
 //
 // The answer is only ever an EARLIER time than the caller's: the floor moves
-// back or stays. What it cannot see is an event whose partition left the live
-// index (rotated into an archive) between being indexed and this fetch; for
-// that one the caller's own time still decides, as it did before.
+// back or stays.
+//
+// # Archives
+//
+// A late event lands in an OLD partition, and old partitions are the next to
+// be rotated out. Once its partition is archived and dropped, no partition
+// shows it (#2152). The archive's own record in archive_state does: rotation
+// records the newest binlog coordinate each file holds (folded over every
+// row, so it does not depend on the event_id premise above), and an archive
+// whose newest coordinate is at or after what the snapshot already saw makes
+// the fetch reach its hour. archivesBelow says what "already saw" is, and why
+// it is the previous refresh's cut when the caller knows it rather than the
+// table's own anchor. An archive with no record (written before the record
+// existed, or registered by a path that did not read the file) is reached
+// when it was written after the fetch's own time, less a clock margin: the
+// only archives that can hold an event indexed after the snapshot. Older ones
+// cannot, and counting them would move every update back by the whole
+// retention.
+//
+// What it still cannot see: an hour rotated out WITHOUT an archive, and an
+// archive whose archive_state row is gone. `archive reconcile --repair`
+// re-registers such a row WITHOUT a newest change and with archived_at = now,
+// so it is read by every update of a snapshot taken before that, or less than
+// archiveWrittenMargin after (a recorded position below the later cuts would
+// hide it from every update).
 //
 // A value is a snapshot of the index. Load it AFTER the fetch's upper bound is
 // fixed (a refresh: after its cut), or a late event indexed in between is
@@ -93,7 +115,33 @@ type PartitionHeads struct {
 	lastFileIndexed time.Time
 	// fileIndexingUnfinished: index_state holds a run with no completed_at.
 	fileIndexingUnfinished bool
+	// archives are the rows of archive_state (#2152).
+	archives []archiveHead
 }
+
+// archiveHead is one archive_state row as the floor reads it.
+type archiveHead struct {
+	name string
+	// lower is the oldest event_timestamp the file can hold: its partition's
+	// hour, or min_event_ts when that is earlier (a first-partition archive
+	// holds every older row).
+	lower time.Time
+	// recorded: max_event_id is set, so hasPos/pos say exactly whether the
+	// file holds an event an anchored fetch returns. hasPos is false for a
+	// recorded file in which no row carries such a coordinate.
+	recorded bool
+	hasPos   bool
+	pos      BinlogPos
+	// archivedAt is when the row was written, in UTC by the index server's
+	// clock.
+	archivedAt time.Time
+}
+
+// archiveWrittenMargin is how much earlier than a fetch's own time an archive
+// with no record must have been written to be left out. The two times come
+// from different clocks (the index server's and the host that stamped the
+// snapshot), and erring long only widens a fetch.
+const archiveWrittenMargin = time.Hour
 
 // fileIndexingMargin is how much earlier than a fetch's own time a file
 // indexing run must have ended to be counted as over before it. The two times
@@ -214,6 +262,13 @@ func loadPartitionHeadsOnce(ctx context.Context, db *sql.DB) (*PartitionHeads, e
 		}
 	}
 
+	// After the partitions, on purpose (#2152): rotation registers an archive
+	// BEFORE it drops the partition, so a partition dropped between the two
+	// reads is in this one. Read the other way round, it would be in neither.
+	if h.archives, err = loadArchiveHeads(ctx, db); err != nil {
+		return nil, err
+	}
+
 	// After the heads, on purpose: a file indexing run that put a row on top
 	// of a partition before the read above had already recorded itself here.
 	if h.streamCaptured, err = StreamCaptured(ctx, db); err != nil {
@@ -240,6 +295,72 @@ func loadPartitionHeadsOnce(ctx context.Context, db *sql.DB) (*PartitionHeads, e
 		}
 	}
 	return h, nil
+}
+
+// loadArchiveHeads reads archive_state for the floor: every row, whatever
+// backend holds the file (a local path, an S3 object, both). The time of each
+// row is computed by the server as an age, so the session time zone the
+// DATETIME was written in cancels out. No archive_state table is an index
+// that never archived; an archive_state an older build created and nothing
+// migrated yet (1054) is read without the record, every row "not recorded".
+func loadArchiveHeads(ctx context.Context, db *sql.DB) ([]archiveHead, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT partition_name, min_event_ts, max_event_id, max_binlog_file, max_start_pos,
+		       TIMESTAMPDIFF(SECOND, archived_at, NOW()), UTC_TIMESTAMP()
+		FROM archive_state`)
+	legacy := false
+	if err != nil {
+		var me *mysql.MySQLError
+		if errors.As(err, &me) && me.Number == 1054 {
+			legacy = true
+			rows, err = db.QueryContext(ctx, `
+				SELECT partition_name, TIMESTAMPDIFF(SECOND, archived_at, NOW()), UTC_TIMESTAMP()
+				FROM archive_state`)
+		}
+	}
+	if err != nil {
+		if isMissingTableErr(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read archive_state: %w", err)
+	}
+	defer rows.Close()
+	var out []archiveHead
+	for rows.Next() {
+		var name string
+		var minTS sql.NullTime
+		var maxID, maxPos sql.Null[uint64]
+		var maxFile sql.NullString
+		var age int64
+		var now time.Time
+		if legacy {
+			err = rows.Scan(&name, &age, &now)
+		} else {
+			err = rows.Scan(&name, &minTS, &maxID, &maxFile, &maxPos, &age, &now)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read archive_state: %w", err)
+		}
+		// A name that is not an hour is skipped, as the planner skips it: no
+		// fetch routes such a file by hour either.
+		label, ok := ParsePartitionName(name)
+		if !ok {
+			continue
+		}
+		a := archiveHead{name: name, lower: label, recorded: maxID.Valid,
+			archivedAt: now.UTC().Add(-time.Duration(age) * time.Second)}
+		if minTS.Valid && minTS.Time.Before(label) {
+			a.lower = minTS.Time.UTC()
+		}
+		if maxID.Valid && maxFile.Valid && maxFile.String != "" {
+			a.hasPos, a.pos = true, BinlogPos{File: maxFile.String, Pos: maxPos.V}
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read archive_state: %w", err)
+	}
+	return out, nil
 }
 
 // headsPerStatement is how many partitions one statement of
@@ -330,6 +451,76 @@ func (h *PartitionHeads) below(since time.Time, anchor BinlogPos) []string {
 		}
 	}
 	return names
+}
+
+// archivesBelow is below for the archives (#2152): the oldest time an
+// archive the floor of a fetch at since leaves out can hold, among those that
+// may hold an event at or after anchor that the snapshot has not seen, and how
+// many there are. Zero time: no such archive.
+//
+// checked is Options.ArchivesCheckedThrough, the cut of the refresh that
+// published the snapshot. Capture indexes in commit order, so every row
+// indexed after that refresh ran sits after its cut, and every row between the
+// table's own anchor and the cut was already in the index when that refresh
+// looked. A recorded archive is then read only when its newest change is at
+// or after the cut, whenever it was written: that is what keeps a table with
+// no changes, whose anchor stays old, from reading the archives rotation
+// writes after every refresh.
+//
+// With no cut (an index `bintrail index` also wrote, where rows with old
+// positions are indexed late; a snapshot that recorded none), a recorded
+// archive is read when its newest change is at or after the anchor AND it was
+// written after since, less the clock margin: any row the snapshot has not
+// seen was indexed after it, into a file written after it. An archive with no
+// record is read when it was written after since, in both cases.
+func (h *PartitionHeads) archivesBelow(since time.Time, anchor BinlogPos, checked, until *BinlogPos) (from time.Time, n int) {
+	floor := CoarseSinceFloor(since)
+	writtenAfter := since.Add(-archiveWrittenMargin)
+	checked = usableCheckedThrough(anchor, checked, until)
+	seen := anchor
+	if checked != nil && anchor.AtOrBefore(*checked) {
+		seen = *checked
+	}
+	for _, a := range h.archives {
+		if !a.lower.Before(floor) {
+			continue
+		}
+		written := !a.archivedAt.Before(writtenAfter)
+		var may bool
+		switch {
+		case !a.recorded:
+			may = written
+		case checked != nil:
+			may = a.hasPos && seen.AtOrBefore(a.pos)
+		default:
+			may = written && a.hasPos && anchor.AtOrBefore(a.pos)
+		}
+		if !may {
+			continue
+		}
+		n++
+		if from.IsZero() || a.lower.Before(from) {
+			from = a.lower
+		}
+	}
+	return from, n
+}
+
+// usableCheckedThrough is checked when it can be a position an earlier
+// refresh searched through, nil otherwise (the time-bounded rule then
+// applies). An earlier cut is never ahead of this fetch's own upper bound
+// (until), and it is in the same binary log as the anchor: a value from an
+// older numbering, after the source's binary log started over, would sort
+// anywhere, and a cut ahead of until or on another base name is not one this
+// fetch can trust.
+func usableCheckedThrough(anchor BinlogPos, checked, until *BinlogPos) *BinlogPos {
+	if checked == nil || binlogBaseName(checked.File) != binlogBaseName(anchor.File) {
+		return nil
+	}
+	if until != nil && !checked.AtOrBefore(*until) {
+		return nil
+	}
+	return checked
 }
 
 // SinceFor returns the time a fetch with these options must start from: its
@@ -426,11 +617,6 @@ func ForRun(f Fetcher) Fetcher {
 	return f
 }
 
-// settleSince is what every fetch runs before it reads: it replaces
-// opts.Since with SinceFor's answer and marks the options so the same fetch
-// does not ask again further down. heads may be nil (a picture is loaded).
-// moved reports that the time changed, and firstEnd is the picture's
-// firstPartitionEnd (zero when it has none).
 // PositionReadFloor is the lowest event_timestamp a read with opts looks at:
 // with SincePos, its Since settled the way the read settles it (settleSince),
 // then the CoarseSinceFloor buildQuery puts under it; without SincePos, Since
@@ -449,6 +635,11 @@ func PositionReadFloor(ctx context.Context, db *sql.DB, opts Options) (time.Time
 	return CoarseSinceFloor(*opts.Since), nil
 }
 
+// settleSince is what every fetch runs before it reads: it replaces
+// opts.Since with SinceFor's answer and marks the options so the same fetch
+// does not ask again further down. heads may be nil (a picture is loaded).
+// moved reports that the time changed, and firstEnd is the picture's
+// firstPartitionEnd (zero when it has none).
 func settleSince(ctx context.Context, db *sql.DB, opts *Options, heads *PartitionHeads) (moved bool, firstEnd time.Time, err error) {
 	if opts.sinceSettled || opts.Since == nil || opts.SincePos == nil {
 		return false, time.Time{}, nil
@@ -475,8 +666,13 @@ func (h *PartitionHeads) sinceFor(ctx context.Context, db *sql.DB, opts Options)
 	}
 	since := *opts.Since
 	names := h.below(since, *opts.SincePos)
+	archFrom, archN := h.archivesBelow(since, *opts.SincePos, opts.ArchivesCheckedThrough, opts.UntilPos)
 	if len(names) == 0 {
-		return opts.Since, nil
+		if archN == 0 {
+			return opts.Since, nil
+		}
+		h.logMoved(opts, since, archFrom, 0, archN)
+		return &archFrom, nil
 	}
 	// The first row in time order, read off idx_row_lookup (schema_name,
 	// table_name, event_timestamp): one seek per named partition.
@@ -494,17 +690,31 @@ func (h *PartitionHeads) sinceFor(ctx context.Context, db *sql.DB, opts Options)
 	var oldest time.Time
 	err := db.QueryRowContext(ctx, q, args...).Scan(&oldest)
 	if errors.Is(err, sql.ErrNoRows) {
-		return opts.Since, nil
+		if archN == 0 {
+			return opts.Since, nil
+		}
+		h.logMoved(opts, since, archFrom, len(names), archN)
+		return &archFrom, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("find how far back the changes after %s:%d reach for %s.%s: %w",
 			opts.SincePos.File, opts.SincePos.Pos, opts.Schema, opts.Table, err)
 	}
-	slog.Info("the fetch starts earlier than the time of the snapshot it continues: "+
-		"the index holds events that may come after the snapshot's position and that ran on the source before that time",
-		"schema", opts.Schema, "table", opts.Table,
-		"snapshot_time", since.UTC().Format(time.RFC3339), "fetch_from", oldest.UTC().Format(time.RFC3339),
-		"anchor", opts.SincePos.File+":"+strconv.FormatUint(opts.SincePos.Pos, 10),
-		"partitions", len(names), "order_proven", h.orderProven(since))
+	// An archive is not narrowed to the table (that would mean opening the
+	// file here): its whole time range is reached.
+	if archN > 0 && archFrom.Before(oldest) {
+		oldest = archFrom
+	}
+	h.logMoved(opts, since, oldest, len(names), archN)
 	return &oldest, nil
+}
+
+// logMoved says that a fetch starts earlier than its own time, and why.
+func (h *PartitionHeads) logMoved(opts Options, since, from time.Time, partitions, archives int) {
+	slog.Info("the fetch starts earlier than the time of the snapshot it continues: "+
+		"the index or its archives hold events that may come after the snapshot's position and that ran on the source before that time",
+		"schema", opts.Schema, "table", opts.Table,
+		"snapshot_time", since.UTC().Format(time.RFC3339), "fetch_from", from.UTC().Format(time.RFC3339),
+		"anchor", opts.SincePos.File+":"+strconv.FormatUint(opts.SincePos.Pos, 10),
+		"partitions", partitions, "archives", archives, "order_proven", h.orderProven(since))
 }

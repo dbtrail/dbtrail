@@ -233,6 +233,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with one of the 44 words and used later (`SELECT made AS at ... ORDER BY
   at`) stays on MySQL too, which is right: the copy would refuse it.
 ### Fixed
+- **A snapshot update reads a late change whose hour was archived and
+  dropped before the update ran** (#2152). An update continues from the
+  snapshot's binlog position, and since #2138 it starts earlier when the
+  index holds a change after that position that ran on the source before the
+  snapshot's time. That only looked at the hours still in the index. A late
+  change lands in an old hour, old hours are the next to be rotated out, and
+  once its hour was archived and dropped the update kept the snapshot's time
+  as its start, skipped the archive, and left the change out with no error
+  (a short `--retain`, or a capture outage longer than the retention).
+  Rotation now records, for each archive, the highest `event_id` and the
+  highest binlog position the file holds, in three new NULLable
+  `archive_state` columns (`max_event_id`, `max_binlog_file`,
+  `max_start_pos`, added on startup by the usual migration). An update now
+  reads an archive whose newest position is at or after the cut of the
+  refresh that published its snapshot, and starts at that archive's hour.
+  The cut, not the table's own position: a table with no changes keeps its
+  old position across refreshes, and every archive rotation writes is after
+  it, so measured that way each refresh of a quiet table would read them all
+  again. Capture indexes in commit order, so a change indexed after a refresh
+  ran is after its cut, and the refresh already looked at everything before
+  it. Each snapshot directory now records, in a new `_ARCHIVE_CHECKED` file
+  beside `_SUCCESS`, how far each of its tables has been checked: the run's
+  cut when the run checked the archives itself (an index only a stream
+  writes, archive sources found, no `--allow-gaps`, an index that holds
+  events), otherwise the value the table was read with, unchanged. It is per
+  table, never a maximum over the directory: a run that did not check must
+  not lift a table carried forward from an older folder to the position
+  another table was checked through. Snapshots written by older builds have no
+  such file and give no cut. A value is also ignored when it is ahead of the
+  update's own cut or names another binary log base name, as a value from
+  before the source's binary log started over would. Without a cut (an
+  index `bintrail index` also wrote, where rows with old positions are
+  indexed late; an older snapshot; a dump; a snapshot in S3; and other
+  readers that continue from a position: `verify`, the shim's `_snapshot`,
+  cascade recovery, the Iceberg export) the update reads the archives after
+  the table's own position that were written after the snapshot's time (less
+  one hour for clock differences), which on such a reader can be every
+  archive rotated since that time, once per read; on the backfilled index a
+  warning says so once per process. A partition archived again after a failed
+  S3 upload is stamped with the new archive time, so the update of a snapshot
+  taken between the two attempts still reads it. Archives written
+  before this release have no record: those written after the snapshot are
+  read, older ones are not, so an upgrade costs at most one wider update per
+  table. `archive reconcile --repair` (local files always,
+  S3 only with `--deep`) and `restore-index` read the files they register and
+  fill `min_event_ts`/`max_event_ts`, and leave the three new columns empty
+  on purpose: a row rebuilt from files was never seen by any refresh, so it is
+  registered with no newest position and the current time, and it is read by
+  every update of a snapshot taken before that, or less than an hour after. Rotation now also
+  runs the `archive_state` migration itself before archiving. Cost: one read
+  of the whole of `archive_state` per load of the index picture (it is not
+  narrowed by time, because a recorded archive is judged by its position),
+  and, per refresh run, one read of a small file per snapshot directory a
+  table is read from. Measured on MySQL 8.4
+  with 8,760 archives (a year of hours) and no late change: loading the
+  picture and answering took 17 ms, and the start did not move. Still not
+  covered: an hour rotated out without an archive, and an archive whose
+  `archive_state` row is missing.
 - **Position-mode capture no longer deletes changes, or reads from the middle
   of an event, after a `RESET MASTER` whose new numbering grew back past the
   checkpoint (#2172).** When the source's binary log starts over and, before

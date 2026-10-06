@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -229,6 +230,20 @@ func runRestoreIndex(cmd *cobra.Command, args []string) error {
 			}
 		}
 		n, lerr := archive.RestorePartition(ctx, db, path, riBatch)
+		// The file's content time range, read while the file is still on
+		// local disk: a first-partition archive holds rows older than its
+		// hour (#1037). Not its newest change (#2152): see
+		// recordRestoredArchive. A file that cannot be read is registered
+		// without the range.
+		var content *archive.Content
+		if lerr == nil {
+			if c, cerr := archive.ReadContent(ctx, path); cerr == nil {
+				content = &c
+			} else {
+				slog.Warn("restore-index: cannot read the time range of an archive; it is registered without it",
+					"partition", f.PartitionName, "error", cerr)
+			}
+		}
 		if f.Backend == archive.BackendS3 {
 			os.Remove(path)
 		}
@@ -244,7 +259,7 @@ func runRestoreIndex(cmd *cobra.Command, args []string) error {
 		}
 		report.EventsLoaded += n
 		report.FilesLoaded++
-		if err := recordRestoredArchive(ctx, db, f, n); err != nil {
+		if err := recordRestoredArchive(ctx, db, f, n, content); err != nil {
 			report.StateRowFailures = append(report.StateRowFailures, f.PartitionName+": "+err.Error())
 			continue
 		}
@@ -375,7 +390,14 @@ func buildRestorePartitionSQL(dbName string, archiveHours map[time.Time]bool, no
 // forever. min/max_event_ts stay NULL permanently — the scan does not read
 // row content, and no current command backfills them; the planner falls
 // back to the hour label.
-func recordRestoredArchive(ctx context.Context, db *sql.DB, f archive.ScannedFile, rows int64) error {
+//
+// content, when not nil, gives the file's content time range. The newest
+// change (max_event_id, max_binlog_file, max_start_pos) is left NULL, as
+// `archive reconcile --repair` leaves it (#2152): a snapshot update skips a
+// recorded archive whose newest change is before the position it was checked
+// through, and a registry rebuilt from files was seen by no update. NULL with
+// archived_at = now makes the next updates of every older snapshot read it.
+func recordRestoredArchive(ctx context.Context, db *sql.DB, f archive.ScannedFile, rows int64, content *archive.Content) error {
 	var localPath, bucket, key, uploadedAt any
 	if f.Backend == archive.BackendS3 {
 		bucket, key, uploadedAt = f.S3Bucket, f.S3Key, f.LastModified.UTC()
@@ -392,17 +414,30 @@ func recordRestoredArchive(ctx context.Context, db *sql.DB, f archive.ScannedFil
 	if f.ColumnSet != "" {
 		columnSet = f.ColumnSet
 	}
+	var minTS, maxTS any
+	if content != nil {
+		if !content.MinEventTS.IsZero() {
+			minTS = content.MinEventTS
+		}
+		if !content.MaxEventTS.IsZero() {
+			maxTS = content.MaxEventTS
+		}
+	}
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO archive_state
-			(partition_name, bintrail_id, local_path, file_size_bytes, row_count, s3_bucket, s3_key, s3_uploaded_at, column_set)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(partition_name, bintrail_id, local_path, file_size_bytes, row_count, s3_bucket, s3_key, s3_uploaded_at, column_set,
+			 min_event_ts, max_event_ts)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			local_path = COALESCE(VALUES(local_path), local_path),
 			s3_bucket = COALESCE(VALUES(s3_bucket), s3_bucket),
 			s3_key = COALESCE(VALUES(s3_key), s3_key),
 			s3_uploaded_at = COALESCE(VALUES(s3_uploaded_at), s3_uploaded_at),
-			column_set = COALESCE(VALUES(column_set), column_set)`,
-		f.PartitionName, f.BintrailID, localPath, f.SizeBytes, rows, bucket, key, uploadedAt, columnSet)
+			column_set = COALESCE(VALUES(column_set), column_set),
+			min_event_ts = COALESCE(VALUES(min_event_ts), min_event_ts),
+			max_event_ts = COALESCE(VALUES(max_event_ts), max_event_ts)`,
+		f.PartitionName, f.BintrailID, localPath, f.SizeBytes, rows, bucket, key, uploadedAt, columnSet,
+		minTS, maxTS)
 	return err
 }
 

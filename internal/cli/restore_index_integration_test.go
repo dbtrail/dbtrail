@@ -164,7 +164,7 @@ func TestIntegrationRestoreIndex_roundTrip(t *testing.T) {
 	s3f := archive.ScannedFile{PartitionName: "p_2099010100", BintrailID: id,
 		Backend: archive.BackendS3, S3Bucket: "b", S3Key: "k", SizeBytes: 1,
 		LastModified: time.Now().UTC()}
-	if err := recordRestoredArchive(ctx, dstDB, s3f, 1); err != nil {
+	if err := recordRestoredArchive(ctx, dstDB, s3f, 1, nil); err != nil {
 		t.Fatalf("recordRestoredArchive S3: %v", err)
 	}
 	var uploadedAt, localPath any

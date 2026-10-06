@@ -1228,5 +1228,31 @@ func EnsureArchiveStateSchema(db *sql.DB) error {
 	); err != nil {
 		return err
 	}
+	// max_event_id, max_binlog_file and max_start_pos record the newest change
+	// each archived file holds (#2152). A snapshot update continues from a
+	// binlog position, and a change indexed late lands in an OLD partition,
+	// the next one rotation archives and drops. Once it is dropped, only this
+	// record tells the update that the archive holds a change after its
+	// position and must be read, however old the change's time.
+	//
+	// NULL on rows written before these columns existed. NULL means "not
+	// recorded", never "nothing after": the update reads such an archive when
+	// it was written after the snapshot's own time, the only window in which
+	// it can hold a change the snapshot has not seen.
+	if err := ensureColumn(db, "archive_state", "max_event_id",
+		`ALTER TABLE archive_state ADD COLUMN max_event_id BIGINT UNSIGNED DEFAULT NULL COMMENT 'highest event_id in the archived file, 0 for a file with no rows (#2152). NULL = not recorded (written before this column, or registered without reading the file): a snapshot update then treats the archive as one that may hold a later change' AFTER column_set`,
+	); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "archive_state", "max_binlog_file",
+		`ALTER TABLE archive_state ADD COLUMN max_binlog_file VARCHAR(255) DEFAULT NULL COMMENT 'with max_start_pos: the highest binlog coordinate in the archived file, file by length then name then position (#2152). NULL with max_event_id set = no row carries a coordinate' AFTER max_event_id`,
+	); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "archive_state", "max_start_pos",
+		`ALTER TABLE archive_state ADD COLUMN max_start_pos BIGINT UNSIGNED DEFAULT NULL COMMENT 'see max_binlog_file (#2152)' AFTER max_binlog_file`,
+	); err != nil {
+		return err
+	}
 	return nil
 }

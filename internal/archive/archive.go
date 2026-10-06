@@ -81,6 +81,10 @@ type Stats struct {
 	// so the record cannot drift from the bytes: a build that ever writes a
 	// narrower file records the narrower set.
 	Columns string
+	// Newest is the file's newest change (#2152), for archive_state's
+	// max_event_id / max_binlog_file / max_start_pos. Folded from the rows
+	// written, like MinEventTS/MaxEventTS, so it cannot disagree with the file.
+	Newest Newest
 }
 
 // ColumnSet renders a Parquet column list as the canonical archive_state.column_set
@@ -112,7 +116,6 @@ func ColumnSetOf(names []string) string {
 	slices.Sort(lower)
 	return strings.Join(lower, ",")
 }
-
 
 // ArchivePartition writes all rows from the named partition of binlog_events
 // to a Parquet file at outputPath. The db must have been opened with
@@ -212,6 +215,8 @@ func ArchivePartition(ctx context.Context, db *sql.DB, dbName, partition, output
 		); err != nil {
 			return stats, fmt.Errorf("scan row: %w", err)
 		}
+
+		stats.Newest.Add(eventID, binlogFile, startPos)
 
 		connIDStr := ""
 		if connID.Valid {
