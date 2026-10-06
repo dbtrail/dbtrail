@@ -367,8 +367,12 @@ func TestRefresh_aBackfilledIndexIsNotARenumbering(t *testing.T) {
 	testutil.MustExec(t, r.db, `INSERT INTO index_state (binlog_file, file_size, last_position, events_indexed, status, started_at, completed_at)
 		VALUES ('binlog.000005', 1, 150, 1, 'completed', ?, ?)`, T.Add(10*time.Minute).Format("2006-01-02 15:04:05"), T.Add(11*time.Minute).Format("2006-01-02 15:04:05"))
 	insertEventAt(t, r.db, r.schema, "orders", "binlog.000005", 20, 100, T.Add(-3*time.Hour), "2", `{"id":2,"status":"old"}`)
-	if _, _, err := r.refreshErr(T.Add(time.Hour), false, false); err != nil {
+	base, _, err := r.refreshErr(T.Add(time.Hour), false, false)
+	if err != nil {
 		t.Fatalf("refresh over a backfilled index: %v", err)
+	}
+	if md, err := baseline.ReadParquetMetadata(base); err != nil || md.EventMark != "" {
+		t.Fatalf("a refresh over a backfilled index stamped event mark %q (%v), want none: its ids do not follow the binary log", md.EventMark, err)
 	}
 }
 
@@ -418,8 +422,14 @@ func TestRefresh_aServerReplacedAfterAFullBackupRefuses(t *testing.T) {
 		[][]string{{"1", "A"}, {"2", "paid"}, {"3", "shipped"}})
 	// Same server: the refresh goes on.
 	insertEventAt(t, r.db, r.schema, "orders", "binlog.000007", 20, 900, T.Add(35*time.Minute), "3", `{"id":3,"status":"C"}`)
-	if _, _, err := r.refreshErr(T.Add(40*time.Minute), false, false); err != nil {
+	base, _, err := r.refreshErr(T.Add(40*time.Minute), false, false)
+	if err != nil {
 		t.Fatalf("refresh on the same server: %v", err)
+	}
+	if md, err := baseline.ReadParquetMetadata(base); err != nil {
+		t.Fatal(err)
+	} else if m := reconstruct.ParseEventMark(md.EventMark); m == nil || m.ServerUUID != "3e11fa47-71ca-11e1-9e33-c80aa9429562" {
+		t.Fatalf("the refresh's mark %q does not name the server capture reads", md.EventMark)
 	}
 	// Failover: capture now reads another server, numbered higher.
 	seedFullRead(t, r, T.Add(45*time.Minute), "binlog.000007", 1000,
