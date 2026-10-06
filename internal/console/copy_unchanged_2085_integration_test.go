@@ -262,6 +262,9 @@ func TestIntegrationCopyUnchanged_2085(t *testing.T) {
 		// After the table file's position and before the pair's: the pair
 		// holds it.
 		r.event("shop", tb.Table, "binlog.000008", 100, pairStamp.Add(-time.Hour))
+		// The pair's position is a refresh's cut: the end of an event the
+		// index holds (#2160 reads the newest event against it).
+		r.event("shop", "elsewhere", "binlog.000008", 8950, pairStamp.Add(-time.Minute))
 		r.wantUnchanged(tb)
 		r.event("shop", tb.Table, "binlog.000008", 9000, pairStamp.Add(time.Hour))
 		r.wantNot("changed since its snapshot", tb)
@@ -449,6 +452,9 @@ func TestIntegrationCopyUnchanged_startedLongBeforeCommittedAfter_2085(t *testin
 	r.event("shop", history.Table, "binlog.000006", 100, floor.Add(-3*time.Hour))
 	r.event("shop", history.Table, "binlog.000006", 200, floor.Add(-2*time.Hour))
 	r.event("shop", folded.Table, "binlog.000006", 300, floor.Add(-2*time.Hour))
+	// The refresh that wrote folded cut at the end of an event the index
+	// holds, as every refresh does (#2160 reads the newest event against it).
+	r.event("shop", "cut", r.anchor.File, r.anchor.Pos-50, floor.Add(-90*time.Minute))
 	r.rewrite(folded, func(md map[string]string) { md[baseline.MetaKeyLastEventID] = r.lastID(folded.Table) })
 	foldedFloor := floor.Add(-2 * time.Hour).Truncate(time.Hour).Add(-time.Hour) // its search starts from its last folded event
 
