@@ -132,6 +132,10 @@ type BaselinePair struct {
 	// previous baseline predates position recording; callers must check before
 	// using it as a query.Options.SincePos, same convention as NewAnchor.
 	PrevAnchor query.BinlogPos
+	// PrevEventMark is the previous baseline's raw event mark
+	// (baseline.MetaKeyEventMark, #2160), checked against the index before
+	// the window from PrevAnchor is read (#2174). "" = none recorded.
+	PrevEventMark string
 	// NewLSN / PrevLSN are the PostgreSQL WAL LSN anchors (baseline.MetaKeyLSN)
 	// of the new and previous baselines — the PG equivalent of NewAnchor/
 	// PrevAnchor. 0 = a MySQL baseline or a pre-#593 PG baseline (no LSN).
@@ -180,6 +184,25 @@ func pairComparesNothing(p BaselinePair) bool {
 // the live-source path had to guard (the new-baseline digest is recomputed here,
 // not taken from #633's persisted value). Neither side reads the live source, so
 // there is no snapshot drift, no off-peak requirement, and no production impact.
+// renumberedPairRemedy follows a binlog-renumbering refusal in baseline-pair
+// mode, where one new full snapshot is not enough: the pair it forms with the
+// snapshot before it still spans the restart.
+const renumberedPairRemedy = "verify compares a table's last read with the snapshot before it, " +
+	"so the table is checkable again from the second full snapshot taken after that."
+
+// pairNumbering runs the refresh's binlog-renumbering check (#2160) on the
+// window a pair reads: from the previous snapshot's position, against that
+// snapshot's event mark (#2174). A previous snapshot without a mark: nil.
+func pairNumbering(ctx context.Context, cfg BaselineConfig, p BaselinePair) error {
+	if err := reconstruct.CheckNumberingFrom(ctx, cfg.IndexDB, &p.PrevAnchor, p.PrevEventMark); err != nil {
+		if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+			return err
+		}
+		return fmt.Errorf("check the binlog numbering since the previous snapshot of %s.%s: %w", p.Schema, p.Table, err)
+	}
+	return nil
+}
+
 func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair) (TableResult, error) {
 	if p.Settled != nil {
 		return *p.Settled, nil
@@ -247,6 +270,13 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 	// writes no row events: the replay would keep rows the database no longer
 	// had at the read and report a mismatch that only a full backup clears.
 	// Every other surface that replays a window refuses on it (#764).
+	if err := pairNumbering(ctx, cfg, p); err != nil {
+		if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+			return inconclusive(res, err.Error()+" "+renumberedPairRemedy), nil
+		}
+		return res, err
+	}
+
 	ddl, ddlAt, found, err := reconstruct.FindDestructiveDDL(ctx, cfg.IndexDB, p.Schema, p.Table, p.PrevSnapshot, p.NewSnapshot)
 	if err != nil {
 		return res, fmt.Errorf("look for a TRUNCATE, DROP or RENAME of %s.%s between the two snapshots: %w", p.Schema, p.Table, err)
@@ -654,6 +684,7 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile) (p Base
 		NewSnapshot:         read.SnapshotTime,
 		NewAnchor:           query.BinlogPos{File: nMeta.BinlogFile, Pos: uint64(nMeta.BinlogPos)},
 		PrevAnchor:          query.BinlogPos{File: prevMeta.BinlogFile, Pos: uint64(prevMeta.BinlogPos)},
+		PrevEventMark:       prevMeta.EventMark,
 		NewLSN:              nMeta.LSN,
 		PrevLSN:             prevMeta.LSN,
 		NewReadFromDatabase: true,

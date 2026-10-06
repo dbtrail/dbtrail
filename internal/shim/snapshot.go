@@ -27,26 +27,51 @@ import (
 // or BinlogPos==0) just means nil — callers fall back to the pre-#797
 // Since-only fetch.
 func snapshotSincePos(ctx context.Context, baselinePath string, logger *slog.Logger, schema, table string) *query.BinlogPos {
-	pos, _ := snapshotAnchor(ctx, baselinePath, logger, schema, table)
+	pos, _, _ := snapshotAnchor(ctx, baselinePath, logger, schema, table)
 	return pos
 }
 
 // snapshotAnchor is snapshotSincePos with the baseline's DDL mark (#1912),
-// which the destructive-DDL check reads beside the position.
-func snapshotAnchor(ctx context.Context, baselinePath string, logger *slog.Logger, schema, table string) (*query.BinlogPos, *reconstruct.DDLMark) {
+// which the destructive-DDL check reads beside the position, and its raw
+// event mark (#2174), which the binlog-renumbering check reads.
+func snapshotAnchor(ctx context.Context, baselinePath string, logger *slog.Logger, schema, table string) (*query.BinlogPos, *reconstruct.DDLMark, string) {
 	bmeta, err := baseline.ReadParquetMetadataAny(ctx, baselinePath)
 	if err != nil {
 		logger.Warn("shim: could not read baseline metadata for position-anchored delta fetch; falling back to timestamp-only Since, "+
 			"and a TRUNCATE, DROP or RENAME is looked for by time alone, so one indexed late is not seen",
 			"schema", schema, "table", table, "path", baselinePath, "error", err)
-		return nil, nil
+		return nil, nil, ""
 	}
 	// Rendering-GUC stamp check (#921) rides the metadata read both _snapshot
 	// paths (single-row and full-table) already pay here — no second read. It
 	// must run BEFORE the MySQL-anchor early return below: a PostgreSQL
 	// baseline records an LSN anchor and no binlog file/pos.
 	warnRenderGUCsMismatch(bmeta, logger, schema, table, baselinePath)
-	return reconstruct.AnchorOf(bmeta), reconstruct.ParseDDLMark(bmeta.DDLMark)
+	return reconstruct.AnchorOf(bmeta), reconstruct.ParseDDLMark(bmeta.DDLMark), bmeta.EventMark
+}
+
+// checkSnapshotNumbering is the refresh's binlog-renumbering check (#2160)
+// for a _snapshot window read from the baseline's position (#2174): when the
+// source's binary log started again after the snapshot, every later change
+// sorts below that position and the window would answer the snapshot's old
+// rows. The error keeps ErrBinlogRenumbered for errors.Is (the pgwire
+// front-end) and names the query type; renumberedRefusal turns it into the
+// MySQL refusal.
+func (h *Handler) checkSnapshotNumbering(ctx context.Context, qType QueryType, anchor *query.BinlogPos, eventMark string) error {
+	if err := reconstruct.CheckNumberingFrom(ctx, h.indexDB, anchor, eventMark); err != nil {
+		return fmt.Errorf("resolve %s: %w", qType, err)
+	}
+	return nil
+}
+
+// renumberedRefusal maps an ErrBinlogRenumbered refusal to the code the other
+// "this history cannot be read" refusals of _snapshot use (a coverage gap, no
+// baseline): ER_NO_PARTITION_FOR_GIVEN_VALUE. Any other error passes through.
+func renumberedRefusal(err error) error {
+	if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+		return mysql.NewError(mysql.ER_NO_PARTITION_FOR_GIVEN_VALUE, err.Error())
+	}
+	return err
 }
 
 // warnRenderGUCsMismatch flags a PostgreSQL baseline (LSN anchor present)
@@ -255,10 +280,13 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 	// through and silently resurrect rows the DDL actually deleted (#764).
 	// The baseline's position is read here, ahead of the fetch that also
 	// takes it: the check places a statement indexed late by it (#1912).
-	sincePos, ddlMark := snapshotAnchor(ctx, baselinePath, h.logger, q.Schema, q.Table)
+	sincePos, ddlMark, eventMark := snapshotAnchor(ctx, baselinePath, h.logger, q.Schema, q.Table)
 	if err := reconstruct.CheckDestructiveDDL(ctx, h.indexDB, q.Schema, q.Table,
 		reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos, Mark: ddlMark}); err != nil {
 		return nil, err
+	}
+	if err := h.checkSnapshotNumbering(ctx, q.Type, sincePos, eventMark); err != nil {
+		return nil, renumberedRefusal(err)
 	}
 
 	// Fetch the latest event per PK from the snapshot instant up to AsOf.

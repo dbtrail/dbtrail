@@ -1350,13 +1350,7 @@ func ReconstructTable(
 	// a new numbering cannot be compared, so no flag can make it readable. A
 	// proven renumbering names its own remedy (a new full snapshot) rather
 	// than the gap message's flag. See renumbered.go.
-	if anchorMeta.BinlogFile != "" && anchorMeta.BinlogPos > 0 {
-		anchor := query.BinlogPos{File: anchorMeta.BinlogFile, Pos: uint64(anchorMeta.BinlogPos)}
-		if err := CheckNumberingContinues(ctx, db, ParseEventMark(anchorMeta.EventMark), anchor); err != nil {
-			return nil, err
-		}
-	}
-	if err := CheckSameServer(ctx, db, ParseEventMark(anchorMeta.EventMark)); err != nil {
+	if err := CheckNumberingFrom(ctx, db, AnchorOf(anchorMeta), anchorMeta.EventMark); err != nil {
 		return nil, err
 	}
 	// For a snapshot whose mark names no server (written before marks did),

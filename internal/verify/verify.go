@@ -212,14 +212,28 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	// How the snapshot was locked (#1380). A footer that cannot be read
 	// leaves it unknown, never consistent.
 	var snapshotLock baseline.ReadConsistency
+	var eventMark string
 	if bmeta, berr := baseline.ReadParquetMetadataAny(ctx, baselinePath); berr != nil {
 		slog.Warn("could not read baseline metadata for position-anchored delta fetch; falling back to timestamp-only Since",
 			"schema", schema, "table", table, "path", baselinePath, "error", berr)
 	} else {
 		snapshotLock = baseline.ReadConsistencyOf(bmeta)
+		eventMark = bmeta.EventMark
 		if bmeta.BinlogFile != "" && bmeta.BinlogPos > 0 {
 			sincePos = &query.BinlogPos{File: bmeta.BinlogFile, Pos: uint64(bmeta.BinlogPos)}
 		}
+	}
+
+	// 3b. The changes since the snapshot are read from its position: when the
+	// source's binary log started again after it, every later change sorts
+	// below that position and the reconstruction would miss it, reading as a
+	// mismatch with no cause. The refresh's check (#2160) names the cause
+	// instead (#2174). A snapshot without an event mark: no check.
+	if err := reconstruct.CheckNumberingFrom(ctx, cfg.IndexDB, sincePos, eventMark); err != nil {
+		if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+			return inconclusive(res, err.Error()), nil
+		}
+		return res, fmt.Errorf("check the binlog numbering since the snapshot of %s.%s: %w", schema, table, err)
 	}
 
 	// 4. Latest event per PK in (baseline, asOf] — the change map the merge needs.

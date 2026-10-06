@@ -400,6 +400,23 @@ func CheckSourceReplaced(ctx context.Context, db *sql.DB, since time.Time) error
 	return checkSourceReplacedSince(ctx, db, since)
 }
 
+// CheckNumberingFrom runs the two checks that read a snapshot's event mark
+// (rawMark, its footer value) against the index, for a window read by
+// position from anchor (nil: the snapshot records none): CheckNumberingContinues,
+// then CheckSameServer. A snapshot without a mark: nil, whatever happened.
+// Shared by every reader that starts at a snapshot's position: the refresh,
+// verify and the shim's _snapshot (#2174). CheckSourceReplaced stays with the
+// refresh, which alone also refuses on a snapshot without a mark.
+func CheckNumberingFrom(ctx context.Context, db *sql.DB, anchor *query.BinlogPos, rawMark string) error {
+	m := ParseEventMark(rawMark)
+	if anchor != nil && anchor.File != "" && anchor.Pos > 0 {
+		if err := CheckNumberingContinues(ctx, db, m, *anchor); err != nil {
+			return err
+		}
+	}
+	return CheckSameServer(ctx, db, m)
+}
+
 // CheckSameServer returns an error wrapping ErrBinlogRenumbered when the mark
 // names the server capture was reading when the snapshot was taken and
 // capture now reads another one. Identities, not times: it holds for a full

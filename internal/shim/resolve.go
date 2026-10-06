@@ -125,13 +125,15 @@ func mysqlResolveError(rerr *ResolveError) error {
 // mysqlRenderErr maps a resolve error to the MySQL wire: a *ResolveError goes
 // through mysqlResolveError; a raw data-fault (ApplyAt / baseline read) passes
 // through unchanged so go-mysql/server emits ER_UNKNOWN_ERROR (1105) with the
-// original message — exactly what the pre-#1008 single-row paths did.
+// original message — exactly what the pre-#1008 single-row paths did. The one
+// exception is a binlog-renumbering refusal (#2174), which gets the code of
+// the other unreadable-history refusals (renumberedRefusal).
 func mysqlRenderErr(err error) error {
 	var rerr *ResolveError
 	if errors.As(err, &rerr) {
 		return mysqlResolveError(rerr)
 	}
-	return err
+	return renumberedRefusal(err)
 }
 
 // ResolveFlashbackRow resolves a single-row _flashback query (binlog-only) to
@@ -266,9 +268,12 @@ func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	// image, so the row would silently resolve as if it still existed (#764).
 	// The baseline's position is read here, ahead of the fetch that also
 	// takes it: the check places a statement indexed late by it (#1912).
-	sincePos, ddlMark := snapshotAnchor(ctx, baselinePath, h.logger, q.Schema, q.Table)
+	sincePos, ddlMark, eventMark := snapshotAnchor(ctx, baselinePath, h.logger, q.Schema, q.Table)
 	if err := reconstruct.CheckDestructiveDDL(ctx, h.indexDB, q.Schema, q.Table,
 		reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos, Mark: ddlMark}); err != nil {
+		return nil, err
+	}
+	if err := h.checkSnapshotNumbering(ctx, q.Type, sincePos, eventMark); err != nil {
 		return nil, err
 	}
 

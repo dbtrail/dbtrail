@@ -132,6 +132,12 @@ func ExplainBaselinePairMismatch(ctx context.Context, cfg BaselineConfig, p Base
 	// VerifyBaselinePair reconstructs the recovery side over (#797: PrevAnchor,
 	// when recorded, replaces the imprecise PrevSnapshot DATETIME lower bound —
 	// see VerifyBaselinePair's comment).
+	// A window whose binlog numbering started over cannot be read by position
+	// (#2174); VerifyBaselinePair calls it inconclusive, and the drill-down,
+	// which the console can request on its own, refuses the same way.
+	if err := pairNumbering(ctx, cfg, p); err != nil {
+		return nil, err
+	}
 	pg := cfg.SourceFlavor == flavorPostgres
 	engine := query.New(cfg.IndexDB)
 	// Same window as VerifyBaselinePair (time-bounded, position cut for MySQL
