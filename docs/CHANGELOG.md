@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **A table with changes is written again in full half as often.** An update
+  keeps a table's changes in small files beside it and writes the table
+  again once those files pass a share of its size. That share was a quarter
+  and is now half. On a 100 million row table taking 300 changes a second,
+  the quarter came round every two hours and each rewrite took about ten
+  minutes and up to 12.5 GB of memory. The price is paid by reads of the
+  copy between rewrites: on that table a program reading the copy with its
+  own DuckDB took 5 seconds at a quarter and 12 to 28 seconds at half.
+  Nothing to configure. Tables that reach a day without a rewrite are still
+  rewritten then.
 - **Read routing: a heavy read that finds the copy busy waits for it, and
   the wait is now documented and visible** (#2112). The documentation said
   such a read runs on MySQL. It does not, and nothing changes in what it

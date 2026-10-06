@@ -69,8 +69,15 @@ const tableDeltaMaxAge = 24 * time.Hour
 // 12 KB pair is not a table worth rewriting, and without the floor every
 // second refresh would rewrite it. Vars, not consts, so tests can reach the
 // rule with a three-row fixture.
+//
+// Half, not a quarter: on a 100 M row table with 300 changes a second the
+// quarter came round every two hours, and each rewrite took ten minutes and
+// up to 12.5 GB. What the longer chain costs is paid by whoever reads the
+// state: measured on that table's files, a reader with DuckDB's defaults
+// went from 5 s at a quarter to 12-28 s at half, and the rewrite's own merge
+// step took about 2.5 times as long.
 var (
-	tableDeltaMaxFraction           = 0.25
+	tableDeltaMaxFraction           = 0.5
 	tableDeltaMinCompactBytes int64 = 1 << 20
 )
 
