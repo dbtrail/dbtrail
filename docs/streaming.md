@@ -335,7 +335,7 @@ or replayed:
   `--reset --start-file <the source's oldest binary log> --start-pos 4`, which
   captures the new numbering from its first transaction (in position mode) and
   records the jump as a capture loss. To return to GTID mode later, stop
-  capture, read its checkpoint (binlog file and position, from `bintrail
+  capture, read its checkpoint (the `Position` line of `bintrail
   status`), and restart once with `--start-gtid` set to what
   `SELECT BINLOG_GTID_POS('<file>', <position>)` returns on the source. Not the
   source's current `@@gtid_binlog_pos`: that skips what the source wrote since

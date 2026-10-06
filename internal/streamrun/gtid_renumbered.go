@@ -363,7 +363,7 @@ func mariadbRenumberedError(r *gtidRenumbering) error {
 		"cannot resume capture: %s. Nothing was deleted from the index. To resume, restart capture once with "+
 			"--reset --start-file %s --start-pos 4: it reads the source's new numbering from its first transaction "+
 			"(in position mode) and records the jump as a capture loss. To return to GTID mode later, stop capture, "+
-			"read its checkpoint (binlog file and position, shown by bintrail status), and restart once with --start-gtid "+
+			"read its checkpoint (the Position line of bintrail status: binlog file and position), and restart once with --start-gtid "+
 			"set to what SELECT BINLOG_GTID_POS('<file>', <position>) returns on the source for that checkpoint. "+
 			"--reset alone also resumes, from the source's current position, and skips everything the source wrote "+
 			"since its reset",
