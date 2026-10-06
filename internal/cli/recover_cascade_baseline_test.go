@@ -71,7 +71,7 @@ func TestCascadeBaselineProviderFor_wiresSingleSourceLookup(t *testing.T) {
 		baseline.MetaKeyBinlogPos:  "12345",
 	})
 
-	provider := cascadeBaselineProviderFor(dir, childResolver(schema))
+	provider := cascadeBaselineProviderFor(dir, childResolver(schema), nil)
 	if provider == nil {
 		t.Fatal("cascadeBaselineProviderFor returned nil; a typed-nil provider would report BaselineActive with no baseline behind it")
 	}
@@ -90,7 +90,7 @@ func TestCascadeBaselineProviderFor_wiresSingleSourceLookup(t *testing.T) {
 
 	// A source with no baseline for the table degrades to Phase-1 only, never an
 	// error that would abort the whole recovery.
-	_, ok2, err := cascadeBaselineProviderFor(t.TempDir(), childResolver(schema)).
+	_, ok2, err := cascadeBaselineProviderFor(t.TempDir(), childResolver(schema), nil).
 		BaselineChildren(context.Background(), schema, "child", "pid", "1", at, 100)
 	if err != nil {
 		t.Fatalf("BaselineChildren against an empty source: %v, want nil (Phase-1 only)", err)

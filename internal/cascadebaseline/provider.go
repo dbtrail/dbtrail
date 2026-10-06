@@ -14,6 +14,7 @@ package cascadebaseline
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -55,15 +56,24 @@ func Source(src string) FindBaselineFunc {
 type Provider struct {
 	find     FindBaselineFunc
 	resolver *metadata.Resolver // for child PK columns
+	// db is the index the cascade engine reads changes from: the baseline's
+	// event mark is checked against it (#2177).
+	db *sql.DB
 }
 
-// New builds a Provider from a baseline lookup and the schema resolver used to
-// encode each baseline row's PK. It never returns nil: callers assign the result
+// renumberNotices logs each lasting condition of the numbering check once
+// per process: the console and the MCP server run cascade recoveries for as
+// long as they are up.
+var renumberNotices reconstruct.NoticeOnce
+
+// New builds a Provider from a baseline lookup, the schema resolver used to
+// encode each baseline row's PK, and the index the cascade engine reads
+// changes from (db; a baseline with an event mark is refused without it). It never returns nil: callers assign the result
 // to a cascade.BaselineProvider interface variable and test that variable for
 // nil to decide whether Phase-2 ran, so a typed-nil would report an active
 // baseline that does not exist.
-func New(find FindBaselineFunc, resolver *metadata.Resolver) *Provider {
-	return &Provider{find: find, resolver: resolver}
+func New(find FindBaselineFunc, resolver *metadata.Resolver, db *sql.DB) *Provider {
+	return &Provider{find: find, resolver: resolver, db: db}
 }
 
 // BaselineChildren implements cascade.BaselineProvider.
@@ -134,11 +144,15 @@ func (p *Provider) BaselineChildren(ctx context.Context, schema, table, fkCol, p
 	// emit a warning about an anchor no lookup will use: the operator would
 	// chase the wrong problem. Nothing depends on it running earlier.
 	var sincePos *query.BinlogPos
+	var eventMark string
 	if bmeta, berr := baseline.ReadParquetMetadataAny(ctx, path); berr != nil {
 		slog.Warn("cascade: could not read baseline metadata for position-anchored victim fetch; falling back to timestamp-only Since",
 			"schema", schema, "table", table, "path", path, "error", berr)
-	} else if bmeta.BinlogFile != "" && bmeta.BinlogPos > 0 {
-		sincePos = &query.BinlogPos{File: bmeta.BinlogFile, Pos: uint64(bmeta.BinlogPos)}
+	} else {
+		eventMark = bmeta.EventMark
+		if bmeta.BinlogFile != "" && bmeta.BinlogPos > 0 {
+			sincePos = &query.BinlogPos{File: bmeta.BinlogFile, Pos: uint64(bmeta.BinlogPos)}
+		}
 	}
 
 	// The FK filter binds parentPK as a STRING against the baseline column.
@@ -150,6 +164,19 @@ func (p *Provider) BaselineChildren(ctx context.Context, schema, table, fkCol, p
 		return cascade.BaselineLookup{}, false, fmt.Errorf(
 			"baseline scan of %s.%s by FK column %q (type %q) is unsupported (string match may not coerce); baseline augmentation skipped",
 			schema, table, fkCol, columnDataType(tm, fkCol))
+	}
+
+	// The engine reads this table's changes in [snapshot, at] from the
+	// snapshot's position, and treats a baseline row with no later change as
+	// untouched. When the source's binary log started again after the
+	// snapshot, every later change sorts before that position and is not
+	// read: the SQL would restore children as the snapshot left them (#2177).
+	// The same check verify and _snapshot run (#2174), over this read's
+	// window. Before the row scan, and so also when no row matches: a covered
+	// lookup with zero rows still widens the engine's scan to the snapshot.
+	// A snapshot without an event mark: no check, today's behavior.
+	if err := p.checkNumbering(ctx, schema, table, sincePos, eventMark, snap, at); err != nil {
+		return cascade.BaselineLookup{}, false, err
 	}
 
 	// Fetch one more than the cap so truncation is observable.
@@ -205,4 +232,26 @@ func fkFilterSafe(dataType string) bool {
 	default:
 		return false
 	}
+}
+
+// checkNumbering runs reconstruct.CheckNumberingFrom for one lookup, over the
+// window the engine reads by position: schema.table from the snapshot to at.
+// A renumbering is returned as is (it wraps reconstruct.ErrBinlogRenumbered,
+// which the engine names under its own caveat); a failure of the check is
+// wrapped with what was being checked.
+func (p *Provider) checkNumbering(ctx context.Context, schema, table string, anchor *query.BinlogPos, mark string, snap, at time.Time) error {
+	if mark == "" {
+		return nil
+	}
+	if p.db == nil {
+		return fmt.Errorf("baseline of %s.%s has an event mark but no index connection was given to check it; "+
+			"whether the source's binary log started again after the snapshot cannot be told", schema, table)
+	}
+	err := reconstruct.CheckNumberingFrom(ctx, p.db, anchor, mark, reconstruct.ReadWindow{
+		Schema: schema, Table: table, Since: snap, Until: at, Notice: renumberNotices.To(nil),
+	})
+	if err == nil || errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+		return err
+	}
+	return fmt.Errorf("check the binlog numbering since the snapshot of %s.%s: %w", schema, table, err)
 }

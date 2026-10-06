@@ -45,7 +45,7 @@ func nonexistentBaseline(ctx context.Context, schema, table string, at time.Time
 func TestProvider_unsupportedPKTypeRefusesBeforeRead(t *testing.T) {
 	for _, pkType := range []string{"float", "double", "bit", "json", "time", "geometry"} {
 		t.Run(pkType, func(t *testing.T) {
-			_, ok, err := New(nonexistentBaseline, resolverWithChildPK(pkType)).
+			_, ok, err := New(nonexistentBaseline, resolverWithChildPK(pkType), nil).
 				BaselineChildren(context.Background(), "shop", "child", "pid", "1", time.Now(), 100)
 			if err == nil {
 				t.Fatalf("expected the PK-type refusal for a %s PK, got nil (ok=%v)", pkType, ok)
@@ -88,7 +88,7 @@ func TestProvider_unsupportedPKTypeRefusesBeforeRead(t *testing.T) {
 // a cause this code cannot know. The gate therefore skips it and the run
 // proceeds to the baseline read, exactly as it does today.
 func TestProvider_emptyPKDataTypeIsNotAPKTypeVerdict(t *testing.T) {
-	_, _, err := New(nonexistentBaseline, resolverWithChildPK("")).
+	_, _, err := New(nonexistentBaseline, resolverWithChildPK(""), nil).
 		BaselineChildren(context.Background(), "shop", "child", "pid", "1", time.Now(), 100)
 	if err == nil {
 		t.Fatal("expected the baseline read to fail on the nonexistent path, got nil")
@@ -115,7 +115,7 @@ func TestProvider_unsupportedPKTypeRefusesBeforeAnyBaselineIO(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	_, _, err := New(nonexistentBaseline, resolverWithChildPK("float")).
+	_, _, err := New(nonexistentBaseline, resolverWithChildPK("float"), nil).
 		BaselineChildren(context.Background(), "shop", "child", "pid", "1", time.Now(), 100)
 	if !errors.Is(err, reconstruct.ErrUnsupportedPKType) {
 		t.Fatalf("want the PK-type refusal, got: %v", err)
@@ -133,7 +133,7 @@ func TestProvider_unsupportedPKTypeRefusesBeforeAnyBaselineIO(t *testing.T) {
 func TestProvider_supportedPKTypesStillReachTheRead(t *testing.T) {
 	for _, pkType := range []string{"int", "bigint", "varchar", "decimal", "datetime", "binary", "varbinary", "blob"} {
 		t.Run(pkType, func(t *testing.T) {
-			_, _, err := New(nonexistentBaseline, resolverWithChildPK(pkType)).
+			_, _, err := New(nonexistentBaseline, resolverWithChildPK(pkType), nil).
 				BaselineChildren(context.Background(), "shop", "child", "pid", "1", time.Now(), 100)
 			if err == nil {
 				t.Fatal("expected the baseline read to fail on the nonexistent path, got nil")

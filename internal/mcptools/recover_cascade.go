@@ -131,7 +131,7 @@ func resolveCascadeBaseline(cfg Config, t *Target, resolver *metadata.Resolver, 
 		// The Target's lookup, not a raw source string: on the console that is
 		// the bundle's findBaseline, which carries the local-to-S3 fallback the
 		// rest of the console gets (#1102).
-		return cascadebaseline.New(cascadebaseline.FindBaselineFunc(t.FindBaseline), resolver), ""
+		return cascadebaseline.New(cascadebaseline.FindBaselineFunc(t.FindBaseline), resolver, t.DB), ""
 	}
 	src := args.BaselineDir
 	if src == "" {
@@ -149,7 +149,7 @@ func resolveCascadeBaseline(cfg Config, t *Target, resolver *metadata.Resolver, 
 	if resolver == nil {
 		return nil, noSnapshotWarn
 	}
-	return cascadebaseline.New(cascadebaseline.Source(src), resolver), ""
+	return cascadebaseline.New(cascadebaseline.Source(src), resolver, t.DB), ""
 }
 
 // MakeRecoverCascadeTool returns the recover_cascade tool handler: reversal

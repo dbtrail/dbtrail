@@ -154,6 +154,17 @@ type BaselineProvider interface {
 	//
 	// An implementation MUST NOT carry both sentinels on one error: the
 	// engine checks ErrGeneratedPK first and would skip a phase that is safe.
+	//
+	// Third classified refusal (#2177): a baseline whose changes cannot be
+	// read from its binlog position, because the source's numbering started
+	// again after it, carries reconstruct.ErrBinlogRenumbered. The engine
+	// names it under its own caveat and runs Phase-1 only (by time). It is
+	// NOT memoized per table: another parent key can resolve a newer
+	// baseline. A failure of the check itself is a plain error.
+	//
+	// ok=true promises that the changes since SnapshotTime (or SincePos) can
+	// be read by position: the engine widens the scan to it and treats a
+	// baseline row with no later change as untouched.
 	BaselineChildren(ctx context.Context, schema, table, fkCol, parentPK string, at time.Time, limit int) (lookup BaselineLookup, ok bool, err error)
 }
 
@@ -805,6 +816,19 @@ func SynthesizeVictims(
 						detail = berr.Error()
 					}
 					addPKTypeCaveat(fk, detail)
+				} else if errors.Is(berr, reconstruct.ErrBinlogRenumbered) {
+					// The source's binary log started again after the
+					// snapshot (#2177): the changes since it cannot be read
+					// from its position, so the baseline is not used and
+					// Phase-1 runs over the lookback window, which reads by
+					// time. Not memoized per table, unlike the PK-type
+					// refusal: another parent can resolve a newer baseline
+					// taken after the restart, which is usable. Same
+					// boundary words as the nobaseline:/pktype: caveats.
+					addIncomplete("renumbered:"+fk.Schema+"."+fk.Table, fmt.Sprintf(
+						"%s.%s's baseline snapshot is not used: %v. Children untouched within the lookback window "+
+							"are not reconstructed, so the recovery may be partial",
+						fk.Schema, fk.Table, berr))
 				} else {
 					addIncomplete("baselinefail:"+fk.Schema+"."+fk.Table, fmt.Sprintf(
 						"baseline lookup failed for %s.%s (recovery may be partial): %v", fk.Schema, fk.Table, berr))
