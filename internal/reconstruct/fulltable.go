@@ -823,7 +823,13 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// Not on an index `bintrail index` also wrote: there a row with an old
 	// position can be indexed after the refresh that published the snapshot,
 	// so that refresh's cut says nothing about it.
-	backfilled := query.IndexBackfilled(ctx, db)
+	// A read that fails refuses the run: guessing either way would be wrong
+	// (yes reads every recent archive for nothing, no can skip one that holds
+	// a change the snapshot has not seen).
+	backfilled, err := query.IndexBackfilled(ctx, db)
+	if err != nil {
+		return nil, fmt.Errorf("cannot tell which archives each table must read: %w", err)
+	}
 	if backfilled {
 		backfilledArchivesWarned.Do(func() {
 			slog.Warn("`bintrail index` also wrote into this index, so a snapshot update cannot skip an archive by the position the previous update searched through; " +

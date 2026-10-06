@@ -596,11 +596,6 @@ func ForRun(f Fetcher) Fetcher {
 	return f
 }
 
-// settleSince is what every fetch runs before it reads: it replaces
-// opts.Since with SinceFor's answer and marks the options so the same fetch
-// does not ask again further down. heads may be nil (a picture is loaded).
-// moved reports that the time changed, and firstEnd is the picture's
-// firstPartitionEnd (zero when it has none).
 // PositionReadFloor is the lowest event_timestamp a read with opts looks at:
 // with SincePos, its Since settled the way the read settles it (settleSince),
 // then the CoarseSinceFloor buildQuery puts under it; without SincePos, Since
@@ -619,6 +614,11 @@ func PositionReadFloor(ctx context.Context, db *sql.DB, opts Options) (time.Time
 	return CoarseSinceFloor(*opts.Since), nil
 }
 
+// settleSince is what every fetch runs before it reads: it replaces
+// opts.Since with SinceFor's answer and marks the options so the same fetch
+// does not ask again further down. heads may be nil (a picture is loaded).
+// moved reports that the time changed, and firstEnd is the picture's
+// firstPartitionEnd (zero when it has none).
 func settleSince(ctx context.Context, db *sql.DB, opts *Options, heads *PartitionHeads) (moved bool, firstEnd time.Time, err error) {
 	if opts.sinceSettled || opts.Since == nil || opts.SincePos == nil {
 		return false, time.Time{}, nil
