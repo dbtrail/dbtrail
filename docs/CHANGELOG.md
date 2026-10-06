@@ -253,20 +253,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, so measured that way each refresh of a quiet table would read them all
   again. Capture indexes in commit order, so a change indexed after a refresh
   ran is after its cut, and the refresh already looked at everything before
-  it. The cut is read as the newest anchor among the refresh-written files of
-  the table's snapshot directory. On an index `bintrail index` also wrote
-  (rows with old positions are indexed late), on a snapshot taken by a dump
-  or stored in S3, and for other readers that continue from a position, the
-  rule falls back to the archives after the table's own position that were
-  written after the snapshot's time (less one hour for clock differences),
-  with one warning per process on the backfilled index. Archives written
+  it. A refresh writes its cut into a new footer key,
+  `bintrail.archive_cut`, only when it checked the archives itself: an index
+  only a stream writes, archive sources found, no `--allow-gaps`, and an index
+  that holds events. The next refresh reads the newest such key in the
+  table's snapshot directory and nothing else, so snapshots written by older
+  builds, which never looked at archived hours, give no cut. Without a cut (an
+  index `bintrail index` also wrote, where rows with old positions are
+  indexed late; an older snapshot; a dump; a snapshot in S3; and other
+  readers that continue from a position: `verify`, the shim's `_snapshot`,
+  cascade recovery, the Iceberg export) the update reads the archives after
+  the table's own position that were written after the snapshot's time (less
+  one hour for clock differences), which on such a reader can be every
+  archive rotated since that time, once per read; on the backfilled index a
+  warning says so once per process. A partition archived again after a failed
+  S3 upload is stamped with the new archive time, so the update of a snapshot
+  taken between the two attempts still reads it. Archives written
   before this release have no record: those written after the snapshot are
   read, older ones are not, so an upgrade costs at most one wider update per
   table. `archive reconcile --repair` (local files always,
   S3 only with `--deep`) and `restore-index` read the files they register and
-  fill the same columns, plus `min_event_ts`/`max_event_ts`. Rotation now also
+  fill `min_event_ts`/`max_event_ts`. `restore-index` also fills the three
+  new columns; `archive reconcile --repair` does not: a row lost from
+  `archive_state` was never seen by any refresh, so it is registered with no
+  newest position and the current time, and each older snapshot's next update
+  reads it once. Rotation now also
   runs the `archive_state` migration itself before archiving. Cost: one read
-  of `archive_state` per load of the index picture. Measured on MySQL 8.4
+  of the whole of `archive_state` per load of the index picture (it is not
+  narrowed by time, because a recorded archive is judged by its position),
+  and, per refresh run, one footer read per file of each snapshot directory
+  a table is read from. Measured on MySQL 8.4
   with 8,760 archives (a year of hours) and no late change: loading the
   picture and answering took 17 ms, and the start did not move. Still not
   covered: an hour rotated out without an archive, and an archive whose
