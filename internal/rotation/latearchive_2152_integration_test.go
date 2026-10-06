@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/parquetquery"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/rotation"
 	"github.com/dbtrail/dbtrail/internal/testutil"
@@ -82,7 +83,8 @@ func TestIntegrationLateEventArchivedBeforeTheNextUpdateIsStillFetched(t *testin
 
 	rows, _, err := query.FetchMerged(ctx, db, query.New(db), query.FetchMergedOptions{
 		Opts:   query.Options{Schema: "shop", Table: "orders", Since: &snapTime, SincePos: anchor},
-		DBName: dbName,
+		DBName:         dbName,
+		ArchiveFetcher: parquetquery.Fetch,
 	})
 	if err != nil {
 		t.Fatalf("FetchMerged: %v", err)
