@@ -641,6 +641,16 @@ jobs:
           grep -q -- '--- PASS: TestSnapshot_archivedWindow_2186 ' /tmp/mysql-it.out \
             || { echo "FATAL: _snapshot over archived hours after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestCheckNumberingContinues_2160 ' /tmp/mysql-it.out || { echo "FATAL: the binlog renumbering check did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationVerifyLiveSourceUnderWrites2150_mysql ' /tmp/mysql-it.out \
+            || { echo "FATAL: live-source verify under continuous writes did not run: is the GTID source in the shard that runs internal/streamrun? (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationVerifyLiveSourceAnchorFallbacks2150 ' /tmp/mysql-it.out \
+            || { echo "FATAL: the live-source verify anchor fallbacks test did not run: is the GTID source in the shard that runs internal/streamrun? (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationSnapshotCutWalkIsPruned2150 ' /tmp/mysql-it.out \
+            || { echo "FATAL: the live-source verify cut walk partition-pruning test did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationVerifyLiveSourceUnpausedByDefault2150 ' /tmp/mysql-it.out \
+            || { echo "FATAL: live-source verify without --pause-writes (the default) did not run: is the GTID source in the shard that runs internal/streamrun? (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationVerifyLiveSourceQuietAfterBaseline2150 ' /tmp/mysql-it.out \
+            || { echo "FATAL: live-source verify on a quiet source after a baseline did not run: is the GTID source in the shard that runs internal/streamrun? (false-green tripwire)" >&2; exit 1; }
 
       # The S3 tripwire, kept apart from the steps above so a store that did
       # not start is red even when every test passed.
@@ -867,7 +877,8 @@ jobs:
             TestIntegrationBinlogOrderRecoverAndReconstruct2156_mariadb \
             TestIntegrationLatestPerKeyBinlogOrder2156_mariadb \
             TestIntegrationRemainingSites2156_mariadb \
-            TestIntegrationCascadeBinlogOrder2156_mariadb; do
+            TestIntegrationCascadeBinlogOrder2156_mariadb \
+            TestIntegrationVerifyLiveSourceUnderWrites2150_mariadb; do
             grep -q -- "--- PASS: $name " /tmp/mariadb-it.out \
               || { echo "FATAL: $name did not run and pass in the MariaDB-source job (false-green tripwire)" >&2; exit 1; }
           done

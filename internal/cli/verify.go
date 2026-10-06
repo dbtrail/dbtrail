@@ -36,6 +36,7 @@ var (
 	vfyCheck       string
 	vfyLookback    string
 	vfyMaxEvents   int
+	vfyPauseWrites bool
 )
 
 // The --check values. checkContent is the historical behavior (reconstructed
@@ -108,6 +109,11 @@ Examples:
   bintrail verify --source-dsn "..." --index-dsn "..." \
     --baseline-s3 s3://bucket/baselines --tables mydb.orders,mydb.users
 
+  # Live-source on a stock MySQL table that keeps taking writes: pause its
+  # writes on the source for the moment each snapshot opens
+  bintrail verify --source-dsn "..." --index-dsn "..." \
+    --baseline-s3 s3://bucket/baselines --tables mydb.orders --pause-writes
+
   # Recover-input check over the last 7 days (no baseline needed)
   bintrail verify --index-dsn "..." --check recover --lookback 7d`,
 	RunE: runVerify,
@@ -124,6 +130,7 @@ func init() {
 	verifyCmd.Flags().StringVar(&vfyFormat, "format", "text", "Output format: text or json")
 	verifyCmd.Flags().StringVar(&vfyCheck, "check", checkContent, "What to verify: content (reconstructed table content vs a baseline or the live source) or recover (recover's before/after image inputs, index-only)")
 	verifyCmd.Flags().StringVar(&vfyLookback, "lookback", "30d", "--check recover only: how far back to walk each primary key's event chain (e.g. 30d, 24h)")
+	verifyCmd.Flags().BoolVar(&vfyPauseWrites, "pause-writes", false, "Live-source mode on a stock MySQL source: take LOCK TABLES <table> READ ON THE SOURCE while each table's snapshot opens, so a table that takes writes during the check can still match. Writers of that table pause while the lock is held (the time to open a snapshot and read one variable); readers never wait, and nobody waits while the lock is being asked for. Needs LOCK TABLES. Under steady writes the lock may not be granted (10 attempts of 1s) and the table is then inconclusive. Without the flag such a table must take no writes during the check. Not needed on Percona Server or MariaDB")
 	verifyCmd.Flags().IntVar(&vfyMaxEvents, "max-events", verify.DefaultRecoverInputsMaxEvents, "--check recover only: per-table cap on events loaded for the chain walk; exceeding it reports inconclusive rather than a partial check")
 	AddDuckDBTuningFlags(verifyCmd)
 }
@@ -142,6 +149,9 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 	}
 	if err := checkVerifyFlagScope(vfyCheck, vfySourceDSN, vfyExplain,
 		cmd.Flags().Changed("lookback"), cmd.Flags().Changed("max-events")); err != nil {
+		return err
+	}
+	if err := checkPauseWritesScope(vfyPauseWrites, vfySourceDSN); err != nil {
 		return err
 	}
 	baselineSrc := vfyBaselineDir
@@ -198,6 +208,9 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 		// (REPEATABLE READ + pg_current_wal_lsn, #1024). The flag value itself
 		// is not sniffed — the index is truth, same rule as everywhere else.
 		if flavor == "postgres" {
+			if vfyPauseWrites {
+				return fmt.Errorf("--pause-writes applies to a MySQL source; a PostgreSQL source is never paused, so omit it")
+			}
 			return runVerifyLivePG(cmd, indexDB, resolver, indexDBName, baselineSrc, duckTuning)
 		}
 		return runVerifyLive(cmd, indexDB, resolver, indexDBName, baselineSrc, duckTuning)
@@ -433,6 +446,7 @@ func runVerifyLive(cmd *cobra.Command, indexDB *sql.DB, resolver *metadata.Resol
 		BaselineSource: baselineSrc,
 		IndexDBName:    indexDBName,
 		NoArchive:      vfyNoArchive,
+		PauseWrites:    vfyPauseWrites,
 		ArchiveFetcher: TunedArchiveFetcher(duckTuning),
 		// Same resolved --ultrafast/--duckdb-* budget as ArchiveFetcher above,
 		// but for the baseline-merge DuckDB session VerifyTable's reconstruct
@@ -590,6 +604,15 @@ func checkVerifyFlagScope(check, sourceDSN string, explain, lookbackSet, maxEven
 	}
 	if maxEventsSet {
 		return fmt.Errorf("--max-events is only used by --check recover; --check content always compares full reconstructed content, so omit it")
+	}
+	return nil
+}
+
+// checkPauseWritesScope refuses --pause-writes outside live-source mode, the
+// only mode that reads the source (#2150).
+func checkPauseWritesScope(pause bool, sourceDSN string) error {
+	if pause && sourceDSN == "" {
+		return fmt.Errorf("--pause-writes is only used in live-source mode (with --source-dsn); omit it")
 	}
 	return nil
 }

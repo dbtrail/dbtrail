@@ -156,3 +156,27 @@ func TestRunVerify_RejectsFlagsTheCheckWouldIgnore(t *testing.T) {
 		}
 	})
 }
+
+func TestCheckPauseWritesScope(t *testing.T) {
+	if err := checkPauseWritesScope(false, ""); err != nil {
+		t.Errorf("off, no source: %v", err)
+	}
+	if err := checkPauseWritesScope(true, "u:p@tcp(h:3306)/"); err != nil {
+		t.Errorf("on, live-source: %v", err)
+	}
+	if err := checkPauseWritesScope(true, ""); err == nil || !strings.Contains(err.Error(), "--source-dsn") {
+		t.Errorf("on without a source: err = %v, want a refusal naming --source-dsn", err)
+	}
+}
+
+func TestPauseWritesFlagDefaultsOff(t *testing.T) {
+	f := verifyCmd.Flags().Lookup("pause-writes")
+	if f == nil || f.DefValue != "false" {
+		t.Fatalf("--pause-writes = %+v; want a flag that defaults to false: verify never pauses a source's writes unasked", f)
+	}
+	for _, want := range []string{"pause", "SOURCE", "LOCK TABLES", "readers never wait"} {
+		if !strings.Contains(f.Usage, want) {
+			t.Errorf("--pause-writes help does not say %q: %q", want, f.Usage)
+		}
+	}
+}

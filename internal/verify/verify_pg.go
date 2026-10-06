@@ -122,10 +122,10 @@ func pgNormalizeRenderedBytes(raw []byte) []byte {
 //     (indexCoversPG), which can PROVE coverage but not always disprove it —
 //     see pgCoverageVerdict for the honest degradation.
 //
-// The T0→T1 alignment caveat of VerifyTable applies identically: writes
-// committed between the snapshot opening and the reconstruct's Until surface
-// as a (safe, conclusive) mismatch — run against a quiescent source,
-// off-peak.
+// Unlike VerifyTable since #2150, the reconstruction is NOT cut at the
+// snapshot's position: writes committed between the snapshot opening and the
+// reconstruct's Until surface as a (safe, conclusive) mismatch, so the table
+// must take no writes during the read. #2198 tracks the PG cut.
 func VerifyTablePG(ctx context.Context, cfg PGLiveConfig, schema, table string) (TableResult, error) {
 	res := TableResult{Schema: schema, Table: table}
 

@@ -239,6 +239,23 @@ func listCutBound(ctx context.Context, db *sql.DB, at time.Time) (*cutBound, err
 	return &cutBound{keep: keep}, nil
 }
 
+// PartitionsAtOrAfter returns the PARTITION (...) clause naming the
+// binlog_events partitions that can hold an event stamped at or after at, and
+// those names, for a reader bounded by a timestamp floor that MySQL's own
+// pruning would not bound (it keeps the oldest partition, #1692). The clause
+// is "" for an unpartitioned table. The layout can move under the reader
+// (rotation's REORGANIZE of p_future, see firstEventPast): a caller that must
+// not miss a row lists again afterwards and compares the names. An error, or
+// a partition name this build does not recognise, is returned as an error;
+// the caller then reads without the clause.
+func PartitionsAtOrAfter(ctx context.Context, db *sql.DB, at time.Time) (clause string, names []string, err error) {
+	b, err := listCutBound(ctx, db, at)
+	if err != nil {
+		return "", nil, err
+	}
+	return b.clause(), b.partitions(), nil
+}
+
 // maxCutBoundAttempts caps the bounded searches firstEventPast runs before it
 // gives up on the bound. A search whose candidate set moved underneath it is
 // retried on the new set. One rotation run changes the layout several times

@@ -72,6 +72,22 @@ type TableChecksum struct {
 	// anchor in GTIDSet). It carries the same lock-free-window caveat as
 	// GTIDSet: pg_current_wal_lsn is global state, not MVCC-filtered.
 	LSN uint64
+	// Anchor says how GTIDSet is tied to the snapshot (#2150): AnchorNative
+	// or AnchorTableLock when it is the snapshot's exact position; "" when it
+	// is the set read just after the snapshot opened, which can differ from
+	// the snapshot by the transactions committing at that moment. Set only by
+	// ConsistentTableChecksumAnchored.
+	Anchor string
+	// AnchorLockRefused: an exact anchor needed LOCK TABLES on the table and
+	// the account may not take it, so Anchor is "".
+	AnchorLockRefused bool
+	// AnchorLockNotRequested: an exact anchor needed the table lock and
+	// AnchorOptions.PauseWrites was not set, so Anchor is "".
+	AnchorLockNotRequested bool
+	// GTIDMode is the source's @@gtid_mode when it is not ON (MySQL; "" when
+	// ON, on MariaDB, or when not read). A set read under any other mode is
+	// not anchored.
+	GTIDMode string
 	// Columns is the ordered set of column names the digest was computed over
 	// (ordinal order, generated columns excluded). A consumer that recomputes a
 	// digest to compare (the verify capstone #634) must hash exactly this set in
@@ -105,7 +121,7 @@ type TableChecksum struct {
 // Generated columns (VIRTUAL/STORED) are excluded: mydumper does not dump them,
 // so they are absent from the baseline Parquet and must be absent here too.
 func ConsistentTableChecksum(ctx context.Context, db *sql.DB, schema, table string) (TableChecksum, error) {
-	return consistentTableChecksum(ctx, db, schema, table, nil)
+	return consistentTableChecksum(ctx, db, schema, table, nil, nil)
 }
 
 // ConsistentTableChecksumNormalized is ConsistentTableChecksum with an extra
@@ -133,10 +149,32 @@ func ConsistentTableChecksum(ctx context.Context, db *sql.DB, schema, table stri
 // normalize, since their digest is compared against ANOTHER raw, unnormalized
 // rendering of the same contract, not against a reconstruct digest.
 func ConsistentTableChecksumNormalized(ctx context.Context, db *sql.DB, schema, table string, normalize func(raw []byte, dataType string) []byte) (TableChecksum, error) {
-	return consistentTableChecksum(ctx, db, schema, table, normalize)
+	return consistentTableChecksum(ctx, db, schema, table, normalize, nil)
 }
 
-func consistentTableChecksum(ctx context.Context, db *sql.DB, schema, table string, normalize func(raw []byte, dataType string) []byte) (TableChecksum, error) {
+// AnchorOptions are the choices ConsistentTableChecksumAnchored takes.
+type AnchorOptions struct {
+	// PauseWrites allows, on a server with no snapshot position of its own
+	// (stock MySQL), LOCK TABLES <table> READ while the snapshot opens: writes
+	// to that table on the source wait for as long as the lock is held (the
+	// time to open a snapshot and read one variable); reads never wait, and
+	// nobody waits while the lock is being asked for. Off by default:
+	// production writes are paused only when the caller asked for it. Without
+	// it such a server's snapshot is not anchored
+	// (TableChecksum.AnchorLockNotRequested).
+	PauseWrites bool
+}
+
+// ConsistentTableChecksumAnchored is ConsistentTableChecksumNormalized whose
+// GTIDSet is the snapshot's exact position where the server allows it (see
+// openAnchoredSnapshot and TableChecksum.Anchor) (#2150). On stock MySQL that
+// takes a brief read lock on the table, only with opts.PauseWrites;
+// ErrAnchorBusy means the lock could not be had, and no scan ran.
+func ConsistentTableChecksumAnchored(ctx context.Context, db *sql.DB, schema, table string, normalize func(raw []byte, dataType string) []byte, opts AnchorOptions) (TableChecksum, error) {
+	return consistentTableChecksum(ctx, db, schema, table, normalize, &opts)
+}
+
+func consistentTableChecksum(ctx context.Context, db *sql.DB, schema, table string, normalize func(raw []byte, dataType string) []byte, anchored *AnchorOptions) (TableChecksum, error) {
 	res := TableChecksum{Schema: schema, Table: table}
 
 	conn, err := db.Conn(ctx)
@@ -165,21 +203,31 @@ func consistentTableChecksum(ctx context.Context, db *sql.DB, schema, table stri
 	}
 
 	// Open the consistent snapshot. Everything below reads the same view.
-	if _, err := conn.ExecContext(ctx, "START TRANSACTION WITH CONSISTENT SNAPSHOT"); err != nil {
-		return res, fmt.Errorf("start consistent snapshot: %w", err)
-	}
 	committed := false
 	defer func() {
 		if !committed {
-			// Read-only transaction; rollback is best-effort cleanup.
+			// Read-only transaction; rollback is best-effort cleanup (also
+			// when the snapshot never opened: a ROLLBACK outside a
+			// transaction is a no-op).
 			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
-
-	// Capture the GTID anchor inside the snapshot.
-	res.GTIDSet, res.GTIDFlavor, err = capturedGTID(ctx, conn)
-	if err != nil {
-		return res, err
+	if anchored != nil {
+		a, err := openAnchoredSnapshot(ctx, db, conn, schema, table, *anchored)
+		if err != nil {
+			return res, err
+		}
+		res.GTIDSet, res.GTIDFlavor, res.Anchor, res.AnchorLockRefused, res.GTIDMode = a.set, a.flavor, a.method, a.lockRefused, a.gtidMode
+		res.AnchorLockNotRequested = a.lockNotRequested
+	} else {
+		if err := startSnapshot(ctx, conn); err != nil {
+			return res, err
+		}
+		// Capture the GTID anchor inside the snapshot.
+		res.GTIDSet, res.GTIDFlavor, err = capturedGTID(ctx, conn)
+		if err != nil {
+			return res, err
+		}
 	}
 
 	// Introspect the non-generated columns, in ordinal order.

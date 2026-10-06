@@ -620,6 +620,10 @@ func (s *verifySupervisor) runLiveSource(req console.VerifyRequest, indexDB *sql
 		SourceDB: sourceDB, IndexDB: indexDB, Resolver: resolver,
 		BaselineSource: baselineSrc, IndexDBName: dbName,
 		NoArchive: req.NoArchive, ArchiveFetcher: parquetquery.Fetch,
+		// PauseWrites stays off (#2150): the console has no per-run option
+		// to ask for pausing a production table's writes, and verify never
+		// pauses them unasked. On stock MySQL the result says the table must
+		// take no writes during the read.
 	}
 	for _, st := range tables {
 		// See runBaselineAnchored: a shutdown mid-run fails the run loudly.

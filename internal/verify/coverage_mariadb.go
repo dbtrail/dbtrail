@@ -61,7 +61,7 @@ func indexCoversMariaDB(ctx context.Context, indexDB *sql.DB, srcPos string) (bo
 	// its first transaction. The source position is not empty (checked above),
 	// so the index is behind. The --reset advice would record a false loss.
 	if strings.TrimSpace(idxGTID.String) == "" {
-		return false, fmt.Sprintf("index is behind the source snapshot: the capture has recorded no transaction yet (snapshot %s); re-run once DBTrail catches up",
+		return false, fmt.Sprintf(indexBehind+": the capture has recorded no transaction yet (snapshot %s); re-run once DBTrail catches up",
 			srcPos)
 	}
 	idx, err := parser.ParseMariaDBPosition(idxGTID.String)
@@ -70,7 +70,7 @@ func indexCoversMariaDB(ctx context.Context, indexDB *sql.DB, srcPos string) (bo
 	}
 	for domain, want := range src {
 		if have, ok := idx[domain]; !ok || have.SequenceNumber < want.SequenceNumber {
-			return false, fmt.Sprintf("index is behind the source snapshot (indexed %s does not contain snapshot %s); re-run once DBTrail catches up",
+			return false, fmt.Sprintf(indexBehind+" (indexed %s does not contain snapshot %s); re-run once DBTrail catches up",
 				idxGTID.String, srcPos)
 		}
 	}

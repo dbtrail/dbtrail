@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **`verify --source-dsn` works on a table that takes writes during the
+  check** (#2150). The reconstruction was cut at the time the source scan
+  ended, so every write committed while the table was read showed as a
+  MISMATCH. It is now cut at the snapshot's own position: the GTID set the
+  snapshot holds, turned into a binlog coordinate from the index. The
+  position is exact where the server can give it: Percona Server and MariaDB
+  report their own snapshot position (no lock); on MySQL with GTIDs on, only
+  with the new opt-in `--pause-writes` flag, a `LOCK TABLES <table> READ` on
+  a second connection is held while the snapshot opens: writers of that one
+  table on the source wait while it is held (the time to open a snapshot and
+  read one variable), readers never wait, and nobody waits while it is being
+  asked for. `FLUSH TABLES ... WITH READ LOCK` is never used: measured, after
+  it gives up behind a long `SELECT` it leaves new readers of the table
+  waiting until that `SELECT` ends.
+  Without the flag (the default, and always in the web console) a stock
+  MySQL source is compared as before. Measured: on MySQL 8.0 and 8.4 a
+  snapshot can see transactions `@@gtid_executed` does not list yet, even
+  when the set read before and after opening it is the same, so that read
+  is never taken as exact. The lock is asked for up to 10 times, 1 second
+  each; a table it never gets (steady writes can keep it from being granted)
+  is **inconclusive**, never compared against a guessed position. Without `--pause-writes` or `LOCK TABLES` on stock MySQL, with `gtid_mode` other than `ON`, or on PostgreSQL
+  (#2198), the read is cut by time as before and the result says the table
+  must take no writes during the read. Each table also waits up to a
+  minute for a running capture to reach the snapshot it read, instead of
+  reporting "index is behind" at once (once per run: after one table waited
+  the whole minute without the capture's saved position moving, later
+  tables do not wait again); and the baseline it starts from is the newest
+  one taken before the read, not one taken during it.
 - **A binlog-renumbering check that cannot tell is no longer silent
   (behavior change for scripts)** (#2186). When the check cannot tell whether the source's binary log
   started again after the snapshot (the event the snapshot's mark names was
