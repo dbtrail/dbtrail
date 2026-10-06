@@ -379,6 +379,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filter, so a new-numbering change in it is dropped. On an index that
   `bintrail index` also wrote into the numbering is not checked (a warning,
   logged once).
+- **`reconstruct --at <past>` no longer refuses because the source's binary
+  log started again after that time** (#2182). Full-table `reconstruct` ran
+  the check from #2160 over the whole index, so a `RESET MASTER` (`RESET
+  BINARY LOGS AND GTIDS`) or a failover to another server AFTER `--at`
+  refused a reconstruction whose changes were all captured before it. With
+  `--at`, the check now looks only at what the read up to `--at` sees, as
+  `verify` and `_snapshot` do: a change of the table that sorts before the
+  snapshot's mark and was recorded up to `--at`, or capture moving to
+  another server at or before `--at`. Without `--at`, and for snapshot
+  updates, the check is unchanged. A snapshot an update wrote without naming
+  the server capture read keeps refusing after a later move to another
+  server.
 - **The binlog-renumbering check no longer switches itself off when it cannot
   read `index_state`** (#2178). A failed read of that table (a denied
   `SELECT`, a lock wait timeout, a dropped connection) counted as "`bintrail

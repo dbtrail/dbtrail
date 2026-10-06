@@ -105,6 +105,13 @@ type FullTableConfig struct {
 	At          time.Time // target point-in-time
 	OutputDir   string    // output root: the mydumper dump directory, or the baselines root under OutputFormatParquet
 	ChunkSize   int64     // per-chunk SQL file size (0 → 256 MiB)
+	// ExplicitAt says At is a point in the past a person asked for
+	// (`bintrail reconstruct --at`), not the time a refresh runs to. The
+	// binlog-renumbering and server checks then look only at what the read up
+	// to At can see (ReadWindow, #2182): a restart or a move to another
+	// server recorded after At leaves that read whole. Unset (every refresh,
+	// and the command without --at), they check the whole index, as before.
+	ExplicitAt bool
 	// SpaceCheck, when set, is called right before a file is created, with its
 	// directory and the bytes it is expected to need: before each SQL chunk
 	// (the chunk size), and before a table's Parquet file (the size of the
@@ -1350,7 +1357,13 @@ func ReconstructTable(
 	// a new numbering cannot be compared, so no flag can make it readable. A
 	// proven renumbering names its own remedy (a new full snapshot) rather
 	// than the gap message's flag. See renumbered.go.
-	if err := CheckNumberingFrom(ctx, db, AnchorOf(anchorMeta), anchorMeta.EventMark, ReadWindow{}); err != nil {
+	// An explicit --at bounds both checks by the read: this table, from
+	// fetchSince to At (#2182). A refresh keeps the whole-index check.
+	var readWin ReadWindow
+	if cfg.ExplicitAt {
+		readWin = ReadWindow{Schema: schema, Table: table, Since: fetchSince, Until: cfg.At}
+	}
+	if err := CheckNumberingFrom(ctx, db, AnchorOf(anchorMeta), anchorMeta.EventMark, readWin); err != nil {
 		return nil, err
 	}
 	// For a snapshot whose mark names no server (written before marks did),
@@ -1361,8 +1374,19 @@ func ReconstructTable(
 	// position was read from whatever server answered when the dump ran,
 	// which that record's time cannot tell (capture may notice the new
 	// server only after the dump), so it is not compared.
+	// Under an explicit --at, a mark that names the server (the check above
+	// already asked whether capture left it by At) bounds this one by At too:
+	// only a server change recorded up to At, such as a failover and a
+	// failback that both came before it, can touch the read. A mark that
+	// names no server says nothing about which server the position belongs
+	// to, so it keeps the whole-index form, as verify and _snapshot keep the
+	// no-mark behavior (#2174).
 	if anchorMeta.Producer == baseline.ProducerReconstruct {
-		if err := CheckSourceReplaced(ctx, db, fetchSince); err != nil {
+		until := time.Time{}
+		if m := ParseEventMark(anchorMeta.EventMark); cfg.ExplicitAt && m != nil && m.ServerUUID != "" {
+			until = cfg.At
+		}
+		if err := checkSourceReplaced(ctx, db, fetchSince, until); err != nil {
 			return nil, err
 		}
 	}

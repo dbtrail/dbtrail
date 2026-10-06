@@ -610,6 +610,8 @@ jobs:
           grep -q -- '--- PASS: TestStreamLoop_unmappableRowReachesThePersistedLedger ' /tmp/mysql-it.out || { echo "FATAL: unmappable-row skip ledger test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestRefresh_afterTheBinlogNumberingStartsOver_refusesUntilAFullSnapshot ' /tmp/mysql-it.out \
             || { echo "FATAL: the refresh after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestRunReconstruct_atBeforeABinlogRenumbering_2182 ' /tmp/mysql-it.out \
+            || { echo "FATAL: reconstruct --at before a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestSnapshot_afterTheBinlogNumberingStartsOver_2174 ' /tmp/mysql-it.out \
             || { echo "FATAL: _snapshot after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestVerifyBaselinePair_afterTheBinlogNumberingStartsOver_2174 ' /tmp/mysql-it.out \
