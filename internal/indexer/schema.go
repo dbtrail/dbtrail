@@ -196,6 +196,7 @@ const ddlStreamState = `CREATE TABLE IF NOT EXISTS stream_state (
     server_id        INT UNSIGNED    NOT NULL,
     bintrail_id      CHAR(36)        NULL DEFAULT NULL,
     source_identity  VARCHAR(64)     DEFAULT NULL COMMENT 'server the checkpoint binlog coordinates belong to: MySQL @@server_uuid, MariaDB server_id:<n> (#2171); binlog file numbers are compared only between checkpoints of one identity; NULL = unknown (older build)',
+    binlog_file_identity VARCHAR(64) DEFAULT NULL COMMENT 'identity of the binlog file the checkpoint names (#2172): fde:<creation time>:<server_id> from its FORMAT_DESCRIPTION event; a position-mode resume reads the file under that name again and treats a different identity as a renumbered binary log; NULL = unknown (older build, or not seen yet)',
     gap_lost_at      DATETIME        DEFAULT NULL COMMENT 'when an unfillable binlog gap forced an auto-advance (events permanently lost); cleared only by an explicit monitor Stop; --reset re-stamps or preserves it',
     gap_lost_detail  TEXT            DEFAULT NULL COMMENT 'human-readable description of the lost gap',
     source_health    JSON            DEFAULT NULL COMMENT 'latest source-side health snapshot (PostgreSQL: replication-slot wal_status/lag + REPLICA IDENTITY coverage) with an embedded checked_at; serialized payload, source-agnostic column',
