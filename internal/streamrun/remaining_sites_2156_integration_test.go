@@ -94,6 +94,10 @@ func runRemainingSites2156(t *testing.T, flavor, sourceDSN string, sourceDB, ind
 	hour := time.Now().UTC().Truncate(time.Hour)
 	testutil.SetupPartitionedTable(t, indexDB, indexName, []time.Time{hour.Add(-time.Hour), hour, hour.Add(time.Hour)})
 	since := time.Now().UTC().Add(-time.Minute)
+	// A snapshot of the table before the shapes, so the one-row `_snapshot`
+	// read takes its baseline path (without one it is the `_flashback` read).
+	snapTime := time.Now().UTC().Truncate(time.Second).Add(-time.Second)
+	baselineDir := latestPerKey2156Baseline(t, snapTime, sourceName)
 
 	captureWhile(t, flavor, sourceDSN, sourceDB, indexDB, sourceName, 8, func() { order2156Shapes(t, sourceDB) })
 	if got := order2156Table(t, sourceDB); got != latestPerKey2156After {
@@ -110,7 +114,7 @@ func runRemainingSites2156(t *testing.T, flavor, sourceDSN string, sourceDB, ind
 	asOf := time.Now().UTC().Add(time.Second)
 	at := asOf.Format("2006-01-02 15:04:05")
 	newShim := func() *shim.Handler {
-		h := shim.NewHandlerWithConfig(indexDB, shim.Config{AllowGaps: true, NoArchive: true, IndexDBName: indexName}, slog.Default())
+		h := shim.NewHandlerWithConfig(indexDB, shim.Config{AllowGaps: true, NoArchive: true, IndexDBName: indexName, BaselineDir: baselineDir}, slog.Default())
 		if err := h.UseDB(sourceName); err != nil {
 			t.Fatalf("UseDB: %v", err)
 		}
@@ -173,8 +177,17 @@ func runRemainingSites2156(t *testing.T, flavor, sourceDSN string, sourceDB, ind
 		if _, err := h.HandleQuery("SELECT * FROM _flashback.t AS OF '" + at + "'"); err == nil || !strings.Contains(err.Error(), "more than 2 rows") {
 			t.Fatalf("over the cap: err = %v, want the 1104 refusal", err)
 		}
-		if got, _ := remaining2156Read(t, h, "SELECT * FROM _flashback.t AS OF '"+at+"' LIMIT 2"); strings.Count(got, "=") != 2 {
+		// LIMIT 2 reads two rows' latest changes; a row whose latest change
+		// is a DELETE (row 2) takes its place and is not answered, as before.
+		got, _ = remaining2156Read(t, h, "SELECT * FROM _flashback.t AS OF '"+at+"' LIMIT 2")
+		rows := strings.Split(got, ",")
+		if got == "" || len(rows) > 2 {
 			t.Fatalf("LIMIT 2 answered %q", got)
+		}
+		for _, r := range rows {
+			if !slices.Contains(strings.Split(latestPerKey2156After, ","), r) {
+				t.Fatalf("LIMIT 2 answered %q: %s is not what the database holds", got, r)
+			}
 		}
 	})
 
@@ -194,6 +207,12 @@ func runRemainingSites2156(t *testing.T, flavor, sourceDSN string, sourceDB, ind
 		}
 		if len(warnings) != 3 || !strings.HasPrefix(warnings[0], "order of changes unproven: ") {
 			t.Fatalf("SHOW WARNINGS = %q, want one note for each of rows 1-3", warnings)
+		}
+	})
+	t.Run("_snapshot single row, order unproven", func(t *testing.T) {
+		got, warnings := singleRows(t, "_snapshot")
+		if want := "1=wait-A,2=upd-A,3=<none>,9=nine-2"; got != want || len(warnings) != 3 {
+			t.Fatalf("answers %s with warnings %q, want the statement-time answer %s and one note for each of rows 1-3", got, warnings, want)
 		}
 	})
 	t.Run("_flashback full table, order unproven", func(t *testing.T) {
