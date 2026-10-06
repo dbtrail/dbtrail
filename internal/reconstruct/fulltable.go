@@ -1366,22 +1366,18 @@ func ReconstructTable(
 	// of the first change past At, and after a restart past At that position
 	// is in the new numbering, where it sorts before changes the read needs.
 	boundedAt := cfg.ExplicitAt && cfg.OutputFormat != OutputFormatParquet
-	if boundedAt {
-		// The bounded form reads only the live binlog_events; once rotation
-		// took part of the read's reach out of it (into the archives, which
-		// the read takes with the same position filter), it would look at
-		// nothing there. The whole-index form then stays.
-		live, err := liveHoldsRead(ctx, db, dbName, query.Options{Schema: schema, Table: table, Since: &fetchSince, SincePos: AnchorOf(anchorMeta)})
-		if err != nil {
-			return nil, err
-		}
-		boundedAt = live
+	numberingCheck := func(w ReadWindow) error {
+		return CheckNumberingFrom(ctx, db, AnchorOf(anchorMeta), anchorMeta.EventMark, w)
 	}
-	var readWin ReadWindow
 	if boundedAt {
-		readWin = ReadWindow{Schema: schema, Table: table, Since: fetchSince, Until: cfg.At}
+		// Bounded only while the live binlog_events holds all the read
+		// reaches, before and after the check (checkNumberingForRead).
+		boundedAt, err = checkNumberingForRead(ctx, db, dbName,
+			query.Options{Schema: schema, Table: table, Since: &fetchSince, SincePos: AnchorOf(anchorMeta)}, cfg.At, numberingCheck)
+	} else {
+		err = numberingCheck(ReadWindow{})
 	}
-	if err := CheckNumberingFrom(ctx, db, AnchorOf(anchorMeta), anchorMeta.EventMark, readWin); err != nil {
+	if err != nil {
 		return nil, err
 	}
 	// For a snapshot whose mark names no server (written before marks did),
@@ -1399,8 +1395,9 @@ func ReconstructTable(
 	// names no server says nothing about which server the position belongs
 	// to, so it keeps the whole-index form, as verify and _snapshot keep the
 	// no-mark behavior (#2174).
-	// The record's time is when capture noticed the new server, which can be
-	// after the switch: changes the new server made before At and before that
+	// The record's time is when capture noticed the new server (at stream
+	// start, not when the binlog connection reconnects on its own to the same
+	// address), which can be long after the switch: changes the new server made before At and before that
 	// record are still read, and the position checks above see them when the
 	// new server's files sort below the mark; when they sort above it, the
 	// read by position includes them.
