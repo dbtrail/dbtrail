@@ -3,6 +3,7 @@ package streamrun
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 )
 
@@ -362,7 +364,8 @@ func mariadbRenumberedError(r *gtidRenumbering) error {
 	return &SourceRenumberedError{msg: fmt.Sprintf(
 		"cannot resume capture: %s. Nothing was deleted from the index. To resume, restart capture once with "+
 			"--reset --start-file %s --start-pos 4: it reads the source's new numbering from its first transaction "+
-			"(in position mode) and records the jump as a capture loss. To return to GTID mode later, stop capture, "+
+			"(in position mode) and records the jump as a capture loss. To return to GTID mode later, stop capture cleanly (the switch of mode skips the resume cleanup, so rows "+
+			"indexed after the last checkpoint would be indexed again), "+
 			"read its checkpoint (the Position line of bintrail status: binlog file and position), and restart once with --start-gtid "+
 			"set to what SELECT BINLOG_GTID_POS('<file>', <position>) returns on the source for that checkpoint. "+
 			"--reset alone also resumes, from the source's current position, and skips everything the source wrote "+
@@ -388,6 +391,12 @@ func detectGTIDRenumbering(sourceDB *sql.DB, flavor, savedSet, file string, pos 
 			return logs, nil
 		}
 		if sameServer {
+			var me *mysqldriver.MySQLError
+			if errors.As(err, &me) && (me.Number == 1227 || me.Number == 1045) {
+				return nil, fmt.Errorf("%w; the source account lacks REPLICATION CLIENT (MariaDB: BINLOG MONITOR), which "+
+					"the GTID history check needs for SHOW BINARY LOGS on every GTID-mode restart: grant it to the "+
+					"capture user", err)
+			}
 			return nil, fmt.Errorf("%w; the GTID history check needs the source's binary log list, retry once the source answers SHOW BINARY LOGS", err)
 		}
 		slog.Warn("could not list the source's binary logs; a restart after a GTID renumbering will not name its first file",
@@ -431,12 +440,26 @@ func detectGTIDRenumbering(sourceDB *sql.DB, flavor, savedSet, file string, pos 
 // source_identity: @@server_uuid on MySQL, "server_id:<n>" on MariaDB (which
 // has no server_uuid; servers that replicate from each other must have
 // distinct server_ids). Two checkpoints with the same identity were read from
-// one server, whose binlog file numbers can be compared.
+// one server, whose binlog file numbers can be compared. A Galera node
+// (wsrep_on=ON) gets none: its nodes may share server_id and GTIDs while each
+// numbers its own binlog files, so nothing here tells them apart, and no
+// identity means no file comparison.
 func sourceIdentity(ctx context.Context, sourceDB *sql.DB, flavor string) (string, error) {
 	if flavor == gomysql.MariaDBFlavor {
 		var id uint32
 		if err := sourceDB.QueryRowContext(ctx, "SELECT @@server_id").Scan(&id); err != nil {
 			return "", fmt.Errorf("query @@server_id: %w", err)
+		}
+		// SHOW VARIABLES, not @@wsrep_on: a server built without wsrep has no
+		// such variable, and that must read as OFF, not as an error.
+		var name, wsrep string
+		err := sourceDB.QueryRowContext(ctx, "SHOW GLOBAL VARIABLES LIKE 'wsrep_on'").Scan(&name, &wsrep)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+		case err != nil:
+			return "", fmt.Errorf("query wsrep_on: %w", err)
+		case strings.EqualFold(strings.TrimSpace(wsrep), "ON"):
+			return "", nil
 		}
 		return fmt.Sprintf("server_id:%d", id), nil
 	}

@@ -335,7 +335,10 @@ or replayed:
   `--reset --start-file <the source's oldest binary log> --start-pos 4`, which
   captures the new numbering from its first transaction (in position mode) and
   records the jump as a capture loss. To return to GTID mode later, stop
-  capture, read its checkpoint (the `Position` line of `bintrail
+  capture cleanly first (a graceful stop writes a final checkpoint; the switch
+  of mode skips the resume cleanup, which only runs when the mode stays the
+  same, so rows indexed after the last checkpoint would be indexed again),
+  read its checkpoint (the `Position` line of `bintrail
   status`), and restart once with `--start-gtid` set to what
   `SELECT BINLOG_GTID_POS('<file>', <position>)` returns on the source. Not the
   source's current `@@gtid_binlog_pos`: that skips what the source wrote since
@@ -362,12 +365,22 @@ it went backwards. Cases this check cannot see:
   part of the old history looks like a lagging replica.
 - Group Replication / InnoDB Cluster: transactions carry the group's UUID, not
   the member's `server_uuid`, so only the "no shared history" case applies.
+- MariaDB Galera (`wsrep_on=ON`): nodes can share `server_id` and GTIDs while
+  each numbers its own binlog files, so a Galera node records no identity and
+  its files are never compared.
+- The identity is read once, when capture starts, while the replication client
+  reconnects by itself during a run. A failover to B and back to A behind one
+  address within a single run can file B's positions under A's identity; the
+  restart on A then reads them as a numbering that started over: a false
+  capture-loss stamp and duplicates from A's oldest binlog, nothing deleted.
 - When the checkpoint was written against another server, or by an older
   build that did not record the source's identity, there is no binary-log
   comparison.
 
 When the comparison applies and `SHOW BINARY LOGS` fails, capture does not
-start (retry); it never decides without the list.
+start (retry); it never decides without the list. That makes `REPLICATION
+CLIENT` (MariaDB: `BINLOG MONITOR`) required for every GTID-mode restart, as
+the privilege table above lists; without it the error names the grant.
 
 The restart reads the source's binary log from its oldest file, which after a
 reset holds only GTID transactions. A source that was not reset but lost the

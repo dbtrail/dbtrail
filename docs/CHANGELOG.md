@@ -220,7 +220,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are compared only against a checkpoint read from the same server: each
   checkpoint now records the source's identity (`stream_state.source_identity`,
   added on startup). On MariaDB the restart refuses, deletes nothing, and the
-  error gives the command that resumes.
+  error gives the command that resumes. **Upgrade note:** a GTID-mode restart
+  now runs `SHOW BINARY LOGS`, so the capture account needs `REPLICATION
+  CLIENT` (MariaDB: `BINLOG MONITOR`), as the documented privileges already
+  say; an account with only `REPLICATION SLAVE` stops with an error naming
+  the grant.
 - **Capture no longer deletes indexed changes after `RESET MASTER` on a
   source captured by binlog position (#2170).** When the source's binary log
   starts over (`RESET MASTER`, `RESET BINARY LOGS AND GTIDS`), the stream

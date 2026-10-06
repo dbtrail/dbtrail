@@ -1,12 +1,14 @@
 package streamrun
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 const (
@@ -313,5 +315,54 @@ func TestDetectGTIDRenumbering_gtidModeNotOn(t *testing.T) {
 	r, err := detectGTIDRenumbering(db, "mysql", uuidOwn+":1-10", "binlog.000004", 500, uuidOwn, uuidOwn, time.Second)
 	if err != nil || r != nil {
 		t.Fatalf("got verdict %v, err %v; want neither", r, err)
+	}
+}
+
+// An account without REPLICATION CLIENT (MariaDB: BINLOG MONITOR) cannot run
+// SHOW BINARY LOGS. Retrying never helps, so the error names the grant.
+func TestDetectGTIDRenumbering_logListDenied(t *testing.T) {
+	for _, code := range []uint16{1227, 1045} {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		mock.ExpectQuery("SELECT @@GLOBAL.gtid_mode").WillReturnRows(
+			sqlmock.NewRows([]string{"m", "u", "e", "p"}).AddRow("ON", uuidOwn, uuidOwn+":1-20", ""))
+		mock.ExpectQuery("SHOW BINARY LOGS").WillReturnError(&mysqldriver.MySQLError{Number: code, Message: "Access denied"})
+		_, err = detectGTIDRenumbering(db, "mysql", uuidOwn+":1-10", "binlog.000004", 500, uuidOwn, uuidOwn, time.Second)
+		db.Close()
+		if err == nil || !strings.Contains(err.Error(), "REPLICATION CLIENT") || !strings.Contains(err.Error(), "BINLOG MONITOR") ||
+			strings.Contains(err.Error(), "retry") {
+			t.Errorf("error %d: got %v, want it to name the missing grant and not say retry", code, err)
+		}
+	}
+}
+
+// MariaDB Galera (wsrep_on=ON): every node may share server_id and GTIDs
+// while numbering its own binlog files, so the identity cannot tell nodes
+// apart and file numbers must not be compared: no identity.
+func TestSourceIdentity_mariadb(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		rows *sqlmock.Rows
+		want string
+	}{
+		{"plain server", sqlmock.NewRows([]string{"Variable_name", "Value"}), "server_id:2"},
+		{"wsrep off", sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("wsrep_on", "OFF"), "server_id:2"},
+		{"galera node", sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("wsrep_on", "ON"), ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			mock.ExpectQuery("SELECT @@server_id").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(2))
+			mock.ExpectQuery("SHOW GLOBAL VARIABLES LIKE 'wsrep_on'").WillReturnRows(c.rows)
+			got, err := sourceIdentity(context.Background(), db, "mariadb")
+			if err != nil || got != c.want {
+				t.Errorf("sourceIdentity = %q, %v; want %q", got, err, c.want)
+			}
+		})
 	}
 }
