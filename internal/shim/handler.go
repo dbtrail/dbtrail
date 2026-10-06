@@ -163,10 +163,13 @@ type Handler struct {
 	// freeSQL, when non-nil, serves ordinary statements over the Parquet
 	// copy (see freesql.go); freeSQLWhyNot is the reason shown when it is
 	// nil and one is known. lastWarnings is what SHOW WARNINGS answers
-	// after a free-SQL result with cells cut at the cell cap; guarded by mu.
-	freeSQL       FreeSQL
-	freeSQLWhyNot string
-	lastWarnings  []string
+	// after a free-SQL result with cells cut at the cell cap, or after a
+	// `_snapshot` read whose order of changes is unproven (#2156), each with
+	// lastWarningCode; guarded by mu.
+	freeSQL         FreeSQL
+	freeSQLWhyNot   string
+	lastWarnings    []string
+	lastWarningCode uint16
 	// sessVars is what this connection SET for itself (time_zone, sql_mode,
 	// sql_select_limit) while free SQL is bound: applied to every statement
 	// on the copy and, with no router, answered by SELECT @@... (#2035, see
@@ -542,6 +545,18 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 			}
 			return h.showWarnings()
 		}
+		h.setWarnings(nil)
+	} else if showWarningsRE.MatchString(qstr) {
+		// Without free SQL the one warning is a `_snapshot` note (#2156).
+		// With none pending SHOW WARNINGS stays the handshake noise it
+		// always was below.
+		h.mu.Lock()
+		pending := len(h.lastWarnings) > 0
+		h.mu.Unlock()
+		if pending {
+			return h.showWarnings()
+		}
+	} else {
 		h.setWarnings(nil)
 	}
 

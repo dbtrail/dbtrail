@@ -45,6 +45,16 @@ func TestPerPKSatisfiedLive(t *testing.T) {
 			why:  "the trim keeps this row and discards every older archived one",
 		},
 		{
+			// #2156: the latest N in binary log order can be an archived
+			// change whose statement started before the live floor.
+			name: "the latest N in binary log order (LatestPerPKCandidates)",
+			opts: Options{LimitPerPK: 1, PKValues: "42", LatestPerPKCandidates: true},
+			rows: pkRowsAt("42", 1, inside),
+			plan: &QueryPlan{ArchivesBelowLive: true, MySQLRanges: []TimeRange{live}},
+			want: false,
+			why:  "an archived change can be later in the binary log than every live one",
+		},
+		{
 			// #2007: a system-versioned lookup adds spellings (key plus
 			// each current marker). The trim is per stored spelling, and
 			// an added spelling with no live row (the other server

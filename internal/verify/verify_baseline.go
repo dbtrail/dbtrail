@@ -92,6 +92,23 @@ func baselineFetchOptions(p BaselinePair, pg bool) query.Options {
 	return opts
 }
 
+// baselineFetchMerged is the fetch of baselineFetchOptions, shared by
+// VerifyBaselinePair and ExplainBaselinePairMismatch so the drill-down sees
+// the rows the verdict saw. A MySQL or MariaDB pair takes each row's latest
+// change in binary log order where the index can show it (#2156); order
+// receives what was decided. PostgreSQL keeps the fetch it always had: its
+// change times are commit times.
+func baselineFetchMerged(cfg BaselineConfig, p BaselinePair, pg bool, order *query.LatestPerPKOrder) query.FetchMergedOptions {
+	return query.FetchMergedOptions{
+		Opts:           baselineFetchOptions(p, pg),
+		DBName:         cfg.IndexDBName,
+		NoArchive:      cfg.NoArchive,
+		ArchiveFetcher: cfg.ArchiveFetcher,
+		LatestInBinlog: !pg,
+		LatestOrder:    order,
+	}
+}
+
 // BaselinePair is one table's previous + new baseline, with the new baseline's
 // recorded binlog anchor and the previous baseline's snapshot time — everything
 // VerifyBaselinePair needs to reconstruct prev→anchor and compare to new.
@@ -278,13 +295,8 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 	// lower-bound artifact. A reported MATCH is unaffected either way (a too-wide
 	// lower bound can only add a superseded older event, never drop a real one).
 	engine := query.New(cfg.IndexDB)
-	fetchOpts := baselineFetchOptions(p, pg)
-	rows, _, err := query.FetchMerged(ctx, cfg.IndexDB, engine, query.FetchMergedOptions{
-		Opts:           fetchOpts,
-		DBName:         cfg.IndexDBName,
-		NoArchive:      cfg.NoArchive,
-		ArchiveFetcher: cfg.ArchiveFetcher,
-	})
+	var order query.LatestPerPKOrder
+	rows, _, err := query.FetchMerged(ctx, cfg.IndexDB, engine, baselineFetchMerged(cfg, p, pg, &order))
 	if err != nil {
 		var gap *query.GapError
 		if errors.As(err, &gap) {
@@ -349,6 +361,7 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 	// A snapshot known to be torn explains a difference; one with no record
 	// of its locks does not (#1380, withSnapshotLock).
 	pairLockVerdict(p, res.Status, res.Detail).apply(&res)
+	withOrderNote(&res, order)
 	return res, nil
 }
 

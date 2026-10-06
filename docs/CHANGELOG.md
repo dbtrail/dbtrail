@@ -202,6 +202,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with one of the 44 words and used later (`SELECT made AS at ... ORDER BY
   at`) stays on MySQL too, which is right: the copy would refuse it.
 ### Fixed
+- **`verify` and a whole-table `_snapshot` read: a row changed by two
+  sessions is taken at its last change** (#2156, second part). Both put on a
+  snapshot the latest change of each row after it. They took "latest" from
+  the time recorded with each change, which is when its statement STARTED,
+  and for a row that two sessions changed at once (one waited on the
+  other's row lock, or ran long, or set its own clock back) that is the
+  change the database does NOT hold. Reproduced on MySQL 8.4.9 and MariaDB
+  11.4.13 through the real capture: `verify` reported a mismatch on a table
+  whose snapshot and changes were right, and `SELECT * FROM _snapshot.t AS
+  OF ...` on the MySQL port answered the first session's values, and
+  brought back a row the second session had deleted.
+
+  Both now take each row's latest change in binary log order, which is
+  commit order, under the same rule as `recover` (entry below). On an index
+  a stream writes, the false mismatches are gone. The baseline pair check
+  (the default), `--explain` and the live-source check all take it; the
+  PostgreSQL checks do not change, since their recorded time is the commit
+  time. Where the order cannot be established (the same cases as for
+  `recover`: an index that also had binary log files indexed into it with
+  `bintrail index` in the last hour, an index built only with `bintrail
+  index` and a row changed in two files, a row with no recorded position,
+  two binary log names, a numbering that restarted), the row is taken at its
+  latest change by time, as before, and the reader is told: a `verify`
+  mismatch ends with "order of changes unproven: ... a mismatch on a row
+  that two sessions changed at once may be a false alarm", and the
+  `_snapshot` read raises one warning with that text, which `SHOW WARNINGS`
+  shows (code 1105), only when the read succeeded. Nothing is looked up for
+  a row whose latest change is the same in both orders, which is every row
+  without one of these waits. For a row where the two differ, all its
+  changes in the range are read (one more query per 500 such rows), and the
+  answer is the one `recover` would give over them. On an index built only
+  with `bintrail index`, a row whose changes are in two binary log files is
+  noted even when the two orders agree on its latest change, if its last
+  binary log position is another change.
+
+  The cost: the fetch of these two readers ranks each row's changes twice
+  and can return two changes of a row instead of one. Measured on a table of
+  100,000 rows with 400,000 changes: reading the latest change of every row
+  took 2.0 seconds from MySQL instead of 1.4, and 1.25 from an archive
+  instead of 1.14; choosing among them took 0.06 seconds. `--limit-per-pk` of `query`
+  and `recover`, the web interface and the MCP tools keep the newest changes
+  by statement time, as before.
 - **Snapshots: an update after the source's binary log started again no
   longer publishes the old rows for good** (#2160). A `RESET MASTER`, a
   failover to another server or a new `log_bin` name starts the source's
@@ -273,9 +315,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   were reordered, the answer can hold a change committed after that
   instant, and the command, the web interface and the MCP tool warn about
   it. Also unchanged: `--limit` keeps the newest
-  changes by statement time; `recover-cascade`, `verify`, and the `_snapshot`
-  and `_flashback` schemas of the MySQL port still order by statement time
-  (#2156). The web interface's undo of a table with cascading foreign-key
+  changes by statement time; `recover-cascade`, the `_flashback` schema of
+  the MySQL port and a single-row read of its `_snapshot` schema still order
+  by statement time (#2156; `verify` and a whole-table `_snapshot` read are in
+  the entry below). The web interface's undo of a table with cascading foreign-key
   children answers with a `recover-cascade` script, and now warns, in the
   response and at the top of the script, when the binary log order differs
   from the one it used.
@@ -300,11 +343,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A snapshot written by an earlier version can hold such a row. Its value
   stays wrong until the row changes again or the table is read again from
   the database, so take a full snapshot of the tables where two sessions
-  update the same rows. `verify` does not find these rows reliably: it still
-  orders a row's changes by time, as does the `_snapshot` schema of the
-  MySQL port (#2156). For the same reason
-  `verify` can flag a table whose snapshot is right when one of its rows
-  changed in one of these shapes; that is not new.
+  update the same rows. On an index a stream writes, `verify` now takes a
+  row's last change in the same binary log order (entry below), so it finds
+  such a row. Where that order cannot be established it still takes the last
+  change by time, and a table whose snapshot is right can then be reported
+  as a mismatch; the mismatch says so.
 
   One limit. A scheduled update and `export iceberg` read a window bounded
   by a binary log position at both ends. A `reconstruct` whose window is
