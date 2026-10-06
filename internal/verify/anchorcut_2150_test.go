@@ -244,6 +244,7 @@ func TestResolveLiveCut_unanchored(t *testing.T) {
 		want string
 	}{
 		{"gtid off", consistency.TableChecksum{GTIDFlavor: consistency.GTIDFlavorMySQL}, "gtid_mode=OFF"},
+		{"gtid off with an old set", consistency.TableChecksum{GTIDFlavor: consistency.GTIDFlavorMySQL, GTIDSet: uuidA + ":1-3", GTIDMode: "OFF"}, "gtid_mode=OFF"},
 		{"no lock grant", consistency.TableChecksum{GTIDFlavor: consistency.GTIDFlavorMySQL, GTIDSet: uuidA + ":1-3", AnchorLockRefused: true}, "LOCK TABLES"},
 		{"mariadb without a coordinate", consistency.TableChecksum{GTIDFlavor: consistency.GTIDFlavorMariaDB, GTIDSet: "0-1-3"}, "binary log position"},
 		{"tagged set", consistency.TableChecksum{GTIDFlavor: consistency.GTIDFlavorMySQL, GTIDSet: uuidA + ":t:1-3", Anchor: consistency.AnchorTableLock}, "tagged"},

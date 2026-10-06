@@ -41,6 +41,9 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 	mysqlAfter := func(m sqlmock.Sqlmock, set string) {
 		m.ExpectQuery(`SELECT @@global.gtid_executed`).WillReturnRows(oneCol(set))
 	}
+	gtidOn := func(m sqlmock.Sqlmock) {
+		m.ExpectQuery(`SELECT @@global.gtid_mode`).WillReturnRows(oneCol("ON"))
+	}
 	noNative := func(m sqlmock.Sqlmock) {
 		m.ExpectQuery(`SHOW STATUS LIKE 'binlog_snapshot%'`).WillReturnRows(rowsKV())
 	}
@@ -67,6 +70,7 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 			expect: func(m sqlmock.Sqlmock) {
 				start(m)
 				mysqlAfter(m, anchorUUID+":1-12")
+				gtidOn(m)
 				m.ExpectQuery(`SHOW STATUS LIKE 'binlog_snapshot%'`).WillReturnRows(rowsKV(
 					"Binlog_snapshot_file", "binlog.000002", "Binlog_snapshot_position", "4410",
 					"Binlog_snapshot_gtid_executed", anchorUUID+":1-10\n"))
@@ -78,6 +82,7 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 			expect: func(m sqlmock.Sqlmock) {
 				start(m)
 				mysqlAfter(m, anchorUUID+":1-12")
+				gtidOn(m)
 				m.ExpectQuery(`SHOW STATUS LIKE 'binlog_snapshot%'`).WillReturnRows(rowsKV(
 					"Binlog_snapshot_gtid_executed", "not-in-consistent-snapshot"))
 				rollback(m)
@@ -93,6 +98,7 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 			expect: func(m sqlmock.Sqlmock) {
 				start(m)
 				mysqlAfter(m, anchorUUID+":1-12")
+				gtidOn(m)
 				m.ExpectQuery(`SHOW STATUS LIKE 'binlog_snapshot%'`).WillReturnError(errors.New("denied"))
 				rollback(m)
 				lockOK(m)
@@ -107,6 +113,7 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 			expect: func(m sqlmock.Sqlmock) {
 				start(m)
 				mysqlAfter(m, anchorUUID+":1-12")
+				gtidOn(m)
 				noNative(m)
 				rollback(m)
 				m.ExpectExec("SET SESSION lock_wait_timeout").WillReturnResult(sqlmock.NewResult(0, 0))
@@ -124,6 +131,7 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 			expect: func(m sqlmock.Sqlmock) {
 				start(m)
 				mysqlAfter(m, anchorUUID+":1-12")
+				gtidOn(m)
 				noNative(m)
 				rollback(m)
 				lockOK(m)
@@ -163,6 +171,7 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 			expect: func(m sqlmock.Sqlmock) {
 				start(m)
 				mysqlAfter(m, anchorUUID+":1-12")
+				gtidOn(m)
 				noNative(m)
 				rollback(m)
 				lockOK(m)
@@ -177,6 +186,7 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 			expect: func(m sqlmock.Sqlmock) {
 				start(m)
 				mysqlAfter(m, anchorUUID+":1-12")
+				gtidOn(m)
 				noNative(m)
 				rollback(m)
 				m.ExpectExec("SET SESSION lock_wait_timeout").WillReturnResult(sqlmock.NewResult(0, 0))
@@ -193,6 +203,7 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 			expect: func(m sqlmock.Sqlmock) {
 				start(m)
 				mysqlAfter(m, anchorUUID+":1-12")
+				gtidOn(m)
 				noNative(m)
 				rollback(m)
 				for range anchorLockAttempts {
@@ -207,6 +218,7 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 			expect: func(m sqlmock.Sqlmock) {
 				start(m)
 				mysqlAfter(m, anchorUUID+":1-12")
+				gtidOn(m)
 				noNative(m)
 				rollback(m)
 				m.ExpectExec("SET SESSION lock_wait_timeout").WillReturnResult(sqlmock.NewResult(0, 0))
@@ -215,6 +227,24 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 				mysqlAfter(m, anchorUUID+":1-14")
 			},
 			want: snapshotAnchor{set: anchorUUID + ":1-14", flavor: GTIDFlavorMySQL, lockRefused: true},
+		},
+		{
+			name: "GTIDs turned off after running with them: the old set is not anchored",
+			expect: func(m sqlmock.Sqlmock) {
+				start(m)
+				mysqlAfter(m, anchorUUID+":1-9")
+				m.ExpectQuery(`SELECT @@global.gtid_mode`).WillReturnRows(oneCol("OFF"))
+			},
+			want: snapshotAnchor{set: anchorUUID + ":1-9", flavor: GTIDFlavorMySQL, gtidMode: "OFF"},
+		},
+		{
+			name: "ON_PERMISSIVE: transactions without GTIDs commit, not anchored",
+			expect: func(m sqlmock.Sqlmock) {
+				start(m)
+				mysqlAfter(m, anchorUUID+":1-9")
+				m.ExpectQuery(`SELECT @@global.gtid_mode`).WillReturnRows(oneCol("ON_PERMISSIVE"))
+			},
+			want: snapshotAnchor{set: anchorUUID + ":1-9", flavor: GTIDFlavorMySQL, gtidMode: "ON_PERMISSIVE"},
 		},
 		{
 			name: "gtid_mode=OFF: nothing to anchor, no lock taken",
@@ -229,6 +259,7 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 			expect: func(m sqlmock.Sqlmock) {
 				start(m)
 				mysqlAfter(m, anchorUUID+":1-12")
+				gtidOn(m)
 				noNative(m)
 				rollback(m)
 				m.ExpectExec("SET SESSION lock_wait_timeout").WillReturnResult(sqlmock.NewResult(0, 0))

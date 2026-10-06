@@ -108,6 +108,8 @@ func resolveLiveCut(ctx context.Context, indexDB *sql.DB, src consistency.TableC
 		switch {
 		case strings.TrimSpace(src.GTIDSet) == "" && src.GTIDFlavor == consistency.GTIDFlavorMySQL:
 			return liveCut{note: unanchoredNote("the source reports no executed GTIDs: gtid_mode=OFF")}, nil
+		case src.GTIDMode != "":
+			return liveCut{note: unanchoredNote("the source runs with gtid_mode=" + src.GTIDMode + ", so its GTID set does not name what the snapshot holds")}, nil
 		case src.AnchorLockRefused:
 			return liveCut{note: unanchoredNote("pinning the position on this server needs a read lock on the table: RELOAD and LOCK TABLES, or at least LOCK TABLES, which the source account does not have")}, nil
 		case src.GTIDFlavor == consistency.GTIDFlavorMariaDB:

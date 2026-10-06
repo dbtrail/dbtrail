@@ -81,6 +81,10 @@ type TableChecksum struct {
 	// AnchorLockRefused: an exact anchor needed LOCK TABLES on the table and
 	// the account may not take it, so Anchor is "".
 	AnchorLockRefused bool
+	// GTIDMode is the source's @@gtid_mode when it is not ON (MySQL; "" when
+	// ON, on MariaDB, or when not read). A set read under any other mode is
+	// not anchored.
+	GTIDMode string
 	// Columns is the ordered set of column names the digest was computed over
 	// (ordinal order, generated columns excluded). A consumer that recomputes a
 	// digest to compare (the verify capstone #634) must hash exactly this set in
@@ -197,7 +201,7 @@ func consistentTableChecksum(ctx context.Context, db *sql.DB, schema, table stri
 		if err != nil {
 			return res, err
 		}
-		res.GTIDSet, res.GTIDFlavor, res.Anchor, res.AnchorLockRefused = a.set, a.flavor, a.method, a.lockRefused
+		res.GTIDSet, res.GTIDFlavor, res.Anchor, res.AnchorLockRefused, res.GTIDMode = a.set, a.flavor, a.method, a.lockRefused, a.gtidMode
 	} else {
 		if err := startSnapshot(ctx, conn); err != nil {
 			return res, err

@@ -60,6 +60,8 @@ type snapshotAnchor struct {
 	// lockRefused: the anchor needed the table lock and the account may not
 	// take it (no LOCK TABLES privilege).
 	lockRefused bool
+	// gtidMode is MySQL's @@gtid_mode when it is not ON (nothing anchored).
+	gtidMode string
 }
 
 // openAnchoredSnapshot opens START TRANSACTION WITH CONSISTENT SNAPSHOT on
@@ -92,6 +94,19 @@ func openAnchoredSnapshot(ctx context.Context, db *sql.DB, conn *sql.Conn, schem
 	a := snapshotAnchor{set: set, flavor: flavor}
 	if flavor == "" || set == "" {
 		return a, nil
+	}
+	if flavor == GTIDFlavorMySQL {
+		// A server that ran with GTIDs and turned them off keeps its old
+		// executed set, and ON_PERMISSIVE still commits transactions with
+		// no GTID: in both, the set does not name what the snapshot holds.
+		var mode string
+		if err := conn.QueryRowContext(ctx, "SELECT @@global.gtid_mode").Scan(&mode); err != nil {
+			return snapshotAnchor{}, fmt.Errorf("read @@gtid_mode: %w", err)
+		}
+		if !strings.EqualFold(mode, "ON") {
+			a.gtidMode = mode
+			return a, nil
+		}
 	}
 	native, ok, err := nativeSnapshotPosition(ctx, conn, flavor)
 	if err != nil {

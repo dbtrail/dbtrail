@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the set read before and after opening it is the same, so that read
   is never taken as exact. The lock waits at most one second, three times; a
   table it never gets is **inconclusive**, never compared against a guessed
-  position. Without `LOCK TABLES`, with `gtid_mode=OFF`, or on PostgreSQL
+  position. Without `LOCK TABLES`, with `gtid_mode` other than `ON`, or on PostgreSQL
   (#2198), the read is cut by time as before and the result says the table
   must take no writes during the read. Each table also waits up to a
   minute for a running capture to reach the snapshot it read, instead of
