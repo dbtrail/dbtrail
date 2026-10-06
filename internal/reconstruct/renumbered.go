@@ -390,11 +390,11 @@ func checkNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 		if w.bounded() {
 			// The bounded check reads the archives from the mark on, so the
 			// mark must be one the archives can vouch for too (#2186).
-			st, note, err := markInArchives(ctx, db, m)
+			st, note, err := markInArchives(ctx, db, m, w.Since)
 			switch {
 			case err != nil:
 				return "", err
-			case st == markUnreadable:
+			case st == markUnreadable, st == markBeyondCap:
 				return note, nil
 			case st == markOtherEvent:
 				w.notice(slog.LevelWarn, "the event the snapshot's event mark names is now another event in the archives (the index was rebuilt?); a binlog numbering that started over is not checked from it",

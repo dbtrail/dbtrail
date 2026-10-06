@@ -14,7 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the mark's id now names another event, after the index was rebuilt;
   `bintrail index` also wrote into the index; the mark does not read; an
   archived hour of the window has no file this process can open, including
-  a recorded S3 object that is not there; the mark comes from an older
+  a recorded S3 object that is not there (to a reader without
+  `s3:ListBucket`, S3 answers "access denied" instead, which stays an
+  error); the mark comes from an older
   numbering than the snapshot's own position; or, in the whole-index form,
   the mark's own hour was archived), it used to
   pass with one log line. Now `verify` reports the table **inconclusive**

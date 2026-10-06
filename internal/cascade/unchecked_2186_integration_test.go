@@ -20,12 +20,6 @@ import (
 // a lookup the engine did not use.
 func TestPhase2_uncheckedNumberingOnlyWhereTheBaselineIsUsed_2186(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
-	db, dbName := testutil.CreateTestDB(t)
-	testutil.InitIndexTables(t, db)
-	if err := indexer.EnsureSchema(db); err != nil {
-		t.Fatal(err)
-	}
-	eng := query.New(db)
 	T := time.Now().UTC()
 	const note = "binlog numbering not checked: `bintrail index` also wrote into this index"
 	pos := &query.BinlogPos{File: "binlog.000007", Pos: 200}
@@ -34,15 +28,37 @@ func TestPhase2_uncheckedNumberingOnlyWhereTheBaselineIsUsed_2186(t *testing.T) 
 		name string
 		rows []cascade.BaselineRow
 		pos  *query.BinlogPos
-		want bool
+		// truncate: more children in the window than the candidate limit,
+		// so augmentation is skipped (baseline-skip) while the scan still
+		// read from the snapshot's position.
+		truncate bool
+		want     bool
 	}{
-		{"a baseline row reaches the output", row, nil, true},
-		{"no row, the scan read from the snapshot's position", nil, pos, true},
-		{"no row, no position: the baseline shaped nothing", nil, nil, false},
+		{"a baseline row reaches the output", row, nil, false, true},
+		{"no row, the scan read from the snapshot's position", nil, pos, false, true},
+		{"no row, no position: the baseline shaped nothing", nil, nil, false, false},
+		{"augmentation skipped, the scan read from the snapshot's position", row, pos, true, true},
+		{"augmentation skipped, no position", row, nil, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			db, dbName := testutil.CreateTestDB(t)
+			testutil.InitIndexTables(t, db)
+			if err := indexer.EnsureSchema(db); err != nil {
+				t.Fatal(err)
+			}
+			eng := query.New(db)
+			opts := cascade.Options{}
+			if tc.truncate {
+				for i, pk := range []string{"21", "22"} {
+					testutil.InsertEvent(t, db, "binlog.000008", uint64(100+100*i), uint64(150+100*i),
+						T.Add(-time.Hour).Format("2006-01-02 15:04:05"), nil, dbName, "child", 2, pk, nil,
+						[]byte(`{"id":`+pk+`,"pid":1}`), []byte(`{"id":`+pk+`,"pid":1}`))
+				}
+				opts.CandidateLimit = 1
+			}
 			prov := &fakeUnchecked{snap: T.Add(-2 * time.Hour), rows: tc.rows, pos: tc.pos, note: note}
-			res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T), cascade.Options{Baseline: prov})
+			opts.Baseline = prov
+			res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T), opts)
 			if err != nil {
 				t.Fatalf("SynthesizeVictims: %v", err)
 			}
@@ -54,6 +70,9 @@ func TestPhase2_uncheckedNumberingOnlyWhereTheBaselineIsUsed_2186(t *testing.T) 
 			}
 			if got != tc.want {
 				t.Fatalf("Incomplete = %v; want the note: %v", res.Incomplete, tc.want)
+			}
+			if tc.truncate && !strings.Contains(strings.Join(res.Incomplete, "|"), "skipped baseline augmentation") {
+				t.Fatalf("Incomplete = %v; the fixture must skip augmentation", res.Incomplete)
 			}
 		})
 	}

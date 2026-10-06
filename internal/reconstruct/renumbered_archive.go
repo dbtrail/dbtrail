@@ -151,10 +151,27 @@ func (w *ReadWindow) probeArchive(ctx context.Context, db *sql.DB, m *EventMark,
 		return asEvent(span.Latest), true, nil
 	}
 	// The earliest is before the window and the latest after it: one in
-	// between may or may not be inside.
+	// between may or may not be inside. Asked once per window.
+	wkey := archiveWindowKey{archiveSpanKey: key, from: floor.Unix(), until: w.Until.Unix()}
+	if inner, ok := archiveWindows.get(wkey); ok {
+		return asEvent(inner.Earliest), inner.Found, nil
+	}
 	q.From, q.Until = floor, w.Until
 	inner, err := archiveProbe(ctx, a.file, q)
-	return asEvent(inner.Earliest), inner.Found, err
+	if err != nil {
+		return indexedEvent{}, false, err
+	}
+	archiveWindows.put(wkey, inner)
+	return asEvent(inner.Earliest), inner.Found, nil
+}
+
+// archiveWindows remembers probeArchive's bounded re-read per file and window
+// (the window's floor and end, to the second).
+var archiveWindows = newLRU[archiveWindowKey, parquetquery.BelowMarkSpan](archiveCacheCap)
+
+type archiveWindowKey struct {
+	archiveSpanKey
+	from, until int64
 }
 
 // markStatus is what the archives say about an event mark that is no longer
@@ -172,13 +189,22 @@ const (
 // markProbeLimit bounds how many archive files markInArchives opens.
 const markProbeLimit = 48
 
+// markHourMargin is how far past the snapshot's time the mark's own hour may
+// lie: the mark is the newest event indexed when the snapshot was taken, but
+// its time comes from the source's clock.
+const markHourMargin = time.Hour
+
 // archiveMarks remembers markInArchives' answers that are about the files
-// themselves (archived, another event, absent), per index and mark.
+// themselves (archived, another event, absent, not found within the cap),
+// per index, mark and archive set: a rotation, rebuild or prune changes the
+// set (its row count or newest archived_at) and the answer is looked for
+// again.
 var archiveMarks = newLRU[archiveMarkKey, markStatus](archiveCacheCap)
 
 type archiveMarkKey struct {
-	db   *sql.DB
-	mark string
+	db       *sql.DB
+	mark     string
+	archives string // archive_state's row count and newest archived_at
 }
 
 // markInArchives looks for the mark's own event in the archives, so the
@@ -186,24 +212,40 @@ type archiveMarkKey struct {
 // rotation archives an hour before dropping it, and the resume cleanup of a
 // restarted capture deletes events (the mark among them) that it captures
 // again under new ids at their old positions, which would read as a
-// numbering that started over. The files that may hold it are those whose
-// newest event id is at or above the mark's, or not recorded, smallest first.
-func markInArchives(ctx context.Context, db *sql.DB, m *EventMark) (markStatus, string, error) {
-	key := archiveMarkKey{db: db, mark: m.Encode()}
+// numbering that started over. The files that may hold it: an hour at or
+// before the snapshot's (since, plus a clock margin; zero: any), whose newest
+// event id is at or above the mark's or not recorded; newest hour first,
+// since the mark is the newest event indexed when the snapshot was taken.
+func markInArchives(ctx context.Context, db *sql.DB, m *EventMark, since time.Time) (markStatus, string, error) {
+	var count int64
+	var newest sql.NullString
+	err := db.QueryRowContext(ctx, `SELECT COUNT(*), UNIX_TIMESTAMP(MAX(archived_at)) FROM archive_state`).Scan(&count, &newest)
+	if err != nil {
+		var me *mysqldriver.MySQLError
+		if errors.As(err, &me) && me.Number == 1146 {
+			return markNoArchive, "", nil
+		}
+		return 0, "", fmt.Errorf("read archive_state: %w", err)
+	}
+	if count == 0 {
+		return markNoArchive, "", nil
+	}
+	key := archiveMarkKey{db: db, mark: m.Encode(), archives: fmt.Sprintf("%d/%s", count, newest.String)}
 	if st, ok := archiveMarks.get(key); ok {
-		return st, "", nil
+		return st, markCapNote(st), nil
+	}
+	upper := "p_9999"
+	if !since.IsZero() {
+		upper = since.UTC().Add(markHourMargin).Truncate(time.Hour).Format("p_2006010215")
 	}
 	rows, err := db.QueryContext(ctx, `SELECT partition_name, local_path, s3_bucket, s3_key FROM archive_state
-		WHERE max_event_id >= ? OR max_event_id IS NULL
-		ORDER BY max_event_id IS NULL, max_event_id, partition_name LIMIT ?`, m.ID, markProbeLimit+1)
+		WHERE (max_event_id >= ? OR max_event_id IS NULL) AND partition_name <= ?
+		ORDER BY partition_name DESC LIMIT ?`, m.ID, upper, markProbeLimit+1)
 	if err != nil {
 		var me *mysqldriver.MySQLError
 		if errors.As(err, &me) && me.Number == 1054 {
 			rows, err = db.QueryContext(ctx, `SELECT partition_name, local_path, s3_bucket, s3_key FROM archive_state
-				ORDER BY partition_name LIMIT ?`, markProbeLimit+1)
-		}
-		if errors.As(err, &me) && me.Number == 1146 {
-			return markNoArchive, "", nil
+				WHERE partition_name <= ? ORDER BY partition_name DESC LIMIT ?`, upper, markProbeLimit+1)
 		}
 		if err != nil {
 			return 0, "", fmt.Errorf("read archive_state: %w", err)
@@ -217,6 +259,9 @@ func markInArchives(ctx context.Context, db *sql.DB, m *EventMark) (markStatus, 
 		if err := rows.Scan(&c.partition, &local, &bucket, &k); err != nil {
 			rows.Close()
 			return 0, "", fmt.Errorf("read archive_state: %w", err)
+		}
+		if _, ok := query.ParsePartitionName(c.partition); !ok {
+			continue
 		}
 		c.file = archiveFileOf(local.String, bucket.String, k.String)
 		cands = append(cands, c)
@@ -232,7 +277,10 @@ func markInArchives(ctx context.Context, db *sql.DB, m *EventMark) (markStatus, 
 	var unreadable []string
 	for i, c := range cands {
 		if i == markProbeLimit {
-			return markUnreadable, uncheckedNote(fmt.Sprintf("the event the snapshot's event mark names is not in the live index, and more than %d archives could hold it", markProbeLimit)), nil
+			if len(unreadable) == 0 {
+				archiveMarks.put(key, markBeyondCap)
+			}
+			return markUnreadable, markCapNote(markBeyondCap), nil
 		}
 		if c.file == "" {
 			unreadable = append(unreadable, c.partition)
@@ -261,6 +309,20 @@ func markInArchives(ctx context.Context, db *sql.DB, m *EventMark) (markStatus, 
 	}
 	archiveMarks.put(key, markAbsent)
 	return markAbsent, "", nil
+}
+
+// markBeyondCap: the mark was not in the markProbeLimit newest archives that
+// could hold it. Remembered as markInArchives' answer; the caller sees it as
+// markUnreadable with markCapNote.
+const markBeyondCap markStatus = -1
+
+// markCapNote is the note of markBeyondCap ("" for any other status), and
+// turns a remembered markBeyondCap into what markInArchives returns.
+func markCapNote(st markStatus) string {
+	if st != markBeyondCap {
+		return ""
+	}
+	return uncheckedNote(fmt.Sprintf("the event the snapshot's event mark names is not in the live index, nor in the %d newest archives that could hold it", markProbeLimit))
 }
 
 // archiveFileOf is the file of an archive_state row this process can open:

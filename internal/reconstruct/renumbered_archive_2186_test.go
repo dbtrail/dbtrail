@@ -52,6 +52,7 @@ func stubProbe(t *testing.T, found map[string]parquetquery.BelowMarkSpan, window
 	}
 	t.Cleanup(func() { archiveProbe = prev })
 	archiveSpans.reset()
+	archiveWindows.reset()
 	archiveMarks.reset()
 	return &calls
 }
@@ -144,10 +145,10 @@ func TestCheckArchives_2186(t *testing.T) {
 			span: spanAt(until.Add(time.Minute), until.Add(time.Hour)), reads: 1},
 		{name: "every one before the window's start: clean, the file read once",
 			span: spanAt(floor.Add(-2*time.Hour), floor.Add(-time.Minute)), reads: 1},
-		{name: "around the window, none inside it: clean, the window read each time",
-			span: spanAt(floor.Add(-time.Hour), until.Add(time.Hour)), reads: 3, windowedRead: true},
+		{name: "around the window, none inside it: clean, the window read once",
+			span: spanAt(floor.Add(-time.Hour), until.Add(time.Hour)), reads: 2, windowedRead: true},
 		{name: "around the window, one inside it: refused",
-			span: spanAt(floor.Add(-time.Hour), until.Add(time.Hour)), windowFound: true, refuse: true, reads: 3, windowedRead: true},
+			span: spanAt(floor.Add(-time.Hour), until.Add(time.Hour)), windowFound: true, refuse: true, reads: 2, windowedRead: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, mock, _ := sqlmock.New()
@@ -337,6 +338,7 @@ func TestCheckArchives_question_2186(t *testing.T) {
 		return parquetquery.BelowMarkSpan{}, nil
 	}
 	archiveSpans.reset()
+	archiveWindows.reset()
 	t.Cleanup(func() { archiveProbe = prev })
 	floor := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
 	until := archiveUntil
@@ -509,23 +511,36 @@ func TestCheckNumberingFromRead_markRotatedUnbounded_2186(t *testing.T) {
 	}
 }
 
-// A snapshot refresh (CheckNumberingFrom) reads nothing new: with the mark's
-// hour rotated it asks archive_state nothing (#2186 review).
-func TestCheckNumberingFrom_refreshReadsNoArchive_2186(t *testing.T) {
-	db, mock, _ := sqlmock.New()
-	defer db.Close()
-	mock.ExpectQuery(`FROM index_state`).WillReturnRows(sqlmock.NewRows([]string{"one"}))
-	mock.ExpectQuery(`WHERE event_id = \?`).WillReturnRows(sqlmock.NewRows([]string{"f", "e"}))
-	mock.ExpectQuery(`MIN\(event_id\)`).WillReturnRows(sqlmock.NewRows([]string{"m"}).AddRow(50))
-	for range 2 {
-		mock.ExpectQuery(`WHERE event_id > \?`).WillReturnRows(sqlmock.NewRows([]string{"i", "f", "e"}).AddRow(60, "binlog.000009", 100))
-	}
+// The check a full-table run makes (numberingCheckFor, what FullTable
+// calls): a snapshot refresh (no explicit --at) reads nothing it did not
+// read before #2186, so with the mark's hour rotated it asks archive_state
+// nothing, and a failure there cannot fail a refresh (#2186 review). With an
+// explicit --at the same state is said (the archived-mark note).
+func TestNumberingCheckFor_refreshReadsNoArchive_2186(t *testing.T) {
 	mark := EventMark{ID: 10, File: "binlog.000007", End: 200}
-	if err := CheckNumberingFrom(context.Background(), db, &query.BinlogPos{File: "binlog.000007", Pos: 200}, mark.Encode(), ReadWindow{Notice: func(slog.Level, string, ...any) {}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
+	anchor := &query.BinlogPos{File: "binlog.000007", Pos: 200}
+	for _, explicitAt := range []bool{false, true} {
+		db, mock, _ := sqlmock.New()
+		mock.ExpectQuery(`FROM index_state`).WillReturnRows(sqlmock.NewRows([]string{"one"}))
+		mock.ExpectQuery(`WHERE event_id = \?`).WillReturnRows(sqlmock.NewRows([]string{"f", "e"}))
+		mock.ExpectQuery(`MIN\(event_id\)`).WillReturnRows(sqlmock.NewRows([]string{"m"}).AddRow(50))
+		for range 2 {
+			mock.ExpectQuery(`WHERE event_id > \?`).WillReturnRows(sqlmock.NewRows([]string{"i", "f", "e"}).AddRow(60, "binlog.000009", 100))
+		}
+		if explicitAt {
+			mock.ExpectQuery(`FROM archive_state WHERE max_event_id > \?`).WillReturnRows(sqlmock.NewRows([]string{"one"}).AddRow(1))
+		}
+		var note string
+		if err := numberingCheckFor(context.Background(), db, anchor, mark.Encode(), explicitAt, &note)(ReadWindow{Notice: func(slog.Level, string, ...any) {}}); err != nil {
+			t.Fatalf("explicitAt=%v: %v", explicitAt, err)
+		}
+		if (note != "") != explicitAt {
+			t.Fatalf("explicitAt=%v: note = %q", explicitAt, note)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("explicitAt=%v: %v", explicitAt, err)
+		}
+		db.Close()
 	}
 }
 
@@ -565,9 +580,14 @@ func TestMarkInArchives_2186(t *testing.T) {
 		archiveMarks.reset()
 		return &calls
 	}
+	fp := func(mock sqlmock.Sqlmock, count int, newest string) {
+		mock.ExpectQuery(`SELECT COUNT\(\*\), UNIX_TIMESTAMP\(MAX\(archived_at\)\) FROM archive_state`).
+			WillReturnRows(sqlmock.NewRows([]string{"n", "t"}).AddRow(count, newest))
+	}
 	expect := func(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
-		mock.ExpectQuery(`WHERE max_event_id >= \? OR max_event_id IS NULL\s+ORDER BY max_event_id IS NULL, max_event_id`).
-			WithArgs(uint64(10), markProbeLimit+1).WillReturnRows(rows)
+		fp(mock, 5, "1759312800")
+		mock.ExpectQuery(`WHERE \(max_event_id >= \? OR max_event_id IS NULL\) AND partition_name <= \?\s+ORDER BY partition_name DESC`).
+			WithArgs(uint64(10), "p_9999", markProbeLimit+1).WillReturnRows(rows)
 	}
 	ctx := context.Background()
 	t.Run("held, the same event; remembered", func(t *testing.T) {
@@ -575,14 +595,24 @@ func TestMarkInArchives_2186(t *testing.T) {
 		defer db.Close()
 		a, b := localFile(t, "a.parquet"), localFile(t, "b.parquet")
 		calls := stub(t, map[string]parquetquery.BelowMarkRow{b: {EventID: 10, File: "binlog.000007", End: 200}}, nil)
-		expect(mock, sqlmock.NewRows(cols).AddRow("p1", a, nil, nil).AddRow("p2", b, nil, nil))
+		expect(mock, sqlmock.NewRows(cols).AddRow("p_2026100111", a, nil, nil).AddRow("p_2026100110", b, nil, nil))
+		fp(mock, 5, "1759312800") // the same archive set: remembered
 		for range 2 {
-			if st, _, err := markInArchives(ctx, db, m); err != nil || st != markArchived {
+			if st, _, err := markInArchives(ctx, db, m, time.Time{}); err != nil || st != markArchived {
 				t.Fatalf("= %v, %v; want archived", st, err)
 			}
 		}
 		if len(*calls) != 2 {
 			t.Fatalf("reads %v; want a then b, once", *calls)
+		}
+		// Another archive set (a rotation, a rebuild, a prune): looked for again.
+		fp(mock, 6, "1759316400")
+		mock.ExpectQuery(`ORDER BY partition_name DESC`).WillReturnRows(sqlmock.NewRows(cols).AddRow("p_2026100110", b, nil, nil))
+		if st, _, err := markInArchives(ctx, db, m, time.Time{}); err != nil || st != markArchived || len(*calls) != 3 {
+			t.Fatalf("= %v, %v (reads %v); want archived, read again", st, err, *calls)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
 		}
 	})
 	t.Run("held as another event", func(t *testing.T) {
@@ -590,8 +620,8 @@ func TestMarkInArchives_2186(t *testing.T) {
 		defer db.Close()
 		a := localFile(t, "a.parquet")
 		stub(t, map[string]parquetquery.BelowMarkRow{a: {EventID: 10, File: "binlog.000007", End: 900}}, nil)
-		expect(mock, sqlmock.NewRows(cols).AddRow("p1", a, nil, nil))
-		if st, _, err := markInArchives(ctx, db, m); err != nil || st != markOtherEvent {
+		expect(mock, sqlmock.NewRows(cols).AddRow("p_2026100110", a, nil, nil))
+		if st, _, err := markInArchives(ctx, db, m, time.Time{}); err != nil || st != markOtherEvent {
 			t.Fatalf("= %v, %v; want another event", st, err)
 		}
 	})
@@ -600,8 +630,8 @@ func TestMarkInArchives_2186(t *testing.T) {
 		defer db.Close()
 		a := localFile(t, "a.parquet")
 		stub(t, nil, nil)
-		expect(mock, sqlmock.NewRows(cols).AddRow("p1", a, nil, nil))
-		if st, _, err := markInArchives(ctx, db, m); err != nil || st != markAbsent {
+		expect(mock, sqlmock.NewRows(cols).AddRow("p_2026100110", a, nil, nil))
+		if st, _, err := markInArchives(ctx, db, m, time.Time{}); err != nil || st != markAbsent {
 			t.Fatalf("= %v, %v; want absent", st, err)
 		}
 	})
@@ -610,7 +640,16 @@ func TestMarkInArchives_2186(t *testing.T) {
 		defer db.Close()
 		stub(t, nil, nil)
 		expect(mock, sqlmock.NewRows(cols))
-		if st, _, err := markInArchives(ctx, db, m); err != nil || st != markNoArchive {
+		if st, _, err := markInArchives(ctx, db, m, time.Time{}); err != nil || st != markNoArchive {
+			t.Fatalf("= %v, %v; want no archive", st, err)
+		}
+	})
+	t.Run("an empty archive_state", func(t *testing.T) {
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		stub(t, nil, nil)
+		fp(mock, 0, "")
+		if st, _, err := markInArchives(ctx, db, m, time.Time{}); err != nil || st != markNoArchive {
 			t.Fatalf("= %v, %v; want no archive", st, err)
 		}
 	})
@@ -619,7 +658,7 @@ func TestMarkInArchives_2186(t *testing.T) {
 		defer db.Close()
 		stub(t, nil, nil)
 		mock.ExpectQuery(`FROM archive_state`).WillReturnError(&mysqldriver.MySQLError{Number: 1146})
-		if st, _, err := markInArchives(ctx, db, m); err != nil || st != markNoArchive {
+		if st, _, err := markInArchives(ctx, db, m, time.Time{}); err != nil || st != markNoArchive {
 			t.Fatalf("= %v, %v; want no archive", st, err)
 		}
 	})
@@ -628,9 +667,11 @@ func TestMarkInArchives_2186(t *testing.T) {
 		defer db.Close()
 		a := localFile(t, "a.parquet")
 		stub(t, map[string]parquetquery.BelowMarkRow{a: {EventID: 10, File: "binlog.000007", End: 200}}, nil)
-		mock.ExpectQuery(`WHERE max_event_id`).WillReturnError(&mysqldriver.MySQLError{Number: 1054})
-		mock.ExpectQuery(`FROM archive_state\s+ORDER BY partition_name`).WillReturnRows(sqlmock.NewRows(cols).AddRow("p1", a, nil, nil))
-		if st, _, err := markInArchives(ctx, db, m); err != nil || st != markArchived {
+		fp(mock, 5, "1759312800")
+		mock.ExpectQuery(`WHERE \(max_event_id`).WillReturnError(&mysqldriver.MySQLError{Number: 1054})
+		mock.ExpectQuery(`FROM archive_state\s+WHERE partition_name <= \? ORDER BY partition_name DESC`).WithArgs("p_9999", markProbeLimit+1).
+			WillReturnRows(sqlmock.NewRows(cols).AddRow("p_2026100110", a, nil, nil))
+		if st, _, err := markInArchives(ctx, db, m, time.Time{}); err != nil || st != markArchived {
 			t.Fatalf("= %v, %v; want archived", st, err)
 		}
 	})
@@ -639,9 +680,9 @@ func TestMarkInArchives_2186(t *testing.T) {
 		defer db.Close()
 		calls := stub(t, nil, map[string]error{"s3://b/k.parquet": fmt.Errorf("x: %w", parquetquery.ErrArchiveObjectMissing)})
 		for range 2 {
-			expect(mock, sqlmock.NewRows(cols).AddRow("p1", nil, "b", "k.parquet").AddRow("p2", "/gone/x.parquet", nil, nil))
-			st, note, err := markInArchives(ctx, db, m)
-			if err != nil || st != markUnreadable || !strings.Contains(note, "p1 and 1 more") {
+			expect(mock, sqlmock.NewRows(cols).AddRow("p_2026100111", nil, "b", "k.parquet").AddRow("p_2026100110", "/gone/x.parquet", nil, nil))
+			st, note, err := markInArchives(ctx, db, m, time.Time{})
+			if err != nil || st != markUnreadable || !strings.Contains(note, "p_2026100111 and 1 more") {
 				t.Fatalf("= %v, %q, %v; want unreadable naming p1", st, note, err)
 			}
 		}
@@ -654,23 +695,42 @@ func TestMarkInArchives_2186(t *testing.T) {
 		defer db.Close()
 		a := localFile(t, "a.parquet")
 		stub(t, nil, map[string]error{a: errors.New("boom")})
-		expect(mock, sqlmock.NewRows(cols).AddRow("p1", a, nil, nil))
-		if _, _, err := markInArchives(ctx, db, m); err == nil || !strings.Contains(err.Error(), "boom") {
+		expect(mock, sqlmock.NewRows(cols).AddRow("p_2026100110", a, nil, nil))
+		if _, _, err := markInArchives(ctx, db, m, time.Time{}); err == nil || !strings.Contains(err.Error(), "boom") {
 			t.Fatalf("err = %v", err)
 		}
 	})
-	t.Run("past the probe limit: a note", func(t *testing.T) {
+	t.Run("past the probe limit: a note, remembered for this archive set", func(t *testing.T) {
 		db, mock, _ := sqlmock.New()
 		defer db.Close()
 		a := localFile(t, "a.parquet")
-		stub(t, nil, nil)
+		calls := stub(t, nil, nil)
 		rows := sqlmock.NewRows(cols)
 		for i := range markProbeLimit + 1 {
-			rows.AddRow(fmt.Sprintf("p%d", i), a, nil, nil)
+			rows.AddRow(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC).Add(-time.Duration(i)*time.Hour).Format("p_2006010215"), a, nil, nil)
 		}
 		expect(mock, rows)
-		if st, note, err := markInArchives(ctx, db, m); err != nil || st != markUnreadable || note == "" {
-			t.Fatalf("= %v, %q, %v", st, note, err)
+		fp(mock, 5, "1759312800")
+		for range 2 {
+			if st, note, err := markInArchives(ctx, db, m, time.Time{}); err != nil || (st != markUnreadable && st != markBeyondCap) || !strings.Contains(note, "newest archives") {
+				t.Fatalf("= %v, %q, %v", st, note, err)
+			}
+		}
+		if len(*calls) != markProbeLimit {
+			t.Fatalf("%d reads; want %d, once", len(*calls), markProbeLimit)
+		}
+	})
+	t.Run("the hours searched end at the snapshot's, plus a clock margin", func(t *testing.T) {
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		stub(t, nil, nil)
+		fp(mock, 5, "1759312800")
+		mock.ExpectQuery(`ORDER BY partition_name DESC`).WithArgs(uint64(10), "p_2026100111", markProbeLimit+1).WillReturnRows(sqlmock.NewRows(cols))
+		if _, _, err := markInArchives(ctx, db, m, time.Date(2026, 10, 1, 10, 40, 0, 0, time.UTC)); err != nil {
+			t.Fatal(err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
 		}
 	})
 }
@@ -691,7 +751,8 @@ func TestCheckNumberingFromRead_markDeletedThenArchived_2186(t *testing.T) {
 	archiveMarks.reset()
 	mock.ExpectQuery(`FROM index_state`).WillReturnRows(sqlmock.NewRows([]string{"one"}))
 	mock.ExpectQuery(`WHERE event_id = \?`).WillReturnRows(sqlmock.NewRows([]string{"f", "e"}))
-	mock.ExpectQuery(`WHERE max_event_id >= \?`).WillReturnRows(sqlmock.NewRows([]string{"p", "l", "b", "k"}).AddRow("p1", a, nil, nil))
+	mock.ExpectQuery(`SELECT COUNT\(\*\)`).WillReturnRows(sqlmock.NewRows([]string{"n", "t"}).AddRow(1, "1759312800"))
+	mock.ExpectQuery(`max_event_id >= \?`).WillReturnRows(sqlmock.NewRows([]string{"p", "l", "b", "k"}).AddRow("p_2026100110", a, nil, nil))
 	mark := EventMark{ID: 10, File: "binlog.000007", End: 200}
 	note, err := CheckNumberingFromRead(context.Background(), db, &query.BinlogPos{File: "binlog.000007", Pos: 200}, mark.Encode(),
 		ReadWindow{Schema: "s", Table: "t", Until: archiveUntil, Notice: func(slog.Level, string, ...any) {}})

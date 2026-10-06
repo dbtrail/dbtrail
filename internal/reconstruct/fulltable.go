@@ -1404,13 +1404,7 @@ func ReconstructTable(
 	// --at, where a person reads the run's output; a refresh keeps its log
 	// line (the check's own notice) and its capturedBackBelow guard below.
 	var unchecked string
-	numberingCheck := func(w ReadWindow) error {
-		note, err := CheckNumberingFromRead(ctx, db, AnchorOf(anchorMeta), anchorMeta.EventMark, w)
-		if note != "" {
-			unchecked = note
-		}
-		return err
-	}
+	numberingCheck := numberingCheckFor(ctx, db, AnchorOf(anchorMeta), anchorMeta.EventMark, cfg.ExplicitAt, &unchecked)
 	if boundedAt {
 		// Bounded only while the live binlog_events holds all the read
 		// reaches, before and after the check (checkNumberingForRead).
@@ -3501,4 +3495,22 @@ func checkMariaDBFixedTypesAgree(createSQL string, snapshotCols []metadata.Colum
 		}
 	}
 	return nil
+}
+
+// numberingCheckFor is the binlog-renumbering check a full-table run makes,
+// for checkNumberingForRead or a whole-index call. Under an explicit --at it
+// is the readers' form (CheckNumberingFromRead) and keeps the last note in
+// *unchecked; otherwise (a snapshot refresh) it is CheckNumberingFrom, which
+// reads nothing the refresh did not read before #2186.
+func numberingCheckFor(ctx context.Context, db *sql.DB, anchor *query.BinlogPos, rawMark string, explicitAt bool, unchecked *string) func(ReadWindow) error {
+	return func(w ReadWindow) error {
+		if !explicitAt {
+			return CheckNumberingFrom(ctx, db, anchor, rawMark, w)
+		}
+		note, err := CheckNumberingFromRead(ctx, db, anchor, rawMark, w)
+		if note != "" {
+			*unchecked = note
+		}
+		return err
+	}
 }

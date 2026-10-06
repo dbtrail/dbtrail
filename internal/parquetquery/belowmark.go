@@ -137,6 +137,9 @@ func withLocalArchive(ctx context.Context, file string, fn func(db *sql.DB, path
 
 // objectMissing reports an S3 "no such object" in any of the shapes S3 and
 // S3-compatible stores return it (storage.S3Backend.Exists reads the same).
+// AWS answers 403, not 404, for a missing key when the caller may not list
+// the bucket (no s3:ListBucket): that stays an error, since a 403 cannot be
+// told from a real permission problem.
 func objectMissing(err error) bool {
 	var nsk *types.NoSuchKey
 	var nf *types.NotFound

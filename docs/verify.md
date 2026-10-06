@@ -380,7 +380,9 @@ Results are **per table**, one of:
   index was rebuilt); the mark does not read, or comes from an older binlog
   numbering than the snapshot's own position; or an archived hour of the
   window has no file this process can open (no local copy, and no S3 copy or
-  one that is not there). A match over such a
+  one that is not there). S3 says an object is not there only to a reader
+  that may list the bucket (`s3:ListBucket`); without that permission it
+  answers "access denied", which verify reports as an error. A match over such a
   window would prove nothing, so it is not reported as one. `--explain` still
   shows the rows of such a pair.
 

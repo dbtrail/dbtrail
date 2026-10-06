@@ -989,8 +989,8 @@ func SynthesizeVictims(
 
 		// addUnchecked marks the result incomplete with the numbering check's
 		// note (#2186), only where the baseline was used: its rows reached the
-		// output, or the scan read from its position. Not when augmentation
-		// was skipped.
+		// output, or the scan read from its position (also when augmentation
+		// was then skipped). Not for a lookup that shaped nothing.
 		addUnchecked := func() {
 			if baseUncheckedMsg != "" {
 				addIncomplete("unchecked:"+fk.Schema+"."+fk.Table, fmt.Sprintf(
@@ -999,10 +999,11 @@ func SynthesizeVictims(
 			}
 		}
 		scan := childScan{cands: cands, baseRows: baseRows, baseSnap: baseSnap}
-		if baseCovered && len(baseRows) == 0 && baseSincePos != nil {
-			// No baseline row to add, but the scan above read the window from
-			// the snapshot's position (#2184): a numbering the check could not
-			// vouch for can still have hidden a child from it (#2186).
+		if baseCovered && baseSincePos != nil {
+			// The scan above read the window from the snapshot's position
+			// (#2184), whether or not baseline rows are added below: a
+			// numbering the check could not vouch for can have hidden a child
+			// from it (#2186).
 			addUnchecked()
 		}
 		if baseCovered && len(baseRows) > 0 {
@@ -1059,7 +1060,8 @@ func SynthesizeVictims(
 					addWarning("baseline-stale:"+fk.Schema+"."+fk.Table, baseStaleMsg)
 				}
 				// #2186: the baseline reaches the output over a window whose
-				// numbering could not be checked: incomplete, with why.
+				// numbering could not be checked: incomplete, with why (once:
+				// addIncomplete keys it per table).
 				addUnchecked()
 				if baseTrunc {
 					addIncomplete("baseline-truncate:"+fk.Schema+"."+fk.Table, fmt.Sprintf(
