@@ -274,11 +274,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after the restart, since a pair with one snapshot on each side still spans
   it. `_snapshot` refuses with error 1526 (`ER_NO_PARTITION_FOR_GIVEN_VALUE`,
   the code of its other unreadable-history refusals; SQLSTATE 22023 on the
-  PostgreSQL wire) and asks for a new full snapshot. Only changes recorded up
-  to the end of what is read count (`AS OF`, or the newer snapshot of a
-  pair), so the history from before a restart stays readable. A snapshot without that record keeps the old behavior; on an
-  index that `bintrail index` also wrote into, the numbering is not checked
-  (a warning is logged), as in the update.
+  PostgreSQL wire), asks for a new full snapshot, says how to take one, and
+  offers `_flashback`, which reads by time. For a read that ends in the past
+  (`AS OF`, the newer snapshot of a pair) the check looks only at what that
+  read sees: the table's own changes up to its end, and a move to another
+  server only when capture recorded it by then. The history from before a
+  restart stays readable. Its two probes take under a tenth of a millisecond per
+  statement on an index with a million changes in the hour read. A snapshot
+  without that record keeps the old behavior; that includes snapshots made
+  with the CLI `bintrail baseline`. Changes already moved to Parquet archives
+  are not looked at, and on an index that `bintrail index` also wrote into
+  the numbering is not checked (a warning, logged once).
 - **Turning the MySQL port off answers only once the port is closed (#2149).**
   Turning it off from the web interface could answer "off" a moment before
   the listening socket was released, and in that moment a new connection to

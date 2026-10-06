@@ -323,13 +323,21 @@ Results are **per table**, one of:
   changes since the snapshot cannot be found by binlog position" and what
   happened. In the baseline pair mode the snapshot checked is the older one
   of the pair, so the table is checkable again from the **second** full
-  snapshot taken after the restart; the live-source mode needs one. A pair
-  whose two snapshots both come before the restart is still checked: only
-  changes recorded up to the newer snapshot count.
-  `--explain` refuses the same way. A snapshot without that record is not
-  checked, and on an index that `bintrail index` also wrote into the
-  numbering is not checked (a warning is logged): its event ids do not follow
-  the binary log.
+  snapshot taken after the restart; the live-source mode needs one. In pair
+  mode the check looks only at what the pair reads: this table's changes
+  recorded up to the newer snapshot. A pair whose two snapshots both come
+  before the restart, or a restart whose later changes touched only other
+  tables, is still checked; capture moving to another server counts only
+  when capture recorded the move at or before the newer snapshot. The
+  live-source mode reads up to now and checks the whole index, as a snapshot
+  update does. `--explain` refuses the same way.
+
+  Not checked: a snapshot without that record, which includes every snapshot
+  made with the CLI `bintrail baseline` (only the web interface's and the
+  daemon's snapshots and snapshot updates record it); changes already moved
+  to Parquet archives, since the check reads the index table only; and an
+  index that `bintrail index` also wrote into, whose event ids do not follow
+  the binary log (a warning is logged once).
 
   Under `--check recover`, inconclusive is subdivided by `inconclusive_kind`
   so a summary can be read: `no-activity` (nothing changed in the window),
