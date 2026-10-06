@@ -202,6 +202,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with one of the 44 words and used later (`SELECT made AS at ... ORDER BY
   at`) stays on MySQL too, which is right: the copy would refuse it.
 ### Fixed
+- **Snapshots: an update after the source's binary log started again no
+  longer publishes the old rows for good** (#2160). A `RESET MASTER`, a
+  failover to another server or a new `log_bin` name starts the source's
+  binary log again, often at `binlog.000001`, and every change after it
+  sorts before the snapshot's binlog position. The update then found nothing
+  to apply, published the old rows under a new date, and did so on every
+  later run, with no error. It now refuses with "the changes since the
+  snapshot cannot be found by binlog position" and asks for a new full
+  snapshot, which a scheduled server takes by itself; the updates after it
+  work again. `--allow-gaps` does not override it. Read routing stops
+  answering from the copy in the same situation, so MySQL answers. To tell
+  this apart from capture that is simply behind, every snapshot now records
+  the newest change the index held when it was taken; a snapshot written
+  before this version is covered once a new one replaces it.
 - **Turning the MySQL port off answers only once the port is closed (#2149).**
   Turning it off from the web interface could answer "off" a moment before
   the listening socket was released, and in that moment a new connection to

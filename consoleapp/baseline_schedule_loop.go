@@ -1431,16 +1431,24 @@ func sameIncurableRefusal(prev []console.RefusedTable, prevOmitted int, cur []co
 	if len(cur) == 0 || prevOmitted > 0 || curOmitted > 0 {
 		return false
 	}
+	// A renumbering refusal (#2160) names the positions it compared, which
+	// move on every run: the same refusal is the same table and verdict.
+	key := func(t console.RefusedTable) console.RefusedTable {
+		if t.Verdict == reconstruct.RefreshVerdictRefusedRenumbered {
+			t.Reason = ""
+		}
+		return t
+	}
 	before := make(map[console.RefusedTable]bool, len(prev))
 	for _, t := range prev {
-		before[t] = true
+		before[key(t)] = true
 	}
 	for _, t := range cur {
 		switch t.Verdict {
 		case reconstruct.RefreshVerdictRefusedDDL, reconstruct.RefreshVerdictRefusedGap:
 			return false
 		}
-		if !before[t] {
+		if !before[key(t)] {
 			return false
 		}
 	}

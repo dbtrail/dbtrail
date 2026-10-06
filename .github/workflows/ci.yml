@@ -592,6 +592,11 @@ jobs:
           grep -q -- '--- PASS: TestIntegrationBinlogOrderRecoverAndReconstruct2156_mysql ' /tmp/mysql-it.out \
             || { echo "FATAL: the applied-recovery-script test over a real capture did not run: is binary logging on? (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestStreamLoop_unmappableRowReachesThePersistedLedger ' /tmp/mysql-it.out || { echo "FATAL: unmappable-row skip ledger test did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestRefresh_afterTheBinlogNumberingStartsOver_refusesUntilAFullSnapshot ' /tmp/mysql-it.out \
+            || { echo "FATAL: the refresh after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationCopyUnchanged_numberingStartedOver_2160 ' /tmp/mysql-it.out \
+            || { echo "FATAL: read routing after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestCheckNumberingContinues_2160 ' /tmp/mysql-it.out || { echo "FATAL: the binlog renumbering check did not run (false-green tripwire)" >&2; exit 1; }
 
       # The S3 tripwire, kept apart from the steps above so a store that did
       # not start is red even when every test passed.

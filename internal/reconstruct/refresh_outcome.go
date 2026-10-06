@@ -14,7 +14,10 @@ const (
 	RefreshVerdictRefusedGap = "refused-gap"
 	RefreshVerdictRefusedDDL = "refused-ddl"
 	RefreshVerdictRefused    = "refused"
-	RefreshVerdictSkipped    = "skipped"
+	// RefreshVerdictRefusedRenumbered: the source's binary log started again
+	// from another numbering since the snapshot (#2160); a full snapshot fixes it.
+	RefreshVerdictRefusedRenumbered = "refused-renumbered"
+	RefreshVerdictSkipped           = "skipped"
 )
 
 // RefreshOutcome is one table's verdict in a refresh run.
@@ -29,7 +32,7 @@ type RefreshOutcome struct {
 // A skipped table did not stop anything; the run ended before reaching it.
 func (o RefreshOutcome) Refused() bool {
 	switch o.Verdict {
-	case RefreshVerdictRefusedGap, RefreshVerdictRefusedDDL, RefreshVerdictRefused:
+	case RefreshVerdictRefusedGap, RefreshVerdictRefusedDDL, RefreshVerdictRefusedRenumbered, RefreshVerdictRefused:
 		return true
 	}
 	return false
@@ -85,6 +88,8 @@ func RefreshOutcomes(tables []string, reports []*TableReport, failures []TableFa
 			// A failure with no error attached still stopped the run. Said
 			// as a refusal with no reason rather than dereferenced.
 			out = append(out, RefreshOutcome{t, RefreshVerdictRefused, ""})
+		case bad && errors.Is(err, ErrBinlogRenumbered):
+			out = append(out, RefreshOutcome{t, RefreshVerdictRefusedRenumbered, err.Error()})
 		case bad && errors.Is(err, ErrCaptureGap):
 			out = append(out, RefreshOutcome{t, RefreshVerdictRefusedGap, err.Error()})
 		case bad && (errors.Is(err, ErrSchemaChanged) || errors.Is(err, ErrDestructiveDDL)):
