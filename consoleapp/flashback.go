@@ -885,6 +885,7 @@ type flashbackControl struct {
 	bound  net.Addr
 	cancel context.CancelFunc
 	done   chan struct{}
+	ln     *closeOnceListener
 	// draining: runs told to stop whose connections outlasted the wait.
 	draining []chan struct{}
 }
@@ -953,28 +954,54 @@ func samePort(a, b string) bool {
 // as long as it runs. Shutdown waits without a bound (Close).
 const flashbackStopWait = 10 * time.Second
 
+// closeOnceListener makes every Close of the port's listener wait for the
+// first one to finish (#2149). A plain net.Listener does not: its Accept
+// returns net.ErrClosed as soon as Close has STARTED, while the socket itself
+// is released only when that Close returns. A stop that waited for the accept
+// loop alone could answer "off" while the kernel still completed connections
+// on the port. With this wrapper the stopper's own Close returns only once
+// the socket is gone, whichever goroutine got there first.
+type closeOnceListener struct {
+	net.Listener
+	once sync.Once
+	err  error
+}
+
+func (l *closeOnceListener) Close() error {
+	l.once.Do(func() { l.err = l.Listener.Close() })
+	return l.err
+}
+
 func (c *flashbackControl) serveLocked(addr string, ln net.Listener) {
 	ctx, cancel := context.WithCancel(c.ctx)
 	done := make(chan struct{})
+	wrapped := &closeOnceListener{Listener: ln}
 	go func() {
 		defer close(done)
-		if err := serveFlashback(ctx, c.srv, ln, c.cfg); err != nil {
+		if err := serveFlashback(ctx, c.srv, wrapped, c.cfg); err != nil {
 			slog.Warn("flashback port exited with error", "error", err)
 		}
 	}()
-	c.addr, c.bound, c.cancel, c.done = addr, ln.Addr(), cancel, done
+	c.addr, c.bound, c.cancel, c.done, c.ln = addr, ln.Addr(), cancel, done, wrapped
 }
 
 // stopLocked closes the port and waits up to wait for its connections (0 =
 // until they are gone). A run still draining when the wait ends is kept for
 // Close to wait on.
+//
+// The listening socket is closed HERE, before any wait and whatever the wait
+// ends in: when stopLocked returns, a new connection to the port is refused
+// by the kernel (#2149), and the same port number can be bound again at once
+// (Apply's same-port move). Connections the port had already accepted are
+// closed through the cancelled context; those are what the wait is for.
 func (c *flashbackControl) stopLocked(wait time.Duration) {
 	if c.cancel == nil {
 		return
 	}
 	c.cancel()
+	_ = c.ln.Close()
 	done := c.done
-	c.addr, c.bound, c.cancel, c.done = "", nil, nil, nil
+	c.addr, c.bound, c.cancel, c.done, c.ln = "", nil, nil, nil, nil
 	if wait <= 0 {
 		<-done
 		return
