@@ -828,6 +828,10 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 			// or a warning, so say it here too when the two orders differ.
 			if notice := query.StatementTimeOrderNotice(rows, query.BinlogOrderProof(r.Context(), b.db)); notice != "" {
 				cw = append(cw, "Order of the changes: "+notice)
+				// And ahead of the script, which is what gets saved and
+				// applied. A comment before its first line: the statements and
+				// their order are untouched.
+				cres.SQL = recovery.CommentParagraph("-- WARNING: ", "order of the changes: "+notice) + cres.SQL
 			}
 			// Notes carries the same info list as the plain path below. NB:
 			// the positive notes wiring test (the recover subtest on the

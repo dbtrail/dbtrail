@@ -167,6 +167,15 @@ func runBinlogOrder2156(t *testing.T, flavor, sourceDSN, applyDSN string, source
 		t.Fatalf("seed = %s", got)
 	}
 	captureWhile(t, flavor, sourceDSN, sourceDB, indexDB, sourceName, 8, func() { order2156Shapes(t, sourceDB) })
+	// This index is one a stream writes, and a stream records itself in
+	// stream_state at its first checkpoint. The capture above stops before
+	// one is due, so the row is written here: without it the index reads as
+	// built with `bintrail index` only, which vouches for one file at a time.
+	testutil.MustExec(t, indexDB, `INSERT INTO stream_state (id, mode, binlog_file, binlog_position, last_checkpoint, server_id)
+		VALUES (1, 'position', 'binlog.000001', 4, NOW(), 1) ON DUPLICATE KEY UPDATE id = id`)
+	if proof, err := query.IDsFollowBinlog(context.Background(), indexDB, time.Now()); err != nil || proof != query.IDsFollowStream {
+		t.Fatalf("IDsFollowBinlog on the captured index = %v, %v; want IDsFollowStream", proof, err)
+	}
 
 	const after = "1=wait-B,3=ins-B,9=nine-2"
 	if got := order2156Table(t, sourceDB); got != after {
@@ -363,8 +372,6 @@ func runBinlogOrder2156(t *testing.T, flavor, sourceDSN, applyDSN string, source
 		opts := query.Options{Schema: sourceName, Table: "t", PKValues: "1"}
 		plain, _ := order2156Script(t, indexDB, opts, false)
 
-		testutil.MustExec(t, indexDB, `INSERT INTO stream_state (id, mode, binlog_file, binlog_position, last_checkpoint, server_id)
-			VALUES (1, 'position', 'binlog.000001', 4, NOW(), 1) ON DUPLICATE KEY UPDATE id = id`)
 		testutil.MustExec(t, indexDB, `INSERT INTO index_state (binlog_file, file_size, last_position, status, started_at, completed_at)
 			VALUES ('binlog.000001', 1, 1, 'completed', UTC_TIMESTAMP(), UTC_TIMESTAMP())`)
 		got, gen := order2156Script(t, indexDB, opts, true)

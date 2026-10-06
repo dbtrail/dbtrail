@@ -614,6 +614,9 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	if note := order.Note(); note != "" {
 		slog.Info("reconstruct: " + note)
 	}
+	if warn := reconstruct.PastCutWarning(order, recAt != ""); warn != "" {
+		slog.Warn("reconstruct: " + warn)
+	}
 	if err := writeReconstructOutput(baselineRow, ordered, snapshotTime, at, recHistory, recFormat, os.Stdout); err != nil {
 		return err
 	}

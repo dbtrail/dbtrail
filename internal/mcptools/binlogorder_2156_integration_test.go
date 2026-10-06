@@ -4,6 +4,7 @@ package mcptools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -57,6 +58,27 @@ func TestIntegrationBinlogOrder2156_tools(t *testing.T) {
 				t.Fatalf("order warning present = %v in the script:\n%s", !tc.sorted, script)
 			}
 
+			// The envelope of a response that carries no script text must
+			// say it too: the header is not there to read.
+			res, err = cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "recover", Arguments: map[string]any{
+				"schema": "app", "table": "users", "since": "2026-06-01 00:00:00", "until": "2026-06-02 00:00:00", "no_archive": true,
+				"summary_only": true,
+			}})
+			if err != nil || res.IsError {
+				t.Fatalf("CallTool recover summary_only: %v %s", err, resultText(res))
+			}
+			var summary recoverResult
+			if err := json.Unmarshal([]byte(resultText(res)), &summary); err != nil {
+				t.Fatalf("decode summary: %v (%s)", err, resultText(res))
+			}
+			inEnvelope := false
+			for _, w := range summary.Warnings {
+				inEnvelope = inEnvelope || (strings.HasPrefix(w, "order of the changes: ") && strings.Contains(w, "different names"))
+			}
+			if inEnvelope == tc.sorted || summary.SQL != "" {
+				t.Fatalf("order warning in the envelope = %v (sorted %v), sql %d bytes: %v", inEnvelope, tc.sorted, len(summary.SQL), summary.Warnings)
+			}
+
 			r := decodeReconstruct(t, callReconstructTool(t, cs, map[string]any{
 				"schema": "app", "table": "users", "pk": "1",
 				"at": "2026-06-01 13:00:00", "baseline_dir": baseDir, "history": true, "allow_gaps": true,
@@ -78,6 +100,17 @@ func TestIntegrationBinlogOrder2156_tools(t *testing.T) {
 			}
 			if warned == tc.sorted {
 				t.Fatalf("statement_time_order warning present = %v: %v", warned, r.Warnings)
+			}
+			// The request named its instant: a reordered answer says that the
+			// cut is by statement time, in words with no command-line flag.
+			cut := ""
+			for _, w := range r.Warnings {
+				if strings.HasPrefix(w, "cut_by_statement_time: ") {
+					cut = w
+				}
+			}
+			if (cut != "") != tc.sorted || strings.Contains(cut, "--") {
+				t.Fatalf("cut_by_statement_time warning = %q (sorted %v): %v", cut, tc.sorted, r.Warnings)
 			}
 		})
 	}

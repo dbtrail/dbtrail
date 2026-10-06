@@ -78,7 +78,7 @@ type Generator struct {
 	// SetBinlogOrder. orderProof is its idsFollowBinlog argument, and
 	// lastOrder what the last generation decided.
 	binlogOrder bool
-	orderProof  func([]query.ResultRow) bool
+	orderProof  func([]query.ResultRow) query.IDProof
 	lastOrder   query.BinlogOrder
 }
 
@@ -143,7 +143,7 @@ func (g *Generator) SetMaxScriptBytes(n int64) { g.maxScriptBytes = n }
 //
 // Inert under PostgresDialect: a PostgreSQL row's event_timestamp is its
 // commit time, so the order handed in is commit order already.
-func (g *Generator) SetBinlogOrder(idsFollowBinlog func([]query.ResultRow) bool) {
+func (g *Generator) SetBinlogOrder(idsFollowBinlog func([]query.ResultRow) query.IDProof) {
 	g.binlogOrder, g.orderProof = true, idsFollowBinlog
 }
 
@@ -609,6 +609,14 @@ func (g *Generator) generate(rows []query.ResultRow, w *countingWriter) (int, []
 
 // commentWidth is where writeCommentParagraph breaks a line.
 const commentWidth = 100
+
+// CommentParagraph is writeCommentParagraph into a string, for a caller that
+// puts a paragraph ahead of a script it did not generate here.
+func CommentParagraph(lead, text string) string {
+	var b strings.Builder
+	writeCommentParagraph(&b, lead, text)
+	return b.String()
+}
 
 // writeCommentParagraph writes text as SQL comment lines: the first one starts
 // with lead ("-- NOTE: "), the following ones are indented under it. The text

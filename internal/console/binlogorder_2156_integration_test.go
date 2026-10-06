@@ -90,6 +90,14 @@ func TestIntegrationBinlogOrder2156_recoverAndReconstruct(t *testing.T) {
 			t.Fatalf("a sorted reconstruction carries an order warning: %v", r.Warnings)
 		}
 	}
+	// The request named its instant and the changes were reordered.
+	cutWarned := false
+	for _, w := range r.Warnings {
+		cutWarned = cutWarned || strings.HasPrefix(w, "cut_by_statement_time: ")
+	}
+	if !cutWarned {
+		t.Fatalf("no cut_by_statement_time warning on a reordered answer for a named instant: %v", r.Warnings)
+	}
 	if len(r.Notes) == 0 || !strings.Contains(strings.Join(r.Notes, "\n"), "in a different order than their statements started") {
 		t.Fatalf("a reordered history does not say so: notes = %v", r.Notes)
 	}
@@ -130,5 +138,65 @@ func TestIntegrationBinlogOrder2156_unprovenOrderIsSaid(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("statement_time_order warning missing: %v", r.Warnings)
+	}
+}
+
+// /api/recover answers with a recover-cascade script when the table has
+// cascading children. That script stays in statement-time order; when the
+// binary log holds the parent's changes in another order the response says so
+// in its warnings AND ahead of the script, which is what gets saved.
+func TestIntegrationBinlogOrder2156_autoCascadeSaysItsOrder(t *testing.T) {
+	srv, dbName := seedCascadeConsole(t, nil)
+	post := func() recoverResponse {
+		t.Helper()
+		rec, body := doReq(t, srv, "POST", "/api/recover", `{"schema":"`+dbName+`","table":"parent"}`)
+		if rec.Code != 200 {
+			t.Fatalf("status = %d, body = %s", rec.Code, body)
+		}
+		var resp recoverResponse
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("decode: %v (body=%s)", err, body)
+		}
+		if !resp.CascadeDetected {
+			t.Fatalf("not the cascade branch; this test needs it:\n%s", resp.SQL)
+		}
+		return resp
+	}
+
+	// The fixture alone: the two orders agree, and nothing is added.
+	plain := post()
+	if strings.Contains(plain.SQL, "order of the changes") {
+		t.Fatalf("an order line on a script whose orders agree:\n%s", plain.SQL)
+	}
+
+	// Parent 2 deleted by A (at 500, started :02) and inserted again by B (at
+	// 600, started :00 and waited).
+	db := srv.cm.boot.db
+	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	const layout = "2006-01-02 15:04:05"
+	testutil.InsertEvent(t, db, "binlog.000001", 500, 550, h.Add(25*time.Minute+2*time.Second).Format(layout), nil,
+		dbName, "parent", 3, "2", nil, []byte(`{"id":2}`), nil)
+	testutil.InsertEvent(t, db, "binlog.000001", 600, 650, h.Add(25*time.Minute).Format(layout), nil,
+		dbName, "parent", 1, "2", nil, nil, []byte(`{"id":2}`))
+
+	resp := post()
+	if !strings.HasPrefix(resp.SQL, "-- WARNING: order of the changes: the binary log holds 2 of 3 changes in a different order") {
+		t.Fatalf("the script does not start with the order warning:\n%s", resp.SQL)
+	}
+	found := false
+	for _, w := range resp.Warnings {
+		found = found || strings.HasPrefix(w, "Order of the changes: the binary log holds 2 of 3 changes")
+	}
+	if !found {
+		t.Fatalf("order warning missing from the response: %v", resp.Warnings)
+	}
+	// The statements are the same ones in the same order as a script built
+	// without the notice: only the leading comment was added.
+	_, body, ok := strings.Cut(resp.SQL, "\n-- bintrail recover")
+	if !ok {
+		t.Fatalf("no cascade preamble after the warning:\n%s", resp.SQL)
+	}
+	if strings.Contains(body, "order of the changes") {
+		t.Fatalf("the notice appears twice:\n%s", resp.SQL)
 	}
 }

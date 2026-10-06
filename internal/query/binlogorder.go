@@ -39,6 +39,30 @@ const (
 	OrderRenumbered
 )
 
+// IDProof is what an index can say about its own event_ids for a set of rows:
+// whether ascending id is the order the source's binary log holds them in.
+type IDProof int
+
+const (
+	// IDsUnproven: ids say nothing. A stream and `bintrail index` both wrote
+	// these rows, or the index could not be asked.
+	IDsUnproven IDProof = iota
+	// IDsFollowStream: one stream wrote these rows, in the order it read them
+	// from the source. Ascending id IS binary log order, across file
+	// rotations and across a restart of the source's numbering.
+	IDsFollowStream
+	// IDsFollowFileIndexing: only `bintrail index` wrote this index. Ids
+	// ascend in the order the FILES WERE INDEXED, which the operator chose:
+	// `--all` takes a directory's files by name, `--files` in any order, over
+	// any number of runs. Inside one file that is binary log order. Across
+	// files it is not shown to be, and index_state cannot show it: it records
+	// which file was indexed when, and a directory holding the old source's
+	// binlog.000045 and the new source's binlog.000001 (a failover, a RESET
+	// MASTER) is indexed 000001 first, in ascending name order, by one run,
+	// with ids and positions rising together and both backwards.
+	IDsFollowFileIndexing
+)
+
 // BinlogOrder is OrderByBinlog's answer.
 type BinlogOrder struct {
 	Reason BinlogOrderReason
@@ -74,7 +98,7 @@ func (o BinlogOrder) Note() string {
 // (recover-cascade, until its own slice of #2156): the text to show when that
 // order is known or suspected to differ from binary log order, and "" when the
 // two agree. rows are not modified.
-func StatementTimeOrderNotice(rows []ResultRow, idsFollowBinlog func([]ResultRow) bool) string {
+func StatementTimeOrderNotice(rows []ResultRow, idsFollowBinlog func([]ResultRow) IDProof) string {
 	o := OrderByBinlog(slices.Clone(rows), idsFollowBinlog)
 	if o.Sorted() {
 		return fmt.Sprintf("the binary log holds %d of %d changes in a different order than their statements started (a statement that waited for a row lock, or ran long), "+
@@ -108,7 +132,7 @@ func (o BinlogOrder) Warning() string {
 			"A restart of the source's binary log numbering (a failover, RESET MASTER) inside this time range cannot be ruled out. %s",
 			o.Moved, o.Total, o.detail, statementTimeTail)
 	case OrderRenumbered:
-		return fmt.Sprintf("the binary log and the statement times disagree on the order of %d of %d changes, and the binary log files of this time range are not in one sequence (%s): "+
+		return fmt.Sprintf("the binary log and the statement times disagree on the order of %d of %d changes, and the binary log position goes down inside this time range (%s): "+
 			"the source's binary log numbering restarted (a failover, RESET MASTER), or binary log files were indexed out of order. %s",
 			o.Moved, o.Total, o.detail, statementTimeTail)
 	}
@@ -150,19 +174,30 @@ func (o BinlogOrder) Warning() string {
 //
 //   - one base name across the set, and
 //   - idsFollowBinlog(rows) says ascending event_id is binlog order for these
-//     rows (IDsFollowBinlog: an index one stream writes, or binlog files
-//     indexed in order), and
+//     rows (IDsFollowBinlog: an index one stream writes, or one file of an
+//     index built with `bintrail index`), and
 //   - walking the rows by event_id, the position never goes down.
 //
-// When all three hold, position order and id order are the same order, and it
-// does not depend on the file numbering at all. When one fails, the rows stay
-// as they came and Warning says why. No path returns a third order.
+// When all three hold, position order and id order are the same order. So
+// THE ORDER RETURNED IS ALWAYS ASCENDING event_id: the order the index
+// received the changes in, used when that is shown to be the binary log's
+// order. The position is the CROSS-CHECK of that claim, not the sort key that
+// matters, and it must not be "simplified" away in either direction: sorting
+// by id alone trusts an index whose files were indexed out of order, and
+// sorting by position alone trusts a numbering that may have restarted inside
+// the window. When one condition fails, the rows stay as they came and
+// Warning says why. No path returns a third order.
+//
+// An index built only with `bintrail index` (IDsFollowFileIndexing) vouches
+// for its ids inside ONE binary log file and no further: a set that spans
+// more than one file is refused. See IDsFollowFileIndexing for why nothing
+// the index holds can prove more.
 //
 // Nothing of this is looked at when the two orders agree, which is every
 // window without one of #2151's shapes: no lookup, no warning.
 //
 // idsFollowBinlog may be nil: the order is then never confirmed.
-func OrderByBinlog(rows []ResultRow, idsFollowBinlog func([]ResultRow) bool) BinlogOrder {
+func OrderByBinlog(rows []ResultRow, idsFollowBinlog func([]ResultRow) IDProof) BinlogOrder {
 	o := BinlogOrder{Total: len(rows)}
 	if len(rows) < 2 {
 		return o
@@ -206,7 +241,19 @@ func OrderByBinlog(rows []ResultRow, idsFollowBinlog func([]ResultRow) bool) Bin
 		o.Reason, o.detail = OrderSeveralBaseNames, strings.Join(names, ", ")
 		return o
 	}
-	if idsFollowBinlog == nil || !idsFollowBinlog(rows) {
+	proof := IDsUnproven
+	if idsFollowBinlog != nil {
+		proof = idsFollowBinlog(rows)
+	}
+	switch proof {
+	case IDsFollowStream:
+	case IDsFollowFileIndexing:
+		if files := distinctBinlogFiles(rows); files > 1 {
+			o.Reason = OrderIDsUnproven
+			o.detail = fmt.Sprintf("it was built with `bintrail index` only and these changes are in %d binary log files, so its ids follow the order the files were indexed in, which is not shown to be the order the source wrote them in", files)
+			return o
+		}
+	default:
 		o.Reason = OrderIDsUnproven
 		o.detail = "binary log files were indexed into it with `bintrail index` beside the stream, or the index could not be asked, so its ids do not say in which order the changes were written"
 		return o
@@ -226,30 +273,6 @@ func OrderByBinlog(rows []ResultRow, idsFollowBinlog func([]ResultRow) bool) Bin
 		}
 	}
 
-	// The ids were ACCEPTED as following the binary log, not checked: an index
-	// built only by `bintrail index` is taken to have had its files indexed
-	// in order. Files of a NEWER numbering indexed before the files of the
-	// older one (a rebuilt index, after a RESET MASTER on the source) pass
-	// the walk above, ids and positions rising together, and are the wrong
-	// way round. Their times give it away: a later file whose every change
-	// started over an hour before every change of the file before it. A lock
-	// wait or a long statement across a rotation does not reach an hour; a
-	// session with SET TIMESTAMP far in the past, alone in its file, does,
-	// and is refused too, which keeps the order it had.
-	for i := 1; i < len(perm); i++ {
-		prev, cur := &rows[perm[i-1]], &rows[perm[i]]
-		if prev.BinlogFile == cur.BinlogFile {
-			continue
-		}
-		prevMin, curMax := fileTimes(rows, prev.BinlogFile, cur.BinlogFile)
-		if curMax.Before(prevMin.Add(-renumberedTimeGap)) {
-			o.Reason = OrderRenumbered
-			o.detail = fmt.Sprintf("every change in %s started more than an hour before every change in %s, the file before it",
-				cur.BinlogFile, prev.BinlogFile)
-			return o
-		}
-	}
-
 	sorted := make([]ResultRow, len(rows))
 	for i, p := range perm {
 		sorted[i] = rows[p]
@@ -259,23 +282,13 @@ func OrderByBinlog(rows []ResultRow, idsFollowBinlog func([]ResultRow) bool) Bin
 	return o
 }
 
-// renumberedTimeGap: see its use in OrderByBinlog.
-const renumberedTimeGap = time.Hour
-
-// fileTimes returns the earliest event_timestamp among the rows of file a and
-// the latest among the rows of file b.
-func fileTimes(rows []ResultRow, a, b string) (minA, maxB time.Time) {
-	first := true
+// distinctBinlogFiles counts the binary log files the rows are in.
+func distinctBinlogFiles(rows []ResultRow) int {
+	seen := map[string]bool{}
 	for i := range rows {
-		r := &rows[i]
-		if r.BinlogFile == a && (first || r.EventTimestamp.Before(minA)) {
-			minA, first = r.EventTimestamp, false
-		}
-		if r.BinlogFile == b && r.EventTimestamp.After(maxB) {
-			maxB = r.EventTimestamp
-		}
+		seen[rows[i].BinlogFile] = true
 	}
-	return minA, maxB
+	return len(seen)
 }
 
 // compareBinlogCoordinate orders two rows that BOTH have a coordinate by
@@ -339,44 +352,48 @@ func writersKeepBinlogOrder(streamCaptured, fileIndexingUnfinished bool, lastFil
 	return lastFileIndexed.Before(since.Add(-fileIndexingMargin))
 }
 
-// IDsFollowBinlog reports whether, for rows whose earliest event_timestamp is
-// since, ascending event_id is the order the source's binary log holds them
-// in. It reads stream_state and index_state, two small tables; it does not
-// look at binlog_events.
+// IDsFollowBinlog reports what the index can say about the event_ids of rows
+// whose earliest event_timestamp is since. It reads stream_state and
+// index_state, two small tables; it does not look at binlog_events.
 //
-// An index with no index_state table is one no `bintrail index` run wrote to.
-func IDsFollowBinlog(ctx context.Context, db *sql.DB, since time.Time) (bool, error) {
+// Every failure answers IDsUnproven, with the error. An index with no stream
+// is IDsFollowFileIndexing whatever index_state holds: see that constant.
+func IDsFollowBinlog(ctx context.Context, db *sql.DB, since time.Time) (IDProof, error) {
 	if db == nil {
-		return false, nil
+		return IDsUnproven, nil
 	}
 	streamCaptured, err := StreamCaptured(ctx, db)
 	if err != nil {
-		return false, err
+		return IDsUnproven, err
+	}
+	if !streamCaptured {
+		return IDsFollowFileIndexing, nil
 	}
 	var last sql.NullTime
 	var unfinished int64
 	err = db.QueryRowContext(ctx, "SELECT MAX(completed_at), COUNT(*) - COUNT(completed_at) FROM index_state").Scan(&last, &unfinished)
-	if err != nil {
-		if isMissingTableErr(err) {
-			return true, nil
-		}
-		return false, fmt.Errorf("read index_state: %w", err)
+	if err != nil && !isMissingTableErr(err) {
+		return IDsUnproven, fmt.Errorf("read index_state: %w", err)
 	}
+	// No index_state table: no `bintrail index` run wrote to this index.
 	var lastFileIndexed time.Time
-	if last.Valid {
+	if err == nil && last.Valid {
 		lastFileIndexed = last.Time.UTC()
 	}
-	return writersKeepBinlogOrder(streamCaptured, unfinished > 0, lastFileIndexed, since), nil
+	if writersKeepBinlogOrder(true, err == nil && unfinished > 0, lastFileIndexed, since) {
+		return IDsFollowStream, nil
+	}
+	return IDsUnproven, nil
 }
 
 // BinlogOrderProof is the idsFollowBinlog argument of OrderByBinlog for a
 // caller that holds the index: IDsFollowBinlog for the rows' earliest
-// event_timestamp. A failed read is logged and answers false, which keeps the
+// event_timestamp. A failed read is logged and answers IDsUnproven, which keeps the
 // rows as they came and puts the warning in front of the reader.
-func BinlogOrderProof(ctx context.Context, db *sql.DB) func([]ResultRow) bool {
-	return func(rows []ResultRow) bool {
+func BinlogOrderProof(ctx context.Context, db *sql.DB) func([]ResultRow) IDProof {
+	return func(rows []ResultRow) IDProof {
 		if len(rows) == 0 {
-			return false
+			return IDsUnproven
 		}
 		since := rows[0].EventTimestamp
 		for i := range rows {
@@ -384,11 +401,11 @@ func BinlogOrderProof(ctx context.Context, db *sql.DB) func([]ResultRow) bool {
 				since = rows[i].EventTimestamp
 			}
 		}
-		ok, err := IDsFollowBinlog(ctx, db, since)
+		proof, err := IDsFollowBinlog(ctx, db, since)
 		if err != nil {
 			slog.Warn("could not read whether this index's ids follow the binary log; the changes stay in statement-time order", "error", err)
-			return false
+			return IDsUnproven
 		}
-		return ok
+		return proof
 	}
 }

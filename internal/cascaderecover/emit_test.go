@@ -739,7 +739,7 @@ func TestEmitSQL_orderIsStatementTimeAndABinlogOrderGeneratorIsRefused(t *testin
 	}
 
 	gen := recovery.New(nil, nil)
-	gen.SetBinlogOrder(func([]query.ResultRow) bool { return true })
+	gen.SetBinlogOrder(func([]query.ResultRow) query.IDProof { return query.IDsFollowStream })
 	var buf bytes.Buffer
 	n, err = cascaderecover.EmitSQL(&buf, gen, rows(), nil, nil, nil, hdr)
 	if err == nil || n != 0 || buf.Len() != 0 {

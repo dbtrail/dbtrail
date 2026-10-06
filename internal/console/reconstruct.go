@@ -615,6 +615,9 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 	if note := order.Note(); note != "" {
 		resp.Notes = append(resp.Notes, note)
 	}
+	if warn := reconstruct.PastCutWarning(order, at != nil); warn != "" {
+		resp.Warnings = append(resp.Warnings, "cut_by_statement_time: "+warn)
+	}
 	if history {
 		entries, err := reconstruct.BuildHistory(baselineRow, snapshotTime, ordered, atTime)
 		if err != nil {

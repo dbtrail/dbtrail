@@ -27,8 +27,9 @@ func orderIDs(rows []ResultRow) []uint64 {
 	return out
 }
 
-func proven([]ResultRow) bool   { return true }
-func unproven([]ResultRow) bool { return false }
+func proven([]ResultRow) IDProof    { return IDsFollowStream }
+func unproven([]ResultRow) IDProof  { return IDsUnproven }
+func filesOnly([]ResultRow) IDProof { return IDsFollowFileIndexing }
 
 var orderT0 = time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 
@@ -47,7 +48,7 @@ func TestOrderByBinlog_decisionTable(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		rows    []ResultRow
-		proof   func([]ResultRow) bool
+		proof   func([]ResultRow) IDProof
 		want    BinlogOrderReason
 		wantIDs []uint64
 		warns   string // a fragment the warning must hold; "" = no warning
@@ -62,7 +63,7 @@ func TestOrderByBinlog_decisionTable(t *testing.T) {
 		{
 			"the two orders agree: nothing is asked, nothing changes",
 			[]ResultRow{orderRow(1, f, 400, orderT0), orderRow(2, f, 900, orderT0.Add(time.Second))},
-			func([]ResultRow) bool { panic("the index must not be asked when the orders agree") },
+			func([]ResultRow) IDProof { panic("the index must not be asked when the orders agree") },
 			OrderAgrees, []uint64{1, 2}, "",
 		},
 		{
@@ -78,7 +79,7 @@ func TestOrderByBinlog_decisionTable(t *testing.T) {
 		{
 			"PostgreSQL: every file is an LSN",
 			[]ResultRow{orderRow(2, "1/5", 5, orderT0), orderRow(1, "0/FFFFFFFF", 9, orderT0.Add(2*time.Second))},
-			func([]ResultRow) bool { panic("a PostgreSQL set must not ask the index") },
+			func([]ResultRow) IDProof { panic("a PostgreSQL set must not ask the index") },
 			OrderPostgres, []uint64{2, 1}, "",
 		},
 		{
@@ -112,7 +113,7 @@ func TestOrderByBinlog_decisionTable(t *testing.T) {
 			// position goes down, so the file alone would not show it.
 			"the numbering restarted onto the same file name",
 			[]ResultRow{orderRow(1, "binlog.000001", 9000, orderT0), orderRow(2, "binlog.000001", 300, orderT0.Add(time.Hour))},
-			proven, OrderRenumbered, []uint64{1, 2}, "are not in one sequence",
+			proven, OrderRenumbered, []uint64{1, 2}, "binary log position goes down",
 		},
 		{
 			// A restart AND a lock wait after it: one inversion is enough to
@@ -123,30 +124,44 @@ func TestOrderByBinlog_decisionTable(t *testing.T) {
 				orderRow(3, "binlog.000001", 900, orderT0.Add(time.Hour)),
 				orderRow(2, "binlog.000001", 300, orderT0.Add(time.Hour+2*time.Second)),
 			},
-			proven, OrderRenumbered, []uint64{1, 3, 2}, "are not in one sequence",
+			proven, OrderRenumbered, []uint64{1, 3, 2}, "binary log position goes down",
 		},
 		{
-			// An index rebuilt with `bintrail index`, the files of the NEW
-			// numbering first: ids and positions rise together and both are
-			// the wrong way round. Event 2 is hours older than event 1.
-			"files of a newer numbering indexed before the older one's",
-			[]ResultRow{orderRow(2, "binlog.000007", 400, orderT0), orderRow(1, "binlog.000001", 900, orderT0.Add(5*time.Hour))},
-			proven, OrderRenumbered, []uint64{2, 1}, "every change in binlog.000007 started more than an hour before every change in binlog.000001",
+			// An index built ONLY with `bintrail index`, from a directory
+			// holding the old source's binlog.000045 and the new source's
+			// binlog.000001 (a failover, RESET MASTER): `--all` takes files by
+			// name, so the NEW file was indexed first. Ids and positions rise
+			// together and both are backwards; the times, 20 minutes apart,
+			// are right. Nothing the index holds tells this from one
+			// numbering, so a file-only index never vouches across files.
+			"file-only index: a newer numbering's file indexed before the older one's",
+			[]ResultRow{orderRow(50, "binlog.000045", 400, orderT0), orderRow(1, "binlog.000001", 900, orderT0.Add(20*time.Minute))},
+			filesOnly, OrderIDsUnproven, []uint64{50, 1}, "built with `bintrail index` only and these changes are in 2 binary log files",
 		},
 		{
-			// The same picture with one row of the later file inside the
-			// hour: not that, so the ids stand.
-			"a later file with one change close to the file before it",
-			[]ResultRow{
-				orderRow(2, "binlog.000007", 400, orderT0),
-				orderRow(3, "binlog.000007", 900, orderT0.Add(4*time.Hour+30*time.Minute)),
-				orderRow(1, "binlog.000001", 900, orderT0.Add(5*time.Hour)),
-			},
-			proven, OrderSorted, []uint64{1, 2, 3}, "",
+			// The same index, one numbering, a lock wait across a rotation:
+			// refused as well. It cannot be told from the case above.
+			"file-only index: a lock wait across a file rotation",
+			[]ResultRow{orderRow(2, "binlog.000008", 4, orderT0), orderRow(1, "binlog.000007", 900, orderT0.Add(2*time.Second))},
+			filesOnly, OrderIDsUnproven, []uint64{2, 1}, "these changes are in 2 binary log files",
 		},
 		{
-			// A lock wait across a rotation: A is the last change of file 7,
-			// B the first of file 8, B started 2 s earlier.
+			// Inside ONE file a file-only index does vouch: `bintrail index`
+			// writes a file's changes in the order the file holds them.
+			"file-only index: the lock wait inside one file",
+			lockWait(f), filesOnly, OrderSorted, []uint64{1, 2}, "",
+		},
+		{
+			// And the id walk still guards that one file: the same name
+			// indexed twice with the position going back.
+			"file-only index: one file name, the position goes down by id",
+			[]ResultRow{orderRow(1, f, 9000, orderT0), orderRow(2, f, 300, orderT0.Add(time.Hour))},
+			filesOnly, OrderRenumbered, []uint64{1, 2}, "binary log position goes down",
+		},
+		{
+			// A lock wait across a rotation on an index a stream writes: A is
+			// the last change of file 7, B the first of file 8, B started 2 s
+			// earlier. The stream read them in that order.
 			"a lock wait across a file rotation",
 			[]ResultRow{orderRow(2, "binlog.000008", 4, orderT0), orderRow(1, "binlog.000007", 900, orderT0.Add(2*time.Second))},
 			proven, OrderSorted, []uint64{1, 2}, "",
@@ -230,8 +245,8 @@ func TestOrderByBinlog_neverAThirdOrder(t *testing.T) {
 			return int(a.EventID) - int(b.EventID)
 		})
 		before := orderIDs(rows)
-		answer := rng.Intn(3) > 0
-		got := OrderByBinlog(rows, func([]ResultRow) bool { return answer })
+		answer := []IDProof{IDsUnproven, IDsFollowStream, IDsFollowStream, IDsFollowFileIndexing}[rng.Intn(4)]
+		got := OrderByBinlog(rows, func([]ResultRow) IDProof { return answer })
 		after := orderIDs(rows)
 
 		if !got.Sorted() {
@@ -247,8 +262,11 @@ func TestOrderByBinlog_neverAThirdOrder(t *testing.T) {
 			continue
 		}
 		sortedSeen++
-		if !answer {
+		if answer == IDsUnproven {
 			t.Fatalf("trial %d: sorted on an index that did not confirm its ids", trial)
+		}
+		if answer == IDsFollowFileIndexing && distinctBinlogFiles(rows) > 1 {
+			t.Fatalf("trial %d: sorted across %d files on an index built with `bintrail index` only", trial, distinctBinlogFiles(rows))
 		}
 		if !slices.IsSorted(after) {
 			t.Fatalf("trial %d: sorted, and the ids are not ascending: %v", trial, after)
@@ -280,7 +298,7 @@ func TestBinlogOrderNoteAndStatementTimeOrderNotice(t *testing.T) {
 	}
 	for name, tc := range map[string]struct {
 		rows  []ResultRow
-		proof func([]ResultRow) bool
+		proof func([]ResultRow) IDProof
 		want  string
 	}{
 		"binlog order differs":  {lockWait(f), proven, "this script undoes them in statement-time order"},
@@ -378,54 +396,55 @@ func TestWritersKeepBinlogOrder(t *testing.T) {
 // answer when a read fails: false, which keeps the fetched order and warns.
 func TestIDsFollowBinlog(t *testing.T) {
 	ctx := context.Background()
-	if ok, err := IDsFollowBinlog(ctx, nil, orderT0); ok || err != nil {
-		t.Fatalf("no index: %v, %v; want false, nil", ok, err)
+	if got, err := IDsFollowBinlog(ctx, nil, orderT0); got != IDsUnproven || err != nil {
+		t.Fatalf("no index: %v, %v; want IDsUnproven, nil", got, err)
 	}
 	const stream = "SELECT 1 FROM stream_state WHERE id = 1"
 	const state = "SELECT MAX\\(completed_at\\), COUNT\\(\\*\\) - COUNT\\(completed_at\\) FROM index_state"
 	for _, tc := range []struct {
 		name   string
 		expect func(sqlmock.Sqlmock)
-		want   bool
+		want   IDProof
 		fails  bool
 	}{
 		{"a stream, no file ever indexed", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(stream).WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 			m.ExpectQuery(state).WillReturnRows(sqlmock.NewRows([]string{"a", "b"}).AddRow(nil, 0))
-		}, true, false},
+		}, IDsFollowStream, false},
 		{"a stream, files indexed after the rows", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(stream).WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 			m.ExpectQuery(state).WillReturnRows(sqlmock.NewRows([]string{"a", "b"}).AddRow(orderT0.Add(time.Hour), 0))
-		}, false, false},
+		}, IDsUnproven, false},
 		// Half an hour before the EARLIEST of the rows BinlogOrderProof is
 		// given below (and an hour and a half before the latest): too close.
 		{"a stream, files indexed just before the earliest row", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(stream).WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 			m.ExpectQuery(state).WillReturnRows(sqlmock.NewRows([]string{"a", "b"}).AddRow(orderT0.Add(-30*time.Minute), 0))
-		}, false, false},
+		}, IDsUnproven, false},
 		{"a stream, files indexed long before the earliest row", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(stream).WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 			m.ExpectQuery(state).WillReturnRows(sqlmock.NewRows([]string{"a", "b"}).AddRow(orderT0.Add(-2*time.Hour), 0))
-		}, true, false},
+		}, IDsFollowStream, false},
 		{"a stream, a file run still open", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(stream).WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 			m.ExpectQuery(state).WillReturnRows(sqlmock.NewRows([]string{"a", "b"}).AddRow(nil, 1))
-		}, false, false},
+		}, IDsUnproven, false},
+		// No stream: index_state is not even read. Whatever it holds, it
+		// cannot show the files were indexed in the order the source wrote them.
 		{"files only", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(stream).WillReturnRows(sqlmock.NewRows([]string{"1"}))
-			m.ExpectQuery(state).WillReturnRows(sqlmock.NewRows([]string{"a", "b"}).AddRow(orderT0.Add(time.Hour), 0))
-		}, true, false},
+		}, IDsFollowFileIndexing, false},
 		{"a stream, and no index_state table", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(stream).WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 			m.ExpectQuery(state).WillReturnError(&mysql.MySQLError{Number: 1146})
-		}, true, false},
+		}, IDsFollowStream, false},
 		{"stream_state cannot be read", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(stream).WillReturnError(errors.New("connection refused"))
-		}, false, true},
+		}, IDsUnproven, true},
 		{"index_state cannot be read", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(stream).WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 			m.ExpectQuery(state).WillReturnError(errors.New("connection refused"))
-		}, false, true},
+		}, IDsUnproven, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
@@ -434,9 +453,9 @@ func TestIDsFollowBinlog(t *testing.T) {
 			}
 			defer db.Close()
 			tc.expect(mock)
-			ok, err := IDsFollowBinlog(ctx, db, orderT0)
-			if ok != tc.want || (err != nil) != tc.fails {
-				t.Fatalf("IDsFollowBinlog = %v, %v; want %v, error %v", ok, err, tc.want, tc.fails)
+			got, err := IDsFollowBinlog(ctx, db, orderT0)
+			if got != tc.want || (err != nil) != tc.fails {
+				t.Fatalf("IDsFollowBinlog = %v, %v; want %v, error %v", got, err, tc.want, tc.fails)
 			}
 
 			// The same through BinlogOrderProof, with the earliest row time.
@@ -450,7 +469,7 @@ func TestIDsFollowBinlog(t *testing.T) {
 			}
 		})
 	}
-	if BinlogOrderProof(ctx, nil)(nil) {
+	if BinlogOrderProof(ctx, nil)(nil) != IDsUnproven {
 		t.Fatal("BinlogOrderProof confirmed the order of no rows")
 	}
 }

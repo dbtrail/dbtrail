@@ -131,18 +131,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Both now put the changes in binary log order, by file and position, when
   that order can be established for the whole set, and the script undoes
-  from the last change back. On an index a stream writes, that is the order
-  the changes were indexed in. A script that was reordered says so in its
+  from the last change back. That order is the order the index received the
+  changes in, used when the file and position of every change agree with it. A script that was reordered says so in its
   header; the `at` times of its statements are then not all in sequence.
 
   The order stays by statement time, as before, and the script header, the
   log and the response say why, when the binary log order cannot be
   trusted: a change carries no position (indexed by an old build); the
   changes come from binary logs with different base names; the position
-  goes down while the index's own ids go up, or a later file holds only
-  changes that started more than an hour before those of the file before
-  it, which is a restart of the source's numbering inside the time range (a
-  failover, `RESET MASTER`) or files indexed out of order; or binary log files were indexed with
+  goes down while the index's own ids go up, which is a restart of the
+  source's numbering inside the time range (a failover, `RESET MASTER`) or
+  files indexed out of order; the changes are in more than one binary log
+  file on an index built only with `bintrail index`, whose ids follow the
+  order the files were indexed in (inside one file the order is used); or binary log files were indexed with
   `bintrail index` into an index a stream also writes, less than an hour
   before the earliest change of the range, so its ids do not say in which
   order the changes were written. None of this is looked at when the two
@@ -157,12 +158,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   What does not change here: the time range itself is still cut by
   statement time, so a change that started before `--until` or `--at` and
-  was committed after it is inside the range; `--limit` keeps the newest
+  was committed after it is inside the range. For a single-row
+  `reconstruct` at a past instant this now shows: when the row's changes
+  were reordered, the answer can hold a change committed after that
+  instant, and the command, the web interface and the MCP tool warn about
+  it. Also unchanged: `--limit` keeps the newest
   changes by statement time; `recover-cascade`, `verify`, and the `_snapshot`
   and `_flashback` schemas of the MySQL port still order by statement time
   (#2156). The web interface's undo of a table with cascading foreign-key
-  children answers with a `recover-cascade` script, and now warns when the
-  binary log order differs from the one it used.
+  children answers with a `recover-cascade` script, and now warns, in the
+  response and at the top of the script, when the binary log order differs
+  from the one it used.
 - **Snapshots: a row keeps its last change, not the change whose statement
   started last** (#2151). An update of a snapshot keeps, for each row, the
   last change since the previous one. It took "last" from the time recorded

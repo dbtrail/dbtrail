@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -31,8 +32,8 @@ func lockWaitRows(fileA, fileB string, posA, posB uint64) []query.ResultRow {
 	}
 }
 
-func yes([]query.ResultRow) bool { return true }
-func no([]query.ResultRow) bool  { return false }
+func yes([]query.ResultRow) query.IDProof { return query.IDsFollowStream }
+func no([]query.ResultRow) query.IDProof  { return query.IDsUnproven }
 
 // script2156 renders rows and returns the script without its first line (the
 // generation time), plus the generator for its decision.
@@ -108,7 +109,7 @@ func TestBinlogOrder_whatCannotBeProvenKeepsTheOrderAndWarns(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		rows  func() []query.ResultRow
-		proof func([]query.ResultRow) bool
+		proof func([]query.ResultRow) query.IDProof
 		warn  string
 	}{
 		{"a change with no position", func() []query.ResultRow { return lockWaitRows("binlog.000007", "", 400, 0) }, yes,
@@ -127,7 +128,7 @@ func TestBinlogOrder_whatCannotBeProvenKeepsTheOrderAndWarns(t *testing.T) {
 			r[0].EventTimestamp, r[1].EventTimestamp = order2156T0, order2156T0.Add(time.Hour)
 			return r
 		}, yes,
-			"the binary log files of this time range are not in one sequence"},
+			"the binary log position goes down inside this time range"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			plain := script2156(t, New(nil, nil), tc.rows())
@@ -175,9 +176,9 @@ func TestBinlogOrder_byteIdenticalWhereThereIsNothingToDecide(t *testing.T) {
 		return rows
 	}
 	pg := func() []query.ResultRow { return lockWaitRows("0/FFFFFFFF", "1/5", 9, 5) }
-	mustNotAsk := func([]query.ResultRow) bool {
+	mustNotAsk := func([]query.ResultRow) query.IDProof {
 		t.Fatal("the index was asked although there was nothing to decide")
-		return false
+		return query.IDsUnproven
 	}
 	for _, tc := range []struct {
 		name    string
@@ -271,5 +272,34 @@ func TestWriteCommentParagraph(t *testing.T) {
 	writeCommentParagraph(&buf, "-- NOTE: ", strings.Repeat("x", 300))
 	if got := buf.String(); got != "-- NOTE: "+strings.Repeat("x", 300)+"\n" {
 		t.Fatalf("a word longer than the line was cut or lost: %q", got)
+	}
+}
+
+// The warning is also LOGGED: a script written to a file is read later, and
+// the operator at the terminal has to see it now.
+func TestBinlogOrder_warningIsLogged(t *testing.T) {
+	var logged bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	g := New(nil, nil)
+	g.SetBinlogOrder(no)
+	script2156(t, g, lockWaitRows("binlog.000007", "binlog.000007", 400, 900))
+	if !strings.Contains(logged.String(), "level=WARN") || !strings.Contains(logged.String(), "recover: the binary log and the statement times disagree") {
+		t.Fatalf("no warning in the log: %q", logged.String())
+	}
+	logged.Reset()
+	g.SetBinlogOrder(yes)
+	script2156(t, g, lockWaitRows("binlog.000007", "binlog.000007", 400, 900))
+	if logged.Len() != 0 {
+		t.Fatalf("a sorted script logged: %q", logged.String())
+	}
+}
+
+func TestCommentParagraph(t *testing.T) {
+	got := CommentParagraph("-- WARNING: ", "one\ntwo")
+	if got != "-- WARNING: \"one\\ntwo\"\n" {
+		t.Fatalf("CommentParagraph = %q", got)
 	}
 }

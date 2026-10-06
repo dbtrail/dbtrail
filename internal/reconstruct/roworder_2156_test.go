@@ -29,7 +29,7 @@ func lockWaitEvents(fileA, fileB string) []query.ResultRow {
 	}
 }
 
-func rowYes([]query.ResultRow) bool { return true }
+func rowYes([]query.ResultRow) query.IDProof { return query.IDsFollowStream }
 
 func historyValues(t *testing.T, events []query.ResultRow, at time.Time) []string {
 	t.Helper()
@@ -101,12 +101,12 @@ func TestEventsInBinlogOrder_unprovenKeepsFetchedOrderAndWarns(t *testing.T) {
 	at := roworderT0.Add(time.Minute)
 	for name, tc := range map[string]struct {
 		events []query.ResultRow
-		proof  func([]query.ResultRow) bool
+		proof  func([]query.ResultRow) query.IDProof
 		warn   string
 	}{
 		"no position":      {lockWaitEvents("binlog.000007", ""), rowYes, "carry no binary log position"},
 		"two names":        {lockWaitEvents("a-bin.000001", "b-bin.000001"), rowYes, "different names"},
-		"ids not in order": {lockWaitEvents("binlog.000007", "binlog.000007"), func([]query.ResultRow) bool { return false }, "cannot show which one is right"},
+		"ids not in order": {lockWaitEvents("binlog.000007", "binlog.000007"), func([]query.ResultRow) query.IDProof { return query.IDsUnproven }, "cannot show which one is right"},
 		"no index":         {lockWaitEvents("binlog.000007", "binlog.000007"), nil, "cannot show which one is right"},
 	} {
 		ordered, order := EventsInBinlogOrder(tc.events, at, tc.proof)
@@ -121,5 +121,45 @@ func TestEventsInBinlogOrder_unprovenKeepsFetchedOrderAndWarns(t *testing.T) {
 	ordered, order := EventsInBinlogOrder(lockWaitEvents("0/FFFFFFFF", "1/5"), at, nil)
 	if order.Warning() != "" || order.Sorted() || ordered[0].EventID != 2 {
 		t.Fatalf("PostgreSQL rows: decision %+v, first event %d", order, ordered[0].EventID)
+	}
+}
+
+// A past instant between two commits: A started :02 and committed at once, B
+// started :00, waited and committed after A. As of :02.5 the cut (by statement
+// time) selects both and binary log order applies B last, a value not yet
+// committed at that instant. The order is kept and the reader is warned, only
+// when the request named its own instant and the changes were reordered.
+func TestPastCutWarning(t *testing.T) {
+	const f = "binlog.000007"
+	at := roworderT0.Add(2500 * time.Millisecond)
+	ordered, order := EventsInBinlogOrder(lockWaitEvents(f, f), at, rowYes)
+	state, err := ApplyAt(map[string]any{"id": float64(1), "v": "seed"}, ordered, at)
+	if err != nil || state["v"] != "B" || !order.Sorted() {
+		t.Fatalf("ApplyAt = %v, %v, decision %+v; this case needs B applied last", state, err, order)
+	}
+	warn := PastCutWarning(order, true)
+	for _, want := range []string{
+		"written to the binary log in a different order than their statements started",
+		"selects changes by the time their statement started",
+		"committed AFTER that instant",
+	} {
+		if !strings.Contains(warn, want) {
+			t.Fatalf("warning = %q, want it to hold %q", warn, want)
+		}
+	}
+	if strings.Contains(warn, "--") {
+		t.Fatalf("the warning names a command-line flag; the MCP tool and the web interface show it too: %q", warn)
+	}
+	if got := PastCutWarning(order, false); got != "" {
+		t.Fatalf("a cut at now warned: %q", got)
+	}
+	// Not reordered: one change selected, an agreeing pair, a refusal (which
+	// has its own warning and keeps the statement-time fold).
+	_, one := EventsInBinlogOrder(lockWaitEvents(f, f), roworderT0.Add(time.Second), rowYes)
+	_, refused := EventsInBinlogOrder(lockWaitEvents(f, f), at, nil)
+	for name, o := range map[string]query.BinlogOrder{"one change": one, "refused": refused, "zero": {}} {
+		if got := PastCutWarning(o, true); got != "" {
+			t.Fatalf("%s: warned %q", name, got)
+		}
 	}
 }
