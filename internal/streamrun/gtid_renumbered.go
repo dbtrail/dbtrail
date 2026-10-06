@@ -378,11 +378,14 @@ func mariadbRenumberedError(r *gtidRenumbering) error {
 func detectGTIDRenumbering(sourceDB *sql.DB, flavor, savedSet, file string, pos uint64, timeout time.Duration) (*gtidRenumbering, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	logs, err := listBinaryLogs(ctx, sourceDB)
-	if err != nil {
-		slog.Warn("could not list the source's binary logs; skipping the check that the checkpoint is not past their end",
-			"error", err)
-		logs = nil
+	binaryLogs := func() []binlogFileEntry {
+		logs, err := listBinaryLogs(ctx, sourceDB)
+		if err != nil {
+			slog.Warn("could not list the source's binary logs; skipping the check that the checkpoint is not past their end",
+				"error", err)
+			return nil
+		}
+		return logs
 	}
 	if flavor == gomysql.MariaDBFlavor {
 		var serverID uint32
@@ -390,11 +393,20 @@ func detectGTIDRenumbering(sourceDB *sql.DB, flavor, savedSet, file string, pos 
 		if err := sourceDB.QueryRowContext(ctx, "SELECT @@server_id, @@GLOBAL.gtid_binlog_state").Scan(&serverID, &state); err != nil {
 			return nil, fmt.Errorf("query @@server_id, @@gtid_binlog_state: %w", err)
 		}
-		return classifyMariaDBRenumbering(savedSet, state, serverID, file, pos, logs)
+		return classifyMariaDBRenumbering(savedSet, state, serverID, file, pos, binaryLogs())
 	}
-	var own, executed, purged string
-	if err := sourceDB.QueryRowContext(ctx, "SELECT @@server_uuid, @@GLOBAL.gtid_executed, @@GLOBAL.gtid_purged").Scan(&own, &executed, &purged); err != nil {
-		return nil, fmt.Errorf("query @@server_uuid, @@gtid_executed, @@gtid_purged: %w", err)
+	var mode, own, executed, purged string
+	if err := sourceDB.QueryRowContext(ctx,
+		"SELECT @@GLOBAL.gtid_mode, @@server_uuid, @@GLOBAL.gtid_executed, @@GLOBAL.gtid_purged").Scan(&mode, &own, &executed, &purged); err != nil {
+		return nil, fmt.Errorf("query @@gtid_mode, @@server_uuid, @@gtid_executed, @@gtid_purged: %w", err)
 	}
-	return classifyMySQLRenumbering(savedSet, executed, purged, own, file, pos, logs)
+	// Only a source with gtid_mode=ON numbers its transactions and serves a
+	// GTID resume at all; on any other mode its gtid_executed is frozen, says
+	// nothing about where its history went, and the source refuses the GTID
+	// dump with its own error.
+	if !strings.EqualFold(strings.TrimSpace(mode), "ON") {
+		slog.Debug("source gtid_mode is not ON; skipping the GTID history check", "gtid_mode", mode)
+		return nil, nil
+	}
+	return classifyMySQLRenumbering(savedSet, executed, purged, own, file, pos, binaryLogs())
 }
