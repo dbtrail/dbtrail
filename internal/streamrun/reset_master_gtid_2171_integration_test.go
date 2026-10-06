@@ -104,7 +104,7 @@ func runGTIDResetScenario(t *testing.T, src dupSource, indexDB *sql.DB, indexNam
 	// fresh capture starts in GTID mode (an empty executed set starts in
 	// position mode on MySQL).
 	resetGTIDSourceBinlogs(t, src.db)
-	testutil.MustExec(t, src.db, "INSERT INTO orders (id, amount) VALUES (0, 0)")
+	testutil.MustExec(t, src.db, "INSERT INTO orders (id, amount) VALUES (-1, 0)")
 	cfg := func(n uint32) Config {
 		c := src.config(indexName)
 		c.ServerID = src.serverID + n
