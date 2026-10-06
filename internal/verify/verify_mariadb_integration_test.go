@@ -209,7 +209,11 @@ func setupLiveSourceMariaDB(t *testing.T) (Config, *sql.DB, string) {
 	// SAME logical values, embedded as marshalRow would store them ──
 	testutil.SetupPartitionedTable(t, indexDB, dbName, []time.Time{h1, h2})
 	ts := now.Add(-1 * time.Minute).Format("2006-01-02 15:04:05")
-	testutil.InsertEvent(t, indexDB, "binlog.000001", 100, 200, ts, nil, sourceName, "audit_log", 2 /*UPDATE*/, "1",
+	// A captured MariaDB change always carries its GTID, and live-source
+	// verify cuts the read by it (#2150): domain 0, sequence 1, which every
+	// snapshot taken after the writes above holds.
+	gtid := "0-1-1"
+	testutil.InsertEvent(t, indexDB, "binlog.000001", 100, 200, ts, &gtid, sourceName, "audit_log", 2 /*UPDATE*/, "1",
 		[]byte(`["details","big"]`),
 		[]byte(`{"id":1,"details":{"c":3,"a":1,"b":2},"big":18446744073709551615}`),
 		[]byte(`{"id":1,"details":{"c":3,"a":1,"b":2},"big":18446744073709551615}`))
