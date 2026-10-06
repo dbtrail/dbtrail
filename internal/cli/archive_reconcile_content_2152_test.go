@@ -45,10 +45,12 @@ func changeOf(a archive.Action, col string) (any, bool) {
 }
 
 // `archive reconcile --repair` registers a file whose archive_state row was
-// lost, with archived_at = now. A row with no record would then count, for
-// every snapshot older than the repair, as an archive that may hold a later
-// change (#2152): one wide update per table. So the insert reads the file it
-// registers and carries the same record rotation writes.
+// lost. It records the file's content time range, read from the file, and
+// NOT its newest change (#2152): a refresh skips an archive whose newest
+// change is before the cut it last searched through, and a row lost from
+// archive_state was never seen by any refresh, whatever its position. Left
+// unrecorded, with archived_at = now, the row counts as one written after
+// every older snapshot: each snapshot's next update reads it once.
 func TestAddInsertContent_2152(t *testing.T) {
 	dir := t.TempDir()
 	good := filepath.Join(dir, "p_2026030102.parquet")
@@ -64,21 +66,17 @@ func TestAddInsertContent_2152(t *testing.T) {
 	}
 	got := addInsertContent(context.Background(), actions, false, "")
 
-	if v, ok := changeOf(got[0], "max_event_id"); !ok || v != uint64(9) {
-		t.Fatalf("insert: max_event_id = %v (%v), want 9", v, ok)
-	}
-	if v, _ := changeOf(got[0], "max_binlog_file"); v != "binlog.000003" {
-		t.Fatalf("insert: max_binlog_file = %v, want binlog.000003", v)
-	}
-	if v, _ := changeOf(got[0], "max_start_pos"); v != uint64(4) {
-		t.Fatalf("insert: max_start_pos = %v, want 4", v)
+	for _, c := range []string{"max_event_id", "max_binlog_file", "max_start_pos"} {
+		if v, ok := changeOf(got[0], c); ok {
+			t.Fatalf("insert: %s = %v; a repaired row must leave the newest change unrecorded", c, v)
+		}
 	}
 	want := time.Date(2026, 3, 1, 2, 30, 0, 0, time.UTC)
 	if v, _ := changeOf(got[0], "min_event_ts"); v != want {
 		t.Fatalf("insert: min_event_ts = %v, want %v", v, want)
 	}
-	if _, ok := changeOf(got[1], "max_event_id"); ok {
-		t.Fatal("an update gained the record: only inserts are filled, so a dry run reports no new drift")
+	if _, ok := changeOf(got[1], "min_event_ts"); ok {
+		t.Fatal("an update gained the time range: only inserts are filled, so a dry run reports no new drift")
 	}
 	if len(got[2].Changes) != 1 {
 		t.Fatalf("an unreadable file must register as before (no record = looked at): %+v", got[2].Changes)
@@ -86,9 +84,14 @@ func TestAddInsertContent_2152(t *testing.T) {
 	if len(got[3].Changes) != 2 {
 		t.Fatalf("an S3 object without --deep is not read: %+v", got[3].Changes)
 	}
-	for _, c := range []string{"max_event_id", "max_binlog_file", "max_start_pos", "min_event_ts", "max_event_ts"} {
+	for _, c := range []string{"min_event_ts", "max_event_ts"} {
 		if !reconcileColumns[c] {
 			t.Errorf("%s is not reconcile-writable: the repair would refuse the insert", c)
+		}
+	}
+	for _, c := range []string{"max_event_id", "max_binlog_file", "max_start_pos"} {
+		if reconcileColumns[c] {
+			t.Errorf("%s is reconcile-writable: a repair must never record a newest change", c)
 		}
 	}
 }

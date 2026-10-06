@@ -111,6 +111,17 @@ const (
 	// it. Absent on an index no stream wrote, and on any file written before
 	// this key existed.
 	MetaKeyEventMark = "bintrail.event_mark"
+	// MetaKeyArchiveCut is the cut of the refresh that wrote this file, written
+	// ONLY when that refresh also checked the archives for changes after each
+	// table's position (#2152) and found its archive sources: the position
+	// up to which every change of this file's table, archived or not, has been
+	// looked at. The next refresh reads an archive only when it holds a change
+	// at or after it. The binlog anchor beside it is not the same promise:
+	// files written by older builds, and a snapshot of an empty index that
+	// keeps a dump's position, carry an anchor no refresh searched through.
+	// Its value is opaque here; reconstruct reads and writes it. Absent on a
+	// dump and on any file written without that check.
+	MetaKeyArchiveCut = "bintrail.archive_cut"
 )
 
 // RenderGUCsPinned is the canonical value the capture side stamps under
@@ -153,6 +164,8 @@ type DumpMetadata struct {
 	DDLMark string
 	// EventMark is MetaKeyEventMark, verbatim; "" when absent.
 	EventMark string
+	// ArchiveCut is MetaKeyArchiveCut, verbatim; "" when absent.
+	ArchiveCut string
 	// Producer is MetaKeySnapshotProducer: which code path wrote these bytes
 	// ("dump" | "reconstruct"). Empty on any snapshot written before #1545
 	// stamped it on the dump path; see ProvenanceOf, which does not guess.
@@ -505,6 +518,9 @@ func ReadParquetMetadata(path string) (DumpMetadata, error) {
 	if v, ok := pf.Lookup(MetaKeyDDLMark); ok {
 		m.DDLMark = v
 	}
+	if v, ok := pf.Lookup(MetaKeyArchiveCut); ok {
+		m.ArchiveCut = v
+	}
 	if v, ok := pf.Lookup(MetaKeyEventMark); ok {
 		m.EventMark = v
 	}
@@ -665,6 +681,8 @@ func applyS3FooterKV(m *DumpMetadata, path, key, val string) (corrupt bool) {
 		m.DDLMark = val
 	case MetaKeyEventMark:
 		m.EventMark = val
+	case MetaKeyArchiveCut:
+		m.ArchiveCut = val
 	case MetaKeyLastEventID:
 		m.LastEventID = parseLastEventID(path, val)
 	case MetaKeyRowCount:

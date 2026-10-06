@@ -279,7 +279,14 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 						// update reads once this partition is dropped, to know
 						// whether the archive holds a change after its position.
 						// Overwritten on a re-archive like the time range: the
-						// record describes the file just written.
+						// record describes the file just written. archived_at
+						// too: a cycle whose upload failed archives the
+						// partition again next time, with what was indexed
+						// into it since, and an update with no cut reads an
+						// unrecorded or late archive only when it was written
+						// after its snapshot. Keeping the first attempt's time
+						// would skip it. A newer archived_at only makes
+						// `archive reconcile --prune-min-age` wait longer.
 						newestFile, newestPos := archive.NewestColumns(newest)
 						if _, err := db.ExecContext(ctx,
 							`INSERT INTO archive_state
@@ -297,7 +304,8 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 								column_set = VALUES(column_set),
 								max_event_id = VALUES(max_event_id),
 								max_binlog_file = VALUES(max_binlog_file),
-								max_start_pos = VALUES(max_start_pos)`,
+								max_start_pos = VALUES(max_start_pos),
+								archived_at = CURRENT_TIMESTAMP`,
 							name, opts.BintrailID, outPath, fileSize, n, insertBucket, insertKey, insertMin, insertMax, columnSet,
 							newest.EventID, newestFile, newestPos,
 						); err != nil {

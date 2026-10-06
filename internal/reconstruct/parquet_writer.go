@@ -325,6 +325,9 @@ func snapshotFileMetadata(in mergeInput) map[string]string {
 		if in.EventMark != "" {
 			md[baseline.MetaKeyEventMark] = in.EventMark
 		}
+		if in.ArchivesChecked {
+			md[baseline.MetaKeyArchiveCut] = encodeArchiveCut(*in.Cut)
+		}
 	case in.SourceBaseline.Metadata.BinlogFile != "":
 		// No cut means the index holds no events, so nothing was folded and the
 		// source's anchor is still exactly where deltas resume. Carrying it over

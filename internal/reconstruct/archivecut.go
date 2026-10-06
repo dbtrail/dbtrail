@@ -1,6 +1,7 @@
 package reconstruct
 
 import (
+	"encoding/json"
 	"io/fs"
 	"log/slog"
 	"path/filepath"
@@ -39,16 +40,19 @@ import (
 //
 // # Where the cut is read from
 //
-// No snapshot records its run's cut as such. Every file a refresh FOLDS is
-// anchored at the cut, and a file it carries forward keeps an older anchor
-// that an earlier refresh resolved the same way, so the newest anchor among
-// the refresh-written files of the table's own snapshot directory is the cut,
-// or an earlier one, which only reads more. A dump's anchor is left out: it is
-// the source's position when the dump started, and capture may still have been
-// behind it. The table's OWN directory, not the newest one: a table missing
-// from a newer snapshot is read from an older one, which a newer refresh never
-// checked it against. A file that does not read is left out, which can only
-// lower the cut. Snapshots in S3 are not read here and get no cut.
+// From baseline.MetaKeyArchiveCut and nothing else. A refresh writes that key
+// on the files it writes only when it checked the archives itself
+// (runChecksArchives) and had a cut. The binlog anchor beside it is not that
+// promise: a file written by a build that never looked at archives or at late
+// changes carries an anchor no refresh searched through archived hours up to,
+// and a snapshot of an empty index keeps its source's (perhaps a dump's)
+// position. The newest key in the table's OWN snapshot directory is used: a
+// carried-forward file keeps an older key, which an earlier refresh wrote the
+// same way and which only reads more. The table's own directory, not the
+// newest one: a table missing from a newer snapshot is read from an older one,
+// which a newer refresh never checked it against. A file or key that does not
+// read is left out, which can only lower the cut. Snapshots in S3 are not read
+// here and get no cut.
 type archiveCuts struct {
 	off bool
 	mu  sync.Mutex
@@ -81,8 +85,8 @@ func (c *archiveCuts) forBaseline(baselinePath string) *query.BinlogPos {
 	return cut
 }
 
-// snapshotCutOf is the newest anchor among the refresh-written Parquet files
-// under snapshotDir, or nil when there is none.
+// snapshotCutOf is the newest archive cut among the Parquet files under
+// snapshotDir, or nil when there is none.
 func snapshotCutOf(snapshotDir string) *query.BinlogPos {
 	var cut *query.BinlogPos
 	_ = filepath.WalkDir(snapshotDir, func(path string, d fs.DirEntry, err error) error {
@@ -94,14 +98,46 @@ func snapshotCutOf(snapshotDir string) *query.BinlogPos {
 			slog.Debug("the snapshot's cut is read without a file that does not open", "path", path, "error", err)
 			return nil
 		}
-		if m.Producer != baseline.ProducerReconstruct || m.BinlogFile == "" || m.BinlogPos <= 0 {
+		p, ok := parseArchiveCut(m.ArchiveCut)
+		if !ok {
 			return nil
 		}
-		p := query.BinlogPos{File: m.BinlogFile, Pos: uint64(m.BinlogPos)}
 		if cut == nil || cut.AtOrBefore(p) {
 			cut = &p
 		}
 		return nil
 	})
 	return cut
+}
+
+// archiveCutJSON is baseline.MetaKeyArchiveCut's value.
+type archiveCutJSON struct {
+	File string  `json:"binlog_file"`
+	Pos  *uint64 `json:"start_pos"`
+}
+
+func encodeArchiveCut(p query.BinlogPos) string {
+	b, _ := json.Marshal(archiveCutJSON{File: p.File, Pos: &p.Pos}) // a string and a number: cannot fail
+	return string(b)
+}
+
+// parseArchiveCut reads the key; ok is false for an absent or malformed one.
+func parseArchiveCut(v string) (query.BinlogPos, bool) {
+	var c archiveCutJSON
+	if v == "" || json.Unmarshal([]byte(v), &c) != nil || c.File == "" || c.Pos == nil {
+		return query.BinlogPos{}, false
+	}
+	return query.BinlogPos{File: c.File, Pos: *c.Pos}, true
+}
+
+// runChecksArchives reports whether a refresh run may write the archive-cut
+// key (#2152): only when its own fetches checked the archives in a way the
+// next refresh can build on.
+//   - backfilled: `bintrail index` also writes this index, so a row with an
+//     old position can be indexed after this run, below its cut.
+//   - allowGaps: a fetch may go on past an archive source it could not read.
+//   - archErr: discovering the archive sources failed, and under allowGaps
+//     the run went on without them.
+func runChecksArchives(backfilled, allowGaps bool, archErr error) bool {
+	return !backfilled && !allowGaps && archErr == nil
 }

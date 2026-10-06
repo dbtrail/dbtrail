@@ -150,6 +150,9 @@ type FullTableConfig struct {
 	// checked through, so archives before it are not read again (#2152). nil
 	// for a direct ReconstructTable caller: no cut, the time-bounded rule.
 	archiveCuts *archiveCuts
+	// archivesChecked is runChecksArchives for this run: whether the files it
+	// writes carry baseline.MetaKeyArchiveCut.
+	archivesChecked bool
 	// ddlMark is the run's DDL mark, encoded (ddl_mark.go): the newest
 	// schema_changes row, read before the cut and so before any table's
 	// check. "" when the index was not written by a stream or holds no row.
@@ -846,6 +849,7 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 		}
 		slog.Warn("archive source discovery failed; proceeding without archives", "error", archErr)
 	}
+	cfg.archivesChecked = runChecksArchives(backfilled, cfg.AllowGaps, archErr)
 
 	// Report slice is protected by a mutex for the parallel goroutines.
 	reports := make([]*TableReport, 0, len(cfg.Tables))
@@ -1639,6 +1643,7 @@ func ReconstructTable(
 		in.Cut = cfg.cut
 		in.DDLMark = stampMark
 		in.EventMark = cfg.eventMark
+		in.ArchivesChecked = cfg.archivesChecked
 		in.CaptureGap = capGap
 		in.SourceBaseline = baselineMeta{
 			Path:     baselinePath,
@@ -1841,6 +1846,10 @@ type mergeInput struct {
 	LastEventID uint64
 	// DDLMark is stamped as baseline.MetaKeyDDLMark (#1912); "" leaves it out.
 	DDLMark string
+	// ArchivesChecked: this run checked the archives (runChecksArchives), so
+	// Cut is also stamped as baseline.MetaKeyArchiveCut (#2152). Without a Cut
+	// nothing is stamped.
+	ArchivesChecked bool
 	// EventMark is stamped as baseline.MetaKeyEventMark beside Cut (#2160);
 	// "" leaves it out. Without a cut the source's own mark is kept with its
 	// own position instead.

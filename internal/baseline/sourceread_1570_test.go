@@ -238,6 +238,7 @@ func TestFooterReaders_agreeOnEveryKey(t *testing.T) {
 		"MetaKeyLastEventID":       "4500",
 		"MetaKeyDDLMark":           `{"id":7,"binlog_file":"binlog.000003","binlog_pos":500,"detected_at":"2026-06-01T00:00:00Z","ddl_type":"TRUNCATE TABLE"}`,
 		"MetaKeyEventMark":         `{"id":4500,"binlog_file":"binlog.000009","end_pos":3000}`,
+		"MetaKeyArchiveCut":        `{"binlog_file":"binlog.000009","start_pos":3000}`,
 		"MetaKeySnapshotProducer":  ProducerReconstruct,
 		"MetaKeyDerivedFrom":       "2026-06-03T03:00:00Z",
 		"MetaKeyDerivedFromPath":   "/b/2026-06-03T03-00-00Z/shop/t.parquet",

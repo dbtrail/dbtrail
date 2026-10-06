@@ -97,8 +97,10 @@ type partitionHead struct {
 // retention.
 //
 // What it still cannot see: an hour rotated out WITHOUT an archive, and an
-// archive whose archive_state row is gone (`archive reconcile --repair`
-// re-registers it).
+// archive whose archive_state row is gone. `archive reconcile --repair`
+// re-registers such a row WITHOUT a newest change and with archived_at = now,
+// so each older snapshot's next update reads it once (a recorded position
+// below the later cuts would hide it from every update).
 //
 // A value is a snapshot of the index. Load it AFTER the fetch's upper bound is
 // fixed (a refresh: after its cut), or a late event indexed in between is
