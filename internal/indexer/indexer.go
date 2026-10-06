@@ -828,6 +828,16 @@ func EnsureSchema(db *sql.DB) error {
 		return err
 	}
 
+	// binlog_file_identity names the FILE the checkpoint's coordinates point
+	// into, not just its name (#2172): RESET MASTER reuses every name, and a
+	// new numbering that grew back past the checkpoint is otherwise the same
+	// name at a valid offset. NULL on rows an older build wrote: no check.
+	if err := ensureColumn(db, "stream_state", "binlog_file_identity",
+		`ALTER TABLE stream_state ADD COLUMN binlog_file_identity VARCHAR(64) DEFAULT NULL COMMENT 'identity of the binlog file the checkpoint names (#2172): fde:<creation time>:<server_id> from its FORMAT_DESCRIPTION event; a position-mode resume reads the file under that name again and treats a different identity as a renumbered binary log; NULL = unknown (older build, or not seen yet)' AFTER source_identity`,
+	); err != nil {
+		return err
+	}
+
 	if err := ensureColumn(db, "stream_state", "flavor",
 		`ALTER TABLE stream_state ADD COLUMN flavor VARCHAR(16) NOT NULL DEFAULT 'mysql' COMMENT 'source flavor: mysql or mariadb; selects the GTID parser on resume' AFTER gtid_set`,
 	); err != nil {

@@ -85,6 +85,13 @@ type streamState struct {
 	// as NULL). File numbers are compared only between checkpoints of one
 	// identity (#2171).
 	sourceIdentity string
+	// fileIdentity is the identity of the checkpoint's binlog file as LOADED
+	// from stream_state.binlog_file_identity (#2172; "" = unknown, NULL).
+	// fileIdents is the running stream's registry the checkpoint WRITES it
+	// from; nil for the bare states a gap advance or --reset writes, which
+	// store NULL.
+	fileIdentity string
+	fileIdents   *fileIdentities
 
 	// skips is the shared capture-skip tally (#1034): the StreamParser records
 	// every event it read and dropped (column-count mismatch, statement-format
@@ -110,7 +117,7 @@ type streamState struct {
 // loadStreamState loads the saved stream_state row, returning nil if no row exists.
 func loadStreamState(db *sql.DB) (*streamState, error) {
 	var s streamState
-	var gtidSet, bintrailID, srcIdentity sql.NullString
+	var gtidSet, bintrailID, srcIdentity, fileIdentity sql.NullString
 	// dedup_floor_event_id is NULL on every checkpoint an older build wrote,
 	// and that has to read as 0 = no floor, not as an error: the whole point
 	// is that an index nobody has migrated still resumes, just with the
@@ -119,11 +126,11 @@ func loadStreamState(db *sql.DB) (*streamState, error) {
 	err := db.QueryRow(`
 		SELECT mode, binlog_file, binlog_position, gtid_set, flavor,
 		       events_indexed, last_event_time, server_id, bintrail_id,
-		       dedup_floor_event_id, source_identity
+		       dedup_floor_event_id, source_identity, binlog_file_identity
 		FROM stream_state WHERE id = 1`).Scan(
 		&s.mode, &s.binlogFile, &s.binlogPos, &gtidSet, &s.flavor,
 		&s.eventsIndexed, &s.lastEventTime, &s.serverID, &bintrailID,
-		&dedupFloor, &srcIdentity)
+		&dedupFloor, &srcIdentity, &fileIdentity)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -137,6 +144,7 @@ func loadStreamState(db *sql.DB) (*streamState, error) {
 		s.bintrailID = bintrailID.String
 	}
 	s.sourceIdentity = srcIdentity.String
+	s.fileIdentity = fileIdentity.String
 	if dedupFloor.Valid && dedupFloor.Int64 > 0 {
 		s.dedupFloorID = dedupFloor.Int64
 	}
@@ -252,6 +260,14 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 		dedupFloor = state.dedupFloorID
 	}
 	args = append(args, dedupFloor)
+	// The identity of the file the checkpoint names (#2172), NULL when this
+	// run has not seen it. Always overwritten, never kept: an old identity
+	// beside a new file name would read as a renumbering on the next start.
+	var fileIdentity any
+	if file, _ := checkpointPosition(state); state.fileIdents.get(file) != "" {
+		fileIdentity = state.fileIdents.get(file)
+	}
+	args = append(args, fileIdentity)
 	// mode is in the UPDATE arm for the cross-mode --reset path (#1079): the
 	// reset no longer DELETEs the row, so the mode switch must land through
 	// this upsert. For every other caller mode is invariant across the run.
@@ -264,8 +280,8 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 		INSERT INTO stream_state
 		    (id, mode, binlog_file, binlog_position, gtid_set, flavor,
 		     events_indexed, last_event_time, last_checkpoint, server_id, bintrail_id, source_identity,
-		     capture_skips, dedup_floor_event_id)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, ?, ?, ?)
+		     capture_skips, dedup_floor_event_id, binlog_file_identity)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 		    mode            = VALUES(mode),
 		    binlog_file     = VALUES(binlog_file),
@@ -279,7 +295,8 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 		    bintrail_id     = VALUES(bintrail_id),
 		    source_identity = VALUES(source_identity),
 		    capture_skips   = COALESCE(VALUES(capture_skips), capture_skips),
-		    dedup_floor_event_id = VALUES(dedup_floor_event_id)`,
+		    dedup_floor_event_id = VALUES(dedup_floor_event_id),
+		    binlog_file_identity = VALUES(binlog_file_identity)`,
 		args...)
 	return err
 }
@@ -2505,6 +2522,55 @@ func oneRun(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	// ── 6a. Binlog connection settings ───────────────────────────────────────
+	// Built before the gap check: the position-mode check of the checkpoint's
+	// file (#2172) opens a dump with the very same settings as the stream.
+	host, port, user, password, err := cfg.Deps.ParseSourceDSN(cfg.SourceDSN)
+	if err != nil {
+		return err
+	}
+
+	tlsCfg, err := buildTLSConfig(cfg.SSLMode, cfg.SSLCA, cfg.SSLCert, cfg.SSLKey, host)
+	if err != nil {
+		return err
+	}
+
+	syncerCfg := replication.BinlogSyncerConfig{
+		ServerID:                cfg.ServerID,
+		Flavor:                  cfg.Flavor,
+		Host:                    host,
+		Port:                    port,
+		User:                    user,
+		Password:                password,
+		HeartbeatPeriod:         30 * time.Second,
+		MaxReconnectAttempts:    0, // infinite retry
+		TLSConfig:               tlsCfg,
+		TimestampStringLocation: time.UTC, // see internal/parser/parser.go (#757)
+	}
+	if cfg.Flavor == "mariadb" {
+		// Ask the MariaDB source to send ANNOTATE_ROWS events (the original
+		// SQL statement, MariaDB's sibling of MySQL's ROWS_QUERY_EVENT) over
+		// the replication stream. Unlike MySQL — which sends ROWS_QUERY
+		// unconditionally when binlog_rows_query_log_events=ON — MariaDB only
+		// forwards ANNOTATE events to a replica that set this dump flag, even
+		// when binlog_annotate_row_events=ON wrote them to the binlog (#699).
+		// Harmless when the source has annotation off: no events, no cost.
+		syncerCfg.DumpCommandFlag |= replication.BINLOG_SEND_ANNOTATE_ROWS_EVENT
+		// MariaDB 11.4+ writes events that pass through the transaction or
+		// statement cache (TABLE_MAP, row events, ANNOTATE) with LogPos=0 in
+		// the binlog itself — only directly-written events (GTID, XID) carry a
+		// real end position. Without this, every captured row stores
+		// start_pos = 2^64-EventSize (underflow) and end_pos = 0, and the
+		// resume-time dedup (deleteEventsSinceCheckpoint's start_pos >= pos
+		// cut) then deletes every already-indexed row in the checkpoint's file
+		// on every restart (#1117). FillZeroLogPos makes go-mysql recompute
+		// LogPos for those events from the running position (exact, because it
+		// also forces BINLOG_SEND_ANNOTATE_ROWS_EVENT so no in-file event is
+		// missing from the wire). The option is library-gated to the MariaDB
+		// flavor and inert elsewhere.
+		syncerCfg.FillZeroLogPos = true
+	}
+
 	// ── 6b. Detect binlog gap ────────────────────────────────────────────
 	// Only check for gaps when resuming from a saved checkpoint (not on first run).
 	// gtidAdvanced tracks whether the GTID auto-advance branch below ran — see
@@ -2522,6 +2588,12 @@ func oneRun(ctx context.Context, cfg Config) error {
 	positionRenumbered := false
 	positionPastEnd := false
 	gtidRenumbered := false
+	// posCheck is the #2172 verdict on the checkpoint's binlog file
+	// (checkPositionCheckpointFile); positionPurgeAdvance marks an advance
+	// past purged files that stays in the checkpoint's numbering as far as
+	// anything here can tell, whose cleanup the residual limit below names.
+	var posCheck positionFileCheck
+	positionPurgeAdvance := false
 	if saved != nil {
 		resumeFloor = saved.dedupFloorID
 	}
@@ -2605,6 +2677,24 @@ func oneRun(ctx context.Context, cfg Config) error {
 			// Handled above; the purge check below would compare the old set.
 		case mode == "position":
 			gap, gapErr = detectPositionGap(sourceDB, startFile, startPos, gapTimeout)
+			if gapErr == nil && saved.mode == "position" {
+				// Is the file under the checkpoint's name the checkpoint's own
+				// file, and the checkpoint this server's (#2172)? Before the
+				// advance and the resume cleanup: on another file the cleanup
+				// deletes rows the source will never send again.
+				var checkErr error
+				posCheck, checkErr = checkPositionCheckpointFile(gap, saved, srcIdentity, func(file string) (string, error) {
+					probeCtx, cancel := context.WithTimeout(ctx, gapTimeout)
+					defer cancel()
+					return probeBinlogFileIdentity(probeCtx, syncerCfg, cfg.SSLMode, file)
+				})
+				if checkErr != nil {
+					slog.Error("binlog file check failed", "error", checkErr)
+					return fmt.Errorf("checking that binlog file %s on the source is the one the checkpoint was read from: %w "+
+						"(nothing was changed; retry, the check runs again on the next start)", saved.binlogFile, checkErr)
+				}
+				gap = posCheck.gap
+			}
 		case mode == "gtid":
 			// MySQL and MariaDB expose the purge boundary differently
 			// (@@gtid_purged vs BINLOG_GTID_POS over the oldest surviving binlog),
@@ -2654,7 +2744,10 @@ func oneRun(ctx context.Context, cfg Config) error {
 					// position of the new numbering and delete them, so the
 					// floor starts above every row already in the index,
 					// exactly as a first run's does.
-					if !continuesNumbering(saved.binlogFile, saved.binlogPos, startFile, uint64(startPos)) {
+					// The same holds when the checkpoint's file turned out to be
+					// another file, or another server's (#2172): its name may
+					// even sort below the start.
+					if posCheck.kind != positionContinues || !continuesNumbering(saved.binlogFile, saved.binlogPos, startFile, uint64(startPos)) {
 						fresh, err := freshDedupFloor(indexDB)
 						if err != nil {
 							return fmt.Errorf("binlog numbering started over (checkpoint %s:%d, oldest source file %s): %w",
@@ -2663,6 +2756,8 @@ func oneRun(ctx context.Context, cfg Config) error {
 						resumeFloor = fresh
 						positionRenumbered = true
 						positionPastEnd = gap.CheckpointPastEnd
+					} else if saved.mode == "position" {
+						positionPurgeAdvance = true
 					}
 
 				case "gtid":
@@ -2737,7 +2832,9 @@ func oneRun(ctx context.Context, cfg Config) error {
 		// diverges); position mode has no identity signal at gap-detection time.
 		// Escalate loudly rather than resume silently. Non-blocking: a hard error
 		// here would break every legitimate position-mode resume.
-		if gap != nil && gap.RebuildUndetectable {
+		if posCheck.verified {
+			fmt.Printf("Source: binlog file %s is the one the checkpoint was read from \u2713\n", saved.binlogFile)
+		} else if gap != nil && gap.RebuildUndetectable {
 			slog.Warn("position-mode resume cannot detect a source rebuild: if the source was "+
 				"rebuilt (RESET MASTER + restore) and a same-named binlog regrew past the checkpoint "+
 				"offset, streaming will silently index a divergent binlog history. GTID mode detects "+
@@ -2807,11 +2904,19 @@ func oneRun(ctx context.Context, cfg Config) error {
 			return err
 		}
 		warn, line := positionCleanupSkipNotice(positionPastEnd, saved.binlogFile, saved.binlogPos, startFile, startPos)
+		if posCheck.kind != positionContinues {
+			warn, line = positionCheckSkipNotice(posCheck.kind, saved.binlogFile, saved.binlogPos, startFile, startPos)
+		}
 		slog.Warn(warn,
 			"checkpoint_file", saved.binlogFile, "checkpoint_pos", saved.binlogPos,
 			"start_file", startFile, "start_pos", startPos)
 		fmt.Println(line)
+		warnLateIndexWrite()
 	} else if saved != nil && saved.mode == mode && mode == "position" {
+		if positionPurgeAdvance {
+			warnPurgeAdvanceCleanup(saved.binlogFile, saved.binlogPos, startFile, startPos)
+		}
+		warnFloorlessCleanup(saved.dedupFloorID)
 		if stopped, err := awaitEarlierCleanup(ctx, indexDB, cfg.Hooks); stopped || err != nil {
 			return err
 		}
@@ -2836,12 +2941,14 @@ func oneRun(ctx context.Context, cfg Config) error {
 				"checkpoint_file", saved.binlogFile, "checkpoint_pos", saved.binlogPos,
 				"start_file", startFile, "start_pos", startPos)
 			fmt.Println("Cleanup: skipped, the source's GTID numbering started over; indexed events are kept")
+			warnLateIndexWrite()
 		} else if gtidAdvanced {
 			slog.Warn("skipping dedup-on-resume after GTID gap auto-advance; " +
 				"re-received events in this window may be duplicated — this is a known, " +
 				"accepted trade-off (deleting on the pre-advance coordinates would destroy " +
 				"already-captured rows below the purge floor); see docs/streaming.md")
 		} else {
+			warnFloorlessCleanup(saved.dedupFloorID)
 			if stopped, err := awaitEarlierCleanup(ctx, indexDB, cfg.Hooks); stopped || err != nil {
 				return err
 			}
@@ -2871,6 +2978,13 @@ func oneRun(ctx context.Context, cfg Config) error {
 		accGTID:        accGTID,
 		bintrailID:     bintrailID,
 		sourceIdentity: srcIdentity,
+		fileIdents:     newFileIdentities(),
+	}
+	// The checkpoint's file was verified above: carry its identity so the
+	// checkpoints written before the stream re-reads the file's format
+	// description (the ticker fires at once) do not store NULL over it.
+	if posCheck.verified {
+		state.fileIdents.set(saved.binlogFile, saved.fileIdentity)
 	}
 	if saved != nil {
 		state.eventsIndexed = saved.eventsIndexed
@@ -2911,69 +3025,8 @@ func oneRun(ctx context.Context, cfg Config) error {
 	}
 	state.skips = skips
 
-	// ── 7. Parse source DSN for BinlogSyncer ─────────────────────────────
-	host, port, user, password, err := cfg.Deps.ParseSourceDSN(cfg.SourceDSN)
-	if err != nil {
-		return err
-	}
-
-	// ── 6b. Build TLS config ──────────────────────────────────────────────────
-	tlsCfg, err := buildTLSConfig(cfg.SSLMode, cfg.SSLCA, cfg.SSLCert, cfg.SSLKey, host)
-	if err != nil {
-		return err
-	}
-
-	// ── 7. Create BinlogSyncer ────────────────────────────────────────────────────
-	syncerCfg := replication.BinlogSyncerConfig{
-		ServerID:                cfg.ServerID,
-		Flavor:                  cfg.Flavor,
-		Host:                    host,
-		Port:                    port,
-		User:                    user,
-		Password:                password,
-		HeartbeatPeriod:         30 * time.Second,
-		MaxReconnectAttempts:    0, // infinite retry
-		TLSConfig:               tlsCfg,
-		TimestampStringLocation: time.UTC, // see internal/parser/parser.go (#757)
-	}
-	if cfg.Flavor == "mariadb" {
-		// Ask the MariaDB source to send ANNOTATE_ROWS events (the original
-		// SQL statement, MariaDB's sibling of MySQL's ROWS_QUERY_EVENT) over
-		// the replication stream. Unlike MySQL — which sends ROWS_QUERY
-		// unconditionally when binlog_rows_query_log_events=ON — MariaDB only
-		// forwards ANNOTATE events to a replica that set this dump flag, even
-		// when binlog_annotate_row_events=ON wrote them to the binlog (#699).
-		// Harmless when the source has annotation off: no events, no cost.
-		syncerCfg.DumpCommandFlag |= replication.BINLOG_SEND_ANNOTATE_ROWS_EVENT
-		// MariaDB 11.4+ writes events that pass through the transaction or
-		// statement cache (TABLE_MAP, row events, ANNOTATE) with LogPos=0 in
-		// the binlog itself — only directly-written events (GTID, XID) carry a
-		// real end position. Without this, every captured row stores
-		// start_pos = 2^64-EventSize (underflow) and end_pos = 0, and the
-		// resume-time dedup (deleteEventsSinceCheckpoint's start_pos >= pos
-		// cut) then deletes every already-indexed row in the checkpoint's file
-		// on every restart (#1117). FillZeroLogPos makes go-mysql recompute
-		// LogPos for those events from the running position (exact, because it
-		// also forces BINLOG_SEND_ANNOTATE_ROWS_EVENT so no in-file event is
-		// missing from the wire). The option is library-gated to the MariaDB
-		// flavor and inert elsewhere.
-		syncerCfg.FillZeroLogPos = true
-	}
-
-	// Use a closure defer so the active syncer is always closed on exit,
-	// even if we replace it during the preferred-mode TLS fallback below.
-	// The nil guard prevents a panic if an early-return is added before
-	// syncer is assigned.
-	var syncer *replication.BinlogSyncer
-	defer func() {
-		if syncer != nil {
-			syncer.Close()
-		}
-	}()
-	syncer = replication.NewBinlogSyncer(syncerCfg)
-
 	// startStreamer starts sync from the resolved position/GTID set.
-	startStreamer := func() (*replication.BinlogStreamer, error) {
+	startStreamer := func(syncer *replication.BinlogSyncer) (*replication.BinlogStreamer, error) {
 		switch mode {
 		case "position":
 			s, startErr := syncer.StartSync(gomysql.Position{Name: startFile, Pos: startPos})
@@ -2997,21 +3050,10 @@ func oneRun(ctx context.Context, cfg Config) error {
 	}
 
 	// ── 8. Start sync ───────────────────────────────────────────────────────────────
-	streamer, startErr := startStreamer()
-	if startErr != nil && cfg.SSLMode == "preferred" && isTLSUnsupportedError(startErr) {
-		// #947: downgrade to plaintext ONLY when the server genuinely does not
-		// support TLS. Any other failure (auth denied, unreachable host, bad
-		// binlog position) must NOT retry unencrypted — that would resend the
-		// source credentials in the clear on an error unrelated to TLS. This
-		// path DOES transmit credentials unencrypted, so warn loudly.
-		slog.Warn("source does not support TLS; retrying WITHOUT encryption "+
-			"(--ssl-mode preferred) — credentials and data will be sent in cleartext",
-			"error", startErr)
-		syncer.Close()
-		syncerCfg.TLSConfig = nil
-		syncer = replication.NewBinlogSyncer(syncerCfg)
-		streamer, startErr = startStreamer()
-	}
+	// startBinlogSync carries the --ssl-mode preferred plaintext downgrade
+	// (#947), shared with the #2172 file check so the two cannot differ.
+	syncer, streamer, startErr := startBinlogSync(syncerCfg, cfg.SSLMode, startStreamer)
+	defer syncer.Close()
 	if startErr != nil {
 		return startErr
 	}
@@ -3066,6 +3108,9 @@ func oneRun(ctx context.Context, cfg Config) error {
 	// Run (internal/parser/stream.go) so its GTID-mode remediation names the
 	// right system variable (#845).
 	sp.SetFlavor(cfg.Flavor)
+	// Every file the stream enters reports its identity; the checkpoint
+	// stores the one of the file it names (#2172).
+	sp.SetFileOpenedHook(state.fileIdents.set)
 	idx := indexer.New(indexDB, cfg.BatchSize)
 
 	// ── 11. DDL auto-snapshot hook — registered BEFORE Run starts so even a
