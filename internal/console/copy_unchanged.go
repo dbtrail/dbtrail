@@ -329,9 +329,12 @@ func copyLookupSince(ctx context.Context, db *sql.DB, t views.BaselineTable, cut
 // after one cut. That verdict cannot become false: the cut is a fixed binlog
 // position and the change is positioned after it. Without it every heavy
 // statement over such a table repeats the lookups, and the one over the
-// older hours can take the whole budget each time. "Unchanged" is never
-// remembered: it is only true until the next change. A new cut for the table
-// (a newer snapshot file) replaces the entry.
+// older hours can take the whole budget each time. It also holds the archive
+// verdict (#2187), which only says the table MAY have changed (an archive
+// holds every table of its hour): it stays until the table's cut moves, even
+// if archive_state is later edited, which only sends reads to MySQL.
+// "Unchanged" is never remembered: it is only true until the next change. A
+// new cut for the table (a newer snapshot file) replaces the entry.
 type copyChangedMemo struct {
 	mu   sync.Mutex
 	seen map[copyChangedKey]copyChangedAt
@@ -639,7 +642,8 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 		return "too many schema changes since the snapshot to check each one"
 	}
 	backfilled := indexBackfilled(ctx, b.db)
-	var floor time.Time
+	var floor, oldestSince time.Time
+	sinces := make([]time.Time, len(tables))
 	for i, t := range tables {
 		for _, r := range ddl {
 			if ddlTouches(r, t.Schema, t.Table, cuts[i].anchor) {
@@ -655,6 +659,9 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 		}
 		if f := copyTimeFloor(since); floor.IsZero() || f.Before(floor) {
 			floor = f
+		}
+		if sinces[i] = since; oldestSince.IsZero() || since.Before(oldestSince) {
+			oldestSince = since
 		}
 		// Marked as searching below its own floor (#2138): the engine would
 		// otherwise look at the newest row of every partition for each table
@@ -736,6 +743,28 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 	oldest := status.OldestLivePartitionHour(parts)
 	if oldest.IsZero() || oldest.After(floor) {
 		return "the index no longer holds every change since the snapshot (older partitions were rotated out), so it cannot say nothing changed"
+	}
+	// And the hours rotation took from below the floors (#2187). A change
+	// indexed late lands in an old hour, the next one rotation archives and
+	// drops, and then neither lookup above sees it. archive_state records the
+	// newest position each archive holds, and is read here by the rule a
+	// fetch with no cut reads it by (query.ArchiveHeads). After the
+	// partitions, on purpose: rotation registers an archive before it drops
+	// its partition, so a partition the lookups missed is registered by now.
+	// Only the rows written since the oldest of the tables' times are read.
+	archives, present, err := query.LoadArchivesWrittenSince(ctx, b.db, oldestSince)
+	if err != nil {
+		return unreadable("the index's archives", err)
+	}
+	if !present {
+		return "the index keeps no record of its archives, so a change in an hour already rotated out cannot be ruled out"
+	}
+	for i, t := range tables {
+		if n := archives.MayHoldAfter(sinces[i], cuts[i].anchor); n > 0 {
+			return s.copyChanged.put(id, t, cuts[i].anchor, fmt.Sprintf(
+				"%s.%s may have changed since its snapshot: %d archive(s) of older hours, written since, may hold a later change (an archive is not split by table)",
+				t.Schema, t.Table, n))
+		}
 	}
 	return ""
 }

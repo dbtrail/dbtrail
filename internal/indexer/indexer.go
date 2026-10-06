@@ -1254,5 +1254,26 @@ func EnsureArchiveStateSchema(db *sql.DB) error {
 	); err != nil {
 		return err
 	}
+	// The routed port asks, per statement, which archives were written since
+	// a snapshot (#2187, query.LoadArchivesWrittenSince). With this index that
+	// is a range read of the few rows rotation wrote since; without it, a scan
+	// of every row (a year of hourly archives: a few milliseconds per
+	// statement). An index without it is still answered correctly, so an
+	// account with no ALTER (a read-plane DSN) is warned, not refused.
+	if err := ensureIndex(db, "archive_state", "idx_archived_at",
+		`ALTER TABLE archive_state ADD INDEX idx_archived_at (archived_at)`); err != nil {
+		var mysqlErr *mysql.MySQLError
+		if !errors.As(err, &mysqlErr) || (mysqlErr.Number != 1142 && mysqlErr.Number != 1044) {
+			return err
+		}
+		archivedAtIndexWarn.Do(func() {
+			slog.Warn("could not add index idx_archived_at to archive_state; the routed port's check of the archives will be slower; "+
+				"run any bintrail command once with an account that has ALTER on the index database to add it",
+				"error", err)
+		})
+	}
 	return nil
 }
+
+// archivedAtIndexWarn keeps that warning to once per process.
+var archivedAtIndexWarn sync.Once

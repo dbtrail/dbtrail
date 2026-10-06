@@ -628,6 +628,8 @@ jobs:
             || { echo "FATAL: verify after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationCopyUnchanged_numberingStartedOver_2160 ' /tmp/mysql-it.out \
             || { echo "FATAL: read routing after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationCopyUnchanged_lateChangeArchivedAndDropped_2187 ' /tmp/mysql-it.out \
+            || { echo "FATAL: read routing after a late change was archived and dropped did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestCascade_afterTheBinlogNumberingStartsOver_2177 ' /tmp/mysql-it.out \
             || { echo "FATAL: cascade recovery after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestCheckNumberingContinues_2160 ' /tmp/mysql-it.out || { echo "FATAL: the binlog renumbering check did not run (false-green tripwire)" >&2; exit 1; }
