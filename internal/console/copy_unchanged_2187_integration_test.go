@@ -188,20 +188,39 @@ func TestIntegrationCopyUnchanged_archiveCost_2187(t *testing.T) {
 		}
 		testutil.MustExec(t, r.db, q, args...)
 	}
-	full := measure(fmt.Sprintf("%d archive_state rows", year))
-
-	var ms []float64
-	for range 21 {
-		start := time.Now()
-		heads, present, err := query.LoadArchivesWrittenSince(context.Background(), r.db, r.stamp)
-		if err != nil || !present {
-			t.Fatalf("LoadArchivesWrittenSince: present=%v err=%v", present, err)
+	scanned := measure(fmt.Sprintf("%d archive_state rows, no idx_archived_at", year))
+	readAlone := func(what string) {
+		t.Helper()
+		var ms []float64
+		for range 21 {
+			start := time.Now()
+			heads, present, err := query.LoadArchivesWrittenSince(context.Background(), r.db, r.stamp)
+			if err != nil || !present {
+				t.Fatalf("LoadArchivesWrittenSince: present=%v err=%v", present, err)
+			}
+			if n := heads.MayHoldAfter(r.stamp, r.anchor); n != 0 {
+				t.Fatalf("MayHoldAfter = %d in the steady state", n)
+			}
+			ms = append(ms, float64(time.Since(start).Microseconds())/1000)
 		}
-		if n := heads.MayHoldAfter(r.stamp, r.anchor); n != 0 {
-			t.Fatalf("MayHoldAfter = %d in the steady state", n)
-		}
-		ms = append(ms, float64(time.Since(start).Microseconds())/1000)
+		sort.Float64s(ms)
+		t.Logf("archive read alone, %d rows, %s: median %.2f ms, worst %.2f ms", year, what, ms[len(ms)/2], ms[len(ms)-1])
 	}
-	sort.Float64s(ms)
-	t.Logf("archive read alone, %d rows: median %.2f ms, worst %.2f ms; whole check %+.2f ms over no rows", year, ms[len(ms)/2], ms[len(ms)-1], full-none)
+	readAlone("no idx_archived_at")
+	// The index the migration adds.
+	if err := indexer.EnsureArchiveStateSchema(r.db); err != nil {
+		t.Fatalf("EnsureArchiveStateSchema: %v", err)
+	}
+	indexed := measure(fmt.Sprintf("%d archive_state rows, idx_archived_at", year))
+	readAlone("idx_archived_at")
+	var plan string
+	if err := r.db.QueryRow(`EXPLAIN FORMAT=TREE SELECT partition_name FROM archive_state
+		WHERE archived_at >= NOW() - INTERVAL (UNIX_TIMESTAMP() - ?) SECOND`, r.stamp.Unix()).Scan(&plan); err == nil {
+		if !strings.Contains(plan, "idx_archived_at") {
+			t.Errorf("the archive read does not use idx_archived_at:\n%s", plan)
+		}
+	} else {
+		t.Logf("EXPLAIN FORMAT=TREE not available here: %v", err)
+	}
+	t.Logf("whole check over no rows: %+.2f ms scanned, %+.2f ms indexed", scanned-none, indexed-none)
 }

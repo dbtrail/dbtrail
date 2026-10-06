@@ -1254,5 +1254,11 @@ func EnsureArchiveStateSchema(db *sql.DB) error {
 	); err != nil {
 		return err
 	}
-	return nil
+	// The routed port asks, per statement, which archives were written since
+	// a snapshot (#2187, query.LoadArchivesWrittenSince). With this index that
+	// is a range read of the few rows rotation wrote since; without it, a scan
+	// of every row (a year of hourly archives: a few milliseconds per
+	// statement). An index without it is still answered correctly.
+	return ensureIndex(db, "archive_state", "idx_archived_at",
+		`ALTER TABLE archive_state ADD INDEX idx_archived_at (archived_at)`)
 }

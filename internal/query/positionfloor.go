@@ -312,12 +312,14 @@ func loadPartitionHeadsOnce(ctx context.Context, db *sql.DB) (*PartitionHeads, e
 //
 // A non-zero writtenSince reads only the rows written at or after it, less
 // archiveWrittenMargin and archiveWrittenSlack: the only ones the rule with
-// no cut can count (ArchiveHeads). The comparison is an age on the server
-// against the server's own epoch, so neither time zone plays a part.
+// no cut can count (ArchiveHeads). The bound is an age on the server against
+// the server's own epoch, so neither time zone plays a part.
 func loadArchiveHeads(ctx context.Context, db *sql.DB, writtenSince time.Time) (_ []archiveHead, present bool, _ error) {
 	where, args := "", []any(nil)
 	if !writtenSince.IsZero() {
-		where = " WHERE TIMESTAMPDIFF(SECOND, archived_at, NOW()) <= UNIX_TIMESTAMP() - ?"
+		// archived_at >= NOW() - age: the same comparison as the age below,
+		// in a form the server can answer from idx_archived_at.
+		where = " WHERE archived_at >= NOW() - INTERVAL (UNIX_TIMESTAMP() - ?) SECOND"
 		args = []any{writtenSince.Add(-archiveWrittenMargin).Unix() - archiveWrittenSlack}
 	}
 	rows, err := db.QueryContext(ctx, `
@@ -548,8 +550,9 @@ type ArchiveHeads struct {
 // archive_state table, which the caller must not read as "no archives".
 //
 // On an index that archives on schedule the answer is the few rows rotation
-// wrote since then; the server still scans the table (archived_at has no
-// index), which costs about as much as a cache's own validity check would.
+// wrote since then, read through idx_archived_at (an index nothing migrated
+// yet is scanned: slower, the same answer). It is read afresh every time: a
+// cache would need a validity check that reads the same rows.
 func LoadArchivesWrittenSince(ctx context.Context, db *sql.DB, writtenSince time.Time) (heads ArchiveHeads, present bool, err error) {
 	heads.rows, present, err = loadArchiveHeads(ctx, db, writtenSince)
 	return heads, present, err
@@ -636,14 +639,16 @@ type runPicture struct {
 //
 // Legitimate for exactly one shape: the caller runs a SECOND fetch for the
 // same table and position with no Since and Until at CoarseSinceFloor(Since),
-// which searches every older hour by position alone, or proves from the index
+// which searches every older hour still in the index by position alone, or proves from the index
 // that no such search can find anything, and treats any failure of either as
 // "changed" or as a refusal. The routed port's "did this table change since
 // its snapshot" check is that caller: it asks per statement inside the
 // capture process, under a two-second budget, and has its own one-row proof
-// that makes the look at every partition a cost with nothing to add. A caller
-// that only wants to skip the cost must not use this: without the second
-// search it is the silent loss #2138 was.
+// that makes the look at every partition a cost with nothing to add. Neither
+// fetch sees the hours rotation already archived and dropped; that caller
+// reads archive_state for them (ArchiveHeads, #2187). A caller that only wants
+// to skip the cost must not use this: without the second search and the
+// archive read it is the silent loss #2138 and #2187 were.
 func (o Options) SearchesBelowItsOwnFloor() Options {
 	o.sinceSettled = true
 	return o

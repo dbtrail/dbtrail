@@ -91,7 +91,7 @@ func TestLoadArchivesWrittenSince_2187(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer db.Close()
-		mock.ExpectQuery(`FROM archive_state\s+WHERE TIMESTAMPDIFF\(SECOND, archived_at, NOW\(\)\) <= UNIX_TIMESTAMP\(\) - \?`).
+		mock.ExpectQuery(`FROM archive_state\s+WHERE archived_at >= NOW\(\) - INTERVAL \(UNIX_TIMESTAMP\(\) - \?\) SECOND`).
 			WithArgs(after.Add(-archiveWrittenMargin).Unix() - archiveWrittenSlack).
 			WillReturnRows(sqlmock.NewRows(cols).AddRow("p_2026030102", nil, 9, "binlog.000001", 900, 3600, now))
 		heads, present, err := LoadArchivesWrittenSince(context.Background(), db, after)
@@ -124,7 +124,7 @@ func TestLoadArchivesWrittenSince_2187(t *testing.T) {
 		}
 		defer db.Close()
 		mock.ExpectQuery(`FROM archive_state`).WillReturnError(&mysql.MySQLError{Number: 1054, Message: "Unknown column 'max_event_id'"})
-		mock.ExpectQuery(`SELECT partition_name, TIMESTAMPDIFF.*FROM archive_state\s+WHERE TIMESTAMPDIFF\(SECOND, archived_at, NOW\(\)\) <= UNIX_TIMESTAMP\(\) - \?`).
+		mock.ExpectQuery(`SELECT partition_name, TIMESTAMPDIFF.*FROM archive_state\s+WHERE archived_at >= NOW\(\) - INTERVAL \(UNIX_TIMESTAMP\(\) - \?\) SECOND`).
 			WithArgs(after.Add(-archiveWrittenMargin).Unix() - archiveWrittenSlack).
 			WillReturnRows(sqlmock.NewRows([]string{"partition_name", "age", "now"}).AddRow("p_2026030102", 60, now))
 		heads, present, err := LoadArchivesWrittenSince(context.Background(), db, after)

@@ -238,7 +238,8 @@ const ddlArchiveState = `CREATE TABLE IF NOT EXISTS archive_state (
     max_binlog_file VARCHAR(255) DEFAULT NULL COMMENT 'with max_start_pos: the highest binlog coordinate in the archived file, file by length then name then position (#2152). NULL with max_event_id set = no row carries a coordinate',
     max_start_pos BIGINT UNSIGNED DEFAULT NULL COMMENT 'see max_binlog_file (#2152)',
     archived_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_partition (partition_name, bintrail_id)
+    UNIQUE KEY uq_partition (partition_name, bintrail_id),
+    KEY idx_archived_at (archived_at)
 ) ENGINE=InnoDB`
 
 // ─── RBAC tables ─────────────────────────────────────────────────────────────
