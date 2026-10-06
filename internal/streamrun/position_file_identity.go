@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync"
+	"time"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
@@ -46,8 +48,20 @@ func (f *fileIdentities) set(file, identity string) {
 		return
 	}
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	if prev, ok := f.m[file]; ok && prev != identity {
+		// The source serves another file under a name this run already read:
+		// its numbering started over under the stream (a reconnect after a
+		// reset). The first identity is kept on purpose: a checkpoint then
+		// pairs the old identity with the new file's positions, and the next
+		// restart's probe reads the difference as a replaced file (no
+		// cleanup, a capture loss) instead of verifying it.
+		slog.Warn("the source now serves another binlog file under a name this capture already read: its binary log "+
+			"numbering started over; the next restart checks the file and records the break",
+			"file", file, "identity_first_seen", prev, "identity_now", identity)
+		return
+	}
 	f.m[file] = identity
-	f.mu.Unlock()
 }
 
 func (f *fileIdentities) get(file string) string {
@@ -154,6 +168,11 @@ func checkPositionCheckpointFile(gap *gapResult, saved *streamState, srcIdentity
 			return out, fmt.Errorf("the source sent no identity for binlog file %s", saved.binlogFile)
 		}
 		if now == saved.fileIdentity {
+			if otherServer {
+				slog.Warn("the checkpoint was written against another source identity, but the binlog file it names is the same file "+
+					"(a changed server_id, or a clone); resuming from the checkpoint",
+					"checkpoint_source_identity", saved.sourceIdentity, "source_identity", srcIdentity, "file", saved.binlogFile)
+			}
 			out.verified = true
 			return out, nil
 		}
@@ -247,6 +266,13 @@ func startBinlogSync(cfg replication.BinlogSyncerConfig, sslMode string,
 // connection is retried once, not forever.
 func probeBinlogFileIdentity(ctx context.Context, cfg replication.BinlogSyncerConfig, sslMode, file string) (string, error) {
 	cfg.MaxReconnectAttempts = 1
+	// Bound the dial and every read too, not only GetEvent: a black-holed
+	// host would otherwise hold StartSync until the OS gives up on TCP.
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout := time.Until(deadline)
+		cfg.ReadTimeout = timeout
+		cfg.Dialer = (&net.Dialer{Timeout: timeout}).DialContext
+	}
 	syncer, streamer, err := startBinlogSync(cfg, sslMode, func(s *replication.BinlogSyncer) (*replication.BinlogStreamer, error) {
 		return s.StartSync(gomysql.Position{Name: file, Pos: 4})
 	})

@@ -423,7 +423,14 @@ reads its first event and compares:
   oldest binary log, so every change of the new numbering is captured. With
   `--no-gap-fill` it refuses instead.
 - **The dump fails:** capture does not start, and changes nothing; the check
-  runs again on the next start.
+  runs again on the next start. The dial and each read are bounded by
+  `--gap-timeout`. If it keeps failing, `--reset` resumes from the source's
+  current position and records the skipped range as a capture loss.
+
+If the source serves another file under a name the running stream already
+read (its numbering started over under a reconnect), the stream logs a warning
+and keeps the first identity for that name, so the next restart's check sees
+the difference instead of verifying the new file.
 
 The dump needs only `REPLICATION SLAVE`, which capture already has. `SHOW
 BINLOG EVENTS` does not show the time, so it cannot replace the dump.

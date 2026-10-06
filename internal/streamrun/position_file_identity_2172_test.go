@@ -183,6 +183,14 @@ func TestFileIdentities(t *testing.T) {
 	if got := f.get("binlog.000005"); got != "" {
 		t.Errorf("an empty identity was stored: %q", got)
 	}
+	// A different identity for a name already seen in this run is a
+	// numbering that started over under the stream: the first one is kept,
+	// so the next restart's probe sees the difference instead of verifying
+	// the new file against the old checkpoint position.
+	f.set("binlog.000004", "fde:999:1")
+	if got := f.get("binlog.000004"); got != "fde:200:1" {
+		t.Errorf("a second identity for the same name replaced the first: %q", got)
+	}
 	if got := f.get("binlog.000009"); got != "" {
 		t.Errorf("unknown file = %q, want empty", got)
 	}
