@@ -273,8 +273,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the default) the table is checkable again from the second full snapshot
   after the restart, since a pair with one snapshot on each side still spans
   it. `_snapshot` refuses with error 1526 (`ER_NO_PARTITION_FOR_GIVEN_VALUE`,
-  the code of its other unreadable-history refusals) and asks for a new full
-  snapshot. A snapshot without that record keeps the old behavior; on an
+  the code of its other unreadable-history refusals; SQLSTATE 22023 on the
+  PostgreSQL wire) and asks for a new full snapshot. Only changes recorded up
+  to the end of what is read count (`AS OF`, or the newer snapshot of a
+  pair), so the history from before a restart stays readable. A snapshot without that record keeps the old behavior; on an
   index that `bintrail index` also wrote into, the numbering is not checked
   (a warning is logged), as in the update.
 - **Turning the MySQL port off answers only once the port is closed (#2149).**

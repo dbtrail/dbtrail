@@ -191,12 +191,13 @@ const renumberedPairRemedy = "verify compares a table's last read with the snaps
 	"so the table is checkable again from the second full snapshot taken after that."
 
 // pairNumbering runs the refresh's binlog-renumbering check (#2160) on the
-// window a pair reads: from the previous snapshot's position, against that
-// snapshot's event mark (#2174). A previous snapshot without a mark: nil.
+// window a pair reads: from the previous snapshot's position up to the newer
+// snapshot, against the previous snapshot's event mark (#2174). A previous
+// snapshot without a mark: nil. A refusal carries renumberedPairRemedy.
 func pairNumbering(ctx context.Context, cfg BaselineConfig, p BaselinePair) error {
-	if err := reconstruct.CheckNumberingFrom(ctx, cfg.IndexDB, &p.PrevAnchor, p.PrevEventMark); err != nil {
+	if err := reconstruct.CheckNumberingFrom(ctx, cfg.IndexDB, &p.PrevAnchor, p.PrevEventMark, p.NewSnapshot); err != nil {
 		if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
-			return err
+			return fmt.Errorf("%w %s", err, renumberedPairRemedy)
 		}
 		return fmt.Errorf("check the binlog numbering since the previous snapshot of %s.%s: %w", p.Schema, p.Table, err)
 	}
@@ -272,7 +273,7 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 	// Every other surface that replays a window refuses on it (#764).
 	if err := pairNumbering(ctx, cfg, p); err != nil {
 		if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
-			return inconclusive(res, err.Error()+" "+renumberedPairRemedy), nil
+			return inconclusive(res, err.Error()), nil
 		}
 		return res, err
 	}

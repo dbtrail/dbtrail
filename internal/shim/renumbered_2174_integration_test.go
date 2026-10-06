@@ -53,8 +53,9 @@ func TestSnapshot_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 		name string
 		// mark is the snapshot's event mark; "" writes none.
 		mark string
-		// startOver indexes a change in mysql-bin.000001 after the mark.
-		startOver bool
+		// startOver indexes a change in mysql-bin.000001 after the mark,
+		// before AS OF; startOverLater indexes it after AS OF.
+		startOver, startOverLater bool
 		// backfilled leaves a row in index_state, as `bintrail index` does.
 		backfilled bool
 		// captureReads, when set, is the server_uuid capture reads now.
@@ -64,6 +65,7 @@ func TestSnapshot_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 		{name: "no event mark: today's behavior", startOver: true},
 		{name: "mark, same numbering", mark: sameServer},
 		{name: "mark, numbering started over", mark: sameServer, startOver: true, refuse: true},
+		{name: "mark, numbering started over after AS OF", mark: sameServer, startOverLater: true},
 		{name: "mark, backfilled index", mark: sameServer, startOver: true, backfilled: true},
 		{name: "mark names the server, capture reads it", mark: withServer, captureReads: renumberedOldUUID},
 		{name: "mark names the server, capture reads another", mark: withServer, captureReads: renumberedNewUUID, refuse: true},
@@ -114,6 +116,10 @@ func TestSnapshot_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 			if tc.startOver {
 				insertUsersEventAt(t, db, 12, "mysql-bin.000001", 100, snapTime.Add(2*time.Minute), "1", "bob", "carol")
 			}
+			if tc.startOverLater {
+				// The window up to AS OF is in one numbering: readable.
+				insertUsersEventAt(t, db, 12, "mysql-bin.000001", 100, asOf.Add(2*time.Minute), "1", "bob", "carol")
+			}
 			if tc.backfilled {
 				testutil.MustExec(t, db, `INSERT INTO index_state (binlog_file, file_size, last_position, events_indexed, status, started_at, completed_at)
 					VALUES ('mysql-bin.000005', 1, 150, 1, 'completed', UTC_TIMESTAMP(), UTC_TIMESTAMP())`)
@@ -134,7 +140,7 @@ func TestSnapshot_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 			row := TimeTravelQuery{Type: TypeSnapshot, Schema: "myapp", Table: "users", AsOf: asOf, PKColumn: "id", PKValue: "1"}
 			table := TimeTravelQuery{Type: TypeSnapshot, Schema: "myapp", Table: "users", AsOf: asOf}
 
-			// The seam pgshim reads: the plain error, by its sentinel.
+			// The seam pgshim reads (pgResolveError): the error, by its sentinel.
 			got, rowErr := h.ResolveSnapshotRow(context.Background(), row)
 			if tc.refuse {
 				if !errors.Is(rowErr, reconstruct.ErrBinlogRenumbered) {

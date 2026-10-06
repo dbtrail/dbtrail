@@ -42,6 +42,9 @@ type renumberCase struct {
 	mark string
 	// startOver puts the change after the snapshot in binlog.000001.
 	startOver bool
+	// startOverLater indexes a change in binlog.000001 after the window's
+	// end (the newer snapshot, or now).
+	startOverLater bool
 	// backfilled leaves a row in index_state, as `bintrail index` does.
 	backfilled bool
 	// captureReads, when set, is the server_uuid capture reads now.
@@ -58,6 +61,7 @@ func renumberCases(withoutCheck Status) []renumberCase {
 		{name: "no event mark", startOver: true, want: withoutCheck},
 		{name: "mark, same numbering", mark: sameServer, want: StatusMatch},
 		{name: "mark, numbering started over", mark: sameServer, startOver: true, want: StatusInconclusive},
+		{name: "mark, numbering started over after the window", mark: sameServer, startOverLater: true, want: StatusMatch},
 		{name: "mark, backfilled index", mark: sameServer, startOver: true, backfilled: true, want: withoutCheck},
 		{name: "mark names the server, capture reads it", mark: withServer, captureReads: renumberedOldUUID, want: StatusMatch},
 		{name: "mark names the server, capture reads another", mark: withServer, captureReads: renumberedNewUUID, want: StatusInconclusive},
@@ -67,7 +71,7 @@ func renumberCases(withoutCheck Status) []renumberCase {
 // renumberIndex seeds the index side shared by both modes: the orders schema,
 // the mark's own row (event 10, before the snapshot), the change after it
 // (event 20, id 1 a→zzz), and what the case says about backfill and capture.
-func renumberIndex(t *testing.T, db *sql.DB, dbName string, tc renumberCase, hours []time.Time, markAt, changeAt time.Time) {
+func renumberIndex(t *testing.T, db *sql.DB, dbName string, tc renumberCase, hours []time.Time, markAt, changeAt, laterAt time.Time) {
 	t.Helper()
 	testutil.InitIndexTables(t, db)
 	if err := indexer.EnsureSchema(db); err != nil {
@@ -96,6 +100,9 @@ func renumberIndex(t *testing.T, db *sql.DB, dbName string, tc renumberCase, hou
 	}
 	insert(10, "binlog.000007", 100, markAt, "2", "x", "b")
 	insert(20, changeFile(tc), 300, changeAt, "1", "a", "zzz")
+	if tc.startOverLater {
+		insert(30, "binlog.000001", 100, laterAt, "2", "b", "later")
+	}
 	if tc.backfilled {
 		testutil.MustExec(t, db, `INSERT INTO index_state (binlog_file, file_size, last_position, events_indexed, status, started_at, completed_at)
 			VALUES ('binlog.000005', 1, 150, 1, 'completed', UTC_TIMESTAMP(), UTC_TIMESTAMP())`)
@@ -179,7 +186,7 @@ func TestVerifyBaselinePair_afterTheBinlogNumberingStartsOver_2174(t *testing.T)
 			db, dbName := testutil.CreateTestDB(t)
 			prevTS := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
 			newTS := prevTS.Add(time.Hour)
-			renumberIndex(t, db, dbName, tc, []time.Time{prevTS.Add(-time.Hour), prevTS, newTS}, prevTS.Add(-5*time.Minute), prevTS.Add(30*time.Minute))
+			renumberIndex(t, db, dbName, tc, []time.Time{prevTS.Add(-time.Hour), prevTS, newTS}, prevTS.Add(-5*time.Minute), prevTS.Add(30*time.Minute), newTS.Add(10*time.Minute))
 			if tc.captureReads != "" {
 				testutil.MustExec(t, db, `INSERT INTO stream_state (id, mode, binlog_file, binlog_position, last_checkpoint, server_id, bintrail_id)
 					VALUES (1, 'position', 'binlog.000007', 400, UTC_TIMESTAMP(), 1, 'b1')`)
@@ -225,7 +232,11 @@ func TestVerifyTable_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 			db, dbName := testutil.CreateTestDB(t)
 			now := time.Now().UTC()
 			h1 := now.Truncate(time.Hour).Add(-time.Hour)
-			renumberIndex(t, db, dbName, tc, []time.Time{h1.Add(-time.Hour), h1, h1.Add(time.Hour)}, h1.Add(-5*time.Minute), now.Add(-time.Minute))
+			if tc.startOverLater {
+				// Live mode reads up to now: there is no "after the window".
+				t.Skip("live mode reads up to now")
+			}
+			renumberIndex(t, db, dbName, tc, []time.Time{h1.Add(-time.Hour), h1, h1.Add(time.Hour)}, h1.Add(-5*time.Minute), now.Add(-time.Minute), time.Time{})
 
 			// The source table holds the change.
 			testutil.MustExec(t, db, fmt.Sprintf("CREATE TABLE `%s`.`orders` (`id` INT PRIMARY KEY, `status` VARCHAR(64))", dbName))

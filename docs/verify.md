@@ -323,7 +323,9 @@ Results are **per table**, one of:
   changes since the snapshot cannot be found by binlog position" and what
   happened. In the baseline pair mode the snapshot checked is the older one
   of the pair, so the table is checkable again from the **second** full
-  snapshot taken after the restart; the live-source mode needs one.
+  snapshot taken after the restart; the live-source mode needs one. A pair
+  whose two snapshots both come before the restart is still checked: only
+  changes recorded up to the newer snapshot count.
   `--explain` refuses the same way. A snapshot without that record is not
   checked, and on an index that `bintrail index` also wrote into the
   numbering is not checked (a warning is logged): its event ids do not follow

@@ -54,14 +54,20 @@ func snapshotAnchor(ctx context.Context, baselinePath string, logger *slog.Logge
 // for a _snapshot window read from the baseline's position (#2174): when the
 // source's binary log started again after the snapshot, every later change
 // sorts below that position and the window would answer the snapshot's old
-// rows. The error keeps ErrBinlogRenumbered for errors.Is (the pgwire
+// rows. The window ends at AS OF, so a restart after it refuses nothing. The
+// error keeps ErrBinlogRenumbered for errors.Is (pgResolveError in the pgwire
 // front-end) and names the query type; renumberedRefusal turns it into the
-// MySQL refusal.
-func (h *Handler) checkSnapshotNumbering(ctx context.Context, qType QueryType, anchor *query.BinlogPos, eventMark string) error {
-	if err := reconstruct.CheckNumberingFrom(ctx, h.indexDB, anchor, eventMark); err != nil {
-		return fmt.Errorf("resolve %s: %w", qType, err)
+// MySQL refusal. A timeout or cancel during the check is classified the way
+// a fetch's is (a *ResolveError).
+func (h *Handler) checkSnapshotNumbering(ctx context.Context, q TimeTravelQuery, anchor *query.BinlogPos, eventMark string) error {
+	err := reconstruct.CheckNumberingFrom(ctx, h.indexDB, anchor, eventMark, q.AsOf)
+	if err == nil {
+		return nil
 	}
-	return nil
+	if ctx.Err() != nil {
+		return classifyFetchError(ctx, q.Type, err, h.logger)
+	}
+	return fmt.Errorf("resolve %s: %w", q.Type, err)
 }
 
 // renumberedRefusal maps an ErrBinlogRenumbered refusal to the code the other
@@ -285,8 +291,8 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 		reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos, Mark: ddlMark}); err != nil {
 		return nil, err
 	}
-	if err := h.checkSnapshotNumbering(ctx, q.Type, sincePos, eventMark); err != nil {
-		return nil, renumberedRefusal(err)
+	if err := h.checkSnapshotNumbering(ctx, q, sincePos, eventMark); err != nil {
+		return nil, mysqlRenderErr(err)
 	}
 
 	// Fetch the latest event per PK from the snapshot instant up to AsOf.

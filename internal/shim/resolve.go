@@ -273,7 +273,7 @@ func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 		reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos, Mark: ddlMark}); err != nil {
 		return nil, err
 	}
-	if err := h.checkSnapshotNumbering(ctx, q.Type, sincePos, eventMark); err != nil {
+	if err := h.checkSnapshotNumbering(ctx, q, sincePos, eventMark); err != nil {
 		return nil, err
 	}
 

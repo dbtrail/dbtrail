@@ -311,6 +311,16 @@ func startedOverAfter(e indexedEvent, m *EventMark) bool {
 //   - Gone with every older row (rotation dropped its hour): the events after
 //     it are still in order. Checked.
 func CheckNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anchor query.BinlogPos) error {
+	return checkNumberingContinues(ctx, db, m, anchor, time.Time{})
+}
+
+// checkNumberingContinues is CheckNumberingContinues for a window that ends at
+// until (zero: now). Only events whose recorded time is at or before until are
+// probed (#2174): a numbering that started over after the window's end leaves
+// the window in one numbering, readable by position. A change recorded at or
+// before until was committed after its statement started, so every change
+// committed inside the window is still probed.
+func checkNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anchor query.BinlogPos, until time.Time) error {
 	if m == nil {
 		return nil
 	}
@@ -359,16 +369,20 @@ func CheckNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 	default:
 		return fmt.Errorf("read the event the snapshot's event mark names: %w", err)
 	}
+	bound, args := "", []any{m.ID}
+	if !until.IsZero() {
+		bound, args = " AND event_timestamp <= ?", append(args, until)
+	}
 	for _, q := range []string{
 		`SELECT event_id, binlog_file, end_pos FROM binlog_events
-			WHERE event_id > ? AND binlog_file IS NOT NULL AND end_pos IS NOT NULL
+			WHERE event_id > ? AND binlog_file IS NOT NULL AND end_pos IS NOT NULL` + bound + `
 			ORDER BY event_id ASC LIMIT 1`,
 		`SELECT event_id, binlog_file, end_pos FROM binlog_events
-			WHERE event_id > ? AND binlog_file IS NOT NULL AND end_pos IS NOT NULL
+			WHERE event_id > ? AND binlog_file IS NOT NULL AND end_pos IS NOT NULL` + bound + `
 			ORDER BY event_id DESC LIMIT 1`,
 	} {
 		var e indexedEvent
-		err := db.QueryRowContext(ctx, q, m.ID).Scan(&e.id, &e.file, &e.end)
+		err := db.QueryRowContext(ctx, q, args...).Scan(&e.id, &e.file, &e.end)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -402,15 +416,16 @@ func CheckSourceReplaced(ctx context.Context, db *sql.DB, since time.Time) error
 
 // CheckNumberingFrom runs the two checks that read a snapshot's event mark
 // (rawMark, its footer value) against the index, for a window read by
-// position from anchor (nil: the snapshot records none): CheckNumberingContinues,
-// then CheckSameServer. A snapshot without a mark: nil, whatever happened.
+// position from anchor (nil: the snapshot records none) up to until (zero:
+// now): CheckNumberingContinues, bounded by until, then CheckSameServer. A
+// snapshot without a mark: nil, whatever happened.
 // Shared by every reader that starts at a snapshot's position: the refresh,
 // verify and the shim's _snapshot (#2174). CheckSourceReplaced stays with the
 // refresh, which alone also refuses on a snapshot without a mark.
-func CheckNumberingFrom(ctx context.Context, db *sql.DB, anchor *query.BinlogPos, rawMark string) error {
+func CheckNumberingFrom(ctx context.Context, db *sql.DB, anchor *query.BinlogPos, rawMark string, until time.Time) error {
 	m := ParseEventMark(rawMark)
 	if anchor != nil && anchor.File != "" && anchor.Pos > 0 {
-		if err := CheckNumberingContinues(ctx, db, m, *anchor); err != nil {
+		if err := checkNumberingContinues(ctx, db, m, *anchor, until); err != nil {
 			return err
 		}
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/shim"
 )
 
@@ -165,6 +166,11 @@ func pgResolveError(err error) *pgErr {
 		default:
 			return &pgErr{"XX000", re.Error()}
 		}
+	}
+	// The source's binary log started again after the baseline (#2174): the
+	// changes since it cannot be read, the same class as a coverage gap.
+	if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+		return &pgErr{"22023", err.Error()}
 	}
 	// Raw data-fault (ApplyAt / baseline read, e.g. a TOAST marker).
 	return &pgErr{"XX000", err.Error()}
