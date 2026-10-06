@@ -3,7 +3,6 @@
 package console
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -16,7 +15,10 @@ import (
 // seedLockWait2156 is one row, alice in the snapshot, changed by two sessions:
 // A (event 1, at fileA:4, started 12:00:02) and then B (event 2, at fileB:40,
 // started 12:00:00, 2 s BEFORE A: it waited on A's row lock).
-func seedLockWait2156(t *testing.T, fileA, fileB string) (*Server, *sql.DB) {
+//
+// Two servers over the one index: the undo one reads the live index only, and
+// the reconstruct one needs archive access left on to be enabled at all.
+func seedLockWait2156(t *testing.T, fileA, fileB string) (undo, recon *Server) {
 	t.Helper()
 	db, dbName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
@@ -28,11 +30,15 @@ func seedLockWait2156(t *testing.T, fileA, fileB string) (*Server, *sql.DB) {
 		[]byte(`["name"]`), []byte(`{"id":1,"name":"A"}`), []byte(`{"id":1,"name":"B"}`))
 	baseDir := t.TempDir()
 	writeBaselineParquet(t, baseDir, "app", "users", time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), "1", "alice", nil)
-	srv, err := New(Config{DB: db, DBName: dbName, Listen: "127.0.0.1:8090", Token: intToken, BaselineDir: baseDir, NoArchive: true})
+	undo, err := New(Config{DB: db, DBName: dbName, Listen: "127.0.0.1:8090", Token: intToken, NoArchive: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return srv, db
+	recon, err = New(Config{DB: db, DBName: dbName, Listen: "127.0.0.1:8090", Token: intToken, BaselineDir: baseDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return undo, recon
 }
 
 func recover2156(t *testing.T, srv *Server) recoverResponse {
@@ -51,9 +57,9 @@ func recover2156(t *testing.T, srv *Server) recoverResponse {
 // The console's undo and its row reconstruction take a row's changes in
 // binary log order (#2156). Guards the wiring of both handlers.
 func TestIntegrationBinlogOrder2156_recoverAndReconstruct(t *testing.T) {
-	srv, _ := seedLockWait2156(t, "bin.000001", "bin.000001")
+	undo, srv := seedLockWait2156(t, "bin.000001", "bin.000001")
 
-	resp := recover2156(t, srv)
+	resp := recover2156(t, undo)
 	undoB, undoA := strings.Index(resp.SQL, "`name` = 'A'"), strings.Index(resp.SQL, "`name` = 'alice'")
 	if undoB < 0 || undoA < 0 || undoB > undoA {
 		t.Fatalf("the script must put A back over B first and alice back over A second (%d, %d):\n%s", undoB, undoA, resp.SQL)
@@ -96,9 +102,9 @@ func TestIntegrationBinlogOrder2156_recoverAndReconstruct(t *testing.T) {
 // logs with different names) both handlers keep statement-time order and put
 // the reason in the response.
 func TestIntegrationBinlogOrder2156_unprovenOrderIsSaid(t *testing.T) {
-	srv, _ := seedLockWait2156(t, "old-bin.000001", "zzz-bin.000001")
+	undo, srv := seedLockWait2156(t, "old-bin.000001", "zzz-bin.000001")
 
-	resp := recover2156(t, srv)
+	resp := recover2156(t, undo)
 	undoB, undoA := strings.Index(resp.SQL, "`name` = 'A'"), strings.Index(resp.SQL, "`name` = 'alice'")
 	if undoB < 0 || undoA < 0 || undoA > undoB {
 		t.Fatalf("the script must keep statement-time order (%d, %d):\n%s", undoA, undoB, resp.SQL)
