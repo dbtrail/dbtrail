@@ -38,11 +38,16 @@ func resetSourceBinlogs(t *testing.T, db *sql.DB) {
 //	run 4  crash again, in the new numbering: index 11-13 past the checkpoint.
 //	run 5  restart: the ordinary cleanup must delete 11-13 (they are replayed)
 //	       and nothing of the old numbering. 1-14 exactly once.
+//	       RESET again.
+//	run 6  restart: jumps, then crashes with the jump as its last durable
+//	       checkpoint while indexing 15-17.
+//	run 7  restart from the jump's checkpoint: 1-18 exactly once.
 //
 // Run 3 is what main got wrong first (its cleanup compared binlog.000001:4 with
 // rows of the old numbering). Run 5 is the second way to lose the same rows:
 // the jump carried the old cleanup floor into the new numbering's checkpoint,
 // so the next ordinary cleanup read old rows as "after" a binlog.000001 position.
+// Runs 6-7 pin the same floor where the jump itself persists it.
 func TestIntegrationPositionResetMasterKeepsCapturedRows(t *testing.T) {
 	indexDB, indexName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
@@ -158,4 +163,58 @@ func TestIntegrationPositionResetMasterKeepsCapturedRows(t *testing.T) {
 		t.Fatalf("run 5 (restart in the new numbering): %v", err)
 	}
 	assertExactlyOnce(t, indexedPKs(t, indexDB, sourceName, "orders"), pkRange(1, 14))
+	if t.Failed() {
+		t.FailNow()
+	}
+
+	// A second reset, now from binlog.000001:N to a new binlog.000001 shorter
+	// than N (the "file regenerated" shape). This time the stream crashes
+	// right after the jump: the advance's own checkpoint is the last durable
+	// one, so the floor it persisted is what the next cleanup runs on.
+	resetSourceBinlogs(t, sourceDB)
+	lift = freezeCheckpointAfterJump(t, indexDB)
+	if err := runOneUntil(t, cfg(5), true, insert(15, 17), indexedThrough(17)); err != nil {
+		t.Fatalf("run 6 (restart after the second reset, crash after the jump): %v", err)
+	}
+	frozen, err := loadStreamState(indexDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frozen.binlogPos != 4 {
+		t.Fatalf("run 6 durable checkpoint = %s:%d, want the jump's :4", frozen.binlogFile, frozen.binlogPos)
+	}
+	assertExactlyOnce(t, indexedPKs(t, indexDB, sourceName, "orders"), pkRange(1, 17))
+	lift()
+
+	if err := runOneUntil(t, cfg(6), false, insert(18, 18), indexedThrough(18)); err != nil {
+		t.Fatalf("run 7 (restart from the jump's checkpoint): %v", err)
+	}
+	assertExactlyOnce(t, indexedPKs(t, indexDB, sourceName, "orders"), pkRange(1, 18))
+}
+
+// freezeCheckpointAfterJump lets the gap stamp and the jump to :4 through,
+// then refuses every checkpoint that would move off :4: a crash right after
+// the advance, which blockCheckpoints cannot model (it refuses the advance's
+// own write too).
+func freezeCheckpointAfterJump(t *testing.T, indexDB *sql.DB) func() {
+	t.Helper()
+	const name = "bintrail_test_freeze_after_jump"
+	testutil.MustExec(t, indexDB, "DROP TRIGGER IF EXISTS "+name)
+	testutil.MustExec(t, indexDB, `
+		CREATE TRIGGER `+name+` BEFORE UPDATE ON stream_state
+		FOR EACH ROW BEGIN
+		  IF OLD.binlog_position = 4 AND NEW.binlog_position <> 4 THEN
+		    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'simulated crash right after the jump';
+		  END IF;
+		END`)
+	lifted := false
+	t.Cleanup(func() {
+		if !lifted {
+			indexDB.Exec("DROP TRIGGER IF EXISTS " + name)
+		}
+	})
+	return func() {
+		lifted = true
+		testutil.MustExec(t, indexDB, "DROP TRIGGER IF EXISTS "+name)
+	}
 }
