@@ -92,7 +92,7 @@ func TestLatestPerPKInBinlog_decisionTable(t *testing.T) {
 			rows:    []ResultRow{keyRow("1", 2, f, 400, at(0)), keyRow("1", 1, f, 900, at(2))},
 			n:       1, proof: proven,
 			wantIDs: []uint64{1}, wantOrder: LatestPerPKOrder{Disagreed: 1, Refused: 1},
-			noteHas: "the index received event 2 (at binlog.000007:400) after event 1 (at binlog.000007:900)",
+			noteHas: "The index received event 2 (at binlog.000007:400) after event 1 (at binlog.000007:900)",
 		},
 		{
 			name: "PostgreSQL: arrival order is commit order, no note",
@@ -120,7 +120,7 @@ func TestLatestPerPKInBinlog_decisionTable(t *testing.T) {
 			// id 4 is the largest id, so the ids put it among the latest two;
 			// its position and its time put it first: refused.
 			wantIDs: []uint64{1, 3}, wantOrder: LatestPerPKOrder{Disagreed: 1, Refused: 1},
-			noteHas: "the index received event 4 (at binlog.000007:50) after event 3",
+			noteHas: "The index received event 4 (at binlog.000007:50) after event 3",
 		},
 		{
 			name: "n = 2 on a clean stream index",

@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // LatestPerPKOrder is what LatestPerPKInBinlog decided, counted over the keys
@@ -31,7 +32,14 @@ func (o LatestPerPKOrder) Note() string {
 	}
 	return fmt.Sprintf("order of changes unproven: for %d row(s) the change with the latest statement time is not the change the index received last, "+
 		"and the binary log order could not be established, so each of those rows was taken at its change with the latest statement time. "+
-		"A mismatch on a row that two sessions changed at once may be a false alarm. The first such row: %s", o.Refused, o.warning)
+		"A mismatch on a row that two sessions changed at once may be a false alarm. The first such row: %s", o.Refused, upperFirst(o.warning))
+}
+
+func upperFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // LatestPerPKInBinlog keeps, for each pk_values, its latest n changes in the
