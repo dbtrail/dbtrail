@@ -571,6 +571,16 @@ jobs:
             || { echo "FATAL: GTID cut-mid-transaction test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationGTIDFreshStartCheckpointsAtOnce ' /tmp/mysql-it.out \
             || { echo "FATAL: GTID fresh-start checkpoint test did not run (false-green tripwire)" >&2; exit 1; }
+          for name in \
+            TestIntegrationGTIDResetMasterRestartBeforeRenumberingPasses \
+            TestIntegrationGTIDResetMasterRestartAfterRenumberingPasses \
+            TestIntegrationGTIDResetMasterCrashRightAfterRestart \
+            TestIntegrationGTIDResetMasterWhileStreaming \
+            TestIntegrationGTIDResetMasterFileNameReused \
+            TestIntegrationGTIDCheckpointFromAnotherServer; do
+            grep -q -- "--- PASS: $name " /tmp/mysql-it.out \
+              || { echo "FATAL: GTID capture across a source RESET ($name) did not run (false-green tripwire)" >&2; exit 1; }
+          done
           grep -q -- '--- PASS: TestIntegrationCrashRestartExactlyOnce_position' /tmp/mysql-it.out \
             || { echo "FATAL: crash→restart exactly-once test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationPositionResetMasterKeepsCapturedRows ' /tmp/mysql-it.out \
@@ -786,6 +796,7 @@ jobs:
             TestOne_MariaDB_resetKeepsOlderHistory \
             TestOne_MariaDB_cutMidTransactionIndexesOnce \
             TestOne_MariaDB_freshStartCheckpointsAtOnce \
+            TestOne_MariaDB_resetMasterStopsWithResumeSteps \
             TestBYOSStream_MariaDBReconnectAfterCommitOnce \
             TestIntegrationMonitorRegistrySourceMariaDBDetected \
             TestIntegrationMonitorRegistrySourceMariaDBRelabeled \

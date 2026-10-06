@@ -233,6 +233,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with one of the 44 words and used later (`SELECT made AS at ... ORDER BY
   at`) stays on MySQL too, which is right: the copy would refuse it.
 ### Fixed
+- **GTID capture after `RESET MASTER` on the source no longer loses changes
+  without saying so** (#2171). `RESET BINARY LOGS AND GTIDS` / `RESET MASTER`
+  starts the source's GTID numbering over. Capture used to delete the changes
+  it had read after its last checkpoint (the source never sends them again),
+  then fail on every restart with "Replica has more GTIDs than the source"
+  until the new numbering passed the old one, and from then on skip every new
+  transaction numbered inside its saved set, with no capture loss recorded.
+  Now, on MySQL with `gtid_mode=ON`, the restart sees that the source went
+  backwards (its own `server_uuid` GTIDs in the saved set are no longer in its
+  `gtid_executed`, or the checkpoint lies past the end of its binary log, or
+  the source shares no GTID history with the checkpoint at all, as after a
+  rebuild with a new `server_uuid`), keeps every event already indexed,
+  records a capture loss that says what happened, and restarts from the start
+  of the source's binary log. A replica that is only behind is not affected:
+  it lags on other servers' GTIDs, never on its own. Binary log file numbers
+  are compared only against a checkpoint read from the same server: each
+  checkpoint now records the source's identity (`stream_state.source_identity`,
+  added on startup). On MariaDB the restart refuses, deletes nothing, and the
+  error gives the command that resumes. **Upgrade note:** a GTID-mode restart
+  now runs `SHOW BINARY LOGS`, so the capture account needs `REPLICATION
+  CLIENT` (MariaDB: `BINLOG MONITOR`), as the documented privileges already
+  say; an account with only `REPLICATION SLAVE` stops with an error naming
+  the grant.
 - **Capture no longer deletes indexed changes after `RESET MASTER` on a
   source captured by binlog position (#2170).** When the source's binary log
   starts over (`RESET MASTER`, `RESET BINARY LOGS AND GTIDS`), the stream
