@@ -129,6 +129,10 @@ const MON_PHASES = {
   // #1708: no cleanup of this run has started. One from an earlier run is
   // still running on the index, and a second one would only fail on its locks.
   resume_cleanup_waiting: { text: "WAITING FOR CLEANUP", title: "an earlier cleanup is still running on the index; capture starts when it finishes." },
+  // #2105: another DBTrail process (an older copy during a deployment, or a
+  // second installation on the same index) is capturing this server. This
+  // one starts on its own when that one stops.
+  lock_waiting: { text: "WAITING FOR OTHER DBTRAIL", title: "another DBTrail process is capturing this server; this one starts capturing when that one stops." },
 };
 
 // A failed state whose cause the daemon names (monitor_error_code) says that
@@ -2021,7 +2025,8 @@ function ovFlowModel(inp) {
       lines: ["Nothing new reaches the copy until it starts again."],
       actions: [{ label: "Start", primary: true, run: "start" }] });
   } else if (mstate === "pending") {
-    capture = piece("binlog", "warn", "starting", srv.monitor_phase || "");
+    const ph = MON_PHASES[srv.monitor_phase];
+    capture = piece("binlog", "warn", "starting", ph ? ph.text.toLowerCase() : (srv.monitor_phase || ""));
   } else {
     const fresh = cov.freshness || "";
     const cont = cov.continuity || "";
