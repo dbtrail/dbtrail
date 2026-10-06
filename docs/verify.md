@@ -186,7 +186,7 @@ depends on the server:
 |---|---|---|
 | Percona Server (`gtid_mode=ON`) | the server's own snapshot position (`Binlog_snapshot_gtid_executed`), no lock | fine |
 | MariaDB | the server's own snapshot coordinate (`binlog_snapshot_file`/`_position`, through `BINLOG_GTID_POS`), no lock | fine |
-| MySQL (`gtid_mode=ON`) | `FLUSH TABLES <table> WITH READ LOCK` on a second connection while the snapshot opens: writes to that one table wait while it is held (measured: 25 to 60 ms on average, under 0.2 s at worst, with 48 concurrent writers) | fine |
+| MySQL (`gtid_mode=ON`) | `FLUSH TABLES <table> WITH READ LOCK` on a second connection while the snapshot opens: writes to that one table wait while it is held (measured on MySQL 8.0, 8.4 and Percona Server 8.0 with 48 concurrent writers: 25 to 70 ms on average, under a quarter second at worst) | fine |
 | MySQL without the `LOCK TABLES` privilege, MySQL with `gtid_mode` other than `ON` (`ON_PERMISSIVE` still commits transactions without a GTID), PostgreSQL | not pinned | **none allowed**: a write while the table is read shows as a MISMATCH |
 
 Why MySQL needs the lock: measured on MySQL 8.0 and 8.4 under concurrent

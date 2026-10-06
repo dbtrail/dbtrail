@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   position is exact where the server can give it: Percona Server and MariaDB
   report their own snapshot position (no lock); on MySQL with GTIDs on, a
   `FLUSH TABLES <table> WITH READ LOCK` on a second connection is held while
-  the snapshot opens, so writes to that one table wait 25 to 60 ms on
+  the snapshot opens, so writes to that one table wait 25 to 70 ms on
   average (measured with 48 concurrent writers; `LOCK TABLES <table> READ`
   when the account lacks `RELOAD`). Measured: on MySQL 8.0 and 8.4 a
   snapshot can see transactions `@@gtid_executed` does not list yet, even
