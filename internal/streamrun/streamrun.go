@@ -2411,16 +2411,94 @@ func oneRun(ctx context.Context, cfg Config) error {
 	// gtidAdvanced tracks whether the GTID auto-advance branch below ran — see
 	// the dedup-on-resume comment after this block for why it matters.
 	gtidAdvanced := false
+	// gtidRenumbered: the source's GTID numbering went backwards (#2171) and
+	// this run restarts from the start of its binary log. carriedFloor is the
+	// dedup floor this run carries: the saved one, or a fresh one after such a
+	// restart. ONE variable feeds both the persisted advance and the running
+	// state, so the two cannot disagree.
+	gtidRenumbered := false
+	var carriedFloor int64
+	if saved != nil {
+		carriedFloor = saved.dedupFloorID
+	}
 	if saved != nil {
 		var gap *gapResult
 		var gapErr error
 
 		gapTimeout := time.Duration(cfg.GapTimeout) * time.Second
 
-		switch mode {
-		case "position":
+		// A GTID checkpoint names what capture has read only while the source's
+		// GTID history is the one it was taken from (#2171). Checked before the
+		// purge detection and before the resume cleanup: after a RESET the
+		// cleanup would delete rows the source will never send again.
+		var renum *gtidRenumbering
+		if mode == "gtid" && saved.mode == "gtid" {
+			var err error
+			renum, err = detectGTIDRenumbering(sourceDB, cfg.Flavor, startGTIDStr, saved.binlogFile, saved.binlogPos, gapTimeout)
+			if err != nil {
+				slog.Error("GTID history check failed", "error", err)
+				return fmt.Errorf("checking that the source's GTID history continues the checkpoint: %w "+
+					"(use --reset to start from a new position)", err)
+			}
+		}
+		if renum != nil {
+			slog.Warn(renum.Detail)
+			if cfg.Flavor == gomysql.MariaDBFlavor {
+				return mariadbRenumberedError(renum)
+			}
+			if cfg.NoGapFill {
+				return &GapRefusedError{msg: renum.Detail}
+			}
+			fresh, err := freshDedupFloor(indexDB)
+			if err != nil {
+				return err
+			}
+			carriedFloor = fresh
+			startGTIDStr = renum.ResumeSet
+			gs, parseErr := parseGTIDSetForFlavor(cfg.Flavor, startGTIDStr)
+			if parseErr != nil {
+				return fmt.Errorf("parse the GTID set to restart from after the source's numbering went backwards: %w", parseErr)
+			}
+			accGTID = gs
+			startFile, startPos = "", 0
+			if renum.EarliestFile != "" {
+				startFile, startPos = renum.EarliestFile, 4
+			}
+			gtidRenumbered = true
+			advancedState := &streamState{
+				mode:          mode,
+				binlogFile:    startFile,
+				binlogPos:     uint64(startPos),
+				safeFile:      startFile,
+				safePos:       uint64(startPos),
+				gtidSet:       startGTIDStr,
+				flavor:        cfg.Flavor,
+				serverID:      cfg.ServerID,
+				bintrailID:    bintrailID,
+				eventsIndexed: saved.eventsIndexed,
+				lastEventTime: saved.lastEventTime,
+				// Every row already indexed belongs to the old numbering, whose
+				// positions say nothing about the new one: a fresh floor keeps
+				// every later resume cleanup off them.
+				dedupFloorID: carriedFloor,
+			}
+			if err := persistGapAutoAdvance(indexDB, advancedState, renum.Detail); err != nil {
+				return err
+			}
+			fmt.Printf("Gap: UNFILLABLE — %s\n", renum.Detail)
+			slog.Info("saved the restart checkpoint after the source's GTID numbering went backwards",
+				"file", startFile, "pos", startPos, "gtid_set", startGTIDStr)
+			if cfg.Hooks != nil && cfg.Hooks.OnGapAutoAdvance != nil {
+				cfg.Hooks.OnGapAutoAdvance(renum.Detail)
+			}
+		}
+
+		switch {
+		case renum != nil:
+			// Handled above; the purge check below would compare the old set.
+		case mode == "position":
 			gap, gapErr = detectPositionGap(sourceDB, startFile, startPos, gapTimeout)
-		case "gtid":
+		case mode == "gtid":
 			// MySQL and MariaDB expose the purge boundary differently
 			// (@@gtid_purged vs BINLOG_GTID_POS over the oldest surviving binlog),
 			// so each flavor has its own detector; both return the same gapResult
@@ -2599,7 +2677,21 @@ func oneRun(ctx context.Context, cfg Config) error {
 			return fmt.Errorf("failed to dedup events since checkpoint: %w", err)
 		}
 	} else if saved != nil && saved.mode == mode && mode == "gtid" {
-		if gtidAdvanced {
+		if gtidRenumbered {
+			// The source's GTID numbering went backwards (#2171): every indexed
+			// row belongs to the old numbering, which the source will never send
+			// again, and its positions say nothing about the new one. Nothing is
+			// deleted; the capture loss stamped above reports the break. Still
+			// waits for a delete an earlier run left executing (#1708).
+			if stopped, err := awaitEarlierCleanup(ctx, indexDB, cfg.Hooks); stopped || err != nil {
+				return err
+			}
+			slog.Warn("dedup-on-resume: skipped; the source's GTID numbering went backwards, so every indexed "+
+				"event is kept (none of them will be sent again)",
+				"checkpoint_file", saved.binlogFile, "checkpoint_pos", saved.binlogPos,
+				"start_file", startFile, "start_pos", startPos)
+			fmt.Println("Cleanup: skipped, the source's GTID numbering started over; indexed events are kept")
+		} else if gtidAdvanced {
 			slog.Warn("skipping dedup-on-resume after GTID gap auto-advance; " +
 				"re-received events in this window may be duplicated — this is a known, " +
 				"accepted trade-off (deleting on the pre-advance coordinates would destroy " +
@@ -2646,7 +2738,9 @@ func oneRun(ctx context.Context, cfg Config) error {
 		// persist a floor of 0 and throw away the one the previous run earned.
 		// A crash right after that leaves the next resume scanning the whole
 		// table, which is the outage this change exists to remove.
-		state.dedupFloorID = saved.dedupFloorID
+		// carriedFloor is the saved floor, or the fresh one a restart after
+		// the source's GTID numbering went backwards took (#2171).
+		state.dedupFloorID = carriedFloor
 	} else {
 		state.dedupFloorID = freshFloor
 	}

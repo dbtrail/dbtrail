@@ -4,6 +4,7 @@ package streamrun
 
 import (
 	"database/sql"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -98,13 +99,18 @@ func ownGTIDCount(t *testing.T, db *sql.DB) int64 {
 // send again; rows 9.. are the new numbering's first transactions, whose GTIDs
 // fall inside the saved set. All of them must be indexed exactly once, and the
 // break in continuity must be stamped as a capture loss.
-func runGTIDResetScenario(t *testing.T, src dupSource, indexDB *sql.DB, indexName string, post func(oldOwn int64) int) {
+func runGTIDResetScenario(t *testing.T, src dupSource, indexDB *sql.DB, indexName, wantDetail string, post func(oldOwn int64) int) {
 	t.Helper()
 	// A small, known numbering to start from, with one transaction in it so a
 	// fresh capture starts in GTID mode (an empty executed set starts in
 	// position mode on MySQL).
 	resetGTIDSourceBinlogs(t, src.db)
 	testutil.MustExec(t, src.db, "INSERT INTO orders (id, amount) VALUES (-1, 0)")
+	// The old numbering's checkpoint lands in a later file than the new
+	// numbering's first one, as it does on any server that has rotated.
+	for range 3 {
+		testutil.MustExec(t, src.db, "FLUSH BINARY LOGS")
+	}
 	cfg := func(n uint32) Config {
 		c := src.config(indexName)
 		c.ServerID = src.serverID + n
@@ -134,17 +140,103 @@ func runGTIDResetScenario(t *testing.T, src dupSource, indexDB *sql.DB, indexNam
 	last := post(oldOwn)
 	insertOrders(t, src.db, 9, last)
 
+	if src.flavor == gomysql.MariaDBFlavor {
+		mariadbResumeAfterReset(t, src, indexDB, cfg(2), cfg(3), last)
+		return
+	}
+
 	err = runOneUntil(t, cfg(2), false, nil, ordersIndexedThrough(t, indexDB, src.schema, last))
-	t.Logf("run 3 (restart after the reset) returned: %v", err)
-	at, detail := gapLost(t, indexDB)
-	t.Logf("gap_lost_at=%v detail=%q", at, detail)
 	if err != nil {
 		t.Fatalf("run 3 (restart after the reset): %v", err)
 	}
+	at, detail := gapLost(t, indexDB)
+	t.Logf("run 3 stamped gap_lost_at=%v detail=%q", at, detail)
 	if !at.Valid {
-		t.Error("run 3 stamped no capture loss after the source's GTID numbering went backwards")
+		t.Fatal("run 3 stamped no capture loss after the source's GTID numbering went backwards")
+	}
+	if !strings.Contains(detail, wantDetail) {
+		t.Errorf("run 3 loss detail = %q, want it to say %q", detail, wantDetail)
 	}
 	assertExactlyOnce(t, indexedPKs(t, indexDB, src.schema, "orders"), pkRange(1, last))
+	if t.Failed() {
+		return
+	}
+
+	// run 4 crashes in the new numbering, run 5 restarts: the ordinary cleanup
+	// must remove only run 4's rows past the checkpoint (they are replayed)
+	// and nothing of the old numbering, whose rows share file names with the
+	// new one. And the restart must not stamp a second loss.
+	lift = blockCheckpoints(t, indexDB)
+	if err := runOneUntil(t, cfg(3), false, func() { insertOrders(t, src.db, last+1, last+3) }, ordersIndexedThrough(t, indexDB, src.schema, last+3)); err != nil {
+		t.Fatalf("run 4 (crash in the new numbering): %v", err)
+	}
+	lift()
+	if err := runOneUntil(t, cfg(4), true, func() { insertOrders(t, src.db, last+4, last+4) }, ordersIndexedThrough(t, indexDB, src.schema, last+4)); err != nil {
+		t.Fatalf("run 5 (restart in the new numbering): %v", err)
+	}
+	assertExactlyOnce(t, indexedPKs(t, indexDB, src.schema, "orders"), pkRange(1, last+4))
+	at5, detail5 := gapLost(t, indexDB)
+	if !at5.Time.Equal(at.Time) || detail5 != detail {
+		t.Errorf("run 5 re-stamped the capture loss (%v %q, was %v %q): a restart in the new numbering is not a new break",
+			at5, detail5, at, detail)
+	}
+}
+
+// mariadbResumeAfterReset: on MariaDB the restart refuses, deletes nothing,
+// and says how to resume; following those steps captures the new numbering
+// from its first transaction and stamps the loss.
+func mariadbResumeAfterReset(t *testing.T, src dupSource, indexDB *sql.DB, restart, resume Config, last int) {
+	t.Helper()
+	var earliest string
+	var size int64
+	rows, err := src.db.Query("SHOW BINARY LOGS")
+	if err != nil {
+		t.Fatalf("SHOW BINARY LOGS: %v", err)
+	}
+	if rows.Next() {
+		cols, _ := rows.Columns()
+		vals := make([]any, len(cols))
+		vals[0], vals[1] = &earliest, &size
+		for i := 2; i < len(cols); i++ {
+			vals[i] = new(sql.RawBytes)
+		}
+		if err := rows.Scan(vals...); err != nil {
+			t.Fatalf("scan SHOW BINARY LOGS: %v", err)
+		}
+	}
+	rows.Close()
+
+	err = runOneUntil(t, restart, false, nil, func() bool { return false })
+	t.Logf("run 3 (restart after the reset) returned: %v", err)
+	var refused *SourceRenumberedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("run 3 = %v, want a SourceRenumberedError", err)
+	}
+	steps := "--reset --start-file " + earliest + " --start-pos 4"
+	if !strings.Contains(err.Error(), steps) {
+		t.Errorf("run 3 error does not carry the resume steps %q: %v", steps, err)
+	}
+	assertExactlyOnce(t, indexedPKs(t, indexDB, src.schema, "orders"), pkRange(1, 8))
+	if at, _ := gapLost(t, indexDB); at.Valid {
+		t.Errorf("run 3 refused but stamped a capture loss at %v", at)
+	}
+	if t.Failed() {
+		return
+	}
+
+	// The steps, exactly as the error gives them.
+	resume.Reset = true
+	resume.StartFile = earliest
+	resume.StartPos = 4
+	if err := runOneUntil(t, resume, false, nil, ordersIndexedThrough(t, indexDB, src.schema, last)); err != nil {
+		t.Fatalf("run 4 (the error's resume steps): %v", err)
+	}
+	assertExactlyOnce(t, indexedPKs(t, indexDB, src.schema, "orders"), pkRange(1, last))
+	if at, detail := gapLost(t, indexDB); !at.Valid {
+		t.Error("resuming with the error's steps stamped no capture loss")
+	} else {
+		t.Logf("run 4 stamped gap_lost_at=%v detail=%q", at, detail)
+	}
 }
 
 // TestIntegrationGTIDResetMasterRestartBeforeRenumberingPasses: the restart
@@ -154,7 +246,7 @@ func TestIntegrationGTIDResetMasterRestartBeforeRenumberingPasses(t *testing.T) 
 	indexDB, indexName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
 	src := mysqlGTIDDupSource(t, 99920)
-	runGTIDResetScenario(t, src, indexDB, indexName, func(int64) int { return 10 })
+	runGTIDResetScenario(t, src, indexDB, indexName, "numbering went backwards", func(int64) int { return 10 })
 }
 
 // TestIntegrationGTIDResetMasterRestartAfterRenumberingPasses: capture is down
@@ -164,7 +256,7 @@ func TestIntegrationGTIDResetMasterRestartAfterRenumberingPasses(t *testing.T) {
 	indexDB, indexName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
 	src := mysqlGTIDDupSource(t, 99924)
-	runGTIDResetScenario(t, src, indexDB, indexName, func(oldOwn int64) int { return 8 + int(oldOwn) + 3 })
+	runGTIDResetScenario(t, src, indexDB, indexName, "numbering started over", func(oldOwn int64) int { return 8 + int(oldOwn) + 3 })
 }
 
 // TestOne_MariaDB_resetMasterStopsWithResumeSteps: the MariaDB sibling.
@@ -172,5 +264,5 @@ func TestOne_MariaDB_resetMasterStopsWithResumeSteps(t *testing.T) {
 	indexDB, indexName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
 	src := mariadbDupSource(t, 99928)
-	runGTIDResetScenario(t, src, indexDB, indexName, func(int64) int { return 10 })
+	runGTIDResetScenario(t, src, indexDB, indexName, "", func(int64) int { return 10 })
 }
