@@ -657,5 +657,5 @@ func (s *Server) cascadeRecover(ctx context.Context, b *bundle, body recoverRequ
 // with the CLI (internal/cascadebaseline) so the two surfaces cannot drift
 // apart again (#1101).
 func cascadeProviderFor(b *bundle) *cascadebaseline.Provider {
-	return cascadebaseline.New(b.findBaseline, b.resolver)
+	return cascadebaseline.New(b.findBaseline, b.resolver, b.db)
 }

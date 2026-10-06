@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -33,8 +34,8 @@ import (
 // single CLI-supplied baseline source (--baseline-dir / --baseline-s3). The
 // shared implementation lives in internal/cascadebaseline so the CLI and the
 // console cannot drift apart again (#1101, #1102).
-func cascadeBaselineProviderFor(src string, resolver *metadata.Resolver) *cascadebaseline.Provider {
-	return cascadebaseline.New(cascadebaseline.Source(src), resolver)
+func cascadeBaselineProviderFor(src string, resolver *metadata.Resolver, db *sql.DB) *cascadebaseline.Provider {
+	return cascadebaseline.New(cascadebaseline.Source(src), resolver, db)
 }
 
 var recoverCascadeCmd = &cobra.Command{
@@ -331,7 +332,7 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 		if resolver == nil {
 			slog.Warn("baseline source set but no schema snapshot is available; Phase-2 fallback disabled (run `bintrail snapshot`)")
 		} else {
-			baselineProvider = cascadeBaselineProviderFor(baselineSrc, resolver)
+			baselineProvider = cascadeBaselineProviderFor(baselineSrc, resolver, db)
 		}
 	}
 

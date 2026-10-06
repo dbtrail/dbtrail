@@ -31,7 +31,7 @@ func TestProvider_generatedPKRefusesWithRealCause(t *testing.T) {
 		}},
 	})
 
-	_, _, err := New(find, resolver).BaselineChildren(context.Background(), "shop", "child", "pid", "1", time.Now(), 100)
+	_, _, err := New(find, resolver, nil).BaselineChildren(context.Background(), "shop", "child", "pid", "1", time.Now(), 100)
 	if err == nil {
 		t.Fatal("expected the generated-PK refusal, got nil")
 	}
