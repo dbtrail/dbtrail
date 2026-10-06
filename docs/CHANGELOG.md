@@ -245,12 +245,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Rotation now records, for each archive, the highest `event_id` and the
   highest binlog position the file holds, in three new NULLable
   `archive_state` columns (`max_event_id`, `max_binlog_file`,
-  `max_start_pos`, added on startup by the usual migration). An archive whose
-  newest position is at or after the snapshot's position makes the update
-  start at that archive's hour. Archives written before this release have
-  no record: those written after the snapshot (less one hour for clock
-  differences) are read, older ones are not, so an upgrade costs at most one
-  wider update per table. `archive reconcile --repair` (local files always,
+  `max_start_pos`, added on startup by the usual migration). An update now
+  reads an archive whose newest position is at or after the cut of the
+  refresh that published its snapshot, and starts at that archive's hour.
+  The cut, not the table's own position: a table with no changes keeps its
+  old position across refreshes, and every archive rotation writes is after
+  it, so measured that way each refresh of a quiet table would read them all
+  again. Capture indexes in commit order, so a change indexed after a refresh
+  ran is after its cut, and the refresh already looked at everything before
+  it. The cut is read as the newest anchor among the refresh-written files of
+  the table's snapshot directory. On an index `bintrail index` also wrote
+  (rows with old positions are indexed late), on a snapshot taken by a dump
+  or stored in S3, and for other readers that continue from a position, the
+  rule falls back to the archives after the table's own position that were
+  written after the snapshot's time (less one hour for clock differences),
+  with one warning per process on the backfilled index. Archives written
+  before this release have no record: those written after the snapshot are
+  read, older ones are not, so an upgrade costs at most one wider update per
+  table. `archive reconcile --repair` (local files always,
   S3 only with `--deep`) and `restore-index` read the files they register and
   fill the same columns, plus `min_event_ts`/`max_event_ts`. Rotation now also
   runs the `archive_state` migration itself before archiving. Cost: one read

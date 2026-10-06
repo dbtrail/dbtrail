@@ -94,6 +94,11 @@ func TestArchiveCuts_forBaseline_2152(t *testing.T) {
 	writeAnchoredFile2152(t, filepath.Join(snap, "shop", "orders.parquet"), baseline.ProducerReconstruct, "binlog.000001", 4)
 	writeAnchoredFile2152(t, filepath.Join(snap, "shop", "items.parquet"), baseline.ProducerReconstruct, "binlog.000003", 77)
 
+	// A newer snapshot the table is missing from (it failed in that run): its
+	// refresh never checked orders, so its cut is not orders' cut.
+	newer := filepath.Join(root, "2026-03-02T10-00-00Z")
+	writeAnchoredFile2152(t, filepath.Join(newer, "shop", "items.parquet"), baseline.ProducerReconstruct, "binlog.000099", 1)
+
 	c := newArchiveCuts(false)
 	got := c.forBaseline(filepath.Join(snap, "shop", "orders.parquet"))
 	if got == nil || *got != (query.BinlogPos{File: "binlog.000003", Pos: 77}) {
