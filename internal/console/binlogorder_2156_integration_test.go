@@ -183,9 +183,10 @@ func TestIntegrationBinlogOrder2156_autoCascadeTakesBinlogOrder(t *testing.T) {
 	// Binary log order is A (delete, 500) then B (insert, 600): B is undone
 	// first. Statement-time order would undo A first, re-inserting a row B's
 	// insert already holds.
-	first := strings.Index(resp.SQL, "\n-- [")
-	if first < 0 || !strings.Contains(strings.SplitN(resp.SQL[first+1:], "\n", 2)[0], "reverse INSERT") {
-		t.Fatalf("the first statement does not undo B's insert:\n%s", resp.SQL)
+	undoB := strings.Index(resp.SQL, "reverse INSERT on "+dbName+".parent pk=2 ")
+	undoA := strings.Index(resp.SQL, "reverse DELETE on "+dbName+".parent pk=2 ")
+	if undoB < 0 || undoA < 0 || undoB > undoA {
+		t.Fatalf("B's insert is not undone before A's delete (%d, %d):\n%s", undoB, undoA, resp.SQL)
 	}
 	if !strings.Contains(resp.SQL, "--   - Order of the changes: 2 of 3 changes were written to the binary log in a different order") {
 		t.Fatalf("the script header does not carry the order note:\n%s", resp.SQL)

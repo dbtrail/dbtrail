@@ -1108,9 +1108,11 @@ func (h *Handler) runFullTable(q TimeTravelQuery) (*mysql.Result, error) {
 	}
 
 	// The read above is each row's latest change by statement time, under
-	// the cap: it fixes which rows are read. Each one's latest change is
-	// then taken in binary log order where the index can show it (#2156):
-	// by statement time, a row two sessions changed at once comes back at
+	// the cap (and a LIMIT, which picks some rows of the window, as it did
+	// before). Each row's latest change is then taken in binary log order
+	// where the index can show it (#2156), by query.RepickLatestInBinlog:
+	// one more read of the window, or of the rows a LIMIT kept. Taken by
+	// statement time, a row two sessions changed at once comes back at
 	// the change the database does not hold. Where the order cannot be shown
 	// the statement-time answer stands and the client gets a warning, as
 	// `_snapshot` does.

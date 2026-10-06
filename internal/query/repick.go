@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 )
 
 // repickBatch bounds the keys one repick read names in its IN list.
@@ -25,17 +26,22 @@ type LatestRepicker interface {
 // It is for a reader whose fetch carries a Limit, which FetchMergedOptions.
 // LatestInBinlog does not take: the shim's full-table `_flashback` bounds its
 // read by its row cap and recover-cascade bounds each scan for children. The
-// Limit there fixes WHICH keys are read, and which keys hold a change in the
-// window does not depend on the order of their changes; it is only each
-// key's latest change that does. So the first read stays as it was (the
-// keys, and its overflow check), and this second one asks for the latest
-// change in binary log order of those keys alone, with o's other filters, in
-// batches of repickBatch keys: FetchMerged with LatestInBinlog, which reads at
-// most two candidates per key and decides with query.LatestPerPKInBinlog.
+// first read stays as it was (its overflow check, and which keys it read),
+// and a second one asks for the latest change in binary log order:
+// FetchMerged with LatestInBinlog, which reads at most two candidates per key
+// and decides with query.LatestPerPKInBinlog.
+//
+//   - When the first read returned fewer rows than its Limit (or had none),
+//     it read every key of the window, and so will the second one: it is ONE
+//     read of the same window, bounded by the same keys.
+//   - Otherwise the Limit cut the keys, and the second read names the keys
+//     the first one returned, in batches of repickBatch, with o's other
+//     filters.
 //
 // Each key's row stays in its place. A row with no pk_values is its own key
 // and is kept as it is. A key the second read does not find (its changes
-// rotated out between the two reads) keeps the first read's row.
+// rotated out between the two reads) keeps the first read's row, and the
+// count of such keys is logged.
 func RepickLatestInBinlog(ctx context.Context, db *sql.DB, engine *Engine, o FetchMergedOptions, rows []ResultRow) ([]ResultRow, LatestPerPKOrder, error) {
 	return repickLatestInBinlog(o.Opts, rows, func(opts Options, latest *LatestPerPKOrder) ([]ResultRow, error) {
 		h := o
@@ -78,34 +84,58 @@ func repickLatestInBinlog(o Options, rows []ResultRow, fetch func(Options, *Late
 		return rows, total, nil
 	}
 	latest := make(map[string]ResultRow, len(keys))
-	for len(keys) > 0 {
-		batch := keys[:min(repickBatch, len(keys))]
-		keys = keys[len(batch):]
-		h := o
+	read := func(h Options) error {
 		h.Limit, h.Order = 0, ""
-		h.PKValues, h.PKValuesIn = "", batch
 		var order LatestPerPKOrder
 		got, err := fetch(h, &order)
 		if err != nil {
+			return err
+		}
+		total.Add(order)
+		for _, r := range got {
+			if seen[r.PKValues] {
+				latest[r.PKValues] = r
+			}
+		}
+		return nil
+	}
+	if o.Limit == 0 || len(rows) < o.Limit {
+		if err := read(o); err != nil {
 			return nil, total, err
 		}
-		total.add(order)
-		for _, r := range got {
-			latest[r.PKValues] = r
+	} else {
+		for len(keys) > 0 {
+			batch := keys[:min(repickBatch, len(keys))]
+			keys = keys[len(batch):]
+			h := o
+			h.PKValues, h.PKValuesIn = "", batch
+			if err := read(h); err != nil {
+				return nil, total, err
+			}
 		}
 	}
 	out := make([]ResultRow, len(rows))
+	missing := 0
 	for i, r := range rows {
-		if l, ok := latest[r.PKValues]; ok && r.PKValues != "" {
-			r = l
+		if r.PKValues != "" {
+			if l, ok := latest[r.PKValues]; ok {
+				r = l
+			} else {
+				missing++
+			}
 		}
 		out[i] = r
+	}
+	if missing > 0 {
+		slog.Warn("latest change in binary log order: some rows were not found by the second read and keep their latest change by statement time",
+			"rows", missing, "schema", o.Schema, "table", o.Table)
 	}
 	return out, total, nil
 }
 
-// add counts p's keys into o, keeping o's first warning.
-func (o *LatestPerPKOrder) add(p LatestPerPKOrder) {
+// Add counts p's keys into o, keeping o's first warning: what a caller that
+// decided several reads reports once.
+func (o *LatestPerPKOrder) Add(p LatestPerPKOrder) {
 	o.Disagreed += p.Disagreed
 	o.Sorted += p.Sorted
 	o.Refused += p.Refused

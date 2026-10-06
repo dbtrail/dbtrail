@@ -238,7 +238,7 @@ func foldRowInBinlogOrder(initial map[string]any, rows []query.ResultRow, asOf t
 	note := ""
 	if order.MayDiffer(ordered) {
 		note = "order of changes unproven: " + order.RowReason() +
-			". The row was taken at its changes in the order their statements started, which is wrong for a row two sessions changed at once."
+			". The row was taken at its changes in the order their statements started, which may be wrong for a row two sessions changed at once."
 	}
 	state, err := reconstruct.ApplyAt(initial, ordered, asOf)
 	return state, ordered, note, err

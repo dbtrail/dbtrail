@@ -493,6 +493,19 @@ func SynthesizeVictims(
 		warned[key] = true
 		warnings = append(warnings, msg)
 	}
+	// orderByTable sums, per child table, what repickChildren decided over
+	// every parent's scan (#2156), so the one note per table counts them all.
+	orderByTable := map[string]*query.LatestPerPKOrder{}
+	var orderTables []string
+	addOrder := func(table string, o query.LatestPerPKOrder) {
+		acc, ok := orderByTable[table]
+		if !ok {
+			acc = &query.LatestPerPKOrder{}
+			orderByTable[table] = acc
+			orderTables = append(orderTables, table)
+		}
+		acc.Add(o)
+	}
 	// addGeneratedPKCaveat is the ONE caveat frame for both #1273 gate paths
 	// (the PKMetas probe and the provider-error backstop), so the two cannot
 	// drift in wording or key format; detail carries the path-specific cause.
@@ -873,7 +886,9 @@ func SynthesizeVictims(
 		}
 		cands, qerr := eng.Fetch(ctx, candOpts)
 		if qerr == nil && len(cands) > 0 {
-			cands, qerr = repickChildren(ctx, eng, candOpts, cands, opts.CandidateLimit, fk, addWarning)
+			var order query.LatestPerPKOrder
+			cands, order, qerr = repickChildren(ctx, eng, candOpts, cands)
+			addOrder(fk.Schema+"."+fk.Table, order)
 		}
 		if qerr != nil {
 			// Operational failure: we never learned whether children existed, so
@@ -1528,6 +1543,11 @@ func SynthesizeVictims(
 		}
 		layer = next
 	}
+	for _, table := range orderTables {
+		if note := orderByTable[table].ReadNote(); note != "" {
+			addWarning("binlog-order:"+table, table+": "+note)
+		}
+	}
 	return Result{
 		Victims:          dedupVictimsNewest(victims),
 		SetNullRows:      setNullRows,
@@ -1539,42 +1559,37 @@ func SynthesizeVictims(
 }
 
 // repickChildren puts in place of each child candidate its latest change in
-// binary log order (#2156), when eng can (query.LatestRepicker): the scan
-// above reads each child's latest change by statement time, and
-// event_timestamp is the time a change's STATEMENT STARTED. When session B
-// waited on a row lock A held, A is in the binary log first and carries the
-// later time; re-inserting the child with A's image puts back a value the
-// database no longer held when the parent was deleted.
+// binary log order (#2156), when eng can (query.LatestRepicker), and returns
+// what was decided: the scan above reads each child's latest change by
+// statement time, and event_timestamp is the time a change's STATEMENT
+// STARTED. When session B waited on a row lock A held, A is in the binary log
+// first and carries the later time; re-inserting the child with A's image
+// puts back a value the database no longer held when the parent was deleted.
 //
 // The scan keeps its Limit (the overflow check, and the bound on how many
-// children one parent reads), which fixes WHICH children are read; that does
-// not depend on the order of their changes. Only the first limit candidates
-// are repicked: the extra one only proves the overflow and is cut below. A
-// child whose order cannot be established keeps the statement-time pick, and
-// the table gets one advisory warning (the recovery is not partial: every
-// child found is re-inserted).
+// children one parent reads), and the second read is bounded by the keys the
+// first one returned: see query.RepickLatestInBinlog. A child whose order
+// cannot be established keeps the statement-time pick; the caller sums the
+// decisions per table and gives each table one advisory warning (the
+// recovery is not partial: every child found is re-inserted).
+//
+// Every fetcher the commands build (query.MergedFetcher) can repick. A
+// fetcher that cannot keeps the statement-time pick: the tests' plain
+// fetchers, and nothing in production.
 //
 // Every newest-wins choice made later from these candidates (the victims of
 // two roots, dedupVictimsNewest; the SET NULL and key restorations) compares
 // their event_timestamp, and keeps doing so on purpose: two scans of one
 // child under two roots read windows that end at their roots, and the later
-// window holds every change of the earlier one, so the binary log's latest
-// change in it is the same change or a later one in both orders.
-func repickChildren(ctx context.Context, eng query.Fetcher, o query.Options, cands []query.ResultRow, limit int,
-	fk CascadeFK, addWarning func(key, msg string)) ([]query.ResultRow, error) {
+// window holds every change of the earlier one, so its binary-log latest
+// change is the same change or one whose time is past the earlier window's
+// end. A pick that kept time order (refused) already carries a warning.
+func repickChildren(ctx context.Context, eng query.Fetcher, o query.Options, cands []query.ResultRow) ([]query.ResultRow, query.LatestPerPKOrder, error) {
 	r, ok := eng.(query.LatestRepicker)
 	if !ok {
-		return cands, nil
+		return cands, query.LatestPerPKOrder{}, nil
 	}
-	head := cands[:min(len(cands), limit)]
-	picked, order, err := r.RepickLatestInBinlog(ctx, o, head)
-	if err != nil {
-		return nil, err
-	}
-	if note := order.ReadNote(); note != "" {
-		addWarning("binlog-order:"+fk.Schema+"."+fk.Table, fk.Schema+"."+fk.Table+": "+note)
-	}
-	return append(picked, cands[len(head):]...), nil
+	return r.RepickLatestInBinlog(ctx, o, cands)
 }
 
 // dedupVictimsNewest collapses victims of the same (schema, table, pk) emitted

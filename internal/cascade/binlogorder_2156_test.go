@@ -125,6 +125,31 @@ func TestSynthesizeVictims2156_childTakenAtItsLastChangeInBinlogOrder(t *testing
 		}
 	})
 
+	t.Run("the note counts every parent's scan", func(t *testing.T) {
+		f := repickingChildFetcher{&childFetcher{timeLatest: []query.ResultRow{a}, repicked: []query.ResultRow{a},
+			order: query.LatestPerPKOrder{Disagreed: 1, Refused: 1}}}
+		_, both := twoParentDeletes()
+		res, err := cascade.SynthesizeVictims(context.Background(), f, fks, both, cascade.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(f.repickCalls) != 2 {
+			t.Fatalf("%d repicks, want one per parent", len(f.repickCalls))
+		}
+		n := 0
+		for _, w := range res.Warnings {
+			if strings.Contains(w, "order of changes unproven") {
+				n++
+				if !strings.HasPrefix(w, "app.child: order of changes unproven: for 2 row(s)") {
+					t.Fatalf("warning %q, want both scans counted", w)
+				}
+			}
+		}
+		if n != 1 {
+			t.Fatalf("%d order warnings, want one for the table: %q", n, res.Warnings)
+		}
+	})
+
 	t.Run("a failed repick is a failed scan", func(t *testing.T) {
 		f := repickingChildFetcher{&childFetcher{timeLatest: []query.ResultRow{a}, repickErr: errors.New("boom")}}
 		res, err := cascade.SynthesizeVictims(context.Background(), f, fks, parents, cascade.Options{})

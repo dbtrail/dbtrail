@@ -25,6 +25,11 @@ func repickFake(t *testing.T, byKey map[string]ResultRow, order LatestPerPKOrder
 	return func(o Options, latest *LatestPerPKOrder) ([]ResultRow, error) {
 		calls = append(calls, o)
 		var out []ResultRow
+		if len(o.PKValuesIn) == 0 {
+			for _, r := range byKey {
+				out = append(out, r)
+			}
+		}
 		for _, pk := range o.PKValuesIn {
 			if r, ok := byKey[pk]; ok {
 				out = append(out, r)
@@ -45,32 +50,54 @@ func TestRepickLatestInBinlog_eachKeyInItsPlace(t *testing.T) {
 		keyRow("1", 1, f, 400, at(2)),  // A: latest by time
 		keyRow("9", 4, f, 1100, at(4)), // gone from the second read
 	}
-	fetch, calls := repickFake(t, map[string]ResultRow{
-		"1": keyRow("1", 2, f, 900, at(0)), // B: latest in the binary log
-		"5": keyRow("5", 3, f, 1000, at(3)),
-	}, LatestPerPKOrder{Disagreed: 1, Sorted: 1})
-	opts := Options{Schema: "s", Table: "t", LimitPerPK: 1, Limit: 5, Order: "DESC", PKValues: "x",
+	byKey := map[string]ResultRow{
+		"1":  keyRow("1", 2, f, 900, at(0)), // B: latest in the binary log
+		"5":  keyRow("5", 3, f, 1000, at(3)),
+		"77": keyRow("77", 9, f, 1200, at(5)), // a key the first read did not return
+	}
+	filters := Options{Schema: "s", Table: "t", LimitPerPK: 1, Order: "DESC", PKValues: "x",
 		ColumnEq: []ColumnEq{{Column: "parent_id", Value: "1"}}}
-	got, order, err := repickLatestInBinlog(opts, rows, fetch)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ids := orderIDs(got); !slices.Equal(ids, []uint64{3, 7, 2, 4}) {
-		t.Fatalf("rows %v, want [3 7 2 4]: each key replaced in its own place, the drift row and a key the second read missed kept", ids)
-	}
-	if orderIDs(rows)[2] != 1 {
-		t.Fatal("the caller's rows were modified")
-	}
-	if order.Sorted != 1 || order.Disagreed != 1 {
-		t.Fatalf("order %+v", order)
-	}
-	if len(*calls) != 1 {
-		t.Fatalf("%d reads, want 1", len(*calls))
-	}
-	c := (*calls)[0]
-	if !slices.Equal(c.PKValuesIn, []string{"5", "1", "9"}) || c.PKValues != "" || c.Limit != 0 || c.LimitPerPK != 1 ||
-		len(c.ColumnEq) != 1 || c.Schema != "s" || c.Table != "t" {
-		t.Fatalf("second read options %+v: want the keys read, no Limit, the other filters kept", c)
+	for _, tc := range []struct {
+		name  string
+		limit int
+		keyed bool // the second read names the keys
+	}{
+		{"no limit: one read of the window", 0, false},
+		{"under the limit: one read of the window", 5, false},
+		{"at the limit: the keys are named", 4, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fetch, calls := repickFake(t, byKey, LatestPerPKOrder{Disagreed: 1, Sorted: 1})
+			opts := filters
+			opts.Limit = tc.limit
+			got, order, err := repickLatestInBinlog(opts, rows, fetch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ids := orderIDs(got); !slices.Equal(ids, []uint64{3, 7, 2, 4}) {
+				t.Fatalf("rows %v, want [3 7 2 4]: each key replaced in its own place, the drift row and a key the second read missed kept, no key added", ids)
+			}
+			if orderIDs(rows)[2] != 1 {
+				t.Fatal("the caller's rows were modified")
+			}
+			if order.Sorted != 1 || order.Disagreed != 1 {
+				t.Fatalf("order %+v", order)
+			}
+			if len(*calls) != 1 {
+				t.Fatalf("%d reads, want 1", len(*calls))
+			}
+			c := (*calls)[0]
+			if c.Limit != 0 || c.Order != "" || c.LimitPerPK != 1 || len(c.ColumnEq) != 1 || c.Schema != "s" || c.Table != "t" {
+				t.Fatalf("second read options %+v: want no Limit, the other filters kept", c)
+			}
+			if tc.keyed {
+				if !slices.Equal(c.PKValuesIn, []string{"5", "1", "9"}) || c.PKValues != "" {
+					t.Fatalf("keyed read: PKValues %q PKValuesIn %v, want the keys read", c.PKValues, c.PKValuesIn)
+				}
+			} else if c.PKValuesIn != nil || c.PKValues != "x" {
+				t.Fatalf("window read: PKValues %q PKValuesIn %v, want the first read's own filter", c.PKValues, c.PKValuesIn)
+			}
+		})
 	}
 }
 
@@ -80,7 +107,7 @@ func TestRepickLatestInBinlog_batchesAndSumsTheOrder(t *testing.T) {
 		rows = append(rows, keyRow(fmt.Sprint(i), uint64(i+1), "binlog.000001", uint64(10*(i+1)), orderT0))
 	}
 	fetch, calls := repickFake(t, nil, LatestPerPKOrder{Disagreed: 2, Sorted: 1, Refused: 1, warning: "w"})
-	got, order, err := repickLatestInBinlog(Options{LimitPerPK: 1}, rows, fetch)
+	got, order, err := repickLatestInBinlog(Options{LimitPerPK: 1, Limit: len(rows)}, rows, fetch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +174,7 @@ func TestMergedFetcher_repickLatestInBinlog(t *testing.T) {
 		SourceResolver: func(context.Context, *sql.DB) ([]string, error) { return []string{"/a/bintrail_id=x"}, nil },
 	}
 	in := []ResultRow{keyRow("1", 1, f, 400, orderT0.Add(2*time.Second))}
-	got, order, err := m.RepickLatestInBinlog(context.Background(), Options{Schema: "s", Table: "t", LimitPerPK: 1, Limit: 2}, in)
+	got, order, err := m.RepickLatestInBinlog(context.Background(), Options{Schema: "s", Table: "t", LimitPerPK: 1, Limit: 1}, in)
 	if err != nil {
 		t.Fatal(err)
 	}

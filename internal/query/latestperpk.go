@@ -46,7 +46,7 @@ func (o LatestPerPKOrder) ReadNote() string {
 		return ""
 	}
 	return fmt.Sprintf("order of changes unproven: for %d row(s) the order of the changes in the binary log could not be established, "+
-		"so each of those rows was taken at its change with the latest statement time, which is wrong for a row two sessions changed at once. "+
+		"so each of those rows was taken at its change with the latest statement time, which may be wrong for a row two sessions changed at once. "+
 		"The first such row: %s", o.Refused, upperFirst(o.warning))
 }
 
@@ -285,9 +285,6 @@ func LatestPerPKInBinlog(rows []ResultRow, n int, idsFollowBinlog func([]ResultR
 	return out, o, nil
 }
 
-// rowRefusal says why OrderByBinlog refused one row's changes, in words
-// about the row and without OrderByBinlog's counts, which a reader of a
-// whole table would take for counts over the table.
 // RowReason is why OrderByBinlog kept one row's changes in statement-time
 // order, worded for that row, and "" when it did not refuse.
 func (o BinlogOrder) RowReason() string {
@@ -320,6 +317,9 @@ func (o BinlogOrder) MayDiffer(rows []ResultRow) bool {
 	return false
 }
 
+// rowRefusal says why OrderByBinlog refused one row's changes, in words
+// about the row and without OrderByBinlog's counts, which a reader of a
+// whole table would take for counts over the table.
 func rowRefusal(d BinlogOrder) string {
 	switch d.Reason {
 	case OrderNoCoordinate:
