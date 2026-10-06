@@ -1276,7 +1276,9 @@ type gapResult struct {
 	Fillable bool   // true if the gap can be filled (binlogs still available)
 	Message  string // human-readable description of the gap
 
-	// For unfillable gaps in position mode: the earliest available binlog.
+	// The earliest available binlog: where an unfillable position-mode gap
+	// restarts, and, on a resume that fits (RebuildUndetectable), where the
+	// restart goes if the checkpoint's file proves to be another file (#2172).
 	EarliestFile string
 	EarliestPos  uint32
 
@@ -1374,14 +1376,18 @@ func detectPositionGap(sourceDB *sql.DB, checkpointFile string, checkpointPos ui
 			// Either way we resume reading the existing file from checkpointPos,
 			// so a same-named regrown binlog after a source rebuild is undetectable
 			// here (see gapResult.RebuildUndetectable).
+			// EarliestFile is set here too: when the file under this name
+			// turns out to be another file (#2172), the restart begins there.
 			currentFile := logs[len(logs)-1].name
 			if checkpointFile == currentFile {
-				return &gapResult{HasGap: false, RebuildUndetectable: true}, nil
+				return &gapResult{HasGap: false, RebuildUndetectable: true, EarliestFile: logs[0].name, EarliestPos: 4}, nil
 			}
 			return &gapResult{
 				HasGap:              true,
 				Fillable:            true,
 				RebuildUndetectable: true,
+				EarliestFile:        logs[0].name,
+				EarliestPos:         4,
 				Message: fmt.Sprintf(
 					"gap detected: checkpoint is at %s:%d, source is at %s; replaying missed events",
 					checkpointFile, checkpointPos, currentFile),

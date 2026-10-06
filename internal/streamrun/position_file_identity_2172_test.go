@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
@@ -341,5 +342,32 @@ func TestOneWarnsBeforeEveryFloorlessCleanup(t *testing.T) {
 	}
 	if starts != 2 {
 		t.Errorf("found %d cleanup starts, want 2", starts)
+	}
+}
+
+// TestDetectPositionGap_fitsNamesTheOldestFile: the check of the checkpoint's
+// file restarts at the oldest file when the file is another one, so the gap
+// detector must name it on a resume that fits too, not only on a purge.
+func TestDetectPositionGap_fitsNamesTheOldestFile(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		file string
+	}{{"checkpoint in the current file", "binlog.000004"}, {"checkpoint in an older file", "binlog.000003"}} {
+		t.Run(c.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			mock.ExpectQuery("SHOW BINARY LOGS").WillReturnRows(sqlmock.NewRows([]string{"Log_name", "File_size"}).
+				AddRow("binlog.000001", 900).AddRow("binlog.000003", 9000).AddRow("binlog.000004", 9000))
+			gap, err := detectPositionGap(db, c.file, 500, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !gap.RebuildUndetectable || gap.EarliestFile != "binlog.000001" || gap.EarliestPos != 4 {
+				t.Errorf("gap = %+v, want RebuildUndetectable with the oldest file binlog.000001:4", gap)
+			}
+		})
 	}
 }
