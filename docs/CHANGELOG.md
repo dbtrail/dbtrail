@@ -31,8 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#2198), the read is cut by time as before and the result says the table
   must take no writes during the read. Each table also waits up to a
   minute for a running capture to reach the snapshot it read, instead of
-  reporting "index is behind" at once; and the baseline it starts from is
-  the newest one taken before the read, not one taken during it.
+  reporting "index is behind" at once (once per run: after one table waited
+  the whole minute without the capture's saved position moving, later
+  tables do not wait again); and the baseline it starts from is the newest
+  one taken before the read, not one taken during it.
 - **A binlog-renumbering check that cannot tell is no longer silent
   (behavior change for scripts)** (#2186). When the check cannot tell whether the source's binary log
   started again after the snapshot (the event the snapshot's mark names was

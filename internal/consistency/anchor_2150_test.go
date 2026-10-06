@@ -3,6 +3,7 @@ package consistency
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -295,6 +296,10 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 			case c.wantErr != nil:
 				if !errors.Is(err, c.wantErr) {
 					t.Fatalf("err = %v, want %v", err, c.wantErr)
+				}
+				// docs/verify.md and the flag's help promise 10 tries of 1 s.
+				if errors.Is(err, ErrAnchorBusy) && !strings.Contains(err.Error(), "10 attempts of 1s") {
+					t.Fatalf("err = %v; want the 10 attempts of 1s the docs promise", err)
 				}
 			case c.wantErrMsg:
 				if err == nil || errors.Is(err, ErrAnchorBusy) {
