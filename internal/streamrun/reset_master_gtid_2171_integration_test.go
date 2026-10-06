@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 
@@ -346,5 +347,46 @@ func freezeCheckpointAfterGTIDRestart(t *testing.T, indexDB *sql.DB) func() {
 	return func() {
 		lifted = true
 		testutil.MustExec(t, indexDB, "DROP TRIGGER IF EXISTS "+name)
+	}
+}
+
+// TestIntegrationGTIDResetMasterWhileStreaming: the reset hits a running
+// capture. The source ends the binlog dump ("could not find next log"); the
+// restart that follows (the supervisor's, here the test's) must see the
+// source went backwards, stamp the loss, and capture the new numbering.
+func TestIntegrationGTIDResetMasterWhileStreaming(t *testing.T) {
+	indexDB, indexName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, indexDB)
+	src := mysqlGTIDDupSource(t, 99936)
+	resetGTIDSourceBinlogs(t, src.db)
+	testutil.MustExec(t, src.db, "INSERT INTO orders (id, amount) VALUES (-1, 0)")
+	for range 3 {
+		testutil.MustExec(t, src.db, "FLUSH BINARY LOGS")
+	}
+	cfg := src.config(indexName)
+	cfg.Checkpoint = 1
+	err := runOneUntil(t, cfg, true, func() {
+		insertOrders(t, src.db, 1, 3)
+		for !ordersIndexedThrough(t, indexDB, src.schema, 3)() {
+			time.Sleep(20 * time.Millisecond)
+		}
+		time.Sleep(1500 * time.Millisecond) // a checkpoint past row 3
+		resetGTIDSourceBinlogs(t, src.db)
+		insertOrders(t, src.db, 4, 6)
+	}, ordersIndexedThrough(t, indexDB, src.schema, 6))
+	t.Logf("the running capture, across the reset, returned: %v", err)
+	if err == nil {
+		t.Fatal("the running capture indexed the new numbering without stopping; the scenario did not happen")
+	}
+
+	cfg.ServerID++
+	if err := runOneUntil(t, cfg, false, nil, ordersIndexedThrough(t, indexDB, src.schema, 6)); err != nil {
+		t.Fatalf("restart after the reset: %v", err)
+	}
+	assertExactlyOnce(t, indexedPKs(t, indexDB, src.schema, "orders"), pkRange(1, 6))
+	if at, detail := gapLost(t, indexDB); !at.Valid {
+		t.Error("the restart after a reset during capture stamped no capture loss")
+	} else {
+		t.Logf("stamped: %q", detail)
 	}
 }

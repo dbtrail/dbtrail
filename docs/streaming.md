@@ -306,6 +306,44 @@ only appear when an application or operator sets a tag on purpose; if yours
 does, capture that source in position mode (`--start-file`/`--start-pos`, or
 `--reset` to move an existing capture, see [Mode switching](#mode-switching)).
 
+#### When the source's GTID numbering starts over (`RESET MASTER`)
+`RESET BINARY LOGS AND GTIDS` (MySQL 8.2+), `RESET MASTER`, a restore from an
+older backup or a rebuilt server start the source's GTID numbering over. The
+saved GTID set then no longer describes what capture has read: the numbers in it
+now name other transactions. On every GTID-mode restart, capture checks that the
+source's GTID history still continues the checkpoint, before anything is deleted
+or replayed:
+
+- **MySQL** (the check runs only when the source has `gtid_mode=ON`). The source
+  went backwards when the saved set holds GTIDs of the source's own
+  `server_uuid` that its `gtid_executed` no longer contains; when the checkpoint
+  lies past the end of the source's binary log (a file numbered after its newest
+  one, or past that file's size) while the source keeps no other server's
+  history; or when the source shares no GTID history with the checkpoint at all
+  (a server rebuilt with a new `server_uuid`). Capture then keeps every event
+  already indexed, records a capture loss (`gap_lost_at` / `gap_lost_detail`,
+  the same `EVENTS PERMANENTLY LOST` signal as an unfillable gap) that says what
+  happened, and restarts from the start of the source's binary log, so the new
+  numbering's transactions are all captured. With `--no-gap-fill` it refuses
+  instead.
+- **MariaDB.** The same check uses the source's `server_id` and
+  `@@gtid_binlog_state`. Capture refuses to start, deletes nothing, and the
+  error says how to resume: restart once with
+  `--reset --start-file <the source's oldest binary log> --start-pos 4`, which
+  captures the new numbering from its first transaction (in position mode) and
+  records the jump as a capture loss.
+
+A source that is only **behind** is never reported: a lagging replica is
+missing other servers' transactions, never its own, and only its own can prove
+it went backwards. Two cases this check cannot see: a numbering that started
+over in a binary log file with the same name, regrown past the checkpoint's
+offset, once the new numbering has passed the old one (position mode has the
+same blind spot); and a source rebuilt with a new `server_uuid` from a backup
+that still shares part of the old history, which looks like a lagging replica.
+A running capture normally meets the reset long before either: the source ends
+the binlog dump when its binary log is reset (`could not find next log`), and
+the restart that follows sees the source went backwards.
+
 ### The `--no-gap-fill` flag
 
 By default, DBTrail auto-advances past unfillable gaps. If you want the stream to **refuse to start** when a gap is detected (so you can investigate and decide how to proceed), use:

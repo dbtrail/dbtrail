@@ -202,6 +202,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with one of the 44 words and used later (`SELECT made AS at ... ORDER BY
   at`) stays on MySQL too, which is right: the copy would refuse it.
 ### Fixed
+- **GTID capture after `RESET MASTER` on the source no longer loses changes
+  without saying so** (#2171). `RESET BINARY LOGS AND GTIDS` / `RESET MASTER`
+  starts the source's GTID numbering over. Capture used to delete the changes
+  it had read after its last checkpoint (the source never sends them again),
+  then fail on every restart with "Replica has more GTIDs than the source"
+  until the new numbering passed the old one, and from then on skip every new
+  transaction numbered inside its saved set, with no capture loss recorded.
+  Now, on MySQL with `gtid_mode=ON`, the restart sees that the source went
+  backwards (its own `server_uuid` GTIDs in the saved set are no longer in its
+  `gtid_executed`, or the checkpoint lies past the end of its binary log, or
+  the source shares no GTID history with the checkpoint at all, as after a
+  rebuild with a new `server_uuid`), keeps every event already indexed,
+  records a capture loss that says what happened, and restarts from the start
+  of the source's binary log. A replica that is only behind is not affected:
+  it lags on other servers' GTIDs, never on its own. On MariaDB the restart
+  refuses, deletes nothing, and the error gives the command that resumes.
 - **Snapshots: an update after the source's binary log started again no
   longer publishes the old rows for good** (#2160). A `RESET MASTER`, a
   failover to another server or a new `log_bin` name starts the source's
