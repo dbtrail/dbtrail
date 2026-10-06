@@ -176,3 +176,52 @@ func seedItemsBaseline2152(t *testing.T, root string, at time.Time) {
 		t.Fatalf("close: %v", err)
 	}
 }
+
+// When a refresh writes the archive-cut key (#2152): only when its own
+// fetches checked the archives in a way the next refresh can build on.
+func TestRefresh_writesTheArchiveCutOnlyWhenItCheckedTheArchives_2152(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		allowGaps  bool
+		backfilled bool
+		want       bool
+	}{
+		{"a stream-only index", false, false, true},
+		{"--allow-gaps", true, false, false},
+		{"`bintrail index` also wrote into the index", false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var T time.Time
+			r, _ := newLagRig(t, func(first time.Time) time.Time {
+				T = first.Add(10 * time.Hour)
+				return T.Add(-8 * time.Hour)
+			})
+			markStreamCaptured(t, r.db)
+			if tc.backfilled {
+				testutil.MustExec(t, r.db, `INSERT INTO index_state (binlog_file, file_size, last_position, events_indexed, status, started_at, completed_at)
+					VALUES ('binlog.000000', 1, 1, 0, 'completed', '2020-01-01 00:00:00', '2020-01-01 00:00:01')`)
+			}
+			insertTableEvent(t, r.db, r.schema, "orders", 10, 1000, T.Add(-time.Hour), 2, "1", `{"id":1,"status":"A"}`)
+			if _, err := reconstruct.ReconstructTables(r.ctx, reconstruct.FullTableConfig{
+				IndexDSN: r.dsn, BaselineSrc: r.root, Tables: []string{r.schema + ".orders"},
+				At: T, OutputDir: r.root, OutputFormat: reconstruct.OutputFormatParquet, AllowGaps: tc.allowGaps,
+			}); err != nil {
+				t.Fatalf("refresh: %v", err)
+			}
+			p, _, _, err := reconstruct.FindBaseline(r.ctx, r.root, r.schema, "orders", T)
+			if err != nil {
+				t.Fatalf("FindBaseline: %v", err)
+			}
+			m, err := baseline.ReadParquetMetadata(p)
+			if err != nil {
+				t.Fatalf("read footer: %v", err)
+			}
+			if (m.ArchiveCut != "") != tc.want {
+				t.Fatalf("archive cut key = %q (anchor %s:%d), want present=%v", m.ArchiveCut, m.BinlogFile, m.BinlogPos, tc.want)
+			}
+			if tc.want && !strings.Contains(m.ArchiveCut, m.BinlogFile) {
+				t.Fatalf("archive cut key %q does not name the run's cut %s:%d", m.ArchiveCut, m.BinlogFile, m.BinlogPos)
+			}
+		})
+	}
+}
