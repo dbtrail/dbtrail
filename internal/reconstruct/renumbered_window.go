@@ -254,11 +254,11 @@ func checkSameServerUntil(ctx context.Context, db *sql.DB, m *EventMark, since, 
 // capture keeps:
 //   - bintrail_server_changes: the same address answered with another
 //     server_uuid (the server record is updated in place);
-//   - bintrail_servers: a record created after uuid's own, at or before the
-//     one capture reads now, which must itself be that recent (another
-//     address, or a server capture had not seen). A record capture reads now
-//     that is older than from is a return to a server known before: nothing
-//     says when, and a later record of an unrelated server must not answer.
+//   - bintrail_servers: a record created after uuid's own and at or before
+//     the one capture reads now (another address, or a server capture had
+//     not seen). A record created after the one capture reads now is not on
+//     the way to it and must not answer; and when that one is older than
+//     from, capture returned to a server known before and nothing says when.
 //
 // Moves before from (a failover and a failback before the snapshot was
 // taken, while its mark names the server) do not count. The earliest of the
@@ -279,15 +279,10 @@ func captureLeftServer(ctx context.Context, db *sql.DB, uuid string, from time.T
 			JOIN stream_state st ON st.id = 1
 			JOIN bintrail_servers cur ON cur.bintrail_id = st.bintrail_id
 			WHERE s.server_uuid <> o.server_uuid AND s.created_at >= o.created_at
-				AND s.created_at <= cur.created_at
-				AND UNIX_TIMESTAMP(s.created_at) >= ? AND UNIX_TIMESTAMP(cur.created_at) >= ?`,
+				AND s.created_at <= cur.created_at AND UNIX_TIMESTAMP(s.created_at) >= ?`,
 	} {
-		args := []any{uuid, fromUnix}
-		if strings.Contains(q, "cur.created_at) >= ?") {
-			args = append(args, fromUnix)
-		}
 		var at sql.NullString
-		err := db.QueryRowContext(ctx, q, args...).Scan(&at)
+		err := db.QueryRowContext(ctx, q, uuid, fromUnix).Scan(&at)
 		if err != nil {
 			var me *mysqldriver.MySQLError
 			if errors.As(err, &me) && me.Number == 1146 {
