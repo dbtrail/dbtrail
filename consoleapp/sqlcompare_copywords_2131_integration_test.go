@@ -168,7 +168,7 @@ func copyWords(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		typeColumn = "SELECT text 'Label' FROM kw ORDER BY n"
 		typeAlias  = "SELECT text 'Label' FROM (SELECT 'body' AS text) t"
 		fullJoin   = "SELECT COUNT(*) FROM kw full JOIN k2 USING (id)"
-		isNull     = "SELECT at isnull FROM kw ORDER BY n"
+		isNull     = "SELECT status isnull FROM kw ORDER BY n"
 		reserved   = "SELECT id FROM kw WHERE at >= 2 ORDER BY n"
 		anyColumn  = "SELECT status 'Label' FROM kw ORDER BY n"
 	)
@@ -183,7 +183,7 @@ func copyWords(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{typeColumn, diff, "", "the column text under the alias Label on the source (body); the constant Label on the copy"},
 		{typeAlias, diff, "", "the same over an alias given in a derived table: no table has a column called text"},
 		{fullJoin, diff, "", "kw under the alias full, joined, on the source (2 rows); a FULL OUTER JOIN on the copy (4)"},
-		{isNull, diff, "", "the column at under the alias isnull on the source (1, 2, 3); the test at IS NULL on the copy"},
+		{isNull, diff, "", "the column status under the alias isnull on the source (open, done, open); the test status IS NULL on the copy"},
 		{reserved, refused, "", "at is a column on the source and a syntax error on the copy"},
 		{anyColumn, refused, "", "the column status under an alias on the source; a constant of a type the copy does not have"},
 	}
@@ -219,17 +219,17 @@ func copyWords(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 			want: "live|body / live|body / live|body"},
 		{stmt: "SELECT side, text'Label' FROM kw ORDER BY n", who: "live", why: "the same with nothing between them"},
 		{stmt: "SELECT side, text 'Label' FROM (SELECT 'body' AS text, side, n FROM kw) t ORDER BY n", who: "live", why: "the same over an alias"},
-		{stmt: "SELECT MIN(kw.side), COUNT(*) FROM kw full JOIN k2 USING (id)", who: "live", why: "full is a table alias on the source",
+		{stmt: "SELECT MIN(side), COUNT(*) FROM kw full JOIN k2 USING (id)", who: "live", why: "full is a table alias on the source",
 			want: "live|2"},
-		{stmt: "SELECT side, at isnull FROM kw ORDER BY n", who: "live", why: "isnull is a column alias on the source",
-			want: "live|1 / live|2 / live|3"},
+		{stmt: "SELECT side, status isnull FROM kw ORDER BY n", who: "live", why: "isnull is a column alias on the source",
+			want: "live|open / live|done / live|open"},
 		{stmt: "SELECT side, id FROM kw WHERE at >= 2 ORDER BY n", who: "live", why: "a column the copy cannot read bare",
 			want: "live|2 / live|3"},
 		{stmt: "SELECT side, id FROM kw WHERE at >= ? ORDER BY n", args: []any{2}, who: "live", why: "the same as a prepared statement",
 			want: "live|2 / live|3"},
 		{stmt: "SELECT side, status 'Label' FROM kw ORDER BY n", who: "live", why: "any column's name right before a string: the table's columns tell",
 			want: "live|open / live|done / live|open"},
-		{stmt: "SELECT side, status 'Label' FROM kw WHERE id >= ? ORDER BY n", args: []any{2}, who: "live", why: "the same as a prepared statement",
+		{stmt: "SELECT side, status 'Label' FROM kw WHERE n >= ? ORDER BY n", args: []any{2}, who: "live", why: "the same as a prepared statement",
 			want: "live|done / live|open"},
 
 		{stmt: "SELECT side, kw.at, `at`, `text` FROM kw ORDER BY n", who: "copy", why: "after a dot and quoted, the copy reads the names",
