@@ -104,8 +104,8 @@ func TestRefreshOutcomes_aNumberingThatStartedOver_2160(t *testing.T) {
 	gap := &CaptureGap{At: time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)}
 	err := fmt.Errorf("shop.orders: %w", capturedBackBelow(gap, &query.BinlogPos{File: "binlog.000007", Pos: 200}, &query.BinlogPos{File: "binlog.000001", Pos: 500}))
 	out := RefreshOutcomes([]string{"shop.orders"}, nil, []TableFailure{{Schema: "shop", Table: "orders", Err: err}})
-	if len(out) != 1 || out[0].Verdict != RefreshVerdictRefused || !out[0].Refused() {
-		t.Fatalf("outcome = %+v, want refused", out)
+	if len(out) != 1 || out[0].Verdict != RefreshVerdictRefusedRenumbered || !out[0].Refused() {
+		t.Fatalf("outcome = %+v, want refused-renumbered", out)
 	}
 	t.Logf("what the run summary says: %s: %s", out[0].Verdict, out[0].Detail)
 	for _, want := range []string{"shop.orders", "started again from another numbering", "new full snapshot is needed"} {

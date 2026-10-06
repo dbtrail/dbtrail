@@ -792,12 +792,13 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 		// The DDL mark first: every table's check below reads schema_changes
 		// after it, so every row up to it is one those checks placed.
 		cfg.ddlMark = readRunDDLMark(ctx, db)
-		cfg.eventMark = readRunEventMark(ctx, db)
+		mark := readRunEventMark(ctx, db)
 		cut, cutErr := ResolveSnapshotCut(ctx, db, cfg.At)
 		if cutErr != nil {
 			return nil, cutErr
 		}
 		cfg.cut = cut
+		cfg.eventMark = encodeMark(markAtOrBefore(ctx, db, mark, cut))
 		// Read AFTER the cut, for every table of the run: each fetch below is
 		// bounded above by the cut, so everything it may return was indexed
 		// before this read and is in the picture (#2138, query.PartitionHeads).
@@ -1352,10 +1353,14 @@ func ReconstructTable(
 	if anchorMeta.BinlogFile != "" && anchorMeta.BinlogPos > 0 {
 		anchor := query.BinlogPos{File: anchorMeta.BinlogFile, Pos: uint64(anchorMeta.BinlogPos)}
 		if err := CheckNumberingContinues(ctx, db, ParseEventMark(anchorMeta.EventMark), anchor); err != nil {
-			return nil, fmt.Errorf("%s.%s: %w", schema, table, err)
+			return nil, err
 		}
 	}
-	// Only for a position a refresh cut from the index: capture records the
+	if err := CheckSameServer(ctx, db, ParseEventMark(anchorMeta.EventMark)); err != nil {
+		return nil, err
+	}
+	// For a snapshot whose mark names no server (written before marks did),
+	// and only for a position a refresh cut from the index: capture records the
 	// new server when it reconnects, before it indexes anything from it, so a
 	// cut taken before that record is in the old server's numbering and one
 	// taken after it is in the new one's, and its time says which. A dump's
@@ -1364,7 +1369,7 @@ func ReconstructTable(
 	// server only after the dump), so it is not compared.
 	if anchorMeta.Producer == baseline.ProducerReconstruct {
 		if err := CheckSourceReplaced(ctx, db, fetchSince); err != nil {
-			return nil, fmt.Errorf("%s.%s: %w", schema, table, err)
+			return nil, err
 		}
 	}
 
@@ -1388,7 +1393,7 @@ func ReconstructTable(
 	if anchorMeta.BinlogFile != "" && anchorMeta.BinlogPos > 0 {
 		anchor := query.BinlogPos{File: anchorMeta.BinlogFile, Pos: uint64(anchorMeta.BinlogPos)}
 		if err := capturedBackBelow(capGap, &anchor, cfg.cut); err != nil {
-			return nil, fmt.Errorf("%s.%s: %w", schema, table, err)
+			return nil, err
 		}
 	}
 

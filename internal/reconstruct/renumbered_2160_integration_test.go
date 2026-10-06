@@ -356,3 +356,79 @@ func TestRefresh_aFullSnapshotTakenRightAfterTheRenumberingFolds(t *testing.T) {
 		t.Fatalf("published %v, want %v", got, want)
 	}
 }
+
+// `bintrail index` backfilling older binlog files into a stream's index gives
+// them ids ABOVE every mark with positions BELOW it. That is not a numbering
+// that started over, and the index cannot tell the two apart by id order, so
+// a backfilled index is not checked this way (as read routing already
+// treats it, indexBackfilled): the refresh goes on.
+func TestRefresh_aBackfilledIndexIsNotARenumbering(t *testing.T) {
+	r, T := renumberRig(t, false, false)
+	testutil.MustExec(t, r.db, `INSERT INTO index_state (binlog_file, file_size, last_position, events_indexed, status, started_at, completed_at)
+		VALUES ('binlog.000005', 1, 150, 1, 'completed', ?, ?)`, T.Add(10*time.Minute).Format("2006-01-02 15:04:05"), T.Add(11*time.Minute).Format("2006-01-02 15:04:05"))
+	insertEventAt(t, r.db, r.schema, "orders", "binlog.000005", 20, 100, T.Add(-3*time.Hour), "2", `{"id":2,"status":"old"}`)
+	if _, _, err := r.refreshErr(T.Add(time.Hour), false, false); err != nil {
+		t.Fatalf("refresh over a backfilled index: %v", err)
+	}
+}
+
+// The cut is the START of the first event past the run's target when one is
+// indexed (a source clock ahead of the daemon, a fixed --at). The mark must
+// then be an event that ends at or before that cut, or the next run drops it
+// as newer than its own position and misses the numbering that started over.
+func TestRefresh_aCutBeforeTheNewestEventStillCarriesAUsableMark(t *testing.T) {
+	var T time.Time
+	r, _ := newLagRig(t, func(first time.Time) time.Time {
+		T = first.Add(6*time.Hour + 30*time.Minute)
+		return T.Add(-4 * time.Hour)
+	})
+	markStreamCaptured(t, r.db)
+	insertEventAt(t, r.db, r.schema, "orders", "binlog.000007", 10, 100, T.Add(-time.Hour), "1", `{"id":1,"status":"A"}`)
+	insertEventAt(t, r.db, r.schema, "items", "binlog.000007", 11, 300, T.Add(10*time.Minute), "9", `{"id":9,"status":"x"}`)
+	if _, _, err := r.refreshErr(T, false, false); err != nil {
+		t.Fatalf("first refresh: %v", err)
+	}
+	p, _, _, err := reconstruct.FindBaseline(r.ctx, r.root, r.schema, "orders", T)
+	if err != nil {
+		t.Fatal(err)
+	}
+	md, err := baseline.ReadParquetMetadata(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := reconstruct.ParseEventMark(md.EventMark); md.BinlogPos != 300 || m == nil || m.ID != 10 || m.End != 200 {
+		t.Fatalf("footer: anchor %s:%d, event mark %q; want binlog.000007:300 and the mark of event 10, the newest that ends at or before it", md.BinlogFile, md.BinlogPos, md.EventMark)
+	}
+	insertEventAt(t, r.db, r.schema, "orders", "binlog.000001", 20, 300, T.Add(20*time.Minute), "1", `{"id":1,"status":"B"}`)
+	if _, _, err := r.refreshErr(T.Add(time.Hour), false, false); !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+		t.Fatalf("refresh after the numbering started over: err = %v, want ErrBinlogRenumbered", err)
+	}
+}
+
+// A failover to a server whose files are numbered higher, AFTER a full
+// backup: positions show nothing, and the change record's time cannot be read
+// against a dump's position. The snapshot records which server capture was
+// reading (in its event mark); capture reading another one now refuses.
+func TestRefresh_aServerReplacedAfterAFullBackupRefuses(t *testing.T) {
+	r, T := renumberRig(t, false, false)
+	testutil.MustExec(t, r.db, `UPDATE stream_state SET bintrail_id = 'b1' WHERE id = 1`)
+	testutil.MustExec(t, r.db, `INSERT INTO bintrail_servers (bintrail_id, server_uuid, host, port, username) VALUES ('b1', '3e11fa47-71ca-11e1-9e33-c80aa9429562', 'db', 3306, 'u')`)
+	seedFullRead(t, r, T.Add(30*time.Minute), "binlog.000007", 900,
+		reconstruct.EventMark{ID: 10, File: "binlog.000007", End: 200, ServerUUID: "3e11fa47-71ca-11e1-9e33-c80aa9429562"}.Encode(),
+		[][]string{{"1", "A"}, {"2", "paid"}, {"3", "shipped"}})
+	// Same server: the refresh goes on.
+	insertEventAt(t, r.db, r.schema, "orders", "binlog.000007", 20, 900, T.Add(35*time.Minute), "3", `{"id":3,"status":"C"}`)
+	if _, _, err := r.refreshErr(T.Add(40*time.Minute), false, false); err != nil {
+		t.Fatalf("refresh on the same server: %v", err)
+	}
+	// Failover: capture now reads another server, numbered higher.
+	seedFullRead(t, r, T.Add(45*time.Minute), "binlog.000007", 1000,
+		reconstruct.EventMark{ID: 20, File: "binlog.000007", End: 1000, ServerUUID: "3e11fa47-71ca-11e1-9e33-c80aa9429562"}.Encode(),
+		[][]string{{"1", "A"}, {"2", "paid"}, {"3", "C"}})
+	testutil.MustExec(t, r.db, `UPDATE bintrail_servers SET server_uuid = '4f22ab58-71ca-11e1-9e33-c80aa9429563' WHERE bintrail_id = 'b1'`)
+	testutil.MustExec(t, r.db, serverChangeSQL, "server_uuid", "3e11fa47-71ca-11e1-9e33-c80aa9429562", "4f22ab58-71ca-11e1-9e33-c80aa9429563", T.Add(50*time.Minute).Unix())
+	insertEventAt(t, r.db, r.schema, "orders", "binlog.000009", 30, 100, T.Add(55*time.Minute), "2", `{"id":2,"status":"D"}`)
+	if _, _, err := r.refreshErr(T.Add(time.Hour), false, false); !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+		t.Fatalf("refresh after a failover following a full backup: err = %v, want ErrBinlogRenumbered", err)
+	}
+}

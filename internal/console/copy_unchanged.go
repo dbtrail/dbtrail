@@ -372,9 +372,7 @@ func (m *copyChangedMemo) put(server string, t views.BaselineTable, cut query.Bi
 // is no longer "the event furthest into the binlog". A read that fails
 // counts as yes.
 func indexBackfilled(ctx context.Context, db *sql.DB) bool {
-	var one int
-	err := db.QueryRowContext(ctx, `SELECT 1 FROM index_state LIMIT 1`).Scan(&one)
-	return !errors.Is(err, sql.ErrNoRows)
+	return query.IndexBackfilled(ctx, db)
 }
 
 // newestEventOlderThan is the binlog position of the event with the highest

@@ -8738,6 +8738,7 @@ function restoreRefusedLine(rst) {
 const REFUSED_TABLE_WORDS = {
   "refused-ddl": ["schema changed", "Needs a new read of this table."],
   "refused-gap": ["changes missing", "Needs a full snapshot."],
+  "refused-renumbered": ["binary log started again", "Needs a full snapshot."],
   "refused": ["refused", ""],
 };
 

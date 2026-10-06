@@ -60,6 +60,10 @@ type EventMark struct {
 	ID   uint64 `json:"id"`
 	File string `json:"binlog_file"`
 	End  uint64 `json:"end_pos"`
+	// ServerUUID is the server capture was reading when the mark was taken
+	// (bintrail_servers.server_uuid of the stream's bintrail_id); "" when the
+	// index does not say.
+	ServerUUID string `json:"server_uuid,omitempty"`
 }
 
 // Encode is the mark as baseline.MetaKeyEventMark stores it.
@@ -92,11 +96,38 @@ func ReadEventMark(ctx context.Context, db *sql.DB) (*EventMark, error) {
 		ORDER BY event_id DESC LIMIT 1`).Scan(&m.ID, &m.File, &m.End)
 	switch {
 	case err == nil:
-		return &m, nil
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("read the newest indexed event: %w", err)
+	}
+	if m.ServerUUID, err = captureServerUUID(ctx, db); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// captureServerUUID is the server capture is reading: the server_uuid
+// bintrail_servers records for the stream's bintrail_id. "" when the index
+// does not say (no stream, no identity resolved, tables missing). Capture
+// updates it when it reconnects to another server, so two different values
+// at two moments mean two different servers, whose binary logs are numbered
+// apart (#2160).
+func captureServerUUID(ctx context.Context, db *sql.DB) (string, error) {
+	var id sql.NullString
+	err := db.QueryRowContext(ctx, `SELECT s.server_uuid FROM stream_state st
+		JOIN bintrail_servers s ON s.bintrail_id = st.bintrail_id WHERE st.id = 1`).Scan(&id)
+	switch {
+	case err == nil:
+		return id.String, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return "", nil
+	default:
+		var me *mysqldriver.MySQLError
+		if errors.As(err, &me) && (me.Number == 1146 || me.Number == 1054) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read the server capture is reading: %w", err)
 	}
 }
 
@@ -111,6 +142,10 @@ func ReadStreamEventMark(ctx context.Context, db *sql.DB) string {
 		return ""
 	}
 	if !captured {
+		return ""
+	}
+	if query.IndexBackfilled(ctx, db) {
+		slog.Warn("`bintrail index` also wrote into this index, so its ids do not follow the binary log; the snapshot is published without an event mark, and a binlog numbering that started over is not detected from it")
 		return ""
 	}
 	m, err := ReadEventMark(ctx, db)
@@ -129,8 +164,82 @@ func ReadStreamEventMark(ctx context.Context, db *sql.DB) string {
 // is an event indexed after the mark that sorts before it, which the next run
 // finds. Read after the cut, such a change could sit between a cut in the old
 // numbering and a mark in the new one, where no comparison sees it.
-func readRunEventMark(ctx context.Context, db *sql.DB) string {
-	return ReadStreamEventMark(ctx, db)
+func readRunEventMark(ctx context.Context, db *sql.DB) *EventMark {
+	return ParseEventMark(ReadStreamEventMark(ctx, db))
+}
+
+func encodeMark(m *EventMark) string {
+	if m == nil {
+		return ""
+	}
+	return m.Encode()
+}
+
+// markAtOrBeforePages bounds markAtOrBefore's walk: pages of 500 events,
+// newest first, from the mark down to the cut.
+const markAtOrBeforePages = 20
+
+// markAtOrBefore is the mark a run stamps beside its cut: an event that ENDS
+// at or before the cut. The mark read before the cut is the newest event,
+// which is that event when the cut is the newest event's end. When the cut is
+// the START of the first event past the run's target (a source clock ahead
+// of the daemon, a fixed --at), the newest event ends after it, and the next
+// run would drop such a mark as newer than its own position. The events
+// between the two are the ones past the target: walked back, newest first,
+// to the first that ends at or before the cut. The server the mark names is
+// kept: it was read with it. No such event within the bound: no mark, said.
+func markAtOrBefore(ctx context.Context, db *sql.DB, m *EventMark, cut *query.BinlogPos) *EventMark {
+	if m == nil || cut == nil {
+		return m
+	}
+	at := func(file string, end uint64) bool {
+		return BinlogBaseName(file) == BinlogBaseName(cut.File) && (query.BinlogPos{File: file, Pos: end}).AtOrBefore(*cut)
+	}
+	if at(m.File, m.End) {
+		return m
+	}
+	below := m.ID
+	for range markAtOrBeforePages {
+		rows, err := db.QueryContext(ctx, `SELECT event_id, binlog_file, end_pos FROM binlog_events
+			WHERE event_id < ? AND binlog_file IS NOT NULL AND end_pos IS NOT NULL
+			ORDER BY event_id DESC LIMIT 500`, below)
+		if err != nil {
+			slog.Warn("could not read the events before the snapshot's cut; the snapshot is published without an event mark", "error", err)
+			return nil
+		}
+		n := 0
+		var found *EventMark
+		for rows.Next() {
+			var e EventMark
+			if err := rows.Scan(&e.ID, &e.File, &e.End); err != nil {
+				rows.Close()
+				slog.Warn("could not read the events before the snapshot's cut; the snapshot is published without an event mark", "error", err)
+				return nil
+			}
+			n++
+			below = e.ID
+			if at(e.File, e.End) {
+				e.ServerUUID = m.ServerUUID
+				found = &e
+				break
+			}
+		}
+		rerr := rows.Err()
+		rows.Close()
+		if rerr != nil {
+			slog.Warn("could not read the events before the snapshot's cut; the snapshot is published without an event mark", "error", rerr)
+			return nil
+		}
+		if found != nil {
+			return found
+		}
+		if n == 0 {
+			break
+		}
+	}
+	slog.Warn("no indexed event ends at or before the snapshot's cut within reach; the snapshot is published without an event mark",
+		"cut", fmt.Sprintf("%s:%d", cut.File, cut.Pos))
+	return nil
 }
 
 // BinlogBaseName is a binlog file name without its numeric extension:
@@ -217,6 +326,13 @@ func CheckNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 			"mark", m.Encode(), "anchor", fmt.Sprintf("%s:%d", anchor.File, anchor.Pos))
 		return nil
 	}
+	// Rows `bintrail index` backfilled get ids above the mark with positions
+	// below it, which reads exactly like a numbering that started over.
+	if query.IndexBackfilled(ctx, db) {
+		slog.Warn("`bintrail index` also wrote into this index, so its ids do not follow the binary log; a binlog numbering that started over is not checked",
+			"mark", m.Encode())
+		return nil
+	}
 	var file string
 	var end uint64
 	err := db.QueryRowContext(ctx, `SELECT binlog_file, end_pos FROM binlog_events WHERE event_id = ?`, m.ID).Scan(&file, &end)
@@ -281,6 +397,28 @@ func CheckSourceReplaced(ctx context.Context, db *sql.DB, since time.Time) error
 	if since.IsZero() {
 		return nil
 	}
+	return checkSourceReplacedSince(ctx, db, since)
+}
+
+// CheckSameServer returns an error wrapping ErrBinlogRenumbered when the mark
+// names the server capture was reading when the snapshot was taken and
+// capture now reads another one. Identities, not times: it holds for a full
+// backup's position too, which the time of a change record cannot be read
+// against. A mark without one (written before it was recorded) or an index
+// that does not say: nil.
+func CheckSameServer(ctx context.Context, db *sql.DB, m *EventMark) error {
+	if m == nil || m.ServerUUID == "" {
+		return nil
+	}
+	now, err := captureServerUUID(ctx, db)
+	if err != nil || now == "" || now == m.ServerUUID {
+		return err
+	}
+	return fmt.Errorf("%w: capture now reads another server (server_uuid %s) than when the snapshot was taken (%s), and two servers number their binary logs apart. %s",
+		ErrBinlogRenumbered, now, m.ServerUUID, renumberedRemedy)
+}
+
+func checkSourceReplacedSince(ctx context.Context, db *sql.DB, since time.Time) error {
 	var oldUUID, newUUID string
 	var at time.Time
 	// Compared as an instant: detected_at is a TIMESTAMP the index server
