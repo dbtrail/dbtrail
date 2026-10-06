@@ -13649,6 +13649,8 @@ const ROUTE_REASON_TEXT = {
   upstream_lost: "nobody answered: the port's connection to the source was lost (the client got error 2006)",
   routing_off: "routing off",
   read_only: "refused: not a read, and this port is read-only",
+  copy_queue_full: "the copy was busy and 16 statements were already waiting for it: MySQL answered at once",
+  copy_wait_timeout: "the copy was busy: the statement waited 30 seconds for its turn, then MySQL answered",
 };
 
 // fmtGoDuration shortens a Go duration string for display by dropping the

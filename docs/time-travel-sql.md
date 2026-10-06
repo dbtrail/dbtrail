@@ -149,8 +149,13 @@ What to know before relying on it:
   slot and then gets MySQL error 1203 ("SQL on the copy is busy"); with 16
   statements already waiting it gets 1203 at once. A client that disconnects
   while waiting, or while its statement runs, leaves at once and frees its
-  place. The daemon that serves them is the one capturing changes, which is
-  why the limits are small. A
+  place. The line of 16 is one for the whole daemon: statements from the SQL
+  card wait in it too. With read routing on, a statement that would get 1203
+  is answered by MySQL instead (see
+  [A busy copy](#a-busy-copy-the-read-waits-its-turn)). The wait is in the
+  metrics: `bintrail_sql_slot_wait_seconds` and `bintrail_sql_slot_waiting`
+  ([Observability](observability.md)). The daemon that serves them is the one
+  capturing changes, which is why the limits are small. A
   statement past 2 GB fails instead of spilling to disk. For a team or a
   dashboard tool, each reader's own DuckDB on the bucket is the way to scale
   reads (see [Dashboards](dashboards.md)): it runs on the reader's machine and
@@ -323,8 +328,11 @@ credentials otherwise, and MySQL's own answer comes back, errors
 included; resultsets are streamed to the client as they arrive, never held
 in the daemon. The one exception is a `SELECT` whose plan says it is
 expensive: it runs on the copy, and if the copy rejects it (DuckDB does not
-know the syntax, the table is not in the copy, the copy is busy, the result
-exceeds the port's row or cell cap), MySQL runs it. Nothing the client sends
+know the syntax, the table is not in the copy, the result exceeds the
+port's row or cell cap), MySQL runs it. A copy that is busy does not reject
+it: the read waits its turn, and reaches MySQL only after 30 seconds or when
+16 statements are already waiting
+([A busy copy](#a-busy-copy-the-read-waits-its-turn)). Nothing the client sends
 needs to change. **This is experimental**: for what MySQL answers, the
 behaviour is MySQL's; for what the copy answers, it is DuckDB's, and the
 list below of where the two differ is what the feature's own testing is
@@ -1310,8 +1318,11 @@ What this is and is not:
   audit trail (a copy-served statement carries `route: copy` and the
   reason), and move the thresholds.
 - **One query at a time per server on the copy, still.** A heavy read that
-  arrives while the copy is busy is not refused: it runs on MySQL. The
-  limits of the section above are the copy's; MySQL's are MySQL's.
+  arrives while the copy is busy is not refused, and it does not go to MySQL
+  either: it waits its turn on the copy. See
+  [A busy copy](#a-busy-copy-the-read-waits-its-turn) below for the rule and
+  its numbers. The limits of the section above are the copy's; MySQL's are
+  MySQL's.
 - **The port accepts writes under routing.** `INSERT`, `UPDATE`, `DELETE`,
   DDL, `GRANT`: everything that is not a `SELECT` reaches the source. On a
   server with no forwarding account that is the registry's source account,
@@ -1660,6 +1671,58 @@ chooses its behaviour from the handshake version rather than from a query:
   (SQLAlchemy, Django, GORM) either ignore the handshake version or ask
   with `SELECT VERSION()`, and get the source's.
 
+#### A busy copy: the read waits its turn
+
+A heavy read that finds the copy busy is not sent to MySQL. It waits for the
+copy, and the client sees a slower answer, not a different one. The rule,
+as the daemon applies it:
+
+- **How many run.** Two statements run on the copy at once for the whole
+  daemon (`--sql-max-in-flight`), and on this port one at a time per server.
+  So sixteen connections reading the same server share ONE place on the
+  copy, whatever `--sql-max-in-flight` says.
+- **The rest wait.** A read that finds its place taken waits until one comes
+  free, then runs on the copy. The turn is not strictly in order of arrival:
+  when a place comes free, every waiting statement that can use it tries,
+  and one gets it.
+- **Up to 16 wait, for at most 30 seconds.** The line holds 16 statements
+  for the whole daemon, every server and the web interface's SQL card
+  together. A read that arrives with 16 already waiting does not wait:
+  MySQL runs it at once (`copy_queue_full` in the counter). A read that has
+  waited 30 seconds without getting a place is run by MySQL then
+  (`copy_wait_timeout`), so its client waited 30 seconds plus MySQL's own
+  time. Neither number is a setting.
+- **What else ends a wait.** The client disconnecting: the statement leaves
+  the line at once and nothing runs. The daemon stopping does the same.
+- **What a waiting read holds.** Its client connection and its idle
+  connection to MySQL, nothing else: no place on the copy, no process, no
+  memory worth counting.
+- **Waiting does not exempt a read from the copy's other refusals.** A read
+  that waited, ran on the copy, and was then refused there (a result over
+  the row cap, a construct DuckDB lacks) is run by MySQL afterwards under
+  that refusal's own reason: it paid the wait, the attempt and MySQL's time.
+
+Why waiting and not MySQL: measured with 16 connections sending a mix with
+heavy reads to one server ([#2080](https://github.com/dbtrail/dbtrail/issues/2080)),
+no read left the line for MySQL, the mean wait for the copy was 1.6 seconds,
+and the median heavy read took 1.2 seconds through the port, wait included,
+against 22 seconds sent straight to MySQL. Waiting for the copy was far
+faster than not waiting. At 64 connections the line overflowed: about 8 % of
+the heavy reads went to MySQL and piled up there, with a 99th percentile of
+94 to 120 seconds, while the median heavy read through the port stayed at
+1.2 to 1.4 seconds.
+
+What to watch ([Observability](observability.md)):
+`bintrail_sql_slot_wait_seconds` is how long statements wait and how each
+wait ended, `bintrail_sql_slot_waiting` is how many wait right now, and
+`copy_queue_full` and `copy_wait_timeout` in
+`bintrail_read_routing_decisions_total` (and in the "Who answered" block of
+the web interface) count the reads that reached MySQL because the copy was
+busy. Those two climbing means this port is asked for more heavy reads than
+one copy serves: point some readers at their own DuckDB on the bucket
+([Dashboards](dashboards.md)), or accept that the overflow runs at MySQL's
+speed.
+
 #### Seeing who answered
 Two surfaces count every routing decision, per server, since the daemon
 started — decisions, not successes: a statement MySQL then fails was still
@@ -1687,7 +1750,10 @@ MySQL's.
   value once per connection), `connection_pinned` (a `CREATE TEMPORARY
   TABLE`, `LOCK TABLES` or `PREPARE` ran earlier on that connection),
   `in_transaction`, `veto`, `explain_failed`,
-  `copy_age_unknown`, `copy_too_old`, `copy_refused`, `copy_columns_differ`
+  `copy_age_unknown`, `copy_too_old`, `copy_refused`, `copy_queue_full` (the
+  copy was busy and 16 statements were already waiting for it, so this one
+  did not wait), `copy_wait_timeout` (the copy was busy and the statement
+  waited 30 seconds for its turn), `copy_columns_differ`
   (the copy works and declined a `SELECT *` or a `NATURAL JOIN` over a table
   whose columns there are not MySQL's, a statement that names a column
   the copy does not hold, one that does arithmetic on a date column, or one

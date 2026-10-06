@@ -57,6 +57,10 @@ import (
 //     No merge stage reads them, and retaining them would let a
 //     statement-logging source dominate the map.
 //
+// BinlogFile and StartPos stay, and must: foldPage compares them to decide
+// which change of a row is the last one (#2151). They cost nothing extra, the
+// copy already carried them.
+//
 // Anything a future merge stage needs must be added back here deliberately —
 // a field read from a map entry that this function blanks reads as empty, not
 // as missing.
@@ -132,6 +136,19 @@ func foldPage(
 		// before-image. Order matters: retainEvent must be the last thing that
 		// touches this event.
 		res.observeImages(ev)
+		// The row keeps the change the binary log holds LAST, which is not
+		// always the one that arrives last (#2151): pages come in
+		// (event_timestamp, event_id) order and event_timestamp is when the
+		// statement STARTED on the source. An UPDATE that waited on a row lock
+		// commits after the change it waited for and carries an earlier time,
+		// so it arrives first. Seen on MySQL 8.4 and MariaDB 11.4
+		// (streamrun's statement_time_vs_binlog_order_2151 test). An event
+		// that arrives after a change of the same row from further on in the
+		// binary log is therefore dropped here, after every guard above has
+		// read it.
+		if cur, ok := res.Changes[ev.PKValues]; ok && query.LaterInBinlog(cur, ev) {
+			continue
+		}
 		res.Changes[ev.PKValues] = retainEvent(ev)
 	}
 	return nil
@@ -223,10 +240,14 @@ type foldConfig struct {
 // foldResult is the completed build side of the merge.
 type foldResult struct {
 	// Changes maps pk_values → the LAST event for that PK in the window,
-	// trimmed by retainEvent. Last-write-wins survives paging because pages
-	// arrive in ascending (event_timestamp, event_id) order and each page is
-	// folded in order, so a PK touched in page 1 and again in page 3 ends up
-	// holding page 3's image — the same result a single-slice fold produced.
+	// trimmed by retainEvent. Last is by binary log position
+	// (query.LaterInBinlog), not by arrival: pages arrive in ascending
+	// (event_timestamp, event_id) order, and for one row that order can
+	// disagree with the binary log (#2151, see foldPage). A PK touched in
+	// page 1 and again in page 3 holds whichever of the two the binary log
+	// holds later. Once the fold spills, this map only holds the pages since
+	// the last drain and the same choice is made again when a group is read
+	// back (changeSpill.load).
 	Changes map[string]*query.ResultRow
 
 	// Total is the number of events folded across every page (the

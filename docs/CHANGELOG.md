@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **Read routing: a heavy read that finds the copy busy waits for it, and
+  the wait is now documented and visible** (#2112). The documentation said
+  such a read runs on MySQL. It does not, and nothing changes in what it
+  does: it waits its turn on the copy. Up to 16 statements wait, for the
+  whole daemon (every server on the port and the web interface's SQL card
+  together), for at most 30 seconds each; the 17th, and one that waited the
+  30 seconds, are run by MySQL. Waiting is the rule because it is far
+  faster: measured with 16 connections on one server (#2080), a heavy read
+  took a median of 1.2 seconds through the port, wait included, against 22
+  seconds on MySQL. What is new is how to see it. Two metrics on `watch
+  --metrics-addr`: `bintrail_sql_slot_wait_seconds{outcome}`, a histogram
+  of how long each statement waited for a place on the copy and how the
+  wait ended (`slot`, `queue_full`, `timeout`, `cancelled`), observed for
+  every statement that asked, not only the ones that ran to a result; and
+  `bintrail_sql_slot_waiting`, how many wait right now. Two reasons in the
+  "Who answered" block and in `bintrail_read_routing_decisions_total`:
+  `copy_queue_full` (the line was full, MySQL answered at once) and
+  `copy_wait_timeout` (the read waited 30 seconds, then MySQL answered).
+  Both were counted under `copy_refused` before, where a busy copy read as
+  a broken one; a dashboard or alert that sums `copy_refused` no longer
+  includes them. The log line for the two is its own, once per connection.
+  `docs/time-travel-sql.md` has the rule in full under "A busy copy: the
+  read waits its turn".
 - **Read routing: a `LIMIT` over a wide range stays on MySQL, and a result
   over the copy's row cap is not tried on the copy** (#2115). Two kinds of
   read were sent to the copy and should not have been. The first is a few
@@ -89,6 +112,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time by the copy (the same day), and a `DATETIME` turned into text
   (`CONCAT(dt, '')`) ends in `+00` there. A table whose snapshot has no
   `CREATE TABLE` was already answered by MySQL for every statement.
+### Fixed
+- **Snapshots: a row keeps its last change, not the change whose statement
+  started last** (#2151). An update of a snapshot keeps, for each row, the
+  last change since the previous one. It took "last" from the time recorded
+  with each change, which is when its statement STARTED on the source. The
+  binary log holds changes in the order they were committed, and for one row
+  the two can disagree: an UPDATE that waits on a row lock is committed after
+  the change it waited for and carries an earlier time. Reproduced on MySQL
+  8.4.9 and MariaDB 11.4.13 with four shapes: a wait behind `SELECT ... FOR
+  UPDATE`, a wait behind an earlier UPDATE of the same transaction, a long
+  UPDATE that reaches a row after a quick one committed, and a session with
+  `SET TIMESTAMP` in the past. When the two times fell in different seconds,
+  the snapshot kept the older value, a deleted row came back, or a row that
+  exists was left out, with no error. The update now compares where the two
+  changes are in the binary log (file, then position), in memory and when the
+  changes of a large update are written to disk. `export iceberg` had the
+  same rule and has the same fix. Nothing changes in how changes are read
+  from the index, and no memory is added: the position was already kept.
+
+  A snapshot written by an earlier version can hold such a row. Its value
+  stays wrong until the row changes again or the table is read again from
+  the database, so take a full snapshot of the tables where two sessions
+  update the same rows. `verify` does not find these rows reliably: it still
+  orders a row's changes by time, as do `recover`, the `_snapshot` schema of
+  the MySQL port and single-row `reconstruct` (#2156). For the same reason
+  `verify` can flag a table whose snapshot is right when one of its rows
+  changed in one of these shapes; that is not new.
+
+  One limit. A scheduled update and `export iceberg` read a window bounded
+  by a binary log position at both ends. A `reconstruct` whose window is
+  bounded by time at one end or both (`--output-format mydumper` or SQL
+  output, or a snapshot that recorded no position) can span a source failover, a `RESET
+  MASTER` or a change of the binary log base name; the file numbering starts
+  again there, and for a row changed on both sides the older numbering's
+  change can be kept where the time order was right. Take a new full
+  snapshot after such an event before a `reconstruct` across it.
 
 
 ## [0.99.0] - 2026-10-05

@@ -142,3 +142,49 @@ func TestFold_compositeKeyImage(t *testing.T) {
 		t.Fatal("PK image carries a non-key column")
 	}
 }
+
+// #2151: pages arrive in (event_timestamp, event_id) order, and for one key
+// that can disagree with the binary log. B's statement started first, waited
+// on A's row lock and was written after A: it arrives first and is the key's
+// last change.
+func TestFold_keepsTheChangeTheBinlogHoldsLast(t *testing.T) {
+	at := func(e query.ResultRow, pos uint64) query.ResultRow {
+		e.BinlogFile, e.StartPos = "binlog.000007", pos
+		return e
+	}
+	b := at(ev(1, event.EventUpdate, "1", row("1", "new"), row("1", "B")), 300)
+	a := at(ev(3, event.EventUpdate, "1", row("1", "new"), row("1", "A")), 100)
+	gone := at(ev(2, event.EventDelete, "2", row("2", "new"), nil), 400)
+	back := at(ev(4, event.EventInsert, "2", nil, row("2", "early")), 200)
+
+	for name, pages := range map[string][][]query.ResultRow{
+		"one page":  {{b, gone, a, back}},
+		"two pages": {{b, gone}, {a, back}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFold("shop", "orders", idPK)
+			for _, p := range pages {
+				if err := f.addPage(p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ops := f.touched()
+			if len(ops) != 2 || f.events != 4 {
+				t.Fatalf("touched keys = %d, events = %d; want 2 and 4", len(ops), f.events)
+			}
+			if ops[0].deleted() || ops[0].Row["status"] != "B" {
+				t.Fatalf("key 1 = %+v, want status B: the change at the higher position", ops[0].Row)
+			}
+			if !ops[1].deleted() {
+				t.Fatalf("key 2 = %+v, want deleted: the DELETE is at the higher position", ops[1].Row)
+			}
+		})
+	}
+
+	// A superseded change is still refused when it is one the export cannot apply.
+	f := newFold("shop", "orders", idPK)
+	moved := at(ev(3, event.EventUpdate, "1", row("1", "new"), row("9", "A")), 100)
+	if err := f.addPage([]query.ResultRow{b, moved}); err == nil {
+		t.Fatal("a PK-changing UPDATE behind a later change of the key was not refused")
+	}
+}
