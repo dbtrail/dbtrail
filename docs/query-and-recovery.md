@@ -549,7 +549,9 @@ bintrail recover-cascade --index-dsn "..." \
   back to the lookback window, read by time, and the output names the reason
   and asks for a new full snapshot ([#2177](https://github.com/dbtrail/dbtrail/issues/2177)).
   Baselines that do not record the newest change the index held (made before
-  this check, or with the CLI `bintrail baseline`) are not checked. When the result is
+  this check, or with the CLI `bintrail baseline`) are not checked. The check reads the
+  live index only: a restart in hours already moved to the Parquet archives is not
+  seen, and those hours are still read from the snapshot's position. When the result is
   provably partial the output is flagged `INCOMPLETE RECOVERY` and the command
   exits non-zero unless `--allow-incomplete` is given. If you have already
   re-created a deleted parent, remove its `INSERT` from the output —
