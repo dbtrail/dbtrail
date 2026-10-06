@@ -19,7 +19,7 @@ func TestStartRefusesWhenTheExpectedJobIsGone(t *testing.T) {
 	lost := &monitorJob{cancel: func() {}, done: make(chan struct{})}
 
 	// Stopped meanwhile: the slot is empty.
-	if err := m.start(context.Background(), e, lost); !errors.Is(err, errNotCurrent) {
+	if err := m.start(context.Background(), e, lost, nil); !errors.Is(err, errNotCurrent) {
 		t.Fatalf("slot empty: err=%v, want errNotCurrent", err)
 	}
 	if len(m.jobs) != 0 {
@@ -29,7 +29,7 @@ func TestStartRefusesWhenTheExpectedJobIsGone(t *testing.T) {
 	other := &monitorJob{cancel: func() {}, done: make(chan struct{})}
 	other.set("running", "")
 	m.jobs[e.ID] = other
-	if err := m.start(context.Background(), e, lost); !errors.Is(err, errNotCurrent) {
+	if err := m.start(context.Background(), e, lost, nil); !errors.Is(err, errNotCurrent) {
 		t.Fatalf("slot taken: err=%v, want errNotCurrent", err)
 	}
 	if m.jobs[e.ID] != other {
@@ -41,7 +41,11 @@ func TestStartRefusesWhenTheExpectedJobIsGone(t *testing.T) {
 // restart fails too. It must stay a retrying failure, never one that waits
 // for someone to press Start; and Stop must end the retries.
 func TestLockLostRestartThatFailsKeepsRetrying(t *testing.T) {
+	base := lockLostBackoffBase
+	lockLostBackoffBase = 50 * time.Millisecond
+	t.Cleanup(func() { lockLostBackoffBase = base })
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	m := newMonitorSupervisor(ctx, "", nil, 0)
 	// An index DSN start cannot parse: start reserves the slot and fails.
 	e := console.ServerEntry{ID: "s2105b", Name: "shop", SourceDSN: "root@tcp(127.0.0.1:1)/", DSN: "::not a dsn::"}
@@ -68,16 +72,16 @@ func TestLockLostRestartThatFailsKeepsRetrying(t *testing.T) {
 	if st.State != "failed" || !st.Retrying {
 		t.Fatalf("after a failed restart: %+v, want failed and retrying", st)
 	}
+	// Stop alone, the daemon still running, must end the retries.
 	if err := m.Stop(context.Background(), e.ID); err != nil {
 		t.Fatal(err)
 	}
-	cancel()
 	waited := make(chan struct{})
 	go func() { m.wg.Wait(); close(waited) }()
 	select {
 	case <-waited:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the retry loop outlived Stop and shutdown")
+		t.Fatal("the retry loop outlived Stop")
 	}
 	if _, ok := m.jobs[e.ID]; ok {
 		t.Fatal("the retry loop started the server again after Stop")

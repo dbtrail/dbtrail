@@ -26,10 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     **WAITING FOR OTHER DBTRAIL**, and starts capturing from the first one's
     checkpoint about 20 seconds after it stops: measured with a source
     under load, every row once, no gap.
-  A process that takes over waits 11 seconds before writing, in case the
-  previous holder lost the lock without knowing; a batch that holder had
-  already sent can still commit, so a cut connection can still leave a few
-  rows twice. The source given at startup (`--source-dsn`) takes no lock yet.
+  A process that loses the lock stops without writing the batch it holds or
+  its position; whoever captures next reads those changes again. A process
+  that took the lock after waiting for it waits 11 more seconds before
+  writing, in case the previous holder lost it without knowing yet. A batch
+  already on its way to the index when the lock went can still commit, so a
+  cut connection can still leave a few rows twice. The source given at
+  startup (`--source-dsn`) takes no lock yet.
   **Upgrading:** a daemon from before this change does not keep its lock, so
   stop it before starting the new one, once. **Rows already indexed twice**
   stay: to see whether a server has any, run on its index database

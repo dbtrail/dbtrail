@@ -132,7 +132,7 @@ const MON_PHASES = {
   // #2105: another DBTrail process (an older copy during a deployment, or a
   // second installation on the same index) is capturing this server. This
   // one starts on its own when that one stops.
-  lock_waiting: { text: "WAITING FOR OTHER DBTRAIL", title: "another DBTrail process is capturing this server; this one starts capturing when that one stops." },
+  lock_waiting: { text: "WAITING FOR OTHER DBTRAIL", title: "another DBTrail process holds this server's capture lock; this one starts capturing when that one lets go." },
 };
 
 // A failed state whose cause the daemon names (monitor_error_code) says that
