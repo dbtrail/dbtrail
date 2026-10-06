@@ -100,7 +100,11 @@ func ownGTIDCount(t *testing.T, db *sql.DB) int64 {
 // break in continuity must be stamped as a capture loss.
 func runGTIDResetScenario(t *testing.T, src dupSource, indexDB *sql.DB, indexName string, post func(oldOwn int64) int) {
 	t.Helper()
-	resetGTIDSourceBinlogs(t, src.db) // a small, known numbering to start from
+	// A small, known numbering to start from, with one transaction in it so a
+	// fresh capture starts in GTID mode (an empty executed set starts in
+	// position mode on MySQL).
+	resetGTIDSourceBinlogs(t, src.db)
+	testutil.MustExec(t, src.db, "INSERT INTO orders (id, amount) VALUES (0, 0)")
 	cfg := func(n uint32) Config {
 		c := src.config(indexName)
 		c.ServerID = src.serverID + n
