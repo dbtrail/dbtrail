@@ -522,7 +522,10 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
   tried with it: `ok`, `user`, `error`, `needs_password`, or `skipped` with
   the reason in a process that has no port (`serve`); and
   `GET /api/flashback` carries `account_refused` per server when the
-  source turned the port's login away; see
+  source turned the port's login away, and `session_untracked` when the
+  source does not tell the port about session settings changed inside a
+  stored function (with the reason; the web interface does not show it
+  yet, DBTrail's log does, once per server); see
   [time-travel-sql.md](time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental)),
   `source_server_id` (0 = derived), `schemas`, `monitor_desired`,
   `archive_s3` (the bucket above — non-secret, round-trips in the masked DTO),
@@ -1163,6 +1166,15 @@ The limits, so a query can never hurt capture:
 - Each query runs in its own process, separate from the one that captures,
   with 2 threads and 2 GB of memory. A query that needs more fails with an
   out-of-memory message; capture does not notice.
+- A query whose tables have more than 48 MB of changes not merged into them
+  yet (all the tables it names, together) is refused before it runs, with the
+  name of the table that has the most. Between two rewrites of a table,
+  DBTrail keeps its changes in small files beside it, and a query has to
+  merge them in memory; past that size they do not fit. DBTrail merges the
+  changes into the table on its own, within a day while updates run
+  ([Snapshots and updates](dump-and-baseline.md)). Until then, and for any
+  heavy read, use your own DuckDB (below): this page is for quick looks on
+  the host that captures.
 - 60 seconds. A longer query is stopped.
 - 1,000 rows come back. The page says when there were more. **Download CSV**
   saves the same rows as a file.

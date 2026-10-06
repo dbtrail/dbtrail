@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **SQL on the copy refuses a table with too many changes waiting, before
+  running.** Between two rewrites of a table its changes sit in small files
+  beside it, and a query has to merge them in memory. A query here has 2 GB
+  and no disk to spill to, on purpose: it runs on the host that captures.
+  On a 100 million row table that stopped fitting at about 86 MB of such
+  files, and the query failed with DuckDB's out-of-memory text. Past 48 MB
+  (over all the tables a query names) the query is now refused up front with
+  the table's name and the way out: your own DuckDB (Settings, MCP Server,
+  Download a DuckDB schema). A query
+  that does run and hits the memory cap gets the same pointer after DuckDB's
+  message. On the MySQL port with read routing, the refused statement goes
+  to MySQL, as the failed one did.
+- **A table with changes is written again in full half as often.** An update
+  keeps a table's changes in small files beside it and writes the table
+  again once those files pass a share of its size. That share was a quarter
+  and is now half. On a 100 million row table taking 300 changes a second,
+  the quarter came round every two hours and each rewrite took about ten
+  minutes and up to 12.5 GB of memory. The price is paid by reads of the
+  copy between rewrites: on that table a program reading the copy with its
+  own DuckDB took 5 seconds at a quarter and 12 to 28 seconds at half.
+  Nothing to configure. Tables that reach a day without a rewrite are still
+  rewritten then.
 - **Read routing: a heavy read that finds the copy busy waits for it, and
   the wait is now documented and visible** (#2112). The documentation said
   such a read runs on MySQL. It does not, and nothing changes in what it
@@ -179,6 +201,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with one of the 44 words and used later (`SELECT made AS at ... ORDER BY
   at`) stays on MySQL too, which is right: the copy would refuse it.
 ### Fixed
+- **`recover` and single-row `reconstruct`: a row changed by two sessions
+  comes back right** (#2156, first part). Both took the order of a row's
+  changes from the time recorded with each change, which is when its
+  statement STARTED on the source. The binary log holds changes in the order
+  they were committed, and the two can disagree: an UPDATE that waits on a
+  row lock is committed after the change it waited for and carries an
+  earlier time (#2151). Reproduced on MySQL 8.4.9 and MariaDB 11.4.13,
+  through the real capture, with the generated script applied to the table.
+  Session A changes a row from `seed` to `A`; session B, which started 2
+  seconds earlier and waited, changes it to `B`. The script undid A first and
+  B second and left the row on `A`, with no error. When B deleted the row,
+  the script brought it back with A's value. When A deleted the row and B
+  inserted it again, the script failed with a duplicate key. Single-row
+  `reconstruct` (the command, the web interface and the MCP tool) answered
+  `A` for a row that holds `B`, and `--history` listed B before A.
+
+  Both now put the changes in binary log order, by file and position, when
+  that order can be established for the whole set, and the script undoes
+  from the last change back. That order is the order the index received the
+  changes in, used when the file and position of every change agree with it. A script that was reordered says so in its
+  header; the `at` times of its statements are then not all in sequence.
+
+  The order stays by statement time, as before, and the script header, the
+  log and the response say why, when the binary log order cannot be
+  trusted: a change carries no position (indexed by an old build); the
+  changes come from binary logs with different base names; the position
+  goes down while the index's own ids go up, which is a restart of the
+  source's numbering inside the time range (a failover, `RESET MASTER`) or
+  files indexed out of order; the changes are in more than one binary log
+  file on an index built only with `bintrail index`, whose ids follow the
+  order the files were indexed in (inside one file the order is used); or binary log files were indexed with
+  `bintrail index` into an index a stream also writes, less than an hour
+  before the earliest change of the range, so its ids do not say in which
+  order the changes were written. None of this is looked at when the two
+  orders agree, which is every range without one of these waits: such a
+  script is the same, byte for byte. PostgreSQL is not affected and does
+  not change: its recorded time is the commit time.
+
+  **If you generated a recovery script with an earlier version** over a
+  range in which two sessions changed the same row within seconds of each
+  other, the script could leave that row on the first session's value
+  without an error. Check those rows, or generate the script again.
+
+  What does not change here: the time range itself is still cut by
+  statement time, so a change that started before `--until` or `--at` and
+  was committed after it is inside the range. For a single-row
+  `reconstruct` at a past instant this now shows: when the row's changes
+  were reordered, the answer can hold a change committed after that
+  instant, and the command, the web interface and the MCP tool warn about
+  it. Also unchanged: `--limit` keeps the newest
+  changes by statement time; `recover-cascade`, `verify`, and the `_snapshot`
+  and `_flashback` schemas of the MySQL port still order by statement time
+  (#2156). The web interface's undo of a table with cascading foreign-key
+  children answers with a `recover-cascade` script, and now warns, in the
+  response and at the top of the script, when the binary log order differs
+  from the one it used.
 - **Snapshots: a row keeps its last change, not the change whose statement
   started last** (#2151). An update of a snapshot keeps, for each row, the
   last change since the previous one. It took "last" from the time recorded
@@ -201,8 +279,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stays wrong until the row changes again or the table is read again from
   the database, so take a full snapshot of the tables where two sessions
   update the same rows. `verify` does not find these rows reliably: it still
-  orders a row's changes by time, as do `recover`, the `_snapshot` schema of
-  the MySQL port and single-row `reconstruct` (#2156). For the same reason
+  orders a row's changes by time, as does the `_snapshot` schema of the
+  MySQL port (#2156). For the same reason
   `verify` can flag a table whose snapshot is right when one of its rows
   changed in one of these shapes; that is not new.
 
@@ -214,7 +292,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again there, and for a row changed on both sides the older numbering's
   change can be kept where the time order was right. Take a new full
   snapshot after such an event before a `reconstruct` across it.
-
+- **Read routing: a session setting changed inside a stored function is
+  seen** (#2127). A `SELECT` that calls a stored function is a read by its
+  text, and the function can run `SET`. Measured before this change: a
+  function set `time_zone = '+05:00'`, and the next expensive read on that
+  connection was answered by the copy under the old zone, five hours off.
+  The port now asks the source to report such changes itself (session
+  tracking): on each new connection to the source it sends one statement
+  naming the settings the copy has to reproduce, and from then on the source
+  marks the answer to any statement that changed one of them, on a packet
+  it sends anyway. After a marked answer the port reads the session back
+  before the copy answers again, exactly as after a `SET`. It does the same
+  after a statement that failed on the source (a function that ran `SET`
+  and then failed has set it, and an error says nothing about the
+  session), and it hears the `EXPLAIN` it sends for a plan the same way,
+  since MariaDB and MySQL can run a function while they plan. A statement
+  that changes nothing costs no extra round trip; the cost is one statement
+  when the port opens its connection to the source. Works on MySQL 8.0 and
+  8.4 and on MariaDB 10.11, 11.4, 11.8 and 12.3, with no extra privilege.
+  When the source does not offer session tracking (an older server, or a
+  proxy in front of it), the connection works as before, this one change is
+  still not seen there, and DBTrail's log says so once per server at warn
+  level (`GET /api/flashback` carries the reason as `session_untracked`). A
+  source or proxy that agrees to session tracking and then sends data the
+  port cannot read is not asked again: the connection is opened once more
+  without it. A panic on one client connection of the port now ends that
+  connection alone, logged with its stack, instead of the process. A client
+  that replaces `session_track_system_variables` with its own list, as some
+  connectors do when they connect, gets the port's settings added back to
+  it the next time the port reads the session.
+  Details in docs/time-travel-sql.md, "A setting changed inside a stored
+  function".
 
 ## [0.99.0] - 2026-10-05
 ### Changed

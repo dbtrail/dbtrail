@@ -432,6 +432,10 @@ func runRecover(cmd *cobra.Command, args []string) error {
 	// the matched events would render past the budget, rather than buffering a
 	// multi-GB script. 0 (from --max-script-bytes 0) disables the guard.
 	gen.SetMaxScriptBytes(maxScriptBytes)
+	// Undo in the reverse of binary log order where it can be established
+	// (#2156). The generator logs the warning when it cannot, and the script
+	// header carries it.
+	gen.SetBinlogOrder(query.BinlogOrderProof(cmd.Context(), db))
 
 	if rDryRun {
 		if rFormat == "json" {

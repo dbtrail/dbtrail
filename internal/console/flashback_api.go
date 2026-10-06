@@ -92,6 +92,12 @@ type routingServerDTO struct {
 	// account, its user name and MySQL's error. Clients of such a
 	// connection get error 2006. Cleared when a connection logs in.
 	AccountRefused string `json:"account_refused,omitempty"`
+	// SessionUntracked, when set, is why the source does not tell the port
+	// when a statement changes a session setting, as the last connection
+	// that asked found it: a setting changed inside a stored function is
+	// not seen on this server's connections. Cleared when a connection is
+	// told.
+	SessionUntracked string `json:"session_untracked,omitempty"`
 }
 
 func (s *Server) routingStatus() *routingStatusDTO {
