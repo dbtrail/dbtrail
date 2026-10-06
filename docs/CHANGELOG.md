@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **A binlog-renumbering check that cannot tell is no longer silent
+  (behavior change for scripts)** (#2186). When the check cannot tell whether the source's binary log
+  started again after the snapshot (the event the snapshot's mark names was
+  deleted while older ones remain, as a restarted capture's cleanup does;
+  the mark's id now names another event, after the index was rebuilt;
+  `bintrail index` also wrote into the index; the mark does not read; an
+  archived hour of the window has no file this process can open, or, in the
+  whole-index form, the mark's own hour was archived), it used to
+  pass with one log line. Now `verify` reports the table **inconclusive**
+  with the reason (both modes; it was reported as a match or a mismatch);
+  the `_snapshot` schema answers as before with a warning that `SHOW
+  WARNINGS` returns (code 1105); cascade recovery uses the baseline as
+  before and flags the result incomplete with the reason, so the command
+  exits non-zero unless `--allow-incomplete` is given and the MCP
+  `recover_cascade` tool fails the call unless `allow_incomplete` is set;
+  and `bintrail reconstruct --at` prints a warning. A snapshot update keeps
+  its log line and its own guard for a capture that came back below the
+  snapshot's position. A snapshot without an event mark keeps the old
+  behavior, as do the PostgreSQL wire front-end (the note is logged) and the
+  `verify --explain` drill-down.
 - **`bintrail index` fails a binlog file that dropped changes, and exits
   non-zero (behavior change for scripts).** A file in which some changes
   were read and left out of the index used to be marked `completed`, and the
@@ -233,6 +253,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with one of the 44 words and used later (`SELECT made AS at ... ORDER BY
   at`) stays on MySQL too, which is right: the copy would refuse it.
 ### Fixed
+- **The binlog-renumbering check reads the archived hours of a read**
+  (#2186). `verify`, the `_snapshot` schema of the MySQL port and cascade
+  recovery read the changes since a snapshot from its binlog position, and
+  since #2174/#2177 refuse when the source's binary log started again after
+  it (`RESET MASTER`, a failover to another server). The check looked only
+  at the live index. When the read's window reached hours that rotation had
+  already moved into Parquet archives, a restart inside those hours was not
+  seen: the read dropped the new-numbering changes there, and `_snapshot`
+  answered the snapshot's old rows, `verify` reported a mismatch with no
+  cause, and cascade recovery could restore a moved child under the deleted
+  parent. The check now reads those archives too. `archive_state` says
+  which archive files hold nothing indexed after the snapshot (their newest
+  event id is at or below the snapshot's mark); those are skipped. Every
+  other archive file in the window is read for that one table, only the
+  columns the question needs, which the read itself also scans. A file found
+  clean is not read again for the same snapshot and table. Measured on
+  MySQL 8.4 with a one-hour archive of 1,000,000 changes (7.6 MB): 44 ms to
+  read it for one table, against 1.7 s for the read's own fetch of the same
+  hour; reading the window's rows of an `archive_state` holding 8,760 rows
+  (a year of hours): 0.25 ms. A restart that touched only other tables, or
+  came after the read's end, still refuses nothing. The whole-index form
+  (live-mode `verify`, `reconstruct --at` once its read reaches archived
+  hours) still reads the live index only; when the snapshot's mark is itself
+  in an archived hour it now says it cannot check instead of passing.
 - **The routed MySQL port no longer answers from the copy after a late change
   whose hour was archived and dropped** (#2187). The check that lets the copy
   answer a heavy read for tables unchanged since their snapshot

@@ -119,17 +119,24 @@ type renumberClean struct {
 	until time.Time
 }
 
-// check is the bounded half of checkNumberingContinues: one question, asked
-// of the changes the read can see. See ReadWindow.Until.
-func (w *ReadWindow) check(ctx context.Context, db *sql.DB, m *EventMark, anchor query.BinlogPos) error {
+// readFloor is the lowest event_timestamp the read reaches
+// (query.PositionReadFloor); zero when the window has no Since.
+func (w *ReadWindow) readFloor(ctx context.Context, db *sql.DB, anchor query.BinlogPos) (time.Time, error) {
+	if w.Since.IsZero() {
+		return time.Time{}, nil
+	}
 	since := w.Since
 	floor, err := query.PositionReadFloor(ctx, db, query.Options{Schema: w.Schema, Table: w.Table, Since: &since, SincePos: &anchor})
-	if w.Since.IsZero() {
-		floor, err = time.Time{}, nil
-	}
 	if err != nil {
-		return fmt.Errorf("find how far back the read of %s.%s reaches: %w", w.Schema, w.Table, err)
+		return time.Time{}, fmt.Errorf("find how far back the read of %s.%s reaches: %w", w.Schema, w.Table, err)
 	}
+	return floor, nil
+}
+
+// check is the bounded half of checkNumberingContinues over the live index:
+// one question, asked of the changes the read can see from floor (readFloor).
+// See ReadWindow.Until. The archived hours are checkArchives'.
+func (w *ReadWindow) check(ctx context.Context, db *sql.DB, m *EventMark, floor time.Time) error {
 	var newest sql.NullInt64
 	if err := db.QueryRowContext(ctx, `SELECT MAX(event_id) FROM binlog_events`).Scan(&newest); err != nil {
 		return fmt.Errorf("read the newest indexed event: %w", err)

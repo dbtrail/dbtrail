@@ -264,19 +264,22 @@ func (h *Handler) logOrderNote(q TimeTravelQuery, note string) {
 // lives here, the pgwire front-end inherits it for free — a second renderer must
 // NOT re-derive it.
 func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (map[string]any, error) {
-	state, note, err := h.resolveSnapshotRow(ctx, q)
-	h.logOrderNote(q, note)
+	state, notes, err := h.resolveSnapshotRow(ctx, q)
+	for _, n := range notes {
+		h.logOrderNote(q, n)
+	}
 	return state, err
 }
 
-// resolveSnapshotRow is ResolveSnapshotRow, with the order note (#2156)
-// returned for the caller to deliver, as resolveFlashbackRow.
-func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (map[string]any, string, error) {
+// resolveSnapshotRow is ResolveSnapshotRow, with its notes returned for the
+// caller to deliver, as resolveFlashbackRow: the binlog numbering check's
+// when it could not tell (#2186), then the order note (#2156).
+func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (map[string]any, []string, error) {
 	src := h.baselineSource()
 	if src == "" {
 		h.logger.Debug("shim: _snapshot has no baseline source configured; using binlog-only path",
 			"schema", q.Schema, "table", q.Table)
-		return h.resolveFlashbackRow(ctx, q)
+		return withNotes(h.resolveFlashbackRow(ctx, q))
 	}
 
 	// Guard the PK type before attempting a baseline match. ReadBaselineRow
@@ -288,7 +291,7 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	if !ok {
 		h.logger.Debug("shim: _snapshot cannot resolve PK type; using binlog-only path",
 			"schema", q.Schema, "table", q.Table, "pk_column", q.PKColumn)
-		return h.resolveFlashbackRow(ctx, q)
+		return withNotes(h.resolveFlashbackRow(ctx, q))
 	}
 	// PostgreSQL baselines store every column as raw pgoutput text (#593), so
 	// ReadBaselineRow's string-bound match is a string-identity join that can
@@ -307,7 +310,7 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 				h.logger.Warn("shim: _snapshot PK type not safe for baseline lookup; using binlog-only path",
 					"schema", q.Schema, "table", q.Table, "pk_column", q.PKColumn, "pk_type", dataType)
 			}
-			return h.resolveFlashbackRow(ctx, q)
+			return withNotes(h.resolveFlashbackRow(ctx, q))
 		}
 	}
 
@@ -317,11 +320,11 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 		if errors.Is(err, reconstruct.ErrNoBaseline) {
 			h.logger.Debug("shim: _snapshot found no baseline at-or-before AsOf; using binlog-only path",
 				"schema", q.Schema, "table", q.Table)
-			return h.resolveFlashbackRow(ctx, q)
+			return withNotes(h.resolveFlashbackRow(ctx, q))
 		}
 		// A real baseline-source failure (unreadable dir, S3 outage) is a
 		// server-side fault: raw error → the caller's "internal fault" branch.
-		return nil, "", err
+		return nil, nil, err
 	}
 
 	// Refuse if a TRUNCATE/DROP/RENAME hit this table in the window: same blind
@@ -332,10 +335,11 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	sincePos, ddlMark, eventMark := snapshotAnchor(ctx, baselinePath, h.logger, q.Schema, q.Table)
 	if err := reconstruct.CheckDestructiveDDL(ctx, h.indexDB, q.Schema, q.Table,
 		reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos, Mark: ddlMark}); err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
-	if err := h.checkSnapshotNumbering(ctx, q, snapshotTime, sincePos, eventMark); err != nil {
-		return nil, "", err
+	numberingNote, err := h.checkSnapshotNumbering(ctx, q, snapshotTime, sincePos, eventMark)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	// q.PKValue is passed RAW here — Parquet baseline rows store actual column
@@ -349,7 +353,7 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	pkMetas := []metadata.ColumnMeta{{Name: q.PKColumn, DataType: dataType, IsPK: true}}
 	baselineRow, err := reconstruct.ReadBaselineRow(ctx, baselinePath, map[string]string{q.PKColumn: q.PKValue}, pkMetas)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
 
 	opts := query.Options{
@@ -378,19 +382,26 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 		ArchiveFetcher: h.archiveFetcher,
 	}, q.AsOf)
 	if err != nil {
-		return nil, "", classifyFetchError(ctx, q.Type, err, h.logger)
+		return nil, nil, classifyFetchError(ctx, q.Type, err, h.logger)
 	}
 
 	h.mapEventImages(q.Schema, q.Table, rows)
 	state, ordered, note, err := foldRowInBinlogOrder(baselineRow, rows, q.AsOf, query.BinlogOrderProof(ctx, h.indexDB))
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
+	notes := nonEmptyNotes(numberingNote, note)
 	if len(state) == 0 {
 		h.warnCorruptImageDrop(q.Schema, q.Table, ordered)
-		return nil, note, nil
+		return nil, notes, nil
 	}
-	return state, note, nil
+	return state, notes, nil
+}
+
+// withNotes is a binlog-only answer (resolveFlashbackRow) as
+// resolveSnapshotRow returns it.
+func withNotes(image map[string]any, note string, err error) (map[string]any, []string, error) {
+	return image, nonEmptyNotes(note), err
 }
 
 // ColumnsFor returns the wire column list for a single-row time-travel result,

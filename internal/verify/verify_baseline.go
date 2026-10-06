@@ -199,16 +199,18 @@ var renumberNotices reconstruct.NoticeOnce
 // window a pair reads: from the previous snapshot's position up to the newer
 // snapshot, against the previous snapshot's event mark (#2174). A previous
 // snapshot without a mark: nil. A refusal carries renumberedPairRemedy.
-func pairNumbering(ctx context.Context, cfg BaselineConfig, p BaselinePair) error {
-	if err := reconstruct.CheckNumberingFrom(ctx, cfg.IndexDB, &p.PrevAnchor, p.PrevEventMark, reconstruct.ReadWindow{
+// unchecked is the check's note when it could not tell (#2186).
+func pairNumbering(ctx context.Context, cfg BaselineConfig, p BaselinePair) (unchecked string, err error) {
+	unchecked, err = reconstruct.CheckNumberingFromRead(ctx, cfg.IndexDB, &p.PrevAnchor, p.PrevEventMark, reconstruct.ReadWindow{
 		Schema: p.Schema, Table: p.Table, Since: p.PrevSnapshot, Until: p.NewSnapshot, Notice: renumberNotices.To(nil),
-	}); err != nil {
+	})
+	if err != nil {
 		if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
-			return fmt.Errorf("%w %s", err, renumberedPairRemedy)
+			return "", fmt.Errorf("%w %s", err, renumberedPairRemedy)
 		}
-		return fmt.Errorf("check the binlog numbering since the previous snapshot of %s.%s: %w", p.Schema, p.Table, err)
+		return "", fmt.Errorf("check the binlog numbering since the previous snapshot of %s.%s: %w", p.Schema, p.Table, err)
 	}
-	return nil
+	return unchecked, nil
 }
 
 func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair) (TableResult, error) {
@@ -278,11 +280,16 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 	// writes no row events: the replay would keep rows the database no longer
 	// had at the read and report a mismatch that only a full backup clears.
 	// Every other surface that replays a window refuses on it (#764).
-	if err := pairNumbering(ctx, cfg, p); err != nil {
+	unchecked, err := pairNumbering(ctx, cfg, p)
+	if err != nil {
 		if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
 			return inconclusive(res, err.Error()), nil
 		}
 		return res, err
+	}
+	if unchecked != "" {
+		// A match over a window nobody could check is no proof (#2186).
+		return inconclusive(res, unchecked), nil
 	}
 
 	ddl, ddlAt, found, err := reconstruct.FindDestructiveDDL(ctx, cfg.IndexDB, p.Schema, p.Table, p.PrevSnapshot, p.NewSnapshot)

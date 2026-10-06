@@ -1400,8 +1400,16 @@ func ReconstructTable(
 	// of the first change past At, and after a restart past At that position
 	// is in the new numbering, where it sorts before changes the read needs.
 	boundedAt := cfg.ExplicitAt && cfg.OutputFormat != OutputFormatParquet
+	// A check that could not tell (#2186) is said out loud under an explicit
+	// --at, where a person reads the run's output; a refresh keeps its log
+	// line (the check's own notice) and its capturedBackBelow guard below.
+	var unchecked string
 	numberingCheck := func(w ReadWindow) error {
-		return CheckNumberingFrom(ctx, db, AnchorOf(anchorMeta), anchorMeta.EventMark, w)
+		note, err := CheckNumberingFromRead(ctx, db, AnchorOf(anchorMeta), anchorMeta.EventMark, w)
+		if note != "" {
+			unchecked = note
+		}
+		return err
 	}
 	if boundedAt {
 		// Bounded only while the live binlog_events holds all the read
@@ -1413,6 +1421,9 @@ func ReconstructTable(
 	}
 	if err != nil {
 		return nil, err
+	}
+	if cfg.ExplicitAt && unchecked != "" {
+		slog.Warn(fmt.Sprintf("reconstruct %s.%s at %s: %s", schema, table, cfg.At.UTC().Format(time.RFC3339), unchecked))
 	}
 	// For a snapshot whose mark names no server (written before marks did),
 	// and only for a position a refresh cut from the index: capture records the

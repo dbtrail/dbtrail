@@ -114,6 +114,13 @@ type BaselineLookup struct {
 	// (#618) so the console's reconstruct-tab staleness signal (appendStaleWarning)
 	// has a Phase-2 cascade counterpart instead of being silently dropped.
 	StaleMessage string
+	// UncheckedMessage is the binlog-renumbering check's note when it could
+	// not tell whether the source's binary log started again after the
+	// snapshot (#2186: the index was rebuilt or backfilled, the mark's event
+	// is gone, an archived hour of the window has no readable file). The
+	// engine uses the baseline and marks the result incomplete with it, so a
+	// recovery over a window nobody could check is never reported complete.
+	UncheckedMessage string
 }
 
 // BaselineProvider supplies Phase-2 baseline fallback: the child rows that
@@ -858,6 +865,11 @@ func SynthesizeVictims(
 				// once we know baseline augmentation actually ran (see the
 				// "default:" branch of the augmentation gate at the end).
 				baseStaleMsg = bl.StaleMessage
+				if bl.UncheckedMessage != "" {
+					addIncomplete("unchecked:"+fk.Schema+"."+fk.Table, fmt.Sprintf(
+						"%s.%s's baseline snapshot is used with its changes read by binlog position, but %s. The recovery may be partial",
+						fk.Schema, fk.Table, bl.UncheckedMessage))
+				}
 			default:
 				addIncomplete("nobaseline:"+fk.Schema+"."+fk.Table, fmt.Sprintf(
 					"no baseline covers %s.%s; children untouched within the lookback window are not reconstructed", fk.Schema, fk.Table))

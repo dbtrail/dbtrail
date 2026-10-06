@@ -134,8 +134,11 @@ func ExplainBaselinePairMismatch(ctx context.Context, cfg BaselineConfig, p Base
 	// see VerifyBaselinePair's comment).
 	// A window whose binlog numbering started over cannot be read by position
 	// (#2174); VerifyBaselinePair calls it inconclusive, and the drill-down,
-	// which the console can request on its own, refuses the same way.
-	if err := pairNumbering(ctx, cfg, p); err != nil {
+	// which the console can request on its own, refuses the same way. A
+	// check that could not tell (#2186) leaves the verdict inconclusive with
+	// its reason; the drill-down, a diagnostic of that same pair, still shows
+	// the rows.
+	if _, err := pairNumbering(ctx, cfg, p); err != nil {
 		return nil, err
 	}
 	pg := cfg.SourceFlavor == flavorPostgres
