@@ -175,7 +175,8 @@ func (p *Provider) BaselineChildren(ctx context.Context, schema, table, fkCol, p
 	// window. Before the row scan, and so also when no row matches: a covered
 	// lookup with zero rows still widens the engine's scan to the snapshot.
 	// A snapshot without an event mark: no check, today's behavior.
-	if err := p.checkNumbering(ctx, schema, table, sincePos, eventMark, snap, at); err != nil {
+	unchecked, err := p.checkNumbering(ctx, schema, table, sincePos, eventMark, snap, at)
+	if err != nil {
 		return cascade.BaselineLookup{}, false, err
 	}
 
@@ -208,7 +209,8 @@ func (p *Provider) BaselineChildren(ctx context.Context, schema, table, fkCol, p
 			Row:      r,
 		})
 	}
-	return cascade.BaselineLookup{SnapshotTime: snap, Rows: out, Truncated: trunc, SincePos: sincePos, StaleMessage: stale.Message}, true, nil
+	return cascade.BaselineLookup{SnapshotTime: snap, Rows: out, Truncated: trunc, SincePos: sincePos, StaleMessage: stale.Message,
+		UncheckedMessage: unchecked}, true, nil
 }
 
 func columnDataType(tm *metadata.TableMeta, name string) string {
@@ -238,20 +240,21 @@ func fkFilterSafe(dataType string) bool {
 // window the engine reads by position: schema.table from the snapshot to at.
 // A renumbering is returned as is (it wraps reconstruct.ErrBinlogRenumbered,
 // which the engine names under its own caveat); a failure of the check is
-// wrapped with what was being checked.
-func (p *Provider) checkNumbering(ctx context.Context, schema, table string, anchor *query.BinlogPos, mark string, snap, at time.Time) error {
+// wrapped with what was being checked. unchecked is the check's note when it
+// could not tell (#2186), which the lookup carries to the engine.
+func (p *Provider) checkNumbering(ctx context.Context, schema, table string, anchor *query.BinlogPos, mark string, snap, at time.Time) (unchecked string, err error) {
 	if mark == "" {
-		return nil
+		return "", nil
 	}
 	if p.db == nil {
-		return fmt.Errorf("baseline of %s.%s has an event mark but no index connection was given to check it; "+
+		return "", fmt.Errorf("baseline of %s.%s has an event mark but no index connection was given to check it; "+
 			"whether the source's binary log started again after the snapshot cannot be told", schema, table)
 	}
-	err := reconstruct.CheckNumberingFrom(ctx, p.db, anchor, mark, reconstruct.ReadWindow{
+	unchecked, err = reconstruct.CheckNumberingFromRead(ctx, p.db, anchor, mark, reconstruct.ReadWindow{
 		Schema: schema, Table: table, Since: snap, Until: at, Notice: renumberNotices.To(nil),
 	})
 	if err == nil || errors.Is(err, reconstruct.ErrBinlogRenumbered) {
-		return err
+		return unchecked, err
 	}
-	return fmt.Errorf("check the binlog numbering since the snapshot of %s.%s: %w", schema, table, err)
+	return "", fmt.Errorf("check the binlog numbering since the snapshot of %s.%s: %w", schema, table, err)
 }

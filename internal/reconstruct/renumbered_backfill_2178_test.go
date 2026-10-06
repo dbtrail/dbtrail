@@ -29,7 +29,7 @@ func TestCheckNumbering_aFailedBackfillReadFails_2178(t *testing.T) {
 			}
 			defer db.Close()
 			mock.ExpectQuery("index_state").WillReturnError(errors.New("Lock wait timeout exceeded"))
-			err = checkNumberingContinues(context.Background(), db, m, anchor, w)
+			_, err = checkNumberingContinues(context.Background(), db, m, anchor, w)
 			if err == nil || !strings.Contains(err.Error(), "Lock wait timeout") || errors.Is(err, ErrBinlogRenumbered) {
 				t.Fatalf("err = %v; want the read's own error", err)
 			}

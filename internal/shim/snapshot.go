@@ -58,21 +58,22 @@ func snapshotAnchor(ctx context.Context, baselinePath string, logger *slog.Logge
 // error keeps ErrBinlogRenumbered for errors.Is (pgResolveError in the pgwire
 // front-end) and names the query type; renumberedRefusal turns it into the
 // MySQL refusal. A timeout or cancel during the check is classified the way
-// a fetch's is (a *ResolveError).
-func (h *Handler) checkSnapshotNumbering(ctx context.Context, q TimeTravelQuery, snapshotTime time.Time, anchor *query.BinlogPos, eventMark string) error {
-	err := reconstruct.CheckNumberingFrom(ctx, h.indexDB, anchor, eventMark, reconstruct.ReadWindow{
+// a fetch's is (a *ResolveError). note is the check's own note when it could
+// not tell (#2186): the statement's warning (SHOW WARNINGS) once it succeeds.
+func (h *Handler) checkSnapshotNumbering(ctx context.Context, q TimeTravelQuery, snapshotTime time.Time, anchor *query.BinlogPos, eventMark string) (note string, err error) {
+	note, err = reconstruct.CheckNumberingFromRead(ctx, h.indexDB, anchor, eventMark, reconstruct.ReadWindow{
 		Schema: q.Schema, Table: q.Table, Since: snapshotTime, Until: q.AsOf, Notice: snapshotNotices.To(h.logger),
 	})
 	if err == nil {
-		return nil
+		return note, nil
 	}
 	if ctx.Err() != nil {
-		return classifyFetchError(ctx, q.Type, err, h.logger)
+		return "", classifyFetchError(ctx, q.Type, err, h.logger)
 	}
 	if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
-		return fmt.Errorf("resolve %s: %w %s", q.Type, err, snapshotRenumberedRemedy)
+		return "", fmt.Errorf("resolve %s: %w %s", q.Type, err, snapshotRenumberedRemedy)
 	}
-	return fmt.Errorf("resolve %s: %w", q.Type, err)
+	return "", fmt.Errorf("resolve %s: %w", q.Type, err)
 }
 
 // snapshotRenumberedRemedy follows the refusal's own "A new full snapshot is
@@ -307,7 +308,8 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 		reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos, Mark: ddlMark}); err != nil {
 		return nil, err
 	}
-	if err := h.checkSnapshotNumbering(ctx, q, snapshotTime, sincePos, eventMark); err != nil {
+	numberingNote, err := h.checkSnapshotNumbering(ctx, q, snapshotTime, sincePos, eventMark)
+	if err != nil {
 		return nil, mysqlRenderErr(err)
 	}
 
@@ -347,7 +349,7 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 	// The note becomes this statement's warning only once the read has
 	// succeeded (finishWithOrderNote): a later step that fails must leave
 	// SHOW WARNINGS with nothing, not with a note about a result never sent.
-	orderNote := order.ReadNote()
+	notes := nonEmptyNotes(numberingNote, order.ReadNote())
 	// ENUM/SET ordinals → labels per event's snapshot epoch (#472/#475),
 	// BEFORE the merge: the merged rowMap reaching the callback below has
 	// no per-row timestamp, and fullTableTextCell would coerce a delta's
@@ -392,7 +394,7 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 		streamCols = h.columnOrderFor(q.Schema, q.Table)
 	}
 	if h.conn != nil && !h.buffered && q.Limit == 0 && len(streamCols) > 0 {
-		return h.streamSnapshotFullTable(ctx, q, input, streamCols, orderNote)
+		return h.streamSnapshotFullTable(ctx, q, input, streamCols, notes)
 	}
 
 	rowCap := h.cfg.FullTableRowCap
@@ -457,18 +459,37 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 	}
 
 	res, err := h.fullTableResult(q, images)
-	return h.finishWithOrderNote(q, orderNote, res, err)
+	return h.finishWithNotes(q, notes, res, err)
 }
 
 // finishWithOrderNote makes the order note (#2156) of a `_snapshot` or
 // `_flashback` read the warning of a statement that succeeded, and passes res and err through. On an error it
 // sets nothing: the statement's diagnostics are the error.
 func (h *Handler) finishWithOrderNote(q TimeTravelQuery, note string, res *mysql.Result, err error) (*mysql.Result, error) {
-	if err == nil && note != "" {
-		h.logger.Warn(q.Type.String()+": "+note, "schema", q.Schema, "table", q.Table)
-		h.setWarningsCoded(mysql.ER_UNKNOWN_ERROR, []string{note})
+	return h.finishWithNotes(q, nonEmptyNotes(note), res, err)
+}
+
+// finishWithNotes is finishWithOrderNote for several notes (the binlog
+// numbering check's, #2186, and the order note): one SHOW WARNINGS row each.
+func (h *Handler) finishWithNotes(q TimeTravelQuery, notes []string, res *mysql.Result, err error) (*mysql.Result, error) {
+	if err == nil && len(notes) > 0 {
+		for _, n := range notes {
+			h.logger.Warn(q.Type.String()+": "+n, "schema", q.Schema, "table", q.Table)
+		}
+		h.setWarningsCoded(mysql.ER_UNKNOWN_ERROR, notes)
 	}
 	return res, err
+}
+
+// nonEmptyNotes drops the empty notes.
+func nonEmptyNotes(notes ...string) []string {
+	var out []string
+	for _, n := range notes {
+		if n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // streamSnapshotFullTable streams a full-table _snapshot resultset row-by-row
@@ -492,7 +513,7 @@ func (h *Handler) finishWithOrderNote(q TimeTravelQuery, note string, res *mysql
 // first-packet ERR). A failure once rows are already on the wire returns an
 // error that go-mysql renders as an ERR packet mid-resultset — the client sees
 // no terminating EOF and reads it as an unambiguous failure (see streamWriter).
-func (h *Handler) streamSnapshotFullTable(ctx context.Context, q TimeTravelQuery, input reconstruct.SnapshotFullTableInput, cols []string, orderNote string) (*mysql.Result, error) {
+func (h *Handler) streamSnapshotFullTable(ctx context.Context, q TimeTravelQuery, input reconstruct.SnapshotFullTableInput, cols []string, notes []string) (*mysql.Result, error) {
 	sw := newStreamWriter(h.conn, cols)
 	sw.status = h.SessionStatus()
 	cells := make([]any, len(cols)) // reused per row; writeRow encodes synchronously
@@ -541,7 +562,7 @@ func (h *Handler) streamSnapshotFullTable(ctx context.Context, q TimeTravelQuery
 	}
 	// Every row was written; the closing packet carries the warning count,
 	// so the note is set before it.
-	h.finishWithOrderNote(q, orderNote, nil, nil)
+	h.finishWithNotes(q, notes, nil, nil)
 	return sw.finish()
 }
 
@@ -743,22 +764,22 @@ func (h *Handler) runSnapshotPointInTime(q TimeTravelQuery) (*mysql.Result, erro
 	// A nil state means the row did not exist at AsOf; a fetch/coverage failure
 	// is a *ResolveError; a baseline/ApplyAt data-fault is raw. mysqlRenderErr
 	// keeps this byte-identical to the pre-#1008 inline path.
-	state, note, err := h.resolveSnapshotRow(ctx, q)
+	state, notes, err := h.resolveSnapshotRow(ctx, q)
 	if err != nil {
 		return nil, mysqlRenderErr(err)
 	}
 	if state == nil {
-		return h.finishWithOrderNote(q, note, emptyResult(), nil)
+		return h.finishWithNotes(q, notes, emptyResult(), nil)
 	}
 
 	// Same projection handling as runPointInTime: an explicit column list
 	// is emitted verbatim; SELECT * uses the DDL column order.
 	if q.Columns != nil {
 		res, err := imageToResultVerbatim(state, q.Columns)
-		return h.finishWithOrderNote(q, note, res, err)
+		return h.finishWithNotes(q, notes, res, err)
 	}
 	res, err := imageToResult(state, h.columnOrderFor(q.Schema, q.Table))
-	return h.finishWithOrderNote(q, note, res, err)
+	return h.finishWithNotes(q, notes, res, err)
 }
 
 // pkDataType returns the DATA_TYPE of pkCol in schema.table from its

@@ -64,6 +64,12 @@ type renumberCase struct {
 	switchAfter bool
 	// want is the status; refused cases are inconclusive.
 	want Status
+	// markGone writes an older row in place of the mark's own (a restarted
+	// capture's cleanup deleted it); markMoved gives the mark's id another
+	// event (a rebuilt index). #2186: these and a backfilled index cannot be
+	// checked, an inconclusive verdict whose detail says unchecked.
+	markGone, markMoved bool
+	unchecked           string
 }
 
 func renumberCases(withoutCheck Status) []renumberCase {
@@ -77,7 +83,12 @@ func renumberCases(withoutCheck Status) []renumberCase {
 		{name: "mark, numbering started over after the window", mark: sameServer, startOverLater: true, want: StatusMatch},
 		{name: "a change committed after the restart, started between two others", mark: sameServer, startedBetween: true, want: StatusInconclusive},
 		{name: "a change committed after the restart, started before the mark", mark: sameServer, startedEarly: true, want: StatusInconclusive},
-		{name: "mark, backfilled index", mark: sameServer, startOver: true, backfilled: true, want: withoutCheck},
+		{name: "mark, backfilled index", mark: sameServer, startOver: true, backfilled: true, want: StatusInconclusive,
+			unchecked: "`bintrail index` also wrote into this index"},
+		{name: "mark's event deleted while older rows remain", mark: sameServer, markGone: true, want: StatusInconclusive,
+			unchecked: "was deleted from the index while older ones remain"},
+		{name: "mark's id names another event", mark: sameServer, markMoved: true, want: StatusInconclusive,
+			unchecked: "is now another event"},
 		{name: "mark names the server, capture reads it", mark: withServer, captureReads: renumberedOldUUID, want: StatusMatch},
 		{name: "mark names the server, capture reads another, no record of when", mark: withServer, captureReads: renumberedNewUUID, want: StatusInconclusive},
 		{name: "same address, new server inside the window", mark: withServer, captureReads: renumberedNewUUID, switchVia: "change", want: StatusInconclusive},
@@ -118,7 +129,14 @@ func renumberIndex(t *testing.T, db *sql.DB, dbName string, tc renumberCase, hou
 			id, file, start, start+100, at.Format("2006-01-02 15:04:05"), dbName, pk,
 			[]byte(`{"id":`+pk+`,"status":"`+before+`"}`), []byte(`{"id":`+pk+`,"status":"`+after+`"}`))
 	}
-	insert(10, "binlog.000007", 100, markAt, "2", "x", "b")
+	switch {
+	case tc.markGone:
+		insert(9, "binlog.000007", 100, markAt, "2", "x", "b")
+	case tc.markMoved:
+		insert(10, "binlog.000007", 50, markAt, "2", "x", "b")
+	default:
+		insert(10, "binlog.000007", 100, markAt, "2", "x", "b")
+	}
 	insert(20, changeFile(tc), 300, changeAt, "1", "a", "zzz")
 	if tc.startedBetween {
 		insert(21, "binlog.000007", 500, changeAt.Add(10*time.Minute), "2", "b", "b")
@@ -214,6 +232,14 @@ func checkRenumberedVerdict(t *testing.T, tc renumberCase, got TableResult, extr
 	if got.InconclusiveKind != "" {
 		t.Errorf("inconclusive kind = %q; a renumbering needs attention, so it must not be a benign kind", got.InconclusiveKind)
 	}
+	if tc.unchecked != "" {
+		for _, w := range []string{"binlog numbering not checked", tc.unchecked, "cannot be told"} {
+			if !strings.Contains(got.Detail, w) {
+				t.Errorf("the detail does not say %q: %s", w, got.Detail)
+			}
+		}
+		return
+	}
 	want := append([]string{"new full snapshot is needed"}, extra...)
 	if tc.captureReads != "" {
 		want = append(want, renumberedNewUUID)
@@ -264,7 +290,7 @@ func TestVerifyBaselinePair_afterTheBinlogNumberingStartsOver_2174(t *testing.T)
 			checkRenumberedVerdict(t, tc, got, "second full snapshot")
 
 			// The drill-down reads the same window, so it refuses the same way.
-			if tc.want == StatusInconclusive {
+			if tc.want == StatusInconclusive && tc.unchecked == "" {
 				if _, err := ExplainBaselinePairMismatch(ctx, cfg, pairs[0]); !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
 					t.Errorf("explain = %v; want ErrBinlogRenumbered", err)
 				}
@@ -281,9 +307,10 @@ func TestVerifyTable_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 			db, dbName := testutil.CreateTestDB(t)
 			now := time.Now().UTC()
 			h1 := now.Truncate(time.Hour).Add(-time.Hour)
-			if tc.startOverLater || tc.switchAfter || tc.otherTable {
-				// Live mode reads up to now and checks the whole index, as the
-				// refresh does: there is no "after the window".
+			if tc.startOverLater || tc.switchAfter || tc.otherTable || tc.startedBetween {
+				// Live mode reads up to now: there is no "after the window",
+				// and this fixture's later changes (startedBetween's two) are
+				// stamped after now, outside what the read and its check see.
 				t.Skip("live mode reads up to now")
 			}
 			renumberIndex(t, db, dbName, tc, []time.Time{h1.Add(-time.Hour), h1, h1.Add(time.Hour)}, h1.Add(-5*time.Minute), now.Add(-time.Minute), time.Time{}, now)

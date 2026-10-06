@@ -1011,21 +1011,29 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	go supervisor.Reconcile(registry)
 
 	// Extension source jobs (ext.RegisterSourceJob) for the daemon's MAIN source
-	// run alongside its stream on the daemon context (ctx) — the same secondary,
-	// never-fatal, daemon-scoped contract as `bintrail up` (cliapp/up.go) and the
-	// built-in rotation loop above. The supervised registry sources get their own
-	// jobs from the monitor supervisor (consoleapp/monitor.go); this call covers
+	// run alongside its stream — the same secondary, never-fatal contract as
+	// `bintrail up` (cliapp/up.go). The supervised registry sources get their
+	// own jobs from the monitor supervisor (consoleapp/monitor.go); this covers
 	// only the single main source `watch --source-dsn` streams. They start once
 	// the stream has asked the source what it is, with the flavor capture runs
 	// as; FlavorOnce keeps a write-deadline restart from starting them again.
 	// Every resolution also updates the flavor the console shows for the boot
 	// entry. No-op in the stock binary.
-	streamCfg := watchStreamConfig(serverID)
-	streamCfg.Hooks = &streamrun.Hooks{OnFlavorResolved: mainStreamFlavorHook(mainFlavor, func(flavor string) {
-		ext.RunSourceJobs(ctx, mainSourceJobInfo(upSourceDSN, upIndexDSN, flavor))
-	})}
-
-	streamErr := runMainStreamWithWriteDeadlineRetry(ctx, streamCfg)
+	//
+	// Only while this process holds the index database's capture lock: a
+	// second daemon with the same source and index waits instead of capturing
+	// beside this one (#2105). The jobs are bound to one tenure of that lock
+	// (the ctx the closure receives), not to the daemon: a process that lost
+	// the lock must stop them too, or they keep writing beside the process
+	// that holds it now. A new tenure starts them again.
+	baseStreamCfg := watchStreamConfig(serverID)
+	streamErr := runMainStreamHoldingLock(ctx, upIndexDSN, func(ctx context.Context) error {
+		streamCfg := baseStreamCfg
+		streamCfg.Hooks = &streamrun.Hooks{OnFlavorResolved: mainStreamFlavorHook(mainFlavor, func(flavor string) {
+			ext.RunSourceJobs(ctx, mainSourceJobInfo(upSourceDSN, upIndexDSN, flavor))
+		})}
+		return runMainStreamWithWriteDeadlineRetry(ctx, streamCfg)
+	})
 	stop()                // drain the console even if the stream returned without a signal
 	<-consoleDone         // order the console goroutine's exit before the deferred db.Close()
 	stopFlashback()       // drain the flashback port before the deferred db.Close()

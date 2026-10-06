@@ -18,9 +18,9 @@ import (
 // test, and restores them afterwards.
 func shortCaptureLockTimings(t *testing.T) {
 	t.Helper()
-	poll, beat := captureLockPoll, captureLockHeartbeat
-	captureLockPoll, captureLockHeartbeat = 100*time.Millisecond, 100*time.Millisecond
-	t.Cleanup(func() { captureLockPoll, captureLockHeartbeat = poll, beat })
+	poll, beat, check := captureLockPoll, captureLockHeartbeat, captureLockCheckTimeout
+	captureLockPoll, captureLockHeartbeat, captureLockCheckTimeout = 100*time.Millisecond, 100*time.Millisecond, time.Second
+	t.Cleanup(func() { captureLockPoll, captureLockHeartbeat, captureLockCheckTimeout = poll, beat, check })
 }
 
 func captureLockTestSetup(t *testing.T) (dsn, name string, probe *sql.DB) {

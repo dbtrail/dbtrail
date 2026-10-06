@@ -248,6 +248,8 @@ metadata:
   name: bintrail-stream
 spec:
   replicas: 1   # must be 1 — multiple replicas would create duplicate events
+  strategy:
+    type: Recreate   # stop the old pod before the new one starts (see below)
   selector:
     matchLabels:
       app: bintrail-stream
@@ -297,6 +299,8 @@ spec:
 ```
 
 > **Important:** Always run exactly one replica of `bintrail stream` per source MySQL. Multiple replicas would index duplicate events with different `server_id` values. If you need HA, use a leader-election sidecar or rely on the systemd/Kubernetes restart mechanism.
+>
+> **Keep `strategy: Recreate`.** The default, `RollingUpdate`, starts the new pod before it stops the old one, so for that moment two replicas run. `bintrail stream` takes no lock, so both capture and every change in that window is stored twice. For `bintrail-console watch` on Amazon ECS, see [ecs.md](ecs.md).
 
 
 ### When the host dies
@@ -310,18 +314,26 @@ A **process** crash recovers on its own: the daemon restarts (systemd `Restart=`
 - **A state folder shared between hosts needs a lock every host sees.** At startup DBTrail cleans up after snapshot jobs a killed process left (see [When DBTrail is killed in the middle of a snapshot job](dump-and-baseline.md#when-dbtrail-is-killed-in-the-middle-of-a-snapshot-job)), and it proves a job is dead by taking that job's `flock`. Such a lock is only seen by processes of one kernel when the folder is on NFS mounted with local locks (`nolock`, `local_lock=flock` or `all`, common in Docker NFS volume examples), after an NFSv4 lease loss, or on a folder a host and Docker Desktop's VM both mount. So each job records which host ran it (the kernel boot id, else the host name), and only that host ever cleans up after it; on a network or FUSE file system DBTrail says once in its log that other hosts' jobs are left alone. Amazon EFS and NFSv4 without local locks give a lock every host sees.
 - **The previous snapshot can come from the bucket.** The new host still needs a Local folder configured, because updates are written there, but with an S3 location set it reads the previous snapshot from the bucket.
 - **Source binlog retention decides what is lost.** The new host resumes from the checkpoint in the index. If the source purged those binlogs while nobody was capturing, capture continues from the oldest binlog the source still has, the changes in between are permanently lost, and the server shows **LOST POSITION** in the web interface. That badge stays across restarts until you press **Stop** and then **Start** on the server; it does not mean capture is still broken.
-- **Make sure the old host is really off before starting the new one.** Servers added in the web interface are guarded by a MySQL lock on the index (`GET_LOCK`): a second daemon marks such a server `failed` ("another bintrail process is already monitoring this server") instead of capturing twice. The hover text on that badge says it retries; for this refusal it does not. Press **Start** on the server, or restart the daemon, once the first host is gone. The source passed with `--source-dsn` (compose `SOURCE_DSN`) takes no lock at all, so two hosts started with it both capture into the same index.
-- **A dead host can hold that lock for hours.** The lock lives in the dead daemon's idle session on the index, and MySQL drops an idle session only after `wait_timeout` (28800 seconds by default) or its TCP keepalive. To take over sooner, list the lock holders on the index:
+- **A second daemon waits instead of capturing twice** (from the release after 0.99.0). Capture holds a MySQL lock on the index (`GET_LOCK`) for each server added in the web interface and for the source passed with `--source-dsn` (compose `SOURCE_DSN`). A second daemon on the same registry and index shows **WAITING FOR OTHER DBTRAIL** on such a server and starts capturing from the first one's position once the first one stops. For the `--source-dsn` source the lock belongs to the index database: a second daemon writing to the same index database logs that it waits. The holder checks its lock every 5 seconds and stops writing within about 10 seconds of losing it or its connection to the index, so a host that becomes unreachable does not keep writing beside the new one. **On 0.99.0 and older** the lock is not checked again after it is taken, a second daemon marks the server `failed` until someone presses **Start**, and the `--source-dsn` source takes no lock at all: make sure the old host is really off first.
+- **A dead host can hold that lock for about two hours.** The lock lives in the dead daemon's session on the index, and MySQL ends that session when its TCP keepalive gives up (about 2 hours 11 minutes with default keepalive settings on the index server's host; the daemon raises its own session's `wait_timeout`, so being idle never frees it). To take over sooner, find the session that holds the lock. For one server added in the web interface (its id is in the web interface and in the daemon's log):
+
+  ```sql
+  SELECT IS_USED_LOCK('bintrail_monitor_<server id>');
+  -- the --source-dsn source, by its index database name:
+  SELECT IS_USED_LOCK(CONCAT('bintrail_stream_', LEFT(SHA2('<index database>', 256), 40)));
+  ```
+
+  Or list every holder, where `performance_schema` is on (on RDS and Aurora it often is not, and then this returns no rows whoever holds the lock):
 
   ```sql
   SELECT m.OBJECT_NAME, t.PROCESSLIST_ID
   FROM performance_schema.metadata_locks m
   JOIN performance_schema.threads t ON t.THREAD_ID = m.OWNER_THREAD_ID
   WHERE m.OBJECT_TYPE = 'USER LEVEL LOCK'
-    AND m.OBJECT_NAME LIKE 'bintrail\_monitor\_%';
+    AND (m.OBJECT_NAME LIKE 'bintrail\_monitor\_%' OR m.OBJECT_NAME LIKE 'bintrail\_stream\_%');
   ```
 
-  and `KILL <PROCESSLIST_ID>` (on RDS or Aurora, `CALL mysql.rds_kill(<PROCESSLIST_ID>)`). Run it as the account the daemon uses, or one with `CONNECTION_ADMIN`; any other account gets `ERROR 1095`. Only do this once the old host is powered off or cut off from both the source and the index: the daemon never checks the lock again after taking it, so a host that was only unreachable keeps capturing when it comes back, alongside the new one. Do not lower `wait_timeout` instead: the lock session is idle on a healthy daemon too, so MySQL would drop it and let a second daemon capture the same source.
+  and `KILL <PROCESSLIST_ID>` (on RDS or Aurora, `CALL mysql.rds_kill(<PROCESSLIST_ID>)`). Run it as the account the daemon uses, or one with `CONNECTION_ADMIN`; any other account gets `ERROR 1095`. On 0.99.0 and older, only do this once the old host is powered off or cut off from both the source and the index, and do not lower `wait_timeout` instead: there the lock session is idle on a healthy daemon too, so MySQL would drop it and let a second daemon capture the same source.
 
 Automatic failover (a lease the standby can take over, with writes from a stale holder rejected) is not built. The design discussion, including why the lock alone cannot do it, is in [#1648](https://github.com/dbtrail/dbtrail/issues/1648).
 
