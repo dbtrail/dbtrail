@@ -778,7 +778,7 @@ func numberingStartedOver(ctx context.Context, db *sql.DB, tables []views.Baseli
 			continue
 		}
 		checked[m] = true
-		if err := reconstruct.CheckNumberingContinues(ctx, db, &m); errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+		if err := reconstruct.CheckNumberingContinues(ctx, db, &m, at); errors.Is(err, reconstruct.ErrBinlogRenumbered) {
 			return fmt.Sprintf("the source's binary log started again from another numbering after the snapshot of %s.%s was taken, so no change since can be ruled out by position", t.Schema, t.Table), nil
 		} else if err != nil {
 			return "", err

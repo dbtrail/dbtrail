@@ -1349,11 +1349,23 @@ func ReconstructTable(
 	// a new numbering cannot be compared, so no flag can make it readable. A
 	// proven renumbering names its own remedy (a new full snapshot) rather
 	// than the gap message's flag. See renumbered.go.
-	if err := CheckNumberingContinues(ctx, db, ParseEventMark(anchorMeta.EventMark)); err != nil {
-		return nil, fmt.Errorf("%s.%s: %w", schema, table, err)
+	if anchorMeta.BinlogFile != "" && anchorMeta.BinlogPos > 0 {
+		anchor := query.BinlogPos{File: anchorMeta.BinlogFile, Pos: uint64(anchorMeta.BinlogPos)}
+		if err := CheckNumberingContinues(ctx, db, ParseEventMark(anchorMeta.EventMark), anchor); err != nil {
+			return nil, fmt.Errorf("%s.%s: %w", schema, table, err)
+		}
 	}
-	if err := CheckSourceReplaced(ctx, db, fetchSince); err != nil {
-		return nil, fmt.Errorf("%s.%s: %w", schema, table, err)
+	// Only for a position a refresh cut from the index: capture records the
+	// new server when it reconnects, before it indexes anything from it, so a
+	// cut taken before that record is in the old server's numbering and one
+	// taken after it is in the new one's, and its time says which. A dump's
+	// position was read from whatever server answered when the dump ran,
+	// which that record's time cannot tell (capture may notice the new
+	// server only after the dump), so it is not compared.
+	if anchorMeta.Producer == baseline.ProducerReconstruct {
+		if err := CheckSourceReplaced(ctx, db, fetchSince); err != nil {
+			return nil, fmt.Errorf("%s.%s: %w", schema, table, err)
+		}
 	}
 
 	// ── 3c. Refuse/warn on a stamped capture gap inside the window (#765) ──

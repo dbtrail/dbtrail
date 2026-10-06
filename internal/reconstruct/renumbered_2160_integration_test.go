@@ -14,6 +14,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -157,7 +158,7 @@ func TestRefresh_afterTheBinlogNumberingStartsOver_refusesUntilAFullSnapshot(t *
 				if errors.Is(err, reconstruct.ErrCaptureGap) {
 					t.Fatalf("the refusal reads as a capture gap, whose remedy is a flag: %v", err)
 				}
-				for _, want := range []string{"shop.orders", "binlog.000001:300", "binlog.000007:200", "new full snapshot is needed"} {
+				for _, want := range []string{"shop.orders", "binlog.000001:400", "binlog.000007:200", "new full snapshot is needed"} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("the refusal does not say %q: %v", want, err)
 					}
@@ -304,7 +305,8 @@ func TestCheckNumberingContinues_2160(t *testing.T) {
 		{"nothing after the mark", []ev{{10, "binlog.000007", 100}}, false},
 		{"the same numbering", []ev{{10, "binlog.000007", 100}, {11, "binlog.000007", 200}, {12, "binlog.000008", 4}}, false},
 		{"RESET MASTER: binlog.000001 again", []ev{{10, "binlog.000007", 100}, {11, "binlog.000001", 300}}, true},
-		{"the same file, lower", []ev{{10, "binlog.000007", 100}, {11, "binlog.000007", 150}}, true},
+		{"the same file, lower", []ev{{10, "binlog.000007", 100}, {11, "binlog.000007", 50}}, true},
+		{"another row of the mark's own rows event, committed in a later batch", []ev{{10, "binlog.000007", 100}, {11, "binlog.000007", 100}}, false},
 		{"a shorter base name", []ev{{10, "binlog.000007", 100}, {11, "bin.000001", 300}}, true},
 		{"a longer base name", []ev{{10, "binlog.000007", 100}, {11, "mysql-bin.000001", 300}}, true},
 		{"started over, then grew past the mark", []ev{{10, "binlog.000007", 100}, {11, "binlog.000001", 300}, {12, "binlog.000009", 4}}, true},
@@ -325,10 +327,32 @@ func TestCheckNumberingContinues_2160(t *testing.T) {
 					(event_id, binlog_file, start_pos, end_pos, event_timestamp, schema_name, table_name, event_type, pk_values)
 					VALUES (?, ?, ?, ?, UTC_TIMESTAMP(), 'shop', 'orders', 2, '1')`, e.id, e.file, e.start, e.start+100)
 			}
-			err := reconstruct.CheckNumberingContinues(context.Background(), db, mark)
+			err := reconstruct.CheckNumberingContinues(context.Background(), db, mark, query.BinlogPos{File: "binlog.000007", Pos: 200})
 			if got := errors.Is(err, reconstruct.ErrBinlogRenumbered); got != tc.want || (err != nil && !got) {
 				t.Fatalf("CheckNumberingContinues = %v, want renumbered %v", err, tc.want)
 			}
 		})
+	}
+}
+
+// The full snapshot an operator takes right after the reset or the failover,
+// before capture indexed anything new: its mark is the newest event, from the
+// OLD numbering, while its position is in the new one. Reading the window from
+// that position is right; the mark says nothing about it and must not refuse.
+// Capture noticing the new server only after the dump does not refuse either:
+// a dump's position is the server it read.
+func TestRefresh_aFullSnapshotTakenRightAfterTheRenumberingFolds(t *testing.T) {
+	r, T := renumberRig(t, false, false)
+	seedFullRead(t, r, T.Add(30*time.Minute), "binlog.000001", 400,
+		reconstruct.EventMark{ID: 10, File: "binlog.000007", End: 200}.Encode(),
+		[][]string{{"1", "B"}, {"2", "paid"}, {"3", "shipped"}})
+	testutil.MustExec(t, r.db, serverChangeSQL, "server_uuid", "3e11fa47-71ca-11e1-9e33-c80aa9429562", "4f22ab58-71ca-11e1-9e33-c80aa9429563", T.Add(40*time.Minute).Unix())
+	insertEventAt(t, r.db, r.schema, "orders", "binlog.000001", 20, 500, T.Add(50*time.Minute), "3", `{"id":3,"status":"C"}`)
+	base, _, err := r.refreshErr(T.Add(time.Hour), false, false)
+	if err != nil {
+		t.Fatalf("refresh from a full snapshot taken after the renumbering: %v", err)
+	}
+	if got, want := lagState(t, base, false), []string{"1=B", "2=paid", "3=C"}; !equalStrings(got, want) {
+		t.Fatalf("published %v, want %v", got, want)
 	}
 }

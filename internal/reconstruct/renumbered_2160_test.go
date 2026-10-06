@@ -50,7 +50,7 @@ func TestStartedOverAfter_2160(t *testing.T) {
 		e    indexedEvent
 		want bool
 	}{
-		{"starts where the mark ends", indexedEvent{11, "binlog.000007", 200}, false},
+		{"ends where the mark ends: a row of the same rows event", indexedEvent{11, "binlog.000007", 200}, false},
 		{"later in the same file", indexedEvent{11, "binlog.000007", 900}, false},
 		{"a later file", indexedEvent{11, "binlog.000008", 4}, false},
 		{"past the rollover", indexedEvent{11, "binlog.1000000", 4}, false},

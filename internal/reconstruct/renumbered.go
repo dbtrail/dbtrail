@@ -106,7 +106,11 @@ func ReadEventMark(ctx context.Context, db *sql.DB) (*EventMark, error) {
 // one, which only means the next run cannot use it.
 func ReadStreamEventMark(ctx context.Context, db *sql.DB) string {
 	captured, err := query.StreamCaptured(ctx, db)
-	if err != nil || !captured {
+	if err != nil {
+		slog.Warn("could not tell whether a stream wrote the index; the snapshot is published without an event mark", "error", err)
+		return ""
+	}
+	if !captured {
 		return ""
 	}
 	m, err := ReadEventMark(ctx, db)
@@ -152,23 +156,26 @@ func sortsBefore(p, q query.BinlogPos) bool {
 
 // indexedEvent is one row read for the check.
 type indexedEvent struct {
-	id    uint64
-	file  string
-	start uint64
+	id   uint64
+	file string
+	end  uint64
 }
 
 func (e indexedEvent) String() string {
-	return fmt.Sprintf("%s:%d", e.file, e.start)
+	return fmt.Sprintf("%s:%d", e.file, e.end)
 }
 
 // startedOverAfter reports whether e, indexed after the mark, shows the
-// numbering started over: a different base name, or a start before the
-// mark's end.
+// numbering started over: a different base name, or an END before the
+// mark's end. Ends, not starts: every row of one binlog rows event carries
+// that event's start and end, and capture may commit them in several
+// batches, so a row indexed after the mark can start before the mark's end
+// while belonging to the very event the mark is a row of.
 func startedOverAfter(e indexedEvent, m *EventMark) bool {
 	if BinlogBaseName(e.file) != BinlogBaseName(m.File) {
 		return true
 	}
-	return sortsBefore(query.BinlogPos{File: e.file, Pos: e.start}, query.BinlogPos{File: m.File, Pos: m.End})
+	return sortsBefore(query.BinlogPos{File: e.file, Pos: e.end}, query.BinlogPos{File: m.File, Pos: m.End})
 }
 
 // CheckNumberingContinues returns an error wrapping ErrBinlogRenumbered when
@@ -194,8 +201,20 @@ func startedOverAfter(e indexedEvent, m *EventMark) bool {
 //     in that mode (gap_lost_at), and the refresh refuses on it.
 //   - Gone with every older row (rotation dropped its hour): the events after
 //     it are still in order. Checked.
-func CheckNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark) error {
+func CheckNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anchor query.BinlogPos) error {
 	if m == nil {
+		return nil
+	}
+	// A mark is only a reference for the position it was stamped beside when
+	// that position is at or after it in ONE numbering. A refresh reads its
+	// mark just before its cut, so that always holds there. A full snapshot
+	// read right after a RESET MASTER or a failover, before capture indexed
+	// anything new, has a mark from the old numbering beside a position in
+	// the new one: reading the window from that position is right, and the
+	// mark says nothing about it.
+	if BinlogBaseName(anchor.File) != BinlogBaseName(m.File) || sortsBefore(anchor, query.BinlogPos{File: m.File, Pos: m.End}) {
+		slog.Info("the snapshot's event mark is from before its own binlog position's numbering; it is not used",
+			"mark", m.Encode(), "anchor", fmt.Sprintf("%s:%d", anchor.File, anchor.Pos))
 		return nil
 	}
 	var file string
@@ -204,6 +223,8 @@ func CheckNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark) erro
 	switch {
 	case err == nil:
 		if file != m.File || end != m.End {
+			slog.Warn("the event the snapshot's event mark names is now another event (the index was rebuilt?); a binlog numbering that started over is not checked from it",
+				"mark", m.Encode(), "now", fmt.Sprintf("%s:%d", file, end))
 			return nil
 		}
 	case errors.Is(err, sql.ErrNoRows):
@@ -211,22 +232,27 @@ func CheckNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark) erro
 		if err := db.QueryRowContext(ctx, `SELECT MIN(event_id) FROM binlog_events`).Scan(&oldest); err != nil {
 			return fmt.Errorf("read the oldest indexed event: %w", err)
 		}
-		if !oldest.Valid || uint64(oldest.Int64) < m.ID {
+		if !oldest.Valid {
+			return nil
+		}
+		if uint64(oldest.Int64) < m.ID {
+			slog.Warn("the event the snapshot's event mark names was deleted while older ones remain (a restarted stream's cleanup); a binlog numbering that started over is not checked from it",
+				"mark", m.Encode())
 			return nil
 		}
 	default:
 		return fmt.Errorf("read the event the snapshot's event mark names: %w", err)
 	}
 	for _, q := range []string{
-		`SELECT event_id, binlog_file, start_pos FROM binlog_events
-			WHERE event_id > ? AND binlog_file IS NOT NULL AND start_pos IS NOT NULL
+		`SELECT event_id, binlog_file, end_pos FROM binlog_events
+			WHERE event_id > ? AND binlog_file IS NOT NULL AND end_pos IS NOT NULL
 			ORDER BY event_id ASC LIMIT 1`,
-		`SELECT event_id, binlog_file, start_pos FROM binlog_events
-			WHERE event_id > ? AND binlog_file IS NOT NULL AND start_pos IS NOT NULL
+		`SELECT event_id, binlog_file, end_pos FROM binlog_events
+			WHERE event_id > ? AND binlog_file IS NOT NULL AND end_pos IS NOT NULL
 			ORDER BY event_id DESC LIMIT 1`,
 	} {
 		var e indexedEvent
-		err := db.QueryRowContext(ctx, q, m.ID).Scan(&e.id, &e.file, &e.start)
+		err := db.QueryRowContext(ctx, q, m.ID).Scan(&e.id, &e.file, &e.end)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -234,7 +260,7 @@ func CheckNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark) erro
 			return fmt.Errorf("read the events indexed after the snapshot's event mark: %w", err)
 		}
 		if startedOverAfter(e, m) {
-			return fmt.Errorf("%w: the source's binary log started again from another numbering (a RESET MASTER, a failover to another server, or a new log_bin name): a change at %s reached the index after the change at %s:%d and sorts before it. %s",
+			return fmt.Errorf("%w: the source's binary log started again from another numbering (a RESET MASTER, a failover to another server, or a new log_bin name): a change ending at %s reached the index after the change ending at %s:%d and sorts before it. %s",
 				ErrBinlogRenumbered, e, m.File, m.End, renumberedRemedy)
 		}
 	}
