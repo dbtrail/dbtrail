@@ -44,6 +44,7 @@ func routedSessionFunction(t *testing.T, baseDSN string) {
 	for _, ddl := range []string{
 		"CREATE FUNCTION set_zone(z VARCHAR(64)) RETURNS INT NO SQL BEGIN SET time_zone = z; RETURN 1; END",
 		"CREATE FUNCTION set_mode(m VARCHAR(255)) RETURNS INT NO SQL BEGIN SET sql_mode = m; RETURN 1; END",
+		"CREATE FUNCTION set_locale(l VARCHAR(16)) RETURNS INT NO SQL BEGIN SET lc_time_names = l; RETURN 1; END",
 		"CREATE FUNCTION set_zone_then_fail(z VARCHAR(64)) RETURNS INT NO SQL BEGIN SET time_zone = z; SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'raised after the SET'; RETURN 1; END",
 		"CREATE FUNCTION sets_nothing(a INT) RETURNS INT NO SQL RETURN a + 1",
 	} {
@@ -99,21 +100,49 @@ func routedSessionFunction(t *testing.T, baseDSN string) {
 		}
 	})
 
-	// The same for sql_mode: a mode the copy does not reproduce keeps it
-	// from answering, and it answers again once the function puts it back.
+	// A setting the server does not report by default (time_zone is in the
+	// default list of both servers; this one is in the port's only), and one
+	// the copy does not reproduce: MySQL answers after the function set it,
+	// and the copy again once the function puts it back.
+	t.Run("a function sets lc_time_names", func(t *testing.T) {
+		c := rig.conn(t, "")
+		must(t, c, "SET time_zone = '+00:00'")
+		rig.scan(t, c, "copy")
+		call(t, c, "SELECT set_locale('es_ES')", "1")
+		if got := connStrings(t, c, "SELECT @@session.lc_time_names")[0][0]; got != "es_ES" {
+			t.Fatalf("after the function the session's lc_time_names is %s: this case tests nothing", got)
+		}
+		rig.scan(t, c, "live")
+		call(t, c, "SELECT set_locale('en_US')", "1")
+		rig.scan(t, c, "copy")
+	})
+
+	// The issue also names sql_mode. A stored function cannot change its
+	// caller's: MySQL and MariaDB run a routine under the mode it was
+	// created with and put the caller's back when it returns (asserted
+	// here). The source reports it all the same, so the session is read
+	// back, and the copy goes on answering what MySQL answers.
 	t.Run("a function sets sql_mode", func(t *testing.T) {
 		c := rig.conn(t, "")
 		must(t, c, "SET time_zone = '+00:00'")
 		rig.scan(t, c, "copy")
-		var mode string
-		if err := c.QueryRowContext(ctx, "SELECT @@session.sql_mode").Scan(&mode); err != nil {
-			t.Fatal(err)
+		mode := connStrings(t, c, "SELECT @@session.sql_mode")[0][0]
+		before := questions(t, c)
+		if got := connStrings(t, c, visitsScan); sidesOf(got) != "copy" {
+			t.Fatalf("answered by %s", sidesOf(got))
 		}
+		known := questions(t, c) - before - 1
 		call(t, c, "SELECT set_mode('PAD_CHAR_TO_FULL_LENGTH')", "1")
-		if got := rig.scan(t, c, "live"); got[0][2] != "ab    |" {
-			t.Errorf("after a function set PAD_CHAR_TO_FULL_LENGTH: %v, want the CHAR column padded", got)
+		if got := connStrings(t, c, "SELECT @@session.sql_mode")[0][0]; got != mode {
+			t.Fatalf("a function changed its caller's sql_mode from %q to %q: the server does not restore it, and this case has to assert the answer under the new mode", mode, got)
 		}
-		call(t, c, "SELECT set_mode('"+mode+"')", "1")
+		before = questions(t, c)
+		if got := connStrings(t, c, visitsScan); sidesOf(got) != "copy" {
+			t.Fatalf("answered by %s", sidesOf(got))
+		}
+		if after := questions(t, c) - before - 1; after != known+1 {
+			t.Errorf("the expensive read after the function cost the source %d statement(s), %d with the session known: want one more, the read-back", after, known)
+		}
 		rig.scan(t, c, "copy")
 	})
 
@@ -245,15 +274,16 @@ func routedSessionFunction(t *testing.T, baseDSN string) {
 	})
 
 	// A connector that replaces the session's tracked list with its own
-	// (from the server's default, which has neither sql_mode nor the port's
-	// mark): the port puts its settings back when it next reads the session,
-	// keeping the client's, and a mode set inside a function is still seen.
+	// (from the server's default, which has neither lc_time_names nor the
+	// port's mark): the port puts its settings back when it next reads the
+	// session, keeping the client's, and a locale set inside a function is
+	// still seen.
 	t.Run("a client replaces the tracked list", func(t *testing.T) {
 		c := rig.conn(t, "")
 		must(t, c, "SET time_zone = '+00:00'")
 		rig.scan(t, c, "copy")
 		must(t, c, "SET autocommit = 1, session_track_system_variables = CONCAT(@@global.session_track_system_variables, ',auto_increment_increment')")
-		if list := connStrings(t, c, "SELECT @@session.session_track_system_variables")[0][0]; strings.Contains(list, "sql_mode") {
+		if list := connStrings(t, c, "SELECT @@session.session_track_system_variables")[0][0]; strings.Contains(list, "lc_time_names") || strings.Contains(list, "sql_mode") {
 			t.Fatalf("the client's list still has the port's settings (%s): this case tests nothing", list)
 		}
 		rig.scan(t, c, "copy")
@@ -261,9 +291,7 @@ func routedSessionFunction(t *testing.T, baseDSN string) {
 		if !strings.Contains(list, "auto_increment_increment") || !strings.Contains(list, "sql_mode") {
 			t.Errorf("after the port read the session, the tracked list is %s: want the client's variable and the port's", list)
 		}
-		call(t, c, "SELECT set_mode('PAD_CHAR_TO_FULL_LENGTH')", "1")
-		if got := rig.scan(t, c, "live"); got[0][2] != "ab    |" {
-			t.Errorf("after a function set PAD_CHAR_TO_FULL_LENGTH on a connection whose list was replaced: %v", got)
-		}
+		call(t, c, "SELECT set_locale('es_ES')", "1")
+		rig.scan(t, c, "live")
 	})
 }
