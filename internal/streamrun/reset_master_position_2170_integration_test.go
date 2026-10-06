@@ -48,6 +48,12 @@ func resetSourceBinlogs(t *testing.T, db *sql.DB) {
 // the jump carried the old cleanup floor into the new numbering's checkpoint,
 // so the next ordinary cleanup read old rows as "after" a binlog.000001 position.
 // Runs 6-7 pin the same floor where the jump itself persists it.
+//
+// It RESETS the binary logs of the shared test server, which deletes the files
+// any other running stream reads. CI runs the integration packages one at a
+// time (scripts/mysql-integration-shard.sh) and nothing in this package uses
+// t.Parallel; locally, run this package alone (-p 1) or expect unrelated
+// streaming failures in packages running beside it.
 func TestIntegrationPositionResetMasterKeepsCapturedRows(t *testing.T) {
 	indexDB, indexName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)

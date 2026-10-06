@@ -2454,8 +2454,11 @@ func oneRun(ctx context.Context, cfg Config) error {
 	// except after a position-mode advance into a numbering that started over
 	// (#2170), where it is replaced by a fresh floor. ONE variable feeds both
 	// the advance's persisted checkpoint and the running state, so the two can
-	// never disagree.
+	// never disagree. positionRenumbered records that same decision for the
+	// resume cleanup below, so the skip and the fresh floor come from ONE
+	// comparison and cannot drift apart.
 	var resumeFloor int64
+	positionRenumbered := false
 	if saved != nil {
 		resumeFloor = saved.dedupFloorID
 	}
@@ -2520,9 +2523,11 @@ func oneRun(ctx context.Context, cfg Config) error {
 					if !continuesNumbering(saved.binlogFile, saved.binlogPos, startFile, uint64(startPos)) {
 						fresh, err := freshDedupFloor(indexDB)
 						if err != nil {
-							return err
+							return fmt.Errorf("binlog numbering started over (checkpoint %s:%d, oldest source file %s): %w",
+								saved.binlogFile, saved.binlogPos, startFile, err)
 						}
 						resumeFloor = fresh
+						positionRenumbered = true
 					}
 
 				case "gtid":
@@ -2659,8 +2664,12 @@ func oneRun(ctx context.Context, cfg Config) error {
 	// from there, and comparing old rows against that position deleted real
 	// changes the source can never send again. Such a start deletes nothing;
 	// the capture loss the advance stamped is what reports the jump.
-	if saved != nil && saved.mode == mode && mode == "position" &&
-		!continuesNumbering(saved.binlogFile, saved.binlogPos, startFile, uint64(startPos)) {
+	if saved != nil && saved.mode == mode && mode == "position" && positionRenumbered {
+		// Still waits for a delete an earlier run left executing (#1708): it
+		// can hold locks this run's first inserts would queue behind.
+		if stopped, err := awaitEarlierCleanup(ctx, indexDB, cfg.Hooks); stopped || err != nil {
+			return err
+		}
 		slog.Warn("dedup-on-resume: skipped; the source's binlog numbering started over "+
 			"(RESET MASTER, a regenerated file or a log_bin rename), so no indexed row can be "+
 			"placed against the new start and every one is kept; the capture loss stamped "+

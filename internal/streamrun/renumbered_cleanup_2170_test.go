@@ -29,6 +29,7 @@ func TestContinuesNumbering(t *testing.T) {
 		{"no dot, other name", "binlog", 500, "other", 600, false},
 		{"dotted against undotted", "binlog.000007", 500, "binlog", 600, false},
 		{"empty start against a checkpoint", "binlog.000007", 500, "", 4, false},
+		{"no saved file", "", 0, "binlog.000001", 4, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := continuesNumbering(tc.savedFile, tc.savedPos, tc.file, tc.pos); got != tc.want {
