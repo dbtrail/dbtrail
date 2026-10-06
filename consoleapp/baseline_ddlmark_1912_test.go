@@ -42,7 +42,7 @@ func TestFullBackup_theConversionStampsTheMark(t *testing.T) {
 	t.Cleanup(func() { snapshotWriterIDFunc = prev })
 	snapshotWriterIDFunc = func(string) (string, error) { return "", nil }
 	s := &baselineSupervisor{}
-	cfg := s.dumpBaselineConfig(console.BaselineRequest{ServerID: "s1"}, "/dump", "/out", time.Now(), `{"id":7}`)
+	cfg := s.dumpBaselineConfig(console.BaselineRequest{ServerID: "s1"}, "/dump", "/out", time.Now(), `{"id":7}`, "")
 	if cfg.DDLMark != `{"id":7}` {
 		t.Fatalf("the conversion is told DDLMark %q", cfg.DDLMark)
 	}

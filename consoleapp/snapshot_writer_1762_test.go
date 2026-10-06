@@ -48,7 +48,7 @@ func TestFullSnapshotsAreSigned(t *testing.T) {
 		SourceDSN: "postgres://u:p@h:5432/db", Slot: "sl", Publication: "pub"}
 	s := &baselineSupervisor{}
 	at := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
-	my := s.dumpBaselineConfig(req, "/dump", "/out", at, "")
+	my := s.dumpBaselineConfig(req, "/dump", "/out", at, "", "")
 	if my.WriterID != "writer-of:idx-s1" {
 		t.Errorf("the mydumper conversion signs with %q", my.WriterID)
 	}
