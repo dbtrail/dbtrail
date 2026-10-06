@@ -57,6 +57,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LIMIT` read already stayed on the source; the row cap rule applies there
   to a table or an index read whole. Nothing changes in what a statement
   answers, only in who answers it.
+- **Read routing: arithmetic on a date column, bit operators and two-digit
+  years stay on MySQL** (#2133). Each of these was answered by MySQL and by
+  the copy with different values and no error; measured on MySQL 8.4.9 and
+  MariaDB 11.4 against the copy.
+  - A `DATE`, `DATETIME` or `TIMESTAMP` column next to `+` or `-`, or under
+    `AVG`: `created_on + 1` is the number 20260102 on MySQL and the date
+    `2026-01-02` on the copy, `MAX(created_on) - MIN(created_on)` is 102 and
+    33. The statement's text does not say the column is a date, so the copy
+    now reads each table's column types from the `CREATE TABLE` stored with
+    its snapshot and declines such a statement (`copy_columns_differ` in
+    the "Who answered" counter), through parentheses, calls and `CASE`, with
+    the name quoted or not, as text and as a prepared statement
+    (`created_on + ?`). Two more are declined because the date can stand
+    under another name: a statement with a subquery or a `WITH` that holds
+    any `+`, `-` or `AVG` and names a date column or has a star, and one
+    that names a date column and has a `+` or `-` in its `GROUP BY`,
+    `HAVING` or `ORDER BY`, where MySQL takes an alias for its expression.
+    What still reaches the copy: a `+` or `-` elsewhere (`SELECT amount +
+    tax ... WHERE created_on >= ...`), a date plus or minus `INTERVAL`, the
+    sign of a number (`amount > -1`), and arithmetic on a number taken out
+    of the date (`YEAR(created_on) * 100 + MONTH(created_on)`, `COUNT(*) -
+    COUNT(paid_at)`, `SUM(...) - SUM(...)`). Column names are matched in
+    any script, by letters and without regard to case, so a table with a
+    column `año` or an alias `número` is treated like any other.
+  - A statement that names a `TIME` or a `YEAR` column, or has a star over
+    a table with one, is declined: the copy
+    holds a `TIME` as text (`tm >= '9:00:00'` returned no row there, three
+    on MySQL) and a `YEAR` as a plain number (`yr = 26` is not 2026 there).
+  - `|`, `&`, `>>`, `BIT_COUNT`, `BIT_AND`, `BIT_OR` and `BIT_XOR` are kept
+    on MySQL from the text (`veto`): 64 unsigned bits on MySQL, signed on
+    the copy (`-1 | 0` is 18446744073709551615 and `-1`), and over no rows a
+    number on MySQL and `NULL` on the copy.
+  - A string with a two-digit year (`'26-01-15'`, `'26/1/5'`), written in
+    the statement or bound to a prepared one, is kept on MySQL (`veto`):
+    the year 2026 there, the year 26 on the copy.
+  - `CAST(... AS DATETIME)` and `CAST(... AS TIME)` are kept on MySQL
+    (`veto`): a fraction of a second is rounded by MySQL, cut by MariaDB and
+    kept by the copy.
+  - `DAYOFWEEK`, `WEEKDAY`, `MICROSECOND` and `EXTRACT(MICROSECOND ...)` are
+    kept on MySQL (`veto`): the copy numbers the days of the week another
+    way and counts the seconds into the microseconds.
+
+  What this costs: of 535 statements in the repository's comparison and
+  routing fixtures that no older rule kept on MySQL, one newly stays there
+  under the date rules, the `created_on + 1` this is about. Those fixtures
+  have no `TIME` or `YEAR` column, so that rule is not in the count: over a
+  table that has one, an ORM that names every column or sends `SELECT *`
+  keeps its reads on MySQL. Of 30 report-shaped statements written for this (year and month
+  buckets, sums and counts subtracted, negative thresholds, subqueries), 4
+  stay on MySQL: an alias in `ORDER BY total - 1`, `amount - tax` and `AVG`
+  beside a subquery, and `MAX(created_on) - MIN(created_on)`. Still different, and listed in
+  `docs/time-travel-sql.md`: a `DATE` plus `INTERVAL` is shown as a date and
+  time by the copy (the same day), and a `DATETIME` turned into text
+  (`CONCAT(dt, '')`) ends in `+00` there. A table whose snapshot has no
+  `CREATE TABLE` was already answered by MySQL for every statement.
 ### Fixed
 - **Snapshots: a row keeps its last change, not the change whose statement
   started last** (#2151). An update of a snapshot keeps, for each row, the
@@ -93,6 +148,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again there, and for a row changed on both sides the older numbering's
   change can be kept where the time order was right. Take a new full
   snapshot after such an event before a `reconstruct` across it.
+
 
 ## [0.99.0] - 2026-10-05
 ### Changed

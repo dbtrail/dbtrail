@@ -168,7 +168,7 @@ func TestVeto_avgOfATime(t *testing.T) {
 		"SELECT TIME '10:00:00' + 1":                           vetoDateArithmetic, // the copy refuses it: kept back at no cost
 		"SELECT CAST(ts AS TIME) - 1 FROM t":                   vetoDateArithmetic,
 		"SELECT TIME '10:00:00' + INTERVAL 1 HOUR":             "",
-		"SELECT MAX(TIME '10:00:00'), CAST(ts AS TIME) FROM t": "",
+		"SELECT MAX(TIME '10:00:00'), CAST(ts AS CHAR) FROM t": "",
 		"SELECT AVG(amount), runtime '10' FROM t":              "",
 		"SELECT AVG(TIME(ts)) FROM t":                          "", // the copy refuses TIME(...)
 	} {

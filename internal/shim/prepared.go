@@ -362,6 +362,9 @@ func copyUnsafeArgument(args []any) string {
 			mysql.MYSQL_TYPE_TIMESTAMP, mysql.MYSQL_TYPE_TIME:
 			continue
 		}
+		if readrouter.TwoDigitYear(string(tb.Bytes)) {
+			return fmt.Sprintf("argument %d is a string that starts with a two-digit year (year 2026 or 1970 on MySQL; year 26 or 70 on the copy)", i+1)
+		}
 		text := bytes.TrimSpace(tb.Bytes)
 		if decimalText.Match(text) && !plainInteger.Match(text) {
 			return fmt.Sprintf("argument %d is a string that spells a non-integer number (compared as a number on MySQL, cast to the column's type on the copy)", i+1)
@@ -380,7 +383,7 @@ func (h *Handler) runPreparedOnCopy(st *preparedStmt, args []any, db, reason str
 	if err != nil {
 		return nil, err
 	}
-	res, err := h.runFreeSQLRouted(db, text, reason, unchangedWithin)
+	res, err := h.runFreeSQLRouted(db, text, readrouter.ShapeOf(st.query), reason, unchangedWithin)
 	if err != nil {
 		return nil, err
 	}

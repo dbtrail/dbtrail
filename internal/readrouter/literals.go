@@ -20,6 +20,10 @@ const (
 	vetoLimitComma       = "LIMIT offset, count (the copy only reads LIMIT count OFFSET offset)"
 	vetoOrderByNull      = "ORDER BY NULL (the copy refuses to sort by a constant)"
 	vetoBinaryIntroducer = "_binary before a string literal (the copy has no such thing)"
+	vetoBitOperator      = "bit operator or function: |, &, >>, BIT_COUNT, BIT_AND, BIT_OR, BIT_XOR (64 unsigned bits on MySQL, signed on the copy; over no rows, a number on MySQL and NULL on the copy)"
+	vetoCastDatetime     = "CAST to DATETIME or TIME (a fraction of a second is rounded on MySQL, cut on MariaDB and kept on the copy)"
+	vetoTwoDigitYear     = "string that starts with a two-digit year (year 2026 or 1970 on MySQL; year 26 or 70 on the copy)"
+	vetoDayNumbering     = "DAYOFWEEK, WEEKDAY or MICROSECOND (the days of the week are numbered another way on the copy, and its microseconds hold the seconds too)"
 )
 
 // shapeText is the text the shape checks read: the statement with string
@@ -77,7 +81,45 @@ var shapeVetoes = []struct {
 	{vetoLimitComma, func(t *shapeText) bool { return limitComma.MatchString(t.all()) }},
 	{vetoOrderByNull, orderByNullKey},
 	{vetoBinaryIntroducer, func(t *shapeText) bool { return binaryIntroducer.MatchString(t.all()) }},
+	{vetoBitOperator, func(t *shapeText) bool { return bitOperator.MatchString(t.all()) }},
+	{vetoCastDatetime, func(t *shapeText) bool { return castDatetime.MatchString(t.all()) }},
+	{vetoDayNumbering, func(t *shapeText) bool { return dayNumbering.MatchString(t.all()) }},
 }
+
+// dayNumbering is a call of DAYOFWEEK, WEEKDAY or MICROSECOND, or
+// EXTRACT(MICROSECOND ...) (#2133). Measured on MySQL 8.4 and MariaDB 11.4
+// against the copy over the same dates: DAYOFWEEK of a Thursday is 5 on the
+// source (Sunday is 1) and 4 on the copy (Sunday is 0); WEEKDAY of it is 3
+// on the source (Monday is 0) and 4 on the copy; MICROSECOND of 10:20:30 is
+// 0 on the source and 30000000 on the copy, which counts the seconds in.
+var dayNumbering = regexp.MustCompile(`(?i)\b(?:dayofweek|weekday|microsecond)\s*\(|\bextract\s*\(\s*microsecond\b`)
+
+// bitOperator is |, & or >> anywhere, or a call of BIT_COUNT, BIT_AND, BIT_OR
+// or BIT_XOR (#2133). MySQL and MariaDB compute them over 64 unsigned bits and
+// the copy over signed numbers: -1 | 0 is 18446744073709551615 on the source
+// and -1 on the copy, -8 >> 1 is 9223372036854775804 and -4, BIT_COUNT(-1) is
+// 64 and 32, and WHERE n | 0 > 0 keeps other rows. Over no rows BIT_AND is
+// 18446744073709551615 and BIT_OR and BIT_XOR are 0 on the source, and all
+// three are NULL on the copy. Over operands that are not negative both sides
+// agree, and the text does not say which a column holds, so every one is
+// kept on the source: they are rare in what an application sends.
+//
+// << is not matched: where it would differ (a negative operand, a result
+// past 31 bits) the copy refuses the statement and the source answers.
+// || (the logical OR), ^ and ~ are vetoed before this, and && is refused by
+// the copy; the & here covers it too.
+var bitOperator = regexp.MustCompile(`(?i)[|&]|>>|\bbit_(?:count|and|or|xor)\s*\(`)
+
+// castDatetime is CAST(... AS DATETIME) and CAST(... AS TIME), with or
+// without a precision (#2133). A value with more decimals of a second than
+// the type keeps is rounded by MySQL, cut by MariaDB and kept whole by the
+// copy: CAST('2026-01-01 10:00:00.6' AS DATETIME) is 10:00:01 on MySQL 8.4,
+// 10:00:00 on MariaDB 11.4 and 10:00:00.6 on the copy, and a DATETIME(6)
+// column under the same cast likewise. What the value holds is not in the
+// text, so the cast itself is kept on the source. The closing parenthesis is
+// asked for so that an alias (`created_at AS time`, what a dashboard sends)
+// is not taken for one. CAST(... AS DATE) is the same day on both.
+var castDatetime = regexp.MustCompile(`(?i)\bas\s+(?:datetime|time)\s*(?:\(\s*\d*\s*\))?\s*\)`)
 
 // The three below are not differences: the copy REFUSES each of them, so
 // without the veto the statement is sent there, fails, and MySQL answers
@@ -261,6 +303,7 @@ type group struct {
 // A temporal is a place where the text itself says "this is a date".
 type temporal struct {
 	start, end int // end is set for a typed literal
+	left       int // where the shape starts for a sign before it: start, or the first qualifier of a column's name
 	paren      int // DATE( and CAST(: where the parenthesis opens; else -1
 	cast       bool
 	call       int // the group of that parenthesis
@@ -295,13 +338,30 @@ type temporal struct {
 // so SUM(IF(d >= DATE '...', amount, 0)) - 1 and YEAR(DATE '...') + 1 are
 // kept on MySQL too, for nothing. And a column, or an expression of one
 // (created_on + 1, max(d) - min(d)), is not seen: nothing in the text or in
-// the plan says what type it has.
+// the plan says what type it has. ColumnVeto is the same rule for a column,
+// asked by the side that knows the table's column types (#2133).
 func dateArithmetic(t *shapeText) bool {
 	shapes := temporalShapes(t)
 	if len(shapes) == 0 {
 		return false
 	}
+	return shapesInArithmetic(t, shapes)
+}
+
+// shapesInArithmetic reads the statement's groups and reports whether one of
+// the shapes, or a group that holds one, stands next to a + or a - that
+// INTERVAL does not follow, or under AVG. shapes are in the order written.
+func shapesInArithmetic(t *shapeText, shapes []temporal) bool {
 	readGroups(t, shapes)
+	return groupsInArithmetic(t, shapes, nil)
+}
+
+// groupsInArithmetic is shapesInArithmetic once the groups are read. A group
+// that is a call of a function in numeric is not looked at, and neither is
+// anything around it on that shape's account: what such a call returns is a
+// number whatever it is given, so a + or a - next to it is not arithmetic
+// on a date.
+func groupsInArithmetic(t *shapeText, shapes []temporal, numeric map[string]bool) bool {
 	seen := make([]bool, len(t.groups))
 	for _, sh := range shapes {
 		if !sh.word {
@@ -315,11 +375,14 @@ func dateArithmetic(t *shapeText) bool {
 			}
 			end = g.end
 		}
-		if signBefore(t, sh.start) || signAfter(t, end) {
+		if signBefore(t, sh.left) || signAfter(t, end) {
 			return true
 		}
 		for gi := sh.in; gi >= 0 && !seen[gi]; gi = t.group(gi).parent {
 			seen[gi] = true
+			if numeric != nil && numeric[groupFunc(t, gi)] {
+				break
+			}
 			if groupInArithmetic(t, gi) {
 				return true
 			}
@@ -336,13 +399,13 @@ func temporalShapes(t *shapeText) []temporal {
 	shapes := make([]temporal, 0, len(lits)+len(calls))
 	for len(lits) > 0 || len(calls) > 0 {
 		if len(calls) == 0 || len(lits) > 0 && lits[0][0] < calls[0][0] {
-			shapes = append(shapes, temporal{start: lits[0][0], end: lits[0][1], paren: -1, in: -1})
+			shapes = append(shapes, temporal{start: lits[0][0], left: lits[0][0], end: lits[0][1], paren: -1, in: -1})
 			lits = lits[1:]
 			continue
 		}
 		m := calls[0]
 		c := t.at(m[2])
-		shapes = append(shapes, temporal{start: m[0], paren: m[1] - 1, cast: c == 'c' || c == 'C', in: -1})
+		shapes = append(shapes, temporal{start: m[0], left: m[0], paren: m[1] - 1, cast: c == 'c' || c == 'C', in: -1})
 		calls = calls[1:]
 	}
 	return shapes
@@ -424,7 +487,7 @@ func groupInArithmetic(t *shapeText, gi int) bool {
 			w--
 		}
 		if w < l {
-			if strings.EqualFold(t.sub(w+1, l+1), "avg") {
+			if f := t.sub(w+1, l+1); strings.EqualFold(f, "avg") || strings.EqualFold(f, "median") {
 				return true
 			}
 			left = w + 1
@@ -432,6 +495,27 @@ func groupInArithmetic(t *shapeText, gi int) bool {
 		right = afterWindow(t, right)
 	}
 	return signBefore(t, left) || signAfter(t, right)
+}
+
+// groupFunc is the name of the function a pair of parentheses is the call
+// of, in lower case, or "" for a CASE, a bare pair, or a group left open.
+func groupFunc(t *shapeText, gi int) string {
+	g := *t.group(gi)
+	if g.isCase || g.end < 0 {
+		return ""
+	}
+	l := g.open - 1
+	for l >= 0 && sqlSpace(t.at(l)) {
+		l--
+	}
+	w := l
+	for w >= 0 && wordByte(t.at(w)) {
+		w--
+	}
+	if w == l {
+		return ""
+	}
+	return strings.ToLower(t.sub(w+1, l+1))
 }
 
 // afterWindow returns where the call that ends at pos ends once its window

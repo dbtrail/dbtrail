@@ -175,8 +175,10 @@ const RouteReasonPinned RouteReason = "connection_pinned"
 
 // RouteReasonCopyColumnsDiffer: the copy declined a star or a NATURAL JOIN
 // over a table whose columns there are not MySQL's (#2111), or a statement
-// that names a column the copy does not hold (#2123). A decision, not a
-// fault, which is why it is not counted under RouteReasonCopyRefused.
+// that names a column the copy does not hold (#2123), or one that uses a
+// date, time or year column where the copy's type for it answers another
+// way (#2133). A decision, not a fault, which is why it is not counted
+// under RouteReasonCopyRefused.
 const RouteReasonCopyColumnsDiffer RouteReason = "copy_columns_differ"
 
 // RouteReasonTablesUnchanged is the copy answering an expensive statement
@@ -267,7 +269,7 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 			if err != nil {
 				return nil, err
 			}
-			return h.runFreeSQLRouted(currentDB, text, reason, unchangedWithin)
+			return h.runFreeSQLRouted(currentDB, text, readrouter.ShapeOf(qstr), reason, unchangedWithin)
 		},
 	})
 }
@@ -386,10 +388,11 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	var differ *sqlsandbox.ColumnsDifferError
 	if errors.As(err, &differ) {
 		// The copy works; it declined this statement because its answer would
-		// not have MySQL's columns (#2111), or one of its names could mean
-		// something else there (#2123). Its own reason and its own
+		// not have MySQL's columns (#2111), one of its names could mean
+		// something else there (#2123), or a date, time or year column
+		// would be read another way (#2133). Its own reason and its own
 		// warning, so it does not read as a fault nor use up a fault's.
-		h.routeWarn("columns", "read routing: the copy's columns are not MySQL's for a statement (a star, a NATURAL JOIN, or the name of a column the copy does not hold), forwarded to mysql", err)
+		h.routeWarn("columns", "read routing: the copy's columns are not MySQL's for a statement (a star, a NATURAL JOIN, the name of a column the copy does not hold, or a date, time or year column it reads another way), forwarded to mysql", err)
 		return ops.forward(RouteReasonCopyColumnsDiffer, "copy's columns differ: "+differ.Reason)
 	}
 	if errors.Is(err, sqlsandbox.ErrBusy) {
@@ -642,7 +645,7 @@ func (h *Handler) notTimeTravelError(qstr string) error {
 
 // runFreeSQL serves one ordinary statement through the bound FreeSQL.
 func (h *Handler) runFreeSQL(schema, qstr string) (*mysql.Result, error) {
-	return h.runFreeSQLRouted(schema, qstr, "", 0)
+	return h.runFreeSQLRouted(schema, qstr, nil, "", 0)
 }
 
 // copyText is the statement the routing ladder sends the copy: the client's
@@ -664,7 +667,10 @@ func copyText(qstr string) (string, error) {
 // on the port without routing its own text. Nothing else is translated from
 // MySQL's dialect, and a statement the copy refuses is the caller's to
 // forward. unchangedWithin is sqlsandbox.Session.UnchangedWithin (#2085).
-func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string, unchangedWithin time.Duration) (*mysql.Result, error) {
+//
+// types is sqlsandbox.Session.Types: the routing layer's reading of the
+// client's own statement, nil for a port without routing.
+func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnTypes, routeReason string, unchangedWithin time.Duration) (*mysql.Result, error) {
 	ctx, cancel := h.queryContext()
 	defer cancel()
 	stmt, schema := rewriteForDuckDB(qstr, schema)
@@ -693,6 +699,7 @@ func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string, unchangedWi
 	// Asked of the connection, not of the reason text: a routing connection
 	// only ever gets here from the ladder.
 	sess.StrictStar = h.router != nil
+	sess.Types = types
 	sess.UnchangedWithin = unchangedWithin
 	res, err := h.freeSQL.Run(ctx, stmt, schema, sess)
 	var differ *sqlsandbox.ColumnsDifferError
