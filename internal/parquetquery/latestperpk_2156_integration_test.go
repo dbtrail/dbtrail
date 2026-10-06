@@ -102,8 +102,9 @@ func TestIntegrationLatestPerPKThreePlacesAgree2156(t *testing.T) {
 		if !slices.Equal(idsOf(rows), idsOf(want)) || order != wantOrder {
 			t.Fatalf("n=%d: merged %v (%+v), want %v (%+v)", n, idsOf(rows), order, idsOf(want), wantOrder)
 		}
-		if order.Sorted == 0 || order.Note() != "" {
-			t.Fatalf("n=%d: order %+v, note %q: want the shapes taken in binary log order, no note", n, order, order.Note())
+		// With n = 2 every shape's two changes are both kept either way.
+		if (n == 1 && order.Sorted != 4) || order.Note() != "" {
+			t.Fatalf("n=%d: order %+v, note %q: want the four shapes taken in binary log order, no note", n, order, order.Note())
 		}
 	}
 }
