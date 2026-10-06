@@ -148,8 +148,12 @@ func ReadStreamEventMark(ctx context.Context, db *sql.DB) string {
 	if !captured {
 		return ""
 	}
-	if query.IndexBackfilled(ctx, db) {
-		slog.Warn("`bintrail index` also wrote into this index, so its ids do not follow the binary log; the snapshot is published without an event mark, and a binlog numbering that started over is not detected from it")
+	if backfilled, err := query.IndexBackfilled(ctx, db); err != nil || backfilled {
+		if err != nil {
+			slog.Warn("could not tell whether `bintrail index` wrote into the index; the snapshot is published without an event mark", "error", err)
+		} else {
+			slog.Warn("`bintrail index` also wrote into this index, so its ids do not follow the binary log; the snapshot is published without an event mark, and a binlog numbering that started over is not detected from it")
+		}
 		return ""
 	}
 	m, err := ReadEventMark(ctx, db)
@@ -338,15 +342,18 @@ func checkNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 	}
 	// Rows `bintrail index` backfilled get ids above the mark with positions
 	// below it, which reads exactly like a numbering that started over.
-	if query.IndexBackfilled(ctx, db) {
+	backfilled, err := query.IndexBackfilled(ctx, db)
+	if err != nil {
+		return err
+	}
+	if backfilled {
 		w.notice(slog.LevelWarn, "`bintrail index` also wrote into this index, so its ids do not follow the binary log; a binlog numbering that started over is not checked",
 			"mark", m.Encode())
 		return nil
 	}
 	var file string
 	var end uint64
-	var markAt time.Time
-	err := db.QueryRowContext(ctx, `SELECT binlog_file, end_pos, event_timestamp FROM binlog_events WHERE event_id = ?`, m.ID).Scan(&file, &end, &markAt)
+	err = db.QueryRowContext(ctx, `SELECT binlog_file, end_pos FROM binlog_events WHERE event_id = ?`, m.ID).Scan(&file, &end)
 	switch {
 	case err == nil:
 		if file != m.File || end != m.End {
@@ -370,20 +377,19 @@ func checkNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 	default:
 		return fmt.Errorf("read the event the snapshot's event mark names: %w", err)
 	}
-	queries, args := []string{
+	if w.bounded() {
+		return w.check(ctx, db, m, anchor)
+	}
+	for _, q := range []string{
 		`SELECT event_id, binlog_file, end_pos FROM binlog_events
 			WHERE event_id > ? AND binlog_file IS NOT NULL AND end_pos IS NOT NULL
 			ORDER BY event_id ASC LIMIT 1`,
 		`SELECT event_id, binlog_file, end_pos FROM binlog_events
 			WHERE event_id > ? AND binlog_file IS NOT NULL AND end_pos IS NOT NULL
 			ORDER BY event_id DESC LIMIT 1`,
-	}, []any{m.ID}
-	if w.bounded() {
-		queries, args = w.probes(m, markAt)
-	}
-	for _, q := range queries {
+	} {
 		var e indexedEvent
-		err := db.QueryRowContext(ctx, q, args...).Scan(&e.id, &e.file, &e.end)
+		err := db.QueryRowContext(ctx, q, m.ID).Scan(&e.id, &e.file, &e.end)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -391,11 +397,15 @@ func checkNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 			return fmt.Errorf("read the events indexed after the snapshot's event mark: %w", err)
 		}
 		if startedOverAfter(e, m) {
-			return fmt.Errorf("%w: the source's binary log started again from another numbering (a RESET MASTER, a failover to another server, or a new log_bin name): a change ending at %s reached the index after the change ending at %s:%d and sorts before it. %s",
-				ErrBinlogRenumbered, e, m.File, m.End, renumberedRemedy)
+			return startedOverErr(e, m)
 		}
 	}
 	return nil
+}
+
+func startedOverErr(e indexedEvent, m *EventMark) error {
+	return fmt.Errorf("%w: the source's binary log started again from another numbering (a RESET MASTER, a failover to another server, or a new log_bin name): a change ending at %s reached the index after the change ending at %s:%d and sorts before it. %s",
+		ErrBinlogRenumbered, e, m.File, m.End, renumberedRemedy)
 }
 
 // CheckSourceReplaced returns an error wrapping ErrBinlogRenumbered when
@@ -434,7 +444,7 @@ func CheckNumberingFrom(ctx context.Context, db *sql.DB, anchor *query.BinlogPos
 		}
 	}
 	if w.bounded() {
-		return checkSameServerUntil(ctx, db, m, w.Until)
+		return checkSameServerUntil(ctx, db, m, w.Since, w.Until)
 	}
 	return CheckSameServer(ctx, db, m)
 }

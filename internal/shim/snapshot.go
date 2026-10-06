@@ -59,9 +59,9 @@ func snapshotAnchor(ctx context.Context, baselinePath string, logger *slog.Logge
 // front-end) and names the query type; renumberedRefusal turns it into the
 // MySQL refusal. A timeout or cancel during the check is classified the way
 // a fetch's is (a *ResolveError).
-func (h *Handler) checkSnapshotNumbering(ctx context.Context, q TimeTravelQuery, anchor *query.BinlogPos, eventMark string) error {
+func (h *Handler) checkSnapshotNumbering(ctx context.Context, q TimeTravelQuery, snapshotTime time.Time, anchor *query.BinlogPos, eventMark string) error {
 	err := reconstruct.CheckNumberingFrom(ctx, h.indexDB, anchor, eventMark, reconstruct.ReadWindow{
-		Schema: q.Schema, Table: q.Table, Until: q.AsOf, Notice: snapshotNotices.To(h.logger),
+		Schema: q.Schema, Table: q.Table, Since: snapshotTime, Until: q.AsOf, Notice: snapshotNotices.To(h.logger),
 	})
 	if err == nil {
 		return nil
@@ -307,7 +307,7 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 		reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos, Mark: ddlMark}); err != nil {
 		return nil, err
 	}
-	if err := h.checkSnapshotNumbering(ctx, q, sincePos, eventMark); err != nil {
+	if err := h.checkSnapshotNumbering(ctx, q, snapshotTime, sincePos, eventMark); err != nil {
 		return nil, mysqlRenderErr(err)
 	}
 

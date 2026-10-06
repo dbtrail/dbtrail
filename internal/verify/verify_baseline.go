@@ -201,7 +201,7 @@ var renumberNotices reconstruct.NoticeOnce
 // snapshot without a mark: nil. A refusal carries renumberedPairRemedy.
 func pairNumbering(ctx context.Context, cfg BaselineConfig, p BaselinePair) error {
 	if err := reconstruct.CheckNumberingFrom(ctx, cfg.IndexDB, &p.PrevAnchor, p.PrevEventMark, reconstruct.ReadWindow{
-		Schema: p.Schema, Table: p.Table, Until: p.NewSnapshot, Notice: renumberNotices.To(nil),
+		Schema: p.Schema, Table: p.Table, Since: p.PrevSnapshot, Until: p.NewSnapshot, Notice: renumberNotices.To(nil),
 	}); err != nil {
 		if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
 			return fmt.Errorf("%w %s", err, renumberedPairRemedy)

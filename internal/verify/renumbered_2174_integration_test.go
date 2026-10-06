@@ -42,6 +42,11 @@ type renumberCase struct {
 	mark string
 	// startOver puts the change after the snapshot in binlog.000001.
 	startOver bool
+	// startedBetween indexes a new-numbering change (id 22) after a later
+	// same-numbering one (id 21), with a statement time between the table's
+	// changes; startedEarly gives it a statement time before the mark's,
+	// within the hour the read reaches back.
+	startedBetween, startedEarly bool
 	// startOverLater indexes a change in binlog.000001 after the window's
 	// end (the newer snapshot, or now).
 	startOverLater bool
@@ -70,6 +75,8 @@ func renumberCases(withoutCheck Status) []renumberCase {
 		{name: "mark, same numbering", mark: sameServer, want: StatusMatch},
 		{name: "mark, numbering started over", mark: sameServer, startOver: true, want: StatusInconclusive},
 		{name: "mark, numbering started over after the window", mark: sameServer, startOverLater: true, want: StatusMatch},
+		{name: "a change committed after the restart, started between two others", mark: sameServer, startedBetween: true, want: StatusInconclusive},
+		{name: "a change committed after the restart, started before the mark", mark: sameServer, startedEarly: true, want: StatusInconclusive},
 		{name: "mark, backfilled index", mark: sameServer, startOver: true, backfilled: true, want: withoutCheck},
 		{name: "mark names the server, capture reads it", mark: withServer, captureReads: renumberedOldUUID, want: StatusMatch},
 		{name: "mark names the server, capture reads another, no record of when", mark: withServer, captureReads: renumberedNewUUID, want: StatusInconclusive},
@@ -113,6 +120,13 @@ func renumberIndex(t *testing.T, db *sql.DB, dbName string, tc renumberCase, hou
 	}
 	insert(10, "binlog.000007", 100, markAt, "2", "x", "b")
 	insert(20, changeFile(tc), 300, changeAt, "1", "a", "zzz")
+	if tc.startedBetween {
+		insert(21, "binlog.000007", 500, changeAt.Add(10*time.Minute), "2", "b", "b")
+		insert(22, "binlog.000001", 100, changeAt.Add(5*time.Minute), "1", "zzz", "zzz")
+	}
+	if tc.startedEarly {
+		insert(22, "binlog.000001", 100, markAt.Add(-35*time.Minute), "1", "zzz", "zzz")
+	}
 	if tc.startOverLater {
 		insert(30, "binlog.000001", 100, laterAt, "2", "b", "later")
 	}

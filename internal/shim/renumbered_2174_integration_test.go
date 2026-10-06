@@ -56,6 +56,12 @@ func TestSnapshot_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 		// startOver indexes a change in mysql-bin.000001 after the mark,
 		// before AS OF; startOverLater indexes it after AS OF.
 		startOver, startOverLater bool
+		// startedBetween indexes the new-numbering change after a later
+		// same-numbering one, with a statement time between two of the
+		// table's changes (it waited on a lock across the restart);
+		// startedEarly gives it a statement time before the mark's, within
+		// the hour the read reaches back.
+		startedBetween, startedEarly bool
 		// backfilled leaves a row in index_state, as `bintrail index` does.
 		backfilled bool
 		// otherTable indexes a change of another table in mysql-bin.000001
@@ -67,6 +73,9 @@ func TestSnapshot_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 		// bintrail_server_changes row, same address) or "record" (a new
 		// bintrail_servers record); "" records nothing. switchAfter puts it
 		// after AS OF, else before.
+		// "failback" also records a failover and a failback before the
+		// snapshot; "oldrecord" makes capture return to a server record older
+		// than the snapshot, with an unrelated record created after AS OF.
 		switchVia   string
 		switchAfter bool
 		refuse      bool
@@ -81,6 +90,10 @@ func TestSnapshot_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 		{name: "same address, new server before AS OF", mark: withServer, captureReads: renumberedNewUUID, switchVia: "change", refuse: true},
 		{name: "same address, new server after AS OF", mark: withServer, captureReads: renumberedNewUUID, switchVia: "change", switchAfter: true},
 		{name: "new address before AS OF", mark: withServer, captureReads: renumberedNewUUID, switchVia: "record", refuse: true},
+		{name: "a change committed after the restart, started between two others", mark: sameServer, startedBetween: true, refuse: true},
+		{name: "a change committed after the restart, started before the mark", mark: sameServer, startedEarly: true, refuse: true},
+		{name: "moves before the snapshot do not count", mark: withServer, captureReads: renumberedNewUUID, switchVia: "failback", switchAfter: true},
+		{name: "back to an old server record, an unrelated one after AS OF", mark: withServer, captureReads: renumberedNewUUID, switchVia: "oldrecord", refuse: true},
 		{name: "new address after AS OF", mark: withServer, captureReads: renumberedNewUUID, switchVia: "record", switchAfter: true},
 		{name: "numbering started over in another table only", mark: sameServer, otherTable: true},
 	} {
@@ -130,6 +143,13 @@ func TestSnapshot_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 			if tc.startOver {
 				insertUsersEventAt(t, db, 12, "mysql-bin.000001", 100, snapTime.Add(2*time.Minute), "1", "bob", "carol")
 			}
+			if tc.startedBetween {
+				insertUsersEventAt(t, db, 12, "mysql-bin.000009", 600, snapTime.Add(3*time.Minute), "2", "dave", "dave")
+				insertUsersEventAt(t, db, 13, "mysql-bin.000001", 100, snapTime.Add(2*time.Minute), "1", "bob", "carol")
+			}
+			if tc.startedEarly {
+				insertUsersEventAt(t, db, 12, "mysql-bin.000001", 100, snapTime.Add(-30*time.Minute), "1", "bob", "carol")
+			}
 			if tc.startOverLater {
 				// The window up to AS OF is in one numbering: readable.
 				insertUsersEventAt(t, db, 12, "mysql-bin.000001", 100, asOf.Add(2*time.Minute), "1", "bob", "carol")
@@ -153,6 +173,12 @@ func TestSnapshot_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 					switchAt = asOf.Add(2 * time.Minute)
 				}
 				created := time.Now()
+				if tc.switchVia == "oldrecord" {
+					created = snapTime.Add(-3 * time.Hour)
+					testutil.MustExec(t, db, `INSERT INTO bintrail_servers (bintrail_id, server_uuid, host, port, username, created_at)
+						VALUES ('b0', ?, 'db-old', 3306, 'u', FROM_UNIXTIME(?)), ('b2', '5a33bc69-71ca-11e1-9e33-c80aa9429564', 'db-other', 3306, 'u', FROM_UNIXTIME(?))`,
+						renumberedOldUUID, snapTime.Add(-2*time.Hour).Unix(), asOf.Add(2*time.Minute).Unix())
+				}
 				if tc.switchVia == "record" {
 					created = switchAt
 					testutil.MustExec(t, db, `INSERT INTO bintrail_servers (bintrail_id, server_uuid, host, port, username, created_at)
@@ -160,6 +186,13 @@ func TestSnapshot_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 				}
 				testutil.MustExec(t, db, `INSERT INTO bintrail_servers (bintrail_id, server_uuid, host, port, username, created_at)
 					VALUES ('b1', ?, 'db', 3306, 'u', FROM_UNIXTIME(?))`, tc.captureReads, created.Unix())
+				if tc.switchVia == "failback" {
+					testutil.MustExec(t, db, serverid.DDLBintrailServerChanges)
+					testutil.MustExec(t, db, `INSERT INTO bintrail_server_changes (bintrail_id, field_changed, old_value, new_value, detected_at)
+						VALUES ('b1', 'server_uuid', ?, 'x', FROM_UNIXTIME(?)), ('b1', 'server_uuid', 'x', ?, FROM_UNIXTIME(?)), ('b1', 'server_uuid', ?, ?, FROM_UNIXTIME(?))`,
+						renumberedOldUUID, snapTime.Add(-2*time.Hour).Unix(), renumberedOldUUID, snapTime.Add(-90*time.Minute).Unix(),
+						renumberedOldUUID, tc.captureReads, switchAt.Unix())
+				}
 				if tc.switchVia == "change" {
 					testutil.MustExec(t, db, serverid.DDLBintrailServerChanges)
 					testutil.MustExec(t, db, `INSERT INTO bintrail_server_changes (bintrail_id, field_changed, old_value, new_value, detected_at)
