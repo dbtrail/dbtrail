@@ -299,9 +299,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SELECT`, a lock wait timeout, a dropped connection) counted as "`bintrail
   index` wrote into this index", so the check was skipped with a warning
   naming the wrong cause. It is now an error: the snapshot update fails with
-  it, `verify` reports it, and a `_snapshot` statement returns it. A missing
-  `index_state` table still means nothing wrote it. Read routing keeps
-  sending such a read to MySQL.
+  it, `verify` reports it, and a `_snapshot` statement returns it. Read
+  routing keeps sending such a read to MySQL.
 - **Turning the MySQL port off answers only once the port is closed (#2149).**
   Turning it off from the web interface could answer "off" a moment before
   the listening socket was released, and in that moment a new connection to

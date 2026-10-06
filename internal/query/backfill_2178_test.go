@@ -25,9 +25,9 @@ func TestIndexBackfilled_anErrorIsNotBackfilled_2178(t *testing.T) {
 		{"no row", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery("index_state").WillReturnRows(sqlmock.NewRows([]string{"1"}))
 		}, false, false},
-		{"no table: nothing ever wrote it", func(m sqlmock.Sqlmock) {
+		{"no table: init creates it, so this says nothing", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery("index_state").WillReturnError(&mysql.MySQLError{Number: 1146, Message: "Table 'x.index_state' doesn't exist"})
-		}, false, false},
+		}, false, true},
 		{"SELECT denied", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery("index_state").WillReturnError(&mysql.MySQLError{Number: 1142, Message: "SELECT command denied"})
 		}, false, true},

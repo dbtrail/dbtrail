@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-
-	"github.com/go-sql-driver/mysql"
 )
 
 // IndexBackfilled reports whether `bintrail index` ever wrote into this
@@ -19,8 +17,9 @@ import (
 // A read that fails is an error (#2178), never "backfilled": a denied SELECT,
 // a lock wait timeout or a dropped connection would otherwise switch the
 // renumbering check off under the wrong explanation. A missing index_state
-// (an index nothing ever ran `bintrail index` against) is not backfilled.
-// Callers decide what an error means for them.
+// is an error too: `bintrail init` creates it, so a table that cannot be read
+// does not say no file was ever indexed (read routing's #2085 test pins
+// that). Callers decide what an error means for them.
 func IndexBackfilled(ctx context.Context, db *sql.DB) (bool, error) {
 	var one int
 	err := db.QueryRowContext(ctx, `SELECT 1 FROM index_state LIMIT 1`).Scan(&one)
@@ -28,10 +27,6 @@ func IndexBackfilled(ctx context.Context, db *sql.DB) (bool, error) {
 	case err == nil:
 		return true, nil
 	case errors.Is(err, sql.ErrNoRows):
-		return false, nil
-	}
-	var me *mysql.MySQLError
-	if errors.As(err, &me) && me.Number == 1146 {
 		return false, nil
 	}
 	return false, fmt.Errorf("read whether `bintrail index` wrote into this index: %w", err)
