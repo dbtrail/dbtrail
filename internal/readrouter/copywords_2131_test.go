@@ -253,3 +253,29 @@ func TestCopyWords_areLinear(t *testing.T) {
 		}
 	}
 }
+
+// The user and the role the statement runs as, written without parentheses
+// (or, for the role, with them): MySQL's and MariaDB's on the source
+// (root@localhost; NONE or NULL for the role), DuckDB's own on the copy
+// (duckdb). Both answer. Measured on MySQL 8.4.9, MariaDB 11.4 and the copy.
+// With parentheses current_user() was kept back already.
+func TestVeto_currentUserWithoutParentheses(t *testing.T) {
+	for _, stmt := range []string{
+		"SELECT current_user FROM t",
+		"SELECT id, CURRENT_USER FROM t",
+		"SELECT current_role FROM t",
+		"SELECT current_role() FROM t",
+		"SELECT id FROM t WHERE owner = current_user",
+	} {
+		if got := Veto(stmt); got != vetoCurrentUser {
+			t.Errorf("Veto(%q) = %q, want %q", stmt, got, vetoCurrentUser)
+		}
+	}
+	for _, stmt := range []string{
+		"SELECT `current_user`, t.current_role, current_users, my_current_user FROM t",
+	} {
+		if got := Veto(stmt); got != "" {
+			t.Errorf("Veto(%q) = %q, want none", stmt, got)
+		}
+	}
+}

@@ -981,6 +981,13 @@ What this is and is not:
     Thursday is 5 on MySQL and 4 on the copy, `WEEKDAY` of it 3 and 4), and
     its microseconds hold the seconds too (`MICROSECOND` of `10:20:30` is 0
     on MySQL and 30000000 on the copy);
+  - `CURRENT_USER` written without parentheses, and `CURRENT_ROLE` with or
+    without them: the user and the role on MySQL and MariaDB
+    (`root@localhost`; `NONE` on MySQL and `NULL` on MariaDB for the role),
+    the copy's own (`duckdb`) there. With parentheses `CURRENT_USER()`,
+    `USER()` and the others were kept on MySQL already, and so were `NOW()`
+    and every other clock function, written either way, so the copy's
+    clock and time zone never answer for the source's;
   - the name of a type on the copy right before a string, with a space, a
     comment or nothing between them: `text 'Label'`, `json'1'`, `datetime
     '2026-01-01'`, `uuid '...'`, `bool '1'`. MySQL and MariaDB read the

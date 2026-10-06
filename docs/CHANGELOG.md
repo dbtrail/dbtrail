@@ -135,6 +135,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     too, and `semi` does on other data. `SELECT v isnull FROM t` is `v`
     under the alias `isnull` on MySQL and the test `v IS NULL` on the copy.
     Both answered. They stay on MySQL now (`veto`).
+  - **Wrong answer, found while measuring, fixed.** `SELECT current_user`
+    without parentheses is the source's user on MySQL and MariaDB
+    (`root@localhost`) and `duckdb` on the copy; `current_role()` is `NONE`
+    on MySQL, `NULL` on MariaDB and `duckdb` on the copy. Both answered.
+    They stay on MySQL now (`veto`). The rest of that family was kept there
+    already: `USER()`, `CURRENT_USER()`, `DATABASE()`, `VERSION()`,
+    `@@version`, `CONNECTION_ID()`, `LAST_INSERT_ID()`, `FOUND_ROWS()`,
+    `ROW_COUNT()`, `RAND()`, `UUID()`, and every clock function (`NOW()`,
+    `CURRENT_TIMESTAMP`, `SYSDATE()`, ...) with or without parentheses.
   - **Wasted attempt, removed.** A column called `at` is an ordinary name
     on MySQL and MariaDB and a keyword on the copy, so `WHERE at >= ...`
     was tried on the copy, refused there with a syntax error, and answered

@@ -171,6 +171,8 @@ func copyWords(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		isNull     = "SELECT status isnull FROM kw ORDER BY n"
 		reserved   = "SELECT id FROM kw WHERE at >= 2 ORDER BY n"
 		anyColumn  = "SELECT status 'Label' FROM kw ORDER BY n"
+		curUser    = "SELECT current_user FROM kw ORDER BY n"
+		curRole    = "SELECT current_role() FROM kw ORDER BY n"
 	)
 
 	copyAddr := serve(flashbackConfig{})
@@ -186,6 +188,8 @@ func copyWords(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{isNull, diff, "", "the column status under the alias isnull on the source (open, done, open); the test status IS NULL on the copy"},
 		{reserved, refused, "", "at is a column on the source and a syntax error on the copy"},
 		{anyColumn, refused, "", "the column status under an alias on the source; a constant of a type the copy does not have"},
+		{curUser, diff, "", "the source's user (root@localhost) on the source, duckdb on the copy"},
+		{curRole, diff, "", "NONE on MySQL, NULL on MariaDB, duckdb on the copy"},
 	}
 	by := compareInHalves(t, sourceDSN, copies, policy, fixtures)
 	checkValuesFixtures(t, sourceDSN, copies[0], fixtures, by)
@@ -195,7 +199,7 @@ func copyWords(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	for stmt, veto := range map[string]string{
 		typeColumn: "name of a type on the copy", typeAlias: "name of a type on the copy",
 		fullJoin: "word the copy keeps for itself", isNull: "word the copy keeps for itself", reserved: "word the copy keeps for itself",
-		anyColumn: "",
+		anyColumn: "", curUser: "CURRENT_USER or CURRENT_ROLE", curRole: "CURRENT_USER or CURRENT_ROLE",
 	} {
 		r := by[stmt]
 		if veto == "" && r.RouteRule == "veto" {
