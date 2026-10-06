@@ -41,3 +41,14 @@ func TestSnapshotOrderNote_showWarningsWithoutFreeSQL(t *testing.T) {
 		t.Fatalf("SHOW WARNINGS after the next statement = (%+v, %v), want the empty OK", r, err)
 	}
 }
+
+// After a statement read routing forwarded to MySQL, SHOW WARNINGS is
+// forwarded too. A `_snapshot` note set since must be answered here instead.
+func TestSnapshotOrderNote_notForwardedAfterARoutedStatement(t *testing.T) {
+	h := NewHandler(nil, nil)
+	h.routeLastForwarded = true
+	h.setWarningsCoded(mysql.ER_UNKNOWN_ERROR, []string{"order of changes unproven: x"})
+	if h.routeLastForwarded {
+		t.Fatal("a note of the port's own left SHOW WARNINGS routed to MySQL")
+	}
+}

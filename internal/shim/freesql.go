@@ -790,6 +790,12 @@ func (h *Handler) setWarningsCoded(code uint16, msgs []string) {
 	h.mu.Lock()
 	h.lastWarnings = msgs
 	h.lastWarningCode = code
+	if len(msgs) > 0 {
+		// Warnings of this port's own: SHOW WARNINGS must answer them, not
+		// forward to MySQL for an earlier routed statement's (#2156: a
+		// `_snapshot` note after a forwarded read).
+		h.routeLastForwarded = false
+	}
 	// Called when a statement starts and when the copy answered one: either
 	// way the refusal of an earlier statement is no longer the last word.
 	h.routeRefusal = ""

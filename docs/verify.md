@@ -300,7 +300,8 @@ Results are **per table**, one of:
   binary log in [query-and-recovery.md](query-and-recovery.md)), those rows
   are taken by time and the mismatch's detail ends with `order of changes
   unproven: ...`: the mismatch can then be a false alarm on a row that two
-  sessions changed at once. A PostgreSQL source keeps its order: its recorded
+  sessions changed at once. `--explain` prints the same note above its rows
+  (`order_note` in JSON). A PostgreSQL source keeps its order: its recorded
   time is the commit time.
 - **inconclusive** — verify could not prove the table either way, and this is
   **never reported as a failure**. Causes include: no predecessor baseline yet,

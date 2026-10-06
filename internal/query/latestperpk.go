@@ -129,6 +129,13 @@ func LatestPerPKInBinlog(rows []ResultRow, n int, idsFollowBinlog func([]ResultR
 			// Its time is its commit time: time order is commit order.
 			continue
 		case OrderAgrees:
+			if latestByID.EventID == latestByTime.EventID {
+				// n > 1: the two latest sets differ below their top.
+				warning = "the index received this row's changes in a different order than their binary log positions and statement times, " +
+					"so the source's binary log numbering may have restarted between them (a failover, RESET MASTER), or binary log files were indexed out of order. " +
+					statementTimeTail
+				break
+			}
 			// Positions agree with the times, the index's ids do not. On an
 			// index whose ids follow the binary log that is a numbering that
 			// restarted between the two (a failover, with the new source's

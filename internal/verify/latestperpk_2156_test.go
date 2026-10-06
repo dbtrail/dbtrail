@@ -55,3 +55,16 @@ func TestWithOrderNote(t *testing.T) {
 		})
 	}
 }
+
+// The drill-down carries the order note, in text and in JSON.
+func TestMismatchExplanation_orderNote(t *testing.T) {
+	ex := &MismatchExplanation{Schema: "s", Table: "t", OrderNote: "order of changes unproven: x"}
+	var b strings.Builder
+	ex.Write(&b)
+	if !strings.Contains(b.String(), "order of changes unproven: x") {
+		t.Fatalf("text drill-down:\n%s", b.String())
+	}
+	if got := ex.ReportEntry().OrderNote; got != ex.OrderNote {
+		t.Fatalf("report entry note %q", got)
+	}
+}
