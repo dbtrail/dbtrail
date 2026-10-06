@@ -2,10 +2,12 @@ package reconstruct
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -88,9 +90,43 @@ func TestCapturedBackBelow_2160(t *testing.T) {
 		}
 	}
 	err := capturedBackBelow(gap, anchor, below)
-	for _, want := range []string{"binlog.000001:500", "binlog.000007:200", "2026-10-05T10:00:00Z", "a new full snapshot is needed"} {
+	for _, want := range []string{"binlog.000001:500", "binlog.000007:200", "2026-10-05T10:00:00Z", "new full snapshot is needed"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal does not say %q: %v", want, err)
 		}
+	}
+}
+
+// The refusal reaches the run's summary as a refusal of its own cause, with
+// the remedy, never as a capture gap (whose remedy is a flag) nor as a
+// schema change.
+func TestRefreshOutcomes_aNumberingThatStartedOver_2160(t *testing.T) {
+	gap := &CaptureGap{At: time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)}
+	err := fmt.Errorf("shop.orders: %w", capturedBackBelow(gap, &query.BinlogPos{File: "binlog.000007", Pos: 200}, &query.BinlogPos{File: "binlog.000001", Pos: 500}))
+	out := RefreshOutcomes([]string{"shop.orders"}, nil, []TableFailure{{Schema: "shop", Table: "orders", Err: err}})
+	if len(out) != 1 || out[0].Verdict != RefreshVerdictRefused || !out[0].Refused() {
+		t.Fatalf("outcome = %+v, want refused", out)
+	}
+	t.Logf("what the run summary says: %s: %s", out[0].Verdict, out[0].Detail)
+	for _, want := range []string{"shop.orders", "started again from another numbering", "new full snapshot is needed"} {
+		if !strings.Contains(out[0].Detail, want) {
+			t.Errorf("the summary does not say %q: %s", want, out[0].Detail)
+		}
+	}
+	if errors.Is(err, ErrCaptureGap) || errors.Is(err, ErrSchemaChanged) {
+		t.Errorf("the refusal reads as another cause: %v", err)
+	}
+}
+
+// The mark is read from the footer that holds the anchor: a delta chain's
+// last pair, not its base.
+func TestFetchFloor_theEventMarkGoesWithThePosition_2160(t *testing.T) {
+	base := baseline.DumpMetadata{BinlogFile: "binlog.000007", BinlogPos: 200, EventMark: "base-mark"}
+	pair := &tableDelta{Meta: baseline.DumpMetadata{BinlogFile: "binlog.000009", BinlogPos: 900, EventMark: "pair-mark"}}
+	if _, a := fetchFloor(time.Now(), base, pair); a.BinlogFile != "binlog.000009" || a.EventMark != "pair-mark" {
+		t.Fatalf("anchor %s:%d with mark %q, want the pair's position and mark", a.BinlogFile, a.BinlogPos, a.EventMark)
+	}
+	if _, a := fetchFloor(time.Now(), base, nil); a.EventMark != "base-mark" {
+		t.Fatalf("no chain: mark %q, want the base's", a.EventMark)
 	}
 }

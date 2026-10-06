@@ -46,12 +46,12 @@ import (
 // found by binlog position. Remedy: a new full snapshot. Not bypassed by
 // --allow-gaps: nothing was lost that a flag could accept, the window is
 // unreadable.
-var ErrBinlogRenumbered = errors.New("the source's binlog numbering started over since the snapshot")
+var ErrBinlogRenumbered = errors.New("the changes since the snapshot cannot be found by binlog position")
 
-// renumberedRemedy ends every ErrBinlogRenumbered message. It names the
-// remedy in words a scheduled refresh and the command line share: the daemon
-// takes the full snapshot by itself after a refused update.
-const renumberedRemedy = "a new full snapshot is needed; the changes since cannot be found by binlog position"
+// renumberedRemedy ends every ErrBinlogRenumbered message, in words a
+// scheduled refresh and the command line share: the daemon takes the full
+// snapshot by itself after a refused update.
+const renumberedRemedy = "A new full snapshot is needed."
 
 // EventMark names one binlog_events row: its id, and where it ends, so the
 // check can tell a row that is gone from a row whose id now names another
@@ -234,7 +234,7 @@ func CheckNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark) erro
 			return fmt.Errorf("read the events indexed after the snapshot's event mark: %w", err)
 		}
 		if startedOverAfter(e, m) {
-			return fmt.Errorf("%w: a change at %s was captured after one at %s:%d, which it should follow in the binary log, so the source's binary log starts again from another numbering (RESET MASTER, a failover, or a new log_bin name); %s",
+			return fmt.Errorf("%w: the source's binary log started again from another numbering (a RESET MASTER, a failover to another server, or a new log_bin name): a change at %s reached the index after the change at %s:%d and sorts before it. %s",
 				ErrBinlogRenumbered, e, m.File, m.End, renumberedRemedy)
 		}
 	}
@@ -264,7 +264,7 @@ func CheckSourceReplaced(ctx context.Context, db *sql.DB, since time.Time) error
 		ORDER BY id DESC LIMIT 1`, since.Unix()).Scan(&oldUUID, &newUUID, &at)
 	switch {
 	case err == nil:
-		return fmt.Errorf("%w: capture found another server at the source's address at %s (server_uuid %s, before it %s), and the two servers' binary logs are numbered apart; %s",
+		return fmt.Errorf("%w: capture found another server answering at the source's address at %s (server_uuid %s, before it %s), and two servers number their binary logs apart. %s",
 			ErrBinlogRenumbered, at.UTC().Format(time.RFC3339), newUUID, oldUUID, renumberedRemedy)
 	case errors.Is(err, sql.ErrNoRows):
 		return nil
@@ -291,6 +291,6 @@ func capturedBackBelow(gap *CaptureGap, anchor, cut *query.BinlogPos) error {
 	if gap == nil || gap.Unevaluable || anchor == nil || cut == nil || !sortsBefore(*cut, *anchor) {
 		return nil
 	}
-	return fmt.Errorf("%w: capture recorded a loss at %s and restarted at %s:%d, below the snapshot's %s:%d, so the source's binary log may start again from another numbering; %s",
+	return fmt.Errorf("%w: capture lost events at %s and came back at %s:%d, below the snapshot's %s:%d, as it does when the source's binary log started again from another numbering (a RESET MASTER). %s",
 		ErrBinlogRenumbered, gap.At.UTC().Format(time.RFC3339), cut.File, cut.Pos, anchor.File, anchor.Pos, renumberedRemedy)
 }

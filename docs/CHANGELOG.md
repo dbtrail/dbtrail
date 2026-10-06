@@ -123,6 +123,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`CONCAT(dt, '')`) ends in `+00` there. A table whose snapshot has no
   `CREATE TABLE` was already answered by MySQL for every statement.
 ### Fixed
+- **Snapshots: an update after the source's binary log started again no
+  longer publishes the old rows for good** (#2160). A `RESET MASTER`, a
+  failover to another server or a new `log_bin` name starts the source's
+  binary log again, often at `binlog.000001`, and every change after it
+  sorts before the snapshot's binlog position. The update then found nothing
+  to apply, published the old rows under a new date, and did so on every
+  later run, with no error. It now refuses with "the changes since the
+  snapshot cannot be found by binlog position" and asks for a new full
+  snapshot, which a scheduled server takes by itself; the updates after it
+  work again. `--allow-gaps` does not override it. Read routing stops
+  answering from the copy in the same situation, so MySQL answers. To tell
+  this apart from capture that is simply behind, every snapshot now records
+  the newest change the index held when it was taken; a snapshot written
+  before this version is covered once a new one replaces it.
 - **`recover` and single-row `reconstruct`: a row changed by two sessions
   comes back right** (#2156, first part). Both took the order of a row's
   changes from the time recorded with each change, which is when its

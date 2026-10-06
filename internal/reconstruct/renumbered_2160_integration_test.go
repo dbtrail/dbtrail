@@ -157,7 +157,7 @@ func TestRefresh_afterTheBinlogNumberingStartsOver_refusesUntilAFullSnapshot(t *
 				if errors.Is(err, reconstruct.ErrCaptureGap) {
 					t.Fatalf("the refusal reads as a capture gap, whose remedy is a flag: %v", err)
 				}
-				for _, want := range []string{"shop.orders", "binlog.000001:300", "binlog.000007:200", "a new full snapshot is needed"} {
+				for _, want := range []string{"shop.orders", "binlog.000001:300", "binlog.000007:200", "new full snapshot is needed"} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("the refusal does not say %q: %v", want, err)
 					}

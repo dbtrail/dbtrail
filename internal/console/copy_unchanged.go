@@ -158,9 +158,9 @@ type copyCut struct {
 	refusal string
 	fault   error
 
-	// mark is the event mark beside the anchor (#2160), nil when the footer
-	// has none.
-	mark *reconstruct.EventMark
+	// mark is the event mark beside the anchor (#2160), the zero mark when the
+	// footer has none.
+	mark reconstruct.EventMark
 	// folded: the anchor is a refresh's cut, a position of an event the index
 	// holds, rather than where the source stood when a dump read it.
 	folded bool
@@ -263,7 +263,7 @@ func copyCutOf(t views.BaselineTable, footer func(path string) (baseline.DumpMet
 		stamp:       at.SnapshotTimestamp,
 		lastEventID: at.LastEventID,
 		sourceRead:  read.At,
-		mark:        reconstruct.ParseEventMark(at.EventMark),
+		mark:        eventMarkOf(at),
 		folded:      at.Producer == baseline.ProducerReconstruct,
 	}
 }
@@ -774,15 +774,23 @@ func numberingStartedOver(ctx context.Context, db *sql.DB, tables []views.Baseli
 				newest.File, newest.End, t.Schema, t.Table, at.File, at.Pos), nil
 		}
 		m := cuts[i].mark
-		if m == nil || checked[*m] {
+		if m.ID == 0 || checked[m] {
 			continue
 		}
-		checked[*m] = true
-		if err := reconstruct.CheckNumberingContinues(ctx, db, m); errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+		checked[m] = true
+		if err := reconstruct.CheckNumberingContinues(ctx, db, &m); errors.Is(err, reconstruct.ErrBinlogRenumbered) {
 			return fmt.Sprintf("the source's binary log started again from another numbering after the snapshot of %s.%s was taken, so no change since can be ruled out by position", t.Schema, t.Table), nil
 		} else if err != nil {
 			return "", err
 		}
 	}
 	return "", nil
+}
+
+// eventMarkOf is the footer's event mark, the zero mark when it has none.
+func eventMarkOf(md baseline.DumpMetadata) reconstruct.EventMark {
+	if m := reconstruct.ParseEventMark(md.EventMark); m != nil {
+		return *m
+	}
+	return reconstruct.EventMark{}
 }
