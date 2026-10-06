@@ -377,10 +377,22 @@ func TestUsableCheckedThrough_2152(t *testing.T) {
 	h0 := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	since := h0.Add(10*time.Hour + 30*time.Minute)
 	h := headsAt(h0.Add(9*time.Hour), 100, 200)
-	h.archives = []archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000003", 900), since.Add(-48*time.Hour))}
+	// Written after the snapshot: the time rule reads it, a cut ahead of
+	// everything would not.
+	h.archives = []archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000003", 900), since.Add(time.Hour))}
 	ahead := pos("binlog.000009", 1)
-	if got, _ := h.archivesBelow(since, anchor, ahead, pos("binlog.000005", 4)); !got.IsZero() {
-		t.Fatalf("a value ahead of the upper bound was used as a cut (or the time rule read an old archive): start %v", got)
+	if got, _ := h.archivesBelow(since, anchor, ahead, pos("binlog.000005", 4)); !got.Equal(h0.Add(2 * time.Hour)) {
+		t.Fatalf("a value ahead of the upper bound was used as a cut: start %v, want the archive's hour from the time rule", got)
+	}
+	// The same through SinceFor: the fetch's own UntilPos is the bound.
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	opts := Options{Schema: "shop", Table: "orders", Since: &since, SincePos: &anchor, UntilPos: pos("binlog.000005", 4), ArchivesCheckedThrough: ahead}
+	if got, err := h.SinceFor(context.Background(), db, opts); err != nil || got == nil || !got.Equal(h0.Add(2*time.Hour)) {
+		t.Fatalf("SinceFor with a checked value ahead of UntilPos = %v, err=%v; want the archive's hour", got, err)
 	}
 	if got, _ := h.archivesBelow(since, anchor, pos("binlog.000003", 950), pos("binlog.000005", 4)); !got.IsZero() {
 		t.Fatalf("a usable cut after the archive's newest change: start %v, want unchanged", got)

@@ -102,7 +102,7 @@ func (c *archiveCuts) forBaseline(baselinePath, schema, table string) *query.Bin
 // checked when this run checked the archives up to cut, otherwise the value
 // it was read with (nil: nothing).
 func (c *archiveCuts) record(schema, table string, checked bool, cut, inherited *query.BinlogPos) {
-	if c == nil || c.off {
+	if c == nil {
 		return
 	}
 	v := inherited
