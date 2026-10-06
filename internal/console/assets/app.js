@@ -13644,7 +13644,7 @@ const ROUTE_REASON_TEXT = {
   copy_too_old: "the copy was older than the limit, and a table the statement reads changed since its snapshot (or nothing could confirm that none did)",
   result_over_row_cap: "an expensive plan whose result is over the copy's row cap: MySQL answered, and the copy was not tried",
   copy_refused: "the copy refused it (a construct it lacks, a table it does not have, the row cap)",
-  copy_columns_differ: "SELECT *, NATURAL JOIN or a column name over a table whose columns on the copy are not MySQL's, or the snapshot holds no table definition: take a new full snapshot",
+  copy_columns_differ: "the copy declined it because of a table's columns: SELECT *, NATURAL JOIN or the name of a column the copy lacks; + or -, or AVG, on a date column or one of unknown type, or anywhere beside a subquery over such a table; a TIME or YEAR column named; or a snapshot with no table definition (take a new full snapshot)",
   show_warnings: "SHOW WARNINGS after a MySQL statement",
   upstream_lost: "nobody answered: the port's connection to the source was lost (the client got error 2006)",
   routing_off: "routing off",

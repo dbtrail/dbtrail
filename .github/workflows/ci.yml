@@ -583,6 +583,8 @@ jobs:
             || { echo "FATAL: the capture watermark test over real GTID sets did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationSQLCompareGeneratedNames ' /tmp/mysql-it.out \
             || { echo "FATAL: read-routing generated-column names test did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationSQLCompareTemporalColumns ' /tmp/mysql-it.out \
+            || { echo "FATAL: read-routing date-column arithmetic test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestStreamLoop_unmappableRowReachesThePersistedLedger ' /tmp/mysql-it.out || { echo "FATAL: unmappable-row skip ledger test did not run (false-green tripwire)" >&2; exit 1; }
 
       # The S3 tripwire, kept apart from the steps above so a store that did
@@ -774,6 +776,7 @@ jobs:
             TestIntegrationFlashbackReadRoutingMariaDBSource \
             TestIntegrationFlashbackRoutingLimitsMariaDBSource_2115 \
             TestIntegrationSQLCompareGeneratedNamesMariaDB \
+            TestIntegrationSQLCompareTemporalColumnsMariaDB \
             TestIntegrationSQLCompareBacktickNamesMariaDB \
             TestTakeSnapshot_pkLessVersionedTableRefused_mariadb \
             TestIntegrationReplicaCheckMariaDB \
