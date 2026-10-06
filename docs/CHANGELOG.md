@@ -149,8 +149,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mismatch ends with "order of changes unproven: ... a mismatch on a row
   that two sessions changed at once may be a false alarm", and the
   `_snapshot` read raises one warning with that text, which `SHOW WARNINGS`
-  shows (code 1105). Nothing is looked up for a row whose latest change is
-  the same in both orders, which is every row without one of these waits.
+  shows (code 1105), only when the read succeeded. Nothing is looked up for
+  a row whose latest change is the same in both orders, which is every row
+  without one of these waits. For a row where the two differ, all its
+  changes in the range are read (one more query per 500 such rows), and the
+  answer is the one `recover` would give over them. On an index built only
+  with `bintrail index`, a row whose changes are in two binary log files is
+  noted even when the two orders agree on its latest change, if its last
+  binary log position is another change.
 
   The cost: the fetch of these two readers ranks each row's changes twice
   and can return two changes of a row instead of one. Measured on a table of

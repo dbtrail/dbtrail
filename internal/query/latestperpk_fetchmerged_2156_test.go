@@ -34,15 +34,12 @@ func TestFetchMerged_latestInBinlog(t *testing.T) {
 	}{
 		{"binary log order", true, "", "OR bt_rn_id <= ?", "", []uint64{2, 3}, LatestPerPKOrder{Disagreed: 1, Sorted: 1}},
 		{"binary log order, newest first", true, "DESC", "OR bt_rn_id <= ?", "", []uint64{3, 2}, LatestPerPKOrder{Disagreed: 1, Sorted: 1}},
-		{"without the flag: statement time", false, "", "bt_rn <= ?", "bt_rn_id", []uint64{1, 3}, LatestPerPKOrder{}},
+		{"without the flag: statement time", false, "", "bt_rn <= ?)", "bt_rn_id", []uint64{1, 3}, LatestPerPKOrder{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherFunc(func(want, got string) error {
-				if !strings.Contains(got, want) {
+				if !strings.Contains(got, want) || (tc.noSQL != "" && strings.Contains(got, tc.noSQL)) {
 					return errMismatch(want, got)
-				}
-				if want == "FROM binlog_events" && (!strings.Contains(got, tc.wantSQL) || (tc.noSQL != "" && strings.Contains(got, tc.noSQL))) {
-					return errMismatch(tc.wantSQL, got)
 				}
 				return nil
 			})))
@@ -50,8 +47,11 @@ func TestFetchMerged_latestInBinlog(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer db.Close()
-			mock.ExpectQuery("FROM binlog_events").WillReturnRows(sqlmock.NewRows([]string{"event_id"}))
+			mock.ExpectQuery(tc.wantSQL).WillReturnRows(sqlmock.NewRows([]string{"event_id"}))
 			if tc.flag {
+				// Row 1's candidates disagree: its history is read, from
+				// the index and the archive, before the index is asked.
+				mock.ExpectQuery("pk_values IN").WillReturnRows(sqlmock.NewRows([]string{"event_id"}))
 				mock.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 				mock.ExpectQuery("FROM index_state").WillReturnRows(sqlmock.NewRows([]string{"m", "u"}).AddRow(nil, 0))
 			}
@@ -79,8 +79,12 @@ func TestFetchMerged_latestInBinlog(t *testing.T) {
 			if order != tc.wantOrder {
 				t.Fatalf("order %+v, want %+v", order, tc.wantOrder)
 			}
-			if !slices.Equal(asked, []bool{tc.flag}) {
-				t.Fatalf("the archive was asked for candidates: %v, want [%v]", asked, tc.flag)
+			want := []bool{tc.flag}
+			if tc.flag {
+				want = append(want, false) // the history read
+			}
+			if !slices.Equal(asked, want) {
+				t.Fatalf("the archive was asked for candidates: %v, want %v", asked, want)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatal(err)

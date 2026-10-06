@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,20 +37,19 @@ func TestBuildQuery_limitPerPKGolden2156(t *testing.T) {
 	} {
 		assertContains(t, q, "QUALIFY ROW_NUMBER() OVER (PARTITION BY pk_values ORDER BY event_timestamp DESC, event_id DESC) <= ?"+
 			" OR ROW_NUMBER() OVER (PARTITION BY pk_values ORDER BY event_id DESC) <= ?")
+		assertContains(t, q, " AS bt_kf, max(")
+		assertContains(t, q, " AS bt_kc FROM parquet_scan(")
 	}
 }
 
-// latestPerPK2156Rows is the data of the agreement test: per key, one of
-// #2151's shapes or none. Event ids follow the binary log (a stream index).
+// latestPerPK2156Rows is the data of the agreement tests: per key, one of
+// #2151's shapes or none, on an index a stream writes (event ids follow the
+// binary log), in table "orders".
 func latestPerPK2156Rows() []query.ResultRow {
 	t0 := time.Date(2026, 10, 5, 12, 10, 0, 0, time.UTC)
 	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
 	row := func(pk string, id uint64, pos uint64, ts time.Time) query.ResultRow {
-		return query.ResultRow{
-			EventID: id, BinlogFile: "binlog.000004", StartPos: pos, EndPos: pos + 10,
-			EventTimestamp: ts, SchemaName: "app", TableName: "orders", EventType: 2,
-			PKValues: pk, RowAfter: map[string]any{"id": pk, "v": fmt.Sprint(id)},
-		}
+		return latestPerPK2156Row("orders", pk, id, "binlog.000004", pos, ts)
 	}
 	return []query.ResultRow{
 		// lock wait: B (id 2) started before A (id 1), committed after it
@@ -67,6 +67,34 @@ func latestPerPK2156Rows() []query.ResultRow {
 	}
 }
 
+// latestPerPK2156FileOnlyRows is an index built with `bintrail index` only,
+// in table "files", where binlog.000002 was indexed BEFORE binlog.000001 (its
+// change has the lower id). Row 1: both candidates (id 22 by time, id 23 by
+// id) are in binlog.000001, the latest in the binary log is id 21 in
+// binlog.000002. Row 2: one file, a lock wait, which the ids place. Row 3:
+// the two latest sets agree (id 26), the last position is id 24's, in the
+// other file.
+func latestPerPK2156FileOnlyRows() []query.ResultRow {
+	t0 := time.Date(2026, 10, 5, 12, 20, 0, 0, time.UTC)
+	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
+	row := func(pk string, id uint64, file string, pos uint64, s int) query.ResultRow {
+		return latestPerPK2156Row("files", pk, id, file, pos, at(s))
+	}
+	return []query.ResultRow{
+		row("1", 21, "binlog.000002", 300, 1), row("1", 22, "binlog.000001", 100, 2), row("1", 23, "binlog.000001", 200, 0),
+		row("2", 27, "binlog.000001", 400, 5), row("2", 28, "binlog.000001", 500, 4),
+		row("3", 24, "binlog.000002", 600, 6), row("3", 25, "binlog.000001", 700, 7), row("3", 26, "binlog.000001", 800, 8),
+	}
+}
+
+func latestPerPK2156Row(table, pk string, id uint64, file string, pos uint64, ts time.Time) query.ResultRow {
+	return query.ResultRow{
+		EventID: id, BinlogFile: file, StartPos: pos, EndPos: pos + 10,
+		EventTimestamp: ts, SchemaName: "app", TableName: table, EventType: 2,
+		PKValues: pk, RowAfter: map[string]any{"id": pk, "v": fmt.Sprint(id)},
+	}
+}
+
 func idsOf(rows []query.ResultRow) []uint64 {
 	out := make([]uint64, len(rows))
 	for i := range rows {
@@ -76,51 +104,125 @@ func idsOf(rows []query.ResultRow) []uint64 {
 	return out
 }
 
-// checkLatestPerPK2156 is the check both the unit test below (DuckDB against
-// Go) and the MySQL integration test of this package run: the pick over the
-// candidates a source returned is the Go pick over ALL the rows.
-func checkLatestPerPK2156(t *testing.T, source string, candidates []query.ResultRow, n int) {
-	t.Helper()
-	all := latestPerPK2156Rows()
-	proof := func([]query.ResultRow) query.IDProof { return query.IDsFollowStream }
-	want, wantOrder := query.LatestPerPKInBinlog(slices.Clone(all), n, proof)
-	got, gotOrder := query.LatestPerPKInBinlog(slices.Clone(candidates), n, proof)
-	if !slices.Equal(idsOf(got), idsOf(want)) || gotOrder != wantOrder {
-		t.Fatalf("%s n=%d: pick over its candidates %v (%+v), over all rows %v (%+v)", source, n, idsOf(got), gotOrder, idsOf(want), wantOrder)
+// truth2156 is the ground truth per key: query.OrderByBinlog over ALL the
+// key's changes, its latest n in binary log order when shown, by statement
+// time otherwise; and whether it refused.
+func truth2156(all []query.ResultRow, n int, proof func([]query.ResultRow) query.IDProof) (ids []uint64, refused map[string]bool) {
+	byKey := map[string][]query.ResultRow{}
+	for _, r := range all {
+		byKey[r.PKValues] = append(byKey[r.PKValues], r)
 	}
-	byTime := query.LimitPerPK(query.MergeResults(slices.Clone(all), 0, "ASC"), n)
-	t.Logf("%s n=%d: binary log %v, statement time %v, candidates %v", source, n, idsOf(want), idsOf(byTime), idsOf(candidates))
+	refused = map[string]bool{}
+	for pk, rows := range byKey {
+		rows = query.MergeResults(rows, 0, "ASC")
+		d := query.OrderByBinlog(rows, proof)
+		refused[pk] = d.Warning() != ""
+		for _, r := range rows[max(0, len(rows)-n):] {
+			ids = append(ids, r.EventID)
+		}
+	}
+	slices.Sort(ids)
+	return ids, refused
 }
 
-// DuckDB returns the candidates the Go pick needs, and the pick over them is
-// the pick over all the rows. The MySQL side is in the integration test.
-func TestLatestPerPKCandidates_duckDBAgreesWithGo2156(t *testing.T) {
-	base := filepath.Join(t.TempDir(), "bintrail_id=src")
-	file := filepath.Join(base, "event_date=2026-10-05", "event_hour=12", "events.parquet")
-	if _, err := buffer.WriteParquet(latestPerPK2156Rows(), file, "none"); err != nil {
-		t.Fatal(err)
-	}
-	for _, n := range []int{1, 2} {
-		opts := query.Options{Schema: "app", Table: "orders", LimitPerPK: n, LatestPerPKCandidates: true}
-		cand, err := Fetch(context.Background(), opts, base)
-		if err != nil {
-			t.Fatalf("Fetch: %v", err)
-		}
-		checkLatestPerPK2156(t, "duckdb", cand, n)
-		if n == 1 {
-			// The exact candidates: per key the latest by time and by id.
-			want := []uint64{1, 2, 4, 5, 6, 7, 8, 9, 11, 12}
-			if got := idsOf(cand); !slices.Equal(got, want) {
-				t.Fatalf("duckdb candidates %v, want %v", got, want)
+func historyOf(all []query.ResultRow) func([]string) ([]query.ResultRow, error) {
+	return func(pks []string) ([]query.ResultRow, error) {
+		var out []query.ResultRow
+		for _, r := range all {
+			if slices.Contains(pks, r.PKValues) {
+				out = append(out, r)
 			}
 		}
-		opts.LatestPerPKCandidates = false
-		plain, err := Fetch(context.Background(), opts, base)
-		if err != nil {
-			t.Fatalf("Fetch: %v", err)
+		return out, nil
+	}
+}
+
+// spanOf2156 is the key span the SQL windows must carry, written out here:
+// per key, the least "4-digit length + file" and the greatest "4-digit length
+// + file + 20-digit position".
+func spanOf2156(all []query.ResultRow) map[string][2]string {
+	out := map[string][2]string{}
+	for _, r := range all {
+		f := fmt.Sprintf("%04d%s", len(r.BinlogFile), r.BinlogFile)
+		c := f + fmt.Sprintf("%020d", r.StartPos)
+		cur, ok := out[r.PKValues]
+		if !ok || f < cur[0] {
+			cur[0] = f
 		}
-		if want := idsOf(query.LimitPerPK(query.MergeResults(latestPerPK2156Rows(), 0, "ASC"), n)); !slices.Equal(idsOf(plain), want) {
-			t.Fatalf("without candidates duckdb keeps %v, the Go trim %v", idsOf(plain), want)
+		if c > cur[1] {
+			cur[1] = c
+		}
+		out[r.PKValues] = cur
+	}
+	return out
+}
+
+// checkLatestPerPK2156 is the check the DuckDB unit test and the MySQL
+// integration test run on a source's candidates: each carries its key's span
+// as written out above, and the pick over them (reading a disagreeing key's
+// history) is the ground truth, with a note for every key the truth refused
+// whose answer the candidates could not settle alone.
+func checkLatestPerPK2156(t *testing.T, source string, all, candidates []query.ResultRow, n int, proof func([]query.ResultRow) query.IDProof) query.LatestPerPKOrder {
+	t.Helper()
+	spans := spanOf2156(all)
+	for _, r := range candidates {
+		if want := spans[r.PKValues]; r.KeySpanFirst != want[0] || r.KeySpanLast != want[1] {
+			t.Fatalf("%s n=%d: event %d carries span (%q, %q), want (%q, %q)", source, n, r.EventID, r.KeySpanFirst, r.KeySpanLast, want[0], want[1])
+		}
+	}
+	wantIDs, refused := truth2156(all, n, proof)
+	got, order, err := query.LatestPerPKInBinlog(slices.Clone(candidates), n, proof, historyOf(all))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(idsOf(got), wantIDs) {
+		t.Fatalf("%s n=%d: pick %v, ground truth %v (%+v)", source, n, idsOf(got), wantIDs, order)
+	}
+	t.Logf("%s n=%d: candidates %v, pick %v, truth refused %v, note %q", source, n, idsOf(candidates), idsOf(got), refused, order.Note())
+	return order
+}
+
+func streamProof([]query.ResultRow) query.IDProof   { return query.IDsFollowStream }
+func filesOnlyProof([]query.ResultRow) query.IDProof { return query.IDsFollowFileIndexing }
+
+// DuckDB returns the candidates and spans the Go pick needs, and the pick
+// over them is the ground truth, on a stream index and on a file-only one.
+// The MySQL side is in the integration test.
+func TestLatestPerPKCandidates_duckDBAgreesWithGo2156(t *testing.T) {
+	for _, tc := range []struct {
+		table string
+		rows  []query.ResultRow
+		proof func([]query.ResultRow) query.IDProof
+	}{
+		{"orders", latestPerPK2156Rows(), streamProof},
+		{"files", latestPerPK2156FileOnlyRows(), filesOnlyProof},
+	} {
+		base := filepath.Join(t.TempDir(), "bintrail_id=src")
+		if _, err := buffer.WriteParquet(tc.rows, filepath.Join(base, "event_date=2026-10-05", "event_hour=12", "events.parquet"), "none"); err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range []int{1, 2} {
+			opts := query.Options{Schema: "app", Table: tc.table, LimitPerPK: n, LatestPerPKCandidates: true}
+			cand, err := Fetch(context.Background(), opts, base)
+			if err != nil {
+				t.Fatalf("Fetch: %v", err)
+			}
+			order := checkLatestPerPK2156(t, "duckdb "+tc.table, tc.rows, cand, n, tc.proof)
+			if tc.table == "files" && n == 1 && (order.Refused != 2 || order.Sorted != 1 ||
+				!strings.Contains(order.Note(), "built with `bintrail index` only")) {
+				t.Fatalf("file-only index: %+v, note %q: want rows 1 and 3 refused, row 2 sorted", order, order.Note())
+			}
+			opts.LatestPerPKCandidates = false
+			plain, err := Fetch(context.Background(), opts, base)
+			if err != nil {
+				t.Fatalf("Fetch: %v", err)
+			}
+			if want := idsOf(query.LimitPerPK(query.MergeResults(slices.Clone(tc.rows), 0, "ASC"), n)); !slices.Equal(idsOf(plain), want) {
+				t.Fatalf("without candidates duckdb keeps %v, the Go trim %v", idsOf(plain), want)
+			}
+			if len(plain) > 0 && (plain[0].KeySpanFirst != "" || plain[0].KeySpanLast != "") {
+				t.Fatal("a span without candidates")
+			}
 		}
 	}
 }

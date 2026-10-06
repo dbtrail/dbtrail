@@ -234,6 +234,22 @@ func runLatestPerKey2156(t *testing.T, flavor, sourceDSN string, sourceDB, index
 			t.Fatalf("SHOW WARNINGS = %q, want one note that the order is unproven", warnings)
 		}
 		t.Logf("SHOW WARNINGS: %s", warnings[0])
+
+		// A later step that fails (the table is over the row cap of a
+		// buffered read) leaves no note behind: the statement's
+		// diagnostics are its error.
+		h := shim.NewHandlerWithConfig(indexDB, shim.Config{
+			AllowGaps: true, NoArchive: true, IndexDBName: indexName, BaselineDir: baselineDir, FullTableRowCap: 1,
+		}, slog.Default())
+		if err := h.UseDB(sourceName); err != nil {
+			t.Fatalf("UseDB: %v", err)
+		}
+		if _, err := h.HandleQuery("SELECT * FROM _snapshot.t AS OF '" + asOf.UTC().Format("2006-01-02 15:04:05") + "'"); err == nil || !strings.Contains(err.Error(), "more than 1 rows") {
+			t.Fatalf("_snapshot over the row cap: err = %v, want the 1104 refusal", err)
+		}
+		if r, err := h.HandleQuery("SHOW WARNINGS"); err != nil || r.Resultset != nil {
+			t.Fatalf("SHOW WARNINGS after a failed _snapshot = (%+v, %v), want nothing", r, err)
+		}
 	})
 }
 

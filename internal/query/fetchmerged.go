@@ -185,6 +185,10 @@ func (o FetchMergedOptions) validate() error {
 	if o.LatestInBinlog && (o.Opts.LimitPerPK <= 0 || o.Opts.Limit > 0) {
 		return errors.New("FetchMerged: LatestInBinlog requires LimitPerPK > 0 and no Limit")
 	}
+	if o.LatestInBinlog && (o.Opts.PKValuesAlt != "" || len(o.Opts.PKAliases) > 0) {
+		// The history of a key is read by its stored spelling.
+		return errors.New("FetchMerged: LatestInBinlog does not take PKValuesAlt or PKAliases")
+	}
 	return nil
 }
 
@@ -1060,7 +1064,11 @@ func fetchPage(
 		return nil, nil, nil, 0, false, err
 	}
 	var order LatestPerPKOrder
-	rows, order = LatestPerPKInBinlog(rows, o.Opts.LimitPerPK, binlogOrderProofOnce(ctx, engine.db))
+	rows, order, err = LatestPerPKInBinlog(rows, o.Opts.LimitPerPK, binlogOrderProofOnce(ctx, engine.db),
+		func(pks []string) ([]ResultRow, error) { return fetchKeyHistory(ctx, engine, o, src, pks) })
+	if err != nil {
+		return nil, nil, nil, 0, false, err
+	}
 	if OrderDirection(o.Opts.Order) == "DESC" {
 		slices.Reverse(rows)
 	}
@@ -1068,6 +1076,29 @@ func fetchPage(
 		*o.LatestOrder = order
 	}
 	return rows, skipped, exhausted, diverged, archivesElided, nil
+}
+
+// fetchKeyHistory reads every change of the named keys in the window o
+// covers, from every source fetchPage read: what LatestPerPKInBinlog needs to
+// decide a key whose candidates disagree. In batches, so a table with many
+// such keys does not build one enormous IN list.
+func fetchKeyHistory(ctx context.Context, engine *Engine, o FetchMergedOptions, src mergeSources, pks []string) ([]ResultRow, error) {
+	const batch = 500
+	var out []ResultRow
+	for len(pks) > 0 {
+		k := pks[:min(batch, len(pks))]
+		pks = pks[len(k):]
+		h := o
+		h.LatestInBinlog, h.LatestOrder = false, nil
+		h.Opts.LimitPerPK, h.Opts.LatestPerPKCandidates = 0, false
+		h.Opts.PKValues, h.Opts.PKValuesIn = "", k
+		rows, _, _, _, _, err := fetchPageRows(ctx, engine, h, src)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rows...)
+	}
+	return out, nil
 }
 
 // fetchPageRows is fetchPage's fetch. Under Opts.LatestPerPKCandidates its

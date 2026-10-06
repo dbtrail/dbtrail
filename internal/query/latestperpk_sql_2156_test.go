@@ -28,8 +28,13 @@ func TestBuildQuery_limitPerPKGolden2156(t *testing.T) {
 	// argument once more.
 	opts.LatestPerPKCandidates = true
 	q, args = buildQuery(opts)
-	want := strings.Replace(golden, "AS bt_rn FROM", "AS bt_rn, ROW_NUMBER() OVER (PARTITION BY pk_values ORDER BY event_id DESC) AS bt_rn_id FROM", 1)
+	// And the key span, carried through the key subquery to the outer row.
+	want := strings.Replace(golden, "AS bt_rn FROM", "AS bt_rn, ROW_NUMBER() OVER (PARTITION BY pk_values ORDER BY event_id DESC) AS bt_rn_id"+
+		", MIN(CAST(CONCAT(LPAD(LENGTH(COALESCE(binlog_file, '')), 4, '0'), COALESCE(binlog_file, '')) AS BINARY)) OVER (PARTITION BY pk_values) AS bt_kf"+
+		", MAX(CAST(CONCAT(LPAD(LENGTH(COALESCE(binlog_file, '')), 4, '0'), COALESCE(binlog_file, ''), LPAD(COALESCE(start_pos, 0), 20, '0')) AS BINARY)) OVER (PARTITION BY pk_values) AS bt_kc FROM", 1)
 	want = strings.Replace(want, "WHERE bt_rn <= ?)", "WHERE bt_rn <= ? OR bt_rn_id <= ?)", 1)
+	want = strings.Replace(want, "SELECT event_id, event_timestamp FROM (SELECT", "SELECT event_id, event_timestamp, bt_kf, bt_kc FROM (SELECT", 1)
+	want = strings.Replace(want, "be.commit_ts_us FROM", "be.commit_ts_us, k.bt_kf, k.bt_kc FROM", 1)
 	if q != want {
 		t.Fatalf("candidates:\n got %q\nwant %q", q, want)
 	}

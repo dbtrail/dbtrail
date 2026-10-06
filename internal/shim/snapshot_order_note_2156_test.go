@@ -1,6 +1,7 @@
 package shim
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -50,5 +51,27 @@ func TestSnapshotOrderNote_notForwardedAfterARoutedStatement(t *testing.T) {
 	h.setWarningsCoded(mysql.ER_UNKNOWN_ERROR, []string{"order of changes unproven: x"})
 	if h.routeLastForwarded {
 		t.Fatal("a note of the port's own left SHOW WARNINGS routed to MySQL")
+	}
+}
+
+// The note is the warning of a statement that succeeded only (#2156): a
+// later step that fails sets nothing.
+func TestFinishWithOrderNote(t *testing.T) {
+	h := NewHandler(nil, nil)
+	conn := &warningsConn{}
+	h.BindConn(conn)
+	q := TimeTravelQuery{Schema: "s", Table: "t"}
+	if _, err := h.finishWithOrderNote(q, "order of changes unproven: x", nil, errors.New("merge failed")); err == nil {
+		t.Fatal("the error was lost")
+	}
+	if conn.warnings != 0 || len(h.lastWarnings) != 0 {
+		t.Fatalf("a failed statement left the note: %d warning(s), %q", conn.warnings, h.lastWarnings)
+	}
+	res := &mysql.Result{}
+	if got, err := h.finishWithOrderNote(q, "order of changes unproven: x", res, nil); err != nil || got != res {
+		t.Fatalf("(%v, %v)", got, err)
+	}
+	if conn.warnings != 1 {
+		t.Fatalf("a succeeded statement: %d warning(s), want 1", conn.warnings)
 	}
 }

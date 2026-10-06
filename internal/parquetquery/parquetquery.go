@@ -881,7 +881,7 @@ func buildQueryFromFiles(files []string, opts query.Options, cols map[string]boo
 		" gtid, " + optionalCol(cols, "connection_id", "INT32") + ", schema_name, table_name, event_type, pk_values," +
 		" changed_columns, row_before, row_after, schema_version," +
 		" " + optionalCol(cols, "query_text", "VARCHAR") + ", " + optionalCol(cols, "query_hash", "VARCHAR") +
-		", " + optionalCol(cols, "commit_ts_us", "BIGINT") +
+		", " + optionalCol(cols, "commit_ts_us", "BIGINT") + keySpanCols(opts) +
 		" FROM parquet_scan(" + fileArrayLiteral(files) + ", hive_partitioning=true, union_by_name=true)"
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
@@ -921,7 +921,7 @@ func buildUnsortedQuery(path string, opts query.Options) (string, []any) {
 
 	q := "SELECT event_id, binlog_file, start_pos, end_pos, event_timestamp," +
 		" gtid, connection_id, schema_name, table_name, event_type, pk_values," +
-		" changed_columns, row_before, row_after, schema_version, query_text, query_hash, commit_ts_us" +
+		" changed_columns, row_before, row_after, schema_version, query_text, query_hash, commit_ts_us" + keySpanCols(opts) +
 		" FROM parquet_scan('" + safePath + "', union_by_name=true)"
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
@@ -945,7 +945,7 @@ func buildQuery(glob string, opts query.Options) (string, []any) {
 
 	q := "SELECT event_id, binlog_file, start_pos, end_pos, event_timestamp," +
 		" gtid, connection_id, schema_name, table_name, event_type, pk_values," +
-		" changed_columns, row_before, row_after, schema_version, query_text, query_hash, commit_ts_us" +
+		" changed_columns, row_before, row_after, schema_version, query_text, query_hash, commit_ts_us" + keySpanCols(opts) +
 		" FROM parquet_scan('" + safeGlob + "', hive_partitioning=true, union_by_name=true)"
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
@@ -969,6 +969,20 @@ func buildQuery(glob string, opts query.Options) (string, []any) {
 // Returns ("", nil) when LimitPerPK is unset. Inner ORDER BY DESC mirrors
 // the MySQL ROW_NUMBER ordering in internal/query so both engines pick the
 // same events for a given filter.
+// keySpanCols is the DuckDB twin of the key span buildQuery selects in MySQL
+// under LatestPerPKCandidates (query.LatestPerPKInBinlog): the first file and
+// the last coordinate of each pk_values over the filtered rows, in the same
+// encoding. DuckDB compares VARCHAR byte by byte, as Go does; strlen is the
+// byte length, as MySQL's LENGTH.
+func keySpanCols(opts query.Options) string {
+	if opts.LimitPerPK <= 0 || !opts.LatestPerPKCandidates {
+		return ""
+	}
+	const file = "lpad(CAST(strlen(coalesce(binlog_file, '')) AS VARCHAR), 4, '0') || coalesce(binlog_file, '')"
+	return ", min(" + file + ") OVER (PARTITION BY pk_values) AS bt_kf" +
+		", max(" + file + " || lpad(CAST(coalesce(start_pos, 0) AS VARCHAR), 20, '0')) OVER (PARTITION BY pk_values) AS bt_kc"
+}
+
 func limitPerPKClause(opts query.Options) (string, []any) {
 	if opts.LimitPerPK <= 0 {
 		return "", nil
@@ -1254,7 +1268,7 @@ func buildQueryForFile(path string, opts query.Options, cols map[string]bool) (s
 		" gtid, " + optionalCol(cols, "connection_id", "INT32") + ", schema_name, table_name, event_type, pk_values," +
 		" changed_columns, row_before, row_after, schema_version," +
 		" " + optionalCol(cols, "query_text", "VARCHAR") + ", " + optionalCol(cols, "query_hash", "VARCHAR") +
-		", " + optionalCol(cols, "commit_ts_us", "BIGINT") +
+		", " + optionalCol(cols, "commit_ts_us", "BIGINT") + keySpanCols(opts) +
 		" FROM parquet_scan('" + safePath + "', hive_partitioning=true, union_by_name=true)"
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
@@ -1335,6 +1349,10 @@ func parseFileHour(path string) (time.Time, bool) {
 // scanRows converts DuckDB result rows into []query.ResultRow.
 func scanRows(rows *sql.Rows) ([]query.ResultRow, error) {
 	var results []query.ResultRow
+	withSpan, err := query.HasKeySpanColumns(rows)
+	if err != nil {
+		return nil, err
+	}
 	for rows.Next() {
 		// Every NOT NULL column is scanned defensively. The Parquet
 		// writer in internal/archive now correctly preserves NULL for
@@ -1372,12 +1390,17 @@ func scanRows(rows *sql.Rows) ([]query.ResultRow, error) {
 			queryHash      sql.NullString
 			commitTsUS     sql.NullInt64
 		)
-		if err := rows.Scan(
+		dest := []any{
 			&eventID, &binlogFile, &startPos, &endPos, &eventTimestamp,
 			&gtid, &connID, &schemaName, &tableName, &eventType, &pkValues,
 			&changedCols, &rowBefore, &rowAfter, &schemaVersion, &queryText, &queryHash,
 			&commitTsUS,
-		); err != nil {
+		}
+		var spanFirst, spanLast sql.NullString
+		if withSpan {
+			dest = append(dest, &spanFirst, &spanLast)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("scan parquet result: %w", err)
 		}
 
@@ -1392,6 +1415,8 @@ func scanRows(rows *sql.Rows) ([]query.ResultRow, error) {
 			EventType:      event.EventType(eventType.Int32),
 			PKValues:       pkValues.String,
 			SchemaVersion:  uint32(schemaVersion.Int32),
+			KeySpanFirst:   spanFirst.String,
+			KeySpanLast:    spanLast.String,
 		}
 		if gtid.Valid {
 			r.GTID = &gtid.String
