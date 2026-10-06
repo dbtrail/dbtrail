@@ -601,6 +601,24 @@ func ForRun(f Fetcher) Fetcher {
 // does not ask again further down. heads may be nil (a picture is loaded).
 // moved reports that the time changed, and firstEnd is the picture's
 // firstPartitionEnd (zero when it has none).
+// PositionReadFloor is the lowest event_timestamp a read with opts looks at:
+// with SincePos, its Since settled the way the read settles it (settleSince),
+// then the CoarseSinceFloor buildQuery puts under it; without SincePos, Since
+// itself; without Since, zero (no floor). For a check that must see every
+// change the read can see (the binlog-renumbering check, #2174).
+func PositionReadFloor(ctx context.Context, db *sql.DB, opts Options) (time.Time, error) {
+	if opts.Since == nil {
+		return time.Time{}, nil
+	}
+	if opts.SincePos == nil {
+		return *opts.Since, nil
+	}
+	if _, _, err := settleSince(ctx, db, &opts, nil); err != nil {
+		return time.Time{}, err
+	}
+	return CoarseSinceFloor(*opts.Since), nil
+}
+
 func settleSince(ctx context.Context, db *sql.DB, opts *Options, heads *PartitionHeads) (moved bool, firstEnd time.Time, err error) {
 	if opts.sinceSettled || opts.Since == nil || opts.SincePos == nil {
 		return false, time.Time{}, nil

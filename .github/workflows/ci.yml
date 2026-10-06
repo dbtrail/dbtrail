@@ -612,6 +612,10 @@ jobs:
             || { echo "FATAL: the late event archived before the next snapshot update test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestRefresh_afterTheBinlogNumberingStartsOver_refusesUntilAFullSnapshot ' /tmp/mysql-it.out \
             || { echo "FATAL: the refresh after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestSnapshot_afterTheBinlogNumberingStartsOver_2174 ' /tmp/mysql-it.out \
+            || { echo "FATAL: _snapshot after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestVerifyBaselinePair_afterTheBinlogNumberingStartsOver_2174 ' /tmp/mysql-it.out \
+            || { echo "FATAL: verify after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationCopyUnchanged_numberingStartedOver_2160 ' /tmp/mysql-it.out \
             || { echo "FATAL: read routing after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestCheckNumberingContinues_2160 ' /tmp/mysql-it.out || { echo "FATAL: the binlog renumbering check did not run (false-green tripwire)" >&2; exit 1; }

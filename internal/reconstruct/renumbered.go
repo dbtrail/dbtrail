@@ -75,12 +75,16 @@ func (m EventMark) Encode() string {
 // ParseEventMark reads a footer's mark. "" is no mark; one that does not read
 // is no mark too, said out loud.
 func ParseEventMark(raw string) *EventMark {
+	return parseEventMark(raw, nil)
+}
+
+func parseEventMark(raw string, w *ReadWindow) *EventMark {
 	if raw == "" {
 		return nil
 	}
 	var m EventMark
 	if err := json.Unmarshal([]byte(raw), &m); err != nil || m.ID == 0 || m.File == "" {
-		slog.Warn("baseline footer: unreadable event mark; a binlog numbering that started over is not detected from it",
+		w.notice(slog.LevelWarn, "baseline footer: unreadable event mark; a binlog numbering that started over is not detected from it",
 			"value", raw, "error", err)
 		return nil
 	}
@@ -144,8 +148,12 @@ func ReadStreamEventMark(ctx context.Context, db *sql.DB) string {
 	if !captured {
 		return ""
 	}
-	if query.IndexBackfilled(ctx, db) {
-		slog.Warn("`bintrail index` also wrote into this index, so its ids do not follow the binary log; the snapshot is published without an event mark, and a binlog numbering that started over is not detected from it")
+	if backfilled, err := query.IndexBackfilled(ctx, db); err != nil || backfilled {
+		if err != nil {
+			slog.Warn("could not tell whether `bintrail index` wrote into the index; the snapshot is published without an event mark", "error", err)
+		} else {
+			slog.Warn("`bintrail index` also wrote into this index, so its ids do not follow the binary log; the snapshot is published without an event mark, and a binlog numbering that started over is not detected from it")
+		}
 		return ""
 	}
 	m, err := ReadEventMark(ctx, db)
@@ -311,6 +319,12 @@ func startedOverAfter(e indexedEvent, m *EventMark) bool {
 //   - Gone with every older row (rotation dropped its hour): the events after
 //     it are still in order. Checked.
 func CheckNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anchor query.BinlogPos) error {
+	return checkNumberingContinues(ctx, db, m, anchor, nil)
+}
+
+// checkNumberingContinues is CheckNumberingContinues; w, when it bounds a
+// read (ReadWindow.bounded), narrows the two probes to it.
+func checkNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anchor query.BinlogPos, w *ReadWindow) error {
 	if m == nil {
 		return nil
 	}
@@ -322,24 +336,28 @@ func CheckNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 	// the new one: reading the window from that position is right, and the
 	// mark says nothing about it.
 	if BinlogBaseName(anchor.File) != BinlogBaseName(m.File) || sortsBefore(anchor, query.BinlogPos{File: m.File, Pos: m.End}) {
-		slog.Info("the snapshot's event mark is from before its own binlog position's numbering; it is not used",
+		w.notice(slog.LevelInfo, "the snapshot's event mark is from before its own binlog position's numbering; it is not used",
 			"mark", m.Encode(), "anchor", fmt.Sprintf("%s:%d", anchor.File, anchor.Pos))
 		return nil
 	}
 	// Rows `bintrail index` backfilled get ids above the mark with positions
 	// below it, which reads exactly like a numbering that started over.
-	if query.IndexBackfilled(ctx, db) {
-		slog.Warn("`bintrail index` also wrote into this index, so its ids do not follow the binary log; a binlog numbering that started over is not checked",
+	backfilled, err := query.IndexBackfilled(ctx, db)
+	if err != nil {
+		return err
+	}
+	if backfilled {
+		w.notice(slog.LevelWarn, "`bintrail index` also wrote into this index, so its ids do not follow the binary log; a binlog numbering that started over is not checked",
 			"mark", m.Encode())
 		return nil
 	}
 	var file string
 	var end uint64
-	err := db.QueryRowContext(ctx, `SELECT binlog_file, end_pos FROM binlog_events WHERE event_id = ?`, m.ID).Scan(&file, &end)
+	err = db.QueryRowContext(ctx, `SELECT binlog_file, end_pos FROM binlog_events WHERE event_id = ?`, m.ID).Scan(&file, &end)
 	switch {
 	case err == nil:
 		if file != m.File || end != m.End {
-			slog.Warn("the event the snapshot's event mark names is now another event (the index was rebuilt?); a binlog numbering that started over is not checked from it",
+			w.notice(slog.LevelWarn, "the event the snapshot's event mark names is now another event (the index was rebuilt?); a binlog numbering that started over is not checked from it",
 				"mark", m.Encode(), "now", fmt.Sprintf("%s:%d", file, end))
 			return nil
 		}
@@ -352,12 +370,15 @@ func CheckNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 			return nil
 		}
 		if uint64(oldest.Int64) < m.ID {
-			slog.Warn("the event the snapshot's event mark names was deleted while older ones remain (a restarted stream's cleanup); a binlog numbering that started over is not checked from it",
+			w.notice(slog.LevelWarn, "the event the snapshot's event mark names was deleted while older ones remain (a restarted stream's cleanup); a binlog numbering that started over is not checked from it",
 				"mark", m.Encode())
 			return nil
 		}
 	default:
 		return fmt.Errorf("read the event the snapshot's event mark names: %w", err)
+	}
+	if w.bounded() {
+		return w.check(ctx, db, m, anchor)
 	}
 	for _, q := range []string{
 		`SELECT event_id, binlog_file, end_pos FROM binlog_events
@@ -376,11 +397,15 @@ func CheckNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 			return fmt.Errorf("read the events indexed after the snapshot's event mark: %w", err)
 		}
 		if startedOverAfter(e, m) {
-			return fmt.Errorf("%w: the source's binary log started again from another numbering (a RESET MASTER, a failover to another server, or a new log_bin name): a change ending at %s reached the index after the change ending at %s:%d and sorts before it. %s",
-				ErrBinlogRenumbered, e, m.File, m.End, renumberedRemedy)
+			return startedOverErr(e, m)
 		}
 	}
 	return nil
+}
+
+func startedOverErr(e indexedEvent, m *EventMark) error {
+	return fmt.Errorf("%w: the source's binary log started again from another numbering (a RESET MASTER, a failover to another server, or a new log_bin name): a change ending at %s reached the index after the change ending at %s:%d and sorts before it. %s",
+		ErrBinlogRenumbered, e, m.File, m.End, renumberedRemedy)
 }
 
 // CheckSourceReplaced returns an error wrapping ErrBinlogRenumbered when
@@ -400,6 +425,30 @@ func CheckSourceReplaced(ctx context.Context, db *sql.DB, since time.Time) error
 	return checkSourceReplacedSince(ctx, db, since)
 }
 
+// CheckNumberingFrom runs the two checks that read a snapshot's event mark
+// (rawMark, its footer value) against the index, for a window read by
+// position from anchor (nil: the snapshot records none): CheckNumberingContinues,
+// then CheckSameServer. A snapshot without a mark: nil, whatever happened.
+// Shared by every reader that starts at a snapshot's position: the refresh,
+// verify and the shim's _snapshot (#2174). CheckSourceReplaced stays with the
+// refresh, which alone also refuses on a snapshot without a mark.
+//
+// w describes the read. A zero w (the refresh, live verify) checks the whole
+// index up to now. A w with Until set (a read that stops in the past: AS OF, a
+// verify pair) checks only what that read can see; see ReadWindow.
+func CheckNumberingFrom(ctx context.Context, db *sql.DB, anchor *query.BinlogPos, rawMark string, w ReadWindow) error {
+	m := parseEventMark(rawMark, &w)
+	if anchor != nil && anchor.File != "" && anchor.Pos > 0 {
+		if err := checkNumberingContinues(ctx, db, m, *anchor, &w); err != nil {
+			return err
+		}
+	}
+	if w.bounded() {
+		return checkSameServerUntil(ctx, db, m, w.Since, w.Until)
+	}
+	return CheckSameServer(ctx, db, m)
+}
+
 // CheckSameServer returns an error wrapping ErrBinlogRenumbered when the mark
 // names the server capture was reading when the snapshot was taken and
 // capture now reads another one. Identities, not times: it holds for a full
@@ -414,6 +463,10 @@ func CheckSameServer(ctx context.Context, db *sql.DB, m *EventMark) error {
 	if err != nil || now == "" || now == m.ServerUUID {
 		return err
 	}
+	return anotherServerErr(now, m)
+}
+
+func anotherServerErr(now string, m *EventMark) error {
 	return fmt.Errorf("%w: capture now reads another server (server_uuid %s) than when the snapshot was taken (%s), and two servers number their binary logs apart. %s",
 		ErrBinlogRenumbered, now, m.ServerUUID, renumberedRemedy)
 }
