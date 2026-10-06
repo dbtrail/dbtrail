@@ -54,10 +54,16 @@ It is read-only and never writes to your source or your index.
 - **In default (baseline-anchored) mode, a table with no baseline yet is out
   of scope** — the same tables `reconstruct` also cannot materialize.
   `verify` reports these `inconclusive`, never as proof of correctness.
-- **Live-source mode requires a quiescent source.** Any commit against the
-  table during the scan reads as drift and reports as MISMATCH, even when the
-  reconstruction itself is correct — the live table simply kept moving during
-  the read.
+- **Live-source mode needs an exact snapshot position to run on a table
+  with writes.** The reconstruction is cut at the position the live read was
+  taken at, so writes committed during the check are left out of both sides.
+  That position is exact on MySQL with GTIDs on (the account needs
+  `LOCK TABLES` on the table), Percona Server and MariaDB; see
+  [Live-source](#live-source). Where it is not (MySQL with `gtid_mode=OFF`, a
+  source account without `LOCK TABLES`, a PostgreSQL source), the rule is
+  unchanged: **no writes to the table while it is read**, or a write shows as
+  a MISMATCH even though the reconstruction is correct. The result says when
+  that rule applies.
 
 ## The modes
 
@@ -166,9 +172,40 @@ bintrail verify --index-dsn "$IDX" --baseline-dir /data/baselines --explain
 
 ### Live-source
 
-Pass `--source-dsn`. For each table, `verify` reconstructs a consistent
-point-in-time snapshot and compares it against the **live source** table. This
-reads the whole table off the live server, so **run it off-peak**.
+Pass `--source-dsn`. For each table, `verify` reads the **live source** table
+inside one consistent snapshot, reconstructs the table to that snapshot's
+position, and compares the two. It reads the whole table off the live server,
+so the load is a full scan of each table checked.
+
+**Writes during the check.** The reconstruction is cut at the snapshot's own
+position (a GTID set, turned into a binlog coordinate from the index), so a
+table that keeps taking writes compares equal. How that position is pinned
+depends on the server:
+
+| Source | How the position is pinned | Writes during the check |
+|---|---|---|
+| Percona Server (GTIDs on) | the server's own snapshot position (`Binlog_snapshot_gtid_executed`), no lock | fine |
+| MariaDB | the server's own snapshot coordinate (`binlog_snapshot_file`/`_position`, through `BINLOG_GTID_POS`), no lock | fine |
+| MySQL (GTIDs on) | `LOCK TABLES <table> READ` on a second connection while the snapshot opens: writes to that one table wait for the few milliseconds the snapshot takes to open | fine |
+| MySQL without the `LOCK TABLES` privilege, MySQL with `gtid_mode=OFF`, PostgreSQL | not pinned | **none allowed**: a write while the table is read shows as a MISMATCH |
+
+Why MySQL needs the lock: measured on MySQL 8.0 and 8.4 under concurrent
+commits, a snapshot can already see transactions that `@@gtid_executed` does
+not list yet, even when the set read just before and just after opening the
+snapshot is the same. Reading the set around the snapshot is therefore never
+taken as exact.
+
+The lock is bounded: it waits at most one second for a transaction that wrote
+the table and is still open (new writes to the table queue behind it during
+that second), three times. If it never gets the table, the table is reported
+`inconclusive` ("the snapshot's position could not be pinned"), never compared
+against a guessed position. Grant it with `GRANT LOCK TABLES ON db.* TO ...`.
+
+A running capture is a few seconds behind a table with writes, so for each
+table `verify` waits up to a minute for the capture to reach the snapshot it
+read (only while the capture's checkpoint is recent, so a stopped capture is
+reported at once). When the result is not cut at the snapshot's position, its
+detail says so and says why.
 
 ```sh
 bintrail verify --source-dsn "$SRC" --index-dsn "$IDX" \
@@ -583,11 +620,15 @@ the contract tag differs.
 `verify` runs against the MySQL index, so every mode works wherever its data
 sources exist:
 
-- **MySQL** — all three modes. Live-source mode anchors on `@@gtid_executed`
-  and refuses to compare when the index is provably behind the snapshot; on a
-  `gtid_mode=OFF` source it proceeds with a `coverage unverified` note.
+- **MySQL** — all three modes. Live-source mode anchors on `@@gtid_executed`,
+  pinned to the snapshot with a brief table lock (Percona Server: its own
+  snapshot position), and refuses to compare when the index is behind the
+  snapshot after waiting for the capture; on a `gtid_mode=OFF` source it
+  proceeds with a `coverage unverified` note and the table must take no
+  writes during the read.
 - **MariaDB** — baseline-anchored and recover-input as MySQL. Live-source
-  mode anchors on `@@gtid_binlog_pos` (MariaDB has no `@@gtid_executed`) and
+  mode anchors on the snapshot's own binlog coordinate, as a GTID position
+  (MariaDB has no `@@gtid_executed`), and
   compares it with the index's checkpoint domain by domain: the index must
   have reached the source's sequence number in every domain. An index behind
   the snapshot is inconclusive, as on MySQL. The check needs the capture to
@@ -617,4 +658,6 @@ sources exist:
   false mismatch; a loss older than the baseline snapshot is outside the
   window — the baseline is a fresh dump of the source, so it re-covers
   whatever the gap lost — and does not degrade the verdict. The
-  quiescent-source requirement applies unchanged.
+  live-source reconstruction is not cut at the snapshot's position yet
+  ([#2198](https://github.com/dbtrail/dbtrail/issues/2198)), so there must be
+  no writes to the table while it is read.

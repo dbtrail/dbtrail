@@ -124,6 +124,10 @@ type Config struct {
 	// command that carries these flags, so leaving this unset would silently
 	// cap the reconstruct-heavy half of a --ultrafast run at 2 threads/4GB.
 	DuckDBTuning duckdbutil.Tuning
+	// CoverageWait bounds how long live-source verify waits, per table, for
+	// a running capture to reach the snapshot it read (#2150). Zero means
+	// DefaultCoverageWait; negative means do not wait.
+	CoverageWait time.Duration
 }
 
 // VerifyTable verifies one table: fingerprint the live source at a consistent
@@ -131,15 +135,18 @@ type Config struct {
 // binlog, render the reconstructed rows into the source's text form, hash them,
 // and compare.
 //
-// Alignment (load-bearing precondition): the source digest is anchored at the
-// GTID captured when the snapshot opens (T0, inside ConsistentTableChecksum);
-// asOf is wall-clock captured AFTER the full-table scan returns (T1). Any write
-// committed in the window (T0, T1] enters the reconstruct (Until=asOf) but not
-// the frozen source snapshot, so it surfaces as a divergence — a row-count or
-// content MISMATCH that FAILS the run (not a soft "inconclusive"). That window
-// spans the whole source scan (seconds to minutes on a large table), so verify
-// is only reliable on a quiescent source — run it off-peak. GTID-precise
-// alignment (reconstruct to exactly the snapshot's GTID) is a follow-up.
+// Alignment (#2150): the reconstruction is cut at the snapshot's own GTID
+// position, not at the time the scan ended, so writes committed while the
+// table is read are out of both sides and a table with steady traffic
+// compares equal. The position is exact only where the server can give it
+// (see consistency.ConsistentTableChecksumAnchored): its own snapshot position
+// (Percona Server, MariaDB), or, on stock MySQL, a LOCK TABLES ... READ on the
+// table held while the snapshot opens. It is translated into a binlog
+// coordinate from the index (snapshotCut) and bounds the fetch as UntilPos;
+// the wall-clock asOf stays as the coarse bound. Where no exact position
+// exists (GTIDs off, no LOCK TABLES grant, a tagged GTID set, an index whose
+// ids are not binlog order) the read is cut at asOf as before and the result
+// says that a write during the read shows as a mismatch.
 func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableResult, error) {
 	res := TableResult{Schema: schema, Table: table}
 
@@ -175,7 +182,13 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	// digest: both sides must agree on what counts as a representation-only
 	// difference, or normalizing only one would trade one false mismatch for
 	// another.
-	src, err := consistency.ConsistentTableChecksumNormalized(ctx, cfg.SourceDB, schema, table, normalizeRenderedBytes)
+	// openedBy is taken before the snapshot opens: the baseline the
+	// reconstruction starts from must be older than the read (step 3).
+	openedBy := time.Now().UTC()
+	src, err := consistency.ConsistentTableChecksumAnchored(ctx, cfg.SourceDB, schema, table, normalizeRenderedBytes)
+	if errors.Is(err, consistency.ErrAnchorBusy) {
+		return inconclusive(res, "the snapshot's position could not be pinned: "+err.Error()+"; run the check again when the table's long write transactions are done"), nil
+	}
 	if err != nil {
 		return res, fmt.Errorf("source checksum %s.%s: %w", schema, table, err)
 	}
@@ -190,13 +203,20 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	// recent writes (a stale last_event_time does not mean "behind"). A GTID-off
 	// source can't be checked this way — verify proceeds but flags the result
 	// as coverage-unverified rather than blocking.
-	covered, coverageNote := indexCovers(ctx, cfg.IndexDB, src.GTIDSet, src.GTIDFlavor)
+	// A running capture is a few seconds behind a snapshot of a table with
+	// writes, so the check waits for it (#2150).
+	wait := cfg.CoverageWait
+	if wait == 0 {
+		wait = DefaultCoverageWait
+	}
+	covered, coverageNote := waitIndexCovers(ctx, cfg.IndexDB, src.GTIDSet, src.GTIDFlavor, wait)
 	if !covered {
 		return inconclusive(res, coverageNote), nil
 	}
 
-	// 3. Find the baseline at-or-before asOf.
-	baselinePath, snapshotTime, _, err := reconstruct.FindBaseline(ctx, cfg.BaselineSource, schema, table, asOf)
+	// 3. Find the baseline at-or-before the read opened: one taken while the
+	// table was being read is newer than the snapshot it is compared with.
+	baselinePath, snapshotTime, _, err := reconstruct.FindBaseline(ctx, cfg.BaselineSource, schema, table, openedBy)
 	if err != nil {
 		if isNoBaseline(err) {
 			return inconclusive(res, "no baseline at-or-before the snapshot; reconstruct would omit never-touched rows"), nil
@@ -224,6 +244,15 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 		}
 	}
 
+	// 3a. Where the reconstruction stops: the snapshot's position (#2150).
+	cut, err := resolveLiveCut(ctx, cfg.IndexDB, src, snapshotTime, sincePos)
+	if err != nil {
+		return res, fmt.Errorf("cut the read of %s.%s at the snapshot: %w", schema, table, err)
+	}
+	if cut.inconclusive != "" {
+		return inconclusive(res, cut.inconclusive), nil
+	}
+
 	// 3b. The changes since the snapshot are read from its position: when the
 	// source's binary log started again after it, every later change sorts
 	// below that position and the reconstruction would miss it, reading as a
@@ -235,7 +264,12 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	// Bounded by the read itself, from the snapshot up to asOf (#2186): the
 	// check then also reads the hours rotation moved into archives, which the
 	// fetch below reads too, so a snapshot older than the index's retention
-	// is checked, not reported as uncheckable.
+	// is checked, not reported as uncheckable. The window ends at asOf, the
+	// read's time bound, and deliberately not at its position cut (#2150):
+	// past a restart of the binary log's numbering a position comparison no
+	// longer orders changes, which is the very thing this checks for. The
+	// time window holds every change the cut read can, so it can only find
+	// more, never miss one.
 	unchecked, err := reconstruct.CheckNumberingFromRead(ctx, cfg.IndexDB, sincePos, eventMark, reconstruct.ReadWindow{
 		Schema: schema, Table: table, Since: snapshotTime, Until: asOf, Notice: renumberNotices.To(nil),
 	})
@@ -262,6 +296,7 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 			Since:      &snapshotTime,
 			SincePos:   sincePos,
 			Until:      &asOf,
+			UntilPos:   cut.pos,
 			LimitPerPK: 1,
 		},
 		DBName:         cfg.IndexDBName,
@@ -349,6 +384,7 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	withSnapshotLock(res.Status, res.Detail,
 		lockSide{what: "the snapshot of " + snapshotTime.UTC().Format(time.RFC3339), lock: snapshotLock}).apply(&res)
 	withOrderNote(&res, order)
+	res.Detail = withNote(res.Detail, cut.note)
 	return res, nil
 }
 
@@ -767,7 +803,7 @@ func indexCovers(ctx context.Context, indexDB *sql.DB, srcGTID, flavor string) (
 		return false, "source GTID set is unparseable: " + err.Error()
 	}
 	if !idxSet.Contain(srcSet) {
-		return false, fmt.Sprintf("index is behind the source snapshot (indexed %s does not contain snapshot %s); re-run once DBTrail catches up",
+		return false, fmt.Sprintf(indexBehind+" (indexed %s does not contain snapshot %s); re-run once DBTrail catches up",
 			idxGTID.String, srcGTID)
 	}
 	return true, ""

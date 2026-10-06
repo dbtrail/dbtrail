@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **`verify --source-dsn` works on a table that takes writes during the
+  check** (#2150). The reconstruction was cut at the time the source scan
+  ended, so every write committed while the table was read showed as a
+  MISMATCH. It is now cut at the snapshot's own position: the GTID set the
+  snapshot holds, turned into a binlog coordinate from the index. The
+  position is exact where the server can give it: Percona Server and MariaDB
+  report their own snapshot position (no lock); on MySQL with GTIDs on, a
+  `LOCK TABLES <table> READ` on a second connection is held while the
+  snapshot opens (measured: on MySQL 8.0 and 8.4 a snapshot can see
+  transactions `@@gtid_executed` does not list yet, even when the set read
+  before and after opening it is the same, so that read is never taken as
+  exact). The lock waits at most one second, three times; a table it never
+  gets is **inconclusive**, never compared against a guessed position.
+  Without the `LOCK TABLES` privilege, with `gtid_mode=OFF`, or on
+  PostgreSQL, the read is cut by time as before and the result says the
+  table must take no writes during the read. Each table also waits up to a
+  minute for a running capture to reach the snapshot it read, instead of
+  reporting "index is behind" at once; and the baseline it starts from is
+  the newest one taken before the read, not one taken during it.
 - **A binlog-renumbering check that cannot tell is no longer silent
   (behavior change for scripts)** (#2186). When the check cannot tell whether the source's binary log
   started again after the snapshot (the event the snapshot's mark names was
