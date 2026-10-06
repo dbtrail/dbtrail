@@ -258,7 +258,9 @@ func routedSessionFunction(t *testing.T, baseDSN string) {
 			"START TRANSACTION READ ONLY",
 			"COMMIT",
 			"SET autocommit = 1",
-			"SET NAMES utf8mb4",
+			// With the collation named: on MariaDB 10.11 a bare SET NAMES
+			// utf8mb4 means utf8mb4_general_ci, under which MySQL answers.
+			"SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci",
 			"SET time_zone = '+02:00'",
 		} {
 			must(t, c, stmt)

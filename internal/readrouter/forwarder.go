@@ -354,12 +354,14 @@ func (f *Forwarder) settleCollation(ctx context.Context, c *client.Conn) error {
 }
 
 // SessionTrackedVariables is what the source is asked to report changes of
-// (session_track_system_variables): every session setting the port reads
+// (session_track_system_variables): every session variable the port reads
 // back before the copy answers (shim's sessionReadBackSQL; a test there holds
-// the two together), and two more.
+// the two together), and three more.
 //
-// max_join_size, because setting it is one of the ways sql_big_selects
-// changes. session_track_system_variables itself is the list's own mark: a
+// collation_connection, which the read-back reads by what it does (its
+// collation probe). max_join_size, because setting it is one of the ways
+// sql_big_selects changes. session_track_system_variables itself is the
+// list's own mark: a
 // client that replaces the list (a connector that asks for the variables it
 // follows) leaves a list without it, which is how the port knows its own was
 // dropped (TracksSession) and asks again (TrackSessionAgain).
@@ -436,7 +438,8 @@ func trackSessionSQL(has string) string {
 //
 // Anything else (a broken connection, a client that left: ctx) is a
 // connection that did not open, as in settleCollation. No privilege is
-// needed: an account with SELECT alone sets it (measured on all six).
+// needed: an account granted SELECT, INSERT and EXECUTE on one schema sets
+// it (measured on all six).
 //
 // Like settleCollation's, the statement goes around Forward.
 func (f *Forwarder) trackSession(ctx context.Context, c *client.Conn) (bool, error) {
