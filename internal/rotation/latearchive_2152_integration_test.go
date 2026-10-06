@@ -82,7 +82,7 @@ func TestIntegrationLateEventArchivedBeforeTheNextUpdateIsStillFetched(t *testin
 	}
 
 	rows, _, err := query.FetchMerged(ctx, db, query.New(db), query.FetchMergedOptions{
-		Opts:   query.Options{Schema: "shop", Table: "orders", Since: &snapTime, SincePos: anchor},
+		Opts:           query.Options{Schema: "shop", Table: "orders", Since: &snapTime, SincePos: anchor},
 		DBName:         dbName,
 		ArchiveFetcher: parquetquery.Fetch,
 	})
