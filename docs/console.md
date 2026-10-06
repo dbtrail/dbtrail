@@ -1173,7 +1173,10 @@ The limits, so a query can never hurt capture:
   is free, so a burst turns slow instead of failing. One identity still runs
   one statement at a time: a dashboard's panels come one after another, and
   a panel that would wait more than 30 seconds is still refused. Past 30 seconds, or with 16 statements
-  already waiting, it is refused as busy (HTTP 429). It never runs beside the
+  already waiting, it is refused as busy (HTTP 429). The line of 16 is one
+  for the whole daemon: statements from the MySQL-protocol port wait in it
+  too, and `bintrail_sql_slot_wait_seconds` and `bintrail_sql_slot_waiting`
+  ([Observability](observability.md)) show the wait. It never runs beside the
   others: the process that serves it is the one capturing changes. Waiting
   costs nothing, because the slot is taken before anything is read, and a
   page closed while waiting leaves the line. For a team

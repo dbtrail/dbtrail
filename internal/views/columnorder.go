@@ -224,6 +224,27 @@ func (t BaselineTable) NamesUnlikeMySQL(statement string) string {
 	return ""
 }
 
+// TypedColumns sorts the table's date, time and year columns for the question
+// read routing asks about a statement's arithmetic (#2133): dates are the
+// DATE, DATETIME and TIMESTAMP columns, which MySQL turns into a number where
+// one is asked for and the copy does not, together with every column whose
+// type is not known; whole are the TIME and YEAR columns, which the copy
+// holds as text and as a plain number.
+//
+// A table whose definition was not read has none listed and is not answered
+// for here: NamesUnlikeMySQL refuses every statement over it first.
+func (t BaselineTable) TypedColumns() (dates, whole []string) {
+	for _, c := range t.Temporal {
+		switch c.Type {
+		case "time", "year":
+			whole = append(whole, c.Name)
+		default:
+			dates = append(dates, c.Name)
+		}
+	}
+	return dates, whole
+}
+
 // isASCII reports whether every byte of s is an ASCII one.
 func isASCII(s string) bool {
 	for i := 0; i < len(s); i++ {

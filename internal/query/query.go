@@ -204,6 +204,63 @@ func (p BinlogPos) AtOrBefore(q BinlogPos) bool {
 	return p.Pos <= q.Pos
 }
 
+// LaterInBinlog reports whether a is strictly after b in the source's binary
+// log, by where each event starts: (binlog_file, start_pos) under the BinlogPos
+// rule. The binary log holds changes in commit order, so of two changes of one
+// row the later one here is the one whose values the row kept.
+//
+// event_timestamp does not say that (#2151). It is the time the change's
+// STATEMENT STARTED: an UPDATE that waited on a row lock, or reached the row
+// late in a long statement, is in the binary log AFTER the change it waited
+// for and carries an EARLIER time. Every fetch returns rows in
+// (event_timestamp, event_id) order, which is how they are paged and pruned;
+// a caller that keeps "the last change of a row" must ask this, not rely on
+// the order rows arrive in.
+//
+// Two events at the same coordinate came out of one binary log event: the
+// images of one rows event, or the statements of one compressed transaction
+// (binlog_transaction_compression), whose row events all carry the
+// coordinate of the payload event around them. Capture gave them ascending
+// event_ids in the order it read them, on any kind of index, so the higher
+// id is the later one.
+//
+// When either event has no coordinate to compare, the answer is false both
+// ways and the caller's arrival order stands, as it did before this rule. That
+// is a row with no file, and a row indexed from MariaDB 11.4 by a build before
+// #1180: those stored start_pos = 2^64 - event size (the server writes a zero
+// end position there, #1117), which is a number and not a place in the file.
+//
+// MySQL and MariaDB only. A PostgreSQL row carries an LSN as text in
+// BinlogFile ("0/16B3748", hasBinlogCoordinate), which this rule does not
+// order: such a row has no coordinate here and arrival order stands, which
+// for PostgreSQL is commit order (its event_timestamp is the commit time).
+func LaterInBinlog(a, b *ResultRow) bool {
+	if !hasBinlogCoordinate(a) || !hasBinlogCoordinate(b) {
+		return false
+	}
+	pa := BinlogPos{File: a.BinlogFile, Pos: a.StartPos}
+	pb := BinlogPos{File: b.BinlogFile, Pos: b.StartPos}
+	if pa == pb {
+		return a.EventID > b.EventID
+	}
+	return !pa.AtOrBefore(pb)
+}
+
+// hasBinlogCoordinate reports whether r's start is a real place in a binary
+// log file. No file can reach 2^63 bytes; the underflowed start positions of
+// LaterInBinlog's comment are all above it.
+//
+// A "file" with a slash is a PostgreSQL LSN (pgcapture writes the commit LSN
+// as unpadded %X/%X): by length and then name, "1/5" sorts before
+// "0/FFFFFFFF", which is backwards. No fold that calls LaterInBinlog reads
+// PostgreSQL rows today (the full-table reconstruct and the Iceberg export
+// refuse the source first); this keeps a later caller from ordering them by
+// accident. A binary log base name cannot hold a slash: the server stores
+// only the name after the last one.
+func hasBinlogCoordinate(r *ResultRow) bool {
+	return r.BinlogFile != "" && r.StartPos < 1<<63 && !strings.Contains(r.BinlogFile, "/")
+}
+
 // Options specifies the filter criteria for querying binlog_events.
 // All fields are optional; nil / zero values are ignored when building SQL.
 type Options struct {

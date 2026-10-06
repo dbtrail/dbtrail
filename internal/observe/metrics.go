@@ -174,6 +174,58 @@ func ObserveSQLStatementPhase(phase string, d time.Duration) {
 	sqlStatementPhase.WithLabelValues(phase).Observe(d.Seconds())
 }
 
+// sqlSlotWait is how long a SQL-on-the-copy statement waited for one of the
+// runner's slots, and how the wait ended (#2112). Unlike the slot_wait phase
+// above, which only a statement that ran to a result reports, this one is
+// observed for EVERY statement that asked for a slot, the SQL card's and the
+// port's alike: the ones that waited and then failed, the ones that gave up,
+// and the ones that never got in. The outcome label is a fixed set:
+//
+//   - slot: it got a slot (a statement that found one free is in here with a
+//     wait of microseconds, so the count is every statement served and the
+//     lowest bucket is the share that did not wait);
+//   - queue_full: the line was full when it arrived, and it did not wait;
+//   - timeout: it waited the whole time a statement waits and none came free;
+//   - cancelled: its caller left while it waited (the client disconnected, or
+//     the connection's own time cap ran out).
+//
+// No server or user label, like the phase histogram: the slots are the
+// daemon's, and one series per outcome does not grow with the registry.
+var sqlSlotWait = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	Namespace: "bintrail",
+	Subsystem: "sql",
+	Name:      "slot_wait_seconds",
+	Help:      "Seconds a SQL-on-the-copy statement waited for a slot, by how the wait ended (slot, queue_full, timeout, cancelled).",
+	Buckets:   prometheus.ExponentialBuckets(0.001, 2, 18), // 1ms … ~131s: past the 30s a statement waits, and past the 120s a slow forward was measured at
+}, []string{"outcome"})
+
+// sqlSlotWaiting is how many statements are asking for a slot and have not
+// been given one or turned away yet: the line for the copy, as of now.
+var sqlSlotWaiting = promauto.NewGauge(prometheus.GaugeOpts{
+	Namespace: "bintrail",
+	Subsystem: "sql",
+	Name:      "slot_waiting",
+	Help:      "SQL-on-the-copy statements asking for a slot right now and not yet given one or turned away.",
+})
+
+// The outcomes of ObserveSQLSlotWait.
+const (
+	SQLSlotWaitGotSlot   = "slot"
+	SQLSlotWaitQueueFull = "queue_full"
+	SQLSlotWaitTimeout   = "timeout"
+	SQLSlotWaitCancelled = "cancelled"
+)
+
+// ObserveSQLSlotWait records one statement's wait for a slot and how it
+// ended (one of the SQLSlotWait* outcomes).
+func ObserveSQLSlotWait(outcome string, d time.Duration) {
+	sqlSlotWait.WithLabelValues(outcome).Observe(d.Seconds())
+}
+
+// SQLSlotWaiting moves the count of statements waiting for a slot: +1 as one
+// starts asking, -1 as it stops.
+func SQLSlotWaiting(delta int) { sqlSlotWaiting.Add(float64(delta)) }
+
 // readRoutingDecisions counts the read router's decisions on the embedded
 // time-travel port (#2038): per server (the registry id, bounded by the
 // registry), per side ("copy", "mysql", or "refused" for a statement the read-only

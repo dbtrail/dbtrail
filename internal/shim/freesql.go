@@ -162,7 +162,7 @@ const (
 	RouteReasonBoundedLimit   RouteReason = "bounded_limit"    // a small LIMIT MySQL answers without reading past it
 	RouteReasonCopyAgeUnknown RouteReason = "copy_age_unknown" // no snapshot time
 	RouteReasonCopyTooOld     RouteReason = "copy_too_old"     // snapshot older than MaxCopyAge, and its tables not vouched for as unchanged (#2085)
-	RouteReasonCopyRefused    RouteReason = "copy_refused"     // the copy errored or cut the result
+	RouteReasonCopyRefused    RouteReason = "copy_refused"     // the copy errored or cut the result (a busy copy has its own two reasons below)
 	RouteReasonShowWarnings   RouteReason = "show_warnings"    // SHOW WARNINGS after a MySQL statement
 	RouteReasonUpstreamLost   RouteReason = "upstream_lost"    // nobody answered: the port's connection to the source is lost
 	RouteReasonExpensivePlan  RouteReason = "expensive_plan"   // the copy answered, its snapshot within MaxCopyAge (past it: tables_unchanged)
@@ -175,8 +175,10 @@ const RouteReasonPinned RouteReason = "connection_pinned"
 
 // RouteReasonCopyColumnsDiffer: the copy declined a star or a NATURAL JOIN
 // over a table whose columns there are not MySQL's (#2111), or a statement
-// that names a column the copy does not hold (#2123). A decision, not a
-// fault, which is why it is not counted under RouteReasonCopyRefused.
+// that names a column the copy does not hold (#2123), or one that uses a
+// date, time or year column where the copy's type for it answers another
+// way (#2133). A decision, not a fault, which is why it is not counted
+// under RouteReasonCopyRefused.
 const RouteReasonCopyColumnsDiffer RouteReason = "copy_columns_differ"
 
 // RouteReasonTablesUnchanged is the copy answering an expensive statement
@@ -191,6 +193,20 @@ const RouteReasonTablesUnchanged RouteReason = "tables_unchanged"
 // not tried: it would have run the statement, refused the result for its
 // size (copy_refused), and MySQL would have run it again (#2115).
 const RouteReasonResultOverCap RouteReason = "result_over_row_cap"
+
+// RouteReasonCopyQueueFull and RouteReasonCopyWaitTimeout are the two ways a
+// busy copy sends an expensive statement to MySQL (#2112). A statement that
+// finds every slot of the copy taken WAITS for one (sqlsandbox.Runner.
+// Reserve): it is MySQL's only when the line was already full as it arrived
+// (copy_queue_full: sqlsandbox.DefaultMaxWaiters statements waiting, and it
+// did not wait at all), or when it waited the whole sqlsandbox.DefaultMaxWait
+// and no slot came free (copy_wait_timeout). Neither is a fault of the copy,
+// which is why they are not counted under RouteReasonCopyRefused: a copy that
+// is merely asked for more than it serves must not read as a broken one.
+const (
+	RouteReasonCopyQueueFull   RouteReason = "copy_queue_full"
+	RouteReasonCopyWaitTimeout RouteReason = "copy_wait_timeout"
+)
 
 // observeRoute reports one decision to the bound observer, if any.
 func (h *Handler) observeRoute(route RouteSide, reason RouteReason) {
@@ -253,7 +269,7 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 			if err != nil {
 				return nil, err
 			}
-			return h.runFreeSQLRouted(currentDB, text, reason, unchangedWithin)
+			return h.runFreeSQLRouted(currentDB, text, readrouter.ShapeOf(qstr), reason, unchangedWithin)
 		},
 	})
 }
@@ -372,16 +388,32 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	var differ *sqlsandbox.ColumnsDifferError
 	if errors.As(err, &differ) {
 		// The copy works; it declined this statement because its answer would
-		// not have MySQL's columns (#2111), or one of its names could mean
-		// something else there (#2123). Its own reason and its own
+		// not have MySQL's columns (#2111), one of its names could mean
+		// something else there (#2123), or a date, time or year column
+		// would be read another way (#2133). Its own reason and its own
 		// warning, so it does not read as a fault nor use up a fault's.
-		h.routeWarn("columns", "read routing: the copy's columns are not MySQL's for a statement (a star, a NATURAL JOIN, or the name of a column the copy does not hold), forwarded to mysql", err)
+		h.routeWarn("columns", "read routing: the copy's columns are not MySQL's for a statement (a star, a NATURAL JOIN, the name of a column the copy does not hold, or a date, time or year column it reads another way), forwarded to mysql", err)
 		return ops.forward(RouteReasonCopyColumnsDiffer, "copy's columns differ: "+differ.Reason)
+	}
+	if errors.Is(err, sqlsandbox.ErrBusy) {
+		// The copy works and was asked for more than it serves (#2112). The
+		// statement either waited the whole time a statement waits, or found
+		// the line full and did not wait: told apart, because the first has
+		// already cost the client that wait and the second cost it nothing.
+		// A cancelled wait (the client left, the connection's own time cap)
+		// is neither, and falls through to the rung below as before.
+		reason, detail := RouteReasonCopyQueueFull, "copy busy, and the line for it full: "
+		var waited *sqlsandbox.BusyError
+		if errors.As(err, &waited) {
+			reason, detail = RouteReasonCopyWaitTimeout, "copy busy for the whole wait: "
+		}
+		h.routeWarn("busy", "read routing: the copy was busy (every slot taken, and the line for one full or the wait over), an expensive statement forwarded to mysql", err)
+		return ops.forward(reason, detail+err.Error())
 	}
 	if err != nil {
 		// The slow path is always right: whatever the copy could not do
-		// (a construct DuckDB lacks, a missing table, busy, a timeout, a
-		// result over the cap), MySQL does.
+		// (a construct DuckDB lacks, a missing table, a timeout, a result
+		// over the cap), MySQL does.
 		h.routeWarn("copy", "read routing: copy refused an expensive statement, forwarded to mysql", err)
 		return ops.forward(RouteReasonCopyRefused, "copy refused: "+shortErr(err))
 	}
@@ -613,7 +645,7 @@ func (h *Handler) notTimeTravelError(qstr string) error {
 
 // runFreeSQL serves one ordinary statement through the bound FreeSQL.
 func (h *Handler) runFreeSQL(schema, qstr string) (*mysql.Result, error) {
-	return h.runFreeSQLRouted(schema, qstr, "", 0)
+	return h.runFreeSQLRouted(schema, qstr, nil, "", 0)
 }
 
 // copyText is the statement the routing ladder sends the copy: the client's
@@ -635,7 +667,10 @@ func copyText(qstr string) (string, error) {
 // on the port without routing its own text. Nothing else is translated from
 // MySQL's dialect, and a statement the copy refuses is the caller's to
 // forward. unchangedWithin is sqlsandbox.Session.UnchangedWithin (#2085).
-func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string, unchangedWithin time.Duration) (*mysql.Result, error) {
+//
+// types is sqlsandbox.Session.Types: the routing layer's reading of the
+// client's own statement, nil for a port without routing.
+func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnTypes, routeReason string, unchangedWithin time.Duration) (*mysql.Result, error) {
 	ctx, cancel := h.queryContext()
 	defer cancel()
 	stmt, schema := rewriteForDuckDB(qstr, schema)
@@ -664,12 +699,19 @@ func (h *Handler) runFreeSQLRouted(schema, qstr, routeReason string, unchangedWi
 	// Asked of the connection, not of the reason text: a routing connection
 	// only ever gets here from the ladder.
 	sess.StrictStar = h.router != nil
+	sess.Types = types
 	sess.UnchangedWithin = unchangedWithin
 	res, err := h.freeSQL.Run(ctx, stmt, schema, sess)
 	var differ *sqlsandbox.ColumnsDifferError
 	var changed *sqlsandbox.MayHaveChangedError
 	if errors.As(err, &differ) || errors.As(err, &changed) {
 		// Handed back as it is: the routing ladder tells it from a fault.
+		return nil, err
+	}
+	if h.router != nil && errors.Is(err, sqlsandbox.ErrBusy) {
+		// Under routing a busy copy is the ladder's to tell from a fault too
+		// (#2112). Asked of the connection, like StrictStar above. A
+		// connection that does not route gets error 1203 below.
 		return nil, err
 	}
 	if err != nil {

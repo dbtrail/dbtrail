@@ -296,6 +296,37 @@ statements that finished, not the slowest ones.
 histogram_quantile(0.9, sum by (le, phase) (rate(bintrail_sql_statement_phase_seconds_bucket[5m])))
 ```
 
+### The wait for a slot (`bintrail_sql_slot_wait_seconds`, `bintrail_sql_slot_waiting`)
+
+A statement that finds every slot taken waits its turn. The phase
+histogram above shows that wait only for the statements that then ran to a
+result. These two show it for every statement that asked for a slot,
+whatever happened next:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `bintrail_sql_slot_wait_seconds{outcome}` | histogram | Seconds a statement waited for a slot, by how the wait ended: `slot` (it got one; a statement that found a slot free is counted here with a wait under a millisecond, so the count is every statement served and the lowest bucket is the share that did not wait), `queue_full` (16 statements were already waiting when it arrived, so it did not wait at all), `timeout` (it waited the whole 30 seconds and no slot came free), `cancelled` (its client disconnected, or the connection's own time limit ran out, while it waited). Buckets from 1 ms to about 131 s. The SQL card and the port together, with no server label: the slots belong to the daemon |
+| `bintrail_sql_slot_waiting` | gauge | Statements asking for a slot right now and not yet given one or turned away, the SQL card's and the port's together. The line holds 16; a statement is counted from the moment it asks, so a scrape can catch one or two more that are about to be turned away |
+
+What happens to a statement that does not get a slot depends on where it
+came from. On the SQL card it is refused (HTTP 429). On the port without
+read routing the client gets MySQL error 1203. On the port with read
+routing MySQL runs it, and the decision is counted as `copy_queue_full` or
+`copy_wait_timeout` (next section).
+
+```promql
+# how long statements wait for the copy, p90, among those that got a slot
+histogram_quantile(0.9, sum by (le) (rate(bintrail_sql_slot_wait_seconds_bucket{outcome="slot"}[5m])))
+
+# statements per second that did not get a slot, by why
+sum by (outcome) (rate(bintrail_sql_slot_wait_seconds_count{outcome!="slot"}[5m]))
+```
+
+A p90 of seconds with `bintrail_sql_slot_waiting` rarely at zero says the
+copy has more heavy reads than slots. `--sql-max-in-flight` adds slots for
+reads on different servers; on the port, reads of ONE server still run one
+at a time whatever its value.
+
 ## Read routing (`bintrail_read_routing_decisions_total`)
 
 With read routing on the embedded port (`watch --flashback-listen` plus
@@ -304,7 +335,7 @@ once:
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `bintrail_read_routing_decisions_total{server,route,reason}` | counter | Routing decisions per server (`server` is the registry id), side (`route` is `copy`, `mysql`, or `refused` for a statement a read-only port did not run) and reason, a closed set: `expensive_plan` (the copy answered, its snapshot within the limit), `tables_unchanged` (the copy answered although its snapshot is older than the limit, because the tables the statement reads have not changed since their snapshot), `cheap_plan`, `bounded_limit` (a small `LIMIT` MySQL answers without reading past it), `result_over_row_cap` (an expensive plan whose result is estimated above the copy's row cap: MySQL answered, and the copy was not tried), `not_a_select`, `write`, `session_setting`, `session_differs` (the source's session on that connection holds a setting the copy does not reproduce: a time zone, a SQL mode, a locale; the log names it once per connection), `connection_pinned` (a `CREATE TEMPORARY TABLE`, `LOCK TABLES` or `PREPARE` ran earlier on that connection), `in_transaction`, `veto`, `explain_failed`, `copy_age_unknown`, `copy_too_old`, `copy_refused`, `copy_columns_differ` (the copy works and declined a `SELECT *` or a `NATURAL JOIN` over a table whose columns there are not MySQL's, or a statement that names a column the copy does not hold: a decision, not a fault), `show_warnings`, `upstream_lost` (nobody answered: the connection to the source is lost, the client got 2006), `read_only` (refused: not a read, and the port runs with `--route-read-only`; the client got 1290), `routing_off`. Decisions, not successes: a statement MySQL then fails was still MySQL's. Exported by `watch --metrics-addr` only; a daemon without routing never creates a series |
+| `bintrail_read_routing_decisions_total{server,route,reason}` | counter | Routing decisions per server (`server` is the registry id), side (`route` is `copy`, `mysql`, or `refused` for a statement a read-only port did not run) and reason, a closed set: `expensive_plan` (the copy answered, its snapshot within the limit), `tables_unchanged` (the copy answered although its snapshot is older than the limit, because the tables the statement reads have not changed since their snapshot), `cheap_plan`, `bounded_limit` (a small `LIMIT` MySQL answers without reading past it), `result_over_row_cap` (an expensive plan whose result is estimated above the copy's row cap: MySQL answered, and the copy was not tried), `not_a_select`, `write`, `session_setting`, `session_differs` (the source's session on that connection holds a setting the copy does not reproduce: a time zone, a SQL mode, a locale; the log names it once per connection), `connection_pinned` (a `CREATE TEMPORARY TABLE`, `LOCK TABLES` or `PREPARE` ran earlier on that connection), `in_transaction`, `veto`, `explain_failed`, `copy_age_unknown`, `copy_too_old`, `copy_refused`, `copy_queue_full` (the copy was busy and the line for it was full when the statement arrived, so it did not wait), `copy_wait_timeout` (the copy was busy and the statement waited the whole 30 seconds for its turn; see [SQL on the copy](#sql-on-the-copy-bintrail_sql_statement_phase_seconds) for the wait itself), `copy_columns_differ` (the copy works and declined a `SELECT *` or a `NATURAL JOIN` over a table whose columns there are not MySQL's, a statement that names a column the copy does not hold, one that does arithmetic on a date column, or one that names a `TIME` or `YEAR` column: a decision, not a fault), `show_warnings`, `upstream_lost` (nobody answered: the connection to the source is lost, the client got 2006), `read_only` (refused: not a read, and the port runs with `--route-read-only`; the client got 1290), `routing_off`. Decisions, not successes: a statement MySQL then fails was still MySQL's. Exported by `watch --metrics-addr` only; a daemon without routing never creates a series |
 
 The copy's share of the work is `route="copy"` over the total. A copy that
 never answers is visible as `copy_refused`, `copy_too_old`,
@@ -313,7 +344,9 @@ never answers is visible as `copy_refused`, `copy_too_old`,
 connection" says which setting and value to change); `explain_failed`
 climbing means the source account cannot `EXPLAIN` what the clients run.
 `upstream_lost` climbing means the source is unreachable or its credentials
-are wrong. `SHOW WARNINGS` after a copy-served statement and the schema
+are wrong. `copy_queue_full` or `copy_wait_timeout` climbing means the copy
+is asked for more heavy reads than it serves: it works, and the reads that
+did not fit went to MySQL, where they are slow. `SHOW WARNINGS` after a copy-served statement and the schema
 seeded at connect are not decisions and are not counted. The same counts, per server since the daemon started,
 are on the web interface under Settings → MCP Server → Connect a SQL client.
 

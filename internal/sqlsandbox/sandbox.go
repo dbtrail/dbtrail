@@ -211,6 +211,18 @@ type Session struct {
 	// no routing leave it off and get the copy's answer. The worker never
 	// sees it: the caller's ViewsFor decides, from what the statement names.
 	StrictStar bool
+	// Types answers, for the statement as the client sent it, whether the
+	// copy must not answer because of the type of a column it names (#2133):
+	// arithmetic on a date column, or a TIME or YEAR column named. Set with
+	// StrictStar, by the routing layer, which holds the reading of the
+	// statement the question needs (readrouter.ShapeOf: of the client's own
+	// text, or of a prepared statement's template); the statement handed over
+	// to run has already been written for the copy, with its arguments in
+	// it. The caller's ViewsFor asks it once, with the column types of the
+	// tables the statement reads. Nil under StrictStar means "not
+	// known", and a statement over a table with such a column is then
+	// refused.
+	Types ColumnTypes
 	// UnchangedWithin, when not zero, asks for a refusal instead of an answer
 	// unless every table the statement reads has had no change on the source
 	// since the snapshot the copy holds of it, as far as that can be known:
@@ -222,6 +234,15 @@ type Session struct {
 	// nothing. Like StrictStar, the worker never sees it: the caller decides,
 	// from the tables the statement names.
 	UnchangedWithin time.Duration
+}
+
+// ColumnTypes is the question Session.Types answers about the tables a
+// statement reads, all together: dates are their DATE, DATETIME and
+// TIMESTAMP columns (and those of a type that is not known), whole their
+// TIME and YEAR columns, by name, and star says the statement holds a star
+// (Refs). The answer is why the copy must not answer the statement, or "".
+type ColumnTypes interface {
+	ColumnVeto(dates, whole []string, star bool) string
 }
 
 // Column is one result column with DuckDB's type name (INTEGER, VARCHAR,

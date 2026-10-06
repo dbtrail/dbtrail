@@ -431,11 +431,14 @@ func backtickFixtures(db string, dollarNames bool) []backtickFixture {
 		kept("SELECT 1.5_5", diff, "starts with a digit", "1.5 under the alias _5 on MySQL; 1.55 on the copy"),
 		same("SELECT `id` FROM `orders` WHERE `created_on` >= DATE '2026-01-05' - INTERVAL 1 DAY ORDER BY `id`", "a date minus INTERVAL is the same day on both: not kept back"),
 		// What the text does not show (#2122): the same arithmetic on a column
-		// is not vetoed, because nothing the router reads says the column is a
-		// date. A known difference, listed in docs/time-travel-sql.md.
+		// is not vetoed, because nothing in the text says the column is a
+		// date. Under read routing the copy declines it from the column's type
+		// in the snapshot's table definition (#2133), which this comparison
+		// does not ask: TestIntegrationSQLCompareTemporalColumns does.
 		{stmt: "SELECT `created_on` + 1 FROM `orders` WHERE `id` = 1", verdict: diff, why: "a DATE column plus a number: 20260102 on MySQL, 2026-01-02 on the copy; not seen in the text"},
+		// A known difference, listed in docs/time-travel-sql.md.
 		{stmt: "SELECT `created_on` + INTERVAL 1 DAY FROM `orders` WHERE `id` = 1", verdict: diff, why: "a DATE on MySQL (2026-01-02), a date and time on the copy (2026-01-02 00:00:00)"},
-		{stmt: "SELECT -1 | 0", verdict: diff, why: "bit operators are unsigned on MySQL (18446744073709551615) and signed on the copy (-1); they agree on numbers that are not negative, and are not vetoed"},
+		kept("SELECT -1 | 0", diff, "bit operator", "bit operators are unsigned on MySQL (18446744073709551615) and signed on the copy (-1)"),
 		// A NUL byte is not a veto: no statement was found that both answer
 		// differently. Inside a comment the copy stops reading there.
 		{stmt: "SELECT 1 /* \x00 */ + 1", verdict: noc, why: "2 on MySQL; the copy reads an unterminated comment"},

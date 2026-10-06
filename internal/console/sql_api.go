@@ -509,6 +509,33 @@ func (s *Server) runSQL(ctx context.Context, b *bundle, user, statement, schema 
 	return s.runSQLVouched(ctx, b, user, statement, schema, maxRows, sess, nil)
 }
 
+// reserveSQLSlot takes a slot from the runner, waiting for one as the runner
+// does, and reports the wait (#2112): how long it was and how it ended, plus
+// the count of statements waiting meanwhile. The SQL card and the port both
+// get their slot here, so the numbers are the daemon's, not one surface's.
+// The error is the runner's own, untouched.
+func reserveSQLSlot(ctx context.Context, runner sqlRunner, user string) (sqlSlot, time.Duration, error) {
+	observe.SQLSlotWaiting(1)
+	start := time.Now()
+	slot, err := runner.Reserve(ctx, user)
+	waited := time.Since(start)
+	observe.SQLSlotWaiting(-1)
+	var timedOut *sqlsandbox.BusyError
+	outcome := observe.SQLSlotWaitGotSlot
+	switch {
+	case err == nil:
+	case errors.As(err, &timedOut):
+		outcome = observe.SQLSlotWaitTimeout
+	case errors.Is(err, sqlsandbox.ErrBusy):
+		outcome = observe.SQLSlotWaitQueueFull
+	default:
+		// The runner returns nothing else but the caller's own ctx error.
+		outcome = observe.SQLSlotWaitCancelled
+	}
+	observe.ObserveSQLSlotWait(outcome, waited)
+	return slot, waited, err
+}
+
 // sqlUnchanged answers, for the tables a statement's views read, why they
 // cannot be vouched for as unchanged since their snapshot ("" when they
 // can): Server.copyUnchanged bound to a server.
@@ -532,12 +559,10 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 	// copy. An unused slot is given back on every early return, and said so
 	// at debug with how long it was held: the slot is one of a few (two by
 	// default), so a build that holds it for long is everybody else's "busy".
-	waitStart := time.Now()
-	slot, err := s.sqlRunner.Reserve(ctx, user)
+	slot, slotWait, err := reserveSQLSlot(ctx, s.sqlRunner, user)
 	if err != nil {
 		return sqlOutcome{}, err
 	}
-	slotWait := time.Since(waitStart)
 	ran := false
 	viewsStart := time.Now()
 	defer func() {
@@ -630,7 +655,7 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 				// A star returns what a view's column list says. Where that
 				// is not what MySQL returns, a caller that asked for MySQL's
 				// answer gets a refusal and sends the statement there (#2111).
-				if msg := sqlStrictRefusalFor(in, narrowed, refs, statement); msg != "" {
+				if msg := sqlStrictRefusalFor(in, narrowed, refs, statement, sess.Types); msg != "" {
 					viewsRefusal = &sqlStarRefusal{msg}
 					return "", viewsRefusal
 				}
@@ -855,8 +880,12 @@ func sqlStarRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs) string {
 //     one name on the copy, so the statement would read the one that kept the
 //     name, whichever the source reads (views.Input.SelectedCaseTwin);
 //   - a star returns other columns than MySQL's (sqlStarRefusalFor, #2111);
-//   - a name could bind to something else (sqlNamesRefusalFor, #2123).
-func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, statement string) string {
+//   - a name could bind to something else (sqlNamesRefusalFor, #2123);
+//   - a date, time or year column is used where the copy's type for it
+//     answers differently (sqlTypesRefusalFor, #2133).
+//
+// types is sqlsandbox.Session.Types.
+func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, statement string, types sqlsandbox.ColumnTypes) string {
 	if table, twin := narrowed.SelectedCaseTwin(); table != "" {
 		return fmt.Sprintf("the copy does not answer this statement: %s and %s differ only by letter case, "+
 			"which the copy does not tell apart, so it could read the other table", table, twin)
@@ -864,7 +893,56 @@ func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, stateme
 	if msg := sqlStarRefusalFor(in, narrowed, refs); msg != "" {
 		return msg
 	}
-	return sqlNamesRefusalFor(narrowed, statement)
+	if msg := sqlNamesRefusalFor(narrowed, statement); msg != "" {
+		return msg
+	}
+	return sqlTypesRefusalFor(narrowed, refs, types)
+}
+
+// sqlTypesRefusalFor says why the copy must not answer a statement because of
+// the TYPE of a column it names, or "" when it can (#2133). narrowed is the
+// views the statement reads (every view, when the walk was not certain of
+// them) and types the routing layer's reading of the statement, which
+// holds the rule (readrouter.ColumnVeto: this package does not link the
+// routing layer, so the rule comes to it).
+//
+// The copy holds a DATE, a DATETIME and a TIMESTAMP as what they are, where
+// MySQL turns one into a number wherever a number is asked for: created_on +
+// 1 is 20260102 on MySQL and 2026-01-02 on the copy, both answered with no
+// error. It holds a TIME as text and a YEAR as a plain number.
+// Each table's columns of those types come from its snapshot's table
+// definition. A table with no definition never gets here:
+// sqlNamesRefusalFor has refused the statement already. With no reading of
+// the statement to ask (types is nil), a statement over a table with such a
+// column is refused: not known is never "nothing to find".
+func sqlTypesRefusalFor(narrowed views.Input, refs sqlsandbox.Refs, types sqlsandbox.ColumnTypes) string {
+	// Every table's columns in one question, so the statement is read once
+	// however many tables it reads (every table of the copy, when the walk
+	// was not certain of them).
+	var dates, whole, tables []string
+	for _, t := range narrowed.SelectedBaselines() {
+		d, w := t.TypedColumns()
+		if len(d) == 0 && len(w) == 0 {
+			continue
+		}
+		dates, whole = append(dates, d...), append(whole, w...)
+		if len(tables) < 3 {
+			tables = append(tables, t.Schema+"."+t.Table)
+		}
+	}
+	if len(tables) == 0 {
+		return ""
+	}
+	why := "the statement could not be searched for its date, time and year columns"
+	if types != nil {
+		star := refs.Star || refs.StarNamedJoin || len(refs.StarTables) > 0
+		why = types.ColumnVeto(dates, whole, star)
+	}
+	if why == "" {
+		return ""
+	}
+	return fmt.Sprintf("the copy does not answer this statement: a date, time or year column of the tables it reads (%s among them) "+
+		"would be read another way than on MySQL (%s)", strings.Join(tables, ", "), why)
 }
 
 // sqlNamesRefusalFor says why the copy must not answer a statement because of
