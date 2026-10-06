@@ -59,6 +59,28 @@ func (f *fileIdentities) get(file string) string {
 	return f.m[file]
 }
 
+// runFileIdentities is the registry a run's checkpoints read. When the
+// checkpoint's file was verified it starts with that file's identity, so the
+// checkpoints written before the stream re-reads the file's format
+// description (the ticker fires at once) do not store NULL over it.
+func runFileIdentities(check positionFileCheck, saved *streamState) *fileIdentities {
+	f := newFileIdentities()
+	if check.verified && saved != nil {
+		f.set(saved.binlogFile, saved.fileIdentity)
+	}
+	return f
+}
+
+// positionAdvanceRenumbered reports whether a position-mode advance to
+// file:pos leaves the checkpoint's numbering, so that no indexed row may be
+// deleted against it and the dedup floor starts over: a verdict of
+// checkPositionCheckpointFile, or a start that does not continue the
+// checkpoint by name and position (#2170). The verdict must win: the oldest
+// file of a new numbering can carry the checkpoint's very name, at :4.
+func positionAdvanceRenumbered(kind positionRenumberKind, savedFile string, savedPos uint64, file string, pos uint32) bool {
+	return kind != positionContinues || !continuesNumbering(savedFile, savedPos, file, uint64(pos))
+}
+
 // positionRenumberKind is a reason found before the gap auto-advance why the
 // restart position is not in the checkpoint's own numbering.
 type positionRenumberKind int

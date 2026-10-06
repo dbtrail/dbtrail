@@ -176,6 +176,7 @@ func TestFileIdentities(t *testing.T) {
 	f.set("binlog.000003", "fde:100:1")
 	f.set("binlog.000004", "fde:200:1")
 	f.set("binlog.000005", "")
+	f.set("binlog.000003", "") // an unknown identity never erases a known one
 	if got := f.get("binlog.000003"); got != "fde:100:1" {
 		t.Errorf("get(000003) = %q", got)
 	}
@@ -369,5 +370,43 @@ func TestDetectPositionGap_fitsNamesTheOldestFile(t *testing.T) {
 				t.Errorf("gap = %+v, want RebuildUndetectable with the oldest file binlog.000001:4", gap)
 			}
 		})
+	}
+}
+
+func TestPositionAdvanceRenumbered(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		kind      positionRenumberKind
+		savedFile string
+		savedPos  uint64
+		file      string
+		pos       uint32
+		want      bool
+	}{
+		{"forward purge in one numbering", positionContinues, "binlog.000003", 9000, "binlog.000005", 4, false},
+		{"start below the checkpoint (#2170)", positionContinues, "binlog.000003", 9000, "binlog.000001", 4, true},
+		{"file replaced, oldest file has the checkpoint's name at :4", positionFileReplaced, "binlog.000001", 4, "binlog.000001", 4, true},
+		{"file replaced, oldest file sorts above", positionFileReplaced, "binlog.000001", 9000, "binlog.000002", 4, true},
+		{"another server whose names sort above", positionOtherServer, "binlog.000003", 9000, "binlog.000009", 4, true},
+	} {
+		if got := positionAdvanceRenumbered(c.kind, c.savedFile, c.savedPos, c.file, c.pos); got != c.want {
+			t.Errorf("%s: positionAdvanceRenumbered = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestRunFileIdentities(t *testing.T) {
+	saved := &streamState{mode: "position", binlogFile: "binlog.000003", fileIdentity: "fde:100:1"}
+	if got := runFileIdentities(positionFileCheck{verified: true}, saved).get("binlog.000003"); got != "fde:100:1" {
+		t.Errorf("a verified checkpoint file starts the run unknown (%q): the first checkpoint would store NULL over it", got)
+	}
+	if got := runFileIdentities(positionFileCheck{}, saved).get("binlog.000003"); got != "" {
+		t.Errorf("an unverified checkpoint file was carried: %q", got)
+	}
+	if got := runFileIdentities(positionFileCheck{kind: positionFileReplaced}, saved).get("binlog.000003"); got != "" {
+		t.Errorf("the identity of a replaced file was carried: %q", got)
+	}
+	if runFileIdentities(positionFileCheck{}, nil) == nil {
+		t.Error("a first run has no registry: its checkpoints would never record an identity")
 	}
 }

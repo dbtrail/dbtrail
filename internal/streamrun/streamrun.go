@@ -2753,7 +2753,7 @@ func oneRun(ctx context.Context, cfg Config) error {
 					// The same holds when the checkpoint's file turned out to be
 					// another file, or another server's (#2172): its name may
 					// even sort below the start.
-					if posCheck.kind != positionContinues || !continuesNumbering(saved.binlogFile, saved.binlogPos, startFile, uint64(startPos)) {
+					if positionAdvanceRenumbered(posCheck.kind, saved.binlogFile, saved.binlogPos, startFile, startPos) {
 						fresh, err := freshDedupFloor(indexDB)
 						if err != nil {
 							return fmt.Errorf("binlog numbering started over (checkpoint %s:%d, oldest source file %s): %w",
@@ -2984,13 +2984,7 @@ func oneRun(ctx context.Context, cfg Config) error {
 		accGTID:        accGTID,
 		bintrailID:     bintrailID,
 		sourceIdentity: srcIdentity,
-		fileIdents:     newFileIdentities(),
-	}
-	// The checkpoint's file was verified above: carry its identity so the
-	// checkpoints written before the stream re-reads the file's format
-	// description (the ticker fires at once) do not store NULL over it.
-	if posCheck.verified {
-		state.fileIdents.set(saved.binlogFile, saved.fileIdentity)
+		fileIdents:     runFileIdentities(posCheck, saved),
 	}
 	if saved != nil {
 		state.eventsIndexed = saved.eventsIndexed
