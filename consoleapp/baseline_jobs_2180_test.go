@@ -645,7 +645,7 @@ func TestReclaim_refusesALockPathOutsideTheJobsFolder(t *testing.T) {
 	for i, lp := range []string{foreign, misnamed, filepath.Join(sup.jobsDir, "run-2.lock")} {
 		id := []string{"run-1", "precious", "run-9"}[i] // the third names another run's lock
 		writeFile(t, lp)
-		if err := sup.history.BeginJob(console.BaselineJob{RunID: id, LockPath: lp, ServerID: "s1", Kind: console.BaselineRunDump,
+		if err := sup.history.BeginJob(console.BaselineJob{RunID: id, LockPath: lp, ServerID: "s1", Kind: console.BaselineRunDump, Host: hostIdentity(),
 			Dirs: []console.BaselineJobDir{{Root: f.staging, ResolvedRoot: resolved, Name: "dump-1"}}}); err != nil {
 			t.Fatal(err)
 		}
@@ -672,5 +672,112 @@ func TestReclaim_sweepsInterruptedDiscards(t *testing.T) {
 	boot.reclaimInterruptedJobs()
 	if exists(snap) || exists(left) {
 		t.Fatalf("snapshot kept=%v, discarding leftover kept=%v", exists(snap), exists(left))
+	}
+}
+
+// rewriteJob replaces a journal entry, for cases that stage what another
+// host or an older entry would have written.
+func rewriteJob(t *testing.T, f jobsFixture, edit func(*console.BaselineJob)) {
+	t.Helper()
+	sup := f.supervisor(t)
+	jobs := sup.history.Jobs()
+	if len(jobs) != 1 {
+		t.Fatalf("jobs = %+v", jobs)
+	}
+	edit(&jobs[0])
+	if err := sup.history.BeginJob(jobs[0]); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// flock only proves anything between processes of ONE kernel. A job another
+// host journaled (a state folder on NFS mounted with local locks, or shared
+// between a host and Docker Desktop's VM) holds a lock this host cannot see,
+// so its folders are never reclaimed here.
+func TestReclaim_aJobFromAnotherHostIsKept(t *testing.T) {
+	f := newJobsFixture(t)
+	snap := stageKilledRefresh(t, f)
+	rewriteJob(t, f, func(j *console.BaselineJob) { j.Host = "boot:another-host" })
+	boot := f.supervisor(t)
+	boot.reclaimInterruptedJobs()
+	if !exists(snap) || len(boot.history.Jobs()) != 1 || len(boot.history.List("s1")) != 0 {
+		t.Fatal("a job journaled by another host was reclaimed")
+	}
+	// No host recorded at all is the same: not provably this host.
+	rewriteJob(t, f, func(j *console.BaselineJob) { j.Host = "" })
+	again := f.supervisor(t)
+	again.reclaimInterruptedJobs()
+	if !exists(snap) {
+		t.Fatal("a job with no host identity was reclaimed")
+	}
+}
+
+// The journal records this host's identity, and a job from this host is
+// reclaimed (the other tests rely on it; this one names it).
+func TestBeginJob_recordsThisHost(t *testing.T) {
+	f := newJobsFixture(t)
+	sup := f.supervisor(t)
+	j := sup.beginJob(console.BaselineRunDump, "s1", "shop", "", "", time.Now())
+	t.Cleanup(j.release)
+	jobs := sup.history.Jobs()
+	if len(jobs) != 1 || jobs[0].Host == "" || jobs[0].Host != hostIdentity() {
+		t.Fatalf("journaled host = %+v, want %q", jobs, hostIdentity())
+	}
+}
+
+// On a network or FUSE file system the reclaim says, once, that a state
+// folder shared between hosts needs a lock every host sees.
+func TestReclaim_networkFolderFromAnotherHostWarnsOnce(t *testing.T) {
+	f := newJobsFixture(t)
+	snap := stageKilledRefresh(t, f)
+	rewriteJob(t, f, func(j *console.BaselineJob) { j.Host = "boot:another-host" })
+	prev := jobsDirOnNetworkFS
+	t.Cleanup(func() { jobsDirOnNetworkFS = prev })
+	jobsDirOnNetworkFS = func(string) (string, bool) { return "nfs", true }
+	logs := captureWarnings(t)
+	for range 2 {
+		f.supervisor(t).reclaimInterruptedJobs()
+	}
+	if !exists(snap) {
+		t.Fatal("reclaimed on a network folder for another host's job")
+	}
+	if c := strings.Count(logs.String(), "network file system"); c != 1 {
+		t.Errorf("%d network warnings over two boots of one process, want 1:\n%s", c, logs)
+	}
+}
+
+func TestNetworkFSClassification(t *testing.T) {
+	for magic, want := range map[int64]bool{
+		0x6969: true, 0xFF534D42: true, 0xFE534D42: true, 0x517B: true, 0x65735546: true, 0x01021997: true,
+		0xEF53: false, 0x58465342: false, 0x9123683E: false, 0x01021994: false,
+	} {
+		if _, got := networkFSMagic(magic); got != want {
+			t.Errorf("networkFSMagic(%#x) = %v, want %v", magic, got, want)
+		}
+	}
+	for name, want := range map[string]bool{"nfs": true, "smbfs": true, "macfuse": true, "osxfuse": true, "webdav": true, "apfs": false, "hfs": false} {
+		if got := networkFSName(name); got != want {
+			t.Errorf("networkFSName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// The .discarding sweep runs only under a parent that passed the same
+// "still resolves where the job wrote" check as the folders themselves.
+func TestReclaim_sweepOnlyUnderAVerifiedRoot(t *testing.T) {
+	f := newJobsFixture(t)
+	stageKilledRefresh(t, f)
+	elsewhere := t.TempDir()
+	left := filepath.Join(elsewhere, "."+killedTS+".discarding")
+	mkdirs(t, left)
+	if err := os.RemoveAll(f.snaps); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, f.snaps); err != nil {
+		t.Fatal(err)
+	}
+	f.supervisor(t).reclaimInterruptedJobs()
+	if !exists(left) {
+		t.Fatal("the sweep ran under a parent that now resolves somewhere else")
 	}
 }

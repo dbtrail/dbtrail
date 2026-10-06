@@ -282,7 +282,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folders that job wrote down, records the run as interrupted (with when it
   started and its last sign of progress), and says so in one warning per job.
   A job whose lock another process still holds (a second DBTrail on the same
-  state folder) is left alone. Only folders the job itself wrote down are
+  state folder) is left alone, and so is a job another host ran: each job
+  records its host (the kernel boot id, else the host name), because an
+  `flock` is not seen across hosts on NFS with local locks or on a folder a
+  host and Docker Desktop's VM share. mydumper is started with a death signal
+  on Linux, so it cannot outlive DBTrail and go on writing into a folder the
+  next start removes. And every snapshot producer now publishes (`_SUCCESS`)
+  only if the `_INCOMPLETE` marker it wrote at the start is still there:
+  otherwise the run fails and the marker is put back, so a folder removed
+  and partly recreated under a running writer is never published complete. Only folders the job itself wrote down are
   ever removed, and of those never a finished snapshot (`_SUCCESS`), a
   snapshot with no marker that holds files, a symbolic link, or a folder
   whose parent now points somewhere else. The listing warning about an

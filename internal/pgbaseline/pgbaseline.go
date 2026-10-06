@@ -378,7 +378,7 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	if err := baselineintegrity.WriteManifest(snapDir); err != nil {
 		return stats, fmt.Errorf("pgbaseline: snapshot complete but could not write integrity manifest: %w", err)
 	}
-	if err := baseline.WriteSuccessMarker(snapDir); err != nil {
+	if err := baseline.CompleteSnapshot(snapDir); err != nil {
 		return stats, fmt.Errorf("pgbaseline: snapshot complete but could not write %s marker: %w", baseline.SuccessMarker, err)
 	}
 	return stats, nil

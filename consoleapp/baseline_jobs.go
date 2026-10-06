@@ -93,6 +93,7 @@ func (s *baselineSupervisor) beginJob(kind, serverID, serverName, trigger, why s
 	err = s.history.BeginJob(console.BaselineJob{
 		RunID: j.runID, LockPath: j.lockPath, ServerID: serverID, ServerName: serverName,
 		Kind: kind, Trigger: trigger, Why: why, StartedAt: started.UTC().Format(time.RFC3339),
+		Host: hostIdentity(),
 	})
 	if err != nil {
 		slog.Warn("snapshot jobs: could not journal this job, so if the process is killed during it, what it leaves on disk "+
@@ -191,6 +192,12 @@ func (s *baselineSupervisor) reclaimJob(j console.BaselineJob) {
 			"server", j.ServerName, "kind", j.Kind, "lock", j.LockPath)
 		return
 	}
+	// Another host's job: its lock lives in a kernel this one cannot see,
+	// so a free lock here proves nothing about it.
+	if j.Host == "" || j.Host != hostIdentity() {
+		noteForeignJob(s.jobsDir, j.Host, j.ServerName, j.Kind)
+		return
+	}
 	lock, state, err := tryJobLock(j.LockPath)
 	if err != nil {
 		slog.Warn("snapshot jobs: could not check whether an earlier snapshot job is still running; what it created is kept",
@@ -228,18 +235,6 @@ func (s *baselineSupervisor) reclaimJob(j console.BaselineJob) {
 	var removed, kept []string
 	var published string
 	var errs []error
-	// A discard whose delete failed part way leaves a ".<ts>.discarding"
-	// folder; the refresh loop sweeps those each cycle, but a server with
-	// full reads only has no refresh, so sweep the snapshot roots here too.
-	// FIRST: a leftover under the very name a discard below renames to would
-	// make that rename fail.
-	for _, d := range j.Dirs {
-		if _, isSnap := snapshotdir.ParseTime(d.Name); isSnap && filepath.IsAbs(d.Root) {
-			if _, serr := reconstruct.SweepDiscardedSnapshots(d.Root); serr != nil {
-				errs = append(errs, serr)
-			}
-		}
-	}
 	last := fileMTime(j.LockPath)
 	for _, d := range j.Dirs {
 		p := filepath.Join(d.Root, d.Name)
@@ -340,6 +335,16 @@ func reclaimJobDir(d console.BaselineJobDir) jobDirResult {
 	}
 	if err != nil || resolved != d.ResolvedRoot {
 		return jobDirResult{keptBecause: "its parent no longer resolves to where the job wrote"}
+	}
+	if isSnapshot {
+		// A discard whose delete failed part way leaves a ".<ts>.discarding"
+		// folder. The refresh loop sweeps those each cycle, but a server with
+		// full reads only has none, so sweep here: only now that the parent
+		// passed the check above, and before the discard below, whose rename
+		// would collide with a leftover of the same name.
+		if _, err := reconstruct.SweepDiscardedSnapshots(d.Root); err != nil {
+			return jobDirResult{err: err}
+		}
 	}
 	p := filepath.Join(d.Root, name)
 	info, err := os.Lstat(p)

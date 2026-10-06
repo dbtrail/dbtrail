@@ -26,6 +26,10 @@ type BaselineJob struct {
 	Trigger    string `json:"trigger,omitempty"`
 	Why        string `json:"why,omitempty"`
 	StartedAt  string `json:"started_at"`
+	// Host is the identity of the kernel the job ran on (boot id, else host
+	// name). An flock is only visible within one kernel, so only the host
+	// that journaled a job may take its free lock as proof it died.
+	Host string `json:"host,omitempty"`
 	// Dirs is every directory the job created, in order, each recorded after
 	// the job established it was its own (a fresh temp directory, or a
 	// snapshot directory that was vacant) and before it wrote data into it.

@@ -1463,7 +1463,8 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 	// where it would be world-readable in `ps aux` / /proc/<pid>/cmdline. The
 	// child's /proc/<pid>/environ is mode 0400 (#811).
 	cmd.Env = mydumperEnv(os.Environ(), password)
-	out, err := cmd.CombinedOutput()
+	prepareMydumperCmd(cmd)
+	out, err := runMydumperCmd(cmd)
 	if err != nil {
 		if msg := strings.TrimSpace(string(out)); msg != "" {
 			if hint := mydumperTLSHint(msg, tlsPlan); hint != "" {

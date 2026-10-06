@@ -1115,7 +1115,10 @@ func finalizeCompletenessMarker(outputDir string, cancelErr error, tableErrs []e
 	if joined := errors.Join(cancelErr, errors.Join(tableErrs...)); joined != nil {
 		return joined
 	}
-	if err := baseline.WriteSuccessMarker(outputDir); err != nil {
+	if err := baseline.CompleteSnapshot(outputDir); err != nil {
+		if errors.Is(err, baseline.ErrIncompleteMarkerVanished) {
+			return err
+		}
 		// The dump is complete on disk but unmarked; without _SUCCESS (and
 		// absent _INCOMPLETE, which this branch would have just removed) it is
 		// STILL treated as complete by the legacy-compat default, so this is a
