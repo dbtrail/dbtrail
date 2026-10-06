@@ -34,7 +34,9 @@ type StateEntry struct {
 
 // ApplyAt applies binlog events to initialState up to and including at,
 // returning the final row state. Returns a nil state if the row was deleted.
-// Events must be sorted by (event_timestamp, event_id).
+// Events are folded in the order given. A caller that wants the row's changes
+// in binary log order, and not in the (event_timestamp, event_id) order a
+// fetch returns, passes them through EventsInBinlogOrder first (#2156).
 //
 // The `ev.EventTimestamp.After(at)` check below is a defensive backstop, not
 // the transaction-boundary cut: callers are expected to have already fetched
@@ -66,7 +68,8 @@ func ApplyAt(initialState map[string]any, events []query.ResultRow, at time.Time
 
 // BuildHistory applies events chronologically up to at and returns a StateEntry
 // for each state transition, starting with the baseline as the first entry.
-// Events must be sorted by (event_timestamp, event_id). Like ApplyAt, it fails
+// Events are folded and listed in the order given: see ApplyAt for binary log
+// order (EventsInBinlogOrder, #2156). Like ApplyAt, it fails
 // loud on a residual unchanged-TOAST marker (#592) in any folded event.
 //
 // Same transaction-boundary caveat as ApplyAt: pass events already fetched

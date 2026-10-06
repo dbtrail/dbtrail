@@ -606,8 +606,14 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 	//    present at some point in the window (baseline row, or any delta). Three
 	//    outcomes: present-with-state / existed-then-deleted-as-of-`at` / never.
 	existed := baselineRow != nil || len(rows) > 0
+	// The fold takes the row's changes in binary log order where that can be
+	// established (#2156); `rows` stays as fetched for the counts.
+	ordered, order := reconstruct.EventsInBinlogOrder(rows, atTime, query.BinlogOrderProof(ctx, b.db))
+	if warn := order.Warning(); warn != "" {
+		resp.Warnings = append(resp.Warnings, "statement_time_order: "+warn)
+	}
 	if history {
-		entries, err := reconstruct.BuildHistory(baselineRow, snapshotTime, rows, atTime)
+		entries, err := reconstruct.BuildHistory(baselineRow, snapshotTime, ordered, atTime)
 		if err != nil {
 			// Residual unchanged-TOAST marker (#592): the stored images can't
 			// yield a correct reconstruction. 422 like the coverage-gap refusal —
@@ -618,7 +624,7 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 		resp.Found = existed
 		resp.History = toStateEntryDTOs(entries)
 	} else {
-		state, err := reconstruct.ApplyAt(baselineRow, rows, atTime)
+		state, err := reconstruct.ApplyAt(baselineRow, ordered, atTime)
 		if err != nil {
 			writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
 			return

@@ -605,7 +605,13 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	}
 
 	// ── Reconstruct and format output ──────────────────────────────────────────
-	if err := writeReconstructOutput(baselineRow, events, snapshotTime, at, recHistory, recFormat, os.Stdout); err != nil {
+	// The fold takes the row's changes in binary log order where that can be
+	// established (#2156); `events` stays as fetched for the counts below.
+	ordered, order := reconstruct.EventsInBinlogOrder(events, at, query.BinlogOrderProof(cmd.Context(), db))
+	if warn := order.Warning(); warn != "" {
+		slog.Warn("reconstruct: " + warn)
+	}
+	if err := writeReconstructOutput(baselineRow, ordered, snapshotTime, at, recHistory, recFormat, os.Stdout); err != nil {
 		return err
 	}
 

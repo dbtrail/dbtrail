@@ -702,3 +702,50 @@ func TestEmitSQL_commentInjectionCannotEscapeThePreamble(t *testing.T) {
 		}
 	}
 }
+
+// recover-cascade's order is unchanged by #2156's first slice: two parent
+// changes whose binary log order is the reverse of their statement times are
+// still merged by statement time and undone in the reverse of that, with no
+// new header line. And a generator that orders by binary log position is
+// refused before a byte is written, so no caller can opt in by accident.
+func TestEmitSQL_orderIsStatementTimeAndABinlogOrderGeneratorIsRefused(t *testing.T) {
+	t0 := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	rows := func() []query.ResultRow {
+		del := query.ResultRow{
+			EventID: 1, BinlogFile: "binlog.000007", StartPos: 400, EventTimestamp: t0.Add(2 * time.Second),
+			EventType: event.EventDelete, SchemaName: "shop", TableName: "orders", PKValues: "1",
+			RowBefore: map[string]any{"id": float64(1)},
+		}
+		upd := query.ResultRow{
+			EventID: 2, BinlogFile: "binlog.000007", StartPos: 900, EventTimestamp: t0,
+			EventType: event.EventUpdate, SchemaName: "shop", TableName: "orders", PKValues: "2",
+			RowBefore: map[string]any{"id": float64(2)}, RowAfter: map[string]any{"id": float64(3)},
+		}
+		return cascaderecover.MergeParentRoots([]query.ResultRow{del}, []query.ResultRow{upd})
+	}
+	hdr := cascaderecover.Header{Schema: "shop", Table: "orders", Parents: 2}
+
+	got, n, err := emit(t, hdr, rows(), nil, nil)
+	if err != nil || n != 2 {
+		t.Fatalf("EmitSQL: n=%d err=%v", n, err)
+	}
+	first := strings.Index(got, "-- [1] reverse DELETE")
+	second := strings.Index(got, "-- [2] reverse UPDATE")
+	if first < 0 || second < 0 || first > second {
+		t.Fatalf("order changed: the later statement time (event 1) must be undone first (%d, %d):\n%s", first, second, got)
+	}
+	if strings.Contains(got, "binary log") {
+		t.Fatalf("the script carries a binary-log-order line:\n%s", got)
+	}
+
+	gen := recovery.New(nil, nil)
+	gen.SetBinlogOrder(func([]query.ResultRow) bool { return true })
+	var buf bytes.Buffer
+	n, err = cascaderecover.EmitSQL(&buf, gen, rows(), nil, nil, nil, hdr)
+	if err == nil || n != 0 || buf.Len() != 0 {
+		t.Fatalf("a binlog-order generator was accepted: n=%d err=%v wrote %d bytes", n, err, buf.Len())
+	}
+	if !strings.Contains(err.Error(), "#2156") {
+		t.Fatalf("refusal does not say why: %v", err)
+	}
+}

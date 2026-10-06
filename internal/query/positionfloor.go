@@ -312,15 +312,7 @@ func partitionClause(names []string) string {
 // orderProven reports whether, for a fetch whose own time is since, the
 // newest row of a partition is known to carry its highest position.
 func (h *PartitionHeads) orderProven(since time.Time) bool {
-	if !h.streamCaptured || (h.lastFileIndexed.IsZero() && !h.fileIndexingUnfinished) {
-		// One writer kind only: a stream alone, or files alone (indexed in
-		// order, the input a refresh chain supports).
-		return true
-	}
-	if h.fileIndexingUnfinished {
-		return false
-	}
-	return h.lastFileIndexed.Before(since.Add(-fileIndexingMargin))
+	return writersKeepBinlogOrder(h.streamCaptured, h.fileIndexingUnfinished, h.lastFileIndexed, since)
 }
 
 // below names the partitions that the floor of a fetch at since leaves out,

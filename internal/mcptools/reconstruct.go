@@ -460,15 +460,21 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 		// 4. Fold baseline + deltas. baselineRow may be nil. "existed" = the row
 		//    was present at some point in the window (baseline row, or any delta).
 		existed := baselineRow != nil || len(rows) > 0
+		// The fold takes the row's changes in binary log order where that can
+		// be established (#2156); `rows` stays as fetched for the counts.
+		ordered, order := reconstruct.EventsInBinlogOrder(rows, atTime, query.BinlogOrderProof(ctx, t.DB))
+		if warn := order.Warning(); warn != "" {
+			res.Warnings = append(res.Warnings, "statement_time_order: "+warn)
+		}
 		if args.History {
-			entries, err := reconstruct.BuildHistory(baselineRow, snapshotTime, rows, atTime)
+			entries, err := reconstruct.BuildHistory(baselineRow, snapshotTime, ordered, atTime)
 			if err != nil {
 				return ErrorResult(err), nil, nil
 			}
 			res.Found = existed
 			res.History = toReconstructStateEntries(entries)
 		} else {
-			state, err := reconstruct.ApplyAt(baselineRow, rows, atTime)
+			state, err := reconstruct.ApplyAt(baselineRow, ordered, atTime)
 			if err != nil {
 				return ErrorResult(err), nil, nil
 			}

@@ -244,6 +244,17 @@ func captureStatementTimeShapes(t *testing.T, flavor, sourceDSN string, sourceDB
 	testutil.MustExec(t, sourceDB, "CREATE TABLE t (id INT PRIMARY KEY, v VARCHAR(32) NOT NULL) ENGINE=InnoDB")
 	testutil.MustExec(t, sourceDB, "INSERT INTO t VALUES (1,'seed'),(2,'seed'),(5,'seed'),(41,'seed'),(42,'seed'),(43,'seed')")
 
+	// wait 2, twice 3, long 3 rows and quick 1, clock 2.
+	captureWhile(t, flavor, sourceDSN, sourceDB, indexDB, sourceName, 11, func() { runStatementTimeShapes(t, sourceDB) })
+	assertStatementTimeShapes(t, sourceDB, indexDB, sourceName)
+}
+
+// captureWhile streams sourceName into the index, through the real capture
+// (StreamParser and the indexer), while run changes the source, and returns
+// once wantEvents changes are indexed and the stream has stopped. The tables
+// must exist before the call: the schema snapshot is taken here.
+func captureWhile(t *testing.T, flavor, sourceDSN string, sourceDB, indexDB *sql.DB, sourceName string, wantEvents int, run func()) {
+	t.Helper()
 	binlogFile, binlogPos, err := config.CurrentBinlogPosition(sourceDB)
 	if err != nil {
 		t.Fatalf("CurrentBinlogPosition: %v", err)
@@ -300,10 +311,9 @@ func captureStatementTimeShapes(t *testing.T, flavor, sourceDSN string, sourceDB
 		loopErrCh <- streamLoop(ctx, events, idx, indexDB, time.Minute, state, observe.ForSource("test-2151-"+flavor), nil)
 	}()
 
-	runStatementTimeShapes(t, sourceDB)
+	run()
 
-	// wait 2, twice 3, long 3 rows and quick 1, clock 2.
-	waitIndexedCount(t, indexDB, sourceName, 11, 20*time.Second)
+	waitIndexedCount(t, indexDB, sourceName, wantEvents, 20*time.Second)
 	cancel()
 	if err := <-loopErrCh; err != nil {
 		t.Fatalf("streamLoop: %v", err)
@@ -317,7 +327,6 @@ func captureStatementTimeShapes(t *testing.T, flavor, sourceDSN string, sourceDB
 		t.Fatalf("version: %v", err)
 	}
 	t.Logf("source: %s (%s)", v, strings.ToLower(fmt.Sprint(flavor)))
-	assertStatementTimeShapes(t, sourceDB, indexDB, sourceName)
 }
 
 func TestIntegrationStatementTimeIsNotBinlogOrder_mysql(t *testing.T) {

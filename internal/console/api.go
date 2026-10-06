@@ -882,10 +882,16 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 	// a refusal never materializes the oversized script in the shared daemon
 	// heap — see the recoverMaxScriptBytes doc comment above.
 	gen.SetMaxScriptBytes(recoverMaxScriptBytes)
+	// Undo in the reverse of binary log order where it can be established
+	// (#2156); where it cannot, the reason is in the script header and here.
+	gen.SetBinlogOrder(query.BinlogOrderProof(r.Context(), b.db))
 	n, err := gen.GenerateSQLFromRows(rows, &buf)
 	if err != nil {
 		writeRecoverError(w, err)
 		return
+	}
+	if warn := gen.OrderDecision().Warning(); warn != "" {
+		warnings = append(warnings, "Order of the changes: "+warn)
 	}
 	writeJSON(w, http.StatusOK, recoverResponse{
 		SQL:            buf.String(),
