@@ -192,3 +192,37 @@ func TestIntegrationArchiveFloorShapesAndCost(t *testing.T) {
 		t.Fatalf("unrecorded archive written after the snapshot: SinceFor = %v, want its hour %v", got, unrec)
 	}
 }
+
+// The built-in rotation loop rotates indexes nothing else in its process
+// migrated. Its archive_state INSERT names the #2152 columns, so on an
+// archive_state from an older build it must migrate first: an INSERT that
+// fails leaves every old partition in place until the disk fills.
+func TestIntegrationRotateMigratesArchiveStateBeforeArchiving(t *testing.T) {
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	ctx := context.Background()
+	testutil.MustExec(t, db, `ALTER TABLE archive_state DROP COLUMN max_event_id, DROP COLUMN max_binlog_file, DROP COLUMN max_start_pos`)
+
+	h := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Hour)
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h})
+	testutil.InsertEvent(t, db, "binlog.000004", 300, 350, h.Add(5*time.Minute).Format("2006-01-02 15:04:05"), nil,
+		"shop", "orders", 1, "1", nil, nil, []byte(`{"id":1}`))
+	if _, err := rotation.Perform(ctx, db, dbName, rotation.Options{
+		RetainDur: 24 * time.Hour, RetainRaw: "24h",
+		ArchiveDir: t.TempDir(), ArchiveCompression: "zstd",
+		BintrailID: "2152cafe-dead-beef-dead-beefdeadbeef", Format: "json",
+	}); err != nil {
+		t.Fatalf("rotation.Perform on an archive_state without the #2152 columns: %v", err)
+	}
+	var file sql.NullString
+	var pos sql.Null[uint64]
+	if err := db.QueryRowContext(ctx, `SELECT max_binlog_file, max_start_pos FROM archive_state`).Scan(&file, &pos); err != nil {
+		t.Fatalf("read archive_state: %v", err)
+	}
+	if file.String != "binlog.000004" || pos.V != 300 {
+		t.Fatalf("recorded %+v:%+v, want binlog.000004:300", file, pos)
+	}
+}
