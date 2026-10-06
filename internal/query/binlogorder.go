@@ -359,31 +359,73 @@ func writersKeepBinlogOrder(streamCaptured, fileIndexingUnfinished bool, lastFil
 // Every failure answers IDsUnproven, with the error. An index with no stream
 // is IDsFollowFileIndexing whatever index_state holds: see that constant.
 func IDsFollowBinlog(ctx context.Context, db *sql.DB, since time.Time) (IDProof, error) {
-	if db == nil {
-		return IDsUnproven, nil
-	}
-	streamCaptured, err := StreamCaptured(ctx, db)
+	w, err := readIndexWriters(ctx, db)
 	if err != nil {
 		return IDsUnproven, err
 	}
+	return w.proof(since), nil
+}
+
+// indexWriters is what IDsFollowBinlog reads from the index, once: which kinds
+// of writer wrote it and when the last file indexing run ended. proof turns it
+// into the answer for one since, so a caller that asks for many sets of rows
+// (one per row of a table, LatestPerPKInBinlog) reads the two tables once.
+type indexWriters struct {
+	// known is false for a nil db: nothing can be proven.
+	known                  bool
+	streamCaptured         bool
+	fileIndexingUnfinished bool
+	lastFileIndexed        time.Time
+}
+
+func readIndexWriters(ctx context.Context, db *sql.DB) (indexWriters, error) {
+	if db == nil {
+		return indexWriters{}, nil
+	}
+	streamCaptured, err := StreamCaptured(ctx, db)
+	if err != nil {
+		return indexWriters{}, err
+	}
+	w := indexWriters{known: true, streamCaptured: streamCaptured}
 	if !streamCaptured {
-		return IDsFollowFileIndexing, nil
+		return w, nil
 	}
 	var last sql.NullTime
 	var unfinished int64
 	err = db.QueryRowContext(ctx, "SELECT MAX(completed_at), COUNT(*) - COUNT(completed_at) FROM index_state").Scan(&last, &unfinished)
 	if err != nil && !isMissingTableErr(err) {
-		return IDsUnproven, fmt.Errorf("read index_state: %w", err)
+		return indexWriters{}, fmt.Errorf("read index_state: %w", err)
 	}
 	// No index_state table: no `bintrail index` run wrote to this index.
-	var lastFileIndexed time.Time
 	if err == nil && last.Valid {
-		lastFileIndexed = last.Time.UTC()
+		w.lastFileIndexed = last.Time.UTC()
 	}
-	if writersKeepBinlogOrder(true, err == nil && unfinished > 0, lastFileIndexed, since) {
-		return IDsFollowStream, nil
+	w.fileIndexingUnfinished = err == nil && unfinished > 0
+	return w, nil
+}
+
+func (w indexWriters) proof(since time.Time) IDProof {
+	switch {
+	case !w.known:
+		return IDsUnproven
+	case !w.streamCaptured:
+		return IDsFollowFileIndexing
+	case writersKeepBinlogOrder(true, w.fileIndexingUnfinished, w.lastFileIndexed, since):
+		return IDsFollowStream
 	}
-	return IDsUnproven, nil
+	return IDsUnproven
+}
+
+// earliestTimestamp is the since of a set of rows: its earliest
+// event_timestamp. rows must not be empty.
+func earliestTimestamp(rows []ResultRow) time.Time {
+	since := rows[0].EventTimestamp
+	for i := range rows {
+		if rows[i].EventTimestamp.Before(since) {
+			since = rows[i].EventTimestamp
+		}
+	}
+	return since
 }
 
 // BinlogOrderProof is the idsFollowBinlog argument of OrderByBinlog for a
@@ -395,17 +437,36 @@ func BinlogOrderProof(ctx context.Context, db *sql.DB) func([]ResultRow) IDProof
 		if len(rows) == 0 {
 			return IDsUnproven
 		}
-		since := rows[0].EventTimestamp
-		for i := range rows {
-			if rows[i].EventTimestamp.Before(since) {
-				since = rows[i].EventTimestamp
-			}
-		}
-		proof, err := IDsFollowBinlog(ctx, db, since)
+		proof, err := IDsFollowBinlog(ctx, db, earliestTimestamp(rows))
 		if err != nil {
 			slog.Warn("could not read whether this index's ids follow the binary log; the changes stay in statement-time order", "error", err)
 			return IDsUnproven
 		}
 		return proof
+	}
+}
+
+// binlogOrderProofOnce is BinlogOrderProof for a caller that asks about many
+// sets of rows of one fetch: stream_state and index_state are read at the
+// first question and the answer for each set is computed from that one read.
+// A failed read is logged once and answers IDsUnproven for every set.
+func binlogOrderProofOnce(ctx context.Context, db *sql.DB) func([]ResultRow) IDProof {
+	var (
+		w    indexWriters
+		read bool
+	)
+	return func(rows []ResultRow) IDProof {
+		if len(rows) == 0 {
+			return IDsUnproven
+		}
+		if !read {
+			read = true
+			var err error
+			if w, err = readIndexWriters(ctx, db); err != nil {
+				slog.Warn("could not read whether this index's ids follow the binary log; each row's latest change is taken by statement time", "error", err)
+				w = indexWriters{}
+			}
+		}
+		return w.proof(earliestTimestamp(rows))
 	}
 }

@@ -973,8 +973,15 @@ func limitPerPKClause(opts query.Options) (string, []any) {
 	if opts.LimitPerPK <= 0 {
 		return "", nil
 	}
-	return " QUALIFY ROW_NUMBER() OVER (PARTITION BY pk_values" +
-		" ORDER BY event_timestamp DESC, event_id DESC) <= ?", []any{opts.LimitPerPK}
+	q := " QUALIFY ROW_NUMBER() OVER (PARTITION BY pk_values" +
+		" ORDER BY event_timestamp DESC, event_id DESC) <= ?"
+	if !opts.LatestPerPKCandidates {
+		return q, []any{opts.LimitPerPK}
+	}
+	// The candidates of query.LatestPerPKInBinlog, as buildQuery's MySQL
+	// window keeps them: the latest N by statement time OR by event_id.
+	return q + " OR ROW_NUMBER() OVER (PARTITION BY pk_values ORDER BY event_id DESC) <= ?",
+		[]any{opts.LimitPerPK, opts.LimitPerPK}
 }
 
 // posArg renders a binlog position for use as a DuckDB bind argument. The

@@ -223,7 +223,11 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	}
 
 	// 4. Latest event per PK in (baseline, asOf] — the change map the merge needs.
+	// The latest in binary log order where the index can show it (#2156):
+	// by statement time, a row two sessions changed at once can be replayed
+	// at the change the database does not hold.
 	engine := query.New(cfg.IndexDB)
+	var order query.LatestPerPKOrder
 	rows, _, err := query.FetchMerged(ctx, cfg.IndexDB, engine, query.FetchMergedOptions{
 		Opts: query.Options{
 			Schema:     schema,
@@ -236,6 +240,8 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 		DBName:         cfg.IndexDBName,
 		NoArchive:      cfg.NoArchive,
 		ArchiveFetcher: cfg.ArchiveFetcher,
+		LatestInBinlog: true,
+		LatestOrder:    &order,
 	})
 	if err != nil {
 		var gap *query.GapError
@@ -315,7 +321,25 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	}
 	withSnapshotLock(res.Status, res.Detail,
 		lockSide{what: "the snapshot of " + snapshotTime.UTC().Format(time.RFC3339), lock: snapshotLock}).apply(&res)
+	withOrderNote(&res, order)
 	return res, nil
+}
+
+// withOrderNote adds to a mismatch the note that some rows were taken at
+// their latest change by statement time because binary log order could not
+// be established (#2156): there the mismatch can be the order's, not the
+// data's. A match needs no note, and neither does an inconclusive verdict,
+// which already says why it is not one.
+func withOrderNote(res *TableResult, order query.LatestPerPKOrder) {
+	note := order.Note()
+	if note == "" || res.Status != StatusMismatch {
+		return
+	}
+	if d := strings.TrimSuffix(strings.TrimSpace(res.Detail), "."); d != "" {
+		res.Detail = d + ". " + note
+		return
+	}
+	res.Detail = note
 }
 
 // classify is the pure comparison core. Row count is checked first: a difference

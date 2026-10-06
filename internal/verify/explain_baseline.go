@@ -131,13 +131,7 @@ func ExplainBaselinePairMismatch(ctx context.Context, cfg BaselineConfig, p Base
 	engine := query.New(cfg.IndexDB)
 	// Same window as VerifyBaselinePair (time-bounded, position cut for MySQL
 	// only) so the drill-down sees exactly the rows the verdict's digest saw.
-	fetchOpts := baselineFetchOptions(p, pg)
-	rows, _, err := query.FetchMerged(ctx, cfg.IndexDB, engine, query.FetchMergedOptions{
-		Opts:           fetchOpts,
-		DBName:         cfg.IndexDBName,
-		NoArchive:      cfg.NoArchive,
-		ArchiveFetcher: cfg.ArchiveFetcher,
-	})
+	rows, _, err := query.FetchMerged(ctx, cfg.IndexDB, engine, baselineFetchMerged(cfg, p, pg, nil))
 	if err != nil {
 		return nil, fmt.Errorf("fetch changes %s.%s: %w", p.Schema, p.Table, err)
 	}

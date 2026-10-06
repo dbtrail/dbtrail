@@ -267,7 +267,14 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 	// already supersedes. No global Limit here — the cap is enforced on the
 	// merged output below, since the table can have far more baseline rows
 	// than changed rows.
+	//
+	// "Latest" is in binary log order where the index can show it (#2156):
+	// by statement time, a row two sessions changed at once comes back at the
+	// change the database does not hold. Where the order cannot be shown the
+	// statement-time answer stands and the client gets a warning (SHOW
+	// WARNINGS): MySQL's protocol has no other place for a note.
 	engine := query.New(h.indexDB)
+	var order query.LatestPerPKOrder
 	rows, _, err := query.FetchMerged(ctx, h.indexDB, engine, query.FetchMergedOptions{
 		Opts: query.Options{
 			Schema:     q.Schema,
@@ -281,9 +288,15 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 		NoArchive:      h.cfg.NoArchive,
 		AllowGaps:      h.cfg.AllowGaps,
 		ArchiveFetcher: h.archiveFetcher,
+		LatestInBinlog: true,
+		LatestOrder:    &order,
 	})
 	if err != nil {
 		return nil, wrapFetchError(ctx, q.Type, err, h.logger)
+	}
+	if note := order.Note(); note != "" {
+		h.logger.Warn("_snapshot: "+note, "schema", q.Schema, "table", q.Table)
+		h.setWarningsCoded(mysql.ER_UNKNOWN_ERROR, []string{note})
 	}
 	// ENUM/SET ordinals → labels per event's snapshot epoch (#472/#475),
 	// BEFORE the merge: the merged rowMap reaching the callback below has

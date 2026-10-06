@@ -458,6 +458,15 @@ type Options struct {
 	// selects "latest N per PK"); only the outer ORDER BY direction follows
 	// Order.
 	LimitPerPK int
+	// LatestPerPKCandidates, with LimitPerPK, returns for each pk_values its
+	// latest LimitPerPK events by statement time AND its latest LimitPerPK by
+	// event_id: up to twice LimitPerPK rows per key, from which
+	// LatestPerPKInBinlog picks the latest LimitPerPK in binary log order
+	// (#2156). FetchMerged sets it under FetchMergedOptions.LatestInBinlog;
+	// a caller that sets it itself must apply LatestPerPKInBinlog to the
+	// result, or it reads more than LimitPerPK rows per key. Not combined
+	// with Limit: a LIMIT would cut candidates, not the picked rows.
+	LatestPerPKCandidates bool
 	// Order controls the direction of the outer ORDER BY applied before
 	// LIMIT. "DESC" (case-insensitive) selects descending order; any other
 	// value (including empty) defaults to ascending — this preserves the
@@ -1170,10 +1179,22 @@ func buildQuery(opts Options) (string, []any) {
 		// Per-PK cap via ROW_NUMBER over the narrow keys only. Inner ORDER BY
 		// DESC is fixed: it selects "latest N events per pk_values" regardless
 		// of the requested final direction.
-		window := "SELECT event_id, event_timestamp, ROW_NUMBER() OVER (PARTITION BY pk_values" +
-			" ORDER BY event_timestamp DESC, event_id DESC) AS bt_rn FROM binlog_events" + whereSQL
-		keys = "SELECT event_id, event_timestamp FROM (" + window + ") AS w WHERE bt_rn <= ?"
+		//
+		// Under LatestPerPKCandidates a second rank by event_id keeps each
+		// key's latest N in the order the index received them too, and the
+		// row is a candidate when either rank keeps it: LatestPerPKInBinlog
+		// chooses among them (#2156). parquetquery.limitPerPKClause is the
+		// DuckDB twin of both shapes.
+		rank, filter := "", "bt_rn <= ?"
 		args = append(args, opts.LimitPerPK)
+		if opts.LatestPerPKCandidates {
+			rank = ", ROW_NUMBER() OVER (PARTITION BY pk_values ORDER BY event_id DESC) AS bt_rn_id"
+			filter += " OR bt_rn_id <= ?"
+			args = append(args, opts.LimitPerPK)
+		}
+		window := "SELECT event_id, event_timestamp, ROW_NUMBER() OVER (PARTITION BY pk_values" +
+			" ORDER BY event_timestamp DESC, event_id DESC) AS bt_rn" + rank + " FROM binlog_events" + whereSQL
+		keys = "SELECT event_id, event_timestamp FROM (" + window + ") AS w WHERE " + filter
 	} else {
 		keys = "SELECT event_id, event_timestamp FROM binlog_events" + whereSQL
 	}
