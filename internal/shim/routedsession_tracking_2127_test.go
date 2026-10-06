@@ -335,6 +335,19 @@ func TestTrackedSession_aReplacedListIsPutBack(t *testing.T) {
 	}
 }
 
+// A client can set the list to NULL: it is put back like an empty one.
+func TestTrackedSession_aNullListIsPutBack(t *testing.T) {
+	rig := newTrackedRig(t)
+	null := any(nil)
+	rig.tr.listCell = &null
+	if got := rig.side(t); got != "copy" {
+		t.Fatalf("answered by %s (%s)", got, rig.last())
+	}
+	if !reflect.DeepEqual(rig.tr.retracked, []string{""}) {
+		t.Errorf("TrackSessionAgain called with %q, want once with an empty list", rig.tr.retracked)
+	}
+}
+
 // A source that refuses to take the list back is one that does not track
 // from there on: the session that was just read is still good, the copy
 // answers, and the next read-back no longer asks for the list.
@@ -361,7 +374,6 @@ func TestTrackedSession_aSourceThatRefusesTheListAgain(t *testing.T) {
 // Whatever goes wrong while the session is read leaves it unknown: the copy
 // does not answer, and the next statement asks again.
 func TestTrackedSession_everyFailureLeavesTheSessionUnknown(t *testing.T) {
-	null := any(nil)
 	cases := []struct {
 		name  string
 		fault func(rig *trackedRig)
@@ -370,9 +382,6 @@ func TestTrackedSession_everyFailureLeavesTheSessionUnknown(t *testing.T) {
 		{"the read-back is refused",
 			func(rig *trackedRig) { rig.r.sessionErr = mysql.NewError(mysql.ER_UNKNOWN_ERROR, "no") },
 			func(rig *trackedRig) { rig.r.sessionErr = nil }},
-		{"the tracked list comes back NULL",
-			func(rig *trackedRig) { rig.tr.listCell = &null },
-			func(rig *trackedRig) { rig.tr.listCell = nil }},
 		{"the read-back comes back a cell short",
 			func(rig *trackedRig) { rig.tr.short = true },
 			func(rig *trackedRig) { rig.tr.short = false }},

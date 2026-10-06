@@ -554,10 +554,13 @@ func (f *Forwarder) TrackSessionAgain(ctx context.Context, has string) error {
 //     that is, and by MariaDB never (measured). So an error counts as a
 //     change, tracked or not.
 //
-// Every answer the forwarder reads goes through here, the EXPLAIN of a
-// decision included: MariaDB runs a deterministic function with constant
-// arguments while it plans, and MySQL a scalar subquery with an aggregate
-// (measured), so an EXPLAIN can change the session as its statement would.
+// The answer to every statement goes through here (Forward, a prepared
+// statement's execution), and so does the EXPLAIN of a decision: MariaDB
+// runs a deterministic function with constant arguments while it plans, and
+// MySQL a scalar subquery with an aggregate (measured), so an EXPLAIN can
+// change the session as its statement would. The answers that run nothing of
+// the client's do not: a PREPARE (measured: neither server runs a function
+// while it prepares), a USE, a PING, and the port's own SETs.
 func (f *Forwarder) heard(status uint16, err error) {
 	if status&mysql.SERVER_SESSION_STATE_CHANGED == 0 && !isMySQLError(err) {
 		return

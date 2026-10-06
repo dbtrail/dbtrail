@@ -433,8 +433,9 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 			// The source is asked to say when a statement changed one of
 			// the session settings the copy runs under, so that a change
 			// made inside a stored function is seen (#2127). A source that
-			// does not do it is said once per connection, at debug: the
-			// connection works as it did before this was asked.
+			// does not do it is said at debug when the connection opens
+			// (and once more if a list a client replaced cannot be put
+			// back): the connection works as it did before this was asked.
 			fw.TrackSession = true
 			fw.OnUntracked = func(why string) {
 				logger.Debug("read routing: the source does not report session changes on this connection; a setting changed inside a stored function is not seen",

@@ -549,10 +549,8 @@ func (h *Handler) ensureSession(ctx context.Context) (routeSession, error) {
 		if len(cells) != sessionReadBackCells+1 {
 			return routeSession{}, fmt.Errorf("the source answered %d session values, want %d", len(cells), sessionReadBackCells+1)
 		}
-		list, ok := cellText(cells[sessionReadBackCells])
-		if !ok {
-			return routeSession{}, errors.New("the source answered NULL for the settings it reports changes of")
-		}
+		// NULL is a list a client emptied: put back like any other.
+		list, _ := cellText(cells[sessionReadBackCells])
 		cells = cells[:sessionReadBackCells]
 		if !readrouter.TracksSession(list) {
 			// A statement of the client replaced the list (a connector

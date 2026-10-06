@@ -513,8 +513,8 @@ The decision, in order, for every statement:
    changed the session, which is every statement that is not a plain read
    (a `SET` of anything, a write, `CALL`, transaction control, a statement
    the port does not recognise), or a read that MySQL itself said changed
-   one of these settings (a stored function, below), or any statement MySQL
-   answered with an error. A cheap statement never pays for it, and
+   one of these settings (a stored function, below), or a statement that
+   failed on MySQL. A cheap statement never pays for it, and
    neither does a run of statements the copy answers. The question is never
    sent on the heels of a `SET` or a write: it goes out just before a
    statement that is headed for the copy (or before a time-travel
@@ -596,9 +596,9 @@ The decision, in order, for every statement:
    ends the answer, which it sends anyway: a statement that changes nothing
    costs no extra round trip. After a marked answer the port reads the
    session back before the copy answers again, as it does after a `SET`.
-   It does the same after any statement the source answered with an error:
-   an error says nothing about the session, and a function that ran `SET`
-   and then failed has set it. The `EXPLAIN` of step 5 is heard the same
+   It does the same after a statement that failed on the source: an error
+   says nothing about the session, and a function that ran `SET` and then
+   failed has set it. The `EXPLAIN` of step 5 is heard the same
    way, because a server can run a function while it plans (MariaDB does,
    for a deterministic function with constant arguments). Measured on MySQL
    8.0 and 8.4 and MariaDB 10.11, 11.4, 11.8 and 12.3; the account needs no
@@ -609,7 +609,8 @@ The decision, in order, for every statement:
    not pass the marks on), the connection works as it did before and this
    one change is not seen on it: do not change session settings inside a
    function there. The port finds out on every connection, from the answer
-   to its own statement: a source that tracks marks that answer too. DBTrail's log says so once per connection, at debug level (`read
+   to its own statement: a source that tracks marks that answer too.
+   DBTrail's log says so when the connection opens, at debug level (`read
    routing: the source does not report session changes on this connection
    ...`, with the reason).
 
