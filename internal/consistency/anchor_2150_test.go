@@ -306,3 +306,20 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 		})
 	}
 }
+
+func TestMySQLGTIDSetShape(t *testing.T) {
+	for s, want := range map[string]bool{
+		anchorUUID + ":1-10":                                       true,
+		anchorUUID + ":1-10:12:15-20":                              true,
+		anchorUUID + ":1-3,4f22ab58-82db-22f2-af44-d91bb0530673:7": true,
+		anchorUUID + ":batch:1-2":                                  true,
+		"not-in-consistent-snapshot":                               false,
+		anchorUUID:                                                 false,
+		anchorUUID + ":1-3,":                                       false,
+		"":                                                         false,
+	} {
+		if got := mysqlGTIDSetShape.MatchString(s); got != want {
+			t.Errorf("shape(%q) = %v, want %v", s, got, want)
+		}
+	}
+}

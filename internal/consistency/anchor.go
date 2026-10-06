@@ -7,11 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-sql-driver/mysql"
 )
 
@@ -241,6 +241,12 @@ func startSnapshot(ctx context.Context, conn *sql.Conn) error {
 	return nil
 }
 
+// mysqlGTIDSetShape is the text form of a MySQL GTID set: uuid[:tag]:interval
+// [:interval...], comma separated (whitespace already removed). A shape check
+// rather than a parse: this package is part of the read layer, which must not
+// link the capture library (internal/event's dependency guard).
+var mysqlGTIDSetShape = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(:[A-Za-z_][A-Za-z0-9_]{0,31})?(:[0-9]+(-[0-9]+)?)+(,[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(:[A-Za-z_][A-Za-z0-9_]{0,31})?(:[0-9]+(-[0-9]+)?)+)*$`)
+
 // nativeSnapshotPosition reads the position the server itself ties to the
 // consistent snapshot open on conn. ok is false where the server has none
 // (stock MySQL lists no binlog_snapshot_* status; a Percona Server without
@@ -272,7 +278,7 @@ func nativeSnapshotPosition(ctx context.Context, conn *sql.Conn, flavor string) 
 		}
 		// Only a value that is a GTID set is a position; anything else
 		// (a placeholder outside a snapshot) is no native position.
-		if _, err := gomysql.ParseMysqlGTIDSet(set); err != nil {
+		if !mysqlGTIDSetShape.MatchString(set) {
 			return "", false, nil
 		}
 		return set, true, nil
