@@ -4,6 +4,10 @@ package reconstruct_test
 
 import (
 	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,10 +28,45 @@ const (
 	uuidB = "4f22ab58-71ca-11e1-9e33-c80aa9429563"
 )
 
-// explicitAt runs a reconstruct at at with ExplicitAt set as given.
-func (r *floorRig) explicitAt(at time.Time, explicit bool) (string, error) {
-	p, _, err := r.refreshWith(at, false, false, func(c *reconstruct.FullTableConfig) { c.ExplicitAt = explicit })
-	return p, err
+// explicitAt runs a reconstruct to a dump (the command's default output) at
+// at with ExplicitAt set as given, and returns every file it wrote, joined.
+func (r *floorRig) explicitAt(t *testing.T, at time.Time, explicit bool) (string, error) {
+	t.Helper()
+	out := t.TempDir()
+	_, err := reconstruct.ReconstructTables(r.ctx, reconstruct.FullTableConfig{
+		IndexDSN: r.dsn, BaselineSrc: r.root, Tables: []string{r.schema + ".orders"},
+		At: at, ExplicitAt: explicit, OutputDir: out, OutputFormat: reconstruct.OutputFormatMydumper,
+	})
+	if err != nil {
+		return "", err
+	}
+	var all strings.Builder
+	if werr := filepath.WalkDir(out, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		all.Write(b)
+		return err
+	}); werr != nil {
+		t.Fatal(werr)
+	}
+	return all.String(), nil
+}
+
+// holds fails unless dump holds every value in want and none in bad.
+func holds(t *testing.T, dump string, want, bad []string) {
+	t.Helper()
+	for _, v := range want {
+		if !strings.Contains(dump, "'"+v+"'") {
+			t.Errorf("the dump does not hold %q", v)
+		}
+	}
+	for _, v := range bad {
+		if strings.Contains(dump, "'"+v+"'") {
+			t.Errorf("the dump holds %q", v)
+		}
+	}
 }
 
 // renumberRigNamingServer is renumberRig with capture reading server uuidA
@@ -86,20 +125,29 @@ func TestReconstructAt_aRenumberingAfterTheTargetDoesNotRefuse_2182(t *testing.T
 		{"--at after the restart", T.Add(30 * time.Minute), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := r.explicitAt(tc.at, tc.explicit); !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+			if _, err := r.explicitAt(t, tc.at, tc.explicit); !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
 				t.Fatalf("err = %v, want ErrBinlogRenumbered", err)
 			}
 		})
 	}
 
+	// A Parquet snapshot at --at keeps the whole-index check: its window ends
+	// at the position of the first change past --at, here binlog.000001:300,
+	// which sorts before the change at binlog.000007:300 it needs.
+	t.Run("Parquet snapshot --at before the restart", func(t *testing.T) {
+		_, _, err := r.refreshWith(T.Add(15*time.Minute), false, false, func(c *reconstruct.FullTableConfig) { c.ExplicitAt = true })
+		if !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+			t.Fatalf("err = %v, want ErrBinlogRenumbered", err)
+		}
+	})
+
 	t.Run("--at before the restart", func(t *testing.T) {
-		base, err := r.explicitAt(T.Add(15*time.Minute), true)
+		dump, err := r.explicitAt(t, T.Add(15*time.Minute), true)
 		if err != nil {
 			t.Fatalf("--at before the restart: %v", err)
 		}
-		if got, want := lagState(t, base, false), []string{"1=A", "2=X", "3=shipped"}; !equalStrings(got, want) {
-			t.Fatalf("published %v, want %v: the change before --at applied, the one after it not", got, want)
-		}
+		// The change before --at applied, the one after it not.
+		holds(t, dump, []string{"A", "X", "shipped"}, []string{"B", "paid"})
 	})
 }
 
@@ -108,16 +156,14 @@ func TestReconstructAt_aRenumberingInAnotherTableDoesNotRefuse_2182(t *testing.T
 	r, T := renumberRig(t, false, false)
 	insertEventAt(t, r.db, r.schema, "orders", "binlog.000007", 15, 300, T.Add(10*time.Minute), "2", `{"id":2,"status":"X"}`)
 	insertEventAt(t, r.db, r.schema, "items", "binlog.000001", 20, 300, T.Add(12*time.Minute), "9", `{"id":9,"status":"y"}`)
-	if _, err := r.explicitAt(T.Add(15*time.Minute), false); !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
-		t.Fatalf("refresh: err = %v, want ErrBinlogRenumbered (unchanged)", err)
+	if _, err := r.explicitAt(t, T.Add(15*time.Minute), false); !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+		t.Fatalf("without --at: err = %v, want ErrBinlogRenumbered (unchanged)", err)
 	}
-	base, err := r.explicitAt(T.Add(15*time.Minute), true)
+	dump, err := r.explicitAt(t, T.Add(15*time.Minute), true)
 	if err != nil {
 		t.Fatalf("--at with the renumbering in another table: %v", err)
 	}
-	if got, want := lagState(t, base, false), []string{"1=A", "2=X", "3=shipped"}; !equalStrings(got, want) {
-		t.Fatalf("published %v, want %v", got, want)
-	}
+	holds(t, dump, []string{"A", "X", "shipped"}, []string{"paid"})
 }
 
 // A snapshot whose mark names the server: capture moving to another server
@@ -139,20 +185,18 @@ func TestReconstructAt_aServerMoveAfterTheTargetDoesNotRefuse_2182(t *testing.T)
 		{"--at after the move", T.Add(time.Hour), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := r.explicitAt(tc.at, tc.explicit); !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+			if _, err := r.explicitAt(t, tc.at, tc.explicit); !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
 				t.Fatalf("err = %v, want ErrBinlogRenumbered", err)
 			}
 		})
 	}
 
 	t.Run("--at before the move", func(t *testing.T) {
-		base, err := r.explicitAt(T.Add(40*time.Minute), true)
+		dump, err := r.explicitAt(t, T.Add(40*time.Minute), true)
 		if err != nil {
 			t.Fatalf("--at before the move: %v", err)
 		}
-		if got, want := lagState(t, base, false), []string{"1=A", "2=X", "3=shipped"}; !equalStrings(got, want) {
-			t.Fatalf("published %v, want %v", got, want)
-		}
+		holds(t, dump, []string{"A", "X", "shipped"}, []string{"D", "paid"})
 	})
 }
 
@@ -164,7 +208,7 @@ func TestReconstructAt_aFailoverAndFailbackBeforeTheTargetRefuses_2182(t *testin
 	testutil.MustExec(t, r.db, serverChangeSQL, "server_uuid", uuidA, uuidB, T.Add(5*time.Minute).Unix())
 	insertEventAt(t, r.db, r.schema, "orders", "binlog.000009", 15, 300, T.Add(6*time.Minute), "2", `{"id":2,"status":"Y"}`)
 	testutil.MustExec(t, r.db, serverChangeSQL, "server_uuid", uuidB, uuidA, T.Add(8*time.Minute).Unix())
-	if _, err := r.explicitAt(T.Add(40*time.Minute), true); !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+	if _, err := r.explicitAt(t, T.Add(40*time.Minute), true); !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
 		t.Fatalf("err = %v, want ErrBinlogRenumbered", err)
 	}
 }
@@ -177,7 +221,7 @@ func TestReconstructAt_aMarkWithoutAServerKeepsTodaysCheck_2182(t *testing.T) {
 	r, T := renumberRig(t, false, false)
 	insertEventAt(t, r.db, r.schema, "orders", "binlog.000007", 15, 300, T.Add(10*time.Minute), "2", `{"id":2,"status":"X"}`)
 	testutil.MustExec(t, r.db, serverChangeSQL, "server_uuid", uuidA, uuidB, T.Add(50*time.Minute).Unix())
-	if _, err := r.explicitAt(T.Add(40*time.Minute), true); !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+	if _, err := r.explicitAt(t, T.Add(40*time.Minute), true); !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
 		t.Fatalf("err = %v, want ErrBinlogRenumbered", err)
 	}
 }

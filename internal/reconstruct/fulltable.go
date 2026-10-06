@@ -111,6 +111,9 @@ type FullTableConfig struct {
 	// to At can see (ReadWindow, #2182): a restart or a move to another
 	// server recorded after At leaves that read whole. Unset (every refresh,
 	// and the command without --at), they check the whole index, as before.
+	// A dump only: under OutputFormatParquet the window also ends at the
+	// cut, the position of the first change past At, which after such a
+	// restart is in the new numbering, so the whole-index check stays.
 	ExplicitAt bool
 	// SpaceCheck, when set, is called right before a file is created, with its
 	// directory and the bytes it is expected to need: before each SQL chunk
@@ -1358,9 +1361,13 @@ func ReconstructTable(
 	// proven renumbering names its own remedy (a new full snapshot) rather
 	// than the gap message's flag. See renumbered.go.
 	// An explicit --at bounds both checks by the read: this table, from
-	// fetchSince to At (#2182). A refresh keeps the whole-index check.
+	// fetchSince to At (#2182). A refresh keeps the whole-index check, and so
+	// does a Parquet snapshot: its window also ends at the cut, the position
+	// of the first change past At, and after a restart past At that position
+	// is in the new numbering, where it sorts before changes the read needs.
+	boundedAt := cfg.ExplicitAt && cfg.OutputFormat != OutputFormatParquet
 	var readWin ReadWindow
-	if cfg.ExplicitAt {
+	if boundedAt {
 		readWin = ReadWindow{Schema: schema, Table: table, Since: fetchSince, Until: cfg.At}
 	}
 	if err := CheckNumberingFrom(ctx, db, AnchorOf(anchorMeta), anchorMeta.EventMark, readWin); err != nil {
@@ -1383,7 +1390,7 @@ func ReconstructTable(
 	// no-mark behavior (#2174).
 	if anchorMeta.Producer == baseline.ProducerReconstruct {
 		until := time.Time{}
-		if m := ParseEventMark(anchorMeta.EventMark); cfg.ExplicitAt && m != nil && m.ServerUUID != "" {
+		if m := ParseEventMark(anchorMeta.EventMark); boundedAt && m != nil && m.ServerUUID != "" {
 			until = cfg.At
 		}
 		if err := checkSourceReplaced(ctx, db, fetchSince, until); err != nil {
