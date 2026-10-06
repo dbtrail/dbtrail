@@ -265,13 +265,11 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	if cut.inconclusive != "" {
 		return inconclusive(res, cut.inconclusive), nil
 	}
-	// The read's time bound. With the exact position cut it is only a
-	// coarse bound for partition pruning, widened by an hour: asOf is the
-	// verify host's clock and event_timestamp the source's, so a tight
-	// bound could drop a change the snapshot holds when the clocks differ,
-	// a false mismatch the position cut already rules out. Without the cut
-	// it stays the read's only end, as before.
-	until := liveReadUntil(asOf, cut.pos != nil)
+	// The read's time bound: asOf, or later when the cut's own change is
+	// stamped later by the source's clock (see liveReadUntil). With the cut
+	// it is only the coarse bound; without it, the read's only end, as
+	// before.
+	until := liveReadUntil(asOf, cut.at)
 
 	// 3b. The changes since the snapshot are read from its position: when the
 	// source's binary log started again after it, every later change sorts

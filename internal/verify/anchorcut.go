@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/consistency"
 	"github.com/dbtrail/dbtrail/internal/parser"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
 // #2150: live-source verify cuts the reconstruction at the source snapshot's
@@ -150,8 +153,9 @@ const snapshotCutPage = 1000
 // checkpoint was saved, so the walk that found nothing would have found it.
 //
 // firstOut is where the oldest change the walk skipped (the first one the
-// snapshot does not hold) starts; nil when it skipped none.
-func snapshotCut(ctx context.Context, db *sql.DB, member snapshotMember, floor time.Time) (cut, firstOut *query.BinlogPos, why string, err error) {
+// snapshot does not hold) starts; nil when it skipped none. cutAt is the cut
+// change's stamp (zero for the checkpoint cut).
+func snapshotCut(ctx context.Context, db *sql.DB, member snapshotMember, floor time.Time) (cut, firstOut *query.BinlogPos, cutAt time.Time, why string, err error) {
 	return snapshotCutPaged(ctx, db, member, floor, snapshotCutPage)
 }
 
@@ -161,121 +165,156 @@ func snapshotCut(ctx context.Context, db *sql.DB, member snapshotMember, floor t
 // transaction ran.
 const snapshotCutFloorMargin = time.Hour
 
-func snapshotCutPaged(ctx context.Context, db *sql.DB, member snapshotMember, floor time.Time, page int) (cut, firstOut *query.BinlogPos, why string, err error) {
+// cutResult is one walk's outcome.
+type cutResult struct {
+	cut, firstOut *query.BinlogPos
+	cutAt         time.Time // the cut change's stamp; zero for the checkpoint cut
+	why           string
+}
+
+func snapshotCutPaged(ctx context.Context, db *sql.DB, member snapshotMember, floor time.Time, page int) (cut, firstOut *query.BinlogPos, cutAt time.Time, why string, err error) {
 	var ckFile sql.NullString
 	var ckPos sql.NullInt64
 	err = db.QueryRowContext(ctx, "SELECT binlog_file, binlog_position FROM stream_state WHERE id = 1").Scan(&ckFile, &ckPos)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, nil, "", fmt.Errorf("read the capture's checkpoint: %w", err)
+		return nil, nil, time.Time{}, "", fmt.Errorf("read the capture's checkpoint: %w", err)
 	}
-
+	ck := &query.BinlogPos{File: ckFile.String, Pos: uint64(max(ckPos.Int64, 0))}
+	if !ckFile.Valid || ckFile.String == "" || !ckPos.Valid || ckPos.Int64 <= 0 {
+		ck = nil
+	}
 	floor = floor.UTC()
-	const cols = snapshotCutCols
-	above := snapshotCutAbove(floor)
+
+	// The partitions that can hold a change at or after the floor, named
+	// explicitly: MySQL's own pruning of the timestamp condition keeps the
+	// table's oldest partition, which an ordered walk would then read whole
+	// on every page (#1692). Rotation can move the layout meanwhile, so it
+	// is listed again after the walk; a moved layout, or one that cannot be
+	// listed, walks again with no clause (slower, complete).
+	clause, names, perr := reconstruct.PartitionsAtOrAfter(ctx, db, floor)
+	if perr != nil {
+		if ctx.Err() != nil {
+			return nil, nil, time.Time{}, "", ctx.Err()
+		}
+		slog.Warn("verify: cannot bound the snapshot-cut walk to partitions; walking all of them", "error", perr)
+		clause = ""
+	}
+	r, err := walkSnapshotCut(ctx, db, member, floor, page, clause, ck)
+	if err == nil && clause != "" {
+		_, again, lerr := reconstruct.PartitionsAtOrAfter(ctx, db, floor)
+		if lerr != nil || !slices.Equal(again, names) {
+			r, err = walkSnapshotCut(ctx, db, member, floor, page, "", ck)
+		}
+	}
+	if err != nil {
+		return nil, nil, time.Time{}, "", err
+	}
+	return r.cut, r.firstOut, r.cutAt, r.why, nil
+}
+
+// walkSnapshotCut is one walk (see snapshotCut), bounded to the partitions
+// partClause names ("" for all of them).
+func walkSnapshotCut(ctx context.Context, db *sql.DB, member snapshotMember, floor time.Time, page int, partClause string, ck *query.BinlogPos) (cutResult, error) {
 	var (
-		last    uint64
-		skipped int
-		first   = true
+		last     uint64
+		skipped  int
+		firstOut *query.BinlogPos
 	)
 	// judge decides one change: stop with a cut, stop unplaced, or go on.
-	judge := func(rows *sql.Rows) (done bool, cut *query.BinlogPos, why string, err error) {
+	judge := func(rows *sql.Rows) (done bool, r cutResult, err error) {
 		var (
 			id         uint64
 			gtid       sql.NullString
 			file       string
 			start, end uint64
+			at         time.Time
 		)
-		if err := rows.Scan(&id, &gtid, &file, &start, &end); err != nil {
-			return true, nil, "", fmt.Errorf("walk the index from its newest change: %w", err)
+		if err := rows.Scan(&id, &gtid, &file, &start, &end, &at); err != nil {
+			return true, cutResult{}, fmt.Errorf("walk the index from its newest change: %w", err)
 		}
 		last = id
 		if !gtid.Valid || strings.TrimSpace(gtid.String) == "" {
-			return true, nil, fmt.Sprintf("the read cannot be cut at the snapshot: indexed change %d (%s:%d) has no GTID, so whether the snapshot holds it cannot be told", id, file, end), nil
+			return true, cutResult{why: fmt.Sprintf("the read cannot be cut at the snapshot: indexed change %d (%s:%d) has no GTID, so whether the snapshot holds it cannot be told", id, file, end)}, nil
 		}
 		in, err := member(gtid.String)
 		if err != nil {
-			return true, nil, "the read cannot be cut at the snapshot: " + err.Error(), nil
+			return true, cutResult{why: "the read cannot be cut at the snapshot: " + err.Error()}, nil
 		}
 		if in {
-			return true, &query.BinlogPos{File: file, Pos: end}, "", nil
+			return true, cutResult{cut: &query.BinlogPos{File: file, Pos: end}, firstOut: firstOut, cutAt: at.UTC()}, nil
 		}
 		skipped++
 		firstOut = &query.BinlogPos{File: file, Pos: start}
-		return false, nil, "", nil
+		return false, cutResult{}, nil
 	}
-	for {
-		var rows *sql.Rows
+	for first := true; ; first = false {
+		var (
+			rows *sql.Rows
+			err  error
+		)
 		if first {
-			rows, err = db.QueryContext(ctx, snapshotCutFirstPageSQL(floor, page), floor)
+			rows, err = db.QueryContext(ctx, snapshotCutFirstPageSQL(floor, partClause, page), floor)
 		} else {
-			rows, err = db.QueryContext(ctx, cols+above+fmt.Sprintf(" AND event_id < ? ORDER BY event_id DESC LIMIT %d", page), floor, last)
+			rows, err = db.QueryContext(ctx, snapshotCutCols+partClause+snapshotCutAbove(floor)+fmt.Sprintf(" AND event_id < ? ORDER BY event_id DESC LIMIT %d", page), floor, last)
 		}
 		if err != nil {
-			return nil, nil, "", fmt.Errorf("walk the index from its newest change: %w", err)
+			return cutResult{}, fmt.Errorf("walk the index from its newest change: %w", err)
 		}
 		n := 0
 		for rows.Next() {
 			n++
-			done, c, why, err := judge(rows)
-			if done {
+			if done, r, err := judge(rows); done {
 				rows.Close()
-				if c != nil {
-					return c, firstOut, "", nil
-				}
-				return nil, nil, why, err
+				return r, err
 			}
 		}
-		err := rows.Err()
+		err = rows.Err()
 		rows.Close()
 		if err != nil {
-			return nil, nil, "", fmt.Errorf("walk the index from its newest change: %w", err)
+			return cutResult{}, fmt.Errorf("walk the index from its newest change: %w", err)
 		}
-		first = false
 		if n < page {
 			break
 		}
 	}
 	if skipped > 0 {
-		return nil, nil, fmt.Sprintf("the read cannot be cut at the snapshot: all %d changes indexed since %s are newer than the snapshot", skipped, floor.Format(time.RFC3339)), nil
+		return cutResult{why: fmt.Sprintf("the read cannot be cut at the snapshot: all %d changes indexed since %s are newer than the snapshot", skipped, floor.Format(time.RFC3339))}, nil
 	}
 	// Nothing indexed near the read: the newest change below the floor.
-	rows, err := db.QueryContext(ctx, cols+" WHERE event_timestamp < ? ORDER BY event_id DESC LIMIT 1", floor)
+	rows, err := db.QueryContext(ctx, snapshotCutCols+" WHERE event_timestamp < ? ORDER BY event_id DESC LIMIT 1", floor)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("read the newest indexed change: %w", err)
+		return cutResult{}, fmt.Errorf("read the newest indexed change: %w", err)
 	}
 	defer rows.Close()
 	if rows.Next() {
-		_, c, why, err := judge(rows)
-		if c != nil {
-			return c, nil, "", nil
+		_, r, err := judge(rows)
+		if err == nil && r.cut == nil && r.why == "" {
+			r.why = "the read cannot be cut at the snapshot: the newest indexed change, from before " + floor.Format(time.RFC3339) + ", is not one the snapshot holds"
 		}
-		if why == "" && err == nil {
-			why = "the read cannot be cut at the snapshot: the newest indexed change, from before " + floor.Format(time.RFC3339) + ", is not one the snapshot holds"
-		}
-		return nil, nil, why, err
+		return r, err
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, "", fmt.Errorf("read the newest indexed change: %w", err)
+		return cutResult{}, fmt.Errorf("read the newest indexed change: %w", err)
 	}
-	if !ckFile.Valid || ckFile.String == "" || !ckPos.Valid || ckPos.Int64 <= 0 {
-		return nil, nil, "the read cannot be cut at the snapshot: the index holds no change and its checkpoint has no position", nil
+	if ck == nil {
+		return cutResult{why: "the read cannot be cut at the snapshot: the index holds no change and its checkpoint has no position"}, nil
 	}
-	return &query.BinlogPos{File: ckFile.String, Pos: uint64(ckPos.Int64)}, nil, "", nil
+	return cutResult{cut: ck}, nil
 }
 
-const snapshotCutCols = "SELECT event_id, gtid, binlog_file, start_pos, end_pos FROM binlog_events"
+const snapshotCutCols = "SELECT event_id, gtid, binlog_file, start_pos, end_pos, event_timestamp FROM binlog_events"
 
 // snapshotCutAbove is the walk's floor condition, with floor as its one
-// parameter. The TO_SECONDS literal prunes partitions the way
-// query.buildQuery's hints do; the plain comparison is the exact filter.
+// parameter: a TO_SECONDS literal like query.buildQuery's hints, and the
+// exact comparison.
 func snapshotCutAbove(floor time.Time) string {
 	return fmt.Sprintf(" WHERE TO_SECONDS(event_timestamp) >= %d AND event_timestamp >= ?", toSecondsUTC(floor.UTC().Truncate(time.Hour)))
 }
 
 // snapshotCutFirstPageSQL is the walk's first statement (floor bound as its
 // parameter), shared with the test that EXPLAINs it.
-func snapshotCutFirstPageSQL(floor time.Time, page int) string {
-	return snapshotCutCols + snapshotCutAbove(floor) + fmt.Sprintf(" ORDER BY event_id DESC LIMIT %d", page)
+func snapshotCutFirstPageSQL(floor time.Time, partClause string, page int) string {
+	return snapshotCutCols + partClause + snapshotCutAbove(floor) + fmt.Sprintf(" ORDER BY event_id DESC LIMIT %d", page)
 }
 
 // toSecondsUTC is MySQL's TO_SECONDS of t (seconds since year 0).

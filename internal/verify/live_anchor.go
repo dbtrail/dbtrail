@@ -131,15 +131,17 @@ func captureRunning(ctx context.Context, indexDB *sql.DB) (bool, string, string)
 	return true, "", ckpt.String
 }
 
-// liveCoarseUntilMargin widens the read's wall-clock bound when the exact
-// position cut bounds it (see VerifyTable).
-const liveCoarseUntilMargin = time.Hour
-
-// liveReadUntil is the read's wall-clock bound: asOf, or asOf widened by
-// liveCoarseUntilMargin when an exact position cut bounds the read.
-func liveReadUntil(asOf time.Time, exactCut bool) time.Time {
-	if exactCut {
-		return asOf.Add(liveCoarseUntilMargin)
+// liveReadUntil is the read's wall-clock bound: asOf, the verify host's
+// clock after the scan, or the stamp of the change the position cut ends at
+// when that is later. event_timestamp comes from the source's clock: a source
+// ahead of this host would otherwise have changes the snapshot holds stamped
+// past asOf, dropped by the time bound, a false mismatch the position cut
+// already rules out. Not widened by a fixed margin: the query planner reports
+// every hour past the newest hourly partition as a coverage gap, so a bound
+// reaching into a future hour would turn a good read inconclusive.
+func liveReadUntil(asOf, cutAt time.Time) time.Time {
+	if cutAt.After(asOf) {
+		return cutAt
 	}
 	return asOf
 }
@@ -149,6 +151,9 @@ type liveCut struct {
 	// pos is the exact upper bound (query.Options.UntilPos): the end of the
 	// last indexed change the snapshot holds. nil when the read is not cut.
 	pos *query.BinlogPos
+	// at is the stamp of the change pos ends (the source's clock); zero
+	// when pos is the capture's checkpoint or the read is not cut.
+	at time.Time
 	// note, when pos is nil, says why the read is not cut and what that
 	// means for the verdict; it is carried on every verdict.
 	note string
@@ -198,7 +203,7 @@ func resolveLiveCut(ctx context.Context, indexDB *sql.DB, src consistency.TableC
 	if proof != query.IDsFollowStream {
 		return liveCut{note: unanchoredNote("the index's change ids do not follow the binary log order, because a stream did not write all of it")}, nil
 	}
-	pos, firstOut, why, err := snapshotCut(ctx, indexDB, member, openedBy.Add(-snapshotCutFloorMargin))
+	pos, firstOut, cutAt, why, err := snapshotCut(ctx, indexDB, member, openedBy.Add(-snapshotCutFloorMargin))
 	if err != nil {
 		return liveCut{}, err
 	}
@@ -217,5 +222,5 @@ func resolveLiveCut(ctx context.Context, indexDB *sql.DB, src consistency.TableC
 		return liveCut{inconclusive: fmt.Sprintf("the snapshot the reconstruction starts from (%s:%d) holds changes the read of the table does not (from %s:%d); run the check again",
 			sincePos.File, sincePos.Pos, firstOut.File, firstOut.Pos)}, nil
 	}
-	return liveCut{pos: pos}, nil
+	return liveCut{pos: pos, at: cutAt}, nil
 }

@@ -3,12 +3,14 @@
 package verify
 
 import (
+	"context"
 	"database/sql"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -30,7 +32,11 @@ func TestIntegrationSnapshotCutWalkIsPruned2150(t *testing.T) {
 
 	floor := time.Now().UTC().Add(-snapshotCutFloorMargin)
 	var parts sql.NullString
-	rows, err := db.Query("EXPLAIN "+snapshotCutFirstPageSQL(floor, snapshotCutPage), floor)
+	clause, _, err := reconstruct.PartitionsAtOrAfter(context.Background(), db, floor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query("EXPLAIN "+snapshotCutFirstPageSQL(floor, clause, snapshotCutPage), floor)
 	if err != nil {
 		t.Fatal(err)
 	}

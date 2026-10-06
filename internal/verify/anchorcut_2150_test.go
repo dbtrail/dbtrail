@@ -97,14 +97,14 @@ func TestSnapshotMembership_MariaDB(t *testing.T) {
 
 // cutRows is one page of the descending walk.
 func cutRows(rows ...[4]any) *sqlmock.Rows {
-	r := sqlmock.NewRows([]string{"event_id", "gtid", "binlog_file", "start_pos", "end_pos"})
+	r := sqlmock.NewRows([]string{"event_id", "gtid", "binlog_file", "start_pos", "end_pos", "event_timestamp"})
 	for _, x := range rows {
 		// start_pos: 50 bytes before the end, enough for these cases.
 		var start any
 		if e, ok := x[3].(int64); ok {
 			start = e - 50
 		}
-		r.AddRow(x[0], x[1], x[2], start, x[3])
+		r.AddRow(x[0], x[1], x[2], start, x[3], cutFloor)
 	}
 	return r
 }
@@ -248,7 +248,7 @@ func TestSnapshotCut(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, _, unplaced, err := snapshotCutPaged(context.Background(), db, in, cutFloor, c.page)
+			got, _, _, unplaced, err := snapshotCutPaged(context.Background(), db, in, cutFloor, c.page)
 			if err != nil {
 				t.Fatalf("snapshotCut: %v", err)
 			}
@@ -480,10 +480,71 @@ func TestWaitIndexCovers(t *testing.T) {
 
 func TestLiveReadUntil(t *testing.T) {
 	asOf := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
-	if got := liveReadUntil(asOf, false); !got.Equal(asOf) {
-		t.Errorf("no cut: %v, want asOf: without the position cut the time bound is the read's only end", got)
+	if got := liveReadUntil(asOf, time.Time{}); !got.Equal(asOf) {
+		t.Errorf("no cut stamp: %v, want asOf", got)
 	}
-	if got := liveReadUntil(asOf, true); !got.Equal(asOf.Add(time.Hour)) {
-		t.Errorf("exact cut: %v, want asOf + 1h: a coarse bound a source clock ahead of this host cannot cut into", got)
+	if got := liveReadUntil(asOf, asOf.Add(-time.Minute)); !got.Equal(asOf) {
+		t.Errorf("cut stamped before asOf: %v, want asOf", got)
 	}
+	ahead := asOf.Add(90 * time.Second)
+	if got := liveReadUntil(asOf, ahead); !got.Equal(ahead) {
+		t.Errorf("cut stamped after asOf (source clock ahead): %v, want the cut's stamp, so its changes are not dropped", got)
+	}
+}
+
+// TestSnapshotCut_partitionBound: the walk names the partitions at or after
+// its floor (MySQL's own pruning keeps the oldest one, which the ordered walk
+// would read whole on every page), and walks again over all of them when the
+// layout moved meanwhile.
+func TestSnapshotCut_partitionBound(t *testing.T) {
+	in, err := newSnapshotMembership(consistency.GTIDFlavorMySQL, uuidA+":1-10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := func(m sqlmock.Sqlmock, names ...string) {
+		r := sqlmock.NewRows([]string{"PARTITION_NAME"})
+		for _, n := range names {
+			r.AddRow(n)
+		}
+		m.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(r)
+	}
+	ckpt := func(m sqlmock.Sqlmock) {
+		m.ExpectQuery("SELECT binlog_file, binlog_position FROM stream_state").
+			WillReturnRows(sqlmock.NewRows([]string{"binlog_file", "binlog_position"}).AddRow("binlog.000002", 900))
+	}
+	held := func() *sqlmock.Rows { return cutRows([4]any{int64(7), uuidA + ":10", "binlog.000002", int64(600)}) }
+	// cutFloor is 12:30, so its hour is 12: p_2026100611 is before it.
+	all := []string{"p_2026100611", "p_2026100612", "p_2026100613", "p_future"}
+
+	t.Run("bounded, layout unchanged", func(t *testing.T) {
+		db, m, _ := sqlmock.New()
+		defer db.Close()
+		ckpt(m)
+		parts(m, all...)
+		m.ExpectQuery(`FROM binlog_events PARTITION \(p_2026100612, p_2026100613, p_future\) WHERE TO_SECONDS`).WillReturnRows(held())
+		parts(m, all...)
+		got, _, _, why, err := snapshotCutPaged(context.Background(), db, in, cutFloor, 1000)
+		if err != nil || why != "" || got == nil || got.Pos != 600 {
+			t.Fatalf("got %v %q %v", got, why, err)
+		}
+		if err := m.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("the layout moved: walked again over every partition", func(t *testing.T) {
+		db, m, _ := sqlmock.New()
+		defer db.Close()
+		ckpt(m)
+		parts(m, all...)
+		m.ExpectQuery(`FROM binlog_events PARTITION \(p_2026100612, p_2026100613, p_future\) WHERE`).WillReturnRows(held())
+		parts(m, "p_2026100612", "p_2026100613", "p_2026100614", "p_future")
+		m.ExpectQuery(`FROM binlog_events WHERE TO_SECONDS`).WillReturnRows(held())
+		got, _, _, why, err := snapshotCutPaged(context.Background(), db, in, cutFloor, 1000)
+		if err != nil || why != "" || got == nil || got.Pos != 600 {
+			t.Fatalf("got %v %q %v", got, why, err)
+		}
+		if err := m.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
 }

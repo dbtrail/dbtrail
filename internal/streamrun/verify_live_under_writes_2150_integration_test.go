@@ -194,7 +194,8 @@ func (u underWrites) setup(t *testing.T, preBaselineWrites int) (verify.Config, 
 // writers runs the steady traffic: single-row updates, inserts and deletes,
 // and two-statement transactions, on as many connections. commits counts
 // what committed.
-func (u underWrites) writers(t *testing.T, commits *atomic.Int64) (stop func()) {
+// pace, when non-zero, is how long each writer rests between two writes.
+func (u underWrites) writers(t *testing.T, commits *atomic.Int64, pace time.Duration) (stop func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
@@ -228,6 +229,9 @@ func (u underWrites) writers(t *testing.T, commits *atomic.Int64) (stop func()) 
 						}
 					}
 				}
+				if pace > 0 {
+					time.Sleep(pace)
+				}
 				if err == nil {
 					commits.Add(1)
 				} else if ctx.Err() == nil && !strings.Contains(err.Error(), "Deadlock") {
@@ -247,8 +251,19 @@ func runVerifyUnderWrites(t *testing.T, u underWrites) {
 	// writes; MariaDB ignores it (its own snapshot position needs no lock).
 	cfg.PauseWrites = u.flavor == gomysql.MySQLFlavor
 
+	// The read lock --pause-writes takes is granted only at a moment no
+	// write transaction on the table is open, and it does not hold new
+	// writers back while it waits (that is what keeps it from stalling the
+	// source). So on stock MySQL the writers here rest between writes, 50 ms
+	// each, six of them: writes still land during every check. The phase
+	// after the loop runs them flat out, where the lock may never be
+	// granted: there the check may be inconclusive, never a mismatch.
+	var pace time.Duration
+	if u.flavor == gomysql.MySQLFlavor {
+		pace = 50 * time.Millisecond
+	}
 	var commits atomic.Int64
-	stopWriters := u.writers(t, &commits)
+	stopWriters := u.writers(t, &commits, pace)
 	defer stopWriters()
 
 	ctx := context.Background()
@@ -272,6 +287,25 @@ func runVerifyUnderWrites(t *testing.T, u underWrites) {
 		if strings.Contains(res.Detail, "not cut at the snapshot") {
 			t.Fatalf("check %d: matched without the cut: %q", i+1, res.Detail)
 		}
+	}
+	if u.flavor != gomysql.MySQLFlavor {
+		return
+	}
+	stopWriters()
+	var hot atomic.Int64
+	stopHot := u.writers(t, &hot, 0)
+	defer stopHot()
+	time.Sleep(300 * time.Millisecond)
+	res, err := verify.VerifyTable(ctx, cfg, u.sourceName, "t")
+	if err != nil {
+		t.Fatalf("flat-out check: VerifyTable: %v", err)
+	}
+	t.Logf("flat-out check: %s, %d writes so far, detail %q", res.Status, hot.Load(), res.Detail)
+	switch {
+	case res.Status == verify.StatusMatch && !strings.Contains(res.Detail, "not cut at the snapshot"):
+	case res.Status == verify.StatusInconclusive && strings.Contains(res.Detail, "could not be pinned"):
+	default:
+		t.Fatalf("flat-out check: %s (%s); want a match, or inconclusive because the lock was never granted", res.Status, res.Detail)
 	}
 }
 
@@ -426,7 +460,7 @@ func TestIntegrationVerifyLiveSourceUnpausedByDefault2150(t *testing.T) {
 		t.Fatal("setup turned PauseWrites on; the default must be off")
 	}
 	var commits atomic.Int64
-	stopWriters := u.writers(t, &commits)
+	stopWriters := u.writers(t, &commits, 0)
 	defer stopWriters()
 	for i := range underWritesChecks {
 		time.Sleep(300 * time.Millisecond)
