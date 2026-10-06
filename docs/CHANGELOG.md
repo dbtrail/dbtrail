@@ -202,6 +202,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with one of the 44 words and used later (`SELECT made AS at ... ORDER BY
   at`) stays on MySQL too, which is right: the copy would refuse it.
 ### Fixed
+- **Turning the MySQL port off answers only once the port is closed (#2149).**
+  Turning it off from the web interface could answer "off" a moment before
+  the listening socket was released, and in that moment a new connection to
+  the port still completed. Seen once, on a loaded test machine; under heavy
+  CPU load about 1 in 25,000 stops did it. The answer now waits for the
+  socket: from then on a new connection is refused. Connections that were
+  already open are closed as before. Nothing to configure.
 - **`recover` and single-row `reconstruct`: a row changed by two sessions
   comes back right** (#2156, first part). Both took the order of a row's
   changes from the time recorded with each change, which is when its

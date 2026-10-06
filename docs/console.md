@@ -2014,7 +2014,9 @@ for the command-line entry), the password rule (the access token, never
 displayed) and a ready-to-copy `mysql -h <host> -P <port> -u <server> -p` line
 for that server. When the port is off, the panel turns it on: an address and
 a **Turn on** button, which also creates the port's own password and shows it
-once (**New password** replaces it, **Turn off** closes the port). A session
+once (**New password** replaces it, **Turn off** closes the port: the call
+answers once a new connection is refused, and closes the connections already
+open). A session
 without `settings:write`, or one with a data access policy, gets no controls.
 When the address was given with `--flashback-listen` /
 `BINTRAIL_CONSOLE_FLASHBACK_LISTEN`, that decides and the panel shows it as
