@@ -522,6 +522,74 @@ func freshDedupFloor(db *sql.DB) (int64, error) {
 	return floor, nil
 }
 
+// continuesNumbering reports whether a position-mode replay start
+// (file, pos) sits at or after the saved checkpoint (savedFile, savedPos) in
+// the SAME binlog numbering: the same base name (the part before the last
+// dot), and a suffix that sorts at or after the checkpoint's, length first
+// as deleteEventsSinceCheckpoint compares them (#840). An equal start is the
+// ordinary crash replay and continues.
+//
+// A start that sorts BELOW the checkpoint, or carries another base name, is a
+// numbering that started over (RESET MASTER / RESET BINARY LOGS AND GTIDS, a
+// regenerated file, a log_bin rename): the unfillable-gap advance moved back
+// to the source's oldest file, which only happens when the checkpoint's file
+// is gone (#2170). Positions of the two numberings say nothing about each
+// other, so the resume cleanup must not compare them. Names are compared
+// byte for byte: a difference only in letter case reads as another base
+// name, which skips the cleanup (deletes less, never more).
+func continuesNumbering(savedFile string, savedPos uint64, file string, pos uint64) bool {
+	savedBase, savedSuffix := splitBinlogName(savedFile)
+	base, suffix := splitBinlogName(file)
+	if base != savedBase {
+		return false
+	}
+	if len(suffix) != len(savedSuffix) {
+		return len(suffix) > len(savedSuffix)
+	}
+	if suffix != savedSuffix {
+		return suffix > savedSuffix
+	}
+	return pos >= savedPos
+}
+
+// positionCleanupSkipNotice is the log message and the startup checklist line
+// for a position-mode resume cleanup skipped by #2170. pastEnd is
+// gapResult.CheckpointPastEnd: the checkpoint's file still exists but ends
+// before the checkpoint, which a source crash that lost the file's tail and a
+// numbering that started over with the same name both produce. That case must
+// not claim a renumbering: after a crash the replay from the oldest file
+// re-sends changes already indexed, and keeping the rows makes those
+// duplicates, which the line has to say (a deleted row the source cannot send
+// again is worse, so the rows are kept either way).
+func positionCleanupSkipNotice(pastEnd bool, savedFile string, savedPos uint64, startFile string, startPos uint32) (warn, line string) {
+	if pastEnd {
+		return "dedup-on-resume: skipped; the checkpoint position is past the end of its binlog file, " +
+				"which still exists on the source, so the start could not be placed against it: either the " +
+				"file's tail was lost in a source crash or the binlog numbering started over with the same " +
+				"file name. Every indexed row was kept; if the tail was lost in a crash, changes the source " +
+				"still has from the new start on that were already indexed will be indexed again (duplicates)",
+			fmt.Sprintf("Cleanup: skipped, the checkpoint %s:%d is past the end of that file and the start %s:%d "+
+				"could not be placed (a crash that lost the file's tail, or the numbering started over); "+
+				"indexed events are kept, and events indexed before may be indexed twice",
+				savedFile, savedPos, startFile, startPos)
+	}
+	return "dedup-on-resume: skipped; the source's binlog numbering started over " +
+			"(RESET MASTER or a log_bin rename), so no indexed row can be " +
+			"placed against the new start and every one is kept; the capture loss stamped " +
+			"for the jump reports the changes in between",
+		fmt.Sprintf("Cleanup: skipped, the binlog numbering started over (checkpoint %s:%d, now starting at %s:%d); indexed events are kept",
+			savedFile, savedPos, startFile, startPos)
+}
+
+// splitBinlogName splits "binlog.000123" into ("binlog", "000123"). A name
+// with no dot is all base, with an empty suffix.
+func splitBinlogName(name string) (base, suffix string) {
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		return name[:i], name[i+1:]
+	}
+	return name, ""
+}
+
 // persistGapAutoAdvance durably records an unfillable-gap auto-advance. It stamps
 // gap_lost_at FIRST, then writes the advanced checkpoint — never the reverse.
 // Ordering is a data-loss-safety invariant: once the checkpoint is advanced past
@@ -1197,6 +1265,13 @@ type gapResult struct {
 	// signal at gap-detection time. Callers surface this as an escalated warning.
 	// Never set by the GTID detectors — GTID resumes stay false.
 	RebuildUndetectable bool
+
+	// CheckpointPastEnd is set by position-mode gap detection when the
+	// checkpoint's file still exists but is shorter than the checkpoint
+	// position. Two causes look identical here: the source lost the file's
+	// tail in a crash (sync_binlog != 1), or its numbering started over and
+	// reused the name. The resume cleanup must not claim either (#2170).
+	CheckpointPastEnd bool
 }
 
 // detectPositionGap queries the source MySQL for available binary logs and
@@ -1256,10 +1331,11 @@ func detectPositionGap(sourceDB *sql.DB, checkpointFile string, checkpointPos ui
 			// may have been regenerated (e.g., RESET MASTER). Treat as unfillable.
 			if int64(checkpointPos) > l.size {
 				return &gapResult{
-					HasGap:       true,
-					Fillable:     false,
-					EarliestFile: logs[0].name,
-					EarliestPos:  4,
+					HasGap:            true,
+					Fillable:          false,
+					CheckpointPastEnd: true,
+					EarliestFile:      logs[0].name,
+					EarliestPos:       4,
 					Message: fmt.Sprintf(
 						"binlog gap: file %s exists but checkpoint position %d exceeds file size %d; "+
 							"file may have been regenerated after RESET MASTER",
@@ -2411,6 +2487,19 @@ func oneRun(ctx context.Context, cfg Config) error {
 	// gtidAdvanced tracks whether the GTID auto-advance branch below ran — see
 	// the dedup-on-resume comment after this block for why it matters.
 	gtidAdvanced := false
+	// resumeFloor is the dedup floor this run carries forward: the saved one,
+	// except after a position-mode advance into a numbering that started over
+	// (#2170), where it is replaced by a fresh floor. ONE variable feeds both
+	// the advance's persisted checkpoint and the running state, so the two can
+	// never disagree. positionRenumbered records that same decision for the
+	// resume cleanup below, so the skip and the fresh floor come from ONE
+	// comparison and cannot drift apart.
+	var resumeFloor int64
+	positionRenumbered := false
+	positionPastEnd := false
+	if saved != nil {
+		resumeFloor = saved.dedupFloorID
+	}
 	if saved != nil {
 		var gap *gapResult
 		var gapErr error
@@ -2461,6 +2550,24 @@ func oneRun(ctx context.Context, cfg Config) error {
 						startFile, startPos, gap.EarliestFile, gap.EarliestPos)
 					startFile = gap.EarliestFile
 					startPos = gap.EarliestPos
+					// A jump back to the oldest file of a numbering that
+					// started over (#2170): every row already indexed belongs
+					// to the old numbering, and its positions sort anywhere
+					// against the new one. Carrying the saved floor would let
+					// the NEXT ordinary cleanup read those rows as "after" a
+					// position of the new numbering and delete them, so the
+					// floor starts above every row already in the index,
+					// exactly as a first run's does.
+					if !continuesNumbering(saved.binlogFile, saved.binlogPos, startFile, uint64(startPos)) {
+						fresh, err := freshDedupFloor(indexDB)
+						if err != nil {
+							return fmt.Errorf("binlog numbering started over (checkpoint %s:%d, oldest source file %s): %w",
+								saved.binlogFile, saved.binlogPos, startFile, err)
+						}
+						resumeFloor = fresh
+						positionRenumbered = true
+						positionPastEnd = gap.CheckpointPastEnd
+					}
 
 				case "gtid":
 					slog.Warn("auto-advancing past purged GTIDs",
@@ -2499,14 +2606,15 @@ func oneRun(ctx context.Context, cfg Config) error {
 					bintrailID:    bintrailID,
 					eventsIndexed: saved.eventsIndexed,
 					lastEventTime: saved.lastEventTime,
-					// Carried, unlike every other bare checkpoint writer. The
-					// advance only ever moves FORWARD past purged binlogs, so a
+					// Carried, unlike every other bare checkpoint writer. A
+					// purge advance moves FORWARD past purged binlogs, so a
 					// row at or beyond the advanced start was read after the
 					// saved checkpoint and therefore inserted above its floor —
 					// the bound still holds. Dropping it would hand a daemon
 					// already recovering from a purge a full-table scan on top
-					// (#1690).
-					dedupFloorID: saved.dedupFloorID,
+					// (#1690). An advance into a numbering that started over
+					// carries a fresh floor instead (resumeFloor, #2170).
+					dedupFloorID: resumeFloor,
 				}
 				if err := persistGapAutoAdvance(indexDB, advancedState, gap.Message); err != nil {
 					return err
@@ -2588,7 +2696,25 @@ func oneRun(ctx context.Context, cfg Config) error {
 	// the index server, and wait for it (#1708). The look is ahead of
 	// beginResumeCleanup on purpose: while it waits, no cleanup of this run has
 	// started, and the phase says so.
-	if saved != nil && saved.mode == mode && mode == "position" {
+	//
+	// Position mode deletes only when the replay start continues the saved
+	// checkpoint's numbering (#2170). After RESET MASTER the advance lands on
+	// binlog.000001:4 of a NEW numbering: nothing indexed will be replayed
+	// from there, and comparing old rows against that position deleted real
+	// changes the source can never send again. Such a start deletes nothing;
+	// the capture loss the advance stamped is what reports the jump.
+	if saved != nil && saved.mode == mode && mode == "position" && positionRenumbered {
+		// Still waits for a delete an earlier run left executing (#1708): it
+		// can hold locks this run's first inserts would queue behind.
+		if stopped, err := awaitEarlierCleanup(ctx, indexDB, cfg.Hooks); stopped || err != nil {
+			return err
+		}
+		warn, line := positionCleanupSkipNotice(positionPastEnd, saved.binlogFile, saved.binlogPos, startFile, startPos)
+		slog.Warn(warn,
+			"checkpoint_file", saved.binlogFile, "checkpoint_pos", saved.binlogPos,
+			"start_file", startFile, "start_pos", startPos)
+		fmt.Println(line)
+	} else if saved != nil && saved.mode == mode && mode == "position" {
 		if stopped, err := awaitEarlierCleanup(ctx, indexDB, cfg.Hooks); stopped || err != nil {
 			return err
 		}
@@ -2646,7 +2772,9 @@ func oneRun(ctx context.Context, cfg Config) error {
 		// persist a floor of 0 and throw away the one the previous run earned.
 		// A crash right after that leaves the next resume scanning the whole
 		// table, which is the outage this change exists to remove.
-		state.dedupFloorID = saved.dedupFloorID
+		// resumeFloor is the saved floor, or the fresh one an advance into a
+		// numbering that started over took (#2170).
+		state.dedupFloorID = resumeFloor
 	} else {
 		state.dedupFloorID = freshFloor
 	}

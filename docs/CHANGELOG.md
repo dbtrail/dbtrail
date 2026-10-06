@@ -202,6 +202,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with one of the 44 words and used later (`SELECT made AS at ... ORDER BY
   at`) stays on MySQL too, which is right: the copy would refuse it.
 ### Fixed
+- **Capture no longer deletes indexed changes after `RESET MASTER` on a
+  source captured by binlog position (#2170).** When the source's binary log
+  starts over (`RESET MASTER`, `RESET BINARY LOGS AND GTIDS`), the stream
+  stops, and on restart it moves to the new first file and records a
+  capture loss. That part was right. But the cleanup that runs on every
+  restart, which removes rows written after the last checkpoint so a replay
+  does not index them twice, compared those rows against the new first
+  file, read them as "after" it and deleted them. They were real changes
+  that the source can never send again. On a test server it deleted 7 of
+  10 rows: the 5 captured after the last checkpoint and 2 just before it.
+  A second restart later, in the new numbering, could delete the same rows
+  the same way. Now, when the restart position sorts below the checkpoint
+  or carries another file name, the cleanup deletes nothing and says so
+  (`Cleanup: skipped, the binlog numbering started over`), and the next
+  cleanups only touch rows captured after the jump. When the checkpoint's
+  file still exists but ends before the checkpoint, a source crash that
+  lost the end of the file looks the same as a reset, so the rows are kept
+  there too and the line says that changes indexed before may now be
+  indexed twice: a duplicate can be seen and removed, a deleted change
+  cannot be brought back. The ordinary restart
+  after a crash is unchanged: replayed rows are still not indexed twice.
+  GTID mode is unchanged.
+  **What may already be missing:** on an index whose source ran `RESET
+  MASTER` while captured in position mode, the changes captured shortly
+  before the reset, mostly those after the last checkpoint (a few seconds
+  of capture). An index whose checkpoint was written before 0.83.0 and never
+  updated since could have lost far more. To tell: `bintrail status` shows
+  `EVENTS PERMANENTLY LOST`, detected at the first restart after the reset,
+  with a detail naming the binlog file that was gone; compare the changes
+  indexed just before that time with the source's own data (`bintrail
+  verify`, or a read of the rows on the source).
 - **`verify` and a whole-table `_snapshot` read: a row changed by two
   sessions is taken at its last change** (#2156, second part). Both put on a
   snapshot the latest change of each row after it. They took "latest" from
