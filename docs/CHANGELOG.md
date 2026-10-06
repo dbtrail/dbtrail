@@ -152,9 +152,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shows (code 1105). Nothing is looked up for a row whose latest change is
   the same in both orders, which is every row without one of these waits.
 
-  The cost: the fetch of these two readers returns up to two changes per
-  changed row instead of one, from MySQL and from the archives. Measured on
-  the integration box: see the pull request. `--limit-per-pk` of `query`
+  The cost: the fetch of these two readers ranks each row's changes twice
+  and can return two changes of a row instead of one. Measured on a table of
+  100,000 rows with 400,000 changes: reading the latest change of every row
+  took 2.0 seconds from MySQL instead of 1.4, and 1.25 from an archive
+  instead of 1.14; choosing among them took 0.06 seconds. `--limit-per-pk` of `query`
   and `recover`, the web interface and the MCP tools keep the newest changes
   by statement time, as before.
 - **`recover` and single-row `reconstruct`: a row changed by two sessions
