@@ -291,6 +291,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   picture and answering took 17 ms, and the start did not move. Still not
   covered: an hour rotated out without an archive, and an archive whose
   `archive_state` row is missing.
+- **Position-mode capture no longer deletes changes, or reads from the middle
+  of an event, after a `RESET MASTER` whose new numbering grew back past the
+  checkpoint (#2172).** When the source's binary log starts over and, before
+  capture restarts, grows back to the checkpoint's file name and past its
+  offset, the names and sizes look like the checkpoint's own file. The
+  restart used to delete the changes indexed after the last checkpoint (the
+  source never sends them again) and then fail on every start with "log event
+  entry exceeded max_allowed_packet", reading the new file from the
+  checkpoint's offset; no capture loss was recorded. On a test server it
+  deleted the 5 changes captured after the checkpoint and never captured the
+  ones written after the reset. Each checkpoint now records the identity of
+  its binlog file (`stream_state.binlog_file_identity`, added on startup: the
+  file's creation time and `server_id`, from its first event). A
+  position-mode restart reads that identity again with a short binlog dump
+  of the file (no new privilege) and, when it differs, deletes nothing,
+  records a capture loss naming both identities and restarts from the
+  source's oldest binary log. When it matches, the "cannot verify the source
+  was not rebuilt" warning is no longer printed. Position-mode restarts also
+  stop comparing binlog positions with a checkpoint written against another
+  server (`source_identity`) when the file's identity cannot settle it: they
+  keep every row and restart from that server's oldest binary log. Cases
+  still out of reach are now named by the restart instead of passing in
+  silence: a checkpoint with no dedup floor (written before 0.83.0), a purge
+  advance that a reset may hide, and a batch from an index write deadline
+  that commits after a renumbering's fresh floor; see docs/streaming.md.
+  **Upgrade note:** the first restart after the upgrade has no recorded file
+  identity and runs as before; checkpoints from then on carry it.
 - **GTID capture after `RESET MASTER` on the source no longer loses changes
   without saying so** (#2171). `RESET BINARY LOGS AND GTIDS` / `RESET MASTER`
   starts the source's GTID numbering over. Capture used to delete the changes

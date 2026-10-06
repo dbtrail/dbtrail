@@ -223,7 +223,7 @@ When a stream is restarted after downtime, MySQL may have continued generating b
 
 **Position mode** (`--start-file`/`--start-pos`):
 1. Queries `SHOW BINARY LOGS` on the source MySQL.
-2. If the checkpoint file still exists in the list, the gap is **fillable** — DBTrail resumes from the checkpoint and replays all missed events before switching to live tailing.
+2. If the checkpoint file still exists in the list, the gap is **fillable** — DBTrail resumes from the checkpoint and replays all missed events before switching to live tailing. First it checks that the file under that name is the file the checkpoint was read from (see [When the binary log numbering starts over, in position mode](#when-the-binary-log-numbering-starts-over-in-position-mode)).
 3. If the checkpoint file has been purged, the gap is **unfillable** — DBTrail logs a warning and auto-advances to the earliest available binlog file.
 
 **GTID mode** (`--start-gtid`):
@@ -360,7 +360,7 @@ it went backwards. Cases this check cannot see:
   and only while the source's newest file sorts before the checkpoint's file
   (or is that file, shorter than the checkpoint's offset). A source that has
   rotated back up to or past the checkpoint's file number by then is not seen.
-  Position mode has the same blind spot.
+  Position mode tells that file apart by its identity (next section).
 - A source rebuilt with a new `server_uuid` from a backup that still shares
   part of the old history looks like a lagging replica.
 - Group Replication / InnoDB Cluster: transactions carry the group's UUID, not
@@ -391,6 +391,103 @@ on every start; `--reset` resumes from its current position.
 A running capture normally meets the reset long before either: the source ends
 the binlog dump when its binary log is reset (`could not find next log`), and
 the restart that follows sees the source went backwards.
+
+#### When the binary log numbering starts over, in position mode
+A position-mode checkpoint is a binlog file name and an offset. `RESET BINARY
+LOGS AND GTIDS` / `RESET MASTER` start the numbering over, and the new
+numbering reuses every name. When the checkpoint's file is gone on restart, or
+shorter than the checkpoint, capture moves to the source's oldest file, keeps
+every indexed event and records a capture loss. When the new numbering has
+already grown back to the checkpoint's file name and past its offset, the
+names and sizes look exactly like the checkpoint's own file. Capture used to
+resume there: it deleted the events indexed after the last checkpoint (the
+source never sends them again) and read the new file from the middle of an
+event (`ERROR 1236 ... log event entry exceeded max_allowed_packet`).
+
+Each checkpoint therefore also records the identity of its binlog file
+(`binlog_file_identity` in `stream_state`, added on startup): the time the
+server created the file and the `server_id` that wrote it, both from the
+file's first event (the format description event). The server writes that
+time once, when it creates the file, and sends it unchanged on every read; a
+reset gives the file under the same name a new one (checked on MySQL 8.0 and
+8.4, MariaDB 10.11 and 11.4). On a position-mode restart whose checkpoint
+recorded it and whose file is still listed, capture opens a short binlog dump
+of that file, with the capture's own connection settings and `server_id`,
+reads its first event and compares:
+
+- **Same identity:** the restart resumes from the checkpoint as before, and
+  prints `Source: binlog file <name> has the identity the checkpoint recorded
+  (fde:<time>:<server_id> ...)`. That says the file was created at the same
+  second by the same `server_id`, not that its content is the same.
+  The "cannot verify the source was not rebuilt" warning is not printed.
+- **Different identity:** the restart deletes nothing, records a capture loss
+  that names both identities, and restarts from the start of the source's
+  oldest binary log, so every change of the new numbering is captured. With
+  `--no-gap-fill` it refuses instead.
+- **The dump fails:** capture does not start, and changes nothing; the check
+  runs again on the next start. The dial and each read are bounded by
+  `--gap-timeout`. If it keeps failing, `--reset` resumes from the source's
+  current position and records the skipped range as a capture loss.
+
+If the source serves another file under a name the running stream already
+read (its numbering started over under a reconnect), the stream logs a warning
+and keeps the first identity for that name, so a restart while the checkpoint
+still names that file sees the difference instead of verifying the new file.
+
+The dump needs only `REPLICATION SLAVE`, which capture already has. `SHOW
+BINLOG EVENTS` does not show the time, so it cannot replace the dump.
+
+The checkpoint also records the source's identity (`source_identity`, see the
+GTID section above). It decides only when the file's identity cannot: a
+server whose `server_id` changed, or a clone with a new `server_uuid`, still
+serves the same files, and reading them as another server's would read its
+whole binary log again. When the checkpoint recorded no file identity and was
+written against another server, capture restarts from that server's oldest
+binary log, keeps every indexed event and records a capture loss; changes the
+two servers' binary logs share are indexed again (duplicates). When the
+checkpoint's file is gone and the checkpoint was written against another
+server, the advance to the oldest file deletes nothing either.
+
+Cases this check cannot see, and what the restart says about them:
+
+- A checkpoint written before this version has no file identity, so the first
+  restart after the upgrade runs as before, with the "cannot verify" warning.
+  So does the start checkpoint of a first run, or one written by a gap advance
+  or `--reset`, until the stream
+  reads its file and writes the next checkpoint (within one checkpoint
+  interval).
+- A numbering that starts over under a running stream (a reconnect after a
+  reset) is caught at the next restart only while the checkpoint still names a
+  file the stream had already read under the old numbering. Once the stream
+  moves on to a name it never read before, that file's identity belongs to the
+  new numbering, the restart verifies it, and the warning logged when the
+  stream met the reused name is the only record of the break.
+- A self-hosted source rolled back to a VM or disk snapshot: its binary logs
+  and its identity roll back together, so the checkpoint's file comes back with
+  the same creation time and `server_id`. Once it grows past the checkpoint,
+  the identity matches and the ordinary cleanup deletes the indexed rows of the
+  discarded timeline at or after the checkpoint.
+- The time has one-second resolution: a reset that regrows a file of the same
+  name within the second the old one was created is not seen.
+- A new numbering that grew past the checkpoint's file name and whose files up
+  to that name were purged before the restart: the checkpoint's file is gone,
+  so its identity cannot be read, and the oldest surviving file sorts above
+  the checkpoint exactly as after an ordinary purge. The restart still deletes
+  the indexed rows at or after that file, which is right after an ordinary
+  purge and wrong after a reset. It says so before deleting
+  (`Cleanup: the checkpoint <file>:<pos> was purged; removing rows ...`).
+- A checkpoint with no dedup floor (written before 0.83.0 and never rewritten):
+  the cleanup compares binlog positions only, so on an index that holds rows
+  of an older numbering it also deletes those in files that sort at or after
+  the checkpoint. The restart says so (`Cleanup: the checkpoint has no dedup
+  floor ...`), in both modes. Once that run indexes a change, its checkpoints
+  carry a floor.
+- After an index write deadline (`--write-timeout`), the timed-out batch can
+  still commit on the index server after the restart read the highest
+  `event_id` for the fresh dedup floor a renumbering takes. Those rows carry
+  the old numbering's positions above that floor; if the new run stops before
+  its first checkpoint, the next cleanup can delete them. A restart that takes
+  that floor logs a warning naming this.
 
 ### The `--no-gap-fill` flag
 

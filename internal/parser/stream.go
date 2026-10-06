@@ -45,6 +45,9 @@ type StreamParser struct {
 	// MySQL vs MariaDB event types (GTIDEvent vs MariadbGTIDEvent) already
 	// disambiguate that.
 	flavor string
+	// onFileOpened, when set, is told the identity of every binlog file the
+	// stream opens (see SetFileOpenedHook). Set before Run starts.
+	onFileOpened func(file, identity string)
 }
 
 // NewStreamParser creates a StreamParser that resolves column names via
@@ -87,6 +90,36 @@ func (sp *StreamParser) SetFlavor(flavor string) {
 // the spawning statement (the SetFlavor contract). nil disables counting.
 func (sp *StreamParser) SetSkipCounters(c *SkipCounters) {
 	sp.skips = c
+}
+
+// SetFileOpenedHook registers fn to be told, for every binlog file the stream
+// opens, the file's name and its identity (BinlogFileIdentity). The source
+// sends a file's FORMAT_DESCRIPTION event every time a dump enters the file,
+// mid-file resumes included, so fn sees the start file of a resume too. fn
+// runs on the parse goroutine, before any event of that file is emitted, so a
+// consumer that looks the identity up by file name always finds it for a
+// file whose events it has received. Must be called before the goroutine
+// that runs Run is spawned (the SetFlavor contract). nil disables it.
+func (sp *StreamParser) SetFileOpenedHook(fn func(file, identity string)) {
+	sp.onFileOpened = fn
+}
+
+// BinlogFileIdentity is the identity of the binlog file whose
+// FORMAT_DESCRIPTION event carries hdr: the time the server created the file,
+// and the server_id that wrote it. A file name alone does not name one file:
+// RESET BINARY LOGS AND GTIDS / RESET MASTER starts the numbering over, and
+// the new numbering reuses every name. The header timestamp is written once,
+// when the file is created, and the server sends it unchanged on every read,
+// from the file's start or from the middle (measured on MySQL 8.0.46 and
+// 8.4.9, MariaDB 10.11.19 and 11.4.13), and a reset gives the file under the
+// same name a new one. Its resolution is one second: a reset and regrow to
+// the same name within the second the old file was created is not told
+// apart. "" when hdr carries no timestamp.
+func BinlogFileIdentity(hdr *replication.EventHeader) string {
+	if hdr == nil || hdr.Timestamp == 0 {
+		return ""
+	}
+	return fmt.Sprintf("fde:%d:%d", hdr.Timestamp, hdr.ServerID)
 }
 
 // GTIDExecutedHint returns the flavor-appropriate system variable an
@@ -349,6 +382,13 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 		if _, isRotate := binlogEv.Event.(*replication.RotateEvent); isRotate {
 			lastLogPos = 0 // new file (real or fake-resume rotate): positions restart
 		} else if _, isFDE := binlogEv.Event.(*replication.FormatDescriptionEvent); isFDE {
+			// The file's identity, for the checkpoint (#2172). currentFile is
+			// the file the rotate before this FDE named.
+			if sp.onFileOpened != nil && currentFile != "" {
+				if id := BinlogFileIdentity(binlogEv.Header); id != "" {
+					sp.onFileOpened(currentFile, id)
+				}
+			}
 			// A FORMAT_DESCRIPTION event neither trips the guard nor advances
 			// lastLogPos. At a mid-file (re)connect the server re-sends the
 			// file's FDE with LogPos zeroed on the wire (its physical offset is

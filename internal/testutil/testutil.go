@@ -370,6 +370,7 @@ func InitIndexTables(t *testing.T, db *sql.DB) {
 		server_id        INT UNSIGNED    NOT NULL,
 		bintrail_id      CHAR(36)        NULL DEFAULT NULL,
 		source_identity  VARCHAR(64)     DEFAULT NULL,
+		binlog_file_identity VARCHAR(64) DEFAULT NULL,
 		gap_lost_at      DATETIME        DEFAULT NULL,
 		gap_lost_detail  TEXT            DEFAULT NULL,
 		source_health    JSON            DEFAULT NULL,
