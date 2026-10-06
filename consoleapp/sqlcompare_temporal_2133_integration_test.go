@@ -79,8 +79,30 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	if err := srcDB.QueryRow("SHOW CREATE TABLE ev").Scan(&name, &ddl); err != nil {
 		t.Fatal(err)
 	}
+	// A table whose TIME column a star reaches without naming it: two
+	// negative times, and one of a hundred hours beside one of ninety-nine.
+	// The same rows on both sides.
+	spans := [][]string{{"1", "-01:30:00"}, {"2", "-05:00:00"}, {"3", "99:00:00"}, {"4", "100:00:00"}, {"5", "10:00:00"}}
+	if _, err := srcDB.Exec("CREATE TABLE v (id INT NOT NULL PRIMARY KEY, tm TIME)"); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range spans {
+		if _, err := srcDB.Exec("INSERT INTO v VALUES ('" + strings.Join(r, "','") + "')"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := srcDB.Exec("ANALYZE TABLE v"); err != nil {
+		t.Fatal(err)
+	}
+	var vddl string
+	if err := srcDB.QueryRow("SHOW CREATE TABLE v").Scan(&name, &vddl); err != nil {
+		t.Fatal(err)
+	}
 	baseDir := t.TempDir()
-	writeOrderSnapshot(t, baseDir, srcName, []orderTable{{name: "ev", ddl: ddl + ";\n", rows: row("live"), copyRows: row("copy"), footer: true}})
+	writeOrderSnapshot(t, baseDir, srcName, []orderTable{
+		{name: "ev", ddl: ddl + ";\n", rows: row("live"), copyRows: row("copy"), footer: true},
+		{name: "v", ddl: vddl + ";\n", rows: spans, footer: true},
+	})
 
 	reg, err := console.LoadRegistry(t.TempDir() + "/servers.yaml")
 	if err != nil {
@@ -126,6 +148,8 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		// The date under a name a column list gives it, over a star written
 		// with no space: its own name is nowhere in the statement.
 		renamed = "WITH q(i, a, b, c, e, f, g) AS (SELECT*FROM ev) SELECT a - 1 FROM q ORDER BY f"
+		// A TIME reached through a star: the copy sorts it as text.
+		timeStar = "SELECT * FROM v ORDER BY 2"
 		// The two known differences this change leaves, each with its line in
 		// docs/time-travel-sql.md.
 		interval = "SELECT created_on + INTERVAL 1 DAY FROM ev ORDER BY n"
@@ -150,6 +174,7 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{yearTwo, diff, "rows", "the year 2026 on the source (one row), the year 26 on the copy (none)"},
 		{castFrac, diff, "", "the fraction is rounded by MySQL, cut by MariaDB and kept by the copy"},
 		{renamed, diff, "", "20260100 on the source, 2025-12-31 on the copy"},
+		{timeStar, diff, "", "by time on the source (-05:00:00 first, 100:00:00 last); as text on the copy"},
 		{interval, diff, "", "the same day: a DATE on the source, a date and time on the copy"},
 		{concat, diff, "", "a DATETIME as text ends in +00 on the copy"},
 	}
@@ -160,7 +185,7 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	// ask (part 2 does).
 	for stmt, veto := range map[string]string{
 		bitOr: "bit operator", yearTwo: "two-digit year", castFrac: "CAST to DATETIME or TIME",
-		plus: "", minus: "", avg: "", alias: "", renamed: "", timeText: "", interval: "", concat: "",
+		plus: "", minus: "", avg: "", alias: "", renamed: "", timeStar: "", timeText: "", interval: "", concat: "",
 	} {
 		r := by[stmt]
 		if veto == "" && r.RouteRule == "veto" {
@@ -168,6 +193,16 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		}
 		if veto != "" && (r.Route != "mysql" || r.RouteRule != "veto" || !strings.Contains(r.RouteReason, veto)) {
 			t.Errorf("%q: route=%s rule=%s (%s), want it kept on the source by the veto %q", stmt, r.Route, r.RouteRule, r.RouteReason, veto)
+		}
+	}
+
+	// Measured for the record, on each server: what a star over the TIME
+	// column returns on the source and on the copy.
+	{
+		cp := openRaw(t, copies[0])
+		raw := openRaw(t, sourceDSN)
+		for _, stmt := range []string{"SELECT * FROM v ORDER BY 2 LIMIT 1", timeStar, "SELECT MAX(b) FROM (SELECT tm AS b FROM v) q"} {
+			t.Logf("star    %s\n    source: %s\n    copy:   %s", stmt, answerText(raw, stmt), answerText(cp, stmt))
 		}
 	}
 
@@ -212,14 +247,20 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 			}
 		}
 	}
+	// A star over the TIME column: the source's order, by time, where the
+	// copy would have sorted the text (-01:30:00 first, 100:00:00 before
+	// 99:00:00).
+	if got := answerText(routed, timeStar); got != "2|-05:00:00 / 1|-01:30:00 / 5|10:00:00 / 3|99:00:00 / 4|100:00:00" {
+		t.Errorf("routed %q: got %s, want the times in the source's order", timeStar, got)
+	}
 	// The values this is about, on every server: a number built from the
 	// date's digits, where the copy would have said 2026-01-02.
 	if got := answerText(routed, "SELECT created_on + 1 FROM ev ORDER BY n"); got != "20260102 / 20260204 / 20260116" {
 		t.Errorf("routed created_on + 1: got %s, want 20260102 / 20260204 / 20260116", got)
 	}
 
-	// Who answered, and why the source: eleven statements declined by the
-	// copy for a column's type (ten above and the one just now), two kept on
+	// Who answered, and why the source: twelve statements declined by the
+	// copy for a column's type (ten in the list, the star over the TIME column and the one just now), two kept on
 	// the source from the text (the bit operator, the bound two-digit year),
 	// four answered by the copy, and the copy at fault in none.
 	req := httptest.NewRequest("GET", "http://127.0.0.1/api/flashback", nil)
@@ -238,7 +279,7 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	}
 	reasons := fb.Routing.Servers[ent.ID].Reasons
 	t.Logf("routing reasons: %v", reasons)
-	if reasons["copy_columns_differ"] != 11 || reasons["veto"] != 2 || reasons["expensive_plan"] != 4 || reasons["copy_refused"] != 0 || reasons["explain_failed"] != 0 {
-		t.Errorf("reasons = %v, want copy_columns_differ 11, veto 2, expensive_plan 4, copy_refused 0, explain_failed 0", reasons)
+	if reasons["copy_columns_differ"] != 12 || reasons["veto"] != 2 || reasons["expensive_plan"] != 4 || reasons["copy_refused"] != 0 || reasons["explain_failed"] != 0 {
+		t.Errorf("reasons = %v, want copy_columns_differ 12, veto 2, expensive_plan 4, copy_refused 0, explain_failed 0", reasons)
 	}
 }

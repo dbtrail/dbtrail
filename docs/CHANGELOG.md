@@ -58,7 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     COUNT(paid_at)`, `SUM(...) - SUM(...)`). Column names are matched in
     any script, by letters and without regard to case, so a table with a
     column `año` or an alias `número` is treated like any other.
-  - A statement that names a `TIME` or a `YEAR` column is declined: the copy
+  - A statement that names a `TIME` or a `YEAR` column, or has a star over
+    a table with one, is declined: the copy
     holds a `TIME` as text (`tm >= '9:00:00'` returned no row there, three
     on MySQL) and a `YEAR` as a plain number (`yr = 26` is not 2026 there).
   - `|`, `&`, `>>`, `BIT_COUNT`, `BIT_AND`, `BIT_OR` and `BIT_XOR` are kept
@@ -79,8 +80,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   routing fixtures that no older rule kept on MySQL, one newly stays there
   under the date rules, the `created_on + 1` this is about. Those fixtures
   have no `TIME` or `YEAR` column, so that rule is not in the count: over a
-  table that has one, an ORM that names every column keeps its reads on
-  MySQL. Of 30 report-shaped statements written for this (year and month
+  table that has one, an ORM that names every column or sends `SELECT *`
+  keeps its reads on MySQL. Of 30 report-shaped statements written for this (year and month
   buckets, sums and counts subtracted, negative thresholds, subqueries), 4
   stay on MySQL: an alias in `ORDER BY total - 1`, `amount - tax` and `AVG`
   beside a subquery, and `MAX(created_on) - MIN(created_on)`. Still different, and listed in

@@ -1218,9 +1218,12 @@ What this is and is not:
     '9:00:00'` compares letters there and finds nothing where MySQL finds
     every row after nine, and a `YEAR` as a plain number, so `yr = 26` is
     not the year 2026 there. On a table with such a column that is most of
-    what an ORM that names every column sends. A star over such a table is
-    not kept back: `SELECT *` returned the same values and the same order
-    on both sides, times over 24 hours and negative ones included;
+    what an ORM sends. A star over such a table (`SELECT *`, `t.*`, `TABLE
+    t`) stays on MySQL as well: it reaches the column without its name, so
+    `SELECT * FROM v ORDER BY 2` sorts the times as text on the copy (two
+    negative times in the other order, `100:00:00` before `99:00:00`), and
+    a column list over the star (`(SELECT * FROM v) q(a, b)`) gives the
+    column another name to compare by;
   - **any statement that reads a table with a date, time or year column
     whose name is not made of letters, digits, `_` and `$` alone** (a
     space, a dot), and a statement that is not valid UTF-8; a column of a

@@ -51,7 +51,8 @@ func (s StatementShape) ColumnVeto(dates, whole []string, star bool) string {
 //   - whole are their TIME and YEAR columns, which the copy holds under
 //     another type: a TIME as text, so tm >= '9:00:00' compares letters, and
 //     a YEAR as a number, so yr = 26 is not the year 2026. A statement that
-//     names one at all is kept on the source.
+//     names one at all is kept on the source, and so is one with a star,
+//     which reaches the column without its name.
 //
 // star says the statement holds a star that stands for columns, when the
 // caller knows from a parse of it; the text is searched for one as well.
@@ -121,7 +122,9 @@ var numericOfDate = map[string]bool{
 
 // beforeANumber are the reserved words a signed number can follow: after
 // one of them a + or a - before a digit is the number's sign. Reserved, so
-// none of them can be an unquoted column or alias.
+// none of them can be an unquoted column or alias where a word stands on its
+// own. After a dot it can: MySQL takes any word there for a name (q.limit),
+// and dateSign does not read such a word as one of these.
 var beforeANumber = map[string]bool{
 	"select": true, "where": true, "and": true, "or": true, "not": true, "then": true, "else": true, "when": true,
 	"between": true, "in": true, "by": true, "limit": true, "on": true, "having": true, "case": true, "is": true,
@@ -202,6 +205,12 @@ func columnVetoWork(shape string, dates, whole []string, star bool) (why string,
 	text := t.all()
 	derived := subquery.MatchString(text)
 	star = star || starItem.MatchString(text)
+	if len(whole) > 0 && star {
+		// A star reaches the column without its name: ORDER BY 2 sorts a
+		// TIME as text on the copy, and a column list over the star
+		// ((SELECT * FROM t) q(a, b)) gives it another name to compare by.
+		return "the statement has a star over a table with a TIME or YEAR column (" + whole[0] + "), which the copy holds as text or as a plain number", t.steps
+	}
 	if len(dates) == 0 || len(shapes) == 0 && !(derived && star) {
 		return "", t.steps
 	}
@@ -353,9 +362,18 @@ func dateSign(t *shapeText, closes map[int]int, i int) bool {
 	if wordByte(lc) {
 		before = strings.ToLower(lastWord(t, l+1))
 	}
+	// A word after a dot is a name, whatever it spells.
+	reserved := beforeANumber[before]
+	if reserved {
+		p := l - len(before)
+		for p >= 0 && sqlSpace(t.at(p)) {
+			p--
+		}
+		reserved = p < 0 || t.at(p) != '.'
+	}
 	if number {
 		switch {
-		case strings.IndexByte("(,=<>!*/%+-|&^", lc) >= 0, beforeANumber[before]:
+		case strings.IndexByte("(,=<>!*/%+-|&^", lc) >= 0, reserved:
 			return false
 		case l == i-1 && r == i+1 && len(before) > 1 && asciiDigit(before[0]) && before[len(before)-1] == 'e':
 			return false

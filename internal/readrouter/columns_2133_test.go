@@ -63,9 +63,26 @@ func TestColumnVeto_arithmeticOnADateColumn(t *testing.T) {
 		"SELECT YEAR(d) + x FROM (SELECT created_on AS x, d FROM orders) q":                   true,
 		"SELECT COALESCE(x, y) - 1 FROM (SELECT created_on AS x, y FROM orders) q":            true,
 		"SELECT (x) + 1 FROM (SELECT created_on AS x FROM orders) q":                          true,
-		"SELECT 1 - year FROM (SELECT created_on AS year FROM orders) q":                      true, // a name, not a call of YEAR
-		"SELECT MEDIAN(x) OVER () FROM (SELECT created_on AS x FROM orders) q":                true,
-		"SELECT offset - 1 FROM (SELECT created_on AS offset FROM orders) q":                  true, // offset is not a reserved word
+		// After a dot a reserved word is a name: q.limit -1 is a column minus one.
+		"SELECT q.limit -1 FROM (SELECT created_on AS `limit` FROM orders) q":             true,
+		"SELECT q.in -1 FROM (SELECT created_on AS `in` FROM orders) q":                   true,
+		"SELECT q.then -1 FROM (SELECT created_on AS `then` FROM orders) q":               true,
+		"SELECT q.by-1 FROM (SELECT created_on AS `by` FROM orders) q":                    true,
+		"SELECT q.mod -1 FROM (SELECT created_on AS `mod` FROM orders) q":                 true,
+		"SELECT q.case-1 FROM (SELECT created_on AS `case` FROM orders) q":                true,
+		"SELECT q.all - 1 FROM (SELECT created_on AS `all` FROM orders) q":                true,
+		"SELECT q . limit -1 FROM (SELECT created_on AS `limit` FROM orders) q":           true,
+		"WITH x AS (SELECT created_on AS `select` FROM orders) SELECT x.select -1 FROM x": true,
+		"SELECT `limit` -1 FROM (SELECT created_on AS `limit` FROM orders) q":             true,
+		// Arithmetic on the date inside a call that returns a number is still arithmetic on the date.
+		"SELECT YEAR(created_on + 1) FROM orders":                              true,
+		"SELECT DAY(created_on + 1) FROM orders":                               true,
+		"SELECT SUM(created_on - seen_at) FROM orders":                         true,
+		"SELECT COUNT(DISTINCT created_on + 1) FROM orders":                    true,
+		"SELECT EXTRACT(DAY FROM created_on - seen_at) FROM orders":            true,
+		"SELECT 1 - year FROM (SELECT created_on AS year FROM orders) q":       true, // a name, not a call of YEAR
+		"SELECT MEDIAN(x) OVER () FROM (SELECT created_on AS x FROM orders) q": true,
+		"SELECT offset - 1 FROM (SELECT created_on AS offset FROM orders) q":   true, // offset is not a reserved word
 		// What both sides answer alike.
 		"SELECT created_on FROM orders":                                                               false,
 		"SELECT id, created_on, seen_at FROM orders ORDER BY created_on DESC":                         false,
@@ -172,11 +189,27 @@ func TestColumnVeto_aDateUnderAnotherName(t *testing.T) {
 	if got := ColumnVeto(Shape(hidden), dates, nil, true); got == "" {
 		t.Errorf("ColumnVeto(%q) with a star the parse saw: not kept back", hidden)
 	}
-	// A star over a table with a TIME or YEAR column is not kept back: the
-	// values and their order measured equal on both sides.
-	for _, stmt := range []string{"SELECT * FROM t ORDER BY 2", "SELECT t.* FROM t"} {
-		if got := ColumnVeto(Shape(stmt), nil, whole, true); got != "" {
-			t.Errorf("a TIME column: ColumnVeto(%q) = %q, want none", stmt, got)
+	// A star over a table with a TIME or YEAR column reaches the column
+	// without its name: the copy sorts and compares a TIME as text.
+	for stmt, star := range map[string]bool{
+		"SELECT * FROM t ORDER BY 2":                              false,
+		"SELECT*FROM t ORDER BY 2 LIMIT 1":                        false,
+		"SELECT t.* FROM t":                                       false,
+		"SELECT a, * FROM t":                                      false,
+		"TABLE t":                                                 false,
+		"SELECT MAX(b) FROM (SELECT * FROM t) q(a, b)":            false,
+		"SELECT b FROM (SELECT * FROM t) q(a, b) WHERE b >= ''":   false,
+		"SELECT 1 FROM x WHERE '' IN (SELECT * FROM t)":           false,
+		"SELECT c FROM (SELECT * FROM t) q(a, b, c) WHERE c = 26": false,
+		"SELECT COLUMNS(c) FROM t":                                true, // a star only the caller's parse sees
+	} {
+		if got := ColumnVeto(Shape(stmt), nil, whole, star); !strings.Contains(got, "star over a table with a TIME or YEAR") {
+			t.Errorf("a TIME column: ColumnVeto(%q) = %q, want kept on the source for its star", stmt, got)
+		}
+	}
+	for _, stmt := range []string{"SELECT COUNT(*), a * 2 FROM t", "SELECT a FROM t WHERE b IN (1 , 2)", "SELECT a, b FROM t ORDER BY 2"} {
+		if got := ColumnVeto(Shape(stmt), nil, whole, false); got != "" {
+			t.Errorf("a TIME column and no star: ColumnVeto(%q) = %q, want none", stmt, got)
 		}
 	}
 	// A date column whose own name starts with $, quoted or not.
