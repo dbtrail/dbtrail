@@ -325,21 +325,37 @@ or replayed:
   the same `EVENTS PERMANENTLY LOST` signal as an unfillable gap) that says what
   happened, and restarts from the start of the source's binary log, so the new
   numbering's transactions are all captured. With `--no-gap-fill` it refuses
-  instead.
+  instead. When the checkpoint's binary log file is still on the source after
+  older ones, the log was not reset but lost its end (a crash with
+  `sync_binlog != 1`, or a restore with the binary logs kept): the loss is
+  recorded the same way, and capture continues after the transactions the
+  source still has instead of reading them a second time.
 - **MariaDB.** The same check uses the source's `server_id` and
   `@@gtid_binlog_state`. Capture refuses to start, deletes nothing, and the
   error says how to resume: restart once with
   `--reset --start-file <the source's oldest binary log> --start-pos 4`, which
   captures the new numbering from its first transaction (in position mode) and
-  records the jump as a capture loss.
+  records the jump as a capture loss. To return to GTID mode later, stop capture
+  once it has caught up and restart it with `--start-gtid` set to the source's
+  `@@gtid_binlog_pos` read at that moment: anything the source writes between
+  that read and the restart is skipped.
 
 A source that is only **behind** is never reported: a lagging replica is
 missing other servers' transactions, never its own, and only its own can prove
-it went backwards. Two cases this check cannot see: a numbering that started
-over in a binary log file with the same name, regrown past the checkpoint's
-offset, once the new numbering has passed the old one (position mode has the
-same blind spot); and a source rebuilt with a new `server_uuid` from a backup
-that still shares part of the old history, which looks like a lagging replica.
+it went backwards. Cases this check cannot see:
+
+- Once the new numbering has passed the old one, only the binary log can tell,
+  and only while the source's newest file sorts before the checkpoint's file
+  (or is that file, shorter than the checkpoint's offset). A source that has
+  rotated back up to or past the checkpoint's file number by then is not seen.
+  Position mode has the same blind spot.
+- A source rebuilt with a new `server_uuid` from a backup that still shares
+  part of the old history looks like a lagging replica.
+- Group Replication / InnoDB Cluster: transactions carry the group's UUID, not
+  the member's `server_uuid`, so only the "no shared history" case applies.
+- When `SHOW BINARY LOGS` fails, the binary-log comparison is skipped with a
+  warning that says so.
+
 A running capture normally meets the reset long before either: the source ends
 the binlog dump when its binary log is reset (`could not find next log`), and
 the restart that follows sees the source went backwards.

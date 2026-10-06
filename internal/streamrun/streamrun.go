@@ -2412,14 +2412,14 @@ func oneRun(ctx context.Context, cfg Config) error {
 	// the dedup-on-resume comment after this block for why it matters.
 	gtidAdvanced := false
 	// gtidRenumbered: the source's GTID numbering went backwards (#2171) and
-	// this run restarts from the start of its binary log. carriedFloor is the
+	// this run restarts from the start of its binary log. resumeFloor is the
 	// dedup floor this run carries: the saved one, or a fresh one after such a
 	// restart. ONE variable feeds both the persisted advance and the running
 	// state, so the two cannot disagree.
 	gtidRenumbered := false
-	var carriedFloor int64
+	var resumeFloor int64
 	if saved != nil {
-		carriedFloor = saved.dedupFloorID
+		resumeFloor = saved.dedupFloorID
 	}
 	if saved != nil {
 		var gap *gapResult
@@ -2447,13 +2447,14 @@ func oneRun(ctx context.Context, cfg Config) error {
 				return mariadbRenumberedError(renum)
 			}
 			if cfg.NoGapFill {
-				return &GapRefusedError{msg: renum.Detail}
+				return &GapRefusedError{msg: renum.Detail + "; restart without --no-gap-fill to record the loss and capture " +
+					"the source's binary log from its start, keeping every event already indexed"}
 			}
 			fresh, err := freshDedupFloor(indexDB)
 			if err != nil {
 				return err
 			}
-			carriedFloor = fresh
+			resumeFloor = fresh
 			startGTIDStr = renum.ResumeSet
 			gs, parseErr := parseGTIDSetForFlavor(cfg.Flavor, startGTIDStr)
 			if parseErr != nil {
@@ -2480,7 +2481,7 @@ func oneRun(ctx context.Context, cfg Config) error {
 				// Every row already indexed belongs to the old numbering, whose
 				// positions say nothing about the new one: a fresh floor keeps
 				// every later resume cleanup off them.
-				dedupFloorID: carriedFloor,
+				dedupFloorID: resumeFloor,
 			}
 			if err := persistGapAutoAdvance(indexDB, advancedState, renum.Detail); err != nil {
 				return err
@@ -2738,9 +2739,9 @@ func oneRun(ctx context.Context, cfg Config) error {
 		// persist a floor of 0 and throw away the one the previous run earned.
 		// A crash right after that leaves the next resume scanning the whole
 		// table, which is the outage this change exists to remove.
-		// carriedFloor is the saved floor, or the fresh one a restart after
+		// resumeFloor is the saved floor, or the fresh one a restart after
 		// the source's GTID numbering went backwards took (#2171).
-		state.dedupFloorID = carriedFloor
+		state.dedupFloorID = resumeFloor
 	} else {
 		state.dedupFloorID = freshFloor
 	}

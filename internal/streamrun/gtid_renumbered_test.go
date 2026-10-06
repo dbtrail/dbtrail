@@ -97,6 +97,28 @@ func TestClassifyMySQLRenumbering(t *testing.T) {
 			own: uuidOwn, logs: newLogs, wantVerdict: "went backwards", wantResume: uuidOwn + ":1-2"},
 		{name: "tagged GTIDs of the own UUID reset", saved: uuidOwn + ":1-10:tg:1-3", exec: uuidOwn + ":1-10",
 			own: uuidOwn, logs: newLogs, wantVerdict: "went backwards", wantResume: ""},
+		// The checkpoint's file is still there after older ones: the binary
+		// log lost its tail (crash, sync_binlog != 1), it was not reset. The
+		// own GTIDs the source still has stay in the restart set, or the
+		// whole retained binary log would be indexed a second time.
+		{name: "binary log kept, tail lost", saved: uuidPrimary + ":1-100," + uuidOwn + ":1-10", exec: uuidPrimary + ":1-100," + uuidOwn + ":1-7",
+			own: uuidOwn, file: "binlog.000002", pos: 9000,
+			logs:        []binlogFileEntry{{"binlog.000001", 500}, {"binlog.000002", 800}},
+			wantVerdict: "lost the end of its binary log", wantResume: uuidPrimary + ":1-100," + uuidOwn + ":1-7"},
+		{name: "binary log kept, gaps intersect", saved: uuidOwn + ":1-10:20-30", exec: uuidOwn + ":1-5:20-25",
+			own: uuidOwn, file: "binlog.000003", pos: 9000,
+			logs:        []binlogFileEntry{{"binlog.000002", 500}, {"binlog.000003", 800}},
+			wantVerdict: "lost the end of its binary log", wantResume: uuidOwn + ":1-5:20-25"},
+		// Only file is the checkpoint's: a young server reset back to the same
+		// name looks the same, so it is read as a reset (no skip, at worst
+		// duplicates).
+		{name: "checkpoint in the only file", saved: uuidOwn + ":1-10", exec: uuidOwn + ":1-3",
+			own: uuidOwn, file: "binlog.000001", pos: 9000, logs: []binlogFileEntry{{"binlog.000001", 800}},
+			wantVerdict: "numbering went backwards", wantResume: ""},
+		{name: "checkpoint in the oldest of several files", saved: uuidOwn + ":1-10", exec: uuidOwn + ":1-3",
+			own: uuidOwn, file: "binlog.000001", pos: 9000,
+			logs:        []binlogFileEntry{{"binlog.000001", 800}, {"binlog.000002", 300}},
+			wantVerdict: "numbering went backwards", wantResume: ""},
 		{name: "upper-case UUID from the server", saved: uuidOwn + ":1-10", exec: uuidOwn + ":1-3",
 			own: strings.ToUpper(uuidOwn), logs: newLogs, wantVerdict: "went backwards", wantResume: ""},
 	}
