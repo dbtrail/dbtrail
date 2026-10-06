@@ -585,6 +585,8 @@ jobs:
             || { echo "FATAL: read-routing generated-column names test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationSQLCompareTemporalColumns ' /tmp/mysql-it.out \
             || { echo "FATAL: read-routing date-column arithmetic test did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationBinlogOrderRecoverAndReconstruct2156_mysql ' /tmp/mysql-it.out \
+            || { echo "FATAL: the applied-recovery-script test over a real capture did not run: is binary logging on? (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestStreamLoop_unmappableRowReachesThePersistedLedger ' /tmp/mysql-it.out || { echo "FATAL: unmappable-row skip ledger test did not run (false-green tripwire)" >&2; exit 1; }
 
       # The S3 tripwire, kept apart from the steps above so a store that did
@@ -804,7 +806,8 @@ jobs:
             TestShimMariaDBUUIDKey \
             TestRunReconstruct_MariaDBUUIDKeyWithoutIndexTypesRefuses \
             TestIntegrationReconstruct_MariaDBUUIDKeyWithoutIndexTypesRefuses \
-            TestIntegrationReconstructTool_MariaDBUUIDKeyWithoutIndexTypesRefuses; do
+            TestIntegrationReconstructTool_MariaDBUUIDKeyWithoutIndexTypesRefuses \
+            TestIntegrationBinlogOrderRecoverAndReconstruct2156_mariadb; do
             grep -q -- "--- PASS: $name " /tmp/mariadb-it.out \
               || { echo "FATAL: $name did not run and pass in the MariaDB-source job (false-green tripwire)" >&2; exit 1; }
           done

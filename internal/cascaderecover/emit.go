@@ -81,6 +81,16 @@ func EmitSQL(w io.Writer, gen *recovery.Generator, rows []query.ResultRow, setNu
 // recovery.GenerateSQLFromRowsIndexed for why a scanner over the rendered text
 // cannot do this safely. The script is byte-identical either way.
 func EmitSQLIndexed(w io.Writer, gen *recovery.Generator, rows []query.ResultRow, setNullRows []cascade.SetNullRestore, keyUpdates []cascade.FKKeyRestore, resolver *metadata.Resolver, hdr Header) (int, []int, error) {
+	// This script is built on statement-time order end to end: MergeParentRoots
+	// below, the cascade detection that picked the rows, and the SET NULL and
+	// key restorations written after them. A generator that reorders its rows
+	// by binary log position (recovery.SetBinlogOrder, #2156) would move the
+	// parents under statements placed by the other order. recover-cascade
+	// takes that rule as a whole in its own slice of #2156; until then a
+	// caller that opts in by accident is refused, not half-applied.
+	if gen.BinlogOrderEnabled() {
+		return 0, nil, fmt.Errorf("internal error: recover-cascade was handed a generator that orders by binary log position; its script is built on statement-time order (#2156). Nothing was written; report this")
+	}
 	// Enforce the recover script-size budget first (#654). GenerateSQLFromRows
 	// re-checks it before rendering, but checking here keeps the refusal
 	// precedence stable (budget outranks a SET NULL build error below) and also
@@ -286,7 +296,9 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 // roots into ONE chronological list, which is what EmitSQL's generator requires.
 //
 // recovery.GenerateSQLFromRows does not sort: it trusts the caller's order and
-// reverses it, so the most recent change is undone first. Concatenating the two
+// reverses it, so the most recent change is undone first. (A generator with
+// recovery.SetBinlogOrder does reorder; EmitSQLIndexed refuses one. The order
+// here is by statement time, which is not always commit order: #2156.) Concatenating the two
 // root sets — DELETEs, then UPDATEs — throws that away. A parent key-UPDATEd at
 // t1 and DELETEd at t2 (both in the window) would emit the UPDATE-undo first,
 // against a row the later-emitted INSERT has not re-created yet: it matches 0

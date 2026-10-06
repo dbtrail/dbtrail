@@ -1084,6 +1084,9 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 		if v, ok := cfg.scriptBudgetOverride(); ok {
 			gen.SetMaxScriptBytes(v)
 		}
+		// Undo in the reverse of binary log order where it can be established
+		// (#2156); where it cannot, the script header says why.
+		gen.SetBinlogOrder(query.BinlogOrderProof(ctx, t.DB))
 		var buf bytes.Buffer
 		n, stmtEnds, err := gen.GenerateSQLFromRowsIndexed(rows, &buf)
 		if err != nil {
@@ -1127,6 +1130,11 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 			w := fmt.Sprintf("schema snapshot unavailable (%v); WHERE clauses use all columns", resolverErr)
 			text += "\n-- Note: " + w + ".\n"
 			warnings = append(warnings, w)
+		}
+		if w := gen.OrderDecision().Warning(); w != "" {
+			// The script's own header already carries it (#2156); this is the
+			// copy for a response that returns no script text.
+			warnings = append(warnings, "order of the changes: "+w)
 		}
 		if n > 0 {
 			text += fmt.Sprintf("\n-- %d reversal statement(s) generated.\n", n)
