@@ -79,10 +79,17 @@ func TestVerifyTable_liveSource_mariadbIndexBehind(t *testing.T) {
 	testutil.MustExec(t, sourceDB, fmt.Sprintf(
 		"INSERT INTO `%s`.`audit_log` (id,details,big) VALUES (2,'{}',1)", sourceName))
 	seedMariaDBStreamState(t, cfg, "gtid", behindBinlogPos(t, readBinlogPos(t, sourceDB)))
+	// The checkpoint is fresh, so verify waits for the capture to catch up
+	// (#2150); nothing will, and the verdict is the same after a short wait.
+	cfg.CoverageWait = 2 * time.Second
 
+	start := time.Now()
 	got, err := VerifyTable(context.Background(), cfg, sourceName, "audit_log")
 	if err != nil {
 		t.Fatalf("VerifyTable: %v", err)
+	}
+	if waited := time.Since(start); waited < cfg.CoverageWait {
+		t.Errorf("returned after %v; a running capture behind the snapshot is waited for %v", waited, cfg.CoverageWait)
 	}
 	if got.Status != StatusInconclusive || !strings.Contains(got.Detail, "index is behind the source snapshot") {
 		t.Fatalf("status = %q (%s); want inconclusive because the index is behind, never a mismatch", got.Status, got.Detail)
