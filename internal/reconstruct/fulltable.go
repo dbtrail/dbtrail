@@ -150,8 +150,8 @@ type FullTableConfig struct {
 	// checked through, so archives before it are not read again (#2152). nil
 	// for a direct ReconstructTable caller: no cut, the time-bounded rule.
 	archiveCuts *archiveCuts
-	// archivesChecked is runChecksArchives for this run: whether the files it
-	// writes carry baseline.MetaKeyArchiveCut.
+	// archivesChecked is runChecksArchives for this run: whether its cut is
+	// what its snapshot directory records for its tables (archiveCuts).
 	archivesChecked bool
 	// ddlMark is the run's DDL mark, encoded (ddl_mark.go): the newest
 	// schema_changes row, read before the cut and so before any table's
@@ -965,6 +965,13 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// the run is otherwise clean; a failed run stays _INCOMPLETE and needs no
 	// manifest.
 	if parquetMode && ctx.Err() == nil && len(errs) == 0 {
+		// How far each table has been checked through the archives (#2152).
+		// A record that cannot be written leaves the next refresh without
+		// it: that refresh then reads more archives, never fewer.
+		if err := cfg.archiveCuts.write(cfg.snapshotDir); err != nil {
+			slog.Warn("could not record how far each table was checked through the archives; the next refresh of this snapshot will read more archives",
+				"snapshot", cfg.snapshotDir, "error", err)
+		}
 		baseline.SignSnapshot(cfg.snapshotDir, cfg.WriterID)
 		carryViewsSkipped(ctx, cfg.snapshotDir, reports)
 		st, err := manifestWriter(cfg.snapshotDir, manifestPriorDirs(reports))
@@ -1460,7 +1467,12 @@ func ReconstructTable(
 		fetchOpts.UntilPos = cfg.cut
 	}
 	if fetchOpts.SincePos != nil {
-		fetchOpts.ArchivesCheckedThrough = cfg.archiveCuts.forBaseline(baselinePath)
+		inherited := cfg.archiveCuts.forBaseline(baselinePath, schema, table)
+		fetchOpts.ArchivesCheckedThrough = inherited
+		// What this run's directory will say for the table: this run's cut
+		// when it checked the archives itself, otherwise the folder's value
+		// it was read with. Written only if the whole run completes.
+		cfg.archiveCuts.record(schema, table, cfg.archivesChecked, cfg.cut, inherited)
 	}
 	// nil ArchiveFetcher → the container-safe parquetquery.Fetch. Resolved here
 	// at the point of use so both ReconstructTables and any direct
@@ -1643,7 +1655,6 @@ func ReconstructTable(
 		in.Cut = cfg.cut
 		in.DDLMark = stampMark
 		in.EventMark = cfg.eventMark
-		in.ArchivesChecked = cfg.archivesChecked
 		in.CaptureGap = capGap
 		in.SourceBaseline = baselineMeta{
 			Path:     baselinePath,
@@ -1846,10 +1857,6 @@ type mergeInput struct {
 	LastEventID uint64
 	// DDLMark is stamped as baseline.MetaKeyDDLMark (#1912); "" leaves it out.
 	DDLMark string
-	// ArchivesChecked: this run checked the archives (runChecksArchives), so
-	// Cut is also stamped as baseline.MetaKeyArchiveCut (#2152). Without a Cut
-	// nothing is stamped.
-	ArchivesChecked bool
 	// EventMark is stamped as baseline.MetaKeyEventMark beside Cut (#2160);
 	// "" leaves it out. Without a cut the source's own mark is kept with its
 	// own position instead.

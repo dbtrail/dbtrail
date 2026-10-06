@@ -571,8 +571,10 @@ var reconcileColumns = map[string]bool{
 // cut it last searched through, because that search already saw it. A row
 // that went missing from archive_state was seen by no search, so recording a
 // position below the later cuts would hide it from every update for good.
-// Left unrecorded, with archived_at = now, it counts as written after every
-// older snapshot, and each snapshot's next update reads it once.
+// Left unrecorded, with archived_at = now, it is read by every update of a
+// snapshot taken before it was registered, or less than an hour after
+// (query's archiveWrittenMargin): the next update of each older snapshot, and
+// of any snapshot under an hour newer.
 //
 // Inserts only. A row that already exists keeps what it has: filling it would
 // report every archive written before as drift and fail the dry run

@@ -99,8 +99,9 @@ type partitionHead struct {
 // What it still cannot see: an hour rotated out WITHOUT an archive, and an
 // archive whose archive_state row is gone. `archive reconcile --repair`
 // re-registers such a row WITHOUT a newest change and with archived_at = now,
-// so each older snapshot's next update reads it once (a recorded position
-// below the later cuts would hide it from every update).
+// so it is read by every update of a snapshot taken before that, or less than
+// archiveWrittenMargin after (a recorded position below the later cuts would
+// hide it from every update).
 //
 // A value is a snapshot of the index. Load it AFTER the fetch's upper bound is
 // fixed (a refresh: after its cut), or a late event indexed in between is
@@ -472,9 +473,10 @@ func (h *PartitionHeads) below(since time.Time, anchor BinlogPos) []string {
 // written after since, less the clock margin: any row the snapshot has not
 // seen was indexed after it, into a file written after it. An archive with no
 // record is read when it was written after since, in both cases.
-func (h *PartitionHeads) archivesBelow(since time.Time, anchor BinlogPos, checked *BinlogPos) (from time.Time, n int) {
+func (h *PartitionHeads) archivesBelow(since time.Time, anchor BinlogPos, checked, until *BinlogPos) (from time.Time, n int) {
 	floor := CoarseSinceFloor(since)
 	writtenAfter := since.Add(-archiveWrittenMargin)
+	checked = usableCheckedThrough(anchor, checked, until)
 	seen := anchor
 	if checked != nil && anchor.AtOrBefore(*checked) {
 		seen = *checked
@@ -502,6 +504,23 @@ func (h *PartitionHeads) archivesBelow(since time.Time, anchor BinlogPos, checke
 		}
 	}
 	return from, n
+}
+
+// usableCheckedThrough is checked when it can be a position an earlier
+// refresh searched through, nil otherwise (the time-bounded rule then
+// applies). An earlier cut is never ahead of this fetch's own upper bound
+// (until), and it is in the same binary log as the anchor: a value from an
+// older numbering, after the source's binary log started over, would sort
+// anywhere, and a cut ahead of until or on another base name is not one this
+// fetch can trust.
+func usableCheckedThrough(anchor BinlogPos, checked, until *BinlogPos) *BinlogPos {
+	if checked == nil || binlogBaseName(checked.File) != binlogBaseName(anchor.File) {
+		return nil
+	}
+	if until != nil && !checked.AtOrBefore(*until) {
+		return nil
+	}
+	return checked
 }
 
 // SinceFor returns the time a fetch with these options must start from: its
@@ -647,7 +666,7 @@ func (h *PartitionHeads) sinceFor(ctx context.Context, db *sql.DB, opts Options)
 	}
 	since := *opts.Since
 	names := h.below(since, *opts.SincePos)
-	archFrom, archN := h.archivesBelow(since, *opts.SincePos, opts.ArchivesCheckedThrough)
+	archFrom, archN := h.archivesBelow(since, *opts.SincePos, opts.ArchivesCheckedThrough, opts.UntilPos)
 	if len(names) == 0 {
 		if archN == 0 {
 			return opts.Since, nil

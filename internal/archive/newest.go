@@ -73,7 +73,9 @@ type Content struct {
 // ReadContent reads an archive file's Content with DuckDB: one pass over
 // four columns. For the paths that register a file without having written it
 // (`archive reconcile --repair`, `restore-index`), so the row they register
-// says what rotation's own row would have said. path is a local path or an
+// records the file's content time range (they record no newest change: see
+// addInsertContent and recordRestoredArchive). Newest is read too, and kept
+// equal to the fold by a test. path is a local path or an
 // s3:// URL; an s3:// URL needs a DuckDB session with httpfs and credentials,
 // which ReadContentWith takes.
 func ReadContent(ctx context.Context, path string) (Content, error) {

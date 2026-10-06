@@ -2,19 +2,19 @@ package reconstruct
 
 import (
 	"encoding/json"
-	"io/fs"
+	"errors"
+	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 
-	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
 // archiveCuts gives each table's fetch query.Options.ArchivesCheckedThrough
-// (#2152): the cut of the refresh that published the snapshot the table is
-// read from.
+// (#2152), and records what this run's snapshot can promise the next one.
 //
 // # Why the table's own anchor is not enough
 //
@@ -25,114 +25,161 @@ import (
 // table's own anchor, each refresh of a quiet table would read every archive
 // written since the table went quiet.
 //
-// # Why the cut is
+// # What "checked through" means
 //
-// Capture indexes in commit order, so a row indexed after a refresh ran sits
-// after that refresh's cut, and every row between the table's anchor and the
-// cut was in the index when that refresh looked, and was checked for this
-// table then. An archive whose newest change is before the cut holds nothing
-// this fetch has not already seen.
+// A refresh that checked the archives (runChecksArchives) and had a cut has
+// looked at every change of each of its tables up to that cut, archived or
+// not: capture indexes in commit order, so every row up to the cut was in the
+// index when it looked, and a row indexed later sits after the cut. An archive
+// whose newest change is before it holds nothing the next fetch has not seen.
 //
 // That premise fails on an index `bintrail index` also writes: files indexed
-// late get old positions. There no cut is given (query.IndexBackfilled, as the
-// #2160 numbering check does), and PartitionHeads falls back to archives
-// written after the snapshot's time.
+// late get old positions. There no cut is used at all (query.IndexBackfilled,
+// as the #2160 numbering check does), and PartitionHeads falls back to
+// archives written after the snapshot's time.
 //
-// # Where the cut is read from
+// # Where it is recorded: one file per snapshot directory, per table
 //
-// From baseline.MetaKeyArchiveCut and nothing else. A refresh writes that key
-// on the files it writes only when it checked the archives itself
-// (runChecksArchives) and had a cut. The binlog anchor beside it is not that
-// promise: a file written by a build that never looked at archives or at late
-// changes carries an anchor no refresh searched through archived hours up to,
-// and a snapshot of an empty index keeps its source's (perhaps a dump's)
-// position. The newest key in the table's OWN snapshot directory is used: a
-// carried-forward file keeps an older key, which an earlier refresh wrote the
-// same way and which only reads more. The table's own directory, not the
-// newest one: a table missing from a newer snapshot is read from an older one,
-// which a newer refresh never checked it against. A file or key that does not
-// read is left out, which can only lower the cut. Snapshots in S3 are not read
-// here and get no cut.
+// archiveCutFile, written by the run that published the directory and only
+// when the run completed. It maps each table to the position up to which that
+// table has been checked:
+//   - a run that checked the archives and has a cut: its cut;
+//   - any other run (`--allow-gaps`, archive discovery failed, an empty
+//     index): what the folder the table was read from recorded for it,
+//     unchanged, because this run added no check of its own.
+//
+// Per table, and never a maximum over the directory's files: a directory can
+// hold tables carried forward from folders of different ages, and a run that
+// did not check archives must not lift a table to a position some other
+// table was checked through. Table files carry nothing about it: a footer
+// travels with a carried-forward file into folders written by runs that did
+// not check, and files written by older builds carry an anchor no refresh
+// searched archived hours up to.
+//
+// Read once per directory per run. Snapshots in S3 are not read here and get
+// no value; a record that does not read gives none either. Both only read more.
 type archiveCuts struct {
 	off bool
 	mu  sync.Mutex
-	dir map[string]*query.BinlogPos
+	dir map[string]map[string]query.BinlogPos
+	// next is what this run's snapshot directory will record, per table.
+	next map[string]query.BinlogPos
 }
 
-// backfilledArchivesWarned says once per process that the cut is not used:
+// archiveCutFile is the per-directory record beside _SUCCESS.
+const archiveCutFile = "_ARCHIVE_CHECKED"
+
+// backfilledArchivesWarned says once per process that the record is not used:
 // every refresh of a daemon would repeat it.
 var backfilledArchivesWarned sync.Once
 
 func newArchiveCuts(backfilled bool) *archiveCuts {
-	return &archiveCuts{off: backfilled, dir: map[string]*query.BinlogPos{}}
+	return &archiveCuts{off: backfilled, dir: map[string]map[string]query.BinlogPos{}, next: map[string]query.BinlogPos{}}
 }
 
-// forBaseline is the cut for a table read from baselinePath
-// (<root>/<snapshot>/<schema>/<table>.parquet), or nil. Each directory is
-// read once per run.
-func (c *archiveCuts) forBaseline(baselinePath string) *query.BinlogPos {
+// forBaseline is how far schema.table has been checked according to the
+// directory baselinePath (<root>/<snapshot>/<schema>/<table>.parquet) lives
+// in, or nil.
+func (c *archiveCuts) forBaseline(baselinePath, schema, table string) *query.BinlogPos {
 	if c == nil || c.off || strings.HasPrefix(baselinePath, "s3://") {
 		return nil
 	}
 	dir := filepath.Dir(filepath.Dir(baselinePath))
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if cut, ok := c.dir[dir]; ok {
-		return cut
+	rec, ok := c.dir[dir]
+	if !ok {
+		rec = readArchiveCutFile(dir)
+		c.dir[dir] = rec
 	}
-	cut := snapshotCutOf(dir)
-	c.dir[dir] = cut
-	return cut
+	if p, ok := rec[schema+"."+table]; ok {
+		return &p
+	}
+	return nil
 }
 
-// snapshotCutOf is the newest archive cut among the Parquet files under
-// snapshotDir, or nil when there is none.
-func snapshotCutOf(snapshotDir string) *query.BinlogPos {
-	var cut *query.BinlogPos
-	_ = filepath.WalkDir(snapshotDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".parquet") {
-			return nil
-		}
-		m, err := baseline.ReadParquetMetadata(path)
-		if err != nil {
-			slog.Debug("the snapshot's cut is read without a file that does not open", "path", path, "error", err)
-			return nil
-		}
-		p, ok := parseArchiveCut(m.ArchiveCut)
-		if !ok {
-			return nil
-		}
-		if cut == nil || cut.AtOrBefore(p) {
-			cut = &p
-		}
+// record notes what this run's directory will promise for schema.table:
+// checked when this run checked the archives up to cut, otherwise the value
+// it was read with (nil: nothing).
+func (c *archiveCuts) record(schema, table string, checked bool, cut, inherited *query.BinlogPos) {
+	if c == nil || c.off {
+		return
+	}
+	v := inherited
+	if checked && cut != nil {
+		v = cut
+	}
+	if v == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.next[schema+"."+table] = *v
+}
+
+// write writes the record of this run into snapshotDir. Nothing to record
+// writes nothing. Called only for a run that completed.
+func (c *archiveCuts) write(snapshotDir string) error {
+	if c == nil || c.off {
 		return nil
-	})
-	return cut
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.next) == 0 {
+		return nil
+	}
+	f := archiveCutRecord{Version: 1, Tables: map[string]archiveCutJSON{}}
+	for k, p := range c.next {
+		f.Tables[k] = archiveCutJSON{File: p.File, Pos: &p.Pos}
+	}
+	b, err := json.Marshal(f)
+	if err != nil {
+		return err
+	}
+	tmp := filepath.Join(snapshotDir, archiveCutFile+".tmp")
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(snapshotDir, archiveCutFile))
 }
 
-// archiveCutJSON is baseline.MetaKeyArchiveCut's value.
+type archiveCutRecord struct {
+	Version int                       `json:"version"`
+	Tables  map[string]archiveCutJSON `json:"tables"`
+}
+
 type archiveCutJSON struct {
 	File string  `json:"binlog_file"`
 	Pos  *uint64 `json:"start_pos"`
 }
 
-func encodeArchiveCut(p query.BinlogPos) string {
-	b, _ := json.Marshal(archiveCutJSON{File: p.File, Pos: &p.Pos}) // a string and a number: cannot fail
-	return string(b)
-}
-
-// parseArchiveCut reads the key; ok is false for an absent or malformed one.
-func parseArchiveCut(v string) (query.BinlogPos, bool) {
-	var c archiveCutJSON
-	if v == "" || json.Unmarshal([]byte(v), &c) != nil || c.File == "" || c.Pos == nil {
-		return query.BinlogPos{}, false
+// readArchiveCutFile reads dir's record; nil when it is absent or does not
+// read. An entry with no file or position is left out.
+func readArchiveCutFile(dir string) map[string]query.BinlogPos {
+	b, err := os.ReadFile(filepath.Join(dir, archiveCutFile))
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Debug("the snapshot's archive record does not read; its tables get no value", "dir", dir, "error", err)
+		}
+		return nil
 	}
-	return query.BinlogPos{File: c.File, Pos: *c.Pos}, true
+	var f archiveCutRecord
+	if err := json.Unmarshal(b, &f); err != nil || f.Version != 1 {
+		slog.Debug("the snapshot's archive record does not parse; its tables get no value", "dir", dir, "error", fmt.Sprint(err))
+		return nil
+	}
+	out := map[string]query.BinlogPos{}
+	for k, v := range f.Tables {
+		if v.File == "" || v.Pos == nil {
+			continue
+		}
+		out[k] = query.BinlogPos{File: v.File, Pos: *v.Pos}
+	}
+	return out
 }
 
-// runChecksArchives reports whether a refresh run may write the archive-cut
-// key (#2152): only when its own fetches checked the archives in a way the
-// next refresh can build on.
+// runChecksArchives reports whether a refresh run's own fetches checked the
+// archives in a way the next refresh can build on (#2152).
 //   - backfilled: `bintrail index` also writes this index, so a row with an
 //     old position can be indexed after this run, below its cut.
 //   - allowGaps: a fetch may go on past an archive source it could not read.

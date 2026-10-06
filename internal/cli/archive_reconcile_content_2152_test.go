@@ -49,8 +49,8 @@ func changeOf(a archive.Action, col string) (any, bool) {
 // NOT its newest change (#2152): a refresh skips an archive whose newest
 // change is before the cut it last searched through, and a row lost from
 // archive_state was never seen by any refresh, whatever its position. Left
-// unrecorded, with archived_at = now, the row counts as one written after
-// every older snapshot: each snapshot's next update reads it once.
+// unrecorded, with archived_at = now, the row is read by every update of a
+// snapshot taken before it was registered or less than an hour after.
 func TestAddInsertContent_2152(t *testing.T) {
 	dir := t.TempDir()
 	good := filepath.Join(dir, "p_2026030102.parquet")

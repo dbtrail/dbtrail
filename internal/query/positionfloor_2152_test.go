@@ -120,7 +120,7 @@ func TestPartitionHeads_archivesBelow_2152(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := headsAt(h0.Add(9*time.Hour), 100, 200)
 			h.archives = tc.archives
-			got, n := h.archivesBelow(since, anchor, tc.checked)
+			got, n := h.archivesBelow(since, anchor, tc.checked, nil)
 			if !got.Equal(tc.want) {
 				t.Fatalf("archivesBelow = %v (%d archives), want %v", got, n, tc.want)
 			}
@@ -140,7 +140,7 @@ func TestPartitionHeads_archivesBelow_doNotFollowTheIDPremise_2152(t *testing.T)
 	h := headsAt(h0.Add(9*time.Hour), 100)
 	h.streamCaptured, h.fileIndexingUnfinished = true, true
 	h.archives = []archiveHead{recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000001", 400)}
-	if got, _ := h.archivesBelow(since, BinlogPos{File: "binlog.000001", Pos: 500}, &BinlogPos{File: "binlog.000001", Pos: 450}); !got.IsZero() {
+	if got, _ := h.archivesBelow(since, BinlogPos{File: "binlog.000001", Pos: 500}, &BinlogPos{File: "binlog.000001", Pos: 450}, nil); !got.IsZero() {
 		t.Fatalf("archivesBelow = %v; a recorded archive before the anchor must not move the start", got)
 	}
 }
@@ -343,4 +343,49 @@ func TestLoadPartitionHeads_archiveStateShapes_2152(t *testing.T) {
 			t.Fatal("LoadPartitionHeads answered without reading the archives")
 		}
 	})
+}
+
+// A checked-through value is trusted only where it can be an earlier
+// refresh's cut: not ahead of this fetch's own upper bound, and in the
+// anchor's binary log. Otherwise the time-bounded rule applies.
+func TestUsableCheckedThrough_2152(t *testing.T) {
+	anchor := BinlogPos{File: "binlog.000003", Pos: 100}
+	pos := func(f string, p uint64) *BinlogPos { return &BinlogPos{File: f, Pos: p} }
+	for _, tc := range []struct {
+		name    string
+		checked *BinlogPos
+		until   *BinlogPos
+		want    bool
+	}{
+		{"none", nil, nil, false},
+		{"behind the fetch's upper bound", pos("binlog.000004", 10), pos("binlog.000005", 4), true},
+		{"exactly at it", pos("binlog.000005", 4), pos("binlog.000005", 4), true},
+		{"no upper bound to compare with", pos("binlog.000004", 10), nil, true},
+		{"ahead of the upper bound: from an older numbering", pos("binlog.000009", 10), pos("binlog.000005", 4), false},
+		{"another binary log base name", pos("mysql-bin.000004", 10), pos("mysql-bin.000005", 4), false},
+		{"a rollover keeps the base name", pos("binlog.1000000", 4), pos("binlog.1000001", 4), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := usableCheckedThrough(anchor, tc.checked, tc.until); (got != nil) != tc.want {
+				t.Fatalf("usableCheckedThrough = %v, want usable=%v", got, tc.want)
+			}
+		})
+	}
+	// Through archivesBelow: an unusable value falls back to the time rule,
+	// so an archive written long ago after the anchor is not read, and one
+	// written after the snapshot is.
+	h0 := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	since := h0.Add(10*time.Hour + 30*time.Minute)
+	h := headsAt(h0.Add(9*time.Hour), 100, 200)
+	h.archives = []archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "binlog.000003", 900), since.Add(-48*time.Hour))}
+	ahead := pos("binlog.000009", 1)
+	if got, _ := h.archivesBelow(since, anchor, ahead, pos("binlog.000005", 4)); !got.IsZero() {
+		t.Fatalf("a value ahead of the upper bound was used as a cut (or the time rule read an old archive): start %v", got)
+	}
+	if got, _ := h.archivesBelow(since, anchor, pos("binlog.000003", 950), pos("binlog.000005", 4)); !got.IsZero() {
+		t.Fatalf("a usable cut after the archive's newest change: start %v, want unchanged", got)
+	}
+	if got, _ := h.archivesBelow(since, anchor, pos("binlog.000003", 800), pos("binlog.000005", 4)); !got.Equal(h0.Add(2 * time.Hour)) {
+		t.Fatalf("a usable cut before the archive's newest change: start %v, want the archive's hour", got)
+	}
 }

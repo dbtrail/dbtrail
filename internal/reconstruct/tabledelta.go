@@ -979,7 +979,6 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		Cut:              p.cfg.cut,
 		DDLMark:          p.ddlMark,
 		EventMark:        p.cfg.eventMark,
-		ArchivesChecked:  p.cfg.archivesChecked,
 		CaptureGap:       p.capGap,
 		SourceBaseline:   baselineMeta{Path: p.basePath, Time: p.chainStart, Metadata: p.anchorMeta},
 		FoldedFrom:       foldedFromChain(p),

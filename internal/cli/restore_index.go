@@ -230,17 +230,17 @@ func runRestoreIndex(cmd *cobra.Command, args []string) error {
 			}
 		}
 		n, lerr := archive.RestorePartition(ctx, db, path, riBatch)
-		// The record rotation writes about the file (#2152), read while the
-		// file is still on local disk. Rows this command registers are
-		// stamped archived_at = now; without the record, every snapshot
-		// taken before the restore would read each of them on its next
-		// update. A file that cannot be read is registered without it.
+		// The file's content time range, read while the file is still on
+		// local disk: a first-partition archive holds rows older than its
+		// hour (#1037). Not its newest change (#2152): see
+		// recordRestoredArchive. A file that cannot be read is registered
+		// without the range.
 		var content *archive.Content
 		if lerr == nil {
 			if c, cerr := archive.ReadContent(ctx, path); cerr == nil {
 				content = &c
 			} else {
-				slog.Warn("restore-index: cannot read the newest change of an archive; it is registered without that record",
+				slog.Warn("restore-index: cannot read the time range of an archive; it is registered without it",
 					"partition", f.PartitionName, "error", cerr)
 			}
 		}
@@ -391,8 +391,12 @@ func buildRestorePartitionSQL(dbName string, archiveHours map[time.Time]bool, no
 // row content, and no current command backfills them; the planner falls
 // back to the hour label.
 //
-// content, when not nil, is the file's own record (#2152): its time range and
-// newest change, the same columns rotation fills.
+// content, when not nil, gives the file's content time range. The newest
+// change (max_event_id, max_binlog_file, max_start_pos) is left NULL, as
+// `archive reconcile --repair` leaves it (#2152): a snapshot update skips a
+// recorded archive whose newest change is before the position it was checked
+// through, and a registry rebuilt from files was seen by no update. NULL with
+// archived_at = now makes the next updates of every older snapshot read it.
 func recordRestoredArchive(ctx context.Context, db *sql.DB, f archive.ScannedFile, rows int64, content *archive.Content) error {
 	var localPath, bucket, key, uploadedAt any
 	if f.Backend == archive.BackendS3 {
@@ -410,7 +414,7 @@ func recordRestoredArchive(ctx context.Context, db *sql.DB, f archive.ScannedFil
 	if f.ColumnSet != "" {
 		columnSet = f.ColumnSet
 	}
-	var minTS, maxTS, maxID, maxFile, maxPos any
+	var minTS, maxTS any
 	if content != nil {
 		if !content.MinEventTS.IsZero() {
 			minTS = content.MinEventTS
@@ -418,14 +422,12 @@ func recordRestoredArchive(ctx context.Context, db *sql.DB, f archive.ScannedFil
 		if !content.MaxEventTS.IsZero() {
 			maxTS = content.MaxEventTS
 		}
-		maxID = content.EventID
-		maxFile, maxPos = archive.NewestColumns(content.Newest)
 	}
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO archive_state
 			(partition_name, bintrail_id, local_path, file_size_bytes, row_count, s3_bucket, s3_key, s3_uploaded_at, column_set,
-			 min_event_ts, max_event_ts, max_event_id, max_binlog_file, max_start_pos)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 min_event_ts, max_event_ts)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			local_path = COALESCE(VALUES(local_path), local_path),
 			s3_bucket = COALESCE(VALUES(s3_bucket), s3_bucket),
@@ -433,12 +435,9 @@ func recordRestoredArchive(ctx context.Context, db *sql.DB, f archive.ScannedFil
 			s3_uploaded_at = COALESCE(VALUES(s3_uploaded_at), s3_uploaded_at),
 			column_set = COALESCE(VALUES(column_set), column_set),
 			min_event_ts = COALESCE(VALUES(min_event_ts), min_event_ts),
-			max_event_ts = COALESCE(VALUES(max_event_ts), max_event_ts),
-			max_event_id = COALESCE(VALUES(max_event_id), max_event_id),
-			max_binlog_file = IF(VALUES(max_event_id) IS NULL, max_binlog_file, VALUES(max_binlog_file)),
-			max_start_pos = IF(VALUES(max_event_id) IS NULL, max_start_pos, VALUES(max_start_pos))`,
+			max_event_ts = COALESCE(VALUES(max_event_ts), max_event_ts)`,
 		f.PartitionName, f.BintrailID, localPath, f.SizeBytes, rows, bucket, key, uploadedAt, columnSet,
-		minTS, maxTS, maxID, maxFile, maxPos)
+		minTS, maxTS)
 	return err
 }
 

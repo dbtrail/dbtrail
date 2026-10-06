@@ -4,6 +4,10 @@ package reconstruct_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -177,9 +181,36 @@ func seedItemsBaseline2152(t *testing.T, root string, at time.Time) {
 	}
 }
 
-// When a refresh writes the archive-cut key (#2152): only when its own
-// fetches checked the archives in a way the next refresh can build on.
-func TestRefresh_writesTheArchiveCutOnlyWhenItCheckedTheArchives_2152(t *testing.T) {
+// readRecord2152 reads a snapshot directory's archive record: table → "file:pos".
+func readRecord2152(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "_ARCHIVE_CHECKED"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f struct {
+		Tables map[string]struct {
+			File string `json:"binlog_file"`
+			Pos  uint64 `json:"start_pos"`
+		} `json:"tables"`
+	}
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatalf("parse record: %v", err)
+	}
+	out := map[string]string{}
+	for k, v := range f.Tables {
+		out[k] = fmt.Sprintf("%s:%d", v.File, v.Pos)
+	}
+	return out
+}
+
+// When a refresh records its cut for a table (#2152): only when its own
+// fetches checked the archives. Otherwise the table keeps what its source
+// folder recorded, and a dump records nothing.
+func TestRefresh_recordsItsCutOnlyWhenItCheckedTheArchives_2152(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		allowGaps  bool
@@ -216,12 +247,103 @@ func TestRefresh_writesTheArchiveCutOnlyWhenItCheckedTheArchives_2152(t *testing
 			if err != nil {
 				t.Fatalf("read footer: %v", err)
 			}
-			if (m.ArchiveCut != "") != tc.want {
-				t.Fatalf("archive cut key = %q (anchor %s:%d), want present=%v", m.ArchiveCut, m.BinlogFile, m.BinlogPos, tc.want)
+			rec := readRecord2152(t, filepath.Dir(filepath.Dir(p)))
+			got, ok := rec["shop.orders"]
+			if ok != tc.want {
+				t.Fatalf("record = %v, want an entry for shop.orders: %v", rec, tc.want)
 			}
-			if tc.want && !strings.Contains(m.ArchiveCut, m.BinlogFile) {
-				t.Fatalf("archive cut key %q does not name the run's cut %s:%d", m.ArchiveCut, m.BinlogFile, m.BinlogPos)
+			if tc.want && got != fmt.Sprintf("%s:%d", m.BinlogFile, m.BinlogPos) {
+				t.Fatalf("record for shop.orders = %s, want the run's cut %s:%d", got, m.BinlogFile, m.BinlogPos)
 			}
 		})
+	}
+}
+
+// The second review's case: a run that did NOT check the archives assembles
+// a folder from tables checked to different positions, and the next refresh
+// must still read, for each table, the archives after ITS position.
+//
+// R1 checks orders and items up to C1. A refresh of items alone checks it up
+// to C1b. Between the two a change to orders is indexed (C1 < p < C1b) into
+// an old hour, which rotation archives and drops. R2 runs with --allow-gaps
+// and cannot read that archive: orders is carried forward unchanged from R1's
+// folder, items from the later one. R3 runs normally and must apply the
+// change: checked through C1 for orders, not C1b.
+func TestRefresh_aRunThatDidNotCheckKeepsEachTablesPosition_2152(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	ctx := context.Background()
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	N := time.Now().UTC().Truncate(time.Hour)
+	var hours []time.Time
+	for h := N.Add(-72 * time.Hour); !h.After(N.Add(2 * time.Hour)); h = h.Add(time.Hour) {
+		hours = append(hours, h)
+	}
+	testutil.SetupPartitionedTable(t, db, dbName, hours)
+	schemaAt := N.Add(-73 * time.Hour)
+	seedOrdersSnapshot(t, db, "shop", schemaAt)
+	ts := schemaAt.Format("2006-01-02 15:04:05")
+	testutil.InsertSnapshot(t, db, 1, ts, "shop", "items", "id", 1, "PRI", "int", "NO")
+	testutil.InsertSnapshot(t, db, 1, ts, "shop", "items", "status", 2, "", "varchar", "YES")
+	markStreamCaptured(t, db)
+	root := t.TempDir()
+	dumpAt := N.Add(-71 * time.Hour)
+	seedSourceBaseline(t, root, dumpAt, "shop")
+	seedItemsBaseline2152(t, root, dumpAt)
+
+	failArchives := false
+	fetch := func(ctx context.Context, opts query.Options, src string) ([]query.ResultRow, error) {
+		if failArchives {
+			return nil, errors.New("simulated: the archive cannot be read")
+		}
+		return parquetquery.Fetch(ctx, opts, src)
+	}
+	refresh := func(at time.Time, tables []string, allowGaps bool) {
+		t.Helper()
+		if _, err := reconstruct.ReconstructTables(ctx, reconstruct.FullTableConfig{
+			IndexDSN: testutil.BaseDSN() + "/" + dbName, BaselineSrc: root, Tables: tables,
+			At: at, OutputDir: root, OutputFormat: reconstruct.OutputFormatParquet,
+			CarryForwardUnchanged: true, ArchiveFetcher: fetch, AllowGaps: allowGaps,
+		}); err != nil {
+			t.Fatalf("refresh at %s: %v", at.Format(time.RFC3339), err)
+		}
+	}
+	both := []string{"shop.orders", "shop.items"}
+
+	insertTableEvent(t, db, "shop", "items", 101, 100, N.Add(-70*time.Hour), 2, "1", `{"id":1,"status":"a"}`)
+	refresh(N.Add(-69*time.Hour), both, false) // R1: C1 = binlog.000001:200 (end of the newest event)
+	// Indexed after R1, positioned after C1, dated in an old hour.
+	insertTableEvent(t, db, "shop", "orders", 102, 250, N.Add(-65*time.Hour), 2, "2", `{"id":2,"status":"late"}`)
+	insertTableEvent(t, db, "shop", "items", 103, 300, N.Add(-60*time.Hour), 2, "1", `{"id":1,"status":"b"}`)
+	refresh(N.Add(-55*time.Hour), []string{"shop.items"}, false) // items alone: C1b = binlog.000001:400
+
+	if _, err := rotation.Perform(ctx, db, dbName, rotation.Options{
+		RetainDur: 24 * time.Hour, RetainRaw: "24h", ArchiveDir: t.TempDir(), ArchiveCompression: "zstd",
+		BintrailID: "2152f11d-dead-beef-dead-beefdeadbeef", Format: "json",
+	}); err != nil {
+		t.Fatalf("rotation.Perform: %v", err)
+	}
+
+	failArchives = true
+	R2 := N.Add(-30 * time.Hour)
+	refresh(R2, both, true) // cannot read the archive; carries both forward
+	failArchives = false
+
+	r2dir := filepath.Join(root, reconstruct.SnapshotDirName(R2))
+	rec := readRecord2152(t, r2dir)
+	if rec["shop.orders"] != "binlog.000001:200" {
+		t.Fatalf("R2 recorded orders as %q (record %v), want R1's binlog.000001:200: a run that did not check must not lift a table to another table's position", rec["shop.orders"], rec)
+	}
+
+	refresh(N, both, false) // R3
+	p, _, _, err := reconstruct.FindBaseline(ctx, root, "shop", "orders", N)
+	if err != nil {
+		t.Fatalf("FindBaseline: %v", err)
+	}
+	if got, want := readOrders(t, p), []string{"1=new", "2=late", "3=shipped"}; !slices.Equal(got, want) {
+		t.Fatalf("orders after R3 = %v, want %v: the archived change after orders' own checked position was skipped", got, want)
 	}
 }
