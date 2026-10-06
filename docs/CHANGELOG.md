@@ -32,7 +32,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writing, in case the previous holder lost it without knowing yet. A batch
   already on its way to the index when the lock went can still commit, so a
   cut connection can still leave a few rows twice. The source given at
-  startup (`--source-dsn`) takes no lock yet.
+  startup (`--source-dsn`) takes the same kind of lock, named after the index
+  database it writes to: before, two daemons started with the same
+  `--source-dsn` and `--index-dsn` both captured it (3,082 duplicate events
+  in 60 seconds, measured). The second one now keeps serving the web
+  interface and logs that it waits; it captures once the first one stops.
+  The extension source jobs of that source now stop with the lock and start
+  again with it. One effect on a slow index: a lock check that takes more
+  than 5 seconds counts as a lost lock, so capture stops and resumes from its
+  checkpoint about 11 seconds later, where it used to ride out a stall of up
+  to `--write-timeout`; nothing is lost. `bintrail stream` and `bintrail up`
+  still take no lock: run one of them per source.
   **Upgrading:** a daemon from before this change does not keep its lock, so
   stop it before starting the new one, once. **Rows already indexed twice**
   stay: to see whether a server has any, run on its index database
