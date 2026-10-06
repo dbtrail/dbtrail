@@ -200,7 +200,13 @@ func (u underWrites) writers(t *testing.T, commits *atomic.Int64, pace time.Dura
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	var next atomic.Int64
-	next.Store(underWritesSeed)
+	// New ids continue after the table's highest, so a second set of
+	// writers does not insert an id the first one already used.
+	var top sql.NullInt64
+	if err := u.sourceDB.QueryRow("SELECT MAX(id) FROM t").Scan(&top); err != nil {
+		t.Fatal(err)
+	}
+	next.Store(max(top.Int64, underWritesSeed))
 	for w := range underWritesWriters {
 		wg.Add(1)
 		go func() {
