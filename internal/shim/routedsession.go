@@ -45,10 +45,20 @@ import (
 //     makes it unknown again. Nothing is pinned for good: a client that puts
 //     the session back gets the copy back.
 //
+//   - A plain read can change the session too, where no reader of its text
+//     sees it: it calls a stored FUNCTION that runs SET. The source is asked
+//     to say so itself (#2127): with session tracking on the upstream
+//     connection (readrouter's Forwarder.TrackSession), the source marks the
+//     answer to any statement that changed one of the settings read back
+//     here, on a packet it sends anyway, and a marked answer leaves the
+//     session unknown like a SET does (heedSessionChanges). This is ADDED to
+//     the rule above, never used to skip a read-back that rule asks for. On
+//     a source that does not track (sessionTracker, SessionTracked), such a
+//     change is not seen.
+//
 // What the read-back covers, and the values the copy reproduces (measured
 // against the copy; consoleapp's routed-session integration test runs both
-// sides): see sessionFromReadBack. A session variable changed by a stored FUNCTION
-// that a SELECT calls is not seen: the statement is a plain read by its text.
+// sides): see sessionFromReadBack.
 
 // routeSession is what the port knows of the source's session.
 type routeSession struct {
@@ -132,6 +142,39 @@ func sessionReadBackSQL(instants []time.Time) string {
 	}
 	b.WriteString(")")
 	return b.String()
+}
+
+// sessionReadBackTrackedSQL is sessionReadBackSQL with one more cell, the
+// last: the list of settings the source reports changes of on this session,
+// for a session that is tracked (ensureSession). Asked only there, since a
+// source that does not track may not have the variable at all.
+func sessionReadBackTrackedSQL(instants []time.Time) string {
+	return sessionReadBackSQL(instants) + ", @@session.session_track_system_variables"
+}
+
+// sessionTracker is the part of a Router that hears the source say its
+// session changed (readrouter.Forwarder with TrackSession). A Router without
+// it only has the text of the statements to go by.
+type sessionTracker interface {
+	// SessionTracked: the source marks the answer to a statement that
+	// changed one of the settings the read-back reads.
+	SessionTracked() bool
+	// TakeSessionChanged: since the last call, an answer was so marked, or
+	// the source answered with an error (which says nothing either way).
+	TakeSessionChanged() bool
+	// TrackSessionAgain asks the source for the marks again on a session
+	// whose list of tracked settings (has) was replaced.
+	TrackSessionAgain(ctx context.Context, has string) error
+}
+
+// heedSessionChanges makes the session unknown when the source said, since
+// the port last asked, that one of its settings changed (or could not say:
+// sessionTracker). Whatever statement did it: a SELECT that called a
+// function, the EXPLAIN of a decision.
+func (h *Handler) heedSessionChanges() {
+	if tr, ok := h.router.(sessionTracker); ok && tr.TakeSessionChanged() {
+		h.markSessionUnknown()
+	}
 }
 
 // copyZoneProbePrefix opens the statement that asks the COPY for the same
@@ -471,15 +514,22 @@ func (h *Handler) markSessionUnknown() {
 // it back first when it is unknown. An error means it could not be read: the
 // session stays unknown and is asked for again next time.
 func (h *Handler) ensureSession(ctx context.Context) (routeSession, error) {
+	h.heedSessionChanges()
 	h.mu.Lock()
 	rs := h.routeSess
 	h.mu.Unlock()
 	if rs.known {
 		return rs, nil
 	}
+	tracker, _ := h.router.(sessionTracker)
+	tracked := tracker != nil && tracker.SessionTracked()
 	instants := zoneProbeInstants(time.Now())
+	readBack := sessionReadBackSQL(instants)
+	if tracked {
+		readBack = sessionReadBackTrackedSQL(instants)
+	}
 	var buf readrouter.BufferSink
-	if _, err := h.router.Forward(ctx, sessionReadBackSQL(instants), &buf); err != nil {
+	if _, err := h.router.Forward(ctx, readBack, &buf); err != nil {
 		return routeSession{}, err
 	}
 	switch len(buf.Rows) {
@@ -489,21 +539,54 @@ func (h *Handler) ensureSession(ctx context.Context) (routeSession, error) {
 		// Known, and not a session the copy runs under.
 		rs = routeSession{known: true, variable: "sql_select_limit",
 			differs: "sql_select_limit = 0: the source returned no row for the session's settings, which is what a select limit of 0 does"}
-		h.mu.Lock()
-		h.routeSess, h.sessVars = rs, sessionVars{}
-		h.mu.Unlock()
+		h.sessionReadBack(tracker, rs, sessionVars{})
 		return rs, nil
 	default:
 		return routeSession{}, fmt.Errorf("the source answered %d rows for the session's settings", len(buf.Rows))
 	}
-	rs, err := sessionFromReadBack(buf.Rows[0], instants, h.copyZoneAgrees(ctx, instants))
+	cells := buf.Rows[0]
+	if tracked {
+		if len(cells) != sessionReadBackCells+1 {
+			return routeSession{}, fmt.Errorf("the source answered %d session values, want %d", len(cells), sessionReadBackCells+1)
+		}
+		list, ok := cellText(cells[sessionReadBackCells])
+		if !ok {
+			return routeSession{}, errors.New("the source answered NULL for the settings it reports changes of")
+		}
+		cells = cells[:sessionReadBackCells]
+		if !readrouter.TracksSession(list) {
+			// A statement of the client replaced the list (a connector
+			// that asks for the variables it follows): the port's are put
+			// back before the session is called known. A source that
+			// refuses is from here on one that does not track, and has
+			// said so (Forwarder.OnUntracked); one that is lost says so on
+			// the statement that follows.
+			if err := tracker.TrackSessionAgain(ctx, list); err != nil && readrouter.IsLost(err) {
+				return routeSession{}, err
+			}
+		}
+	}
+	rs, err := sessionFromReadBack(cells, instants, h.copyZoneAgrees(ctx, instants))
 	if err != nil {
 		return routeSession{}, err
 	}
-	h.mu.Lock()
-	h.routeSess, h.sessVars = rs, rs.vars
-	h.mu.Unlock()
+	h.sessionReadBack(tracker, rs, rs.vars)
 	return rs, nil
+}
+
+// sessionReadBack records the session as it was just read. What the source
+// reported up to the read-back's own answer is in what was read, so it is
+// forgotten here: MySQL reports a change made by a statement that failed
+// with the NEXT answer, which can be the read-back's. Nothing of the
+// client's ran in between: the read-back and this are one step of one
+// statement, on the connection's own goroutine.
+func (h *Handler) sessionReadBack(tracker sessionTracker, rs routeSession, vars sessionVars) {
+	if tracker != nil {
+		tracker.TakeSessionChanged()
+	}
+	h.mu.Lock()
+	h.routeSess, h.sessVars = rs, vars
+	h.mu.Unlock()
 }
 
 // sessionKeepsCopyFromAnswering is the last rung before the copy: "" when
@@ -545,6 +628,7 @@ func (h *Handler) sessionKeepsCopyFromAnswering(ctx context.Context) string {
 // and print in UTC, so they run only when the source's session is in UTC,
 // by any name. nil lets the statement run.
 func (h *Handler) timeTravelZoneRefusal(ctx context.Context) error {
+	h.heedSessionChanges()
 	h.mu.Lock()
 	cached := h.routeSess.known
 	h.mu.Unlock()

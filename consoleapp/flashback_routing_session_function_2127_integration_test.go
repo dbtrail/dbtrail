@@ -124,7 +124,15 @@ func routedSessionFunction(t *testing.T, baseDSN string) {
 		c := rig.conn(t, "")
 		must(t, c, "SET time_zone = 'Europe/Madrid'")
 		rig.scan(t, c, "copy")
-		if _, err := c.QueryContext(ctx, "SELECT set_zone_then_fail('+03:00')"); mysqlCode(err) != 1644 {
+		// The error comes after the column definitions: it is the rows'.
+		rows, err := c.QueryContext(ctx, "SELECT set_zone_then_fail('+03:00')")
+		if err == nil {
+			for rows.Next() {
+			}
+			err = rows.Err()
+			rows.Close()
+		}
+		if mysqlCode(err) != 1644 {
 			t.Fatalf("SELECT set_zone_then_fail = %v, want the function's own error 1644", err)
 		}
 		if got, want := rig.scan(t, c, "copy"), inZone(t, "Etc/GMT-3"); !reflect.DeepEqual(got, want) {

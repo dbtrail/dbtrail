@@ -430,6 +430,16 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 				logger.Warn("read routing: the source would not give this connection a collation the copy reproduces; MySQL answers every statement on it",
 					"server", user, "collation", collation, "error", err.Error())
 			}
+			// The source is asked to say when a statement changed one of
+			// the session settings the copy runs under, so that a change
+			// made inside a stored function is seen (#2127). A source that
+			// does not do it is said once per connection, at debug: the
+			// connection works as it did before this was asked.
+			fw.TrackSession = true
+			fw.OnUntracked = func(why string) {
+				logger.Debug("read routing: the source does not report session changes on this connection; a setting changed inside a stored function is not seen",
+					"server", user, "why", why)
+			}
 			warnDSNOverridesTLS(logger, id, user, tgt.ForwardDSN, tgt.SourceSSL.Mode)
 			bound = fw
 			h.BindRouter(fw, shim.RouterConfig{
