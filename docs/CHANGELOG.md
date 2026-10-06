@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **SQL on the copy refuses a table with too many changes waiting, before
+  running.** Between two rewrites of a table its changes sit in small files
+  beside it, and a query has to merge them in memory. A query here has 2 GB
+  and no disk to spill to, on purpose: it runs on the host that captures.
+  On a 100 million row table that stopped fitting at about 86 MB of such
+  files, and the query failed with DuckDB's out-of-memory text. Past 48 MB
+  (over all the tables a query names) the query is now refused up front with
+  the table's name and the way out: your own DuckDB (Settings, MCP Server,
+  Download a DuckDB schema). A query
+  that does run and hits the memory cap gets the same pointer after DuckDB's
+  message. On the MySQL port with read routing, the refused statement goes
+  to MySQL, as the failed one did.
 - **A table with changes is written again in full half as often.** An update
   keeps a table's changes in small files beside it and writes the table
   again once those files pass a share of its size. That share was a quarter
