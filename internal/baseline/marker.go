@@ -195,6 +195,11 @@ func CompleteSnapshot(snapshotDir string) error {
 	if _, err := os.Lstat(filepath.Join(snapshotDir, IncompleteMarker)); err != nil {
 		if os.IsNotExist(err) {
 			if werr := WriteIncompleteMarker(snapshotDir); werr != nil {
+				if _, gone := os.Lstat(snapshotDir); os.IsNotExist(gone) {
+					// The whole folder went, so there is nothing to mark and
+					// nothing a reader could find.
+					return fmt.Errorf("%w: the folder is gone (%s), so nothing was published", ErrIncompleteMarkerVanished, snapshotDir)
+				}
 				return fmt.Errorf("%w in %s, and it could not be put back, so this folder now reads as a complete snapshot "+
 					"although tables may be missing; delete it: %w", ErrIncompleteMarkerVanished, snapshotDir, werr)
 			}

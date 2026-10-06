@@ -3,8 +3,8 @@
 package baseline
 
 import (
-	"errors"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"

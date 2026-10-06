@@ -38,6 +38,7 @@ package pgbaseline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -379,9 +380,19 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		return stats, fmt.Errorf("pgbaseline: snapshot complete but could not write integrity manifest: %w", err)
 	}
 	if err := baseline.CompleteSnapshot(snapDir); err != nil {
-		return stats, fmt.Errorf("pgbaseline: snapshot complete but could not write %s marker: %w", baseline.SuccessMarker, err)
+		return stats, publishError(err)
 	}
 	return stats, nil
+}
+
+// publishError words a failed publish. A vanished marker is returned as it
+// is (#2180): the folder is NOT complete, so the "snapshot complete" wording
+// of a marker-write failure would be false about it.
+func publishError(err error) error {
+	if errors.Is(err, baseline.ErrIncompleteMarkerVanished) {
+		return err
+	}
+	return fmt.Errorf("pgbaseline: snapshot complete but could not write %s marker: %w", baseline.SuccessMarker, err)
 }
 
 // openWorkerConn opens a connection whose transaction adopts the exported

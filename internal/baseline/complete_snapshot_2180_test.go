@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -63,5 +64,23 @@ func TestCompleteSnapshot_refusalLeavesTheFolderIncomplete(t *testing.T) {
 	_ = CompleteSnapshot(dir)
 	if SnapshotComplete(dir) {
 		t.Fatal("after the refusal the folder reads as a complete snapshot")
+	}
+}
+
+// When the whole folder is gone, the marker cannot be put back, and there is
+// nothing to delete: the refusal says the folder is gone and nothing was
+// published, not "delete it".
+func TestCompleteSnapshot_folderGoneSaysNothingWasPublished(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "2026-10-06T10-00-00Z")
+	err := CompleteSnapshot(dir)
+	if !errors.Is(err, ErrIncompleteMarkerVanished) {
+		t.Fatalf("err = %v, want ErrIncompleteMarkerVanished", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "folder is gone") || !strings.Contains(msg, "nothing was published") || strings.Contains(msg, "delete it") {
+		t.Fatalf("message = %q", msg)
+	}
+	if _, serr := os.Stat(dir); serr == nil {
+		t.Fatal("the refusal recreated the folder")
 	}
 }
