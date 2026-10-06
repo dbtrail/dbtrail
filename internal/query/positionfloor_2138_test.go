@@ -217,20 +217,28 @@ func TestFetchMerged_refusesWhenTheFloorCannotBeSettled(t *testing.T) {
 			m.ExpectQuery("UNION ALL").WillReturnRows(
 				sqlmock.NewRows([]string{"part", "binlog_file", "start_pos"}).AddRow(7, "binlog.000001", 900))
 		}},
+		{"archive_state does not read", func(m sqlmock.Sqlmock) {
+			twoParts(m)
+			head(m, "binlog.000001", 900)
+			m.ExpectQuery("FROM archive_state").WillReturnError(forced)
+		}},
 		{"stream_state does not read", func(m sqlmock.Sqlmock) {
 			twoParts(m)
 			head(m, "binlog.000001", 900)
+			m.ExpectQuery("FROM archive_state").WillReturnError(&mysql.MySQLError{Number: 1146, Message: "no such table"})
 			m.ExpectQuery("FROM stream_state").WillReturnError(forced)
 		}},
 		{"index_state does not read", func(m sqlmock.Sqlmock) {
 			twoParts(m)
 			head(m, "binlog.000001", 900)
+			m.ExpectQuery("FROM archive_state").WillReturnError(&mysql.MySQLError{Number: 1146, Message: "no such table"})
 			m.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}))
 			m.ExpectQuery("FROM index_state").WillReturnError(forced)
 		}},
 		{"the oldest event of the table does not read", func(m sqlmock.Sqlmock) {
 			twoParts(m)
 			head(m, "binlog.000001", 900)
+			m.ExpectQuery("FROM archive_state").WillReturnError(&mysql.MySQLError{Number: 1146, Message: "no such table"})
 			m.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}))
 			m.ExpectQuery("FROM index_state").WillReturnRows(sqlmock.NewRows([]string{"m", "n"}).AddRow(nil, 0))
 			m.ExpectQuery("ORDER BY event_timestamp LIMIT 1").WillReturnError(forced)
@@ -277,6 +285,7 @@ func TestLoadPartitionHeads_missingIndexStateIsNoFileIndexing(t *testing.T) {
 		sqlmock.NewRows([]string{"PARTITION_NAME", "PARTITION_DESCRIPTION"}).AddRow(nil, nil))
 	mock.ExpectQuery("FROM binlog_events ORDER BY event_id DESC LIMIT 1").WillReturnRows(
 		sqlmock.NewRows([]string{"part", "binlog_file", "start_pos"}).AddRow(0, "", 0))
+	mock.ExpectQuery("FROM archive_state").WillReturnError(&mysql.MySQLError{Number: 1146, Message: "no such table"})
 	mock.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 	mock.ExpectQuery("FROM index_state").WillReturnError(&mysql.MySQLError{Number: 1146, Message: "no such table"})
 	h, err := LoadPartitionHeads(context.Background(), db)
@@ -305,6 +314,7 @@ func TestSinceFor_readsAgainWhenAPartitionWasDropped(t *testing.T) {
 		m.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(sqlmock.NewRows(partCols).
 			AddRow("p1", strconv.FormatInt(mysqlToSeconds(h0.Add(2*time.Hour)), 10)).AddRow("p_future", "MAXVALUE"))
 		m.ExpectQuery("PARTITION \\(`p1`\\) ORDER BY event_id DESC.*UNION ALL.*`p_future`").WillReturnRows(sqlmock.NewRows(headCols).AddRow(0, "binlog.000001", 700))
+		m.ExpectQuery("FROM archive_state").WillReturnError(&mysql.MySQLError{Number: 1146, Message: "no such table"})
 		m.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}))
 		m.ExpectQuery("FROM index_state").WillReturnRows(sqlmock.NewRows([]string{"m", "n"}).AddRow(nil, 0))
 	}
@@ -444,6 +454,7 @@ func expectPicture(m sqlmock.Sqlmock) {
 		sqlmock.NewRows([]string{"PARTITION_NAME", "PARTITION_DESCRIPTION"}).AddRow(nil, nil))
 	m.ExpectQuery("ORDER BY event_id DESC LIMIT 1").WillReturnRows(
 		sqlmock.NewRows([]string{"part", "binlog_file", "start_pos"}).AddRow(0, "binlog.000001", 100))
+	m.ExpectQuery("FROM archive_state").WillReturnError(&mysql.MySQLError{Number: 1146, Message: "no such table"})
 	m.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}))
 	m.ExpectQuery("FROM index_state").WillReturnRows(sqlmock.NewRows([]string{"m", "n"}).AddRow(nil, 0))
 }

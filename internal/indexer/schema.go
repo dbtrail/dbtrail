@@ -232,6 +232,9 @@ const ddlArchiveState = `CREATE TABLE IF NOT EXISTS archive_state (
     min_event_ts    DATETIME DEFAULT NULL COMMENT 'MIN(event_timestamp) of the archived rows; NULL for archives written before #1037 or registered by upload/reconcile. Content-derived pruning: may precede the partition hour label when backfilled events landed in the partition',
     max_event_ts    DATETIME DEFAULT NULL COMMENT 'MAX(event_timestamp) of the archived rows; see min_event_ts (#1037)',
     column_set      VARCHAR(4096) DEFAULT NULL COMMENT 'the archived Parquet file own column set: lowercase, sorted, comma-joined (#1535). NULL = unknown (written before this column, or registered without a footer read); archive reconcile --repair records it, needing --deep on an S3-only archive',
+    max_event_id BIGINT UNSIGNED DEFAULT NULL COMMENT 'highest event_id in the archived file, 0 for a file with no rows (#2152). NULL = not recorded (written before this column, or registered without reading the file): a snapshot update then treats the archive as one that may hold a later change',
+    max_binlog_file VARCHAR(255) DEFAULT NULL COMMENT 'with max_start_pos: the highest binlog coordinate in the archived file, file by length then name then position (#2152). NULL with max_event_id set = no row carries a coordinate',
+    max_start_pos BIGINT UNSIGNED DEFAULT NULL COMMENT 'see max_binlog_file (#2152)',
     archived_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_partition (partition_name, bintrail_id)
 ) ENGINE=InnoDB`

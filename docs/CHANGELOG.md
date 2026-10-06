@@ -233,6 +233,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with one of the 44 words and used later (`SELECT made AS at ... ORDER BY
   at`) stays on MySQL too, which is right: the copy would refuse it.
 ### Fixed
+- **A snapshot update reads a late change whose hour was archived and
+  dropped before the update ran** (#2152). An update continues from the
+  snapshot's binlog position, and since #2138 it starts earlier when the
+  index holds a change after that position that ran on the source before the
+  snapshot's time. That only looked at the hours still in the index. A late
+  change lands in an old hour, old hours are the next to be rotated out, and
+  once its hour was archived and dropped the update kept the snapshot's time
+  as its start, skipped the archive, and left the change out with no error
+  (a short `--retain`, or a capture outage longer than the retention).
+  Rotation now records, for each archive, the highest `event_id` and the
+  highest binlog position the file holds, in three new NULLable
+  `archive_state` columns (`max_event_id`, `max_binlog_file`,
+  `max_start_pos`, added on startup by the usual migration). An archive whose
+  newest position is at or after the snapshot's position makes the update
+  start at that archive's hour. Archives written before this release have
+  no record: those written after the snapshot (less one hour for clock
+  differences) are read, older ones are not, so an upgrade costs at most one
+  wider update per table. `archive reconcile --repair` (local files always,
+  S3 only with `--deep`) and `restore-index` read the files they register and
+  fill the same columns, plus `min_event_ts`/`max_event_ts`. Rotation now also
+  runs the `archive_state` migration itself before archiving. Cost: one read
+  of `archive_state` per load of the index picture; with 8,760 archives
+  (a year of hours) and no late change, the start does not move. Still not
+  covered: an hour rotated out without an archive, and an archive whose
+  `archive_state` row is missing.
 - **Capture no longer deletes indexed changes after `RESET MASTER` on a
   source captured by binlog position (#2170).** When the source's binary log
   starts over (`RESET MASTER`, `RESET BINARY LOGS AND GTIDS`), the stream

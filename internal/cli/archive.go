@@ -246,6 +246,9 @@ func runArchiveReconcile(cmd *cobra.Command, args []string) error {
 	// monitor.
 	deepUnverified := report.DeepUnverified
 
+	if arcRepair {
+		report.Actions = addInsertContent(ctx, report.Actions, arcDeep, arcRegion)
+	}
 	executed, execErrs := executeReconcileActions(ctx, db, report.Actions, arcRepair, arcPrune)
 
 	if err := writeReconcileReport(os.Stdout, arcFormat, &report, deepUnverified, executed, execErrs, arcRepair, arcPrune); err != nil {
@@ -552,6 +555,88 @@ var reconcileColumns = map[string]bool{
 	"local_path": true, "file_size_bytes": true, "row_count": true,
 	"s3_bucket": true, "s3_key": true, "s3_uploaded_at": true,
 	"column_set": true,
+	// Written on INSERT only, by addInsertContent (#2152).
+	"min_event_ts": true, "max_event_ts": true,
+	"max_event_id": true, "max_binlog_file": true, "max_start_pos": true,
+}
+
+// addInsertContent reads each file a --repair is about to REGISTER and adds
+// what rotation would have recorded about it: the content time range and the
+// newest change (#2152). A registered row is stamped archived_at = now, and
+// one with no record counts, for every snapshot taken before the repair, as
+// an archive that may hold a change after the snapshot's position, which
+// sends each table's next update back to that archive's hour. On an archive
+// whose registry was lost wholesale that is the whole history, once per
+// table. Reading the file here is what keeps a repair from costing that.
+//
+// Inserts only. A row that already exists keeps what it has: filling NULL
+// records on existing rows would report every archive written before #2152
+// as drift and fail the dry run documented as a cron drift monitor, and those
+// rows cost nothing (an unrecorded archive written before a snapshot is not
+// looked at). A local file is always read, as its footer already is; an S3
+// object only under --deep, the flag that allows S3 reads. A file that cannot
+// be read is registered as before, with a warning: no record means "look",
+// never "skip".
+func addInsertContent(ctx context.Context, actions []archive.Action, deep bool, region string) []archive.Action {
+	var s3db *sql.DB
+	defer func() {
+		if s3db != nil {
+			s3db.Close()
+		}
+	}()
+	for i, a := range actions {
+		if a.Kind != archive.ActionInsert {
+			continue
+		}
+		var local, bucket, key string
+		for _, c := range a.Changes {
+			v, _ := c.Value.(string)
+			switch c.Column {
+			case "local_path":
+				local = v
+			case "s3_bucket":
+				bucket = v
+			case "s3_key":
+				key = v
+			}
+		}
+		var content archive.Content
+		var err error
+		switch {
+		case local != "":
+			content, err = archive.ReadContent(ctx, local)
+		case deep && bucket != "" && key != "":
+			if s3db == nil {
+				if s3db, err = openS3FooterSession(ctx, region); err != nil {
+					s3db = nil
+					slog.Warn("reconcile: cannot open DuckDB session to read the archives it registers; their newest change is left unrecorded", "error", err)
+					return actions
+				}
+			}
+			content, err = archive.ReadContentWith(ctx, s3db, "s3://"+bucket+"/"+key)
+		default:
+			continue
+		}
+		if err != nil {
+			slog.Warn("reconcile: cannot read the archive it registers; its newest change is left unrecorded, so snapshot updates older than this repair will read it",
+				"partition", a.PartitionName, "error", err)
+			continue
+		}
+		if !content.MinEventTS.IsZero() {
+			a.Changes = append(a.Changes, archive.FieldChange{Column: "min_event_ts", Value: content.MinEventTS})
+		}
+		if !content.MaxEventTS.IsZero() {
+			a.Changes = append(a.Changes, archive.FieldChange{Column: "max_event_ts", Value: content.MaxEventTS})
+		}
+		a.Changes = append(a.Changes, archive.FieldChange{Column: "max_event_id", Value: content.EventID})
+		if content.HasPos {
+			a.Changes = append(a.Changes,
+				archive.FieldChange{Column: "max_binlog_file", Value: content.File},
+				archive.FieldChange{Column: "max_start_pos", Value: content.Pos})
+		}
+		actions[i] = a
+	}
+	return actions
 }
 
 // executeReconcileActions applies insert/update actions under --repair and

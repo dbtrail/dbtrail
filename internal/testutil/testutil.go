@@ -432,6 +432,9 @@ func InitIndexTables(t *testing.T, db *sql.DB) {
 		min_event_ts    DATETIME DEFAULT NULL,
 		max_event_ts    DATETIME DEFAULT NULL,
 		column_set      VARCHAR(4096) DEFAULT NULL,
+		max_event_id    BIGINT UNSIGNED DEFAULT NULL,
+		max_binlog_file VARCHAR(255) DEFAULT NULL,
+		max_start_pos   BIGINT UNSIGNED DEFAULT NULL,
 		archived_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		UNIQUE KEY uq_partition (partition_name, bintrail_id)
 	) ENGINE=InnoDB`)

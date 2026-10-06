@@ -127,6 +127,16 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 			// Each partition is dropped immediately after archiving to free
 			// disk space incrementally and reduce the crash window.
 			if opts.ArchiveDir != "" {
+				// The archive_state row written below names columns added
+				// after the table was created (#2152's max_event_id and
+				// friends). Every command that starts a capture migrates the
+				// index, but the built-in rotation loop also rotates indexes
+				// nothing else in this process migrated, and an INSERT that
+				// fails here leaves every old partition in place until the
+				// disk fills. The narrow migration: archive_state only.
+				if err := indexer.EnsureArchiveStateSchema(db); err != nil {
+					return Result{}, fmt.Errorf("migrate archive_state before archiving: %w", err)
+				}
 				// Set up S3 client once for all uploads (nil when --archive-s3 is not set).
 				var s3Client *s3.Client
 				var s3Bucket, s3Prefix string
@@ -169,6 +179,7 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 					var n int64
 					var minTS, maxTS time.Time
 					var columnSet string
+					var newest archive.Newest
 					skipped := false
 					if opts.Retry && fileExists(outPath) {
 						// A file existing at outPath with size>0 is NOT sufficient
@@ -204,7 +215,7 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 						if aerr != nil {
 							return Result{}, fmt.Errorf("archive partition %s: %w", name, aerr)
 						}
-						n, minTS, maxTS, columnSet = st.Rows, st.MinEventTS, st.MaxEventTS, st.Columns
+						n, minTS, maxTS, columnSet, newest = st.Rows, st.MinEventTS, st.MaxEventTS, st.Columns, st.Newest
 						// A partition whose CONTENT escapes its hour label holds
 						// backfilled events (#1037): old rows replayed after a
 						// capture stall land in the oldest live RANGE partition.
@@ -264,10 +275,17 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 						// here so the views generator can group the layout by
 						// schema instead of making DuckDB open every footer at
 						// bind time.
+						// The newest change the file holds (#2152): what a snapshot
+						// update reads once this partition is dropped, to know
+						// whether the archive holds a change after its position.
+						// Overwritten on a re-archive like the time range: the
+						// record describes the file just written.
+						newestFile, newestPos := archive.NewestColumns(newest)
 						if _, err := db.ExecContext(ctx,
 							`INSERT INTO archive_state
-								(partition_name, bintrail_id, local_path, file_size_bytes, row_count, s3_bucket, s3_key, min_event_ts, max_event_ts, column_set)
-							VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+								(partition_name, bintrail_id, local_path, file_size_bytes, row_count, s3_bucket, s3_key, min_event_ts, max_event_ts, column_set,
+								 max_event_id, max_binlog_file, max_start_pos)
+							VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 							ON DUPLICATE KEY UPDATE
 								local_path = VALUES(local_path),
 								file_size_bytes = VALUES(file_size_bytes),
@@ -276,8 +294,12 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 								s3_key = COALESCE(VALUES(s3_key), s3_key),
 								min_event_ts = VALUES(min_event_ts),
 								max_event_ts = VALUES(max_event_ts),
-								column_set = VALUES(column_set)`,
+								column_set = VALUES(column_set),
+								max_event_id = VALUES(max_event_id),
+								max_binlog_file = VALUES(max_binlog_file),
+								max_start_pos = VALUES(max_start_pos)`,
 							name, opts.BintrailID, outPath, fileSize, n, insertBucket, insertKey, insertMin, insertMax, columnSet,
+							newest.EventID, newestFile, newestPos,
 						); err != nil {
 							return Result{}, fmt.Errorf("record archive state for %s: %w", name, err)
 						}

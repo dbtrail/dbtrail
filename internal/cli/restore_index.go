@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -229,6 +230,20 @@ func runRestoreIndex(cmd *cobra.Command, args []string) error {
 			}
 		}
 		n, lerr := archive.RestorePartition(ctx, db, path, riBatch)
+		// The record rotation writes about the file (#2152), read while the
+		// file is still on local disk. Rows this command registers are
+		// stamped archived_at = now; without the record, every snapshot
+		// taken before the restore would read each of them on its next
+		// update. A file that cannot be read is registered without it.
+		var content *archive.Content
+		if lerr == nil {
+			if c, cerr := archive.ReadContent(ctx, path); cerr == nil {
+				content = &c
+			} else {
+				slog.Warn("restore-index: cannot read the newest change of an archive; it is registered without that record",
+					"partition", f.PartitionName, "error", cerr)
+			}
+		}
 		if f.Backend == archive.BackendS3 {
 			os.Remove(path)
 		}
@@ -244,7 +259,7 @@ func runRestoreIndex(cmd *cobra.Command, args []string) error {
 		}
 		report.EventsLoaded += n
 		report.FilesLoaded++
-		if err := recordRestoredArchive(ctx, db, f, n); err != nil {
+		if err := recordRestoredArchive(ctx, db, f, n, content); err != nil {
 			report.StateRowFailures = append(report.StateRowFailures, f.PartitionName+": "+err.Error())
 			continue
 		}
@@ -375,7 +390,10 @@ func buildRestorePartitionSQL(dbName string, archiveHours map[time.Time]bool, no
 // forever. min/max_event_ts stay NULL permanently — the scan does not read
 // row content, and no current command backfills them; the planner falls
 // back to the hour label.
-func recordRestoredArchive(ctx context.Context, db *sql.DB, f archive.ScannedFile, rows int64) error {
+//
+// content, when not nil, is the file's own record (#2152): its time range and
+// newest change, the same columns rotation fills.
+func recordRestoredArchive(ctx context.Context, db *sql.DB, f archive.ScannedFile, rows int64, content *archive.Content) error {
 	var localPath, bucket, key, uploadedAt any
 	if f.Backend == archive.BackendS3 {
 		bucket, key, uploadedAt = f.S3Bucket, f.S3Key, f.LastModified.UTC()
@@ -392,17 +410,35 @@ func recordRestoredArchive(ctx context.Context, db *sql.DB, f archive.ScannedFil
 	if f.ColumnSet != "" {
 		columnSet = f.ColumnSet
 	}
+	var minTS, maxTS, maxID, maxFile, maxPos any
+	if content != nil {
+		if !content.MinEventTS.IsZero() {
+			minTS = content.MinEventTS
+		}
+		if !content.MaxEventTS.IsZero() {
+			maxTS = content.MaxEventTS
+		}
+		maxID = content.EventID
+		maxFile, maxPos = archive.NewestColumns(content.Newest)
+	}
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO archive_state
-			(partition_name, bintrail_id, local_path, file_size_bytes, row_count, s3_bucket, s3_key, s3_uploaded_at, column_set)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(partition_name, bintrail_id, local_path, file_size_bytes, row_count, s3_bucket, s3_key, s3_uploaded_at, column_set,
+			 min_event_ts, max_event_ts, max_event_id, max_binlog_file, max_start_pos)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			local_path = COALESCE(VALUES(local_path), local_path),
 			s3_bucket = COALESCE(VALUES(s3_bucket), s3_bucket),
 			s3_key = COALESCE(VALUES(s3_key), s3_key),
 			s3_uploaded_at = COALESCE(VALUES(s3_uploaded_at), s3_uploaded_at),
-			column_set = COALESCE(VALUES(column_set), column_set)`,
-		f.PartitionName, f.BintrailID, localPath, f.SizeBytes, rows, bucket, key, uploadedAt, columnSet)
+			column_set = COALESCE(VALUES(column_set), column_set),
+			min_event_ts = COALESCE(VALUES(min_event_ts), min_event_ts),
+			max_event_ts = COALESCE(VALUES(max_event_ts), max_event_ts),
+			max_event_id = COALESCE(VALUES(max_event_id), max_event_id),
+			max_binlog_file = IF(VALUES(max_event_id) IS NULL, max_binlog_file, VALUES(max_binlog_file)),
+			max_start_pos = IF(VALUES(max_event_id) IS NULL, max_start_pos, VALUES(max_start_pos))`,
+		f.PartitionName, f.BintrailID, localPath, f.SizeBytes, rows, bucket, key, uploadedAt, columnSet,
+		minTS, maxTS, maxID, maxFile, maxPos)
 	return err
 }
 
