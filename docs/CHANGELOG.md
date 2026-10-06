@@ -386,6 +386,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   naming the wrong cause. It is now an error: the snapshot update fails with
   it, `verify` reports it, and a `_snapshot` statement returns it. Read
   routing keeps sending such a read to MySQL.
+- **Cascade recovery notices the source's binary log started again after the
+  baseline** (#2177). `recover-cascade` with a baseline, the console's cascade
+  recovery and the MCP `recover_cascade` tool read a child table's changes
+  since its baseline snapshot from the snapshot's binlog position. After a
+  `RESET MASTER` (`RESET BINARY LOGS AND GTIDS`) or a failover to another
+  server, every later change sorts before that position and was not read, so
+  a child moved to another parent (or deleted) after the snapshot was
+  restored under the deleted parent as the snapshot left it, with no caveat.
+  They now run the same check as `verify` and `_snapshot`, over the
+  recovery's own window (the child table, from the snapshot to the parent's
+  change). On a restart inside it the baseline is not used for that table:
+  the recovery reads that table's changes by time over the lookback window,
+  as with no baseline, and is flagged incomplete with the reason ("the
+  changes since the snapshot cannot be found by binlog position ... A new
+  full snapshot is needed"), so the command exits non-zero unless
+  `--allow-incomplete` is given. A check that cannot read the index is
+  reported as a failed baseline lookup, never as a pass. A baseline without
+  the event mark keeps the old behavior, and so does an index `bintrail
+  index` also wrote into.
 - **Turning the MySQL port off answers only once the port is closed (#2149).**
   Turning it off from the web interface could answer "off" a moment before
   the listening socket was released, and in that moment a new connection to

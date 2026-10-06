@@ -540,7 +540,16 @@ bintrail recover-cascade --index-dsn "..." \
   per-parent cap. When augmentation is skipped the child scan falls back to the
   plain lookback window (widened to the snapshot when that is older), with the
   baseline still used as a membership filter for children whose last event
-  predates it. A table with no baseline keeps the Phase-1 window limit. When the result is
+  predates it. A table with no baseline keeps the Phase-1 window limit.
+  The baseline is also not used for a table when the source's binary log
+  started again after the snapshot, inside the window being recovered (a
+  `RESET MASTER`, a failover to another server): its changes since then can
+  no longer be found from the snapshot's position, so a child moved or
+  deleted after it would come back as the snapshot left it. That table falls
+  back to the lookback window, read by time, and the output names the reason
+  and asks for a new full snapshot ([#2177](https://github.com/dbtrail/dbtrail/issues/2177)).
+  Baselines that do not record the newest change the index held (made before
+  this check, or with the CLI `bintrail baseline`) are not checked. When the result is
   provably partial the output is flagged `INCOMPLETE RECOVERY` and the command
   exits non-zero unless `--allow-incomplete` is given. If you have already
   re-created a deleted parent, remove its `INSERT` from the output —
