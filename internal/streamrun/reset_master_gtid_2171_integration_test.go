@@ -266,3 +266,85 @@ func TestOne_MariaDB_resetMasterStopsWithResumeSteps(t *testing.T) {
 	src := mariadbDupSource(t, 99928)
 	runGTIDResetScenario(t, src, indexDB, indexName, "", func(int64) int { return 10 })
 }
+
+// TestIntegrationGTIDResetMasterCrashRightAfterRestart: the restart after the
+// reset persists its jump to the start of the source's binary log and then
+// crashes before any later checkpoint, with the new numbering's rows already
+// indexed. The next restart's ordinary cleanup replays from that jump: it
+// must delete only those new rows (they are sent again), never the old
+// numbering's rows 6-8, which sit after the old checkpoint and above its
+// cleanup floor. Only the fresh floor the jump persisted keeps them out.
+func TestIntegrationGTIDResetMasterCrashRightAfterRestart(t *testing.T) {
+	indexDB, indexName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, indexDB)
+	src := mysqlGTIDDupSource(t, 99932)
+	resetGTIDSourceBinlogs(t, src.db)
+	testutil.MustExec(t, src.db, "INSERT INTO orders (id, amount) VALUES (-1, 0)")
+	for range 3 {
+		testutil.MustExec(t, src.db, "FLUSH BINARY LOGS")
+	}
+	cfg := func(n uint32) Config {
+		c := src.config(indexName)
+		c.ServerID = src.serverID + n
+		c.Checkpoint = 1
+		return c
+	}
+	if err := runOneUntil(t, cfg(0), true, func() { insertOrders(t, src.db, 1, 5) }, ordersIndexedThrough(t, indexDB, src.schema, 5)); err != nil {
+		t.Fatalf("run 1 (clean): %v", err)
+	}
+	lift := blockCheckpoints(t, indexDB)
+	if err := runOneUntil(t, cfg(1), false, func() { insertOrders(t, src.db, 6, 8) }, ordersIndexedThrough(t, indexDB, src.schema, 8)); err != nil {
+		t.Fatalf("run 2 (crash): %v", err)
+	}
+	lift()
+
+	resetGTIDSourceBinlogs(t, src.db)
+	insertOrders(t, src.db, 9, 10)
+
+	unfreeze := freezeCheckpointAfterGTIDRestart(t, indexDB)
+	if err := runOneUntil(t, cfg(2), false, nil, ordersIndexedThrough(t, indexDB, src.schema, 10)); err != nil {
+		t.Fatalf("run 3 (restart after the reset, crash after the jump): %v", err)
+	}
+	unfreeze()
+	frozen, err := loadStreamState(indexDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frozen.binlogPos != 4 {
+		t.Fatalf("run 3 durable checkpoint = %s:%d, want the jump's :4", frozen.binlogFile, frozen.binlogPos)
+	}
+	if at, _ := gapLost(t, indexDB); !at.Valid {
+		t.Fatal("run 3 stamped no capture loss")
+	}
+
+	if err := runOneUntil(t, cfg(3), true, func() { insertOrders(t, src.db, 11, 11) }, ordersIndexedThrough(t, indexDB, src.schema, 11)); err != nil {
+		t.Fatalf("run 4 (restart from the jump): %v", err)
+	}
+	assertExactlyOnce(t, indexedPKs(t, indexDB, src.schema, "orders"), pkRange(1, 11))
+}
+
+// freezeCheckpointAfterGTIDRestart lets the loss stamp and the jump to :4
+// through, then refuses every later checkpoint: a crash right after the
+// restart persisted its jump.
+func freezeCheckpointAfterGTIDRestart(t *testing.T, indexDB *sql.DB) func() {
+	t.Helper()
+	const name = "bintrail_test_freeze_after_gtid_restart"
+	testutil.MustExec(t, indexDB, "DROP TRIGGER IF EXISTS "+name)
+	testutil.MustExec(t, indexDB, `
+		CREATE TRIGGER `+name+` BEFORE UPDATE ON stream_state
+		FOR EACH ROW BEGIN
+		  IF OLD.binlog_position = 4 THEN
+		    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'simulated crash right after the jump';
+		  END IF;
+		END`)
+	lifted := false
+	t.Cleanup(func() {
+		if !lifted {
+			indexDB.Exec("DROP TRIGGER IF EXISTS " + name)
+		}
+	})
+	return func() {
+		lifted = true
+		testutil.MustExec(t, indexDB, "DROP TRIGGER IF EXISTS "+name)
+	}
+}
