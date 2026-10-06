@@ -370,9 +370,10 @@ func (m *copyChangedMemo) put(server string, t views.BaselineTable, cut query.Bi
 // index: it is the only writer of index_state. Files indexed that way get
 // the NEWEST ids whatever their position, so "the event with the highest id"
 // is no longer "the event furthest into the binlog". A read that fails
-// counts as yes.
+// counts as yes: here that only sends the read to MySQL.
 func indexBackfilled(ctx context.Context, db *sql.DB) bool {
-	return query.IndexBackfilled(ctx, db)
+	backfilled, err := query.IndexBackfilled(ctx, db)
+	return backfilled || err != nil
 }
 
 // newestEventOlderThan is the binlog position of the event with the highest
