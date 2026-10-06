@@ -187,6 +187,10 @@ func TestDuckDB_copyOnlyReservedWords(t *testing.T) {
 		{`SELECT count(*) FROM kw semi JOIN k2 b ON b.id = 1`, "2", "2"},
 		{`SELECT v isnull FROM kw WHERE id = 1`, "false", "body"},
 		{`SELECT v notnull FROM kw WHERE id = 1`, "true", "body"},
+		// A dot after a number is its decimal point, not a qualifier.
+		{`SELECT 1. isnull FROM kw WHERE id = 1`, "false", "1"},
+		{`SELECT 1. notnull FROM kw WHERE id = 1`, "true", "1"},
+		{`SELECT 1.isnull FROM kw WHERE id = 1`, "false", "1"},
 	} {
 		var v any
 		err := db.QueryRow(c.stmt).Scan(&v)

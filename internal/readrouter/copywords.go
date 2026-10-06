@@ -124,7 +124,8 @@ func CopyOnlyReserved() []string { return sortedWords(copyOnlyReserved) }
 // Such a word is found when it stands bare where the source reads a name:
 // a column, an alias, a table. The copy reads it as the source does, and the
 // statement is not kept back, when the word is quoted (the copy is sent the
-// name in double quotes), after a dot (ev.at), or right after AS as the
+// name in double quotes), after a name and a dot (ev.at, but not 1.isnull,
+// where the dot is a decimal point), or right after AS as the
 // alias of a column (SELECT made AS at). Nor is it kept back where the word
 // is the keyword on the source too:
 //
@@ -157,6 +158,11 @@ func copyReservedWork(shape string) (why string, steps int) {
 		prevWord string // the word that ends right before this point, white space apart, in lower case
 		cases    int    // bare CASE keywords
 		ends     int    // bare words end
+		// qualified is true at a dot that follows a name, a word that does
+		// not start with a digit or a quoted name. A dot after a number is
+		// its decimal point: 1. isnull is the number 1 under the alias
+		// isnull on the source, and 1 IS NULL on the copy.
+		qualified bool
 	)
 	for i := 0; i < n; {
 		c := t.at(i)
@@ -174,6 +180,9 @@ func copyReservedWork(shape string) (why string, steps int) {
 			continue
 		case !wordByte(c):
 			if !sqlSpace(c) {
+				if c == '.' {
+					qualified = prev == '"' || prevWord != "" && !asciiDigit(prevWord[0])
+				}
 				prev, prevWord = c, ""
 			}
 			i++
@@ -184,7 +193,7 @@ func copyReservedWork(shape string) (why string, steps int) {
 			j++
 		}
 		word := strings.ToLower(t.sub(i, j))
-		skip := prev == '.' || prevWord == "as"
+		skip := prev == '.' && qualified || prevWord == "as"
 		before := prevWord
 		prev, prevWord = word[len(word)-1], word
 		i = j

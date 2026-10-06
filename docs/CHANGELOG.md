@@ -155,8 +155,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (1 row in the measurement) and a `FULL OUTER JOIN` on the copy (3
     rows); the same shape with `anti`, `asof` and `positional` differed
     too, and `semi` does on other data. `SELECT v isnull FROM t` is `v`
-    under the alias `isnull` on MySQL and the test `v IS NULL` on the copy.
-    Both answered. They stay on MySQL now (`veto`).
+    under the alias `isnull` on MySQL and the test `v IS NULL` on the copy,
+    and so is `SELECT 1. isnull` (the number 1 on MySQL, `false` on the
+    copy). Both answered. They stay on MySQL now (`veto`).
   - **Wrong answer, found while measuring, fixed.** `SELECT current_user`
     without parentheses is the source's user on MySQL and MariaDB
     (`root@localhost`) and `duckdb` on the copy; `current_role()` is `NONE`

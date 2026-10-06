@@ -131,6 +131,13 @@ func TestVeto_copyReservedWords(t *testing.T) {
 		"SELECT v notnull FROM t",
 		"SELECT `v`NOTNULL FROM `t`",
 		"SELECT (v)isnull FROM t",
+		// A dot after a number is a decimal point, not a qualifier: 1. is
+		// the number 1 under the alias isnull on the source, 1 IS NULL on
+		// the copy.
+		"SELECT 1. isnull FROM t",
+		"SELECT 1. notnull FROM t",
+		"SELECT 1.isnull FROM t",
+		"SELECT 1e3.isnull FROM t",
 	} {
 		if got := Veto(stmt); got != vetoCopyReserved {
 			t.Errorf("Veto(%q) = %q, want %q", stmt, got, vetoCopyReserved)
@@ -142,6 +149,7 @@ func TestVeto_copyReservedWords(t *testing.T) {
 		"SELECT ev.at, e . at FROM ev e WHERE ev.at >= '2026-01-02'",
 		"SELECT id AS at, status AS end FROM ev",
 		"SELECT x.full FROM a x JOIN b USING (id)",
+		"SELECT t1.end, `123`.at, db.t2 . offset FROM t1",
 		"SELECT `isnull`, t.notnull, is_null, isnullable FROM t",
 		"SELECT COUNT(*) FROM a `full` JOIN b USING (id)",
 		// The keyword on the source too.

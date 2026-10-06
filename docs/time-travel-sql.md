@@ -1067,7 +1067,9 @@ What this is and is not:
     `anti`, `asof` and `positional`. And `SELECT v isnull FROM t` is `v`
     under the alias `isnull` on MySQL and the test `v IS NULL` on the copy.
     All of these stay on MySQL now. The copy still answers when the name is
-    quoted (`` `at` ``), comes after a dot (`ev.at`), or is the alias of a
+    quoted (`` `at` ``), comes after a name and a dot (`ev.at`; after a
+    number the dot is a decimal point, and `SELECT 1. isnull` stays on
+    MySQL: `1` there, `false` on the copy), or is the alias of a
     column right after `AS` (`SELECT made AS at`), and where the word is
     the keyword on MySQL too: before a parenthesis (`CAST(`, `= ANY (`),
     the `END` of a `CASE`, `OFFSET` before a number, `ROWS ONLY`, and
