@@ -306,6 +306,92 @@ only appear when an application or operator sets a tag on purpose; if yours
 does, capture that source in position mode (`--start-file`/`--start-pos`, or
 `--reset` to move an existing capture, see [Mode switching](#mode-switching)).
 
+#### When the source's GTID numbering starts over (`RESET MASTER`)
+`RESET BINARY LOGS AND GTIDS` (MySQL 8.2+), `RESET MASTER`, a restore from an
+older backup or a rebuilt server start the source's GTID numbering over. The
+saved GTID set then no longer describes what capture has read: the numbers in it
+now name other transactions. On every GTID-mode restart, capture checks that the
+source's GTID history still continues the checkpoint, before anything is deleted
+or replayed:
+
+- **MySQL** (the check runs only when the source has `gtid_mode=ON`). The source
+  went backwards when the saved set holds GTIDs of the source's own
+  `server_uuid` that its `gtid_executed` no longer contains; when the checkpoint
+  lies past the end of the source's binary log (a file numbered after its newest
+  one, or past that file's size) while the source keeps no other server's
+  history; or when the source shares no GTID history with the checkpoint at all
+  (a server rebuilt with a new `server_uuid`). Capture then keeps every event
+  already indexed, records a capture loss (`gap_lost_at` / `gap_lost_detail`,
+  the same `EVENTS PERMANENTLY LOST` signal as an unfillable gap) that says what
+  happened, and restarts from the start of the source's binary log, so the new
+  numbering's transactions are all captured. With `--no-gap-fill` it refuses
+  instead. A source that lost the end of its binary log in a crash
+  (`sync_binlog != 1`) looks the same from SQL as one that was reset, so it is
+  handled the same way: the transactions still in its binary log that capture
+  had already read are indexed again (duplicates), never skipped.
+- **MariaDB.** The same check uses the source's `server_id` and
+  `@@gtid_binlog_state`. Capture refuses to start, deletes nothing, and the
+  error says how to resume: restart once with
+  `--reset --start-file <the source's oldest binary log> --start-pos 4`, which
+  captures the new numbering from its first transaction (in position mode) and
+  records the jump as a capture loss. To return to GTID mode later, stop
+  capture cleanly first (a graceful stop writes a final checkpoint; the switch
+  of mode skips the resume cleanup, which only runs when the mode stays the
+  same, so rows indexed after the last checkpoint would be indexed again),
+  read its checkpoint (the `Position` line of `bintrail
+  status`), and restart once with `--start-gtid` set to what
+  `SELECT BINLOG_GTID_POS('<file>', <position>)` returns on the source. Not the
+  source's current `@@gtid_binlog_pos`: that skips what the source wrote since
+  the checkpoint.
+
+The binary-log comparison only runs between a checkpoint and the server it was
+read from. Every checkpoint records the source's identity (`source_identity`
+in `stream_state`: `@@server_uuid` on MySQL, `server_id:<n>` on MariaDB), and
+binlog file numbers of two servers say nothing about each other: when capture
+moves to another server behind the same address (a replica to its primary),
+the files are not compared. A checkpoint written before this column existed is
+not compared either.
+
+A source that is only **behind** is never reported: a lagging replica is
+missing other servers' transactions, never its own, and only its own can prove
+it went backwards. Cases this check cannot see:
+
+- Once the new numbering has passed the old one, only the binary log can tell,
+  and only while the source's newest file sorts before the checkpoint's file
+  (or is that file, shorter than the checkpoint's offset). A source that has
+  rotated back up to or past the checkpoint's file number by then is not seen.
+  Position mode has the same blind spot.
+- A source rebuilt with a new `server_uuid` from a backup that still shares
+  part of the old history looks like a lagging replica.
+- Group Replication / InnoDB Cluster: transactions carry the group's UUID, not
+  the member's `server_uuid`, so only the "no shared history" case applies.
+- MariaDB Galera (`wsrep_on=ON`): nodes can share `server_id` and GTIDs while
+  each numbers its own binlog files, so a Galera node records no identity and
+  its files are never compared.
+- The identity is read once, when capture starts, while the replication client
+  reconnects by itself during a run. A failover to B and back to A behind one
+  address within a single run can file B's positions under A's identity; the
+  restart on A then reads them as a numbering that started over: a false
+  capture-loss stamp and duplicates from A's oldest binlog, nothing deleted.
+- When the checkpoint was written against another server, or by an older
+  build that did not record the source's identity, there is no binary-log
+  comparison.
+
+When the comparison applies and `SHOW BINARY LOGS` fails, capture does not
+start (retry); it never decides without the list. That makes `REPLICATION
+CLIENT` (MariaDB: `BINLOG MONITOR`) required for every GTID-mode restart, as
+the privilege table above lists; without it the error names the grant.
+
+The restart reads the source's binary log from its oldest file, which after a
+reset holds only GTID transactions. A source that was not reset but lost the
+end of its binary log, and still keeps files from before `gtid_mode=ON`, refuses
+that restart (`Cannot replicate anonymous transaction when AUTO_POSITION = 1`)
+on every start; `--reset` resumes from its current position.
+
+A running capture normally meets the reset long before either: the source ends
+the binlog dump when its binary log is reset (`could not find next log`), and
+the restart that follows sees the source went backwards.
+
 ### The `--no-gap-fill` flag
 
 By default, DBTrail auto-advances past unfillable gaps. If you want the stream to **refuse to start** when a gap is detected (so you can investigate and decide how to proceed), use:

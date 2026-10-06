@@ -818,6 +818,16 @@ func EnsureSchema(db *sql.DB) error {
 		return err
 	}
 
+	// source_identity names the server whose binlog coordinates the
+	// checkpoint carries (MySQL @@server_uuid, MariaDB "server_id:<n>"), so a
+	// resume compares binlog file numbers only against a checkpoint of the
+	// same server (#2171). NULL on rows an older build wrote: no comparison.
+	if err := ensureColumn(db, "stream_state", "source_identity",
+		`ALTER TABLE stream_state ADD COLUMN source_identity VARCHAR(64) DEFAULT NULL COMMENT 'server the checkpoint binlog coordinates belong to: MySQL @@server_uuid, MariaDB server_id:<n> (#2171); binlog file numbers are compared only between checkpoints of one identity; NULL = unknown (older build)' AFTER bintrail_id`,
+	); err != nil {
+		return err
+	}
+
 	if err := ensureColumn(db, "stream_state", "flavor",
 		`ALTER TABLE stream_state ADD COLUMN flavor VARCHAR(16) NOT NULL DEFAULT 'mysql' COMMENT 'source flavor: mysql or mariadb; selects the GTID parser on resume' AFTER gtid_set`,
 	); err != nil {
