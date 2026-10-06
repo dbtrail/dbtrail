@@ -585,6 +585,8 @@ jobs:
             || { echo "FATAL: crash→restart exactly-once test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationPositionResetMasterKeepsCapturedRows ' /tmp/mysql-it.out \
             || { echo "FATAL: position-mode RESET MASTER keep-rows test did not run: is the source in position mode? (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationPositionResetRegrownPastCheckpoint ' /tmp/mysql-it.out \
+            || { echo "FATAL: position-mode RESET MASTER regrown-past-the-checkpoint test did not run: is the source in position mode? (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestOne_SourceFlavor_mysqlDeclaredMariaDBRefuses ' /tmp/mysql-it.out \
             || { echo "FATAL: source-flavor refusal test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestOne_SourceFlavor_mysqlDetectedWhenUndeclared ' /tmp/mysql-it.out \
@@ -801,6 +803,7 @@ jobs:
             TestOne_MariaDB_cutMidTransactionIndexesOnce \
             TestOne_MariaDB_freshStartCheckpointsAtOnce \
             TestOne_MariaDB_resetMasterStopsWithResumeSteps \
+            TestIntegrationPositionResetRegrownPastCheckpoint_MariaDB \
             TestBYOSStream_MariaDBReconnectAfterCommitOnce \
             TestIntegrationMonitorRegistrySourceMariaDBDetected \
             TestIntegrationMonitorRegistrySourceMariaDBRelabeled \
