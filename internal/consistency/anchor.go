@@ -62,6 +62,9 @@ type snapshotAnchor struct {
 	lockRefused bool
 	// gtidMode is MySQL's @@gtid_mode when it is not ON (nothing anchored).
 	gtidMode string
+	// lockNotRequested: the anchor needed the table lock and the caller did
+	// not allow it (AnchorOptions.PauseWrites).
+	lockNotRequested bool
 }
 
 // openAnchoredSnapshot opens START TRANSACTION WITH CONSISTENT SNAPSHOT on
@@ -80,10 +83,14 @@ type snapshotAnchor struct {
 // none can commit until it is released. It is per table and held for the time
 // the snapshot takes to open; see anchorLockAttempts for the worst case.
 //
+// The lock is taken only with opts.PauseWrites: it pauses the table's writers
+// on the source, which a check must not do unasked. Without it a stock MySQL
+// snapshot is left unanchored (lockNotRequested).
+//
 // Where the server has no GTIDs (MySQL gtid_mode=OFF; a MariaDB that has
 // written no GTID yet) nothing is anchored and no lock is taken. Without the
 // LOCK TABLES privilege the snapshot opens unlocked and the result says so.
-func openAnchoredSnapshot(ctx context.Context, db *sql.DB, conn *sql.Conn, schema, table string) (snapshotAnchor, error) {
+func openAnchoredSnapshot(ctx context.Context, db *sql.DB, conn *sql.Conn, schema, table string, opts AnchorOptions) (snapshotAnchor, error) {
 	if err := startSnapshot(ctx, conn); err != nil {
 		return snapshotAnchor{}, err
 	}
@@ -124,6 +131,12 @@ func openAnchoredSnapshot(ctx context.Context, db *sql.DB, conn *sql.Conn, schem
 	}
 	if flavor != GTIDFlavorMySQL {
 		return a, nil // MariaDB without a usable snapshot coordinate
+	}
+	if !opts.PauseWrites {
+		// The lock pauses writes to the table on the source: never taken
+		// unless asked for. The snapshot stays open, unanchored.
+		a.lockNotRequested = true
+		return a, nil
 	}
 
 	// Stock MySQL: reopen the snapshot under the table lock.

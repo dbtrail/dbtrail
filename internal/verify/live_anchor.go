@@ -110,6 +110,8 @@ func resolveLiveCut(ctx context.Context, indexDB *sql.DB, src consistency.TableC
 			return liveCut{note: unanchoredNote("the source reports no executed GTIDs: gtid_mode=OFF")}, nil
 		case src.GTIDMode != "":
 			return liveCut{note: unanchoredNote("the source runs with gtid_mode=" + src.GTIDMode + ", so its GTID set does not name what the snapshot holds")}, nil
+		case src.AnchorLockNotRequested:
+			return liveCut{note: unanchoredNote("on this server pinning it needs a brief pause of writes to the table, which this check was not asked to take")}, nil
 		case src.AnchorLockRefused:
 			return liveCut{note: unanchoredNote("pinning the position on this server needs a read lock on the table: RELOAD and LOCK TABLES, or at least LOCK TABLES, which the source account does not have")}, nil
 		case src.GTIDFlavor == consistency.GTIDFlavorMariaDB:

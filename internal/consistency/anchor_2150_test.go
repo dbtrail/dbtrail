@@ -64,6 +64,9 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 		want       snapshotAnchor
 		wantErr    error
 		wantErrMsg bool
+		// noPause: the caller did not allow the table lock (the default);
+		// every other case allows it.
+		noPause bool
 	}{
 		{
 			name: "percona: the server's own snapshot set",
@@ -165,6 +168,29 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 				m.ExpectQuery(`SELECT BINLOG_GTID_POS`).WillReturnRows(oneCol(nil))
 			},
 			want: snapshotAnchor{set: "0-1-120", flavor: GTIDFlavorMariaDB},
+		},
+		{
+			name: "stock mysql by default: no lock statement, the snapshot stays open unanchored",
+			expect: func(m sqlmock.Sqlmock) {
+				start(m)
+				mysqlAfter(m, anchorUUID+":1-12")
+				gtidOn(m)
+				noNative(m)
+			},
+			noPause: true,
+			want:    snapshotAnchor{set: anchorUUID + ":1-12", flavor: GTIDFlavorMySQL, lockNotRequested: true},
+		},
+		{
+			name: "percona by default: its own position, no lock needed",
+			expect: func(m sqlmock.Sqlmock) {
+				start(m)
+				mysqlAfter(m, anchorUUID+":1-12")
+				gtidOn(m)
+				m.ExpectQuery(`SHOW STATUS LIKE 'binlog_snapshot%'`).WillReturnRows(rowsKV(
+					"Binlog_snapshot_gtid_executed", anchorUUID+":1-11"))
+			},
+			noPause: true,
+			want:    snapshotAnchor{set: anchorUUID + ":1-11", flavor: GTIDFlavorMySQL, method: AnchorNative},
 		},
 		{
 			name: "stock mysql: the table's writers held while the snapshot opens",
@@ -282,7 +308,7 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := openAnchoredSnapshot(context.Background(), db, conn, "s", "t")
+			got, err := openAnchoredSnapshot(context.Background(), db, conn, "s", "t", AnchorOptions{PauseWrites: !c.noPause})
 			switch {
 			case c.wantErr != nil:
 				if !errors.Is(err, c.wantErr) {

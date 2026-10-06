@@ -57,13 +57,13 @@ It is read-only and never writes to your source or your index.
 - **Live-source mode needs an exact snapshot position to run on a table
   with writes.** The reconstruction is cut at the position the live read was
   taken at, so writes committed during the check are left out of both sides.
-  That position is exact on MySQL with GTIDs on (the account needs
-  `RELOAD` and `LOCK TABLES`), Percona Server and MariaDB; see
-  [Live-source](#live-source). Where it is not (MySQL with `gtid_mode=OFF`, a
-  source account without `LOCK TABLES`, a PostgreSQL source), the rule is
-  unchanged: **no writes to the table while it is read**, or a write shows as
-  a MISMATCH even though the reconstruction is correct. The result says when
-  that rule applies.
+  That position is exact on Percona Server and MariaDB, and on MySQL with
+  GTIDs on only with `--pause-writes`, which briefly pauses writes to each
+  checked table on the source; see [Live-source](#live-source). Everywhere
+  else (MySQL by default, MySQL with `gtid_mode=OFF`, a source account
+  without the grants, a PostgreSQL source) the rule is unchanged: **no writes
+  to the table while it is read**, or a write shows as a MISMATCH even though
+  the reconstruction is correct. The result says when that rule applies.
 
 ## The modes
 
@@ -186,10 +186,18 @@ depends on the server:
 |---|---|---|
 | Percona Server (`gtid_mode=ON`) | the server's own snapshot position (`Binlog_snapshot_gtid_executed`), no lock | fine |
 | MariaDB | the server's own snapshot coordinate (`binlog_snapshot_file`/`_position`, through `BINLOG_GTID_POS`), no lock | fine |
-| MySQL (`gtid_mode=ON`) | `FLUSH TABLES <table> WITH READ LOCK` on a second connection while the snapshot opens: writes to that one table wait while it is held (measured on MySQL 8.0, 8.4 and Percona Server 8.0 with 48 concurrent writers: 25 to 70 ms on average, under a quarter second at worst) | fine |
-| MySQL without the `LOCK TABLES` privilege, MySQL with `gtid_mode` other than `ON` (`ON_PERMISSIVE` still commits transactions without a GTID), PostgreSQL | not pinned | **none allowed**: a write while the table is read shows as a MISMATCH |
+| MySQL (`gtid_mode=ON`) with `--pause-writes` | `FLUSH TABLES <table> WITH READ LOCK` on a second connection while the snapshot opens: **writes to that one table on the source wait while it is held** (measured on MySQL 8.0, 8.4 and Percona Server 8.0 with 48 concurrent writers: 25 to 70 ms on average, under a quarter second at worst; up to about 3 s behind a long write transaction) | fine |
+| MySQL by default (no `--pause-writes`), MySQL without the grants, MySQL with `gtid_mode` other than `ON` (`ON_PERMISSIVE` still commits transactions without a GTID), PostgreSQL | not pinned | **none allowed**: a write while the table is read shows as a MISMATCH |
 
-Why MySQL needs the lock: measured on MySQL 8.0 and 8.4 under concurrent
+**`--pause-writes` (stock MySQL only, off by default).** It pauses writes to
+the checked table **on the production source** for the moment its snapshot
+opens: tens of milliseconds typically, up to about 3 seconds when a
+transaction that wrote the table is still open. Reads are not blocked. It needs
+the `RELOAD` (or `FLUSH_TABLES`) and `LOCK TABLES` privileges. `verify` never
+takes this lock unless the flag is given; the web console's verify never takes
+it. Percona Server and MariaDB do not need it.
+
+Why stock MySQL needs the lock: measured on MySQL 8.0 and 8.4 under concurrent
 commits, a snapshot can already see transactions that `@@gtid_executed` does
 not list yet, even when the set read just before and just after opening the
 snapshot is the same. Reading the set around the snapshot is therefore never
@@ -215,6 +223,10 @@ detail says so and says why.
 ```sh
 bintrail verify --source-dsn "$SRC" --index-dsn "$IDX" \
   --baseline-s3 s3://bucket/baselines --tables mydb.orders,mydb.users
+
+# stock MySQL, a table that keeps taking writes: pause them briefly per table
+bintrail verify --source-dsn "$SRC" --index-dsn "$IDX" \
+  --baseline-s3 s3://bucket/baselines --tables mydb.orders --pause-writes
 ```
 
 For a PostgreSQL source the same command works unchanged — pass the
@@ -553,6 +565,7 @@ diff tool involved.
 | `--baseline-s3` | *(empty)* | S3 URL prefix of baseline snapshots (e.g. `s3://bucket/baselines/`) |
 | `--tables` | *(all)* | Comma-separated `schema.table` list (default: all tables in the latest schema snapshot; in baseline-anchored mode, snapshot tables with no baseline report `inconclusive` — "never baselined") |
 | `--no-archive` | `false` | Query live MySQL partitions only; skip Parquet archive discovery |
+| `--pause-writes` | `false` | Live-source mode, stock MySQL: briefly pause writes to each checked table **on the source** while its snapshot opens (tens of ms typically, up to about 3 s behind a long write transaction; needs `RELOAD` and `LOCK TABLES`), so a table with writes during the check can match. See [Live-source](#live-source) |
 | `--explain` | `false` | On a baseline-anchored mismatch, print a per-row drill-down. Rejected under `--check recover` |
 | `--format` | `text` | Output format: `text` or `json` (see [Machine-readable output](#machine-readable-output---format-json)) |
 | `--check` | `content` | What to verify: `content` (reconstructed table content) or `recover` (`recover`'s before/after image inputs, index-only) |
@@ -626,8 +639,8 @@ the contract tag differs.
 sources exist:
 
 - **MySQL** — all three modes. Live-source mode anchors on `@@gtid_executed`,
-  pinned to the snapshot with a brief table lock (Percona Server: its own
-  snapshot position), and refuses to compare when the index is behind the
+  pinned to the snapshot with a brief table lock when `--pause-writes` is
+  given (Percona Server: its own snapshot position, no flag needed), and refuses to compare when the index is behind the
   snapshot after waiting for the capture; on a `gtid_mode=OFF` source it
   proceeds with a `coverage unverified` note and the table must take no
   writes during the read.

@@ -124,6 +124,13 @@ type Config struct {
 	// command that carries these flags, so leaving this unset would silently
 	// cap the reconstruct-heavy half of a --ultrafast run at 2 threads/4GB.
 	DuckDBTuning duckdbutil.Tuning
+	// PauseWrites allows live-source verify, on a stock MySQL source (no
+	// snapshot position of its own), to hold a brief read lock on each
+	// checked table while its snapshot opens, which pauses writes to that
+	// table on the source (#2150). Off by default; without it such a source
+	// is compared with the time cut and the result says the table must take
+	// no writes during the read. Percona Server and MariaDB never need it.
+	PauseWrites bool
 	// CoverageWait bounds how long live-source verify waits, per table, for
 	// a running capture to reach the snapshot it read (#2150). Zero means
 	// DefaultCoverageWait; negative means do not wait.
@@ -140,11 +147,13 @@ type Config struct {
 // table is read are out of both sides and a table with steady traffic
 // compares equal. The position is exact only where the server can give it
 // (see consistency.ConsistentTableChecksumAnchored): its own snapshot position
-// (Percona Server, MariaDB), or, on stock MySQL, a brief read lock on the
-// table held while the snapshot opens. It is translated into a binlog
+// (Percona Server, MariaDB), or, on stock MySQL and only with
+// Config.PauseWrites, a brief read lock on the table held while the snapshot
+// opens. It is translated into a binlog
 // coordinate from the index (snapshotCut) and bounds the fetch as UntilPos;
 // the wall-clock asOf stays as the coarse bound. Where no exact position
-// exists (GTIDs off, no LOCK TABLES grant, a tagged GTID set, an index whose
+// exists (stock MySQL without PauseWrites, GTIDs off, no LOCK TABLES grant, a
+// tagged GTID set, an index whose
 // ids are not binlog order) the read is cut at asOf as before and the result
 // says that a write during the read shows as a mismatch.
 func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableResult, error) {
@@ -185,7 +194,8 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	// openedBy is taken before the snapshot opens: the baseline the
 	// reconstruction starts from must be older than the read (step 3).
 	openedBy := time.Now().UTC()
-	src, err := consistency.ConsistentTableChecksumAnchored(ctx, cfg.SourceDB, schema, table, normalizeRenderedBytes)
+	src, err := consistency.ConsistentTableChecksumAnchored(ctx, cfg.SourceDB, schema, table, normalizeRenderedBytes,
+		consistency.AnchorOptions{PauseWrites: cfg.PauseWrites})
 	if errors.Is(err, consistency.ErrAnchorBusy) {
 		return inconclusive(res, "the snapshot's position could not be pinned: "+err.Error()+"; run the check again when the table's long write transactions are done"), nil
 	}

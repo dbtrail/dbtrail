@@ -13,16 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MISMATCH. It is now cut at the snapshot's own position: the GTID set the
   snapshot holds, turned into a binlog coordinate from the index. The
   position is exact where the server can give it: Percona Server and MariaDB
-  report their own snapshot position (no lock); on MySQL with GTIDs on, a
-  `FLUSH TABLES <table> WITH READ LOCK` on a second connection is held while
-  the snapshot opens, so writes to that one table wait 25 to 70 ms on
-  average (measured with 48 concurrent writers; `LOCK TABLES <table> READ`
-  when the account lacks `RELOAD`). Measured: on MySQL 8.0 and 8.4 a
+  report their own snapshot position (no lock); on MySQL with GTIDs on, only
+  with the new opt-in `--pause-writes` flag, a `FLUSH TABLES <table> WITH
+  READ LOCK` on a second connection is held while the snapshot opens, so
+  writes to that one table on the source wait 25 to 70 ms on average
+  (measured with 48 concurrent writers; up to about 3 s behind a long write
+  transaction; `LOCK TABLES <table> READ` when the account lacks `RELOAD`).
+  Without the flag (the default, and always in the web console) a stock
+  MySQL source is compared as before. Measured: on MySQL 8.0 and 8.4 a
   snapshot can see transactions `@@gtid_executed` does not list yet, even
   when the set read before and after opening it is the same, so that read
   is never taken as exact. The lock waits at most one second, three times; a
   table it never gets is **inconclusive**, never compared against a guessed
-  position. Without `LOCK TABLES`, with `gtid_mode` other than `ON`, or on PostgreSQL
+  position. Without `--pause-writes` or `LOCK TABLES` on stock MySQL, with `gtid_mode` other than `ON`, or on PostgreSQL
   (#2198), the read is cut by time as before and the result says the table
   must take no writes during the read. Each table also waits up to a
   minute for a running capture to reach the snapshot it read, instead of

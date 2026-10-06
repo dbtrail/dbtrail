@@ -645,6 +645,8 @@ jobs:
             || { echo "FATAL: live-source verify under continuous writes did not run: is the GTID source in the shard that runs internal/streamrun? (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationVerifyLiveSourceAnchorFallbacks2150 ' /tmp/mysql-it.out \
             || { echo "FATAL: the live-source verify anchor fallbacks test did not run: is the GTID source in the shard that runs internal/streamrun? (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationVerifyLiveSourceUnpausedByDefault2150 ' /tmp/mysql-it.out \
+            || { echo "FATAL: live-source verify without --pause-writes (the default) did not run: is the GTID source in the shard that runs internal/streamrun? (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationVerifyLiveSourceQuietAfterBaseline2150 ' /tmp/mysql-it.out \
             || { echo "FATAL: live-source verify on a quiet source after a baseline did not run: is the GTID source in the shard that runs internal/streamrun? (false-green tripwire)" >&2; exit 1; }
 

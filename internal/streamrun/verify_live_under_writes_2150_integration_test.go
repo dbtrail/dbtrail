@@ -243,6 +243,9 @@ func (u underWrites) writers(t *testing.T, commits *atomic.Int64) (stop func()) 
 func runVerifyUnderWrites(t *testing.T, u underWrites) {
 	cfg, stopCapture := u.setup(t, 0)
 	defer stopCapture()
+	// Stock MySQL pins the position only when asked to pause the table's
+	// writes; MariaDB ignores it (its own snapshot position needs no lock).
+	cfg.PauseWrites = u.flavor == gomysql.MySQLFlavor
 
 	var commits atomic.Int64
 	stopWriters := u.writers(t, &commits)
@@ -273,7 +276,7 @@ func runVerifyUnderWrites(t *testing.T, u underWrites) {
 }
 
 // TestIntegrationVerifyLiveSourceUnderWrites2150_mysql: stock MySQL with
-// GTIDs on, the position pinned by the table lock.
+// GTIDs on and --pause-writes, the position pinned by the table lock.
 func TestIntegrationVerifyLiveSourceUnderWrites2150_mysql(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	base := testutil.SkipIfNoGTIDSource(t)
@@ -326,6 +329,7 @@ func TestIntegrationVerifyLiveSourceAnchorFallbacks2150(t *testing.T) {
 	testutil.InitIndexTables(t, u.indexDB)
 	cfg, stopCapture := u.setup(t, 0)
 	defer stopCapture()
+	cfg.PauseWrites = true // both cases are about the lock --pause-writes asks for
 	ctx := context.Background()
 
 	t.Run("no LOCK TABLES grant", func(t *testing.T) {
@@ -391,6 +395,7 @@ func TestIntegrationVerifyLiveSourceQuietAfterBaseline2150(t *testing.T) {
 	testutil.InitIndexTables(t, u.indexDB)
 	cfg, stopCapture := u.setup(t, 25)
 	defer stopCapture()
+	cfg.PauseWrites = true
 	res, err := verify.VerifyTable(context.Background(), cfg, u.sourceName, "t")
 	if err != nil {
 		t.Fatalf("VerifyTable: %v", err)
@@ -398,5 +403,45 @@ func TestIntegrationVerifyLiveSourceQuietAfterBaseline2150(t *testing.T) {
 	t.Logf("%s: anchor %.80s, detail %q", res.Status, res.Anchor, res.Detail)
 	if res.Status != verify.StatusMatch || res.Detail != "" {
 		t.Fatalf("status %s, detail %q; want a plain match on a quiet source", res.Status, res.Detail)
+	}
+}
+
+// TestIntegrationVerifyLiveSourceUnpausedByDefault2150: stock MySQL with
+// GTIDs on, writes during the whole check, and no PauseWrites (the default
+// everywhere, and the only mode of the web console). verify must not pause
+// the source's writes, so it cannot pin the position: every verdict carries
+// the note that the read was not cut and that the table must take no writes
+// during it. Under these writes today's time cut usually reports a MISMATCH
+// (writes after the snapshot are in the reconstruction); the note is what
+// tells that apart from a real divergence.
+func TestIntegrationVerifyLiveSourceUnpausedByDefault2150(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	base := testutil.SkipIfNoGTIDSource(t)
+	u := gtidSourceDB(t, base)
+	u.indexDB, u.indexName = testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, u.indexDB)
+	cfg, stopCapture := u.setup(t, 0)
+	defer stopCapture()
+	if cfg.PauseWrites {
+		t.Fatal("setup turned PauseWrites on; the default must be off")
+	}
+	var commits atomic.Int64
+	stopWriters := u.writers(t, &commits)
+	defer stopWriters()
+	for i := range underWritesChecks {
+		time.Sleep(300 * time.Millisecond)
+		before := commits.Load()
+		res, err := verify.VerifyTable(context.Background(), cfg, u.sourceName, "t")
+		if err != nil {
+			t.Fatalf("check %d: VerifyTable: %v", i+1, err)
+		}
+		t.Logf("check %d: %s with %d writes during it, detail %q", i+1, res.Status, commits.Load()-before, res.Detail)
+		if res.Status == verify.StatusInconclusive || res.Status == verify.StatusError {
+			t.Fatalf("check %d: %s (%s); want the comparison made, as before this change", i+1, res.Status, res.Detail)
+		}
+		if !strings.Contains(res.Detail, "not cut at the snapshot") || !strings.Contains(res.Detail, "takes no writes during the read") ||
+			!strings.Contains(res.Detail, "pause of writes") {
+			t.Fatalf("check %d: detail %q; want the note that the read was not cut because pausing writes was not asked for, and that the table must take no writes", i+1, res.Detail)
+		}
 	}
 }
