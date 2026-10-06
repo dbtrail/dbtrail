@@ -112,6 +112,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time by the copy (the same day), and a `DATETIME` turned into text
   (`CONCAT(dt, '')`) ends in `+00` there. A table whose snapshot has no
   `CREATE TABLE` was already answered by MySQL for every statement.
+- **Read routing: a column or an alias named like a type, and words the
+  copy keeps for itself, stay on MySQL** (#2131, #2158). Measured on MySQL
+  8.4.9 and MariaDB 11.4 against the copy; the list of words was also
+  checked on MySQL 8.0 and MariaDB 10.11, 11.8 and 12.3.
+  - **Wrong answer, fixed.** `SELECT text 'Label' FROM ...` is the column,
+    or the alias, called `text` under the name `Label` on MySQL (`body`),
+    and the constant `'Label'` of type `text` on the copy (`Label`). Both
+    answered. The same for `json'1'`, `datetime '2026-01-01'`, `uuid`,
+    `bool`, `string` and every other word the copy's engine has a type
+    for. Such a word right before a string, with a space, a comment or
+    nothing between them, now keeps the statement on MySQL (`veto`),
+    whether it names a table's column or an alias given in the statement.
+    The quoted spelling (`` `text` 'Label' ``) was kept back already. `DATE
+    '...'`, `TIME '...'`, `TIMESTAMP '...'` and `INTERVAL '...'` still
+    reach the copy: MySQL reads them as the copy does, also over a table
+    with a column called `date`.
+  - **Wrong answer, found while measuring, fixed.** `FROM a full JOIN b
+    USING (id)` is the table `a` under the alias `full`, joined, on MySQL
+    (1 row in the measurement) and a `FULL OUTER JOIN` on the copy (3
+    rows); the same shape with `anti`, `asof` and `positional` differed
+    too, and `semi` does on other data. `SELECT v isnull FROM t` is `v`
+    under the alias `isnull` on MySQL and the test `v IS NULL` on the copy.
+    Both answered. They stay on MySQL now (`veto`).
+  - **Wasted attempt, removed.** A column called `at` is an ordinary name
+    on MySQL and MariaDB and a keyword on the copy, so `WHERE at >= ...`
+    was tried on the copy, refused there with a syntax error, and answered
+    by MySQL afterwards, on every such statement, counted as
+    `copy_refused`. 44 words are like that (`at`, `end`, `offset`, `full`,
+    `any`, `some`, `cast`, `do`, `only`, `array`, ...): the words the
+    copy's engine cannot read as a bare name, less the ones MySQL and
+    MariaDB reserve too. One written as a name without quotes now keeps
+    the statement on MySQL without trying the copy (`veto`). Quoted, after
+    a dot (`ev.at`) or as a column alias right after `AS`, the copy reads
+    it and still answers; so it does where the word is MySQL's keyword too
+    (`CAST(`, `= ANY (`, the `END` of a `CASE`, `LIMIT 20 OFFSET 40`, `ROWS
+    ONLY`, `WINDOW w AS (...)`).
+  - **Wasted attempt, removed.** `SELECT status 'Label' FROM orders`, any
+    column's name right before a string, is the column under an alias on
+    MySQL and a constant of a type the copy does not have. The copy now
+    declines it from the table's column names without running it
+    (`copy_columns_differ`), so it is not counted as a fault of the copy.
+
+  Two tests keep the lists current: one asks the linked engine for its
+  types and keywords and fails when either list here differs, and the
+  routed fixture asks the real MySQL and MariaDB of every CI job which of
+  the engine's words they take as a column name and fails on one that is
+  not listed.
+
+  What this costs: of 2,230 `SELECT` and `WITH` strings in the repository's
+  tests, 1,496 were kept on MySQL by no older rule, and these rules newly
+  keep 3 that are SQL. None is a statement MySQL runs and the copy
+  answered: two name a column or an alias called `offset` or `only` bare,
+  which the copy refuses, and one is written for the copy's engine
+  (`TIMESTAMPTZ '...'`), which MySQL refuses. Known to stay on MySQL
+  although the copy might have answered: `AT TIME ZONE`. An alias named
+  with one of the 44 words and used later (`SELECT made AS at ... ORDER BY
+  at`) stays on MySQL too, which is right: the copy would refuse it.
 ### Fixed
 - **Snapshots: a row keeps its last change, not the change whose statement
   started last** (#2151). An update of a snapshot keeps, for each row, the

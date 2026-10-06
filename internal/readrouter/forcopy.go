@@ -178,6 +178,17 @@ func scan(stmt string) scanned {
 				// the copy (#2081).
 				refuse(vetoNameString)
 			}
+			if lastWord != "" && copyTypeWords[strings.ToLower(strings.TrimFunc(lastWord, notASCII))] {
+				// text 'Label' is the column, or the alias, called text
+				// under the name Label on MySQL, and the constant 'Label' of
+				// type text on the copy (#2131). The quoted spelling is the
+				// case above. lastWord is the word right before the string
+				// here: a quoted name between them was refused just above,
+				// and a string between them was refused when it started.
+				// Characters outside ASCII around the word are left out of
+				// it: the copy takes a no-break space for white space.
+				refuse(vetoTypeString)
+			}
 			afterName, prefixAfterName = false, false
 			amountOfInterval := strings.EqualFold(lastWord, "interval")
 			if c == '"' {
@@ -346,6 +357,9 @@ func TwoDigitYear(s string) bool {
 	}
 	return i > 3 && i+1 < len(s) && sep(s[i]) && asciiDigit(s[i+1])
 }
+
+// notASCII reports whether r is a character outside ASCII.
+func notASCII(r rune) bool { return r >= 0x80 }
 
 // wordByte reports whether c can be part of an unquoted word: a letter, a
 // digit, an underscore, a dollar sign or a byte of a multi-byte character.

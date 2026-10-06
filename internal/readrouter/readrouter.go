@@ -249,6 +249,9 @@ func Veto(stmt string) string {
 	if why := shapeVeto(sc.blankedCopy); why != "" {
 		return why
 	}
+	if why := copyReservedVeto(sc.blankedCopy); why != "" {
+		return why
+	}
 	if sc.hash {
 		// MySQL reads `#` to the end of the line as a comment, which scan
 		// has removed as MySQL does; DuckDB reads `#2` as the second column

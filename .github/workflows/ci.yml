@@ -585,6 +585,8 @@ jobs:
             || { echo "FATAL: read-routing generated-column names test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationSQLCompareTemporalColumns ' /tmp/mysql-it.out \
             || { echo "FATAL: read-routing date-column arithmetic test did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationSQLCompareCopyWords ' /tmp/mysql-it.out \
+            || { echo "FATAL: read-routing copy-reserved words test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestStreamLoop_unmappableRowReachesThePersistedLedger ' /tmp/mysql-it.out || { echo "FATAL: unmappable-row skip ledger test did not run (false-green tripwire)" >&2; exit 1; }
 
       # The S3 tripwire, kept apart from the steps above so a store that did
@@ -777,6 +779,7 @@ jobs:
             TestIntegrationFlashbackRoutingLimitsMariaDBSource_2115 \
             TestIntegrationSQLCompareGeneratedNamesMariaDB \
             TestIntegrationSQLCompareTemporalColumnsMariaDB \
+            TestIntegrationSQLCompareCopyWordsMariaDB \
             TestIntegrationSQLCompareBacktickNamesMariaDB \
             TestTakeSnapshot_pkLessVersionedTableRefused_mariadb \
             TestIntegrationReplicaCheckMariaDB \
