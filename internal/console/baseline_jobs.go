@@ -50,7 +50,13 @@ func (h *BaselineRunHistory) BeginJob(j BaselineJob) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.jobs[j.RunID] = cloneJob(j)
-	return h.save()
+	if err := h.save(); err != nil {
+		// Not on disk, so not in memory either: a later save must not
+		// write out an entry the caller was told failed.
+		delete(h.jobs, j.RunID)
+		return err
+	}
+	return nil
 }
 
 // JobCreated adds a directory to a journaled job. A run id the journal does
@@ -63,9 +69,14 @@ func (h *BaselineRunHistory) JobCreated(runID string, d BaselineJobDir) error {
 	if !ok {
 		return nil
 	}
+	prev := j
 	j.Dirs = append(slices.Clone(j.Dirs), d)
 	h.jobs[runID] = j
-	return h.save()
+	if err := h.save(); err != nil {
+		h.jobs[runID] = prev
+		return err
+	}
+	return nil
 }
 
 // FinishJob appends a finished run's record and marks its job recorded, in
@@ -86,15 +97,29 @@ func (h *BaselineRunHistory) FinishJob(runID string, rec BaselineRunRecord) erro
 func (h *BaselineRunHistory) DropJob(runID string, rec *BaselineRunRecord) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	_, ok := h.jobs[runID]
+	prev, ok := h.jobs[runID]
 	if !ok && rec == nil {
 		return nil
 	}
 	delete(h.jobs, runID)
+	var prevRecs []BaselineRunRecord
 	if rec != nil {
-		h.servers[rec.ServerID] = capRecords(append(h.servers[rec.ServerID], *rec))
+		prevRecs = h.servers[rec.ServerID]
+		h.servers[rec.ServerID] = capRecords(append(slices.Clone(prevRecs), *rec))
 	}
-	return h.save()
+	if err := h.save(); err != nil {
+		// Rolled back, so a later save cannot drop the entry (or write the
+		// record) that the caller was told did not reach the disk: the caller
+		// keeps the lock file on that promise.
+		if ok {
+			h.jobs[runID] = prev
+		}
+		if rec != nil {
+			h.servers[rec.ServerID] = prevRecs
+		}
+		return err
+	}
+	return nil
 }
 
 // Jobs returns a copy of the journal, oldest start first.

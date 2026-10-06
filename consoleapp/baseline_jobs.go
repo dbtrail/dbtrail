@@ -55,7 +55,7 @@ import (
 // Absolute, because the journal stores the lock paths and a later process
 // must find them whatever its working directory.
 func baselineJobsDir(historyPath string) string {
-	dir := filepath.Join(filepath.Dir(historyPath), "baseline-jobs")
+	dir := filepath.Join(filepath.Dir(historyPath), "snapshot-jobs")
 	if abs, err := filepath.Abs(dir); err == nil {
 		return abs
 	}
@@ -85,7 +85,7 @@ func (s *baselineSupervisor) beginJob(kind, serverID, serverName, trigger, why s
 	}
 	f, err := createJobLock(s.jobsDir)
 	if err != nil {
-		slog.Warn("baseline: could not create this job's lock file, so if the process is killed during it, what it leaves on disk "+
+		slog.Warn("snapshot jobs: could not create this job's lock file, so if the process is killed during it, what it leaves on disk "+
 			"will not be cleaned up at the next start", "server", serverName, "kind", kind, "dir", s.jobsDir, "error", err)
 		return nil
 	}
@@ -95,7 +95,7 @@ func (s *baselineSupervisor) beginJob(kind, serverID, serverName, trigger, why s
 		Kind: kind, Trigger: trigger, Why: why, StartedAt: started.UTC().Format(time.RFC3339),
 	})
 	if err != nil {
-		slog.Warn("baseline: could not journal this job, so if the process is killed during it, what it leaves on disk "+
+		slog.Warn("snapshot jobs: could not journal this job, so if the process is killed during it, what it leaves on disk "+
 			"will not be cleaned up at the next start", "server", serverName, "kind", kind, "error", err)
 		os.Remove(j.lockPath)
 		f.Close()
@@ -118,12 +118,12 @@ func (j *jobRun) Created(root, name string) {
 	if err != nil {
 		// The root does not resolve, so a later reclaim could not compare
 		// it, and would refuse it. Not journaled.
-		slog.Warn("baseline: could not resolve a job directory's parent; it will not be cleaned up if the process is killed",
+		slog.Warn("snapshot jobs: could not resolve a job directory's parent; it will not be cleaned up if the process is killed",
 			"root", root, "name", name, "error", err)
 		return
 	}
 	if err := j.history.JobCreated(j.runID, console.BaselineJobDir{Root: root, ResolvedRoot: resolved, Name: name}); err != nil {
-		slog.Warn("baseline: could not journal a job directory; it will not be cleaned up if the process is killed",
+		slog.Warn("snapshot jobs: could not journal a job directory; it will not be cleaned up if the process is killed",
 			"dir", filepath.Join(root, name), "error", err)
 	}
 }
@@ -147,7 +147,7 @@ func (j *jobRun) release() {
 		// start then finds the lock free, takes the job for dead, and cleans
 		// up what it listed, which by now is only what this job did not
 		// remove itself. Its record, if it wrote one, is not written again.
-		slog.Warn("baseline: could not remove a finished job from the journal; the next start cleans up after it",
+		slog.Warn("snapshot jobs: could not remove a finished job from the journal; the next start cleans up after it",
 			"run", j.runID, "error", err)
 		j.lock.Close()
 		return
@@ -183,16 +183,24 @@ func (s *baselineSupervisor) reclaimInterruptedJobs() {
 }
 
 func (s *baselineSupervisor) reclaimJob(j console.BaselineJob) {
+	// The lock path is journal data like the folders: only a lock file this
+	// daemon creates, in its own jobs folder, for this very run, is ever
+	// opened, locked or removed.
+	if filepath.Dir(j.LockPath) != s.jobsDir || filepath.Base(j.LockPath) != j.RunID+".lock" || !strings.HasPrefix(j.RunID, "run-") {
+		slog.Warn("snapshot jobs: a journaled job names a lock file DBTrail does not create; it is left alone, with what it lists",
+			"server", j.ServerName, "kind", j.Kind, "lock", j.LockPath)
+		return
+	}
 	lock, state, err := tryJobLock(j.LockPath)
 	if err != nil {
-		slog.Warn("baseline: could not check whether an earlier snapshot job is still running; what it created is kept",
+		slog.Warn("snapshot jobs: could not check whether an earlier snapshot job is still running; what it created is kept",
 			"server", j.ServerName, "kind", j.Kind, "lock", j.LockPath, "error", err)
 		return
 	}
 	switch state {
 	case jobLockHeld:
 		// Running, here or in another process. Not ours to touch.
-		slog.Info("baseline: a snapshot job journaled by another process is still running; leaving it alone",
+		slog.Info("snapshot jobs: a snapshot job journaled by another process is still running; leaving it alone",
 			"server", j.ServerName, "kind", j.Kind, "started", j.StartedAt)
 		return
 	case jobLockMissing:
@@ -205,13 +213,13 @@ func (s *baselineSupervisor) reclaimJob(j console.BaselineJob) {
 			}
 		}
 		if len(left) > 0 {
-			slog.Warn("baseline: an earlier snapshot job's lock file is missing, so whether it is still running cannot be "+
+			slog.Warn("snapshot jobs: an earlier snapshot job's lock file is missing, so whether it is still running cannot be "+
 				"proven; what it created is kept. If no other DBTrail process uses this state directory, delete these by hand",
 				"server", j.ServerName, "kind", j.Kind, "started", j.StartedAt, "dirs", left)
 			return
 		}
 		if err := s.history.DropJob(j.RunID, nil); err != nil {
-			slog.Warn("baseline: could not drop a finished job from the journal", "run", j.RunID, "error", err)
+			slog.Warn("snapshot jobs: could not drop a finished job from the journal", "run", j.RunID, "error", err)
 		}
 		return
 	}
@@ -220,6 +228,18 @@ func (s *baselineSupervisor) reclaimJob(j console.BaselineJob) {
 	var removed, kept []string
 	var published string
 	var errs []error
+	// A discard whose delete failed part way leaves a ".<ts>.discarding"
+	// folder; the refresh loop sweeps those each cycle, but a server with
+	// full reads only has no refresh, so sweep the snapshot roots here too.
+	// FIRST: a leftover under the very name a discard below renames to would
+	// make that rename fail.
+	for _, d := range j.Dirs {
+		if _, isSnap := snapshotdir.ParseTime(d.Name); isSnap && filepath.IsAbs(d.Root) {
+			if _, serr := reconstruct.SweepDiscardedSnapshots(d.Root); serr != nil {
+				errs = append(errs, serr)
+			}
+		}
+	}
 	last := fileMTime(j.LockPath)
 	for _, d := range j.Dirs {
 		p := filepath.Join(d.Root, d.Name)
@@ -243,7 +263,7 @@ func (s *baselineSupervisor) reclaimJob(j console.BaselineJob) {
 	if len(errs) > 0 {
 		// Tried and could not: keep the entry and the lock file, so the next
 		// start tries again, and say so at Error, because disk is leaking.
-		slog.Error("baseline: could not remove what a snapshot job left when its process was killed; the next start tries again",
+		slog.Error("snapshot jobs: could not remove what a snapshot job left when its process was killed; the next start tries again",
 			"server", j.ServerName, "kind", j.Kind, "started", j.StartedAt, "error", errors.Join(errs...))
 		return
 	}
@@ -252,7 +272,7 @@ func (s *baselineSupervisor) reclaimJob(j console.BaselineJob) {
 		rec = interruptedRunRecord(j, published, last)
 	}
 	if err := s.history.DropJob(j.RunID, rec); err != nil {
-		slog.Warn("baseline: removed what a killed snapshot job left, but could not update the run history; the next start records it",
+		slog.Warn("snapshot jobs: removed what a killed snapshot job left, but could not update the run history; the next start records it",
 			"server", j.ServerName, "kind", j.Kind, "error", err)
 		return
 	}
@@ -261,14 +281,14 @@ func (s *baselineSupervisor) reclaimJob(j console.BaselineJob) {
 		return
 	}
 	if j.Recorded {
-		slog.Warn("baseline: a snapshot job had finished and recorded its run, but the previous DBTrail process stopped "+
+		slog.Warn("snapshot jobs: a snapshot job had finished and recorded its run, but the previous DBTrail process stopped "+
 			"before it removed its temporary files; removed them",
 			"server", j.ServerName, "id", j.ServerID, "kind", j.Kind, "started", j.StartedAt,
 			"removed", removed, "kept", kept)
 		return
 	}
 	// One line per killed job: the whole report of what happened to it.
-	slog.Warn("baseline: a snapshot job was still running when the previous DBTrail process stopped (killed, out of memory, or "+
+	slog.Warn("snapshot jobs: a snapshot job was still running when the previous DBTrail process stopped (killed, out of memory, or "+
 		"restarted); removed what it left on disk and recorded the run as interrupted",
 		"server", j.ServerName, "id", j.ServerID, "kind", j.Kind, "started", j.StartedAt,
 		"removed", removed, "kept", kept)
@@ -305,11 +325,11 @@ func isStagingName(name string) bool {
 func reclaimJobDir(d console.BaselineJobDir) jobDirResult {
 	name := d.Name
 	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) || filepath.Base(name) != name {
-		return jobDirResult{keptBecause: "not a directory name this daemon creates"}
+		return jobDirResult{keptBecause: "not a directory name DBTrail creates"}
 	}
 	_, isSnapshot := snapshotdir.ParseTime(name)
 	if !isSnapshot && !isStagingName(name) {
-		return jobDirResult{keptBecause: "not a directory name this daemon creates"}
+		return jobDirResult{keptBecause: "not a directory name DBTrail creates"}
 	}
 	if !filepath.IsAbs(d.Root) {
 		return jobDirResult{keptBecause: "its parent is not an absolute path"}

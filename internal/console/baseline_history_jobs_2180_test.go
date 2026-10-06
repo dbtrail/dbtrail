@@ -108,3 +108,31 @@ func TestBaselineJobs_oldFileLoads(t *testing.T) {
 		t.Fatalf("old file: jobs=%v records=%v", h.Jobs(), h.List("s"))
 	}
 }
+
+// A journal change whose save fails is rolled back in memory, so a later
+// successful save cannot quietly write what the caller was told failed.
+func TestBaselineJobs_failedSaveRollsBack(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := t.TempDir()
+	h, _ := OpenBaselineHistory(filepath.Join(dir, "h.json"))
+	_ = h.BeginJob(BaselineJob{RunID: "keep", LockPath: "/l", ServerID: "s", Kind: BaselineRunDump})
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	if err := h.DropJob("keep", &BaselineRunRecord{ServerID: "s", Kind: BaselineRunDump}); err == nil {
+		t.Fatal("save into a read-only directory succeeded; the case is not exercising a failure")
+	}
+	if err := h.BeginJob(BaselineJob{RunID: "ghost", LockPath: "/g", ServerID: "s"}); err == nil {
+		t.Fatal("BeginJob save succeeded unexpectedly")
+	}
+	if err := h.JobCreated("keep", BaselineJobDir{Root: "/r", Name: "dump-1"}); err == nil {
+		t.Fatal("JobCreated save succeeded unexpectedly")
+	}
+	jobs := h.Jobs()
+	if len(jobs) != 1 || jobs[0].RunID != "keep" || len(jobs[0].Dirs) != 0 || len(h.List("s")) != 0 {
+		t.Fatalf("after failed saves: jobs=%+v records=%v, want only the original entry", jobs, h.List("s"))
+	}
+}

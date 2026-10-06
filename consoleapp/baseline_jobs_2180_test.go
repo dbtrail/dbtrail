@@ -627,3 +627,50 @@ func TestTryJobLock_aLockOnARemovedFileProvesNothing(t *testing.T) {
 		}
 	}
 }
+
+// The lock path is journal data too: an entry whose lock file is not one
+// this daemon creates in its own jobs folder is never opened, locked or
+// removed, and nothing it lists is touched.
+func TestReclaim_refusesALockPathOutsideTheJobsFolder(t *testing.T) {
+	f := newJobsFixture(t)
+	sup := f.supervisor(t)
+	dump := filepath.Join(f.staging, "dump-1")
+	mkdirs(t, dump)
+	resolved, _ := filepath.EvalSymlinks(f.staging)
+	foreign := filepath.Join(t.TempDir(), "run-1.lock")
+	writeFile(t, foreign)
+	misnamed := filepath.Join(sup.jobsDir, "precious.txt")
+	mkdirs(t, sup.jobsDir)
+	writeFile(t, misnamed)
+	for i, lp := range []string{foreign, misnamed, filepath.Join(sup.jobsDir, "run-2.lock")} {
+		id := []string{"run-1", "precious", "run-9"}[i] // the third names another run's lock
+		writeFile(t, lp)
+		if err := sup.history.BeginJob(console.BaselineJob{RunID: id, LockPath: lp, ServerID: "s1", Kind: console.BaselineRunDump,
+			Dirs: []console.BaselineJobDir{{Root: f.staging, ResolvedRoot: resolved, Name: "dump-1"}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	boot := f.supervisor(t)
+	boot.reclaimInterruptedJobs()
+	if !exists(dump) || !exists(foreign) || !exists(misnamed) {
+		t.Fatal("an entry with a lock path this daemon did not create was acted on")
+	}
+	if len(boot.history.List("s1")) != 0 {
+		t.Fatal("an entry with a foreign lock path was recorded")
+	}
+}
+
+// A discard that was interrupted part way leaves a ".<ts>.discarding"
+// folder. On a server with full reads only no refresh cycle ever sweeps it,
+// so the reclaim sweeps the snapshot roots it works in.
+func TestReclaim_sweepsInterruptedDiscards(t *testing.T) {
+	f := newJobsFixture(t)
+	snap := stageKilledRefresh(t, f)
+	left := filepath.Join(f.snaps, "."+killedTS+".discarding")
+	mkdirs(t, filepath.Join(left, "shop"))
+	boot := f.supervisor(t)
+	boot.reclaimInterruptedJobs()
+	if exists(snap) || exists(left) {
+		t.Fatalf("snapshot kept=%v, discarding leftover kept=%v", exists(snap), exists(left))
+	}
+}
