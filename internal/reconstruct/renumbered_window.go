@@ -314,3 +314,37 @@ func parseUnixSeconds(s string) (time.Time, error) {
 	}
 	return time.Unix(sec, 0).UTC(), nil
 }
+
+// liveHoldsRead reports whether binlog_events (dbName) still holds every
+// change the read described by opts can see: its oldest partition starts at
+// or before the read's floor (query.PositionReadFloor), so rotation, which
+// drops the oldest hours, has taken nothing the read reaches. An
+// unpartitioned table, or one with only the p_future catch-all, never
+// rotated. A partition name this build cannot place, or no database name:
+// false, the answer that keeps the whole-index check.
+func liveHoldsRead(ctx context.Context, db *sql.DB, dbName string, opts query.Options) (bool, error) {
+	if dbName == "" {
+		return false, nil
+	}
+	floor, err := query.PositionReadFloor(ctx, db, opts)
+	if err != nil {
+		return false, fmt.Errorf("find how far back the read of %s.%s reaches: %w", opts.Schema, opts.Table, err)
+	}
+	var name string
+	err = db.QueryRowContext(ctx, `SELECT PARTITION_NAME FROM information_schema.PARTITIONS
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'binlog_events' AND PARTITION_NAME IS NOT NULL
+		ORDER BY PARTITION_ORDINAL_POSITION LIMIT 1`, dbName).Scan(&name)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return true, nil
+	case err != nil:
+		return false, fmt.Errorf("read binlog_events' oldest partition: %w", err)
+	case name == "p_future":
+		return true, nil
+	}
+	oldest, ok := query.ParsePartitionName(name)
+	if !ok || floor.IsZero() {
+		return false, nil
+	}
+	return !floor.Before(oldest), nil
+}

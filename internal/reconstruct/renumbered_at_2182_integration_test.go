@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -222,6 +223,42 @@ func TestReconstructAt_aMarkWithoutAServerKeepsTodaysCheck_2182(t *testing.T) {
 	insertEventAt(t, r.db, r.schema, "orders", "binlog.000007", 15, 300, T.Add(10*time.Minute), "2", `{"id":2,"status":"X"}`)
 	testutil.MustExec(t, r.db, serverChangeSQL, "server_uuid", uuidA, uuidB, T.Add(50*time.Minute).Unix())
 	if _, err := r.explicitAt(t, T.Add(40*time.Minute), true); !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+		t.Fatalf("err = %v, want ErrBinlogRenumbered", err)
+	}
+}
+
+// Rotation took the hours the read reaches back to out of binlog_events
+// (into Parquet archives, or nowhere): the bounded check reads only the live
+// table and would look at nothing there, while the read takes those hours
+// from the archives with the same position filter and drops a new-numbering
+// change in them. So the check keeps its whole-index form, which still
+// refuses here.
+func TestReconstructAt_aRotatedWindowKeepsTodaysCheck_2182(t *testing.T) {
+	r, T := renumberRig(t, false, false)
+	insertEventAt(t, r.db, r.schema, "orders", "binlog.000007", 15, 300, T.Add(10*time.Minute), "2", `{"id":2,"status":"X"}`)
+	insertEventAt(t, r.db, r.schema, "orders", "binlog.000001", 20, 300, T.Add(20*time.Minute), "1", `{"id":1,"status":"B"}`)
+	// The read from the snapshot (T) reaches back to the hour before T's.
+	rows, err := r.db.Query(`SELECT PARTITION_NAME FROM information_schema.PARTITIONS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'binlog_events' AND PARTITION_NAME IS NOT NULL`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var drop []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		if h, ok := indexer.PartitionDate(name); ok && h.Before(T.Truncate(time.Hour)) {
+			drop = append(drop, name)
+		}
+	}
+	rows.Close()
+	if len(drop) == 0 {
+		t.Fatal("no partition before the snapshot's hour to drop")
+	}
+	testutil.MustExec(t, r.db, "ALTER TABLE binlog_events DROP PARTITION "+strings.Join(drop, ", "))
+	if _, err := r.explicitAt(t, T.Add(15*time.Minute), true); !errors.Is(err, reconstruct.ErrBinlogRenumbered) {
 		t.Fatalf("err = %v, want ErrBinlogRenumbered", err)
 	}
 }

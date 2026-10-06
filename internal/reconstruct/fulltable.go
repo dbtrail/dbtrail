@@ -1366,6 +1366,17 @@ func ReconstructTable(
 	// of the first change past At, and after a restart past At that position
 	// is in the new numbering, where it sorts before changes the read needs.
 	boundedAt := cfg.ExplicitAt && cfg.OutputFormat != OutputFormatParquet
+	if boundedAt {
+		// The bounded form reads only the live binlog_events; once rotation
+		// took part of the read's reach out of it (into the archives, which
+		// the read takes with the same position filter), it would look at
+		// nothing there. The whole-index form then stays.
+		live, err := liveHoldsRead(ctx, db, dbName, query.Options{Schema: schema, Table: table, Since: &fetchSince, SincePos: AnchorOf(anchorMeta)})
+		if err != nil {
+			return nil, err
+		}
+		boundedAt = live
+	}
 	var readWin ReadWindow
 	if boundedAt {
 		readWin = ReadWindow{Schema: schema, Table: table, Since: fetchSince, Until: cfg.At}
@@ -1388,6 +1399,11 @@ func ReconstructTable(
 	// names no server says nothing about which server the position belongs
 	// to, so it keeps the whole-index form, as verify and _snapshot keep the
 	// no-mark behavior (#2174).
+	// The record's time is when capture noticed the new server, which can be
+	// after the switch: changes the new server made before At and before that
+	// record are still read, and the position checks above see them when the
+	// new server's files sort below the mark; when they sort above it, the
+	// read by position includes them.
 	if anchorMeta.Producer == baseline.ProducerReconstruct {
 		until := time.Time{}
 		if m := ParseEventMark(anchorMeta.EventMark); boundedAt && m != nil && m.ServerUUID != "" {
