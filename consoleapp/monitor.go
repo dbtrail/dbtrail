@@ -8,7 +8,9 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"regexp"
+	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
@@ -92,9 +94,10 @@ var (
 	monitorBackoffCap   = 5 * time.Minute
 	monitorHealthyReset = 10 * time.Minute
 	// monitorReloadDrainTimeout: how long ReloadSchema waits for a cancelled
-	// stream to release its advisory lock before giving up. Start's GET_LOCK
-	// has a ZERO timeout, so relaunching early fails outright instead of
-	// queueing — waiting is the only way to hand the lock over.
+	// stream to release its capture lock before giving up. Relaunching early
+	// would not fail (Start waits for a held lock, #2105), but the new job
+	// would show "waiting for another DBTrail process" for a lock this same
+	// process holds.
 	monitorReloadDrainTimeout = 15 * time.Second
 )
 
@@ -105,14 +108,18 @@ type monitorJob struct {
 	// indexDSN is the entry's per-source index database — set once at job
 	// creation (before the job is published), immutable after. Stop uses it
 	// to clear the durable gap-loss record with its own short-lived
-	// connection (lockDB belongs to the run goroutine; sharing it from Stop
-	// would race Start's provisioning window).
+	// connection (the capture lock belongs to the run goroutine; sharing it
+	// from Stop would race Start's provisioning window).
 	indexDSN string
-	// lockDB's single dedicated connection holds the advisory lock for this
-	// entry; closing it releases the lock. Written by Start before the run
-	// goroutine launches and read only by run's teardown — never from other
-	// goroutines.
-	lockDB *sql.DB
+	// lock is this entry's capture lock (captureLock); releasing it lets
+	// another process capture the entry. Written by Start (or by the
+	// goroutine that waited for the lock) before the run goroutine launches,
+	// and read only by run — never from other goroutines.
+	lock *captureLock
+	// waitingLock: the job is in Start's background wait for the capture
+	// lock (a phase or an index error on screen), so this process streams
+	// nothing for it yet.
+	waitingLock atomic.Bool
 
 	mu      sync.Mutex
 	state   string // stored: pending|running|failed|stopped
@@ -458,6 +465,20 @@ func tallyCheck(out *console.DoctorReport, status string) {
 // lock, and launch the supervised stream on the daemon's lifecycle.
 // Idempotent for an entry that is already running or starting.
 func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) error {
+	return m.start(ctx, e, nil, nil)
+}
+
+// errNotCurrent: start was asked to replace a job that is no longer the
+// entry's (an operator's Stop or Start got there first).
+var errNotCurrent = errors.New("the job to replace is no longer this server's")
+
+// start is Start, with one more condition when expect is not nil: the entry's
+// job must still be expect when the slot is reserved, checked under the same
+// lock that reserves it. A restart decided in the background (lockLost) uses
+// it so it can never undo an operator's Stop that landed in between. When
+// reserved is not nil it receives the job this call reserved, so a caller can
+// mark that one and never a job an operator started a moment later.
+func (m *monitorSupervisor) start(ctx context.Context, e console.ServerEntry, expect *monitorJob, reserved **monitorJob) error {
 	if e.SourceDSN == "" {
 		return errors.New("entry has no source configured")
 	}
@@ -466,11 +487,16 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 	}
 
 	m.mu.Lock()
+	if expect != nil && m.jobs[e.ID] != expect {
+		m.mu.Unlock()
+		return errNotCurrent
+	}
 	if j, ok := m.jobs[e.ID]; ok {
 		// Gate on the STORED state, not the derived presentation: stalled
 		// and lost_position are running variants (the goroutine still holds
-		// the advisory lock; superseding it would deadlock on our own lock —
-		// restart a stalled stream via Stop+Start), and checking the stored
+		// the capture lock; superseding it would leave the new job waiting on
+		// this process's own lock — restart a stalled stream via Stop+Start),
+		// and checking the stored
 		// machine means new derived states can never fall through to the
 		// cancel below by omission.
 		switch j.storedState() {
@@ -487,6 +513,9 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 	job.set("pending", "")
 	m.jobs[e.ID] = job
 	m.mu.Unlock()
+	if reserved != nil {
+		*reserved = job
+	}
 
 	fail := func(err error) error {
 		scrubbed := config.ScrubDSNError(err, e.SourceDSN, e.DSN)
@@ -519,6 +548,9 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 	defer func() {
 		if r := recover(); r != nil {
 			if !launched {
+				if job.lock != nil {
+					job.lock.Release() // taken by launch before the panic
+				}
 				_ = fail(fmt.Errorf("internal error: %v", r))
 			}
 			panic(r)
@@ -578,82 +610,157 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 	}
 	idxDB.Close()
 
-	// ── Advisory lock: refuse to double-stream one entry ─────────────────
-	// GET_LOCK is held by a dedicated connection on the index server; a
-	// second daemon pointed at the same registry fails here with a clear
-	// message instead of double-indexing the source. Closing lockDB (job
-	// teardown) releases it.
-	lockDB, err := config.Connect(e.DSN)
-	if err != nil {
-		return fail(fmt.Errorf("connect for advisory lock: %w", err))
-	}
-	lockDB.SetMaxOpenConns(1)
-	lockDB.SetMaxIdleConns(1)
-	lockDB.SetConnMaxIdleTime(0)
-	lockDB.SetConnMaxLifetime(0)
-	var got int
-	lockName := "bintrail_monitor_" + e.ID
-	if err := lockDB.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", lockName).Scan(&got); err != nil {
-		lockDB.Close()
-		return fail(fmt.Errorf("acquire advisory lock: %w", err))
-	}
-	if got != 1 {
-		lockDB.Close()
-		return fail(fmt.Errorf("another bintrail process is already monitoring this server (advisory lock %s is held)", lockName))
-	}
-	job.lockDB = lockDB
-
-	// ── Launch the supervised stream ─────────────────────────────────────
-	// One circuit-breaker loop (run) drives either engine; the flavor only
-	// selects which One is called with which config + liveness hooks.
-	flavor := e.SourceFlavor()
-	serverID, err := m.deriveSourceIdentity(e, flavor)
-	if err != nil {
-		lockDB.Close()
-		return fail(err)
-	}
-	var runOnce func(context.Context) error
-	// startJobs launches the extension source jobs (see below) with the
-	// flavor capture runs as.
-	startJobs := func(f string) {
-		ext.RunSourceJobs(jobCtx, entrySourceJobInfo(e, f))
-	}
-	switch flavor {
-	case console.FlavorPostgres:
-		pgcfg, cErr := sourcePGStreamConfig(e, serverID, upBatchSize)
-		if cErr != nil {
-			lockDB.Close()
-			return fail(cErr)
+	// ── Capture lock: one process captures an entry (#2105) ──────────────
+	// See captureLock. A second daemon pointed at the same registry, which is
+	// what a rolling deployment runs for a while, waits here instead of
+	// double-indexing the source, and starts on its own once the first one
+	// lets go.
+	lockName := monitorLockName(e.ID)
+	// runStarted: m.run owns the job (it closes done) once it is launched.
+	runStarted := false
+	launch := func(lock *captureLock) error {
+		job.lock = lock
+		// ── Launch the supervised stream ─────────────────────────────────────
+		// One circuit-breaker loop (run) drives either engine; the flavor only
+		// selects which One is called with which config + liveness hooks.
+		flavor := e.SourceFlavor()
+		serverID, err := m.deriveSourceIdentity(e, flavor)
+		if err != nil {
+			lock.Release()
+			return fail(err)
 		}
-		pgcfg.Hooks = job.pgStreamHooks()
-		runOnce = func(c context.Context) error { return m.pgStreamFn(c, pgcfg) }
-		startJobs(flavor)
-	default:
-		// The saved Source type of a MySQL-family entry is a hint: the stream
-		// asks the server and captures as what it reports, the jobs start from
-		// that, and a contradiction shows on the server's status as a warning.
-		cfg := sourceStreamConfig(e, serverID, upBatchSize)
-		cfg.Hooks = job.streamHooks()
-		cfg.Hooks.OnFlavorResolved = registryFlavorHook(job, e.Flavor, m.flavorCorrector(e.ID), startJobs)
-		runOnce = func(c context.Context) error { return explainRegistryFlavorError(m.streamFn(c, cfg)) }
+		var runOnce func(context.Context) error
+		// startJobs launches the extension source jobs (see below) with the
+		// flavor capture runs as.
+		startJobs := func(f string) {
+			ext.RunSourceJobs(jobCtx, entrySourceJobInfo(e, f))
+		}
+		switch flavor {
+		case console.FlavorPostgres:
+			pgcfg, cErr := sourcePGStreamConfig(e, serverID, upBatchSize)
+			if cErr != nil {
+				lock.Release()
+				return fail(cErr)
+			}
+			pgcfg.Hooks = job.pgStreamHooks()
+			runOnce = func(c context.Context) error { return m.pgStreamFn(c, pgcfg) }
+			startJobs(flavor)
+		default:
+			// The saved Source type of a MySQL-family entry is a hint: the stream
+			// asks the server and captures as what it reports, the jobs start from
+			// that, and a contradiction shows on the server's status as a warning.
+			cfg := sourceStreamConfig(e, serverID, upBatchSize)
+			cfg.Hooks = job.streamHooks()
+			cfg.Hooks.OnFlavorResolved = registryFlavorHook(job, e.Flavor, m.flavorCorrector(e.ID), startJobs)
+			runOnce = func(c context.Context) error { return explainRegistryFlavorError(m.streamFn(c, cfg)) }
+		}
+
+		// Extension source jobs (ext.RegisterSourceJob) run alongside the supervised
+		// stream, bound to jobCtx — the per-source lifecycle context, created once per
+		// (re)start and cancelled on Stop, daemon shutdown, OR the supervised stream's
+		// own terminal exit (crash-loop give-up / clean return — m.run defers
+		// job.cancel(), see run). Placing this here (after index-DB provisioning and
+		// the advisory lock, before the stream goroutine) ties one set of jobs to each
+		// monitored source's lifetime: not per stream-reconnect (m.run reuses jobCtx,
+		// so no per-retry goroutine leak), and only for a source this daemon actually
+		// streams (the advisory lock holder) — jobCtx dies with the lock, so a second
+		// daemon that re-acquires the freed lock never double-runs these jobs
+		// (after a lost lock they stop when run returns, within moments of the
+		// heartbeat noticing).
+		// No-op in the stock binary. The PostgreSQL branch above starts them
+		// directly; the MySQL-family branch starts them from the stream's
+		// OnFlavorResolved, still bound to jobCtx and still once per Start.
+
+		launched, runStarted = true, true
+		m.wg.Add(1)
+		go m.run(jobCtx, job, e, flavor, runOnce)
+		return nil
 	}
-
-	// Extension source jobs (ext.RegisterSourceJob) run alongside the supervised
-	// stream, bound to jobCtx — the per-source lifecycle context, created once per
-	// (re)start and cancelled on Stop, daemon shutdown, OR the supervised stream's
-	// own terminal exit (crash-loop give-up / clean return — m.run defers
-	// job.cancel(), see run). Placing this here (after index-DB provisioning and
-	// the advisory lock, before the stream goroutine) ties one set of jobs to each
-	// monitored source's lifetime: not per stream-reconnect (m.run reuses jobCtx,
-	// so no per-retry goroutine leak), and only for a source this daemon actually
-	// streams (the advisory lock holder) — jobCtx dies with the lock, so a second
-	// daemon that re-acquires the freed lock never double-runs these jobs.
-	// No-op in the stock binary. The PostgreSQL branch above starts them
-	// directly; the MySQL-family branch starts them from the stream's
-	// OnFlavorResolved, still bound to jobCtx and still once per Start.
-
+	// jobCtx, not the request's ctx: a browser closing mid-Connect must not
+	// show up as an index that did not answer.
+	lock, err := tryCaptureLock(jobCtx, e.DSN, lockName)
+	if lock != nil {
+		return launch(lock)
+	}
+	// Held by another process, or the index did not answer: wait. Both heal
+	// on their own, so neither may become a failure that waits for someone to
+	// press Start (#2105).
+	scrub := func(err error) string { return config.ScrubDSNError(err, e.SourceDSN, e.DSN) }
+	onBusy := func() {
+		job.set("pending", "")
+		job.setPhase(monitorPhaseLockWaiting)
+	}
+	var lastWarn time.Time
+	onErr := func(err error) {
+		job.fail("could not ask the index for the capture lock: "+scrub(err)+" (retrying)", "", true)
+		if time.Since(lastWarn) >= time.Minute {
+			lastWarn = time.Now()
+			slog.Warn("could not ask the index for the capture lock; asking again",
+				"server", e.Name, "entry", e.ID, "error", scrub(err))
+		}
+	}
+	if err != nil {
+		onErr(err)
+	} else {
+		onBusy()
+		slog.Warn("another DBTrail process holds this server's capture lock; this one waits and starts capturing when that one lets go",
+			"server", e.Name, "entry", e.ID, "lock", lockName)
+	}
+	// The waiter owns the job from here: it closes done on every path, so the
+	// provisioning panic guard above must not call fail on it again.
+	launched = true
+	job.waitingLock.Store(true)
 	m.wg.Add(1)
-	go m.run(jobCtx, job, e, flavor, runOnce)
+	go func() {
+		defer m.wg.Done()
+		// Nothing up the stack recovers this goroutine, and a panic here would
+		// end the whole daemon: capture for every server. Fail this job
+		// instead, loudly, as the baseline jobs do (#1472).
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("internal error while waiting to start capture", "server", e.Name, "entry", e.ID,
+					"panic", r, "stack", string(debug.Stack()))
+				if !runStarted {
+					if job.lock != nil {
+						job.lock.Release() // or it stays held, and every later start waits on it
+					}
+					job.set("failed", fmt.Sprintf("internal error: %v", r))
+					cancel()
+					close(job.done)
+				}
+			}
+		}()
+		stopped := func() {
+			// jobCtx ended: Stop, daemon shutdown, or a Start that superseded
+			// this job. Nothing was launched, so nothing else closes done.
+			job.set("stopped", "")
+			close(job.done)
+		}
+		lock, err := waitCaptureLock(jobCtx, e.DSN, lockName, onBusy, onErr)
+		if err != nil {
+			stopped()
+			return
+		}
+		// Held now: no longer "waiting for another DBTrail", nor an index
+		// error. Starting, from the screen's point of view.
+		job.set("pending", "")
+		// Taking a lock someone else held: that one may have LOST it rather
+		// than let go (a cut connection), and it keeps writing until its own
+		// heartbeat notices. Give it that long before writing beside it.
+		select {
+		case <-time.After(captureLockTakeoverDelay()):
+		case <-jobCtx.Done():
+			lock.Release()
+			stopped()
+			return
+		}
+		slog.Info("took the capture lock; starting capture", "server", e.Name, "entry", e.ID, "lock", lockName)
+		job.waitingLock.Store(false)
+		if err := launch(lock); err != nil {
+			// On the direct path the caller logs this; here nobody would.
+			slog.Error("could not start capture after taking the capture lock", "server", e.Name, "entry", e.ID, "error", err)
+		}
+	}()
 	return nil
 }
 
@@ -909,8 +1016,8 @@ func (m *monitorSupervisor) run(ctx context.Context, job *monitorJob, e console.
 	defer m.wg.Done()
 	defer close(job.done)
 	defer func() {
-		if job.lockDB != nil {
-			job.lockDB.Close() // releases the advisory lock
+		if job.lock != nil {
+			job.lock.Release()
 		}
 	}()
 	// Cancel jobCtx on every terminal return (give-up, clean exit, cancellation).
@@ -920,12 +1027,38 @@ func (m *monitorSupervisor) run(ctx context.Context, job *monitorJob, e console.
 	// for-loop below, so this never fires mid-retry.
 	defer job.cancel()
 
+	// lost closes when the heartbeat finds the capture lock gone. A job
+	// without a lock (unit tests drive run directly) never loses one: a nil
+	// channel never fires.
+	var lost <-chan struct{}
+	if job.lock != nil {
+		lost = job.lock.Lost()
+	}
 	var policy crashLoopPolicy
 	for {
 		job.set("pending", "")
 		started := time.Now()
-		err := runOnce(ctx)
-		if ctx.Err() != nil || err == nil {
+		// A run stops writing the moment the lock is lost (#2105): another
+		// process may hold it by now and be capturing the same source.
+		runCtx, cancelRun := context.WithCancelCause(ctx)
+		go func() {
+			select {
+			case <-lost:
+				cancelRun(streamrun.ErrStopWithoutFlush)
+			case <-runCtx.Done():
+			}
+		}()
+		err := runOnce(runCtx)
+		cancelRun(nil)
+		if ctx.Err() != nil {
+			job.set("stopped", "")
+			return
+		}
+		if chanClosed(lost) {
+			m.lockLost(job, e)
+			return
+		}
+		if err == nil {
 			job.set("stopped", "")
 			return
 		}
@@ -943,12 +1076,93 @@ func (m *monitorSupervisor) run(ctx context.Context, job *monitorJob, e console.
 		job.fail(scrubbed+" (retrying)", monitorErrorCode(err), true)
 		select {
 		case <-time.After(delay):
+		case <-lost:
+			m.lockLost(job, e)
+			return
 		case <-ctx.Done():
 			job.set("stopped", "")
 			return
 		}
 	}
 }
+
+// lockLost ends a job whose capture lock was lost and starts the entry again
+// once this job is gone. The new start waits for the lock like any other: if
+// another process took it, this one waits until that one stops; if nobody
+// did, it takes it back at once. Ending the job, not only the stream, also
+// stops the extension source jobs bound to it, so they never run beside the
+// process that holds the lock now.
+//
+// The commonest cause of a lost lock is the index being unreachable for a
+// while, and then the new start fails too (provisioning connects to it). So a
+// failed start is retried with the stream's own backoff for as long as that
+// failed job is still the entry's: an operator's Stop or Start ends the loop,
+// and the entry is read again from the registry each time, so a restart
+// never uses settings the operator has since changed or a server since
+// removed or stopped.
+//
+// Called from run, which still holds its own wg count, so the Add below can
+// never race Shutdown's Wait at zero.
+func (m *monitorSupervisor) lockLost(job *monitorJob, e console.ServerEntry) {
+	job.fail("this process lost its capture lock on the index, so it stopped writing; capture starts again once it holds the lock (retrying)", "", true)
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		<-job.done
+		expect, delay := job, lockLostBackoffBase
+		for m.baseCtx.Err() == nil {
+			cur := e
+			if m.registry != nil {
+				got, ok := m.registry.Get(e.ID)
+				if !ok || !got.MonitorDesired || got.SourceDSN == "" || got.DSN == "" {
+					return
+				}
+				cur = got
+			}
+			var reserved *monitorJob
+			err := m.start(m.baseCtx, cur, expect, &reserved)
+			if err == nil || errors.Is(err, errNotCurrent) || reserved == nil {
+				return
+			}
+			// The job this start reserved and failed; an operator's Start or
+			// Stop after it makes the next start refuse.
+			expect = reserved
+			expect.setRetrying(err.Error() + " (retrying)")
+			slog.Warn("could not start capture again after losing the capture lock; retrying",
+				"server", e.Name, "entry", e.ID, "delay", delay, "error", err)
+			select {
+			case <-time.After(delay):
+			case <-m.baseCtx.Done():
+				return
+			}
+			delay = min(delay*2, monitorBackoffCap)
+		}
+	}()
+}
+
+// lockLostBackoffBase is the first wait between restarts after a lost lock;
+// the stream's own base, a variable so a test can shorten it.
+var lockLostBackoffBase = monitorBackoffBase
+
+// chanClosed reports whether c is closed, without blocking. A nil channel is
+// never closed.
+func chanClosed(c <-chan struct{}) bool {
+	select {
+	case <-c:
+		return true
+	default:
+		return false
+	}
+}
+
+// monitorLockName is the capture lock of a registry entry. The name is the
+// one every release since the lock existed has used: an older daemon running
+// beside a newer one during an upgrade still sees the newer one's lock.
+func monitorLockName(entryID string) string { return "bintrail_monitor_" + entryID }
+
+// monitorPhaseLockWaiting is the phase of a pending job waiting for another
+// process to release the entry's capture lock.
+const monitorPhaseLockWaiting = "lock_waiting"
 
 // ReloadSchema restarts the supervised stream for one entry so it loads the
 // newest schema snapshot (#1296). A stream swaps its metadata resolver only on
@@ -971,6 +1185,13 @@ func (m *monitorSupervisor) run(ctx context.Context, job *monitorJob, e console.
 func (m *monitorSupervisor) ReloadSchema(ctx context.Context, e console.ServerEntry) (reloaded bool, err error) {
 	m.mu.Lock()
 	job, ok := m.jobs[e.ID]
+	// A job waiting for the capture lock streams nothing here: the process
+	// that holds the lock does (#2105). Restarting the waiter would report a
+	// reload of a stream that may still decode against the old snapshot.
+	if ok && job.waitingLock.Load() {
+		m.mu.Unlock()
+		return false, nil
+	}
 	if ok {
 		delete(m.jobs, e.ID)
 	}
@@ -992,10 +1213,10 @@ func (m *monitorSupervisor) ReloadSchema(ctx context.Context, e console.ServerEn
 	}
 	job.cancel()
 	// Wait for the run goroutine to finish before relaunching. Its outermost
-	// defer closes done AFTER closing lockDB, and Start takes the advisory lock
-	// with GET_LOCK(name, 0) — a zero timeout. Starting early would therefore
-	// not queue behind the dying stream, it would FAIL to get the lock and mark
-	// the new job terminally failed, with no retry loop to converge later.
+	// defer closes done AFTER releasing the capture lock. Starting early would
+	// find the lock still held by the dying stream, and the new job would wait
+	// for it (#2105) showing "waiting for another DBTrail process", which this
+	// process is not.
 	//
 	// The two non-success branches leave this entry's capture STOPPED: the job
 	// is already cancelled and unpublished, and nothing here restarts it. That
@@ -1032,7 +1253,7 @@ func (m *monitorSupervisor) Stop(ctx context.Context, entryID string) error {
 	if !ok {
 		return nil
 	}
-	// Clear with a short-lived connection of our own: lockDB belongs to the
+	// Clear with a short-lived connection of our own: the lock belongs to the
 	// run goroutine (reading it here would race Start's provisioning window,
 	// and it is already closed when the stream gave up or exited). On
 	// failure the record survives — the next Start re-raises lost_position,

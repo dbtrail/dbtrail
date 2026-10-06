@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **Two DBTrail processes no longer capture the same server at once, and the
+  second one takes over on its own** (#2105). Servers added from the web
+  interface carry a lock on the index, so a second `bintrail-console watch`
+  on the same registry does not insert every change a second time. Two
+  things defeated it, both measured:
+  - The lock lived on an idle connection, and MySQL ends a session idle past
+    `wait_timeout` (8 hours by default) and frees its locks with it. Past
+    that, a second daemon took the lock while the first still captured, and
+    both inserted every change (2,373 duplicate events in 20 seconds with
+    `wait_timeout` lowered to 20). The lock is now held on one dedicated
+    connection whose `wait_timeout` is raised, and checked every 5 seconds;
+    a process that finds it gone stops writing and waits to take it back.
+  - A second daemon that found the lock taken marked the server `failed`
+    and never tried again, so when the first one stopped, nobody captured
+    until someone pressed Start. A rolling deployment (ECS, Kubernetes'
+    default) is exactly that sequence. The second daemon now waits, shown as
+    **WAITING FOR OTHER DBTRAIL**, and starts capturing from the first one's
+    checkpoint about 20 seconds after it stops: measured with a source
+    under load, every row once, no gap.
+  A process that loses the lock stops without writing the batch it holds or
+  its position; whoever captures next reads those changes again. A process
+  that took the lock after waiting for it waits 11 more seconds before
+  writing, in case the previous holder lost it without knowing yet. A batch
+  already on its way to the index when the lock went can still commit, so a
+  cut connection can still leave a few rows twice. The source given at
+  startup (`--source-dsn`) takes no lock yet.
+  **Upgrading:** a daemon from before this change does not keep its lock, so
+  stop it before starting the new one, once. **Rows already indexed twice**
+  stay: to see whether a server has any, run on its index database
+  `SELECT COUNT(*) FROM (SELECT 1 FROM binlog_events GROUP BY binlog_file,
+  start_pos, schema_name, table_name, pk_values, event_type HAVING COUNT(*)
+  > 1) d;` (0 means none).
 - **`bintrail index` fails a binlog file that dropped changes, and exits
   non-zero (behavior change for scripts).** A file in which some changes
   were read and left out of the index used to be marked `completed`, and the
