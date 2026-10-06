@@ -76,6 +76,7 @@ func TestFetchMerged_latestInBinlog(t *testing.T) {
 				t.Fatalf("rows %v, want %v", orderIDs(rows), tc.wantIDs)
 			}
 			order.warning = ""
+			order.refused = nil
 			if order != tc.wantOrder {
 				t.Fatalf("order %+v, want %+v", order, tc.wantOrder)
 			}

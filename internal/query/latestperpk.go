@@ -24,6 +24,35 @@ type LatestPerPKOrder struct {
 	Refused int
 	// warning is the first refused key's reason.
 	warning string
+	// refused holds the keys counted in Refused, so Add counts a key
+	// refused by two reads once (recover-cascade scans one child under
+	// every parent that reaches it). A pointer keeps the struct comparable.
+	refused *map[string]bool
+}
+
+// RefusedRow is the decision for one row kept at its statement-time answer,
+// with why: for a reader that refuses a row on grounds of its own and
+// reports it with LatestPerPKInBinlog's (query.RepickLatestInBinlog).
+func RefusedRow(pk, why string) LatestPerPKOrder {
+	var o LatestPerPKOrder
+	o.refuse(pk, why)
+	return o
+}
+
+// refuse counts pk as kept at its statement-time answer for why.
+func (o *LatestPerPKOrder) refuse(pk, why string) {
+	if o.refused == nil {
+		m := map[string]bool{}
+		o.refused = &m
+	}
+	if (*o.refused)[pk] {
+		return
+	}
+	(*o.refused)[pk] = true
+	o.Refused++
+	if o.warning == "" {
+		o.warning = why + ". " + statementTimeTail
+	}
 }
 
 // Note is the text for the reader of a result some of whose keys kept
@@ -168,12 +197,6 @@ func LatestPerPKInBinlog(rows []ResultRow, n int, idsFollowBinlog func([]ResultR
 		}
 		byKey[pk] = append(byKey[pk], i)
 	}
-	refuse := func(why string) {
-		o.Refused++
-		if o.warning == "" {
-			o.warning = why + ". " + statementTimeTail
-		}
-	}
 
 	type keyCand struct {
 		cand     []ResultRow
@@ -234,10 +257,10 @@ func LatestPerPKInBinlog(rows []ResultRow, n int, idsFollowBinlog func([]ResultR
 			if !hasCoord(byTime, last) && ask(cand) == IDsFollowFileIndexing {
 				first, _ := keySpan(rows, byKey[pk])
 				if ff, lf := decodeKeySpanFile(first), decodeKeySpanFile(last); ff != lf {
-					refuse(fmt.Sprintf("this index was built with `bintrail index` only and this row's changes are in more than one binary log file (%s to %s), "+
+					o.refuse(pk, fmt.Sprintf("this index was built with `bintrail index` only and this row's changes are in more than one binary log file (%s to %s), "+
 						"so its ids follow the order the files were indexed in, which is not shown to be the order the source wrote them in", ff, lf))
 				} else {
-					refuse(fmt.Sprintf("the change at this row's last binary log position (in %s) was received by an index built with `bintrail index` only "+
+					o.refuse(pk, fmt.Sprintf("the change at this row's last binary log position (in %s) was received by an index built with `bintrail index` only "+
 						"before the change kept: the file may have been indexed out of order or twice", lf))
 				}
 			}
@@ -266,10 +289,10 @@ func LatestPerPKInBinlog(rows []ResultRow, n int, idsFollowBinlog func([]ResultR
 			// positions with times), so it is said here.
 			if latestByID.EventID == latestByTime.EventID {
 				// n > 1: the two latest sets differ below their top.
-				refuse("the index received this row's changes in a different order than their binary log positions and statement times: " +
+				o.refuse(pk, "the index received this row's changes in a different order than their binary log positions and statement times: "+
 					"the source's binary log numbering may have restarted between them (a failover, RESET MASTER), or binary log files were indexed out of order")
 			} else {
-				refuse(fmt.Sprintf("the index received event %d (at %s:%d) after event %d (at %s:%d), "+
+				o.refuse(pk, fmt.Sprintf("the index received event %d (at %s:%d) after event %d (at %s:%d), "+
 					"while the binary log position and the statement time both put event %d last: the source's binary log numbering may have restarted between them "+
 					"(a failover, RESET MASTER), or binary log files were indexed out of order",
 					latestByID.EventID, latestByID.BinlogFile, latestByID.StartPos,
@@ -277,7 +300,7 @@ func LatestPerPKInBinlog(rows []ResultRow, n int, idsFollowBinlog func([]ResultR
 					latestByTime.EventID))
 			}
 		default:
-			refuse(rowRefusal(d))
+			o.refuse(pk, rowRefusal(d))
 		}
 		out = append(out, all[len(all)-n:]...)
 	}

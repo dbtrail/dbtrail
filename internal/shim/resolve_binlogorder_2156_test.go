@@ -1,9 +1,13 @@
 package shim
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/query"
@@ -135,4 +139,28 @@ func TestFoldRowInBinlogOrder2156(t *testing.T) {
 			t.Fatalf("(%v, %q, %v)", state, note, err)
 		}
 	})
+}
+
+// The full-table `_flashback` read has no start, so the history its second
+// read buffers for contended rows is bounded by the same row cap as its first
+// read, and passing it is the same refusal (ER_TOO_BIG_SELECT, 1104).
+func TestFullTableCapError2156(t *testing.T) {
+	q := TimeTravelQuery{Type: TypeFlashback, Schema: "s", Table: "t", AsOf: foldBase}
+	for _, err := range []error{
+		&query.HistoryCapError{Cap: 7},
+		fmt.Errorf("read the changes of 2 row(s): %w", &query.HistoryCapError{Cap: 7}),
+	} {
+		got := fullTableCapError(q, 7, err)
+		var myErr *gomysql.MyError
+		if !errors.As(got, &myErr) || myErr.Code != gomysql.ER_TOO_BIG_SELECT {
+			t.Fatalf("%v → %v, want ER_TOO_BIG_SELECT", err, got)
+		}
+		if want := fullTableCapError(q, 7, nil).Error(); got.Error() != want {
+			t.Fatalf("message %q, want the first read's %q", got.Error(), want)
+		}
+	}
+	other := errors.New("boom")
+	if got := fullTableCapError(q, 7, other); got != other {
+		t.Fatalf("another error became %v", got)
+	}
 }

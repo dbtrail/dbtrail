@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"log/slog"
 )
 
 // repickBatch bounds the keys one repick read names in its IN list.
@@ -40,8 +39,8 @@ type LatestRepicker interface {
 //
 // Each key's row stays in its place. A row with no pk_values is its own key
 // and is kept as it is. A key the second read does not find (its changes
-// rotated out between the two reads) keeps the first read's row, and the
-// count of such keys is logged.
+// rotated out between the two reads) keeps the first read's row and is
+// counted as refused, so the reader's note says so.
 func RepickLatestInBinlog(ctx context.Context, db *sql.DB, engine *Engine, o FetchMergedOptions, rows []ResultRow) ([]ResultRow, LatestPerPKOrder, error) {
 	return repickLatestInBinlog(o.Opts, rows, func(opts Options, latest *LatestPerPKOrder) ([]ResultRow, error) {
 		h := o
@@ -115,30 +114,40 @@ func repickLatestInBinlog(o Options, rows []ResultRow, fetch func(Options, *Late
 		}
 	}
 	out := make([]ResultRow, len(rows))
-	missing := 0
 	for i, r := range rows {
 		if r.PKValues != "" {
 			if l, ok := latest[r.PKValues]; ok {
 				r = l
 			} else {
-				missing++
+				total.Add(RefusedRow(r.PKValues, "this row's changes were not found by the second read, "+
+					"which asks for its latest change in binary log order (they left the index or its archives between the two reads)"))
 			}
 		}
 		out[i] = r
-	}
-	if missing > 0 {
-		slog.Warn("latest change in binary log order: some rows were not found by the second read and keep their latest change by statement time",
-			"rows", missing, "schema", o.Schema, "table", o.Table)
 	}
 	return out, total, nil
 }
 
 // Add counts p's keys into o, keeping o's first warning: what a caller that
-// decided several reads reports once.
+// decided several reads reports once. A key refused in both counts once in
+// Refused; Disagreed and Sorted add up per read.
 func (o *LatestPerPKOrder) Add(p LatestPerPKOrder) {
 	o.Disagreed += p.Disagreed
 	o.Sorted += p.Sorted
-	o.Refused += p.Refused
+	if p.refused == nil {
+		o.Refused += p.Refused
+	} else {
+		for pk := range *p.refused {
+			if o.refused == nil || !(*o.refused)[pk] {
+				if o.refused == nil {
+					m := map[string]bool{}
+					o.refused = &m
+				}
+				(*o.refused)[pk] = true
+				o.Refused++
+			}
+		}
+	}
 	if o.warning == "" {
 		o.warning = p.warning
 	}

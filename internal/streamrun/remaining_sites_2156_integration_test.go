@@ -177,6 +177,15 @@ func runRemainingSites2156(t *testing.T, flavor, sourceDSN string, sourceDB, ind
 		if _, err := h.HandleQuery("SELECT * FROM _flashback.t AS OF '" + at + "'"); err == nil || !strings.Contains(err.Error(), "more than 2 rows") {
 			t.Fatalf("over the cap: err = %v, want the 1104 refusal", err)
 		}
+		// Four rows fit a cap of 4, but rows 1-3 need their history read
+		// (two changes each): six rows past the cap are the same refusal.
+		h4 := shim.NewHandlerWithConfig(indexDB, shim.Config{AllowGaps: true, NoArchive: true, IndexDBName: indexName, FullTableRowCap: 4}, slog.Default())
+		if err := h4.UseDB(sourceName); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h4.HandleQuery("SELECT * FROM _flashback.t AS OF '" + at + "'"); err == nil || !strings.Contains(err.Error(), "more than 4 rows") {
+			t.Fatalf("history past the cap: err = %v, want the 1104 refusal", err)
+		}
 		// LIMIT 2 reads two rows' latest changes; a row whose latest change
 		// is a DELETE (row 2) takes its place and is not answered, as before.
 		got, _ = remaining2156Read(t, h, "SELECT * FROM _flashback.t AS OF '"+at+"' LIMIT 2")

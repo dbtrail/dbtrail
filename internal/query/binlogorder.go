@@ -431,11 +431,11 @@ func BinlogOrderProof(ctx context.Context, db *sql.DB) func([]ResultRow) IDProof
 	}
 }
 
-// binlogOrderProofOnce is BinlogOrderProof for a caller that asks about many
+// BinlogOrderProofOnce is BinlogOrderProof for a caller that asks about many
 // sets of rows of one fetch: stream_state and index_state are read at the
 // first question and the answer for each set is computed from that one read.
 // A failed read is logged once and answers IDsUnproven for every set.
-func binlogOrderProofOnce(ctx context.Context, db *sql.DB) func([]ResultRow) IDProof {
+func BinlogOrderProofOnce(ctx context.Context, db *sql.DB) func([]ResultRow) IDProof {
 	var (
 		w    indexWriters
 		read bool

@@ -106,7 +106,11 @@ func TestRepickLatestInBinlog_batchesAndSumsTheOrder(t *testing.T) {
 	for i := range 1201 {
 		rows = append(rows, keyRow(fmt.Sprint(i), uint64(i+1), "binlog.000001", uint64(10*(i+1)), orderT0))
 	}
-	fetch, calls := repickFake(t, nil, LatestPerPKOrder{Disagreed: 2, Sorted: 1, Refused: 1, warning: "w"})
+	all := make(map[string]ResultRow, len(rows))
+	for _, r := range rows {
+		all[r.PKValues] = r
+	}
+	fetch, calls := repickFake(t, all, LatestPerPKOrder{Disagreed: 2, Sorted: 1, Refused: 1, warning: "w"})
 	got, order, err := repickLatestInBinlog(Options{LimitPerPK: 1, Limit: len(rows)}, rows, fetch)
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +126,7 @@ func TestRepickLatestInBinlog_batchesAndSumsTheOrder(t *testing.T) {
 		t.Fatalf("order %+v, want the three reads summed", order)
 	}
 	if !slices.Equal(orderIDs(got), orderIDs(rows)) {
-		t.Fatal("rows changed though the reads found nothing")
+		t.Fatal("rows changed though the reads found the same rows")
 	}
 }
 

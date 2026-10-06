@@ -1070,7 +1070,9 @@ func (h *Handler) runFullTable(q TimeTravelQuery) (*mysql.Result, error) {
 	// SUCCEEDS instead of tripping the cap — the "add a LIMIT to browse" remedy
 	// the cap error suggests. A LIMIT never RAISES the cap (conservative
 	// default): a LIMIT above the cap keeps the cap+1 overflow probe, so the
-	// binlog full-table path can never buffer more than the cap. This path
+	// first read buffers at most cap+1 rows. The second read (#2156, below)
+	// buffers at most two candidates per row read here plus cap rows of
+	// history, so the whole path stays bounded by a few times the cap. This path
 	// stays buffered (unlike the streaming _snapshot path, #998) because
 	// query.FetchMerged materialises the whole fetch regardless — streaming the
 	// wire without a cursor-based fetch would only relocate the OOM.
@@ -1101,10 +1103,7 @@ func (h *Handler) runFullTable(q TimeTravelQuery) (*mysql.Result, error) {
 	}
 
 	if capped && len(rows) > cap {
-		return nil, mysql.NewError(mysql.ER_TOO_BIG_SELECT, fmt.Sprintf(
-			"resolve %s: %s.%s at %s would return more than %d rows; add a LIMIT (e.g. LIMIT %d) to browse, narrow the AS OF range, or filter by PK",
-			q.Type, q.Schema, q.Table, q.AsOf.Format("2006-01-02 15:04:05"), cap, cap,
-		))
+		return nil, fullTableCapError(q, cap, nil)
 	}
 
 	// The read above is each row's latest change by statement time, under
@@ -1116,8 +1115,18 @@ func (h *Handler) runFullTable(q TimeTravelQuery) (*mysql.Result, error) {
 	// the change the database does not hold. Where the order cannot be shown
 	// the statement-time answer stands and the client gets a warning, as
 	// `_snapshot` does.
+	//
+	// That read buffers at most two candidates per row, plus the changes of
+	// each row whose two latest sets disagree, read from the start of the
+	// window. `_flashback` has no start (only AS OF), so for a contended row
+	// that is its whole retention: HistoryRowCap bounds those changes by the
+	// same cap, and passing it is the same refusal.
+	fetch.HistoryRowCap = cap
 	rows, order, err := query.RepickLatestInBinlog(ctx, h.indexDB, engine, fetch, rows)
 	if err != nil {
+		if capErr := fullTableCapError(q, cap, err); capErr != err {
+			return nil, capErr
+		}
 		return nil, wrapFetchError(ctx, q.Type, err, h.logger)
 	}
 
@@ -1126,6 +1135,21 @@ func (h *Handler) runFullTable(q TimeTravelQuery) (*mysql.Result, error) {
 	h.mapEventImages(q.Schema, q.Table, rows)
 	res, err := h.fullTableResult(q, extractFullTableImages(rows))
 	return h.finishWithOrderNote(q, order.ReadNote(), res, err)
+}
+
+// fullTableCapError is the refusal of a full-table read past the row cap
+// (ER_TOO_BIG_SELECT, 1104): for the first read when cause is nil, and for
+// the second one when cause is a *query.HistoryCapError. Any other cause is
+// returned as it is.
+func fullTableCapError(q TimeTravelQuery, cap int, cause error) error {
+	var capErr *query.HistoryCapError
+	if cause != nil && !errors.As(cause, &capErr) {
+		return cause
+	}
+	return mysql.NewError(mysql.ER_TOO_BIG_SELECT, fmt.Sprintf(
+		"resolve %s: %s.%s at %s would return more than %d rows; add a LIMIT (e.g. LIMIT %d) to browse, narrow the AS OF range, or filter by PK",
+		q.Type, q.Schema, q.Table, q.AsOf.Format("2006-01-02 15:04:05"), cap, cap,
+	))
 }
 
 // extractFullTableImages picks the post-image of every non-DELETE

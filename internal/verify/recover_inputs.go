@@ -175,7 +175,7 @@ func VerifyRecoverInputs(ctx context.Context, cfg RecoverInputsConfig, schema, t
 		// Each row's changes in binary log order where the index can show
 		// it (#2156): by statement time, a row two sessions changed at once
 		// reads as a broken chain.
-		IDsFollowBinlog: query.BinlogOrderProof(ctx, cfg.IndexDB),
+		IDsFollowBinlog: query.BinlogOrderProofOnce(ctx, cfg.IndexDB),
 	})
 
 	res.Status = out.Status
@@ -366,8 +366,9 @@ type recoverChainInput struct {
 	// events here are a PREFIX of it.
 	Truncated bool
 	// IDsFollowBinlog is query.OrderByBinlog's argument for each row's
-	// changes (query.BinlogOrderProof for a caller that holds the index; nil
-	// never proves the order). See orderChainsByBinlog.
+	// changes (query.BinlogOrderProofOnce for a caller that holds the index:
+	// one read of the index's writers for the whole table; nil never proves
+	// the order). See orderChainsByBinlog.
 	IDsFollowBinlog func([]query.ResultRow) query.IDProof
 }
 

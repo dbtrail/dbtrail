@@ -402,7 +402,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PostgreSQL wire front-end logs it), and a `recover-cascade` script carries
   one advisory note per child table. The full-table `_flashback` read keeps
   its row cap: it reads which rows to answer as before and then asks for
-  those rows' last change in binary log order, which is one more query.
+  those rows' last change in binary log order, which is one more query, and
+  the changes it reads for that are bounded by the same cap (past it, the
+  same "would return more than N rows" refusal). A row that second query
+  does not find keeps its old answer and is counted in the note.
+  `recover-cascade` still ends a child's window at the parent DELETE's
+  statement time: a change of the child that started after the DELETE
+  started and committed before it is left out.
   Still by statement time: the range itself (a change that started before
   the `AS OF` instant or `--until` and was committed after it is inside),
   `--limit`/`--limit-per-pk`, and the order changes are listed in by
