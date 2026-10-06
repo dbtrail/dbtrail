@@ -140,7 +140,7 @@ type Config struct {
 // table is read are out of both sides and a table with steady traffic
 // compares equal. The position is exact only where the server can give it
 // (see consistency.ConsistentTableChecksumAnchored): its own snapshot position
-// (Percona Server, MariaDB), or, on stock MySQL, a LOCK TABLES ... READ on the
+// (Percona Server, MariaDB), or, on stock MySQL, a brief read lock on the
 // table held while the snapshot opens. It is translated into a binlog
 // coordinate from the index (snapshotCut) and bounds the fetch as UntilPos;
 // the wall-clock asOf stays as the coarse bound. Where no exact position

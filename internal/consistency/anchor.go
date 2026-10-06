@@ -35,7 +35,7 @@ const (
 var ErrAnchorBusy = errors.New("the table was never free of open write transactions long enough to pin the snapshot's position")
 
 // anchorLockAttempts and anchorLockWait bound what the lock may cost: while a
-// LOCK TABLES ... READ waits (for a transaction that wrote the table and is
+// table lock waits (for a transaction that wrote the table and is
 // still open), new writes to the table queue behind it. Each attempt waits at
 // most anchorLockWait (lock_wait_timeout, whole seconds), so the table's
 // writers stall at most anchorLockAttempts * anchorLockWait in the worst case,

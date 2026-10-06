@@ -148,7 +148,7 @@ func ConsistentTableChecksumNormalized(ctx context.Context, db *sql.DB, schema, 
 // ConsistentTableChecksumAnchored is ConsistentTableChecksumNormalized whose
 // GTIDSet is the snapshot's exact position where the server allows it (see
 // openAnchoredSnapshot and TableChecksum.Anchor) (#2150). On stock MySQL that
-// takes a brief LOCK TABLES ... READ on the table; ErrAnchorBusy means the
+// takes a brief read lock on the table; ErrAnchorBusy means the
 // lock could not be had, and no scan ran.
 func ConsistentTableChecksumAnchored(ctx context.Context, db *sql.DB, schema, table string, normalize func(raw []byte, dataType string) []byte) (TableChecksum, error) {
 	return consistentTableChecksum(ctx, db, schema, table, normalize, true)

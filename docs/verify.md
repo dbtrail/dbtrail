@@ -58,7 +58,7 @@ It is read-only and never writes to your source or your index.
   with writes.** The reconstruction is cut at the position the live read was
   taken at, so writes committed during the check are left out of both sides.
   That position is exact on MySQL with GTIDs on (the account needs
-  `LOCK TABLES` on the table), Percona Server and MariaDB; see
+  `RELOAD` and `LOCK TABLES`), Percona Server and MariaDB; see
   [Live-source](#live-source). Where it is not (MySQL with `gtid_mode=OFF`, a
   source account without `LOCK TABLES`, a PostgreSQL source), the rule is
   unchanged: **no writes to the table while it is read**, or a write shows as
@@ -186,7 +186,7 @@ depends on the server:
 |---|---|---|
 | Percona Server (GTIDs on) | the server's own snapshot position (`Binlog_snapshot_gtid_executed`), no lock | fine |
 | MariaDB | the server's own snapshot coordinate (`binlog_snapshot_file`/`_position`, through `BINLOG_GTID_POS`), no lock | fine |
-| MySQL (GTIDs on) | `LOCK TABLES <table> READ` on a second connection while the snapshot opens: writes to that one table wait for the few milliseconds the snapshot takes to open | fine |
+| MySQL (GTIDs on) | `FLUSH TABLES <table> WITH READ LOCK` on a second connection while the snapshot opens: writes to that one table wait while it is held (measured: 25 to 60 ms on average, under 0.2 s at worst, with 48 concurrent writers) | fine |
 | MySQL without the `LOCK TABLES` privilege, MySQL with `gtid_mode=OFF`, PostgreSQL | not pinned | **none allowed**: a write while the table is read shows as a MISMATCH |
 
 Why MySQL needs the lock: measured on MySQL 8.0 and 8.4 under concurrent
@@ -199,7 +199,12 @@ The lock is bounded: it waits at most one second for a transaction that wrote
 the table and is still open (new writes to the table queue behind it during
 that second), three times. If it never gets the table, the table is reported
 `inconclusive` ("the snapshot's position could not be pinned"), never compared
-against a guessed position. Grant it with `GRANT LOCK TABLES ON db.* TO ...`.
+against a guessed position. It needs `RELOAD` (or `FLUSH_TABLES`) and
+`LOCK TABLES`, the same grants mydumper asks for. With `LOCK TABLES` alone,
+`verify` falls back to `LOCK TABLES <table> READ`, which is exact too but does
+not hold new writes back: on a table with steady writes it can wait out every
+attempt (measured: about two thirds of attempts timed out with 48 writers), and
+the table is then `inconclusive`.
 
 A running capture is a few seconds behind a table with writes, so for each
 table `verify` waits up to a minute for the capture to reach the snapshot it
