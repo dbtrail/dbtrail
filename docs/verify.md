@@ -186,16 +186,36 @@ depends on the server:
 |---|---|---|
 | Percona Server (`gtid_mode=ON`) | the server's own snapshot position (`Binlog_snapshot_gtid_executed`), no lock | fine |
 | MariaDB | the server's own snapshot coordinate (`binlog_snapshot_file`/`_position`, through `BINLOG_GTID_POS`), no lock | fine |
-| MySQL (`gtid_mode=ON`) with `--pause-writes` | `FLUSH TABLES <table> WITH READ LOCK` on a second connection while the snapshot opens: **writes to that one table on the source wait while it is held** (measured on MySQL 8.0, 8.4 and Percona Server 8.0 with 48 concurrent writers: 25 to 70 ms on average, under a quarter second at worst; up to about 3 s behind a long write transaction) | fine |
+| MySQL (`gtid_mode=ON`) with `--pause-writes` | `LOCK TABLES <table> READ` on a second connection while the snapshot opens: **writes to that one table on the source wait while it is held**, the time it takes to open a snapshot and read one variable; reads never wait | fine, unless steady writes keep the lock from being granted (then `inconclusive`) |
 | MySQL by default (no `--pause-writes`), MySQL without the grants, MySQL with `gtid_mode` other than `ON` (`ON_PERMISSIVE` still commits transactions without a GTID), PostgreSQL | not pinned | **none allowed**: a write while the table is read shows as a MISMATCH |
 
-**`--pause-writes` (stock MySQL only, off by default).** It pauses writes to
-the checked table **on the production source** for the moment its snapshot
-opens: tens of milliseconds typically, up to about 3 seconds when a
-transaction that wrote the table is still open. Reads are not blocked. It needs
-the `RELOAD` (or `FLUSH_TABLES`) and `LOCK TABLES` privileges. `verify` never
-takes this lock unless the flag is given; the web console's verify never takes
-it. Percona Server and MariaDB do not need it.
+**`--pause-writes` (stock MySQL only, off by default).** Exactly who waits,
+on the production source:
+
+- **Writers of the checked table** wait while the lock is held: from the
+  moment it is granted until the snapshot is open and one variable is read
+  (two short statements on the source). Writers of other tables never wait.
+- **Readers** never wait: a read lock lets every reader through.
+- **While the lock is being asked for, nobody waits.** It queues behind
+  transactions that wrote the table and are still open, but holds no new
+  writer or reader back (measured on MySQL 8.0 and 8.4: a new writer and a
+  new reader each went through in about 60 ms while it waited).
+
+The other side of that last point: on a table with steady writes the lock
+may not be granted. `verify` asks up to 10 times, waiting at most 1 second
+each time; if it never gets it, the table is reported `inconclusive` ("the
+snapshot's position could not be pinned"), never compared against a guessed
+position. It needs the `LOCK TABLES` privilege (and `SELECT`) on the table.
+`verify` never takes this lock unless the flag is given; the web console's
+verify never takes it. Percona Server and MariaDB do not need it.
+
+Why not `FLUSH TABLES <table> WITH READ LOCK`, which would be granted sooner
+under steady writes: measured on MySQL 8.0.46 and 8.4.9, when a long `SELECT`
+has the table open, that statement gives up after its lock timeout but
+leaves the table waiting for a flush, and a **new reader** of the table then
+waited 18 seconds, until the long `SELECT` ended, after the check was gone. A
+check must not be able to freeze a production table for its readers, so
+`verify` never uses it.
 
 Why stock MySQL needs the lock: measured on MySQL 8.0 and 8.4 under concurrent
 commits, a snapshot can already see transactions that `@@gtid_executed` does
@@ -203,21 +223,11 @@ not list yet, even when the set read just before and just after opening the
 snapshot is the same. Reading the set around the snapshot is therefore never
 taken as exact.
 
-The lock is bounded: it waits at most one second for a transaction that wrote
-the table and is still open (new writes to the table queue behind it during
-that second), three times. If it never gets the table, the table is reported
-`inconclusive` ("the snapshot's position could not be pinned"), never compared
-against a guessed position. It needs `RELOAD` (or `FLUSH_TABLES`) and
-`LOCK TABLES`, the same grants mydumper asks for. With `LOCK TABLES` alone,
-`verify` falls back to `LOCK TABLES <table> READ`, which is exact too but does
-not hold new writes back: on a table with steady writes it can wait out every
-attempt (measured: about two thirds of attempts timed out with 48 writers), and
-the table is then `inconclusive`.
-
 A running capture is a few seconds behind a table with writes, so for each
 table `verify` waits up to a minute for the capture to reach the snapshot it
 read (only while the capture's checkpoint is recent, so a stopped capture is
-reported at once). When the result is not cut at the snapshot's position, its
+reported at once; and once one table has waited the whole minute without the
+capture's saved position moving, later tables of the run do not wait again). When the result is not cut at the snapshot's position, its
 detail says so and says why.
 
 ```sh
@@ -565,7 +575,7 @@ diff tool involved.
 | `--baseline-s3` | *(empty)* | S3 URL prefix of baseline snapshots (e.g. `s3://bucket/baselines/`) |
 | `--tables` | *(all)* | Comma-separated `schema.table` list (default: all tables in the latest schema snapshot; in baseline-anchored mode, snapshot tables with no baseline report `inconclusive` — "never baselined") |
 | `--no-archive` | `false` | Query live MySQL partitions only; skip Parquet archive discovery |
-| `--pause-writes` | `false` | Live-source mode, stock MySQL: briefly pause writes to each checked table **on the source** while its snapshot opens (tens of ms typically, up to about 3 s behind a long write transaction; needs `RELOAD` and `LOCK TABLES`), so a table with writes during the check can match. See [Live-source](#live-source) |
+| `--pause-writes` | `false` | Live-source mode, stock MySQL: take `LOCK TABLES <table> READ` **on the source** while each table's snapshot opens. Writers of that table wait while it is held (the time to open a snapshot and read one variable); readers never wait; nobody waits while it is being asked for. Needs `LOCK TABLES`. Under steady writes it may not be granted (10 attempts of 1 s), and the table is then `inconclusive`. See [Live-source](#live-source) |
 | `--explain` | `false` | On a baseline-anchored mismatch, print a per-row drill-down. Rejected under `--check recover` |
 | `--format` | `text` | Output format: `text` or `json` (see [Machine-readable output](#machine-readable-output---format-json)) |
 | `--check` | `content` | What to verify: `content` (reconstructed table content) or `recover` (`recover`'s before/after image inputs, index-only) |

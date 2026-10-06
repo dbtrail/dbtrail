@@ -49,7 +49,7 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 	}
 	lockOK := func(m sqlmock.Sqlmock) {
 		m.ExpectExec("SET SESSION lock_wait_timeout").WillReturnResult(sqlmock.NewResult(0, 0))
-		m.ExpectExec("FLUSH TABLES `s`.`t` WITH READ LOCK").WillReturnResult(sqlmock.NewResult(0, 0))
+		m.ExpectExec("LOCK TABLES `s`.`t` READ").WillReturnResult(sqlmock.NewResult(0, 0))
 	}
 	rollback := func(m sqlmock.Sqlmock) {
 		m.ExpectExec("ROLLBACK").WillReturnResult(sqlmock.NewResult(0, 0))
@@ -105,24 +105,6 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 				m.ExpectQuery(`SHOW STATUS LIKE 'binlog_snapshot%'`).WillReturnError(errors.New("denied"))
 				rollback(m)
 				lockOK(m)
-				start(m)
-				mysqlAfter(m, anchorUUID+":1-13")
-				unlock(m)
-			},
-			want: snapshotAnchor{set: anchorUUID + ":1-13", flavor: GTIDFlavorMySQL, method: AnchorTableLock},
-		},
-		{
-			name: "without RELOAD the plain read lock is used",
-			expect: func(m sqlmock.Sqlmock) {
-				start(m)
-				mysqlAfter(m, anchorUUID+":1-12")
-				gtidOn(m)
-				noNative(m)
-				rollback(m)
-				m.ExpectExec("SET SESSION lock_wait_timeout").WillReturnResult(sqlmock.NewResult(0, 0))
-				m.ExpectExec("FLUSH TABLES").WillReturnError(&mysql.MySQLError{Number: 1227, Message: "need RELOAD"})
-				m.ExpectExec("SET SESSION lock_wait_timeout").WillReturnResult(sqlmock.NewResult(0, 0))
-				m.ExpectExec("LOCK TABLES `s`.`t` READ").WillReturnResult(sqlmock.NewResult(0, 0))
 				start(m)
 				mysqlAfter(m, anchorUUID+":1-13")
 				unlock(m)
@@ -216,7 +198,7 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 				noNative(m)
 				rollback(m)
 				m.ExpectExec("SET SESSION lock_wait_timeout").WillReturnResult(sqlmock.NewResult(0, 0))
-				m.ExpectExec("FLUSH TABLES").WillReturnError(lockTimeout)
+				m.ExpectExec("LOCK TABLES").WillReturnError(lockTimeout)
 				lockOK(m)
 				start(m)
 				mysqlAfter(m, anchorUUID+":1-20")
@@ -234,7 +216,7 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 				rollback(m)
 				for range anchorLockAttempts {
 					m.ExpectExec("SET SESSION lock_wait_timeout").WillReturnResult(sqlmock.NewResult(0, 0))
-					m.ExpectExec("FLUSH TABLES").WillReturnError(lockTimeout)
+					m.ExpectExec("LOCK TABLES").WillReturnError(lockTimeout)
 				}
 			},
 			wantErr: ErrAnchorBusy,
@@ -248,7 +230,7 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 				noNative(m)
 				rollback(m)
 				m.ExpectExec("SET SESSION lock_wait_timeout").WillReturnResult(sqlmock.NewResult(0, 0))
-				m.ExpectExec("FLUSH TABLES").WillReturnError(noLockGrant)
+				m.ExpectExec("LOCK TABLES").WillReturnError(noLockGrant)
 				start(m)
 				mysqlAfter(m, anchorUUID+":1-14")
 			},
@@ -289,7 +271,7 @@ func TestOpenAnchoredSnapshot(t *testing.T) {
 				noNative(m)
 				rollback(m)
 				m.ExpectExec("SET SESSION lock_wait_timeout").WillReturnResult(sqlmock.NewResult(0, 0))
-				m.ExpectExec("FLUSH TABLES").WillReturnError(errors.New("connection reset"))
+				m.ExpectExec("LOCK TABLES").WillReturnError(errors.New("connection reset"))
 			},
 			wantErrMsg: true,
 		},

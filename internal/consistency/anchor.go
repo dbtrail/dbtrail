@@ -23,31 +23,33 @@ const (
 	// BINLOG_GTID_POS). Exact, and takes no lock.
 	AnchorNative = "native"
 	// AnchorTableLock: the snapshot opened, and the position was read, while
-	// a second connection held a read lock on the table (FLUSH TABLES <table>
-	// WITH READ LOCK, or LOCK TABLES <table> READ), so no transaction writing
-	// the table was in flight. Exact for that table.
+	// a second connection held LOCK TABLES <table> READ, so no transaction
+	// writing the table was in flight. Exact for that table.
 	AnchorTableLock = "table-lock"
 )
 
-// ErrAnchorBusy: the table's writers never paused long enough to take the
-// read lock the anchor needs (every attempt hit lock_wait_timeout). The scan
-// was not run; the caller reports the check inconclusive.
+// ErrAnchorBusy: the table was never free of open write transactions when
+// the read lock the anchor needs was asked for (every attempt hit
+// lock_wait_timeout). The scan was not run; the caller reports the check
+// inconclusive.
 var ErrAnchorBusy = errors.New("the table was never free of open write transactions long enough to pin the snapshot's position")
 
-// anchorLockAttempts and anchorLockWait bound what the lock may cost: while a
-// table lock waits (for a transaction that wrote the table and is
-// still open), new writes to the table queue behind it. Each attempt waits at
-// most anchorLockWait (lock_wait_timeout, whole seconds), so the table's
-// writers stall at most anchorLockAttempts * anchorLockWait in the worst case,
-// and for the time the snapshot takes to open in the ordinary one.
+// anchorLockAttempts and anchorLockWait bound how long the check tries for
+// the lock: at most anchorLockAttempts * anchorLockWait per table. The
+// waiting costs the source nothing: a pending LOCK TABLES ... READ queues
+// behind open write transactions but holds no one back (measured on MySQL
+// 8.0 and 8.4, #2150: a new writer and a new reader of the table both went
+// through in about 60 ms while it waited). That is also why a table with
+// steady writes can keep it waiting past every attempt, so the attempts are
+// many and short.
 const (
-	anchorLockAttempts = 3
+	anchorLockAttempts = 10
 	anchorLockWait     = 1 // seconds
 )
 
-// anchorLockPause is the pause between two lock attempts, letting the queued
-// writers through. A variable so tests do not sleep.
-var anchorLockPause = 500 * time.Millisecond
+// anchorLockPause is the pause between two lock attempts. A variable so
+// tests do not sleep.
+var anchorLockPause = 100 * time.Millisecond
 
 // snapshotAnchor is what openAnchoredSnapshot reports about the snapshot it
 // left open on the scan connection.
@@ -75,13 +77,13 @@ type snapshotAnchor struct {
 // regularly sees transactions that @@gtid_executed does not list yet, also
 // when the two reads around it are equal: InnoDB makes a commit visible before
 // the server adds its GTID to the executed set. So on stock MySQL only a lock
-// makes the position exact: a read lock on the table (flushLockStmt, else
-// readLockStmt) is granted once no transaction that wrote the table is open,
-// and a transaction's metadata lock is released only after its commit is
-// complete, GTID included. With it held,
-// every change to the table the snapshot sees is in the set read under it, and
-// none can commit until it is released. It is per table and held for the time
-// the snapshot takes to open; see anchorLockAttempts for the worst case.
+// makes the position exact: LOCK TABLES <table> READ (readLockStmt) is granted
+// once no transaction that wrote the table is open, and a transaction's
+// metadata lock is released only after its commit is complete, GTID included.
+// With it held, every change to the table the snapshot sees is in the set
+// read under it, and none can commit until it is released. It is per table
+// and held only for the time the snapshot takes to open and the set to be
+// read: writes to the table wait that long, reads never do.
 //
 // The lock is taken only with opts.PauseWrites: it pauses the table's writers
 // on the source, which a check must not do unasked. Without it a stock MySQL
@@ -143,16 +145,8 @@ func openAnchoredSnapshot(ctx context.Context, db *sql.DB, conn *sql.Conn, schem
 	if _, err := conn.ExecContext(ctx, "ROLLBACK"); err != nil {
 		return snapshotAnchor{}, fmt.Errorf("close the unanchored snapshot: %w", err)
 	}
-	stmt := flushLockStmt
 	for attempt := 1; ; attempt++ {
-		a, err = lockedSnapshot(ctx, db, conn, schema, table, stmt)
-		if errors.Is(err, errLockNeedsReload) {
-			// No RELOAD / FLUSH_TABLES: the plain read lock, which a table
-			// with steady writes can starve (see flushLockStmt).
-			stmt = readLockStmt
-			attempt--
-			continue
-		}
+		a, err = lockedSnapshot(ctx, db, conn, schema, table)
 		if !errors.Is(err, errLockWaitTimeout) {
 			return a, err
 		}
@@ -167,33 +161,25 @@ func openAnchoredSnapshot(ctx context.Context, db *sql.DB, conn *sql.Conn, schem
 	}
 }
 
-var (
-	errLockWaitTimeout = errors.New("lock wait timeout")
-	errLockNeedsReload = errors.New("FLUSH TABLES needs RELOAD or FLUSH_TABLES")
-)
+var errLockWaitTimeout = errors.New("lock wait timeout")
 
-// The two table locks, in the order they are tried.
+// readLockStmt is the one table lock the anchor takes. It needs LOCK TABLES
+// (and SELECT) on the table.
 //
-// flushLockStmt takes the table's metadata lock as SHARED_NO_WRITE, a lock
-// MySQL queues AHEAD of new writers, so it is granted as soon as the
-// transactions already writing the table finish, however steady the writes.
-// It needs RELOAD (or FLUSH_TABLES) besides LOCK TABLES, the grants mydumper
-// also asks for.
-//
-// readLockStmt (LOCK TABLES ... READ) needs only LOCK TABLES, but its
-// SHARED_READ_ONLY lock does not hold new writers back: measured (#2150), a
-// table with six writers kept it waiting past every attempt. It is the
-// fallback when RELOAD is missing.
-const (
-	flushLockStmt = "FLUSH TABLES %s WITH READ LOCK"
-	readLockStmt  = "LOCK TABLES %s READ"
-)
+// Not FLUSH TABLES <table> WITH READ LOCK, although its lock is queued ahead
+// of new writers and so is granted sooner under steady writes: measured on
+// MySQL 8.0.46 and 8.4.9 (#2150), when a long SELECT has the table open the
+// FLUSH times out after lock_wait_timeout, yet leaves the table marked for
+// flush, and a NEW reader of the table then waited 18 s, until that SELECT
+// ended, with the check long gone. A check must not be able to freeze a
+// production table for its readers.
+const readLockStmt = "LOCK TABLES %s READ"
 
 // lockedSnapshot is one attempt: take the table's read lock on a connection
 // of its own, open the snapshot on conn and read the position, release the
 // lock. The lock's connection is discarded, never returned to the pool, so
 // neither the lock nor its session timeout can outlive the attempt.
-func lockedSnapshot(ctx context.Context, db *sql.DB, conn *sql.Conn, schema, table, lockStmt string) (snapshotAnchor, error) {
+func lockedSnapshot(ctx context.Context, db *sql.DB, conn *sql.Conn, schema, table string) (snapshotAnchor, error) {
 	lk, err := db.Conn(ctx)
 	if err != nil {
 		return snapshotAnchor{}, fmt.Errorf("open the lock connection: %w", err)
@@ -205,14 +191,12 @@ func lockedSnapshot(ctx context.Context, db *sql.DB, conn *sql.Conn, schema, tab
 	if _, err := lk.ExecContext(ctx, fmt.Sprintf("SET SESSION lock_wait_timeout = %d", anchorLockWait)); err != nil {
 		return snapshotAnchor{}, fmt.Errorf("set lock_wait_timeout: %w", err)
 	}
-	if _, err := lk.ExecContext(ctx, fmt.Sprintf(lockStmt, quoteIdent(schema)+"."+quoteIdent(table))); err != nil {
+	if _, err := lk.ExecContext(ctx, fmt.Sprintf(readLockStmt, quoteIdent(schema)+"."+quoteIdent(table))); err != nil {
 		var me *mysql.MySQLError
 		if errors.As(err, &me) {
 			switch {
 			case me.Number == 1205: // ER_LOCK_WAIT_TIMEOUT
 				return snapshotAnchor{}, errLockWaitTimeout
-			case me.Number == 1227 && lockStmt == flushLockStmt: // ER_SPECIFIC_ACCESS_DENIED: no RELOAD
-				return snapshotAnchor{}, errLockNeedsReload
 			case me.Number == 1044 || me.Number == 1142 || me.Number == 1227: // no LOCK TABLES
 				return unlockedSnapshot(ctx, conn)
 			}

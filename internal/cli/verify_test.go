@@ -174,7 +174,7 @@ func TestPauseWritesFlagDefaultsOff(t *testing.T) {
 	if f == nil || f.DefValue != "false" {
 		t.Fatalf("--pause-writes = %+v; want a flag that defaults to false: verify never pauses a source's writes unasked", f)
 	}
-	for _, want := range []string{"pause", "SOURCE", "RELOAD", "LOCK TABLES"} {
+	for _, want := range []string{"pause", "SOURCE", "LOCK TABLES", "readers never wait"} {
 		if !strings.Contains(f.Usage, want) {
 			t.Errorf("--pause-writes help does not say %q: %q", want, f.Usage)
 		}

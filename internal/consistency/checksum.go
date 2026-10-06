@@ -155,12 +155,13 @@ func ConsistentTableChecksumNormalized(ctx context.Context, db *sql.DB, schema, 
 // AnchorOptions are the choices ConsistentTableChecksumAnchored takes.
 type AnchorOptions struct {
 	// PauseWrites allows, on a server with no snapshot position of its own
-	// (stock MySQL), a brief read lock on the table while the snapshot opens,
-	// which pauses writes to that table on the source (tens of milliseconds
-	// typically, up to anchorLockAttempts * anchorLockWait behind a long
-	// write transaction). Off by default: production writes are paused only
-	// when the caller asked for it. Without it such a server's snapshot is
-	// not anchored (TableChecksum.AnchorLockNotRequested).
+	// (stock MySQL), LOCK TABLES <table> READ while the snapshot opens: writes
+	// to that table on the source wait for as long as the lock is held (the
+	// time to open a snapshot and read one variable); reads never wait, and
+	// nobody waits while the lock is being asked for. Off by default:
+	// production writes are paused only when the caller asked for it. Without
+	// it such a server's snapshot is not anchored
+	// (TableChecksum.AnchorLockNotRequested).
 	PauseWrites bool
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 
@@ -123,24 +124,44 @@ const snapshotCutPage = 1000
 //
 // A change on the way down whose GTID cannot be judged (none recorded, or one
 // that does not parse) cannot be placed on either side of the cut, so the
-// cut is not placed. Neither is it when every change in the live index is
-// newer than the snapshot: the ones it holds were moved to the archive tier,
-// whose order against the live index is not known here.
+// cut is not placed.
 //
-// An empty live index has nothing to walk. Its cut is the capture's
-// checkpoint position, read BEFORE the walk: the coverage check proved the
-// checkpoint holds the snapshot, so every change the snapshot holds ends at or
-// before it; and a change the capture wrote at or before it was indexed
-// before the checkpoint was saved, so the walk that found nothing would have
-// found it.
+// The walk reads only changes stamped at or after floor (the time the read
+// opened, less snapshotCutFloorMargin), so MySQL prunes it to the recent
+// hourly partitions instead of merging every one of them on each page. Past
+// the floor:
+//   - if it skipped changes, every change of the last hour and more is newer
+//     than the snapshot (a read that took that long): the cut is not placed;
+//   - if it skipped none, nothing was indexed near the read at all (a quiet
+//     source). The newest change below the floor is then read alone
+//     (one row, ORDER BY event_id DESC LIMIT 1): held by the snapshot, its end
+//     is the cut; not held, or not judgeable, the cut is not placed.
+//
+// A change stamped below the floor but committed after a change above it (a
+// transaction that ran for longer than the margin) is not seen by the walk.
+// If the snapshot does not hold it, it sorts after the cut anyway; if it
+// does, the cut lands before it and the comparison reports a mismatch, never
+// a false match.
+//
+// An empty index has nothing to walk. Its cut is the capture's checkpoint
+// position, read BEFORE the walk: the coverage check proved the checkpoint
+// holds the snapshot, so every change the snapshot holds ends at or before
+// it; and a change the capture wrote at or before it was indexed before the
+// checkpoint was saved, so the walk that found nothing would have found it.
 //
 // firstOut is where the oldest change the walk skipped (the first one the
 // snapshot does not hold) starts; nil when it skipped none.
-func snapshotCut(ctx context.Context, db *sql.DB, member snapshotMember) (cut, firstOut *query.BinlogPos, why string, err error) {
-	return snapshotCutPaged(ctx, db, member, snapshotCutPage)
+func snapshotCut(ctx context.Context, db *sql.DB, member snapshotMember, floor time.Time) (cut, firstOut *query.BinlogPos, why string, err error) {
+	return snapshotCutPaged(ctx, db, member, floor, snapshotCutPage)
 }
 
-func snapshotCutPaged(ctx context.Context, db *sql.DB, member snapshotMember, page int) (cut, firstOut *query.BinlogPos, why string, err error) {
+// snapshotCutFloorMargin is how far before the read's opening the walk looks
+// (see snapshotCut): a change's stamp is its statement's start, so one held
+// by the snapshot can be stamped before the read by as long as its
+// transaction ran.
+const snapshotCutFloorMargin = time.Hour
+
+func snapshotCutPaged(ctx context.Context, db *sql.DB, member snapshotMember, floor time.Time, page int) (cut, firstOut *query.BinlogPos, why string, err error) {
 	var ckFile sql.NullString
 	var ckPos sql.NullInt64
 	err = db.QueryRowContext(ctx, "SELECT binlog_file, binlog_position FROM stream_state WHERE id = 1").Scan(&ckFile, &ckPos)
@@ -148,18 +169,46 @@ func snapshotCutPaged(ctx context.Context, db *sql.DB, member snapshotMember, pa
 		return nil, nil, "", fmt.Errorf("read the capture's checkpoint: %w", err)
 	}
 
-	const cols = "SELECT event_id, gtid, binlog_file, start_pos, end_pos FROM binlog_events"
+	floor = floor.UTC()
+	const cols = snapshotCutCols
+	above := snapshotCutAbove(floor)
 	var (
 		last    uint64
 		skipped int
 		first   = true
 	)
+	// judge decides one change: stop with a cut, stop unplaced, or go on.
+	judge := func(rows *sql.Rows) (done bool, cut *query.BinlogPos, why string, err error) {
+		var (
+			id         uint64
+			gtid       sql.NullString
+			file       string
+			start, end uint64
+		)
+		if err := rows.Scan(&id, &gtid, &file, &start, &end); err != nil {
+			return true, nil, "", fmt.Errorf("walk the index from its newest change: %w", err)
+		}
+		last = id
+		if !gtid.Valid || strings.TrimSpace(gtid.String) == "" {
+			return true, nil, fmt.Sprintf("the read cannot be cut at the snapshot: indexed change %d (%s:%d) has no GTID, so whether the snapshot holds it cannot be told", id, file, end), nil
+		}
+		in, err := member(gtid.String)
+		if err != nil {
+			return true, nil, "the read cannot be cut at the snapshot: " + err.Error(), nil
+		}
+		if in {
+			return true, &query.BinlogPos{File: file, Pos: end}, "", nil
+		}
+		skipped++
+		firstOut = &query.BinlogPos{File: file, Pos: start}
+		return false, nil, "", nil
+	}
 	for {
 		var rows *sql.Rows
 		if first {
-			rows, err = db.QueryContext(ctx, cols+fmt.Sprintf(" ORDER BY event_id DESC LIMIT %d", page))
+			rows, err = db.QueryContext(ctx, snapshotCutFirstPageSQL(floor, page), floor)
 		} else {
-			rows, err = db.QueryContext(ctx, cols+fmt.Sprintf(" WHERE event_id < ? ORDER BY event_id DESC LIMIT %d", page), last)
+			rows, err = db.QueryContext(ctx, cols+above+fmt.Sprintf(" AND event_id < ? ORDER BY event_id DESC LIMIT %d", page), floor, last)
 		}
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("walk the index from its newest change: %w", err)
@@ -167,32 +216,14 @@ func snapshotCutPaged(ctx context.Context, db *sql.DB, member snapshotMember, pa
 		n := 0
 		for rows.Next() {
 			n++
-			var (
-				id         uint64
-				gtid       sql.NullString
-				file       string
-				start, end uint64
-			)
-			if err := rows.Scan(&id, &gtid, &file, &start, &end); err != nil {
+			done, c, why, err := judge(rows)
+			if done {
 				rows.Close()
-				return nil, nil, "", fmt.Errorf("walk the index from its newest change: %w", err)
+				if c != nil {
+					return c, firstOut, "", nil
+				}
+				return nil, nil, why, err
 			}
-			last = id
-			if !gtid.Valid || strings.TrimSpace(gtid.String) == "" {
-				rows.Close()
-				return nil, nil, fmt.Sprintf("the read cannot be cut at the snapshot: indexed change %d (%s:%d) has no GTID, so whether the snapshot holds it cannot be told", id, file, end), nil
-			}
-			in, err := member(gtid.String)
-			if err != nil {
-				rows.Close()
-				return nil, nil, "the read cannot be cut at the snapshot: " + err.Error(), nil
-			}
-			if in {
-				rows.Close()
-				return &query.BinlogPos{File: file, Pos: end}, firstOut, "", nil
-			}
-			skipped++
-			firstOut = &query.BinlogPos{File: file, Pos: start}
 		}
 		err := rows.Err()
 		rows.Close()
@@ -205,10 +236,47 @@ func snapshotCutPaged(ctx context.Context, db *sql.DB, member snapshotMember, pa
 		}
 	}
 	if skipped > 0 {
-		return nil, nil, fmt.Sprintf("the read cannot be cut at the snapshot: all %d changes in the live index are newer than the snapshot, and the ones it holds are archived", skipped), nil
+		return nil, nil, fmt.Sprintf("the read cannot be cut at the snapshot: all %d changes indexed since %s are newer than the snapshot", skipped, floor.Format(time.RFC3339)), nil
+	}
+	// Nothing indexed near the read: the newest change below the floor.
+	rows, err := db.QueryContext(ctx, cols+" WHERE event_timestamp < ? ORDER BY event_id DESC LIMIT 1", floor)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("read the newest indexed change: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		_, c, why, err := judge(rows)
+		if c != nil {
+			return c, nil, "", nil
+		}
+		if why == "" && err == nil {
+			why = "the read cannot be cut at the snapshot: the newest indexed change, from before " + floor.Format(time.RFC3339) + ", is not one the snapshot holds"
+		}
+		return nil, nil, why, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, "", fmt.Errorf("read the newest indexed change: %w", err)
 	}
 	if !ckFile.Valid || ckFile.String == "" || !ckPos.Valid || ckPos.Int64 <= 0 {
 		return nil, nil, "the read cannot be cut at the snapshot: the index holds no change and its checkpoint has no position", nil
 	}
 	return &query.BinlogPos{File: ckFile.String, Pos: uint64(ckPos.Int64)}, nil, "", nil
 }
+
+const snapshotCutCols = "SELECT event_id, gtid, binlog_file, start_pos, end_pos FROM binlog_events"
+
+// snapshotCutAbove is the walk's floor condition, with floor as its one
+// parameter. The TO_SECONDS literal prunes partitions the way
+// query.buildQuery's hints do; the plain comparison is the exact filter.
+func snapshotCutAbove(floor time.Time) string {
+	return fmt.Sprintf(" WHERE TO_SECONDS(event_timestamp) >= %d AND event_timestamp >= ?", toSecondsUTC(floor.UTC().Truncate(time.Hour)))
+}
+
+// snapshotCutFirstPageSQL is the walk's first statement (floor bound as its
+// parameter), shared with the test that EXPLAINs it.
+func snapshotCutFirstPageSQL(floor time.Time, page int) string {
+	return snapshotCutCols + snapshotCutAbove(floor) + fmt.Sprintf(" ORDER BY event_id DESC LIMIT %d", page)
+}
+
+// toSecondsUTC is MySQL's TO_SECONDS of t (seconds since year 0).
+func toSecondsUTC(t time.Time) int64 { return t.UTC().Unix() + 62167219200 }

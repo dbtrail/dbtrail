@@ -258,13 +258,20 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	}
 
 	// 3a. Where the reconstruction stops: the snapshot's position (#2150).
-	cut, err := resolveLiveCut(ctx, cfg.IndexDB, src, snapshotTime, sincePos)
+	cut, err := resolveLiveCut(ctx, cfg.IndexDB, src, snapshotTime, sincePos, openedBy)
 	if err != nil {
 		return res, fmt.Errorf("cut the read of %s.%s at the snapshot: %w", schema, table, err)
 	}
 	if cut.inconclusive != "" {
 		return inconclusive(res, cut.inconclusive), nil
 	}
+	// The read's time bound. With the exact position cut it is only a
+	// coarse bound for partition pruning, widened by an hour: asOf is the
+	// verify host's clock and event_timestamp the source's, so a tight
+	// bound could drop a change the snapshot holds when the clocks differ,
+	// a false mismatch the position cut already rules out. Without the cut
+	// it stays the read's only end, as before.
+	until := liveReadUntil(asOf, cut.pos != nil)
 
 	// 3b. The changes since the snapshot are read from its position: when the
 	// source's binary log started again after it, every later change sorts
@@ -277,14 +284,14 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	// Bounded by the read itself, from the snapshot up to asOf (#2186): the
 	// check then also reads the hours rotation moved into archives, which the
 	// fetch below reads too, so a snapshot older than the index's retention
-	// is checked, not reported as uncheckable. The window ends at asOf, the
-	// read's time bound, and deliberately not at its position cut (#2150):
+	// is checked, not reported as uncheckable. The window ends at until,
+	// the read's time bound, and deliberately not at its position cut (#2150):
 	// past a restart of the binary log's numbering a position comparison no
 	// longer orders changes, which is the very thing this checks for. The
 	// time window holds every change the cut read can, so it can only find
 	// more, never miss one.
 	unchecked, err := reconstruct.CheckNumberingFromRead(ctx, cfg.IndexDB, sincePos, eventMark, reconstruct.ReadWindow{
-		Schema: schema, Table: table, Since: snapshotTime, Until: asOf, Notice: renumberNotices.To(nil),
+		Schema: schema, Table: table, Since: snapshotTime, Until: until, Notice: renumberNotices.To(nil),
 	})
 	if err != nil {
 		if errors.Is(err, reconstruct.ErrBinlogRenumbered) {
@@ -308,7 +315,7 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 			Table:      table,
 			Since:      &snapshotTime,
 			SincePos:   sincePos,
-			Until:      &asOf,
+			Until:      &until,
 			UntilPos:   cut.pos,
 			LimitPerPK: 1,
 		},

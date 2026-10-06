@@ -109,6 +109,9 @@ func cutRows(rows ...[4]any) *sqlmock.Rows {
 	return r
 }
 
+// cutFloor is the walk's floor in TestSnapshotCut.
+var cutFloor = time.Date(2026, 10, 6, 12, 30, 0, 0, time.UTC)
+
 func TestSnapshotCut(t *testing.T) {
 	set := uuidA + ":1-10"
 	ckpt := func(m sqlmock.Sqlmock, file any, pos any) {
@@ -130,7 +133,7 @@ func TestSnapshotCut(t *testing.T) {
 				m.ExpectQuery("ORDER BY event_id DESC").WillReturnRows(cutRows(
 					[4]any{int64(9), uuidA + ":12", "binlog.000002", int64(800)},
 					[4]any{int64(8), uuidA + ":11", "binlog.000002", int64(700)}))
-				m.ExpectQuery("ORDER BY event_id DESC").WithArgs(int64(8)).WillReturnRows(cutRows(
+				m.ExpectQuery("ORDER BY event_id DESC").WithArgs(sqlmock.AnyArg(), int64(8)).WillReturnRows(cutRows(
 					[4]any{int64(7), uuidA + ":10", "binlog.000002", int64(600)},
 					[4]any{int64(6), uuidA + ":10", "binlog.000002", int64(500)}))
 			},
@@ -152,6 +155,7 @@ func TestSnapshotCut(t *testing.T) {
 			mock: func(m sqlmock.Sqlmock) {
 				ckpt(m, "binlog.000004", 154)
 				m.ExpectQuery("ORDER BY event_id DESC").WillReturnRows(cutRows())
+				m.ExpectQuery("event_timestamp < . ORDER BY event_id DESC LIMIT 1").WillReturnRows(cutRows())
 			},
 			want: &query.BinlogPos{File: "binlog.000004", Pos: 154},
 		},
@@ -161,8 +165,33 @@ func TestSnapshotCut(t *testing.T) {
 			mock: func(m sqlmock.Sqlmock) {
 				ckpt(m, nil, nil)
 				m.ExpectQuery("ORDER BY event_id DESC").WillReturnRows(cutRows())
+				m.ExpectQuery("event_timestamp < . ORDER BY event_id DESC LIMIT 1").WillReturnRows(cutRows())
 			},
 			unplaced: "no position",
+		},
+		{
+			name: "nothing indexed near the read: the newest older change, held by the snapshot, is the cut",
+			page: 1000,
+			mock: func(m sqlmock.Sqlmock) {
+				ckpt(m, "binlog.000004", 154)
+				// The floor bounds the walk, by partition (TO_SECONDS of its
+				// hour) and exactly; the probe reads below the same floor.
+				m.ExpectQuery("TO_SECONDS\\(event_timestamp\\) >= 63958507200 AND event_timestamp >= . ORDER BY event_id DESC").WithArgs(cutFloor).WillReturnRows(cutRows())
+				m.ExpectQuery("event_timestamp < . ORDER BY event_id DESC LIMIT 1").WithArgs(cutFloor).WillReturnRows(cutRows(
+					[4]any{int64(3), uuidA + ":9", "binlog.000001", int64(300)}))
+			},
+			want: &query.BinlogPos{File: "binlog.000001", Pos: 300},
+		},
+		{
+			name: "nothing indexed near the read, and the newest older change is not held",
+			page: 1000,
+			mock: func(m sqlmock.Sqlmock) {
+				ckpt(m, "binlog.000004", 154)
+				m.ExpectQuery("ORDER BY event_id DESC").WillReturnRows(cutRows())
+				m.ExpectQuery("event_timestamp < . ORDER BY event_id DESC LIMIT 1").WillReturnRows(cutRows(
+					[4]any{int64(3), uuidA + ":11", "binlog.000001", int64(300)}))
+			},
+			unplaced: "not one the snapshot holds",
 		},
 		{
 			name: "every live change is newer than the snapshot",
@@ -219,7 +248,7 @@ func TestSnapshotCut(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, _, unplaced, err := snapshotCutPaged(context.Background(), db, in, c.page)
+			got, _, unplaced, err := snapshotCutPaged(context.Background(), db, in, cutFloor, c.page)
 			if err != nil {
 				t.Fatalf("snapshotCut: %v", err)
 			}
@@ -256,7 +285,7 @@ func TestResolveLiveCut_unanchored(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer db.Close()
-			cut, err := resolveLiveCut(context.Background(), db, c.src, time.Time{}, nil)
+			cut, err := resolveLiveCut(context.Background(), db, c.src, time.Time{}, nil, time.Now())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -288,7 +317,7 @@ func TestResolveLiveCut_anchored(t *testing.T) {
 		defer db.Close()
 		stream(m)
 		walk(m)
-		cut, err := resolveLiveCut(context.Background(), db, src, time.Now(), &query.BinlogPos{File: "binlog.000003", Pos: 100})
+		cut, err := resolveLiveCut(context.Background(), db, src, time.Now(), &query.BinlogPos{File: "binlog.000003", Pos: 100}, time.Now())
 		if err != nil || cut.pos == nil || *cut.pos != (query.BinlogPos{File: "binlog.000003", Pos: 700}) || cut.note != "" {
 			t.Fatalf("got %+v, %v", cut, err)
 		}
@@ -309,7 +338,7 @@ func TestResolveLiveCut_anchored(t *testing.T) {
 			defer db.Close()
 			stream(m)
 			walk(m)
-			cut, err := resolveLiveCut(context.Background(), db, src, time.Now(), &query.BinlogPos{File: "binlog.000003", Pos: c.sincePos})
+			cut, err := resolveLiveCut(context.Background(), db, src, time.Now(), &query.BinlogPos{File: "binlog.000003", Pos: c.sincePos}, time.Now())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -323,7 +352,7 @@ func TestResolveLiveCut_anchored(t *testing.T) {
 		defer db.Close()
 		m.ExpectQuery("SELECT 1 FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 		m.ExpectQuery("FROM index_state").WillReturnRows(sqlmock.NewRows([]string{"m", "n"}).AddRow(nil, 1))
-		cut, err := resolveLiveCut(context.Background(), db, src, time.Now(), nil)
+		cut, err := resolveLiveCut(context.Background(), db, src, time.Now(), nil, time.Now())
 		if err != nil || cut.pos != nil || !strings.Contains(cut.note, "binary log order") {
 			t.Fatalf("got %+v, %v; want unanchored", cut, err)
 		}
@@ -338,7 +367,7 @@ func TestWaitIndexCovers(t *testing.T) {
 		m.ExpectQuery("SELECT gtid_set FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"g"}).AddRow(uuidA + ":1-8"))
 	}
 	age := func(m sqlmock.Sqlmock, secs int) {
-		m.ExpectQuery("TIMESTAMPDIFF").WillReturnRows(sqlmock.NewRows([]string{"a"}).AddRow(secs))
+		m.ExpectQuery("TIMESTAMPDIFF").WillReturnRows(sqlmock.NewRows([]string{"a", "g"}).AddRow(secs, uuidA+":1-8"))
 	}
 	t.Run("waits for a running capture to catch up", func(t *testing.T) {
 		db, m, _ := sqlmock.New()
@@ -352,6 +381,36 @@ func TestWaitIndexCovers(t *testing.T) {
 		}
 		if err := m.ExpectationsWereMet(); err != nil {
 			t.Fatal(err)
+		}
+	})
+	t.Run("a capture that did not move during one full wait is not waited for again", func(t *testing.T) {
+		db, m, _ := sqlmock.New()
+		defer db.Close()
+		// First table: waits the whole (short) time, the saved position
+		// never moves.
+		behind(m)
+		age(m, 1)
+		ok, _, err := waitIndexCovers(context.Background(), db, src, consistency.GTIDFlavorMySQL, time.Nanosecond)
+		if err != nil || ok {
+			t.Fatalf("first wait: %v %v", ok, err)
+		}
+		// Second table, same position: returns at once, and says why.
+		behind(m)
+		age(m, 1)
+		start := time.Now()
+		ok, note, err := waitIndexCovers(context.Background(), db, src, consistency.GTIDFlavorMySQL, time.Minute)
+		if err != nil || ok || !strings.Contains(note, "not waited for again") || time.Since(start) > time.Second {
+			t.Fatalf("second wait: %v %q %v after %v; want an immediate verdict naming the earlier wait", ok, note, err, time.Since(start))
+		}
+		if err := m.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+		// The capture moved: a later table waits again.
+		behind(m)
+		m.ExpectQuery("TIMESTAMPDIFF").WillReturnRows(sqlmock.NewRows([]string{"a", "g"}).AddRow(1, uuidA+":1-9"))
+		m.ExpectQuery("SELECT gtid_set FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"g"}).AddRow(uuidA + ":1-12"))
+		if ok, note, err := waitIndexCovers(context.Background(), db, src, consistency.GTIDFlavorMySQL, time.Minute); err != nil || !ok {
+			t.Fatalf("after the capture moved: %v %q %v; want it waited for and covered", ok, note, err)
 		}
 	})
 	t.Run("a stopped capture is not waited for", func(t *testing.T) {
@@ -417,4 +476,14 @@ func TestWaitIndexCovers(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+func TestLiveReadUntil(t *testing.T) {
+	asOf := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	if got := liveReadUntil(asOf, false); !got.Equal(asOf) {
+		t.Errorf("no cut: %v, want asOf: without the position cut the time bound is the read's only end", got)
+	}
+	if got := liveReadUntil(asOf, true); !got.Equal(asOf.Add(time.Hour)) {
+		t.Errorf("exact cut: %v, want asOf + 1h: a coarse bound a source clock ahead of this host cannot cut into", got)
+	}
 }
