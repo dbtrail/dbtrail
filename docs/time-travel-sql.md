@@ -996,8 +996,8 @@ What this is and is not:
   - a word the copy keeps for itself and MySQL takes for a name, written
     as a name without quotes: `at`, `end`, `offset`, `full`, `any`, `some`,
     `cast`, `do`, `only`, `array`, `semi`, `anti`, `isnull`, `notnull`,
-    `pivot` and about thirty rarer ones (44 in all; on MariaDB also
-    `window`, `lateral`, `qualify` and `tablesample`). The copy cannot read
+    `pivot` and about thirty rarer ones (44 in all; `window` and `lateral`
+    among them are a name on MariaDB only). The copy cannot read
     such a name bare. For a column it refuses the statement (`WHERE at >=
     '2026-01-02'` over a column called `at` is a syntax error there), which
     used to cost a failed attempt on the copy before MySQL answered, on

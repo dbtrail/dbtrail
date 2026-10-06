@@ -69,11 +69,12 @@ var sameTypedLiteral = wordSet("all", "binary", "date", "distinct", "interval", 
 // The copy reserves more words than these (views.BareKeywords, 105 of them,
 // pinned to the engine by a test there): the rest are reserved on the source
 // too (order, group, left, desc), so a statement that runs there holds them
-// as the keyword or quoted. Measured on MySQL 8.4.9 and MariaDB 11.4, each
-// word as `CREATE TABLE t (id INT, <word> VARCHAR(60))` and then read bare:
-// 40 of them are a name on MySQL and 42 on MariaDB, and this is both lists
-// together. lateral, qualify, tablesample and window are a name on MariaDB
-// only; offset and returning on MySQL only. Two tests keep the list:
+// as the keyword or quoted. Measured on MySQL 8.0.46 and 8.4.9 and on
+// MariaDB 10.11, 11.4, 11.8 and 12.3, each word as `CREATE TABLE t (id INT,
+// <word> INT)` and then read bare: 40 of them are a name on MySQL 8.4 and
+// 42 on each of the others, and this is all the lists together. lateral and
+// window are a name on MariaDB only, qualify and tablesample on MariaDB and
+// MySQL 8.0, offset and returning on MySQL only. Two tests keep the list:
 // TestDuckDB_copyOnlyReservedWords holds it inside the engine's and checks
 // what the copy does with each word, and the routed fixture of #2131 asks a
 // real MySQL and a real MariaDB which of the engine's words they take bare
