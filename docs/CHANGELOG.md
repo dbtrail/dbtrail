@@ -387,8 +387,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--at`, the check now looks only at what the read up to `--at` sees, as
   `verify` and `_snapshot` do: a change of the table that sorts before the
   snapshot's mark and was recorded up to `--at`, or capture moving to
-  another server at or before `--at`. Without `--at`, and for snapshot
-  updates, the check is unchanged. A snapshot an update wrote without naming
+  another server at or before `--at`. Without `--at`, with `--output-format
+  parquet` (its window also ends at a binlog position taken after `--at`),
+  and for snapshot updates, the check is unchanged. A snapshot an update wrote without naming
   the server capture read keeps refusing after a later move to another
   server.
 - **The binlog-renumbering check no longer switches itself off when it cannot
