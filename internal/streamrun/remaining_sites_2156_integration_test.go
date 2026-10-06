@@ -188,7 +188,9 @@ func runRemainingSites2156(t *testing.T, flavor, sourceDSN string, sourceDB, ind
 		}
 		// LIMIT 2 reads two rows' latest changes; a row whose latest change
 		// is a DELETE (row 2) takes its place and is not answered, as before.
-		got, _ = remaining2156Read(t, h, "SELECT * FROM _flashback.t AS OF '"+at+"' LIMIT 2")
+		// Under the cap of 4 the history of two rows fits; under a cap of 2
+		// it would not, and a smaller LIMIT is the way out the refusal names.
+		got, _ = remaining2156Read(t, h4, "SELECT * FROM _flashback.t AS OF '"+at+"' LIMIT 2")
 		rows := strings.Split(got, ",")
 		if got == "" || len(rows) > 2 {
 			t.Fatalf("LIMIT 2 answered %q", got)
