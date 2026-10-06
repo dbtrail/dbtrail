@@ -496,7 +496,7 @@ func TestPersistGapAutoAdvance_stampIsUpsert(t *testing.T) {
 		`gap_lost_at\s+= UTC_TIMESTAMP\(\),\s+gap_lost_detail = VALUES\(gap_lost_detail\)\s*$`).
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-			sqlmock.AnyArg(), "events lost").
+			sqlmock.AnyArg(), sqlmock.AnyArg(), "events lost").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(checkpointStmtRE).
 		WillReturnResult(sqlmock.NewResult(0, 1))

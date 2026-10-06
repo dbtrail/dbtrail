@@ -369,6 +369,7 @@ func InitIndexTables(t *testing.T, db *sql.DB) {
 		last_checkpoint  DATETIME        NOT NULL,
 		server_id        INT UNSIGNED    NOT NULL,
 		bintrail_id      CHAR(36)        NULL DEFAULT NULL,
+		source_identity  VARCHAR(64)     DEFAULT NULL,
 		gap_lost_at      DATETIME        DEFAULT NULL,
 		gap_lost_detail  TEXT            DEFAULT NULL,
 		source_health    JSON            DEFAULT NULL,

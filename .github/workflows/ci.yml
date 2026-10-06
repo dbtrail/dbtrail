@@ -575,7 +575,9 @@ jobs:
             TestIntegrationGTIDResetMasterRestartBeforeRenumberingPasses \
             TestIntegrationGTIDResetMasterRestartAfterRenumberingPasses \
             TestIntegrationGTIDResetMasterCrashRightAfterRestart \
-            TestIntegrationGTIDResetMasterWhileStreaming; do
+            TestIntegrationGTIDResetMasterWhileStreaming \
+            TestIntegrationGTIDResetMasterFileNameReused \
+            TestIntegrationGTIDCheckpointFromAnotherServer; do
             grep -q -- "--- PASS: $name " /tmp/mysql-it.out \
               || { echo "FATAL: GTID capture across a source RESET ($name) did not run (false-green tripwire)" >&2; exit 1; }
           done

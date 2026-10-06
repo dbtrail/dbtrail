@@ -147,50 +147,6 @@ func mysqlSubset(s *gomysql.MysqlGTIDSet, keep func(uuid.UUID) bool) *gomysql.My
 	return &out
 }
 
-// binlogKept reports whether the checkpoint's binlog file is still on the
-// source with an older file before it: its binary log was not started over.
-// A checkpoint in the oldest (or only) file is not proof: a young server
-// reset back to that same name looks the same, and reading it as a reset
-// costs duplicates at worst, while the other reading would skip changes.
-func binlogKept(file string, logs []binlogFileEntry) bool {
-	if file == "" || len(logs) < 2 {
-		return false
-	}
-	for _, l := range logs[1:] {
-		if l.name == file {
-			return true
-		}
-	}
-	return false
-}
-
-// mysqlIntersect returns a ∩ b.
-func mysqlIntersect(a, b *gomysql.MysqlGTIDSet) *gomysql.MysqlGTIDSet {
-	out := gomysql.NewMysqlGTIDSet()
-	for sid, tags := range *a {
-		for tag, ivs := range tags {
-			bivs := (*b)[sid][tag]
-			var got gomysql.IntervalSlice
-			for _, x := range ivs {
-				for _, y := range bivs {
-					lo, hi := max(x.Start, y.Start), min(x.Stop, y.Stop)
-					if lo < hi {
-						got = append(got, gomysql.Interval{Start: lo, Stop: hi})
-					}
-				}
-			}
-			if len(got) == 0 {
-				continue
-			}
-			if out[sid] == nil {
-				out[sid] = make(map[gomysql.Tag]gomysql.IntervalSlice)
-			}
-			out[sid][tag] = got.Normalize()
-		}
-	}
-	return &out
-}
-
 func parseMysqlSet(s string) (*gomysql.MysqlGTIDSet, error) {
 	set, err := gomysql.ParseMysqlGTIDSet(NormalizeGTIDSet(strings.TrimSpace(s)))
 	if err != nil {
@@ -218,7 +174,7 @@ func earliestOrUnknown(logs []binlogFileEntry) string {
 // and binary log list (logs may be nil when SHOW BINARY LOGS failed; only
 // the past-the-end check needs it). nil means the saved set still continues
 // the source's history: equal, behind, or ahead only on other servers' GTIDs.
-func classifyMySQLRenumbering(saved, executed, purged, serverUUID, file string, pos uint64, logs []binlogFileEntry) (*gtidRenumbering, error) {
+func classifyMySQLRenumbering(saved, executed, purged, serverUUID, file string, pos uint64, sameServer bool, logs []binlogFileEntry) (*gtidRenumbering, error) {
 	s, err := parseMysqlSet(saved)
 	if err != nil {
 		return nil, fmt.Errorf("parse checkpoint GTID set: %w", err)
@@ -251,32 +207,23 @@ func classifyMySQLRenumbering(saved, executed, purged, serverUUID, file string, 
 	}
 	earliest := earliestOrUnknown(logs)
 	var why string
-	var keepOwn *gomysql.MysqlGTIDSet // own GTIDs that stay in the restart set
 	switch {
 	case !ownPart.IsEmpty() && !e.Contain(ownPart):
 		ownNow := mysqlSubset(e, func(sid uuid.UUID) bool { return sid == own })
-		if binlogKept(file, logs) {
-			// The checkpoint's file is still there, after older ones: the
-			// binary log was not reset, it lost its tail (a crash with
-			// sync_binlog != 1) or the server was restored with its logs.
-			// The source's own GTIDs it still has are the same transactions
-			// capture read, so they stay in the restart set: dropping them
-			// would re-index the whole retained binary log as duplicates.
-			keepOwn = mysqlIntersect(ownPart, ownNow)
-			why = fmt.Sprintf("the source's GTID history went backwards: the saved checkpoint holds %s of the source's own "+
-				"server_uuid, but the source's gtid_executed now holds only %s of it, while its binary log still has the "+
-				"checkpoint's file %s (the source lost the end of its binary log, as in a crash with sync_binlog != 1, or was "+
-				"restored from an older backup with its binary logs)", ownPart.String(), setOrNone(ownNow.String()), file)
-			break
-		}
+		// Nothing reachable from SQL proves which: a reset whose new
+		// numbering rotated back past the checkpoint's file name looks like
+		// a crash that lost the end of the binary log (sync_binlog != 1). It
+		// is read as a reset either way: that costs duplicates after a lost
+		// tail, while the other reading would skip new changes for good.
 		why = fmt.Sprintf("the source's GTID numbering went backwards: the saved checkpoint holds %s of the source's own "+
 			"server_uuid, but the source's gtid_executed now holds %s of it (RESET BINARY LOGS AND GTIDS / RESET MASTER, "+
-			"or a restore from an older backup)", ownPart.String(), setOrNone(ownNow.String()))
+			"a restore from an older backup, or a crash that lost the end of its binary log; after a crash, changes still "+
+			"in the source's binary log that capture had read are indexed again)", ownPart.String(), setOrNone(ownNow.String()))
 	case !shared:
 		why = fmt.Sprintf("the source shares no GTID history with the saved checkpoint: no server UUID of the saved set "+
 			"(%s) appears in the source's gtid_executed (%s), so the source was rebuilt or replaced (its server_uuid is %s)",
 			s.String(), setOrNone(e.String()), own)
-	case !ownPart.IsEmpty() && !foreignPresent && checkpointPastBinlogEnd(file, pos, logs):
+	case sameServer && !ownPart.IsEmpty() && !foreignPresent && checkpointPastBinlogEnd(file, pos, logs):
 		newest := logs[len(logs)-1]
 		why = fmt.Sprintf("the source's binary log and GTID numbering started over: the saved checkpoint is at %s:%d, past "+
 			"the end of the source's newest binary log %s (%d bytes), so the source's transactions numbered inside the saved set "+
@@ -291,11 +238,6 @@ func classifyMySQLRenumbering(saved, executed, purged, serverUUID, file string, 
 	// shared history" again and stamp a second loss for the same break). The
 	// purged set joins, because the source cannot send it.
 	resume := mysqlSubset(s, func(sid uuid.UUID) bool { return sid != own && mysqlSetHasUUID(e, sid) })
-	if keepOwn != nil {
-		if err := resume.Update(keepOwn.String()); err != nil {
-			return nil, fmt.Errorf("keep the source's surviving own GTIDs in the resume set: %w", err)
-		}
-	}
 	lostPurged := !resume.Contain(p)
 	if err := resume.Update(p.String()); err != nil {
 		return nil, fmt.Errorf("merge @@gtid_purged into the resume set: %w", err)
@@ -303,9 +245,6 @@ func classifyMySQLRenumbering(saved, executed, purged, serverUUID, file string, 
 	where := "the start of the source's binary log"
 	if earliest != "" {
 		where += " (" + earliest + ")"
-	}
-	if keepOwn != nil {
-		where = "the source's first transaction it has not sent before"
 	}
 	detail := why + "; capture restarts from " + where + " and keeps every event already indexed; changes the source " +
 		"made between the last capture and that point that were not captured are permanently lost"
@@ -342,7 +281,7 @@ func parseMariadbBinlogState(s string) (map[uint32]map[uint32]uint64, error) {
 // transactions are those carrying its server_id; @@gtid_binlog_state keeps
 // the last one per domain and server, so it can be looked up even when
 // another server wrote last in that domain.
-func classifyMariaDBRenumbering(saved, binlogState string, serverID uint32, file string, pos uint64, logs []binlogFileEntry) (*gtidRenumbering, error) {
+func classifyMariaDBRenumbering(saved, binlogState string, serverID uint32, file string, pos uint64, sameServer bool, logs []binlogFileEntry) (*gtidRenumbering, error) {
 	s, err := parseMariadbSet(strings.TrimSpace(saved))
 	if err != nil {
 		return nil, fmt.Errorf("parse checkpoint GTID set: %w", err)
@@ -393,7 +332,7 @@ func classifyMariaDBRenumbering(saved, binlogState string, serverID uint32, file
 		why = fmt.Sprintf("the source shares no GTID history with the saved checkpoint: no domain of the saved position "+
 			"(%s) appears in the source's @@gtid_binlog_state (%s), so its binary log was reset or the server was replaced",
 			saved, setOrNone(strings.TrimSpace(binlogState)))
-	case ownInSaved && !foreignPresent && checkpointPastBinlogEnd(file, pos, logs):
+	case sameServer && ownInSaved && !foreignPresent && checkpointPastBinlogEnd(file, pos, logs):
 		newest := logs[len(logs)-1]
 		why = fmt.Sprintf("the source's binary log and GTID numbering started over: the saved checkpoint is at %s:%d, past "+
 			"the end of the source's newest binary log %s (%d bytes) (RESET MASTER)", file, pos, newest.name, newest.size)
@@ -423,28 +362,37 @@ func mariadbRenumberedError(r *gtidRenumbering) error {
 	return &SourceRenumberedError{msg: fmt.Sprintf(
 		"cannot resume capture: %s. Nothing was deleted from the index. To resume, restart capture once with "+
 			"--reset --start-file %s --start-pos 4: it reads the source's new numbering from its first transaction "+
-			"(in position mode; restart later with --start-gtid set to the source's @@gtid_binlog_pos to return to GTID "+
-			"mode) and records the jump as a capture loss. --reset alone also resumes, from the source's current "+
-			"position, and skips everything the source wrote since its reset",
+			"(in position mode) and records the jump as a capture loss. To return to GTID mode later, stop capture, "+
+			"read its checkpoint (binlog file and position, shown by bintrail status), and restart once with --start-gtid "+
+			"set to what SELECT BINLOG_GTID_POS('<file>', <position>) returns on the source for that checkpoint. "+
+			"--reset alone also resumes, from the source's current position, and skips everything the source wrote "+
+			"since its reset",
 		r.Detail, file)}
 }
 
-// detectGTIDRenumbering reads what the verdict needs from the source. Only the
-// past-the-end check needs SHOW BINARY LOGS: when that fails the other checks
-// still run, with a warning, so a resume that worked before never stops here.
-func detectGTIDRenumbering(sourceDB *sql.DB, flavor, savedSet, file string, pos uint64, timeout time.Duration) (*gtidRenumbering, error) {
+// detectGTIDRenumbering reads what the verdict needs from the source.
+// savedIdentity is the source identity the checkpoint was written against,
+// identity the one capture reads now (sourceIdentity): binlog file numbers
+// are only comparable on one server, so the past-the-end check runs only when
+// the two match. When it runs, failing to list the binary logs is fatal: a
+// verdict that silently changes with a failed query is the loss this check
+// exists to stop. Otherwise the list only names where a restart begins, and a
+// failure there is a warning.
+func detectGTIDRenumbering(sourceDB *sql.DB, flavor, savedSet, file string, pos uint64, savedIdentity, identity string, timeout time.Duration) (*gtidRenumbering, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	binaryLogs := func() []binlogFileEntry {
+	sameServer := savedIdentity != "" && savedIdentity == identity && file != ""
+	binaryLogs := func() ([]binlogFileEntry, error) {
 		logs, err := listBinaryLogs(ctx, sourceDB)
-		if err != nil {
-			slog.Warn("could not list the source's binary logs; skipping the check that the checkpoint is not past their end: "+
-				"if the source's GTID numbering started over and has already passed the checkpoint's, this restart cannot "+
-				"see it and skips the source's new transactions numbered inside the saved set",
-				"error", err)
-			return nil
+		if err == nil {
+			return logs, nil
 		}
-		return logs
+		if sameServer {
+			return nil, fmt.Errorf("%w; the GTID history check needs the source's binary log list, retry once the source answers SHOW BINARY LOGS", err)
+		}
+		slog.Warn("could not list the source's binary logs; a restart after a GTID renumbering will not name its first file",
+			"error", err)
+		return nil, nil
 	}
 	if flavor == gomysql.MariaDBFlavor {
 		var serverID uint32
@@ -452,21 +400,49 @@ func detectGTIDRenumbering(sourceDB *sql.DB, flavor, savedSet, file string, pos 
 		if err := sourceDB.QueryRowContext(ctx, "SELECT @@server_id, @@GLOBAL.gtid_binlog_state").Scan(&serverID, &state); err != nil {
 			return nil, fmt.Errorf("query @@server_id, @@gtid_binlog_state: %w", err)
 		}
-		return classifyMariaDBRenumbering(savedSet, state, serverID, file, pos, binaryLogs())
+		logs, err := binaryLogs()
+		if err != nil {
+			return nil, err
+		}
+		return classifyMariaDBRenumbering(savedSet, state, serverID, file, pos, sameServer, logs)
 	}
 	var mode, own, executed, purged string
 	if err := sourceDB.QueryRowContext(ctx,
 		"SELECT @@GLOBAL.gtid_mode, @@server_uuid, @@GLOBAL.gtid_executed, @@GLOBAL.gtid_purged").Scan(&mode, &own, &executed, &purged); err != nil {
 		return nil, fmt.Errorf("query @@gtid_mode, @@server_uuid, @@gtid_executed, @@gtid_purged: %w", err)
 	}
-	// Only a source with gtid_mode=ON numbers its transactions and serves a
-	// GTID resume at all; on any other mode its gtid_executed is frozen, says
-	// nothing about where its history went, and the source refuses the GTID
-	// dump with its own error.
+	// Only gtid_mode=ON serves a GTID resume: MySQL refuses the dump on any
+	// other mode, ON_PERMISSIVE included (observed on 8.4.9: "cannot start
+	// in AUTO_POSITION mode: this server has GTID_MODE = ON_PERMISSIVE
+	// instead of ON"), so there is no history to judge.
 	if !strings.EqualFold(strings.TrimSpace(mode), "ON") {
 		slog.Warn("source gtid_mode is not ON, so a GTID-mode resume cannot work and the GTID history check is skipped",
 			"gtid_mode", mode)
 		return nil, nil
 	}
-	return classifyMySQLRenumbering(savedSet, executed, purged, own, file, pos, binaryLogs())
+	logs, err := binaryLogs()
+	if err != nil {
+		return nil, err
+	}
+	return classifyMySQLRenumbering(savedSet, executed, purged, own, file, pos, sameServer, logs)
+}
+
+// sourceIdentity names the server capture reads, for stream_state's
+// source_identity: @@server_uuid on MySQL, "server_id:<n>" on MariaDB (which
+// has no server_uuid; servers that replicate from each other must have
+// distinct server_ids). Two checkpoints with the same identity were read from
+// one server, whose binlog file numbers can be compared.
+func sourceIdentity(ctx context.Context, sourceDB *sql.DB, flavor string) (string, error) {
+	if flavor == gomysql.MariaDBFlavor {
+		var id uint32
+		if err := sourceDB.QueryRowContext(ctx, "SELECT @@server_id").Scan(&id); err != nil {
+			return "", fmt.Errorf("query @@server_id: %w", err)
+		}
+		return fmt.Sprintf("server_id:%d", id), nil
+	}
+	var u string
+	if err := sourceDB.QueryRowContext(ctx, "SELECT @@server_uuid").Scan(&u); err != nil {
+		return "", fmt.Errorf("query @@server_uuid: %w", err)
+	}
+	return strings.ToLower(strings.TrimSpace(u)), nil
 }

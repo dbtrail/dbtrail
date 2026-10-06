@@ -116,7 +116,7 @@ func TestPersistResetDiscard_jumpStampsBeforeCheckpoint(t *testing.T) {
 	mock.ExpectExec(stampStmtRE).
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-			sqlmock.AnyArg(), "events lost via reset").
+			sqlmock.AnyArg(), sqlmock.AnyArg(), "events lost via reset").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(checkpointStmtRE).
 		WillReturnResult(sqlmock.NewResult(0, 1))

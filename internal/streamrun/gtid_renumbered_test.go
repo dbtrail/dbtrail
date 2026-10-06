@@ -4,6 +4,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 const (
@@ -50,8 +53,10 @@ func TestClassifyMySQLRenumbering(t *testing.T) {
 		file               string
 		pos                uint64
 		logs               []binlogFileEntry
+		otherServer        bool   // the checkpoint was written against another server
 		wantVerdict        string // "" = no verdict
 		wantResume         string
+		wantDuplicates     bool // the detail must say retained changes are indexed again
 	}{
 		// The case the issue reports: RESET, restart before the new
 		// numbering reaches the old one.
@@ -97,34 +102,38 @@ func TestClassifyMySQLRenumbering(t *testing.T) {
 			own: uuidOwn, logs: newLogs, wantVerdict: "went backwards", wantResume: uuidOwn + ":1-2"},
 		{name: "tagged GTIDs of the own UUID reset", saved: uuidOwn + ":1-10:tg:1-3", exec: uuidOwn + ":1-10",
 			own: uuidOwn, logs: newLogs, wantVerdict: "went backwards", wantResume: ""},
-		// The checkpoint's file is still there after older ones: the binary
-		// log lost its tail (crash, sync_binlog != 1), it was not reset. The
-		// own GTIDs the source still has stay in the restart set, or the
-		// whole retained binary log would be indexed a second time.
-		{name: "binary log kept, tail lost", saved: uuidPrimary + ":1-100," + uuidOwn + ":1-10", exec: uuidPrimary + ":1-100," + uuidOwn + ":1-7",
+		// A file NAME proves nothing about its content: after a RESET the new
+		// numbering rotates back past the old checkpoint's file name. The
+		// verdict must be a reset (own UUID dropped from the restart set,
+		// never kept), or the new transactions numbered inside the saved
+		// set are skipped for good.
+		{name: "file name reused after a reset", saved: uuidOwn + ":1-500", exec: uuidOwn + ":1-200",
+			own: uuidOwn, file: "binlog.000003", pos: 5000,
+			logs:        []binlogFileEntry{{"binlog.000001", 900}, {"binlog.000002", 900}, {"binlog.000003", 900}, {"binlog.000004", 300}},
+			wantVerdict: "went backwards", wantResume: "", wantDuplicates: true},
+		// A real lost tail (crash, sync_binlog != 1) looks the same from here.
+		// It is read as a reset too: retained changes are indexed again, never
+		// skipped.
+		{name: "lost tail with older files kept", saved: uuidPrimary + ":1-100," + uuidOwn + ":1-10", exec: uuidPrimary + ":1-100," + uuidOwn + ":1-7",
 			own: uuidOwn, file: "binlog.000002", pos: 9000,
 			logs:        []binlogFileEntry{{"binlog.000001", 500}, {"binlog.000002", 800}},
-			wantVerdict: "lost the end of its binary log", wantResume: uuidPrimary + ":1-100," + uuidOwn + ":1-7"},
-		{name: "binary log kept, gaps intersect", saved: uuidOwn + ":1-10:20-30", exec: uuidOwn + ":1-5:20-25",
-			own: uuidOwn, file: "binlog.000003", pos: 9000,
-			logs:        []binlogFileEntry{{"binlog.000002", 500}, {"binlog.000003", 800}},
-			wantVerdict: "lost the end of its binary log", wantResume: uuidOwn + ":1-5:20-25"},
-		// Only file is the checkpoint's: a young server reset back to the same
-		// name looks the same, so it is read as a reset (no skip, at worst
-		// duplicates).
-		{name: "checkpoint in the only file", saved: uuidOwn + ":1-10", exec: uuidOwn + ":1-3",
-			own: uuidOwn, file: "binlog.000001", pos: 9000, logs: []binlogFileEntry{{"binlog.000001", 800}},
-			wantVerdict: "numbering went backwards", wantResume: ""},
-		{name: "checkpoint in the oldest of several files", saved: uuidOwn + ":1-10", exec: uuidOwn + ":1-3",
-			own: uuidOwn, file: "binlog.000001", pos: 9000,
-			logs:        []binlogFileEntry{{"binlog.000001", 800}, {"binlog.000002", 300}},
-			wantVerdict: "numbering went backwards", wantResume: ""},
+			wantVerdict: "went backwards", wantResume: uuidPrimary + ":1-100", wantDuplicates: true},
+		// Capture moved from replica Q (binlog.000900) to primary R
+		// (binlog.000010) behind the same address. File numbers of two
+		// servers are not comparable: no position verdict.
+		{name: "repointed from a replica to its primary", saved: uuidPrimary + ":1-100", exec: uuidPrimary + ":1-150",
+			own: uuidPrimary, file: "binlog.000900", pos: 4, logs: []binlogFileEntry{{"binlog.000010", 500}}, otherServer: true},
+		{name: "repointed, own GTIDs of the saved set still missing", saved: uuidPrimary + ":1-100", exec: uuidPrimary + ":1-50",
+			own: uuidPrimary, file: "binlog.000900", pos: 4, logs: []binlogFileEntry{{"binlog.000010", 500}}, otherServer: true,
+			wantVerdict: "went backwards", wantResume: ""},
+		{name: "numbering passed, checkpoint from another server", saved: uuidOwn + ":1-10", exec: uuidOwn + ":1-20",
+			own: uuidOwn, file: "binlog.000004", pos: 500, logs: newLogs, otherServer: true},
 		{name: "upper-case UUID from the server", saved: uuidOwn + ":1-10", exec: uuidOwn + ":1-3",
 			own: strings.ToUpper(uuidOwn), logs: newLogs, wantVerdict: "went backwards", wantResume: ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			r, err := classifyMySQLRenumbering(c.saved, c.exec, c.purge, c.own, c.file, c.pos, c.logs)
+			r, err := classifyMySQLRenumbering(c.saved, c.exec, c.purge, c.own, c.file, c.pos, !c.otherServer, c.logs)
 			if err != nil {
 				t.Fatalf("classify: %v", err)
 			}
@@ -151,7 +160,10 @@ func TestClassifyMySQLRenumbering(t *testing.T) {
 			}
 			// The checkpoint the restart persists must not be read as another
 			// break on the next restart, before anything new is captured.
-			again, err := classifyMySQLRenumbering(r.ResumeSet, c.exec, c.purge, c.own, r.EarliestFile, 4, c.logs)
+			if c.wantDuplicates && !strings.Contains(r.Detail, "indexed again") {
+				t.Errorf("detail = %q, want it to say retained changes may be indexed again", r.Detail)
+			}
+			again, err := classifyMySQLRenumbering(r.ResumeSet, c.exec, c.purge, c.own, r.EarliestFile, 4, true, c.logs)
 			if err != nil {
 				t.Fatalf("classify the restart checkpoint: %v", err)
 			}
@@ -163,10 +175,10 @@ func TestClassifyMySQLRenumbering(t *testing.T) {
 }
 
 func TestClassifyMySQLRenumbering_badInput(t *testing.T) {
-	if _, err := classifyMySQLRenumbering(uuidOwn+":1-10", "", "", "not-a-uuid", "", 0, nil); err == nil {
+	if _, err := classifyMySQLRenumbering(uuidOwn+":1-10", "", "", "not-a-uuid", "", 0, true, nil); err == nil {
 		t.Error("an unparseable @@server_uuid gave no error")
 	}
-	if _, err := classifyMySQLRenumbering("garbage", "", "", uuidOwn, "", 0, nil); err == nil {
+	if _, err := classifyMySQLRenumbering("garbage", "", "", uuidOwn, "", 0, true, nil); err == nil {
 		t.Error("an unparseable checkpoint set gave no error")
 	}
 }
@@ -181,6 +193,7 @@ func TestClassifyMariaDBRenumbering(t *testing.T) {
 		file        string
 		pos         uint64
 		logs        []binlogFileEntry
+		otherServer bool
 		wantVerdict string
 	}{
 		{name: "reset, nothing written since", saved: "0-2-6", state: "", serverID: 2, logs: newLogs, wantVerdict: "went backwards"},
@@ -196,6 +209,8 @@ func TestClassifyMariaDBRenumbering(t *testing.T) {
 			logs: newLogs, wantVerdict: "went backwards"},
 		{name: "empty saved position", saved: "", state: "0-2-3", serverID: 2, logs: newLogs},
 		{name: "no shared domain", saved: "5-9-10", state: "0-2-3", serverID: 2, logs: newLogs, wantVerdict: "shares no GTID history"},
+		{name: "numbering passed, checkpoint from another server", saved: "0-2-6", state: "0-2-20", serverID: 2,
+			file: "mysqld-bin.000004", pos: 500, logs: newLogs, otherServer: true},
 		{name: "numbering passed, checkpoint past the binlog end", saved: "0-2-6", state: "0-2-20", serverID: 2,
 			file: "mysqld-bin.000004", pos: 500, logs: newLogs, wantVerdict: "numbering started over"},
 		{name: "past the end but foreign history present", saved: "0-2-6,1-1-5", state: "0-2-20,1-1-5", serverID: 2,
@@ -203,7 +218,7 @@ func TestClassifyMariaDBRenumbering(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			r, err := classifyMariaDBRenumbering(c.saved, c.state, c.serverID, c.file, c.pos, c.logs)
+			r, err := classifyMariaDBRenumbering(c.saved, c.state, c.serverID, c.file, c.pos, !c.otherServer, c.logs)
 			if err != nil {
 				t.Fatalf("classify: %v", err)
 			}
@@ -234,12 +249,69 @@ func TestMariaDBRenumberedErrorCarriesResumeSteps(t *testing.T) {
 		"Nothing was deleted",
 		"--reset --start-file mysqld-bin.000001 --start-pos 4",
 		"capture loss",
+		"BINLOG_GTID_POS",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not say %q: %v", want, err)
 		}
 	}
+	if strings.Contains(err.Error(), "@@gtid_binlog_pos") {
+		t.Errorf("the error points the return to GTID mode at the source's current position, which skips or repeats changes: %v", err)
+	}
 	if refused.TelemetryClass() != "binlog_not_found" {
 		t.Errorf("telemetry class = %q", refused.TelemetryClass())
+	}
+}
+
+// The wrapper: when the verdict can depend on the binlog list, failing to
+// read it is fatal (retry), never a silent change of verdict; when it cannot
+// (another server wrote the checkpoint), it is not.
+func TestDetectGTIDRenumbering_logListFailure(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		savedIdentity string
+		wantErr       bool
+	}{
+		{"same server: fatal", uuidOwn, true},
+		{"checkpoint from another server: no position verdict, no error", uuidNew, false},
+		{"checkpoint without an identity (older build): no error", "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			mock.ExpectQuery("SELECT @@GLOBAL.gtid_mode").WillReturnRows(
+				sqlmock.NewRows([]string{"m", "u", "e", "p"}).AddRow("ON", uuidOwn, uuidOwn+":1-20", ""))
+			mock.ExpectQuery("SHOW BINARY LOGS").WillReturnError(errors.New("access denied"))
+			r, err := detectGTIDRenumbering(db, "mysql", uuidOwn+":1-10", "binlog.000004", 500, c.savedIdentity, uuidOwn, time.Second)
+			if c.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "retry") {
+					t.Fatalf("err = %v, want a fatal error that says to retry", err)
+				}
+				return
+			}
+			if err != nil || r != nil {
+				t.Fatalf("got verdict %v, err %v; want neither", r, err)
+			}
+		})
+	}
+}
+
+// gtid_mode other than ON: MySQL refuses the GTID dump itself (observed on
+// 8.4.9: "cannot start in AUTO_POSITION mode: this server has GTID_MODE =
+// ON_PERMISSIVE instead of ON"), so there is nothing to judge.
+func TestDetectGTIDRenumbering_gtidModeNotOn(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SELECT @@GLOBAL.gtid_mode").WillReturnRows(
+		sqlmock.NewRows([]string{"m", "u", "e", "p"}).AddRow("ON_PERMISSIVE", uuidOwn, uuidOwn+":1-3", ""))
+	r, err := detectGTIDRenumbering(db, "mysql", uuidOwn+":1-10", "binlog.000004", 500, uuidOwn, uuidOwn, time.Second)
+	if err != nil || r != nil {
+		t.Fatalf("got verdict %v, err %v; want neither", r, err)
 	}
 }

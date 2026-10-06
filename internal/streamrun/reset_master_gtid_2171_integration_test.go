@@ -142,7 +142,7 @@ func runGTIDResetScenario(t *testing.T, src dupSource, indexDB *sql.DB, indexNam
 	insertOrders(t, src.db, 9, last)
 
 	if src.flavor == gomysql.MariaDBFlavor {
-		mariadbResumeAfterReset(t, src, indexDB, cfg(2), cfg(3), last)
+		mariadbResumeAfterReset(t, src, indexDB, cfg(2), cfg(3), cfg(4), last)
 		return
 	}
 
@@ -186,7 +186,7 @@ func runGTIDResetScenario(t *testing.T, src dupSource, indexDB *sql.DB, indexNam
 // mariadbResumeAfterReset: on MariaDB the restart refuses, deletes nothing,
 // and says how to resume; following those steps captures the new numbering
 // from its first transaction and stamps the loss.
-func mariadbResumeAfterReset(t *testing.T, src dupSource, indexDB *sql.DB, restart, resume Config, last int) {
+func mariadbResumeAfterReset(t *testing.T, src dupSource, indexDB *sql.DB, restart, resume, back Config, last int) {
 	t.Helper()
 	var earliest string
 	var size int64
@@ -233,10 +233,34 @@ func mariadbResumeAfterReset(t *testing.T, src dupSource, indexDB *sql.DB, resta
 		t.Fatalf("run 4 (the error's resume steps): %v", err)
 	}
 	assertExactlyOnce(t, indexedPKs(t, indexDB, src.schema, "orders"), pkRange(1, last))
-	if at, detail := gapLost(t, indexDB); !at.Valid {
-		t.Error("resuming with the error's steps stamped no capture loss")
-	} else {
-		t.Logf("run 4 stamped gap_lost_at=%v detail=%q", at, detail)
+	at, detail := gapLost(t, indexDB)
+	if !at.Valid {
+		t.Fatal("resuming with the error's steps stamped no capture loss")
+	}
+	t.Logf("run 4 stamped gap_lost_at=%v detail=%q", at, detail)
+
+	// The error's way back to GTID mode: the stopped capture's checkpoint,
+	// translated with BINLOG_GTID_POS on the source. Nothing skipped, nothing
+	// twice, no new loss.
+	cp, err := loadStreamState(indexDB)
+	if err != nil || cp == nil || cp.mode != "position" {
+		t.Fatalf("checkpoint after run 4 = %+v, err %v: want position mode", cp, err)
+	}
+	var startGTID string
+	if err := src.db.QueryRow("SELECT BINLOG_GTID_POS(?, ?)", cp.binlogFile, cp.binlogPos).Scan(&startGTID); err != nil {
+		t.Fatalf("BINLOG_GTID_POS(%s, %d): %v", cp.binlogFile, cp.binlogPos, err)
+	}
+	insertOrders(t, src.db, last+1, last+2)
+	back.StartGTID = startGTID
+	if err := runOneUntil(t, back, false, nil, ordersIndexedThrough(t, indexDB, src.schema, last+2)); err != nil {
+		t.Fatalf("run 5 (back to GTID mode from BINLOG_GTID_POS of the checkpoint %s:%d = %q): %v", cp.binlogFile, cp.binlogPos, startGTID, err)
+	}
+	assertExactlyOnce(t, indexedPKs(t, indexDB, src.schema, "orders"), pkRange(1, last+2))
+	if st, _ := loadStreamState(indexDB); st == nil || st.mode != "gtid" {
+		t.Errorf("after run 5 the checkpoint is %+v, want GTID mode", st)
+	}
+	if at5, detail5 := gapLost(t, indexDB); !at5.Time.Equal(at.Time) || detail5 != detail {
+		t.Errorf("returning to GTID mode stamped a new loss (%v %q, was %v %q)", at5, detail5, at, detail)
 	}
 }
 
@@ -258,6 +282,23 @@ func TestIntegrationGTIDResetMasterRestartAfterRenumberingPasses(t *testing.T) {
 	testutil.InitIndexTables(t, indexDB)
 	src := mysqlGTIDDupSource(t, 99924)
 	runGTIDResetScenario(t, src, indexDB, indexName, "numbering started over", func(oldOwn int64) int { return 8 + int(oldOwn) + 3 })
+}
+
+// TestIntegrationGTIDResetMasterFileNameReused: after the reset the new
+// numbering rotates back past the old checkpoint's file name before capture
+// restarts, still below the old numbering. The file name proves nothing
+// about its content: the restart must read it as a reset and capture the new
+// transactions, not keep the old numbers and skip them.
+func TestIntegrationGTIDResetMasterFileNameReused(t *testing.T) {
+	indexDB, indexName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, indexDB)
+	src := mysqlGTIDDupSource(t, 99940)
+	runGTIDResetScenario(t, src, indexDB, indexName, "numbering went backwards", func(int64) int {
+		for range 5 {
+			testutil.MustExec(t, src.db, "FLUSH BINARY LOGS")
+		}
+		return 10
+	})
 }
 
 // TestOne_MariaDB_resetMasterStopsWithResumeSteps: the MariaDB sibling.
@@ -388,5 +429,63 @@ func TestIntegrationGTIDResetMasterWhileStreaming(t *testing.T) {
 		t.Error("the restart after a reset during capture stamped no capture loss")
 	} else {
 		t.Logf("stamped: %q", detail)
+	}
+}
+
+// TestIntegrationGTIDCheckpointFromAnotherServer: binlog file numbers of two
+// servers are not comparable. A checkpoint whose file sorts after the
+// source's newest one, written against ANOTHER server (capture moved from a
+// replica to its primary behind the same address), whose GTIDs the source
+// all has, is a normal resume: no loss stamped, nothing skipped. The same
+// checkpoint written against THIS server is a numbering that started over.
+func TestIntegrationGTIDCheckpointFromAnotherServer(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		identity  func(own string) string
+		wantStamp bool
+	}{
+		{"another server", func(string) string { return "11111111-2222-3333-4444-555555555555" }, false},
+		{"older checkpoint without an identity", func(string) string { return "" }, false},
+		{"this server", func(own string) string { return own }, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			indexDB, indexName := testutil.CreateTestDB(t)
+			testutil.InitIndexTables(t, indexDB)
+			src := mysqlGTIDDupSource(t, 99944)
+			// Only GTID transactions in the binary log: a restart from its
+			// start cannot replay transactions written before gtid_mode=ON.
+			resetGTIDSourceBinlogs(t, src.db)
+			insertOrders(t, src.db, 1, 1)
+			var own, executed string
+			if err := src.db.QueryRow("SELECT @@server_uuid, @@GLOBAL.gtid_executed").Scan(&own, &executed); err != nil {
+				t.Fatal(err)
+			}
+			if err := saveCheckpoint(indexDB, &streamState{
+				mode: "gtid", binlogFile: "binlog.999990", binlogPos: 4,
+				gtidSet: NormalizeGTIDSet(executed), flavor: gomysql.MySQLFlavor,
+				serverID: src.serverID, sourceIdentity: c.identity(own),
+			}); err != nil {
+				t.Fatalf("seed checkpoint: %v", err)
+			}
+			cfg := src.config(indexName)
+			cfg.ServerID++
+			if err := runOneUntil(t, cfg, true, func() { insertOrders(t, src.db, 2, 3) }, ordersIndexedThrough(t, indexDB, src.schema, 3)); err != nil {
+				t.Fatalf("resume: %v", err)
+			}
+			// A renumbering restarts from the source's oldest binlog, which
+			// still holds row 1 (written before the seeded checkpoint).
+			want := pkRange(2, 3)
+			if c.wantStamp {
+				want = pkRange(1, 3)
+			}
+			assertExactlyOnce(t, indexedPKs(t, indexDB, src.schema, "orders"), want)
+			at, detail := gapLost(t, indexDB)
+			if at.Valid != c.wantStamp {
+				t.Errorf("capture loss stamped = %v (%q), want %v", at.Valid, detail, c.wantStamp)
+			}
+			if st, _ := loadStreamState(indexDB); st == nil || !strings.EqualFold(st.sourceIdentity, own) {
+				t.Errorf("checkpoint source_identity = %+v, want this server's %s", st, own)
+			}
+		})
 	}
 }

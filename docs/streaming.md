@@ -325,20 +325,29 @@ or replayed:
   the same `EVENTS PERMANENTLY LOST` signal as an unfillable gap) that says what
   happened, and restarts from the start of the source's binary log, so the new
   numbering's transactions are all captured. With `--no-gap-fill` it refuses
-  instead. When the checkpoint's binary log file is still on the source after
-  older ones, the log was not reset but lost its end (a crash with
-  `sync_binlog != 1`, or a restore with the binary logs kept): the loss is
-  recorded the same way, and capture continues after the transactions the
-  source still has instead of reading them a second time.
+  instead. A source that lost the end of its binary log in a crash
+  (`sync_binlog != 1`) looks the same from SQL as one that was reset, so it is
+  handled the same way: the transactions still in its binary log that capture
+  had already read are indexed again (duplicates), never skipped.
 - **MariaDB.** The same check uses the source's `server_id` and
   `@@gtid_binlog_state`. Capture refuses to start, deletes nothing, and the
   error says how to resume: restart once with
   `--reset --start-file <the source's oldest binary log> --start-pos 4`, which
   captures the new numbering from its first transaction (in position mode) and
-  records the jump as a capture loss. To return to GTID mode later, stop capture
-  once it has caught up and restart it with `--start-gtid` set to the source's
-  `@@gtid_binlog_pos` read at that moment: anything the source writes between
-  that read and the restart is skipped.
+  records the jump as a capture loss. To return to GTID mode later, stop
+  capture, read its checkpoint (binlog file and position, from `bintrail
+  status`), and restart once with `--start-gtid` set to what
+  `SELECT BINLOG_GTID_POS('<file>', <position>)` returns on the source. Not the
+  source's current `@@gtid_binlog_pos`: that skips what the source wrote since
+  the checkpoint.
+
+The binary-log comparison only runs between a checkpoint and the server it was
+read from. Every checkpoint records the source's identity (`source_identity`
+in `stream_state`: `@@server_uuid` on MySQL, `server_id:<n>` on MariaDB), and
+binlog file numbers of two servers say nothing about each other: when capture
+moves to another server behind the same address (a replica to its primary),
+the files are not compared. A checkpoint written before this column existed is
+not compared either.
 
 A source that is only **behind** is never reported: a lagging replica is
 missing other servers' transactions, never its own, and only its own can prove
@@ -353,8 +362,18 @@ it went backwards. Cases this check cannot see:
   part of the old history looks like a lagging replica.
 - Group Replication / InnoDB Cluster: transactions carry the group's UUID, not
   the member's `server_uuid`, so only the "no shared history" case applies.
-- When `SHOW BINARY LOGS` fails, the binary-log comparison is skipped with a
-  warning that says so.
+- When the checkpoint was written against another server, or by an older
+  build that did not record the source's identity, there is no binary-log
+  comparison.
+
+When the comparison applies and `SHOW BINARY LOGS` fails, capture does not
+start (retry); it never decides without the list.
+
+The restart reads the source's binary log from its oldest file, which after a
+reset holds only GTID transactions. A source that was not reset but lost the
+end of its binary log, and still keeps files from before `gtid_mode=ON`, refuses
+that restart (`Cannot replicate anonymous transaction when AUTO_POSITION = 1`)
+on every start; `--reset` resumes from its current position.
 
 A running capture normally meets the reset long before either: the source ends
 the binlog dump when its binary log is reset (`could not find next log`), and

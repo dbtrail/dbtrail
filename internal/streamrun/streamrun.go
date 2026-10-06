@@ -80,6 +80,11 @@ type streamState struct {
 	lastEventTime sql.NullTime
 	serverID      uint32
 	bintrailID    string // resolved server identity (empty = unknown, stored as NULL)
+	// sourceIdentity names the server the checkpoint's binlog coordinates
+	// belong to (sourceIdentity in gtid_renumbered.go; empty = unknown, stored
+	// as NULL). File numbers are compared only between checkpoints of one
+	// identity (#2171).
+	sourceIdentity string
 
 	// skips is the shared capture-skip tally (#1034): the StreamParser records
 	// every event it read and dropped (column-count mismatch, statement-format
@@ -105,7 +110,7 @@ type streamState struct {
 // loadStreamState loads the saved stream_state row, returning nil if no row exists.
 func loadStreamState(db *sql.DB) (*streamState, error) {
 	var s streamState
-	var gtidSet, bintrailID sql.NullString
+	var gtidSet, bintrailID, srcIdentity sql.NullString
 	// dedup_floor_event_id is NULL on every checkpoint an older build wrote,
 	// and that has to read as 0 = no floor, not as an error: the whole point
 	// is that an index nobody has migrated still resumes, just with the
@@ -114,11 +119,11 @@ func loadStreamState(db *sql.DB) (*streamState, error) {
 	err := db.QueryRow(`
 		SELECT mode, binlog_file, binlog_position, gtid_set, flavor,
 		       events_indexed, last_event_time, server_id, bintrail_id,
-		       dedup_floor_event_id
+		       dedup_floor_event_id, source_identity
 		FROM stream_state WHERE id = 1`).Scan(
 		&s.mode, &s.binlogFile, &s.binlogPos, &gtidSet, &s.flavor,
 		&s.eventsIndexed, &s.lastEventTime, &s.serverID, &bintrailID,
-		&dedupFloor)
+		&dedupFloor, &srcIdentity)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -131,6 +136,7 @@ func loadStreamState(db *sql.DB) (*streamState, error) {
 	if bintrailID.Valid {
 		s.bintrailID = bintrailID.String
 	}
+	s.sourceIdentity = srcIdentity.String
 	if dedupFloor.Valid && dedupFloor.Int64 > 0 {
 		s.dedupFloorID = dedupFloor.Int64
 	}
@@ -205,9 +211,13 @@ func checkpointInsertArgs(state *streamState) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	var srcIdentity any
+	if state.sourceIdentity != "" {
+		srcIdentity = state.sourceIdentity
+	}
 	file, pos := checkpointPosition(state)
 	return []any{state.mode, file, pos, gtidSet, flavor,
-		state.eventsIndexed, lastEventTime, state.serverID, bintrailIDArg}, nil
+		state.eventsIndexed, lastEventTime, state.serverID, bintrailIDArg, srcIdentity}, nil
 }
 
 // saveCheckpoint persists the current stream state to the stream_state table.
@@ -253,9 +263,9 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO stream_state
 		    (id, mode, binlog_file, binlog_position, gtid_set, flavor,
-		     events_indexed, last_event_time, last_checkpoint, server_id, bintrail_id,
+		     events_indexed, last_event_time, last_checkpoint, server_id, bintrail_id, source_identity,
 		     capture_skips, dedup_floor_event_id)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, ?, ?)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 		    mode            = VALUES(mode),
 		    binlog_file     = VALUES(binlog_file),
@@ -267,6 +277,7 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 		    last_checkpoint = UTC_TIMESTAMP(),
 		    server_id       = VALUES(server_id),
 		    bintrail_id     = VALUES(bintrail_id),
+		    source_identity = VALUES(source_identity),
 		    capture_skips   = COALESCE(VALUES(capture_skips), capture_skips),
 		    dedup_floor_event_id = VALUES(dedup_floor_event_id)`,
 		args...)
@@ -630,9 +641,9 @@ func persistGapAutoAdvance(db *sql.DB, advanced *streamState, gapMessage string)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO stream_state
 		    (id, mode, binlog_file, binlog_position, gtid_set, flavor,
-		     events_indexed, last_event_time, last_checkpoint, server_id, bintrail_id,
+		     events_indexed, last_event_time, last_checkpoint, server_id, bintrail_id, source_identity,
 		     gap_lost_at, gap_lost_detail)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, UTC_TIMESTAMP(), ?)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, ?, UTC_TIMESTAMP(), ?)
 		ON DUPLICATE KEY UPDATE
 		    gap_lost_at     = UTC_TIMESTAMP(),
 		    gap_lost_detail = VALUES(gap_lost_detail)`,
@@ -2290,6 +2301,17 @@ func oneRun(ctx context.Context, cfg Config) error {
 	if cfg.Hooks != nil && cfg.Hooks.OnFlavorResolved != nil {
 		cfg.Hooks.OnFlavorResolved(cfg.Flavor)
 	}
+	// The server whose binlog coordinates this run's checkpoints carry
+	// (#2171): a later resume compares file numbers only against a
+	// checkpoint written against the same one.
+	srcIdentity, err := func() (string, error) {
+		ctx, cancel := context.WithTimeout(ctx, time.Duration(cfg.GapTimeout)*time.Second)
+		defer cancel()
+		return sourceIdentity(ctx, sourceDB, cfg.Flavor)
+	}()
+	if err != nil {
+		return fmt.Errorf("read the source's identity: %w (retry)", err)
+	}
 
 	if err := cfg.Deps.ValidateBinlogFormat(sourceDB); err != nil {
 		return err
@@ -2463,16 +2485,17 @@ func oneRun(ctx context.Context, cfg Config) error {
 	// checkpoint tick would overwrite a carried value anyway).
 	if resetDiscarded != nil {
 		fresh := &streamState{
-			mode:         mode,
-			binlogFile:   startFile,
-			binlogPos:    uint64(startPos),
-			safeFile:     startFile,
-			safePos:      uint64(startPos),
-			gtidSet:      startGTIDStr,
-			flavor:       cfg.Flavor,
-			serverID:     cfg.ServerID,
-			bintrailID:   bintrailID,
-			dedupFloorID: freshFloor,
+			mode:           mode,
+			binlogFile:     startFile,
+			binlogPos:      uint64(startPos),
+			safeFile:       startFile,
+			safePos:        uint64(startPos),
+			gtidSet:        startGTIDStr,
+			flavor:         cfg.Flavor,
+			serverID:       cfg.ServerID,
+			bintrailID:     bintrailID,
+			sourceIdentity: srcIdentity,
+			dedupFloorID:   freshFloor,
 		}
 		noop, detail := classifyResetDiscard(resetDiscarded, cfg.Flavor, mode, startFile, startPos, startGTIDStr,
 			cfg.StartFile == "" && cfg.StartGTID == "",
@@ -2515,11 +2538,12 @@ func oneRun(ctx context.Context, cfg Config) error {
 		var renum *gtidRenumbering
 		if mode == "gtid" && saved.mode == "gtid" {
 			var err error
-			renum, err = detectGTIDRenumbering(sourceDB, cfg.Flavor, startGTIDStr, saved.binlogFile, saved.binlogPos, gapTimeout)
+			renum, err = detectGTIDRenumbering(sourceDB, cfg.Flavor, startGTIDStr, saved.binlogFile, saved.binlogPos,
+				saved.sourceIdentity, srcIdentity, gapTimeout)
 			if err != nil {
 				slog.Error("GTID history check failed", "error", err)
 				return fmt.Errorf("checking that the source's GTID history continues the checkpoint: %w "+
-					"(use --reset to start from a new position)", err)
+					"(nothing was changed; retry, the check runs again on the next start)", err)
 			}
 		}
 		if renum != nil {
@@ -2548,17 +2572,18 @@ func oneRun(ctx context.Context, cfg Config) error {
 			}
 			gtidRenumbered = true
 			advancedState := &streamState{
-				mode:          mode,
-				binlogFile:    startFile,
-				binlogPos:     uint64(startPos),
-				safeFile:      startFile,
-				safePos:       uint64(startPos),
-				gtidSet:       startGTIDStr,
-				flavor:        cfg.Flavor,
-				serverID:      cfg.ServerID,
-				bintrailID:    bintrailID,
-				eventsIndexed: saved.eventsIndexed,
-				lastEventTime: saved.lastEventTime,
+				mode:           mode,
+				binlogFile:     startFile,
+				binlogPos:      uint64(startPos),
+				safeFile:       startFile,
+				safePos:        uint64(startPos),
+				gtidSet:        startGTIDStr,
+				flavor:         cfg.Flavor,
+				serverID:       cfg.ServerID,
+				bintrailID:     bintrailID,
+				sourceIdentity: srcIdentity,
+				eventsIndexed:  saved.eventsIndexed,
+				lastEventTime:  saved.lastEventTime,
 				// Every row already indexed belongs to the old numbering, whose
 				// positions say nothing about the new one: a fresh floor keeps
 				// every later resume cleanup off them.
@@ -2666,17 +2691,18 @@ func oneRun(ctx context.Context, cfg Config) error {
 				// (see persistGapAutoAdvance — the stamp must precede the advance so
 				// the loss record can never desync from an advanced checkpoint, #402).
 				advancedState := &streamState{
-					mode:          mode,
-					binlogFile:    startFile,
-					binlogPos:     uint64(startPos),
-					safeFile:      startFile,
-					safePos:       uint64(startPos),
-					gtidSet:       startGTIDStr,
-					flavor:        cfg.Flavor,
-					serverID:      cfg.ServerID,
-					bintrailID:    bintrailID,
-					eventsIndexed: saved.eventsIndexed,
-					lastEventTime: saved.lastEventTime,
+					mode:           mode,
+					binlogFile:     startFile,
+					binlogPos:      uint64(startPos),
+					safeFile:       startFile,
+					safePos:        uint64(startPos),
+					gtidSet:        startGTIDStr,
+					flavor:         cfg.Flavor,
+					serverID:       cfg.ServerID,
+					bintrailID:     bintrailID,
+					sourceIdentity: srcIdentity,
+					eventsIndexed:  saved.eventsIndexed,
+					lastEventTime:  saved.lastEventTime,
 					// Carried, unlike every other bare checkpoint writer. A
 					// purge advance moves FORWARD past purged binlogs, so a
 					// row at or beyond the advanced start was read after the
@@ -2836,14 +2862,15 @@ func oneRun(ctx context.Context, cfg Config) error {
 		// safePos seed identically — the resolved start is always a boundary, and
 		// this keeps the position-mode checkpoint at a valid resume point until the
 		// first statement/commit/DDL boundary advances it (#775).
-		binlogFile: startFile,
-		binlogPos:  uint64(startPos),
-		safeFile:   startFile,
-		safePos:    uint64(startPos),
-		flavor:     cfg.Flavor,
-		serverID:   cfg.ServerID,
-		accGTID:    accGTID,
-		bintrailID: bintrailID,
+		binlogFile:     startFile,
+		binlogPos:      uint64(startPos),
+		safeFile:       startFile,
+		safePos:        uint64(startPos),
+		flavor:         cfg.Flavor,
+		serverID:       cfg.ServerID,
+		accGTID:        accGTID,
+		bintrailID:     bintrailID,
+		sourceIdentity: srcIdentity,
 	}
 	if saved != nil {
 		state.eventsIndexed = saved.eventsIndexed
