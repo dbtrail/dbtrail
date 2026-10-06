@@ -14,6 +14,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/status"
 	"github.com/dbtrail/dbtrail/internal/views"
 )
@@ -156,6 +157,13 @@ type copyCut struct {
 	// that could not be read, which is worth a line in the log.
 	refusal string
 	fault   error
+
+	// mark is the event mark beside the anchor (#2160), the zero mark when the
+	// footer has none.
+	mark reconstruct.EventMark
+	// folded: the anchor is a refresh's cut, a position of an event the index
+	// holds, rather than where the source stood when a dump read it.
+	folded bool
 }
 
 // copyCutKey identifies the bytes a cut was read from: a snapshot's files are
@@ -255,6 +263,8 @@ func copyCutOf(t views.BaselineTable, footer func(path string) (baseline.DumpMet
 		stamp:       at.SnapshotTimestamp,
 		lastEventID: at.LastEventID,
 		sourceRead:  read.At,
+		mark:        eventMarkOf(at),
+		folded:      at.Producer == baseline.ProducerReconstruct,
 	}
 }
 
@@ -362,9 +372,7 @@ func (m *copyChangedMemo) put(server string, t views.BaselineTable, cut query.Bi
 // is no longer "the event furthest into the binlog". A read that fails
 // counts as yes.
 func indexBackfilled(ctx context.Context, db *sql.DB) bool {
-	var one int
-	err := db.QueryRowContext(ctx, `SELECT 1 FROM index_state LIMIT 1`).Scan(&one)
-	return !errors.Is(err, sql.ErrNoRows)
+	return query.IndexBackfilled(ctx, db)
 }
 
 // newestEventOlderThan is the binlog position of the event with the highest
@@ -696,6 +704,13 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 			}
 		}
 	}
+	// No event after any position: that means "unchanged" only while the
+	// source kept one binlog numbering (#2160).
+	if why, err := numberingStartedOver(ctx, b.db, tables, cuts); err != nil {
+		return unreadable("where the newest captured change sits", err)
+	} else if why != "" {
+		return why
+	}
 	// A source that was replaced since the oldest of those times: its binlog
 	// files are numbered anew, and a position on one server says nothing
 	// about the other. Compared as an instant, not as the session's wall
@@ -722,4 +737,58 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 		return "the index no longer holds every change since the snapshot (older partitions were rotated out), so it cannot say nothing changed"
 	}
 	return ""
+}
+
+// numberingStartedOver answers "" when nothing shows the source's binlog
+// numbering started over since any of the tables' snapshots (#2160), else
+// why not. After a RESET MASTER, a failover or a shorter log_bin base name,
+// changes sort BELOW a snapshot's position, so "no event after the position"
+// would read as "unchanged" for a table that changed.
+//
+// Two rules, either one enough to send the statement to MySQL:
+//   - The snapshot's event mark: an event indexed after it sorts before it,
+//     the check the refresh refuses on (reconstruct.CheckNumberingContinues).
+//   - For a snapshot a refresh wrote, whose position is the end of an event
+//     the index held: the newest event sorts before that position, or carries
+//     another base name. The index only grows past an event it holds, so this
+//     is a numbering that started over, or a stream briefly replaying after a
+//     restart, and the cost of a false answer here is only that MySQL
+//     answers. It covers what a refresh wrote before the event mark existed.
+//     A dump's position is where the SOURCE stood, which capture reaches only
+//     with the next change of a table it records, so it is never compared
+//     this way.
+func numberingStartedOver(ctx context.Context, db *sql.DB, tables []views.BaselineTable, cuts []copyCut) (string, error) {
+	newest, err := reconstruct.ReadEventMark(ctx, db)
+	if err != nil {
+		return "", err
+	}
+	checked := map[reconstruct.EventMark]bool{}
+	for i, t := range tables {
+		at := cuts[i].anchor
+		if cuts[i].folded && newest != nil && (reconstruct.BinlogBaseName(newest.File) != reconstruct.BinlogBaseName(at.File) ||
+			!at.AtOrBefore(query.BinlogPos{File: newest.File, Pos: newest.End})) {
+			return fmt.Sprintf("the newest change capture recorded (%s:%d) sorts before the snapshot of %s.%s (%s:%d): "+
+				"the source's binary log may have started again from another numbering, so no change since can be ruled out by position",
+				newest.File, newest.End, t.Schema, t.Table, at.File, at.Pos), nil
+		}
+		m := cuts[i].mark
+		if m.ID == 0 || checked[m] {
+			continue
+		}
+		checked[m] = true
+		if err := reconstruct.CheckNumberingContinues(ctx, db, &m, at); errors.Is(err, reconstruct.ErrBinlogRenumbered) {
+			return fmt.Sprintf("the source's binary log started again from another numbering after the snapshot of %s.%s was taken, so no change since can be ruled out by position", t.Schema, t.Table), nil
+		} else if err != nil {
+			return "", err
+		}
+	}
+	return "", nil
+}
+
+// eventMarkOf is the footer's event mark, the zero mark when it has none.
+func eventMarkOf(md baseline.DumpMetadata) reconstruct.EventMark {
+	if m := reconstruct.ParseEventMark(md.EventMark); m != nil {
+		return *m
+	}
+	return reconstruct.EventMark{}
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/status"
 	"github.com/dbtrail/dbtrail/internal/views"
@@ -61,7 +62,22 @@ func TestCopyCutOf(t *testing.T) {
 		{name: "a locked dump", table: table,
 			want: copyCut{anchor: query.BinlogPos{File: "binlog.000007", Pos: 4200}, stamp: cutStamp, sourceRead: cutStamp}},
 		{name: "a chain: the LAST pair's position, stamp and event id; the base's read of the source", table: withChain,
-			want: copyCut{anchor: query.BinlogPos{File: "binlog.000009", Pos: 900}, stamp: pairStamp, lastEventID: 5150, sourceRead: cutStamp}},
+			want: copyCut{anchor: query.BinlogPos{File: "binlog.000009", Pos: 900}, stamp: pairStamp, lastEventID: 5150, sourceRead: cutStamp, folded: true}},
+		{name: "a chain: the LAST pair's event mark, which goes with its position (#2160)", table: withChain,
+			base: func(md *baseline.DumpMetadata) {
+				md.EventMark = reconstruct.EventMark{ID: 7, File: "binlog.000007", End: 4100}.Encode()
+			},
+			last: func(md *baseline.DumpMetadata) {
+				md.EventMark = reconstruct.EventMark{ID: 5150, File: "binlog.000009", End: 900}.Encode()
+			},
+			want: copyCut{anchor: query.BinlogPos{File: "binlog.000009", Pos: 900}, stamp: pairStamp, lastEventID: 5150, sourceRead: cutStamp, folded: true,
+				mark: reconstruct.EventMark{ID: 5150, File: "binlog.000009", End: 900}}},
+		{name: "a dump's event mark", table: table,
+			base: func(md *baseline.DumpMetadata) {
+				md.EventMark = reconstruct.EventMark{ID: 7, File: "binlog.000007", End: 4100}.Encode()
+			},
+			want: copyCut{anchor: query.BinlogPos{File: "binlog.000007", Pos: 4200}, stamp: cutStamp, sourceRead: cutStamp,
+				mark: reconstruct.EventMark{ID: 7, File: "binlog.000007", End: 4100}}},
 		{name: "a carried-forward file answers with its own stamp, not the directory's", table: table,
 			base: func(md *baseline.DumpMetadata) { md.SnapshotTimestamp = cutStamp.Add(-72 * time.Hour) },
 			want: copyCut{anchor: query.BinlogPos{File: "binlog.000007", Pos: 4200}, stamp: cutStamp.Add(-72 * time.Hour), sourceRead: cutStamp.Add(-72 * time.Hour)}},

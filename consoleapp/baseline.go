@@ -828,7 +828,7 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 		}
 		return dumpOutcome{}, err
 	}
-	dumpDir, dumpStartedAt, ddlMark := att.dir, att.startedAt, att.ddlMark
+	dumpDir, dumpStartedAt, ddlMark, eventMark := att.dir, att.startedAt, att.ddlMark, att.eventMark
 	defer os.RemoveAll(dumpDir)
 
 	// A dump that cannot be anchored is refused here, never published (#1688).
@@ -856,7 +856,7 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 		out.cleanup = func() { os.RemoveAll(outputDir) }
 	}
 
-	stats, err := baseline.Run(s.ctx, s.dumpBaselineConfig(req, dumpDir, outputDir, dumpStartedAt, ddlMark))
+	stats, err := baseline.Run(s.ctx, s.dumpBaselineConfig(req, dumpDir, outputDir, dumpStartedAt, ddlMark, eventMark))
 	if err != nil {
 		out.cleanup()
 		return dumpOutcome{}, fmt.Errorf("convert: %w", err)
@@ -874,6 +874,7 @@ type dumpAttempt struct {
 	dir       string
 	startedAt time.Time
 	ddlMark   string
+	eventMark string
 }
 
 func (s *baselineSupervisor) dumpAttempt(req console.BaselineRequest, lockMode baseline.LockMode, src lockModeSource) (dumpAttempt, error) {
@@ -893,6 +894,7 @@ func (s *baselineSupervisor) dumpAttempt(req console.BaselineRequest, lockMode b
 	// index ran on the source before this dump began, so the dump holds its
 	// effect, and no update from this snapshot has to place it by position.
 	a.ddlMark = dumpDDLMarkFunc(req)
+	a.eventMark = dumpEventMarkFunc(req)
 	ctx := withTransportNote(s.ctx, func(note string) { s.noteDumpTransport(req.ServerID, note) })
 	if err := runMydumperFunc(ctx, req.SourceDSN, req.SourceSSL, req.Schemas, dir, lockMode, src); err != nil {
 		if rmErr := os.RemoveAll(dir); rmErr != nil {
@@ -934,7 +936,7 @@ func ftwrlRefused(err error) bool {
 // dumpBaselineConfig is how a dump of req's server is converted: split out
 // so what the conversion is told, the writer it signs with among it, is
 // checked without running mydumper.
-func (s *baselineSupervisor) dumpBaselineConfig(req console.BaselineRequest, dumpDir, outputDir string, at time.Time, ddlMark string) baseline.Config {
+func (s *baselineSupervisor) dumpBaselineConfig(req console.BaselineRequest, dumpDir, outputDir string, at time.Time, ddlMark, eventMark string) baseline.Config {
 	return baseline.Config{
 		InputDir:    dumpDir,
 		OutputDir:   outputDir,
@@ -943,6 +945,7 @@ func (s *baselineSupervisor) dumpBaselineConfig(req console.BaselineRequest, dum
 		TableDeltas: s.tableDeltas,
 		WriterID:    snapshotWriterID(req),
 		DDLMark:     ddlMark,
+		EventMark:   eventMark,
 	}
 }
 
@@ -1009,6 +1012,28 @@ var dumpDDLMarkFunc = func(req console.BaselineRequest) string {
 		return ""
 	}
 	return m.Encode()
+}
+
+// dumpEventMarkFunc reads the event mark (#2160) a dump of req's server is
+// stamped with: the newest event in its index, read BEFORE mydumper starts,
+// like the DDL mark. Every event indexed after it follows it in the source's
+// binary log, so an update from this snapshot that finds one sorting before
+// it knows the numbering started over. "" when it cannot be read, which only
+// leaves the snapshot without that check. A var so tests can count it.
+var dumpEventMarkFunc = func(req console.BaselineRequest) string {
+	if req.IndexDSN == "" {
+		return ""
+	}
+	db, err := config.Connect(req.IndexDSN)
+	if err != nil {
+		slog.Warn("could not reach the index for the snapshot's event mark; the snapshot is published without one",
+			"server", req.ServerID, "error", err)
+		return ""
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return reconstruct.ReadStreamEventMark(ctx, db)
 }
 
 // executePG produces a PostgreSQL baseline in-process via internal/pgbaseline —

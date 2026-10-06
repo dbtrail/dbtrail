@@ -731,6 +731,15 @@ did before:
   (not with the `no-lock` mode, which reads each table at a different
   moment), with its binlog position recorded, and not built over a known gap
   in capture.
+- **The source's binary log kept one numbering since the snapshot.** After a
+  `RESET MASTER`, a failover to another server or a new `log_bin` name, the
+  source's binary log starts again, and its changes sort before the
+  snapshot's binlog position, where "no change after the position" proves
+  nothing. The copy does not answer when a change reached the index after
+  the one the snapshot records as its newest (its event mark) and sorts
+  before it, when the newest change sorts before the position of a snapshot
+  a refresh wrote, or when capture found another server at the source's
+  address.
 
 What the answer is, then: what MySQL held for those tables at the moment
 capture was last confirmed complete. A change the source makes after that

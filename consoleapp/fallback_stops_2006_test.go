@@ -425,3 +425,18 @@ func TestIncludeNewTables_recordsItsOwnStartNotAnEmergency_2006(t *testing.T) {
 		t.Fatalf("a second new-tables read the same day, within the bound: %q %q", action, reason)
 	}
 }
+
+// #2160: a refusal because the source's binary log started again names the
+// positions it compared, which differ on every run. Two such refusals of the
+// same tables in a row, around a full read, are still the same refusal.
+func TestSameIncurableRefusal_aRenumberingNamesNewPositionsEachRun_2160(t *testing.T) {
+	prev := []console.RefusedTable{{Name: "shop.orders", Verdict: reconstruct.RefreshVerdictRefusedRenumbered, Reason: "shop.orders: ... a change ending at binlog.000001:400 ..."}}
+	cur := []console.RefusedTable{{Name: "shop.orders", Verdict: reconstruct.RefreshVerdictRefusedRenumbered, Reason: "shop.orders: ... a change ending at binlog.000001:900 ..."}}
+	if !sameIncurableRefusal(prev, 0, cur, 0) {
+		t.Fatal("two renumbering refusals of the same table, positions apart, were not read as the same refusal")
+	}
+	other := []console.RefusedTable{{Name: "shop.items", Verdict: reconstruct.RefreshVerdictRefusedRenumbered, Reason: "x"}}
+	if sameIncurableRefusal(prev, 0, other, 0) {
+		t.Fatal("a refusal of another table was read as the same one")
+	}
+}
