@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **`bintrail index` fails a binlog file that dropped changes, and exits
+  non-zero (behavior change for scripts).** A file in which some changes
+  were read and left out of the index used to be marked `completed`, and the
+  command exited 0. That covered a STATEMENT/MIXED-format DML (no row image
+  in the binlog), a rows event type the parser does not decode, a row whose
+  text could not be converted (`row_map_failed`), and a rows event read with
+  no schema snapshot loaded. Such a file is now marked `failed` in
+  `index_state`, like a file with a stale-snapshot gap, and the command
+  exits non-zero. A script or cron job that treated exit 0 as "every change
+  is in the index" now sees these files fail. The error says how many
+  changes of which kind were dropped, in which tables, and what to do. It
+  also says that the rows read from the file are already in the index:
+  indexing the file again, which `--all` does on every run while the file
+  is marked failed, inserts those rows a second time. Statement-format DML
+  now also appears in the end-of-run summary of skipped events. A tool that
+  writes in STATEMENT format on its own session (pt-table-checksum writing
+  `percona.checksums`) fails the file unless `--schemas` leaves that schema
+  out. Tables left
+  out of the snapshot by validation and the system schemas still do not fail
+  the file.
+- **An UPDATE rows event with an odd number of row images is reported.**
+  The binlog always writes before and after images in pairs, so this means a
+  decoding fault. The complete pairs are indexed as before; the unpaired
+  last image used to be dropped with no trace and now produces a warning and
+  a capture ledger entry, `unpaired_update_image`, with its table. In
+  `bintrail index` it also fails the file.
+- **`no_resolver` in the capture ledger names its table.** A rows event read
+  with no schema snapshot loaded is now recorded with its file, position and
+  table, like the other table-level reasons, so per-table readers (the
+  Iceberg export's capture check, `status`) no longer read it as "every
+  table".
 - **SQL on the copy refuses a table with too many changes waiting, before
   running.** Between two rewrites of a table its changes sit in small files
   beside it, and a query has to merge them in memory. A query here has 2 GB

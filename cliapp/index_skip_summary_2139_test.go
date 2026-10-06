@@ -29,7 +29,7 @@ func TestIndexSkipSummary(t *testing.T) {
 		"not valid UTF-8 and could not be converted",
 		"the rest of their event was indexed",
 		"`failed to map` warnings above",
-		"this does not mark the file failed",
+		"the file holding them is marked failed",
 	} {
 		if !strings.Contains(added, want) {
 			t.Errorf("missing %q:\n%s", want, added)

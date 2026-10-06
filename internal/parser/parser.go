@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -277,21 +278,7 @@ func (p *Parser) ParseFile(ctx context.Context, filename string, events chan<- E
 				// NOTE: never log the statement text — a DML statement embeds row
 				// VALUES; keyword + file/pos + connection_id locate it without
 				// leaking data into operator logs.
-				if schema := string(ev.Schema); !statementDMLInScope(schema, &p.filters) {
-					p.logger.Debug("statement-format DML for out-of-scope schema — not captured, not a coverage gap",
-						"file", filename,
-						"pos", binlogEv.Header.LogPos,
-						"schema", schema,
-						"statement_type", kw,
-						"connection_id", ev.SlaveProxyID)
-				} else {
-					p.logger.Warn("statement-format DML in binlog — event NOT captured (bintrail requires binlog_format=ROW; a STATEMENT/MIXED format or a session-level override produced this)",
-						"file", filename,
-						"pos", binlogEv.Header.LogPos,
-						"statement_type", kw,
-						"connection_id", ev.SlaveProxyID)
-					observe.StatementDMLDropped()
-				}
+				recordStatementDML(p.logger, &p.filters, p.skips, &gaps, filename, binlogEv.Header.LogPos, string(ev.Schema), kw, ev.SlaveProxyID)
 			}
 
 		case *replication.RowsQueryEvent:
@@ -389,22 +376,190 @@ func firstPartialImage(skipped [][]int) []int {
 	return nil
 }
 
+// recordStatementDML handles a STATEMENT/MIXED-format DML met while reading a
+// binlog FILE: the row image is not in the binlog, so the change cannot be
+// captured. In capture scope it warns, counts the metric, enters the run tally
+// with the stream's attribution, and fails the file (#2144). Out of scope (a
+// system schema, or a schema the filters exclude: RDS's rdsadmin writes mysql.*
+// in STATEMENT format, #1000) it is not a coverage gap and stays a Debug line.
+// The stream keeps its own copy of this branch in StreamParser.Run.
+//
+// NOTE: never log the statement text: a DML statement embeds row VALUES;
+// keyword + file/pos + connection_id locate it without leaking data into
+// operator logs.
+func recordStatementDML(logger *slog.Logger, filters *Filters, skips *SkipCounters, tracker *schemaGapTracker, filename string, pos uint32, schema, kw string, connectionID uint32) {
+	if !statementDMLInScope(schema, filters) {
+		logger.Debug("statement-format DML for out-of-scope schema — not captured, not a coverage gap",
+			"file", filename,
+			"pos", pos,
+			"schema", schema,
+			"statement_type", kw,
+			"connection_id", connectionID)
+		return
+	}
+	logger.Warn("statement-format DML in binlog — event NOT captured (bintrail requires binlog_format=ROW; a STATEMENT/MIXED format or a session-level override produced this)",
+		"file", filename,
+		"pos", pos,
+		"statement_type", kw,
+		"connection_id", connectionID)
+	observe.StatementDMLDropped()
+	skips.RecordSkipAttributed(SkipStatementFormatDML, SkipAttribution{
+		File:          filename,
+		Pos:           uint64(pos),
+		StatementType: kw,
+		ConnectionID:  connectionID,
+	})
+	name := schema
+	if name == "" {
+		name = "(no default database)"
+	}
+	tracker.recordDrop(SkipStatementFormatDML, 1, name)
+}
+
 // err is the file's fail-loud verdict once parsing ends: nil when nothing was
-// skipped, else a *SchemaGapError so the file is marked failed and usage
-// telemetry sees the same schema_mismatch class as the hard drift error —
-// both mean "the snapshot is stale".
+// skipped or dropped. A stale-snapshot gap is a *SchemaGapError so the file is
+// marked failed and usage telemetry sees the same schema_mismatch class as the
+// hard drift error (both mean "the snapshot is stale"); drops seen in the same
+// file are named in that message too. Drops alone are a *DroppedChangesError.
 func (g *schemaGapTracker) err(filename string) error {
 	if g.count == 0 {
-		return nil
+		if len(g.drops) == 0 {
+			return nil
+		}
+		return &DroppedChangesError{msg: g.dropsMessage(filename), class: g.dropsClass()}
 	}
-	return &SchemaGapError{msg: fmt.Sprintf(
+	msg := fmt.Sprintf(
 		"schema gap: %d row event(s) in %s were skipped because the schema snapshot is stale "+
 			"(first: %s) — these rows were NOT indexed. Run `bintrail snapshot` against the current "+
 			"schema and re-index this file (a failed file re-indexes from the start). This commonly "+
 			"follows a CREATE/ALTER TABLE within the file whose auto-snapshot landed too late for the "+
 			"buffered rows",
-		g.count, filename, g.first)}
+		g.count, filename, g.first)
+	if len(g.drops) > 0 {
+		msg += ". In the same file: " + g.dropsMessage(filename)
+	}
+	return &SchemaGapError{msg: msg}
 }
+
+// fileDrop is one reason's share of a file's dropped changes (#2144).
+type fileDrop struct {
+	changes   int
+	names     []string // schema.table, or the default schema for statement DML
+	truncated bool
+}
+
+// dropOrder is the order reasons appear in the file error, and the first one
+// present decides the error's telemetry class.
+var dropOrder = []string{SkipStatementFormatDML, SkipUnhandledRowEvent, SkipRowMapFailed, SkipUnpairedUpdateImage, SkipNoResolver}
+
+// dropUnit names what a reason's count counts.
+var dropUnit = map[string]string{
+	SkipStatementFormatDML:  "statement(s)",
+	SkipUnhandledRowEvent:   "rows event(s)",
+	SkipRowMapFailed:        "row(s)",
+	SkipUnpairedUpdateImage: "UPDATE row image(s)",
+	SkipNoResolver:          "rows event(s)",
+}
+
+// dropRemedy is the fix for one reason, and whether reading the file again
+// would bring the changes back.
+var dropRemedy = map[string]string{
+	SkipStatementFormatDML: "the source wrote these as STATEMENT/MIXED-format events, which carry no row " +
+		"images; set binlog_format=ROW server-wide on the source. The changes are not in this binlog, so " +
+		"reading it again cannot recover them",
+	SkipUnhandledRowEvent: "the source wrote a rows event type bintrail does not decode (PARTIAL_UPDATE_ROWS_EVENT " +
+		"under binlog_row_value_options=PARTIAL_JSON); set binlog_row_value_options to empty on the source. " +
+		"Reading this file again drops the same events",
+	SkipRowMapFailed: "a CHAR/VARCHAR value was not valid UTF-8 and could not be converted; the `failed to map` " +
+		"warnings name the column and the cause. If they say the schema snapshot has no character set for " +
+		"the column, run `bintrail snapshot` and re-index this file; otherwise correct the text or convert " +
+		"the column to utf8mb4 on the source, because reading this file again drops the same rows",
+	SkipUnpairedUpdateImage: "an UPDATE event carried an odd number of row images, which the binlog format " +
+		"never writes: this is a decoding fault, report it with the file and position from the warning",
+	SkipNoResolver: "no schema snapshot was loaded; run `bintrail snapshot` and re-index this file",
+}
+
+// recordDrop notes changes of one file that were dropped under reason, for the
+// table (or schema) name. Nil-safe: the stream passes no tracker.
+func (t *schemaGapTracker) recordDrop(reason string, changes int, name string) {
+	if t == nil {
+		return
+	}
+	if t.drops == nil {
+		t.drops = map[string]*fileDrop{}
+	}
+	d := t.drops[reason]
+	if d == nil {
+		d = &fileDrop{}
+		t.drops[reason] = d
+	}
+	d.changes += changes
+	if name == "" || slices.Contains(d.names, name) {
+		return
+	}
+	if len(d.names) >= MaxLedgerTables {
+		d.truncated = true
+		return
+	}
+	d.names = append(d.names, name)
+}
+
+// dropsMessage is the operator text for a file that dropped changes: per
+// reason, how many, where, and the fix; then what already happened to the rows
+// that could be read, because the index has no natural key to tell a second
+// copy of a row from the first.
+func (g *schemaGapTracker) dropsMessage(filename string) string {
+	var parts []string
+	for _, reason := range dropOrder {
+		d := g.drops[reason]
+		if d == nil {
+			continue
+		}
+		where := strings.Join(d.names, ", ")
+		if d.truncated {
+			where += " and others"
+		}
+		parts = append(parts, fmt.Sprintf("%d %s dropped under %s (%s): %s",
+			d.changes, dropUnit[reason], reason, where, dropRemedy[reason]))
+	}
+	return fmt.Sprintf("changes in %s were read and NOT indexed, so the file is marked failed instead of "+
+		"completed: %s. The rows that could be read from this file are already in the index, and the index "+
+		"cannot tell a second copy of a row from the first: indexing this file again (which `bintrail index "+
+		"--all` does on every run while the file is marked failed) inserts them a second time",
+		filename, strings.Join(parts, "; "))
+}
+
+func (g *schemaGapTracker) dropsClass() string {
+	for _, reason := range dropOrder {
+		if g.drops[reason] == nil {
+			continue
+		}
+		switch reason {
+		case SkipNoResolver:
+			return "schema_mismatch"
+		case SkipUnpairedUpdateImage:
+			return "internal"
+		default:
+			return "config_invalid"
+		}
+	}
+	return "internal"
+}
+
+// DroppedChangesError fails a binlog FILE some of whose changes were read and
+// left out of the index (#2144): a statement-format DML, a rows event type the
+// parser does not decode, a row that could not be mapped, an unpaired UPDATE
+// image, or a rows event read with no schema snapshot. Before, such a file was
+// marked completed and `bintrail index` exited 0 with the changes missing.
+type DroppedChangesError struct {
+	msg   string
+	class string
+}
+
+func (e *DroppedChangesError) Error() string { return e.msg }
+
+// TelemetryClass implements telemetry.Classed.
+func (e *DroppedChangesError) TelemetryClass() string { return e.class }
 
 // SchemaGapError is the file-mode sibling of SchemaDriftError (#778): rows
 // were skipped because their table was absent from a stale snapshot, so the
@@ -429,9 +584,14 @@ func (e *SchemaGapError) TelemetryClass() string { return "schema_mismatch" }
 // 'completed' with an undetected gap — the file-mode DDL resolver swap runs
 // consumer-side, one buffered channel behind the parser, so post-DDL rows can
 // decode with a stale resolver and be skipped before the swap lands (#778).
+//
+// It also carries the file's other dropped changes (#2144, recordDrop): those
+// are not a stale snapshot, so they fail the file with a *DroppedChangesError
+// and their own remedies instead.
 type schemaGapTracker struct {
 	count int
 	first string // human detail of the first gap, for the file-level error
+	drops map[string]*fileDrop
 }
 
 // record notes one skipped-row schema gap and returns true if it was the first
@@ -491,7 +651,11 @@ func isSnapshotExcludedSchema(schema string) bool {
 // because its table is absent from the snapshot or the column count diverged AND
 // the event is at-or-after the snapshot time (a stale snapshot), the skip is
 // recorded so ParseFile can fail the whole file rather than complete it with an
-// undetected gap (#778). The stream path passes nil.
+// undetected gap (#778). The stream path passes nil. The same tracker carries
+// the file's other dropped changes (no_resolver, unhandled_row_event,
+// row_map_failed, unpaired_update_image; statement-format DML is recorded in
+// ParseFile), which fail the file too (#2144). Validation-excluded tables and
+// the system schemas stay carved out, as below.
 //
 // skips (#1034): on the STREAM path the counters persist to
 // stream_state.capture_skips so `status` can render the discards — every
@@ -529,7 +693,14 @@ func handleRows(
 		logger.Warn("no resolver available — skipping event",
 			"file", filename, "pos", binlogEv.Header.LogPos,
 			"schema", schema, "table", table)
-		skips.RecordSkip(SkipNoResolver)
+		// Attributed like the other table-level drops (#2144).
+		skips.RecordSkipAttributed(SkipNoResolver, SkipAttribution{
+			File:   filename,
+			Pos:    uint64(binlogEv.Header.LogPos),
+			Schema: schema,
+			Table:  table,
+		})
+		gapTracker.recordDrop(SkipNoResolver, 1, schema+"."+table)
 		return nil
 	}
 
@@ -778,6 +949,24 @@ func handleRows(
 		replication.MARIADB_UPDATE_ROWS_COMPRESSED_EVENT_V1:
 		skips.RecordCaptured()
 		unmapped, emitErr = emitUpdates(ctx, logger, resolver, rowsEv.Rows, schema, table, filename, currentGTID, connectionID, commitTsUS, queryText, startPos, endPos, ts, pkCols, schemaVersion, stmtEnd, out)
+		// emitUpdates walks before/after pairs; a trailing image with no
+		// partner is dropped there. The binlog format always writes pairs, so
+		// this is a decoding fault: say so and record it (#2144). Recorded
+		// after RecordCaptured, like row_map_failed, so it never feeds the
+		// consecutive-skip escalation.
+		if len(rowsEv.Rows)%2 != 0 {
+			logger.Warn("UPDATE rows event with an odd number of row images — the unpaired last image was NOT indexed",
+				"file", filename, "pos", binlogEv.Header.LogPos,
+				"schema", schema, "table", table,
+				"row_images", len(rowsEv.Rows))
+			skips.RecordSkipAttributed(SkipUnpairedUpdateImage, SkipAttribution{
+				File:   filename,
+				Pos:    uint64(binlogEv.Header.LogPos),
+				Schema: schema,
+				Table:  table,
+			})
+			gapTracker.recordDrop(SkipUnpairedUpdateImage, 1, schema+"."+table)
+		}
 
 	default:
 		// A RowsEvent whose type matches none of the above — e.g.
@@ -802,11 +991,13 @@ func handleRows(
 			Schema: schema,
 			Table:  table,
 		})
+		gapTracker.recordDrop(SkipUnhandledRowEvent, 1, schema+"."+table)
 		return nil
 	}
 
 	if unmapped > 0 {
 		recordUnmappedRows(skips, filename, uint64(binlogEv.Header.LogPos), schema, table)
+		gapTracker.recordDrop(SkipRowMapFailed, unmapped, schema+"."+table)
 	}
 	return emitErr
 }

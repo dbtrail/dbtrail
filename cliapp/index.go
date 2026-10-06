@@ -322,7 +322,7 @@ func indexSkipSummary(rowMapFailed bool) string {
 	if rowMapFailed {
 		msg += "; " + parser.SkipRowMapFailed + " is a different cause: rows whose text was not valid UTF-8 and could not be " +
 			"converted were left out while the rest of their event was indexed, the `failed to map` warnings above " +
-			"name the column and the cause, and this does not mark the file failed"
+			"name the column and the cause, and the file holding them is marked failed (its error says what to do)"
 	}
 	return msg
 }
