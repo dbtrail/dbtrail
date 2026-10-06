@@ -425,8 +425,11 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
 - The supervisor reconciles **desired state** (`monitor_desired` in the
   registry) at boot: restart the daemon and monitoring resumes from each
   stream's saved checkpoint.
-- A per-entry **advisory lock** (`GET_LOCK`) on the index server makes a
-  second daemon refuse to double-stream the same entry.
+- A per-entry **capture lock** (`GET_LOCK`) on the index server makes a
+  second daemon wait instead of double-streaming the same entry: it shows
+  **WAITING FOR OTHER DBTRAIL** and captures once the first one stops. The
+  holder checks the lock every 5 seconds and stops writing without it
+  ([deployment.md](deployment.md#when-the-host-dies)).
 - **Stream states**: `PENDING` covers launch through the stream's first
   checkpoint (connecting, snapshotting, finding the start position) — the
   badge only says `RUNNING` once the stream has proven it is attached and
