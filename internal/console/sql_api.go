@@ -1028,7 +1028,9 @@ func sqlStarRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs) string {
 //   - a star returns other columns than MySQL's (sqlStarRefusalFor, #2111);
 //   - a name could bind to something else (sqlNamesRefusalFor, #2123);
 //   - a date, time or year column is used where the copy's type for it
-//     answers differently (sqlTypesRefusalFor, #2133).
+//     answers differently (sqlTypesRefusalFor, #2133);
+//   - a column's name stands right before a string, which the copy reads
+//     as a constant of a type called that (sqlWordsRefusalFor, #2131).
 //
 // types is sqlsandbox.Session.Types.
 func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, statement string, types sqlsandbox.ColumnTypes) string {
@@ -1042,7 +1044,42 @@ func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, stateme
 	if msg := sqlNamesRefusalFor(narrowed, statement); msg != "" {
 		return msg
 	}
-	return sqlTypesRefusalFor(narrowed, refs, types)
+	if msg := sqlTypesRefusalFor(narrowed, refs, types); msg != "" {
+		return msg
+	}
+	return sqlWordsRefusalFor(narrowed, types)
+}
+
+// sqlWordsRefusalFor says why the copy would refuse a statement because of
+// how it writes the name of a column of a table it reads, or "" (#2131):
+// the name right before a string literal. `SELECT status 'Label' FROM t` is
+// the column under an alias on MySQL and a constant of a type called status
+// on the copy. The rule is the routing layer's (readrouter.NameVeto), asked
+// once with the columns of every table the statement reads.
+//
+// The copy would refuse such a statement and MySQL would answer after the
+// failed attempt, counted as a fault of the copy; this refuses it before
+// the views are built, as the decision about a table's columns it is.
+// Nothing here keeps a wrong answer away (the words the copy answers on are
+// vetoed from the text, before any table is known), so what is not known
+// asks nothing: no reading of the statement (types is nil), or a table
+// whose columns were not read, which sqlNamesRefusalFor has refused
+// already.
+func sqlWordsRefusalFor(narrowed views.Input, types sqlsandbox.ColumnTypes) string {
+	if types == nil {
+		return ""
+	}
+	var names []string
+	for _, t := range narrowed.SelectedBaselines() {
+		names = append(names, t.Columns...)
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	if why := types.NameVeto(names); why != "" {
+		return "the copy does not answer this statement: " + why
+	}
+	return ""
 }
 
 // sqlTypesRefusalFor says why the copy must not answer a statement because of

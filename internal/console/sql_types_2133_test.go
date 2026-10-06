@@ -131,11 +131,19 @@ type askedTypes struct {
 	calls        int
 	dates, whole []string
 	star         bool
+	nameCalls    int
+	names        []string
 }
 
 func (a *askedTypes) ColumnVeto(dates, whole []string, star bool) string {
 	a.calls++
 	a.dates, a.whole, a.star = dates, whole, star
+	return ""
+}
+
+func (a *askedTypes) NameVeto(names []string) string {
+	a.nameCalls++
+	a.names = names
 	return ""
 }
 

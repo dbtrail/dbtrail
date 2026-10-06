@@ -902,8 +902,8 @@ What this is and is not:
     the column `text` under the alias `Label` on MySQL, the constant
     `'Label'` of type `text` on the copy, and both answer. The same holds
     for `` `int` '5' ``, `` `date` '2024-01-01' `` and every other name the
-    copy has a type for. The unquoted spelling (`text 'Label'`) has the
-    same difference and is not caught: write the alias with `AS`;
+    copy has a type for. The unquoted spelling (`text 'Label'`) is kept on
+    MySQL too, by the two rules for a word before a string further down;
   - a quoted name right after `U&` (two columns and an operator on MySQL,
     one Unicode-escaped name on the copy);
   - a string, a quoted name or a comment that never ends, and a comment
@@ -1032,7 +1032,51 @@ What this is and is not:
     The copy numbers the days of the week another way (`DAYOFWEEK` of a
     Thursday is 5 on MySQL and 4 on the copy, `WEEKDAY` of it 3 and 4), and
     its microseconds hold the seconds too (`MICROSECOND` of `10:20:30` is 0
-    on MySQL and 30000000 on the copy).
+    on MySQL and 30000000 on the copy);
+  - `CURRENT_USER` written without parentheses, and `CURRENT_ROLE` with or
+    without them: the user and the role on MySQL and MariaDB
+    (`root@localhost`; `NONE` on MySQL and `NULL` on MariaDB for the role),
+    the copy's own (`duckdb`) there. With parentheses `CURRENT_USER()`,
+    `USER()` and the others were kept on MySQL already, and so were `NOW()`
+    and every other clock function, written either way, so the copy's
+    clock and time zone never answer for the source's;
+  - the name of a type on the copy right before a string, with a space, a
+    comment or nothing between them: `text 'Label'`, `json'1'`, `datetime
+    '2026-01-01'`, `uuid '...'`, `bool '1'`. MySQL and MariaDB read the
+    column, or the alias, called `text`, shown under the name `Label`; the
+    copy reads the constant `'Label'` of type `text`, and both answer:
+    `SELECT text 'Label' FROM (SELECT 'body' AS text) t` is `body` on MySQL
+    and `Label` on the copy. The words are every type name the copy's
+    engine has (a test asks the engine for the list, so a new type cannot
+    be missed). `DATE '...'`, `TIME '...'`, `TIMESTAMP '...'` and `INTERVAL
+    '...'` are not kept back: MySQL reads those as the copy does, also over
+    a table with a column called `date`. Write the alias with `AS` to have
+    the copy answer;
+  - a word the copy keeps for itself and MySQL takes for a name, written
+    as a name without quotes: `at`, `end`, `offset`, `full`, `any`, `some`,
+    `cast`, `do`, `only`, `array`, `semi`, `anti`, `isnull`, `notnull`,
+    `pivot` and about thirty rarer ones (44 in all; `window` and `lateral`
+    among them are a name on MariaDB only). The copy cannot read
+    such a name bare. For a column it refuses the statement (`WHERE at >=
+    '2026-01-02'` over a column called `at` is a syntax error there), which
+    used to cost a failed attempt on the copy before MySQL answered, on
+    every such statement. In two places it does not refuse, it answers
+    something else. `FROM a full JOIN b USING (id)` is the table `a` under
+    the alias `full`, joined, on MySQL (the rows both tables hold) and a
+    `FULL OUTER JOIN` on the copy (every row of both); the same for `semi`,
+    `anti`, `asof` and `positional`. And `SELECT v isnull FROM t` is `v`
+    under the alias `isnull` on MySQL and the test `v IS NULL` on the copy.
+    All of these stay on MySQL now. The copy still answers when the name is
+    quoted (`` `at` ``), comes after a name and a dot (`ev.at`; after a
+    number the dot is a decimal point, and `SELECT 1. isnull` stays on
+    MySQL: `1` there, `false` on the copy), or is the alias of a
+    column right after `AS` (`SELECT made AS at`), and where the word is
+    the keyword on MySQL too: before a parenthesis (`CAST(`, `= ANY (`),
+    the `END` of a `CASE`, `OFFSET` before a number, `ROWS ONLY`, and
+    `WINDOW w AS (...)`. One statement the copy might have answered stays
+    on MySQL for it: `AT TIME ZONE`. A column named with a word both sides
+    reserve (`order`, `group`, `left`, `desc`) is not part of this: MySQL
+    only takes it quoted.
 
   The
   copy itself compares text close to the way MySQL's default collation
@@ -1353,7 +1397,16 @@ What this is and is not:
   - **a statement that reads a table whose name differs from another
     table's only by letter case** (`Gen` and `gen`, on a source with
     `lower_case_table_names=0`): the copy does not tell the two names apart
-    and would read one table for both.
+    and would read one table for both;
+  - **a statement with the name of a column of a table it reads right
+    before a string**, with a space, a comment or nothing between them:
+    `SELECT status 'Label' FROM orders`. MySQL reads the column under the
+    alias `Label`; the copy reads a constant of a type called `status`, has
+    no such type and refuses. The copy is no longer tried for it, and the
+    statement is counted as a decision about the table's columns instead of
+    a refusal by the copy. (When the copy does have a type of that name,
+    the statement is kept on MySQL from its text: see the list of
+    constructs above.)
 
   An invisible column is not part of this: a snapshot holds it, and both
   sides resolve its name the same way (only `SELECT *` and `NATURAL JOIN`
