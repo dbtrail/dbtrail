@@ -619,14 +619,25 @@ The decision, in order, for every statement:
    one change is not seen on it: do not change session settings inside a
    function there. The port finds out on every connection, from the answer
    to its own statement: a source that tracks marks that answer too.
-   DBTrail's log says so when the connection opens, at debug level (`read
-   routing: the source does not report session changes on this connection
-   ...`, with the reason).
+   DBTrail's log says so once per server, at warn level (`read routing:
+   this source does not tell the port when a statement changes a session
+   setting ...`, with the reason), and `GET /api/flashback` carries the
+   reason as `session_untracked` for that server.
+
+   A source, or a proxy in front of it, can also agree to session tracking
+   and then send data about the session that the port cannot read. A
+   connection that fails that way while it opens is opened once more
+   without asking, and works as before; one that fails later is lost like
+   any connection whose packets cannot be read (error 2006), and the
+   client's next connection works. Either way the port stops asking that
+   server for session tracking until DBTrail restarts, and says so in the
+   same warning.
 
    A client that sets `session_track_system_variables` itself (some
    connectors do when they connect) replaces the port's list. The port
-   sees it the next time it reads the session and adds its settings back
-   to the client's list, with one more statement.
+   sees it the next time it reads the session and, when any of its
+   settings is missing from the list, adds them back to the client's,
+   with one more statement.
 
    Two things the port still does not see. A stored function that changes
    `session_track_system_variables` itself, inside a `SELECT`: from then

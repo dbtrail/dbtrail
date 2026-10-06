@@ -168,10 +168,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   8.4 and on MariaDB 10.11, 11.4, 11.8 and 12.3, with no extra privilege.
   When the source does not offer session tracking (an older server, or a
   proxy in front of it), the connection works as before, this one change is
-  still not seen there, and DBTrail's log says so when the connection opens,
-  at debug level. A client that replaces `session_track_system_variables` with
-  its own list, as some connectors do when they connect, gets the port's
-  settings added back to it the next time the port reads the session.
+  still not seen there, and DBTrail's log says so once per server at warn
+  level (`GET /api/flashback` carries the reason as `session_untracked`). A
+  source or proxy that agrees to session tracking and then sends data the
+  port cannot read is not asked again: the connection is opened once more
+  without it. A panic on one client connection of the port now ends that
+  connection alone, logged with its stack, instead of the process. A client
+  that replaces `session_track_system_variables` with its own list, as some
+  connectors do when they connect, gets the port's settings added back to
+  it the next time the port reads the session.
   Details in docs/time-travel-sql.md, "A setting changed inside a stored
   function".
 

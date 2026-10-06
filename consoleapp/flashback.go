@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -191,6 +192,15 @@ func serveFlashback(ctx context.Context, srv *console.Server, ln net.Listener, c
 // reveals the target. Commands are dispatched sequentially in this goroutine
 // strictly after that, so no synchronisation is needed.
 func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, mysrv *server.Server, creds server.AuthenticationHandler, gate *shim.Gate, cfg flashbackConfig, logger *slog.Logger) {
+	proxy := &routingHandler{}
+	// The first defer, so the last to run: by then this connection's own
+	// defers have closed the client's socket, dropped the upstream connection
+	// and given back its slot, as they do when it ends any other way.
+	defer func() {
+		if r := recover(); r != nil {
+			flashbackConnPanicked(logger, c.RemoteAddr(), r, debug.Stack(), proxy.onPanic)
+		}
+	}()
 	defer c.Close()
 
 	// The connection context ends when the daemon context dies (SIGTERM), when
@@ -207,7 +217,6 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 	stopCloser := context.AfterFunc(connCtx, func() { _ = c.Close() })
 	defer stopCloser()
 
-	proxy := &routingHandler{}
 	// shim.NewConn: the handshake announces autocommit (#2110).
 	mysqlConn, err := shim.NewConn(wc, mysrv, creds, proxy)
 	if err != nil {
@@ -244,6 +253,29 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 			}
 			return
 		}
+	}
+}
+
+// flashbackConnPanicked is what the port does with a panic on a client
+// connection's goroutine: it says so with the stack, and the connection ends.
+//
+// In `watch` this process is also capture, so a panic that is let go ends
+// capture for every server. The connection is the unit that fails: its
+// client reads a closed socket (every driver reconnects on that), and the
+// port goes on accepting. Nothing is left held: handleFlashbackConn's defers
+// ran before this, as on any other end of a connection.
+//
+// The code this goroutine runs that reads bytes it did not write is the
+// client library's packet reader, for the client's packets and, under read
+// routing, the source's. Since #2127 asked sources for session tracking it
+// also decodes their session-state data, and it indexes that data without
+// checking its length. onPanic, when set, is the connection's own note for
+// that case (bindFlashbackHandler).
+func flashbackConnPanicked(logger *slog.Logger, remote net.Addr, r any, stack []byte, onPanic func()) {
+	logger.Error("flashback: a client connection panicked and was closed; the port and every other connection go on",
+		"remote", remote, "panic", fmt.Sprint(r), "stack", string(stack))
+	if onPanic != nil {
+		onPanic()
 	}
 }
 
@@ -317,6 +349,15 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	// once per connection: silently serving the copy to a client who was
 	// promised MySQL semantics is the one thing this must not do.
 	if fw := bindReadRouter(h, srv, tgt, user, cfg, logger); fw != nil {
+		if fw.TrackSession {
+			// A panic on a connection that asked the source for session
+			// tracking: the one new thing such a connection does is decode
+			// the source's session-state data, so this server's next
+			// connections do not ask (flashbackConnPanicked).
+			proxy.onPanic = func() {
+				fw.OnUntracked("a connection that asked the source for them ended in a panic (logged with its stack)", true)
+			}
+		}
 		// tgt was read at generation tgt.ForwardGen. If the account changed
 		// since, this handler may carry the previous one: the connection is
 		// closed here, and the client reconnects into the account in force.
@@ -433,13 +474,31 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 			// The source is asked to say when a statement changed one of
 			// the session settings the copy runs under, so that a change
 			// made inside a stored function is seen (#2127). A source that
-			// does not do it is said at debug when the connection opens
-			// (and once more if a list a client replaced cannot be put
-			// back): the connection works as it did before this was asked.
-			fw.TrackSession = true
-			fw.OnUntracked = func(why string) {
+			// does not do it is said once per server at warn level
+			// (warnSessionUntracked) and on GET /api/flashback, and per
+			// connection at debug: the connection works as it did before
+			// this was asked. A source whose connections BREAK when it is
+			// asked (sessionTrackingUnusable) is not asked again.
+			_, unusable := sessionTrackingUnusable.Load(id)
+			fw.TrackSession = !unusable
+			untracked := false
+			noteUntracked := func(why string, unusable bool) {
+				untracked = true
+				if unusable {
+					sessionTrackingUnusable.Store(id, true)
+				}
 				logger.Debug("read routing: the source does not report session changes on this connection; a setting changed inside a stored function is not seen",
 					"server", user, "why", why)
+				warnSessionUntracked(logger, id, user, why)
+				srv.RecordRouteSessionUntracked(id, why)
+			}
+			fw.OnUntracked = noteUntracked
+			onConnect := fw.OnConnect
+			fw.OnConnect = func(err error) {
+				onConnect(err)
+				if err == nil && fw.TrackSession && !untracked {
+					srv.RecordRouteSessionTracked(id)
+				}
 			}
 			warnDSNOverridesTLS(logger, id, user, tgt.ForwardDSN, tgt.SourceSSL.Mode)
 			bound = fw
@@ -481,6 +540,31 @@ func warnDSNOverridesTLS(logger *slog.Logger, id, server, dsn, mode string) {
 	}
 	logger.Warn("read routing: the DSN the port forwards with sets its own tls= parameter, which takes precedence over this server's TLS mode; verify it meets your security requirement",
 		"server", server, "ssl_mode", mode)
+}
+
+// sessionTrackingUnusable: the servers whose connections broke when the port
+// asked them for session tracking (readrouter.Forwarder.OnUntracked with
+// unusable set, or a panic on a connection that asked). The port's later
+// connections to such a server do not ask, for the life of the process: a
+// client that reconnects after the loss gets a connection that works.
+var sessionTrackingUnusable sync.Map
+
+// sessionUntrackedWarned: the servers already told about (warnSessionUntracked).
+var sessionUntrackedWarned sync.Map
+
+// sessionUntrackedText is what the log says, once per server, when the source
+// does not report changes to session settings on the port's connections.
+const sessionUntrackedText = "read routing: this source does not tell the port when a statement changes a session setting, " +
+	"so a setting changed inside a stored function that a SELECT calls is not seen until the next statement that changes settings (a SET, a write, a CALL); " +
+	"until then the copy can answer an expensive read under the setting from before. Everything else about read routing works as before"
+
+// warnSessionUntracked says it, once per server for the life of the process,
+// with the reason the port's connection gave.
+func warnSessionUntracked(logger *slog.Logger, id, server, why string) {
+	if _, told := sessionUntrackedWarned.LoadOrStore(id, true); told {
+		return
+	}
+	logger.Warn(sessionUntrackedText, "server", server, "why", why, "note", "logged once per server")
 }
 
 // sessionDefaultsWarned: the servers already told that their sessions do not
@@ -651,6 +735,9 @@ type routingHandler struct {
 	server.EmptyHandler
 	inner *shim.Handler
 	fail  error
+	// onPanic, when set, is run after a panic on this connection's
+	// goroutine (flashbackConnPanicked).
+	onPanic func()
 	// pendingDB holds a default schema the client sent in the handshake
 	// (CLIENT_CONNECT_WITH_DB): go-mysql invokes UseDB DURING the handshake,
 	// before bindFlashbackHandler binds inner. Stashing it (and returning nil)

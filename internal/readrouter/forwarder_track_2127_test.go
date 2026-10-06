@@ -84,7 +84,7 @@ func (h *trackSource) HandleQuery(q string) (*mysql.Result, error) {
 // that greets with the given version. agreed is what the handshake is said to
 // have settled on; "" leaves what it really did (the library's server has
 // session tracking and not CLIENT_DEPRECATE_EOF).
-func newTrackForwarder(t *testing.T, version, agreed string) (*Forwarder, *trackSource) {
+func startTrackSource(t *testing.T, version string) (string, *trackSource) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -118,7 +118,19 @@ func newTrackForwarder(t *testing.T, version, agreed string) (*Forwarder, *track
 			}()
 		}
 	}()
-	f, err := NewForwarder("u:p@tcp("+ln.Addr().String()+")/db?tls=false", config.SSL{Mode: "disabled"}, DefaultPolicy(), 10*time.Second)
+	return ln.Addr().String(), h
+}
+
+func newTrackForwarder(t *testing.T, version, agreed string) (*Forwarder, *trackSource) {
+	t.Helper()
+	addr, h := startTrackSource(t, version)
+	return trackForwarderAt(t, addr, agreed), h
+}
+
+// trackForwarderAt is a Forwarder with TrackSession set that connects to addr.
+func trackForwarderAt(t *testing.T, addr, agreed string) *Forwarder {
+	t.Helper()
+	f, err := NewForwarder("u:p@tcp("+addr+")/db?tls=false", config.SSL{Mode: "disabled"}, DefaultPolicy(), 10*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +139,7 @@ func newTrackForwarder(t *testing.T, version, agreed string) (*Forwarder, *track
 		f.capabilities = func(*client.Conn) string { return agreed }
 	}
 	t.Cleanup(f.Close)
-	return f, h
+	return f
 }
 
 const bothAgreed = "CLIENT_PROTOCOL_41|CLIENT_SESSION_TRACK|CLIENT_DEPRECATE_EOF"
@@ -138,7 +150,7 @@ const bothAgreed = "CLIENT_PROTOCOL_41|CLIENT_SESSION_TRACK|CLIENT_DEPRECATE_EOF
 func TestForwarder_trackSession_oneStatementPerConnection(t *testing.T) {
 	ctx := context.Background()
 	f, src := newTrackForwarder(t, "8.4.9", bothAgreed)
-	f.OnUntracked = func(why string) { t.Errorf("OnUntracked(%q) on a source that tracks", why) }
+	f.OnUntracked = func(why string, _ bool) { t.Errorf("OnUntracked(%q) on a source that tracks", why) }
 	if f.SessionTracked() {
 		t.Error("tracked before the connection is opened")
 	}
@@ -232,7 +244,12 @@ func TestForwarder_trackSession_sourceThatCannot(t *testing.T) {
 			ctx := context.Background()
 			f, src := newTrackForwarder(t, "8.4.9", tc.agreed)
 			var told []string
-			f.OnUntracked = func(why string) { told = append(told, why) }
+			f.OnUntracked = func(why string, unusable bool) {
+				if unusable {
+					t.Errorf("OnUntracked(%q) said tracking is unusable", why)
+				}
+				told = append(told, why)
+			}
 			for range 3 {
 				if _, err := f.Forward(ctx, "DO 1", &BufferSink{}); err != nil {
 					t.Fatal(err)
@@ -258,7 +275,12 @@ func TestForwarder_trackSession_sourceThatRefuses(t *testing.T) {
 	f, src := newTrackForwarder(t, "8.4.9", bothAgreed)
 	src.setErr = mysql.NewError(mysql.ER_UNKNOWN_SYSTEM_VARIABLE, "Unknown system variable 'session_track_system_variables'")
 	var told []string
-	f.OnUntracked = func(why string) { told = append(told, why) }
+	f.OnUntracked = func(why string, unusable bool) {
+		if unusable {
+			t.Errorf("OnUntracked(%q) said tracking is unusable", why)
+		}
+		told = append(told, why)
+	}
 	var connected []error
 	f.OnConnect = func(err error) { connected = append(connected, err) }
 	for range 2 {
@@ -288,7 +310,12 @@ func TestForwarder_trackSession_sourceThatDoesNotMark(t *testing.T) {
 	f, src := newTrackForwarder(t, "8.4.9", bothAgreed)
 	src.unmarked = true
 	var told []string
-	f.OnUntracked = func(why string) { told = append(told, why) }
+	f.OnUntracked = func(why string, unusable bool) {
+		if unusable {
+			t.Errorf("OnUntracked(%q) said tracking is unusable", why)
+		}
+		told = append(told, why)
+	}
 	for range 2 {
 		if _, err := f.Forward(ctx, "DO 1", &BufferSink{}); err != nil {
 			t.Fatal(err)
@@ -312,7 +339,7 @@ func TestForwarder_trackSession_connectionLost(t *testing.T) {
 	src.drop = true
 	var connected []error
 	f.OnConnect = func(err error) { connected = append(connected, err) }
-	f.OnUntracked = func(why string) { t.Errorf("OnUntracked(%q) for a connection that broke", why) }
+	f.OnUntracked = func(why string, _ bool) { t.Errorf("OnUntracked(%q) for a connection that broke", why) }
 	if _, err := f.Forward(ctx, "DO 1", &BufferSink{}); !IsLost(err) {
 		t.Fatalf("err = %v, want the lost error", err)
 	}
@@ -394,7 +421,7 @@ func TestTracksSession(t *testing.T) {
 		// MariaDB 11.4 prints the list sorted, without two of its names.
 		"character_set_connection,character_set_results,div_precision_increment,lc_time_names,max_join_size,session_track_system_variables,sql_auto_is_null,sql_mode,sql_select_limit,time_zone": true,
 		"*": true,
-		"time_zone, Session_Track_System_Variables": true,
+		" Time_Zone , " + strings.ToUpper(strings.TrimPrefix(SessionTrackedVariables, "time_zone,")): true,
 		// What a client leaves when it replaces the list.
 		"autocommit,character_set_client,character_set_connection,character_set_results,time_zone": false,
 		"time_zone,autocommit,transaction_isolation":                                               false,
@@ -402,6 +429,14 @@ func TestTracksSession(t *testing.T) {
 		"session_track_system_variables_x":    false,
 		"xsession_track_system_variables":     false,
 		"session_track_state_change,sql_mode": false,
+		// The mark alone is not the list: a client that kept it and dropped
+		// a setting is not tracked for that setting.
+		strings.Replace(SessionTrackedVariables, "time_zone,", "", 1):     false,
+		strings.Replace(SessionTrackedVariables, ",lc_time_names", "", 1): false,
+		"session_track_system_variables":                                  false,
+		// The two names MariaDB 11.4 leaves out when it prints the list.
+		strings.NewReplacer(",sql_big_selects", "", ",collation_connection", "").Replace(SessionTrackedVariables): true,
+		SessionTrackedVariables + ",autocommit": true,
 	} {
 		if got := TracksSession(list); got != want {
 			t.Errorf("TracksSession(%q) = %v, want %v", list, got, want)
@@ -434,7 +469,12 @@ func TestForwarder_trackSessionAgain(t *testing.T) {
 	ctx := context.Background()
 	f, src := newTrackForwarder(t, "8.4.9", bothAgreed)
 	var told []string
-	f.OnUntracked = func(why string) { told = append(told, why) }
+	f.OnUntracked = func(why string, unusable bool) {
+		if unusable {
+			t.Errorf("OnUntracked(%q) said tracking is unusable", why)
+		}
+		told = append(told, why)
+	}
 	// No connection yet: nothing to ask, and none is opened for it.
 	if err := f.TrackSessionAgain(ctx, "time_zone"); err != nil || len(src.statements()) != 0 {
 		t.Fatalf("before the connection opened: err %v, the source saw %q", err, src.statements())

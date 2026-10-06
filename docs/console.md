@@ -522,7 +522,10 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
   tried with it: `ok`, `user`, `error`, `needs_password`, or `skipped` with
   the reason in a process that has no port (`serve`); and
   `GET /api/flashback` carries `account_refused` per server when the
-  source turned the port's login away; see
+  source turned the port's login away, and `session_untracked` when the
+  source does not tell the port about session settings changed inside a
+  stored function (with the reason; the web interface does not show it
+  yet, DBTrail's log does, once per server); see
   [time-travel-sql.md](time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental)),
   `source_server_id` (0 = derived), `schemas`, `monitor_desired`,
   `archive_s3` (the bucket above — non-secret, round-trips in the masked DTO),
