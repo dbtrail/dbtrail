@@ -216,7 +216,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same way. Now, when the restart position sorts below the checkpoint
   or carries another file name, the cleanup deletes nothing and says so
   (`Cleanup: skipped, the binlog numbering started over`), and the next
-  cleanups only touch rows captured after the jump. The ordinary restart
+  cleanups only touch rows captured after the jump. When the checkpoint's
+  file still exists but ends before the checkpoint, a source crash that
+  lost the end of the file looks the same as a reset, so the rows are kept
+  there too and the line says that changes indexed before may now be
+  indexed twice: a duplicate can be seen and removed, a deleted change
+  cannot be brought back. The ordinary restart
   after a crash is unchanged: replayed rows are still not indexed twice.
   GTID mode is unchanged.
   **What may already be missing:** on an index whose source ran `RESET

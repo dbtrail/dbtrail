@@ -1111,6 +1111,9 @@ func TestDetectPositionGap_posExceedsSize(t *testing.T) {
 	if gap.RebuildUndetectable {
 		t.Error("expected RebuildUndetectable=false on the loud pos>size branch")
 	}
+	if !gap.CheckpointPastEnd {
+		t.Error("expected CheckpointPastEnd=true on the pos>size branch: the #2170 cleanup notice needs it to not claim a renumbering")
+	}
 }
 
 // TestDetectGTIDGap_noGap verifies no gap when checkpoint matches executed.
