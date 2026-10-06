@@ -35,6 +35,32 @@ relationships) into the index so events can be decoded into named columns.
   `performance_schema`, `mysql`, `sys` — e.g. the periodic
   `mysql.rds_heartbeat2` updates RDS writes to the binlog). To automate
   re-snapshotting, see [DDL tracking](ddl-tracking.md).
+- **Other dropped changes fail the file too.** Some changes cannot be
+  indexed whatever the snapshot says: a STATEMENT/MIXED-format DML (the
+  binlog holds no row image), a rows event type DBTrail does not decode
+  (`PARTIAL_UPDATE_ROWS_EVENT` under `binlog_row_value_options=PARTIAL_JSON`),
+  a CHAR/VARCHAR value that is not valid UTF-8 and cannot be converted
+  (`row_map_failed`), an UPDATE event with an unpaired row image, or a rows
+  event read with no schema snapshot loaded. When any of them happens in a
+  file, `bintrail index` marks the file `failed` and exits non-zero; the
+  error lists each kind with its count, its tables and its fix. Statement
+  DML in `mysql`, `sys` and the other system schemas, or in a schema the
+  `--schemas`/`--tables` filters leave out, is not a gap and does not fail
+  the file. The scope is decided by the statement's default database, since
+  the binlog holds no row image to name the table: a tool that switches its
+  own session to STATEMENT format, such as pt-table-checksum writing
+  `percona.checksums`, fails the file unless `--schemas` leaves that schema
+  out. Unlike a schema gap, re-indexing does not bring most of these
+  back (the same binlog drops the same changes), and the rows that WERE read
+  are already in the index: indexing a failed file again, which `--all` does
+  on every run while it stays failed, inserts those rows a second time,
+  because the index cannot tell a second copy of a row from the first. The
+  same holds for a schema-gap failure.
+- **Escalation is per event, by decision.** The single "capture is
+  effectively stopped" error fires after 100 consecutive events that each
+  lost every row. An event that gets at least one row through resets that
+  count, so a table where most rows of every event are dropped never raises
+  it; those drops show in the capture ledger and as DEGRADED in `status`.
 - **Same-count changes are the dangerous ones.** A column rename (or a
   `DROP COLUMN` + `ADD COLUMN` in one `ALTER`) keeps the count equal, so the
   count check can't see it — values would silently index under the wrong

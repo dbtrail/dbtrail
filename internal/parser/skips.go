@@ -57,6 +57,11 @@ const (
 	// SkipStatementFormatDML — a STATEMENT/MIXED-format DML whose row image
 	// is not in the binlog (#999); the change cannot be captured.
 	SkipStatementFormatDML = "statement_format_dml"
+	// SkipUnpairedUpdateImage — an UPDATE rows event carried an odd number of
+	// row images (#2144). The binlog format always writes before/after pairs,
+	// so this means a decoding fault; the complete pairs are indexed and the
+	// trailing image is dropped, recorded once per event like row_map_failed.
+	SkipUnpairedUpdateImage = "unpaired_update_image"
 	// SkipUnreadablePreviousLedger — meta-reason (#1206): the previous run's
 	// persisted ledger existed but could not be parsed at restart. Not an
 	// event skip — it preserves the FACT that a loss tally may have been
@@ -72,6 +77,13 @@ const (
 // with remediation guidance — the per-event WARNs blend into noise exactly
 // when they matter most (#1034 observed 100% skips for ~2 days). One ERROR
 // per degraded episode: the flag re-arms only after an event is captured.
+//
+// The run is all-or-nothing per EVENT, and that is a decision (#2144), not an
+// accident: an event that gets at least one row through counts as captured and
+// resets the run, so a table where most rows of every event are dropped never
+// escalates. That condition is reported by the per-reason ledger entry (which
+// marks capture DEGRADED in `status`), not by this line, whose job is to say
+// the whole stream is discarding everything.
 const SkipEscalationThreshold = 100
 
 // SkipStat is one reason's monotonic tally. The JSON field names are the
