@@ -419,10 +419,16 @@ func startedOverErr(e indexedEvent, m *EventMark) error {
 // MariaDB has no server_uuid: capture derives its identity from the address,
 // so a failover behind the same address records nothing here.
 func CheckSourceReplaced(ctx context.Context, db *sql.DB, since time.Time) error {
+	return checkSourceReplaced(ctx, db, since, time.Time{})
+}
+
+// checkSourceReplaced is CheckSourceReplaced counting only changes recorded
+// at or before until (zero: up to now).
+func checkSourceReplaced(ctx context.Context, db *sql.DB, since, until time.Time) error {
 	if since.IsZero() {
 		return nil
 	}
-	return checkSourceReplacedSince(ctx, db, since)
+	return checkSourceReplacedSince(ctx, db, since, until)
 }
 
 // CheckNumberingFrom runs the two checks that read a snapshot's event mark
@@ -471,14 +477,19 @@ func anotherServerErr(now string, m *EventMark) error {
 		ErrBinlogRenumbered, now, m.ServerUUID, renumberedRemedy)
 }
 
-func checkSourceReplacedSince(ctx context.Context, db *sql.DB, since time.Time) error {
+func checkSourceReplacedSince(ctx context.Context, db *sql.DB, since, until time.Time) error {
 	var oldUUID, newUUID string
 	var at time.Time
 	// Compared as an instant: detected_at is a TIMESTAMP the index server
 	// reads in its own time zone.
-	err := db.QueryRowContext(ctx, `SELECT old_value, new_value, detected_at FROM bintrail_server_changes
-		WHERE field_changed = 'server_uuid' AND UNIX_TIMESTAMP(detected_at) >= ?
-		ORDER BY id DESC LIMIT 1`, since.Unix()).Scan(&oldUUID, &newUUID, &at)
+	q := `SELECT old_value, new_value, detected_at FROM bintrail_server_changes
+		WHERE field_changed = 'server_uuid' AND UNIX_TIMESTAMP(detected_at) >= ?`
+	args := []any{since.Unix()}
+	if !until.IsZero() {
+		q += ` AND UNIX_TIMESTAMP(detected_at) <= ?`
+		args = append(args, until.Unix())
+	}
+	err := db.QueryRowContext(ctx, q+` ORDER BY id DESC LIMIT 1`, args...).Scan(&oldUUID, &newUUID, &at)
 	switch {
 	case err == nil:
 		return fmt.Errorf("%w: capture found another server answering at the source's address at %s (server_uuid %s, before it %s), and two servers number their binary logs apart. %s",

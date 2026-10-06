@@ -314,3 +314,78 @@ func parseUnixSeconds(s string) (time.Time, error) {
 	}
 	return time.Unix(sec, 0).UTC(), nil
 }
+
+// checkNumberingForRead runs check, the binlog-renumbering check of a read
+// described by opts that ends at until, bounded to that read (a ReadWindow)
+// only while binlog_events (dbName) still holds every change the read can
+// see: the bounded form reads only the live table, and the read takes
+// rotated hours from the archives with the same position filter. Otherwise,
+// and when rotation dropped the oldest partition while the bounded check ran
+// (the floor's hour may be gone from what it scanned), check runs again over
+// the whole index (a zero ReadWindow). bounded reports which form answered.
+func checkNumberingForRead(ctx context.Context, db *sql.DB, dbName string, opts query.Options, until time.Time, check func(ReadWindow) error) (bool, error) {
+	before, live, err := liveHoldsRead(ctx, db, dbName, opts)
+	if err != nil {
+		return false, err
+	}
+	if !live {
+		return false, check(ReadWindow{})
+	}
+	if err := check(ReadWindow{Schema: opts.Schema, Table: opts.Table, Since: *opts.Since, Until: until}); err != nil {
+		return true, err
+	}
+	after, _, err := oldestPartition(ctx, db, dbName)
+	if err != nil {
+		return false, err
+	}
+	if after != before {
+		return false, check(ReadWindow{})
+	}
+	return true, nil
+}
+
+// liveHoldsRead reports whether binlog_events (dbName) still holds every
+// change the read described by opts can see: its oldest partition starts at
+// or before the read's floor (query.PositionReadFloor), so rotation, which
+// drops the oldest hours, has taken nothing the read reaches. A table with
+// only the p_future catch-all never rotated. No partition row (no table, or
+// an unpartitioned one), a partition name this build cannot place, no
+// database name or no floor: false, the answer that keeps the whole-index
+// check. oldest is the partition read, for checkNumberingForRead to compare.
+func liveHoldsRead(ctx context.Context, db *sql.DB, dbName string, opts query.Options) (oldest string, live bool, err error) {
+	if dbName == "" || opts.Since == nil {
+		return "", false, nil
+	}
+	floor, err := query.PositionReadFloor(ctx, db, opts)
+	if err != nil {
+		return "", false, fmt.Errorf("find how far back the read of %s.%s reaches: %w", opts.Schema, opts.Table, err)
+	}
+	name, found, err := oldestPartition(ctx, db, dbName)
+	if err != nil || !found {
+		return "", false, err
+	}
+	if name == "p_future" {
+		return name, true, nil
+	}
+	start, ok := query.ParsePartitionName(name)
+	if !ok || floor.IsZero() {
+		return name, false, nil
+	}
+	return name, !floor.Before(start), nil
+}
+
+// oldestPartition returns binlog_events' first partition by position; found
+// false when the table has none (or does not exist).
+func oldestPartition(ctx context.Context, db *sql.DB, dbName string) (string, bool, error) {
+	var name string
+	err := db.QueryRowContext(ctx, `SELECT PARTITION_NAME FROM information_schema.PARTITIONS
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'binlog_events' AND PARTITION_NAME IS NOT NULL
+		ORDER BY PARTITION_ORDINAL_POSITION LIMIT 1`, dbName).Scan(&name)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", false, nil
+	case err != nil:
+		return "", false, fmt.Errorf("read binlog_events' oldest partition: %w", err)
+	}
+	return name, true, nil
+}

@@ -748,13 +748,14 @@ func runReconstructFullTable(cmd *cobra.Command, start time.Time) error {
 
 	// ── Parse --at ─────────────────────────────────────────────────────────
 	at := time.Now().UTC()
+	explicitAt := false // a past --at bounds the renumbering check (#2182)
 	if recAt != "" {
 		parsed, err := cliutil.ParseTime(recAt)
 		if err != nil {
 			return fmt.Errorf("--at: %w", err)
 		}
 		if parsed != nil {
-			at = *parsed
+			at, explicitAt = *parsed, true
 		}
 	}
 	if recBaselineDir == "" && recBaselineS3 == "" {
@@ -804,6 +805,7 @@ func runReconstructFullTable(cmd *cobra.Command, start time.Time) error {
 		BaselineSrc:  baselineSrc,
 		Tables:       tables,
 		At:           at,
+		ExplicitAt:   explicitAt,
 		OutputDir:    recOutputDir,
 		OutputFormat: recOutputFormat,
 		// Opt-in here too, and for the same reason the daemon needs its own
