@@ -86,47 +86,37 @@ func listBinaryLogs(ctx context.Context, db *sql.DB) ([]binlogFileEntry, error) 
 	return logs, nil
 }
 
-// binlogNumberSuffix splits "binlog.000123" into ("binlog", "000123"). ok is
-// false when the name has no all-digit suffix after its last dot.
-func binlogNumberSuffix(name string) (base, num string, ok bool) {
-	i := strings.LastIndexByte(name, '.')
-	if i < 0 || i == len(name)-1 {
-		return "", "", false
-	}
-	base, num = name[:i], name[i+1:]
-	for _, c := range num {
-		if c < '0' || c > '9' {
-			return "", "", false
-		}
-	}
-	return base, num, true
-}
-
 // checkpointPastBinlogEnd reports whether the checkpoint (file, pos) lies past
 // the end of the source's binary log: a file numbered after the newest one, or
 // the newest file at an offset beyond its size. On one server binlog numbers
-// only grow, so this is a numbering that started over. Names are compared
-// byte for byte, and another base name (a log_bin rename) never matches:
-// that is no verdict, not a loss. The case it cannot see is the same file
-// number regrown past the checkpoint offset, the blind spot position mode
-// has too.
+// only grow, so this is a numbering that started over (or, in the newest file,
+// a lost tail). It compares as continuesNumbering does (#2170), and only names
+// with the newest file's base and an all-digit number: another base name (a
+// log_bin rename) is no verdict, not a loss. It cannot see a numbering that
+// started over and has rotated back up to the checkpoint's file number.
 func checkpointPastBinlogEnd(file string, pos uint64, logs []binlogFileEntry) bool {
 	if file == "" || len(logs) == 0 {
 		return false
 	}
 	newest := logs[len(logs)-1]
-	base, num, ok := binlogNumberSuffix(file)
-	nbase, nnum, nok := binlogNumberSuffix(newest.name)
-	if !ok || !nok || base != nbase {
+	base, num := splitBinlogName(file)
+	nbase, nnum := splitBinlogName(newest.name)
+	if base != nbase || !allDigits(num) || !allDigits(nnum) {
 		return false
 	}
-	if len(num) != len(nnum) {
-		return len(num) > len(nnum)
+	return !continuesNumbering(file, pos, newest.name, uint64(newest.size))
+}
+
+func allDigits(s string) bool {
+	if s == "" {
+		return false
 	}
-	if num != nnum {
-		return num > nnum
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
 	}
-	return pos > uint64(newest.size)
+	return true
 }
 
 func mysqlSetHasUUID(s *gomysql.MysqlGTIDSet, sid uuid.UUID) bool {

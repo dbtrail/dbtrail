@@ -204,6 +204,8 @@ type ExplainReport struct {
 	// (missing/changed/extra) — so the data-loss class is never invisible
 	// behind changed rows that filled the cap first.
 	OverflowByKind map[string]int `json:"overflow_by_kind,omitempty"`
+	// OrderNote is MismatchExplanation.OrderNote (#2156).
+	OrderNote string `json:"order_note,omitempty"`
 	// DeferredTypeNote mirrors the text caveat: a deferred-type column
 	// (ENUM/SET/JSON/binary) is among the diffs, so a shown value pair may be
 	// an event image rather than the source text — not necessarily corruption.
@@ -346,6 +348,7 @@ func (ex *MismatchExplanation) ReportEntry() ExplainReport {
 		TotalDifferingRows: ex.Total,
 		Rows:               make([]ExplainRow, 0, len(ex.Diffs)),
 		DeferredTypeNote:   ex.deferredSeen,
+		OrderNote:          ex.OrderNote,
 	}
 	for _, d := range ex.Diffs {
 		row := ExplainRow{PK: d.PK, Kind: d.Kind}

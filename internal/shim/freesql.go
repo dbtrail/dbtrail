@@ -780,8 +780,22 @@ type warningsSetter interface{ SetWarnings(uint16) }
 // setWarnings stores what SHOW WARNINGS answers until the next statement and
 // puts the count on the connection, so the client's "N warning(s)" shows.
 func (h *Handler) setWarnings(msgs []string) {
+	h.setWarningsCoded(mysql.ER_WARN_TOO_MANY_RECORDS, msgs)
+}
+
+// setWarningsCoded is setWarnings with the code SHOW WARNINGS gives each
+// message: the cell cap is MySQL's 1262; a note of the port's own (the
+// `_snapshot` order note, #2156) has no MySQL code of its own and takes 1105.
+func (h *Handler) setWarningsCoded(code uint16, msgs []string) {
 	h.mu.Lock()
 	h.lastWarnings = msgs
+	h.lastWarningCode = code
+	if len(msgs) > 0 {
+		// Warnings of this port's own: SHOW WARNINGS must answer them, not
+		// forward to MySQL for an earlier routed statement's (#2156: a
+		// `_snapshot` note after a forwarded read).
+		h.routeLastForwarded = false
+	}
 	// Called when a statement starts and when the copy answered one: either
 	// way the refusal of an earlier statement is no longer the last word.
 	h.routeRefusal = ""
@@ -798,12 +812,12 @@ func (h *Handler) setWarnings(msgs []string) {
 // stays handshake noise (an empty OK), as it always was.
 func (h *Handler) showWarnings() (*mysql.Result, error) {
 	h.mu.Lock()
-	msgs := h.lastWarnings
+	msgs, code := h.lastWarnings, h.lastWarningCode
 	h.mu.Unlock()
 	cols := []string{"Level", "Code", "Message"}
 	var rows [][]any
 	for _, msg := range msgs {
-		rows = append(rows, []any{"Warning", int64(mysql.ER_WARN_TOO_MANY_RECORDS), msg})
+		rows = append(rows, []any{"Warning", int64(code), msg})
 	}
 	rs, err := mysql.BuildSimpleTextResultset(cols, rows)
 	if err != nil {

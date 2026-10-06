@@ -139,6 +139,22 @@ type FetchMergedOptions struct {
 	// refresh folds every table up to the same cut) loads it once, AFTER that
 	// bound is fixed, and passes it to each.
 	PartitionHeads *PartitionHeads
+
+	// LatestInBinlog makes Opts.LimitPerPK keep each pk_values' latest
+	// LimitPerPK changes in binary log order (commit order) instead of by
+	// statement time, where the index can show that order (#2156):
+	// LatestPerPKInBinlog over the candidates Opts.LatestPerPKCandidates
+	// fetches, on every path this function returns by. Requires
+	// Opts.LimitPerPK > 0 and Opts.Limit == 0. For MySQL and MariaDB
+	// sources; a PostgreSQL change keeps its order (its time is its commit
+	// time), so the flag only costs it the larger fetch.
+	LatestInBinlog bool
+
+	// LatestOrder, when set with LatestInBinlog, receives what
+	// LatestPerPKInBinlog decided. Its Note is the text a caller shows when
+	// some keys kept statement-time order because binary log order could
+	// not be established.
+	LatestOrder *LatestPerPKOrder
 }
 
 // SourceResolver names the archive sources a merged read will open.
@@ -165,6 +181,13 @@ func (o FetchMergedOptions) validate() error {
 	// depend on which tiers happen to run.
 	if err := o.Opts.ValidateStatementFilter(); err != nil {
 		return err
+	}
+	if o.LatestInBinlog && (o.Opts.LimitPerPK <= 0 || o.Opts.Limit > 0) {
+		return errors.New("FetchMerged: LatestInBinlog requires LimitPerPK > 0 and no Limit")
+	}
+	if o.LatestInBinlog && (o.Opts.PKValuesAlt != "" || len(o.Opts.PKAliases) > 0) {
+		// The history of a key is read by its stored spelling.
+		return errors.New("FetchMerged: LatestInBinlog does not take PKValuesAlt or PKAliases")
 	}
 	return nil
 }
@@ -534,6 +557,16 @@ func topNSatisfiedLive(opts Options, rows []ResultRow, plan *QueryPlan) bool {
 // slicing to Limit as the top-N path does.
 func perPKSatisfiedLive(opts Options, rows []ResultRow, plan *QueryPlan) bool {
 	if opts.LimitPerPK <= 0 {
+		return false
+	}
+	// The latest N in binary log order (#2156) is not decided by the live
+	// rows alone. A change in an archived hour can be later in the binary
+	// log than every live change of its key: a long UPDATE whose statement
+	// started at 09:59:59 and committed after a quick UPDATE of the same row
+	// at 10:00:01, with hour 09 archived. Its statement time puts it below
+	// the live floor, so the conditions below all hold and the skip would
+	// drop the change the database holds.
+	if opts.LatestPerPKCandidates {
 		return false
 	}
 	// PKValuesAlt is a SECOND spelling of the same logical key, and the trim
@@ -1019,6 +1052,64 @@ func fetchPage(
 	o FetchMergedOptions,
 	src mergeSources,
 ) (rows []ResultRow, skipped, exhausted []string, diverged int, archivesElided bool, err error) {
+	if !o.LatestInBinlog {
+		return fetchPageRows(ctx, engine, o, src)
+	}
+	// Every path of fetchPageRows returns candidates (up to twice LimitPerPK
+	// per key, untrimmed: see its LimitPerPK handling); the pick is made
+	// here, once, over all of them.
+	o.Opts.LatestPerPKCandidates = true
+	rows, skipped, exhausted, diverged, archivesElided, err = fetchPageRows(ctx, engine, o, src)
+	if err != nil {
+		return nil, nil, nil, 0, false, err
+	}
+	var order LatestPerPKOrder
+	rows, order, err = LatestPerPKInBinlog(rows, o.Opts.LimitPerPK, binlogOrderProofOnce(ctx, engine.db),
+		func(pks []string) ([]ResultRow, error) { return fetchKeyHistory(ctx, engine, o, src, pks) })
+	if err != nil {
+		return nil, nil, nil, 0, false, err
+	}
+	if OrderDirection(o.Opts.Order) == "DESC" {
+		slices.Reverse(rows)
+	}
+	if o.LatestOrder != nil {
+		*o.LatestOrder = order
+	}
+	return rows, skipped, exhausted, diverged, archivesElided, nil
+}
+
+// fetchKeyHistory reads every change of the named keys in the window o
+// covers, from every source fetchPage read: what LatestPerPKInBinlog needs to
+// decide a key whose candidates disagree. In batches, so a table with many
+// such keys does not build one enormous IN list.
+func fetchKeyHistory(ctx context.Context, engine *Engine, o FetchMergedOptions, src mergeSources, pks []string) ([]ResultRow, error) {
+	const batch = 500
+	var out []ResultRow
+	for len(pks) > 0 {
+		k := pks[:min(batch, len(pks))]
+		pks = pks[len(k):]
+		h := o
+		h.LatestInBinlog, h.LatestOrder = false, nil
+		h.Opts.LimitPerPK, h.Opts.LatestPerPKCandidates = 0, false
+		h.Opts.PKValues, h.Opts.PKValuesIn = "", k
+		rows, _, _, _, _, err := fetchPageRows(ctx, engine, h, src)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rows...)
+	}
+	return out, nil
+}
+
+// fetchPageRows is fetchPage's fetch. Under Opts.LatestPerPKCandidates its
+// merge does not trim per key: the rows are the candidates fetchPage picks
+// from.
+func fetchPageRows(
+	ctx context.Context,
+	engine *Engine,
+	o FetchMergedOptions,
+	src mergeSources,
+) (rows []ResultRow, skipped, exhausted []string, diverged int, archivesElided bool, err error) {
 	// Fast path: no archives → single fetch from MySQL, no merge. engine.Fetch
 	// already applied ORDER BY and LIMIT in SQL, so MergeAndTrim would be a
 	// no-op over a single source.
@@ -1081,7 +1172,11 @@ func fetchPage(
 		rows = append(rows, ar...)
 	}
 
-	rows, diverged = MergeAndTrimReport(rows, o.Opts.Limit, o.Opts.LimitPerPK, o.Opts.Order)
+	limitPerPK := o.Opts.LimitPerPK
+	if o.Opts.LatestPerPKCandidates {
+		limitPerPK = 0 // fetchPage picks from the merged candidates
+	}
+	rows, diverged = MergeAndTrimReport(rows, o.Opts.Limit, limitPerPK, o.Opts.Order)
 	return rows, skipped, exhausted, diverged, false, nil
 }
 

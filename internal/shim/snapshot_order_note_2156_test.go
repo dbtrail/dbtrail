@@ -1,0 +1,77 @@
+package shim
+
+import (
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/go-mysql-org/go-mysql/mysql"
+)
+
+// A `_snapshot` order note (#2156) reaches the client without free SQL bound:
+// the count on the connection, the text from SHOW WARNINGS with code 1105, and
+// the next statement clears both. With no note pending, SHOW WARNINGS stays
+// the empty OK it always was.
+func TestSnapshotOrderNote_showWarningsWithoutFreeSQL(t *testing.T) {
+	h := NewHandler(nil, nil)
+	conn := &warningsConn{}
+	h.BindConn(conn)
+	if r, err := h.HandleQuery("SHOW WARNINGS"); err != nil || r.Resultset != nil {
+		t.Fatalf("SHOW WARNINGS with nothing pending = (%+v, %v), want the empty OK", r, err)
+	}
+
+	// What runSnapshotFullTable does when the order is unproven.
+	h.setWarningsCoded(mysql.ER_UNKNOWN_ERROR, []string{"order of changes unproven: for 1 row(s) ..."})
+	if conn.warnings != 1 {
+		t.Fatalf("connection warnings = %d, want 1", conn.warnings)
+	}
+	w, err := h.HandleQuery("show warnings;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := textRows(t, w.Resultset)
+	if len(rows) != 1 || rows[0][0] != "Warning" || rows[0][1] != "1105" || !strings.HasPrefix(rows[0][2], "order of changes unproven") {
+		t.Fatalf("SHOW WARNINGS rows = %v, want the note with code 1105", rows)
+	}
+
+	_, _ = h.HandleQuery("SELECT * FROM _flashback.orders AS OF '2026-01-01' WHERE id = 1")
+	if conn.warnings != 0 {
+		t.Fatalf("connection warnings after the next statement = %d, want 0", conn.warnings)
+	}
+	if r, err := h.HandleQuery("SHOW WARNINGS"); err != nil || r.Resultset != nil {
+		t.Fatalf("SHOW WARNINGS after the next statement = (%+v, %v), want the empty OK", r, err)
+	}
+}
+
+// After a statement read routing forwarded to MySQL, SHOW WARNINGS is
+// forwarded too. A `_snapshot` note set since must be answered here instead.
+func TestSnapshotOrderNote_notForwardedAfterARoutedStatement(t *testing.T) {
+	h := NewHandler(nil, nil)
+	h.routeLastForwarded = true
+	h.setWarningsCoded(mysql.ER_UNKNOWN_ERROR, []string{"order of changes unproven: x"})
+	if h.routeLastForwarded {
+		t.Fatal("a note of the port's own left SHOW WARNINGS routed to MySQL")
+	}
+}
+
+// The note is the warning of a statement that succeeded only (#2156): a
+// later step that fails sets nothing.
+func TestFinishWithOrderNote(t *testing.T) {
+	h := NewHandler(nil, nil)
+	conn := &warningsConn{}
+	h.BindConn(conn)
+	q := TimeTravelQuery{Schema: "s", Table: "t"}
+	if _, err := h.finishWithOrderNote(q, "order of changes unproven: x", nil, errors.New("merge failed")); err == nil {
+		t.Fatal("the error was lost")
+	}
+	if conn.warnings != 0 || len(h.lastWarnings) != 0 {
+		t.Fatalf("a failed statement left the note: %d warning(s), %q", conn.warnings, h.lastWarnings)
+	}
+	res := &mysql.Result{}
+	if got, err := h.finishWithOrderNote(q, "order of changes unproven: x", res, nil); err != nil || got != res {
+		t.Fatalf("(%v, %v)", got, err)
+	}
+	if conn.warnings != 1 {
+		t.Fatalf("a succeeded statement: %d warning(s), want 1", conn.warnings)
+	}
+}

@@ -465,7 +465,9 @@ With such a warning, the script can leave a row that two sessions changed within
 
 None of this is looked at when the two orders agree, which is every range without such a wait: the script is the same as before. A PostgreSQL index is not affected: its recorded time is the commit time.
 
-Three things still go by statement time. The range itself: a change that started before `--until` and was committed after it is inside the range. `--limit`, which keeps the newest changes by statement time. And `recover-cascade`, which orders its whole script by statement time. That includes the web interface's undo of a table with cascading foreign-key children, which answers with a `recover-cascade` script: its response and the first lines of its script carry a warning when the binary log order differs.
+`verify` and a whole-table read of the MySQL port's `_snapshot` schema put on a snapshot the latest change of each row after it. They take "latest" in the same binary log order, under the same rule, decided row by row: for a row whose latest change by time is also the last one the index received, nothing is looked up. Where the order cannot be established for a row (the cases in the table above), that row is taken at its latest change by time, a `verify` mismatch says "order of changes unproven", and the `_snapshot` read raises a warning with that text (`SHOW WARNINGS`, code 1105).
+
+Four things still go by statement time. The range itself: a change that started before `--until` and was committed after it is inside the range. `--limit` and `--limit-per-pk`, which keep the newest changes by statement time. The MySQL port's `_flashback` schema, and a `_snapshot` read of one row. And `recover-cascade`, which orders its whole script by statement time. That includes the web interface's undo of a table with cascading foreign-key children, which answers with a `recover-cascade` script: its response and the first lines of its script carry a warning when the binary log order differs.
 
 > **Foreign keys are NOT handled.** Reverse-chronological ordering is the only
 > ordering `bintrail recover` applies — there is no FK-graph analysis, no
