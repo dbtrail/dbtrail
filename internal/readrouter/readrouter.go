@@ -184,6 +184,13 @@ var vetoes = []struct {
 	{"RAND/UUID", regexp.MustCompile(`(?i)\b(rand|uuid|uuid_short)\s*\(`)},                         // nondeterministic
 	{"FOUND_ROWS/LAST_INSERT_ID/ROW_COUNT", regexp.MustCompile(`(?i)\b(found_rows|last_insert_id|row_count|sql_calc_found_rows)\b`)},
 	{"CONNECTION_ID/USER/DATABASE/VERSION", regexp.MustCompile(`(?i)\b(connection_id|current_user|session_user|system_user|user|database|schema|version)\s*\(`)},
+	// Without parentheses CURRENT_USER is still the function on MySQL and
+	// MariaDB (root@localhost), and the copy has its own (duckdb); so is
+	// CURRENT_ROLE, with or without them (NONE on MySQL, NULL on MariaDB,
+	// duckdb on the copy). Measured on MySQL 8.4.9, MariaDB 11.4 and the
+	// copy (#2131). A leading quote, word character or dot means a quoted
+	// name, a longer word or a column of that name.
+	{"CURRENT_USER or CURRENT_ROLE without parentheses, or CURRENT_ROLE() (the source's user or role; the copy's own)", regexp.MustCompile(`(?i)(^|[^\x60"\w.])(current_user|current_role)\b`)},
 	{"user or system variable", regexp.MustCompile(`@`)},
 	{"locking read", regexp.MustCompile(`(?i)\b(for\s+update|lock\s+in\s+share\s+mode|for\s+share)\b`)},
 	{"INTO (OUTFILE/DUMPFILE/variables)", regexp.MustCompile(`(?i)\binto\s+(outfile|dumpfile|@)`)},
@@ -247,6 +254,9 @@ func Veto(stmt string) string {
 		}
 	}
 	if why := shapeVeto(sc.blankedCopy); why != "" {
+		return why
+	}
+	if why := copyReservedVeto(sc.blankedCopy); why != "" {
 		return why
 	}
 	if sc.hash {

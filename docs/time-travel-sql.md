@@ -156,7 +156,9 @@ What to know before relying on it:
   metrics: `bintrail_sql_slot_wait_seconds` and `bintrail_sql_slot_waiting`
   ([Observability](observability.md)). The daemon that serves them is the one
   capturing changes, which is why the limits are small. A
-  statement past 2 GB fails instead of spilling to disk. For a team or a
+  statement past 2 GB fails instead of spilling to disk, and one whose
+  tables have more than 48 MB of changes not merged into them yet is refused
+  before it runs (under read routing it goes to MySQL like any other refusal). For a team or a
   dashboard tool, each reader's own DuckDB on the bucket is the way to scale
   reads (see [Dashboards](dashboards.md)): it runs on the reader's machine and
   adds no load to the capture host. The trade-off: bucket permissions replace
@@ -520,7 +522,10 @@ The decision, in order, for every statement:
    connection, and on the first one after any statement that could have
    changed the session, which is every statement that is not a plain read
    (a `SET` of anything, a write, `CALL`, transaction control, a statement
-   the port does not recognise). A cheap statement never pays for it, and
+   the port does not recognise), and, where MySQL reports its session
+   changes (a stored function, below), a read that MySQL itself said
+   changed one of these settings or a statement that failed there. A cheap
+   statement never pays for it, and
    neither does a run of statements the copy answers. The question is never
    sent on the heels of a `SET` or a write: it goes out just before a
    statement that is headed for the copy (or before a time-travel
@@ -582,17 +587,64 @@ The decision, in order, for every statement:
    port asks which collation the session got, and when it is not the one
    it asked for it sends `SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci`
    before anything of the client's: one extra statement per connection on
-   MariaDB 11.4 and later, two on 10.11, none on MySQL. The copy then
+   MariaDB 11.4 and later, two on 10.11, none on MySQL (the statement that
+   asks for session tracking, below, is one more on all of them). The copy then
    answers a connection that names no collation on every supported
    version. A client that sets a collation itself keeps it: `SET NAMES
    utf8mb4` with no `COLLATE` means `utf8mb4_general_ci` on 10.11, and
    MySQL answers that connection (the log says so, once, with the
    setting). Send `SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci` instead.
 
-   Two things the port does not see. A session setting changed by a stored
-   function that a `SELECT` calls: the statement is a read by its text, so
-   do not change session settings inside a function on a source this port
-   routes. And a prepared statement keeps, on MySQL, the reading it got
+   **A setting changed inside a stored function.** A `SELECT` that calls a
+   stored function is a read by its text, and the function can run `SET`
+   (measured: a function sets `time_zone = '+05:00'`, and the next expensive
+   read was answered by the copy five hours off). So the port asks the
+   source to say so itself. On each new connection to the source it sends
+   one statement, `SET SESSION session_track_system_variables = '...'`,
+   naming the settings of the table above (and `max_join_size`, which is
+   one of the ways `sql_big_selects` changes). From then on the source marks
+   the answer to any statement that changed one of them, on the packet that
+   ends the answer, which it sends anyway: a statement that changes nothing
+   costs no extra round trip. After a marked answer the port reads the
+   session back before the copy answers again, as it does after a `SET`.
+   It does the same after a statement that failed on the source: an error
+   says nothing about the session, and a function that ran `SET` and then
+   failed has set it. The `EXPLAIN` of step 5 is heard the same
+   way, because a server can run a function while it plans (MariaDB does,
+   for a deterministic function with constant arguments). Measured on MySQL
+   8.0 and 8.4 and MariaDB 10.11, 11.4, 11.8 and 12.3; the account needs no
+   privilege for it.
+
+   When the source does not do this (a server, or a proxy in front of it,
+   that does not offer session tracking, refuses the statement, or does
+   not pass the marks on), the connection works as it did before and this
+   one change is not seen on it: do not change session settings inside a
+   function there. The port finds out on every connection, from the answer
+   to its own statement: a source that tracks marks that answer too.
+   DBTrail's log says so once per server, at warn level (`read routing:
+   this source does not tell the port when a statement changes a session
+   setting ...`, with the reason), and `GET /api/flashback` carries the
+   reason as `session_untracked` for that server.
+
+   A source, or a proxy in front of it, can also agree to session tracking
+   and then send data about the session that the port cannot read. A
+   connection that fails that way while it opens is opened once more
+   without asking, and works as before; one that fails later is lost like
+   any connection whose packets cannot be read (error 2006), and the
+   client's next connection works. Either way the port stops asking that
+   server for session tracking until DBTrail restarts, and says so in the
+   same warning.
+
+   A client that sets `session_track_system_variables` itself (some
+   connectors do when they connect) replaces the port's list. The port
+   sees it the next time it reads the session and, when any of its
+   settings is missing from the list, adds them back to the client's,
+   with one more statement.
+
+   Two things the port still does not see. A stored function that changes
+   `session_track_system_variables` itself, inside a `SELECT`: from then
+   on the source no longer marks its answers on that connection. And a
+   prepared statement keeps, on MySQL, the reading it got
    under the SQL mode in force when it was prepared; the copy runs each
    execution under the session of that moment. They differ only for a
    statement prepared under a mode that changes how it is read
@@ -850,8 +902,8 @@ What this is and is not:
     the column `text` under the alias `Label` on MySQL, the constant
     `'Label'` of type `text` on the copy, and both answer. The same holds
     for `` `int` '5' ``, `` `date` '2024-01-01' `` and every other name the
-    copy has a type for. The unquoted spelling (`text 'Label'`) has the
-    same difference and is not caught: write the alias with `AS`;
+    copy has a type for. The unquoted spelling (`text 'Label'`) is kept on
+    MySQL too, by the two rules for a word before a string further down;
   - a quoted name right after `U&` (two columns and an operator on MySQL,
     one Unicode-escaped name on the copy);
   - a string, a quoted name or a comment that never ends, and a comment
@@ -980,7 +1032,51 @@ What this is and is not:
     The copy numbers the days of the week another way (`DAYOFWEEK` of a
     Thursday is 5 on MySQL and 4 on the copy, `WEEKDAY` of it 3 and 4), and
     its microseconds hold the seconds too (`MICROSECOND` of `10:20:30` is 0
-    on MySQL and 30000000 on the copy).
+    on MySQL and 30000000 on the copy);
+  - `CURRENT_USER` written without parentheses, and `CURRENT_ROLE` with or
+    without them: the user and the role on MySQL and MariaDB
+    (`root@localhost`; `NONE` on MySQL and `NULL` on MariaDB for the role),
+    the copy's own (`duckdb`) there. With parentheses `CURRENT_USER()`,
+    `USER()` and the others were kept on MySQL already, and so were `NOW()`
+    and every other clock function, written either way, so the copy's
+    clock and time zone never answer for the source's;
+  - the name of a type on the copy right before a string, with a space, a
+    comment or nothing between them: `text 'Label'`, `json'1'`, `datetime
+    '2026-01-01'`, `uuid '...'`, `bool '1'`. MySQL and MariaDB read the
+    column, or the alias, called `text`, shown under the name `Label`; the
+    copy reads the constant `'Label'` of type `text`, and both answer:
+    `SELECT text 'Label' FROM (SELECT 'body' AS text) t` is `body` on MySQL
+    and `Label` on the copy. The words are every type name the copy's
+    engine has (a test asks the engine for the list, so a new type cannot
+    be missed). `DATE '...'`, `TIME '...'`, `TIMESTAMP '...'` and `INTERVAL
+    '...'` are not kept back: MySQL reads those as the copy does, also over
+    a table with a column called `date`. Write the alias with `AS` to have
+    the copy answer;
+  - a word the copy keeps for itself and MySQL takes for a name, written
+    as a name without quotes: `at`, `end`, `offset`, `full`, `any`, `some`,
+    `cast`, `do`, `only`, `array`, `semi`, `anti`, `isnull`, `notnull`,
+    `pivot` and about thirty rarer ones (44 in all; `window` and `lateral`
+    among them are a name on MariaDB only). The copy cannot read
+    such a name bare. For a column it refuses the statement (`WHERE at >=
+    '2026-01-02'` over a column called `at` is a syntax error there), which
+    used to cost a failed attempt on the copy before MySQL answered, on
+    every such statement. In two places it does not refuse, it answers
+    something else. `FROM a full JOIN b USING (id)` is the table `a` under
+    the alias `full`, joined, on MySQL (the rows both tables hold) and a
+    `FULL OUTER JOIN` on the copy (every row of both); the same for `semi`,
+    `anti`, `asof` and `positional`. And `SELECT v isnull FROM t` is `v`
+    under the alias `isnull` on MySQL and the test `v IS NULL` on the copy.
+    All of these stay on MySQL now. The copy still answers when the name is
+    quoted (`` `at` ``), comes after a name and a dot (`ev.at`; after a
+    number the dot is a decimal point, and `SELECT 1. isnull` stays on
+    MySQL: `1` there, `false` on the copy), or is the alias of a
+    column right after `AS` (`SELECT made AS at`), and where the word is
+    the keyword on MySQL too: before a parenthesis (`CAST(`, `= ANY (`),
+    the `END` of a `CASE`, `OFFSET` before a number, `ROWS ONLY`, and
+    `WINDOW w AS (...)`. One statement the copy might have answered stays
+    on MySQL for it: `AT TIME ZONE`. A column named with a word both sides
+    reserve (`order`, `group`, `left`, `desc`) is not part of this: MySQL
+    only takes it quoted.
 
   The
   copy itself compares text close to the way MySQL's default collation
@@ -1301,7 +1397,16 @@ What this is and is not:
   - **a statement that reads a table whose name differs from another
     table's only by letter case** (`Gen` and `gen`, on a source with
     `lower_case_table_names=0`): the copy does not tell the two names apart
-    and would read one table for both.
+    and would read one table for both;
+  - **a statement with the name of a column of a table it reads right
+    before a string**, with a space, a comment or nothing between them:
+    `SELECT status 'Label' FROM orders`. MySQL reads the column under the
+    alias `Label`; the copy reads a constant of a type called `status`, has
+    no such type and refuses. The copy is no longer tried for it, and the
+    statement is counted as a decision about the table's columns instead of
+    a refusal by the copy. (When the copy does have a type of that name,
+    the statement is kept on MySQL from its text: see the list of
+    constructs above.)
 
   An invisible column is not part of this: a snapshot holds it, and both
   sides resolve its name the same way (only `SELECT *` and `NATURAL JOIN`

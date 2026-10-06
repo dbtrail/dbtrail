@@ -35,6 +35,10 @@ type routingStats struct {
 	// such a connection get error 2006 on every statement; without this the
 	// only trace would be the upstream_lost count.
 	accountRefused map[string]string
+	// sessionUntracked holds, per server id, why the source does not report
+	// session changes to the port's connections (#2127), as the last
+	// connection that asked found it. Cleared when a connection is tracked.
+	sessionUntracked map[string]string
 }
 
 // routingTally is one server's counts.
@@ -44,7 +48,7 @@ type routingTally struct {
 }
 
 func newRoutingStats(now time.Time) *routingStats {
-	return &routingStats{since: now, perServer: map[string]*routingTally{}, unavailable: map[string]string{}, accountRefused: map[string]string{}}
+	return &routingStats{since: now, perServer: map[string]*routingTally{}, unavailable: map[string]string{}, accountRefused: map[string]string{}, sessionUntracked: map[string]string{}}
 }
 
 // record tallies one decision. route is "copy", "mysql" or "refused" (the
@@ -93,6 +97,18 @@ func (r *routingStats) setAccountRefused(serverID, text string) {
 	r.accountRefused[serverID] = text
 }
 
+// setSessionUntracked records why a server's source does not report session
+// changes; an empty reason clears the note (a connection is tracked).
+func (r *routingStats) setSessionUntracked(serverID, why string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if why == "" {
+		delete(r.sessionUntracked, serverID)
+		return
+	}
+	r.sessionUntracked[serverID] = why
+}
+
 // snapshot copies the tally for the wire; the caller owns the result. A
 // server with only an unavailable note gets an entry with zero counts.
 func (r *routingStats) snapshot() map[string]routingServerDTO {
@@ -117,6 +133,9 @@ func (r *routingStats) snapshot() map[string]routingServerDTO {
 	}
 	for id, text := range r.accountRefused {
 		note(id, func(d *routingServerDTO) { d.AccountRefused = text })
+	}
+	for id, why := range r.sessionUntracked {
+		note(id, func(d *routingServerDTO) { d.SessionUntracked = why })
 	}
 	return out
 }
@@ -153,6 +172,19 @@ func (s *Server) RecordRouteAccountRefused(serverID string, gen uint64, text str
 // RecordRouteAccountOK: see RecordRouteAccountRefused.
 func (s *Server) RecordRouteAccountOK(serverID string, gen uint64) {
 	s.routed.whileCurrent(serverID, gen, func() { s.routing.setAccountRefused(serverID, "") })
+}
+
+// RecordRouteSessionUntracked notes that the source of serverID does not
+// tell the port's connections when a statement changes a session setting,
+// and why, so a setting changed inside a stored function is not seen there
+// (#2127). RecordRouteSessionTracked clears the note: a connection is told.
+func (s *Server) RecordRouteSessionUntracked(serverID, why string) {
+	s.routing.setSessionUntracked(serverID, why)
+}
+
+// RecordRouteSessionTracked: see RecordRouteSessionUntracked.
+func (s *Server) RecordRouteSessionTracked(serverID string) {
+	s.routing.setSessionUntracked(serverID, "")
 }
 
 // RecordRouteAvailable: see RecordRouteUnavailable.

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **SQL on the copy refuses a table with too many changes waiting, before
+  running.** Between two rewrites of a table its changes sit in small files
+  beside it, and a query has to merge them in memory. A query here has 2 GB
+  and no disk to spill to, on purpose: it runs on the host that captures.
+  On a 100 million row table that stopped fitting at about 86 MB of such
+  files, and the query failed with DuckDB's out-of-memory text. Past 48 MB
+  (over all the tables a query names) the query is now refused up front with
+  the table's name and the way out: your own DuckDB (Settings, MCP Server,
+  Download a DuckDB schema). A query
+  that does run and hits the memory cap gets the same pointer after DuckDB's
+  message. On the MySQL port with read routing, the refused statement goes
+  to MySQL, as the failed one did.
 - **A table with changes is written again in full half as often.** An update
   keeps a table's changes in small files beside it and writes the table
   again once those files pass a share of its size. That share was a quarter
@@ -122,6 +134,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time by the copy (the same day), and a `DATETIME` turned into text
   (`CONCAT(dt, '')`) ends in `+00` there. A table whose snapshot has no
   `CREATE TABLE` was already answered by MySQL for every statement.
+- **Read routing: a column or an alias named like a type, and words the
+  copy keeps for itself, stay on MySQL** (#2131, #2158). Measured on MySQL
+  8.4.9 and MariaDB 11.4 against the copy; the list of words was also
+  checked on MySQL 8.0 and MariaDB 10.11, 11.8 and 12.3.
+  - **Wrong answer, fixed.** `SELECT text 'Label' FROM ...` is the column,
+    or the alias, called `text` under the name `Label` on MySQL (`body`),
+    and the constant `'Label'` of type `text` on the copy (`Label`). Both
+    answered. The same for `json'1'`, `datetime '2026-01-01'`, `uuid`,
+    `bool`, `string` and every other word the copy's engine has a type
+    for. Such a word right before a string, with a space, a comment or
+    nothing between them, now keeps the statement on MySQL (`veto`),
+    whether it names a table's column or an alias given in the statement.
+    The quoted spelling (`` `text` 'Label' ``) was kept back already. `DATE
+    '...'`, `TIME '...'`, `TIMESTAMP '...'` and `INTERVAL '...'` still
+    reach the copy: MySQL reads them as the copy does, also over a table
+    with a column called `date`.
+  - **Wrong answer, found while measuring, fixed.** `FROM a full JOIN b
+    USING (id)` is the table `a` under the alias `full`, joined, on MySQL
+    (1 row in the measurement) and a `FULL OUTER JOIN` on the copy (3
+    rows); the same shape with `anti`, `asof` and `positional` differed
+    too, and `semi` does on other data. `SELECT v isnull FROM t` is `v`
+    under the alias `isnull` on MySQL and the test `v IS NULL` on the copy,
+    and so is `SELECT 1. isnull` (the number 1 on MySQL, `false` on the
+    copy). Both answered. They stay on MySQL now (`veto`).
+  - **Wrong answer, found while measuring, fixed.** `SELECT current_user`
+    without parentheses is the source's user on MySQL and MariaDB
+    (`root@localhost`) and `duckdb` on the copy; `current_role()` is `NONE`
+    on MySQL, `NULL` on MariaDB and `duckdb` on the copy. Both answered.
+    They stay on MySQL now (`veto`). The rest of that family was kept there
+    already: `USER()`, `CURRENT_USER()`, `DATABASE()`, `VERSION()`,
+    `@@version`, `CONNECTION_ID()`, `LAST_INSERT_ID()`, `FOUND_ROWS()`,
+    `ROW_COUNT()`, `RAND()`, `UUID()`, and every clock function (`NOW()`,
+    `CURRENT_TIMESTAMP`, `SYSDATE()`, ...) with or without parentheses.
+  - **Wasted attempt, removed.** A column called `at` is an ordinary name
+    on MySQL and MariaDB and a keyword on the copy, so `WHERE at >= ...`
+    was tried on the copy, refused there with a syntax error, and answered
+    by MySQL afterwards, on every such statement, counted as
+    `copy_refused`. 44 words are like that (`at`, `end`, `offset`, `full`,
+    `any`, `some`, `cast`, `do`, `only`, `array`, ...): the words the
+    copy's engine cannot read as a bare name, less the ones MySQL and
+    MariaDB reserve too. One written as a name without quotes now keeps
+    the statement on MySQL without trying the copy (`veto`). Quoted, after
+    a dot (`ev.at`) or as a column alias right after `AS`, the copy reads
+    it and still answers; so it does where the word is MySQL's keyword too
+    (`CAST(`, `= ANY (`, the `END` of a `CASE`, `LIMIT 20 OFFSET 40`, `ROWS
+    ONLY`, `WINDOW w AS (...)`).
+  - **Wasted attempt, removed.** `SELECT status 'Label' FROM orders`, any
+    column's name right before a string, is the column under an alias on
+    MySQL and a constant of a type the copy does not have. The copy now
+    declines it from the table's column names without running it
+    (`copy_columns_differ`), so it is not counted as a fault of the copy.
+
+  Two tests keep the lists current: one asks the linked engine for its
+  types and keywords and fails when either list here differs, and the
+  routed fixture asks the real MySQL and MariaDB of every CI job which of
+  the engine's words they take as a column name and fails on one that is
+  not listed.
+
+  What this costs: of 2,230 `SELECT` and `WITH` strings in the repository's
+  tests, 1,496 were kept on MySQL by no older rule, and these rules newly
+  keep 3 that are SQL. None is a statement MySQL runs and the copy
+  answered: two name a column or an alias called `offset` or `only` bare,
+  which the copy refuses, and one is written for the copy's engine
+  (`TIMESTAMPTZ '...'`), which MySQL refuses. Known to stay on MySQL
+  although the copy might have answered: `AT TIME ZONE`. An alias named
+  with one of the 44 words and used later (`SELECT made AS at ... ORDER BY
+  at`) stays on MySQL too, which is right: the copy would refuse it.
 ### Fixed
 - **`verify` and a whole-table `_snapshot` read: a row changed by two
   sessions is taken at its last change** (#2156, second part). Both put on a
@@ -165,6 +244,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of 1.14; choosing among them took 0.06 seconds. `--limit-per-pk` of `query`
   and `recover`, the web interface and the MCP tools keep the newest changes
   by statement time, as before.
+- **Turning the MySQL port off answers only once the port is closed (#2149).**
+  Turning it off from the web interface could answer "off" a moment before
+  the listening socket was released, and in that moment a new connection to
+  the port still completed. Seen once, on a loaded test machine; under heavy
+  CPU load about 1 in 25,000 stops did it. The answer now waits for the
+  socket: from then on a new connection is refused. Connections that were
+  already open are closed as before. Nothing to configure.
 - **`recover` and single-row `reconstruct`: a row changed by two sessions
   comes back right** (#2156, first part). Both took the order of a row's
   changes from the time recorded with each change, which is when its
@@ -257,7 +343,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again there, and for a row changed on both sides the older numbering's
   change can be kept where the time order was right. Take a new full
   snapshot after such an event before a `reconstruct` across it.
-
+- **Read routing: a session setting changed inside a stored function is
+  seen** (#2127). A `SELECT` that calls a stored function is a read by its
+  text, and the function can run `SET`. Measured before this change: a
+  function set `time_zone = '+05:00'`, and the next expensive read on that
+  connection was answered by the copy under the old zone, five hours off.
+  The port now asks the source to report such changes itself (session
+  tracking): on each new connection to the source it sends one statement
+  naming the settings the copy has to reproduce, and from then on the source
+  marks the answer to any statement that changed one of them, on a packet
+  it sends anyway. After a marked answer the port reads the session back
+  before the copy answers again, exactly as after a `SET`. It does the same
+  after a statement that failed on the source (a function that ran `SET`
+  and then failed has set it, and an error says nothing about the
+  session), and it hears the `EXPLAIN` it sends for a plan the same way,
+  since MariaDB and MySQL can run a function while they plan. A statement
+  that changes nothing costs no extra round trip; the cost is one statement
+  when the port opens its connection to the source. Works on MySQL 8.0 and
+  8.4 and on MariaDB 10.11, 11.4, 11.8 and 12.3, with no extra privilege.
+  When the source does not offer session tracking (an older server, or a
+  proxy in front of it), the connection works as before, this one change is
+  still not seen there, and DBTrail's log says so once per server at warn
+  level (`GET /api/flashback` carries the reason as `session_untracked`). A
+  source or proxy that agrees to session tracking and then sends data the
+  port cannot read is not asked again: the connection is opened once more
+  without it. A panic on one client connection of the port now ends that
+  connection alone, logged with its stack, instead of the process. A client
+  that replaces `session_track_system_variables` with its own list, as some
+  connectors do when they connect, gets the port's settings added back to
+  it the next time the port reads the session.
+  Details in docs/time-travel-sql.md, "A setting changed inside a stored
+  function".
 
 ## [0.99.0] - 2026-10-05
 ### Changed

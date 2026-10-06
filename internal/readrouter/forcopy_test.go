@@ -222,6 +222,7 @@ func TestVeto_everyVetoStillFiresOnBacktickStatements(t *testing.T) {
 		"SELECT `a` FROM `t` INTERSECT SELECT `a` FROM `u`": vetoSetOps,
 		"(SELECT `a` FROM `t`)EXCEPT(SELECT `a` FROM `u`)":  vetoSetOps,
 		"SELECT `a` FROM `t` WHERE `b` = \"x\"":             "double-quoted string literal",
+		"SELECT `a`, current_user FROM `t`":                 vetoCurrentUser,
 		"SELECT `a` FROM `t` WHERE `b` = 'a\\\\b'":          "backslash in a string literal (an escape on MySQL, a plain character on the copy)",
 	}
 	seen := map[string]bool{}
@@ -239,6 +240,8 @@ func TestVeto_everyVetoStillFiresOnBacktickStatements(t *testing.T) {
 		}
 	}
 }
+
+const vetoCurrentUser = "CURRENT_USER or CURRENT_ROLE without parentheses, or CURRENT_ROLE() (the source's user or role; the copy's own)"
 
 const vetoDollar = "$...$ (a name on the source, a dollar-quoted string on the copy)"
 

@@ -583,8 +583,12 @@ jobs:
             || { echo "FATAL: the capture watermark test over real GTID sets did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationSQLCompareGeneratedNames ' /tmp/mysql-it.out \
             || { echo "FATAL: read-routing generated-column names test did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationFlashbackRoutedSessionFunction_2127 ' /tmp/mysql-it.out \
+            || { echo "FATAL: read routing after a session change inside a stored function did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationSQLCompareTemporalColumns ' /tmp/mysql-it.out \
             || { echo "FATAL: read-routing date-column arithmetic test did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationSQLCompareCopyWords ' /tmp/mysql-it.out \
+            || { echo "FATAL: read-routing copy-reserved words test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationBinlogOrderRecoverAndReconstruct2156_mysql ' /tmp/mysql-it.out \
             || { echo "FATAL: the applied-recovery-script test over a real capture did not run: is binary logging on? (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationLatestPerKeyBinlogOrder2156_mysql ' /tmp/mysql-it.out \
@@ -780,9 +784,11 @@ jobs:
             TestIntegrationMonitorRegistrySourceMariaDBRelabeled \
             TestIntegrationWatchMariaDBSource \
             TestIntegrationFlashbackReadRoutingMariaDBSource \
+            TestIntegrationFlashbackRoutedSessionFunctionMariaDB_2127 \
             TestIntegrationFlashbackRoutingLimitsMariaDBSource_2115 \
             TestIntegrationSQLCompareGeneratedNamesMariaDB \
             TestIntegrationSQLCompareTemporalColumnsMariaDB \
+            TestIntegrationSQLCompareCopyWordsMariaDB \
             TestIntegrationSQLCompareBacktickNamesMariaDB \
             TestTakeSnapshot_pkLessVersionedTableRefused_mariadb \
             TestIntegrationReplicaCheckMariaDB \

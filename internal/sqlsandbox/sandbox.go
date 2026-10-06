@@ -241,8 +241,14 @@ type Session struct {
 // TIMESTAMP columns (and those of a type that is not known), whole their
 // TIME and YEAR columns, by name, and star says the statement holds a star
 // (Refs). The answer is why the copy must not answer the statement, or "".
+//
+// NameVeto is the second question, about how the statement writes the names
+// of those tables' columns (#2131): names are all of them, and the answer
+// is why the copy would refuse the statement, or "". It spares the copy a
+// statement it cannot run; it is not what keeps a wrong answer away.
 type ColumnTypes interface {
 	ColumnVeto(dates, whole []string, star bool) string
+	NameVeto(names []string) string
 }
 
 // Column is one result column with DuckDB's type name (INTEGER, VARCHAR,
