@@ -323,6 +323,14 @@ func CheckNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 	return err
 }
 
+// CheckNumberingContinuesNote is CheckNumberingContinues with the note of a
+// check that could not tell (uncheckedNote), for a caller that must not read
+// "cannot tell" as "continues": the read router's "unchanged since the
+// snapshot" check (#2186). It reads no archive and adds no note for one.
+func CheckNumberingContinuesNote(ctx context.Context, db *sql.DB, m *EventMark, anchor query.BinlogPos) (string, error) {
+	return checkNumberingContinues(ctx, db, m, anchor, nil)
+}
+
 // uncheckedNote is the "cannot check" note of CheckNumberingFromRead: why the
 // check could not tell, and what that leaves open. Plain words with no
 // command-line flag: verify, the MySQL port, cascade recovery and the MCP
@@ -351,7 +359,7 @@ func checkNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 	if BinlogBaseName(anchor.File) != BinlogBaseName(m.File) || sortsBefore(anchor, query.BinlogPos{File: m.File, Pos: m.End}) {
 		w.notice(slog.LevelInfo, "the snapshot's event mark is from before its own binlog position's numbering; it is not used",
 			"mark", m.Encode(), "anchor", fmt.Sprintf("%s:%d", anchor.File, anchor.Pos))
-		return "", nil
+		return uncheckedNote("the snapshot's event mark is from an older binlog numbering than the snapshot's own position, so it says nothing about a later restart"), nil
 	}
 	// Rows `bintrail index` backfilled get ids above the mark with positions
 	// below it, which reads exactly like a numbering that started over.
@@ -379,6 +387,27 @@ func checkNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 			return uncheckedNote("the event the snapshot's event mark names is now another event (the index was rebuilt?)"), nil
 		}
 	case errors.Is(err, sql.ErrNoRows):
+		if w.bounded() {
+			// The bounded check reads the archives from the mark on, so the
+			// mark must be one the archives can vouch for too (#2186).
+			st, note, err := markInArchives(ctx, db, m)
+			switch {
+			case err != nil:
+				return "", err
+			case st == markUnreadable:
+				return note, nil
+			case st == markOtherEvent:
+				w.notice(slog.LevelWarn, "the event the snapshot's event mark names is now another event in the archives (the index was rebuilt?); a binlog numbering that started over is not checked from it",
+					"mark", m.Encode())
+				return uncheckedNote("the event the snapshot's event mark names is now another event (the index was rebuilt?)"), nil
+			case st == markAbsent:
+				w.notice(slog.LevelWarn, "the event the snapshot's event mark names is neither in the index nor in the archives that could hold it (a restarted stream's cleanup); a binlog numbering that started over is not checked from it",
+					"mark", m.Encode())
+				return uncheckedNote("the event the snapshot's event mark names was deleted from the index while older ones remain (a restarted capture's cleanup)"), nil
+			case st == markArchived:
+				return w.checkLiveAndArchives(ctx, db, m, anchor)
+			}
+		}
 		var oldest sql.NullInt64
 		if err := db.QueryRowContext(ctx, `SELECT MIN(event_id) FROM binlog_events`).Scan(&oldest); err != nil {
 			return "", fmt.Errorf("read the oldest indexed event: %w", err)
@@ -393,7 +422,10 @@ func checkNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 				}
 				return w.checkArchives(ctx, db, m, floor)
 			}
-			return archivedAfterMarkNote(ctx, db, m)
+			if w.wantsArchiveNote() {
+				return archivedAfterMarkNote(ctx, db, m)
+			}
+			return "", nil
 		}
 		if uint64(oldest.Int64) < m.ID {
 			w.notice(slog.LevelWarn, "the event the snapshot's event mark names was deleted while older ones remain (a restarted stream's cleanup); a binlog numbering that started over is not checked from it",
@@ -405,14 +437,7 @@ func checkNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 		return "", fmt.Errorf("read the event the snapshot's event mark names: %w", err)
 	}
 	if w.bounded() {
-		floor, err := w.readFloor(ctx, db, anchor)
-		if err != nil {
-			return "", err
-		}
-		if err := w.check(ctx, db, m, floor); err != nil {
-			return "", err
-		}
-		return w.checkArchives(ctx, db, m, floor)
+		return w.checkLiveAndArchives(ctx, db, m, anchor)
 	}
 	for _, q := range []string{
 		`SELECT event_id, binlog_file, end_pos FROM binlog_events
@@ -434,10 +459,23 @@ func checkNumberingContinues(ctx context.Context, db *sql.DB, m *EventMark, anch
 			return "", startedOverErr(e, m)
 		}
 	}
-	if markRotated {
+	if markRotated && w.wantsArchiveNote() {
 		return archivedAfterMarkNote(ctx, db, m)
 	}
 	return "", nil
+}
+
+// checkLiveAndArchives is the bounded check: the live index, then the
+// window's archived hours.
+func (w *ReadWindow) checkLiveAndArchives(ctx context.Context, db *sql.DB, m *EventMark, anchor query.BinlogPos) (string, error) {
+	floor, err := w.readFloor(ctx, db, anchor)
+	if err != nil {
+		return "", err
+	}
+	if err := w.check(ctx, db, m, floor); err != nil {
+		return "", err
+	}
+	return w.checkArchives(ctx, db, m, floor)
 }
 
 // archivedAfterMarkNote is the unbounded check's note when the mark's hour
@@ -505,7 +543,7 @@ func checkSourceReplaced(ctx context.Context, db *sql.DB, since, until time.Time
 // index up to now. A w with Until set (a read that stops in the past: AS OF, a
 // verify pair) checks only what that read can see; see ReadWindow.
 func CheckNumberingFrom(ctx context.Context, db *sql.DB, anchor *query.BinlogPos, rawMark string, w ReadWindow) error {
-	_, err := CheckNumberingFromRead(ctx, db, anchor, rawMark, w)
+	_, err := checkNumberingFromRead(ctx, db, anchor, rawMark, w)
 	return err
 }
 
@@ -522,6 +560,14 @@ func CheckNumberingFrom(ctx context.Context, db *sql.DB, anchor *query.BinlogPos
 // check (no mark, no position, nothing indexed after the mark). A refusal or
 // failure comes with no note.
 func CheckNumberingFromRead(ctx context.Context, db *sql.DB, anchor *query.BinlogPos, rawMark string, w ReadWindow) (unchecked string, err error) {
+	w.archiveNote = true
+	return checkNumberingFromRead(ctx, db, anchor, rawMark, w)
+}
+
+// checkNumberingFromRead is CheckNumberingFromRead with w as given: a
+// snapshot refresh (CheckNumberingFrom) leaves archiveNote off, so its run
+// reads nothing it did not read before.
+func checkNumberingFromRead(ctx context.Context, db *sql.DB, anchor *query.BinlogPos, rawMark string, w ReadWindow) (unchecked string, err error) {
 	m := parseEventMark(rawMark, &w)
 	positioned := anchor != nil && anchor.File != "" && anchor.Pos > 0
 	if positioned {

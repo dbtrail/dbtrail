@@ -135,6 +135,18 @@ func TestCheckNumbering_archivedWindow_2186(t *testing.T) {
 					t.Fatal(err)
 				}
 			}},
+		// #2186 review: a restarted capture's resume cleanup deleted the mark
+		// and captured its events again under new ids, at their old positions
+		// (before the mark's end); then rotation archived the hour. That is
+		// not a numbering that started over: the archives no longer hold the
+		// mark, so the check cannot vouch for it and says so.
+		{name: "the mark deleted by a resume cleanup, replayed, then archived: cannot check, no refusal",
+			extra: func(db *sql.DB, schema string, h time.Time) {
+				testutil.MustExec(t, db, `DELETE FROM binlog_events WHERE event_id = 10`)
+				insertEventAt(t, db, schema, "orders", "binlog.000007", 13, 50, h.Add(4*time.Minute), "1", `{"id":1,"status":"A"}`)
+				insertEventAt(t, db, schema, "orders", "binlog.000007", 14, 100, h.Add(4*time.Minute), "1", `{"id":1,"status":"A"}`)
+			},
+			note: "was deleted from the index"},
 		{name: "an archive the window needs whose file is gone: cannot check",
 			after: func(t *testing.T, a *archivedWindow) {
 				if err := os.Remove(a.archiveRow(t, a.h)); err != nil {
@@ -158,7 +170,9 @@ func TestCheckNumbering_archivedWindow_2186(t *testing.T) {
 				t.Fatalf("err = %v", err)
 			case tc.note == "" && note != "":
 				t.Fatalf("note = %q; want none", note)
-			case tc.note != "" && (!strings.Contains(note, tc.note) || !strings.Contains(note, indexer.PartitionName(a.h))):
+			case tc.note != "" && !strings.Contains(note, tc.note):
+				t.Fatalf("note = %q; want it to say %q", note, tc.note)
+			case strings.HasPrefix(tc.note, "the archived hour") && !strings.Contains(note, indexer.PartitionName(a.h)):
 				t.Fatalf("note = %q; want it to name %s", note, indexer.PartitionName(a.h))
 			}
 		})

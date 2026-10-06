@@ -13,16 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deleted while older ones remain, as a restarted capture's cleanup does;
   the mark's id now names another event, after the index was rebuilt;
   `bintrail index` also wrote into the index; the mark does not read; an
-  archived hour of the window has no file this process can open, or, in the
-  whole-index form, the mark's own hour was archived), it used to
+  archived hour of the window has no file this process can open, including
+  a recorded S3 object that is not there; the mark comes from an older
+  numbering than the snapshot's own position; or, in the whole-index form,
+  the mark's own hour was archived), it used to
   pass with one log line. Now `verify` reports the table **inconclusive**
   with the reason (both modes; it was reported as a match or a mismatch);
   the `_snapshot` schema answers as before with a warning that `SHOW
   WARNINGS` returns (code 1105); cascade recovery uses the baseline as
-  before and flags the result incomplete with the reason, so the command
+  before and flags the result incomplete with the reason where the baseline
+  is used (its rows reach the output, or the child scan reads from its
+  position), so the command
   exits non-zero unless `--allow-incomplete` is given and the MCP
   `recover_cascade` tool fails the call unless `allow_incomplete` is set;
-  and `bintrail reconstruct --at` prints a warning. A snapshot update keeps
+  `bintrail reconstruct --at` prints a warning; and the routed MySQL port's
+  "unchanged since the snapshot" check no longer vouches for the copy (MySQL
+  answers). A snapshot update keeps
   its log line and its own guard for a capture that came back below the
   snapshot's position. A snapshot without an event mark keeps the old
   behavior, as do the PostgreSQL wire front-end (the note is logged) and the
@@ -273,10 +279,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read it for one table, against 1.7 s for the read's own fetch of the same
   hour; reading the window's rows of an `archive_state` holding 8,760 rows
   (a year of hours): 0.25 ms. A restart that touched only other tables, or
-  came after the read's end, still refuses nothing. The whole-index form
-  (live-mode `verify`, `reconstruct --at` once its read reaches archived
-  hours) still reads the live index only; when the snapshot's mark is itself
-  in an archived hour it now says it cannot check instead of passing.
+  came after the read's end, still refuses nothing. Live-mode `verify` now
+  asks the same bounded question as pair mode (from the snapshot to the
+  comparison), so a table whose snapshot is older than the index's retention
+  is checked through the archives rather than over the live index only.
+  `bintrail reconstruct --at` takes the bounded form too when every hour
+  rotation took from its read has an archive. When the snapshot's mark was
+  itself archived, the check reads the archives only from that mark: a mark
+  a restarted capture's cleanup deleted before rotation is a "cannot check",
+  not a restart. What each archive file holds is remembered per snapshot
+  and table (the earliest and latest change below the mark), so later
+  statements do not read the file again.
 - **The routed MySQL port no longer answers from the copy after a late change
   whose hour was archived and dropped** (#2187). The check that lets the copy
   answer a heavy read for tables unchanged since their snapshot

@@ -769,6 +769,9 @@ func SynthesizeVictims(
 			baseCovered  bool
 			baseSincePos *query.BinlogPos
 			baseStaleMsg string // reconstruct.StaleWarning.Message, if the provider fell back to an older snapshot (#618)
+			// baseUncheckedMsg is the binlog-renumbering check's note when it
+			// could not tell (#2186); reported only where the baseline is used.
+			baseUncheckedMsg string
 			// archiveGap: the [snapshot, T] window may include hours the scan
 			// cannot see, so augmentation must be skipped (#1615);
 			// archiveGapErr is the probe failure behind it, when that is why.
@@ -865,11 +868,7 @@ func SynthesizeVictims(
 				// once we know baseline augmentation actually ran (see the
 				// "default:" branch of the augmentation gate at the end).
 				baseStaleMsg = bl.StaleMessage
-				if bl.UncheckedMessage != "" {
-					addIncomplete("unchecked:"+fk.Schema+"."+fk.Table, fmt.Sprintf(
-						"%s.%s's baseline snapshot is used with its changes read by binlog position, but %s. The recovery may be partial",
-						fk.Schema, fk.Table, bl.UncheckedMessage))
-				}
+				baseUncheckedMsg = bl.UncheckedMessage
 			default:
 				addIncomplete("nobaseline:"+fk.Schema+"."+fk.Table, fmt.Sprintf(
 					"no baseline covers %s.%s; children untouched within the lookback window are not reconstructed", fk.Schema, fk.Table))
@@ -988,7 +987,24 @@ func SynthesizeVictims(
 			cands = kept
 		}
 
+		// addUnchecked marks the result incomplete with the numbering check's
+		// note (#2186), only where the baseline was used: its rows reached the
+		// output, or the scan read from its position. Not when augmentation
+		// was skipped.
+		addUnchecked := func() {
+			if baseUncheckedMsg != "" {
+				addIncomplete("unchecked:"+fk.Schema+"."+fk.Table, fmt.Sprintf(
+					"%s.%s's baseline snapshot is used with its changes read by binlog position, but %s. The recovery may be partial",
+					fk.Schema, fk.Table, baseUncheckedMsg))
+			}
+		}
 		scan := childScan{cands: cands, baseRows: baseRows, baseSnap: baseSnap}
+		if baseCovered && len(baseRows) == 0 && baseSincePos != nil {
+			// No baseline row to add, but the scan above read the window from
+			// the snapshot's position (#2184): a numbering the check could not
+			// vouch for can still have hidden a child from it (#2186).
+			addUnchecked()
+		}
 		if baseCovered && len(baseRows) > 0 {
 			switch {
 			case binlogTrunc:
@@ -1042,6 +1058,9 @@ func SynthesizeVictims(
 				if baseStaleMsg != "" {
 					addWarning("baseline-stale:"+fk.Schema+"."+fk.Table, baseStaleMsg)
 				}
+				// #2186: the baseline reaches the output over a window whose
+				// numbering could not be checked: incomplete, with why.
+				addUnchecked()
 				if baseTrunc {
 					addIncomplete("baseline-truncate:"+fk.Schema+"."+fk.Table, fmt.Sprintf(
 						"more than %d baseline children for %s.%s; some untouched children were NOT reconstructed",

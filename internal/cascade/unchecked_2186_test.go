@@ -11,25 +11,34 @@ import (
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
+// The positive half (the baseline used: its rows reach the output, or the
+// scan reads from its position) needs a real index; see
+// unchecked_2186_integration_test.go and internal/cascadebaseline.
+//
 // #2186: a baseline used although the binlog-renumbering check could not
 // tell (the index was rebuilt or backfilled, the mark's event is gone, an
 // archived hour has no readable file) makes the result incomplete, with the
 // check's note: the recovery must not be reported complete over a window
 // nobody could check.
-type uncheckedProvider struct{ note string }
+type uncheckedProvider struct {
+	note string
+	pos  *query.BinlogPos
+}
 
 func (p uncheckedProvider) BaselineChildren(_ context.Context, _, _, _, _ string, at time.Time, _ int) (cascade.BaselineLookup, bool, error) {
-	return cascade.BaselineLookup{SnapshotTime: at.Add(-time.Hour), UncheckedMessage: p.note}, true, nil
+	return cascade.BaselineLookup{SnapshotTime: at.Add(-time.Hour), UncheckedMessage: p.note, SincePos: p.pos}, true, nil
 }
 
 func TestSynthesizeVictims_uncheckedNumberingMarksIncomplete_2186(t *testing.T) {
 	const note = "binlog numbering not checked: `bintrail index` also wrote into this index, so the order of its event ids is not the order of the binary log, so whether the source's binary log started again after the snapshot cannot be told"
 	for _, tc := range []struct {
 		name, note string
+		pos        *query.BinlogPos
 		want       bool
 	}{
-		{"checked", "", false},
-		{"not checked", note, true},
+		{"checked", "", nil, false},
+		// No row and no position: the baseline did not shape this scan.
+		{"not checked, the baseline not used", note, nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
@@ -42,7 +51,7 @@ func TestSynthesizeVictims_uncheckedNumberingMarksIncomplete_2186(t *testing.T) 
 				mock.ExpectQuery(`.`).WillReturnRows(sqlmock.NewRows([]string{"x"}))
 			}
 			fks, parents := twoParentDeletes()
-			res, _ := cascade.SynthesizeVictims(context.Background(), query.New(db), fks, parents[:1], cascade.Options{Baseline: uncheckedProvider{tc.note}})
+			res, _ := cascade.SynthesizeVictims(context.Background(), query.New(db), fks, parents[:1], cascade.Options{Baseline: uncheckedProvider{tc.note, tc.pos}})
 			var got string
 			for _, msg := range res.Incomplete {
 				if strings.Contains(msg, "binlog numbering not checked") {

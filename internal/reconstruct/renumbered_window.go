@@ -43,7 +43,14 @@ type ReadWindow struct {
 	// so a lasting condition (a backfilled index, a mark that names nothing)
 	// is logged once, not on every statement.
 	Notice func(level slog.Level, msg string, args ...any)
+
+	// archiveNote lets the whole-index form add its note when rotation took
+	// the mark's hour (archivedAfterMarkNote). Set by CheckNumberingFromRead;
+	// a snapshot refresh leaves it off and reads nothing new.
+	archiveNote bool
 }
+
+func (w *ReadWindow) wantsArchiveNote() bool { return w != nil && w.archiveNote }
 
 func (w *ReadWindow) bounded() bool {
 	return w != nil && !w.Until.IsZero() && w.Schema != "" && w.Table != ""
@@ -336,6 +343,13 @@ func checkNumberingForRead(ctx context.Context, db *sql.DB, dbName string, opts 
 		return false, err
 	}
 	if !live {
+		// The bounded check reads archived hours too (#2186): it is enough
+		// that every hour rotation took from the read's reach was archived.
+		if live, err = archivesCoverReach(ctx, db, opts, before); err != nil {
+			return false, err
+		}
+	}
+	if !live {
 		return false, check(ReadWindow{})
 	}
 	if err := check(ReadWindow{Schema: opts.Schema, Table: opts.Table, Since: *opts.Since, Until: until}); err != nil {
@@ -379,6 +393,38 @@ func liveHoldsRead(ctx context.Context, db *sql.DB, dbName string, opts query.Op
 		return name, false, nil
 	}
 	return name, !floor.Before(start), nil
+}
+
+// archivesCoverReach reports whether archive_state records an archive for
+// every hour from the read's floor (query.PositionReadFloor) up to the start
+// of oldest, the oldest live partition: the hours rotation took from the
+// read's reach. A partition name this build cannot place, no floor, or no
+// archive_state table: false.
+func archivesCoverReach(ctx context.Context, db *sql.DB, opts query.Options, oldest string) (bool, error) {
+	start, ok := query.ParsePartitionName(oldest)
+	if !ok || opts.Since == nil {
+		return false, nil
+	}
+	floor, err := query.PositionReadFloor(ctx, db, opts)
+	if err != nil || floor.IsZero() {
+		return false, err
+	}
+	from := floor.UTC().Truncate(time.Hour)
+	hours := int(start.Sub(from) / time.Hour)
+	if hours <= 0 {
+		return true, nil
+	}
+	var n int
+	err = db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT partition_name) FROM archive_state WHERE partition_name >= ? AND partition_name < ?`,
+		from.Format("p_2006010215"), start.Format("p_2006010215")).Scan(&n)
+	if err != nil {
+		var me *mysqldriver.MySQLError
+		if errors.As(err, &me) && me.Number == 1146 {
+			return false, nil
+		}
+		return false, fmt.Errorf("read archive_state: %w", err)
+	}
+	return n >= hours, nil
 }
 
 // oldestPartition returns binlog_events' first partition by position; found

@@ -343,18 +343,22 @@ Results are **per table**, one of:
   restart whose later changes touched only other tables, is still checked;
   capture moving to another server counts only when capture recorded the
   move after the older snapshot and at or before the newer one. The
-  live-source mode reads up to now and checks the whole index, as a snapshot
-  update does. `--explain` refuses the same way.
+  live-source mode asks the same question of what it reads: from the
+  snapshot up to the moment of the comparison
+  ([#2186](https://github.com/dbtrail/dbtrail/issues/2186)). `--explain`
+  refuses the same way.
 
-  In pair mode, hours of the window that rotation already moved into Parquet
+  In both modes, hours of the window that rotation already moved into Parquet
   archives are checked too ([#2186](https://github.com/dbtrail/dbtrail/issues/2186)):
   verify reads them from the archives with the same position filter, so the
-  check reads them as well. The live-source mode does not read archives in
-  the check: when the snapshot's mark is in an hour already archived and an
-  archive may hold later changes, it reports the table inconclusive (cannot
-  check, below). An archive whose newest change was indexed at or
-  before the snapshot's mark is skipped (`archive_state` records it); every
-  other archive file of the window is read for this table. An archive with
+  check reads them as well, and a snapshot older than the index's retention
+  (a quiet table keeps its old snapshot file) is checked like a recent one.
+  When the snapshot's mark itself has been archived, the check first finds
+  it in the archives, so it reads the archives only from a mark they still
+  hold. An archive whose newest change was indexed at or before the
+  snapshot's mark is skipped (`archive_state` records it); every other
+  archive file of the window is read for this table, once per snapshot and
+  table (what it holds is remembered). An archive with
   no `archive_state` row is not checked: `bintrail archive reconcile --prune`
   removes the row of an archive whose file is gone from every backend, and
   from then on nothing records that the hour held a change, so a late change
@@ -371,10 +375,12 @@ Results are **per table**, one of:
   checked:" and the reason ([#2186](https://github.com/dbtrail/dbtrail/issues/2186)):
   `bintrail index` also wrote into the index, so its event ids do not follow
   the binary log; the event the snapshot's mark names was deleted while older
-  ones remain (a restarted capture's cleanup); the mark's id now names another
-  event (the index was rebuilt); the mark does not read; or an archived hour
-  of the window has no file this process can open; or (live-source mode) the
-  snapshot's mark is in an hour already moved to the archives. A match over such a
+  ones remain (a restarted capture's cleanup), in the index or, once its hour
+  was archived, in the archives; the mark's id now names another event (the
+  index was rebuilt); the mark does not read, or comes from an older binlog
+  numbering than the snapshot's own position; or an archived hour of the
+  window has no file this process can open (no local copy, and no S3 copy or
+  one that is not there). A match over such a
   window would prove nothing, so it is not reported as one. `--explain` still
   shows the rows of such a pair.
 

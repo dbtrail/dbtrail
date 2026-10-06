@@ -3,11 +3,16 @@ package parquetquery
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // writeEvents writes an archive-shaped Parquet file holding the given rows:
@@ -71,12 +76,12 @@ func TestFirstBelowMark_2186(t *testing.T) {
 			f := writeEvents(t, tc.rows)
 			qq := q
 			qq.From, qq.Until = tc.from, tc.to
-			row, found, err := FirstBelowMark(context.Background(), f, qq)
+			span, err := FirstBelowMark(context.Background(), f, qq)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if found != (tc.want != 0) || (found && row.EventID != tc.want) {
-				t.Fatalf("= %+v, %v; want event %d", row, found, tc.want)
+			if span.Found != (tc.want != 0) || (span.Found && span.Earliest.EventID != tc.want) {
+				t.Fatalf("= %+v; want event %d", span, tc.want)
 			}
 		})
 	}
@@ -84,13 +89,60 @@ func TestFirstBelowMark_2186(t *testing.T) {
 		f := writeEvents(t, [][5]any{{101, "other-name.1", 900, 1, "orders"}})
 		qq := q
 		qq.MarkFile, qq.Base = "binlog", ""
-		if _, found, err := FirstBelowMark(context.Background(), f, qq); err != nil || found {
-			t.Fatalf("= %v, %v; want none", found, err)
+		if span, err := FirstBelowMark(context.Background(), f, qq); err != nil || span.Found {
+			t.Fatalf("= %+v, %v; want none", span, err)
 		}
 	})
 	t.Run("a file that does not read is an error", func(t *testing.T) {
-		if _, _, err := FirstBelowMark(context.Background(), filepath.Join(t.TempDir(), "missing.parquet"), q); err == nil {
+		if _, err := FirstBelowMark(context.Background(), filepath.Join(t.TempDir(), "missing.parquet"), q); err == nil {
 			t.Fatal("no error")
 		}
 	})
+	// The span: the earliest and the latest matching change by recorded
+	// time, whatever their ids, with what the refusal names.
+	t.Run("the earliest and the latest", func(t *testing.T) {
+		f := writeEvents(t, [][5]any{
+			{103, "binlog.000001", 300, 20, "orders"},
+			{101, "binlog.000001", 200, 30, "orders"},
+			{104, "binlog.000002", 900, 5, "orders"},
+			{105, "binlog.000007", 900, 1, "orders"}, // after the mark: not counted
+		})
+		span, err := FirstBelowMark(context.Background(), f, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !span.Found || span.Earliest.EventID != 104 || span.Earliest.File != "binlog.000002" || span.Earliest.End != 900 ||
+			!span.Earliest.At.Equal(at(5)) || span.Latest.EventID != 101 || !span.Latest.At.Equal(at(30)) {
+			t.Fatalf("span = %+v; want 104 at :05 to 101 at :30", span)
+		}
+	})
+	t.Run("an event by its id", func(t *testing.T) {
+		f := writeEvents(t, [][5]any{{100, "binlog.000007", 500, 1, "orders"}, {101, "binlog.000007", 600, 2, "orders"}})
+		row, found, err := EventByID(context.Background(), f, 100)
+		if err != nil || !found || row.File != "binlog.000007" || row.End != 500 {
+			t.Fatalf("= %+v, %v, %v", row, found, err)
+		}
+		if _, found, err := EventByID(context.Background(), f, 99); err != nil || found {
+			t.Fatalf("absent id = %v, %v", found, err)
+		}
+	})
+}
+
+// A missing S3 object, in each shape stores return it, is told apart from
+// another failure (#2186).
+func TestObjectMissing_2186(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{fmt.Errorf("download: %w", &types.NoSuchKey{}), true},
+		{fmt.Errorf("download: %w", &types.NotFound{}), true},
+		{fmt.Errorf("download: %w", &smithyhttp.ResponseError{Response: &smithyhttp.Response{Response: &http.Response{StatusCode: 404}}}), true},
+		{fmt.Errorf("download: %w", &smithyhttp.ResponseError{Response: &smithyhttp.Response{Response: &http.Response{StatusCode: 403}}}), false},
+		{errors.New("connection reset"), false},
+	} {
+		if got := objectMissing(tc.err); got != tc.want {
+			t.Errorf("objectMissing(%v) = %v; want %v", tc.err, got, tc.want)
+		}
+	}
 }

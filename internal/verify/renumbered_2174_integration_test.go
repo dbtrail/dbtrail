@@ -307,9 +307,10 @@ func TestVerifyTable_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 			db, dbName := testutil.CreateTestDB(t)
 			now := time.Now().UTC()
 			h1 := now.Truncate(time.Hour).Add(-time.Hour)
-			if tc.startOverLater || tc.switchAfter || tc.otherTable {
-				// Live mode reads up to now and checks the whole index, as the
-				// refresh does: there is no "after the window".
+			if tc.startOverLater || tc.switchAfter || tc.otherTable || tc.startedBetween {
+				// Live mode reads up to now: there is no "after the window",
+				// and this fixture's later changes (startedBetween's two) are
+				// stamped after now, outside what the read and its check see.
 				t.Skip("live mode reads up to now")
 			}
 			renumberIndex(t, db, dbName, tc, []time.Time{h1.Add(-time.Hour), h1, h1.Add(time.Hour)}, h1.Add(-5*time.Minute), now.Add(-time.Minute), time.Time{}, now)

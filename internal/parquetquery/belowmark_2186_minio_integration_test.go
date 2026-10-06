@@ -76,18 +76,24 @@ func TestFirstBelowMark_s3_MinIO_2186(t *testing.T) {
 			if _, err := client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), Body: body}); err != nil {
 				t.Fatalf("upload: %v", err)
 			}
-			row, found, err := FirstBelowMark(ctx, "s3://"+bucket+"/"+key, q)
+			span, err := FirstBelowMark(ctx, "s3://"+bucket+"/"+key, q)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if found != (tc.want != 0) || (found && row.EventID != tc.want) {
-				t.Fatalf("= %+v, %v; want event %d", row, found, tc.want)
+			if span.Found != (tc.want != 0) || (span.Found && span.Earliest.EventID != tc.want) {
+				t.Fatalf("= %+v; want event %d", span, tc.want)
 			}
 		})
 	}
-	t.Run("an object that is not there is an error", func(t *testing.T) {
-		if _, _, err := FirstBelowMark(ctx, "s3://"+bucket+"/belowmark-2186/missing.parquet", q); err == nil {
-			t.Fatal("no error")
+	// A recorded object that is not there (an upload that never completed)
+	// is told apart from any other failure: the check reports it as an
+	// archive it cannot open.
+	t.Run("an object that is not there", func(t *testing.T) {
+		if _, err := FirstBelowMark(ctx, "s3://"+bucket+"/belowmark-2186/missing.parquet", q); !errors.Is(err, ErrArchiveObjectMissing) {
+			t.Fatalf("err = %v; want ErrArchiveObjectMissing", err)
+		}
+		if _, _, err := EventByID(ctx, "s3://"+bucket+"/belowmark-2186/missing.parquet", 1); !errors.Is(err, ErrArchiveObjectMissing) {
+			t.Fatalf("EventByID err = %v; want ErrArchiveObjectMissing", err)
 		}
 	})
 }
