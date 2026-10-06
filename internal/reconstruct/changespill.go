@@ -72,11 +72,18 @@ func init() {
 // (for the nil-image log line), the key and the after-image. Nothing else.
 // A merge stage that starts reading another field of a change map entry must
 // add it here, or it reads zero from every change that went through disk.
+//
+// File and Pos are where the event starts in the binary log. They are not for
+// the merge: reading a group back keeps, per key, the change the binary log
+// holds last, and a row changed on both sides of a drain has one record from
+// each (#2151).
 type spillRecord struct {
 	PK    string
 	Type  event.EventType
 	ID    uint64
 	After map[string]any
+	File  string
+	Pos   uint64
 }
 
 // changeSpill is one table's changes on disk, one gob stream per group.
@@ -118,8 +125,10 @@ func (s *changeSpill) path(b int) string {
 }
 
 // drain appends every entry of changes to its group. Entries of one map have
-// distinct keys, so their order does not matter; calls must come in the order
-// the changes happened, because reading a group back keeps the last write.
+// distinct keys, so their order does not matter. Neither does the order of the
+// calls for which change of a row is kept: reading a group back compares
+// binary log positions. Between two records at the same position the later
+// write wins, so calls still come in fold order.
 func (s *changeSpill) drain(changes map[string]*query.ResultRow) error {
 	for pk, ev := range changes {
 		b := spillBucket(pk)
@@ -133,7 +142,7 @@ func (s *changeSpill) drain(changes map[string]*query.ResultRow) error {
 			s.encs[b] = gob.NewEncoder(s.bufs[b])
 			s.written[b] = true
 		}
-		if err := s.encs[b].Encode(spillRecord{PK: pk, Type: ev.EventType, ID: ev.EventID, After: ev.RowAfter}); err != nil {
+		if err := s.encs[b].Encode(spillRecord{PK: pk, Type: ev.EventType, ID: ev.EventID, After: ev.RowAfter, File: ev.BinlogFile, Pos: ev.StartPos}); err != nil {
 			return fmt.Errorf("write changed row %q to the temporary directory %s: %w", pk, s.dir, err)
 		}
 		s.records++
@@ -159,8 +168,10 @@ func (s *changeSpill) finish() error {
 	return errors.Join(errs...)
 }
 
-// load reads group b back into a change map, the last write for a key
-// winning. It stops with the changed-rows refusal as soon as the group alone
+// load reads group b back into a change map. For a key written more than
+// once it keeps the change the binary log holds last (query.LaterInBinlog,
+// the fold's own rule: #2151), and the later write between two at the same
+// position. It stops with the changed-rows refusal as soon as the group alone
 // holds more distinct rows than the limit, before reading the rest of it.
 func (s *changeSpill) load(b int) (map[string]*query.ResultRow, error) {
 	m := map[string]*query.ResultRow{}
@@ -184,7 +195,11 @@ func (s *changeSpill) load(b int) (map[string]*query.ResultRow, error) {
 		for k, v := range rec.After {
 			rec.After[k] = restoreEmpty(v)
 		}
-		m[rec.PK] = &query.ResultRow{EventType: rec.Type, EventID: rec.ID, PKValues: rec.PK, RowAfter: rec.After}
+		row := &query.ResultRow{EventType: rec.Type, EventID: rec.ID, PKValues: rec.PK, RowAfter: rec.After, BinlogFile: rec.File, StartPos: rec.Pos}
+		if cur, ok := m[rec.PK]; ok && query.LaterInBinlog(cur, row) {
+			continue
+		}
+		m[rec.PK] = row
 		if s.limit > 0 && int64(len(m)) > s.limit {
 			return nil, TouchedRowBudgetError(s.limit, s.tables, true)
 		}

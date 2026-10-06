@@ -314,6 +314,11 @@ Three offline commands hold their working set in memory, so a BLOB/TEXT-heavy or
 
 The MCP server applies its own agent-facing row ceiling on the `query` tool — see [the MCP tool reference](mcp-server.md#tool-parameters-and-behavior-reference).
 
+#### Which change of a row is the last one
+For each row, full-table `reconstruct` keeps the change the binary log holds last, by file and position, not the one whose statement started last ([#2151](https://github.com/dbtrail/dbtrail/issues/2151)): an UPDATE that waited on a row lock is committed after the change it waited for and carries an earlier time.
+
+One limit follows. A scheduled update of a snapshot, `reconstruct --output-format parquet` and `export iceberg` read a window bounded by a binary log position at both ends. With `--output-format mydumper` or SQL output, or from a snapshot that recorded no position, the window is bounded by time at one end or both. If that window spans a source failover, a `RESET MASTER` or a change of the binary log base name, the file numbering starts again inside it, and for a row changed on both sides the older numbering's change can be kept. Take a new full snapshot after such an event before a `reconstruct` across it.
+
 #### Streaming the event window
 
 Full-table `reconstruct` rebuilds a table by merging a baseline snapshot with every binlog event since it. Those events used to be fetched in one call and held whole — including each event's *before* image, which the merge never reads.
