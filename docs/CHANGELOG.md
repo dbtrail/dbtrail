@@ -258,6 +258,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this apart from capture that is simply behind, every snapshot now records
   the newest change the index held when it was taken; a snapshot written
   before this version is covered once a new one replaces it.
+- **`verify` and `_snapshot` notice the source's binary log started again
+  after the snapshot** (#2174). Both read the changes since a snapshot from
+  its binlog position, like the update above, and neither ran its check.
+  After a `RESET MASTER` (`RESET BINARY LOGS AND GTIDS`) or a failover to
+  another server, every later change sorts before that position and was not
+  read: `verify` reported a mismatch with no cause, and `SELECT ... FROM
+  _snapshot.t AS OF ...` on the MySQL port answered the snapshot's old rows,
+  with no error, for one row and for the whole table. Both now run the same
+  check when the snapshot records the newest change the index held (every
+  snapshot from #2160 on). `verify` reports the table inconclusive with the
+  reason ("the changes since the snapshot cannot be found by binlog
+  position"), in both modes and in `--explain`; in the baseline pair mode
+  (the default) the table is checkable again from the second full snapshot
+  after the restart, since a pair with one snapshot on each side still spans
+  it. `_snapshot` refuses with error 1526 (`ER_NO_PARTITION_FOR_GIVEN_VALUE`,
+  the code of its other unreadable-history refusals) and asks for a new full
+  snapshot. A snapshot without that record keeps the old behavior; on an
+  index that `bintrail index` also wrote into, the numbering is not checked
+  (a warning is logged), as in the update.
 - **Turning the MySQL port off answers only once the port is closed (#2149).**
   Turning it off from the web interface could answer "off" a moment before
   the listening socket was released, and in that moment a new connection to

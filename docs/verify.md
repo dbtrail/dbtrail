@@ -311,6 +311,24 @@ Results are **per table**, one of:
   (regenerate the baseline — see below), or a value class this version cannot yet
   compare.
 
+  One cause names itself: **the source's binary log started again after the
+  snapshot** ([#2174](https://github.com/dbtrail/dbtrail/issues/2174)). verify
+  reads the changes since a snapshot from its binlog position. After a `RESET
+  MASTER` (`RESET BINARY LOGS AND GTIDS`), or a failover to another server,
+  every later change sorts before that position and cannot be found, so the
+  comparison would be a mismatch with no real divergence. When the snapshot
+  records the newest change the index held (every snapshot written since
+  [#2160](https://github.com/dbtrail/dbtrail/issues/2160)), verify runs the
+  same check as a snapshot update and reports the table inconclusive with "the
+  changes since the snapshot cannot be found by binlog position" and what
+  happened. In the baseline pair mode the snapshot checked is the older one
+  of the pair, so the table is checkable again from the **second** full
+  snapshot taken after the restart; the live-source mode needs one.
+  `--explain` refuses the same way. A snapshot without that record is not
+  checked, and on an index that `bintrail index` also wrote into the
+  numbering is not checked (a warning is logged): its event ids do not follow
+  the binary log.
+
   Under `--check recover`, inconclusive is subdivided by `inconclusive_kind`
   so a summary can be read: `no-activity` (nothing changed in the window),
   `nothing-to-assert` (every chain is a single INSERT — an append-only shape
