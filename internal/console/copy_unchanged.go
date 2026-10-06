@@ -329,9 +329,12 @@ func copyLookupSince(ctx context.Context, db *sql.DB, t views.BaselineTable, cut
 // after one cut. That verdict cannot become false: the cut is a fixed binlog
 // position and the change is positioned after it. Without it every heavy
 // statement over such a table repeats the lookups, and the one over the
-// older hours can take the whole budget each time. "Unchanged" is never
-// remembered: it is only true until the next change. A new cut for the table
-// (a newer snapshot file) replaces the entry.
+// older hours can take the whole budget each time. It also holds the archive
+// verdict (#2187), which only says the table MAY have changed (an archive
+// holds every table of its hour): it stays until the table's cut moves, even
+// if archive_state is later edited, which only sends reads to MySQL.
+// "Unchanged" is never remembered: it is only true until the next change. A
+// new cut for the table (a newer snapshot file) replaces the entry.
 type copyChangedMemo struct {
 	mu   sync.Mutex
 	seen map[copyChangedKey]copyChangedAt

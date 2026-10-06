@@ -313,7 +313,10 @@ func loadPartitionHeadsOnce(ctx context.Context, db *sql.DB) (*PartitionHeads, e
 // A non-zero writtenSince reads only the rows written at or after it, less
 // archiveWrittenMargin and archiveWrittenSlack: the only ones the rule with
 // no cut can count (ArchiveHeads). The bound is an age on the server against
-// the server's own epoch, so neither time zone plays a part.
+// the server's own epoch, computed the way the age below is, so it lets
+// through at least every row the rule counts (a daylight-saving change between
+// the write and the read skews both by the same hour, which the margin
+// absorbs).
 func loadArchiveHeads(ctx context.Context, db *sql.DB, writtenSince time.Time) (_ []archiveHead, present bool, _ error) {
 	where, args := "", []any(nil)
 	if !writtenSince.IsZero() {
@@ -492,10 +495,14 @@ func (h *PartitionHeads) below(since time.Time, anchor BinlogPos) []string {
 // seen was indexed after it, into a file written after it. An archive with no
 // record is read when it was written after since, in both cases.
 //
-// A recorded newest position on another binlog base name than the anchor's
-// (#2187) cannot be placed against it or the cut: names of different lengths
-// sort by length, whatever they hold. It is judged by the time rule, as an
-// archive with no record is.
+// With no cut, a recorded newest position on another binlog base name than
+// the anchor's (#2187) cannot be placed against it: names of different
+// lengths sort by length, whatever they hold. It is judged by the time rule,
+// as an archive with no record is. (With a cut the comparison is kept as it
+// was: a usable cut shares the anchor's base name, and the time rule there
+// could only narrow what an update reads.) Only the archive's newest position
+// is recorded, so an archive holding both names whose newest sorts on the
+// anchor's is still judged by position.
 func (h *PartitionHeads) archivesBelow(since time.Time, anchor BinlogPos, checked, until *BinlogPos) (from time.Time, n int) {
 	return archivesMayHold(h.archives, since, anchor, usableCheckedThrough(anchor, checked, until))
 }
@@ -518,7 +525,7 @@ func archivesMayHold(archives []archiveHead, since time.Time, anchor BinlogPos, 
 		switch {
 		case !a.recorded:
 			may = written
-		case a.hasPos && binlogBaseName(a.pos.File) != binlogBaseName(anchor.File):
+		case checked == nil && a.hasPos && binlogBaseName(a.pos.File) != binlogBaseName(anchor.File):
 			may = written
 		case checked != nil:
 			may = a.hasPos && seen.AtOrBefore(a.pos)

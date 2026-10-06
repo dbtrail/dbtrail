@@ -13,8 +13,9 @@ import (
 // #2187: the routed port's "unchanged since the snapshot" check asks the same
 // question of archive_state as a fetch with no cut (archivesBelow), through
 // ArchiveHeads. These cases pin that both read the archives by one rule, and
-// the one addition #2187 made to it: a newest position on another binlog base
-// name cannot be placed against the anchor, so only the time rule applies.
+// the one addition #2187 made to the rule with no cut: a newest position on
+// another binlog base name cannot be placed against the anchor, so only the
+// time rule applies.
 
 func TestArchiveHeads_mayHoldAfter_2187(t *testing.T) {
 	h0 := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
@@ -60,23 +61,19 @@ func TestArchiveHeads_mayHoldAfter_2187(t *testing.T) {
 	}
 }
 
-// With a cut, a position on another base name is not compared with the cut
-// either: the time rule decides.
-func TestPartitionHeads_archivesBelow_anotherBaseName_2187(t *testing.T) {
+// With a cut, the comparison is the one #2152 shipped: a cut is only usable
+// on the anchor's base name, and the time rule could only narrow what an
+// update reads.
+func TestPartitionHeads_archivesBelow_anotherBaseNameWithACutUnchanged_2187(t *testing.T) {
 	h0 := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	since := h0.Add(10*time.Hour + 30*time.Minute)
 	anchor := BinlogPos{File: "binlog.000001", Pos: 500}
 	cut := &BinlogPos{File: "binlog.000001", Pos: 800}
 	h := headsAt(h0.Add(9*time.Hour), 100, 200)
-	// "a.000001" sorts before "binlog.000001" by length: compared, it would
-	// read as already seen.
-	h.archives = []archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "a.000001", 4), since.Add(time.Hour))}
+	// Longer than the cut's name: sorts after it, counted whenever written.
+	h.archives = []archiveHead{writtenAt(recorded(archiveAt(h0.Add(2*time.Hour)), "mysql-bin.000001", 4), since.Add(-48*time.Hour))}
 	if got, _ := h.archivesBelow(since, anchor, cut, nil); !got.Equal(h0.Add(2 * time.Hour)) {
-		t.Fatalf("archivesBelow = %v; an archive on another base name written after the snapshot must be reached", got)
-	}
-	h.archives[0].archivedAt = since.Add(-48 * time.Hour)
-	if got, _ := h.archivesBelow(since, anchor, cut, nil); !got.IsZero() {
-		t.Fatalf("archivesBelow = %v; written long before the snapshot it cannot hold a change it missed", got)
+		t.Fatalf("archivesBelow = %v; with a cut, an archive the position order puts after it is still reached", got)
 	}
 }
 

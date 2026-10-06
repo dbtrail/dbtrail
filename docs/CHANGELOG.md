@@ -245,8 +245,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written since the snapshot less an hour, whose newest recorded position is
   at or after the table's snapshot position, or that records none, sends the
   statement to MySQL. A newest position in a binary log with another base
-  name cannot be compared, so it is judged by the time rule alone; this also
-  applies to the snapshot update's own archive rule. Archives are not split
+  name cannot be compared, so it is judged by the time rule alone (in the
+  snapshot update's archive rule too, when it has no recorded cut). Archives are not split
   by table, so another table's late change in one sends this table's reads
   to MySQL too, until that table's snapshot position moves past the change
   (a refresh that rewrites the table, or a full snapshot).
