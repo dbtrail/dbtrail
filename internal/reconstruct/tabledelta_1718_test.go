@@ -203,7 +203,7 @@ func TestTableDelta_compactionStartsTheChainAtZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("window 2: %v", err)
 	}
-	if rep2.TableDelta || !strings.Contains(rep2.DeltaCompacted, "passed 25% of the table") {
+	if rep2.TableDelta || !strings.Contains(rep2.DeltaCompacted, "passed 50% of the table") {
 		t.Fatalf("window 2: want a compaction by size, got TableDelta=%v compacted=%q", rep2.TableDelta, rep2.DeltaCompacted)
 	}
 	want := byID(readSnapshotRows(t, ref2))
@@ -301,7 +301,9 @@ func TestTableDeltaCompactReason_1718(t *testing.T) {
 	}{
 		{"start a chain", nil, "/b/t.parquet", nil, "", false, ""},
 		{"extend", chain(time.Hour, 100), "/b/t.parquet", nil, "", false, ""},
-		{"past a quarter", chain(time.Hour, 251), "/b/t.parquet", nil, "passed 25%", false, ""},
+		{"a quarter no longer ends the chain", chain(time.Hour, 251), "/b/t.parquet", nil, "", false, ""},
+		{"exactly half", chain(time.Hour, 500), "/b/t.parquet", nil, "", false, ""},
+		{"past half", chain(time.Hour, 501), "/b/t.parquet", nil, "passed 50%", false, ""},
 		{"past a day", chain(24*time.Hour+time.Minute, 1), "/b/t.parquet", nil, "old", false, ""},
 		{"s3 source", nil, "s3://b/t.parquet", nil, "S3", false, ""},
 		{"capture gap", chain(time.Hour, 1), "/b/t.parquet", &CaptureGap{}, "capture gap", false, ""},

@@ -177,7 +177,7 @@ func TestTableDeltaCompactReason_leavesSmallTablesAlone(t *testing.T) {
 		t.Errorf("under the floor: reason = %q, want none", got)
 	}
 	prev.PairSize = 1 << 20
-	if got := tableDeltaCompactReason(prev, "/b/t.parquet", 700, nil, at, true, "", time.Time{}, time.Time{}); !strings.Contains(got, "passed 25%") {
+	if got := tableDeltaCompactReason(prev, "/b/t.parquet", 700, nil, at, true, "", time.Time{}, time.Time{}); !strings.Contains(got, "passed 50%") {
 		t.Errorf("at the floor: reason = %q, want the size rule", got)
 	}
 }
