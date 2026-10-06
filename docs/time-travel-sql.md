@@ -766,11 +766,14 @@ index never received, and has no record of not receiving, it cannot see:
   miss changes it should have folded in. The position in that file's footer
   says they are in it, so nothing after it looks changed;
 - a statement that began before the oldest hour the index still holds and
-  committed after the table's snapshot. While the hour it began in is in the
-  index the statement is found, however long it ran; once rotation drops
-  that hour, and until rotation also drops the hour of the snapshot, it is
-  not. The same goes for a change dated that far back because the source's
-  clock runs behind.
+  committed after the table's snapshot, when rotation dropped that hour
+  WITHOUT archiving it. While the hour it began in is in the index the
+  statement is found, however long it ran. When rotation archives the hour
+  before dropping it, the archive's record of the newest change it holds
+  says so, and the statement goes to MySQL (below); dropped with no archive,
+  and until rotation also drops the hour of the snapshot, it is not found.
+  The same goes for a change dated that far back because the source's clock
+  runs behind.
 
 None of these is new, and the copy was already wrong about such a change
 before this rule. The copy's age is the stamp of its newest snapshot, and a
@@ -839,6 +842,21 @@ When it applies and what it costs:
   Once a table is found changed after its snapshot, that is remembered for
   that snapshot file and the index is not asked again: the statements that
   follow go to MySQL at once.
+- The archives rotation wrote are read too. A change indexed late lands in an
+  old hour, the next one rotation archives and drops, and then the index no
+  longer shows it. Each archive records the newest binlog position it holds,
+  so the statement goes to MySQL when an archive of an hour older than the
+  lookups reach, written since the table's snapshot (less an hour for clock
+  differences), holds a change at or after the snapshot's position, does not
+  record its newest position (written by an older version, or registered by
+  `archive reconcile --repair` or `restore-index`), or records it in a binary
+  log with another base name. An archive holds every table of its hour, so
+  another table's late change in it counts as well. Only the archives written
+  since the oldest of the statement's snapshots are read: measured with a
+  year of hourly archives (8,760) on MySQL 8.4, 0.5 ms a statement; on an
+  index no version with this check has migrated yet (it adds an index on
+  `archive_state.archived_at`), about 3 ms. An index with no `archive_state`
+  at all, or one that cannot be read, is not vouched for.
 - The statement takes one of the copy's slots while it is checked, as a heavy
   read within the limit does.
 

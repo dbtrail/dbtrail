@@ -233,6 +233,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with one of the 44 words and used later (`SELECT made AS at ... ORDER BY
   at`) stays on MySQL too, which is right: the copy would refuse it.
 ### Fixed
+- **The routed MySQL port no longer answers from the copy after a late change
+  whose hour was archived and dropped** (#2187). The check that lets the copy
+  answer a heavy read for tables unchanged since their snapshot
+  (`tables_unchanged`, #2085) looked only at the hours still in the index. A
+  change indexed late lands in an old hour; once rotation archived and
+  dropped that hour before the next snapshot refresh, the check called the
+  table unchanged and the copy answered without the change. The check now
+  also reads `archive_state`, by the same rule a snapshot update with no
+  recorded cut uses (#2152): an archive of an hour below the lookups' floor,
+  written since the snapshot less an hour, whose newest recorded position is
+  at or after the table's snapshot position, or that records none, sends the
+  statement to MySQL. A newest position in a binary log with another base
+  name cannot be compared, so it is judged by the time rule alone; this also
+  applies to the snapshot update's own archive rule. Archives are not split
+  by table, so another table's late change in one sends this table's reads
+  to MySQL too, until that table's snapshot position moves past the change
+  (a refresh that rewrites the table, or a full snapshot).
+  An index with no `archive_state`, or one that cannot be read, is not
+  vouched for. A new index on `archive_state.archived_at` (added on startup
+  by the usual migration) keeps the read at 0.5 ms a statement with a year of
+  hourly archives on MySQL 8.4 (about 3 ms without it).
 - **A snapshot update reads a late change whose hour was archived and
   dropped before the update ran** (#2152). An update continues from the
   snapshot's binlog position, and since #2138 it starts earlier when the

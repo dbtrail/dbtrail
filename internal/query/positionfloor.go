@@ -639,9 +639,9 @@ type runPicture struct {
 //
 // Legitimate for exactly one shape: the caller runs a SECOND fetch for the
 // same table and position with no Since and Until at CoarseSinceFloor(Since),
-// which searches every older hour still in the index by position alone, or proves from the index
-// that no such search can find anything, and treats any failure of either as
-// "changed" or as a refusal. The routed port's "did this table change since
+// which searches every older hour still in the index by position alone, or
+// proves from the index that no such search can find anything, and treats any
+// failure of either as "changed" or as a refusal. The routed port's "did this table change since
 // its snapshot" check is that caller: it asks per statement inside the
 // capture process, under a two-second budget, and has its own one-row proof
 // that makes the look at every partition a cost with nothing to add. Neither
