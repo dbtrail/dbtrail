@@ -466,6 +466,9 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 		if warn := order.Warning(); warn != "" {
 			res.Warnings = append(res.Warnings, "statement_time_order: "+warn)
 		}
+		if note := order.Note(); note != "" {
+			res.Notes = append(res.Notes, "binlog_order: "+note)
+		}
 		if args.History {
 			entries, err := reconstruct.BuildHistory(baselineRow, snapshotTime, ordered, atTime)
 			if err != nil {

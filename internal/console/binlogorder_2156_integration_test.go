@@ -90,6 +90,9 @@ func TestIntegrationBinlogOrder2156_recoverAndReconstruct(t *testing.T) {
 			t.Fatalf("a sorted reconstruction carries an order warning: %v", r.Warnings)
 		}
 	}
+	if len(r.Notes) == 0 || !strings.Contains(strings.Join(r.Notes, "\n"), "in a different order than their statements started") {
+		t.Fatalf("a reordered history does not say so: notes = %v", r.Notes)
+	}
 
 	// As of a moment between the two start times only B had started.
 	r = reconstructAt(t, srv, "schema=app&table=users&pk=1&at=2026-06-01%2012:00:01&allow_gaps=true")

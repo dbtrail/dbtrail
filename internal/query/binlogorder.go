@@ -57,6 +57,33 @@ type BinlogOrder struct {
 // Sorted reports whether the rows were reordered.
 func (o BinlogOrder) Sorted() bool { return o.Reason == OrderSorted }
 
+// Note is the text for the reader of a result whose rows WERE reordered, and
+// "" otherwise: the times of consecutive changes are then not all ascending,
+// which reads as a defect to someone who was not told.
+func (o BinlogOrder) Note() string {
+	if !o.Sorted() {
+		return ""
+	}
+	return fmt.Sprintf("%d of %d changes were written to the binary log in a different order than their statements started "+
+		"(a statement that waited for a row lock, or ran long). They are in binary log order, which is commit order, so their times are not all in sequence.",
+		o.Moved, o.Total)
+}
+
+// StatementTimeOrderNotice is for a caller that does NOT take the rule and
+// keeps its rows in statement-time order whatever the binary log says
+// (recover-cascade, until its own slice of #2156): the text to show when that
+// order is known or suspected to differ from binary log order, and "" when the
+// two agree. rows are not modified.
+func StatementTimeOrderNotice(rows []ResultRow, idsFollowBinlog func([]ResultRow) bool) string {
+	o := OrderByBinlog(slices.Clone(rows), idsFollowBinlog)
+	if o.Sorted() {
+		return fmt.Sprintf("the binary log holds %d of %d changes in a different order than their statements started (a statement that waited for a row lock, or ran long), "+
+			"and this script undoes them in statement-time order. For a row that two sessions changed close together it can leave the first session's value: check such rows by hand.",
+			o.Moved, o.Total)
+	}
+	return o.Warning()
+}
+
 // statementTimeTail is what every refusal ends with: what order was kept and
 // what it means for the reader.
 const statementTimeTail = "The changes are in the order their statements started, as before. " +
@@ -81,7 +108,7 @@ func (o BinlogOrder) Warning() string {
 			"A restart of the source's binary log numbering (a failover, RESET MASTER) inside this time range cannot be ruled out. %s",
 			o.Moved, o.Total, o.detail, statementTimeTail)
 	case OrderRenumbered:
-		return fmt.Sprintf("the binary log and the statement times disagree on the order of %d of %d changes, and the binary log position goes down inside this time range (%s): "+
+		return fmt.Sprintf("the binary log and the statement times disagree on the order of %d of %d changes, and the binary log files of this time range are not in one sequence (%s): "+
 			"the source's binary log numbering restarted (a failover, RESET MASTER), or binary log files were indexed out of order. %s",
 			o.Moved, o.Total, o.detail, statementTimeTail)
 	}
@@ -199,6 +226,30 @@ func OrderByBinlog(rows []ResultRow, idsFollowBinlog func([]ResultRow) bool) Bin
 		}
 	}
 
+	// The ids were ACCEPTED as following the binary log, not checked: an index
+	// built only by `bintrail index` is taken to have had its files indexed
+	// in order. Files of a NEWER numbering indexed before the files of the
+	// older one (a rebuilt index, after a RESET MASTER on the source) pass
+	// the walk above, ids and positions rising together, and are the wrong
+	// way round. Their times give it away: a later file whose every change
+	// started over an hour before every change of the file before it. A lock
+	// wait or a long statement across a rotation does not reach an hour; a
+	// session with SET TIMESTAMP far in the past, alone in its file, does,
+	// and is refused too, which keeps the order it had.
+	for i := 1; i < len(perm); i++ {
+		prev, cur := &rows[perm[i-1]], &rows[perm[i]]
+		if prev.BinlogFile == cur.BinlogFile {
+			continue
+		}
+		prevMin, curMax := fileTimes(rows, prev.BinlogFile, cur.BinlogFile)
+		if curMax.Before(prevMin.Add(-renumberedTimeGap)) {
+			o.Reason = OrderRenumbered
+			o.detail = fmt.Sprintf("every change in %s started more than an hour before every change in %s, the file before it",
+				cur.BinlogFile, prev.BinlogFile)
+			return o
+		}
+	}
+
 	sorted := make([]ResultRow, len(rows))
 	for i, p := range perm {
 		sorted[i] = rows[p]
@@ -206,6 +257,25 @@ func OrderByBinlog(rows []ResultRow, idsFollowBinlog func([]ResultRow) bool) Bin
 	copy(rows, sorted)
 	o.Reason = OrderSorted
 	return o
+}
+
+// renumberedTimeGap: see its use in OrderByBinlog.
+const renumberedTimeGap = time.Hour
+
+// fileTimes returns the earliest event_timestamp among the rows of file a and
+// the latest among the rows of file b.
+func fileTimes(rows []ResultRow, a, b string) (minA, maxB time.Time) {
+	first := true
+	for i := range rows {
+		r := &rows[i]
+		if r.BinlogFile == a && (first || r.EventTimestamp.Before(minA)) {
+			minA, first = r.EventTimestamp, false
+		}
+		if r.BinlogFile == b && r.EventTimestamp.After(maxB) {
+			maxB = r.EventTimestamp
+		}
+	}
+	return minA, maxB
 }
 
 // compareBinlogCoordinate orders two rows that BOTH have a coordinate by

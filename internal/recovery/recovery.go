@@ -327,6 +327,9 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 }
 
 func (g *Generator) generate(rows []query.ResultRow, w *countingWriter) (int, []int, error) {
+	// Before any return: OrderDecision reports THIS generation, and one that
+	// writes nothing or refuses decided nothing.
+	g.lastOrder = query.BinlogOrder{}
 	if len(rows) == 0 {
 		fmt.Fprintln(w, "-- No events matched the specified criteria.")
 		return 0, nil, nil
@@ -365,7 +368,6 @@ func (g *Generator) generate(rows []query.ResultRow, w *countingWriter) (int, []
 	// Put the changes in binary log order where that can be established
 	// (SetBinlogOrder, #2156). Every other outcome leaves rows as they came
 	// and is said in the header below.
-	g.lastOrder = query.BinlogOrder{}
 	if g.binlogOrder && g.dialect != PostgresDialect {
 		g.lastOrder = query.OrderByBinlog(rows, g.orderProof)
 		if warn := g.lastOrder.Warning(); warn != "" {

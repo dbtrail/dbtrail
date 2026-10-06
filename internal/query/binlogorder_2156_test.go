@@ -112,7 +112,7 @@ func TestOrderByBinlog_decisionTable(t *testing.T) {
 			// position goes down, so the file alone would not show it.
 			"the numbering restarted onto the same file name",
 			[]ResultRow{orderRow(1, "binlog.000001", 9000, orderT0), orderRow(2, "binlog.000001", 300, orderT0.Add(time.Hour))},
-			proven, OrderRenumbered, []uint64{1, 2}, "binary log position goes down",
+			proven, OrderRenumbered, []uint64{1, 2}, "are not in one sequence",
 		},
 		{
 			// A restart AND a lock wait after it: one inversion is enough to
@@ -123,7 +123,33 @@ func TestOrderByBinlog_decisionTable(t *testing.T) {
 				orderRow(3, "binlog.000001", 900, orderT0.Add(time.Hour)),
 				orderRow(2, "binlog.000001", 300, orderT0.Add(time.Hour+2*time.Second)),
 			},
-			proven, OrderRenumbered, []uint64{1, 3, 2}, "binary log position goes down",
+			proven, OrderRenumbered, []uint64{1, 3, 2}, "are not in one sequence",
+		},
+		{
+			// An index rebuilt with `bintrail index`, the files of the NEW
+			// numbering first: ids and positions rise together and both are
+			// the wrong way round. Event 2 is hours older than event 1.
+			"files of a newer numbering indexed before the older one's",
+			[]ResultRow{orderRow(2, "binlog.000007", 400, orderT0), orderRow(1, "binlog.000001", 900, orderT0.Add(5*time.Hour))},
+			proven, OrderRenumbered, []uint64{2, 1}, "every change in binlog.000007 started more than an hour before every change in binlog.000001",
+		},
+		{
+			// The same picture with one row of the later file inside the
+			// hour: not that, so the ids stand.
+			"a later file with one change close to the file before it",
+			[]ResultRow{
+				orderRow(2, "binlog.000007", 400, orderT0),
+				orderRow(3, "binlog.000007", 900, orderT0.Add(4*time.Hour+30*time.Minute)),
+				orderRow(1, "binlog.000001", 900, orderT0.Add(5*time.Hour)),
+			},
+			proven, OrderSorted, []uint64{1, 2, 3}, "",
+		},
+		{
+			// A lock wait across a rotation: A is the last change of file 7,
+			// B the first of file 8, B started 2 s earlier.
+			"a lock wait across a file rotation",
+			[]ResultRow{orderRow(2, "binlog.000008", 4, orderT0), orderRow(1, "binlog.000007", 900, orderT0.Add(2*time.Second))},
+			proven, OrderSorted, []uint64{1, 2}, "",
 		},
 		{
 			// The .999999 to .1000000 rollover (#840): the longer name is the
@@ -240,6 +266,39 @@ func TestOrderByBinlog_neverAThirdOrder(t *testing.T) {
 	}
 }
 
+// Note is said only for a reordered set, and StatementTimeOrderNotice, for a
+// caller that keeps statement-time order, speaks whenever the two orders
+// differ or cannot be compared, and never touches the rows.
+func TestBinlogOrderNoteAndStatementTimeOrderNotice(t *testing.T) {
+	const f = "binlog.000007"
+	rows := lockWait(f)
+	if got := OrderByBinlog(slices.Clone(rows), unproven).Note(); got != "" {
+		t.Fatalf("a refusal carries the reordered note: %q", got)
+	}
+	if got := OrderByBinlog(slices.Clone(rows), proven).Note(); !strings.Contains(got, "2 of 2 changes were written to the binary log in a different order") {
+		t.Fatalf("note = %q", got)
+	}
+	for name, tc := range map[string]struct {
+		rows  []ResultRow
+		proof func([]ResultRow) bool
+		want  string
+	}{
+		"binlog order differs":  {lockWait(f), proven, "this script undoes them in statement-time order"},
+		"order cannot be shown": {lockWait(f), unproven, "cannot show which one is right"},
+		"no position":           {lockWait(""), proven, "carry no binary log position"},
+		"the orders agree":      {[]ResultRow{orderRow(1, f, 4, orderT0), orderRow(2, f, 9, orderT0.Add(time.Second))}, proven, ""},
+	} {
+		before := orderIDs(tc.rows)
+		got := StatementTimeOrderNotice(tc.rows, tc.proof)
+		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
+			t.Fatalf("%s: notice = %q, want one holding %q", name, got, tc.want)
+		}
+		if !slices.Equal(before, orderIDs(tc.rows)) {
+			t.Fatalf("%s: the caller's rows were reordered", name)
+		}
+	}
+}
+
 // compareBinlogCoordinate is a total order over rows with coordinates:
 // antisymmetric and transitive, and for any two rows it says what
 // LaterInBinlog says. A comparison without those properties makes a sort
@@ -338,6 +397,16 @@ func TestIDsFollowBinlog(t *testing.T) {
 			m.ExpectQuery(stream).WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 			m.ExpectQuery(state).WillReturnRows(sqlmock.NewRows([]string{"a", "b"}).AddRow(orderT0.Add(time.Hour), 0))
 		}, false, false},
+		// Half an hour before the EARLIEST of the rows BinlogOrderProof is
+		// given below (and an hour and a half before the latest): too close.
+		{"a stream, files indexed just before the earliest row", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(stream).WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+			m.ExpectQuery(state).WillReturnRows(sqlmock.NewRows([]string{"a", "b"}).AddRow(orderT0.Add(-30*time.Minute), 0))
+		}, false, false},
+		{"a stream, files indexed long before the earliest row", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(stream).WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+			m.ExpectQuery(state).WillReturnRows(sqlmock.NewRows([]string{"a", "b"}).AddRow(orderT0.Add(-2*time.Hour), 0))
+		}, true, false},
 		{"a stream, a file run still open", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(stream).WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 			m.ExpectQuery(state).WillReturnRows(sqlmock.NewRows([]string{"a", "b"}).AddRow(nil, 1))

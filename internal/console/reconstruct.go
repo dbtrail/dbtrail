@@ -612,6 +612,9 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 	if warn := order.Warning(); warn != "" {
 		resp.Warnings = append(resp.Warnings, "statement_time_order: "+warn)
 	}
+	if note := order.Note(); note != "" {
+		resp.Notes = append(resp.Notes, note)
+	}
 	if history {
 		entries, err := reconstruct.BuildHistory(baselineRow, snapshotTime, ordered, atTime)
 		if err != nil {

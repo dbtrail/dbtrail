@@ -127,7 +127,7 @@ func TestBinlogOrder_whatCannotBeProvenKeepsTheOrderAndWarns(t *testing.T) {
 			r[0].EventTimestamp, r[1].EventTimestamp = order2156T0, order2156T0.Add(time.Hour)
 			return r
 		}, yes,
-			"the binary log position goes down inside this time range"},
+			"the binary log files of this time range are not in one sequence"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			plain := script2156(t, New(nil, nil), tc.rows())
@@ -219,6 +219,15 @@ func TestBinlogOrder_decisionIsPerGeneration(t *testing.T) {
 	script2156(t, g, lockWaitRows("binlog.000007", "binlog.000007", 400, 900)[:1])
 	if g.OrderDecision().Warning() != "" {
 		t.Fatalf("stale warning after a generation with nothing to decide: %q", g.OrderDecision().Warning())
+	}
+	// And after one that never reaches the decision: no rows.
+	script2156(t, g, lockWaitRows("binlog.000007", "binlog.000007", 400, 900))
+	var buf bytes.Buffer
+	if _, err := g.GenerateSQLFromRows(nil, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if g.OrderDecision().Warning() != "" {
+		t.Fatalf("stale warning after a generation over no rows: %q", g.OrderDecision().Warning())
 	}
 }
 

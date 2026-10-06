@@ -58,6 +58,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to a table or an index read whole. Nothing changes in what a statement
   answers, only in who answers it.
 ### Fixed
+- **`recover` and single-row `reconstruct`: a row changed by two sessions
+  comes back right** (#2156, first part). Both took the order of a row's
+  changes from the time recorded with each change, which is when its
+  statement STARTED on the source. The binary log holds changes in the order
+  they were committed, and the two can disagree: an UPDATE that waits on a
+  row lock is committed after the change it waited for and carries an
+  earlier time (#2151). Reproduced on MySQL 8.4.9 and MariaDB 11.4.13,
+  through the real capture, with the generated script applied to the table.
+  Session A changes a row from `seed` to `A`; session B, which started 2
+  seconds earlier and waited, changes it to `B`. The script undid A first and
+  B second and left the row on `A`, with no error. When B deleted the row,
+  the script brought it back with A's value. When A deleted the row and B
+  inserted it again, the script failed with a duplicate key. Single-row
+  `reconstruct` (the command, the web interface and the MCP tool) answered
+  `A` for a row that holds `B`, and `--history` listed B before A.
+
+  Both now put the changes in binary log order, by file and position, when
+  that order can be established for the whole set, and the script undoes
+  from the last change back. On an index a stream writes, that is the order
+  the changes were indexed in. A script that was reordered says so in its
+  header; the `at` times of its statements are then not all in sequence.
+
+  The order stays by statement time, as before, and the script header, the
+  log and the response say why, when the binary log order cannot be
+  trusted: a change carries no position (indexed by an old build); the
+  changes come from binary logs with different base names; the position
+  goes down while the index's own ids go up, or a later file holds only
+  changes that started more than an hour before those of the file before
+  it, which is a restart of the source's numbering inside the time range (a
+  failover, `RESET MASTER`) or files indexed out of order; or binary log files were indexed with
+  `bintrail index` into an index a stream also writes, less than an hour
+  before the earliest change of the range, so its ids do not say in which
+  order the changes were written. None of this is looked at when the two
+  orders agree, which is every range without one of these waits: such a
+  script is the same, byte for byte. PostgreSQL is not affected and does
+  not change: its recorded time is the commit time.
+
+  **If you generated a recovery script with an earlier version** over a
+  range in which two sessions changed the same row within seconds of each
+  other, the script could leave that row on the first session's value
+  without an error. Check those rows, or generate the script again.
+
+  What does not change here: the time range itself is still cut by
+  statement time, so a change that started before `--until` or `--at` and
+  was committed after it is inside the range; `--limit` keeps the newest
+  changes by statement time; `recover-cascade`, `verify`, and the `_snapshot`
+  and `_flashback` schemas of the MySQL port still order by statement time
+  (#2156). The web interface's undo of a table with cascading foreign-key
+  children answers with a `recover-cascade` script, and now warns when the
+  binary log order differs from the one it used.
 - **Snapshots: a row keeps its last change, not the change whose statement
   started last** (#2151). An update of a snapshot keeps, for each row, the
   last change since the previous one. It took "last" from the time recorded
@@ -80,8 +130,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stays wrong until the row changes again or the table is read again from
   the database, so take a full snapshot of the tables where two sessions
   update the same rows. `verify` does not find these rows reliably: it still
-  orders a row's changes by time, as do `recover`, the `_snapshot` schema of
-  the MySQL port and single-row `reconstruct` (#2156). For the same reason
+  orders a row's changes by time, as does the `_snapshot` schema of the
+  MySQL port (#2156). For the same reason
   `verify` can flag a table whose snapshot is right when one of its rows
   changed in one of these shapes; that is not new.
 
