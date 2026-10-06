@@ -608,6 +608,8 @@ jobs:
           grep -q -- '--- PASS: TestIntegrationLatestPerPKThreePlacesAgree2156 ' /tmp/mysql-it.out \
             || { echo "FATAL: the latest-per-key agreement test (MySQL, DuckDB, Go) did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestStreamLoop_unmappableRowReachesThePersistedLedger ' /tmp/mysql-it.out || { echo "FATAL: unmappable-row skip ledger test did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestRefresh_archivedHours_quietTableReadsNoArchive_lateChangeApplied_2152 ' /tmp/mysql-it.out \
+            || { echo "FATAL: the refresh over archived hours (quiet table, late change) did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationLateEventArchivedBeforeTheNextUpdateIsStillFetched ' /tmp/mysql-it.out \
             || { echo "FATAL: the late event archived before the next snapshot update test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestRefresh_afterTheBinlogNumberingStartsOver_refusesUntilAFullSnapshot ' /tmp/mysql-it.out \
