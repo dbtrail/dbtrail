@@ -607,6 +607,17 @@ An S3-only baseline destination is skipped with a warning: a refresh writes Parq
 
 **Where the deltas resume.** The snapshot records the exact binlog coordinate the next reconstruct starts from — chosen as the position of the first transaction committed after `--at`, not derived from `--at` itself. Binlog row events carry the time a statement *executed*, not the time it *committed*, so a cut made on the timestamp alone can drop a transaction from both the snapshot and the following delta window. Cutting on position on both sides of the seam cannot: what one side ends at is exactly what the other starts from.
 
+### When DBTrail is killed in the middle of a snapshot job
+
+A snapshot update or a full read that fails while DBTrail keeps running cleans up after itself. One that dies with the process (killed, or stopped by the kernel's out-of-memory killer) cannot, so since [#2180](https://github.com/dbtrail/dbtrail/issues/2180) the next start does it:
+
+- **Each job writes down what it creates, before it writes into it.** Every folder (the update's snapshot folder, the full read's `dump-…` folder and its staged copy in `BINTRAIL_CONSOLE_BASELINE_STAGING`) is recorded in the run history file (`console-baseline-history.json`, beside the server list), and the job holds a lock on its own file in `baseline-jobs/` beside it for as long as it runs.
+- **The lock is the proof the job is gone.** The operating system releases it when the process exits, however it exits. A job whose lock is still held, by this process or by another DBTrail on the same state folder, is left alone. A process id is not used: a restarted container usually gets the same one.
+- **At startup, DBTrail cleans up after every job whose lock is free.** It removes the folders that job wrote down, records the run in the run history as interrupted (its start, and the last time it touched its files), and logs one warning per job naming what it removed and what it kept.
+- **What it never removes:** a folder the job did not write down (one from an older version, from `bintrail baseline`, or yours), a finished snapshot (`_SUCCESS`; the run is recorded with that snapshot, since it may not have reached the snapshot destination), a snapshot folder with no marker that holds files (every reader takes it as complete), a symbolic link in place of a folder, and anything under a parent folder that now resolves somewhere else than when the job started.
+
+**Not covered:** leftovers from a version before this one (the listing warns about each `_INCOMPLETE` folder once per process; delete it by hand), the snapshot folder of a PostgreSQL full read into a local backup directory (the database chooses its name, so it cannot be written down before it exists), and a partial upload in S3 (excluded from every listing by its `_INCOMPLETE` marker; DBTrail never deletes snapshot data from a bucket). **Retention does not remove these either:** `--baseline-retain` and the keep-newest count never touch an `_INCOMPLETE` snapshot, at any age, and never look at the staging folder.
+
 ### No database connection required
 
 `bintrail baseline` reads only files — it never connects to MySQL. This means you can:

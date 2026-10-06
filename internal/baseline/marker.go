@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // Snapshot completeness markers (#467).
@@ -149,4 +150,23 @@ func SnapshotComplete(snapshotDir string) bool {
 	}
 	// Neither marker: a pre-marker (legacy) snapshot — complete by default.
 	return true
+}
+
+// incompleteWarned is every incomplete snapshot directory a listing has
+// already warned about in this process (#2180).
+var incompleteWarned sync.Map
+
+// WarnIncompleteSnapshotOnce is the listings' "skipping incomplete snapshot"
+// warning, said once per directory per process and at Debug after that.
+// Listings run on every page load and on every statement on the time-travel
+// port, so a per-listing warning for one leftover was hundreds of identical
+// lines an hour, which teaches an operator to stop reading the log. The
+// directory is still skipped every time; only the repetition is quieter. A
+// new leftover is a new path and is still said.
+func WarnIncompleteSnapshotOnce(msg, path string) {
+	if _, seen := incompleteWarned.LoadOrStore(path, struct{}{}); seen {
+		slog.Debug(msg, "path", path)
+		return
+	}
+	slog.Warn(msg, "path", path)
 }

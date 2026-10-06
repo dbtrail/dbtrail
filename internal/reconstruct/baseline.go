@@ -613,7 +613,7 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, []UnreadableSnapsho
 		// Skip a partially-converted snapshot (#467) so the listing doesn't
 		// advertise an incomplete snapshot as the latest baseline.
 		if !baseline.SnapshotComplete(snapDir) {
-			slog.Warn("baseline listing: skipping incomplete snapshot", "path", snapDir)
+			baseline.WarnIncompleteSnapshotOnce("baseline listing: skipping incomplete snapshot", snapDir)
 			// Not listed, and still evidence of who writes here. A local
 			// snapshot is signed as it completes, so this read finds a
 			// signature only on one that was completed and flagged again.

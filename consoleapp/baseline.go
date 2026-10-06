@@ -117,6 +117,10 @@ type baselineSupervisor struct {
 	// restore) so the backups page can report exact durations. Failures to
 	// save are logged, never returned: history must not fail a run.
 	history *console.BaselineRunHistory
+	// jobsDir is where each running job keeps its lock file (#2180),
+	// beside the history whose journal points at them. Empty: no journal,
+	// and nothing a killed job leaves is ever reclaimed. Set with history.
+	jobsDir string
 
 	// produce runs the production half of a full backup (mydumper → Parquet)
 	// and hands the outcome to completeDump: execute in the daemon (set by
@@ -337,6 +341,14 @@ func (s *baselineSupervisor) run(req console.BaselineRequest) {
 	// deeper (inside recoverDumpJob) it would return nil and catch nothing.
 	defer func() { s.recoverDumpJob(req, &own, recover()) }()
 	started := time.Now().UTC()
+	// Journaled for its whole life, upload included (#2180): every folder
+	// it creates is named to the journal as it is made (journalDir), and a
+	// kill leaves them for the next start to clean up.
+	job := s.beginJob(console.BaselineRunDump, req.ServerID, req.ServerName, req.Trigger, req.Why, started)
+	defer job.release()
+	if job != nil {
+		req.Journal = job
+	}
 	if req.Flavor == console.FlavorPostgres {
 		// The PG producer uploads inside executePG and stamps the snapshot
 		// server-side; it keeps the one-phase shape. No index mark either:
@@ -694,7 +706,8 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	if rec.SnapshotTime == "" {
 		rec.Failure = snapshotFailureOf(err, req)
 	}
-	s.recordRun(req.ServerID, req.ServerName, rec, err)
+	job, _ := req.Journal.(*jobRun)
+	s.recordJobRun(job, req.ServerID, req.ServerName, rec, err)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -852,10 +865,21 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 		if err != nil {
 			return dumpOutcome{}, fmt.Errorf("create baseline staging dir: %w", err)
 		}
+		journalDir(req, s.stagingDir, filepath.Base(outputDir))
 		out.staged = true
 		out.cleanup = func() { os.RemoveAll(outputDir) }
 	}
 
+	if !out.staged {
+		// The snapshot directory baseline.Run is about to create, journaled
+		// only when it is vacant now: one that already holds files is not
+		// this run's alone (a same-second CLI run), and a kill must never make
+		// it reclaimable.
+		name := reconstruct.SnapshotDirName(dumpStartedAt)
+		if vacant, verr := reconstruct.SnapshotDirVacant(filepath.Join(outputDir, name)); verr == nil && vacant {
+			journalDir(req, outputDir, name)
+		}
+	}
 	stats, err := baseline.Run(s.ctx, s.dumpBaselineConfig(req, dumpDir, outputDir, dumpStartedAt, ddlMark, eventMark))
 	if err != nil {
 		out.cleanup()
@@ -864,6 +888,13 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	out.stats = stats
 	out.snapDir = filepath.Join(outputDir, reconstruct.SnapshotDirName(dumpStartedAt))
 	return out, nil
+}
+
+// journalDir names a folder the run just created to its journal (#2180).
+func journalDir(req console.BaselineRequest, root, name string) {
+	if req.Journal != nil {
+		req.Journal.Created(root, name)
+	}
 }
 
 // dumpAttempt is one run of mydumper for execute: its own dump folder, start
@@ -882,6 +913,7 @@ func (s *baselineSupervisor) dumpAttempt(req console.BaselineRequest, lockMode b
 	if err != nil {
 		return dumpAttempt{}, fmt.Errorf("create dump dir: %w", err)
 	}
+	journalDir(req, s.stagingDir, filepath.Base(dir))
 	// Captured immediately before invoking mydumper: since this pipeline runs
 	// mydumper and baseline.Run in the same process, we can pass our own UTC
 	// wall-clock time straight through as the snapshot anchor instead of
@@ -1061,6 +1093,7 @@ func (s *baselineSupervisor) executePG(req console.BaselineRequest) (dumpOutcome
 		if err != nil {
 			return dumpOutcome{}, 0, fmt.Errorf("create baseline staging dir: %w", err)
 		}
+		journalDir(req, s.stagingDir, filepath.Base(outputDir))
 		defer os.RemoveAll(outputDir)
 	}
 
@@ -1605,6 +1638,12 @@ func nowStamp() string { return time.Now().UTC().Format(time.RFC3339) }
 // recordRun appends one finished run to the history (no-op without one).
 // finishedAt is stamped here so every producer records the same clock.
 func (s *baselineSupervisor) recordRun(serverID, serverName string, rec console.BaselineRunRecord, runErr error) {
+	s.recordRunFor("", serverID, serverName, rec, runErr)
+}
+
+// recordRunFor is recordRun for the journaled job runID ("" for none): the
+// record and that job's "recorded" mark are one save (#2180).
+func (s *baselineSupervisor) recordRunFor(runID, serverID, serverName string, rec console.BaselineRunRecord, runErr error) {
 	if s.history == nil {
 		return
 	}
@@ -1615,7 +1654,7 @@ func (s *baselineSupervisor) recordRun(serverID, serverName string, rec console.
 		rec.Error = runErr.Error()
 	}
 	rec.RefusedTables, rec.RefusedTablesOmitted = refusedTablesIn(runErr)
-	if err := s.history.Append(rec); err != nil {
+	if err := s.history.FinishJob(runID, rec); err != nil {
 		slog.Warn("baseline history: could not record run (durations for this snapshot will fall back to file timestamps)",
 			"server", serverName, "kind", rec.Kind, "error", err)
 	}
