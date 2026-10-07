@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **The snapshot schedule takes a full read on cost only when an update is
+  clearly dearer** (#2181). The cost rule chose a full read whenever the
+  update was estimated (or measured) to cost more than the last full read,
+  so on a small source where the two were close it alternated update / full
+  read every slot, reading the production source in full every other time.
+  A full read loads the source and an update does not, so now the update
+  must cost more than twice the last full read AND more than 30 seconds
+  longer before a full read is taken on cost; the reason line says so. Both
+  numbers are single measurements that move with the network (an update to
+  S3 is a few dozen requests), and below 30 seconds the gap is at most a
+  tenth of the shortest schedule interval. On the source in the issue, a
+  15 s update against a 6 s full read is now an update; a two-minute update
+  against a 6 s full read is still a full read. Within the margin the age
+  rule still applies (an old previous snapshot still cuts over), and the
+  slot after a full read still runs an update to measure again.
 - **Snapshot uploads to S3 send several files at once, and archive reads stop
   asking where the bucket lives on every table** (#2181). A snapshot update of
   a small source with an S3 destination took 15 to 18 seconds for a few dozen

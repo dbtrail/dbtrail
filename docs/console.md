@@ -745,8 +745,14 @@ saved, shown with the reason `serve` is not running it.
   high-water mark moved since the previous snapshot, against a cost model
   fitted on its last five measured updates, a fixed cost plus a per-event
   rate, and the duration of the last full backup on record) and takes a
-  full backup instead when the update is estimated to cost more and no
-  recorded update that large was done in less time; when one of the three
+  full backup instead when the update is estimated to cost CLEARLY more
+  (more than twice as long AND over 30 seconds longer, #2181) and no
+  recorded update that large was done in less time. The same margin
+  applies when the cheapest recent update alone already costs more than
+  the last full backup. Below the margin the update runs: a full read
+  loads the source and an update does not, so when the two cost about the
+  same the update is preferred (on a small source, 15 s against 6 s is an
+  update; two minutes against 6 s is a full read). When one of the three
   is unknown (no full backup on record, no rate yet because the recent
   updates differ too little to read a per-event cost from, an index that
   did not answer the probe) it cuts over on age alone, once the previous

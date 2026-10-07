@@ -475,11 +475,40 @@ func BackupCutoverAge(interval time.Duration) time.Duration {
 // proven cost is the better evidence.
 const BackupProvenMargin = 1.5
 
+// BackupFullCostFactor and BackupFullCostFloor are the margin by which an
+// update must cost more than the last full read before a full read is taken
+// on cost (#2181): more than BackupFullCostFactor times as long AND more than
+// BackupFullCostFloor longer. A full read loads the production source and an
+// update does not, so when the two cost about the same the update wins.
+//
+// The factor: both sides are single measurements that move with the network
+// (an update on an S3 destination is a few dozen requests, measured at
+// 190 ms each on one install and much less elsewhere), so only a doubling
+// is a difference the next measurement will not erase. The floor: below
+// 30 s the gap is a tenth of the shortest schedule interval (5 minutes) or
+// less, so the update cannot be what makes a slot run late, and reading
+// production to save it is the wrong trade. Measured on that source: 15 s
+// against 6 s (2.5 times, 9 s more) is now an update; a two-minute update
+// against a six-second full read is still a full read.
+const (
+	BackupFullCostFactor = 2.0
+	BackupFullCostFloor  = 30 * time.Second
+)
+
+// backupFullCostMarginWords is the margin, said in the reason line.
+const backupFullCostMarginWords = "more than twice and over 30s longer than"
+
+// updateClearlyDearer reports whether an update of updateSec seconds costs
+// clearly more than a full read of fullSec: past both halves of the margin.
+func updateClearlyDearer(updateSec, fullSec float64) bool {
+	return updateSec > BackupFullCostFactor*fullSec && updateSec > fullSec+BackupFullCostFloor.Seconds()
+}
+
 // CutoverToFull is the #1721 rule: the why for a FULL backup instead of an
 // update, or "" to update. Measured first: with the events since the
 // anchor, a measured fold rate and a last full backup on record, the
-// update is cut over when its estimate exceeds the full backup's duration,
-// and NOT cut over otherwise, however old the anchor (the estimate is the
+// update is cut over when its estimate is clearly dearer than the full
+// backup (updateClearlyDearer, #2181), and NOT cut over otherwise, however old the anchor (the estimate is the
 // better evidence). Only without one of the three does the age rule apply:
 // an anchor older than BackupCutoverAge(interval), counted from when the
 // full backup that published it finished when one did (AnchorFullFinished).
@@ -495,6 +524,7 @@ const BackupProvenMargin = 1.5
 // backup that is one update after each full backup, the price of a model
 // that can notice when they stop.
 func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string {
+	withinMargin := false
 	if w.Events >= 0 && w.FoldRate > 0 && w.LastFull > 0 {
 		// Compared in float seconds: a Duration conversion of a huge
 		// estimate (a tiny rate, a long stop) overflows to a NEGATIVE
@@ -503,17 +533,22 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 		if estSec <= w.LastFull.Seconds() {
 			return ""
 		}
-		if float64(w.Events) <= BackupProvenMargin*float64(w.Proven) {
+		if !updateClearlyDearer(estSec, w.LastFull.Seconds()) {
+			// Dearer, but within the margin (#2181): about the cost of a
+			// full read, which would load the source. Not a full read on
+			// cost; the age rule below still applies, as it does when the
+			// estimate is not trusted.
+			withinMargin = true
+		} else if float64(w.Events) <= BackupProvenMargin*float64(w.Proven) {
 			// Evidence over the model, said so: the two disagree by a
 			// lot here, and which one to believe is what an operator
 			// reading the log would want to know.
 			slog.Info("snapshot schedule: updating although the estimate exceeds the last full read; an update of about this size was done cheaper",
 				"events", w.Events, "estimate", roundSeconds(estSec), "last_full", roundDuration(w.LastFull), "proven_events", w.Proven)
 			return ""
-		}
-		if !w.UnmeasuredSinceFull {
-			return fmt.Sprintf("%s: %s events since the previous snapshot would take about %s to apply at the measured rate, and the last full read took %s",
-				BackupWhyWindowPrefix, formatCount(w.Events), roundSeconds(estSec), roundDuration(w.LastFull))
+		} else if !w.UnmeasuredSinceFull {
+			return fmt.Sprintf("%s: %s events since the previous snapshot would take about %s to apply at the measured rate, %s the last full read, which took %s",
+				BackupWhyWindowPrefix, formatCount(w.Events), roundSeconds(estSec), backupFullCostMarginWords, roundDuration(w.LastFull))
 		}
 	}
 	// No rate, but the fixed cost alone decides (#1736's review): when even
@@ -521,9 +556,10 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 	// no estimate is needed, and the age rule below could never say so on
 	// a server whose every update succeeds (each one renews the anchor).
 	// Only ever a full backup, so not on a model older than the last one.
-	if !w.UnmeasuredSinceFull && w.Events != 0 && w.FoldRate <= 0 && w.FoldFixed > 0 && w.LastFull > 0 && w.FoldFixed > w.LastFull {
-		return fmt.Sprintf("%s: the cheapest recent update took %s, longer than the last full read's %s",
-			BackupWhyWindowPrefix, roundDuration(w.FoldFixed), roundDuration(w.LastFull))
+	if !w.UnmeasuredSinceFull && w.Events != 0 && w.FoldRate <= 0 && w.FoldFixed > 0 && w.LastFull > 0 &&
+		updateClearlyDearer(w.FoldFixed.Seconds(), w.LastFull.Seconds()) {
+		return fmt.Sprintf("%s: the cheapest recent update took %s, %s the last full read, which took %s",
+			BackupWhyWindowPrefix, roundDuration(w.FoldFixed), backupFullCostMarginWords, roundDuration(w.LastFull))
 	}
 	if w.Anchor.IsZero() {
 		return ""
@@ -571,6 +607,10 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 	}
 	if w.LastFull <= 0 {
 		missing = append(missing, "no full read on record")
+	}
+	if len(missing) == 0 && withinMargin && !w.UnmeasuredSinceFull {
+		return fmt.Sprintf("%s: it is %s old and the cut-over is %s (the update is estimated at about the cost of a full read, not %s it, so the estimate does not decide)",
+			BackupWhyStaleAnchorPrefix, roundDuration(age), roundDuration(BackupCutoverAge(interval)), backupFullCostMarginWords)
 	}
 	if len(missing) == 0 {
 		// Everything was measured and the estimate called the update

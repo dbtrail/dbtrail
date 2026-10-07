@@ -26,7 +26,10 @@ func TestCutoverToFull(t *testing.T) {
 		{"nothing known: update", BackupWindow{Events: -1}, 5 * time.Minute, ""},
 		{"measured cheaper than a full read: update", BackupWindow{Anchor: fresh, Events: 100_000, FoldRate: 1000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
 		{"measured dearer than a full read: full", BackupWindow{Anchor: fresh, Events: 17_000_000, FoldRate: 4000, LastFull: 8 * time.Minute}, 5 * time.Minute, "window_measured"},
-		{"the fixed cost alone exceeds the full read: full", BackupWindow{Anchor: fresh, Events: 1, FoldFixed: 9 * time.Minute, FoldRate: 4000, LastFull: 8 * time.Minute}, 5 * time.Minute, "window_measured"},
+		{"the fixed cost alone is clearly dearer than the full read: full", BackupWindow{Anchor: fresh, Events: 1, FoldFixed: 17 * time.Minute, FoldRate: 4000, LastFull: 8 * time.Minute}, 5 * time.Minute, "window_measured"},
+		// #2181: dearer, but within the margin; a full read would load the source.
+		{"the fixed cost a little over the full read: update", BackupWindow{Anchor: fresh, Events: 1, FoldFixed: 9 * time.Minute, FoldRate: 4000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
+		{"within the margin, old anchor: full on age", BackupWindow{Anchor: old, Events: 1, FoldFixed: 9 * time.Minute, FoldRate: 4000, LastFull: 8 * time.Minute}, 5 * time.Minute, "window_age"},
 		// Evidence beats the model: an update this size was done cheaper.
 		{"dearer by the model but proven cheaper: update", BackupWindow{Anchor: fresh, Events: 17_000_000, FoldRate: 4000, Proven: 20_000_000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
 		// A tiny rate and a long stop: the estimate overflows a Duration,
