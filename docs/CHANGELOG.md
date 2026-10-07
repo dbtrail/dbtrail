@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **Rewriting a table's backup file reads the old file in pages** (#2207).
+  The rewrite read the whole previous file with one query, and the DuckDB
+  driver holds a query's whole result in memory, outside DuckDB's own
+  memory limit. On a 20 M row table shaped like sysbench-tpcc's `stock`
+  (1.5 GB file) that read alone took 9.7 GB, and the whole rewrite 11.6 GB
+  (23 GB for two tables at once, which a scheduled update does). The read
+  now asks for one row group (500,000 rows) at a time, in file order: the
+  same rows in the same order into a byte-identical file, and the rewrite
+  of that table peaks at 2.9 GB (5.5 GB for two), in the same time. The
+  read ends on the row count the file declares and then checks that no row
+  lies past it, so a file whose footer under-counts fails instead of
+  losing rows. A table with a column named `file_row_number` is still read
+  in one query, and the log says so.
 - **The snapshot schedule takes a full read on cost only when an update is
   clearly dearer** (#2181). The cost rule chose a full read whenever the
   update was estimated (or measured) to cost more than the last full read,

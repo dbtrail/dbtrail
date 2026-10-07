@@ -2213,23 +2213,98 @@ func mergeSpilledPasses(ctx context.Context, ddb *sql.DB, in mergeCore, emit fun
 	return nil
 }
 
+// scanPageRows is how many baseline rows one query of the merge's read asks
+// for (#2207). duckdb-go runs a query to a materialized result, so one
+// SELECT * over the file held the whole table, decoded, in memory that
+// DuckDB's memory_limit does not cover; on a large table that was most of a
+// rewrite's peak. A page is the writer's row group, so a file this package
+// wrote is read a group at a time. Zero or less reads the file in one query.
+// A variable so tests can page a small file.
+var scanPageRows int64 = ParquetWriterRowGroupSize
+
 // scanBaselinePass streams the local baseline Parquet once and applies
 // changes to it. owns, when set, limits the pass to the baseline rows whose
 // key falls in the groups it marks (a spilled merge, #1107); nil is the whole
 // table. Matched entries are removed from changes.
+//
+// The file is read in pages of scanPageRows rows, in file order, so the rows
+// come out in the order a single query returns them. The read ends on the row
+// count the file's footer declares, never on the rows emitted (the pass filter
+// and deletes emit fewer), and a read that returns another count fails.
 func scanBaselinePass(ctx context.Context, ddb *sql.DB, in mergeCore, changes map[string]*query.ResultRow,
 	owns *[spillBuckets]bool, emit func(map[string]any) error, stats *mergeStats) error {
-	safePath := strings.ReplaceAll(in.LocalBaselinePath, "'", "''")
-	q := fmt.Sprintf("SELECT * FROM parquet_scan('%s')", safePath)
+	lit := "'" + strings.ReplaceAll(in.LocalBaselinePath, "'", "''") + "'"
+	total, paged, err := baselineScanPages(ctx, ddb, lit)
+	if err != nil {
+		return err
+	}
+	if !paged {
+		if scanPageRows > 0 {
+			slog.Warn("reading a backup file in one query, not by pages: the table has a column named file_row_number, so the read is not bounded in memory",
+				"schema", in.Schema, "table", in.Table)
+		}
+		_, err := scanBaselineQuery(ctx, ddb, "SELECT * FROM parquet_scan("+lit+")", in, changes, owns, emit, stats)
+		return err
+	}
+	var read int64
+	for lo := int64(0); lo < total; lo += scanPageRows {
+		q := fmt.Sprintf("SELECT * EXCLUDE (file_row_number) FROM read_parquet(%s, file_row_number = true) "+
+			"WHERE file_row_number >= %d AND file_row_number < %d", lit, lo, lo+scanPageRows)
+		n, err := scanBaselineQuery(ctx, ddb, q, in, changes, owns, emit, stats)
+		if err != nil {
+			return err
+		}
+		read += n
+	}
+	if read != total {
+		return fmt.Errorf("read %d rows of the %d the backup file of %s.%s declares", read, total, in.Schema, in.Table)
+	}
+	// The loop ends on the footer's count, and so does the check above. A
+	// footer that declares fewer rows than its row groups hold would pass
+	// both while the rows past it never reach the rewritten file; a single
+	// query reads by row group and returns them. Ask whether any row lies
+	// beyond the count.
+	var beyond int64
+	if err := ddb.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM read_parquet(%s, file_row_number = true) WHERE file_row_number >= %d", lit, total)).Scan(&beyond); err != nil {
+		return fmt.Errorf("check the end of the backup file of %s.%s: %w", in.Schema, in.Table, err)
+	}
+	if beyond != 0 {
+		return fmt.Errorf("the backup file of %s.%s holds %d rows past the %d its footer declares", in.Schema, in.Table, beyond, total)
+	}
+	return nil
+}
+
+// baselineScanPages says whether the merge reads the file at lit by pages,
+// and the row count its footer declares. A table with a column named
+// file_row_number (any case) is read in one query, unbounded as before: DuckDB
+// refuses the file_row_number option on such a file.
+func baselineScanPages(ctx context.Context, ddb *sql.DB, lit string) (total int64, paged bool, err error) {
+	if scanPageRows <= 0 {
+		return 0, false, nil
+	}
+	if err := ddb.QueryRowContext(ctx, "SELECT num_rows FROM parquet_file_metadata("+lit+")").Scan(&total); err != nil {
+		return 0, false, fmt.Errorf("read the row count of the baseline: %w", err)
+	}
+	var clash int
+	if err := ddb.QueryRowContext(ctx, "SELECT count(*) FROM parquet_schema("+lit+") WHERE lower(name) = 'file_row_number'").Scan(&clash); err != nil {
+		return 0, false, fmt.Errorf("read the columns of the baseline: %w", err)
+	}
+	return total, clash == 0, nil
+}
+
+// scanBaselineQuery runs one query of the baseline read and applies changes
+// to its rows; read is how many rows the query returned.
+func scanBaselineQuery(ctx context.Context, ddb *sql.DB, q string, in mergeCore, changes map[string]*query.ResultRow,
+	owns *[spillBuckets]bool, emit func(map[string]any) error, stats *mergeStats) (read int64, err error) {
 	drows, err := ddb.QueryContext(ctx, q)
 	if err != nil {
-		return fmt.Errorf("duckdb baseline query: %w", err)
+		return 0, fmt.Errorf("duckdb baseline query: %w", err)
 	}
 	defer drows.Close()
 
 	dcols, err := drows.Columns()
 	if err != nil {
-		return fmt.Errorf("duckdb columns: %w", err)
+		return read, fmt.Errorf("duckdb columns: %w", err)
 	}
 
 	scan := make([]any, len(dcols))
@@ -2240,8 +2315,9 @@ func scanBaselinePass(ctx context.Context, ddb *sql.DB, in mergeCore, changes ma
 
 	for drows.Next() {
 		if err := drows.Scan(ptrs...); err != nil {
-			return fmt.Errorf("scan baseline row: %w", err)
+			return read, fmt.Errorf("scan baseline row: %w", err)
 		}
+		read++
 		// zipMap reads the scanned values into a fresh map; database/sql
 		// clones []byte into the *any destinations and reassigns (never
 		// mutates) scan[i] on the next Next(), so the map is safe to retain
@@ -2264,7 +2340,7 @@ func scanBaselinePass(ctx context.Context, ddb *sql.DB, in mergeCore, changes ma
 		if !in.PGTextPK {
 			var err error
 			if pkMap, err = canonicalizePKMap(rowMap, in.PKCols); err != nil {
-				return fmt.Errorf("canonicalize baseline PK for %s.%s: %w", in.Schema, in.Table, err)
+				return read, fmt.Errorf("canonicalize baseline PK for %s.%s: %w", in.Schema, in.Table, err)
 			}
 		}
 		pk := event.BuildPKValues(in.PKCols, pkMap)
@@ -2286,7 +2362,7 @@ func scanBaselinePass(ctx context.Context, ddb *sql.DB, in mergeCore, changes ma
 		// row itself; above the ownership skip for that reason.
 		if alt, ok := altFixedBinaryPK(in.PKCols, pkMap); ok && (owns == nil || owns[spillBucket(alt)]) {
 			if ev, pending := changes[alt]; pending {
-				return pkSpellingJoinErr(in.Schema, in.Table, pk, alt, ev.EventType)
+				return read, pkSpellingJoinErr(in.Schema, in.Table, pk, alt, ev.EventType)
 			}
 		}
 		if owns != nil && !owns[spillBucket(pk)] {
@@ -2310,21 +2386,21 @@ func scanBaselinePass(ctx context.Context, ddb *sql.DB, in mergeCore, changes ma
 					continue
 				}
 				if err := emit(ev.RowAfter); err != nil {
-					return err
+					return read, err
 				}
 				stats.UpdatesApplied++
 			}
 		} else {
 			if err := emit(rowMap); err != nil {
-				return err
+				return read, err
 			}
 			stats.BaselineRows++
 		}
 	}
 	if err := drows.Err(); err != nil {
-		return fmt.Errorf("iterate baseline rows: %w", err)
+		return read, fmt.Errorf("iterate baseline rows: %w", err)
 	}
-	return nil
+	return read, nil
 }
 
 // emitLeftoverChanges appends the events for PKs that weren't in the baseline
