@@ -329,3 +329,35 @@ func TestPublishWithTableDelta_copiesAnUnchangedS3Table(t *testing.T) {
 		t.Fatalf("copies=%v compacted=%q, want the base and its pair copied", rep.S3Copies, rep.DeltaCompacted)
 	}
 }
+
+// CI over MinIO caught it: the fold's footer read went through the S3
+// integrity pass, which streams the WHOLE object to hash it, so an unchanged
+// table was read in full before it was copied. On a run that copies, the
+// footer is read alone; a table that is then folded is verified where it is
+// downloaded (materializeBaselineLocalIn), and a copied one keeps the source's
+// digest, so its first read still checks the bytes.
+func TestReadBaselineMeta_aCopyingRunReadsOnlyTheFooter_2212(t *testing.T) {
+	prevV, prevF := readMetaVerified, readMetaFooter
+	t.Cleanup(func() { readMetaVerified, readMetaFooter = prevV, prevF })
+	var verified, footer []string
+	readMetaVerified = func(_ context.Context, p string) (baseline.DumpMetadata, error) {
+		verified = append(verified, p)
+		return baseline.DumpMetadata{}, nil
+	}
+	readMetaFooter = func(_ context.Context, p string) (baseline.DumpMetadata, error) {
+		footer = append(footer, p)
+		return baseline.DumpMetadata{}, nil
+	}
+	src := prevS3 + "shop/orders.parquet"
+	ctx := context.Background()
+	_, _ = readBaselineMeta(ctx, FullTableConfig{S3CopyUnchangedTo: destS3}, src)
+	if len(footer) != 1 || len(verified) != 0 {
+		t.Fatalf("copying run: footer=%v verified=%v, want the footer alone", footer, verified)
+	}
+	footer, verified = nil, nil
+	_, _ = readBaselineMeta(ctx, FullTableConfig{}, src)
+	_, _ = readBaselineMeta(ctx, FullTableConfig{S3CopyUnchangedTo: destS3}, "/b/2026-10-07T11-00-00Z/shop/orders.parquet")
+	if len(footer) != 0 || len(verified) != 2 {
+		t.Fatalf("other runs: footer=%v verified=%v, want the verified read", footer, verified)
+	}
+}

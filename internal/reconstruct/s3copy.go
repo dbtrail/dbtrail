@@ -67,6 +67,30 @@ var (
 	listS3TableDelta = baseline.ListTableDelta
 )
 
+// readMetaVerified and readMetaFooter are the two ways the fold reads a
+// table file's metadata, indirected for tests.
+var (
+	readMetaVerified = baseline.ReadParquetMetadataAny
+	readMetaFooter   = baseline.ReadParquetMetadataFooter
+)
+
+// readBaselineMeta reads the previous table file's metadata for a fold. On a
+// run that may copy unchanged tables inside S3, an s3:// file's footer is
+// read ALONE, without the integrity pass that streams the whole object to
+// hash it: that pass is exactly the read of the table's bytes the copy exists
+// to avoid (caught in CI over MinIO). Nothing is trusted unchecked for long:
+// a table that is then folded is verified where it is downloaded
+// (materializeBaselineLocalIn validates before the DuckDB copy), and a copied
+// one carries its source's digest into the new manifest, so its first read
+// hashes it. A rotted footer can at worst steer this run to copy a file whose
+// own read will then fail on that digest, never certify it afresh.
+func readBaselineMeta(ctx context.Context, cfg FullTableConfig, path string) (baseline.DumpMetadata, error) {
+	if cfg.S3CopyUnchangedTo != "" && strings.HasPrefix(path, "s3://") {
+		return readMetaFooter(ctx, path)
+	}
+	return readMetaVerified(ctx, path)
+}
+
 // s3CopyEligible reports whether a table may be published by a copy inside
 // S3, before any per-file check. why is set only when the answer is a
 // surprise an operator should read (another bucket): the other refusals are

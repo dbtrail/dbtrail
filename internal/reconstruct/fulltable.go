@@ -966,7 +966,7 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 			tableName := metaReport.Schema + "." + metaReport.Table
 			baselinePath, _, _, perr := FindBaseline(ctx, cfg.BaselineSrc, metaReport.Schema, metaReport.Table, cfg.At)
 			if perr == nil {
-				bmeta, merr := baseline.ReadParquetMetadataAny(ctx, baselinePath)
+				bmeta, merr := readBaselineMeta(ctx, cfg, baselinePath)
 				if merr == nil {
 					if err := WriteMetadataFile(cfg.OutputDir, cfg.At,
 						bmeta.GTIDSet, bmeta.BinlogFile, bmeta.BinlogPos); err != nil {
@@ -1234,7 +1234,7 @@ func ReconstructTable(
 		"path", baselinePath, "snapshot_time", snapshotTime.UTC().Format(time.RFC3339))
 
 	// ── 2. Read baseline Parquet metadata ──────────────────────────────────
-	bmeta, err := baseline.ReadParquetMetadataAny(ctx, baselinePath)
+	bmeta, err := readBaselineMeta(ctx, cfg, baselinePath)
 	if err != nil {
 		return nil, fmt.Errorf("read baseline metadata: %w", err)
 	}
