@@ -853,8 +853,11 @@ func emitWindowChanges(in mergeInput, cols []baseline.Column, changes map[string
 // baseline. DuckDB re-encodes; that is the same trip an S3 baseline already
 // makes through materializeBaselineLocal before every merge, so the merge sees
 // nothing new.
-func materializeBaseWithDelta(ctx context.Context, basePath string, d *tableDelta, tuning duckdbutil.Tuning) (string, func(), error) {
-	tmpDir, err := os.MkdirTemp("", "bintrail-compact-*")
+//
+// dir is where the temporary file goes (FullTableConfig.DownloadDir); "" is
+// the system's temporary directory.
+func materializeBaseWithDelta(ctx context.Context, basePath string, d *tableDelta, tuning duckdbutil.Tuning, dir string) (string, func(), error) {
+	tmpDir, err := os.MkdirTemp(dir, "bintrail-compact-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("mkdir temp: %w", err)
 	}
@@ -1185,9 +1188,9 @@ func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInp
 		if err := baselineintegrity.ValidateLocalFile(p.basePath); err != nil {
 			return err
 		}
-		in.LocalBaselinePath, cleanup, err = materializeBaseWithDelta(ctx, p.basePath, p.prev, p.cfg.DuckDBTuning)
+		in.LocalBaselinePath, cleanup, err = materializeBaseWithDelta(ctx, p.basePath, p.prev, p.cfg.DuckDBTuning, p.cfg.DownloadDir)
 	} else {
-		in.LocalBaselinePath, cleanup, err = materializeBaselineLocal(ctx, p.basePath, p.cfg.DuckDBTuning)
+		in.LocalBaselinePath, cleanup, err = materializeBaselineLocalIn(ctx, p.basePath, p.cfg.DuckDBTuning, p.cfg.DownloadDir)
 	}
 	if err != nil {
 		return fmt.Errorf("materialize baseline: %w", err)

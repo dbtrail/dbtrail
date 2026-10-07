@@ -60,9 +60,10 @@ const (
 // sanity bound a few ticks above the loop's one-minute clock, not a
 // protection. It was 15m until #1620, when a server that folds from S3
 // wanted the cadence of a reporting copy. The floor does NOT stop the two
-// costs that number once guarded against: a server with an S3 destination
-// and no local backup directory takes a FULL backup every slot, one with no
-// previous backup takes one on its first (ChooseBackupMethod), and a
+// costs that number once guarded against: a server with no previous backup
+// takes a FULL backup on its first slot (ChooseBackupMethod), a server whose
+// snapshots go only to S3 rewrites and re-uploads every table at every slot
+// (#2212), and a
 // local-only server keeps every snapshot it publishes. All are said out loud instead, at save and
 // at boot (warnBackupScheduleRate and its twin in backup_schedule_api.go)
 // and on the card as the 30-day count, so the operator reads the rate before
@@ -351,6 +352,14 @@ type BackupScheduleGates struct {
 	// one another server writes too (#1684, Registry.WriteRefusal). It beats
 	// every producer, the update included. Nil: no such check (a test).
 	WriteRefusal func(ServerEntry) error
+	// StagingRefusal is why this daemon cannot build an update for a server
+	// whose snapshots go only to S3 (#2212): such an update is written into
+	// a folder of its own under the staging folder
+	// (BINTRAIL_CONSOLE_BASELINE_STAGING), uploaded, and deleted, and this
+	// says that folder cannot be used. Empty: it can. Read when the gates
+	// are built (BackupScheduleReporter.StagedUpdates), never probed here,
+	// so the checker stays free of IO.
+	StagingRefusal string
 }
 
 // writeRefused applies gates.WriteRefusal, nil-safe.
@@ -706,7 +715,9 @@ func FullBackupPossible(e ServerEntry, gates BackupScheduleGates) error {
 // one, so unchanged tables can be carried forward by hard link.
 //
 // The OUTPUT stays local whatever this returns: the fold writes Parquet to a
-// filesystem, and the upload is a separate step afterwards.
+// filesystem (the local directory, or a run folder under the staging folder
+// for a server with S3 only, #2212), and the upload is a separate step
+// afterwards.
 func BaselineFoldSource(e ServerEntry) string {
 	if e.BaselineS3 != "" {
 		return e.BaselineS3
@@ -716,16 +727,23 @@ func BaselineFoldSource(e ServerEntry) string {
 
 // rebuildPossible reports whether a rebuild from the change history can be
 // attempted for e (the fold itself may still refuse), and why not.
-func rebuildPossible(e ServerEntry) error {
+//
+// The fold WRITES Parquet to a filesystem. A server with a local folder
+// writes there; a server whose snapshots go only to S3 writes into a folder
+// of its own under the staging folder, which is uploaded and then deleted
+// (#2212). Before that, an S3-only server could only ever be read in full.
+func rebuildPossible(e ServerEntry, gates BackupScheduleGates) error {
 	if e.DSN == "" {
 		return errors.New(BackupWhyNoIndex)
 	}
 	if e.BaselineDir == "" {
-		// The fold WRITES Parquet to a filesystem, so it needs the server's
-		// own local directory. Its READ may be remote (see BaselineFoldSource);
-		// only the write is the constraint. The refresh loop refuses on the
-		// same condition.
-		return errors.New(BackupWhyNoLocalDir)
+		if e.BaselineS3 == "" {
+			// No destination at all: nothing to write into, here or anywhere.
+			return errors.New(BackupWhyNoLocalDir)
+		}
+		if gates.StagingRefusal != "" {
+			return errors.New(BackupWhyNoStagingPrefix + "; " + gates.StagingRefusal)
+		}
 	}
 	return nil
 }
@@ -737,9 +755,18 @@ func rebuildPossible(e ServerEntry) error {
 // full. The first two are permanent until a setting changes, which is why
 // the page turns them into the setting to change.
 const (
-	BackupWhyNoIndex     = "this server has no index connection to read the recorded changes from"
-	BackupWhyNoLocalDir  = "an update from the recorded changes needs a local snapshot directory"
-	BackupWhyFirstBackup = "no previous snapshot to update"
+	BackupWhyNoIndex = "this server has no index connection to read the recorded changes from"
+	// BackupWhyNoLocalDir is kept for run records written before #2212,
+	// when a server whose snapshots go only to S3 could not be updated at
+	// all. A current daemon records it only for a server with no snapshot
+	// location of any kind.
+	BackupWhyNoLocalDir = "an update from the recorded changes needs a local snapshot directory"
+	// BackupWhyNoStagingPrefix starts the reason a server whose snapshots go
+	// only to S3 is read in full: its update is built in the staging folder,
+	// and that folder cannot be used (the rest names why). A setting, like
+	// the two above, so every run is a full read until it is fixed.
+	BackupWhyNoStagingPrefix = "an update for a server whose snapshots go only to S3 is built in the staging folder, which cannot be used"
+	BackupWhyFirstBackup     = "no previous snapshot to update"
 	// BackupWhyUnreadablePrefix starts the reason for a full backup taken
 	// because the previous one could not be read (the rest names the error).
 	BackupWhyUnreadablePrefix = "the previous snapshot could not be read"
@@ -855,6 +882,8 @@ func BackupWhyCode(why string) string {
 		return "no_index"
 	case why == BackupWhyNoLocalDir:
 		return "no_local_dir"
+	case strings.HasPrefix(why, BackupWhyNoStagingPrefix):
+		return "no_staging"
 	case why == BackupWhyFirstBackup:
 		return "first_backup"
 	case strings.HasPrefix(why, BackupWhyUnreadablePrefix):
@@ -900,7 +929,7 @@ func CheckBackupSchedule(e ServerEntry, sched BackupSchedule, gates BackupSchedu
 	if fullErr == nil {
 		return nil
 	}
-	if rebuildErr := rebuildPossible(e); rebuildErr != nil {
+	if rebuildErr := rebuildPossible(e, gates); rebuildErr != nil {
 		return notRunnable(strings.TrimSuffix(fullErr.Error(), onPage(PageSnapshots)) + "; " + rebuildErr.Error() + onPage(PageSnapshots))
 	}
 	// Only a rebuild is possible. That is a runnable schedule (it is what
@@ -942,8 +971,9 @@ var newestSnapshot = reconstruct.NewestSnapshot
 // ChooseBackupMethod decides how the next scheduled run for e will be made,
 // and why, on a daemon with these gates. The rule, in order:
 //
-//   - a server an update cannot serve (no index DSN, no local backup
-//     directory) gets a FULL backup, with that refusal as the why;
+//   - a server an update cannot serve (no index DSN, no snapshot location,
+//     or S3 only with a staging folder that cannot be used) gets a FULL
+//     backup, with that refusal as the why;
 //   - a server with no previous backup gets a FULL backup: there is nothing
 //     to update. A directory that does not exist yet is that case; one that
 //     cannot be READ is its own error, never "no snapshot yet". The previous
@@ -974,7 +1004,7 @@ func ChooseBackupMethodAt(ctx context.Context, e ServerEntry, gates BackupSchedu
 		return BackupMethodFull, "", werr
 	}
 	fullErr := FullBackupPossible(e, gates)
-	rebuildErr := rebuildPossible(e)
+	rebuildErr := rebuildPossible(e, gates)
 	if rebuildErr != nil {
 		if fullErr != nil {
 			return BackupMethodFull, "", fmt.Errorf("%v; %v", fullErr, rebuildErr)
@@ -986,11 +1016,10 @@ func ChooseBackupMethodAt(ctx context.Context, e ServerEntry, gates BackupSchedu
 	// (#1539): the fold reads the previous snapshot straight from the s3://
 	// source, writes the new one into the server's local directory, and the
 	// scheduled path uploads it to the same destination a full backup would.
-	//
-	// The local directory is still REQUIRED and rebuildPossible above still
-	// refuses without one, because the fold writes Parquet to a filesystem. On
-	// an S3-only server that refusal is what keeps the old behaviour, and its
-	// message is what tells the operator which setting unlocks the cheap path.
+	// A server with NO local directory writes it into a folder of its own
+	// under the staging folder instead, uploads it, and deletes the folder
+	// (#2212); rebuildPossible above refuses only when that folder cannot be
+	// used, and its message names why.
 	source := BaselineFoldSource(e)
 	anchor, tables, listErr := newestSnapshot(ctx, source)
 	if listErr != nil && errors.Is(listErr, fs.ErrNotExist) {
@@ -1138,4 +1167,8 @@ type BackupScheduleReporter interface {
 	// WindowProbe measures what an update would fold (#1721), for
 	// ChooseBackupMethod; nil when this process measures nothing.
 	WindowProbe() BackupWindowProbe
+	// StagedUpdates reports why the update of a server whose snapshots go
+	// only to S3 cannot be built in this daemon's staging folder (#2212):
+	// nil when it can. Becomes BackupScheduleGates.StagingRefusal.
+	StagedUpdates() error
 }

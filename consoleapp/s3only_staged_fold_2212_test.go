@@ -1,0 +1,482 @@
+package consoleapp
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
+)
+
+// #2212: a server whose snapshots go only to S3 (a bucket, no Local folder)
+// gets scheduled UPDATES. The update is written into a folder of its own
+// under the staging folder (<staging>/refresh-*/<snapshot>), uploaded to the
+// bucket, and the run folder is deleted, whatever the outcome.
+//
+// The edge cases, written down before the code:
+//   - two S3-only servers folding at once: distinct run folders, both gone after;
+//   - a crash mid-run: the run folder is journaled, and the boot reclaim removes it;
+//   - an upload failure: folder deleted, run failed, message promises no local copy,
+//     and no full read stands in for it (it would hit the same bucket);
+//   - the staging disk full: a disk refusal, not a crash, folder deleted;
+//   - a server with BOTH a Local folder and S3: unchanged, the local path;
+//   - S3-only with no previous snapshot: still a full read (internal/console tests);
+//   - staging unusable: a refusal naming the folder, never a silent full read.
+
+// stagedFoldStubs answers the bucket listing with one table and records what
+// the loop uploaded. Safe for concurrent runs, unlike stubS3Fold.
+type stagedFoldStubs struct {
+	mu      sync.Mutex
+	uploads []uploadCall
+	// seenAtUpload: whether the snapshot directory existed when the upload
+	// was asked for, per call.
+	seenAtUpload []bool
+}
+
+func stubStagedFold(t *testing.T, uploadErr error) *stagedFoldStubs {
+	t.Helper()
+	stubGateReads(t)
+	stubBucketListing(t)
+	realList, realUpload := newestSnapshotTables, uploadSnapshot
+	t.Cleanup(func() { newestSnapshotTables, uploadSnapshot = realList, realUpload })
+	newestSnapshotTables = func(ctx context.Context, src string) (time.Time, []string, error) {
+		if !strings.HasPrefix(src, "s3://") {
+			return realList(ctx, src)
+		}
+		return time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC), []string{"shop.orders"}, nil
+	}
+	s := &stagedFoldStubs{}
+	uploadSnapshot = func(_ context.Context, outputDir, dest, _ string, _ bool) (int, error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.uploads = append(s.uploads, uploadCall{outputDir, dest})
+		s.seenAtUpload = append(s.seenAtUpload, dirExists(outputDir))
+		if uploadErr != nil {
+			return 0, uploadErr
+		}
+		return 1, nil
+	}
+	return s
+}
+
+func s3OnlyRequest(id string) refreshRequest {
+	return refreshRequest{ServerID: id, ServerName: id, IndexDSN: "d", BaselineS3: "s3://bucket/" + id + "/"}
+}
+
+func stagingEntries(t *testing.T, staging string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// The happy path, and the shape every other case starts from.
+func TestStagedFold_S3OnlyServerUpdatesThroughTheStagingFolder(t *testing.T) {
+	stubs := stubStagedFold(t, nil)
+	f := newJobsFixture(t)
+	sup := f.supervisor(t)
+	var cfgSeen reconstruct.FullTableConfig
+	prev := foldTables
+	t.Cleanup(func() { foldTables = prev })
+	foldTables = func(_ context.Context, cfg reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		cfgSeen = cfg
+		writeSnapshotFiles(t, filepath.Join(cfg.OutputDir, reconstruct.SnapshotDirName(cfg.At)), baseline.SuccessMarker)
+		return nil, nil, nil
+	}
+	req := s3OnlyRequest("s")
+	sup.refreshes["s"] = &console.BaselineStatus{State: "running"}
+	sup.runRefresh(req, refreshAt, time.Minute)
+
+	st := sup.RefreshStatus("s")
+	if st.State != "succeeded" || !st.Published {
+		t.Fatalf("status = %+v, want a published success", st)
+	}
+	if cfgSeen.BaselineSrc != "s3://bucket/s/" {
+		t.Errorf("the fold read %q, want the bucket", cfgSeen.BaselineSrc)
+	}
+	if filepath.Dir(cfgSeen.OutputDir) != f.staging || !isStagingName(filepath.Base(cfgSeen.OutputDir)) ||
+		!strings.HasPrefix(filepath.Base(cfgSeen.OutputDir), stagedRunPrefix) {
+		t.Fatalf("the fold wrote into %q, want a %s* folder directly under the staging folder %s", cfgSeen.OutputDir, stagedRunPrefix, f.staging)
+	}
+	// The download lands on the run folder's disk, beside the snapshot and
+	// never inside it: everything in the snapshot directory is uploaded.
+	snapDir := filepath.Join(cfgSeen.OutputDir, reconstruct.SnapshotDirName(refreshAt))
+	if cfgSeen.DownloadDir != cfgSeen.OutputDir {
+		t.Errorf("DownloadDir = %q, want the run folder %q", cfgSeen.DownloadDir, cfgSeen.OutputDir)
+	}
+	if rel, err := filepath.Rel(snapDir, cfgSeen.DownloadDir); err == nil && !strings.HasPrefix(rel, "..") {
+		t.Errorf("DownloadDir %q is inside the snapshot directory %q, so it would be uploaded", cfgSeen.DownloadDir, snapDir)
+	}
+	if cfgSeen.SpaceCheck == nil {
+		t.Error("the staged fold runs without a disk check")
+	}
+	stamp := reconstruct.SnapshotDirName(refreshAt)
+	if len(stubs.uploads) != 1 || stubs.uploads[0] != (uploadCall{snapDir, "s3://bucket/s/" + stamp}) || !stubs.seenAtUpload[0] {
+		t.Fatalf("uploads = %+v (present %v), want exactly %s -> s3://bucket/s/%s", stubs.uploads, stubs.seenAtUpload, snapDir, stamp)
+	}
+	if left := stagingEntries(t, f.staging); len(left) != 0 {
+		t.Fatalf("the staging folder still holds %v after the run", left)
+	}
+	recs := sup.history.List("s")
+	if len(recs) != 1 || recs[0].Error != "" || recs[0].SnapshotTime == "" || recs[0].Uploaded != 1 {
+		t.Fatalf("records = %+v, want one published, uploaded run", recs)
+	}
+}
+
+// Two S3-only servers share one staging folder and fold at the same time:
+// each writes into its own run folder, and both are gone afterwards.
+func TestStagedFold_twoServersAtOnceUseDistinctRunFolders(t *testing.T) {
+	stubs := stubStagedFold(t, nil)
+	f := newJobsFixture(t)
+	sup := f.supervisor(t)
+	var mu sync.Mutex
+	outs := map[string]string{}
+	both := make(chan struct{})
+	var arrived sync.WaitGroup
+	arrived.Add(2)
+	go func() { arrived.Wait(); close(both) }()
+	prev := foldTables
+	t.Cleanup(func() { foldTables = prev })
+	foldTables = func(_ context.Context, cfg reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		mu.Lock()
+		outs[cfg.BaselineSrc] = cfg.OutputDir
+		mu.Unlock()
+		writeSnapshotFiles(t, filepath.Join(cfg.OutputDir, reconstruct.SnapshotDirName(cfg.At)), baseline.SuccessMarker)
+		arrived.Done()
+		select { // both folds are inside their run folders at once
+		case <-both:
+		case <-time.After(10 * time.Second):
+			return nil, nil, errors.New("the other fold never started")
+		}
+		return nil, nil, nil
+	}
+	var done sync.WaitGroup
+	for _, id := range []string{"a", "b"} {
+		sup.refreshes[id] = &console.BaselineStatus{State: "running"}
+	}
+	for _, id := range []string{"a", "b"} {
+		done.Add(1)
+		go func() {
+			defer done.Done()
+			sup.runRefresh(s3OnlyRequest(id), refreshAt, time.Minute)
+		}()
+	}
+	done.Wait()
+
+	a, b := outs["s3://bucket/a/"], outs["s3://bucket/b/"]
+	if a == "" || b == "" || a == b {
+		t.Fatalf("run folders = %q and %q, want two distinct ones", a, b)
+	}
+	for _, d := range []string{a, b} {
+		if filepath.Dir(d) != f.staging || !isStagingName(filepath.Base(d)) {
+			t.Errorf("run folder %q is not a staging-named folder under %s", d, f.staging)
+		}
+	}
+	for _, id := range []string{"a", "b"} {
+		if st := sup.RefreshStatus(id); st.State != "succeeded" {
+			t.Errorf("%s: status = %+v", id, st)
+		}
+	}
+	if len(stubs.uploads) != 2 {
+		t.Errorf("uploads = %+v, want one per server", stubs.uploads)
+	}
+	if left := stagingEntries(t, f.staging); len(left) != 0 {
+		t.Fatalf("the staging folder still holds %v", left)
+	}
+}
+
+// A crash mid-run: while the fold runs, the journal names the run folder
+// (and not the snapshot inside it, which goes with it). A killed run's folder
+// is removed by the boot reclaim.
+func TestStagedFold_aKilledRunsFolderIsReclaimedAtBoot(t *testing.T) {
+	stubStagedFold(t, nil)
+	f := newJobsFixture(t)
+	sup := f.supervisor(t)
+	var during []console.BaselineJob
+	var out string
+	prev := foldTables
+	t.Cleanup(func() { foldTables = prev })
+	foldTables = func(_ context.Context, cfg reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		during = sup.history.Jobs()
+		out = cfg.OutputDir
+		return nil, nil, errors.New("refused")
+	}
+	sup.refreshes["s"] = &console.BaselineStatus{State: "running"}
+	sup.runRefresh(s3OnlyRequest("s"), refreshAt, time.Minute)
+	if len(during) != 1 || len(during[0].Dirs) != 1 || during[0].Dirs[0].Root != f.staging || during[0].Dirs[0].Name != filepath.Base(out) {
+		t.Fatalf("journal during the fold = %+v, want exactly the run folder %s", during, out)
+	}
+
+	// The kill itself: a journaled run folder with a partial snapshot in it,
+	// and the lock released by the kernel.
+	j := sup.beginJob(console.BaselineRunRefresh, "s", "s", console.BaselineRunTriggerScheduled, "", time.Now())
+	run := filepath.Join(f.staging, stagedRunPrefix+"123")
+	mkdirs(t, run)
+	j.Created(f.staging, filepath.Base(run))
+	writeSnapshotFiles(t, filepath.Join(run, reconstruct.SnapshotDirName(refreshAt)), baseline.IncompleteMarker)
+	abandon(t, j)
+
+	f.supervisor(t).reclaimInterruptedJobs()
+	if exists(run) {
+		t.Fatalf("the killed run's folder %s survived the boot reclaim", run)
+	}
+}
+
+// The upload fails: the run is FAILED, nothing is kept (there is no local
+// folder to keep it in), and the message promises nothing about a local copy.
+func TestStagedFold_uploadFailureDeletesTheRunAndPromisesNoLocalCopy(t *testing.T) {
+	stubs := stubStagedFold(t, errors.New("AccessDenied: s3:PutObject"))
+	f := newJobsFixture(t)
+	sup := f.supervisor(t)
+	injectFold(t, 0, nil)
+	sup.refreshes["s"] = &console.BaselineStatus{State: "running"}
+	sup.runRefresh(s3OnlyRequest("s"), refreshAt, time.Minute)
+
+	st := sup.RefreshStatus("s")
+	t.Logf("LastError: %s", st.LastError)
+	if st.State != "failed" || st.Published || !st.UploadFailed {
+		t.Fatalf("status = %+v, want failed, not published, upload failed", st)
+	}
+	if len(stubs.uploads) != 1 || !stubs.seenAtUpload[0] {
+		t.Fatalf("uploads = %+v, want one attempt of an existing snapshot", stubs.uploads)
+	}
+	for _, promise := range []string{"written to", "next full read", "sweeps", "local snapshot"} {
+		if strings.Contains(st.LastError, promise) {
+			t.Errorf("the message promises a kept copy (%q): %s", promise, st.LastError)
+		}
+	}
+	for _, want := range []string{"AccessDenied", "s3://bucket/s/" + reconstruct.SnapshotDirName(refreshAt), "deleted", "newest snapshot in the bucket"} {
+		if !strings.Contains(st.LastError, want) {
+			t.Errorf("the message does not say %q: %s", want, st.LastError)
+		}
+	}
+	if left := stagingEntries(t, f.staging); len(left) != 0 {
+		t.Fatalf("the staging folder still holds %v", left)
+	}
+	recs := sup.history.List("s")
+	if len(recs) != 1 || recs[0].SnapshotTime != "" || recs[0].Error == "" {
+		t.Fatalf("records = %+v, want one failed run naming no snapshot", recs)
+	}
+	if fullReadStandsIn(st) {
+		t.Error("a full read would stand in for this upload failure, and it uploads to the same bucket")
+	}
+}
+
+// The staging disk is full: the fold's own disk check refuses (a disk
+// refusal, which the schedule never answers with a full read), and the run
+// folder is still deleted. The check measures the staging folder's disk.
+func TestStagedFold_aFullStagingDiskIsARefusalNotACrash(t *testing.T) {
+	stubs := stubStagedFold(t, nil)
+	f := newJobsFixture(t)
+	sup := f.supervisor(t)
+	var measured []string
+	prevDisk := diskSpaceFn
+	t.Cleanup(func() { diskSpaceFn = prevDisk })
+	diskSpaceFn = func(dir string) (uint64, uint64, error) {
+		measured = append(measured, dir)
+		return 0, 100 << 30, nil
+	}
+	prev := foldTables
+	t.Cleanup(func() { foldTables = prev })
+	foldTables = func(_ context.Context, cfg reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		snap := filepath.Join(cfg.OutputDir, reconstruct.SnapshotDirName(cfg.At))
+		writeSnapshotFiles(t, snap, baseline.IncompleteMarker)
+		err := cfg.SpaceCheck(snap, 10<<20)
+		return nil, []reconstruct.TableFailure{{Schema: "shop", Table: "orders", Err: err}}, err
+	}
+	sup.refreshes["s"] = &console.BaselineStatus{State: "running"}
+	sup.runRefresh(s3OnlyRequest("s"), refreshAt, time.Minute)
+
+	st := sup.RefreshStatus("s")
+	t.Logf("LastError: %s", st.LastError)
+	if st.State != "failed" || !st.DiskRefused || st.Published {
+		t.Fatalf("status = %+v, want a failed disk refusal", st)
+	}
+	if len(measured) == 0 || !strings.HasPrefix(measured[0], f.staging) {
+		t.Fatalf("the disk check measured %v, want a folder under the staging folder %s", measured, f.staging)
+	}
+	if len(stubs.uploads) != 0 {
+		t.Errorf("uploaded %+v after a refusal", stubs.uploads)
+	}
+	if left := stagingEntries(t, f.staging); len(left) != 0 {
+		t.Fatalf("the staging folder still holds %v", left)
+	}
+	if fullReadStandsIn(st) {
+		t.Error("a full read would stand in for a disk refusal")
+	}
+}
+
+// A server with BOTH a Local folder and a bucket is untouched: it folds into
+// its own folder, keeps the snapshot there, and the staging folder is not used.
+func TestStagedFold_aServerWithALocalFolderKeepsTheLocalPath(t *testing.T) {
+	stubs := stubStagedFold(t, nil)
+	f := newJobsFixture(t)
+	sup := f.supervisor(t)
+	local := t.TempDir()
+	var cfgSeen reconstruct.FullTableConfig
+	prev := foldTables
+	t.Cleanup(func() { foldTables = prev })
+	foldTables = func(_ context.Context, cfg reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		cfgSeen = cfg
+		writeSnapshotFiles(t, filepath.Join(cfg.OutputDir, reconstruct.SnapshotDirName(cfg.At)), baseline.SuccessMarker)
+		return nil, nil, nil
+	}
+	req := s3OnlyRequest("s")
+	req.BaselineDir = local
+	sup.refreshes["s"] = &console.BaselineStatus{State: "running"}
+	sup.runRefresh(req, refreshAt, time.Minute)
+
+	if cfgSeen.OutputDir != local || cfgSeen.DownloadDir != "" {
+		t.Fatalf("OutputDir = %q, DownloadDir = %q, want %q and the system temporary directory", cfgSeen.OutputDir, cfgSeen.DownloadDir, local)
+	}
+	snap := filepath.Join(local, reconstruct.SnapshotDirName(refreshAt))
+	if !dirExists(snap) {
+		t.Error("the local snapshot was not kept")
+	}
+	if len(stubs.uploads) != 1 || stubs.uploads[0].outputDir != snap {
+		t.Errorf("uploads = %+v, want the local snapshot", stubs.uploads)
+	}
+	if left := stagingEntries(t, f.staging); len(left) != 0 {
+		t.Fatalf("the staging folder was used: %v", left)
+	}
+}
+
+// The staging folder cannot be used: the run fails with a reason naming it,
+// uploads nothing, and writes nothing anywhere else (no relative path under
+// the working directory, which is what an empty output folder would mean).
+func TestStagedFold_anUnusableStagingFolderFailsTheRunAndSaysWhy(t *testing.T) {
+	stubs := stubStagedFold(t, nil)
+	f := newJobsFixture(t)
+	sup := f.supervisor(t)
+	blocker := filepath.Join(t.TempDir(), "staging-is-a-file")
+	writeFile(t, blocker)
+	sup.stagingDir = blocker
+	folded := false
+	prev := foldTables
+	t.Cleanup(func() { foldTables = prev })
+	foldTables = func(context.Context, reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		folded = true
+		return nil, nil, nil
+	}
+	wd, _ := os.Getwd()
+	before, _ := os.ReadDir(wd)
+	sup.refreshes["s"] = &console.BaselineStatus{State: "running"}
+	sup.runRefresh(s3OnlyRequest("s"), refreshAt, time.Minute)
+
+	st := sup.RefreshStatus("s")
+	t.Logf("LastError: %s", st.LastError)
+	if st.State != "failed" || st.Published || !strings.Contains(st.LastError, blocker) {
+		t.Fatalf("status = %+v, want a failure naming %s", st, blocker)
+	}
+	if folded || len(stubs.uploads) != 0 {
+		t.Fatalf("folded=%v uploads=%+v, want neither", folded, stubs.uploads)
+	}
+	if after, _ := os.ReadDir(wd); len(after) != len(before) {
+		t.Fatalf("the run wrote into the working directory %s", wd)
+	}
+
+	// The gate says the same thing before any run, so the schedule reports it.
+	if err := sup.stagedUpdatesRefusal(); err == nil || !strings.Contains(err.Error(), blocker) {
+		t.Fatalf("stagedUpdatesRefusal = %v, want a refusal naming %s", err, blocker)
+	}
+	sup.stagingDir = ""
+	sup.stagingChecked = time.Time{}
+	if err := sup.stagedUpdatesRefusal(); err == nil {
+		t.Fatal("no staging folder at all was accepted")
+	} else {
+		t.Logf("no staging folder: %v", err)
+	}
+	sup.stagingDir = f.staging
+	sup.stagingChecked = time.Time{}
+	if err := sup.stagedUpdatesRefusal(); err != nil {
+		t.Fatalf("a writable staging folder was refused: %v", err)
+	}
+	if left := stagingEntries(t, f.staging); len(left) != 0 {
+		t.Fatalf("the probe left %v in the staging folder", left)
+	}
+}
+
+// Both gate builders carry the staging verdict: the loop's own, and (through
+// StagedUpdates) the console's.
+func TestBackupScheduler_gatesCarryTheStagingVerdict(t *testing.T) {
+	b, _, sup := newScheduleFixture(t, true)
+	if g := b.gates(); g.StagingRefusal != "" {
+		t.Fatalf("StagingRefusal = %q with a writable staging folder", g.StagingRefusal)
+	}
+	if err := b.StagedUpdates(); err != nil {
+		t.Fatalf("StagedUpdates = %v with a writable staging folder", err)
+	}
+	blocker := filepath.Join(t.TempDir(), "file")
+	writeFile(t, blocker)
+	sup.stagingDir = blocker
+	sup.stagingChecked = time.Time{}
+	if g := b.gates(); !strings.Contains(g.StagingRefusal, blocker) {
+		t.Fatalf("StagingRefusal = %q, want it to name %s", g.StagingRefusal, blocker)
+	}
+}
+
+// fullReadStandsIn is the watcher's rule; pinned on the shapes it must refuse.
+func TestFullReadStandsIn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		st   console.BaselineStatus
+		want bool
+	}{
+		{"a refused update", console.BaselineStatus{State: "failed"}, true},
+		{"published, only the upload failed (local folder)", console.BaselineStatus{State: "failed", Published: true}, false},
+		{"staged upload failed (S3 only)", console.BaselineStatus{State: "failed", UploadFailed: true}, false},
+		{"disk refused", console.BaselineStatus{State: "failed", DiskRefused: true}, false},
+		{"succeeded", console.BaselineStatus{State: "succeeded", Published: true}, false},
+	} {
+		if got := fullReadStandsIn(tc.st); got != tc.want {
+			t.Errorf("%s: fullReadStandsIn = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The daemon-wide loop includes S3-only servers now, with their bucket as the
+// destination (there is nowhere else for the snapshot to go), and still
+// refuses two servers on one prefix.
+func TestBaselineRefreshTargets_includesS3OnlyServers_2212(t *testing.T) {
+	entries := []console.ServerEntry{
+		{ID: "a", Name: "both", DSN: "dsn-a", BaselineDir: "/b/a", BaselineS3: "s3://bucket/a/"},
+		{ID: "b", Name: "s3only", DSN: "dsn-b", BaselineS3: "s3://bucket/b/"},
+		{ID: "c", Name: "same-prefix-1", DSN: "dsn-c", BaselineS3: "s3://bucket/shared"},
+		{ID: "d", Name: "same-prefix-2", DSN: "dsn-d", BaselineS3: "s3://bucket/shared/"},
+	}
+	got, shared := baselineRefreshTargets(entries, "", "")
+	byID := map[string]refreshRequest{}
+	for _, r := range got {
+		byID[r.ServerID] = r
+	}
+	if r, ok := byID["b"]; !ok || r.BaselineDir != "" || r.BaselineS3 != "s3://bucket/b/" {
+		t.Fatalf("S3-only target = %+v (present %v), want it with its bucket and no folder", r, ok)
+	}
+	// Unchanged for a server with a folder: the daemon-wide loop keeps its
+	// snapshots local, as its flag documents.
+	if r := byID["a"]; r.BaselineDir != "/b/a" || r.BaselineS3 != "" {
+		t.Fatalf("local+S3 target = %+v, want the folder and no upload", r)
+	}
+	if _, ok := byID["c"]; ok {
+		t.Error("a server sharing its prefix was refreshed")
+	}
+	if len(shared) != 2 {
+		t.Fatalf("shared skips = %+v, want both servers on the one prefix", shared)
+	}
+	if dirs := refreshTargetDirs(got); len(dirs) != 1 || dirs[0] != "/b/a" {
+		t.Fatalf("refreshTargetDirs = %v, want only the real folder", dirs)
+	}
+}

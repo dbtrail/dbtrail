@@ -122,6 +122,14 @@ type FullTableConfig struct {
 	// reaches it. An error stops that table, whose files are then removed. The
 	// daemon checks free disk with it (#1614).
 	SpaceCheck func(dir string, need int64) error
+	// DownloadDir, when set, is where an s3:// previous snapshot is downloaded
+	// before it is merged (materializeBaselineLocal), in a temporary folder of
+	// its own that is removed when the table is done. Empty: the system's
+	// temporary directory, as the command line has always used. The daemon
+	// sets it for a server whose snapshots go only to S3 (#2212), so the
+	// download lands on the disk SpaceCheck measures. Never inside the
+	// snapshot directory itself: everything there is uploaded.
+	DownloadDir string
 
 	// OutputFormat selects the artifact the run produces. The zero value means
 	// "not specified" and resolves to OutputFormatMydumper, matching this
@@ -1675,7 +1683,7 @@ func ReconstructTable(
 	}
 
 	// ── 6. Materialize the baseline locally for DuckDB streaming ───────────
-	localPath, cleanup, err := materializeBaselineLocal(ctx, baselinePath, cfg.DuckDBTuning)
+	localPath, cleanup, err := materializeBaselineLocalIn(ctx, baselinePath, cfg.DuckDBTuning, cfg.DownloadDir)
 	if err != nil {
 		return nil, fmt.Errorf("materialize baseline: %w", err)
 	}
@@ -3045,6 +3053,12 @@ func splitSchemaTable(entry string) (string, string, bool) {
 // default, so passing duckdbutil.Tuning{} (any caller that hasn't been wired
 // with an explicit budget — e.g. the shim, verify) is always safe.
 func materializeBaselineLocal(ctx context.Context, path string, tuning duckdbutil.Tuning) (string, func(), error) {
+	return materializeBaselineLocalIn(ctx, path, tuning, "")
+}
+
+// materializeBaselineLocalIn is materializeBaselineLocal downloading under dir
+// (FullTableConfig.DownloadDir); "" is the system temporary directory.
+func materializeBaselineLocalIn(ctx context.Context, path string, tuning duckdbutil.Tuning, dir string) (string, func(), error) {
 	if !strings.HasPrefix(path, "s3://") {
 		// At-rest integrity (#636): validate the local file against its snapshot's
 		// _MANIFEST before any reader trusts it (DuckDB validates nothing). Fail
@@ -3062,9 +3076,9 @@ func materializeBaselineLocal(ctx context.Context, path string, tuning duckdbuti
 		return "", nil, err
 	}
 	// Download via DuckDB httpfs. Keep the temp file around until cleanup().
-	tmpDir, err := os.MkdirTemp("", "bintrail-baseline-*")
+	tmpDir, err := baselineDownloadDir(dir)
 	if err != nil {
-		return "", nil, fmt.Errorf("mkdir temp: %w", err)
+		return "", nil, err
 	}
 	tmpPath := filepath.Join(tmpDir, "baseline.parquet")
 
@@ -3093,6 +3107,22 @@ func materializeBaselineLocal(ctx context.Context, path string, tuning duckdbuti
 
 	cleanup := func() { os.RemoveAll(tmpDir) }
 	return tmpPath, cleanup, nil
+}
+
+// baselineDownloadDir makes the temporary folder one s3:// baseline is
+// downloaded into: under dir, or the system's temporary directory when dir is
+// "". A dir that cannot be used is an error, never a quiet fall back to the
+// system temporary directory: the caller chose it so the download lands on
+// the disk it measures.
+func baselineDownloadDir(dir string) (string, error) {
+	tmp, err := os.MkdirTemp(dir, "bintrail-baseline-*")
+	if err != nil {
+		if dir != "" {
+			return "", fmt.Errorf("create a folder to download the previous snapshot into under %s: %w", dir, err)
+		}
+		return "", fmt.Errorf("mkdir temp: %w", err)
+	}
+	return tmp, nil
 }
 
 // ReadBaselineColumns returns the column names of a baseline Parquet file (local

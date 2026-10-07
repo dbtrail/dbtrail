@@ -19,6 +19,7 @@ type stubScheduleReporter struct {
 	state     map[string]BackupScheduleState
 	observed  []string // "<id> <identity>" per Observe call
 	forgotten []string // ids per Forget call
+	staging   error    // what StagedUpdates answers (#2212); nil = usable
 }
 
 func (s *stubScheduleReporter) ScheduleState(id string) BackupScheduleState {
@@ -26,6 +27,7 @@ func (s *stubScheduleReporter) ScheduleState(id string) BackupScheduleState {
 }
 func (s *stubScheduleReporter) FullBackups() (bool, error)     { return s.full, s.refusal }
 func (s *stubScheduleReporter) WindowProbe() BackupWindowProbe { return s.probe }
+func (s *stubScheduleReporter) StagedUpdates() error           { return s.staging }
 func (s *stubScheduleReporter) Observe(id string, sched BackupSchedule, _ time.Time) {
 	s.observed = append(s.observed, id+" "+sched.Identity())
 }
@@ -65,6 +67,11 @@ func newScheduleServer(t *testing.T, rep *stubScheduleReporter) (*Server, string
 	srv.cm.bundles[e.ID] = &bundle{}
 	return srv, e.ID
 }
+
+// errNoStaging is a StagedUpdates refusal (#2212): with it an S3-only server
+// cannot be updated, which is what the S3-only cases below need to stay off
+// the network (an update would look for its previous snapshot in the bucket).
+var errNoStaging = errors.New("the staging folder /stage cannot be written: permission denied")
 
 // s3Only rewrites the fixture server to keep its backups in S3 only.
 func s3Only(t *testing.T, srv *Server, id string) {
@@ -158,8 +165,10 @@ func TestBackupScheduleAPI_saveListRemove(t *testing.T) {
 }
 
 func TestBackupScheduleAPI_refusals(t *testing.T) {
-	srv, id := newScheduleServer(t, &stubScheduleReporter{full: false})
-	s3Only(t, srv, id) // no local dir: only a full backup could run, and creation is off
+	// S3 only, with a staging folder that cannot be used (#2212): no update
+	// can be built, and creation is off, so nothing could run.
+	srv, id := newScheduleServer(t, &stubScheduleReporter{full: false, staging: errNoStaging})
+	s3Only(t, srv, id)
 	path := "/api/servers/" + id + "/backup-schedule"
 	cases := []struct {
 		name string
@@ -251,10 +260,10 @@ func TestBackupScheduleAPI_needsTheLoop(t *testing.T) {
 		t.Fatalf("dormant schedule = %+v, want reported as not runnable with the PUT refusal's words", got)
 	}
 	// The creation opt-in going away on a server with no local directory
-	// (nothing for the fold to write into) flips it to not runnable, with the
-	// reason.
+	// and a staging folder that cannot be used (#2212: nothing for the fold
+	// to write into) flips it to not runnable, with the reason.
 	s3Only(t, live, id2)
-	live.backupSchedules = &stubScheduleReporter{full: false}
+	live.backupSchedules = &stubScheduleReporter{full: false, staging: errNoStaging}
 	_, body = doServersReqHeader(t, live, "GET", "/api/baselines", "", id2)
 	if got = scheduleOf(t, body); got == nil || got.Runnable || !strings.Contains(got.Reason, "is not set to 1") {
 		t.Fatalf("S3 schedule with creation off = %+v", got)
@@ -262,7 +271,7 @@ func TestBackupScheduleAPI_needsTheLoop(t *testing.T) {
 	// The supervisor's standing refusal (lock-mode misconfiguration) reaches
 	// the listing the same way, so a next run is not promised for a
 	// schedule that can never start.
-	live.backupSchedules = &stubScheduleReporter{full: true, refusal: errors.New("BINTRAIL_CONSOLE_BASELINE_LOCK_MODE: unknown mode")}
+	live.backupSchedules = &stubScheduleReporter{full: true, refusal: errors.New("BINTRAIL_CONSOLE_BASELINE_LOCK_MODE: unknown mode"), staging: errNoStaging}
 	_, body = doServersReqHeader(t, live, "GET", "/api/baselines", "", id2)
 	if got = scheduleOf(t, body); got == nil || got.Runnable || !strings.Contains(got.Reason, "unknown mode") {
 		t.Fatalf("misconfigured lock mode = %+v, want not runnable with the supervisor's reason", got)
@@ -566,15 +575,18 @@ func TestBackupScheduleAPI_windowProbeReachesTheWire(t *testing.T) {
 
 func TestBackupScheduleAPI_nextMethodWhyCodeReachesTheWire(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		s3only bool
-		want   string
+		name    string
+		s3only  bool
+		staging error
+		want    string
 	}{
-		{"no snapshot yet", false, "first_backup"},
-		{"S3 without a Snapshot dir", true, "no_local_dir"},
+		{"no snapshot yet", false, nil, "first_backup"},
+		// #2212: S3 only reads in full only when the staging folder the
+		// update is built in cannot be used.
+		{"S3 only, staging folder unusable", true, errors.New("the staging folder /stage cannot be written: permission denied"), "no_staging"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, id := newScheduleServer(t, &stubScheduleReporter{full: true})
+			srv, id := newScheduleServer(t, &stubScheduleReporter{full: true, staging: tc.staging})
 			if tc.s3only {
 				s3Only(t, srv, id)
 			}

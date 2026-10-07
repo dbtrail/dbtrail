@@ -359,6 +359,13 @@ type BaselineStatus struct {
 	// (#1684). The schedule does not answer it with a full read: that would
 	// publish into the same shared location.
 	ForeignSource bool `json:"foreign_source,omitempty"`
+	// UploadFailed: an update of a server whose snapshots go only to S3
+	// (#2212) was built in the staging folder and could not be sent to the
+	// bucket; the staged copy was deleted, so nothing was kept anywhere. The
+	// schedule does not answer it with a full read: that one uploads to the
+	// same bucket and would fail the same way, after reading the source in
+	// full. The next run updates again from the bucket's newest snapshot.
+	UploadFailed bool `json:"upload_failed,omitempty"`
 }
 
 // handleBaselineTrigger enqueues an in-process baseline for the selected server.

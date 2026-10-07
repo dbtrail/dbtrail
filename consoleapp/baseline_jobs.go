@@ -300,10 +300,12 @@ type jobDirResult struct {
 	err error
 }
 
-// stagingNamePrefixes are the os.MkdirTemp patterns of the full read's
-// scratch directories: the dump, a staged snapshot bound for S3, and a
-// PostgreSQL one. Nothing in them is ever kept by a run that ends.
-var stagingNamePrefixes = []string{"dump-", "baseline-", "pgbaseline-"}
+// stagingNamePrefixes are the os.MkdirTemp patterns of the scratch
+// directories in the staging folder: the full read's dump, a staged snapshot
+// bound for S3, a PostgreSQL one, and the run folder of an update of a server
+// whose snapshots go only to S3 (stagedRunPrefix, #2212). Nothing in them is
+// ever kept by a run that ends.
+var stagingNamePrefixes = []string{"dump-", "baseline-", "pgbaseline-", stagedRunPrefix}
 
 func isStagingName(name string) bool {
 	for _, p := range stagingNamePrefixes {

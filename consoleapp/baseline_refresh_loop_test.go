@@ -20,9 +20,9 @@ import (
 func TestBaselineRefreshTargets(t *testing.T) {
 	entries := []console.ServerEntry{
 		{ID: "a", Name: "prod", DSN: "dsn-a", BaselineDir: "/b/a"},
-		// S3-only destination: a refresh reads and writes snapshot FILES, so it
-		// cannot refresh in place. Skipped, and warned about — silently doing
-		// nothing is what an operator would misread as "it's working".
+		// S3-only destination: refreshed since #2212, folding into a run
+		// folder under the staging folder and uploading to its bucket (see
+		// s3only_staged_fold_2212_test.go). Before, it was skipped.
 		{ID: "b", Name: "s3only", DSN: "dsn-b", BaselineS3: "s3://bucket/baselines/"},
 		// No baseline destination at all.
 		{ID: "c", Name: "nobaseline", DSN: "dsn-c"},
@@ -30,22 +30,15 @@ func TestBaselineRefreshTargets(t *testing.T) {
 		{ID: "d", Name: "viewonly", BaselineDir: "/b/d"},
 	}
 
-	got, skipped, _ := baselineRefreshTargets(entries, "boot-dsn", "/b/boot")
-	want := map[string]string{"default": "/b/boot", "a": "/b/a"}
+	got, _ := baselineRefreshTargets(entries, "boot-dsn", "/b/boot")
+	want := map[string][2]string{"default": {"/b/boot", ""}, "a": {"/b/a", ""}, "b": {"", "s3://bucket/baselines/"}}
 	if len(got) != len(want) {
 		t.Fatalf("got %d target(s) %+v, want %d", len(got), got, len(want))
 	}
 	for _, r := range got {
-		if want[r.ServerID] != r.BaselineDir {
-			t.Errorf("target %q = %q, want %q", r.ServerID, r.BaselineDir, want[r.ServerID])
+		if w := want[r.ServerID]; w != [2]string{r.BaselineDir, r.BaselineS3} {
+			t.Errorf("target %q = (%q, %q), want %q", r.ServerID, r.BaselineDir, r.BaselineS3, w)
 		}
-	}
-	// The skip is REPORTED, not just absent (#1579): "covers every server"
-	// was wrong exactly because this server vanished without a count, and the
-	// dispatching callers log it. The no-baseline and no-DSN entries are NOT
-	// in it: they are unconfigured, not skipped for a reason to name.
-	if len(skipped) != 1 || skipped[0] != "s3only" {
-		t.Errorf("skippedS3Only = %v, want exactly [s3only]", skipped)
 	}
 }
 
@@ -53,10 +46,10 @@ func TestBaselineRefreshTargets(t *testing.T) {
 // the daemon has both halves — a --baseline-dir with no --index-dsn (or the
 // reverse) has nothing to fold.
 func TestBaselineRefreshTargets_bootNeedsBoth(t *testing.T) {
-	if got, _, _ := baselineRefreshTargets(nil, "", "/b/boot"); len(got) != 0 {
+	if got, _ := baselineRefreshTargets(nil, "", "/b/boot"); len(got) != 0 {
 		t.Errorf("targets without an index DSN = %+v, want none", got)
 	}
-	if got, _, _ := baselineRefreshTargets(nil, "boot-dsn", ""); len(got) != 0 {
+	if got, _ := baselineRefreshTargets(nil, "boot-dsn", ""); len(got) != 0 {
 		t.Errorf("targets without a baseline dir = %+v, want none", got)
 	}
 }

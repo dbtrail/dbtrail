@@ -25,7 +25,7 @@ func TestBaselineRefreshTargets_skipsASharedLocation(t *testing.T) {
 		{ID: "c", Name: "c", DSN: "dsn-c", BaselineDir: "/c"},
 		{ID: "d", Name: "d", DSN: "dsn-d", BaselineDir: "/boot"},
 	}
-	got, _, shared := baselineRefreshTargets(entries, "boot-dsn", "/boot")
+	got, shared := baselineRefreshTargets(entries, "boot-dsn", "/boot")
 	ids := map[string]string{}
 	for _, r := range got {
 		ids[r.ServerID] = r.BaselineDir
@@ -43,7 +43,7 @@ func TestBaselineRefreshTargets_skipsASharedLocation(t *testing.T) {
 	}
 	// Without an index for the command-line server nothing is refreshed for
 	// it, so d is alone in its folder and is refreshed.
-	got, _, shared = baselineRefreshTargets(entries[2:], "", "/boot")
+	got, shared = baselineRefreshTargets(entries[2:], "", "/boot")
 	if len(got) != 2 || len(shared) != 0 {
 		t.Fatalf("no command-line refresh: targets = %+v skipped = %+v", got, shared)
 	}
@@ -134,17 +134,17 @@ func TestLogSkippedRefreshTargets_saysASharedSkipOncePerChange(t *testing.T) {
 	count := func() int { return strings.Count(buf.String(), "its snapshot location is shared") }
 	a := []refreshSkip{{name: "a", why: "shared with b"}}
 	for range 3 {
-		logSkippedRefreshTargets(nil, a)
+		logSkippedRefreshTargets(a)
 	}
 	if n := count(); n != 1 {
 		t.Fatalf("three cycles, same reason: said %d times, want 1", n)
 	}
-	logSkippedRefreshTargets(nil, []refreshSkip{{name: "a", why: "shared with b, c"}})
+	logSkippedRefreshTargets([]refreshSkip{{name: "a", why: "shared with b, c"}})
 	if n := count(); n != 2 {
 		t.Fatalf("a new reason: said %d times, want 2", n)
 	}
-	logSkippedRefreshTargets(nil, nil) // fixed
-	logSkippedRefreshTargets(nil, a)   // and back
+	logSkippedRefreshTargets(nil) // fixed
+	logSkippedRefreshTargets(a)   // and back
 	if n := count(); n != 3 {
 		t.Fatalf("back after it cleared: said %d times, want 3", n)
 	}

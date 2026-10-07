@@ -173,6 +173,9 @@ func (s *Server) scheduleGates() BackupScheduleGates {
 			g.FullBackupsErr = refusal.Error()
 		}
 		g.Window = s.backupSchedules.WindowProbe()
+		if err := s.backupSchedules.StagedUpdates(); err != nil {
+			g.StagingRefusal = err.Error()
+		}
 	}
 	return g
 }

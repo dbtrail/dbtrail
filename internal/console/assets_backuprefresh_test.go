@@ -229,12 +229,13 @@ func TestBackupScheduleCard_saysWhatARunCosts(t *testing.T) {
 	docs := docsNoWrap(t)
 	for _, want := range []string{
 		"otherwise the newest backup is **updated from the recorded changes**",
-		// The condition that actually decides the producer since #1539. It
-		// used to be the S3 destination, which is why this guard asked for
-		// "only a full read uploads" — a sentence the docs must NOT carry
-		// any more, because an operator who reads it configures a nightly
-		// full read of production to get an off-box copy.
-		"a server with no local backup directory gets a **full backup**",
+		// The condition that actually decides the producer. It used to be the
+		// S3 destination (until #1539), then a missing local backup directory
+		// (until #2212, when S3-only servers began updating through the
+		// staging folder); now it is the first backup, or a staging folder
+		// an S3-only update cannot use.
+		"a server with no previous backup yet gets a **full backup**",
+		"under the staging folder that is uploaded and then deleted",
 		// The whole of #1539 in the docs. Without this line the page still
 		// reads as if an S3 destination meant a nightly full read.
 		"reads its previous snapshot straight from the bucket and uploads its result back to the same place",
@@ -264,6 +265,9 @@ func TestBackupScheduleCard_saysWhatARunCosts(t *testing.T) {
 			"only a full read can upload",
 			"snapshots that go to S3 are always full reads",
 			"snapshots that go to S3 are full reads",
+			// #2212 made these false too: an S3-only server is updated.
+			"a server with no local backup directory gets a full backup",
+			"An S3-only baseline destination is skipped",
 		} {
 			if strings.Contains(flat, banned) {
 				t.Errorf("docs/%s still says %q, which #1539 made false: the scheduled update reads the "+

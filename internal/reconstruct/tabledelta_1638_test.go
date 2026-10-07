@@ -122,7 +122,7 @@ func deltaState(t *testing.T, base string) []map[string]any {
 	if err != nil || d == nil {
 		t.Fatalf("no usable table delta beside %s (err=%v)", base, err)
 	}
-	tmp, cleanup, err := materializeBaseWithDelta(context.Background(), base, d, duckdbutil.Tuning{})
+	tmp, cleanup, err := materializeBaseWithDelta(context.Background(), base, d, duckdbutil.Tuning{}, "")
 	if err != nil {
 		t.Fatalf("materializeBaseWithDelta: %v", err)
 	}

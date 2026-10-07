@@ -19,6 +19,7 @@ func TestBackupWhyCode(t *testing.T) {
 		{"", ""},
 		{BackupWhyNoIndex, "no_index"},
 		{BackupWhyNoLocalDir, "no_local_dir"},
+		{BackupWhyNoStagingPrefix + " (the staging folder /stage cannot be written: permission denied)", "no_staging"},
 		{BackupWhyFirstBackup, "first_backup"},
 		{BackupWhyUnreadablePrefix + " from the snapshot destination (boom), so a full read is taken instead", "previous_unreadable"},
 		{BackupWhyFoldRefusedPrefix + " (capture gap)", "fold_refused"},
@@ -36,11 +37,29 @@ func TestBackupWhyCode(t *testing.T) {
 	// The strings ChooseBackupMethod and rebuildPossible emit ARE the
 	// constants: a reason that never reaches the classifier as written is
 	// a code that never fires.
-	if err := rebuildPossible(ServerEntry{}); err == nil || err.Error() != BackupWhyNoIndex {
+	if err := rebuildPossible(ServerEntry{}, BackupScheduleGates{}); err == nil || err.Error() != BackupWhyNoIndex {
 		t.Errorf("rebuildPossible without an index = %v, want the constant", err)
 	}
-	if err := rebuildPossible(ServerEntry{DSN: "d"}); err == nil || err.Error() != BackupWhyNoLocalDir {
-		t.Errorf("rebuildPossible without a local dir = %v, want the constant", err)
+	// No snapshot location of any kind: the one shape that still says
+	// no_local_dir since #2212.
+	if err := rebuildPossible(ServerEntry{DSN: "d"}, BackupScheduleGates{}); err == nil || err.Error() != BackupWhyNoLocalDir {
+		t.Errorf("rebuildPossible without any location = %v, want the constant", err)
+	}
+	// S3 only (#2212): an update is possible, built in the staging folder,
+	// unless that folder cannot be used, which is said with its own code.
+	s3only := ServerEntry{DSN: "d", BaselineS3: "s3://b/p/"}
+	if err := rebuildPossible(s3only, BackupScheduleGates{}); err != nil {
+		t.Errorf("rebuildPossible for an S3-only server = %v, want nil", err)
+	}
+	err := rebuildPossible(s3only, BackupScheduleGates{StagingRefusal: "the staging folder /stage cannot be written: permission denied"})
+	if err == nil || BackupWhyCode(err.Error()) != "no_staging" || !strings.Contains(err.Error(), "/stage cannot be written") {
+		t.Errorf("rebuildPossible with an unusable staging folder = %v, want the no_staging reason naming the folder", err)
+	} else {
+		t.Logf("no_staging reason: %s", err)
+	}
+	// A server WITH a local folder never consults the staging folder.
+	if err := rebuildPossible(ServerEntry{DSN: "d", BaselineDir: "/b", BaselineS3: "s3://b/"}, BackupScheduleGates{StagingRefusal: "x"}); err != nil {
+		t.Errorf("rebuildPossible with a local folder = %v, want nil whatever the staging folder", err)
 	}
 }
 
@@ -90,7 +109,7 @@ func TestBackupWhyRemedyKeysMatchTheCodes(t *testing.T) {
 	block := js[i : i+strings.Index(js[i:], "};")]
 	line := jsFunctionBody(t, js, "backupWhyLine")
 	produced := map[string]bool{}
-	for _, why := range []string{BackupWhyNoIndex, BackupWhyNoLocalDir, BackupWhyFirstBackup,
+	for _, why := range []string{BackupWhyNoIndex, BackupWhyNoLocalDir, BackupWhyNoStagingPrefix + "; x", BackupWhyFirstBackup,
 		BackupWhyUnreadablePrefix + " (x)", BackupWhyFoldRefusedPrefix + " (x)", BackupWhyFoldCrashedPrefix + " (x)",
 		BackupWhyWindowPrefix + ": x", BackupWhyStaleAnchorPrefix + ": x"} {
 		produced[BackupWhyCode(why)] = true
@@ -195,6 +214,8 @@ const gap = "` + BackupWhyFoldRefusedPrefix + ` (shop.orders: reconstruct: captu
 const out = {
   remedy: backupWhyLine("` + BackupWhyNoLocalDir + `", "no_local_dir", true),
   fact: backupWhyLine("` + BackupWhyNoLocalDir + `", "no_local_dir", false),
+  stagingRemedy: backupWhyLine("` + BackupWhyNoStagingPrefix + `; the staging folder /stage cannot be written: permission denied", "no_staging", true),
+  stagingFact: backupWhyLine("` + BackupWhyNoStagingPrefix + `; the staging folder /stage cannot be written: permission denied", "no_staging", false),
   unreadable: backupWhyLine("` + BackupWhyUnreadablePrefix + ` from the snapshot destination (boom), so a full read is taken instead", "previous_unreadable", true),
   gap: backupWhyLine(gap, "fold_refused", true),
   crash: backupWhyLine("` + BackupWhyFoldCrashedPrefix + ` (internal error: nil map)", "fold_crashed", false),
@@ -213,12 +234,20 @@ console.log(JSON.stringify(out));
 	if err != nil {
 		t.Fatalf("node: %v\n%s", err, out)
 	}
-	var got struct{ Remedy, Fact, Unreadable, Gap, Crash, Unknown, Empty, Window, Age string }
+	var got struct{ Remedy, Fact, StagingRemedy, StagingFact, Unreadable, Gap, Crash, Unknown, Empty, Window, Age string }
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("decode %q: %v", out, err)
 	}
-	if !strings.Contains(got.Remedy, "the next run updates") || strings.Contains(got.Fact, "next run") || !strings.Contains(got.Fact, "did not have at the time") {
+	// no_local_dir is an old record's code since #2212: its card line says
+	// what changed, and never asks for a Local folder an update no longer needs.
+	if !strings.Contains(got.Remedy, "now updated from the recorded changes") || strings.Contains(got.Remedy, "Set a Local folder") ||
+		strings.Contains(got.Fact, "next run") || !strings.Contains(got.Fact, "did not have at the time") {
 		t.Errorf("remedy/fact split: remedy=%q fact=%q", got.Remedy, got.Fact)
+	}
+	t.Logf("no_staging remedy: %s", got.StagingRemedy)
+	t.Logf("no_staging fact: %s", got.StagingFact)
+	if !strings.Contains(got.StagingRemedy, "Fix the staging folder") || strings.Contains(got.StagingFact, "next run") || !strings.Contains(got.StagingFact, "could not be used at the time") {
+		t.Errorf("no_staging remedy/fact split: remedy=%q fact=%q", got.StagingRemedy, got.StagingFact)
 	}
 	if got.Unreadable != "The previous snapshot could not be read from the snapshot destination (boom), so a full read is taken instead." {
 		t.Errorf("unreadable = %q", got.Unreadable)

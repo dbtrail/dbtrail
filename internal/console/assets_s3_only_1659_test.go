@@ -52,6 +52,7 @@ func TestS3OnlyBackupWarning_1659(t *testing.T) {
 	}
 	script := strings.Join([]string{
 		functionBody(t, js, "function s3OnlyBackupWarning("),
+		functionBody(t, js, "function s3OnlyBackupFault("),
 		// Runs to the next function, so it carries BACKUP_WHY_EVERY_RUN too.
 		functionBody(t, js, "const BACKUP_WHY_REMEDY = {"),
 		functionBody(t, js, "function backupFoldError("),
@@ -93,14 +94,23 @@ const out = {
     s3OnlyBackupWarning(null),
     s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", schedule_loop: false, full_backup_possible: false })),
     s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", schedule_refusal: "creating snapshots from the console is turned off" })),
+    s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", staging_refusal: "the staging folder /stage cannot be written: permission denied" })),
+    s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", staging_refusal: "the staging folder /stage cannot be written: permission denied", full_backup_possible: false })),
+    s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p" }), false),
+  ],
+  fault: [
+    s3OnlyBackupFault(srv({ baseline_s3: "s3://b/p" })),
+    s3OnlyBackupFault(srv({ baseline_s3: "s3://b/p", staging_refusal: "x" })),
   ],
   alarms: [
-    nextRun({ runnable: true, next_method: "full", next_method_why: "an update from the recorded changes needs a local snapshot directory", next_method_why_code: "no_local_dir" }),
+    nextRun({ runnable: true, next_method: "full", next_method_why: "an update for a server whose snapshots go only to S3 is built in the staging folder, which cannot be used; the staging folder /stage cannot be written: permission denied", next_method_why_code: "no_staging" }),
     nextRun({ runnable: true, next_method: "full", next_method_why: "no previous snapshot to update", next_method_why_code: "first_backup" }),
     nextRun({ runnable: true, next_method: "refresh", next_method_why: "no load on your database" }),
     nextRun({ runnable: true, next_method: "full", next_method_why: "this server has no index connection to read the recorded changes from", next_method_why_code: "no_index" }),
     nextRun({ runnable: true, next_method: "refresh", next_method_why: "x", next_method_why_code: "no_local_dir" }),
     nextRun({ runnable: true, next_method: "full", next_method_why: "the previous snapshot could not be read", next_method_why_code: "previous_unreadable" }),
+    // An old daemon's code, should one ever be predicted: no longer every run.
+    nextRun({ runnable: true, next_method: "full", next_method_why: "an update from the recorded changes needs a local snapshot directory", next_method_why_code: "no_local_dir" }),
   ],
   lines,
   lastRun: [
@@ -121,6 +131,7 @@ console.log(JSON.stringify(out));
 	}
 	var got struct {
 		Warn    []string
+		Fault   []bool
 		Alarms  [][]any
 		Lines   []struct{ Class, Text string }
 		LastRun [][]string
@@ -131,29 +142,43 @@ console.log(JSON.stringify(out));
 	for i, w := range got.Warn {
 		t.Logf("warning %d: %q", i, w)
 	}
-	const fullRead = "With S3 only, every scheduled snapshot reads your whole database. Add a Local folder so runs update from the recorded changes."
-	if got.Warn[0] != fullRead {
-		t.Errorf("S3 without a folder is not warned with the agreed sentence: %q", got.Warn[0])
+	// #2212: an S3-only server is updated through the staging folder, so the
+	// note is its cost, a hint, wherever this process cannot tell otherwise.
+	const cost = "With S3 only, each scheduled update downloads every table from S3, rewrites it in the staging folder and uploads it again, even tables that did not change."
+	const costFix = cost + " Add a Local folder so unchanged tables are not downloaded and rewritten."
+	for _, i := range []int{0, 4, 6} {
+		if got.Warn[i] != costFix {
+			t.Errorf("case %d: S3 only is not told the cost of its updates: %q", i, got.Warn[i])
+		}
+	}
+	if got.Warn[10] != cost {
+		t.Errorf("a session that cannot save the row is told what to do: %q", got.Warn[10])
 	}
 	for _, i := range []int{1, 2, 3, 5, 7} {
 		if got.Warn[i] != "" {
 			t.Errorf("case %d warned where it must not: %q", i, got.Warn[i])
 		}
 	}
-	// Where no full backup is possible either, nothing runs: saying every run
-	// reads the database would be false.
-	if w := got.Warn[4]; w != "With S3 only, scheduled snapshots cannot run on this server: a full read is not available here, and updating from the recorded changes needs a Local folder. Add one." {
-		t.Errorf("S3 without a folder on a daemon that cannot take a full read: %q", w)
+	// The staging folder cannot be used: every run is a full read, or, with
+	// no full read either, nothing runs.
+	if w := got.Warn[8]; w != "With S3 only, a scheduled update is built in the staging folder, which cannot be used here (the staging folder /stage cannot be written: permission denied), so every scheduled snapshot reads your whole database. Fix the staging folder, or add a Local folder." {
+		t.Errorf("S3 only, staging unusable: %q", w)
 	}
-	wantAlarm := []bool{true, false, false, true, false, false}
-	wantCode := []string{"no_local_dir", "", "", "no_index", "", ""}
+	if w := got.Warn[9]; w != "With S3 only, a scheduled update is built in the staging folder, which cannot be used here (the staging folder /stage cannot be written: permission denied), and a full read is not available either, so scheduled snapshots cannot run on this server. Fix the staging folder, or add a Local folder." {
+		t.Errorf("S3 only, staging unusable, no full read: %q", w)
+	}
+	if len(got.Fault) != 2 || got.Fault[0] || !got.Fault[1] {
+		t.Errorf("fault = %v, want a hint for the cost and red for an unusable staging folder", got.Fault)
+	}
+	wantAlarm := []bool{true, false, false, true, false, false, false}
+	wantCode := []string{"no_staging", "", "", "no_index", "", "", ""}
 	for i := range wantAlarm {
 		if len(got.Alarms) <= i || got.Alarms[i][0] != wantAlarm[i] || got.Alarms[i][1] != wantCode[i] {
 			t.Errorf("next-run case %d: alarm/code = %v, want %v %q", i, got.Alarms, wantAlarm[i], wantCode[i])
 		}
 	}
-	if len(got.Lines) != 6 {
-		t.Fatalf("rendered %d next-run lines, want 6: %+v", len(got.Lines), got.Lines)
+	if len(got.Lines) != 7 {
+		t.Fatalf("rendered %d next-run lines, want 7: %+v", len(got.Lines), got.Lines)
 	}
 	for i, l := range got.Lines {
 		t.Logf("next-run line %d [%s]: %s", i, l.Class, l.Text)
@@ -166,18 +191,14 @@ console.log(JSON.stringify(out));
 			t.Errorf("em dash in %q", w)
 		}
 	}
-	if got.Lines[0].Class != "form-msg err" || !strings.Contains(got.Lines[0].Text, "Set a Local folder for this server") {
-		t.Errorf("no Snapshot dir: not a red line naming the setting: %+v", got.Lines[0])
+	if got.Lines[0].Class != "form-msg err" || !strings.Contains(got.Lines[0].Text, "Fix the staging folder") {
+		t.Errorf("unusable staging folder: not a red line naming the setting: %+v", got.Lines[0])
 	}
-	if got.Lines[1].Class != "ks-chain" || got.Lines[2].Class != "ks-chain" || got.Lines[4].Class != "ks-chain" || got.Lines[5].Class != "ks-chain" {
+	if got.Lines[1].Class != "ks-chain" || got.Lines[2].Class != "ks-chain" || got.Lines[4].Class != "ks-chain" || got.Lines[5].Class != "ks-chain" || got.Lines[6].Class != "ks-chain" {
 		t.Errorf("a first snapshot or an update is not the quiet drawing: %+v", got.Lines)
 	}
 	if got.Lines[3].Class != "form-msg err" || !strings.Contains(got.Lines[3].Text, "Set an index connection") {
 		t.Errorf("no index connection: not a red line naming the setting: %+v", got.Lines[3])
-	}
-	// Where this process runs no scheduled backups, only the setting is known.
-	if got.Warn[6] != "With S3 only, a scheduled snapshot cannot update from the recorded changes. Add a Local folder." {
-		t.Errorf("no schedule loop: %q", got.Warn[6])
 	}
 	// The last run's full-backup reason: skipped when the next-run warning
 	// carries the same remedy, in the past tense when it carries another, and
@@ -185,7 +206,12 @@ console.log(JSON.stringify(out));
 	if len(got.LastRun) != 3 || len(got.LastRun[0]) != 1 || len(got.LastRun[1]) != 2 || len(got.LastRun[2]) != 2 {
 		t.Fatalf("last-run lines = %q", got.LastRun)
 	}
-	if strings.Contains(got.LastRun[1][1], "Set a Local folder") || !strings.Contains(got.LastRun[2][1], "Set a Local folder") {
+	// An old record (#2212): no_local_dir now explains a past run and what
+	// changed since, never "set a Local folder" as if it were still needed.
+	for _, l := range got.LastRun[2] {
+		t.Logf("old no_local_dir record: %s", l)
+	}
+	if strings.Contains(got.LastRun[1][1], "now updated") || !strings.Contains(got.LastRun[2][1], "now updated from the recorded changes, through the staging folder") {
 		t.Errorf("last-run reason tense: next-run warning elsewhere %q, no warning %q", got.LastRun[1][1], got.LastRun[2][1])
 	}
 }
@@ -299,9 +325,12 @@ function red(n, out = []) {
   for (const c of n.children || []) red(c, out);
   return out;
 }
-const base = { id: "a", name: "a", kind: "registry", baseline_dir: "", baseline_s3: "s3://b/p", full_backup_possible: true, schedule_loop: true };
+const base = { id: "a", name: "a", kind: "registry", baseline_dir: "", baseline_s3: "s3://b/p", full_backup_possible: true, schedule_loop: true,
+  staging_refusal: "the staging folder /stage cannot be written: permission denied" };
 const rows = {
   noSchedule: base,
+  // #2212: updates run; their cost is a hint, never red.
+  updates: Object.assign({}, base, { staging_refusal: "" }),
   withSchedule: Object.assign({}, base, { schedule_every: "1d", schedule_every_minutes: 1440 }),
   refused: Object.assign({}, base, { schedule_every: "1d", schedule_every_minutes: 1440, schedule_refusal: "creating snapshots from the console is turned off" }),
   noLoop: Object.assign({}, base, { schedule_loop: false, full_backup_possible: false }),
@@ -323,7 +352,7 @@ console.log(JSON.stringify(out));
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
 	}
-	const fullRead = "With S3 only, every scheduled snapshot reads your whole database. Add a Local folder so runs update from the recorded changes."
+	const fullRead = "With S3 only, a scheduled update is built in the staging folder, which cannot be used here (the staging folder /stage cannot be written: permission denied), so every scheduled snapshot reads your whole database. Fix the staging folder, or add a Local folder."
 	has := func(lines []string, want string) bool {
 		for _, l := range lines {
 			if l == want {
@@ -338,8 +367,11 @@ console.log(JSON.stringify(out));
 	if has(got["refused"], fullRead) || len(got["refused"]) != 1 || !strings.Contains(got["refused"][0], "creating snapshots from the console is turned off") {
 		t.Errorf("a refused schedule shows the S3-only line next to its own reason: %q", got["refused"])
 	}
-	if !has(got["noLoop"], "With S3 only, a scheduled snapshot cannot update from the recorded changes. Add a Local folder.") {
+	if !has(got["noLoop"], "With S3 only, a scheduled update is built in the staging folder, which cannot be used here (the staging folder /stage cannot be written: permission denied), and a full read is not available either, so scheduled snapshots cannot run on this server. Fix the staging folder, or add a Local folder.") {
 		t.Errorf("no schedule loop: %q", got["noLoop"])
+	}
+	if len(got["updates"]) != 0 {
+		t.Errorf("an S3-only server whose updates run is warned in red: %q", got["updates"])
 	}
 	if len(got["withDir"]) != 0 {
 		t.Errorf("a server with a Snapshot dir is warned: %q", got["withDir"])
