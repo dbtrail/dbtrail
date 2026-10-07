@@ -157,6 +157,23 @@ func (j *jobRun) release() {
 	j.lock.Close()
 }
 
+// keepForReclaim ends the job WITHOUT dropping its journal entry: the lock is
+// released and the lock file kept, so the next start finds the job dead and
+// removes what it journaled (a run folder whose delete failed, #2212). Its
+// record, already written, is not written again. Idempotent with release.
+func (j *jobRun) keepForReclaim() {
+	if j == nil {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.released {
+		return
+	}
+	j.released = true
+	j.lock.Close()
+}
+
 // id is the run id, "" for a job with no journal.
 func (j *jobRun) id() string {
 	if j == nil {

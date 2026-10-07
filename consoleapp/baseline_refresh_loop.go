@@ -302,9 +302,13 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		// and is never anybody else's.
 		job = s.beginJob(console.BaselineRunRefresh, req.ServerID, req.ServerName, req.Trigger, "", started)
 		req.StagedRun, stageErr = s.beginStagedRun(job)
-		// The panic net only: every normal exit deletes the folder before
-		// the run's status goes terminal (removeStagedRun below).
-		defer removeStagedRun(req)
+		// Registered in this order so the folder goes BEFORE the journal
+		// entry that would reclaim it (defers run newest first), and a
+		// delete that fails keeps that entry (cleanupStagedRun). The panic
+		// net only: every normal exit deletes the folder before the run's
+		// status goes terminal (below).
+		defer job.release()
+		defer cleanupStagedRun(job, req)
 	} else {
 		// Asked BEFORE the fold, and it has to be: the question is whether
 		// the snapshot directory holds anything this run did not write, and
@@ -315,8 +319,8 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		if unclaimed == "" {
 			job.Created(req.BaselineDir, reconstruct.SnapshotDirName(at))
 		}
+		defer job.release()
 	}
-	defer job.release()
 	req.FoldSource = resolveFoldSource(s.ctx, req)
 	var prev time.Time
 	var tables, refused int
@@ -425,7 +429,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// after the last read of the snapshot (publishedReadsFrom, above) and
 	// BEFORE the status below goes terminal, which is what every observer
 	// waits on. The caller's deferred delete is only the panic net.
-	removeStagedRun(req)
+	cleanupStagedRun(job, req)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1038,7 +1042,8 @@ func uploadRefreshedSnapshot(ctx context.Context, req refreshRequest, at time.Ti
 		// folder, so nothing may promise it is kept or sent later. Not
 		// errSnapshotNotUploaded, which says a finished snapshot is on disk.
 		return 0, fmt.Errorf("%w: it could not be uploaded to %s. This server keeps its snapshots only in S3, so the "+
-			"copy built in the staging folder was deleted; the next update starts again from the newest snapshot in the bucket: %w",
+			"copy built in the staging folder was deleted (any files already sent stay there marked incomplete, and are never read); "+
+			"the next update starts again from the newest snapshot in the bucket: %w",
 			errStagedSnapshotNotUploaded, dest, err)
 	}
 	if err != nil {
@@ -1822,8 +1827,9 @@ func startBaselineRefreshLoop(ctx context.Context, reg *console.Registry, sup *b
 		// console that is not running. The visibility this warning gives is what
 		// the refusal was actually for.
 		slog.Warn("baseline refresh: no server is refreshable yet, so nothing will run until one has BOTH an " +
-			"index DSN and a snapshot location (a local baseline directory, or an S3 destination, whose updates " +
-			"are built in the staging folder and uploaded). Servers added later are picked up automatically.")
+			"index DSN and a snapshot location: a local snapshot directory, or, for a server added in the web " +
+			"interface, an S3 destination (its updates are built in the staging folder and uploaded). The " +
+			"command-line server needs a local directory. Servers added later are picked up automatically.")
 	}
 	// RETENTION INTERPLAY (#616), stated at startup on purpose. A refreshed
 	// snapshot is written locally and is NOT uploaded, and baseline.PruneLocal

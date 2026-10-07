@@ -41,8 +41,11 @@ const stagedRunPrefix = "refresh-"
 
 // errStagedSnapshotNotUploaded marks the upload failure of an update built in
 // the staging folder. Unlike errSnapshotNotUploaded it is NOT a published
-// snapshot: the staged copy is deleted with its run folder, so nothing is
-// left anywhere, and nothing may say otherwise (foldPublished stays false).
+// snapshot: the staged copy is deleted with its run folder, so no complete
+// copy is left anywhere, and nothing may say otherwise (foldPublished stays
+// false). An upload that failed part way leaves what it sent in the bucket
+// under the _INCOMPLETE marker baseline.Upload writes first, which every
+// listing skips; nothing reclaims it today, and the message says it stays.
 // It still keeps the schedule from answering the failure with a full read
 // (BaselineStatus.UploadFailed): that one uploads to the same bucket.
 var errStagedSnapshotNotUploaded = errors.New("the update was not sent to the snapshot destination")
@@ -65,15 +68,23 @@ func stagedOutputRoot(req refreshRequest) string {
 // (or can be made) and a file can be created in it. Cached for a minute, so a
 // permission fixed on the host is seen without a restart, and a page load is
 // not a disk probe.
+//
+// The probe runs outside the lock, so a staging folder on a mount that hangs
+// holds up the caller that probes, not every page load queued behind it.
 func (s *baselineSupervisor) stagedUpdatesRefusal() error {
 	s.stagingMu.Lock()
-	defer s.stagingMu.Unlock()
 	if !s.stagingChecked.IsZero() && time.Since(s.stagingChecked) < stagingProbeEvery {
-		return s.stagingErr
+		err := s.stagingErr
+		s.stagingMu.Unlock()
+		return err
 	}
-	s.stagingErr = probeStagingDir(s.stagingDir)
-	s.stagingChecked = time.Now()
-	return s.stagingErr
+	dir := s.stagingDir
+	s.stagingMu.Unlock()
+	err := probeStagingDir(dir)
+	s.stagingMu.Lock()
+	s.stagingErr, s.stagingChecked = err, time.Now()
+	s.stagingMu.Unlock()
+	return err
 }
 
 func probeStagingDir(dir string) error {
@@ -113,15 +124,20 @@ func (s *baselineSupervisor) beginStagedRun(job *jobRun) (string, error) {
 	return dir, nil
 }
 
-// removeStagedRun deletes a run folder. A failure is said at Error: the
-// folder holds a whole snapshot's worth of disk, and the journal entry that
-// would reclaim it at the next start is dropped when this run ends.
-func removeStagedRun(req refreshRequest) {
+// cleanupStagedRun deletes a run folder. Idempotent: the normal exit and the
+// deferred panic net both call it.
+//
+// A delete that fails keeps the job's journal entry (jobRun.keepForReclaim),
+// so the next start removes the folder: it holds a whole snapshot's worth of
+// disk, and dropping the entry would leave nothing that ever looks at it
+// again. Said at Error, since until that start the disk stays used.
+func cleanupStagedRun(job *jobRun, req refreshRequest) {
 	if req.StagedRun == "" {
 		return
 	}
 	if err := removeAllDir(req.StagedRun); err != nil {
-		slog.Error("snapshot refresh: could not delete this update's folder in the staging folder; delete it by hand",
+		slog.Error("snapshot refresh: could not delete this update's folder in the staging folder; DBTrail removes it at its next start, or delete it by hand",
 			"server", req.ServerName, "id", req.ServerID, "dir", req.StagedRun, "error", err)
+		job.keepForReclaim()
 	}
 }

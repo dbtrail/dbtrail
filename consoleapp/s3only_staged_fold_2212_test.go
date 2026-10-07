@@ -480,3 +480,38 @@ func TestBaselineRefreshTargets_includesS3OnlyServers_2212(t *testing.T) {
 		t.Fatalf("refreshTargetDirs = %v, want only the real folder", dirs)
 	}
 }
+
+// The run folder cannot be deleted: its journal entry is KEPT, so the next
+// start removes it, instead of a whole snapshot's worth of staging disk that
+// nothing would ever look at again.
+func TestStagedFold_aFailedDeleteIsReclaimedAtTheNextStart(t *testing.T) {
+	stubStagedFold(t, nil)
+	f := newJobsFixture(t)
+	sup := f.supervisor(t)
+	injectFold(t, 0, nil)
+	prevRemove := removeAllDir
+	t.Cleanup(func() { removeAllDir = prevRemove })
+	removeAllDir = func(string) error { return errors.New("EBUSY") }
+	sup.refreshes["s"] = &console.BaselineStatus{State: "running"}
+	sup.runRefresh(s3OnlyRequest("s"), refreshAt, time.Minute)
+
+	left := stagingEntries(t, f.staging)
+	if len(left) != 1 || !isStagingName(left[0]) {
+		t.Fatalf("staging = %v, want the one run folder the delete could not remove", left)
+	}
+	if st := sup.RefreshStatus("s"); st.State != "succeeded" {
+		t.Fatalf("status = %+v: a failed cleanup must not fail an uploaded run", st)
+	}
+	if jobs := sup.history.Jobs(); len(jobs) != 1 || len(jobs[0].Dirs) != 1 || jobs[0].Dirs[0].Name != left[0] {
+		t.Fatalf("journal = %+v, want the run kept with its folder", jobs)
+	}
+	removeAllDir = prevRemove
+	next := f.supervisor(t)
+	next.reclaimInterruptedJobs()
+	if exists(filepath.Join(f.staging, left[0])) {
+		t.Fatal("the next start did not remove the run folder")
+	}
+	if recs := next.history.List("s"); len(recs) != 1 {
+		t.Fatalf("records = %+v, want the run's own record only, not an interrupted one", recs)
+	}
+}
