@@ -263,7 +263,7 @@ func TestUpload_carriesTheViewsRecord_1879(t *testing.T) {
 		objectExists: func(_ context.Context, _ string) (bool, error) { return false, nil },
 		deleteObject: func(_ context.Context, k string) error { calls = append(calls, "delete "+k); return nil },
 	}
-	if _, err := uploadWithOps(context.Background(), out, "p", false, ops); err != nil {
+	if _, err := uploadWithOps(context.Background(), out, "p", false, lockedOps(ops)); err != nil {
 		t.Fatal(err)
 	}
 	rec := slices.Index(calls, "upload p/"+filepath.Base(snap)+"/"+ViewsSkippedName)

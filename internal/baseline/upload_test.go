@@ -39,7 +39,7 @@ func TestUploadWithOps_ordering(t *testing.T) {
 		deleteObject: func(_ context.Context, k string) error { calls = append(calls, "delete "+k); return nil },
 	}
 
-	n, err := uploadWithOps(context.Background(), outputDir, "p", false, ops)
+	n, err := uploadWithOps(context.Background(), outputDir, "p", false, lockedOps(ops))
 	if err != nil {
 		t.Fatalf("uploadWithOps: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestUploadWithOps_retrySkipsExisting(t *testing.T) {
 
 	// count is "objects processed" (incremented even when skipped); the
 	// load-bearing assertion is that uploadFile was never actually invoked.
-	if _, err := uploadWithOps(context.Background(), outputDir, "p", true, ops); err != nil {
+	if _, err := uploadWithOps(context.Background(), outputDir, "p", true, lockedOps(ops)); err != nil {
 		t.Fatalf("uploadWithOps: %v", err)
 	}
 	if len(uploaded) != 0 {
@@ -227,7 +227,7 @@ func TestUploadWithOps_singleSnapshotDir(t *testing.T) {
 
 	// The prefix ParseS3URL yields for s3://bucket/backups/<stamp>, which is
 	// how the refresh addresses the snapshot it just folded.
-	n, err := uploadWithOps(context.Background(), snap, "backups/"+stamp, false, ops)
+	n, err := uploadWithOps(context.Background(), snap, "backups/"+stamp, false, lockedOps(ops))
 	if err != nil {
 		t.Fatalf("uploadWithOps: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestUploadWithOps_refusesWhenNoSnapshotIsComplete(t *testing.T) {
 		deleteObject: func(_ context.Context, k string) error { calls = append(calls, "delete "+k); return nil },
 	}
 
-	n, err := uploadWithOps(context.Background(), dir, "p", false, ops)
+	n, err := uploadWithOps(context.Background(), dir, "p", false, lockedOps(ops))
 	if err == nil {
 		t.Fatal("the upload was allowed with no completed snapshot, so nothing would have written _INCOMPLETE")
 	}

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **Snapshot uploads to S3 send several files at once, and archive reads stop
+  asking where the bucket lives on every table** (#2181). A snapshot update of
+  a small source with an S3 destination took 15 to 18 seconds for a few dozen
+  changes, longer than a full read of the same source, so the schedule's cost
+  rule picked a full read every other slot. Measured with S3 answering in about
+  190 ms per request, an update of 12 tables made about 40 uploads one after
+  the other (8.6 s: an update writes about three small files per table) and,
+  per table, a bucket-region question and the archive reads (3.9 s). The
+  upload now sends files of under 16 MiB eight at a time; larger ones still go
+  one at a time after them, since they wait on bandwidth, not on round trips,
+  and the SDK already splits them into parts. `_INCOMPLETE` is still written
+  before any data and `_SUCCESS` only after every data file has finished, and
+  a failed file stops the rest. Each of those files is one request (files
+  are now sent as a single PUT up to 32 MiB, so a cancelled upload leaves no
+  half-done multipart upload in the bucket), and a panic in one upload
+  becomes that upload's error instead of stopping the process. The archive
+  reads ask for the bucket's region once and remember the answer for 10 minutes (a detection, or a denial of the
+  question under the minimal IAM policy; any other failure is asked again; a
+  bucket with its own configured store is never cached). Same measurement:
+  12 tables 13.6 s → 5.8 s, 100 tables 94 s → 32 s, and the full read's
+  upload 3.5 s → 1.4 s (12 tables). The rest of an update's cost on S3 is
+  still per table (one archive listing and download each); a test now pins
+  the archive reads at one per table per update.
 - **The Overview gives the copy's age as the age of its data, and says when
   capture keeps falling behind** (#2201). The copy arrow counted from when
   the newest copy was written, so while capture was 65 minutes behind it

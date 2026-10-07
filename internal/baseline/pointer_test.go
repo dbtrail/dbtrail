@@ -204,7 +204,7 @@ func TestUploadWithOps_skipsTheCurrentPointer(t *testing.T) {
 		deleteObject: func(_ context.Context, _ string) error { return nil },
 	}
 
-	n, err := uploadWithOps(context.Background(), root, "p", false, ops)
+	n, err := uploadWithOps(context.Background(), root, "p", false, lockedOps(ops))
 	if err != nil {
 		t.Fatalf("uploadWithOps: %v", err)
 	}
@@ -550,7 +550,7 @@ func TestUploadWithOps_uploadsASymlinkedTableFile(t *testing.T) {
 		objectExists: func(_ context.Context, _ string) (bool, error) { return false, nil },
 		deleteObject: func(_ context.Context, _ string) error { return nil },
 	}
-	if _, err := uploadWithOps(context.Background(), root, "p", false, ops); err != nil {
+	if _, err := uploadWithOps(context.Background(), root, "p", false, lockedOps(ops)); err != nil {
 		t.Fatalf("uploadWithOps: %v", err)
 	}
 	var found bool
@@ -591,7 +591,7 @@ func TestUploadWithOps_survivesAStagingLeftover(t *testing.T) {
 		objectExists: func(_ context.Context, _ string) (bool, error) { return false, nil },
 		deleteObject: func(_ context.Context, _ string) error { return nil },
 	}
-	if _, err := uploadWithOps(context.Background(), root, "p", false, ops); err != nil {
+	if _, err := uploadWithOps(context.Background(), root, "p", false, lockedOps(ops)); err != nil {
 		t.Fatalf("a staging leftover failed the upload: %v", err)
 	}
 }
@@ -618,7 +618,7 @@ func TestUploadWithOps_refusesAnUnreadableSnapshotFile(t *testing.T) {
 		objectExists: func(_ context.Context, _ string) (bool, error) { return false, nil },
 		deleteObject: func(_ context.Context, _ string) error { return nil },
 	}
-	_, err := uploadWithOps(context.Background(), root, "p", false, ops)
+	_, err := uploadWithOps(context.Background(), root, "p", false, lockedOps(ops))
 	if err == nil {
 		t.Fatal("uploaded a snapshot holding something that is not a file, without complaining")
 	}
@@ -828,7 +828,7 @@ func TestUploadWithOps_skipsThePointerLock(t *testing.T) {
 		objectExists: func(_ context.Context, _ string) (bool, error) { return false, nil },
 		deleteObject: func(_ context.Context, _ string) error { return nil },
 	}
-	if _, err := uploadWithOps(context.Background(), root, "p", false, ops); err != nil {
+	if _, err := uploadWithOps(context.Background(), root, "p", false, lockedOps(ops)); err != nil {
 		t.Fatalf("uploadWithOps: %v", err)
 	}
 	for _, k := range keys {

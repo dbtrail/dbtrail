@@ -569,7 +569,7 @@ func TestLastPrune_isNotASnapshotAndIsNotUploaded(t *testing.T) {
 		objectExists: func(context.Context, string) (bool, error) { return false, nil },
 		deleteObject: func(context.Context, string) error { return nil },
 	}
-	if _, err := uploadWithOps(context.Background(), root, "p", false, ops); err != nil {
+	if _, err := uploadWithOps(context.Background(), root, "p", false, lockedOps(ops)); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	for _, k := range keys {

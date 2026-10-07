@@ -85,7 +85,7 @@ func TestNewestPointer_writtenLastNamingTheSnapshot_2052(t *testing.T) {
 	root := t.TempDir()
 	mkUploadSnapshot(t, root, "2026-10-04T12-00-03Z")
 	b := newFakeBucket()
-	if _, err := uploadWithOps(context.Background(), root, "p", false, b.ops()); err != nil {
+	if _, err := uploadWithOps(context.Background(), root, "p", false, lockedOps(b.ops())); err != nil {
 		t.Fatal(err)
 	}
 	if got := string(b.objects[ptrKey]); got != "2026-10-04T12-00-03Z\n" {
@@ -111,7 +111,7 @@ func TestNewestPointer_singleSnapshotDirUpload_2052(t *testing.T) {
 	root := t.TempDir()
 	snap := mkUploadSnapshot(t, root, "2026-10-04T12-00-03Z")
 	b := newFakeBucket()
-	if _, err := uploadWithOps(context.Background(), snap, "p/2026-10-04T12-00-03Z", false, b.ops()); err != nil {
+	if _, err := uploadWithOps(context.Background(), snap, "p/2026-10-04T12-00-03Z", false, lockedOps(b.ops())); err != nil {
 		t.Fatal(err)
 	}
 	if got := string(b.objects[ptrKey]); got != "2026-10-04T12-00-03Z\n" {
@@ -140,7 +140,7 @@ func TestNewestPointer_neverMovesBackward_2052(t *testing.T) {
 			mkUploadSnapshot(t, root, c.upload)
 			b := newFakeBucket()
 			b.objects[ptrKey] = []byte(c.existing)
-			if _, err := uploadWithOps(context.Background(), root, "p", false, b.ops()); err != nil {
+			if _, err := uploadWithOps(context.Background(), root, "p", false, lockedOps(b.ops())); err != nil {
 				t.Fatal(err)
 			}
 			if got := string(b.objects[ptrKey]); got != c.want {
@@ -164,7 +164,7 @@ func TestNewestPointer_namesTheNewestOfThePass_2052(t *testing.T) {
 	mkUploadSnapshot(t, root, "2026-10-04T12-00-03Z")
 	mkUploadSnapshot(t, root, "2026-10-03T00-00-00Z")
 	b := newFakeBucket()
-	if _, err := uploadWithOps(context.Background(), root, "p", false, b.ops()); err != nil {
+	if _, err := uploadWithOps(context.Background(), root, "p", false, lockedOps(b.ops())); err != nil {
 		t.Fatal(err)
 	}
 	if got := string(b.objects[ptrKey]); got != "2026-10-04T12-00-03Z\n" {
@@ -184,7 +184,7 @@ func TestNewestPointer_failuresAreLoudAndTyped_2052(t *testing.T) {
 			mkUploadSnapshot(t, root, "2026-10-04T12-00-03Z")
 			b := newFakeBucket()
 			b.fail[op+" "+ptrKey] = errors.New("AccessDenied")
-			_, err := uploadWithOps(context.Background(), root, "p", false, b.ops())
+			_, err := uploadWithOps(context.Background(), root, "p", false, lockedOps(b.ops()))
 			if !errors.Is(err, ErrNewestPointer) {
 				t.Fatalf("err = %v, want ErrNewestPointer", err)
 			}
@@ -212,7 +212,7 @@ func TestNewestPointer_notSnapshotShapedGetsNone_2052(t *testing.T) {
 	root := t.TempDir()
 	snap := mkUploadSnapshot(t, root, "2026-10-04T12-00-03Z")
 	b := newFakeBucket()
-	if _, err := uploadWithOps(context.Background(), snap, "p/mybackup", false, b.ops()); err != nil {
+	if _, err := uploadWithOps(context.Background(), snap, "p/mybackup", false, lockedOps(b.ops())); err != nil {
 		t.Fatal(err)
 	}
 	for k := range b.objects {
@@ -282,7 +282,7 @@ func TestNewestPointer_accessDeniedNamesThePermission_2052(t *testing.T) {
 	mkUploadSnapshot(t, root, "2026-10-04T12-00-03Z")
 	b := newFakeBucket()
 	b.fail["get "+ptrKey] = &smithy.GenericAPIError{Code: "AccessDenied", Message: "Access Denied"}
-	_, err := uploadWithOps(context.Background(), root, "p", false, b.ops())
+	_, err := uploadWithOps(context.Background(), root, "p", false, lockedOps(b.ops()))
 	if !errors.Is(err, ErrNewestPointer) || !strings.Contains(err.Error(), "s3:ListBucket") {
 		t.Fatalf("err = %v, want ErrNewestPointer naming s3:ListBucket", err)
 	}
@@ -292,7 +292,7 @@ func TestNewestPointer_accessDeniedNamesThePermission_2052(t *testing.T) {
 	// Any other failure carries no permission hint.
 	b2 := newFakeBucket()
 	b2.fail["get "+ptrKey] = errors.New("connection reset")
-	_, err = uploadWithOps(context.Background(), root, "p", false, b2.ops())
+	_, err = uploadWithOps(context.Background(), root, "p", false, lockedOps(b2.ops()))
 	if strings.Contains(err.Error(), "ListBucket") {
 		t.Errorf("a network error blamed permissions: %v", err)
 	}

@@ -249,7 +249,7 @@ func TestUpload_carriesTheSignature(t *testing.T) {
 		objectExists: func(_ context.Context, _ string) (bool, error) { return false, nil },
 		deleteObject: func(_ context.Context, k string) error { calls = append(calls, "delete "+k); return nil },
 	}
-	if _, err := uploadWithOps(context.Background(), filepath.Dir(snap), "p", false, ops); err != nil {
+	if _, err := uploadWithOps(context.Background(), filepath.Dir(snap), "p", false, lockedOps(ops)); err != nil {
 		t.Fatal(err)
 	}
 	sig := slices.Index(calls, "upload p/"+filepath.Base(snap)+"/_WRITER.abc-1")
