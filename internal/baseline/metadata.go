@@ -547,6 +547,18 @@ func ReadParquetMetadataAny(ctx context.Context, path string) (DumpMetadata, err
 	if err := baselineintegrity.ValidateS3File(ctx, path); err != nil {
 		return DumpMetadata{}, err
 	}
+	return ReadParquetMetadataFooter(ctx, path)
+}
+
+// ReadParquetMetadataFooter is ReadParquetMetadataAny WITHOUT the integrity
+// pass on an s3:// object, which streams the whole object to hash it: a
+// range read of the footer and nothing more. For a caller that must not read
+// the table's bytes (#2212: an update that may copy the table inside S3
+// instead) and that verifies them wherever it does read them.
+func ReadParquetMetadataFooter(ctx context.Context, path string) (DumpMetadata, error) {
+	if !strings.HasPrefix(path, "s3://") {
+		return ReadParquetMetadata(path)
+	}
 
 	db, err := sql.Open("duckdb", "")
 	if err != nil {

@@ -62,8 +62,8 @@ const (
 // wanted the cadence of a reporting copy. The floor does NOT stop the two
 // costs that number once guarded against: a server with no previous backup
 // takes a FULL backup on its first slot (ChooseBackupMethod), a server whose
-// snapshots go only to S3 rewrites and re-uploads every table at every slot
-// (#2212), and a
+// snapshots go only to S3 downloads, rewrites and re-uploads every CHANGED
+// table at every slot (#2212; unchanged ones are copied inside S3), and a
 // local-only server keeps every snapshot it publishes. All are said out loud instead, at save and
 // at boot (warnBackupScheduleRate and its twin in backup_schedule_api.go)
 // and on the card as the 30-day count, so the operator reads the rate before

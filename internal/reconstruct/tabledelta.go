@@ -277,9 +277,18 @@ func readDeltaChainStart(ctx context.Context, basePath string) (time.Time, error
 // base's time, not at this run, and would otherwise carry an already too old
 // start forward for a whole cycle.
 func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, capGap *CaptureGap, at time.Time, hasAnchor bool, reserved string, chainFloor, newStart time.Time) string {
-	switch {
-	case strings.HasPrefix(basePath, "s3://"):
+	if strings.HasPrefix(basePath, "s3://") {
 		return "the previous snapshot is read from S3"
+	}
+	return chainCompactReason(prev, baseSize, capGap, at, hasAnchor, reserved, chainFloor, newStart)
+}
+
+// chainCompactReason is tableDeltaCompactReason without the S3 rule: every
+// reason a chain must end that is about the chain itself, not about where its
+// files are. A copy inside S3 (#2212) applies these to the chain it would
+// carry, exactly as a local carry does.
+func chainCompactReason(prev *tableDelta, baseSize int64, capGap *CaptureGap, at time.Time, hasAnchor bool, reserved string, chainFloor, newStart time.Time) string {
+	switch {
 	case !hasAnchor:
 		// A delta with no anchor cannot be resumed from, so the next run would
 		// set it aside, start over from the base and write another one: a
@@ -1006,6 +1015,12 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	reserved := ""
 	if cols, err := baseline.ParseSchemaText(in.CreateTableSQL); err == nil {
 		reserved = reservedDeltaColumn(cols)
+	}
+	// An s3:// previous snapshot cannot be linked; on an S3-only server's
+	// update an unchanged table and its chain are copied inside S3 instead
+	// (#2212), behind the same refusals and chain rules.
+	if s3CopyUnchangedChain(ctx, p, hasAnchor, reserved, rep) {
+		return nil
 	}
 	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.capGap, p.cfg.At, hasAnchor, reserved, p.cfg.ChainStartFloor, newChainStart(p)); reason != "" {
 		return rewriteWithEmptyDelta(ctx, p, in, newBase, reason, reserved != "", rep)

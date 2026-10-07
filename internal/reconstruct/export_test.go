@@ -65,8 +65,8 @@ func CountFoldWindowsForTest(calls *atomic.Int32) (restore func()) {
 // goroutine, after the folds, so a plain variable is enough.
 func CountManifestReuseForTest(into *baselineintegrity.ManifestStats) (restore func()) {
 	prev := manifestWriter
-	manifestWriter = func(dir string, priors []string) (baselineintegrity.ManifestStats, error) {
-		st, err := prev(dir, priors)
+	manifestWriter = func(dir string, priors []string, carried map[string]string) (baselineintegrity.ManifestStats, error) {
+		st, err := prev(dir, priors, carried)
 		*into = st
 		return st, err
 	}
@@ -79,4 +79,12 @@ func AfterDestructiveDDLCheckForTest(fn func()) (restore func()) {
 	prev := afterDestructiveDDLCheck
 	afterDestructiveDDLCheck = fn
 	return func() { afterDestructiveDDLCheck = prev }
+}
+
+// OnS3BaselineDownloadForTest calls fn with every s3:// table file a fold
+// downloads (#2212).
+func OnS3BaselineDownloadForTest(fn func(string)) (restore func()) {
+	prev := s3BaselineDownloadHook
+	s3BaselineDownloadHook = fn
+	return func() { s3BaselineDownloadHook = prev }
 }

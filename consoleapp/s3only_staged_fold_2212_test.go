@@ -740,7 +740,7 @@ func TestRemovePartialUpload_theMarkerGoesLastAndOnlyIfEverythingElseWent(t *tes
 		t.Run(tc.name, func(t *testing.T) {
 			store := &fakePartialStore{keys: keys, failOn: tc.failOn}
 			stubPartialStore(t, store)
-			words := removePartialUpload(context.Background(), req, dest)
+			words := removePartialUpload(context.Background(), req, dest, "")
 			t.Logf("words: %s; deleted %v", words, store.deleted)
 			markerGone := false
 			for i, k := range store.deleted {
@@ -771,7 +771,7 @@ func TestRemovePartialUpload_aCopyWithoutAMarkerIsLeftAlone(t *testing.T) {
 	store := &fakePartialStore{keys: []string{pre + "shop/a.parquet"}}
 	stubPartialStore(t, store)
 	logs := captureWarnings(t)
-	words := removePartialUpload(context.Background(), s3OnlyRequest("s"), "s3://bucket/s/"+stamp)
+	words := removePartialUpload(context.Background(), s3OnlyRequest("s"), "s3://bucket/s/"+stamp, "")
 	t.Logf("words: %s", words)
 	if len(store.deleted) != 0 {
 		t.Fatalf("deleted %v from a folder with no marker", store.deleted)

@@ -7887,8 +7887,9 @@ function locationMigrationWords(m) {
 // saved location is a bucket with no folder (#1659), or "" when it does not
 // apply. Since #2212 such a server is updated from the recorded changes too:
 // the update is built in the staging folder, uploaded, and deleted. What is
-// left to say is its cost (every table is downloaded, rewritten and uploaded
-// again, changed or not), or, where the staging folder cannot be used
+// left to say is its cost (each changed table is downloaded, rewritten and
+// uploaded again; an unchanged one is copied inside S3), or, where the
+// staging folder cannot be used
 // (staging_refusal), that every run is a full read. The values are compared
 // as stored, untrimmed, the way the daemon reads them.
 function s3OnlyBackupWarning(srv, fix = true) {
@@ -7911,8 +7912,8 @@ function s3OnlyBackupWarning(srv, fix = true) {
     }
     return why + ", so every scheduled snapshot reads your whole database." + then("Fix the staging folder, or add a Local folder.");
   }
-  return "With S3 only, each scheduled update downloads every table from S3, rewrites it in the staging folder and uploads it again, even tables that did not change." +
-    then("Add a Local folder so unchanged tables are not downloaded and rewritten.");
+  return "With S3 only, each scheduled update downloads, rewrites and uploads again the tables that changed. Unchanged tables are usually copied inside S3 without being downloaded; the first update after a full read rewrites every table, as does an update whose previous snapshot is in another bucket." +
+    then("Add a Local folder so changed tables are not downloaded first.");
 }
 
 // s3OnlyBackupFault: the note above is a fault (red) only when no update can
@@ -8814,6 +8815,13 @@ function archivingPanel(servers, serversErr) {
 // every byte was written again (no hard link; the daemon log names the
 // cause). Confirming a saving the daemon log denies is the bug this splits
 // away (#1578).
+// s3CopiedNote (#2212) counts the tables an S3-only update copied inside S3
+// from the previous snapshot: nothing was written for them, so they are
+// neither "refreshed" nor part of the reuse note, which speaks of disk.
+function s3CopiedNote(n) {
+  return n ? ", " + n + " unchanged and copied inside S3 without being downloaded" : "";
+}
+
 function reusedCopiedNote(copied) {
   if (!copied) return "";
   return " (" + copied + " of them written in full, which saved no disk; DBTrail's log says why)";
@@ -9082,10 +9090,11 @@ function baselineRefreshNote(rf) {
       // the CLI summary follows: a reused table is not a refreshed one, and
       // which tables actually cost a rewrite is the number worth seeing.
       const reused = rf.carried || 0;
-      const rewritten = Math.max(0, (rf.tables || 0) - reused);
+      const rewritten = Math.max(0, (rf.tables || 0) - reused - (rf.s3_copied || 0));
       text = "Automatic refresh" + (when ? " at " + when : "") + ": " +
         rewritten + " table(s) refreshed" +
-        (reused ? ", " + reused + " unchanged and reused" + reusedCopiedNote(rf.carried_copied || 0) : "") + ".";
+        (reused ? ", " + reused + " unchanged and reused" + reusedCopiedNote(rf.carried_copied || 0) : "") +
+        s3CopiedNote(rf.s3_copied || 0) + ".";
       break;
     case "failed":
       // published means the fold finished and marked the snapshot, and only
@@ -10817,6 +10826,7 @@ function backupScheduleCard(cur, b) {
         body.append(el("p", { class: "form-hint", text:
           "Last scheduled snapshot finished " + when + " (" + what + "): " + (run.tables || 0) + " table(s)" +
           (reused ? ", " + reused + " unchanged and reused" + reusedCopiedNote(run.carried_copied || 0) : "") +
+          s3CopiedNote(run.s3_copied || 0) +
           (run.uploaded ? ", " + run.uploaded + " file(s) uploaded" : "") + "." }));
       } else {
         alarm = true;

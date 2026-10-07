@@ -136,6 +136,17 @@ type FullTableConfig struct {
 	// uploaded.
 	DownloadDir string
 
+	// S3CopyUnchangedTo, when set, is the s3:// root this run's snapshot is
+	// uploaded to, and turns on copying unchanged tables inside S3 (#2212):
+	// with an s3:// previous snapshot, a table the window did not touch is
+	// not written at all; its report lists the previous object(s) to copy
+	// (TableReport.S3Copies), and the caller MUST hand those to the upload
+	// (baseline.UploadWithCopies), or the snapshot is published without
+	// them. So it is set only by a caller that uploads the run and passes
+	// the copies: the daemon, for a server whose snapshots go only to S3.
+	// Empty (the command line, a restore) folds such tables as before.
+	S3CopyUnchangedTo string
+
 	// OutputFormat selects the artifact the run produces. The zero value means
 	// "not specified" and resolves to OutputFormatMydumper, matching this
 	// struct's existing convention for ArchiveFetcher/WarnEventThreshold.
@@ -387,6 +398,15 @@ type TableReport struct {
 	// consumer that renders "reused" as a disk saving must count THIS, not
 	// CarriedForward, or it confirms a saving the daemon log denies.
 	CarriedByLink bool
+	// S3Copies lists the files of this table that the run did NOT write
+	// because they are copied inside S3 when the snapshot is uploaded
+	// (#2212, FullTableConfig.S3CopyUnchangedTo). Non-empty means the table
+	// is absent from the local snapshot directory and present in the
+	// published one only once the upload performed these copies.
+	S3Copies []baseline.RemoteCopy
+	// S3CopyChainStart is where the copied table's chain of deltas starts,
+	// the instant its readers fetch from; zero when no chain was copied.
+	S3CopyChainStart time.Time
 
 	// TableDelta is true when the table was published as its previous file
 	// plus a chain of deltas beside it instead of being rewritten (#1638,
@@ -946,7 +966,7 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 			tableName := metaReport.Schema + "." + metaReport.Table
 			baselinePath, _, _, perr := FindBaseline(ctx, cfg.BaselineSrc, metaReport.Schema, metaReport.Table, cfg.At)
 			if perr == nil {
-				bmeta, merr := baseline.ReadParquetMetadataAny(ctx, baselinePath)
+				bmeta, merr := readBaselineMeta(ctx, cfg, baselinePath)
 				if merr == nil {
 					if err := WriteMetadataFile(cfg.OutputDir, cfg.At,
 						bmeta.GTIDSet, bmeta.BinlogFile, bmeta.BinlogPos); err != nil {
@@ -997,12 +1017,12 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 		}
 		baseline.SignSnapshot(cfg.snapshotDir, cfg.WriterID)
 		carryViewsSkipped(ctx, cfg.snapshotDir, reports)
-		st, err := manifestWriter(cfg.snapshotDir, manifestPriorDirs(reports))
+		st, err := manifestWriter(cfg.snapshotDir, manifestPriorDirs(reports), carriedDigests(reports))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("snapshot complete but could not write integrity manifest: %w", err))
 		} else {
 			slog.Info("integrity manifest written", "snapshot", cfg.snapshotDir,
-				"files_hashed", st.Hashed, "files_reused", st.Reused)
+				"files_hashed", st.Hashed, "files_reused", st.Reused, "files_copied_in_s3", st.Carried)
 		}
 	}
 
@@ -1012,9 +1032,14 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	return reports, nil
 }
 
-// manifestWriter is baselineintegrity.WriteManifestFrom behind a variable so
+// s3BaselineDownloadHook is called with every s3:// table file the fold
+// downloads, before the download: a test's way to assert that a table copied
+// inside S3 (#2212) was never downloaded. A no-op otherwise.
+var s3BaselineDownloadHook = func(string) {}
+
+// manifestWriter is baselineintegrity.WriteManifestWith behind a variable so
 // a test can see what a run reused (#1717).
-var manifestWriter = baselineintegrity.WriteManifestFrom
+var manifestWriter = baselineintegrity.WriteManifestWith
 
 // localSnapshotDir is the snapshot directory a local table file lives in
 // (<snapshot>/<schema>/<table>.parquet), "" for an S3 path or no path.
@@ -1209,7 +1234,7 @@ func ReconstructTable(
 		"path", baselinePath, "snapshot_time", snapshotTime.UTC().Format(time.RFC3339))
 
 	// ── 2. Read baseline Parquet metadata ──────────────────────────────────
-	bmeta, err := baseline.ReadParquetMetadataAny(ctx, baselinePath)
+	bmeta, err := readBaselineMeta(ctx, cfg, baselinePath)
 	if err != nil {
 		return nil, fmt.Errorf("read baseline metadata: %w", err)
 	}
@@ -1665,6 +1690,13 @@ func ReconstructTable(
 	// capGap is passed in because step 3c does NOT refuse under --allow-gaps:
 	// it returns the finding and lets the run proceed. See carryForwardEligible
 	// for why a known gap disqualifies a table from being carried at all.
+	//
+	// An s3:// previous snapshot cannot be linked; on an S3-only server's
+	// update its unchanged table is copied inside S3 instead (#2212).
+	if s3CopyUnchanged(ctx, cfg, schema, table, baselinePath, fold.changeCount(), capGap, rep) {
+		rep.Duration = time.Since(start)
+		return rep, nil
+	}
 	if carryForwardEligible(cfg.CarryForwardUnchanged, cfg.OutputFormat, baselinePath, fold.changeCount(), capGap) {
 		linked, cerr := carryForward(ctx, baselinePath, cfg.snapshotDir, schema, table)
 		if cerr != nil {
@@ -3079,6 +3111,7 @@ func materializeBaselineLocalIn(ctx context.Context, path string, tuning duckdbu
 	// against the snapshot's _MANIFEST before the DuckDB COPY below re-encodes
 	// them — the temp copy is no longer byte-identical to the object, so this
 	// pre-pass is the only point where the manifest's raw-byte CRC applies.
+	s3BaselineDownloadHook(path)
 	if err := validateS3Baseline(ctx, path); err != nil {
 		return "", nil, err
 	}

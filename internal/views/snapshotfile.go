@@ -73,14 +73,14 @@ func init() {
 				"regenerate the file with `bintrail views`)", "dir", snapshotDir, "error", err)
 		}
 	})
-	baseline.SetSnapshotViewsRespeller(func(ctx context.Context, snapshotDir, root string) (content string, ok bool, err error) {
+	baseline.SetSnapshotViewsRespeller(func(ctx context.Context, snapshotDir, root string, extra []baseline.RemoteCopy) (content string, ok bool, err error) {
 		defer func() {
 			if r := recover(); r != nil {
 				recoverLogSnapshotViews("respell", snapshotDir, r)
 				content, ok, err = "", false, fmt.Errorf("views generator panicked: %v", r)
 			}
 		}()
-		return GenerateSnapshotViews(ctx, snapshotDir, root)
+		return GenerateSnapshotViews(ctx, snapshotDir, root, extra)
 	})
 }
 
@@ -111,7 +111,11 @@ func WriteSnapshotViews(ctx context.Context, snapshotDir string) error {
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", snapshotDir, err)
 	}
-	content, ok, err := GenerateSnapshotViews(ctx, snapshotDir, filepath.ToSlash(abs))
+	// No copies here: this copy of the file names this machine's paths, and a
+	// table copied inside S3 (#2212) has no file on this machine to name.
+	// Such a snapshot is built in a staging folder that is deleted after its
+	// upload, and the upload regenerates the file with every table in it.
+	content, ok, err := GenerateSnapshotViews(ctx, snapshotDir, filepath.ToSlash(abs), nil)
 	if err != nil || !ok {
 		return err
 	}
@@ -145,12 +149,16 @@ func WriteSnapshotViews(ctx context.Context, snapshotDir string) error {
 // ok=false means the directory is not a snapshot this file can describe (its
 // name does not parse, or it holds no tables); that is a decline, not an
 // error.
-func GenerateSnapshotViews(ctx context.Context, snapshotDir, root string) (string, bool, error) {
+//
+// extra are the snapshot's files that are not on disk but copied inside S3
+// (#2212): each copied table is described like a local one, its footer read
+// from the copy's source (the same bytes), its path spelled under root.
+func GenerateSnapshotViews(ctx context.Context, snapshotDir, root string, extra []baseline.RemoteCopy) (string, bool, error) {
 	ts, ok := snapshotdir.ParseTime(filepath.Base(snapshotDir))
 	if !ok {
 		return "", false, nil
 	}
-	tables, err := snapshotTables(snapshotDir)
+	tables, err := snapshotTablesWith(snapshotDir, extra)
 	if err != nil {
 		return "", false, err
 	}
@@ -230,42 +238,74 @@ const snapshotViewsTempPrefix = SnapshotFileTempPrefix
 // snapshot directory, forward-slashed, the same shape the followed producers
 // fill. Sorted so the rendered file is deterministic for a given snapshot.
 func snapshotTables(snapshotDir string) ([]BaselineTable, error) {
+	return snapshotTablesWith(snapshotDir, nil)
+}
+
+// snapshotTablesWith is snapshotTables over the files on disk plus the ones
+// copied inside S3 (#2212). A copied file joins its schema's listing by name,
+// so a copied chain marks its table exactly as one on disk would; its Path is
+// the copy's source, which holds the same bytes, for the footer read. A
+// schema whose every table was copied has no folder on disk at all.
+func snapshotTablesWith(snapshotDir string, extra []baseline.RemoteCopy) ([]BaselineTable, error) {
 	entries, err := os.ReadDir(snapshotDir)
 	if err != nil {
 		return nil, err
 	}
-	var out []BaselineTable
+	names := map[string][]string{}
+	var schemas []string
+	addSchema := func(s string) {
+		if _, ok := names[s]; !ok {
+			names[s] = nil
+			schemas = append(schemas, s)
+		}
+	}
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
+		addSchema(e.Name())
 		files, err := os.ReadDir(filepath.Join(snapshotDir, e.Name()))
 		if err != nil {
 			return nil, err
 		}
-		names := make([]string, 0, len(files))
 		for _, f := range files {
 			if !f.IsDir() {
-				names = append(names, f.Name())
+				names[e.Name()] = append(names[e.Name()], f.Name())
 			}
 		}
+	}
+	src := map[string]string{} // local-shaped path of a copied file -> its source
+	for _, c := range extra {
+		schema, file, ok := strings.Cut(c.Rel, "/")
+		if !ok || strings.Contains(file, "/") {
+			return nil, fmt.Errorf("copied file %q is not at <schema>/<file>", c.Rel)
+		}
+		addSchema(schema)
+		names[schema] = append(names[schema], file)
+		src[filepath.Join(snapshotDir, schema, file)] = c.Src
+	}
+	var out []BaselineTable
+	for _, schema := range schemas {
 		// The listing is already in hand, so the chain (#1638, #1718) is read
 		// off it. Half a pair is refused for the reason MarkTableDeltas gives.
-		chains, err := baseline.MarkTableDeltaFiles(filepath.Join(snapshotDir, e.Name()), names)
+		chains, err := baseline.MarkTableDeltaFiles(filepath.Join(snapshotDir, schema), names[schema])
 		if err != nil {
 			return nil, err
 		}
-		for _, f := range files {
-			if f.IsDir() || !strings.HasSuffix(f.Name(), ".parquet") {
+		for _, name := range names[schema] {
+			if !strings.HasSuffix(name, ".parquet") {
 				continue
 			}
-			path := filepath.Join(snapshotDir, e.Name(), f.Name())
+			path := filepath.Join(snapshotDir, schema, name)
 			c := chains[path]
+			if s, ok := src[path]; ok {
+				path = s
+			}
 			out = append(out, BaselineTable{
-				Schema:      e.Name(),
-				Table:       strings.TrimSuffix(f.Name(), ".parquet"),
+				Schema:      schema,
+				Table:       strings.TrimSuffix(name, ".parquet"),
 				Path:        path,
-				Rel:         e.Name() + "/" + f.Name(),
+				Rel:         schema + "/" + name,
 				Delta:       c != nil,
 				DeltaLegacy: c != nil && c.Legacy,
 			})

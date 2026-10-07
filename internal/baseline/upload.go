@@ -11,6 +11,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"golang.org/x/sync/errgroup"
@@ -45,6 +46,20 @@ import (
 // Extracted from cmd/bintrail (#613) so the bintrail-console daemon can run the
 // dump→convert→upload pipeline in-process, without a docker socket.
 func Upload(ctx context.Context, outputDir, s3URL, region string, retry bool) (int, error) {
+	return UploadWithCopies(ctx, outputDir, s3URL, region, retry, nil)
+}
+
+// UploadWithCopies is Upload for ONE snapshot directory some of whose files
+// are not on disk (#2212): each copy is made inside S3, from its source
+// object to the key the file would have had on disk, between the
+// _INCOMPLETE marker and _SUCCESS like every data file. A copy that fails
+// fails the upload, so _SUCCESS is never written over a snapshot missing a
+// table. The copies are requested through the destination bucket's client,
+// so they run in its region and with its credentials.
+//
+// With copies, outputDir must be the snapshot directory itself; the list is
+// checked (validateRemoteCopies) before anything is sent.
+func UploadWithCopies(ctx context.Context, outputDir, s3URL, region string, retry bool, copies []RemoteCopy) (int, error) {
 	bucket, prefix, err := storage.ParseS3URL(s3URL)
 	if err != nil {
 		return 0, fmt.Errorf("invalid upload URL: %w", err)
@@ -55,7 +70,7 @@ func Upload(ctx context.Context, outputDir, s3URL, region string, retry bool) (i
 		return 0, err
 	}
 
-	return uploadWithOps(ctx, outputDir, prefix, retry, newS3UploadOps(client, bucket))
+	return uploadWithOpsCopies(ctx, outputDir, prefix, retry, newS3UploadOps(client, bucket), copies)
 }
 
 // newS3UploadOps routes the upload's S3 operations through an injectable seam
@@ -71,6 +86,13 @@ func newS3UploadOps(client *s3.Client, bucket string) s3UploadOps {
 			return storage.S3ObjectExists(ctx, client, bucket, key)
 		},
 		deleteObject: func(ctx context.Context, key string) error { return storage.DeleteObject(ctx, client, bucket, key) },
+		copyObject: func(ctx context.Context, src, key string) error {
+			srcBucket, srcKey, err := storage.ParseS3URL(src)
+			if err != nil {
+				return err
+			}
+			return storage.CopyObject(ctx, client, srcBucket, srcKey, bucket, key)
+		},
 		putObject: func(ctx context.Context, key string, body []byte) error {
 			return storage.PutSmallObject(ctx, client, bucket, key, body)
 		},
@@ -101,6 +123,9 @@ type s3UploadOps struct {
 	// error for anything else. nil skips the pointer (tests of other steps).
 	putObject func(ctx context.Context, key string, body []byte) error
 	getObject func(ctx context.Context, key string) (body []byte, found bool, err error)
+	// copyObject copies the s3:// object src to key inside S3 (#2212). Only
+	// an upload with copies calls it, and one without it is refused.
+	copyObject func(ctx context.Context, src, key string) error
 }
 
 // snapshotViewsRespeller regenerates a snapshot's views file against a
@@ -110,10 +135,13 @@ type s3UploadOps struct {
 // hook for the same reason marker.go's writer is one — the generator lives in
 // internal/views, which imports this package. ok=false means the directory
 // holds nothing the generator can describe.
-var snapshotViewsRespeller func(ctx context.Context, snapshotDir, root string) (content string, ok bool, err error)
+//
+// extra lists the snapshot's files that are not on disk (#2212): their tables
+// belong in the file all the same.
+var snapshotViewsRespeller func(ctx context.Context, snapshotDir, root string, extra []RemoteCopy) (content string, ok bool, err error)
 
 // SetSnapshotViewsRespeller arms the upload-time respell. Nil disarms (tests).
-func SetSnapshotViewsRespeller(f func(ctx context.Context, snapshotDir, root string) (string, bool, error)) {
+func SetSnapshotViewsRespeller(f func(ctx context.Context, snapshotDir, root string, extra []RemoteCopy) (string, bool, error)) {
 	snapshotViewsRespeller = f
 }
 
@@ -126,20 +154,33 @@ func SnapshotViewsRespellerArmed() bool { return snapshotViewsRespeller != nil }
 // uploadWithOps performs the crash-safe upload ordering against ops. See the
 // Upload doc for the four-step contract it guarantees.
 func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, ops s3UploadOps) (int, error) {
+	return uploadWithOpsCopies(ctx, outputDir, prefix, retry, ops, nil)
+}
+
+// uploadWithOpsCopies is uploadWithOps with the snapshot's files that are
+// not on disk (UploadWithCopies).
+func uploadWithOpsCopies(ctx context.Context, outputDir, prefix string, retry bool, ops s3UploadOps, copies []RemoteCopy) (int, error) {
+	// skipExisting reports whether --retry finds key already in the bucket.
+	skipExisting := func(ctx context.Context, key string) (bool, error) {
+		if !retry {
+			return false, nil
+		}
+		exists, err := ops.objectExists(ctx, key)
+		if err != nil {
+			return false, err
+		}
+		if exists {
+			slog.Info("skipping existing S3 object (--retry)", "key", key)
+		}
+		return exists, nil
+	}
 	upload := func(ctx context.Context, path string) error {
 		key, err := storage.BuildS3Key(outputDir, path, prefix)
 		if err != nil {
 			return err
 		}
-		if retry {
-			exists, err := ops.objectExists(ctx, key)
-			if err != nil {
-				return err
-			}
-			if exists {
-				slog.Info("skipping existing S3 object (--retry)", "key", key)
-				return nil
-			}
+		if skip, err := skipExisting(ctx, key); err != nil || skip {
+			return err
 		}
 		if err := ops.uploadFile(ctx, path, key); err != nil {
 			return err
@@ -169,6 +210,20 @@ func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, op
 		return 0, fmt.Errorf("refusing to upload %q: no completed snapshot was found in it or under it, so the "+
 			"%s marker cannot be written and an interrupted upload would read as a complete backup",
 			outputDir, IncompleteMarker)
+	}
+	if len(copies) > 0 {
+		// Copies are keyed below ONE snapshot directory, so the upload must
+		// be of exactly that directory: under a root holding several, a copy
+		// would land in the wrong prefix, or in none.
+		if len(snapDirs) != 1 || filepath.Clean(snapDirs[0]) != filepath.Clean(outputDir) {
+			return 0, fmt.Errorf("refusing to upload %q with %d files copied inside S3: copies need the upload to be of one snapshot directory", outputDir, len(copies))
+		}
+		if ops.copyObject == nil {
+			return 0, fmt.Errorf("refusing to upload %q: %d of its files are to be copied inside S3 and this upload path cannot copy", outputDir, len(copies))
+		}
+		if err := validateRemoteCopies(outputDir, copies); err != nil {
+			return 0, err
+		}
 	}
 	incompleteKey := func(snapDir string) (string, error) {
 		return storage.BuildS3Key(outputDir, filepath.Join(snapDir, IncompleteMarker), prefix)
@@ -249,11 +304,14 @@ func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, op
 		// and still uploads verbatim, which is theirs to spell.
 		if base := filepath.Base(filepath.Dir(path)); d.Name() == SnapshotViewsName {
 			if _, isSnap := snapshotdir.ParseTime(base); isSnap {
+				if len(copies) > 0 && filepath.Dir(path) == filepath.Clean(outputDir) {
+					return nil // regenerated below, with the copied tables
+				}
 				// One at a time: the views generator reads the snapshot
 				// through DuckDB, and nothing is gained by running several
 				// (a sweep can carry one per snapshot) beside the data.
 				alone = append(alone, func(ctx context.Context) (bool, error) {
-					return uploadRespelledViews(ctx, path, outputDir, prefix, retry, ops)
+					return uploadRespelledViews(ctx, path, outputDir, prefix, retry, ops, nil)
 				})
 				return nil
 			}
@@ -276,6 +334,47 @@ func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, op
 	})
 	if err != nil {
 		return count, err
+	}
+	// The copies are data files like any other (#2212): in the same pool,
+	// inside the same bracket. The views file is regenerated whether or not
+	// the fold left one on disk: with every table copied it left none, and
+	// the copied tables are in the snapshot all the same.
+	for _, c := range copies {
+		key, err := storage.BuildS3Key(outputDir, filepath.Join(outputDir, filepath.FromSlash(c.Rel)), prefix)
+		if err != nil {
+			return count, err
+		}
+		jobs = append(jobs, func(ctx context.Context) (bool, error) {
+			if skip, err := skipExisting(ctx, key); err != nil || skip {
+				return false, err
+			}
+			// Once sent, a copy is the bucket's to finish: cutting the request
+			// does not stop it. So none starts after another file failed, and
+			// one that started is waited for, on a context the failure does not
+			// cancel (bounded, so a hung request cannot hold the run forever):
+			// the caller's cleanup of a failed upload must find every object
+			// that will ever land, or a late copy would sit in a folder with
+			// no marker, which discovery reads as complete (#467).
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), copyTimeout)
+			defer cancel()
+			if err := ops.copyObject(cctx, c.Src, key); err != nil {
+				if cctx.Err() != nil && errors.Is(err, context.DeadlineExceeded) {
+					return false, &CopyMayStillLandError{Key: key, Err: err}
+				}
+				return false, fmt.Errorf("copy %s into the new snapshot inside S3: %w", c.Rel, err)
+			}
+			slog.Debug("copied inside S3", "src", c.Src, "key", key)
+			return true, nil
+		})
+	}
+	if len(copies) > 0 {
+		viewsPath := filepath.Join(outputDir, SnapshotViewsName)
+		alone = append(alone, func(ctx context.Context) (bool, error) {
+			return uploadRespelledViews(ctx, viewsPath, outputDir, prefix, retry, ops, copies)
+		})
 	}
 	sent, err := runUploadJobs(ctx, jobs, uploadConcurrency)
 	count += sent
@@ -316,12 +415,45 @@ func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, op
 }
 
 // uploadConcurrency is how many of a snapshot's data files are sent at once.
+// A copy inside S3 (#2212) runs in the same pool; one over 5 GiB is a
+// multipart copy, whose abort on failure runs on a context the cancellation
+// does not reach (storage.CopyObject).
 // Each is one PUT: the files sent this way are under uploadParallelMaxSize,
 // below storage.UploadFileSinglePutMax (a test pins that), so a failure that
 // cancels the others never leaves a half-done multipart upload behind. Files
 // are read in place from disk, not buffered, so this bounds open files and
 // connections rather than memory.
 const uploadConcurrency = 8
+
+// copyTimeout bounds one copy inside S3 once started (#2212), parts
+// included. S3 copies at well over 100 MiB/s, so an hour covers objects of
+// hundreds of GiB; past it the request is cut, the run fails, and a copy the
+// bucket still finishes lands after the cleanup, which is what the bound
+// trades for never hanging.
+//
+// The cost of waiting: a started copy of a very large object runs to its end
+// (up to this bound) even after another file failed and the run is lost.
+// That is time and S3 requests spent on a doomed run, never a correctness
+// problem; the alternative is an object landing after the cleanup.
+//
+// A variable for tests.
+var copyTimeout = time.Hour
+
+// CopyMayStillLandError is a copy inside S3 that ran out of time
+// (copyTimeout): the request was cut, and the bucket may still finish the
+// copy afterwards. A caller cleaning up the failed upload must keep the
+// snapshot folder's _INCOMPLETE marker, or that late object would sit in a
+// folder with no marker, which discovery reads as complete (#467).
+type CopyMayStillLandError struct {
+	Key string // the destination key that may still appear
+	Err error
+}
+
+func (e *CopyMayStillLandError) Error() string {
+	return fmt.Sprintf("the copy inside S3 to %s did not finish in %s, and the bucket may still complete it: %v", e.Key, copyTimeout, e.Err)
+}
+
+func (e *CopyMayStillLandError) Unwrap() error { return e.Err }
 
 // uploadParallelMaxSize is the size from which a file is sent on its own,
 // after the small ones. A large file is not waiting on a round trip but on
@@ -402,7 +534,7 @@ func SnapshotViewsStagingPrefix() string { return snapshotViewsTempPrefix }
 // Every refusal here is a skip with a warning, never an error: the file is a
 // convenience beside the data, and failing the upload over it would hold the
 // _SUCCESS marker hostage to an artifact `bintrail views` can rebuild.
-func uploadRespelledViews(ctx context.Context, localPath, outputDir, prefix string, retry bool, ops s3UploadOps) (uploaded bool, err error) {
+func uploadRespelledViews(ctx context.Context, localPath, outputDir, prefix string, retry bool, ops s3UploadOps, extra []RemoteCopy) (uploaded bool, err error) {
 	key, err := storage.BuildS3Key(outputDir, localPath, prefix)
 	if err != nil {
 		return false, err
@@ -435,11 +567,13 @@ func uploadRespelledViews(ctx context.Context, localPath, outputDir, prefix stri
 	if i := strings.LastIndex(key, "/"); i >= 0 {
 		dirKey = key[:i]
 	}
-	content, ok, genErr := snapshotViewsRespeller(ctx, filepath.Dir(localPath), ops.objectURL(dirKey))
+	content, ok, genErr := snapshotViewsRespeller(ctx, filepath.Dir(localPath), ops.objectURL(dirKey), extra)
 	switch {
 	case genErr != nil:
 		slog.Warn("skipping the snapshot's views file: could not regenerate it for S3 "+
-			"(regenerate with `bintrail views` against the bucket)", "key", key, "error", genErr)
+			"(regenerate with `bintrail views` against the bucket)", "key", key, "error", genErr,
+			// With copies there is no local file to fall back on (#2212).
+			"tables_copied_in_s3", len(extra))
 		return false, nil
 	case !ok:
 		// A decline, not a failure: the directory holds nothing the generator

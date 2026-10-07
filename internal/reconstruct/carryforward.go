@@ -207,7 +207,10 @@ func carryForwardFile(ctx context.Context, srcPath, dst string, validate bool) (
 // server reads its previous snapshot from the BUCKET, where carrying a file
 // forward would mean downloading it — an S3 source would have to be downloaded, which buys the
 // re-encode back and reintroduces the cost this avoids. Those runs take the
-// ordinary merge path, which is correct, just not free.
+// ordinary merge path, which is correct, just not free, unless the run
+// uploads its snapshot to S3 and says where (FullTableConfig.S3CopyUnchangedTo,
+// an S3-only server's update, #2212): then the table is copied inside S3
+// instead (s3copy.go), which is the S3 form of this.
 func carryForwardEligible(enabled bool, format, srcPath string, changes int, capGap *CaptureGap) bool {
 	// Mydumper output is a SQL dump for a human to load, not a snapshot to be
 	// discovered, so there is no previous file to carry: the rows still have

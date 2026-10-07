@@ -296,7 +296,7 @@ func stubReadsFrom(t *testing.T, at time.Time, err error) *atomic.Int32 {
 	var n atomic.Int32
 	prev := snapshotReadsFrom
 	t.Cleanup(func() { snapshotReadsFrom = prev })
-	snapshotReadsFrom = func(context.Context, string, time.Time) (time.Time, error) {
+	snapshotReadsFrom = func(context.Context, string, time.Time, []time.Time) (time.Time, error) {
 		n.Add(1)
 		return at, err
 	}

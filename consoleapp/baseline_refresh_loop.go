@@ -82,6 +82,14 @@ type refreshRequest struct {
 	// own snapshot folder. Only the write path reads this
 	// (stagedOutputRoot).
 	StagedRun string
+	// s3Copies is set with StagedRun and only with it: the fold copies the
+	// run's unchanged tables inside S3 instead of writing them (#2212,
+	// reconstruct.FullTableConfig.S3CopyUnchangedTo), and records here what
+	// the upload must copy. A pointer so the fold, deep in executeRefresh,
+	// can fill it for the upload and the read bound in runRefresh. Nil
+	// everywhere else (a Local folder, a restore): those publish the
+	// directory whole, so a table left out of it would be lost.
+	s3Copies *stagedCopies
 	// PlanNewTables, set by the backup schedule, decides what happens to the
 	// tables a published update left out (#1993): it is handed every one of
 	// them and returns a console.NewTablesAction* value and, for a refusal,
@@ -302,6 +310,9 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		job = s.beginJob(console.BaselineRunRefresh, req.ServerID, req.ServerName, req.Trigger, "", started)
 		var journaled bool
 		req.StagedRun, journaled, stageErr = s.beginStagedRun(job)
+		if stageErr == nil {
+			req.s3Copies = &stagedCopies{}
+		}
 		cleanupStaged = stagedCleanup(job, req, journaled)
 		// Registered in this order so the folder goes BEFORE the journal
 		// entry that would reclaim it (defers run newest first), and a
@@ -492,7 +503,13 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// s3:// previous snapshot, since carrying a file forward means hard-linking
 	// it). Reuse is on and the card says unchanged tables keep their file, so
 	// a count that CANNOT be nonzero here has to say so.
-	if req.CarryForwardUnchanged && strings.HasPrefix(baselineFoldSource(req), "s3://") {
+	switch {
+	case req.s3Copies != nil:
+		// An S3-only server (#2212): unchanged tables were copied inside the
+		// bucket, never downloaded. Not a disk saving: the bucket keeps a full
+		// copy per snapshot.
+		pub = append(pub, "copied_in_s3", reuse.s3Copied)
+	case req.CarryForwardUnchanged && strings.HasPrefix(baselineFoldSource(req), "s3://"):
 		pub = append(pub, "reuse_unchanged", "not applicable: the previous snapshot is read from S3, and reusing a file means linking it on disk")
 	}
 	slog.Info("baseline refresh: published", pub...)
@@ -547,7 +564,11 @@ func (s *baselineSupervisor) publishedReadsFrom(req refreshRequest, at time.Time
 	if !s.tableDeltas {
 		return at, true
 	}
-	from, err := snapshotReadsFrom(s.ctx, stagedOutputRoot(req), at)
+	var copied []time.Time
+	if req.s3Copies != nil {
+		copied = req.s3Copies.chainStarts
+	}
+	from, err := snapshotReadsFrom(s.ctx, stagedOutputRoot(req), at, copied)
 	known := err == nil
 	why := ""
 	if err != nil {
@@ -663,7 +684,9 @@ func baselineFoldSource(req refreshRequest) string {
 // source), so every table was rewritten and re-uploaded at every slot even
 // when the local directory held the very snapshot the bucket had (#1626), and
 // after the first fold it always does: the fold writes locally and uploads,
-// and retention never removes the newest snapshot.
+// and retention never removes the newest snapshot. (A server with NO local
+// folder copies its unchanged tables inside S3 instead, #2212; this one keeps
+// its local snapshot whole, so it cannot leave tables out of it.)
 //
 // So: when the local directory's newest complete snapshot is the SAME one the
 // bucket reports (same instant) and holds every table the bucket's copy
@@ -1045,14 +1068,20 @@ func foldPublished(err error) bool {
 func uploadRefreshedSnapshot(ctx context.Context, req refreshRequest, at time.Time) (int, error) {
 	name := reconstruct.SnapshotDirName(at)
 	dest := strings.TrimSuffix(req.BaselineS3, "/") + "/" + name
-	n, err := uploadSnapshot(ctx, refreshSnapshotDir(req, at), dest, "", false)
+	var n int
+	var err error
+	if req.s3Copies != nil && len(req.s3Copies.files) > 0 {
+		n, err = uploadSnapshotCopies(ctx, refreshSnapshotDir(req, at), dest, req.s3Copies.files)
+	} else {
+		n, err = uploadSnapshot(ctx, refreshSnapshotDir(req, at), dest, "", false)
+	}
 	if err != nil && req.StagedRun != "" {
 		// An S3-only server (#2212): the staged copy is deleted with its run
 		// folder, so nothing may promise it is kept or sent later. Not
 		// errSnapshotNotUploaded, which says a finished snapshot is on disk.
 		return 0, fmt.Errorf("%w: it could not be uploaded to %s. This server keeps its snapshots only in S3, so the "+
 			"copy built in the staging folder was deleted (%s); the next update starts again from the newest snapshot in the bucket: %w",
-			errStagedSnapshotNotUploaded, dest, removePartialUpload(ctx, req, dest), err)
+			errStagedSnapshotNotUploaded, dest, removePartialUpload(ctx, req, dest, mayStillLand(err)), err)
 	}
 	if err != nil {
 		// Names the local path on purpose: the snapshot itself is intact and
@@ -1064,6 +1093,26 @@ func uploadRefreshedSnapshot(ctx context.Context, req refreshRequest, at time.Ti
 			errSnapshotNotUploaded, refreshSnapshotDir(req, at), dest, err)
 	}
 	return n, nil
+}
+
+// stagedCopies (baseline_staged_fold.go has the rest of the staged run)
+// is what a staged run's fold did not write because it copies
+// it inside S3 at upload (#2212): the files for the upload, and where each
+// copied table's readers start, for the read bound of the published
+// snapshot. Filled by foldSnapshot.
+type stagedCopies struct {
+	files       []baseline.RemoteCopy
+	chainStarts []time.Time
+}
+
+// s3CopyDestination is where a run's fold may copy unchanged tables to
+// (reconstruct.FullTableConfig.S3CopyUnchangedTo): the server's bucket on a
+// staged run, whose upload takes the copies, and nowhere otherwise.
+func s3CopyDestination(req refreshRequest) string {
+	if req.s3Copies == nil {
+		return ""
+	}
+	return req.BaselineS3
 }
 
 // refreshSnapshotDir names the directory one refresh cycle folds into: the
@@ -1343,6 +1392,7 @@ func dirExists(path string) bool {
 func foldRunCounts(rec console.BaselineRunRecord, tables, refused int, reuse reuseTally) console.BaselineRunRecord {
 	rec.Tables, rec.Refused = tables, refused
 	rec.Carried, rec.CarriedCopied = reuse.reused, reuse.copied
+	rec.S3Copied = reuse.s3Copied
 	return rec
 }
 
@@ -1408,6 +1458,7 @@ func applyFoldStatus(st *console.BaselineStatus, tables, refused int, reuse reus
 	st.RefusedTables, st.RefusedTablesOmitted = refusedTablesIn(err)
 	st.Carried = reuse.reused
 	st.CarriedCopied = reuse.copied
+	st.S3Copied = reuse.s3Copied
 	// Set on BOTH branches, never left from a previous run: this is what the
 	// scheduled watcher reads to decide whether a full backup is still owed,
 	// and a stale true there is a skipped backup.
@@ -1584,7 +1635,9 @@ func refreshFoldConfig(req refreshRequest, at time.Time, tableList []string) rec
 		// directory and never in it, and SpaceCheck is asked about that disk
 		// before each download. Empty otherwise: the system temporary
 		// directory, unchecked, as before.
-		DownloadDir:           req.StagedRun,
+		DownloadDir: req.StagedRun,
+		// Only where the run's upload takes the copies: see refreshRequest.s3Copies.
+		S3CopyUnchangedTo:     s3CopyDestination(req),
 		OutputFormat:          reconstruct.OutputFormatParquet,
 		CarryForwardUnchanged: req.CarryForwardUnchanged,
 		TableDeltas:           req.TableDeltas,
@@ -1630,6 +1683,10 @@ type reuseTally struct {
 	// table was not REBUILT, which is the part the advice about a table's
 	// cost gets wrong if nobody says so.
 	slowestCarried bool
+	// s3Copied counts the tables copied inside S3 instead of being written
+	// (#2212), with or without their chain. Never part of reused or copied:
+	// those speak of the local file and its disk.
+	s3Copied int
 }
 
 // countReuse tallies the tables a fold published by reusing the previous
@@ -1649,7 +1706,12 @@ func countReuse(reports []*reconstruct.TableReport) (tally reuseTally) {
 		if rep == nil {
 			continue
 		}
-		if rep.CarriedForward {
+		if len(rep.S3Copies) > 0 {
+			// Counted apart and only here (#2212): nothing was written and no
+			// disk is involved, so it is neither a reuse that saved disk nor
+			// one "written in full".
+			tally.s3Copied++
+		} else if rep.CarriedForward {
 			tally.reused++
 			if !rep.CarriedByLink {
 				tally.copied++
@@ -1675,6 +1737,10 @@ func countReuse(reports []*reconstruct.TableReport) (tally reuseTally) {
 // with a capture gap, or on the S3 path is folded anyway.
 func (s *baselineSupervisor) foldSnapshot(req refreshRequest, at time.Time, tableList []string) (tables, refused int, reuse reuseTally, err error) {
 	reports, failures, runErr := foldTables(s.ctx, refreshFoldConfig(req, at, tableList))
+	if req.s3Copies != nil {
+		req.s3Copies.files = reconstruct.S3Copies(reports)
+		req.s3Copies.chainStarts = reconstruct.S3CopyChainStarts(reports)
+	}
 	tables, refused, reuse, err = foldOutcome(tableList, reports, failures, runErr)
 	// Which tables refused, and why, from the rule the command line prints
 	// (#1653). Attached to the error, which is what reaches the status and
@@ -1714,6 +1780,19 @@ var foldTables = reconstruct.ReconstructTablesDetailed
 // refresh loop), so this is the one place the invalidation lives.
 func uploadAndInvalidate(ctx context.Context, outputDir, s3URL, region string, retry bool) (int, error) {
 	n, err := baselineUpload(ctx, outputDir, s3URL, region, retry)
+	return afterUpload(s3URL, n, err)
+}
+
+// uploadCopiesAndInvalidate is uploadAndInvalidate for one snapshot
+// directory some of whose files are copied inside S3 (#2212).
+func uploadCopiesAndInvalidate(ctx context.Context, snapshotDir, s3URL string, copies []baseline.RemoteCopy) (int, error) {
+	n, err := baselineUploadCopies(ctx, snapshotDir, s3URL, "", false, copies)
+	return afterUpload(s3URL, n, err)
+}
+
+// afterUpload is what every upload does once it returns: the inventory
+// invalidation, and the pointer-only failure read as a success.
+func afterUpload(s3URL string, n int, err error) (int, error) {
 	invalidateS3Inventory(s3URL)
 	if warn, _ := baseline.SplitPointerError(err); warn != nil {
 		// The snapshot is in S3, complete, and discoverable: only the root's
@@ -1734,6 +1813,7 @@ func uploadAndInvalidate(ctx context.Context, outputDir, s3URL, region string, r
 // uploadAndInvalidate, indirected so a test can drive it without a bucket.
 var (
 	baselineUpload        = baseline.Upload
+	baselineUploadCopies  = baseline.UploadWithCopies
 	invalidateS3Inventory = reconstruct.InvalidateS3Inventory
 )
 
@@ -1745,6 +1825,9 @@ var (
 var (
 	newestSnapshotTables = reconstruct.NewestSnapshot
 	uploadSnapshot       = uploadAndInvalidate
+	// uploadSnapshotCopies is uploadSnapshot for a staged snapshot whose
+	// unchanged tables are copied inside S3 (#2212).
+	uploadSnapshotCopies = uploadCopiesAndInvalidate
 	// listBaselines feeds resolveFoldSource; it addresses the bucket on an
 	// S3-backed server, same rule as the two above.
 	listBaselines = reconstruct.ListBaselines
@@ -2463,7 +2546,21 @@ var newPartialUploadStore = func(ctx context.Context, bucket string) (partialUpl
 // LAST, only when all of them went. A failure anywhere leaves the marker
 // standing, which is when, and only when, the words say the files stay
 // marked incomplete.
-func removePartialUpload(ctx context.Context, req refreshRequest, dest string) string {
+// mayStillLand is the key a timed-out copy inside S3 may still write
+// (baseline.CopyMayStillLandError), or "".
+func mayStillLand(err error) string {
+	var late *baseline.CopyMayStillLandError
+	if errors.As(err, &late) {
+		return late.Key
+	}
+	return ""
+}
+
+// lateKey, when set, is an object a timed-out copy inside S3 may still write
+// after this cleanup (#2212): the folder's _INCOMPLETE marker is then KEPT,
+// because a late object in a folder with no marker reads as a complete
+// snapshot (#467).
+func removePartialUpload(ctx context.Context, req refreshRequest, dest, lateKey string) string {
 	const stay = "the files already sent stay there marked incomplete, and are never read"
 	where := strings.TrimSuffix(dest, "/") + "/"
 	warn := func(msg string, err error) {
@@ -2513,6 +2610,12 @@ func removePartialUpload(ctx context.Context, req refreshRequest, dest string) s
 			warn("could not remove a partial upload from the bucket; it stays there marked incomplete, and no listing reads it", err)
 			return stay
 		}
+	}
+	if lateKey != "" {
+		warn("removed a partial upload from the bucket except its incomplete marker, kept because a copy inside S3 to "+lateKey+
+			" timed out and the bucket may still complete it; the folder stays marked incomplete, and no listing reads it", nil)
+		return "the files already sent were removed from the bucket; the folder stays marked incomplete, because the copy to " +
+			lateKey + " timed out and may still land there"
 	}
 	if err := store.Delete(ctx, marker); err != nil {
 		warn("removed a partial upload from the bucket except its incomplete marker, which stays; no listing reads that folder", err)

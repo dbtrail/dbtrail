@@ -1046,8 +1046,12 @@ and lands on Retention.
   link, two snapshots then share the same bytes on disk, so deleting the
   older one frees nothing while the newer one still points at it, and a `du`
   per snapshot directory double-counts it (one `du` over the root reports the
-  truth). It does not apply when the previous snapshot is read from S3,
-  because linking a file needs both ends on a filesystem. A
+  truth). It does not apply when the previous snapshot is read from S3
+  into a local folder, because linking a file needs both ends on a
+  filesystem; on a server whose snapshots go only to S3 the unchanged table
+  is copied inside the bucket instead (#2212). With table deltas on (the
+  default) an unchanged table and its pair are kept, locally or by a copy in
+  S3, whether this is on or off; it governs only tables without deltas. A
   `baseline_refresh:` block saved by an older version is ignored and kept in
   the registry file untouched.
   See [dump-and-baseline.md](dump-and-baseline.md#refreshing-on-a-schedule).
