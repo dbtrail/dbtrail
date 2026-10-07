@@ -39,9 +39,10 @@ const (
 
 // RecommendedBufferPool is the index buffer pool for a machine (or Docker
 // VM) with memTotal bytes: a quarter of it, rounded DOWN to whole GiB from
-// 1 GiB up (MySQL rounds the pool UP to a multiple of chunk size times
-// instances, which divides a whole GiB, so the value it runs with is the one
-// computed here), in 128 MiB steps below that, at most 32 GiB. A quarter,
+// 1 GiB up, in 128 MiB steps below that, at most 32 GiB. MySQL rounds the
+// pool UP to a multiple of chunk size times instances, and 8.4 picks the
+// instance count from the CPUs, so the pool it runs with is this value or a
+// little above (exact when the count divides 8). A quarter,
 // not InnoDB's usual "most of the RAM", because the index rarely has the
 // machine to itself: the web interface's SQL engine takes up to 4 GB, and the
 // source database may run on the same host. ok is false when a quarter is
@@ -144,7 +145,7 @@ func bufferPoolPlaceOf(ctx context.Context, db *sql.DB, dsn string) bufferPoolPl
 func gradeBufferPool(pool, mem uint64, memKnown bool, place bufferPoolPlace) CheckResult {
 	c := CheckResult{Name: BufferPoolCheckName}
 	poolText := humanBytes(float64(pool))
-	atDefault := pool <= DefaultBufferPool
+	atDefault := pool == DefaultBufferPool
 	if !memKnown {
 		if !atDefault {
 			c.Status, c.Detail = StatusPass, poolText
@@ -184,9 +185,11 @@ func gradeBufferPool(pool, mem uint64, memKnown bool, place bufferPoolPlace) Che
 }
 
 // memoryFrom reads the memory this machine (or Docker VM) has, under root
-// ("/" in production, a temp dir in tests): MemTotal from /proc/meminfo,
-// lowered to the cgroup limit when one is set. Outside Linux there is no
-// /proc/meminfo, and the answer is unknown.
+// ("/" in production, a temp dir in tests): MemTotal from /proc/meminfo.
+// A cgroup limit is deliberately NOT applied: it would be the limit of THIS
+// process's container (the console), not of the MySQL being graded, which
+// shares the machine's memory. Outside Linux there is no /proc/meminfo, and
+// the answer is unknown.
 func memoryFrom(root string) (uint64, bool) {
 	f, err := os.Open(filepath.Join(root, "proc", "meminfo"))
 	if err != nil {
@@ -208,20 +211,6 @@ func memoryFrom(root string) (uint64, bool) {
 	}
 	if total == 0 {
 		return 0, false
-	}
-	for _, p := range []string{
-		filepath.Join(root, "sys", "fs", "cgroup", "memory.max"),                      // cgroup v2
-		filepath.Join(root, "sys", "fs", "cgroup", "memory", "memory.limit_in_bytes"), // cgroup v1
-	} {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		// "max" (v2) does not parse and a v1 "unlimited" is a huge number:
-		// both leave the total alone.
-		if limit, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64); err == nil && limit > 0 && limit < total {
-			total = limit
-		}
 	}
 	return total, true
 }

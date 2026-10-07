@@ -301,7 +301,11 @@ grep -q '^services:' docker-compose.yml || die \
 # Only a fresh install writes: on a re-run a new line would change the
 # MySQL's configuration and the `up -d` below would restart it in the middle
 # of capture, so the line is printed instead. A value already in .env, in any
-# form compose reads, is never touched.
+# form compose's .env reader takes (KEY=, KEY:, export KEY=, a bare KEY), is
+# never touched. A compose file without the setting (an older DBTRAIL_REF)
+# gets no line: it would claim a size nothing passes on. MySQL rounds the
+# pool up to a multiple of its chunk size times instances, so the value it
+# runs with is this one or a little above.
 pool_setting() {
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
   [ "${#1}" -le 18 ] || return 1
@@ -316,28 +320,32 @@ pool_setting() {
   fi
 }
 env_has_pool() {
-  [ -f .env ] && grep -Eq '^[[:space:]]*(export[[:space:]]+)?INDEX_BUFFER_POOL[[:space:]]*=' .env
+  [ -f .env ] && grep -Eq '^[[:space:]]*(export[[:space:]]+)?INDEX_BUFFER_POOL[[:space:]]*([=:]|$)' .env
 }
 mem=$(docker info --format '{{.MemTotal}}' 2>/dev/null) || mem=""
 [ "$mem" = 0 ] && mem=""
 pool=$(pool_setting "$mem") || pool=""
-if [ -n "${INDEX_BUFFER_POOL:-}" ]; then
-  say "${DIM}    INDEX_BUFFER_POOL is set in this shell (${INDEX_BUFFER_POOL}), so .env was left alone${RST}"
+if [ -n "${INDEX_BUFFER_POOL+set}" ]; then
+  say "${DIM}    INDEX_BUFFER_POOL is set in this shell, so .env was left alone. The value lasts for this run only: put it in .env to keep it${RST}"
 elif env_has_pool; then
   say "${DIM}    INDEX_BUFFER_POOL is already in .env, so it was left as you set it${RST}"
 elif [ "$pool" = default ]; then
   say "${DIM}    this machine is small, so DBTrail's MySQL keeps the 128 MB memory default${RST}"
+elif [ -n "$pool" ] && [ -n "${FRESH:-}" ] && ! grep -q -- '--innodb-buffer-pool-size=' docker-compose.yml; then
+  say "${DIM}    this docker-compose.yml does not pass INDEX_BUFFER_POOL on, so DBTrail's MySQL keeps the 128 MB memory default${RST}"
 elif [ -n "$pool" ] && [ -n "${FRESH:-}" ]; then
   if [ -s .env ] && [ -n "$(tail -c 1 .env)" ]; then printf '\n' >> .env; fi
   printf 'INDEX_BUFFER_POOL=%s\n' "$pool" >> .env || die "Couldn't write ${DIR}/.env."
-  say "${DIM}    DBTrail's MySQL gets ${pool} of memory, a quarter of what Docker has (INDEX_BUFFER_POOL in .env)${RST}"
+  say "${DIM}    DBTrail's MySQL gets ${pool} of memory, a quarter of what Docker has and at most 32G (INDEX_BUFFER_POOL in .env)${RST}"
 elif [ -n "$pool" ]; then
   warn "DBTrail's MySQL may still run with the 128 MB memory default, which slows capture on a busy server."
-  if grep -q 'INDEX_BUFFER_POOL' docker-compose.yml; then
+  if grep -q -- '--innodb-buffer-pool-size=' docker-compose.yml; then
     warn "To give it ${pool}, add INDEX_BUFFER_POOL=${pool} to ${DIR}/.env and run: ${COMPOSE} up -d"
   else
     warn "To give it ${pool}, take the current docker-compose.yml (docs/docker.md 'Upgrading the stack'), then add INDEX_BUFFER_POOL=${pool} to ${DIR}/.env and run: ${COMPOSE} up -d"
   fi
+else
+  say "${DIM}    Docker did not say how much memory it has, so DBTrail's MySQL keeps the 128 MB memory default (set INDEX_BUFFER_POOL in .env to change it)${RST}"
 fi
 
 # ── 3. bring it up ──────────────────────────────────────────────────────

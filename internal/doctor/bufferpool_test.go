@@ -84,6 +84,7 @@ func TestGradeBufferPool(t *testing.T) {
 		{"own MySQL on this machine, default pool, big host", DefaultBufferPool, 64 * gib, true, placeThisMachine, StatusWarn, "innodb_buffer_pool_size"},
 		{"own MySQL on this machine, small host", DefaultBufferPool, 1 * gib, true, placeThisMachine, StatusPass, ""},
 		{"own MySQL on this machine, deliberately small pool", 512 * mib, 64 * gib, true, placeThisMachine, StatusPass, ""},
+		{"own MySQL on this machine, chosen below the default", 64 * mib, 64 * gib, true, placeThisMachine, StatusPass, ""},
 		{"own MySQL elsewhere, default pool", DefaultBufferPool, 0, false, placeElsewhere, StatusSkip, "quarter"},
 		{"own MySQL elsewhere, sized pool", 8 * gib, 0, false, placeElsewhere, StatusPass, "8.0 GB"},
 		{"bundled, memory unreadable", DefaultBufferPool, 0, false, placeBundled, StatusSkip, "INDEX_BUFFER_POOL"},
@@ -134,8 +135,9 @@ func TestMemoryFromFiles(t *testing.T) {
 	}{
 		{"no cgroup limit", map[string]string{"proc/meminfo": meminfo}, 16314564 * 1024, true},
 		{"cgroup v2 unlimited", map[string]string{"proc/meminfo": meminfo, "sys/fs/cgroup/memory.max": "max\n"}, 16314564 * 1024, true},
-		{"cgroup v2 limit", map[string]string{"proc/meminfo": meminfo, "sys/fs/cgroup/memory.max": "4294967296\n"}, 4 * gib, true},
-		{"cgroup v1 limit", map[string]string{"proc/meminfo": meminfo, "sys/fs/cgroup/memory/memory.limit_in_bytes": "2147483648\n"}, 2 * gib, true},
+		// A limit on this process's own container is not the MySQL's.
+		{"cgroup v2 limit is ignored", map[string]string{"proc/meminfo": meminfo, "sys/fs/cgroup/memory.max": "4294967296\n"}, 16314564 * 1024, true},
+		{"cgroup v1 limit is ignored", map[string]string{"proc/meminfo": meminfo, "sys/fs/cgroup/memory/memory.limit_in_bytes": "2147483648\n"}, 16314564 * 1024, true},
 		{"cgroup v1 unlimited", map[string]string{"proc/meminfo": meminfo, "sys/fs/cgroup/memory/memory.limit_in_bytes": "9223372036854771712\n"}, 16314564 * 1024, true},
 		{"no meminfo (not Linux)", map[string]string{}, 0, false},
 		{"garbled meminfo", map[string]string{"proc/meminfo": "MemTotal: lots\n"}, 0, false},

@@ -94,6 +94,9 @@ func TestInstaller_noMemoryNumberWritesNothing(t *testing.T) {
 			if got := poolLines(envFile(t, r)); len(got) != 0 {
 				t.Fatalf("wrote %v from %q", got, v)
 			}
+			if !strings.Contains(r.out, "Docker did not say how much memory") {
+				t.Errorf("an unread memory is not said:\n%s", r.out)
+			}
 		})
 	}
 }
@@ -122,6 +125,9 @@ func TestInstaller_anExistingEnvIsOnlyAddedTo(t *testing.T) {
 		{"value set with export", "export INDEX_BUFFER_POOL=2G\n", "export INDEX_BUFFER_POOL=2G\n"},
 		{"value set indented with spaces", "  INDEX_BUFFER_POOL = 3G\n", "  INDEX_BUFFER_POOL = 3G\n"},
 		{"empty value is a value", "INDEX_BUFFER_POOL=\n", "INDEX_BUFFER_POOL=\n"},
+		{"colon form compose also reads", "INDEX_BUFFER_POOL: 2G\n", "INDEX_BUFFER_POOL: 2G\n"},
+		{"bare key (from the shell)", "INDEX_BUFFER_POOL\n", "INDEX_BUFFER_POOL\n"},
+		{"CRLF line endings", "INDEX_BUFFER_POOL=2G\r\n", "INDEX_BUFFER_POOL=2G\r\n"},
 		{"commented out", "# INDEX_BUFFER_POOL=2G\n", "# INDEX_BUFFER_POOL=2G\nINDEX_BUFFER_POOL=4G\n"},
 		{"no newline at the end", "SCHEMAS=shop", "SCHEMAS=shop\nINDEX_BUFFER_POOL=4G\n"},
 		{"a similar name", "INDEX_BUFFER_POOL_OLD=9G\n", "INDEX_BUFFER_POOL_OLD=9G\nINDEX_BUFFER_POOL=4G\n"},
@@ -156,8 +162,53 @@ func TestInstaller_aValueInTheShellIsLeftToTheShell(t *testing.T) {
 	if got := envFile(t, r); got != "" {
 		t.Fatalf(".env = %q, want none", got)
 	}
-	if !strings.Contains(r.out, "INDEX_BUFFER_POOL is set in this shell") {
-		t.Errorf("the shell value is not said:\n%s", r.out)
+	if !strings.Contains(r.out, "INDEX_BUFFER_POOL is set in this shell") || !strings.Contains(r.out, "put it in .env to keep it") {
+		t.Errorf("the shell value, and that it lasts one run, is not said:\n%s", r.out)
+	}
+}
+
+// An empty value exported in the shell also beats .env in compose (and
+// gives the 128M default), so it is treated as a shell value too.
+func TestInstaller_anEmptyShellValueIsStillTheShells(t *testing.T) {
+	r := install(t, "STUB_MEM_TOTAL="+strconv.FormatUint(16*gib, 10), "INDEX_BUFFER_POOL=")
+	if r.failed {
+		t.Fatalf("install failed:\n%s", r.out)
+	}
+	if got := envFile(t, r); got != "" {
+		t.Fatalf(".env = %q, want none", got)
+	}
+	if strings.Contains(r.out, "of memory, a quarter") {
+		t.Errorf("claims a size compose will not use:\n%s", r.out)
+	}
+}
+
+// A fresh install from a compose file that does not pass the value on (an
+// older DBTRAIL_REF) writes no line and claims no size.
+func TestInstaller_anOlderComposeGetsNoLine(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := strings.ReplaceAll(string(b), `      - "--innodb-buffer-pool-size=${INDEX_BUFFER_POOL:-128M}"`+"\n", "")
+	if strings.Contains(old, "--innodb-buffer-pool-size=") {
+		t.Fatal("could not build the older compose file")
+	}
+	src := filepath.Join(t.TempDir(), "docker-compose.yml")
+	if err := os.WriteFile(src, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := install(t, "STUB_MEM_TOTAL="+strconv.FormatUint(16*gib, 10), "COMPOSE_SRC="+src)
+	if r.failed {
+		t.Fatalf("install failed:\n%s", r.out)
+	}
+	if got := envFile(t, r); got != "" {
+		t.Fatalf(".env = %q, want none", got)
+	}
+	if !strings.Contains(r.out, "does not pass INDEX_BUFFER_POOL on") || strings.Contains(r.out, "of memory, a quarter") {
+		t.Errorf("wrong words for an older compose file:\n%s", r.out)
+	}
+	for _, h := range sentenceHits(t, r.out, r.dir) {
+		t.Errorf("banned in a sentence the installer prints: %s", h)
 	}
 }
 
@@ -223,9 +274,10 @@ func TestInstaller_bufferPoolLinesSpeakTheWordList(t *testing.T) {
 		{"STUB_MEM_TOTAL=" + strconv.FormatUint(16*gib, 10)},
 		{"STUB_MEM_TOTAL=" + strconv.FormatUint(512*mib, 10)},
 		{"STUB_MEM_TOTAL=" + strconv.FormatUint(16*gib, 10), "INDEX_BUFFER_POOL=6G"},
+		{"STUB_MEM_TOTAL=abc"},
 	} {
 		r := install(t, env...)
-		if !strings.Contains(r.out, "128 MB") && !strings.Contains(r.out, "of memory") && !strings.Contains(r.out, "this shell") {
+		if !strings.Contains(r.out, "INDEX_BUFFER_POOL") && !strings.Contains(r.out, "128 MB") {
 			t.Fatalf("%v: no buffer pool line printed, so this proves nothing:\n%s", env, r.out)
 		}
 		for _, h := range sentenceHits(t, r.out, r.dir) {
