@@ -99,8 +99,12 @@ func planS3Copies(ctx context.Context, schema string, srcs []string) (copies []b
 		switch {
 		case err != nil:
 			return nil, "the integrity manifest of the previous snapshot could not be read (" + err.Error() + ")"
-		case !ok:
-			return nil, "the integrity manifest of the previous snapshot does not list " + src
+		case !ok || crc == "":
+			// An empty digest is no digest: carried as is, the new manifest
+			// would leave the file out and its reads would go unverified
+			// without a word.
+			return nil, "the previous snapshot's integrity manifest does not vouch for " + src +
+				" (no manifest, no digest for it, or a path outside the snapshot layout)"
 		}
 		copies = append(copies, baseline.RemoteCopy{Rel: schema + "/" + src[strings.LastIndexByte(src, '/')+1:], Src: src, CRC32C: crc})
 	}

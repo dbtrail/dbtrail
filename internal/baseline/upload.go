@@ -525,7 +525,9 @@ func uploadRespelledViews(ctx context.Context, localPath, outputDir, prefix stri
 	switch {
 	case genErr != nil:
 		slog.Warn("skipping the snapshot's views file: could not regenerate it for S3 "+
-			"(regenerate with `bintrail views` against the bucket)", "key", key, "error", genErr)
+			"(regenerate with `bintrail views` against the bucket)", "key", key, "error", genErr,
+			// With copies there is no local file to fall back on (#2212).
+			"tables_copied_in_s3", len(extra))
 		return false, nil
 	case !ok:
 		// A decline, not a failure: the directory holds nothing the generator

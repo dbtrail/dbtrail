@@ -134,6 +134,12 @@ func TestS3CopyUnchanged_refusals(t *testing.T) {
 			t.Fatal("copied a file its source manifest does not vouch for")
 		}
 	})
+	t.Run("an empty digest is no digest", func(t *testing.T) {
+		stubS3CopySeams(t, map[string]string{src: ""}, nil)
+		if s3CopyUnchanged(context.Background(), copyCfg(t, destS3), "shop", "orders", src, 0, nil, &TableReport{}) {
+			t.Fatal("copied a file whose carried digest is empty")
+		}
+	})
 	t.Run("the source manifest cannot be read: rewritten instead", func(t *testing.T) {
 		stubS3CopySeams(t, nil, errors.New("SlowDown"))
 		if s3CopyUnchanged(context.Background(), copyCfg(t, destS3), "shop", "orders", src, 0, nil, &TableReport{}) {
