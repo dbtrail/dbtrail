@@ -7887,8 +7887,9 @@ function locationMigrationWords(m) {
 // saved location is a bucket with no folder (#1659), or "" when it does not
 // apply. Since #2212 such a server is updated from the recorded changes too:
 // the update is built in the staging folder, uploaded, and deleted. What is
-// left to say is its cost (every table is downloaded, rewritten and uploaded
-// again, changed or not), or, where the staging folder cannot be used
+// left to say is its cost (each changed table is downloaded, rewritten and
+// uploaded again; an unchanged one is copied inside S3), or, where the
+// staging folder cannot be used
 // (staging_refusal), that every run is a full read. The values are compared
 // as stored, untrimmed, the way the daemon reads them.
 function s3OnlyBackupWarning(srv, fix = true) {
@@ -7906,8 +7907,8 @@ function s3OnlyBackupWarning(srv, fix = true) {
     }
     return why + ", so every scheduled snapshot reads your whole database." + then("Fix the staging folder, or add a Local folder.");
   }
-  return "With S3 only, each scheduled update downloads every table from S3, rewrites it in the staging folder and uploads it again, even tables that did not change." +
-    then("Add a Local folder so unchanged tables are not downloaded and rewritten.");
+  return "With S3 only, each scheduled update downloads the tables that changed from S3, rewrites them in the staging folder and uploads them again; tables that did not change are copied inside S3 without being downloaded." +
+    then("Add a Local folder so changed tables are not downloaded first.");
 }
 
 // s3OnlyBackupFault: the note above is a fault (red) only when no update can

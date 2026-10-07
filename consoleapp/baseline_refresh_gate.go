@@ -447,4 +447,4 @@ func (m indexMark) unchangedSince(prev indexMark) bool {
 // refresh cycle reads it once per clean fold with table deltas on, off the
 // snapshot it just published (foldMemo.readsFrom), and a unit test has no
 // published chain to read.
-var snapshotReadsFrom = reconstruct.SnapshotReadsFrom
+var snapshotReadsFrom = reconstruct.SnapshotReadsFromWith

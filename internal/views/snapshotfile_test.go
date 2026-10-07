@@ -109,7 +109,7 @@ func TestSnapshotViews_stampsTheProducerVersion(t *testing.T) {
 	root := t.TempDir()
 	writeSnapshot(t, root, "2026-04-30T03-00-00Z", true, "kept")
 	sqlText, ok, err := GenerateSnapshotViews(context.Background(),
-		filepath.Join(root, "2026-04-30T03-00-00Z"), "/spelled/root")
+		filepath.Join(root, "2026-04-30T03-00-00Z"), "/spelled/root", nil)
 	if err != nil || !ok {
 		t.Fatalf("GenerateSnapshotViews: ok=%v err=%v", ok, err)
 	}
@@ -157,7 +157,7 @@ func TestGenerateSnapshotViews_respellsForS3(t *testing.T) {
 	dir := filepath.Join(root, "2026-04-30T03-00-00Z")
 
 	s3root := "s3://bkt/baselines/2026-04-30T03-00-00Z"
-	sqlText, ok, err := GenerateSnapshotViews(context.Background(), dir, s3root)
+	sqlText, ok, err := GenerateSnapshotViews(context.Background(), dir, s3root, nil)
 	if err != nil || !ok {
 		t.Fatalf("GenerateSnapshotViews: ok=%v err=%v", ok, err)
 	}

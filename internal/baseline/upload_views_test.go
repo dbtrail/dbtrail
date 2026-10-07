@@ -35,7 +35,7 @@ func uploadViewsFixture(t *testing.T) (outputDir string) {
 
 func TestUploadWithOps_respellsTheViewsFile(t *testing.T) {
 	outputDir := uploadViewsFixture(t)
-	SetSnapshotViewsRespeller(func(_ context.Context, snapshotDir, root string) (string, bool, error) {
+	SetSnapshotViewsRespeller(func(_ context.Context, snapshotDir, root string, _ []RemoteCopy) (string, bool, error) {
 		return "-- RESPELLED under " + root + " from " + filepath.Base(snapshotDir), true, nil
 	})
 	t.Cleanup(func() { SetSnapshotViewsRespeller(nil) })
@@ -116,7 +116,7 @@ func TestUploadWithOps_neverPlainCopiesAMarkerlessSnapshotsViewsFile(t *testing.
 			t.Fatal(err)
 		}
 	}
-	SetSnapshotViewsRespeller(func(_ context.Context, _, root string) (string, bool, error) {
+	SetSnapshotViewsRespeller(func(_ context.Context, _, root string, _ []RemoteCopy) (string, bool, error) {
 		return "-- RESPELLED under " + root, true, nil
 	})
 	t.Cleanup(func() { SetSnapshotViewsRespeller(nil) })
@@ -153,7 +153,7 @@ func TestUploadWithOps_skipsViewsStagingLeftovers(t *testing.T) {
 	if err := os.WriteFile(leftover, []byte("-- half-written"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	SetSnapshotViewsRespeller(func(_ context.Context, _, root string) (string, bool, error) {
+	SetSnapshotViewsRespeller(func(_ context.Context, _, root string, _ []RemoteCopy) (string, bool, error) {
 		return "-- RESPELLED", true, nil
 	})
 	t.Cleanup(func() { SetSnapshotViewsRespeller(nil) })
@@ -184,7 +184,7 @@ func TestUploadWithOps_plainCopiesTheOperatorsRootViewsFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(outputDir, SnapshotViewsName), []byte("-- OPERATOR file"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	SetSnapshotViewsRespeller(func(_ context.Context, _, root string) (string, bool, error) {
+	SetSnapshotViewsRespeller(func(_ context.Context, _, root string, _ []RemoteCopy) (string, bool, error) {
 		return "-- RESPELLED under " + root, true, nil
 	})
 	t.Cleanup(func() { SetSnapshotViewsRespeller(nil) })

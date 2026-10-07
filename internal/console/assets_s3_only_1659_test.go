@@ -144,8 +144,8 @@ console.log(JSON.stringify(out));
 	}
 	// #2212: an S3-only server is updated through the staging folder, so the
 	// note is its cost, a hint, wherever this process cannot tell otherwise.
-	const cost = "With S3 only, each scheduled update downloads every table from S3, rewrites it in the staging folder and uploads it again, even tables that did not change."
-	const costFix = cost + " Add a Local folder so unchanged tables are not downloaded and rewritten."
+	const cost = "With S3 only, each scheduled update downloads the tables that changed from S3, rewrites them in the staging folder and uploads them again; tables that did not change are copied inside S3 without being downloaded."
+	const costFix = cost + " Add a Local folder so changed tables are not downloaded first."
 	for _, i := range []int{0, 4, 6} {
 		if got.Warn[i] != costFix {
 			t.Errorf("case %d: S3 only is not told the cost of its updates: %q", i, got.Warn[i])

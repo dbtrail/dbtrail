@@ -227,6 +227,36 @@ func ValidateS3File(ctx context.Context, s3Path string) error {
 	return nil
 }
 
+// S3ManifestDigest returns the digest an s3:// table file's own snapshot
+// manifest records for it, without reading the file (#2212): the digest a
+// copy of that object inside S3 carries into the new snapshot's manifest.
+// ok=false with a nil error means the manifest vouches for nothing here: no
+// manifest (a snapshot from before #636), a version or algorithm this build
+// does not read, no entry for the file, or a path outside the snapshot
+// layout. A manifest that cannot be READ is an error, never "no digest": the
+// caller decides, and the fold falls back to rewriting the table.
+func S3ManifestDigest(ctx context.Context, s3Path string) (digest string, ok bool, err error) {
+	bucket, key, err := storage.ParseS3URL(s3Path)
+	if err != nil {
+		return "", false, nil
+	}
+	key = path.Clean(key)
+	tableDir := path.Dir(key)
+	snapKey := path.Dir(tableDir)
+	if tableDir == "." || snapKey == "." {
+		return "", false, nil
+	}
+	m, found, err := loadManifestS3(ctx, bucket, snapKey)
+	if err != nil || !found {
+		return "", false, err
+	}
+	if m.Version != manifestVersion || m.Algo != "crc32c" {
+		return "", false, nil
+	}
+	digest, ok = m.Files[strings.TrimPrefix(key, snapKey+"/")]
+	return digest, ok, nil
+}
+
 // storeVerdict caches a validation outcome for s3Path. terminal verdicts
 // never expire (the snapshot is immutable); non-terminal ones (mismatch,
 // validator-read failure) expire after failureVerdictTTL and re-check.

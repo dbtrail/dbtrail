@@ -65,8 +65,8 @@ func CountFoldWindowsForTest(calls *atomic.Int32) (restore func()) {
 // goroutine, after the folds, so a plain variable is enough.
 func CountManifestReuseForTest(into *baselineintegrity.ManifestStats) (restore func()) {
 	prev := manifestWriter
-	manifestWriter = func(dir string, priors []string) (baselineintegrity.ManifestStats, error) {
-		st, err := prev(dir, priors)
+	manifestWriter = func(dir string, priors []string, carried map[string]string) (baselineintegrity.ManifestStats, error) {
+		st, err := prev(dir, priors, carried)
 		*into = st
 		return st, err
 	}
