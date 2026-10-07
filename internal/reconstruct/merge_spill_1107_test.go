@@ -87,7 +87,9 @@ func TestMergeSpilled_matchesInMemoryMerge(t *testing.T) {
 	}{{12, 0, true}, {100000, 0, false}, {100000, 12, true}} {
 		t.Run(fmt.Sprintf("limit %d passRows %d", tc.limit, tc.passRows), func(t *testing.T) {
 			s := spillOf(t, tc.limit, cloneChanges(changes))
-			s.passRows = tc.passRows
+			if tc.passRows > 0 {
+				s.maxBytes = tc.passRows * (s.heldBytes / s.records)
+			}
 			perPass := tc.limit
 			if tc.passRows > 0 {
 				perPass = tc.passRows

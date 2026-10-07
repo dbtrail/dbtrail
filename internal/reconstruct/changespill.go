@@ -93,11 +93,13 @@ type changeSpill struct {
 	// with it, and tables names the tables folding at once for the refusal.
 	limit  int64
 	tables int
-	// passRows, when set, is how many changes a merge pass holds, from the
-	// fold's size budget (#2207); below limit for a wide table. Only the
+	// maxBytes is the fold's size budget (#2207), what a merge pass should
+	// hold; heldBytes is the estimate of every record drained. The passes are
+	// sized from the two (passRows), over every drained row rather than the
+	// sample that started the spill, which can miss a few huge rows. Only the
 	// passes follow it: the refusal stays on limit, and a group larger than a
 	// pass is still read whole, as its own pass.
-	passRows int64
+	maxBytes, heldBytes int64
 
 	files   [spillBuckets]*os.File
 	bufs    [spillBuckets]*bufio.Writer
@@ -151,8 +153,18 @@ func (s *changeSpill) drain(changes map[string]*query.ResultRow) error {
 			return fmt.Errorf("write changed row %q to the temporary directory %s: %w", pk, s.dir, err)
 		}
 		s.records++
+		s.heldBytes += approxChangeBytes(ev)
 	}
 	return nil
+}
+
+// passRows is how many changes a merge pass holds under the size budget, from
+// the average estimate of what was drained; 0 when there is no budget.
+func (s *changeSpill) passRows() int64 {
+	if s.maxBytes <= 0 || s.records == 0 {
+		return 0
+	}
+	return max(1, s.maxBytes/max(1, s.heldBytes/s.records))
 }
 
 // finish flushes and closes every group file. Nothing may be drained after it.
@@ -252,9 +264,10 @@ func (s *changeSpill) eachPass(ctx context.Context, run func(pass map[string]*qu
 	}
 	last := 0
 	passLimit := s.limit
-	if s.passRows > 0 && (passLimit <= 0 || s.passRows < passLimit) {
-		passLimit = s.passRows
+	if pr := s.passRows(); pr > 0 && (passLimit <= 0 || pr < passLimit) {
+		passLimit = pr
 	}
+	warned := false
 	for b := range spillBuckets {
 		if err := ctx.Err(); err != nil {
 			return passes, err
@@ -269,6 +282,14 @@ func (s *changeSpill) eachPass(ctx context.Context, run func(pass map[string]*qu
 			return passes, err
 		}
 		last = len(group)
+		// A group over the budget is still read whole; say so once, so a
+		// pass over the target is not silent. A group is about 1/64 of the
+		// changes, so this is a window past 64 times the budget.
+		if pr := s.passRows(); !warned && pr > 0 && int64(last) > 2*pr {
+			warned = true
+			slog.Warn("reconstruct: a group of changed rows read back from disk is larger than the memory budget; it is merged whole",
+				"rows", last, "rows_a_pass", pr, "byte_limit", s.maxBytes)
+		}
 		// Groups hold disjoint keys, so nothing here overwrites.
 		maps.Copy(pass, group)
 		owns[b] = true

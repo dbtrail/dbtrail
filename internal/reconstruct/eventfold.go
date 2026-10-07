@@ -349,6 +349,8 @@ func approxValueBytes(v any) int64 {
 		return int64(len(x))
 	case []byte:
 		return 8 + int64(len(x))
+	case time.Time:
+		return 24
 	case map[string]any:
 		return approxImageBytes(x)
 	case []any:
@@ -400,9 +402,9 @@ func (r *foldResult) admitPage(limit int64, tables int, spill bool) error {
 func (r *foldResult) admit(limit, maxBytes int64, tables int, spill bool) error {
 	if r.Spill == nil {
 		overRows := limit > 0 && int64(len(r.Changes)) > limit
-		var total, perRow int64
+		var total int64
 		if spill && maxBytes > 0 {
-			total, perRow = sampledChangeBytes(r.Changes)
+			total, _ = sampledChangeBytes(r.Changes)
 		}
 		if !overRows && (maxBytes <= 0 || total <= maxBytes) {
 			return nil
@@ -415,9 +417,7 @@ func (r *foldResult) admit(limit, maxBytes int64, tables int, spill bool) error 
 			return err
 		}
 		s.tables = tables
-		if maxBytes > 0 {
-			s.passRows = max(1, maxBytes/perRow)
-		}
+		s.maxBytes = maxBytes
 		r.Spill = s
 	}
 	if err := r.Spill.drain(r.Changes); err != nil {
@@ -632,8 +632,7 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 		}
 		if !spilling && res.Spill != nil {
 			slog.Info("reconstruct: more changed rows than this fold holds in memory; writing them to disk and merging in passes",
-				"schema", fc.Schema, "table", fc.Table, "limit", limit, "byte_limit", maxBytes,
-				"rows_a_pass", res.Spill.passRows, "dir", res.Spill.dir)
+				"schema", fc.Schema, "table", fc.Table, "limit", limit, "byte_limit", maxBytes, "dir", res.Spill.dir)
 		}
 
 		res.Total += int64(len(page))

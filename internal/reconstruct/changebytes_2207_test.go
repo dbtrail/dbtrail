@@ -148,8 +148,8 @@ func TestFoldResult_admitBytes(t *testing.T) {
 		if r.Spill == nil || len(r.Changes) != 0 {
 			t.Fatalf("spill=%v changes=%d, want every change on disk", r.Spill != nil, len(r.Changes))
 		}
-		if r.Spill.passRows < 15 || r.Spill.passRows > 25 {
-			t.Errorf("passRows = %d, want about 20 (the byte budget over the row size)", r.Spill.passRows)
+		if pr := r.Spill.passRows(); pr < 15 || pr > 25 {
+			t.Errorf("passRows = %d, want about 20 (the byte budget over the row size)", pr)
 		}
 		// The refusal stays on rows: a pass is a memory target, not a limit.
 		if r.Spill.limit != 1000 {
@@ -169,8 +169,8 @@ func TestFoldResult_admitBytes(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(r.close)
-		if r.Spill == nil || r.Spill.passRows < 7 || r.Spill.passRows > 13 {
-			t.Fatalf("spill=%v passRows=%v, want about 10", r.Spill != nil, r.Spill)
+		if r.Spill == nil || r.Spill.passRows() < 7 || r.Spill.passRows() > 13 {
+			t.Fatalf("spill=%v, want passes of about 10", r.Spill != nil)
 		}
 	})
 	t.Run("a byte budget smaller than one row still passes a row at a time", func(t *testing.T) {
@@ -179,8 +179,8 @@ func TestFoldResult_admitBytes(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(r.close)
-		if r.Spill == nil || r.Spill.passRows != 1 {
-			t.Fatalf("passRows = %v, want 1", r.Spill)
+		if r.Spill == nil || r.Spill.passRows() != 1 {
+			t.Fatalf("spill=%v, want passes of 1", r.Spill != nil)
 		}
 	})
 }
@@ -202,12 +202,13 @@ func TestChangeSpill_passesSizedByBytes(t *testing.T) {
 	if p, rows := count(); p != 1 || rows != 640 {
 		t.Fatalf("row limit only: %d passes, %d rows; want 1 pass of 640", p, rows)
 	}
-	s.passRows = 100
+	perRow := s.heldBytes / s.records
+	s.maxBytes = 100 * perRow
 	p, rows := count()
 	if rows != 640 || p < 6 || p > 9 {
-		t.Fatalf("passRows 100: %d passes, %d rows; want 6-9 passes of all 640", p, rows)
+		t.Fatalf("budget of 100 rows: %d passes, %d rows; want 6-9 passes of all 640", p, rows)
 	}
-	s.passRows = 1 // smaller than any group: one group a pass, none refused
+	s.maxBytes = 1 // smaller than any group: one group a pass, none refused
 	if p, rows := count(); rows != 640 || p < 50 {
 		t.Fatalf("passRows 1: %d passes, %d rows", p, rows)
 	}
@@ -267,5 +268,31 @@ func TestFoldEventWindow_spillsOnTheByteBudget(t *testing.T) {
 				t.Fatalf("kept %d changes, want 3", res.changeCount())
 			}
 		})
+	}
+}
+
+// The passes are sized over every drained row, not the sample that started
+// the spill: a few huge rows the sample missed still count (#2207 review).
+func TestChangeSpill_passRowsCountsEveryDrainedRow(t *testing.T) {
+	small := pageOf(1, 640, "a")
+	huge := map[string]*query.ResultRow{}
+	for id := 1000; id < 1006; id++ {
+		pk := strconv.Itoa(id)
+		huge[pk] = &query.ResultRow{EventType: event.EventUpdate, PKValues: pk, RowAfter: map[string]any{"v": strings.Repeat("h", 1<<20)}}
+	}
+	s := spillOf(t, 1_000_000, small, huge)
+	if s.heldBytes < 6<<20 {
+		t.Fatalf("held %d bytes; the six 1 MiB rows are not counted", s.heldBytes)
+	}
+	s.maxBytes = 4 << 20
+	want := s.maxBytes / (s.heldBytes / s.records)
+	smallOnly := spillOf(t, 1_000_000, pageOf(1, 640, "a"))
+	smallOnly.maxBytes = s.maxBytes
+	if got := s.passRows(); got != want || got*10 > smallOnly.passRows() {
+		t.Fatalf("passRows = %d (want %d), %d without the huge rows: the average must carry them", got, want, smallOnly.passRows())
+	}
+	var none changeSpill
+	if none.passRows() != 0 {
+		t.Fatal("no budget must mean no byte-sized passes")
 	}
 }
