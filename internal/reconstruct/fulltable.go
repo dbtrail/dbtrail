@@ -3103,30 +3103,10 @@ func materializeBaselineLocalIn(ctx context.Context, path string, tuning duckdbu
 		return "", nil, err
 	}
 	tmpPath := filepath.Join(tmpDir, "baseline.parquet")
-
-	db, err := sql.Open("duckdb", "")
-	if err != nil {
+	if err := downloadS3Baseline(ctx, tuning, path, tmpPath); err != nil {
 		os.RemoveAll(tmpDir)
-		return "", nil, fmt.Errorf("open duckdb: %w", err)
+		return "", nil, localWriteErr(err)
 	}
-	defer db.Close()
-	applyDuckDBTuning(ctx, db, tuning)
-
-	if err := duckdbutil.LoadHTTPFS(ctx, db); err != nil {
-		os.RemoveAll(tmpDir)
-		return "", nil, fmt.Errorf("load httpfs: %w", err)
-	}
-	if err := duckdbutil.EnableS3CredentialChain(ctx, db); err != nil {
-		os.RemoveAll(tmpDir)
-		return "", nil, err
-	}
-	safeSrc := strings.ReplaceAll(path, "'", "''")
-	safeDst := strings.ReplaceAll(tmpPath, "'", "''")
-	if _, err := db.ExecContext(ctx, s3DownloadCopySQL(safeSrc, safeDst)); err != nil {
-		os.RemoveAll(tmpDir)
-		return "", nil, fmt.Errorf("download s3 baseline: %w", err)
-	}
-
 	cleanup := func() { os.RemoveAll(tmpDir) }
 	return tmpPath, cleanup, nil
 }
@@ -3140,13 +3120,75 @@ var (
 		if err != nil {
 			return 0, err
 		}
-		b, err := storage.NewS3BackendUnprobed(ctx, storage.S3Config{Bucket: bucket})
+		b, err := sizeBackendFor(ctx, bucket)
 		if err != nil {
 			return 0, err
 		}
 		return b.Size(ctx, key)
 	}
 )
+
+// sizeBackends holds one S3 client per bucket for s3ObjectSize, so a fold of
+// many tables does not build a client (and resolve credentials) per table.
+// The SDK client refreshes its own credentials, so keeping it is safe.
+var (
+	sizeBackendsMu sync.Mutex
+	sizeBackends   = map[string]*storage.S3Backend{}
+)
+
+func sizeBackendFor(ctx context.Context, bucket string) (*storage.S3Backend, error) {
+	sizeBackendsMu.Lock()
+	defer sizeBackendsMu.Unlock()
+	if b := sizeBackends[bucket]; b != nil {
+		return b, nil
+	}
+	b, err := storage.NewS3BackendUnprobed(ctx, storage.S3Config{Bucket: bucket})
+	if err != nil {
+		return nil, err
+	}
+	sizeBackends[bucket] = b
+	return b, nil
+}
+
+// downloadS3Baseline copies one s3:// Parquet object to a local file through
+// DuckDB's httpfs. Indirected so a test can fail the download without a bucket.
+var downloadS3Baseline = func(ctx context.Context, tuning duckdbutil.Tuning, src, dst string) error {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		return fmt.Errorf("open duckdb: %w", err)
+	}
+	defer db.Close()
+	applyDuckDBTuning(ctx, db, tuning)
+	if err := duckdbutil.LoadHTTPFS(ctx, db); err != nil {
+		return fmt.Errorf("load httpfs: %w", err)
+	}
+	if err := duckdbutil.EnableS3CredentialChain(ctx, db); err != nil {
+		return err
+	}
+	safeSrc := strings.ReplaceAll(src, "'", "''")
+	safeDst := strings.ReplaceAll(dst, "'", "''")
+	if _, err := db.ExecContext(ctx, s3DownloadCopySQL(safeSrc, safeDst)); err != nil {
+		return fmt.Errorf("download s3 baseline: %w", err)
+	}
+	return nil
+}
+
+// ErrLocalDiskFull marks a write to a LOCAL folder (the download of an s3://
+// previous snapshot, or a compaction's temporary merge) that found the disk
+// full (#2212). DuckDB reports that as text with no errno to unwrap, so it is
+// classified here, where the write is known to be local, and never by
+// matching the words later: the index MySQL reports its own full tmp disk with
+// the same words, and that failure has nothing to do with this host's disk.
+var ErrLocalDiskFull = errors.New("no space left on the local disk")
+
+// localWriteErr wraps err with ErrLocalDiskFull when it says the disk is full;
+// any other error is returned unchanged.
+func localWriteErr(err error) error {
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "no space left on device") {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrLocalDiskFull, err)
+}
 
 // baselineDownloadDir makes the temporary folder one s3:// baseline is
 // downloaded into: under dir, or the system's temporary directory when dir is

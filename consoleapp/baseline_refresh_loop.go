@@ -2449,46 +2449,74 @@ var newPartialUploadStore = func(ctx context.Context, bucket string) (partialUpl
 
 // removePartialUpload deletes, best effort, what a failed upload of a staged
 // update left under its own snapshot prefix (dest, "s3://bucket/.../<ts>"),
-// and returns the words for the run's message. Only that one prefix, with
-// its trailing slash so a sibling whose name starts the same is never
-// touched, and only when it holds no _SUCCESS: a copy carrying the marker is
-// complete, and is kept. A listing or delete that fails is said at Warn with
-// the prefix; the files then stay, marked incomplete, which no listing reads.
+// and returns the words for the run's message.
+//
+// Only that one prefix, with its trailing slash so a sibling whose name
+// starts the same is never touched. A copy carrying _SUCCESS is complete and
+// kept. A copy with no _INCOMPLETE marker is not this daemon's upload
+// (baseline.Upload writes the marker first) and is left alone.
+//
+// The ORDER is the safety: the _INCOMPLETE marker is what keeps a partial
+// copy out of every listing, and a folder with no marker at all reads as a
+// complete pre-marker snapshot (#467). S3 lists the marker before any table
+// ('_' sorts before letters), so every other key goes first and the marker
+// LAST, only when all of them went. A failure anywhere leaves the marker
+// standing, which is when, and only when, the words say the files stay
+// marked incomplete.
 func removePartialUpload(ctx context.Context, req refreshRequest, dest string) string {
 	const stay = "the files already sent stay there marked incomplete, and are never read"
+	where := strings.TrimSuffix(dest, "/") + "/"
+	warn := func(msg string, err error) {
+		slog.Warn("snapshot refresh: "+msg, "server", req.ServerName, "id", req.ServerID, "prefix", where, "error", err)
+	}
 	bucket, key, err := storage.ParseS3URL(dest)
 	prefix := strings.TrimSuffix(key, "/") + "/"
-	warn := func(err error) string {
-		slog.Warn("snapshot refresh: could not remove a partial upload from the bucket; it stays there marked incomplete, and no listing reads it",
-			"server", req.ServerName, "id", req.ServerID, "prefix", strings.TrimSuffix(dest, "/")+"/", "error", err)
+	if err == nil && prefix == "/" {
+		err = errors.New("the destination names no snapshot folder")
+	}
+	var store partialUploadStore
+	if err == nil {
+		store, err = newPartialUploadStore(ctx, bucket)
+	}
+	var keys []string
+	if err == nil {
+		keys, err = store.List(ctx, prefix)
+	}
+	if err != nil {
+		// Nothing deleted. What an upload sent sits under the marker it
+		// wrote first.
+		warn("could not look for a partial upload to remove; what was sent stays there marked incomplete, and no listing reads it", err)
 		return stay
 	}
-	if err != nil {
-		return warn(err)
-	}
-	if prefix == "/" {
-		return warn(errors.New("the destination names no snapshot folder"))
-	}
-	store, err := newPartialUploadStore(ctx, bucket)
-	if err != nil {
-		return warn(err)
-	}
-	keys, err := store.List(ctx, prefix)
-	if err != nil {
-		return warn(err)
-	}
+	marker := prefix + baseline.IncompleteMarker
+	hasMarker := false
+	var rest []string
 	for _, k := range keys {
-		if k == prefix+baseline.SuccessMarker {
+		switch {
+		case k == prefix+baseline.SuccessMarker:
 			return "a complete copy did reach the bucket and was kept"
+		case k == marker:
+			hasMarker = true
+		case strings.HasPrefix(k, prefix): // defensive: the listing answers for the prefix asked
+			rest = append(rest, k)
 		}
 	}
-	for _, k := range keys {
-		if !strings.HasPrefix(k, prefix) {
-			continue // defensive: the listing answers for the prefix asked
+	if !hasMarker {
+		if len(rest) == 0 {
+			return "nothing had reached the bucket"
 		}
+		warn("found files with no completeness marker where the failed upload was going; they are not this upload's, and are left alone", nil)
+		return "files already in the bucket at that name were left alone"
+	}
+	for _, k := range rest {
 		if err := store.Delete(ctx, k); err != nil {
-			return warn(err)
+			warn("could not remove a partial upload from the bucket; it stays there marked incomplete, and no listing reads it", err)
+			return stay
 		}
+	}
+	if err := store.Delete(ctx, marker); err != nil {
+		warn("removed a partial upload from the bucket except its incomplete marker, which stays; no listing reads that folder", err)
+		return "the files already sent were removed from the bucket; only the folder's marker stays, marked incomplete, and no listing reads it"
 	}
 	return "any files already sent were removed from the bucket"
 }

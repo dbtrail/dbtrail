@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -501,21 +502,29 @@ func TestStagedFold_aFailedDeleteIsReclaimedAtTheNextStart(t *testing.T) {
 	}
 }
 
-// A download that fills the disk fails inside DuckDB, whose error is text, not
-// syscall.ENOSPC. It must still read as a disk refusal, so no full read (which
-// stages in the same folder) stands in for it.
-func TestFoldDiskRefused_recognisesDuckDBsDiskFullText(t *testing.T) {
-	duck := errors.New(`materialize baseline: download s3 baseline: IO Error: Could not write file "/stage/refresh-1/bintrail-baseline-2/baseline.parquet": No space left on device`)
-	if !foldDiskRefused(duck) {
-		t.Fatal("a DuckDB disk-full download is not a disk refusal")
-	}
-	if foldDiskRefused(errors.New("download s3 baseline: HTTP 403 Forbidden")) {
-		t.Fatal("an unrelated download error reads as a disk refusal")
+// A download that fills the disk is a disk refusal, so no full read (which
+// stages in the same folder) stands in for it. Classified in reconstruct,
+// where the error is known to be a local write (ErrLocalDiskFull), never by
+// the words: the index MySQL says the same "No space left on device" about
+// ITS tmp disk, and that failure a full read would cure.
+func TestFoldDiskRefused_onlyALocalWriteIsADiskRefusal(t *testing.T) {
+	download := fmt.Errorf("shop.orders: materialize baseline: %w", reconstruct.ErrLocalDiskFull)
+	if !foldDiskRefused(download) {
+		t.Fatal("a full disk under the download is not a disk refusal")
 	}
 	st := console.BaselineStatus{}
-	applyFoldStatus(&st, 1, 1, reuseTally{}, duck)
+	applyFoldStatus(&st, 1, 1, reuseTally{}, download)
 	if !st.DiskRefused || fullReadStandsIn(st) {
 		t.Fatalf("status = %+v, want a disk refusal no full read stands in for", st)
+	}
+	index := errors.New("shop.orders: fetch events: Error 3 (HY000): Error writing file '/tmp/MYfd=58' (OS errno 28 - No space left on device)")
+	if foldDiskRefused(index) {
+		t.Fatal("the index MySQL's own full tmp disk reads as a local disk refusal")
+	}
+	st = console.BaselineStatus{}
+	applyFoldStatus(&st, 1, 1, reuseTally{}, index)
+	if st.DiskRefused || !fullReadStandsIn(st) {
+		t.Fatalf("status = %+v, want a refusal a full read stands in for", st)
 	}
 }
 
@@ -560,6 +569,7 @@ type fakePartialStore struct {
 	listed  []string
 	deleted []string
 	delErr  error
+	failOn  map[string]error // a delete of this key fails with this
 }
 
 func (f *fakePartialStore) List(_ context.Context, prefix string) ([]string, error) {
@@ -580,6 +590,9 @@ func (f *fakePartialStore) Delete(_ context.Context, key string) error {
 	defer f.mu.Unlock()
 	if f.delErr != nil {
 		return f.delErr
+	}
+	if err := f.failOn[key]; err != nil {
+		return err
 	}
 	f.deleted = append(f.deleted, key)
 	return nil
@@ -620,7 +633,7 @@ func TestStagedFold_aPartialUploadIsRemovedFromTheBucket(t *testing.T) {
 	if *bucket != "bucket" || len(store.listed) != 1 || store.listed[0] != "s/"+stamp+"/" {
 		t.Fatalf("listed %v in bucket %q, want only this run's prefix s/%s/", store.listed, *bucket, stamp)
 	}
-	want := []string{"s/" + stamp + "/_INCOMPLETE", "s/" + stamp + "/shop/orders.parquet"}
+	want := []string{"s/" + stamp + "/shop/orders.parquet", "s/" + stamp + "/_INCOMPLETE"} // the marker last
 	if strings.Join(store.deleted, ",") != strings.Join(want, ",") {
 		t.Fatalf("deleted %v, want %v", store.deleted, want)
 	}
@@ -660,7 +673,7 @@ func TestStagedFold_partialUploadCleanupKeepsACompleteCopyAndSaysAFailure(t *tes
 			!strings.Contains(logs.String(), "AccessDenied: s3:DeleteObject") {
 			t.Fatalf("the failed delete is not said at Warn with the prefix: %s", logs)
 		}
-		if !strings.Contains(st.LastError, "stay there marked incomplete") {
+		if !strings.Contains(st.LastError, "marked incomplete") {
 			t.Fatalf("message = %q, want it to say the sent files stay", st.LastError)
 		}
 	})
@@ -699,5 +712,71 @@ func TestStagedFold_theRunFolderIsGoneWhenTheStatusTurnsTerminal(t *testing.T) {
 				t.Fatalf("the staging folder held %v when the status turned %s", atTerminal, state)
 			}
 		})
+	}
+}
+
+// The _INCOMPLETE marker is what keeps a partial copy out of every S3 listing
+// (a folder with no marker at all reads as a complete pre-marker snapshot,
+// #467). So it is deleted LAST, and only when every other delete went
+// through: a delete that fails half way must leave the marker standing, or the
+// leftover tables would become the bucket's newest "complete" snapshot. S3
+// lists "_INCOMPLETE" before any table folder ('_' sorts before letters), so
+// deleting in listing order would remove it first.
+func TestRemovePartialUpload_theMarkerGoesLastAndOnlyIfEverythingElseWent(t *testing.T) {
+	stamp := reconstruct.SnapshotDirName(refreshAt)
+	pre := "s/" + stamp + "/"
+	keys := []string{pre + "_INCOMPLETE", pre + "shop/a.parquet", pre + "shop/b.parquet"}
+	req := s3OnlyRequest("s")
+	dest := "s3://bucket/s/" + stamp
+	for _, tc := range []struct {
+		name       string
+		failOn     map[string]error
+		markerKept bool
+	}{
+		{"every delete works", nil, false},
+		{"a table delete fails half way", map[string]error{pre + "shop/b.parquet": errors.New("SlowDown")}, true},
+		{"the marker delete fails", map[string]error{pre + "_INCOMPLETE": errors.New("SlowDown")}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakePartialStore{keys: keys, failOn: tc.failOn}
+			stubPartialStore(t, store)
+			words := removePartialUpload(context.Background(), req, dest)
+			t.Logf("words: %s; deleted %v", words, store.deleted)
+			markerGone := false
+			for i, k := range store.deleted {
+				if k == pre+"_INCOMPLETE" {
+					markerGone = true
+					if i != len(store.deleted)-1 {
+						t.Fatalf("the marker was deleted before %v", store.deleted[i+1:])
+					}
+				}
+			}
+			if markerGone == tc.markerKept {
+				t.Fatalf("marker deleted = %v, want kept = %v (deleted %v)", markerGone, tc.markerKept, store.deleted)
+			}
+			says := strings.Contains(words, "marked incomplete")
+			if says != tc.markerKept {
+				t.Fatalf("words %q: say the files stay marked incomplete exactly when the marker does", words)
+			}
+		})
+	}
+}
+
+// A copy with NO marker at all (another writer's, or an older one) is never
+// deleted piecemeal: a failed delete there would leave tables that read as
+// complete. It is left alone and said.
+func TestRemovePartialUpload_aCopyWithoutAMarkerIsLeftAlone(t *testing.T) {
+	stamp := reconstruct.SnapshotDirName(refreshAt)
+	pre := "s/" + stamp + "/"
+	store := &fakePartialStore{keys: []string{pre + "shop/a.parquet"}}
+	stubPartialStore(t, store)
+	logs := captureWarnings(t)
+	words := removePartialUpload(context.Background(), s3OnlyRequest("s"), "s3://bucket/s/"+stamp)
+	t.Logf("words: %s", words)
+	if len(store.deleted) != 0 {
+		t.Fatalf("deleted %v from a folder with no marker", store.deleted)
+	}
+	if strings.Contains(words, "marked incomplete") || !strings.Contains(logs.String(), pre) {
+		t.Fatalf("words %q / log %q", words, logs)
 	}
 }

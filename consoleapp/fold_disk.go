@@ -6,11 +6,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 
 	"github.com/dbtrail/dbtrail/internal/doctor"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
 // errFoldDiskFull marks a table refused before writing because the disk could
@@ -68,14 +68,13 @@ func newDiskSpaceCheck() func(dir string, need int64) error {
 // the check, or a write that found the disk full anyway (another server's
 // build, the index, anything else filling the same disk meanwhile).
 //
-// DuckDB reports a full disk as text ("No space left on device", inside an
-// IO Error), with no errno to unwrap: the download of an s3:// previous
-// snapshot (#2212) is a DuckDB COPY, so that text counts too.
+// DuckDB reports a full disk as text, with no errno to unwrap; reconstruct
+// classifies its local writes (the download of an s3:// previous snapshot, a
+// compaction's merge) as reconstruct.ErrLocalDiskFull where they happen
+// (#2212). The words alone are never matched here: the index MySQL says the
+// same about its own tmp disk, and a full read cures that one.
 func foldDiskRefused(err error) bool {
-	if errors.Is(err, errFoldDiskFull) || errors.Is(err, syscall.ENOSPC) {
-		return true
-	}
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no space left on device")
+	return errors.Is(err, errFoldDiskFull) || errors.Is(err, syscall.ENOSPC) || errors.Is(err, reconstruct.ErrLocalDiskFull)
 }
 
 // existingParent walks up from dir to the nearest directory that exists, so a
