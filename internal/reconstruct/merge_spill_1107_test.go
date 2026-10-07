@@ -79,12 +79,19 @@ func TestMergeSpilled_matchesInMemoryMerge(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// passRows (#2207): a spill sized by the fold's byte budget, its passes
+	// smaller than its row limit.
 	for _, tc := range []struct {
-		limit      int64
-		manyPasses bool
-	}{{12, true}, {100000, false}} {
-		t.Run(fmt.Sprintf("limit %d", tc.limit), func(t *testing.T) {
+		limit, passRows int64
+		manyPasses      bool
+	}{{12, 0, true}, {100000, 0, false}, {100000, 12, true}} {
+		t.Run(fmt.Sprintf("limit %d passRows %d", tc.limit, tc.passRows), func(t *testing.T) {
 			s := spillOf(t, tc.limit, cloneChanges(changes))
+			s.passRows = tc.passRows
+			perPass := tc.limit
+			if tc.passRows > 0 {
+				perPass = tc.passRows
+			}
 			var got []map[string]any
 			var checks, checked int
 			stats, err := mergeBaselineImages(ctx, mergeCore{
@@ -92,8 +99,8 @@ func TestMergeSpilled_matchesInMemoryMerge(t *testing.T) {
 				CheckPass: func(m map[string]*query.ResultRow) error {
 					checks++
 					checked += len(m)
-					if int64(len(m)) > 2*tc.limit {
-						t.Errorf("a pass held %d changes with a limit of %d", len(m), tc.limit)
+					if int64(len(m)) > 2*perPass {
+						t.Errorf("a pass held %d changes with passes of %d", len(m), perPass)
 					}
 					return nil
 				},
@@ -115,7 +122,7 @@ func TestMergeSpilled_matchesInMemoryMerge(t *testing.T) {
 				t.Errorf("the passes checked %d changes, want all %d", checked, len(changes))
 			}
 			if tc.manyPasses && checks < 3 {
-				t.Errorf("a limit of %d over %d changes took %d passes; the test is not exercising passes", tc.limit, len(changes), checks)
+				t.Errorf("passes of %d over %d changes took %d passes; the test is not exercising passes", perPass, len(changes), checks)
 			}
 			if !tc.manyPasses && checks != 1 {
 				t.Errorf("everything fits in memory but took %d passes", checks)

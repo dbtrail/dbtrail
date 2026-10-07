@@ -247,6 +247,15 @@ type FullTableConfig struct {
 	// refusal wraps ErrTouchedRowBudget.
 	MaxTouchedRows int64
 
+	// MaxChangeBytes is the same budget in bytes (#2207): past it, by an
+	// estimate of what the changes take on the heap, the merge over a baseline
+	// moves them to disk and sizes its passes to it. It never refuses; the
+	// binlog-only fallback, which cannot spill, ignores it. Rows alone let a
+	// wide table's million changed rows take 2.2 GB live (4 GB with the
+	// collector's headroom) per table on a measured TPC-C-like fold. Per-RUN,
+	// divided by the effective parallelism like MaxTouchedRows. 0 = no limit.
+	MaxChangeBytes int64
+
 	// RemediationHint replaces the advice attached to that warning.
 	//
 	// Empty uses the wording for the attended CLI commands, which names the
@@ -526,6 +535,7 @@ func withFoldBudgets(cfg FullTableConfig, fc foldConfig) foldConfig {
 	fc.BatchSize = cfg.FetchBatchSize
 	fc.WarnEventThreshold = cfg.WarnEventThreshold
 	fc.MaxTouchedRows = cfg.MaxTouchedRows
+	fc.MaxChangeBytes = cfg.MaxChangeBytes
 	// The DIVISOR, not the raw field: effectiveParallelism clamps to
 	// len(cfg.Tables), so a single-table run is not divided by a parallelism it
 	// can never reach.

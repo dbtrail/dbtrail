@@ -940,6 +940,7 @@ func sqlExportFoldConfig(req console.SQLExportRequest, dir string, tableList []s
 		Parallelism:        daemonFoldParallelism,
 		WarnEventThreshold: daemonFoldWarnEventThreshold,
 		MaxTouchedRows:     daemonFoldMaxTouchedRows,
+		MaxChangeBytes:     daemonFoldMaxChangeBytes,
 		RemediationHint:    daemonFoldRemediation,
 		SpaceCheck:         newDiskSpaceCheck(),
 		// AllowGaps stays FALSE: a dump the operator will load somewhere is

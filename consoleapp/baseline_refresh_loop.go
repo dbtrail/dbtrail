@@ -1461,6 +1461,14 @@ const (
 	// share (a table with no backup still refuses at the share).
 	daemonFoldMaxTouchedRows = 2_000_000
 
+	// daemonFoldMaxChangeBytes is the same cap by estimated heap (#2207),
+	// divided the same way: 1 GiB per table. Rows alone let a table of
+	// 2.2 KB rows hold 2.2 GB live at the row cap, about twice that with the
+	// collector's headroom, and two tables fold at once; this daemon shares
+	// its host with capture. Past it a table's changes go to disk and its
+	// merge runs in passes of about this size. It never refuses.
+	daemonFoldMaxChangeBytes = 2 << 30
+
 	// daemonFoldRemediation replaces the volume warning's default advice, which
 	// names --at, --parallelism and --warn-event-threshold. bintrail-console
 	// registers none of the three: its only persistent flags are --log-level and
@@ -1502,6 +1510,7 @@ func refreshFoldConfig(req refreshRequest, at time.Time, tableList []string) rec
 		Parallelism:           daemonFoldParallelism,
 		WarnEventThreshold:    daemonFoldWarnEventThreshold,
 		MaxTouchedRows:        daemonFoldMaxTouchedRows,
+		MaxChangeBytes:        daemonFoldMaxChangeBytes,
 		RemediationHint:       daemonFoldRemediation,
 		SpaceCheck:            newDiskSpaceCheck(),
 		// AllowGaps stays FALSE. An unattended job must never publish a

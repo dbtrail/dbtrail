@@ -93,6 +93,11 @@ type changeSpill struct {
 	// with it, and tables names the tables folding at once for the refusal.
 	limit  int64
 	tables int
+	// passRows, when set, is how many changes a merge pass holds, from the
+	// fold's size budget (#2207); below limit for a wide table. Only the
+	// passes follow it: the refusal stays on limit, and a group larger than a
+	// pass is still read whole, as its own pass.
+	passRows int64
 
 	files   [spillBuckets]*os.File
 	bufs    [spillBuckets]*bufio.Writer
@@ -246,11 +251,15 @@ func (s *changeSpill) eachPass(ctx context.Context, run func(pass map[string]*qu
 		return nil
 	}
 	last := 0
+	passLimit := s.limit
+	if s.passRows > 0 && (passLimit <= 0 || s.passRows < passLimit) {
+		passLimit = s.passRows
+	}
 	for b := range spillBuckets {
 		if err := ctx.Err(); err != nil {
 			return passes, err
 		}
-		if len(pass) > 0 && int64(len(pass)+last) > s.limit {
+		if len(pass) > 0 && int64(len(pass)+last) > passLimit {
 			if err := flush(); err != nil {
 				return passes, err
 			}

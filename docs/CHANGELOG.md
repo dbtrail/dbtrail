@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **A scheduled update moves a table's changes to disk by size, not only by
+  count** (#2207). An update holds every changed row of a table in memory
+  until it writes it, and moved them to disk only past 1,000,000 rows a
+  table. A row's cost is its width: on a table shaped like sysbench-tpcc's
+  `stock`, a million changed rows took 2.2 GB live, about twice that with
+  the Go collector's headroom, and two tables fold at once, on the host
+  that also runs capture. The scheduler now also moves a table's changes
+  to disk once they take about 1 GiB (2 GiB per update), estimated from a
+  sample of the rows, and merges them in passes of that size. The new
+  bound never refuses an update; the row limit and its refusal are
+  unchanged.
 - **Rewriting a table's backup file reads the old file in pages** (#2207).
   The rewrite read the whole previous file with one query, and the DuckDB
   driver holds a query's whole result in memory, outside DuckDB's own
