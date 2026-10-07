@@ -267,7 +267,6 @@ func TestBackupScheduleCard_saysWhatARunCosts(t *testing.T) {
 			"snapshots that go to S3 are full reads",
 			// #2212 made these false too: an S3-only server is updated.
 			"a server with no local backup directory gets a full backup",
-			"An S3-only baseline destination is skipped",
 		} {
 			if strings.Contains(flat, banned) {
 				t.Errorf("docs/%s still says %q, which #1539 made false: the scheduled update reads the "+

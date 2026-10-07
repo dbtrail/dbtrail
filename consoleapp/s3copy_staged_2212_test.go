@@ -134,7 +134,9 @@ func TestStagedFold_aFailedCopyFailsTheRun(t *testing.T) {
 	if st.State != "failed" || st.Published || !st.UploadFailed {
 		t.Fatalf("status = %+v", st)
 	}
-	for _, want := range []string{"AccessDenied", "customers.parquet", "deleted"} {
+	// The copies already made sit under this run's prefix, which the
+	// partial-upload cleanup removes like any file the upload sent.
+	for _, want := range []string{"AccessDenied", "customers.parquet", "deleted", "removed from the bucket"} {
 		if !strings.Contains(st.LastError, want) {
 			t.Errorf("message lacks %q: %s", want, st.LastError)
 		}

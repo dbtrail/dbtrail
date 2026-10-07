@@ -864,8 +864,22 @@ func emitWindowChanges(in mergeInput, cols []baseline.Column, changes map[string
 // nothing new.
 //
 // dir is where the temporary file goes (FullTableConfig.DownloadDir); "" is
-// the system's temporary directory.
-func materializeBaseWithDelta(ctx context.Context, basePath string, d *tableDelta, tuning duckdbutil.Tuning, dir string) (string, func(), error) {
+// the system's temporary directory. With a dir and a spaceCheck, the free disk
+// there is checked first against the base plus its chain, about what the
+// merge writes (#2212), and a full disk during the write is ErrLocalDiskFull.
+func materializeBaseWithDelta(ctx context.Context, basePath string, d *tableDelta, tuning duckdbutil.Tuning, dir string, spaceCheck func(string, int64) error) (string, func(), error) {
+	if dir != "" && spaceCheck != nil {
+		need := d.PairSize
+		if fi, err := os.Stat(basePath); err == nil {
+			need += fi.Size()
+		} else {
+			slog.Warn("could not size a table's base file before merging its deltas; checking the free space for the deltas alone",
+				"path", basePath, "error", err)
+		}
+		if err := spaceCheck(dir, need); err != nil {
+			return "", nil, err
+		}
+	}
 	tmpDir, err := os.MkdirTemp(dir, "bintrail-compact-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("mkdir temp: %w", err)
@@ -902,7 +916,7 @@ func materializeBaseWithDelta(ctx context.Context, basePath string, d *tableDelt
 	q := fmt.Sprintf("COPY (%s) TO %s (FORMAT PARQUET, COMPRESSION '%s')", state, lit(tmpPath), ParquetWriterCompression)
 	if _, err := ddb.ExecContext(ctx, q); err != nil {
 		cleanup()
-		return "", nil, fmt.Errorf("apply the table delta to its base: %w", err)
+		return "", nil, fmt.Errorf("apply the table delta to its base: %w", localWriteErr(err))
 	}
 	return tmpPath, cleanup, nil
 }
@@ -1203,9 +1217,9 @@ func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInp
 		if err := baselineintegrity.ValidateLocalFile(p.basePath); err != nil {
 			return err
 		}
-		in.LocalBaselinePath, cleanup, err = materializeBaseWithDelta(ctx, p.basePath, p.prev, p.cfg.DuckDBTuning, p.cfg.DownloadDir)
+		in.LocalBaselinePath, cleanup, err = materializeBaseWithDelta(ctx, p.basePath, p.prev, p.cfg.DuckDBTuning, p.cfg.DownloadDir, p.cfg.SpaceCheck)
 	} else {
-		in.LocalBaselinePath, cleanup, err = materializeBaselineLocalIn(ctx, p.basePath, p.cfg.DuckDBTuning, p.cfg.DownloadDir)
+		in.LocalBaselinePath, cleanup, err = materializeBaselineLocalIn(ctx, p.basePath, p.cfg.DuckDBTuning, p.cfg.DownloadDir, p.cfg.SpaceCheck)
 	}
 	if err != nil {
 		return fmt.Errorf("materialize baseline: %w", err)

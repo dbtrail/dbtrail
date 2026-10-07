@@ -408,6 +408,25 @@ func (b *S3Backend) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+// Size returns the size in bytes of the object at the given key (a HEAD
+// request).
+func (b *S3Backend) Size(ctx context.Context, key string) (int64, error) {
+	if err := validateKey(key); err != nil {
+		return 0, err
+	}
+	out, err := b.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(b.bucket),
+		Key:    aws.String(b.fullKey(key)),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("storage: size %q: %w", key, err)
+	}
+	if out.ContentLength == nil {
+		return 0, fmt.Errorf("storage: size %q: the response carries no length", key)
+	}
+	return *out.ContentLength, nil
+}
+
 // Exists checks whether an object exists at the given key.
 func (b *S3Backend) Exists(ctx context.Context, key string) (bool, error) {
 	if err := validateKey(key); err != nil {

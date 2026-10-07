@@ -7898,6 +7898,11 @@ function s3OnlyBackupWarning(srv, fix = true) {
   // fix: the closing instruction is for a session that can save this row.
   // The problem itself is said to everyone who can see the row.
   const then = (t) => fix ? " " + t : "";
+  // A process that runs no schedule (the read-only console): the cost below
+  // is the service's to state, and nothing here builds an update.
+  if (!srv.schedule_loop) {
+    return "With S3 only, scheduled updates are built in the staging folder of the DBTrail service that runs the schedule. This one runs none.";
+  }
   if (srv.staging_refusal) {
     const why = "With S3 only, a scheduled update is built in the staging folder, which cannot be used here (" +
       srv.staging_refusal.replace(/[.\s]+$/, "") + ")";
@@ -7914,7 +7919,7 @@ function s3OnlyBackupWarning(srv, fix = true) {
 // s3OnlyBackupFault: the note above is a fault (red) only when no update can
 // run; the cost of a working update is a hint.
 function s3OnlyBackupFault(srv) {
-  return !!(srv && srv.staging_refusal);
+  return !!(srv && srv.schedule_loop && srv.staging_refusal);
 }
 
 // localCopyWords is what the per-server yes/no means right now (#1681), from

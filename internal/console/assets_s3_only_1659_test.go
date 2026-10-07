@@ -101,6 +101,7 @@ const out = {
   fault: [
     s3OnlyBackupFault(srv({ baseline_s3: "s3://b/p" })),
     s3OnlyBackupFault(srv({ baseline_s3: "s3://b/p", staging_refusal: "x" })),
+    s3OnlyBackupFault(srv({ baseline_s3: "s3://b/p", staging_refusal: "x", schedule_loop: false })),
   ],
   alarms: [
     nextRun({ runnable: true, next_method: "full", next_method_why: "an update for a server whose snapshots go only to S3 is built in the staging folder, which cannot be used; the staging folder /stage cannot be written: permission denied", next_method_why_code: "no_staging" }),
@@ -146,7 +147,11 @@ console.log(JSON.stringify(out));
 	// note is its cost, a hint, wherever this process cannot tell otherwise.
 	const cost = "With S3 only, each scheduled update downloads the tables that changed from S3, rewrites them in the staging folder and uploads them again; tables that did not change are copied inside S3 without being downloaded."
 	const costFix = cost + " Add a Local folder so changed tables are not downloaded first."
-	for _, i := range []int{0, 4, 6} {
+	// A process that runs no schedule says so instead of the cost.
+	if got.Warn[6] != "With S3 only, scheduled updates are built in the staging folder of the DBTrail service that runs the schedule. This one runs none." {
+		t.Errorf("no schedule loop: %q", got.Warn[6])
+	}
+	for _, i := range []int{0, 4} {
 		if got.Warn[i] != costFix {
 			t.Errorf("case %d: S3 only is not told the cost of its updates: %q", i, got.Warn[i])
 		}
@@ -167,7 +172,7 @@ console.log(JSON.stringify(out));
 	if w := got.Warn[9]; w != "With S3 only, a scheduled update is built in the staging folder, which cannot be used here (the staging folder /stage cannot be written: permission denied), and a full read is not available either, so scheduled snapshots cannot run on this server. Fix the staging folder, or add a Local folder." {
 		t.Errorf("S3 only, staging unusable, no full read: %q", w)
 	}
-	if len(got.Fault) != 2 || got.Fault[0] || !got.Fault[1] {
+	if len(got.Fault) != 3 || got.Fault[0] || !got.Fault[1] || got.Fault[2] {
 		t.Errorf("fault = %v, want a hint for the cost and red for an unusable staging folder", got.Fault)
 	}
 	wantAlarm := []bool{true, false, false, true, false, false, false}
@@ -333,7 +338,8 @@ const rows = {
   updates: Object.assign({}, base, { staging_refusal: "" }),
   withSchedule: Object.assign({}, base, { schedule_every: "1d", schedule_every_minutes: 1440 }),
   refused: Object.assign({}, base, { schedule_every: "1d", schedule_every_minutes: 1440, schedule_refusal: "creating snapshots from the console is turned off" }),
-  noLoop: Object.assign({}, base, { schedule_loop: false, full_backup_possible: false }),
+  noLoop: Object.assign({}, base, { schedule_loop: false, full_backup_possible: false, staging_refusal: "" }),
+  noFull: Object.assign({}, base, { full_backup_possible: false }),
   withDir: Object.assign({}, base, { baseline_dir: "/var/lib/bintrail/baselines/a" }),
 };
 const out = {};
@@ -367,8 +373,11 @@ console.log(JSON.stringify(out));
 	if has(got["refused"], fullRead) || len(got["refused"]) != 1 || !strings.Contains(got["refused"][0], "creating snapshots from the console is turned off") {
 		t.Errorf("a refused schedule shows the S3-only line next to its own reason: %q", got["refused"])
 	}
-	if !has(got["noLoop"], "With S3 only, a scheduled update is built in the staging folder, which cannot be used here (the staging folder /stage cannot be written: permission denied), and a full read is not available either, so scheduled snapshots cannot run on this server. Fix the staging folder, or add a Local folder.") {
-		t.Errorf("no schedule loop: %q", got["noLoop"])
+	if len(got["noLoop"]) != 0 {
+		t.Errorf("a console that runs no schedule shows a red S3-only line: %q", got["noLoop"])
+	}
+	if !has(got["noFull"], "With S3 only, a scheduled update is built in the staging folder, which cannot be used here (the staging folder /stage cannot be written: permission denied), and a full read is not available either, so scheduled snapshots cannot run on this server. Fix the staging folder, or add a Local folder.") {
+		t.Errorf("staging unusable and no full read: %q", got["noFull"])
 	}
 	if len(got["updates"]) != 0 {
 		t.Errorf("an S3-only server whose updates run is warned in red: %q", got["updates"])
