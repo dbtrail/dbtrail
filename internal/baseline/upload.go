@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 
@@ -315,9 +316,11 @@ func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, op
 }
 
 // uploadConcurrency is how many of a snapshot's data files are sent at once.
-// Each is one PUT (a file past the multipart threshold is read in place from
-// disk, not buffered), so this bounds open files and connections rather than
-// memory; past a handful the round trips, not the count, are what is left.
+// Each is one PUT: the files sent this way are under uploadParallelMaxSize,
+// below storage.UploadFileSinglePutMax (a test pins that), so a failure that
+// cancels the others never leaves a half-done multipart upload behind. Files
+// are read in place from disk, not buffered, so this bounds open files and
+// connections rather than memory.
 const uploadConcurrency = 8
 
 // uploadParallelMaxSize is the size from which a file is sent on its own,
@@ -339,7 +342,18 @@ func runUploadJobs(ctx context.Context, jobs []func(context.Context) (bool, erro
 		if gctx.Err() != nil {
 			break
 		}
-		g.Go(func() error {
+		g.Go(func() (err error) {
+			// errgroup does not recover: a panic here would end the whole
+			// process, and the process uploading is also the one capturing.
+			// It becomes this upload's error instead, which withholds
+			// _SUCCESS like any other failure.
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("snapshot upload panicked; the snapshot is left marked incomplete",
+						"panic", r, "stack", string(debug.Stack()))
+					err = fmt.Errorf("snapshot upload panicked: %v", r)
+				}
+			}()
 			if err := gctx.Err(); err != nil {
 				return err
 			}

@@ -781,3 +781,36 @@ func TestPutIfAbsentOtherErrorPropagates(t *testing.T) {
 		t.Fatalf("want plain propagated error, got: %v", err)
 	}
 }
+
+// #2181 review: a snapshot upload sends files under 16 MiB eight at a time.
+// With the SDK's 5 MiB default part size a 6 to 16 MiB file was a multipart
+// upload, and a sibling's failure cancelled it mid-way, leaving its parts
+// behind in the bucket (the abort runs on the cancelled context). A FILE
+// body is read in place, not buffered, so the file path uses parts of
+// UploadFileSinglePutMax: anything below it is one PUT, nothing to orphan.
+func TestUploadFileBody_singlePutBelowTheLimit_2181(t *testing.T) {
+	for _, tc := range []struct {
+		size          int
+		wantMultipart bool
+	}{
+		{16 << 20, false},
+		{UploadFileSinglePutMax - 1, false},
+		{UploadFileSinglePutMax + 1, true},
+	} {
+		mock := newMockS3()
+		mock.objects = map[string][]byte{}
+		payload := make([]byte, tc.size)
+		for i := range payload {
+			payload[i] = byte((i * 13) % 251)
+		}
+		if err := uploadFileBody(context.Background(), mock, "bucket", "k", bytes.NewReader(payload)); err != nil {
+			t.Fatalf("%d bytes: %v", tc.size, err)
+		}
+		if got := mock.createMPUCount > 0; got != tc.wantMultipart {
+			t.Errorf("%d bytes: multipart = %v, want %v", tc.size, got, tc.wantMultipart)
+		}
+		if !bytes.Equal(mock.objects["k"], payload) {
+			t.Errorf("%d bytes: stored content differs", tc.size)
+		}
+	}
+}

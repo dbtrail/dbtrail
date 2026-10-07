@@ -323,8 +323,8 @@ func S3ObjectExists(ctx context.Context, client *s3.Client, bucket, key string) 
 // bucket. Operators should attach an AbortIncompleteMultipartUpload
 // lifecycle rule to the archive bucket to reap them (follow-up, documented in
 // docs/deployment.md).
-func uploadReader(ctx context.Context, client manager.UploadAPIClient, bucket, key string, body io.Reader) error {
-	uploader := manager.NewUploader(client)
+func uploadReader(ctx context.Context, client manager.UploadAPIClient, bucket, key string, body io.Reader, opts ...func(*manager.Uploader)) error {
+	uploader := manager.NewUploader(client, opts...)
 	_, err := uploader.Upload(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
@@ -346,10 +346,26 @@ func UploadFile(ctx context.Context, client *s3.Client, path, bucket, key string
 	}
 	defer f.Close()
 
-	if err := uploadReader(ctx, client, bucket, key, f); err != nil {
+	if err := uploadFileBody(ctx, client, bucket, key, f); err != nil {
 		return fmt.Errorf("upload %s → s3://%s/%s: %w", path, bucket, key, err)
 	}
 	return nil
+}
+
+// UploadFileSinglePutMax is the size below which UploadFile sends a file in
+// ONE PutObject, and the part size above it. The SDK's 5 MiB default made
+// every file past 5 MiB a multipart upload; a snapshot upload sends files
+// under 16 MiB eight at a time (#2181), and a multipart upload cancelled by
+// a sibling's failure leaves its parts behind in the bucket, billed, because
+// the SDK's abort runs on the cancelled context. A file body is read in
+// place (io.ReaderAt), not buffered, so a larger part costs no memory.
+const UploadFileSinglePutMax = 32 << 20
+
+// uploadFileBody is uploadReader with UploadFile's part size.
+func uploadFileBody(ctx context.Context, client manager.UploadAPIClient, bucket, key string, body io.Reader) error {
+	return uploadReader(ctx, client, bucket, key, body, func(u *manager.Uploader) {
+		u.PartSize = UploadFileSinglePutMax
+	})
 }
 
 // PutEmptyObject writes a zero-byte object at key. It is used to publish the

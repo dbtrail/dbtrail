@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
 // lockedOps serializes the bodies of a fake's functions. The upload sends a
@@ -166,18 +168,31 @@ func TestUploadWithOps_failedFileWithholdsSuccess_2181(t *testing.T) {
 	out := parallelFixture(t, files)
 	var mu sync.Mutex
 	started, success := 0, false
+	// The other files wait until t00 has failed, so how the scheduler
+	// orders the goroutines cannot let every file finish first.
+	failed := make(chan struct{})
 	ops := s3UploadOps{
 		putEmpty: func(context.Context, string) error { return nil },
 		uploadFile: func(ctx context.Context, _, k string) error {
 			mu.Lock()
-			defer mu.Unlock()
 			if strings.HasSuffix(k, SuccessMarker) {
 				success = true
+				mu.Unlock()
 				return nil
 			}
 			started++
+			mu.Unlock()
 			if strings.HasSuffix(k, "t00.parquet") {
+				close(failed)
 				return errors.New("boom")
+			}
+			select {
+			case <-failed:
+			case <-time.After(5 * time.Second):
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
 			}
 			return ctx.Err()
 		},
@@ -191,6 +206,8 @@ func TestUploadWithOps_failedFileWithholdsSuccess_2181(t *testing.T) {
 	if success {
 		t.Error("_SUCCESS was sent although a data file failed")
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if started == files {
 		t.Errorf("all %d files were attempted after the first failure; the rest should stop", files)
 	}
@@ -287,5 +304,46 @@ func TestUploadWithOps_cancelledMidwayWithholdsSuccess_2181(t *testing.T) {
 	}
 	if success {
 		t.Error("_SUCCESS was sent after the caller cancelled the upload")
+	}
+}
+
+// The files sent eight at a time must each be ONE request: a multipart
+// upload cancelled by a sibling's failure leaves billed parts behind.
+func TestUploadParallelFilesAreSinglePuts_2181(t *testing.T) {
+	if uploadParallelMaxSize >= storage.UploadFileSinglePutMax {
+		t.Fatalf("files up to %d bytes go up concurrently, but a file from %d bytes is a multipart upload",
+			uploadParallelMaxSize, storage.UploadFileSinglePutMax)
+	}
+}
+
+// A panic in one upload goroutine must not take the process down: the
+// daemon uploading is also the one capturing. It becomes the upload's error,
+// and _SUCCESS is not sent.
+func TestUploadWithOps_panicInAnUploadIsAnError_2181(t *testing.T) {
+	out := parallelFixture(t, 2*uploadConcurrency)
+	var mu sync.Mutex
+	success := false
+	ops := s3UploadOps{
+		putEmpty: func(context.Context, string) error { return nil },
+		uploadFile: func(_ context.Context, _, k string) error {
+			if strings.HasSuffix(k, "t03.parquet") {
+				panic("boom in the uploader")
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if strings.HasSuffix(k, SuccessMarker) {
+				success = true
+			}
+			return nil
+		},
+		objectExists: func(context.Context, string) (bool, error) { return false, nil },
+		deleteObject: func(context.Context, string) error { return nil },
+	}
+	_, err := uploadWithOps(context.Background(), out, "p", false, ops)
+	if err == nil || !strings.Contains(err.Error(), "boom in the uploader") {
+		t.Fatalf("err = %v, want the panic reported as the upload's error", err)
+	}
+	if success {
+		t.Error("_SUCCESS was sent after an upload panicked")
 	}
 }
