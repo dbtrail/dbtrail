@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -207,5 +208,39 @@ func TestCountReuse_aCopyInsideS3IsAReuseThatSavesNoDisk(t *testing.T) {
 	chain.CarriedForward = false
 	if got := countReuse([]*reconstruct.TableReport{chain}); got.s3Copied != 1 || got.reused != 0 {
 		t.Fatalf("chain copy tally = %+v", got)
+	}
+}
+
+// A copy that timed out may still land after the cleanup. The cleanup then
+// removes what it can but KEEPS the folder's incomplete marker, and the
+// message names the key and says why the folder stays marked incomplete.
+func TestStagedFold_aTimedOutCopyKeepsTheIncompleteMarker(t *testing.T) {
+	stubStagedFold(t, nil)
+	stamp := reconstruct.SnapshotDirName(refreshAt)
+	lateKey := "s/" + stamp + "/shop/customers.parquet"
+	stubCopyUpload(t, fmt.Errorf("upload: %w", &baseline.CopyMayStillLandError{Key: lateKey, Err: context.DeadlineExceeded}))
+	store := &fakePartialStore{keys: []string{"s/" + stamp + "/_INCOMPLETE", "s/" + stamp + "/shop/orders.parquet"}}
+	stubPartialStore(t, store)
+	f := newJobsFixture(t)
+	sup := f.supervisor(t)
+	var cfgSeen reconstruct.FullTableConfig
+	foldWithReports(t, &cfgSeen, copiedReport())
+	sup.refreshes["s"] = &console.BaselineStatus{State: "running"}
+	sup.runRefresh(s3OnlyRequest("s"), refreshAt, time.Minute)
+
+	st := sup.RefreshStatus("s")
+	t.Log(st.LastError)
+	if st.State != "failed" {
+		t.Fatalf("status = %+v", st)
+	}
+	for _, k := range store.deleted {
+		if strings.HasSuffix(k, "/_INCOMPLETE") {
+			t.Fatalf("the marker was deleted while a copy may still land: %v", store.deleted)
+		}
+	}
+	for _, want := range []string{lateKey, "marked incomplete", "may still"} {
+		if !strings.Contains(st.LastError, want) {
+			t.Errorf("message lacks %q: %s", want, st.LastError)
+		}
 	}
 }

@@ -80,3 +80,11 @@ func AfterDestructiveDDLCheckForTest(fn func()) (restore func()) {
 	afterDestructiveDDLCheck = fn
 	return func() { afterDestructiveDDLCheck = prev }
 }
+
+// OnS3BaselineDownloadForTest calls fn with every s3:// table file a fold
+// downloads (#2212).
+func OnS3BaselineDownloadForTest(fn func(string)) (restore func()) {
+	prev := s3BaselineDownloadHook
+	s3BaselineDownloadHook = fn
+	return func() { s3BaselineDownloadHook = prev }
+}

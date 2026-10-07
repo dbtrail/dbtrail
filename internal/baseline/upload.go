@@ -361,6 +361,9 @@ func uploadWithOpsCopies(ctx context.Context, outputDir, prefix string, retry bo
 			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), copyTimeout)
 			defer cancel()
 			if err := ops.copyObject(cctx, c.Src, key); err != nil {
+				if cctx.Err() != nil && errors.Is(err, context.DeadlineExceeded) {
+					return false, &CopyMayStillLandError{Key: key, Err: err}
+				}
 				return false, fmt.Errorf("copy %s into the new snapshot inside S3: %w", c.Rel, err)
 			}
 			slog.Debug("copied inside S3", "src", c.Src, "key", key)
@@ -427,7 +430,30 @@ const uploadConcurrency = 8
 // hundreds of GiB; past it the request is cut, the run fails, and a copy the
 // bucket still finishes lands after the cleanup, which is what the bound
 // trades for never hanging.
-const copyTimeout = time.Hour
+//
+// The cost of waiting: a started copy of a very large object runs to its end
+// (up to this bound) even after another file failed and the run is lost.
+// That is time and S3 requests spent on a doomed run, never a correctness
+// problem; the alternative is an object landing after the cleanup.
+//
+// A variable for tests.
+var copyTimeout = time.Hour
+
+// CopyMayStillLandError is a copy inside S3 that ran out of time
+// (copyTimeout): the request was cut, and the bucket may still finish the
+// copy afterwards. A caller cleaning up the failed upload must keep the
+// snapshot folder's _INCOMPLETE marker, or that late object would sit in a
+// folder with no marker, which discovery reads as complete (#467).
+type CopyMayStillLandError struct {
+	Key string // the destination key that may still appear
+	Err error
+}
+
+func (e *CopyMayStillLandError) Error() string {
+	return fmt.Sprintf("the copy inside S3 to %s did not finish in %s, and the bucket may still complete it: %v", e.Key, copyTimeout, e.Err)
+}
+
+func (e *CopyMayStillLandError) Unwrap() error { return e.Err }
 
 // uploadParallelMaxSize is the size from which a file is sent on its own,
 // after the small ones. A large file is not waiting on a round trip but on

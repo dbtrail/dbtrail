@@ -3,11 +3,15 @@
 package reconstruct_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -106,6 +110,32 @@ func TestReconstructParquet_s3OnlyUpdateCopiesAnUnchangedTable_MinIO(t *testing.
 		base.Add(time.Minute).Format("2006-01-02 15:04:05"), nil,
 		schema, "customers", 1, "1", nil, nil, []byte(`{"id":1,"name":"n"}`))
 
+	// Whole-object reads of the unchanged table during the fold: the
+	// download (DuckDB COPY) and the integrity pass that streams the object
+	// (the SDK). The footer read at step 2 is a small range read and is not
+	// counted; the table's bytes are.
+	srcURL := s3root + "/" + prevName + "/shop/orders.parquet"
+	_, srcKey, _ := storage.ParseS3URL(srcURL)
+	var mu sync.Mutex
+	downloads, streams := 0, 0
+	t.Cleanup(reconstruct.OnS3BaselineDownloadForTest(func(p string) {
+		if p == srcURL {
+			mu.Lock()
+			downloads++
+			mu.Unlock()
+		}
+	}))
+	realOpen := baselineintegrity.OpenS3Object
+	t.Cleanup(func() { baselineintegrity.OpenS3Object = realOpen })
+	baselineintegrity.OpenS3Object = func(ctx context.Context, b, k string) (io.ReadCloser, error) {
+		if b == bucket && k == srcKey {
+			mu.Lock()
+			streams++
+			mu.Unlock()
+		}
+		return realOpen(ctx, b, k)
+	}
+
 	staged := t.TempDir()
 	at := base.Add(30 * time.Minute)
 	reports, err := reconstruct.ReconstructTables(ctx, reconstruct.FullTableConfig{
@@ -122,6 +152,11 @@ func TestReconstructParquet_s3OnlyUpdateCopiesAnUnchangedTable_MinIO(t *testing.
 	if err != nil {
 		t.Fatalf("ReconstructTables: %v", err)
 	}
+	mu.Lock()
+	if downloads != 0 || streams != 0 {
+		t.Fatalf("the unchanged table's bytes were read during the fold: %d downloads, %d whole-object reads", downloads, streams)
+	}
+	mu.Unlock()
 	if len(reports) != 1 || len(reports[0].S3Copies) != 1 {
 		t.Fatalf("reports = %+v, want orders listed as one copy", reports)
 	}
@@ -138,16 +173,34 @@ func TestReconstructParquet_s3OnlyUpdateCopiesAnUnchangedTable_MinIO(t *testing.
 		t.Fatalf("the new manifest does not carry the copy's digest: %+v ok=%v err=%v", nm, ok, err)
 	}
 
-	// The upload copies it inside the bucket, and the new snapshot passes its own
-	// integrity check.
+	// The upload copies it inside the bucket.
 	dest := s3root + "/" + reconstruct.SnapshotDirName(at)
 	if _, err := baseline.UploadWithCopies(ctx, snapDir, dest, "", false, reconstruct.S3Copies(reports)); err != nil {
 		t.Fatalf("UploadWithCopies: %v", err)
 	}
-	copied := dest + "/shop/orders.parquet"
-	if err := baselineintegrity.ValidateS3File(ctx, copied); err != nil {
-		t.Fatalf("the copy fails its own manifest: %v", err)
+	// The copy is byte for byte the source object, and the bucket's own
+	// manifest certifies it with the source's digest.
+	get := func(key string) []byte {
+		out, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+		if err != nil {
+			t.Fatalf("get %s: %v", key, err)
+		}
+		defer out.Body.Close()
+		b, err := io.ReadAll(out.Body)
+		if err != nil {
+			t.Fatalf("read %s: %v", key, err)
+		}
+		return b
 	}
-	// The check above re-hashed the copy against the digest computed over the
-	// source's bytes: the copy IS the source file.
+	_, destKey, _ := storage.ParseS3URL(dest)
+	if src, cp := get(srcKey), get(destKey+"/shop/orders.parquet"); len(src) == 0 || !bytes.Equal(src, cp) {
+		t.Fatalf("the copy differs from its source (%d vs %d bytes)", len(src), len(cp))
+	}
+	var bm baselineintegrity.Manifest
+	if err := json.Unmarshal(get(destKey+"/"+baselineintegrity.ManifestName), &bm); err != nil {
+		t.Fatalf("the published manifest: %v", err)
+	}
+	if bm.Files["shop/orders.parquet"] != wantCRC {
+		t.Fatalf("the published manifest lists %q for the copy, want %s", bm.Files["shop/orders.parquet"], wantCRC)
+	}
 }

@@ -1081,7 +1081,7 @@ func uploadRefreshedSnapshot(ctx context.Context, req refreshRequest, at time.Ti
 		// errSnapshotNotUploaded, which says a finished snapshot is on disk.
 		return 0, fmt.Errorf("%w: it could not be uploaded to %s. This server keeps its snapshots only in S3, so the "+
 			"copy built in the staging folder was deleted (%s); the next update starts again from the newest snapshot in the bucket: %w",
-			errStagedSnapshotNotUploaded, dest, removePartialUpload(ctx, req, dest), err)
+			errStagedSnapshotNotUploaded, dest, removePartialUpload(ctx, req, dest, mayStillLand(err)), err)
 	}
 	if err != nil {
 		// Names the local path on purpose: the snapshot itself is intact and
@@ -2546,7 +2546,21 @@ var newPartialUploadStore = func(ctx context.Context, bucket string) (partialUpl
 // LAST, only when all of them went. A failure anywhere leaves the marker
 // standing, which is when, and only when, the words say the files stay
 // marked incomplete.
-func removePartialUpload(ctx context.Context, req refreshRequest, dest string) string {
+// mayStillLand is the key a timed-out copy inside S3 may still write
+// (baseline.CopyMayStillLandError), or "".
+func mayStillLand(err error) string {
+	var late *baseline.CopyMayStillLandError
+	if errors.As(err, &late) {
+		return late.Key
+	}
+	return ""
+}
+
+// lateKey, when set, is an object a timed-out copy inside S3 may still write
+// after this cleanup (#2212): the folder's _INCOMPLETE marker is then KEPT,
+// because a late object in a folder with no marker reads as a complete
+// snapshot (#467).
+func removePartialUpload(ctx context.Context, req refreshRequest, dest, lateKey string) string {
 	const stay = "the files already sent stay there marked incomplete, and are never read"
 	where := strings.TrimSuffix(dest, "/") + "/"
 	warn := func(msg string, err error) {
@@ -2596,6 +2610,12 @@ func removePartialUpload(ctx context.Context, req refreshRequest, dest string) s
 			warn("could not remove a partial upload from the bucket; it stays there marked incomplete, and no listing reads it", err)
 			return stay
 		}
+	}
+	if lateKey != "" {
+		warn("removed a partial upload from the bucket except its incomplete marker, kept because a copy inside S3 to "+lateKey+
+			" timed out and the bucket may still complete it; the folder stays marked incomplete, and no listing reads it", nil)
+		return "the files already sent were removed from the bucket; the folder stays marked incomplete, because the copy to " +
+			lateKey + " timed out and may still land there"
 	}
 	if err := store.Delete(ctx, marker); err != nil {
 		warn("removed a partial upload from the bucket except its incomplete marker, which stays; no listing reads that folder", err)

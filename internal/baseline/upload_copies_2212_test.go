@@ -333,3 +333,29 @@ func TestUploadCopies_noCopyStartsAfterAFailure(t *testing.T) {
 		t.Fatalf("%d copies started after the upload was cancelled", copied)
 	}
 }
+
+// A copy that ran out of time may still be finished by the bucket after the
+// upload gave up on it. The upload says so in a way the caller can act on:
+// a CopyMayStillLandError naming the key, so the cleanup keeps the folder's
+// incomplete marker instead of leaving a late copy in a folder with none.
+func TestUploadCopies_aTimedOutCopyIsReportedAsMayStillLand(t *testing.T) {
+	prev := copyTimeout
+	copyTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { copyTimeout = prev })
+	snap := copySnapshot(t, "shop/orders.parquet")
+	r := &copyRecorder{}
+	ops := r.ops()
+	ops.copyObject = func(ctx context.Context, _, _ string) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	copies := []RemoteCopy{{Rel: "crm/leads.parquet", Src: prevSnap + "crm/leads.parquet"}}
+	_, err := uploadWithOpsCopies(context.Background(), snap, "srv/"+copyStamp, false, ops, copies)
+	var late *CopyMayStillLandError
+	if !errors.As(err, &late) || late.Key != "srv/"+copyStamp+"/crm/leads.parquet" {
+		t.Fatalf("err = %v, want a CopyMayStillLandError naming the key", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("the cause is lost: %v", err)
+	}
+}

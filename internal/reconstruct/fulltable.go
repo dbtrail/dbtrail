@@ -1032,7 +1032,12 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	return reports, nil
 }
 
-// manifestWriter is baselineintegrity.WriteManifestFrom behind a variable so
+// s3BaselineDownloadHook is called with every s3:// table file the fold
+// downloads, before the download: a test's way to assert that a table copied
+// inside S3 (#2212) was never downloaded. A no-op otherwise.
+var s3BaselineDownloadHook = func(string) {}
+
+// manifestWriter is baselineintegrity.WriteManifestWith behind a variable so
 // a test can see what a run reused (#1717).
 var manifestWriter = baselineintegrity.WriteManifestWith
 
@@ -3106,6 +3111,7 @@ func materializeBaselineLocalIn(ctx context.Context, path string, tuning duckdbu
 	// against the snapshot's _MANIFEST before the DuckDB COPY below re-encodes
 	// them — the temp copy is no longer byte-identical to the object, so this
 	// pre-pass is the only point where the manifest's raw-byte CRC applies.
+	s3BaselineDownloadHook(path)
 	if err := validateS3Baseline(ctx, path); err != nil {
 		return "", nil, err
 	}
