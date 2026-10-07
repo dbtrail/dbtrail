@@ -321,6 +321,9 @@ func TestSQLExportFoldConfig_sharesTheDaemonBounds(t *testing.T) {
 		t.Errorf("Parallelism = %d, want %d (the shared in-daemon bound)",
 			cfg.Parallelism, daemonFoldParallelism)
 	}
+	if cfg.MaxChangeBytes/int64(daemonFoldParallelism) != 1<<30 {
+		t.Errorf("MaxChangeBytes = %d with parallelism %d, want 1 GiB a table (#2207)", cfg.MaxChangeBytes, daemonFoldParallelism)
+	}
 	if cfg.WarnEventThreshold == 0 {
 		t.Error("WarnEventThreshold left at zero: shouldWarnEvents is " +
 			"`threshold > 0 && n > threshold`, so this fold would never warn")

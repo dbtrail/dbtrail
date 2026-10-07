@@ -22,11 +22,12 @@ import (
 //
 // A fold holds one row image per distinct changed row until the merge, and
 // paging the event fetch (#1097) does not bound that. When a table's changes
-// pass the fold's in-memory limit (FullTableConfig.MaxTouchedRows, divided by
-// the tables folding at once), foldEventWindow moves them here instead of
-// refusing: every change goes to one of spillBuckets files chosen by a hash of
-// its pk_values, and the merge then reads a few groups at a time, as many as
-// fit under the same limit, making one pass over the baseline per set. Peak
+// pass the fold's in-memory limit (FullTableConfig.MaxTouchedRows, or
+// MaxChangeBytes by estimated size, each divided by the tables folding at
+// once), foldEventWindow moves them here instead of refusing: every change
+// goes to one of spillBuckets files chosen by a hash of its pk_values, and the
+// merge then reads a few groups at a time, as many as fit under the smaller of
+// the two limits (passRows), making one pass over the baseline per set. Peak
 // memory stays near the limit, plus about one group while a pass is built,
 // however many rows the window changed; the price
 // is one baseline read per pass, and disk in the system temp directory for the
@@ -282,9 +283,9 @@ func (s *changeSpill) eachPass(ctx context.Context, run func(pass map[string]*qu
 			return passes, err
 		}
 		last = len(group)
-		// A group over the budget is still read whole; say so once, so a
-		// pass over the target is not silent. A group is about 1/64 of the
-		// changes, so this is a window past 64 times the budget.
+		// A group over twice a pass is still read whole; say so once, so a
+		// pass well over the target is not silent. A group is about 1/64 of
+		// the changes, so this is a window past about 128 times the budget.
 		if pr := s.passRows(); !warned && pr > 0 && int64(last) > 2*pr {
 			warned = true
 			slog.Warn("reconstruct: a group of changed rows read back from disk is larger than the memory budget; it is merged whole",

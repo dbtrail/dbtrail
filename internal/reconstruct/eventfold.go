@@ -228,7 +228,7 @@ type foldConfig struct {
 	// at the check.
 	MaxChangeBytes int64
 	// SpillOverBudget moves the changes to disk past MaxTouchedRows instead of
-	// refusing (#1107). Only the merge over a baseline reads a spill; the
+	// refusing (#1107), and past MaxChangeBytes (#2207), which never refuses. Only the merge over a baseline reads a spill; the
 	// binlog-only fallback keeps the refusal.
 	SpillOverBudget bool
 
@@ -631,8 +631,9 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 			return foldErr
 		}
 		if !spilling && res.Spill != nil {
-			slog.Info("reconstruct: more changed rows than this fold holds in memory; writing them to disk and merging in passes",
-				"schema", fc.Schema, "table", fc.Table, "limit", limit, "byte_limit", maxBytes, "dir", res.Spill.dir)
+			slog.Info("reconstruct: more changes than this fold holds in memory; writing them to disk and merging in passes",
+				"schema", fc.Schema, "table", fc.Table, "rows", res.Spill.records, "limit", limit,
+				"est_bytes", res.Spill.heldBytes, "byte_limit", maxBytes, "dir", res.Spill.dir)
 		}
 
 		res.Total += int64(len(page))

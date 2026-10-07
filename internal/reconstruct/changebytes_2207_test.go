@@ -1,9 +1,11 @@
 package reconstruct
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"runtime"
 	"strconv"
 	"strings"
@@ -219,11 +221,24 @@ func TestChangeSpill_passesSizedByBytes(t *testing.T) {
 // deleted line at the call site keeps every admit test green while no fold
 // ever bounds by size (the #2148 class: the function works, nothing calls it).
 func TestFoldEventWindow_spillsOnTheByteBudget(t *testing.T) {
+	var three int64
+	for id := 1; id <= 3; id++ {
+		ev := foldEvent(id, strconv.Itoa(id), event.EventInsert)
+		three += approxChangeBytes(retainEvent(&ev))
+	}
 	for _, tc := range []struct {
 		name     string
 		maxBytes int64
+		par      int
 		spill    bool
-	}{{"under the budget", 1 << 40, false}, {"over the budget", 1, true}} {
+	}{
+		{"under the budget", 1 << 40, 1, false},
+		{"over the budget", 1, 1, true},
+		// The budget is per run: two tables folding at once get half each,
+		// so three rows under the run's budget are over a table's share.
+		{"over a table's share of the run", three * 3 / 2, 2, true},
+		{"under a table's share of the run", three * 5, 2, false},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
 			if err != nil {
@@ -255,7 +270,7 @@ func TestFoldEventWindow_spillsOnTheByteBudget(t *testing.T) {
 			res, err := foldEventWindow(context.Background(), foldConfig{
 				DB: db, Engine: query.New(db), Schema: "mydb", Table: "orders", PKCols: pkColsIntID(),
 				Opts: query.Options{Schema: "mydb", Table: "orders"}, AllowGaps: true, ArchiveFetcher: fetcher, BatchSize: 2,
-				MaxTouchedRows: 1000, MaxChangeBytes: tc.maxBytes, Parallelism: 1, SpillOverBudget: true,
+				MaxTouchedRows: 1000, MaxChangeBytes: tc.maxBytes, Parallelism: tc.par, SpillOverBudget: true,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -294,5 +309,50 @@ func TestChangeSpill_passRowsCountsEveryDrainedRow(t *testing.T) {
 	var none changeSpill
 	if none.passRows() != 0 {
 		t.Fatal("no budget must mean no byte-sized passes")
+	}
+}
+
+// The sample sees a mixed map: small deletes beside wide updates. A sample of
+// one entry would land on one shape and miss the other by far.
+func TestSampledChangeBytes_mixedShapes(t *testing.T) {
+	m := map[string]*query.ResultRow{}
+	var exact int64
+	for id := 1; id <= 4000; id++ {
+		shape := "delete"
+		if id%2 == 0 {
+			shape = "wide text"
+		}
+		ev := changeShapes[shape](id)
+		m[ev.PKValues] = ev
+		exact += approxChangeBytes(ev)
+	}
+	for range 20 {
+		total, _ := sampledChangeBytes(m)
+		if total < exact*6/10 || total > exact*14/10 {
+			t.Fatalf("sampled %d, exact %d: the sample does not see the mix", total, exact)
+		}
+	}
+}
+
+// A group over twice a pass is merged whole and says so.
+func TestChangeSpill_warnsOnAGroupOverTheBudget(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	s := spillOf(t, 1_000_000, pageOf(1, 640, "a"))
+	run := func() {
+		if _, err := s.eachPass(t.Context(), func(map[string]*query.ResultRow, *[spillBuckets]bool) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run()
+	if buf.Len() != 0 {
+		t.Fatalf("no budget, yet: %q", buf.String())
+	}
+	s.maxBytes = 1
+	run()
+	if strings.Count(buf.String(), "larger than the memory budget") != 1 {
+		t.Fatalf("want one warning for the run, got %q", buf.String())
 	}
 }
