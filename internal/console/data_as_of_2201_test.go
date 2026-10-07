@@ -134,6 +134,22 @@ func TestLagGrowth(t *testing.T) {
 			}
 		})
 	}
+	// A source writing every four minutes, captured at once, read every 20
+	// seconds: three and a half minutes after its last write the gap since
+	// it counts as growth, but at every read right after a write it was
+	// next to nothing. Growth, yes; "indexing", no, so no card without the
+	// source's own word.
+	t.Run("low-traffic source captured at once is not indexing", func(t *testing.T) {
+		b := newLagTrendBook()
+		var got *lagGrowthDTO
+		for sec := 0; sec <= 690; sec += 20 {
+			lastWrite := (sec / 240) * 240
+			got = b.observe("s", t0.Add(time.Duration(sec)*time.Second), t0.Add(time.Duration(lastWrite)*time.Second))
+		}
+		if got == nil || got.Indexing {
+			t.Fatalf("growth = %+v, want growth reported and not indexing", got)
+		}
+	})
 	t.Run("a burst of reads keeps the older sample", func(t *testing.T) {
 		b := newLagTrendBook()
 		b.observe("s", t0, t0.Add(-time.Hour))

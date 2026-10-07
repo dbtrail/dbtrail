@@ -66,9 +66,9 @@ func newLagTrendBook() *lagTrendBook { return &lagTrendBook{} }
 type lagGrowthDTO struct {
 	GrownSeconds int64 `json:"grown_seconds"`
 	OverSeconds  int64 `json:"over_seconds"`
-	// Indexing: the newest indexed change moved forward over at least two
-	// of the intervals between reads. Capture is still indexing, only slower
-	// than the source writes. Without it the gap widened with nothing new
+	// Indexing: the newest indexed change kept moving forward, and the gap
+	// measured at the reads where it moved still grew (stillIndexing).
+	// Capture is still indexing, only slower than the source writes. Without it the gap widened with nothing new
 	// indexed, which a quiet database does just the same as a stuck capture,
 	// so only the source itself can tell those two apart.
 	Indexing bool `json:"indexing,omitempty"`
@@ -139,11 +139,28 @@ func lagGrowth(samples []lagSample, cur lagSample) *lagGrowthDTO {
 	if last := samples[len(samples)-1]; !last.at.Equal(cur.at) {
 		pts = append(slices.Clone(samples), cur)
 	}
-	advances := 0
+	return &lagGrowthDTO{GrownSeconds: int64(g / time.Second), OverSeconds: int64(span / time.Second), Indexing: stillIndexing(pts)}
+}
+
+// stillIndexing says capture keeps indexing new changes and still falls
+// behind: the gap is measured only at the reads where the newest indexed
+// change had just moved, first such read to last. A capture that keeps up
+// with a source writing now and then has next to no gap at each of those
+// reads, however long the source then stays quiet; a slow one shows the gap
+// rising from one to the next. Growth from the first read to now cannot tell
+// the two apart, because the quiet time after the last write counts as
+// growth. Same thresholds as the growth itself.
+func stillIndexing(pts []lagSample) bool {
+	var moved []lagSample
 	for i := 1; i < len(pts); i++ {
 		if pts[i].deltaTo.After(pts[i-1].deltaTo) {
-			advances++
+			moved = append(moved, pts[i])
 		}
 	}
-	return &lagGrowthDTO{GrownSeconds: int64(g / time.Second), OverSeconds: int64(span / time.Second), Indexing: advances >= 2}
+	if len(moved) < 2 {
+		return false
+	}
+	first, last := moved[0], moved[len(moved)-1]
+	span, g := last.at.Sub(first.at), grown(first, last)
+	return g >= lagTrendMinGrowth && float64(g) >= lagTrendMinRatio*float64(span)
 }

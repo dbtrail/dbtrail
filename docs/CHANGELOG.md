@@ -24,7 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still widening; the growth is measured so that a clock difference between
   the source and this machine cancels out. When the source says capture is
   behind, or capture is still indexing but slower than the source writes
-  (`indexing`; a quiet database widens the same gap), the binlog arrow says
+  (`indexing`: the gap still grows when measured at the reads where a new
+  change had just arrived; a quiet database widens the same gap between
+  writes), the binlog arrow says
   "falling behind" and a card names what to check first: the `doctor` check
   "Index buffer pool" and the source's write rate.
 
