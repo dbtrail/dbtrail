@@ -3089,7 +3089,7 @@ func materializeBaselineLocalIn(ctx context.Context, path string, tuning duckdbu
 		// (the check's own margin still applies) and said, never skipped quietly.
 		need, err := s3ObjectSize(ctx, path)
 		if err != nil {
-			slog.Warn("could not read the size of the previous snapshot before downloading it; checking only the free-space margin",
+			slog.Warn("could not read the size of the previous snapshot from its bucket before downloading it; checking only the free-space margin",
 				"path", path, "error", err)
 			need = 0
 		}
@@ -3122,32 +3122,80 @@ var (
 		}
 		b, err := sizeBackendFor(ctx, bucket)
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("open bucket s3://%s: %w", bucket, err)
 		}
-		return b.Size(ctx, key)
+		n, err := b.Size(ctx, key)
+		if err != nil {
+			// Dropped, so the next table builds a fresh client: an expired
+			// credential or a wrong region would otherwise fail every table.
+			dropSizeBackend(bucket, b)
+			return 0, fmt.Errorf("size s3://%s/%s: %w", bucket, key, err)
+		}
+		return n, nil
 	}
 )
+
+// objectSizer is what s3ObjectSize needs of a bucket client.
+type objectSizer interface {
+	Size(ctx context.Context, key string) (int64, error)
+}
+
+// newSizeBackend opens a bucket for sizing, reporting whether its region is
+// the us-east-1 fallback (storage.NewS3BackendUnprobedRegion). Indirected for
+// tests.
+var newSizeBackend = func(ctx context.Context, bucket string) (objectSizer, bool, error) {
+	return storage.NewS3BackendUnprobedRegion(ctx, storage.S3Config{Bucket: bucket})
+}
 
 // sizeBackends holds one S3 client per bucket for s3ObjectSize, so a fold of
-// many tables does not build a client (and resolve credentials) per table.
-// The SDK client refreshes its own credentials, so keeping it is safe.
+// many tables does not build a client (and resolve credentials and the
+// bucket's region) per table. Never a client whose region was a fallback,
+// and a client whose request failed is dropped (dropSizeBackend): either
+// would fail every later table until a restart. The client is built outside
+// the lock, so concurrent folds do not queue behind one slow region lookup;
+// two that race both build one and the first stored wins.
 var (
 	sizeBackendsMu sync.Mutex
-	sizeBackends   = map[string]*storage.S3Backend{}
+	sizeBackends   = map[string]objectSizer{}
 )
 
-func sizeBackendFor(ctx context.Context, bucket string) (*storage.S3Backend, error) {
+func sizeBackendFor(ctx context.Context, bucket string) (objectSizer, error) {
 	sizeBackendsMu.Lock()
-	defer sizeBackendsMu.Unlock()
-	if b := sizeBackends[bucket]; b != nil {
+	b := sizeBackends[bucket]
+	sizeBackendsMu.Unlock()
+	if b != nil {
 		return b, nil
 	}
-	b, err := storage.NewS3BackendUnprobed(ctx, storage.S3Config{Bucket: bucket})
+	b, fellBack, err := newSizeBackend(ctx, bucket)
 	if err != nil {
 		return nil, err
 	}
+	if fellBack {
+		return b, nil // used once, never kept
+	}
+	sizeBackendsMu.Lock()
+	defer sizeBackendsMu.Unlock()
+	if kept := sizeBackends[bucket]; kept != nil {
+		return kept, nil
+	}
 	sizeBackends[bucket] = b
 	return b, nil
+}
+
+// dropSizeBackend forgets b for bucket, if it is still the one kept.
+func dropSizeBackend(bucket string, b objectSizer) {
+	sizeBackendsMu.Lock()
+	defer sizeBackendsMu.Unlock()
+	if sizeBackends[bucket] == b {
+		delete(sizeBackends, bucket)
+	}
+}
+
+// resetSizeBackends forgets every kept client; tests call it.
+func resetSizeBackends() {
+	sizeBackendsMu.Lock()
+	sizeBackends = map[string]objectSizer{}
+	sizeBackendsMu.Unlock()
 }
 
 // downloadS3Baseline copies one s3:// Parquet object to a local file through

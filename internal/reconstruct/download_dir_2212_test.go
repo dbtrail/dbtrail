@@ -166,3 +166,73 @@ func TestLocalWriteErr(t *testing.T) {
 		t.Fatalf("got %v, want the error unchanged", got)
 	}
 }
+
+// fakeSizer answers Size with a fixed size or error.
+type fakeSizer struct {
+	size int64
+	err  error
+}
+
+func (f fakeSizer) Size(context.Context, string) (int64, error) { return f.size, f.err }
+
+// #2212 review: the bucket's region lookup can fail, and the client then
+// falls back to us-east-1, where every request to a bucket elsewhere fails.
+// Such a client is never kept, and a client whose request fails is dropped,
+// so the NEXT table asks again and gets a real size.
+func TestS3ObjectSize_doesNotKeepAFallbackOrFailingClient(t *testing.T) {
+	prev := newSizeBackend
+	t.Cleanup(func() { newSizeBackend = prev; resetSizeBackends() })
+	resetSizeBackends()
+	calls := 0
+	newSizeBackend = func(_ context.Context, bucket string) (objectSizer, bool, error) {
+		calls++
+		if bucket != "b" {
+			t.Errorf("bucket %q", bucket)
+		}
+		if calls <= 2 { // the region lookup failed: a us-east-1 client that cannot reach the bucket
+			return fakeSizer{err: errors.New("301 PermanentRedirect")}, true, nil
+		}
+		return fakeSizer{size: 42}, false, nil
+	}
+	url := "s3://b/p/2026-08-28T09-00-00Z/shop/orders.parquet"
+	// The fallback client is handed out for this one call and never kept,
+	// whatever its first request would have said.
+	if _, err := sizeBackendFor(context.Background(), "b"); err != nil {
+		t.Fatal(err)
+	}
+	sizeBackendsMu.Lock()
+	kept := len(sizeBackends)
+	sizeBackendsMu.Unlock()
+	if kept != 0 {
+		t.Fatal("a client on the fallback region was kept")
+	}
+	if _, err := s3ObjectSize(context.Background(), url); err == nil || !strings.Contains(err.Error(), "s3://b") {
+		t.Fatalf("first table: err = %v, want the failure naming the bucket", err)
+	}
+	if n, err := s3ObjectSize(context.Background(), url); err != nil || n != 42 {
+		t.Fatalf("second table: %d, %v, want a real size from a fresh client", n, err)
+	}
+	if n, _ := s3ObjectSize(context.Background(), url); n != 42 || calls != 3 {
+		t.Fatalf("a good client was not kept: %d calls", calls)
+	}
+}
+
+// A kept client whose request fails is dropped, so the next table retries.
+func TestS3ObjectSize_dropsAClientWhoseRequestFails(t *testing.T) {
+	prev := newSizeBackend
+	t.Cleanup(func() { newSizeBackend = prev; resetSizeBackends() })
+	resetSizeBackends()
+	calls := 0
+	newSizeBackend = func(context.Context, string) (objectSizer, bool, error) {
+		calls++
+		if calls == 1 {
+			return fakeSizer{err: errors.New("ExpiredToken")}, false, nil
+		}
+		return fakeSizer{size: 7}, false, nil
+	}
+	url := "s3://b/p/2026-08-28T09-00-00Z/shop/orders.parquet"
+	_, _ = s3ObjectSize(context.Background(), url)
+	if n, err := s3ObjectSize(context.Background(), url); err != nil || n != 7 || calls != 2 {
+		t.Fatalf("%d, %v after %d builds, want the failing client dropped and a fresh one used", n, err, calls)
+	}
+}
