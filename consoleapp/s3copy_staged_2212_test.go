@@ -122,6 +122,12 @@ func TestStagedFold_unchangedTablesAreCopiedInsideS3(t *testing.T) {
 func TestStagedFold_aFailedCopyFailsTheRun(t *testing.T) {
 	stubStagedFold(t, nil)
 	stubCopyUpload(t, errors.New("copy shop/customers.parquet into the new snapshot inside S3: AccessDenied"))
+	// One copy landed before another failed: it sits under this run's
+	// prefix, and the partial-upload cleanup must remove it like any file
+	// the upload sent.
+	stamp := reconstruct.SnapshotDirName(refreshAt)
+	store := &fakePartialStore{keys: []string{"s/" + stamp + "/_INCOMPLETE", "s/" + stamp + "/shop/customers.000000.posdel"}}
+	stubPartialStore(t, store)
 	f := newJobsFixture(t)
 	sup := f.supervisor(t)
 	var cfgSeen reconstruct.FullTableConfig
@@ -143,6 +149,10 @@ func TestStagedFold_aFailedCopyFailsTheRun(t *testing.T) {
 	}
 	if left := stagingEntries(t, f.staging); len(left) != 0 {
 		t.Fatalf("the staging folder still holds %v", left)
+	}
+	deleted := strings.Join(store.deleted, " ")
+	if !strings.Contains(deleted, "shop/customers.000000.posdel") {
+		t.Fatalf("the copy that reached the bucket was not removed: deleted %v", store.deleted)
 	}
 }
 

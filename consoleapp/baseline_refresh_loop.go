@@ -1095,6 +1095,26 @@ func uploadRefreshedSnapshot(ctx context.Context, req refreshRequest, at time.Ti
 	return n, nil
 }
 
+// stagedCopies (baseline_staged_fold.go has the rest of the staged run)
+// is what a staged run's fold did not write because it copies
+// it inside S3 at upload (#2212): the files for the upload, and where each
+// copied table's readers start, for the read bound of the published
+// snapshot. Filled by foldSnapshot.
+type stagedCopies struct {
+	files       []baseline.RemoteCopy
+	chainStarts []time.Time
+}
+
+// s3CopyDestination is where a run's fold may copy unchanged tables to
+// (reconstruct.FullTableConfig.S3CopyUnchangedTo): the server's bucket on a
+// staged run, whose upload takes the copies, and nowhere otherwise.
+func s3CopyDestination(req refreshRequest) string {
+	if req.s3Copies == nil {
+		return ""
+	}
+	return req.BaselineS3
+}
+
 // refreshSnapshotDir names the directory one refresh cycle folds into: the
 // snapshot directory reconstruct derives from the instant the cycle targets.
 //

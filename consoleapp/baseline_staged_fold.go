@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
-
-	"github.com/dbtrail/dbtrail/internal/baseline"
 )
 
 // Updates for a server whose snapshots go only to S3 (#2212).
@@ -37,25 +35,6 @@ import (
 // server has no Local folder to keep one in. An upload that fails therefore
 // loses the update, and says so (errStagedSnapshotNotUploaded); the next run
 // folds again from the newest snapshot in the bucket.
-
-// stagedCopies is what a staged run's fold did not write because it copies
-// it inside S3 at upload (#2212): the files for the upload, and where each
-// copied table's readers start, for the read bound of the published
-// snapshot. Filled by foldSnapshot.
-type stagedCopies struct {
-	files       []baseline.RemoteCopy
-	chainStarts []time.Time
-}
-
-// s3CopyDestination is where a run's fold may copy unchanged tables to
-// (reconstruct.FullTableConfig.S3CopyUnchangedTo): the server's bucket on a
-// staged run, whose upload takes the copies, and nowhere otherwise.
-func s3CopyDestination(req refreshRequest) string {
-	if req.s3Copies == nil {
-		return ""
-	}
-	return req.BaselineS3
-}
 
 // stagedRunPrefix names a run folder. A fixed prefix, never the server id:
 // an id is not a file name, and the reclaim only removes names it knows.
