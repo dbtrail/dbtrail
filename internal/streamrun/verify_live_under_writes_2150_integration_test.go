@@ -34,7 +34,7 @@ import (
 // The capture is the real one (One, GTID mode, checkpoint every second), run
 // for the whole test as `watch` runs it, so verify also has to wait for it to
 // reach each snapshot. MySQL runs on the GTID source (stock MySQL: the
-// position is pinned with FLUSH TABLES ... WITH READ LOCK); MariaDB on the MariaDB
+// position is pinned with LOCK TABLES ... READ under --pause-writes); MariaDB on the MariaDB
 // source (its own snapshot position).
 
 const (
