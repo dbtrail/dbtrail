@@ -77,6 +77,13 @@ type baselineSnapshotDTO struct {
 	// when it cannot be said: a table of the snapshot is only in S3, where
 	// the listing reads no footer. See snapshot_lock.go.
 	Lock string `json:"lock,omitempty"`
+	// DataAsOf is the newest change this snapshot holds (#2201), from the
+	// run that made it: a full read's own instant, an update's recorded
+	// value. OMITTED when no run on record says, which the Overview reads as
+	// "at least as old as capture's lag", never as current. A full read's is
+	// on this host's clock, an update's on the source's; the page compares
+	// an update's against the coverage read's newest change, same clock.
+	DataAsOf string `json:"data_as_of,omitempty"`
 }
 
 type baselinesResponse struct {
@@ -393,6 +400,9 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 			// What this daemon recorded for the run, until the snapshot's
 			// own record is read below.
 			dto.rowViewsSkipped(s.viewsSkippedFromRun(serverID, f.SnapshotTime))
+			if at, ok := s.baselineHistory.DataAsOfFor(serverID, f.SnapshotTime.UTC().Format(time.RFC3339)); ok {
+				dto.DataAsOf = at.UTC().Format(consoleTSFormat)
+			}
 			resp.Snapshots = append(resp.Snapshots, dto)
 			cur = &resp.Snapshots[len(resp.Snapshots)-1]
 			curViews = false

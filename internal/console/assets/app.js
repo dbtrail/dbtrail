@@ -1956,6 +1956,67 @@ function flowEveryLabel(every) {
   return "every " + (min / 60) + " h";
 }
 
+// flowParseStamp reads a wire stamp (RFC3339, or "YYYY-MM-DD HH:MM:SS" in
+// UTC) as milliseconds, NaN when it cannot.
+function flowParseStamp(stamp) {
+  return Date.parse(String(stamp || "").replace(" ", "T").replace(/Z?$/, "Z"));
+}
+
+// copyDataAge is how old the newest copy's DATA is (#2201), which is not how
+// long ago its files were written: an update writes what the index holds,
+// and while capture is an hour behind the source so is the copy it writes.
+// Returns { sec, asOf, extra }: the age in seconds, the stamp it is "as of",
+// and how many seconds older than the files the data is (0 when the files'
+// age is the answer). Never younger than the files.
+//
+// Clocks: the coverage read's lag_seconds is this host's now minus the
+// newest indexed change, clamped at zero; delta_to and an update's
+// data_as_of are both on the source's clock, so their difference is too.
+// Adding the two never mixes clocks and never goes negative.
+//  - data_as_of on record and not past delta_to: lag plus how far behind
+//    the newest indexed change the copy's newest change is. When the copy
+//    holds the newest indexed change and the source says capture holds all
+//    it wrote, nothing is missing: the files' age.
+//  - data_as_of past delta_to: a full read newer than anything indexed. It
+//    holds the source as of its own instant: the files' age.
+//  - nothing on record (the CLI made it, or it predates the record): at
+//    least as old as capture's lag, since the copy cannot hold a change
+//    capture has not read.
+//  - no lag (no capture, or nothing indexed yet): the files' age.
+function copyDataAge(snap, cov) {
+  const filesSec = typeof snap.age_hours === "number" ? Math.max(0, snap.age_hours * 3600) : -1;
+  if (filesSec < 0) return null;
+  const files = { sec: filesSec, asOf: snap.time, extra: 0 };
+  const lag = typeof cov.lag_seconds === "number" ? Math.max(0, cov.lag_seconds) : null;
+  const to = flowParseStamp(cov.delta_to);
+  if (lag === null || !isFinite(to)) return files;
+  const held = flowParseStamp(snap.data_as_of);
+  let sec, asOf;
+  if (isFinite(held)) {
+    if (held > to) return files;
+    if (held === to && covCaptureState(cov) === "up_to_date") return files;
+    sec = lag + (to - held) / 1000;
+    asOf = snap.data_as_of;
+  } else {
+    sec = lag;
+    asOf = cov.delta_to;
+  }
+  if (sec <= filesSec) return files;
+  return { sec, asOf, extra: sec - filesSec };
+}
+
+// captureFallingBehind is the #2201 card: the gap between the source and the
+// index kept widening over the coverage reads (lag_growth), said only where
+// that means capture cannot keep up. A quiet database widens the same gap
+// at one second per second, so it counts only beside a capture reading new
+// changes (current) or one the source itself says is behind.
+function captureFallingBehind(cov) {
+  const g = cov.lag_growth;
+  if (!g || typeof g.grown_seconds !== "number" || typeof g.over_seconds !== "number") return null;
+  if (cov.freshness !== "current" && covCaptureState(cov) !== "behind") return null;
+  return g;
+}
+
 function ovFlowModel(inp) {
   const cov = inp.coverage || {};
   const bl = inp.baselines || {};
@@ -2074,6 +2135,23 @@ function ovFlowModel(inp) {
     }
   }
 
+  // Falling further behind (#2201): never over a break, a start, or a state
+  // that could not be read, which say their own thing. The card names the
+  // first things to check; there is nothing to press but Details.
+  const falling = !cut && mstate !== "pending" && capture.line !== "state could not be read" ? captureFallingBehind(cov) : null;
+  if (falling) {
+    const lagNow = typeof cov.lag_seconds === "number" ? plainDuration(cov.lag_seconds) : "";
+    capture = piece("binlog", "warn", "falling behind", lagNow ? lagNow + " behind" : (lastIndexed ? "last change " + lastIndexed : ""));
+    cards.push({ kind: "capture-falling-behind", key: sid + "|falling-behind", tone: "warn",
+      title: "Capture is falling further behind",
+      lines: ["The gap to your database grew " + plainDuration(falling.grown_seconds) + " in the last " + plainDuration(falling.over_seconds) + "." +
+        (lagNow ? " Capture is now " + lagNow + " behind, and the copy cannot hold anything newer than what capture has read." : "")],
+      recipe: ["Index buffer pool: run bintrail doctor. If its Index buffer pool check warns, the index MySQL still runs with the 128 MB default, which cannot keep up with a busy source. On the bundled index, set INDEX_BUFFER_POOL in .env (for example 8G) and run docker compose up -d.",
+        "Source write rate: a batch job, a bulk load or a load test can write faster than capture indexes. The gap closes once it ends.",
+        "Free disk and write errors on the index database."],
+      actions: [{ label: "Details", run: "status" }] });
+  }
+
   // The Source type saved with a server is a hint: capture follows what the
   // server reports, and says so when the two disagree. Never a failure.
   if (srv && srv.monitor_warning) {
@@ -2122,11 +2200,11 @@ function ovFlowModel(inp) {
     engine = piece("DBTrail", "warn", "a schema change", "copy read in full" + (run.finished_at ? " " + flowHHMM(run.finished_at) : ""));
   }
 
-  // The copy arrow: how the copy moves, and how old the newest one is. The
-  // number is the copy's AGE, never "behind the source": the copy stands on
-  // the index as it was when the update started, and the index was itself
-  // behind by then, so a single "behind" figure would understate. "behind"
-  // is said once on this page, on the binlog arrow.
+  // The copy arrow: how the copy moves, and how old its DATA is (#2201):
+  // from the newest change the copy holds, not from when its files were
+  // written, which read as fresh over a copy an hour stale (copyDataAge).
+  // The word "behind" is still said once on this page, on the binlog arrow:
+  // this arrow says an age.
   const blUnknown = !!bl.unavailable;
   const snap = (bl.snapshots || [])[0] || null;
   const snapAt = snap ? flowHHMM(snap.time) : "";
@@ -2140,7 +2218,8 @@ function ovFlowModel(inp) {
   // console can run one, and for a session that may set it.
   if (srv && !sch && !bl.refresh && !blUnknown && monitorCap && may("settings:write")) update.action = { label: "Set a schedule", run: "schedule" };
   if (snap) {
-    update.big = ageMin >= 0 ? plainDuration(ageMin * 60) + " ago" : "";
+    const data = copyDataAge(snap, cov);
+    update.big = data ? plainDuration(data.sec) + " ago" : "";
     // "read" touches the database, "refresh" only the recorded changes. The
     // word is the daemon's plan as of this page load (next_method): a refresh
     // that fails at run time can still fall back to a read, as the schedule
@@ -2148,11 +2227,23 @@ function ovFlowModel(inp) {
     // daemon fills next_method even then (next_method_error says why).
     const nextWord = sch && sch.next_method === "refresh" ? "next refresh " : sch && sch.next_method ? "next read " : "next ";
     const nextPart = sch && sch.next_method_error ? "next run cannot start" : nextAt ? nextWord + nextAt : "";
-    update.sub = (snapAt ? "copy from " + snapAt : "") + (nextPart ? (snapAt ? " · " : "") + nextPart : "");
-    update.stamp = snap.time;
+    // "written" only when the files are a minute or more younger than the
+    // data: otherwise the two times are one.
+    const asOfAt = data ? flowHHMM(data.asOf) : snapAt;
+    const when = [asOfAt ? "data as of " + asOfAt : "", data && data.extra >= 60 && snapAt ? "written " + snapAt : ""].filter(Boolean).join(" · ");
+    update.sub = [when, nextPart].filter(Boolean).join(" · ");
+    update.stamp = data ? data.asOf : snap.time;
+    // The tick (ovTickAges) re-reads the age off this stamp on the browser's
+    // clock: the files' stamp, moved back by how much older the data is, so
+    // the number keeps moving without mixing in the source's clock.
+    const filesMs = flowParseStamp(snap.time);
+    update.tick = data && data.extra > 0 && isFinite(filesMs) ? new Date(filesMs - data.extra * 1000).toISOString() : snap.time;
     if (everyMin && ageMin >= 0) {
       const ratio = ageMin / everyMin;
       update.tone = ratio < 2 ? "ok" : ratio <= 3 ? "warn" : "bad";
+      // Files on time over data that is not: never green. The cause is on
+      // the binlog arrow, so this one goes amber, not red.
+      if (update.tone === "ok" && data && data.extra >= 60 && data.sec / 60 / everyMin >= 2) update.tone = "warn";
     }
   } else {
     update.line = blUnknown ? "could not be read" : "no copy yet";
@@ -2286,7 +2377,7 @@ function flowSummaryLine(model) {
   const parts = [];
   const add = (s) => { if (s && !parts.includes(s)) parts.push(s); };
   add(capture.line);
-  add(update.big ? "copy " + update.big : update.line);
+  add(update.big ? "copy data " + update.big : update.line);
   add(engine.line);
   add(bucket.sub);
   return parts.length ? " · " + parts.join(" · ") : "";
@@ -2306,7 +2397,7 @@ function flowGrid(pieces, ctx) {
       node.append(el("span", { class: "flow-label", text: String(p.title || "") }));
       node.append(el("span", { class: "flow-line", "aria-hidden": "true" }));
       const val = el("div", { class: "flow-val" });
-      if (p.big) val.append(el("div", { class: "flow-big", text: p.big, title: p.stamp ? utcLocalTitle(p.stamp) || null : null, "data-stamp": p.stamp || null }));
+      if (p.big) val.append(el("div", { class: "flow-big", text: p.big, title: p.stamp ? utcLocalTitle(p.stamp) || null : null, "data-stamp": p.tick || p.stamp || null }));
       if (p.line) val.append(el("div", { class: "flow-state" }, el("span", { class: "health-dot " + (p.tone || "none") }), " " + p.line));
       if (p.sub) val.append(el("div", { class: "flow-sub" + (p.mono ? " flow-mono" : ""), text: p.sub }));
       if (p.action) {
