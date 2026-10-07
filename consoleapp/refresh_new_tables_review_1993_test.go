@@ -81,7 +81,7 @@ func TestScheduledRefresh_aNewTablePastTheDisplayCapStillCounts(t *testing.T) {
 func TestBaselineRefreshTargets_carryTheSource(t *testing.T) {
 	entries := []console.ServerEntry{{ID: "s1", Name: "one", DSN: "idx:pw@tcp(h:3306)/idx", BaselineDir: t.TempDir(),
 		SourceDSN: "src:pw@tcp(src:3306)/", Schemas: "shop, crm"}}
-	got, _ := baselineRefreshTargets(entries, "", "")
+	got, _, _ := baselineRefreshTargets(entries, "", "")
 	if len(got) != 1 {
 		t.Fatalf("targets: %+v", got)
 	}

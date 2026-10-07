@@ -1190,7 +1190,7 @@ func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInp
 		}
 		in.LocalBaselinePath, cleanup, err = materializeBaseWithDelta(ctx, p.basePath, p.prev, p.cfg.DuckDBTuning, p.cfg.DownloadDir)
 	} else {
-		in.LocalBaselinePath, cleanup, err = materializeBaselineLocalIn(ctx, p.basePath, p.cfg.DuckDBTuning, p.cfg.DownloadDir)
+		in.LocalBaselinePath, cleanup, err = materializeBaselineLocalIn(ctx, p.basePath, p.cfg.DuckDBTuning, p.cfg.DownloadDir, p.cfg.SpaceCheck)
 	}
 	if err != nil {
 		return fmt.Errorf("materialize baseline: %w", err)

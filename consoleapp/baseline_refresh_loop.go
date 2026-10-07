@@ -18,6 +18,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/rotation"
+	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
 // refreshRequest is one server's periodic baseline refresh.
@@ -45,12 +46,9 @@ type refreshRequest struct {
 	//
 	// This field is what decides whether this loop uploads at all, and that is
 	// deliberate (#1539). The daemon-wide --baseline-refresh-interval leaves it
-	// EMPTY for a server with a local folder and keeps the original
-	// behaviour, because that flag names no destination and a loop uploading
-	// on the operator's behalf would be deciding something it was not told.
-	// The one exception is a server whose snapshots go ONLY to S3 (#2212):
-	// the bucket is the only place its snapshot can go, so the loop sets it
-	// (baselineRefreshTargets). The per-server schedule sets it from
+	// EMPTY and keeps the original behaviour, because that flag names no
+	// destination and a loop uploading on the operator's behalf would be
+	// deciding something it was not told. The per-server schedule sets it from
 	// the server's own configured backup destination, which IS a destination
 	// the operator named. The gate is therefore data rather than a mode flag:
 	// there is no way to reach the upload without a destination to reach.
@@ -295,20 +293,23 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	var job *jobRun
 	var unclaimed string
 	var stageErr error
+	cleanupStaged := func() {}
 	if req.BaselineDir == "" && req.BaselineS3 != "" {
 		// A server whose snapshots go only to S3 (#2212): this run writes into
 		// a fresh folder of its own under the staging folder, journaled as a
 		// whole, so the snapshot inside it needs no journal entry of its own
 		// and is never anybody else's.
 		job = s.beginJob(console.BaselineRunRefresh, req.ServerID, req.ServerName, req.Trigger, "", started)
-		req.StagedRun, stageErr = s.beginStagedRun(job)
+		var journaled bool
+		req.StagedRun, journaled, stageErr = s.beginStagedRun(job)
+		cleanupStaged = stagedCleanup(job, req, journaled)
 		// Registered in this order so the folder goes BEFORE the journal
 		// entry that would reclaim it (defers run newest first), and a
 		// delete that fails keeps that entry (cleanupStagedRun). The panic
 		// net only: every normal exit deletes the folder before the run's
 		// status goes terminal (below).
 		defer job.release()
-		defer cleanupStagedRun(job, req)
+		defer cleanupStaged()
 	} else {
 		// Asked BEFORE the fold, and it has to be: the question is whether
 		// the snapshot directory holds anything this run did not write, and
@@ -429,10 +430,14 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// after the last read of the snapshot (publishedReadsFrom, above) and
 	// BEFORE the status below goes terminal, which is what every observer
 	// waits on. The caller's deferred delete is only the panic net.
-	cleanupStagedRun(job, req)
+	cleanupStaged()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Runs after this cycle's terminal status is written, still under the
+	// lock, on every exit below: what a test observes "at the moment the
+	// status turns terminal" (#2212, the run folder must be gone by then).
+	defer refreshStatusWritten(req)
 	st := s.refreshes[req.ServerID]
 	if st == nil { // defensive; the single-flight means this cycle's own claim is still here
 		st = &console.BaselineStatus{}
@@ -501,6 +506,10 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	reportRefreshDuration(req.ServerName, finished, prevPace)
 	s.refreshPaces[req.ServerID] = refreshSample(finished)
 }
+
+// refreshStatusWritten is called once a cycle's terminal status is written.
+// A no-op; tests replace it (and restore it only after the cycle ends).
+var refreshStatusWritten = func(refreshRequest) {}
 
 // chainStartFloor is the line this cycle's fold ends chains of table deltas
 // on (#1904, reconstruct.FullTableConfig.ChainStartFloor): coverageRule's, drawn
@@ -1042,9 +1051,8 @@ func uploadRefreshedSnapshot(ctx context.Context, req refreshRequest, at time.Ti
 		// folder, so nothing may promise it is kept or sent later. Not
 		// errSnapshotNotUploaded, which says a finished snapshot is on disk.
 		return 0, fmt.Errorf("%w: it could not be uploaded to %s. This server keeps its snapshots only in S3, so the "+
-			"copy built in the staging folder was deleted (any files already sent stay there marked incomplete, and are never read); "+
-			"the next update starts again from the newest snapshot in the bucket: %w",
-			errStagedSnapshotNotUploaded, dest, err)
+			"copy built in the staging folder was deleted (%s); the next update starts again from the newest snapshot in the bucket: %w",
+			errStagedSnapshotNotUploaded, dest, removePartialUpload(ctx, req, dest), err)
 	}
 	if err != nil {
 		// Names the local path on purpose: the snapshot itself is intact and
@@ -1110,20 +1118,18 @@ func claimSnapshotDir(dir string) string {
 // happened to the files is carried in the attributes.
 func reportRefusedRefresh(req refreshRequest, at time.Time, refused int, unclaimed string, err error) {
 	args := []any{"server", req.ServerName, "id", req.ServerID, "refused", refused, "error", err}
-	if stagedOutputRoot(req) == "" || req.StagedRun != "" {
+	switch {
+	case req.StagedRun != "":
 		// An S3-only server (#2212): its whole run folder is deleted after
 		// this line, so there is nothing to judge, and a "kept_because" here
-		// would describe a folder that is about to go. With no run folder at
-		// all (it could not be made), there is no path to name.
-		if errors.Is(err, errStagedSnapshotNotUploaded) {
-			slog.Warn("baseline refresh: the update was built but not sent to the snapshot destination; it was not kept", args...)
-			return
-		}
-		slog.Warn("baseline refresh: published nothing", args...)
-		return
+		// would describe a folder that is about to go.
+		args = append(args, "staged_run", req.StagedRun, "staged_copy", "deleted")
+	case stagedOutputRoot(req) != "":
+		args = append(args, reclaimPartialSnapshot(refreshSnapshotDir(req, at), refused, unclaimed)...)
 	}
-	args = append(args, reclaimPartialSnapshot(refreshSnapshotDir(req, at), refused, unclaimed)...)
-	if errors.Is(err, errSnapshotNotUploaded) {
+	// (No folder at all: an S3-only run whose folder could not be made has
+	// no path to name.)
+	if errors.Is(err, errSnapshotNotUploaded) || errors.Is(err, errStagedSnapshotNotUploaded) {
 		// A different headline, because operators alert on this one. Saying
 		// "published nothing" over a finished snapshot sends them looking for
 		// a fold problem that did not happen, and the remedy (the credentials
@@ -1573,10 +1579,11 @@ func refreshFoldConfig(req refreshRequest, at time.Time, tableList []string) rec
 		Tables:      tableList,
 		At:          at,
 		OutputDir:   stagedOutputRoot(req),
-		// The staged run's own folder for an S3-only server (#2212), so the
-		// previous snapshot's download lands on the disk SpaceCheck measures,
-		// beside the snapshot directory and never in it. Empty otherwise: the
-		// system temporary directory, as before.
+		// The staged run's own folder for an S3-only server (#2212): the
+		// previous snapshot's download lands there, beside the snapshot
+		// directory and never in it, and SpaceCheck is asked about that disk
+		// before each download. Empty otherwise: the system temporary
+		// directory, unchecked, as before.
 		DownloadDir:           req.StagedRun,
 		OutputFormat:          reconstruct.OutputFormatParquet,
 		CarryForwardUnchanged: req.CarryForwardUnchanged,
@@ -1806,8 +1813,8 @@ func startBaselineRefreshLoop(ctx context.Context, reg *console.Registry, sup *b
 		// instead of running a console with a flag that is silently inert.
 		return fmt.Errorf("internal: --baseline-refresh-interval was set without a baseline supervisor")
 	}
-	targets, shared := baselineRefreshTargets(registryEntries(reg), globalDSN, globalBaselineDir)
-	logSkippedRefreshTargets(shared)
+	targets, skipped, shared := baselineRefreshTargets(registryEntries(reg), globalDSN, globalBaselineDir)
+	logSkippedRefreshTargets(skipped, shared)
 	// Name the reuse setting AND where it came from, once, at the one moment
 	// an operator is reading the log to see whether their configuration took.
 	// Since #1681 the source is always the flag, and the line stays: the
@@ -1827,9 +1834,9 @@ func startBaselineRefreshLoop(ctx context.Context, reg *console.Registry, sup *b
 		// console that is not running. The visibility this warning gives is what
 		// the refusal was actually for.
 		slog.Warn("baseline refresh: no server is refreshable yet, so nothing will run until one has BOTH an " +
-			"index DSN and a snapshot location: a local snapshot directory, or, for a server added in the web " +
-			"interface, an S3 destination (its updates are built in the staging folder and uploaded). The " +
-			"command-line server needs a local directory. Servers added later are picked up automatically.")
+			"index DSN and a LOCAL baseline directory (a refresh writes Parquet to a filesystem, so it needs one " +
+			"to fold into; its previous snapshot may be in the bucket). Servers added later are " +
+			"picked up automatically.")
 	}
 	// RETENTION INTERPLAY (#616), stated at startup on purpose. A refreshed
 	// snapshot is written locally and is NOT uploaded, and baseline.PruneLocal
@@ -1845,10 +1852,6 @@ func startBaselineRefreshLoop(ctx context.Context, reg *console.Registry, sup *b
 	// forever. An operator who discovers this from a full disk discovers it far
 	// too late, and the loop has no business quietly deciding to upload on their
 	// behalf.
-	//
-	// A server whose snapshots go ONLY to S3 is the exception (#2212): its
-	// bucket is the only place a snapshot can go, so this loop uploads its
-	// update and deletes the staged copy, and it is not in the dirs below.
 	slog.Warn("baseline refresh: snapshots from this interval are written locally and never uploaded, so retention "+
 		"cannot reclaim them (a prune needs a confirmed S3 copy of the snapshot). Upload and prune on your own "+
 		"schedule, or size the disk for one full-table snapshot per server per interval, at the rate below.",
@@ -2213,8 +2216,8 @@ func refreshTargetsFor(reg *console.Registry, globalDSN, globalBaselineDir strin
 // refreshTargetsWith is the same thing with the setting ALREADY resolved, so
 // one cycle resolves it once and logs exactly the value it dispatched with.
 func refreshTargetsWith(reg *console.Registry, globalDSN, globalBaselineDir string, carry bool) []refreshRequest {
-	reqs, shared := baselineRefreshTargets(registryEntries(reg), globalDSN, globalBaselineDir)
-	logSkippedRefreshTargets(shared)
+	reqs, skipped, shared := baselineRefreshTargets(registryEntries(reg), globalDSN, globalBaselineDir)
+	logSkippedRefreshTargets(skipped, shared)
 	for i := range reqs {
 		reqs[i].CarryForwardUnchanged = carry
 	}
@@ -2316,9 +2319,7 @@ func refreshTargetDirs(targets []refreshRequest) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, t := range targets {
-		// An S3-only server has no folder that grows (#2212): its run folder
-		// is deleted after every run.
-		if t.BaselineDir == "" || seen[t.BaselineDir] {
+		if seen[t.BaselineDir] {
 			continue
 		}
 		seen[t.BaselineDir] = true
@@ -2334,67 +2335,70 @@ func registryEntries(reg *console.Registry) []console.ServerEntry {
 	return reg.List()
 }
 
-// baselineRefreshTargets collects the servers a refresh can run for: an index
-// DSN to fold from, and somewhere to put the result. That is the server's
-// local folder, or, for a server whose snapshots go only to S3, its bucket:
-// such a server folds into a run folder under the staging folder and uploads
-// (#2212), so its request carries BaselineS3 and no folder. Before #2212 it
-// was skipped with a warning.
+// baselineRefreshTargets collects the servers a refresh can run for — an index
+// DSN to fold from and a LOCAL baseline directory to fold into — plus the
+// names of servers skipped for having only an S3 destination.
 //
-// A server with a local folder keeps the daemon-wide loop's original
-// behaviour: its request carries no BaselineS3, and nothing is uploaded,
-// because the interval flag names no destination (see refreshRequest).
+// PURE on purpose (#1579): it used to slog.Warn the S3-only skip itself, and
+// the same computation also answered a page's live target count (removed with
+// the disk-space card in #1681), where a warning per page load would have been
+// log spam. The callers that dispatch work log the skip via
+// logSkippedRefreshTargets, preserving the old visibility.
 //
-// PURE on purpose (#1579): the callers that dispatch work log the skips via
-// logSkippedRefreshTargets.
-//
-// A registry server whose location another server writes too is skipped
-// with its refusal (#1684): the fold would read the other's newest snapshot
-// and publish into the same folder or prefix. The command-line server counts
+// A registry server whose location another server writes too is skipped as
+// well, with its refusal (#1684): the fold would read the other's newest
+// snapshot and publish into the same folder. The command-line server counts
 // as a writer of its folder when it is a target here, and is never skipped
 // for it: the folder is its own startup flag.
-func baselineRefreshTargets(entries []console.ServerEntry, globalDSN, globalBaselineDir string) ([]refreshRequest, []refreshSkip) {
+func baselineRefreshTargets(entries []console.ServerEntry, globalDSN, globalBaselineDir string) ([]refreshRequest, []string, []refreshSkip) {
 	var out []refreshRequest
+	var skippedS3Only []string
 	var shared []refreshSkip
 	cli := console.CommandLineWriter{Dir: globalBaselineDir, Writes: globalDSN != "" && globalBaselineDir != ""}
 	seen := map[string]bool{}
-	add := func(id, name, dsn, dir, s3 string) bool {
-		if dsn == "" || (dir == "" && s3 == "") || seen[id] {
+	add := func(id, name, dsn, dir string) bool {
+		if dsn == "" || dir == "" || seen[id] {
 			return false
 		}
 		seen[id] = true
-		out = append(out, refreshRequest{ServerID: id, ServerName: name, IndexDSN: dsn, BaselineDir: dir, BaselineS3: s3})
+		out = append(out, refreshRequest{ServerID: id, ServerName: name, IndexDSN: dsn, BaselineDir: dir})
 		return true
 	}
-	add("default", "boot", globalDSN, globalBaselineDir, "")
+	add("default", "boot", globalDSN, globalBaselineDir)
 	for _, e := range entries {
-		if e.DSN == "" || (e.BaselineDir == "" && e.BaselineS3 == "") {
+		if e.DSN != "" && e.BaselineDir == "" && e.BaselineS3 != "" {
+			skippedS3Only = append(skippedS3Only, e.Name)
 			continue
 		}
-		if err := console.SharedLocationRefusal(entries, e, cli); err != nil {
-			shared = append(shared, refreshSkip{name: e.Name, why: err.Error()})
-			continue
+		if e.DSN != "" && e.BaselineDir != "" {
+			if err := console.SharedLocationRefusal(entries, e, cli); err != nil {
+				shared = append(shared, refreshSkip{name: e.Name, why: err.Error()})
+				continue
+			}
 		}
-		s3 := ""
-		if e.BaselineDir == "" {
-			s3 = e.BaselineS3
-		}
-		if add(e.ID, e.Name, e.DSN, e.BaselineDir, s3) {
+		if add(e.ID, e.Name, e.DSN, e.BaselineDir) {
 			withSource(&out[len(out)-1], e)
 		}
 	}
-	return out, shared
+	return out, skippedS3Only, shared
 }
 
 // refreshSkip is a server the refresh leaves alone, and why.
 type refreshSkip struct{ name, why string }
 
-// logSkippedRefreshTargets is the warning half baselineRefreshTargets does
-// not carry: a server whose location is shared is skipped WITH a warning,
-// said when the skip starts or its reason changes.
-func logSkippedRefreshTargets(shared []refreshSkip) {
+// logSkippedRefreshTargets is the warning half baselineRefreshTargets no
+// longer carries: a server with only an S3 baseline destination is skipped
+// WITH a warning rather than silently — the refresh writes files, so an
+// in-place S3 refresh is not something the loop can do, and an operator who
+// configured S3-only baselines and set the interval would otherwise see
+// nothing happen and no reason why.
+func logSkippedRefreshTargets(skipped []string, shared []refreshSkip) {
 	for _, s := range sayChangedSharedSkips(shared) {
 		slog.Warn("snapshot refresh: server skipped, its snapshot location is shared", "server", s.name, "reason", s.why)
+	}
+	for _, name := range skipped {
+		slog.Warn("baseline refresh: server has an S3-only baseline destination and will not be refreshed "+
+			"(a refresh writes Parquet to a filesystem, so it needs a local directory to fold into)", "server", name)
 	}
 }
 
@@ -2428,4 +2432,63 @@ func resetSharedSkipsSaid() {
 	sharedSkipsMu.Lock()
 	sharedSkipsSaid = map[string]string{}
 	sharedSkipsMu.Unlock()
+}
+
+// partialUploadStore is the two bucket calls removePartialUpload makes;
+// *storage.S3Backend is one, a test's fake is the other.
+type partialUploadStore interface {
+	List(ctx context.Context, prefix string) ([]string, error)
+	Delete(ctx context.Context, key string) error
+}
+
+// newPartialUploadStore opens a bucket with no key prefix, so List and Delete
+// take whole keys. Indirected so a test never reaches S3.
+var newPartialUploadStore = func(ctx context.Context, bucket string) (partialUploadStore, error) {
+	return storage.NewS3BackendUnprobed(ctx, storage.S3Config{Bucket: bucket})
+}
+
+// removePartialUpload deletes, best effort, what a failed upload of a staged
+// update left under its own snapshot prefix (dest, "s3://bucket/.../<ts>"),
+// and returns the words for the run's message. Only that one prefix, with
+// its trailing slash so a sibling whose name starts the same is never
+// touched, and only when it holds no _SUCCESS: a copy carrying the marker is
+// complete, and is kept. A listing or delete that fails is said at Warn with
+// the prefix; the files then stay, marked incomplete, which no listing reads.
+func removePartialUpload(ctx context.Context, req refreshRequest, dest string) string {
+	const stay = "the files already sent stay there marked incomplete, and are never read"
+	bucket, key, err := storage.ParseS3URL(dest)
+	prefix := strings.TrimSuffix(key, "/") + "/"
+	warn := func(err error) string {
+		slog.Warn("snapshot refresh: could not remove a partial upload from the bucket; it stays there marked incomplete, and no listing reads it",
+			"server", req.ServerName, "id", req.ServerID, "prefix", strings.TrimSuffix(dest, "/")+"/", "error", err)
+		return stay
+	}
+	if err != nil {
+		return warn(err)
+	}
+	if prefix == "/" {
+		return warn(errors.New("the destination names no snapshot folder"))
+	}
+	store, err := newPartialUploadStore(ctx, bucket)
+	if err != nil {
+		return warn(err)
+	}
+	keys, err := store.List(ctx, prefix)
+	if err != nil {
+		return warn(err)
+	}
+	for _, k := range keys {
+		if k == prefix+baseline.SuccessMarker {
+			return "a complete copy did reach the bucket and was kept"
+		}
+	}
+	for _, k := range keys {
+		if !strings.HasPrefix(k, prefix) {
+			continue // defensive: the listing answers for the prefix asked
+		}
+		if err := store.Delete(ctx, k); err != nil {
+			return warn(err)
+		}
+	}
+	return "any files already sent were removed from the bucket"
 }

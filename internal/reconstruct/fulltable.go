@@ -34,6 +34,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/recovery"
 	"github.com/dbtrail/dbtrail/internal/serverid"
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
+	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
 // FullTableConfig drives ReconstructTables — the full-table merge-on-read
@@ -117,18 +118,22 @@ type FullTableConfig struct {
 	ExplicitAt bool
 	// SpaceCheck, when set, is called right before a file is created, with its
 	// directory and the bytes it is expected to need: before each SQL chunk
-	// (the chunk size), and before a table's Parquet file (the size of the
-	// backup file it is rebuilt from). A table carried forward unchanged never
-	// reaches it. An error stops that table, whose files are then removed. The
-	// daemon checks free disk with it (#1614).
+	// (the chunk size), before a table's Parquet file (the size of the backup
+	// file it is rebuilt from), and, when DownloadDir is set, before an s3://
+	// previous snapshot is downloaded into it (the object's size, #2212). A
+	// table carried forward unchanged never reaches it. An error stops that
+	// table, whose files are then removed. The daemon checks free disk with it
+	// (#1614).
 	SpaceCheck func(dir string, need int64) error
 	// DownloadDir, when set, is where an s3:// previous snapshot is downloaded
 	// before it is merged (materializeBaselineLocal), in a temporary folder of
 	// its own that is removed when the table is done. Empty: the system's
 	// temporary directory, as the command line has always used. The daemon
 	// sets it for a server whose snapshots go only to S3 (#2212), so the
-	// download lands on the disk SpaceCheck measures. Never inside the
-	// snapshot directory itself: everything there is uploaded.
+	// download lands on the disk SpaceCheck measures, and SpaceCheck is asked
+	// before each download. With it empty no download is checked, as before.
+	// Never inside the snapshot directory itself: everything there is
+	// uploaded.
 	DownloadDir string
 
 	// OutputFormat selects the artifact the run produces. The zero value means
@@ -1683,7 +1688,7 @@ func ReconstructTable(
 	}
 
 	// ── 6. Materialize the baseline locally for DuckDB streaming ───────────
-	localPath, cleanup, err := materializeBaselineLocalIn(ctx, baselinePath, cfg.DuckDBTuning, cfg.DownloadDir)
+	localPath, cleanup, err := materializeBaselineLocalIn(ctx, baselinePath, cfg.DuckDBTuning, cfg.DownloadDir, cfg.SpaceCheck)
 	if err != nil {
 		return nil, fmt.Errorf("materialize baseline: %w", err)
 	}
@@ -3053,12 +3058,14 @@ func splitSchemaTable(entry string) (string, string, bool) {
 // default, so passing duckdbutil.Tuning{} (any caller that hasn't been wired
 // with an explicit budget — e.g. the shim, verify) is always safe.
 func materializeBaselineLocal(ctx context.Context, path string, tuning duckdbutil.Tuning) (string, func(), error) {
-	return materializeBaselineLocalIn(ctx, path, tuning, "")
+	return materializeBaselineLocalIn(ctx, path, tuning, "", nil)
 }
 
 // materializeBaselineLocalIn is materializeBaselineLocal downloading under dir
-// (FullTableConfig.DownloadDir); "" is the system temporary directory.
-func materializeBaselineLocalIn(ctx context.Context, path string, tuning duckdbutil.Tuning, dir string) (string, func(), error) {
+// (FullTableConfig.DownloadDir); "" is the system temporary directory. With a
+// dir and a spaceCheck, the free disk there is checked against the object's
+// size before anything is downloaded.
+func materializeBaselineLocalIn(ctx context.Context, path string, tuning duckdbutil.Tuning, dir string, spaceCheck func(string, int64) error) (string, func(), error) {
 	if !strings.HasPrefix(path, "s3://") {
 		// At-rest integrity (#636): validate the local file against its snapshot's
 		// _MANIFEST before any reader trusts it (DuckDB validates nothing). Fail
@@ -3072,8 +3079,23 @@ func materializeBaselineLocalIn(ctx context.Context, path string, tuning duckdbu
 	// against the snapshot's _MANIFEST before the DuckDB COPY below re-encodes
 	// them — the temp copy is no longer byte-identical to the object, so this
 	// pre-pass is the only point where the manifest's raw-byte CRC applies.
-	if err := baselineintegrity.ValidateS3File(ctx, path); err != nil {
+	if err := validateS3Baseline(ctx, path); err != nil {
 		return "", nil, err
+	}
+	if dir != "" && spaceCheck != nil {
+		// Before the download, on the disk it lands on (#2212): a staging disk
+		// that cannot hold the file is a refusal here, not a failure half way
+		// through DuckDB's COPY. A size that cannot be read is checked as zero
+		// (the check's own margin still applies) and said, never skipped quietly.
+		need, err := s3ObjectSize(ctx, path)
+		if err != nil {
+			slog.Warn("could not read the size of the previous snapshot before downloading it; checking only the free-space margin",
+				"path", path, "error", err)
+			need = 0
+		}
+		if err := spaceCheck(dir, need); err != nil {
+			return "", nil, err
+		}
 	}
 	// Download via DuckDB httpfs. Keep the temp file around until cleanup().
 	tmpDir, err := baselineDownloadDir(dir)
@@ -3108,6 +3130,23 @@ func materializeBaselineLocalIn(ctx context.Context, path string, tuning duckdbu
 	cleanup := func() { os.RemoveAll(tmpDir) }
 	return tmpPath, cleanup, nil
 }
+
+// validateS3Baseline and s3ObjectSize are the two S3 reads before a download,
+// indirected so a test can drive the disk check without a bucket.
+var (
+	validateS3Baseline = baselineintegrity.ValidateS3File
+	s3ObjectSize       = func(ctx context.Context, s3URL string) (int64, error) {
+		bucket, key, err := storage.ParseS3URL(s3URL)
+		if err != nil {
+			return 0, err
+		}
+		b, err := storage.NewS3BackendUnprobed(ctx, storage.S3Config{Bucket: bucket})
+		if err != nil {
+			return 0, err
+		}
+		return b.Size(ctx, key)
+	}
+)
 
 // baselineDownloadDir makes the temporary folder one s3:// baseline is
 // downloaded into: under dir, or the system's temporary directory when dir is

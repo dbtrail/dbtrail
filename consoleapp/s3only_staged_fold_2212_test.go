@@ -52,6 +52,9 @@ func stubStagedFold(t *testing.T, uploadErr error) *stagedFoldStubs {
 		}
 		return time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC), []string{"shop.orders"}, nil
 	}
+	// The bucket the partial-upload cleanup sees: empty unless a case
+	// stubs its own, and never the network.
+	stubPartialStore(t, &fakePartialStore{})
 	s := &stagedFoldStubs{}
 	uploadSnapshot = func(_ context.Context, outputDir, dest, _ string, _ bool) (int, error) {
 		s.mu.Lock()
@@ -447,37 +450,19 @@ func TestFullReadStandsIn(t *testing.T) {
 	}
 }
 
-// The daemon-wide loop includes S3-only servers now, with their bucket as the
-// destination (there is nowhere else for the snapshot to go), and still
-// refuses two servers on one prefix.
-func TestBaselineRefreshTargets_includesS3OnlyServers_2212(t *testing.T) {
+// The daemon-wide --baseline-refresh-interval loop is NOT part of #2212: it
+// names no destination, so turning S3-only servers into targets would start
+// uploading a full snapshot to their bucket every interval, with no cost
+// check and no retention, for an operator who never asked for it. Such a
+// server stays skipped, with the warning; only the per-server schedule
+// updates it through the staging folder.
+func TestBaselineRefreshTargets_stillSkipsS3OnlyServers_2212(t *testing.T) {
 	entries := []console.ServerEntry{
-		{ID: "a", Name: "both", DSN: "dsn-a", BaselineDir: "/b/a", BaselineS3: "s3://bucket/a/"},
 		{ID: "b", Name: "s3only", DSN: "dsn-b", BaselineS3: "s3://bucket/b/"},
-		{ID: "c", Name: "same-prefix-1", DSN: "dsn-c", BaselineS3: "s3://bucket/shared"},
-		{ID: "d", Name: "same-prefix-2", DSN: "dsn-d", BaselineS3: "s3://bucket/shared/"},
 	}
-	got, shared := baselineRefreshTargets(entries, "", "")
-	byID := map[string]refreshRequest{}
-	for _, r := range got {
-		byID[r.ServerID] = r
-	}
-	if r, ok := byID["b"]; !ok || r.BaselineDir != "" || r.BaselineS3 != "s3://bucket/b/" {
-		t.Fatalf("S3-only target = %+v (present %v), want it with its bucket and no folder", r, ok)
-	}
-	// Unchanged for a server with a folder: the daemon-wide loop keeps its
-	// snapshots local, as its flag documents.
-	if r := byID["a"]; r.BaselineDir != "/b/a" || r.BaselineS3 != "" {
-		t.Fatalf("local+S3 target = %+v, want the folder and no upload", r)
-	}
-	if _, ok := byID["c"]; ok {
-		t.Error("a server sharing its prefix was refreshed")
-	}
-	if len(shared) != 2 {
-		t.Fatalf("shared skips = %+v, want both servers on the one prefix", shared)
-	}
-	if dirs := refreshTargetDirs(got); len(dirs) != 1 || dirs[0] != "/b/a" {
-		t.Fatalf("refreshTargetDirs = %v, want only the real folder", dirs)
+	got, skipped, _ := baselineRefreshTargets(entries, "", "")
+	if len(got) != 0 || len(skipped) != 1 || skipped[0] != "s3only" {
+		t.Fatalf("targets = %+v, skipped = %v, want the S3-only server skipped", got, skipped)
 	}
 }
 
@@ -513,5 +498,206 @@ func TestStagedFold_aFailedDeleteIsReclaimedAtTheNextStart(t *testing.T) {
 	}
 	if recs := next.history.List("s"); len(recs) != 1 {
 		t.Fatalf("records = %+v, want the run's own record only, not an interrupted one", recs)
+	}
+}
+
+// A download that fills the disk fails inside DuckDB, whose error is text, not
+// syscall.ENOSPC. It must still read as a disk refusal, so no full read (which
+// stages in the same folder) stands in for it.
+func TestFoldDiskRefused_recognisesDuckDBsDiskFullText(t *testing.T) {
+	duck := errors.New(`materialize baseline: download s3 baseline: IO Error: Could not write file "/stage/refresh-1/bintrail-baseline-2/baseline.parquet": No space left on device`)
+	if !foldDiskRefused(duck) {
+		t.Fatal("a DuckDB disk-full download is not a disk refusal")
+	}
+	if foldDiskRefused(errors.New("download s3 baseline: HTTP 403 Forbidden")) {
+		t.Fatal("an unrelated download error reads as a disk refusal")
+	}
+	st := console.BaselineStatus{}
+	applyFoldStatus(&st, 1, 1, reuseTally{}, duck)
+	if !st.DiskRefused || fullReadStandsIn(st) {
+		t.Fatalf("status = %+v, want a disk refusal no full read stands in for", st)
+	}
+}
+
+// The same failed delete with NO journal (a supervisor without a run history,
+// or a journal write that failed): nothing will remove the folder at the next
+// start, so the log must name it and say to remove it by hand, and say it
+// once, although the cleanup runs twice (the explicit call and the panic net).
+func TestStagedFold_aFailedDeleteWithoutAJournalSaysRemoveByHand(t *testing.T) {
+	stubStagedFold(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	staging := t.TempDir()
+	sup := newBaselineSupervisor(ctx, staging, baseline.DefaultLockMode) // no history: no journal
+	injectFold(t, 0, nil)
+	prevRemove := removeAllDir
+	t.Cleanup(func() { removeAllDir = prevRemove })
+	removeAllDir = func(string) error { return errors.New("EBUSY") }
+	logs := captureWarnings(t)
+	sup.refreshes["s"] = &console.BaselineStatus{State: "running"}
+	sup.runRefresh(s3OnlyRequest("s"), refreshAt, time.Minute)
+	removeAllDir = prevRemove
+
+	left := stagingEntries(t, staging)
+	if len(left) != 1 {
+		t.Fatalf("staging = %v, want the run folder left behind", left)
+	}
+	out := logs.String()
+	t.Log(out)
+	if n := strings.Count(out, "level=ERROR"); n != 1 {
+		t.Fatalf("%d Error lines, want exactly one", n)
+	}
+	if !strings.Contains(out, filepath.Join(staging, left[0])) || !strings.Contains(out, "remove it by hand") ||
+		strings.Contains(out, "next start") {
+		t.Fatalf("the log does not name the folder and say to remove it by hand: %s", out)
+	}
+}
+
+// fakePartialStore is the bucket as the partial-upload cleanup sees it.
+type fakePartialStore struct {
+	mu      sync.Mutex
+	keys    []string
+	listed  []string
+	deleted []string
+	delErr  error
+}
+
+func (f *fakePartialStore) List(_ context.Context, prefix string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listed = append(f.listed, prefix)
+	var out []string
+	for _, k := range f.keys {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, k)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakePartialStore) Delete(_ context.Context, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.delErr != nil {
+		return f.delErr
+	}
+	f.deleted = append(f.deleted, key)
+	return nil
+}
+
+func stubPartialStore(t *testing.T, f *fakePartialStore) *string {
+	t.Helper()
+	prev := newPartialUploadStore
+	t.Cleanup(func() { newPartialUploadStore = prev })
+	var bucket string
+	newPartialUploadStore = func(_ context.Context, b string) (partialUploadStore, error) {
+		bucket = b
+		return f, nil
+	}
+	return &bucket
+}
+
+// A staged update whose upload failed part way: what reached the bucket under
+// THIS run's snapshot prefix is deleted (it has no _SUCCESS), and nothing
+// else; the message says it was removed.
+func TestStagedFold_aPartialUploadIsRemovedFromTheBucket(t *testing.T) {
+	stubStagedFold(t, errors.New("connection reset"))
+	stamp := reconstruct.SnapshotDirName(refreshAt)
+	store := &fakePartialStore{keys: []string{
+		"s/2026-08-28T09-00-00Z/_SUCCESS", "s/2026-08-28T09-00-00Z/shop/orders.parquet", // the previous snapshot
+		"s/" + stamp + "/_INCOMPLETE", "s/" + stamp + "/shop/orders.parquet", // this run's partial copy
+		"s/" + stamp + "x/shop/orders.parquet", // a sibling sharing the name as a prefix
+	}}
+	bucket := stubPartialStore(t, store)
+	f := newJobsFixture(t)
+	sup := f.supervisor(t)
+	injectFold(t, 0, nil)
+	sup.refreshes["s"] = &console.BaselineStatus{State: "running"}
+	sup.runRefresh(s3OnlyRequest("s"), refreshAt, time.Minute)
+
+	st := sup.RefreshStatus("s")
+	t.Logf("LastError: %s", st.LastError)
+	if *bucket != "bucket" || len(store.listed) != 1 || store.listed[0] != "s/"+stamp+"/" {
+		t.Fatalf("listed %v in bucket %q, want only this run's prefix s/%s/", store.listed, *bucket, stamp)
+	}
+	want := []string{"s/" + stamp + "/_INCOMPLETE", "s/" + stamp + "/shop/orders.parquet"}
+	if strings.Join(store.deleted, ",") != strings.Join(want, ",") {
+		t.Fatalf("deleted %v, want %v", store.deleted, want)
+	}
+	if !st.UploadFailed || !strings.Contains(st.LastError, "removed from the bucket") {
+		t.Fatalf("status = %+v, want an upload failure saying the partial copy was removed", st)
+	}
+}
+
+// A copy that carries _SUCCESS is complete and is never deleted; a delete that
+// fails is said at Warn with the prefix, and the message says the files stay.
+func TestStagedFold_partialUploadCleanupKeepsACompleteCopyAndSaysAFailure(t *testing.T) {
+	stamp := reconstruct.SnapshotDirName(refreshAt)
+	t.Run("complete copy kept", func(t *testing.T) {
+		stubStagedFold(t, errors.New("timeout after the last file"))
+		store := &fakePartialStore{keys: []string{"s/" + stamp + "/_SUCCESS", "s/" + stamp + "/shop/orders.parquet"}}
+		stubPartialStore(t, store)
+		sup := newJobsFixture(t).supervisor(t)
+		injectFold(t, 0, nil)
+		sup.refreshes["s"] = &console.BaselineStatus{State: "running"}
+		sup.runRefresh(s3OnlyRequest("s"), refreshAt, time.Minute)
+		if len(store.deleted) != 0 {
+			t.Fatalf("deleted %v from a copy that carries _SUCCESS", store.deleted)
+		}
+	})
+	t.Run("delete fails", func(t *testing.T) {
+		stubStagedFold(t, errors.New("connection reset"))
+		store := &fakePartialStore{keys: []string{"s/" + stamp + "/_INCOMPLETE"}, delErr: errors.New("AccessDenied: s3:DeleteObject")}
+		stubPartialStore(t, store)
+		sup := newJobsFixture(t).supervisor(t)
+		injectFold(t, 0, nil)
+		logs := captureWarnings(t)
+		sup.refreshes["s"] = &console.BaselineStatus{State: "running"}
+		sup.runRefresh(s3OnlyRequest("s"), refreshAt, time.Minute)
+		st := sup.RefreshStatus("s")
+		t.Logf("LastError: %s", st.LastError)
+		if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "s3://bucket/s/"+stamp+"/") ||
+			!strings.Contains(logs.String(), "AccessDenied: s3:DeleteObject") {
+			t.Fatalf("the failed delete is not said at Warn with the prefix: %s", logs)
+		}
+		if !strings.Contains(st.LastError, "stay there marked incomplete") {
+			t.Fatalf("message = %q, want it to say the sent files stay", st.LastError)
+		}
+	})
+}
+
+// The run folder is gone BEFORE the status turns terminal, which is what every
+// observer waits on (the schedule's watcher, the page's poll): the deferred
+// delete alone would run after it.
+func TestStagedFold_theRunFolderIsGoneWhenTheStatusTurnsTerminal(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		uploadErr error
+	}{{"published", nil}, {"upload failed", errors.New("connection reset")}} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubStagedFold(t, tc.uploadErr)
+			f := newJobsFixture(t)
+			sup := f.supervisor(t)
+			injectFold(t, 0, nil)
+			var atTerminal []string
+			var state string
+			prev := refreshStatusWritten
+			t.Cleanup(func() { refreshStatusWritten = prev })
+			refreshStatusWritten = func(req refreshRequest) {
+				state = sup.refreshes[req.ServerID].State // under s.mu, as the hook runs
+				entries, _ := os.ReadDir(f.staging)
+				for _, e := range entries {
+					atTerminal = append(atTerminal, e.Name())
+				}
+			}
+			sup.refreshes["s"] = &console.BaselineStatus{State: "running"}
+			sup.runRefresh(s3OnlyRequest("s"), refreshAt, time.Minute)
+			if state != "succeeded" && state != "failed" {
+				t.Fatalf("the hook saw state %q, want a terminal one", state)
+			}
+			if len(atTerminal) != 0 {
+				t.Fatalf("the staging folder held %v when the status turned %s", atTerminal, state)
+			}
+		})
 	}
 }

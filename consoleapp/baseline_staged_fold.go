@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -45,7 +46,8 @@ const stagedRunPrefix = "refresh-"
 // copy is left anywhere, and nothing may say otherwise (foldPublished stays
 // false). An upload that failed part way leaves what it sent in the bucket
 // under the _INCOMPLETE marker baseline.Upload writes first, which every
-// listing skips; nothing reclaims it today, and the message says it stays.
+// listing skips; removePartialUpload deletes it, best effort, and the message
+// says which way that went.
 // It still keeps the schedule from answering the failure with a full read
 // (BaselineStatus.UploadFailed): that one uploads to the same bucket.
 var errStagedSnapshotNotUploaded = errors.New("the update was not sent to the snapshot destination")
@@ -107,37 +109,52 @@ func probeStagingDir(dir string) error {
 }
 
 // beginStagedRun makes this run's folder under the staging folder and
-// journals it before anything is written into it. The error names the
-// staging folder: it is the setting to fix.
-func (s *baselineSupervisor) beginStagedRun(job *jobRun) (string, error) {
+// journals it before anything is written into it, reporting whether the
+// journal took it. The error names the staging folder: it is the setting to
+// fix.
+func (s *baselineSupervisor) beginStagedRun(job *jobRun) (dir string, journaled bool, err error) {
 	if s.stagingDir == "" {
-		return "", errors.New("this server keeps its snapshots only in S3, so its update is built in the staging folder, and no staging folder is set (BINTRAIL_CONSOLE_BASELINE_STAGING)")
+		return "", false, errors.New("this server keeps its snapshots only in S3, so its update is built in the staging folder, and no staging folder is set")
 	}
 	if err := os.MkdirAll(s.stagingDir, 0o755); err != nil {
-		return "", fmt.Errorf("this server keeps its snapshots only in S3, so its update is built in the staging folder %s, which cannot be created: %w", s.stagingDir, err)
+		return "", false, fmt.Errorf("this server keeps its snapshots only in S3, so its update is built in the staging folder %s, which cannot be created: %w", s.stagingDir, err)
 	}
-	dir, err := os.MkdirTemp(s.stagingDir, stagedRunPrefix)
+	dir, err = os.MkdirTemp(s.stagingDir, stagedRunPrefix)
 	if err != nil {
-		return "", fmt.Errorf("this server keeps its snapshots only in S3, so its update is built in the staging folder %s, which cannot be written: %w", s.stagingDir, err)
+		return "", false, fmt.Errorf("this server keeps its snapshots only in S3, so its update is built in the staging folder %s, which cannot be written: %w", s.stagingDir, err)
 	}
-	job.Created(s.stagingDir, filepath.Base(dir))
-	return dir, nil
+	return dir, job.journal(s.stagingDir, filepath.Base(dir)), nil
 }
 
-// cleanupStagedRun deletes a run folder. Idempotent: the normal exit and the
-// deferred panic net both call it.
+// stagedCleanup returns the function that deletes a run folder, safe to call
+// more than once (the explicit call before the status goes terminal, and the
+// deferred panic net): only the first call does anything, so a delete that
+// fails is said once.
 //
-// A delete that fails keeps the job's journal entry (jobRun.keepForReclaim),
-// so the next start removes the folder: it holds a whole snapshot's worth of
-// disk, and dropping the entry would leave nothing that ever looks at it
-// again. Said at Error, since until that start the disk stays used.
-func cleanupStagedRun(job *jobRun, req refreshRequest) {
-	if req.StagedRun == "" {
-		return
-	}
-	if err := removeAllDir(req.StagedRun); err != nil {
-		slog.Error("snapshot refresh: could not delete this update's folder in the staging folder; DBTrail removes it at its next start, or delete it by hand",
-			"server", req.ServerName, "id", req.ServerID, "dir", req.StagedRun, "error", err)
-		job.keepForReclaim()
+// A delete that fails on a JOURNALED folder keeps the job's journal entry
+// (jobRun.keepForReclaim), so the next start removes it: it holds a whole
+// snapshot's worth of disk, and dropping the entry would leave nothing that
+// ever looks at it again. A folder that is NOT journaled (no run history, or
+// the entry could not be written) is reclaimed by nothing, so the line names
+// it and says to remove it by hand. Error either way: the disk stays used.
+func stagedCleanup(job *jobRun, req refreshRequest, journaled bool) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			if req.StagedRun == "" {
+				return
+			}
+			err := removeAllDir(req.StagedRun)
+			if err == nil {
+				return
+			}
+			args := []any{"server", req.ServerName, "id", req.ServerID, "dir", req.StagedRun, "error", err}
+			if journaled {
+				slog.Error("snapshot refresh: could not delete this update's folder in the staging folder; DBTrail removes it at its next start", args...)
+				job.keepForReclaim()
+				return
+			}
+			slog.Error("snapshot refresh: could not delete this update's folder in the staging folder, and nothing will remove it later; remove it by hand", args...)
+		})
 	}
 }

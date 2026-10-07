@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -66,8 +67,15 @@ func newDiskSpaceCheck() func(dir string, need int64) error {
 // foldDiskRefused reports whether a fold stopped for disk space: refused by
 // the check, or a write that found the disk full anyway (another server's
 // build, the index, anything else filling the same disk meanwhile).
+//
+// DuckDB reports a full disk as text ("No space left on device", inside an
+// IO Error), with no errno to unwrap: the download of an s3:// previous
+// snapshot (#2212) is a DuckDB COPY, so that text counts too.
 func foldDiskRefused(err error) bool {
-	return errors.Is(err, errFoldDiskFull) || errors.Is(err, syscall.ENOSPC)
+	if errors.Is(err, errFoldDiskFull) || errors.Is(err, syscall.ENOSPC) {
+		return true
+	}
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no space left on device")
 }
 
 // existingParent walks up from dir to the nearest directory that exists, so a
