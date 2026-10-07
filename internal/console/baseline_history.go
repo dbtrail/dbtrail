@@ -82,6 +82,10 @@ type BaselineRunRecord struct {
 	Carried int `json:"carried,omitempty"`
 	// CarriedCopied narrows Carried to the reuses published as full byte
 	// copies (no hard link, no disk saved) — see BaselineStatus.CarriedCopied.
+	// S3Copied counts tables copied inside S3 from the previous snapshot
+	// instead of being written (#2212, a server whose snapshots go only to
+	// S3). Apart from Carried: nothing was written, and no disk is involved.
+	S3Copied      int   `json:"s3_copied,omitempty"`
 	CarriedCopied int   `json:"carried_copied,omitempty"`
 	Rows          int64 `json:"rows,omitempty"`
 	Uploaded      int   `json:"uploaded,omitempty"`

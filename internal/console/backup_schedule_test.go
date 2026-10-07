@@ -204,9 +204,15 @@ func TestCheckBackupSchedule(t *testing.T) {
 		{"read-only console", ready, BackupScheduleGates{ReadOnlyConsole: true}, "DBTrail service"},
 		{"watch without any baseline feature", ready, BackupScheduleGates{}, "BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1 and no refresh interval is set (CLI: --baseline-refresh-interval)"},
 		{"creation off but a rebuild is possible", ready, BackupScheduleGates{LoopRunning: true}, ""},
-		{"creation off and no local dir", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineS3: "s3://b/"}, BackupScheduleGates{LoopRunning: true}, "BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1); an update from the recorded changes needs a local snapshot directory"},
+		// S3 only (#2212): an update is a producer there too, built in the
+		// staging folder, so the opt-in being off still leaves a runnable
+		// schedule. Refused only when the staging folder cannot be used.
+		{"creation off, S3 only", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineS3: "s3://b/"}, BackupScheduleGates{LoopRunning: true}, ""},
+		{"creation off, S3 only, staging unusable", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineS3: "s3://b/"}, BackupScheduleGates{LoopRunning: true, StagingRefusal: "the staging folder /stage cannot be written: permission denied"},
+			"BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1); an update for a server whose snapshots go only to S3 is built in the staging folder, which cannot be used; the staging folder /stage cannot be written: permission denied"},
 		{"lock mode misconfigured but a rebuild is possible", ready, BackupScheduleGates{LoopRunning: true, FullBackups: true, FullBackupsErr: "bad lock mode"}, ""},
-		{"lock mode misconfigured, S3-only", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineS3: "s3://b/"}, BackupScheduleGates{LoopRunning: true, FullBackups: true, FullBackupsErr: "bad lock mode"}, "bad lock mode; an update from the recorded changes needs a local snapshot directory"},
+		{"lock mode misconfigured, S3-only", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineS3: "s3://b/"}, BackupScheduleGates{LoopRunning: true, FullBackups: true, FullBackupsErr: "bad lock mode"}, ""},
+		{"lock mode misconfigured, S3-only, staging unusable", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineS3: "s3://b/"}, BackupScheduleGates{LoopRunning: true, FullBackups: true, FullBackupsErr: "bad lock mode", StagingRefusal: "no staging folder is set (BINTRAIL_CONSOLE_BASELINE_STAGING)"}, "bad lock mode; an update for a server whose snapshots go only to S3 is built in the staging folder"},
 		// S3 AND a local dir: since #1539 the rebuild IS a candidate producer
 		// there (it reads the bucket, writes the local directory, uploads),
 		// so the creation opt-in being off no longer makes this a timer
@@ -262,7 +268,8 @@ func fakeSnapshot(t *testing.T, dir string) {
 }
 
 // How the next run is made is the daemon's decision, and the rule has to be
-// the one the docs state: no local backup directory means full, no previous
+// the one the docs state: an update that cannot be built (no index; S3 only
+// with an unusable staging folder, #2212) means full, no previous
 // backup means full, otherwise rebuild; a rule that lands on a producer this
 // daemon cannot run says so.
 func TestChooseBackupMethod(t *testing.T) {
@@ -289,10 +296,16 @@ func TestChooseBackupMethod(t *testing.T) {
 		// same case, not an unreadable one.
 		{"local dir that does not exist yet: full", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineDir: filepath.Join(empty, "not-yet")}, live, BackupMethodFull, "no previous snapshot", "", nil, nil, ""},
 		{"local dir, no snapshot yet, creation off: nothing can run", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineDir: empty}, off, BackupMethodFull, "", "no previous snapshot to update", nil, nil, ""},
-		// S3 with no local directory is the one shape that still forces a
-		// full backup, and the why names the setting that unlocks the cheap
-		// path rather than the destination the operator cannot change.
-		{"S3 destination, no local dir: full", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineS3: "s3://b/"}, live, BackupMethodFull, "needs a local snapshot directory", "", nil, nil, ""},
+		// S3 with no local directory (#2212): the update is built in the
+		// staging folder, so the bucket decides like any other location: a
+		// snapshot there is updated, an empty bucket is a first backup.
+		{"S3 only, a snapshot in the bucket: rebuild", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineS3: "s3://b/"}, live, BackupMethodRefresh, "no load on your database", "", []string{"app.orders"}, nil, "s3://b/"},
+		{"S3 only, an empty bucket: full, first backup", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineS3: "s3://b/"}, live, BackupMethodFull, BackupWhyFirstBackup, "", nil, nil, "s3://b/"},
+		{"S3 only, creation off, a snapshot in the bucket: still rebuild", ServerEntry{DSN: "idx", BaselineS3: "s3://b/"}, off, BackupMethodRefresh, "no load", "", []string{"app.orders"}, nil, "s3://b/"},
+		// The staging folder cannot be used: a full read, and the why names
+		// the folder, before the bucket is even asked.
+		{"S3 only, staging unusable: full, saying why", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineS3: "s3://b/"},
+			BackupScheduleGates{LoopRunning: true, FullBackups: true, StagingRefusal: "the staging folder /stage cannot be written: permission denied"}, BackupMethodFull, BackupWhyNoStagingPrefix + "; the staging folder /stage cannot be written", "", nil, nil, ""},
 		// #1539: the previous backup is looked for in the BUCKET, so an
 		// S3-backed server whose local directory is empty (every backup it
 		// has was uploaded) still rebuilds. Under the old rule this was a
@@ -302,7 +315,9 @@ func TestChooseBackupMethod(t *testing.T) {
 		// bucket. Folding the local one would publish an update of a
 		// backup no reader of the bucket has ever seen.
 		{"S3 and a local dir, nothing in the bucket yet: full", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineDir: withSnap, BaselineS3: "s3://b/"}, live, BackupMethodFull, "no previous snapshot", "", nil, nil, "s3://b/"},
-		{"S3 destination, creation off, no local dir: nothing can run", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineS3: "s3://b/"}, off, BackupMethodFull, "", "needs a local snapshot directory", nil, nil, ""},
+		{"S3 only, creation off, empty bucket: nothing can run", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineS3: "s3://b/"}, off, BackupMethodFull, "", "no previous snapshot to update under s3://b/", nil, nil, "s3://b/"},
+		{"S3 only, creation off, staging unusable: nothing can run", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineS3: "s3://b/"},
+			BackupScheduleGates{LoopRunning: true, StagingRefusal: "x"}, BackupMethodFull, "", "built in the staging folder, which cannot be used; x", nil, nil, ""},
 		// A bucket that will not answer must not cost the slot: before #1539
 		// these servers were guaranteed a full backup without touching the
 		// network, and a throttled listing that skipped the night would be a

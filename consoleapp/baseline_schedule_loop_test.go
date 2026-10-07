@@ -6,6 +6,8 @@ import (
 	"errors"
 	"github.com/dbtrail/dbtrail/internal/config"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -888,7 +890,8 @@ func TestBackupScheduler_collisionSkipsAndRecords(t *testing.T) {
 // A schedule the daemon cannot serve at this slot is skipped with the reason
 // the page already knows, never silently: no backup to rebuild from and no
 // creation opt-in, or the supervisor's standing refusal (a lock-mode
-// misconfiguration) on a server whose backups go to S3.
+// misconfiguration) on a server whose backups go to S3 only and whose
+// staging folder cannot be used (#2212: with a usable one, the update runs).
 func TestBackupScheduler_skipsWithTheReasonWhenNothingCanRun(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -909,6 +912,11 @@ func TestBackupScheduler_skipsWithTheReasonWhenNothingCanRun(t *testing.T) {
 				if err := reg.Update(e); err != nil {
 					t.Fatal(err)
 				}
+				blocker := filepath.Join(t.TempDir(), "staging-is-a-file")
+				if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				sup.stagingDir = blocker
 			}
 			fireAt(b, time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC))
 			if st := sup.Status(e.ID); st.State != "idle" {

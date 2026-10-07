@@ -3,6 +3,8 @@ package consoleapp
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -57,35 +59,43 @@ func TestBackupScheduler_recordsWhyTheFallbackWasFull(t *testing.T) {
 	}
 }
 
-// The two reasons that stay true until a setting changes (#1604's headline
+// The reasons that stay true until a setting changes (#1604's headline
 // cases) reach the record from the scheduler: decided BEFORE any probe of
-// the destination, so an S3-only server records the missing setting, not
-// "first snapshot" or an unreadable bucket.
+// the destination, so an S3-only server whose staging folder cannot be used
+// (#2212) records that setting, not "first snapshot" or an unreadable bucket.
 func TestBackupScheduler_recordsThePermanentReasons(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		shape func(e *console.ServerEntry)
+		shape func(e *console.ServerEntry, sup *baselineSupervisor)
 		why   string
 		code  string
 	}{
-		{"no local snapshot directory", func(e *console.ServerEntry) { e.BaselineDir, e.BaselineS3 = "", "s3://bucket/prefix" }, console.BackupWhyNoLocalDir, "no_local_dir"},
-		{"no index connection", func(e *console.ServerEntry) { e.DSN = "" }, console.BackupWhyNoIndex, "no_index"},
+		{"S3 only, and the staging folder cannot be used", func(e *console.ServerEntry, sup *baselineSupervisor) {
+			e.BaselineDir, e.BaselineS3 = "", "s3://bucket/prefix"
+			blocker := filepath.Join(t.TempDir(), "staging-is-a-file")
+			if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			sup.stagingDir = blocker
+		}, console.BackupWhyNoStagingPrefix, "no_staging"},
+		{"no index connection", func(e *console.ServerEntry, _ *baselineSupervisor) { e.DSN = "" }, console.BackupWhyNoIndex, "no_index"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, reg, sup := newScheduleFixture(t, true)
 			e := addScheduled(t, reg, false)
 			e.SourceDSN = "not a dsn"
-			tc.shape(&e)
+			tc.shape(&e, sup)
 			if err := reg.Update(e); err != nil {
 				t.Fatal(err)
 			}
 			fireAt(b, time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC))
 			st := waitTerminalMethod(t, b, e.ID, console.BackupMethodFull)
-			if st.LastWhy != tc.why {
+			if !strings.HasPrefix(st.LastWhy, tc.why) {
 				t.Fatalf("live view LastWhy = %q, want %q", st.LastWhy, tc.why)
 			}
+			t.Logf("why: %s", st.LastWhy)
 			run, _ := sup.history.LastScheduled(e.ID)
-			if run == nil || run.Why != tc.why || run.WhyCode != tc.code {
+			if run == nil || !strings.HasPrefix(run.Why, tc.why) || run.WhyCode != tc.code {
 				t.Fatalf("record = %+v, want why %q code %q", run, tc.why, tc.code)
 			}
 		})

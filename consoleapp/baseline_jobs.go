@@ -108,8 +108,16 @@ func (s *baselineSupervisor) beginJob(kind, serverID, serverName, trigger, why s
 // Created journals a directory the job has just made its own (a fresh temp
 // directory, or a snapshot directory proven vacant), before data goes in.
 func (j *jobRun) Created(root, name string) {
+	j.journal(root, name)
+}
+
+// journal is Created reporting whether the directory is now in the journal:
+// false for a job with no journal, and for one whose entry could not be
+// written (said at Warn here). A caller that must tell an operator who will
+// clean a directory up reads this rather than assuming (#2212).
+func (j *jobRun) journal(root, name string) bool {
 	if j == nil {
-		return
+		return false
 	}
 	abs, err := filepath.Abs(root)
 	if err == nil {
@@ -121,12 +129,14 @@ func (j *jobRun) Created(root, name string) {
 		// it, and would refuse it. Not journaled.
 		slog.Warn("snapshot jobs: could not resolve a job directory's parent; it will not be cleaned up if the process is killed",
 			"root", root, "name", name, "error", err)
-		return
+		return false
 	}
 	if err := j.history.JobCreated(j.runID, console.BaselineJobDir{Root: root, ResolvedRoot: resolved, Name: name}); err != nil {
 		slog.Warn("snapshot jobs: could not journal a job directory; it will not be cleaned up if the process is killed",
 			"dir", filepath.Join(root, name), "error", err)
+		return false
 	}
+	return true
 }
 
 // release ends the job: its journal entry goes, then its lock file, then the
@@ -154,6 +164,23 @@ func (j *jobRun) release() {
 		return
 	}
 	os.Remove(j.lockPath)
+	j.lock.Close()
+}
+
+// keepForReclaim ends the job WITHOUT dropping its journal entry: the lock is
+// released and the lock file kept, so the next start finds the job dead and
+// removes what it journaled (a run folder whose delete failed, #2212). Its
+// record, already written, is not written again. Idempotent with release.
+func (j *jobRun) keepForReclaim() {
+	if j == nil {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.released {
+		return
+	}
+	j.released = true
 	j.lock.Close()
 }
 
@@ -300,10 +327,12 @@ type jobDirResult struct {
 	err error
 }
 
-// stagingNamePrefixes are the os.MkdirTemp patterns of the full read's
-// scratch directories: the dump, a staged snapshot bound for S3, and a
-// PostgreSQL one. Nothing in them is ever kept by a run that ends.
-var stagingNamePrefixes = []string{"dump-", "baseline-", "pgbaseline-"}
+// stagingNamePrefixes are the os.MkdirTemp patterns of the scratch
+// directories in the staging folder: the full read's dump, a staged snapshot
+// bound for S3, a PostgreSQL one, and the run folder of an update of a server
+// whose snapshots go only to S3 (stagedRunPrefix, #2212). Nothing in them is
+// ever kept by a run that ends.
+var stagingNamePrefixes = []string{"dump-", "baseline-", "pgbaseline-", stagedRunPrefix}
 
 func isStagingName(name string) bool {
 	for _, p := range stagingNamePrefixes {

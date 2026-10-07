@@ -73,32 +73,42 @@ type S3Backend struct {
 // bucket's own region is asked for, then us-east-1: what DuckDB's httpfs
 // defaulted to, so a read-only console that listed yesterday lists today.
 func NewS3BackendUnprobed(ctx context.Context, cfg S3Config) (*S3Backend, error) {
+	b, _, err := NewS3BackendUnprobedRegion(ctx, cfg)
+	return b, err
+}
+
+// NewS3BackendUnprobedRegion is NewS3BackendUnprobed also reporting whether
+// the region is the us-east-1 fallback taken because the bucket's own region
+// could not be learned. A caller that keeps the client must not keep that
+// one: against a bucket elsewhere every request it makes fails.
+func NewS3BackendUnprobedRegion(ctx context.Context, cfg S3Config) (b *S3Backend, fellBack bool, err error) {
 	if cfg.Bucket == "" {
-		return nil, fmt.Errorf("storage: S3 bucket name is required")
+		return nil, false, fmt.Errorf("storage: S3 bucket name is required")
 	}
 	client, err := newS3Client(ctx, cfg)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if cfg.Endpoint == "" && client.Options().Region == "" {
 		awsCfg, err := LoadAWSConfig(ctx, "")
 		if err != nil {
-			return nil, fmt.Errorf("storage: %w", err)
+			return nil, false, fmt.Errorf("storage: %w", err)
 		}
 		region, ok := DetectBucketRegion(ctx, awsCfg, cfg.Bucket)
 		if !ok {
 			region = "us-east-1"
+			fellBack = true
 		}
 		cfg.Region = region
 		if client, err = newS3Client(ctx, cfg); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	prefix := cfg.Prefix
 	if prefix != "" {
 		prefix = strings.TrimSuffix(prefix, "/") + "/"
 	}
-	return &S3Backend{client: client, bucket: cfg.Bucket, prefix: prefix}, nil
+	return &S3Backend{client: client, bucket: cfg.Bucket, prefix: prefix}, fellBack, nil
 }
 
 // NewS3Backend creates an S3Backend and validates that the credentials and
@@ -406,6 +416,25 @@ func (b *S3Backend) Delete(ctx context.Context, key string) error {
 		return fmt.Errorf("storage: delete %q: %w", key, err)
 	}
 	return nil
+}
+
+// Size returns the size in bytes of the object at the given key (a HEAD
+// request).
+func (b *S3Backend) Size(ctx context.Context, key string) (int64, error) {
+	if err := validateKey(key); err != nil {
+		return 0, err
+	}
+	out, err := b.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(b.bucket),
+		Key:    aws.String(b.fullKey(key)),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("storage: size %q: %w", key, err)
+	}
+	if out.ContentLength == nil {
+		return 0, fmt.Errorf("storage: size %q: the response carries no length", key)
+	}
+	return *out.ContentLength, nil
 }
 
 // Exists checks whether an object exists at the given key.

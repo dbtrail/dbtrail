@@ -7883,24 +7883,43 @@ function locationMigrationWords(m) {
     ". They use it for now. If DBTrail starts without that location, they will have none.";
 }
 
-// s3OnlyBackupWarning is the Backup settings warning for a server whose own
+// s3OnlyBackupWarning is the Backup settings note for a server whose own
 // saved location is a bucket with no folder (#1659), or "" when it does not
-// apply. An update from the recorded changes writes files, so it needs this
-// server's Backup dir; without one a scheduled run can only be a full backup,
-// and where this daemon cannot take one either, nothing runs at all. The
-// values are compared as stored, untrimmed, the way the daemon reads them.
+// apply. Since #2212 such a server is updated from the recorded changes too:
+// the update is built in the staging folder, uploaded, and deleted. What is
+// left to say is its cost (each changed table is downloaded, rewritten and
+// uploaded again; an unchanged one is copied inside S3), or, where the
+// staging folder cannot be used
+// (staging_refusal), that every run is a full read. The values are compared
+// as stored, untrimmed, the way the daemon reads them.
 function s3OnlyBackupWarning(srv, fix = true) {
   // A saved schedule that cannot run already says why, more precisely.
   if (!srv || srv.baseline_dir || !srv.baseline_s3 || srv.schedule_refusal) return "";
   // fix: the closing instruction is for a session that can save this row.
   // The problem itself is said to everyone who can see the row.
   const then = (t) => fix ? " " + t : "";
-  // Where this process runs no scheduled backups, only the setting is known.
-  if (!srv.schedule_loop) return "With S3 only, a scheduled snapshot cannot update from the recorded changes." + then("Add a Local folder.");
-  if (!srv.full_backup_possible) {
-    return "With S3 only, scheduled snapshots cannot run on this server: a full read is not available here, and updating from the recorded changes needs a Local folder." + then("Add one.");
+  // A process that runs no schedule (the read-only console): the cost below
+  // is the service's to state, and nothing here builds an update.
+  if (!srv.schedule_loop) {
+    return "With S3 only, scheduled updates are built in the staging folder of the DBTrail service that runs the schedule. This one runs none.";
   }
-  return "With S3 only, every scheduled snapshot reads your whole database." + then("Add a Local folder so runs update from the recorded changes.");
+  if (srv.staging_refusal) {
+    const why = "With S3 only, a scheduled update is built in the staging folder, which cannot be used here (" +
+      srv.staging_refusal.replace(/[.\s]+$/, "") + ")";
+    if (!srv.full_backup_possible) {
+      return why + ", and a full read is not available either, so scheduled snapshots cannot run on this server." +
+        then("Fix the staging folder, or add a Local folder.");
+    }
+    return why + ", so every scheduled snapshot reads your whole database." + then("Fix the staging folder, or add a Local folder.");
+  }
+  return "With S3 only, each scheduled update downloads, rewrites and uploads again the tables that changed. Unchanged tables are usually copied inside S3 without being downloaded; the first update after a full read rewrites every table, as does an update whose previous snapshot is in another bucket." +
+    then("Add a Local folder so changed tables are not downloaded first.");
+}
+
+// s3OnlyBackupFault: the note above is a fault (red) only when no update can
+// run; the cost of a working update is a hint.
+function s3OnlyBackupFault(srv) {
+  return !!(srv && srv.schedule_loop && srv.staging_refusal);
 }
 
 // localCopyWords is what the per-server yes/no means right now (#1681), from
@@ -8132,13 +8151,14 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   // never reads about AWS.
   const signing = s3SigningNote(s3, srv, snapStorage, snapRegistry);
   if (signing) box.append(signing);
-  // S3 without a folder (#1659): said in red next to the two fields, schedule
-  // or not. From the SAVED values, the ones the schedule reads
+  // S3 without a folder (#1659): said next to the two fields, schedule or
+  // not; in red only when the staging folder its updates need cannot be
+  // used (#2212). From the SAVED values, the ones the schedule reads
   // (rebuildPossible): a daemon default folder does not save this server,
   // and a warning that followed the typing would vanish on a save that
   // failed. The page redraws after a successful save.
   const s3Only = s3OnlyBackupWarning(srv, sessionMay("servers:write"));
-  if (s3Only) box.append(el("p", { class: "form-msg err", text: s3Only }));
+  if (s3Only) box.append(el("p", { class: s3OnlyBackupFault(srv) ? "form-msg err" : "form-hint", text: s3Only }));
   // The archive toggle is not one of the three settings (D13): it keeps its
   // saved value and stays off the page (CLI: --no-archive).
   const noArch = el("input", { type: "checkbox", name: "no_archive" });
@@ -8795,6 +8815,13 @@ function archivingPanel(servers, serversErr) {
 // every byte was written again (no hard link; the daemon log names the
 // cause). Confirming a saving the daemon log denies is the bug this splits
 // away (#1578).
+// s3CopiedNote (#2212) counts the tables an S3-only update copied inside S3
+// from the previous snapshot: nothing was written for them, so they are
+// neither "refreshed" nor part of the reuse note, which speaks of disk.
+function s3CopiedNote(n) {
+  return n ? ", " + n + " unchanged and copied inside S3 without being downloaded" : "";
+}
+
 function reusedCopiedNote(copied) {
   if (!copied) return "";
   return " (" + copied + " of them written in full, which saved no disk; DBTrail's log says why)";
@@ -9063,10 +9090,11 @@ function baselineRefreshNote(rf) {
       // the CLI summary follows: a reused table is not a refreshed one, and
       // which tables actually cost a rewrite is the number worth seeing.
       const reused = rf.carried || 0;
-      const rewritten = Math.max(0, (rf.tables || 0) - reused);
+      const rewritten = Math.max(0, (rf.tables || 0) - reused - (rf.s3_copied || 0));
       text = "Automatic refresh" + (when ? " at " + when : "") + ": " +
         rewritten + " table(s) refreshed" +
-        (reused ? ", " + reused + " unchanged and reused" + reusedCopiedNote(rf.carried_copied || 0) : "") + ".";
+        (reused ? ", " + reused + " unchanged and reused" + reusedCopiedNote(rf.carried_copied || 0) : "") +
+        s3CopiedNote(rf.s3_copied || 0) + ".";
       break;
     case "failed":
       // published means the fold finished and marked the snapshot, and only
@@ -9896,19 +9924,25 @@ const BACKUP_KIND_LABEL = { dump: "database read", refresh: "automatic refresh",
 // rest carry the run's own reason, which names the error.
 const BACKUP_WHY_REMEDY = {
   no_index: "Set an index connection for this server (Servers) and the next run updates from the recorded changes instead of reading your database in full; without one there are no recorded changes to update from.",
-  no_local_dir: "Set a Local folder for this server (under Where and how often) and the next run updates from the recorded changes instead of reading your database in full.",
+  // Old records only (#2212): servers that keep snapshots only in S3 are
+  // updated through the staging folder now.
+  no_local_dir: "That run read your database in full because this server had no Local folder then. Servers that keep their snapshots only in S3 are now updated from the recorded changes, through the staging folder.",
+  no_staging: "Fix the staging folder (the .sql build folder setting, BINTRAIL_CONSOLE_BASELINE_STAGING) or set a Local folder for this server, and the next run updates from the recorded changes instead of reading your database in full.",
   first_backup: "First snapshot: there was nothing to update from yet. The next run updates from it.",
 };
 // The codes whose cause is a setting, so every run until it changes is a
 // full read of the database (#1659). first_backup is not one: the next run
 // after it updates.
-const BACKUP_WHY_EVERY_RUN = new Set(["no_index", "no_local_dir"]);
+// no_local_dir is no longer one (#2212): a current daemon never predicts it
+// for a server that can run at all, and its remedy now speaks of a past run.
+const BACKUP_WHY_EVERY_RUN = new Set(["no_index", "no_staging"]);
 // The same three, as a FACT about a past run, for the detail of a backup
 // that may be months old: "the next run updates" is false there (it ran
 // long ago) and "this server has no index connection" may no longer hold.
 const BACKUP_WHY_FACT = {
   no_index: "Full read: this server had no index connection at the time, so there were no recorded changes to update from.",
   no_local_dir: "Full read: an update from the recorded changes needed a local snapshot directory, which this server did not have at the time.",
+  no_staging: "Full read: this server keeps its snapshots only in S3, and the staging folder its update is built in could not be used at the time.",
   first_backup: "Full read: the first one, with nothing to update from yet.",
 };
 // remedy: true on the schedule card (this IS the last run, and the setting
@@ -10792,6 +10826,7 @@ function backupScheduleCard(cur, b) {
         body.append(el("p", { class: "form-hint", text:
           "Last scheduled snapshot finished " + when + " (" + what + "): " + (run.tables || 0) + " table(s)" +
           (reused ? ", " + reused + " unchanged and reused" + reusedCopiedNote(run.carried_copied || 0) : "") +
+          s3CopiedNote(run.s3_copied || 0) +
           (run.uploaded ? ", " + run.uploaded + " file(s) uploaded" : "") + "." }));
       } else {
         alarm = true;

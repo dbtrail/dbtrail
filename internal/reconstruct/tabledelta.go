@@ -277,9 +277,18 @@ func readDeltaChainStart(ctx context.Context, basePath string) (time.Time, error
 // base's time, not at this run, and would otherwise carry an already too old
 // start forward for a whole cycle.
 func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, capGap *CaptureGap, at time.Time, hasAnchor bool, reserved string, chainFloor, newStart time.Time) string {
-	switch {
-	case strings.HasPrefix(basePath, "s3://"):
+	if strings.HasPrefix(basePath, "s3://") {
 		return "the previous snapshot is read from S3"
+	}
+	return chainCompactReason(prev, baseSize, capGap, at, hasAnchor, reserved, chainFloor, newStart)
+}
+
+// chainCompactReason is tableDeltaCompactReason without the S3 rule: every
+// reason a chain must end that is about the chain itself, not about where its
+// files are. A copy inside S3 (#2212) applies these to the chain it would
+// carry, exactly as a local carry does.
+func chainCompactReason(prev *tableDelta, baseSize int64, capGap *CaptureGap, at time.Time, hasAnchor bool, reserved string, chainFloor, newStart time.Time) string {
+	switch {
 	case !hasAnchor:
 		// A delta with no anchor cannot be resumed from, so the next run would
 		// set it aside, start over from the base and write another one: a
@@ -853,8 +862,25 @@ func emitWindowChanges(in mergeInput, cols []baseline.Column, changes map[string
 // baseline. DuckDB re-encodes; that is the same trip an S3 baseline already
 // makes through materializeBaselineLocal before every merge, so the merge sees
 // nothing new.
-func materializeBaseWithDelta(ctx context.Context, basePath string, d *tableDelta, tuning duckdbutil.Tuning) (string, func(), error) {
-	tmpDir, err := os.MkdirTemp("", "bintrail-compact-*")
+//
+// dir is where the temporary file goes (FullTableConfig.DownloadDir); "" is
+// the system's temporary directory. With a dir and a spaceCheck, the free disk
+// there is checked first against the base plus its chain, about what the
+// merge writes (#2212), and a full disk during the write is ErrLocalDiskFull.
+func materializeBaseWithDelta(ctx context.Context, basePath string, d *tableDelta, tuning duckdbutil.Tuning, dir string, spaceCheck func(string, int64) error) (string, func(), error) {
+	if dir != "" && spaceCheck != nil {
+		need := d.PairSize
+		if fi, err := os.Stat(basePath); err == nil {
+			need += fi.Size()
+		} else {
+			slog.Warn("could not size a table's base file before merging its deltas; checking the free space for the deltas alone",
+				"path", basePath, "error", err)
+		}
+		if err := spaceCheck(dir, need); err != nil {
+			return "", nil, err
+		}
+	}
+	tmpDir, err := os.MkdirTemp(dir, "bintrail-compact-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("mkdir temp: %w", err)
 	}
@@ -890,7 +916,7 @@ func materializeBaseWithDelta(ctx context.Context, basePath string, d *tableDelt
 	q := fmt.Sprintf("COPY (%s) TO %s (FORMAT PARQUET, COMPRESSION '%s')", state, lit(tmpPath), ParquetWriterCompression)
 	if _, err := ddb.ExecContext(ctx, q); err != nil {
 		cleanup()
-		return "", nil, fmt.Errorf("apply the table delta to its base: %w", err)
+		return "", nil, fmt.Errorf("apply the table delta to its base: %w", localWriteErr(err))
 	}
 	return tmpPath, cleanup, nil
 }
@@ -989,6 +1015,12 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	reserved := ""
 	if cols, err := baseline.ParseSchemaText(in.CreateTableSQL); err == nil {
 		reserved = reservedDeltaColumn(cols)
+	}
+	// An s3:// previous snapshot cannot be linked; on an S3-only server's
+	// update an unchanged table and its chain are copied inside S3 instead
+	// (#2212), behind the same refusals and chain rules.
+	if s3CopyUnchangedChain(ctx, p, hasAnchor, reserved, rep) {
+		return nil
 	}
 	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.capGap, p.cfg.At, hasAnchor, reserved, p.cfg.ChainStartFloor, newChainStart(p)); reason != "" {
 		return rewriteWithEmptyDelta(ctx, p, in, newBase, reason, reserved != "", rep)
@@ -1185,9 +1217,9 @@ func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInp
 		if err := baselineintegrity.ValidateLocalFile(p.basePath); err != nil {
 			return err
 		}
-		in.LocalBaselinePath, cleanup, err = materializeBaseWithDelta(ctx, p.basePath, p.prev, p.cfg.DuckDBTuning)
+		in.LocalBaselinePath, cleanup, err = materializeBaseWithDelta(ctx, p.basePath, p.prev, p.cfg.DuckDBTuning, p.cfg.DownloadDir, p.cfg.SpaceCheck)
 	} else {
-		in.LocalBaselinePath, cleanup, err = materializeBaselineLocal(ctx, p.basePath, p.cfg.DuckDBTuning)
+		in.LocalBaselinePath, cleanup, err = materializeBaselineLocalIn(ctx, p.basePath, p.cfg.DuckDBTuning, p.cfg.DownloadDir, p.cfg.SpaceCheck)
 	}
 	if err != nil {
 		return fmt.Errorf("materialize baseline: %w", err)

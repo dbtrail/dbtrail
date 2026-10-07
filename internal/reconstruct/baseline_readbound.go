@@ -208,6 +208,16 @@ func NewestPerTable(files []BaselineFile) []int {
 // snapshot, or a chain whose start could not be read. Never a guess, since
 // the caller acts on a later answer as "still covered".
 func SnapshotReadsFrom(ctx context.Context, root string, at time.Time) (time.Time, error) {
+	return SnapshotReadsFromWith(ctx, root, at, nil)
+}
+
+// SnapshotReadsFromWith is SnapshotReadsFrom for a snapshot some of whose
+// tables are not on disk because they are copied inside S3 at upload
+// (#2212). copied holds, per copied table, where its readers start (its
+// chain's start, or zero for a table copied without a chain, whose readers
+// start at the snapshot itself): those tables are usually the oldest, and a
+// snapshot whose every table was copied has no file on disk at all.
+func SnapshotReadsFromWith(ctx context.Context, root string, at time.Time, copied []time.Time) (time.Time, error) {
 	files, unreadable, err := ListBaselinesUnreadable(ctx, root)
 	if err != nil {
 		return time.Time{}, err
@@ -227,10 +237,18 @@ func SnapshotReadsFrom(ctx context.Context, root string, at time.Time) (time.Tim
 			mine = append(mine, f)
 		}
 	}
-	if len(mine) == 0 {
+	if len(mine) == 0 && len(copied) == 0 {
 		return time.Time{}, fmt.Errorf("no table file of the snapshot %s is listed under %s", name, root)
 	}
 	var oldest time.Time
+	for _, from := range copied {
+		if from.IsZero() {
+			from = at
+		}
+		if oldest.IsZero() || from.Before(oldest) {
+			oldest = from
+		}
+	}
 	for i, b := range ReadBounds(ctx, mine) {
 		if b.Unread {
 			return time.Time{}, fmt.Errorf("where the chain of deltas beside %s starts could not be read", mine[i].Path)

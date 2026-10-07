@@ -32,6 +32,9 @@ func lockedOps(ops s3UploadOps) s3UploadOps {
 	if f := ops.uploadFile; f != nil {
 		out.uploadFile = func(ctx context.Context, p, k string) error { mu.Lock(); defer mu.Unlock(); return f(ctx, p, k) }
 	}
+	if f := ops.copyObject; f != nil {
+		out.copyObject = func(ctx context.Context, src, k string) error { mu.Lock(); defer mu.Unlock(); return f(ctx, src, k) }
+	}
 	if f := ops.objectExists; f != nil {
 		out.objectExists = func(ctx context.Context, k string) (bool, error) { mu.Lock(); defer mu.Unlock(); return f(ctx, k) }
 	}

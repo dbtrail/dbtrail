@@ -243,6 +243,13 @@ func (b *backupScheduler) WindowProbe() console.BackupWindowProbe {
 	return b.window
 }
 
+// StagedUpdates implements console.BackupScheduleReporter: why the update of
+// a server whose snapshots go only to S3 cannot be built in this daemon's
+// staging folder right now, nil when it can (#2212).
+func (b *backupScheduler) StagedUpdates() error {
+	return b.sup.stagedUpdatesRefusal()
+}
+
 // windowProbeTimeout bounds the one index read the probe makes: it runs on
 // every schedule decision AND every load of the Snapshots page, so an index
 // that does not answer must cost a bounded wait and an "unknown", never a
@@ -988,6 +995,9 @@ func (b *backupScheduler) gates() console.BackupScheduleGates {
 	if refusal != nil {
 		g.FullBackupsErr = refusal.Error()
 	}
+	if err := b.StagedUpdates(); err != nil {
+		g.StagingRefusal = err.Error()
+	}
 	return g
 }
 
@@ -1196,7 +1206,7 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 			b.skip(e, time.Now().UTC(), "the update was refused and no full read stands in for it, because it would publish into the same location: "+st.Last.LastError)
 			return
 		}
-		if method == console.BackupMethodRefresh && st.Last.State == "failed" && !st.Last.Published && !st.Last.DiskRefused {
+		if method == console.BackupMethodRefresh && fullReadStandsIn(*st.Last) {
 			if !b.fullReadCannotCure(e, *st.Last) {
 				b.fallBack(e, *st.Last)
 			}
@@ -1209,6 +1219,15 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 		}
 		return
 	}
+}
+
+// fullReadStandsIn reports whether a failed update is one a full read can
+// stand in for. Not when the update published a snapshot and only its upload
+// failed (#1539), not when the staged update of an S3-only server failed to
+// upload (#2212: the full read uploads to the same bucket, after reading the
+// source in full), and not when the disk refused it (#1614).
+func fullReadStandsIn(last console.BaselineStatus) bool {
+	return last.State == "failed" && !last.Published && !last.UploadFailed && !last.DiskRefused
 }
 
 // fallBack takes the full backup that stands in for a failed update, at

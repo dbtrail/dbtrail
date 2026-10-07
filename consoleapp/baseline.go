@@ -54,6 +54,12 @@ type baselineSupervisor struct {
 	ctx        context.Context // daemon lifecycle; cancels an in-flight dump on shutdown
 	stagingDir string          // base dir for temp dump + staged Parquet (S3-destined runs)
 
+	// The cached answer of stagedUpdatesRefusal (#2212), so the schedule's
+	// gates, read on every page load, do not probe the disk each time.
+	stagingMu      sync.Mutex
+	stagingChecked time.Time
+	stagingErr     error
+
 	// lockMode selects how mydumper synchronizes its worker threads onto one
 	// instant for MySQL/MariaDB dumps — see internal/baseline.LockMode for the
 	// measured trade-offs. Defaults to baseline.DefaultLockMode (FTWRL): a

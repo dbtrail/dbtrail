@@ -34,6 +34,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/recovery"
 	"github.com/dbtrail/dbtrail/internal/serverid"
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
+	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
 // FullTableConfig drives ReconstructTables — the full-table merge-on-read
@@ -117,11 +118,34 @@ type FullTableConfig struct {
 	ExplicitAt bool
 	// SpaceCheck, when set, is called right before a file is created, with its
 	// directory and the bytes it is expected to need: before each SQL chunk
-	// (the chunk size), and before a table's Parquet file (the size of the
-	// backup file it is rebuilt from). A table carried forward unchanged never
-	// reaches it. An error stops that table, whose files are then removed. The
-	// daemon checks free disk with it (#1614).
+	// (the chunk size), before a table's Parquet file (the size of the backup
+	// file it is rebuilt from), and, when DownloadDir is set, before an s3://
+	// previous snapshot is downloaded into it (the object's size, #2212). A
+	// table carried forward unchanged never reaches it. An error stops that
+	// table, whose files are then removed. The daemon checks free disk with it
+	// (#1614).
 	SpaceCheck func(dir string, need int64) error
+	// DownloadDir, when set, is where an s3:// previous snapshot is downloaded
+	// before it is merged (materializeBaselineLocal), in a temporary folder of
+	// its own that is removed when the table is done. Empty: the system's
+	// temporary directory, as the command line has always used. The daemon
+	// sets it for a server whose snapshots go only to S3 (#2212), so the
+	// download lands on the disk SpaceCheck measures, and SpaceCheck is asked
+	// before each download. With it empty no download is checked, as before.
+	// Never inside the snapshot directory itself: everything there is
+	// uploaded.
+	DownloadDir string
+
+	// S3CopyUnchangedTo, when set, is the s3:// root this run's snapshot is
+	// uploaded to, and turns on copying unchanged tables inside S3 (#2212):
+	// with an s3:// previous snapshot, a table the window did not touch is
+	// not written at all; its report lists the previous object(s) to copy
+	// (TableReport.S3Copies), and the caller MUST hand those to the upload
+	// (baseline.UploadWithCopies), or the snapshot is published without
+	// them. So it is set only by a caller that uploads the run and passes
+	// the copies: the daemon, for a server whose snapshots go only to S3.
+	// Empty (the command line, a restore) folds such tables as before.
+	S3CopyUnchangedTo string
 
 	// OutputFormat selects the artifact the run produces. The zero value means
 	// "not specified" and resolves to OutputFormatMydumper, matching this
@@ -374,6 +398,15 @@ type TableReport struct {
 	// consumer that renders "reused" as a disk saving must count THIS, not
 	// CarriedForward, or it confirms a saving the daemon log denies.
 	CarriedByLink bool
+	// S3Copies lists the files of this table that the run did NOT write
+	// because they are copied inside S3 when the snapshot is uploaded
+	// (#2212, FullTableConfig.S3CopyUnchangedTo). Non-empty means the table
+	// is absent from the local snapshot directory and present in the
+	// published one only once the upload performed these copies.
+	S3Copies []baseline.RemoteCopy
+	// S3CopyChainStart is where the copied table's chain of deltas starts,
+	// the instant its readers fetch from; zero when no chain was copied.
+	S3CopyChainStart time.Time
 
 	// TableDelta is true when the table was published as its previous file
 	// plus a chain of deltas beside it instead of being rewritten (#1638,
@@ -933,7 +966,7 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 			tableName := metaReport.Schema + "." + metaReport.Table
 			baselinePath, _, _, perr := FindBaseline(ctx, cfg.BaselineSrc, metaReport.Schema, metaReport.Table, cfg.At)
 			if perr == nil {
-				bmeta, merr := baseline.ReadParquetMetadataAny(ctx, baselinePath)
+				bmeta, merr := readBaselineMeta(ctx, cfg, baselinePath)
 				if merr == nil {
 					if err := WriteMetadataFile(cfg.OutputDir, cfg.At,
 						bmeta.GTIDSet, bmeta.BinlogFile, bmeta.BinlogPos); err != nil {
@@ -984,12 +1017,12 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 		}
 		baseline.SignSnapshot(cfg.snapshotDir, cfg.WriterID)
 		carryViewsSkipped(ctx, cfg.snapshotDir, reports)
-		st, err := manifestWriter(cfg.snapshotDir, manifestPriorDirs(reports))
+		st, err := manifestWriter(cfg.snapshotDir, manifestPriorDirs(reports), carriedDigests(reports))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("snapshot complete but could not write integrity manifest: %w", err))
 		} else {
 			slog.Info("integrity manifest written", "snapshot", cfg.snapshotDir,
-				"files_hashed", st.Hashed, "files_reused", st.Reused)
+				"files_hashed", st.Hashed, "files_reused", st.Reused, "files_copied_in_s3", st.Carried)
 		}
 	}
 
@@ -999,9 +1032,14 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	return reports, nil
 }
 
-// manifestWriter is baselineintegrity.WriteManifestFrom behind a variable so
+// s3BaselineDownloadHook is called with every s3:// table file the fold
+// downloads, before the download: a test's way to assert that a table copied
+// inside S3 (#2212) was never downloaded. A no-op otherwise.
+var s3BaselineDownloadHook = func(string) {}
+
+// manifestWriter is baselineintegrity.WriteManifestWith behind a variable so
 // a test can see what a run reused (#1717).
-var manifestWriter = baselineintegrity.WriteManifestFrom
+var manifestWriter = baselineintegrity.WriteManifestWith
 
 // localSnapshotDir is the snapshot directory a local table file lives in
 // (<snapshot>/<schema>/<table>.parquet), "" for an S3 path or no path.
@@ -1196,7 +1234,7 @@ func ReconstructTable(
 		"path", baselinePath, "snapshot_time", snapshotTime.UTC().Format(time.RFC3339))
 
 	// ── 2. Read baseline Parquet metadata ──────────────────────────────────
-	bmeta, err := baseline.ReadParquetMetadataAny(ctx, baselinePath)
+	bmeta, err := readBaselineMeta(ctx, cfg, baselinePath)
 	if err != nil {
 		return nil, fmt.Errorf("read baseline metadata: %w", err)
 	}
@@ -1652,6 +1690,13 @@ func ReconstructTable(
 	// capGap is passed in because step 3c does NOT refuse under --allow-gaps:
 	// it returns the finding and lets the run proceed. See carryForwardEligible
 	// for why a known gap disqualifies a table from being carried at all.
+	//
+	// An s3:// previous snapshot cannot be linked; on an S3-only server's
+	// update its unchanged table is copied inside S3 instead (#2212).
+	if s3CopyUnchanged(ctx, cfg, schema, table, baselinePath, fold.changeCount(), capGap, rep) {
+		rep.Duration = time.Since(start)
+		return rep, nil
+	}
 	if carryForwardEligible(cfg.CarryForwardUnchanged, cfg.OutputFormat, baselinePath, fold.changeCount(), capGap) {
 		linked, cerr := carryForward(ctx, baselinePath, cfg.snapshotDir, schema, table)
 		if cerr != nil {
@@ -1675,7 +1720,7 @@ func ReconstructTable(
 	}
 
 	// ── 6. Materialize the baseline locally for DuckDB streaming ───────────
-	localPath, cleanup, err := materializeBaselineLocal(ctx, baselinePath, cfg.DuckDBTuning)
+	localPath, cleanup, err := materializeBaselineLocalIn(ctx, baselinePath, cfg.DuckDBTuning, cfg.DownloadDir, cfg.SpaceCheck)
 	if err != nil {
 		return nil, fmt.Errorf("materialize baseline: %w", err)
 	}
@@ -3045,6 +3090,14 @@ func splitSchemaTable(entry string) (string, string, bool) {
 // default, so passing duckdbutil.Tuning{} (any caller that hasn't been wired
 // with an explicit budget — e.g. the shim, verify) is always safe.
 func materializeBaselineLocal(ctx context.Context, path string, tuning duckdbutil.Tuning) (string, func(), error) {
+	return materializeBaselineLocalIn(ctx, path, tuning, "", nil)
+}
+
+// materializeBaselineLocalIn is materializeBaselineLocal downloading under dir
+// (FullTableConfig.DownloadDir); "" is the system temporary directory. With a
+// dir and a spaceCheck, the free disk there is checked against the object's
+// size before anything is downloaded.
+func materializeBaselineLocalIn(ctx context.Context, path string, tuning duckdbutil.Tuning, dir string, spaceCheck func(string, int64) error) (string, func(), error) {
 	if !strings.HasPrefix(path, "s3://") {
 		// At-rest integrity (#636): validate the local file against its snapshot's
 		// _MANIFEST before any reader trusts it (DuckDB validates nothing). Fail
@@ -3058,41 +3111,180 @@ func materializeBaselineLocal(ctx context.Context, path string, tuning duckdbuti
 	// against the snapshot's _MANIFEST before the DuckDB COPY below re-encodes
 	// them — the temp copy is no longer byte-identical to the object, so this
 	// pre-pass is the only point where the manifest's raw-byte CRC applies.
-	if err := baselineintegrity.ValidateS3File(ctx, path); err != nil {
+	s3BaselineDownloadHook(path)
+	if err := validateS3Baseline(ctx, path); err != nil {
 		return "", nil, err
 	}
+	if dir != "" && spaceCheck != nil {
+		// Before the download, on the disk it lands on (#2212): a staging disk
+		// that cannot hold the file is a refusal here, not a failure half way
+		// through DuckDB's COPY. A size that cannot be read is checked as zero
+		// (the check's own margin still applies) and said, never skipped quietly.
+		need, err := s3ObjectSize(ctx, path)
+		if err != nil {
+			slog.Warn("could not read the size of the previous snapshot from its bucket before downloading it; checking only the free-space margin",
+				"path", path, "error", err)
+			need = 0
+		}
+		if err := spaceCheck(dir, need); err != nil {
+			return "", nil, err
+		}
+	}
 	// Download via DuckDB httpfs. Keep the temp file around until cleanup().
-	tmpDir, err := os.MkdirTemp("", "bintrail-baseline-*")
+	tmpDir, err := baselineDownloadDir(dir)
 	if err != nil {
-		return "", nil, fmt.Errorf("mkdir temp: %w", err)
+		return "", nil, err
 	}
 	tmpPath := filepath.Join(tmpDir, "baseline.parquet")
+	if err := downloadS3Baseline(ctx, tuning, path, tmpPath); err != nil {
+		os.RemoveAll(tmpDir)
+		return "", nil, localWriteErr(err)
+	}
+	cleanup := func() { os.RemoveAll(tmpDir) }
+	return tmpPath, cleanup, nil
+}
 
+// validateS3Baseline and s3ObjectSize are the two S3 reads before a download,
+// indirected so a test can drive the disk check without a bucket.
+var (
+	validateS3Baseline = baselineintegrity.ValidateS3File
+	s3ObjectSize       = func(ctx context.Context, s3URL string) (int64, error) {
+		bucket, key, err := storage.ParseS3URL(s3URL)
+		if err != nil {
+			return 0, err
+		}
+		b, err := sizeBackendFor(ctx, bucket)
+		if err != nil {
+			return 0, fmt.Errorf("open bucket s3://%s: %w", bucket, err)
+		}
+		n, err := b.Size(ctx, key)
+		if err != nil {
+			// Dropped, so the next table builds a fresh client: an expired
+			// credential or a wrong region would otherwise fail every table.
+			dropSizeBackend(bucket, b)
+			return 0, fmt.Errorf("size s3://%s/%s: %w", bucket, key, err)
+		}
+		return n, nil
+	}
+)
+
+// objectSizer is what s3ObjectSize needs of a bucket client.
+type objectSizer interface {
+	Size(ctx context.Context, key string) (int64, error)
+}
+
+// newSizeBackend opens a bucket for sizing, reporting whether its region is
+// the us-east-1 fallback (storage.NewS3BackendUnprobedRegion). Indirected for
+// tests.
+var newSizeBackend = func(ctx context.Context, bucket string) (objectSizer, bool, error) {
+	return storage.NewS3BackendUnprobedRegion(ctx, storage.S3Config{Bucket: bucket})
+}
+
+// sizeBackends holds one S3 client per bucket for s3ObjectSize, so a fold of
+// many tables does not build a client (and resolve credentials and the
+// bucket's region) per table. Never a client whose region was a fallback,
+// and a client whose request failed is dropped (dropSizeBackend): either
+// would fail every later table until a restart. The client is built outside
+// the lock, so concurrent folds do not queue behind one slow region lookup;
+// two that race both build one and the first stored wins.
+var (
+	sizeBackendsMu sync.Mutex
+	sizeBackends   = map[string]objectSizer{}
+)
+
+func sizeBackendFor(ctx context.Context, bucket string) (objectSizer, error) {
+	sizeBackendsMu.Lock()
+	b := sizeBackends[bucket]
+	sizeBackendsMu.Unlock()
+	if b != nil {
+		return b, nil
+	}
+	b, fellBack, err := newSizeBackend(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if fellBack {
+		return b, nil // used once, never kept
+	}
+	sizeBackendsMu.Lock()
+	defer sizeBackendsMu.Unlock()
+	if kept := sizeBackends[bucket]; kept != nil {
+		return kept, nil
+	}
+	sizeBackends[bucket] = b
+	return b, nil
+}
+
+// dropSizeBackend forgets b for bucket, if it is still the one kept.
+func dropSizeBackend(bucket string, b objectSizer) {
+	sizeBackendsMu.Lock()
+	defer sizeBackendsMu.Unlock()
+	if sizeBackends[bucket] == b {
+		delete(sizeBackends, bucket)
+	}
+}
+
+// resetSizeBackends forgets every kept client; tests call it.
+func resetSizeBackends() {
+	sizeBackendsMu.Lock()
+	sizeBackends = map[string]objectSizer{}
+	sizeBackendsMu.Unlock()
+}
+
+// downloadS3Baseline copies one s3:// Parquet object to a local file through
+// DuckDB's httpfs. Indirected so a test can fail the download without a bucket.
+var downloadS3Baseline = func(ctx context.Context, tuning duckdbutil.Tuning, src, dst string) error {
 	db, err := sql.Open("duckdb", "")
 	if err != nil {
-		os.RemoveAll(tmpDir)
-		return "", nil, fmt.Errorf("open duckdb: %w", err)
+		return fmt.Errorf("open duckdb: %w", err)
 	}
 	defer db.Close()
 	applyDuckDBTuning(ctx, db, tuning)
-
 	if err := duckdbutil.LoadHTTPFS(ctx, db); err != nil {
-		os.RemoveAll(tmpDir)
-		return "", nil, fmt.Errorf("load httpfs: %w", err)
+		return fmt.Errorf("load httpfs: %w", err)
 	}
 	if err := duckdbutil.EnableS3CredentialChain(ctx, db); err != nil {
-		os.RemoveAll(tmpDir)
-		return "", nil, err
+		return err
 	}
-	safeSrc := strings.ReplaceAll(path, "'", "''")
-	safeDst := strings.ReplaceAll(tmpPath, "'", "''")
+	safeSrc := strings.ReplaceAll(src, "'", "''")
+	safeDst := strings.ReplaceAll(dst, "'", "''")
 	if _, err := db.ExecContext(ctx, s3DownloadCopySQL(safeSrc, safeDst)); err != nil {
-		os.RemoveAll(tmpDir)
-		return "", nil, fmt.Errorf("download s3 baseline: %w", err)
+		return fmt.Errorf("download s3 baseline: %w", err)
 	}
+	return nil
+}
 
-	cleanup := func() { os.RemoveAll(tmpDir) }
-	return tmpPath, cleanup, nil
+// ErrLocalDiskFull marks a write to a LOCAL folder (the download of an s3://
+// previous snapshot, or a compaction's temporary merge) that found the disk
+// full (#2212). DuckDB reports that as text with no errno to unwrap, so it is
+// classified here, where the write is known to be local, and never by
+// matching the words later: the index MySQL reports its own full tmp disk with
+// the same words, and that failure has nothing to do with this host's disk.
+var ErrLocalDiskFull = errors.New("no space left on the local disk")
+
+// localWriteErr wraps err with ErrLocalDiskFull when it says the disk is full;
+// any other error is returned unchanged.
+func localWriteErr(err error) error {
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "no space left on device") {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrLocalDiskFull, err)
+}
+
+// baselineDownloadDir makes the temporary folder one s3:// baseline is
+// downloaded into: under dir, or the system's temporary directory when dir is
+// "". A dir that cannot be used is an error, never a quiet fall back to the
+// system temporary directory: the caller chose it so the download lands on
+// the disk it measures.
+func baselineDownloadDir(dir string) (string, error) {
+	tmp, err := os.MkdirTemp(dir, "bintrail-baseline-*")
+	if err != nil {
+		if dir != "" {
+			return "", fmt.Errorf("create a folder to download the previous snapshot into under %s: %w", dir, err)
+		}
+		return "", fmt.Errorf("mkdir temp: %w", err)
+	}
+	return tmp, nil
 }
 
 // ReadBaselineColumns returns the column names of a baseline Parquet file (local

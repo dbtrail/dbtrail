@@ -691,12 +691,15 @@ saved, shown with the reason `serve` is not running it.
   one of six intervals, 5 minutes to 24 hours (the daily one lined up on a
   UTC hour). The operator picks WHEN; HOW each run is made is the daemon's decision
   per slot (`console.ChooseBackupMethod`), and the page says which one comes
-  next and why: a server with no local backup directory gets a **full backup**
+  next and why: a server with no previous backup yet gets a **full backup**
   (the Read-database-now job, reads the source, needs
-  `BINTRAIL_CONSOLE_BASELINE_TRIGGER=1`), and so does one with no previous
-  backup yet; otherwise the newest backup is **updated from the recorded
-  changes** (the baseline-refresh fold: reads nothing from the source, needs
-  the server's own local backup directory to write into). When the backups go
+  `BINTRAIL_CONSOLE_BASELINE_TRIGGER=1`); otherwise the newest backup is
+  **updated from the recorded changes** (the baseline-refresh fold: reads
+  nothing from the source, writes into the server's local backup directory,
+  or, for a server whose backups go only to S3, into a folder of its own
+  under the staging folder that is uploaded and then deleted, #2212; if the
+  staging folder cannot be used, that server gets a full backup and the page
+  says why). When the backups go
   to S3 that update reads its previous snapshot straight from the bucket and
   uploads its result back to the same place (#1539), so an S3 destination no
   longer forces a nightly full read of the source; when the local directory
@@ -729,8 +732,9 @@ saved, shown with the reason `serve` is not running it.
   recorded changes fails and a full backup is started in its place, the
   page says so in red until a later scheduled update goes through. A
   schedule the daemon cannot serve at all (no producer possible: creation
-  opt-in not set AND no local directory, a lock-mode misconfiguration on a
-  server that has no local directory either, no destination) is refused on save with
+  opt-in not set AND no update possible, such as S3 only with a staging
+  folder that cannot be used, a lock-mode misconfiguration on such a server,
+  no destination) is refused on save with
   the reason, and one already saved is reported as not runnable on the
   page, never silently skipped.
   `PUT`/`DELETE /api/servers/{id}/backup-schedule`; state on `GET /api/baselines`
@@ -1042,8 +1046,12 @@ and lands on Retention.
   link, two snapshots then share the same bytes on disk, so deleting the
   older one frees nothing while the newer one still points at it, and a `du`
   per snapshot directory double-counts it (one `du` over the root reports the
-  truth). It does not apply when the previous snapshot is read from S3,
-  because linking a file needs both ends on a filesystem. A
+  truth). It does not apply when the previous snapshot is read from S3
+  into a local folder, because linking a file needs both ends on a
+  filesystem; on a server whose snapshots go only to S3 the unchanged table
+  is copied inside the bucket instead (#2212). With table deltas on (the
+  default) an unchanged table and its pair are kept, locally or by a copy in
+  S3, whether this is on or off; it governs only tables without deltas. A
   `baseline_refresh:` block saved by an older version is ignored and kept in
   the registry file untouched.
   See [dump-and-baseline.md](dump-and-baseline.md#refreshing-on-a-schedule).
@@ -1325,7 +1333,8 @@ one release and warns that it no longer does anything. Remove it.
   fail on first use, and a full backup reads every table in scope on the
   source, which is load an operator should choose. Turning it on also lets the
   backup schedule take a full backup on its own when an update cannot serve
-  the server (no previous backup, no Local folder) or fails (a capture
+  the server (no previous backup, or S3 only with a staging folder that
+  cannot be used) or fails (a capture
   gap, a schema change), and it is what a schedule's full-backup timetable
   (`full_every`, set through the schedule API; the page no longer edits it)
   needs: without it, saving one is refused with the reason, and one saved
