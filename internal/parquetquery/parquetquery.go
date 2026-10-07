@@ -326,7 +326,7 @@ func s3ClientForBucket(ctx context.Context, bucket string) (*s3.Client, string, 
 	}
 	// The read path ignores the detected flag on purpose: it is about to
 	// read, so a wrong guess fails here and loudly.
-	bucketRegion, _ := storage.DetectBucketRegion(ctx, cfg, bucket)
+	bucketRegion, _ := storage.DetectBucketRegionCached(ctx, cfg, bucket)
 	client := storage.NewS3ClientFromConfig(cfg, func(o *s3.Options) {
 		o.Region = bucketRegion
 	})

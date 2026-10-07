@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
 	"github.com/dbtrail/dbtrail/internal/storage"
@@ -123,7 +125,7 @@ func SnapshotViewsRespellerArmed() bool { return snapshotViewsRespeller != nil }
 // uploadWithOps performs the crash-safe upload ordering against ops. See the
 // Upload doc for the four-step contract it guarantees.
 func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, ops s3UploadOps) (int, error) {
-	upload := func(path string) error {
+	upload := func(ctx context.Context, path string) error {
 		key, err := storage.BuildS3Key(outputDir, path, prefix)
 		if err != nil {
 			return err
@@ -183,8 +185,15 @@ func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, op
 	}
 
 	// 2 & 3. Upload data files; defer the _SUCCESS marker(s) to the very end.
+	// The walk only COLLECTS the data files; they are sent afterwards, up to
+	// uploadConcurrency at a time (#2181). A snapshot update writes about
+	// three small files per table, and sent one by one at a round trip each
+	// they were most of an update's time on an S3 destination. Large files
+	// go after them, one at a time (uploadParallelMaxSize). The bracket is
+	// untouched: every data file has FINISHED before any _SUCCESS is sent.
 	var count int
 	var successMarkers []string
+	var jobs, alone []func(context.Context) (uploaded bool, err error)
 	err = filepath.WalkDir(outputDir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil || d.IsDir() {
 			return walkErr
@@ -239,13 +248,12 @@ func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, op
 		// and still uploads verbatim, which is theirs to spell.
 		if base := filepath.Base(filepath.Dir(path)); d.Name() == SnapshotViewsName {
 			if _, isSnap := snapshotdir.ParseTime(base); isSnap {
-				uploaded, err := uploadRespelledViews(ctx, path, outputDir, prefix, retry, ops)
-				if err != nil {
-					return err
-				}
-				if uploaded {
-					count++
-				}
+				// One at a time: the views generator reads the snapshot
+				// through DuckDB, and nothing is gained by running several
+				// (a sweep can carry one per snapshot) beside the data.
+				alone = append(alone, func(ctx context.Context) (bool, error) {
+					return uploadRespelledViews(ctx, path, outputDir, prefix, retry, ops)
+				})
 				return nil
 			}
 		}
@@ -255,17 +263,31 @@ func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, op
 		if strings.HasPrefix(d.Name(), snapshotViewsTempPrefix) {
 			return nil
 		}
-		if err := upload(path); err != nil {
-			return err
+		job := func(ctx context.Context) (bool, error) {
+			return true, upload(ctx, path)
 		}
-		count++
+		if info, serr := os.Stat(path); serr != nil || info.Size() >= uploadParallelMaxSize {
+			alone = append(alone, job)
+		} else {
+			jobs = append(jobs, job)
+		}
 		return nil
 	})
 	if err != nil {
 		return count, err
 	}
+	sent, err := runUploadJobs(ctx, jobs, uploadConcurrency)
+	count += sent
+	if err != nil {
+		return count, err
+	}
+	sent, err = runUploadJobs(ctx, alone, 1)
+	count += sent
+	if err != nil {
+		return count, err
+	}
 	for _, path := range successMarkers {
-		if err := upload(path); err != nil {
+		if err := upload(ctx, path); err != nil {
 			return count, err
 		}
 		count++
@@ -290,6 +312,59 @@ func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, op
 		return count, err
 	}
 	return count, nil
+}
+
+// uploadConcurrency is how many of a snapshot's data files are sent at once.
+// Each is one PUT (a file past the multipart threshold is read in place from
+// disk, not buffered), so this bounds open files and connections rather than
+// memory; past a handful the round trips, not the count, are what is left.
+const uploadConcurrency = 8
+
+// uploadParallelMaxSize is the size from which a file is sent on its own,
+// after the small ones. A large file is not waiting on a round trip but on
+// bandwidth, which the SDK already splits into concurrent parts; sending
+// several at once would only take more of the network from the capture
+// running in the same process, for no gain.
+const uploadParallelMaxSize = 16 << 20
+
+// runUploadJobs runs the upload jobs up to limit at a time and
+// returns how many put an object in the bucket. The first failure cancels the
+// rest, and jobs not yet started are not started: the snapshot stays marked
+// incomplete either way, so sending more of it after a failure buys nothing.
+func runUploadJobs(ctx context.Context, jobs []func(context.Context) (bool, error), limit int) (int, error) {
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(limit)
+	var sent atomic.Int64
+	for _, job := range jobs {
+		if gctx.Err() != nil {
+			break
+		}
+		g.Go(func() error {
+			if err := gctx.Err(); err != nil {
+				return err
+			}
+			uploaded, err := job(gctx)
+			if err != nil {
+				return err
+			}
+			if uploaded {
+				sent.Add(1)
+			}
+			return nil
+		})
+	}
+	err := g.Wait()
+	if err == nil {
+		// A cancellation of the caller's context that landed after the last
+		// job started still means the upload did not finish as asked.
+		err = ctx.Err()
+	}
+	if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		// The bare cancellation names no file and no phase; a job's own
+		// failure is already wrapped with its file and key.
+		err = fmt.Errorf("snapshot upload stopped before every data file was sent: %w", err)
+	}
+	return int(sent.Load()), err
 }
 
 // snapshotViewsTempPrefix mirrors the views writer's staging-file prefix so

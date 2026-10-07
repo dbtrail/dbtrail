@@ -55,7 +55,7 @@ func TestUploadWithOps_respellsTheViewsFile(t *testing.T) {
 		deleteObject: func(_ context.Context, _ string) error { return nil },
 		objectURL:    func(key string) string { return "s3://bkt/" + key },
 	}
-	n, err := uploadWithOps(context.Background(), outputDir, "p", false, ops)
+	n, err := uploadWithOps(context.Background(), outputDir, "p", false, lockedOps(ops))
 	if err != nil {
 		t.Fatalf("uploadWithOps: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestUploadWithOps_skipsTheViewsFileUnarmed(t *testing.T) {
 		objectExists: func(_ context.Context, _ string) (bool, error) { return false, nil },
 		deleteObject: func(_ context.Context, _ string) error { return nil },
 	}
-	if _, err := uploadWithOps(context.Background(), outputDir, "p", false, ops); err != nil {
+	if _, err := uploadWithOps(context.Background(), outputDir, "p", false, lockedOps(ops)); err != nil {
 		t.Fatalf("uploadWithOps: %v", err)
 	}
 	for key := range uploaded {
@@ -136,7 +136,7 @@ func TestUploadWithOps_neverPlainCopiesAMarkerlessSnapshotsViewsFile(t *testing.
 		deleteObject: func(_ context.Context, _ string) error { return nil },
 		objectURL:    func(key string) string { return "s3://bkt/" + key },
 	}
-	if _, err := uploadWithOps(context.Background(), outputDir, "p", false, ops); err != nil {
+	if _, err := uploadWithOps(context.Background(), outputDir, "p", false, lockedOps(ops)); err != nil {
 		t.Fatalf("uploadWithOps: %v", err)
 	}
 	got := uploaded["p/2025-02-01T00-00-00Z/"+SnapshotViewsName]
@@ -165,7 +165,7 @@ func TestUploadWithOps_skipsViewsStagingLeftovers(t *testing.T) {
 		deleteObject: func(_ context.Context, _ string) error { return nil },
 		objectURL:    func(key string) string { return "s3://bkt/" + key },
 	}
-	if _, err := uploadWithOps(context.Background(), outputDir, "p", false, ops); err != nil {
+	if _, err := uploadWithOps(context.Background(), outputDir, "p", false, lockedOps(ops)); err != nil {
 		t.Fatalf("uploadWithOps: %v", err)
 	}
 	for key := range uploaded {
@@ -203,7 +203,7 @@ func TestUploadWithOps_plainCopiesTheOperatorsRootViewsFile(t *testing.T) {
 		deleteObject: func(_ context.Context, _ string) error { return nil },
 		objectURL:    func(key string) string { return "s3://bkt/" + key },
 	}
-	if _, err := uploadWithOps(context.Background(), outputDir, "p", false, ops); err != nil {
+	if _, err := uploadWithOps(context.Background(), outputDir, "p", false, lockedOps(ops)); err != nil {
 		t.Fatalf("uploadWithOps: %v", err)
 	}
 	if got := uploaded["p/"+SnapshotViewsName]; got != "-- OPERATOR file" {
