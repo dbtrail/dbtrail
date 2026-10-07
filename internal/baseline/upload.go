@@ -11,6 +11,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"golang.org/x/sync/errgroup"
@@ -347,7 +348,19 @@ func uploadWithOpsCopies(ctx context.Context, outputDir, prefix string, retry bo
 			if skip, err := skipExisting(ctx, key); err != nil || skip {
 				return false, err
 			}
-			if err := ops.copyObject(ctx, c.Src, key); err != nil {
+			// Once sent, a copy is the bucket's to finish: cutting the request
+			// does not stop it. So none starts after another file failed, and
+			// one that started is waited for, on a context the failure does not
+			// cancel (bounded, so a hung request cannot hold the run forever):
+			// the caller's cleanup of a failed upload must find every object
+			// that will ever land, or a late copy would sit in a folder with
+			// no marker, which discovery reads as complete (#467).
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), copyTimeout)
+			defer cancel()
+			if err := ops.copyObject(cctx, c.Src, key); err != nil {
 				return false, fmt.Errorf("copy %s into the new snapshot inside S3: %w", c.Rel, err)
 			}
 			slog.Debug("copied inside S3", "src", c.Src, "key", key)
@@ -408,6 +421,13 @@ func uploadWithOpsCopies(ctx context.Context, outputDir, prefix string, retry bo
 // are read in place from disk, not buffered, so this bounds open files and
 // connections rather than memory.
 const uploadConcurrency = 8
+
+// copyTimeout bounds one copy inside S3 once started (#2212), parts
+// included. S3 copies at well over 100 MiB/s, so an hour covers objects of
+// hundreds of GiB; past it the request is cut, the run fails, and a copy the
+// bucket still finishes lands after the cleanup, which is what the bound
+// trades for never hanging.
+const copyTimeout = time.Hour
 
 // uploadParallelMaxSize is the size from which a file is sent on its own,
 // after the small ones. A large file is not waiting on a round trip but on

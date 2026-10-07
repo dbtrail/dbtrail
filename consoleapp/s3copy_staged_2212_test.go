@@ -114,8 +114,11 @@ func TestStagedFold_unchangedTablesAreCopiedInsideS3(t *testing.T) {
 	if len(startsSeen) != 1 || !startsSeen[0].Equal(copiedReport().S3CopyChainStart) {
 		t.Fatalf("the read bound saw %v, want the copied chain's start", startsSeen)
 	}
-	if recs := sup.history.List("s"); len(recs) != 1 || recs[0].Uploaded != 4 {
-		t.Fatalf("records = %+v, want Uploaded to count the copies", recs)
+	if recs := sup.history.List("s"); len(recs) != 1 || recs[0].Uploaded != 4 || recs[0].S3Copied != 1 || recs[0].CarriedCopied != 0 {
+		t.Fatalf("records = %+v, want Uploaded to count the copies and one table copied inside S3", recs)
+	}
+	if st.S3Copied != 1 || st.CarriedCopied != 0 {
+		t.Fatalf("status counts: s3_copied=%d carried_copied=%d", st.S3Copied, st.CarriedCopied)
 	}
 }
 
@@ -196,7 +199,13 @@ func TestS3CopyIsOnlyForStagedRuns(t *testing.T) {
 
 func TestCountReuse_aCopyInsideS3IsAReuseThatSavesNoDisk(t *testing.T) {
 	got := countReuse([]*reconstruct.TableReport{copiedReport(), {CarriedForward: true, CarriedByLink: true}})
-	if got.reused != 2 || got.copied != 1 || got.s3Copied != 1 {
-		t.Fatalf("tally = %+v, want reused 2, copied 1 (no disk saved), s3Copied 1", got)
+	if got.reused != 1 || got.copied != 0 || got.s3Copied != 1 {
+		t.Fatalf("tally = %+v, want the linked table reused, the S3 copy counted apart and never as written in full", got)
+	}
+	// A copy with its chain beside it (not CarriedForward) counts too.
+	chain := copiedReport()
+	chain.CarriedForward = false
+	if got := countReuse([]*reconstruct.TableReport{chain}); got.s3Copied != 1 || got.reused != 0 {
+		t.Fatalf("chain copy tally = %+v", got)
 	}
 }

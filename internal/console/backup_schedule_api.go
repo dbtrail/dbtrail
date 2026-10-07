@@ -110,7 +110,9 @@ type backupScheduleRunDTO struct {
 	// CarriedCopied narrows Carried to full-byte-copy reuses (no disk saved)
 	// — see BaselineStatus.CarriedCopied.
 	CarriedCopied int `json:"carried_copied,omitempty"`
-	Refused       int `json:"refused,omitempty"`
+	// S3Copied: see BaselineStatus.S3Copied.
+	S3Copied int `json:"s3_copied,omitempty"`
+	Refused  int `json:"refused,omitempty"`
 	// RefusedTables / RefusedTablesOmitted: see BaselineStatus.
 	RefusedTables        []RefusedTable `json:"refused_tables,omitempty"`
 	RefusedTablesOmitted int            `json:"refused_tables_omitted,omitempty"`
@@ -374,6 +376,7 @@ func scheduleRunFromRecord(run *BaselineRunRecord) *backupScheduleRunDTO {
 		Uploaded:      run.Uploaded,
 		Carried:       run.Carried,
 		CarriedCopied: run.CarriedCopied,
+		S3Copied:      run.S3Copied,
 		Refused:       run.Refused,
 		RefusedTables: run.RefusedTables, RefusedTablesOmitted: run.RefusedTablesOmitted,
 		LeftOutTables: run.LeftOutTables, LeftOutTablesOmitted: run.LeftOutTablesOmitted,
@@ -416,6 +419,7 @@ func scheduleRunFromStatus(st BackupScheduleState) *backupScheduleRunDTO {
 		Uploaded:      cur.Uploaded,
 		Carried:       cur.Carried,
 		CarriedCopied: cur.CarriedCopied,
+		S3Copied:      cur.S3Copied,
 		Refused:       cur.Refused,
 		RefusedTables: cur.RefusedTables, RefusedTablesOmitted: cur.RefusedTablesOmitted,
 		LeftOutTables: cur.LeftOutTables, LeftOutTablesOmitted: cur.LeftOutTablesOmitted,

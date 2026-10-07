@@ -254,6 +254,10 @@ type BaselineStatus struct {
 	// CarriedCopied narrows Carried to the reuses that fell back to a full
 	// byte copy (no hard link, so no disk saved). Without the split the UI
 	// confirmed a disk saving the daemon log denied (#1578).
+	// S3Copied counts tables copied inside S3 from the previous snapshot
+	// instead of being written (#2212, a server whose snapshots go only to
+	// S3). Apart from Carried: nothing was written, and no disk is involved.
+	S3Copied      int   `json:"s3_copied,omitempty"`
 	CarriedCopied int   `json:"carried_copied,omitempty"`
 	Rows          int64 `json:"rows,omitempty"`
 	// Bytes is the finished artifact's on-disk weight (sql-export builds

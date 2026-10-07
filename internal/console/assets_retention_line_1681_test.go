@@ -32,7 +32,7 @@ func TestSnapshotRetentionLines_1681(t *testing.T) {
 		functionBody(t, js, "function firstLine("),
 		functionBody(t, js, "function baselineRefreshNote("),
 	}, "\n") + `
-const backupFoldError = (e) => e, budgetRefusedTail = () => "", reusedCopiedNote = () => "";
+const backupFoldError = (e) => e, budgetRefusedTail = () => "", reusedCopiedNote = () => "", s3CopiedNote = () => "";
 // A node is its class, its own text, and its children, in order.
 function el(tag, o, ...kids) {
   const n = { cls: (o && o.class) || "", text: (o && o.text) || "", kids: [] };

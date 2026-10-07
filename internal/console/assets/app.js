@@ -7912,7 +7912,7 @@ function s3OnlyBackupWarning(srv, fix = true) {
     }
     return why + ", so every scheduled snapshot reads your whole database." + then("Fix the staging folder, or add a Local folder.");
   }
-  return "With S3 only, each scheduled update downloads the tables that changed from S3, rewrites them in the staging folder and uploads them again; tables that did not change are copied inside S3 without being downloaded." +
+  return "With S3 only, each scheduled update downloads, rewrites and uploads again the tables that changed. Unchanged tables are usually copied inside S3 without being downloaded; the first update after a full read rewrites every table, as does an update whose previous snapshot is in another bucket." +
     then("Add a Local folder so changed tables are not downloaded first.");
 }
 
@@ -8815,6 +8815,13 @@ function archivingPanel(servers, serversErr) {
 // every byte was written again (no hard link; the daemon log names the
 // cause). Confirming a saving the daemon log denies is the bug this splits
 // away (#1578).
+// s3CopiedNote (#2212) counts the tables an S3-only update copied inside S3
+// from the previous snapshot: nothing was written for them, so they are
+// neither "refreshed" nor part of the reuse note, which speaks of disk.
+function s3CopiedNote(n) {
+  return n ? ", " + n + " unchanged and copied inside S3 without being downloaded" : "";
+}
+
 function reusedCopiedNote(copied) {
   if (!copied) return "";
   return " (" + copied + " of them written in full, which saved no disk; DBTrail's log says why)";
@@ -9083,10 +9090,11 @@ function baselineRefreshNote(rf) {
       // the CLI summary follows: a reused table is not a refreshed one, and
       // which tables actually cost a rewrite is the number worth seeing.
       const reused = rf.carried || 0;
-      const rewritten = Math.max(0, (rf.tables || 0) - reused);
+      const rewritten = Math.max(0, (rf.tables || 0) - reused - (rf.s3_copied || 0));
       text = "Automatic refresh" + (when ? " at " + when : "") + ": " +
         rewritten + " table(s) refreshed" +
-        (reused ? ", " + reused + " unchanged and reused" + reusedCopiedNote(rf.carried_copied || 0) : "") + ".";
+        (reused ? ", " + reused + " unchanged and reused" + reusedCopiedNote(rf.carried_copied || 0) : "") +
+        s3CopiedNote(rf.s3_copied || 0) + ".";
       break;
     case "failed":
       // published means the fold finished and marked the snapshot, and only
@@ -10818,6 +10826,7 @@ function backupScheduleCard(cur, b) {
         body.append(el("p", { class: "form-hint", text:
           "Last scheduled snapshot finished " + when + " (" + what + "): " + (run.tables || 0) + " table(s)" +
           (reused ? ", " + reused + " unchanged and reused" + reusedCopiedNote(run.carried_copied || 0) : "") +
+          s3CopiedNote(run.s3_copied || 0) +
           (run.uploaded ? ", " + run.uploaded + " file(s) uploaded" : "") + "." }));
       } else {
         alarm = true;

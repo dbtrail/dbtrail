@@ -76,7 +76,7 @@ function nextRun(sch) {
   ` + nextRunBranch(t, card) + `
   return [alarm, everyRunCode];
 }
-const utcLabel = (s) => s, reusedCopiedNote = () => "";
+const utcLabel = (s) => s, reusedCopiedNote = () => "", s3CopiedNote = () => "";
 function lastRun(sch, everyRunCode) {
   const out = [], body = { append: (n) => out.push(n.text) };
   let alarm = false;
@@ -145,7 +145,7 @@ console.log(JSON.stringify(out));
 	}
 	// #2212: an S3-only server is updated through the staging folder, so the
 	// note is its cost, a hint, wherever this process cannot tell otherwise.
-	const cost = "With S3 only, each scheduled update downloads the tables that changed from S3, rewrites them in the staging folder and uploads them again; tables that did not change are copied inside S3 without being downloaded."
+	const cost = "With S3 only, each scheduled update downloads, rewrites and uploads again the tables that changed. Unchanged tables are usually copied inside S3 without being downloaded; the first update after a full read rewrites every table, as does an update whose previous snapshot is in another bucket."
 	const costFix = cost + " Add a Local folder so changed tables are not downloaded first."
 	// A process that runs no schedule says so instead of the cost.
 	if got.Warn[6] != "With S3 only, scheduled updates are built in the staging folder of the DBTrail service that runs the schedule. This one runs none." {

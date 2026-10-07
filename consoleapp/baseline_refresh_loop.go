@@ -1392,6 +1392,7 @@ func dirExists(path string) bool {
 func foldRunCounts(rec console.BaselineRunRecord, tables, refused int, reuse reuseTally) console.BaselineRunRecord {
 	rec.Tables, rec.Refused = tables, refused
 	rec.Carried, rec.CarriedCopied = reuse.reused, reuse.copied
+	rec.S3Copied = reuse.s3Copied
 	return rec
 }
 
@@ -1457,6 +1458,7 @@ func applyFoldStatus(st *console.BaselineStatus, tables, refused int, reuse reus
 	st.RefusedTables, st.RefusedTablesOmitted = refusedTablesIn(err)
 	st.Carried = reuse.reused
 	st.CarriedCopied = reuse.copied
+	st.S3Copied = reuse.s3Copied
 	// Set on BOTH branches, never left from a previous run: this is what the
 	// scheduled watcher reads to decide whether a full backup is still owed,
 	// and a stale true there is a skipped backup.
@@ -1682,9 +1684,8 @@ type reuseTally struct {
 	// cost gets wrong if nobody says so.
 	slowestCarried bool
 	// s3Copied counts the tables copied inside S3 instead of being written
-	// (#2212): a subset of reused when carried with no chain, and the tables
-	// copied with their chain beside them, which the local path does not
-	// count as reused either.
+	// (#2212), with or without their chain. Never part of reused or copied:
+	// those speak of the local file and its disk.
 	s3Copied int
 }
 
@@ -1706,9 +1707,11 @@ func countReuse(reports []*reconstruct.TableReport) (tally reuseTally) {
 			continue
 		}
 		if len(rep.S3Copies) > 0 {
+			// Counted apart and only here (#2212): nothing was written and no
+			// disk is involved, so it is neither a reuse that saved disk nor
+			// one "written in full".
 			tally.s3Copied++
-		}
-		if rep.CarriedForward {
+		} else if rep.CarriedForward {
 			tally.reused++
 			if !rep.CarriedByLink {
 				tally.copied++

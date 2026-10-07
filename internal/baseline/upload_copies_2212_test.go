@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // #2212: an S3-only server's update publishes its unchanged tables by copying
@@ -256,5 +258,78 @@ func TestUploadCopies_viewsAreRegeneratedWithTheCopiedTables(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("respell ran %d times", calls)
+	}
+}
+
+// A copy is a server-side operation: cutting its HTTP request when another
+// file fails does not stop S3 from finishing it. If the upload returned while
+// a copy was still in flight, the run's cleanup would delete the prefix
+// (marker included) and the copy would land afterwards in a folder with no
+// marker, which discovery reads as a COMPLETE snapshot (#467). So once a copy
+// has started, the upload waits for it to end, whatever else fails.
+func TestUploadCopies_aStartedCopyEndsBeforeTheUploadReturns(t *testing.T) {
+	snap := copySnapshot(t, "shop/orders.parquet")
+	copyStarted := make(chan struct{})
+	var mu sync.Mutex
+	landed := map[string]bool{}
+	ops := s3UploadOps{
+		putEmpty:     func(context.Context, string) error { return nil },
+		objectExists: func(context.Context, string) (bool, error) { return false, nil },
+		deleteObject: func(context.Context, string) error { return nil },
+		uploadFile: func(_ context.Context, _, k string) error {
+			<-copyStarted
+			return errors.New("connection reset")
+		},
+		copyObject: func(ctx context.Context, _, k string) error {
+			// The bucket finishes the copy a little after the request was
+			// sent, whether or not the client is still waiting.
+			done := make(chan struct{})
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+				mu.Lock()
+				landed[k] = true
+				mu.Unlock()
+				close(done)
+			}()
+			close(copyStarted)
+			select {
+			case <-done:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	}
+	copies := []RemoteCopy{{Rel: "crm/leads.parquet", Src: prevSnap + "crm/leads.parquet"}}
+	_, err := uploadWithOpsCopies(context.Background(), snap, "srv/"+copyStamp, false, ops, copies)
+	if err == nil {
+		t.Fatal("the failed upload returned no error")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !landed["srv/"+copyStamp+"/crm/leads.parquet"] {
+		t.Fatal("the upload returned while a copy was still landing; a cleanup run now would miss it")
+	}
+}
+
+// A copy not yet started when another file failed is never started.
+func TestUploadCopies_noCopyStartsAfterAFailure(t *testing.T) {
+	snap := copySnapshot(t, "shop/orders.parquet")
+	ops := s3UploadOps{
+		putEmpty:     func(context.Context, string) error { return nil },
+		objectExists: func(context.Context, string) (bool, error) { return false, nil },
+		deleteObject: func(context.Context, string) error { return nil },
+		uploadFile:   func(context.Context, string, string) error { return nil },
+		copyObject:   func(context.Context, string, string) error { return nil },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var copied int
+	ops.copyObject = func(context.Context, string, string) error { copied++; return nil }
+	if _, err := uploadWithOpsCopies(ctx, snap, "srv/"+copyStamp, false, lockedOps(ops), mixedCopies()); err == nil {
+		t.Fatal("a cancelled upload returned no error")
+	}
+	if copied != 0 {
+		t.Fatalf("%d copies started after the upload was cancelled", copied)
 	}
 }

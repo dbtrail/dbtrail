@@ -25,16 +25,17 @@ import (
 //   - the source cannot be sized (HEAD fails): an error, nothing copied.
 
 type fakeCopyAPI struct {
-	mu        sync.Mutex
-	size      int64
-	headErr   error
-	partErrAt int // 1-based part number that fails; 0 = none
-	copies    []s3.CopyObjectInput
-	parts     []s3.UploadPartCopyInput
-	created   int
-	completed *s3.CompleteMultipartUploadInput
-	aborted   int
-	abortCtx  error
+	mu                    sync.Mutex
+	size                  int64
+	headErr               error
+	partErrAt             int // 1-based part number that fails; 0 = none
+	copies                []s3.CopyObjectInput
+	parts                 []s3.UploadPartCopyInput
+	created               int
+	completed             *s3.CompleteMultipartUploadInput
+	aborted               int
+	abortCtx              error
+	completeErr, abortErr error
 }
 
 func (f *fakeCopyAPI) HeadObject(_ context.Context, in *s3.HeadObjectInput, _ ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
@@ -67,6 +68,9 @@ func (f *fakeCopyAPI) UploadPartCopy(_ context.Context, in *s3.UploadPartCopyInp
 }
 
 func (f *fakeCopyAPI) CompleteMultipartUpload(_ context.Context, in *s3.CompleteMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+	if f.completeErr != nil {
+		return nil, f.completeErr
+	}
 	f.completed = in
 	return &s3.CompleteMultipartUploadOutput{}, nil
 }
@@ -74,6 +78,9 @@ func (f *fakeCopyAPI) CompleteMultipartUpload(_ context.Context, in *s3.Complete
 func (f *fakeCopyAPI) AbortMultipartUpload(ctx context.Context, in *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
 	f.aborted++
 	f.abortCtx = ctx.Err()
+	if f.abortErr != nil {
+		return nil, f.abortErr
+	}
 	return &s3.AbortMultipartUploadOutput{}, nil
 }
 
@@ -168,5 +175,21 @@ func TestS3CopySource_encodesEveryByteS3WouldReadDifferently(t *testing.T) {
 	}
 	if strings.Contains(s3CopySource("b", "a b"), " ") {
 		t.Fatal("a space survived")
+	}
+}
+
+// The completion can succeed in the bucket while the client sees an error
+// (a cut connection). The abort then finds no upload (NoSuchUpload): no parts
+// are left, and the message must not say they are. Any other abort failure
+// still says so.
+func TestCopyS3Object_anAbortThatFindsNoUploadPromisesNoLeftoverParts(t *testing.T) {
+	f := &fakeCopyAPI{size: S3CopySingleMax + 1, completeErr: errors.New("connection reset"), abortErr: &types.NoSuchUpload{}}
+	err := copyS3Object(context.Background(), f, "src", "k", "dst", "k2")
+	if err == nil || strings.Contains(err.Error(), "stay in the bucket") || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("err = %v", err)
+	}
+	f = &fakeCopyAPI{size: S3CopySingleMax + 1, completeErr: errors.New("connection reset"), abortErr: errors.New("AccessDenied")}
+	if err := copyS3Object(context.Background(), f, "src", "k", "dst", "k2"); err == nil || !strings.Contains(err.Error(), "stay in the bucket") {
+		t.Fatalf("a real abort failure is not said: %v", err)
 	}
 }

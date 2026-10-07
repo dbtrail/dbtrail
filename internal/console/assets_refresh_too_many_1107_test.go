@@ -46,7 +46,7 @@ func TestBudgetRefusalLines(t *testing.T) {
 	script.WriteString(`
 const el = (tag, o) => o;
 const utcLabel = (s) => s;
-const reusedCopiedNote = () => "";
+const reusedCopiedNote = () => "", s3CopiedNote = () => "";
 let capsCache = { baseline_trigger: true };
 const budget = ` + marshal(budget) + `, gap = ` + marshal(gap) + `, one = ` + marshal(one) + `, two = ` + marshal(two) + `;
 const out = {

@@ -147,6 +147,11 @@ func s3CopyUnchanged(ctx context.Context, cfg FullTableConfig, schema, table, ba
 // chain uploaded from a local fold, a range or legacy pair, none at all) is
 // rewritten once into that shape, which keeps the size rule, which needs the
 // pairs' sizes, out of the question.
+//
+// Not gated on CarryForwardUnchanged, unlike s3CopyUnchanged, and on purpose
+// (owner decision, #2212): the local chain carry in publishWithTableDelta
+// keeps the previous file and its chain whatever that setting says, and this
+// is its S3 form. The setting governs only the plain carry of step 5b.
 func s3CopyUnchangedChain(ctx context.Context, p tableDeltaPublish, hasAnchor bool, reserved string, rep *TableReport) bool {
 	changes := len(p.fold.Changes)
 	if p.fold.Spill != nil {

@@ -2,12 +2,14 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 )
 
 // S3CopySingleMax is the largest object one CopyObject may copy (5 GiB); a
@@ -72,6 +74,12 @@ func multipartCopy(ctx context.Context, api s3CopyAPI, src string, size int64, d
 		if _, aerr := api.AbortMultipartUpload(actx, &s3.AbortMultipartUploadInput{
 			Bucket: aws.String(dstBucket), Key: aws.String(dstKey), UploadId: up.UploadId,
 		}); aerr != nil {
+			if multipartGone(aerr) {
+				// Nothing to abort: the completion went through in the bucket
+				// though the client saw an error, or S3 already removed it. No
+				// parts are left, so none are said to be.
+				return cause
+			}
 			return fmt.Errorf("%w (and the multipart upload %s could not be aborted, so its parts stay in the bucket until a lifecycle rule removes them: %v)",
 				cause, aws.ToString(up.UploadId), aerr)
 		}
@@ -101,6 +109,17 @@ func multipartCopy(ctx context.Context, api s3CopyAPI, src string, size int64, d
 		return abort(fmt.Errorf("finish the multipart copy of %s → s3://%s/%s: %w", src, dstBucket, dstKey, err))
 	}
 	return nil
+}
+
+// multipartGone reports whether an abort failed because the multipart upload
+// no longer exists.
+func multipartGone(err error) bool {
+	var nsu *types.NoSuchUpload
+	if errors.As(err, &nsu) {
+		return true
+	}
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchUpload"
 }
 
 // s3CopySource spells the x-amz-copy-source header: "bucket/key" with every
