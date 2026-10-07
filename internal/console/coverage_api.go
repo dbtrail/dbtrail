@@ -52,6 +52,12 @@ type coverageResponse struct {
 	// omitted (never 0) when there is no checkpoint to age. Under "stalled"
 	// this is the number that says how long it has been down.
 	CheckpointAgeSeconds *int64 `json:"checkpoint_age_seconds,omitempty"`
+	// LagGrowth is set when the gap between the source and the index has
+	// kept widening over the last several reads (#2201, lag_trend.go). It is
+	// a trend over reads, not a verdict on its own: a quiet source widens the
+	// same gap at one second per second, so the page shows it only beside a
+	// capture that is reading ("current") or that the source says is behind.
+	LagGrowth *lagGrowthDTO `json:"lag_growth,omitempty"`
 }
 
 // serverID labels log lines with the request's selected server — a
@@ -94,5 +100,6 @@ func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
 	if !sum.DeltaTo.IsZero() {
 		resp.DeltaTo = sum.DeltaTo.Format(consoleTSFormat)
 	}
+	resp.LagGrowth = s.lagTrend.observe(serverID(r), now, sum.DeltaTo)
 	writeJSON(w, http.StatusOK, resp)
 }

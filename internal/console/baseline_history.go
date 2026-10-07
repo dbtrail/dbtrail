@@ -53,9 +53,17 @@ type BaselineRunRecord struct {
 	// when the producer does not report it (PostgreSQL dumps stamp the
 	// snapshot server-side, out of this process's sight).
 	SnapshotTime string `json:"snapshot_time,omitempty"`
-	StartedAt    string `json:"started_at"`
-	FinishedAt   string `json:"finished_at"`
-	Tables       int    `json:"tables,omitempty"`
+	// DataAsOf is the newest change an UPDATE's snapshot holds, RFC3339 UTC
+	// on the source's clock (#2201): the later of what its ancestor held and
+	// the newest change the index had when the fold started, never later
+	// than SnapshotTime. Set on updates only: a full read holds the source as
+	// of SnapshotTime itself (DataAsOfFor). Empty when the index did not
+	// answer and the ancestor is not on record, and on every run recorded
+	// before the field existed; both read as unknown, never as current.
+	DataAsOf   string `json:"data_as_of,omitempty"`
+	StartedAt  string `json:"started_at"`
+	FinishedAt string `json:"finished_at"`
+	Tables     int    `json:"tables,omitempty"`
 	// ViewsSkipped: see BaselineStatus.ViewsSkipped. Zero also for every run
 	// recorded before the count existed, so zero is never shown as a count.
 	ViewsSkipped int `json:"views_skipped,omitempty"`
@@ -284,6 +292,37 @@ func (h *BaselineRunHistory) IndexMarkFor(serverID, snapshotTime string) (uint64
 		return rec.IndexMark, true
 	}
 	return 0, false
+}
+
+// DataAsOfFor is the newest change the snapshot named snapshotTime (RFC3339
+// UTC) holds, and whether it is on record (#2201). A full read holds the
+// source as of its own instant, so its snapshot time answers; an update
+// answers with what it recorded. Anything else is unknown: an update recorded
+// before the field existed, a restore (a chosen past instant, which the page
+// never presents as the newest copy), and a snapshot this daemon did not make.
+// A nil history answers unknown.
+func (h *BaselineRunHistory) DataAsOfFor(serverID, snapshotTime string) (time.Time, bool) {
+	if h == nil {
+		return time.Time{}, false
+	}
+	rec := h.FindBySnapshot(serverID, snapshotTime)
+	if rec == nil || rec.SkipReason != "" {
+		return time.Time{}, false
+	}
+	var stamp string
+	switch rec.Kind {
+	case BaselineRunDump:
+		stamp = rec.SnapshotTime
+	case BaselineRunRefresh:
+		stamp = rec.DataAsOf
+	default:
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, stamp)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // UpdateSample is how many measured successful updates the model fits for

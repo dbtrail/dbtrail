@@ -235,6 +235,9 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		s.releaseRefreshSlot(req.ServerID)
 		return
 	}
+	// The newest change the index holds, read BEFORE the fold like the mark
+	// (#2201): it dates the data of the copy this cycle publishes.
+	newest, newestKnown := readNewestIndexed(s.ctx, req.IndexDSN)
 	// BELOW the mark read, and the order is the point (#1705). See
 	// anchorRefresh.
 	at = s.anchorRefresh(req.ServerID, at)
@@ -352,6 +355,12 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		rec.UpdateSeconds = took.Seconds()
 		if known {
 			rec.IndexMark = mark.events
+		}
+	}
+	if rec.SnapshotTime != "" && !prev.IsZero() {
+		ancestor, ancestorKnown := s.history.DataAsOfFor(req.ServerID, prev.UTC().Format(time.RFC3339))
+		if asOf, ok := foldDataAsOf(ancestor, ancestorKnown, newest, newestKnown, at); ok {
+			rec.DataAsOf = asOf.UTC().Format(time.RFC3339)
 		}
 	}
 	rec.NewTables, rec.NewTablesOmitted, rec.NewTablesUnchecked = gap.tables, gap.omitted, gap.unchecked

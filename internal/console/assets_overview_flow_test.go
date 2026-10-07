@@ -90,7 +90,87 @@ func TestOverviewFlowModel(t *testing.T) {
 	snap := c{"time": "2026-09-23 14:30:07", "age_hours": 0.083, "tables": []string{"a.b", "a.c"}, "kinds": []string{"dir", "s3"}}
 	sched := c{"every": "5m", "runnable": true, "next_run": "2026-09-23T14:35:00Z"}
 	registry := c{"id": "a", "kind": "registry", "has_source": true, "source_host": "db1"}
+	// #2201: a copy written 54 s ago while capture is an hour behind.
+	fresh := func(extra c) c {
+		o := c{"time": "2026-09-23 14:59:06", "age_hours": 0.015, "tables": []string{"a.b"}, "kinds": []string{"dir"}}
+		for k, v := range extra {
+			o[k] = v
+		}
+		return o
+	}
+	behindCov := func(extra c) c {
+		o := c{"freshness": "idle", "continuity": "ok", "lag_seconds": 3900, "delta_to": "2026-09-23 13:54:00", "capture": c{"state": "behind"}}
+		for k, v := range extra {
+			o[k] = v
+		}
+		return o
+	}
+	growing := c{"grown_seconds": 300, "over_seconds": 300}
+	lagCase := func(cov c, snaps []any) c {
+		return c{"input": c{"coverage": cov, "baselines": c{"configured": true, "snapshots": snaps, "schedule": sched},
+			"server": registry, "schema": c{"state": "idle"}, "uncaptured": c{}}}
+	}
 	cases := map[string]c{
+		// The data is as old as the newest change the copy holds, not as
+		// young as its files: recorded by the update that wrote it...
+		"lag-hour-recorded": lagCase(behindCov(nil), []any{fresh(c{"data_as_of": "2026-09-23 13:53:00"})}),
+		// ...or, with nothing on record, at least as old as capture's lag.
+		"lag-hour-unrecorded": lagCase(behindCov(nil), []any{fresh(nil)}),
+		// The gap kept widening, and the source says capture is behind: say
+		// so, and name the first things to check.
+		"lag-growing-behind": lagCase(behindCov(c{"lag_growth": growing}), []any{fresh(nil)}),
+		// Same, while capture is still reading new changes.
+		"lag-growing-current": lagCase(c{"freshness": "current", "continuity": "ok", "lag_seconds": 200, "delta_to": "2026-09-23 14:56:00",
+			"lag_growth": c{"grown_seconds": 150, "over_seconds": 300, "indexing": true}}, []any{fresh(nil)}),
+		// Running, gap growing, nothing new indexed, source not asked: a
+		// database that took one write and went quiet looks the same. No card.
+		"lag-growing-current-quiet": lagCase(c{"freshness": "current", "continuity": "ok", "lag_seconds": 230, "delta_to": "2026-09-23 14:55:00",
+			"lag_growth": c{"grown_seconds": 230, "over_seconds": 240}}, []any{fresh(nil)}),
+		// The issue's case on a console that cannot ask the source (serve):
+		// over five minutes behind (idle), still indexing, slower than the
+		// source writes. The card.
+		"lag-growing-idle-indexing": lagCase(c{"freshness": "idle", "continuity": "ok", "lag_seconds": 3900, "delta_to": "2026-09-23 13:54:00",
+			"lag_growth": c{"grown_seconds": 225, "over_seconds": 300, "indexing": true}}, []any{fresh(nil)}),
+		// An update from a full read that capture had not reached: it holds
+		// the full read's instant (14:29), half an hour before its files.
+		"update-after-full-read": lagCase(behindCov(c{"lag_seconds": 7200, "delta_to": "2026-09-23 12:59:00"}),
+			[]any{fresh(c{"data_as_of": "2026-09-23 14:29:06"})}),
+		// The coverage read failed: the record still dates the data.
+		"recorded-coverage-down": {"input": c{"coverage": c{"continuity": "unavailable"}, "baselines": c{"configured": true, "snapshots": []any{fresh(c{"data_as_of": "2026-09-23 13:59:06"})}, "schedule": sched},
+			"server": registry, "schema": c{"state": "idle"}, "uncaptured": c{}}},
+		// Idle and the source not asked: a quiet database widens the same
+		// gap. No card.
+		"lag-growing-quiet": lagCase(c{"freshness": "idle", "continuity": "ok", "lag_seconds": 3900, "delta_to": "2026-09-23 13:54:00",
+			"lag_growth": growing}, []any{fresh(nil)}),
+		// Capture stopped: its own card and the cut say it; no second card.
+		"lag-growing-stalled": lagCase(c{"freshness": "stalled", "continuity": "ok", "lag_seconds": 3900, "delta_to": "2026-09-23 13:54:00",
+			"checkpoint_age_seconds": 900, "lag_growth": growing}, []any{fresh(nil)}),
+		// The supervisor says capture failed while the index still looks
+		// current: the break's card, never a second one.
+		"lag-growing-failed": {"input": c{
+			"coverage": c{"freshness": "current", "continuity": "ok", "lag_seconds": 200, "delta_to": "2026-09-23 14:56:00",
+				"lag_growth": c{"grown_seconds": 150, "over_seconds": 300, "indexing": true}},
+			"baselines": c{"configured": true, "snapshots": []any{fresh(nil)}, "schedule": sched},
+			"server":    c{"id": "a", "kind": "registry", "has_source": true, "monitor_state": "failed"},
+			"monitor":   c{"state": "failed", "last_error": "dial tcp: connection refused"},
+			"schema":    c{"state": "idle"}, "uncaptured": c{}}},
+		// Nothing written for three hours, the source says capture holds it
+		// all, and the copy holds the newest change: the copy is current as
+		// of its own instant.
+		"quiet-up-to-date": lagCase(c{"freshness": "idle", "continuity": "ok", "lag_seconds": 10800, "delta_to": "2026-09-23 12:00:00",
+			"capture": c{"state": "up_to_date"}}, []any{c{"time": "2026-09-23 14:30:07", "age_hours": 0.083, "tables": []string{"a.b"}, "data_as_of": "2026-09-23 12:00:00"}}),
+		// A full read is current as of its own instant while capture lags.
+		"full-read-ahead": lagCase(behindCov(c{"lag_seconds": 5400, "delta_to": "2026-09-23 13:30:00"}),
+			[]any{c{"time": "2026-09-23 14:30:07", "age_hours": 0.083, "tables": []string{"a.b"}, "data_as_of": "2026-09-23 14:30:07"}}),
+		// The source's clock runs five minutes ahead of this host: the lag
+		// is clamped at zero, and the age is never negative.
+		"skew-source-ahead": lagCase(c{"freshness": "current", "continuity": "ok", "lag_seconds": 0, "delta_to": "2026-09-23 15:05:00"},
+			[]any{fresh(c{"data_as_of": "2026-09-23 15:00:00"})}),
+		// No copy yet while capture is behind: still "no copy yet".
+		"lag-no-copy": lagCase(behindCov(nil), []any{}),
+		// No capture yet: the copy's own age.
+		"copy-no-capture": {"input": c{"coverage": c{}, "baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": sched},
+			"server": registry, "schema": c{"state": "idle"}, "uncaptured": c{}}},
 		// P4: nothing answered, nothing green.
 		"empty": {"input": c{"coverage": c{}, "baselines": c{}, "server": nil, "schema": c{"unavailable": true}, "uncaptured": c{}}},
 		// C2 + U2 + B2 + T2: the healthy path.
@@ -282,9 +362,9 @@ const origPaint = paint;`, 1)
 	}
 
 	for name, want := range map[string]string{
-		"next-refresh": "copy from 14:30 · next refresh 14:35",
-		"next-read":    "copy from 14:30 · next read 14:35",
-		"next-blocked": "copy from 14:30 · next run cannot start",
+		"next-refresh": "data as of 14:30 · next refresh 14:35",
+		"next-read":    "data as of 14:30 · next read 14:35",
+		"next-blocked": "data as of 14:30 · next run cannot start",
 	} {
 		if got := get(name).Pieces[update].Sub; got != want {
 			t.Errorf("%s: update sub = %q, want %q", name, got, want)
@@ -296,7 +376,7 @@ const origPaint = paint;`, 1)
 	if !strings.Contains(h.Pieces[engine].Sub, "definitions read 14:31") {
 		t.Errorf("healthy: engine sub = %q", h.Pieces[engine].Sub)
 	}
-	if h.Pieces[update].Tone != "ok" || h.Pieces[update].Big != "4m 58s ago" || h.Pieces[update].Title != "every 5 min" || h.Pieces[update].Sub != "copy from 14:30 · next 14:35" {
+	if h.Pieces[update].Tone != "ok" || h.Pieces[update].Big != "4m 58s ago" || h.Pieces[update].Title != "every 5 min" || h.Pieces[update].Sub != "data as of 14:30 · next 14:35" {
 		t.Errorf("healthy: update = %+v", h.Pieces[update])
 	}
 	want("healthy", bucket, "none", "2 tables")
@@ -323,6 +403,71 @@ const origPaint = paint;`, 1)
 	// "behind" once, on the binlog arrow.
 	if n := strings.Count(strings.ToLower(h.Screen), "behind"); n != 1 {
 		t.Errorf("healthy: 'behind' appears %d times on screen, want 1: %q", n, h.Screen)
+	}
+
+	// #2201: the copy's age is its data's.
+	for name, w := range map[string]struct{ big, sub, tone string }{
+		"lag-hour-recorded":      {"1h 7m ago", "data as of 13:53 · written 14:59 · next 14:35", "warn"},
+		"lag-hour-unrecorded":    {"1h 5m ago", "data as of 13:54 · written 14:59 · next 14:35", "warn"},
+		"quiet-up-to-date":       {"4m 58s ago", "data as of 14:30 · next 14:35", "ok"},
+		"full-read-ahead":        {"4m 58s ago", "data as of 14:30 · next 14:35", "ok"},
+		"skew-source-ahead":      {"5m ago", "data as of 15:00 · written 14:59 · next 14:35", "ok"},
+		"copy-no-capture":        {"4m 58s ago", "data as of 14:30 · next 14:35", "ok"},
+		"update-after-full-read": {"30m 54s ago", "data as of 14:29 · written 14:59 · next 14:35", "warn"},
+		// Colour dropped (capture state unknown), age kept.
+		"recorded-coverage-down": {"1h ago", "data as of 13:59 · written 14:59 · next 14:35", "none"},
+	} {
+		if p := get(name).Pieces[update]; p.Big != w.big || p.Sub != w.sub || p.Tone != w.tone {
+			t.Errorf("%s: copy arrow = big %q sub %q tone %q; want %q, %q, %q", name, p.Big, p.Sub, p.Tone, w.big, w.sub, w.tone)
+		}
+	}
+	if p := get("lag-no-copy").Pieces[update]; p.Line != "no copy yet" || p.Big != "" {
+		t.Errorf("lag-no-copy: copy arrow = %+v, want no copy yet", p)
+	}
+	fallingBehind := func(name string) *flowCardOut {
+		for i, k := range get(name).Cards {
+			if k.Kind == "capture-falling-behind" {
+				return &get(name).Cards[i]
+			}
+		}
+		return nil
+	}
+	for _, name := range []string{"lag-growing-behind", "lag-growing-current", "lag-growing-idle-indexing"} {
+		o := get(name)
+		k := fallingBehind(name)
+		if k == nil || k.Title != "Capture is falling further behind" || !hasLabel(k.Actions, "Details") {
+			t.Errorf("%s: cards = %+v, want the falling-behind card with Details", name, o.Cards)
+			continue
+		}
+		if o.Pieces[capture].Tone != "warn" || o.Pieces[capture].Line != "falling behind" {
+			t.Errorf("%s: capture arrow = %+v, want warn 'falling behind'", name, o.Pieces[capture])
+		}
+		// The recipe names the first things to check, in words on screen.
+		for _, w := range []string{"Index buffer pool", "INDEX_BUFFER_POOL", "write rate"} {
+			if !strings.Contains(o.Screen, w) {
+				t.Errorf("%s: the screen does not name %q: %q", name, w, o.Screen)
+			}
+		}
+		if strings.Contains(o.Screen, "—") {
+			t.Errorf("%s: an em dash on screen: %q", name, o.Screen)
+		}
+	}
+	if k := fallingBehind("lag-growing-behind"); k == nil || len(k.Lines) == 0 || k.Lines[0] != "Capture is 1h 5m behind your database, and nothing newer was indexed in the last 5m. The copy cannot hold anything newer than what capture has read." {
+		t.Errorf("lag-growing-behind: card = %+v", k)
+	}
+	if k := fallingBehind("lag-growing-current"); k == nil || len(k.Lines) == 0 || k.Lines[0] != "Capture is 3m 20s behind your database, and the gap grew 2m 30s in the last 5m. The copy cannot hold anything newer than what capture has read." {
+		t.Errorf("lag-growing-behind: card = %+v", k)
+	}
+	if p := get("lag-growing-current").Pieces[capture]; p.Sub != "3m 20s behind" {
+		t.Errorf("lag-growing-current: capture sub = %q", p.Sub)
+	}
+	for _, name := range []string{"lag-growing-quiet", "lag-growing-current-quiet", "lag-growing-stalled", "lag-growing-failed", "lag-hour-unrecorded", "healthy"} {
+		if k := fallingBehind(name); k != nil {
+			t.Errorf("%s: a falling-behind card where none belongs: %+v", name, *k)
+		}
+	}
+	if p := get("lag-growing-quiet").Pieces[capture]; p.Tone != "ok" || p.Line != "connected" {
+		t.Errorf("lag-growing-quiet: capture arrow = %+v, want the quiet state untouched", p)
 	}
 
 	i := get("idle")
@@ -420,7 +565,7 @@ const origPaint = paint;`, 1)
 	if get("age-warn").Pieces[update].Tone != "warn" || get("age-bad").Pieces[update].Tone != "bad" || get("age-hour").Pieces[update].Tone != "ok" {
 		t.Errorf("age tones: warn %q bad %q hour %q", get("age-warn").Pieces[update].Tone, get("age-bad").Pieces[update].Tone, get("age-hour").Pieces[update].Tone)
 	}
-	if get("age-hour").Pieces[update].Sub != "copy from 14:30" {
+	if get("age-hour").Pieces[update].Sub != "data as of 14:30" {
 		t.Errorf("age-hour: RFC3339 stamp not read: %q", get("age-hour").Pieces[update].Sub)
 	}
 	if get("age-day").Pieces[update].Title != "every 24 h" {

@@ -336,6 +336,9 @@ type BaselineRefreshDefaults struct {
 // gates) lives in a connManager bundle resolved per request from the
 // X-Bintrail-Server header.
 type Server struct {
+	// lagTrend keeps the last coverage reads per server, to tell a capture
+	// gap that keeps widening from one being worked off (#2201).
+	lagTrend lagTrendBook
 	// snapshotExpiry keeps the last read of each bucket's expiry rules
 	// (#1680), so a settings page that redraws asks S3 once.
 	snapshotExpiry snapshotExpiryCache

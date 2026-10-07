@@ -131,6 +131,14 @@ func CollectCoverageSummary(ctx context.Context, db *sql.DB, dbName string, now 
 	return sum, nil
 }
 
+// NewestIndexedEvent is newestIndexedEvent for a caller outside this package:
+// the snapshot fold reads it beside its index mark (#2201), so the instant it
+// records as the newest change a copy holds is measured exactly the way the
+// coverage window's upper edge is. Zero with a nil error is an empty index.
+func NewestIndexedEvent(ctx context.Context, db *sql.DB, dbName string) (time.Time, error) {
+	return newestIndexedEvent(ctx, db, dbName)
+}
+
 // newestIndexedEvent finds the newest event_timestamp with per-partition MAX
 // probes, newest partition first, stopping at the first non-empty one. A
 // whole-table MAX(event_timestamp) would be a full index scan — no index
