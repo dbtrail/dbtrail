@@ -2832,9 +2832,10 @@ try {
     const cur = { id: "srv-fix", kind: "registry", has_source: true };
     const b = { configured: true, source: "/tmp/baselines", kind: "dir", snapshots: [{ time: "2026-06-10 12:00:00", location: "dir" }] };
     const srv = { id: "srv-fix", name: "fixture", source: "server", baseline_dir: "/tmp/b" };
-    // S3 only, with no scheduling loop: the row states the problem, and
-    // "Add a Local folder." is the remedy only a writer gets.
-    const s3only = { id: "srv-s3", name: "s3fix", source: "server", baseline_s3: "s3://b/p" };
+    // S3 only, on a process that runs the schedule (#2212: without one the
+    // note names no remedy at all): the row states the cost, and "Add a
+    // Local folder" is the remedy only a writer gets.
+    const s3only = { id: "srv-s3", name: "s3fix", source: "server", baseline_s3: "s3://b/p", schedule_loop: true };
     // No location at all (#1684: the daemon's own no longer backs it):
     // "Type one above and Save." is the remedy, and only a writer gets it.
     const inherits = { id: "srv-inh", name: "inh", source: "none" };
