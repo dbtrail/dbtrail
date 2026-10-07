@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **The Overview gives the copy's age as the age of its data, and says when
+  capture keeps falling behind** (#2201). The copy arrow counted from when
+  the newest copy was written, so while capture was 65 minutes behind it
+  said the copy was from 54 seconds ago, over a copy that held nothing from
+  the last hour. Each update now records the newest change it folded (the later of what the
+  snapshot it started from held and the newest change in the index when it
+  started, never later than its own time); a full read holds the database as
+  of its own time. `GET /api/baselines` carries it per snapshot as
+  `data_as_of`, and the arrow shows the data's age with "data as of HH:MM",
+  plus "written HH:MM" when the files are a minute or more younger. A
+  snapshot with no record is shown as at least as old as capture's lag.
+  `GET /api/coverage` now keeps its last reads per server for 15 minutes and
+  adds `lag_growth` when the gap between the source and the index widened
+  by two minutes or more over reads at least four minutes apart and is
+  still widening; the growth is measured so that a clock difference between
+  the source and this machine cancels out. When the source says capture is
+  behind, or capture is still indexing but slower than the source writes
+  (`indexing`: the gap still grows when measured at the reads where a new
+  change had just arrived; a quiet database widens the same gap between
+  writes), the binlog arrow says
+  "falling behind" and a card names what to check first: the `doctor` check
+  "Index buffer pool" and the source's write rate.
 
 ## [0.100.0] - 2026-10-06
 ### Changed
