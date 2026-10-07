@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -261,5 +262,41 @@ func TestScanBaselinePass_footerShortOfItsRowsFails(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("page %d: err = %v, want %q", page, err, want)
 		}
+	}
+}
+
+// The point of the change: an ordinary table is read by pages. The other
+// tests compare against the single read, which gives the same rows and bytes,
+// so they would pass if paging were switched off by mistake.
+func TestBaselineScanPages_pagesAnOrdinaryTableOnly(t *testing.T) {
+	ddb, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ddb.Close()
+	lit := func(p string) string { return "'" + strings.ReplaceAll(p, "'", "''") + "'" }
+	plain := writeZooRows(t, t.TempDir(), 23, 4, zooCreateTableSQL)
+	total, paged, err := baselineScanPages(context.Background(), ddb, lit(plain), "mydb", "orders")
+	if err != nil || !paged || total != 23 {
+		t.Fatalf("ordinary table: total=%d paged=%v err=%v, want 23 rows read by pages", total, paged, err)
+	}
+	clash := writeZooRows(t, t.TempDir(), 9, 4, strings.Replace(zooCreateTableSQL, "`name` varchar(64)", "`FILE_ROW_NUMBER` varchar(64)", 1))
+	if _, paged, err := baselineScanPages(context.Background(), ddb, lit(clash), "mydb", "orders"); err != nil || paged {
+		t.Fatalf("table with a file_row_number column: paged=%v err=%v, want one query", paged, err)
+	}
+
+	// And the one-query read says so, naming the table.
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	mergedRows(t, clash, 2, nil)
+	if !strings.Contains(buf.String(), "reading a backup file in one query") || !strings.Contains(buf.String(), "table=orders") {
+		t.Fatalf("no warning for the one-query read; log: %q", buf.String())
+	}
+	buf.Reset()
+	mergedRows(t, plain, 2, nil)
+	if buf.Len() != 0 {
+		t.Fatalf("an ordinary table logged %q", buf.String())
 	}
 }

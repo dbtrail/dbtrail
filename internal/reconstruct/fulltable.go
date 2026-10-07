@@ -2217,8 +2217,10 @@ func mergeSpilledPasses(ctx context.Context, ddb *sql.DB, in mergeCore, emit fun
 // for (#2207). duckdb-go runs a query to a materialized result, so one
 // SELECT * over the file held the whole table, decoded, in memory that
 // DuckDB's memory_limit does not cover; on a large table that was most of a
-// rewrite's peak. A page is the writer's row group, so a file this package
-// wrote is read a group at a time. Zero or less reads the file in one query.
+// rewrite's peak. A page is the Parquet writer's row group (500,000 rows); a
+// file DuckDB wrote (a base with its chain applied, a download) has groups of
+// about 122,880 rows, so a page spans a few. Zero or less reads the file in
+// one query.
 // A variable so tests can page a small file.
 var scanPageRows int64 = ParquetWriterRowGroupSize
 
@@ -2234,7 +2236,7 @@ var scanPageRows int64 = ParquetWriterRowGroupSize
 func scanBaselinePass(ctx context.Context, ddb *sql.DB, in mergeCore, changes map[string]*query.ResultRow,
 	owns *[spillBuckets]bool, emit func(map[string]any) error, stats *mergeStats) error {
 	lit := "'" + strings.ReplaceAll(in.LocalBaselinePath, "'", "''") + "'"
-	total, paged, err := baselineScanPages(ctx, ddb, lit)
+	total, paged, err := baselineScanPages(ctx, ddb, lit, in.Schema, in.Table)
 	if err != nil {
 		return err
 	}
@@ -2278,16 +2280,16 @@ func scanBaselinePass(ctx context.Context, ddb *sql.DB, in mergeCore, changes ma
 // and the row count its footer declares. A table with a column named
 // file_row_number (any case) is read in one query, unbounded as before: DuckDB
 // refuses the file_row_number option on such a file.
-func baselineScanPages(ctx context.Context, ddb *sql.DB, lit string) (total int64, paged bool, err error) {
+func baselineScanPages(ctx context.Context, ddb *sql.DB, lit, schema, table string) (total int64, paged bool, err error) {
 	if scanPageRows <= 0 {
 		return 0, false, nil
 	}
 	if err := ddb.QueryRowContext(ctx, "SELECT num_rows FROM parquet_file_metadata("+lit+")").Scan(&total); err != nil {
-		return 0, false, fmt.Errorf("read the row count of the baseline: %w", err)
+		return 0, false, fmt.Errorf("read the row count of the backup file of %s.%s: %w", schema, table, err)
 	}
 	var clash int
 	if err := ddb.QueryRowContext(ctx, "SELECT count(*) FROM parquet_schema("+lit+") WHERE lower(name) = 'file_row_number'").Scan(&clash); err != nil {
-		return 0, false, fmt.Errorf("read the columns of the baseline: %w", err)
+		return 0, false, fmt.Errorf("read the columns of the backup file of %s.%s: %w", schema, table, err)
 	}
 	return total, clash == 0, nil
 }

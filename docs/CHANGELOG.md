@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   memory limit. On a 20 M row table shaped like sysbench-tpcc's `stock`
   (1.5 GB file) that read alone took 9.7 GB, and the whole rewrite 11.6 GB
   (23 GB for two tables at once, which a scheduled update does). The read
-  now asks for one row group (500,000 rows) at a time, in file order: the
+  now asks for 500,000 rows at a time, in file order: the
   same rows in the same order into a byte-identical file, and the rewrite
   of that table peaks at 2.9 GB (5.5 GB for two), in the same time. The
   read ends on the row count the file declares and then checks that no row
