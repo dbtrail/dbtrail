@@ -74,11 +74,20 @@ func TestLagGrowth(t *testing.T) {
 		deltaTo time.Duration // newest indexed change, since t0, on the source clock
 	}
 	for _, c := range []struct {
-		name       string
-		obs        []obs
-		wantGrown  int64 // 0 = no growth reported
-		wantOver   int64
+		name         string
+		obs          []obs
+		wantGrown    int64 // 0 = no growth reported
+		wantOver     int64
+		wantIndexing bool
 	}{
+		// Capture still indexing, at a quarter of the source's pace, read
+		// every minute (the Overview's pace while changes arrive).
+		{name: "slow capture, still indexing", obs: []obs{{0, -time.Hour}, {time.Minute, -time.Hour + 15*time.Second},
+			{2 * time.Minute, -time.Hour + 30*time.Second}, {3 * time.Minute, -time.Hour + 45*time.Second}, {4 * time.Minute, -time.Hour + time.Minute}},
+			wantGrown: 180, wantOver: 240, wantIndexing: true},
+		// One write right after the first read and nothing since: the gap
+		// grows like a stuck capture's, and the one move is not "indexing".
+		{name: "quiet after one write", obs: []obs{{0, 0}, {5 * time.Minute, 10 * time.Second}}, wantGrown: 290, wantOver: 300},
 		// Capture stuck an hour behind: nothing new indexed for five minutes.
 		{name: "an hour behind and stuck", obs: []obs{{0, -time.Hour}, {5 * time.Minute, -time.Hour}}, wantGrown: 300, wantOver: 300},
 		// The issue's shape: capture indexing about a quarter of what the
@@ -120,7 +129,7 @@ func TestLagGrowth(t *testing.T) {
 				}
 				return
 			}
-			if got == nil || got.GrownSeconds != c.wantGrown || got.OverSeconds != c.wantOver {
+			if got == nil || got.GrownSeconds != c.wantGrown || got.OverSeconds != c.wantOver || got.Indexing != c.wantIndexing {
 				t.Fatalf("growth = %+v, want grown %d over %d", got, c.wantGrown, c.wantOver)
 			}
 		})

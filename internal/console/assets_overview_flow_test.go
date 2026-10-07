@@ -121,7 +121,23 @@ func TestOverviewFlowModel(t *testing.T) {
 		"lag-growing-behind": lagCase(behindCov(c{"lag_growth": growing}), []any{fresh(nil)}),
 		// Same, while capture is still reading new changes.
 		"lag-growing-current": lagCase(c{"freshness": "current", "continuity": "ok", "lag_seconds": 200, "delta_to": "2026-09-23 14:56:00",
-			"lag_growth": c{"grown_seconds": 150, "over_seconds": 300}}, []any{fresh(nil)}),
+			"lag_growth": c{"grown_seconds": 150, "over_seconds": 300, "indexing": true}}, []any{fresh(nil)}),
+		// Running, gap growing, nothing new indexed, source not asked: a
+		// database that took one write and went quiet looks the same. No card.
+		"lag-growing-current-quiet": lagCase(c{"freshness": "current", "continuity": "ok", "lag_seconds": 230, "delta_to": "2026-09-23 14:55:00",
+			"lag_growth": c{"grown_seconds": 230, "over_seconds": 240}}, []any{fresh(nil)}),
+		// The issue's case on a console that cannot ask the source (serve):
+		// over five minutes behind (idle), still indexing, slower than the
+		// source writes. The card.
+		"lag-growing-idle-indexing": lagCase(c{"freshness": "idle", "continuity": "ok", "lag_seconds": 3900, "delta_to": "2026-09-23 13:54:00",
+			"lag_growth": c{"grown_seconds": 225, "over_seconds": 300, "indexing": true}}, []any{fresh(nil)}),
+		// An update from a full read that capture had not reached: it holds
+		// the full read's instant (14:29), half an hour before its files.
+		"update-after-full-read": lagCase(behindCov(c{"lag_seconds": 7200, "delta_to": "2026-09-23 12:59:00"}),
+			[]any{fresh(c{"data_as_of": "2026-09-23 14:29:06"})}),
+		// The coverage read failed: the record still dates the data.
+		"recorded-coverage-down": {"input": c{"coverage": c{"continuity": "unavailable"}, "baselines": c{"configured": true, "snapshots": []any{fresh(c{"data_as_of": "2026-09-23 13:59:06"})}, "schedule": sched},
+			"server": registry, "schema": c{"state": "idle"}, "uncaptured": c{}}},
 		// Idle and the source not asked: a quiet database widens the same
 		// gap. No card.
 		"lag-growing-quiet": lagCase(c{"freshness": "idle", "continuity": "ok", "lag_seconds": 3900, "delta_to": "2026-09-23 13:54:00",
@@ -132,7 +148,8 @@ func TestOverviewFlowModel(t *testing.T) {
 		// The supervisor says capture failed while the index still looks
 		// current: the break's card, never a second one.
 		"lag-growing-failed": {"input": c{
-			"coverage":  c{"freshness": "current", "continuity": "ok", "lag_seconds": 200, "delta_to": "2026-09-23 14:56:00", "lag_growth": growing},
+			"coverage": c{"freshness": "current", "continuity": "ok", "lag_seconds": 200, "delta_to": "2026-09-23 14:56:00",
+				"lag_growth": c{"grown_seconds": 150, "over_seconds": 300, "indexing": true}},
 			"baselines": c{"configured": true, "snapshots": []any{fresh(nil)}, "schedule": sched},
 			"server":    c{"id": "a", "kind": "registry", "has_source": true, "monitor_state": "failed"},
 			"monitor":   c{"state": "failed", "last_error": "dial tcp: connection refused"},
@@ -390,12 +407,15 @@ const origPaint = paint;`, 1)
 
 	// #2201: the copy's age is its data's.
 	for name, w := range map[string]struct{ big, sub, tone string }{
-		"lag-hour-recorded":   {"1h 6m ago", "data as of 13:53 · written 14:59 · next 14:35", "warn"},
-		"lag-hour-unrecorded": {"1h 5m ago", "data as of 13:54 · written 14:59 · next 14:35", "warn"},
-		"quiet-up-to-date":    {"4m 58s ago", "data as of 14:30 · next 14:35", "ok"},
-		"full-read-ahead":     {"4m 58s ago", "data as of 14:30 · next 14:35", "ok"},
-		"skew-source-ahead":   {"5m ago", "data as of 15:00 · written 14:59 · next 14:35", "ok"},
-		"copy-no-capture":     {"4m 58s ago", "data as of 14:30 · next 14:35", "ok"},
+		"lag-hour-recorded":      {"1h 7m ago", "data as of 13:53 · written 14:59 · next 14:35", "warn"},
+		"lag-hour-unrecorded":    {"1h 5m ago", "data as of 13:54 · written 14:59 · next 14:35", "warn"},
+		"quiet-up-to-date":       {"4m 58s ago", "data as of 14:30 · next 14:35", "ok"},
+		"full-read-ahead":        {"4m 58s ago", "data as of 14:30 · next 14:35", "ok"},
+		"skew-source-ahead":      {"5m ago", "data as of 15:00 · written 14:59 · next 14:35", "ok"},
+		"copy-no-capture":        {"4m 58s ago", "data as of 14:30 · next 14:35", "ok"},
+		"update-after-full-read": {"30m 54s ago", "data as of 14:29 · written 14:59 · next 14:35", "warn"},
+		// Colour dropped (capture state unknown), age kept.
+		"recorded-coverage-down": {"1h ago", "data as of 13:59 · written 14:59 · next 14:35", "none"},
 	} {
 		if p := get(name).Pieces[update]; p.Big != w.big || p.Sub != w.sub || p.Tone != w.tone {
 			t.Errorf("%s: copy arrow = big %q sub %q tone %q; want %q, %q, %q", name, p.Big, p.Sub, p.Tone, w.big, w.sub, w.tone)
@@ -412,7 +432,7 @@ const origPaint = paint;`, 1)
 		}
 		return nil
 	}
-	for _, name := range []string{"lag-growing-behind", "lag-growing-current"} {
+	for _, name := range []string{"lag-growing-behind", "lag-growing-current", "lag-growing-idle-indexing"} {
 		o := get(name)
 		k := fallingBehind(name)
 		if k == nil || k.Title != "Capture is falling further behind" || !hasLabel(k.Actions, "Details") {
@@ -432,13 +452,16 @@ const origPaint = paint;`, 1)
 			t.Errorf("%s: an em dash on screen: %q", name, o.Screen)
 		}
 	}
-	if k := fallingBehind("lag-growing-behind"); k == nil || len(k.Lines) == 0 || k.Lines[0] != "The gap to your database grew 5m in the last 5m. Capture is now 1h 5m behind, and the copy cannot hold anything newer than what capture has read." {
+	if k := fallingBehind("lag-growing-behind"); k == nil || len(k.Lines) == 0 || k.Lines[0] != "Capture is 1h 5m behind your database, and nothing newer was indexed in the last 5m. The copy cannot hold anything newer than what capture has read." {
+		t.Errorf("lag-growing-behind: card = %+v", k)
+	}
+	if k := fallingBehind("lag-growing-current"); k == nil || len(k.Lines) == 0 || k.Lines[0] != "Capture is 3m 20s behind your database, and the gap grew 2m 30s in the last 5m. The copy cannot hold anything newer than what capture has read." {
 		t.Errorf("lag-growing-behind: card = %+v", k)
 	}
 	if p := get("lag-growing-current").Pieces[capture]; p.Sub != "3m 20s behind" {
 		t.Errorf("lag-growing-current: capture sub = %q", p.Sub)
 	}
-	for _, name := range []string{"lag-growing-quiet", "lag-growing-stalled", "lag-growing-failed", "lag-hour-unrecorded", "healthy"} {
+	for _, name := range []string{"lag-growing-quiet", "lag-growing-current-quiet", "lag-growing-stalled", "lag-growing-failed", "lag-hour-unrecorded", "healthy"} {
 		if k := fallingBehind(name); k != nil {
 			t.Errorf("%s: a falling-behind card where none belongs: %+v", name, *k)
 		}

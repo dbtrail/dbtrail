@@ -60,10 +60,10 @@ type BaselineRunRecord struct {
 	// of SnapshotTime itself (DataAsOfFor). Empty when the index did not
 	// answer and the ancestor is not on record, and on every run recorded
 	// before the field existed; both read as unknown, never as current.
-	DataAsOf string `json:"data_as_of,omitempty"`
-	StartedAt    string `json:"started_at"`
-	FinishedAt   string `json:"finished_at"`
-	Tables       int    `json:"tables,omitempty"`
+	DataAsOf   string `json:"data_as_of,omitempty"`
+	StartedAt  string `json:"started_at"`
+	FinishedAt string `json:"finished_at"`
+	Tables     int    `json:"tables,omitempty"`
 	// ViewsSkipped: see BaselineStatus.ViewsSkipped. Zero also for every run
 	// recorded before the count existed, so zero is never shown as a count.
 	ViewsSkipped int `json:"views_skipped,omitempty"`

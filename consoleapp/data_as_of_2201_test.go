@@ -20,13 +20,13 @@ func TestFoldDataAsOf(t *testing.T) {
 	at := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	hourAgo := at.Add(-time.Hour)
 	for _, c := range []struct {
-		name           string
-		ancestor       time.Time
-		ancestorKnown  bool
-		newest         time.Time
-		newestKnown    bool
-		want           time.Time
-		wantKnown      bool
+		name          string
+		ancestor      time.Time
+		ancestorKnown bool
+		newest        time.Time
+		newestKnown   bool
+		want          time.Time
+		wantKnown     bool
 	}{
 		{name: "capture an hour behind: the newest change folded", newest: hourAgo, newestKnown: true, want: hourAgo, wantKnown: true},
 		// The source clock ahead of this host: an event stamped after the

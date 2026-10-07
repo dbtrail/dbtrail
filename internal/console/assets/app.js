@@ -1969,37 +1969,38 @@ function flowParseStamp(stamp) {
 // and how many seconds older than the files the data is (0 when the files'
 // age is the answer). Never younger than the files.
 //
-// Clocks: the coverage read's lag_seconds is this host's now minus the
-// newest indexed change, clamped at zero; delta_to and an update's
-// data_as_of are both on the source's clock, so their difference is too.
-// Adding the two never mixes clocks and never goes negative.
-//  - data_as_of on record and not past delta_to: lag plus how far behind
-//    the newest indexed change the copy's newest change is. When the copy
-//    holds the newest indexed change and the source says capture holds all
-//    it wrote, nothing is missing: the files' age.
-//  - data_as_of past delta_to: a full read newer than anything indexed. It
-//    holds the source as of its own instant: the files' age.
-//  - nothing on record (the CLI made it, or it predates the record): at
+// With data_as_of on record the age is now minus data_as_of, reached two
+// ways and the larger kept: the files' age plus how much older than the
+// files' instant the data is (works without a coverage read), and
+// capture's lag plus how far behind the newest indexed change the copy's
+// newest change is. An update's data_as_of is on the source's clock, so a
+// source clock running ahead understates the age by that offset; both
+// parts are clamped, so it is never negative.
+//  - The copy holds the newest indexed change and the source says capture
+//    holds all it wrote: nothing is missing, so the files' age.
+//  - Nothing on record (the CLI made it, or it predates the record): at
 //    least as old as capture's lag, since the copy cannot hold a change
 //    capture has not read.
-//  - no lag (no capture, or nothing indexed yet): the files' age.
+//  - Neither (no record, no lag): the files' age.
 function copyDataAge(snap, cov) {
   const filesSec = typeof snap.age_hours === "number" ? Math.max(0, snap.age_hours * 3600) : -1;
   if (filesSec < 0) return null;
   const files = { sec: filesSec, asOf: snap.time, extra: 0 };
   const lag = typeof cov.lag_seconds === "number" ? Math.max(0, cov.lag_seconds) : null;
-  const to = flowParseStamp(cov.delta_to);
-  if (lag === null || !isFinite(to)) return files;
+  const to = lag === null ? NaN : flowParseStamp(cov.delta_to);
   const held = flowParseStamp(snap.data_as_of);
   let sec, asOf;
   if (isFinite(held)) {
-    if (held > to) return files;
-    if (held === to && covCaptureState(cov) === "up_to_date") return files;
-    sec = lag + (to - held) / 1000;
+    if (isFinite(to) && held >= to && covCaptureState(cov) === "up_to_date") return files;
+    const filesAt = flowParseStamp(snap.time);
+    sec = isFinite(filesAt) ? filesSec + Math.max(0, (filesAt - held) / 1000) : filesSec;
+    if (isFinite(to) && held <= to) sec = Math.max(sec, lag + (to - held) / 1000);
     asOf = snap.data_as_of;
-  } else {
+  } else if (isFinite(to)) {
     sec = lag;
     asOf = cov.delta_to;
+  } else {
+    return files;
   }
   if (sec <= filesSec) return files;
   return { sec, asOf, extra: sec - filesSec };
@@ -2007,14 +2008,16 @@ function copyDataAge(snap, cov) {
 
 // captureFallingBehind is the #2201 card: the gap between the source and the
 // index kept widening over the coverage reads (lag_growth), said only where
-// that means capture cannot keep up. A quiet database widens the same gap
-// at one second per second, so it counts only beside a capture reading new
-// changes (current) or one the source itself says is behind.
+// that means capture cannot keep up. A quiet database widens the same gap at
+// one second per second, so growth alone is not enough: the source must say
+// capture is behind, or capture must still be indexing new changes (only
+// slower than the source writes them) while it reads as running.
 function captureFallingBehind(cov) {
   const g = cov.lag_growth;
   if (!g || typeof g.grown_seconds !== "number" || typeof g.over_seconds !== "number") return null;
-  if (cov.freshness !== "current" && covCaptureState(cov) !== "behind") return null;
-  return g;
+  if (covCaptureState(cov) === "behind") return g;
+  if (g.indexing === true && (cov.freshness === "current" || cov.freshness === "idle")) return g;
+  return null;
 }
 
 function ovFlowModel(inp) {
@@ -2141,11 +2144,17 @@ function ovFlowModel(inp) {
   const falling = !cut && mstate !== "pending" && capture.line !== "state could not be read" ? captureFallingBehind(cov) : null;
   if (falling) {
     const lagNow = typeof cov.lag_seconds === "number" ? plainDuration(cov.lag_seconds) : "";
+    const grewBy = plainDuration(falling.grown_seconds) + " in the last " + plainDuration(falling.over_seconds);
     capture = piece("binlog", "warn", "falling behind", lagNow ? lagNow + " behind" : (lastIndexed ? "last change " + lastIndexed : ""));
     cards.push({ kind: "capture-falling-behind", key: sid + "|falling-behind", tone: "warn",
       title: "Capture is falling further behind",
-      lines: ["The gap to your database grew " + plainDuration(falling.grown_seconds) + " in the last " + plainDuration(falling.over_seconds) + "." +
-        (lagNow ? " Capture is now " + lagNow + " behind, and the copy cannot hold anything newer than what capture has read." : "")],
+      // Stuck (the gap grew by about all the time that passed) and slow
+      // say different things: nothing new was indexed, or less than the
+      // source wrote.
+      lines: [(!lagNow ? "The gap to your database grew " + grewBy + "."
+        : "Capture is " + lagNow + " behind your database, and " +
+          (falling.grown_seconds >= 0.9 * falling.over_seconds ? "nothing newer was indexed in the last " + plainDuration(falling.over_seconds) + "." : "the gap grew " + grewBy + ".")) +
+        " The copy cannot hold anything newer than what capture has read."],
       recipe: ["Index buffer pool: run bintrail doctor. If its Index buffer pool check warns, the index MySQL still runs with the 128 MB default, which cannot keep up with a busy source. On the bundled index, set INDEX_BUFFER_POOL in .env (for example 8G) and run docker compose up -d.",
         "Source write rate: a batch job, a bulk load or a load test can write faster than capture indexes. The gap closes once it ends.",
         "Free disk and write errors on the index database."],

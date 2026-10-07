@@ -1,6 +1,7 @@
 package console
 
 import (
+	"slices"
 	"sync"
 	"time"
 )
@@ -65,6 +66,12 @@ func newLagTrendBook() *lagTrendBook { return &lagTrendBook{} }
 type lagGrowthDTO struct {
 	GrownSeconds int64 `json:"grown_seconds"`
 	OverSeconds  int64 `json:"over_seconds"`
+	// Indexing: the newest indexed change moved forward over at least two
+	// of the intervals between reads. Capture is still indexing, only slower
+	// than the source writes. Without it the gap widened with nothing new
+	// indexed, which a quiet database does just the same as a stuck capture,
+	// so only the source itself can tell those two apart.
+	Indexing bool `json:"indexing,omitempty"`
 }
 
 // observe records one read for server and says whether the gap is growing.
@@ -127,5 +134,16 @@ func lagGrowth(samples []lagSample, cur lagSample) *lagGrowthDTO {
 	if rs := cur.at.Sub(recent.at); rs > 0 && float64(grown(recent, cur)) < lagTrendMinRatio*float64(rs) {
 		return nil
 	}
-	return &lagGrowthDTO{GrownSeconds: int64(g / time.Second), OverSeconds: int64(span / time.Second)}
+	// cur is the last sample unless the dedupe left it out.
+	pts := samples
+	if last := samples[len(samples)-1]; !last.at.Equal(cur.at) {
+		pts = append(slices.Clone(samples), cur)
+	}
+	advances := 0
+	for i := 1; i < len(pts); i++ {
+		if pts[i].deltaTo.After(pts[i-1].deltaTo) {
+			advances++
+		}
+	}
+	return &lagGrowthDTO{GrownSeconds: int64(g / time.Second), OverSeconds: int64(span / time.Second), Indexing: advances >= 2}
 }
