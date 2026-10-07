@@ -366,6 +366,7 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 			report.add(checkIndexConnection(ctx, indexDSN, indexCfg.DBName))
 			report.add(checkIndexWriteAccess(ctx, indexDSN, indexCfg.DBName))
 			report.add(checkIndexCapacity(ctx, indexDSN, indexCfg.DBName, indexRetain, cfg.retainNote))
+			report.add(checkIndexBufferPool(ctx, indexDSN))
 		}
 	} else {
 		report.add(CheckResult{

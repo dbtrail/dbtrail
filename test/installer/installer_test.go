@@ -12,12 +12,14 @@ import (
 // with no Docker and no network. lsof reports a port busy when it is listed
 // in BUSY_PORTS; curl serves the repository's docker-compose.yml; docker
 // records what it was asked to do, and plays a stopped Docker
-// (STUB_DOCKER_DOWN) or a missing Compose (STUB_NO_COMPOSE) when asked.
+// (STUB_DOCKER_DOWN) or a missing Compose (STUB_NO_COMPOSE) when asked;
+// `docker info --format` prints STUB_MEM_TOTAL, the memory Docker reports.
 var stubs = map[string]string{
 	"docker": `#!/bin/sh
 echo "docker $*" >> "$STUB_LOG"
 case "$1" in
-  info) [ -n "$STUB_DOCKER_DOWN" ] && exit 1 ;;
+  info) [ -n "$STUB_DOCKER_DOWN" ] && exit 1
+        [ "$2" = --format ] && printf '%s\n' "$STUB_MEM_TOTAL" ;;
   compose) [ "$2" = version ] && [ -n "$STUB_NO_COMPOSE" ] && exit 1 ;;
 esac
 case "$1 $2" in
@@ -50,6 +52,14 @@ type run struct {
 
 func install(t *testing.T, env ...string) run {
 	t.Helper()
+	return installWith(t, nil, env...)
+}
+
+// installWith runs the installer after prep has put files in the stack
+// directory (which exists, empty, when prep runs): an .env the operator
+// wrote before installing, or a compose file from an earlier run.
+func installWith(t *testing.T, prep func(dir string), env ...string) run {
+	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
@@ -65,6 +75,12 @@ func install(t *testing.T, env ...string) run {
 		}
 	}
 	dir := filepath.Join(tmp, "stack")
+	if prep != nil {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		prep(dir)
+	}
 	log := filepath.Join(tmp, "docker.log")
 	cmd := exec.Command("sh", filepath.Join(root, "install.sh"))
 	cmd.Env = append([]string{

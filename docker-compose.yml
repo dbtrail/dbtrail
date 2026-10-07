@@ -140,8 +140,8 @@ services:
     image: mysql:8.4.9
     # --innodb-flush-log-at-trx-commit=2 is the one safe index-side tuning
     # (bintrail replays from the stream_state checkpoint, so a ≤1s recovery
-    # window is acceptable). buffer-pool size is left at the default — it
-    # depends on host RAM and is the operator's to tune (docs/deployment.md §3).
+    # window is acceptable). The buffer pool is sized per machine through
+    # INDEX_BUFFER_POOL, see below.
     #
     # --sort-buffer-size=4M raises the stock default (256K on MySQL 8.x).
     # binlog_events stores
@@ -189,8 +189,14 @@ services:
     # operator who repoints the volume at an exotic filesystem may need to drop
     # this one flag.
     #
-    # Buffer pool stays at the 128M default — it is host-RAM dependent and the
-    # operator's to size (docs/deployment.md §3); we never hardcode a RAM number.
+    # --innodb-buffer-pool-size comes from INDEX_BUFFER_POOL in .env. install.sh
+    # writes it on a fresh install as a quarter of the memory Docker has (at
+    # most 32G; a machine under about 1 GB keeps the default), because the
+    # 128M InnoDB default caps capture at about 1,400 row changes per second on
+    # a busy server whatever the machine has (#2141). Unset, it stays 128M, as
+    # before. It is a number, never hardcoded here: the machine decides it, and
+    # the operator can change it in .env (docs/deployment.md §3). `doctor`
+    # warns when it is still 128M on a machine with far more memory.
     command:
       - "--innodb-flush-log-at-trx-commit=2"
       - "--sort-buffer-size=4M"
@@ -198,6 +204,7 @@ services:
       - "--skip-log-bin"
       - "--innodb-redo-log-capacity=2147483648"
       - "--innodb-flush-method=O_DIRECT"
+      - "--innodb-buffer-pool-size=${INDEX_BUFFER_POOL:-128M}"
     environment:
       # 8.4 defaults to caching_sha2_password (native_password disabled);
       # bintrail's driver negotiates it over the plaintext Docker network.

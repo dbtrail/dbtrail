@@ -168,8 +168,10 @@ sign-in.
 
 Optional knobs go in a `.env` next to the file: `SOURCE_DSN` to start
 streaming one source immediately at boot, `INDEX_DSN` to bring your own index
-MySQL, `CONSOLE_TOKEN` for an opt-in API-automation token (humans use the
-password). (From a source checkout, `cp .env.example .env` gives you the
+MySQL, `INDEX_BUFFER_POOL` for the bundled index MySQL's buffer pool (`install.sh`
+writes it from the machine's memory; see
+[deployment.md §3](deployment.md#innodb-tuning)), `CONSOLE_TOKEN` for an
+opt-in API-automation token (humans use the password). (From a source checkout, `cp .env.example .env` gives you the
 annotated template.)
 
 Notes:
@@ -257,6 +259,7 @@ What a stale compose file costs:
 | the read-only index mount plus `BINTRAIL_INDEX_DATADIR_RO` | free disk space for the index cannot be measured | The preflight and the Retention page report it as not measurable |
 | the `iceberg-export` profile and its volume | there is no one-shot Iceberg export to run | `docker compose --profile iceberg-export run ...` says the service does not exist |
 | the `host.docker.internal` mapping (`extra_hosts`) | on Linux, a database on this same machine cannot be reached by that name | Adding the server fails with `lookup host.docker.internal: no such host` |
+| `--innodb-buffer-pool-size=${INDEX_BUFFER_POOL:-128M}` on `index-mysql` | `INDEX_BUFFER_POOL` in `.env` does nothing, and the index MySQL keeps the 128 MB buffer pool, which caps capture on a busy source | `doctor` warns "Index buffer pool" at 128 MB on a machine with about 4 GB or more; capture lag keeps growing |
 | `BINTRAIL_CONSOLE_SQL_PANEL` (the current file does not set it) | nothing: the SQL page it switched was removed in 0.75.0 | Remove the variable. It is read for one release and warns. SQL in the browser is on the Overview now and this variable does not control it |
 
 Two things make this easier to catch:
