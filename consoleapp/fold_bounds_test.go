@@ -104,6 +104,7 @@ func TestEveryConsoleappFoldConfigIsBounded(t *testing.T) {
 		"Parallelism":        "daemonFoldParallelism",
 		"WarnEventThreshold": "daemonFoldWarnEventThreshold",
 		"MaxTouchedRows":     "daemonFoldMaxTouchedRows",
+		"MaxChangeBytes":     "daemonFoldMaxChangeBytes",
 		"RemediationHint":    "daemonFoldRemediation",
 	}
 

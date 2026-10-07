@@ -250,6 +250,8 @@ func TestWithFoldBudgets(t *testing.T) {
 	cfg := FullTableConfig{
 		FetchBatchSize:     4242,
 		WarnEventThreshold: 777_777,
+		MaxTouchedRows:     55_555,
+		MaxChangeBytes:     66_666,
 		Parallelism:        3,
 		Tables:             []string{"a.one", "a.two", "a.three", "a.four"},
 		RemediationHint:    "do the thing this binary can actually do",
@@ -259,7 +261,11 @@ func TestWithFoldBudgets(t *testing.T) {
 	got := withFoldBudgets(cfg, foldConfig{
 		Schema: "shop", Table: "orders",
 		BatchSize: 1, WarnEventThreshold: 1, Parallelism: 1, RemediationHint: "stale",
+		MaxTouchedRows: 1, MaxChangeBytes: 1,
 	})
+	if got.MaxTouchedRows != 55_555 || got.MaxChangeBytes != 66_666 {
+		t.Errorf("MaxTouchedRows, MaxChangeBytes = %d, %d; want 55555, 66666 (#1107, #2207)", got.MaxTouchedRows, got.MaxChangeBytes)
+	}
 
 	if got.BatchSize != 4242 {
 		t.Errorf("BatchSize = %d, want 4242", got.BatchSize)

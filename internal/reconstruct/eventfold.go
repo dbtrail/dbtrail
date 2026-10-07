@@ -3,6 +3,7 @@ package reconstruct
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -223,8 +224,11 @@ type foldConfig struct {
 	// MaxTouchedRows is FullTableConfig.MaxTouchedRows, divided by Parallelism
 	// at the check.
 	MaxTouchedRows int64
+	// MaxChangeBytes is FullTableConfig.MaxChangeBytes, divided by Parallelism
+	// at the check.
+	MaxChangeBytes int64
 	// SpillOverBudget moves the changes to disk past MaxTouchedRows instead of
-	// refusing (#1107). Only the merge over a baseline reads a spill; the
+	// refusing (#1107), and past MaxChangeBytes (#2207), which never refuses. Only the merge over a baseline reads a spill; the
 	// binlog-only fallback keeps the refusal.
 	SpillOverBudget bool
 
@@ -297,16 +301,112 @@ type foldResult struct {
 	Spill *changeSpill
 }
 
-// admitPage runs after each page is folded into r.Changes. Up to limit
+// Row images are estimated at what they take on the heap, not on disk: the
+// constants are calibrated against the runtime's own count by
+// TestApproxChangeBytes_tracksTheHeap, for the shapes a decoded image takes.
+const (
+	// changeRowBytes is a retained event without its image: the ResultRow
+	// and its own small strings.
+	changeRowBytes = 330
+	// changeMapBytes is an image map's fixed cost: its header and its first
+	// group of slots, paid by a map of one entry as much as of eight.
+	changeMapBytes = 300
+	// changeFieldBytes is one image entry besides its key's and its value's
+	// bytes: the map slot and the boxed value.
+	changeFieldBytes = 64
+	// changeSampleRows is how many entries sampledChangeBytes reads.
+	changeSampleRows = 64
+)
+
+// approxChangeBytes estimates the heap one retained change takes.
+func approxChangeBytes(ev *query.ResultRow) int64 {
+	n := int64(changeRowBytes) + int64(len(ev.PKValues)+len(ev.BinlogFile)+len(ev.SchemaName)+len(ev.TableName))
+	if ev.GTID != nil {
+		n += int64(len(*ev.GTID))
+	}
+	for _, c := range ev.ChangedColumns {
+		n += 16 + int64(len(c))
+	}
+	return n + approxImageBytes(ev.RowAfter)
+}
+
+func approxImageBytes(m map[string]any) int64 {
+	if m == nil {
+		return 0
+	}
+	n := int64(changeMapBytes)
+	for k, v := range m {
+		n += changeFieldBytes + int64(len(k)) + approxValueBytes(v)
+	}
+	return n
+}
+
+func approxValueBytes(v any) int64 {
+	switch x := v.(type) {
+	case string:
+		return int64(len(x))
+	case json.Number:
+		return int64(len(x))
+	case []byte:
+		return 8 + int64(len(x))
+	case time.Time:
+		return 24
+	case map[string]any:
+		return approxImageBytes(x)
+	case []any:
+		n := 24 + 16*int64(len(x))
+		for _, e := range x {
+			n += approxValueBytes(e)
+		}
+		return n
+	default:
+		return 8
+	}
+}
+
+// sampledChangeBytes estimates the heap a change map takes from up to
+// changeSampleRows of its entries: the total, and the average a row.
+func sampledChangeBytes(m map[string]*query.ResultRow) (total, perRow int64) {
+	if len(m) == 0 {
+		return 0, 0
+	}
+	var sum, seen int64
+	for _, ev := range m {
+		sum += approxChangeBytes(ev)
+		if seen++; seen == changeSampleRows {
+			break
+		}
+	}
+	perRow = max(1, sum/seen)
+	return perRow * int64(len(m)), perRow
+}
+
+// admitPage is admit with no size budget.
+func (r *foldResult) admitPage(limit int64, tables int, spill bool) error {
+	return r.admit(limit, 0, tables, spill)
+}
+
+// admit runs after each page is folded into r.Changes. Up to limit
 // distinct changed rows (0 = no limit) the changes stay in memory. Past it,
 // with spill allowed, every change moves to disk and the map is replaced,
 // and every later page follows it there; without spill it is the refusal.
 //
 // The map is replaced, not cleared: a cleared Go map keeps the memory it grew
 // to, which is the memory this exists to give back.
-func (r *foldResult) admitPage(limit int64, tables int, spill bool) error {
+//
+// maxBytes (0 = none) is the same move by size (#2207): rows are a proxy for
+// memory, and a wide table's rows cost several times a narrow one's. Past it
+// the changes go to disk and the merge's passes are sized to it; it never
+// refuses, so a fold that may not spill ignores it and the refusal stays on
+// rows.
+func (r *foldResult) admit(limit, maxBytes int64, tables int, spill bool) error {
 	if r.Spill == nil {
-		if limit <= 0 || int64(len(r.Changes)) <= limit {
+		overRows := limit > 0 && int64(len(r.Changes)) > limit
+		var total int64
+		if spill && maxBytes > 0 {
+			total, _ = sampledChangeBytes(r.Changes)
+		}
+		if !overRows && (maxBytes <= 0 || total <= maxBytes) {
 			return nil
 		}
 		if !spill {
@@ -317,6 +417,7 @@ func (r *foldResult) admitPage(limit int64, tables int, spill bool) error {
 			return err
 		}
 		s.tables = tables
+		s.maxBytes = maxBytes
 		r.Spill = s
 	}
 	if err := r.Spill.drain(r.Changes); err != nil {
@@ -519,8 +620,9 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 		// Per page, not after the window: the memory is spent as the map
 		// grows, so a check at the end would come after the harm (#1107).
 		limit := scaledEventThreshold(fc.MaxTouchedRows, fc.Parallelism)
+		maxBytes := scaledEventThreshold(fc.MaxChangeBytes, fc.Parallelism)
 		spilling := res.Spill != nil
-		if err := res.admitPage(limit, fc.Parallelism, fc.SpillOverBudget); err != nil {
+		if err := res.admit(limit, maxBytes, fc.Parallelism, fc.SpillOverBudget); err != nil {
 			// No table prefix: the run's error adds "schema.table: ".
 			// No remedy here: it differs per surface (a restore needs a closer
 			// moment, a scheduled update a full backup), and the surfaces add
@@ -529,8 +631,9 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 			return foldErr
 		}
 		if !spilling && res.Spill != nil {
-			slog.Info("reconstruct: more changed rows than this fold holds in memory; writing them to disk and merging in passes",
-				"schema", fc.Schema, "table", fc.Table, "limit", limit, "dir", res.Spill.dir)
+			slog.Info("reconstruct: more changes than this fold holds in memory; writing them to disk and merging in passes",
+				"schema", fc.Schema, "table", fc.Table, "rows", res.Spill.records, "limit", limit,
+				"est_bytes", res.Spill.heldBytes, "byte_limit", maxBytes, "dir", res.Spill.dir)
 		}
 
 		res.Total += int64(len(page))

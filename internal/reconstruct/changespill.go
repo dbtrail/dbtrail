@@ -22,11 +22,12 @@ import (
 //
 // A fold holds one row image per distinct changed row until the merge, and
 // paging the event fetch (#1097) does not bound that. When a table's changes
-// pass the fold's in-memory limit (FullTableConfig.MaxTouchedRows, divided by
-// the tables folding at once), foldEventWindow moves them here instead of
-// refusing: every change goes to one of spillBuckets files chosen by a hash of
-// its pk_values, and the merge then reads a few groups at a time, as many as
-// fit under the same limit, making one pass over the baseline per set. Peak
+// pass the fold's in-memory limit (FullTableConfig.MaxTouchedRows, or
+// MaxChangeBytes by estimated size, each divided by the tables folding at
+// once), foldEventWindow moves them here instead of refusing: every change
+// goes to one of spillBuckets files chosen by a hash of its pk_values, and the
+// merge then reads a few groups at a time, as many as fit under the smaller of
+// the two limits (passRows), making one pass over the baseline per set. Peak
 // memory stays near the limit, plus about one group while a pass is built,
 // however many rows the window changed; the price
 // is one baseline read per pass, and disk in the system temp directory for the
@@ -93,6 +94,13 @@ type changeSpill struct {
 	// with it, and tables names the tables folding at once for the refusal.
 	limit  int64
 	tables int
+	// maxBytes is the fold's size budget (#2207), what a merge pass should
+	// hold; heldBytes is the estimate of every record drained. The passes are
+	// sized from the two (passRows), over every drained row rather than the
+	// sample that started the spill, which can miss a few huge rows. Only the
+	// passes follow it: the refusal stays on limit, and a group larger than a
+	// pass is still read whole, as its own pass.
+	maxBytes, heldBytes int64
 
 	files   [spillBuckets]*os.File
 	bufs    [spillBuckets]*bufio.Writer
@@ -146,8 +154,18 @@ func (s *changeSpill) drain(changes map[string]*query.ResultRow) error {
 			return fmt.Errorf("write changed row %q to the temporary directory %s: %w", pk, s.dir, err)
 		}
 		s.records++
+		s.heldBytes += approxChangeBytes(ev)
 	}
 	return nil
+}
+
+// passRows is how many changes a merge pass holds under the size budget, from
+// the average estimate of what was drained; 0 when there is no budget.
+func (s *changeSpill) passRows() int64 {
+	if s.maxBytes <= 0 || s.records == 0 {
+		return 0
+	}
+	return max(1, s.maxBytes/max(1, s.heldBytes/s.records))
 }
 
 // finish flushes and closes every group file. Nothing may be drained after it.
@@ -246,11 +264,16 @@ func (s *changeSpill) eachPass(ctx context.Context, run func(pass map[string]*qu
 		return nil
 	}
 	last := 0
+	passLimit := s.limit
+	if pr := s.passRows(); pr > 0 && (passLimit <= 0 || pr < passLimit) {
+		passLimit = pr
+	}
+	warned := false
 	for b := range spillBuckets {
 		if err := ctx.Err(); err != nil {
 			return passes, err
 		}
-		if len(pass) > 0 && int64(len(pass)+last) > s.limit {
+		if len(pass) > 0 && int64(len(pass)+last) > passLimit {
 			if err := flush(); err != nil {
 				return passes, err
 			}
@@ -260,6 +283,14 @@ func (s *changeSpill) eachPass(ctx context.Context, run func(pass map[string]*qu
 			return passes, err
 		}
 		last = len(group)
+		// A group over twice a pass is still read whole; say so once, so a
+		// pass well over the target is not silent. A group is about 1/64 of
+		// the changes, so this is a window past about 128 times the budget.
+		if pr := s.passRows(); !warned && pr > 0 && int64(last) > 2*pr {
+			warned = true
+			slog.Warn("reconstruct: a group of changed rows read back from disk is larger than the memory budget; it is merged whole",
+				"rows", last, "rows_a_pass", pr, "byte_limit", s.maxBytes)
+		}
 		// Groups hold disjoint keys, so nothing here overwrites.
 		maps.Copy(pass, group)
 		owns[b] = true

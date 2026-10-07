@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,12 +27,13 @@ import (
 // it runs only when BINTRAIL_2207_PROBE is set, one probe per process so the
 // numbers of one do not carry another's leftovers.
 //
-//	BINTRAIL_2207_PROBE    build | scan | paged | rewrite
+//	BINTRAIL_2207_PROBE    build | scan | paged | rewrite | window
 //	BINTRAIL_2207_DIR      work directory, shared by the probes (required)
 //	BINTRAIL_2207_ROWS     rows in each base (build)
 //	BINTRAIL_2207_WINDOWS  windows in the chain (build, default 10)
 //	BINTRAIL_2207_CHANGES  changed rows per window (build, default ROWS/40)
 //	BINTRAIL_2207_PAR      tables (build) / tables rewritten at once (rewrite)
+//	BINTRAIL_2207_REWRITE_CHANGES  changed rows in the window (rewrite, window)
 //	BINTRAIL_2207_THREADS, BINTRAIL_2207_MEMLIMIT  DuckDB tuning (unset = the
 //	                       daemon's: duckdbutil.DefaultTuning)
 //
@@ -80,6 +82,17 @@ func TestRewriteMemoryProfile2207(t *testing.T) {
 			}
 		})
 		t.Logf("merge read of one base (today's scan): %s", peak)
+	case "window":
+		// The live size of one window's change map, which a rewrite holds
+		// while it writes: the part of its heap that is not the writer's.
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		m := wideWindow(rand.New(rand.NewSource(7)), st.Rows, envInt(t, "BINTRAIL_2207_REWRITE_CHANGES", st.Changes), st.Windows+1)
+		runtime.GC()
+		runtime.ReadMemStats(&after)
+		t.Logf("one window's change map, %d rows: %s live", len(m), mib(after.HeapAlloc-before.HeapAlloc))
+		runtime.KeepAlive(m)
 	case "paged":
 		paged2207(t, st, tuning)
 	case "rewrite":
@@ -90,7 +103,7 @@ func TestRewriteMemoryProfile2207(t *testing.T) {
 			for i, tb := range st.Tables[:par] {
 				wg.Go(func() {
 					rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(i)))
-					m := wideWindow(rng, st.Rows, st.Changes, st.Windows+1)
+					m := wideWindow(rng, st.Rows, envInt(t, "BINTRAIL_2207_REWRITE_CHANGES", st.Changes), st.Windows+1)
 					at := tb.PrevTime.Add(5*time.Minute + time.Duration(rng.Intn(1e6))*time.Second)
 					cut := &query.BinlogPos{File: "binlog.000009", Pos: uint64(1000 * (st.Windows + 1))}
 					out, rep, err := deltaWindow(t, tb.Root, tb.Base, tb.PrevTime, m, at, cut, func(p *tableDeltaPublish) {
@@ -357,6 +370,14 @@ func sampleMemory(f func()) memPeak {
 				}
 			}
 			runtime.ReadMemStats(&ms)
+			// BINTRAIL_2207_PPROF: keep a heap profile of the highest heap
+			// seen, for `go tool pprof -sample_index=inuse_space`.
+			if path := os.Getenv("BINTRAIL_2207_PPROF"); path != "" && ms.HeapInuse > p.heapInuse*11/10 {
+				if f, err := os.Create(path); err == nil {
+					_ = pprof.Lookup("heap").WriteTo(f, 0)
+					f.Close()
+				}
+			}
 			p.heapInuse = max(p.heapInuse, ms.HeapInuse)
 			p.goSys = max(p.goSys, ms.Sys)
 			time.Sleep(100 * time.Millisecond)

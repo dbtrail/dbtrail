@@ -837,6 +837,11 @@ func TestRefreshFoldConfig_boundsTheUnattendedFold(t *testing.T) {
 	if cfg.Parallelism != daemonFoldParallelism {
 		t.Errorf("Parallelism = %d, want %d", cfg.Parallelism, daemonFoldParallelism)
 	}
+	// #2207: 1 GiB of estimated changes a table. The guard in
+	// fold_bounds_test.go checks the name is used, this checks the value.
+	if cfg.MaxChangeBytes/int64(daemonFoldParallelism) != 1<<30 {
+		t.Errorf("MaxChangeBytes = %d with parallelism %d, want 1 GiB a table", cfg.MaxChangeBytes, daemonFoldParallelism)
+	}
 	if cfg.WarnEventThreshold == 0 {
 		t.Error("WarnEventThreshold left at zero: shouldWarnEvents is " +
 			"`threshold > 0 && n > threshold`, so the unattended fold would never warn")
