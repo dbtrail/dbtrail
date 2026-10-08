@@ -10,11 +10,15 @@ import (
 	"github.com/parquet-go/parquet-go"
 )
 
-// The state view partitions upserts by bintrail_pk, a text column. The
-// console's SQL sandbox runs with default_collation = 'nocase.icu_noaccent'
-// (#2038); without COLLATE C on the partition, two keys that differ only in
-// case ('abc' and 'ABC', a _bin or VARBINARY primary key) fold into one
-// partition and the older upsert vanishes from the table, with no error.
+// The state view picks the newest version of each bintrail_pk, a text
+// column, through a join on the key (TableDeltaLatestSQL). The console's SQL
+// sandbox runs with default_collation = 'nocase.icu_noaccent' (#2038); a key
+// compared under it would fold 'abc' and 'ABC' (a _bin or VARBINARY primary
+// key) into one, and the one in the older pair would vanish from the table,
+// with no error. The two keys sit in DIFFERENT pairs on purpose: in one file
+// a folded key still finds its own row again, and the test could not fail.
+// Both view forms run: the one bintrail views writes for a listed chain, and
+// the following one (#1918).
 func TestTableDeltaState_keysDifferingInCaseSurviveNocaseSession(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "2026-10-04T00-00-00Z", "shop")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -51,33 +55,42 @@ func TestTableDeltaState_keysDifferingInCaseSurviveNocaseSession(t *testing.T) {
 	nulls := make([]bool, len(upsCols))
 	md := map[string]string{MetaKeyBinlogFile: "b.1", MetaKeyBinlogPos: "2", MetaKeyDeltaBaseAnchor: "b.1:1", MetaKeyDeltaBaseSize: "1"}
 	err = WriteTableDeltaPair(base, 0, cols, md, nil, func(emit func([]string, []bool) error) error {
-		if err := emit(row("abc", "1"), nulls); err != nil {
-			return err
-		}
+		return emit(row("abc", "1"), nulls)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	md1 := map[string]string{MetaKeyBinlogFile: "b.1", MetaKeyBinlogPos: "3", MetaKeyDeltaBaseAnchor: "b.1:1", MetaKeyDeltaBaseSize: "1"}
+	err = WriteTableDeltaPair(base, 1, cols, md1, nil, func(emit func([]string, []bool) error) error {
 		return emit(row("ABC", "2"), nulls)
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	posdel, upserts := TableDeltaGlobs(base)
-	q := "SELECT count(*) FROM (" + TableDeltaStateSQL("'"+base+"'", "'"+posdel+"'", "'"+upserts+"'", base, "") + ")"
-	for _, session := range []string{"", "SET default_collation = 'nocase.noaccent'", "SET default_collation = 'nocase.icu_noaccent'"} {
-		ddb, err := sql.Open("duckdb", "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if session != "" {
-			if _, err := ddb.Exec(session); err != nil {
+	fposdel, fupserts := TableDeltaFollowGlobs(base)
+	for _, q := range []string{
+		"SELECT count(*) FROM (" + TableDeltaStateSQL("'"+base+"'", "'"+posdel+"'", "'"+upserts+"'", base, "") + ")",
+		"SELECT count(*) FROM (" + TableDeltaFollowStateSQL("'"+base+"'", "'"+fposdel+"'", "'"+fupserts+"'", base, "") + ")",
+	} {
+		for _, session := range []string{"", "SET default_collation = 'nocase.noaccent'", "SET default_collation = 'nocase.icu_noaccent'"} {
+			ddb, err := sql.Open("duckdb", "")
+			if err != nil {
 				t.Fatal(err)
 			}
-		}
-		var n int
-		if err := ddb.QueryRow(q).Scan(&n); err != nil {
-			t.Fatalf("%s: %v", session, err)
-		}
-		ddb.Close()
-		if n != 3 {
-			t.Errorf("session %q: state has %d rows, want 3 (zzz, abc and ABC): a case-folding collation reached the key partition", session, n)
+			if session != "" {
+				if _, err := ddb.Exec(session); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var n int
+			if err := ddb.QueryRow(q).Scan(&n); err != nil {
+				t.Fatalf("%s: %v", session, err)
+			}
+			ddb.Close()
+			if n != 3 {
+				t.Errorf("session %q: state has %d rows, want 3 (zzz, abc and ABC): a case-folding collation reached the key comparison", session, n)
+			}
 		}
 	}
 }

@@ -38,7 +38,7 @@ func TestStateView_binaryCollationThroughADeltaChain(t *testing.T) {
 		BaselineSource: f.root, BaselineSnapshot: time.Date(2026, 4, 30, 1, 0, 0, 0, time.UTC),
 		Baselines: tables,
 	})
-	if !strings.Contains(sqlText, "bintrail_delta") || !strings.Contains(sqlText, `"status" COLLATE C AS "status"`) {
+	if !strings.Contains(sqlText, "bintrail_latest") || !strings.Contains(sqlText, `"status" COLLATE C AS "status"`) {
 		t.Fatalf("the view is not the delta shape with the collation:\n%s", sqlText)
 	}
 	for _, collation := range []string{"nocase.icu_noaccent", "nocase.noaccent"} {

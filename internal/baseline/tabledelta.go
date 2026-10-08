@@ -598,9 +598,9 @@ func TableDeltaStateSQL(base, posdelGlob, upsertsGlob, basePath, replace string)
 // TableDeltaLatestSQL selects the newest version of every key from delta, a
 // relation with the columns of the chain's .upserts files plus filename: one
 // row per key, tombstones included, the technical columns kept, filename
-// dropped. It is the rule tableDeltaStateSQL states with a window (newest by
-// file name), written as a join for the daemon's own merges, which run under a
-// memory limit:
+// dropped: newest by sequence number, written as a join rather than a window. The
+// daemon's merges used it first (#2126); the views read through it too since
+// #2210 (tableDeltaStateSQL):
 //
 // Measured on the files of a 100 M row table with 15.1 M upserts in 24 pairs
 // (DuckDB as vendored at the time, 2 threads, a temp directory to spill to):
@@ -608,8 +608,9 @@ func TableDeltaStateSQL(base, posdelGlob, upsertsGlob, basePath, replace string)
 // 1 GB, so it is not a matter of size; this join passed at every limit tried
 // from 500 MB to 8 GB. With COLLATE C on its keys the same join failed at
 // every limit, which is why the keys are compared as their UTF-8 bytes
-// instead: bytes, whatever the session's default collation (the reason the
-// window carries COLLATE C), and what the join needs to stay out of core.
+// instead: bytes, whatever the session's default collation (the console's
+// SQL sandbox folds case and accents), and what the join needs to stay out
+// of core.
 //
 // encode(), NOT a cast to BLOB. The cast parses its input: it reads `\x41`
 // as the byte for "A", refuses any other backslash and refuses every byte
@@ -624,29 +625,38 @@ func TableDeltaStateSQL(base, posdelGlob, upsertsGlob, basePath, replace string)
 //
 // delta is read twice. Not a CTE: DuckDB materializes one that is referenced
 // twice, in memory.
+//
+// Newest is the pair's SEQUENCE NUMBER, read from the file name (the low end
+// of a range pair, "<lo>-<hi>"), not the file name itself (#2210). Every
+// file of a chain shares one directory and stem, so the two order the same
+// way; but a file name is over a hundred bytes, and carrying it beside every
+// key through the aggregate and the join took memory DuckDB's memory_limit
+// does not count: measured over a sysbench-tpcc snapshot with 4 and 8.5 M
+// upserts waiting (DuckDB 1.4.5, 2 GB, a temp directory), the process grew
+// to 4.2 GB comparing names and stayed at 2.2 GB comparing numbers, with the
+// same rows and two to three times faster. The number is computed where it
+// is compared, never as a column, so no table column can collide with it. A
+// file whose name carries no sequence number fails the statement on the
+// CAST, loudly: every caller reads the chain through TableDeltaNameFilter or
+// the chain's own listing, and a silent NULL here would drop that file's
+// rows from the state.
 func TableDeltaLatestSQL(delta string) string {
 	pk := `"` + TableDeltaPKColumn + `"`
+	seq := func(col string) string {
+		return "CAST(regexp_extract(" + col + ", '[.]([0-9]{6})(-[0-9]{6})?[.]" + strings.TrimPrefix(TableDeltaUpsertsSuffix, ".") + "$', 1) AS INTEGER)"
+	}
 	return fmt.Sprintf("SELECT bintrail_u.* EXCLUDE (filename) FROM (%[1]s) AS bintrail_u "+
-		"JOIN (SELECT encode(%[2]s) AS bintrail_k, max(encode(filename)) AS bintrail_f FROM (%[1]s) GROUP BY 1) AS bintrail_m "+
-		"ON encode(bintrail_u.%[2]s) = bintrail_m.bintrail_k AND encode(bintrail_u.filename) = bintrail_m.bintrail_f",
-		delta, pk)
+		"JOIN (SELECT encode(%[2]s) AS bintrail_k, max(%[3]s) AS bintrail_f FROM (%[1]s) GROUP BY 1) AS bintrail_m "+
+		"ON encode(bintrail_u.%[2]s) = bintrail_m.bintrail_k AND %[4]s = bintrail_m.bintrail_f",
+		delta, pk, seq("filename"), seq("bintrail_u.filename"))
 }
 
 // TableDeltaMergeStateSQL is TableDeltaStateSQL for the daemon's compaction
-// (reconstruct.materializeBaseWithDelta): the same state, with the newest
-// version of each key read through TableDeltaLatestSQL. The views keep the
-// window; a test holds the two to the same rows.
+// (reconstruct.materializeBaseWithDelta), with no REPLACE. Since #2210 the
+// views read the newest version of each key through the same join, so the two
+// are one statement.
 func TableDeltaMergeStateSQL(base, posdelGlob, upsertsGlob, basePath string) string {
-	upserts := fmt.Sprintf("SELECT * FROM read_parquet(%s, filename=true, union_by_name=true) WHERE %s",
-		upsertsGlob, TableDeltaNameFilter(basePath, TableDeltaUpsertsSuffix))
-	dead := fmt.Sprintf("SELECT \"%s\" FROM read_parquet(%s, filename=true) WHERE %s AND \"%s\" IS NOT NULL",
-		TableDeltaPosColumn, posdelGlob, TableDeltaNameFilter(basePath, TableDeltaPosdelSuffix), TableDeltaPosColumn)
-	return fmt.Sprintf("WITH bintrail_latest AS (%s) "+
-		"SELECT * FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet(%s, file_row_number=true) "+
-		"WHERE file_row_number NOT IN (%s) "+
-		"UNION ALL BY NAME SELECT * EXCLUDE (\"%s\", \"%s\") FROM bintrail_latest WHERE \"%s\" = '%s')",
-		TableDeltaLatestSQL(upserts), base, dead,
-		TableDeltaPKColumn, TableDeltaOpColumn, TableDeltaOpColumn, TableDeltaOpUpsert)
+	return TableDeltaStateSQL(base, posdelGlob, upsertsGlob, basePath, "")
 }
 
 // TableDeltaFollowGlobs returns the patterns TableDeltaFollowStateSQL reads
@@ -714,24 +724,37 @@ func TableDeltaFollowStateSQL(base, posdelGlob, upsertsGlob, basePath, replace s
 // selects every row of the chain's .upserts files with a filename column, and
 // dead selects the dead row numbers.
 //
-// The window partitions by "bintrail_pk" COLLATE C: the key is text, and a
-// session whose default collation folds case or accents (the console's SQL
-// sandbox runs under nocase.icu_noaccent, #2038 and #2083) would otherwise fold two keys
-// that differ only that way into ONE partition and drop a row, silently.
-// COLLATE C is byte comparison whatever the session default; the filename
-// order is pinned the same way.
+// The newest version of each key is read through TableDeltaLatestSQL, the
+// join, for the views too (#2210): the window this used before held every
+// upsert of the chain, every column, in one sort that cannot spill, so past
+// the SQL worker's memory a statement failed whatever disk it had. Measured
+// with this SQL on DuckDB 1.4.5 over a sysbench-tpcc snapshot (stock, 20 M
+// rows with 4 M upserts waiting; order_line, 60 M with 8.5 M), 2 threads,
+// five statements (a lookup and a total on each table, a three-table join),
+// each process's peak memory read from the OS: with a temp directory the join
+// answered 5 of 5 at 2 GB and at 1 GB, the window 1 of 5 at 2 GB, with the
+// same rows wherever both answered, and the join's process peaked at 2.2 GB
+// where the window's reached 2.3 GB. Without a temp directory the join
+// answered 4 of 5 at 2 GB, every one the window answered among them. The
+// cost: a lookup of a row the chain never touched no longer skips the chain
+// (the window let the filter reach the .upserts statistics), 0.75 s to 4.7 s
+// in that run, and the .upserts files are read twice, which over s3:// may
+// be two downloads.
+//
+// Its keys are compared as their bytes, whatever the session's default
+// collation: the console's SQL sandbox runs under nocase.icu_noaccent (#2038,
+// #2083), which would otherwise fold two keys that differ only in case or
+// accents into one and drop a row, silently.
 func tableDeltaStateSQL(base, upserts, dead, replace string) string {
 	star := "*"
 	if replace != "" {
 		star = "* REPLACE (" + replace + ")"
 	}
-	return fmt.Sprintf("WITH bintrail_delta AS (%s), "+
-		"bintrail_latest AS (SELECT * EXCLUDE (filename) FROM bintrail_delta "+
-		"QUALIFY row_number() OVER (PARTITION BY \"%s\" COLLATE C ORDER BY filename COLLATE C DESC) = 1) "+
+	return fmt.Sprintf("WITH bintrail_latest AS (%s) "+
 		"SELECT %s FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet(%s, file_row_number=true) "+
 		"WHERE file_row_number NOT IN (%s) "+
 		"UNION ALL BY NAME SELECT * EXCLUDE (\"%s\", \"%s\") FROM bintrail_latest WHERE \"%s\" = '%s')",
-		upserts, TableDeltaPKColumn, star, base, dead,
+		TableDeltaLatestSQL(upserts), star, base, dead,
 		TableDeltaPKColumn, TableDeltaOpColumn, TableDeltaOpColumn, TableDeltaOpUpsert)
 }
 

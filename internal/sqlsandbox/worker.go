@@ -383,8 +383,8 @@ type spillSpec struct {
 //     column does not: its state view gives it COLLATE C
 //     (views.BaselineTable.BinaryText, #2083), which outranks this default.
 //     The copy's OWN views are immune on purpose:
-//     the delta chain partitions by "bintrail_pk" COLLATE C
-//     (baseline.tableDeltaStateSQL), or two keys differing only in case
+//     the delta chain compares "bintrail_pk" as its bytes
+//     (baseline.TableDeltaLatestSQL), or two keys differing only in case
 //     would fold into one row. Locked with the rest so a statement cannot
 //     undo them.
 //   - ieee_floating_point_ops = false: division and modulo by zero are NULL,

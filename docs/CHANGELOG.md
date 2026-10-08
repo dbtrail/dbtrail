@@ -19,6 +19,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was used up too. Where the temporary directory is in memory (`tmpfs`) or
   nearly full, statements do not spill; the settings panel says so, and so
   does the error of a statement that ran out of memory.
+- **The copy's views pick the newest version of a changed row with less
+  memory** (#2210). To keep only the last version of each row that changed
+  since the snapshot, the views sorted every waiting change, all columns,
+  in one step that cannot use the disk; on a large table with millions of
+  changes that alone ran past SQL on the copy's memory. They now use the
+  join the daemon's own merges already use, now comparing each pair's
+  sequence number instead of its file name: same rows, and with the disk the
+  worker may now spill to, every statement measured on a 20 M and a 60 M row
+  table finished at 1 GB and at 2 GB, where four of five failed at 2 GB
+  before, without the process using more memory than before. The daemon's
+  own merges use the same join and take less memory too. A
+  lookup of a row that never changed reads the changes now instead of
+  skipping them, a few seconds instead of under one on those tables. A
+  `views` file written by an earlier version keeps the old form until it is
+  generated again.
 - **SQL on the copy answers from an earlier copy instead of refusing**
   (#2210). A query whose tables hold more unmerged changes than SQL on the
   copy merges at once used to be refused until DBTrail merged them, which

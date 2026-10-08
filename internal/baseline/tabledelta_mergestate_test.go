@@ -14,13 +14,13 @@ import (
 	"github.com/parquet-go/parquet-go"
 )
 
-// The daemon's own merges (a table written again in full, a chain merged into
-// a range pair) read the newest version of every key through
-// TableDeltaLatestSQL, not through the window the views use: over the files
-// of a 100 M row table with 15 M upserts in 24 pairs, the window failed under
-// the daemon's 4 GB memory limit with a temp directory to spill to (and
-// passed under 1 GB), where the join passes from 500 MB to 8 GB. Two forms of
-// one rule, so this file holds them to the same answer.
+// The newest version of every key is read through TableDeltaLatestSQL, a
+// join, by the daemon's own merges (#2126) and, since #2210, by the views:
+// over the files of a 100 M row table with 15 M upserts in 24 pairs, the
+// window used before failed under the daemon's 4 GB memory limit with a temp
+// directory to spill to (and passed under 1 GB), where the join passes from
+// 500 MB to 8 GB. This file holds the state to the expected rows under every
+// session collation.
 
 type mergeFixture struct {
 	base, posdels, upserts string
@@ -245,4 +245,32 @@ func TestTableDeltaLatestSQL_aRangePairIsOlderThanThePairAfterIt(t *testing.T) {
 	if len(got) != len(want) {
 		t.Errorf("%d rows, want one per key (%d): %v", len(got), len(want), got)
 	}
+}
+
+// The newest version is picked by the sequence number in the file name
+// (#2210). A file whose name carries none must fail the statement: a NULL
+// sequence would quietly drop that file's rows from the state.
+func TestTableDeltaLatestSQL_aFileWithNoSequenceFails(t *testing.T) {
+	f := writeMergeFixture(t)
+	_, u0 := TableDeltaPaths(f.base, 0)
+	bare := filepath.Join(filepath.Dir(f.base), "orders.upserts")
+	data, err := os.ReadFile(u0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bare, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	delta := "SELECT * FROM read_parquet(['" + bare + "'], filename=true, union_by_name=true)"
+	var n int
+	err = db.QueryRow("SELECT count(*) FROM (" + TableDeltaLatestSQL(delta) + ")").Scan(&n)
+	if err == nil {
+		t.Fatalf("a file with no sequence number gave %d rows and no error", n)
+	}
+	t.Logf("a file with no sequence number: %v", err)
 }
