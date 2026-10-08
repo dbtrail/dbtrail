@@ -158,8 +158,12 @@ What to know before relying on it:
   capturing changes, which is why the limits are small. A
   statement past its memory (2 GB by default) fails instead of spilling to
   disk, and one whose tables have more than 48 MB of changes not merged into
-  them yet is refused before it runs (under read routing it goes to MySQL
-  like any other refusal). On a host with memory to spare, `--sql-memory`
+  them yet is answered from the newest earlier copy in which they fit, with
+  a warning (SHOW WARNINGS) naming that copy's time; with no such copy it is
+  refused before it runs. Under read routing it is not answered from an
+  earlier copy: it goes to MySQL like any other refusal. A statement that
+  reads `events` is not either, since the change log is not pinned to a
+  copy. On a host with memory to spare, `--sql-memory`
   (env `BINTRAIL_CONSOLE_SQL_MEMORY`, at least 512MB) raises both: the line
   of changes moves with it, 96 MB at 4GB. Without the flag it can be set in
   the web interface (Settings, MCP Server, Memory for SQL on the copy) and

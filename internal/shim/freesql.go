@@ -739,7 +739,17 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 	if res.TruncatedCells > 0 {
 		warnings = append(warnings, fmt.Sprintf("%d cell(s) longer than this server's cap were cut; each ends with a marker", res.TruncatedCells))
 	}
-	h.setWarnings(warnings)
+	code := uint16(mysql.ER_WARN_TOO_MANY_RECORDS)
+	if res.Note != "" {
+		// The answer is from an earlier copy (#2210). A note of the port's
+		// own: MySQL has no code for it, so 1105, unless a cut cell's 1262
+		// is the other warning of this statement.
+		warnings = append(warnings, res.Note)
+		if res.TruncatedCells == 0 {
+			code = mysql.ER_UNKNOWN_ERROR
+		}
+	}
+	h.setWarningsCoded(code, warnings)
 	h.recordFreeSQL(qstr, schema, res, routeReason)
 	return &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}, nil
 }

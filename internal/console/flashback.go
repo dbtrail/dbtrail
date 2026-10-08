@@ -142,6 +142,7 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 		}
 		return sqlsandbox.Result{}, err
 	}
+	out.Result.Note = out.OlderCopyNote
 	return out.Result, nil
 }
 

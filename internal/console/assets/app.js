@@ -2700,7 +2700,7 @@ function sqlWaitingNote(u, maxMB) {
   let title = u.unknown ? "Changes are waiting to be merged into this table; their size could not be read."
     : u.mb + " MB of changes waiting to be merged into this table.";
   if (maxMB > 0) title += " SQL here merges at most " + maxMB + " MB per query, all the tables it reads together.";
-  if (level === "over") title += " A query naming this table is refused until DBTrail merges them, which it does on its own.";
+  if (level === "over") title += " A query naming this table is answered from an earlier copy until DBTrail merges them, which it does on its own (refused if no earlier copy fits).";
   return { text: u.unknown ? "size unknown" : u.mb + " MB waiting", level: level, title: title };
 }
 
@@ -2713,7 +2713,7 @@ function sqlOverNote(unmerged, maxMB) {
   if (!over.length) return "";
   const who = over.length === 1 ? over[0].view + " has" : over.length + " tables have";
   return who + " more changes waiting than SQL here merges (" + maxMB + " MB per query, all its tables together), so a query naming " +
-    (over.length === 1 ? "it" : "them") + " is refused until DBTrail merges them, which it does on its own. " +
+    (over.length === 1 ? "it" : "them") + " is answered from an earlier copy until DBTrail merges them, which it does on its own. " +
     "More memory for SQL raises the line.";
 }
 
@@ -2761,6 +2761,9 @@ function sqlCountLine(res, ms) {
 // and long values cut in place (the count says how many, not which).
 function sqlResultNotes(res, exactInts) {
   const notes = [];
+  // The answer is from an earlier copy than the newest (#2210): said first,
+  // in the server's words, which name both times and why.
+  if (res && res.older_copy) notes.push(String(res.older_copy));
   const n = ((res && res.rows) || []).length;
   // A browser that cannot hand the page a number's own digits rounds whole
   // numbers past 2^53 (an id of nineteen digits). Said where it can happen:

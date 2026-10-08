@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -70,6 +71,12 @@ type viewsRequest struct {
 	// snapshots both locally and in S3), which exists to tell a file's
 	// reader that a newer snapshot lives elsewhere.
 	ForStatement bool
+	// SnapshotAt pins the state views to that snapshot instead of the
+	// newest (#2210): SQL on the copy answers from an earlier copy when the
+	// newest one holds more unmerged changes than a statement can merge.
+	// Zero means the newest, as before. A snapshot that is not there is an
+	// error, never a silent fall back to the newest.
+	SnapshotAt time.Time
 }
 
 // naming, not a degrade: silently dropping the baseline half would hand over a
@@ -158,8 +165,14 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 		// into the header, since silence reads as "this is the newest".
 		in.BaselineUnreadable = skipped
 		baseUnreadable = skipped
+		if !req.SnapshotAt.IsZero() && !slices.ContainsFunc(files, func(f reconstruct.BaselineFile) bool { return f.SnapshotTime.Equal(req.SnapshotAt) }) {
+			return views.Input{}, fmt.Errorf("no snapshot of %s under %s", req.SnapshotAt.UTC().Format(time.RFC3339), baseSrc)
+		}
 		if len(files) > 0 {
 			newest := files[0].SnapshotTime // ListBaselines returns newest first
+			if !req.SnapshotAt.IsZero() {
+				newest = req.SnapshotAt
+			}
 			in.BaselineSnapshot = newest
 			// #1571: this file pins ONE location, so a newer snapshot in the
 			// other one is invisible to its reader. Not merged -- the state
