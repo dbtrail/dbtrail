@@ -2700,7 +2700,7 @@ function sqlWaitingNote(u, maxMB) {
   let title = u.unknown ? "Changes are waiting to be merged into this table; their size could not be read."
     : u.mb + " MB of changes waiting to be merged into this table.";
   if (maxMB > 0) title += " SQL here merges at most " + maxMB + " MB per query, all the tables it reads together.";
-  if (level === "over") title += " A query naming this table is refused until DBTrail merges them, which it does on its own.";
+  if (level === "over") title += " A query naming this table is answered from an earlier copy until DBTrail merges them, which it does on its own (refused if no earlier copy fits).";
   return { text: u.unknown ? "size unknown" : u.mb + " MB waiting", level: level, title: title };
 }
 
@@ -2713,7 +2713,7 @@ function sqlOverNote(unmerged, maxMB) {
   if (!over.length) return "";
   const who = over.length === 1 ? over[0].view + " has" : over.length + " tables have";
   return who + " more changes waiting than SQL here merges (" + maxMB + " MB per query, all its tables together), so a query naming " +
-    (over.length === 1 ? "it" : "them") + " is refused until DBTrail merges them, which it does on its own. " +
+    (over.length === 1 ? "it" : "them") + " is answered from an earlier copy until DBTrail merges them, which it does on its own. " +
     "More memory for SQL raises the line.";
 }
 
@@ -2761,6 +2761,9 @@ function sqlCountLine(res, ms) {
 // and long values cut in place (the count says how many, not which).
 function sqlResultNotes(res, exactInts) {
   const notes = [];
+  // The answer is from an earlier copy than the newest (#2210): said first,
+  // in the server's words, which name both times and why.
+  if (res && res.older_copy) notes.push(String(res.older_copy));
   const n = ((res && res.rows) || []).length;
   // A browser that cannot hand the page a number's own digits rounds whole
   // numbers past 2^53 (an id of nineteen digits). Said where it can happen:
@@ -2830,8 +2833,17 @@ async function sqlPost(statement, signal, csv) {
     try { const j = JSON.parse(text); if (j && j.error) msg = j.error; } catch (_) { /* raw text it is */ }
     throw apiError(res.status, msg);
   }
-  if (csv) return text;
+  // The file is named for the copy it came from, and an answer from an
+  // earlier copy (#2210) says so beside the download: a CSV has no note.
+  if (csv) return { text: text, copyAt: res.headers.get("X-DBTrail-Copy-At") || "", olderCopy: res.headers.get("X-DBTrail-Older-Copy") || "" };
   try { return sqlParseResult(text); } catch (_) { throw new Error("malformed response from /api/sql"); }
+}
+
+// sqlCSVName names a downloaded result for the copy it was read from,
+// "dbtrail-sql.csv" when the server did not say.
+function sqlCSVName(copyAt) {
+  const at = String(copyAt || "").replace(/[^0-9TZ-]/g, "-");
+  return at ? "dbtrail-sql-copy-" + at + ".csv" : "dbtrail-sql.csv";
 }
 
 // sqlResultTable paints the result: a real table with a caption, a header
@@ -2926,6 +2938,7 @@ function renderSQLPanel(box) {
   const rereadInfo = () => api("/api/sql").then((info) => {
     if (!alive() || !info) return;
     st.info = info;
+    if (st.answeredAt) st.info.copy_updated_at = st.answeredAt;
     meta.textContent = sqlStatusLine(st.info, Date.now());
     paintList();
   }, () => {});
@@ -2978,6 +2991,10 @@ function renderSQLPanel(box) {
       // The copy a later query runs on may be newer than the one the panel
       // opened on: the answer carries the snapshot it actually used.
       if (st.info && res.copy_updated_at) { st.info.copy_updated_at = res.copy_updated_at; meta.textContent = sqlStatusLine(st.info, Date.now()); }
+      // The status line keeps the time of the copy that answered, also
+      // across the reread below, so it never sits over an earlier copy's
+      // result naming the newest one's (#2210).
+      st.answeredAt = (res && res.copy_updated_at) || "";
       results.focus();
     } catch (err) {
       if (!alive()) return;
@@ -3000,8 +3017,9 @@ function renderSQLPanel(box) {
     if (!st.lastSQL) return;
     csv.disabled = true;
     try {
-      const text = await sqlPost(st.lastSQL, undefined, true);
-      downloadBlob("dbtrail-sql.csv", text, "text/csv");
+      const got = await sqlPost(st.lastSQL, undefined, true);
+      downloadBlob(sqlCSVName(got.copyAt), got.text, "text/csv");
+      if (got.olderCopy && alive()) { clear(msg); msg.append(el("p", { class: "sqlp-note", text: "The download: " + got.olderCopy })); }
     } catch (err) {
       if (alive()) showError(err);
     } finally {

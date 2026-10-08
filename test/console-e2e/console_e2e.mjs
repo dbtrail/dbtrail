@@ -6525,9 +6525,9 @@ try {
       const [dl] = await Promise.all([page.waitForEvent("download", { timeout: 20000 }), page.click(".sqlp-csv")]);
       csvFile = { name: dl.suggestedFilename(), text: readFileSync(await dl.path(), "utf8"), type: await page.evaluate(() => window.__sqlBlobType) };
     } catch (err) { csvFile = { error: String(err) }; }
-    (csvFile.name === "dbtrail-sql.csv" && csvFile.text === "id,status\r\n1,new\r\n2,new\r\n4,new" && csvFile.type === "text/csv")
-      ? ok("sql: Download CSV saves dbtrail-sql.csv with the server's CSV of the query that ran, byte for byte, not of what the editor holds now")
-      : bad("sql: Download CSV saves dbtrail-sql.csv with the server's CSV of the query that ran, byte for byte, not of what the editor holds now", JSON.stringify(csvFile));
+    (/^dbtrail-sql-copy-[0-9TZ-]+\.csv$/.test(csvFile.name) && csvFile.text === "id,status\r\n1,new\r\n2,new\r\n4,new" && csvFile.type === "text/csv")
+      ? ok("sql: Download CSV saves dbtrail-sql-copy-<copy time>.csv with the server's CSV of the query that ran, byte for byte, not of what the editor holds now")
+      : bad("sql: Download CSV saves dbtrail-sql-copy-<copy time>.csv with the server's CSV of the query that ran, byte for byte, not of what the editor holds now", JSON.stringify(csvFile));
 
     // From before the panel opened to the download: the page talked to
     // this console and to nothing else. The anchor is that the listener

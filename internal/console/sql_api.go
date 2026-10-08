@@ -108,6 +108,10 @@ type sqlResponse struct {
 	// Milliseconds with microsecond precision, so a sub-millisecond phase
 	// reads as the small number it is, not as "not measured".
 	PhasesMS map[string]float64 `json:"phases_ms"`
+	// OlderCopy says why the answer comes from an earlier copy than the
+	// newest (#2210); omitted when it does not. CopyUpdatedAt is then that
+	// earlier copy's time.
+	OlderCopy string `json:"older_copy,omitempty"`
 }
 
 // sqlPhases names a statement's phases once, for the response, the log
@@ -461,12 +465,21 @@ func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
 
 	csv := wantsCSV(r)
 	if csv {
+		// A file carries no note above it: the copy's time and, for an
+		// earlier copy (#2210), why, travel as headers the page reads.
+		if copyUpdatedAt != nil {
+			w.Header().Set("X-DBTrail-Copy-At", copyUpdatedAt.UTC().Format(time.RFC3339))
+		}
+		if out.OlderCopyNote != "" {
+			w.Header().Set("X-DBTrail-Older-Copy", out.OlderCopyNote)
+		}
 		writeSQLCSV(w, res)
 	} else {
 		writeJSON(w, http.StatusOK, sqlResponse{
 			Columns: res.Columns, Rows: res.Rows, Truncated: res.Truncated,
 			TruncatedCells: res.TruncatedCells, ElapsedMS: res.Elapsed.Milliseconds(),
 			CopyUpdatedAt: copyUpdatedAt, PhasesMS: sqlPhasesMS(out.SlotWait, out.ViewBuild, res.Phases),
+			OlderCopy: out.OlderCopyNote,
 		})
 	}
 	// After the response, like the events surface: the rows were read and
@@ -483,6 +496,11 @@ func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
 	}
 	if csv {
 		detail["format"] = "csv"
+	}
+	if out.OlderCopyNote != "" && copyUpdatedAt != nil {
+		// Which point in time the rows came from, when it is not the newest
+		// copy (#2210).
+		detail["older_copy_at"] = copyUpdatedAt.UTC().Format(time.RFC3339)
 	}
 	recordConsoleAccess(r, "sql.run", "", "", detail)
 }
@@ -749,6 +767,9 @@ type sqlOutcome struct {
 	ViewBuild time.Duration
 	// SlotWait is how long the statement waited for a worker slot (#2033).
 	SlotWait time.Duration
+	// OlderCopyNote says why the statement was answered from an earlier
+	// copy than the newest (#2210), "" when it was not.
+	OlderCopyNote string
 }
 
 // runSQL is POST /api/sql without the HTTP: the gates that need the copy
@@ -803,6 +824,133 @@ type sqlUnchanged func(ctx context.Context, tables []views.BaselineTable) string
 // refused too: an answer nobody vouched for is not the one that was asked
 // for.
 func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, schema string, maxRows int, sess sqlsandbox.Session, unchanged sqlUnchanged) (sqlOutcome, error) {
+	var heavy *sqlHeavyRun
+	out, err := s.runSQLAt(ctx, b, user, statement, schema, maxRows, sess, unchanged, time.Time{}, &heavy)
+	if heavy == nil || !sqlMayAnswerOlder(statement, sess) {
+		return out, err
+	}
+	// dbtrail answers from a point in time, not from now (#2210): a newest
+	// copy whose tables hold more unmerged changes than this statement can
+	// merge is not a reason to answer nothing when an earlier copy, one
+	// consistent moment of the same tables, can be read. The refusal stands
+	// when no earlier copy fits, or when the earlier run cannot start.
+	at, ok := s.sqlOlderCopy(ctx, b, heavy)
+	if !ok {
+		return out, err
+	}
+	var again *sqlHeavyRun
+	older, oerr := s.runSQLAt(ctx, b, user, statement, schema, maxRows, sess, unchanged, at, &again)
+	if oerr != nil {
+		// Whatever stopped the run on the earlier copy (busy, its own time
+		// cap, a column that copy does not have yet, the copy removed in
+		// between), the reader is told what they asked about: the newest
+		// copy's refusal. Why the earlier copy did not answer is the
+		// operator's, in the log.
+		slog.Warn("console: sql: an earlier copy was found but could not answer; the statement is refused as before",
+			"user", user, "copy", at.UTC().Format(time.RFC3339), "error", oerr)
+		return out, err
+	}
+	older.OlderCopyNote = sqlOlderCopyNote(heavy, at)
+	// Debug, not Info: while a table stays over the line every statement
+	// naming it comes here, and a dashboard polling the port would flood the
+	// log. The answer itself says it, and the audit record carries the copy.
+	slog.Debug("console: sql answered from an earlier copy: the newest one holds more unmerged changes than a statement merges",
+		"user", user, "copy", at.UTC().Format(time.RFC3339), "newest", heavy.newest.UTC().Format(time.RFC3339),
+		"table", heavy.chain.Table, "unmerged_mb", (heavy.chain.Total+(1<<20)-1)>>20, "limit_mb", heavy.limit>>20)
+	return older, nil
+}
+
+// sqlHeavyRun is what a statement refused for unmerged changes leaves for
+// the search of an earlier copy: the tables it named (as the newest copy
+// lists them), what they held, the line, and the newest copy's time.
+type sqlHeavyRun struct {
+	tables []views.BaselineTable
+	chain  sqlHeavyChain
+	limit  int64
+	newest time.Time
+}
+
+// sqlMayAnswerOlder says whether a statement may be answered from an
+// earlier copy. Not under read routing: there the client asked for MySQL's
+// answer within a set age, and the refusal is what sends the statement to
+// MySQL. Not a statement that reads events: the change log is not pinned to
+// a snapshot, and an earlier copy's tables beside today's events would be
+// two moments in one answer.
+func sqlMayAnswerOlder(statement string, sess sqlsandbox.Session) bool {
+	return !sess.StrictStar && sess.UnchangedWithin <= 0 && !sqlMentionsEvents(statement)
+}
+
+// sqlOlderCopy finds the newest copy older than h.newest in which every
+// table h names is present and holds no more unmerged changes, together,
+// than h.limit. Every snapshot it can list is a complete one (a run that
+// failed is never listed), so the tables of one copy are one moment.
+func (s *Server) sqlOlderCopy(ctx context.Context, b *bundle, h *sqlHeavyRun) (time.Time, bool) {
+	if b.baselineSrc == "" || len(h.tables) == 0 {
+		return time.Time{}, false
+	}
+	lctx, cancel := context.WithTimeout(ctx, baselineListTimeout)
+	defer cancel()
+	files, _, err := reconstruct.ListBaselinesReport(lctx, b.baselineSrc)
+	if err != nil {
+		slog.Warn("console: sql: could not list earlier copies to answer from", "error", err)
+		return time.Time{}, false
+	}
+	want := map[[2]string]bool{}
+	for _, t := range h.tables {
+		want[[2]string{t.Schema, t.Table}] = true
+	}
+	bySnapshot := map[time.Time][]views.BaselineTable{}
+	var order []time.Time
+	for _, f := range files {
+		if !f.SnapshotTime.Before(h.newest) || !want[[2]string{f.Schema, f.Table}] {
+			continue
+		}
+		if _, seen := bySnapshot[f.SnapshotTime]; !seen {
+			order = append(order, f.SnapshotTime)
+		}
+		bySnapshot[f.SnapshotTime] = append(bySnapshot[f.SnapshotTime], views.BaselineTable{Schema: f.Schema, Table: f.Table, Path: f.Path})
+	}
+	slices.SortFunc(order, func(a, b time.Time) int { return b.Compare(a) })
+	for _, at := range order {
+		// One deadline for the listing and the walk, checked per copy: on a
+		// slow disk, or with a client gone, the walk stops and the refusal
+		// stands.
+		if lctx.Err() != nil {
+			slog.Warn("console: sql: stopped looking for an earlier copy to answer from", "error", lctx.Err())
+			return time.Time{}, false
+		}
+		tables := bySnapshot[at]
+		if len(tables) != len(want) {
+			continue // a table the statement names is not in that copy
+		}
+		if err := views.MarkTableDeltas(lctx, tables); err != nil {
+			slog.Warn("console: sql: could not read an earlier copy's changes; looking at older ones", "copy", at.UTC().Format(time.RFC3339), "error", err)
+			continue
+		}
+		if sqlChainTooHeavy(tables, h.limit, sqlFileSize).Table == "" {
+			return at, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// sqlOlderCopyNote is what the reader is told when an earlier copy
+// answered: which copy, and why not the newest. Short enough for a MySQL
+// client's warning.
+func sqlOlderCopyNote(h *sqlHeavyRun, at time.Time) string {
+	const layout = "2006-01-02 15:04 UTC"
+	mb := func(n int64) int64 { return (n + (1 << 20) - 1) >> 20 }
+	what := fmt.Sprintf("%s has %d MB", h.chain.Table, mb(h.chain.Own))
+	if h.chain.WithChanges > 1 {
+		what = fmt.Sprintf("the tables this statement reads have %d MB", mb(h.chain.Total))
+	}
+	return fmt.Sprintf("Answered from the copy of %s: in the newest copy (%s), %s of changes not merged in yet, more than SQL here reads at once (%d MB). DBTrail merges them on its own.",
+		at.UTC().Format(layout), h.newest.UTC().Format(layout), what, h.limit>>20)
+}
+
+// runSQLAt is runSQLVouched over the copy of time at (zero: the newest).
+// *heavy is set when the statement was refused for unmerged changes.
+func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schema string, maxRows int, sess sqlsandbox.Session, unchanged sqlUnchanged, at time.Time, heavy **sqlHeavyRun) (sqlOutcome, error) {
 	// What is known without any I/O is refused before the slot: a copy that
 	// lives only on S3 is never served here, and listing it would hold one
 	// of the daemon's two slots while it waits on the network.
@@ -832,7 +980,7 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 	// The build has a deadline so a slow disk or listing cannot hold the
 	// slot for long; the sandbox has its own, longer one for the statement.
 	buildCtx, cancelBuild := context.WithTimeout(ctx, baselineListTimeout)
-	in, eventsInS3, err := s.sqlViewsFor(buildCtx, b, statement)
+	in, eventsInS3, err := s.sqlViewsFor(buildCtx, b, statement, at)
 	cancelBuild()
 	switch {
 	case errors.Is(err, errNoViewSources):
@@ -897,8 +1045,11 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 			// Refused before the views are installed (#1735): a chain this
 			// long does not fit the worker's memory, and the statement
 			// would fail there after reading for a while.
-			if msg := sqlChainRefusalFor(in, refs, memory); msg != "" {
-				viewsRefusal = &sqlRefusal{http.StatusUnprocessableEntity, msg}
+			limit := sqlChainLimit(memory)
+			named := sqlNamedTables(in, refs)
+			if h := sqlChainTooHeavy(named, limit, sqlFileSize); h.Table != "" {
+				viewsRefusal = &sqlRefusal{http.StatusUnprocessableEntity, sqlChainTooHeavyMessage(h, limit, memory)}
+				*heavy = &sqlHeavyRun{tables: named, chain: h, limit: limit, newest: in.BaselineSnapshot}
 				return "", viewsRefusal
 			}
 			if sess.StrictStar && refs.Natural {
@@ -1424,14 +1575,14 @@ func dirCoversConfig(copyDirs, files []string) (dir, file string, covered bool) 
 // should, and one that really reads events gets sqlEventsInS3Message
 // instead of "the copy is only on S3", which would be false for a server
 // whose tables are local.
-func (s *Server) sqlViewsFor(ctx context.Context, b *bundle, statement string) (in views.Input, eventsInS3 bool, err error) {
+func (s *Server) sqlViewsFor(ctx context.Context, b *bundle, statement string, at time.Time) (in views.Input, eventsInS3 bool, err error) {
 	// A statement that does not name events needs the state views alone:
 	// no archive_state read, no per-file check of the change log, no listing
 	// of the other snapshot location (#2026). That was most of the daemon's
 	// fixed cost per statement, paid by every statement. A copy that gives
 	// no state view this way (no snapshot, or every table in a schema
 	// DuckDB keeps for itself) falls through to the archive, as before.
-	tablesOnly := viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true}
+	tablesOnly := viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true, SnapshotAt: at}
 	if !sqlMentionsEvents(statement) {
 		in, err = s.buildViewsInput(ctx, b, tablesOnly)
 		if err == nil && in.RendersAnyView() {
@@ -1446,7 +1597,7 @@ func (s *Server) sqlViewsFor(ctx context.Context, b *bundle, statement string) (
 	// S3 change log is detected from the sources alone and answered with
 	// the tables, exactly as before; only a local change log is then built
 	// with the events view on.
-	in, err = s.buildViewsInput(ctx, b, viewsRequest{PinSnapshot: true, OmitEvents: true, ForStatement: true})
+	in, err = s.buildViewsInput(ctx, b, viewsRequest{PinSnapshot: true, OmitEvents: true, ForStatement: true, SnapshotAt: at})
 	if err != nil {
 		return views.Input{}, false, err
 	}
@@ -1456,7 +1607,7 @@ func (s *Server) sqlViewsFor(ctx context.Context, b *bundle, statement string) (
 	if !sqlArchivesLocal(in.ArchiveSources) {
 		return in, true, nil
 	}
-	in, err = s.buildViewsInput(ctx, b, viewsRequest{PinSnapshot: true, ForStatement: true})
+	in, err = s.buildViewsInput(ctx, b, viewsRequest{PinSnapshot: true, ForStatement: true, SnapshotAt: at})
 	if err != nil {
 		return views.Input{}, false, err
 	}

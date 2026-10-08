@@ -1218,7 +1218,11 @@ The limits, so a query can never hurt capture:
   it from the page rather than by hand.
 - A query whose tables have more than 48 MB of changes not merged into them
   yet (all the tables it names, together; the line grows with the memory,
-  96 MB at 4GB) is refused before it runs, with the
+  96 MB at 4GB) is answered from the newest earlier copy in which those
+  tables fit, and the result says which copy and why. The answer is
+  consistent with that copy's moment, like every answer here: SQL on the
+  copy reads a point in time, not the source as it is now. With no such
+  copy kept on disk the query is refused before it runs, with the
   name of the table that has the most. Between two rewrites of a table,
   DBTrail keeps its changes in small files beside it, and a query has to
   merge them in memory; past that size they do not fit. DBTrail merges the
@@ -1227,8 +1231,9 @@ The limits, so a query can never hurt capture:
   heavy read, use your own DuckDB (below): this page is for quick looks on
   the host that captures. The table list on the left shows how many MB are
   waiting beside each table that has any: in amber from three quarters of
-  the line, in red past it (a query naming that table is refused), with a
-  line under the list naming the red ones. A query over several tables adds
+  the line, in red past it (a query naming that table reads an earlier
+  copy, or is refused when there is none), with a line under the list naming
+  the red ones. A query over several tables adds
   their changes together, so two tables under the line can still be refused
   together. The list is read again after each query.
 - 60 seconds. A longer query is stopped.

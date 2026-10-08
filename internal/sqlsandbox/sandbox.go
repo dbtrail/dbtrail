@@ -277,6 +277,9 @@ type Result struct {
 	Elapsed        time.Duration `json:"elapsed_ns"`
 	// Phases is where the time went, for the measurement #2026 asks for.
 	Phases Phases `json:"phases"`
+	// Note is a sentence the caller adds for the reader, set by the parent
+	// and never by the worker (#2210: the answer came from an earlier copy).
+	Note string `json:"-"`
 }
 
 // Phases times one run, worker side (reported by the child) and parent

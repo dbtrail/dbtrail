@@ -112,7 +112,7 @@ func TestSQLPanel_changesWaitingBesideEachTable(t *testing.T) {
 			t.Errorf("note %d = %+v, want %q level %q", i+2, n, want.text, want.level)
 		}
 	}
-	if n := out.Notes[4]; n == nil || !strings.Contains(n.Title, "at most 48 MB") || !strings.Contains(n.Title, "is refused until DBTrail merges them") {
+	if n := out.Notes[4]; n == nil || !strings.Contains(n.Title, "at most 48 MB") || !strings.Contains(n.Title, "is answered from an earlier copy until DBTrail merges them") {
 		t.Errorf("over title: %+v", n)
 	}
 	if n := out.Notes[5]; n == nil || strings.Contains(n.Title, "at most") {
@@ -122,10 +122,10 @@ func TestSQLPanel_changesWaitingBesideEachTable(t *testing.T) {
 	if out.Over[0] != "" || out.Over[1] != "" {
 		t.Errorf("no table over: %q", out.Over[:2])
 	}
-	if want := "shop.orders has more changes waiting than SQL here merges (48 MB per query, all its tables together), so a query naming it is refused until DBTrail merges them, which it does on its own. More memory for SQL raises the line."; out.Over[2] != want {
+	if want := "shop.orders has more changes waiting than SQL here merges (48 MB per query, all its tables together), so a query naming it is answered from an earlier copy until DBTrail merges them, which it does on its own. More memory for SQL raises the line."; out.Over[2] != want {
 		t.Errorf("one over:\n got %q\nwant %q", out.Over[2], want)
 	}
-	if !strings.HasPrefix(out.Over[3], "2 tables have more changes waiting than SQL here merges (48 MB per query, all its tables together), so a query naming them is refused") {
+	if !strings.HasPrefix(out.Over[3], "2 tables have more changes waiting than SQL here merges (48 MB per query, all its tables together), so a query naming them is answered from an earlier copy") {
 		t.Errorf("two over: %q", out.Over[3])
 	}
 
