@@ -361,8 +361,10 @@ func TestRun_cancelKillsWorker(t *testing.T) {
 }
 
 // The memory cap fails INSIDE the worker: DuckDB reports out of memory, the
-// parent gets a QueryError, and the next query works. Spilling is off in the
-// worker (temp_directory is empty), so the cap is a cap and not a slowdown.
+// parent gets a QueryError, and the next query works. 16 MB is under what the
+// engine needs to spill at all, so the statement fails with a spill
+// directory too (TestRun_spillsPastMemoryInsteadOfFailing has the one that
+// spills).
 func TestRun_memoryCapFailsInsideWorker(t *testing.T) {
 	f := newCopyFixture(t)
 	l := testLimits()
@@ -402,11 +404,15 @@ func TestRun_sessionIsLockedAsSeenByTheQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 	row := res.Rows[0]
-	want := []any{"3", "false", "true", "", "false", "false"}
+	want := []any{"3", "false", "true", nil, "false", "false"}
 	for i, w := range want {
-		if row[i] != w {
+		if w != nil && row[i] != w {
 			t.Errorf("setting %d = %#v, want %#v", i, row[i], w)
 		}
+	}
+	// The statement's own spill directory (#2210), under the spill root.
+	if temp, _ := row[3].(string); !strings.Contains(temp, spillPrefix) {
+		t.Errorf("temp_directory = %q, want the statement's %s* directory", temp, spillPrefix)
 	}
 	allowed, _ := row[6].(string)
 	for _, dir := range []string{f.archiveRoot, f.baselineRoot} {

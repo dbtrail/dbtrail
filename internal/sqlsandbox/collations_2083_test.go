@@ -105,7 +105,7 @@ func TestCollationPairs_mariadbDiffersOnlyOnTrailingSpaces(t *testing.T) {
 
 func TestDefaultCollation_whereItDiffersFromMySQL(t *testing.T) {
 	// The default under test is the one the lock-down sets.
-	if script := strings.Join(lockdownStatements([]string{"/copy"}), "\n"); !strings.Contains(script, "SET default_collation = 'nocase.icu_noaccent'") {
+	if script := strings.Join(lockdownStatements([]string{"/copy"}, spillSpec{}), "\n"); !strings.Contains(script, "SET default_collation = 'nocase.icu_noaccent'") {
 		t.Fatalf("the copy's default collation changed; re-measure collationPairs against it and update docs/time-travel-sql.md:\n%s", script)
 	}
 	db, err := sql.Open("duckdb", "")

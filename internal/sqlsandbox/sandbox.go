@@ -62,12 +62,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dbtrail/dbtrail/internal/cliutil"
 )
 
 // WorkerCommand is the hidden subcommand the console binary registers for the
@@ -85,8 +88,9 @@ type Limits struct {
 	// Threads is DuckDB's thread count inside the worker.
 	Threads int
 	// MemoryLimit is DuckDB's memory budget inside the worker, e.g. "2GB".
-	// Spilling is off, so a query past it fails with an out-of-memory error
-	// instead of slowing down and writing to disk.
+	// Past it the worker spills to a private directory of its own, up to
+	// SpillFactor times this budget (Config.SpillDir, #2210), and only past
+	// that fails with an out-of-memory error.
 	MemoryLimit string
 	// Timeout is the wall clock for the whole child: start, views install and
 	// query. Past it the process group is killed.
@@ -415,7 +419,41 @@ type Config struct {
 	// MaxWaiters bounds how many callers wait at once; past it Reserve
 	// refuses at once. 0 means DefaultMaxWaiters.
 	MaxWaiters int
+	// SpillDir is where workers spill past their memory limit (#2210): the
+	// parent makes one private directory per statement under it and removes
+	// it when the worker exits. Empty means os.TempDir(), where bintrail's
+	// other DuckDB sessions spill too. It must not lie inside a copy
+	// directory: those are readable by the statement.
+	SpillDir string
 }
+
+// SpillFactor is how much disk a worker may spill to, as a multiple of its
+// memory limit (#2210): 8 GiB at the default 2 GiB, so two workers at once
+// hold at most 16 GiB, and only while they run. Measured on DuckDB 1.4.5 over
+// sysbench-tpcc snapshots (20 M and 60 M row tables with 4 M and 8.5 M changes
+// waiting): statements that ran out of a 512 MiB limit without a temp
+// directory finished with one, writing at most 1.6 times the limit; a DISTINCT
+// over 20 M integers at 128 MB needed more than twice it.
+const SpillFactor = 4
+
+// spillCapMessage is DuckDB's error for a statement that filled its spill
+// directory, with what DuckDB leaves out: the "used" figures it quotes are the
+// DISK cap, not the memory, and nothing in its text says so.
+func spillCapMessage(msg string, spill spillSpec) string {
+	if spill.Dir == "" || !strings.Contains(msg, "failed to offload data block") {
+		return msg
+	}
+	return msg + fmt.Sprintf(" Past its memory this statement may also use %d MB of disk, and it filled that too.", spill.MaxBytes>>20)
+}
+
+// spillPrefix names a statement's spill directory under Config.SpillDir;
+// staleSpillAge is how old one must be before New removes it as left behind
+// by a parent that died (a live statement is bounded by its Timeout, a minute
+// by default).
+const (
+	spillPrefix   = "bintrail-sql-spill-"
+	staleSpillAge = time.Hour
+)
 
 // DefaultMaxWait and DefaultMaxWaiters bound the line for a slot (#2033):
 // a burst of statements (a dashboard drawing its panels, two people at
@@ -434,6 +472,7 @@ type Runner struct {
 	maxInFlight int
 	maxWait     time.Duration
 	maxWaiters  int
+	spillRoot   string
 
 	mu       sync.Mutex
 	busy     map[string]bool
@@ -456,6 +495,7 @@ func New(cfg Config) *Runner {
 		maxInFlight: cfg.MaxInFlight,
 		maxWait:     cfg.MaxWait,
 		maxWaiters:  cfg.MaxWaiters,
+		spillRoot:   cfg.SpillDir,
 		busy:        map[string]bool{},
 		freed:       make(chan struct{}),
 	}
@@ -468,7 +508,48 @@ func New(cfg Config) *Runner {
 	if r.maxWaiters <= 0 {
 		r.maxWaiters = DefaultMaxWaiters
 	}
+	if r.spillRoot == "" {
+		r.spillRoot = os.TempDir()
+	}
+	sweepSpill(r.spillRoot, time.Now().Add(-staleSpillAge))
 	return r
+}
+
+// sweepSpill removes the spill directories under root last written before
+// cutoff: what a parent that died mid-statement left behind. Best-effort.
+func sweepSpill(root string, cutoff time.Time) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), spillPrefix) {
+			continue
+		}
+		if info, err := e.Info(); err == nil && info.ModTime().Before(cutoff) {
+			if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
+				slog.Warn("sql on the copy: could not remove a spill directory left behind", "dir", filepath.Join(root, e.Name()), "error", err)
+			}
+		}
+	}
+}
+
+// makeSpill makes the private spill directory for one statement and returns
+// its spec, or a zero spec (no spill) when the memory limit does not parse or
+// the directory cannot be made: the statement then runs as before #2210,
+// failing past its memory instead of slowing down, and the log says why.
+func (r *Runner) makeSpill(memoryLimit string) spillSpec {
+	mem, err := cliutil.ParseByteSize(memoryLimit)
+	if err != nil || mem <= 0 {
+		slog.Warn("sql on the copy: the memory limit does not parse, so this statement cannot spill to disk", "memory", memoryLimit, "error", err)
+		return spillSpec{}
+	}
+	dir, err := os.MkdirTemp(r.spillRoot, spillPrefix)
+	if err != nil {
+		slog.Warn("sql on the copy: could not make a spill directory, so this statement fails past its memory instead of using the disk", "root", r.spillRoot, "error", err)
+		return spillSpec{}
+	}
+	return spillSpec{Dir: dir, MaxBytes: SpillFactor * mem}
 }
 
 // IsWorkerInvocation reports whether args (os.Args) start a worker: the first
@@ -685,6 +766,10 @@ type wireJob struct {
 	// MaxResultBytes is counted by the worker as it collects rows, so it
 	// stops before building a result the parent would refuse anyway.
 	MaxResultBytes int64 `json:"max_result_bytes"`
+	// SpillDir is the private directory the parent made for this statement,
+	// and SpillMaxBytes what it may hold (#2210). Empty: no spill.
+	SpillDir      string `json:"spill_dir,omitempty"`
+	SpillMaxBytes int64  `json:"spill_max_bytes,omitempty"`
 	// TimeoutNS is the parent's wall clock, so the child can stop on its own
 	// shortly after it if the parent is no longer there to kill it.
 	TimeoutNS int64 `json:"timeout_ns"`
@@ -744,11 +829,23 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 	if asking {
 		viewsSQL = ""
 	}
+	spill := r.makeSpill(limits.MemoryLimit)
+	if spill.Dir != "" {
+		// After the worker has exited on every path (a group kill at the
+		// timeout included: Wait returns only then), so nothing writes here
+		// any more.
+		defer func() {
+			if err := os.RemoveAll(spill.Dir); err != nil {
+				slog.Warn("sql on the copy: could not remove a statement's spill directory", "dir", spill.Dir, "error", err)
+			}
+		}()
+	}
 	in, err := json.Marshal(wireJob{
 		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, Schema: job.Schema,
 		TimeZone: job.Session.TimeZone, SelectLimit: job.Session.SelectLimit,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
+		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes,
 	})
 	if err != nil {
 		return Result{}, &WorkerError{Err: err}
@@ -839,7 +936,7 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 		case errRefused:
 			return Result{}, &RefusedError{Reason: out.Error.Message}
 		case errQuery:
-			return Result{}, &QueryError{Message: out.Error.Message}
+			return Result{}, &QueryError{Message: spillCapMessage(out.Error.Message, spill)}
 		case errTooLarge:
 			return Result{}, ErrResultTooLarge
 		default:

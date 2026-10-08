@@ -36,13 +36,13 @@ func TestSandboxSettingsExistInPinnedEngine(t *testing.T) {
 	}
 	// And the lock-down script names each of them, in the order that matters:
 	// the lock last.
-	script := strings.Join(lockdownStatements([]string{"/copy"}), "\n")
+	script := strings.Join(lockdownStatements([]string{"/copy"}, spillSpec{Dir: "/spill", MaxBytes: 1 << 30}), "\n")
 	for _, s := range sandboxSettings {
 		if !strings.Contains(script, "SET "+s+" ") {
 			t.Errorf("lockdown does not SET %s:\n%s", s, script)
 		}
 	}
-	last := lockdownStatements([]string{"/copy"})
+	last := lockdownStatements([]string{"/copy"}, spillSpec{})
 	if !strings.HasPrefix(last[len(last)-1], "SET lock_configuration = true") {
 		t.Errorf("lock_configuration must be the last statement, got %q", last[len(last)-1])
 	}
@@ -50,7 +50,7 @@ func TestSandboxSettingsExistInPinnedEngine(t *testing.T) {
 
 // A copy directory with a quote in its name cannot break out of the literal.
 func TestLockdownQuotesDirectories(t *testing.T) {
-	stmts := lockdownStatements([]string{"/co'py", "/other"})
+	stmts := lockdownStatements([]string{"/co'py", "/other"}, spillSpec{})
 	var got string
 	for _, s := range stmts {
 		if strings.HasPrefix(s, "SET allowed_directories") {
@@ -72,7 +72,7 @@ func TestLockdownRunsInOrderOnPinnedEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	stmts := lockdownStatements([]string{t.TempDir()})
+	stmts := lockdownStatements([]string{t.TempDir()}, spillSpec{})
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
 			t.Fatalf("%s: %v", s, err)
@@ -95,7 +95,7 @@ func TestLockdownEngineRefusesInstallAndOutsideReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, s := range lockdownStatements([]string{t.TempDir()}) {
+	for _, s := range lockdownStatements([]string{t.TempDir()}, spillSpec{}) {
 		if _, err := db.Exec(s); err != nil {
 			t.Fatalf("%s: %v", s, err)
 		}
@@ -172,7 +172,7 @@ func TestDuckDBPrefixedTableFunctionsArePinned(t *testing.T) {
 //     so a build without ICU refuses every query loudly instead of answering
 //     under some other collation.
 func TestLockdown_collationComesFromTheBinary(t *testing.T) {
-	stmts := lockdownStatements([]string{t.TempDir()})
+	stmts := lockdownStatements([]string{t.TempDir()}, spillSpec{})
 	index := func(prefix string) int {
 		for i, s := range stmts {
 			if strings.HasPrefix(s, prefix) {

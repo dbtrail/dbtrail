@@ -156,8 +156,10 @@ What to know before relying on it:
   metrics: `bintrail_sql_slot_wait_seconds` and `bintrail_sql_slot_waiting`
   ([Observability](observability.md)). The daemon that serves them is the one
   capturing changes, which is why the limits are small. A
-  statement past its memory (2 GB by default) fails instead of spilling to
-  disk, and one whose tables have more than 48 MB of changes not merged into
+  statement past its memory (2 GB by default) goes on using a temporary
+  folder of its own on disk, more slowly, up to four times its memory (8 GB
+  by default; the folder is under the system's temporary directory and is
+  removed when the statement ends), and fails only past that. One whose tables have more than 48 MB of changes not merged into
   them yet is answered from the newest earlier copy in which they fit, with
   a warning (SHOW WARNINGS) naming that copy's time; with no such copy it is
   refused before it runs. Under read routing it is not answered from an

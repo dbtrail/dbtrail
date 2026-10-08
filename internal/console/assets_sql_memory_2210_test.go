@@ -135,6 +135,8 @@ func TestSQLMemoryPanel_2210(t *testing.T) {
 
 	has("default", got.Def, "Each statement can use 2 GB of memory. This is the default.")
 	has("default", got.Def, "Tables with up to 48 MB of changes waiting to be merged can be queried. More memory raises this limit.")
+	has("default", got.Def, "Past that, it can also use up to 8 GB of disk, in a temporary folder deleted when it ends, so a heavy statement runs slower instead of failing.")
+	has("saved", got.Saved4, "Past that, it can also use up to 16 GB of disk")
 	has("default", got.Def, "2 statements can run at once, on the machine that also captures changes.")
 	has("default", got.Def, "Write it like 4GB or 1536MB, at least 512MB. The default is 2 GB.")
 	if !slices.Equal(got.Def.Buttons, []string{"Save"}) || !slices.Equal(got.Def.Inputs, []string{"2GB"}) {
