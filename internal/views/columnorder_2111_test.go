@@ -344,7 +344,7 @@ func TestStateView_selectStarOrder_throughADeltaChain(t *testing.T) {
 		t.Fatal("the fixture's table has no delta: this test would run the plain view")
 	}
 	sqlText := Generate(in)
-	if !strings.Contains(sqlText, "bintrail_delta") {
+	if !strings.Contains(sqlText, "bintrail_latest") {
 		t.Fatalf("the view is not the delta shape:\n%s", sqlText)
 	}
 	db := execViews(t, sqlText)
