@@ -234,7 +234,7 @@ func TestSpillState(t *testing.T) {
 		{"plenty of room", fs{free: 1 << 40}, "2048MiB", 8 << 30, ""},
 		{"free space unknown", fs{free: -1}, "2048MiB", 8 << 30, ""},
 		{"a share of the free space", fs{free: 8 << 30}, "2048MiB", 2 << 30, ""},
-		{"too little room", fs{free: 512 << 20}, "2048MiB", 0, "MB free, too little"},
+		{"too little room", fs{free: 512 << 20}, "2048MiB", 0, "is too little to spill to"},
 		{"in memory", fs{free: 1 << 40, inMemory: true}, "2048MiB", 0, "is in memory (tmpfs)"},
 		{"cannot be read", fs{err: os.ErrPermission}, "2048MiB", 0, "cannot be used"},
 		{"memory that does not parse", fs{free: 1 << 40}, "lots", 0, "does not parse"},
@@ -269,5 +269,34 @@ func TestLockdownStatements_spill(t *testing.T) {
 	none := strings.Join(lockdownStatements([]string{"/copy"}, spillSpec{}), "\n")
 	if !strings.Contains(none, "SET temp_directory = ''") || strings.Contains(none, "max_temp_directory_size") {
 		t.Errorf("with no spill spec:\n%s", none)
+	}
+}
+
+// The sweep also runs after New, at most every spillSweepEvery: a folder a
+// crash left behind goes with a later statement, not only at a restart.
+func TestSweepSpillDue_runsAgainAfterTheInterval(t *testing.T) {
+	root := t.TempDir()
+	r := New(Config{SpillDir: root})
+	t0 := time.Now()
+	r.spillSweptAt = t0
+	leave := func() string {
+		p := filepath.Join(root, spillPrefix+"left")
+		if err := os.MkdirAll(p, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		old := t0.Add(-2 * minStaleSpillAge)
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	p := leave()
+	r.sweepSpillDue(t0.Add(spillSweepEvery/2), false)
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("swept before the interval: %v", err)
+	}
+	r.sweepSpillDue(t0.Add(spillSweepEvery+time.Second), false)
+	if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("not swept after the interval: %v", err)
 	}
 }

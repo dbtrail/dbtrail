@@ -14,5 +14,5 @@ func spillFS(dir string) (free int64, inMemory bool, err error) {
 	if err := syscall.Statfs(dir, &st); err != nil {
 		return 0, false, err
 	}
-	return int64(st.Bavail) * st.Bsize, st.Type == tmpfsMagic, nil
+	return int64(st.Bavail) * int64(st.Frsize), st.Type == tmpfsMagic, nil
 }

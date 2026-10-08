@@ -160,8 +160,9 @@ What to know before relying on it:
   folder of its own on disk, more slowly, up to four times its memory (8 GB
   by default) and never more than a share of the free space there, and fails
   only past that. The folder is under the system's temporary directory
-  (`TMPDIR`), is removed when the statement ends, and one a crash left
-  behind goes within minutes of the restart. Where that directory is in
+  (`TMPDIR`), is removed when the statement ends; one a crash left behind is
+  removed once it is ten minutes old, when the daemon starts or with a later
+  statement. Where that directory is in
   memory (a `tmpfs`), statements do not spill and fail past their memory as
   before; the settings panel (Memory for SQL on the copy) says which. One whose tables have more than 384 MB of changes not merged into
   them yet is answered from the newest earlier copy in which they fit, with

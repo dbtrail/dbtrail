@@ -1216,9 +1216,9 @@ The limits, so a query can never hurt capture:
   setting to the page. The saved value lives in `console-sql-settings.json`
   beside the servers file; DBTrail reads that file when it starts, so change
   it from the page rather than by hand.
-- A query whose tables have more than 48 MB of changes not merged into them
+- A query whose tables have more than 384 MB of changes not merged into them
   yet (all the tables it names, together; the line grows with the memory,
-  96 MB at 4GB) is answered from the newest earlier copy in which those
+  768 MB at 4GB) is answered from the newest earlier copy in which those
   tables fit, and the result says which copy and why. The answer is
   consistent with that copy's moment, like every answer here: SQL on the
   copy reads a point in time, not the source as it is now. With no such
@@ -1416,8 +1416,8 @@ one release and warns that it no longer does anything. Remove it.
 - `BINTRAIL_CONSOLE_SQL_MEMORY` (`watch` and `serve`) — same as
   `--sql-memory`: the memory each SQL-on-the-copy statement may use, e.g.
   `4GB` (default 2GB; under 512MB, or not a size, refuses to start). The
-  changes a statement's tables may hold unmerged grow with it: 48 MB at 2GB,
-  96 MB at 4GB. In `.env` as `SQL_MEMORY` (leave it empty to set the memory
+  changes a statement's tables may hold unmerged grow with it: 384 MB at 2GB,
+  768 MB at 4GB. In `.env` as `SQL_MEMORY` (leave it empty to set the memory
   in the web interface). `watch` warns at startup when this
   times `--sql-max-in-flight` is more than the host's memory. Set this way it
   wins over the value saved in Settings, MCP Server (which then shows it

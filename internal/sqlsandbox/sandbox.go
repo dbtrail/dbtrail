@@ -626,7 +626,7 @@ func (r *Runner) SpillState(memoryLimit string) (int64, error) {
 		limit = min(limit, free/int64(2*r.maxInFlight))
 	}
 	if limit < minSpillBytes {
-		return 0, fmt.Errorf("the temporary directory %s has %d MB free, too little to spill to", r.spillRoot, free>>20)
+		return 0, fmt.Errorf("the temporary directory %s has %d MB free, and a statement's share of it (half, split between the %d that can run at once) is too little to spill to", r.spillRoot, free>>20, r.maxInFlight)
 	}
 	return limit, nil
 }

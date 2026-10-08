@@ -361,7 +361,7 @@ services:
       # value saved in the web interface (Settings, MCP Server), else 2GB;
       # set here, it wins and that panel only shows it.
       # The changes a statement's tables may hold unmerged grow with it
-      # (48 MB at 2GB, 96 MB at 4GB).
+      # (384 MB at 2GB, 768 MB at 4GB).
       BINTRAIL_CONSOLE_SQL_MEMORY: ${SQL_MEMORY:-}
       # "Run verification" button (#677): lets the console run `bintrail verify`
       # in-process for a monitored server (trigger, poll per-table results,
