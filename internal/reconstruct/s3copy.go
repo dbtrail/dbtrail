@@ -204,7 +204,9 @@ func s3CopyUnchangedChain(ctx context.Context, p tableDeltaPublish, hasAnchor bo
 		return false
 	}
 	prev := &tableDelta{Chain: chain, Meta: baseline.DumpMetadata{DeltaSeq: 0, DeltaChainStart: start}}
-	if reason := chainCompactReason(prev, 0, p.capGap, p.cfg.At, hasAnchor, reserved, p.cfg.ChainStartFloor, time.Time{}); reason != "" {
+	// No line rule here (0): SQL on the copy does not read a copy kept only
+	// in S3, so there is no line to keep its chains under.
+	if reason := chainCompactReason(prev, 0, p.capGap, p.cfg.At, hasAnchor, reserved, p.cfg.ChainStartFloor, time.Time{}, 0); reason != "" {
 		logS3CopyDeclined(p.schema, p.table, reason)
 		return false
 	}
