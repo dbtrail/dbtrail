@@ -23,8 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   beside it passed half of the table, which for a large table is far past
   what SQL on the copy reads at once (48 MB at 2 GB). A refresh now also
   rewrites a table whose changes pass half of that line, read at each
-  refresh from the memory in force, so in normal operation statements read
-  the newest copy. Large tables under steady writes are rewritten more often.
+  refresh from the memory in force, so a statement over one table normally
+  reads the newest copy (a statement over several adds their changes
+  together, and one window that alone passes the line still reaches it until
+  the next refresh). Large tables under steady writes are rewritten more
+  often.
 
 ## [0.101.0] - 2026-10-07
 ### Added
