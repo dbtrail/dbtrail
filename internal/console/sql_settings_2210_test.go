@@ -3,6 +3,7 @@ package console
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -157,6 +158,16 @@ func sqlSettingsServer(t *testing.T, path, startup string) *Server {
 		t.Fatal(err)
 	}
 	s.hostMemory = func() uint64 { return 8 << 30 }
+	if s.sqlSpillState == nil {
+		t.Fatal("New left the runner's spill state unwired: the settings panel would never say how much disk a statement may use")
+	}
+	// The runner's answer depends on the free space of the machine running
+	// the test; the panel's sentences are pinned against a fixed one, four
+	// times the memory (sqlsandbox tests the real computation).
+	s.sqlSpillState = func(memory string) (int64, error) {
+		n, err := cliutil.ParseByteSize(memory)
+		return 4 * n, err
+	}
 	return s
 }
 

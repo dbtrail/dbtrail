@@ -318,9 +318,10 @@ type sqlSettingsDTO struct {
 	// this memory takes before refusing (sqlChainLimit).
 	MaxUnmergedMB int64 `json:"max_unmerged_mb"`
 	// Disk is what a statement may also spill to disk past its memory, as
-	// words (sqlsandbox.SpillFactor times it, #2210); "" when the memory does
-	// not parse.
-	Disk string `json:"disk,omitempty"`
+	// words (#2210, the runner's SpillState); NoDisk, set instead, is why a
+	// statement cannot spill at all.
+	Disk   string `json:"disk,omitempty"`
+	NoDisk string `json:"no_disk,omitempty"`
 	// MaxInFlight is how many statements run at once; HostMemoryBytes the
 	// machine's memory, 0 (omitted) when not known; Warning is set when the
 	// first times the memory is more than the second.
@@ -354,8 +355,12 @@ func (s *Server) sqlSettings() sqlSettingsDTO {
 		Locked:          locked,
 		Error:           loadErr,
 	}
-	if nbytes > 0 {
-		dto.Disk = sqlMemoryWords(fmt.Sprintf("%dMiB", sqlsandbox.SpillFactor*nbytes>>20))
+	if s.sqlSpillState != nil {
+		if n, err := s.sqlSpillState(lim); err != nil {
+			dto.NoDisk = err.Error()
+		} else {
+			dto.Disk = sqlMemoryWords(fmt.Sprintf("%dMiB", n>>20))
+		}
 	}
 	if src == "startup" && saved > 0 {
 		dto.Saved = sqlMemoryWords(fmt.Sprintf("%dMiB", saved))

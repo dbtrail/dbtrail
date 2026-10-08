@@ -10,12 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SQL on the copy uses the disk past its memory instead of failing**
   (#2210). A statement that needed more than its memory (2 GB by default)
   failed with an out-of-memory error, because the worker that runs it had no
-  disk to spill to. Each statement now gets a temporary folder of its own,
-  up to four times its memory (8 GB by default), removed when it ends: a
-  heavy statement runs slower instead of failing. Only the engine writes
-  there, and the statement can read nothing outside its own folder and the
-  copy. Past that cap it still fails, and the message now says the disk was
-  used up too.
+  disk to spill to. Each statement now gets a temporary folder of its own
+  under the system's temporary directory, up to four times its memory (8 GB
+  by default) and no more than a share of the free space, removed when it
+  ends: a heavy statement runs slower instead of failing. Only the engine
+  writes there, and the statement can read nothing outside its own folder and
+  the copy. Past that cap it still fails, and the message now says the disk
+  was used up too. Where the temporary directory is in memory (`tmpfs`) or
+  nearly full, statements do not spill; the settings panel says so, and so
+  does the error of a statement that ran out of memory.
 - **SQL on the copy answers from an earlier copy instead of refusing**
   (#2210). A query whose tables hold more unmerged changes than SQL on the
   copy merges at once used to be refused until DBTrail merged them, which

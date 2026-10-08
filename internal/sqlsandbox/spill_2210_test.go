@@ -77,11 +77,17 @@ func TestRun_spillDirRemovedOnTimeoutAndError(t *testing.T) {
 	f := newCopyFixture(t)
 	root := t.TempDir()
 	l := testLimits()
-	l.Timeout = time.Second
+	l.Timeout = 1500 * time.Millisecond
+	l.MemoryLimit = spillMemory
 	r := spillRunner(t, root, l)
+	// The spilling statement, killed while DuckDB is writing to the folder,
+	// or, on a loaded machine, stopped by its spill cap first: both end with
+	// files in the folder, and both must leave nothing behind.
+	_, err := r.Run(context.Background(), f.job("SELECT count(*) FROM (SELECT DISTINCT i FROM range(200000000) t(i))"))
 	var te *TimeoutError
-	if _, err := r.Run(context.Background(), f.job("SELECT count(*) FROM range(100000000) a, range(100000000) b")); !errors.As(err, &te) {
-		t.Fatalf("err = %v, want TimeoutError", err)
+	var capped *QueryError
+	if !errors.As(err, &te) && !(errors.As(err, &capped) && strings.Contains(capped.Message, "failed to offload")) {
+		t.Fatalf("err = %v, want TimeoutError or the spill cap", err)
 	}
 	if left := spillLeft(t, root); len(left) != 0 {
 		t.Errorf("after a timeout, left behind: %v", left)
@@ -100,7 +106,7 @@ func TestRun_spillDirRemovedOnTimeoutAndError(t *testing.T) {
 // host is running) and anything not named like a spill directory stay.
 func TestNew_sweepsStaleSpillDirectories(t *testing.T) {
 	root := t.TempDir()
-	old := time.Now().Add(-2 * staleSpillAge)
+	old := time.Now().Add(-2 * minStaleSpillAge)
 	mk := func(name string, at time.Time) {
 		p := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Join(p, "inner"), 0o700); err != nil {
@@ -175,11 +181,74 @@ func TestLockdown_spillDirIsTheEnginesOnly(t *testing.T) {
 		t.Fatalf("past the spill cap: err = %v, want DuckDB's failed-to-offload error, which spillCapMessage recognizes", err)
 	}
 	spec := spillSpec{Dir: "/spill", MaxBytes: 8 << 30}
-	if got := spillCapMessage(err.Error(), spec); !strings.HasSuffix(got, "may also use 8192 MB of disk, and it filled that too.") {
-		t.Errorf("past the spill cap the user reads %q", got)
+	got := spillCapMessage(err.Error(), spec, nil)
+	t.Logf("past the spill cap, the user reads: %s", got)
+	if !strings.HasSuffix(got, "The statement needed more than its memory and also filled the 8192 MB of disk it may use past it.") ||
+		strings.Contains(got, "PRAGMA") || len(got) > 400 {
+		t.Errorf("past the spill cap the user reads %q: want DuckDB's first sentence and ours, without the PRAGMA the locked session refuses, short enough for a MySQL client", got)
 	}
-	if got := spillCapMessage("Out of Memory Error: could not allocate block", spec); strings.Contains(got, "disk") {
-		t.Errorf("a plain out-of-memory error reads as a full disk: %q", got)
+}
+
+// The other messages spillCapMessage writes, and the ones it leaves alone.
+func TestSpillCapMessage(t *testing.T) {
+	spec := spillSpec{Dir: "/spill", MaxBytes: 8 << 30}
+	noDisk := errors.New("the temporary directory /tmp is in memory (tmpfs), where spilling would use memory; point TMPDIR at a folder on disk")
+	oom := "Out of Memory Error: failed to allocate data of size 64.0 MiB (77.5 MiB/122.0 MiB used).\n\nPossible solutions: ..."
+	cases := []struct {
+		name, msg string
+		spill     spillSpec
+		noSpill   error
+		want      string
+	}{
+		{"disk full", `IO Error: Could not write file "/tmp/x/duckdb_temp_storage-0.tmp": No space left on device`, spec, nil,
+			"Out of Memory Error: the disk this statement spills to past its memory is full."},
+		{"no disk, out of memory", oom, spillSpec{}, noDisk,
+			"Out of Memory Error: failed to allocate data of size 64.0 MiB (77.5 MiB/122.0 MiB used). It could not use the disk past its memory: " + noDisk.Error() + "."},
+		{"with disk, out of memory: untouched", oom, spec, nil, oom},
+		{"no disk, another error: untouched", "Binder Error: no such column", spillSpec{}, noDisk, "Binder Error: no such column"},
+	}
+	for _, c := range cases {
+		if got := spillCapMessage(c.msg, c.spill, c.noSpill); got != c.want {
+			t.Errorf("%s:\n got %q\nwant %q", c.name, got, c.want)
+		}
+	}
+}
+
+// SpillState: four times the memory, bounded by a share of the free space
+// (half of it, split between the statements that can run at once), and a
+// reason instead whenever a statement cannot spill.
+func TestSpillState(t *testing.T) {
+	type fs struct {
+		free     int64
+		inMemory bool
+		err      error
+	}
+	r := New(Config{SpillDir: t.TempDir(), MaxInFlight: 2})
+	cases := []struct {
+		name    string
+		fs      fs
+		memory  string
+		want    int64
+		wantErr string
+	}{
+		{"plenty of room", fs{free: 1 << 40}, "2048MiB", 8 << 30, ""},
+		{"free space unknown", fs{free: -1}, "2048MiB", 8 << 30, ""},
+		{"a share of the free space", fs{free: 8 << 30}, "2048MiB", 2 << 30, ""},
+		{"too little room", fs{free: 512 << 20}, "2048MiB", 0, "MB free, too little"},
+		{"in memory", fs{free: 1 << 40, inMemory: true}, "2048MiB", 0, "is in memory (tmpfs)"},
+		{"cannot be read", fs{err: os.ErrPermission}, "2048MiB", 0, "cannot be used"},
+		{"memory that does not parse", fs{free: 1 << 40}, "lots", 0, "does not parse"},
+	}
+	defer func(old func(string) (int64, bool, error)) { spillFSFor = old }(spillFSFor)
+	for _, c := range cases {
+		spillFSFor = func(string) (int64, bool, error) { return c.fs.free, c.fs.inMemory, c.fs.err }
+		got, err := r.SpillState(c.memory)
+		switch {
+		case c.wantErr == "" && (err != nil || got != c.want):
+			t.Errorf("%s: %d, %v; want %d", c.name, got, err, c.want)
+		case c.wantErr != "" && (err == nil || !strings.Contains(err.Error(), c.wantErr)):
+			t.Errorf("%s: err = %v, want one saying %q", c.name, err, c.wantErr)
+		}
 	}
 }
 

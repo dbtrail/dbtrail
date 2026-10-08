@@ -409,9 +409,14 @@ type spillSpec struct {
 //     statement slows down instead of failing; past the cap it fails with
 //     an out-of-memory error that names the cap. The directory is the
 //     parent's (Runner.spawn makes it per statement and removes it when the
-//     worker exits), it is NOT in allowed_directories, so the statement
-//     itself can neither read nor list it: only the engine writes there.
-//     With no spill spec, temp_directory = '' and nothing is ever written:
+//     worker exits). DuckDB admits its temp directory to reads, so the
+//     statement CAN list and read this one (observed on v1.4.5: glob and
+//     read_csv over it succeed): that is why it is one statement's own and
+//     lives as long as the statement, holding nothing but that statement's
+//     own spill. Its parent and another statement's directory stay out of
+//     reach, and nothing can be written there but by the engine, since the
+//     only statement admitted is one SELECT.
+//     With no spill spec, temp_directory is empty and nothing is written:
 //     a statement past memory_limit fails, as before #2210.
 //   - lock_configuration = true: from here on every SET, RESET and config
 //     PRAGMA is "Cannot change configuration option ... the configuration

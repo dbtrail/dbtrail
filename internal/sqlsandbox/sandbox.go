@@ -436,24 +436,58 @@ type Config struct {
 // over 20 M integers at 128 MB needed more than twice it.
 const SpillFactor = 4
 
-// spillCapMessage is DuckDB's error for a statement that filled its spill
-// directory, with what DuckDB leaves out: the "used" figures it quotes are the
-// DISK cap, not the memory, and nothing in its text says so.
-func spillCapMessage(msg string, spill spillSpec) string {
-	if spill.Dir == "" || !strings.Contains(msg, "failed to offload data block") {
-		return msg
+// spillCapMessage is the message a user reads for a statement that ran out
+// of room. DuckDB's own text for a full spill directory goes on to advise
+// "PRAGMA max_temp_directory_size", which the locked session refuses, and the
+// figures it quotes are the DISK cap; a MySQL client shows 512 bytes of it.
+// So its first sentence is kept and the rest replaced. A statement that had
+// no disk at all (noSpill) and ran out of memory says why it had none.
+func spillCapMessage(msg string, spill spillSpec, noSpill error) string {
+	first := func(s string) string {
+		if i := strings.Index(s, ")."); i >= 0 {
+			return s[:i+2]
+		}
+		if i := strings.IndexByte(s, '\n'); i >= 0 {
+			return s[:i]
+		}
+		return s
 	}
-	return msg + fmt.Sprintf(" Past its memory this statement may also use %d MB of disk, and it filled that too.", spill.MaxBytes>>20)
+	switch {
+	case spill.Dir != "" && strings.Contains(msg, "failed to offload data block"):
+		return first(msg) + fmt.Sprintf(" The statement needed more than its memory and also filled the %d MB of disk it may use past it.", spill.MaxBytes>>20)
+	case spill.Dir != "" && strings.Contains(msg, "No space left on device"):
+		return "Out of Memory Error: the disk this statement spills to past its memory is full."
+	case spill.Dir == "" && noSpill != nil && strings.Contains(msg, "Out of Memory Error"):
+		return first(msg) + " It could not use the disk past its memory: " + noSpill.Error() + "."
+	}
+	return msg
 }
 
-// spillPrefix names a statement's spill directory under Config.SpillDir;
-// staleSpillAge is how old one must be before New removes it as left behind
-// by a parent that died (a live statement is bounded by its Timeout, a minute
-// by default).
+// spillPrefix names a statement's spill directory under Config.SpillDir.
+// minSpillBytes is the least a statement is given to spill to; with less
+// room than that it runs without the disk, as before #2210.
 const (
 	spillPrefix   = "bintrail-sql-spill-"
-	staleSpillAge = time.Hour
+	minSpillBytes = 256 << 20
 )
+
+// staleSpillAge is how old a spill directory must be before a sweep removes
+// it as left behind: one a worker kept writing after its parent died (the
+// worker has its own process group, so it outlives the parent until its own
+// deadline, Timeout plus selfDeadlineGrace) and that nothing removed. Ten
+// minutes, or four times the timeout when that is longer, so a live
+// statement of another console on the same host is never taken. A sweep runs
+// when the Runner is built and again at most every spillSweepEvery, so a
+// directory a crash left goes within minutes of the restart, not at the next
+// one.
+const (
+	minStaleSpillAge = 10 * time.Minute
+	spillSweepEvery  = 10 * time.Minute
+)
+
+func (r *Runner) staleSpillAge() time.Duration {
+	return max(minStaleSpillAge, 4*r.limits.Timeout)
+}
 
 // DefaultMaxWait and DefaultMaxWaiters bound the line for a slot (#2033):
 // a burst of statements (a dashboard drawing its panels, two people at
@@ -473,6 +507,13 @@ type Runner struct {
 	maxWait     time.Duration
 	maxWaiters  int
 	spillRoot   string
+
+	// spillMu guards the spill bookkeeping: when the last sweep ran, and the
+	// last reason a statement could not spill ("" when it could), so the log
+	// says so once per change instead of once per statement.
+	spillMu        sync.Mutex
+	spillSweptAt   time.Time
+	spillLastError string
 
 	mu       sync.Mutex
 	busy     map[string]bool
@@ -511,8 +552,25 @@ func New(cfg Config) *Runner {
 	if r.spillRoot == "" {
 		r.spillRoot = os.TempDir()
 	}
-	sweepSpill(r.spillRoot, time.Now().Add(-staleSpillAge))
+	r.sweepSpillDue(time.Now(), true)
+	if _, err := r.SpillState(r.limits.MemoryLimit); err != nil {
+		r.noteSpill(err)
+	}
 	return r
+}
+
+// sweepSpillDue sweeps when the last sweep is older than spillSweepEvery, or
+// when forced.
+func (r *Runner) sweepSpillDue(now time.Time, force bool) {
+	r.spillMu.Lock()
+	due := force || now.Sub(r.spillSweptAt) >= spillSweepEvery
+	if due {
+		r.spillSweptAt = now
+	}
+	r.spillMu.Unlock()
+	if due {
+		sweepSpill(r.spillRoot, now.Add(-r.staleSpillAge()))
+	}
 }
 
 // sweepSpill removes the spill directories under root last written before
@@ -520,6 +578,8 @@ func New(cfg Config) *Runner {
 func sweepSpill(root string, cutoff time.Time) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
+		// SpillState reports a root that cannot be used; this is only the
+		// cleanup, and it has nothing to remove from a root it cannot read.
 		return
 	}
 	for _, e := range entries {
@@ -534,22 +594,81 @@ func sweepSpill(root string, cutoff time.Time) {
 	}
 }
 
-// makeSpill makes the private spill directory for one statement and returns
-// its spec, or a zero spec (no spill) when the memory limit does not parse or
-// the directory cannot be made: the statement then runs as before #2210,
-// failing past its memory instead of slowing down, and the log says why.
-func (r *Runner) makeSpill(memoryLimit string) spillSpec {
+// spillFSFor is spillFS, a variable so a test can give a full or an
+// in-memory root.
+var spillFSFor = spillFS
+
+// SpillState is how much disk one statement with memoryLimit may spill to
+// past it: SpillFactor times the memory, and no more than a share of the
+// space free under the spill root (half of it, split between the statements
+// that can run at once), because that disk may be the one capture writes to.
+// The error says why a statement cannot spill at all: the memory does not
+// parse, the root cannot be read, it is in memory (a tmpfs, where spilling
+// would take memory memory_limit does not count), or it has too little room.
+// The console's settings panel shows the same answer.
+func (r *Runner) SpillState(memoryLimit string) (int64, error) {
 	mem, err := cliutil.ParseByteSize(memoryLimit)
-	if err != nil || mem <= 0 {
-		slog.Warn("sql on the copy: the memory limit does not parse, so this statement cannot spill to disk", "memory", memoryLimit, "error", err)
-		return spillSpec{}
-	}
-	dir, err := os.MkdirTemp(r.spillRoot, spillPrefix)
 	if err != nil {
-		slog.Warn("sql on the copy: could not make a spill directory, so this statement fails past its memory instead of using the disk", "root", r.spillRoot, "error", err)
-		return spillSpec{}
+		return 0, fmt.Errorf("the memory limit %q does not parse: %w", memoryLimit, err)
 	}
-	return spillSpec{Dir: dir, MaxBytes: SpillFactor * mem}
+	if mem <= 0 {
+		return 0, fmt.Errorf("the memory limit %q is not a size", memoryLimit)
+	}
+	free, inMemory, err := spillFSFor(r.spillRoot)
+	if err != nil {
+		return 0, fmt.Errorf("the temporary directory %s cannot be used: %w", r.spillRoot, err)
+	}
+	if inMemory {
+		return 0, fmt.Errorf("the temporary directory %s is in memory (tmpfs), where spilling would use memory; point TMPDIR at a folder on disk", r.spillRoot)
+	}
+	limit := SpillFactor * mem
+	if free >= 0 {
+		limit = min(limit, free/int64(2*r.maxInFlight))
+	}
+	if limit < minSpillBytes {
+		return 0, fmt.Errorf("the temporary directory %s has %d MB free, too little to spill to", r.spillRoot, free>>20)
+	}
+	return limit, nil
+}
+
+// noteSpill logs a change in whether statements can spill: the first
+// statement that cannot, with why, and the first that can again. Not every
+// statement: a dashboard sends several at once.
+func (r *Runner) noteSpill(err error) {
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	r.spillMu.Lock()
+	changed := msg != r.spillLastError
+	r.spillLastError = msg
+	r.spillMu.Unlock()
+	switch {
+	case !changed:
+	case err != nil:
+		slog.Warn("sql on the copy: statements cannot use the disk past their memory, so a heavy one fails instead of slowing down", "reason", msg)
+	default:
+		slog.Info("sql on the copy: statements can use the disk past their memory again", "root", r.spillRoot)
+	}
+}
+
+// makeSpill makes the private spill directory for one statement and returns
+// its spec, or a zero spec with the reason when it cannot spill: the
+// statement then runs as before #2210, failing past its memory instead of
+// slowing down, and its error says why it had no disk (spillCapMessage).
+func (r *Runner) makeSpill(memoryLimit string) (spillSpec, error) {
+	r.sweepSpillDue(time.Now(), false)
+	limit, err := r.SpillState(memoryLimit)
+	if err == nil {
+		var dir string
+		if dir, err = os.MkdirTemp(r.spillRoot, spillPrefix); err == nil {
+			r.noteSpill(nil)
+			return spillSpec{Dir: dir, MaxBytes: limit}, nil
+		}
+		err = fmt.Errorf("could not make a folder under %s: %w", r.spillRoot, err)
+	}
+	r.noteSpill(err)
+	return spillSpec{}, err
 }
 
 // IsWorkerInvocation reports whether args (os.Args) start a worker: the first
@@ -829,7 +948,7 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 	if asking {
 		viewsSQL = ""
 	}
-	spill := r.makeSpill(limits.MemoryLimit)
+	spill, noSpill := r.makeSpill(limits.MemoryLimit)
 	if spill.Dir != "" {
 		// After the worker has exited on every path (a group kill at the
 		// timeout included: Wait returns only then), so nothing writes here
@@ -936,7 +1055,7 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 		case errRefused:
 			return Result{}, &RefusedError{Reason: out.Error.Message}
 		case errQuery:
-			return Result{}, &QueryError{Message: spillCapMessage(out.Error.Message, spill)}
+			return Result{}, &QueryError{Message: spillCapMessage(out.Error.Message, spill, noSpill)}
 		case errTooLarge:
 			return Result{}, ErrResultTooLarge
 		default:
