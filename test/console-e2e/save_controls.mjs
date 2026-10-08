@@ -51,6 +51,8 @@ export const WRITES = [
   // The MySQL port, turned on and off from the Connect panel (#2101).
   { method: "PUT", path: "/api/flashback", count: 2, kind: "scene", id: "mysql-port" },
   { method: "POST", path: "/api/flashback/password", count: 1, kind: "scene", id: "mysql-port" },
+  // The memory for SQL on the copy, Save and Use default (#2210).
+  { method: "PUT", path: "/api/sql-settings", count: 2, kind: "scene", id: "sql-memory" },
   { method: "PUT", path: "/api/servers/draft", count: 1, kind: "scene", id: "draft" },
   { method: "DELETE", path: "/api/servers/draft", count: 2, kind: "scene", id: "draft" },
   { method: "POST", path: "/api/capture-skips/ack", count: 1, kind: "scene", id: "capture-skips" },
@@ -953,6 +955,75 @@ export async function runSaveScenes(ctx) {
           !!off && !!st3 && st3.has_password === true && st3.suggested_listen === want && !!back && !(await listening()),
           JSON.stringify({ off, st3, back, listening: await listening() }));
       } finally { await tab.close(); }
+    });
+
+    // ── the SQL memory (#2210) ──────────────────────────────────────────
+    // On the main daemon, started with no --sql-memory, so the panel offers
+    // the form. Save, Save again and Use default are pressed on ONE panel,
+    // each read back through GET /api/sql-settings. It ends on the default,
+    // so the scenes after it run SQL as before.
+    await scene("sql-memory", async () => {
+      const sel = ".cn-sqlmem";
+      const status = async () => (await readAs(page, "/api/sql-settings")).body;
+      const press = (label) => until(() => page.evaluate(({ sel, label }) => {
+        const b = Array.from(document.querySelectorAll(sel + " button")).find((x) => x.textContent === label && !x.disabled);
+        if (b) { b.click(); return true; }
+        return false;
+      }, { sel, label }));
+      const type = (v) => until(() => page.evaluate(({ sel, v }) => {
+        const i = document.querySelector(sel + " input");
+        if (!i) return false;
+        i.value = v;
+        return true;
+      }, { sel, v }));
+      const text = () => page.evaluate((sel) => { const p = document.querySelector(sel); return p ? p.innerText : ""; }, sel);
+      const GiB = 1 << 30;
+      const savedAs = (bytes) => until(async () => { const b = await status(); return b && b.source === "saved" && b.memory_bytes === bytes ? b : null; });
+
+      const before = await status();
+      try {
+        await page.evaluate(() => navigate("connect"));
+        const s1 = (await type("3GB")) && await press("Save");
+        const st1 = await savedAs(3 * GiB);
+        const shown1 = await until(async () => /can use 3 GB of memory\. Saved here\./.test(await text()));
+        check("sql-memory", "Save stores the memory typed and the panel shows it, with its unmerged-changes line",
+          before && before.can_manage === true && before.source === "default" && !!s1 && !!st1 && st1.max_unmerged_mb === 72 && !!shown1 &&
+            (await text()).includes("up to 72 MB of changes"),
+          JSON.stringify({ before, s1, st1, shown1, text: await text() }));
+        // The live value, as the SQL card reads it. The copy may not exist
+        // yet when this runs; then the route has no limits to show.
+        const info = await readAs(page, "/api/sql");
+        if (info.status === 200) {
+          check("sql-memory", "GET /api/sql reports the saved memory without a restart",
+            info.body && info.body.limits && info.body.limits.memory === "3 GB" && info.body.limits.max_unmerged_mb === 72, JSON.stringify(info));
+        } else {
+          console.log(`NOT CHECKED  save sql-memory: GET /api/sql answered ${info.status}, so its limits were not read back`);
+        }
+
+        // The same panel, pressed again.
+        const s2 = (await type("4GB")) && await press("Save");
+        const st2 = await savedAs(4 * GiB);
+        const shown2 = await until(async () => /can use 4 GB of memory\. Saved here\./.test(await text()));
+        check("sql-memory", "a second Save on the same panel stores the new value and the panel shows it",
+          !!s2 && !!st2 && st2.max_unmerged_mb === 96 && !!shown2, JSON.stringify({ s2, st2, shown2, text: await text() }));
+
+        const s3 = await press("Use default");
+        const st3 = await until(async () => { const b = await status(); return b && b.source === "default" ? b : null; });
+        const shown3 = await until(async () => /can use 2 GB of memory\. This is the default\./.test(await text()));
+        check("sql-memory", "Use default goes back to 2 GB, stored, and the panel says it is the default",
+          !!s3 && !!st3 && st3.memory_bytes === 2 * GiB && !!shown3, JSON.stringify({ s3, st3, shown3, text: await text() }));
+      } finally {
+        // A check that failed half way must not leave 3 or 4 GB in force
+        // for the scenes after this one.
+        const last = await status();
+        if (last && last.source === "saved") {
+          await page.evaluate(async () => {
+            const h = { "Content-Type": "application/json" };
+            if (TOKEN) h.Authorization = "Bearer " + TOKEN;
+            await fetch("/api/sql-settings", { method: "PUT", headers: h, body: JSON.stringify({ memory: "" }) });
+          });
+        }
+      }
     });
 
     // ── telemetry ───────────────────────────────────────────────────────

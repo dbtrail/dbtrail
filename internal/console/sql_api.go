@@ -401,12 +401,13 @@ func (s *Server) handleSQLInfo(w http.ResponseWriter, r *http.Request) {
 		// Whether there is one could not be read: not "no change log".
 		notes = append(notes, sqlEventsLookupFailedNote)
 	}
+	memory, _ := s.sqlMemoryNow()
 	resp := sqlInfoResponse{Views: names, Notes: notes, Limits: sqlLimitsDTO{
 		TimeoutSeconds: int(s.sqlLimits.Timeout / time.Second),
 		MaxRows:        s.sqlLimits.MaxRows,
 		MaxCellBytes:   sqlsandbox.MaxCellBytes,
-		Memory:         sqlMemoryWords(s.sqlLimits.MemoryLimit),
-		MaxUnmergedMB:  sqlChainLimit(s.sqlLimits.MemoryLimit) >> 20,
+		Memory:         sqlMemoryWords(memory),
+		MaxUnmergedMB:  sqlChainLimit(memory) >> 20,
 	}}
 	if !in.BaselineSnapshot.IsZero() {
 		at := in.BaselineSnapshot.UTC()
@@ -522,7 +523,7 @@ func sqlChainLimit(memory string) int64 {
 }
 
 // sqlMemoryWords is the worker's memory as a person reads it: "2 GB",
-// "1.5 GB", "512 MB". The raw value when it does not parse.
+// "1.5 GB", "512 MB", "1030 MB". The raw value when it does not parse.
 func sqlMemoryWords(memory string) string {
 	if memory == "" {
 		memory = sqlsandbox.DefaultLimits().MemoryLimit
@@ -534,7 +535,8 @@ func sqlMemoryWords(memory string) string {
 	if n%(1<<30) == 0 {
 		return fmt.Sprintf("%d GB", n>>30)
 	}
-	if n >= 1<<30 {
+	// One decimal only when it is exact: 1030 MB is not "1.0 GB".
+	if n >= 1<<30 && (n%(1<<30))*10%(1<<30) == 0 {
 		return strconv.FormatFloat(float64(n)/(1<<30), 'f', 1, 64) + " GB"
 	}
 	return fmt.Sprintf("%d MB", n>>20)
@@ -749,6 +751,9 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 	if err != nil {
 		return sqlOutcome{}, err
 	}
+	// Read once (#2210): a change saved while this statement runs applies to
+	// the next one, and this one's refusal or hint names what it ran with.
+	memory, _ := s.sqlMemoryNow()
 	ran := false
 	viewsStart := time.Now()
 	defer func() {
@@ -825,7 +830,7 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 			// Refused before the views are installed (#1735): a chain this
 			// long does not fit the worker's memory, and the statement
 			// would fail there after reading for a while.
-			if msg := sqlChainRefusalFor(in, refs, s.sqlLimits.MemoryLimit); msg != "" {
+			if msg := sqlChainRefusalFor(in, refs, memory); msg != "" {
 				viewsRefusal = &sqlRefusal{http.StatusUnprocessableEntity, msg}
 				return "", viewsRefusal
 			}
@@ -874,7 +879,7 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 		SQL:     statement,
 		Schema:  schema,
 		Session: sess,
-		Limits:  sqlsandbox.Limits{MaxRows: maxRows},
+		Limits:  sqlsandbox.Limits{MaxRows: maxRows, MemoryLimit: memory},
 	}
 	ran = true
 	res, err := slot.Run(ctx, job)
@@ -895,7 +900,7 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 				return sqlOutcome{}, &sqlRefusal{http.StatusBadGateway, sqlEventsLookupFailedMessage}
 			}
 		}
-		return sqlOutcome{}, sqlWithMemoryHint(err, s.sqlLimits.MemoryLimit)
+		return sqlOutcome{}, sqlWithMemoryHint(err, memory)
 	}
 	// The measurement #2026 asks for, per statement, at debug so a run under
 	// load can be read back from the log.
