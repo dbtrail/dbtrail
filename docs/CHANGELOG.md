@@ -13,10 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under steady traffic made queries fail without warning. It is now
   answered from the newest earlier copy in which those tables fit, the same
   tables at one earlier moment, and the answer says so: a note above the
-  result in the web interface, a warning (SHOW WARNINGS, code 1105) on the
-  MySQL port, and the copy's time in place of the newest one's. The refusal
-  remains when no earlier copy fits, under read routing (the statement goes
-  to MySQL as before), and for a statement that reads `events`.
+  result in the web interface, a warning (SHOW WARNINGS) on the MySQL port, and the copy's time in place of the newest one's. The refusal
+  remains when no earlier copy fits or the earlier one cannot answer (the
+  log says why), under read routing (the statement goes to MySQL as
+  before), and for a statement that reads `events`. A CSV of such an answer
+  is named for its copy, and the audit record carries the copy's time.
 
 ## [0.101.0] - 2026-10-07
 ### Added

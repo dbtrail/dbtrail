@@ -122,6 +122,25 @@ func TestSQLAPI_answersFromAnEarlierCopy(t *testing.T) {
 		}
 	})
 
+	t.Run("a CSV of an earlier copy carries the copy and why as headers", func(t *testing.T) {
+		f := newSQLFixture(t, runner, false)
+		addChain(t, f.schemaDir, "orders")
+		writeOrdersSnapshot(t, f.root, "2026-04-30T02-00-00Z", "at two")
+		w := f.post(t, `{"sql":"`+stmt+`"}`, "Accept", "text/csv")
+		if w.Code != http.StatusOK || w.Header().Get("X-DBTrail-Copy-At") != "2026-04-30T02:00:00Z" ||
+			!strings.HasPrefix(w.Header().Get("X-DBTrail-Older-Copy"), "Answered from the copy of 2026-04-30 02:00 UTC") ||
+			!strings.Contains(w.Body.String(), "at two") {
+			t.Fatalf("code=%d headers=%v body=%q", w.Code, w.Header(), w.Body.String())
+		}
+	})
+
+	t.Run("the note names the total when the statement reads several tables", func(t *testing.T) {
+		h := &sqlHeavyRun{chain: sqlHeavyChain{Table: "shop.orders", Own: 30 << 20, Total: 55 << 20, WithChanges: 2}, limit: 48 << 20, newest: sqlSnapshotAt}
+		if n := sqlOlderCopyNote(h, two); !strings.Contains(n, "the tables this statement reads have 55 MB") || strings.Contains(n, "30 MB") {
+			t.Errorf("note: %q", n)
+		}
+	})
+
 	t.Run("an earlier copy that is too heavy too is skipped", func(t *testing.T) {
 		f := newSQLFixture(t, runner, false)
 		addChain(t, f.schemaDir, "orders")
@@ -149,6 +168,21 @@ func TestSQLAPI_answersFromAnEarlierCopy(t *testing.T) {
 		f := newSQLFixture(t, runner, false)
 		addChain(t, f.schemaDir, "orders")
 		writeTableSnapshot(t, f.root, "2026-04-30T02-00-00Z", "customers", "x")
+		if a := ask(f, stmt); a.code != http.StatusUnprocessableEntity || !strings.Contains(a.body, "not merged") {
+			t.Fatalf("got %+v", a)
+		}
+	})
+
+	t.Run("an earlier copy that cannot answer leaves the refusal, not its error", func(t *testing.T) {
+		f := newSQLFixture(t, runner, false)
+		addChain(t, f.schemaDir, "orders")
+		dir := filepath.Join(f.root, "2026-04-30T02-00-00Z", "shop")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "orders.parquet"), []byte("not parquet"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		if a := ask(f, stmt); a.code != http.StatusUnprocessableEntity || !strings.Contains(a.body, "not merged") {
 			t.Fatalf("got %+v", a)
 		}

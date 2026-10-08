@@ -465,6 +465,14 @@ func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
 
 	csv := wantsCSV(r)
 	if csv {
+		// A file carries no note above it: the copy's time and, for an
+		// earlier copy (#2210), why, travel as headers the page reads.
+		if copyUpdatedAt != nil {
+			w.Header().Set("X-DBTrail-Copy-At", copyUpdatedAt.UTC().Format(time.RFC3339))
+		}
+		if out.OlderCopyNote != "" {
+			w.Header().Set("X-DBTrail-Older-Copy", out.OlderCopyNote)
+		}
 		writeSQLCSV(w, res)
 	} else {
 		writeJSON(w, http.StatusOK, sqlResponse{
@@ -488,6 +496,11 @@ func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
 	}
 	if csv {
 		detail["format"] = "csv"
+	}
+	if out.OlderCopyNote != "" && copyUpdatedAt != nil {
+		// Which point in time the rows came from, when it is not the newest
+		// copy (#2210).
+		detail["older_copy_at"] = copyUpdatedAt.UTC().Format(time.RFC3339)
 	}
 	recordConsoleAccess(r, "sql.run", "", "", detail)
 }
@@ -827,19 +840,21 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 	}
 	var again *sqlHeavyRun
 	older, oerr := s.runSQLAt(ctx, b, user, statement, schema, maxRows, sess, unchanged, at, &again)
-	if errors.Is(oerr, sqlsandbox.ErrBusy) || errors.Is(oerr, context.DeadlineExceeded) {
-		return out, err
-	}
-	if again != nil {
-		// The earlier copy was read once to pick it and again to run on it:
-		// a refusal now means it changed in between. The first answer stands.
-		return out, err
-	}
 	if oerr != nil {
-		return older, oerr
+		// Whatever stopped the run on the earlier copy (busy, its own time
+		// cap, a column that copy does not have yet, the copy removed in
+		// between), the reader is told what they asked about: the newest
+		// copy's refusal. Why the earlier copy did not answer is the
+		// operator's, in the log.
+		slog.Warn("console: sql: an earlier copy was found but could not answer; the statement is refused as before",
+			"user", user, "copy", at.UTC().Format(time.RFC3339), "error", oerr)
+		return out, err
 	}
 	older.OlderCopyNote = sqlOlderCopyNote(heavy, at)
-	slog.Info("console: sql answered from an earlier copy: the newest one holds more unmerged changes than a statement merges",
+	// Debug, not Info: while a table stays over the line every statement
+	// naming it comes here, and a dashboard polling the port would flood the
+	// log. The answer itself says it, and the audit record carries the copy.
+	slog.Debug("console: sql answered from an earlier copy: the newest one holds more unmerged changes than a statement merges",
 		"user", user, "copy", at.UTC().Format(time.RFC3339), "newest", heavy.newest.UTC().Format(time.RFC3339),
 		"table", heavy.chain.Table, "unmerged_mb", (heavy.chain.Total+(1<<20)-1)>>20, "limit_mb", heavy.limit>>20)
 	return older, nil
@@ -897,11 +912,19 @@ func (s *Server) sqlOlderCopy(ctx context.Context, b *bundle, h *sqlHeavyRun) (t
 	}
 	slices.SortFunc(order, func(a, b time.Time) int { return b.Compare(a) })
 	for _, at := range order {
+		// One deadline for the listing and the walk, checked per copy: on a
+		// slow disk, or with a client gone, the walk stops and the refusal
+		// stands.
+		if lctx.Err() != nil {
+			slog.Warn("console: sql: stopped looking for an earlier copy to answer from", "error", lctx.Err())
+			return time.Time{}, false
+		}
 		tables := bySnapshot[at]
 		if len(tables) != len(want) {
 			continue // a table the statement names is not in that copy
 		}
 		if err := views.MarkTableDeltas(lctx, tables); err != nil {
+			slog.Warn("console: sql: could not read an earlier copy's changes; looking at older ones", "copy", at.UTC().Format(time.RFC3339), "error", err)
 			continue
 		}
 		if sqlChainTooHeavy(tables, h.limit, sqlFileSize).Table == "" {
@@ -916,8 +939,13 @@ func (s *Server) sqlOlderCopy(ctx context.Context, b *bundle, h *sqlHeavyRun) (t
 // client's warning.
 func sqlOlderCopyNote(h *sqlHeavyRun, at time.Time) string {
 	const layout = "2006-01-02 15:04 UTC"
-	return fmt.Sprintf("Answered from the copy of %s: in the newest copy (%s), %s has %d MB of changes not merged in yet, more than SQL here reads at once (%d MB). DBTrail merges them on its own.",
-		at.UTC().Format(layout), h.newest.UTC().Format(layout), h.chain.Table, (h.chain.Own+(1<<20)-1)>>20, h.limit>>20)
+	mb := func(n int64) int64 { return (n + (1 << 20) - 1) >> 20 }
+	what := fmt.Sprintf("%s has %d MB", h.chain.Table, mb(h.chain.Own))
+	if h.chain.WithChanges > 1 {
+		what = fmt.Sprintf("the tables this statement reads have %d MB", mb(h.chain.Total))
+	}
+	return fmt.Sprintf("Answered from the copy of %s: in the newest copy (%s), %s of changes not merged in yet, more than SQL here reads at once (%d MB). DBTrail merges them on its own.",
+		at.UTC().Format(layout), h.newest.UTC().Format(layout), what, h.limit>>20)
 }
 
 // runSQLAt is runSQLVouched over the copy of time at (zero: the newest).

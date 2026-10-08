@@ -1112,6 +1112,10 @@ func (h *Handler) recordFreeSQL(statement, schema string, res sqlsandbox.Result,
 	if schema != "" {
 		detail["schema"] = schema
 	}
+	if res.Note != "" {
+		// The rows came from an earlier copy than the newest (#2210).
+		detail["note"] = res.Note
+	}
 	ctx := context.Background()
 	if h.baseCtx != nil {
 		ctx = context.WithoutCancel(h.baseCtx)
