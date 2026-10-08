@@ -97,7 +97,7 @@ func TestSQLPanelPureFunctions(t *testing.T) {
 		"ago": []c{{"iso": iso(10), "now": now}, {"iso": iso(7 * 60), "now": now}, {"iso": iso(3 * 3600), "now": now},
 			{"iso": iso(86400), "now": now}, {"iso": iso(3 * 86400), "now": now}, {"iso": "not a time", "now": now}},
 		"status": []c{
-			{"info": c{"copy_updated_at": iso(7 * 60), "limits": c{"timeout_seconds": 60, "max_rows": 1000}}, "now": now},
+			{"info": c{"copy_updated_at": iso(7 * 60), "limits": c{"timeout_seconds": 60, "max_rows": 1000, "memory": "2 GB", "max_unmerged_mb": 48}}, "now": now},
 			{"info": c{"copy_updated_at": nil, "limits": c{"timeout_seconds": 45}}, "now": now},
 			{"info": nil, "now": now},
 		},
@@ -196,7 +196,7 @@ func TestSQLPanelPureFunctions(t *testing.T) {
 		t.Errorf("sqlAgo = %q, want %q", out.Ago, want)
 	}
 	wantStatus := []string{
-		"runs on the copy updated 7 min ago · read-only · 60 s limit",
+		"runs on the copy updated 7 min ago · read-only · 60 s limit · 2 GB of memory · tables with up to 48 MB of changes waiting",
 		"runs on DBTrail's copy · read-only · 45 s limit",
 		"runs on DBTrail's copy · read-only",
 	}

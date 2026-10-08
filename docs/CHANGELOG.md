@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **`--sql-memory` sets the memory SQL on the copy runs with** (#2210).
+  The SQL card and the MySQL port ran every statement with a fixed 2 GB, and
+  refused a statement whose tables held more than a fixed 48 MB of changes
+  not yet merged into them, also on hosts with far more memory. `watch
+  --sql-memory 4GB` (env `BINTRAIL_CONSOLE_SQL_MEMORY`, at least 512MB) gives
+  each statement that memory, and the line of unmerged changes moves with it
+  (96 MB at 4GB; it was measured at 2 GB). The SQL card's status line now
+  shows the memory and the line in force, and the refusal and out-of-memory
+  messages name the memory actually used. `serve` takes the same flag. A
+  startup warning says when that memory times `--sql-max-in-flight` is more
+  than the host has. The default is now passed as 2048MiB: DuckDB read the
+  old "2GB" as 1.86 GiB. Sizes take KB/MB/GB and KiB/MiB/GiB.
 ### Changed
 - **A scheduled update moves a table's changes to disk by size, not only by
   count** (#2207). An update holds every changed row of a table in memory

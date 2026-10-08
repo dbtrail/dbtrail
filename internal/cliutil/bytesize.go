@@ -21,6 +21,17 @@ func ParseByteSize(s string) (int64, error) {
 
 	multiplier := int64(1)
 	switch {
+	// The IEC spellings (KiB, MiB, GiB), which DuckDB's memory_limit takes:
+	// the same binary units as the short ones here.
+	case strings.HasSuffix(s, "GIB"):
+		multiplier = 1 << 30
+		s = strings.TrimSuffix(s, "GIB")
+	case strings.HasSuffix(s, "MIB"):
+		multiplier = 1 << 20
+		s = strings.TrimSuffix(s, "MIB")
+	case strings.HasSuffix(s, "KIB"):
+		multiplier = 1 << 10
+		s = strings.TrimSuffix(s, "KIB")
 	case strings.HasSuffix(s, "GB"):
 		multiplier = 1 << 30
 		s = strings.TrimSuffix(s, "GB")
@@ -34,7 +45,7 @@ func ParseByteSize(s string) (int64, error) {
 
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil || n < 0 {
-		return 0, fmt.Errorf("invalid byte size %q; expected a number with optional KB/MB/GB suffix, e.g. 256MB", original)
+		return 0, fmt.Errorf("invalid byte size %q; expected a number with optional KB/MB/GB (or KiB/MiB/GiB) suffix, e.g. 256MB", original)
 	}
 	if n > math.MaxInt64/multiplier {
 		return 0, fmt.Errorf("byte size %q overflows int64", original)

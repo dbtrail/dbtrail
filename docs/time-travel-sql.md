@@ -97,7 +97,7 @@ mysql> SELECT * FROM _flashback.orders AS OF '2026-05-02 10:00:00' WHERE id = 12
 The same connection runs ordinary read-only SQL over the server's Parquet
 copy, the snapshots and the archived change log, exactly as the console's
 **SQL** card does: same locked DuckDB child process, same views, same caps
-(2 threads, 2 GB, 60 seconds, 1,000 rows, one query at a time per server).
+(2 threads, 2 GB by default, 60 seconds, 1,000 rows, one query at a time per server).
 A statement that is not time travel is handed to it:
 
 ```sql
@@ -156,9 +156,14 @@ What to know before relying on it:
   metrics: `bintrail_sql_slot_wait_seconds` and `bintrail_sql_slot_waiting`
   ([Observability](observability.md)). The daemon that serves them is the one
   capturing changes, which is why the limits are small. A
-  statement past 2 GB fails instead of spilling to disk, and one whose
-  tables have more than 48 MB of changes not merged into them yet is refused
-  before it runs (under read routing it goes to MySQL like any other refusal). For a team or a
+  statement past its memory (2 GB by default) fails instead of spilling to
+  disk, and one whose tables have more than 48 MB of changes not merged into
+  them yet is refused before it runs (under read routing it goes to MySQL
+  like any other refusal). On a host with memory to spare, `--sql-memory`
+  (env `BINTRAIL_CONSOLE_SQL_MEMORY`, at least 512MB) raises both: the line
+  of changes moves with it, 96 MB at 4GB. The SQL card shows the memory and
+  the line in force. Each statement can take that much at once, times
+  `--sql-max-in-flight`, on the host that captures. For a team or a
   dashboard tool, each reader's own DuckDB on the bucket is the way to scale
   reads (see [Dashboards](dashboards.md)): it runs on the reader's machine and
   adds no load to the capture host. The trade-off: bucket permissions replace

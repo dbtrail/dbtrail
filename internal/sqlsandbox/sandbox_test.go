@@ -538,7 +538,7 @@ func TestRun_workerThatCannotStartIsAnError(t *testing.T) {
 // DefaultLimits are the ones the issue asks for.
 func TestDefaultLimits(t *testing.T) {
 	l := DefaultLimits()
-	if l.Threads != 2 || l.MemoryLimit != "2GB" || l.Timeout != 60*time.Second || l.MaxRows != 1000 {
+	if l.Threads != 2 || l.MemoryLimit != "2048MiB" || l.Timeout != 60*time.Second || l.MaxRows != 1000 {
 		t.Errorf("DefaultLimits = %+v", l)
 	}
 }

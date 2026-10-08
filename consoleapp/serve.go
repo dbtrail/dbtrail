@@ -18,6 +18,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/telemetry"
 )
 
@@ -49,6 +50,7 @@ var (
 	conListen       string
 	conToken        string
 	conNoArchive    bool
+	conSQLMemory    string
 	conProfile      string
 	conAllowedHosts []string
 	conBaselineDir  string
@@ -66,6 +68,7 @@ func init() {
 	serveCmd.Flags().StringVar(&conListen, "listen", "127.0.0.1:8090", "Address to listen on (host:port)")
 	serveCmd.Flags().StringVar(&conToken, "token", "", "Opt-in static token for API automation (never generated; humans use the password)")
 	serveCmd.Flags().BoolVar(&conNoArchive, "no-archive", false, "Disable Parquet archive auto-discovery (MySQL-only)")
+	serveCmd.Flags().StringVar(&conSQLMemory, "sql-memory", "", "Memory each SQL-on-the-copy statement may use, e.g. 4GB; default 2GB, at least 512MB. A table with more changes not yet merged than it can merge (48 MB at 2 GB, in proportion) is refused. Env BINTRAIL_CONSOLE_SQL_MEMORY.")
 	serveCmd.Flags().StringVar(&conProfile, "profile", "", "RBAC profile: deny tables / redact columns; forces --no-archive")
 	serveCmd.Flags().StringSliceVar(&conAllowedHosts, "allowed-hosts", nil, "Extra hostnames allowed in the Host header (for reverse-proxy setups; IP literals and localhost are always allowed)")
 	serveCmd.Flags().StringVar(&conBaselineDir, "baseline-dir", "", "Local directory of baseline Parquet snapshots; enables the point-in-time Reconstruct surface")
@@ -102,6 +105,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if v := os.Getenv("BINTRAIL_CONSOLE_LISTEN"); v != "" {
 			conListen = v
 		}
+	}
+	// --sql-memory (#2210): serve runs SQL on the copy too.
+	sqlMemory, err := sqlMemoryFrom(cmd)
+	if err != nil {
+		return err
 	}
 	if !cmd.Flags().Changed("token") {
 		if v := os.Getenv("BINTRAIL_CONSOLE_TOKEN"); v != "" {
@@ -242,6 +250,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// endpoint must report the live decision — while console actions stay
 		// unrecorded, per TELEMETRY.md.
 		Telemetry: serveTelemetry{},
+		SQLLimits: sqlsandbox.Limits{MemoryLimit: sqlMemory},
 		Registry:  registry,
 		Listen:    conListen,
 		Token:     conToken,
