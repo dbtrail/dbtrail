@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/ext"
+	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
@@ -340,6 +341,11 @@ type sqlLimitsDTO struct {
 	TimeoutSeconds int `json:"timeout_seconds"`
 	MaxRows        int `json:"max_rows"`
 	MaxCellBytes   int `json:"max_cell_bytes"`
+	// Memory is the worker's memory as a person reads it ("2 GB"), and
+	// MaxUnmergedMB the changes not yet merged into a statement's tables it
+	// takes before refusing (#2210, sqlChainLimit).
+	Memory        string `json:"memory"`
+	MaxUnmergedMB int64  `json:"max_unmerged_mb"`
 }
 
 // handleSQLInfo is GET /api/sql. Same permission and the same gates as the
@@ -399,6 +405,8 @@ func (s *Server) handleSQLInfo(w http.ResponseWriter, r *http.Request) {
 		TimeoutSeconds: int(s.sqlLimits.Timeout / time.Second),
 		MaxRows:        s.sqlLimits.MaxRows,
 		MaxCellBytes:   sqlsandbox.MaxCellBytes,
+		Memory:         sqlMemoryWords(s.sqlLimits.MemoryLimit),
+		MaxUnmergedMB:  sqlChainLimit(s.sqlLimits.MemoryLimit) >> 20,
 	}}
 	if !in.BaselineSnapshot.IsZero() {
 		at := in.BaselineSnapshot.UTC()
@@ -487,7 +495,8 @@ func (e *sqlRefusal) Error() string { return e.Message }
 // sqlMaxChainBytes is how much of a chain's upserts files (on disk, over
 // every table the statement reads) a statement here may have to merge. The
 // state view keeps the newest image of each changed row, and to pick it
-// DuckDB holds every image at once; the worker has 2 GB and no spill.
+// DuckDB holds every image at once; the worker has 2 GB by default
+// (--sql-memory, sqlChainLimit scales this line to it) and no spill.
 //
 // Measured on one table, so a line and not a law: sysbench-tpcc order_line,
 // 100 M rows, ten narrow columns. At 45 MiB (4.5 M images) a total over the
@@ -497,6 +506,39 @@ func (e *sqlRefusal) Error() string { return e.Message }
 // seen to pass. A wider table can fail under it, which is what
 // sqlWithMemoryHint is for. A var so tests can reach it.
 var sqlMaxChainBytes int64 = 48 << 20
+
+// sqlChainLimit is sqlMaxChainBytes scaled to the worker's memory (#2210,
+// watch --sql-memory): the line was measured at the default 2 GB, and what a
+// merge holds grows with the images it holds, so twice the memory merges
+// about twice the changes. A memory that does not parse keeps the measured
+// line (the daemon refuses such a value at startup; this is a belt).
+func sqlChainLimit(memory string) int64 {
+	m, err := cliutil.ParseByteSize(memory)
+	d, derr := cliutil.ParseByteSize(sqlsandbox.DefaultLimits().MemoryLimit)
+	if memory == "" || err != nil || m <= 0 || derr != nil || d <= 0 {
+		return sqlMaxChainBytes
+	}
+	return int64(float64(sqlMaxChainBytes) * float64(m) / float64(d))
+}
+
+// sqlMemoryWords is the worker's memory as a person reads it: "2 GB",
+// "1.5 GB", "512 MB". The raw value when it does not parse.
+func sqlMemoryWords(memory string) string {
+	if memory == "" {
+		memory = sqlsandbox.DefaultLimits().MemoryLimit
+	}
+	n, err := cliutil.ParseByteSize(memory)
+	if err != nil || n <= 0 {
+		return memory
+	}
+	if n%(1<<30) == 0 {
+		return fmt.Sprintf("%d GB", n>>30)
+	}
+	if n >= 1<<30 {
+		return strconv.FormatFloat(float64(n)/(1<<30), 'f', 1, 64) + " GB"
+	}
+	return fmt.Sprintf("%d MB", n>>20)
+}
 
 func sqlFileSize(path string) (int64, error) {
 	fi, err := os.Stat(path)
@@ -530,12 +572,13 @@ func sqlNamedTables(in views.Input, refs sqlsandbox.Refs) []views.BaselineTable 
 
 // sqlChainRefusalFor is the refusal for a statement whose tables hold more
 // unmerged changes than a query here can merge, "" when it may run.
-func sqlChainRefusalFor(in views.Input, refs sqlsandbox.Refs) string {
-	heavy := sqlChainTooHeavy(sqlNamedTables(in, refs), sqlMaxChainBytes, sqlFileSize)
+func sqlChainRefusalFor(in views.Input, refs sqlsandbox.Refs, memory string) string {
+	limit := sqlChainLimit(memory)
+	heavy := sqlChainTooHeavy(sqlNamedTables(in, refs), limit, sqlFileSize)
 	if heavy.Table == "" {
 		return ""
 	}
-	return sqlChainTooHeavyMessage(heavy, sqlMaxChainBytes)
+	return sqlChainTooHeavyMessage(heavy, limit, memory)
 }
 
 // sqlHeavyChain is what sqlChainTooHeavy found: the table that holds the
@@ -597,7 +640,7 @@ func sqlChainTooHeavy(tables []views.BaselineTable, limit int64, size func(strin
 // client alike (which cuts a message at 512 bytes). Megabytes waiting are
 // rounded up so a chain just past the limit never prints the limit's own
 // number.
-func sqlChainTooHeavyMessage(h sqlHeavyChain, limit int64) string {
+func sqlChainTooHeavyMessage(h sqlHeavyChain, limit int64, memory string) string {
 	mb := func(n int64) int64 { return (n + (1 << 20) - 1) >> 20 }
 	what := fmt.Sprintf("%s has %d MB of changes not merged into it yet", h.Table, mb(h.Own))
 	read := "Read it"
@@ -605,19 +648,23 @@ func sqlChainTooHeavyMessage(h sqlHeavyChain, limit int64) string {
 		what = fmt.Sprintf("the tables this statement reads have %d MB of changes not merged into them yet (%s has %d MB)", mb(h.Total), h.Table, mb(h.Own))
 		read = "Read them"
 	}
-	return fmt.Sprintf("%s, and SQL on the copy merges at most %d MB: it runs with 2 GB of memory on the capture host, for quick looks. "+
-		"%s with your own DuckDB instead (in the web interface: Settings, MCP Server, Download a DuckDB schema). "+
-		"DBTrail merges them on its own, within a day while updates run.", what, limit>>20, read)
+	msg := fmt.Sprintf("%s, and SQL on the copy merges at most %d MB: it runs with %s of memory on the capture host, for quick looks. "+
+		"%s with your own DuckDB instead (in the web interface: Settings, MCP Server, Download a DuckDB schema).", what, limit>>20, sqlMemoryWords(memory), read)
+	// A MySQL client shows 512 bytes; the last sentence goes first.
+	if tail := " DBTrail merges them on its own, within a day while updates run."; len(msg)+len(tail) <= 512 {
+		msg += tail
+	}
+	return msg
 }
 
 // sqlWithMemoryHint adds the way out to a statement that ran and hit the
 // worker's memory cap. The runner's error is copied, not changed.
-func sqlWithMemoryHint(err error) error {
+func sqlWithMemoryHint(err error, memory string) error {
 	var qerr *sqlsandbox.QueryError
 	if !errors.As(err, &qerr) || !strings.Contains(qerr.Message, "Out of Memory Error") {
 		return err
 	}
-	return &sqlsandbox.QueryError{Message: qerr.Message + " SQL on the copy runs with 2 GB of memory on the host that captures changes, " +
+	return &sqlsandbox.QueryError{Message: qerr.Message + " SQL on the copy runs with " + sqlMemoryWords(memory) + " of memory on the host that captures changes, " +
 		"for quick looks. For heavier reads use your own DuckDB (the web interface has the file for it: Settings, MCP Server, Download a DuckDB schema)."}
 }
 
@@ -778,7 +825,7 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 			// Refused before the views are installed (#1735): a chain this
 			// long does not fit the worker's memory, and the statement
 			// would fail there after reading for a while.
-			if msg := sqlChainRefusalFor(in, refs); msg != "" {
+			if msg := sqlChainRefusalFor(in, refs, s.sqlLimits.MemoryLimit); msg != "" {
 				viewsRefusal = &sqlRefusal{http.StatusUnprocessableEntity, msg}
 				return "", viewsRefusal
 			}
@@ -848,7 +895,7 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 				return sqlOutcome{}, &sqlRefusal{http.StatusBadGateway, sqlEventsLookupFailedMessage}
 			}
 		}
-		return sqlOutcome{}, sqlWithMemoryHint(err)
+		return sqlOutcome{}, sqlWithMemoryHint(err, s.sqlLimits.MemoryLimit)
 	}
 	// The measurement #2026 asks for, per statement, at debug so a run under
 	// load can be read back from the log.

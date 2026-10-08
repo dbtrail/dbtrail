@@ -2684,6 +2684,8 @@ function sqlStatusLine(info, nowMs) {
   parts.push("read-only");
   const lim = (info && info.limits) || {};
   if (lim.timeout_seconds) parts.push(lim.timeout_seconds + " s limit");
+  if (lim.memory) parts.push(lim.memory + " of memory");
+  if (lim.max_unmerged_mb) parts.push("tables with up to " + lim.max_unmerged_mb + " MB of changes waiting");
   return parts.join(" · ");
 }
 

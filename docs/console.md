@@ -1205,10 +1205,13 @@ query. The line under the editor says how old the copy is.
 The limits, so a query can never hurt capture:
 
 - Each query runs in its own process, separate from the one that captures,
-  with 2 threads and 2 GB of memory. A query that needs more fails with an
-  out-of-memory message; capture does not notice.
+  with 2 threads and 2 GB of memory by default (`--sql-memory`, at least
+  512MB). A query that needs more fails with an out-of-memory message;
+  capture does not notice. The line under the editor shows the memory in
+  force.
 - A query whose tables have more than 48 MB of changes not merged into them
-  yet (all the tables it names, together) is refused before it runs, with the
+  yet (all the tables it names, together; the line grows with the memory,
+  96 MB at 4GB) is refused before it runs, with the
   name of the table that has the most. Between two rewrites of a table,
   DBTrail keeps its changes in small files beside it, and a query has to
   merge them in memory; past that size they do not fit. DBTrail merges the
@@ -1384,7 +1387,8 @@ one release and warns that it no longer does anything. Remove it.
 - `BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT` (`watch` only) — same as
   `--sql-max-in-flight`: how many SQL-on-the-copy statements run at once, the
   SQL card and the time-travel port together (default `2`; below `1` refuses
-  to start). Each one is its own process with 2 threads and up to 2 GB, on
+  to start). Each one is its own process with 2 threads and up to
+  `--sql-memory` (2 GB by default), on
   the host that captures, and every result is held in the daemon while it is
   sent, so the daemon's own memory grows with it; on the compose stack the
   workers share the `watch` container, which sets no limit, and the value goes
@@ -1392,6 +1396,12 @@ one release and warns that it no longer does anything. Remove it.
   right for a 4-core host: measured there, two heavy statements kept capture
   current (#2026). The daemon warns at startup when the statements could take
   more threads than the host has cores.
+- `BINTRAIL_CONSOLE_SQL_MEMORY` (`watch` and `serve`) — same as
+  `--sql-memory`: the memory each SQL-on-the-copy statement may use, e.g.
+  `4GB` (default 2GB; under 512MB, or not a size, refuses to start). The
+  changes a statement's tables may hold unmerged grow with it: 48 MB at 2GB,
+  96 MB at 4GB. In `.env` as `SQL_MEMORY`. `watch` warns at startup when this
+  times `--sql-max-in-flight` is more than the host's memory.
 - `BINTRAIL_CONSOLE_FLASHBACK_LISTEN` (`watch` only) — same as `--flashback-listen`
   (e.g. `127.0.0.1:3308`): serve an embedded MySQL-protocol time-travel port for
   every monitored server, routed by the connection username. Off by default;

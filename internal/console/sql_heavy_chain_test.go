@@ -79,7 +79,7 @@ func TestSQLChainTooHeavy(t *testing.T) {
 // It names the table with ITS megabytes, says the limit and where to go, and
 // fits what a MySQL client shows of an error.
 func TestSQLChainTooHeavyMessage(t *testing.T) {
-	one := sqlChainTooHeavyMessage(sqlHeavyChain{"tpcc.order_line1", 86 << 20, 86 << 20, 1}, 48<<20)
+	one := sqlChainTooHeavyMessage(sqlHeavyChain{"tpcc.order_line1", 86 << 20, 86 << 20, 1}, 48<<20, "2GB")
 	want := "tpcc.order_line1 has 86 MB of changes not merged into it yet, and SQL on the copy merges at most 48 MB: " +
 		"it runs with 2 GB of memory on the capture host, for quick looks. " +
 		"Read it with your own DuckDB instead (in the web interface: Settings, MCP Server, Download a DuckDB schema). " +
@@ -87,19 +87,25 @@ func TestSQLChainTooHeavyMessage(t *testing.T) {
 	if one != want {
 		t.Errorf("one table:\n got %q\nwant %q", one, want)
 	}
-	several := sqlChainTooHeavyMessage(sqlHeavyChain{"shop.orders", 30 << 20, 55 << 20, 2}, 48<<20)
+	several := sqlChainTooHeavyMessage(sqlHeavyChain{"shop.orders", 30 << 20, 55 << 20, 2}, 48<<20, "2GB")
 	if !strings.HasPrefix(several, "the tables this statement reads have 55 MB of changes not merged into them yet (shop.orders has 30 MB), and SQL on the copy merges at most 48 MB: ") ||
 		!strings.Contains(several, "Read them with your own DuckDB") {
 		t.Errorf("several tables: %q", several)
 	}
-	long := sqlChainTooHeavyMessage(sqlHeavyChain{strings.Repeat("s", 64) + "." + strings.Repeat("t", 64), 9999 << 20, 99999 << 20, 2}, 48<<20)
-	for name, msg := range map[string]string{"one": one, "several": several, "longest names": long} {
+	msgs := map[string]string{"one": one, "several": several}
+	// The longest names, the most waiting, every memory shape (#2210 review):
+	// the limit as sqlChainLimit gives it, not a fixed one.
+	for _, mem := range []string{"2GB", "2048MiB", "12800MiB", "131072MiB", "1048576MiB", "1025MiB"} {
+		msgs["longest names at "+mem] = sqlChainTooHeavyMessage(sqlHeavyChain{strings.Repeat("s", 64) + "." + strings.Repeat("t", 64), 99999 << 20, 999999 << 20, 2},
+			sqlChainLimit(mem), mem)
+	}
+	for name, msg := range msgs {
 		if len(msg) > 512 {
 			t.Errorf("%s: %d bytes, past the 512 a MySQL client shows", name, len(msg))
 		}
 	}
 	// Under a megabyte past a round limit must not print the same number twice.
-	if got := sqlChainTooHeavyMessage(sqlHeavyChain{"a.b", 48<<20 + 1, 48<<20 + 1, 1}, 48<<20); !strings.Contains(got, "has 49 MB") {
+	if got := sqlChainTooHeavyMessage(sqlHeavyChain{"a.b", 48<<20 + 1, 48<<20 + 1, 1}, 48<<20, "2GB"); !strings.Contains(got, "has 49 MB") {
 		t.Errorf("just past the limit: %q", got)
 	}
 }
@@ -107,20 +113,24 @@ func TestSQLChainTooHeavyMessage(t *testing.T) {
 // A statement that ran and failed past the memory cap is told the same way out.
 func TestSQLOutOfMemoryHint(t *testing.T) {
 	oom := &sqlsandbox.QueryError{Message: "Out of Memory Error: could not allocate block of size 256.0 KiB (1.8 GiB/1.8 GiB used)"}
-	got := sqlWithMemoryHint(oom)
+	got := sqlWithMemoryHint(oom, "2GB")
 	var q *sqlsandbox.QueryError
-	if !errors.As(got, &q) || !strings.HasPrefix(q.Message, oom.Message) || !strings.Contains(q.Message, "your own DuckDB") {
+	if !errors.As(got, &q) || !strings.HasPrefix(q.Message, oom.Message) || !strings.Contains(q.Message, "your own DuckDB") ||
+		!strings.Contains(q.Message, "2 GB of memory") {
 		t.Errorf("out of memory: %v", got)
+	}
+	if got := sqlWithMemoryHint(oom, "6144MiB"); !strings.Contains(got.Error(), "6 GB of memory") {
+		t.Errorf("out of memory under --sql-memory 6GB: %v", got)
 	}
 	if oom.Message != "Out of Memory Error: could not allocate block of size 256.0 KiB (1.8 GiB/1.8 GiB used)" {
 		t.Error("the runner's error was changed in place")
 	}
 	other := &sqlsandbox.QueryError{Message: "Binder Error: column x not found"}
-	if got := sqlWithMemoryHint(other); got != error(other) {
+	if got := sqlWithMemoryHint(other, "2GB"); got != error(other) {
 		t.Errorf("another query error must pass untouched: %v", got)
 	}
 	wrapped := errors.New("not a query error: Out of Memory Error")
-	if got := sqlWithMemoryHint(wrapped); got != wrapped {
+	if got := sqlWithMemoryHint(wrapped, "2GB"); got != wrapped {
 		t.Errorf("a non-query error must pass untouched: %v", got)
 	}
 }
@@ -169,9 +179,46 @@ func TestSQLAPI_refusesATableWithTooManyChangesWaiting(t *testing.T) {
 		t.Fatalf("a statement whose tables are not known was refused: code=%d body=%s", w.Code, w.Body.String())
 	}
 
+	// #2210: the limit follows the memory the server runs SQL with, read at
+	// each statement: twice the default memory, twice the line, so the same
+	// chain is no longer refused.
+	f.s.sqlLimits.MemoryLimit = "4GB"
+	w = f.post(t, `{"sql":"SELECT count(*) FROM shop.orders"}`)
+	if strings.Contains(w.Body.String(), "not merged") {
+		t.Fatalf("under twice the memory the same chain was refused: code=%d body=%s", w.Code, w.Body.String())
+	}
+	f.s.sqlLimits.MemoryLimit = ""
+
 	sqlMaxChainBytes = 11
 	w = f.post(t, `{"sql":"SELECT count(*) FROM shop.orders"}`)
 	if strings.Contains(w.Body.String(), "not merged") || w.Code == http.StatusOK {
 		t.Fatalf("at the limit the check must stay out and the unreadable pair must fail the read: code=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// #2210: the limit follows the worker's memory. It was measured at the
+// default 2 GB; twice the memory merges about twice the changes.
+func TestSQLChainLimit_followsTheWorkersMemory(t *testing.T) {
+	for _, c := range []struct {
+		memory string
+		want   int64
+	}{
+		{"2GB", 48 << 20},
+		{"", 48 << 20},
+		{"2048MiB", 48 << 20},
+		{"4096MiB", 96 << 20},
+		{"8GB", 192 << 20},
+		{"1GB", 24 << 20},
+		{"512MiB", 12 << 20},
+		{"64GB", 1536 << 20},
+		{"not a size", 48 << 20},
+	} {
+		if got := sqlChainLimit(c.memory); got != c.want {
+			t.Errorf("sqlChainLimit(%q) = %d MiB, want %d MiB", c.memory, got>>20, c.want>>20)
+		}
+	}
+	msg := sqlChainTooHeavyMessage(sqlHeavyChain{"tpcc.stock", 120 << 20, 120 << 20, 1}, sqlChainLimit("4096MiB"), "4096MiB")
+	if !strings.Contains(msg, "merges at most 96 MB: it runs with 4 GB of memory") {
+		t.Errorf("message under 4 GB: %q", msg)
 	}
 }

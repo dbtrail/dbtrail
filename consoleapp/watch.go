@@ -109,6 +109,9 @@ var (
 	// with its own threads and memory beside capture. Env
 	// BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT; below 1 refuses to start.
 	upSQLMaxInFlight = sqlsandbox.DefaultMaxInFlight
+	// upSQLMemory is --sql-memory as given (#2210); upSQLMemoryLimit is what
+	// resolveSQLMemory made of it for DuckDB, "" for the sandbox default.
+	upSQLMemory, upSQLMemoryLimit string
 	// upRouteMaxCopyAge turns read routing on the port on (#2038): MySQL
 	// answers by default, the copy takes expensive SELECTs while its snapshot
 	// is at most this old, and past that the ones over tables unchanged since
@@ -280,7 +283,8 @@ func init() {
 	watchCmd.Flags().StringVar(&upConsoleTLSKey, "console-tls-key", "", "TLS private key file (PEM; requires --console-tls-cert)")
 	watchCmd.Flags().StringSliceVar(&upConsoleAllowedHost, "console-allowed-hosts", nil, "Extra hostnames allowed in the Host header (for a TLS-terminating reverse proxy); IP literals and localhost are always allowed")
 	watchCmd.Flags().BoolVar(&upConsoleAllowSetup, "console-allow-setup", false, "Allow browser first-run password setup on a non-loopback bind (assert the bind is access-controlled, e.g. published only on the host loopback)")
-	watchCmd.Flags().IntVar(&upSQLMaxInFlight, "sql-max-in-flight", sqlsandbox.DefaultMaxInFlight, "How many SQL-on-the-copy statements run at once, the SQL card and the --flashback-listen port together; one more waits up to 30 s for a free slot, then is refused. Each runs as its own process with 2 threads and up to 2 GB, on the host that captures, and every result is held in this process while it is sent, so raise it only with cores and memory to spare. Env BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT.")
+	watchCmd.Flags().IntVar(&upSQLMaxInFlight, "sql-max-in-flight", sqlsandbox.DefaultMaxInFlight, "How many SQL-on-the-copy statements run at once, the SQL card and the --flashback-listen port together; one more waits up to 30 s for a free slot, then is refused. Each runs as its own process with 2 threads and up to --sql-memory, on the host that captures, and every result is held in this process while it is sent, so raise it only with cores and memory to spare. Env BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT.")
+	watchCmd.Flags().StringVar(&upSQLMemory, "sql-memory", "", "Memory each SQL-on-the-copy statement may use (the SQL card and the --flashback-listen port), e.g. 4GB; default 2GB, at least 512MB. It runs on the host that captures, times --sql-max-in-flight at once. A table with more changes not yet merged than this memory can merge (48 MB at 2 GB, in proportion) is refused with a pointer to your own DuckDB. Env BINTRAIL_CONSOLE_SQL_MEMORY.")
 	watchCmd.Flags().StringVar(&upConsoleFlashbackListen, "flashback-listen", "", "Serve an embedded MySQL-protocol time-travel port (_flashback/_snapshot/_diff) for every monitored server, routed by the connection username (server id or name); e.g. 127.0.0.1:3308. Requires --console-token, which reads every schema of every server: the port does not filter by schema. Empty = the web interface decides (Connect turns the port on and off, with its own password; off until then). Set, this address decides and the web interface cannot change it. Env BINTRAIL_CONSOLE_FLASHBACK_LISTEN.")
 	watchCmd.Flags().DurationVar(&upRouteMaxCopyAge, "route-max-copy-age", 0, "Experimental read routing on the --flashback-listen port: forward every statement, WRITES INCLUDED, to the server's source MySQL with the server's forwarding account when it has one (set on the server, in the web interface or as route_user / route_password in the API) and with its source account otherwise, except SELECTs whose EXPLAIN FORMAT=JSON says they are expensive (see --route-cost-threshold, --route-scan-rows), which run on the copy while its snapshot is at most this old; past that age the copy still answers one whose tables have had no change since their snapshot, as long as capture is known to have read everything the source had written at some moment within this same limit; a statement the copy rejects runs on MySQL. Anyone holding the access token can then do on the source whatever that account can: give the port its own account with SELECT only, and set --route-read-only. 0 = off (the port serves the copy only). Env BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE.")
 	watchCmd.Flags().BoolVar(&upRouteReadOnly, "route-read-only", false, "Read routing: refuse every statement that is not a read (INSERT, UPDATE, DELETE, DDL, GRANT, KILL, SET GLOBAL, SELECT ... INTO OUTFILE, SELECT ... FOR UPDATE, more than one statement in a line and anything else not recognised as a read) with an error that names this flag, and never send it to the source. SELECT, SHOW, DESCRIBE, EXPLAIN, USE, session SETs and transaction control keep working. It reads the statement's text, so it cannot see a stored function that writes: the source account's grants are the guard for that. Requires --route-max-copy-age. Env BINTRAIL_CONSOLE_ROUTE_READ_ONLY.")
@@ -322,6 +326,9 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if err := resolveSQLMemory(cmd); err != nil {
+		return err
+	}
 	if err := resolveSQLMaxInFlight(cmd); err != nil {
 		return err
 	}
@@ -1692,6 +1699,9 @@ type consoleOpts struct {
 	// a bind failure, so a value the console reports was bound at startup;
 	// a mid-run serve failure is logged and swallowed, not reflected here.
 	FlashbackListen string
+	// SQLMemoryLimit is the resolved --sql-memory as DuckDB takes it
+	// ("4096MiB"), "" for the default (#2210).
+	SQLMemoryLimit string
 	// SQLMaxInFlight is the resolved --sql-max-in-flight (#2030).
 	SQLMaxInFlight int
 	// ReadRouting is the port's read-routing policy (--route-max-copy-age and
@@ -1722,6 +1732,7 @@ func upConsoleOpts() consoleOpts {
 			ReadOnly:      upRouteReadOnly,
 		},
 		SQLMaxInFlight: upSQLMaxInFlight,
+		SQLMemoryLimit: upSQLMemoryLimit,
 	}
 }
 
@@ -1788,6 +1799,9 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 	if w := sqlMaxInFlightWarning(opts.SQLMaxInFlight, sqlsandbox.DefaultLimits().Threads, runtime.GOMAXPROCS(0)); w != "" {
 		slog.Warn(w)
 	}
+	if w := sqlMemoryWarning(opts.SQLMemoryLimit, max(opts.SQLMaxInFlight, 1), hostMemoryBytes()); w != "" {
+		slog.Warn(w)
+	}
 	// Only a daemon that captures its own source has a flavor to show.
 	var bootSourceFlavor func() string
 	if upSourceDSN != "" {
@@ -1824,6 +1838,8 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		// change is ended on the source too.
 		KillSourceThreads: killSourceThreads,
 		SQLMaxInFlight:    opts.SQLMaxInFlight,
+		// --sql-memory (#2210); "" keeps the sandbox default.
+		SQLLimits: sqlsandbox.Limits{MemoryLimit: opts.SQLMemoryLimit},
 		// The daemon's --rotate-* defaults, so GET /api/rotation can report the
 		// effective policy (and the console panel prefill it) before the
 		// operator saves an override.
@@ -2127,6 +2143,82 @@ func sqlMaxInFlightWarning(maxInFlight, threadsEach, cores int) string {
 	}
 	return fmt.Sprintf("--sql-max-in-flight %d: %d statements at once can take %d threads on a host with %d cores, and they share them with capture; capture may fall behind while they run",
 		maxInFlight, maxInFlight, maxInFlight*threadsEach, cores)
+}
+
+// sqlMemoryFloor is the least --sql-memory takes: below it a worker cannot
+// open the views of a real copy, and every statement would fail late.
+const sqlMemoryFloor = 512 << 20
+
+// resolveSQLMemory sets upSQLMemoryLimit from --sql-memory or, when the flag
+// is not given, BINTRAIL_CONSOLE_SQL_MEMORY (#2210). Called with
+// resolveSQLMaxInFlight, before the daemon waits for its index, so a typo
+// fails at once.
+func resolveSQLMemory(cmd *cobra.Command) error {
+	limit, err := sqlMemoryFrom(cmd)
+	if err != nil {
+		return err
+	}
+	upSQLMemoryLimit = limit
+	return nil
+}
+
+// sqlMemoryFrom is --sql-memory on cmd or, when not given,
+// BINTRAIL_CONSOLE_SQL_MEMORY, as DuckDB takes it: in MiB, because its "GB"
+// is decimal and ours (and the operator's) binary. "" when neither is set.
+// watch and serve both run SQL on the copy, so both read it.
+func sqlMemoryFrom(cmd *cobra.Command) (string, error) {
+	raw, name := "", "--sql-memory"
+	if cmd.Flags().Changed("sql-memory") {
+		raw, _ = cmd.Flags().GetString("sql-memory")
+	} else {
+		raw, name = strings.TrimSpace(os.Getenv("BINTRAIL_CONSOLE_SQL_MEMORY")), "BINTRAIL_CONSOLE_SQL_MEMORY"
+		if raw == "" {
+			return "", nil
+		}
+	}
+	n, err := cliutil.ParseByteSize(raw)
+	if err != nil || n < sqlMemoryFloor {
+		return "", fmt.Errorf("%s=%q: want a size of at least 512MB, e.g. 4GB (the memory each SQL statement on the copy may use; the default is 2GB)",
+			name, raw)
+	}
+	return fmt.Sprintf("%dMiB", n>>20), nil
+}
+
+// sqlMemoryWarning says, once at startup, when the statements allowed at
+// once can take more memory together than the host has (#2210). Not a
+// refusal, as with the threads: statements rarely all run to the cap. Only
+// for a memory the operator set. Empty when it fits or the host is unknown.
+func sqlMemoryWarning(memoryLimit string, maxInFlight int, hostBytes uint64) string {
+	if memoryLimit == "" || hostBytes == 0 || maxInFlight < 1 {
+		return ""
+	}
+	each, err := cliutil.ParseByteSize(memoryLimit)
+	if err != nil || each <= 0 || uint64(each)*uint64(maxInFlight) <= hostBytes {
+		return ""
+	}
+	return fmt.Sprintf("--sql-memory %d MiB: %d statements at once can take %d MiB, more than this host's %d MiB, which capture shares; a statement may be killed by the kernel instead of refused",
+		each>>20, maxInFlight, (each*int64(maxInFlight))>>20, hostBytes>>20)
+}
+
+// hostMemoryBytes is MemTotal from /proc/meminfo, 0 when it cannot be read
+// (outside Linux). The machine's, not a container's: the warning it feeds is
+// about the memory capture shares.
+func hostMemoryBytes() uint64 {
+	b, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && f[0] == "MemTotal:" {
+			kb, err := strconv.ParseUint(f[1], 10, 64)
+			if err != nil {
+				return 0
+			}
+			return kb * 1024
+		}
+	}
+	return 0
 }
 
 // resolveSQLMaxInFlight sets upSQLMaxInFlight from --sql-max-in-flight or,

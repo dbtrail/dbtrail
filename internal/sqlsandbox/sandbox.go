@@ -103,7 +103,10 @@ type Limits struct {
 // 1,000 rows. The byte cap is a defensive bound on the wire, not a product
 // number: 1,000 rows of 16 KiB statement texts fit with room.
 func DefaultLimits() Limits {
-	return Limits{Threads: 2, MemoryLimit: "2GB", Timeout: 60 * time.Second, MaxRows: 1000, MaxResultBytes: 64 << 20}
+	// 2048MiB, not "2GB": DuckDB reads GB as decimal (1.86 GiB), and the
+	// unmerged-changes line SQL on the copy scales from this is in binary
+	// units, as --sql-memory is (#2210).
+	return Limits{Threads: 2, MemoryLimit: "2048MiB", Timeout: 60 * time.Second, MaxRows: 1000, MaxResultBytes: 64 << 20}
 }
 
 // DefaultMaxInFlight is how many workers a Runner runs at once by default:
