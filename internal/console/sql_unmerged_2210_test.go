@@ -48,18 +48,30 @@ func TestSQLUnmergedByView(t *testing.T) {
 	}}
 	got := sqlUnmergedByView(in, limit, size)
 	want := []sqlUnmergedDTO{
-		{View: "shop.old", MB: 5, Over: true},
-		{View: "shop.c", MB: 4, Over: true},
-		{View: "shop.b", MB: 3},
+		{View: "shop.old", MB: 5, Level: "over"},
+		{View: "shop.c", MB: 4, Level: "over"},
+		{View: "shop.b", MB: 3, Level: "near"},
 		{View: "shop.d", MB: 2},
 		{View: "shop.e", MB: 2},
 		{View: "shop.a", MB: 1},
+		{View: "shop.denied", MB: 1, Unknown: true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got  %+v\nwant %+v", got, want)
 	}
 	if got := sqlUnmergedByView(views.Input{Baselines: []views.BaselineTable{chainTable("shop", "plain")}}, limit, size); got == nil || len(got) != 0 {
 		t.Errorf("nothing waiting: %#v, want an empty list", got)
+	}
+
+	// A line that is not a whole MB (1000 MiB of memory: 23.4 MiB): under
+	// it the MB never reads past the line the page states, past it always.
+	odd := sqlChainLimit("1000MiB")
+	sizes["/snap/shop/u.000000.upserts"] = odd - 1<<16
+	sizes["/snap/shop/v.000000.upserts"] = odd + 1
+	got = sqlUnmergedByView(views.Input{Baselines: []views.BaselineTable{chainTable("shop", "u", 0), chainTable("shop", "v", 0)}}, odd, size)
+	stated := odd >> 20
+	if len(got) != 2 || got[0].Level != "over" || got[0].MB <= stated || got[1].Level != "near" || got[1].MB > stated {
+		t.Errorf("line %d bytes (stated %d MB): %+v", odd, stated, got)
 	}
 }
 
@@ -108,7 +120,7 @@ func TestSQLAPI_infoListsChangesWaiting(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.schemaDir, "orders.000000.upserts"), make([]byte, 50<<20), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := get().Unmerged; !reflect.DeepEqual(got, []sqlUnmergedDTO{{View: "shop.orders", MB: 50, Over: true}}) {
+	if got := get().Unmerged; !reflect.DeepEqual(got, []sqlUnmergedDTO{{View: "shop.orders", MB: 50, Level: "over"}}) {
 		t.Errorf("50 MB at the default memory: %+v", got)
 	}
 	f.s.sqlMem.savedMiB = 4096

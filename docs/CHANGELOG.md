@@ -33,7 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SQL on the copy shows the changes waiting in each table** (#2210). The
   table list beside the editor shows how many MB of changes are not merged
   into each table yet, in amber near the line a query is refused at and in
-  red past it, so a refusal is visible before the query runs.
+  red past it, so a table that alone gets a query refused is visible before
+  the query runs (a query over several tables adds theirs together).
 
 ### Changed
 - **A scheduled update moves a table's changes to disk by size, not only by

@@ -1227,8 +1227,10 @@ The limits, so a query can never hurt capture:
   heavy read, use your own DuckDB (below): this page is for quick looks on
   the host that captures. The table list on the left shows how many MB are
   waiting beside each table that has any: in amber from three quarters of
-  the line, in red past it, with a line under the list naming the tables a
-  query would be refused on.
+  the line, in red past it (a query naming that table is refused), with a
+  line under the list naming the red ones. A query over several tables adds
+  their changes together, so two tables under the line can still be refused
+  together. The list is read again after each query.
 - 60 seconds. A longer query is stopped.
 - 1,000 rows come back. The page says when there were more. **Download CSV**
   saves the same rows as a file.

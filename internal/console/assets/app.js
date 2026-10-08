@@ -2690,25 +2690,29 @@ function sqlStatusLine(info, nowMs) {
 }
 
 // sqlWaitingNote: what the table list says beside a table with changes not
-// merged into it yet (#2210), from the server's numbers. level is "over"
-// when a query naming that table is refused, "near" from three quarters of
-// the line, "" below it or when the line is not known.
+// merged into it yet (#2210). The server decides the level on bytes ("over":
+// a query naming this table is refused; "near": from three quarters of the
+// line) and rounds MB so it never contradicts the line it states; the page
+// only paints. unknown: a file could not be sized, so no number is shown.
 function sqlWaitingNote(u, maxMB) {
-  if (!u || !(u.mb > 0)) return null;
-  const level = u.over ? "over" : maxMB > 0 && u.mb * 4 >= maxMB * 3 ? "near" : "";
-  let title = u.mb + " MB of changes waiting to be merged into this table.";
-  if (maxMB > 0) title += " SQL here merges at most " + maxMB + " MB per query.";
-  if (u.over) title += " A query naming this table is refused until DBTrail merges them, which it does on its own.";
-  return { text: u.mb + " MB waiting", level: level, title: title };
+  if (!u || !(u.mb > 0 || u.unknown)) return null;
+  const level = u.level === "over" || u.over ? "over" : u.level === "near" ? "near" : "";
+  let title = u.unknown ? "Changes are waiting to be merged into this table; their size could not be read."
+    : u.mb + " MB of changes waiting to be merged into this table.";
+  if (maxMB > 0) title += " SQL here merges at most " + maxMB + " MB per query, all the tables it reads together.";
+  if (level === "over") title += " A query naming this table is refused until DBTrail merges them, which it does on its own.";
+  return { text: u.unknown ? "size unknown" : u.mb + " MB waiting", level: level, title: title };
 }
 
 // sqlOverNote: the line under the table list when some table is past the
-// line, so a table the list cuts off is not missed. "" when none is.
+// line on its own, so a table the list cuts off is not missed. "" when none
+// is. A query over several tables adds theirs together, which no single row
+// shows, so the line says so.
 function sqlOverNote(unmerged, maxMB) {
-  const over = (unmerged || []).filter((u) => u && u.over);
+  const over = (unmerged || []).filter((u) => u && (u.level === "over" || u.over));
   if (!over.length) return "";
   const who = over.length === 1 ? over[0].view + " has" : over.length + " tables have";
-  return who + " more changes waiting than SQL here merges (" + maxMB + " MB), so a query naming " +
+  return who + " more changes waiting than SQL here merges (" + maxMB + " MB per query, all its tables together), so a query naming " +
     (over.length === 1 ? "it" : "them") + " is refused until DBTrail merges them, which it does on its own. " +
     "More memory for SQL raises the line.";
 }
@@ -2915,6 +2919,16 @@ function renderSQLPanel(box) {
     if (over && !filter.value) list.append(el("div", { class: "sqlp-more sqlp-note sqlp-wait-over", text: over }));
   };
   filter.addEventListener("input", paintList);
+  // After each run the list is read again (#2210): a merge since the panel
+  // opened clears a red table, and growth past the line shows before the
+  // next refusal. A failed reread keeps the list as it was; the run's own
+  // result already said what happened.
+  const rereadInfo = () => api("/api/sql").then((info) => {
+    if (!alive() || !info) return;
+    st.info = info;
+    meta.textContent = sqlStatusLine(st.info, Date.now());
+    paintList();
+  }, () => {});
 
   const showError = (err) => {
     clear(msg);
@@ -2974,7 +2988,7 @@ function renderSQLPanel(box) {
       clearInterval(gone);
       if (seen) seen.disconnect();
       if (st.ctl === ctl) st.ctl = null;
-      if (alive()) busy(false);
+      if (alive()) { busy(false); rereadInfo(); }
     }
   };
   run.onclick = runNow;

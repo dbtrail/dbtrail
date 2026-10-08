@@ -650,18 +650,25 @@ func sqlTableUnmergedBytes(t views.BaselineTable, size func(string) (int64, erro
 }
 
 // sqlUnmergedDTO is one table's changes waiting to be merged, for the SQL
-// panel's table list (#2210): MB rounded up the way the refusal prints them,
-// Over when a statement naming this table alone is refused.
+// panel's table list (#2210). The level is decided here, on bytes, so the
+// page never compares two rounded numbers: "over" when a statement naming
+// this table alone is refused, "near" from three quarters of the line. MB
+// is rounded up past the line (as the refusal prints it) and down under it,
+// so it never reads as past the line the page states (limit>>20) unless it
+// is. Unknown when a file of the table could not be sized: the number is
+// then a floor, not the size.
 type sqlUnmergedDTO struct {
-	View string `json:"view"`
-	MB   int64  `json:"mb"`
-	Over bool   `json:"over,omitempty"`
+	View    string `json:"view"`
+	MB      int64  `json:"mb"`
+	Level   string `json:"level,omitempty"`
+	Unknown bool   `json:"unknown,omitempty"`
 }
 
 // sqlUnmergedByView lists the views whose tables hold changes not merged
 // yet, the most first (ties by name), against limit. A file that cannot be
-// read counts as nothing here, as in the refusal; the refusal is what logs
-// it, so a page that reloads the list does not repeat the warning.
+// sized marks its table Unknown instead of being logged: the refusal logs it
+// when a statement names the table, and a page that reloads the list would
+// repeat the warning on every load.
 func sqlUnmergedByView(in views.Input, limit int64, size func(string) (int64, error)) []sqlUnmergedDTO {
 	type row struct {
 		dto   sqlUnmergedDTO
@@ -669,11 +676,21 @@ func sqlUnmergedByView(in views.Input, limit int64, size func(string) (int64, er
 	}
 	var rows []row
 	for _, v := range in.StateViews() {
-		n, _ := sqlTableUnmergedBytes(v.Table, size)
-		if n <= 0 {
+		n, unread := sqlTableUnmergedBytes(v.Table, size)
+		if n <= 0 && unread == nil {
 			continue
 		}
-		rows = append(rows, row{sqlUnmergedDTO{View: v.Label, MB: (n + (1 << 20) - 1) >> 20, Over: n > limit}, n})
+		d := sqlUnmergedDTO{View: v.Label, Unknown: unread != nil}
+		switch {
+		case n > limit:
+			d.Level, d.MB = "over", (n+(1<<20)-1)>>20
+		default:
+			d.MB = max(n>>20, 1)
+			if n*4 >= limit*3 {
+				d.Level = "near"
+			}
+		}
+		rows = append(rows, row{d, n})
 	}
 	slices.SortFunc(rows, func(a, b row) int {
 		if c := cmp.Compare(b.bytes, a.bytes); c != 0 {
