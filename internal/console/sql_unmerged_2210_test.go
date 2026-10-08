@@ -97,6 +97,10 @@ func TestSQLUnmergedByView_namesAreTheListedViews(t *testing.T) {
 // The wiring: GET /api/sql carries the list, built from the files on disk
 // and against the line the memory in force sets.
 func TestSQLAPI_infoListsChangesWaiting(t *testing.T) {
+	// The levels against the old 48 MB line, so the fixture's files stay
+	// small; the line's own value is pinned in sql_chain_limit_2210_test.go.
+	defer func(old int64) { sqlMaxChainBytes = old }(sqlMaxChainBytes)
+	sqlMaxChainBytes = 48 << 20
 	f := newSQLFixture(t, &fakeSQLRunner{}, false)
 	get := func() sqlInfoResponse {
 		t.Helper()

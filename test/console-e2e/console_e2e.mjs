@@ -6282,8 +6282,8 @@ try {
       ? ok("sql: the panel opens with the copy's tables, a starter query over the first one, a labelled editor")
       : bad("sql: the panel opens with the copy's tables, a starter query over the first one, a labelled editor", JSON.stringify(opened));
     // #2210: the memory and the unmerged-changes line, as the server
-    // reports them (the run uses the defaults: 2 GB, 48 MB).
-    /^runs on the copy updated .+ · read-only · 60 s limit · 2 GB of memory · tables with up to 48 MB of changes waiting$/.test(opened.meta)
+    // reports them (the run uses the defaults: 2 GB, 384 MB).
+    /^runs on the copy updated .+ · read-only · 60 s limit · 2 GB of memory · tables with up to 384 MB of changes waiting$/.test(opened.meta)
       ? ok("sql: the status line states the copy's age and the server's real limit")
       : bad("sql: the status line states the copy's age and the server's real limit", opened.meta);
 

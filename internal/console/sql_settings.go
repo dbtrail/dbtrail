@@ -429,11 +429,18 @@ func (s *Server) handleSQLSettingsPut(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.sqlSettings())
 }
 
-// SQLChainLimit is the line SQL on the copy refuses at, for the memory in
-// force now (#2210): the daemon's refresh reads it each cycle to end a
-// table's chain at half of it, so a change saved in the web interface
-// moves both on the next cycle.
+// SQLChainLimit is the line SQL on the copy answers from an earlier copy
+// past, for the memory in force now (#2210).
 func (s *Server) SQLChainLimit() int64 {
 	m, _ := s.sqlMemoryNow()
 	return sqlChainLimit(m)
+}
+
+// SQLFoldLine is the size the daemon's refresh keeps a table's changes
+// under, for the memory in force now (sqlFoldChainBytes): it reads it each
+// cycle and ends a table's chain at half of it, so a change saved in the web
+// interface moves it on the next cycle.
+func (s *Server) SQLFoldLine() int64 {
+	m, _ := s.sqlMemoryNow()
+	return sqlScaled(sqlFoldChainBytes, m)
 }

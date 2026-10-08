@@ -163,7 +163,7 @@ What to know before relying on it:
   (`TMPDIR`), is removed when the statement ends, and one a crash left
   behind goes within minutes of the restart. Where that directory is in
   memory (a `tmpfs`), statements do not spill and fail past their memory as
-  before; the settings panel (Memory for SQL on the copy) says which. One whose tables have more than 48 MB of changes not merged into
+  before; the settings panel (Memory for SQL on the copy) says which. One whose tables have more than 384 MB of changes not merged into
   them yet is answered from the newest earlier copy in which they fit, with
   a warning (SHOW WARNINGS) naming that copy's time; with no such copy it is
   refused before it runs. Under read routing it is not answered from an
@@ -171,7 +171,7 @@ What to know before relying on it:
   reads `events` is not either, since the change log is not pinned to a
   copy. On a host with memory to spare, `--sql-memory`
   (env `BINTRAIL_CONSOLE_SQL_MEMORY`, at least 512MB) raises both: the line
-  of changes moves with it, 96 MB at 4GB. Without the flag it can be set in
+  of changes moves with it, 768 MB at 4GB. Without the flag it can be set in
   the web interface (Settings, MCP Server, Memory for SQL on the copy) and
   applies to the next statement, no restart; the flag, when given, wins. The
   SQL card shows the memory and the line in force. Each statement can take that much at once, times

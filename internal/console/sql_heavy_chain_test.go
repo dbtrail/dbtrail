@@ -209,22 +209,22 @@ func TestSQLChainLimit_followsTheWorkersMemory(t *testing.T) {
 		memory string
 		want   int64
 	}{
-		{"2GB", 48 << 20},
-		{"", 48 << 20},
-		{"2048MiB", 48 << 20},
-		{"4096MiB", 96 << 20},
-		{"8GB", 192 << 20},
-		{"1GB", 24 << 20},
-		{"512MiB", 12 << 20},
-		{"64GB", 1536 << 20},
-		{"not a size", 48 << 20},
+		{"2GB", 384 << 20},
+		{"", 384 << 20},
+		{"2048MiB", 384 << 20},
+		{"4096MiB", 768 << 20},
+		{"8GB", 1536 << 20},
+		{"1GB", 192 << 20},
+		{"512MiB", 96 << 20},
+		{"64GB", 12288 << 20},
+		{"not a size", 384 << 20},
 	} {
 		if got := sqlChainLimit(c.memory); got != c.want {
 			t.Errorf("sqlChainLimit(%q) = %d MiB, want %d MiB", c.memory, got>>20, c.want>>20)
 		}
 	}
-	msg := sqlChainTooHeavyMessage(sqlHeavyChain{"tpcc.stock", 120 << 20, 120 << 20, 1}, sqlChainLimit("4096MiB"), "4096MiB")
-	if !strings.Contains(msg, "merges at most 96 MB: it runs with 4 GB of memory") {
+	msg := sqlChainTooHeavyMessage(sqlHeavyChain{"tpcc.stock", 900 << 20, 900 << 20, 1}, sqlChainLimit("4096MiB"), "4096MiB")
+	if !strings.Contains(msg, "merges at most 768 MB: it runs with 4 GB of memory") {
 		t.Errorf("message under 4 GB: %q", msg)
 	}
 }

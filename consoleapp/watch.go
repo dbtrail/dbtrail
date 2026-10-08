@@ -284,7 +284,7 @@ func init() {
 	watchCmd.Flags().StringSliceVar(&upConsoleAllowedHost, "console-allowed-hosts", nil, "Extra hostnames allowed in the Host header (for a TLS-terminating reverse proxy); IP literals and localhost are always allowed")
 	watchCmd.Flags().BoolVar(&upConsoleAllowSetup, "console-allow-setup", false, "Allow browser first-run password setup on a non-loopback bind (assert the bind is access-controlled, e.g. published only on the host loopback)")
 	watchCmd.Flags().IntVar(&upSQLMaxInFlight, "sql-max-in-flight", sqlsandbox.DefaultMaxInFlight, "How many SQL-on-the-copy statements run at once, the SQL card and the --flashback-listen port together; one more waits up to 30 s for a free slot, then is refused. Each runs as its own process with 2 threads and up to --sql-memory, on the host that captures, and every result is held in this process while it is sent, so raise it only with cores and memory to spare. Env BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT.")
-	watchCmd.Flags().StringVar(&upSQLMemory, "sql-memory", "", "Memory each SQL-on-the-copy statement may use (the SQL card and the --flashback-listen port), e.g. 4GB; default 2GB, at least 512MB. It runs on the host that captures, times --sql-max-in-flight at once. A table with more changes not yet merged than this memory can merge (48 MB at 2 GB, in proportion) is refused with a pointer to your own DuckDB. Env BINTRAIL_CONSOLE_SQL_MEMORY. Unset, the web interface can set it (Settings, MCP Server); set, it wins there.")
+	watchCmd.Flags().StringVar(&upSQLMemory, "sql-memory", "", "Memory each SQL-on-the-copy statement may use (the SQL card and the --flashback-listen port), e.g. 4GB; default 2GB, at least 512MB. It runs on the host that captures, times --sql-max-in-flight at once. A table with more changes not yet merged than this memory can merge (384 MB at 2 GB, in proportion) is answered from an earlier copy, or refused with a pointer to your own DuckDB when none fits. Past its memory a statement spills to a temporary folder, up to four times it. Env BINTRAIL_CONSOLE_SQL_MEMORY. Unset, the web interface can set it (Settings, MCP Server); set, it wins there.")
 	watchCmd.Flags().StringVar(&upConsoleFlashbackListen, "flashback-listen", "", "Serve an embedded MySQL-protocol time-travel port (_flashback/_snapshot/_diff) for every monitored server, routed by the connection username (server id or name); e.g. 127.0.0.1:3308. Requires --console-token, which reads every schema of every server: the port does not filter by schema. Empty = the web interface decides (Connect turns the port on and off, with its own password; off until then). Set, this address decides and the web interface cannot change it. Env BINTRAIL_CONSOLE_FLASHBACK_LISTEN.")
 	watchCmd.Flags().DurationVar(&upRouteMaxCopyAge, "route-max-copy-age", 0, "Experimental read routing on the --flashback-listen port: forward every statement, WRITES INCLUDED, to the server's source MySQL with the server's forwarding account when it has one (set on the server, in the web interface or as route_user / route_password in the API) and with its source account otherwise, except SELECTs whose EXPLAIN FORMAT=JSON says they are expensive (see --route-cost-threshold, --route-scan-rows), which run on the copy while its snapshot is at most this old; past that age the copy still answers one whose tables have had no change since their snapshot, as long as capture is known to have read everything the source had written at some moment within this same limit; a statement the copy rejects runs on MySQL. Anyone holding the access token can then do on the source whatever that account can: give the port its own account with SELECT only, and set --route-read-only. 0 = off (the port serves the copy only). Env BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE.")
 	watchCmd.Flags().BoolVar(&upRouteReadOnly, "route-read-only", false, "Read routing: refuse every statement that is not a read (INSERT, UPDATE, DELETE, DDL, GRANT, KILL, SET GLOBAL, SELECT ... INTO OUTFILE, SELECT ... FOR UPDATE, more than one statement in a line and anything else not recognised as a read) with an error that names this flag, and never send it to the source. SELECT, SHOW, DESCRIBE, EXPLAIN, USE, session SETs and transaction control keep working. It reads the statement's text, so it cannot see a stored function that writes: the source account's grants are the guard for that. Requires --route-max-copy-age. Env BINTRAIL_CONSOLE_ROUTE_READ_ONLY.")
@@ -2255,12 +2255,13 @@ func autoServerID(ctx context.Context, w io.Writer) (uint32, error) {
 	return installid.AutoDerive(ctx, w, upSourceDSN, upIndexDSN)
 }
 
-// wireSQLChainLine hands the refresh the console's live SQL-on-the-copy line
-// (#2210), so a table's chain ends at half of it. Both watch entry points
-// call it right after the console exists, before either starts serving.
+// wireSQLChainLine hands the refresh the console's live fold line (#2210,
+// console.Server.SQLFoldLine), so a table's chain ends at half of it. Both
+// watch entry points call it right after the console exists, before either
+// starts serving.
 func wireSQLChainLine(sup *baselineSupervisor, srv *console.Server) {
 	if sup != nil && srv != nil {
-		line := srv.SQLChainLimit
+		line := srv.SQLFoldLine
 		sup.sqlChainLine.Store(&line)
 	}
 }

@@ -516,32 +516,43 @@ type sqlRefusal struct {
 func (e *sqlRefusal) Error() string { return e.Message }
 
 // sqlMaxChainBytes is how much of a chain's upserts files (on disk, over
-// every table the statement reads) a statement here may have to merge. The
-// state view keeps the newest image of each changed row, and to pick it
-// DuckDB holds every image at once; the worker has 2 GB by default
-// (--sql-memory, sqlChainLimit scales this line to it) and no spill.
+// every table the statement reads) a statement here may have to merge before
+// it is answered from an earlier copy instead (#2210). At 2 GB by default
+// (--sql-memory, sqlChainLimit scales this line to it).
 //
-// Measured on one table, so a line and not a law: sysbench-tpcc order_line,
-// 100 M rows, ten narrow columns. At 45 MiB (4.5 M images) a total over the
-// table and a one-order lookup both ran in under 2 s; at 70 MiB the total
-// still ran; at 86 MiB (8.3 M images) both ran out of memory, and so did the
-// join the rewrite uses. 48 MiB is the last size at which both shapes were
-// seen to pass. A wider table can fail under it, which is what
-// sqlWithMemoryHint is for. A var so tests can reach it.
-var sqlMaxChainBytes int64 = 48 << 20
+// It was 48 MiB, the last size at which both a total and a lookup over
+// sysbench-tpcc order_line passed when the views picked the newest image of
+// each row with a window and the worker had no disk. Since #2210 the views
+// pick it with a join and the worker spills past its memory, and over two
+// tpcc snapshots with 70 to 90 MB of changes waiting per table every
+// statement measured finished at 2 GB; the line is eight times the old one,
+// a guard against a chain no refresh has merged for a long time, not a
+// measured edge. A statement under it that still runs out of memory and disk
+// fails with sqlWithMemoryHint. A var so tests can reach it.
+var sqlMaxChainBytes int64 = 384 << 20
+
+// sqlFoldChainBytes is the size, at 2 GB, the daemon's refresh keeps a
+// table's changes under: it ends a chain at half of it (#2210, scaled like
+// the line above), so a statement reads a short chain and the newest copy
+// answers. It is the old 48 MiB line, kept for that: raising the refusal
+// line does not make tables wait longer to be merged.
+var sqlFoldChainBytes int64 = 48 << 20
 
 // sqlChainLimit is sqlMaxChainBytes scaled to the worker's memory (#2210,
 // watch --sql-memory): the line was measured at the default 2 GB, and what a
 // merge holds grows with the images it holds, so twice the memory merges
 // about twice the changes. A memory that does not parse keeps the measured
 // line (the daemon refuses such a value at startup; this is a belt).
-func sqlChainLimit(memory string) int64 {
+func sqlChainLimit(memory string) int64 { return sqlScaled(sqlMaxChainBytes, memory) }
+
+// sqlScaled is a line measured at the default memory, scaled to memory.
+func sqlScaled(line int64, memory string) int64 {
 	m, err := cliutil.ParseByteSize(memory)
 	d, derr := cliutil.ParseByteSize(sqlsandbox.DefaultLimits().MemoryLimit)
 	if memory == "" || err != nil || m <= 0 || derr != nil || d <= 0 {
-		return sqlMaxChainBytes
+		return line
 	}
-	return int64(float64(sqlMaxChainBytes) * float64(m) / float64(d))
+	return int64(float64(line) * float64(m) / float64(d))
 }
 
 // sqlMemoryWords is the worker's memory as a person reads it: "2 GB",

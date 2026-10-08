@@ -337,11 +337,9 @@ func chainCompactReason(prev *tableDelta, baseSize int64, capGap *CaptureGap, at
 			prev.Meta.DeltaChainStart.UTC().Format(time.RFC3339), chainFloor.UTC().Format(time.RFC3339))
 	}
 	if maxUpserts > 0 && prev.ChainUpsertsSize > maxUpserts {
-		// #2210: a statement over this table would merge more changes than
-		// SQL on the copy reads at once and be answered from an earlier copy.
-		// Ended at half that line, so in normal operation the line is never
-		// reached and the newest copy answers.
-		return fmt.Sprintf("the changes beside the table (%d MB) passed %d MB, half of what SQL on the copy reads at once",
+		// #2210: keep the chain a statement over this table merges short, so
+		// SQL on the copy reads it quickly from the newest copy.
+		return fmt.Sprintf("the changes beside the table (%d MB) passed %d MB, the most a refresh leaves beside a table for SQL on the copy",
 			(prev.ChainUpsertsSize+(1<<20)-1)>>20, maxUpserts>>20)
 	}
 	if prev.PairSize >= tableDeltaMinCompactBytes && float64(prev.PairSize) > tableDeltaMaxFraction*float64(baseSize) {
@@ -1222,11 +1220,11 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 }
 
 // warnChainOverLine says when the chain just published, this window's pair
-// included, is past the whole line SQL on the copy reads at once (#2210).
-// The line rule looks at the chain a window starts from, so one window that
-// alone adds more than half the line leaves the table past it until the next
-// refresh rewrites it; meanwhile a statement over it is answered from an
-// earlier copy, and the operator should know why.
+// included, is past twice MaxChainUpserts, the console's fold line (#2210).
+// The rule looks at the chain a window starts from, so one window that alone
+// adds more than that leaves a long chain until the next refresh rewrites
+// it; meanwhile a statement over the table reads it more slowly, and the
+// operator should know why.
 func warnChainOverLine(p tableDeltaPublish, chain *baseline.TableDeltaChain) {
 	if p.cfg.MaxChainUpserts <= 0 || chain == nil {
 		return
@@ -1238,7 +1236,7 @@ func warnChainOverLine(p tableDeltaPublish, chain *baseline.TableDeltaChain) {
 		}
 	}
 	if line := 2 * p.cfg.MaxChainUpserts; total > line {
-		slog.Warn("table's changes are past what SQL on the copy reads at once until the next refresh rewrites it: this window alone added more than half of that",
+		slog.Warn("table's changes are past the size a refresh keeps them under until the next refresh rewrites it: this window alone added more than half of that",
 			"schema", p.schema, "table", p.table, "unmerged_mb", (total+(1<<20)-1)>>20, "line_mb", line>>20)
 	}
 }

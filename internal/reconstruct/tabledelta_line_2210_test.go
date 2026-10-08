@@ -28,7 +28,7 @@ func TestChainCompactReason_line(t *testing.T) {
 	if got := reason(24 << 20); got != "" {
 		t.Errorf("at the line: %q", got)
 	}
-	if got := reason(24<<20 - 1); !strings.Contains(got, "(24 MB) passed 23 MB, half of what SQL on the copy reads at once") {
+	if got := reason(24<<20 - 1); !strings.Contains(got, "(24 MB) passed 23 MB, the most a refresh leaves beside a table for SQL on the copy") {
 		t.Errorf("past the line: %q", got)
 	}
 }
@@ -76,7 +76,7 @@ func TestTableDelta_lineEndsTheChain(t *testing.T) {
 		switch {
 		case i < 4 && rep.DeltaCompacted != "":
 			t.Fatalf("window %d ended the chain (%q) under the line", i, rep.DeltaCompacted)
-		case i == 4 && !strings.Contains(rep.DeltaCompacted, "half of what SQL on the copy reads at once"):
+		case i == 4 && !strings.Contains(rep.DeltaCompacted, "the most a refresh leaves beside a table"):
 			t.Fatalf("window 4: want the line rule over three pairs, got %q", rep.DeltaCompacted)
 		case i == 5 && rep.DeltaCompacted != "":
 			t.Fatalf("window 5 ended the chain (%q) right after a rewrite", rep.DeltaCompacted)
@@ -111,7 +111,7 @@ func TestWarnChainOverLine(t *testing.T) {
 	}
 	p.cfg.MaxChainUpserts = 549
 	warnChainOverLine(p, chain)
-	if !strings.Contains(buf.String(), "past what SQL on the copy reads at once") {
+	if !strings.Contains(buf.String(), "past the size a refresh keeps them under") {
 		t.Fatalf("past the line: %q", buf.String())
 	}
 }
