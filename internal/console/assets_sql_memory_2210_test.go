@@ -159,7 +159,7 @@ func TestSQLMemoryPanel_2210(t *testing.T) {
 	if !slices.Equal(got.Saved4.Buttons, []string{"Save", "Use default"}) || !slices.Equal(got.Saved4.Inputs, []string{"4GB"}) {
 		t.Errorf("saved: buttons %q inputs %q", got.Saved4.Buttons, got.Saved4.Inputs)
 	}
-	has("huge", got.Huge, "Together, the statements that can run at once can take 128 GB, more than the 8 GB of memory this machine has.")
+	has("huge", got.Huge, "Together, the statements that can run at once can take 128 GB, more than the 8 GB of memory DBTrail can use here (the machine's, or a lower limit set on its container).")
 	has("startup", got.Startup, "Each statement can use 3 GB of memory. Set where DBTrail starts.")
 	has("startup", got.Startup, "The value saved here, 64 GB, is not used while the one set at startup is.")
 	has("startup", got.Startup, "(CLI: --sql-memory, or the environment variable BINTRAIL_CONSOLE_SQL_MEMORY)")

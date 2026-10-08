@@ -2202,7 +2202,7 @@ func sqlMemoryWarning(memoryLimit string, maxInFlight int, hostBytes uint64) str
 		return ""
 	}
 	each, _ := cliutil.ParseByteSize(memoryLimit)
-	return fmt.Sprintf("--sql-memory %d MiB: %d statements at once can take %d MiB, more than this host's %d MiB, which capture shares; a statement may be killed by the kernel instead of refused",
+	return fmt.Sprintf("--sql-memory %d MiB: %d statements at once can take %d MiB, more than the %d MiB this host lets DBTrail use (its memory, or a lower container limit), which capture shares; a statement may be killed by the kernel instead of refused",
 		each>>20, maxInFlight, total, hostBytes>>20)
 }
 

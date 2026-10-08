@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **The SQL memory warning sees a container's memory limit** (#2223). The
+  warning that the statements SQL on the copy can run at once may take more
+  memory than there is (the settings panel, and `watch` at startup) compared
+  against the machine's total memory. Inside a container or a systemd slice
+  capped below that, it never fired where it mattered. It now compares
+  against the smallest of the machine's memory and every memory limit on the
+  cgroups the process runs in (cgroup v2, and v1).
 
 ## [0.102.0] - 2026-10-08
 ### Changed

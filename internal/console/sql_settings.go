@@ -70,11 +70,27 @@ func SQLMemoryOverHost(limit string, maxInFlight int, hostBytes uint64) (totalMi
 	return eachMiB * int64(maxInFlight), over
 }
 
-// HostMemoryBytes is MemTotal from /proc/meminfo, 0 when it cannot be read
-// (outside Linux). The machine's, not a container's: the warning it feeds is
-// about the memory capture shares.
-func HostMemoryBytes() uint64 {
-	b, err := os.ReadFile("/proc/meminfo")
+// HostMemoryBytes is the memory DBTrail's processes can use here, 0 when it
+// cannot be read (outside Linux): the machine's MemTotal, or the least memory
+// cap on the cgroup chain this process runs in when that is smaller (#2223).
+// A container or a systemd slice capped at 8 GB on a larger host is an 8 GB
+// host for the warning it feeds, which is about the memory capture shares.
+func HostMemoryBytes() uint64 { return memoryAvailable("/") }
+
+// memoryAvailable is HostMemoryBytes over a root directory, so a test can lay
+// out /proc and /sys/fs/cgroup.
+func memoryAvailable(root string) uint64 {
+	best := memTotal(filepath.Join(root, "proc/meminfo"))
+	for _, limit := range cgroupMemoryLimits(root) {
+		if best == 0 || limit < best {
+			best = limit
+		}
+	}
+	return best
+}
+
+func memTotal(path string) uint64 {
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return 0
 	}
@@ -89,6 +105,57 @@ func HostMemoryBytes() uint64 {
 		}
 	}
 	return 0
+}
+
+// cgroupMemoryLimits returns every memory cap set on this process's cgroup
+// and on each of its ancestors: memory.max under cgroup v2 ("max" is no cap),
+// memory.limit_in_bytes under v1 (where no cap reads as a number near 2^63).
+// The cap often sits on a parent (a slice the container is placed in), so the
+// whole chain is read, not only the process's own cgroup.
+func cgroupMemoryLimits(root string) []uint64 {
+	b, err := os.ReadFile(filepath.Join(root, "proc/self/cgroup"))
+	if err != nil {
+		return nil
+	}
+	var out []uint64
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		var base, file string
+		switch {
+		case parts[0] == "0" && parts[1] == "":
+			base, file = filepath.Join(root, "sys/fs/cgroup"), "memory.max"
+		case strings.Contains(","+parts[1]+",", ",memory,"):
+			base, file = filepath.Join(root, "sys/fs/cgroup/memory"), "memory.limit_in_bytes"
+		default:
+			continue
+		}
+		for dir := filepath.Clean("/" + parts[2]); ; dir = filepath.Dir(dir) {
+			if v, ok := readMemoryCap(filepath.Join(base, dir, file)); ok {
+				out = append(out, v)
+			}
+			if dir == "/" {
+				break
+			}
+		}
+	}
+	return out
+}
+
+// readMemoryCap reads one cap file; ok is false for no file, "max", a value
+// that does not parse, and v1's unlimited (anything from 2^62 up).
+func readMemoryCap(path string) (uint64, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil || v == 0 || v >= 1<<62 {
+		return 0, false
+	}
+	return v, true
 }
 
 // sqlSettingsFile is the saved setting. MemoryMiB 0 = none saved (the
@@ -366,7 +433,7 @@ func (s *Server) sqlSettings() sqlSettingsDTO {
 		dto.Saved = sqlMemoryWords(fmt.Sprintf("%dMiB", saved))
 	}
 	if total, over := SQLMemoryOverHost(lim, s.sqlMaxInFlight, dto.HostMemoryBytes); over {
-		dto.Warning = fmt.Sprintf("Together, the statements that can run at once can take %s, more than the %s of memory this machine has. If memory runs out, the system may stop a statement instead of DBTrail refusing it.",
+		dto.Warning = fmt.Sprintf("Together, the statements that can run at once can take %s, more than the %s of memory DBTrail can use here (the machine's, or a lower limit set on its container). If memory runs out, the system may stop a statement instead of DBTrail refusing it.",
 			sqlMemoryWords(fmt.Sprintf("%dMiB", total)), sqlMemoryWords(fmt.Sprintf("%dMiB", dto.HostMemoryBytes>>20)))
 	}
 	return dto
