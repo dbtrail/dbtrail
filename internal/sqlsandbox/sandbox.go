@@ -62,12 +62,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dbtrail/dbtrail/internal/cliutil"
 )
 
 // WorkerCommand is the hidden subcommand the console binary registers for the
@@ -85,8 +88,9 @@ type Limits struct {
 	// Threads is DuckDB's thread count inside the worker.
 	Threads int
 	// MemoryLimit is DuckDB's memory budget inside the worker, e.g. "2GB".
-	// Spilling is off, so a query past it fails with an out-of-memory error
-	// instead of slowing down and writing to disk.
+	// Past it the worker spills to a private directory of its own, up to
+	// SpillFactor times this budget (Config.SpillDir, #2210), and only past
+	// that fails with an out-of-memory error.
 	MemoryLimit string
 	// Timeout is the wall clock for the whole child: start, views install and
 	// query. Past it the process group is killed.
@@ -415,6 +419,74 @@ type Config struct {
 	// MaxWaiters bounds how many callers wait at once; past it Reserve
 	// refuses at once. 0 means DefaultMaxWaiters.
 	MaxWaiters int
+	// SpillDir is where workers spill past their memory limit (#2210): the
+	// parent makes one private directory per statement under it and removes
+	// it when the worker exits. Empty means os.TempDir(), where bintrail's
+	// other DuckDB sessions spill too. It must not lie inside a copy
+	// directory: those are readable by the statement.
+	SpillDir string
+}
+
+// SpillFactor is how much disk a worker may spill to, as a multiple of its
+// memory limit (#2210): 8 GiB at the default 2 GiB, so two workers at once
+// hold at most 16 GiB, and only while they run. Measured on DuckDB 1.4.5 over
+// sysbench-tpcc snapshots (20 M and 60 M row tables with 4 M and 8.5 M changes
+// waiting): statements that ran out of a 512 MiB limit without a temp
+// directory finished with one, writing at most 1.6 times the limit; a DISTINCT
+// over 20 M integers at 128 MB needed more than twice it.
+const SpillFactor = 4
+
+// spillCapMessage is the message a user reads for a statement that ran out
+// of room. DuckDB's own text for a full spill directory goes on to advise
+// "PRAGMA max_temp_directory_size", which the locked session refuses, and the
+// figures it quotes are the DISK cap; a MySQL client shows 512 bytes of it.
+// So its first sentence is kept and the rest replaced. A statement that had
+// no disk at all (noSpill) and ran out of memory says why it had none.
+func spillCapMessage(msg string, spill spillSpec, noSpill error) string {
+	first := func(s string) string {
+		if i := strings.Index(s, ")."); i >= 0 {
+			return s[:i+2]
+		}
+		if i := strings.IndexByte(s, '\n'); i >= 0 {
+			return s[:i]
+		}
+		return s
+	}
+	switch {
+	case spill.Dir != "" && strings.Contains(msg, "failed to offload data block"):
+		return first(msg) + fmt.Sprintf(" The statement needed more than its memory and also filled the %d MB of disk it may use past it.", spill.MaxBytes>>20)
+	case spill.Dir != "" && strings.Contains(msg, "No space left on device"):
+		return "Out of Memory Error: the disk this statement spills to past its memory is full."
+	case spill.Dir == "" && noSpill != nil && strings.Contains(msg, "Out of Memory Error"):
+		return first(msg) + " It could not use the disk past its memory: " + noSpill.Error() + "."
+	}
+	return msg
+}
+
+// spillPrefix names a statement's spill directory under Config.SpillDir.
+// minSpillBytes is the least a statement is given to spill to; with less
+// room than that it runs without the disk, as before #2210.
+const (
+	spillPrefix   = "bintrail-sql-spill-"
+	minSpillBytes = 256 << 20
+)
+
+// staleSpillAge is how old a spill directory must be before a sweep removes
+// it as left behind: one a worker kept writing after its parent died (the
+// worker has its own process group, so it outlives the parent until its own
+// deadline, Timeout plus selfDeadlineGrace) and that nothing removed. Ten
+// minutes, or four times the timeout when that is longer, so a live
+// statement of another console on the same host is never taken. A sweep runs
+// when the Runner is built and again at most every spillSweepEvery, so a
+// directory a crash left goes within minutes of the restart, not at the next
+// one.
+const (
+	minStaleSpillAge = 10 * time.Minute
+	spillSweepEvery  = 10 * time.Minute
+)
+
+func (r *Runner) staleSpillAge() time.Duration {
+	return max(minStaleSpillAge, 4*r.limits.Timeout)
 }
 
 // DefaultMaxWait and DefaultMaxWaiters bound the line for a slot (#2033):
@@ -434,6 +506,14 @@ type Runner struct {
 	maxInFlight int
 	maxWait     time.Duration
 	maxWaiters  int
+	spillRoot   string
+
+	// spillMu guards the spill bookkeeping: when the last sweep ran, and the
+	// last reason a statement could not spill ("" when it could), so the log
+	// says so once per change instead of once per statement.
+	spillMu        sync.Mutex
+	spillSweptAt   time.Time
+	spillLastError string
 
 	mu       sync.Mutex
 	busy     map[string]bool
@@ -456,6 +536,7 @@ func New(cfg Config) *Runner {
 		maxInFlight: cfg.MaxInFlight,
 		maxWait:     cfg.MaxWait,
 		maxWaiters:  cfg.MaxWaiters,
+		spillRoot:   cfg.SpillDir,
 		busy:        map[string]bool{},
 		freed:       make(chan struct{}),
 	}
@@ -468,7 +549,126 @@ func New(cfg Config) *Runner {
 	if r.maxWaiters <= 0 {
 		r.maxWaiters = DefaultMaxWaiters
 	}
+	if r.spillRoot == "" {
+		r.spillRoot = os.TempDir()
+	}
+	r.sweepSpillDue(time.Now(), true)
+	if _, err := r.SpillState(r.limits.MemoryLimit); err != nil {
+		r.noteSpill(err)
+	}
 	return r
+}
+
+// sweepSpillDue sweeps when the last sweep is older than spillSweepEvery, or
+// when forced.
+func (r *Runner) sweepSpillDue(now time.Time, force bool) {
+	r.spillMu.Lock()
+	due := force || now.Sub(r.spillSweptAt) >= spillSweepEvery
+	if due {
+		r.spillSweptAt = now
+	}
+	r.spillMu.Unlock()
+	if due {
+		sweepSpill(r.spillRoot, now.Add(-r.staleSpillAge()))
+	}
+}
+
+// sweepSpill removes the spill directories under root last written before
+// cutoff: what a parent that died mid-statement left behind. Best-effort.
+func sweepSpill(root string, cutoff time.Time) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		// SpillState reports a root that cannot be used; this is only the
+		// cleanup, and it has nothing to remove from a root it cannot read.
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), spillPrefix) {
+			continue
+		}
+		if info, err := e.Info(); err == nil && info.ModTime().Before(cutoff) {
+			if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
+				slog.Warn("sql on the copy: could not remove a spill directory left behind", "dir", filepath.Join(root, e.Name()), "error", err)
+			}
+		}
+	}
+}
+
+// spillFSFor is spillFS, a variable so a test can give a full or an
+// in-memory root.
+var spillFSFor = spillFS
+
+// SpillState is how much disk one statement with memoryLimit may spill to
+// past it: SpillFactor times the memory, and no more than a share of the
+// space free under the spill root (half of it, split between the statements
+// that can run at once), because that disk may be the one capture writes to.
+// The error says why a statement cannot spill at all: the memory does not
+// parse, the root cannot be read, it is in memory (a tmpfs, where spilling
+// would take memory memory_limit does not count), or it has too little room.
+// The console's settings panel shows the same answer.
+func (r *Runner) SpillState(memoryLimit string) (int64, error) {
+	mem, err := cliutil.ParseByteSize(memoryLimit)
+	if err != nil {
+		return 0, fmt.Errorf("the memory limit %q does not parse: %w", memoryLimit, err)
+	}
+	if mem <= 0 {
+		return 0, fmt.Errorf("the memory limit %q is not a size", memoryLimit)
+	}
+	free, inMemory, err := spillFSFor(r.spillRoot)
+	if err != nil {
+		return 0, fmt.Errorf("the temporary directory %s cannot be used: %w", r.spillRoot, err)
+	}
+	if inMemory {
+		return 0, fmt.Errorf("the temporary directory %s is in memory (tmpfs), where spilling would use memory; point TMPDIR at a folder on disk", r.spillRoot)
+	}
+	limit := SpillFactor * mem
+	if free >= 0 {
+		limit = min(limit, free/int64(2*r.maxInFlight))
+	}
+	if limit < minSpillBytes {
+		return 0, fmt.Errorf("the temporary directory %s has %d MB free, and a statement's share of it (half, split between the %d that can run at once) is too little to spill to", r.spillRoot, free>>20, r.maxInFlight)
+	}
+	return limit, nil
+}
+
+// noteSpill logs a change in whether statements can spill: the first
+// statement that cannot, with why, and the first that can again. Not every
+// statement: a dashboard sends several at once.
+func (r *Runner) noteSpill(err error) {
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	r.spillMu.Lock()
+	changed := msg != r.spillLastError
+	r.spillLastError = msg
+	r.spillMu.Unlock()
+	switch {
+	case !changed:
+	case err != nil:
+		slog.Warn("sql on the copy: statements cannot use the disk past their memory, so a heavy one fails instead of slowing down", "reason", msg)
+	default:
+		slog.Info("sql on the copy: statements can use the disk past their memory again", "root", r.spillRoot)
+	}
+}
+
+// makeSpill makes the private spill directory for one statement and returns
+// its spec, or a zero spec with the reason when it cannot spill: the
+// statement then runs as before #2210, failing past its memory instead of
+// slowing down, and its error says why it had no disk (spillCapMessage).
+func (r *Runner) makeSpill(memoryLimit string) (spillSpec, error) {
+	r.sweepSpillDue(time.Now(), false)
+	limit, err := r.SpillState(memoryLimit)
+	if err == nil {
+		var dir string
+		if dir, err = os.MkdirTemp(r.spillRoot, spillPrefix); err == nil {
+			r.noteSpill(nil)
+			return spillSpec{Dir: dir, MaxBytes: limit}, nil
+		}
+		err = fmt.Errorf("could not make a folder under %s: %w", r.spillRoot, err)
+	}
+	r.noteSpill(err)
+	return spillSpec{}, err
 }
 
 // IsWorkerInvocation reports whether args (os.Args) start a worker: the first
@@ -685,6 +885,10 @@ type wireJob struct {
 	// MaxResultBytes is counted by the worker as it collects rows, so it
 	// stops before building a result the parent would refuse anyway.
 	MaxResultBytes int64 `json:"max_result_bytes"`
+	// SpillDir is the private directory the parent made for this statement,
+	// and SpillMaxBytes what it may hold (#2210). Empty: no spill.
+	SpillDir      string `json:"spill_dir,omitempty"`
+	SpillMaxBytes int64  `json:"spill_max_bytes,omitempty"`
 	// TimeoutNS is the parent's wall clock, so the child can stop on its own
 	// shortly after it if the parent is no longer there to kill it.
 	TimeoutNS int64 `json:"timeout_ns"`
@@ -744,11 +948,23 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 	if asking {
 		viewsSQL = ""
 	}
+	spill, noSpill := r.makeSpill(limits.MemoryLimit)
+	if spill.Dir != "" {
+		// After the worker has exited on every path (a group kill at the
+		// timeout included: Wait returns only then), so nothing writes here
+		// any more.
+		defer func() {
+			if err := os.RemoveAll(spill.Dir); err != nil {
+				slog.Warn("sql on the copy: could not remove a statement's spill directory", "dir", spill.Dir, "error", err)
+			}
+		}()
+	}
 	in, err := json.Marshal(wireJob{
 		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, Schema: job.Schema,
 		TimeZone: job.Session.TimeZone, SelectLimit: job.Session.SelectLimit,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
+		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes,
 	})
 	if err != nil {
 		return Result{}, &WorkerError{Err: err}
@@ -839,7 +1055,7 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 		case errRefused:
 			return Result{}, &RefusedError{Reason: out.Error.Message}
 		case errQuery:
-			return Result{}, &QueryError{Message: out.Error.Message}
+			return Result{}, &QueryError{Message: spillCapMessage(out.Error.Message, spill, noSpill)}
 		case errTooLarge:
 			return Result{}, ErrResultTooLarge
 		default:

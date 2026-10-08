@@ -3,6 +3,7 @@ package console
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -157,6 +158,16 @@ func sqlSettingsServer(t *testing.T, path, startup string) *Server {
 		t.Fatal(err)
 	}
 	s.hostMemory = func() uint64 { return 8 << 30 }
+	if s.sqlSpillState == nil {
+		t.Fatal("New left the runner's spill state unwired: the settings panel would never say how much disk a statement may use")
+	}
+	// The runner's answer depends on the free space of the machine running
+	// the test; the panel's sentences are pinned against a fixed one, four
+	// times the memory (sqlsandbox tests the real computation).
+	s.sqlSpillState = func(memory string) (int64, error) {
+		n, err := cliutil.ParseByteSize(memory)
+		return 4 * n, err
+	}
 	return s
 }
 
@@ -181,13 +192,13 @@ func TestSQLSettingsAPI_saveApplyAndRestart_2210(t *testing.T) {
 
 	rec, st := sqlSettingsDo(t, s, "GET", "")
 	if rec.Code != 200 || st.Source != "default" || st.Memory != "2 GB" || st.MemoryBytes != 2<<30 || st.Value != "2GB" ||
-		!st.CanManage || st.MaxUnmergedMB != 48 || st.FloorMB != 512 || st.Default != "2 GB" || st.Warning != "" ||
+		!st.CanManage || st.MaxUnmergedMB != 384 || st.FloorMB != 512 || st.Default != "2 GB" || st.Warning != "" ||
 		st.HostMemoryBytes != 8<<30 || st.MaxInFlight != 2 || st.Error != "" || st.Locked != "" {
 		t.Fatalf("default: %d %+v", rec.Code, st)
 	}
 
 	rec, st = sqlSettingsDo(t, s, "PUT", `{"memory":"4gb"}`)
-	if rec.Code != 200 || st.Source != "saved" || st.Memory != "4 GB" || st.Value != "4GB" || st.MaxUnmergedMB != 96 {
+	if rec.Code != 200 || st.Source != "saved" || st.Memory != "4 GB" || st.Value != "4GB" || st.MaxUnmergedMB != 768 {
 		t.Fatalf("PUT 4gb: %d %s", rec.Code, rec.Body.String())
 	}
 	if lim, src := s.sqlMemoryNow(); lim != "4096MiB" || src != "saved" {
@@ -208,7 +219,7 @@ func TestSQLSettingsAPI_saveApplyAndRestart_2210(t *testing.T) {
 	}
 
 	// 1536MB is not whole GB: words and value keep the MB.
-	if rec, st = sqlSettingsDo(t, s, "PUT", `{"memory":"1536MiB"}`); rec.Code != 200 || st.Memory != "1.5 GB" || st.Value != "1536MB" || st.MaxUnmergedMB != 36 {
+	if rec, st = sqlSettingsDo(t, s, "PUT", `{"memory":"1536MiB"}`); rec.Code != 200 || st.Memory != "1.5 GB" || st.Value != "1536MB" || st.MaxUnmergedMB != 288 {
 		t.Errorf("PUT 1536MiB: %d %+v", rec.Code, st)
 	}
 
@@ -371,7 +382,7 @@ func TestSQLSettings_reachesTheNextStatement_2210(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/sql", nil)
 	w := httptest.NewRecorder()
 	f.s.handleSQLInfo(w, req)
-	if !strings.Contains(w.Body.String(), `"memory":"6 GB"`) || !strings.Contains(w.Body.String(), `"max_unmerged_mb":144`) {
+	if !strings.Contains(w.Body.String(), `"memory":"6 GB"`) || !strings.Contains(w.Body.String(), `"max_unmerged_mb":1152`) {
 		t.Errorf("GET /api/sql after the PUT: %s", w.Body.String())
 	}
 }

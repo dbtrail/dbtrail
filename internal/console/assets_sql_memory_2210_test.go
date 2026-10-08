@@ -2,6 +2,7 @@ package console
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -97,11 +98,16 @@ func TestSQLMemoryPanel_2210(t *testing.T) {
 	}
 	put("corrupt", sqlSettingsServer(t, bad, ""), "GET", "")
 	put("corruptStartup", sqlSettingsServer(t, bad, "3072MiB"), "GET", "")
+	noDisk := sqlSettingsServer(t, filepath.Join(dir, "nodisk", SQLSettingsFileName), "")
+	noDisk.sqlSpillState = func(string) (int64, error) {
+		return 0, errors.New("the temporary directory /tmp is in memory (tmpfs), where spilling would use memory; point TMPDIR at a folder on disk")
+	}
+	put("noDisk", noDisk, "GET", "")
 
 	arg, _ := json.Marshal(status)
 	var got struct {
-		Def, Saved4, Saved6, Huge, Startup, Corrupt, CorruptStartup, None, ReadOnly sqlMemDrawn
-		First, Second, Third                                                        struct {
+		Def, Saved4, Saved6, Huge, Startup, Corrupt, CorruptStartup, NoDisk, None, ReadOnly sqlMemDrawn
+		First, Second, Third                                                                struct {
 			Calls [][]json.RawMessage
 			After sqlMemDrawn
 		}
@@ -134,14 +140,22 @@ func TestSQLMemoryPanel_2210(t *testing.T) {
 	}
 
 	has("default", got.Def, "Each statement can use 2 GB of memory. This is the default.")
-	has("default", got.Def, "Tables with up to 48 MB of changes waiting to be merged can be queried. More memory raises this limit.")
+	has("default", got.Def, "Tables with up to 384 MB of changes waiting to be merged can be queried. More memory raises this limit.")
+	has("default", got.Def, "Past that, it can also use up to 8 GB of disk, in a temporary folder of its own, so a heavy statement runs slower instead of failing.")
+	has("saved", got.Saved4, "Past that, it can also use up to 16 GB of disk")
+	has("no disk", got.NoDisk, "Past that, a statement fails: it cannot use the disk here, because the temporary directory /tmp is in memory (tmpfs), where spilling would use memory; point TMPDIR at a folder on disk.")
+	for _, l := range got.NoDisk.Lines {
+		if strings.Contains(l, "of disk, in a temporary folder") {
+			t.Errorf("with no disk the panel still promises it: %q", l)
+		}
+	}
 	has("default", got.Def, "2 statements can run at once, on the machine that also captures changes.")
 	has("default", got.Def, "Write it like 4GB or 1536MB, at least 512MB. The default is 2 GB.")
 	if !slices.Equal(got.Def.Buttons, []string{"Save"}) || !slices.Equal(got.Def.Inputs, []string{"2GB"}) {
 		t.Errorf("default: buttons %q inputs %q", got.Def.Buttons, got.Def.Inputs)
 	}
 	has("saved", got.Saved4, "Each statement can use 4 GB of memory. Saved here.")
-	has("saved", got.Saved4, "up to 96 MB of changes")
+	has("saved", got.Saved4, "up to 768 MB of changes")
 	if !slices.Equal(got.Saved4.Buttons, []string{"Save", "Use default"}) || !slices.Equal(got.Saved4.Inputs, []string{"4GB"}) {
 		t.Errorf("saved: buttons %q inputs %q", got.Saved4.Buttons, got.Saved4.Inputs)
 	}

@@ -987,15 +987,15 @@ export async function runSaveScenes(ctx) {
         const st1 = await savedAs(3 * GiB);
         const shown1 = await until(async () => /can use 3 GB of memory\. Saved here\./.test(await text()));
         check("sql-memory", "Save stores the memory typed and the panel shows it, with its unmerged-changes line",
-          before && before.can_manage === true && before.source === "default" && !!s1 && !!st1 && st1.max_unmerged_mb === 72 && !!shown1 &&
-            (await text()).includes("up to 72 MB of changes"),
+          before && before.can_manage === true && before.source === "default" && !!s1 && !!st1 && st1.max_unmerged_mb === 576 && !!shown1 &&
+            (await text()).includes("up to 576 MB of changes"),
           JSON.stringify({ before, s1, st1, shown1, text: await text() }));
         // The live value, as the SQL card reads it. The copy may not exist
         // yet when this runs; then the route has no limits to show.
         const info = await readAs(page, "/api/sql");
         if (info.status === 200) {
           check("sql-memory", "GET /api/sql reports the saved memory without a restart",
-            info.body && info.body.limits && info.body.limits.memory === "3 GB" && info.body.limits.max_unmerged_mb === 72, JSON.stringify(info));
+            info.body && info.body.limits && info.body.limits.memory === "3 GB" && info.body.limits.max_unmerged_mb === 576, JSON.stringify(info));
         } else {
           console.log(`NOT CHECKED  save sql-memory: GET /api/sql answered ${info.status}, so its limits were not read back`);
         }
@@ -1005,7 +1005,7 @@ export async function runSaveScenes(ctx) {
         const st2 = await savedAs(4 * GiB);
         const shown2 = await until(async () => /can use 4 GB of memory\. Saved here\./.test(await text()));
         check("sql-memory", "a second Save on the same panel stores the new value and the panel shows it",
-          !!s2 && !!st2 && st2.max_unmerged_mb === 96 && !!shown2, JSON.stringify({ s2, st2, shown2, text: await text() }));
+          !!s2 && !!st2 && st2.max_unmerged_mb === 768 && !!shown2, JSON.stringify({ s2, st2, shown2, text: await text() }));
 
         const s3 = await press("Use default");
         const st3 = await until(async () => { const b = await status(); return b && b.source === "default" ? b : null; });

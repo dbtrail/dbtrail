@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"os"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -128,7 +129,7 @@ func runJob(job wireJob, ask func(Refs) (string, error), stderr io.Writer) (res 
 	// installed AFTER external access is restricted so an installed view can
 	// only ever reach the copy directories, and BEFORE the lock because the
 	// script sets the session time zone.
-	lock := lockdownStatements(job.CopyDirs)
+	lock := lockdownStatements(job.CopyDirs, spillSpec{Dir: job.SpillDir, MaxBytes: job.SpillMaxBytes})
 	restrict, lockLast := lock[:len(lock)-1], lock[len(lock)-1]
 	for _, stmt := range restrict {
 		if _, err := conn.ExecContext(ctx, stmt); err != nil {
@@ -335,7 +336,16 @@ var sandboxSettings = []string{
 	"autoinstall_known_extensions",
 	"autoload_known_extensions",
 	"temp_directory",
+	"max_temp_directory_size",
 	"lock_configuration",
+}
+
+// spillSpec is where a worker may spill past its memory limit (#2210): Dir is
+// the private directory the parent made for this statement, MaxBytes what it
+// may hold. A zero spec is no spill.
+type spillSpec struct {
+	Dir      string
+	MaxBytes int64
 }
 
 // lockdownStatements is the session lock-down, in order, lock LAST. What
@@ -392,9 +402,22 @@ var sandboxSettings = []string{
 //     allowed_directories (read_csv('/etc/passwd'), read_parquet elsewhere,
 //     glob, ATTACH a file, COPY TO elsewhere), no http:// or s3:// URLs,
 //     no INSTALL (it cannot reach the extension directory), no LOAD.
-//   - temp_directory = ”: no spill. A query past memory_limit fails with
-//     an Out of Memory Error instead of writing to disk. The worker never
-//     writes anything.
+//   - temp_directory = the statement's spill directory, and
+//     max_temp_directory_size = its cap (#2210). Past memory_limit DuckDB
+//     moves what its operators can offload (the joins and aggregates the
+//     views read the delta chain through) to that directory, and the
+//     statement slows down instead of failing; past the cap it fails with
+//     an out-of-memory error that names the cap. The directory is the
+//     parent's (Runner.spawn makes it per statement and removes it when the
+//     worker exits). DuckDB admits its temp directory to reads, so the
+//     statement CAN list and read this one (observed on v1.4.5: glob and
+//     read_csv over it succeed): that is why it is one statement's own and
+//     lives as long as the statement, holding nothing but that statement's
+//     own spill. Its parent and another statement's directory stay out of
+//     reach, and nothing can be written there but by the engine, since the
+//     only statement admitted is one SELECT.
+//     With no spill spec, temp_directory is empty and nothing is written:
+//     a statement past memory_limit fails, as before #2210.
 //   - lock_configuration = true: from here on every SET, RESET and config
 //     PRAGMA is "Cannot change configuration option ... the configuration
 //     has been locked", including this one and every setting above.
@@ -405,22 +428,29 @@ var sandboxSettings = []string{
 // has been disabled by configuration"), and lock_configuration must be LAST.
 // TestLockdown_collationComesFromTheBinary pins the third: extension
 // loading goes off BEFORE the collation is set.
-func lockdownStatements(copyDirs []string) []string {
+func lockdownStatements(copyDirs []string, spill spillSpec) []string {
 	quoted := make([]string, len(copyDirs))
 	for i, d := range copyDirs {
 		quoted[i] = "'" + strings.ReplaceAll(d, "'", "''") + "'"
 	}
-	return []string{
+	temp := []string{"SET temp_directory = ''"}
+	if spill.Dir != "" && spill.MaxBytes > 0 {
+		temp = []string{
+			"SET temp_directory = '" + strings.ReplaceAll(spill.Dir, "'", "''") + "'",
+			fmt.Sprintf("SET max_temp_directory_size = '%dMiB'", max(spill.MaxBytes>>20, 1)),
+		}
+	}
+	return slices.Concat([]string{
 		"SET autoinstall_known_extensions = false",
 		"SET autoload_known_extensions = false",
 		"SET default_collation = 'nocase.icu_noaccent'",
 		"SET default_null_order = 'nulls_first_on_asc_last_on_desc'",
 		"SET ieee_floating_point_ops = false",
 		"SET allowed_directories = [" + strings.Join(quoted, ", ") + "]",
-		"SET temp_directory = ''",
+	}, temp, []string{
 		"SET enable_external_access = false",
 		"SET lock_configuration = true",
-	}
+	})
 }
 
 // allowedTableFunctions are the table functions a statement may call, at any

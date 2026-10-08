@@ -441,6 +441,10 @@ type Server struct {
 	// global in-flight cap applies across servers, because every worker
 	// competes with capture on the same host.
 	sqlRunner sqlRunner
+	// sqlSpillState is the runner's SpillState: how much disk a statement
+	// with a given memory may spill to, or why none (#2210). Nil (a test's
+	// runner) leaves the settings panel's disk line out.
+	sqlSpillState func(memory string) (int64, error)
 	// sqlLimits are the caps sqlRunner runs under, every field resolved (a
 	// zero Config.SQLLimits is sqlsandbox.DefaultLimits); the handler reads
 	// them to bound max_rows and to name the timeout in its refusal.
@@ -726,7 +730,8 @@ func New(cfg Config) (*Server, error) {
 	// given the value on upgrade (MigrateProcessBaselineLocation, run where
 	// the registry is loaded, before any loop reads it).
 	s.sqlLimits = resolveSQLLimits(cfg.SQLLimits)
-	s.sqlRunner = sandboxRunner{sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits, MaxInFlight: cfg.SQLMaxInFlight})}
+	runner := sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits, MaxInFlight: cfg.SQLMaxInFlight})
+	s.sqlRunner, s.sqlSpillState = sandboxRunner{runner}, runner.SpillState
 	s.sqlMaxInFlight = cfg.SQLMaxInFlight
 	if s.sqlMaxInFlight < 1 {
 		s.sqlMaxInFlight = sqlsandbox.DefaultMaxInFlight

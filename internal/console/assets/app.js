@@ -13854,6 +13854,11 @@ function sqlMemoryLines(st) {
   if (!st) return ["We could not read this setting. Reload the page to try again."];
   const from = { default: "This is the default.", saved: "Saved here.", startup: "Set where DBTrail starts." }[st.source] || "";
   const out = [("Each statement can use " + st.memory + " of memory. " + from).trim()];
+  if (st.disk) {
+    out.push("Past that, it can also use up to " + st.disk + " of disk, in a temporary folder of its own, so a heavy statement runs slower instead of failing.");
+  } else if (st.no_disk) {
+    out.push("Past that, a statement fails: it cannot use the disk here, because " + st.no_disk + ".");
+  }
   if (st.max_unmerged_mb) {
     out.push("Tables with up to " + st.max_unmerged_mb + " MB of changes waiting to be merged can be queried. More memory raises this limit.");
   }

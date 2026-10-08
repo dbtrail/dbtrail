@@ -317,6 +317,11 @@ type sqlSettingsDTO struct {
 	// MaxUnmergedMB is the changes not yet merged into a statement's tables
 	// this memory takes before refusing (sqlChainLimit).
 	MaxUnmergedMB int64 `json:"max_unmerged_mb"`
+	// Disk is what a statement may also spill to disk past its memory, as
+	// words (#2210, the runner's SpillState); NoDisk, set instead, is why a
+	// statement cannot spill at all.
+	Disk   string `json:"disk,omitempty"`
+	NoDisk string `json:"no_disk,omitempty"`
 	// MaxInFlight is how many statements run at once; HostMemoryBytes the
 	// machine's memory, 0 (omitted) when not known; Warning is set when the
 	// first times the memory is more than the second.
@@ -349,6 +354,13 @@ func (s *Server) sqlSettings() sqlSettingsDTO {
 		CanManage:       locked == "",
 		Locked:          locked,
 		Error:           loadErr,
+	}
+	if s.sqlSpillState != nil {
+		if n, err := s.sqlSpillState(lim); err != nil {
+			dto.NoDisk = err.Error()
+		} else {
+			dto.Disk = sqlMemoryWords(fmt.Sprintf("%dMiB", n>>20))
+		}
 	}
 	if src == "startup" && saved > 0 {
 		dto.Saved = sqlMemoryWords(fmt.Sprintf("%dMiB", saved))
@@ -417,11 +429,18 @@ func (s *Server) handleSQLSettingsPut(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.sqlSettings())
 }
 
-// SQLChainLimit is the line SQL on the copy refuses at, for the memory in
-// force now (#2210): the daemon's refresh reads it each cycle to end a
-// table's chain at half of it, so a change saved in the web interface
-// moves both on the next cycle.
+// SQLChainLimit is the line SQL on the copy answers from an earlier copy
+// past, for the memory in force now (#2210).
 func (s *Server) SQLChainLimit() int64 {
 	m, _ := s.sqlMemoryNow()
 	return sqlChainLimit(m)
+}
+
+// SQLFoldLine is the size the daemon's refresh keeps a table's changes
+// under, for the memory in force now (sqlFoldChainBytes): it reads it each
+// cycle and ends a table's chain at half of it, so a change saved in the web
+// interface moves it on the next cycle.
+func (s *Server) SQLFoldLine() int64 {
+	m, _ := s.sqlMemoryNow()
+	return sqlScaled(sqlFoldChainBytes, m)
 }

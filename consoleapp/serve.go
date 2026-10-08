@@ -68,7 +68,7 @@ func init() {
 	serveCmd.Flags().StringVar(&conListen, "listen", "127.0.0.1:8090", "Address to listen on (host:port)")
 	serveCmd.Flags().StringVar(&conToken, "token", "", "Opt-in static token for API automation (never generated; humans use the password)")
 	serveCmd.Flags().BoolVar(&conNoArchive, "no-archive", false, "Disable Parquet archive auto-discovery (MySQL-only)")
-	serveCmd.Flags().StringVar(&conSQLMemory, "sql-memory", "", "Memory each SQL-on-the-copy statement may use, e.g. 4GB; default 2GB, at least 512MB. A table with more changes not yet merged than it can merge (48 MB at 2 GB, in proportion) is refused. Env BINTRAIL_CONSOLE_SQL_MEMORY. Unset, the web interface can set it (Settings, MCP Server); set, it wins there.")
+	serveCmd.Flags().StringVar(&conSQLMemory, "sql-memory", "", "Memory each SQL-on-the-copy statement may use, e.g. 4GB; default 2GB, at least 512MB. A table with more changes not yet merged than it can merge (384 MB at 2 GB, in proportion) is answered from an earlier copy, or refused when none fits. Past its memory a statement spills to a temporary folder, up to four times it. Env BINTRAIL_CONSOLE_SQL_MEMORY. Unset, the web interface can set it (Settings, MCP Server); set, it wins there.")
 	serveCmd.Flags().StringVar(&conProfile, "profile", "", "RBAC profile: deny tables / redact columns; forces --no-archive")
 	serveCmd.Flags().StringSliceVar(&conAllowedHosts, "allowed-hosts", nil, "Extra hostnames allowed in the Host header (for reverse-proxy setups; IP literals and localhost are always allowed)")
 	serveCmd.Flags().StringVar(&conBaselineDir, "baseline-dir", "", "Local directory of baseline Parquet snapshots; enables the point-in-time Reconstruct surface")

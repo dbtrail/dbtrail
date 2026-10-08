@@ -65,7 +65,7 @@ type refreshRequest struct {
 	// a restore, which writes no chain.
 	ChainStartFloor time.Time
 	// MaxChainUpserts is reconstruct.FullTableConfig.MaxChainUpserts for this
-	// cycle: half the line SQL on the copy reads at once, read live (#2210).
+	// cycle: half the console's fold line, read live (#2210).
 	MaxChainUpserts int64
 	// SourceDSN, Schemas and SourcePostgres are the server's source and its
 	// snapshot scope, which the update asks for the tables created after
