@@ -134,6 +134,8 @@ func TestSQLSettingsFile_2210(t *testing.T) {
 		"misspelled key":  `{"version":1,"memory_mb":4096}`,
 		"too large":       `{"version":1,"memory_mib":10000000000000}`,
 		"a string":        `{"version":1,"memory_mib":"4GB"}`,
+		"two objects":     `{"version":1,"memory_mib":4096}{"version":1,"memory_mib":8192}`,
+		"trailing text":   `{"version":1,"memory_mib":4096} oops`,
 	} {
 		bad := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".json")
 		if err := os.WriteFile(bad, []byte(body), 0o600); err != nil {

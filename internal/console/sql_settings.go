@@ -117,6 +117,11 @@ func loadSQLSettingsFile(path string) (sqlSettingsFile, error) {
 	if err := dec.Decode(&f); err != nil {
 		return sqlSettingsFile{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	// Decode stops after the first object: a second one left over from a
+	// hand edit would otherwise be dropped and the first loaded as if valid.
+	if dec.More() {
+		return sqlSettingsFile{}, fmt.Errorf("parse %s: unexpected data after the settings object", path)
+	}
 	if f == nil || f.Version < 1 {
 		return sqlSettingsFile{}, fmt.Errorf("parse %s: no \"version\"; this file is written by DBTrail", path)
 	}
@@ -405,5 +410,9 @@ func (s *Server) handleSQLSettingsPut(w http.ResponseWriter, r *http.Request) {
 	after, src := s.sqlMemoryNow()
 	slog.Info("console: SQL memory changed from the web interface", "actor", consoleActor(r),
 		"from", sqlMemoryWords(before), "to", sqlMemoryWords(after), "source", src)
+	if total, over := SQLMemoryOverHost(after, s.sqlMaxInFlight, s.hostMemoryBytes()); over {
+		slog.Warn(fmt.Sprintf("console: SQL memory saved from the web interface, %d MiB: %d statements at once can take %d MiB, more than this host's %d MiB, which capture shares; a statement may be killed by the kernel instead of refused",
+			sqlMiB(after), s.sqlMaxInFlight, total, s.hostMemoryBytes()>>20))
+	}
 	writeJSON(w, http.StatusOK, s.sqlSettings())
 }

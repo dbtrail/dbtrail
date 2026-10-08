@@ -1214,7 +1214,8 @@ The limits, so a query can never hurt capture:
   (`--sql-memory` or `BINTRAIL_CONSOLE_SQL_MEMORY`) wins; the panel then
   shows it read-only and says so, and removing it (and restarting) hands the
   setting to the page. The saved value lives in `console-sql-settings.json`
-  beside the servers file.
+  beside the servers file; DBTrail reads that file when it starts, so change
+  it from the page rather than by hand.
 - A query whose tables have more than 48 MB of changes not merged into them
   yet (all the tables it names, together; the line grows with the memory,
   96 MB at 4GB) is refused before it runs, with the
