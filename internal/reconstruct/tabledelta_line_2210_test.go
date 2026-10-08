@@ -3,6 +3,7 @@ package reconstruct
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -81,5 +82,36 @@ func TestTableDelta_lineEndsTheChain(t *testing.T) {
 			t.Fatalf("window 5 ended the chain (%q) right after a rewrite", rep.DeltaCompacted)
 		}
 		base, prevTime = nb, at
+	}
+}
+
+// A chain that a single window pushed past the whole line is said in the log
+// (#2210); one under it is not.
+func TestWarnChainOverLine(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, n int) string {
+		p := dir + "/" + name
+		if err := os.WriteFile(p, make([]byte, n), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	chain := &baseline.TableDeltaChain{Files: []baseline.TableDeltaFile{
+		{Seq: 0, Upserts: write("t.000000.upserts", 600)},
+		{Seq: 1, Upserts: write("t.000001.upserts", 500)},
+	}}
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	p := tableDeltaPublish{schema: "s", table: "t", cfg: FullTableConfig{MaxChainUpserts: 550}}
+	warnChainOverLine(p, chain) // 1100 is the line: not past it
+	if buf.Len() != 0 {
+		t.Fatalf("at the line: %s", buf.String())
+	}
+	p.cfg.MaxChainUpserts = 549
+	warnChainOverLine(p, chain)
+	if !strings.Contains(buf.String(), "past what SQL on the copy reads at once") {
+		t.Fatalf("past the line: %q", buf.String())
 	}
 }

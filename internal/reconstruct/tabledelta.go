@@ -1217,7 +1217,30 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		// Above zero: the window's changes did not fit in memory and were
 		// read back from disk in that many passes.
 		"spill_passes", passes)
+	warnChainOverLine(p, chain)
 	return nil
+}
+
+// warnChainOverLine says when the chain just published, this window's pair
+// included, is past the whole line SQL on the copy reads at once (#2210).
+// The line rule looks at the chain a window starts from, so one window that
+// alone adds more than half the line leaves the table past it until the next
+// refresh rewrites it; meanwhile a statement over it is answered from an
+// earlier copy, and the operator should know why.
+func warnChainOverLine(p tableDeltaPublish, chain *baseline.TableDeltaChain) {
+	if p.cfg.MaxChainUpserts <= 0 || chain == nil {
+		return
+	}
+	var total int64
+	for _, f := range chain.Files {
+		if fi, err := os.Stat(f.Upserts); err == nil {
+			total += fi.Size()
+		}
+	}
+	if line := 2 * p.cfg.MaxChainUpserts; total > line {
+		slog.Warn("table's changes are past what SQL on the copy reads at once until the next refresh rewrites it: this window alone added more than half of that",
+			"schema", p.schema, "table", p.table, "unmerged_mb", (total+(1<<20)-1)>>20, "line_mb", line>>20)
+	}
 }
 
 // rewriteWithEmptyDelta is the compaction: the ordinary rewrite, fed the base
