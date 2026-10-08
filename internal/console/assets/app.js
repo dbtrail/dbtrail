@@ -12991,6 +12991,12 @@ async function renderConnect() {
   // null on failure — the SQL client panel says it could not check.
   let fbStatus = null;
   try { fbStatus = await api("/api/flashback"); } catch (_) {}
+  // The SQL memory setting (#2210): undefined draws no panel (a session
+  // without settings:read), null says the read failed.
+  let sqlMem;
+  if (sessionMay("settings:read")) {
+    try { sqlMem = await api("/api/sql-settings"); } catch (err) { sqlMem = err.status === 403 ? undefined : null; }
+  }
   // Where the selected server's snapshots live, for the Iceberg export
   // command (#1573): location_only is the Backups listing's own resolution,
   // answered without reading the storage or opening the server's index. Not
@@ -13023,7 +13029,7 @@ async function renderConnect() {
     // too, and "this server" would name nothing.
     const cur = servers.find((s) => s.id === (currentServer || serversDefault));
     buildConnect(servers, tokStatus, minted, fbStatus,
-      { cur: cur, loc: bLoc, failed: (bLocFailed && !!cur) || serversFailed });
+      { cur: cur, loc: bLoc, failed: (bLocFailed && !!cur) || serversFailed }, sqlMem);
   } catch (err) {
     if (minted) toastError("Token display interrupted; the plain token is gone. Click New token to get a fresh one");
     const v = VIEW(); clear(v); v.append(pageHead("MCP Server", null)); renderError(v, err);
@@ -13065,7 +13071,7 @@ function copyText(text, what) {
   clip.writeText(text).then(() => toast(what + " copied to clipboard"), () => toastError("Copy failed."));
 }
 
-function buildConnect(servers, tokStatus, minted, fbStatus, ice) {
+function buildConnect(servers, tokStatus, minted, fbStatus, ice, sqlMem) {
   const v = VIEW(); clear(v);
   const sub = el("p", { class: "page-sub" },
     "Three steps and Claude can answer questions about your database history. It can only read; it can never change anything.");
@@ -13078,6 +13084,7 @@ function buildConnect(servers, tokStatus, minted, fbStatus, ice) {
   v.append(cards);
   if (capsCache.mcp) v.append(otherClientsPanel(servers));
   v.append(sqlClientPanel(servers, fbStatus));
+  if (sqlMem !== undefined) v.append(sqlMemoryPanel(sqlMem));
   // The DuckDB schema card, on this page with or without the watch daemon
   // (#1573; it sat on Backups from #1581, and here only on a serve-only
   // console). GET /api/views.sql needs settings:read, so a session denied it
@@ -13764,6 +13771,83 @@ function sqlClientPanel(servers, fb, reveal, live) {
     el("p", { class: "form-hint", text: fb.host
       ? "The port answers on that address only. Run mysql where it can reach it (on the machine DBTrail runs on when it is 127.0.0.1), or open a tunnel to it."
       : "The port answers on every network address of the machine DBTrail runs on; the command uses the name the web interface was opened with. If that name is a reverse proxy in front of DBTrail, it does not pass this port through, so use that machine's own name or address instead. In the Docker install, docker-compose.yml decides who can reach it: a new install publishes it to the machine itself only." })));
+  return panel;
+}
+
+// ── Memory for SQL on the copy (#2210) ──────────────────────────────────────
+//
+// How much memory each SQL statement on the copy may use (the SQL card and
+// the MySQL port). Saved here and applied to the next statement, no restart.
+// A value given where DBTrail starts wins; then this panel shows it and says
+// where to change it. GET /api/sql-settings answers every line: the panel
+// never computes a limit itself.
+
+// sqlMemoryLines is what the panel says about the setting, one sentence per
+// line, from the route's answer. Pure, so it is tested in node.
+function sqlMemoryLines(st) {
+  if (!st) return ["We could not read this setting. Reload the page to try again."];
+  const from = { default: "This is the default.", saved: "Saved here.", startup: "Set where DBTrail starts." }[st.source] || "";
+  const out = [("Each statement can use " + st.memory + " of memory. " + from).trim()];
+  if (st.max_unmerged_mb) {
+    out.push("Tables with up to " + st.max_unmerged_mb + " MB of changes waiting to be merged can be queried. More memory raises this limit.");
+  }
+  if (st.max_in_flight) {
+    out.push((st.max_in_flight === 1 ? "One statement runs" : st.max_in_flight + " statements can run") +
+      " at once, on the machine that also captures changes.");
+  }
+  if (st.saved) out.push("The value saved here, " + st.saved + ", is not used while the one set at startup is.");
+  return out;
+}
+
+// changeSQLMemory sends one change and draws the panel again from the answer,
+// in place on live (the element on the page), so a second press acts on what
+// the reader sees. send spells its own method and path for save_controls.mjs.
+function changeSQLMemory(live, send, btn) {
+  if (btn) btn.disabled = true;
+  return send().then((st) => {
+    const fresh = sqlMemoryPanel(st, live);
+    live.replaceChildren(...Array.from(fresh.children));
+  }, (err) => {
+    if (btn) btn.disabled = false;
+    toastError("SQL memory: " + ((err && err.message) || err));
+  });
+}
+
+// sqlMemoryPanel: the setting, its effect, and a form when this session may
+// change it here. live: the panel already on the page (changeSQLMemory).
+function sqlMemoryPanel(st, live) {
+  const panel = el("section", { class: "ov-panel cn-sqlmem", style: "margin-top:18px" });
+  live = live || panel;
+  panel.append(el("div", { class: "ov-panel-head" }, el("h2", { class: "ov-panel-title", text: "Memory for SQL on the copy" })));
+  const body = el("div", { class: "cn-sql-body" });
+  panel.append(body);
+  for (const line of sqlMemoryLines(st)) body.append(el("p", { class: "cn-sql-row", text: line }));
+  if (!st) return panel;
+  if (st.warning) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: st.warning }));
+  if (!st.can_manage) {
+    if (st.locked) body.append(el("p", { class: "cn-sql-row", text: st.locked }));
+    // A startup value locks it first; a file that did not load is still said.
+    if (st.error && !(st.locked || "").includes(st.error)) {
+      body.append(el("p", { class: "cn-sql-row cn-sql-err", text: "The saved setting could not be read: " + st.error + ". Fix or remove the file." }));
+    }
+    return panel;
+  }
+  if (!sessionMay("settings:write")) {
+    body.append(el("p", { class: "cn-sql-row", text: "Someone who can change settings can change it here." }));
+    return panel;
+  }
+  const input = el("input", { class: "input cn-sql-addr", type: "text", value: st.value || "", "aria-label": "Memory per statement", spellcheck: "false", autocomplete: "off" });
+  const save = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Save" });
+  save.onclick = () => changeSQLMemory(live, () => api("/api/sql-settings", { method: "PUT", body: { memory: input.value } }), save);
+  const row = el("div", { class: "cn-urlrow" }, el("span", { class: "cn-sql-lbl", text: "Memory" }), input, save);
+  if (st.source === "saved") {
+    const reset = el("button", { class: "btn btn-sm", type: "button", text: "Use default" });
+    reset.onclick = () => changeSQLMemory(live, () => api("/api/sql-settings", { method: "PUT", body: { memory: "" } }), reset);
+    row.append(reset);
+  }
+  body.append(row);
+  body.append(el("p", { class: "form-hint", text: "Write it like 4GB or 1536MB, at least " + st.floor_mb + "MB. The default is " + st.default +
+    ". The next statement uses it; nothing restarts." }));
   return panel;
 }
 

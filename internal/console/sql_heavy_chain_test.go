@@ -182,12 +182,18 @@ func TestSQLAPI_refusesATableWithTooManyChangesWaiting(t *testing.T) {
 	// #2210: the limit follows the memory the server runs SQL with, read at
 	// each statement: twice the default memory, twice the line, so the same
 	// chain is no longer refused.
-	f.s.sqlLimits.MemoryLimit = "4GB"
+	// Saved in the web interface (#2210 UI), so read live, not at startup.
+	f.s.sqlMem.savedMiB = 4096
 	w = f.post(t, `{"sql":"SELECT count(*) FROM shop.orders"}`)
 	if strings.Contains(w.Body.String(), "not merged") {
 		t.Fatalf("under twice the memory the same chain was refused: code=%d body=%s", w.Code, w.Body.String())
 	}
-	f.s.sqlLimits.MemoryLimit = ""
+	// And back at the default the same chain is refused again.
+	f.s.sqlMem.savedMiB = 0
+	w = f.post(t, `{"sql":"SELECT count(*) FROM shop.orders"}`)
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "2 GB of memory") {
+		t.Fatalf("back at the default: code=%d body=%s", w.Code, w.Body.String())
+	}
 
 	sqlMaxChainBytes = 11
 	w = f.post(t, `{"sql":"SELECT count(*) FROM shop.orders"}`)

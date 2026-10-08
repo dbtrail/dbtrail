@@ -161,8 +161,10 @@ What to know before relying on it:
   them yet is refused before it runs (under read routing it goes to MySQL
   like any other refusal). On a host with memory to spare, `--sql-memory`
   (env `BINTRAIL_CONSOLE_SQL_MEMORY`, at least 512MB) raises both: the line
-  of changes moves with it, 96 MB at 4GB. The SQL card shows the memory and
-  the line in force. Each statement can take that much at once, times
+  of changes moves with it, 96 MB at 4GB. Without the flag it can be set in
+  the web interface (Settings, MCP Server, Memory for SQL on the copy) and
+  applies to the next statement, no restart; the flag, when given, wins. The
+  SQL card shows the memory and the line in force. Each statement can take that much at once, times
   `--sql-max-in-flight`, on the host that captures. For a team or a
   dashboard tool, each reader's own DuckDB on the bucket is the way to scale
   reads (see [Dashboards](dashboards.md)): it runs on the reader's machine and
