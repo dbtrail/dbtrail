@@ -1225,7 +1225,10 @@ The limits, so a query can never hurt capture:
   changes into the table on its own, within a day while updates run
   ([Snapshots and updates](dump-and-baseline.md)). Until then, and for any
   heavy read, use your own DuckDB (below): this page is for quick looks on
-  the host that captures.
+  the host that captures. The table list on the left shows how many MB are
+  waiting beside each table that has any: in amber from three quarters of
+  the line, in red past it, with a line under the list naming the tables a
+  query would be refused on.
 - 60 seconds. A longer query is stopped.
 - 1,000 rows come back. The page says when there were more. **Download CSV**
   saves the same rows as a file.

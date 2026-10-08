@@ -2689,6 +2689,30 @@ function sqlStatusLine(info, nowMs) {
   return parts.join(" · ");
 }
 
+// sqlWaitingNote: what the table list says beside a table with changes not
+// merged into it yet (#2210), from the server's numbers. level is "over"
+// when a query naming that table is refused, "near" from three quarters of
+// the line, "" below it or when the line is not known.
+function sqlWaitingNote(u, maxMB) {
+  if (!u || !(u.mb > 0)) return null;
+  const level = u.over ? "over" : maxMB > 0 && u.mb * 4 >= maxMB * 3 ? "near" : "";
+  let title = u.mb + " MB of changes waiting to be merged into this table.";
+  if (maxMB > 0) title += " SQL here merges at most " + maxMB + " MB per query.";
+  if (u.over) title += " A query naming this table is refused until DBTrail merges them, which it does on its own.";
+  return { text: u.mb + " MB waiting", level: level, title: title };
+}
+
+// sqlOverNote: the line under the table list when some table is past the
+// line, so a table the list cuts off is not missed. "" when none is.
+function sqlOverNote(unmerged, maxMB) {
+  const over = (unmerged || []).filter((u) => u && u.over);
+  if (!over.length) return "";
+  const who = over.length === 1 ? over[0].view + " has" : over.length + " tables have";
+  return who + " more changes waiting than SQL here merges (" + maxMB + " MB), so a query naming " +
+    (over.length === 1 ? "it" : "them") + " is refused until DBTrail merges them, which it does on its own. " +
+    "More memory for SQL raises the line.";
+}
+
 // sqlFilterViews: the names to paint for a filter, at most `max`, and how
 // many more match. Case-insensitive substring; an empty filter is the head
 // of the list.
@@ -2874,11 +2898,21 @@ function renderSQLPanel(box) {
     const names = (st.info && st.info.views) || [];
     filter.placeholder = names.length ? "Filter " + names.length.toLocaleString("en-US") + (names.length === 1 ? " table" : " tables") : "Filter tables";
     const f = sqlFilterViews(names, filter.value, SQL_LIST_MAX);
-    f.shown.forEach((n) => list.append(el("button", { class: "sqlp-name", type: "button", role: "listitem", text: n, title: "Insert " + n, onclick: () => insert(n) })));
+    const maxMB = (st.info && st.info.limits && st.info.limits.max_unmerged_mb) || 0;
+    const waiting = new Map(((st.info && st.info.unmerged) || []).map((u) => [u.view, u]));
+    f.shown.forEach((n) => {
+      const w = sqlWaitingNote(waiting.get(n), maxMB);
+      const btn = el("button", { class: "sqlp-name", type: "button", role: "listitem", title: "Insert " + n + (w ? ". " + w.title : ""), onclick: () => insert(n) },
+        el("span", { class: "sqlp-nm", text: n }));
+      if (w) btn.append(el("span", { class: "sqlp-wait" + (w.level ? " sqlp-wait-" + w.level : ""), text: w.text }));
+      list.append(btn);
+    });
     if (f.more > 0) list.append(el("div", { class: "sqlp-more", text: "… " + f.more.toLocaleString("en-US") + " more. Filter to narrow." }));
     if (names.length && f.matched === 0) list.append(el("div", { class: "sqlp-more", text: "No table matches." }));
     // Tables listed under another name, or not at all, and why (#2013).
     if (!filter.value) ((st.info && st.info.notes) || []).forEach((n) => list.append(el("div", { class: "sqlp-more sqlp-note", text: n })));
+    const over = sqlOverNote(st.info && st.info.unmerged, maxMB);
+    if (over && !filter.value) list.append(el("div", { class: "sqlp-more sqlp-note sqlp-wait-over", text: over }));
   };
   filter.addEventListener("input", paintList);
 

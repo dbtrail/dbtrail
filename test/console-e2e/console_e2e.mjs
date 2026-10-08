@@ -6271,7 +6271,7 @@ try {
     const panelUp = await openSQL();
     const opened = await page.evaluate(() => ({
       starter: (document.querySelector(".sqlp-editor") || {}).value || "",
-      names: Array.from(document.querySelectorAll(".sqlp-name")).map((n) => n.textContent),
+      names: Array.from(document.querySelectorAll(".sqlp-name .sqlp-nm")).map((n) => n.textContent),
       meta: (document.querySelector(".sqlp-meta") || {}).textContent || "",
       label: !!document.querySelector('label[for="sqlp-sql"]'),
       csvDisabled: (document.querySelector(".sqlp-csv") || {}).disabled,
@@ -6356,7 +6356,7 @@ try {
       const at = await page.evaluate(([q, a, b, name]) => {
         const ta = document.querySelector(".sqlp-editor");
         ta.value = q; ta.focus(); ta.selectionStart = a; ta.selectionEnd = b;
-        return Array.from(document.querySelectorAll(".sqlp-name")).findIndex((n) => n.textContent === name);
+        return Array.from(document.querySelectorAll(".sqlp-name .sqlp-nm")).findIndex((n) => n.textContent === name);
       }, [text, from, to, stateView]);
       await page.locator(".sqlp-name").nth(at).click();
       return page.evaluate(() => { const ta = document.querySelector(".sqlp-editor"); return { value: ta.value, caret: ta.selectionStart, end: ta.selectionEnd, focused: document.activeElement === ta }; });
