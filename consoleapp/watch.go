@@ -619,6 +619,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	wireSQLChainLine(baselineSup, srv)
 	ln, err := srv.Listen()
 	if err != nil {
 		return fmt.Errorf("console: cannot bind %s: %w", upConsoleListen, err)
@@ -982,6 +983,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	wireSQLChainLine(baselineSup, srv)
 
 	// Bind synchronously so a port conflict fails `watch` fast — otherwise the
 	// console would report "running" while the stream blocks for hours over a
@@ -2251,4 +2253,14 @@ func sqlSettingsFilePath(serversFile string) string {
 // second installation capturing the same source gets another id.
 func autoServerID(ctx context.Context, w io.Writer) (uint32, error) {
 	return installid.AutoDerive(ctx, w, upSourceDSN, upIndexDSN)
+}
+
+// wireSQLChainLine hands the refresh the console's live SQL-on-the-copy line
+// (#2210), so a table's chain ends at half of it. Both watch entry points
+// call it right after the console exists, before either starts serving.
+func wireSQLChainLine(sup *baselineSupervisor, srv *console.Server) {
+	if sup != nil && srv != nil {
+		line := srv.SQLChainLimit
+		sup.sqlChainLine.Store(&line)
+	}
 }

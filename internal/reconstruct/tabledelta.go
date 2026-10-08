@@ -90,6 +90,9 @@ type tableDelta struct {
 	// PairSize is the size of every file of the chain together (the size rule);
 	// UpsertsSize is the last pair's upserts (the space estimate for the next).
 	PairSize, UpsertsSize int64
+	// ChainUpsertsSize is every pair's upserts together: what SQL on the copy
+	// weighs against its line (#2210), and so what the line rule measures.
+	ChainUpsertsSize int64
 	// Legacy marks a v0.83.0 pair: read for its anchor and chain start, folded
 	// once into a rewrite, never extended.
 	Legacy bool
@@ -202,11 +205,11 @@ func readTableDeltaReason(ctx context.Context, basePath string, bmeta baseline.D
 			return nil, "", err
 		}
 		ups, _ := size(chain.LegacyUpserts)
-		return &tableDelta{Chain: chain, Meta: um, PairSize: pair, UpsertsSize: ups, Legacy: true}, "", nil
+		return &tableDelta{Chain: chain, Meta: um, PairSize: pair, UpsertsSize: ups, ChainUpsertsSize: ups, Legacy: true}, "", nil
 	}
 
 	var last baseline.DumpMetadata
-	var total int64
+	var total, allUps int64
 	for i, f := range chain.Files {
 		um, why := readPair(f.Posdel, f.Upserts, f.SeqLo, f.Seq)
 		if why != "" {
@@ -220,14 +223,19 @@ func readTableDeltaReason(ctx context.Context, basePath string, bmeta baseline.D
 		if err != nil {
 			return nil, "", err
 		}
+		u, err := size(f.Upserts)
+		if err != nil {
+			return nil, "", err
+		}
 		total += n
+		allUps += u
 		last = um
 	}
 	ups, err := size(chain.Last().Upserts)
 	if err != nil {
 		return nil, "", err
 	}
-	return &tableDelta{Chain: chain, Meta: last, PairSize: total, UpsertsSize: ups}, "", nil
+	return &tableDelta{Chain: chain, Meta: last, PairSize: total, UpsertsSize: ups, ChainUpsertsSize: allUps}, "", nil
 }
 
 // DeltaChainStart is deltaChainStart for the one reader that pairs a base with
@@ -276,18 +284,21 @@ func readDeltaChainStart(ctx context.Context, basePath string) (time.Time, error
 // yet is checked on newStart: a chain begun over an old base starts at that
 // base's time, not at this run, and would otherwise carry an already too old
 // start forward for a whole cycle.
-func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, capGap *CaptureGap, at time.Time, hasAnchor bool, reserved string, chainFloor, newStart time.Time) string {
+func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, capGap *CaptureGap, at time.Time, hasAnchor bool, reserved string, chainFloor, newStart time.Time, maxUpserts int64) string {
 	if strings.HasPrefix(basePath, "s3://") {
 		return "the previous snapshot is read from S3"
 	}
-	return chainCompactReason(prev, baseSize, capGap, at, hasAnchor, reserved, chainFloor, newStart)
+	return chainCompactReason(prev, baseSize, capGap, at, hasAnchor, reserved, chainFloor, newStart, maxUpserts)
 }
 
 // chainCompactReason is tableDeltaCompactReason without the S3 rule: every
 // reason a chain must end that is about the chain itself, not about where its
 // files are. A copy inside S3 (#2212) applies these to the chain it would
 // carry, exactly as a local carry does.
-func chainCompactReason(prev *tableDelta, baseSize int64, capGap *CaptureGap, at time.Time, hasAnchor bool, reserved string, chainFloor, newStart time.Time) string {
+//
+// maxUpserts is FullTableConfig.MaxChainUpserts: past it the chain is ended
+// so SQL on the copy keeps reading the newest copy (#2210). Zero: no such rule.
+func chainCompactReason(prev *tableDelta, baseSize int64, capGap *CaptureGap, at time.Time, hasAnchor bool, reserved string, chainFloor, newStart time.Time, maxUpserts int64) string {
 	switch {
 	case !hasAnchor:
 		// A delta with no anchor cannot be resumed from, so the next run would
@@ -324,6 +335,14 @@ func chainCompactReason(prev *tableDelta, baseSize int64, capGap *CaptureGap, at
 		// events at that start, and a quiet table would ride the chain there.
 		return fmt.Sprintf("the chain started at %s, too close to the oldest events the index keeps (chains that start at or before %s are ended)",
 			prev.Meta.DeltaChainStart.UTC().Format(time.RFC3339), chainFloor.UTC().Format(time.RFC3339))
+	}
+	if maxUpserts > 0 && prev.ChainUpsertsSize > maxUpserts {
+		// #2210: a statement over this table would merge more changes than
+		// SQL on the copy reads at once and be answered from an earlier copy.
+		// Ended at half that line, so in normal operation the line is never
+		// reached and the newest copy answers.
+		return fmt.Sprintf("the changes beside the table (%d MB) passed %d MB, half of what SQL on the copy reads at once",
+			(prev.ChainUpsertsSize+(1<<20)-1)>>20, maxUpserts>>20)
 	}
 	if prev.PairSize >= tableDeltaMinCompactBytes && float64(prev.PairSize) > tableDeltaMaxFraction*float64(baseSize) {
 		return fmt.Sprintf("the changes beside the table (%d bytes) passed %d%% of the table (%d bytes)",
@@ -1022,7 +1041,7 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	if s3CopyUnchangedChain(ctx, p, hasAnchor, reserved, rep) {
 		return nil
 	}
-	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.capGap, p.cfg.At, hasAnchor, reserved, p.cfg.ChainStartFloor, newChainStart(p)); reason != "" {
+	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.capGap, p.cfg.At, hasAnchor, reserved, p.cfg.ChainStartFloor, newChainStart(p), p.cfg.MaxChainUpserts); reason != "" {
 		return rewriteWithEmptyDelta(ctx, p, in, newBase, reason, reserved != "", rep)
 	}
 	// A base written before a type joined the binary list (VECTOR) stores that

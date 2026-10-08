@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
@@ -86,6 +87,11 @@ type baselineSupervisor struct {
 	// tableDeltas is --baseline-table-deltas (#1638): a refresh keeps a changed
 	// table's file and writes the change beside it. Read by executeRefresh.
 	tableDeltas bool
+	// sqlChainLine is the console's live SQL-on-the-copy line (#2210); a
+	// refresh ends a table's chain at half of it. Unset: no such rule (a
+	// supervisor without a console, as in most tests). Atomic: watch starts
+	// the refresh loop before the console exists and sets it after.
+	sqlChainLine atomic.Pointer[func() int64]
 
 	mu   sync.Mutex
 	jobs map[string]*console.BaselineStatus

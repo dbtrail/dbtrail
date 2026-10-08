@@ -64,6 +64,9 @@ type refreshRequest struct {
 	// cycle (#1904), stamped by runRefresh when table deltas are on. Zero for
 	// a restore, which writes no chain.
 	ChainStartFloor time.Time
+	// MaxChainUpserts is reconstruct.FullTableConfig.MaxChainUpserts for this
+	// cycle: half the line SQL on the copy reads at once, read live (#2210).
+	MaxChainUpserts int64
 	// SourceDSN, Schemas and SourcePostgres are the server's source and its
 	// snapshot scope, which the update asks for the tables created after
 	// the snapshot it starts from (#1993, checkNewTables). Empty SourceDSN:
@@ -262,6 +265,9 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	at = s.anchorRefresh(req.ServerID, at)
 	if s.tableDeltas {
 		req.ChainStartFloor = s.chainStartFloor(req, at, interval)
+		if line := s.sqlChainLine.Load(); line != nil {
+			req.MaxChainUpserts = (*line)() / 2
+		}
 	}
 
 	// Read and REMOVED in one step, before anything below can fail. Every exit
@@ -1650,6 +1656,7 @@ func refreshFoldConfig(req refreshRequest, at time.Time, tableList []string) rec
 		CarryForwardUnchanged: req.CarryForwardUnchanged,
 		TableDeltas:           req.TableDeltas,
 		ChainStartFloor:       req.ChainStartFloor,
+		MaxChainUpserts:       req.MaxChainUpserts,
 		CompactDir:            compactDirFor(req.BaselineDir),
 		Parallelism:           daemonFoldParallelism,
 		WarnEventThreshold:    daemonFoldWarnEventThreshold,

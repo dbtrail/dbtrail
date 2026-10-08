@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   log says why), under read routing (the statement goes to MySQL as
   before), and for a statement that reads `events`. A CSV of such an answer
   is named for its copy, and the audit record carries the copy's time.
+- **A table's changes are merged before SQL on the copy has to skip them**
+  (#2210). With table deltas on, a refresh rewrote a table once its changes
+  beside it passed half of the table, which for a large table is far past
+  what SQL on the copy reads at once (48 MB at 2 GB). A refresh now also
+  rewrites a table whose changes pass half of that line, read at each
+  refresh from the memory in force, so in normal operation statements read
+  the newest copy. Large tables under steady writes are rewritten more often.
 
 ## [0.101.0] - 2026-10-07
 ### Added

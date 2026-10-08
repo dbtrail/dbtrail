@@ -236,6 +236,11 @@ type FullTableConfig struct {
 	// the events it needs. The daemon's refresh sets it from how far back the
 	// index still keeps events; the zero value ends nothing on this ground.
 	ChainStartFloor time.Time
+	// MaxChainUpserts ends a table's chain of deltas once its upserts files
+	// together pass it (#2210): the daemon sets half of the line SQL on the
+	// copy reads at once, so a statement over the table is answered from the
+	// newest copy instead of an earlier one. Zero: no such rule.
+	MaxChainUpserts int64
 
 	// WarnEventThreshold logs a loud warning when a table's fetched event count
 	// exceeds it. The event window itself is PAGED since #1097, so the resident
