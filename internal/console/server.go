@@ -168,6 +168,10 @@ type Config struct {
 	// the whole process, the SQL card and the embedded port together (#2030,
 	// watch --sql-max-in-flight); 0 means sqlsandbox.DefaultMaxInFlight.
 	SQLMaxInFlight int
+	// SQLSettingsPath is the file the web interface saves the SQL memory in
+	// (#2210), beside the servers file. Empty = this console keeps none, and
+	// the memory can only be set where DBTrail starts.
+	SQLSettingsPath string
 	// BaselineDir / BaselineS3 enable point-in-time reconstruct (Phase 2) on
 	// the boot entry. When either is set (and no RBAC profile is active), the
 	// "Reconstruct" surface is exposed. BaselineDir takes precedence;
@@ -441,6 +445,13 @@ type Server struct {
 	// zero Config.SQLLimits is sqlsandbox.DefaultLimits); the handler reads
 	// them to bound max_rows and to name the timeout in its refusal.
 	sqlLimits sqlsandbox.Limits
+	// sqlMem is the SQL memory setting (#2210): MemoryLimit above is the
+	// startup value or the default, and sqlMemoryNow says which applies.
+	sqlMem sqlMemoryState
+	// sqlMaxInFlight is Config.SQLMaxInFlight resolved (default when < 1);
+	// hostMemory, when set, replaces HostMemoryBytes (tests).
+	sqlMaxInFlight int
+	hostMemory     func() uint64
 	// sqlViewsObserver, when set (tests only), sees the views input the SQL
 	// route built before it generates the views: what the worker will be
 	// handed is otherwise only visible as rendered SQL text.
@@ -716,6 +727,12 @@ func New(cfg Config) (*Server, error) {
 	// the registry is loaded, before any loop reads it).
 	s.sqlLimits = resolveSQLLimits(cfg.SQLLimits)
 	s.sqlRunner = sandboxRunner{sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits, MaxInFlight: cfg.SQLMaxInFlight})}
+	s.sqlMaxInFlight = cfg.SQLMaxInFlight
+	if s.sqlMaxInFlight < 1 {
+		s.sqlMaxInFlight = sqlsandbox.DefaultMaxInFlight
+	}
+	// Before resolveSQLLimits filled it, the memory was given or not.
+	s.initSQLMemory(cfg.SQLLimits.MemoryLimit != "", cfg.SQLSettingsPath)
 	s.cm.defaultBaselineDir = cfg.BaselineDir
 	s.cm.defaultBaselineS3 = cfg.BaselineS3
 	// That bucket is read with the process-wide endpoint, so no per-server
@@ -923,6 +940,10 @@ func (s *Server) buildHandler() http.Handler {
 	// Embedded time-travel port (#1446): where it listens and whether it is
 	// on, so the Connect page can show a ready-to-copy mysql line. Read-only;
 	// the token that authenticates the port is never serialized.
+	// The memory SQL on the copy runs with (#2210), saved here and applied
+	// to the next statement.
+	api.HandleFunc("GET /api/sql-settings", s.handleSQLSettingsGet)
+	api.HandleFunc("PUT /api/sql-settings", s.recordAction("sql-settings", s.handleSQLSettingsPut))
 	api.HandleFunc("GET /api/flashback", s.handleFlashbackGet)
 	api.HandleFunc("PUT /api/flashback", s.handleFlashbackPut)
 	api.HandleFunc("POST /api/flashback/password", s.handleFlashbackPassword)

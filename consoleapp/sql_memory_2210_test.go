@@ -1,9 +1,11 @@
 package consoleapp
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/spf13/cobra"
 )
 
@@ -129,5 +131,21 @@ func TestSQLMemoryWarning_2210(t *testing.T) {
 		if c.warn && !strings.Contains(got, "--sql-memory") {
 			t.Errorf("warning must name the flag: %q", got)
 		}
+	}
+}
+
+// The SQL memory saved in the web interface lives beside the servers file,
+// on watch as on serve, so it survives restarts where the servers do.
+func TestSQLSettingsPath_besideTheServersFile_2210(t *testing.T) {
+	cfg, err := upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/idx",
+		consoleOpts{Listen: "127.0.0.1:8090", Token: "tok", ServersFile: "/state/console-servers.yaml"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SQLSettingsPath != "/state/"+console.SQLSettingsFileName {
+		t.Errorf("SQLSettingsPath = %q", cfg.SQLSettingsPath)
+	}
+	if got := sqlSettingsFilePath(""); got != filepath.Join(filepath.Dir(console.DefaultRegistryPath()), console.SQLSettingsFileName) {
+		t.Errorf("default path = %q", got)
 	}
 }

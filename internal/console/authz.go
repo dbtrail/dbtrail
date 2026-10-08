@@ -250,6 +250,9 @@ var apiRoutePerms = []routePerm{
 	// The time-travel port's address is daemon configuration shown on the
 	// Connect page, beside the MCP token status: settings vocabulary, no row
 	// data, and never the token that authenticates the port.
+	// The SQL memory setting (#2210): daemon configuration, like the port.
+	{"GET", "/api/sql-settings", ext.PermSettingsRead},
+	{"PUT", "/api/sql-settings", ext.PermSettingsWrite},
 	{"GET", "/api/flashback", ext.PermSettingsRead},
 	// Turning the port on, off, or giving it a new password opens (or
 	// re-keys) a network door onto every server's history: a settings

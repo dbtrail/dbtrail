@@ -1208,7 +1208,14 @@ The limits, so a query can never hurt capture:
   with 2 threads and 2 GB of memory by default (`--sql-memory`, at least
   512MB). A query that needs more fails with an out-of-memory message;
   capture does not notice. The line under the editor shows the memory in
-  force.
+  force. It can be changed in **Settings, MCP Server, Memory for SQL on the
+  copy**: Save applies it to the next query, with no restart, and **Use
+  default** goes back to 2 GB. A value given where DBTrail starts
+  (`--sql-memory` or `BINTRAIL_CONSOLE_SQL_MEMORY`) wins; the panel then
+  shows it read-only and says so, and removing it (and restarting) hands the
+  setting to the page. The saved value lives in `console-sql-settings.json`
+  beside the servers file; DBTrail reads that file when it starts, so change
+  it from the page rather than by hand.
 - A query whose tables have more than 48 MB of changes not merged into them
   yet (all the tables it names, together; the line grows with the memory,
   96 MB at 4GB) is refused before it runs, with the
@@ -1400,8 +1407,13 @@ one release and warns that it no longer does anything. Remove it.
   `--sql-memory`: the memory each SQL-on-the-copy statement may use, e.g.
   `4GB` (default 2GB; under 512MB, or not a size, refuses to start). The
   changes a statement's tables may hold unmerged grow with it: 48 MB at 2GB,
-  96 MB at 4GB. In `.env` as `SQL_MEMORY`. `watch` warns at startup when this
-  times `--sql-max-in-flight` is more than the host's memory.
+  96 MB at 4GB. In `.env` as `SQL_MEMORY` (leave it empty to set the memory
+  in the web interface). `watch` warns at startup when this
+  times `--sql-max-in-flight` is more than the host's memory. Set this way it
+  wins over the value saved in Settings, MCP Server (which then shows it
+  read-only); unset, the saved value applies, else 2GB. The same setting is
+  `GET`/`PUT /api/sql-settings` (`{"memory":"4GB"}`, `""` for the default;
+  `settings:read` / `settings:write`).
 - `BINTRAIL_CONSOLE_FLASHBACK_LISTEN` (`watch` only) — same as `--flashback-listen`
   (e.g. `127.0.0.1:3308`): serve an embedded MySQL-protocol time-travel port for
   every monitored server, routed by the connection username. Off by default;
@@ -1940,6 +1952,8 @@ All endpoints return JSON except `GET /api/views.sql`, which serves a SQL file. 
 | `GET /api/flashback` | Process-global: the embedded time-travel SQL port (`watch --flashback-listen`): `{enabled, listen, host, port, routing}`. `enabled: false` alone on standalone `serve` and on a daemon that did not open the port; `host` is empty on a wildcard bind (the UI then uses the name it was opened with). `routing` (present when the port is on) is the read router's state: `{enabled: false}` when `--route-max-copy-age` is unset, else `{enabled, max_copy_age, cost_threshold, scan_rows, read_only, since, servers}`: a threshold is omitted when that rule is off (0), `read_only` is omitted on a read-write port, `servers` is omitted until a server has a decision, and each entry (keyed by registry id) is `{copy, mysql, refused, reasons, unavailable}` counting decisions since the daemon started (`refused`, omitted while zero, counts statements a read-only port did not run), `unavailable` (omitted when routing works) saying why connections to that server cannot route and read the copy alone. Never the access token that authenticates the port. Backs the **Connect a SQL client** panel on Settings → MCP Server. |
 | `PUT /api/flashback` | `settings:write`. `{enabled, listen}`: turn the embedded port on at `listen` (omitted = the address saved last, else one with the web interface's own reach on port 3309) or off. Answers the same document as the GET plus, in the response that creates it, `password`: the port's own password, never returned again. `409` when the address was set at startup, on `serve`, when the address cannot be bound (nothing is changed), or when the saved settings file cannot be read or was written by a newer version; `403` from a session with a data access policy. The GET also carries `source` (`startup`/`saved`), `can_manage`, `suggested_listen`, `has_password`, `password_created_at` and `error` (why a port saved as on is not listening). |
 | `POST /api/flashback/password` | `settings:write`. Replaces the port's password and returns the new one once. Open connections stay; the next login needs the new password. Same refusals as the PUT. |
+| `GET /api/sql-settings` | `settings:read`. Process-global: the memory each SQL-on-the-copy statement uses (#2210): `{memory, memory_bytes, value, source, saved, default, floor_mb, max_unmerged_mb, max_in_flight, host_memory_bytes, warning, can_manage, locked, error}`. `source` is `startup` (`--sql-memory` / `BINTRAIL_CONSOLE_SQL_MEMORY`, which wins), `saved` or `default`; `saved` names a saved value a startup one overrides; `max_unmerged_mb` is the changes a statement's tables may hold unmerged at that memory; `warning` is set when `max_in_flight` statements could take more than the host's memory (`host_memory_bytes`, omitted when unknown); `locked` says why `can_manage` is false; `error` is why the saved file did not load. Backs the **Memory for SQL on the copy** panel on Settings → MCP Server. |
+| `PUT /api/sql-settings` | `settings:write`. `{"memory":"4GB"}` saves the memory (KB/MB/GB or KiB/MiB/GiB, at least 512MB) and applies it to the next statement; `{"memory":""}` goes back to the default. Answers the GET document. `400` for a value that is not such a size (or no `memory` field); `409` when the memory was set at startup, when this console keeps no settings file, or when the saved file cannot be read. |
 | `GET /api/profiles` | RBAC data-profile **names** defined on the selected server's index: `{"profiles": ["..."]}`, sorted; empty on a legacy index without the table. Vocabulary for administration panels (e.g. a settings-surface profile picker) — never the rules or flagged tables/columns behind a name. |
 | `GET /api/access-profiles` | The selected server's access-profile configuration in one document: `{flags: [{schema, table, column, flag, created_at}], profiles: [{name, description, created_at}], rules: [{profile, flag, permission, created_at}]}` (`column` empty = a table-level flag). `settings:read`. `403` while an access-control profile is active (a startup `--profile`, even one with no rules yet, or the session's own data profile: the flagged tables and columns are what that profile withholds). `422` on an index without the RBAC tables. |
 | `POST /api/access-profiles/flags`, `.../flags/remove` | Add / remove a flag: `{flag, schema, table, column}` (`column` optional). `settings:write`; `403` while an access-control profile is active, as for the GET. Names are trimmed. Answers with the full document. `400` with the CLI's own message on missing fields or a value past its column width, `404` when the flag to remove is not there, `409` when the flag exists under a spelling that differs only by case or accents (the stored row is named). When the write landed but the readback failed, a `500` whose message begins `The change was saved but the page could not be re-read:`. |

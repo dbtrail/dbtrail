@@ -19,6 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   startup warning says when that memory times `--sql-max-in-flight` is more
   than the host has. The default is now passed as 2048MiB: DuckDB read the
   old "2GB" as 1.86 GiB. Sizes take KB/MB/GB and KiB/MiB/GiB.
+- **The SQL memory can be set from the web interface** (#2210). Settings,
+  MCP Server has a "Memory for SQL on the copy" panel: it shows the memory
+  each statement uses, where it comes from, the unmerged-changes line it
+  gives and a warning when the statements that can run at once could take
+  more than the machine has. Save applies a new value to the next statement
+  without a restart; Use default goes back to 2 GB. A value given at startup
+  (`--sql-memory`, `BINTRAIL_CONSOLE_SQL_MEMORY`) still wins and the panel
+  shows it read-only. The value is saved in `console-sql-settings.json`
+  beside the servers file; a file that does not load is reported and refuses
+  changes instead of falling back silently. New routes: `GET` and `PUT
+  /api/sql-settings`.
 ### Changed
 - **A scheduled update moves a table's changes to disk by size, not only by
   count** (#2207). An update holds every changed row of a table in memory
