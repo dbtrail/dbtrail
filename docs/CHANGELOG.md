@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.102.0] - 2026-10-08
 ### Changed
 - **SQL on the copy uses the disk past its memory instead of failing**
   (#2210). A statement that needed more than its memory (2 GB by default)
