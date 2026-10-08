@@ -1488,6 +1488,11 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
   font-family: var(--f-mono); font-size: var(--fs-xs); line-height: 1.5;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: none;
 }
+.sqlp-name { display: flex; align-items: baseline; gap: 8px; }
+.sqlp-nm { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sqlp-wait { margin-left: auto; flex: none; color: var(--ink-3); }
+.sqlp-wait-near { color: var(--warn); }
+.sqlp-wait-over { color: var(--error); }
 .sqlp-name:hover { background: var(--raised); color: var(--ink); }
 .sqlp-name:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .sqlp-more { padding: 4px 6px; color: var(--ink-3); font-family: var(--f-mono); font-size: var(--fs-xs); }

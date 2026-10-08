@@ -2689,6 +2689,34 @@ function sqlStatusLine(info, nowMs) {
   return parts.join(" · ");
 }
 
+// sqlWaitingNote: what the table list says beside a table with changes not
+// merged into it yet (#2210). The server decides the level on bytes ("over":
+// a query naming this table is refused; "near": from three quarters of the
+// line) and rounds MB so it never contradicts the line it states; the page
+// only paints. unknown: a file could not be sized, so no number is shown.
+function sqlWaitingNote(u, maxMB) {
+  if (!u || !(u.mb > 0 || u.unknown)) return null;
+  const level = u.level === "over" || u.over ? "over" : u.level === "near" ? "near" : "";
+  let title = u.unknown ? "Changes are waiting to be merged into this table; their size could not be read."
+    : u.mb + " MB of changes waiting to be merged into this table.";
+  if (maxMB > 0) title += " SQL here merges at most " + maxMB + " MB per query, all the tables it reads together.";
+  if (level === "over") title += " A query naming this table is refused until DBTrail merges them, which it does on its own.";
+  return { text: u.unknown ? "size unknown" : u.mb + " MB waiting", level: level, title: title };
+}
+
+// sqlOverNote: the line under the table list when some table is past the
+// line on its own, so a table the list cuts off is not missed. "" when none
+// is. A query over several tables adds theirs together, which no single row
+// shows, so the line says so.
+function sqlOverNote(unmerged, maxMB) {
+  const over = (unmerged || []).filter((u) => u && (u.level === "over" || u.over));
+  if (!over.length) return "";
+  const who = over.length === 1 ? over[0].view + " has" : over.length + " tables have";
+  return who + " more changes waiting than SQL here merges (" + maxMB + " MB per query, all its tables together), so a query naming " +
+    (over.length === 1 ? "it" : "them") + " is refused until DBTrail merges them, which it does on its own. " +
+    "More memory for SQL raises the line.";
+}
+
 // sqlFilterViews: the names to paint for a filter, at most `max`, and how
 // many more match. Case-insensitive substring; an empty filter is the head
 // of the list.
@@ -2874,13 +2902,33 @@ function renderSQLPanel(box) {
     const names = (st.info && st.info.views) || [];
     filter.placeholder = names.length ? "Filter " + names.length.toLocaleString("en-US") + (names.length === 1 ? " table" : " tables") : "Filter tables";
     const f = sqlFilterViews(names, filter.value, SQL_LIST_MAX);
-    f.shown.forEach((n) => list.append(el("button", { class: "sqlp-name", type: "button", role: "listitem", text: n, title: "Insert " + n, onclick: () => insert(n) })));
+    const maxMB = (st.info && st.info.limits && st.info.limits.max_unmerged_mb) || 0;
+    const waiting = new Map(((st.info && st.info.unmerged) || []).map((u) => [u.view, u]));
+    f.shown.forEach((n) => {
+      const w = sqlWaitingNote(waiting.get(n), maxMB);
+      const btn = el("button", { class: "sqlp-name", type: "button", role: "listitem", title: "Insert " + n + (w ? ". " + w.title : ""), onclick: () => insert(n) },
+        el("span", { class: "sqlp-nm", text: n }));
+      if (w) btn.append(el("span", { class: "sqlp-wait" + (w.level ? " sqlp-wait-" + w.level : ""), text: w.text }));
+      list.append(btn);
+    });
     if (f.more > 0) list.append(el("div", { class: "sqlp-more", text: "… " + f.more.toLocaleString("en-US") + " more. Filter to narrow." }));
     if (names.length && f.matched === 0) list.append(el("div", { class: "sqlp-more", text: "No table matches." }));
     // Tables listed under another name, or not at all, and why (#2013).
     if (!filter.value) ((st.info && st.info.notes) || []).forEach((n) => list.append(el("div", { class: "sqlp-more sqlp-note", text: n })));
+    const over = sqlOverNote(st.info && st.info.unmerged, maxMB);
+    if (over && !filter.value) list.append(el("div", { class: "sqlp-more sqlp-note sqlp-wait-over", text: over }));
   };
   filter.addEventListener("input", paintList);
+  // After each run the list is read again (#2210): a merge since the panel
+  // opened clears a red table, and growth past the line shows before the
+  // next refusal. A failed reread keeps the list as it was; the run's own
+  // result already said what happened.
+  const rereadInfo = () => api("/api/sql").then((info) => {
+    if (!alive() || !info) return;
+    st.info = info;
+    meta.textContent = sqlStatusLine(st.info, Date.now());
+    paintList();
+  }, () => {});
 
   const showError = (err) => {
     clear(msg);
@@ -2940,7 +2988,7 @@ function renderSQLPanel(box) {
       clearInterval(gone);
       if (seen) seen.disconnect();
       if (st.ctl === ctl) st.ctl = null;
-      if (alive()) busy(false);
+      if (alive()) { busy(false); rereadInfo(); }
     }
   };
   run.onclick = runNow;

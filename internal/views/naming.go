@@ -159,6 +159,26 @@ func (in Input) stateLabel(p statePlan) string {
 	return label
 }
 
+// StateView is one state view DefinedViews lists, with the table it reads.
+type StateView struct {
+	// Label is the view exactly as DefinedViews prints it.
+	Label string
+	Table BaselineTable
+}
+
+// StateViews pairs each state view DefinedViews lists with its table, in
+// the same order, for a caller that reports per view on the files behind it
+// (#2210: the changes waiting in each table, beside its name).
+func (in Input) StateViews() []StateView {
+	var out []StateView
+	for _, p := range stateViewPlan(in) {
+		if p.skip == "" {
+			out = append(out, StateView{Label: in.stateLabel(p), Table: p.table})
+		}
+	}
+	return out
+}
+
 // stateKey is a state view's key in a ViewSet: its label without the
 // database, compared the way DuckDB compares names.
 func stateKey(p statePlan) string {

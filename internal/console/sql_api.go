@@ -2,6 +2,7 @@ package console
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -330,9 +331,12 @@ type sqlInfoResponse struct {
 	// why (#2013): a table in a schema DuckDB keeps for itself has no view,
 	// and without this the list would just be one table short. The same for
 	// events when the change log is in S3 (#2028).
-	Notes         []string     `json:"notes,omitempty"`
-	CopyUpdatedAt *time.Time   `json:"copy_updated_at"`
-	Limits        sqlLimitsDTO `json:"limits"`
+	Notes []string `json:"notes,omitempty"`
+	// Unmerged is the tables with changes waiting to be merged, against
+	// Limits.MaxUnmergedMB (#2210); omitted when none has any.
+	Unmerged      []sqlUnmergedDTO `json:"unmerged,omitempty"`
+	CopyUpdatedAt *time.Time       `json:"copy_updated_at"`
+	Limits        sqlLimitsDTO     `json:"limits"`
 }
 
 // sqlLimitsDTO are the caps a query runs under, so the panel states the
@@ -402,7 +406,7 @@ func (s *Server) handleSQLInfo(w http.ResponseWriter, r *http.Request) {
 		notes = append(notes, sqlEventsLookupFailedNote)
 	}
 	memory, _ := s.sqlMemoryNow()
-	resp := sqlInfoResponse{Views: names, Notes: notes, Limits: sqlLimitsDTO{
+	resp := sqlInfoResponse{Views: names, Notes: notes, Unmerged: sqlUnmergedByView(in, sqlChainLimit(memory), sqlFileSize), Limits: sqlLimitsDTO{
 		TimeoutSeconds: int(s.sqlLimits.Timeout / time.Second),
 		MaxRows:        s.sqlLimits.MaxRows,
 		MaxCellBytes:   sqlsandbox.MaxCellBytes,
@@ -604,21 +608,7 @@ type sqlHeavyChain struct {
 func sqlChainTooHeavy(tables []views.BaselineTable, limit int64, size func(string) (int64, error)) sqlHeavyChain {
 	var out sqlHeavyChain
 	for _, t := range tables {
-		if !t.Delta || strings.Contains(t.Path, "://") {
-			continue
-		}
-		var sum int64
-		var unread error
-		for _, f := range t.DeltaUpsertsFiles() {
-			n, err := size(f)
-			if err != nil {
-				if !errors.Is(err, fs.ErrNotExist) && unread == nil {
-					unread = err
-				}
-				continue
-			}
-			sum += n
-		}
+		sum, unread := sqlTableUnmergedBytes(t, size)
 		if unread != nil {
 			slog.Warn("console: sql: could not size a table's changes; the statement runs unchecked for it",
 				"table", t.Schema+"."+t.Table, "error", unread)
@@ -634,6 +624,83 @@ func sqlChainTooHeavy(tables []views.BaselineTable, limit int64, size func(strin
 	}
 	if out.Total <= limit {
 		return sqlHeavyChain{}
+	}
+	return out
+}
+
+// sqlTableUnmergedBytes is the size of a table's upserts files: the changes
+// a statement naming it has to merge. 0 for a table with no chain or one in
+// S3 (a statement here never reads that). A file that is gone counts as
+// nothing; the first that cannot be read is returned beside the sum.
+func sqlTableUnmergedBytes(t views.BaselineTable, size func(string) (int64, error)) (sum int64, unread error) {
+	if !t.Delta || strings.Contains(t.Path, "://") {
+		return 0, nil
+	}
+	for _, f := range t.DeltaUpsertsFiles() {
+		n, err := size(f)
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) && unread == nil {
+				unread = err
+			}
+			continue
+		}
+		sum += n
+	}
+	return sum, unread
+}
+
+// sqlUnmergedDTO is one table's changes waiting to be merged, for the SQL
+// panel's table list (#2210). The level is decided here, on bytes, so the
+// page never compares two rounded numbers: "over" when a statement naming
+// this table alone is refused, "near" from three quarters of the line. MB
+// is rounded up past the line (as the refusal prints it) and down under it,
+// so it never reads as past the line the page states (limit>>20) unless it
+// is. Unknown when a file of the table could not be sized: the number is
+// then a floor, not the size.
+type sqlUnmergedDTO struct {
+	View    string `json:"view"`
+	MB      int64  `json:"mb"`
+	Level   string `json:"level,omitempty"`
+	Unknown bool   `json:"unknown,omitempty"`
+}
+
+// sqlUnmergedByView lists the views whose tables hold changes not merged
+// yet, the most first (ties by name), against limit. A file that cannot be
+// sized marks its table Unknown instead of being logged: the refusal logs it
+// when a statement names the table, and a page that reloads the list would
+// repeat the warning on every load.
+func sqlUnmergedByView(in views.Input, limit int64, size func(string) (int64, error)) []sqlUnmergedDTO {
+	type row struct {
+		dto   sqlUnmergedDTO
+		bytes int64
+	}
+	var rows []row
+	for _, v := range in.StateViews() {
+		n, unread := sqlTableUnmergedBytes(v.Table, size)
+		if n <= 0 && unread == nil {
+			continue
+		}
+		d := sqlUnmergedDTO{View: v.Label, Unknown: unread != nil}
+		switch {
+		case n > limit:
+			d.Level, d.MB = "over", (n+(1<<20)-1)>>20
+		default:
+			d.MB = max(n>>20, 1)
+			if n*4 >= limit*3 {
+				d.Level = "near"
+			}
+		}
+		rows = append(rows, row{d, n})
+	}
+	slices.SortFunc(rows, func(a, b row) int {
+		if c := cmp.Compare(b.bytes, a.bytes); c != 0 {
+			return c
+		}
+		return strings.Compare(a.dto.View, b.dto.View)
+	})
+	out := make([]sqlUnmergedDTO, len(rows))
+	for i, r := range rows {
+		out[i] = r.dto
 	}
 	return out
 }

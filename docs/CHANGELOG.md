@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   beside the servers file; a file that does not load is reported and refuses
   changes instead of falling back silently. New routes: `GET` and `PUT
   /api/sql-settings`.
+- **SQL on the copy shows the changes waiting in each table** (#2210). The
+  table list beside the editor shows how many MB of changes are not merged
+  into each table yet, in amber near the line a query is refused at and in
+  red past it, so a table that alone gets a query refused is visible before
+  the query runs (a query over several tables adds theirs together).
+
 ### Changed
 - **A scheduled update moves a table's changes to disk by size, not only by
   count** (#2207). An update holds every changed row of a table in memory
