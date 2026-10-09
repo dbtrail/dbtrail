@@ -76,6 +76,15 @@ func ApplyFollow(in *Input, root string, pin bool) {
 	if !isS3(root) {
 		return
 	}
+	// A root whose text holds a pattern character is not followed either
+	// (#2246). The newest snapshot is found with a glob over the root, where
+	// the root's own text is a pattern: under "s3://b/da?a/" it also matches
+	// the snapshots of a sibling "s3://b/data/", the newest of the two wins,
+	// and every view then reads that one's files, with no error. Pinned, each
+	// path is named through a class (fileGlob), so the file reads its own.
+	if strings.ContainsAny(strings.TrimPrefix(root, "s3://"), "*?[{") {
+		return
+	}
 	rels := snapshotRels(root, paths)
 	if rels == nil {
 		// All or nothing. A file where some state views follow and others

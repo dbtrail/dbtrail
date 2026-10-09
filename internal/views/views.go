@@ -2687,10 +2687,11 @@ func writeSnapshotPreflight(b *strings.Builder, in Input, wanted []statePlan) {
 //
 // DuckDB does not honour a backslash escape here; a single-character class does,
 // which is what globLiteral builds. FollowNewest needs no escaping: its value is
-// itself a glob RESULT, so a root that glob cannot express never reaches it —
-// writeNewestSnapshotVar's own glob raises first, naming the root. The pointer
-// variant (#2052) builds the value from the raw root instead, which is why
-// UseNewestPointer refuses a root carrying a glob character.
+// itself a glob RESULT, and a root whose text is a pattern never reaches it,
+// because ApplyFollow does not follow one (#2246: writeNewestSnapshotVar's
+// glob does not raise on such a root, it matches a sibling root too). The
+// pointer variant (#2052) builds the value from the raw root, and
+// UseNewestPointer refuses such a root on its own account.
 func snapshotDirExpr(in Input) (dir, globDir string, ok bool) {
 	switch in.Follow {
 	case FollowNewest:

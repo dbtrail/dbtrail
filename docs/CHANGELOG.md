@@ -39,6 +39,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairs, and one that follows the newest snapshot reads as before.
 
 ### Fixed
+- **A views file over an S3 folder whose name holds `?`, `*`, `[` or `{`
+  reads that folder only** (#2246). A views file that follows the newest
+  snapshot finds it by listing the snapshots folder, and the folder's own
+  name was a pattern there: under `s3://bucket/da?a/` the listing also
+  matched the snapshots of `s3://bucket/data/`, and the views read whichever
+  of the two folders held the newest snapshot, with no error. Such a folder
+  is no longer followed: its views file is pinned to the snapshot it was
+  generated for, and says so, like one generated with `--pin`.
+
 - **A refresh of a table whose name holds `?`, `*` or `[` reads that table's
   files only** (#2243). The same cause as #2235 below, in the daemon's own
   reads: DuckDB takes a file path as a pattern. A table named `order[st]`
