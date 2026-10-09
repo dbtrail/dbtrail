@@ -3,6 +3,7 @@ package baseline
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -32,5 +33,38 @@ func TestReadTableFooters_aTableNamedLikeAGlob(t *testing.T) {
 				t.Errorf("%d files: no footer for %s", len(list), filepath.Base(p))
 			}
 		}
+	}
+}
+
+// A backslash is the one character no class stands for: DuckDB's glob splits
+// a pattern on it. A table named `\..\hr\*` in "shop" must not have the
+// footers of the schema "hr" read as its own, and the tables beside it keep
+// theirs.
+func TestReadTableFooters_aBackslashNameReadsNoOtherSchema(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "snap")
+	hr := filepath.Join(root, "hr", "salaries.parquet")
+	writeFixtureTable(t, hr, footerTestSQL, [][]string{{"1", "AB"}})
+	orders := filepath.Join(root, "shop", "orders.parquet")
+	writeFixtureTable(t, orders, footerTestSQL, [][]string{{"1", "AB"}})
+	for _, name := range []string{`\..\hr\*`, `\..\hr\salaries`, `a\b`, `a\*b`} {
+		t.Run(name, func(t *testing.T) {
+			own := filepath.Join(root, "shop", name+".parquet")
+			writeFixtureTable(t, own, footerTestSQL, [][]string{{"1", "AB"}})
+			got, err := ReadTableFooters(context.Background(), []string{orders, own})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Its own footer, or said to be unread: never another file's,
+			// and never "carries no CREATE TABLE", which a caller keeps.
+			if _, ok := got.Footers[own]; !ok && !slices.Contains(got.Unread, own) {
+				t.Errorf("%s: no footer and not reported unread (no schema = %v)", name, got.NoSchema)
+			}
+			if _, ok := got.Footers[hr]; ok {
+				t.Errorf("the footer of %s was read: nobody asked for it", hr)
+			}
+			if _, ok := got.Footers[orders]; !ok {
+				t.Errorf("no footer for shop.orders, the table beside it")
+			}
+		})
 	}
 }

@@ -179,29 +179,114 @@ func TestStateView_aTableNamedLikeAGlobReadsItsOwnFiles(t *testing.T) {
 	}
 }
 
-// TestStateView_aTableNamedWithABackslashStillLoads: DuckDB's glob splits a
-// pattern on a backslash as on a slash, so no class can stand for one and an
-// escaped path would name no file. Such a path is given as it is, which
-// matches nothing as a pattern and is then read as the file it names: the
-// view loads and reads its table, as it did before the paths were escaped.
-func TestStateView_aTableNamedWithABackslashStillLoads(t *testing.T) {
+// TestStateView_aBackslashNameNeverReadsAnotherSchema: DuckDB's glob splits
+// a pattern on a backslash as on a slash, so a table named `\..\hr\*` in
+// "shop" is, read as a pattern, every table file of "hr". No class stands for
+// a backslash, so no pattern names that one file: the table gets no view, the
+// file says why, and every other view still loads. A name with a backslash
+// and no pattern character is read as the file it names by a pinned view,
+// and has no view when the view follows the snapshots, which finds a
+// table's chain by a pattern built on its name. A pinned view whose chain is
+// not named file by file does the same, and has none either.
+func TestStateView_aBackslashNameNeverReadsAnotherSchema(t *testing.T) {
 	const stamp = "2026-04-30T03-00-00Z"
-	root := t.TempDir()
-	neighbour := writeSnapshot(t, root, stamp, true, "a", "b", "c")
-	const name = `a\*b`
-	base := writeTableBeside(t, neighbour, name)
-	tables := []BaselineTable{{Schema: "shop", Table: name, Path: base, Rel: "shop/" + name + ".parquet", SchemaKnown: true}}
-	sqlText := Generate(Input{
-		GeneratedAt: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC), Version: "test",
-		BaselineSource: root, BaselineSnapshot: time.Date(2026, 4, 30, 3, 0, 0, 0, time.UTC),
-		Follow: FollowNone, Baselines: tables,
-	})
-	db, err := loadViews(t, sqlText)
-	if err != nil {
-		t.Fatalf("the views do not load: %v\n%s", err, sqlText)
-	}
-	var n int
-	if err := db.QueryRow(`SELECT count(*) FROM shop."a\*b" WHERE status IN ('p', 'q', 'r')`).Scan(&n); err != nil || n != 3 {
-		t.Fatalf("rows of the table's own = %d (err=%v), want 3\n%s", n, err, sqlText)
+	at := time.Date(2026, 4, 30, 3, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name string
+		// pinned says a pinned view exists (and reads the table's own
+		// rows); a following one never does.
+		pinned bool
+		// byPattern gives the table a chain the view is not told the
+		// files of, and the schema "hr" a chain a pattern would reach.
+		byPattern bool
+	}{
+		{`a\*b`, false, false},
+		{`\..\hr\*`, false, false},
+		{`\..\hr\salar?es`, false, false},
+		{`\..\hr\[s]alaries`, false, false},
+		{`\..\hr\{salaries,x}`, false, false},
+		{`\..\hr\salaries`, true, false},
+		{`a\b`, true, false},
+		{`\..\hr\salaries`, false, true},
+	} {
+		for _, mode := range []FollowMode{FollowNone, FollowPointer, FollowNewest} {
+			t.Run(fmt.Sprintf("%s/pattern=%v/%v", c.name, c.byPattern, mode), func(t *testing.T) {
+				root := t.TempDir()
+				orders := writeSnapshot(t, root, stamp, true, "a", "b", "c")
+				own := writeTableBeside(t, orders, c.name)
+				// The other schema's table: the same file as shop.orders,
+				// so a read that reaches it returns a, b, c.
+				raw, err := os.ReadFile(orders)
+				if err != nil {
+					t.Fatal(err)
+				}
+				hr := filepath.Join(root, stamp, "hr", "salaries.parquet")
+				if err := os.MkdirAll(filepath.Dir(hr), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(hr, raw, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				in := Input{
+					GeneratedAt: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC), Version: "test",
+					BaselineSource: root, BaselineSnapshot: at, Follow: mode,
+					Baselines: []BaselineTable{
+						{Schema: "shop", Table: "orders", Path: orders, Rel: "shop/orders.parquet", SchemaKnown: true},
+						{Schema: "shop", Table: c.name, Path: own, Rel: "shop/" + c.name + ".parquet", SchemaKnown: true},
+					},
+				}
+				if c.byPattern {
+					writeDeltaPair(t, hr, 0, []int64{2}, [][3]string{{"77", "hr", "u"}})
+					writeDeltaPair(t, own, 0, nil, nil)
+					// Said to have a chain, with no file of it named: what a
+					// caller that does not list the chain hands over.
+					in.Baselines[1].Delta = true
+				}
+				if mode == FollowPointer {
+					if err := os.Symlink(stamp, filepath.Join(root, baseline.CurrentLinkName)); err != nil {
+						t.Fatal(err)
+					}
+					for i := range in.Baselines {
+						in.Baselines[i].Path = filepath.Join(root, baseline.CurrentLinkName, in.Baselines[i].Rel)
+					}
+				}
+				sqlText := Generate(in)
+				db, err := loadViews(t, sqlText)
+				if err != nil {
+					t.Fatalf("the views do not load: %v\n%s", err, sqlText)
+				}
+				var n int
+				if err := db.QueryRow(`SELECT count(*) FROM shop.orders WHERE status IN ('a', 'b', 'c')`).Scan(&n); err != nil || n != 3 {
+					t.Fatalf("shop.orders, the table beside it: %d rows (err=%v), want 3\n%s", n, err, sqlText)
+				}
+				quoted := `shop."` + strings.ReplaceAll(c.name, `"`, `""`) + `"`
+				rows, err := db.Query(`SELECT status FROM ` + quoted + ` ORDER BY 1`)
+				if !c.pinned || mode != FollowNone {
+					if err == nil {
+						rows.Close()
+						t.Fatalf("%s has a view; no path names its file, so it must have none\n%s", quoted, sqlText)
+					}
+					if !strings.Contains(sqlText, "holds a backslash, and DuckDB reads a path as a pattern") {
+						t.Fatalf("the file does not say why %s has no view\n%s", quoted, sqlText)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("%s: %v\n%s", quoted, err, sqlText)
+				}
+				defer rows.Close()
+				var got []string
+				for rows.Next() {
+					var st string
+					if err := rows.Scan(&st); err != nil {
+						t.Fatal(err)
+					}
+					got = append(got, st)
+				}
+				if strings.Join(got, ",") != "p,q,r" {
+					t.Fatalf("%s returned %v, want its own p, q, r (a, b, c are the other schema's)\n%s", quoted, got, sqlText)
+				}
+			})
+		}
 	}
 }

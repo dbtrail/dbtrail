@@ -2726,17 +2726,11 @@ func globLiteral(s string) string {
 }
 
 // fileGlob is the pattern that names the one file at path, for read_parquet,
-// which takes a path as a glob (#2235): globLiteral, except for a path with
-// a backslash, which is returned as it is. DuckDB's glob splits a pattern on
-// a backslash as it does on a slash, so no class can stand for one and the
-// escaped text would name no file; as it is, such a pattern matches nothing
-// and DuckDB falls back to the path itself, which is the file.
-func fileGlob(path string) string {
-	if strings.Contains(path, `\`) {
-		return path
-	}
-	return globLiteral(path)
-}
+// which takes a path as a glob (#2235): globLiteral. Named for its use: every
+// table file and chain file a view reads goes through it. A path it cannot
+// name (one with a backslash that a view would read through a pattern,
+// unnameableFile) never reaches it: that table has no view.
+func fileGlob(path string) string { return globLiteral(path) }
 
 // FileGlob is fileGlob, for a caller that has to name a path the way the
 // views do: the SQL sandbox allows a statement its directories by their
@@ -2745,9 +2739,9 @@ func FileGlob(path string) string { return fileGlob(path) }
 
 // globLiteralSQL is fileGlob as a SQL expression over expr, for a path that
 // is only known when the statement runs: the same four characters, each
-// wrapped in a class, in one pass, and a path with a backslash left as it is.
+// wrapped in a class, in one pass.
 func globLiteralSQL(expr string) string {
-	return "CASE WHEN contains(" + expr + `, '\') THEN ` + expr + " ELSE regexp_replace(" + expr + `, '([\[*?{])', '[\1]', 'g') END`
+	return "regexp_replace(" + expr + `, '([\[*?{])', '[\1]', 'g')`
 }
 
 // writeNewestStateBody emits one state view's body under FollowNewest: a read of

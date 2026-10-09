@@ -471,12 +471,10 @@ func fileListLiteral(paths []string) string {
 		// Each entry is taken as a glob (#2235): unescaped, the footer of a
 		// table named "order[st]" was read from the file of "orders", the
 		// table got no entry and was reported as carrying no CREATE TABLE.
-		// A path with a backslash is left as it is: the glob splits on one,
-		// so no class can stand for it, and as it is the path names itself.
-		if !strings.Contains(p, `\`) {
-			p = escapeGlob(p)
-		}
-		quoted[i] = sqlQuoteLiteral(p)
+		// Always: a path that also holds a backslash, which the glob splits
+		// on, then matches nothing and that one file is reported as not
+		// read, where the pattern it was would have read other files.
+		quoted[i] = sqlQuoteLiteral(escapeGlob(p))
 	}
 	return "[" + strings.Join(quoted, ", ") + "]"
 }

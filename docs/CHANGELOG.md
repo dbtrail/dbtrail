@@ -37,7 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copy and the MySQL port get this with the upgrade; a views file, when it
   is generated again; the views file inside a snapshot, from the next
   snapshot on. Over S3, a table with `?` in its name still fails, with
-  DuckDB's own error, as before.
+  DuckDB's own error, as before. One kind of name gets no view at all, and
+  the views file says so beside it: a name with a backslash, when the view
+  would find the table's files by a pattern (any view that follows the
+  snapshots, or a name that also holds one of those characters). DuckDB
+  splits a pattern on a backslash, so a table named `\..\hr\*` read the
+  files of the schema `hr` as its own; no pattern names such a file alone.
 
 - **`bintrail baseline --upload` no longer sends the daemon's work
   directories to the bucket** (#2231). An upload of a whole snapshots

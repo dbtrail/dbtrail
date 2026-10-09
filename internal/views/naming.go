@@ -93,6 +93,8 @@ func stateViewPlan(in Input) []statePlan {
 		p := statePlan{table: t, view: t.Table}
 		if why := in.reservedSchema(t.Schema); why != "" {
 			p.skip = why
+		} else if why := in.unnameableFile(t); why != "" {
+			p.skip = why
 		} else if k := nameKey(t.Schema, t.Table); k != nameKey("main", eventsViewName) && spelling(winner[k]) == spelling(t) {
 			holder[k] = in.stateLabel(p)
 		}
@@ -120,6 +122,32 @@ func stateViewPlan(in Input) []statePlan {
 			p.table.Schema, p.table.Table, taken)
 	}
 	return plan
+}
+
+// unnameableFile says why no view can read t's files, or "" when one can
+// (#2235). read_parquet takes a path as a glob, and the views make every path
+// match itself by putting each pattern character in a class (fileGlob). A
+// backslash defeats that: DuckDB's glob splits a pattern on a backslash as on
+// a slash, so the path is cut into components that are not the file's, and
+// no class stands for one. Left as it is, such a path is a pattern cut the
+// same way: a table named `\..\hr\*` in one schema read every table file of
+// the schema "hr" as its own. So a path with a backslash gets no view, and
+// the file says why, whenever the view would read through a pattern: the
+// path holds a pattern character, or the view finds the table's chain by a
+// pattern built on the path (every following view, and a pinned one whose
+// chain is not named file by file). What is left reads the path as the file
+// it names, which is how a pinned file under a root with a backslash works
+// (ApplyFollow).
+func (in Input) unnameableFile(t BaselineTable) string {
+	if !strings.Contains(t.Path, `\`) && !strings.Contains(t.Rel, `\`) {
+		return ""
+	}
+	byPattern := in.Follow.follows() || (t.Delta && !t.DeltaLegacy && len(t.DeltaFiles) == 0 && t.DeltaResolved == nil)
+	if byPattern || strings.ContainsAny(t.Path+t.Rel, "[*?{") {
+		return "not defined. The path of its file holds a backslash, and DuckDB reads a path as a pattern " +
+			"that it splits on a backslash, so no pattern names that one file"
+	}
+	return ""
 }
 
 // reservedSchema says why a source schema cannot hold views in this file, or
