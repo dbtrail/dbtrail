@@ -561,9 +561,10 @@ func escapeGlob(s string) string {
 // each key across the .upserts that is not a tombstone. One function, used by
 // the compaction (reconstruct.materializeBaseWithDelta) and by `bintrail
 // views`, so the state a view shows and the state a compaction folds from
-// cannot drift apart. The one other reading is a pinned view's over a chain
-// of one pair (TableDeltaOnePairStateSQL, #2231), held to this one over
-// random chains (TestOnePairState_randomChains).
+// cannot drift apart. The one other reading is TableDeltaOnePairStateSQL
+// (#2231), a statement's over a chain of one pair or over the chain's
+// resolved pair, held to this one over random chains
+// (TestOnePairState_randomChains).
 //
 // base is a SQL expression for the base's path (a quoted literal, or whatever
 // the caller's following mode builds); posdelGlob and upsertsGlob are SQL
@@ -603,7 +604,8 @@ func TableDeltaStateSQL(base, posdelGlob, upsertsGlob, basePath, replace string)
 // dropped: newest by sequence number, written as a join rather than a window. The
 // daemon's merges used it first (#2126); the views read through it too since
 // #2210 (tableDeltaStateSQL), except a pinned view over a chain of one pair
-// (#2231), which has no versions to choose between:
+// or over the chain's resolved pair (#2231), which has no versions to choose
+// between:
 //
 // Measured on the files of a 100 M row table with 15.1 M upserts in 24 pairs
 // (DuckDB as vendored at the time, 2 threads, a temp directory to spill to):
@@ -657,8 +659,8 @@ func TableDeltaLatestSQL(delta string) string {
 // TableDeltaMergeStateSQL is TableDeltaStateSQL for the daemon's compaction
 // (reconstruct.materializeBaseWithDelta), with no REPLACE. Since #2210 the
 // views read the newest version of each key through the same join, so the two
-// are one statement; a pinned view over a chain of one pair has no join
-// (TableDeltaOnePairStateSQL).
+// are one statement; a pinned view over a chain of one pair, or over the
+// chain's resolved pair, has no join (TableDeltaOnePairStateSQL).
 func TableDeltaMergeStateSQL(base, posdelGlob, upsertsGlob, basePath string) string {
 	return TableDeltaStateSQL(base, posdelGlob, upsertsGlob, basePath, "")
 }
@@ -763,22 +765,23 @@ func tableDeltaStateSQL(base, upserts, dead, replace string) string {
 }
 
 // TableDeltaOnePairStateSQL is TableDeltaStateSQL for a chain that is exactly
-// ONE pair, named by its two files: the base minus the pair's dead row
-// numbers, plus the pair's rows that are not tombstones (#2231). It returns
-// the rows TableDeltaStateSQL returns over the same pair, without that
-// function's aggregate and join: a key appears at most once in one pair (the
-// invariant TableDeltaLatestSQL states and every writer keeps), so every row
-// of the pair already is the newest version of its key, and there is nothing
-// to choose between.
+// ONE pair, or for the one pair a whole chain was merged into (its resolved
+// pair, FindResolvedTableDelta), named by its two files: the base minus the
+// pair's dead row numbers, plus the pair's rows that are not tombstones
+// (#2231). It returns the rows TableDeltaStateSQL returns over the same
+// pair, without that function's aggregate and join: a key appears at most
+// once in one pair (the invariant TableDeltaLatestSQL states and every
+// writer keeps), so every row of the pair already is the newest version of
+// its key, and there is nothing to choose between.
 //
-// What the join costs was measured in #2231 with a file holding the newest
-// version of each key standing in for such a pair (a 20 M row table, 1.05 M
-// upserts in six pairs; DuckDB CLI, 4 threads, 2 GB; a count and a sum over
-// one column): 325 ms through the join, 197 ms without it. A refresh still
-// writes each window as a pair of its own, so today a chain of one is the
-// empty pair a rewrite or a full backup leaves, or the first pair of a chain
-// a refresh started beside a table that had none, until the table's next
-// change adds a second.
+// What the join costs, measured over one pair read both ways (a 20 M row
+// table, 1.03 M changed rows; DuckDB 1.4.5, 2 threads, 2 GB): a count and a
+// sum over one column took 423 ms through the join and 323 ms without it, a
+// lookup by key 80 ms and 31 ms. A refresh writes each window as a pair of
+// its own, so a chain of one is the empty pair a rewrite or a full backup
+// leaves, or the first pair of a chain a refresh started beside a table that
+// had none; a longer chain is read this way through its resolved pair, which
+// the watch daemon merges after each refresh.
 //
 // For ONE pair only. Over two it would return every version of a key the two
 // share, and bring back a row one pair inserts and the next deletes; a caller

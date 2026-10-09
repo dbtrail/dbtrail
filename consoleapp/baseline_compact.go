@@ -49,7 +49,7 @@ func compactDirFor(baselineDir string) string {
 	if baselineDir == "" {
 		return ""
 	}
-	return filepath.Join(baselineDir, ".compact")
+	return filepath.Join(baselineDir, baseline.CompactDirName)
 }
 
 // listSnapshotChains and compactMinor are the two seams a test drives the job
@@ -161,7 +161,11 @@ func (s *baselineSupervisor) TriggerCompact(req refreshRequest, due []compactCan
 		}
 	}
 	s.mu.Lock()
-	if s.busyLocked(req.ServerID) {
+	// The resolved pairs of this folder are being written (#2231): a merge
+	// of nearly the same files in another DuckDB session, on a host that
+	// also runs capture. Not started; the next refresh tries again, as for
+	// a busy server.
+	if s.busyLocked(req.ServerID) || s.resolving[resolveFolder(req.BaselineDir)] {
 		s.mu.Unlock()
 		return console.ErrBaselineRunning
 	}

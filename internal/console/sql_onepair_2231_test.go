@@ -1,13 +1,19 @@
 package console
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
 // #2231, the wiring: the views the console generates for a statement name
@@ -26,7 +32,14 @@ func TestSQLAPI_onePairChainIsReadWithoutTheJoin(t *testing.T) {
 	// rows are (id, status, op); a tombstone's columns are NULL.
 	pair := func(seq int, dead []int64, rows ...[3]string) {
 		t.Helper()
-		err := baseline.WriteTableDeltaPair(base, seq, cols, nil, dead, func(emit func([]string, []bool) error) error {
+		// The footer a refresh stamps: the merge that resolves a chain reads
+		// the chain's start and base from the last pair.
+		md := map[string]string{
+			baseline.MetaKeyBinlogFile: "b.1", baseline.MetaKeyBinlogPos: strconv.Itoa(seq + 2),
+			baseline.MetaKeyDeltaChainStart: "2026-04-30T03:00:00Z",
+			baseline.MetaKeyDeltaBaseAnchor: "b.1:1", baseline.MetaKeyDeltaBaseSize: "1",
+		}
+		err := baseline.WriteTableDeltaPair(base, seq, cols, md, dead, func(emit func([]string, []bool) error) error {
 			for _, r := range rows {
 				tomb := r[2] == baseline.TableDeltaOpDelete
 				if err := emit([]string{r[0], r[1], r[0], r[2]}, []bool{tomb, tomb, false, false}); err != nil {
@@ -90,5 +103,48 @@ func TestSQLAPI_onePairChainIsReadWithoutTheJoin(t *testing.T) {
 	}
 	if want := []string{"1=returned"}; !reflect.DeepEqual(rows, want) {
 		t.Errorf("two pairs: rows = %v, want %v", rows, want)
+	}
+
+	// The daemon merges the chain into one pair beside the snapshots: the
+	// statement reads the table file and that pair, with no join again, and
+	// the worker is given the pair's directory to read, which is under the
+	// snapshots' root and not in any snapshot.
+	chain, err := baseline.ListTableDelta(context.Background(), base)
+	if err != nil || chain == nil {
+		t.Fatalf("chain = %v, err = %v", chain, err)
+	}
+	if done, _, err := reconstruct.ResolveTableDelta(context.Background(), base, chain, ""); err != nil || !done {
+		t.Fatalf("resolve: done=%v err=%v", done, err)
+	}
+	resolved, ok := baseline.FindResolvedTableDelta(base, chain.Files)
+	if !ok {
+		t.Fatal("no resolved pair")
+	}
+	script, rows = state()
+	if strings.Contains(script, join) || !strings.Contains(script, filepath.Base(resolved.Upserts)) {
+		t.Errorf("a chain with a resolved pair is not read through it:\n%s", script)
+	}
+	if want := []string{"1=returned"}; !reflect.DeepEqual(rows, want) {
+		t.Errorf("resolved pair: rows = %v, want %v", rows, want)
+	}
+	job := f.runner.jobs[len(f.runner.jobs)-1]
+	if dir := filepath.Dir(resolved.Upserts); !slices.Contains(job.CopyDirs, dir) {
+		t.Errorf("the worker may read %v, which leaves out the resolved pair's directory %s", job.CopyDirs, dir)
+	}
+	if slices.Contains(job.CopyDirs, f.root) {
+		t.Errorf("the worker may read the snapshots' root: %v", job.CopyDirs)
+	}
+
+	// The pair goes (its snapshot is no longer one of the newest): the next
+	// statement reads the chain as before.
+	if err := os.RemoveAll(filepath.Join(f.root, baseline.ResolvedDirName)); err != nil {
+		t.Fatal(err)
+	}
+	script, rows = state()
+	if !strings.Contains(script, join) {
+		t.Errorf("with the resolved pair gone the chain is read without the join:\n%s", script)
+	}
+	if want := []string{"1=returned"}; !reflect.DeepEqual(rows, want) {
+		t.Errorf("pair gone: rows = %v, want %v", rows, want)
 	}
 }

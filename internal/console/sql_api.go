@@ -1511,6 +1511,10 @@ func sqlCopyDirs(in views.Input) []string {
 				}
 			}
 		}
+		// The resolved pair lives beside the snapshots, not in one (#2231).
+		if f := t.DeltaResolved; f != nil {
+			add(filepath.Dir(f.Upserts))
+		}
 	}
 	return dirs
 }

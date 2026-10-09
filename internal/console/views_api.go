@@ -225,6 +225,13 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 			if err := views.MarkTableDeltas(ctx, in.Baselines); err != nil {
 				return views.Input{}, err
 			}
+			// The chain already merged into one pair beside the snapshots
+			// (#2231), for the views of one statement only: a views file
+			// outlives that pair, which goes when its snapshot is no longer
+			// one of the newest.
+			if req.ForStatement && req.PinSnapshot {
+				views.MarkResolvedTableDeltas(in.Baselines)
+			}
 			// Column types for the state views' decimal casts. Best-effort and
 			// memoized per snapshot; serves the download and the SQL panel
 			// alike, both of which reach the same Parquet through the same

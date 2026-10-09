@@ -66,7 +66,17 @@ func stubCompaction(t *testing.T, chains map[string]*baseline.TableDeltaChain) *
 	t.Helper()
 	cs := &compactStub{}
 	prevList, prevMinor, prevFooter := listSnapshotChains, compactMinor, readChainFooter
-	t.Cleanup(func() { listSnapshotChains, compactMinor, readChainFooter = prevList, prevMinor, prevFooter })
+	prevResolve, prevCurrent := resolveTableDelta, resolvedCurrent
+	t.Cleanup(func() {
+		listSnapshotChains, compactMinor, readChainFooter = prevList, prevMinor, prevFooter
+		resolveTableDelta, resolvedCurrent = prevResolve, prevCurrent
+	})
+	// The resolved pairs job (#2231) runs after a refresh too and lists the
+	// same chains: over these fake pairs it writes nothing.
+	resolveTableDelta = func(context.Context, string, *baseline.TableDeltaChain, string) (bool, bool, error) {
+		return false, false, nil
+	}
+	resolvedCurrent = func(string, *baseline.TableDeltaChain) bool { return false }
 	listSnapshotChains = func(context.Context, string) (map[string]*baseline.TableDeltaChain, error) { return chains, nil }
 	readChainFooter = func(string) (baseline.DumpMetadata, error) {
 		return baseline.DumpMetadata{DeltaChainStart: chainStart}, nil
