@@ -202,3 +202,33 @@ func TestReadBaselineColumns_aTableNamedLikeAGlob(t *testing.T) {
 		t.Fatalf("readBaselineColumns = %v (err=%v), want the table's own 8 columns", cols, err)
 	}
 }
+
+// TestSnapshotDirTime_aBackslashInTheTableName: the snapshot's directory is
+// the third part from the end of the path, counted in "/" alone.
+func TestSnapshotDirTime_aBackslashInTheTableName(t *testing.T) {
+	at := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	for _, name := range []string{"orders", `a\orders`, `\orders`} {
+		got, ok := SnapshotDirTime("/root/" + SnapshotDirName(at) + "/mydb/" + name + ".parquet")
+		if !ok || !got.Equal(at) {
+			t.Errorf("SnapshotDirTime of %s = %v, %v; want %v", name, got, ok, at)
+		}
+	}
+}
+
+// TestReadBaselineRows_aBackslashNameNeverReadsAnotherSchema: DuckDB's glob
+// splits a pattern on a backslash, so a table named `\..\hr\*` was, read as
+// a pattern, every table of the schema "hr". Named through classes it
+// matches no file: the read fails, and returns no row of another table.
+func TestReadBaselineRows_aBackslashNameNeverReadsAnotherSchema(t *testing.T) {
+	rows, nulls := zooRows()
+	src := writeZooBaseline(t, rows, nulls)
+	root := t.TempDir()
+	copyTableFile(t, src, filepath.Join(root, "hr", "salaries.parquet"))
+	// The table's own file holds one row, so rows of "hr" would show.
+	own := filepath.Join(root, "shop", `\..\hr\*.parquet`)
+	copyTableFile(t, writeZooBaseline(t, rows[:1], nulls[:1]), own)
+	got, err := ReadBaselineRows(context.Background(), own, nil, 0)
+	if err == nil && len(got) != 1 {
+		t.Fatalf("read %d rows with no error: the table has 1, the schema hr has %d", len(got), len(rows))
+	}
+}

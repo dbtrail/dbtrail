@@ -1302,7 +1302,10 @@ func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInp
 // returns a chain's start for a table with a delta, which is right for bounding
 // a read and wrong for asking which of two copies is NEWER; this is for that.
 func SnapshotDirTime(tablePath string) (time.Time, bool) {
-	parts := strings.Split(strings.ReplaceAll(tablePath, "\\", "/"), "/")
+	// Split at "/" only: a backslash is a legal character of a table file's
+	// name, and split there too the snapshot's directory was looked for one
+	// place off (#2243).
+	parts := strings.Split(tablePath, "/")
 	if len(parts) < 3 {
 		return time.Time{}, false
 	}

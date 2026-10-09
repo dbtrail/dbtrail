@@ -44,14 +44,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads: DuckDB takes a file path as a pattern. A table named `order[st]`
   beside one named `orders` had the rows its changes replace looked up in
   the other table's file, so a refresh with table deltas published a wrong
-  state for it, with no error; one named `or?ers` failed every refresh
-  instead. The rewrite of a table, the merge of its changes, the reads of a
-  cascade recovery and of a snapshot query, and the Iceberg export named the
-  file the same way, and now each names that one file. A table with a
-  backslash in its name was given the changes of the table named by what
-  follows the backslash, and is given its own now. A table with such a name
-  whose state was published wrong is corrected by the next full snapshot of
-  it, not by this upgrade.
+  state for it, with no error; one named `or?ers` read both files, and its
+  refresh failed or published a wrong state. The rewrite of a table, the
+  merge of its changes, the reads of a cascade recovery and of a snapshot
+  query, and the Iceberg export named the file the same way. Each now names
+  that one file, in a snapshots folder on disk; over S3 a table with one of
+  those characters in its name fails with DuckDB's own error instead of
+  reading another table. A table with a backslash in its name was given the
+  changes of the table named by what follows the backslash, and the daemon
+  gives it its own now; with a backslash and one of those characters, its
+  reads fail with an error, where they could read the files of another
+  schema. Nothing here repairs a state already published wrong for a table
+  with such a name: take a new snapshot of it from the source.
 
 - **A view of a table whose name holds `?`, `*` or `[` reads that table's
   files only** (#2235). DuckDB takes a file path as a pattern, and the views
