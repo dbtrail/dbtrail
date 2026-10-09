@@ -112,6 +112,9 @@ var (
 	// upSQLMemory is --sql-memory as given (#2210); upSQLMemoryLimit is what
 	// resolveSQLMemory made of it for DuckDB, "" for the sandbox default.
 	upSQLMemory, upSQLMemoryLimit string
+	// upSQLPortMaxRows is --sql-port-max-rows: the most rows one statement
+	// returns on the --flashback-listen port.
+	upSQLPortMaxRows = console.DefaultSQLPortMaxRows
 	// upRouteMaxCopyAge turns read routing on the port on (#2038): MySQL
 	// answers by default, the copy takes expensive SELECTs while its snapshot
 	// is at most this old, and past that the ones over tables unchanged since
@@ -284,6 +287,7 @@ func init() {
 	watchCmd.Flags().StringSliceVar(&upConsoleAllowedHost, "console-allowed-hosts", nil, "Extra hostnames allowed in the Host header (for a TLS-terminating reverse proxy); IP literals and localhost are always allowed")
 	watchCmd.Flags().BoolVar(&upConsoleAllowSetup, "console-allow-setup", false, "Allow browser first-run password setup on a non-loopback bind (assert the bind is access-controlled, e.g. published only on the host loopback)")
 	watchCmd.Flags().IntVar(&upSQLMaxInFlight, "sql-max-in-flight", sqlsandbox.DefaultMaxInFlight, "How many SQL-on-the-copy statements run at once, the SQL card and the --flashback-listen port together; one more waits up to 30 s for a free slot, then is refused. Each runs as its own process with 2 threads and up to --sql-memory, on the host that captures, and every result is held in this process while it is sent, so raise it only with cores and memory to spare. Env BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT.")
+	watchCmd.Flags().IntVar(&upSQLPortMaxRows, "sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns on the --flashback-listen port; a result with more is refused with error 1104, not cut. The SQL page of the web interface shows 1,000 rows whatever this is. A result is also refused past 64 MB, which most tables reach before 100,000 rows. A result is held in this process, which captures, while it is sent, taking a few times its size while it is prepared, and --sql-max-in-flight does not count the connections that are receiving one: lower this on a host with little memory. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
 	watchCmd.Flags().StringVar(&upSQLMemory, "sql-memory", "", "Memory each SQL-on-the-copy statement may use (the SQL card and the --flashback-listen port), e.g. 4GB; default 2GB, at least 512MB. It runs on the host that captures, times --sql-max-in-flight at once. A table with more changes not yet merged than this memory can merge (384 MB at 2 GB, in proportion) is answered from an earlier copy, or refused with a pointer to your own DuckDB when none fits. Past its memory a statement spills to a temporary folder, up to four times it. Env BINTRAIL_CONSOLE_SQL_MEMORY. Unset, the web interface can set it (Settings, MCP Server); set, it wins there.")
 	watchCmd.Flags().StringVar(&upConsoleFlashbackListen, "flashback-listen", "", "Serve an embedded MySQL-protocol time-travel port (_flashback/_snapshot/_diff) for every monitored server, routed by the connection username (server id or name); e.g. 127.0.0.1:3308. Requires --console-token, which reads every schema of every server: the port does not filter by schema. Empty = the web interface decides (Connect turns the port on and off, with its own password; off until then). Set, this address decides and the web interface cannot change it. Env BINTRAIL_CONSOLE_FLASHBACK_LISTEN.")
 	watchCmd.Flags().DurationVar(&upRouteMaxCopyAge, "route-max-copy-age", 0, "Experimental read routing on the --flashback-listen port: forward every statement, WRITES INCLUDED, to the server's source MySQL with the server's forwarding account when it has one (set on the server, in the web interface or as route_user / route_password in the API) and with its source account otherwise, except SELECTs whose EXPLAIN FORMAT=JSON says they are expensive (see --route-cost-threshold, --route-scan-rows), which run on the copy while its snapshot is at most this old; past that age the copy still answers one whose tables have had no change since their snapshot, as long as capture is known to have read everything the source had written at some moment within this same limit; a statement the copy rejects runs on MySQL. Anyone holding the access token can then do on the source whatever that account can: give the port its own account with SELECT only, and set --route-read-only. 0 = off (the port serves the copy only). Env BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE.")
@@ -330,6 +334,9 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := resolveSQLMaxInFlight(cmd); err != nil {
+		return err
+	}
+	if err := resolveSQLPortMaxRows(cmd); err != nil {
 		return err
 	}
 	// The port's flags, checked here, before the first connection: a
@@ -1706,6 +1713,8 @@ type consoleOpts struct {
 	SQLMemoryLimit string
 	// SQLMaxInFlight is the resolved --sql-max-in-flight (#2030).
 	SQLMaxInFlight int
+	// SQLPortMaxRows is the resolved --sql-port-max-rows.
+	SQLPortMaxRows int
 	// ReadRouting is the port's read-routing policy (--route-max-copy-age and
 	// the threshold flags, #2038), reported by GET /api/flashback; the port
 	// itself is bound with the same values in startFlashbackPort.
@@ -1735,6 +1744,7 @@ func upConsoleOpts() consoleOpts {
 		},
 		SQLMaxInFlight: upSQLMaxInFlight,
 		SQLMemoryLimit: upSQLMemoryLimit,
+		SQLPortMaxRows: upSQLPortMaxRows,
 	}
 }
 
@@ -1844,7 +1854,8 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		KillSourceThreads: killSourceThreads,
 		SQLMaxInFlight:    opts.SQLMaxInFlight,
 		// --sql-memory (#2210); "" keeps the sandbox default.
-		SQLLimits: sqlsandbox.Limits{MemoryLimit: opts.SQLMemoryLimit},
+		SQLLimits:      sqlsandbox.Limits{MemoryLimit: opts.SQLMemoryLimit},
+		SQLPortMaxRows: opts.SQLPortMaxRows,
 		// The daemon's --rotate-* defaults, so GET /api/rotation can report the
 		// effective policy (and the console panel prefill it) before the
 		// operator saves an override.
@@ -2222,6 +2233,26 @@ func resolveSQLMaxInFlight(cmd *cobra.Command) error {
 		}
 	} else if upSQLMaxInFlight < 1 {
 		return fmt.Errorf("--sql-max-in-flight %d: want at least 1 (how many SQL statements run at once; the default is %d)", upSQLMaxInFlight, sqlsandbox.DefaultMaxInFlight)
+	}
+	return nil
+}
+
+// resolveSQLPortMaxRows sets upSQLPortMaxRows from --sql-port-max-rows or,
+// when the flag is not given, BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS. A value
+// below 1 fails here, at startup: it would refuse every result, and falling
+// back to the default would hide the mistake.
+func resolveSQLPortMaxRows(cmd *cobra.Command) error {
+	const want = "want a whole number of at least 1 (the most rows one statement returns on the MySQL port; the default is %d)"
+	if !cmd.Flags().Changed("sql-port-max-rows") {
+		if v := strings.TrimSpace(os.Getenv("BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS")); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 {
+				return fmt.Errorf("BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS=%q: "+want, v, console.DefaultSQLPortMaxRows)
+			}
+			upSQLPortMaxRows = n
+		}
+	} else if upSQLPortMaxRows < 1 {
+		return fmt.Errorf("--sql-port-max-rows %d: "+want, upSQLPortMaxRows, console.DefaultSQLPortMaxRows)
 	}
 	return nil
 }

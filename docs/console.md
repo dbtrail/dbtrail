@@ -1401,6 +1401,15 @@ one release and warns that it no longer does anything. Remove it.
   Off by default for a bare `watch` invocation; the bundled compose stack sets
   this on by default (see [docker.md](docker.md) — `VERIFY_TRIGGER=0` in
   `.env` opts out there).
+- `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` (`watch` only) — same as
+  `--sql-port-max-rows`: the most rows one statement returns on the
+  time-travel port (default `100000`; below `1` refuses to start). A result
+  with more is refused with error 1104, not cut. This page's SQL card shows
+  1,000 rows whatever it is. A result is also refused past 64 MB, and is
+  held in the daemon while it is sent, one per connection receiving one
+  whatever `--sql-max-in-flight` says: lower it on a host with little
+  memory. On the compose stack the value goes in `.env` as
+  `SQL_PORT_MAX_ROWS`.
 - `BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT` (`watch` only) — same as
   `--sql-max-in-flight`: how many SQL-on-the-copy statements run at once, the
   SQL card and the time-travel port together (default `2`; below `1` refuses

@@ -764,7 +764,7 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 // named when it is above the cap, because the client that set it expects it
 // to have covered this.
 func rowCapError(qstr string, rowCap int, selectLimit uint64) error {
-	msg := fmt.Sprintf("the result has more than %d rows, the row cap for SQL on the copy on this server, and is not returned cut; ", rowCap)
+	msg := fmt.Sprintf("the result has more than %d rows, the row cap of this port (watch --sql-port-max-rows where DBTrail runs), and is not returned cut; ", rowCap)
 	switch readrouter.LeadingKeyword(qstr) {
 	case "SHOW", "DESCRIBE", "DESC", "SUMMARIZE":
 		msg += fmt.Sprintf("this statement takes no LIMIT: read the same from the catalog with one "+
@@ -903,6 +903,12 @@ func (h *Handler) freeSQLError(err error) error {
 			fmt.Sprintf("the query ran longer than this server's cap of %.0f s and was stopped; narrow it", timeout.Limit.Seconds()))
 	case errors.Is(err, sqlsandbox.ErrBusy):
 		return mysql.NewError(mysql.ER_TOO_MANY_USER_CONNECTIONS, err.Error())
+	case errors.Is(err, sqlsandbox.ErrResultTooLarge):
+		// The size cap, the one a result under the row cap can still pass:
+		// the same code as the row cap, and its number. No command line
+		// sets it, so the sandbox's default is the one in force.
+		return mysql.NewError(mysql.ER_TOO_BIG_SELECT, fmt.Sprintf("the result is larger than %d MB, the most one statement returns on this port, "+
+			"and is not returned cut; add a LIMIT, select fewer columns, or narrow the statement", sqlsandbox.DefaultLimits().MaxResultBytes>>20))
 	case errors.Is(err, context.DeadlineExceeded) && h.cfg.QueryTimeout > 0:
 		// This connection's own cap (shorter than the sandbox's), not a cancel.
 		return mysql.NewError(mysql.ER_QUERY_INTERRUPTED,
@@ -945,6 +951,11 @@ func freeSQLResultset(res sqlsandbox.Result, loc *time.Location) (*mysql.Results
 			out[j] = freeSQLCell(cell, typ, loc)
 		}
 		values[i] = out
+		// The decoded row is not read again, and every cell above is a copy:
+		// let it go now, so a large result is not held twice in the process
+		// that captures while its wire form is built. The result is the
+		// caller's own (FreeSQL.Run returns a fresh one per statement).
+		res.Rows[i] = nil
 	}
 	rs, err := mysql.BuildSimpleTextResultset(names, values)
 	if err != nil {
