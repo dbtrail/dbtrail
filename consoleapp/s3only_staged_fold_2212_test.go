@@ -385,6 +385,10 @@ func TestStagedFold_anUnusableStagingFolderFailsTheRunAndSaysWhy(t *testing.T) {
 	if st.State != "failed" || st.Published || !strings.Contains(st.LastError, blocker) {
 		t.Fatalf("status = %+v, want a failure naming %s", st, blocker)
 	}
+	// #1938: the folder goes by the name the settings row shows.
+	if !strings.Contains(st.LastError, "working folder") || strings.Contains(st.LastError, "staging folder") {
+		t.Fatalf("LastError = %q, want it to call the folder the working folder", st.LastError)
+	}
 	if folded || len(stubs.uploads) != 0 {
 		t.Fatalf("folded=%v uploads=%+v, want neither", folded, stubs.uploads)
 	}
@@ -393,15 +397,16 @@ func TestStagedFold_anUnusableStagingFolderFailsTheRunAndSaysWhy(t *testing.T) {
 	}
 
 	// The gate says the same thing before any run, so the schedule reports it.
-	if err := sup.stagedUpdatesRefusal(); err == nil || !strings.Contains(err.Error(), blocker) {
-		t.Fatalf("stagedUpdatesRefusal = %v, want a refusal naming %s", err, blocker)
+	if err := sup.stagedUpdatesRefusal(); err == nil || !strings.Contains(err.Error(), blocker) ||
+		!strings.Contains(err.Error(), "the working folder") || strings.Contains(err.Error(), "staging folder") {
+		t.Fatalf("stagedUpdatesRefusal = %v, want a refusal naming the working folder %s", err, blocker)
 	}
 	sup.stagingDir = ""
 	sup.stagingChecked = time.Time{}
 	if err := sup.stagedUpdatesRefusal(); err == nil {
 		t.Fatal("no staging folder at all was accepted")
-	} else {
-		t.Logf("no staging folder: %v", err)
+	} else if !strings.Contains(err.Error(), "no working folder is set") || strings.Contains(err.Error(), "staging folder") {
+		t.Fatalf("stagedUpdatesRefusal with no folder = %v, want it to say no working folder is set", err)
 	}
 	sup.stagingDir = f.staging
 	sup.stagingChecked = time.Time{}

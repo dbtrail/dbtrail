@@ -86,7 +86,7 @@ const sqlExportReapEvery = time.Minute
 const (
 	removeDownloaded = "downloaded"
 	removeExpired    = "download deadline passed"
-	removeVanished   = "files removed from the staging directory"
+	removeVanished   = "files removed from the working folder"
 	removeFailed     = "build failed"
 )
 
@@ -365,7 +365,7 @@ func (s *baselineSupervisor) expireSQLExports() {
 		case err != nil:
 			slog.Warn("sql export: could not read a staged build's completeness marker; the build is kept and checked again on the next poll",
 				"id", c.id, "dir", c.dir, "error", err)
-			s.setStagingError(c.id, c.dir, "the staging directory could not be read: "+err.Error())
+			s.setStagingError(c.id, c.dir, "the working folder could not be read: "+err.Error())
 		case !present:
 			s.removeSQLExportBuild(c.id, c.dir, removeVanished)
 		case sqlExportExpired(c.expiresAt, now):
@@ -665,15 +665,15 @@ func removeStagedBuild(base, dir string) (freed int64, sized bool, err error) {
 	// directory happens to be; every caller passes an absolute one, and a
 	// guard that trusts that is no guard.
 	if !filepath.IsAbs(base) {
-		return 0, false, fmt.Errorf("refusing to remove %q: the staging directory %q is not an absolute path", dir, base)
+		return 0, false, fmt.Errorf("refusing to remove %q: the sql-export folder %q inside the working folder is not an absolute path", dir, base)
 	}
 	rel, err := filepath.Rel(base, dir)
 	if err != nil || rel == "." || rel == ".." || filepath.IsAbs(rel) ||
 		strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return 0, false, fmt.Errorf("refusing to remove %q: not inside the sql-export staging directory %q", dir, base)
+		return 0, false, fmt.Errorf("refusing to remove %q: not inside the sql-export folder %q of the working folder", dir, base)
 	}
 	if fi, err := os.Lstat(base); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
-		return 0, false, fmt.Errorf("refusing to remove %q: the staging directory %q is a symbolic link", dir, base)
+		return 0, false, fmt.Errorf("refusing to remove %q: the sql-export folder %q inside the working folder is a symbolic link", dir, base)
 	}
 	cur := base
 	for _, part := range strings.Split(rel, string(filepath.Separator)) {
@@ -878,11 +878,11 @@ func (s *baselineSupervisor) executeSQLExport(req console.SQLExportRequest, dir 
 	// list rather than on disk until someone runs du.
 	root := filepath.Dir(dir)
 	if err := os.MkdirAll(root, 0o700); err != nil {
-		return 0, 0, 0, fmt.Errorf("create staging directory: %w", err)
+		return 0, 0, 0, fmt.Errorf("create this build's folder in the working folder: %w", err)
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("scan staging directory: %w", err)
+		return 0, 0, 0, fmt.Errorf("scan this server's builds in the working folder: %w", err)
 	}
 	for _, ent := range entries {
 		if ent.Name() == filepath.Base(dir) {

@@ -235,7 +235,7 @@ func TestBackupScheduleCard_saysWhatARunCosts(t *testing.T) {
 		// staging folder); now it is the first backup, or a staging folder
 		// an S3-only update cannot use.
 		"a server with no previous backup yet gets a **full backup**",
-		"under the staging folder that is uploaded and then deleted",
+		"under the working folder that is uploaded and then deleted",
 		// The whole of #1539 in the docs. Without this line the page still
 		// reads as if an S3 destination meant a nightly full read.
 		"reads its previous snapshot straight from the bucket and uploads its result back to the same place",

@@ -91,14 +91,14 @@ func (s *baselineSupervisor) stagedUpdatesRefusal() error {
 
 func probeStagingDir(dir string) error {
 	if dir == "" {
-		return errors.New("no staging folder is set (BINTRAIL_CONSOLE_BASELINE_STAGING)")
+		return errors.New("no working folder is set (BINTRAIL_CONSOLE_BASELINE_STAGING)")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("the staging folder %s cannot be created: %w", dir, err)
+		return fmt.Errorf("the working folder %s cannot be created: %w", dir, err)
 	}
 	f, err := os.CreateTemp(dir, ".write-probe-*")
 	if err != nil {
-		return fmt.Errorf("the staging folder %s cannot be written: %w", dir, err)
+		return fmt.Errorf("the working folder %s cannot be written: %w", dir, err)
 	}
 	name := f.Name()
 	f.Close()
@@ -114,14 +114,14 @@ func probeStagingDir(dir string) error {
 // fix.
 func (s *baselineSupervisor) beginStagedRun(job *jobRun) (dir string, journaled bool, err error) {
 	if s.stagingDir == "" {
-		return "", false, errors.New("this server keeps its snapshots only in S3, so its update is built in the staging folder, and no staging folder is set")
+		return "", false, errors.New("this server keeps its snapshots only in S3, so its update is built in the working folder, and no working folder is set")
 	}
 	if err := os.MkdirAll(s.stagingDir, 0o755); err != nil {
-		return "", false, fmt.Errorf("this server keeps its snapshots only in S3, so its update is built in the staging folder %s, which cannot be created: %w", s.stagingDir, err)
+		return "", false, fmt.Errorf("this server keeps its snapshots only in S3, so its update is built in the working folder %s, which cannot be created: %w", s.stagingDir, err)
 	}
 	dir, err = os.MkdirTemp(s.stagingDir, stagedRunPrefix)
 	if err != nil {
-		return "", false, fmt.Errorf("this server keeps its snapshots only in S3, so its update is built in the staging folder %s, which cannot be written: %w", s.stagingDir, err)
+		return "", false, fmt.Errorf("this server keeps its snapshots only in S3, so its update is built in the working folder %s, which cannot be written: %w", s.stagingDir, err)
 	}
 	return dir, job.journal(s.stagingDir, filepath.Base(dir)), nil
 }

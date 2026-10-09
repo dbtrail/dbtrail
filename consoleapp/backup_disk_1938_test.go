@@ -66,7 +66,7 @@ func TestDumpDiskVerdict(t *testing.T) {
 		if !errors.Is(err, errFoldDiskFull) {
 			t.Fatalf("err = %v, want a disk refusal", err)
 		}
-		for _, want := range []string{stage, "10.0 GiB", "4.0 GiB", "5.0 GiB", "upper bound", "BINTRAIL_CONSOLE_BASELINE_STAGING", `".sql build folder"`, "restart"} {
+		for _, want := range []string{stage, "10.0 GiB", "4.0 GiB", "5.0 GiB", "upper bound", "BINTRAIL_CONSOLE_BASELINE_STAGING", `"Working folder"`, "restart"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("refusal lacks %q: %v", want, err)
 			}
@@ -85,7 +85,7 @@ func TestDumpDiskVerdict(t *testing.T) {
 		if err != nil || check != dumpDiskLow {
 			t.Fatalf("check = %q, err = %v, want low and no refusal", check, err)
 		}
-		for _, want := range []string{"Low disk", stage, "10.0 GiB", "9.0 GiB free", "upper bound", "BINTRAIL_CONSOLE_BASELINE_STAGING", `".sql build folder"`, "restart"} {
+		for _, want := range []string{"Low disk", stage, "10.0 GiB", "9.0 GiB free", "upper bound", "BINTRAIL_CONSOLE_BASELINE_STAGING", `"Working folder"`, "restart"} {
 			if !strings.Contains(note, want) {
 				t.Errorf("warning lacks %q: %s", want, note)
 			}

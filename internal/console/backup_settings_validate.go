@@ -40,7 +40,7 @@ func ValidateBackupSetting(key, value string) error {
 			// daemon's working directory is not something the operator can
 			// see from a browser, and a relative path that resolved
 			// somewhere unexpected would put a multi-gigabyte export there.
-			return fmt.Errorf("staging folder: %q is relative; give a full path starting with /", value)
+			return fmt.Errorf("working folder: %q is relative; give a full path starting with /", value)
 		}
 	case BackupSettingVerifyTables:
 		if err := ValidateVerifyTables(value); err != nil {

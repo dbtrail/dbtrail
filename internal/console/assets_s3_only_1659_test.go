@@ -94,8 +94,8 @@ const out = {
     s3OnlyBackupWarning(null),
     s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", schedule_loop: false, full_backup_possible: false })),
     s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", schedule_refusal: "creating snapshots from the console is turned off" })),
-    s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", staging_refusal: "the staging folder /stage cannot be written: permission denied" })),
-    s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", staging_refusal: "the staging folder /stage cannot be written: permission denied", full_backup_possible: false })),
+    s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", staging_refusal: "the working folder /stage cannot be written: permission denied" })),
+    s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", staging_refusal: "the working folder /stage cannot be written: permission denied", full_backup_possible: false })),
     s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p" }), false),
   ],
   fault: [
@@ -104,7 +104,7 @@ const out = {
     s3OnlyBackupFault(srv({ baseline_s3: "s3://b/p", staging_refusal: "x", schedule_loop: false })),
   ],
   alarms: [
-    nextRun({ runnable: true, next_method: "full", next_method_why: "an update for a server whose snapshots go only to S3 is built in the staging folder, which cannot be used; the staging folder /stage cannot be written: permission denied", next_method_why_code: "no_staging" }),
+    nextRun({ runnable: true, next_method: "full", next_method_why: "an update for a server whose snapshots go only to S3 is built in the working folder, which cannot be used; the working folder /stage cannot be written: permission denied", next_method_why_code: "no_staging" }),
     nextRun({ runnable: true, next_method: "full", next_method_why: "no previous snapshot to update", next_method_why_code: "first_backup" }),
     nextRun({ runnable: true, next_method: "refresh", next_method_why: "no load on your database" }),
     nextRun({ runnable: true, next_method: "full", next_method_why: "this server has no index connection to read the recorded changes from", next_method_why_code: "no_index" }),
@@ -148,7 +148,7 @@ console.log(JSON.stringify(out));
 	const cost = "With S3 only, each scheduled update downloads, rewrites and uploads again the tables that changed. Unchanged tables are usually copied inside S3 without being downloaded; the first update after a full read rewrites every table, as does an update whose previous snapshot is in another bucket."
 	const costFix = cost + " Add a Local folder so changed tables are not downloaded first."
 	// A process that runs no schedule says so instead of the cost.
-	if got.Warn[6] != "With S3 only, scheduled updates are built in the staging folder of the DBTrail service that runs the schedule. This one runs none." {
+	if got.Warn[6] != "With S3 only, scheduled updates are built in the working folder of the DBTrail service that runs the schedule. This one runs none." {
 		t.Errorf("no schedule loop: %q", got.Warn[6])
 	}
 	for _, i := range []int{0, 4} {
@@ -166,10 +166,10 @@ console.log(JSON.stringify(out));
 	}
 	// The staging folder cannot be used: every run is a full read, or, with
 	// no full read either, nothing runs.
-	if w := got.Warn[8]; w != "With S3 only, a scheduled update is built in the staging folder, which cannot be used here (the staging folder /stage cannot be written: permission denied), so every scheduled snapshot reads your whole database. Fix the staging folder, or add a Local folder." {
+	if w := got.Warn[8]; w != "With S3 only, a scheduled update is built in the working folder, which cannot be used here (the working folder /stage cannot be written: permission denied), so every scheduled snapshot reads your whole database. Fix the working folder, or add a Local folder." {
 		t.Errorf("S3 only, staging unusable: %q", w)
 	}
-	if w := got.Warn[9]; w != "With S3 only, a scheduled update is built in the staging folder, which cannot be used here (the staging folder /stage cannot be written: permission denied), and a full read is not available either, so scheduled snapshots cannot run on this server. Fix the staging folder, or add a Local folder." {
+	if w := got.Warn[9]; w != "With S3 only, a scheduled update is built in the working folder, which cannot be used here (the working folder /stage cannot be written: permission denied), and a full read is not available either, so scheduled snapshots cannot run on this server. Fix the working folder, or add a Local folder." {
 		t.Errorf("S3 only, staging unusable, no full read: %q", w)
 	}
 	if len(got.Fault) != 3 || got.Fault[0] || !got.Fault[1] || got.Fault[2] {
@@ -196,7 +196,7 @@ console.log(JSON.stringify(out));
 			t.Errorf("em dash in %q", w)
 		}
 	}
-	if got.Lines[0].Class != "form-msg err" || !strings.Contains(got.Lines[0].Text, "Fix the staging folder") {
+	if got.Lines[0].Class != "form-msg err" || !strings.Contains(got.Lines[0].Text, "Fix the working folder") {
 		t.Errorf("unusable staging folder: not a red line naming the setting: %+v", got.Lines[0])
 	}
 	if got.Lines[1].Class != "ks-chain" || got.Lines[2].Class != "ks-chain" || got.Lines[4].Class != "ks-chain" || got.Lines[5].Class != "ks-chain" || got.Lines[6].Class != "ks-chain" {
@@ -216,7 +216,7 @@ console.log(JSON.stringify(out));
 	for _, l := range got.LastRun[2] {
 		t.Logf("old no_local_dir record: %s", l)
 	}
-	if strings.Contains(got.LastRun[1][1], "now updated") || !strings.Contains(got.LastRun[2][1], "now updated from the recorded changes, through the staging folder") {
+	if strings.Contains(got.LastRun[1][1], "now updated") || !strings.Contains(got.LastRun[2][1], "now updated from the recorded changes, through the working folder") {
 		t.Errorf("last-run reason tense: next-run warning elsewhere %q, no warning %q", got.LastRun[1][1], got.LastRun[2][1])
 	}
 }
@@ -331,7 +331,7 @@ function red(n, out = []) {
   return out;
 }
 const base = { id: "a", name: "a", kind: "registry", baseline_dir: "", baseline_s3: "s3://b/p", full_backup_possible: true, schedule_loop: true,
-  staging_refusal: "the staging folder /stage cannot be written: permission denied" };
+  staging_refusal: "the working folder /stage cannot be written: permission denied" };
 const rows = {
   noSchedule: base,
   // #2212: updates run; their cost is a hint, never red.
@@ -358,7 +358,7 @@ console.log(JSON.stringify(out));
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
 	}
-	const fullRead = "With S3 only, a scheduled update is built in the staging folder, which cannot be used here (the staging folder /stage cannot be written: permission denied), so every scheduled snapshot reads your whole database. Fix the staging folder, or add a Local folder."
+	const fullRead = "With S3 only, a scheduled update is built in the working folder, which cannot be used here (the working folder /stage cannot be written: permission denied), so every scheduled snapshot reads your whole database. Fix the working folder, or add a Local folder."
 	has := func(lines []string, want string) bool {
 		for _, l := range lines {
 			if l == want {
@@ -376,7 +376,7 @@ console.log(JSON.stringify(out));
 	if len(got["noLoop"]) != 0 {
 		t.Errorf("a console that runs no schedule shows a red S3-only line: %q", got["noLoop"])
 	}
-	if !has(got["noFull"], "With S3 only, a scheduled update is built in the staging folder, which cannot be used here (the staging folder /stage cannot be written: permission denied), and a full read is not available either, so scheduled snapshots cannot run on this server. Fix the staging folder, or add a Local folder.") {
+	if !has(got["noFull"], "With S3 only, a scheduled update is built in the working folder, which cannot be used here (the working folder /stage cannot be written: permission denied), and a full read is not available either, so scheduled snapshots cannot run on this server. Fix the working folder, or add a Local folder.") {
 		t.Errorf("staging unusable and no full read: %q", got["noFull"])
 	}
 	if len(got["updates"]) != 0 {

@@ -191,7 +191,7 @@ func (s *Server) handleSQLExportDownload(w http.ResponseWriter, r *http.Request)
 	dir, st, ready := s.sqlExport.SQLExportDir(e.ID)
 	if !ready {
 		writeJSONError(w, http.StatusConflict,
-			"no finished .sql export to download; build one first (it may still be running, the last build may have failed, it may already have been downloaded or passed its download deadline, or its files were removed from the staging directory; building again fixes all of these)")
+			"no finished .sql export to download; build one first (it may still be running, the last build may have failed, it may already have been downloaded or passed its download deadline, or its files were removed from the working folder; building again fixes all of these)")
 		return
 	}
 	// The hold keeps the TTL and the reaper off this build for as long as
@@ -200,7 +200,7 @@ func (s *Server) handleSQLExportDownload(w http.ResponseWriter, r *http.Request)
 	release, held := s.sqlExport.SQLExportHold(e.ID, dir)
 	if !held {
 		writeJSONError(w, http.StatusConflict,
-			"no finished .sql export to download; build one first (it may still be running, the last build may have failed, it may already have been downloaded or passed its download deadline, or its files were removed from the staging directory; building again fixes all of these)")
+			"no finished .sql export to download; build one first (it may still be running, the last build may have failed, it may already have been downloaded or passed its download deadline, or its files were removed from the working folder; building again fixes all of these)")
 		return
 	}
 	defer release()

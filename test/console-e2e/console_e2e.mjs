@@ -2789,7 +2789,7 @@ try {
         sqlBuild: hasBtn(sqlFailed, "Build"),
         sqlReadyText: txt(sqlReady),
         sqlReadyDownload: hasBtn(sqlReady, "Download .sql export (.tar.gz)"),
-        sqlStaging: /Staging problem/.test(txt(sqlStaging)),
+        sqlStaging: /Working folder problem/.test(txt(sqlStaging)),
         sqlBuildAgain: /Build again/.test(txt(sqlStaging)),
         sqlIdle: !!sqlIdle,
         takeOpen: !!take && !!take.open,
