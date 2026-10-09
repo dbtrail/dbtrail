@@ -82,6 +82,11 @@ jobs:
             # Credentials that stopped working must not stop every job: the
             # pull is tried anonymously, and this says why it may be limited.
             echo "::warning::Docker Hub refused the login (DOCKERHUB_USERNAME / DOCKERHUB_TOKEN): images are pulled anonymously, and may hit the pull limit"
+            # What is wrong with the values, without printing them.
+            case "$user" in *@*) echo "DOCKERHUB_USERNAME looks like an e-mail address: it must be the Docker ID" ;; esac
+            printf %s "$user" | LC_ALL=C grep -Eq '^[a-z0-9_-]+$' || echo "DOCKERHUB_USERNAME (${#user} characters) holds something other than lowercase letters, digits, _ and -"
+            case "$token" in dckr_pat_*) ;; *) echo "DOCKERHUB_TOKEN (${#token} characters) does not start with dckr_pat_, as a personal access token does" ;; esac
+            printf %s "$token" | LC_ALL=C grep -Eq '^[A-Za-z0-9_-]+$' || echo "DOCKERHUB_TOKEN (${#token} characters) holds something other than letters, digits, _ and -"
           fi
 
       - name: Start MySQL index (bintrail-test-mysql, 8.4)
