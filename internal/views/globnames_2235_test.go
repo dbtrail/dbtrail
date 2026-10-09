@@ -95,12 +95,6 @@ func TestStateView_aTableNamedLikeAGlobReadsItsOwnFiles(t *testing.T) {
 	for _, n := range globNames {
 		for _, shape := range shapes {
 			for _, mode := range followModes {
-				// A view that follows the newest snapshot does not read a
-				// v0.83.0 pair, whatever the table is named ("plain" fails
-				// the same way): not this issue's, and left out here.
-				if shape.name == "a v0.83.0 pair" && mode.follow == FollowNewest {
-					continue
-				}
 				t.Run(fmt.Sprintf("%s/%s/%s", n.table, shape.name, mode.name), func(t *testing.T) {
 					root := t.TempDir()
 					neighbour := writeSnapshot(t, root, stamp, true, "a", "b", "c")
