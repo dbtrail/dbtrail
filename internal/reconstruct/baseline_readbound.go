@@ -67,7 +67,7 @@ func (m deltaMarks) mark(f BaselineFile) BaselineFile {
 		return f
 	}
 	if p := m.newest[f.Table]; p != "" {
-		f.DeltaUpserts = p[strings.LastIndexAny(p, `/\`)+1:]
+		f.DeltaUpserts = p[strings.LastIndexByte(p, '/')+1:]
 	}
 	return f
 }

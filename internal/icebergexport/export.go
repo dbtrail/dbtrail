@@ -508,7 +508,7 @@ func (d *deps) writeBaselineRows(ctx context.Context, icetbl *table.Table, arrow
 	duckdbutil.SetTempDirectory(ctx, ddb)
 	d.cfg.DuckDBTuning.Apply(ctx, ddb)
 
-	q := "SELECT * FROM parquet_scan('" + strings.ReplaceAll(local, "'", "''") + "')"
+	q := "SELECT * FROM parquet_scan('" + strings.ReplaceAll(duckdbutil.FileGlob(local), "'", "''") + "')"
 	drows, err := ddb.QueryContext(ctx, q)
 	if err != nil {
 		return nil, 0, fmt.Errorf("duckdb baseline query: %w", err)

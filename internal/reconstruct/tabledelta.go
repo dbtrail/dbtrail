@@ -413,7 +413,7 @@ func lookupBasePositionsWith(ctx context.Context, basePath, schema, table string
 		quoted[i] = `"` + strings.ReplaceAll(c.Name, `"`, `""`) + `"`
 		sel[i] = "b." + quoted[i] + " AS " + quoted[i]
 	}
-	scanSQL := fmt.Sprintf("parquet_scan('%s', file_row_number=true)", strings.ReplaceAll(basePath, "'", "''"))
+	scanSQL := fmt.Sprintf("parquet_scan('%s', file_row_number=true)", strings.ReplaceAll(duckdbutil.FileGlob(basePath), "'", "''"))
 	q := "SELECT " + strings.Join(sel, ", ") + ", b.file_row_number FROM " + scanSQL + " AS b"
 
 	if allowJoin {
@@ -911,9 +911,11 @@ func materializeBaseWithDelta(ctx context.Context, basePath string, d *tableDelt
 	defer ddb.Close()
 	applyDuckDBTuning(ctx, ddb, tuning)
 	lit := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+	// file is a path DuckDB reads: a pattern that names that one file.
+	file := func(s string) string { return lit(duckdbutil.FileGlob(s)) }
 	var state string
 	if d.Legacy {
-		state = baseline.LegacyTableDeltaStateSQL(lit(basePath), lit(d.Chain.LegacyPosdel), lit(d.Chain.LegacyUpserts), "")
+		state = baseline.LegacyTableDeltaStateSQL(file(basePath), file(d.Chain.LegacyPosdel), file(d.Chain.LegacyUpserts), "")
 	} else {
 		// Exact file lists, not the glob: the chain is in hand, a list of
 		// literal paths never over-matches, and union_by_name over a
@@ -922,13 +924,13 @@ func materializeBaseWithDelta(ctx context.Context, basePath string, d *tableDelt
 		// the name filter drops its rows.
 		var posdels, upserts []string
 		for _, f := range d.Chain.Files {
-			posdels = append(posdels, lit(f.Posdel))
-			upserts = append(upserts, lit(f.Upserts))
+			posdels = append(posdels, file(f.Posdel))
+			upserts = append(upserts, file(f.Upserts))
 		}
 		// The merge's form of the state, not the views': the window the
 		// views read the newest version of a key through fails under this
 		// session's memory limit on a long chain (baseline.TableDeltaLatestSQL).
-		state = baseline.TableDeltaMergeStateSQL(lit(basePath), "["+strings.Join(posdels, ", ")+"]", "["+strings.Join(upserts, ", ")+"]", basePath)
+		state = baseline.TableDeltaMergeStateSQL(file(basePath), "["+strings.Join(posdels, ", ")+"]", "["+strings.Join(upserts, ", ")+"]", basePath)
 	}
 	q := fmt.Sprintf("COPY (%s) TO %s (FORMAT PARQUET, COMPRESSION '%s')", state, lit(tmpPath), ParquetWriterCompression)
 	if _, err := ddb.ExecContext(ctx, q); err != nil {

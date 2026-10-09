@@ -68,10 +68,13 @@ func CompactTableDeltaMinor(ctx context.Context, basePath string, chain *baselin
 	// most of the host's memory, on a host that also runs capture.
 	applyDuckDBTuning(ctx, ddb, duckdbutil.Tuning{})
 	lit := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+	// file is a path DuckDB reads: a pattern that names that one file.
+	// lit stays for what is written and for plain strings.
+	file := func(s string) string { return lit(duckdbutil.FileGlob(s)) }
 	list := func(paths []string) string {
 		q := make([]string, len(paths))
 		for i, p := range paths {
-			q[i] = lit(p)
+			q[i] = file(p)
 		}
 		return "[" + strings.Join(q, ", ") + "]"
 	}
@@ -88,7 +91,7 @@ func CompactTableDeltaMinor(ctx context.Context, basePath string, chain *baselin
 	// cast to VARCHAR does not decode the bytes, it ESCAPES them (every
 	// newline, quote and non-ASCII byte of a CREATE TABLE would be rewritten
 	// into the range's footer, certified by the next manifest).
-	rows, err := ddb.QueryContext(ctx, "SELECT key, value FROM parquet_kv_metadata("+lit(last.Upserts)+")")
+	rows, err := ddb.QueryContext(ctx, "SELECT key, value FROM parquet_kv_metadata("+file(last.Upserts)+")")
 	if err != nil {
 		return nil, fmt.Errorf("read the footer of %s: %w", last.Upserts, err)
 	}
