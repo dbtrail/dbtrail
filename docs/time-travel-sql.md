@@ -98,7 +98,7 @@ The same connection runs ordinary read-only SQL over the server's Parquet
 copy, the snapshots and the archived change log, exactly as the console's
 **SQL** card does: same locked DuckDB child process, same views, same caps
 (2 threads, 2 GB by default, 60 seconds, one query at a time per server),
-except the row cap: 100,000 rows on this port by default, where the card
+except the row cap: 10,000 rows on this port by default, where the card
 shows 1,000.
 A statement that is not time travel is handed to it:
 
@@ -307,19 +307,18 @@ What to know before relying on it:
   1064.
 - **A result with more rows than the row cap is an error, not a short
   answer.** The statement fails with error 1104, which names the cap
-  (100,000 rows by default) and the way out: add a `LIMIT` at or under the
+  (10,000 rows by default) and the way out: add a `LIMIT` at or under the
   cap, or narrow the statement. Nothing is returned, so an application
   cannot take the first rows for the whole result. The cap is the port's
   own: `watch --sql-port-max-rows` (env `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS`,
   `SQL_PORT_MAX_ROWS` in the compose stack's `.env`) sets it, and the SQL
   card's 1,000 rows do not move with it. A result is also refused, with the
-  same error code, past 64 MB, whatever its row count; rows of a few hundred
-  bytes reach that before 100,000 rows. The whole result is held by the
+  same error code, past 64 MB, whatever its row count. The whole result is held by the
   daemon, which captures, while it is sent, and takes a few times its size
   while it is prepared (measured: a 64 MB result of 100,000 rows, about 320
   MB at its peak). `--sql-max-in-flight` bounds the statements running, not
-  the connections receiving a result, so on a host with little memory, or
-  with many clients reading large results at once, lower the cap. A result of exactly the cap's
+  the connections receiving a result, so raise the cap only with memory to spare, and not
+  for many clients reading large results at once. A result of exactly the cap's
   size is whole and is returned. The one cut that is not an error is the one
   the connection asked for: after `SET sql_select_limit = N`, with N at or
   under the cap, a `SELECT` with no `LIMIT` of its own returns its first N
@@ -514,7 +513,7 @@ The decision, in order, for every statement:
    (the vetoes of step 4) was run against MySQL; on a MariaDB source read
    routing is as experimental, and less measured.
    Last, for a plan the copy should take, **the size of the result**. The
-   copy returns at most its row cap (100,000 rows by default) and refuses a
+   copy returns at most its row cap (10,000 rows by default) and refuses a
    larger result, so a statement that returns more would run on the copy,
    be refused, and run again on MySQL. When the plan reads only its result
    (as above; here a sort is allowed) and the statement has no aggregate,

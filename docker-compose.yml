@@ -358,7 +358,7 @@ services:
       # threads and up to SQL_MEMORY beside capture.
       BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT: ${SQL_MAX_IN_FLIGHT:-}
       # Most rows one statement returns on the time-travel port. Empty =
-      # 100000. The SQL card shows 1,000 rows whatever this is.
+      # 10000. The SQL card shows 1,000 rows whatever this is.
       BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS: ${SQL_PORT_MAX_ROWS:-}
       # Memory each SQL statement on the copy may use (#2210). Empty = the
       # value saved in the web interface (Settings, MCP Server), else 2GB;
