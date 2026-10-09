@@ -71,7 +71,7 @@ func TestUpConsoleConfig_sqlPortMaxRowsReachesTheConsole(t *testing.T) {
 	if got := upConsoleOpts().SQLPortMaxRows; got != upSQLPortMaxRows {
 		t.Errorf("upConsoleOpts().SQLPortMaxRows = %d, want the resolved %d", got, upSQLPortMaxRows)
 	}
-	if f := watchCmd.Flags().Lookup("sql-port-max-rows"); f == nil || f.DefValue != "100000" {
-		t.Errorf("watch --sql-port-max-rows = %+v, want it registered with default 100000", f)
+	if f := watchCmd.Flags().Lookup("sql-port-max-rows"); f == nil || f.DefValue != "10000" {
+		t.Errorf("watch --sql-port-max-rows = %+v, want it registered with default 10000", f)
 	}
 }

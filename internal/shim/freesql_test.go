@@ -580,7 +580,7 @@ func TestFreeSQL_connectionDeadlineIsNamed(t *testing.T) {
 func TestFreeSQL_resultSizeRefusalsFitAClient(t *testing.T) {
 	const maxUint = ^uint64(0)
 	msgs := map[string]error{
-		"rows, select":       rowCapError("SELECT * FROM t", 100_000, 0),
+		"rows, select":       rowCapError("SELECT * FROM t", 10_000, 0),
 		"rows, select limit": rowCapError("SELECT * FROM t", 1<<31-1, maxUint),
 		"rows, listing":      rowCapError("SHOW TABLES", 1<<31-1, maxUint),
 		"bytes":              NewHandler(nil, nil).freeSQLError(sqlsandbox.ErrResultTooLarge),
