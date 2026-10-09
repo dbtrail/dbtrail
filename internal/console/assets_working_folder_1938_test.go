@@ -81,13 +81,13 @@ func TestNoOldWorkingFolderNameOnScreen1938(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := []string{"staging folder", "staging directory", "Staging problem", ".sql build folder", `"temp folder"`}
+	old := []string{"staging folder", "staging dir", "Staging problem", ".sql build folder", `"temp folder"`}
 	for i, line := range strings.Split(string(src), "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "//") {
 			continue
 		}
 		for _, o := range old {
-			if strings.Contains(line, o) {
+			if strings.Contains(strings.ToLower(line), strings.ToLower(o)) {
 				t.Errorf("app.js:%d still shows %q: %s", i+1, o, strings.TrimSpace(line))
 			}
 		}

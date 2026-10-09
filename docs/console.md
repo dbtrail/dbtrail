@@ -1367,8 +1367,11 @@ one release and warns that it no longer does anything. Remove it.
   location it can list. It is turned on where the daemon is started, with this
   variable, and not in the web interface; see
   [settings that need a restart](https://www.dbtrail.com/docs/settings/backups#set-at-startup).
-- `BINTRAIL_CONSOLE_BASELINE_STAGING` (`watch` only) — local staging dir for
-  S3-destined baselines created by that button (default a temp subdir).
+- `BINTRAIL_CONSOLE_BASELINE_STAGING` (`watch` only) — the working folder
+  (the **Working folder** row in the web interface's backup settings): where
+  full reads, S3-only updates and `.sql` builds write their temporary files
+  (default a subfolder of the system temp folder). Sizing is in
+  [capacity.md](./capacity.md).
 - `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (`watch` only) — empty (default:
   automatic), `ftwrl`, `lock-all`, `safe-no-lock` or `no-lock`. Selects how
   mydumper synchronizes its worker threads onto one instant for console

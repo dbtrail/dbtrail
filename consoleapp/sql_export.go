@@ -878,7 +878,7 @@ func (s *baselineSupervisor) executeSQLExport(req console.SQLExportRequest, dir 
 	// list rather than on disk until someone runs du.
 	root := filepath.Dir(dir)
 	if err := os.MkdirAll(root, 0o700); err != nil {
-		return 0, 0, 0, fmt.Errorf("create this build's folder in the working folder: %w", err)
+		return 0, 0, 0, fmt.Errorf("create this server's builds folder in the working folder: %w", err)
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
