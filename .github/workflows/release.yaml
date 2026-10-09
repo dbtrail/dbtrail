@@ -74,6 +74,21 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Docker Hub limits anonymous image pulls per address, and GitHub's
+      # runners share theirs: without an account every `docker run` below can
+      # fail with "toomanyrequests" for hours. A pull request from a fork gets
+      # no secrets and pulls anonymously, as before.
+      - name: Log in to Docker Hub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::notice::no Docker Hub credentials here (a fork's pull request, or the secrets are not set): images are pulled anonymously"
+            exit 0
+          fi
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+
       - name: Start MySQL (bintrail-test-mysql, ${{ matrix.mysql }})
         run: |
           docker run -d --name bintrail-test-mysql \
@@ -181,6 +196,21 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+
+      # Docker Hub limits anonymous image pulls per address, and GitHub's
+      # runners share theirs: without an account every `docker run` below can
+      # fail with "toomanyrequests" for hours. A pull request from a fork gets
+      # no secrets and pulls anonymously, as before.
+      - name: Log in to Docker Hub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::notice::no Docker Hub credentials here (a fork's pull request, or the secrets are not set): images are pulled anonymously"
+            exit 0
+          fi
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
 
       - name: Start MySQL index (bintrail-test-mysql, 8.4)
         run: |
@@ -338,6 +368,21 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+
+      # Docker Hub limits anonymous image pulls per address, and GitHub's
+      # runners share theirs: without an account every `docker run` below can
+      # fail with "toomanyrequests" for hours. A pull request from a fork gets
+      # no secrets and pulls anonymously, as before.
+      - name: Log in to Docker Hub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::notice::no Docker Hub credentials here (a fork's pull request, or the secrets are not set): images are pulled anonymously"
+            exit 0
+          fi
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
 
       - name: Start MySQL index (bintrail-test-mysql, 8.4)
         run: |
