@@ -25,6 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairs, and one that follows the newest snapshot reads as before.
 
 ### Fixed
+- **A view of a table whose name holds `?`, `*` or `[` reads that table's
+  files only** (#2235). DuckDB takes a file path as a pattern, and the views
+  named a table's file as it is. A table named `or?ers` beside one named
+  `orders` returned the rows of both, and one named `order[st]` returned the
+  other table's rows instead of its own, with no error. Every view body now
+  names the table's file, and the files of its changes, so that each
+  matches itself, and so does the read of each file's column types, which
+  reported such a table as one with no schema. A directory with one of those
+  characters in its name is read correctly for the same reason. SQL on the
+  copy and the MySQL port get this with the upgrade; a views file, when it
+  is generated again; the views file inside a snapshot, from the next
+  snapshot on. Over S3, a table with `?` in its name still fails, with
+  DuckDB's own error, as before.
+
 - **`bintrail baseline --upload` no longer sends the daemon's work
   directories to the bucket** (#2231). An upload of a whole snapshots
   folder walked everything under it, so the range pairs a compaction had
