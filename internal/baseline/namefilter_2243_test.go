@@ -20,6 +20,7 @@ func TestTableDeltaNameFilter_cutsTheNameAtASlashOnly(t *testing.T) {
 		`/snap/shop/a\orders.000000-000003.upserts`: true,
 		`/snap/shop/orders.000000.upserts`:          false,
 		`/snap/shop/b\orders.000000.upserts`:        false,
+		`/snap/shop/b\a\orders.000000.upserts`:      false,
 	} {
 		var got bool
 		if err := db.QueryRow("SELECT "+filter+" FROM (SELECT ? AS filename)", name).Scan(&got); err != nil {

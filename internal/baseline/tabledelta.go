@@ -185,7 +185,7 @@ func TableDeltaNameFilter(basePath, suffix string) string {
 	// Anchored at the start OR after a separator: a relative glob run from
 	// inside the directory gives a bare file name, and a "/" anchor there
 	// would drop every pair and read the base alone, without an error.
-	re := `(^|[/\\])` + regexp.QuoteMeta(stem) + `\.` + six + "(-" + six + ")?" + regexp.QuoteMeta(suffix) + "$"
+	re := `(^|/)` + regexp.QuoteMeta(stem) + `\.` + six + "(-" + six + ")?" + regexp.QuoteMeta(suffix) + "$"
 	return "regexp_matches(filename, '" + strings.ReplaceAll(re, "'", "''") + "')"
 }
 
