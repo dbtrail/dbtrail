@@ -178,14 +178,14 @@ func TableDeltaGlobs(basePath string) (posdel, upserts string) {
 // It reads the `filename` column read_parquet adds.
 func TableDeltaNameFilter(basePath, suffix string) string {
 	stem := strings.TrimSuffix(basePath, ".parquet")
-	if i := strings.LastIndexAny(stem, "/\\"); i >= 0 {
-		stem = stem[i+1:]
-	}
+	// Cut at the last "/" only, as ListTableDelta: the file's name may hold
+	// a backslash (#2243).
+	stem = stem[strings.LastIndexByte(stem, '/')+1:]
 	six := fmt.Sprintf("[0-9]{%d}", TableDeltaSeqWidth)
 	// Anchored at the start OR after a separator: a relative glob run from
 	// inside the directory gives a bare file name, and a "/" anchor there
 	// would drop every pair and read the base alone, without an error.
-	re := `(^|[/\\])` + regexp.QuoteMeta(stem) + `\.` + six + "(-" + six + ")?" + regexp.QuoteMeta(suffix) + "$"
+	re := `(^|/)` + regexp.QuoteMeta(stem) + `\.` + six + "(-" + six + ")?" + regexp.QuoteMeta(suffix) + "$"
 	return "regexp_matches(filename, '" + strings.ReplaceAll(re, "'", "''") + "')"
 }
 
@@ -433,7 +433,10 @@ func ListTableDelta(ctx context.Context, basePath string) (*TableDeltaChain, err
 	if err != nil {
 		return nil, fmt.Errorf("look for a table delta beside %s: %w", basePath, err)
 	}
-	stem := strings.TrimSuffix(filepath.Base(strings.ReplaceAll(basePath, "\\", "/")), ".parquet")
+	// The name after the last "/", and nothing else: a backslash is a legal
+	// character of a file name where this runs, and cutting there too gave a
+	// table named `a\orders` the chain of "orders" and hid its own (#2243).
+	stem := strings.TrimSuffix(basePath[strings.LastIndexByte(basePath, '/')+1:], ".parquet")
 	return TableDeltaChainIn(dir, names, stem)
 }
 
@@ -540,21 +543,8 @@ func deltaProbePattern(basePath string) string {
 // escapeGlob makes s match itself under DuckDB's glob by wrapping every pattern
 // metacharacter in a single-character class. Same rule as views.globLiteral,
 // which records what was verified against DuckDB: a backslash does NOT escape,
-// a class does. Repeated here because this package cannot import views.
-func escapeGlob(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch r {
-		case '[', '*', '?', '{':
-			b.WriteByte('[')
-			b.WriteRune(r)
-			b.WriteByte(']')
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
+// a class does.
+func escapeGlob(s string) string { return duckdbutil.FileGlob(s) }
 
 // TableDeltaStateSQL is THE definition of a table's state under a chain: the
 // base minus every dead row number in any .posdel, plus the newest version of

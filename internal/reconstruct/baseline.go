@@ -222,7 +222,7 @@ func ReadBaselineRows(ctx context.Context, path string, filter map[string]string
 
 	// Build sorted conditions for deterministic SQL + arg ordering.
 	conds := buildCondsList(filter)
-	safePath := strings.ReplaceAll(path, "'", "''")
+	safePath := strings.ReplaceAll(duckdbutil.FileGlob(path), "'", "''")
 	q := "SELECT * FROM parquet_scan('" + safePath + "')"
 	if len(conds) > 0 {
 		parts := make([]string, len(conds))

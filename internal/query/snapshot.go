@@ -95,7 +95,7 @@ func FetchSnapshot(ctx context.Context, path string, opts Options) ([]ResultRow,
 	if err != nil {
 		return nil, err
 	}
-	safePath := strings.ReplaceAll(path, "'", "''")
+	safePath := strings.ReplaceAll(duckdbutil.FileGlob(path), "'", "''")
 	q := "SELECT * FROM parquet_scan('" + safePath + "')"
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
@@ -225,7 +225,7 @@ func readSnapshotTimestamp(ctx context.Context, db *sql.DB, path string) (time.T
 }
 
 func readSnapshotTimestampFromFooter(ctx context.Context, db *sql.DB, path string) (time.Time, error) {
-	safePath := strings.ReplaceAll(path, "'", "''")
+	safePath := strings.ReplaceAll(duckdbutil.FileGlob(path), "'", "''")
 	rows, err := db.QueryContext(ctx, "SELECT key, value FROM parquet_kv_metadata('"+safePath+"')")
 	if err != nil {
 		return time.Time{}, fmt.Errorf("read baseline metadata: %w", err)

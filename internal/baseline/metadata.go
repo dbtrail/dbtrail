@@ -573,7 +573,7 @@ func ReadParquetMetadataFooter(ctx context.Context, path string) (DumpMetadata, 
 		return DumpMetadata{}, err
 	}
 
-	safePath := strings.ReplaceAll(path, "'", "''")
+	safePath := strings.ReplaceAll(duckdbutil.FileGlob(path), "'", "''")
 	q := fmt.Sprintf("SELECT key, value FROM parquet_kv_metadata('%s')", safePath)
 	rows, err := db.QueryContext(ctx, q)
 	if err != nil {

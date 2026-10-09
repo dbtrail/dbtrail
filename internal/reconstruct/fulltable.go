@@ -2295,7 +2295,7 @@ var scanPageRows int64 = ParquetWriterRowGroupSize
 // and deletes emit fewer), and a read that returns another count fails.
 func scanBaselinePass(ctx context.Context, ddb *sql.DB, in mergeCore, changes map[string]*query.ResultRow,
 	owns *[spillBuckets]bool, emit func(map[string]any) error, stats *mergeStats) error {
-	lit := "'" + strings.ReplaceAll(in.LocalBaselinePath, "'", "''") + "'"
+	lit := "'" + strings.ReplaceAll(duckdbutil.FileGlob(in.LocalBaselinePath), "'", "''") + "'"
 	total, paged, err := baselineScanPages(ctx, ddb, lit, in.Schema, in.Table)
 	if err != nil {
 		return err
@@ -3261,7 +3261,7 @@ var downloadS3Baseline = func(ctx context.Context, tuning duckdbutil.Tuning, src
 	if err := duckdbutil.EnableS3CredentialChain(ctx, db); err != nil {
 		return err
 	}
-	safeSrc := strings.ReplaceAll(src, "'", "''")
+	safeSrc := strings.ReplaceAll(duckdbutil.FileGlob(src), "'", "''")
 	safeDst := strings.ReplaceAll(dst, "'", "''")
 	if _, err := db.ExecContext(ctx, s3DownloadCopySQL(safeSrc, safeDst)); err != nil {
 		return fmt.Errorf("download s3 baseline: %w", err)
@@ -3336,7 +3336,7 @@ func readBaselineColumns(ctx context.Context, localPath string, tuning duckdbuti
 	defer db.Close()
 	applyDuckDBTuning(ctx, db, tuning)
 
-	safePath := strings.ReplaceAll(localPath, "'", "''")
+	safePath := strings.ReplaceAll(duckdbutil.FileGlob(localPath), "'", "''")
 	q := fmt.Sprintf("SELECT * FROM parquet_scan('%s') LIMIT 0", safePath)
 	rows, err := db.QueryContext(ctx, q)
 	if err != nil {

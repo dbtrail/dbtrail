@@ -39,6 +39,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairs, and one that follows the newest snapshot reads as before.
 
 ### Fixed
+- **A refresh of a table whose name holds `?`, `*` or `[` reads that table's
+  files only** (#2243). The same cause as #2235 below, in the daemon's own
+  reads: DuckDB takes a file path as a pattern. A table named `order[st]`
+  beside one named `orders` had the rows its changes replace looked up in
+  the other table's file, so a refresh with table deltas published a wrong
+  state for it, with no error; one named `or?ers` read both files, and its
+  refresh failed or published a wrong state. The rewrite of a table, the
+  merge of its changes, the reads of a cascade recovery and of a snapshot
+  query, and the Iceberg export named the file the same way. Each now names
+  that one file, on disk and over S3 (measured against a bucket; over S3 a
+  `?` in a name still fails with DuckDB's own error, as before). A table with a backslash in its name was given the
+  changes of the table named by what follows the backslash, and the daemon
+  gives it its own now; with a backslash and one of those characters, its
+  reads fail with an error, where they could read the files of another
+  schema. A read that fails fails the whole refresh, as any table's failure
+  does. Nothing here repairs a state already published wrong for a table
+  with such a name: a full read of the source (**Read database now**)
+  replaces it.
+
 - **A view of a table whose name holds `?`, `*` or `[` reads that table's
   files only** (#2235). DuckDB takes a file path as a pattern, and the views
   named a table's file as it is. A table named `or?ers` beside one named
