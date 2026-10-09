@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -65,7 +66,11 @@ func (f *fakeFreeSQL) Run(_ context.Context, statement, schema string, sess sqls
 			return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: "shop.orders changed since its snapshot"}
 		}
 	}
-	return f.res, f.err
+	// A result of its own each time, as the executor's is: the port lets go
+	// of a result's rows as it renders them.
+	res := f.res
+	res.Rows = slices.Clone(f.res.Rows)
+	return res, f.err
 }
 
 func oneCell(name, typ string, v any) sqlsandbox.Result {
@@ -502,7 +507,7 @@ func TestFreeSQL_errorMapping(t *testing.T) {
 		{"busy after the wait", &sqlsandbox.BusyError{Waited: 30 * time.Second, MaxInFlight: 2}, mysql.ER_TOO_MANY_USER_CONNECTIONS, "waited 30s", ""},
 		{"cancelled", context.Canceled, mysql.ER_QUERY_INTERRUPTED, "cancelled", ""},
 		{"deadline without a cap", context.DeadlineExceeded, mysql.ER_QUERY_INTERRUPTED, "cancelled", ""},
-		{"too large", sqlsandbox.ErrResultTooLarge, mysql.ER_UNKNOWN_ERROR, "too large", ""},
+		{"too large", sqlsandbox.ErrResultTooLarge, mysql.ER_TOO_BIG_SELECT, "larger than 64 MB", ""},
 		{"not local", sqlsandbox.ErrCopyNotLocal, mysql.ER_UNKNOWN_ERROR, "only on S3", ""},
 		{"worker", &sqlsandbox.WorkerError{Err: errors.New("exit 2"), Stderr: "/Users/dani/secret/path"}, mysql.ER_UNKNOWN_ERROR, "DBTrail's log", "secret"},
 		{"gate", errors.New("the copy for this server is only on S3; SQL needs a local copy"), mysql.ER_UNKNOWN_ERROR, "only on S3", ""},
@@ -567,4 +572,31 @@ func TestFreeSQL_connectionDeadlineIsNamed(t *testing.T) {
 	h.BindFreeSQL(&fakeFreeSQL{err: context.DeadlineExceeded})
 	_, err := h.HandleQuery("SELECT id FROM orders")
 	wantMyError(t, err, mysql.ER_QUERY_INTERRUPTED, "this connection's cap of 7 s")
+}
+
+// The two refusals for a result too big for the port name their limit and
+// the setting that moves the row cap, and fit in the 512 bytes a MySQL
+// client shows of an error, at the largest numbers they can carry.
+func TestFreeSQL_resultSizeRefusalsFitAClient(t *testing.T) {
+	const maxUint = ^uint64(0)
+	msgs := map[string]error{
+		"rows, select":       rowCapError("SELECT * FROM t", 100_000, 0),
+		"rows, select limit": rowCapError("SELECT * FROM t", 1<<31-1, maxUint),
+		"rows, listing":      rowCapError("SHOW TABLES", 1<<31-1, maxUint),
+		"bytes":              NewHandler(nil, nil).freeSQLError(sqlsandbox.ErrResultTooLarge),
+	}
+	for name, err := range msgs {
+		var me *mysql.MyError
+		if !errors.As(err, &me) || me.Code != mysql.ER_TOO_BIG_SELECT {
+			t.Errorf("%s: err = %v, want error 1104", name, err)
+			continue
+		}
+		t.Logf("%s (%d bytes): %s", name, len(me.Message), me.Message)
+		if len(me.Message) > 512 {
+			t.Errorf("%s: %d bytes, past the 512 a MySQL client shows", name, len(me.Message))
+		}
+		if strings.HasPrefix(name, "rows") && !strings.Contains(me.Message, "--sql-port-max-rows") {
+			t.Errorf("%s: %q does not name the setting that moves the cap", name, me.Message)
+		}
+	}
 }

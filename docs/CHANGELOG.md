@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **The MySQL port returns up to 100,000 rows per statement, and the number
+  can be set.** Ordinary SQL on the port shared the SQL card's cap of 1,000
+  rows, so a statement returning more failed with error 1104 unless it
+  carried a `LIMIT`. The port now has its own cap, 100,000 rows by default,
+  set with `watch --sql-port-max-rows` (env
+  `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS`, `SQL_PORT_MAX_ROWS` in the compose
+  stack's `.env`). The SQL card still shows 1,000 rows. A result is still
+  refused past 64 MB whatever its row count, and that refusal is now error
+  1104 too, naming the size, instead of 1105 with "too large". Under read
+  routing, statements the plan estimates between 1,000 and 100,000 rows now
+  run on the copy when they are expensive, where they went to MySQL; one
+  whose result passes 64 MB is refused by the copy and then run by MySQL.
+  The daemon holds a result while it sends it, so a host with little memory
+  may want a lower cap.
 - **Statements over a table with changes waiting no longer choose the
   newest version of each row every time** (#2231). SQL on the copy and the
   MySQL port read such a table as its file, minus the rows its change files

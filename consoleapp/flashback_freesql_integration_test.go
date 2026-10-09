@@ -222,7 +222,7 @@ func TestIntegrationFlashbackFreeSQLOnTheCopy(t *testing.T) {
 	// shows, naming the cap and the way out, never the first rows with a
 	// warning a client may not read. Pinned with a 1-row cap.
 	capped, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg,
-		SQLLimits: sqlsandbox.Limits{MaxRows: 1}})
+		SQLLimits: sqlsandbox.Limits{MaxRows: 1}, SQLPortMaxRows: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

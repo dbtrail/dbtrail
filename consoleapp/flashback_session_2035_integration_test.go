@@ -61,7 +61,7 @@ func sessionPort(t *testing.T, maxRows int) (addr, user string) {
 		t.Fatal(err)
 	}
 	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg,
-		SQLLimits: sqlsandbox.Limits{MaxRows: maxRows}})
+		SQLLimits: sqlsandbox.Limits{MaxRows: maxRows}, SQLPortMaxRows: maxRows})
 	if err != nil {
 		t.Fatal(err)
 	}

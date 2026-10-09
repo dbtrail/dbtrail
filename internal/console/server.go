@@ -164,6 +164,13 @@ type Config struct {
 	// threads, memory, wall clock, rows. Zero fields take
 	// sqlsandbox.DefaultLimits (2 threads, 2 GB, 60 s, 1,000 rows).
 	SQLLimits sqlsandbox.Limits
+	// SQLPortMaxRows is the most rows one statement returns on the embedded
+	// MySQL port. Its own number, not SQLLimits.MaxRows: that one is how
+	// many rows the web interface's SQL page shows, and a program that
+	// connects to the port reads its result whole. Zero or less takes
+	// DefaultSQLPortMaxRows. The size of the result in bytes
+	// (SQLLimits.MaxResultBytes) bounds it either way.
+	SQLPortMaxRows int
 	// SQLMaxInFlight is how many SQL-on-the-copy statements run at once for
 	// the whole process, the SQL card and the embedded port together (#2030,
 	// watch --sql-max-in-flight); 0 means sqlsandbox.DefaultMaxInFlight.
@@ -449,6 +456,8 @@ type Server struct {
 	// zero Config.SQLLimits is sqlsandbox.DefaultLimits); the handler reads
 	// them to bound max_rows and to name the timeout in its refusal.
 	sqlLimits sqlsandbox.Limits
+	// sqlPortMaxRows is Config.SQLPortMaxRows; read through sqlPortRowCap.
+	sqlPortMaxRows int
 	// sqlMem is the SQL memory setting (#2210): MemoryLimit above is the
 	// startup value or the default, and sqlMemoryNow says which applies.
 	sqlMem sqlMemoryState
@@ -730,6 +739,7 @@ func New(cfg Config) (*Server, error) {
 	// given the value on upgrade (MigrateProcessBaselineLocation, run where
 	// the registry is loaded, before any loop reads it).
 	s.sqlLimits = resolveSQLLimits(cfg.SQLLimits)
+	s.sqlPortMaxRows = cfg.SQLPortMaxRows
 	runner := sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits, MaxInFlight: cfg.SQLMaxInFlight})
 	s.sqlRunner, s.sqlSpillState = sandboxRunner{runner}, runner.SpillState
 	s.sqlMaxInFlight = cfg.SQLMaxInFlight

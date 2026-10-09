@@ -113,7 +113,7 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 			return q.s.copyUnchanged(ctx, q.b, q.id, tables, sess.UnchangedWithin)
 		}
 	}
-	out, err := q.s.runSQLVouched(ctx, q.b, q.user, statement, schema, 0, sess, unchanged)
+	out, err := q.s.runSQLVouched(ctx, q.b, q.user, statement, schema, q.s.sqlPortRowCap(), sess, unchanged)
 	if err != nil {
 		var werr *sqlsandbox.WorkerError
 		var refusal *sqlRefusal
@@ -171,9 +171,23 @@ func (q *SQLOnCopy) CopyUpdatedAt(ctx context.Context) time.Time {
 	return in.BaselineSnapshot
 }
 
-// RowCap is this server's row cap for one statement on the copy: the same
-// number runSQL hands the worker when the caller asks for no lower one.
-func (q *SQLOnCopy) RowCap() int { return q.s.sqlLimits.MaxRows }
+// RowCap is the port's row cap for one statement on the copy: the same
+// number Run hands the worker.
+func (q *SQLOnCopy) RowCap() int { return q.s.sqlPortRowCap() }
+
+// DefaultSQLPortMaxRows is the port's row cap when none is configured
+// (Config.SQLPortMaxRows, watch --sql-port-max-rows).
+const DefaultSQLPortMaxRows = 100_000
+
+// sqlPortRowCap is the row cap of one statement on the embedded port: the
+// configured one, or the default. Never zero, which runSQL would read as
+// "the SQL page's cap".
+func (s *Server) sqlPortRowCap() int {
+	if s.sqlPortMaxRows > 0 {
+		return s.sqlPortMaxRows
+	}
+	return DefaultSQLPortMaxRows
+}
 
 // sqlOnCopyFor decides, once per connection, whether the port can offer
 // free SQL on this server: the console has a sandbox runner, and archive
