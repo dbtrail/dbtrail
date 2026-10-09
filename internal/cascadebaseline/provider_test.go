@@ -164,10 +164,11 @@ func TestProvider_metadataReadFailureDoesNotBlockScan(t *testing.T) {
 		baseline.MetaKeyBinlogPos:  "12345",
 	})
 
-	// A glob path is the cheapest way to split the two reads: DuckDB's
+	// A file: URL is the cheapest way to split the two reads: DuckDB's
 	// parquet_scan resolves it (so the row scan succeeds) while the footer read
-	// opens it literally and fails.
-	glob := filepath.Join(dir, "2026-01-01T00-00-00Z", schema, "*.parquet")
+	// opens it as a path and fails. (A glob did this until #2243: the scan
+	// now names the one file a path names, and resolves no pattern.)
+	glob := "file://" + filepath.Join(dir, "2026-01-01T00-00-00Z", schema, "child.parquet")
 	find := func(ctx context.Context, sch, table string, at time.Time) (string, time.Time, reconstruct.StaleWarning, error) {
 		return glob, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), reconstruct.StaleWarning{}, nil
 	}

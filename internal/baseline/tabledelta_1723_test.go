@@ -132,7 +132,7 @@ func TestTableDeltaNameFilter(t *testing.T) {
 	// A stem with regexp metacharacters is quoted, and the filter is on the
 	// file NAME only (the directory is the glob's business).
 	f := TableDeltaNameFilter("/snap/dir/a.b+c.parquet", TableDeltaUpsertsSuffix)
-	if !strings.Contains(f, `(^|[/\\])a\.b\+c\.`) || strings.Contains(f, "snap") {
+	if !strings.Contains(f, `(^|/)a\.b\+c\.`) || strings.Contains(f, "snap") {
 		t.Fatalf("filter = %s", f)
 	}
 	if f := TableDeltaNameFilter("/snap/it's.parquet", TableDeltaPosdelSuffix); !strings.Contains(f, "it''s") {
