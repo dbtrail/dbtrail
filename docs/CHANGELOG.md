@@ -39,6 +39,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairs, and one that follows the newest snapshot reads as before.
 
 ### Fixed
+- **A views file that follows the newest snapshot reads the changes
+  v0.83.0 wrote beside a table** (#2242). That build named a table's two
+  change files without a number, and a view that follows the newest snapshot
+  looked for the numbered names only: it returned the table's file alone,
+  the table as it was before those changes, with no error. It reads them
+  now, as a pinned views file and SQL on the copy already did. Only a
+  snapshot whose changes v0.83.0 wrote is affected, and the first refresh by
+  a later build rewrites such a table; after that refresh the views file
+  stops with DuckDB's "No files found" on that table until it is generated
+  again.
 - **A views file over an S3 folder whose name holds `?`, `*`, `[` or `{`
   reads that folder only** (#2246). A views file that follows the newest
   snapshot finds it by listing the snapshots folder, and the folder's own

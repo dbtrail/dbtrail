@@ -2807,6 +2807,17 @@ func writeNewestStateBody(b *strings.Builder, in Input, t BaselineTable) {
 			"    ELSE [%s FOR f IN struct_extract(%s, 'files') IF f GLOB (%s) AND NOT contains(substr(f, length(%s) + 1), '/')] END",
 			newest, sqlString(newestVarUnsetMsg), fv, newest, pattern, globLiteralSQL("f"), fv, pattern, dirOf)
 	}
+	if t.DeltaLegacy {
+		// A pair written by v0.83.0 has no sequence number, so the globs of
+		// the branch below do not match it and the view returned the table's
+		// file alone, with no error (#2242). Read here as the pointer mode
+		// reads it: its three files by name. The next refresh rewrites such
+		// a table in full, and this view then stops with DuckDB's "No files
+		// found" on the pair until the views are generated again, as it does
+		// under the pointer.
+		fmt.Fprintf(b, "  %s;\n", deltaStateBody(t, t.Rel, path, false))
+		return
+	}
 	if t.Delta || chainReady(in, t) {
 		if once {
 			posdel, upserts := baseline.TableDeltaFollowGlobs(t.Rel)
