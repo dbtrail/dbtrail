@@ -315,7 +315,15 @@ jobs:
             echo "::notice::no Docker Hub credentials here (a fork's pull request, or the secrets are not set): images are pulled anonymously"
             exit 0
           fi
-          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          # A value pasted with a line break or a space makes the registry
+          # answer "malformed HTTP Authorization header".
+          user="$(printf %s "$DOCKERHUB_USERNAME" | tr -d '[:space:]')"
+          token="$(printf %s "$DOCKERHUB_TOKEN" | tr -d '[:space:]')"
+          if ! printf %s "$token" | docker login -u "$user" --password-stdin; then
+            # Credentials that stopped working must not stop every job: the
+            # pull is tried anonymously, and this says why it may be limited.
+            echo "::warning::Docker Hub refused the login (DOCKERHUB_USERNAME / DOCKERHUB_TOKEN): images are pulled anonymously, and may hit the pull limit"
+          fi
 
       # Start MySQL as a manually-named container rather than a `services:`
       # block. The integration tests `docker cp` raw binlog files out of a
@@ -744,7 +752,15 @@ jobs:
             echo "::notice::no Docker Hub credentials here (a fork's pull request, or the secrets are not set): images are pulled anonymously"
             exit 0
           fi
-          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          # A value pasted with a line break or a space makes the registry
+          # answer "malformed HTTP Authorization header".
+          user="$(printf %s "$DOCKERHUB_USERNAME" | tr -d '[:space:]')"
+          token="$(printf %s "$DOCKERHUB_TOKEN" | tr -d '[:space:]')"
+          if ! printf %s "$token" | docker login -u "$user" --password-stdin; then
+            # Credentials that stopped working must not stop every job: the
+            # pull is tried anonymously, and this says why it may be limited.
+            echo "::warning::Docker Hub refused the login (DOCKERHUB_USERNAME / DOCKERHUB_TOKEN): images are pulled anonymously, and may hit the pull limit"
+          fi
 
       - name: Start MySQL index (bintrail-test-mysql, 8.4)
         if: env.RUN == 'true'
@@ -972,7 +988,15 @@ jobs:
             echo "::notice::no Docker Hub credentials here (a fork's pull request, or the secrets are not set): images are pulled anonymously"
             exit 0
           fi
-          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          # A value pasted with a line break or a space makes the registry
+          # answer "malformed HTTP Authorization header".
+          user="$(printf %s "$DOCKERHUB_USERNAME" | tr -d '[:space:]')"
+          token="$(printf %s "$DOCKERHUB_TOKEN" | tr -d '[:space:]')"
+          if ! printf %s "$token" | docker login -u "$user" --password-stdin; then
+            # Credentials that stopped working must not stop every job: the
+            # pull is tried anonymously, and this says why it may be limited.
+            echo "::warning::Docker Hub refused the login (DOCKERHUB_USERNAME / DOCKERHUB_TOKEN): images are pulled anonymously, and may hit the pull limit"
+          fi
 
       - name: Start MySQL index (bintrail-test-mysql, 8.4)
         if: env.RUN == 'true'
@@ -1103,7 +1127,15 @@ jobs:
             echo "::notice::no Docker Hub credentials here (a fork's pull request, or the secrets are not set): images are pulled anonymously"
             exit 0
           fi
-          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          # A value pasted with a line break or a space makes the registry
+          # answer "malformed HTTP Authorization header".
+          user="$(printf %s "$DOCKERHUB_USERNAME" | tr -d '[:space:]')"
+          token="$(printf %s "$DOCKERHUB_TOKEN" | tr -d '[:space:]')"
+          if ! printf %s "$token" | docker login -u "$user" --password-stdin; then
+            # Credentials that stopped working must not stop every job: the
+            # pull is tried anonymously, and this says why it may be limited.
+            echo "::warning::Docker Hub refused the login (DOCKERHUB_USERNAME / DOCKERHUB_TOKEN): images are pulled anonymously, and may hit the pull limit"
+          fi
 
       - name: Start MySQL index (bintrail-test-mysql, 8.4)
         if: env.RUN == 'true'
@@ -1195,7 +1227,15 @@ jobs:
             echo "::notice::no Docker Hub credentials here (a fork's pull request, or the secrets are not set): images are pulled anonymously"
             exit 0
           fi
-          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          # A value pasted with a line break or a space makes the registry
+          # answer "malformed HTTP Authorization header".
+          user="$(printf %s "$DOCKERHUB_USERNAME" | tr -d '[:space:]')"
+          token="$(printf %s "$DOCKERHUB_TOKEN" | tr -d '[:space:]')"
+          if ! printf %s "$token" | docker login -u "$user" --password-stdin; then
+            # Credentials that stopped working must not stop every job: the
+            # pull is tried anonymously, and this says why it may be limited.
+            echo "::warning::Docker Hub refused the login (DOCKERHUB_USERNAME / DOCKERHUB_TOKEN): images are pulled anonymously, and may hit the pull limit"
+          fi
 
       # Same manually-named container as the integration job (8.4 = the bundled
       # index engine, caching_sha2_password default).
@@ -1285,7 +1325,15 @@ jobs:
             echo "::notice::no Docker Hub credentials here (a fork's pull request, or the secrets are not set): images are pulled anonymously"
             exit 0
           fi
-          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          # A value pasted with a line break or a space makes the registry
+          # answer "malformed HTTP Authorization header".
+          user="$(printf %s "$DOCKERHUB_USERNAME" | tr -d '[:space:]')"
+          token="$(printf %s "$DOCKERHUB_TOKEN" | tr -d '[:space:]')"
+          if ! printf %s "$token" | docker login -u "$user" --password-stdin; then
+            # Credentials that stopped working must not stop every job: the
+            # pull is tried anonymously, and this says why it may be limited.
+            echo "::warning::Docker Hub refused the login (DOCKERHUB_USERNAME / DOCKERHUB_TOKEN): images are pulled anonymously, and may hit the pull limit"
+          fi
 
       # The index server, the same manually-named 8.4 container the other jobs
       # use. The database the walk CAPTURES is a separate, stock mysql:8.4 that
