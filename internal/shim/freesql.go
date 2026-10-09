@@ -208,6 +208,12 @@ const (
 	RouteReasonCopyWaitTimeout RouteReason = "copy_wait_timeout"
 )
 
+// RouteReasonCopyResultsHeld: the copy works and its slots may be free, but
+// the port already holds as many results as it keeps in memory while it
+// sends them (ResultBudget, #2241). Its own reason: what clears it is
+// clients reading their answers, not more slots.
+const RouteReasonCopyResultsHeld RouteReason = "copy_results_held"
+
 // observeRoute reports one decision to the bound observer, if any.
 func (h *Handler) observeRoute(route RouteSide, reason RouteReason) {
 	if h.routerCfg.Observe != nil {
@@ -222,9 +228,11 @@ func (h *Handler) BindRouter(r Router, cfg RouterConfig) {
 	h.routerCfg = cfg
 }
 
-// Close releases what a connection holds: today, the router's upstream
-// connection. Safe to call on a handler that bound nothing.
+// Close releases what a connection holds: the router's upstream connection,
+// and its share of the port's result budget. Safe to call on a handler that
+// bound nothing.
 func (h *Handler) Close() {
+	h.ReleaseResult()
 	if h.router != nil {
 		h.router.Close()
 	}
@@ -394,6 +402,12 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		// warning, so it does not read as a fault nor use up a fault's.
 		h.routeWarn("columns", "read routing: the copy's columns are not MySQL's for a statement (a star, a NATURAL JOIN, the name of a column the copy does not hold, or a date, time or year column it reads another way), forwarded to mysql", err)
 		return ops.forward(RouteReasonCopyColumnsDiffer, "copy's columns differ: "+differ.Reason)
+	}
+	var held *ResultsHeldError
+	if errors.As(err, &held) {
+		// The copy works; the port has no room for another result (#2241).
+		h.routeWarn("results", "read routing: the port is still sending as many results as it keeps in memory at once, an expensive statement forwarded to mysql", err)
+		return ops.forward(RouteReasonCopyResultsHeld, "port holds its results: "+err.Error())
 	}
 	if errors.Is(err, sqlsandbox.ErrBusy) {
 		// The copy works and was asked for more than it serves (#2112). The
@@ -671,6 +685,11 @@ func copyText(qstr string) (string, error) {
 // types is sqlsandbox.Session.Types: the routing layer's reading of the
 // client's own statement, nil for a port without routing.
 func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnTypes, routeReason string, unchangedWithin time.Duration) (*mysql.Result, error) {
+	// Before anything is run (#2241): a statement whose result the port has
+	// no room to hold is refused here, not after the copy answered it.
+	if err := h.cfg.ResultBudget.admit(h.logger); err != nil {
+		return nil, h.resultsHeld(err)
+	}
 	ctx, cancel := h.queryContext()
 	defer cancel()
 	stmt, schema := rewriteForDuckDB(qstr, schema)
@@ -735,6 +754,13 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 		h.logger.Error("free sql: build resultset", "err", err)
 		return nil, fmt.Errorf("free sql: build resultset: %w", err)
 	}
+	out := &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}
+	// Counted from here until its answer is written (#2241). Before the
+	// warnings and the audit record below: a result refused here was never
+	// served, and must leave neither.
+	if err := h.holdResult(out); err != nil {
+		return nil, h.resultsHeld(err)
+	}
 	var warnings []string
 	if res.TruncatedCells > 0 {
 		warnings = append(warnings, fmt.Sprintf("%d cell(s) longer than this server's cap were cut; each ends with a marker", res.TruncatedCells))
@@ -751,7 +777,17 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 	}
 	h.setWarningsCoded(code, warnings)
 	h.recordFreeSQL(qstr, schema, res, routeReason)
-	return &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}, nil
+	return out, nil
+}
+
+// resultsHeld is the port's result budget's refusal as this connection
+// returns it: under read routing as it is, a busy copy for the ladder to
+// tell from a fault (#2112); else MySQL's "try again" code.
+func (h *Handler) resultsHeld(err error) error {
+	if h.router != nil {
+		return err
+	}
+	return h.freeSQLError(err)
 }
 
 // rowCapError is the refusal for a result with more rows than the port's row

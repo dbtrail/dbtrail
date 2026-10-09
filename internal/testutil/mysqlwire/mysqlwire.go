@@ -220,6 +220,13 @@ func (c *Conn) Exec(query string) (Reply, error) {
 	return c.command(append([]byte{comQuery}, query...), false)
 }
 
+// Send sends one statement as COM_QUERY and reads nothing: a client that
+// asked and stopped reading.
+func (c *Conn) Send(query string) error {
+	c.seq = 0
+	return c.write(append([]byte{comQuery}, query...))
+}
+
 // Ping sends COM_PING.
 func (c *Conn) Ping() (Reply, error) { return c.command([]byte{comPing}, false) }
 

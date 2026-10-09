@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **The MySQL port bounds the results it holds while it sends them**
+  (#2241). A result of ordinary SQL on the port is built whole in the
+  daemon, the process that captures, and stays there until the client has
+  read it. The limit on statements running at once (`--sql-max-in-flight`)
+  did not count it, so many clients reading large results at once could
+  take memory without a bound. The port now counts a result only while it
+  holds less than 256 MB of results being sent, over all its connections:
+  while it holds that much, a statement is refused with error 1203 and
+  "run the statement again in a moment", or answered by MySQL under read
+  routing (`copy_results_held` in the routing counter), and the log says
+  so. A connection that has its answer holds nothing. A client that reads
+  nothing of an answer for 60 seconds is now disconnected, as MySQL does at
+  `net_write_timeout`, on this port and on `bintrail shim`: before, it kept
+  its answer in memory for as long as it stayed connected.
 - **The MySQL port returns up to 10,000 rows per statement, and the number
   can be set.** Ordinary SQL on the port shared the SQL card's cap of 1,000
   rows, so a statement returning more failed with error 1104 unless it

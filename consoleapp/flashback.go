@@ -70,11 +70,21 @@ type flashbackConfig struct {
 	// RouteReadOnly makes the routed port read-only (#2079): the handler
 	// refuses every statement that is not a read before the source sees it.
 	RouteReadOnly bool
+	// ResultBudget bounds the SQL-on-the-copy results the port holds while
+	// it sends them (#2241). nil = withDefaults makes one of
+	// defaultFlashbackResultBudget; a test passes its own to read it.
+	ResultBudget *shim.ResultBudget
 }
 
 const (
 	defaultFlashbackQueryTimeout = 5 * time.Minute
 	defaultFlashbackMaxFullTable = 4
+	// defaultFlashbackResultBudget is how many bytes of SQL-on-the-copy
+	// results the port holds at once while sending them: four results of
+	// the largest size one statement returns (64 MiB). The port holds them
+	// in the process that captures, so this, and not the number of
+	// connections, is what a burst of clients reading large results costs.
+	defaultFlashbackResultBudget = 256 << 20
 )
 
 // withDefaults resolves the zero-value fields to their production defaults.
@@ -90,6 +100,11 @@ func (c flashbackConfig) withDefaults() flashbackConfig {
 	}
 	if c.MaxFullTable == 0 {
 		c.MaxFullTable = defaultFlashbackMaxFullTable
+	}
+	if c.ResultBudget == nil {
+		// One for the port: the config is copied to every connection, the
+		// budget it points at is shared. Resolved once, in serveFlashback.
+		c.ResultBudget = shim.NewResultBudget(defaultFlashbackResultBudget)
 	}
 	return c
 }
@@ -310,6 +325,7 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 		AllowGaps:     cfg.AllowGaps,
 		QueryTimeout:  cfg.QueryTimeout,
 		FullTableGate: gate,
+		ResultBudget:  cfg.ResultBudget,
 		AuthMethod:    cfg.AuthMethod,
 		// Already split by scheme and dir-preferred by ResolveFlashback so
 		// `_snapshot` matches the console's Time-travel tab.
@@ -791,6 +807,15 @@ func (r *routingHandler) PingSource() error {
 		return nil
 	}
 	return r.inner.PingSource()
+}
+
+// ReleaseResult forwards to the bound handler: shim.Session calls it once a
+// command's answer is written, and the handler that counted the result is
+// the inner one (#2241).
+func (r *routingHandler) ReleaseResult() {
+	if r.inner != nil {
+		r.inner.ReleaseResult()
+	}
 }
 
 func (r *routingHandler) HandleQuery(query string) (*gomysql.Result, error) {

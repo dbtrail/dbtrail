@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
@@ -89,6 +90,10 @@ const resolverCacheTTL = 30 * time.Second
 // of ProxySQL sitting in front of the shim.
 type Handler struct {
 	server.EmptyHandler
+
+	// heldResult is what this connection's result counts in
+	// cfg.ResultBudget now (resultbudget.go).
+	heldResult atomic.Int64
 
 	indexDB *sql.DB
 	cfg     Config
@@ -396,6 +401,11 @@ type Config struct {
 	// shared *Gate here at startup — a per-Handler gate would cap
 	// nothing.
 	FullTableGate *Gate
+
+	// ResultBudget bounds the SQL-on-the-copy results every connection of
+	// the port holds while sending them (#2241). Shared like FullTableGate:
+	// ONE per port. nil = no bound.
+	ResultBudget *ResultBudget
 }
 
 // NewHandler constructs a Handler bound to a bintrail index DSN with
