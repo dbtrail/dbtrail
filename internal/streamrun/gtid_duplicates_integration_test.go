@@ -411,11 +411,24 @@ const cutRestartLogged = "restarting capture from its last checkpoint so a trans
 // source's dump thread is killed. The source re-sends the whole transaction
 // after go-mysql reconnects. Every row must end up indexed exactly once, and
 // the restart path must be the one that got it there.
+//
+// The transaction's size is what makes the kill a cut. The kill is sent when
+// the first row shows up in the index, and by then the source may already have
+// written everything that fits between it and the indexer: go-mysql's queue of
+// 10240 binlog events (two or three per single-row statement, so about 5000
+// rows), the parser's channel of 1000 rows, one batch, and the TCP buffers on
+// the way (up to 6 MiB to receive and 4 MiB to send per socket by Linux's
+// defaults, twice over behind Docker's port proxy: about 20 MiB). A
+// transaction that fits in that was sent whole before the kill, nothing is
+// cut, and the run proves nothing: 20000 rows of 1.2 kB (24 MiB) did fit, on
+// some CI runs. 30000 rows of 4 kB are about 120 MiB against the 45 MiB those
+// hold at this row size (6100 rows, 25 MiB, plus the 20 MiB of buffers).
+// Single-row statements on purpose: go-mysql's queue counts events, not bytes.
 func runCutMidTransaction(t *testing.T, src dupSource, indexDB *sql.DB, indexName string) {
 	t.Helper()
-	const n = 20000
+	const n = 30000
 	logs := teeLogs(t)
-	testutil.MustExec(t, src.db, "ALTER TABLE orders ADD COLUMN pad VARCHAR(1000) NOT NULL DEFAULT ''")
+	testutil.MustExec(t, src.db, "ALTER TABLE orders ADD COLUMN pad VARCHAR(4000) NOT NULL DEFAULT ''")
 
 	cfg := src.config(indexName)
 	cfg.BatchSize = 100
@@ -427,7 +440,7 @@ func runCutMidTransaction(t *testing.T, src dupSource, indexDB *sql.DB, indexNam
 			if err != nil {
 				t.Fatalf("begin: %v", err)
 			}
-			stmt, err := tx.Prepare("INSERT INTO orders (amount, pad) VALUES (1, REPEAT('x', 1000))")
+			stmt, err := tx.Prepare("INSERT INTO orders (amount, pad) VALUES (1, REPEAT('x', 4000))")
 			if err != nil {
 				t.Fatalf("prepare: %v", err)
 			}
