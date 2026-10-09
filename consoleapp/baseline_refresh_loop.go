@@ -148,13 +148,18 @@ func (s *baselineSupervisor) TriggerRefresh(req refreshRequest, interval time.Du
 	s.mu.Unlock()
 
 	slog.Info("baseline refresh: starting", "server", req.ServerName, "id", req.ServerID)
+	s.postRefresh.Add(1)
 	go func() {
+		defer s.postRefresh.Done()
 		// The zero instant: the cycle stamps its own, after the mark read.
 		s.runRefresh(req, time.Time{}, interval)
 		// After the refresh has released its slot: a chain that grew long
 		// is merged by the compaction job, which claims the slot for itself
 		// (#1723). Never inside the refresh's own time.
 		s.maybeCompact(req)
+		// And the chains of the snapshot just published are merged into the
+		// pairs the console's statements read (#2231), in no slot at all.
+		s.maybeResolve(req)
 	}()
 	return since, nil
 }

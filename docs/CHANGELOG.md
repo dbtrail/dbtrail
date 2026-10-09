@@ -7,21 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
-- **A table whose changes are in one file pair is read without choosing
-  between versions** (#2231). SQL on the copy, the MySQL port and a views
-  file pinned to one snapshot read a table as its file, minus the rows its
-  change files mark dead, plus the newest version of each changed row, and
-  finding that newest version was an aggregate and a join on every
-  statement. When the table's changes are in a single pair of files, each
-  row is there once, and the statement now reads them as they are. Today
-  that is a table with no change since it was last written in full, and a
-  table whose first changes were written beside a file that had none (the
-  first refresh after `bintrail baseline`, or after turning table deltas
-  on), until it changes again; a refresh still writes each window's changes
-  as a pair of its own, so a table changed in two or more refreshes is read
-  as before.
+- **Statements over a table with changes waiting no longer choose the
+  newest version of each row every time** (#2231). SQL on the copy and the
+  MySQL port read such a table as its file, minus the rows its change files
+  mark dead, plus the newest version of each changed row, and finding that
+  newest version was an aggregate and a join on every statement, growing
+  with the changes waiting. Right after each refresh the daemon now merges
+  each table's change files of the newest snapshot into one pair, kept
+  beside the snapshots under `.resolved`, and statements read that pair as
+  it is. Measured on a 20M-row table with 1.03M changed rows: a count and a
+  sum went from 423 ms to 323 ms, a lookup by key from 80 ms to 31 ms. The
+  pairs are a cache: snapshots and retention are unchanged, an upload
+  leaves them out, they exist for the two newest snapshots, and a table
+  whose pair is missing is read as before. A table whose changes are
+  already in a single pair is read the same way with no merge, also by a
+  views file pinned to one snapshot. Views files never read the merged
+  pairs, and one that follows the newest snapshot reads as before.
 
 ### Fixed
+- **`bintrail baseline --upload` no longer sends the daemon's work
+  directories to the bucket** (#2231). An upload of a whole snapshots
+  folder walked everything under it, so the range pairs a compaction had
+  staged under `.compact` (and now the pairs under `.resolved`) were
+  uploaded as if they were snapshot data, to a place nothing reads and no
+  retention removes. The upload now leaves both out. The daemon's own
+  uploads send one snapshot at a time and never included them.
 - **The SQL memory warning sees a container's memory limit** (#2223). The
   warning that the statements SQL on the copy can run at once may take more
   memory than there is (the settings panel, and `watch` at startup) compared

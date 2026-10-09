@@ -251,6 +251,12 @@ func uploadWithOpsCopies(ctx context.Context, outputDir, prefix string, retry bo
 	var successMarkers []string
 	var jobs, alone []func(context.Context) (uploaded bool, err error)
 	err = filepath.WalkDir(outputDir, func(path string, d fs.DirEntry, walkErr error) error {
+		// The daemon's own work beside the snapshots (isDaemonWorkDir) is
+		// not snapshot data: an upload of the whole root left it in the
+		// bucket, where nothing reads it and no retention removes it.
+		if walkErr == nil && d.IsDir() && isDaemonWorkDir(outputDir, path) {
+			return filepath.SkipDir
+		}
 		if walkErr != nil || d.IsDir() {
 			return walkErr
 		}

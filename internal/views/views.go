@@ -89,6 +89,15 @@ type BaselineTable struct {
 	// and that residual; baseline.TableDeltaGlobs says so.
 	DeltaFiles []baseline.TableDeltaFile
 
+	// DeltaResolved, when set, is the table's whole chain merged into one
+	// pair that the daemon keeps beside the snapshots (#2231,
+	// baseline.FindResolvedTableDelta; set by MarkResolvedTableDeltas). A
+	// PINNED view reads the base and this pair, with no join to choose the
+	// newest version of each key. DeltaFiles stays the chain: it is still
+	// what the snapshot holds and what is weighed. A following view ignores
+	// it: the pair belongs to one snapshot and is removed after it.
+	DeltaResolved *baseline.TableDeltaFile
+
 	// Decimals are the table's DECIMAL and NUMERIC columns, which the baseline
 	// writer stores as text (internal/baseline.MysqlToParquetNode says why).
 	// The state view casts each one back to a number so arithmetic works
@@ -202,11 +211,28 @@ func MarkTableDeltas(ctx context.Context, tables []BaselineTable) error {
 		tables[i].Delta = c != nil
 		tables[i].DeltaLegacy = c != nil && c.Legacy
 		tables[i].DeltaFiles = nil
+		// The pair of the chain as it was listed before, if any.
+		tables[i].DeltaResolved = nil
 		if c != nil && !c.Legacy {
 			tables[i].DeltaFiles = c.Files
 		}
 	}
 	return nil
+}
+
+// MarkResolvedTableDeltas sets DeltaResolved on every table whose chain has a
+// finished resolved pair beside the snapshots (#2231). Call it after
+// MarkTableDeltas and while Path is still the real path, and only for views
+// that are generated per statement: the pair is the daemon's cache, removed
+// once its snapshot is no longer one of the newest, so a views file that
+// outlives the statement must not name it.
+func MarkResolvedTableDeltas(tables []BaselineTable) {
+	for i := range tables {
+		tables[i].DeltaResolved = nil
+		if f, ok := baseline.FindResolvedTableDelta(tables[i].Path, tables[i].DeltaFiles); ok {
+			tables[i].DeltaResolved = &f
+		}
+	}
 }
 
 // snapshotDirOf strips "<schema>/<table>.parquet" off a table file's path or
@@ -2817,8 +2843,9 @@ func chainReady(in Input, t BaselineTable) bool {
 // deltaStateBody is the state view's body for a table with a delta, and for
 // a following view's table that chainReady clears: the chain's state
 // (baseline.TableDeltaStateSQL over the chain's files, or
-// baseline.TableDeltaOnePairStateSQL when a pinned chain is one pair) or, for
-// a snapshot written by v0.83.0, its unnumbered pair's state. p is the table file's
+// baseline.TableDeltaOnePairStateSQL when a pinned chain is one pair or has
+// its resolved pair) or, for a snapshot written by v0.83.0, its unnumbered
+// pair's state. p is the table file's
 // path or Rel, and expr turns such a string into the SQL expression the
 // producer's following mode wants (a literal, or the variable-prefixed CASE).
 // pinned says the view reads these files forever: then the chain is named
@@ -2837,13 +2864,18 @@ func deltaStateStar(t BaselineTable, p string, expr func(string) string, pinned 
 		return baseline.LegacyTableDeltaStateSQL(expr(p), expr(stem+baseline.TableDeltaPosdelSuffix),
 			expr(stem+baseline.TableDeltaUpsertsSuffix), replace)
 	}
-	if pinned && len(t.DeltaFiles) == 1 {
+	if pinned && (len(t.DeltaFiles) == 1 || t.DeltaResolved != nil) {
 		// One pair holds each key once, so its rows are the newest versions
-		// already: no aggregate and no join to find them (#2231). The paths
-		// are made to match themselves: read_parquet takes each as a glob,
-		// and the join's name filter, which kept a table named "or?ers" from
-		// reading the pair of "orders", is not in this SQL.
-		f := t.DeltaFiles[0]
+		// already: no aggregate and no join to find them (#2231). The pair
+		// is the chain's only one, or the whole chain merged into one beside
+		// the snapshots. The paths are made to match themselves:
+		// read_parquet takes each as a glob, and the join's name filter,
+		// which kept a table named "or?ers" from reading the pair of
+		// "orders", is not in this SQL.
+		f := t.DeltaResolved
+		if f == nil {
+			f = &t.DeltaFiles[0]
+		}
 		return baseline.TableDeltaOnePairStateSQL(expr(globLiteral(p)), expr(globLiteral(f.Posdel)), expr(globLiteral(f.Upserts)), replace)
 	}
 	if pinned && len(t.DeltaFiles) > 0 {

@@ -1,10 +1,13 @@
 package views
 
 import (
+	"context"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 )
@@ -198,5 +201,72 @@ func TestStateView_onePairOfATableNamedLikeAGlob(t *testing.T) {
 	}
 	if want := []string{"1=changed", "2=b", "3=c"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("state view = %v, want %v", got, want)
+	}
+}
+
+// TestStateView_resolvedPairSkipsTheJoin: a chain of two pairs whose merge
+// into one is kept beside the snapshots (BaselineTable.DeltaResolved) is read
+// by a pinned view through the base and that pair, with no join. The pair
+// here says something the chain does not (id 1 is "resolved"), so the rows
+// show which files were read. A following view ignores it and reads the
+// chain: the pair belongs to one snapshot and is gone after it.
+func TestStateView_resolvedPairSkipsTheJoin(t *testing.T) {
+	const stamp = "2026-04-30T03-00-00Z"
+	for _, mode := range followModes {
+		t.Run(mode.name, func(t *testing.T) {
+			root := t.TempDir()
+			base := writeSnapshot(t, root, stamp, true, "a", "b", "c")
+			writeDeltaPair(t, base, 0, []int64{0}, [][3]string{{"1", "first", "u"}, {"9", "new", "u"}})
+			writeDeltaPair(t, base, 1, []int64{0}, [][3]string{{"1", "second", "u"}, {"9", "", "d"}})
+			tables := onePairTables(base)
+			if err := MarkTableDeltas(context.Background(), tables); err != nil {
+				t.Fatal(err)
+			}
+			MarkResolvedTableDeltas(tables)
+			if tables[0].DeltaResolved != nil {
+				t.Fatal("a resolved pair is marked with none written")
+			}
+			// The pair, as the daemon would leave it: written beside a copy
+			// of the base under the resolved directory, under the range.
+			want, ok := baseline.ResolvedTableDeltaPaths(base, tables[0].DeltaFiles)
+			if !ok {
+				t.Fatal("a chain of two pairs has no place for a resolved pair")
+			}
+			stage := filepath.Join(filepath.Dir(want.Upserts), "orders.parquet")
+			writeDeltaPairAt(t, stage, 7, []int64{0}, [][3]string{{"1", "resolved", "u"}, {"9", "", "d"}})
+			posdel, upserts := baseline.TableDeltaPaths(stage, 7)
+			for _, mv := range [][2]string{{posdel, want.Posdel}, {upserts, want.Upserts}} {
+				if err := os.Rename(mv[0], mv[1]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			MarkResolvedTableDeltas(tables)
+			if tables[0].DeltaResolved == nil || *tables[0].DeltaResolved != want {
+				t.Fatalf("DeltaResolved = %+v, want %+v", tables[0].DeltaResolved, want)
+			}
+			if len(tables[0].DeltaFiles) != 2 {
+				t.Fatalf("the chain was replaced by the pair: %+v", tables[0].DeltaFiles)
+			}
+			resolved := *tables[0].DeltaResolved
+			// generateFor lists the chain again, which drops the pair; it is
+			// set again and the views generated with it, in every mode.
+			generateFor(t, root, stamp, mode.follow, tables)
+			tables[0].DeltaResolved = &resolved
+			sqlText := Generate(Input{
+				GeneratedAt: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC), Version: "test",
+				BaselineSource: root, BaselineSnapshot: time.Date(2026, 4, 30, 3, 0, 0, 0, time.UTC),
+				Follow: mode.follow, Baselines: tables,
+			})
+			wantRows, wantJoin := []string{"1=second", "2=b", "3=c"}, true
+			if mode.follow == FollowNone {
+				wantRows, wantJoin = []string{"1=resolved", "2=b", "3=c"}, false
+			}
+			if joined := strings.Contains(sqlText, latestMark); joined != wantJoin {
+				t.Fatalf("the view reads through the join = %v, want %v\n%s", joined, wantJoin, sqlText)
+			}
+			if got := stateRows(t, sqlText); !reflect.DeepEqual(got, wantRows) {
+				t.Fatalf("state view = %v, want %v", got, wantRows)
+			}
+		})
 	}
 }

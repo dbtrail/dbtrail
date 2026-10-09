@@ -72,6 +72,9 @@ func TestTriggerRefresh_runsTheCompactionAfterTheRefresh(t *testing.T) {
 	root := stageBaselineRoot(t)
 	cs := stubCompaction(t, fakeChain(t, filepath.Join(root, "2026-08-28T09-00-00Z"), compactMinPairs))
 	sup := newBaselineSupervisor(ctx, t.TempDir(), baseline.DefaultLockMode)
+	// What follows the refresh reads the seams above after the refresh's
+	// own status is final: wait for it before they are restored.
+	t.Cleanup(sup.postRefresh.Wait)
 	h, err := console.OpenBaselineHistory(filepath.Join(t.TempDir(), "h.json"))
 	if err != nil {
 		t.Fatal(err)

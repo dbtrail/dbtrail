@@ -109,6 +109,18 @@ type baselineSupervisor struct {
 	// compactRetry is when a server's compaction job may be tried again after
 	// a run that failed (compactRetryEvery). Guarded by mu.
 	compactRetry map[string]time.Time
+	// resolving is the snapshot folders whose resolved pairs are being
+	// written (#2231, maybeResolve), by absolute path. Not a job slot: it
+	// only keeps two runs from writing the same pairs. Guarded by mu.
+	resolving map[string]bool
+	// resolveRetry is when a table whose pair could not be written may be
+	// tried again, keyed by resolveRetryKey. Guarded by mu.
+	resolveRetry map[string]time.Time
+	// postRefresh counts the goroutines that run what follows a refresh
+	// (the compaction's scan, the resolved pairs), which outlive the
+	// refresh's own status: a test waits on it before it restores a seam
+	// they read.
+	postRefresh sync.WaitGroup
 	// exportRuns is each server's CURRENT build: its directory (unique per
 	// build; see sqlExportRoot for why builds never share a path), the
 	// downloads streaming it, and the removal it is owed.
@@ -259,6 +271,8 @@ func newBaselineSupervisor(ctx context.Context, stagingDir string, lockMode base
 		exports:          make(map[string]*console.BaselineStatus),
 		compacts:         make(map[string]*console.BaselineStatus),
 		compactRetry:     make(map[string]time.Time),
+		resolving:        make(map[string]bool),
+		resolveRetry:     make(map[string]time.Time),
 		exportRuns:       make(map[string]*sqlExportRun),
 		exportOrphans:    make(map[string]map[string]string),
 	}
