@@ -179,41 +179,44 @@ func TestStateView_aTableNamedLikeAGlobReadsItsOwnFiles(t *testing.T) {
 	}
 }
 
-// TestStateView_aBackslashNameNeverReadsAnotherSchema: DuckDB's glob splits
-// a pattern on a backslash as on a slash, so a table named `\..\hr\*` in
-// "shop" is, read as a pattern, every table file of "hr". No class stands for
-// a backslash, so no pattern names that one file: the table gets no view, the
-// file says why, and every other view still loads. A name with a backslash
-// and no pattern character is read as the file it names by a pinned view,
-// and has no view when the view follows the snapshots, which finds a
-// table's chain by a pattern built on its name. A pinned view whose chain is
-// not named file by file does the same, and has none either.
-func TestStateView_aBackslashNameNeverReadsAnotherSchema(t *testing.T) {
+// TestStateView_aBackslashPathNeverReadsThroughAPattern: DuckDB's glob
+// splits a pattern on a backslash as on a slash, so a table named
+// `\..\hr\*` in "shop" is, read as a pattern, every table file of "hr". No
+// class stands for a backslash, so no pattern names that one file: the table
+// gets no view, the file says why, and every other view still loads.
+//
+// A backslash in the file's name: never a view (the chain beside such a
+// table is not found either, the last test of this file). A backslash in a
+// directory: a pinned view reads the path as the file it names, unless the
+// path also holds a pattern character or the view is not told the chain's
+// files; a following view finds the chain by a pattern, and has none.
+func TestStateView_aBackslashPathNeverReadsThroughAPattern(t *testing.T) {
 	const stamp = "2026-04-30T03-00-00Z"
 	at := time.Date(2026, 4, 30, 3, 0, 0, 0, time.UTC)
 	for _, c := range []struct {
-		name string
+		schema, name string
 		// pinned says a pinned view exists (and reads the table's own
 		// rows); a following one never does.
 		pinned bool
-		// byPattern gives the table a chain the view is not told the
-		// files of, and the schema "hr" a chain a pattern would reach.
+		// byPattern says the table has a chain without naming its files.
 		byPattern bool
 	}{
-		{`a\*b`, false, false},
-		{`\..\hr\*`, false, false},
-		{`\..\hr\salar?es`, false, false},
-		{`\..\hr\[s]alaries`, false, false},
-		{`\..\hr\{salaries,x}`, false, false},
-		{`\..\hr\salaries`, true, false},
-		{`a\b`, true, false},
-		{`\..\hr\salaries`, false, true},
+		{"shop", `a\*b`, false, false},
+		{"shop", `\..\hr\*`, false, false},
+		{"shop", `\..\hr\salar?es`, false, false},
+		{"shop", `\..\hr\[s]alaries`, false, false},
+		{"shop", `\..\hr\{salaries,x}`, false, false},
+		{"shop", `\..\hr\salaries`, false, false},
+		{"shop", `a\b`, false, false},
+		{`sh\op`, "items", true, false},
+		{`sh\op`, "items", false, true},
+		{`sh\o*p`, "items", false, false},
+		{`..\hr`, "salar?es", false, false},
 	} {
 		for _, mode := range []FollowMode{FollowNone, FollowPointer, FollowNewest} {
-			t.Run(fmt.Sprintf("%s/pattern=%v/%v", c.name, c.byPattern, mode), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/%s/pattern=%v/%v", c.schema, c.name, c.byPattern, mode), func(t *testing.T) {
 				root := t.TempDir()
 				orders := writeSnapshot(t, root, stamp, true, "a", "b", "c")
-				own := writeTableBeside(t, orders, c.name)
 				// The other schema's table: the same file as shop.orders,
 				// so a read that reaches it returns a, b, c.
 				raw, err := os.ReadFile(orders)
@@ -221,23 +224,29 @@ func TestStateView_aBackslashNameNeverReadsAnotherSchema(t *testing.T) {
 					t.Fatal(err)
 				}
 				hr := filepath.Join(root, stamp, "hr", "salaries.parquet")
-				if err := os.MkdirAll(filepath.Dir(hr), 0o755); err != nil {
+				ownRaw, err := os.ReadFile(writeTableBeside(t, orders, "own"))
+				if err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(hr, raw, 0o644); err != nil {
-					t.Fatal(err)
+				rel := c.schema + "/" + c.name + ".parquet"
+				own := filepath.Join(root, stamp) + "/" + rel
+				for p, b := range map[string][]byte{hr: raw, own: ownRaw} {
+					if err := os.MkdirAll(p[:strings.LastIndex(p, "/")], 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(p, b, 0o644); err != nil {
+						t.Fatal(err)
+					}
 				}
 				in := Input{
 					GeneratedAt: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC), Version: "test",
 					BaselineSource: root, BaselineSnapshot: at, Follow: mode,
 					Baselines: []BaselineTable{
 						{Schema: "shop", Table: "orders", Path: orders, Rel: "shop/orders.parquet", SchemaKnown: true},
-						{Schema: "shop", Table: c.name, Path: own, Rel: "shop/" + c.name + ".parquet", SchemaKnown: true},
+						{Schema: c.schema, Table: c.name, Path: own, Rel: rel, SchemaKnown: true},
 					},
 				}
 				if c.byPattern {
-					writeDeltaPair(t, hr, 0, []int64{2}, [][3]string{{"77", "hr", "u"}})
-					writeDeltaPair(t, own, 0, nil, nil)
 					// Said to have a chain, with no file of it named: what a
 					// caller that does not list the chain hands over.
 					in.Baselines[1].Delta = true
@@ -247,7 +256,7 @@ func TestStateView_aBackslashNameNeverReadsAnotherSchema(t *testing.T) {
 						t.Fatal(err)
 					}
 					for i := range in.Baselines {
-						in.Baselines[i].Path = filepath.Join(root, baseline.CurrentLinkName, in.Baselines[i].Rel)
+						in.Baselines[i].Path = filepath.Join(root, baseline.CurrentLinkName) + "/" + in.Baselines[i].Rel
 					}
 				}
 				sqlText := Generate(in)
@@ -259,34 +268,91 @@ func TestStateView_aBackslashNameNeverReadsAnotherSchema(t *testing.T) {
 				if err := db.QueryRow(`SELECT count(*) FROM shop.orders WHERE status IN ('a', 'b', 'c')`).Scan(&n); err != nil || n != 3 {
 					t.Fatalf("shop.orders, the table beside it: %d rows (err=%v), want 3\n%s", n, err, sqlText)
 				}
-				quoted := `shop."` + strings.ReplaceAll(c.name, `"`, `""`) + `"`
-				rows, err := db.Query(`SELECT status FROM ` + quoted + ` ORDER BY 1`)
+				quoted := `"` + c.schema + `"."` + c.name + `"`
+				var got string
+				err = db.QueryRow(`SELECT string_agg(status, ',' ORDER BY id) FROM ` + quoted).Scan(&got)
 				if !c.pinned || mode != FollowNone {
 					if err == nil {
-						rows.Close()
-						t.Fatalf("%s has a view; no path names its file, so it must have none\n%s", quoted, sqlText)
+						t.Fatalf("%s has a view (it returned %s); no pattern names its file, so it must have none\n%s", quoted, got, sqlText)
 					}
 					if !strings.Contains(sqlText, "holds a backslash, and DuckDB reads a path as a pattern") {
 						t.Fatalf("the file does not say why %s has no view\n%s", quoted, sqlText)
 					}
 					return
 				}
-				if err != nil {
-					t.Fatalf("%s: %v\n%s", quoted, err, sqlText)
-				}
-				defer rows.Close()
-				var got []string
-				for rows.Next() {
-					var st string
-					if err := rows.Scan(&st); err != nil {
-						t.Fatal(err)
-					}
-					got = append(got, st)
-				}
-				if strings.Join(got, ",") != "p,q,r" {
-					t.Fatalf("%s returned %v, want its own p, q, r (a, b, c are the other schema's)\n%s", quoted, got, sqlText)
+				if err != nil || got != "p,q,r" {
+					t.Fatalf("%s returned %s (err=%v), want its own p,q,r (a, b, c are the other schema's)\n%s", quoted, got, err, sqlText)
 				}
 			})
 		}
+	}
+}
+
+// TestPrefetchList_leavesOutAFileNoPatternNames: the prefetch of a following
+// file reads every table file of the snapshot's listing, whether or not the
+// table has a view. One that holds a backslash and a pattern character,
+// named through a class, matches nothing, and that fails the statement
+// before any view exists. It is first in the listing here, where a DuckDB
+// that reads one footer (older than 1.5) looks, and where one that reads
+// them all does too.
+func TestPrefetchList_leavesOutAFileNoPatternNames(t *testing.T) {
+	root := t.TempDir()
+	orders := writeSnapshot(t, root, "2026-04-30T03-00-00Z", true, "a", "b", "c")
+	raw, err := os.ReadFile(orders)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostile := filepath.Join(filepath.Dir(filepath.Dir(orders)), "aa", `\*.parquet`)
+	plain := filepath.Join(filepath.Dir(filepath.Dir(orders)), "aa", `x\y.parquet`)
+	for _, p := range []string{hostile, plain} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := []string{hostile, plain, orders}
+	slices.Sort(files)
+	if files[0] != hostile {
+		t.Fatalf("the listing starts with %s; the case needs the file no pattern names first", files[0])
+	}
+	quoted := make([]string, len(files))
+	for i, f := range files {
+		quoted[i] = sqlString(f)
+	}
+	list := prefetchListSQL("{'files': [" + strings.Join(quoted, ", ") + "]}")
+	db, err := loadViews(t, "SELECT 1;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for expr, want := range map[string]int{list: 2, list + "[1:1]": 1} {
+		var n int
+		if err := db.QueryRow("SELECT count(DISTINCT file_name) FROM parquet_file_metadata(" + expr + ")").Scan(&n); err != nil {
+			t.Fatalf("the prefetch fails: %v\n%s", err, expr)
+		}
+		if n != want {
+			t.Errorf("the prefetch read %d files, want %d\n%s", n, want, expr)
+		}
+	}
+}
+
+// TestStateView_aBackslashNameHidesItsChain is the premise of the rule that
+// a backslash in a file's name gets no view: the listing of a table's chain
+// does not find the chain of such a table, so a view of its file alone
+// would be the table as it was when the chain started. If this starts
+// failing because the chain is found, the rule can be narrowed.
+func TestStateView_aBackslashNameHidesItsChain(t *testing.T) {
+	root := t.TempDir()
+	orders := writeSnapshot(t, root, "2026-04-30T03-00-00Z", true, "a", "b", "c")
+	const name = `a\orders`
+	own := writeTableBeside(t, orders, name)
+	writeDeltaPair(t, own, 0, []int64{2}, [][3]string{{"77", "one", "u"}})
+	tables := []BaselineTable{{Schema: "shop", Table: name, Path: own, Rel: "shop/" + name + ".parquet", SchemaKnown: true}}
+	if err := MarkTableDeltas(context.Background(), tables); err != nil {
+		return // refused aloud: also no view of the file alone
+	}
+	if tables[0].Delta {
+		t.Fatalf("the chain of %s is found now (%+v): unnameableFile may let a pinned view of it through", name, tables[0].DeltaFiles)
 	}
 }

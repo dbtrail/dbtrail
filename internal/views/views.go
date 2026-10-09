@@ -2509,10 +2509,20 @@ func writeFollowedPrefetch(b *strings.Builder, in Input) {
 	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT count(*) = 2 FROM duckdb_settings() WHERE name = 'validate_external_file_cache' OR (name = 'enable_external_file_cache' AND lower(value) = 'true'));\n", all)
 	// Each entry through globLiteralSQL, as the views name them (#2235): a
 	// function that takes a list takes each entry as a glob.
-	parquet := fmt.Sprintf("[%s FOR f IN struct_extract(%s, 'files') IF regexp_matches(f, %s)]", globLiteralSQL("f"), filesVarExpr(in),
-		sqlString(`\.parquet$|\.[0-9]{6}(-[0-9]{6})?\.(upserts|posdel)$`))
+	parquet := prefetchListSQL(filesVarExpr(in))
 	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT count(*) FROM parquet_file_metadata(CASE WHEN getvariable('%s') THEN %s ELSE %s[1:1] END));\n\n",
 		read, all, parquet, parquet)
+}
+
+// prefetchListSQL is the list of files the prefetch reads, as a SQL
+// expression over files, the listing of the snapshot: every table file and
+// chain file in it, each named through globLiteralSQL. A file with a
+// backslash and a pattern character in its path is left out: no pattern
+// names it (unnameableFile), its table has no view to read it for, and one
+// entry that matches nothing fails the statement, before any view exists.
+func prefetchListSQL(files string) string {
+	return fmt.Sprintf("[%s FOR f IN struct_extract(%s, 'files') IF regexp_matches(f, %s) AND NOT (contains(f, '\\') AND regexp_matches(f, '[\\[*?{]'))]",
+		globLiteralSQL("f"), files, sqlString(`\.parquet$|\.[0-9]{6}(-[0-9]{6})?\.(upserts|posdel)$`))
 }
 
 // selectedStatePlans is the state views this render will actually emit: the
