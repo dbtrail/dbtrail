@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **A table whose changes are in one file pair is read without choosing
+  between versions** (#2231). SQL on the copy, the MySQL port and a views
+  file pinned to one snapshot read a table as its file, minus the rows its
+  change files mark dead, plus the newest version of each changed row, and
+  finding that newest version was an aggregate and a join on every
+  statement. When the table's changes are in a single pair of files, each
+  row is there once, and the statement now reads them as they are. Today
+  that is a table with no change since it was last written in full, and a
+  table whose first changes were written beside a file that had none (the
+  first refresh after `bintrail baseline`, or after turning table deltas
+  on), until it changes again; a refresh still writes each window's changes
+  as a pair of its own, so a table changed in two or more refreshes is read
+  as before.
+
 ### Fixed
 - **The SQL memory warning sees a container's memory limit** (#2223). The
   warning that the statements SQL on the copy can run at once may take more
