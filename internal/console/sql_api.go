@@ -1487,11 +1487,18 @@ func sqlCopyDirs(in views.Input) []string {
 			d = abs
 		}
 		d = filepath.Clean(d)
-		if d == "." || seen[d] {
-			return
+		// The directory as it is, and as the views spell it (#2235): the
+		// sandbox allows a path by its text, and a view reads a table
+		// through views.FileGlob, where a directory named "sh[o]p" is
+		// written "sh[[]o]p". The second spelling is the same directory,
+		// not a pattern for others.
+		for _, spelling := range []string{d, views.FileGlob(d)} {
+			if spelling == "." || seen[spelling] {
+				continue
+			}
+			seen[spelling] = true
+			dirs = append(dirs, spelling)
 		}
-		seen[d] = true
-		dirs = append(dirs, d)
 	}
 	// The archive bases only when the events view is installed: they are
 	// what it reads, and nothing else does.

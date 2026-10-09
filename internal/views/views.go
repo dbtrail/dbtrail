@@ -1217,9 +1217,9 @@ const (
 // the bind opens one; measured in the HTTP log). A chain read through globs
 // (legacy pairs, an unlisted chain) is left out: a glob is not a file.
 //
-// A path holding a glob character is left out too. The views name it the same
-// unescaped way and fail on it at their own statement; listed here, the same
-// failure would come first and cost the reader every view before it.
+// A path holding a glob character is left out too: the function this list is
+// handed to takes each entry as a glob, and the views, which name such a file
+// through fileGlob (#2235), read its footer at their own statement instead.
 func prefetchFiles(in Input) []string {
 	var out []string
 	seen := map[string]bool{}
@@ -2304,6 +2304,11 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 		}
 		// Only a view that FOLLOWS can meet a snapshot it was not generated
 		// against; a pinned one reads the same files forever.
+		//
+		// The table's file is named through globLiteral here and in every
+		// other body (#2235): read_parquet takes a path as a glob, so a
+		// table named "or?ers" read the file of "orders" too, and one named
+		// "order[st]" read that file INSTEAD of its own.
 		guard := ""
 		if in.Follow.follows() {
 			plain, rng := deltaAppearedPatterns(t.Path)
@@ -2313,15 +2318,15 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 			// The table's columns in the table's order (#2111); the casts
 			// and collations stand on their columns in the list.
 			fmt.Fprintf(b, "  SELECT %s\n", list)
-			fmt.Fprintf(b, "  FROM read_parquet(%s)%s;\n", sqlString(t.Path), guard)
+			fmt.Fprintf(b, "  FROM read_parquet(%s)%s;\n", sqlString(fileGlob(t.Path)), guard)
 			continue
 		}
 		if replace := replaceClause(t); replace != "" {
 			fmt.Fprintf(b, "  SELECT * REPLACE (%s)\n", replace)
-			fmt.Fprintf(b, "  FROM read_parquet(%s)%s;\n", sqlString(t.Path), guard)
+			fmt.Fprintf(b, "  FROM read_parquet(%s)%s;\n", sqlString(fileGlob(t.Path)), guard)
 			continue
 		}
-		fmt.Fprintf(b, "  SELECT * FROM read_parquet(%s)%s;\n", sqlString(t.Path), guard)
+		fmt.Fprintf(b, "  SELECT * FROM read_parquet(%s)%s;\n", sqlString(fileGlob(t.Path)), guard)
 	}
 	b.WriteString("\n")
 	return len(wanted) > 0
@@ -2502,10 +2507,22 @@ func writeFollowedPrefetch(b *strings.Builder, in Input) {
 	b.WriteString("-- Reads the footer of every file the views below open, all at once (DuckDB\n")
 	b.WriteString("-- 1.5 or newer; an older DuckDB reads one here and loads at its usual pace).\n")
 	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT count(*) = 2 FROM duckdb_settings() WHERE name = 'validate_external_file_cache' OR (name = 'enable_external_file_cache' AND lower(value) = 'true'));\n", all)
-	parquet := fmt.Sprintf("[f FOR f IN struct_extract(%s, 'files') IF regexp_matches(f, %s)]", filesVarExpr(in),
-		sqlString(`\.parquet$|\.[0-9]{6}(-[0-9]{6})?\.(upserts|posdel)$`))
+	// Each entry through globLiteralSQL, as the views name them (#2235): a
+	// function that takes a list takes each entry as a glob.
+	parquet := prefetchListSQL(filesVarExpr(in))
 	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT count(*) FROM parquet_file_metadata(CASE WHEN getvariable('%s') THEN %s ELSE %s[1:1] END));\n\n",
 		read, all, parquet, parquet)
+}
+
+// prefetchListSQL is the list of files the prefetch reads, as a SQL
+// expression over files, the listing of the snapshot: every table file and
+// chain file in it, each named through globLiteralSQL. A file with a
+// backslash and a pattern character in its path is left out: no pattern
+// names it (unnameableFile), its table has no view to read it for, and one
+// entry that matches nothing fails the statement, before any view exists.
+func prefetchListSQL(files string) string {
+	return fmt.Sprintf("[%s FOR f IN struct_extract(%s, 'files') IF regexp_matches(f, %s) AND NOT (contains(f, '\\') AND regexp_matches(f, '[\\[*?{]'))]",
+		globLiteralSQL("f"), files, sqlString(`\.parquet$|\.[0-9]{6}(-[0-9]{6})?\.(upserts|posdel)$`))
 }
 
 // selectedStatePlans is the state views this render will actually emit: the
@@ -2718,6 +2735,25 @@ func globLiteral(s string) string {
 	return b.String()
 }
 
+// fileGlob is the pattern that names the one file at path, for read_parquet,
+// which takes a path as a glob (#2235): globLiteral. Named for its use: every
+// table file and chain file a view reads goes through it. A path it cannot
+// name (one with a backslash that a view would read through a pattern,
+// unnameableFile) never reaches it: that table has no view.
+func fileGlob(path string) string { return globLiteral(path) }
+
+// FileGlob is fileGlob, for a caller that has to name a path the way the
+// views do: the SQL sandbox allows a statement its directories by their
+// text, and the text a view reads through is this one.
+func FileGlob(path string) string { return fileGlob(path) }
+
+// globLiteralSQL is fileGlob as a SQL expression over expr, for a path that
+// is only known when the statement runs: the same four characters, each
+// wrapped in a class, in one pass.
+func globLiteralSQL(expr string) string {
+	return "regexp_replace(" + expr + `, '([\[*?{])', '[\1]', 'g')`
+}
+
 // writeNewestStateBody emits one state view's body under FollowNewest: a read of
 // ONE Parquet file, whose directory comes from the session variable.
 //
@@ -2755,6 +2791,11 @@ func writeNewestStateBody(b *strings.Builder, in Input, t BaselineTable) {
 	listed := func(glob string) string {
 		fv := filesVarExpr(in)
 		pattern := fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(glob))
+		// Each listed file is named through globLiteralSQL: read_parquet
+		// takes every entry of a list as a glob again, so the file of a
+		// table named "order[st]" read the pair of "orders" and not its own
+		// (#2235).
+		//
 		// The GLOB operator lets `*` cross a "/", which the store's glob does
 		// not: a file in a subdirectory named like this table's chain would
 		// join the list, and the posdel read takes its columns from the first
@@ -2762,14 +2803,14 @@ func writeNewestStateBody(b *strings.Builder, in Input, t BaselineTable) {
 		dirOf := fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(t.Rel[:strings.LastIndex(t.Rel, "/")+1]))
 		return fmt.Sprintf("CASE WHEN getvariable('%s') IS NULL\n    THEN error(%s)\n"+
 			"    WHEN struct_extract(%s, 'dir') IS DISTINCT FROM getvariable('%s')\n    THEN [%s]\n"+
-			"    ELSE [f FOR f IN struct_extract(%s, 'files') IF f GLOB (%s) AND NOT contains(substr(f, length(%s) + 1), '/')] END",
-			newest, sqlString(newestVarUnsetMsg), fv, newest, pattern, fv, pattern, dirOf)
+			"    ELSE [%s FOR f IN struct_extract(%s, 'files') IF f GLOB (%s) AND NOT contains(substr(f, length(%s) + 1), '/')] END",
+			newest, sqlString(newestVarUnsetMsg), fv, newest, pattern, globLiteralSQL("f"), fv, pattern, dirOf)
 	}
 	if t.Delta || chainReady(in, t) {
 		if once {
 			posdel, upserts := baseline.TableDeltaFollowGlobs(t.Rel)
 			fmt.Fprintf(b, "  %s;\n", ordered(t, func(replace string) string {
-				return baseline.TableDeltaFollowStateSQL(path(t.Rel), listed(posdel), listed(upserts), t.Rel, replace)
+				return baseline.TableDeltaFollowStateSQL(path(fileGlob(t.Rel)), listed(posdel), listed(upserts), t.Rel, replace)
 			}))
 			return
 		}
@@ -2781,7 +2822,7 @@ func writeNewestStateBody(b *strings.Builder, in Input, t BaselineTable) {
 	plain, rng := deltaAppearedPatterns(t.Rel)
 	guard := "\n  " + deltaAppearedGuard(fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(plain)),
 		fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(rng)), t)
-	read := "read_parquet(" + path(t.Rel) + ")" + guard
+	read := "read_parquet(" + path(fileGlob(t.Rel)) + ")" + guard
 	if replace := replaceClause(t); replace != "" {
 		fmt.Fprintf(b, "  SELECT * REPLACE (%s)\n", replace)
 		fmt.Fprintf(b, "  FROM %s;\n", read)
@@ -2860,36 +2901,39 @@ func deltaStateBody(t BaselineTable, p string, expr func(string) string, pinned 
 // apply to it; ordered decides whether the star is what the view returns.
 func deltaStateStar(t BaselineTable, p string, expr func(string) string, pinned bool, replace string) string {
 	if t.DeltaLegacy {
-		stem := strings.TrimSuffix(p, ".parquet")
-		return baseline.LegacyTableDeltaStateSQL(expr(p), expr(stem+baseline.TableDeltaPosdelSuffix),
+		stem := fileGlob(strings.TrimSuffix(p, ".parquet"))
+		return baseline.LegacyTableDeltaStateSQL(expr(fileGlob(p)), expr(stem+baseline.TableDeltaPosdelSuffix),
 			expr(stem+baseline.TableDeltaUpsertsSuffix), replace)
 	}
 	if pinned && (len(t.DeltaFiles) == 1 || t.DeltaResolved != nil) {
 		// One pair holds each key once, so its rows are the newest versions
 		// already: no aggregate and no join to find them (#2231). The pair
 		// is the chain's only one, or the whole chain merged into one beside
-		// the snapshots. The paths are made to match themselves:
-		// read_parquet takes each as a glob, and the join's name filter,
-		// which kept a table named "or?ers" from reading the pair of
-		// "orders", is not in this SQL.
+		// the snapshots. Its two files are named through globLiteral like
+		// the table's: the join's name filter, which keeps a table named
+		// "or?ers" from reading the ROWS of the pair of "orders", is not in
+		// this SQL.
 		f := t.DeltaResolved
 		if f == nil {
 			f = &t.DeltaFiles[0]
 		}
-		return baseline.TableDeltaOnePairStateSQL(expr(globLiteral(p)), expr(globLiteral(f.Posdel)), expr(globLiteral(f.Upserts)), replace)
+		return baseline.TableDeltaOnePairStateSQL(expr(fileGlob(p)), expr(fileGlob(f.Posdel)), expr(fileGlob(f.Upserts)), replace)
 	}
 	if pinned && len(t.DeltaFiles) > 0 {
 		posdels := make([]string, 0, len(t.DeltaFiles))
 		upserts := make([]string, 0, len(t.DeltaFiles))
 		for _, f := range t.DeltaFiles {
-			posdels = append(posdels, expr(f.Posdel))
-			upserts = append(upserts, expr(f.Upserts))
+			// Through globLiteral although the name filter drops a
+			// neighbour's rows: the files a pattern admits give the read
+			// their columns and types first (BaselineTable.DeltaFiles).
+			posdels = append(posdels, expr(fileGlob(f.Posdel)))
+			upserts = append(upserts, expr(fileGlob(f.Upserts)))
 		}
-		return baseline.TableDeltaStateSQL(expr(p), "["+strings.Join(posdels, ", ")+"]", "["+strings.Join(upserts, ", ")+"]", p, replace)
+		return baseline.TableDeltaStateSQL(expr(fileGlob(p)), "["+strings.Join(posdels, ", ")+"]", "["+strings.Join(upserts, ", ")+"]", p, replace)
 	}
 	if pinned {
 		posdel, upserts := baseline.TableDeltaGlobs(p)
-		return baseline.TableDeltaStateSQL(expr(p), expr(posdel), expr(upserts), p, replace)
+		return baseline.TableDeltaStateSQL(expr(fileGlob(p)), expr(posdel), expr(upserts), p, replace)
 	}
 	// A following view outlives the snapshot it was generated against, and a
 	// later one can hold this table rewritten in full with no chain beside it
@@ -2897,7 +2941,7 @@ func deltaStateStar(t BaselineTable, p string, expr func(string) string, pinned 
 	// also match the table's own file, so the view reads the base alone then
 	// instead of failing on a glob that matches nothing.
 	posdel, upserts := baseline.TableDeltaFollowGlobs(p)
-	return baseline.TableDeltaFollowStateSQL(expr(p), expr(posdel), expr(upserts), p, replace)
+	return baseline.TableDeltaFollowStateSQL(expr(fileGlob(p)), expr(posdel), expr(upserts), p, replace)
 }
 
 // deltaAppearedPatterns are the two globs deltaAppearedGuard counts: the

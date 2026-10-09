@@ -468,7 +468,13 @@ func anyS3(paths []string) bool {
 func fileListLiteral(paths []string) string {
 	quoted := make([]string, len(paths))
 	for i, p := range paths {
-		quoted[i] = sqlQuoteLiteral(p)
+		// Each entry is taken as a glob (#2235): unescaped, the footer of a
+		// table named "order[st]" was read from the file of "orders", the
+		// table got no entry and was reported as carrying no CREATE TABLE.
+		// Always: a path that also holds a backslash, which the glob splits
+		// on, then matches nothing and that one file is reported as not
+		// read, where the pattern it was would have read other files.
+		quoted[i] = sqlQuoteLiteral(escapeGlob(p))
 	}
 	return "[" + strings.Join(quoted, ", ") + "]"
 }
