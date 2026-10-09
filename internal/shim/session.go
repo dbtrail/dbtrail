@@ -99,6 +99,11 @@ func (s *Session) HandleCommand() error {
 		s.stampStatus(v)
 		err = c.WriteValue(v)
 	}
+	// The answer is written, or will never be: whatever result the handler
+	// counted for it is no longer held (#2241).
+	if rh, ok := s.h.(resultReleaser); ok {
+		rh.ReleaseResult()
+	}
 	if c.Conn != nil {
 		c.ResetSequence()
 	}

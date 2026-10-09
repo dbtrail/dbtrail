@@ -317,8 +317,18 @@ What to know before relying on it:
   daemon, which captures, while it is sent, and takes a few times its size
   while it is prepared (measured: a 64 MB result of 100,000 rows, about 320
   MB at its peak). `--sql-max-in-flight` bounds the statements running, not
-  the connections receiving a result, so raise the cap only with memory to spare, and not
-  for many clients reading large results at once. A result of exactly the cap's
+  the connections receiving a result, so the port has a bound of its own:
+  a result is counted only while the port holds less than 256 MB of results
+  being sent, over all its connections, so it never holds more than that
+  plus one result. While it holds that much, a statement is refused, before
+  it runs when the port can tell, with error 1203 and "run the statement
+  again in a moment"; under read routing MySQL answers it instead
+  (`copy_results_held` in the counter). The daemon's log says so, once a
+  minute at most. A result stops counting when it has been written to the
+  client, so a connection left open holds nothing. A client that reads
+  nothing of an answer for 60 seconds is disconnected, as MySQL does at its
+  `net_write_timeout`, and the log names its address; one that reads
+  slowly is not. A result of exactly the cap's
   size is whole and is returned. The one cut that is not an error is the one
   the connection asked for: after `SET sql_select_limit = N`, with N at or
   under the cap, a `SELECT` with no `LIMIT` of its own returns its first N
@@ -1914,7 +1924,8 @@ MySQL's.
   `copy_age_unknown`, `copy_too_old`, `copy_refused`, `copy_queue_full` (the
   copy was busy and 16 statements were already waiting for it, so this one
   did not wait), `copy_wait_timeout` (the copy was busy and the statement
-  waited 30 seconds for its turn), `copy_columns_differ`
+  waited 30 seconds for its turn), `copy_results_held` (the port was still
+  sending as many results as it keeps in memory at once), `copy_columns_differ`
   (the copy works and declined a `SELECT *` or a `NATURAL JOIN` over a table
   whose columns there are not MySQL's, a statement that names a column
   the copy does not hold, one that does arithmetic on a date column, or one

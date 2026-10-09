@@ -11,6 +11,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/shim"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
 // This file mutates up* package globals via save-and-restore. DO NOT add
@@ -91,10 +93,49 @@ func TestFlashbackConfigWithDefaults(t *testing.T) {
 	if got.MaxFullTable != defaultFlashbackMaxFullTable {
 		t.Fatalf("MaxFullTable default = %d, want %d", got.MaxFullTable, defaultFlashbackMaxFullTable)
 	}
-	custom := flashbackConfig{QueryTimeout: time.Second, MaxFullTable: 9}.withDefaults()
-	if custom.QueryTimeout != time.Second || custom.MaxFullTable != 9 {
+	// #2241: a port always has a bound on the results it holds while
+	// sending them, of four of the largest result one statement returns.
+	if got.ResultBudget.Max() != 4*sqlsandbox.DefaultLimits().MaxResultBytes {
+		t.Fatalf("ResultBudget default = %d bytes, want four results of %d", got.ResultBudget.Max(), sqlsandbox.DefaultLimits().MaxResultBytes)
+	}
+	own := shim.NewResultBudget(1)
+	custom := flashbackConfig{QueryTimeout: time.Second, MaxFullTable: 9, ResultBudget: own}.withDefaults()
+	if custom.QueryTimeout != time.Second || custom.MaxFullTable != 9 || custom.ResultBudget != own {
 		t.Fatalf("explicit values overwritten: %+v", custom)
 	}
+}
+
+// budgetTestFreeSQL is a copy that answers one row.
+type budgetTestFreeSQL struct{ routeTestFreeSQL }
+
+func (budgetTestFreeSQL) Run(context.Context, string, string, sqlsandbox.Session) (sqlsandbox.Result, error) {
+	return sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "x", Type: "VARCHAR"}}, Rows: [][]any{{strings.Repeat("a", 1000)}}}, nil
+}
+
+// The port's serving loop asks the handler it was given to release the
+// result it counted, and that handler is the routing wrapper: it must pass
+// the call to the handler that did the counting, or the budget fills up for
+// good and the port refuses every statement (#2241).
+func TestRoutingHandlerReleasesTheInnerHandlersResult(t *testing.T) {
+	b := shim.NewResultBudget(1 << 20)
+	inner := shim.NewHandlerWithConfig(nil, shim.Config{ResultBudget: b}, nil)
+	inner.BindFreeSQL(budgetTestFreeSQL{})
+	proxy := &routingHandler{inner: inner}
+	if _, err := proxy.HandleQuery("SELECT x FROM t"); err != nil {
+		t.Fatal(err)
+	}
+	if b.Held() < 1000 {
+		t.Fatalf("held = %d after a 1000-byte result, want it counted", b.Held())
+	}
+	rel, ok := any(proxy).(interface{ ReleaseResult() })
+	if !ok {
+		t.Fatal("routingHandler has no ReleaseResult: shim.Session would never release a result")
+	}
+	rel.ReleaseResult()
+	if b.Held() != 0 {
+		t.Errorf("held = %d after the release, want 0", b.Held())
+	}
+	(&routingHandler{}).ReleaseResult() // not bound yet: nothing to release
 }
 
 // TestServeFlashbackRequiresToken: the port refuses to start without a token,

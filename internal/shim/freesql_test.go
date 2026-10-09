@@ -26,6 +26,9 @@ type fakeFreeSQL struct {
 	gotSess   sqlsandbox.Session
 	updatedAt time.Time
 	ageCalls  int
+	// onRun, when set, runs inside each ordinary Run, as the wait for a
+	// worker does: time in which other connections go on.
+	onRun func()
 	// rowCap is what RowCap answers: 0 is a copy that names no cap.
 	rowCap int
 	// A statement sent with Session.UnchangedWithin (the snapshot is older
@@ -60,6 +63,9 @@ func (f *fakeFreeSQL) Run(_ context.Context, statement, schema string, sess sqls
 	}
 	f.calls++
 	f.gotStmt, f.gotSchema, f.gotSess = statement, schema, sess
+	if f.onRun != nil {
+		f.onRun()
+	}
 	if sess.UnchangedWithin > 0 {
 		f.unchangedAsks++
 		if !f.unchanged {

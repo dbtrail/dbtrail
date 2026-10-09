@@ -1406,9 +1406,10 @@ one release and warns that it no longer does anything. Remove it.
   time-travel port (default `10000`; below `1` refuses to start). A result
   with more is refused with error 1104, not cut. This page's SQL card shows
   1,000 rows whatever it is. A result is also refused past 64 MB, and is
-  held in the daemon while it is sent, one per connection receiving one
-  whatever `--sql-max-in-flight` says: raise it only with memory to
-  spare. On the compose stack the value goes in `.env` as
+  held in the daemon while it is sent: at most 256 MB of results over all
+  the port's connections, past which a statement is refused with error
+  1203 until an answer has been written to its client (one that reads
+  nothing of it for 60 seconds is disconnected). On the compose stack the value goes in `.env` as
   `SQL_PORT_MAX_ROWS`.
 - `BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT` (`watch` only) — same as
   `--sql-max-in-flight`: how many SQL-on-the-copy statements run at once, the

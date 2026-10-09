@@ -3,9 +3,12 @@ package shim
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/server"
@@ -186,14 +189,40 @@ func (a announceStatus) OnAuthSuccess(c *server.Conn) error {
 // handshakeConn sets the status announced by the server's handshake, the
 // first packet written on the connection (before any TLS upgrade). Every
 // later write passes through untouched.
+//
+// It also gives every write a time limit (portWriteTimeout): the library
+// sets none on a server connection.
 type handshakeConn struct {
 	net.Conn
 	written bool
+	// stalled says the write timeout was already logged for this connection.
+	stalled bool
 }
 
+// portWriteTimeout is how long one write to a client may block, in
+// nanoseconds: what MySQL calls net_write_timeout, and the 60 seconds this
+// port announces for it (sysvars.go). A write blocks only while the client
+// reads nothing, so a client that takes long over a large answer is not cut
+// as long as it keeps reading; one that asked and stopped reading is, and
+// its connection ends, which gives back the result the port held for it
+// (ResultBudget, #2241). An atomic so a test can lower it.
+var portWriteTimeout atomic.Int64
+
+func init() { portWriteTimeout.Store(int64(60 * time.Second)) }
+
 func (c *handshakeConn) Write(p []byte) (int, error) {
+	if d := time.Duration(portWriteTimeout.Load()); d > 0 {
+		_ = c.Conn.SetWriteDeadline(time.Now().Add(d))
+	}
 	if c.written {
-		return c.Conn.Write(p)
+		n, err := c.Conn.Write(p)
+		var ne net.Error
+		if err != nil && errors.As(err, &ne) && ne.Timeout() && !c.stalled {
+			c.stalled = true
+			slog.Warn("mysql port: a client read nothing of its answer for the whole write timeout; its connection is closed",
+				"remote", c.RemoteAddr(), "timeout", time.Duration(portWriteTimeout.Load()))
+		}
+		return n, err
 	}
 	c.written = true
 	out, ok := setHandshakeStatus(p, newSessionStatus)

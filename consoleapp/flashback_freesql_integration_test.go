@@ -20,6 +20,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/audittest"
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/shim"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -86,13 +87,33 @@ func TestIntegrationFlashbackFreeSQLOnTheCopy(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan struct{})
-	go func() { _ = serveFlashback(ctx, srv, ln, flashbackConfig{}); close(served) }()
+	budget := shim.NewResultBudget(64 << 20)
+	go func() { _ = serveFlashback(ctx, srv, ln, flashbackConfig{ResultBudget: budget}); close(served) }()
 	defer func() { cancel(); <-served }()
+	// #2241, checked while the test's connection is still open (deferred
+	// after its Close would let the close do the releasing): the results of
+	// its statements were counted, and none is held once it was read.
+	checkBudget := func() {
+		t.Helper()
+		if budget.Charged() == 0 {
+			t.Error("the port's result budget counted nothing: the statements above returned rows")
+		}
+		// The port gives a result back right after writing it, which the
+		// client can see a moment before.
+		for range 200 {
+			if budget.Held() == 0 {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Errorf("the port still counts %d bytes of results after every answer was read", budget.Held())
+	}
 	addr := ln.Addr().String()
 	rec := audittest.Install(t)
 
 	conn := openFlashback(t, addr, ent.ID, "tok", "")
 	defer conn.Close()
+	defer checkBudget()
 
 	// An ordinary SELECT, unqualified: the state view in the default schema.
 	rows, err := conn.Query("SELECT id, status FROM orders ORDER BY id")

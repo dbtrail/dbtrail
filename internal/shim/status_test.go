@@ -484,6 +484,9 @@ func (f *firstWrite) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// The port sets a time limit on every write (portWriteTimeout).
+func (f *firstWrite) SetWriteDeadline(time.Time) error { return nil }
+
 // A first packet that is not the handshake this code knows (a library that
 // writes it another way) goes out as written, and is said in the log, once
 // per process: the status it announces is then most likely 0, which is the
