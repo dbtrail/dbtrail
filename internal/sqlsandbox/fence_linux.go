@@ -4,7 +4,6 @@ package sqlsandbox
 
 import (
 	"os"
-	"os/exec"
 	"syscall"
 )
 
@@ -27,12 +26,4 @@ func cgroupDelegated(dir string) bool {
 		}
 	}
 	return false
-}
-
-// startInFence makes the kernel start cmd inside the cgroup (clone3 with
-// CLONE_INTO_CGROUP, Linux 5.7), so the worker never runs a moment outside
-// its ceiling. setProcessGroup has set SysProcAttr already.
-func startInFence(cmd *exec.Cmd, wf *workerFence) {
-	cmd.SysProcAttr.UseCgroupFD = true
-	cmd.SysProcAttr.CgroupFD = int(wf.handle.Fd())
 }

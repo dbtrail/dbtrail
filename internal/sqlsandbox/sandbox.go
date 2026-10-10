@@ -1136,7 +1136,9 @@ func (r *Runner) startWorker(memoryLimit string) (*worker, error) {
 	return w, startErr
 }
 
-// startWorkerProcess starts one worker process, inside wf when it is given.
+// startWorkerProcess starts one worker process and, when wf is given, moves
+// it into that cgroup before returning it. wf is removed when the process
+// exits.
 func startWorkerProcess(exe string, args []string, wf *workerFence) (*worker, error) {
 	// The process is tied to its own context, not to a statement's: the
 	// statement's deadline does not exist yet when a worker starts.
@@ -1149,9 +1151,6 @@ func startWorkerProcess(exe string, args []string, wf *workerFence) (*worker, er
 		return nil, fmt.Errorf("stdin: %w", err)
 	}
 	setProcessGroup(cmd)
-	if wf != nil {
-		intoFence(cmd, wf)
-	}
 	// Kill the whole process group: DuckDB's worker threads belong to the
 	// child, and a plain Kill of the leader is enough for them, but a group
 	// kill also covers anything the child might spawn.
@@ -1183,6 +1182,16 @@ func startWorkerProcess(exe string, args []string, wf *workerFence) (*worker, er
 		}
 		close(w.done)
 	}()
+	if wf != nil {
+		// Before the worker is given anything to do. One that cannot be
+		// moved is stopped: it is not handed a job outside its ceiling as if
+		// it were inside.
+		if err := intoFence(wf, cmd.Process.Pid); err != nil {
+			kill()
+			<-w.done
+			return nil, fmt.Errorf("move it into its cgroup: %w", err)
+		}
+	}
 	return w, nil
 }
 

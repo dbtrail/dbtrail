@@ -148,15 +148,21 @@ func fenceBytes(memoryLimit string) (int64, error) {
 // stand in for the kernel, which fills a new cgroup with its control files.
 var mkFenceDir = func(root string) (string, error) { return os.MkdirTemp(root, fencePrefix) }
 
-// intoFence starts a command inside a worker's cgroup; a variable so a test
-// whose cgroup is a plain directory can start its worker all the same.
-var intoFence = startInFence
+// intoFence moves a started worker into its cgroup; a variable so a test
+// can see the move or refuse it.
+var intoFence = func(wf *workerFence, pid int) error { return wf.take(pid) }
 
-// workerFence is one worker's cgroup. handle is the open directory the
-// worker is started into.
-type workerFence struct {
-	dir    string
-	handle *os.File
+// workerFence is one worker's cgroup.
+type workerFence struct{ dir string }
+
+// take moves the process pid, with all its threads, into the cgroup. The
+// worker is moved after it starts and before it is given its job: it is
+// idle until then, so no statement ever runs outside the ceiling. Starting
+// it inside the cgroup in one step (clone3 with CLONE_INTO_CGROUP) is not
+// used: Docker's default seccomp profile answers clone3 with "not
+// implemented" (verified on Docker 29.1).
+func (w *workerFence) take(pid int) error {
+	return writeCgroupFile(filepath.Join(w.dir, "cgroup.procs"), strconv.Itoa(pid))
 }
 
 // make makes the cgroup for one worker with memoryLimit and sets its
@@ -188,10 +194,6 @@ func (f fence) make(memoryLimit string) (*workerFence, error) {
 	}
 	// Best-effort: it only matters if the worker ever starts a process.
 	_ = writeCgroupFile(filepath.Join(dir, "memory.oom.group"), "1")
-	if wf.handle, err = os.Open(dir); err != nil {
-		wf.close()
-		return nil, fmt.Errorf("open the statement's cgroup: %w", err)
-	}
 	return wf, nil
 }
 
@@ -229,9 +231,6 @@ func (w *workerFence) oomKilled() bool {
 // close removes the cgroup. The worker has exited by then, but the kernel
 // can hold the cgroup busy for a moment after its last process is gone.
 func (w *workerFence) close() {
-	if w.handle != nil {
-		_ = w.handle.Close()
-	}
 	var err error
 	for range 50 {
 		if err = removeFenceDir(w.dir); err == nil || errors.Is(err, os.ErrNotExist) {

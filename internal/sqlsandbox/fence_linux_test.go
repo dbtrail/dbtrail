@@ -31,7 +31,7 @@ func realFence(t *testing.T) fence {
 }
 
 // The worker runs inside a cgroup of its own, with the ceiling its memory
-// limit asks for, from its first instruction.
+// limit asks for, by the time it is given its job.
 func TestFence_theWorkerRunsInItsOwnCgroup(t *testing.T) {
 	realFence(t)
 	f := newCopyFixture(t)

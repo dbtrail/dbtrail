@@ -36,7 +36,7 @@ func fakeKernel(t *testing.T, events string) {
 		if err != nil {
 			return "", err
 		}
-		for name, body := range map[string]string{"memory.max": "max\n", "memory.swap.max": "max\n", "memory.oom.group": "0\n", "memory.events": events} {
+		for name, body := range map[string]string{"memory.max": "max\n", "memory.swap.max": "max\n", "memory.oom.group": "0\n", "memory.events": events, "cgroup.procs": ""} {
 			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 				return "", err
 			}
@@ -193,6 +193,12 @@ func TestWorkerFenceLifecycle(t *testing.T) {
 	}
 	if wf.oomKilled() {
 		t.Error("oom_kill 0 read as a kill")
+	}
+	if err := wf.take(4242); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(wf.dir, "cgroup.procs")); string(got) != "4242" {
+		t.Errorf("cgroup.procs = %q, want the worker's pid", got)
 	}
 	// The real directory holds only kernel files and rmdir takes it; the
 	// fake's are ordinary files, removed first.

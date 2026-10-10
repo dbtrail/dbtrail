@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,7 +14,7 @@ import (
 
 // fakeFence gives the Runners of one test a fence over a plain directory:
 // the kernel's part (the control files, the counters a dead worker leaves)
-// is stood in for, and the worker is started outside it.
+// is stood in for, and the worker's move into it is recorded, not made.
 func fakeFence(t *testing.T, events string) (parent string) {
 	t.Helper()
 	fakeKernel(t, events)
@@ -23,10 +22,11 @@ func fakeFence(t *testing.T, events string) (parent string) {
 	prevFor, prevInto := fenceFor, intoFence
 	fenceFor = func() fence { return fence{root: parent} }
 	startedIn = nil
-	intoFence = func(_ *exec.Cmd, wf *workerFence) {
+	intoFence = func(wf *workerFence, pid int) error {
 		// Read now: the cgroup is gone when the statement returns.
 		ceiling, _ := os.ReadFile(filepath.Join(wf.dir, "memory.max"))
-		startedIn = append(startedIn, fenceStart{dir: wf.dir, ceiling: string(ceiling)})
+		startedIn = append(startedIn, fenceStart{dir: wf.dir, ceiling: string(ceiling), pid: pid})
+		return nil
 	}
 	t.Cleanup(func() { fenceFor, intoFence = prevFor, prevInto })
 	return parent
@@ -34,7 +34,10 @@ func fakeFence(t *testing.T, events string) (parent string) {
 
 // fenceStart is one worker start as fakeFence's stand-in saw it: the cgroup
 // the worker was to be started in and the ceiling it had at that moment.
-type fenceStart struct{ dir, ceiling string }
+type fenceStart struct {
+	dir, ceiling string
+	pid          int
+}
 
 var startedIn []fenceStart
 
@@ -105,8 +108,8 @@ func TestRun_aFencedStatementAnswers(t *testing.T) {
 	// The worker was started into a cgroup of its own under the delegated
 	// one, with the ceiling its memory limit asks for already set.
 	want, _ := fenceBytes(testLimits().MemoryLimit)
-	if len(startedIn) != 1 || filepath.Dir(startedIn[0].dir) != parent || startedIn[0].ceiling != fmt.Sprint(want) {
-		t.Errorf("worker starts = %+v, want one, under %s, with memory.max %d", startedIn, parent, want)
+	if len(startedIn) != 1 || filepath.Dir(startedIn[0].dir) != parent || startedIn[0].ceiling != fmt.Sprint(want) || startedIn[0].pid <= 0 {
+		t.Errorf("worker moves = %+v, want one process, into a cgroup under %s, with memory.max %d", startedIn, parent, want)
 	}
 	if left := fencesLeft(t, parent); len(left) != 0 {
 		t.Errorf("cgroups left after the statement: %v", left)
@@ -165,5 +168,37 @@ func TestRun_aWorkerThatCannotStartDoesNotBlameItsCgroup(t *testing.T) {
 	}
 	if fenced, why := r.FenceState(); !fenced {
 		t.Errorf("FenceState = false, %q; the cgroup was not what failed", why)
+	}
+}
+
+// A worker that cannot be moved into its cgroup is stopped, never handed a
+// job outside its ceiling as if it were inside: the statement runs in a
+// second worker with no cgroup, and the Runner says so.
+func TestRun_aWorkerThatCannotBeMovedIsReplaced(t *testing.T) {
+	parent := fakeFence(t, "oom_kill 0\n")
+	var refused []int
+	intoFence = func(_ *workerFence, pid int) error {
+		refused = append(refused, pid)
+		return errors.New("no")
+	}
+	f := newCopyFixture(t)
+	r := newTestRunner(t, testLimits())
+	var ran int
+	r.onStart = func(pid int) { ran = pid }
+	res, err := r.Run(context.Background(), f.job("SELECT 1"))
+	if err != nil || len(res.Rows) != 1 {
+		t.Fatalf("res = %v, err = %v; want the statement's answer", res.Rows, err)
+	}
+	if len(refused) != 1 || ran == refused[0] {
+		t.Fatalf("moves refused for %v, statement ran in %d: want it to run in another worker than the one refused", refused, ran)
+	}
+	if alive(refused[0]) {
+		t.Errorf("worker %d, which could not be moved, is still running", refused[0])
+	}
+	if fenced, why := r.FenceState(); fenced || !strings.Contains(why, "move it into its cgroup") {
+		t.Errorf("FenceState = %v, %q; want unfenced, naming the move", fenced, why)
+	}
+	if left := fencesLeft(t, parent); len(left) != 0 {
+		t.Errorf("cgroups left after the statement: %v", left)
 	}
 }
