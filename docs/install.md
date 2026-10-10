@@ -270,8 +270,8 @@ What the package puts on the machine:
 
 | Path | What it is |
 |---|---|
-| `/usr/lib/systemd/system/bintrail-console.service` | The unit: restarts after a crash, and gives capture 60 seconds to save its position on a stop |
-| `/etc/bintrail/bintrail-console.env` | The settings, mode `0600` because the index DSN holds a password. An upgrade never overwrites it |
+| `/usr/lib/systemd/system/bintrail-console.service` | The unit: restarts whenever the process ends without being asked to stop, and gives capture 60 seconds to save its position on a stop |
+| `/etc/bintrail/bintrail-console.env` | The settings, mode `0600` because the index DSN holds a password. Created on install when there is none; no upgrade overwrites it or asks about it |
 | `/var/lib/bintrail` | What DBTrail saves: the servers you add, the login, Claude's token, the work folders of full reads |
 | a `bintrail` system account | The account the service runs as. An account of that name that already exists is left as it is |
 
@@ -279,11 +279,15 @@ What the package puts on the machine:
   To change the unit itself use `sudo systemctl edit bintrail-console`: that
   survives upgrades, an edit of the installed file does not.
 - **An upgrade** restarts the service if it was running, so the new binary is
-  the one capturing. Capture resumes from its saved position.
-- **A removal** stops and disables the service. `/var/lib/bintrail` and the
-  account stay, so reinstalling finds the servers and the login again. On
-  Debian and Ubuntu `apt purge` also deletes the settings file; on RHEL-family
-  systems an edited settings file is kept as `bintrail-console.env.rpmsave`.
+  the one capturing. Capture resumes from its saved position. If the service
+  does not come back, the upgrade says so and names the log to read.
+- **A removal** stops and disables the service. The settings file,
+  `/var/lib/bintrail` and the account stay, so reinstalling finds the index,
+  the servers and the login again; enable the service again after it. On
+  Debian and Ubuntu `apt purge` also deletes the settings file.
+- **A setting added by a later version** is not added to your settings file.
+  The current text, with every setting and its comment, is always at
+  `/usr/share/bintrail-console/bintrail-console.env`.
 - **A unit you wrote yourself** at `/etc/systemd/system/bintrail-console.service`
   keeps winning over the packaged one. Delete it, then run
   `sudo systemctl daemon-reload`, to move to the packaged unit.

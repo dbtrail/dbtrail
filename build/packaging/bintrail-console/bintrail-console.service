@@ -16,12 +16,14 @@ ExecStart=/usr/bin/bintrail-console watch
 WorkingDirectory=/var/lib/bintrail
 StateDirectory=bintrail
 StateDirectoryMode=0750
-# DBTrail only captures while it runs, so a crash must not end capture.
-Restart=on-failure
+# DBTrail only captures while it runs, so nothing but a stop asked of systemd
+# ends it: a crash restarts, and so does an exit that reported no error.
+Restart=always
 RestartSec=5
 # Time for capture to save its position before systemd kills the process.
 TimeoutStopSec=60
-# Lets the service manage its own control groups below this unit.
+# Hands the control groups below this unit to the service. Nothing uses
+# that yet.
 Delegate=yes
 
 [Install]

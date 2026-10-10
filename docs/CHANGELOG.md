@@ -11,14 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.deb` and `.rpm` used to bring the binary and nothing around it, so
   starting at boot and restarting after a crash were left to a unit the
   operator wrote. The package now brings `bintrail-console.service` (it runs
-  `bintrail-console watch`, restarts after a crash, and gives capture 60
-  seconds to save its position on a stop), its settings in
+  `bintrail-console watch`, restarts whenever the process ends without being
+  asked to stop, and gives capture 60 seconds to save its position on a
+  stop), its settings in
   `/etc/bintrail/bintrail-console.env`, the folder `/var/lib/bintrail` for what
   DBTrail saves, and a `bintrail` system account to run as. Installing does
   not start anything: set `BINTRAIL_INDEX_DSN` in the settings file, then
   `sudo systemctl enable --now bintrail-console`. An upgrade never overwrites
-  the settings file, and restarts the service only if it was running. A
-  removal stops the service and leaves `/var/lib/bintrail` in place.
+  the settings file, restarts the service only if it was running, and says
+  so if it does not come back. A removal stops the service and leaves the
+  settings file and `/var/lib/bintrail` in place.
   **If you already run it from a unit of your own** named
   `bintrail-console.service` under `/etc/systemd/system`, yours keeps winning
   and nothing changes; an account named `bintrail` that already exists is left

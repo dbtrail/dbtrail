@@ -63,9 +63,20 @@ func TestPackaging_theUnitMatchesWhatThePackageInstalls(t *testing.T) {
 	if got := line("ExecStart"); got != "/usr/bin/bintrail-console watch" {
 		t.Errorf("ExecStart=%s, want the packaged binary running watch", got)
 	}
+	// The live settings file is created by postinstall from the shipped copy,
+	// never owned by the package: an owned file the operator edited makes
+	// dpkg stop and ask on the first upgrade that changes the shipped text.
 	envFile := line("EnvironmentFile")
-	if !strings.Contains(cfg, "dst: "+envFile+"\n") {
-		t.Errorf("the unit reads %s, which the package does not install", envFile)
+	post := read(t, filepath.Join(pkgDir, "postinstall.sh"))
+	if !strings.Contains(post, "settings="+envFile+"\n") {
+		t.Errorf("the unit reads %s, which postinstall.sh does not create", envFile)
+	}
+	if strings.Contains(cfg, "dst: "+envFile) {
+		t.Errorf("the package owns %s; ship a copy and let postinstall.sh place it", envFile)
+	}
+	const shipped = "/usr/share/bintrail-console/bintrail-console.env"
+	if !strings.Contains(cfg, "dst: "+shipped+"\n") || !strings.Contains(post, shipped) {
+		t.Errorf("the package and postinstall.sh must agree on the shipped copy %s", shipped)
 	}
 	state := "/var/lib/" + line("StateDirectory")
 	if !strings.Contains(cfg, "dst: "+state+"\n") {
@@ -73,6 +84,9 @@ func TestPackaging_theUnitMatchesWhatThePackageInstalls(t *testing.T) {
 	}
 	if got := line("WorkingDirectory"); got != state {
 		t.Errorf("WorkingDirectory=%s, want %s", got, state)
+	}
+	if got := line("Restart"); got != "always" {
+		t.Errorf("Restart=%s: an exit that reports no error would end capture until someone noticed", got)
 	}
 	if got := line("User"); got != "bintrail" {
 		t.Errorf("User=%s, want the account preinstall.sh creates", got)
@@ -100,17 +114,31 @@ func TestPackaging_theUnitMatchesWhatThePackageInstalls(t *testing.T) {
 }
 
 // stub writes stand-ins for the tools the scripts call. Each one records its
-// arguments; getent answers from EXISTING (space separated names).
+// arguments; getent answers from EXISTING (space separated names). systemctl
+// answers is-enabled from ENABLED, and is-active from ACTIVE: "yes", "no", or
+// "once" for a service that is running when asked and gone after a restart.
 func stub(t *testing.T) (path, log string) {
 	t.Helper()
 	dir := t.TempDir()
 	log = filepath.Join(dir, "calls.log")
 	rec := "#!/bin/sh\necho \"$(basename \"$0\") $*\" >> \"$STUB_LOG\"\n"
 	for name, body := range map[string]string{
-		"systemctl": rec,
-		"groupadd":  rec,
-		"useradd":   rec,
-		"getent":    "#!/bin/sh\ncase \" $EXISTING \" in *\" $1:$2 \"*) exit 0 ;; esac\nexit 2\n",
+		"systemctl": rec + `case "$1" in
+  is-enabled) [ "$ENABLED" = yes ] ;;
+  is-active) case "$ACTIVE" in
+      yes) exit 0 ;;
+      once) [ ! -e "$STUB_LOG.asked" ] && : > "$STUB_LOG.asked" ;;
+      *) exit 1 ;;
+    esac ;;
+esac
+`,
+		"groupadd": rec,
+		"useradd":  rec,
+		"install":  rec,
+		"rm":       rec,
+		"rmdir":    rec,
+		"sleep":    "#!/bin/sh\n",
+		"getent":   "#!/bin/sh\ncase \" $EXISTING \" in *\" $1:$2 \"*) exit 0 ;; esac\nexit 2\n",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
 			t.Fatal(err)
@@ -121,9 +149,14 @@ func stub(t *testing.T) (path, log string) {
 
 func runScript(t *testing.T, script string, existing string, args ...string) (calls, out string) {
 	t.Helper()
+	return runScriptEnv(t, script, []string{"EXISTING=" + existing}, args...)
+}
+
+func runScriptEnv(t *testing.T, script string, env []string, args ...string) (calls, out string) {
+	t.Helper()
 	bin, log := stub(t)
 	cmd := exec.Command("/bin/sh", append([]string{filepath.Join(pkgDir, script)}, args...)...)
-	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "STUB_LOG=" + log, "EXISTING=" + existing}
+	cmd.Env = append([]string{"PATH=" + bin + ":/usr/bin:/bin", "STUB_LOG=" + log}, env...)
 	b, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s %v: %v\n%s", script, args, err, b)
@@ -154,36 +187,69 @@ func TestPackaging_preinstallCreatesTheAccountOnceAndLeavesAnExistingOneAlone(t 
 func needSystemd(t *testing.T) {
 	t.Helper()
 	if _, err := os.Stat("/run/systemd/system"); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("CI runs on a host with no systemd, so the scripts' systemctl branches are not tested anywhere")
+		}
 		t.Skip("no systemd on this host: the scripts exit before calling systemctl")
+	}
+}
+
+// The settings file is placed before the systemd check, so this runs on any
+// host. The stand-in for install records the call; the real file is never
+// written (the test host has no /etc/bintrail/bintrail-console.env).
+func TestPackaging_postinstallPlacesTheSettingsFileOnlyWhenThereIsNone(t *testing.T) {
+	if _, err := os.Stat("/etc/bintrail/bintrail-console.env"); err == nil {
+		t.Skip("this host has a real settings file, which the script must leave alone")
+	}
+	calls, _ := runScript(t, "postinstall.sh", "", "configure")
+	want := "install -m 0600 /usr/share/bintrail-console/bintrail-console.env /etc/bintrail/bintrail-console.env\n"
+	if !strings.Contains(calls, want) {
+		t.Errorf("want the shipped copy placed with mode 0600, got:\n%s", calls)
+	}
+	post := read(t, filepath.Join(pkgDir, "postinstall.sh"))
+	if !strings.Contains(post, `if [ ! -e "$settings" ]; then`) {
+		t.Error("postinstall.sh must place the settings file only when none exists: an upgrade would overwrite the index DSN")
 	}
 }
 
 func TestPackaging_postinstallStartsNothingOnAFirstInstallAndRestartsOnAnUpgrade(t *testing.T) {
 	needSystemd(t)
 	for _, tc := range []struct {
-		name    string
-		args    []string
-		restart bool
+		name            string
+		args            []string
+		active, enabled string
+		restart, hint   bool
+		warn            bool
 	}{
-		{"deb first install", []string{"configure"}, false},
-		{"deb first install, empty version", []string{"configure", ""}, false},
-		{"rpm first install", []string{"1"}, false},
-		{"deb upgrade", []string{"configure", "0.102.0"}, true},
-		{"rpm upgrade", []string{"2"}, true},
+		{"deb first install", []string{"configure"}, "no", "no", false, true, false},
+		{"deb first install, empty version", []string{"configure", ""}, "no", "no", false, true, false},
+		{"rpm first install", []string{"1"}, "no", "no", false, true, false},
+		{"deb upgrade, running", []string{"configure", "0.102.0"}, "yes", "yes", true, false, false},
+		{"rpm upgrade, running", []string{"2"}, "yes", "yes", true, false, false},
+		{"upgrade, stopped by the operator", []string{"2"}, "no", "yes", false, false, false},
+		{"upgrade from a version with no service", []string{"configure", "0.102.0"}, "no", "no", false, true, false},
+		{"deb reinstall after a removal", []string{"configure", "0.103.0"}, "no", "no", false, true, false},
+		{"upgrade, and it does not come back", []string{"2"}, "once", "yes", true, false, true},
+		// A first install over a service that already runs, from a unit the
+		// operator wrote: it is theirs to restart.
+		{"first install, their own unit running", []string{"1"}, "yes", "yes", false, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			calls, out := runScript(t, "postinstall.sh", "", tc.args...)
+			calls, out := runScriptEnv(t, "postinstall.sh", []string{"ACTIVE=" + tc.active, "ENABLED=" + tc.enabled}, tc.args...)
 			if !strings.Contains(calls, "systemctl daemon-reload\n") {
 				t.Errorf("want a daemon-reload, got:\n%s", calls)
 			}
 			if got := strings.Contains(calls, "try-restart bintrail-console.service"); got != tc.restart {
 				t.Errorf("restart = %v, want %v; calls:\n%s", got, tc.restart, calls)
 			}
-			if strings.Contains(calls, "enable") || strings.Contains(calls, " start ") {
+			if strings.Contains(calls, "systemctl enable") || strings.Contains(calls, "systemctl start") {
 				t.Errorf("an install must never enable or start the service, got:\n%s", calls)
 			}
-			if hint := strings.Contains(out, "systemctl enable --now bintrail-console"); hint == tc.restart {
-				t.Errorf("the how-to-start hint is for a first install only; printed = %v", hint)
+			if got := strings.Contains(out, "systemctl enable --now bintrail-console"); got != tc.hint {
+				t.Errorf("how-to-start hint printed = %v, want %v; output:\n%s", got, tc.hint, out)
+			}
+			if got := strings.Contains(out, "did not come back"); got != tc.warn {
+				t.Errorf("did-not-come-back warning printed = %v, want %v; output:\n%s", got, tc.warn, out)
 			}
 		})
 	}
@@ -214,11 +280,24 @@ func TestPackaging_preremoveStopsTheServiceOnARemovalAndNeverOnAnUpgrade(t *test
 	}
 }
 
-func TestPackaging_postremoveReloadsAndRemovesNothing(t *testing.T) {
-	needSystemd(t)
-	for _, arg := range []string{"remove", "purge", "upgrade", "0", "1"} {
+func TestPackaging_postremoveDeletesOnlyTheSettingsFileAndOnlyOnAPurge(t *testing.T) {
+	// purge runs before the systemd check, so it is tested on any host.
+	calls, _ := runScript(t, "postremove.sh", "", "purge")
+	if !strings.Contains(calls, "rm -f /etc/bintrail/bintrail-console.env\n") {
+		t.Errorf("a purge must delete the settings file, got:\n%s", calls)
+	}
+	for _, arg := range []string{"remove", "upgrade", "0", "1", "purge"} {
 		calls, _ := runScript(t, "postremove.sh", "", arg)
-		if calls != "systemctl daemon-reload\n" {
+		if strings.Contains(calls, "/var/lib/bintrail") || strings.Contains(calls, "userdel") {
+			t.Errorf("postremove %s must leave the saved state and the account, got:\n%s", arg, calls)
+		}
+		if arg != "purge" && strings.Contains(calls, "rm") {
+			t.Errorf("postremove %s must delete nothing, got:\n%s", arg, calls)
+		}
+	}
+	needSystemd(t)
+	for _, arg := range []string{"remove", "upgrade", "0", "1"} {
+		if calls, _ := runScript(t, "postremove.sh", "", arg); calls != "systemctl daemon-reload\n" {
 			t.Errorf("postremove %s: want only a daemon-reload, got:\n%s", arg, calls)
 		}
 	}
