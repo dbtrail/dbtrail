@@ -347,7 +347,8 @@ type BaselineStatus struct {
 	// DiskCheck and DiskNote (full reads of MySQL/MariaDB only, #1938): the
 	// free-space check taken before mydumper starts. DiskCheck is "ok",
 	// "low" (room for the dump, maybe not for the dump plus its Parquet copy;
-	// the read ran anyway) or "unchecked" (the check could not run, and the
+	// the read ran anyway) or "unchecked" (the check could not run, or could
+	// not vouch for its sizes because some tables are stored compressed; the
 	// read went ahead). DiskNote is the sentence to show. A refusal is a
 	// failed run with DiskRefused set and the reason in LastError, and
 	// carries neither. Set while the read is still running.

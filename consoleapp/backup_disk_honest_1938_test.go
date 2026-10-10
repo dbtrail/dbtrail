@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -89,6 +90,23 @@ func TestSummarizeDumpTables_1938(t *testing.T) {
 		})
 		if strings.Join(est.compressedTop, ",") != "shop.tie_a,shop.tie_b" {
 			t.Fatalf("named = %q", est.compressedTop)
+		}
+	})
+	t.Run("only the largest are kept, however many there are and in whatever order they come", func(t *testing.T) {
+		var rows []dumpTableRow
+		for i := range 500 {
+			rows = append(rows, row("s", fmt.Sprintf("t%03d", i), "InnoDB", "Compressed", int64((i*37)%500), 0))
+		}
+		var sum dumpTableSum
+		for _, r := range rows {
+			sum.add(r)
+			if len(sum.top) > dumpCompressedNamed {
+				t.Fatalf("holding %d names", len(sum.top))
+			}
+		}
+		// (i*37)%500 is 499 at i=27 and 498 at i=54.
+		if est := sum.estimate(); est.compressed != 500 || strings.Join(est.compressedTop, ",") != "s.t027,s.t054" {
+			t.Fatalf("compressed = %d, named = %q", est.compressed, est.compressedTop)
 		}
 	})
 	t.Run("a name cannot break the line it is printed on", func(t *testing.T) {
@@ -193,8 +211,26 @@ func TestDumpDiskVerdict_compressedTables_1938(t *testing.T) {
 		if err != nil || check != dumpDiskUnchecked {
 			t.Fatalf("check = %q, err = %v, want unchecked", check, err)
 		}
-		if !strings.Contains(note, sentence) || !strings.Contains(note, "100.0 GiB free") || strings.Contains(note, "upper bound") {
+		// Its first words say what it could not do: after "Snapshot complete"
+		// a note that opened "Disk check: a full read needs..." read as a pass.
+		if !strings.HasPrefix(note, "Disk check cannot tell whether this read fits. By the sizes the server reports: a full read needs about 10.0 GiB free at ") ||
+			!strings.Contains(note, sentence) || !strings.Contains(note, "100.0 GiB free") || strings.Contains(note, "upper bound") {
 			t.Fatalf("note = %q", note)
+		}
+	})
+	// The snapshot folder on another disk, the usual local setup: the same.
+	t.Run("room on both disks: not vouched for either", func(t *testing.T) {
+		local := t.TempDir()
+		stubSameFS(t, false, nil)
+		diskByPath(t, map[string]uint64{stage: 100 * gib, local: 100 * gib})
+		check, note, err := dumpDiskVerdict(stage, local, est, nil)
+		if err != nil || check != dumpDiskUnchecked || !strings.HasPrefix(note, "Disk check cannot tell whether this read fits. By the sizes the server reports: the dump needs about 10.0 GiB free at ") ||
+			!strings.Contains(note, sentence) {
+			t.Fatalf("check = %q, err = %v, note = %q", check, err, note)
+		}
+		plain := dumpEstimate{dataBytes: int64(10 * gib), bytes: int64(10 * gib), tables: 4}
+		if check, note, _ := dumpDiskVerdict(stage, local, plain, nil); check != dumpDiskOK || !strings.HasPrefix(note, "Disk check: the dump needs about ") {
+			t.Fatalf("without compressed tables: check = %q, note = %q", check, note)
 		}
 	})
 	for name, free := range map[string]uint64{"below the sizes": 9 * gib, "below the peak": 15 * gib} {
@@ -247,35 +283,38 @@ func TestPrepareEstimateSession_1938(t *testing.T) {
 	unknown := &mysqldriver.MySQLError{Number: 1193, Message: "Unknown system variable"}
 	denied := &mysqldriver.MySQLError{Number: 1227, Message: "Access denied"}
 
-	t.Run("all three are sent, in this order", func(t *testing.T) {
+	t.Run("MySQL: fresh sizes and its own limit, and MariaDB's is never sent", func(t *testing.T) {
 		f := &fakeExec{}
 		if stale := prepareEstimateSession(context.Background(), f); stale {
 			t.Fatal("stale with nothing refused")
+		}
+		if strings.Join(f.stmts, "|") != fresh+"|"+mysqlTL {
+			t.Fatalf("stmts = %q", f.stmts)
+		}
+	})
+	t.Run("MariaDB: no size cache, no MySQL limit, so its own limit", func(t *testing.T) {
+		f := &fakeExec{fail: map[string]error{fresh: unknown, mysqlTL: unknown}}
+		if stale := prepareEstimateSession(context.Background(), f); stale {
+			t.Fatal("MariaDB's sizes are not cached")
 		}
 		if strings.Join(f.stmts, "|") != fresh+"|"+mysqlTL+"|"+mariaTL {
 			t.Fatalf("stmts = %q", f.stmts)
 		}
 	})
-	t.Run("MySQL: the MariaDB limit is unknown, and that is fine", func(t *testing.T) {
-		f := &fakeExec{fail: map[string]error{mariaTL: unknown}}
-		if stale := prepareEstimateSession(context.Background(), f); stale || len(f.stmts) != 3 {
-			t.Fatalf("stale = %v, stmts = %q", stale, f.stmts)
-		}
-	})
-	t.Run("MariaDB: no size cache and no MySQL limit, and the sizes are current", func(t *testing.T) {
-		f := &fakeExec{fail: map[string]error{fresh: unknown, mysqlTL: unknown}}
-		if stale := prepareEstimateSession(context.Background(), f); stale || len(f.stmts) != 3 {
-			t.Fatalf("stale = %v, stmts = %q", stale, f.stmts)
-		}
-	})
 	t.Run("a refused cache setting still marks the sizes stale", func(t *testing.T) {
 		f := &fakeExec{fail: map[string]error{fresh: denied}}
-		if stale := prepareEstimateSession(context.Background(), f); !stale || len(f.stmts) != 3 {
+		if stale := prepareEstimateSession(context.Background(), f); !stale || len(f.stmts) != 2 {
 			t.Fatalf("stale = %v, stmts = %q", stale, f.stmts)
 		}
 	})
-	t.Run("a refused limit is not a reason to skip the check", func(t *testing.T) {
-		f := &fakeExec{fail: map[string]error{mysqlTL: denied, mariaTL: errors.New("proxy says no")}}
+	// The same name means milliseconds on some Percona builds: a limit that
+	// was refused for another reason must not fall through to it.
+	t.Run("a limit refused for another reason does not try the other one, and is not a reason to skip the check", func(t *testing.T) {
+		f := &fakeExec{fail: map[string]error{mysqlTL: denied}}
+		if stale := prepareEstimateSession(context.Background(), f); stale || strings.Join(f.stmts, "|") != fresh+"|"+mysqlTL {
+			t.Fatalf("stale = %v, stmts = %q", stale, f.stmts)
+		}
+		f = &fakeExec{fail: map[string]error{mysqlTL: unknown, mariaTL: errors.New("proxy says no")}}
 		if stale := prepareEstimateSession(context.Background(), f); stale || len(f.stmts) != 3 {
 			t.Fatalf("stale = %v, stmts = %q", stale, f.stmts)
 		}

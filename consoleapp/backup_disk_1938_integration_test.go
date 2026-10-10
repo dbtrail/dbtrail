@@ -16,7 +16,7 @@ import (
 // #1938 against a real server: the estimate's query as the server answers
 // it, including a size read right after a table grew (MySQL 8 caches
 // information_schema sizes for a day by default) and a schema with no
-// tables, whose SUM is NULL.
+// tables, which answers with no rows.
 func TestIntegrationEstimateDumpSize(t *testing.T) {
 	db, name := testutil.CreateTestDB(t)
 	ctx := context.Background()

@@ -10936,8 +10936,9 @@ function backupScheduleCard(cur, b) {
         const left = newTablesBlock(run, ((b && b.snapshots) || [])[0]);
         if (left) body.append(left);
       }
-      // A full read that ran on a low disk, or without its disk check
-      // (#1938): nobody clicked, so the card is where it is said.
+      // A full read that ran on a low disk, or without a disk check that
+      // could vouch for it (#1938): nobody clicked, so the card is where it
+      // is said.
       if (run.disk_note && run.disk_check !== "ok") {
         body.append(el("p", { class: run.disk_check === "low" ? "form-msg err" : "form-hint", text: run.disk_note }));
       }

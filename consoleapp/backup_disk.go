@@ -1,7 +1,6 @@
 package consoleapp
 
 import (
-	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -139,38 +138,68 @@ func (r dumpTableRow) storedCompressed() bool {
 		(r.engine.Valid && strings.EqualFold(r.engine.String, "ROCKSDB"))
 }
 
-// summarizeDumpTables adds the rows up. A NULL size adds nothing and counts
-// the table as unsized, so the note says the estimate is short by it.
-func summarizeDumpTables(rows []dumpTableRow) dumpEstimate {
-	var est dumpEstimate
-	type named struct {
-		name string
-		size int64
+// dumpTableSum adds rows up as they are read, so a source with a million
+// tables costs this process a few numbers and two names, not a million rows
+// held in the capture process. A NULL size adds nothing and counts the table
+// as unsized, so the note says the estimate is short by it.
+type dumpTableSum struct {
+	est dumpEstimate
+	// top holds the largest compressed tables seen so far, largest first,
+	// at most dumpCompressedNamed of them.
+	top []namedSize
+}
+
+type namedSize struct {
+	name string
+	size int64
+}
+
+// before reports whether a goes ahead of b: larger first, then by name, so
+// the names a note prints do not change between two runs over equal sizes.
+func (a namedSize) before(b namedSize) bool {
+	if a.size != b.size {
+		return a.size > b.size
 	}
-	var compressed []named
-	for _, r := range rows {
-		est.tables++
-		if !r.data.Valid || !r.index.Valid {
-			est.unsized++
-		}
-		data, index := max(r.data.Int64, 0), max(r.index.Int64, 0)
-		est.dataBytes += data
-		est.bytes += data + index
-		if r.storedCompressed() {
-			compressed = append(compressed, named{printableName(r.schema) + "." + printableName(r.table), data + index})
-		}
+	return a.name < b.name
+}
+
+func (s *dumpTableSum) add(r dumpTableRow) {
+	s.est.tables++
+	if !r.data.Valid || !r.index.Valid {
+		s.est.unsized++
 	}
-	est.compressed = len(compressed)
-	slices.SortFunc(compressed, func(a, b named) int {
-		if c := cmp.Compare(b.size, a.size); c != 0 {
-			return c
-		}
-		return cmp.Compare(a.name, b.name)
-	})
-	for _, c := range compressed[:min(len(compressed), dumpCompressedNamed)] {
-		est.compressedTop = append(est.compressedTop, c.name)
+	data, index := max(r.data.Int64, 0), max(r.index.Int64, 0)
+	s.est.dataBytes += data
+	s.est.bytes += data + index
+	if !r.storedCompressed() {
+		return
+	}
+	s.est.compressed++
+	n := namedSize{printableName(r.schema) + "." + printableName(r.table), data + index}
+	at := len(s.top)
+	for at > 0 && n.before(s.top[at-1]) {
+		at--
+	}
+	s.top = slices.Insert(s.top, at, n)
+	s.top = s.top[:min(len(s.top), dumpCompressedNamed)]
+}
+
+func (s *dumpTableSum) estimate() dumpEstimate {
+	est := s.est
+	est.compressedTop = nil
+	for _, n := range s.top {
+		est.compressedTop = append(est.compressedTop, n.name)
 	}
 	return est
+}
+
+// summarizeDumpTables is dumpTableSum over a list.
+func summarizeDumpTables(rows []dumpTableRow) dumpEstimate {
+	var sum dumpTableSum
+	for _, r := range rows {
+		sum.add(r)
+	}
+	return sum.estimate()
 }
 
 // printableName keeps a schema or table name on the line it is printed in: a
@@ -222,9 +251,10 @@ type sessionExecer interface {
 // The driver then closes the connection without KILL QUERY, and with fresh
 // sizes asked for the server opens every table, which on a source with tens
 // of thousands of them goes on for minutes after nobody is listening. MySQL
-// takes max_execution_time (milliseconds), MariaDB max_statement_time
-// (seconds); each refuses the other's with 1193, so both are sent and neither
-// refusal means anything. A limit that could not be set is not a reason to
+// takes max_execution_time (milliseconds). MariaDB does not know it (1193)
+// and takes max_statement_time (seconds), which is sent ONLY then: some
+// Percona builds read that same name in milliseconds, where 12 would end
+// every estimate at once. A limit that could not be set is not a reason to
 // skip the check: the wait is still bounded.
 func prepareEstimateSession(ctx context.Context, conn sessionExecer) (stale bool) {
 	unknownVariable := func(err error) bool {
@@ -239,13 +269,21 @@ func prepareEstimateSession(ctx context.Context, conn sessionExecer) (stale bool
 			stale = true
 		}
 	}
-	for _, set := range []string{
-		fmt.Sprintf("SET SESSION max_execution_time = %d", dumpEstimateServerLimit.Milliseconds()),
-		fmt.Sprintf("SET SESSION max_statement_time = %d", int(dumpEstimateServerLimit.Seconds())),
-	} {
-		if _, err := conn.ExecContext(ctx, set); err != nil && !unknownVariable(err) {
-			slog.Debug("full read disk check: the source refused a time limit for the size query; the wait for it is still bounded", "statement", set, "error", err)
+	refused := func(set string, err error) {
+		slog.Warn("full read disk check: the source refused a time limit for the size query, so the query can go on there after "+
+			"this read stops waiting for it", "statement", set, "error", err)
+	}
+	mysqlLimit := fmt.Sprintf("SET SESSION max_execution_time = %d", dumpEstimateServerLimit.Milliseconds())
+	_, err := conn.ExecContext(ctx, mysqlLimit)
+	switch {
+	case err == nil:
+	case unknownVariable(err):
+		mariaLimit := fmt.Sprintf("SET SESSION max_statement_time = %d", int(dumpEstimateServerLimit.Seconds()))
+		if _, err := conn.ExecContext(ctx, mariaLimit); err != nil {
+			refused(mariaLimit, err)
 		}
+	default:
+		refused(mysqlLimit, err)
 	}
 	return stale
 }
@@ -270,20 +308,20 @@ func estimateDumpSize(ctx context.Context, sourceDSN string, ssl config.SSL, sch
 		return dumpEstimate{}, err
 	}
 	defer res.Close()
-	var rows []dumpTableRow
+	var sum dumpTableSum
 	for res.Next() {
 		var r dumpTableRow
 		if err := res.Scan(&r.schema, &r.table, &r.engine, &r.rowFormat, &r.data, &r.index); err != nil {
 			return dumpEstimate{}, err
 		}
-		rows = append(rows, r)
+		sum.add(r)
 	}
 	// A limit that fires mid-scan ends the rows early with an error here; a
-	// partial list must never be summed as the whole.
+	// partial sum must never be returned as the whole.
 	if err := res.Err(); err != nil {
 		return dumpEstimate{}, err
 	}
-	est := summarizeDumpTables(rows)
+	est := sum.estimate()
 	est.stale = stale
 	return est, nil
 }
@@ -384,8 +422,8 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 				localDir, humanSize(int64(outFree)), humanSize(int64(need)), stagingDir, humanSize(int64(stageFree)), short), nil
 		}
 		if !shared {
-			return roomVerdict(est), fmt.Sprintf("Disk check: the dump needs about %s free at %s; %s free.%s",
-				humanSize(int64(need)), stagingDir, humanSize(int64(stageFree)), short), nil
+			return roomVerdict(est, fmt.Sprintf("Disk check: the dump needs about %s free at %s; %s free.%s",
+				humanSize(int64(need)), stagingDir, humanSize(int64(stageFree)), short))
 		}
 	}
 	where := "on the same disk"
@@ -398,19 +436,21 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 			"%s it can reach about %s for data that does not compress. This read may fail with a full disk.%s %s",
 			stagingDir, humanSize(int64(stageFree)), humanSize(int64(need)), where, humanSize(int64(peak)), short, moveStagingHint), nil
 	}
-	return roomVerdict(est), fmt.Sprintf("Disk check: a full read needs about %s free at %s (up to %s with the Parquet copy); %s free.%s",
-		humanSize(int64(need)), stagingDir, humanSize(int64(peak)), humanSize(int64(stageFree)), short), nil
+	return roomVerdict(est, fmt.Sprintf("Disk check: a full read needs about %s free at %s (up to %s with the Parquet copy); %s free.%s",
+		humanSize(int64(need)), stagingDir, humanSize(int64(peak)), humanSize(int64(stageFree)), short))
 }
 
-// roomVerdict is the verdict when the free space covers what the sizes ask
-// for. With tables stored compressed the sizes ask for too little, so the
-// check cannot say there is room: it says it could not tell, which the page
-// shows as a note and not as an alarm.
-func roomVerdict(est dumpEstimate) string {
+// roomVerdict is the verdict and the note when the free space covers what the
+// sizes ask for; note opens with "Disk check: ". With tables stored
+// compressed the sizes ask for too little, so the check cannot say there is
+// room: it says it cannot tell, in the note's first words, and the page shows
+// that as a note and not as an alarm.
+func roomVerdict(est dumpEstimate, note string) (string, string, error) {
 	if est.compressed > 0 {
-		return dumpDiskUnchecked
+		return dumpDiskUnchecked, "Disk check cannot tell whether this read fits. By the sizes the server reports: " +
+			strings.TrimPrefix(note, "Disk check: "), nil
 	}
-	return dumpDiskOK
+	return dumpDiskOK, note, nil
 }
 
 // moveStagingHint is how an operator gives the staging folder more room.
