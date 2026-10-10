@@ -251,8 +251,10 @@ func apiGuard(next http.Handler) http.Handler {
 // executable sink, and script-src 'self' guarantees that stays true.
 //
 // The CSP value matches what the embedded frontend actually needs:
-// script-src 'self' (index.html has exactly one <script src="app.js">, no
-// inline scripts; real extension views are same-origin module imports —
+// script-src 'self' (index.html loads two same-origin files, theme.js in the
+// head and app.js at the end of the body, and no inline scripts, which is why
+// the theme is a file at all: inline, this policy would drop it silently and
+// a dark-mode viewer would get a white flash on every load; real extension views are same-origin module imports —
 // ext.ConsoleViewProvider.Script names a URL under the provider's /ext/<ID>/
 // StaticHandler subtree) plus blob:, because dynamically minted module URLs
 // are part of the ext-view import surface (the console-e2e ext-view contract

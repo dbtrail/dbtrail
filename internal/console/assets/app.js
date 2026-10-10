@@ -16767,11 +16767,27 @@ async function bootSequence() {
   return servers;
 }
 
+// mountThemeChoice (#1969) draws Light / Dark / System in the sidebar foot.
+// theme.js owns the choice (it has to run before the first paint, so it is
+// its own file); this is only the control. If that file did not load there
+// is nothing to drive, and the mount stays empty rather than showing pills
+// that do nothing.
+function mountThemeChoice() {
+  const theme = window.dbtrailTheme;
+  const mount = document.getElementById("theme-mount");
+  if (!theme || !mount) return;
+  const pills = choicePills([["light", "Light"], ["dark", "Dark"], ["system", "System"]], theme.choice, "Theme", () => theme.set(pills.value));
+  mount.replaceChildren(pills);
+  // Another tab changed it: light the pill that is now painted.
+  theme.onchange = (choice) => { pills.value = choice; };
+}
+
 async function init() {
   document.getElementById("server-select").addEventListener("change", (e) => switchServer(e.target.value));
   document.getElementById("manage-servers").addEventListener("click", openServersModal);
   document.getElementById("open-cmdk").addEventListener("click", openCmdk);
   document.getElementById("logout-btn").addEventListener("click", doLogout);
+  mountThemeChoice();
   document.addEventListener("keydown", globalKeydown);
   // Capture phase on purpose — see toastEscape. An Escape that closes a dialog
   // must not also dismiss an error notice behind it, and only the capture phase
