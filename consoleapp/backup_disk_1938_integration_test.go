@@ -107,6 +107,53 @@ func TestIntegrationEstimateDumpSize(t *testing.T) {
 			all.tables, everything, sys, everything-sys)
 	}
 
+	// A table stored compressed (#1938): the server reports its compressed
+	// size, so it is counted and named. And the data is summed apart from the
+	// indexes: t1 has a secondary index, so the two totals differ.
+	if _, err := db.Exec("CREATE TABLE zipped (id INT PRIMARY KEY AUTO_INCREMENT, pad VARCHAR(200)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO zipped (pad) VALUES (REPEAT('x', 200))"); err != nil {
+		t.Fatal(err)
+	}
+	withZipped, err := estimateDumpSize(ctx, sourceDSN, config.SSL{Mode: "preferred"}, []string{name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withZipped.tables != 2 || withZipped.compressed != 1 || len(withZipped.compressedTop) != 1 || withZipped.compressedTop[0] != name+".zipped" {
+		t.Fatalf("with a compressed table: %+v", withZipped)
+	}
+	if withZipped.dataBytes <= 0 || withZipped.dataBytes >= withZipped.bytes {
+		t.Fatalf("data %d, data plus indexes %d: want the data alone to be the smaller, positive sum", withZipped.dataBytes, withZipped.bytes)
+	}
+
+	// The session's own time limit, as the server took it: MySQL knows one
+	// variable and MariaDB the other, and the one it knows holds the limit.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if stale := prepareEstimateSession(ctx, conn); stale {
+		t.Fatal("this server refused fresh sizes for a reason other than not having the cache")
+	}
+	var mysqlMS, mariaS float64
+	errMy := conn.QueryRowContext(ctx, "SELECT @@SESSION.max_execution_time").Scan(&mysqlMS)
+	errMa := conn.QueryRowContext(ctx, "SELECT @@SESSION.max_statement_time").Scan(&mariaS)
+	t.Logf("max_execution_time = %v (%v), max_statement_time = %v (%v)", mysqlMS, errMy, mariaS, errMa)
+	switch {
+	case errMy == nil && errMa != nil:
+		if mysqlMS != float64(dumpEstimateServerLimit.Milliseconds()) {
+			t.Fatalf("max_execution_time = %v ms, want %d", mysqlMS, dumpEstimateServerLimit.Milliseconds())
+		}
+	case errMa == nil && errMy != nil:
+		if mariaS != dumpEstimateServerLimit.Seconds() {
+			t.Fatalf("max_statement_time = %v s, want %v", mariaS, dumpEstimateServerLimit.Seconds())
+		}
+	default:
+		t.Fatalf("expected exactly one of the two variables to exist on this server: %v / %v", errMy, errMa)
+	}
+
 	// A source that refuses gives an error, which the verdict turns into
 	// "the check did not run".
 	if _, err := estimateDumpSize(ctx, strings.Replace(sourceDSN, ":testroot@", ":wrong@", 1), config.SSL{Mode: "preferred"}, nil); err == nil {

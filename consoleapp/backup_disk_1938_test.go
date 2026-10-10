@@ -55,7 +55,7 @@ func stubEstimate(t *testing.T, est dumpEstimate, err error) {
 
 func TestDumpDiskVerdict(t *testing.T) {
 	stage := t.TempDir()
-	est := dumpEstimate{bytes: int64(10 * gib), tables: 3}
+	est := dumpEstimate{bytes: int64(10 * gib), dataBytes: int64(10 * gib), tables: 3}
 
 	// The estimate is an upper bound (secondary indexes are not dumped,
 	// deleted rows still count), and the smallest dump the #1938 measurement
@@ -66,7 +66,7 @@ func TestDumpDiskVerdict(t *testing.T) {
 		if !errors.Is(err, errFoldDiskFull) {
 			t.Fatalf("err = %v, want a disk refusal", err)
 		}
-		for _, want := range []string{stage, "10.0 GiB", "4.0 GiB", "5.0 GiB", "upper bound", "BINTRAIL_CONSOLE_BASELINE_STAGING", `"Working folder"`, "restart"} {
+		for _, want := range []string{stage, "10.0 GiB", "4.0 GiB", "BINTRAIL_CONSOLE_BASELINE_STAGING", `"Working folder"`, "restart"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("refusal lacks %q: %v", want, err)
 			}
@@ -141,14 +141,14 @@ func TestDumpDiskVerdict(t *testing.T) {
 	})
 	t.Run("sizes the source would not refresh are named", func(t *testing.T) {
 		diskByPath(t, map[string]uint64{stage: 100 * gib})
-		_, note, _ := dumpDiskVerdict(stage, "", dumpEstimate{bytes: 1, tables: 1, stale: true}, nil)
+		_, note, _ := dumpDiskVerdict(stage, "", dumpEstimate{bytes: 1, dataBytes: 1, tables: 1, stale: true}, nil)
 		if !strings.Contains(note, "up to a day old") {
 			t.Fatalf("note = %q", note)
 		}
 	})
 	t.Run("tables without a size are named", func(t *testing.T) {
 		diskByPath(t, map[string]uint64{stage: 100 * gib})
-		_, note, _ := dumpDiskVerdict(stage, "", dumpEstimate{bytes: 1, tables: 4, unsized: 2}, nil)
+		_, note, _ := dumpDiskVerdict(stage, "", dumpEstimate{bytes: 1, dataBytes: 1, tables: 4, unsized: 2}, nil)
 		if !strings.Contains(note, "no size for 2 table(s)") {
 			t.Fatalf("note = %q", note)
 		}
@@ -160,7 +160,7 @@ func TestDumpDiskVerdict(t *testing.T) {
 // the other disk is warned about, never refused.
 func TestDumpDiskVerdict_localFolderOnAnotherDisk(t *testing.T) {
 	stage, local := t.TempDir(), t.TempDir()
-	est := dumpEstimate{bytes: int64(10 * gib), tables: 3}
+	est := dumpEstimate{bytes: int64(10 * gib), dataBytes: int64(10 * gib), tables: 3}
 	stubSameFS(t, false, nil)
 
 	t.Run("small staging with a huge local folder refuses", func(t *testing.T) {
@@ -217,7 +217,7 @@ func TestDumpDiskVerdict_localFolderOnAnotherDisk(t *testing.T) {
 // Parquet share it, so the 1.8x margin applies.
 func TestDumpDiskVerdict_localFolderOnTheSameDisk(t *testing.T) {
 	stage, local := t.TempDir(), t.TempDir()
-	est := dumpEstimate{bytes: int64(10 * gib), tables: 1}
+	est := dumpEstimate{bytes: int64(10 * gib), dataBytes: int64(10 * gib), tables: 1}
 	t.Run("same", func(t *testing.T) {
 		stubSameFS(t, true, nil)
 		diskByPath(t, map[string]uint64{stage: 12 * gib})
@@ -264,7 +264,9 @@ func TestDumpSizeQuery(t *testing.T) {
 	if !strings.Contains(q, "TABLE_SCHEMA NOT IN ('mysql','sys','performance_schema','information_schema')") || len(args) != 0 {
 		t.Fatalf("empty list: %s %v", q, args)
 	}
-	if !strings.Contains(q, "COALESCE(SUM(") || !strings.Contains(q, "INDEX_LENGTH") || !strings.Contains(q, "'BASE TABLE', 'SYSTEM VERSIONED'") {
+	// One row per table, with what tells a compressed one apart (#1938).
+	if !strings.HasPrefix(q, "SELECT TABLE_SCHEMA, TABLE_NAME, ENGINE, ROW_FORMAT, DATA_LENGTH, INDEX_LENGTH FROM information_schema.TABLES WHERE ") ||
+		strings.Contains(q, "SUM(") || strings.Contains(q, "GROUP_CONCAT") || !strings.Contains(q, "'BASE TABLE', 'SYSTEM VERSIONED'") {
 		t.Fatalf("query = %s", q)
 	}
 	_, args = dumpSizeQuery([]string{"Shop", " b "})
@@ -294,7 +296,7 @@ func countMydumper(t *testing.T) *atomic.Int32 {
 // The refusal comes before anything is created or dumped.
 func TestExecute_diskRefusalStopsBeforeMydumper(t *testing.T) {
 	stage := t.TempDir()
-	stubEstimate(t, dumpEstimate{bytes: int64(10 * gib), tables: 1}, nil)
+	stubEstimate(t, dumpEstimate{bytes: int64(10 * gib), dataBytes: int64(10 * gib), tables: 1}, nil)
 	diskByPath(t, map[string]uint64{stage: gib})
 	calls := countMydumper(t)
 	var marks atomic.Int32
@@ -345,7 +347,7 @@ func supWithHistory(t *testing.T, stage string) *baselineSupervisor {
 // later failure into the history.
 func TestFullRead_S3OnlyLowDiskWarnsInStatusAndHistory(t *testing.T) {
 	stage := t.TempDir()
-	stubEstimate(t, dumpEstimate{bytes: int64(10 * gib), tables: 2}, nil)
+	stubEstimate(t, dumpEstimate{bytes: int64(10 * gib), dataBytes: int64(10 * gib), tables: 2}, nil)
 	diskByPath(t, map[string]uint64{stage: 12 * gib})
 	calls := countMydumper(t)
 	s := supWithHistory(t, stage)
@@ -386,7 +388,7 @@ func TestFullRead_estimateErrorGoesAheadAndSaysSo(t *testing.T) {
 // schedule slot and the history.
 func TestFullRead_refusalIsDiskRefused(t *testing.T) {
 	stage := t.TempDir()
-	stubEstimate(t, dumpEstimate{bytes: int64(10 * gib), tables: 2}, nil)
+	stubEstimate(t, dumpEstimate{bytes: int64(10 * gib), dataBytes: int64(10 * gib), tables: 2}, nil)
 	diskByPath(t, map[string]uint64{stage: gib})
 	calls := countMydumper(t)
 	s := supWithHistory(t, stage)
@@ -408,7 +410,7 @@ func TestBackupScheduler_diskRefusedFullReadIsOnItsSlot(t *testing.T) {
 	prevEst := dumpSizeEstimateFn
 	dumpSizeEstimateFn = func(context.Context, string, config.SSL, []string) (dumpEstimate, error) {
 		estimates.Add(1)
-		return dumpEstimate{bytes: int64(10 * gib), tables: 2}, nil
+		return dumpEstimate{bytes: int64(10 * gib), dataBytes: int64(10 * gib), tables: 2}, nil
 	}
 	t.Cleanup(func() { dumpSizeEstimateFn = prevEst })
 	diskByPath(t, map[string]uint64{sup.stagingDir: gib})
@@ -417,7 +419,7 @@ func TestBackupScheduler_diskRefusedFullReadIsOnItsSlot(t *testing.T) {
 	fireAt(b, time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC))
 	st := waitTerminal(t, b, e.ID)
 	if st.LastMethod != console.BackupMethodFull || st.Last == nil || st.Last.State != "failed" || !st.Last.DiskRefused ||
-		!strings.Contains(st.Last.LastError, "Nothing was dumped") {
+		!strings.Contains(st.Last.LastError, "Nothing was read from your database") {
 		t.Fatalf("slot = %+v last = %+v", st, st.Last)
 	}
 	if calls.Load() != 0 {

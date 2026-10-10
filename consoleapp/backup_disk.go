@@ -1,12 +1,16 @@
 package consoleapp
 
 import (
+	"cmp"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
@@ -31,6 +35,23 @@ import (
 // deleted. So a refusal waits for less than half the estimate, a line no
 // measured dump reached, and everything between that and 1.8x runs with a
 // warning that says the same things a refusal would.
+//
+// The REFUSAL does not read that sum. A dump holds no secondary indexes, so a
+// table that is mostly indexes (10 GB of rows under 30 GB of indexes) was
+// refused with room to spare, and a refusal has no way past it. It reads
+// SUM(DATA_LENGTH) alone: the smallest dump measured against it was 0.89x
+// (apart from a table with most of its rows deleted), so half of it is still
+// a line no measured dump reached, and since data is never more than data
+// plus indexes the change can only turn refusals into warnings. The warnings
+// keep the sum.
+//
+// Neither number bounds anything for a table stored COMPRESSED
+// (ROW_FORMAT=COMPRESSED, MyRocks): the server reports the compressed size and
+// the dump is written uncompressed. Those tables are counted and named, no
+// verdict calls the sizes a bound when there are any, and "there is room"
+// becomes "the check cannot vouch for it". InnoDB page compression
+// (COMPRESSION=, PAGE_COMPRESSED) is not in that set: whether its reported
+// size is the compressed one has not been measured.
 
 // Values of BaselineStatus.DiskCheck.
 const (
@@ -45,9 +66,19 @@ const (
 // over 99 MiB).
 const dumpPeakTenths = 18
 
-// dumpRefuseTenths is the refusal line as tenths of the estimate: below half
-// of it no measured dump fit, so refusing there is not a guess.
+// dumpRefuseTenths is the refusal line as tenths of the tables' DATA size:
+// below half of it no measured dump fit, so refusing there is not a guess.
 const dumpRefuseTenths = 5
+
+// dumpEstimateServerLimit is how long the SOURCE may spend on the estimate's
+// query before it stops it itself. Under dumpEstimateTimeout, so what comes
+// back is the server's own error and not a connection closed under a query
+// that goes on running.
+const dumpEstimateServerLimit = 12 * time.Second
+
+// dumpCompressedNamed is how many compressed tables a note names: the largest
+// ones, which are the ones the sizes are most wrong about.
+const dumpCompressedNamed = 2
 
 // dumpEstimateTimeout bounds the information_schema read. It runs before every
 // full read, and a source that does not answer in time must cost a note, not
@@ -56,8 +87,15 @@ const dumpEstimateTimeout = 15 * time.Second
 
 // dumpEstimate is what the source reports about the tables a dump selects.
 type dumpEstimate struct {
-	bytes  int64 // DATA_LENGTH + INDEX_LENGTH, summed
-	tables int
+	bytes int64 // DATA_LENGTH + INDEX_LENGTH, summed: what the warnings read
+	// dataBytes is DATA_LENGTH alone, summed: what the refusal reads, since
+	// a dump holds no secondary indexes.
+	dataBytes int64
+	tables    int
+	// compressed counts tables whose reported size is their compressed size;
+	// compressedTop names the largest dumpCompressedNamed of them.
+	compressed    int
+	compressedTop []string
 	// unsized counts tables the server reported no size for (NULL). They add
 	// nothing to bytes, so the note says the estimate is short by them.
 	unsized int
@@ -75,24 +113,145 @@ var sameFilesystemFn = sameFilesystem
 
 // dumpSizeQuery is the estimate's query over the same table selection as
 // dumpableTableCountQuery, which is the selection buildConsoleMydumperArgs
-// asks mydumper for. COALESCE twice: SUM over no rows is NULL, which would
-// read as "the check failed" on an empty schema, and a NULL size would drop
-// its table from the sum without a word.
+// asks mydumper for. One row per table, summed here: the source walks every
+// table for a SUM anyway, a second query for the compressed ones would walk
+// them again, and GROUP_CONCAT cuts a list of names at 1024 bytes without a
+// word.
 func dumpSizeQuery(schemas []string) (string, []any) {
 	where, args := dumpableTablesWhere(schemas)
-	return "SELECT COUNT(*), " +
-		"COALESCE(SUM(COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0)), 0), " +
-		"COALESCE(SUM(DATA_LENGTH IS NULL OR INDEX_LENGTH IS NULL), 0) " +
+	return "SELECT TABLE_SCHEMA, TABLE_NAME, ENGINE, ROW_FORMAT, DATA_LENGTH, INDEX_LENGTH " +
 		"FROM information_schema.TABLES WHERE " + where, args
 }
 
-// estimateDumpSize runs dumpSizeQuery on the source. MySQL 8.0 and newer
-// serve information_schema sizes from a cache that can be a day old
-// (information_schema_stats_expiry), which undercounts a table that grew; the
-// session asks for fresh values first. A server without the variable
-// (MariaDB, 5.7) refuses the SET with 1193, and its sizes are current anyway.
-// Any other refusal (a proxy that rejects the SET, say) leaves the day-old
-// cache in play, and the estimate says so.
+// dumpTableRow is one row of dumpSizeQuery. Everything but the names can be
+// NULL: a table the server cannot open reports no engine, format or size.
+type dumpTableRow struct {
+	schema, table     string
+	engine, rowFormat sql.NullString
+	data, index       sql.NullInt64
+}
+
+// storedCompressed reports whether the server's size for this table is its
+// compressed size. Exact words, any case: MySQL and MariaDB both spell the
+// row format "Compressed", and MyRocks reports its engine as "ROCKSDB".
+func (r dumpTableRow) storedCompressed() bool {
+	return (r.rowFormat.Valid && strings.EqualFold(r.rowFormat.String, "Compressed")) ||
+		(r.engine.Valid && strings.EqualFold(r.engine.String, "ROCKSDB"))
+}
+
+// summarizeDumpTables adds the rows up. A NULL size adds nothing and counts
+// the table as unsized, so the note says the estimate is short by it.
+func summarizeDumpTables(rows []dumpTableRow) dumpEstimate {
+	var est dumpEstimate
+	type named struct {
+		name string
+		size int64
+	}
+	var compressed []named
+	for _, r := range rows {
+		est.tables++
+		if !r.data.Valid || !r.index.Valid {
+			est.unsized++
+		}
+		data, index := max(r.data.Int64, 0), max(r.index.Int64, 0)
+		est.dataBytes += data
+		est.bytes += data + index
+		if r.storedCompressed() {
+			compressed = append(compressed, named{printableName(r.schema) + "." + printableName(r.table), data + index})
+		}
+	}
+	est.compressed = len(compressed)
+	slices.SortFunc(compressed, func(a, b named) int {
+		if c := cmp.Compare(b.size, a.size); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.name, b.name)
+	})
+	for _, c := range compressed[:min(len(compressed), dumpCompressedNamed)] {
+		est.compressedTop = append(est.compressedTop, c.name)
+	}
+	return est
+}
+
+// printableName keeps a schema or table name on the line it is printed in: a
+// name may hold a newline or any other control character, and the note it
+// lands in is cut at its first line in more than one place.
+func printableName(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '?'
+		}
+		return r
+	}, s)
+}
+
+// compressedTablesSentence is what a verdict says about tables stored
+// compressed, "" when there are none. It starts with a space, like the other
+// parts of a note's tail.
+func compressedTablesSentence(est dumpEstimate) string {
+	if est.compressed == 0 {
+		return ""
+	}
+	names := strings.Join(est.compressedTop, ", ")
+	if more := est.compressed - len(est.compressedTop); more > 0 {
+		names += fmt.Sprintf(" and %d more", more)
+	}
+	if est.compressed == 1 {
+		return fmt.Sprintf(" 1 table uses compressed storage (%s): the server reports its compressed size, and a full read writes it "+
+			"uncompressed, so this read can need more than the sizes say.", names)
+	}
+	return fmt.Sprintf(" %d tables use compressed storage (%s): the server reports their compressed size, and a full read writes them "+
+		"uncompressed, so this read can need more than the sizes say.", est.compressed, names)
+}
+
+// sessionExecer is the part of a connection prepareEstimateSession uses.
+type sessionExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// prepareEstimateSession sets up the estimate's own connection, and reports
+// whether the sizes it will read may be stale.
+//
+// Fresh sizes: MySQL 8.0 and newer serve information_schema sizes from a
+// cache that can be a day old (information_schema_stats_expiry), which
+// undercounts a table that grew. A server without the variable (MariaDB, 5.7)
+// refuses the SET with 1193, and its sizes are not cached. Any other refusal
+// (a proxy that rejects the SET, say) leaves the day-old cache in play.
+//
+// A limit the source enforces: the read's own timeout only ends the waiting.
+// The driver then closes the connection without KILL QUERY, and with fresh
+// sizes asked for the server opens every table, which on a source with tens
+// of thousands of them goes on for minutes after nobody is listening. MySQL
+// takes max_execution_time (milliseconds), MariaDB max_statement_time
+// (seconds); each refuses the other's with 1193, so both are sent and neither
+// refusal means anything. A limit that could not be set is not a reason to
+// skip the check: the wait is still bounded.
+func prepareEstimateSession(ctx context.Context, conn sessionExecer) (stale bool) {
+	unknownVariable := func(err error) bool {
+		var me *mysqldriver.MySQLError
+		return errors.As(err, &me) && me.Number == 1193
+	}
+	if _, err := conn.ExecContext(ctx, "SET SESSION information_schema_stats_expiry = 0"); err != nil {
+		if unknownVariable(err) {
+			slog.Debug("full read disk check: the source has no size cache to turn off", "error", err)
+		} else {
+			slog.Warn("full read disk check: could not ask the source for current table sizes; it may answer with sizes up to a day old", "error", err)
+			stale = true
+		}
+	}
+	for _, set := range []string{
+		fmt.Sprintf("SET SESSION max_execution_time = %d", dumpEstimateServerLimit.Milliseconds()),
+		fmt.Sprintf("SET SESSION max_statement_time = %d", int(dumpEstimateServerLimit.Seconds())),
+	} {
+		if _, err := conn.ExecContext(ctx, set); err != nil && !unknownVariable(err) {
+			slog.Debug("full read disk check: the source refused a time limit for the size query; the wait for it is still bounded", "statement", set, "error", err)
+		}
+	}
+	return stale
+}
+
+// estimateDumpSize runs dumpSizeQuery on the source, on a session prepared by
+// prepareEstimateSession.
 func estimateDumpSize(ctx context.Context, sourceDSN string, ssl config.SSL, schemas []string) (dumpEstimate, error) {
 	db, err := connectSource(sourceDSN, ssl)
 	if err != nil {
@@ -104,24 +263,28 @@ func estimateDumpSize(ctx context.Context, sourceDSN string, ssl config.SSL, sch
 		return dumpEstimate{}, err
 	}
 	defer conn.Close()
-	var est dumpEstimate
-	// ctx bounds how long this waits, not how long the source works: on a
-	// timeout the driver closes the connection without KILL QUERY, so an
-	// information_schema scan over many tables can keep running on the source
-	// for a while after the read has moved on.
-	if _, err := conn.ExecContext(ctx, "SET SESSION information_schema_stats_expiry = 0"); err != nil {
-		var me *mysqldriver.MySQLError
-		if errors.As(err, &me) && me.Number == 1193 {
-			slog.Debug("full read disk check: the source has no size cache to turn off", "error", err)
-		} else {
-			slog.Warn("full read disk check: could not ask the source for current table sizes; it may answer with sizes up to a day old", "error", err)
-			est.stale = true
-		}
-	}
+	stale := prepareEstimateSession(ctx, conn)
 	q, args := dumpSizeQuery(schemas)
-	if err := conn.QueryRowContext(ctx, q, args...).Scan(&est.tables, &est.bytes, &est.unsized); err != nil {
+	res, err := conn.QueryContext(ctx, q, args...)
+	if err != nil {
 		return dumpEstimate{}, err
 	}
+	defer res.Close()
+	var rows []dumpTableRow
+	for res.Next() {
+		var r dumpTableRow
+		if err := res.Scan(&r.schema, &r.table, &r.engine, &r.rowFormat, &r.data, &r.index); err != nil {
+			return dumpEstimate{}, err
+		}
+		rows = append(rows, r)
+	}
+	// A limit that fires mid-scan ends the rows early with an error here; a
+	// partial list must never be summed as the whole.
+	if err := res.Err(); err != nil {
+		return dumpEstimate{}, err
+	}
+	est := summarizeDumpTables(rows)
+	est.stale = stale
 	return est, nil
 }
 
@@ -161,7 +324,8 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 	}
 	need := uint64(max(est.bytes, 0))
 	peak := need * dumpPeakTenths / 10
-	floor := need * dumpRefuseTenths / 10
+	data := uint64(max(est.dataBytes, 0))
+	floor := data * dumpRefuseTenths / 10
 	shared, unknown := localDir == "", false
 	outDir := stagingDir
 	if !shared {
@@ -184,21 +348,28 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 	if est.stale {
 		short += " The source may have reported sizes up to a day old."
 	}
+	short += compressedTablesSentence(est)
+	// The sizes bound the dump from above only when every table reports its
+	// real size.
+	bound := ", an upper bound (secondary indexes are not dumped, deleted rows still count),"
+	if est.compressed > 0 {
+		bound = ""
+	}
 
 	if stageFree < floor {
-		freeS, floorS := sizePair(stageFree, floor)
-		return "", "", fmt.Errorf("%w: a full read writes the whole dump to %s before converting it. The tables add up to about %s, "+
-			"an upper bound (secondary indexes are not dumped, deleted rows still count), and no measured dump came to less than "+
-			"half of it, %s; the folder has %s free.%s Nothing was dumped from the source. %s",
-			errFoldDiskFull, stagingDir, humanSize(int64(need)), floorS, freeS, short, moveStagingHint)
+		// Two numbers, and what did not happen. Why the line is where it is
+		// belongs to the comment above, not to the reader of a refusal.
+		dataS, freeS := sizePair(data, stageFree)
+		return "", "", fmt.Errorf("%w: the full read was not started. The tables to read take up about %s on the database server, "+
+			"not counting indexes, and the working folder %s has %s free.%s Nothing was read from your database, and earlier snapshots are unchanged. %s",
+			errFoldDiskFull, dataS, stagingDir, freeS, short, moveStagingHint)
 	}
 	if stageFree < need {
 		// Below the bound, above the refusal line: the dump may fit, may not.
 		// Loud, and with everything a refusal would say.
-		return dumpDiskLow, fmt.Sprintf("Low disk: a full read writes the whole dump to %s before converting it. The tables add up to about %s, "+
-			"an upper bound (secondary indexes are not dumped, deleted rows still count), and the folder has %s free, so the dump may not fit "+
-			"and this read may fail with a full disk.%s %s",
-			stagingDir, humanSize(int64(need)), humanSize(int64(stageFree)), short, moveStagingHint), nil
+		return dumpDiskLow, fmt.Sprintf("Low disk: a full read writes the whole dump to %s before converting it. The tables add up to about %s%s "+
+			"and the folder has %s free, so the dump may not fit and this read may fail with a full disk.%s %s",
+			stagingDir, humanSize(int64(need)), bound, humanSize(int64(stageFree)), short, moveStagingHint), nil
 	}
 	if !shared || unknown {
 		outFree, ok, why := measureFree(outDir)
@@ -213,7 +384,7 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 				localDir, humanSize(int64(outFree)), humanSize(int64(need)), stagingDir, humanSize(int64(stageFree)), short), nil
 		}
 		if !shared {
-			return dumpDiskOK, fmt.Sprintf("Disk check: the dump needs about %s free at %s; %s free.%s",
+			return roomVerdict(est), fmt.Sprintf("Disk check: the dump needs about %s free at %s; %s free.%s",
 				humanSize(int64(need)), stagingDir, humanSize(int64(stageFree)), short), nil
 		}
 	}
@@ -227,8 +398,19 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 			"%s it can reach about %s for data that does not compress. This read may fail with a full disk.%s %s",
 			stagingDir, humanSize(int64(stageFree)), humanSize(int64(need)), where, humanSize(int64(peak)), short, moveStagingHint), nil
 	}
-	return dumpDiskOK, fmt.Sprintf("Disk check: a full read needs about %s free at %s (up to %s with the Parquet copy); %s free.%s",
+	return roomVerdict(est), fmt.Sprintf("Disk check: a full read needs about %s free at %s (up to %s with the Parquet copy); %s free.%s",
 		humanSize(int64(need)), stagingDir, humanSize(int64(peak)), humanSize(int64(stageFree)), short), nil
+}
+
+// roomVerdict is the verdict when the free space covers what the sizes ask
+// for. With tables stored compressed the sizes ask for too little, so the
+// check cannot say there is room: it says it could not tell, which the page
+// shows as a note and not as an alarm.
+func roomVerdict(est dumpEstimate) string {
+	if est.compressed > 0 {
+		return dumpDiskUnchecked
+	}
+	return dumpDiskOK
 }
 
 // moveStagingHint is how an operator gives the staging folder more room.
