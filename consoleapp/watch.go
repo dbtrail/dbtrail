@@ -548,7 +548,8 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	// The sweep runs regardless of the supervisor decision below: with both
 	// baseline features off, no supervisor would ever remove a previous
 	// process's staged dump.
-	sweepSQLExportStaging(baselineStagingDirFor(registry))
+	sweepWorkingFoldersAtBoot(registry, time.Now())
+	go runUnusedDefaultSweep(ctx, registry, 0)
 	var baselineSup *baselineSupervisor
 	if upConsoleBaselineTrigger || upBaselineRefreshEvery != "" {
 		baselineSup = newBaselineSupervisorFromConfig(ctx, baselineStagingDirFor(registry), registry)
@@ -900,7 +901,8 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	// The sweep runs regardless of the supervisor decision below: with both
 	// baseline features off, no supervisor would ever remove a previous
 	// process's staged dump.
-	sweepSQLExportStaging(baselineStagingDirFor(registry))
+	sweepWorkingFoldersAtBoot(registry, time.Now())
+	go runUnusedDefaultSweep(ctx, registry, 0)
 	var baselineSup *baselineSupervisor
 	if upConsoleBaselineTrigger || upBaselineRefreshEvery != "" {
 		baselineSup = newBaselineSupervisorFromConfig(ctx, baselineStagingDirFor(registry), registry)
