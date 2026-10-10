@@ -68,6 +68,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/cliutil"
@@ -288,9 +289,10 @@ type Result struct {
 
 // Phases times one run, worker side (reported by the child) and parent
 // side. Every field is a duration; a zero one did not happen or was not
-// measured. They nest: Total (the parent's whole run) contains Spawn (the
-// worker's whole lifetime, exec to exit), which contains every child phase;
-// Spawn minus the child phases is process start, result encoding and exit.
+// measured. They nest: Total (the parent's whole run) contains Spawn (what
+// the worker cost this statement, from starting it to its exit), which
+// contains every child phase; Spawn minus the child phases is process start,
+// result encoding and exit.
 type Phases struct {
 	// Child: opening the in-memory DuckDB and taking the connection.
 	Open time.Duration `json:"open_ns"`
@@ -304,8 +306,9 @@ type Phases struct {
 	// child cannot time its own encoding from inside the encoded message;
 	// Spawn minus the child phases is that cost plus process start and exit.
 	Query time.Duration `json:"query_ns"`
-	// Parent: the worker's whole lifetime, exec to exit, pipe included: NOT
-	// process start alone, which is Spawn minus the child phases.
+	// Parent: the worker for this statement, from starting it to its exit,
+	// pipe included: NOT process start alone, which is Spawn minus the child
+	// phases.
 	Spawn time.Duration `json:"spawn_ns"`
 	// Parent: decoding the child's result.
 	Decode time.Duration `json:"decode_ns"`
@@ -931,27 +934,103 @@ const (
 	errTooLarge = "too_large" // the result passed MaxResultBytes while collecting
 )
 
-func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, error) {
+// worker is one started worker process: its DuckDB open (or opening), blocked
+// reading its job from stdin. It serves ONE job and exits; it is never handed
+// a second one.
+type worker struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout *cappedBuffer
+	stderr *cappedBuffer
+	// kill ends the process group: the timeout, a cancelled caller and a
+	// result past its cap all go through it. Safe to call more than once,
+	// and after the process is gone.
+	kill context.CancelFunc
+	// done is closed once the process has exited and its pipes are drained;
+	// waitErr is its exit then. Wait is called in one place only, so a
+	// worker that dies before it is used is reaped all the same.
+	done    chan struct{}
+	waitErr error
+	// used is set by the one run this worker serves. A second hand-over is
+	// refused: its stdout still holds the first statement's answer.
+	used atomic.Bool
+}
+
+// startWorker starts a worker with no job. Nothing of a statement is in its
+// environment or its arguments: the job goes in by stdin (run).
+func (r *Runner) startWorker() (*worker, error) {
 	exe := r.exe
 	if exe == "" {
 		var err error
 		if exe, err = workerExe(); err != nil {
-			return Result{}, &WorkerError{Err: fmt.Errorf("locate the worker executable: %w", err)}
+			return nil, fmt.Errorf("locate the worker executable: %w", err)
 		}
 	}
 	args := r.args
 	if args == nil {
 		args = []string{WorkerCommand}
 	}
+	// The process is tied to its own context, not to a statement's: the
+	// statement's deadline does not exist yet when a worker starts.
+	wctx, kill := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(wctx, exe, args...)
+	cmd.Env = childEnv()
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		kill()
+		return nil, fmt.Errorf("stdin: %w", err)
+	}
+	setProcessGroup(cmd)
+	// Kill the whole process group: DuckDB's worker threads belong to the
+	// child, and a plain Kill of the leader is enough for them, but a group
+	// kill also covers anything the child might spawn.
+	cmd.Cancel = func() error { return killProcessGroup(cmd.Process) }
+	// If the group kill somehow leaves the pipes open, stop waiting on them.
+	cmd.WaitDelay = 5 * time.Second
+	w := &worker{cmd: cmd, stdin: stdin, kill: kill, done: make(chan struct{}),
+		// Until a job arms it (run), stdout takes nothing: a worker has
+		// nothing to say before its job.
+		stdout: &cappedBuffer{},
+		// stderr is diagnostics: past its cap the rest is dropped, never a
+		// reason to fail the child.
+		stderr: &cappedBuffer{max: 64 << 10, drop: true},
+	}
+	cmd.Stdout, cmd.Stderr = w.stdout, w.stderr
+	if err := cmd.Start(); err != nil {
+		kill()
+		return nil, fmt.Errorf("start: %w", err)
+	}
+	go func() {
+		w.waitErr = cmd.Wait()
+		// Release the context whatever ended the process.
+		kill()
+		close(w.done)
+	}()
+	return w, nil
+}
+
+// marshalJob is the job as the worker reads it. A job that asks for its views
+// (ViewsFor) carries none: the worker asks once it has parsed the statement.
+func marshalJob(job Job, limits Limits, spill spillSpec) ([]byte, error) {
 	asking := job.ViewsFor != nil
 	viewsSQL := job.ViewsSQL
 	if asking {
 		viewsSQL = ""
 	}
+	return json.Marshal(wireJob{
+		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, Schema: job.Schema,
+		TimeZone: job.Session.TimeZone, SelectLimit: job.Session.SelectLimit,
+		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
+		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
+		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes,
+	})
+}
+
+func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, error) {
 	spill, noSpill := r.makeSpill(limits.MemoryLimit)
 	if spill.Dir != "" {
 		// After the worker has exited on every path (a group kill at the
-		// timeout included: Wait returns only then), so nothing writes here
+		// timeout included: run returns only then), so nothing writes here
 		// any more.
 		defer func() {
 			if err := os.RemoveAll(spill.Dir); err != nil {
@@ -959,13 +1038,7 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 			}
 		}()
 	}
-	in, err := json.Marshal(wireJob{
-		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, Schema: job.Schema,
-		TimeZone: job.Session.TimeZone, SelectLimit: job.Session.SelectLimit,
-		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
-		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
-		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes,
-	})
+	in, err := marshalJob(job, limits, spill)
 	if err != nil {
 		return Result{}, &WorkerError{Err: err}
 	}
@@ -973,53 +1046,65 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 		// Already cancelled: report the cancel, not a worker that failed.
 		return Result{}, err
 	}
+	// A worker started for this statement: starting it is part of the
+	// statement's cost (Phases.Spawn).
+	began := time.Now()
+	w, err := r.startWorker()
+	if err != nil {
+		return Result{}, &WorkerError{Err: err}
+	}
+	return r.run(ctx, w, began, in, job.ViewsFor, limits, spill, noSpill)
+}
 
+// run hands the job to w and waits for its answer. The statement's timeout
+// starts here, when the job is handed over, not when the process started.
+// began is when this statement started paying for the worker: before the
+// start for a worker started for it. It returns only after the process has
+// exited.
+func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte, viewsFor func(Refs) (string, error), limits Limits, spill spillSpec, noSpill error) (Result, error) {
+	if w.used.Swap(true) {
+		return Result{}, &WorkerError{Err: errors.New("the worker was already handed a job; start another"), PID: w.cmd.Process.Pid}
+	}
+	// Whatever happens below, the process does not outlive this call.
+	defer func() {
+		w.kill()
+		<-w.done
+	}()
 	cctx, cancel := context.WithTimeout(ctx, limits.Timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, exe, args...)
-	cmd.Env = childEnv()
-	var stdin io.WriteCloser
-	if asking {
-		// Kept open: the answer to the worker's question goes here too.
-		if stdin, err = cmd.StdinPipe(); err != nil {
-			return Result{}, &WorkerError{Err: fmt.Errorf("stdin: %w", err)}
-		}
-	} else {
-		cmd.Stdin = bytes.NewReader(in)
-	}
-	setProcessGroup(cmd)
-	// On timeout or cancel, kill the whole process group: DuckDB's worker
-	// threads belong to the child, and a plain Kill of the leader is enough
-	// for them, but a group kill also covers anything the child might spawn.
-	cmd.Cancel = func() error { return killProcessGroup(cmd.Process) }
-	// If the group kill somehow leaves the pipes open, stop waiting on them.
-	cmd.WaitDelay = 5 * time.Second
-	stdout := &cappedBuffer{max: limits.MaxResultBytes, onOverflow: func() { _ = killProcessGroup(cmd.Process) }}
-	if asking {
-		stdout.firstLine = make(chan []byte, 1)
-	}
-	// stderr is diagnostics: past its cap the rest is dropped, never a reason
-	// to fail the child.
-	stderr := &cappedBuffer{max: 64 << 10, drop: true}
-	cmd.Stdout, cmd.Stderr = stdout, stderr
+	// On timeout or cancel, kill the worker's process group.
+	stop := context.AfterFunc(cctx, w.kill)
+	defer stop()
 
-	spawnStart := time.Now()
-	if err := cmd.Start(); err != nil {
-		return Result{}, &WorkerError{Err: fmt.Errorf("start: %w", err)}
+	asking := viewsFor != nil
+	var firstLine chan []byte
+	if asking {
+		firstLine = make(chan []byte, 1)
 	}
-	pid := cmd.Process.Pid
+	w.stdout.arm(limits.MaxResultBytes, func() { _ = killProcessGroup(w.cmd.Process) }, firstLine)
+
+	pid := w.cmd.Process.Pid
 	if r.onStart != nil {
 		r.onStart(pid)
 	}
 	var waitErr error
 	if asking {
 		var askErr error
-		waitErr, askErr = answerAsk(cmd, stdin, in, stdout.firstLine, job.ViewsFor)
+		waitErr, askErr = answerAsk(w, in, firstLine, viewsFor)
 		if askErr != nil && ctx.Err() == nil && cctx.Err() == nil {
-			return Result{}, &WorkerError{Err: askErr, PID: pid, Stderr: stderr.buf.String()}
+			return Result{}, &WorkerError{Err: askErr, PID: pid, Stderr: w.stderr.text()}
 		}
 	} else {
-		waitErr = cmd.Wait()
+		// Written from its own goroutine: a statement can be larger than
+		// the pipe's buffer, and a worker that dies before reading it must
+		// not leave this write blocked. Closed after it: this worker gets
+		// no second message.
+		go func() {
+			_, _ = w.stdin.Write(in)
+			_ = w.stdin.Close()
+		}()
+		<-w.done
+		waitErr = w.waitErr
 	}
 
 	switch {
@@ -1027,16 +1112,18 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 		return Result{}, ctx.Err()
 	case errors.Is(cctx.Err(), context.DeadlineExceeded):
 		return Result{}, &TimeoutError{Limit: limits.Timeout, PID: pid}
-	case stdout.overflowed:
+	case w.stdout.didOverflow():
 		return Result{}, ErrResultTooLarge
 	}
 
-	spawnTook := time.Since(spawnStart)
+	spawnTook := time.Since(began)
 	decodeStart := time.Now()
 	var out wireResult
-	dec := json.NewDecoder(bytes.NewReader(stdout.buf.Bytes()))
+	// The process has exited and its pipes are drained (done is closed), so
+	// nothing writes to the buffers any more.
+	dec := json.NewDecoder(bytes.NewReader(w.stdout.buf.Bytes()))
 	dec.UseNumber()
-	err = dec.Decode(&out)
+	err := dec.Decode(&out)
 	if err == nil && out.Ask != nil {
 		// The question came first; the result follows it.
 		out = wireResult{}
@@ -1048,7 +1135,7 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 		} else {
 			err = fmt.Errorf("unreadable result: %w", err)
 		}
-		return Result{}, &WorkerError{Err: err, PID: pid, Stderr: stderr.buf.String()}
+		return Result{}, &WorkerError{Err: err, PID: pid, Stderr: w.stderr.text()}
 	}
 	if out.Error != nil {
 		switch out.Error.Kind {
@@ -1059,7 +1146,7 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 		case errTooLarge:
 			return Result{}, ErrResultTooLarge
 		default:
-			return Result{}, &WorkerError{Err: errors.New(out.Error.Message), PID: pid, Stderr: stderr.buf.String()}
+			return Result{}, &WorkerError{Err: errors.New(out.Error.Message), PID: pid, Stderr: w.stderr.text()}
 		}
 	}
 	res := Result{Columns: out.Columns, Rows: out.Rows, Truncated: out.Truncated,
@@ -1083,44 +1170,46 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 // line answers nothing: either way stdin is closed and the run ends as
 // usual. The second error is a failure of the exchange itself; a killed
 // worker (timeout, cancel) is reported by the caller from the contexts.
-func answerAsk(cmd *exec.Cmd, stdin io.WriteCloser, job []byte, firstLine <-chan []byte, viewsFor func(Refs) (string, error)) (waitErr, askErr error) {
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+func answerAsk(w *worker, job []byte, firstLine <-chan []byte, viewsFor func(Refs) (string, error)) (waitErr, askErr error) {
 	// The job is written from its own goroutine: a statement can be larger
 	// than the pipe's buffer, and a worker that dies before reading it must
 	// not leave this write blocked.
 	go func() {
-		if _, err := stdin.Write(job); err != nil {
-			_ = stdin.Close()
+		if _, err := w.stdin.Write(job); err != nil {
+			_ = w.stdin.Close()
 		}
 	}()
+	exited := func() error {
+		<-w.done
+		return w.waitErr
+	}
 	select {
 	case line := <-firstLine:
 		var q wireResult
 		if err := json.Unmarshal(line, &q); err != nil || q.Ask == nil {
-			_ = stdin.Close()
-			return <-done, nil
+			_ = w.stdin.Close()
+			return exited(), nil
 		}
 		script, err := viewsFor(*q.Ask)
 		if err != nil {
-			_ = killProcessGroup(cmd.Process)
-			_ = stdin.Close()
-			<-done
+			w.kill()
+			_ = w.stdin.Close()
+			<-w.done
 			return nil, fmt.Errorf("build the views for the statement: %w", err)
 		}
 		answer, err := json.Marshal(wireViews{ViewsSQL: script})
 		if err != nil {
-			_ = killProcessGroup(cmd.Process)
-			_ = stdin.Close()
-			<-done
+			w.kill()
+			_ = w.stdin.Close()
+			<-w.done
 			return nil, err
 		}
 		// A write that fails means the worker is gone; its exit says why.
-		_, _ = stdin.Write(answer)
-		_ = stdin.Close()
-		return <-done, nil
-	case err := <-done:
-		return err, nil
+		_, _ = w.stdin.Write(answer)
+		_ = w.stdin.Close()
+		return exited(), nil
+	case <-w.done:
+		return w.waitErr, nil
 	}
 }
 
@@ -1168,7 +1257,13 @@ func allowedDirs(dirs []string) []string {
 // rest is discarded (diagnostics); otherwise the writer reports an error
 // (which stops exec's copy goroutine) and fires onOverflow, which kills the
 // child so it does not block forever on a pipe nobody reads.
+//
+// exec's copy goroutine writes to it from the moment the process starts, and
+// a worker's stdout learns its cap only when the job is handed over (arm), so
+// the fields are guarded by mu. buf is read without it only once the process
+// has exited and its pipes are drained.
 type cappedBuffer struct {
+	mu         sync.Mutex
 	buf        bytes.Buffer
 	max        int64
 	drop       bool
@@ -1182,7 +1277,30 @@ type cappedBuffer struct {
 	lineSent  bool
 }
 
+// arm sets what a job allows this buffer: its cap, what to do past it, and
+// where the first line goes.
+func (c *cappedBuffer) arm(max int64, onOverflow func(), firstLine chan []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.max, c.onOverflow, c.firstLine = max, onOverflow, firstLine
+}
+
+func (c *cappedBuffer) didOverflow() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.overflowed
+}
+
+// text is what was collected so far, for an error report.
+func (c *cappedBuffer) text() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+
 func (c *cappedBuffer) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.overflowed {
 		if c.drop {
 			return len(p), nil

@@ -27,14 +27,23 @@ import (
 // selected by argument; the package's own test binary uses this.
 func IsWorkerProcess() bool { return os.Getenv(workerEnv) == "1" }
 
-// WorkerMain is the child's whole life: read one job from stdin, run it,
-// write one result to stdout, exit. The exit code is 0 whenever a result
-// (including a structured error) was written; anything else is a protocol
-// failure the parent reports as a WorkerError with stderr attached.
+// WorkerMain is the child's whole life: open its DuckDB, read one job from
+// stdin, run it, write one result to stdout, exit. The exit code is 0
+// whenever a result (including a structured error) was written; anything
+// else is a protocol failure the parent reports as a WorkerError with stderr
+// attached.
+//
+// DuckDB is opened BEFORE the job is read (#2236), so a worker started ahead
+// of its statement has that part done when the statement arrives. Nothing
+// about a job is known then and nothing of one is applied: the threads, the
+// memory limit, the spill directory and the directories it may read are all
+// set from the job, in runJobOn.
 func WorkerMain(stdin io.Reader, stdout, stderr io.Writer) int {
 	// First thing: on Linux, be the kernel's first choice if memory runs
 	// out on the host, ahead of the console that is also the capture plane.
 	lowerOOMPriority(stderr)
+	sess := openSession(stderr)
+	defer sess.close()
 	var job wireJob
 	dec := json.NewDecoder(stdin)
 	if err := dec.Decode(&job); err != nil {
@@ -64,7 +73,7 @@ func WorkerMain(stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return v.ViewsSQL, nil
 	}
-	res := runJob(job, ask, stderr)
+	res := runJobOn(sess, job, ask, stderr)
 	if err := json.NewEncoder(stdout).Encode(res); err != nil {
 		fmt.Fprintf(stderr, "sql worker: write result: %v\n", err)
 		return 2
@@ -81,37 +90,85 @@ const (
 	selfDeadlineExit  = 3
 )
 
-// runJob never panics out: a panic anywhere below becomes a session error
+// session is the worker's in-memory DuckDB and its one connection, opened
+// before the job is known. A failure to open is kept, not returned: the
+// worker still reads its job and answers it with that failure, so the parent
+// gets a typed answer either way.
+type session struct {
+	db     *sql.DB
+	conn   *sql.Conn
+	openNS int64
+	err    error
+}
+
+// openSession opens the DuckDB a job will run on. It never panics out: a
+// panic becomes the session's error, with the stack on stderr.
+func openSession(stderr io.Writer) (s *session) {
+	s = &session{}
+	start := time.Now()
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(stderr, "sql worker: panic: %v\n%s", r, debug.Stack())
+			s.err = fmt.Errorf("sql worker panicked: %v", r)
+		}
+		s.openNS = int64(time.Since(start))
+	}()
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		s.err = fmt.Errorf("open DuckDB: %v", err)
+		return s
+	}
+	s.db = db
+	// ONE connection for everything. DuckDB scopes some settings (TimeZone)
+	// and every SET VARIABLE to the connection, and the views script uses
+	// both; a pooled second connection would not see them.
+	db.SetMaxOpenConns(1)
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		s.err = fmt.Errorf("open DuckDB connection: %v", err)
+		return s
+	}
+	s.conn = conn
+	return s
+}
+
+func (s *session) close() {
+	if s.conn != nil {
+		_ = s.conn.Close()
+	}
+	if s.db != nil {
+		_ = s.db.Close()
+	}
+}
+
+// runJob opens a session and runs job on it.
+func runJob(job wireJob, ask func(Refs) (string, error), stderr io.Writer) wireResult {
+	sess := openSession(stderr)
+	defer sess.close()
+	return runJobOn(sess, job, ask, stderr)
+}
+
+// runJobOn never panics out: a panic anywhere below becomes a session error
 // with the stack on stderr, so the parent gets a typed answer.
-func runJob(job wireJob, ask func(Refs) (string, error), stderr io.Writer) (res wireResult) {
+func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr io.Writer) (res wireResult) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(stderr, "sql worker: panic: %v\n%s", r, debug.Stack())
 			res = wireResult{Error: &wireError{Kind: errSession, Message: fmt.Sprintf("sql worker panicked: %v", r)}}
 		}
 	}()
+	if sess.err != nil {
+		return sessionErr("%v", sess.err)
+	}
 	ctx := context.Background()
+	conn := sess.conn
+	res.OpenNS = sess.openNS
 	phase := time.Now()
 	mark := func(dst *int64) {
 		now := time.Now()
 		*dst = int64(now.Sub(phase))
 		phase = now
 	}
-	db, err := sql.Open("duckdb", "")
-	if err != nil {
-		return sessionErr("open DuckDB: %v", err)
-	}
-	defer db.Close()
-	// ONE connection for everything. DuckDB scopes some settings (TimeZone)
-	// and every SET VARIABLE to the connection, and the views script uses
-	// both; a pooled second connection would not see them.
-	db.SetMaxOpenConns(1)
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return sessionErr("open DuckDB connection: %v", err)
-	}
-	defer conn.Close()
-	mark(&res.OpenNS)
 
 	stmt, reason := parseStatement(ctx, conn, job.SQL)
 	if reason != "" {
