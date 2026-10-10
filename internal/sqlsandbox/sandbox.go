@@ -47,7 +47,9 @@
 // it, verified), so on Linux the worker raises its own oom_score_adj to be
 // the kernel's first choice ahead of the console, cells are cut at a fixed
 // size, the result is counted in bytes on both sides of the pipe, and the
-// runner caps how many workers run at once.
+// runner caps how many workers run at once. Where the host hands the daemon
+// a cgroup to manage, each worker also runs in a memory cgroup of its own
+// (#2226, fence.go), so it reaches its own ceiling before the host runs out.
 //
 // The parent API is Runner.Run. Slice 2 (the panel and its HTTP route) calls
 // it with a Job built from the selected server's copy location and the views
@@ -546,6 +548,12 @@ type Runner struct {
 	spillSweptAt   time.Time
 	spillLastError string
 
+	// fence is where a worker gets a memory cgroup of its own (#2226), found
+	// once; fenceLastError, under spillMu, is the last reason a statement
+	// ran without one, logged once per change like the spill's.
+	fence          fence
+	fenceLastError string
+
 	mu       sync.Mutex
 	busy     map[string]bool
 	inFlight int
@@ -615,7 +623,62 @@ func New(cfg Config) *Runner {
 	if _, err := r.SpillState(r.limits.MemoryLimit); err != nil {
 		r.noteSpill(err)
 	}
+	r.fence = fenceFor()
+	if r.fence.root != "" {
+		sweepFences(r.fence.root)
+		slog.Info("sql on the copy: each statement runs in a memory cgroup of its own", "under", r.fence.root)
+	} else if r.fence.why != "" {
+		// Info, not a warning: this is how a statement ran before #2226, and
+		// a warning is kept for a fence that was there and stopped working.
+		slog.Info("sql on the copy: statements run without a memory cgroup of their own, so one that outgrows its memory is stopped only when the host runs out", "reason", r.fence.why)
+	}
 	return r
+}
+
+// fenceFor finds the Runner's fence; a variable so a test can give one.
+var fenceFor = func() fence {
+	if !fenceReason {
+		return fence{}
+	}
+	self, err := procSelfCgroup()
+	if err != nil {
+		return fence{why: fmt.Sprintf("DBTrail's own cgroup cannot be read: %v", err)}
+	}
+	return findFence(cgroupMount, self, cgroupDelegated)
+}
+
+// FenceState reports whether a statement runs in a memory cgroup of its own
+// (#2226) and, when it does not on a host where it could, why. Without one a
+// statement that outgrows its memory can only be stopped by the kernel once
+// the whole host is out of memory, where the choice is not confined to the
+// statement. The reason is empty off Linux, where there is nothing to set up.
+func (r *Runner) FenceState() (fenced bool, reason string) {
+	if r.fence.root == "" {
+		return false, r.fence.why
+	}
+	r.spillMu.Lock()
+	defer r.spillMu.Unlock()
+	return r.fenceLastError == "", r.fenceLastError
+}
+
+// noteFence logs a change in whether statements get their cgroup, as
+// noteSpill does for the disk: once when they stop, once when they do again.
+func (r *Runner) noteFence(err error) {
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	r.spillMu.Lock()
+	changed := msg != r.fenceLastError
+	r.fenceLastError = msg
+	r.spillMu.Unlock()
+	switch {
+	case !changed || !fenceReason:
+	case err != nil:
+		slog.Warn("sql on the copy: statements run without a memory cgroup of their own, so one that outgrows its memory is stopped only when the host runs out", "reason", msg)
+	default:
+		slog.Info("sql on the copy: each statement runs in a memory cgroup of its own again")
+	}
 }
 
 // sweepSpillDue sweeps when the last sweep is older than spillSweepEvery, or
@@ -1028,11 +1091,18 @@ type worker struct {
 	// used is set by the one run this worker serves. A second hand-over is
 	// refused: its stdout still holds the first statement's answer.
 	used atomic.Bool
+	// fence is the worker's memory cgroup (#2226), nil when it runs without
+	// one. oomKilled, set before done is closed, says the kernel stopped the
+	// worker at that cgroup's ceiling.
+	fence     *workerFence
+	oomKilled bool
 }
 
 // startWorker starts a worker with no job. Nothing of a statement is in its
-// environment or its arguments: the job goes in by stdin (run).
-func (r *Runner) startWorker() (*worker, error) {
+// environment or its arguments: the job goes in by stdin (run). memoryLimit
+// sizes the worker's memory cgroup where the host gives one (#2226); a
+// worker that cannot be started inside it is started without, as before.
+func (r *Runner) startWorker(memoryLimit string) (*worker, error) {
 	exe := r.exe
 	if exe == "" {
 		var err error
@@ -1044,6 +1114,30 @@ func (r *Runner) startWorker() (*worker, error) {
 	if args == nil {
 		args = []string{WorkerCommand}
 	}
+	if r.fence.root == "" {
+		return startWorkerProcess(exe, args, nil)
+	}
+	wf, err := r.fence.make(memoryLimit)
+	if err == nil {
+		var w *worker
+		if w, err = startWorkerProcess(exe, args, wf); err == nil {
+			r.noteFence(nil)
+			return w, nil
+		}
+		wf.close()
+		err = fmt.Errorf("start the worker in its cgroup: %w", err)
+	}
+	// Noted only once the worker has started without its cgroup: a worker
+	// that cannot start either way failed for a reason of its own.
+	w, startErr := startWorkerProcess(exe, args, nil)
+	if startErr == nil {
+		r.noteFence(err)
+	}
+	return w, startErr
+}
+
+// startWorkerProcess starts one worker process, inside wf when it is given.
+func startWorkerProcess(exe string, args []string, wf *workerFence) (*worker, error) {
 	// The process is tied to its own context, not to a statement's: the
 	// statement's deadline does not exist yet when a worker starts.
 	wctx, kill := context.WithCancel(context.Background())
@@ -1055,13 +1149,16 @@ func (r *Runner) startWorker() (*worker, error) {
 		return nil, fmt.Errorf("stdin: %w", err)
 	}
 	setProcessGroup(cmd)
+	if wf != nil {
+		intoFence(cmd, wf)
+	}
 	// Kill the whole process group: DuckDB's worker threads belong to the
 	// child, and a plain Kill of the leader is enough for them, but a group
 	// kill also covers anything the child might spawn.
 	cmd.Cancel = func() error { return killProcessGroup(cmd.Process) }
 	// If the group kill somehow leaves the pipes open, stop waiting on them.
 	cmd.WaitDelay = 5 * time.Second
-	w := &worker{cmd: cmd, stdin: stdin, kill: kill, done: make(chan struct{}),
+	w := &worker{cmd: cmd, stdin: stdin, kill: kill, done: make(chan struct{}), fence: wf,
 		// Until a job arms it (run), stdout takes nothing: a worker has
 		// nothing to say before its job.
 		stdout: &cappedBuffer{},
@@ -1078,6 +1175,12 @@ func (r *Runner) startWorker() (*worker, error) {
 		w.waitErr = cmd.Wait()
 		// Release the context whatever ended the process.
 		kill()
+		if wf != nil {
+			// The process is gone: its cgroup's counters are final, and the
+			// cgroup can go.
+			w.oomKilled = wf.oomKilled()
+			wf.close()
+		}
 		close(w.done)
 	}()
 	return w, nil
@@ -1144,7 +1247,7 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 	// A worker started for this statement: starting it is part of the
 	// statement's cost (Phases.Spawn).
 	began := time.Now()
-	w, err := r.startWorker()
+	w, err := r.startWorker(limits.MemoryLimit)
 	if err != nil {
 		return Result{}, &WorkerError{Err: err}
 	}
@@ -1235,6 +1338,11 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 		err = dec.Decode(&out)
 	}
 	if err != nil {
+		if w.oomKilled {
+			// The kernel stopped the worker at its own ceiling (#2226): the
+			// statement ran out of memory, the worker did not fail.
+			return Result{}, &QueryError{Message: oomFenceMessage}
+		}
 		if waitErr != nil {
 			err = fmt.Errorf("%w (no result: %v)", waitErr, err)
 		} else {

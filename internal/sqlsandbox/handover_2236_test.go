@@ -34,7 +34,7 @@ func TestHandover_theClockStartsWithTheJob(t *testing.T) {
 	limits := testLimits()
 	limits.Timeout = 2 * time.Second
 	r := newTestRunner(t, limits)
-	w, err := r.startWorker()
+	w, err := r.startWorker(r.limits.MemoryLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestHandover_theTimeoutCountsFromTheJob(t *testing.T) {
 	limits := testLimits()
 	limits.Timeout = 1500 * time.Millisecond
 	r := newTestRunner(t, limits)
-	w, err := r.startWorker()
+	w, err := r.startWorker(r.limits.MemoryLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestHandover_theTimeoutCountsFromTheJob(t *testing.T) {
 // reaped. Nothing is left waiting for a deadline it does not have.
 func TestHandover_aWorkerWithNoJobExitsWhenStdinCloses(t *testing.T) {
 	r := newTestRunner(t, testLimits())
-	w, err := r.startWorker()
+	w, err := r.startWorker(r.limits.MemoryLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestHandover_aWorkerThatDiedFirstIsAFailureNotAHang(t *testing.T) {
 	f := newCopyFixture(t)
 	limits := testLimits()
 	r := newTestRunner(t, limits)
-	w, err := r.startWorker()
+	w, err := r.startWorker(r.limits.MemoryLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestHandover_aWorkerServesOneJob(t *testing.T) {
 	f := newCopyFixture(t)
 	limits := testLimits()
 	r := newTestRunner(t, limits)
-	w, err := r.startWorker()
+	w, err := r.startWorker(r.limits.MemoryLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestHandover_aWorkerServesOneJob(t *testing.T) {
 func TestHandover_theJobsLimitsApplyNotTheOnesAtStart(t *testing.T) {
 	f := newCopyFixture(t)
 	r := newTestRunner(t, testLimits())
-	w, err := r.startWorker()
+	w, err := r.startWorker(r.limits.MemoryLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestHandover_askingForViewsWorksAfterAWait(t *testing.T) {
 	f := newCopyFixture(t)
 	limits := testLimits()
 	r := newTestRunner(t, limits)
-	w, err := r.startWorker()
+	w, err := r.startWorker(r.limits.MemoryLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
