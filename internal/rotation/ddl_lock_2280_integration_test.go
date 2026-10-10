@@ -59,10 +59,10 @@ func partitionList(t *testing.T, db *sql.DB, dbName string) string {
 // waitForALTERWaiting returns once an ALTER is waiting for the table, so what
 // the caller does next arrives behind it. It only reports: it runs in
 // goroutines.
-func waitForALTERWaiting(t *testing.T, db *sql.DB) {
+func waitForALTERWaiting(t *testing.T, db *sql.DB, dbName string) {
 	for range 200 {
 		var n int
-		err := db.QueryRow("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE STATE = 'Waiting for table metadata lock' AND INFO LIKE 'ALTER TABLE%'").Scan(&n)
+		err := db.QueryRow("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE STATE = 'Waiting for table metadata lock' AND INFO LIKE ?", "ALTER TABLE `"+dbName+"`%").Scan(&n)
 		if err == nil && n > 0 {
 			return
 		}
@@ -98,7 +98,7 @@ func TestAlterBinlogEvents_givesUpInsteadOfHoldingUpWrites(t *testing.T) {
 	wrote := make(chan time.Duration, 1)
 	writeErr := make(chan error, 1)
 	go func() {
-		waitForALTERWaiting(t, db)
+		waitForALTERWaiting(t, db, dbName)
 		start := time.Now()
 		_, err := db.Exec("INSERT INTO `"+dbName+"`.binlog_events (binlog_file, start_pos, end_pos, event_timestamp, schema_name, table_name, event_type, pk_values) VALUES ('binlog.000001', 1, 2, ?, 's', 't', 1, '1')",
 			time.Now().UTC().Format("2006-01-02 15:04:05"))
@@ -340,7 +340,7 @@ func TestPerform_rowArrivingWhileTheDropWaitsStopsTheDrop(t *testing.T) {
 
 	inserted := make(chan error, 1)
 	go func() {
-		waitForALTERWaiting(t, db)
+		waitForALTERWaiting(t, db, dbName)
 		_, err := db.Exec("INSERT INTO `"+dbName+"`.binlog_events (binlog_file, start_pos, end_pos, event_timestamp, schema_name, table_name, event_type, pk_values) VALUES ('binlog.000001', 300, 400, ?, 'testdb', 'users', 1, '2')", at)
 		inserted <- err
 	}()
@@ -359,6 +359,12 @@ func TestPerform_rowArrivingWhileTheDropWaitsStopsTheDrop(t *testing.T) {
 	}
 	if res.Dropped != 0 || res.Deferred != 1 {
 		t.Errorf("cycle = %+v, want nothing dropped and 1 deferred", res)
+	}
+	// The archive taken before the late row is discarded, so no later
+	// cycle that only drops takes the partition for safely archived.
+	var states int
+	if err := db.QueryRow("SELECT COUNT(*) FROM archive_state WHERE partition_name = ?", name).Scan(&states); err != nil || states != 0 {
+		t.Errorf("archive_state rows for %s = %d (%v), want none: its archive lacks the late row", name, states, err)
 	}
 	end()
 	var rows int

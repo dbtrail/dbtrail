@@ -22,7 +22,10 @@ import (
 // retention that this cycle did NOT drop to avoid data loss: the
 // ProtectUnarchived guard refusing an unarchived partition, an S3 upload that
 // failed in this run, an upload still pending (in either branch, whichever
-// source it belongs to), or a partition that changed after it was archived.
+// source it belongs to), a partition that changed after it was archived, or
+// one whose drop found binlog_events in use (#2280). An add of future
+// partitions skipped for that reason counts as one more, so Deferred is the
+// steps a cycle left undone, not strictly a number of partitions.
 // The built-in loop sums it across targets to drive escalation. The explicit
 // `rotate` command surfaces only Dropped/Added, but can still produce
 // Deferred>0 for the last three. A named struct, not a positional tuple: three same-typed ints
@@ -427,17 +430,8 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 							fmt.Fprintf(os.Stdout, "skipped drop for %s (partition changed since archive: %d → %d rows; will re-archive next cycle)\n",
 								name, archived.Int64, live)
 						}
-						// Discard the incomplete staged archive and its
-						// archive_state row so (a) --retry re-archives instead of
-						// trusting the stale file, and (b) no later drop-only cycle
-						// trusts this partition as safely archived.
-						if _, derr := db.ExecContext(ctx,
-							`DELETE FROM archive_state WHERE partition_name = ? AND bintrail_id = ?`,
-							name, opts.BintrailID); derr != nil {
-							return Result{}, fmt.Errorf("invalidate stale archive state for %s: %w", name, derr)
-						}
-						if rerr := os.Remove(outPath); rerr != nil && !os.IsNotExist(rerr) {
-							slog.Warn("could not remove stale local archive after deferring drop", "partition", name, "error", rerr)
+						if err := discardStaleArchive(ctx, db, name, opts.BintrailID, outPath); err != nil {
+							return Result{}, err
 						}
 						deferredCount++
 						continue
@@ -459,13 +453,15 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 					}
 					if err := dropPartitions(ctx, db, dbName, []string{name}, unchanged); err != nil {
 						if errors.Is(err, errChangedWhileWaiting) {
-							// Still in the index with its archive: the next
-							// cycle's own count finds the difference and
-							// archives the partition again.
-							slog.Warn("partition received rows while its drop waited for the table; deferring the drop to the next cycle",
+							// The archive is as stale as one the count above
+							// refuses, and is discarded the same way.
+							slog.Warn("partition received rows while its drop waited for the table; deferring drop and discarding the stale archive for re-archive next cycle",
 								"partition", name)
 							if opts.Format != "json" {
-								fmt.Fprintf(os.Stdout, "skipped drop for %s (rows arrived while the drop waited)\n", name)
+								fmt.Fprintf(os.Stdout, "skipped drop for %s (rows arrived while the drop waited; will re-archive next cycle)\n", name)
+							}
+							if err := discardStaleArchive(ctx, db, name, opts.BintrailID, outPath); err != nil {
+								return Result{}, err
 							}
 							deferredCount++
 							continue
@@ -874,6 +870,22 @@ func dropPartitions(ctx context.Context, db *sql.DB, dbName string, names []stri
 	q := fmt.Sprintf("ALTER TABLE `%s`.`binlog_events` DROP PARTITION %s",
 		dbName, strings.Join(names, ", "))
 	return alterBinlogEvents(ctx, db, q, stillSafe)
+}
+
+// discardStaleArchive drops the archive of a partition that received rows
+// after it was archived: its archive_state row and its staged file, so that
+// (a) --retry re-archives instead of trusting the stale file, and (b) no
+// later drop-only cycle trusts this partition as safely archived.
+func discardStaleArchive(ctx context.Context, db *sql.DB, name, bintrailID, outPath string) error {
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM archive_state WHERE partition_name = ? AND bintrail_id = ?`,
+		name, bintrailID); err != nil {
+		return fmt.Errorf("invalidate stale archive state for %s: %w", name, err)
+	}
+	if err := os.Remove(outPath); err != nil && !os.IsNotExist(err) {
+		slog.Warn("could not remove stale local archive after deferring drop", "partition", name, "error", err)
+	}
+	return nil
 }
 
 // warnTableBusy says a rotation statement was given up because the table was
