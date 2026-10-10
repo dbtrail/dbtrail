@@ -2,18 +2,13 @@ package consoleapp
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
-	"time"
-	"unicode"
 
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
-	mysqldriver "github.com/go-sql-driver/mysql"
+	"github.com/dbtrail/dbtrail/internal/doctor"
 )
 
 // A full read (#1938) writes mydumper's whole dump, uncompressed, into the
@@ -94,59 +89,17 @@ func dumpDiskOnceItFit(check, note string) (string, string) {
 	return check, note
 }
 
-// dumpPeakTenths is the dump-plus-Parquet peak as tenths of the estimate:
-// 18 = 1.8x, the highest ratio the #1938 measurement saw against
-// DATA_LENGTH + INDEX_LENGTH (random binary: 94 MiB dump + 84 MiB Parquet
-// over 99 MiB).
-//
-// It was measured with the whole dump on disk until the last table
-// was converted. Since #1938 each table's dump data is removed when its Parquet
-// file is written (baseline.Config.RemoveConvertedData), so the real peak is
-// at most what it was and usually lower: how much lower depends on how many
-// tables there are next to the CPUs converting them, and on whether one table
-// dominates. The constant is deliberately left as it was until that is
-// measured (#2256): it warns too early, never too late.
-const dumpPeakTenths = 18
+// The estimate itself (the query, the sum, the session it runs on and the
+// two ratios) lives in internal/doctor, where `bintrail doctor` reads the
+// same numbers (#2259). What follows is this process's use of it: where each
+// part of a full read is written, and what the job says about it.
+type dumpEstimate = doctor.DumpEstimate
 
-// dumpRefuseTenths is the refusal line as tenths of the tables' DATA size:
-// below half of it no measured dump fit, so refusing there is not a guess.
-const dumpRefuseTenths = 5
-
-// dumpEstimateServerLimit is how long the SOURCE may spend on the estimate's
-// query before it stops it itself. Under dumpEstimateTimeout, so what comes
-// back is the server's own error and not a connection closed under a query
-// that goes on running. (When connecting and the session's settings take more
-// than the difference, the wait ends first and the query runs on for at most
-// this long: still bounded.)
-const dumpEstimateServerLimit = 12 * time.Second
-
-// dumpCompressedNamed is how many compressed tables a note names: the largest
-// ones, which are the ones the sizes are most wrong about.
-const dumpCompressedNamed = 2
-
-// dumpEstimateTimeout bounds the information_schema read. It runs before every
-// full read, and a source that does not answer in time must cost a note, not
-// the backup.
-const dumpEstimateTimeout = 15 * time.Second
-
-// dumpEstimate is what the source reports about the tables a dump selects.
-type dumpEstimate struct {
-	bytes int64 // DATA_LENGTH + INDEX_LENGTH, summed: what the warnings read
-	// dataBytes is DATA_LENGTH alone, summed: what the refusal reads, since
-	// a dump holds no secondary indexes.
-	dataBytes int64
-	tables    int
-	// compressed counts tables whose reported size is their compressed size;
-	// compressedTop names the largest dumpCompressedNamed of them.
-	compressed    int
-	compressedTop []string
-	// unsized counts tables the server reported no size for (NULL). They add
-	// nothing to bytes, so the note says the estimate is short by them.
-	unsized int
-	// stale: the source refused to serve current sizes (not the 1193 of a
-	// server that has no cache), so they may be up to a day old.
-	stale bool
-}
+const (
+	dumpPeakTenths      = doctor.DumpPeakTenths
+	dumpRefuseTenths    = doctor.DumpRefuseTenths
+	dumpEstimateTimeout = doctor.DumpEstimateTimeout
+)
 
 // dumpSizeEstimateFn reads the estimate from the source; a test replaces it.
 var dumpSizeEstimateFn = estimateDumpSize
@@ -155,220 +108,15 @@ var dumpSizeEstimateFn = estimateDumpSize
 // a test replaces it.
 var sameFilesystemFn = sameFilesystem
 
-// dumpSizeQuery is the estimate's query over the same table selection as
-// dumpableTableCountQuery, which is the selection buildConsoleMydumperArgs
-// asks mydumper for. One row per table, summed here: the source walks every
-// table for a SUM anyway, a second query for the compressed ones would walk
-// them again, and GROUP_CONCAT cuts a list of names at 1024 bytes without a
-// word.
-func dumpSizeQuery(schemas []string) (string, []any) {
-	where, args := dumpableTablesWhere(schemas)
-	return "SELECT TABLE_SCHEMA, TABLE_NAME, ENGINE, ROW_FORMAT, DATA_LENGTH, INDEX_LENGTH " +
-		"FROM information_schema.TABLES WHERE " + where, args
-}
-
-// dumpTableRow is one row of dumpSizeQuery. Everything but the names can be
-// NULL: a table the server cannot open reports no engine, format or size.
-type dumpTableRow struct {
-	schema, table     string
-	engine, rowFormat sql.NullString
-	data, index       sql.NullInt64
-}
-
-// storedCompressed reports whether the server's size for this table is its
-// compressed size. Exact words, any case: MySQL and MariaDB both spell the
-// row format "Compressed", and MyRocks reports its engine as "ROCKSDB".
-func (r dumpTableRow) storedCompressed() bool {
-	return (r.rowFormat.Valid && strings.EqualFold(r.rowFormat.String, "Compressed")) ||
-		(r.engine.Valid && strings.EqualFold(r.engine.String, "ROCKSDB"))
-}
-
-// dumpTableSum adds rows up as they are read, so a source with a million
-// tables costs this process a few numbers and two names, not a million rows
-// held in the capture process. A NULL size adds nothing and counts the table
-// as unsized, so the note says the estimate is short by it.
-type dumpTableSum struct {
-	est dumpEstimate
-	// top holds the largest compressed tables seen so far, largest first,
-	// at most dumpCompressedNamed of them.
-	top []namedSize
-}
-
-type namedSize struct {
-	name string
-	size int64
-}
-
-// before reports whether a goes ahead of b: larger first, then by name, so
-// the names a note prints do not change between two runs over equal sizes.
-func (a namedSize) before(b namedSize) bool {
-	if a.size != b.size {
-		return a.size > b.size
-	}
-	return a.name < b.name
-}
-
-func (s *dumpTableSum) add(r dumpTableRow) {
-	s.est.tables++
-	if !r.data.Valid || !r.index.Valid {
-		s.est.unsized++
-	}
-	data, index := max(r.data.Int64, 0), max(r.index.Int64, 0)
-	s.est.dataBytes += data
-	s.est.bytes += data + index
-	if !r.storedCompressed() {
-		return
-	}
-	s.est.compressed++
-	n := namedSize{printableName(r.schema) + "." + printableName(r.table), data + index}
-	at := len(s.top)
-	for at > 0 && n.before(s.top[at-1]) {
-		at--
-	}
-	s.top = slices.Insert(s.top, at, n)
-	s.top = s.top[:min(len(s.top), dumpCompressedNamed)]
-}
-
-func (s *dumpTableSum) estimate() dumpEstimate {
-	est := s.est
-	est.compressedTop = nil
-	for _, n := range s.top {
-		est.compressedTop = append(est.compressedTop, n.name)
-	}
-	return est
-}
-
-// summarizeDumpTables is dumpTableSum over a list.
-func summarizeDumpTables(rows []dumpTableRow) dumpEstimate {
-	var sum dumpTableSum
-	for _, r := range rows {
-		sum.add(r)
-	}
-	return sum.estimate()
-}
-
-// printableName keeps a schema or table name on the line it is printed in: a
-// name may hold a newline or any other control character, and the note it
-// lands in is cut at its first line in more than one place.
-func printableName(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return '?'
-		}
-		return r
-	}, s)
-}
-
-// compressedTablesSentence is what a verdict says about tables stored
-// compressed, "" when there are none. It starts with a space, like the other
-// parts of a note's tail.
-func compressedTablesSentence(est dumpEstimate) string {
-	if est.compressed == 0 {
-		return ""
-	}
-	names := strings.Join(est.compressedTop, ", ")
-	if more := est.compressed - len(est.compressedTop); more > 0 {
-		names += fmt.Sprintf(" and %d more", more)
-	}
-	if est.compressed == 1 {
-		return fmt.Sprintf(" 1 table uses compressed storage (%s): the server reports its compressed size, and a full read writes it "+
-			"uncompressed, so a full read can need more than the sizes say.", names)
-	}
-	return fmt.Sprintf(" %d tables use compressed storage (%s): the server reports their compressed size, and a full read writes them "+
-		"uncompressed, so a full read can need more than the sizes say.", est.compressed, names)
-}
-
-// sessionExecer is the part of a connection prepareEstimateSession uses.
-type sessionExecer interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-}
-
-// prepareEstimateSession sets up the estimate's own connection, and reports
-// whether the sizes it will read may be stale.
-//
-// Fresh sizes: MySQL 8.0 and newer serve information_schema sizes from a
-// cache that can be a day old (information_schema_stats_expiry), which
-// undercounts a table that grew. A server without the variable (MariaDB, 5.7)
-// refuses the SET with 1193, and its sizes are not cached. Any other refusal
-// (a proxy that rejects the SET, say) leaves the day-old cache in play.
-//
-// A limit the source enforces: the read's own timeout only ends the waiting.
-// The driver then closes the connection without KILL QUERY, and with fresh
-// sizes asked for the server opens every table, which on a source with tens
-// of thousands of them goes on for minutes after nobody is listening. MySQL
-// takes max_execution_time (milliseconds). MariaDB does not know it (1193)
-// and takes max_statement_time (seconds), which is sent ONLY then: some
-// Percona builds read that same name in milliseconds, where 12 would end
-// every estimate at once. A limit that could not be set is not a reason to
-// skip the check: the wait is still bounded.
-func prepareEstimateSession(ctx context.Context, conn sessionExecer) (stale bool) {
-	unknownVariable := func(err error) bool {
-		var me *mysqldriver.MySQLError
-		return errors.As(err, &me) && me.Number == 1193
-	}
-	if _, err := conn.ExecContext(ctx, "SET SESSION information_schema_stats_expiry = 0"); err != nil {
-		if unknownVariable(err) {
-			slog.Debug("full read disk check: the source has no size cache to turn off", "error", err)
-		} else {
-			slog.Warn("full read disk check: could not ask the source for current table sizes; it may answer with sizes up to a day old", "error", err)
-			stale = true
-		}
-	}
-	refused := func(set string, err error) {
-		slog.Warn("full read disk check: the source refused a time limit for the size query, so the query can go on there after "+
-			"this read stops waiting for it", "statement", set, "error", err)
-	}
-	mysqlLimit := fmt.Sprintf("SET SESSION max_execution_time = %d", dumpEstimateServerLimit.Milliseconds())
-	_, err := conn.ExecContext(ctx, mysqlLimit)
-	switch {
-	case err == nil:
-	case unknownVariable(err):
-		mariaLimit := fmt.Sprintf("SET SESSION max_statement_time = %d", int(dumpEstimateServerLimit.Seconds()))
-		if _, err := conn.ExecContext(ctx, mariaLimit); err != nil {
-			refused(mariaLimit, err)
-		}
-	default:
-		refused(mysqlLimit, err)
-	}
-	return stale
-}
-
-// estimateDumpSize runs dumpSizeQuery on the source, on a session prepared by
-// prepareEstimateSession.
+// estimateDumpSize reads the estimate over a connection opened with this
+// process's own TLS settings for the source.
 func estimateDumpSize(ctx context.Context, sourceDSN string, ssl config.SSL, schemas []string) (dumpEstimate, error) {
 	db, err := connectSource(sourceDSN, ssl)
 	if err != nil {
 		return dumpEstimate{}, err
 	}
 	defer db.Close()
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return dumpEstimate{}, err
-	}
-	defer conn.Close()
-	stale := prepareEstimateSession(ctx, conn)
-	q, args := dumpSizeQuery(schemas)
-	res, err := conn.QueryContext(ctx, q, args...)
-	if err != nil {
-		return dumpEstimate{}, err
-	}
-	defer res.Close()
-	var sum dumpTableSum
-	for res.Next() {
-		var r dumpTableRow
-		if err := res.Scan(&r.schema, &r.table, &r.engine, &r.rowFormat, &r.data, &r.index); err != nil {
-			return dumpEstimate{}, err
-		}
-		sum.add(r)
-	}
-	// A limit that fires mid-scan ends the rows early with an error here; a
-	// partial sum must never be returned as the whole.
-	if err := res.Err(); err != nil {
-		return dumpEstimate{}, err
-	}
-	est := sum.estimate()
-	est.stale = stale
-	return est, nil
+	return doctor.ReadDumpEstimate(ctx, db, schemas)
 }
 
 // checkDumpDisk is the preflight execute runs before mydumper. It returns the
@@ -395,7 +143,7 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 		return dumpDiskUnchecked, "Disk check did not run: the table sizes could not be read from the source (" +
 			firstLineOf(estErr.Error()) + "). The full read went ahead.", nil
 	}
-	if est.tables == 0 {
+	if est.Tables == 0 {
 		// Not "needs 0 B": nothing matched, which is its own fact. mydumper
 		// runs with the same user and selection, so it has nothing to write.
 		return dumpDiskOK, "Disk check: no tables match what this read dumps, so there was nothing to size.", nil
@@ -405,9 +153,9 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 		return dumpDiskUnchecked, "Disk check did not run: the free space at " + stagingDir + " could not be measured (" +
 			why + "). The full read went ahead.", nil
 	}
-	need := uint64(max(est.bytes, 0))
+	need := uint64(max(est.Bytes, 0))
 	peak := need * dumpPeakTenths / 10
-	data := uint64(max(est.dataBytes, 0))
+	data := uint64(max(est.DataBytes, 0))
 	floor := data * dumpRefuseTenths / 10
 	shared, unknown := localDir == "", false
 	outDir := stagingDir
@@ -425,17 +173,17 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 		shared = same || unknown
 	}
 	short := ""
-	if est.unsized > 0 {
-		short += fmt.Sprintf(" The source gave no size for %d table(s), so the real need is higher.", est.unsized)
+	if est.Unsized > 0 {
+		short += fmt.Sprintf(" The source gave no size for %d table(s), so the real need is higher.", est.Unsized)
 	}
-	if est.stale {
+	if est.Stale {
 		short += " The source may have reported sizes up to a day old."
 	}
-	short += compressedTablesSentence(est)
+	short += doctor.DumpCompressedSentence(est)
 	// The sizes bound the dump from above only when every table reports its
 	// real size.
 	bound := ", an upper bound (secondary indexes are not dumped, deleted rows still count),"
-	if est.compressed > 0 {
+	if est.Compressed > 0 {
 		bound = ""
 	}
 
@@ -465,7 +213,7 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 			// "Up to" and "fits" are claims about a bound, which the sizes
 			// are not with tables stored compressed.
 			copyTakes, dumpFits := "the copy can take up to about", "The dump itself fits at"
-			if est.compressed > 0 {
+			if est.Compressed > 0 {
 				copyTakes, dumpFits = "by the sizes the server reports the copy takes about", "By those sizes the dump fits at"
 			}
 			return dumpDiskLow, fmt.Sprintf("Low disk: %s, where the Parquet copy goes, has %s free, and %s %s. "+
@@ -497,7 +245,7 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 // room: it says it cannot tell, in the note's first words, and the page shows
 // that as a note and not as an alarm.
 func roomVerdict(est dumpEstimate, note string) (string, string, error) {
-	if est.compressed > 0 {
+	if est.Compressed > 0 {
 		return dumpDiskUnchecked, "Disk check cannot tell whether this read fits. By the sizes the server reports: " +
 			strings.TrimPrefix(note, "Disk check: "), nil
 	}

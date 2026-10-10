@@ -60,7 +60,7 @@ func stubDumpThatWrites(t *testing.T, write func(dir string)) {
 	dumpDDLMarkFunc = func(console.BaselineRequest) string { return "" }
 	dumpEventMarkFunc = func(console.BaselineRequest) string { return "" }
 	t.Cleanup(func() { dumpDDLMarkFunc, dumpEventMarkFunc = prevDDL, prevEv })
-	stubEstimate(t, dumpEstimate{bytes: 1 << 20, tables: 2}, nil)
+	stubEstimate(t, dumpEstimate{Bytes: 1 << 20, Tables: 2}, nil)
 	stubSameFS(t, true, nil)
 	prevDisk := diskSpaceFn
 	diskSpaceFn = func(string) (uint64, uint64, error) { return 100 * gib, 1 << 40, nil }

@@ -1781,22 +1781,10 @@ func dumpableTableCountQuery(schemas []string) (string, []any) {
 }
 
 // dumpableTablesWhere is the information_schema.TABLES filter for the tables
-// a console dump selects, shared by the no-lock count above and the disk
-// check's size estimate (dumpSizeQuery, #1938) so the two cannot drift apart.
+// a console dump selects. It lives in internal/doctor beside the size
+// estimate that shares it (#1938, #2259), so the two cannot drift apart.
 func dumpableTablesWhere(schemas []string) (string, []any) {
-	// SYSTEM VERSIONED is how MariaDB lists a system-versioned table; it is
-	// a table mydumper dumps like any other (#1993 reads this list to find
-	// tables a snapshot lacks, and would never see one created that way).
-	const base = "TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VERSIONED') AND "
-	if len(schemas) == 0 {
-		return base + "TABLE_SCHEMA NOT IN ('mysql','sys','performance_schema','information_schema')", nil
-	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(schemas)), ",")
-	args := make([]any, len(schemas))
-	for i, s := range schemas {
-		args[i] = s
-	}
-	return base + "TABLE_SCHEMA IN (" + placeholders + ")", args
+	return doctor.DumpableTablesWhere(schemas)
 }
 
 // warnIfMultiTableNoLock logs an advisory warning when a no-lock dump is about

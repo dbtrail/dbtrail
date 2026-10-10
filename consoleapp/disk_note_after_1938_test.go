@@ -21,8 +21,8 @@ import (
 
 func TestDumpDiskOnceItFit_1938(t *testing.T) {
 	stage, local := t.TempDir(), t.TempDir()
-	plain := dumpEstimate{dataBytes: int64(10 * gib), bytes: int64(10 * gib), tables: 4}
-	zipped := dumpEstimate{dataBytes: int64(10 * gib), bytes: int64(10 * gib), tables: 4, compressed: 1, compressedTop: []string{"shop.orders"}}
+	plain := dumpEstimate{DataBytes: int64(10 * gib), Bytes: int64(10 * gib), Tables: 4}
+	zipped := dumpEstimate{DataBytes: int64(10 * gib), Bytes: int64(10 * gib), Tables: 4, Compressed: 1, CompressedTop: []string{"shop.orders"}}
 
 	type lowCase struct {
 		name     string
@@ -126,7 +126,7 @@ func TestFullRead_aLowDiskReadThatWorkedSaysItFit_1938(t *testing.T) {
 		dumpDDLMarkFunc = func(console.BaselineRequest) string { return "" }
 		dumpEventMarkFunc = func(console.BaselineRequest) string { return "" }
 		t.Cleanup(func() { dumpDDLMarkFunc, dumpEventMarkFunc = prevDDL, prevEv })
-		stubEstimate(t, dumpEstimate{bytes: int64(10 * gib), dataBytes: int64(10 * gib), tables: 2}, nil)
+		stubEstimate(t, dumpEstimate{Bytes: int64(10 * gib), DataBytes: int64(10 * gib), Tables: 2}, nil)
 		stubSameFS(t, true, nil)
 		prevDisk := diskSpaceFn
 		diskSpaceFn = func(string) (uint64, uint64, error) { return 15 * gib, 1 << 40, nil }
@@ -167,7 +167,7 @@ func TestFullRead_aLowDiskNoteSaysItFitOnceTheSnapshotIsWritten_1938(t *testing.
 	stage, local := t.TempDir(), t.TempDir()
 	ds := stubDumpUpload(t, map[string]bool{}, errors.New("upload: access denied"))
 	stubDumpThatWrites(t, func(dir string) { writeWholeDump(t, dir) })
-	stubEstimate(t, dumpEstimate{bytes: int64(10 * gib), dataBytes: int64(10 * gib), tables: 2}, nil)
+	stubEstimate(t, dumpEstimate{Bytes: int64(10 * gib), DataBytes: int64(10 * gib), Tables: 2}, nil)
 	prevDisk := diskSpaceFn
 	diskSpaceFn = func(string) (uint64, uint64, error) { return 15 * gib, 1 << 40, nil }
 	t.Cleanup(func() { diskSpaceFn = prevDisk })

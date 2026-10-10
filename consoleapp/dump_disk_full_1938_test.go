@@ -237,7 +237,7 @@ func TestDumpAttempt_aPartialDumpThatStaysIsNotCalledDeleted_1938(t *testing.T) 
 // status and the failure card.
 func TestFullRead_aDiskThatFillsDuringTheDumpReachesThePage_1938(t *testing.T) {
 	stage := t.TempDir()
-	stubEstimate(t, dumpEstimate{bytes: int64(10 * gib), tables: 2}, nil)
+	stubEstimate(t, dumpEstimate{Bytes: int64(10 * gib), Tables: 2}, nil)
 	stubSameFS(t, true, nil)
 	var full atomic.Bool
 	prevDisk := diskSpaceFn
