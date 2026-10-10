@@ -42,6 +42,13 @@ const capWarnFraction = 0.7
 // state remaining≈0 so the remaining-growth thresholds go quiet — but a
 // nearly-full volume there still has zero margin for a rotation stall or a
 // write spike, and the operator should hear it.
+//
+// The floor does not scale with the retention window, on purpose (#2263).
+// It measures how long the volume lasts once rotation stops freeing space,
+// and a stalled rotation fills the disk at the gross rate whatever the
+// window is: a 6 h window with free space five times the index still has
+// about a day before capture stops. Three days is the time to notice and
+// act, not a share of the index.
 const capFreeFloorDays = 3.0
 
 // CapacityCheckName is the check's display name — shared with `up`'s
@@ -238,13 +245,25 @@ type CapacityMeasurement struct {
 	// FreeReason is the probe's free-space branch, carried through untouched
 	// so a surface can say what would make the volume measurable (#1527).
 	FreeReason CapacityFreeReason
-	// DaysUntilFull is FreeBytes over the daily growth: how long the free
-	// space lasts at the measured rate if nothing frees it. Present
-	// (DaysUntilFullKnown) only when free space is known and the rate is
-	// positive. Under a retention window rotation frees space before then,
-	// so it reads as headroom there and as a forecast only without one.
-	DaysUntilFull      float64
-	DaysUntilFullKnown bool
+	// FreeDays is FreeBytes over the daily GROSS write rate: how long the
+	// free space lasts if nothing frees it. Present (FreeDaysKnown) only when
+	// free space is known and the rate is positive. It is not a forecast:
+	// under a retention window rotation frees space first, and an index at
+	// steady state does not grow at all. DaysUntilFull is the forecast.
+	FreeDays      float64
+	FreeDaysKnown bool
+}
+
+// DaysUntilFull is when the volume fills, and whether that can be said. Only
+// an index KNOWN to have no retention window grows at the gross rate until
+// the disk is full. A window that is set bounds the index, and one that could
+// not be read may be set, so neither is reported as a date the disk fills
+// (#2263): a client printed "full in 1.3 days" for an index that was flat.
+func (m CapacityMeasurement) DaysUntilFull() (float64, bool) {
+	if !m.FreeDaysKnown || !m.RetainKnown || m.Retain != 0 {
+		return 0, false
+	}
+	return m.FreeDays, true
 }
 
 // EvaluateCapacity runs the projection and the verdict over a probe.
@@ -350,8 +369,8 @@ func classifyCapacity(p capacityProjection, ok bool, retain time.Duration, retai
 	m.GrowthBytesPerDay = p.eventsPerDay * p.bytesPerEvent
 	m.ProjectedBytes = p.projectedBytes
 	if freeKnown && m.GrowthBytesPerDay > 0 {
-		m.DaysUntilFull = float64(free) / m.GrowthBytesPerDay
-		m.DaysUntilFullKnown = true
+		m.FreeDays = float64(free) / m.GrowthBytesPerDay
+		m.FreeDaysKnown = true
 	}
 	underFloor := freeKnown && float64(free) < capFreeFloorDays*m.GrowthBytesPerDay
 
@@ -428,8 +447,8 @@ func capacityCheckResult(m CapacityMeasurement, dbName, retainNote string) Check
 	case CapacityNoRetention:
 		detail := fmt.Sprintf("no retention window configured — the index grows unbounded at ~%s/day measured (%.0f events/day × %s/event, InnoDB estimates); current size %s",
 			humanBytes(m.GrowthBytesPerDay), m.EventsPerDay, humanBytes(m.BytesPerEvent), humanBytes(float64(m.CurrentBytes)))
-		if m.DaysUntilFullKnown {
-			detail += fmt.Sprintf("; ~%.0f days until the volume fills (%s free)", m.DaysUntilFull, humanBytes(float64(m.FreeBytes)))
+		if days, ok := m.DaysUntilFull(); ok {
+			detail += fmt.Sprintf("; ~%.0f days until the volume fills (%s free)", days, humanBytes(float64(m.FreeBytes)))
 		}
 		return CheckResult{
 			Name:   CapacityCheckName,

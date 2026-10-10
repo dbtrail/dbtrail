@@ -103,8 +103,12 @@ func TestCapacityAPI_watch(t *testing.T) {
 			t.Fatalf("retention = %+v, want the daemon's 30d default, enabled", got.Retention)
 		}
 		// Free space lasts 2 GB / 24 MB ≈ 83 days at the measured rate.
-		if got.DaysUntilFull == nil || *got.DaysUntilFull < 83 || *got.DaysUntilFull > 84 {
-			t.Fatalf("days_until_full = %v, want ≈83.3", got.DaysUntilFull)
+		if d := got.FreeSpaceDaysAtWriteRate; d == nil || *d < 83 || *d > 84 {
+			t.Fatalf("free_space_days_at_write_rate = %v, want ≈83.3", d)
+		}
+		// A window is set, so rotation frees space first: no date the disk fills.
+		if got.DaysUntilFull != nil {
+			t.Fatalf("days_until_full = %v under a retention window, want absent", *got.DaysUntilFull)
 		}
 	})
 
@@ -116,8 +120,11 @@ func TestCapacityAPI_watch(t *testing.T) {
 			t.Fatalf("status/reason = %s/%s, want fail/growth_exceeds_free: %+v", got.Status, got.Reason, got)
 		}
 		// 10 MB free at 24 MB/day: under half a day.
-		if got.DaysUntilFull == nil || *got.DaysUntilFull > 0.5 {
-			t.Fatalf("days_until_full = %v, want under 0.5", got.DaysUntilFull)
+		if d := got.FreeSpaceDaysAtWriteRate; d == nil || *d > 0.5 {
+			t.Fatalf("free_space_days_at_write_rate = %v, want under 0.5", d)
+		}
+		if got.DaysUntilFull != nil {
+			t.Fatalf("days_until_full = %v under a retention window, want absent", *got.DaysUntilFull)
 		}
 	})
 
@@ -133,6 +140,14 @@ func TestCapacityAPI_watch(t *testing.T) {
 		if got.RemainingBytes != 0 {
 			t.Fatalf("remaining = %v, want 0 at steady state", got.RemainingBytes)
 		}
+		// #2263: an index that is not growing gets nothing a client can print
+		// as "disk full in N days"; the floor's own figure keeps its name.
+		if got.DaysUntilFull != nil {
+			t.Fatalf("days_until_full = %v at steady state, want absent", *got.DaysUntilFull)
+		}
+		if d := got.FreeSpaceDaysAtWriteRate; d == nil || *d < 2 || *d > 2.2 {
+			t.Fatalf("free_space_days_at_write_rate = %v, want ≈2.1 (50 MB / 24 MB per day)", d)
+		}
 	})
 
 	t.Run("free space not measurable: skip, projection still reported, no days figure", func(t *testing.T) {
@@ -142,8 +157,8 @@ func TestCapacityAPI_watch(t *testing.T) {
 		if got.Status != "skip" || got.Reason != "free_unknown" {
 			t.Fatalf("status/reason = %s/%s, want skip/free_unknown", got.Status, got.Reason)
 		}
-		if got.FreeKnown || got.DaysUntilFull != nil {
-			t.Fatalf("free_known=%v days=%v, want neither claimed", got.FreeKnown, got.DaysUntilFull)
+		if got.FreeKnown || got.DaysUntilFull != nil || got.FreeSpaceDaysAtWriteRate != nil {
+			t.Fatalf("free_known=%v days=%v/%v, want none claimed", got.FreeKnown, got.DaysUntilFull, got.FreeSpaceDaysAtWriteRate)
 		}
 		if got.ProjectedBytes != 720_000_000 {
 			t.Fatalf("projected = %v, want the 720 MB projection even without free space", got.ProjectedBytes)
@@ -201,8 +216,12 @@ func TestCapacityAPI_watch(t *testing.T) {
 		if got.ProjectedBytes != 0 {
 			t.Fatalf("projected = %v, want none without a window", got.ProjectedBytes)
 		}
+		// No window: the index grows until the disk is full, so this IS the forecast.
 		if got.DaysUntilFull == nil || *got.DaysUntilFull != 10 {
 			t.Fatalf("days_until_full = %v, want 10 (240 MB / 24 MB per day)", got.DaysUntilFull)
+		}
+		if d := got.FreeSpaceDaysAtWriteRate; d == nil || *d != 10 {
+			t.Fatalf("free_space_days_at_write_rate = %v, want 10", d)
 		}
 	})
 
@@ -236,7 +255,7 @@ func TestCapacityAPI_watch(t *testing.T) {
 		if got.SampleHours != 2 || got.CurrentBytes != 2_000_000 {
 			t.Fatalf("sample_hours=%d current=%d, want 2 hours / 2 MB reported anyway", got.SampleHours, got.CurrentBytes)
 		}
-		if got.GrowthBytesPerDay != 0 || got.DaysUntilFull != nil {
+		if got.GrowthBytesPerDay != 0 || got.DaysUntilFull != nil || got.FreeSpaceDaysAtWriteRate != nil {
 			t.Fatalf("no rate must mean no growth/days claims, got %+v", got)
 		}
 	})
@@ -308,8 +327,12 @@ func TestCapacityAPI_serve(t *testing.T) {
 		if got.ProjectedBytes != 0 || got.RemainingBytes != 0 {
 			t.Fatalf("projection = %v/%v, want none without a window", got.ProjectedBytes, got.RemainingBytes)
 		}
-		if !got.Measured || got.GrowthBytesPerDay != 24_000_000 || got.DaysUntilFull == nil {
+		if !got.Measured || got.GrowthBytesPerDay != 24_000_000 || got.FreeSpaceDaysAtWriteRate == nil {
 			t.Fatalf("rate and days must still be measured: %+v", got)
+		}
+		// A window that could not be read may be set: not "no retention".
+		if got.DaysUntilFull != nil {
+			t.Fatalf("days_until_full = %v with the retention unknown, want absent", *got.DaysUntilFull)
 		}
 	})
 
