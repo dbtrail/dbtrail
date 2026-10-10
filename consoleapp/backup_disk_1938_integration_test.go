@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -134,7 +135,7 @@ func TestIntegrationEstimateDumpSize(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	if stale := prepareEstimateSession(ctx, conn); stale {
+	if stale := doctor.PrepareDumpEstimateSession(ctx, conn); stale {
 		t.Fatal("this server refused fresh sizes for a reason other than not having the cache")
 	}
 	var mysqlMS, mariaS float64
@@ -143,12 +144,12 @@ func TestIntegrationEstimateDumpSize(t *testing.T) {
 	t.Logf("max_execution_time = %v (%v), max_statement_time = %v (%v)", mysqlMS, errMy, mariaS, errMa)
 	switch {
 	case errMy == nil && errMa != nil:
-		if mysqlMS != float64(dumpEstimateServerLimit.Milliseconds()) {
-			t.Fatalf("max_execution_time = %v ms, want %d", mysqlMS, dumpEstimateServerLimit.Milliseconds())
+		if mysqlMS != float64(doctor.DumpEstimateServerLimit.Milliseconds()) {
+			t.Fatalf("max_execution_time = %v ms, want %d", mysqlMS, doctor.DumpEstimateServerLimit.Milliseconds())
 		}
 	case errMa == nil && errMy != nil:
-		if mariaS != dumpEstimateServerLimit.Seconds() {
-			t.Fatalf("max_statement_time = %v s, want %v", mariaS, dumpEstimateServerLimit.Seconds())
+		if mariaS != doctor.DumpEstimateServerLimit.Seconds() {
+			t.Fatalf("max_statement_time = %v s, want %v", mariaS, doctor.DumpEstimateServerLimit.Seconds())
 		}
 	default:
 		t.Fatalf("expected exactly one of the two variables to exist on this server: %v / %v", errMy, errMa)

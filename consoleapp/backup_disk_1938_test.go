@@ -257,22 +257,9 @@ func TestSameFilesystem_realPaths(t *testing.T) {
 	}
 }
 
-// The estimate selects exactly the tables the dump selects: every
-// non-system schema for an empty list, the names verbatim otherwise.
-func TestDumpSizeQuery(t *testing.T) {
-	q, args := dumpSizeQuery(nil)
-	if !strings.Contains(q, "TABLE_SCHEMA NOT IN ('mysql','sys','performance_schema','information_schema')") || len(args) != 0 {
-		t.Fatalf("empty list: %s %v", q, args)
-	}
-	// One row per table, with what tells a compressed one apart (#1938).
-	if !strings.HasPrefix(q, "SELECT TABLE_SCHEMA, TABLE_NAME, ENGINE, ROW_FORMAT, DATA_LENGTH, INDEX_LENGTH FROM information_schema.TABLES WHERE ") ||
-		strings.Contains(q, "SUM(") || strings.Contains(q, "GROUP_CONCAT") || !strings.Contains(q, "'BASE TABLE', 'SYSTEM VERSIONED'") {
-		t.Fatalf("query = %s", q)
-	}
-	_, args = dumpSizeQuery([]string{"Shop", " b "})
-	if len(args) != 2 || args[0] != "Shop" || args[1] != " b " {
-		t.Fatalf("names were changed on the way: %v", args)
-	}
+// The no-lock warning counts the same tables the estimate sizes: one filter,
+// held beside the estimate.
+func TestDumpableTableCountQuery_usesTheEstimateFilter(t *testing.T) {
 	count, _ := dumpableTableCountQuery([]string{"a"})
 	if !strings.HasSuffix(count, "TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VERSIONED') AND TABLE_SCHEMA IN (?)") {
 		t.Fatalf("count query = %s", count)
