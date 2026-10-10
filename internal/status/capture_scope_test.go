@@ -205,6 +205,9 @@ func TestWriteStatusJSON_tableVisibleScopesNamesEverywhere(t *testing.T) {
 func TestWriteStatusJSON_noPredicateRendersVerbatim(t *testing.T) {
 	ledger := `{"table_not_in_snapshot":{"count":5,"last_at":"2026-08-04T19:49:33Z","tables":["app.users","hr.payroll"]}}`
 	stream := captureStream(ledger)
+	// Each render reads the clock for checkpoint_age_seconds, so two renders
+	// on either side of a second boundary differ by one. No checkpoint, no age.
+	stream.LastCheckpoint = time.Time{}
 	var scoped, cli bytes.Buffer
 	if err := (&StatusData{Stream: stream}).WriteJSON(&scoped); err != nil {
 		t.Fatal(err)

@@ -2,9 +2,29 @@ package ext
 
 import (
 	"context"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// panicLogSignal is a slog handler that closes logged when the recovered
+// panic's line reaches it.
+type panicLogSignal struct {
+	once   sync.Once
+	logged chan struct{}
+}
+
+func (h *panicLogSignal) Enabled(context.Context, slog.Level) bool { return true }
+func (h *panicLogSignal) Handle(_ context.Context, r slog.Record) error {
+	if strings.Contains(r.Message, "source job panicked") {
+		h.once.Do(func() { close(h.logged) })
+	}
+	return nil
+}
+func (h *panicLogSignal) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *panicLogSignal) WithGroup(string) slog.Handler      { return h }
 
 func TestRunSourceJobsNoRegistrationIsNoop(t *testing.T) {
 	orig := sourceJobs
@@ -49,6 +69,14 @@ func TestRunSourceJobsPanicDoesNotPropagate(t *testing.T) {
 	sourceJobs = nil
 	t.Cleanup(func() { sourceJobs = orig })
 
+	// The panicking job logs from its own goroutine. Without waiting for that
+	// line the goroutine outlives this test and writes into whatever logger
+	// the next test installed (the race detector failed the package on it).
+	sig := &panicLogSignal{logged: make(chan struct{})}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(sig))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
 	survivorRan := make(chan struct{})
 	RegisterSourceJob(func(context.Context, SourceJobInfo) { panic("source job boom") })
 	RegisterSourceJob(func(context.Context, SourceJobInfo) { close(survivorRan) })
@@ -62,5 +90,10 @@ func TestRunSourceJobsPanicDoesNotPropagate(t *testing.T) {
 	case <-survivorRan:
 	case <-time.After(5 * time.Second):
 		t.Fatal("surviving job did not run after a sibling panicked")
+	}
+	select {
+	case <-sig.logged:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the recovered panic was not logged")
 	}
 }

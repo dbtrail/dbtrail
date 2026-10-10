@@ -2222,6 +2222,12 @@ try {
   // The coverage card fills independently (#1352); its freshness clock is part
   // of what this scenario pins, so wait for that fill too.
   await page.waitForFunction(() => !!document.querySelector(".cov-card .cov-asof"));
+  // The window tiles fill from /api/activity, a third independent fetch: the
+  // tiles exist with an empty scope line until it answers. Bounded and
+  // caught, so a scope that never arrives is still the legible failures below
+  // and not a driver timeout.
+  await page.waitForFunction(() => Array.from(document.querySelectorAll(".ov-stat-scope")).every((n) => n.textContent.trim() !== ""),
+    undefined, { timeout: 30000 }).catch(() => {});
   const ovLive = await page.evaluate(() => ({
     scopes: Array.from(document.querySelectorAll(".ov-stat")).map((n) => (n.querySelector(".ov-stat-scope") || {}).textContent || ""),
     win: (document.querySelector(".ov-coverage") || {}).textContent || "",
