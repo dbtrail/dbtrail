@@ -955,13 +955,89 @@ func (s *baselineSupervisor) dumpAttempt(req console.BaselineRequest, lockMode b
 	a.eventMark = dumpEventMarkFunc(req)
 	ctx := withTransportNote(s.ctx, func(note string) { s.noteDumpTransport(req.ServerID, note) })
 	if err := runMydumperFunc(ctx, req.SourceDSN, req.SourceSSL, req.Schemas, dir, lockMode, src); err != nil {
-		if rmErr := os.RemoveAll(dir); rmErr != nil {
+		// Read BEFORE the removal (#1938): once the partial dump is gone the
+		// folder has room again, and a disk that filled would read as one
+		// that did not.
+		free, filled := s.dumpFilledWorkingFolder(err)
+		rmErr := os.RemoveAll(dir)
+		if rmErr != nil {
 			slog.Warn("console snapshot: could not remove the folder of a failed dump", "path", dir, "error", rmErr)
+		}
+		if filled {
+			err = &workingFolderFullError{err: err, folder: s.stagingDir, free: free, dumpDir: dir, rmErr: rmErr}
 		}
 		return dumpAttempt{}, fmt.Errorf("dump: %w", err)
 	}
 	return a, nil
 }
+
+// mydumperNoSpaceText is the C library's wording for ENOSPC, which mydumper
+// prints when a write to one of its output files fails (measured with 1.0.3-1
+// on ext4 and tmpfs: "Couldn't write data to a file(13): No space left on
+// device", once per failed file, exit status 1 after the last table). It is
+// the kernel's error under the C locale, not mydumper's own sentence, so it
+// does not change between mydumper versions; a host whose messages are
+// translated prints something else, and that failure stays unclassified.
+const mydumperNoSpaceText = "No space left on device"
+
+// mydumperNoSpaceError marks a mydumper failure whose output says a disk had
+// no space left. Made in runMydumper, where the output is in hand, so nothing
+// after it reads the words. It does NOT say which disk: the source server
+// reports its own full tmpdir in the same words, relayed by mydumper, which
+// is why dumpFilledWorkingFolder also measures. The message is unchanged.
+type mydumperNoSpaceError struct{ err error }
+
+func (e *mydumperNoSpaceError) Error() string { return e.err.Error() }
+func (e *mydumperNoSpaceError) Unwrap() error { return e.err }
+
+// dumpFullFreeBelow is how little free space the working folder must have,
+// right after mydumper said "no space", for the failure to be called this
+// folder's. A disk that filled reports zero, or the last few blocks no write
+// fitted into (mydumper writes a statement at a time, about a megabyte); the
+// margin covers that and nothing else, so a folder with real room is never
+// blamed for someone else's full disk.
+const dumpFullFreeBelow = 16 << 20
+
+// dumpFilledWorkingFolder reports whether a failed dump filled the working
+// folder, and what the folder had free when asked. Both halves are required:
+// mydumper's output said a disk had no space, and this folder measures as
+// having none. Free space that cannot be measured is "cannot tell", so the
+// failure keeps its own words.
+func (s *baselineSupervisor) dumpFilledWorkingFolder(err error) (free uint64, filled bool) {
+	var noSpace *mydumperNoSpaceError
+	if !errors.As(err, &noSpace) {
+		return 0, false
+	}
+	free, ok, _ := measureFree(s.stagingDir)
+	return free, ok && free < dumpFullFreeBelow
+}
+
+// workingFolderFullError is a full read whose dump stopped because the
+// working folder filled (#1938): the check before the dump works from an
+// estimate, and another read, an export or anything else on that disk can
+// take the room meanwhile. It is errFoldDiskFull to the page, like a read
+// refused before it started, and keeps mydumper's own failure in the chain.
+type workingFolderFullError struct {
+	err     error
+	folder  string
+	free    uint64
+	dumpDir string
+	rmErr   error
+}
+
+// Error says the cause first, on one line, so the failure card's summary is
+// that line; mydumper's words follow on the next.
+func (e *workingFolderFullError) Error() string {
+	left := "The partial dump was deleted."
+	if e.rmErr != nil {
+		left = fmt.Sprintf("The partial dump at %s could not be removed (%s); it still takes room there.", e.dumpDir, firstLineOf(e.rmErr.Error()))
+	}
+	return fmt.Sprintf("%s: the working folder %s filled up during the full read (%s free when the dump stopped). "+
+		"No new snapshot was made, and earlier snapshots are unchanged. %s %s\n%s",
+		errFoldDiskFull, e.folder, humanSize(int64(e.free)), left, moveStagingHint, e.err)
+}
+
+func (e *workingFolderFullError) Unwrap() []error { return []error{errFoldDiskFull, e.err} }
 
 // ftwrlDeniedError is mydumper's refusal of the global read lock that lock
 // mode ftwrl takes, as on RDS and Aurora (see mydumperlock.FTWRLDeniedHint).
@@ -1498,6 +1574,9 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 			}
 			if hint := mydumperlock.FTWRLDeniedHint(lockMode, msg, remedy); hint != "" {
 				return &ftwrlDeniedError{err: fmt.Errorf("mydumper failed: %w: %s; output: %s", err, hint, msg)}
+			}
+			if strings.Contains(msg, mydumperNoSpaceText) {
+				return &mydumperNoSpaceError{err: fmt.Errorf("mydumper failed: %w; output: %s", err, msg)}
 			}
 			return fmt.Errorf("mydumper failed: %w; output: %s", err, msg)
 		}
