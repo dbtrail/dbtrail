@@ -17,8 +17,9 @@ import (
 
 // #1938: a working folder that fills DURING the dump. The disk check before
 // the dump works from an estimate, so a read it let through can still fill
-// the disk, and that failure read "mydumper failed: exit status 1; output:
-// ..." with no mention of the disk.
+// the disk. That failure opened with "mydumper failed: exit status 1", the
+// disk appeared only inside mydumper's output, and the failure card, which
+// shows the part before the output, never mentioned it.
 
 // mydumperDiskFullOutput is what mydumper 1.0.3-1 printed, with the flags
 // the console passes, when a 150 MB ext4 filesystem filled under a 318 MB
@@ -87,7 +88,7 @@ func TestRunMydumper_marksAnOutputThatSaysNoSpace_1938(t *testing.T) {
 var errNoSpaceDump = &mydumperNoSpaceError{err: errors.New("mydumper failed: exit status 1; output: ** (mydumper:1): CRITICAL **: Couldn't write data to a file(13): No space left on device")}
 
 // stubFailedDump makes the dump write a file into its folder and then fail
-// with err. sawDump reports, from inside the free-space measurement, whether
+// with err. measuredWithDump counts the free-space measurements taken while
 // a dump folder still existed under stage.
 func stubFailedDump(t *testing.T, stage string, err error, free uint64, measureErr error, total uint64) (measuredWithDump *atomic.Int32) {
 	t.Helper()
@@ -130,7 +131,7 @@ func TestDumpAttempt_aWorkingFolderThatFilledIsSaidAsOne_1938(t *testing.T) {
 		wantFull   bool
 	}{
 		{"no space said, and the folder has none", errNoSpaceDump, 0, nil, total, true},
-		{"no space said, a few bytes left (a filesystem that keeps a reserve)", errNoSpaceDump, dumpFullFreeBelow - 1, nil, total, true},
+		{"no space said, just under the limit left", errNoSpaceDump, dumpFullFreeBelow - 1, nil, total, true},
 		// At the limit and above, the folder had room: the words came from
 		// somewhere else (the source's own disk says the same).
 		{"no space said, the folder has room at the limit", errNoSpaceDump, dumpFullFreeBelow, nil, total, false},
@@ -168,7 +169,7 @@ func TestDumpAttempt_aWorkingFolderThatFilledIsSaidAsOne_1938(t *testing.T) {
 				return
 			}
 			// Free space is read while the dump is still on disk: after the
-			// removal the folder always has room.
+			// removal the folder has its room back.
 			if measured.Load() == 0 {
 				t.Fatal("free space was measured after the dump folder was removed")
 			}
@@ -233,7 +234,7 @@ func TestDumpAttempt_aPartialDumpThatStaysIsNotCalledDeleted_1938(t *testing.T) 
 
 // Through Trigger and the real execute: the check before the dump saw room,
 // the disk filled anyway, and the page learns it as a disk failure in the
-// status, the run history and the failure card.
+// status and the failure card.
 func TestFullRead_aDiskThatFillsDuringTheDumpReachesThePage_1938(t *testing.T) {
 	stage := t.TempDir()
 	stubEstimate(t, dumpEstimate{bytes: int64(10 * gib), tables: 2}, nil)
@@ -270,7 +271,7 @@ func TestFullRead_aDiskThatFillsDuringTheDumpReachesThePage_1938(t *testing.T) {
 	// The card shows one line, whole: the cause, then the fix by the name of
 	// the setting. Nothing of mydumper's, and no cut.
 	want := "The working folder " + stage + " filled up during the full read (0 B free when the dump stopped). " +
-		`Free space there, or move it to a bigger disk with the "Working folder" setting.`
+		`Free space there, or move it to a bigger disk with the "Working folder" setting and restart DBTrail.`
 	if st.Failure == nil || st.Failure.Summary != want {
 		t.Fatalf("failure card = %+v\nwant summary %q", st.Failure, want)
 	}
@@ -292,9 +293,14 @@ func TestSnapshotFailure_aFilledWorkingFolderIsNeverCutFromTheCard_1938(t *testi
 		if f == nil || f.Kind != "" {
 			t.Fatalf("%s: failure = %+v", name, f)
 		}
-		if !strings.HasPrefix(f.Summary, "The working folder "+folder+" filled up") || !strings.HasSuffix(f.Summary, `the "Working folder" setting.`) || !strings.Contains(f.Summary, "4.0 KiB free") {
+		if !strings.HasPrefix(f.Summary, "The working folder "+folder+" filled up") || !strings.HasSuffix(f.Summary, `the "Working folder" setting and restart DBTrail.`) || !strings.Contains(f.Summary, "4.0 KiB free") {
 			t.Errorf("%s: summary = %q", name, f.Summary)
 		}
+	}
+	// A dump that stayed on disk is on the card too, with where it is.
+	stuck := &workingFolderFullError{err: errNoSpaceDump, folder: "/work", free: 0, dumpDir: "/work/dump-1", rmErr: errors.New("permission denied")}
+	if f := snapshotFailureOf(fmt.Errorf("dump: %w", stuck), console.BaselineRequest{}); !strings.HasSuffix(f.Summary, " The partial dump at /work/dump-1 could not be removed and still takes room there.") {
+		t.Errorf("a dump left on disk is not on the card: %q", f.Summary)
 	}
 	// Any other failure keeps the first line of its own error.
 	plain := errors.New("mydumper failed: exit status 1; output: Access denied")

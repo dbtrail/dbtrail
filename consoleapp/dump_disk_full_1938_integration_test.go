@@ -17,7 +17,7 @@ import (
 )
 
 // smallFSEnv names a directory on a filesystem too small for the dump below
-// (about 64 MiB of random text): a loop-mounted image or a size-limited
+// (about 75 MiB of random text): a loop-mounted image or a size-limited
 // tmpfs. The test needs root to make one, so it does not make it itself.
 const smallFSEnv = "BINTRAIL_TEST_SMALL_FS"
 
@@ -45,7 +45,7 @@ func TestIntegrationDumpFillsARealWorkingFolder_1938(t *testing.T) {
 	if _, err := db.Exec("INSERT INTO big (pad) VALUES (HEX(RANDOM_BYTES(300)))"); err != nil {
 		t.Fatal(err)
 	}
-	for range 17 { // 2^17 rows of about 600 bytes: a dump of about 80 MiB
+	for range 17 { // 2^17 rows of about 600 bytes: a dump of about 75 MiB
 		if _, err := db.Exec("INSERT INTO big (pad) SELECT HEX(RANDOM_BYTES(300)) FROM big"); err != nil {
 			t.Fatal(err)
 		}
@@ -60,7 +60,7 @@ func TestIntegrationDumpFillsARealWorkingFolder_1938(t *testing.T) {
 		t.Fatalf("free space at %s cannot be measured: %s", stage, why)
 	}
 	if freeBefore > 70<<20 {
-		t.Fatalf("%s has %s free: too much for an 80 MiB dump to fill", stage, humanSize(int64(freeBefore)))
+		t.Fatalf("%s has %s free: too much for a 75 MiB dump to fill", stage, humanSize(int64(freeBefore)))
 	}
 
 	s := newBaselineSupervisor(context.Background(), stage, baseline.LockModeNoLock)
