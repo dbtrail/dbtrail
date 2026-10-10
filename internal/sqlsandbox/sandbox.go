@@ -1733,6 +1733,12 @@ func (c *cappedBuffer) arm(max int64, onOverflow func(), firstLine chan []byte) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.max, c.onOverflow, c.firstLine = max, onOverflow, firstLine
+	// A child that wrote before its job overflowed this buffer while it had
+	// no cap and nothing to call: act on it now, or the child is left
+	// running until the statement's timeout.
+	if c.overflowed && onOverflow != nil {
+		onOverflow()
+	}
 }
 
 func (c *cappedBuffer) didOverflow() bool {

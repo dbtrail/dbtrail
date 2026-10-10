@@ -332,3 +332,21 @@ func TestWorkerFenceSwapLimit(t *testing.T) {
 		t.Fatal("a cgroup whose swap limit could not be set was used")
 	}
 }
+
+// A child that wrote before it was given a job has overflowed a buffer that
+// takes nothing yet. Arming the buffer for the job acts on that at once: the
+// kill is not left for a later write that may never come.
+func TestCappedBuffer_armActsOnAnEarlierOverflow(t *testing.T) {
+	var c cappedBuffer
+	if _, err := c.Write([]byte("early")); !errors.Is(err, ErrResultTooLarge) {
+		t.Fatalf("a write before the job: err = %v, want ErrResultTooLarge", err)
+	}
+	fired := 0
+	c.arm(1<<20, func() { fired++ }, nil)
+	if fired != 1 || !c.didOverflow() {
+		t.Errorf("after arm: overflow acted on %d times, overflowed = %v; want once, true", fired, c.didOverflow())
+	}
+	// And a buffer with nothing early is armed without it.
+	var quiet cappedBuffer
+	quiet.arm(1<<20, func() { t.Error("a buffer that took nothing acted on an overflow") }, nil)
+}
