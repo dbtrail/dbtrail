@@ -48,6 +48,19 @@ type Config struct {
 	// newest binlog_events row in the index before the dump started, read under
 	// the same rule as DDLMark. Empty leaves the key out.
 	EventMark string
+	// RemoveConvertedData deletes a table's dump DATA files as soon as its
+	// Parquet file is closed (#1938), so the dump shrinks while the snapshot
+	// grows instead of both being whole at the end. Tables convert as many
+	// at once as the host has CPUs, and none of a table's files go before
+	// that table is done. Schema files and the metadata stay.
+	//
+	// Only a caller that OWNS the dump and deletes it whatever happens may
+	// set this: the console's full read, whose dump folder is its own and is
+	// removed when the run ends. `bintrail baseline` converts a dump that is
+	// the operator's and never sets it. It cannot be combined with Retry,
+	// which exists to convert again from a dump that is still whole: Run
+	// refuses the pair.
+	RemoveConvertedData bool
 }
 
 // Stats describes the outcome of a baseline run.
@@ -66,6 +79,12 @@ type Stats struct {
 
 // Run converts a mydumper output directory into Parquet files.
 func Run(ctx context.Context, cfg Config) (Stats, error) {
+	// Before anything is read or written (#1938): a retry converts again from
+	// the dump, and this would have removed what it needs.
+	if cfg.RemoveConvertedData && cfg.Retry {
+		return Stats{}, errors.New("a conversion cannot both remove the dump's data as it goes and retry from that dump: " +
+			"removing is for a dump the caller deletes anyway, retry for one that is kept")
+	}
 	// A dump `bintrail dump` refused stays on disk when there was no previous
 	// dump to restore (#1744), so its refusal has to be honored here too.
 	if reason, refused := ReadRefusedDumpMarker(cfg.InputDir); refused {
@@ -341,6 +360,12 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 			}
 
 			n, err := processTable(ctx, tf, outPath, writerCfg)
+			if err == nil && cfg.RemoveConvertedData {
+				// Outside the lock below: unlinking a table's worth of dump
+				// can take a while, and every worker that finishes waits on
+				// that lock with its slot still taken.
+				removeConvertedData(tf)
+			}
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -405,6 +430,22 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		return stats, fmt.Errorf("snapshot complete but could not write %s marker: %w", SuccessMarker, err)
 	}
 	return stats, nil
+}
+
+// removeConvertedData deletes the dump data files of a table whose Parquet
+// file is written and closed (#1938). All of a table's files go together and
+// only then: a table that fails keeps every one of them. The schema file is
+// not a data file and stays.
+//
+// A file that will not go is logged and left: the caller deletes the whole
+// dump when the run ends, and the snapshot does not depend on this.
+func removeConvertedData(tf TableFiles) {
+	for _, f := range tf.DataFiles {
+		if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+			slog.Warn("could not remove a dump file whose table is already converted; it stays until the dump is removed",
+				"db", tf.Database, "table", tf.Table, "file", f, "error", err)
+		}
+	}
 }
 
 // processTable converts a single table's mydumper files to Parquet.

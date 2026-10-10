@@ -148,6 +148,8 @@ A full read (the web interface's **Read database now**, or a scheduled full read
 peak = the uncompressed dump  +  the Parquet being written
 ```
 
+A full read started by DBTrail (the web interface's **Read database now**, or a schedule) lowers that peak: as soon as a table's Parquet file is written, that table's part of the dump is deleted, so what is on disk is the whole dump at the start and less of it as the conversion goes, plus the Parquet written so far. The dump on its own still has to fit. How much the peak drops depends on the data: tables are converted as many at once as the host has CPUs and a table's dump goes only when that table is done, so a database that is mostly one table, or one with fewer tables than CPUs, gains little. When the snapshot folder is on another disk the working folder only ever held the dump, and that does not change. The numbers below were measured **before** this, with the whole dump kept to the end, and the check still uses them: it warns earlier than it now needs to. `bintrail baseline`, which converts a dump you made, never deletes any of it.
+
 This is disk on the DBTrail host, not on the database server. It is transient, but it has to fit, and a full disk also hurts anything else on that disk, the index included if it lives there.
 
 **How big.** A synthetic measurement (MySQL 8.4, mydumper 1.0.5 with the flags DBTrail passes, five tables of different shapes, one machine; not yet confirmed on real datasets). Ratios are against `DATA_LENGTH + INDEX_LENGTH`, the number DBTrail reads before a full read:
