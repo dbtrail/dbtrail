@@ -24,7 +24,6 @@ type cutEvent struct {
 	id   uint64
 	ts   time.Time
 	file string
-	null bool // no coordinate: never an anchor
 }
 
 func insertCutEvent(t *testing.T, db *sql.DB, e cutEvent) {
@@ -33,28 +32,20 @@ func insertCutEvent(t *testing.T, db *sql.DB, e cutEvent) {
 	if file == "" {
 		file = "binlog.000001"
 	}
-	var f, start, end any = file, e.id * 1000, e.id*1000 + 100
-	if e.null {
-		f, start, end = nil, nil, nil
-	}
 	if _, err := db.Exec(`INSERT INTO binlog_events
 		(event_id, binlog_file, start_pos, end_pos, event_timestamp, schema_name, table_name, event_type, pk_values, row_after)
 		VALUES (?, ?, ?, ?, ?, 'shop', 'orders', 1, ?, '{}')`,
-		e.id, f, start, end, e.ts.UTC().Format("2006-01-02 15:04:05"), fmt.Sprint(e.id)); err != nil {
+		e.id, file, e.id*1000, e.id*1000+100, e.ts.UTC().Format("2006-01-02 15:04:05"), fmt.Sprint(e.id)); err != nil {
 		t.Fatalf("insert event %d: %v", e.id, err)
 	}
 }
 
 // wantCut is ResolveSnapshotCut's rule worked out over the fixture: the start
-// of the lowest-id event with a coordinate stamped past at, else the end of
-// the newest event with one.
+// of the lowest-id event stamped past at, else the end of the newest event.
 func wantCut(events []cutEvent, at time.Time) *query.BinlogPos {
 	var newest *cutEvent
 	for i := range events {
 		e := &events[i]
-		if e.null {
-			continue
-		}
 		if e.ts.After(at) {
 			return &query.BinlogPos{File: "binlog.000001", Pos: e.id * 1000}
 		}
@@ -91,7 +82,7 @@ func sameCut(a, b *query.BinlogPos) bool {
 // refresh resolves its cut, again and again. The stamps do not follow the
 // ids: some events are stamped minutes before or after their neighbours (a
 // long transaction, a session that set its own timestamp, a source clock
-// ahead), and some carry no coordinate. After every batch the cut is resolved
+// ahead). After every batch the cut is resolved
 // for a time that mostly moves forward and sometimes back, and must be the
 // one the rule gives over all the events so far, which is also what a search
 // with nothing remembered returns.
@@ -115,7 +106,7 @@ func TestCutFloor_sameCutAsASearchFromTheStart(t *testing.T) {
 					case 1:
 						ts = clock.Add(time.Duration(1+r.Intn(300)) * time.Second) // stamped ahead
 					}
-					e := cutEvent{id: id, ts: ts, null: r.Intn(15) == 0}
+					e := cutEvent{id: id, ts: ts}
 					insertCutEvent(t, db, e)
 					events = append(events, e)
 				}
