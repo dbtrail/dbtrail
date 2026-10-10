@@ -14,8 +14,9 @@ import (
 // nearly every event is before it and the walk reads them all: bounded to
 // the partition of the current hour (#1692), it read every event the hour
 // had indexed so far, and a refresh took longer with every minute of the
-// hour (measured: 0.1 s at the hour's first refresh, 12 s at its last, at
-// 1.5 M events an hour).
+// hour (measured at 1.5 M events an hour, the index in 2 CPUs and a 1 GB
+// buffer pool: 0.1 s at the hour's first refresh, 11.9 s at its last, on a
+// refresh whose tables take 5 s; with the floor, 0.08 s and 0.41 s).
 //
 // What one search establishes holds for every later one. A search for the
 // time T that ends on the event F (or, finding none, having seen everything
@@ -55,9 +56,10 @@ type cutFloor struct {
 var cutFloors = &cutFloorStore{m: map[string]cutFloor{}}
 
 // remember records what a search for at established on index, unless a
-// search for a later time already did: the later one's floor is the higher,
-// and a search for an earlier time (a fixed --at in the past) must not
-// replace it.
+// search for a later time already did. Replacing it would lose no row (what
+// an earlier time's search established also holds for later times); it would
+// cost the next refresh its floor, lowered to where a run for a time in the
+// past (a fixed --at) happened to end.
 func (s *cutFloorStore) remember(index string, at time.Time, floor uint64, witness *newestEvent) {
 	if index == "" || witness == nil {
 		return
