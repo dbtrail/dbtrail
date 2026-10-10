@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- **The `bintrail-console` package installs a systemd service** (#2291). The
+  `.deb` and `.rpm` used to bring the binary and nothing around it, so
+  starting at boot and restarting after a crash were left to a unit the
+  operator wrote. The package now brings `bintrail-console.service` (it runs
+  `bintrail-console watch`, restarts whenever the process ends without being
+  asked to stop, and gives capture 60 seconds to save its position on a
+  stop), its settings in
+  `/etc/bintrail/bintrail-console.env`, the folder `/var/lib/bintrail` for what
+  DBTrail saves, and a `bintrail` system account to run as. Installing does
+  not start anything: set `BINTRAIL_INDEX_DSN` in the settings file, then
+  `sudo systemctl enable --now bintrail-console`. An upgrade never overwrites
+  the settings file, restarts the service only if it was running, and says
+  so if it does not come back. A removal stops the service and leaves the
+  settings file and `/var/lib/bintrail` in place.
+  **If you already run it from a unit of your own** named
+  `bintrail-console.service` under `/etc/systemd/system`, yours keeps winning
+  and nothing changes; an account named `bintrail` that already exists is left
+  as it is. The `bintrail` and `bintrail-pg` packages are unchanged.
 - **The web console has a dark theme** (#1969). Light, Dark or System in the
   sidebar foot; System follows the operating system and is the default. The
   choice is remembered per browser.

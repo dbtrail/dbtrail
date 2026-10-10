@@ -230,6 +230,32 @@ nfpms:
         dst: /usr/share/doc/bintrail-console/NOTICE
       - src: build/THIRD-PARTY-NOTICES
         dst: /usr/share/doc/bintrail-console/THIRD-PARTY-NOTICES
+      # The service (#2291): a systemd unit for `bintrail-console watch`, the
+      # settings it reads, and the folder it saves to. The settings ship as a
+      # copy under /usr/share, and postinstall puts it at
+      # /etc/bintrail/bintrail-console.env only when no file is there. The
+      # package must not own the live file: every operator edits it (it holds
+      # the index DSN), and an owned, edited file makes dpkg stop and ask on
+      # the first upgrade that changes the shipped text, which fails an
+      # unattended upgrade halfway. The account is created in preinstall,
+      # before these files are unpacked, so the folder can be owned by it.
+      # Nothing is enabled or started on a first install: the service cannot
+      # run until the settings name the index.
+      - src: build/packaging/bintrail-console/bintrail-console.service
+        dst: /usr/lib/systemd/system/bintrail-console.service
+      - src: build/packaging/bintrail-console/bintrail-console.env
+        dst: /usr/share/bintrail-console/bintrail-console.env
+      - dst: /var/lib/bintrail
+        type: dir
+        file_info:
+          mode: 0750
+          owner: bintrail
+          group: bintrail
+    scripts:
+      preinstall: build/packaging/bintrail-console/preinstall.sh
+      postinstall: build/packaging/bintrail-console/postinstall.sh
+      preremove: build/packaging/bintrail-console/preremove.sh
+      postremove: build/packaging/bintrail-console/postremove.sh
 
   # Separate package for the PostgreSQL-source binary (#534), mirroring the
   # console split: a PostgreSQL operator installs only bintrail-pg.

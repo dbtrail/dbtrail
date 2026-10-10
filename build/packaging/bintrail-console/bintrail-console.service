@@ -1,0 +1,30 @@
+# Installed by the bintrail-console package. To change a setting, edit
+# /etc/bintrail/bintrail-console.env. To change the unit itself, use
+# `systemctl edit bintrail-console`, which survives upgrades; this file does not.
+[Unit]
+Description=DBTrail capture and web interface
+Documentation=https://www.dbtrail.com/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bintrail
+Group=bintrail
+EnvironmentFile=/etc/bintrail/bintrail-console.env
+ExecStart=/usr/bin/bintrail-console watch
+WorkingDirectory=/var/lib/bintrail
+StateDirectory=bintrail
+StateDirectoryMode=0750
+# DBTrail only captures while it runs, so nothing but a stop asked of systemd
+# ends it: a crash restarts, and so does an exit that reported no error.
+Restart=always
+RestartSec=5
+# Time for capture to save its position before systemd kills the process.
+TimeoutStopSec=60
+# Hands the control groups below this unit to the service. Nothing uses
+# that yet.
+Delegate=yes
+
+[Install]
+WantedBy=multi-user.target
