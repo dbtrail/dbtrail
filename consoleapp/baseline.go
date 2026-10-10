@@ -560,6 +560,8 @@ func (s *baselineSupervisor) publishDump(req console.BaselineRequest, out dumpOu
 	st.LeftOutTables, st.LeftOutTablesOmitted = console.LeftOutTablesOf(leftOutOf(out.stats))
 	st.Rows = out.stats.RowsWritten
 	st.FinishedAt = nowStamp()
+	// The snapshot is written, so a low disk was not this read's end (#1938).
+	st.DiskCheck, st.DiskNote = dumpDiskOnceItFit(st.DiskCheck, st.DiskNote)
 	slog.Info("baseline: snapshot published locally; uploading it to the snapshot destination in the background",
 		"server", req.ServerName, "id", req.ServerID, "snapshot", out.snapDir, "destination", req.S3)
 	return st
@@ -720,6 +722,15 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	if !out.at.IsZero() && (err == nil || (out.snapDir != "" && !out.staged)) {
 		rec.SnapshotTime = out.at.UTC().Format(time.RFC3339)
 	}
+	// A low-disk warning is about the dump and its conversion (#1938). Once a
+	// snapshot was written they fit, whatever the upload did afterwards, and
+	// the note says so in place of "this read may fail"; a read that wrote
+	// none keeps the warning as it was given. wroteSnapshot is the condition
+	// above without the timestamp, which a Postgres read does not have here.
+	wroteSnapshot := err == nil || (out.snapDir != "" && !out.staged)
+	if wroteSnapshot {
+		rec.DiskCheck, rec.DiskNote = dumpDiskOnceItFit(rec.DiskCheck, rec.DiskNote)
+	}
 	// The base the next update from this snapshot counts its events from
 	// (#1737): whenever a snapshot was published, including one whose
 	// upload failed, since the next update folds from that local copy.
@@ -745,6 +756,9 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	}
 	st.FinishedAt = nowStamp()
 	st.Uploading = false
+	if wroteSnapshot {
+		st.DiskCheck, st.DiskNote = dumpDiskOnceItFit(st.DiskCheck, st.DiskNote)
+	}
 	if err != nil {
 		st.State = "failed"
 		st.LastError = err.Error()

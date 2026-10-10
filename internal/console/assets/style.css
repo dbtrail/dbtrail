@@ -1970,6 +1970,8 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .form-msg { font-family: var(--f-mono); font-size: 12px; margin-top: 10px; min-height: 1em; }
 .form-msg.ok { color: var(--insert); }
 .form-msg.err { color: var(--delete); }
+/* A warning about what comes next, over something that worked (#1938). */
+.form-msg.warn { color: var(--warn); }
 
 /* The tables that stopped an update (#1653): one row each, the name, what
    happened and the fix on one line, the reason under them. */

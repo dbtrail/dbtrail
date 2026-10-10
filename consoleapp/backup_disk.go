@@ -57,7 +57,42 @@ const (
 	dumpDiskOK        = "ok"        // room for the peak
 	dumpDiskLow       = "low"       // room for the dump, maybe not for dump plus Parquet
 	dumpDiskUnchecked = "unchecked" // the check could not run, or could not vouch for its sizes; the read went ahead
+	// dumpDiskTight is what a "low" verdict becomes once the read it warned
+	// about has written its snapshot: the warning was about this read, the
+	// read fit, and what is left to say is about the next one. A separate
+	// value, not a word in the note, so the page never calls a read that
+	// worked a failure.
+	dumpDiskTight = "tight"
 )
+
+// The risk a "low" note states while the read has not written its snapshot,
+// and what each becomes once it has. dumpDiskVerdict builds its notes from
+// the first of each pair and dumpDiskOnceItFit swaps in the second, so the
+// two cannot drift apart: a note in the future tense over a snapshot that
+// exists ("this read may fail") is a sentence that is false as shown.
+const (
+	diskRiskDump    = "so the dump may not fit and this read may fail with a full disk."
+	diskRiskDumpFit = "so the dump was not sure to fit. This read fit. The next one may not."
+	diskRisk        = "This read may fail with a full disk."
+	diskRiskFit     = "This read fit. The next one may not."
+)
+
+// dumpDiskOnceItFit is the check and note of a full read whose snapshot is
+// written. Only a "low" verdict changes, and only when its note carries a
+// risk sentence this build wrote: anything else (another verdict, a note in
+// an older wording) is returned as it came, since "it fit" must not be said
+// over a sentence that was not read.
+func dumpDiskOnceItFit(check, note string) (string, string) {
+	if check != dumpDiskLow {
+		return check, note
+	}
+	for _, p := range [][2]string{{diskRiskDump, diskRiskDumpFit}, {diskRisk, diskRiskFit}} {
+		if strings.Count(note, p[0]) == 1 {
+			return dumpDiskTight, strings.Replace(note, p[0], p[1], 1)
+		}
+	}
+	return check, note
+}
 
 // dumpPeakTenths is the dump-plus-Parquet peak as tenths of the estimate:
 // 18 = 1.8x, the highest ratio the #1938 measurement saw against
@@ -408,8 +443,8 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 		// Below the bound, above the refusal line: the dump may fit, may not.
 		// Loud, and with everything a refusal would say.
 		return dumpDiskLow, fmt.Sprintf("Low disk: a full read writes the whole dump to %s before converting it. The tables add up to about %s%s "+
-			"and the folder has %s free, so the dump may not fit and this read may fail with a full disk.%s %s",
-			stagingDir, humanSize(int64(need)), bound, humanSize(int64(stageFree)), short, moveStagingHint), nil
+			"and the folder has %s free, %s%s %s",
+			stagingDir, humanSize(int64(need)), bound, humanSize(int64(stageFree)), diskRiskDump, short, moveStagingHint), nil
 	}
 	if !shared || unknown {
 		outFree, ok, why := measureFree(outDir)
@@ -426,8 +461,8 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 				copyTakes, dumpFits = "by the sizes the server reports the copy takes about", "By those sizes the dump fits at"
 			}
 			return dumpDiskLow, fmt.Sprintf("Low disk: %s, where the Parquet copy goes, has %s free, and %s %s. "+
-				"This read may fail with a full disk. %s %s (%s free).%s",
-				localDir, humanSize(int64(outFree)), copyTakes, humanSize(int64(need)), dumpFits, stagingDir, humanSize(int64(stageFree)), short), nil
+				"%s %s %s (%s free).%s",
+				localDir, humanSize(int64(outFree)), copyTakes, humanSize(int64(need)), diskRisk, dumpFits, stagingDir, humanSize(int64(stageFree)), short), nil
 		}
 		if !shared {
 			return roomVerdict(est, fmt.Sprintf("Disk check: the dump needs about %s free at %s; %s free.%s",
@@ -441,8 +476,8 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 	}
 	if stageFree < peak {
 		return dumpDiskLow, fmt.Sprintf("Low disk: %s has %s free. The dump needs about %s, and with its Parquet copy "+
-			"%s it can reach about %s for data that does not compress. This read may fail with a full disk.%s %s",
-			stagingDir, humanSize(int64(stageFree)), humanSize(int64(need)), where, humanSize(int64(peak)), short, moveStagingHint), nil
+			"%s it can reach about %s for data that does not compress. %s%s %s",
+			stagingDir, humanSize(int64(stageFree)), humanSize(int64(need)), where, humanSize(int64(peak)), diskRisk, short, moveStagingHint), nil
 	}
 	return roomVerdict(est, fmt.Sprintf("Disk check: a full read needs about %s free at %s (up to %s with the Parquet copy); %s free.%s",
 		humanSize(int64(need)), stagingDir, humanSize(int64(peak)), humanSize(int64(stageFree)), short))
