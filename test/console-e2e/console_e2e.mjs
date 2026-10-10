@@ -678,15 +678,15 @@ try {
     const base = { measured: true, sample_hours: 6, current_bytes: 6000000, events_per_day: 24000, bytes_per_event: 1000,
       growth_bytes_per_day: 24000000, projected_bytes: 720000000, remaining_bytes: 714000000,
       retention: { known: true, retain: "30d", source: "default", enabled: true } };
-    const fail = { ...base, status: "fail", reason: "growth_exceeds_free", free_known: true, free_bytes: 10000000, days_until_full: 0.42 };
-    const warn = { ...base, status: "warn", reason: "free_under_floor", remaining_bytes: 0, free_known: true, free_bytes: 50000000, days_until_full: 2.1 };
-    const pass = { ...base, status: "pass", reason: "ok", free_known: true, free_bytes: 2000000000, days_until_full: 83.3 };
+    const fail = { ...base, status: "fail", reason: "growth_exceeds_free", free_known: true, free_bytes: 10000000, free_space_days_at_write_rate: 0.42 };
+    const warn = { ...base, status: "warn", reason: "free_under_floor", remaining_bytes: 0, free_known: true, free_bytes: 50000000, free_space_days_at_write_rate: 2.1 };
+    const pass = { ...base, status: "pass", reason: "ok", free_known: true, free_bytes: 2000000000, free_space_days_at_write_rate: 83.3 };
     const freeUnknown = { ...base, status: "skip", reason: "free_unknown", free_known: false, free_bytes: 0, free_reason: "mount_unset" };
     const freeRemote = { ...base, status: "skip", reason: "free_unknown", free_known: false, free_bytes: 0, free_reason: "index_not_local" };
     const freeTunnel = { ...base, status: "skip", reason: "free_unknown", free_known: false, free_bytes: 0, free_reason: "host_unconfirmed" };
     const freeLegacy = { ...base, status: "skip", reason: "free_unknown", free_known: false, free_bytes: 0 };
     const serve = { ...base, status: "skip", reason: "retention_unknown", projected_bytes: 0, remaining_bytes: 0,
-      retention: { known: false, enabled: false }, free_known: true, free_bytes: 2000000000, days_until_full: 83.3 };
+      retention: { known: false, enabled: false }, free_known: true, free_bytes: 2000000000, free_space_days_at_write_rate: 83.3 };
     const failBox = capacityBox(fail), warnBox = capacityBox(warn), passBox = capacityBox(pass), unknownBox = capacityBox(freeUnknown), serveBox = capacityBox(serve);
     const failCard = capacityCard(fail), passCard = capacityCard(pass), unknownCard = capacityCard(freeUnknown), serveCard = capacityCard(serve), errCard = capacityCard({ error: "boom" });
     const remoteCard = capacityCard(freeRemote), legacyCard = capacityCard(freeLegacy), tunnelCard = capacityCard(freeTunnel);

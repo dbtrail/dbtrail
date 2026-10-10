@@ -86,9 +86,13 @@ type capacityResponse struct {
 	// from an older backend's response, and unrecognised values from a newer
 	// one, both fall to the card's default arm, which offers no mount advice.
 	FreeReason string `json:"free_reason,omitempty"`
-	// DaysUntilFull is the free space divided by the daily growth: how long
-	// the free space lasts at the measured rate if nothing frees it.
-	// Present only when free space is known and the rate is positive.
+	// FreeSpaceDaysAtWriteRate is the free space divided by the daily gross
+	// write rate: how long the free space lasts if nothing frees it. Present
+	// when free space is known and the rate is positive. Not a forecast:
+	// status and reason are the verdict.
+	FreeSpaceDaysAtWriteRate *float64 `json:"free_space_days_at_write_rate,omitempty"`
+	// DaysUntilFull is the same figure, present only where it IS a forecast:
+	// the index is known to have no retention window (#2263).
 	DaysUntilFull *float64 `json:"days_until_full,omitempty"`
 }
 
@@ -185,8 +189,11 @@ func capacityResponseFrom(m doctor.CapacityMeasurement, retention capacityRetent
 		resp.ProjectedBytes = m.ProjectedBytes
 		resp.RemainingBytes = m.RemainingBytes
 	}
-	if m.DaysUntilFullKnown {
-		d := m.DaysUntilFull
+	if m.FreeDaysKnown {
+		d := m.FreeDays
+		resp.FreeSpaceDaysAtWriteRate = &d
+	}
+	if d, ok := m.DaysUntilFull(); ok {
 		resp.DaysUntilFull = &d
 	}
 	return resp

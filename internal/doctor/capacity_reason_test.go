@@ -336,3 +336,40 @@ func TestBundledIndexHostMatchesCompose(t *testing.T) {
 		t.Errorf("docker-compose.yml no longer sets %s: the guidance names a variable the shipped stack does not wire", datadirMountEnv)
 	}
 }
+
+// #2263, the reported case: 63.7 GB a day under a 6 h window, the index flat
+// at its steady size, 84.7 GB free. Free space is five times the index and
+// still under three days of gross writes, so the floor warns (a stalled
+// rotation fills the volume in 1.3 days). What it must not do is call that a
+// date the disk fills: the index is not growing.
+func TestClassifyCapacity_shortWindowAtSteadyState(t *testing.T) {
+	const gb = 1_000_000_000.0
+	p := capacityProjection{eventsPerDay: 63_700_000, bytesPerEvent: 1000, projectedBytes: 15.9 * gb, currentBytes: uint64(16.5 * gb), sampleHours: 6}
+	free := uint64(84.7 * gb)
+
+	m := classifyCapacity(p, true, 6*time.Hour, true, free, true, CapacityFreeFromMount)
+	if m.Status != StatusWarn || m.Reason != CapacityFreeUnderFloor {
+		t.Fatalf("graded %s/%s, want warn/free_under_floor: the floor does not scale with the window", m.Status, m.Reason)
+	}
+	if !m.FreeDaysKnown || m.FreeDays < 1.3 || m.FreeDays > 1.4 {
+		t.Fatalf("FreeDays = %v known=%v, want ≈1.33", m.FreeDays, m.FreeDaysKnown)
+	}
+	if d, ok := m.DaysUntilFull(); ok {
+		t.Fatalf("DaysUntilFull = %v under a 6 h window, want not reported", d)
+	}
+	if detail := capacityCheckResult(m, "binlog_index", "").Detail; strings.Contains(detail, "until the volume fills") {
+		t.Fatalf("doctor text forecasts a full disk at steady state:\n%s", detail)
+	}
+
+	// The three retention cases. Unknown is not "none": the window may be set.
+	if _, ok := classifyCapacity(p, true, 0, false, free, true, CapacityFreeFromMount).DaysUntilFull(); ok {
+		t.Error("retention unknown: DaysUntilFull reported, want not reported")
+	}
+	none := classifyCapacity(p, true, 0, true, free, true, CapacityFreeFromMount)
+	if d, ok := none.DaysUntilFull(); !ok || d < 1.3 || d > 1.4 {
+		t.Errorf("no retention: DaysUntilFull = %v ok=%v, want ≈1.33 reported", d, ok)
+	}
+	if detail := capacityCheckResult(none, "binlog_index", "").Detail; !strings.Contains(detail, "until the volume fills") {
+		t.Errorf("no retention: doctor text lost the forecast:\n%s", detail)
+	}
+}

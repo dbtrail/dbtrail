@@ -6263,7 +6263,7 @@ function capacityCard(cap) {
   rows.push(["keeps for", !ret.known ? "not known here" : (ret.enabled ? ret.retain + basis : "rotation is off"), false, !ret.known || !ret.enabled || !!basis]);
   if (cap.measured && cap.projected_bytes > 0) rows.push(["steady size", humanBytes(cap.projected_bytes)]);
   rows.push(["free on disk", cap.free_known ? humanBytes(cap.free_bytes) : "not measurable from here", false, !cap.free_known]);
-  if (cap.days_until_full !== null && cap.days_until_full !== undefined) rows.push(["free space lasts", daysText(cap.days_until_full) + " at this rate", false, true]);
+  if (cap.free_space_days_at_write_rate !== null && cap.free_space_days_at_write_rate !== undefined) rows.push(["free space lasts", daysText(cap.free_space_days_at_write_rate) + " at this rate", false, true]);
   rows.forEach(([k, val, big, words]) => {
     card.append(el("div", { class: "kv" },
       el("span", { class: "kv-k", text: k }),
@@ -6288,7 +6288,7 @@ function capacityBox(cap) {
   if (!cap || cap.error || (cap.status !== "warn" && cap.status !== "fail")) return null;
   const growth = humanBytes(cap.growth_bytes_per_day) + " a day";
   const free = humanBytes(cap.free_bytes);
-  const days = daysText(cap.days_until_full);
+  const days = daysText(cap.free_space_days_at_write_rate);
   const ahead = humanBytes(cap.remaining_bytes);
   const window = (cap.retention && cap.retention.retain) || "";
   const stops = " A full disk stops capture, and once the source deletes its binlogs those changes are gone for good.";
