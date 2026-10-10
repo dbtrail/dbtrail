@@ -957,6 +957,12 @@ func (s *Server) sqlOlderCopy(ctx context.Context, b *bundle, h *sqlHeavyRun) (t
 			slog.Warn("console: sql: could not read an earlier copy's changes; looking at older ones", "copy", at.UTC().Format(time.RFC3339), "error", err)
 			continue
 		}
+		// Weighed as the statement will read it: a table of that copy with
+		// its resolved pair is read through the pair (buildViewsInput marks
+		// it the same way). Without this the copy before the newest, whose
+		// pairs are kept for exactly this, was weighed by its whole chain
+		// and passed over for a much older one (#2261).
+		views.MarkResolvedTableDeltas(tables)
 		if sqlChainTooHeavy(tables, h.limit, sqlFileSize).Table == "" {
 			return at, true
 		}

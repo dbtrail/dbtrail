@@ -149,8 +149,8 @@ func (s *baselineSupervisor) maybeResolve(req refreshRequest) {
 // refresh that starts seconds after the one before it ended (that one
 // outran its slot) folds while the pass is still on its way to this table,
 // and reading that as "no pair" would write the table in full for it. A
-// pass that then fails for the table leaves no pair, and the refresh after
-// puts the table back on the ordinary line.
+// table whose merge failed is not counted while it waits to be tried again
+// (resolveRetry): a pass skips it, so no pair is on its way.
 func (s *baselineSupervisor) chainResolved(req refreshRequest) func(string, *baseline.TableDeltaChain) bool {
 	if req.BaselineDir == "" || strings.HasPrefix(req.BaselineDir, "s3://") {
 		return nil
@@ -170,7 +170,7 @@ func (s *baselineSupervisor) chainResolved(req refreshRequest) func(string, *bas
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return s.resolving[folder]
+		return s.resolving[folder] && !time.Now().Before(s.resolveRetry[resolveRetryKey(req.ServerID, basePath)])
 	}
 }
 

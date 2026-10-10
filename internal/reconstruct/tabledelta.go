@@ -1223,7 +1223,7 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		// Above zero: the window's changes did not fit in memory and were
 		// read back from disk in that many passes.
 		"spill_passes", passes)
-	warnChainOverLine(p, chain)
+	warnChainOverLine(p, chain, maxUpserts)
 	return nil
 }
 
@@ -1249,9 +1249,9 @@ func chainUpsertsLine(p tableDeltaPublish) (line int64, resolved bool) {
 // from an earlier copy (#2261). The rule looks at the chain a window starts
 // from, so one window that alone adds more than that leaves a long chain
 // until the next refresh rewrites it; meanwhile a statement over the table
-// reads it more slowly, and the operator should know why.
-func warnChainOverLine(p tableDeltaPublish, chain *baseline.TableDeltaChain) {
-	max, _ := chainUpsertsLine(p)
+// reads it more slowly, and the operator should know why. max is the line
+// this window's decision used (chainUpsertsLine), not asked for again.
+func warnChainOverLine(p tableDeltaPublish, chain *baseline.TableDeltaChain, max int64) {
 	if max <= 0 || chain == nil {
 		return
 	}

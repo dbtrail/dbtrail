@@ -157,6 +157,19 @@ func (s *baselineSupervisor) TriggerRefresh(req refreshRequest, interval time.Du
 	s.postRefresh.Add(1)
 	go func() {
 		defer s.postRefresh.Done()
+		// Once per server and process, before the fold: a daemon stopped
+		// between a refresh and the pass that follows it left the newest
+		// snapshot with no resolved pairs, and this refresh would hold
+		// every table of it to the short line and write each one past it
+		// in full (#2261). Pairs that are there cost a look at their
+		// footers.
+		s.mu.Lock()
+		first := !s.resolvedSinceStart[req.ServerID]
+		s.resolvedSinceStart[req.ServerID] = true
+		s.mu.Unlock()
+		if first {
+			s.maybeResolve(req)
+		}
 		// The zero instant: the cycle stamps its own, after the mark read.
 		s.runRefresh(req, time.Time{}, interval)
 		// After the refresh has released its slot: a chain that grew long

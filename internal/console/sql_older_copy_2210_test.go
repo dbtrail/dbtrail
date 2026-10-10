@@ -12,6 +12,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
+	"github.com/dbtrail/dbtrail/internal/views"
 )
 
 // writeOrdersSnapshot writes shop.orders (id, status) with one status per row
@@ -232,4 +233,50 @@ func TestSQLAPI_answersFromAnEarlierCopy(t *testing.T) {
 			t.Fatalf("port: %v %q", err, res.Note)
 		}
 	})
+}
+
+// The copy before the newest is weighed as a statement on it reads it
+// (#2261): a table with its resolved pair is read through the pair, so its
+// chain does not send the statement further back.
+func TestSQLOlderCopy_weighsATableThroughItsResolvedPair(t *testing.T) {
+	root := t.TempDir()
+	three := time.Date(2026, 4, 30, 3, 0, 0, 0, time.UTC)
+	two := time.Date(2026, 4, 30, 2, 0, 0, 0, time.UTC)
+	one := time.Date(2026, 4, 30, 1, 0, 0, 0, time.UTC)
+	writeOrdersSnapshot(t, root, "2026-04-30T03-00-00Z", "at three")
+	schemaTwo := writeOrdersSnapshot(t, root, "2026-04-30T02-00-00Z", "at two")
+	writeOrdersSnapshot(t, root, "2026-04-30T01-00-00Z", "at one")
+	base := filepath.Join(schemaTwo, "orders.parquet")
+	var chain []baseline.TableDeltaFile
+	for seq := range 2 {
+		posdel, upserts := baseline.TableDeltaPaths(base, seq)
+		for _, p := range []string{posdel, upserts} {
+			if err := os.WriteFile(p, []byte("a chain past the line"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		chain = append(chain, baseline.TableDeltaFile{Seq: seq, SeqLo: seq, Posdel: posdel, Upserts: upserts})
+	}
+	h := &sqlHeavyRun{tables: []views.BaselineTable{{Schema: "shop", Table: "orders"}}, limit: 10, newest: three}
+	s := &Server{}
+	at, ok := s.sqlOlderCopy(context.Background(), &bundle{baselineSrc: root}, h)
+	if !ok || !at.Equal(one) {
+		t.Fatalf("no pair: answered from %v (%v), want the copy of one: the copy of two holds a chain past the line", at, ok)
+	}
+	pair, ok := baseline.ResolvedTableDeltaPaths(base, chain)
+	if !ok {
+		t.Fatal("no place for a resolved pair")
+	}
+	if err := os.MkdirAll(filepath.Dir(pair.Upserts), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{pair.Posdel, pair.Upserts} {
+		if err := os.WriteFile(p, []byte("r"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at, ok = s.sqlOlderCopy(context.Background(), &bundle{baselineSrc: root}, h)
+	if !ok || !at.Equal(two) {
+		t.Fatalf("with its pair: answered from %v (%v), want the copy of two", at, ok)
+	}
 }

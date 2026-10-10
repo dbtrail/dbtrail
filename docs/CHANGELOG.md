@@ -24,10 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written again when its changes pass half the size of the table's file, or
   192 MB (384 MB at 4 GB), whichever comes first, or after a day as before.
   A table without the pair (snapshots only on S3, a folder two servers
-  share, a merge that failed) keeps the fixed size. Views files for DuckDB
-  clients do not read the merged pair, and read such a table through a
-  longer chain than before. The merged pairs are also written when a
-  compaction ends, not at the refresh after it.
+  share, a merge that failed) keeps the fixed size. What it costs: views
+  files for DuckDB clients do not read the merged pair, and read such a
+  table through a longer chain than before, as do `reconstruct`, a restore
+  and the next full write of the table; and the merged pairs, kept for the
+  two newest snapshots, take more disk as the chains they copy grow. The
+  merged pairs are also written when a compaction ends, not at the refresh
+  after it, and by the first refresh after a restart when they are
+  missing. A statement answered from an earlier copy now counts that
+  copy's merged pairs too, so it is answered from the copy just before the
+  newest when that one has them.
 - **Rotation no longer holds up capture while the index table is in use**
   (#2280). Dropping old partitions and adding future ones are `ALTER TABLE`
   statements on `binlog_events`. MySQL makes such a statement wait for

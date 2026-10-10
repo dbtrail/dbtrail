@@ -143,9 +143,9 @@ func TestTableDelta_resolvedTableStillEndsAtTheShareOfTheTable(t *testing.T) {
 	}
 }
 
-// The warning about a chain past its line follows the table's own line: a
-// table read through its pair is past the ordinary one on purpose, at every
-// refresh, and says nothing until it passes its own.
+// The warning about a chain past its line is given the line the window's
+// decision used: a table read through its pair is past the ordinary one on
+// purpose, at every refresh, and says nothing until it passes its own.
 func TestWarnChainOverLine_resolvedTable(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name string, n int) string {
@@ -163,23 +163,20 @@ func TestWarnChainOverLine_resolvedTable(t *testing.T) {
 	prevLog := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(prevLog) })
-	resolved := true
+	asked := 0
 	p := tableDeltaPublish{schema: "s", table: "t", prev: &tableDelta{Chain: chain},
 		cfg: FullTableConfig{MaxChainUpserts: 100, MaxResolvedChainUpserts: 550,
-			ChainResolved: func(string, *baseline.TableDeltaChain) bool { return resolved }}}
-	warnChainOverLine(p, chain) // 1100 is twice its line: not past it
+			ChainResolved: func(string, *baseline.TableDeltaChain) bool { asked++; return true }}}
+	line, _ := chainUpsertsLine(p)
+	warnChainOverLine(p, chain, line) // 1100 is twice its line: not past it
 	if buf.Len() != 0 {
 		t.Fatalf("a table with its pair, at its own line: %s", buf.String())
 	}
-	p.cfg.MaxResolvedChainUpserts = 549
-	warnChainOverLine(p, chain)
-	if !strings.Contains(buf.String(), "line_mb=") || !strings.Contains(buf.String(), "past the size a refresh keeps them under") {
+	warnChainOverLine(p, chain, 549)
+	if !strings.Contains(buf.String(), "past the size a refresh keeps them under") {
 		t.Fatalf("a table with its pair, past its own line: %q", buf.String())
 	}
-	buf.Reset()
-	p.cfg.MaxResolvedChainUpserts, resolved = 550, false
-	warnChainOverLine(p, chain)
-	if !strings.Contains(buf.String(), "past the size a refresh keeps them under") {
-		t.Fatalf("the same chain with no pair is past the ordinary line: %q", buf.String())
+	if asked != 1 {
+		t.Fatalf("the daemon was asked %d times about one table's pair, want once: the warning takes the decision's line", asked)
 	}
 }

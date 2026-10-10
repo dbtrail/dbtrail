@@ -121,6 +121,10 @@ type baselineSupervisor struct {
 	// resolveRetry is when a table whose pair could not be written may be
 	// tried again, keyed by resolveRetryKey. Guarded by mu.
 	resolveRetry map[string]time.Time
+	// resolvedSinceStart is the servers whose first refresh of this process
+	// has looked at the resolved pairs before folding (TriggerRefresh).
+	// Guarded by mu.
+	resolvedSinceStart map[string]bool
 	// postRefresh counts the goroutines that run what follows a refresh
 	// (the compaction's scan, the resolved pairs), which outlive the
 	// refresh's own status: a test waits on it before it restores a seam
@@ -261,25 +265,26 @@ type baselineSupervisor struct {
 func newBaselineSupervisor(ctx context.Context, stagingDir string, lockMode baseline.LockMode) *baselineSupervisor {
 	sweepSQLExportStaging(stagingDir)
 	s := &baselineSupervisor{
-		ctx:              ctx,
-		stagingDir:       stagingDir,
-		lockMode:         lockMode,
-		jobs:             make(map[string]*console.BaselineStatus),
-		refreshes:        make(map[string]*console.BaselineStatus),
-		refreshPaces:     make(map[string]refreshPace),
-		foldedMarks:      make(map[string]foldMemo),
-		refreshPrior:     make(map[string]*console.BaselineStatus),
-		refreshGateSkips: make(map[string]string),
-		refreshChecked:   make(map[string]string),
-		gateEdge:         notify.NewEdge(notify.DefaultRepeatEvery),
-		restores:         make(map[string]*console.BaselineStatus),
-		exports:          make(map[string]*console.BaselineStatus),
-		compacts:         make(map[string]*console.BaselineStatus),
-		compactRetry:     make(map[string]time.Time),
-		resolving:        make(map[string]bool),
-		resolveRetry:     make(map[string]time.Time),
-		exportRuns:       make(map[string]*sqlExportRun),
-		exportOrphans:    make(map[string]map[string]string),
+		ctx:                ctx,
+		stagingDir:         stagingDir,
+		lockMode:           lockMode,
+		jobs:               make(map[string]*console.BaselineStatus),
+		refreshes:          make(map[string]*console.BaselineStatus),
+		refreshPaces:       make(map[string]refreshPace),
+		foldedMarks:        make(map[string]foldMemo),
+		refreshPrior:       make(map[string]*console.BaselineStatus),
+		refreshGateSkips:   make(map[string]string),
+		refreshChecked:     make(map[string]string),
+		gateEdge:           notify.NewEdge(notify.DefaultRepeatEvery),
+		restores:           make(map[string]*console.BaselineStatus),
+		exports:            make(map[string]*console.BaselineStatus),
+		compacts:           make(map[string]*console.BaselineStatus),
+		compactRetry:       make(map[string]time.Time),
+		resolving:          make(map[string]bool),
+		resolveRetry:       make(map[string]time.Time),
+		resolvedSinceStart: make(map[string]bool),
+		exportRuns:         make(map[string]*sqlExportRun),
+		exportOrphans:      make(map[string]map[string]string),
 	}
 	s.produce = s.execute
 	return s

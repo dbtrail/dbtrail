@@ -3,12 +3,15 @@ package consoleapp
 import (
 	"context"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/rotation"
 )
 
@@ -96,6 +99,22 @@ func TestChainResolved_pairOrPassInFlight(t *testing.T) {
 	if ask(base, chainOf(1)) {
 		t.Error("a pass in flight writes no pair for a chain of one")
 	}
+	// Its merge failed and it waits to be tried again: the pass skips it.
+	sup.mu.Lock()
+	sup.resolveRetry[resolveRetryKey("s", base)] = time.Now().Add(time.Hour)
+	sup.mu.Unlock()
+	if ask(base, chainOf(2)) {
+		t.Error("a table waiting after a failed merge counted as having a pair on its way")
+	}
+	if !ask(filepath.Join(local, "snap", "shop", "items.parquet"), chainOf(2)) {
+		t.Error("another table's wait held this one to the ordinary line")
+	}
+	sup.mu.Lock()
+	sup.resolveRetry[resolveRetryKey("s", base)] = time.Now().Add(-time.Second)
+	sup.mu.Unlock()
+	if !ask(base, chainOf(2)) {
+		t.Error("a wait that is over still held the table to the ordinary line")
+	}
 	sup.mu.Lock()
 	delete(sup.resolving, resolveFolder(local))
 	sup.resolving[resolveFolder(t.TempDir())] = true // another folder's pass
@@ -164,7 +183,6 @@ func TestRunRefresh_deltasOff_noResolvedLine(t *testing.T) {
 // ordinary line).
 func TestTriggerCompact_writesThePairsWhenItEnds(t *testing.T) {
 	sup, req, _, _ := compactRig(t, compactMinPairs)
-	t.Cleanup(sup.postRefresh.Wait)
 	var merges atomic.Int32
 	var compactingAtMerge atomic.Bool
 	resolveTableDelta = func(context.Context, string, *baseline.TableDeltaChain, string) (bool, bool, error) {
@@ -184,5 +202,56 @@ func TestTriggerCompact_writesThePairsWhenItEnds(t *testing.T) {
 	}
 	if compactingAtMerge.Load() {
 		t.Fatal("a pair was merged while the compaction was still running")
+	}
+}
+
+// The first refresh of a server after the daemon starts looks at the pairs
+// BEFORE it folds: a daemon stopped between a refresh and the pass after it
+// left none, and the fold would hold every table to the ordinary line. Later
+// refreshes do not: their pairs are written by the pass that follows each.
+func TestTriggerRefresh_firstRefreshWritesMissingPairsBeforeTheFold(t *testing.T) {
+	mark := indexMark{events: 100, schemaChanges: 7}
+	stubIndexMark(t, &mark, true)
+	stubBucketListing(t)
+	stubCoverage(t, true, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	root := stageBaselineRoot(t)
+	stubCompaction(t, fakeChain(t, filepath.Join(root, "2026-08-28T09-00-00Z"), 3))
+	sup := newBaselineSupervisor(ctx, t.TempDir(), baseline.DefaultLockMode)
+	t.Cleanup(sup.postRefresh.Wait)
+	sup.tableDeltas = true
+
+	var mu sync.Mutex
+	var order []string
+	note := func(what string) {
+		mu.Lock()
+		order = append(order, what)
+		mu.Unlock()
+	}
+	resolveTableDelta = func(context.Context, string, *baseline.TableDeltaChain, string) (bool, bool, error) {
+		note("pairs")
+		return true, false, nil
+	}
+	prevFold := foldTables
+	t.Cleanup(func() { foldTables = prevFold })
+	foldTables = func(context.Context, reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		note("fold")
+		return []*reconstruct.TableReport{{Schema: "shop", Table: "orders"}}, nil, nil
+	}
+
+	req := refreshRequest{ServerID: "s", ServerName: "s", IndexDSN: "d", BaselineDir: root}
+	for range 2 {
+		if _, err := sup.TriggerRefresh(req, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		sup.postRefresh.Wait()
+		mark.events++ // something new, so the second cycle folds too
+	}
+	mu.Lock()
+	got := strings.Join(order, " ")
+	mu.Unlock()
+	if got != "pairs fold pairs fold pairs" {
+		t.Fatalf("order = %q, want %q: the pairs before the first fold, and after each", got, "pairs fold pairs fold pairs")
 	}
 }
