@@ -915,10 +915,11 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	stats, err := baseline.Run(s.ctx, s.dumpBaselineConfig(req, dumpDir, outputDir, dumpStartedAt, ddlMark, eventMark))
 	if err != nil {
 		out.cleanup()
+		convErr := err
 		err = fmt.Errorf("convert: %w", err)
 		if ownSnapshot != "" {
-			if left := discardFailedSnapshot(outputDir, ownSnapshot, req.ServerID); left != "" {
-				err = fmt.Errorf("%w. %s", err, left)
+			if said := discardFailedSnapshot(outputDir, ownSnapshot, req.ServerID, convErr); said != "" {
+				err = fmt.Errorf("%w. %s", err, said)
 			}
 		}
 		return dumpOutcome{}, err
@@ -942,19 +943,49 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 // marked snapshot stays, and so does a folder with files and no marker, which
 // every reader takes as complete. The caller passes only a folder that was
 // vacant when the run started, so it never holds anyone else's files.
-func discardFailedSnapshot(root, name, serverID string) (left string) {
+//
+// Two failures keep the folder, because what they leave is not a partial
+// snapshot: every table converted and only the finishing failed
+// (baseline.ErrAllTablesConverted; the refresh keeps the same shape, see
+// keepPartialSnapshotBecause), and a folder whose marker vanished under the
+// run (baseline.ErrIncompleteMarkerVanished), which someone else has touched.
+//
+// The discard renames the folder to a hidden name before it deletes it. A
+// delete that fails after the rename leaves that hidden folder, which only
+// the sweep removes, and the sweep otherwise runs on update cycles alone; so
+// it runs here first, and the next failed read of a server that only does
+// full reads retries what this one could not finish.
+func discardFailedSnapshot(root, name, serverID string, convErr error) (said string) {
 	p := filepath.Join(root, name)
+	if n, err := reconstruct.SweepDiscardedSnapshots(root); err != nil {
+		slog.Warn("console snapshot: could not clear a folder an earlier failed read left half removed", "server", serverID, "root", root, "error", err)
+	} else if n > 0 {
+		slog.Info("console snapshot: cleared folders an earlier failed read left half removed", "server", serverID, "root", root, "dirs", n)
+	}
+	switch {
+	case errors.Is(convErr, baseline.ErrAllTablesConverted):
+		slog.Warn("console snapshot: kept the snapshot folder of a full read that converted every table and could not finish it",
+			"server", serverID, "path", p)
+		return fmt.Sprintf("Every table was converted, so the folder %s was kept. It is marked incomplete and no listing shows it", p)
+	case errors.Is(convErr, baseline.ErrIncompleteMarkerVanished):
+		slog.Warn("console snapshot: kept the snapshot folder of a full read whose marker vanished while it ran",
+			"server", serverID, "path", p)
+		return ""
+	}
 	res := reclaimSnapshotDir(p, name)
 	switch {
 	case res.err != nil:
 		slog.Error("console snapshot: could not remove the snapshot folder of a full read whose conversion failed; "+
-			"it is marked incomplete, no listing shows it, and nothing will remove it later",
+			"no listing shows it, and only the next failed full read of this server retries",
 			"server", serverID, "path", p, "error", res.err)
-		return fmt.Sprintf("The unfinished snapshot folder %s could not be removed (%s); it holds nothing usable and still takes room there",
-			p, firstLineOf(res.err.Error()))
+		return fmt.Sprintf("The unfinished snapshot folder this read started could not be removed (%s); it holds nothing usable and still takes room",
+			firstLineOf(res.err.Error()))
 	case res.keptBecause != "":
 		slog.Warn("console snapshot: kept the snapshot folder of a full read whose conversion failed",
 			"server", serverID, "path", p, "reason", res.keptBecause)
+	case res.removed:
+		slog.Info("console snapshot: removed the unfinished snapshot folder of a full read whose conversion failed", "server", serverID, "path", p)
+		return "The unfinished snapshot folder this read started was removed"
 	}
 	return ""
 }

@@ -2,6 +2,8 @@ package consoleapp
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,9 +111,9 @@ func TestExecute_aFailedConversionRemovesTheSnapshotFolderItMade_1938(t *testing
 			t.Fatalf("the older snapshot lost %s: %v", f, err)
 		}
 	}
-	// Nothing in the message claims a folder was left.
-	if strings.Contains(err.Error(), "could not be removed") {
-		t.Fatalf("the message reports a leftover that is not there: %v", err)
+	// The run's error says what became of the folder, after its own words.
+	if !strings.HasSuffix(err.Error(), ". The unfinished snapshot folder this read started was removed") {
+		t.Fatalf("the message does not say the folder was removed: %v", err)
 	}
 	if left, _ := filepath.Glob(filepath.Join(stage, "*")); len(left) != 0 {
 		t.Fatalf("the working folder still holds %v", left)
@@ -150,6 +152,12 @@ func TestExecute_aFailedConversionLeavesAFolderItDidNotMake_1938(t *testing.T) {
 			t.Fatalf("a file this read did not write is gone: %v", err)
 		}
 	}
+	// The read really wrote into one of them, so the files above survived a
+	// failure in their own folder and not one somewhere else.
+	marked, _ := filepath.Glob(filepath.Join(local, "*", baseline.IncompleteMarker))
+	if len(marked) != 1 || len(snapshotDirsIn(t, local)) != 4 {
+		t.Fatalf("the read did not land in an occupied folder (marked: %v, folders: %v): the test proved nothing", marked, snapshotDirsIn(t, local))
+	}
 }
 
 // The rules are the reclaim's: an unfinished folder goes, a finished one and
@@ -171,10 +179,10 @@ func TestDiscardFailedSnapshot_keepsWhatIsUsableAndSaysWhatStays_1938(t *testing
 	}
 	exists := func(p string) bool { _, err := os.Stat(p); return err == nil }
 
-	t.Run("unfinished: removed", func(t *testing.T) {
+	t.Run("unfinished: removed, and said", func(t *testing.T) {
 		root, p := mk(t, baseline.IncompleteMarker, "shop.good.parquet")
-		if left := discardFailedSnapshot(root, name, "s1"); left != "" || exists(p) {
-			t.Fatalf("left=%q exists=%v", left, exists(p))
+		if said := discardFailedSnapshot(root, name, "s1", errTableFailed); said != "The unfinished snapshot folder this read started was removed" || exists(p) {
+			t.Fatalf("said=%q exists=%v", said, exists(p))
 		}
 		if rest := snapshotDirsIn(t, root); len(rest) != 0 {
 			t.Fatalf("the folder was renamed, not removed: %v", rest)
@@ -182,18 +190,18 @@ func TestDiscardFailedSnapshot_keepsWhatIsUsableAndSaysWhatStays_1938(t *testing
 	})
 	t.Run("finished and marked: kept", func(t *testing.T) {
 		root, p := mk(t, baseline.SuccessMarker, "shop.good.parquet")
-		if left := discardFailedSnapshot(root, name, "s1"); left != "" || !exists(filepath.Join(p, "shop.good.parquet")) {
+		if left := discardFailedSnapshot(root, name, "s1", errTableFailed); left != "" || !exists(filepath.Join(p, "shop.good.parquet")) {
 			t.Fatalf("left=%q, a finished snapshot was touched", left)
 		}
 	})
 	t.Run("files and no marker: kept", func(t *testing.T) {
 		root, p := mk(t, "shop.good.parquet")
-		if left := discardFailedSnapshot(root, name, "s1"); left != "" || !exists(filepath.Join(p, "shop.good.parquet")) {
+		if left := discardFailedSnapshot(root, name, "s1", errTableFailed); left != "" || !exists(filepath.Join(p, "shop.good.parquet")) {
 			t.Fatalf("left=%q, a markerless snapshot was touched", left)
 		}
 	})
 	t.Run("never created: nothing to do", func(t *testing.T) {
-		if left := discardFailedSnapshot(t.TempDir(), name, "s1"); left != "" {
+		if left := discardFailedSnapshot(t.TempDir(), name, "s1", errTableFailed); left != "" {
 			t.Fatalf("left=%q for a folder that does not exist", left)
 		}
 	})
@@ -206,12 +214,55 @@ func TestDiscardFailedSnapshot_keepsWhatIsUsableAndSaysWhatStays_1938(t *testing
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
-		left := discardFailedSnapshot(root, name, "s1")
+		left := discardFailedSnapshot(root, name, "s1", errTableFailed)
 		if !exists(p) {
 			t.Fatal("the test did not keep the folder")
 		}
-		if !strings.HasPrefix(left, "The unfinished snapshot folder "+p+" could not be removed (") || !strings.Contains(left, "holds nothing usable") {
+		if !strings.HasPrefix(left, "The unfinished snapshot folder this read started could not be removed (") || !strings.Contains(left, p) || !strings.Contains(left, "holds nothing usable") {
 			t.Fatalf("left = %q", left)
 		}
 	})
+	// Every table converted and only the finishing failed: the folder is the
+	// whole result of the read, and it stays, said with where it is.
+	t.Run("every table converted: kept, and said", func(t *testing.T) {
+		root, p := mk(t, baseline.IncompleteMarker, "shop.good.parquet")
+		late := fmt.Errorf("snapshot complete but could not write integrity manifest: %w: disk full", baseline.ErrAllTablesConverted)
+		said := discardFailedSnapshot(root, name, "s1", late)
+		if !exists(filepath.Join(p, "shop.good.parquet")) || !exists(filepath.Join(p, baseline.IncompleteMarker)) {
+			t.Fatal("a snapshot with every table converted was removed")
+		}
+		if said != "Every table was converted, so the folder "+p+" was kept. It is marked incomplete and no listing shows it" {
+			t.Fatalf("said = %q", said)
+		}
+	})
+	t.Run("the marker vanished under the run: kept", func(t *testing.T) {
+		root, p := mk(t, baseline.IncompleteMarker, "shop.good.parquet")
+		if said := discardFailedSnapshot(root, name, "s1", baseline.ErrIncompleteMarkerVanished); said != "" || !exists(filepath.Join(p, "shop.good.parquet")) {
+			t.Fatalf("said=%q, a folder someone else touched was removed", said)
+		}
+	})
+	// A discard that renamed the folder and then could not delete it leaves a
+	// hidden folder. The next failed read clears it: a server that only does
+	// full reads has no update cycle to sweep it.
+	t.Run("a half-removed folder from an earlier failure is cleared", func(t *testing.T) {
+		root, _ := mk(t, baseline.IncompleteMarker)
+		stale := filepath.Join(root, ".2026-10-09T01-02-03Z.discarding")
+		if err := os.MkdirAll(stale, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(stale, "shop.good.parquet"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// A hidden folder that is not one of ours stays.
+		other := filepath.Join(root, ".notes")
+		if err := os.MkdirAll(other, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		discardFailedSnapshot(root, name, "s1", errTableFailed)
+		if exists(stale) || !exists(other) {
+			t.Fatalf("stale exists=%v, the operator's folder exists=%v", exists(stale), exists(other))
+		}
+	})
 }
+
+var errTableFailed = errors.New("shop.bad: read sql file: unterminated statement")

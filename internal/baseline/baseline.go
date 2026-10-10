@@ -384,7 +384,7 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	// Before the manifest, which covers the pair like any other file.
 	if cfg.TableDeltas {
 		if err := WriteEmptyTableDeltas(snapDir); err != nil {
-			return stats, err
+			return stats, &tablesConvertedError{err}
 		}
 	}
 	SignSnapshot(snapDir, cfg.WriterID)
@@ -393,20 +393,33 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	// this directory may have left.
 	RecordViewsSkipped(snapDir, NewViewsSkipped(stats.ViewsSkipped, ts))
 	if err := baselineintegrity.WriteManifest(snapDir); err != nil {
-		return stats, fmt.Errorf("snapshot complete but could not write integrity manifest: %w", err)
+		return stats, &tablesConvertedError{fmt.Errorf("snapshot complete but could not write integrity manifest: %w", err)}
 	}
 	if err := CompleteSnapshot(snapDir); err != nil {
 		if errors.Is(err, ErrIncompleteMarkerVanished) {
 			return stats, err
 		}
-		// The snapshot is complete on disk but unmarked; without the _SUCCESS
-		// marker (and absent _INCOMPLETE) discovery still treats it as
-		// complete-by-default, so this is a degraded-observability failure, not
-		// a data one. Fail loud so the operator can re-run.
-		return stats, fmt.Errorf("snapshot complete but could not write %s marker: %w", SuccessMarker, err)
+		// Every table is on disk and the folder still carries _INCOMPLETE,
+		// so no listing serves it: the data is whole, the snapshot is not
+		// published. Fail loud so the operator can re-run.
+		return stats, &tablesConvertedError{fmt.Errorf("snapshot complete but could not write %s marker: %w", SuccessMarker, err)}
 	}
 	return stats, nil
 }
+
+// ErrAllTablesConverted matches a Run that failed AFTER every table was
+// written: what is on disk is a whole snapshot that could not be finished
+// (its table deltas, its integrity manifest or its _SUCCESS marker). A caller
+// that removes the folder of a failed run must not remove this one: it is the
+// whole result of a read the source already paid for. The message of the
+// failure is unchanged.
+var ErrAllTablesConverted = errors.New("every table was converted")
+
+type tablesConvertedError struct{ err error }
+
+func (e *tablesConvertedError) Error() string        { return e.err.Error() }
+func (e *tablesConvertedError) Unwrap() error        { return e.err }
+func (e *tablesConvertedError) Is(target error) bool { return target == ErrAllTablesConverted }
 
 // processTable converts a single table's mydumper files to Parquet.
 // Returns the number of rows written.
