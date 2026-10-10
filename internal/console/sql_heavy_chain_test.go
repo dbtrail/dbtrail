@@ -50,6 +50,14 @@ func TestSQLChainTooHeavy(t *testing.T) {
 		return 0, fs.ErrNotExist
 	}
 	legacy := views.BaselineTable{Schema: "shop", Table: "old", Path: "/snap/shop/old.parquet", Delta: true, DeltaLegacy: true}
+	// A table whose chain the daemon already merged into one pair beside
+	// the snapshots (#2231): a statement reads it through that pair, with no
+	// join over the chain, so the chain's weight is not what it holds.
+	resolved := func(t views.BaselineTable) views.BaselineTable {
+		t.DeltaResolved = &baseline.TableDeltaFile{Posdel: "/snap/.resolved/x.posdel", Upserts: "/snap/.resolved/x.upserts"}
+		return t
+	}
+	sizes["/snap/.resolved/x.upserts"] = 900
 	cases := []struct {
 		name   string
 		tables []views.BaselineTable
@@ -64,6 +72,10 @@ func TestSQLChainTooHeavy(t *testing.T) {
 		{"a table with nothing waiting beside a heavy one is not counted",
 			[]views.BaselineTable{chainTable("shop", "gone", 0), chainTable("shop", "big", 0), chainTable("shop", "plain")}, sqlHeavyChain{"shop.big", 101, 101, 1}},
 		{"a v0.83.0 pair", []views.BaselineTable{legacy}, sqlHeavyChain{"shop.old", 500, 500, 1}},
+		{"a heavy chain read through its resolved pair is not counted (#2239)",
+			[]views.BaselineTable{resolved(chainTable("shop", "big", 0))}, sqlHeavyChain{}},
+		{"nor beside tables that are: those are weighed as before",
+			[]views.BaselineTable{resolved(chainTable("shop", "big", 0)), chainTable("shop", "b", 0), chainTable("shop", "a", 0, 1)}, sqlHeavyChain{"shop.a", 100, 161, 2}},
 		{"a file that is gone counts as nothing", []views.BaselineTable{chainTable("shop", "gone", 0, 1)}, sqlHeavyChain{}},
 		{"a file that cannot be read counts as nothing", []views.BaselineTable{chainTable("shop", "denied", 0)}, sqlHeavyChain{}},
 		{"a copy on S3 is not this check's", []views.BaselineTable{{Schema: "shop", Table: "s", Path: "s3://b/shop/s.parquet", Delta: true, DeltaLegacy: true}}, sqlHeavyChain{}},

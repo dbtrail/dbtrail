@@ -410,6 +410,11 @@ func (s *Server) handleSQLInfo(w http.ResponseWriter, r *http.Request) {
 		notes = append(notes, sqlEventsLookupFailedNote)
 	}
 	memory, _ := s.sqlMemoryNow()
+	// The list says what a statement would weigh, so its tables are marked
+	// as a statement's are (buildViewsInput marks them for ForStatement
+	// only): one read through its resolved pair is not listed. Nothing
+	// below generates a view from this input.
+	views.MarkResolvedTableDeltas(in.Baselines)
 	resp := sqlInfoResponse{Views: names, Notes: notes, Unmerged: sqlUnmergedByView(in, sqlChainLimit(memory), sqlFileSize), Limits: sqlLimitsDTO{
 		TimeoutSeconds: int(s.sqlLimits.Timeout / time.Second),
 		MaxRows:        s.sqlLimits.MaxRows,
@@ -663,6 +668,18 @@ func sqlChainTooHeavy(tables []views.BaselineTable, limit int64, size func(strin
 // nothing; the first that cannot be read is returned beside the sum.
 func sqlTableUnmergedBytes(t views.BaselineTable, size func(string) (int64, error)) (sum int64, unread error) {
 	if !t.Delta || strings.Contains(t.Path, "://") {
+		return 0, nil
+	}
+	// A table marked with its resolved pair (#2231) is read through that
+	// pair: no join over the chain, which is what this weight stands for.
+	// Measured (#2239) on a table of 20 M rows with 283 MB and with 661 MB
+	// of changes waiting, DuckDB 1.4.5, 2 threads, a 2 GB limit, each
+	// statement in its own process: through the pair a sum, a lookup and a
+	// GROUP BY peaked at 78, 80 and 156 MB of process memory at both sizes,
+	// where through the chain they took 578, 303 and 584 MB at the first and
+	// 1333, 587 and 1213 MB at the second. So such a table weighs nothing
+	// here, whatever its chain holds.
+	if t.DeltaResolved != nil {
 		return 0, nil
 	}
 	for _, f := range t.DeltaUpsertsFiles() {
