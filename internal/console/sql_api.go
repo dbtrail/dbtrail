@@ -540,7 +540,9 @@ var sqlMaxChainBytes int64 = 384 << 20
 // table's changes under: it ends a chain at half of it (#2210, scaled like
 // the line above), so a statement reads a short chain and the newest copy
 // answers. It is the old 48 MiB line, kept for that: raising the refusal
-// line does not make tables wait longer to be merged.
+// line does not make tables wait longer to be merged. A table read through
+// its resolved pair is not held to it (#2261): its chain is ended by its
+// share of the table, and at half of sqlMaxChainBytes at the latest.
 var sqlFoldChainBytes int64 = 48 << 20
 
 // sqlChainLimit is sqlMaxChainBytes scaled to the worker's memory (#2210,

@@ -2318,12 +2318,15 @@ func autoServerID(ctx context.Context, w io.Writer) (uint32, error) {
 }
 
 // wireSQLChainLine hands the refresh the console's live fold line (#2210,
-// console.Server.SQLFoldLine), so a table's chain ends at half of it. Both
+// console.Server.SQLFoldLine), so a table's chain ends at half of it, and
+// its refusal line (console.Server.SQLChainLimit), half of which is where
+// the chain of a table read through its resolved pair ends (#2261). Both
 // watch entry points call it right after the console exists, before either
 // starts serving.
 func wireSQLChainLine(sup *baselineSupervisor, srv *console.Server) {
 	if sup != nil && srv != nil {
-		line := srv.SQLFoldLine
+		line, limit := srv.SQLFoldLine, srv.SQLChainLimit
 		sup.sqlChainLine.Store(&line)
+		sup.sqlChainLimit.Store(&limit)
 	}
 }

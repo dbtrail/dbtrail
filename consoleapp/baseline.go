@@ -92,6 +92,11 @@ type baselineSupervisor struct {
 	// supervisor without a console, as in most tests). Atomic: watch starts
 	// the refresh loop before the console exists and sets it after.
 	sqlChainLine atomic.Pointer[func() int64]
+	// sqlChainLimit is the console's live refusal line: the size of changes
+	// past which SQL on the copy answers from an earlier copy. A refresh ends
+	// at half of it the chain of a table read through its resolved pair
+	// (#2261). Unset: such a table keeps sqlChainLine's rule.
+	sqlChainLimit atomic.Pointer[func() int64]
 
 	mu   sync.Mutex
 	jobs map[string]*console.BaselineStatus

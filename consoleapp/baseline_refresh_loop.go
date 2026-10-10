@@ -67,6 +67,12 @@ type refreshRequest struct {
 	// MaxChainUpserts is reconstruct.FullTableConfig.MaxChainUpserts for this
 	// cycle: half the console's fold line, read live (#2210).
 	MaxChainUpserts int64
+	// MaxResolvedChainUpserts is FullTableConfig.MaxResolvedChainUpserts for
+	// this cycle: half the console's refusal line, read live (#2261).
+	MaxResolvedChainUpserts int64
+	// ChainResolved is FullTableConfig.ChainResolved for this cycle
+	// (baselineSupervisor.chainResolved).
+	ChainResolved func(string, *baseline.TableDeltaChain) bool
 	// SourceDSN, Schemas and SourcePostgres are the server's source and its
 	// snapshot scope, which the update asks for the tables created after
 	// the snapshot it starts from (#1993, checkNewTables). Empty SourceDSN:
@@ -272,6 +278,10 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		req.ChainStartFloor = s.chainStartFloor(req, at, interval)
 		if line := s.sqlChainLine.Load(); line != nil {
 			req.MaxChainUpserts = (*line)() / 2
+		}
+		if limit := s.sqlChainLimit.Load(); limit != nil {
+			req.MaxResolvedChainUpserts = (*limit)() / 2
+			req.ChainResolved = s.chainResolved(req)
 		}
 	}
 
@@ -1656,19 +1666,21 @@ func refreshFoldConfig(req refreshRequest, at time.Time, tableList []string) rec
 		// directory, unchecked, as before.
 		DownloadDir: req.StagedRun,
 		// Only where the run's upload takes the copies: see refreshRequest.s3Copies.
-		S3CopyUnchangedTo:     s3CopyDestination(req),
-		OutputFormat:          reconstruct.OutputFormatParquet,
-		CarryForwardUnchanged: req.CarryForwardUnchanged,
-		TableDeltas:           req.TableDeltas,
-		ChainStartFloor:       req.ChainStartFloor,
-		MaxChainUpserts:       req.MaxChainUpserts,
-		CompactDir:            compactDirFor(req.BaselineDir),
-		Parallelism:           daemonFoldParallelism,
-		WarnEventThreshold:    daemonFoldWarnEventThreshold,
-		MaxTouchedRows:        daemonFoldMaxTouchedRows,
-		MaxChangeBytes:        daemonFoldMaxChangeBytes,
-		RemediationHint:       daemonFoldRemediation,
-		SpaceCheck:            newDiskSpaceCheck(),
+		S3CopyUnchangedTo:       s3CopyDestination(req),
+		OutputFormat:            reconstruct.OutputFormatParquet,
+		CarryForwardUnchanged:   req.CarryForwardUnchanged,
+		TableDeltas:             req.TableDeltas,
+		ChainStartFloor:         req.ChainStartFloor,
+		MaxChainUpserts:         req.MaxChainUpserts,
+		MaxResolvedChainUpserts: req.MaxResolvedChainUpserts,
+		ChainResolved:           req.ChainResolved,
+		CompactDir:              compactDirFor(req.BaselineDir),
+		Parallelism:             daemonFoldParallelism,
+		WarnEventThreshold:      daemonFoldWarnEventThreshold,
+		MaxTouchedRows:          daemonFoldMaxTouchedRows,
+		MaxChangeBytes:          daemonFoldMaxChangeBytes,
+		RemediationHint:         daemonFoldRemediation,
+		SpaceCheck:              newDiskSpaceCheck(),
 		// AllowGaps stays FALSE. An unattended job must never publish a
 		// knowingly-incomplete baseline: accepting a permanent capture loss is a
 		// decision with consequences for every future reconstruct, and nobody is

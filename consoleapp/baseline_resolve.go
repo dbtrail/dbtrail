@@ -29,8 +29,9 @@ import (
 // waits for it or skips because of it. Taking no slot, it can run beside the
 // next refresh, each with its own DuckDB session and budget; it and a
 // compaction of the same server, which merges nearly the same files, stand
-// aside for each other (TriggerCompact), and the refresh after writes the
-// pairs or starts the compaction. A table that cannot be
+// aside for each other (TriggerCompact): a compaction writes the pairs when
+// it ends (#2261), and a compaction that found the pairs being written is
+// started by the refresh after. A table that cannot be
 // merged is a line in the log and is read the slower way; it is tried again
 // after resolveRetryEvery, not at every refresh.
 
@@ -133,6 +134,43 @@ func (s *baselineSupervisor) maybeResolve(req refreshRequest) {
 			return
 		}
 		done = newest
+	}
+}
+
+// chainResolved is FullTableConfig.ChainResolved for req's refresh (#2261):
+// whether a table's chain is read through its resolved pair, so the refresh
+// lets it grow to a share of the table. Nil where maybeResolve writes no
+// pair: no local snapshot folder, a folder another server writes too. The
+// caller asks only with table deltas on (the supervisor's own setting: a
+// request handed straight to runRefresh does not carry it).
+//
+// A table counts when the pair of the chain asked about is there and
+// current, or when a pass is writing this folder's pairs right now: a
+// refresh that starts seconds after the one before it ended (that one
+// outran its slot) folds while the pass is still on its way to this table,
+// and reading that as "no pair" would write the table in full for it. A
+// pass that then fails for the table leaves no pair, and the refresh after
+// puts the table back on the ordinary line.
+func (s *baselineSupervisor) chainResolved(req refreshRequest) func(string, *baseline.TableDeltaChain) bool {
+	if req.BaselineDir == "" || strings.HasPrefix(req.BaselineDir, "s3://") {
+		return nil
+	}
+	if s.reg != nil {
+		if e, ok := s.reg.Get(req.ServerID); ok && s.reg.WriteRefusal(e) != nil {
+			return nil
+		}
+	}
+	folder := resolveFolder(req.BaselineDir)
+	return func(basePath string, chain *baseline.TableDeltaChain) bool {
+		if chain == nil || chain.Legacy || len(chain.Files) < 2 {
+			return false // no pair is written for such a chain
+		}
+		if resolvedCurrent(basePath, chain) {
+			return true
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.resolving[folder]
 	}
 }
 
