@@ -302,33 +302,33 @@ func isUnknownPartition(err error) bool {
 // at all, the search runs unbounded, which is slower and always complete. An
 // empty clause (an unpartitioned table) runs unbounded without a warning:
 // there is nothing to bound by and no layout to confirm.
-func firstEventPast(ctx context.Context, db *sql.DB, at time.Time) (*query.BinlogPos, error) {
+func firstEventPast(ctx context.Context, db *sql.DB, at time.Time, floor uint64) (*query.BinlogPos, uint64, error) {
 	atStamp := at.UTC().Format(time.RFC3339)
 	bound, err := listCutBound(ctx, db, at)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		slog.Warn("resolve snapshot cut: cannot bound the search to partitions; searching the whole table",
 			"at", atStamp, "error", err)
 		bound = nil
 	}
 	for attempt := 1; ; attempt++ {
-		cut, err := firstEventPastIn(ctx, db, at, bound.clause())
+		cut, id, err := firstEventPastIn(ctx, db, at, bound.clause(), floor)
 		// A partition the clause named was dropped between the listing and
 		// the search. The layout moved and this attempt saw nothing; it is
 		// retried below like any other move, never accepted.
 		moved := err != nil && bound.clause() != "" && isUnknownPartition(err)
 		if err != nil && !moved {
-			return nil, err
+			return nil, 0, err
 		}
 		if bound.clause() == "" {
-			return cut, nil
+			return cut, id, nil
 		}
 		again, err := listCutBound(ctx, db, at)
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			slog.Warn("resolve snapshot cut: cannot confirm the partition layout after a bounded search; searching the whole table",
 				"at", atStamp, "error", err)
@@ -336,7 +336,7 @@ func firstEventPast(ctx context.Context, db *sql.DB, at time.Time) (*query.Binlo
 			continue
 		}
 		if !moved && slices.Equal(again.partitions(), bound.partitions()) {
-			return cut, nil
+			return cut, id, nil
 		}
 		if attempt >= maxCutBoundAttempts {
 			slog.Warn("resolve snapshot cut: the bounded search could not be confirmed after repeated attempts; searching the whole table",
@@ -355,30 +355,40 @@ func firstEventPast(ctx context.Context, db *sql.DB, at time.Time) (*query.Binlo
 // skipped here and by the newest-event statement alike; they are also not
 // events the position predicates could ever admit, so skipping them changes
 // no window.
-func firstEventPastSQL(at time.Time, partClause string) string {
+//
+// floor, when not zero, is an event_id below which no event can be past at
+// (cutFloor); the walk then starts there instead of at the first row of the
+// oldest partition named. It is written into the statement, like the
+// TO_SECONDS bound: a number this package worked out, never a caller's text.
+func firstEventPastSQL(at time.Time, partClause string, floor uint64) string {
+	from := ""
+	if floor > 0 {
+		from = fmt.Sprintf(" AND event_id >= %d", floor)
+	}
 	return fmt.Sprintf(
-		`SELECT binlog_file, start_pos FROM binlog_events%s
+		`SELECT binlog_file, start_pos, event_id FROM binlog_events%s
 		  WHERE TO_SECONDS(event_timestamp) >= %d
-		    AND event_timestamp > ?
+		    AND event_timestamp > ?%s
 		    AND binlog_file IS NOT NULL AND start_pos IS NOT NULL
-		  ORDER BY event_id ASC LIMIT 1`, partClause, toSeconds(at.Truncate(time.Hour)))
+		  ORDER BY event_id ASC LIMIT 1`, partClause, toSeconds(at.Truncate(time.Hour)), from)
 }
 
 // firstEventPastIn is one bounded (or, with an empty clause, unbounded)
 // search for the first event past at. nil, nil means none was found.
-func firstEventPastIn(ctx context.Context, db *sql.DB, at time.Time, partClause string) (*query.BinlogPos, error) {
+// id is the event_id of the event the cut is the start of.
+func firstEventPastIn(ctx context.Context, db *sql.DB, at time.Time, partClause string, floor uint64) (cut *query.BinlogPos, id uint64, err error) {
 	var (
 		file string
 		pos  uint64
 	)
-	err := db.QueryRowContext(ctx, firstEventPastSQL(at, partClause), at).Scan(&file, &pos)
+	err = db.QueryRowContext(ctx, firstEventPastSQL(at, partClause, floor), at).Scan(&file, &pos, &id)
 	switch {
 	case err == nil:
-		return &query.BinlogPos{File: file, Pos: pos}, nil
+		return &query.BinlogPos{File: file, Pos: pos}, id, nil
 	case errors.Is(err, sql.ErrNoRows):
-		return nil, nil
+		return nil, 0, nil
 	default:
-		return nil, fmt.Errorf("resolve snapshot cut (first event past %s): %w",
+		return nil, 0, fmt.Errorf("resolve snapshot cut (first event past %s): %w",
 			at.UTC().Format(time.RFC3339), err)
 	}
 }
@@ -393,36 +403,57 @@ func resolveSnapshotCutOnce(ctx context.Context, db *sql.DB, at time.Time) (*que
 	// on ResolveSnapshotCut. Swapping these two back reopens #1695.
 	newest, err := newestIndexedEvent(ctx, db)
 	if err != nil || newest == nil {
-		return newest, err
+		return nil, err
 	}
 	afterNewestEventForTest()
-	cut, err := firstEventPast(ctx, db, at)
+	floor := cutFloors.floorFor(ctx, db, newest.index, at)
+	cut, cutID, err := firstEventPast(ctx, db, at, floor)
 	if err != nil {
 		return nil, err
 	}
+	// What this search established, for the next one: every event below the
+	// one found is not past at; with none found, every event up to the
+	// newest one read above.
+	next := newest.id + 1
+	if cut != nil {
+		next = cutID
+	}
+	cutFloors.remember(newest.index, at, next, newest)
 	if cut != nil {
 		return cut, nil
 	}
 	// Nothing indexed past at, up to and including the newest event read above:
 	// fold everything, and resume after that event.
-	return newest, nil
+	return &query.BinlogPos{File: newest.file, Pos: newest.end}, nil
 }
 
-// newestIndexedEvent returns the end coordinate of the newest indexed event
-// that carries one. nil, nil means the index is empty; ErrNoIndexedCoordinates
+// newestEvent is the newest indexed event that carries a coordinate, as
+// newestIndexedEvent reads it: its id, where it ends, and which index it was
+// read from (the server and database the connection is on).
+type newestEvent struct {
+	id    uint64
+	file  string
+	end   uint64
+	index string
+}
+
+// newestIndexedEvent returns the newest indexed event that carries a
+// coordinate. nil, nil means the index is empty; ErrNoIndexedCoordinates
 // means it holds events but none with a coordinate.
-func newestIndexedEvent(ctx context.Context, db *sql.DB) (*query.BinlogPos, error) {
-	var (
-		file string
-		pos  uint64
-	)
+func newestIndexedEvent(ctx context.Context, db *sql.DB) (*newestEvent, error) {
+	var e newestEvent
+	var uuid, dbName sql.NullString
 	err := db.QueryRowContext(ctx,
-		`SELECT binlog_file, end_pos FROM binlog_events
+		`SELECT binlog_file, end_pos, event_id, @@server_uuid, DATABASE() FROM binlog_events
 		  WHERE binlog_file IS NOT NULL AND end_pos IS NOT NULL
-		  ORDER BY event_id DESC LIMIT 1`).Scan(&file, &pos)
+		  ORDER BY event_id DESC LIMIT 1`).Scan(&e.file, &e.end, &e.id, &uuid, &dbName)
 	switch {
 	case err == nil:
-		return &query.BinlogPos{File: file, Pos: pos}, nil
+		// An index this cannot name gets no floor: "" is never remembered.
+		if uuid.Valid && uuid.String != "" && dbName.Valid && dbName.String != "" {
+			e.index = uuid.String + "/" + dbName.String
+		}
+		return &e, nil
 	case errors.Is(err, sql.ErrNoRows):
 		// Either the index is empty, or every row lacks a coordinate. Distinguish
 		// them: an empty index is a legitimate "nothing to fold", while an index

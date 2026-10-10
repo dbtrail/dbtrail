@@ -195,19 +195,24 @@ func TestListCutBound(t *testing.T) {
 }
 
 func cutRows(file string, pos uint64) *sqlmock.Rows {
-	return sqlmock.NewRows([]string{"binlog_file", "start_pos"}).AddRow(file, pos)
+	return sqlmock.NewRows([]string{"binlog_file", "start_pos", "event_id"}).AddRow(file, pos, 7)
 }
 
-func noCutRows() *sqlmock.Rows { return sqlmock.NewRows([]string{"binlog_file", "start_pos"}) }
+func noCutRows() *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"binlog_file", "start_pos", "event_id"})
+}
 
 // expectNewest expects the newest-event read, which ResolveSnapshotCut runs
 // FIRST since #1695, before any partition listing or search. sqlmock matches in
 // order, so every test built on it also pins that order.
 func expectNewest(mock sqlmock.Sqlmock) { expectNewestAt(mock, "mysql-bin.000203", 99999999) }
 
+// The index names itself as nothing here (NULL server and database), so no
+// floor is remembered between these tests (#2269): each pins the statements
+// of a FIRST search. The floor has its own tests, against a real index.
 func expectNewestAt(mock sqlmock.Sqlmock, file string, pos uint64) {
 	mock.ExpectQuery(`ORDER BY event_id DESC LIMIT 1`).
-		WillReturnRows(sqlmock.NewRows([]string{"binlog_file", "end_pos"}).AddRow(file, pos))
+		WillReturnRows(sqlmock.NewRows([]string{"binlog_file", "end_pos", "event_id", "uuid", "db"}).AddRow(file, pos, 9, nil, nil))
 }
 
 // The first query must carry the bound, and the layout must be confirmed
