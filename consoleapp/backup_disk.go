@@ -94,18 +94,18 @@ func dumpDiskOnceItFit(check, note string) (string, string) {
 	return check, note
 }
 
-// The peak below was measured with the whole dump on disk until the last table
+// dumpPeakTenths is the dump-plus-Parquet peak as tenths of the estimate:
+// 18 = 1.8x, the highest ratio the #1938 measurement saw against
+// DATA_LENGTH + INDEX_LENGTH (random binary: 94 MiB dump + 84 MiB Parquet
+// over 99 MiB).
+//
+// It was measured with the whole dump on disk until the last table
 // was converted. Since #1938 each table's dump data is removed when its Parquet
 // file is written (baseline.Config.RemoveConvertedData), so the real peak is
 // at most what it was and usually lower: how much lower depends on how many
 // tables there are next to the CPUs converting them, and on whether one table
 // dominates. The constant is deliberately left as it was until that is
 // measured (#2256): it warns too early, never too late.
-//
-// dumpPeakTenths is the dump-plus-Parquet peak as tenths of the estimate:
-// 18 = 1.8x, the highest ratio the #1938 measurement saw against
-// DATA_LENGTH + INDEX_LENGTH (random binary: 94 MiB dump + 84 MiB Parquet
-// over 99 MiB).
 const dumpPeakTenths = 18
 
 // dumpRefuseTenths is the refusal line as tenths of the tables' DATA size:
