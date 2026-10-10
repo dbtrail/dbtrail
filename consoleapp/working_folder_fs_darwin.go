@@ -2,8 +2,8 @@ package consoleapp
 
 import "syscall"
 
-var networkFSNames = map[string]bool{"nfs": true, "smbfs": true, "afpfs": true, "webdav": true}
-
+// fsKind classifies the filesystem holding path, with the job journal's own
+// list of network filesystems (networkFSName).
 func fsKind(path string) (fsClass, string, error) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(path, &st); err != nil {
@@ -17,7 +17,7 @@ func fsKind(path string) (fsClass, string, error) {
 		b = append(b, byte(c))
 	}
 	kind := string(b)
-	if networkFSNames[kind] {
+	if networkFSName(kind) {
 		return fsNetwork, kind, nil
 	}
 	return fsLocal, kind, nil

@@ -2,33 +2,26 @@ package consoleapp
 
 import "syscall"
 
-// networkFSMagic are the statfs types (include/uapi/linux/magic.h) of
-// filesystems that are not a disk of this host. FUSE is in the list although
-// some FUSE mounts are local: what it fronts cannot be told from here, and
-// staying in the temp folder is what every install did before.
-var networkFSMagic = map[uint32]string{
-	0x6969:     "nfs",
-	0xFF534D42: "cifs",
-	0xFE534D42: "smb2",
-	0x517B:     "smb",
-	0x00C36400: "ceph",
-	0x01021997: "9p",
-	0x65735546: "fuse",
-}
-
-// memoryFSMagic are the filesystems whose files are held in RAM.
-var memoryFSMagic = map[uint32]string{
+// memoryFSMagic are the statfs types (include/uapi/linux/magic.h) of the
+// filesystems whose files are held in RAM.
+var memoryFSMagic = map[int64]string{
 	0x01021994: "tmpfs",
 	0x858458F6: "ramfs",
 }
 
+// fsKind classifies the filesystem holding path. Network storage is what the
+// job journal already calls network storage (networkFSMagic): one list, so
+// the two cannot disagree about a mount.
 func fsKind(path string) (fsClass, string, error) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(path, &st); err != nil {
 		return fsLocal, "", err
 	}
-	magic := uint32(st.Type) //nolint:unconvert // the field's type differs per architecture
-	if kind, ok := networkFSMagic[magic]; ok {
+	// Through uint32: the field is signed and 32 bits wide on some
+	// architectures, where a magic above 0x7FFFFFFF (cifs, smb2, ramfs)
+	// would otherwise widen to a negative number and match nothing.
+	magic := int64(uint32(st.Type)) //nolint:unconvert // the field's type differs per architecture
+	if kind, ok := networkFSMagic(magic); ok {
 		return fsNetwork, kind, nil
 	}
 	if kind, ok := memoryFSMagic[magic]; ok {
