@@ -230,3 +230,37 @@ func TestRun_aWorkerGoneBeforeTheMoveIsNotReplaced(t *testing.T) {
 		t.Errorf("FenceState = false, %q; the cgroup was not what failed", why)
 	}
 }
+
+// A worker started ahead of its statement (#2236) does not know the
+// statement's memory yet: it waits under the Runner's default ceiling, and
+// gets the statement's own when the job is handed over.
+func TestRun_aWorkerStartedAheadGetsItsStatementsCeiling(t *testing.T) {
+	fakeFence(t, "oom_kill 0\n")
+	f := newCopyFixture(t)
+	r := newTestRunner(t, testLimits())
+	w, err := r.startWorker(r.limits.MemoryLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, _ := fenceBytes(r.limits.MemoryLimit)
+	if len(startedIn) != 1 || startedIn[0].ceiling != fmt.Sprint(waiting) {
+		t.Fatalf("worker moves = %+v, want one under the default ceiling %d", startedIn, waiting)
+	}
+	limits := testLimits()
+	limits.MemoryLimit = "512MiB"
+	var atHandover string
+	r.onStart = func(int) {
+		b, _ := os.ReadFile(filepath.Join(startedIn[0].dir, "memory.max"))
+		atHandover = string(b)
+	}
+	res, err := handover(t, r, w, f.job("SELECT 1"), limits)
+	if err != nil || len(res.Rows) != 1 {
+		t.Fatalf("res = %v, err = %v", res.Rows, err)
+	}
+	if want, _ := fenceBytes("512MiB"); atHandover != fmt.Sprint(want) {
+		t.Errorf("memory.max when the job was handed over = %q, want %d", atHandover, want)
+	}
+	if fenced, why := r.FenceState(); !fenced {
+		t.Errorf("FenceState = false, %q", why)
+	}
+}

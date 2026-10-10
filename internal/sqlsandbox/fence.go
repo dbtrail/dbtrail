@@ -155,6 +155,20 @@ var intoFence = func(wf *workerFence, pid int) error { return wf.take(pid) }
 // workerFence is one worker's cgroup.
 type workerFence struct{ dir string }
 
+func (w *workerFence) setCeiling(limit int64) error {
+	return writeCgroupFile(filepath.Join(w.dir, "memory.max"), strconv.FormatInt(limit, 10))
+}
+
+// resize sets the ceiling for a worker with memoryLimit, for a cgroup made
+// before its statement was known.
+func (w *workerFence) resize(memoryLimit string) error {
+	limit, err := fenceBytes(memoryLimit)
+	if err != nil {
+		return err
+	}
+	return w.setCeiling(limit)
+}
+
 // take moves the process pid, with all its threads, into the cgroup. The
 // worker is moved after it starts and before it is given its job: it is
 // idle until then, so no statement ever runs outside the ceiling. Starting
@@ -181,7 +195,7 @@ func (f fence) make(memoryLimit string) (*workerFence, error) {
 		return nil, fmt.Errorf("make a cgroup for the statement: %w", err)
 	}
 	wf := &workerFence{dir: dir}
-	if err := writeCgroupFile(filepath.Join(dir, "memory.max"), strconv.FormatInt(limit, 10)); err != nil {
+	if err := wf.setCeiling(limit); err != nil {
 		wf.close()
 		return nil, fmt.Errorf("set the statement's memory ceiling: %w", err)
 	}

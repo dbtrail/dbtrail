@@ -1299,6 +1299,15 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 	// wrote receives the result of writing the job, once.
 	wrote := make(chan error, 1)
 
+	if w.fence != nil {
+		// The ceiling for THIS statement's memory: a worker started ahead of
+		// it (#2236) has waited under the default. A cgroup that is gone is
+		// a worker that died, which its exit reports below.
+		if err := w.fence.resize(limits.MemoryLimit); err != nil && !errors.Is(err, os.ErrNotExist) {
+			r.noteFence(fmt.Errorf("set the statement's memory ceiling: %w", err))
+		}
+	}
+
 	pid := w.cmd.Process.Pid
 	if r.onStart != nil {
 		r.onStart(pid)
@@ -1516,7 +1525,9 @@ func (r *Runner) addStandby() bool {
 	if !want {
 		return false
 	}
-	w, err := r.startWorker()
+	// A standby does not know its statement: it waits under the default
+	// ceiling and gets the statement's own at the handover (run).
+	w, err := r.startWorker(r.limits.MemoryLimit)
 	if err != nil {
 		// Not a failed statement: the next one starts its own worker, and
 		// that start reports the error if it is still there.
