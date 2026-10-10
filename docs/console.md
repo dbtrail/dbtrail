@@ -274,8 +274,10 @@ and searching events:
    any moment**, which folds a chosen instant into a mydumper-format dump
    downloaded as one `.tar.gz` — load it with `myloader`, nothing from
    bintrail needed on the restore side; the build is a full plaintext copy
-   of every row, staged on the daemon's disk under the system temp
-   directory unless `BINTRAIL_CONSOLE_BASELINE_STAGING` says otherwise). Its
+   of every row, staged on the daemon's disk in the working folder, which
+   is beside DBTrail's own data unless `BINTRAIL_CONSOLE_BASELINE_STAGING`
+   or the backup settings say otherwise; [capacity.md](./capacity.md) has
+   the cases where it stays under the system temp folder). Its
    **Checks** section (`watch` only) runs
    `bintrail verify` and shows past runs, and **Where and how often** holds
    every setting that shapes a backup. The first two produce and validate the
@@ -1369,9 +1371,13 @@ one release and warns that it no longer does anything. Remove it.
   [settings that need a restart](https://www.dbtrail.com/docs/settings/backups#set-at-startup).
 - `BINTRAIL_CONSOLE_BASELINE_STAGING` (`watch` only) — the working folder
   (the **Working folder** row in the web interface's backup settings): where
-  full reads, S3-only updates and `.sql` builds write their temporary files
-  (default a subfolder of the system temp folder). Sizing is in
-  [capacity.md](./capacity.md).
+  full reads, S3-only updates and `.sql` builds write their temporary files.
+  With nothing set it is `baseline-staging` in the folder that holds the
+  servers file, beside DBTrail's own data; it stays under the system temp
+  folder when that data is on network storage or in memory, or the folder
+  cannot be written, and the backup settings then say so, with a warning when that
+  folder is memory. Sizing, and the full rule,
+  are in [capacity.md](./capacity.md).
 - `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (`watch` only) — empty (default:
   automatic), `ftwrl`, `lock-all`, `safe-no-lock` or `no-lock`. Selects how
   mydumper synchronizes its worker threads onto one instant for console

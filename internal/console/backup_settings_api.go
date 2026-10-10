@@ -40,11 +40,20 @@ type BackupSettingsDefaults struct {
 	// LockModeErr: the env value was rejected, so LockMode holds the
 	// fallback default, which is NOT in force — MySQL dumps are refused
 	// while it stands. The page must show the rejection, not the fallback.
-	LockModeErr    string
-	TriggerOn      bool   // BINTRAIL_CONSOLE_BASELINE_TRIGGER
-	StagingDir     string // BINTRAIL_CONSOLE_BASELINE_STAGING
-	VerifyInterval string // --verify-interval
-	VerifyTables   string // --verify-tables
+	LockModeErr string
+	TriggerOn   bool   // BINTRAIL_CONSOLE_BASELINE_TRIGGER
+	StagingDir  string // BINTRAIL_CONSOLE_BASELINE_STAGING
+	// StagingDirDefault is the working folder this daemon uses when none is
+	// set (#2255), and StagingDirDefaultWhy why that is the system temp
+	// folder when it is. The default is worked out from the host (the disk
+	// DBTrail's data is on), so only the process can name it; the page shows
+	// it in place of a value. Empty on `serve`, which stages nothing.
+	StagingDirDefault    string
+	StagingDirDefaultWhy string
+	// StagingDirDefaultInMemory: that default is held in RAM on this host.
+	StagingDirDefaultInMemory bool
+	VerifyInterval            string // --verify-interval
+	VerifyTables              string // --verify-tables
 	// Live names the keys THIS process applies without a restart, because
 	// only the process knows: liveness is a property of how the daemon reads
 	// the value (a provider consulted per job) and not of the setting. The
@@ -88,6 +97,14 @@ type backupSettingRow struct {
 	// page rendered the fallback default on the one row whose real state is
 	// "your value was rejected", which is the opposite of provenance.
 	Err string `json:"err,omitempty"`
+	// Default is what is in force when the row has no value, for the one row
+	// whose default depends on the host (the working folder, #2255).
+	// DefaultNote says why that default is not the usual one.
+	// DefaultInMemory: the default is held in RAM on this host, which is the
+	// case the page warns about.
+	Default         string `json:"default,omitempty"`
+	DefaultNote     string `json:"default_note,omitempty"`
+	DefaultInMemory bool   `json:"default_in_memory,omitempty"`
 }
 
 // backupSettingsServerDTO is one server's backup configuration: the registry
@@ -274,6 +291,10 @@ func (s *Server) handleBackupSettingsGet(w http.ResponseWriter, r *http.Request)
 	}
 	// The lock-mode rejection rides on whichever row ended up carrying it.
 	for i := range dto.Daemon {
+		if dto.Daemon[i].Key == BackupSettingStagingDir {
+			dto.Daemon[i].Default, dto.Daemon[i].DefaultNote = d.StagingDirDefault, d.StagingDirDefaultWhy
+			dto.Daemon[i].DefaultInMemory = d.StagingDirDefaultInMemory
+		}
 		if dto.Daemon[i].Key == BackupSettingLockMode && dto.Daemon[i].Source != backupSettingSaved {
 			dto.Daemon[i].Err = lockModeRowErr(d.LockModeErr)
 		}
