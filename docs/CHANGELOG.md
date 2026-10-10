@@ -59,12 +59,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   just under 524,288, 1,048,576 or 2,097,152 of them a statement took twice
   what it took just over. They are now left out through one small mask per
   64 rows of the file, whose cost barely moves. On a table of 20 million
-  rows, with 2 threads, a sum over the whole table took 214 ms to 823 ms
-  before, depending on that number, and takes 247 ms to 348 ms now, with the
-  same rows returned. With fewer than about 4,000 replaced rows (a table
-  just written in full) the same statement is some 35 ms slower than before;
-  a lookup of one row is not. Measured on one machine with replaced rows
-  picked at random. SQL on the copy and the MySQL port get this with the
+  rows, with 2 threads, a sum over the whole table took 214 ms to 865 ms
+  before, depending on that number, and takes 241 ms to 345 ms now, with the
+  same rows returned; when the replaced rows sit together in the file,
+  237 ms to 332 ms. With fewer than about 4,000
+  replaced rows (a table just written in full) the same statement is some
+  30 ms slower than before; a lookup of one row is not. Measured on one
+  machine that was capturing nothing. SQL on the copy and the MySQL port get this with the
   upgrade; a views file, when it is generated again.
 
 ### Fixed

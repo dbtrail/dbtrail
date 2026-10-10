@@ -762,8 +762,10 @@ func posdelPositionsSQL(posdel string) string {
 
 // baseMinusDeadSQL selects the rows of the table file at base (a SQL
 // expression for its path) that dead does not list. dead is a SELECT of one
-// BIGINT column, the dead row numbers; a NULL or a number the file does not
-// have removes nothing (its block matches no row of the file), and a number
+// column of an integer type, the dead row numbers, as both writers of a
+// .posdel write them (BIGINT); a column of another type (a DOUBLE, a
+// DECIMAL) does not bind, where NOT IN compared it. A NULL, a negative
+// number or a number past the file's last row removes nothing, and a number
 // listed twice removes its row once.
 //
 // The dead rows are folded into one 64-bit mask per block of 64 row numbers,
@@ -777,15 +779,19 @@ func posdelPositionsSQL(posdel string) string {
 // accumulated. The masks number at most a 64th of the file's rows however
 // many are dead, so that table stops growing.
 //
-// Measured through TableDeltaOnePairStateSQL on DuckDB 1.4.5 (and the same
-// shape on 1.5.6) over a file of 20 M rows on one machine, 2 threads, a sum
-// of one column over the whole table, dead rows picked at random: 247 ms
-// with 1,000 dead rows, 341 ms with 4.2 M, where NOT IN took 214 ms and
-// 823 ms and went from 325 ms to 615 ms within one doubling of the list.
-// Under about 4,000 dead rows this form is the slower one, by some 35 ms on
-// that table; a lookup of one row costs the same either way up to a million
-// dead rows and less past that. Not measured: dead rows that cluster, as a
-// workload's do, and a host that is also capturing.
+// Measured through TableDeltaOnePairStateSQL on DuckDB 1.4.5 over a file of
+// 20 M rows on one machine, 2 threads, a sum of one column over the whole
+// table, from 1,000 dead rows to 4.2 M. Dead rows picked at random: 241 ms
+// to 345 ms, where NOT IN took 214 ms to 865 ms and went from 319 ms to
+// 608 ms within one doubling of the list. Dead rows that sit together (the
+// file's last rows, runs of 128, most of them in a twentieth of the file)
+// fill fewer masks: 237 ms to 332 ms, against 207 ms to 699 ms. Under about
+// 4,000 dead rows this form is the slower one whatever their layout, by some
+// 30 ms on that table; past that it loses only to the cheap side of each
+// doubling, with dead rows spread at random, by under 10 % (twice that on
+// DuckDB 1.5.6, which a downloaded views file runs on). A lookup of one row
+// costs the same either way up to a million dead rows and less past that.
+// Not measured: a host that is also capturing.
 //
 // Every name the statement adds starts with bintrail_ and is qualified, and
 // only the file's own columns are selected, so a table with a column of any
