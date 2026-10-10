@@ -5,8 +5,10 @@ package sqlsandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -20,10 +22,21 @@ func fakeFence(t *testing.T, events string) (parent string) {
 	_, parent = fakeCgroupTree(t, "memory\n", "memory\n")
 	prevFor, prevInto := fenceFor, intoFence
 	fenceFor = func() fence { return fence{root: parent} }
-	intoFence = func(*exec.Cmd, *workerFence) {}
+	startedIn = nil
+	intoFence = func(_ *exec.Cmd, wf *workerFence) {
+		// Read now: the cgroup is gone when the statement returns.
+		ceiling, _ := os.ReadFile(filepath.Join(wf.dir, "memory.max"))
+		startedIn = append(startedIn, fenceStart{dir: wf.dir, ceiling: string(ceiling)})
+	}
 	t.Cleanup(func() { fenceFor, intoFence = prevFor, prevInto })
 	return parent
 }
+
+// fenceStart is one worker start as fakeFence's stand-in saw it: the cgroup
+// the worker was to be started in and the ceiling it had at that moment.
+type fenceStart struct{ dir, ceiling string }
+
+var startedIn []fenceStart
 
 func fencesLeft(t *testing.T, parent string) []string {
 	t.Helper()
@@ -88,6 +101,12 @@ func TestRun_aFencedStatementAnswers(t *testing.T) {
 	}
 	if fenced, why := r.FenceState(); !fenced || why != "" {
 		t.Errorf("FenceState = %v, %q; want fenced", fenced, why)
+	}
+	// The worker was started into a cgroup of its own under the delegated
+	// one, with the ceiling its memory limit asks for already set.
+	want, _ := fenceBytes(testLimits().MemoryLimit)
+	if len(startedIn) != 1 || filepath.Dir(startedIn[0].dir) != parent || startedIn[0].ceiling != fmt.Sprint(want) {
+		t.Errorf("worker starts = %+v, want one, under %s, with memory.max %d", startedIn, parent, want)
 	}
 	if left := fencesLeft(t, parent); len(left) != 0 {
 		t.Errorf("cgroups left after the statement: %v", left)
