@@ -898,6 +898,9 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 		out.cleanup = func() { os.RemoveAll(outputDir) }
 	}
 
+	// ownSnapshot is the snapshot folder this run alone writes, "" when it
+	// cannot be said to be this run's.
+	ownSnapshot := ""
 	if !out.staged {
 		// The snapshot directory baseline.Run is about to create, journaled
 		// only when it is vacant now: one that already holds files is not
@@ -906,16 +909,54 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 		name := reconstruct.SnapshotDirName(dumpStartedAt)
 		if vacant, verr := reconstruct.SnapshotDirVacant(filepath.Join(outputDir, name)); verr == nil && vacant {
 			journalDir(req, outputDir, name)
+			ownSnapshot = name
 		}
 	}
 	stats, err := baseline.Run(s.ctx, s.dumpBaselineConfig(req, dumpDir, outputDir, dumpStartedAt, ddlMark, eventMark))
 	if err != nil {
 		out.cleanup()
-		return dumpOutcome{}, fmt.Errorf("convert: %w", err)
+		err = fmt.Errorf("convert: %w", err)
+		if ownSnapshot != "" {
+			if left := discardFailedSnapshot(outputDir, ownSnapshot, req.ServerID); left != "" {
+				err = fmt.Errorf("%w. %s", err, left)
+			}
+		}
+		return dumpOutcome{}, err
 	}
 	out.stats = stats
 	out.snapDir = filepath.Join(outputDir, reconstruct.SnapshotDirName(dumpStartedAt))
 	return out, nil
+}
+
+// discardFailedSnapshot removes the snapshot folder a full read created in the
+// server's own folder when its conversion failed (#1938), and returns a
+// sentence for the run's error only when the folder is still there and
+// holds nothing usable.
+//
+// It is what the next start does for a run that DIED (reclaimJobDir, #2180),
+// done now for a run that failed and lived: the job's journal is cleared when
+// the job ends, prune never touches an _INCOMPLETE folder and the sweep only
+// knows discards that were interrupted, so nothing else would ever remove it,
+// and a scheduled read failing on a full disk left one more on that disk at
+// every slot. The rules are the reclaim's own (reclaimSnapshotDir): a finished,
+// marked snapshot stays, and so does a folder with files and no marker, which
+// every reader takes as complete. The caller passes only a folder that was
+// vacant when the run started, so it never holds anyone else's files.
+func discardFailedSnapshot(root, name, serverID string) (left string) {
+	p := filepath.Join(root, name)
+	res := reclaimSnapshotDir(p, name)
+	switch {
+	case res.err != nil:
+		slog.Error("console snapshot: could not remove the snapshot folder of a full read whose conversion failed; "+
+			"it is marked incomplete, no listing shows it, and nothing will remove it later",
+			"server", serverID, "path", p, "error", res.err)
+		return fmt.Sprintf("The unfinished snapshot folder %s could not be removed (%s); it holds nothing usable and still takes room there",
+			p, firstLineOf(res.err.Error()))
+	case res.keptBecause != "":
+		slog.Warn("console snapshot: kept the snapshot folder of a full read whose conversion failed",
+			"server", serverID, "path", p, "reason", res.keptBecause)
+	}
+	return ""
 }
 
 // journalDir names a folder the run just created to its journal (#2180).
