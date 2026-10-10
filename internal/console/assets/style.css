@@ -1375,6 +1375,11 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .flow-ico { width: 22px; height: 22px; flex: none; display: inline-flex; color: var(--flow-ink); }
 .flow-ico svg { width: 22px; height: 22px; }
 .flow-ico-mysql { width: 34px; height: 22px; object-fit: contain; }
+/* the vendor's logo is dark blue and orange on transparent: drawn for a light
+   ground, and the mark is not ours to recolour. In dark it gets a white
+   plate instead; without it the dark-blue dolphin and letters sink into
+   the box (#1969). */
+[data-theme="dark"] .flow-ico-mysql { background: var(--white); border-radius: var(--r-xs); padding: 2px 3px; box-sizing: content-box; }
 .flow-lockup { height: 24px; width: auto; display: block; }
 .flow-box:nth-child(5) .flow-ico { color: var(--ok); }
 .flow-box:nth-child(7) .flow-ico { color: var(--orange); }
