@@ -433,7 +433,7 @@ type Config struct {
 	// directory: those are readable by the statement.
 	SpillDir string
 	// Standby keeps workers started ahead of the statements that will use
-	// them (#2236): after a statement ran, one per free slot waits with its
+	// them (#2236): once a statement has run, one per slot waits with its
 	// DuckDB open, so the next statement does not pay the process start and
 	// the open. Each still serves ONE statement and exits. Off unless set:
 	// a Runner that keeps processes must be closed (Close).
@@ -554,9 +554,7 @@ type Runner struct {
 	waiting int
 	freed   chan struct{}
 
-	// The standby workers (#2236), guarded by mu like the gate they are
-	// counted against: never more of them than free slots, so workers
-	// running plus workers waiting never pass maxInFlight.
+	// The standby workers (#2236), guarded by mu: at most one per slot.
 	standby      bool
 	standbyIdle  time.Duration
 	standbys     []*worker
@@ -1118,6 +1116,8 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 		return Result{}, err
 	}
 	if w := r.takeStandby(); w != nil {
+		// Its replacement starts now, while this statement runs.
+		r.topUpStandbys()
 		if r.beforeHandOver != nil {
 			r.beforeHandOver(w)
 		}
@@ -1322,8 +1322,11 @@ func (r *Runner) takeStandby() *worker {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for len(r.standbys) > 0 {
-		w := r.standbys[len(r.standbys)-1]
-		r.standbys = r.standbys[:len(r.standbys)-1]
+		// The oldest first: it has had the longest to finish opening, and
+		// the newest may have started a moment ago.
+		w := r.standbys[0]
+		r.standbys[0] = nil
+		r.standbys = r.standbys[1:]
 		select {
 		case <-w.done:
 			r.standbyDiedLocked()
@@ -1337,9 +1340,18 @@ func (r *Runner) takeStandby() *worker {
 	return nil
 }
 
-// topUpStandbys starts standbys up to the number of free slots. It runs
-// after a statement, so an install nobody runs SQL on never starts one, and
-// starting them never delays a statement: it happens off the caller.
+// topUpStandbys starts standbys up to one per slot. It runs when a statement
+// takes one and after every statement, so an install nobody runs SQL on never
+// starts one, and starting them never delays a statement: it happens off the
+// caller.
+//
+// One per slot, not per FREE slot: the replacement starts while the statement
+// that took a standby is still running, so statements that follow each other
+// closely find one that has finished opening. Measured on a c7g.2xlarge with
+// capture running, a standby that waits holds about 11 MB of private memory
+// (26 MB counting its share of the binary's pages), against the memory limit
+// of up to 2 GB a running statement has. The statements running at once are
+// still at most maxInFlight; the standbys add that small, fixed amount.
 func (r *Runner) topUpStandbys() {
 	if !r.standby {
 		return
@@ -1355,7 +1367,7 @@ func (r *Runner) topUpStandbys() {
 func (r *Runner) addStandby() bool {
 	r.mu.Lock()
 	r.pruneStandbysLocked()
-	want := !r.closed && time.Now().After(r.standbyOffUntil) && len(r.standbys) < r.maxInFlight-r.inFlight
+	want := !r.closed && time.Now().After(r.standbyOffUntil) && len(r.standbys) < r.maxInFlight
 	r.mu.Unlock()
 	if !want {
 		return false
@@ -1368,9 +1380,8 @@ func (r *Runner) addStandby() bool {
 		return false
 	}
 	r.mu.Lock()
-	// Counted again: a statement may have taken a slot while this one
-	// started, and workers running plus waiting must not pass maxInFlight.
-	if r.closed || len(r.standbys) >= r.maxInFlight-r.inFlight {
+	// Counted again: another top-up may have added one while this started.
+	if r.closed || len(r.standbys) >= r.maxInFlight {
 		r.mu.Unlock()
 		stopStandby(w)
 		return false

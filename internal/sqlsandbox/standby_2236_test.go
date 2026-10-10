@@ -90,8 +90,9 @@ func TestStandby_theNextStatementRunsOnOneAndItIsNeverReused(t *testing.T) {
 	if !res.Phases.Standby || res.Phases.Open != 0 || r.standbyUsed.Load() != 1 {
 		t.Fatalf("the second statement: %+v, used %d, want it on a standby", res.Phases, r.standbyUsed.Load())
 	}
-	if second == first || (second != waiting[0] && second != waiting[1]) {
-		t.Fatalf("the second statement ran in %d; the standbys were %v, the first worker %d", second, waiting, first)
+	// The one that waited longest: it has finished opening.
+	if second != waiting[0] {
+		t.Fatalf("the second statement ran in %d; the standbys were %v, oldest first, and the first worker %d", second, waiting, first)
 	}
 	if alive(second) {
 		t.Fatalf("worker %d is still there after its statement", second)
@@ -183,15 +184,14 @@ func TestStandby_aStatementThatKillsItsWorkerIsNotRunAgain(t *testing.T) {
 	}
 }
 
-// Workers running plus workers waiting never pass the cap, and a statement
-// above the slot count is refused exactly as without standbys.
-func TestStandby_neverMoreProcessesThanSlots(t *testing.T) {
+// Statements running at once stay at the slot count, a statement above it is
+// refused exactly as without standbys, and there is never more than one
+// standby per slot, however many statements come and go.
+func TestStandby_theSlotCountStillBoundsStatementsAndStandbys(t *testing.T) {
 	f := newCopyFixture(t)
 	r := newStandbyRunner(t, Config{MaxInFlight: 2})
 	mustRun(t, r, f.job("SELECT 1"))
 	waitStandbys(t, r, 2)
-	// A statement holds its slot a moment before it has its worker, so the
-	// processes are counted: the workers handed a job, and the ones waiting.
 	var handed atomic.Int32
 	r.onStart = func(int) { handed.Add(1) }
 
@@ -205,31 +205,33 @@ func TestStandby_neverMoreProcessesThanSlots(t *testing.T) {
 		}()
 	}
 	deadline := time.Now().Add(10 * time.Second)
-	for {
-		r.mu.Lock()
-		waiting := len(r.standbys)
-		r.mu.Unlock()
-		in := int(handed.Load())
-		if in+waiting > 2 {
-			t.Fatalf("%d workers with a job and %d waiting, with 2 slots", in, waiting)
-		}
-		if in == 2 {
-			break
+	for handed.Load() < 2 {
+		if n := len(standbyPids(r)); n > 2 {
+			t.Fatalf("%d standbys with 2 slots", n)
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the two statements never got their workers (%d)", in)
+			t.Fatalf("the two statements never got their workers (%d)", handed.Load())
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	if _, err := r.Run(context.Background(), f.job("SELECT 1")); !errors.Is(err, ErrBusy) {
 		t.Fatalf("a third statement: %v, want busy", err)
 	}
-	time.Sleep(300 * time.Millisecond)
-	if pids := standbyPids(r); len(pids) != 0 {
-		t.Fatalf("standbys while every slot is taken: %v", pids)
+	if handed.Load() != 2 {
+		t.Fatalf("%d workers were handed a job with 2 slots", handed.Load())
 	}
+	// The replacements started while the two statements run.
+	waitStandbys(t, r, 2)
 	cancel()
 	wg.Wait()
+	for range 6 {
+		if _, err := r.Run(context.Background(), f.job("SELECT 1")); err != nil {
+			t.Fatal(err)
+		}
+		if n := len(standbyPids(r)); n > 2 {
+			t.Fatalf("%d standbys with 2 slots", n)
+		}
+	}
 	waitStandbys(t, r, 2)
 }
 
