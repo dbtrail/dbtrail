@@ -55,9 +55,11 @@ console.log(JSON.stringify({
 		if len(r.Hints) != 2 || r.Hints[0] != help || !strings.Contains(r.Hints[1], "command line") {
 			t.Errorf("%s: hints = %q, want what the folder is for, then where its value comes from", name, r.Hints)
 		}
-		// The empty value's name is what an unset row shows in its input.
-		if r.Placeholder != "system temp folder" {
-			t.Errorf("%s: placeholder = %q, want system temp folder", name, r.Placeholder)
+		// A daemon that names no default (the read-only serve, which writes
+		// nothing here) gets a word in the input, not a folder it would have
+		// to guess (#2255).
+		if r.Placeholder != "default folder" {
+			t.Errorf("%s: placeholder = %q, want default folder", name, r.Placeholder)
 		}
 	}
 	// A session that cannot save still reads what the folder is for.

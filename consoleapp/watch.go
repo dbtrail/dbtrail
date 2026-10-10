@@ -1291,25 +1291,48 @@ func resolveUpConsoleEnv(cmd *cobra.Command) error {
 	return nil
 }
 
-// baselineStagingDir resolves the local staging base for baselines destined for
-// S3 (BINTRAIL_CONSOLE_BASELINE_STAGING). The dump and the staged Parquet are
-// written under a fresh temp subdir here per run and removed after upload, so a
-// leftover never causes a re-upload of an old snapshot. Default: an OS temp subdir.
-func baselineStagingDir() string {
-	if upBaselineStageDir != "" {
-		return upBaselineStageDir
+// baselineStagingDirFor resolves the working folder (#1682, #2255): a folder
+// saved in the web interface wins, then BINTRAIL_CONSOLE_BASELINE_STAGING,
+// and with neither set the default beside the servers file
+// (defaultWorkingFolder, which keeps the temp folder where that one cannot
+// hold a dump).
+//
+// Resolved at BOOT rather than per job on purpose: the directory is swept
+// once at startup for what a previous process left behind, so a switch while
+// running would leave those files with nothing looking at them again. The row
+// on the page says "restart to change" for that reason, and saying it per row
+// is what keeps the page honest about the difference.
+func baselineStagingDirFor(reg *console.Registry) string {
+	if set := effectiveStagingDir(reg, upBaselineStageDir); set != "" {
+		return set
 	}
-	return filepath.Join(os.TempDir(), "bintrail-baseline-staging")
+	return defaultWorkingFolderOnce(reg.Path()).Dir
 }
 
-// baselineStagingDirFor is baselineStagingDir with a saved setting (#1682)
-// taking precedence. Resolved at BOOT rather than per job on purpose: the
-// directory is swept once at startup for what a previous process left behind,
-// so a switch while running would leave those files with nothing looking at
-// them again. The row on the page says "restart to change" for that reason,
-// and saying it per row is what keeps the page honest about the difference.
-func baselineStagingDirFor(reg *console.Registry) string {
-	return effectiveStagingDir(reg, baselineStagingDir())
+// bootWorkingFolderDefault is the default working folder for the page, and
+// the startup line that says so when it is the temp folder. Empty when a
+// folder is set: the default is then not in use, and working it out would
+// create a folder nothing writes to.
+func bootWorkingFolderDefault(reg *console.Registry) workingFolderDefault {
+	if effectiveStagingDir(reg, upBaselineStageDir) != "" {
+		return workingFolderDefault{}
+	}
+	d := defaultWorkingFolderOnce(reg.Path())
+	const fix = "set the Working folder in the web interface's backup settings, or BINTRAIL_CONSOLE_BASELINE_STAGING, to a disk with room, and restart"
+	switch {
+	case d.InMemory:
+		slog.Warn("working folder: no folder is set, and full reads will write their dump into memory: the system temp folder is RAM on this host",
+			"folder", d.Dir, "why", d.Why, "fix", fix)
+	case d.Unusable:
+		slog.Warn("working folder: no folder is set, and the folder beside DBTrail's data cannot be used, so full reads write under the system temp folder",
+			"folder", d.Dir, "why", d.Why, "fix", fix)
+	case d.Why != "":
+		slog.Info("working folder: no folder is set, and full reads write under the system temp folder",
+			"folder", d.Dir, "why", d.Why, "to_change", fix)
+	default:
+		slog.Info("working folder: no folder is set, so full reads write beside DBTrail's data", "folder", d.Dir)
+	}
+	return d
 }
 
 // wireVerify wires the in-process verify supervisor and, when
@@ -1806,6 +1829,7 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 	// because both watch entry points reach this function and neither reaches
 	// the other, and once per process: it is a startup line, not a monitor.
 	composeDriftReporter(indexDSN, opts)
+	workingDefault := bootWorkingFolderDefault(reg)
 	// GOMAXPROCS, not NumCPU: since Go 1.25 it follows a container's CPU
 	// limit, which is the number of cores the workers really share.
 	if w := sqlMaxInFlightWarning(opts.SQLMaxInFlight, sqlsandbox.DefaultLimits().Threads, runtime.GOMAXPROCS(0)); w != "" {
@@ -1876,8 +1900,13 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 			LockModeErr:    errString(upConsoleBaselineLockModeErr),
 			TriggerOn:      upConsoleBaselineTrigger,
 			StagingDir:     upBaselineStageDir,
-			VerifyInterval: upVerifyInterval,
-			VerifyTables:   upVerifyTables,
+			// What is in force when that is empty and nothing is saved
+			// (#2255): worked out from the host, so the page cannot know it.
+			StagingDirDefault:         workingDefault.Dir,
+			StagingDirDefaultWhy:      workingDefault.Why,
+			StagingDirDefaultInMemory: workingDefault.InMemory,
+			VerifyInterval:            upVerifyInterval,
+			VerifyTables:              upVerifyTables,
 			// Which of those rows THIS daemon applies without a restart
 			// (#1682). Computed from the same expressions that gate the
 			// consumers below — the caveat BaselineRefreshDefaults already

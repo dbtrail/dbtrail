@@ -7810,7 +7810,7 @@ const BACKUP_DAEMON_EMPTY = {
   refresh_every: "off",
   lock_mode: "automatic",
   trigger: "Off",
-  staging_dir: "system temp folder",
+  staging_dir: "default folder",
   verify_interval: "off",
   verify_tables: "all tables",
 };
@@ -7838,6 +7838,18 @@ function backupDaemonEditCard(rows, locked) {
   return card;
 }
 
+// workingFolderUnsetLine says which folder is in use when none is set
+// (#2255). Only the daemon can name it: it depends on the disk DBTrail's
+// data is on. When it is the system temp folder the line says why, and that
+// is a plain fact (on ECS it is the right disk). The warning is kept for the
+// one case that is a hazard: that folder is memory on this host.
+function workingFolderUnsetLine(row) {
+  if (!row || row.value || !row.default) return "";
+  if (!row.default_note) return "No folder is set, so DBTrail uses " + row.default + ", beside its own data.";
+  return "No folder is set, so DBTrail uses " + row.default + ", under the system temp folder. " + row.default_note +
+    (row.default_in_memory ? " That folder is memory on this host: a full read would write the whole database into RAM. Set a folder on a disk." : "");
+}
+
 function backupDaemonEditRow(row, locked) {
   const label = BACKUP_DAEMON_ROWS[row.key] || row.key;
   const wrap = el("div", { class: "bks-erow" });
@@ -7847,7 +7859,7 @@ function backupDaemonEditRow(row, locked) {
   // The age retention shows an example instead of "off": a reader has to
   // know the grammar (days or hours) to type one.
   const input = el("input", { class: "input", id: "bks-" + row.key, type: "text",
-    value: row.value || "", placeholder: row.key === "baseline_retain" ? "e.g. 7d" : (BACKUP_DAEMON_EMPTY[row.key] || "") });
+    value: row.value || "", placeholder: row.key === "baseline_retain" ? "e.g. 7d" : (row.default || BACKUP_DAEMON_EMPTY[row.key] || "") });
   const msg = el("p", { class: "form-msg" });
   const save = el("button", { class: "btn btn-sm", type: "button", text: "Save" });
   const revert = row.source === "saved"
@@ -7884,6 +7896,8 @@ function backupDaemonEditRow(row, locked) {
   // largest of them.
   if (row.key === "staging_dir") {
     wrap.append(el("p", { class: "form-hint", text: "Where DBTrail writes temporary files during a full read, an S3-only update, or a .sql build. Needs room for the largest database it reads." }));
+    const unset = workingFolderUnsetLine(row);
+    if (unset) wrap.append(el("p", { class: row.default_in_memory ? "form-msg warn" : "form-hint", text: unset }));
   }
   // Provenance, in one line: what is winning, and what it is winning over.
   wrap.append(el("p", { class: "form-hint", text: row.source === "saved"
