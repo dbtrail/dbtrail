@@ -52,6 +52,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   views file pinned to one snapshot. Views files never read the merged
   pairs, and one that follows the newest snapshot reads as before.
 
+- **A statement over a table with changes waiting no longer gets faster
+  and slower with the number of rows those changes replaced** (#2237). Such
+  a table is read as its file less the rows its changes replaced, and the
+  cost of leaving those rows out doubled and halved as their number grew:
+  just under 524,288, 1,048,576 or 2,097,152 of them a statement took twice
+  what it took just over. They are now left out through one small mask per
+  64 rows of the file, whose cost barely moves. On a table of 20 million
+  rows, with 2 threads, a sum over the whole table took 214 ms to 823 ms
+  before, depending on that number, and takes 247 ms to 348 ms now, with the
+  same rows returned. With fewer than about 4,000 replaced rows (a table
+  just written in full) the same statement is some 35 ms slower than before;
+  a lookup of one row is not. Measured on one machine with replaced rows
+  picked at random. SQL on the copy and the MySQL port get this with the
+  upgrade; a views file, when it is generated again.
+
 ### Fixed
 - **A views file that follows the newest snapshot reads the changes
   v0.83.0 wrote beside a table** (#2242). That build named a table's two
