@@ -3,7 +3,9 @@ package console
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -84,6 +86,23 @@ func TestSQLAPI_onePairChainIsReadWithoutTheJoin(t *testing.T) {
 		return script, rows
 	}
 
+	// waiting is the SQL panel's list of tables with changes not merged yet
+	// (GET /api/sql), which weighs each table as a statement would.
+	waiting := func() []string {
+		t.Helper()
+		w := httptest.NewRecorder()
+		f.s.handleSQLInfo(w, httptest.NewRequest("GET", "/api/sql", nil))
+		var info sqlInfoResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &info); err != nil || w.Code != http.StatusOK {
+			t.Fatalf("GET /api/sql: code=%d err=%v body=%s", w.Code, err, w.Body.String())
+		}
+		var out []string
+		for _, u := range info.Unmerged {
+			out = append(out, u.View)
+		}
+		return out
+	}
+
 	// The base holds 1=new and 2=paid. One pair: 1 changes, 2 is deleted, 3 is
 	// new.
 	pair(0, []int64{0, 1}, [3]string{"1", "shipped", "u"}, [3]string{"2", "", "d"}, [3]string{"3", "new", "u"})
@@ -103,6 +122,10 @@ func TestSQLAPI_onePairChainIsReadWithoutTheJoin(t *testing.T) {
 	}
 	if want := []string{"1=returned"}; !reflect.DeepEqual(rows, want) {
 		t.Errorf("two pairs: rows = %v, want %v", rows, want)
+	}
+
+	if got := waiting(); !slices.Contains(got, "shop.orders") {
+		t.Errorf("a table with a chain of two pairs is not in the panel's list of changes waiting: %v", got)
 	}
 
 	// The daemon merges the chain into one pair beside the snapshots: the
@@ -135,10 +158,19 @@ func TestSQLAPI_onePairChainIsReadWithoutTheJoin(t *testing.T) {
 		t.Errorf("the worker may read the snapshots' root: %v", job.CopyDirs)
 	}
 
+	// And the table weighs nothing while it is read that way (#2239): it is
+	// not in the panel's list, which is what a statement's size check sees.
+	if got := waiting(); slices.Contains(got, "shop.orders") {
+		t.Errorf("a table read through its resolved pair is still listed with changes waiting: %v", got)
+	}
+
 	// The pair goes (its snapshot is no longer one of the newest): the next
 	// statement reads the chain as before.
 	if err := os.RemoveAll(filepath.Join(f.root, baseline.ResolvedDirName)); err != nil {
 		t.Fatal(err)
+	}
+	if got := waiting(); !slices.Contains(got, "shop.orders") {
+		t.Errorf("with the resolved pair gone the table is not back in the list: %v", got)
 	}
 	script, rows = state()
 	if !strings.Contains(script, join) {
