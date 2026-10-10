@@ -154,6 +154,12 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 			why + "). The full read went ahead.", nil
 	}
 	need := uint64(max(est.Bytes, 0))
+	if need == 0 && est.Unsized > 0 {
+		// Nothing was sized, so there is no sum to compare: "needs about 0 B"
+		// would read as a pass.
+		return dumpDiskUnchecked, fmt.Sprintf("Disk check cannot tell whether this read fits: the source gave no size for any of the %d table(s) to read. "+
+			"%s free at %s. The full read went ahead.", est.Unsized, humanSize(int64(stageFree)), stagingDir), nil
+	}
 	peak := need * dumpPeakTenths / 10
 	data := uint64(max(est.DataBytes, 0))
 	floor := data * dumpRefuseTenths / 10
@@ -182,8 +188,9 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 	short += doctor.DumpCompressedSentence(est)
 	// The sizes bound the dump from above only when every table reports its
 	// real size.
+	vouched := est.Compressed == 0 && est.Unsized == 0
 	bound := ", an upper bound (secondary indexes are not dumped, deleted rows still count),"
-	if est.Compressed > 0 {
+	if !vouched {
 		bound = ""
 	}
 
@@ -211,9 +218,9 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 		}
 		if outFree < need {
 			// "Up to" and "fits" are claims about a bound, which the sizes
-			// are not with tables stored compressed.
+			// are not with tables stored compressed or not sized.
 			copyTakes, dumpFits := "the copy can take up to about", "The dump itself fits at"
-			if est.Compressed > 0 {
+			if !vouched {
 				copyTakes, dumpFits = "by the sizes the server reports the copy takes about", "By those sizes the dump fits at"
 			}
 			return dumpDiskLow, fmt.Sprintf("Low disk: %s, where the Parquet copy goes, has %s free, and %s %s. "+
@@ -241,11 +248,12 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 
 // roomVerdict is the verdict and the note when the free space covers what the
 // sizes ask for; note opens with "Disk check: ". With tables stored
-// compressed the sizes ask for too little, so the check cannot say there is
-// room: it says it cannot tell, in the note's first words, and the page shows
-// that as a note and not as an alarm.
+// compressed, or tables the server gave no size for, the sizes ask for too
+// little, so the check cannot say there is room: it says it cannot tell, in
+// the note's first words, and the page shows that as a note and not as an
+// alarm.
 func roomVerdict(est dumpEstimate, note string) (string, string, error) {
-	if est.Compressed > 0 {
+	if est.Compressed > 0 || est.Unsized > 0 {
 		return dumpDiskUnchecked, "Disk check cannot tell whether this read fits. By the sizes the server reports: " +
 			strings.TrimPrefix(note, "Disk check: "), nil
 	}
