@@ -41,7 +41,11 @@ func TestRun_childEnvironmentIsScrubbed(t *testing.T) {
 // stderr, never a result.
 func TestRun_garbageFromTheChildIsAWorkerError(t *testing.T) {
 	f := newCopyFixture(t)
-	r := New(Config{Exe: "/bin/sh", Args: []string{"-c", "echo 'not json'; echo oops 1>&2; exit 2"}, Limits: testLimits()})
+	// The child reads its job before it answers, as a worker does: what a
+	// child says before it was given a job is not a result at all (stdout
+	// takes nothing until then), and how soon the job follows the start is
+	// not this test's subject.
+	r := New(Config{Exe: "/bin/sh", Args: []string{"-c", "cat >/dev/null; echo 'not json'; echo oops 1>&2; exit 2"}, Limits: testLimits()})
 	_, err := r.Run(context.Background(), f.job("SELECT 1"))
 	var we *WorkerError
 	if !errors.As(err, &we) {
@@ -51,7 +55,7 @@ func TestRun_garbageFromTheChildIsAWorkerError(t *testing.T) {
 		t.Errorf("WorkerError = %v (stderr %q)", we, we.Stderr)
 	}
 	// Garbage with a clean exit is still not a result.
-	r = New(Config{Exe: "/bin/sh", Args: []string{"-c", "echo 'not json'"}, Limits: testLimits()})
+	r = New(Config{Exe: "/bin/sh", Args: []string{"-c", "cat >/dev/null; echo 'not json'"}, Limits: testLimits()})
 	_, err = r.Run(context.Background(), f.job("SELECT 1"))
 	if !errors.As(err, &we) {
 		t.Fatalf("clean exit with garbage: err = %v, want WorkerError", err)
