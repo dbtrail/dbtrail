@@ -740,7 +740,11 @@ func New(cfg Config) (*Server, error) {
 	// the registry is loaded, before any loop reads it).
 	s.sqlLimits = resolveSQLLimits(cfg.SQLLimits)
 	s.sqlPortMaxRows = cfg.SQLPortMaxRows
-	runner := sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits, MaxInFlight: cfg.SQLMaxInFlight})
+	// Standby (#2236): after a statement, a worker per free slot waits with
+	// its DuckDB open, so a short statement does not pay the start. They stop
+	// on their own after a few minutes with no statement, and with this
+	// process, whose exit closes their stdin.
+	runner := sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits, MaxInFlight: cfg.SQLMaxInFlight, Standby: true})
 	s.sqlRunner, s.sqlSpillState = sandboxRunner{runner}, runner.SpillState
 	s.sqlMaxInFlight = cfg.SQLMaxInFlight
 	if s.sqlMaxInFlight < 1 {

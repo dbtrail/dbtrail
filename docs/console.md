@@ -1217,7 +1217,12 @@ The limits, so a query can never hurt capture:
   shows it read-only and says so, and removing it (and restarting) hands the
   setting to the page. The saved value lives in `console-sql-settings.json`
   beside the servers file; DBTrail reads that file when it starts, so change
-  it from the page rather than by hand.
+  it from the page rather than by hand. Once a
+  query has run, a process per slot is kept started and waiting for the next
+  one, so a short query does not pay the start (about 53 ms down to 11 ms for
+  the shortest, measured). Each still runs ONE query and exits, never a
+  second. A waiting process holds about 11 MB of its own, and they stop
+  after five minutes with no query.
 - A query whose tables have more than 384 MB of changes not merged into them
   yet (all the tables it names, together; the line grows with the memory,
   768 MB at 4GB) is answered from the newest earlier copy in which those
