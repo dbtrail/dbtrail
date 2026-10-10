@@ -958,11 +958,16 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 // every reader takes as complete. The caller passes only a folder that was
 // vacant when the run started, so it never holds anyone else's files.
 //
-// Two failures keep the folder, because what they leave is not a partial
-// snapshot: every table converted and only the finishing failed
-// (baseline.ErrAllTablesConverted; the refresh keeps the same shape, see
-// keepPartialSnapshotBecause), and a folder whose marker vanished under the
-// run (baseline.ErrIncompleteMarkerVanished), which someone else has touched.
+// One failure keeps the folder: its marker vanished under the run
+// (baseline.ErrIncompleteMarkerVanished), so someone else has touched it.
+//
+// A run that wrote every table and failed only at the finishing (table
+// deltas, integrity manifest, _SUCCESS) is NOT kept. Its folder is still
+// marked incomplete, so no listing shows it and nothing publishes it; the
+// dump it came from is already removed, so nothing can finish it; and the
+// usual reason for that failure is the full disk the folder would stay on.
+// (The refresh keeps a folder of that shape, see keepPartialSnapshotBecause.
+// That rule is the refresh's own and is not changed here.)
 //
 // The discard renames the folder to a hidden name before it deletes it. A
 // delete that fails after the rename leaves that hidden folder, which only
@@ -977,11 +982,6 @@ func discardFailedSnapshot(root, name, serverID string, convErr error) (said str
 		slog.Info("console snapshot: cleared folders an earlier failed read left half removed", "server", serverID, "root", root, "dirs", n)
 	}
 	switch {
-	case errors.Is(convErr, baseline.ErrAllTablesConverted):
-		slog.Warn("console snapshot: kept the snapshot folder of a full read that converted every table and could not finish it",
-			"server", serverID, "path", p)
-		return fmt.Sprintf("Every table was written and only the last step failed, so the folder %s was kept. Nothing publishes it "+
-			"(it is marked incomplete and no listing shows it) and a new full read does not use it: delete it to free the room once you no longer want it", p)
 	case errors.Is(convErr, baseline.ErrIncompleteMarkerVanished):
 		slog.Warn("console snapshot: kept the snapshot folder of a full read whose marker vanished while it ran",
 			"server", serverID, "path", p)
