@@ -59,6 +59,7 @@ var (
 	docBaselineS3    string
 	docBaselineS3Reg string
 	docSnapshotEvery string
+	docStagingDir    string
 )
 
 func init() {
@@ -73,6 +74,7 @@ func init() {
 	doctorCmd.Flags().StringVar(&docBaselineS3, "baseline-s3", "", "S3 snapshot destination, e.g. s3://bucket/backups (optional; reports whether a rule in the bucket expires old snapshots; advisory WARN only, needs s3:GetBucketLifecycleConfiguration)")
 	doctorCmd.Flags().StringVar(&docBaselineS3Reg, "baseline-s3-region", "", "AWS region for --baseline-s3 (optional; the SDK resolves it when empty)")
 	doctorCmd.Flags().StringVar(&docSnapshotEvery, "snapshot-every", "", "How often snapshots are taken, e.g. 6h or 1d (optional; with --baseline-s3, warns when the bucket rule expires snapshots sooner than that)")
+	doctorCmd.Flags().StringVar(&docStagingDir, "staging-dir", "", "Working folder of full reads, on this machine (optional; compares its free space with the size of the tables --schemas selects; advisory WARN only)")
 	_ = doctorCmd.MarkFlagRequired("source-dsn")
 	bindCommandEnv(doctorCmd)
 	rootCmd.AddCommand(doctorCmd)
@@ -99,7 +101,18 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	return runDoctorTo(cmd.Context(), os.Stdout, docFormat, docSourceDSN, docIndexDSN, docSchemas, retain, note, docProxySQLAdmin, docArchiveS3, docArchiveS3Reg,
-		snapshotExpiryChecks(docBaselineS3, docBaselineS3Reg, every)...)
+		append(snapshotExpiryChecks(docBaselineS3, docBaselineS3Reg, every), fullReadDiskCheck(docStagingDir, docSourceDSN, docSchemas))...)
+}
+
+// fullReadDiskCheck is the disk a full read needs (#2259; advisory, never
+// affects the exit code): the free space of --staging-dir beside the tables
+// --schemas selects, or with no folder one skipped line that says where the
+// check runs. It is added here and not in doctor.Build, which also feeds
+// `bintrail up` and the web interface: there the line would point at itself.
+func fullReadDiskCheck(stagingDir, sourceDSN, schemasCSV string) func(context.Context) doctor.CheckResult {
+	return func(ctx context.Context) doctor.CheckResult {
+		return doctor.CheckFullReadDisk(ctx, stagingDir, sourceDSN, cliutil.ParseSchemaList(schemasCSV))
+	}
 }
 
 // parseDocSnapshotEvery reads --snapshot-every; empty means the schedule was

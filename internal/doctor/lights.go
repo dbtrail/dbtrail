@@ -56,6 +56,7 @@ var checkLights = map[string]string{
 	CapacityCheckName:              LightOther,
 	BufferPoolCheckName:            LightOther,
 	SnapshotExpiryCheckName:        LightOther,
+	FullReadDiskCheckName:          LightOther,
 	ObjectLockCheckName:            LightOther,
 	proxySQLRulesCheckName:         LightOther,
 	ExtensionPanicCheckName:        LightOther,

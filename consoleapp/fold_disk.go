@@ -94,16 +94,6 @@ func existingParent(dir string) string {
 	}
 }
 
-// humanSize renders bytes in binary units with one decimal. A value that would
-// round up to 1024.0 moves to the next unit.
-func humanSize(b int64) string {
-	if b < 1024 {
-		return fmt.Sprintf("%d B", b)
-	}
-	v, exp := float64(b)/1024, 0
-	for v >= 1023.95 && exp < 5 {
-		v /= 1024
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", v, "KMGTPE"[exp])
-}
+// humanSize renders bytes in binary units with one decimal: the one
+// formatter the disk checks share with `bintrail doctor` (#2259).
+func humanSize(b int64) string { return doctor.BinarySize(b) }
