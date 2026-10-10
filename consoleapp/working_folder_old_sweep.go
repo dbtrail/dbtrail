@@ -160,6 +160,21 @@ func sweepDeadSQLBuilds(stagingDir string, now time.Time) {
 		return
 	}
 	const kept = "working folder: old .sql builds may be left in a default folder DBTrail is not using here, and it will not remove them. Each is a full copy of a database: check the folder and remove it by hand"
+	// The folder itself must not be a link (ownFolder, on the path as
+	// given), and from here on everything is checked AND removed through one
+	// path with no link in it. Checking the resolved path and then removing
+	// through the given one would leave any link above the folder free to be
+	// pointed elsewhere in between.
+	if why := ownFolder(stagingDir); why != "" {
+		sayOnce(base, kept, "dir", base, "why", stagingDir+": "+why)
+		return
+	}
+	real, err := filepath.EvalSymlinks(stagingDir)
+	if err != nil {
+		sayOnce(base, kept, "dir", base, "why", firstLineOf(err.Error()))
+		return
+	}
+	stagingDir, base = real, filepath.Join(real, "sql-export")
 	if why := heldInPlace(stagingDir); why != "" {
 		sayOnce(base, kept, "dir", base, "why", why)
 		return

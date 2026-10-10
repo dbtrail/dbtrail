@@ -346,6 +346,11 @@ func TestSweepUnusedDefaultFolders_2255(t *testing.T) {
 		if err := os.Mkdir(filepath.Join(dir, "x"), 0o700); err != nil {
 			t.Fatal(err)
 		}
+		// Free of links first, as the sweep hands it over.
+		dir, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if why := heldInPlace(filepath.Join(dir, "x")); why != "" {
 			t.Fatalf("under this user's own folders: %s", why)
 		}
@@ -357,8 +362,69 @@ func TestSweepUnusedDefaultFolders_2255(t *testing.T) {
 		}
 	})
 
+	t.Run("a link above the working folder: checked and removed through one path", func(t *testing.T) {
+		// heldInPlace takes a path with no link in it and refuses one that
+		// has: where a link leads says nothing about who can repoint it.
+		realDir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(realDir, "inside", "x"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(realDir, "link")
+		if err := os.Symlink(filepath.Join(realDir, "inside"), link); err != nil {
+			t.Skip(err)
+		}
+		if why := heldInPlace(filepath.Join(realDir, "inside", "x")); why != "" {
+			t.Fatalf("by its real path: %s", why)
+		}
+		if why := heldInPlace(filepath.Join(link, "x")); why == "" {
+			t.Fatal("a path through a link counts as held in place")
+		}
+
+		// The sweep, with the temp folder reached through a link: it works
+		// on the real folder, and a dead build there still goes.
+		realTmp, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		viaLink := filepath.Join(realDir, "tmp-link")
+		if err := os.Symlink(realTmp, viaLink); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("TMPDIR", viaLink)
+		stubFSKind(t, localFS)
+		oldDir := upBaselineStageDir
+		upBaselineStageDir = ""
+		t.Cleanup(func() { upBaselineStageDir = oldDir })
+		reg, err := console.LoadRegistry(filepath.Join(t.TempDir(), "console-servers.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		build := stagedBuild(t, filepath.Join(realTmp, "bintrail-baseline-staging"), "srv1", "100", long)
+		sweepUnusedDefaultFolders(reg, baselineStagingDirFor(reg), now)
+		if leftOnDisk2255(build) {
+			t.Fatal("with the temp folder reached through a link, a dead build in the real folder was kept")
+		}
+		// The same, with the folder that holds the real one open to all:
+		// the real chain is what is judged.
+		build = stagedBuild(t, filepath.Join(realTmp, "bintrail-baseline-staging"), "srv1", "200", long)
+		t.Cleanup(func() { _ = os.Chmod(realTmp, 0o700) })
+		if err := os.Chmod(realTmp, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		sweepUnusedDefaultFolders(reg, baselineStagingDirFor(reg), now)
+		if !leftOnDisk2255(build) {
+			t.Fatal("the real folder above is open to every user, and the build was removed through the link")
+		}
+	})
+
 	t.Run("a folder two levels up that others can write into is seen", func(t *testing.T) {
-		top := t.TempDir()
+		top, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
 		path := filepath.Join(top, "a", "b", "c")
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			t.Fatal(err)

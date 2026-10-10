@@ -46,28 +46,26 @@ func ownFolder(path string) string {
 // heldInPlace reports whether no other unprivileged user can rename or
 // replace path or any folder above it. "" means yes.
 //
-// Every folder from the one that holds path up to the root has to belong to
-// this process's user or to root, and either be closed to other users'
-// writes or carry the sticky bit (the shape of /tmp, where only an entry's
-// owner may rename or remove it). The owner matters as much as the mode: a
-// folder's owner can rename its entries whatever the mode says, so a 0755
-// folder of another user holds nothing in place.
+// Every folder from the one that holds path up to the root has to be a real
+// folder that belongs to this process's user or to root, and either be
+// closed to other users' writes or carry the sticky bit (the shape of /tmp,
+// where only an entry's owner may rename or remove it). The owner matters as
+// much as the mode: a folder's owner can rename its entries whatever the
+// mode says, so a 0755 folder of another user holds nothing in place.
 //
-// The chain is that of the real path: a link on the way (/tmp on macOS) is
-// resolved first, and what is checked is where it leads.
+// path has to be free of links already (resolvedFolder): a link on the way
+// is refused here, not followed. Checking where a link leads while the
+// caller goes on to use the path with the link in it would prove nothing
+// about the folder that holds the link.
 func heldInPlace(path string) string {
-	real, err := filepath.EvalSymlinks(filepath.Clean(path))
-	if err != nil {
-		return firstLineOf(err.Error())
-	}
-	for dir := filepath.Dir(real); ; dir = filepath.Dir(dir) {
+	for dir := filepath.Dir(filepath.Clean(path)); ; dir = filepath.Dir(dir) {
 		fi, err := os.Lstat(dir)
 		if err != nil {
 			return firstLineOf(err.Error())
 		}
 		st, ok := fi.Sys().(*syscall.Stat_t)
-		if !ok || !fi.IsDir() {
-			return fmt.Sprintf("%s, above it, cannot be checked", dir)
+		if !ok || fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir() {
+			return fmt.Sprintf("%s, above it, is not a folder", dir)
 		}
 		if uid := int(st.Uid); uid != 0 && uid != currentUID() {
 			return fmt.Sprintf("%s, above it, belongs to another user (uid %d), who can rename what it holds", dir, uid)
