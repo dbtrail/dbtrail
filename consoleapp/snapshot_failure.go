@@ -66,6 +66,11 @@ func snapshotFailureOf(err error, req console.BaselineRequest) *console.Snapshot
 	}
 	if f.Kind == "" {
 		f.Summary = refusalSummary(err)
+		// A working folder that filled (#1938) says so in its own words: the
+		// error's first line is longer than the card shows.
+		if full := (*workingFolderFullError)(nil); errors.As(err, &full) {
+			f.Summary = full.summary()
+		}
 	}
 	return f
 }

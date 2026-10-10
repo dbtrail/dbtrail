@@ -756,7 +756,9 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 			st.Published = true
 		}
 		// A full read refused for disk (#1938), or one that found the disk
-		// full anyway, reads the same to the page as a refused update.
+		// full anyway, is recorded as a disk failure. Nothing acts on it for
+		// a full read today (fullReadStandsIn reads it for updates only): a
+		// failed scheduled full read is tried again at its next slot.
 		st.DiskRefused = foldDiskRefused(err)
 		if st.Published {
 			if errors.Is(err, context.Canceled) {
@@ -1038,6 +1040,16 @@ func (e *workingFolderFullError) Error() string {
 }
 
 func (e *workingFolderFullError) Unwrap() []error { return []error{errFoldDiskFull, e.err} }
+
+// summary is the failure card's one line: the cause and the fix, short enough
+// to be shown whole. Error()'s first line is not: refusalSummary cuts at 300
+// runes, which lands inside the fix, and after the lock-all retry the ftwrl
+// refusal comes first and pushes the cause out of it altogether.
+func (e *workingFolderFullError) summary() string {
+	return fmt.Sprintf("The working folder %s filled up during the full read (%s free when the dump stopped). "+
+		"Free space there, or move it to a bigger disk with the \"Working folder\" setting.",
+		e.folder, humanSize(int64(e.free)))
+}
 
 // ftwrlDeniedError is mydumper's refusal of the global read lock that lock
 // mode ftwrl takes, as on RDS and Aurora (see mydumperlock.FTWRLDeniedHint).

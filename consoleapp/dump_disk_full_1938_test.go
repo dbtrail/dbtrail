@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -266,10 +267,38 @@ func TestFullRead_aDiskThatFillsDuringTheDumpReachesThePage_1938(t *testing.T) {
 	if !strings.HasPrefix(st.LastError, "dump: "+opening+stage+" filled up during the full read") {
 		t.Fatalf("LastError = %q", st.LastError)
 	}
-	if st.Failure == nil || !strings.Contains(st.Failure.Summary, opening+stage) || strings.Contains(st.Failure.Summary, "exit status") {
-		t.Fatalf("failure card = %+v, want its one line to say the folder filled", st.Failure)
+	// The card shows one line, whole: the cause, then the fix by the name of
+	// the setting. Nothing of mydumper's, and no cut.
+	want := "The working folder " + stage + " filled up during the full read (0 B free when the dump stopped). " +
+		`Free space there, or move it to a bigger disk with the "Working folder" setting.`
+	if st.Failure == nil || st.Failure.Summary != want {
+		t.Fatalf("failure card = %+v\nwant summary %q", st.Failure, want)
 	}
 	if left, _ := filepath.Glob(filepath.Join(stage, "*")); len(left) != 0 {
 		t.Fatalf("the working folder still holds %v", left)
+	}
+}
+
+// After the automatic retry with lock-all, the error opens with the ftwrl
+// refusal (up to 300 runes of it), which is as much as the card's line holds.
+// The card still names the disk, and a long folder path does not cut the fix.
+func TestSnapshotFailure_aFilledWorkingFolderIsNeverCutFromTheCard_1938(t *testing.T) {
+	folder := "/" + strings.Repeat("very-long-folder-name/", 12) + "work"
+	full := &workingFolderFullError{err: errNoSpaceDump, folder: folder, free: 4096}
+	retried := fmt.Errorf("lock mode ftwrl was refused by the source (%s), and the automatic retry with lock-all failed too: %w",
+		strings.Repeat("x", 300), fmt.Errorf("dump: %w", full))
+	for name, err := range map[string]error{"plain": fmt.Errorf("dump: %w", full), "after the lock-all retry": retried, "a chosen mode": &chosenModeError{err: retried}} {
+		f := snapshotFailureOf(err, console.BaselineRequest{ServerName: "shop-db"})
+		if f == nil || f.Kind != "" {
+			t.Fatalf("%s: failure = %+v", name, f)
+		}
+		if !strings.HasPrefix(f.Summary, "The working folder "+folder+" filled up") || !strings.HasSuffix(f.Summary, `the "Working folder" setting.`) || !strings.Contains(f.Summary, "4.0 KiB free") {
+			t.Errorf("%s: summary = %q", name, f.Summary)
+		}
+	}
+	// Any other failure keeps the first line of its own error.
+	plain := errors.New("mydumper failed: exit status 1; output: Access denied")
+	if f := snapshotFailureOf(fmt.Errorf("dump: %w", plain), console.BaselineRequest{}); f.Summary != "dump: mydumper failed: exit status 1" {
+		t.Errorf("an unrelated failure's summary changed: %q", f.Summary)
 	}
 }
