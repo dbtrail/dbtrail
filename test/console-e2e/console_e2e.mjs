@@ -6721,6 +6721,94 @@ try {
     }
   }
 
+  // Dark holds every text floor light holds (#1969), over every route, on
+  // the fixture server so the pages carry rows, badges and drawings. Each
+  // piece of visible text is measured against the ground composited under
+  // it, once in light and once in dark, in the same tab. The rule is parity,
+  // not a fixed number: where light reaches 4.5:1 dark must too, where light
+  // reaches 3:1 (the --ink-4 hints) dark must too. Text light itself leaves
+  // under 3:1 is not judged here. Not measured, and said so rather than
+  // guessed: text over a gradient or an image (no single ground), and text
+  // dimmed by opacity or disabled.
+  {
+    const tab = await browser.newPage({ viewport: { width: 1440, height: 2200 }, colorScheme: "light" });
+    try {
+      await tab.goto(`${URL}/?token=${encodeURIComponent(TOKEN)}`, { waitUntil: "networkidle" });
+      await tab.waitForFunction(() => typeof navigate === "function" && !!window.dbtrailTheme);
+      await tab.evaluate((id) => switchServer(id), byoId);
+      await tab.waitForTimeout(1500);
+      const sweep = () => tab.evaluate(() => {
+        const cv = document.createElement("canvas"); cv.width = cv.height = 1;
+        const g = cv.getContext("2d", { willReadFrequently: true });
+        const rgba = (c) => { g.clearRect(0, 0, 1, 1); g.fillStyle = c; g.fillRect(0, 0, 1, 1); const d = g.getImageData(0, 0, 1, 1).data; return [d[0], d[1], d[2], d[3] / 255]; };
+        const over = (top, under) => [0, 1, 2].map((i) => top[i] * top[3] + under[i] * (1 - top[3])).concat(1);
+        const lum = (d) => { const [r, gg, b] = d.slice(0, 3).map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * gg + 0.0722 * b; };
+        const out = {};
+        let measured = 0;
+        for (const el of document.querySelectorAll("#app *, #modal *")) {
+          const own = Array.from(el.childNodes).filter((n) => n.nodeType === 3 && n.textContent.trim()).map((n) => n.textContent.trim()).join(" ");
+          if (!own) continue;
+          const r = el.getBoundingClientRect();
+          if (r.width < 1 || r.height < 1) continue;
+          const cs = getComputedStyle(el);
+          if (cs.visibility === "hidden" || el.closest("[hidden]") || el.closest("option") || el.closest("[disabled]")) continue;
+          if (cs.webkitBackgroundClip === "text" || cs.backgroundClip === "text") continue;
+          let grounds = [], skip = false;
+          for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+            const s = getComputedStyle(n);
+            if (+s.opacity < 1 || s.backgroundImage !== "none") { skip = true; break; }
+            const c = rgba(s.backgroundColor);
+            if (c[3] > 0) grounds.push(c);
+            if (c[3] === 1) break;
+          }
+          if (skip || !grounds.length || grounds[grounds.length - 1][3] < 1) continue;
+          let ground = grounds[grounds.length - 1];
+          for (let i = grounds.length - 2; i >= 0; i--) ground = over(grounds[i], ground);
+          const ink = over(rgba(cs.color), ground);
+          const [hi, lo] = [lum(ink), lum(ground)].sort((a, b) => b - a);
+          const ratio = (hi + 0.05) / (lo + 0.05);
+          const key = el.tagName.toLowerCase() + "." + String(el.getAttribute("class") || "").trim().split(/\s+/).join(".") + " " + JSON.stringify(own.slice(0, 32));
+          measured++;
+          if (!(key in out) || ratio < out[key]) out[key] = ratio;
+        }
+        return { out, measured };
+      });
+      const routes = ["overview", "snapshots", "status", "events", "schema-changes", "recover", "connect", "retention", "access-profiles"];
+      const drops = [];
+      let judged = 0;
+      for (const route of routes) {
+        const byTheme = {};
+        for (const theme of ["light", "dark"]) {
+          await tab.evaluate((t) => window.dbtrailTheme.set(t), theme);
+          await tab.evaluate((r) => navigate(r), route);
+          await tab.waitForTimeout(1500);
+          // Folded sections carry text too; rows open their before/after.
+          await tab.evaluate(() => { for (const d of document.querySelectorAll("#view details")) d.open = true; for (const r of Array.from(document.querySelectorAll(".ev-row")).slice(0, 3)) if (!r.classList.contains("open")) r.click(); });
+          await tab.waitForTimeout(700);
+          byTheme[theme] = await sweep();
+        }
+        for (const [key, light] of Object.entries(byTheme.light.out)) {
+          const dark = byTheme.dark.out[key];
+          if (dark === undefined) continue;
+          const floor = light >= 4.5 ? 4.5 : light >= 3 ? 3 : 0;
+          if (!floor) continue;
+          judged++;
+          if (dark < floor) drops.push(`${route}: ${key} is ${light.toFixed(2)} in light, ${dark.toFixed(2)} in dark (floor ${floor})`);
+        }
+      }
+      // A sweep that measures nothing passes everything.
+      judged >= 150
+        ? ok("theme: the contrast sweep measured text on every route in both themes")
+        : bad("theme: the contrast sweep measured text on every route in both themes", `only ${judged} pieces of text were judged`);
+      drops.length === 0
+        ? ok("theme: dark holds every text floor light holds, on every route")
+        : bad("theme: dark holds every text floor light holds, on every route", `${drops.length} drop(s):\n    ` + drops.slice(0, 25).join("\n    "));
+      console.log(`theme sweep: ${judged} pieces of text judged, ${drops.length} drop(s)`);
+    } finally {
+      await tab.close();
+    }
+  }
+
   // One scene per control that saves something (#1883), last: they add and
   // remove a server, leave a rotation override behind, and set the console
   // password, which ends every other session. Each reads the stored value
