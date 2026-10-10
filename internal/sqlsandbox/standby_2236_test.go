@@ -35,6 +35,17 @@ func newStandbyRunner(t *testing.T, cfg Config) *Runner {
 	return r
 }
 
+// killStandby kills the oldest waiting standby and waits for it to be gone.
+func killStandby(t *testing.T, r *Runner) int {
+	t.Helper()
+	r.mu.Lock()
+	w := r.standbys[0]
+	r.mu.Unlock()
+	_ = killProcessGroup(w.cmd.Process)
+	<-w.done
+	return w.cmd.Process.Pid
+}
+
 func standbyPids(r *Runner) []int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -50,6 +61,9 @@ func waitStandbys(t *testing.T, r *Runner, n int) []int {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for {
+		// Counted with no top-up in flight: one still running may prune or
+		// add right after the count.
+		r.topUps.Wait()
 		pids := standbyPids(r)
 		if len(pids) == n {
 			return pids
@@ -127,8 +141,7 @@ func TestStandby_oneThatDiedWaitingCostsNothing(t *testing.T) {
 	r := newStandbyRunner(t, Config{MaxInFlight: 1})
 	mustRun(t, r, f.job("SELECT 1"))
 	pids := waitStandbys(t, r, 1)
-	_ = killProcessGroup(r.standbys[0].cmd.Process)
-	<-r.standbys[0].done
+	killStandby(t, r)
 	res, pid := mustRun(t, r, f.job("SELECT count(*) FROM shop.orders"))
 	if pid == pids[0] || res.Phases.Standby || len(res.Rows) != 1 {
 		t.Fatalf("ran in %d (the dead standby was %d), phases %+v", pid, pids[0], res.Phases)
@@ -168,10 +181,11 @@ func TestStandby_aStatementThatKillsItsWorkerIsNotRunAgain(t *testing.T) {
 	f := newCopyFixture(t)
 	r := newStandbyRunner(t, Config{MaxInFlight: 1})
 	mustRun(t, r, f.job("SELECT 1"))
-	waitStandbys(t, r, 1)
-	starts := 0
+	waiting := waitStandbys(t, r, 1)
+	starts, ranIn := 0, 0
 	r.onStart = func(pid int) {
 		starts++
+		ranIn = pid
 		go func() {
 			time.Sleep(400 * time.Millisecond)
 			_ = killProcessGroup(&os.Process{Pid: pid})
@@ -181,6 +195,53 @@ func TestStandby_aStatementThatKillsItsWorkerIsNotRunAgain(t *testing.T) {
 	var we *WorkerError
 	if !errors.As(err, &we) || starts != 1 {
 		t.Fatalf("err = %v after %d hand-over(s), want one worker failure", err, starts)
+	}
+	// It was a standby that had the job, which is the case the rule is for.
+	if ranIn != waiting[0] || r.standbyUsed.Load() != 1 {
+		t.Fatalf("the statement ran in %d, not on the standby %d (used %d)", ranIn, waiting[0], r.standbyUsed.Load())
+	}
+}
+
+// The same for a statement that carries its views and asks for nothing: the
+// write of the job is what says whether the worker had it.
+func TestStandby_goneBeforeTheJobWithoutAskingRunsOnce(t *testing.T) {
+	f := newCopyFixture(t)
+	r := newStandbyRunner(t, Config{MaxInFlight: 1})
+	mustRun(t, r, f.job("SELECT 1"))
+	waitStandbys(t, r, 1)
+	r.beforeHandOver = func(w *worker) {
+		_ = killProcessGroup(w.cmd.Process)
+		<-w.done
+	}
+	starts := 0
+	r.onStart = func(int) { starts++ }
+	res, err := r.Run(context.Background(), f.job("SELECT count(*) FROM shop.orders"))
+	if err != nil || len(res.Rows) != 1 || res.Phases.Standby || starts != 2 {
+		t.Fatalf("err = %v, rows = %v, phases %+v, handed over %d time(s)", err, res.Rows, res.Phases, starts)
+	}
+}
+
+// Standbys stopped because nobody ran a statement did not die: any number of
+// idle stops leaves them unpaused.
+func TestStandby_idleStopsAreNotDeaths(t *testing.T) {
+	f := newCopyFixture(t)
+	r := newStandbyRunner(t, Config{MaxInFlight: 1, StandbyIdle: 1500 * time.Millisecond})
+	for range standbyMaxDeaths + 1 {
+		mustRun(t, r, f.job("SELECT 1"))
+		waitStandbys(t, r, 1)
+		deadline := time.Now().Add(15 * time.Second)
+		for len(standbyPids(r)) != 0 {
+			if time.Now().After(deadline) {
+				t.Fatal("the standby was not stopped after the idle time")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	r.mu.Lock()
+	deaths, off := r.standbyDeaths, r.standbyOffUntil
+	r.mu.Unlock()
+	if deaths != 0 || !off.IsZero() {
+		t.Fatalf("after idle stops: %d deaths counted, paused until %v", deaths, off)
 	}
 }
 
@@ -239,7 +300,7 @@ func TestStandby_theSlotCountStillBoundsStatementsAndStandbys(t *testing.T) {
 // statement starts its own worker and brings them back.
 func TestStandby_stoppedAfterTheIdleTime(t *testing.T) {
 	f := newCopyFixture(t)
-	r := newStandbyRunner(t, Config{MaxInFlight: 1, StandbyIdle: 400 * time.Millisecond})
+	r := newStandbyRunner(t, Config{MaxInFlight: 1, StandbyIdle: 1500 * time.Millisecond})
 	mustRun(t, r, f.job("SELECT 1"))
 	pids := waitStandbys(t, r, 1)
 	deadline := time.Now().Add(10 * time.Second)
@@ -309,8 +370,7 @@ func TestStandby_tooManyDeathsInARowPauseThem(t *testing.T) {
 		} else if len(waitStandbysOrNone(r, 1)) == 0 {
 			t.Fatalf("no standby after statement %d, before the pause", i+1)
 		}
-		_ = killProcessGroup(r.standbys[0].cmd.Process)
-		<-r.standbys[0].done
+		killStandby(t, r)
 	}
 	mustRun(t, r, f.job("SELECT 1"))
 	time.Sleep(500 * time.Millisecond)
@@ -328,6 +388,7 @@ func TestStandby_tooManyDeathsInARowPauseThem(t *testing.T) {
 func waitStandbysOrNone(r *Runner, n int) []int {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
+		r.topUps.Wait()
 		if pids := standbyPids(r); len(pids) == n {
 			return pids
 		}

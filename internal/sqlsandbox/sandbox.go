@@ -565,7 +565,12 @@ type Runner struct {
 	standbyDeaths   int
 	standbyOffUntil time.Time
 	standbyNote     string
-	closed          bool
+	// standbyLastDeath is how the last standby found dead ended, for the
+	// log line that says they are paused.
+	standbyLastDeath string
+	closed           bool
+	// topUps counts top-ups in flight, so Close can wait for them.
+	topUps sync.WaitGroup
 	// standbyUsed counts statements that ran on a standby.
 	standbyUsed atomic.Int64
 
@@ -1134,7 +1139,7 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 		// The standby was gone before it read the job, so the statement
 		// has not run anywhere: start a worker for it, as if there had
 		// been no standby.
-		r.noteStandbyDeath()
+		r.noteStandbyDeath(w)
 	}
 	// A worker started for this statement: starting it is part of the
 	// statement's cost (Phases.Spawn).
@@ -1329,11 +1334,18 @@ func (r *Runner) takeStandby() *worker {
 		r.standbys = r.standbys[1:]
 		select {
 		case <-w.done:
-			r.standbyDiedLocked()
+			r.standbyDiedLocked(w)
 			continue
 		default:
 		}
-		r.standbyDeaths = 0
+		if w.stdout.didOverflow() {
+			// It wrote before it had a job, which no worker does. Its
+			// stdout is spent, so it could run a statement and not answer.
+			w.kill()
+			r.standbyDiedLocked(w)
+			continue
+		}
+		r.standbyDeaths, r.standbyNote = 0, ""
 		r.touchStandbysLocked()
 		return w
 	}
@@ -1356,7 +1368,15 @@ func (r *Runner) topUpStandbys() {
 	if !r.standby {
 		return
 	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	r.topUps.Add(1)
+	r.mu.Unlock()
 	go func() {
+		defer r.topUps.Done()
 		for r.addStandby() {
 		}
 	}()
@@ -1388,6 +1408,7 @@ func (r *Runner) addStandby() bool {
 	}
 	w.standby = true
 	r.standbys = append(r.standbys, w)
+	r.standbyNote = ""
 	r.touchStandbysLocked()
 	r.mu.Unlock()
 	return true
@@ -1399,7 +1420,7 @@ func (r *Runner) pruneStandbysLocked() {
 	for _, w := range r.standbys {
 		select {
 		case <-w.done:
-			r.standbyDiedLocked()
+			r.standbyDiedLocked(w)
 		default:
 			live = append(live, w)
 		}
@@ -1412,19 +1433,35 @@ func (r *Runner) pruneStandbysLocked() {
 
 // standbyDiedLocked counts a standby that died before it was used, and stops
 // starting them for a while after too many in a row.
-func (r *Runner) standbyDiedLocked() {
+//
+// w is the worker that died; how it ended (its exit and the end of its
+// stderr, where a worker says what went wrong before its job) is kept for
+// the log.
+func (r *Runner) standbyDiedLocked(w *worker) {
 	r.standbyDeaths++
+	select {
+	case <-w.done:
+		r.standbyLastDeath = fmt.Sprintf("pid %d: %v", w.cmd.Process.Pid, w.waitErr)
+		if tail := strings.TrimSpace(w.stderr.text()); tail != "" {
+			if len(tail) > 300 {
+				tail = tail[len(tail)-300:]
+			}
+			r.standbyLastDeath += "; stderr: " + tail
+		}
+	default:
+		r.standbyLastDeath = fmt.Sprintf("pid %d: it wrote to stdout before it had a job", w.cmd.Process.Pid)
+	}
 	if r.standbyDeaths >= standbyMaxDeaths {
 		r.standbyDeaths = 0
 		r.standbyOffUntil = time.Now().Add(standbyOffFor)
-		go r.noteStandby(fmt.Sprintf("%d standby workers in a row ended before they were used; none is started for %s, and statements start their own",
-			standbyMaxDeaths, standbyOffFor), nil)
+		go r.noteStandby(fmt.Sprintf("%d standby workers in a row ended before they were used; none is started for %s, and statements start their own. The last one, %s",
+			standbyMaxDeaths, standbyOffFor, r.standbyLastDeath), nil)
 	}
 }
 
-func (r *Runner) noteStandbyDeath() {
+func (r *Runner) noteStandbyDeath(w *worker) {
 	r.mu.Lock()
-	r.standbyDiedLocked()
+	r.standbyDiedLocked(w)
 	r.mu.Unlock()
 }
 
@@ -1464,7 +1501,8 @@ func stopStandby(w *worker) {
 }
 
 // noteStandby logs a change in the standbys' state once, not once per
-// statement.
+// statement. A standby that is taken alive, or added, clears what was last
+// said, so the same trouble coming back later is said again.
 func (r *Runner) noteStandby(msg string, err error) {
 	key := msg
 	if err != nil {
@@ -1495,6 +1533,9 @@ func (r *Runner) Close() {
 		r.standbyTimer.Stop()
 	}
 	r.mu.Unlock()
+	// A top-up that was starting a worker sees closed and stops it; after
+	// this none is in flight and none starts.
+	r.topUps.Wait()
 	r.stopStandbys()
 }
 
