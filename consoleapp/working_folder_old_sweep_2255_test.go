@@ -303,19 +303,75 @@ func TestSweepUnusedDefaultFolders_2255(t *testing.T) {
 		}
 	})
 
-	t.Run("another user's folder is left alone", func(t *testing.T) {
-		if os.Geteuid() != 0 {
-			t.Skip("needs root to hand a folder to another user")
-		}
+	t.Run("folders of another user are left alone", func(t *testing.T) {
+		// Seen from another user: every folder here is then somebody
+		// else's, at each level in turn the first one to say so.
 		legacy, _, reg := setup(t)
 		build := stagedBuild(t, legacy, "srv1", "100", long)
-		if err := os.Chown(filepath.Dir(build), 65534, 65534); err != nil {
-			t.Skip(err)
-		}
-		dateTree(t, legacy, long)
+		old := currentUID
+		t.Cleanup(func() { currentUID = old })
+		currentUID = func() int { return old() + 1 }
 		sweepUnusedDefaultFolders(reg, baselineStagingDirFor(reg), now)
 		if !leftOnDisk2255(build) {
-			t.Fatal("a build under a folder of another user was removed")
+			t.Fatal("a build in folders of another user was removed")
+		}
+		currentUID = old
+		sweepUnusedDefaultFolders(reg, baselineStagingDirFor(reg), now)
+		if leftOnDisk2255(build) {
+			t.Fatal("back as the owner, the dead build was kept")
+		}
+	})
+
+	t.Run("a folder is this user's only by its owner, whatever its mode", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if why := ownFolder(dir); why != "" {
+			t.Fatalf("this user's own closed folder: %s", why)
+		}
+		old := currentUID
+		t.Cleanup(func() { currentUID = old })
+		currentUID = func() int { return old() + 1 }
+		if why := ownFolder(dir); why == "" {
+			t.Fatal("a closed folder of another user counts as this user's")
+		}
+	})
+
+	t.Run("a folder above that belongs to another user holds nothing in place", func(t *testing.T) {
+		if currentUID() == 0 {
+			t.Skip("root is trusted above any folder")
+		}
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, "x"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if why := heldInPlace(filepath.Join(dir, "x")); why != "" {
+			t.Fatalf("under this user's own folders: %s", why)
+		}
+		old := currentUID
+		t.Cleanup(func() { currentUID = old })
+		currentUID = func() int { return old() + 1 }
+		if why := heldInPlace(filepath.Join(dir, "x")); why == "" {
+			t.Fatal("a path under another user's 0700 folder counts as held in place: its owner can rename it")
+		}
+	})
+
+	t.Run("a folder two levels up that others can write into is seen", func(t *testing.T) {
+		top := t.TempDir()
+		path := filepath.Join(top, "a", "b", "c")
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if why := heldInPlace(path); why != "" {
+			t.Fatalf("closed chain: %s", why)
+		}
+		t.Cleanup(func() { _ = os.Chmod(top, 0o700) })
+		if err := os.Chmod(top, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		if why := heldInPlace(path); why == "" {
+			t.Fatal("a folder two levels above is open to every user, and the path counts as held in place")
 		}
 	})
 

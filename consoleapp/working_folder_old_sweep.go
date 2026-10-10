@@ -53,7 +53,7 @@ const unusedDefaultSweepEvery = time.Hour
 //   - Only inside folders that belong to this process's user and that no
 //     other user can write into, from the working folder down to the build
 //     (ownFolder), and only when no other user can rename the working folder
-//     itself (heldInPlace). Without that, an entry could be swapped for a
+//     or any folder above it (heldInPlace). Without that, an entry could be swapped for a
 //     link between the check and the removal.
 //   - Never the dump, staged-snapshot or staged-run folders. Those of a dead
 //     job this install journaled are reclaimed through the journal, which
