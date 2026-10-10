@@ -99,12 +99,14 @@ func TestThemeContractAcrossFiles(t *testing.T) {
 
 // --white is white in BOTH themes (text on the brand gradient). On an --ink
 // ground that is right in light and invisible in dark, where --ink is near
-// white: a checked checkbox with no tick, a picked day with no number. What
-// sits on --ink wears --on-ink, which flips with it.
-func TestNothingWhiteOnAnInkGround(t *testing.T) {
+// white: a checked checkbox with no tick, a picked day with no number. The
+// solid data and state colours flip the same way (dark red in light, light
+// red in dark), so a white label on one fades too. What sits on a ground
+// that flips wears --on-ink, which flips with it.
+func TestNothingWhiteOnAGroundThatFlips(t *testing.T) {
 	css := sanitizeCSS(readAsset(t, "style.css"))
 	rule := regexp.MustCompile(`([^{}]+)\{([^{}]*)\}`)
-	inkGround := regexp.MustCompile(`background(-color)?:\s*var\(--ink\)`)
+	inkGround := regexp.MustCompile(`background(-color)?:\s*var\(--(ink|delete|insert|update|accent|accent-2|ok|error|warn|orange-2)\)`)
 	var grounds []string
 	for _, m := range rule.FindAllStringSubmatch(css, -1) {
 		sel, body := strings.TrimSpace(m[1]), m[2]
@@ -115,11 +117,11 @@ func TestNothingWhiteOnAnInkGround(t *testing.T) {
 		// .btn-primary is the one exception: the dark set repaints its
 		// ground with the brand gradient, where white is the right ink.
 		if strings.Contains(body, "var(--white)") && sel != ".btn-primary" {
-			t.Errorf("%s puts var(--white) on a var(--ink) ground; in dark that is white on near white. Use var(--on-ink).", sel)
+			t.Errorf("%s puts var(--white) on a ground that turns light in dark. Use var(--on-ink).", sel)
 		}
 	}
-	if len(grounds) < 5 {
-		t.Fatalf("found only %d rules with an --ink ground (%v); the scan stopped matching, so it guards nothing", len(grounds), grounds)
+	if len(grounds) < 15 {
+		t.Fatalf("found only %d rules with a ground that flips (%v); the scan stopped matching, so it guards nothing", len(grounds), grounds)
 	}
 	// The tick and the dot are painted by ::after, a rule apart from the
 	// ground they sit on, so the scan above cannot pair them.

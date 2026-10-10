@@ -31,8 +31,9 @@
   /* ALWAYS white, in every theme: text on the brand gradient, the toggle knob */
   --white:     #ffffff;
   /* what sits ON an --ink ground (the lit pill, a checkbox tick, the picked
-     day): white here, the dark surface in dark, where --ink is near white
-     and --white on it measured 1.15:1 (#1969) */
+     day) or on a solid data/state fill (the Delete button under the
+     pointer): white here, the dark surface in dark, where those grounds turn
+     light and --white on --ink measured 1.15:1 (#1969) */
   --on-ink:    #ffffff;
 
   /* ---- ink ramp: site ink hue/chroma at console lightness steps.
@@ -625,7 +626,7 @@ button { font-family: inherit; }
 .btn-ghost { background: transparent; border-color: transparent; color: var(--ink-2); box-shadow: none; }
 .btn-ghost:hover { background: var(--raised); color: var(--ink); border-color: transparent; }
 .btn-danger { color: var(--delete); border-color: color-mix(in srgb, var(--delete) 40%, var(--line)); }
-.btn-danger:hover { color: var(--white); background: var(--delete); border-color: transparent; }
+.btn-danger:hover { color: var(--on-ink); background: var(--delete); border-color: transparent; }
 .btn-sm { height: 30px; padding: 0 10px; font-size: var(--fs-xs); border-radius: var(--r-sm); }
 .btn-icon { width: 34px; height: 34px; padding: 0; border-radius: var(--r-sm); color: var(--ink-3); }
 .btn-icon.btn-sm { width: 28px; height: 28px; }
