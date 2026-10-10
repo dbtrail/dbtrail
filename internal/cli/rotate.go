@@ -238,6 +238,9 @@ func runRotate(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+		if err := replacementsOwed(res, rotNoReplace); err != nil {
+			return err
+		}
 		if rotFormat == "json" {
 			return cliutil.OutputJSON(struct {
 				PartitionsDropped int `json:"partitions_dropped"`
@@ -287,4 +290,17 @@ func runRotate(cmd *cobra.Command, args []string) error {
 			}()
 		}
 	}
+}
+
+// replacementsOwed is the error of a run that dropped partitions and could
+// not add their replacements because binlog_events was in use (#2280).
+// Replacements are owed only by the run that dropped, so a later plain run
+// would leave the window short for good: the run fails and names the
+// command that adds them.
+func replacementsOwed(res rotation.Result, noReplace bool) error {
+	if res.AddSkipped == 0 || res.Dropped == 0 || noReplace {
+		return nil
+	}
+	return fmt.Errorf("dropped %d partition(s) but could not add %d future partition(s): binlog_events was in use; run 'bintrail rotate --add-future %d' to add them",
+		res.Dropped, res.AddSkipped, res.AddFutureTarget)
 }

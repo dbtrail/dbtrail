@@ -111,7 +111,8 @@ type RotateTarget struct {
 // banner are taken once from the initial read: a daemon started with rotation
 // off runs no loop (re-enabling needs a restart).
 // onCycle callbacks (optional) observe each cycle's health — failed reports a
-// rotation error, deferred counts partitions the cycle declined to drop
+// rotation error, deferred counts the steps the cycle left undone: partitions
+// it declined to drop, and an add of future partitions it skipped
 // (Result.Deferred). They run inside the cycle's recover guard, so a panicking callback
 // cannot take down the loop.
 func StartLoop(ctx context.Context, settings func() Settings, targets func() []RotateTarget, onCycle ...func(failed bool, deferred int)) <-chan struct{} {

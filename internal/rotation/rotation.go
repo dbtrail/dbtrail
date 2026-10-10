@@ -22,13 +22,21 @@ import (
 // retention that this cycle did NOT drop to avoid data loss: the
 // ProtectUnarchived guard refusing an unarchived partition, an S3 upload that
 // failed in this run, an upload still pending (in either branch, whichever
-// source it belongs to), or a partition that changed after it was archived.
+// source it belongs to), a partition that changed after it was archived, or
+// one whose drop found binlog_events in use (#2280). An add of future
+// partitions skipped for that reason counts as one more, so Deferred is the
+// steps a cycle left undone, not strictly a number of partitions.
 // The built-in loop sums it across targets to drive escalation. The explicit
 // `rotate` command surfaces only Dropped/Added, but can still produce
 // Deferred>0 for the last three. A named struct, not a positional tuple: three same-typed ints
 // invite silent misordering at call sites.
 type Result struct {
 	Dropped, Added, Deferred int
+	// AddSkipped is how many future partitions the cycle meant to add and
+	// did not, because binlog_events was in use (#2280); AddFutureTarget is
+	// the --add-future value that adds them in a later run. Both are zero
+	// when nothing was skipped.
+	AddSkipped, AddFutureTarget int
 }
 
 // Options configures one rotation cycle. The fields replace the package-level
@@ -105,6 +113,9 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 
 	// ── Drop old partitions ───────────────────────────────────────────────────
 	var droppedCount, deferredCount int
+	// tableBusy: a drop of this cycle gave up because binlog_events was in
+	// use. No later step of the cycle asks for the table again.
+	var tableBusy bool
 	if retainDur > 0 {
 		cutoff := time.Now().UTC().Add(-retainDur)
 		var toDrop []string
@@ -168,7 +179,7 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 					}
 				}
 
-				for _, name := range toDrop {
+				for i, name := range toDrop {
 					outPath, err := HiveArchivePath(opts.ArchiveDir, opts.BintrailID, name)
 					if err != nil {
 						return Result{}, fmt.Errorf("build archive path for %s: %w", name, err)
@@ -419,24 +430,56 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 							fmt.Fprintf(os.Stdout, "skipped drop for %s (partition changed since archive: %d → %d rows; will re-archive next cycle)\n",
 								name, archived.Int64, live)
 						}
-						// Discard the incomplete staged archive and its
-						// archive_state row so (a) --retry re-archives instead of
-						// trusting the stale file, and (b) no later drop-only cycle
-						// trusts this partition as safely archived.
-						if _, derr := db.ExecContext(ctx,
-							`DELETE FROM archive_state WHERE partition_name = ? AND bintrail_id = ?`,
-							name, opts.BintrailID); derr != nil {
-							return Result{}, fmt.Errorf("invalidate stale archive state for %s: %w", name, derr)
-						}
-						if rerr := os.Remove(outPath); rerr != nil && !os.IsNotExist(rerr) {
-							slog.Warn("could not remove stale local archive after deferring drop", "partition", name, "error", rerr)
+						if err := discardStaleArchive(ctx, db, name, opts.BintrailID, outPath); err != nil {
+							return Result{}, err
 						}
 						deferredCount++
 						continue
 					}
 
 					// Drop this partition immediately after archiving.
-					if err := dropPartitions(ctx, db, dbName, []string{name}); err != nil {
+					// The count above holds for the first attempt only: a
+					// retry comes after a pause in which rows can arrive, so
+					// each one counts again (#2280).
+					unchanged := func(ctx context.Context) error {
+						live, err := partitionRowCount(ctx, db, dbName, name)
+						if err != nil {
+							return fmt.Errorf("recount partition %s before drop: %w", name, err)
+						}
+						if !archivedPartitionUnchanged(archived, live) {
+							return errChangedWhileWaiting
+						}
+						return nil
+					}
+					if err := dropPartitions(ctx, db, dbName, []string{name}, unchanged); err != nil {
+						if errors.Is(err, errChangedWhileWaiting) {
+							// The archive is as stale as one the count above
+							// refuses, and is discarded the same way.
+							slog.Warn("partition received rows while its drop waited for the table; deferring drop and discarding the stale archive for re-archive next cycle",
+								"partition", name)
+							if opts.Format != "json" {
+								fmt.Fprintf(os.Stdout, "skipped drop for %s (rows arrived while the drop waited; will re-archive next cycle)\n", name)
+							}
+							if err := discardStaleArchive(ctx, db, name, opts.BintrailID, outPath); err != nil {
+								return Result{}, err
+							}
+							deferredCount++
+							continue
+						}
+						if errors.Is(err, errTableBusy) {
+							// Archived and still in the index: the next cycle
+							// drops it. The partitions after it are left too,
+							// so one cycle asks for the table once and not
+							// once for each of them (#2280).
+							left := toDrop[i:]
+							warnTableBusy(dbName, "drop "+strings.Join(left, ", "), err)
+							if opts.Format != "json" {
+								fmt.Fprintf(os.Stdout, "skipped drop for %s (the index table was in use; the next run drops them)\n", strings.Join(left, ", "))
+							}
+							deferredCount += len(left)
+							tableBusy = true
+							break
+						}
 						return Result{}, fmt.Errorf("failed to drop partition %s: %w", name, err)
 					}
 					droppedCount++
@@ -510,8 +553,18 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 					safeToDrop = append(safeToDrop, name)
 				}
 				if len(safeToDrop) > 0 {
-					if err := dropPartitions(ctx, db, dbName, safeToDrop); err != nil {
-						return Result{}, fmt.Errorf("failed to drop partitions: %w", err)
+					if err := dropPartitions(ctx, db, dbName, safeToDrop, nil); err != nil {
+						if !errors.Is(err, errTableBusy) {
+							return Result{}, fmt.Errorf("failed to drop partitions: %w", err)
+						}
+						// Nothing was dropped; the next cycle tries again (#2280).
+						warnTableBusy(dbName, "drop "+strings.Join(safeToDrop, ", "), err)
+						if opts.Format != "json" {
+							fmt.Fprintf(os.Stdout, "skipped drop for %s (the index table was in use; the next run drops them)\n", strings.Join(safeToDrop, ", "))
+						}
+						deferredCount += len(safeToDrop)
+						safeToDrop = nil
+						tableBusy = true
 					}
 				}
 				for _, name := range safeToDrop {
@@ -549,10 +602,32 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 	nowHour := time.Now().UTC().Truncate(time.Hour)
 	futureCount := countFuturePartitions(partitions, nowHour)
 	toAdd := computeToAdd(opts.AddFuture, futureCount, droppedCount, opts.NoReplace)
+	addSkipped, addFutureTarget := 0, 0
 	if toAdd > 0 {
 		startDate := nextPartitionStart(partitions)
-		if err := addFuturePartitions(ctx, db, dbName, startDate, toAdd); err != nil {
-			return Result{}, fmt.Errorf("failed to add future partitions: %w", err)
+		// A drop that found the table in use this cycle already asked for
+		// it five times: the add does not ask again.
+		err := error(errTableBusy)
+		if !tableBusy {
+			err = addFuturePartitions(ctx, db, dbName, startDate, toAdd)
+		}
+		if err != nil {
+			if !errors.Is(err, errTableBusy) {
+				return Result{}, fmt.Errorf("failed to add future partitions: %w", err)
+			}
+			// Counted as deferred so a table in use cycle after cycle
+			// reaches the loop's escalation before the partitions ahead
+			// run out and rows land in p_future. A later run with
+			// --add-future at addFutureTarget adds what this one could
+			// not; a run without it does not, because replacements are
+			// owed only by the run that dropped (#2280).
+			warnTableBusy(dbName, fmt.Sprintf("add %d future partition(s)", toAdd), err)
+			if opts.Format != "json" {
+				fmt.Fprintf(os.Stdout, "skipped adding %d future partition(s) (the index table was in use)\n", toAdd)
+			}
+			addSkipped, addFutureTarget = toAdd, futureCount+toAdd
+			deferredCount++
+			toAdd = 0
 		}
 		for i := range toAdd {
 			if opts.Format != "json" {
@@ -574,7 +649,8 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 		"duration_ms", time.Since(start).Milliseconds())
 	slog.Info("rotation complete", completeAttrs...)
 
-	return Result{Dropped: droppedCount, Added: toAdd, Deferred: deferredCount}, nil
+	return Result{Dropped: droppedCount, Added: toAdd, Deferred: deferredCount,
+		AddSkipped: addSkipped, AddFutureTarget: addFutureTarget}, nil
 }
 
 // dropLevel is the level of a "dropped partition" line: Info, the durable
@@ -790,11 +866,33 @@ func listPartitions(ctx context.Context, db *sql.DB, dbName string) ([]partition
 }
 
 // dropPartitions drops one or more named partitions in a single ALTER TABLE statement.
-func dropPartitions(ctx context.Context, db *sql.DB, dbName string, names []string) error {
+func dropPartitions(ctx context.Context, db *sql.DB, dbName string, names []string, stillSafe func(context.Context) error) error {
 	q := fmt.Sprintf("ALTER TABLE `%s`.`binlog_events` DROP PARTITION %s",
 		dbName, strings.Join(names, ", "))
-	_, err := db.ExecContext(ctx, q)
-	return err
+	return alterBinlogEvents(ctx, db, q, stillSafe)
+}
+
+// discardStaleArchive drops the archive of a partition that received rows
+// after it was archived: its archive_state row and its staged file, so that
+// (a) --retry re-archives instead of trusting the stale file, and (b) no
+// later drop-only cycle trusts this partition as safely archived.
+func discardStaleArchive(ctx context.Context, db *sql.DB, name, bintrailID, outPath string) error {
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM archive_state WHERE partition_name = ? AND bintrail_id = ?`,
+		name, bintrailID); err != nil {
+		return fmt.Errorf("invalidate stale archive state for %s: %w", name, err)
+	}
+	if err := os.Remove(outPath); err != nil && !os.IsNotExist(err) {
+		slog.Warn("could not remove stale local archive after deferring drop", "partition", name, "error", err)
+	}
+	return nil
+}
+
+// warnTableBusy says a rotation statement was given up because the table was
+// in use, and that the next cycle does it.
+func warnTableBusy(dbName, what string, err error) {
+	slog.Warn("rotation: the index table was in use, so this step waits for the next cycle rather than hold up capture; if it repeats, look for a long statement or a transaction left open on binlog_events",
+		"db", dbName, "step", what, "error", err)
 }
 
 // partitionHasData reports whether the p_future catch-all partition holds any rows.
@@ -885,6 +983,5 @@ func addFuturePartitions(ctx context.Context, db *sql.DB, dbName string, startDa
 		dbName,
 		strings.Join(parts, ",\n\t"),
 	)
-	_, err := db.ExecContext(ctx, q)
-	return err
+	return alterBinlogEvents(ctx, db, q, nil)
 }
