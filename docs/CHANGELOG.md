@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **Rotation no longer holds up capture while the index table is being
+  read** (#2280). Dropping old partitions and adding future ones are
+  `ALTER TABLE` statements on `binlog_events`. MySQL makes such a statement
+  wait for every statement already reading the table, and makes every new
+  statement on the table, the capture's inserts included, wait behind it.
+  A long read of the index at the moment a rotation cycle ran therefore
+  stopped capture for as long as the read lasted. Rotation now waits at
+  most 2 seconds for the table, lets the queued statements through, and
+  tries again after 3 seconds, up to 5 times. If the table is still in use
+  it leaves that step for the next cycle: the partitions stay in the index
+  and are counted as deferred, the log says which step waited, and no rows
+  or archives are lost. Applies to `bintrail rotate` and to the rotation
+  the `watch` daemon runs.
 - **The MySQL port bounds the results it holds while it sends them**
   (#2241). A result of ordinary SQL on the port is built whole in the
   daemon, the process that captures, and stays there until the client has

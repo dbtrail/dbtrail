@@ -52,6 +52,8 @@ The `--retain` flag accepts a duration: `7d` (days) or `24h` (hours). The comman
 
 A single `ALTER TABLE DROP PARTITION` statement for multiple partitions is more efficient than separate statements — MySQL does it in one pass.
 
+The statement needs the table to itself for an instant. MySQL makes it wait for every statement already reading `binlog_events`, and makes every new statement on the table wait behind it, including the inserts of a running `stream`. So rotation waits at most 2 seconds for the table, steps aside, and tries again after 3 seconds, up to 5 times. If the table is still in use, the partitions stay in place, the summary counts them as deferred, the log says so, and the next run drops them. The same applies to adding future partitions.
+
 After dropping, the command automatically adds the same number of future hourly partitions to keep the rolling window size constant (e.g. dropping 168 partitions adds 168 new ones). Use `--no-replace` to suppress this auto-replacement when you genuinely want to reclaim space:
 
 ```sh

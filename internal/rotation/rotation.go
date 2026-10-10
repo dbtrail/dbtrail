@@ -437,6 +437,13 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 
 					// Drop this partition immediately after archiving.
 					if err := dropPartitions(ctx, db, dbName, []string{name}); err != nil {
+						if errors.Is(err, errTableBusy) {
+							// Archived and still in the index: the next cycle
+							// drops it (#2280).
+							warnTableBusy(dbName, "drop partition "+name, err)
+							deferredCount++
+							continue
+						}
 						return Result{}, fmt.Errorf("failed to drop partition %s: %w", name, err)
 					}
 					droppedCount++
@@ -511,7 +518,13 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 				}
 				if len(safeToDrop) > 0 {
 					if err := dropPartitions(ctx, db, dbName, safeToDrop); err != nil {
-						return Result{}, fmt.Errorf("failed to drop partitions: %w", err)
+						if !errors.Is(err, errTableBusy) {
+							return Result{}, fmt.Errorf("failed to drop partitions: %w", err)
+						}
+						// Nothing was dropped; the next cycle tries again (#2280).
+						warnTableBusy(dbName, "drop "+strings.Join(safeToDrop, ", "), err)
+						deferredCount += len(safeToDrop)
+						safeToDrop = nil
 					}
 				}
 				for _, name := range safeToDrop {
@@ -552,7 +565,13 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 	if toAdd > 0 {
 		startDate := nextPartitionStart(partitions)
 		if err := addFuturePartitions(ctx, db, dbName, startDate, toAdd); err != nil {
-			return Result{}, fmt.Errorf("failed to add future partitions: %w", err)
+			if !errors.Is(err, errTableBusy) {
+				return Result{}, fmt.Errorf("failed to add future partitions: %w", err)
+			}
+			// The partitions already ahead cover the hours until the next
+			// cycle, which adds what this one could not (#2280).
+			warnTableBusy(dbName, fmt.Sprintf("add %d future partition(s)", toAdd), err)
+			toAdd = 0
 		}
 		for i := range toAdd {
 			if opts.Format != "json" {
@@ -793,8 +812,14 @@ func listPartitions(ctx context.Context, db *sql.DB, dbName string) ([]partition
 func dropPartitions(ctx context.Context, db *sql.DB, dbName string, names []string) error {
 	q := fmt.Sprintf("ALTER TABLE `%s`.`binlog_events` DROP PARTITION %s",
 		dbName, strings.Join(names, ", "))
-	_, err := db.ExecContext(ctx, q)
-	return err
+	return alterBinlogEvents(ctx, db, q)
+}
+
+// warnTableBusy says a rotation statement was given up because the table was
+// in use, and that the next cycle does it.
+func warnTableBusy(dbName, what string, err error) {
+	slog.Warn("rotation: the index table was in use, so this step waits for the next cycle rather than hold up capture",
+		"db", dbName, "step", what, "error", err)
 }
 
 // partitionHasData reports whether the p_future catch-all partition holds any rows.
@@ -885,6 +910,5 @@ func addFuturePartitions(ctx context.Context, db *sql.DB, dbName string, startDa
 		dbName,
 		strings.Join(parts, ",\n\t"),
 	)
-	_, err := db.ExecContext(ctx, q)
-	return err
+	return alterBinlogEvents(ctx, db, q)
 }
