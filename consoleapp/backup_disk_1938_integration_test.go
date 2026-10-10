@@ -23,7 +23,7 @@ func TestIntegrationEstimateDumpSize(t *testing.T) {
 	sourceDSN := testutil.BaseDSN() + "/"
 
 	empty, err := estimateDumpSize(ctx, sourceDSN, config.SSL{Mode: "preferred"}, []string{name})
-	if err != nil || empty.tables != 0 || empty.bytes != 0 || empty.unsized != 0 {
+	if err != nil || empty.Tables != 0 || empty.Bytes != 0 || empty.Unsized != 0 {
 		t.Fatalf("empty schema: %+v, %v", empty, err)
 	}
 
@@ -64,28 +64,28 @@ func TestIntegrationEstimateDumpSize(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if est.bytes > cached || time.Now().After(deadline) {
+		if est.Bytes > cached || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(time.Second)
 	}
-	if est.tables != 1 {
-		t.Fatalf("tables = %d, want 1: the view is not a table the dump copies", est.tables)
+	if est.Tables != 1 {
+		t.Fatalf("tables = %d, want 1: the view is not a table the dump copies", est.Tables)
 	}
-	if est.bytes <= cached {
-		t.Fatalf("estimate %d never rose above the cached one-row size %d: the stale cache was read", est.bytes, cached)
+	if est.Bytes <= cached {
+		t.Fatalf("estimate %d never rose above the cached one-row size %d: the stale cache was read", est.Bytes, cached)
 	}
 	var stale int64
 	if err := db.QueryRow("SELECT DATA_LENGTH + INDEX_LENGTH FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 't1'", name).Scan(&stale); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("default session still reads %d bytes", stale)
-	t.Logf("cached one-row size %d, fresh estimate %d bytes", cached, est.bytes)
+	t.Logf("cached one-row size %d, fresh estimate %d bytes", cached, est.Bytes)
 
 	// Every non-system schema: this one's table is counted, the system
 	// schemas are not.
 	all, err := estimateDumpSize(ctx, sourceDSN, config.SSL{Mode: "preferred"}, nil)
-	if err != nil || all.tables < 1 || all.bytes < est.bytes {
+	if err != nil || all.Tables < 1 || all.Bytes < est.Bytes {
 		t.Fatalf("all schemas: %+v, %v", all, err)
 	}
 	// The table counts, read the way the estimate reads them: every base
@@ -102,9 +102,9 @@ func TestIntegrationEstimateDumpSize(t *testing.T) {
 	if sys == 0 {
 		t.Fatal("the server has no system tables, so this case proves nothing")
 	}
-	if all.tables != everything-sys {
+	if all.Tables != everything-sys {
 		t.Fatalf("all schemas counted %d tables; the server has %d, %d of them in system schemas, so want %d",
-			all.tables, everything, sys, everything-sys)
+			all.Tables, everything, sys, everything-sys)
 	}
 
 	// A table stored compressed (#1938): the server reports its compressed
@@ -120,11 +120,11 @@ func TestIntegrationEstimateDumpSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if withZipped.tables != 2 || withZipped.compressed != 1 || len(withZipped.compressedTop) != 1 || withZipped.compressedTop[0] != name+".zipped" {
+	if withZipped.Tables != 2 || withZipped.Compressed != 1 || len(withZipped.CompressedTop) != 1 || withZipped.CompressedTop[0] != name+".zipped" {
 		t.Fatalf("with a compressed table: %+v", withZipped)
 	}
-	if withZipped.dataBytes <= 0 || withZipped.dataBytes >= withZipped.bytes {
-		t.Fatalf("data %d, data plus indexes %d: want the data alone to be the smaller, positive sum", withZipped.dataBytes, withZipped.bytes)
+	if withZipped.DataBytes <= 0 || withZipped.DataBytes >= withZipped.Bytes {
+		t.Fatalf("data %d, data plus indexes %d: want the data alone to be the smaller, positive sum", withZipped.DataBytes, withZipped.Bytes)
 	}
 
 	// The session's own time limit, as the server took it: MySQL knows one

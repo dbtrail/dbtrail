@@ -26,7 +26,7 @@ func row(schema, table, engine, format string, data, index int64) dumpTableRow {
 
 func TestSummarizeDumpTables_1938(t *testing.T) {
 	t.Run("no tables", func(t *testing.T) {
-		if est := summarizeDumpTables(nil); est.tables != 0 || est.bytes != 0 || est.dataBytes != 0 || est.compressed != 0 || len(est.compressedTop) != 0 {
+		if est := summarizeDumpTables(nil); est.Tables != 0 || est.Bytes != 0 || est.DataBytes != 0 || est.Compressed != 0 || len(est.CompressedTop) != 0 {
 			t.Fatalf("est = %+v", est)
 		}
 	})
@@ -35,7 +35,7 @@ func TestSummarizeDumpTables_1938(t *testing.T) {
 			row("shop", "orders", "InnoDB", "Dynamic", 10, 30),
 			row("shop", "items", "InnoDB", "Dynamic", 5, 0),
 		})
-		if est.tables != 2 || est.dataBytes != 15 || est.bytes != 45 || est.unsized != 0 || est.compressed != 0 {
+		if est.Tables != 2 || est.DataBytes != 15 || est.Bytes != 45 || est.Unsized != 0 || est.Compressed != 0 {
 			t.Fatalf("est = %+v", est)
 		}
 	})
@@ -45,7 +45,7 @@ func TestSummarizeDumpTables_1938(t *testing.T) {
 			{schema: "shop", table: "b", engine: nstr("InnoDB"), rowFormat: nstr("Dynamic"), data: nint(7)},
 			row("shop", "c", "InnoDB", "Dynamic", 1, 2),
 		})
-		if est.tables != 3 || est.unsized != 2 || est.dataBytes != 8 || est.bytes != 10 {
+		if est.Tables != 3 || est.Unsized != 2 || est.DataBytes != 8 || est.Bytes != 10 {
 			t.Fatalf("est = %+v", est)
 		}
 	})
@@ -63,12 +63,12 @@ func TestSummarizeDumpTables_1938(t *testing.T) {
 		}
 		for _, c := range cases {
 			est := summarizeDumpTables([]dumpTableRow{row("s", "t", c.engine, c.format, 1, 1)})
-			if got := est.compressed == 1; got != c.want {
+			if got := est.Compressed == 1; got != c.want {
 				t.Errorf("engine %q, row format %q: compressed = %v, want %v", c.engine, c.format, got, c.want)
 			}
 		}
 		// The server reports neither for a table it cannot open.
-		if est := summarizeDumpTables([]dumpTableRow{{schema: "s", table: "t", data: nint(1)}}); est.compressed != 0 {
+		if est := summarizeDumpTables([]dumpTableRow{{schema: "s", table: "t", data: nint(1)}}); est.Compressed != 0 {
 			t.Errorf("a table with no engine and no row format was called compressed: %+v", est)
 		}
 	})
@@ -81,15 +81,15 @@ func TestSummarizeDumpTables_1938(t *testing.T) {
 			row("shop", "tie_b", "InnoDB", "Compressed", 40, 40),
 			row("shop", "tie_a", "InnoDB", "Compressed", 40, 40),
 		})
-		if est.compressed != 5 || len(est.compressedTop) != 2 || est.compressedTop[0] != "shop.big" || est.compressedTop[1] != "logs.events" {
-			t.Fatalf("compressed = %d, named = %q", est.compressed, est.compressedTop)
+		if est.Compressed != 5 || len(est.CompressedTop) != 2 || est.CompressedTop[0] != "shop.big" || est.CompressedTop[1] != "logs.events" {
+			t.Fatalf("compressed = %d, named = %q", est.Compressed, est.CompressedTop)
 		}
 		// Same size: by name, so the sentence does not change between runs.
 		est = summarizeDumpTables([]dumpTableRow{
 			row("shop", "tie_b", "InnoDB", "Compressed", 40, 40), row("shop", "tie_a", "InnoDB", "Compressed", 40, 40), row("shop", "tie_c", "InnoDB", "Compressed", 40, 40),
 		})
-		if strings.Join(est.compressedTop, ",") != "shop.tie_a,shop.tie_b" {
-			t.Fatalf("named = %q", est.compressedTop)
+		if strings.Join(est.CompressedTop, ",") != "shop.tie_a,shop.tie_b" {
+			t.Fatalf("named = %q", est.CompressedTop)
 		}
 	})
 	t.Run("only the largest are kept, however many there are and in whatever order they come", func(t *testing.T) {
@@ -105,13 +105,13 @@ func TestSummarizeDumpTables_1938(t *testing.T) {
 			}
 		}
 		// (i*37)%500 is 499 at i=27 and 498 at i=54.
-		if est := sum.estimate(); est.compressed != 500 || strings.Join(est.compressedTop, ",") != "s.t027,s.t054" {
-			t.Fatalf("compressed = %d, named = %q", est.compressed, est.compressedTop)
+		if est := sum.estimate(); est.Compressed != 500 || strings.Join(est.CompressedTop, ",") != "s.t027,s.t054" {
+			t.Fatalf("compressed = %d, named = %q", est.Compressed, est.CompressedTop)
 		}
 	})
 	t.Run("a name cannot break the line it is printed on", func(t *testing.T) {
 		est := summarizeDumpTables([]dumpTableRow{row("sh\nop", "or\tders\x00", "InnoDB", "Compressed", 1, 1), row("año", "a b.c", "InnoDB", "Compressed", 2, 2)})
-		if got := strings.Join(est.compressedTop, "|"); got != "año.a b.c|sh?op.or?ders?" {
+		if got := strings.Join(est.CompressedTop, "|"); got != "año.a b.c|sh?op.or?ders?" {
 			t.Fatalf("named = %q", got)
 		}
 	})
@@ -129,7 +129,7 @@ func TestCompressedTablesSentence_1938(t *testing.T) {
 		{3, []string{"shop.orders", "shop.events"}, " 3 tables use compressed storage (shop.orders, shop.events and 1 more): the server reports their compressed size, and a full read writes them uncompressed, so a full read can need more than the sizes say."},
 		{120, []string{"shop.orders", "shop.events"}, " 120 tables use compressed storage (shop.orders, shop.events and 118 more): the server reports their compressed size, and a full read writes them uncompressed, so a full read can need more than the sizes say."},
 	} {
-		if got := compressedTablesSentence(dumpEstimate{compressed: c.n, compressedTop: c.top}); got != c.want {
+		if got := compressedTablesSentence(dumpEstimate{Compressed: c.n, CompressedTop: c.top}); got != c.want {
 			t.Errorf("%d compressed:\n got %q\nwant %q", c.n, got, c.want)
 		}
 	}
@@ -141,7 +141,7 @@ func TestCompressedTablesSentence_1938(t *testing.T) {
 func TestDumpDiskVerdict_refusesOnDataAlone_1938(t *testing.T) {
 	stage := t.TempDir()
 	// 10 GiB of rows under 30 GiB of secondary indexes.
-	est := dumpEstimate{dataBytes: int64(10 * gib), bytes: int64(40 * gib), tables: 1}
+	est := dumpEstimate{DataBytes: int64(10 * gib), Bytes: int64(40 * gib), Tables: 1}
 
 	t.Run("15 GiB free: runs with a warning (it was refused: 15 < half of 40)", func(t *testing.T) {
 		diskByPath(t, map[string]uint64{stage: 15 * gib})
@@ -190,7 +190,7 @@ func TestDumpDiskVerdict_refusesOnDataAlone_1938(t *testing.T) {
 	})
 	t.Run("a server that reports no data size never refuses", func(t *testing.T) {
 		diskByPath(t, map[string]uint64{stage: 0})
-		check, _, err := dumpDiskVerdict(stage, "", dumpEstimate{dataBytes: 0, bytes: int64(40 * gib), tables: 1, unsized: 1}, nil)
+		check, _, err := dumpDiskVerdict(stage, "", dumpEstimate{DataBytes: 0, Bytes: int64(40 * gib), Tables: 1, Unsized: 1}, nil)
 		if err != nil || check != dumpDiskLow {
 			t.Fatalf("check = %q, err = %v", check, err)
 		}
@@ -201,7 +201,7 @@ func TestDumpDiskVerdict_refusesOnDataAlone_1938(t *testing.T) {
 // they are, and "there is room" becomes "the check cannot vouch for it".
 func TestDumpDiskVerdict_compressedTables_1938(t *testing.T) {
 	stage := t.TempDir()
-	est := dumpEstimate{dataBytes: int64(10 * gib), bytes: int64(10 * gib), tables: 4, compressed: 3, compressedTop: []string{"shop.orders", "shop.events"}}
+	est := dumpEstimate{DataBytes: int64(10 * gib), Bytes: int64(10 * gib), Tables: 4, Compressed: 3, CompressedTop: []string{"shop.orders", "shop.events"}}
 	const sentence = "3 tables use compressed storage (shop.orders, shop.events and 1 more)"
 
 	t.Run("room by the reported sizes: not vouched for", func(t *testing.T) {
@@ -228,7 +228,7 @@ func TestDumpDiskVerdict_compressedTables_1938(t *testing.T) {
 			!strings.Contains(note, sentence) {
 			t.Fatalf("check = %q, err = %v, note = %q", check, err, note)
 		}
-		plain := dumpEstimate{dataBytes: int64(10 * gib), bytes: int64(10 * gib), tables: 4}
+		plain := dumpEstimate{DataBytes: int64(10 * gib), Bytes: int64(10 * gib), Tables: 4}
 		if check, note, _ := dumpDiskVerdict(stage, local, plain, nil); check != dumpDiskOK || !strings.HasPrefix(note, "Disk check: the dump needs about ") {
 			t.Fatalf("without compressed tables: check = %q, note = %q", check, note)
 		}
@@ -253,7 +253,7 @@ func TestDumpDiskVerdict_compressedTables_1938(t *testing.T) {
 			t.Errorf("the note no longer says where the dump goes: %s", note)
 		}
 		// Without compressed tables the sentence is what it was.
-		plain := dumpEstimate{dataBytes: int64(10 * gib), bytes: int64(10 * gib), tables: 4}
+		plain := dumpEstimate{DataBytes: int64(10 * gib), Bytes: int64(10 * gib), Tables: 4}
 		if _, note, _ := dumpDiskVerdict(stage, local, plain, nil); !strings.Contains(note, "the copy can take up to about 10.0 GiB") || !strings.Contains(note, "The dump itself fits at "+stage) {
 			t.Errorf("the plain note changed: %s", note)
 		}
@@ -275,7 +275,7 @@ func TestDumpDiskVerdict_compressedTables_1938(t *testing.T) {
 		}
 	})
 	t.Run("without compressed tables the verdicts are what they were", func(t *testing.T) {
-		plain := dumpEstimate{dataBytes: int64(10 * gib), bytes: int64(10 * gib), tables: 4}
+		plain := dumpEstimate{DataBytes: int64(10 * gib), Bytes: int64(10 * gib), Tables: 4}
 		diskByPath(t, map[string]uint64{stage: 100 * gib})
 		if check, note, _ := dumpDiskVerdict(stage, "", plain, nil); check != dumpDiskOK || strings.Contains(note, "compressed storage") {
 			t.Fatalf("check = %q, note = %q", check, note)

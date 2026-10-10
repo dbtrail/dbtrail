@@ -131,21 +131,21 @@ const dumpEstimateTimeout = 15 * time.Second
 
 // dumpEstimate is what the source reports about the tables a dump selects.
 type dumpEstimate struct {
-	bytes int64 // DATA_LENGTH + INDEX_LENGTH, summed: what the warnings read
-	// dataBytes is DATA_LENGTH alone, summed: what the refusal reads, since
+	Bytes int64 // DATA_LENGTH + INDEX_LENGTH, summed: what the warnings read
+	// DataBytes is DATA_LENGTH alone, summed: what the refusal reads, since
 	// a dump holds no secondary indexes.
-	dataBytes int64
-	tables    int
-	// compressed counts tables whose reported size is their compressed size;
+	DataBytes int64
+	Tables    int
+	// Compressed counts tables whose reported size is their Compressed size;
 	// compressedTop names the largest dumpCompressedNamed of them.
-	compressed    int
-	compressedTop []string
-	// unsized counts tables the server reported no size for (NULL). They add
+	Compressed    int
+	CompressedTop []string
+	// Unsized counts tables the server reported no size for (NULL). They add
 	// nothing to bytes, so the note says the estimate is short by them.
-	unsized int
-	// stale: the source refused to serve current sizes (not the 1193 of a
+	Unsized int
+	// Stale: the source refused to serve current sizes (not the 1193 of a
 	// server that has no cache), so they may be up to a day old.
-	stale bool
+	Stale bool
 }
 
 // dumpSizeEstimateFn reads the estimate from the source; a test replaces it.
@@ -209,17 +209,17 @@ func (a namedSize) before(b namedSize) bool {
 }
 
 func (s *dumpTableSum) add(r dumpTableRow) {
-	s.est.tables++
+	s.est.Tables++
 	if !r.data.Valid || !r.index.Valid {
-		s.est.unsized++
+		s.est.Unsized++
 	}
 	data, index := max(r.data.Int64, 0), max(r.index.Int64, 0)
-	s.est.dataBytes += data
-	s.est.bytes += data + index
+	s.est.DataBytes += data
+	s.est.Bytes += data + index
 	if !r.storedCompressed() {
 		return
 	}
-	s.est.compressed++
+	s.est.Compressed++
 	n := namedSize{printableName(r.schema) + "." + printableName(r.table), data + index}
 	at := len(s.top)
 	for at > 0 && n.before(s.top[at-1]) {
@@ -231,9 +231,9 @@ func (s *dumpTableSum) add(r dumpTableRow) {
 
 func (s *dumpTableSum) estimate() dumpEstimate {
 	est := s.est
-	est.compressedTop = nil
+	est.CompressedTop = nil
 	for _, n := range s.top {
-		est.compressedTop = append(est.compressedTop, n.name)
+		est.CompressedTop = append(est.CompressedTop, n.name)
 	}
 	return est
 }
@@ -263,19 +263,19 @@ func printableName(s string) string {
 // compressed, "" when there are none. It starts with a space, like the other
 // parts of a note's tail.
 func compressedTablesSentence(est dumpEstimate) string {
-	if est.compressed == 0 {
+	if est.Compressed == 0 {
 		return ""
 	}
-	names := strings.Join(est.compressedTop, ", ")
-	if more := est.compressed - len(est.compressedTop); more > 0 {
+	names := strings.Join(est.CompressedTop, ", ")
+	if more := est.Compressed - len(est.CompressedTop); more > 0 {
 		names += fmt.Sprintf(" and %d more", more)
 	}
-	if est.compressed == 1 {
+	if est.Compressed == 1 {
 		return fmt.Sprintf(" 1 table uses compressed storage (%s): the server reports its compressed size, and a full read writes it "+
 			"uncompressed, so a full read can need more than the sizes say.", names)
 	}
 	return fmt.Sprintf(" %d tables use compressed storage (%s): the server reports their compressed size, and a full read writes them "+
-		"uncompressed, so a full read can need more than the sizes say.", est.compressed, names)
+		"uncompressed, so a full read can need more than the sizes say.", est.Compressed, names)
 }
 
 // sessionExecer is the part of a connection prepareEstimateSession uses.
@@ -367,7 +367,7 @@ func estimateDumpSize(ctx context.Context, sourceDSN string, ssl config.SSL, sch
 		return dumpEstimate{}, err
 	}
 	est := sum.estimate()
-	est.stale = stale
+	est.Stale = stale
 	return est, nil
 }
 
@@ -395,7 +395,7 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 		return dumpDiskUnchecked, "Disk check did not run: the table sizes could not be read from the source (" +
 			firstLineOf(estErr.Error()) + "). The full read went ahead.", nil
 	}
-	if est.tables == 0 {
+	if est.Tables == 0 {
 		// Not "needs 0 B": nothing matched, which is its own fact. mydumper
 		// runs with the same user and selection, so it has nothing to write.
 		return dumpDiskOK, "Disk check: no tables match what this read dumps, so there was nothing to size.", nil
@@ -405,9 +405,9 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 		return dumpDiskUnchecked, "Disk check did not run: the free space at " + stagingDir + " could not be measured (" +
 			why + "). The full read went ahead.", nil
 	}
-	need := uint64(max(est.bytes, 0))
+	need := uint64(max(est.Bytes, 0))
 	peak := need * dumpPeakTenths / 10
-	data := uint64(max(est.dataBytes, 0))
+	data := uint64(max(est.DataBytes, 0))
 	floor := data * dumpRefuseTenths / 10
 	shared, unknown := localDir == "", false
 	outDir := stagingDir
@@ -425,17 +425,17 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 		shared = same || unknown
 	}
 	short := ""
-	if est.unsized > 0 {
-		short += fmt.Sprintf(" The source gave no size for %d table(s), so the real need is higher.", est.unsized)
+	if est.Unsized > 0 {
+		short += fmt.Sprintf(" The source gave no size for %d table(s), so the real need is higher.", est.Unsized)
 	}
-	if est.stale {
+	if est.Stale {
 		short += " The source may have reported sizes up to a day old."
 	}
 	short += compressedTablesSentence(est)
 	// The sizes bound the dump from above only when every table reports its
 	// real size.
 	bound := ", an upper bound (secondary indexes are not dumped, deleted rows still count),"
-	if est.compressed > 0 {
+	if est.Compressed > 0 {
 		bound = ""
 	}
 
@@ -465,7 +465,7 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 			// "Up to" and "fits" are claims about a bound, which the sizes
 			// are not with tables stored compressed.
 			copyTakes, dumpFits := "the copy can take up to about", "The dump itself fits at"
-			if est.compressed > 0 {
+			if est.Compressed > 0 {
 				copyTakes, dumpFits = "by the sizes the server reports the copy takes about", "By those sizes the dump fits at"
 			}
 			return dumpDiskLow, fmt.Sprintf("Low disk: %s, where the Parquet copy goes, has %s free, and %s %s. "+
@@ -497,7 +497,7 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 // room: it says it cannot tell, in the note's first words, and the page shows
 // that as a note and not as an alarm.
 func roomVerdict(est dumpEstimate, note string) (string, string, error) {
-	if est.compressed > 0 {
+	if est.Compressed > 0 {
 		return dumpDiskUnchecked, "Disk check cannot tell whether this read fits. By the sizes the server reports: " +
 			strings.TrimPrefix(note, "Disk check: "), nil
 	}

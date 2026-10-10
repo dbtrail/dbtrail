@@ -55,7 +55,7 @@ func stubEstimate(t *testing.T, est dumpEstimate, err error) {
 
 func TestDumpDiskVerdict(t *testing.T) {
 	stage := t.TempDir()
-	est := dumpEstimate{bytes: int64(10 * gib), dataBytes: int64(10 * gib), tables: 3}
+	est := dumpEstimate{Bytes: int64(10 * gib), DataBytes: int64(10 * gib), Tables: 3}
 
 	// The estimate is an upper bound (secondary indexes are not dumped,
 	// deleted rows still count), and the smallest dump the #1938 measurement
@@ -141,14 +141,14 @@ func TestDumpDiskVerdict(t *testing.T) {
 	})
 	t.Run("sizes the source would not refresh are named", func(t *testing.T) {
 		diskByPath(t, map[string]uint64{stage: 100 * gib})
-		_, note, _ := dumpDiskVerdict(stage, "", dumpEstimate{bytes: 1, dataBytes: 1, tables: 1, stale: true}, nil)
+		_, note, _ := dumpDiskVerdict(stage, "", dumpEstimate{Bytes: 1, DataBytes: 1, Tables: 1, Stale: true}, nil)
 		if !strings.Contains(note, "up to a day old") {
 			t.Fatalf("note = %q", note)
 		}
 	})
 	t.Run("tables without a size are named", func(t *testing.T) {
 		diskByPath(t, map[string]uint64{stage: 100 * gib})
-		_, note, _ := dumpDiskVerdict(stage, "", dumpEstimate{bytes: 1, dataBytes: 1, tables: 4, unsized: 2}, nil)
+		_, note, _ := dumpDiskVerdict(stage, "", dumpEstimate{Bytes: 1, DataBytes: 1, Tables: 4, Unsized: 2}, nil)
 		if !strings.Contains(note, "no size for 2 table(s)") {
 			t.Fatalf("note = %q", note)
 		}
@@ -160,7 +160,7 @@ func TestDumpDiskVerdict(t *testing.T) {
 // the other disk is warned about, never refused.
 func TestDumpDiskVerdict_localFolderOnAnotherDisk(t *testing.T) {
 	stage, local := t.TempDir(), t.TempDir()
-	est := dumpEstimate{bytes: int64(10 * gib), dataBytes: int64(10 * gib), tables: 3}
+	est := dumpEstimate{Bytes: int64(10 * gib), DataBytes: int64(10 * gib), Tables: 3}
 	stubSameFS(t, false, nil)
 
 	t.Run("small staging with a huge local folder refuses", func(t *testing.T) {
@@ -217,7 +217,7 @@ func TestDumpDiskVerdict_localFolderOnAnotherDisk(t *testing.T) {
 // Parquet share it, so the 1.8x margin applies.
 func TestDumpDiskVerdict_localFolderOnTheSameDisk(t *testing.T) {
 	stage, local := t.TempDir(), t.TempDir()
-	est := dumpEstimate{bytes: int64(10 * gib), dataBytes: int64(10 * gib), tables: 1}
+	est := dumpEstimate{Bytes: int64(10 * gib), DataBytes: int64(10 * gib), Tables: 1}
 	t.Run("same", func(t *testing.T) {
 		stubSameFS(t, true, nil)
 		diskByPath(t, map[string]uint64{stage: 12 * gib})
@@ -296,7 +296,7 @@ func countMydumper(t *testing.T) *atomic.Int32 {
 // The refusal comes before anything is created or dumped.
 func TestExecute_diskRefusalStopsBeforeMydumper(t *testing.T) {
 	stage := t.TempDir()
-	stubEstimate(t, dumpEstimate{bytes: int64(10 * gib), dataBytes: int64(10 * gib), tables: 1}, nil)
+	stubEstimate(t, dumpEstimate{Bytes: int64(10 * gib), DataBytes: int64(10 * gib), Tables: 1}, nil)
 	diskByPath(t, map[string]uint64{stage: gib})
 	calls := countMydumper(t)
 	var marks atomic.Int32
@@ -347,7 +347,7 @@ func supWithHistory(t *testing.T, stage string) *baselineSupervisor {
 // later failure into the history.
 func TestFullRead_S3OnlyLowDiskWarnsInStatusAndHistory(t *testing.T) {
 	stage := t.TempDir()
-	stubEstimate(t, dumpEstimate{bytes: int64(10 * gib), dataBytes: int64(10 * gib), tables: 2}, nil)
+	stubEstimate(t, dumpEstimate{Bytes: int64(10 * gib), DataBytes: int64(10 * gib), Tables: 2}, nil)
 	diskByPath(t, map[string]uint64{stage: 12 * gib})
 	calls := countMydumper(t)
 	s := supWithHistory(t, stage)
@@ -388,7 +388,7 @@ func TestFullRead_estimateErrorGoesAheadAndSaysSo(t *testing.T) {
 // schedule slot and the history.
 func TestFullRead_refusalIsDiskRefused(t *testing.T) {
 	stage := t.TempDir()
-	stubEstimate(t, dumpEstimate{bytes: int64(10 * gib), dataBytes: int64(10 * gib), tables: 2}, nil)
+	stubEstimate(t, dumpEstimate{Bytes: int64(10 * gib), DataBytes: int64(10 * gib), Tables: 2}, nil)
 	diskByPath(t, map[string]uint64{stage: gib})
 	calls := countMydumper(t)
 	s := supWithHistory(t, stage)
@@ -410,7 +410,7 @@ func TestBackupScheduler_diskRefusedFullReadIsOnItsSlot(t *testing.T) {
 	prevEst := dumpSizeEstimateFn
 	dumpSizeEstimateFn = func(context.Context, string, config.SSL, []string) (dumpEstimate, error) {
 		estimates.Add(1)
-		return dumpEstimate{bytes: int64(10 * gib), dataBytes: int64(10 * gib), tables: 2}, nil
+		return dumpEstimate{Bytes: int64(10 * gib), DataBytes: int64(10 * gib), Tables: 2}, nil
 	}
 	t.Cleanup(func() { dumpSizeEstimateFn = prevEst })
 	diskByPath(t, map[string]uint64{sup.stagingDir: gib})

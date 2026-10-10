@@ -526,7 +526,7 @@ func TestDumpAttempt_PassesTheRequestTLS(t *testing.T) {
 // history record carry the note, not only the daemon log.
 func TestFullRead_CleartextReadIsNotedInStatusAndHistory(t *testing.T) {
 	stage := t.TempDir()
-	stubEstimate(t, dumpEstimate{bytes: 1, tables: 1}, nil)
+	stubEstimate(t, dumpEstimate{Bytes: 1, Tables: 1}, nil)
 	diskByPath(t, map[string]uint64{stage: 100 * gib})
 	prev := runMydumperFunc
 	runMydumperFunc = func(ctx context.Context, _ string, _ config.SSL, _ []string, _ string, _ baseline.LockMode, _ lockModeSource) error {
