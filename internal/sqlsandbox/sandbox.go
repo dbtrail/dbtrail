@@ -71,6 +71,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/cliutil"
@@ -1186,7 +1187,13 @@ func startWorkerProcess(exe string, args []string, wf *workerFence) (*worker, er
 		// Before the worker is given anything to do. One that cannot be
 		// moved is stopped: it is not handed a job outside its ceiling as if
 		// it were inside.
-		if err := intoFence(wf, cmd.Process.Pid); err != nil {
+		err := intoFence(wf, cmd.Process.Pid)
+		if errors.Is(err, syscall.ESRCH) {
+			// Already gone: a worker that died at its start, which its exit
+			// reports as it always did. Not a cgroup that failed.
+			return w, nil
+		}
+		if err != nil {
 			kill()
 			<-w.done
 			return nil, fmt.Errorf("move it into its cgroup: %w", err)

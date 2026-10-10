@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -200,5 +201,32 @@ func TestRun_aWorkerThatCannotBeMovedIsReplaced(t *testing.T) {
 	}
 	if left := fencesLeft(t, parent); len(left) != 0 {
 		t.Errorf("cgroups left after the statement: %v", left)
+	}
+}
+
+// A worker that died before it could be moved is a worker that failed, as
+// it was before: no second worker is started for it, and its cgroup is not
+// what gets the blame.
+func TestRun_aWorkerGoneBeforeTheMoveIsNotReplaced(t *testing.T) {
+	fakeFence(t, "oom_kill 0\n")
+	moves := 0
+	intoFence = func(*workerFence, int) error {
+		moves++
+		return &os.PathError{Op: "write", Path: "cgroup.procs", Err: syscall.ESRCH}
+	}
+	f := newCopyFixture(t)
+	r := New(Config{Exe: "/bin/sh", Args: []string{"-c", "exit 1"}, Limits: testLimits()})
+	starts := 0
+	r.onStart = func(int) { starts++ }
+	_, err := r.Run(context.Background(), f.job("SELECT 1"))
+	var we *WorkerError
+	if !errors.As(err, &we) {
+		t.Fatalf("err = %v (%T), want a WorkerError", err, err)
+	}
+	if moves != 1 || starts != 1 {
+		t.Errorf("moves = %d, workers run = %d; want one of each", moves, starts)
+	}
+	if fenced, why := r.FenceState(); !fenced {
+		t.Errorf("FenceState = false, %q; the cgroup was not what failed", why)
 	}
 }
