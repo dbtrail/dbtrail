@@ -437,7 +437,7 @@ func TestDropPartitions(t *testing.T) {
 	}
 
 	toDrop := parts[0].Name // drop the first daily partition
-	if err := dropPartitions(context.Background(), db, dbName, []string{toDrop}); err != nil {
+	if err := dropPartitions(context.Background(), db, dbName, []string{toDrop}, nil); err != nil {
 		t.Fatalf("dropPartitions failed: %v", err)
 	}
 

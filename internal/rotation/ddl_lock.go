@@ -32,15 +32,29 @@ var (
 )
 
 // errTableBusy: the ALTER never got the table within its attempts. Nothing
-// was changed.
-var errTableBusy = errors.New("binlog_events was being read every time the statement was tried")
+// was changed. What held the table is not known here: a running statement,
+// or a transaction left open after reading or writing it.
+var errTableBusy = errors.New("binlog_events was in use every time the statement was tried")
+
+// errChangedWhileWaiting: a partition that matched its archive before the
+// first attempt to drop it did not match before a later one.
+var errChangedWhileWaiting = errors.New("the partition received rows while its drop waited for the table")
 
 // alterBinlogEvents runs one ALTER of binlog_events without letting it wait
 // in front of capture: see ddlLockWait. It returns errTableBusy (wrapped)
 // when the table was in use at every attempt, ctx's error when ctx ended
 // between attempts, and any other error of the statement as it is.
-func alterBinlogEvents(ctx context.Context, db *sql.DB, q string) error {
+//
+// stillSafe, when not nil, runs before every attempt after the first and its
+// error ends the retries: a caller that checked something before the ALTER
+// checks it again, because the pause lets other statements change the table.
+func alterBinlogEvents(ctx context.Context, db *sql.DB, q string, stillSafe func(context.Context) error) error {
 	for attempt := 1; ; attempt++ {
+		if attempt > 1 && stillSafe != nil {
+			if err := stillSafe(ctx); err != nil {
+				return err
+			}
+		}
 		err := alterOnce(ctx, db, q)
 		if err == nil || !isLockWaitTimeout(err) {
 			return err
