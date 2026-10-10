@@ -68,6 +68,10 @@ trap cleanup EXIT
 echo "==> every Save control in app.js has a scene (save_controls.test.mjs)"
 node --test "$HERE/save_controls.test.mjs"
 
+# The theme loader's edge cases (#1969): no daemon either.
+echo "==> theme loader edge cases (theme.test.mjs)"
+node --test "$HERE/theme.test.mjs"
+
 echo "==> build bintrail-console"
 CONSOLE_BIN="${CONSOLE_BIN:-}"
 if [ -z "$CONSOLE_BIN" ]; then

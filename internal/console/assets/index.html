@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DBTrail</title>
   <link rel="icon" type="image/png" href="/favicon.png">
+  <!-- The theme (#1969), ahead of the stylesheet on purpose: it puts
+       data-theme on <html> before the first paint. A file, not an inline
+       script: the CSP is script-src 'self'. -->
+  <script src="/theme.js"></script>
   <link rel="stylesheet" href="/style.css">
   <style>
     /* Row click toggles .open on the .ev-row to reveal its adjacent diff.
@@ -135,6 +139,8 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><path d="M16 17l5-5-5-5"></path><path d="M21 12H9"></path></svg>
           <span>Log out</span>
         </button>
+        <!-- The theme choice (#1969); app.js builds the three pills here. -->
+        <div class="side-theme" id="theme-mount"></div>
         <div class="side-meta" id="side-meta">
           <div><b id="meta-conn">—</b></div>
           <div id="meta-stream">stream <b>—</b></div>

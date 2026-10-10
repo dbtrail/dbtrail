@@ -6625,6 +6625,102 @@ try {
       : bad("sql: without the capability the card is not shown and the other three are", JSON.stringify(hiddenCard));
   }
 
+  // Theme (#1969): Light / Dark / System in the sidebar foot. Its own tab,
+  // which is its own browser context, so the choice it stores never reaches
+  // the scenes around it (they measure the light palette). What can only be
+  // seen in a browser: the control paints the page, the choice survives a
+  // reload, "System" follows the OS live, and the lit pill stays readable in
+  // both themes. theme.test.mjs covers the loader's edge cases.
+  {
+    const tab = await browser.newPage({ viewport: { width: 1300, height: 1000 }, colorScheme: "light" });
+    try {
+      await tab.goto(`${URL}/?token=${encodeURIComponent(TOKEN)}`, { waitUntil: "networkidle" });
+      await tab.waitForSelector("#theme-mount [role=radio]", { timeout: 5000 });
+      // Colours come back as oklch() or rgb() strings depending on the token;
+      // a 1x1 canvas turns either into the sRGB bytes that were painted.
+      const read = () => tab.evaluate(() => {
+        const px = (c) => {
+          const cv = document.createElement("canvas"); cv.width = cv.height = 1;
+          const g = cv.getContext("2d"); g.fillStyle = c; g.fillRect(0, 0, 1, 1);
+          return Array.from(g.getImageData(0, 0, 1, 1).data).slice(0, 3);
+        };
+        const lum = (d) => {
+          const [r, g, b] = d.map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+          return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        };
+        const pills = Array.from(document.querySelectorAll("#theme-mount [role=radio]"));
+        const lit = pills.filter((p) => p.getAttribute("aria-checked") === "true");
+        const cs = lit[0] ? getComputedStyle(lit[0]) : null;
+        const pair = cs ? [lum(px(cs.color)), lum(px(cs.backgroundColor))].sort((a, b) => b - a) : [0, 0];
+        return {
+          attr: document.documentElement.getAttribute("data-theme"),
+          scheme: getComputedStyle(document.documentElement).colorScheme,
+          ground: lum(px(getComputedStyle(document.body).backgroundColor)),
+          labels: pills.map((p) => p.textContent),
+          lit: lit.map((p) => p.dataset.value),
+          litContrast: (pair[0] + 0.05) / (pair[1] + 0.05),
+        };
+      });
+      const pick = async (v) => { await tab.click(`#theme-mount [role=radio][data-value="${v}"]`); };
+
+      const first = await read();
+      (first.labels.join("|") === "Light|Dark|System" && first.lit.join() === "system" && first.attr === "light" && first.ground > 0.8)
+        ? ok("theme: three choices, System lit on a first visit, the page follows a light OS")
+        : bad("theme: three choices, System lit on a first visit, the page follows a light OS", JSON.stringify(first));
+
+      await pick("dark");
+      const dark = await read();
+      (dark.attr === "dark" && dark.lit.join() === "dark" && dark.ground < 0.05 && dark.scheme === "dark")
+        ? ok("theme: Dark paints the page dark and switches the native widgets")
+        : bad("theme: Dark paints the page dark and switches the native widgets", JSON.stringify(dark));
+      // The next load, with the stylesheet HELD: the attribute has to land
+      // anyway. A script ahead of the stylesheet runs without waiting for it;
+      // one after it is blocked until the stylesheet arrives, which is the
+      // light first paint this guards against. (Reading the attribute when
+      // the stylesheet is REQUESTED proves nothing: the preload scanner asks
+      // for it before any script has run.)
+      let early = "the stylesheet was never requested";
+      await tab.route("**/style.css", async (route) => {
+        try {
+          await tab.waitForFunction(() => document.documentElement.getAttribute("data-theme") === "dark", null, { timeout: 3000 });
+          early = "dark";
+        } catch (_) { early = "not set while the stylesheet was held"; }
+        await route.continue();
+      });
+      await tab.reload({ waitUntil: "networkidle" });
+      await tab.unroute("**/style.css");
+      await tab.waitForSelector("#theme-mount [role=radio]", { timeout: 5000 });
+      const reloaded = await read();
+      (early === "dark" && reloaded.attr === "dark" && reloaded.lit.join() === "dark")
+        ? ok("theme: the choice survives a reload and is set before the stylesheet loads")
+        : bad("theme: the choice survives a reload and is set before the stylesheet loads", `with the stylesheet held: ${early}; after: ${JSON.stringify(reloaded)}`);
+
+      // The dark figure comes from the reloaded page on purpose: the pill
+      // carries a .15s colour transition, so a read straight after the click
+      // returns the colours it is LEAVING (measured 7.33 with the rule right
+      // and with it reverted).
+      (first.litContrast >= 4.5 && reloaded.litContrast >= 4.5)
+        ? ok("theme: the lit pill's label holds 4.5:1 in light and in dark")
+        : bad("theme: the lit pill's label holds 4.5:1 in light and in dark", `light ${first.litContrast.toFixed(2)}, dark ${reloaded.litContrast.toFixed(2)}`);
+
+      // An explicit choice ignores the OS; System follows it, live.
+      await tab.emulateMedia({ colorScheme: "light" });
+      const held = (await read()).attr;
+      await pick("system");
+      const sysLight = (await read()).attr;
+      await tab.emulateMedia({ colorScheme: "dark" });
+      await tab.waitForFunction(() => document.documentElement.getAttribute("data-theme") === "dark", null, { timeout: 5000 }).catch(() => {});
+      const sysDark = (await read()).attr;
+      await pick("light");
+      const lightOnDarkOS = (await read()).attr;
+      (held === "dark" && sysLight === "light" && sysDark === "dark" && lightOnDarkOS === "light")
+        ? ok("theme: System follows the OS live, and an explicit choice does not")
+        : bad("theme: System follows the OS live, and an explicit choice does not", JSON.stringify({ held, sysLight, sysDark, lightOnDarkOS }));
+    } finally {
+      await tab.close();
+    }
+  }
+
   // One scene per control that saves something (#1883), last: they add and
   // remove a server, leave a rotation override behind, and set the console
   // password, which ends every other session. Each reads the stored value

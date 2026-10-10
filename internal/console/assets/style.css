@@ -5,8 +5,8 @@
    ONE token block (#1950). Every colour, radius and elevation in this file
    is a var() into the two blocks below; the only literals live here. The
    light set is the console's measured palette (the site's hue + chroma at
-   console lightness, verified against WCAG floors); the dark set is defined
-   but nothing sets data-theme yet, so it renders nowhere.
+   console lightness, verified against WCAG floors); the dark set applies
+   when theme.js puts data-theme="dark" on <html> (#1969).
 
    The DATA colours (INSERT/UPDATE/DELETE, the diff) are sacred: reserved for
    those meanings, never worn as decoration, never repainted by a brand rule.
@@ -15,6 +15,9 @@
    ============================================================ */
 
 :root {
+  /* native widgets (scrollbars, the <select> popup, checkboxes, date
+     fields) follow the theme through this, not through a token */
+  color-scheme: light;
   /* ---- neutrals: cool purple-tinted surfaces (site line hue) ---- */
   --bg:        oklch(0.985 0.006 340);  /* the canvas: flat, the one page ground (#1950) */
   --surface:   #ffffff;                 /* cards, panels, fields */
@@ -27,6 +30,10 @@
   --line-on-tint: oklch(0.5 0.05 320 / 0.22);
   /* ALWAYS white, in every theme: text on the brand gradient, the toggle knob */
   --white:     #ffffff;
+  /* what sits ON an --ink ground (the lit pill, a checkbox tick, the picked
+     day): white here, the dark surface in dark, where --ink is near white
+     and --white on it measured 1.15:1 (#1969) */
+  --on-ink:    #ffffff;
 
   /* ---- ink ramp: site ink hue/chroma at console lightness steps.
      Verified floors: >=4.5:1 for --ink-3 body text and >=3:1 for --ink-4
@@ -164,11 +171,15 @@
   --ease-out: cubic-bezier(.16, 1, .3, 1);
 }
 
-/* The dark set (values from the approved makeover mockup). Defined only:
-   nothing sets data-theme until the dark-mode slice wires the toggle. */
+/* The dark set (values from the approved makeover mockup). theme.js sets
+   data-theme to the RESOLVED theme (the viewer's choice, or the system's
+   when they chose to follow it), so this is the one dark block: there is no
+   prefers-color-scheme copy to drift from it (#1969). */
 [data-theme="dark"] {
+  color-scheme: dark;
   --bg: #120C1A; --surface: #1A1224; --raised: #221830; --inset: #2A1F3A;
   --line: rgba(255,255,255,.08); --line-soft: rgba(255,255,255,.05); --line-on-tint: rgba(255,255,255,.14);
+  --on-ink: #1A1224;
   --ink: #F4ECFA; --ink-2: #C9B8DD; --ink-3: #9A87B3; --ink-4: #7D6B96;
   --strip: #0D0716; --strip-2: #07030D; --strip-ink: #F4ECFA;
   --pink-mid: #FF8CC6; --sun-mid: #FFD23D;
@@ -431,6 +442,10 @@ button { font-family: inherit; }
 .side-logout svg { width: 15px; height: 15px; color: var(--ink-4); }
 .side-logout:hover { background: var(--delete-bg); color: var(--delete); }
 .side-logout:hover svg { color: var(--delete); }
+/* the theme choice (#1969): the pills recipe at sidebar size, three across */
+.side-theme:empty { display: none; }
+.side-theme .sch-pills { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; margin: 0 -6px 10px; }
+.side-theme .sch-pill { font-size: var(--fs-xs); padding: 5px 0; border-radius: var(--r-sm); }
 .side-meta { display: flex; flex-direction: column; gap: 3px; }
 
 /* ============================================================
@@ -1204,8 +1219,8 @@ input[type="radio"] { border-radius: 50%; }
 input[type="checkbox"]:hover, input[type="radio"]:hover { border-color: var(--ink-2); }
 input[type="checkbox"]:focus-visible, input[type="radio"]:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
 input[type="checkbox"]:checked, input[type="radio"]:checked { background: var(--ink); border-color: var(--ink); }
-input[type="checkbox"]:checked::after { content: ""; width: 4px; height: 8px; border: solid var(--white); border-width: 0 2px 2px 0; transform: translateY(-1px) rotate(45deg); }
-input[type="radio"]:checked::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--white); }
+input[type="checkbox"]:checked::after { content: ""; width: 4px; height: 8px; border: solid var(--on-ink); border-width: 0 2px 2px 0; transform: translateY(-1px) rotate(45deg); }
+input[type="radio"]:checked::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--on-ink); }
 input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; cursor: not-allowed; }
 .modal-foot { display: flex; gap: 10px; margin-top: 22px; align-items: center; }
 
@@ -1442,7 +1457,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
   border-radius: var(--r-lg); box-shadow: var(--shadow); cursor: pointer;
 }
 .use-card.on { border-color: var(--ink); }
-.use-card.on .use-act { background: var(--ink); color: var(--white); border-color: transparent; }
+.use-card.on .use-act { background: var(--ink); color: var(--on-ink); border-color: transparent; }
 .use-art { height: 86px; border-radius: var(--r-md); display: grid; place-items: center; }
 .use-art svg { width: 120px; height: 64px; }
 .use-art-sql { background: var(--pink-tint); }
@@ -2425,7 +2440,7 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 .dt-day:hover { background: var(--raised); }
 .dt-day.is-muted { color: var(--ink-4); }
 .dt-day.is-today { box-shadow: inset 0 0 0 1px var(--ink-4); }
-.dt-day.is-sel { background: var(--ink); color: var(--white); }
+.dt-day.is-sel { background: var(--ink); color: var(--on-ink); }
 
 .dt-time { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
 .dt-time-select { width: 70px; height: 32px; padding: 0 22px 0 8px; font-size: var(--fs-xs); }
@@ -3106,7 +3121,7 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 .sch-pill { font-family: var(--f-ui); font-size: var(--fs-sm); font-weight: 600; padding: 9px 0; border-radius: var(--r-md); border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); cursor: pointer; transition: background .15s, color .15s, border-color .15s; }
 .sch-pill:hover { border-color: var(--ink-4); color: var(--ink); }
 .sch-pill:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
-.sch-pill.is-on { background: var(--ink); border-color: var(--ink); color: var(--white); }
+.sch-pill.is-on { background: var(--ink); border-color: var(--ink); color: var(--on-ink); }
 .keep-step { display: flex; align-items: center; gap: 12px; margin: 4px 0 10px; }
 .keep-btn { width: 40px; height: 40px; border-radius: 50%; font-size: var(--fs-xl); color: var(--ink); }
 .keep-step .keep-n { font-family: var(--f-display); font-size: 40px; font-weight: 800; letter-spacing: -0.02em; width: 110px; text-align: center; border: 0; background: transparent; color: var(--ink); padding: 0; height: auto; -moz-appearance: textfield; }
