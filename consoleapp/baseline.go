@@ -1188,6 +1188,11 @@ func (s *baselineSupervisor) dumpBaselineConfig(req console.BaselineRequest, dum
 		WriterID:    snapshotWriterID(req),
 		DDLMark:     ddlMark,
 		EventMark:   eventMark,
+		// The dump folder is this run's own and is removed when the run ends
+		// (#1938), so each table's dump data goes as soon as its Parquet file
+		// is written: the dump shrinks while the snapshot grows, instead of
+		// both being whole on disk at the end.
+		RemoveConvertedData: true,
 	}
 }
 

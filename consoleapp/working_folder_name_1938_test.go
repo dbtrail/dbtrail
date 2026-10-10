@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/console"
@@ -38,5 +39,17 @@ func TestExecute_anUncreatableWorkingFolderIsNamedAsOne(t *testing.T) {
 	_, _, err = s.executePG(req)
 	if err == nil || !strings.HasPrefix(err.Error(), "create the working folder "+stage+": ") {
 		t.Fatalf("executePG: err = %v, want it to name the working folder %s", err, stage)
+	}
+}
+
+// #1938: the console's full read converts a dump that is its own, in a
+// folder it removes when the run ends, so it has each table's dump data
+// removed as soon as the table is converted, and it never retries from a
+// dump (the two cannot be combined).
+func TestDumpBaselineConfig_removesConvertedDataAndNeverRetries(t *testing.T) {
+	s := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.LockModeFTWRL)
+	cfg := s.dumpBaselineConfig(console.BaselineRequest{ServerID: "s1"}, "/dump", "/out", time.Now(), "", "")
+	if !cfg.RemoveConvertedData || cfg.Retry {
+		t.Fatalf("RemoveConvertedData = %v, Retry = %v", cfg.RemoveConvertedData, cfg.Retry)
 	}
 }
