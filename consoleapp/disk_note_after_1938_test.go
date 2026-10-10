@@ -51,7 +51,7 @@ func TestDumpDiskOnceItFit_1938(t *testing.T) {
 					t.Fatalf("check = %q, want %q", gotCheck, dumpDiskTight)
 				}
 				// Nothing in the future tense about a read that is over.
-				for _, not := range []string{"may fail", "may not fit", "This read may"} {
+				for _, not := range []string{"may fail", "may not fit", "This read may", "this read can", "this read may"} {
 					if strings.Contains(after, not) {
 						t.Errorf("the note still says %q: %s", not, after)
 					}

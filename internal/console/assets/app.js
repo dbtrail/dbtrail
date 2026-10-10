@@ -9978,10 +9978,7 @@ async function createBaseline(id, btn, onStarted) {
     // Published, then the copy to the destination failed: a snapshot
     // exists, so "did not finish" would be false.
     const why = done.last_error || "unknown error";
-    // The snapshot is written, so its disk note is the "it fit" one: said
-    // after the failure, which is about the copy and not about the disk.
-    const after = lowDisk || diskNote.said.replace(/^\. /, "");
-    toastError("Snapshot failed: " + why + (after ? (/[.!?]$/.test(why) ? " " : ". ") + after : ""));
+    toastError("Snapshot failed: " + why + (lowDisk ? (/[.!?]$/.test(why) ? " " : ". ") + lowDisk : ""));
   } else {
     toast("The snapshot is still running. Check back shortly.");
   }

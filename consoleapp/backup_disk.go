@@ -264,10 +264,10 @@ func compressedTablesSentence(est dumpEstimate) string {
 	}
 	if est.compressed == 1 {
 		return fmt.Sprintf(" 1 table uses compressed storage (%s): the server reports its compressed size, and a full read writes it "+
-			"uncompressed, so this read can need more than the sizes say.", names)
+			"uncompressed, so a full read can need more than the sizes say.", names)
 	}
 	return fmt.Sprintf(" %d tables use compressed storage (%s): the server reports their compressed size, and a full read writes them "+
-		"uncompressed, so this read can need more than the sizes say.", est.compressed, names)
+		"uncompressed, so a full read can need more than the sizes say.", est.compressed, names)
 }
 
 // sessionExecer is the part of a connection prepareEstimateSession uses.

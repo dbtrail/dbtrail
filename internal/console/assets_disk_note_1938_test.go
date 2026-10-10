@@ -129,13 +129,16 @@ console.log(JSON.stringify({
 	}
 }
 
-// The outcome toasts of a manual read, read from the source: a note that is
-// "said" rides on toast(), never on toastError(), and the warning style has
-// its own colour in the stylesheet.
+// The outcome toasts of a manual read, read from the source: the place of a
+// disk note is decided by diskNoteAfterRead alone, the two toasts that can
+// carry a "said" note hold long enough to read it, and the warning style has
+// its own colour in the stylesheet. (A snapshot that was written and then
+// failed to copy keeps its note on the snapshot's own page: that toast is
+// about the copy.)
 func TestFullReadDiskNote_aReadThatFitIsNotAnErrorToast(t *testing.T) {
 	js := readAsset(t, "app.js")
 	body := jsFunctionBody(t, js, "createBaseline")
-	if strings.Contains(body, "toastError(diskNote.said") || strings.Contains(body, `done.disk_check === "low"`) || strings.Contains(body, `done.disk_check === "unchecked"`) {
+	if strings.Contains(body, "diskNote.said.") || strings.Contains(body, `done.disk_check === "low"`) || strings.Contains(body, `done.disk_check === "unchecked"`) {
 		t.Error("createBaseline decides the disk note's place itself instead of through diskNoteAfterRead")
 	}
 	if n := strings.Count(body, "diskNote.said ? TOAST_HOLD_NOTE : 0"); n != 2 {

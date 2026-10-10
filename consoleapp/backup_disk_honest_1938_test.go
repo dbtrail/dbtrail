@@ -124,10 +124,10 @@ func TestCompressedTablesSentence_1938(t *testing.T) {
 		want string
 	}{
 		{0, nil, ""},
-		{1, []string{"shop.orders"}, " 1 table uses compressed storage (shop.orders): the server reports its compressed size, and a full read writes it uncompressed, so this read can need more than the sizes say."},
-		{2, []string{"shop.orders", "shop.events"}, " 2 tables use compressed storage (shop.orders, shop.events): the server reports their compressed size, and a full read writes them uncompressed, so this read can need more than the sizes say."},
-		{3, []string{"shop.orders", "shop.events"}, " 3 tables use compressed storage (shop.orders, shop.events and 1 more): the server reports their compressed size, and a full read writes them uncompressed, so this read can need more than the sizes say."},
-		{120, []string{"shop.orders", "shop.events"}, " 120 tables use compressed storage (shop.orders, shop.events and 118 more): the server reports their compressed size, and a full read writes them uncompressed, so this read can need more than the sizes say."},
+		{1, []string{"shop.orders"}, " 1 table uses compressed storage (shop.orders): the server reports its compressed size, and a full read writes it uncompressed, so a full read can need more than the sizes say."},
+		{2, []string{"shop.orders", "shop.events"}, " 2 tables use compressed storage (shop.orders, shop.events): the server reports their compressed size, and a full read writes them uncompressed, so a full read can need more than the sizes say."},
+		{3, []string{"shop.orders", "shop.events"}, " 3 tables use compressed storage (shop.orders, shop.events and 1 more): the server reports their compressed size, and a full read writes them uncompressed, so a full read can need more than the sizes say."},
+		{120, []string{"shop.orders", "shop.events"}, " 120 tables use compressed storage (shop.orders, shop.events and 118 more): the server reports their compressed size, and a full read writes them uncompressed, so a full read can need more than the sizes say."},
 	} {
 		if got := compressedTablesSentence(dumpEstimate{compressed: c.n, compressedTop: c.top}); got != c.want {
 			t.Errorf("%d compressed:\n got %q\nwant %q", c.n, got, c.want)
