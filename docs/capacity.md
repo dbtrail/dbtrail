@@ -142,29 +142,11 @@ Prevention is rotation: without a scheduled `rotate`, `binlog_events` grows **un
 
 ## Disk for a full read: the dump is on disk before it is Parquet
 
-A full read (the web interface's **Read database now**, or a scheduled full read) runs mydumper, which writes the **whole dump, uncompressed**, into the working folder. Only after the dump finishes is it converted to Parquet, and the dump is deleted when the run ends. So for a short while both are on disk at once:
+A full read (the web interface's **Read database now**, or a scheduled full read) first writes the whole database as an uncompressed dump into the **working folder**, and only then converts it to Parquet. That folder has to have the room.
 
-```
-peak = the uncompressed dump  +  the Parquet being written
-```
+**The rule.** Free space at the working folder ≥ the size of the dumped tables (data + indexes), and about 1.8× that when the Parquet goes to the same disk and the data is mostly binary or random. This is disk on the DBTrail host, not on the database server. It is transient, but it has to fit, and a full disk also hurts anything else on that disk, the index included if it lives there.
 
-A full read started by DBTrail (the web interface's **Read database now**, or a schedule) lowers that peak: as soon as a table's Parquet file is written, that table's part of the dump is deleted, so what is on disk is the whole dump at the start and less of it as the conversion goes, plus the Parquet written so far. The dump on its own still has to fit. How much the peak drops depends on the data: tables are converted as many at once as the host has CPUs and a table's dump goes only when that table is done, so a database that is mostly one table, or one with fewer tables than CPUs, gains little. When the snapshot folder is on another disk the working folder only ever held the dump, and that does not change. The numbers below were measured **before** this, with the whole dump kept to the end, and the check still uses them: it warns earlier than it now needs to. `bintrail baseline`, which converts a dump you made, never deletes any of it.
-
-This is disk on the DBTrail host, not on the database server. It is transient, but it has to fit, and a full disk also hurts anything else on that disk, the index included if it lives there.
-
-**How big.** A synthetic measurement (MySQL 8.4, mydumper 1.0.5 with the flags DBTrail passes, five tables of different shapes, one machine; not yet confirmed on real datasets). Ratios are against `DATA_LENGTH + INDEX_LENGTH`, the number DBTrail reads before a full read:
-
-| Table shape | Dump ÷ (data + indexes) | Peak (dump + Parquet) ÷ (data + indexes) |
-|---|---|---|
-| Random strings, 1 secondary index | 0.82 | 1.21 |
-| Numbers and dates, 3 secondary indexes | 0.60 | 0.75 |
-| Repetitive text and JSON | 0.98 | 1.02 |
-| Random binary | 0.95 | 1.80 |
-| 90% of rows deleted | stale sizes | stale sizes |
-
-In every case the dump alone stayed below `DATA_LENGTH + INDEX_LENGTH`. `DATA_LENGTH` alone is not a safe bound: numbers and dates are written as text, and one table dumped to 1.6× its `DATA_LENGTH`. With the Parquet copy on the same disk, data that does not compress (random strings, binary) peaked above the tables' size, up to 1.8×. Compressible data stayed near or below it. The table with 90% of its rows deleted kept its file size and reported sizes from before the delete, while its dump held only the live rows (0.08× the file): sizes that lag make the estimate too high, not too low. Compressed storage was not measured: `ROW_FORMAT=COMPRESSED` and MyRocks report their compressed size, so their dump can be larger than the estimate (see "Compressed tables" below, which also says what is not known about InnoDB page compression).
-
-**Rule of thumb.** Free space at the working folder ≥ the size of the dumped tables (data + indexes), and about 1.8× that when the Parquet goes to the same disk and the data is mostly binary or random.
+**Where the working folder is, and how to move it.** It is the folder the web interface calls **Working folder** (the staging folder, in versions before this name). By default it is `bintrail-baseline-staging` under the system temp folder (`$TMPDIR`, usually `/tmp`), which on many hosts is a small or memory-backed filesystem. Point it at a disk with room with `BINTRAIL_CONSOLE_BASELINE_STAGING=/path`, or with the **Working folder** row in the web interface's backup settings (the same folder), then restart DBTrail. It is read once at startup.
 
 **What DBTrail checks.** Before mydumper starts, a full read of a MySQL or MariaDB server reads the size of every table it is about to dump and compares it with the free space at the working folder. It reads two sums. `DATA_LENGTH + INDEX_LENGTH` is an upper bound for the dump itself (secondary indexes are not dumped, and rows that were deleted still count), so the warnings use it. `DATA_LENGTH` alone is what a dump is closest to, and the refusal uses that, so a table that is mostly indexes is never a reason to refuse. The check refuses only when a dump clearly cannot fit, and otherwise warns:
 
@@ -177,15 +159,37 @@ In every case the dump alone stayed below `DATA_LENGTH + INDEX_LENGTH`. `DATA_LE
 
 The size query runs on a session that asks for current sizes and tells the server to stop the query itself after 12 seconds (`max_execution_time` on MySQL; on a server that does not know it, MariaDB's `max_statement_time`), so a source with a very large number of tables is not left working on it after DBTrail has stopped waiting.
 
+**What you see.** A warning is written before the read, about that read. Once the read has written its snapshot the same note says "This read fit. The next one may not.", and the web interface shows it as a warning about the next read, in the snapshot's detail and on the schedule card, not as a failure. A full read recorded before this change keeps the note it was given. Every refusal and warning names the folder, the estimate, what is free, and how to move the folder. They show in the snapshot's status, its run history, its detail, the schedule card, and the message after a read you started yourself.
+
 **If the folder fills anyway.** The check works from an estimate, and other reads, exports or anything else on that disk can take the room while the dump runs. When mydumper stops because the working folder has no space left, the read fails and is recorded as a disk failure: the message says the folder filled, how much it had free at that moment, that no new snapshot was made and earlier ones are unchanged, and how to move the folder. The partial dump is deleted. DBTrail calls it this folder's failure only when mydumper reported a full disk **and** the folder measures as full; a source server whose own disk is full says the same words, and that failure keeps mydumper's message. So does the second of two full reads that fill the folder together: the first to stop deletes its dump, and by the time the second is measured the folder usually has room again. A failed scheduled full read is tried again at its next time; it is not retried sooner.
 
 A disk can also fill later, while the dump is being converted to Parquet. A full read that fails there removes the snapshot folder it had started in the server's Local folder, so a failed read leaves nothing behind on the disk that was full. It removes only a folder that was empty or absent when the read started, and never a finished snapshot. That includes a read that wrote every table and failed only at the last step (the integrity manifest or the completion marker): its folder is marked incomplete, nothing could publish it, and it is removed like the rest.
 
-A warning is written before the read, about that read. Once the read has written its snapshot the same note says "This read fit. The next one may not.", and the web interface shows it as a warning about the next read, in the snapshot's detail and on the schedule card, not as a failure. A full read recorded before this change keeps the note it was given. Every refusal and warning names the folder, the estimate, what is free, and how to move the folder. They show in the snapshot's status, its run history, its detail, the schedule card, and the message after a read you started yourself.
+**Another disk.** When the local snapshot folder is on another disk, the working folder only has to hold the dump, and a small snapshot folder is a warning, never a refusal. "Another disk" means another filesystem: btrfs subvolumes, ZFS datasets and thin LVM volumes look separate but draw from one pool, so on those the 1.8× margin is yours to keep. When DBTrail cannot tell whether the two folders share a disk, it asks for the larger margin and measures both.
 
-When the local snapshot folder is on another disk, the working folder only has to hold the dump, and a small snapshot folder is a warning, never a refusal. "Another disk" means another filesystem: btrfs subvolumes, ZFS datasets and thin LVM volumes look separate but draw from one pool, so on those the 1.8× margin is yours to keep. When DBTrail cannot tell whether the two folders share a disk, it asks for the larger margin and measures both. Full reads of several servers that run at the same time share one working folder, and each check sees the whole free space, not what is left after the others: size the folder for the reads you let overlap. The size of a PostgreSQL full read is not checked: it writes Parquet directly, with no dump in between. Neither is a dump you run yourself with `bintrail dump`.
+**Several reads at once.** Full reads of several servers that run at the same time share one working folder, and each check sees the whole free space, not what is left after the others: size the folder for the reads you let overlap.
 
-**Where the working folder is, and how to move it.** It is the folder the web interface calls **Working folder** (the staging folder, in versions before this name). By default it is `bintrail-baseline-staging` under the system temp folder (`$TMPDIR`, usually `/tmp`), which on many hosts is a small or memory-backed filesystem. Point it at a disk with room with `BINTRAIL_CONSOLE_BASELINE_STAGING=/path`, or with the **Working folder** row in the web interface's backup settings (the same folder), then restart DBTrail. It is read once at startup.
+**What is not checked.** The size of a PostgreSQL full read is not checked: it writes Parquet directly, with no dump in between. Neither is a dump you run yourself with `bintrail dump`.
+
+**Why both are on disk at once.** A full read (the web interface's **Read database now**, or a scheduled full read) runs mydumper, which writes the **whole dump, uncompressed**, into the working folder. Only after the dump finishes is it converted to Parquet, and the dump is deleted when the run ends. So for a short while both are on disk at once:
+
+```
+peak = the uncompressed dump  +  the Parquet being written
+```
+
+A full read started by DBTrail (the web interface's **Read database now**, or a schedule) lowers that peak: as soon as a table's Parquet file is written, that table's part of the dump is deleted, so what is on disk is the whole dump at the start and less of it as the conversion goes, plus the Parquet written so far. The dump on its own still has to fit. How much the peak drops depends on the data: tables are converted as many at once as the host has CPUs and a table's dump goes only when that table is done, so a database that is mostly one table, or one with fewer tables than CPUs, gains little. When the snapshot folder is on another disk the working folder only ever held the dump, and that does not change. The numbers below were measured **before** this, with the whole dump kept to the end, and the check still uses them: it warns earlier than it now needs to. `bintrail baseline`, which converts a dump you made, never deletes any of it.
+
+**The measurement behind those numbers.** It is synthetic (MySQL 8.4, mydumper 1.0.5 with the flags DBTrail passes, five tables of different shapes, one machine; not yet confirmed on real datasets, and not repeated on mydumper 1.0.3-1, the version the DBTrail images ship). Ratios are against `DATA_LENGTH + INDEX_LENGTH`, the number DBTrail reads before a full read:
+
+| Table shape | Dump ÷ (data + indexes) | Peak (dump + Parquet) ÷ (data + indexes) |
+|---|---|---|
+| Random strings, 1 secondary index | 0.82 | 1.21 |
+| Numbers and dates, 3 secondary indexes | 0.60 | 0.75 |
+| Repetitive text and JSON | 0.98 | 1.02 |
+| Random binary | 0.95 | 1.80 |
+| 90% of rows deleted | stale sizes | stale sizes |
+
+In every case the dump alone stayed below `DATA_LENGTH + INDEX_LENGTH`. `DATA_LENGTH` alone is not a safe bound: numbers and dates are written as text, and one table dumped to 1.6× its `DATA_LENGTH`. With the Parquet copy on the same disk, data that does not compress (random strings, binary) peaked above the tables' size, up to 1.8×. Compressible data stayed near or below it. The table with 90% of its rows deleted kept its file size and reported sizes from before the delete, while its dump held only the live rows (0.08× the file): sizes that lag make the estimate too high, not too low. Compressed storage was not measured: `ROW_FORMAT=COMPRESSED` and MyRocks report their compressed size, so their dump can be larger than the estimate (see "Compressed tables" above, which also says what is not known about InnoDB page compression).
 
 ## Monitoring
 

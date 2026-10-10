@@ -15,7 +15,7 @@ import (
 // #1938: a full read keeps mydumper's whole dump on disk until its last table
 // is converted, so the peak is the dump plus the whole snapshot. With
 // RemoveConvertedData a table's dump files go as soon as its Parquet file is
-// closed, and the peak is the dump plus the tables in flight.
+// closed, so the dump shrinks while the snapshot grows.
 
 const hdr1938 = "/*!40101 SET NAMES utf8mb4*/;\n/*!40014 SET FOREIGN_KEY_CHECKS=0*/;\n"
 
