@@ -19,7 +19,7 @@ it, and that is what matters once it runs unattended.
 | [Docker Compose](#docker-compose-the-bundled-default) | Yes | Capture, the web interface, an index MySQL, mydumper for full reads, restart after a crash, a health check | Back up the index volumes and watch their disk. Re-download the compose file on every upgrade |
 | [Amazon ECS](./ecs.md) | Yes | The `bintrail-console` image as one Fargate task: capture, the web interface, mydumper, a health check | An index MySQL (RDS), EFS for the saved state, a load balancer |
 | [Docker image](#docker-image-without-compose) | Yes | The binaries. The `bintrail-console` image also carries mydumper; the `bintrail` image does not | An index MySQL, a volume for the state, a restart policy |
-| [Linux packages](#linux-packages) | Yes | The binaries and their license texts, nothing else | A service unit so it starts at boot and restarts after a crash ([deployment.md](./deployment.md#5-deployment-options) has one), mydumper ([how to get it](./dump-and-baseline.md#getting-mydumper)), an index MySQL |
+| [Linux packages](#linux-packages) | Yes | The binaries and their license texts. The `bintrail-console` package also brings a systemd service that starts at boot and restarts after a crash | An index MySQL, mydumper ([how to get it](./dump-and-baseline.md#getting-mydumper)). On releases up to 0.102.0, the service unit too ([deployment.md](./deployment.md#5-deployment-options) has one) |
 | [Go install](#go-install), [source build](#build-from-source) | No | A binary built on your machine | Everything above, plus the build itself |
 
 Why the last row is not for production: a binary you build is not the release
@@ -30,8 +30,9 @@ a workstation.
 
 The three production paths differ in one way that is easy to miss. DBTrail
 only captures while it is running, so a process that stops and is not
-restarted leaves a gap in the history. The Compose stack restarts it for you.
-With the packages or a bare `docker run`, that restart is yours to set up.
+restarted leaves a gap in the history. The Compose stack restarts it for you,
+and so does the service in the `bintrail-console` package once you enable it.
+With a bare `docker run`, that restart is yours to set up.
 
 ## Requirements
 
@@ -252,12 +253,48 @@ is a separate `bintrail-console` package — install it only where an operator
 wants the UI. PostgreSQL-source capture is a separate `bintrail-pg`
 package — install it only on hosts that capture from PostgreSQL.
 
-The packages install the binaries and nothing around them: no service unit,
-no mydumper, no index MySQL. Write a unit so the process starts at boot and
-restarts after a crash ([deployment.md](./deployment.md#5-deployment-options)
-has one to copy). Full reads from the web interface run the `mydumper` found
-on the `PATH` of the `bintrail-console` process, so install it on that host
-([Getting mydumper](./dump-and-baseline.md#getting-mydumper)).
+### The `bintrail-console` service
+
+From the release after 0.102.0 the `bintrail-console` package installs a
+systemd service for `bintrail-console watch`, the daemon that captures and
+serves the web interface. Installing the package does not start it: it cannot
+run until it knows where the index MySQL is.
+
+```sh
+sudoedit /etc/bintrail/bintrail-console.env     # set BINTRAIL_INDEX_DSN
+sudo systemctl enable --now bintrail-console
+journalctl -u bintrail-console -f
+```
+
+What the package puts on the machine:
+
+| Path | What it is |
+|---|---|
+| `/usr/lib/systemd/system/bintrail-console.service` | The unit: restarts after a crash, and gives capture 60 seconds to save its position on a stop |
+| `/etc/bintrail/bintrail-console.env` | The settings, mode `0600` because the index DSN holds a password. An upgrade never overwrites it |
+| `/var/lib/bintrail` | What DBTrail saves: the servers you add, the login, Claude's token, the work folders of full reads |
+| a `bintrail` system account | The account the service runs as. An account of that name that already exists is left as it is |
+
+- **To change a setting**, edit the settings file and restart the service.
+  To change the unit itself use `sudo systemctl edit bintrail-console`: that
+  survives upgrades, an edit of the installed file does not.
+- **An upgrade** restarts the service if it was running, so the new binary is
+  the one capturing. Capture resumes from its saved position.
+- **A removal** stops and disables the service. `/var/lib/bintrail` and the
+  account stay, so reinstalling finds the servers and the login again. On
+  Debian and Ubuntu `apt purge` also deletes the settings file; on RHEL-family
+  systems an edited settings file is kept as `bintrail-console.env.rpmsave`.
+- **A unit you wrote yourself** at `/etc/systemd/system/bintrail-console.service`
+  keeps winning over the packaged one. Delete it, then run
+  `sudo systemctl daemon-reload`, to move to the packaged unit.
+- The unit sets `Delegate=yes`, which lets the service manage its own control
+  groups. Nothing uses that yet.
+
+The package still does not bring mydumper or an index MySQL. Full reads from
+the web interface run the `mydumper` found on the `PATH` of the service, so
+install it on that host
+([Getting mydumper](./dump-and-baseline.md#getting-mydumper)). The `bintrail`
+and `bintrail-pg` packages install binaries only.
 
 ## Go install
 
