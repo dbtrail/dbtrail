@@ -173,6 +173,23 @@ func (s *baselineSupervisor) resolveNewest(req refreshRequest, root, done string
 		}
 	}
 	sort.Strings(bases)
+	// A wait belongs to the chain that earned it (#2239). A table of this
+	// server that is not among the chains to merge has no such chain any
+	// more: gone from the snapshot, or written again in full, which leaves
+	// one pair. Its entry goes, so the chain it grows next is not kept
+	// waiting for the old one, and a dropped table's entry does not stay
+	// for as long as the daemon runs.
+	mergeable := make(map[string]bool, len(bases))
+	for _, base := range bases {
+		mergeable[resolveRetryKey(req.ServerID, base)] = true
+	}
+	s.mu.Lock()
+	for key := range s.resolveRetry {
+		if strings.HasPrefix(key, req.ServerID+"\x00") && !mergeable[key] {
+			delete(s.resolveRetry, key)
+		}
+	}
+	s.mu.Unlock()
 	merged, linked, failed := 0, 0, 0
 	space := newDiskSpaceCheck()
 	for _, base := range bases {

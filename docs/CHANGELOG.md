@@ -81,6 +81,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to 6 seconds throughout. The first refresh after the daemon starts, and one for a time
   in the past, search as before.
 
+- **A table read through its merged pair no longer counts toward the limit
+  on unmerged changes** (#2239). The web interface's SQL and the MySQL port
+  refuse a statement whose tables hold more unmerged changes than a
+  statement can merge in memory, and the SQL card shows how much is
+  waiting. Both went on weighing the whole chain of a table whose chain the
+  daemon had already merged into one pair (#2231), so a statement that
+  would have run was refused and the card showed changes waiting that no
+  statement had to merge. Such a table now weighs nothing in both places.
+  Measured on a table holding 661 MB of changes, a statement through the
+  pair peaked at 78 to 389 MB, as with 283 MB of changes, against 587 to
+  1,529 MB through the chain.
+- **A table whose merge failed is not kept waiting once its chain is gone**
+  (#2239). A failed merge waits an hour before it is tried again. The wait
+  stayed after the table was written again in full or dropped, so the next
+  chain of the same table waited out the old one's hour, and a dropped
+  table's entry stayed for as long as the daemon ran.
 - **A views file that follows the newest snapshot reads the changes
   v0.83.0 wrote beside a table** (#2242). That build named a table's two
   change files without a number, and a view that follows the newest snapshot
