@@ -178,8 +178,12 @@
    prefers-color-scheme copy to drift from it (#1969). */
 [data-theme="dark"] {
   color-scheme: dark;
+  /* --line-soft is .065, not the mockup's .05: at .05 the row dividers (the
+     before/after grid, the sidebar foot) measured 1.13 on --surface, under
+     the 1.15 divider floor light holds at 1.17. At .065 dark holds it too;
+     console-e2e's marks sweep measures it on every route (#1969). */
   --bg: #120C1A; --surface: #1A1224; --raised: #221830; --inset: #2A1F3A;
-  --line: rgba(255,255,255,.08); --line-soft: rgba(255,255,255,.05); --line-on-tint: rgba(255,255,255,.14);
+  --line: rgba(255,255,255,.08); --line-soft: rgba(255,255,255,.065); --line-on-tint: rgba(255,255,255,.14);
   --on-ink: #1A1224;
   --ink: #F4ECFA; --ink-2: #C9B8DD; --ink-3: #9A87B3; --ink-4: #7D6B96;
   --strip: #0D0716; --strip-2: #07030D; --strip-ink: #F4ECFA;

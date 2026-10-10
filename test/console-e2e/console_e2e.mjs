@@ -6773,9 +6773,67 @@ try {
         }
         return { out, measured };
       });
+      // The same walk for what is not text: the edge or the fill that sets a
+      // box apart from the ground around it (a divider, a field, a card, a
+      // chip). A box is set apart by its edge OR its fill, so its mark is the
+      // stronger of the two. Floors are the ones light is already pinned to
+      // elsewhere in this suite: 1.15 for a hairline, 1.3 for a fill that has
+      // to read as present, 3 for a control's boundary.
+      const marks = () => tab.evaluate(() => {
+        const cv = document.createElement("canvas"); cv.width = cv.height = 1;
+        const g = cv.getContext("2d", { willReadFrequently: true });
+        const rgba = (c) => { g.clearRect(0, 0, 1, 1); g.fillStyle = c; g.fillRect(0, 0, 1, 1); const d = g.getImageData(0, 0, 1, 1).data; return [d[0], d[1], d[2], d[3] / 255]; };
+        const over = (top, under) => [0, 1, 2].map((i) => top[i] * top[3] + under[i] * (1 - top[3])).concat(1);
+        const lum = (d) => { const [r, gg, b] = d.slice(0, 3).map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * gg + 0.0722 * b; };
+        const ratio = (a, b) => { const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x); return (hi + 0.05) / (lo + 0.05); };
+        // The opaque colour painted behind a node; null when a gradient, an
+        // image or opacity is in the way and there is no single ground.
+        const groundOf = (start) => {
+          const stack = [];
+          for (let n = start; n && n.nodeType === 1; n = n.parentElement) {
+            const s = getComputedStyle(n);
+            if (+s.opacity < 1 || s.backgroundImage !== "none") return null;
+            const c = rgba(s.backgroundColor);
+            if (c[3] > 0) stack.push(c);
+            if (c[3] === 1) break;
+          }
+          if (!stack.length || stack[stack.length - 1][3] < 1) return null;
+          let gnd = stack[stack.length - 1];
+          for (let i = stack.length - 2; i >= 0; i--) gnd = over(stack[i], gnd);
+          return gnd;
+        };
+        const out = {};
+        for (const el of document.querySelectorAll("#app *")) {
+          const r = el.getBoundingClientRect();
+          if (r.width < 2 || r.height < 2) continue;
+          const cs = getComputedStyle(el);
+          if (cs.visibility === "hidden" || el.closest("[hidden]") || el.closest("[disabled]") || el.closest("svg")) continue;
+          // A box an image covers edge to edge shows the image, not its fill.
+          if (Array.from(el.children).some((c) => { if (c.tagName !== "IMG") return false; const i = c.getBoundingClientRect(); return i.width >= r.width && i.height >= r.height; })) continue;
+          const outside = el.parentElement ? groundOf(el.parentElement) : null;
+          if (!outside) continue;
+          let edge = null;
+          for (const side of ["Top", "Right", "Bottom", "Left"]) {
+            if (parseFloat(cs["border" + side + "Width"]) <= 0 || cs["border" + side + "Style"] === "none") continue;
+            const c = rgba(cs["border" + side + "Color"]);
+            if (c[3] === 0) continue;
+            const v = ratio(over(c, outside), outside);
+            if (edge === null || v < edge) edge = v;
+          }
+          const own = rgba(cs.backgroundColor);
+          const fill = (own[3] > 0 && cs.backgroundImage === "none" && +cs.opacity === 1) ? ratio(over(own, outside), outside) : null;
+          if (edge === null && fill === null) continue;
+          const key = el.tagName.toLowerCase() + "." + String(el.getAttribute("class") || "").trim().split(/\s+/).join(".");
+          const mark = Math.max(edge || 0, fill || 0);
+          if (!(key in out) || mark < out[key]) out[key] = mark;
+        }
+        return out;
+      });
       const routes = ["overview", "snapshots", "status", "events", "schema-changes", "recover", "connect", "retention", "access-profiles"];
       const drops = [];
+      const markDrops = [];
       let judged = 0;
+      let marksJudged = 0;
       for (const route of routes) {
         const byTheme = {};
         for (const theme of ["light", "dark"]) {
@@ -6786,6 +6844,15 @@ try {
           await tab.evaluate(() => { for (const d of document.querySelectorAll("#view details")) d.open = true; for (const r of Array.from(document.querySelectorAll(".ev-row")).slice(0, 3)) if (!r.classList.contains("open")) r.click(); });
           await tab.waitForTimeout(700);
           byTheme[theme] = await sweep();
+          byTheme[theme].marks = await marks();
+        }
+        for (const [key, light] of Object.entries(byTheme.light.marks)) {
+          const dark = byTheme.dark.marks[key];
+          if (dark === undefined) continue;
+          const floor = light >= 3 ? 3 : light >= 1.3 ? 1.3 : light >= 1.15 ? 1.15 : 0;
+          if (!floor) continue;
+          marksJudged++;
+          if (dark < floor) markDrops.push(`${route}: ${key} is ${light.toFixed(2)} in light, ${dark.toFixed(2)} in dark (floor ${floor})`);
         }
         for (const [key, light] of Object.entries(byTheme.light.out)) {
           const dark = byTheme.dark.out[key];
@@ -6796,6 +6863,40 @@ try {
           if (dark < floor) drops.push(`${route}: ${key} is ${light.toFixed(2)} in light, ${dark.toFixed(2)} in dark (floor ${floor})`);
         }
       }
+      // The loading bars never show on a loaded page, so the walk above
+      // cannot meet them. Their two tokens are measured directly, in each
+      // theme, on the grounds they are drawn on. 1.3 is the floor the light
+      // scenes above pin: under it a loading page reads as an empty one.
+      const bars = {};
+      for (const theme of ["light", "dark"]) {
+        await tab.evaluate((t) => window.dbtrailTheme.set(t), theme);
+        bars[theme] = await tab.evaluate(() => {
+          const cv = document.createElement("canvas"); cv.width = cv.height = 1;
+          const g = cv.getContext("2d", { willReadFrequently: true });
+          const lum = (d) => { const [r, gg, b] = d.map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * gg + 0.0722 * b; };
+          const paint = (...layers) => { g.clearRect(0, 0, 1, 1); for (const c of layers) { g.fillStyle = c; g.fillRect(0, 0, 1, 1); } return Array.from(g.getImageData(0, 0, 1, 1).data).slice(0, 3); };
+          const probe = document.createElement("div");
+          document.body.append(probe);
+          const val = (tok) => { probe.style.background = `var(${tok})`; return getComputedStyle(probe).backgroundColor; };
+          const res = {};
+          for (const [bar, grounds] of [["--skel-warm", ["--surface", "--violet-tint"]], ["--skel-neutral", ["--surface", "--bg"]]]) {
+            for (const gr of grounds) {
+              // a tint is translucent in dark: it sits on the surface
+              const base = gr === "--violet-tint" ? [val("--surface"), val(gr)] : [val(gr)];
+              const a = lum(paint(...base, val(bar))), b = lum(paint(...base));
+              res[bar + " on " + gr] = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+            }
+          }
+          probe.remove();
+          return res;
+        });
+      }
+      const faintBars = [];
+      for (const theme of ["light", "dark"]) for (const [k, v] of Object.entries(bars[theme])) if (!(v >= 1.3)) faintBars.push(`${theme}: ${k} = ${Number(v).toFixed(2)}`);
+      (faintBars.length === 0 && Object.keys(bars.dark).length === 4)
+        ? ok("theme: the loading bars hold 1.3:1 on their grounds in light and in dark")
+        : bad("theme: the loading bars hold 1.3:1 on their grounds in light and in dark", faintBars.join("; ") || JSON.stringify(bars));
+
       // A sweep that measures nothing passes everything.
       judged >= 150
         ? ok("theme: the contrast sweep measured text on every route in both themes")
@@ -6803,7 +6904,13 @@ try {
       drops.length === 0
         ? ok("theme: dark holds every text floor light holds, on every route")
         : bad("theme: dark holds every text floor light holds, on every route", `${drops.length} drop(s):\n    ` + drops.slice(0, 25).join("\n    "));
-      console.log(`theme sweep: ${judged} pieces of text judged, ${drops.length} drop(s)`);
+      marksJudged >= 100
+        ? ok("theme: the marks sweep measured edges and fills on every route in both themes")
+        : bad("theme: the marks sweep measured edges and fills on every route in both themes", `only ${marksJudged} boxes were judged`);
+      markDrops.length === 0
+        ? ok("theme: dark holds every edge and fill floor light holds, on every route")
+        : bad("theme: dark holds every edge and fill floor light holds, on every route", `${markDrops.length} drop(s):\n    ` + markDrops.slice(0, 25).join("\n    "));
+      console.log(`theme sweep: ${judged} pieces of text judged, ${drops.length} drop(s); ${marksJudged} boxes judged, ${markDrops.length} drop(s)`);
     } finally {
       await tab.close();
     }
