@@ -452,6 +452,10 @@ type Server struct {
 	// with a given memory may spill to, or why none (#2210). Nil (a test's
 	// runner) leaves the settings panel's disk line out.
 	sqlSpillState func(memory string) (int64, error)
+	// sqlFenceState is the runner's FenceState: whether a statement runs
+	// under a memory ceiling of its own and, when it does not where it
+	// could, why (#2226). Nil leaves the settings panel's line out.
+	sqlFenceState func() (fenced bool, reason string)
 	// sqlLimits are the caps sqlRunner runs under, every field resolved (a
 	// zero Config.SQLLimits is sqlsandbox.DefaultLimits); the handler reads
 	// them to bound max_rows and to name the timeout in its refusal.
@@ -745,7 +749,7 @@ func New(cfg Config) (*Server, error) {
 	// on their own after a few minutes with no statement, and with this
 	// process, whose exit closes their stdin.
 	runner := sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits, MaxInFlight: cfg.SQLMaxInFlight, Standby: true})
-	s.sqlRunner, s.sqlSpillState = sandboxRunner{runner}, runner.SpillState
+	s.sqlRunner, s.sqlSpillState, s.sqlFenceState = sandboxRunner{runner}, runner.SpillState, runner.FenceState
 	s.sqlMaxInFlight = cfg.SQLMaxInFlight
 	if s.sqlMaxInFlight < 1 {
 		s.sqlMaxInFlight = sqlsandbox.DefaultMaxInFlight

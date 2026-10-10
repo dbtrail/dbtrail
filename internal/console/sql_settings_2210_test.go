@@ -168,6 +168,12 @@ func sqlSettingsServer(t *testing.T, path, startup string) *Server {
 		n, err := cliutil.ParseByteSize(memory)
 		return 4 * n, err
 	}
+	if s.sqlFenceState == nil {
+		t.Fatal("New left the runner's fence state unwired: the settings panel would never say whether a statement has a memory ceiling of its own")
+	}
+	// The runner's answer depends on where the test runs; pinned to "nothing
+	// to say", which is what a system with no such ceiling to offer answers.
+	s.sqlFenceState = func() (bool, string) { return false, "" }
 	return s
 }
 

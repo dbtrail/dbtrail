@@ -13920,6 +13920,11 @@ function sqlMemoryLines(st) {
     out.push((st.max_in_flight === 1 ? "One statement runs" : st.max_in_flight + " statements can run") +
       " at once, on the machine that also captures changes.");
   }
+  if (st.own_ceiling) {
+    out.push("Each statement also has a memory ceiling of its own, kept by the system: one that outgrows its memory is stopped alone, and nothing else on this machine is affected.");
+  } else if (st.no_own_ceiling) {
+    out.push("A statement has no memory ceiling of its own here, so one that outgrows its memory is only stopped when this machine runs out of memory, and the system may stop something else with it. Why: " + st.no_own_ceiling + ".");
+  }
   if (st.saved) out.push("The value saved here, " + st.saved + ", is not used while the one set at startup is.");
   return out;
 }

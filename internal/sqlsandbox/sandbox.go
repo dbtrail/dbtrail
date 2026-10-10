@@ -554,6 +554,9 @@ type Runner struct {
 	// ran without one, logged once per change like the spill's.
 	fence          fence
 	fenceLastError string
+	// fenceLastReason is the same reason without file paths, for the
+	// settings panel (plainReason).
+	fenceLastReason string
 
 	mu       sync.Mutex
 	busy     map[string]bool
@@ -643,9 +646,9 @@ var fenceFor = func() fence {
 	}
 	self, err := procSelfCgroup()
 	if err != nil {
-		return fence{why: fmt.Sprintf("DBTrail's own cgroup cannot be read: %v", err)}
+		return fence{why: "DBTrail's own cgroup cannot be read: " + plainReason(err)}
 	}
-	return findFence(cgroupMount, self, cgroupDelegated)
+	return findFence(cgroupMount, self, cgroupDelegated, settleInLeaf)
 }
 
 // FenceState reports whether a statement runs in a memory cgroup of its own
@@ -659,7 +662,7 @@ func (r *Runner) FenceState() (fenced bool, reason string) {
 	}
 	r.spillMu.Lock()
 	defer r.spillMu.Unlock()
-	return r.fenceLastError == "", r.fenceLastError
+	return r.fenceLastError == "", r.fenceLastReason
 }
 
 // noteFence logs a change in whether statements get their cgroup, as
@@ -669,9 +672,13 @@ func (r *Runner) noteFence(err error) {
 	if err != nil {
 		msg = err.Error()
 	}
+	plain := ""
+	if err != nil {
+		plain = plainReason(err)
+	}
 	r.spillMu.Lock()
 	changed := msg != r.fenceLastError
-	r.fenceLastError = msg
+	r.fenceLastError, r.fenceLastReason = msg, plain
 	r.spillMu.Unlock()
 	switch {
 	case !changed || !fenceReason:

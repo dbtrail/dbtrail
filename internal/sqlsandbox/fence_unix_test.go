@@ -138,6 +138,10 @@ func TestRun_aStatementRunsWithoutItsCgroupWhenNoneCanBeMade(t *testing.T) {
 	if fenced || !strings.Contains(why, "memory ceiling") {
 		t.Errorf("FenceState = %v, %q; want unfenced, naming the ceiling that could not be set", fenced, why)
 	}
+	// What the settings panel shows names no path on the host.
+	if strings.Contains(why, parent) {
+		t.Errorf("the reason names a path on the host: %q", why)
+	}
 	if left := fencesLeft(t, parent); len(left) != 0 {
 		t.Errorf("cgroups left after the statement: %v", left)
 	}
@@ -147,7 +151,7 @@ func TestRun_aStatementRunsWithoutItsCgroupWhenNoneCanBeMade(t *testing.T) {
 // found at start.
 func TestRun_noFenceOnTheHost(t *testing.T) {
 	prev := fenceFor
-	fenceFor = func() fence { return fence{why: "this host does not run DBTrail under cgroup v2"} }
+	fenceFor = func() fence { return fence{why: "this system does not offer it (it needs cgroup v2)"} }
 	t.Cleanup(func() { fenceFor = prev })
 	f := newCopyFixture(t)
 	r := newTestRunner(t, testLimits())
