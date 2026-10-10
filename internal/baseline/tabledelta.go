@@ -569,10 +569,11 @@ func escapeGlob(s string) string { return duckdbutil.FileGlob(s) }
 // day they do not a positional union would swap values between columns
 // without an error.
 //
-// `pos IS NOT NULL`: verified against DuckDB 1.5.5, ONE NULL in the NOT IN
-// subquery makes the predicate unknown for every row and the base vanishes
-// from the state without an error. The writer never writes a NULL position;
-// the filter is for a file it did not write.
+// `pos IS NOT NULL` dates from when the dead rows were subtracted with NOT IN,
+// where ONE NULL in the subquery made the predicate unknown for every row and
+// the base vanished from the state without an error (verified against DuckDB
+// 1.5.5). baseMinusDeadSQL ignores a NULL on its own; the filter stays, for a
+// file the writer did not write.
 //
 // base, posdelGlob and upsertsGlob are SQL expressions (a quoted path, or the
 // producer's variable-prefixed one); basePath is the table file's path as a
@@ -747,11 +748,61 @@ func tableDeltaStateSQL(base, upserts, dead, replace string) string {
 		star = "* REPLACE (" + replace + ")"
 	}
 	return fmt.Sprintf("WITH bintrail_latest AS (%s) "+
-		"SELECT %s FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet(%s, file_row_number=true) "+
-		"WHERE file_row_number NOT IN (%s) "+
+		"SELECT %s FROM (%s "+
 		"UNION ALL BY NAME SELECT * EXCLUDE (\"%s\", \"%s\") FROM bintrail_latest WHERE \"%s\" = '%s')",
-		TableDeltaLatestSQL(upserts), star, base, dead,
+		TableDeltaLatestSQL(upserts), star, baseMinusDeadSQL(base, dead),
 		TableDeltaPKColumn, TableDeltaOpColumn, TableDeltaOpColumn, TableDeltaOpUpsert)
+}
+
+// posdelPositionsSQL selects the dead row numbers of one .posdel file, given
+// as a SQL expression for its path.
+func posdelPositionsSQL(posdel string) string {
+	return fmt.Sprintf("SELECT \"%s\" FROM read_parquet(%s) WHERE \"%s\" IS NOT NULL", TableDeltaPosColumn, posdel, TableDeltaPosColumn)
+}
+
+// baseMinusDeadSQL selects the rows of the table file at base (a SQL
+// expression for its path) that dead does not list. dead is a SELECT of one
+// column of an integer type, the dead row numbers, as both writers of a
+// .posdel write them (BIGINT); a column of another type (a DOUBLE, a
+// DECIMAL) does not bind, where NOT IN compared it. A NULL, a negative
+// number or a number past the file's last row removes nothing, and a number
+// listed twice removes its row once.
+//
+// The dead rows are folded into one 64-bit mask per block of 64 row numbers,
+// and each row of the file looks up its block's mask and tests its bit
+// (#2237). The form this replaced, `file_row_number NOT IN (dead)`, probed a
+// hash table of every dead row once per row of the file, and its cost
+// doubled and halved with the size of the list: just under a power of two
+// (2^19, 2^20, 2^21 rows...) it took twice what it took just over one,
+// consistent with the join's table being half full on one side and a quarter
+// full on the other. A table drifted across those sizes as its changes
+// accumulated. The masks number at most a 64th of the file's rows however
+// many are dead, so that table stops growing.
+//
+// Measured through TableDeltaOnePairStateSQL on DuckDB 1.4.5 over a file of
+// 20 M rows on one machine, 2 threads, a sum of one column over the whole
+// table, from 1,000 dead rows to 4.2 M. Dead rows picked at random: 241 ms
+// to 345 ms, where NOT IN took 214 ms to 865 ms and went from 319 ms to
+// 608 ms within one doubling of the list. Dead rows that sit together (the
+// file's last rows, runs of 128, most of them in a twentieth of the file)
+// fill fewer masks: 237 ms to 332 ms, against 207 ms to 699 ms. Under about
+// 4,000 dead rows this form is the slower one whatever their layout, by some
+// 30 ms on that table; past that it loses only to the cheap side of each
+// doubling, with dead rows spread at random, by under 10 % (twice that on
+// DuckDB 1.5.6, which a downloaded views file runs on). A lookup of one row
+// costs the same either way up to a million dead rows and less past that.
+// Not measured: a host that is also capturing.
+//
+// Every name the statement adds starts with bintrail_ and is qualified, and
+// only the file's own columns are selected, so a table with a column of any
+// of these names reads as itself.
+func baseMinusDeadSQL(base, dead string) string {
+	return fmt.Sprintf("SELECT bintrail_b.* EXCLUDE (file_row_number) FROM read_parquet(%s, file_row_number=true) AS bintrail_b "+
+		"LEFT JOIN (SELECT bintrail_p >> 6 AS bintrail_block, bit_or(1::UBIGINT << (bintrail_p & 63)::UBIGINT) AS bintrail_mask "+
+		"FROM (%s) AS bintrail_d(bintrail_p) GROUP BY 1) AS bintrail_dead "+
+		"ON (bintrail_b.file_row_number >> 6) = bintrail_dead.bintrail_block "+
+		"WHERE bintrail_dead.bintrail_mask IS NULL OR (bintrail_dead.bintrail_mask >> (bintrail_b.file_row_number & 63)::UBIGINT) & 1 = 0",
+		base, dead)
 }
 
 // TableDeltaOnePairStateSQL is TableDeltaStateSQL for a chain that is exactly
@@ -790,10 +841,9 @@ func TableDeltaOnePairStateSQL(base, posdel, upserts, replace string) string {
 	if replace != "" {
 		star = "* REPLACE (" + replace + ")"
 	}
-	return fmt.Sprintf("SELECT %s FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet(%s, file_row_number=true) "+
-		"WHERE file_row_number NOT IN (SELECT \"%s\" FROM read_parquet(%s) WHERE \"%s\" IS NOT NULL) "+
+	return fmt.Sprintf("SELECT %s FROM (%s "+
 		"UNION ALL BY NAME SELECT * EXCLUDE (\"%s\", \"%s\") FROM read_parquet(%s) WHERE \"%s\" = '%s')",
-		star, base, TableDeltaPosColumn, posdel, TableDeltaPosColumn,
+		star, baseMinusDeadSQL(base, posdelPositionsSQL(posdel)),
 		TableDeltaPKColumn, TableDeltaOpColumn, upserts, TableDeltaOpColumn, TableDeltaOpUpsert)
 }
 
@@ -806,10 +856,9 @@ func LegacyTableDeltaStateSQL(base, posdel, upserts, replace string) string {
 	if replace != "" {
 		star = "* REPLACE (" + replace + ")"
 	}
-	return fmt.Sprintf("SELECT %s FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet(%s, file_row_number=true) "+
-		"WHERE file_row_number NOT IN (SELECT \"%s\" FROM read_parquet(%s) WHERE \"%s\" IS NOT NULL) "+
+	return fmt.Sprintf("SELECT %s FROM (%s "+
 		"UNION ALL BY NAME SELECT * FROM read_parquet(%s))",
-		star, base, TableDeltaPosColumn, posdel, TableDeltaPosColumn, upserts)
+		star, baseMinusDeadSQL(base, posdelPositionsSQL(posdel)), upserts)
 }
 
 // SnapshotTableDeltas returns which tables of ONE snapshot have a delta beside
