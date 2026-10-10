@@ -80,6 +80,9 @@ func init() {
 	rootCmd.AddCommand(doctorCmd)
 }
 
+// doctorOut is where the command writes its report; a test replaces it.
+var doctorOut io.Writer = os.Stdout
+
 func runDoctor(cmd *cobra.Command, args []string) error {
 	if !cliutil.IsValidOutputFormat(docFormat) {
 		return fmt.Errorf("invalid --format %q; must be text or json", docFormat)
@@ -100,8 +103,16 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return runDoctorTo(cmd.Context(), os.Stdout, docFormat, docSourceDSN, docIndexDSN, docSchemas, retain, note, docProxySQLAdmin, docArchiveS3, docArchiveS3Reg,
-		append(snapshotExpiryChecks(docBaselineS3, docBaselineS3Reg, every), fullReadDiskCheck(docStagingDir, docSourceDSN, docSchemas))...)
+	return runDoctorTo(cmd.Context(), doctorOut, docFormat, docSourceDSN, docIndexDSN, docSchemas, retain, note, docProxySQLAdmin, docArchiveS3, docArchiveS3Reg,
+		doctorOptInChecks(docBaselineS3, docBaselineS3Reg, every, docStagingDir, docSourceDSN, docSchemas)...)
+}
+
+// doctorOptInChecks are the checks `bintrail doctor` adds after the built-in
+// ones, in the order they print: the snapshot expiry check when
+// --baseline-s3 is given, then the full-read disk check, which is always
+// there (one skipped line without --staging-dir).
+func doctorOptInChecks(baselineS3, baselineRegion string, every time.Duration, stagingDir, sourceDSN, schemasCSV string) []func(context.Context) doctor.CheckResult {
+	return append(snapshotExpiryChecks(baselineS3, baselineRegion, every), fullReadDiskCheck(stagingDir, sourceDSN, schemasCSV))
 }
 
 // fullReadDiskCheck is the disk a full read needs (#2259; advisory, never

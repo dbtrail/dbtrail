@@ -62,19 +62,34 @@ func TestFullReadDiskResult(t *testing.T) {
 			has: []string{"40.0 GiB", "50.0 GiB", "72.0 GiB", "If the snapshot is written to this disk too"}},
 		{name: "room for the peak", free: 100 * frGiB, est: plain, status: StatusPass,
 			has: []string{"40.0 GiB", "100.0 GiB"}, hasNot: []string{"If the snapshot"}},
-		{name: "no tables match", free: frGiB, est: DumpEstimate{}, status: StatusPass, schemas: []string{"shop"},
-			has: []string{"no tables match", "--schemas shop", "1.0 GiB"}, hasNot: []string{"needs about 0"}},
+		// A user that sees no table reads the same as there being none.
+		{name: "no visible tables is nothing sized, not a pass", free: frGiB, est: DumpEstimate{}, status: StatusSkip, schemas: []string{"shop"},
+			has: []string{"nothing was sized", "sees no tables", "--schemas shop", "1.0 GiB"}, hasNot: []string{"needs about", "nothing to write"}},
 		{name: "sizes could not be read: the free space is still reported", free: 7 * frGiB, estErr: errors.New("Error 1045: denied\nsecond line"), status: StatusSkip,
 			has: []string{"7.0 GiB", "Error 1045: denied", "not compared"}, hasNot: []string{"second line"}},
 		{name: "compressed tables: never a pass, never fits", free: 100 * frGiB,
 			est:    DumpEstimate{DataBytes: int64(10 * frGiB), Bytes: int64(10 * frGiB), Tables: 2, Compressed: 1, CompressedTop: []string{"shop.zipped"}},
-			status: StatusSkip, has: []string{"cannot tell", "shop.zipped", "compressed size"}, hasNot: []string{"upper bound", "fits"}},
+			status: StatusSkip, has: []string{"cannot tell", "shop.zipped", "compressed size"}, hasNot: []string{"upper bound", "needs about"}},
+		{name: "compressed tables under the refusal line: still what the console refuses", free: 4 * frGiB,
+			est:    DumpEstimate{DataBytes: int64(10 * frGiB), Bytes: int64(10 * frGiB), Tables: 2, Compressed: 1, CompressedTop: []string{"shop.zipped"}},
+			status: StatusWarn, has: []string{"refuses to start a full read", "shop.zipped"}, hasNot: []string{"upper bound"}},
 		{name: "compressed tables under the tables' size: no upper bound claimed", free: 8 * frGiB,
 			est:    DumpEstimate{DataBytes: int64(10 * frGiB), Bytes: int64(10 * frGiB), Tables: 2, Compressed: 1, CompressedTop: []string{"shop.zipped"}},
 			status: StatusWarn, has: []string{"may not fit", "shop.zipped"}, hasNot: []string{"upper bound"}},
-		{name: "unsized tables and stale sizes are said", free: 100 * frGiB,
-			est:    DumpEstimate{DataBytes: int64(frGiB), Bytes: int64(frGiB), Tables: 2, Unsized: 1, Stale: true},
-			status: StatusPass, has: []string{"no size for 1 table", "up to a day old"}},
+		{name: "a table with no size: room for the sum is not room for the read", free: 100 * frGiB,
+			est:    DumpEstimate{DataBytes: int64(frGiB), Bytes: int64(frGiB), Tables: 2, Unsized: 1},
+			status: StatusSkip, has: []string{"cannot tell", "no size for 1 table"}, hasNot: []string{"needs about"}},
+		{name: "no table has a size: never needs 0 B", free: 100 * frGiB,
+			est:    DumpEstimate{Tables: 3, Unsized: 3},
+			status: StatusSkip, has: []string{"cannot tell", "no size for 3 table"}, hasNot: []string{"needs about"}},
+		{name: "stale sizes are said on a pass", free: 100 * frGiB,
+			est:    DumpEstimate{DataBytes: int64(frGiB), Bytes: int64(frGiB), Tables: 2, Stale: true},
+			status: StatusPass, has: []string{"up to a day old"}},
+		{name: "a source that timed out says how long was waited", free: 7 * frGiB, estErr: context.DeadlineExceeded, status: StatusSkip,
+			has: []string{"did not answer within 15s", "7.0 GiB"}, hasNot: []string{"deadline exceeded"}},
+		{name: "a filesystem that reports 2^63 bytes free prints no negative size", free: 1 << 63,
+			est:    DumpEstimate{DataBytes: int64(frGiB), Bytes: int64(frGiB), Tables: 1},
+			status: StatusPass, has: []string{"8.0 EiB free"}, hasNot: []string{"-"}},
 		{name: "two sizes that print alike are given in bytes", free: 10*frGiB - 1,
 			est:    DumpEstimate{DataBytes: int64(10*frGiB + 2), Bytes: int64(10*frGiB + 2), Tables: 1},
 			status: StatusWarn, has: []string{"bytes"}},
@@ -162,6 +177,47 @@ func TestCheckFullReadDisk_theFolder(t *testing.T) {
 			t.Fatalf("under a file: %s (%s)", got.Status, got.Detail)
 		}
 	})
+	t.Run("a link to a folder that is not there is not measured at its parent", func(t *testing.T) {
+		s := stubFullReadDisk(t, 100*frGiB, 200*frGiB, nil, est, nil)
+		base := t.TempDir()
+		link := filepath.Join(base, "stage")
+		if err := os.Symlink(filepath.Join(base, "unmounted", "stage"), link); err != nil {
+			t.Skip("no symlinks here:", err)
+		}
+		for _, dir := range []string{link, filepath.Join(link, "sub")} {
+			got := CheckFullReadDisk(ctx, dir, "dsn", nil)
+			if got.Status != StatusSkip || !strings.Contains(got.Detail, "is a link to something that is not there") || len(s.measured) != 0 {
+				t.Fatalf("%s: %s (%s), measured %v", dir, got.Status, got.Detail, s.measured)
+			}
+		}
+		// A link to a folder that is there is that folder.
+		real := t.TempDir()
+		good := filepath.Join(base, "good")
+		if err := os.Symlink(real, good); err != nil {
+			t.Fatal(err)
+		}
+		if got := CheckFullReadDisk(ctx, good, "dsn", nil); got.Status != StatusPass || len(s.measured) != 1 || s.measured[0] != good {
+			t.Fatalf("live link: %s (%s), measured %v", got.Status, got.Detail, s.measured)
+		}
+	})
+	t.Run("a parent that cannot be looked into is cannot tell, with no number", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads every folder")
+		}
+		s := stubFullReadDisk(t, 100*frGiB, 200*frGiB, nil, est, nil)
+		locked := filepath.Join(t.TempDir(), "locked")
+		if err := os.Mkdir(locked, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(locked, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+		got := CheckFullReadDisk(ctx, filepath.Join(locked, "stage"), "dsn", nil)
+		if got.Status != StatusSkip || !strings.Contains(got.Detail, "could not be looked at") || strings.Contains(got.Detail, "GiB") || len(s.measured) != 0 {
+			t.Fatalf("%s (%s), measured %v", got.Status, got.Detail, s.measured)
+		}
+	})
 	t.Run("a relative folder is measured, and named, by its full path", func(t *testing.T) {
 		s := stubFullReadDisk(t, 100*frGiB, 200*frGiB, nil, est, nil)
 		t.Chdir(t.TempDir())
@@ -218,7 +274,7 @@ func TestCheckFullReadDisk_aSourceThatHangs(t *testing.T) {
 	go func() { done <- CheckFullReadDisk(context.Background(), t.TempDir(), "dsn", nil) }()
 	select {
 	case got := <-done:
-		if got.Status != StatusSkip || !strings.Contains(got.Detail, "9.0 GiB") || !strings.Contains(got.Detail, "deadline exceeded") {
+		if got.Status != StatusSkip || !strings.Contains(got.Detail, "9.0 GiB") || !strings.Contains(got.Detail, "did not answer within 50ms") {
 			t.Fatalf("%s (%s)", got.Status, got.Detail)
 		}
 	case <-time.After(5 * time.Second):

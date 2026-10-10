@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,6 +109,12 @@ func existingFolder(path string) (folder, isFile string, err error) {
 		case !errors.Is(serr, fs.ErrNotExist) && !errors.Is(serr, syscall.ENOTDIR):
 			return "", "", serr
 		}
+		// Something is there that Stat could not follow: a link to a folder
+		// that is missing or not mounted. A folder made "at" it would land
+		// wherever the link points, not on the parent's disk.
+		if li, lerr := os.Lstat(p); lerr == nil && li.Mode()&os.ModeSymlink != 0 {
+			return "", "", fmt.Errorf("%s is a link to something that is not there", p)
+		}
 		parent := filepath.Dir(p)
 		if parent == p {
 			return "", "", serr
@@ -123,8 +130,9 @@ func existingFolder(path string) (folder, isFile string, err error) {
 // Parquet copy (DumpPeakTenths) depends on where the snapshot is written,
 // which is not known here, so that is said as a condition and not graded.
 //
-// With tables stored compressed the sizes are not a bound (#1938), so there
-// is no pass and no "fits": it cannot tell.
+// With tables stored compressed the sizes are not a bound (#1938), and a
+// table the server gave no size for adds nothing to them, so with either
+// there is no pass: it cannot tell.
 func fullReadDiskResult(dir, measuredAt string, free uint64, schemas []string, est DumpEstimate, estErr error) CheckResult {
 	at := dir
 	if measuredAt != "" {
@@ -137,18 +145,25 @@ func fullReadDiskResult(dir, measuredAt string, free uint64, schemas []string, e
 	// Whose disk and whose tables: neither is necessarily what a full read
 	// started from the web interface uses.
 	const here = ", measured on the machine this command runs on"
-	freeS := BinarySize(int64(free))
+	freeS := BinarySize(clampSize(free))
 	res := CheckResult{Name: FullReadDiskCheckName}
 
 	if estErr != nil {
+		why := firstLine(estErr.Error())
+		if errors.Is(estErr, context.DeadlineExceeded) {
+			why = fmt.Sprintf("the source did not answer within %s", fullReadEstimateWait)
+		}
 		res.Status = StatusSkip
 		res.Detail = fmt.Sprintf("%s free at %s%s; the table sizes could not be read from the source (%s), so it is not compared with what a full read needs",
-			freeS, at, here, firstLine(estErr.Error()))
+			freeS, at, here, why)
 		return res
 	}
 	if est.Tables == 0 {
-		res.Status = StatusPass
-		res.Detail = fmt.Sprintf("no tables match %s, so a full read has nothing to write; %s free at %s%s", scope, freeS, at, here)
+		// Not a pass: this account seeing no table (a missing privilege, a
+		// misspelled schema) reads the same as there being none, and doctor
+		// need not run as the user that reads.
+		res.Status = StatusSkip
+		res.Detail = fmt.Sprintf("nothing was sized: this user sees no tables in %s; %s free at %s%s", scope, freeS, at, here)
 		return res
 	}
 	need := uint64(max(est.Bytes, 0))
@@ -184,16 +199,18 @@ func fullReadDiskResult(dir, measuredAt string, free uint64, schemas []string, e
 		res.Status, res.Remediation = StatusWarn, fix
 		res.Detail = fmt.Sprintf("the tables of %s add up to about %s%s and %s has %s free%s, so the dump of a full read may not fit.%s",
 			scope, needS, bound, at, fS, here, tail)
-	case est.Compressed > 0:
+	case est.Compressed > 0 || est.Unsized > 0:
+		// A size that is compressed, or missing, asks for too little: room
+		// for the sum is not room for the read.
 		res.Status = StatusSkip
 		res.Detail = fmt.Sprintf("cannot tell whether a full read has room: by the sizes the server reports, the tables of %s add up to about %s and %s has %s free%s.%s",
-			scope, BinarySize(int64(need)), at, freeS, here, tail)
+			scope, BinarySize(clampSize(need)), at, freeS, here, tail)
 	default:
 		res.Status = StatusPass
-		res.Detail = fmt.Sprintf("a full read of %s needs about %s at %s; %s free%s.", scope, BinarySize(int64(need)), at, freeS, here)
+		res.Detail = fmt.Sprintf("a full read of %s needs about %s at %s; %s free%s.", scope, BinarySize(clampSize(need)), at, freeS, here)
 		if free < peak {
 			res.Detail += fmt.Sprintf(" If the snapshot is written to this disk too (a server that keeps its snapshots only in S3, or a local folder on it), "+
-				"the dump and its Parquet copy together can reach about %s for data that does not compress.", BinarySize(int64(peak)))
+				"the dump and its Parquet copy together can reach about %s for data that does not compress.", BinarySize(clampSize(peak)))
 		}
 		res.Detail += tail
 	}
@@ -205,6 +222,7 @@ func fullReadDiskResult(dir, measuredAt string, free uint64, schemas []string, e
 // BinarySize renders bytes in binary units with one decimal. A value that
 // would round up to 1024.0 moves to the next unit.
 func BinarySize(b int64) string {
+	b = max(b, 0)
 	if b < 1024 {
 		return fmt.Sprintf("%d B", b)
 	}
@@ -216,10 +234,14 @@ func BinarySize(b int64) string {
 	return fmt.Sprintf("%.1f %ciB", v, "KMGTPE"[exp])
 }
 
+// clampSize keeps a size some filesystems report as "unlimited" (2^63 bytes
+// and more) from printing as a negative number.
+func clampSize(b uint64) int64 { return int64(min(b, math.MaxInt64)) }
+
 // binarySizePair renders two sizes, in bytes when they would otherwise print
 // alike, so a line never reads "about 10.0 GiB and has 10.0 GiB free".
 func binarySizePair(a, b uint64) (string, string) {
-	as, bs := BinarySize(int64(a)), BinarySize(int64(b))
+	as, bs := BinarySize(clampSize(a)), BinarySize(clampSize(b))
 	if as == bs {
 		return fmt.Sprintf("%d bytes", a), fmt.Sprintf("%d bytes", b)
 	}
