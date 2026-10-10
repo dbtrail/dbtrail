@@ -231,7 +231,8 @@ func TestDiscardFailedSnapshot_keepsWhatIsUsableAndSaysWhatStays_1938(t *testing
 		if !exists(filepath.Join(p, "shop.good.parquet")) || !exists(filepath.Join(p, baseline.IncompleteMarker)) {
 			t.Fatal("a snapshot with every table converted was removed")
 		}
-		if said != "Every table was converted, so the folder "+p+" was kept. It is marked incomplete and no listing shows it" {
+		if said != "Every table was written and only the last step failed, so the folder "+p+" was kept. Nothing publishes it "+
+			"(it is marked incomplete and no listing shows it) and a new full read does not use it: delete it to free the room once you no longer want it" {
 			t.Fatalf("said = %q", said)
 		}
 	})

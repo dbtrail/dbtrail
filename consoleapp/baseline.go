@@ -966,7 +966,8 @@ func discardFailedSnapshot(root, name, serverID string, convErr error) (said str
 	case errors.Is(convErr, baseline.ErrAllTablesConverted):
 		slog.Warn("console snapshot: kept the snapshot folder of a full read that converted every table and could not finish it",
 			"server", serverID, "path", p)
-		return fmt.Sprintf("Every table was converted, so the folder %s was kept. It is marked incomplete and no listing shows it", p)
+		return fmt.Sprintf("Every table was written and only the last step failed, so the folder %s was kept. Nothing publishes it "+
+			"(it is marked incomplete and no listing shows it) and a new full read does not use it: delete it to free the room once you no longer want it", p)
 	case errors.Is(convErr, baseline.ErrIncompleteMarkerVanished):
 		slog.Warn("console snapshot: kept the snapshot folder of a full read whose marker vanished while it ran",
 			"server", serverID, "path", p)

@@ -408,11 +408,13 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 }
 
 // ErrAllTablesConverted matches a Run that failed AFTER every table was
-// written: what is on disk is a whole snapshot that could not be finished
-// (its table deltas, its integrity manifest or its _SUCCESS marker). A caller
-// that removes the folder of a failed run must not remove this one: it is the
-// whole result of a read the source already paid for. The message of the
-// failure is unchanged.
+// written: no table reported a failure, and what could not be done is the
+// finishing (its table deltas, its integrity manifest or its _SUCCESS
+// marker). A caller that removes the folder of a failed run must not remove
+// this one: it is the whole result of a read the source already paid for.
+// It is not a promise that the files are good: the manifest step reads every
+// Parquet file back for its checksum, and a file the disk would not give back
+// fails there too. The message of the failure is unchanged.
 var ErrAllTablesConverted = errors.New("every table was converted")
 
 type tablesConvertedError struct{ err error }
