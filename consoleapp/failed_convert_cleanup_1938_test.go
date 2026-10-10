@@ -3,7 +3,6 @@ package consoleapp
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
@@ -222,18 +222,33 @@ func TestDiscardFailedSnapshot_keepsWhatIsUsableAndSaysWhatStays_1938(t *testing
 			t.Fatalf("left = %q", left)
 		}
 	})
-	// Every table converted and only the finishing failed: the folder is the
-	// whole result of the read, and it stays, said with where it is.
-	t.Run("every table converted: kept, and said", func(t *testing.T) {
-		root, p := mk(t, baseline.IncompleteMarker, "shop.good.parquet")
-		late := fmt.Errorf("snapshot complete but could not write integrity manifest: %w: disk full", baseline.ErrAllTablesConverted)
-		said := discardFailedSnapshot(root, name, "s1", late)
-		if !exists(filepath.Join(p, "shop.good.parquet")) || !exists(filepath.Join(p, baseline.IncompleteMarker)) {
-			t.Fatal("a snapshot with every table converted was removed")
+	// Every table written and only the finishing failed (the manifest, the
+	// marker): the folder is still marked incomplete, nothing can publish it
+	// and the dump it came from is gone, so it goes like any other. Keeping it
+	// left a whole snapshot's worth of files, shown nowhere, on a disk that
+	// was probably full.
+	// The error and the folder are the real ones: baseline.Run converts a
+	// whole dump and fails where the manifest goes, after the last table.
+	t.Run("every table written, the last step failed: removed", func(t *testing.T) {
+		in, root := t.TempDir(), t.TempDir()
+		writeWholeDump(t, in)
+		at := time.Date(2026, 10, 10, 13, 51, 42, 0, time.UTC)
+		snapName := reconstruct.SnapshotDirName(at)
+		p := filepath.Join(root, snapName)
+		if err := os.MkdirAll(filepath.Join(p, baselineintegrity.ManifestName, "x"), 0o755); err != nil {
+			t.Fatal(err)
 		}
-		if said != "Every table was written and only the last step failed, so the folder "+p+" was kept. Nothing publishes it "+
-			"(it is marked incomplete and no listing shows it) and a new full read does not use it: delete it to free the room once you no longer want it" {
-			t.Fatalf("said = %q", said)
+		_, late := baseline.Run(context.Background(), baseline.Config{InputDir: in, OutputDir: root, Compression: "zstd", Timestamp: at})
+		if late == nil || !strings.HasPrefix(late.Error(), "snapshot complete but could not write integrity manifest") {
+			t.Fatalf("Run: %v, want the manifest's failure after every table", late)
+		}
+		if written, _ := filepath.Glob(filepath.Join(p, "*", "*.parquet")); len(written) == 0 {
+			if flat, _ := filepath.Glob(filepath.Join(p, "*.parquet")); len(flat) == 0 {
+				t.Fatal("no table was written: the case proves nothing")
+			}
+		}
+		if said := discardFailedSnapshot(root, snapName, "s1", late); said != "The unfinished snapshot folder this read started was removed" || exists(p) {
+			t.Fatalf("said=%q exists=%v", said, exists(p))
 		}
 	})
 	t.Run("the marker vanished under the run: kept", func(t *testing.T) {

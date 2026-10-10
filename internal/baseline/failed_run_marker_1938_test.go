@@ -2,7 +2,6 @@ package baseline
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,11 +41,11 @@ func writeDump1938(t *testing.T, dir string, cut bool) {
 	}
 }
 
-// #1938: a caller that removes the folder of a failed run has to tell a run
-// that left a PARTIAL snapshot from one that wrote every table and could not
-// finish it. Only Run knows which, so it says so with a type; the words of the
-// failure are what they were.
-func TestRun_aFailureAfterEveryTableSaysSo_1938(t *testing.T) {
+// #1938: the console removes the snapshot folder of a full read whose
+// conversion failed, and it tells such a folder by its _INCOMPLETE marker.
+// That holds for a failure at ANY point of Run, including after the last
+// table: the marker is replaced by _SUCCESS only when everything is done.
+func TestRun_aFailedRunLeavesItsFolderMarkedIncomplete_1938(t *testing.T) {
 	at := time.Date(2026, 10, 10, 13, 51, 42, 0, time.UTC)
 	cfg := func(in, out string) Config {
 		return Config{InputDir: in, OutputDir: out, Compression: "zstd", Timestamp: at}
@@ -55,9 +54,15 @@ func TestRun_aFailureAfterEveryTableSaysSo_1938(t *testing.T) {
 	t.Run("a table that does not convert: a partial snapshot", func(t *testing.T) {
 		in, out := t.TempDir(), t.TempDir()
 		writeDump1938(t, in, true)
-		_, err := Run(context.Background(), cfg(in, out))
-		if err == nil || errors.Is(err, ErrAllTablesConverted) {
-			t.Fatalf("err = %v, want a table failure that is not ErrAllTablesConverted", err)
+		if _, err := Run(context.Background(), cfg(in, out)); err == nil {
+			t.Fatal("a dump with a cut table converted")
+		}
+		snap := filepath.Join(out, snapshotdir.Name(at))
+		if _, err := os.Stat(filepath.Join(snap, IncompleteMarker)); err != nil {
+			t.Fatalf("the folder is not marked incomplete: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(snap, SuccessMarker)); err == nil {
+			t.Fatal("a partial snapshot was published")
 		}
 	})
 
@@ -72,14 +77,11 @@ func TestRun_aFailureAfterEveryTableSaysSo_1938(t *testing.T) {
 		}
 		_, err := Run(context.Background(), cfg(in, out))
 		t.Logf("error: %v", err)
-		if !errors.Is(err, ErrAllTablesConverted) {
-			t.Fatalf("err = %v, want ErrAllTablesConverted", err)
+		if err == nil || !strings.HasPrefix(err.Error(), "snapshot complete but could not write integrity manifest: ") {
+			t.Fatalf("err = %v, want the manifest's failure", err)
 		}
-		if !strings.HasPrefix(err.Error(), "snapshot complete but could not write integrity manifest: ") {
-			t.Fatalf("the message changed: %v", err)
-		}
-		// What the type promises: both tables are on disk, and the folder is
-		// still marked incomplete.
+		// Both tables are on disk, and the folder is still marked incomplete:
+		// to every reader, and to the console's cleanup, it is not a snapshot.
 		parquet, _ := filepath.Glob(filepath.Join(snap, "*", "*.parquet"))
 		if flat, _ := filepath.Glob(filepath.Join(snap, "*.parquet")); len(flat) > 0 {
 			parquet = append(parquet, flat...)
