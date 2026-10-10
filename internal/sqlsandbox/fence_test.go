@@ -10,6 +10,10 @@ import (
 	"testing"
 )
 
+// The tests decide whether systemd started the process, each for itself: the
+// machine that runs them may or may not be a systemd unit (a CI runner is).
+func init() { startedBySystemd = func() bool { return false } }
+
 // fakeCgroupTree is a directory laid out like the part of a cgroup v2 mount
 // findFence reads: the daemon's cgroup at <mount>/svc/daemon and its parent
 // with the two control files. Plain files, so the tests run on any OS.
@@ -287,6 +291,67 @@ func TestFindFence_own(t *testing.T) {
 			t.Fatalf("fence = %+v after %d moves, want root %s after one", f, moved, mount)
 		}
 	})
+}
+
+// Under systemd only its own mark counts. A unit can be given a cgroup
+// namespace of its own (ProtectControlGroups=private or strict, systemd
+// 257), and then sees itself at the top of one without having been handed
+// anything: that is not a container.
+func TestFindFence_aNamespaceTopUnderSystemdIsNotAContainer(t *testing.T) {
+	prev := startedBySystemd
+	startedBySystemd = func() bool { return true }
+	t.Cleanup(func() { startedBySystemd = prev })
+	newTop := func() string {
+		mount := t.TempDir()
+		for name, body := range map[string]string{"cgroup.controllers": "memory\n", "cgroup.subtree_control": "", "cgroup.events": "populated 1\n"} {
+			if err := os.WriteFile(filepath.Join(mount, name), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return mount
+	}
+	mount := newTop()
+	f := findFence(mount, []byte("0::/\n"), only(), noSettle(t))
+	if f.root != "" || !strings.Contains(f.why, "Delegate=yes") {
+		t.Fatalf("fence = %+v, want off, asking for Delegate=yes", f)
+	}
+	if got, _ := os.ReadFile(filepath.Join(mount, "cgroup.subtree_control")); len(got) != 0 {
+		t.Errorf("subtree_control was written: %q", got)
+	}
+	// With the mark it is the unit's own, and a read-only tree there is the
+	// unit's setting, not Docker's.
+	mount = newTop()
+	f = findFence(mount, []byte("0::/\n"), only(mount), func(string) error {
+		return &os.PathError{Op: "mkdir", Path: mount, Err: syscall.EROFS}
+	})
+	if f.root != "" || !strings.Contains(f.why, "ProtectControlGroups") || strings.Contains(f.why, "docker") {
+		t.Fatalf("fence = %+v, want off, naming the unit's setting and not Docker", f)
+	}
+}
+
+// The probe proved the tree writable when it was made. Failing to remove it
+// is not a reason to run without ceilings: the sweep that follows takes it.
+func TestEnableFence_aProbeThatCannotBeRemovedIsNotAFailure(t *testing.T) {
+	_, parent := fakeCgroupTree(t, "memory\n", "memory\n")
+	prev := mkFenceDir
+	t.Cleanup(func() { mkFenceDir = prev })
+	var probe string
+	mkFenceDir = func(root string) (string, error) {
+		dir, err := prev(root)
+		if err == nil {
+			probe = dir
+			// A directory inside makes the removal fail: it is never
+			// recursive.
+			err = os.Mkdir(filepath.Join(dir, "held"), 0o755)
+		}
+		return dir, err
+	}
+	if err := enableFence(parent); err != nil {
+		t.Fatalf("enableFence = %v, want nil: the tree is writable", err)
+	}
+	if !isFenceName(filepath.Base(probe)) {
+		t.Errorf("the probe %s is not a name the sweep takes", probe)
+	}
 }
 
 // Everything that is not a cgroup handed to the daemon: nothing is moved

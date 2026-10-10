@@ -138,6 +138,15 @@ func TestRun_aStatementRunsWithoutItsCgroupWhenNoneCanBeMade(t *testing.T) {
 	if fenced || !strings.Contains(why, "memory ceiling") {
 		t.Errorf("FenceState = %v, %q; want unfenced, naming the ceiling that could not be set", fenced, why)
 	}
+	// The same failure on the next statement is not a change: the cgroup's
+	// name differs every time, and the reason does not.
+	before := r.fenceLastError
+	if _, err := r.Run(context.Background(), f.job("SELECT 1")); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(before, parent) || r.fenceLastError != before {
+		t.Errorf("the reason kept for comparison changed between two statements that failed alike: %q then %q", before, r.fenceLastError)
+	}
 	// What the settings panel shows names no path on the host.
 	if strings.Contains(why, parent) {
 		t.Errorf("the reason names a path on the host: %q", why)

@@ -551,12 +551,11 @@ type Runner struct {
 
 	// fence is where a worker gets a memory cgroup of its own (#2226), found
 	// once; fenceLastError, under spillMu, is the last reason a statement
-	// ran without one, logged once per change like the spill's.
+	// ran without one, logged once per change like the spill's. It is kept
+	// without file paths (plainReason): the settings panel shows it, and a
+	// statement's cgroup has a new name every time, which is not a change.
 	fence          fence
 	fenceLastError string
-	// fenceLastReason is the same reason without file paths, for the
-	// settings panel (plainReason).
-	fenceLastReason string
 
 	mu       sync.Mutex
 	busy     map[string]bool
@@ -662,7 +661,7 @@ func (r *Runner) FenceState() (fenced bool, reason string) {
 	}
 	r.spillMu.Lock()
 	defer r.spillMu.Unlock()
-	return r.fenceLastError == "", r.fenceLastReason
+	return r.fenceLastError == "", r.fenceLastError
 }
 
 // noteFence logs a change in whether statements get their cgroup, as
@@ -677,8 +676,8 @@ func (r *Runner) noteFence(err error) {
 		plain = plainReason(err)
 	}
 	r.spillMu.Lock()
-	changed := msg != r.fenceLastError
-	r.fenceLastError, r.fenceLastReason = msg, plain
+	changed := plain != r.fenceLastError
+	r.fenceLastError = plain
 	r.spillMu.Unlock()
 	switch {
 	case !changed || !fenceReason:

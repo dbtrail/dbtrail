@@ -248,9 +248,10 @@ services:
     # this container's own, and nowhere else; the container gains no other
     # privilege. Needs Docker Engine 28 or later: an older Docker refuses to
     # start the stack when it reads it (Podman was not tried), which is why
-    # it is off here. Settings, SQL on the copy says whether it is in effect. After a
-    # statement is stopped this way `docker inspect` reports OOMKilled=true
-    # for this container although it kept running.
+    # it is off here. Settings, MCP Server, Memory for SQL on the copy says
+    # whether it is in effect. After a statement is stopped this way
+    # `docker inspect` reports OOMKilled=true for this container although it
+    # kept running.
     # security_opt:
     #   - writable-cgroups=true
     # Building from a source checkout instead? Uncomment here AND on

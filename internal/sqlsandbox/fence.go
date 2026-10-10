@@ -108,13 +108,18 @@ func findFence(mount string, procSelfCgroup []byte, delegated func(dir string) b
 		return fence{why: "this system does not offer it (it needs cgroup v2)"}
 	}
 	dirOf := func(cg string) string { return filepath.Join(mount, filepath.FromSlash(cg)) }
+	// A container: the top of a cgroup namespace that systemd did not make.
+	// A unit can get a namespace of its own too (ProtectControlGroups=private
+	// or strict, systemd 257; read in its documentation, not run here), and
+	// there only systemd's mark says the cgroup was handed over.
+	container := namespaceTop(mount) && !startedBySystemd()
 	// A slice is where systemd keeps other units, the user's own systemd
 	// included: never a service's to manage, whoever owns it.
 	ours := func(cg string) bool {
 		if strings.HasSuffix(cg, ".slice") {
 			return false
 		}
-		return delegated(dirOf(cg)) || (cg == "/" && namespaceTop(mount))
+		return delegated(dirOf(cg)) || (cg == "/" && container)
 	}
 	hasMemory := func(cg string) bool {
 		controllers, err := os.ReadFile(filepath.Join(dirOf(cg), "cgroup.controllers"))
@@ -125,7 +130,7 @@ func findFence(mount string, procSelfCgroup []byte, delegated func(dir string) b
 	// read-only tree anywhere else is a mount the operator chose.
 	why := func(cg, what string, err error) fence {
 		if errors.Is(err, syscall.EROFS) {
-			if cg == "/" && namespaceTop(mount) {
+			if cg == "/" && container {
 				return fence{why: "this container does not let DBTrail make cgroups: in docker-compose.yml, uncomment security_opt (writable-cgroups=true) on the bintrail service, which needs Docker 28 or later, and recreate the container"}
 			}
 			return fence{why: "the cgroups DBTrail was handed are read-only (under systemd, ProtectControlGroups=yes in its unit does that)"}
@@ -189,8 +194,17 @@ func enableFence(dir string) error {
 	if err != nil {
 		return err
 	}
-	return removeFenceDir(probe)
+	// Made, so the tree can be written. One that will not go now is taken
+	// by the sweep that follows, and is no reason to run without ceilings.
+	if err := removeFenceDir(probe); err != nil {
+		slog.Warn("sql on the copy: could not remove the cgroup made to check that statements can have one", "dir", probe, "error", err)
+	}
+	return nil
 }
+
+// startedBySystemd reports whether systemd started this process: it gives
+// every unit's processes an INVOCATION_ID. A variable so a test can say so.
+var startedBySystemd = func() bool { return os.Getenv("INVOCATION_ID") != "" }
 
 // plainReason is err's text without the path of the file it was about: a
 // reason is shown in the web interface, and a cgroup path names the host's
