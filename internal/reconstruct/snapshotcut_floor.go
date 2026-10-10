@@ -28,17 +28,33 @@ import (
 //
 // This is a statement about rows, not about clocks: it assumes nothing of
 // how timestamps relate to commit order, which ResolveSnapshotCut's rule
-// does not either. What it does assume is that an event_id keeps naming the
-// event it named, and that is checked: the floor is remembered beside the
-// newest event read with it, and is used only while that row still holds
-// that file and position. A row gone (the stream's cleanup after a restart,
-// rotation, an index rebuilt) or naming another event means no floor, and
-// the search runs as it did before. So does a search for a time before the
-// remembered one, and the first search a process makes.
+// does not either.
 //
-// Kept in memory, per index: the watch daemon resolves a cut every refresh
-// and is the caller this is for. A command-line run resolves one and gains
-// nothing, as before.
+// It rests on two things about the index. That an event_id keeps naming the
+// event it named is CHECKED: the floor is remembered beside the newest event
+// read with it, and used only while that row still holds that file and
+// position. A row gone (the stream's cleanup after a restart deletes what
+// was indexed since its checkpoint; an index emptied or rebuilt) or naming
+// another event means no floor, and the search runs as it did before. So
+// does a search for a time before the remembered one, and the first search
+// a process makes.
+//
+// That no event appears later BELOW the floor is NOT checked; it holds for
+// the index's own writers. Capture and `bintrail index` never name an id, so
+// each row they add gets one above every row there (the counter survives a
+// server restart on MySQL 8.0 and later, the supported index). The one
+// writer that names ids is `bintrail restore-index`, which puts archived
+// rows back under their original ids and refuses an index that is not
+// empty. A restore under a running daemon that refreshes the same index is
+// the case this does not cover: rows restored below a floor already
+// remembered are not searched until the daemon restarts. For the same
+// reason only a fold uses the floor (resolveRefreshCut); the exported
+// ResolveSnapshotCut, which an export run against any index calls, never
+// reads or leaves one.
+//
+// Kept in memory, per index (the host, port and database the connection is
+// on): the watch daemon resolves a cut every refresh and is the caller this
+// is for. A command-line run resolves one and gains nothing, as before.
 type cutFloorStore struct {
 	mu sync.Mutex
 	m  map[string]cutFloor

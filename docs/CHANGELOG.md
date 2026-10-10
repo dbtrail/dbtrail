@@ -75,10 +75,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the hour began. On a server indexing 1.5 million changes an hour, with the
   index held to 2 CPUs and a 1 GB buffer pool, a refresh every 5 minutes
   went from 5 seconds at the top of the hour to 18 at its end, then back to
-  5. The search now starts where the previous refresh's search ended, when
-  the daemon can show nothing in the index moved under it, and reads what
-  was indexed since: the same hour, measured again, 5 to 6 seconds
-  throughout. The first refresh after the daemon starts, and one for a time
+  5. The search now starts where the previous refresh's search ended, as
+  long as the newest change that search saw is still in the index where it
+  was, and reads what was indexed since: the same hour, measured again, 5
+  to 6 seconds throughout. The first refresh after the daemon starts, and one for a time
   in the past, search as before.
 
 - **A views file that follows the newest snapshot reads the changes

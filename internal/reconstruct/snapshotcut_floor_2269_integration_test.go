@@ -67,9 +67,10 @@ func cutIndex(t *testing.T) *sql.DB {
 
 func mustCut(t *testing.T, db *sql.DB, at time.Time) *query.BinlogPos {
 	t.Helper()
-	cut, err := ResolveSnapshotCut(context.Background(), db, at)
+	// As a fold resolves it: the search that may use a floor.
+	cut, err := resolveRefreshCut(context.Background(), db, at)
 	if err != nil {
-		t.Fatalf("ResolveSnapshotCut(%s): %v", at.Format(time.RFC3339), err)
+		t.Fatalf("resolveRefreshCut(%s): %v", at.Format(time.RFC3339), err)
 	}
 	return cut
 }
@@ -304,5 +305,37 @@ func TestCutFloor_theEventFoundIsTheNextFloor(t *testing.T) {
 	}
 	if got, want := mustCut(t, db, now.Add(55*time.Second)), (&query.BinlogPos{File: "binlog.000001", Pos: 40*1000 + 100}); !sameCut(got, want) {
 		t.Fatalf("at +55s: cut = %+v, want the newest event's end, %+v", got, want)
+	}
+}
+
+// TestCutFloor_theExportedSearchNeverUsesOne: ResolveSnapshotCut is what an
+// export run against any index calls, including one that archived rows are
+// being restored into under their original ids. It reads no floor a fold
+// left, and leaves none for a fold to use.
+func TestCutFloor_theExportedSearchNeverUsesOne(t *testing.T) {
+	db := cutIndex(t)
+	cutFloors.reset()
+	now := time.Now().UTC().Truncate(time.Second).Add(-20 * time.Minute)
+	for id := uint64(10); id <= 50; id += 10 {
+		insertCutEvent(t, db, cutEvent{id: id, ts: now.Add(-time.Minute)})
+	}
+	newestEnd := &query.BinlogPos{File: "binlog.000001", Pos: 50*1000 + 100}
+	// The exported search first: it must leave nothing behind.
+	if got, err := ResolveSnapshotCut(context.Background(), db, now); err != nil || !sameCut(got, newestEnd) {
+		t.Fatalf("ResolveSnapshotCut = %+v (err=%v), want %+v", got, err, newestEnd)
+	}
+	insertCutEvent(t, db, cutEvent{id: 25, ts: now.Add(30 * time.Second)}) // restored under a low id, past the time
+	past := &query.BinlogPos{File: "binlog.000001", Pos: 25 * 1000}
+	if got := mustCut(t, db, now.Add(time.Second)); !sameCut(got, past) {
+		t.Fatalf("a fold after the exported search: cut = %+v, want %+v (the exported search left a floor)", got, past)
+	}
+	// Now a fold HAS left one (its cut event is 25, so the floor is 25).
+	// An event restored below it is invisible to the next fold, by the
+	// assumption documented on cutFloorStore, and visible to the exported
+	// search, which is the one that may meet such an index.
+	insertCutEvent(t, db, cutEvent{id: 15, ts: now.Add(40 * time.Second)})
+	lower := &query.BinlogPos{File: "binlog.000001", Pos: 15 * 1000}
+	if got, err := ResolveSnapshotCut(context.Background(), db, now.Add(2*time.Second)); err != nil || !sameCut(got, lower) {
+		t.Fatalf("ResolveSnapshotCut = %+v (err=%v), want %+v: it started at a fold's floor", got, err, lower)
 	}
 }

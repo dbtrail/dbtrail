@@ -124,7 +124,16 @@ var ErrNoIndexedCoordinates = errors.New("no indexed event carries a binlog file
 // Returns (nil, nil) when the index holds no events at all — there is nothing to
 // fold, and the caller keeps the source baseline's own coordinates.
 func ResolveSnapshotCut(ctx context.Context, db *sql.DB, at time.Time) (*query.BinlogPos, error) {
-	return resolveSnapshotCut(ctx, db, at)
+	return resolveSnapshotCut(ctx, db, at, false)
+}
+
+// resolveRefreshCut is ResolveSnapshotCut for a fold (ReconstructTables):
+// the same cut, and its search may start where an earlier fold's ended
+// (cutFloors, #2269). Kept apart from the exported name because that start
+// rests on one thing the index's own writers guarantee and another writer
+// does not: see cutFloorStore.
+func resolveRefreshCut(ctx context.Context, db *sql.DB, at time.Time) (*query.BinlogPos, error) {
+	return resolveSnapshotCut(ctx, db, at, true)
 }
 
 // resolveSnapshotCut holds ResolveSnapshotCut's implementation behind a
@@ -398,7 +407,10 @@ func firstEventPastIn(ctx context.Context, db *sql.DB, at time.Time, partClause 
 // (#1695); production leaves it a no-op.
 var afterNewestEventForTest = func() {}
 
-func resolveSnapshotCutOnce(ctx context.Context, db *sql.DB, at time.Time) (*query.BinlogPos, error) {
+// floored says whether the search may start at a remembered floor and leave
+// one for the next (resolveRefreshCut); without it nothing is read from
+// cutFloors and nothing written.
+func resolveSnapshotCutOnce(ctx context.Context, db *sql.DB, at time.Time, floored bool) (*query.BinlogPos, error) {
 	// Newest FIRST, then the search: see "Why the newest event is read FIRST"
 	// on ResolveSnapshotCut. Swapping these two back reopens #1695.
 	newest, err := newestIndexedEvent(ctx, db)
@@ -406,7 +418,10 @@ func resolveSnapshotCutOnce(ctx context.Context, db *sql.DB, at time.Time) (*que
 		return nil, err
 	}
 	afterNewestEventForTest()
-	floor := cutFloors.floorFor(ctx, db, newest.index, at)
+	var floor uint64
+	if floored {
+		floor = cutFloors.floorFor(ctx, db, newest.index, at)
+	}
 	cut, cutID, err := firstEventPast(ctx, db, at, floor)
 	if err != nil {
 		return nil, err
@@ -414,11 +429,13 @@ func resolveSnapshotCutOnce(ctx context.Context, db *sql.DB, at time.Time) (*que
 	// What this search established, for the next one: every event below the
 	// one found is not past at; with none found, every event up to the
 	// newest one read above.
-	next := newest.id + 1
-	if cut != nil {
-		next = cutID
+	if floored {
+		next := newest.id + 1
+		if cut != nil {
+			next = cutID
+		}
+		cutFloors.remember(newest.index, at, next, newest)
 	}
-	cutFloors.remember(newest.index, at, next, newest)
 	if cut != nil {
 		return cut, nil
 	}
@@ -429,7 +446,7 @@ func resolveSnapshotCutOnce(ctx context.Context, db *sql.DB, at time.Time) (*que
 
 // newestEvent is the newest indexed event that carries a coordinate, as
 // newestIndexedEvent reads it: its id, where it ends, and which index it was
-// read from (the server and database the connection is on).
+// read from (the host, port and database the connection is on).
 type newestEvent struct {
 	id    uint64
 	file  string
@@ -442,16 +459,20 @@ type newestEvent struct {
 // means it holds events but none with a coordinate.
 func newestIndexedEvent(ctx context.Context, db *sql.DB) (*newestEvent, error) {
 	var e newestEvent
-	var uuid, dbName sql.NullString
+	// @@hostname and @@port, not @@server_uuid: every server this statement
+	// can reach has the two, and a server without the third (MariaDB) would
+	// refuse the whole statement.
+	var host, dbName sql.NullString
+	var port sql.NullInt64
 	err := db.QueryRowContext(ctx,
-		`SELECT binlog_file, end_pos, event_id, @@server_uuid, DATABASE() FROM binlog_events
+		`SELECT binlog_file, end_pos, event_id, @@hostname, @@port, DATABASE() FROM binlog_events
 		  WHERE binlog_file IS NOT NULL AND end_pos IS NOT NULL
-		  ORDER BY event_id DESC LIMIT 1`).Scan(&e.file, &e.end, &e.id, &uuid, &dbName)
+		  ORDER BY event_id DESC LIMIT 1`).Scan(&e.file, &e.end, &e.id, &host, &port, &dbName)
 	switch {
 	case err == nil:
 		// An index this cannot name gets no floor: "" is never remembered.
-		if uuid.Valid && uuid.String != "" && dbName.Valid && dbName.String != "" {
-			e.index = uuid.String + "/" + dbName.String
+		if host.Valid && host.String != "" && port.Valid && dbName.Valid && dbName.String != "" {
+			e.index = fmt.Sprintf("%s:%d/%s", host.String, port.Int64, dbName.String)
 		}
 		return &e, nil
 	case errors.Is(err, sql.ErrNoRows):
