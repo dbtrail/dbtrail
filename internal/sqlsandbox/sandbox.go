@@ -314,6 +314,10 @@ type Phases struct {
 	Decode time.Duration `json:"decode_ns"`
 	// Parent: the whole run, from Slot.Run's entry.
 	Total time.Duration `json:"total_ns"`
+	// Standby: the statement ran on a worker started before it arrived
+	// (#2236). Open is then zero, paid ahead of the statement, and Spawn
+	// runs from the hand-over of the job to the worker's exit.
+	Standby bool `json:"standby,omitempty"`
 }
 
 // ErrCopyNotLocal: the job names no local copy directory. v1 reads a local
@@ -428,7 +432,31 @@ type Config struct {
 	// other DuckDB sessions spill too. It must not lie inside a copy
 	// directory: those are readable by the statement.
 	SpillDir string
+	// Standby keeps workers started ahead of the statements that will use
+	// them (#2236): after a statement ran, one per free slot waits with its
+	// DuckDB open, so the next statement does not pay the process start and
+	// the open. Each still serves ONE statement and exits. Off unless set:
+	// a Runner that keeps processes must be closed (Close).
+	Standby bool
+	// StandbyIdle is how long the standbys are kept with no statement
+	// running or arriving; after it they are stopped, and the next statement
+	// starts its own worker. 0 means DefaultStandbyIdle.
+	StandbyIdle time.Duration
 }
+
+// DefaultStandbyIdle is how long standby workers outlive the last statement:
+// long enough for a person or a dashboard working with the copy to find one
+// ready every time, short enough that an install nobody runs SQL on keeps no
+// idle process.
+const DefaultStandbyIdle = 5 * time.Minute
+
+// Standbys that die before they are used are a sign that keeping them costs
+// more than it gives (a host short of memory picks them first: they ask for
+// it). After standbyMaxDeaths in a row none is started for standbyOffFor.
+const (
+	standbyMaxDeaths = 3
+	standbyOffFor    = 5 * time.Minute
+)
 
 // SpillFactor is how much disk a worker may spill to, as a multiple of its
 // memory limit (#2210): 8 GiB at the default 2 GiB, so two workers at once
@@ -526,8 +554,28 @@ type Runner struct {
 	waiting int
 	freed   chan struct{}
 
+	// The standby workers (#2236), guarded by mu like the gate they are
+	// counted against: never more of them than free slots, so workers
+	// running plus workers waiting never pass maxInFlight.
+	standby      bool
+	standbyIdle  time.Duration
+	standbys     []*worker
+	standbyTimer *time.Timer
+	// standbyDeaths counts standbys found dead in a row; standbyOffUntil is
+	// until when none is started after too many; standbyNote is the last
+	// thing logged about them, so the log says it once per change.
+	standbyDeaths   int
+	standbyOffUntil time.Time
+	standbyNote     string
+	closed          bool
+	// standbyUsed counts statements that ran on a standby.
+	standbyUsed atomic.Int64
+
 	// onStart is a test hook that receives the child's pid.
 	onStart func(pid int)
+	// beforeHandOver is a test hook that receives a standby just taken for
+	// a statement, before its job is written.
+	beforeHandOver func(w *worker)
 }
 
 // New builds a Runner.
@@ -540,6 +588,8 @@ func New(cfg Config) *Runner {
 		maxWait:     cfg.MaxWait,
 		maxWaiters:  cfg.MaxWaiters,
 		spillRoot:   cfg.SpillDir,
+		standby:     cfg.Standby,
+		standbyIdle: cfg.StandbyIdle,
 		busy:        map[string]bool{},
 		freed:       make(chan struct{}),
 	}
@@ -554,6 +604,9 @@ func New(cfg Config) *Runner {
 	}
 	if r.spillRoot == "" {
 		r.spillRoot = os.TempDir()
+	}
+	if r.standbyIdle <= 0 {
+		r.standbyIdle = DefaultStandbyIdle
 	}
 	r.sweepSpillDue(time.Now(), true)
 	if _, err := r.SpillState(r.limits.MemoryLimit); err != nil {
@@ -810,6 +863,14 @@ func (s *Slot) Run(ctx context.Context, job Job) (Result, error) {
 	if spent {
 		return Result{}, &WorkerError{Err: errors.New("the slot was already used or released; reserve another")}
 	}
+	// Registered first so it runs last, after the slot is given back: the
+	// standbys are counted against the free slots.
+	ran := false
+	defer func() {
+		if ran {
+			s.r.topUpStandbys()
+		}
+	}()
 	defer s.Release()
 	if job.User != s.user {
 		return Result{}, &WorkerError{Err: fmt.Errorf("job for user %q run in a slot reserved for %q", job.User, s.user)}
@@ -821,6 +882,7 @@ func (s *Slot) Run(ctx context.Context, job Job) (Result, error) {
 		return Result{}, ErrCopyNotLocal
 	}
 	start := time.Now()
+	ran = true
 	res, err := s.r.spawn(ctx, job, job.Limits.withDefaults(s.r.limits))
 	if err == nil {
 		res.Phases.Total = time.Since(start)
@@ -934,6 +996,13 @@ const (
 	errTooLarge = "too_large" // the result passed MaxResultBytes while collecting
 )
 
+// errNotHandedOver: the job could not be written to the worker, so the
+// worker never read it and the statement has not run. It is the ONLY failure
+// after which a statement may be given to another worker: once the job is
+// written, a worker that dies may have run it, and a statement that got a
+// host out of memory must not quietly do it a second time.
+var errNotHandedOver = errors.New("the job did not reach the worker")
+
 // worker is one started worker process: its DuckDB open (or opening), blocked
 // reading its job from stdin. It serves ONE job and exits; it is never handed
 // a second one.
@@ -951,6 +1020,8 @@ type worker struct {
 	// worker that dies before it is used is reaped all the same.
 	done    chan struct{}
 	waitErr error
+	// standby: started ahead of its statement, not for it (#2236).
+	standby bool
 	// used is set by the one run this worker serves. A second hand-over is
 	// refused: its stdout still holds the first statement's answer.
 	used atomic.Bool
@@ -1046,6 +1117,25 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 		// Already cancelled: report the cancel, not a worker that failed.
 		return Result{}, err
 	}
+	if w := r.takeStandby(); w != nil {
+		if r.beforeHandOver != nil {
+			r.beforeHandOver(w)
+		}
+		res, err := r.run(ctx, w, time.Now(), in, job.ViewsFor, limits, spill, noSpill)
+		if !errors.Is(err, errNotHandedOver) {
+			if err == nil {
+				// Opening DuckDB was paid before this statement arrived.
+				res.Phases.Open = 0
+				res.Phases.Standby = true
+			}
+			r.standbyUsed.Add(1)
+			return res, err
+		}
+		// The standby was gone before it read the job, so the statement
+		// has not run anywhere: start a worker for it, as if there had
+		// been no standby.
+		r.noteStandbyDeath()
+	}
 	// A worker started for this statement: starting it is part of the
 	// statement's cost (Phases.Spawn).
 	began := time.Now()
@@ -1082,6 +1172,8 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 		firstLine = make(chan []byte, 1)
 	}
 	w.stdout.arm(limits.MaxResultBytes, func() { _ = killProcessGroup(w.cmd.Process) }, firstLine)
+	// wrote receives the result of writing the job, once.
+	wrote := make(chan error, 1)
 
 	pid := w.cmd.Process.Pid
 	if r.onStart != nil {
@@ -1090,7 +1182,7 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 	var waitErr error
 	if asking {
 		var askErr error
-		waitErr, askErr = answerAsk(w, in, firstLine, viewsFor)
+		waitErr, askErr = answerAsk(w, in, wrote, firstLine, viewsFor)
 		if askErr != nil && ctx.Err() == nil && cctx.Err() == nil {
 			return Result{}, &WorkerError{Err: askErr, PID: pid, Stderr: w.stderr.text()}
 		}
@@ -1100,7 +1192,8 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 		// not leave this write blocked. Closed after it: this worker gets
 		// no second message.
 		go func() {
-			_, _ = w.stdin.Write(in)
+			_, err := w.stdin.Write(in)
+			wrote <- err
 			_ = w.stdin.Close()
 		}()
 		<-w.done
@@ -1114,6 +1207,13 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 		return Result{}, &TimeoutError{Limit: limits.Timeout, PID: pid}
 	case w.stdout.didOverflow():
 		return Result{}, ErrResultTooLarge
+	}
+	// The process has exited, so the write of the job has returned. If it
+	// failed, the worker never had the whole job and so never ran it: a
+	// standby that was gone before its statement. (For a worker started for
+	// the statement the same failure is reported below, with its stderr.)
+	if err := <-wrote; err != nil && w.standby {
+		return Result{}, fmt.Errorf("%w: %v", errNotHandedOver, err)
 	}
 
 	spawnTook := time.Since(began)
@@ -1170,12 +1270,14 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 // line answers nothing: either way stdin is closed and the run ends as
 // usual. The second error is a failure of the exchange itself; a killed
 // worker (timeout, cancel) is reported by the caller from the contexts.
-func answerAsk(w *worker, job []byte, firstLine <-chan []byte, viewsFor func(Refs) (string, error)) (waitErr, askErr error) {
+func answerAsk(w *worker, job []byte, wrote chan<- error, firstLine <-chan []byte, viewsFor func(Refs) (string, error)) (waitErr, askErr error) {
 	// The job is written from its own goroutine: a statement can be larger
 	// than the pipe's buffer, and a worker that dies before reading it must
 	// not leave this write blocked.
 	go func() {
-		if _, err := w.stdin.Write(job); err != nil {
+		_, err := w.stdin.Write(job)
+		wrote <- err
+		if err != nil {
 			_ = w.stdin.Close()
 		}
 	}()
@@ -1211,6 +1313,178 @@ func answerAsk(w *worker, job []byte, firstLine <-chan []byte, viewsFor func(Ref
 	case <-w.done:
 		return w.waitErr, nil
 	}
+}
+
+// takeStandby returns a standby worker for a statement, or nil when there is
+// none: the statement then starts its own. A standby found dead is dropped
+// here and never handed over.
+func (r *Runner) takeStandby() *worker {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for len(r.standbys) > 0 {
+		w := r.standbys[len(r.standbys)-1]
+		r.standbys = r.standbys[:len(r.standbys)-1]
+		select {
+		case <-w.done:
+			r.standbyDiedLocked()
+			continue
+		default:
+		}
+		r.standbyDeaths = 0
+		r.touchStandbysLocked()
+		return w
+	}
+	return nil
+}
+
+// topUpStandbys starts standbys up to the number of free slots. It runs
+// after a statement, so an install nobody runs SQL on never starts one, and
+// starting them never delays a statement: it happens off the caller.
+func (r *Runner) topUpStandbys() {
+	if !r.standby {
+		return
+	}
+	go func() {
+		for r.addStandby() {
+		}
+	}()
+}
+
+// addStandby starts one standby if there is a free slot without one, and
+// reports whether it did.
+func (r *Runner) addStandby() bool {
+	r.mu.Lock()
+	r.pruneStandbysLocked()
+	want := !r.closed && time.Now().After(r.standbyOffUntil) && len(r.standbys) < r.maxInFlight-r.inFlight
+	r.mu.Unlock()
+	if !want {
+		return false
+	}
+	w, err := r.startWorker()
+	if err != nil {
+		// Not a failed statement: the next one starts its own worker, and
+		// that start reports the error if it is still there.
+		r.noteStandby("could not start a standby worker; statements start their own", err)
+		return false
+	}
+	r.mu.Lock()
+	// Counted again: a statement may have taken a slot while this one
+	// started, and workers running plus waiting must not pass maxInFlight.
+	if r.closed || len(r.standbys) >= r.maxInFlight-r.inFlight {
+		r.mu.Unlock()
+		stopStandby(w)
+		return false
+	}
+	w.standby = true
+	r.standbys = append(r.standbys, w)
+	r.touchStandbysLocked()
+	r.mu.Unlock()
+	return true
+}
+
+// pruneStandbysLocked drops standbys that died while they waited.
+func (r *Runner) pruneStandbysLocked() {
+	live := r.standbys[:0]
+	for _, w := range r.standbys {
+		select {
+		case <-w.done:
+			r.standbyDiedLocked()
+		default:
+			live = append(live, w)
+		}
+	}
+	for i := len(live); i < len(r.standbys); i++ {
+		r.standbys[i] = nil
+	}
+	r.standbys = live
+}
+
+// standbyDiedLocked counts a standby that died before it was used, and stops
+// starting them for a while after too many in a row.
+func (r *Runner) standbyDiedLocked() {
+	r.standbyDeaths++
+	if r.standbyDeaths >= standbyMaxDeaths {
+		r.standbyDeaths = 0
+		r.standbyOffUntil = time.Now().Add(standbyOffFor)
+		go r.noteStandby(fmt.Sprintf("%d standby workers in a row ended before they were used; none is started for %s, and statements start their own",
+			standbyMaxDeaths, standbyOffFor), nil)
+	}
+}
+
+func (r *Runner) noteStandbyDeath() {
+	r.mu.Lock()
+	r.standbyDiedLocked()
+	r.mu.Unlock()
+}
+
+// touchStandbysLocked restarts the idle clock: a statement used a standby, or
+// one was added after a statement.
+func (r *Runner) touchStandbysLocked() {
+	if r.standbyTimer == nil {
+		r.standbyTimer = time.AfterFunc(r.standbyIdle, r.stopStandbys)
+		return
+	}
+	r.standbyTimer.Reset(r.standbyIdle)
+}
+
+// stopStandbys stops every waiting standby. A statement that arrives later
+// starts its own worker, and standbys come back after it.
+func (r *Runner) stopStandbys() {
+	r.mu.Lock()
+	ws := r.standbys
+	r.standbys = nil
+	r.mu.Unlock()
+	for _, w := range ws {
+		stopStandby(w)
+	}
+}
+
+// stopStandby ends a worker that was never given a job, and waits for it:
+// closing its stdin is how it is told, and the kill is for one that does not
+// listen.
+func stopStandby(w *worker) {
+	_ = w.stdin.Close()
+	select {
+	case <-w.done:
+	case <-time.After(5 * time.Second):
+		w.kill()
+		<-w.done
+	}
+}
+
+// noteStandby logs a change in the standbys' state once, not once per
+// statement.
+func (r *Runner) noteStandby(msg string, err error) {
+	key := msg
+	if err != nil {
+		key += ": " + err.Error()
+	}
+	r.mu.Lock()
+	same := r.standbyNote == key
+	r.standbyNote = key
+	r.mu.Unlock()
+	if same {
+		return
+	}
+	if err != nil {
+		slog.Warn("sql on the copy: "+msg, "error", err)
+		return
+	}
+	slog.Warn("sql on the copy: " + msg)
+}
+
+// Close stops the standby workers and starts no more. Statements still run
+// after it, each on a worker of its own. A Runner with Config.Standby must be
+// closed when it is no longer used; without Close its standbys still end when
+// this process does, since their stdin closes with it.
+func (r *Runner) Close() {
+	r.mu.Lock()
+	r.closed = true
+	if r.standbyTimer != nil {
+		r.standbyTimer.Stop()
+	}
+	r.mu.Unlock()
+	r.stopStandbys()
 }
 
 // childEnv is the scrubbed environment the worker gets: what a process and

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -47,6 +48,11 @@ func WorkerMain(stdin io.Reader, stdout, stderr io.Writer) int {
 	var job wireJob
 	dec := json.NewDecoder(stdin)
 	if err := dec.Decode(&job); err != nil {
+		if errors.Is(err, io.EOF) {
+			// Stdin closed with no job: a worker started ahead that its
+			// parent stopped, or whose parent is gone. Not a failure.
+			return 0
+		}
 		fmt.Fprintf(stderr, "sql worker: read job: %v\n", err)
 		return 2
 	}
@@ -129,6 +135,21 @@ func openSession(stderr io.Writer) (s *session) {
 		return s
 	}
 	s.conn = conn
+	// Paid here so a worker started ahead of its statement has it done: the
+	// settings every job gets, and one parse, which is what first loads the
+	// statement parser. The job's lockdown runs them all again, so nothing
+	// depends on this having worked, and a failure here is the job's to
+	// report, in its own words.
+	for _, stmt := range fixedSettings {
+		if _, err := conn.ExecContext(context.Background(), stmt); err != nil {
+			fmt.Fprintf(stderr, "sql worker: ahead of the job, %s: %v\n", stmt, err)
+			break
+		}
+	}
+	var parsed string
+	if err := conn.QueryRowContext(context.Background(), "SELECT json_serialize_sql('SELECT 1')::VARCHAR").Scan(&parsed); err != nil {
+		fmt.Fprintf(stderr, "sql worker: ahead of the job, the parser: %v\n", err)
+	}
 	return s
 }
 
@@ -485,6 +506,20 @@ type spillSpec struct {
 // has been disabled by configuration"), and lock_configuration must be LAST.
 // TestLockdown_collationComesFromTheBinary pins the third: extension
 // loading goes off BEFORE the collation is set.
+// fixedSettings are the session settings that are the same for every job:
+// they name no directory, no limit and nothing a statement brings. They are
+// the first statements of the lockdown, and openSession also runs them before
+// the job is read (#2236), because the first of each kind is slow: setting
+// the collation loads ICU, about 7 ms of the 12 a short statement spent
+// between its job and its first row.
+var fixedSettings = []string{
+	"SET autoinstall_known_extensions = false",
+	"SET autoload_known_extensions = false",
+	"SET default_collation = 'nocase.icu_noaccent'",
+	"SET default_null_order = 'nulls_first_on_asc_last_on_desc'",
+	"SET ieee_floating_point_ops = false",
+}
+
 func lockdownStatements(copyDirs []string, spill spillSpec) []string {
 	quoted := make([]string, len(copyDirs))
 	for i, d := range copyDirs {
@@ -497,12 +532,7 @@ func lockdownStatements(copyDirs []string, spill spillSpec) []string {
 			fmt.Sprintf("SET max_temp_directory_size = '%dMiB'", max(spill.MaxBytes>>20, 1)),
 		}
 	}
-	return slices.Concat([]string{
-		"SET autoinstall_known_extensions = false",
-		"SET autoload_known_extensions = false",
-		"SET default_collation = 'nocase.icu_noaccent'",
-		"SET default_null_order = 'nulls_first_on_asc_last_on_desc'",
-		"SET ieee_floating_point_ops = false",
+	return slices.Concat(fixedSettings, []string{
 		"SET allowed_directories = [" + strings.Join(quoted, ", ") + "]",
 	}, temp, []string{
 		"SET enable_external_access = false",
