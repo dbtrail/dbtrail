@@ -56,7 +56,7 @@ import (
 const (
 	dumpDiskOK        = "ok"        // room for the peak
 	dumpDiskLow       = "low"       // room for the dump, maybe not for dump plus Parquet
-	dumpDiskUnchecked = "unchecked" // the check could not run; the read went ahead
+	dumpDiskUnchecked = "unchecked" // the check could not run, or could not vouch for its sizes; the read went ahead
 )
 
 // dumpPeakTenths is the dump-plus-Parquet peak as tenths of the estimate:
@@ -72,7 +72,9 @@ const dumpRefuseTenths = 5
 // dumpEstimateServerLimit is how long the SOURCE may spend on the estimate's
 // query before it stops it itself. Under dumpEstimateTimeout, so what comes
 // back is the server's own error and not a connection closed under a query
-// that goes on running.
+// that goes on running. (When connecting and the session's settings take more
+// than the difference, the wait ends first and the query runs on for at most
+// this long: still bounded.)
 const dumpEstimateServerLimit = 12 * time.Second
 
 // dumpCompressedNamed is how many compressed tables a note names: the largest
@@ -417,9 +419,15 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 				humanSize(int64(need)), stagingDir, humanSize(int64(stageFree)), localDir, why, short), nil
 		}
 		if outFree < need {
-			return dumpDiskLow, fmt.Sprintf("Low disk: %s, where the Parquet copy goes, has %s free, and the copy can take up to about %s. "+
-				"This read may fail with a full disk. The dump itself fits at %s (%s free).%s",
-				localDir, humanSize(int64(outFree)), humanSize(int64(need)), stagingDir, humanSize(int64(stageFree)), short), nil
+			// "Up to" and "fits" are claims about a bound, which the sizes
+			// are not with tables stored compressed.
+			copyTakes, dumpFits := "the copy can take up to about", "The dump itself fits at"
+			if est.compressed > 0 {
+				copyTakes, dumpFits = "by the sizes the server reports the copy takes about", "By those sizes the dump fits at"
+			}
+			return dumpDiskLow, fmt.Sprintf("Low disk: %s, where the Parquet copy goes, has %s free, and %s %s. "+
+				"This read may fail with a full disk. %s %s (%s free).%s",
+				localDir, humanSize(int64(outFree)), copyTakes, humanSize(int64(need)), dumpFits, stagingDir, humanSize(int64(stageFree)), short), nil
 		}
 		if !shared {
 			return roomVerdict(est, fmt.Sprintf("Disk check: the dump needs about %s free at %s; %s free.%s",

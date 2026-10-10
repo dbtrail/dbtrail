@@ -233,6 +233,31 @@ func TestDumpDiskVerdict_compressedTables_1938(t *testing.T) {
 			t.Fatalf("without compressed tables: check = %q, note = %q", check, note)
 		}
 	})
+	// The snapshot folder on another disk and short of room: the warning made
+	// two claims about a bound ("can take up to", "the dump itself fits").
+	t.Run("the other disk is short: a warning with no claim the sizes cannot back", func(t *testing.T) {
+		local := t.TempDir()
+		stubSameFS(t, false, nil)
+		diskByPath(t, map[string]uint64{stage: 100 * gib, local: gib})
+		check, note, err := dumpDiskVerdict(stage, local, est, nil)
+		t.Logf("note: %s", note)
+		if err != nil || check != dumpDiskLow || !strings.Contains(note, sentence) {
+			t.Fatalf("check = %q, err = %v, note = %q", check, err, note)
+		}
+		for _, not := range []string{"up to", "The dump itself fits", "upper bound"} {
+			if strings.Contains(note, not) {
+				t.Errorf("the note says %q over compressed tables: %s", not, note)
+			}
+		}
+		if !strings.Contains(note, "By those sizes the dump fits at "+stage) {
+			t.Errorf("the note no longer says where the dump goes: %s", note)
+		}
+		// Without compressed tables the sentence is what it was.
+		plain := dumpEstimate{dataBytes: int64(10 * gib), bytes: int64(10 * gib), tables: 4}
+		if _, note, _ := dumpDiskVerdict(stage, local, plain, nil); !strings.Contains(note, "the copy can take up to about 10.0 GiB") || !strings.Contains(note, "The dump itself fits at "+stage) {
+			t.Errorf("the plain note changed: %s", note)
+		}
+	})
 	for name, free := range map[string]uint64{"below the sizes": 9 * gib, "below the peak": 15 * gib} {
 		t.Run(name+": a warning that does not call the sizes a bound", func(t *testing.T) {
 			diskByPath(t, map[string]uint64{stage: free})
