@@ -80,14 +80,14 @@ func TestResolveSnapshotCut_hourlyLayoutLeavesTheOldestPartitionOut(t *testing.T
 		t.Fatalf("bound.keep = %v, want %v", bound.keep, want)
 	}
 
-	bounded := explainPartitions(t, db, firstEventPastSQL(at, bound.clause()), at)
+	bounded := explainPartitions(t, db, firstEventPastSQL(at, bound.clause(), 0), at)
 	if strings.Contains(bounded, oldest) || !strings.Contains(bounded, "p_2026091620") {
 		t.Errorf("bounded plan opens partitions %q; want at's hour without %s", bounded, oldest)
 	}
 	// Documented, not asserted: MySQL's own pruning of the unbounded statement
 	// kept the oldest partition on 8.4, which is what this bound exists for.
 	t.Logf("unbounded plan opens partitions %q; bounded plan opens %q",
-		explainPartitions(t, db, firstEventPastSQL(at, ""), at), bounded)
+		explainPartitions(t, db, firstEventPastSQL(at, "", 0), at), bounded)
 
 	cut, err := ResolveSnapshotCut(ctx, db, at)
 	if err != nil {

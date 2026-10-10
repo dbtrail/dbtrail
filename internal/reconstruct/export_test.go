@@ -32,9 +32,9 @@ func StubLinkFileForTest(fn func(oldname, newname string) error) (restore func()
 // resolved once per table would bump it from several goroutines at once.
 func CountSnapshotCutsForTest(calls *atomic.Int32) (restore func()) {
 	prev := resolveSnapshotCut
-	resolveSnapshotCut = func(ctx context.Context, db *sql.DB, at time.Time) (*query.BinlogPos, error) {
+	resolveSnapshotCut = func(ctx context.Context, db *sql.DB, at time.Time, floored bool) (*query.BinlogPos, error) {
 		calls.Add(1)
-		return prev(ctx, db, at)
+		return prev(ctx, db, at, floored)
 	}
 	return func() { resolveSnapshotCut = prev }
 }

@@ -858,7 +858,7 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 		// after it, so every row up to it is one those checks placed.
 		cfg.ddlMark = readRunDDLMark(ctx, db)
 		mark := readRunEventMark(ctx, db)
-		cut, cutErr := ResolveSnapshotCut(ctx, db, cfg.At)
+		cut, cutErr := resolveRefreshCut(ctx, db, cfg.At)
 		if cutErr != nil {
 			return nil, cutErr
 		}
