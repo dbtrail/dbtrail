@@ -233,7 +233,7 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 
 // moveStagingHint is how an operator gives the staging folder more room.
 const moveStagingHint = "Free space there, or move this folder to a bigger disk " +
-	"(the \".sql build folder\" setting, or BINTRAIL_CONSOLE_BASELINE_STAGING) and restart DBTrail."
+	"(the \"Working folder\" setting, or BINTRAIL_CONSOLE_BASELINE_STAGING) and restart DBTrail."
 
 // measureFree is diskSpaceFn with the fold check's reading of it: an error,
 // or a filesystem that reports no size, is "cannot tell", never "full".

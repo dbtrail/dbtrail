@@ -119,7 +119,7 @@ starts another one.
 ## Disk for full reads
 
 A full read (**Read database now**, or a schedule) writes mydumper's output
-and, with S3, the Parquet copy to a staging folder before it converts and
+and, with S3, the Parquet copy to the working folder before it converts and
 uploads them. Leave `BINTRAIL_CONSOLE_BASELINE_STAGING` unset: it then uses a
 folder under `/tmp`, which on Fargate is the task's ephemeral storage, not EFS.
 Fargate gives 20 GiB by default and up to 200 GiB with `ephemeralStorage`.

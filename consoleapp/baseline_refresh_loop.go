@@ -1091,7 +1091,7 @@ func uploadRefreshedSnapshot(ctx context.Context, req refreshRequest, at time.Ti
 		// folder, so nothing may promise it is kept or sent later. Not
 		// errSnapshotNotUploaded, which says a finished snapshot is on disk.
 		return 0, fmt.Errorf("%w: it could not be uploaded to %s. This server keeps its snapshots only in S3, so the "+
-			"copy built in the staging folder was deleted (%s); the next update starts again from the newest snapshot in the bucket: %w",
+			"copy built in the working folder was deleted (%s); the next update starts again from the newest snapshot in the bucket: %w",
 			errStagedSnapshotNotUploaded, dest, removePartialUpload(ctx, req, dest, mayStillLand(err)), err)
 	}
 	if err != nil {

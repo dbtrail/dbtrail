@@ -762,11 +762,16 @@ const (
 	// location of any kind.
 	BackupWhyNoLocalDir = "an update from the recorded changes needs a local snapshot directory"
 	// BackupWhyNoStagingPrefix starts the reason a server whose snapshots go
-	// only to S3 is read in full: its update is built in the staging folder,
+	// only to S3 is read in full: its update is built in the working folder,
 	// and that folder cannot be used (the rest names why). A setting, like
 	// the two above, so every run is a full read until it is fixed.
-	BackupWhyNoStagingPrefix = "an update for a server whose snapshots go only to S3 is built in the staging folder, which cannot be used"
-	BackupWhyFirstBackup     = "no previous snapshot to update"
+	BackupWhyNoStagingPrefix = "an update for a server whose snapshots go only to S3 is built in the working folder, which cannot be used"
+	// backupWhyNoStagingPrefixOld is the same reason as daemons before #1938
+	// worded it, when the folder was called the staging folder. Recognized,
+	// never written: a job journaled by such a daemon is classified again
+	// after the upgrade, and must keep its code.
+	backupWhyNoStagingPrefixOld = "an update for a server whose snapshots go only to S3 is built in the staging folder, which cannot be used"
+	BackupWhyFirstBackup        = "no previous snapshot to update"
 	// BackupWhyUnreadablePrefix starts the reason for a full backup taken
 	// because the previous one could not be read (the rest names the error).
 	BackupWhyUnreadablePrefix = "the previous snapshot could not be read"
@@ -882,7 +887,7 @@ func BackupWhyCode(why string) string {
 		return "no_index"
 	case why == BackupWhyNoLocalDir:
 		return "no_local_dir"
-	case strings.HasPrefix(why, BackupWhyNoStagingPrefix):
+	case strings.HasPrefix(why, BackupWhyNoStagingPrefix), strings.HasPrefix(why, backupWhyNoStagingPrefixOld):
 		return "no_staging"
 	case why == BackupWhyFirstBackup:
 		return "first_backup"

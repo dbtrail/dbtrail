@@ -697,8 +697,8 @@ saved, shown with the reason `serve` is not running it.
   **updated from the recorded changes** (the baseline-refresh fold: reads
   nothing from the source, writes into the server's local backup directory,
   or, for a server whose backups go only to S3, into a folder of its own
-  under the staging folder that is uploaded and then deleted, #2212; if the
-  staging folder cannot be used, that server gets a full backup and the page
+  under the working folder that is uploaded and then deleted, #2212; if the
+  working folder cannot be used, that server gets a full backup and the page
   says why). When the backups go
   to S3 that update reads its previous snapshot straight from the bucket and
   uploads its result back to the same place (#1539), so an S3 destination no
@@ -732,7 +732,7 @@ saved, shown with the reason `serve` is not running it.
   recorded changes fails and a full backup is started in its place, the
   page says so in red until a later scheduled update goes through. A
   schedule the daemon cannot serve at all (no producer possible: creation
-  opt-in not set AND no update possible, such as S3 only with a staging
+  opt-in not set AND no update possible, such as S3 only with a working
   folder that cannot be used, a lock-mode misconfiguration on such a server,
   no destination) is refused on save with
   the reason, and one already saved is reported as not runnable on the
@@ -1353,7 +1353,7 @@ one release and warns that it no longer does anything. Remove it.
   fail on first use, and a full backup reads every table in scope on the
   source, which is load an operator should choose. Turning it on also lets the
   backup schedule take a full backup on its own when an update cannot serve
-  the server (no previous backup, or S3 only with a staging folder that
+  the server (no previous backup, or S3 only with a working folder that
   cannot be used) or fails (a capture
   gap, a schema change), and it is what a schedule's full-backup timetable
   (`full_every`, set through the schedule API; the page no longer edits it)
@@ -1367,8 +1367,11 @@ one release and warns that it no longer does anything. Remove it.
   location it can list. It is turned on where the daemon is started, with this
   variable, and not in the web interface; see
   [settings that need a restart](https://www.dbtrail.com/docs/settings/backups#set-at-startup).
-- `BINTRAIL_CONSOLE_BASELINE_STAGING` (`watch` only) — local staging dir for
-  S3-destined baselines created by that button (default a temp subdir).
+- `BINTRAIL_CONSOLE_BASELINE_STAGING` (`watch` only) — the working folder
+  (the **Working folder** row in the web interface's backup settings): where
+  full reads, S3-only updates and `.sql` builds write their temporary files
+  (default a subfolder of the system temp folder). Sizing is in
+  [capacity.md](./capacity.md).
 - `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (`watch` only) — empty (default:
   automatic), `ftwrl`, `lock-all`, `safe-no-lock` or `no-lock`. Selects how
   mydumper synchronizes its worker threads onto one instant for console

@@ -71,7 +71,7 @@ func newScheduleServer(t *testing.T, rep *stubScheduleReporter) (*Server, string
 // errNoStaging is a StagedUpdates refusal (#2212): with it an S3-only server
 // cannot be updated, which is what the S3-only cases below need to stay off
 // the network (an update would look for its previous snapshot in the bucket).
-var errNoStaging = errors.New("the staging folder /stage cannot be written: permission denied")
+var errNoStaging = errors.New("the working folder /stage cannot be written: permission denied")
 
 // s3Only rewrites the fixture server to keep its backups in S3 only.
 func s3Only(t *testing.T, srv *Server, id string) {
@@ -583,7 +583,7 @@ func TestBackupScheduleAPI_nextMethodWhyCodeReachesTheWire(t *testing.T) {
 		{"no snapshot yet", false, nil, "first_backup"},
 		// #2212: S3 only reads in full only when the staging folder the
 		// update is built in cannot be used.
-		{"S3 only, staging folder unusable", true, errors.New("the staging folder /stage cannot be written: permission denied"), "no_staging"},
+		{"S3 only, staging folder unusable", true, errors.New("the working folder /stage cannot be written: permission denied"), "no_staging"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, id := newScheduleServer(t, &stubScheduleReporter{full: true, staging: tc.staging})

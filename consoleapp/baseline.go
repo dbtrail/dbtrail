@@ -809,7 +809,7 @@ var s3ObjectPresent = func(ctx context.Context, url string) (bool, error) {
 // cleanup removes once the upload is done. The upload itself is completeDump's.
 func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, error) {
 	if err := os.MkdirAll(s.stagingDir, 0o755); err != nil {
-		return dumpOutcome{}, fmt.Errorf("create staging dir: %w", err)
+		return dumpOutcome{}, fmt.Errorf("create the working folder %s: %w", s.stagingDir, err)
 	}
 	// Before anything is created or dumped (#1938): the whole dump lands in
 	// the staging folder before it becomes Parquet. The verdict goes on the
@@ -889,7 +889,7 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	if outputDir == "" { // S3-only: stage, upload, discard the staging
 		outputDir, err = os.MkdirTemp(s.stagingDir, "baseline-")
 		if err != nil {
-			return dumpOutcome{}, fmt.Errorf("create baseline staging dir: %w", err)
+			return dumpOutcome{}, fmt.Errorf("create this run's folder in the working folder %s: %w", s.stagingDir, err)
 		}
 		journalDir(req, s.stagingDir, filepath.Base(outputDir))
 		out.staged = true
@@ -1109,7 +1109,7 @@ var pgBaselineRun = pgbaseline.Run
 // time, so no page calls it unfinished (#1991 review).
 func (s *baselineSupervisor) executePG(req console.BaselineRequest) (dumpOutcome, int, error) {
 	if err := os.MkdirAll(s.stagingDir, 0o755); err != nil {
-		return dumpOutcome{}, 0, fmt.Errorf("create staging dir: %w", err)
+		return dumpOutcome{}, 0, fmt.Errorf("create the working folder %s: %w", s.stagingDir, err)
 	}
 	outputDir := req.LocalDir
 	staged := outputDir == ""
@@ -1117,7 +1117,7 @@ func (s *baselineSupervisor) executePG(req console.BaselineRequest) (dumpOutcome
 		var err error
 		outputDir, err = os.MkdirTemp(s.stagingDir, "pgbaseline-")
 		if err != nil {
-			return dumpOutcome{}, 0, fmt.Errorf("create baseline staging dir: %w", err)
+			return dumpOutcome{}, 0, fmt.Errorf("create this run's folder in the working folder %s: %w", s.stagingDir, err)
 		}
 		journalDir(req, s.stagingDir, filepath.Base(outputDir))
 		defer os.RemoveAll(outputDir)

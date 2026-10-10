@@ -19,7 +19,7 @@ func TestBackupWhyCode(t *testing.T) {
 		{"", ""},
 		{BackupWhyNoIndex, "no_index"},
 		{BackupWhyNoLocalDir, "no_local_dir"},
-		{BackupWhyNoStagingPrefix + " (the staging folder /stage cannot be written: permission denied)", "no_staging"},
+		{BackupWhyNoStagingPrefix + " (the working folder /stage cannot be written: permission denied)", "no_staging"},
 		{BackupWhyFirstBackup, "first_backup"},
 		{BackupWhyUnreadablePrefix + " from the snapshot destination (boom), so a full read is taken instead", "previous_unreadable"},
 		{BackupWhyFoldRefusedPrefix + " (capture gap)", "fold_refused"},
@@ -51,7 +51,7 @@ func TestBackupWhyCode(t *testing.T) {
 	if err := rebuildPossible(s3only, BackupScheduleGates{}); err != nil {
 		t.Errorf("rebuildPossible for an S3-only server = %v, want nil", err)
 	}
-	err := rebuildPossible(s3only, BackupScheduleGates{StagingRefusal: "the staging folder /stage cannot be written: permission denied"})
+	err := rebuildPossible(s3only, BackupScheduleGates{StagingRefusal: "the working folder /stage cannot be written: permission denied"})
 	if err == nil || BackupWhyCode(err.Error()) != "no_staging" || !strings.Contains(err.Error(), "/stage cannot be written") {
 		t.Errorf("rebuildPossible with an unusable staging folder = %v, want the no_staging reason naming the folder", err)
 	} else {
@@ -214,8 +214,8 @@ const gap = "` + BackupWhyFoldRefusedPrefix + ` (shop.orders: reconstruct: captu
 const out = {
   remedy: backupWhyLine("` + BackupWhyNoLocalDir + `", "no_local_dir", true),
   fact: backupWhyLine("` + BackupWhyNoLocalDir + `", "no_local_dir", false),
-  stagingRemedy: backupWhyLine("` + BackupWhyNoStagingPrefix + `; the staging folder /stage cannot be written: permission denied", "no_staging", true),
-  stagingFact: backupWhyLine("` + BackupWhyNoStagingPrefix + `; the staging folder /stage cannot be written: permission denied", "no_staging", false),
+  stagingRemedy: backupWhyLine("` + BackupWhyNoStagingPrefix + `; the working folder /stage cannot be written: permission denied", "no_staging", true),
+  stagingFact: backupWhyLine("` + BackupWhyNoStagingPrefix + `; the working folder /stage cannot be written: permission denied", "no_staging", false),
   unreadable: backupWhyLine("` + BackupWhyUnreadablePrefix + ` from the snapshot destination (boom), so a full read is taken instead", "previous_unreadable", true),
   gap: backupWhyLine(gap, "fold_refused", true),
   crash: backupWhyLine("` + BackupWhyFoldCrashedPrefix + ` (internal error: nil map)", "fold_crashed", false),
@@ -246,7 +246,7 @@ console.log(JSON.stringify(out));
 	}
 	t.Logf("no_staging remedy: %s", got.StagingRemedy)
 	t.Logf("no_staging fact: %s", got.StagingFact)
-	if !strings.Contains(got.StagingRemedy, "Fix the staging folder") || strings.Contains(got.StagingFact, "next run") || !strings.Contains(got.StagingFact, "could not be used at the time") {
+	if !strings.Contains(got.StagingRemedy, "Fix the working folder") || strings.Contains(got.StagingFact, "next run") || !strings.Contains(got.StagingFact, "could not be used at the time") {
 		t.Errorf("no_staging remedy/fact split: remedy=%q fact=%q", got.StagingRemedy, got.StagingFact)
 	}
 	if got.Unreadable != "The previous snapshot could not be read from the snapshot destination (boom), so a full read is taken instead." {

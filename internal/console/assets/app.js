@@ -7759,7 +7759,7 @@ const BACKUP_DAEMON_ROWS = {
   refresh_every: "Refresh snapshots every",
   lock_mode: "Lock while dumping",
   trigger: "Read database now button",
-  staging_dir: ".sql build folder",
+  staging_dir: "Working folder",
   verify_interval: "Verify every",
   verify_tables: "Verify only these tables",
 };
@@ -7779,7 +7779,7 @@ const BACKUP_DAEMON_EMPTY = {
   refresh_every: "off",
   lock_mode: "automatic",
   trigger: "Off",
-  staging_dir: "temp folder",
+  staging_dir: "system temp folder",
   verify_interval: "off",
   verify_tables: "all tables",
 };
@@ -7847,6 +7847,12 @@ function backupDaemonEditRow(row, locked) {
   wrap.append(el("div", { class: "bks-erow-in" }, input, locked ? null : save, locked ? null : revert));
   if (row.key === "baseline_retain") {
     wrap.append(el("p", { class: "form-hint", text: "Days or hours: 7d, 36h. Empty keeps them all. Deletes only where snapshots also go to S3, once S3 has each one. Without S3, copies younger than this stay even past the count." }));
+  }
+  // The one row whose name cannot say what it holds (#1938): full reads,
+  // S3-only updates and .sql builds all write here, and it has to fit the
+  // largest of them.
+  if (row.key === "staging_dir") {
+    wrap.append(el("p", { class: "form-hint", text: "Where DBTrail writes temporary files during a full read, an S3-only update, or a .sql build. Needs room for the largest database it reads." }));
   }
   // Provenance, in one line: what is winning, and what it is winning over.
   wrap.append(el("p", { class: "form-hint", text: row.source === "saved"
@@ -7969,16 +7975,16 @@ function s3OnlyBackupWarning(srv, fix = true) {
   // A process that runs no schedule (the read-only console): the cost below
   // is the service's to state, and nothing here builds an update.
   if (!srv.schedule_loop) {
-    return "With S3 only, scheduled updates are built in the staging folder of the DBTrail service that runs the schedule. This one runs none.";
+    return "With S3 only, scheduled updates are built in the working folder of the DBTrail service that runs the schedule. This one runs none.";
   }
   if (srv.staging_refusal) {
-    const why = "With S3 only, a scheduled update is built in the staging folder, which cannot be used here (" +
+    const why = "With S3 only, a scheduled update is built in the working folder, which cannot be used here (" +
       srv.staging_refusal.replace(/[.\s]+$/, "") + ")";
     if (!srv.full_backup_possible) {
       return why + ", and a full read is not available either, so scheduled snapshots cannot run on this server." +
-        then("Fix the staging folder, or add a Local folder.");
+        then("Fix the working folder, or add a Local folder.");
     }
-    return why + ", so every scheduled snapshot reads your whole database." + then("Fix the staging folder, or add a Local folder.");
+    return why + ", so every scheduled snapshot reads your whole database." + then("Fix the working folder, or add a Local folder.");
   }
   return "With S3 only, each scheduled update downloads, rewrites and uploads again the tables that changed. Unchanged tables are usually copied inside S3 without being downloaded; the first update after a full read rewrites every table, as does an update whose previous snapshot is in another bucket." +
     then("Add a Local folder so changed tables are not downloaded first.");
@@ -9994,8 +10000,8 @@ const BACKUP_WHY_REMEDY = {
   no_index: "Set an index connection for this server (Servers) and the next run updates from the recorded changes instead of reading your database in full; without one there are no recorded changes to update from.",
   // Old records only (#2212): servers that keep snapshots only in S3 are
   // updated through the staging folder now.
-  no_local_dir: "That run read your database in full because this server had no Local folder then. Servers that keep their snapshots only in S3 are now updated from the recorded changes, through the staging folder.",
-  no_staging: "Fix the staging folder (the .sql build folder setting, BINTRAIL_CONSOLE_BASELINE_STAGING) or set a Local folder for this server, and the next run updates from the recorded changes instead of reading your database in full.",
+  no_local_dir: "That run read your database in full because this server had no Local folder then. Servers that keep their snapshots only in S3 are now updated from the recorded changes, through the working folder.",
+  no_staging: "Fix the working folder (the Working folder setting, BINTRAIL_CONSOLE_BASELINE_STAGING) or set a Local folder for this server, and the next run updates from the recorded changes instead of reading your database in full.",
   first_backup: "First snapshot: there was nothing to update from yet. The next run updates from it.",
 };
 // The codes whose cause is a setting, so every run until it changes is a
@@ -10010,7 +10016,7 @@ const BACKUP_WHY_EVERY_RUN = new Set(["no_index", "no_staging"]);
 const BACKUP_WHY_FACT = {
   no_index: "Full read: this server had no index connection at the time, so there were no recorded changes to update from.",
   no_local_dir: "Full read: an update from the recorded changes needed a local snapshot directory, which this server did not have at the time.",
-  no_staging: "Full read: this server keeps its snapshots only in S3, and the staging folder its update is built in could not be used at the time.",
+  no_staging: "Full read: this server keeps its snapshots only in S3, and the working folder its update is built in could not be used at the time.",
   first_backup: "Full read: the first one, with nothing to update from yet.",
 };
 // remedy: true on the schedule card (this IS the last run, and the setting
@@ -11644,7 +11650,7 @@ function backupSQLLane(cur, b, sqlSt) {
   // only answer "not ready".
   if (st && st.staging_error) {
     body.append(el("p", { class: "form-msg err", text:
-      "Staging problem: " + st.staging_error + ". DBTrail retries every minute; check the staging directory on the machine it runs on." }));
+      "Working folder problem: " + st.staging_error + ". DBTrail retries every minute; check the working folder on the machine it runs on." }));
   }
   // Without baseline:create and nothing to report, there is no lane. An
   // unreadable status and a state this console does not know ARE something
