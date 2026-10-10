@@ -796,13 +796,44 @@ async function submitPasswordChange(form, msg, firstSet) {
 // restart onto the new snapshot", export-truncation warnings. Each is reported
 // nowhere else, and one undismissed error would have suppressed them all for
 // the rest of the session. Two nodes, no contention.
-function toast(msg) {
+//
+// hold is how long it stays, for the few messages that carry a sentence a
+// reader has to get through (a disk note after a read, #1938). Still not an
+// error: it fades, and what it said is on the page it came from.
+function toast(msg, hold) {
   const t = document.getElementById("toast");
   if (!t) return;
   clearTimeout(toast._t);
   t.textContent = msg;
   t.hidden = false;
-  toast._t = setTimeout(() => { t.hidden = true; }, 2200);
+  toast._t = setTimeout(() => { t.hidden = true; }, hold || 2200);
+}
+
+// TOAST_HOLD_NOTE is how long a toast that carries a disk note stays.
+const TOAST_HOLD_NOTE = 15000;
+
+// diskNoteLine draws a full read's disk note (#1938) in the style its verdict
+// asks for, or returns null when there is none. "low" is a read that may not
+// fit, or did not: the error style. "tight" is a read that FIT on a low disk,
+// so the note is about the next one: a warning, never the colour of a
+// failure. Anything else ("ok", "unchecked") is a plain line.
+function diskNoteLine(check, note) {
+  if (!note) return null;
+  const cls = check === "low" ? "form-msg err" : check === "tight" ? "form-msg warn" : "form-hint";
+  return el("p", { class: cls, text: note });
+}
+
+// diskNoteAfterRead splits a finished read's disk note by where the toast
+// says it (#1938). alarm: the read may not have fit, said in the toast that
+// stays. said: the read ran and the note is about what the check could not
+// tell or about the next read; it rides on the outcome's own toast, after
+// its sentence.
+function diskNoteAfterRead(done) {
+  const check = done && done.disk_check, note = done && done.disk_note;
+  if (!note) return { alarm: "", said: "" };
+  if (check === "low") return { alarm: note, said: "" };
+  if (check === "unchecked" || check === "tight") return { alarm: "", said: ". " + note };
+  return { alarm: "", said: "" };
 }
 
 // toastError shows a failure that stays until the operator dismisses it.
@@ -9919,21 +9950,25 @@ async function createBaseline(id, btn, onStarted) {
     done = await pollBaseline(id, true);
   }
   restore();
-  // A low disk (#1938) stays on screen: the read ran, and the next one may not.
-  const lowDisk = done && done.disk_check === "low" && done.disk_note ? done.disk_note : "";
-  const unchecked = done && done.disk_check === "unchecked" && done.disk_note ? ". " + done.disk_note : "";
+  // The read's disk note (#1938). A low disk whose read wrote no snapshot
+  // stays on screen with the failure; one whose read fit is not a failure,
+  // and is said with the outcome.
+  const diskNote = diskNoteAfterRead({ disk_check: done && done.disk_check, disk_note: done && done.disk_note });
+  const lowDisk = diskNote.alarm;
   // A read that reached the source without encryption says so (#1996).
   const cleartext = done && done.transport_note ? " " + done.transport_note : "";
   if (done && done.state === "succeeded" && !done.uploading) {
     toast("Snapshot complete: " + (done.tables || 0) + " table(s)" +
       (done.uploaded ? ", " + done.uploaded + " file(s) uploaded" : "") +
-      (done.swept ? ", " + done.swept + " earlier snapshot(s) sent too" : "") + unchecked + cleartext);
+      (done.swept ? ", " + done.swept + " earlier snapshot(s) sent too" : "") + diskNote.said + cleartext,
+      diskNote.said ? TOAST_HOLD_NOTE : 0);
     if (lowDisk) toastError(lowDisk);
     const left = leftOutWords(done);
     if (left) toastError(left.head + (left.rows.length ? " " + left.rows.map((r) => r.name + ": " + r.reason).join(" ") : ""));
   } else if (done && done.uploading) {
     // The poll's cap hit mid-copy: say what is true, not "complete".
-    toast("Snapshot saved on this machine. The copy to the snapshot destination is still running; the Snapshots page shows when it finishes.");
+    toast("Snapshot saved on this machine. The copy to the snapshot destination is still running; the Snapshots page shows when it finishes" +
+      (diskNote.said || "."), diskNote.said ? TOAST_HOLD_NOTE : 0);
     if (lowDisk) toastError(lowDisk);
   } else if (done && !done.published) {
     // The failure toast never fades, so the whole card fits in it (#1986):
@@ -10324,9 +10359,9 @@ async function loadBackupDetail(at, box) {
   if (sessionMay("query:execute")) facts.append(dl);
   box.append(facts);
   if (d.incomplete) box.append(el("p", { class: "form-msg err", text: "This snapshot is marked incomplete (a failed or unfinished run); it cannot be downloaded or restored from." }));
-  // The full read's disk check (#1938): a low disk in the error style, the
-  // rest as a plain line.
-  if (d.run && d.run.disk_note) box.append(el("p", { class: d.run.disk_check === "low" ? "form-msg err" : "form-hint", text: d.run.disk_note }));
+  // The full read's disk check (#1938), in the style its verdict asks for.
+  const diskLine = d.run ? diskNoteLine(d.run.disk_check, d.run.disk_note) : null;
+  if (diskLine) box.append(diskLine);
   // A read made without encryption (#1996), as a plain line.
   if (d.run && d.run.transport_note) box.append(el("p", { class: "form-hint", text: d.run.transport_note }));
   const skipped = viewsSkippedBlock(d.views_skipped);
@@ -10939,9 +10974,7 @@ function backupScheduleCard(cur, b) {
       // A full read that ran on a low disk, or without a disk check that
       // could vouch for it (#1938): nobody clicked, so the card is where it
       // is said.
-      if (run.disk_note && run.disk_check !== "ok") {
-        body.append(el("p", { class: run.disk_check === "low" ? "form-msg err" : "form-hint", text: run.disk_note }));
-      }
+      if (run.disk_note && run.disk_check !== "ok") body.append(diskNoteLine(run.disk_check, run.disk_note));
       // A full read that reached the source without encryption (#1996).
       if (run.transport_note) body.append(el("p", { class: "form-hint", text: run.transport_note }));
       // The reason a full backup was taken, as recorded when it ran, and
