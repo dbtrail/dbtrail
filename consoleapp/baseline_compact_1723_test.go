@@ -192,6 +192,7 @@ func TestMaybeCompact_leavesShortChainsAndBusyServersAlone(t *testing.T) {
 	}
 	// Long enough, but the server is busy (a full backup running): not
 	// started, and said at Info; the next refresh tries again.
+	sup.postRefresh.Wait() // before the next rig swaps the seams
 	sup2, req2, cs2, _ := compactRig(t, compactMinPairs)
 	sup2.jobs["s"] = &console.BaselineStatus{State: "running"}
 	logs := captureSlogFor(t)
@@ -224,6 +225,10 @@ func TestCompactJob_failureAndPanicFreeTheSlotAndStageNothing(t *testing.T) {
 		t.Fatalf("history = %+v, want the failure recorded", runs)
 	}
 
+	// The first job's goroutine goes on reading the seams after its status
+	// turned terminal (see compactRig); the second rig swaps them, so the
+	// first is awaited before it. Seen in CI as a data race.
+	sup.postRefresh.Wait()
 	sup2, req2, cs2, stage2 := compactRig(t, compactMinPairs)
 	cs2.panic = true
 	captureSlogFor(t)
