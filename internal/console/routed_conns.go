@@ -128,7 +128,8 @@ const routedKillTimeout = 10 * time.Second
 // dropRoutedConns closes the routed connections of a server whose forwarding
 // DSN just changed (oldDSN and oldSSL are the ones those connections were
 // opened with) or that was deleted, and says so in the log. It also forgets
-// a refusal noted for the previous account.
+// a refusal noted for the previous account, and why the last connection
+// could not route.
 //
 // Closing the client's socket ends the port's connection to the source, but
 // the source only notices when the statement it is running next touches the
@@ -144,6 +145,11 @@ func (s *Server) dropRoutedConns(serverID, why, oldDSN string, oldSSL config.SSL
 		// this one. Under the lock, so a connection bound before this
 		// cannot record it again afterwards (RecordRouteAccountRefused).
 		s.routing.setAccountRefused(serverID, "")
+		// Nor is what the last connection found about whether the server
+		// can route: "no forwarding account" must not stay on the page
+		// after one was saved. The next connection says it again if it
+		// still holds.
+		s.routing.setUnavailable(serverID, "")
 	})
 	if len(threads) == 0 {
 		return

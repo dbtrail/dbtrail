@@ -62,6 +62,11 @@ func (s *Server) probeRouteAccount(ctx context.Context, req serverRequest, saved
 		return nil
 	case routeUnreadable:
 		return &routeProbeResult{Error: "the saved forwarding account cannot be read; enter its user and password again, or remove it"}
+	case routeIsCapture:
+		// The port never forwards with this account (#2317): a login that
+		// works would read as "the port can route", and it cannot. Not
+		// tried, so the capture account is not opened in the port's name.
+		return &routeProbeResult{User: cfg.User, Error: "the saved forwarding account is the account DBTrail captures with, and the MySQL port never forwards with that one; set another forwarding user, or remove it"}
 	}
 	res := &routeProbeResult{User: cfg.User}
 	// The same guard as the index probe's: this route is open to

@@ -49,7 +49,7 @@ func TestIntegrationFlashbackForwardsOverTheServersTLS(t *testing.T) {
 	}
 	ids := map[string]string{}
 	for name, mode := range map[string]string{"default": "", "required": "required", "disabled": "disabled"} {
-		e, err := reg.Add(console.ServerEntry{Name: "tls-" + name, DSN: indexDSN, SourceDSN: sourceDSN, BaselineDir: baseDir, SSLMode: mode})
+		e, err := reg.Add(console.ServerEntry{Name: "tls-" + name, DSN: indexDSN, SourceDSN: sourceDSN, RouteDSN: routeAccountDSN(t, sourceDSN), BaselineDir: baseDir, SSLMode: mode})
 		if err != nil {
 			t.Fatal(err)
 		}

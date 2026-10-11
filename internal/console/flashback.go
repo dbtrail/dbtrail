@@ -59,17 +59,19 @@ type FlashbackTarget struct {
 	// router (#2038) opens its ONE upstream connection with: everything the
 	// router does on the source (EXPLAIN, forwarded statements, prepared
 	// statements, USE) runs on that connection. It is the server's
-	// forwarding account when one is set (#2079; ForwardSeparate is then
-	// true), else its source DSN; empty for the boot entry and for a server
-	// with no source.
-	ForwardDSN      string
-	ForwardSeparate bool
-	// ForwardFromRouteField: ForwardDSN is the entry's forwarding account
-	// field and not its source DSN. True without ForwardSeparate when that
-	// field holds the capture account itself or a value that cannot be
-	// read: the port then says what is wrong with that field, and never
-	// that a separate account is in use.
-	ForwardFromRouteField bool
+	// forwarding account (#2079), an account of its own on the source, and
+	// NEVER the account the server captures with (#2317): that one reads
+	// whatever capture needs, which with SELECT on every schema includes
+	// MySQL's own account tables, and a credential handed out to read
+	// history must not reach it. Empty when the server has no such account,
+	// and ForwardRefused then says why in the words the client is shown;
+	// both empty for the boot entry and for a server with no source.
+	ForwardDSN string
+	// ForwardRefused: the server has a source and no account the port may
+	// forward with (none saved, the capture account saved as one, or a
+	// saved value that cannot be read). A clause that completes "cannot be
+	// routed: ...", naming what to do.
+	ForwardRefused string
 	// ForwardGen is the server's routed-connection generation, read before
 	// the fields above: hand it to Server.TrackRoutedConn, which refuses a
 	// connection whose target was read before the account last changed.
@@ -231,22 +233,21 @@ func (s *Server) ResolveFlashback(ctx context.Context, selector string) (Flashba
 	sqlOnCopy, sqlWhyNot := s.sqlOnCopyFor(b, id)
 	// The generation first, the entry second: see routedConns.gen.
 	forwardGen := s.routed.generation(id)
-	forwardDSN, forwardSeparate, forwardFromRouteField := s.flashbackForwardDSN(id)
+	forwardDSN, forwardRefused := s.flashbackForwardDSN(id)
 	return FlashbackTarget{
-		ID:                    id,
-		IndexDB:               b.db,
-		IndexDBName:           b.dbName,
-		BaselineDir:           dir,
-		BaselineS3:            s3,
-		NoArchive:             b.noArchive,
-		DefaultSchema:         s.flashbackDefaultSchema(id),
-		SQL:                   sqlOnCopy,
-		SQLUnavailable:        sqlWhyNot,
-		ForwardDSN:            forwardDSN,
-		ForwardSeparate:       forwardSeparate,
-		ForwardFromRouteField: forwardFromRouteField,
-		ForwardGen:            forwardGen,
-		SourceSSL:             s.flashbackSourceSSL(id),
+		ID:             id,
+		IndexDB:        b.db,
+		IndexDBName:    b.dbName,
+		BaselineDir:    dir,
+		BaselineS3:     s3,
+		NoArchive:      b.noArchive,
+		DefaultSchema:  s.flashbackDefaultSchema(id),
+		SQL:            sqlOnCopy,
+		SQLUnavailable: sqlWhyNot,
+		ForwardDSN:     forwardDSN,
+		ForwardRefused: forwardRefused,
+		ForwardGen:     forwardGen,
+		SourceSSL:      s.flashbackSourceSSL(id),
 	}, nil
 }
 

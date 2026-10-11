@@ -93,7 +93,7 @@ func TestIntegrationSQLCompareValues(t *testing.T) {
 	// Two registered servers over the same copy: see compareInHalves.
 	var ids [2]string
 	for i, name := range []string{"srva", "srvb"} {
-		ent, err := reg.Add(console.ServerEntry{Name: name, DSN: indexDSN, SourceDSN: sourceDSN, BaselineDir: baseDir})
+		ent, err := reg.Add(console.ServerEntry{Name: name, DSN: indexDSN, SourceDSN: sourceDSN, RouteDSN: routeAccountDSN(t, sourceDSN), BaselineDir: baseDir})
 		if err != nil {
 			t.Fatal(err)
 		}

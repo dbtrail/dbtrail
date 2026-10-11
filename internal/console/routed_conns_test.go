@@ -126,6 +126,9 @@ func TestServersAPI_AccountChangeDropsRoutedConns(t *testing.T) {
 		open()
 		gen := srv.routed.generation(dto.ID)
 		srv.RecordRouteAccountRefused(dto.ID, gen, "the forwarding account fwd: MySQL error 1045")
+		// #2317: what the last connection found about routing, as it is
+		// recorded for a server with no forwarding account.
+		srv.RecordRouteUnavailable(dto.ID, RouteRefusedNoAccount)
 		before := dropped.Load()
 		killMu.Lock()
 		kills = nil
@@ -149,6 +152,15 @@ func TestServersAPI_AccountChangeDropsRoutedConns(t *testing.T) {
 		}
 		if !st.wantDrop && note == "" {
 			t.Errorf("%s: an edit that changed no account forgot that this one is refused", st.name)
+		}
+		// #2317: "no forwarding account" does not stay on the page once the
+		// account changed; an edit that changed none keeps it.
+		why := srv.routing.snapshot()[dto.ID].Unavailable
+		if st.wantDrop && why != "" {
+			t.Errorf("%s: the page still says why the previous account could not route: %q", st.name, why)
+		}
+		if !st.wantDrop && why == "" {
+			t.Errorf("%s: an edit that changed no account forgot why this server cannot route", st.name)
 		}
 		// The statements those connections were running are ended on the
 		// source, as the account they ran as, in one go; a connection that
@@ -355,6 +367,27 @@ func TestServersAPI_TestConnectionTriesTheForwardingAccount(t *testing.T) {
 	// Removing it in the form: nothing to try.
 	if r := probe("being removed", `{"route_user":""}`); r != nil {
 		t.Errorf("an account being removed was probed: %+v", r)
+	}
+	// #2317: a file edited by hand, or written by a build that did not
+	// check, can hold the capture account as the forwarding account. The
+	// port never forwards with it, so Test connection does not log in with
+	// it and call that a pass.
+	held, _ := srv.cm.reg.Get(dto.ID)
+	kept := held.RouteDSN
+	held.RouteDSN = held.SourceDSN
+	if err := srv.cm.reg.Update(held); err != nil {
+		t.Fatal(err)
+	}
+	loginsBefore := src.logins[srcAddr]
+	if r := probe("the capture account saved as the forwarding account", `{}`); r == nil || r.OK || !strings.Contains(r.Error, "never forwards with that one") {
+		t.Errorf("the capture account saved as the forwarding account: %+v, want a refusal that says the port does not use it", r)
+	}
+	if src.logins[srcAddr] != loginsBefore {
+		t.Errorf("Test connection logged in to the source %d time(s) with the capture account", src.logins[srcAddr]-loginsBefore)
+	}
+	held.RouteDSN = kept
+	if err := srv.cm.reg.Update(held); err != nil {
+		t.Fatal(err)
 	}
 	// A server with none: no result at all.
 	doServersReq(t, srv, "PUT", "/api/servers/"+dto.ID, `{`+base+`,"route_user":""}`)

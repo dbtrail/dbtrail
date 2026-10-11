@@ -57,7 +57,7 @@ func TestIntegrationFlashbackForwardedEmptyString(t *testing.T) {
 	baseDir := t.TempDir()
 	writeRoutingBaseline(t, baseDir, srcName, time.Minute, 2)
 	reg, _ := console.LoadRegistry(t.TempDir() + "/servers.yaml")
-	ent, err := reg.Add(console.ServerEntry{Name: "srva", DSN: indexDSN, SourceDSN: testutil.IntegrationDSN(srcName), BaselineDir: baseDir})
+	ent, err := reg.Add(console.ServerEntry{Name: "srva", DSN: indexDSN, SourceDSN: testutil.IntegrationDSN(srcName), RouteDSN: routeAccountDSN(t, testutil.IntegrationDSN(srcName)), BaselineDir: baseDir})
 	if err != nil {
 		t.Fatal(err)
 	}

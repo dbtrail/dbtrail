@@ -243,7 +243,7 @@ func formatRouteDSN(out *mysql.Config) (string, error) {
 // account itself: saved, it would read as a separation that is not there.
 func notTheCaptureAccount(route, source *mysql.Config) error {
 	if sameAccount(route, source) {
-		return errors.New("that is the account DBTrail captures with, not a separate one; leave the forwarding account empty to forward with the capture account, or name another user")
+		return errors.New("that is the account DBTrail captures with, not a separate one, and the MySQL port never forwards with it; name another user")
 	}
 	return nil
 }
@@ -322,14 +322,16 @@ func sameAddr(a, b string) bool {
 type routeState int
 
 const (
-	// routeNone: no forwarding account, or no source to forward to.
+	// routeNone: no forwarding account, or no source to forward to. The
+	// port does not forward for such a server (#2317).
 	routeNone routeState = iota
 	// routeSeparate: an account of its own. The port uses it and the
 	// capture account is not opened.
 	routeSeparate
 	// routeIsCapture: the field holds the capture account itself (a
 	// hand-edited file, or one written by a build that did not check):
-	// nothing is separated, and nothing may say it is.
+	// nothing is separated, nothing may say it is, and the port does not
+	// forward with it.
 	routeIsCapture
 	// routeUnreadable: the stored value does not parse. The port cannot
 	// route with it.
@@ -382,8 +384,13 @@ func fillRouteDSNParts(dto *serverDTO, routeDSN, sourceDSN string) {
 	}
 }
 
-// forwardDSNOf is the DSN the port forwards with for an entry: its forwarding
-// account when it has one, else its source DSN; "" with no source.
+// forwardDSNOf identifies the account an entry's routed connections belong
+// to, for the bookkeeping around them: whether an edit changed it (the open
+// connections are then closed), and which saved account Test connection is
+// asked about. It is NOT what the port opens: that is flashbackForwardDSN,
+// which never hands out the source DSN (#2317). An entry with no forwarding
+// account has no routed connections, so its source DSN here only ever
+// compares equal or unequal.
 func forwardDSNOf(e ServerEntry) string {
 	switch {
 	case e.SourceDSN == "":
@@ -394,24 +401,47 @@ func forwardDSNOf(e ServerEntry) string {
 	return e.SourceDSN
 }
 
-// flashbackForwardDSN is the DSN read routing forwards with for a server, ""
-// when the server has no source (the boot entry, a view-only server).
-// fromRouteField says the DSN is the entry's forwarding account (route_dsn)
-// and not its source DSN. separate says it is an account of its own: false
-// when there is none, and also when the field holds the capture account
-// itself or cannot be read, so nothing downstream reports a separation that
-// is not there.
-func (s *Server) flashbackForwardDSN(id string) (dsn string, separate, fromRouteField bool) {
+// Why the port does not forward for a server that has a source: the three
+// states of its forwarding account that are not an account of its own. Each
+// completes "cannot be routed: ..." and names what to do. A connection that
+// was refused is not one the port closes when the account is set, so each
+// ends on "reconnect".
+const (
+	RouteRefusedNoAccount  = "the server has no forwarding account, and this port never forwards with the account DBTrail captures with. On the source, create a MySQL user with SELECT on what this port should read, set it as the server's forwarding user (in the web interface, edit the server), then reconnect"
+	RouteRefusedIsCapture  = "the server's saved forwarding account is the account DBTrail captures with, and this port never forwards with that one. Set another forwarding user on the server (in the web interface, edit the server), then reconnect"
+	RouteRefusedUnreadable = "the server's saved forwarding account cannot be read. Edit the server in the web interface and type the forwarding user and password again, then reconnect"
+	// RouteRefusedNotMySQL: a source the port has nothing to forward to in
+	// its own protocol. No account would change that, so none is asked for.
+	RouteRefusedNotMySQL = "the server's source is PostgreSQL, and this port forwards to MySQL and MariaDB sources only"
+)
+
+// flashbackForwardDSN is the DSN read routing forwards with for a server:
+// its forwarding account, and only when that is an account of its own. The
+// account the server captures with is never returned (#2317), whether no
+// forwarding account is saved or the saved one is that same account: refused
+// then says why, as it does for a saved value that cannot be read. Both are
+// empty when the server has no source (the boot entry, a view-only server)
+// and for an id the registry does not hold.
+//
+// This is the one place the capture account is kept from the port. The
+// connections' own bookkeeping (forwardDSNOf) still knows which DSN an
+// entry's connections were opened with, and is not a way to open one.
+func (s *Server) flashbackForwardDSN(id string) (dsn, refused string) {
 	entry, ok := s.cm.reg.Get(id)
-	if !ok {
-		return "", false, false
+	if !ok || entry.SourceDSN == "" {
+		return "", ""
 	}
-	// forwardDSNOf is the one place that says an entry with no source has
-	// nothing to forward with, whatever else is stored on it.
-	dsn = forwardDSNOf(entry)
-	if dsn == "" {
-		return "", false, false
+	if entry.IsPostgres() {
+		return "", RouteRefusedNotMySQL
 	}
 	state, _ := routeAccountState(entry.RouteDSN, entry.SourceDSN)
-	return dsn, state == routeSeparate, state != routeNone
+	switch state {
+	case routeSeparate:
+		return entry.RouteDSN, ""
+	case routeIsCapture:
+		return "", RouteRefusedIsCapture
+	case routeUnreadable:
+		return "", RouteRefusedUnreadable
+	}
+	return "", RouteRefusedNoAccount
 }

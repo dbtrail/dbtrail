@@ -109,7 +109,7 @@ func newStatusPorts(t *testing.T, mariadb bool) statusPorts {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ent, err := reg.Add(console.ServerEntry{Name: "srva", DSN: testutil.IntegrationDSN(indexName), SourceDSN: sourceDSN, BaselineDir: baseDir})
+	ent, err := reg.Add(console.ServerEntry{Name: "srva", DSN: testutil.IntegrationDSN(indexName), SourceDSN: sourceDSN, RouteDSN: routeAccountDSN(t, sourceDSN), BaselineDir: baseDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func newStatusPorts(t *testing.T, mariadb bool) statusPorts {
 	downAddr := closed.Addr().String()
 	closed.Close()
 	down, err := reg.Add(console.ServerEntry{Name: "srvdown", DSN: testutil.IntegrationDSN(indexName),
-		SourceDSN: "u:p@tcp(" + downAddr + ")/" + srcName, BaselineDir: baseDir})
+		SourceDSN: "u:p@tcp(" + downAddr + ")/" + srcName, RouteDSN: otherAccountDSN(t, "u:p@tcp("+downAddr+")/"+srcName), BaselineDir: baseDir})
 	if err != nil {
 		t.Fatal(err)
 	}

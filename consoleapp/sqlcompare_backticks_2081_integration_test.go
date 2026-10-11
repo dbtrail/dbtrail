@@ -134,7 +134,7 @@ func backtickRig(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) [2]stri
 	}
 	var ids [2]string
 	for i, name := range []string{"srva", "srvb"} {
-		ent, err := reg.Add(console.ServerEntry{Name: name, DSN: indexDSN, SourceDSN: sourceDSN, BaselineDir: baseDir})
+		ent, err := reg.Add(console.ServerEntry{Name: name, DSN: indexDSN, SourceDSN: sourceDSN, RouteDSN: routeAccountDSN(t, sourceDSN), BaselineDir: baseDir})
 		if err != nil {
 			t.Fatal(err)
 		}

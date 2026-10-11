@@ -538,8 +538,9 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
   in [upload.md → A store per server](upload.md#a-store-per-server-from-the-web-interface).
 - Registry fields: `source_dsn` (replication credentials — a secret with the
   same masking/keep-password discipline as the index DSN; `source_dsn: ""`
-  clears it), `route_dsn` (the optional forwarding account read routing
-  connects to the source with instead of `source_dsn`: a secret with the
+  clears it), `route_dsn` (the forwarding account read routing connects to the
+  source with: never `source_dsn`, so a server without one is not
+  forwarded for; a secret with the
   same discipline, set through `route_user` / `route_password` or a raw
   `route_dsn`, shown as `has_route` / `route_user` / `has_route_password`,
   plus `route_host` / `route_port` only when it connects to another address

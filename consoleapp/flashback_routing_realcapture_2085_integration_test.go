@@ -85,7 +85,7 @@ func TestIntegrationFlashbackRoutedUnchangedRealCapture_2085(t *testing.T) {
 		t.Fatal(err)
 	}
 	ent, err := reg.Add(console.ServerEntry{Name: "real", DSN: testutil.IntegrationDSN(indexName), SourceDSN: sourceBase + "/",
-		Schemas: srcName, BaselineDir: baseDir})
+		RouteDSN: routeAccountDSN(t, sourceBase+"/"), Schemas: srcName, BaselineDir: baseDir})
 	if err != nil {
 		t.Fatal(err)
 	}

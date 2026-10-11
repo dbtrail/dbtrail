@@ -376,7 +376,7 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	}
 	// Read routing (#2038): one upstream MySQL connection per client
 	// connection, opened on first use with the server's forwarding account
-	// when it has one (#2079), else with its source credentials. Bound
+	// (#2079), never with its source credentials (#2317). Bound
 	// BEFORE the schema seeds below so the upstream follows them. A server that cannot route stays copy-only and says so
 	// once per connection: silently serving the copy to a client who was
 	// promised MySQL semantics is the one thing this must not do.
@@ -453,17 +453,23 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 		logger.Warn("read routing off for this connection: SQL on the copy unavailable", "server", user, "reason", tgt.SQLUnavailable)
 		unavailable = "SQL on the copy is unavailable (" + tgt.SQLUnavailable + ")"
 		srv.RecordRouteUnavailable(tgt.ID, unavailable)
+	case tgt.ForwardRefused != "":
+		// The server has a source and no account of its own for this port
+		// (#2317). Ahead of the empty-DSN case below: the DSN is empty
+		// here too, and "no source" would send the reader to the wrong fix.
+		logger.Warn("read routing off for this connection: the server has no account this port may forward with", "server", user, "reason", tgt.ForwardRefused)
+		unavailable = tgt.ForwardRefused
+		srv.RecordRouteUnavailable(tgt.ID, unavailable)
 	case tgt.ForwardDSN == "":
 		logger.Warn("read routing off for this connection: the server has no source DSN to forward to", "server", user)
 		unavailable = "the server has no source database to forward to"
 		srv.RecordRouteUnavailable(tgt.ID, unavailable)
 	default:
-		// ForwardDSN is the server's forwarding account when it has one
-		// (#2079), else its source account. This Forwarder is the only
-		// thing the port ever opens on the source, so with a forwarding
-		// account set the capture account is not used here at all. Either
-		// way the connection is opened with the TLS capture uses for this
-		// server (tgt.SourceSSL), by capture's own rule.
+		// ForwardDSN is the server's forwarding account (#2079), always an
+		// account of its own (#2317). This Forwarder is the only thing the
+		// port ever opens on the source, so the capture account is not
+		// used here at all. The connection is opened with the TLS capture
+		// uses for this server (tgt.SourceSSL), by capture's own rule.
 		fw, err := readrouter.NewForwarder(tgt.ForwardDSN, tgt.SourceSSL, cfg.RoutePolicy, cfg.QueryTimeout)
 		if err != nil {
 			// The DSN is the registry's own and was parsed to open the
@@ -471,7 +477,7 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 			// setting that cannot be used, is the realistic cause. The
 			// message carries no secret.
 			logger.Warn("read routing off for this connection", "server", user, "err", err)
-			why := forwardAddressUnavailable(tgt.ForwardFromRouteField, err)
+			why := forwardAddressUnavailable(err)
 			if problem, isTLS := strings.CutPrefix(err.Error(), "source TLS settings: "); isTLS {
 				why = "this server's TLS settings cannot be used (" + problem + ")"
 			}
@@ -479,7 +485,7 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 			srv.RecordRouteUnavailable(tgt.ID, why)
 		} else {
 			srv.RecordRouteAvailable(tgt.ID)
-			logger.Debug("read routing: connection bound", "server", user, "separate_forwarding_account", tgt.ForwardSeparate)
+			logger.Debug("read routing: connection bound", "server", user)
 			host := config.DSNHost(tgt.ForwardDSN)
 			fw.OnCleartext = func(err error) {
 				// The same thing capture says when its own connection to
@@ -493,9 +499,9 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 			id := tgt.ID
 			// A login the source refuses reaches the client as error 2006
 			// on every statement. The page is told what the source said and
-			// about which of the two accounts, so the cause is not left to
-			// an upstream_lost count (#2079).
-			account := accountLabel(tgt.ForwardSeparate, config.DSNUser(tgt.ForwardDSN))
+			// about which account, so the cause is not left to an
+			// upstream_lost count (#2079).
+			account := accountLabel(config.DSNUser(tgt.ForwardDSN))
 			// Recorded with the generation this connection was bound at:
 			// a login that ends after the server's account was changed, or
 			// the server deleted, says nothing about the account in force.
@@ -708,13 +714,10 @@ func probeRouteAccount(ctx context.Context, dsn string, ssl config.SSL, timeout 
 	return nil
 }
 
-// accountLabel names which of a server's two accounts the port logs in
-// with, and its user name.
-func accountLabel(separate bool, user string) string {
-	if separate {
-		return "the forwarding account " + user
-	}
-	return "the source account " + user + " (this server has no forwarding account)"
+// accountLabel names the account the port logs in with: the server's
+// forwarding account, the only one it ever uses (#2317).
+func accountLabel(user string) string {
+	return "the forwarding account " + user
 }
 
 // accountRefusedText is what the Connect page shows when the source turned
@@ -730,14 +733,9 @@ func accountRefusedText(account string, err error) string {
 }
 
 // forwardAddressUnavailable says, in the words the Connect page shows, that
-// the DSN read routing would forward with cannot be used, and names which
-// of the server's two accounts it belongs to.
-func forwardAddressUnavailable(separate bool, err error) string {
-	why := strings.TrimPrefix(err.Error(), "source DSN: ")
-	if separate {
-		return "the forwarding account's address cannot be forwarded to (" + why + ")"
-	}
-	return "the source address cannot be forwarded to (" + why + ")"
+// the forwarding account's DSN cannot be used.
+func forwardAddressUnavailable(err error) string {
+	return "the forwarding account's address cannot be forwarded to (" + strings.TrimPrefix(err.Error(), "source DSN: ") + ")"
 }
 
 // flashbackCreds authenticates the flashback port on the shared console token

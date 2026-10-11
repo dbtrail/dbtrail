@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -237,7 +239,7 @@ func (f routerFiles) savePortFile(t *testing.T, enabled bool, password string) {
 // lets a server's statements run at once.
 func TestNewRouterConsole_readsTheDaemonsFilesAndWritesNone(t *testing.T) {
 	f := newRouterFiles(t)
-	if _, err := f.owner.Add(console.ServerEntry{Name: "prod", DSN: "u:p@tcp(127.0.0.1:1)/idx", SourceDSN: "repl:pw@tcp(127.0.0.1:1)/app"}); err != nil {
+	if _, err := f.owner.Add(console.ServerEntry{Name: "prod", DSN: "u:p@tcp(127.0.0.1:1)/idx", SourceDSN: "repl:pw@tcp(127.0.0.1:1)/app", RouteDSN: "fwd:pw@tcp(127.0.0.1:1)/app"}); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.ReadFile(f.servers)
@@ -664,5 +666,89 @@ func TestBindReadRouterWhy_handsBackTheReason(t *testing.T) {
 				t.Errorf("bound = %v, why = %q; want bound %v and a reason with %q", fw != nil, why, tc.bound, tc.why)
 			}
 		})
+	}
+}
+
+// #2317: neither port ever forwards with the account a server captures
+// with. A server with no forwarding account, with the capture account saved
+// as one, or with a saved value that cannot be read is refused with what to
+// do, and nothing is opened on its source: the address below counts every
+// connection made to it. A server with an account of its own routes.
+func TestPortsNeverForwardWithTheCaptureAccount_2317(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var reached atomic.Int32
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			reached.Add(1)
+			_ = c.Close()
+		}
+	}()
+	source := "repl:capturepw@tcp(" + ln.Addr().String() + ")/app"
+	f := newRouterFiles(t)
+	add := func(name, routeDSN string) string {
+		t.Helper()
+		e, err := f.owner.Add(console.ServerEntry{Name: name, DSN: "u:p@tcp(127.0.0.1:1)/idx_" + name, SourceDSN: source, RouteDSN: routeDSN, BaselineDir: t.TempDir()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e.ID
+	}
+	add("none", "")
+	add("same", "repl:other@tcp("+ln.Addr().String()+")/")
+	add("unreadable", "fwd:pw@tcp("+ln.Addr().String())
+	add("own", "fwd:pw@tcp(127.0.0.1:1)/app")
+	srv, runner, err := newRouterConsole(f.settings("tok"), console.SQLPool{Workers: 1, Threads: 2, Why: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runner.Close)
+	ports := map[string]flashbackConfig{
+		"the router":            routerFlashbackConfig(f.settings("tok")).withDefaults(),
+		"the port inside watch": flashbackConfig{RouteMaxCopyAge: time.Hour, RoutePolicy: readrouter.DefaultPolicy()}.withDefaults(),
+	}
+	want := map[string]string{"none": console.RouteRefusedNoAccount, "same": console.RouteRefusedIsCapture, "unreadable": console.RouteRefusedUnreadable, "own": ""}
+	for port, cfg := range ports {
+		for name, refusal := range want {
+			tgt, err := srv.ResolveFlashback(context.Background(), name)
+			if err != nil {
+				t.Fatalf("%s, %s: %v", port, name, err)
+			}
+			if strings.Contains(tgt.ForwardDSN, "repl") || strings.Contains(tgt.ForwardDSN, "capturepw") {
+				t.Errorf("%s, %s: the port is handed the capture account: %q", port, name, tgt.ForwardDSN)
+			}
+			var logged bytes.Buffer
+			h := shim.NewHandler(nil, nil)
+			h.BindFreeSQL(routeTestFreeSQL{})
+			t.Cleanup(h.Close)
+			bound, why := bindReadRouterWhy(h, srv, tgt, name, cfg, slog.New(slog.NewTextHandler(&logged, nil)))
+			if (bound != nil) != (refusal == "") || why != refusal {
+				t.Errorf("%s, %s: bound %v, reason %q; want bound %v, reason %q", port, name, bound != nil, why, refusal == "", refusal)
+			}
+			if strings.Contains(logged.String(), "capturepw") || strings.Contains(why, "capturepw") {
+				t.Errorf("%s, %s: the capture account's password is in what is said: %s / %s", port, name, logged.String(), why)
+			}
+			if refusal == "" {
+				continue
+			}
+			// What a client then sends is not forwarded anywhere: reads
+			// and writes alike stay off the source.
+			for _, stmt := range []string{"SELECT 1", "DELETE FROM t", "SELECT * FROM mysql.user"} {
+				_, _ = h.HandleQuery(stmt)
+			}
+			if _, routing := h.RouterConfig(); routing {
+				t.Errorf("%s, %s: a router is bound on a refused server", port, name)
+			}
+		}
+	}
+	if n := reached.Load(); n != 0 {
+		t.Errorf("%d connection(s) were opened on the source of servers with no account of their own for the port", n)
 	}
 }

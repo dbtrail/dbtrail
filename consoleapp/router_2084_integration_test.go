@@ -43,7 +43,7 @@ func TestIntegrationRouter(t *testing.T) {
 	writeRoutingBaseline(t, baseDir, srcName, 30*24*time.Hour, 2)
 
 	f := newRouterFiles(t)
-	ent, err := f.owner.Add(console.ServerEntry{Name: "srva", DSN: indexDSN, SourceDSN: sourceDSN, BaselineDir: baseDir})
+	ent, err := f.owner.Add(console.ServerEntry{Name: "srva", DSN: indexDSN, SourceDSN: sourceDSN, RouteDSN: routeAccountDSN(t, sourceDSN), BaselineDir: baseDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestIntegrationRouter(t *testing.T) {
 	if _, err := raw.ExecContext(context.Background(), "SELECT 1"); err != nil {
 		t.Fatal(err)
 	}
-	ent.RouteDSN = testutil.IntegrationDSN(srcName) + "&interpolateParams=true"
+	ent.RouteDSN = routeAccountDSN(t, sourceDSN)
 	if err := f.owner.Update(ent); err != nil {
 		t.Fatal(err)
 	}
@@ -208,6 +208,27 @@ func TestIntegrationRouter(t *testing.T) {
 		t.Errorf("a statement for a server with no source: %v, want error 1105 that says it cannot be routed and why", err)
 	}
 
+	// Nor can a server that has a source and no forwarding account (#2317):
+	// the router never forwards with the account the server captures with,
+	// here one that works. The client is told what is missing, and nothing
+	// it sends runs on the source.
+	bare, err := f.owner.Add(console.ServerEntry{Name: "noaccount", DSN: indexDSN, SourceDSN: sourceDSN, BaselineDir: baseDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "the router to see the server with no forwarding account", func() bool {
+		_, err := srv.ResolveFlashback(context.Background(), bare.Name)
+		return err == nil
+	})
+	bc := openFlashback(t, addr, bare.Name, "tok", srcName)
+	defer bc.Close()
+	for _, stmt := range []string{"SELECT CURRENT_USER()", "SELECT status FROM orders WHERE id = 1", "SELECT user FROM mysql.user"} {
+		_, err = bc.Query(stmt)
+		if err == nil || mysqlCode(err) != 1105 || !strings.Contains(err.Error(), "cannot be routed") || !strings.Contains(err.Error(), "no forwarding account") {
+			t.Errorf("%q for a server with no forwarding account: %v, want error 1105 that says it cannot be routed and what is missing", stmt, err)
+		}
+	}
+
 	// And the router wrote nothing in the daemon's directory but what the
 	// test, as the daemon, saved there.
 	entries, err := os.ReadDir(filepath.Dir(f.servers))
@@ -241,7 +262,7 @@ func TestIntegrationRouter_theIndexIsAway(t *testing.T) {
 	writeRoutingBaseline(t, baseDir, srcName, time.Hour, 2)
 	f := newRouterFiles(t)
 	ent, err := f.owner.Add(console.ServerEntry{Name: "srva", DSN: "idx:secretpw@tcp(127.0.0.1:1)/binlog_index?timeout=2s",
-		SourceDSN: testutil.IntegrationDSN(srcName), BaselineDir: baseDir})
+		SourceDSN: testutil.IntegrationDSN(srcName), RouteDSN: routeAccountDSN(t, testutil.IntegrationDSN(srcName)), BaselineDir: baseDir})
 	if err != nil {
 		t.Fatal(err)
 	}

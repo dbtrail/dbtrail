@@ -45,7 +45,7 @@ func TestIntegrationFlashbackReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ent, err := reg.Add(console.ServerEntry{Name: "srva", DSN: indexDSN, SourceDSN: testutil.IntegrationDSN(srcName), BaselineDir: baseDir})
+	ent, err := reg.Add(console.ServerEntry{Name: "srva", DSN: indexDSN, SourceDSN: testutil.IntegrationDSN(srcName), RouteDSN: routeAccountDSN(t, testutil.IntegrationDSN(srcName)), BaselineDir: baseDir})
 	if err != nil {
 		t.Fatal(err)
 	}

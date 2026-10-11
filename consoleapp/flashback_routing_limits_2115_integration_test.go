@@ -148,7 +148,7 @@ func routingLimits(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, cases
 	if err != nil {
 		t.Fatal(err)
 	}
-	ent, err := reg.Add(console.ServerEntry{Name: "srva", DSN: indexDSN, SourceDSN: sourceDSN, BaselineDir: baseDir})
+	ent, err := reg.Add(console.ServerEntry{Name: "srva", DSN: indexDSN, SourceDSN: sourceDSN, RouteDSN: routeAccountDSN(t, sourceDSN), BaselineDir: baseDir})
 	if err != nil {
 		t.Fatal(err)
 	}

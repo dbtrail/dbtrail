@@ -28,9 +28,12 @@ import (
 // The proof that the source account is not used AT ALL: the entry's source
 // DSN carries credentials the source refuses. Every way the router touches
 // the source (the EXPLAIN it decides on, a forwarded statement, a prepared
-// one, USE) must still work, because it goes through the forwarding account;
-// the control server, with the same broken source DSN and no forwarding
-// account, fails on its first statement.
+// one, USE) must still work, because it goes through the forwarding account.
+//
+// And the other half (#2317): the control server has a source account that
+// WORKS and no forwarding account. The port does not forward for it at all:
+// nothing a client sends reaches the source as the capture account, and the
+// page says what is missing.
 func TestIntegrationFlashbackForwardingAccount(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	now := time.Now().UTC().Truncate(time.Hour)
@@ -76,7 +79,7 @@ func TestIntegrationFlashbackForwardingAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	control, err := reg.Add(console.ServerEntry{Name: "control", DSN: indexDSN, SourceDSN: broken.FormatDSN(), BaselineDir: baseDir})
+	control, err := reg.Add(console.ServerEntry{Name: "control", DSN: indexDSN, SourceDSN: good.FormatDSN(), BaselineDir: baseDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,18 +144,24 @@ func TestIntegrationFlashbackForwardingAccount(t *testing.T) {
 		t.Errorf("the source holds %d rows (%v), want 3", rows, err)
 	}
 
-	// The control: the same source DSN with no forwarding account is what
-	// the router uses, and the source refuses it.
+	// The control (#2317): a source account that works, and no forwarding
+	// account. The port never forwards with the capture account, so a
+	// write does not land on the source and no statement runs there as it.
 	ctl := openFlashback(t, addr, control.ID, "tok", srcName)
 	defer ctl.Close()
-	if _, err := ctl.Query("SELECT CURRENT_USER()"); err == nil {
-		t.Fatal("the control server answered: its source DSN is not refused, so the checks above prove nothing")
-	} else if !strings.Contains(err.Error(), "2006") && !strings.Contains(err.Error(), "gone away") {
-		t.Logf("control server failed with: %v", err)
+	if _, err := ctl.Exec("INSERT INTO orders VALUES (9,'through-capture')"); err == nil {
+		t.Error("an INSERT for a server with no forwarding account was accepted")
+	}
+	if err := srcDB.QueryRow("SELECT count(*) FROM orders").Scan(&rows); err != nil || rows != 3 {
+		t.Fatalf("after an INSERT sent for a server with no forwarding account the source holds %d rows (%v), want 3: it was forwarded with the capture account", rows, err)
+	}
+	var ranAs string
+	if err := ctl.QueryRow("SELECT CURRENT_USER()").Scan(&ranAs); err == nil && strings.HasPrefix(ranAs, good.User+"@") {
+		t.Fatalf("a statement for a server with no forwarding account ran on the source as the capture account %s", ranAs)
 	}
 
-	// The page is told what the source said and about which account: the
-	// control server's clients only ever see error 2006.
+	// The page is told why: nothing was refused by the source, the server
+	// simply has no account the port may use.
 	api := func(method, path, body string) (int, string) {
 		t.Helper()
 		req := httptest.NewRequest(method, "http://127.0.0.1"+path, strings.NewReader(body))
@@ -162,13 +171,14 @@ func TestIntegrationFlashbackForwardingAccount(t *testing.T) {
 		srv.Handler().ServeHTTP(rec, req)
 		return rec.Code, rec.Body.String()
 	}
-	refusedNote := func(id string) string {
+	pageNotes := func(id string) (refused, unavailable string) {
 		t.Helper()
 		code, body := api("GET", "/api/flashback", "")
 		var fb struct {
 			Routing struct {
 				Servers map[string]struct {
 					AccountRefused string `json:"account_refused"`
+					Unavailable    string `json:"unavailable"`
 				} `json:"servers"`
 			} `json:"routing"`
 		}
@@ -178,15 +188,15 @@ func TestIntegrationFlashbackForwardingAccount(t *testing.T) {
 		if strings.Contains(body, fwdPass) || strings.Contains(body, ":wrong@") {
 			t.Fatalf("the page's data carries a password: %s", body)
 		}
-		return fb.Routing.Servers[id].AccountRefused
+		return fb.Routing.Servers[id].AccountRefused, fb.Routing.Servers[id].Unavailable
 	}
-	note := refusedNote(control.ID)
-	t.Logf("control server, on the page: %s", note)
-	if !strings.Contains(note, "the source account dbtrail_no_such_capture_user") || !strings.Contains(note, "1045") {
-		t.Errorf("the page says %q about the control server, want the source account and MySQL's 1045", note)
+	note, why := pageNotes(control.ID)
+	t.Logf("control server, on the page: refused %q, cannot route because %q", note, why)
+	if note != "" || why != console.RouteRefusedNoAccount {
+		t.Errorf("the page says refused %q / cannot route %q about the control server, want no refusal and %q", note, why, console.RouteRefusedNoAccount)
 	}
-	if note := refusedNote(withFwd.ID); note != "" {
-		t.Errorf("the server whose forwarding account logs in carries a refusal: %q", note)
+	if note, why := pageNotes(withFwd.ID); note != "" || why != "" {
+		t.Errorf("the server whose forwarding account logs in carries a note: refused %q, cannot route %q", note, why)
 	}
 
 	// A connection that is OPEN when the account changes does not keep the
@@ -297,7 +307,7 @@ func TestIntegrationFlashbackForwardingAccount(t *testing.T) {
 		t.Fatalf("after the edit a new connection ran as %v, want %s@%%", got, fwd2)
 	}
 	// The account is removed: the open connection goes, and the port is
-	// back on the source account (which this entry's source refuses).
+	// back on the source account: it stops routing (#2317).
 	held2, err := again.Conn(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -312,12 +322,17 @@ func TestIntegrationFlashbackForwardingAccount(t *testing.T) {
 	if who, err := currentUser(held2); err == nil {
 		t.Fatalf("a connection open across the removal still answers, as %q", who)
 	}
+	// With the account removed the port does not fall back to the source
+	// account: it stops forwarding for this server, and says so.
 	after := openFlashback(t, addr, withFwd.ID, "tok", srcName)
 	defer after.Close()
-	if _, err := after.Query("SELECT CURRENT_USER()"); err == nil {
-		t.Fatal("after the removal the port still reaches the source: it is not on the source account")
+	if _, err := after.Exec("INSERT INTO orders VALUES (10,'after-removal')"); err == nil {
+		t.Error("after the removal an INSERT was accepted")
 	}
-	if note := refusedNote(withFwd.ID); !strings.Contains(note, "the source account dbtrail_no_such_capture_user") {
-		t.Errorf("after the removal the page says %q, want the source account refused", note)
+	if err := srcDB.QueryRow("SELECT count(*) FROM orders").Scan(&rows); err != nil || rows != 3 {
+		t.Errorf("after the removal the source holds %d rows (%v), want 3", rows, err)
+	}
+	if note, why := pageNotes(withFwd.ID); note != "" || why != console.RouteRefusedNoAccount {
+		t.Errorf("after the removal the page says refused %q / cannot route %q, want no refusal and the missing account", note, why)
 	}
 }

@@ -38,11 +38,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The Docker stack starts it as the `router` service (`docker-compose.yml`
   is version 3: download the current file to get it), with the state volume
   mounted read-only, and read-only itself: it refuses writes unless
-  `ROUTER_READ_ONLY=0` is set. `ROUTER_MEMORY` and `ROUTER_CPUS` in `.env`
+  `ROUTER_READ_ONLY=0` is set. It forwards with each server's forwarding
+  account and refuses a server that has none (see Changed, #2317).
+  `ROUTER_MEMORY` and `ROUTER_CPUS` in `.env`
   give it ceilings of its own. The `bintrail-console` package installs it as a
   second systemd service, `bintrail-router`, read-only and off until you
   enable it (`sudo systemctl enable --now bintrail-router`). See
   [The router](time-travel-sql.md#the-router-the-same-port-as-a-service-of-its-own-experimental).
+
+### Changed
+- **The MySQL port no longer forwards with the account DBTrail captures
+  with** (#2317). Under read routing (`--route-max-copy-age`, experimental)
+  a server with no forwarding account used to have its statements forwarded
+  to its source with the capture account. That account reads whatever
+  capture needs, and with `SELECT ON *.*`, the grant the docs show first,
+  that includes the `mysql` schema: the port's password, handed out to read
+  history, could read the password hashes of every account on the source.
+  The port now forwards only with a server's forwarding account, a second
+  MySQL user set on the server's page (**Forwarding user**) or as
+  `route_user` / `route_password` in the API. **If you turned read routing
+  on without one, routing stops for that server after the upgrade**: the
+  copy answers alone on the port inside `watch`, the new `router` service
+  refuses the server's statements, and the Connect page and the error both
+  say what is missing. To get routing back, create a user with `SELECT` on
+  what the port should read, save it as the server's forwarding user, and
+  reconnect. A forwarding account saved as the capture account itself, or
+  one that cannot be read, counts as none. Nothing changes for a port with
+  read routing off, which is the default.
 
 
 ## [0.103.1] - 2026-10-10

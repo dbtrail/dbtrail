@@ -343,9 +343,9 @@ never answers is visible as `copy_refused`, `copy_too_old`,
 `copy_age_unknown` or `session_differs` climbing while `expensive_plan` and
 `tables_unchanged` stay flat (for `session_differs`, the log line "the copy does not answer on this
 connection" says which setting and value to change); `explain_failed`
-climbing means the source account cannot `EXPLAIN` what the clients run.
-`upstream_lost` climbing means the source is unreachable or its credentials
-are wrong. `copy_queue_full` or `copy_wait_timeout` climbing means the copy
+climbing means the forwarding account cannot `EXPLAIN` what the clients run.
+`upstream_lost` climbing means the source is unreachable or the forwarding
+account's credentials are wrong. `copy_queue_full` or `copy_wait_timeout` climbing means the copy
 is asked for more heavy reads than it serves: it works, and the reads that
 did not fit went to MySQL, where they are slow. `SHOW WARNINGS` after a copy-served statement and the schema
 seeded at connect are not decisions and are not counted. The same counts, per server since the daemon started,

@@ -304,25 +304,49 @@ func TestFlashbackForwardDSN(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	type fwd struct {
-		dsn                  string
-		separate, routeField bool
+	// The same account as the source's with another password and another
+	// spelling of the address: still the capture account (#2317), since the
+	// check is on who logs in and where, not on the string.
+	isCaptureOtherPw, err := reg.Add(ServerEntry{Name: "iscapture2", DSN: "u:p@tcp(i:3306)/idx7", SourceDSN: "repl:pw@tcp(s:3306)/shop", RouteDSN: "repl:other@tcp(s.:3306)/"})
+	if err != nil {
+		t.Fatal(err)
 	}
+	// A PostgreSQL source: nothing to forward to in the port's protocol, and
+	// no MySQL account is asked for.
+	pg, err := reg.Add(ServerEntry{Name: "pg", DSN: "u:p@tcp(i:3306)/idx8", Flavor: FlavorPostgres, SourceDSN: "postgres://repl:pw@s:5432/shop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type fwd struct{ dsn, refused string }
 	for name, tc := range map[string]struct {
 		id   string
 		want fwd
 	}{
-		"a forwarding account":                {with.ID, fwd{"fwd:pw2@tcp(s:3306)/shop", true, true}},
-		"none":                                {without.ID, fwd{"repl:pw@tcp(s:3306)/shop", false, false}},
+		"a forwarding account":                {with.ID, fwd{"fwd:pw2@tcp(s:3306)/shop", ""}},
+		"none":                                {without.ID, fwd{"", RouteRefusedNoAccount}},
 		"no source":                           {view.ID, fwd{}},
 		"a forwarding account with no source": {orphan.ID, fwd{}},
-		"the capture account in the field":    {isCapture.ID, fwd{"repl:pw@tcp(S:3306)/shop", false, true}},
-		"a value that cannot be read":         {unreadable.ID, fwd{"fwd:pw@tcp(s:3306", false, true}},
+		"the capture account in the field":    {isCapture.ID, fwd{"", RouteRefusedIsCapture}},
+		"the capture account, other password": {isCaptureOtherPw.ID, fwd{"", RouteRefusedIsCapture}},
+		"a value that cannot be read":         {unreadable.ID, fwd{"", RouteRefusedUnreadable}},
+		"a PostgreSQL source":                 {pg.ID, fwd{"", RouteRefusedNotMySQL}},
 		"unknown server":                      {"nope", fwd{}},
 	} {
-		dsn, separate, routeField := srv.flashbackForwardDSN(tc.id)
-		if got := (fwd{dsn, separate, routeField}); got != tc.want {
+		dsn, refused := srv.flashbackForwardDSN(tc.id)
+		if got := (fwd{dsn, refused}); got != tc.want {
 			t.Errorf("%s: %+v, want %+v", name, got, tc.want)
+		}
+		// #2317: whatever the entry holds, the account the server captures
+		// with never leaves for the port.
+		if strings.Contains(dsn, "repl") {
+			t.Errorf("%s: the port is handed the capture account: %q", name, dsn)
+		}
+	}
+	// Each refusal says what to do and that the connection must be opened
+	// again, and none carries a credential.
+	for _, why := range []string{RouteRefusedNoAccount, RouteRefusedIsCapture, RouteRefusedUnreadable} {
+		if !strings.Contains(why, "forwarding user") || !strings.HasSuffix(why, "then reconnect") || strings.Contains(why, "pw") {
+			t.Errorf("refusal %q: want the forwarding user named, ending on reconnect, no credential", why)
 		}
 	}
 }

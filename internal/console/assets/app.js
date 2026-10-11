@@ -14167,6 +14167,26 @@ function routerPanel(view, cur) {
 // trailing zero DIGIT of "10m0s".
 function fmtGoDuration(d) { return String(d || "").replace(/(\d[hm])(?:0m)?0s$/, "$1"); }
 
+// routeAccountMissing says why the MySQL port does not forward for a server
+// that has a source: it has no forwarding account of its own (#2317). The
+// port never forwards with the account DBTrail captures with, so "none",
+// "the capture account saved as one" and "a saved value that cannot be
+// read" all leave the copy answering alone. "" when the server can route as
+// far as its account goes, or has no source at all.
+function routeAccountMissing(cur) {
+  if (!cur || !cur.has_source || cur.has_route) return "";
+  // A source the port has nothing to forward to in its own protocol: no
+  // account would change that, so none is asked for.
+  if (cur.flavor === "postgres") return "its source is PostgreSQL, and this port forwards to MySQL and MariaDB sources only";
+  if (cur.route_unreadable) {
+    return "its saved forwarding account cannot be read. Edit the server and type the forwarding user and password again";
+  }
+  if (cur.route_is_capture) {
+    return "its saved forwarding account is the account DBTrail captures with, and this port never forwards with that one. Edit the server and set another forwarding user";
+  }
+  return "it has no forwarding account, and this port never forwards with the account DBTrail captures with. On its MySQL, create a user with SELECT on what this port should read, then edit the server and set it as the forwarding user";
+}
+
 // routingBlock (#2038) says who answers on the port: with read routing off,
 // the copy, always (and how to turn routing on); with it on, the rule and,
 // for the server picked in the sidebar, how many statements each side has
@@ -14197,14 +14217,23 @@ function routingBlock(fb, cur) {
       wrap.append(el("p", { class: "cn-sql-row", text: "Who answered: pick a server in the left sidebar to see its counts." }));
       return;
     }
-    if (t.unavailable) {
-      // A connection to this server found it cannot route (no source to
-      // forward to, or no SQL on the copy): the copy answers everything
-      // sent under its name, and the rule below does not apply to it.
+    // The port forwards with a server's forwarding account and never with
+    // the account DBTrail captures with (#2317). A server that has a source
+    // and no account of its own for the port does not route, and that is
+    // read here from the server itself: it holds before any client has
+    // connected, and it is what to fix whatever else a connection found.
+    const noAccount = routeAccountMissing(cur);
+    if (noAccount || t.unavailable) {
+      // noAccount, or a connection to this server found it cannot route
+      // (no source to forward to, or no SQL on the copy): the copy answers
+      // everything sent under its name, and the rule below does not apply.
       const p = el("p", { class: "cn-sql-row" });
       p.append("Who answered", cur ? " for " : "", cur ? el("code", { text: cur.name || cur.id }) : "",
-        ": the copy, always. Routing is off for this server: " + t.unavailable + ". ", refresh);
+        ": the copy, always. Routing is off for this server: " + (noAccount || t.unavailable) + ". ", refresh);
       wrap.append(p);
+      if (noAccount && cur.flavor !== "postgres") {
+        wrap.append(el("p", { class: "cn-sql-row", text: "A connection already open keeps being answered by the copy; it routes once it is opened again. The router service refuses this server's statements for the same reason." }));
+      }
       return;
     }
     const since = r.since ? new Date(r.since) : null;
@@ -14235,33 +14264,23 @@ function routingBlock(fb, cur) {
       : el("p", { class: "cn-sql-row" }, el("b", { text: "This port is read-write." }),
         " Writes sent to it run on MySQL. To refuse them, start DBTrail with ", el("code", { text: "--route-read-only" }), "."));
     // Which account runs what MySQL answers (#2079): the user name only.
-    // has_route is the server's own verdict that the account is a separate
-    // one: a saved value that is the capture account itself, or that cannot
-    // be read, is said as what it is and never as a separation.
+    // Always the server's forwarding account: a server without one was
+    // answered for above and never gets here with a source (#2317).
     if (cur.has_route) {
       // route_host is sent only when the account connects somewhere else
       // than the source.
       const where = cur.route_host ? " It connects to " + cur.route_host + (cur.route_port ? ":" + cur.route_port : "") + ", not the source's address." : "";
       wrap.append(el("p", { class: "cn-sql-row" }, "On MySQL, statements run as ",
         cur.route_user ? el("code", { text: cur.route_user }) : "this server's forwarding account",
-        (cur.route_user ? ", this server's forwarding user." : ".") + where + " The account DBTrail captures with is not used by this port."));
-    } else if (cur.route_unreadable) {
-      wrap.append(el("p", { class: "cn-sql-row" }, el("b", { text: "This server's saved forwarding account cannot be read," }),
-        " so this port cannot forward for it and does not fall back to the account DBTrail captures with. Edit the server and type the forwarding user and password again, or remove the forwarding account."));
-    } else if (cur.has_source) {
-      wrap.append(el("p", { class: "cn-sql-row" }, "On MySQL, statements run as ",
-        cur.source_user ? el("code", { text: cur.source_user }) : "the source user",
-        ", the account DBTrail captures with: this port can do whatever that account can. " +
-        (cur.route_is_capture ? "The saved forwarding account is that same account, so nothing is separated. To separate them, edit the server and set another forwarding user."
-          : "To use another one, edit the server and set a forwarding user.")));
+        (cur.route_user ? ", this server's forwarding user." : ".") + where +
+        " This port can do there whatever that account is granted, and read whatever its SELECT covers. The account DBTrail captures with is never used by this port."));
     }
     // The source turned the port's login away (#2079): every statement of
     // such a connection fails with error 2006, which says nothing of why.
     if (t.account_refused) {
       wrap.append(el("p", { class: "cn-sql-row" }, el("b", { text: "MySQL refused the login of " + t.account_refused + "." }),
         " Clients of this port get error 2006 for this server until that is fixed. " +
-        (cur.has_route ? "Edit the server to correct the forwarding account. Test connection on that form tries its login, and one that works clears this message."
-          : "Edit the server to correct the source user or its password. This message goes when a client of the port logs in.")));
+        "Edit the server to correct the forwarding account. Test connection on that form tries its login, and one that works clears this message."));
     }
     if (total > 0) {
       const reasons = Object.entries(t.reasons || {}).sort((x, y) => y[1] - x[1]);
@@ -14826,7 +14845,7 @@ function serverRow(s) {
 // srvField builds a labeled input row: <label class="field"><span/><input/></label>.
 // FORWARDING_HINT explains the two optional forwarding fields of the server
 // form (#2079) in the form's own words.
-const FORWARDING_HINT = "Forwarding user and password are optional. They only matter when DBTrail was started with read routing: what a SQL client sends to the MySQL port then runs on this server as the forwarding user, not as the source user, so the forwarding user's permissions are all that port can do here. Give it SELECT only for a port that cannot change anything. Blank forwards with the source user. Saving a change to the forwarding account closes the connections open on that port for this server, so that none stays on the previous account; clients reconnect.";
+const FORWARDING_HINT = "Forwarding user and password are optional. They only matter when DBTrail was started with read routing, or when the router service runs: what a SQL client sends to the MySQL port then runs on this server as the forwarding user, so the forwarding user's permissions are all that port can do here, and what its SELECT covers is all it can read. Give it SELECT only, on the schemas the port should read. It must be another user than the source user: the port never forwards with the account DBTrail captures with, so with these fields blank the port does not forward for this server and the copy answers alone. Saving a change to the forwarding account closes the connections open on that port for this server, so that none stays on the previous account; clients reconnect.";
 
 // routePrefill remembers, per form, the forwarding account its server had
 // when the form opened: serverFormBody sends the forwarding fields only when
@@ -15121,7 +15140,7 @@ function buildServerForm() {
   // by serverFormBody only when changed; the password is never prefilled
   // and blank keeps the saved one. Removing a saved account is the control
   // in #route-extra, filled in when the form opens on a server that has one.
-  monGrid.append(tagFlavor(srvField("Forwarding user", "route_user", { placeholder: "(optional) blank forwards with the source user", autocomplete: "off" }), "mysql mariadb"));
+  monGrid.append(tagFlavor(srvField("Forwarding user", "route_user", { placeholder: "(optional) blank: the port does not forward", autocomplete: "off" }), "mysql mariadb"));
   monGrid.append(tagFlavor(srvField("Forwarding password", "route_password", { type: "password", autocomplete: "new-password" }), "mysql mariadb"));
   // PostgreSQL-only: a logical-replication connection is per-database, and the
   // slot/publication are operator-created (validate-don't-create).
@@ -16196,12 +16215,12 @@ function fillRouteExtra(form, prefill) {
   if (prefill.route_unreadable) {
     box.append(el("p", { class: "form-msg err", text: "The forwarding account saved for this server cannot be read (was the servers file edited by hand?), so the MySQL port cannot forward for this server. Type the forwarding user and password again, or remove it below. Saving this form without doing either leaves it as it is." }));
   } else if (prefill.route_is_capture) {
-    box.append(el("p", { class: "form-hint", text: "The forwarding account saved for this server is the same account DBTrail captures with, so the port is not on a separate account. Set another forwarding user, or remove it below." }));
+    box.append(el("p", { class: "form-hint", text: "The forwarding account saved for this server is the same account DBTrail captures with. The MySQL port never forwards with that one, so it does not forward for this server. Set another forwarding user, or remove it below." }));
   } else if (prefill.route_host) {
     box.append(el("p", { class: "form-hint", text: "This forwarding account connects to " + prefill.route_host + (prefill.route_port ? ":" + prefill.route_port : "") + ", not to the source's address. It keeps that address when its user or password is changed here." }));
   }
   box.append(el("label", { class: "check" }, el("input", { type: "checkbox", name: "route_remove" }),
-    el("span", { text: "Remove the forwarding account (the port then forwards with the source user)" })));
+    el("span", { text: "Remove the forwarding account (the port then stops forwarding for this server)" })));
 }
 
 // keep-password semantics: omit password fields when blank (= keep stored).

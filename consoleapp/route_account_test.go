@@ -73,8 +73,8 @@ func fakeSourceAddr(t *testing.T) string {
 }
 
 // TestBindReadRouterSaysWhichAccountWasRefused: a login the source refuses
-// reaches the client as error 2006; the Connect page is told which of the
-// server's two accounts it was and MySQL's own error, with no password, and
+// reaches the client as error 2006; the Connect page is told which account
+// it was and MySQL's own error, with no password, and
 // the note goes when a connection logs in. bindReadRouter also reports
 // whether it bound a router, which is what makes the port track the
 // connection.
@@ -106,16 +106,16 @@ func TestBindReadRouterSaysWhichAccountWasRefused(t *testing.T) {
 		return fb.Routing.Servers["s1"].AccountRefused
 	}
 	cfg := flashbackConfig{RouteMaxCopyAge: time.Hour, RoutePolicy: readrouter.DefaultPolicy(), QueryTimeout: 5 * time.Second}
-	try := func(dsn string, separate bool) bool {
+	try := func(dsn string) bool {
 		h := shim.NewHandler(nil, nil)
 		h.BindFreeSQL(routeTestFreeSQL{})
 		t.Cleanup(h.Close)
-		bound := bindReadRouter(h, srv, console.FlashbackTarget{ID: "s1", SQL: &console.SQLOnCopy{}, ForwardDSN: dsn, ForwardSeparate: separate,
+		bound := bindReadRouter(h, srv, console.FlashbackTarget{ID: "s1", SQL: &console.SQLOnCopy{}, ForwardDSN: dsn,
 			SourceSSL: config.SSL{Mode: "disabled"}}, "s1", cfg, slog.Default())
 		_, _ = h.HandleQuery("DELETE FROM t") // a write is forwarded: the login happens
 		return bound != nil
 	}
-	if !try("fwd:wrong-pw@tcp("+addr+")/", true) {
+	if !try("fwd:wrong-pw@tcp(" + addr + ")/") {
 		t.Fatal("a server that can route was not reported as bound")
 	}
 	got := note()
@@ -124,18 +124,12 @@ func TestBindReadRouterSaysWhichAccountWasRefused(t *testing.T) {
 		t.Errorf("the page says %q, want the forwarding account fwd and MySQL's 1045", got)
 	}
 	// A login clears it.
-	try("fwd:pw@tcp("+addr+")/", true)
+	try("fwd:pw@tcp(" + addr + ")/")
 	if got := note(); got != "" {
 		t.Errorf("after a connection logged in the page still says %q", got)
 	}
-	// The source account, on a server with no forwarding account.
-	try("fwd:wrong-pw@tcp("+addr+")/", false)
-	if got := note(); !strings.Contains(got, "the source account fwd") || strings.Contains(got, "the forwarding account fwd") {
-		t.Errorf("the page says %q, want the source account named", got)
-	}
 	// A source that cannot be reached at all is not an account refused.
-	try("fwd:pw@tcp("+addr+")/", true)
-	try("fwd:pw@tcp(127.0.0.1:1)/", true)
+	try("fwd:pw@tcp(127.0.0.1:1)/")
 	if got := note(); got != "" {
 		t.Errorf("an unreachable source is reported as a refused account: %q", got)
 	}
@@ -155,8 +149,8 @@ func TestBindReadRouterSaysWhichAccountWasRefused(t *testing.T) {
 	if bindReadRouter(h, srv, console.FlashbackTarget{ID: "s1", SQL: &console.SQLOnCopy{}, ForwardDSN: "fwd:pw@tcp(" + addr + ")/"}, "s1", flashbackConfig{}, slog.Default()) != nil {
 		t.Error("routing off reported a bound router")
 	}
-	if bindReadRouter(h, srv, console.FlashbackTarget{ID: "s1", SQL: &console.SQLOnCopy{}}, "s1", cfg, slog.Default()) != nil {
-		t.Error("a server with no source reported a bound router")
+	if bound, why := bindReadRouterWhy(h, srv, console.FlashbackTarget{ID: "s1", SQL: &console.SQLOnCopy{}}, "s1", cfg, slog.Default()); bound != nil || !strings.Contains(why, "no source database") {
+		t.Errorf("a server with no source: bound %v, reason %q", bound != nil, why)
 	}
 }
 

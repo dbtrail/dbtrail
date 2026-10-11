@@ -57,7 +57,7 @@ func TestIntegrationFlashbackReadRoutingMariaDBSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ent, err := reg.Add(console.ServerEntry{Name: "srva", DSN: indexDSN, SourceDSN: testutil.MariaDBBaseDSN() + "/" + srcName + "?parseTime=true", BaselineDir: baseDir})
+	ent, err := reg.Add(console.ServerEntry{Name: "srva", DSN: indexDSN, SourceDSN: testutil.MariaDBBaseDSN() + "/" + srcName + "?parseTime=true", RouteDSN: routeAccountDSN(t, testutil.MariaDBBaseDSN()+"/"+srcName+"?parseTime=true"), BaselineDir: baseDir})
 	if err != nil {
 		t.Fatal(err)
 	}

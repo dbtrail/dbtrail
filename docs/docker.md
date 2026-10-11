@@ -618,23 +618,33 @@ It listens on `127.0.0.1:3310`, and only once there is a password for it:
 
 Until then the container waits and uses next to nothing.
 
-**What its password reads: the source itself, live.** On port 3309 the MySQL
-port's password reads the history and the copy of the captured tables. On the
-router the same password has its statements forwarded to the server's source
-MySQL, with that server's forwarding account when it has one and its source
-account otherwise, so it reads every table that account may read, captured or
-not. Give each server a forwarding account limited to what applications
-should read (the web interface, on the server's page). If you do not want the
-password to reach the source at all, `docker compose stop router`.
+**What its password reads: the source itself, live, as far as you allow.**
+On port 3309 the MySQL port's password reads the history and the copy of the
+captured tables. On the router the same password has its statements forwarded
+to the server's source MySQL, with that server's **forwarding account**: a
+MySQL user of its own that you create and set on the server's page in the web
+interface. Give it `SELECT` on what applications should read, and nothing
+else:
+
+```sql
+CREATE USER 'report_ro'@'%' IDENTIFIED BY <choose a password>;
+GRANT SELECT ON shop.* TO 'report_ro'@'%';
+```
+
+The account DBTrail captures with is never used by the router: it reads
+whatever capture needs, which with `SELECT ON *.*` includes the `mysql`
+schema and the password hashes of every account. So a server with no
+forwarding account is refused, with an error that names what is missing,
+until it has one. If you do not want the password to reach the source at
+all, `docker compose stop router`.
 
 **It is read-only in this stack.** A statement that is not a read is refused
 with an error and never reaches the source. The password that opens the
 router is one that, until the router existed, could only read; it does not
 become a way to write to your databases because a service was added.
 `ROUTER_READ_ONLY=0` in `.env` makes it forward writes too, with each
-server's forwarding account when it has one and its source account otherwise.
-Give each server a forwarding account with the grants you mean before setting
-it (the web interface, on the server's page).
+server's forwarding account. Give that account the grants you mean before
+setting it.
 
 ```bash
 mysql -h 127.0.0.1 -P 3310 -u <server id or name> -p

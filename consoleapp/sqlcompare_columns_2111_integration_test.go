@@ -198,14 +198,14 @@ func TestIntegrationSQLCompareColumnOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ent, err := reg.Add(console.ServerEntry{Name: "srva", DSN: indexDSN, SourceDSN: sourceDSN, BaselineDir: baseDir})
+	ent, err := reg.Add(console.ServerEntry{Name: "srva", DSN: indexDSN, SourceDSN: sourceDSN, RouteDSN: routeAccountDSN(t, sourceDSN), BaselineDir: baseDir})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// A second server over the same copy, for the comparison only (see
 	// compareInHalves). The routed half below, and the reasons it counts,
 	// stay on the first.
-	entB, err := reg.Add(console.ServerEntry{Name: "srvb", DSN: indexDSN, SourceDSN: sourceDSN, BaselineDir: baseDir})
+	entB, err := reg.Add(console.ServerEntry{Name: "srvb", DSN: indexDSN, SourceDSN: sourceDSN, RouteDSN: routeAccountDSN(t, sourceDSN), BaselineDir: baseDir})
 	if err != nil {
 		t.Fatal(err)
 	}

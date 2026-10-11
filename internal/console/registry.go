@@ -73,7 +73,8 @@ type ServerEntry struct {
 	// RouteDSN is the forwarding account (#2079): the DSN read routing on
 	// the MySQL-protocol port connects to the source with, instead of
 	// SourceDSN, so forwarded statements do not run as the capture account.
-	// Empty = forward with SourceDSN. A secret exactly like SourceDSN, never
+	// Empty = the port does not forward for this server: it never uses
+	// SourceDSN (#2317). A secret exactly like SourceDSN, never
 	// serialized to any HTTP response. Meaningless without a SourceDSN.
 	// Additive at registryVersion 1: on binaries that predate it, it
 	// round-trips untouched through Extra.

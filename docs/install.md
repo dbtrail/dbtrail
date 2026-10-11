@@ -324,8 +324,10 @@ journalctl -u bintrail-router -f
   the settings file, or else the password the web interface creates when the
   MySQL port is turned on there. Until then it waits.
 - That password reads **the source itself, live**, with each server's
-  forwarding account when it has one and its source account otherwise: every
-  table that account may read, captured or not.
+  forwarding account: a MySQL user of its own, set on the server's page in
+  the web interface, with `SELECT` on what applications should read. The
+  account DBTrail captures with is never used, so a server with no
+  forwarding account is refused with an error that names what is missing.
 - It is **read-only** unless the settings file says
   `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0`: a statement that is not a read is
   refused and never reaches the source.

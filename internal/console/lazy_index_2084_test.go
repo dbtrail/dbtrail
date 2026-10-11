@@ -20,7 +20,7 @@ func lazyIndexServer(t *testing.T, lazy bool) *Server {
 		t.Fatal(err)
 	}
 	if _, err := reg.Add(ServerEntry{Name: "prod", DSN: "u:secretpw@tcp(127.0.0.1:1)/idx?timeout=2s",
-		SourceDSN: "repl:pw@tcp(db.prod:3306)/app", BaselineDir: t.TempDir()}); err != nil {
+		SourceDSN: "repl:pw@tcp(db.prod:3306)/app", RouteDSN: "fwd:pw@tcp(db.prod:3306)/app", BaselineDir: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
 	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, LazyIndex: lazy})
@@ -48,7 +48,7 @@ func TestLazyIndex_theServerIsSelectedAndOnlyIndexReadsFail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("with the index away: %v", err)
 	}
-	if tgt.ForwardDSN != "repl:pw@tcp(db.prod:3306)/app" || tgt.DefaultSchema != "app" || tgt.BaselineDir == "" || tgt.SQL == nil || tgt.IndexDBName != "idx" || tgt.IndexDB == nil {
+	if tgt.ForwardDSN != "fwd:pw@tcp(db.prod:3306)/app" || tgt.ForwardRefused != "" || tgt.DefaultSchema != "app" || tgt.BaselineDir == "" || tgt.SQL == nil || tgt.IndexDBName != "idx" || tgt.IndexDB == nil {
 		t.Errorf("the target: forward %q, schema %q, baseline %q, sql %v, index %q", tgt.ForwardDSN, tgt.DefaultSchema, tgt.BaselineDir, tgt.SQL != nil, tgt.IndexDBName)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

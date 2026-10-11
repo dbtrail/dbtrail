@@ -362,11 +362,13 @@ What to know before relying on it:
 
 ### Read routing: MySQL answers, the copy takes the heavy reads (experimental)
 With `--route-max-copy-age` set (for example `--route-max-copy-age 15m`), a
-connection on this port to a server that has a source DSN forwards every
-statement to that MySQL over one upstream connection per client connection,
-with the server's forwarding account when it has one and the source DSN's
-credentials otherwise, and MySQL's own answer comes back, errors
-included; resultsets are streamed to the client as they arrive, never held
+connection on this port to a server that has a source DSN and a
+[forwarding account](#the-forwarding-account) forwards every statement to
+that MySQL over one upstream connection per client connection, with that
+forwarding account, and MySQL's own answer comes back, errors included. A
+server with no forwarding account is not forwarded for: the account the
+daemon captures with is never used by this port, so the copy answers alone
+and the web interface says why. Resultsets are streamed to the client as they arrive, never held
 in the daemon. The one exception is a `SELECT` whose plan says it is
 expensive: it runs on the copy, and if the copy rejects it (DuckDB does not
 know the syntax, the table is not in the copy, the result exceeds the
@@ -915,12 +917,12 @@ What this is and is not:
   moment no longer ago than the same limit (next section). A `SELECT` that
   must see the last second belongs in a transaction, which MySQL always
   answers.
-- **The copy's grants are nobody's; the forwarded ones are the registry's.**
-  Forwarded statements run with the server's forwarding account, or with
-  the source DSN's account when the server has none. Give this port to
-  people who may do on MySQL whatever that account can. To bound it, give
-  the server a forwarding account with only the grants the port should have
-  and start the port with `--route-read-only` (both below).
+- **The copy's grants are nobody's; the forwarded ones are the forwarding
+  account's.** Forwarded statements run with the server's forwarding
+  account, never with the account the daemon captures with. Give this port
+  to people who may do on MySQL whatever the forwarding account is granted.
+  To bound it, give that account only the grants the port should have and
+  start the port with `--route-read-only` (both below).
 - **One thing is translated: backtick-quoted names.** DuckDB does not read
   MySQL's backtick-quoted names, and most ORMs and drivers quote every name
   that way. So a routed statement reaches the copy with each
@@ -1495,22 +1497,27 @@ What this is and is not:
   its numbers. The limits of the section above are the copy's; MySQL's are
   MySQL's.
 - **The port accepts writes under routing.** `INSERT`, `UPDATE`, `DELETE`,
-  DDL, `GRANT`: everything that is not a `SELECT` reaches the source. On a
-  server with no forwarding account that is the registry's source account,
-  the one the daemon captures with: anyone holding the access token can
-  then do on the source what that account can, including killing the
-  capture's own connection or changing its password. Each forwarded write
-  is logged at info level with its leading keyword (never the statement).
-  Two settings close this, and they are meant to be used together: a
-  forwarding account, so the port has its own grants, and
-  `--route-read-only`, so a write is refused before it is sent (the next
-  two points).
-- **A forwarding account gives the port its own grants.** Each server can
-  carry an optional second account on its source, used only by this port.
-  With one set, everything the port does on that server's MySQL (forwarded
-  statements, the `EXPLAIN` the decision reads, prepared statements, `USE`)
-  runs as that account, and the capture account is never opened by the
-  port. Its grants are then the most the port can do there:
+  DDL, `GRANT`: everything that is not a `SELECT` reaches the source, as
+  the server's forwarding account: anyone holding the access token can do
+  on the source what that account is granted. Each forwarded write is
+  logged at info level with its leading keyword (never the statement). Two
+  settings bound this, and they are meant to be used together: the grants
+  of the forwarding account, and `--route-read-only`, so a write is
+  refused before it is sent (the next two points).
+- <a id="the-forwarding-account"></a>**The forwarding account is the only
+  account the port uses, and a server needs one to be routed.** It is a
+  second account on the server's source, used only by this port.
+  Everything the port does on that server's MySQL (forwarded statements,
+  the `EXPLAIN` the decision reads, prepared statements, `USE`) runs as
+  that account. The account the daemon captures with is never opened by
+  the port: it reads whatever capture needs, which with `SELECT ON *.*`
+  includes the `mysql` schema and the password hashes of every account,
+  and a credential handed out to read history must not reach that. So a
+  server with no forwarding account is not forwarded for: on this port the
+  copy answers alone, on the [router](#the-router-the-same-port-as-a-service-of-its-own-experimental)
+  its statements are refused, and both say what is missing. A forwarding
+  account saved as the capture account itself, or one that cannot be read,
+  counts as none. Its grants are the most the port can do there:
 
   ```sql
   CREATE USER 'report_ro'@'%' IDENTIFIED BY <choose a password>;
@@ -1543,9 +1550,8 @@ What this is and is not:
 
   **Saving, changing or removing the forwarding account closes that
   server's open connections on the port**, and so does any other edit
-  that changes the address or account the port forwards with (the
-  source's own, on a server with no forwarding account), or deleting the
-  server. Clients see a lost connection at once, reconnect, and get the
+  that changes the address or account the port forwards with, or
+  deleting the server. Clients see a lost connection at once, reconnect, and get the
   account in force. An edit that changes neither closes nothing.
 
   A statement that was running on the source when its connection was
@@ -1939,8 +1945,8 @@ MySQL's.
   `copy_too_old`, `copy_age_unknown` or `session_differs` climbing while
   `expensive_plan` and `tables_unchanged` stay flat; `explain_failed` climbing means MySQL refuses to `EXPLAIN` what the
   client runs (a table it cannot see, a statement it cannot plan);
-  `upstream_lost` climbing means the source is unreachable or the registry's
-  source credentials are wrong. Each routed statement counts exactly once,
+  `upstream_lost` climbing means the source is unreachable or the forwarding
+  account's credentials are wrong. Each routed statement counts exactly once,
   a `USE` sent as a statement included. Not counted, because they are no
   routing decision: the schema seeded when the connection opens and the
   mysql client's `\u` (sent as `COM_INIT_DB`, not as a statement), `SHOW
@@ -2052,7 +2058,7 @@ Three rules differ from the port inside `watch`:
 |---|---|---|
 | How old the copy may be | `--route-max-copy-age` | No maximum. An expensive read goes to the copy whatever the age of its snapshot. |
 | Every worker busy | The statement is forwarded to MySQL | The statement waits up to 30 seconds (16 at most wait at once), then the client gets error 1040, "too many connections", which drivers and pools retry |
-| A server that cannot route (no source to forward to, an account whose address cannot be used) | Its connections are answered from the copy only | Its statements are refused with error 1105 and the reason |
+| A server that cannot route (no forwarding account, no source to forward to, an account whose address cannot be used) | Its connections are answered from the copy only | Its statements are refused with error 1105 and the reason |
 
 The first is the trade a read/write split through a proxy already makes: on
 one connection a cheap statement is answered by MySQL as it is now, and an

@@ -201,14 +201,14 @@ func newRoutedSessionRig(t *testing.T, baseDSN string) *routedSessionRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ent, err := reg.Add(console.ServerEntry{Name: "srva", DSN: indexDSN, SourceDSN: baseDSN + "/" + rig.srcName, BaselineDir: baseDir})
+	ent, err := reg.Add(console.ServerEntry{Name: "srva", DSN: indexDSN, SourceDSN: baseDSN + "/" + rig.srcName, RouteDSN: routeAccountDSN(t, baseDSN+"/"+rig.srcName), BaselineDir: baseDir})
 	if err != nil {
 		t.Fatal(err)
 	}
 	rig.entID = ent.ID
 	// The same index and copy behind a source nobody answers at: a
 	// connection the source never lets in.
-	dead, err := reg.Add(console.ServerEntry{Name: "srvdead", DSN: indexDSN, SourceDSN: "root:testroot@tcp(127.0.0.1:1)/" + rig.srcName, BaselineDir: baseDir})
+	dead, err := reg.Add(console.ServerEntry{Name: "srvdead", DSN: indexDSN, SourceDSN: "root:testroot@tcp(127.0.0.1:1)/" + rig.srcName, RouteDSN: otherAccountDSN(t, "root:testroot@tcp(127.0.0.1:1)/"+rig.srcName), BaselineDir: baseDir})
 	if err != nil {
 		t.Fatal(err)
 	}

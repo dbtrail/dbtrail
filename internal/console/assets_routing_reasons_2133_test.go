@@ -30,7 +30,7 @@ const flat = (n, out = []) => { if (n == null) return out; if (typeof n === "str
 const block = vm.runInContext("routingBlock", ctx);
 const routing = { enabled: true, max_copy_age: "10m0s", cost_threshold: 10000, scan_rows: 100000, since: "2026-10-04T12:00:00Z",
   servers: { s1: { copy: 3, mysql: 4, reasons: { expensive_plan: 3, copy_columns_differ: 4 } } } };
-console.log(flat(block({ enabled: true, listen: "127.0.0.1:3308", port: "3308", routing }, { id: "s1", name: "shop", has_source: true, source_user: "repl" })).join(" ").replace(/\s+/g, " "));
+console.log(flat(block({ enabled: true, listen: "127.0.0.1:3308", port: "3308", routing }, { id: "s1", name: "shop", has_source: true, has_route: true, route_user: "report_ro", source_user: "repl" })).join(" ").replace(/\s+/g, " "));
 `
 	path := filepath.Join(t.TempDir(), "reasons.js")
 	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {

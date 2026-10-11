@@ -517,13 +517,14 @@ services:
   #     the port is turned off there.
   # Until then it waits and uses next to nothing.
   #
-  # WHAT THAT PASSWORD READS HERE: the source itself, live. On 3309 the same
-  # password reads the history and the copy of the captured tables. Here a
-  # statement is forwarded to the server's source MySQL with that server's
-  # forwarding account when it has one, else with its source account, so the
-  # password reads every table THAT ACCOUNT may read, captured or not. Give
-  # each server a forwarding account limited to what applications should read
-  # (the web interface, on the server's page), or stop this service.
+  # WHAT THAT PASSWORD READS HERE: the source itself, live, and only as far
+  # as you allow. On 3309 the same password reads the history and the copy of
+  # the captured tables. Here a statement is forwarded to the server's source
+  # MySQL with that server's FORWARDING ACCOUNT: a MySQL user of its own that
+  # you create with SELECT on what applications should read, and set on the
+  # server's page in the web interface. The account DBTrail captures with is
+  # never used here, so a server with no forwarding account is refused, with
+  # an error that says so, until it has one.
   #
   #   mysql -h 127.0.0.1 -P 3310 -u <server id or name> -p
   #   mysql> SHOW ROUTER STATUS;     -- the copy's age, who answered, the pool
@@ -573,9 +574,8 @@ services:
       # stack, and its password is one that until now could only read (the
       # MySQL port's password, or CONSOLE_TOKEN); it must not become a way to
       # write to your databases without anyone deciding so. ROUTER_READ_ONLY=0
-      # in .env forwards writes too, with each server's forwarding account
-      # when it has one, else with its source account: give each server a
-      # forwarding account with the grants you mean before you set it.
+      # in .env forwards writes too, with each server's forwarding account:
+      # give that account the grants you mean before you set it.
       BINTRAIL_CONSOLE_ROUTE_READ_ONLY: ${ROUTER_READ_ONLY:-1}
       # Prometheus metrics of the router, inside the compose network
       # (router:9091). Not published on the host: add a `ports:` line to
