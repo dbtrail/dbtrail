@@ -486,6 +486,10 @@ type Server struct {
 	mayCreateFolders bool
 	// version is the running build's version string (Config.Version).
 	version string
+	// startedAt is processStart, copied here so a test can move it. The
+	// Overview's "Running for" tile reads it through /api/capabilities
+	// (#2330); nothing else does.
+	startedAt time.Time
 	// sqlRunner runs one read-only SQL statement on a server's Parquet copy
 	// in a separate child process (#1952). ONE per console process: its
 	// global in-flight cap applies across servers, because every worker
@@ -614,6 +618,12 @@ func (s *Server) archiveFetch() query.ArchiveFetcher {
 	}
 	return parquetquery.Fetch
 }
+
+// processStart is when this process loaded the console package, which is
+// its start to within the time Go takes to initialise packages. Read here
+// and not when the Server is built: `watch` builds its Server after its
+// startup work, and an uptime counted from there would leave that work out.
+var processStart = time.Now()
 
 // New validates the config, seeds the boot connection bundle, and assembles
 // the middleware/route tree. It does no network I/O — call Run to listen.
@@ -763,6 +773,7 @@ func New(cfg Config) (*Server, error) {
 		localPruneLoop:          cfg.LocalPruneLoop,
 		mayCreateFolders:        cfg.MayCreateFolders,
 		version:                 cfg.Version,
+		startedAt:               processStart,
 		cm:                      newConnManager(cfg.Registry, profileActive),
 		authPath:                authPath,
 		passwordCfg:             passwordCfg,

@@ -1626,6 +1626,11 @@ function ovFrame() {
   // by fillOvFlow once the four reads behind it land, and again on the slow
   // refresh cycle. Not painted on a console that lists no server yet: the
   // add-server card above is that page's whole first screen.
+  // Above the drawing, the three facts it does not carry (#2330): version,
+  // uptime and the index disk. Empty until its two reads land, and left
+  // empty on a console that lists no server, like the drawing.
+  f.stripSlot = el("div");
+  v.append(f.stripSlot);
   f.flowSlot = el("div");
   f.flowSlot.append(el("section", { class: "flow flow-pending" }, ovSkelLines(2), el("div", { class: "skel-note", text: "reading the path from your database to its copy…" })));
   v.append(f.flowSlot);
@@ -2609,6 +2614,146 @@ function loadOvFlow(f, live, coverageP) {
   });
 }
 
+// ── The three facts the drawing does not carry (#2330) ──────────────────────
+//
+// The drawing above answers capture, the copy and how old the copy's data
+// is. It says nothing about the program itself or the disk under the index:
+// which version is running, how long this process has been up, and how much
+// room the index has. Those are these three tiles, and only those: a tile
+// repeating what an arrow says would be a second voice for one state.
+//
+// ovStripModel is pure, like ovFlowModel: the two payloads in, three tiles
+// out. inp is { caps, capsUnknown, capacity, capacityErr, now }. Tones are
+// the drawing's: ok, warn, bad, none. Only the disk tile is ever coloured,
+// and only by the doctor's own verdict over a disk that was measured.
+
+// ovSinceText: how long ago `stamp` was, as plainDuration says it, or "" for
+// a stamp that does not parse. Never negative: a daemon whose clock runs
+// ahead of the browser's reads as just started, not as minus four minutes.
+function ovSinceText(stamp, nowMs) {
+  if (!stamp) return "";
+  const t = flowParseStamp(stamp);
+  if (!isFinite(t)) return "";
+  return plainDuration(Math.max(0, (nowMs - t) / 1000));
+}
+
+function ovStripModel(inp) {
+  const caps = inp.caps || {};
+  const now = typeof inp.now === "number" ? inp.now : Date.now();
+  const tile = (key, tone, value, sub, extra) => Object.assign({ key, tone, value, sub: sub || "" }, extra || {});
+  const unread = "could not be read";
+
+  let version, running;
+  if (inp.capsUnknown) {
+    version = tile("Version", "none", "—", unread);
+    running = tile("Running for", "none", "—", unread);
+  } else {
+    const ver = String(caps.version || "").replace(/^v/, "");
+    version = !ver || ver === "dev" ? tile("Version", "none", "dev", "not a released build")
+      : tile("Version", "none", ver, "this DBTrail");
+    const up = ovSinceText(caps.started_at, now);
+    running = up ? tile("Running for", "none", up, "since " + utcLabel(caps.started_at), { since: caps.started_at })
+      : tile("Running for", "none", "—", "not reported");
+  }
+
+  let disk;
+  const cap = inp.capacity;
+  const err = inp.capacityErr;
+  if (err && err.status === 403) {
+    // Not this session's to read: no link either, the page behind it is the
+    // same read.
+    disk = tile("Index disk", "none", "—", "not available to this session");
+  } else if (err || !cap || !cap.status) {
+    disk = tile("Index disk", "none", "—", unread, { link: "status" });
+  } else if (cap.reason === "not_initialized") {
+    disk = tile("Index disk", "none", "—", "no index yet", { link: "status" });
+  } else {
+    const graded = cap.status === "pass" ? "ok" : cap.status === "warn" ? "warn" : cap.status === "fail" ? "bad" : "none";
+    const parts = [];
+    // The verdict in words beside the colour, for every grade that is not
+    // plain "ok": a red border alone says something is wrong, not what.
+    const word = capacityStateText(cap);
+    if (cap.reason !== "ok" && cap.reason !== "free_unknown" && cap.reason !== "not_enough_history" && word) parts.push(word);
+    parts.push("index " + humanBytes(cap.current_bytes));
+    parts.push(cap.measured ? "grows " + humanBytes(cap.growth_bytes_per_day) + " a day" : "measuring the write rate");
+    // A disk nobody measured is never green, whatever the grade says.
+    disk = cap.free_known
+      ? tile("Index disk", graded, humanBytes(cap.free_bytes) + " free", parts.join(" · "), { link: "status" })
+      : tile("Index disk", graded === "ok" ? "none" : graded, "free space not measured", parts.join(" · "), { link: "status", words: true });
+  }
+  return { tiles: [version, running, disk] };
+}
+
+// ovStripSection paints the three tiles. The tone is the tile's top border
+// (and its class, which the tests read); the words under the value say the
+// same thing, so the row never depends on colour alone.
+function ovStripSection(model) {
+  const row = el("div", { class: "ov-strip" });
+  for (const t of model.tiles) {
+    const kids = [
+      el("div", { class: "ov-tile-k", text: t.key }),
+      el("div", { class: "ov-tile-v" + (t.words ? " words" : ""), text: t.value,
+        "data-since": t.since || null, title: t.since ? utcLocalTitle(t.since) || null : null }),
+      el("div", { class: "ov-tile-sub", text: t.sub }),
+    ];
+    const cls = "ov-tile tone-" + t.tone;
+    row.append(t.link
+      ? el("a", { class: cls + " ov-tile-link", href: "/" + t.link, onclick: (e) => { e.preventDefault(); navigate(t.link); } }, ...kids)
+      : el("div", { class: cls }, ...kids));
+  }
+  return row;
+}
+
+// ovStripSeq: the newest loadOvStrip issued, so a slow read landing after a
+// newer one painted does not paint over it.
+let ovStripSeq = 0;
+
+// loadOvStrip reads what the tiles need and paints them. Both reads are made
+// again on every call (the first paint and the slow refresh), the
+// capabilities one included: the page's own copy of it is from when the page
+// loaded, and a daemon restarted since would go on reading as running for
+// days. A read that fails is painted as a failure, over whatever was there:
+// a disk figure left on screen in green after its read failed would be the
+// one thing this row must not say. The loop that calls this cannot always
+// reach the daemon to make the reads at all; ovStripUnread covers that.
+function loadOvStrip(f, live) {
+  if (!f.stripSlot) return Promise.resolve();
+  if (serversEmpty) { clear(f.stripSlot); return Promise.resolve(); }
+  const seq = ++ovStripSeq;
+  const caps = apiWithin("/api/capabilities", OV_REQUEST_MS).then((d) => ({ caps: d || {}, capsUnknown: !d }),
+    (err) => { console.error("strip: capabilities unavailable", err); return { caps: {}, capsUnknown: true }; });
+  const capacity = apiWithin("/api/capacity", OV_REQUEST_MS).then((d) => ({ capacity: d || null }),
+    (err) => { console.error("strip: capacity unavailable", err); return { capacity: null, capacityErr: { status: (err && err.status) || 0, message: (err && err.message) || String(err) } }; });
+  return Promise.all([caps, capacity]).then(([a, b]) => {
+    if (!live() || seq !== ovStripSeq) return;
+    clear(f.stripSlot);
+    f.stripSlot.append(ovStripSection(ovStripModel(Object.assign({ now: Date.now() }, a, b))));
+  });
+}
+
+// ovStripUnread paints the three tiles as not read. The page's loop calls it
+// the moment a turn of its own fails: the strip's reads ride on that loop,
+// so while the loop cannot reach the daemon nothing would repaint the tiles,
+// and "Running for" would go on counting up for a process that may be gone
+// beside a disk figure still edged in green. Unlike an age, which stays true
+// as it grows, an uptime that grows for a stopped process is false.
+function ovStripUnread(f) {
+  if (!f.stripSlot || serversEmpty) return;
+  ovStripSeq++; // a read still on its way must not paint over this
+  clear(f.stripSlot);
+  f.stripSlot.append(ovStripSection(ovStripModel({ capsUnknown: true, capacityErr: { status: 0 } })));
+}
+
+// ovTickStrip keeps "Running for" moving between reads, off its own stamp.
+function ovTickStrip(root) {
+  if (!root || typeof root.querySelectorAll !== "function") return;
+  const now = Date.now();
+  for (const n of root.querySelectorAll(".ov-tile-v[data-since]")) {
+    const text = ovSinceText(n.getAttribute("data-since"), now);
+    if (text && n.textContent !== text) n.textContent = text;
+  }
+}
+
 // ovFlowLast is what the drawing on screen was painted from, so that a
 // coverage read that changes after the paint (the card's own refresh, the
 // source's answer about capture, #1794) repaints it without reading
@@ -3395,6 +3540,7 @@ function renderOverview() {
   const coverageP = api("/api/coverage").catch((err) => { console.error("coverage fetch failed", err); return { continuity: "unavailable" }; });
   coverageP.then((coverage) => { if (live()) fillOvCoverage(f, coverage); });
   loadOvFlow(f, live, coverageP).catch((err) => console.error("flow paint failed", err));
+  loadOvStrip(f, live).catch((err) => console.error("strip paint failed", err));
   loadOvUncaptured(f, live);
   // null on failure, never {} — the fill renders "—" for a missing aggregate.
   // A zero-filled fallback would print "0 deletes", an assurance nobody
@@ -3669,7 +3815,7 @@ function watchOverview(f, live, firstRun) {
   // drawn at least once, from data or with the reason it could not be read.
   let head = null, drawn = false, armed = 0, busy = false, stopped = false, failures = 0;
   let delay = OV_TICK_MS, slowAt = Date.now() + OV_SLOW_MS, idleSlowAt = Date.now() + OV_IDLE_SLOW_MS;
-  let okAt = nowClock(), sideOkAt = nowClock();
+  let okAt = nowClock(), sideOkAt = nowClock(), stripUnread = false;
   const on = () => !stopped && ovLive === me && live();
   const arm = (ms) => { const t = ++armed; setTimeout(() => { if (t === armed) tick(); }, ms); };
   const note = (msg) => {
@@ -3689,6 +3835,9 @@ function watchOverview(f, live, firstRun) {
   const failed = (err) => {
     const msg = (err && err.message) || String(err);
     if (err && err.status === 401) { stopped = true; return; } // the sign-in gate is up
+    // The tiles above the drawing are read on this loop's turns; a turn that
+    // failed leaves them unvouched for, so they say so until one succeeds.
+    if (!stripUnread) { stripUnread = true; ovStripUnread(f); }
     if (err && (err.status === 403 || err.status === 404)) {
       stopped = true;
       note("The Overview stopped updating: " + msg + ". Reload the page to try again.");
@@ -3737,6 +3886,9 @@ function watchOverview(f, live, firstRun) {
         head = next;
       }
       failures = 0; delay = OV_TICK_MS; okAt = nowClock();
+      // The first good turn after a failed one reads the tiles again, whatever
+      // the slow refresh's clock says: the failure may have been a restart.
+      if (stripUnread) { stripUnread = false; loadOvStrip(f, on).catch((err) => console.error("strip refresh failed", err)); }
       note("");
       // The paint read everything else a moment ago.
       if (prev === null) return;
@@ -3772,6 +3924,7 @@ function watchOverview(f, live, firstRun) {
         // The flow's reads go out beside the coverage read; a failed one
         // leaves the flow as it was (null paints nothing).
         loadOvFlow(f, on, coverageP.then((c) => c, () => null)).catch((err) => console.error("flow refresh failed", err));
+        loadOvStrip(f, on).catch((err) => console.error("strip refresh failed", err));
       }
     } finally {
       busy = false;
@@ -3783,6 +3936,7 @@ function watchOverview(f, live, firstRun) {
     if (!on()) return;
     if (document.hidden) { arm(OV_HIDDEN_MS); return; }
     ovTickAges(f.flowSlot);
+    ovTickStrip(f.stripSlot);
     pull();
   };
   me.wake = () => {

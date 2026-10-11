@@ -40,6 +40,8 @@ const loadOvUncaptured = () => {};
 // The flow's loader is called at render since #1847 (its reads start beside
 // the coverage read, no longer after its answer); this harness paints no flow.
 const loadOvFlow = () => Promise.resolve();
+// The three tiles above the flow load beside it since #2330; none here.
+const loadOvStrip = () => Promise.resolve();
 const watchOverview = () => calls.push("live");
 const overviewOnScreen = () => true;
 const sessionMay = () => true;

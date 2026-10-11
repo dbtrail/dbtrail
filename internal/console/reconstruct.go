@@ -160,6 +160,10 @@ type capabilitiesResponse struct {
 	// on unversioned builds). Presentation-only: the Connect AI client card
 	// derives the release-asset download link for the RUNNING version from it.
 	Version string `json:"version,omitempty"`
+	// StartedAt is when this process started, RFC 3339 UTC (#2330).
+	// Presentation-only, like Version: the Overview's "Running for" tile. The
+	// page reads it again on its slow refresh, so a restart shows as one.
+	StartedAt string `json:"started_at,omitempty"`
 	// Source names the selected server's source database family — "postgresql"
 	// or "mysql" — derived per-server from stream_state.flavor (the same field
 	// DialectForIndex reads). It drives source-aware PRESENTATION only: the
@@ -227,8 +231,9 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		// The MCP endpoint accepts the static token or the UI-managed one
 		// (mcp.go refuses with 403 when neither is configured), so token
 		// presence IS the capability.
-		MCP:     s.token != "" || s.managedTok.configured(),
-		Version: s.version,
+		MCP:       s.token != "" || s.managedTok.configured(),
+		Version:   s.version,
+		StartedAt: startedAtWire(s.startedAt),
 		// Default until the bundle resolves: a degraded console renders MySQL
 		// vocabulary (the common case), never a blank source.
 		Source: sourceMySQL,
@@ -780,3 +785,13 @@ func appendCaptureGapWarning(warnings []string, g *reconstruct.CaptureGap) []str
 
 // isTrue reports whether a query-param flag is set to a truthy value.
 func isTrue(v string) bool { return v == "true" || v == "1" }
+
+// startedAtWire is the capabilities document's started_at: RFC 3339 UTC to
+// the second, or empty for a Server built without New (a zero time would
+// otherwise travel as year 1 and read as running for two thousand years).
+func startedAtWire(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
