@@ -446,13 +446,30 @@ func preflightRotationSettings() rotation.Settings {
 // a bounded projection over an index that only grows.
 func checksRotationSettings(reg *console.Registry) func() rotation.Settings {
 	provider := rotationSettingsProvider(reg)
-	loopRuns := provider().Enabled
+	loopRuns := rotationLoopRuns(reg)
 	return func() rotation.Settings {
 		if !loopRuns {
 			return rotation.Settings{}
 		}
 		return provider()
 	}
+}
+
+// rotationLoopRuns says whether this daemon runs a rotation loop, the way
+// rotation.StartLoop decides it: ONCE, from the settings in force at start —
+// the policy saved in the web interface when there is a valid one, else the
+// --rotate-* flags. So a daemon started with --rotate-retain off DOES rotate
+// when a retention was already saved (what the web interface promises: "take
+// effect only after DBTrail restarts"), and every surface that says whether
+// rotation is on must read this, not the flag alone: the web interface used
+// to say "rotation is turned off" over a loop that was dropping partitions
+// (#2334). Called at startup, like StartLoop; a retention saved later does
+// not start a loop.
+func rotationLoopRuns(reg *console.Registry) bool {
+	if reg == nil {
+		return upRotationCfg.Enabled
+	}
+	return rotationSettingsProvider(reg)().Enabled
 }
 
 // upPreflightOutcome maps the preflight report to the daemon's boot decision:
@@ -1951,7 +1968,9 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 			Retain:    upRotateRetain,
 			Interval:  upRotateInterval,
 			AddFuture: upRotateAddFuture,
-			Enabled:   upRotationCfg.Enabled,
+			// Whether a loop RUNS, as StartLoop decides it: from the saved
+			// policy when there is a valid one, else from the flags (#2334).
+			Enabled: rotationLoopRuns(reg),
 			// The same bit the loop decides on (#2315): an explicit window
 			// is what every index rotates on, so the capacity projection
 			// and the rotation panel must report it, not the index record.

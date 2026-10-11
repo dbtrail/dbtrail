@@ -342,9 +342,13 @@ type RotationDefaults struct {
 	Retain    string
 	Interval  string
 	AddFuture int
-	// Enabled is false when the daemon was started with rotation off
-	// (--rotate-retain off). The loop is not running then, so a console-saved
-	// override would need a restart — the panel warns in that state.
+	// Enabled is whether the daemon runs a rotation loop, as
+	// rotation.StartLoop decided it at startup: from the policy saved in the
+	// web interface when there was a valid one, else from --rotate-retain. It
+	// is NOT "the flag was not off": a daemon started with --rotate-retain off
+	// over an already saved policy runs the loop on that policy (#2334).
+	// False means no loop, so a policy saved now needs a restart — the panel
+	// warns in that state.
 	Enabled bool
 	// Explicit is rotation.Settings.Explicit: the operator set Retain
 	// themselves (flag or env), so the loop drops EVERY index on it and never

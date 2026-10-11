@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Fixed
+- **The web interface said rotation was turned off while the loop was
+  dropping partitions** (#2334). A daemon started with `--rotate-retain off`
+  runs no rotation loop, and a policy saved in the web interface then takes
+  effect after a restart, as the panel says. After that restart the loop does
+  run on the saved policy, but the web interface read "is rotation on" from
+  the flag alone: the Rotation card kept saying rotation was turned off, and
+  the Index disk card graded the index as growing without limit. Both now
+  read what the loop decided at startup, so they show the saved retention as
+  live and project over it. Nothing changes in what is dropped. A policy
+  saved while no loop runs is still reported as waiting for a restart.
 - **The checks a daemon runs on itself graded the index over the retention it
   was started with, whatever the index really rotates on** (#2328). The web
   interface's Checks report and the `up` / `watch` boot preflights passed the

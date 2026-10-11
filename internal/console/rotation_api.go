@@ -87,10 +87,11 @@ func (s *Server) handleRotationGet(w http.ResponseWriter, r *http.Request) {
 
 // effectiveRotation resolves the policy the daemon is actually running: a
 // console-saved override wins, else the injected daemon defaults. Enabled is
-// taken from the daemon's boot-time liveness (rotationDefaults.Enabled) in BOTH
-// branches — never forced true on override presence: a daemon booted with
-// rotation off runs no loop, so a saved override is dormant until a restart and
-// the panel must keep warning, not claim it is live.
+// whether a loop runs (rotationDefaults.Enabled, decided once at startup) —
+// never forced true on override presence: a daemon that started with no loop
+// leaves a policy saved afterwards dormant until a restart, and the panel
+// must keep warning, not claim it is live. The other way round is #2334: a
+// loop started on a saved policy is running whatever --rotate-retain said.
 //
 // A saved override is reported only if the loop would run it: the same
 // rotation.ParseSettings the watch command's rotationSettingsProvider applies
@@ -103,7 +104,7 @@ func (s *Server) effectiveRotation() rotationDTO {
 	d := s.rotationDefaults
 	if rc, ok := s.cm.reg.Rotation(); ok {
 		if st, err := rotation.ParseSettings(rc.Retain, rc.Interval, rc.AddFuture, true); err != nil || !st.Enabled {
-			return rotationDTO{Retain: d.Retain, Interval: d.Interval, AddFuture: d.AddFuture, Source: "default", Enabled: d.Enabled}
+			return rotationDTO{Retain: d.Retain, Interval: d.Interval, AddFuture: d.AddFuture, Source: "default", Enabled: d.defaultsEnabled()}
 		}
 		return rotationDTO{
 			Retain:    rc.Retain,
@@ -118,8 +119,21 @@ func (s *Server) effectiveRotation() rotationDTO {
 		Interval:  d.Interval,
 		AddFuture: d.AddFuture,
 		Source:    "default",
-		Enabled:   d.Enabled,
+		Enabled:   d.defaultsEnabled(),
 	}
+}
+
+// defaultsEnabled is Enabled for the branch that reports the daemon's own
+// --rotate-* values: a loop runs AND those values rotate. The second half
+// matters only for a loop that started on a saved policy while the flags said
+// off: if that policy is no longer usable, the loop reads the flags and drops
+// nothing, and "retention: off, rotation on" would be the wrong thing to show.
+func (d RotationDefaults) defaultsEnabled() bool {
+	if !d.Enabled {
+		return false
+	}
+	st, err := rotation.ParseSettings(d.Retain, d.Interval, d.AddFuture, false)
+	return err == nil && st.Enabled
 }
 
 // handleRotationUpdate serves PUT /api/rotation: validate and persist a global

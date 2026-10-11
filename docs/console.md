@@ -635,7 +635,12 @@ editing flags or restarting:
   and overrides both.
 - **Disabling** rotation entirely stays a daemon-level decision
   (`--rotate-retain off`); the panel tunes a running loop rather than turning it
-  off. A retain like `off` is rejected at save.
+  off. A retain like `off` is rejected at save. A daemon started with rotation
+  off runs no loop, so a policy saved then takes effect only after a restart
+  (the panel says so). After that restart the loop does run, on the saved
+  policy, even though the daemon is still started with `--rotate-retain off`:
+  the panel and the Index disk card report it as live. To keep rotation off,
+  do not save a policy.
 - The standalone `bintrail-console serve` hides the panel and refuses the write
   (HTTP 403) — only the daemon running the loop consumes the policy.
 
