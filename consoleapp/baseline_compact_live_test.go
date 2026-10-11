@@ -68,9 +68,12 @@ func TestMaybeCompact_aFailedMergeWaitsBeforeItIsTriedAgain(t *testing.T) {
 // The merged pair is a second copy of the pairs it merges. Without room for
 // it the merge does not start.
 func TestCompactJob_checksTheDiskBeforeItMerges(t *testing.T) {
-	sup, req, cs, stage := compactRig(t, compactMinPairs)
+	// Registered before the rig, so it runs after the rig has waited for the
+	// job's goroutine, which goes on reading diskSpaceFn after the status
+	// turned terminal. Seen in CI as a data race.
 	prev := diskSpaceFn
 	t.Cleanup(func() { diskSpaceFn = prev })
+	sup, req, cs, stage := compactRig(t, compactMinPairs)
 	diskSpaceFn = func(string) (uint64, uint64, error) { return 1 << 20, 1 << 40, nil } // 1 MiB free
 	sup.maybeCompact(req)
 	st := waitCompact(t, sup, "s")

@@ -180,11 +180,13 @@ func TestCompactJob_shutdownStopsAndSaysSo(t *testing.T) {
 // a new record. (A 40-entry history at a 5-minute interval would otherwise
 // be all compaction failures within four hours.)
 func TestCompactJob_repeatedFailureIsOneRecord(t *testing.T) {
-	sup, req, cs, _ := compactRig(t, compactMinPairs)
-	// No wait between tries: this is about what two tries record.
+	// No wait between tries: this is about what two tries record. Restored
+	// by a cleanup registered before the rig, so it runs after the rig has
+	// waited for the job's goroutine.
 	prevRetry := compactRetryEvery
-	compactRetryEvery = 0
 	t.Cleanup(func() { compactRetryEvery = prevRetry })
+	sup, req, cs, _ := compactRig(t, compactMinPairs)
+	compactRetryEvery = 0
 	cs.err = errors.New("duckdb: out of memory")
 	run := func() console.BaselineStatus {
 		t.Helper()
