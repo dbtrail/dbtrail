@@ -476,8 +476,8 @@ func TestReuse_closeLeavesNoProcess(t *testing.T) {
 func TestReuse_residentIsReportedWhereKnown(t *testing.T) {
 	got := residentBytes()
 	if _, err := os.Stat("/proc/self/statm"); err == nil {
-		if got < 1<<20 {
-			t.Fatalf("resident = %d on a host with /proc, want this process's memory", got)
+		if got < 1<<20 || got > retireResidentFloor {
+			t.Fatalf("resident = %d on a host with /proc, want this process's own memory, under what replaces a worker", got)
 		}
 		return
 	}
@@ -594,6 +594,11 @@ func TestReuse_theWorkersResidentReachesTheRunner(t *testing.T) {
 	if known := err == nil; known != (got > 1<<20) {
 		t.Fatalf("resident = %d, /proc readable = %v", got, known)
 	}
+	// And after one short statement it is far from what replaces a worker:
+	// a worker that crossed it at once would never answer a second.
+	if got > retireResidentFloor/2 {
+		t.Fatalf("a worker holds %d bytes of its own after SELECT 1, over half the %d that replace it", got, int64(retireResidentFloor))
+	}
 }
 
 // A statement larger than the pipe's buffer reaches a kept worker whole.
@@ -698,5 +703,26 @@ func TestReuse_aWorkerThatDoesNotStartIsNotCounted(t *testing.T) {
 	_, first := mustRun(t, r, f.job("SELECT 1"))
 	if _, second := mustRun(t, r, f.job("SELECT 1")); second != first {
 		t.Fatalf("after a failed start the slot's worker is not kept: %d, then %d", first, second)
+	}
+}
+
+// What a worker holds of its own is its resident set less the file-backed
+// pages; a line that does not read is "not known", never a number.
+func TestReuse_statmPrivate(t *testing.T) {
+	for _, c := range []struct {
+		line string
+		want int64
+	}{
+		{"52000 9000 6000 100 0 30000 0\n", 3000 * 4096},
+		{"52000 9000 9000 100 0 30000 0", 0},
+		{"52000 9000 9500 100 0 30000 0", 0},
+		{"52000 9000", 0},
+		{"52000 nine 6000", 0},
+		{"52000 9000 -1", 0},
+		{"", 0},
+	} {
+		if got := statmPrivate(c.line, 4096); got != c.want {
+			t.Errorf("statmPrivate(%q) = %d, want %d", c.line, got, c.want)
+		}
 	}
 }

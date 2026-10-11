@@ -2,27 +2,18 @@
 
 package sqlsandbox
 
-import (
-	"os"
-	"strconv"
-	"strings"
-)
+import "os"
 
-// residentBytes is the memory this process holds now (not its peak), from
-// /proc/self/statm, whose second field is the resident set in pages. 0 when
-// it cannot be read.
+// residentBytes is the memory this process holds now that is its own: its
+// resident set less the pages backed by files, from /proc/self/statm (fields
+// 2 and 3, in pages). The pages of the binary and of the Parquet files it
+// read are left out because they are not what a statement leaves behind:
+// they are shared with every other worker, and the kernel drops them when it
+// needs the room. Not the peak. 0 when it cannot be read.
 func residentBytes() int64 {
 	b, err := os.ReadFile("/proc/self/statm")
 	if err != nil {
 		return 0
 	}
-	fields := strings.Fields(string(b))
-	if len(fields) < 2 {
-		return 0
-	}
-	pages, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil || pages < 0 {
-		return 0
-	}
-	return pages * int64(os.Getpagesize())
+	return statmPrivate(string(b), int64(os.Getpagesize()))
 }
