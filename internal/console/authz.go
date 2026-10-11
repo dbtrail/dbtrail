@@ -258,6 +258,11 @@ var apiRoutePerms = []routePerm{
 	// counts, times and its settings, shown beside the port's on the same
 	// page, so the same tier. No row data and no account's name.
 	{"GET", "/api/router", ext.PermSettingsRead},
+	// Turning the router's port on or off, or giving it a new password,
+	// opens (or re-keys) a door applications reach every source through:
+	// a settings mutation, and the one response the password is shown in.
+	{"PUT", "/api/router", ext.PermSettingsWrite},
+	{"POST", "/api/router/password", ext.PermSettingsWrite},
 	// Turning the port on, off, or giving it a new password opens (or
 	// re-keys) a network door onto every server's history: a settings
 	// mutation, and the response is the one place the password is shown.

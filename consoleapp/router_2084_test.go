@@ -207,7 +207,7 @@ func newRouterFiles(t *testing.T) routerFiles {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return routerFiles{owner: owner, servers: servers, portFile: filepath.Join(dir, console.FlashbackFileName)}
+	return routerFiles{owner: owner, servers: servers, portFile: console.RouterSwitchPath(servers)}
 }
 
 func (f routerFiles) settings(token string) routerSettings {
@@ -224,7 +224,7 @@ func (f routerFiles) savePortFile(t *testing.T, enabled bool, password string) {
 	if enabled {
 		body = "version: 1\nenabled: true\n"
 	}
-	body += "listen: 127.0.0.1:3309\npassword: " + password + "\n"
+	body += "password: " + password + "\n"
 	tmp := f.portFile + ".tmp"
 	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
 		t.Fatal(err)

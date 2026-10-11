@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,8 +49,8 @@ It runs beside 'bintrail-console watch', not inside it: restarting capture does
 not drop its connections, and a statement that runs out of memory here cannot
 take capture with it. It reads the servers the web interface
 manages and never writes them. Connect with the server's id or name as the
-user, and the access token (or the port password created in the web interface)
-as the password.
+user, and the access token (or the router's password, created in the web
+interface under Settings, MCP Server, The router) as the password.
 
 How many statements run on the copy at once, and with how many threads each,
 is worked out from the cores and the memory this process may use: give the
@@ -80,7 +79,7 @@ func addRouterFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
 	f.String("listen", defaultRouterListen, "Address the MySQL-protocol port listens on (host:port). Env BINTRAIL_ROUTER_LISTEN.")
 	f.String("metrics-addr", "", "Address to expose Prometheus metrics on (e.g. 127.0.0.1:9091); empty = none. The same address answers /status, the router's numbers as JSON, which the web interface reads when it is given this address (BINTRAIL_CONSOLE_ROUTER_URL). Neither asks for a password. Not the capture process's address: each process serves its own. Env BINTRAIL_ROUTER_METRICS_ADDR.")
-	f.String("token", "", "Access token: the password every client of the port uses. With one, only the token opens the port. Without one, the port opens when the MySQL port is turned on in the web interface, with the password created there, and closes when it is turned off. Env BINTRAIL_CONSOLE_TOKEN.")
+	f.String("token", "", "Access token: the password every client of the port uses. With one, only the token opens the port. Without one, the port opens when the router is turned on in the web interface (Settings, MCP Server, The router), with the password created there, and closes when it is turned off there. That switch and password are the router's own: the MySQL port inside the capture process has another. Env BINTRAIL_CONSOLE_TOKEN.")
 	f.String("servers-file", "", "Path to the server registry the web interface manages (default ~/.config/bintrail/console-servers.yaml). Read, never written. Env BINTRAIL_CONSOLE_SERVERS.")
 	f.String("auth-file", "", "Path to the web interface auth file, when it is not the default: only so a statement cannot read it through a copy directory that contains it. Env BINTRAIL_CONSOLE_AUTH.")
 	f.String("mcp-token-file", "", "Path to the managed MCP token file, when it is not the default: for the same reason as --auth-file. Env BINTRAIL_CONSOLE_MCP_TOKEN_FILE.")
@@ -222,8 +221,8 @@ func newRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server,
 		// through a copy directory that contains them.
 		AuthPath:     st.AuthFile,
 		MCPTokenPath: st.MCPTokenFile,
-		// The port's password, created in the web interface: followed only
-		// when the router has no token (routerPortFile). No address is
+		// The router's own password, created in the web interface: followed
+		// only when the router has no token (routerPortFile). No address is
 		// given here: the router binds its own.
 		FlashbackPath:       routerPortFile(st),
 		SQLLimits:           sqlsandbox.Limits{MemoryLimit: st.SQLMemory, Threads: pool.Threads},
@@ -360,16 +359,18 @@ func routerStatusHandler(st routerSettings, numbers func() console.RouterNumbers
 }
 
 // routerPortFile is the saved setting whose password the router accepts, ""
-// when it accepts none from it. With a token, the token decides and the file
-// is not read: that is the capture process's own rule when it is started
-// with an address for its port, and such a process ignores the file without
-// clearing it, so a password left there would open this port while opening
-// nothing where it was made, and nobody could see or replace it.
+// when it accepts none from it: the router's own (console.RouterFileName),
+// which the web interface writes when the router's port is turned on there.
+// Not the setting of the MySQL port inside the capture process: that port's
+// switch and password are its own, and turning it off or replacing its
+// password must not close this one. With a token, the token decides and the
+// file is not read, as in the capture process when its port is given an
+// address at startup: one credential, set in one place.
 func routerPortFile(st routerSettings) string {
 	if st.Token != "" {
 		return ""
 	}
-	return filepath.Join(filepath.Dir(st.ServersFile), console.FlashbackFileName)
+	return console.RouterSwitchPath(st.ServersFile)
 }
 
 // routerIgnoredEnv names the capture process's settings that are in the
@@ -438,7 +439,7 @@ func (p *routerPort) serve(ctx context.Context) error {
 		if len(p.srv.FlashbackPasswords()) == 0 {
 			if !waiting {
 				waiting = true
-				fmt.Fprintf(p.out, "The router is not listening yet: there is no credential that could open its port. Start it with --token (or BINTRAIL_CONSOLE_TOKEN), or turn the MySQL port on in the web interface, which creates a password; it opens %s then, without a restart. (A capture process started with --flashback-listen saves no password there: use the token.)\n", p.addr)
+				fmt.Fprintf(p.out, "The router is not listening yet: there is no credential that could open its port. Start it with --token (or BINTRAIL_CONSOLE_TOKEN), or turn the router on in the web interface (Settings, MCP Server, The router), which creates its password; it opens %s then, without a restart.\n", p.addr)
 			}
 			select {
 			case <-ctx.Done():
@@ -524,9 +525,9 @@ func routerStartupLines(u routerStartup) string {
 		}
 	}
 	if u.PortFile == "" {
-		b.WriteString("Router: the password is the access token (--token). A port password created in the web interface is not accepted here.\n")
+		b.WriteString("Router: the password is the access token (--token). A password created in the web interface is not accepted here.\n")
 	} else {
-		fmt.Fprintf(&b, "Router: no access token was given, so the password is the one the web interface creates when the MySQL port is turned on there (read from %s), and the port is open only while it is on.\n", u.PortFile)
+		fmt.Fprintf(&b, "Router: no access token was given, so the password is the one the web interface creates when the router is turned on there (Settings, MCP Server, The router; read from %s), and the port is open only while it is on. The MySQL port inside the capture process has its own switch and password: turning that one off does not close this one.\n", u.PortFile)
 	}
 	switch {
 	case !u.ServersExists:
