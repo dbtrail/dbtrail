@@ -31,7 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two newest snapshots, take more disk as the chains they copy grow. The
   merged pairs are also written when a compaction ends, not at the refresh
   after it, and by the first refresh after a restart when they are
-  missing. A statement answered from an earlier copy now counts that
+  missing. In the moment between a refresh and its merged pairs, a
+  statement that joins several such tables can meet more changes than SQL
+  on the copy reads at once, and is answered from the copy before (under
+  read routing, by MySQL). A statement answered from an earlier copy now counts that
   copy's merged pairs too, so it is answered from the copy just before the
   newest when that one has them.
 - **Rotation no longer holds up capture while the index table is in use**
