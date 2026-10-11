@@ -2010,6 +2010,84 @@ different order are counted apart and never fail the run: ties in an `ORDER
 BY` resolve differently on each engine, and so does a collation difference
 in the sort key; read those by hand.
 
+### The router: the same port as a service of its own (experimental)
+
+`bintrail-console router` runs the port and its read routing in a process of
+its own, beside `bintrail-console watch` and not inside it. Applications
+connect to it in place of their MySQL server: a statement goes to the server's
+source MySQL, except a `SELECT` whose plan says it is expensive, which runs on
+the copy.
+
+```bash
+BINTRAIL_CONSOLE_TOKEN=... bintrail-console router --listen 127.0.0.1:3310
+mysql -h 127.0.0.1 -P 3310 -u <server id or name> -p
+```
+
+What running it apart changes:
+
+- **Restarting capture does not drop its connections.** The port inside `watch`
+  ends with the process that captures.
+- **More statements run on the copy at once.** Inside `watch` they are kept to
+  two at a time, and one per server, because they share a machine with
+  capture. The router works the number out from the cores and the memory it
+  may use: one worker per two cores or per statement's memory, whichever is
+  fewer, and the cores are divided among the workers. Nothing is set by hand.
+  Give the service its own ceilings (`cpus` and `mem_limit` in Docker,
+  `CPUQuota=` and `MemoryMax=` under systemd) and it uses all of them; with
+  none it takes half of the machine, since capture uses the machine too. The
+  numbers and where they came from are printed when it starts.
+- **A statement that runs out of memory cannot take capture with it.** It is
+  another process, under its own ceiling.
+
+It asks the capture process nothing. It reads the servers file the web
+interface manages (`--servers-file`, the same path `watch` uses) and never
+writes it, and it sees a server added, changed or removed there within a few
+seconds, without a restart. When a server's forwarding account changes, the
+connections that were using the previous one are closed, as on the port
+inside `watch`.
+
+Three rules differ from the port inside `watch`:
+
+| | Inside `watch` | The router |
+|---|---|---|
+| How old the copy may be | `--route-max-copy-age` | No maximum. An expensive read goes to the copy whatever the age of its snapshot. |
+| Every worker busy | The statement is forwarded to MySQL | The statement waits up to 30 seconds (16 at most wait at once), then the client gets error 1040, "too many connections", which drivers and pools retry |
+| A server that cannot route (no source to forward to, an account whose address cannot be used) | Its connections are answered from the copy only | Its statements are refused with error 1105 and the reason |
+
+The first is the trade a read/write split through a proxy already makes: on
+one connection a cheap statement is answered by MySQL as it is now, and an
+expensive one by the copy as it was at its last snapshot. The copy is an
+asynchronous replica; its age is a number to watch, not a rule. If your
+application cannot read a result that old, do not send it through the router.
+
+**The password.** Started with `--token` (or `BINTRAIL_CONSOLE_TOKEN`), the
+token is the password and nothing else opens the port. Started without one,
+the router waits without listening until the MySQL port is turned on in the
+web interface, accepts the password created there, and closes its port, with
+every connection on it, when the port is turned off there. Replacing the
+password there closes the connections that were open too: clients reconnect
+with the new one, and whoever held the old one is out.
+
+**Without the index.** A server's index database can be away (restarting,
+unreachable from the router's host) and the router still serves that server:
+forwarding and the copy's tables do not read the index. Time travel
+(`_flashback`, `_snapshot`, `_diff`) and the `events` view do, and answer
+with an error until it is back.
+
+**What it needs.** The servers file, a copy on local disk for each server it
+should answer expensive reads for (a copy that lives only on S3 is not read
+here), and a network path to each server's source. The other flags are the
+routing thresholds of the port inside `watch`: `--route-cost-threshold`,
+`--route-scan-rows`, `--route-read-only`, `--sql-memory` and
+`--sql-port-max-rows`, under the same environment variables, so one
+environment file serves both. `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE` and
+`BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT` do not apply to it, and it says so at
+startup when they are set.
+
+Forwarding to a replica is not something the router does. To read from
+replicas, put ProxySQL in front of the source and point the server's source
+address at it.
+
 ### The dedicated terminal
 
 **With the Docker Compose stack**, the shim ships as the opt-in `flashback`

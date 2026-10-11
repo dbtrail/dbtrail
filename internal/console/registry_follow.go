@@ -202,26 +202,31 @@ func (s *Server) refreshFlashbackPassword() {
 		password, createdAt = f.Password, f.PasswordCreatedAt
 	}
 	fb.mu.Lock()
-	withdrawn := fb.saved.Password != "" && password == ""
+	// Replaced counts too: a new password is how a person holding the old
+	// one is put out without turning the port off.
+	withdrawn := fb.saved.Password != "" && password != fb.saved.Password
 	fb.saved.Password, fb.saved.PasswordCreatedAt = password, createdAt
 	onWithdrawn := fb.onWithdrawn
 	fb.mu.Unlock()
 	// Outside the lock: closing connections waits on handshakes, which read
 	// the passwords under it.
 	if withdrawn && onWithdrawn != nil {
-		slog.Info("console: the MySQL port's password from the web interface is no longer accepted (the port was turned off there, or its setting removed); connections open on this port are closed")
+		slog.Info("console: the MySQL port's password from the web interface is no longer the one accepted (it was replaced there, the port was turned off, or its setting removed); connections open on this port are closed")
 		onWithdrawn()
 	}
 }
 
-// OnFlashbackPasswordWithdrawn sets what FollowFiles calls when the password
-// from the web interface stops being accepted: the port was turned off
-// there, or its saved setting is gone or unreadable. The daemon's own port
-// closes then, with every connection on it; a process that follows the file
-// keeps its port open for the token, so it is handed this to close the
-// connections it holds, which may have come in with that password. A
-// password that is REPLACED is not a withdrawal, here as in the daemon:
-// connections made with the previous one stay until they end.
+// OnFlashbackPasswordWithdrawn sets what FollowFiles calls when a password
+// from the web interface stops being accepted: it was replaced there, the
+// port was turned off there, or its saved setting is gone or unreadable. The
+// process is handed this to close the connections it holds, which may have
+// come in with that password.
+//
+// Turning the port off closes the daemon's own port with every connection
+// on it, and this is the same. Replacing the password does not close the
+// daemon's connections, and here it does: a process that follows the file
+// has no other way to put out someone who holds the old password while its
+// port stays open, and its clients are applications that reconnect.
 func (s *Server) OnFlashbackPasswordWithdrawn(fn func()) {
 	s.flashback.mu.Lock()
 	s.flashback.onWithdrawn = fn
