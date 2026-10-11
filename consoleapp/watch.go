@@ -685,7 +685,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 
 	// Keep a local mirror of the newest snapshots of every server that has
 	// them only in S3, so SQL on the copy can read them (#2302).
-	startCopyMirrorLoop(ctx, registry)
+	startCopyMirrorLoop(ctx, registry, upConsoleBaselineDir, upConsoleBaselineS3)
 
 	// Keep each server's newest snapshot moving forward from the index alone
 	// (#1171). Opt-in, and refused at startup when nothing can be refreshed.
@@ -1041,7 +1041,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 
 	// Keep a local mirror of the newest snapshots of every server that has
 	// them only in S3, so SQL on the copy can read them (#2302).
-	startCopyMirrorLoop(ctx, registry)
+	startCopyMirrorLoop(ctx, registry, upConsoleBaselineDir, upConsoleBaselineS3)
 
 	// Keep each server's newest snapshot moving forward from the index alone
 	// (#1171). Opt-in, and refused at startup when nothing can be refreshed.

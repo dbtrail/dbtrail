@@ -856,6 +856,9 @@ func New(cfg Config) (*Server, error) {
 			BaselineDir: cfg.BaselineDir,
 			BaselineS3:  cfg.BaselineS3,
 		}, profileActive)
+		// The command-line server is not in the registry, so the registry's
+		// own wiring (connManager.buildBundle) never reaches it.
+		boot.sqlMirrorDir = cfg.Registry.BootCopyMirrorDir(cfg.BaselineDir, cfg.BaselineS3)
 		boot.resolver, boot.resolverUnavailable = loadResolver(cfg.DB)
 		s.cm.seedBoot(boot, cfg.BootDSN)
 	}

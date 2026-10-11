@@ -83,12 +83,45 @@ func (r *Registry) CopyMirrorRoot() string {
 // at another one gets an empty folder and never reads the old one's
 // snapshots as its own. One trailing slash apart is the same location, as it
 // is for the storage layer.
+//
+// An id that is not a plain name gets no mirror. Ids are minted here as hex,
+// but the registry file can be edited by hand, and an id is a path segment
+// in this folder: one holding a separator or a dot name would put the mirror,
+// and the directories handed to the SQL worker, outside it.
 func (r *Registry) CopyMirrorDir(entry ServerEntry) string {
-	if r == nil || r.path == "" || entry.ID == "" || entry.BaselineS3 == "" || entry.BaselineDir != "" {
+	if r == nil || r.path == "" || !plainPathSegment(entry.ID) || entry.BaselineS3 == "" || entry.BaselineDir != "" {
 		return ""
 	}
 	sum := sha256.Sum256([]byte(strings.TrimSuffix(entry.BaselineS3, "/")))
 	return filepath.Join(r.CopyMirrorRoot(), entry.ID, hex.EncodeToString(sum[:8]))
+}
+
+// BootServerID is the id of the server the daemon was started with on its
+// command line, for the callers outside this package that name it.
+const BootServerID = bootServerID
+
+// BootCopyMirrorDir is CopyMirrorDir for the server the daemon was started
+// with on its command line, which is not in the registry: the same folder
+// layout under the id every surface knows it by. "" when that server has no
+// mirror, by the same rules.
+func (r *Registry) BootCopyMirrorDir(baselineDir, baselineS3 string) string {
+	return r.CopyMirrorDir(ServerEntry{ID: bootServerID, BaselineDir: baselineDir, BaselineS3: baselineS3})
+}
+
+// plainPathSegment reports whether s is safe as one folder name: letters,
+// digits, - and _ only, and not empty.
+func plainPathSegment(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // errLocalDirInvalid marks a refusal of the folder itself, which the handlers

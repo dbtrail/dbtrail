@@ -51,28 +51,39 @@ func TestSQLMirror_statementRunsOverTheMirror(t *testing.T) {
 	}
 }
 
-func TestSQLMirror_refusedAsBeforeWithoutAUsableMirror(t *testing.T) {
-	for name, prepare := range map[string]func(t *testing.T, f *sqlFixture){
-		"no mirror directory configured": func(t *testing.T, f *sqlFixture) { f.s.cm.boot.sqlMirrorDir = "" },
-		"mirror directory does not exist": func(t *testing.T, f *sqlFixture) {
+func TestSQLMirror_refusalWithoutAUsableMirror(t *testing.T) {
+	for name, c := range map[string]struct {
+		prepare func(t *testing.T, f *sqlFixture)
+		want    string
+	}{
+		// No mirror folder at all (a registry in memory): the old answer.
+		"no mirror directory configured": {func(t *testing.T, f *sqlFixture) { f.s.cm.boot.sqlMirrorDir = "" }, sqlCopyNotLocalMessage},
+		// A mirror that holds nothing to read yet: it is on its way.
+		"mirror directory does not exist": {func(t *testing.T, f *sqlFixture) {
 			f.s.cm.boot.sqlMirrorDir = filepath.Join(t.TempDir(), "nope")
-		},
-		"mirror holds nothing yet": func(t *testing.T, f *sqlFixture) { f.s.cm.boot.sqlMirrorDir = t.TempDir() },
-		"mirror holds only a snapshot still being written": func(t *testing.T, f *sqlFixture) {
+		}, sqlCopyMirrorNotReadyMessage},
+		"mirror holds nothing yet": {func(t *testing.T, f *sqlFixture) { f.s.cm.boot.sqlMirrorDir = t.TempDir() }, sqlCopyMirrorNotReadyMessage},
+		"mirror holds only a snapshot still being written": {func(t *testing.T, f *sqlFixture) {
 			if err := baseline.WriteIncompleteMarker(filepath.Join(f.root, sqlSnapshotDirName)); err != nil {
 				t.Fatal(err)
 			}
-		},
+		}, sqlCopyMirrorNotReadyMessage},
 	} {
 		t.Run(name, func(t *testing.T) {
 			runner := &fakeSQLRunner{busy: true} // a busy runner would answer 429 if a slot were taken first
 			f := newSQLMirrorFixture(t, runner)
-			prepare(t, f)
+			c.prepare(t, f)
 			w := postSQL(t, f.s, `{"sql":"SELECT 1"}`)
-			if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), sqlCopyNotLocalMessage) {
-				t.Errorf("code=%d body=%s, want 409 copy-not-local before any slot", w.Code, w.Body.String())
+			if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), c.want[:40]) {
+				t.Errorf("code=%d body=%s, want 409 %q before any slot", w.Code, w.Body.String(), c.want)
+			}
+			if strings.Contains(w.Body.String(), f.root) {
+				t.Errorf("the refusal names a path on this host: %s", w.Body.String())
 			}
 		})
+	}
+	if len(sqlCopyMirrorNotReadyMessage) > 512 {
+		t.Errorf("the refusal is %d bytes; a MySQL client cuts a message at 512", len(sqlCopyMirrorNotReadyMessage))
 	}
 }
 
@@ -191,5 +202,83 @@ func TestCopyMirrorDir(t *testing.T) {
 		if strings.HasPrefix(dir, filepath.Join(state, taken)+string(filepath.Separator)) {
 			t.Errorf("the mirror is inside %s", taken)
 		}
+	}
+}
+
+// Time travel through the port, and everything else that is not SQL on the
+// copy, is handed the server's own location and never the mirror.
+func TestSQLMirror_timeTravelKeepsTheBucket(t *testing.T) {
+	f := newSQLMirrorFixture(t, &fakeSQLRunner{})
+	if !f.s.cm.boot.usesSQLMirror() {
+		t.Fatal("the fixture's mirror is not in use, so this proves nothing")
+	}
+	if dir, s3 := timeTravelBaseline(f.s.cm.boot); s3 != "s3://bucket/prefix" || dir != "" {
+		t.Errorf("time travel reads dir=%q s3=%q, want the bucket alone", dir, s3)
+	}
+}
+
+// The wiring: every way a server's bundle is built gives it its mirror
+// folder. A bundle without it answers "only on S3" for ever, with a mirror
+// full of snapshots beside it.
+func TestSQLMirror_everyBundleIsGivenItsMirrorFolder(t *testing.T) {
+	reg, err := LoadRegistry(filepath.Join(t.TempDir(), "console-servers.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := reg.Add(ServerEntry{Name: "shop", DSN: "u:p@tcp(127.0.0.1:1)/idx", BaselineS3: "s3://bucket/prefix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := reg.CopyMirrorDir(entry)
+	if want == "" {
+		t.Fatal("the entry has no mirror folder")
+	}
+
+	// A bundle opened on first use (the router opens its index lazily, so
+	// this path needs no index to answer).
+	cm := newConnManager(reg, false)
+	cm.lazyIndex = true
+	b, err := cm.buildBundle(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { b.db.Close() })
+	if b.sqlMirrorDir != want {
+		t.Errorf("buildBundle: sqlMirrorDir = %q, want %q", b.sqlMirrorDir, want)
+	}
+
+	// A bundle rebuilt after the server's settings were saved.
+	cm.mu.Lock()
+	cm.bundles[entry.ID] = b
+	cm.mu.Unlock()
+	moved := entry
+	moved.BaselineS3 = "s3://other/prefix"
+	cm.rebuildDerived(moved)
+	cm.mu.Lock()
+	got := cm.bundles[entry.ID].sqlMirrorDir
+	cm.mu.Unlock()
+	if got != reg.CopyMirrorDir(moved) || got == want {
+		t.Errorf("rebuildDerived: sqlMirrorDir = %q, want the folder for the new bucket %q", got, reg.CopyMirrorDir(moved))
+	}
+
+	// The server on the command line, which is not in the registry.
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, BaselineS3: "s3://bucket/boot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := srv.cm.boot.sqlMirrorDir, reg.BootCopyMirrorDir("", "s3://bucket/boot"); got != want || want == "" {
+		t.Errorf("the command-line server: sqlMirrorDir = %q, want %q", got, want)
+	}
+}
+
+func TestCopyMirrorDir_idsThatAreNotPlainNames(t *testing.T) {
+	reg := &Registry{path: filepath.Join(t.TempDir(), "console-servers.yaml")}
+	for _, id := range []string{"../x", "a/b", "..", ".", "a b", "a\\b", "", "id\x00"} {
+		if got := reg.CopyMirrorDir(ServerEntry{ID: id, BaselineS3: "s3://bucket/prefix"}); got != "" {
+			t.Errorf("id %q got the mirror folder %q", id, got)
+		}
+	}
+	if got := reg.BootCopyMirrorDir("", "s3://bucket/prefix"); got == "" || !strings.HasPrefix(got, reg.CopyMirrorRoot()+string(filepath.Separator)) {
+		t.Errorf("the command-line server's mirror folder = %q", got)
 	}
 }

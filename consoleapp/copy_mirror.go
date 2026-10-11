@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -57,13 +58,20 @@ type copyMirrorTarget struct {
 	region   string
 }
 
+// bootMirror is the snapshot location the daemon was started with for the
+// server on its command line, which is not in the registry.
+type bootMirror struct{ dir, s3 string }
+
 // copyMirrorTargets lists the servers that have a mirror: those the registry
-// gives a mirror folder to.
-func copyMirrorTargets(reg *console.Registry) []copyMirrorTarget {
+// gives a mirror folder to, the command-line server among them.
+func copyMirrorTargets(reg *console.Registry, boot bootMirror) []copyMirrorTarget {
 	if reg == nil {
 		return nil
 	}
 	var out []copyMirrorTarget
+	if dir := reg.BootCopyMirrorDir(boot.dir, boot.s3); dir != "" {
+		out = append(out, copyMirrorTarget{id: console.BootServerID, name: console.BootServerID, dir: dir, s3: boot.s3})
+	}
 	for _, e := range reg.List() {
 		if dir := reg.CopyMirrorDir(e); dir != "" {
 			out = append(out, copyMirrorTarget{id: e.ID, name: e.Name, dir: dir, s3: e.BaselineS3, region: e.S3Region})
@@ -83,12 +91,42 @@ type copyMirrorStatus struct {
 }
 
 type copyMirrorState struct {
-	mu sync.Mutex
-	m  map[string]copyMirrorStatus
+	mu   sync.Mutex
+	m    map[string]copyMirrorStatus
+	said map[string]time.Time
+	now  func() time.Time // nil is time.Now
 }
 
 func newCopyMirrorState() *copyMirrorState {
-	return &copyMirrorState{m: map[string]copyMirrorStatus{}}
+	return &copyMirrorState{m: map[string]copyMirrorStatus{}, said: map[string]time.Time{}}
+}
+
+// copyMirrorRepeatEvery is how often a line that keeps being true is logged
+// again. Not once per round, which is every few minutes for as long as a
+// disk stays full; and not once per daemon, which leaves a mirror that has
+// been failing for weeks with a single line far up the log.
+const copyMirrorRepeatEvery = time.Hour
+
+var digitRuns = regexp.MustCompile(`[0-9]+`)
+
+// sayNow reports whether a line about server id should be logged now: the
+// first time, and again once copyMirrorRepeatEvery has passed. Two texts
+// that differ only in their numbers are one line (free bytes, bytes read
+// before a connection dropped), or a failure that carries a number would be
+// new every round.
+func (s *copyMirrorState) sayNow(id, text string) bool {
+	now := time.Now()
+	if s.now != nil {
+		now = s.now()
+	}
+	key := id + "\x00" + digitRuns.ReplaceAllString(text, "#")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if last, ok := s.said[key]; ok && now.Sub(last) < copyMirrorRepeatEvery {
+		return false
+	}
+	s.said[key] = now
+	return true
 }
 
 func (s *copyMirrorState) of(id string) copyMirrorStatus {
@@ -113,15 +151,22 @@ func syncCopyMirror(ctx context.Context, t copyMirrorTarget) (copymirror.Result,
 	if err != nil {
 		return copymirror.Result{}, err
 	}
-	return copymirror.Sync(ctx, copymirror.Config{Dir: t.dir, Source: src, SourceName: t.s3})
+	return copymirror.Sync(ctx, copymirror.Config{Dir: t.dir, Source: src, SourceName: t.s3,
+		// A first download can take long, and the round says nothing else
+		// until it ends: without this line the log shows a server whose SQL
+		// answers "not ready yet" and no sign that anything is happening.
+		OnDownload: func(snapshot string, files int, bytes int64) {
+			slog.Info("copy mirror: bringing a snapshot from S3 for SQL on the copy",
+				"server", t.name, "snapshot", snapshot, "files", files, "bytes_to_download", bytes)
+		}})
 }
 
 // runCopyMirrorRound runs one round for every server that has a mirror, one
 // after another. A server that fails, or whose round panics, does not keep
 // the next one from its round.
-func runCopyMirrorRound(ctx context.Context, reg *console.Registry, state *copyMirrorState,
+func runCopyMirrorRound(ctx context.Context, reg *console.Registry, boot bootMirror, state *copyMirrorState,
 	sync func(context.Context, copyMirrorTarget) (copymirror.Result, error)) {
-	for _, t := range copyMirrorTargets(reg) {
+	for _, t := range copyMirrorTargets(reg, boot) {
 		if ctx.Err() != nil {
 			return
 		}
@@ -130,7 +175,8 @@ func runCopyMirrorRound(ctx context.Context, reg *console.Registry, state *copyM
 		if err != nil {
 			st.Err = err.Error()
 		}
-		reportCopyMirror(t, res, err, state.set(t.id, st))
+		prev := state.set(t.id, st)
+		reportCopyMirror(slog.Default(), state, t, res, err, prev)
 	}
 }
 
@@ -150,25 +196,41 @@ func guardedCopyMirrorSync(ctx context.Context, t copyMirrorTarget,
 	return sync(ctx, t)
 }
 
-// reportCopyMirror logs what a round did. A failure that repeats is logged
-// once, not every five minutes; so is a round with nothing to do.
-func reportCopyMirror(t copyMirrorTarget, res copymirror.Result, err error, prev copyMirrorStatus) {
+// reportCopyMirror logs what a round did. What happened once (a snapshot
+// brought, a mirror followed again) is said once; what goes on being true (a
+// failure, a bucket with nothing to mirror) is said when it starts and again
+// every copyMirrorRepeatEvery, never every round.
+func reportCopyMirror(log *slog.Logger, state *copyMirrorState, t copyMirrorTarget, res copymirror.Result, err error, prev copyMirrorStatus) {
 	for _, n := range res.Notes {
-		slog.Warn("copy mirror: "+n, "server", t.name)
+		if state.sayNow(t.id, "note: "+n) {
+			log.Warn("copy mirror: "+n, "server", t.name)
+		}
 	}
 	switch {
 	case err != nil && errors.Is(err, context.Canceled):
 		// The daemon is stopping.
-	case err != nil && err.Error() != prev.Err:
-		slog.Warn("copy mirror: the local copy SQL reads for this server could not be brought up to date; "+
-			"it keeps answering from the snapshot it has, if any, and the next round tries again",
-			"server", t.name, "source", t.s3, "mirror_newest", res.Newest, "error", err)
-	case err == nil && res.Downloaded != "":
-		slog.Info("copy mirror: brought a snapshot from S3 for SQL on the copy",
+	case err != nil:
+		if state.sayNow(t.id, "error: "+err.Error()) {
+			log.Warn("copy mirror: the local copy SQL reads for this server could not be brought up to date; "+
+				"it keeps answering from the snapshot it has, if any, and the next round tries again",
+				"server", t.name, "source", t.s3, "mirror_newest", res.Newest, "error", err)
+		}
+	case res.Busy:
+		// Another process is bringing this mirror up to date.
+	case res.Downloaded != "":
+		log.Info("copy mirror: brought a snapshot from S3 for SQL on the copy",
 			"server", t.name, "snapshot", res.Downloaded, "downloaded_bytes", res.BytesDownloaded,
 			"linked_bytes", res.BytesLinked, "resumed_bytes", res.BytesResumed, "removed", res.Removed)
-	case err == nil && prev.Err != "":
-		slog.Info("copy mirror: this server's mirror is being followed again", "server", t.name, "mirror_newest", res.Newest)
+	case res.Newest == "":
+		// No error and nothing to read: SQL on this server answers "not
+		// ready yet", and this is the line that says why it will stay so.
+		if state.sayNow(t.id, "empty") {
+			log.Warn("copy mirror: there is no snapshot to bring for this server, so SQL on the copy has nothing to read: "+
+				"the bucket lists no complete snapshot under this location (none taken yet, one still uploading, or another prefix)",
+				"server", t.name, "source", t.s3)
+		}
+	case prev.Err != "":
+		log.Info("copy mirror: this server's mirror is being followed again", "server", t.name, "mirror_newest", res.Newest)
 	}
 }
 
@@ -187,7 +249,7 @@ func reportCopyMirror(t copyMirrorTarget, res copymirror.Result, err error, prev
 //     at its root (copymirror.SourceFile). A folder without it is not a
 //     mirror: removed only if it is empty, which is what a mirror made and
 //     never started looks like.
-func sweepCopyMirrors(reg *console.Registry) {
+func sweepCopyMirrors(reg *console.Registry, boot bootMirror) {
 	root := reg.CopyMirrorRoot()
 	if root == "" {
 		return
@@ -200,7 +262,7 @@ func sweepCopyMirrors(reg *console.Registry) {
 		return
 	}
 	wanted := map[string]bool{}
-	for _, t := range copyMirrorTargets(reg) {
+	for _, t := range copyMirrorTargets(reg, boot) {
 		wanted[t.dir] = true
 	}
 	servers, err := os.ReadDir(root)
@@ -255,10 +317,14 @@ func warnCopyMirrorSweepOnce(dir, msg, why string) {
 // startCopyMirrorLoop keeps every S3-only server's mirror up to date for the
 // life of the daemon. No flag and no error: with no such server a round does
 // nothing, and one can be added at any time.
-func startCopyMirrorLoop(ctx context.Context, reg *console.Registry) {
+//
+// bootDir and bootS3 are the snapshot locations the daemon was started with,
+// for the server on its command line.
+func startCopyMirrorLoop(ctx context.Context, reg *console.Registry, bootDir, bootS3 string) {
 	if reg == nil {
 		return
 	}
+	boot := bootMirror{dir: bootDir, s3: bootS3}
 	state := newCopyMirrorState()
 	runOnce := func() {
 		defer func() {
@@ -267,8 +333,8 @@ func startCopyMirrorLoop(ctx context.Context, reg *console.Registry) {
 					"panic", r, "stack", string(debug.Stack()))
 			}
 		}()
-		sweepCopyMirrors(reg)
-		runCopyMirrorRound(ctx, reg, state, syncCopyMirror)
+		sweepCopyMirrors(reg, boot)
+		runCopyMirrorRound(ctx, reg, boot, state, syncCopyMirror)
 	}
 	go func() {
 		if ctx.Err() == nil {

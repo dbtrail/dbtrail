@@ -1,13 +1,16 @@
 package consoleapp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,14 +44,14 @@ func TestCopyMirrorTargets(t *testing.T) {
 		mirrorEntry("local", t.TempDir(), ""),
 		mirrorEntry("none", "", ""),
 	)
-	got := copyMirrorTargets(reg)
+	got := copyMirrorTargets(reg, bootMirror{})
 	if len(got) != 1 || got[0].name != "s3only" || got[0].s3 != "s3://bucket/a" {
 		t.Fatalf("targets = %+v, want the S3-only server alone", got)
 	}
 	if got[0].dir == "" || got[0].dir != reg.CopyMirrorDir(reg.List()[0]) {
 		t.Errorf("target dir = %q, want the registry's mirror folder for it", got[0].dir)
 	}
-	if n := len(copyMirrorTargets(nil)); n != 0 {
+	if n := len(copyMirrorTargets(nil, bootMirror{})); n != 0 {
 		t.Errorf("a nil registry has %d targets", n)
 	}
 }
@@ -71,7 +74,7 @@ func TestCopyMirrorRound_oneServerFailingOrPanickingDoesNotStopTheOthers(t *test
 		return copymirror.Result{Downloaded: "2026-10-01T10-00-00Z", Newest: "2026-10-01T10-00-00Z"}, nil
 	}
 	state := newCopyMirrorState()
-	runCopyMirrorRound(context.Background(), reg, state, sync)
+	runCopyMirrorRound(context.Background(), reg, bootMirror{}, state, sync)
 	if len(ran) != 3 {
 		t.Fatalf("ran %v, want all three servers", ran)
 	}
@@ -94,7 +97,7 @@ func TestCopyMirrorRound_stopsWhenTheDaemonDoes(t *testing.T) {
 	reg := mirrorRegistry(t, mirrorEntry("a", "", "s3://bucket/a"), mirrorEntry("b", "", "s3://bucket/b"))
 	ctx, cancel := context.WithCancel(context.Background())
 	ran := 0
-	runCopyMirrorRound(ctx, reg, newCopyMirrorState(), func(context.Context, copyMirrorTarget) (copymirror.Result, error) {
+	runCopyMirrorRound(ctx, reg, bootMirror{}, newCopyMirrorState(), func(context.Context, copyMirrorTarget) (copymirror.Result, error) {
 		ran++
 		cancel()
 		return copymirror.Result{}, nil
@@ -150,7 +153,7 @@ func TestSweepCopyMirrors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sweepCopyMirrors(reg)
+	sweepCopyMirrors(reg, bootMirror{})
 
 	for _, gone := range []string{otherBucket, goneServer, nowLocal, neverStarted, filepath.Join(root, "deadbeefdeadbeef")} {
 		if _, err := os.Lstat(gone); !errors.Is(err, os.ErrNotExist) {
@@ -165,8 +168,8 @@ func TestSweepCopyMirrors(t *testing.T) {
 	}
 
 	// No registry file, no root: nothing to do, nothing to fail.
-	sweepCopyMirrors(nil)
-	sweepCopyMirrors(mirrorRegistry(t))
+	sweepCopyMirrors(nil, bootMirror{})
+	sweepCopyMirrors(mirrorRegistry(t), bootMirror{})
 }
 
 // A tree is deleted only below folders nobody else could have rearranged.
@@ -185,7 +188,7 @@ func TestSweepCopyMirrors_trustsNoFolderItCannotVouchFor(t *testing.T) {
 	}
 	t.Run("the control: a stale mirror in trusted folders is removed", func(t *testing.T) {
 		reg, dir := stale(t)
-		sweepCopyMirrors(reg)
+		sweepCopyMirrors(reg, bootMirror{})
 		if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
 			t.Fatal("the stale mirror was not removed, so the cases below prove nothing")
 		}
@@ -234,7 +237,7 @@ func TestSweepCopyMirrors_trustsNoFolderItCannotVouchFor(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			reg, dir := stale(t)
 			spoil(t, reg, dir)
-			sweepCopyMirrors(reg)
+			sweepCopyMirrors(reg, bootMirror{})
 			if _, err := os.Stat(filepath.Join(dir, "2026-10-01T10-00-00Z")); err != nil {
 				t.Errorf("a tree was deleted below a folder that cannot be vouched for: %v", err)
 			}
@@ -279,6 +282,9 @@ func TestCopyMirrorLoopStartsWhereverSnapshotsArePruned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Calls anywhere in the function, and calls that are a statement of
+	// its own at the top of its body: one inside an `if` is not a start
+	// every daemon makes.
 	calls := func(fn *ast.FuncDecl, name string) int {
 		n := 0
 		ast.Inspect(fn, func(node ast.Node) bool {
@@ -291,6 +297,19 @@ func TestCopyMirrorLoopStartsWhereverSnapshotsArePruned(t *testing.T) {
 		})
 		return n
 	}
+	topLevel := func(fn *ast.FuncDecl, name string) int {
+		n := 0
+		for _, st := range fn.Body.List {
+			if es, ok := st.(*ast.ExprStmt); ok {
+				if c, ok := es.X.(*ast.CallExpr); ok {
+					if id, ok := c.Fun.(*ast.Ident); ok && id.Name == name {
+						n++
+					}
+				}
+			}
+		}
+		return n
+	}
 	starters := 0
 	for _, d := range f.Decls {
 		fn, ok := d.(*ast.FuncDecl)
@@ -298,9 +317,9 @@ func TestCopyMirrorLoopStartsWhereverSnapshotsArePruned(t *testing.T) {
 			continue
 		}
 		starters++
-		if calls(fn, "startCopyMirrorLoop") != 1 {
-			t.Errorf("%s starts the snapshot prune loop and starts the copy mirror loop %d times, want once",
-				fn.Name.Name, calls(fn, "startCopyMirrorLoop"))
+		if calls(fn, "startCopyMirrorLoop") != 1 || topLevel(fn, "startCopyMirrorLoop") != 1 {
+			t.Errorf("%s starts the snapshot prune loop; it calls startCopyMirrorLoop %d times, %d of them as a statement of its own at the top of its body, want one and one",
+				fn.Name.Name, calls(fn, "startCopyMirrorLoop"), topLevel(fn, "startCopyMirrorLoop"))
 		}
 	}
 	if starters != 2 {
@@ -322,5 +341,106 @@ func TestAfterUpload_kicksTheCopyMirror(t *testing.T) {
 	case <-copyMirrorKick:
 	default:
 		t.Error("an upload did not ask the copy mirror for a round")
+	}
+}
+
+// The server on the daemon's command line is not in the registry. With its
+// snapshots only in S3 it is mirrored like any other, and its folder is not
+// swept as one nobody uses.
+func TestCopyMirror_commandLineServer(t *testing.T) {
+	reg := mirrorRegistry(t, mirrorEntry("a", "", "s3://bucket/a"))
+	boot := bootMirror{s3: "s3://bucket/boot"}
+	got := copyMirrorTargets(reg, boot)
+	if len(got) != 2 || got[0].id != console.BootServerID || got[0].s3 != "s3://bucket/boot" || got[0].dir != reg.BootCopyMirrorDir("", "s3://bucket/boot") {
+		t.Fatalf("targets = %+v, want the command-line server first", got)
+	}
+	if n := len(copyMirrorTargets(reg, bootMirror{dir: "/var/lib/x", s3: "s3://bucket/boot"})); n != 1 {
+		t.Errorf("a command-line server with a local folder is mirrored: %d targets", n)
+	}
+	if err := os.MkdirAll(got[0].dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(got[0].dir, copymirror.SourceFile), []byte("s3://bucket/boot\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sweepCopyMirrors(reg, boot)
+	if _, err := os.Stat(got[0].dir); err != nil {
+		t.Errorf("the command-line server's mirror was swept: %v", err)
+	}
+	sweepCopyMirrors(reg, bootMirror{})
+	if _, err := os.Stat(got[0].dir); !errors.Is(err, os.ErrNotExist) {
+		t.Error("with no command-line location, its old mirror stays")
+	}
+}
+
+// What keeps being true is said when it starts and once an hour, not every
+// round and not once for ever; a failure whose text carries numbers that
+// change each round is still one failure.
+func TestCopyMirrorReport_repeatsAreQuietAndStuckMirrorsAreNot(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	state := newCopyMirrorState()
+	clock := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	state.now = func() time.Time { return clock }
+	tg := copyMirrorTarget{id: "abc", name: "shop", s3: "s3://bucket/a"}
+	lines := func() int {
+		n := strings.Count(buf.String(), "\n")
+		buf.Reset()
+		return n
+	}
+	round := func(res copymirror.Result, err error) int {
+		st := copyMirrorStatus{Newest: res.Newest}
+		if err != nil {
+			st.Err = err.Error()
+		}
+		reportCopyMirror(log, state, tg, res, err, state.set(tg.id, st))
+		return lines()
+	}
+	noSpace := func(free int64) error {
+		return &copymirror.NoSpaceError{Dir: "/m", Snapshot: "2026-10-01T10-00-00Z", Need: 1000, Free: free, Headroom: 10}
+	}
+	if n := round(copymirror.Result{}, noSpace(500)); n != 1 {
+		t.Errorf("the first failure logged %d lines, want 1", n)
+	}
+	for _, free := range []int64{499, 480, 7} {
+		if n := round(copymirror.Result{}, noSpace(free)); n != 0 {
+			t.Errorf("the same failure with %d free logged %d lines, want 0", free, n)
+		}
+	}
+	clock = clock.Add(copyMirrorRepeatEvery + time.Minute)
+	if n := round(copymirror.Result{}, noSpace(3)); n != 1 {
+		t.Errorf("an hour on, the failure that is still there logged %d lines, want 1", n)
+	}
+	if n := round(copymirror.Result{}, errors.New("access denied")); n != 1 {
+		t.Errorf("another failure logged %d lines, want 1", n)
+	}
+	// It lands: said once, and the mirror is followed again.
+	if n := round(copymirror.Result{Downloaded: "2026-10-01T10-00-00Z", Newest: "2026-10-01T10-00-00Z"}, nil); n != 1 {
+		t.Errorf("a snapshot brought logged %d lines, want 1", n)
+	}
+	if n := round(copymirror.Result{Newest: "2026-10-01T10-00-00Z"}, nil); n != 0 {
+		t.Errorf("a round with nothing to do logged %d lines, want 0", n)
+	}
+
+	// No error and nothing to read: that is not silence.
+	other := copyMirrorTarget{id: "def", name: "empty", s3: "s3://bucket/typo"}
+	reportCopyMirror(log, state, other, copymirror.Result{}, nil, copyMirrorStatus{})
+	if out := buf.String(); strings.Count(out, "\n") != 1 || !strings.Contains(out, "no snapshot to bring") {
+		t.Errorf("an empty mirror with no error logged %q", out)
+	}
+	buf.Reset()
+	reportCopyMirror(log, state, other, copymirror.Result{}, nil, copyMirrorStatus{})
+	// Servers nothing was said about yet, so that silence here is the
+	// branch's own and not a repeat's.
+	reportCopyMirror(log, state, copyMirrorTarget{id: "busy", name: "busy"}, copymirror.Result{Busy: true}, nil, copyMirrorStatus{})
+	reportCopyMirror(log, state, copyMirrorTarget{id: "stop", name: "stop"}, copymirror.Result{}, context.Canceled, copyMirrorStatus{})
+	if n := lines(); n != 0 {
+		t.Errorf("a repeat, a busy round and a stopping daemon logged %d lines, want 0", n)
+	}
+	// Notes are a round's own words: once each, not every round.
+	reportCopyMirror(log, state, tg, copymirror.Result{Newest: "x", Notes: []string{"could not remove the leftover .a.removing: busy"}}, nil, copyMirrorStatus{})
+	reportCopyMirror(log, state, tg, copymirror.Result{Newest: "x", Notes: []string{"could not remove the leftover .a.removing: busy"}}, nil, copyMirrorStatus{})
+	if n := lines(); n != 1 {
+		t.Errorf("the same note twice logged %d lines, want 1", n)
 	}
 }
