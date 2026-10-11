@@ -520,6 +520,10 @@ type Server struct {
 	// data-profile enforcement (#1075). Inert in OSS (no session ever carries a
 	// profile); populated lazily on the first profiled request.
 	sessionProfiles *profileRuleCache
+	// followNotes is what was last said about each followed file
+	// (FollowFiles), so its trouble is logged once. Guarded by followMu.
+	followMu    sync.Mutex
+	followNotes map[string]string
 	// flashback: the embedded MySQL-protocol port's state: where it listens
 	// (Config.FlashbackListen at startup, or the setting saved from the web
 	// interface) and the password that setting carries.
