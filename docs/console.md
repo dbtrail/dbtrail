@@ -1348,14 +1348,54 @@ it. It is **not available**:
 - to a session with a data profile or table and column restrictions. The
   profile filters what the console shows, and SQL reads the raw files, which it
   cannot filter;
-- for a server whose copy is only on S3. SQL in the browser needs the copy on
-  local disk (a local snapshot directory, or a local archive directory);
+- for a server whose snapshots are only on S3, until DBTrail has brought the
+  newest one to local disk. SQL reads files on this machine, so for such a
+  server `bintrail-console watch` keeps a local mirror of its two newest
+  snapshots under the state directory (`copy-mirror/`), and the card appears
+  once the first one is there. See [SQL on a server whose snapshots are only
+  on S3](#sql-on-a-server-whose-snapshots-are-only-on-s3);
 - when archive access is disabled for the server.
 
 In those cases the card is not shown. For no row cap and no time limit, query
 the same files in your own DuckDB: **Download a DuckDB schema** on the **MCP
 Server** page writes a `views.sql` over them. See
 [Query in DuckDB](https://www.dbtrail.com/docs/guides/query-in-duckdb/).
+
+#### SQL on a server whose snapshots are only on S3
+
+A statement runs in a process with no network, so it cannot read a bucket.
+For a server that keeps its snapshots in S3 and has no local snapshot folder,
+`bintrail-console watch` brings them to disk itself:
+
+- **What it keeps.** The two newest complete snapshots, in
+  `copy-mirror/<server id>/` under the state directory. The newest is what
+  statements read; the one before stays for a statement that started just
+  before the newest arrived. Older ones are removed. Everything else that
+  reads this server's snapshots (recovery, time travel, the Snapshots page,
+  the downloaded `views.sql`) keeps reading the bucket: the mirror is a cache
+  for SQL, not a second copy of the backup.
+- **When.** When the daemon starts, right after each snapshot or update it
+  uploads, and every five minutes for snapshots something else published.
+  The time the SQL card gives for the copy is the mirrored snapshot's, so it
+  can be a few minutes behind the bucket.
+- **What it costs.** Disk for what it downloads, in Parquet. An update
+  publishes the tables that did not change as copies inside the bucket; the
+  mirror links those from the snapshot it already has and downloads only the
+  tables that changed. Every file is checked against the snapshot's own
+  checksums before it is used.
+- **When the disk is short.** Nothing is downloaded unless it fits with 1 GiB
+  left free. The daemon log says so, under `copy mirror`, with how much the
+  snapshot needs and how much is free, and SQL keeps answering from the
+  snapshot the mirror already has.
+- **Until the first snapshot is there**, SQL answers that the local copy is
+  not ready yet. If it stays that way, the daemon log says why under
+  `copy mirror`: no complete snapshot in the bucket yet, no room, or the
+  bucket cannot be read.
+
+A server that also keeps a local snapshot folder has no mirror: that folder
+is what SQL reads. The change history (the `events` view) is not mirrored: on
+a server whose change log is only in S3, statements over the tables work and
+`events` is not offered.
 
 The API behind it is `POST /api/sql` with `{"sql": "..."}` (JSON result, or CSV
 with `?format=csv`), and `GET /api/sql` for the list of tables, the copy's age

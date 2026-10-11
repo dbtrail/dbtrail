@@ -341,10 +341,14 @@ What to know before relying on it:
   marked, and raises a warning the client counts; `SHOW WARNINGS` reports
   it. The console's SQL card keeps its own behaviour: it returns the first
   rows up to the cap and says on the page that there were more.
-- **The copy has to be on local disk**, as for the SQL card. A server whose
-  copy is only on S3, or with archive access disabled, or whose copy defines
-  no view yet, keeps the time-travel shapes and refuses ordinary SQL with
-  1235 and the reason.
+- **The copy has to be on local disk**, as for the SQL card. For a server
+  whose snapshots are only on S3, `bintrail-console watch` brings the newest
+  ones to disk itself (see [SQL on a server whose snapshots are only on
+  S3](console.md#sql-on-a-server-whose-snapshots-are-only-on-s3)); until the
+  first one is there, ordinary SQL is refused with 1235 and says the local
+  copy is not ready yet. A server with archive access disabled, or whose copy
+  defines no view yet, keeps the time-travel shapes and refuses ordinary SQL
+  with 1235 and the reason.
 - **A current database the copy does not have** (the server's source
   database before its first snapshot, a typo in `-D`) is left alone:
   unqualified names then resolve in `main`, `SHOW DATABASES` and `events`
