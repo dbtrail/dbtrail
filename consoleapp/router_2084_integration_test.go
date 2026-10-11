@@ -49,6 +49,9 @@ func TestIntegrationRouter(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := f.settings("tok")
+	// The port is turned on in the web interface: that, and no token, is
+	// what opens it.
+	f.savePortFile(t, true, "made-in-the-web")
 	// The scan rule alone, at 2 rows: a full scan over the 3-row table goes
 	// to the copy, a primary-key lookup stays on MySQL.
 	st.Policy = readrouter.Policy{ScanRows: 2}
@@ -239,12 +242,10 @@ func TestIntegrationRouter(t *testing.T) {
 		t.Errorf("after reconnecting: %q", got)
 	}
 
-	// This router has a token, so a password created in the web interface
-	// does not open it.
-	f.savePortFile(t, true, "made-in-the-web")
-	time.Sleep(200 * time.Millisecond)
-	if code := mysqlLoginQuiet(addr, "made-in-the-web"); code != 1045 {
-		t.Errorf("login with the web interface's password: %d, want 1045", code)
+	// The token is one more password: the one created in the web interface
+	// opens this port too, while it is on.
+	if code := mysqlLoginQuiet(addr, "made-in-the-web"); code != 0 {
+		t.Errorf("login with the web interface's password on a router that has a token: MySQL error %d", code)
 	}
 
 	// A server with no source to forward to is answered from the copy
@@ -335,6 +336,9 @@ func TestIntegrationRouter_theIndexIsAway(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := f.settings("tok")
+	// The port is turned on in the web interface: that, and no token, is
+	// what opens it.
+	f.savePortFile(t, true, "made-in-the-web")
 	st.Policy = readrouter.Policy{ScanRows: 2}
 	srv, runner, err := newRouterConsole(st, console.SQLPool{Workers: 2, Threads: 2})
 	if err != nil {

@@ -2082,21 +2082,24 @@ expensive one by the copy as it was at its last snapshot. The copy is an
 asynchronous replica; its age is a number to watch, not a rule. If your
 application cannot read a result that old, do not send it through the router.
 
-**The password.** Started with `--token` (or `BINTRAIL_CONSOLE_TOKEN`), the
-token is the password and nothing else opens the port. Started without one,
-the router waits without listening until the MySQL port is turned on in the
-web interface, accepts the password created there, and closes its port, with
-every connection on it, when the port is turned off there. Replacing the
+**The switch and the password.** The router waits without listening until
+the MySQL port is turned on in the web interface, accepts the password
+created there, and closes its port, with every connection on it, when the
+port is turned off there. Started with `--token` (or
+`BINTRAIL_CONSOLE_TOKEN`), it accepts the token as a password too while the
+port is on. The token does not open the port: one that nobody turned on must
+not open because a token is in the environment the router shares with the
+capture process. Replacing the
 password there closes the connections that were open too: clients reconnect
 with the new one, and whoever held the old one is out.
 
-**Routing on or off.** A router started without a token reads one more
+**Routing on or off.** The router reads one more
 thing from the port's saved setting: `routing`. Absent or `false`, the copy
 answers every statement and nothing is forwarded. `true`, statements are
 routed as above. The change is seen within a few seconds and closes the
 connections that were open: who answers is decided when a connection is
 made, and one left open would go on forwarding after routing was turned off.
-A router started with a token does not read that file, and routes.
+With or without a token.
 
 **The copy alone, for one connection.** Connect as `<server>@copy` and that
 connection is answered from the copy alone, the light reads too, while the

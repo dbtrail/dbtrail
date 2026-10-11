@@ -122,7 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the copy whatever the age of its snapshot), and a statement that finds
   every worker busy waits and then gets error 1040 instead of being forwarded
   to MySQL. A server with no forwarding account is answered from the copy
-  alone, as there. Started without a token, it routes only when the port's
+  alone, as there. It routes only when the port's
   saved setting says so (`routing: true` in `console-mysql-port.yaml`, off
   until set), and turning that on or off closes the connections that were
   open, so that each comes back under the new setting. On either port a

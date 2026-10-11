@@ -281,6 +281,43 @@ func TestFollowFiles_registryChangesReachOpenConnections(t *testing.T) {
 	}
 }
 
+// The switch of the saved setting is what a process that follows the file
+// opens and closes its port by (#2341), apart from any password: on with no
+// password yet is on, and turning it off closes the connections that came
+// in with the token, which is still a password.
+func TestFollowFiles_theSwitch(t *testing.T) {
+	_, srv, _, portFile := followerServer(t)
+	closed := 0
+	srv.OnFlashbackPasswordWithdrawn(func() { closed++ })
+	save := func(f FlashbackFile) {
+		t.Helper()
+		if err := saveFlashbackFile(portFile, &f); err != nil {
+			t.Fatal(err)
+		}
+		srv.RefreshFollowedFiles()
+	}
+	srv.RefreshFollowedFiles()
+	if srv.FlashbackSwitchOn() {
+		t.Fatal("on with no saved setting")
+	}
+	save(FlashbackFile{Enabled: true})
+	if !srv.FlashbackSwitchOn() || closed != 0 {
+		t.Fatalf("saved as on: on=%v, closed %d time(s)", srv.FlashbackSwitchOn(), closed)
+	}
+	save(FlashbackFile{Enabled: false})
+	if srv.FlashbackSwitchOn() || closed != 1 {
+		t.Fatalf("turned off with no password in the file: on=%v, connections closed %d time(s), want off and 1", srv.FlashbackSwitchOn(), closed)
+	}
+	save(FlashbackFile{Enabled: true, Password: "pw"})
+	if err := os.WriteFile(portFile, []byte("enabled: [\n{{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv.RefreshFollowedFiles()
+	if srv.FlashbackSwitchOn() || closed != 2 {
+		t.Fatalf("a file that does not parse: on=%v, closed %d time(s), want off and 2", srv.FlashbackSwitchOn(), closed)
+	}
+}
+
 // Read routing is the saved setting's too (#2341): on only while the port is
 // on and its file says so, and off for a file that cannot be read. Turning
 // it on or off closes the connections made under the other setting, once,
