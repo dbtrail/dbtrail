@@ -2064,7 +2064,9 @@ application cannot read a result that old, do not send it through the router.
 token is the password and nothing else opens the port. Started without one,
 the router waits without listening until the MySQL port is turned on in the
 web interface, accepts the password created there, and closes its port, with
-every connection on it, when the port is turned off there.
+every connection on it, when the port is turned off there. Replacing the
+password there closes the connections that were open too: clients reconnect
+with the new one, and whoever held the old one is out.
 
 **Without the index.** A server's index database can be away (restarting,
 unreachable from the router's host) and the router still serves that server:

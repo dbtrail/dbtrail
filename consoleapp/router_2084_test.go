@@ -383,15 +383,30 @@ func TestRouterPort_waitsForACredentialAndFollowsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	// The password replaced in the web interface: the port stays open, the
+	// new one opens it, the old one does not, and the connection that came
+	// in with the old one does not stay.
+	f.savePortFile(t, true, "made-again")
+	waitUntil(t, "the connection made with the replaced password to be closed", func() bool { return conn.Ping() != nil })
+	waitUntil(t, "the port to be open for the new password", func() bool { return bound() != "" && mysqlLoginQuiet(addr, "made-again") == 0 })
+	if code := mysqlLogin(t, addr, "made-in-the-web"); code != gomysql.ER_ACCESS_DENIED_ERROR {
+		t.Fatalf("login with the replaced password: %d, want 1045", code)
+	}
+	conn2, err := client.Connect(addr, "default", "made-again", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn2.Close()
+	conn = conn2
 	// The port turned off in the web interface: that password opens
 	// nothing any more, and the connection made with it does not stay.
-	f.savePortFile(t, false, "made-in-the-web")
+	f.savePortFile(t, false, "made-again")
 	waitUntil(t, "the connection made with the withdrawn password to be closed", func() bool { return conn.Ping() != nil })
 	waitUntil(t, "the port to close with no credential left", func() bool { return bound() == "" && !accepts(addr) })
 	// Turned on again: it opens again, on the same address.
-	f.savePortFile(t, true, "made-in-the-web")
+	f.savePortFile(t, true, "made-again")
 	waitUntil(t, "the port to open again", func() bool { return bound() != "" })
-	if code := mysqlLogin(t, addr, "made-in-the-web"); code != 0 {
+	if code := mysqlLogin(t, addr, "made-again"); code != 0 {
 		t.Fatalf("login after the port was turned on again: MySQL error %d", code)
 	}
 }

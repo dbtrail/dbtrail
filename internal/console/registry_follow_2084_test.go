@@ -312,7 +312,10 @@ func TestFollowFiles_thePortPassword(t *testing.T) {
 	if got := passwords(); got != "tok,made-in-the-web" {
 		t.Fatalf("after the daemon saved a password: %q", got)
 	}
+	// Replaced: the old one opens nothing more, and whoever came in with it
+	// does not stay.
 	save(FlashbackFile{Enabled: true, Listen: "127.0.0.1:3309", Password: "made-again"})
+	wantClosed++
 	if got := passwords(); got != "tok,made-again" {
 		t.Fatalf("after the password was replaced: %q", got)
 	}
@@ -321,7 +324,7 @@ func TestFollowFiles_thePortPassword(t *testing.T) {
 	}
 	// A password that stops being accepted takes the connections made with
 	// it: the daemon's port closes when it is turned off, and this one must
-	// not keep them. A password that is replaced does not (above).
+	// not keep them.
 	wantClosed++
 	if got := passwords(); got != "tok" {
 		t.Fatalf("with a file that does not parse: %q", got)
