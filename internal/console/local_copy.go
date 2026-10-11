@@ -65,6 +65,15 @@ func (r *Registry) DefaultBaselineDir(id string) string {
 // folders nested).
 const copyMirrorDirName = "copy-mirror"
 
+// CopyMirrorRoot is the folder that holds every server's mirror folder,
+// <state dir>/copy-mirror. "" for a registry in memory.
+func (r *Registry) CopyMirrorRoot() string {
+	if r == nil || r.path == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(r.path), copyMirrorDirName)
+}
+
 // CopyMirrorDir is where the local mirror of entry's S3 snapshots lives:
 // <state dir>/copy-mirror/<id>/<digest of the bucket and prefix>. "" when the
 // entry has no mirror: it keeps a local folder (that folder is the copy), it
@@ -79,7 +88,7 @@ func (r *Registry) CopyMirrorDir(entry ServerEntry) string {
 		return ""
 	}
 	sum := sha256.Sum256([]byte(strings.TrimSuffix(entry.BaselineS3, "/")))
-	return filepath.Join(filepath.Dir(r.path), copyMirrorDirName, entry.ID, hex.EncodeToString(sum[:8]))
+	return filepath.Join(r.CopyMirrorRoot(), entry.ID, hex.EncodeToString(sum[:8]))
 }
 
 // errLocalDirInvalid marks a refusal of the folder itself, which the handlers

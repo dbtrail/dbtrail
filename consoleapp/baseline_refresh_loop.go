@@ -1840,6 +1840,9 @@ func uploadCopiesAndInvalidate(ctx context.Context, snapshotDir, s3URL string, c
 // invalidation, and the pointer-only failure read as a success.
 func afterUpload(s3URL string, n int, err error) (int, error) {
 	invalidateS3Inventory(s3URL)
+	// A snapshot may have just landed in a bucket some server's SQL mirror
+	// follows (#2302): look now, not at the next interval.
+	kickCopyMirror()
 	if warn, _ := baseline.SplitPointerError(err); warn != nil {
 		// The snapshot is in S3, complete, and discoverable: only the root's
 		// newest-snapshot pointer (#2052) is behind. Reporting the upload as
