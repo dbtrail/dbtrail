@@ -174,12 +174,29 @@ func reportCopyMirror(t copyMirrorTarget, res copymirror.Result, err error, prev
 
 // sweepCopyMirrors removes the mirror folders no server uses any more: a
 // server's folder for a bucket it no longer points at, a removed server's,
-// one of a server that now keeps a local folder. Only folders two levels
-// below the mirror root, which is this code's own; a file or a link there is
-// left alone.
+// one of a server that now keeps a local folder.
+//
+// It deletes a whole tree, so it proves the tree is a mirror first, at every
+// level, and leaves alone anything it cannot prove:
+//
+//   - the mirror root and the server's folder are real folders (not links)
+//     of this process's user that no other user can write into (ownFolder):
+//     where another user can write, an entry can be swapped for a link
+//     between the check and the removal;
+//   - the folder to remove is one too, and carries the file a mirror writes
+//     at its root (copymirror.SourceFile). A folder without it is not a
+//     mirror: removed only if it is empty, which is what a mirror made and
+//     never started looks like.
 func sweepCopyMirrors(reg *console.Registry) {
 	root := reg.CopyMirrorRoot()
 	if root == "" {
+		return
+	}
+	if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if why := ownFolder(root); why != "" {
+		warnCopyMirrorSweepOnce(root, "copy mirror: mirror folders that are no longer used are not removed, because the folder that holds them cannot be trusted", why)
 		return
 	}
 	wanted := map[string]bool{}
@@ -188,34 +205,50 @@ func sweepCopyMirrors(reg *console.Registry) {
 	}
 	servers, err := os.ReadDir(root)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			slog.Warn("copy mirror: cannot look for mirror folders that are no longer used", "dir", root, "error", err)
-		}
+		warnCopyMirrorSweepOnce(root, "copy mirror: cannot look for mirror folders that are no longer used", err.Error())
 		return
 	}
 	for _, s := range servers {
-		if !s.IsDir() {
+		serverDir := filepath.Join(root, s.Name())
+		if !s.IsDir() || ownFolder(serverDir) != "" {
 			continue
 		}
-		serverDir := filepath.Join(root, s.Name())
 		mirrors, err := os.ReadDir(serverDir)
 		if err != nil {
-			slog.Warn("copy mirror: cannot look for mirror folders that are no longer used", "dir", serverDir, "error", err)
+			warnCopyMirrorSweepOnce(serverDir, "copy mirror: cannot look for mirror folders that are no longer used", err.Error())
 			continue
 		}
 		for _, m := range mirrors {
 			dir := filepath.Join(serverDir, m.Name())
-			if !m.IsDir() || wanted[dir] {
+			if !m.IsDir() || wanted[dir] || ownFolder(dir) != "" {
+				continue
+			}
+			if fi, err := os.Lstat(filepath.Join(dir, copymirror.SourceFile)); err != nil || !fi.Mode().IsRegular() {
+				// Not shown to be a mirror. Gone if it is empty; otherwise
+				// it is somebody's, and stays.
+				if os.Remove(dir) != nil {
+					warnCopyMirrorSweepOnce(dir, "copy mirror: a folder among the mirrors is not a mirror and was left as it is", "it has no "+copymirror.SourceFile)
+				}
 				continue
 			}
 			if err := os.RemoveAll(dir); err != nil {
-				slog.Warn("copy mirror: could not remove a mirror folder no server uses any more", "dir", dir, "error", err)
+				warnCopyMirrorSweepOnce(dir, "copy mirror: could not remove a mirror folder no server uses any more", err.Error())
 				continue
 			}
 			slog.Info("copy mirror: removed a mirror folder no server uses any more", "dir", dir)
 		}
 		// Gone if that left it empty; a folder with anything in it stays.
 		_ = os.Remove(serverDir)
+	}
+}
+
+// copyMirrorSweepWarned keeps a sweep that runs every few minutes from saying
+// the same thing about the same folder every time.
+var copyMirrorSweepWarned sync.Map
+
+func warnCopyMirrorSweepOnce(dir, msg, why string) {
+	if _, said := copyMirrorSweepWarned.LoadOrStore(dir+"\x00"+why, true); !said {
+		slog.Warn(msg, "dir", dir, "why", why)
 	}
 }
 

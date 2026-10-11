@@ -107,11 +107,11 @@ func TestCopyMirrorRound_stopsWhenTheDaemonDoes(t *testing.T) {
 // Folders nobody mirrors any more are removed: another bucket's for the same
 // server, a removed server's, a server's that now keeps a local folder.
 // Nothing outside the mirror root is touched, and nothing in it that is not
-// a folder this code makes.
+// shown to be a mirror.
 func TestSweepCopyMirrors(t *testing.T) {
 	reg := mirrorRegistry(t, mirrorEntry("kept", "", "s3://bucket/a"), mirrorEntry("local", t.TempDir(), "s3://bucket/b"))
 	state := filepath.Dir(reg.Path())
-	root := filepath.Join(state, "copy-mirror")
+	root := reg.CopyMirrorRoot()
 	var kept, local console.ServerEntry
 	for _, e := range reg.List() {
 		if e.Name == "kept" {
@@ -121,21 +121,26 @@ func TestSweepCopyMirrors(t *testing.T) {
 		}
 	}
 	current := reg.CopyMirrorDir(kept)
-	mk := func(parts ...string) string {
+	mk := func(file string, parts ...string) string {
 		p := filepath.Join(parts...)
-		if err := os.MkdirAll(p, 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Join(p, "2026-10-01T10-00-00Z", "shop"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(p, "file"), []byte("x"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(p, file), []byte("s3://bucket/x\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return p
 	}
-	mk(current)
-	otherBucket := mk(root, kept.ID, "0123456789abcdef")
-	goneServer := mk(root, "deadbeefdeadbeef", "0123456789abcdef")
-	nowLocal := mk(root, local.ID, "0123456789abcdef")
-	outside := mk(state, "snapshots", kept.ID)
+	mk(copymirror.SourceFile, current)
+	otherBucket := mk(copymirror.SourceFile, root, kept.ID, "0123456789abcdef")
+	goneServer := mk(copymirror.SourceFile, root, "deadbeefdeadbeef", "0123456789abcdef")
+	nowLocal := mk(copymirror.SourceFile, root, local.ID, "0123456789abcdef")
+	notAMirror := mk("somebodys.txt", root, kept.ID, "fedcba9876543210")
+	neverStarted := filepath.Join(root, kept.ID, "0000000000000000")
+	if err := os.Mkdir(neverStarted, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := mk(copymirror.SourceFile, state, "snapshots", kept.ID)
 	stray := filepath.Join(root, "notes.txt")
 	if err := os.WriteFile(stray, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
@@ -147,27 +152,94 @@ func TestSweepCopyMirrors(t *testing.T) {
 
 	sweepCopyMirrors(reg)
 
-	for _, gone := range []string{otherBucket, goneServer, nowLocal} {
-		if _, err := os.Stat(gone); !errors.Is(err, os.ErrNotExist) {
+	for _, gone := range []string{otherBucket, goneServer, nowLocal, neverStarted, filepath.Join(root, "deadbeefdeadbeef")} {
+		if _, err := os.Lstat(gone); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s is still there", gone)
 		}
 	}
-	for _, stays := range []string{current, outside, stray, filepath.Join(outside, "file")} {
-		if _, err := os.Stat(stays); err != nil {
+	for _, stays := range []string{current, outside, stray, link, notAMirror,
+		filepath.Join(outside, copymirror.SourceFile), filepath.Join(notAMirror, "somebodys.txt")} {
+		if _, err := os.Lstat(stays); err != nil {
 			t.Errorf("%s was removed: %v", stays, err)
 		}
-	}
-	if _, err := os.Lstat(link); err != nil {
-		t.Errorf("a link inside the mirror root was removed: %v", err)
-	}
-	// No folder left behind for a server with nothing to mirror.
-	if _, err := os.Stat(filepath.Join(root, "deadbeefdeadbeef")); !errors.Is(err, os.ErrNotExist) {
-		t.Error("the removed server's folder is still there")
 	}
 
 	// No registry file, no root: nothing to do, nothing to fail.
 	sweepCopyMirrors(nil)
 	sweepCopyMirrors(mirrorRegistry(t))
+}
+
+// A tree is deleted only below folders nobody else could have rearranged.
+func TestSweepCopyMirrors_trustsNoFolderItCannotVouchFor(t *testing.T) {
+	stale := func(t *testing.T) (reg *console.Registry, dir string) {
+		t.Helper()
+		reg = mirrorRegistry(t, mirrorEntry("kept", "", "s3://bucket/a"))
+		dir = filepath.Join(reg.CopyMirrorRoot(), reg.List()[0].ID, "0123456789abcdef")
+		if err := os.MkdirAll(filepath.Join(dir, "2026-10-01T10-00-00Z"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, copymirror.SourceFile), []byte("s3://bucket/old\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return reg, dir
+	}
+	t.Run("the control: a stale mirror in trusted folders is removed", func(t *testing.T) {
+		reg, dir := stale(t)
+		sweepCopyMirrors(reg)
+		if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("the stale mirror was not removed, so the cases below prove nothing")
+		}
+	})
+	for name, spoil := range map[string]func(t *testing.T, reg *console.Registry, dir string){
+		"the mirror root is a link": func(t *testing.T, reg *console.Registry, _ string) {
+			root := reg.CopyMirrorRoot()
+			moved := root + "-real"
+			if err := os.Rename(root, moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(moved, root); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"the mirror root is writable by others": func(t *testing.T, reg *console.Registry, _ string) {
+			if err := os.Chmod(reg.CopyMirrorRoot(), 0o777); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"the server's folder is writable by others": func(t *testing.T, _ *console.Registry, dir string) {
+			if err := os.Chmod(filepath.Dir(dir), 0o777); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"the folder itself is writable by others": func(t *testing.T, _ *console.Registry, dir string) {
+			if err := os.Chmod(dir, 0o777); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"the folders belong to another user": func(t *testing.T, _ *console.Registry, _ string) {
+			real := currentUID
+			currentUID = func() int { return real() + 1 }
+			t.Cleanup(func() { currentUID = real })
+		},
+		"the mirror's source file is a link": func(t *testing.T, _ *console.Registry, dir string) {
+			p := filepath.Join(dir, copymirror.SourceFile)
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("/etc/hosts", p); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reg, dir := stale(t)
+			spoil(t, reg, dir)
+			sweepCopyMirrors(reg)
+			if _, err := os.Stat(filepath.Join(dir, "2026-10-01T10-00-00Z")); err != nil {
+				t.Errorf("a tree was deleted below a folder that cannot be vouched for: %v", err)
+			}
+		})
+	}
 }
 
 func TestKickCopyMirror_neverBlocksAndCoalesces(t *testing.T) {
