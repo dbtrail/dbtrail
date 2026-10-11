@@ -85,6 +85,9 @@ type connManager struct {
 	// (and thus disables reconstruct) on every bundle, because neither archives
 	// nor baseline reads apply RBAC redaction.
 	profileActive bool
+	// lazyIndex: a server's index is not asked to answer when the server is
+	// first selected (Config.LazyIndex).
+	lazyIndex bool
 
 	// defaultBaselineDir / defaultBaselineS3 are the process-wide
 	// --baseline-dir / --baseline-s3 flags: the command-line server's
@@ -282,6 +285,19 @@ func (cm *connManager) buildBundle(entry ServerEntry) (*bundle, error) {
 	}
 	if cfg.DBName == "" {
 		return nil, fmt.Errorf("server %q: DSN must include a database name", entry.Name)
+	}
+	if cm.lazyIndex {
+		db, err := config.Open(entry.DSN)
+		if err != nil {
+			return nil, fmt.Errorf("server %q: %s", entry.Name, scrubDSNError(err, entry.DSN))
+		}
+		b := newBundleDerived(db, cfg.DBName, entry, cm.profileActive)
+		b.dsn = entry.DSN
+		// The schema resolver is the recovery pages' and is read from the
+		// index: not loaded here, and marked so nothing reads its absence
+		// as "this index has no schema snapshot".
+		b.resolverUnavailable = true
+		return b, nil
 	}
 	db, err := config.Connect(entry.DSN)
 	if err != nil {

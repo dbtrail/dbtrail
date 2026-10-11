@@ -194,6 +194,23 @@ func Connect(dsn string) (*sql.DB, error) {
 	return db, nil
 }
 
+// Open is Connect without the ping: the DSN is checked and the pool is made,
+// and nothing is asked of the server until the first query. For a caller
+// that must come up, and answer what does not need this database, while the
+// database is away; a query then fails with the connection's own error, and
+// works again when the server is back.
+func Open(dsn string) (*sql.DB, error) {
+	cfg, err := normalizeDSN(dsn)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		return nil, fmt.Errorf("failed to open MySQL connection: %w", err)
+	}
+	return db, nil
+}
+
 // pingBounded verifies a freshly opened connection within the DSN's own connect
 // budget (cfg.Timeout, defaultTimeout when the DSN sets none).
 //
