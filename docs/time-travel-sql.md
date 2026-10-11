@@ -2094,6 +2094,27 @@ and `bintrail_read_routing_copy_snapshot_timestamp_seconds`, per server.
 `time()` minus that one is the copy's age, the number to alert on here, the
 way replica lag is alerted on. See [Read routing metrics](observability.md#read-routing-bintrail_read_routing_decisions_total).
 
+The same address answers `GET /status` with the router's numbers as one JSON
+document: for every server, how many statements the copy answered, how many
+MySQL, how many were refused and for which reasons, and the time of the
+copy's snapshot; and once for the whole process, the pool (workers, running,
+waiting, threads and memory each). The snapshot times are the ones read for
+the metric, every 30 seconds, and `copy_snapshots_read_at` says when: a
+time much older than that means the reading stopped, and the snapshot times
+are the last ones known. A server left out of a reading (its copy could not
+be read, or it has none) has no `copy_snapshot`; the router's log at debug
+level says which. Three yes-or-no fields say what the counts cannot:
+`cannot_route` (the server's statements are refused), `account_refused` (the
+source turned the router's login away, so clients get error 2006 while the
+counts go on rising) and `session_untracked`. Like
+`/metrics` it asks for no password, so it carries counts, times and the
+router's own settings only: never an account's name, nor what a source
+answered a login. Those stay in the router's log.
+
+```sh
+curl -s http://127.0.0.1:9091/status
+```
+
 **Without the index.** A server's index database can be away (restarting,
 unreachable from the router's host) and the router still serves that server:
 forwarding and the copy's tables do not read the index. Time travel

@@ -3272,8 +3272,20 @@ func oneRun(ctx context.Context, cfg Config) error {
 // and the `bintrail-console watch` daemon (one endpoint for all supervised streams;
 // the default registry is process-global).
 func StartMetricsServer(addr string) (shutdown func(), err error) {
+	return StartMetricsServerWith(addr, nil)
+}
+
+// StartMetricsServerWith is StartMetricsServer with more routes on the same
+// listener, by ServeMux pattern ("GET /status"): for a process that has
+// something of its own to say where its metrics are. Give no pattern for
+// /metrics: the same one panics as a route registered twice, and one with a
+// method ("GET /metrics") is taken as more specific and replaces the metrics.
+func StartMetricsServerWith(addr string, more map[string]http.Handler) (shutdown func(), err error) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
+	for pattern, h := range more {
+		mux.Handle(pattern, h)
+	}
 	srv := &http.Server{Handler: mux}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {

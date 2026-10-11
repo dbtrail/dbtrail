@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It answers `SHOW ROUTER STATUS` on its own port (the copy's age, who
   answered, the pool) and, with `--metrics-addr`, exports the copy's snapshot
   time per server so its age can be alerted on like replica lag.
+  The same address answers `GET /status` with those numbers as one JSON
+  document, every server and the pool, for a program to read (#2318).
   The Docker stack starts it as the `router` service (`docker-compose.yml`
   is version 3: download the current file to get it), with the state volume
   mounted read-only, and read-only itself: it refuses writes unless

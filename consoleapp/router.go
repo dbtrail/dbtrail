@@ -2,11 +2,13 @@ package consoleapp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -77,7 +79,7 @@ func addRouterFlags(cmd *cobra.Command) {
 	def := readrouter.DefaultPolicy()
 	f := cmd.Flags()
 	f.String("listen", defaultRouterListen, "Address the MySQL-protocol port listens on (host:port). Env BINTRAIL_ROUTER_LISTEN.")
-	f.String("metrics-addr", "", "Address to expose Prometheus metrics on (e.g. 127.0.0.1:9091); empty = none. Not the capture process's address: each process serves its own. Env BINTRAIL_ROUTER_METRICS_ADDR.")
+	f.String("metrics-addr", "", "Address to expose Prometheus metrics on (e.g. 127.0.0.1:9091); empty = none. The same address answers /status, the router's numbers as JSON, which the web interface reads when it is given this address (BINTRAIL_CONSOLE_ROUTER_URL). Neither asks for a password. Not the capture process's address: each process serves its own. Env BINTRAIL_ROUTER_METRICS_ADDR.")
 	f.String("token", "", "Access token: the password every client of the port uses. With one, only the token opens the port. Without one, the port opens when the MySQL port is turned on in the web interface, with the password created there, and closes when it is turned off. Env BINTRAIL_CONSOLE_TOKEN.")
 	f.String("servers-file", "", "Path to the server registry the web interface manages (default ~/.config/bintrail/console-servers.yaml). Read, never written. Env BINTRAIL_CONSOLE_SERVERS.")
 	f.String("auth-file", "", "Path to the web interface auth file, when it is not the default: only so a statement cannot read it through a copy directory that contains it. Env BINTRAIL_CONSOLE_AUTH.")
@@ -246,16 +248,41 @@ func newRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server,
 // apart at the closest.
 const routerCopySnapshotEvery = 30 * time.Second
 
+// routerCopySnapshots is what the last reading of the copies' snapshot times
+// found, kept so the router's status document answers from memory: reading
+// them lists folders, once per server.
+type routerCopySnapshots struct {
+	mu     sync.Mutex
+	at     map[string]time.Time
+	readAt time.Time
+}
+
+func (c *routerCopySnapshots) set(at map[string]time.Time, readAt time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at, c.readAt = at, readAt
+}
+
+// get is the last reading and when it was taken; a zero time is "not read
+// yet", which is not the same as "no server has a copy".
+func (c *routerCopySnapshots) get() (map[string]time.Time, time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at, c.readAt
+}
+
 // exportCopySnapshots keeps bintrail_read_routing_copy_snapshot_timestamp_seconds
-// in step with the copies, until ctx ends. A server whose copy can no longer
-// be read loses its series, so an alert on the age does not go on reading a
-// number that stopped moving.
-func exportCopySnapshots(ctx context.Context, srv *console.Server, every time.Duration) {
+// in step with the copies, until ctx ends, and leaves each reading in last
+// for the status document. A server whose copy can no longer be read loses
+// its series, so an alert on the age does not go on reading a number that
+// stopped moving.
+func exportCopySnapshots(ctx context.Context, read func(context.Context) map[string]time.Time, every time.Duration, last *routerCopySnapshots) {
 	known := map[string]bool{}
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
-		now := srv.CopySnapshots(ctx)
+		now := read(ctx)
+		last.set(now, time.Now())
 		for id, at := range now {
 			observe.SetCopySnapshot(id, at)
 			known[id] = true
@@ -272,6 +299,52 @@ func exportCopySnapshots(ctx context.Context, srv *console.Server, every time.Du
 		case <-t.C:
 		}
 	}
+}
+
+// routerStatusPath is where the status document is served, on the address
+// the metrics are on.
+const routerStatusPath = "/status"
+
+// routerStatus builds the document from the numbers and the last reading of
+// the copies. A server that has a copy and was sent nothing yet gets an
+// entry of zeros with its snapshot: its copy's age is a number to watch
+// before the first statement.
+func routerStatus(st routerSettings, numbers console.RouterNumbers, last *routerCopySnapshots) console.RouterStatusDoc {
+	doc := console.RouterStatusDoc{
+		Version: console.RouterStatusVersion, Listen: st.Listen, ReadOnly: st.ReadOnly,
+		CostThreshold: st.Policy.CostThreshold, ScanRows: st.Policy.ScanRows,
+		RouterNumbers: numbers,
+	}
+	if doc.Servers == nil {
+		doc.Servers = map[string]console.RouterServerNumbers{}
+	}
+	at, readAt := last.get()
+	if !readAt.IsZero() {
+		doc.CopySnapshotsReadAt = readAt.UTC().Format(time.RFC3339)
+	}
+	for id, when := range at {
+		if when.IsZero() {
+			continue
+		}
+		n, ok := doc.Servers[id]
+		if !ok {
+			n = console.RouterServerNumbers{Reasons: map[string]uint64{}}
+		}
+		n.CopySnapshot = when.UTC().Format(time.RFC3339)
+		doc.Servers[id] = n
+	}
+	return doc
+}
+
+// routerStatusHandler serves the document. numbers is read on every request.
+func routerStatusHandler(st routerSettings, numbers func() console.RouterNumbers, last *routerCopySnapshots) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		if err := json.NewEncoder(w).Encode(routerStatus(st, numbers(), last)); err != nil {
+			slog.Warn("router: the status document could not be written", "error", err)
+		}
+	})
 }
 
 // routerPortFile is the saved setting whose password the router accepts, ""
@@ -514,12 +587,15 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 	srv.RefreshFollowedFiles()
 	go srv.FollowFiles(ctx, 0)
 	if st.MetricsAddr != "" {
-		stopMetrics, err := streamrun.StartMetricsServer(st.MetricsAddr)
+		last := &routerCopySnapshots{}
+		stopMetrics, err := streamrun.StartMetricsServerWith(st.MetricsAddr, map[string]http.Handler{
+			"GET " + routerStatusPath: routerStatusHandler(st, srv.RouterNumbers, last),
+		})
 		if err != nil {
 			return err
 		}
 		defer stopMetrics()
-		go exportCopySnapshots(ctx, srv, routerCopySnapshotEvery)
+		go exportCopySnapshots(ctx, srv.CopySnapshots, routerCopySnapshotEvery, last)
 	}
 
 	cfg := routerFlashbackConfig(st)
