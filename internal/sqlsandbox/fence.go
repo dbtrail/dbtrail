@@ -144,7 +144,7 @@ func findFence(mount string, procSelfCgroup []byte, delegated func(dir string) b
 		return fence{root: dirOf(above)}
 	}
 	if !ours(self) {
-		return fence{why: "DBTrail was not handed over a cgroup to manage (under systemd, add Delegate=yes to its unit)"}
+		return fence{why: "DBTrail was not handed over a cgroup to manage (under systemd, add Delegate=yes to its unit; a systemd that does not mark the cgroup it hands over, such as 249 on Ubuntu 22.04, leaves it so even with that line)"}
 	}
 	if !hasMemory(self) {
 		return fence{why: "the cgroup DBTrail was handed does not control memory (whoever starts DBTrail has to pass the memory controller down to it)"}

@@ -117,6 +117,8 @@ func TestPackaging_theUnitMatchesWhatThePackageInstalls(t *testing.T) {
 // arguments; getent answers from EXISTING (space separated names). systemctl
 // answers is-enabled from ENABLED, and is-active from ACTIVE: "yes", "no", or
 // "once" for a service that is running when asked and gone after a restart.
+// bintrail-router.service answers is-active from ROUTER_ACTIVE instead, so a
+// case can have one service running and the other not.
 func stub(t *testing.T) (path, log string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -125,9 +127,11 @@ func stub(t *testing.T) (path, log string) {
 	for name, body := range map[string]string{
 		"systemctl": rec + `case "$1" in
   is-enabled) [ "$ENABLED" = yes ] ;;
-  is-active) case "$ACTIVE" in
+  is-active) state=$ACTIVE; mark=$STUB_LOG.asked
+    case "$*" in *bintrail-router.service*) state=$ROUTER_ACTIVE; mark=$STUB_LOG.router-asked ;; esac
+    case "$state" in
       yes) exit 0 ;;
-      once) [ ! -e "$STUB_LOG.asked" ] && : > "$STUB_LOG.asked" ;;
+      once) [ ! -e "$mark" ] && : > "$mark" ;;
       *) exit 1 ;;
     esac ;;
 esac
@@ -299,6 +303,106 @@ func TestPackaging_postremoveDeletesOnlyTheSettingsFileAndOnlyOnAPurge(t *testin
 	for _, arg := range []string{"remove", "upgrade", "0", "1"} {
 		if calls, _ := runScript(t, "postremove.sh", "", arg); calls != "systemctl daemon-reload\n" {
 			t.Errorf("postremove %s: want only a daemon-reload, got:\n%s", arg, calls)
+		}
+	}
+}
+
+// The router's unit is a second service of the same package. It runs the same
+// binary as the same account from the same settings file, so the two read the
+// same servers file, and it must not hang off the capture service: it is a
+// service of its own so that restarting capture does not drop its connections.
+func TestPackaging_theRouterUnitRunsBesideTheCaptureUnitAndNotUnderIt(t *testing.T) {
+	cfg := read(t, "../../build/.goreleaser.yaml")
+	capture := read(t, filepath.Join(pkgDir, "bintrail-console.service"))
+	router := read(t, filepath.Join(pkgDir, "bintrail-router.service"))
+	line := func(unit, key string) string {
+		t.Helper()
+		m := regexp.MustCompile(`(?m)^`+key+`=(.*)$`).FindAllStringSubmatch(unit, -1)
+		if len(m) != 1 {
+			t.Fatalf("want one %s= line in the unit, found %d", key, len(m))
+		}
+		return m[0][1]
+	}
+	if !strings.Contains(cfg, "dst: /usr/lib/systemd/system/bintrail-router.service\n") {
+		t.Error("the package does not install bintrail-router.service where systemd reads units")
+	}
+	if got := line(router, "ExecStart"); got != "/usr/bin/bintrail-console router" {
+		t.Errorf("ExecStart=%s, want the packaged binary running router", got)
+	}
+	if cmd := read(t, "../../consoleapp/router.go"); !strings.Contains(cmd, "Use:   \"router\",") {
+		t.Error("consoleapp/router.go no longer declares the router command the unit starts")
+	}
+	for _, key := range []string{"EnvironmentFile", "User", "Group", "WorkingDirectory"} {
+		if got, want := line(router, key), line(capture, key); got != want {
+			t.Errorf("%s=%s in the router unit, %s in the capture unit: the two would read different files", key, got, want)
+		}
+	}
+	// The folder belongs to the capture unit, which creates it. A second
+	// StateDirectory= here would have systemd reset its mode from this unit.
+	if strings.Contains(router, "\nStateDirectory") {
+		t.Error("the router unit must not declare the state folder: the capture unit owns it")
+	}
+	if got := line(router, "Restart"); got != "always" {
+		t.Errorf("Restart=%s: applications connect through this port", got)
+	}
+	if got := line(router, "Delegate"); got != "yes" {
+		t.Errorf("Delegate=%s: without it a statement on the copy has no memory ceiling of its own", got)
+	}
+	// Read-only unless the settings file says otherwise. Environment= is the
+	// default and EnvironmentFile= overrides it, whatever their order.
+	if got := line(router, "Environment"); got != "BINTRAIL_CONSOLE_ROUTE_READ_ONLY=1" {
+		t.Errorf("Environment=%s, want the router read-only by default", got)
+	}
+	for _, l := range strings.Split(router, "\n") {
+		if strings.HasPrefix(l, "#") {
+			continue
+		}
+		if strings.Contains(l, "bintrail-console.service") {
+			t.Errorf("the router unit names the capture unit in %q: restarting capture must not touch the router", l)
+		}
+	}
+}
+
+func TestPackaging_postinstallRestartsARunningRouterOnAnUpgradeAndNeverStartsOne(t *testing.T) {
+	needSystemd(t)
+	for _, tc := range []struct {
+		name            string
+		args            []string
+		capture, router string
+		restart, warn   bool
+	}{
+		{"deb upgrade, router running", []string{"configure", "0.103.0"}, "yes", "yes", true, false},
+		{"rpm upgrade, router running", []string{"2"}, "yes", "yes", true, false},
+		{"upgrade, router running and capture stopped", []string{"2"}, "no", "yes", true, false},
+		{"upgrade, router never started", []string{"2"}, "yes", "no", false, false},
+		{"upgrade, and the router does not come back", []string{"2"}, "yes", "once", true, true},
+		{"first install, their own router unit running", []string{"1"}, "no", "yes", false, false},
+		{"deb first install", []string{"configure"}, "no", "no", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls, out := runScriptEnv(t, "postinstall.sh", []string{"ACTIVE=" + tc.capture, "ROUTER_ACTIVE=" + tc.router, "ENABLED=yes"}, tc.args...)
+			if got := strings.Contains(calls, "try-restart bintrail-router.service"); got != tc.restart {
+				t.Errorf("router restart = %v, want %v; calls:\n%s", got, tc.restart, calls)
+			}
+			if strings.Contains(calls, "systemctl enable") || strings.Contains(calls, "systemctl start") {
+				t.Errorf("an install must never enable or start a service, got:\n%s", calls)
+			}
+			if got := strings.Contains(out, "bintrail-router did not come back"); got != tc.warn {
+				t.Errorf("router warning printed = %v, want %v; output:\n%s", got, tc.warn, out)
+			}
+			if strings.Contains(out, "bintrail-console did not come back") {
+				t.Errorf("the capture service was fine in every case here, got:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestPackaging_preremoveStopsTheRouterOnARemoval(t *testing.T) {
+	needSystemd(t)
+	for _, arg := range []string{"remove", "0"} {
+		calls, _ := runScript(t, "preremove.sh", "", arg)
+		if !regexp.MustCompile(`(?m)^systemctl disable --now .*bintrail-router\.service`).MatchString(calls) {
+			t.Errorf("preremove %s must stop and disable the router, got:\n%s", arg, calls)
 		}
 	}
 }

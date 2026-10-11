@@ -243,6 +243,11 @@ nfpms:
       # run until the settings name the index.
       - src: build/packaging/bintrail-console/bintrail-console.service
         dst: /usr/lib/systemd/system/bintrail-console.service
+      # The router (#2084): `bintrail-console router` as a second unit of the
+      # same package, reading the same settings file. Not enabled or started
+      # by an install either.
+      - src: build/packaging/bintrail-console/bintrail-router.service
+        dst: /usr/lib/systemd/system/bintrail-router.service
       - src: build/packaging/bintrail-console/bintrail-console.env
         dst: /usr/share/bintrail-console/bintrail-console.env
       - dst: /var/lib/bintrail

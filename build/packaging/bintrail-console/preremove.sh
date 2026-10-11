@@ -8,6 +8,6 @@ set -e
 
 case "$1" in
     remove|0)  # deb: remove. rpm: 0 = last version removed, 1 = upgrade
-        systemctl disable --now bintrail-console.service || true
+        systemctl disable --now bintrail-console.service bintrail-router.service || true
         ;;
 esac

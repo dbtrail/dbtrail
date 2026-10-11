@@ -22,8 +22,10 @@ Restart=always
 RestartSec=5
 # Time for capture to save its position before systemd kills the process.
 TimeoutStopSec=60
-# Hands the control groups below this unit to the service. Nothing uses
-# that yet.
+# Hands the control groups below this unit to the service, which gives each
+# statement on the copy a memory ceiling of its own. That needs a systemd that
+# marks the group it hands over: 255 (Ubuntu 24.04) does, 249 (Ubuntu 22.04)
+# does not, and the service says which at start.
 Delegate=yes
 
 [Install]

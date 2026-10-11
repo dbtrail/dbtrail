@@ -270,6 +270,7 @@ What the package puts on the machine:
 
 | Path | What it is |
 |---|---|
+| `/usr/lib/systemd/system/bintrail-router.service` | The router's unit, off until you enable it (below) |
 | `/usr/lib/systemd/system/bintrail-console.service` | The unit: restarts whenever the process ends without being asked to stop, and gives capture 60 seconds to save its position on a stop |
 | `/etc/bintrail/bintrail-console.env` | The settings, mode `0600` because the index DSN holds a password. Created on install when there is none; no upgrade overwrites it or asks about it |
 | `/var/lib/bintrail` | What DBTrail saves: the servers you add, the login, Claude's token, the work folders of full reads |
@@ -292,7 +293,44 @@ What the package puts on the machine:
   keeps winning over the packaged one. Delete it, then run
   `sudo systemctl daemon-reload`, to move to the packaged unit.
 - The unit sets `Delegate=yes`, which lets the service manage its own control
-  groups. Nothing uses that yet.
+  groups: each statement on the copy then runs under a memory ceiling of its
+  own. That needs a systemd that marks the group it hands over. systemd 255
+  (Ubuntu 24.04) does and 249 (Ubuntu 22.04) does not; the service says which
+  at start.
+
+#### The router, a second service of the same package
+
+The package also installs `bintrail-router.service`, which runs
+`bintrail-console router`: the MySQL port with read routing, apart from
+capture ([The router](./time-travel-sql.md#the-router-the-same-port-as-a-service-of-its-own-experimental)).
+It is not started by an install either.
+
+```sh
+sudo systemctl enable --now bintrail-router
+journalctl -u bintrail-router -f
+```
+
+- It reads **the same settings file** as the capture service, so it serves the
+  servers that one manages. Its own settings are at the end of that file,
+  commented out: `BINTRAIL_ROUTER_LISTEN` (`127.0.0.1:3310` unless set) and
+  `BINTRAIL_ROUTER_METRICS_ADDR`.
+- It **listens only once there is a password**: `BINTRAIL_CONSOLE_TOKEN` in
+  the settings file, or else the password the web interface creates when the
+  MySQL port is turned on there. Until then it waits.
+- That password reads **the source itself, live**, with each server's
+  forwarding account when it has one and its source account otherwise: every
+  table that account may read, captured or not.
+- It is **read-only** unless the settings file says
+  `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0`: a statement that is not a read is
+  refused and never reaches the source.
+- It is **a service of its own**: restarting `bintrail-console` does not
+  restart it or drop its connections. An upgrade restarts it if it was
+  running, and a removal stops and disables it.
+- It has **no memory or CPU ceiling by default** and sizes itself from half of
+  the machine, since capture uses the machine too. To give it ceilings of its
+  own, `sudo systemctl edit bintrail-router` and set, under `[Service]`,
+  `MemoryMax=8G` and `CPUQuota=400%` for example: it then uses all of what it
+  was given.
 
 The package still does not bring mydumper or an index MySQL. Full reads from
 the web interface run the `mydumper` found on the `PATH` of the service, so

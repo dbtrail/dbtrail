@@ -32,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is version 3: download the current file to get it), with the state volume
   mounted read-only, and read-only itself: it refuses writes unless
   `ROUTER_READ_ONLY=0` is set. `ROUTER_MEMORY` and `ROUTER_CPUS` in `.env`
-  give it ceilings of its own. The packages do not start it yet. See
+  give it ceilings of its own. The `bintrail-console` package installs it as a
+  second systemd service, `bintrail-router`, read-only and off until you
+  enable it (`sudo systemctl enable --now bintrail-router`). See
   [The router](time-travel-sql.md#the-router-the-same-port-as-a-service-of-its-own-experimental).
 
 
