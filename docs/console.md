@@ -429,11 +429,12 @@ supervised binlog stream. Auto-start: a green preflight starts streaming
 immediately; warnings (e.g. short binlog retention) show but don't block.
 
 The **source user** you paste into the form needs `REPLICATION SLAVE,
-REPLICATION CLIENT, SELECT` on the source MySQL — the form spells out the
-exact `CREATE USER` / `GRANT` to copy. DBTrail never writes to the source, and
-capture never locks it. The **Read database now** button needs more,
-`RELOAD` plus `BACKUP_ADMIN` on MySQL/Percona 8.0+ and `SHOW VIEW` for views,
-because a baseline is point-consistent by default. Without the lock privileges
+REPLICATION CLIENT, SELECT` on the source MySQL for capture, and the form
+spells out the exact `CREATE USER` / `GRANT` to copy. DBTrail never writes to
+the source, and capture never locks it. The first copy of your tables
+(**Read database now**) and every later full read need more, so the form's SQL
+grants it too: `RELOAD` plus `BACKUP_ADMIN` on MySQL/Percona 8.0+ and
+`SHOW VIEW` for views, because a baseline is point-consistent by default. Without the lock privileges
 capture keeps running and only the baseline is refused, naming the exact
 `GRANT`; without `SHOW VIEW` the dump itself stops at the first view with
 mydumper's `SHOW VIEW command denied`. On

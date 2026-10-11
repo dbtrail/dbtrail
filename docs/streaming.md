@@ -11,11 +11,19 @@ Before streaming (or monitoring a source from the web interface's "+ Add server"
 ```sql
 CREATE USER 'dbtrail'@'%' IDENTIFIED BY <choose a password>;
 GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'dbtrail'@'%';
+-- For the first copy of your tables (the baseline) and every later full read.
+-- MySQL/Percona 8.0 or later:
+GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO 'dbtrail'@'%';
+-- MariaDB and MySQL 5.7 have no BACKUP_ADMIN; run this instead:
+-- GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';
+-- Managed MySQL (RDS, Aurora, Cloud SQL) and RDS for MariaDB: run this
+-- instead of GRANT RELOAD:
+-- GRANT LOCK TABLES, SHOW VIEW ON *.* TO 'dbtrail'@'%';
 ```
 
 Put a password of your own in quotes where it says `<choose a password>`. As written, MySQL refuses the line on purpose, so no user is created with a password copied from this page. On MariaDB or MySQL 5.7, run the `CREATE USER` line on its own first and check it worked: there, a `GRANT` to a user that does not exist can create it with no password.
 
-That is the complete, minimal set. Each privilege maps to exactly one thing DBTrail does:
+Run both `GRANT` lines. The first one is what capture uses, and each privilege in it maps to exactly one thing DBTrail does:
 
 | Privilege | Why DBTrail needs it |
 |---|---|
@@ -23,16 +31,31 @@ That is the complete, minimal set. Each privilege maps to exactly one thing DBTr
 | `REPLICATION CLIENT` | Discover the start position and detect gaps: `SHOW BINARY LOG STATUS` / `SHOW MASTER STATUS`, `SHOW BINARY LOGS`, `@@gtid_purged`, `@@gtid_executed`. |
 | `SELECT` | Snapshot the schema (column types, primary keys, foreign keys) from `information_schema`, and run the preflight checks. |
 
-DBTrail **never writes to the source**, and nothing on the capture path ever locks it. Capture does not need `RELOAD`, `LOCK TABLES`, `PROCESS`, `SHOW VIEW`, or `EXECUTE`.
+DBTrail **never writes to the source**, and nothing on the capture path ever locks it. Capture does not use `RELOAD`, `LOCK TABLES`, `PROCESS`, `SHOW VIEW`, or `EXECUTE`. The second `GRANT` is for the baseline, below.
 
-### If you also want baselines: add a lock privilege and `SHOW VIEW`
+<a id="if-you-also-want-baselines-add-a-lock-privilege-and-show-view"></a>
 
-Capture alone gives you the change history. A **baseline** — the full-table
-snapshot that `reconstruct`, Time-travel and the web interface's **Create baseline**
-button merge those changes onto — is a `mydumper` run, and it needs more:
+### The baseline needs a lock privilege and `SHOW VIEW`
+
+A **baseline** is the first full copy of your tables, and it is part of the
+setup, not an extra. The copy you query and its scheduled updates,
+`reconstruct`, Time-travel and `verify` all start from one. The web interface
+takes it with **Read database now**, and the command line with
+`bintrail dump` and `bintrail baseline`. Capture on its own only gives you the
+changes made from now on (row history and undo): a row nobody has touched
+since is not in it.
+
+DBTrail reads the source in full again later too: when a column is added,
+dropped, renamed or retyped, on a `TRUNCATE`, `DROP` or `RENAME` of a table,
+and when a new table appears. So the account needs these privileges for as
+long as it is in use, not just on the first day.
+
+Grant them when you create the user. Leaving them out fails late: capture
+starts clean, and the first copy is refused hours or days afterwards. A
+baseline is a `mydumper` run, and it needs:
 
 ```sql
--- Only if you want baselines. MySQL/Percona 8.0 or later:
+-- MySQL/Percona 8.0 or later:
 GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO 'dbtrail'@'%';
 -- MariaDB and MySQL 5.7 (BACKUP_ADMIN does not exist there):
 -- GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';
@@ -98,8 +121,9 @@ The snapshot records the mode it used. `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE`
 choice, for every server. `bintrail dump` does not choose: pass
 `--lock-mode lock-all` there.
 
-If you grant neither, capture keeps working normally and only the baseline is
-refused — with a message naming the exact `GRANT` to run. It never quietly falls
+If you grant neither, capture still runs and the baseline is refused, with a
+message naming the exact `GRANT` to run. Until it is granted there is no copy
+to query, to update or to rebuild a table from. It never quietly falls
 back to a snapshot it cannot vouch for. The low-privilege escape hatches are
 `safe-no-lock` (needs nothing extra, but **aborts** rather than write a torn
 snapshot, so expect it to refuse on a write-active source) and `no-lock` (accepts
@@ -112,6 +136,9 @@ CREATE USER 'dbtrail'@'%' IDENTIFIED BY <choose a password>;
 GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'dbtrail'@'%';
 GRANT SELECT ON shop.* TO 'dbtrail'@'%';        -- repeat per monitored schema
 ```
+
+The baseline `GRANT` from the first block stays as written: `RELOAD` and
+`BACKUP_ADMIN` are global-only as well.
 
 If you scope `SELECT`, it must cover **every column of every monitored table**, or the schema snapshot fails with `no columns found for the requested schemas`.
 

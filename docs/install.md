@@ -40,9 +40,11 @@ With a bare `docker run`, that restart is yours to set up.
   `binlog_row_image = FULL`. Don't guess: `bintrail doctor` checks everything
   and prints copy-pasteable remediation for whatever is missing.
 - A MySQL user on the source with `REPLICATION SLAVE`, `REPLICATION CLIENT`,
-  and `SELECT` — plus, if you want baselines (point-consistent by default),
-  `RELOAD` (and `BACKUP_ADMIN` on MySQL/Percona 8.0+) and `SHOW VIEW`; see
-  [streaming.md](./streaming.md#if-you-also-want-baselines-add-a-lock-privilege-and-show-view).
+  and `SELECT` for capture, plus `RELOAD` (and `BACKUP_ADMIN` on
+  MySQL/Percona 8.0+) and `SHOW VIEW` for the first copy of your tables (the
+  baseline) and every later full read. On managed MySQL (RDS, Aurora, Cloud
+  SQL) grant `LOCK TABLES` instead of `RELOAD` and `BACKUP_ADMIN`. See
+  [streaming.md](./streaming.md#the-baseline-needs-a-lock-privilege-and-show-view).
 - An **index MySQL 8.0+** database for DBTrail's data (the Compose stack
   bundles one).
 - **Other sources:** besides MySQL, DBTrail can also capture from **MariaDB**

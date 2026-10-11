@@ -15020,7 +15020,7 @@ function buildServerForm() {
   const grantHint = tagFlavor(el("p", { class: "form-hint", style: "margin-top:10px" }), "mysql mariadb");
   grantHint.append("Source user needs ");
   grantHint.append(el("code", { text: "REPLICATION SLAVE, REPLICATION CLIENT, SELECT" }));
-  grantHint.append(" to capture, plus the snapshot line if you want snapshots. Create one on the source; copy and run:");
+  grantHint.append(" to capture, and the snapshot line for the first copy of your tables. Create one on the source; copy and run:");
   mon.append(grantHint);
   const grants = grantBlocks("", "");
   mon.append(tagFlavor(el("pre", { class: "form-code", "data-grant": "mysql", text: grants.mysql }), "mysql"));

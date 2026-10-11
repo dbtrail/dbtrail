@@ -25,9 +25,9 @@ rebuild a row or a table as it was.
   ```sql
   CREATE USER 'dbtrail'@'%' IDENTIFIED BY <choose a password>;
   GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'dbtrail'@'%';
-  -- Only if you want baselines (Time-travel / reconstruct): they are
-  -- point-consistent by default, and that guarantee needs a lock.
-  -- SHOW VIEW lets the dump copy views.
+  -- For the first copy of your tables (the baseline) and every later full
+  -- read. A baseline is point-consistent by default, and that guarantee
+  -- needs a lock. SHOW VIEW lets the dump copy views.
   GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO 'dbtrail'@'%';
   -- MariaDB and MySQL 5.7 have no BACKUP_ADMIN; run this instead:
   -- GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';
