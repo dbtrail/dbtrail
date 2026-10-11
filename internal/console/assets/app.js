@@ -13097,6 +13097,14 @@ async function renderConnect() {
   // refusal or the empty console must say why the panel is missing. The
   // default id is THIS response's, the one a header-less request resolves to
   // right now, not the one the last loadServers left behind.
+  // A router's numbers (#2318), read by the server from the router, which
+  // may take two seconds when the router is away: asked now and awaited
+  // last, so the page does not wait for it on top of the rest. undefined
+  // draws no panel (a session without settings:read, or a server too old to
+  // have the route), null says the read failed.
+  const rtAsked = sessionMay("settings:read")
+    ? api("/api/router").then((v) => v, (err) => (err && (err.status === 403 || err.status === 404) ? undefined : null))
+    : Promise.resolve(undefined);
   let servers = [], serversDefault = "", serversFailed = false;
   try {
     const r = await api("/api/servers");
@@ -13117,6 +13125,7 @@ async function renderConnect() {
   if (sessionMay("settings:read")) {
     try { sqlMem = await api("/api/sql-settings"); } catch (err) { sqlMem = err.status === 403 ? undefined : null; }
   }
+  const rtView = await rtAsked;
   // Where the selected server's snapshots live, for the Iceberg export
   // command (#1573): location_only is the Backups listing's own resolution,
   // answered without reading the storage or opening the server's index. Not
@@ -13149,7 +13158,7 @@ async function renderConnect() {
     // too, and "this server" would name nothing.
     const cur = servers.find((s) => s.id === (currentServer || serversDefault));
     buildConnect(servers, tokStatus, minted, fbStatus,
-      { cur: cur, loc: bLoc, failed: (bLocFailed && !!cur) || serversFailed }, sqlMem);
+      { cur: cur, loc: bLoc, failed: (bLocFailed && !!cur) || serversFailed }, sqlMem, rtView);
   } catch (err) {
     if (minted) toastError("Token display interrupted; the plain token is gone. Click New token to get a fresh one");
     const v = VIEW(); clear(v); v.append(pageHead("MCP Server", null)); renderError(v, err);
@@ -13191,7 +13200,7 @@ function copyText(text, what) {
   clip.writeText(text).then(() => toast(what + " copied to clipboard"), () => toastError("Copy failed."));
 }
 
-function buildConnect(servers, tokStatus, minted, fbStatus, ice, sqlMem) {
+function buildConnect(servers, tokStatus, minted, fbStatus, ice, sqlMem, rtView) {
   const v = VIEW(); clear(v);
   const sub = el("p", { class: "page-sub" },
     "Three steps and Claude can answer questions about your database history. It can only read; it can never change anything.");
@@ -13204,6 +13213,11 @@ function buildConnect(servers, tokStatus, minted, fbStatus, ice, sqlMem) {
   v.append(cards);
   if (capsCache.mcp) v.append(otherClientsPanel(servers));
   v.append(sqlClientPanel(servers, fbStatus));
+  if (rtView !== undefined) {
+    // The server this page is about, as the Iceberg panel has it.
+    const rp = routerPanel(rtView, ice && ice.cur);
+    if (rp) v.append(rp);
+  }
   if (sqlMem !== undefined) v.append(sqlMemoryPanel(sqlMem));
   // The DuckDB schema card, on this page with or without the watch daemon
   // (#1573; it sat on Backups from #1581, and here only on a serve-only
@@ -14024,6 +14038,127 @@ const ROUTE_REASON_TEXT = {
   copy_wait_timeout: "the copy was busy: the statement waited 30 seconds for its turn, then MySQL answered",
   copy_results_held: "the port was still sending as many results as it keeps in memory at once: MySQL answered",
 };
+
+// What two reasons mean on a router (#2318): there a statement that finds the
+// copy busy is refused with error 1040, where the port inside the service
+// hands it to MySQL. Every other reason reads as ROUTE_REASON_TEXT says.
+const ROUTER_REASON_TEXT = {
+  copy_queue_full: "every worker was busy and as many statements as may wait were already waiting: refused with error 1040",
+  copy_wait_timeout: "every worker was busy for the whole wait: refused with error 1040",
+  read_only: "refused: not a read, and the router is read-only",
+};
+
+// routerStaleAfterSec: the router reads the copies' snapshot times every 30
+// seconds. A reading older than this, by the clock of the DBTrail that asked,
+// has stopped, and the time shown is the last one known.
+const routerStaleAfterSec = 120;
+
+// routerLines is what the router panel says, one entry per line, from GET
+// /api/router and the server picked in the sidebar: { text, strong } where
+// strong is said first, in bold. Null when no router was configured (no
+// panel). Three states are kept apart: no router, a router that did not
+// answer (never shown as zero statements), and its numbers. Pure, so it is
+// tested in node.
+function routerLines(view, cur) {
+  if (!view) return [{ text: "We could not ask this DBTrail for its router's numbers. Reload the page to try again." }];
+  if (!view.configured) return null;
+  if (view.error || !view.status) {
+    return [
+      { strong: "No numbers from the router.", text: (view.url ? "Asked at " + view.url + ": " : "") + (view.error || "it gave no answer") + "." },
+      { text: "This says nothing about how many statements it answered: its counts are unknown until it answers again. Its MySQL port may still be serving." },
+    ];
+  }
+  const st = view.status, out = [];
+  const port = String(st.listen || "").replace(/^.*:/, "");
+  out.push({ text: "The router is a second MySQL port, run as a service of its own" + (port ? ", on port " + port : "") + ". " +
+    (st.read_only ? "It is read-only: a statement that would change the server is refused and never sent to MySQL."
+      : "It is read-write: writes sent to it run on MySQL.") });
+  if (view.newer) out.push({ strong: "This router is a later version than this page knows.", text: "A number below may be missing or read as zero when the router now says it another way. SHOW ROUTER STATUS on the router's own port is the one to trust until DBTrail is updated too." });
+  if (!cur) {
+    out.push({ text: "Who answered: pick a server in the left sidebar to see its counts." });
+  } else {
+    const name = cur.name || cur.id;
+    const known = !!(st.servers && st.servers[cur.id]);
+    const t = (st.servers && st.servers[cur.id]) || {};
+    const total = (t.copy || 0) + (t.mysql || 0) + (t.refused || 0);
+    const since = st.counting_since ? new Date(st.counting_since) : null;
+    const sinceText = since && !isNaN(since) ? " since " + since.toLocaleString() : "";
+    out.push({ text: "Who answered for " + name + sinceText + ": " + (total === 0 ? (known ? "no statements yet." : "nothing to show. Either no statement was sent for it yet, or the router does not have this server: it reads its own servers file, which must be the one this DBTrail manages.")
+      : (t.mysql || 0) + " by MySQL, " + (t.copy || 0) + " by the copy" + (t.refused ? ", " + t.refused + " refused" : "") + ".") });
+    if (t.cannot_route) out.push({ strong: "The router refuses every statement for this server:", text: "it cannot route for it. The router's log says why." });
+    if (t.account_refused) out.push({ strong: "MySQL refused the router's login for this server.", text: "Its clients get error 2006 until that account is fixed, while the counts above go on rising. The router's log names the account and what MySQL answered." });
+    if (t.session_untracked) out.push({ text: "This server's MySQL does not tell the router when a statement changes a session setting, so one changed inside a stored function is not seen. The router's log says why." });
+    // The copy's age, by the clock of the DBTrail that asked: the browser's
+    // own clock is not used, it can be off by more than the age.
+    const read = view.read_at ? new Date(view.read_at) : null;
+    const readCopies = st.copy_snapshots_read_at ? new Date(st.copy_snapshots_read_at) : null;
+    const snap = t.copy_snapshot ? new Date(t.copy_snapshot) : null;
+    const okDate = (d) => d && !isNaN(d);
+    if (!okDate(readCopies)) {
+      out.push({ text: "The copy's age: the router has not read its copies yet. Refresh in half a minute." });
+    } else {
+      const staleSec = okDate(read) ? (read - readCopies) / 1000 : 0;
+      const stale = staleSec > routerStaleAfterSec ? " The router last looked " + fmtAge(staleSec) + " ago, though it looks every 30 seconds: this is the last snapshot it knew of, and a newer one may exist." : "";
+      if (okDate(snap)) {
+        const age = okDate(read) ? " (" + fmtAge(Math.max(0, (read - snap) / 1000)) + " old)" : "";
+        out.push({ text: "The copy the router reads for " + name + " is the snapshot of " + snap.toLocaleString() + age + ". An expensive SELECT is answered from it whatever its age." + stale });
+      } else {
+        out.push({ text: "The router knows no copy for " + name + ": it has no snapshot, or its copy cannot be read from where the router runs." + stale });
+      }
+    }
+  }
+  const p = st.pool;
+  if (p) {
+    out.push({ text: "Workers for the copy, shared by every server: " + (p.running || 0) + " of " + (p.workers || 0) + " busy, " + (p.waiting || 0) + " " + ((p.waiting || 0) === 1 ? "statement" : "statements") + " waiting. Each statement gets " +
+      (p.threads_each || 0) + " threads and " + (p.memory_each || "its default memory") + ". With every worker busy a statement waits, then is refused with error 1040." });
+  }
+  const rules = [];
+  if (st.cost_threshold > 0) rules.push("MySQL's plan costs at least " + st.cost_threshold);
+  if (st.scan_rows > 0) rules.push("it scans a whole table of at least " + st.scan_rows + " rows");
+  const readAt = view.read_at ? new Date(view.read_at) : null;
+  if (readAt && !isNaN(readAt)) out.push({ text: "These numbers were read at " + readAt.toLocaleTimeString() + ". Refresh reads them again." });
+  out.push({ text: rules.length ? "A SELECT runs on the copy when " + rules.join(" or ") + ". " + (st.read_only ? "Every other read runs on MySQL." : "Everything else, writes included, runs on MySQL.")
+    : "No plan threshold is set (both are 0), so every " + (st.read_only ? "read" : "statement") + " runs on MySQL and nothing reaches the copy." });
+  return out;
+}
+
+// routerPanel (#2318) draws routerLines, with a Refresh that asks again and
+// repaints this panel alone, and the reasons folded under it. Null when no
+// router was configured.
+function routerPanel(view, cur) {
+  if (routerLines(view, cur) === null) return null;
+  const panel = el("section", { class: "ov-panel cn-sql", style: "margin-top:18px" });
+  panel.append(el("div", { class: "ov-panel-head" }, el("h2", { class: "ov-panel-title", text: "The router" })));
+  const body = el("div", { class: "cn-sql-body" });
+  panel.append(body);
+  const paint = (v) => {
+    clear(body);
+    const lines = routerLines(v, cur) || [{ text: "This DBTrail is no longer given a router's address." }];
+    for (const l of lines) {
+      const p = el("p", { class: "cn-sql-row" + (!v || (v.configured && !v.status) ? " cn-sql-err" : "") });
+      if (l.strong) p.append(el("b", { text: l.strong }), " ");
+      p.append(l.text);
+      body.append(p);
+    }
+    const refresh = el("button", { class: "btn btn-sm", type: "button", text: "Refresh" });
+    refresh.onclick = () => { refresh.disabled = true; api("/api/router").then(paint, (e) => {
+      // The numbers on screen are no longer ones just read: they go, and
+      // the panel says it could not ask, with the button to try again.
+      paint(null);
+      toastError("Could not refresh the router's numbers: " + ((e && e.message) || e));
+    }); };
+    body.append(el("div", { class: "cn-links" }, refresh));
+    const t = v && v.status && cur && v.status.servers && v.status.servers[cur.id];
+    const reasons = Object.entries((t && t.reasons) || {}).sort((x, y) => y[1] - x[1]);
+    if (reasons.length) {
+      const ul = el("ul", { class: "form-hint", style: "margin:4px 0 0 18px; padding:0" });
+      for (const [key, n] of reasons) ul.append(el("li", { text: n + " × " + (ROUTER_REASON_TEXT[key] || ROUTE_REASON_TEXT[key] || key) }));
+      body.append(cnFine("Why each side", ul));
+    }
+  };
+  paint(view);
+  return panel;
+}
 
 // fmtGoDuration shortens a Go duration string for display by dropping the
 // zero units Go prints after a non-zero one: "15m0s" → "15m", "10m0s" →

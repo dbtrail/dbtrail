@@ -735,6 +735,7 @@ surface, use the demo image ([demo.md](./demo.md)).
 | `ROUTER_CPUS` | compose `router` service (optional) | CPU ceiling of the router (e.g. `4`). Unset = none |
 | `ROUTER_READ_ONLY` | compose `router` service (optional) | The router refuses every statement that is not a read, and never sends it to the source (default `1`). `0` forwards writes too |
 | `ROUTER_METRICS_ADDR` | compose `router` service (optional) | Container-side bind for the router's Prometheus `/metrics` (default `:9091`, reachable as `router:9091` on the compose network and not published on the host; set empty to disable) |
+| `ROUTER_URL` | compose (optional) | Where the web interface reads the router's numbers to show them on its MCP Server page (default `http://router:9091`, the `router` service; set empty to show nothing about a router) |
 | `INDEX_MYSQL_ROOT_PASSWORD` | compose (optional) | Pin the bundled index root password (set *before* first boot; default: randomly generated into the `bintrail-index-secret` volume) |
 | `BINTRAIL_TAG` | compose (optional) | Image tag to run (default `latest`) |
 | `BASELINE_SOURCE_DSN` | compose `baseline` profile | Source MySQL to snapshot (default: `SOURCE_DSN`) |

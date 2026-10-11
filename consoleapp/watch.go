@@ -115,6 +115,11 @@ var (
 	// upSQLPortMaxRows is --sql-port-max-rows: the most rows one statement
 	// returns on the --flashback-listen port.
 	upSQLPortMaxRows = console.DefaultSQLPortMaxRows
+	// upRouterURL is --router-url: where a router serves its status
+	// document, resolved by resolveRouterURL (#2318).
+	upRouterURL string
+	// upRouterURLError is why --router-url could not be used, if so.
+	upRouterURLError string
 	// upRouteMaxCopyAge turns read routing on the port on (#2038): MySQL
 	// answers by default, the copy takes expensive SELECTs while its snapshot
 	// is at most this old, and past that the ones over tables unchanged since
@@ -288,6 +293,7 @@ func init() {
 	watchCmd.Flags().BoolVar(&upConsoleAllowSetup, "console-allow-setup", false, "Allow browser first-run password setup on a non-loopback bind (assert the bind is access-controlled, e.g. published only on the host loopback)")
 	watchCmd.Flags().IntVar(&upSQLMaxInFlight, "sql-max-in-flight", sqlsandbox.DefaultMaxInFlight, "How many SQL-on-the-copy statements run at once, the SQL card and the --flashback-listen port together; one more waits up to 30 s for a free slot, then is refused. Each runs as its own process with 2 threads and up to --sql-memory, on the host that captures, and every result is held in this process while it is sent, so raise it only with cores and memory to spare. Env BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT.")
 	watchCmd.Flags().IntVar(&upSQLPortMaxRows, "sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns on the --flashback-listen port; a result with more is refused with error 1104, not cut. The SQL page of the web interface shows 1,000 rows whatever this is. A result is also refused past 64 MB. A result is held in this process, which captures, while it is sent, taking a few times its size while it is prepared; the port holds at most 256 MB of results being sent, over all its connections, plus one result, and past that refuses a statement with error 1203 until an answer has been written to its client. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
+	watchCmd.Flags().StringVar(&upRouterURL, "router-url", "", "Address a router (bintrail-console router) serves its metrics on, e.g. http://127.0.0.1:9091. Given it, the web interface shows the router's numbers on its "+console.PageConnect+" page: who answered each server's statements, the copy's age, the pool. This process asks the router; the router never asks this one. Empty = the page shows nothing about a router. Env BINTRAIL_CONSOLE_ROUTER_URL.")
 	watchCmd.Flags().StringVar(&upSQLMemory, "sql-memory", "", "Memory each SQL-on-the-copy statement may use (the SQL card and the --flashback-listen port), e.g. 4GB; default 2GB, at least 512MB. It runs on the host that captures, times --sql-max-in-flight at once. A table with more changes not yet merged than this memory can merge (384 MB at 2 GB, in proportion) is answered from an earlier copy, or refused with a pointer to your own DuckDB when none fits. Past its memory a statement spills to a temporary folder, up to four times it. Env BINTRAIL_CONSOLE_SQL_MEMORY. Unset, the web interface can set it (Settings, MCP Server); set, it wins there.")
 	watchCmd.Flags().StringVar(&upConsoleFlashbackListen, "flashback-listen", "", "Serve an embedded MySQL-protocol time-travel port (_flashback/_snapshot/_diff) for every monitored server, routed by the connection username (server id or name); e.g. 127.0.0.1:3308. Requires --console-token, which reads every schema of every server: the port does not filter by schema. Empty = the web interface decides (Connect turns the port on and off, with its own password; off until then). Set, this address decides and the web interface cannot change it. Env BINTRAIL_CONSOLE_FLASHBACK_LISTEN.")
 	watchCmd.Flags().DurationVar(&upRouteMaxCopyAge, "route-max-copy-age", 0, "Experimental read routing on the --flashback-listen port: forward every statement, WRITES INCLUDED, to the server's source MySQL with the server's forwarding account when it has one (set on the server, in the web interface or as route_user / route_password in the API) and with its source account otherwise, except SELECTs whose EXPLAIN FORMAT=JSON says they are expensive (see --route-cost-threshold, --route-scan-rows), which run on the copy while its snapshot is at most this old; past that age the copy still answers one whose tables have had no change since their snapshot, as long as capture is known to have read everything the source had written at some moment within this same limit; a statement the copy rejects runs on MySQL. Anyone holding the access token can then do on the source whatever that account can: give the port its own account with SELECT only, and set --route-read-only. 0 = off (the port serves the copy only). Env BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE.")
@@ -339,6 +345,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	if err := resolveSQLPortMaxRows(cmd); err != nil {
 		return err
 	}
+	resolveRouterURL(cmd, os.Stderr)
 	// The port's flags, checked here, before the first connection: a
 	// read-only flag that cannot apply, or an environment value that does
 	// not parse, must not wait for the index to answer.
@@ -1740,6 +1747,9 @@ type consoleOpts struct {
 	SQLMaxInFlight int
 	// SQLPortMaxRows is the resolved --sql-port-max-rows.
 	SQLPortMaxRows int
+	// RouterURL is the resolved --router-url (#2318), "" when none;
+	// RouterURLError is why a value given could not be used.
+	RouterURL, RouterURLError string
 	// ReadRouting is the port's read-routing policy (--route-max-copy-age and
 	// the threshold flags, #2038), reported by GET /api/flashback; the port
 	// itself is bound with the same values in startFlashbackPort.
@@ -1770,6 +1780,8 @@ func upConsoleOpts() consoleOpts {
 		SQLMaxInFlight: upSQLMaxInFlight,
 		SQLMemoryLimit: upSQLMemoryLimit,
 		SQLPortMaxRows: upSQLPortMaxRows,
+		RouterURL:      upRouterURL,
+		RouterURLError: upRouterURLError,
 	}
 }
 
@@ -1882,6 +1894,8 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		// --sql-memory (#2210); "" keeps the sandbox default.
 		SQLLimits:      sqlsandbox.Limits{MemoryLimit: opts.SQLMemoryLimit},
 		SQLPortMaxRows: opts.SQLPortMaxRows,
+		RouterURL:      opts.RouterURL,
+		RouterURLError: opts.RouterURLError,
 		// The daemon's --rotate-* defaults, so GET /api/rotation can report the
 		// effective policy (and the console panel prefill it) before the
 		// operator saves an override.
@@ -2286,6 +2300,25 @@ func resolveSQLPortMaxRows(cmd *cobra.Command) error {
 		return fmt.Errorf("--sql-port-max-rows %d: "+want, upSQLPortMaxRows, console.DefaultSQLPortMaxRows)
 	}
 	return nil
+}
+
+// resolveRouterURL sets upRouterURL from --router-url or, when the flag is
+// not given, BINTRAIL_CONSOLE_ROUTER_URL, as the address asked (with its
+// /status path). A value that cannot be an address does NOT fail the start:
+// this process captures, and the address only feeds one panel of the web
+// interface. It is warned about here and kept in upRouterURLError, which the
+// panel shows in place of the numbers.
+func resolveRouterURL(cmd *cobra.Command, warn io.Writer) {
+	raw, from := upRouterURL, "--router-url"
+	if !cmd.Flags().Changed("router-url") {
+		raw, from = os.Getenv("BINTRAIL_CONSOLE_ROUTER_URL"), "BINTRAIL_CONSOLE_ROUTER_URL"
+	}
+	resolved, err := console.ParseRouterURL(raw)
+	upRouterURL, upRouterURLError = resolved, ""
+	if err != nil {
+		upRouterURLError = from + ": " + err.Error()
+		fmt.Fprintf(warn, "WARNING: %s. The web interface will show no numbers of the router until this is corrected; everything else starts as usual.\n", upRouterURLError)
+	}
 }
 
 // flashbackFilePath is where the web interface saves the MySQL port's setting

@@ -185,6 +185,16 @@ type Config struct {
 	// Unset, one runs at a time per server (#2026), which is the rule for a
 	// port that shares its process with capture.
 	SQLPortSharedSlots bool
+	// RouterURL is where a router (bintrail-console router) serves its
+	// status document, as ParseRouterURL resolved it (#2318). Set, GET
+	// /api/router reads it and the Connect page shows the router's numbers;
+	// empty, the page shows nothing about a router. Only the operator sets
+	// it, at startup: this process then makes requests to that address.
+	RouterURL string
+	// RouterURLError is why the address given for a router could not be
+	// used, when it could not: the page says it where the numbers would
+	// be. A process that captures does not refuse to start over a panel.
+	RouterURLError string
 	// LazyIndex opens a registry server's index without asking it to answer
 	// (#2084): selecting the server succeeds while its index is away, and
 	// only what reads the index fails then, with the connection's own
@@ -483,6 +493,10 @@ type Server struct {
 	sqlPortMaxRows int
 	// sqlPortSharedSlots is Config.SQLPortSharedSlots.
 	sqlPortSharedSlots bool
+	// routerURL is Config.RouterURL; routerClient asks it.
+	routerURL    string
+	routerURLErr string
+	routerClient *http.Client
 	// sqlMem is the SQL memory setting (#2210): MemoryLimit above is the
 	// startup value or the default, and sqlMemoryNow says which applies.
 	sqlMem sqlMemoryState
@@ -769,6 +783,7 @@ func New(cfg Config) (*Server, error) {
 	// the registry is loaded, before any loop reads it).
 	s.sqlLimits = resolveSQLLimits(cfg.SQLLimits)
 	s.sqlPortMaxRows = cfg.SQLPortMaxRows
+	s.routerURL, s.routerURLErr, s.routerClient = cfg.RouterURL, cfg.RouterURLError, newRouterClient(routerStatusTimeout)
 	// Standby (#2236): after a statement, a worker per free slot waits with
 	// its DuckDB open, so a short statement does not pay the start. They stop
 	// on their own after a few minutes with no statement, and with this
@@ -996,6 +1011,7 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("GET /api/sql-settings", s.handleSQLSettingsGet)
 	api.HandleFunc("PUT /api/sql-settings", s.recordAction("sql-settings", s.handleSQLSettingsPut))
 	api.HandleFunc("GET /api/flashback", s.handleFlashbackGet)
+	api.HandleFunc("GET /api/router", s.handleRouterGet)
 	api.HandleFunc("PUT /api/flashback", s.handleFlashbackPut)
 	api.HandleFunc("POST /api/flashback/password", s.handleFlashbackPassword)
 

@@ -316,6 +316,10 @@ journalctl -u bintrail-router -f
   servers that one manages. Its own settings are at the end of that file,
   commented out: `BINTRAIL_ROUTER_LISTEN` (`127.0.0.1:3310` unless set) and
   `BINTRAIL_ROUTER_METRICS_ADDR`.
+- To **see its numbers in the web interface**, uncomment
+  `BINTRAIL_ROUTER_METRICS_ADDR` and `BINTRAIL_CONSOLE_ROUTER_URL` there and
+  restart both services. The MCP Server page then shows who answered, the
+  age of the copy, and the router's workers.
 - It **listens only once there is a password**: `BINTRAIL_CONSOLE_TOKEN` in
   the settings file, or else the password the web interface creates when the
   MySQL port is turned on there. Until then it waits.

@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time per server so its age can be alerted on like replica lag.
   The same address answers `GET /status` with those numbers as one JSON
   document, every server and the pool, for a program to read (#2318).
+  Given that address (`watch --router-url`, `BINTRAIL_CONSOLE_ROUTER_URL`;
+  the Docker stack sets it), the web interface shows them on its MCP Server
+  page, in a panel of their own: who answered for the server picked in the
+  sidebar and why, the age of the copy the router reads, and its workers. A
+  router that does not answer is said as that, never as zero statements.
   The Docker stack starts it as the `router` service (`docker-compose.yml`
   is version 3: download the current file to get it), with the state volume
   mounted read-only, and read-only itself: it refuses writes unless

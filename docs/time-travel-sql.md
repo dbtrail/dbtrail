@@ -2111,6 +2111,16 @@ counts go on rising) and `session_untracked`. Like
 router's own settings only: never an account's name, nor what a source
 answered a login. Those stay in the router's log.
 
+**In the web interface.** Give the capture process that address
+(`watch --router-url http://127.0.0.1:9091`, or
+`BINTRAIL_CONSOLE_ROUTER_URL`; the Docker stack sets it) and its MCP Server
+page shows a panel, The router: for the server picked in the sidebar, who
+answered and why, the snapshot of the copy the router reads and its age, and
+the workers. The capture process asks the router each time the page is
+opened or Refresh is pressed; the router asks it nothing. When the router
+does not answer, the panel says so and why, and shows no counts: a router
+that is down is not a router nobody uses.
+
 ```sh
 curl -s http://127.0.0.1:9091/status
 ```

@@ -373,6 +373,13 @@ services:
       # Most rows one statement returns on the time-travel port. Empty =
       # 10000. The SQL card shows 1,000 rows whatever this is.
       BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS: ${SQL_PORT_MAX_ROWS:-}
+      # Where the router service below says its numbers (#2318): the web
+      # interface reads them from there and shows them on its MCP Server
+      # page. This service asks the router; the router never asks this one.
+      # ROUTER_URL= (empty) in .env shows nothing about a router: set it so
+      # if you stop the router for good or turn its metrics off, or the page
+      # goes on saying the router does not answer.
+      BINTRAIL_CONSOLE_ROUTER_URL: ${ROUTER_URL-http://router:9091}
       # Memory each SQL statement on the copy may use (#2210). Empty = the
       # value saved in the web interface (Settings, MCP Server), else 2GB;
       # set here, it wins and that panel only shows it.
@@ -572,7 +579,8 @@ services:
       BINTRAIL_CONSOLE_ROUTE_READ_ONLY: ${ROUTER_READ_ONLY:-1}
       # Prometheus metrics of the router, inside the compose network
       # (router:9091). Not published on the host: add a `ports:` line to
-      # scrape it from outside. Empty in .env turns it off.
+      # scrape it from outside. Empty in .env turns it off. The same address
+      # says the router's numbers to the web interface (ROUTER_URL above).
       BINTRAIL_ROUTER_METRICS_ADDR: ${ROUTER_METRICS_ADDR-:9091}
     # 0 = no ceiling. See ROUTER_MEMORY / ROUTER_CPUS above.
     mem_limit: ${ROUTER_MEMORY:-0}
