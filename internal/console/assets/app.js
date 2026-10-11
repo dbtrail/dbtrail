@@ -13902,6 +13902,23 @@ function sqlClientPanel(servers, fb, reveal, live) {
 // where to change it. GET /api/sql-settings answers every line: the panel
 // never computes a limit itself.
 
+// sqlCeilingNote is the folded note on whether each statement has a memory
+// ceiling of its own (#2226): a short label that says on or off, and under it
+// what that means and, when it is off, why and what to change. Folded: the
+// page keeps its text short, and this is read once. Null where the system
+// has nothing to offer. Pure, so it is tested in node.
+function sqlCeilingNote(st) {
+  if (st && st.own_ceiling) {
+    return { label: "Own memory ceiling: on",
+      text: "Each statement also has a memory ceiling of its own, kept by the system: one that outgrows its memory is stopped alone, and nothing else on this machine is affected." };
+  }
+  if (st && st.no_own_ceiling) {
+    return { label: "Own memory ceiling: off",
+      text: "A statement has no memory ceiling of its own here, so one that outgrows its memory is only stopped when this machine runs out of memory, and the system may stop something else with it. Why: " + st.no_own_ceiling + "." };
+  }
+  return null;
+}
+
 // sqlMemoryLines is what the panel says about the setting, one sentence per
 // line, from the route's answer. Pure, so it is tested in node.
 function sqlMemoryLines(st) {
@@ -13948,6 +13965,8 @@ function sqlMemoryPanel(st, live) {
   panel.append(body);
   for (const line of sqlMemoryLines(st)) body.append(el("p", { class: "cn-sql-row", text: line }));
   if (!st) return panel;
+  const ceiling = sqlCeilingNote(st);
+  if (ceiling) body.append(cnFine(ceiling.label, el("p", { class: "form-hint", text: ceiling.text })));
   if (st.warning) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: st.warning }));
   if (!st.can_manage) {
     if (st.locked) body.append(el("p", { class: "cn-sql-row", text: st.locked }));

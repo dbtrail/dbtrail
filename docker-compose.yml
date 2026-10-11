@@ -241,6 +241,19 @@ services:
     # hosts ('dbtrail'@'%', as in the grant the add-server form shows).
     extra_hosts:
       - "host.docker.internal:${HOST_GATEWAY:-host-gateway}"
+    # Optional: a memory ceiling of its own for each statement of SQL on the
+    # copy. With it, a statement that outgrows its memory is stopped alone,
+    # before this machine runs out of memory and the system chooses what to
+    # stop (which can be the index MySQL). It lets DBTrail make cgroups inside
+    # this container's own, and nowhere else; the container gains no other
+    # privilege. Needs Docker Engine 28 or later: an older Docker refuses to
+    # start the stack when it reads it (Podman was not tried), which is why
+    # it is off here. Settings, MCP Server, Memory for SQL on the copy says
+    # whether it is in effect. After a statement is stopped this way
+    # `docker inspect` reports OOMKilled=true for this container although it
+    # kept running.
+    # security_opt:
+    #   - writable-cgroups=true
     # Building from a source checkout instead? Uncomment here AND on
     # index-init above (keep the image: lines — `docker compose build` tags
     # the local build with that name, so nothing is pulled):

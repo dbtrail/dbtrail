@@ -389,6 +389,12 @@ type sqlSettingsDTO struct {
 	// statement cannot spill at all.
 	Disk   string `json:"disk,omitempty"`
 	NoDisk string `json:"no_disk,omitempty"`
+	// OwnCeiling says each statement runs under a memory ceiling of its own
+	// that the system keeps (#2226, the runner's FenceState); NoOwnCeiling,
+	// set instead, is why it does not. Both empty off Linux, where there is
+	// nothing to set up.
+	OwnCeiling   bool   `json:"own_ceiling,omitempty"`
+	NoOwnCeiling string `json:"no_own_ceiling,omitempty"`
 	// MaxInFlight is how many statements run at once; HostMemoryBytes the
 	// machine's memory, 0 (omitted) when not known; Warning is set when the
 	// first times the memory is more than the second.
@@ -428,6 +434,9 @@ func (s *Server) sqlSettings() sqlSettingsDTO {
 		} else {
 			dto.Disk = sqlMemoryWords(fmt.Sprintf("%dMiB", n>>20))
 		}
+	}
+	if s.sqlFenceState != nil {
+		dto.OwnCeiling, dto.NoOwnCeiling = s.sqlFenceState()
 	}
 	if src == "startup" && saved > 0 {
 		dto.Saved = sqlMemoryWords(fmt.Sprintf("%dMiB", saved))

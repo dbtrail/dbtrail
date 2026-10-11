@@ -26,11 +26,11 @@ import (
 // reaches ITS ceiling first, the kernel acts inside that cgroup only, and
 // nothing outside it is a candidate.
 //
-// Where it applies: Linux with cgroup v2, when the cgroup above the daemon's
-// own was handed over to it (a systemd unit with Delegate=yes and
-// DelegateSubgroup=, or a container whose entrypoint did the same). The
-// daemon never moves itself and never writes into a cgroup it was not given:
-// everywhere else statements run as before, and FenceState says why.
+// Where it applies: Linux with cgroup v2, when the daemon was handed a
+// cgroup to manage (a systemd unit with Delegate=yes, or a container whose
+// cgroup is writable; findFence has the rule). It never writes into a
+// cgroup it was not given: everywhere else statements run as before, and
+// FenceState says why.
 
 // cgroupMount is where cgroup v2 is mounted.
 const cgroupMount = "/sys/fs/cgroup"
@@ -79,42 +79,181 @@ func hasController(text []byte, name string) bool {
 	return false
 }
 
-// findFence looks for a cgroup the daemon may make its workers' cgroups in:
-// the parent of its own, when that parent was delegated and has the memory
-// controller. It turns the controller on for the parent's children when it
-// is off, and changes nothing else.
-func findFence(mount string, procSelfCgroup []byte, delegated func(dir string) bool) fence {
+// fenceLeaf is the cgroup the daemon moves itself into when it sits directly
+// in the cgroup it was handed. systemd's DelegateSubgroup= does the same
+// before the daemon starts.
+const fenceLeaf = "daemon"
+
+// findFence looks for a cgroup the daemon may make its workers' cgroups in,
+// and turns the memory controller on for that cgroup's children when it is
+// off. Two places qualify, in this order:
+//
+//   - the cgroup above the daemon's own, when it was handed over: a systemd
+//     unit with Delegate=yes and DelegateSubgroup=, or a daemon that already
+//     moved itself (below);
+//   - the daemon's own cgroup, when that is what was handed over: a unit
+//     with Delegate=yes alone, or a container whose cgroup is writable. The
+//     kernel does not let a cgroup hold processes and give its children a
+//     controller at once, so the daemon first moves the processes there
+//     (itself, and anything it already started) one level down, into
+//     fenceLeaf. settle does that move.
+//
+// A cgroup counts as handed over when systemd marked it (delegated), or
+// when it is the top of a cgroup namespace: the kernel treats a namespace's
+// top as the limit of what was given to whoever runs inside it. Nothing is
+// written anywhere else.
+func findFence(mount string, procSelfCgroup []byte, delegated func(dir string) bool, settle func(dir string) error) fence {
 	self, ok := selfCgroupPath(procSelfCgroup)
 	if !ok {
-		return fence{why: "this host does not run DBTrail under cgroup v2"}
+		return fence{why: "this system does not offer it (it needs cgroup v2)"}
 	}
-	if self == "/" {
-		return fence{why: "DBTrail runs at the top of its cgroup tree, with no cgroup above its own to make a statement's in"}
-	}
-	parent := filepath.Join(mount, filepath.FromSlash(path.Dir(self)))
-	controllers, err := os.ReadFile(filepath.Join(parent, "cgroup.controllers"))
-	if err != nil {
-		return fence{why: fmt.Sprintf("the cgroup above DBTrail's own cannot be read: %v", err)}
-	}
-	if !hasController(controllers, "memory") {
-		return fence{why: "the cgroup above DBTrail's own has no memory controller"}
-	}
+	dirOf := func(cg string) string { return filepath.Join(mount, filepath.FromSlash(cg)) }
+	// A container: the top of a cgroup namespace that systemd did not make.
+	// A unit can get a namespace of its own too (ProtectControlGroups=private
+	// or strict, systemd 257; read in its documentation, not run here), and
+	// there only systemd's mark says the cgroup was handed over.
+	container := namespaceTop(mount) && !startedBySystemd()
 	// A slice is where systemd keeps other units, the user's own systemd
 	// included: never a service's to manage, whoever owns it.
-	if strings.HasSuffix(path.Dir(self), ".slice") || !delegated(parent) {
-		return fence{why: "the cgroup above DBTrail's own was not handed over to it (a systemd unit needs Delegate=yes and DelegateSubgroup=)"}
+	ours := func(cg string) bool {
+		if strings.HasSuffix(cg, ".slice") {
+			return false
+		}
+		return delegated(dirOf(cg)) || (cg == "/" && container)
 	}
-	subtree := filepath.Join(parent, "cgroup.subtree_control")
+	hasMemory := func(cg string) bool {
+		controllers, err := os.ReadFile(filepath.Join(dirOf(cg), "cgroup.controllers"))
+		return err == nil && hasController(controllers, "memory")
+	}
+	// why is the reason a write into cg's directory failed. Only a
+	// container (the top of a cgroup namespace) has the Docker way out; a
+	// read-only tree anywhere else is a mount the operator chose.
+	why := func(cg, what string, err error) fence {
+		if errors.Is(err, syscall.EROFS) {
+			if cg == "/" && container {
+				return fence{why: "this container does not let DBTrail make cgroups: in docker-compose.yml, uncomment security_opt (writable-cgroups=true) on the bintrail service, which needs Docker 28 or later, and recreate the container"}
+			}
+			return fence{why: "the cgroups DBTrail was handed are read-only (under systemd, ProtectControlGroups=yes in its unit does that)"}
+		}
+		return fence{why: what + ": " + plainReason(err)}
+	}
+	if above := path.Dir(self); self != "/" && ours(above) && hasMemory(above) {
+		if err := enableFence(dirOf(above)); err != nil {
+			return why(above, "could not set up a statement's cgroup", err)
+		}
+		return fence{root: dirOf(above)}
+	}
+	if !ours(self) {
+		return fence{why: "DBTrail was not handed over a cgroup to manage (under systemd, add Delegate=yes to its unit)"}
+	}
+	if !hasMemory(self) {
+		return fence{why: "the cgroup DBTrail was handed does not control memory (whoever starts DBTrail has to pass the memory controller down to it)"}
+	}
+	// A process that lands in the cgroup between the move and the write
+	// that needs it empty (a health check, a shell someone opened in the
+	// container) makes the kernel answer "busy": move again, a few times.
+	var err error
+	for range settlePasses {
+		if err = settle(dirOf(self)); err != nil {
+			return why(self, "could not move DBTrail into a cgroup of its own, below the one it was handed", err)
+		}
+		if err = enableFence(dirOf(self)); !errors.Is(err, syscall.EBUSY) {
+			break
+		}
+	}
+	if err != nil {
+		return why(self, "could not set up a statement's cgroup", err)
+	}
+	return fence{root: dirOf(self)}
+}
+
+// namespaceTop reports whether mount is the top of a cgroup namespace and
+// not of the host's whole tree: only the host's own top has no
+// cgroup.events.
+func namespaceTop(mount string) bool {
+	_, err := os.Stat(filepath.Join(mount, "cgroup.events"))
+	return err == nil
+}
+
+// enableFence turns the memory controller on for dir's children, unless it
+// is on, and then makes and removes one cgroup there: a tree that reads as
+// ready and cannot be written (a read-only mount with the controller
+// already on) is found now, not by the first statement.
+func enableFence(dir string) error {
+	subtree := filepath.Join(dir, "cgroup.subtree_control")
 	enabled, err := os.ReadFile(subtree)
 	if err != nil {
-		return fence{why: fmt.Sprintf("the cgroup above DBTrail's own cannot be read: %v", err)}
+		return err
 	}
 	if !hasController(enabled, "memory") {
 		if err := writeCgroupFile(subtree, "+memory"); err != nil {
-			return fence{why: fmt.Sprintf("could not turn the memory controller on for a statement's cgroup: %v", err)}
+			return err
 		}
 	}
-	return fence{root: parent}
+	probe, err := mkFenceDir(dir)
+	if err != nil {
+		return err
+	}
+	// Made, so the tree can be written. One that will not go now is taken
+	// by the sweep that follows, and is no reason to run without ceilings.
+	if err := removeFenceDir(probe); err != nil {
+		slog.Warn("sql on the copy: could not remove the cgroup made to check that statements can have one", "dir", probe, "error", err)
+	}
+	return nil
+}
+
+// startedBySystemd reports whether systemd started this process: it gives
+// every unit's processes an INVOCATION_ID. A variable so a test can say so.
+var startedBySystemd = func() bool { return os.Getenv("INVOCATION_ID") != "" }
+
+// plainReason is err's text without the path of the file it was about: a
+// reason is shown in the web interface, and a cgroup path names the host's
+// units or the container's id. The log keeps the whole error.
+func plainReason(err error) string {
+	var pe *os.PathError
+	if errors.As(err, &pe) {
+		return strings.Replace(err.Error(), pe.Error(), pe.Err.Error(), 1)
+	}
+	return err.Error()
+}
+
+// moveProc writes one pid into a cgroup.procs; a variable so a test can see
+// each move and stand in for the kernel's answers.
+var moveProc = writeCgroupFile
+
+// settlePasses is how many times settleInLeaf goes over the cgroup's
+// processes: one started while a pass ran is moved by the next.
+const settlePasses = 5
+
+// settleInLeaf moves every process in the cgroup at dir into dir/fenceLeaf,
+// so dir holds none and can give its children the memory controller. Every
+// process, not only the daemon's own: in a container that is also a shell
+// someone opened in it, or whatever else the image runs. Nothing changes for
+// any of them: their memory stays counted against dir's own limit, which
+// sits above the leaf.
+func settleInLeaf(dir string) error {
+	leaf := filepath.Join(dir, fenceLeaf)
+	if err := os.Mkdir(leaf, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	for range settlePasses {
+		procs, err := os.ReadFile(filepath.Join(dir, "cgroup.procs"))
+		if err != nil {
+			return err
+		}
+		pids := strings.Fields(string(procs))
+		if len(pids) == 0 {
+			return nil
+		}
+		for _, pid := range pids {
+			// A process that ended since the list was read is gone, not a
+			// failure.
+			if err := moveProc(filepath.Join(leaf, "cgroup.procs"), pid); err != nil && !errors.Is(err, syscall.ESRCH) {
+				return fmt.Errorf("move process %s: %w", pid, err)
+			}
+		}
+	}
+	return errors.New("processes kept starting in it")
 }
 
 // writeCgroupFile writes a control file that must already exist: the kernel

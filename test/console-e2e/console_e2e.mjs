@@ -5569,6 +5569,11 @@ try {
   // never about.
   // The DuckDB schema card, back here since #1573, is left out the same way:
   // it carries its own 300-character budget, asserted below.
+  // The "Memory for SQL on the copy" panel (#2210) is left out for the same
+  // reason, and was not until #2226: with it counted the page measured about 1486
+  // of 1500, so the label of one folded note on that panel rang this guard.
+  // Its own budget (700) sits about 50% above what it shows (about 460
+  // chars on this stack), as the cap above does for the steps.
   // Limit worth naming: run.sh builds without -ldflags, so this only ever
   // photographs the UNVERSIONED bundle arm.
   await page.evaluate(() => navigate("connect"));
@@ -5608,6 +5613,7 @@ try {
     const sqlPanel = view.querySelector(".cn-sql:not(.cn-ice)");
     const icePanel = view.querySelector(".cn-ice");
     const dkPanel = view.querySelector(".cn-dk");
+    const memPanel = view.querySelector(".cn-sqlmem");
     const kids = Array.from(view.children || []);
     const iceCode = icePanel ? icePanel.querySelector("code.cn-url") : null;
     return {
@@ -5615,7 +5621,11 @@ try {
       labels,
       // Minus the three panels' own text (see the budget note above).
       visibleChars: visible.length - (sqlPanel ? sqlPanel.innerText.length : 0)
-        - (icePanel ? icePanel.innerText.length : 0) - (dkPanel ? dkPanel.innerText.length : 0),
+        - (icePanel ? icePanel.innerText.length : 0) - (dkPanel ? dkPanel.innerText.length : 0)
+        - (memPanel ? memPanel.innerText.length : 0),
+      // The memory panel's own text, its folded notes closed.
+      mem: memPanel ? { present: true, chars: memPanel.innerText.length,
+        open: memPanel.querySelectorAll("details[open]").length } : { present: false },
       ice: {
         present: !!icePanel,
         title: icePanel ? (icePanel.querySelector(".ov-panel-title") || {}).textContent || "" : "",
@@ -5653,6 +5663,9 @@ try {
   (cn.visibleChars > 0 && cn.visibleChars < 1500 && cn.fine >= 1)
     ? ok("connect: visible text stays under budget with fine print folded")
     : bad("connect: visible text stays under budget with fine print folded", "chars " + cn.visibleChars + " fine " + cn.fine);
+  (cn.mem.present && cn.mem.chars > 0 && cn.mem.chars <= 700 && cn.mem.open === 0)
+    ? ok("connect: the memory panel stays under its 700-character budget, its notes folded")
+    : bad("connect: the memory panel stays under its 700-character budget, its notes folded", JSON.stringify(cn.mem));
   // The DuckDB schema card lives here since #1573, with monitor on too (the
   // views capability is on for this stack, so absence would be a bug).
   (cn.duckViewsCap && cn.dk.present && cn.dk.chars > 0 && cn.dk.chars <= 300)

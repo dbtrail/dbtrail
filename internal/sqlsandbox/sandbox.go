@@ -551,7 +551,9 @@ type Runner struct {
 
 	// fence is where a worker gets a memory cgroup of its own (#2226), found
 	// once; fenceLastError, under spillMu, is the last reason a statement
-	// ran without one, logged once per change like the spill's.
+	// ran without one, logged once per change like the spill's. It is kept
+	// without file paths (plainReason): the settings panel shows it, and a
+	// statement's cgroup has a new name every time, which is not a change.
 	fence          fence
 	fenceLastError string
 
@@ -643,9 +645,9 @@ var fenceFor = func() fence {
 	}
 	self, err := procSelfCgroup()
 	if err != nil {
-		return fence{why: fmt.Sprintf("DBTrail's own cgroup cannot be read: %v", err)}
+		return fence{why: "DBTrail's own cgroup cannot be read: " + plainReason(err)}
 	}
-	return findFence(cgroupMount, self, cgroupDelegated)
+	return findFence(cgroupMount, self, cgroupDelegated, settleInLeaf)
 }
 
 // FenceState reports whether a statement runs in a memory cgroup of its own
@@ -669,9 +671,13 @@ func (r *Runner) noteFence(err error) {
 	if err != nil {
 		msg = err.Error()
 	}
+	plain := ""
+	if err != nil {
+		plain = plainReason(err)
+	}
 	r.spillMu.Lock()
-	changed := msg != r.fenceLastError
-	r.fenceLastError = msg
+	changed := plain != r.fenceLastError
+	r.fenceLastError = plain
 	r.spillMu.Unlock()
 	switch {
 	case !changed || !fenceReason:

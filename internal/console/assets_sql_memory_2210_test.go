@@ -18,8 +18,9 @@ const whole = (n) => !n ? "" : n.nodeType === 3 ? n.textContent : (n._text || ""
 const tidy = (s) => s.replace(/\s+/g, " ").trim();
 const walk = (n, f) => { if (!n || n.nodeType === 3) return; f(n); (n.children || []).forEach((c) => walk(c, f)); };
 const run = (s) => vm.runInContext(s, ctx);
-const read = (panel) => { const o = { lines: [], buttons: [], inputs: [] };
+const read = (panel) => { const o = { lines: [], buttons: [], inputs: [], folds: [] };
   walk(panel, (x) => { if (x.tag === "p") o.lines.push(tidy(whole(x)));
+    if (x.tag === "details") o.folds.push(tidy(whole(x)));
     if (x.tag === "button") o.buttons.push(x._text); if (x.tag === "input") o.inputs.push(x.value); });
   return o; };
 const find = (panel, tag, text) => { let hit = null; walk(panel, (x) => { if (!hit && x.tag === tag && (text === undefined || x._text === text)) hit = x; }); return hit; };
@@ -69,6 +70,9 @@ const find = (panel, tag, text) => { let hit = null; walk(panel, (x) => { if (!h
 
 type sqlMemDrawn struct {
 	Lines, Buttons, Inputs []string
+	// Folds is the whole text of each folded note: its label, then what is
+	// under it.
+	Folds []string
 }
 
 func TestSQLMemoryPanel_2210(t *testing.T) {
@@ -103,11 +107,19 @@ func TestSQLMemoryPanel_2210(t *testing.T) {
 		return 0, errors.New("the temporary directory /tmp is in memory (tmpfs), where spilling would use memory; point TMPDIR at a folder on disk")
 	}
 	put("noDisk", noDisk, "GET", "")
+	fenced := sqlSettingsServer(t, filepath.Join(dir, "fenced", SQLSettingsFileName), "")
+	fenced.sqlFenceState = func() (bool, string) { return true, "" }
+	put("fenced", fenced, "GET", "")
+	unfenced := sqlSettingsServer(t, filepath.Join(dir, "unfenced", SQLSettingsFileName), "")
+	unfenced.sqlFenceState = func() (bool, string) {
+		return false, "this container does not let DBTrail make cgroups: in docker-compose.yml, uncomment security_opt (writable-cgroups=true) on the bintrail service, which needs Docker 28 or later, and recreate the container"
+	}
+	put("unfenced", unfenced, "GET", "")
 
 	arg, _ := json.Marshal(status)
 	var got struct {
-		Def, Saved4, Saved6, Huge, Startup, Corrupt, CorruptStartup, NoDisk, None, ReadOnly sqlMemDrawn
-		First, Second, Third                                                                struct {
+		Def, Saved4, Saved6, Huge, Startup, Corrupt, CorruptStartup, NoDisk, Fenced, Unfenced, None, ReadOnly sqlMemDrawn
+		First, Second, Third                                                                                  struct {
 			Calls [][]json.RawMessage
 			After sqlMemDrawn
 		}
@@ -130,7 +142,7 @@ func TestSQLMemoryPanel_2210(t *testing.T) {
 		}
 		t.Errorf("%s: want a line containing %q in:\n  %s", what, want, strings.Join(d.Lines, "\n  "))
 	}
-	for name, d := range map[string]sqlMemDrawn{"def": got.Def, "saved4": got.Saved4, "huge": got.Huge, "startup": got.Startup, "corrupt": got.Corrupt, "none": got.None} {
+	for name, d := range map[string]sqlMemDrawn{"def": got.Def, "saved4": got.Saved4, "huge": got.Huge, "startup": got.Startup, "corrupt": got.Corrupt, "none": got.None, "fenced": got.Fenced, "unfenced": got.Unfenced} {
 		t.Logf("%s:\n  %s\n  buttons %q inputs %q", name, strings.Join(d.Lines, "\n  "), d.Buttons, d.Inputs)
 		for _, l := range d.Lines {
 			if strings.Contains(l, "—") {
@@ -150,6 +162,34 @@ func TestSQLMemoryPanel_2210(t *testing.T) {
 		}
 	}
 	has("default", got.Def, "2 statements can run at once, on the machine that also captures changes.")
+	// The memory ceiling of its own (#2226): said when it is there, said
+	// with the reason when it is not, and not mentioned where the system has
+	// nothing to offer (the default server here: no reason given).
+	has("fenced", got.Fenced, "Each statement also has a memory ceiling of its own, kept by the system: one that outgrows its memory is stopped alone, and nothing else on this machine is affected.")
+	has("unfenced", got.Unfenced, "A statement has no memory ceiling of its own here, so one that outgrows its memory is only stopped when this machine runs out of memory, and the system may stop something else with it. Why: this container does not let DBTrail make cgroups: in docker-compose.yml, uncomment security_opt (writable-cgroups=true) on the bintrail service, which needs Docker 28 or later, and recreate the container.")
+	// Folded, each under a label that says which it is: the page keeps its
+	// visible text short (the console's own budget for this page).
+	if len(got.Fenced.Folds) != 1 || !strings.HasPrefix(got.Fenced.Folds[0], "Own memory ceiling: on Each statement also has") {
+		t.Errorf("fenced: folds %q, want one, labelled on, holding the sentence", got.Fenced.Folds)
+	}
+	if len(got.Unfenced.Folds) != 1 || !strings.HasPrefix(got.Unfenced.Folds[0], "Own memory ceiling: off A statement has no memory ceiling") {
+		t.Errorf("unfenced: folds %q, want one, labelled off, holding the sentence", got.Unfenced.Folds)
+	}
+	if len(got.Def.Folds) != 0 {
+		t.Errorf("default: a folded note with nothing to say: %q", got.Def.Folds)
+	}
+	for name, d := range map[string]sqlMemDrawn{"default": got.Def, "unfenced": got.Unfenced} {
+		for _, l := range d.Lines {
+			if strings.Contains(l, "ceiling of its own, kept by the system") {
+				t.Errorf("%s: the panel promises a ceiling that is not there: %q", name, l)
+			}
+		}
+	}
+	for _, l := range append(got.Def.Lines, got.Fenced.Lines...) {
+		if strings.Contains(l, "no memory ceiling of its own") {
+			t.Errorf("the panel reports a missing ceiling with no reason to give, or with the ceiling there: %q", l)
+		}
+	}
 	has("default", got.Def, "Write it like 4GB or 1536MB, at least 512MB. The default is 2 GB.")
 	if !slices.Equal(got.Def.Buttons, []string{"Save"}) || !slices.Equal(got.Def.Inputs, []string{"2GB"}) {
 		t.Errorf("default: buttons %q inputs %q", got.Def.Buttons, got.Def.Inputs)
