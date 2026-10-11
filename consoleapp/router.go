@@ -224,14 +224,15 @@ func newRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server,
 		// The port's password, created in the web interface: followed only
 		// when the router has no token (routerPortFile). No address is
 		// given here: the router binds its own.
-		FlashbackPath:       routerPortFile(st),
-		SQLLimits:           sqlsandbox.Limits{MemoryLimit: st.SQLMemory, Threads: pool.Threads},
-		SQLMaxInFlight:      pool.Workers,
-		SQLWorkerStatements: sqlsandbox.DefaultWorkerStatements,
-		SQLMaxWaiters:       routerMaxWaiters,
-		SQLPortSharedSlots:  true,
-		SQLPortMaxRows:      st.SQLPortMaxRows,
-		KillSourceThreads:   killSourceThreads,
+		FlashbackPath:          routerPortFile(st),
+		FlashbackFollowsSwitch: true,
+		SQLLimits:              sqlsandbox.Limits{MemoryLimit: st.SQLMemory, Threads: pool.Threads},
+		SQLMaxInFlight:         pool.Workers,
+		SQLWorkerStatements:    sqlsandbox.DefaultWorkerStatements,
+		SQLMaxWaiters:          routerMaxWaiters,
+		SQLPortSharedSlots:     true,
+		SQLPortMaxRows:         st.SQLPortMaxRows,
+		KillSourceThreads:      killSourceThreads,
 		// A server is served while its index is away: forwarding and the
 		// copy's tables do not read it. Time travel and the events view
 		// do, and fail then with the reason.
@@ -479,10 +480,11 @@ func (p *routerPort) listening() string {
 // not stay up looking like one that does. After that a failure to bind
 // again is logged and tried again, since something is expected to connect
 // to this address.
-// open says whether the port is to be open now: the switch saved in the web
-// interface is on, and there is a password to take.
+// open says whether the port is to be open now: there is a password to
+// take, which there is only while the switch saved in the web interface is
+// on (console.Config.FlashbackFollowsSwitch).
 func (p *routerPort) open() bool {
-	return p.srv.FlashbackSwitchOn() && len(p.srv.FlashbackPasswords()) > 0
+	return len(p.srv.FlashbackPasswords()) > 0
 }
 
 func (p *routerPort) serve(ctx context.Context) error {

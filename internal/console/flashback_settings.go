@@ -216,6 +216,8 @@ type flashbackState struct {
 	mutate sync.Mutex
 
 	mu sync.Mutex
+	// followsSwitch: Config.FlashbackFollowsSwitch.
+	followsSwitch bool
 	// startup: the address came from where DBTrail is started
 	// (Config.FlashbackListen). It decides, and the saved setting is not
 	// consulted.
@@ -239,16 +241,21 @@ type flashbackState struct {
 // FlashbackPasswords returns every password that authenticates the MySQL
 // port: the static token, and the password generated in the web interface
 // unless the port's address was set at startup (whoever starts it that way
-// chose the token). Never an empty string: an empty entry would authorise a
-// passwordless handshake.
+// chose the token). None at all in a process that follows the saved switch
+// while that switch is off (Config.FlashbackFollowsSwitch). Never an empty
+// string: an empty entry would authorise a passwordless handshake.
 func (s *Server) FlashbackPasswords() []string {
+	fb := &s.flashback
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	if fb.followsSwitch && !fb.saved.Enabled {
+		// The port is off: nothing opens it, the token included.
+		return nil
+	}
 	var out []string
 	if s.token != "" {
 		out = append(out, s.token)
 	}
-	fb := &s.flashback
-	fb.mu.Lock()
-	defer fb.mu.Unlock()
 	if !fb.startup && fb.saved.Password != "" {
 		out = append(out, fb.saved.Password)
 	}

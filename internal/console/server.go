@@ -298,6 +298,12 @@ type Config struct {
 	// setting and password in (#2101). Empty = this console keeps none, and
 	// the port can only be set where DBTrail is started.
 	FlashbackPath string
+	// FlashbackFollowsSwitch: this process does not bind the port from the
+	// web interface's routes; it follows FlashbackPath (the router, #2341).
+	// The saved switch then gates the passwords too: while it is off, none
+	// is accepted, the token included, so a handshake that races the
+	// closing of the port is refused and not let in on the token.
+	FlashbackFollowsSwitch bool
 	// ReadRouting is the read-routing policy the time-travel port runs with
 	// (#2038, watch --route-max-copy-age and the two threshold flags),
 	// reported by GET /api/flashback beside the port's address so the
@@ -794,7 +800,7 @@ func New(cfg Config) (*Server, error) {
 		tlsConf:                 tlsConf,
 		mcpTokenPath:            mcpTokenPath,
 		sessionProfiles:         newProfileRuleCache(),
-		flashback:               flashbackState{startup: cfg.FlashbackListen != "", listen: cfg.FlashbackListen, path: cfg.FlashbackPath},
+		flashback:               flashbackState{followsSwitch: cfg.FlashbackFollowsSwitch, startup: cfg.FlashbackListen != "", listen: cfg.FlashbackListen, path: cfg.FlashbackPath},
 		readRouting:             cfg.ReadRouting,
 		routing:                 newRoutingStats(time.Now()),
 		routed:                  newRoutedConns(),

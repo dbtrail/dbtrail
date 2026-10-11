@@ -318,6 +318,44 @@ func TestFollowFiles_theSwitch(t *testing.T) {
 	}
 }
 
+// In a process that follows the saved switch, the switch gates the passwords
+// themselves: while it is off none is accepted, the token included, so a
+// login that arrives as the port is closing is refused and not let in on
+// the token.
+func TestFollowFiles_theSwitchGatesTheToken(t *testing.T) {
+	_, f, path := ownerAndFollower(t)
+	portFile := filepath.Join(filepath.Dir(path), FlashbackFileName)
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "tok", Registry: f, FlashbackPath: portFile, FlashbackFollowsSwitch: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	passwords := func(f *FlashbackFile) string {
+		t.Helper()
+		if f != nil {
+			if err := saveFlashbackFile(portFile, f); err != nil {
+				t.Fatal(err)
+			}
+		}
+		srv.RefreshFollowedFiles()
+		return strings.Join(srv.FlashbackPasswords(), ",")
+	}
+	if got := passwords(nil); got != "" {
+		t.Fatalf("with no saved setting: %q, want no password at all", got)
+	}
+	if got := passwords(&FlashbackFile{Enabled: false, Password: "pw"}); got != "" {
+		t.Fatalf("saved as off: %q, want no password at all", got)
+	}
+	if got := passwords(&FlashbackFile{Enabled: true, Password: "pw"}); got != "tok,pw" {
+		t.Fatalf("turned on: %q, want the token and the saved password", got)
+	}
+	if got := passwords(&FlashbackFile{Enabled: true}); got != "tok" {
+		t.Fatalf("on with no saved password: %q, want the token", got)
+	}
+	if got := passwords(&FlashbackFile{Enabled: false}); got != "" {
+		t.Fatalf("turned off: %q, want no password at all", got)
+	}
+}
+
 // Read routing is the saved setting's too (#2341): on only while the port is
 // on and its file says so, and off for a file that cannot be read. Turning
 // it on or off closes the connections made under the other setting, once,
