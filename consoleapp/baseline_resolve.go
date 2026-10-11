@@ -23,7 +23,10 @@ import (
 // console's statements read that pair when it is there, and the chain as
 // before when it is not.
 //
-// Never inside the refresh's time and never in the server's job slot: it
+// Never inside the refresh's time and never in the server's job slot, with
+// one exception: a server's first refresh after the daemon starts runs it
+// before the fold, with the slot already claimed (TriggerRefresh, #2261),
+// and merges whatever pairs the newest snapshot lacks. Otherwise it
 // reads a finished snapshot, which nothing rewrites, and writes only under
 // its own directory, so the next refresh, a full backup or a restore never
 // waits for it or skips because of it. Taking no slot, it can run beside the
