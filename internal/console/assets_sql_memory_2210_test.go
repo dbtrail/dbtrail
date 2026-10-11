@@ -18,8 +18,9 @@ const whole = (n) => !n ? "" : n.nodeType === 3 ? n.textContent : (n._text || ""
 const tidy = (s) => s.replace(/\s+/g, " ").trim();
 const walk = (n, f) => { if (!n || n.nodeType === 3) return; f(n); (n.children || []).forEach((c) => walk(c, f)); };
 const run = (s) => vm.runInContext(s, ctx);
-const read = (panel) => { const o = { lines: [], buttons: [], inputs: [] };
+const read = (panel) => { const o = { lines: [], buttons: [], inputs: [], folds: [] };
   walk(panel, (x) => { if (x.tag === "p") o.lines.push(tidy(whole(x)));
+    if (x.tag === "details") o.folds.push(tidy(whole(x)));
     if (x.tag === "button") o.buttons.push(x._text); if (x.tag === "input") o.inputs.push(x.value); });
   return o; };
 const find = (panel, tag, text) => { let hit = null; walk(panel, (x) => { if (!hit && x.tag === tag && (text === undefined || x._text === text)) hit = x; }); return hit; };
@@ -69,6 +70,9 @@ const find = (panel, tag, text) => { let hit = null; walk(panel, (x) => { if (!h
 
 type sqlMemDrawn struct {
 	Lines, Buttons, Inputs []string
+	// Folds is the whole text of each folded note: its label, then what is
+	// under it.
+	Folds []string
 }
 
 func TestSQLMemoryPanel_2210(t *testing.T) {
@@ -163,6 +167,17 @@ func TestSQLMemoryPanel_2210(t *testing.T) {
 	// nothing to offer (the default server here: no reason given).
 	has("fenced", got.Fenced, "Each statement also has a memory ceiling of its own, kept by the system: one that outgrows its memory is stopped alone, and nothing else on this machine is affected.")
 	has("unfenced", got.Unfenced, "A statement has no memory ceiling of its own here, so one that outgrows its memory is only stopped when this machine runs out of memory, and the system may stop something else with it. Why: this container does not let DBTrail make cgroups: in docker-compose.yml, uncomment security_opt (writable-cgroups=true) on the bintrail service, which needs Docker 28 or later, and recreate the container.")
+	// Folded, each under a label that says which it is: the page keeps its
+	// visible text short (the console's own budget for this page).
+	if len(got.Fenced.Folds) != 1 || !strings.HasPrefix(got.Fenced.Folds[0], "Own memory ceiling: on Each statement also has") {
+		t.Errorf("fenced: folds %q, want one, labelled on, holding the sentence", got.Fenced.Folds)
+	}
+	if len(got.Unfenced.Folds) != 1 || !strings.HasPrefix(got.Unfenced.Folds[0], "Own memory ceiling: off A statement has no memory ceiling") {
+		t.Errorf("unfenced: folds %q, want one, labelled off, holding the sentence", got.Unfenced.Folds)
+	}
+	if len(got.Def.Folds) != 0 {
+		t.Errorf("default: a folded note with nothing to say: %q", got.Def.Folds)
+	}
 	for name, d := range map[string]sqlMemDrawn{"default": got.Def, "unfenced": got.Unfenced} {
 		for _, l := range d.Lines {
 			if strings.Contains(l, "ceiling of its own, kept by the system") {
