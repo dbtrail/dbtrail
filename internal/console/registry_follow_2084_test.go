@@ -287,8 +287,16 @@ func TestFollowFiles_registryChangesReachOpenConnections(t *testing.T) {
 // file that cannot be read. The token always is.
 func TestFollowFiles_thePortPassword(t *testing.T) {
 	_, srv, _, portFile := followerServer(t)
+	// closed counts the times the port was told to close its connections.
+	closed, wantClosed := 0, 0
+	srv.OnFlashbackPasswordWithdrawn(func() { closed++ })
 	passwords := func() string {
+		t.Helper()
 		srv.RefreshFollowedFiles()
+		if closed != wantClosed {
+			t.Errorf("open connections were closed %d time(s), want %d", closed, wantClosed)
+			wantClosed = closed
+		}
 		return strings.Join(srv.FlashbackPasswords(), ",")
 	}
 	if got := passwords(); got != "tok" {
@@ -311,6 +319,10 @@ func TestFollowFiles_thePortPassword(t *testing.T) {
 	if err := os.WriteFile(portFile, []byte("password: [\n{{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A password that stops being accepted takes the connections made with
+	// it: the daemon's port closes when it is turned off, and this one must
+	// not keep them. A password that is replaced does not (above).
+	wantClosed++
 	if got := passwords(); got != "tok" {
 		t.Fatalf("with a file that does not parse: %q", got)
 	}
@@ -322,6 +334,7 @@ func TestFollowFiles_thePortPassword(t *testing.T) {
 	// file and closes its port. This port is still open, so the password
 	// must stop opening it.
 	save(FlashbackFile{Enabled: false, Listen: "127.0.0.1:3309", Password: "back"})
+	wantClosed++
 	if got := passwords(); got != "tok" {
 		t.Fatalf("after the port was turned off in the web interface: %q", got)
 	}
@@ -332,8 +345,13 @@ func TestFollowFiles_thePortPassword(t *testing.T) {
 	if err := os.Remove(portFile); err != nil {
 		t.Fatal(err)
 	}
+	wantClosed++
 	if got := passwords(); got != "tok" {
 		t.Fatalf("after the file was removed: %q", got)
+	}
+	// Still off: nothing more to close.
+	if got := passwords(); got != "tok" {
+		t.Fatalf("a second look at the removed file: %q", got)
 	}
 	// This process wrote nothing beside the registry.
 	entries, err := os.ReadDir(filepath.Dir(portFile))

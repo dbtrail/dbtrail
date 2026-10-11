@@ -223,6 +223,8 @@ type flashbackState struct {
 	saved   FlashbackFile
 	// lastErr is why a port saved as on is not up.
 	lastErr string
+	// onWithdrawn: see OnFlashbackPasswordWithdrawn.
+	onWithdrawn func()
 	// loadErr: the settings file is there and could not be read. Nothing is
 	// changed until it is fixed or removed: saving would replace a file this
 	// process never saw the contents of, a password included.

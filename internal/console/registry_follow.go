@@ -197,8 +197,30 @@ func (s *Server) refreshFlashbackPassword() {
 		password, createdAt = f.Password, f.PasswordCreatedAt
 	}
 	fb.mu.Lock()
+	withdrawn := fb.saved.Password != "" && password == ""
 	fb.saved.Password, fb.saved.PasswordCreatedAt = password, createdAt
+	onWithdrawn := fb.onWithdrawn
 	fb.mu.Unlock()
+	// Outside the lock: closing connections waits on handshakes, which read
+	// the passwords under it.
+	if withdrawn && onWithdrawn != nil {
+		slog.Info("console: the MySQL port's password from the web interface is no longer accepted (the port was turned off there, or its setting removed); connections open on this port are closed")
+		onWithdrawn()
+	}
+}
+
+// OnFlashbackPasswordWithdrawn sets what FollowFiles calls when the password
+// from the web interface stops being accepted: the port was turned off
+// there, or its saved setting is gone or unreadable. The daemon's own port
+// closes then, with every connection on it; a process that follows the file
+// keeps its port open for the token, so it is handed this to close the
+// connections it holds, which may have come in with that password. A
+// password that is REPLACED is not a withdrawal, here as in the daemon:
+// connections made with the previous one stay until they end.
+func (s *Server) OnFlashbackPasswordWithdrawn(fn func()) {
+	s.flashback.mu.Lock()
+	s.flashback.onWithdrawn = fn
+	s.flashback.mu.Unlock()
 }
 
 // noteFollow logs a followed file's trouble once per change of reason, and
