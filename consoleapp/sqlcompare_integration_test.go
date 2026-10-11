@@ -170,10 +170,15 @@ SELECT * FROM nope;
 	if err := srcDB.QueryRow("SELECT status, (SELECT count(*) FROM orders) FROM orders WHERE id = 1").Scan(&status, &n); err != nil || status != "live" || n != 4 {
 		t.Errorf("the source was written to (status=%q, rows=%d, err=%v): the UPDATE and the WITH ... DELETE must have been skipped", status, n, err)
 	}
-	// A copy port with routing ON is refused before anything runs.
+	// A routed connection to the copy port is refused before anything runs,
+	// and the same port taken as <server>@copy, which the copy answers
+	// alone, is compared.
 	routed := serveRouting(t, srv, flashbackConfig{RouteMaxCopyAge: time.Hour, RoutePolicy: readrouter.Policy{ScanRows: 2}})
-	if _, err := sqlcompare.Run(context.Background(), sqlcompare.Options{SourceDSN: sourceDSN, CopyDSN: fmt.Sprintf("%s:tok@tcp(%s)/%s", ent.ID, routed, srcName)}, statements); err == nil || !strings.Contains(err.Error(), "read routing on") {
-		t.Errorf("a routing port was accepted as the copy: err = %v", err)
+	if _, err := sqlcompare.Run(context.Background(), sqlcompare.Options{SourceDSN: sourceDSN, CopyDSN: fmt.Sprintf("%s:tok@tcp(%s)/%s", ent.ID, routed, srcName)}, statements); err == nil || !strings.Contains(err.Error(), "this connection is routed") || !strings.Contains(err.Error(), "@copy") {
+		t.Errorf("a routed connection was accepted as the copy, or the refusal does not say how to ask for the copy alone: err = %v", err)
+	}
+	if rep, err := sqlcompare.Run(context.Background(), sqlcompare.Options{SourceDSN: sourceDSN, CopyDSN: fmt.Sprintf("%s@copy:tok@tcp(%s)/%s", ent.ID, routed, srcName)}, statements); err != nil || rep == nil {
+		t.Errorf("the routing port taken as <server>@copy: %v, want a comparison", err)
 	}
 	var out bytes.Buffer
 	sqlcompare.WriteText(&out, rep)
