@@ -1463,6 +1463,9 @@ one release and warns that it no longer does anything. Remove it.
   read-only); unset, the saved value applies, else 2GB. The same setting is
   `GET`/`PUT /api/sql-settings` (`{"memory":"4GB"}`, `""` for the default;
   `settings:read` / `settings:write`).
+- `BINTRAIL_ROUTER_LISTEN` (`router` only) — same as `router --listen`
+  (default `127.0.0.1:3310`): the address of the MySQL-protocol port when it
+  runs as a service of its own. See [The router](time-travel-sql.md#the-router-the-same-port-as-a-service-of-its-own-experimental).
 - `BINTRAIL_CONSOLE_FLASHBACK_LISTEN` (`watch` only) — same as `--flashback-listen`
   (e.g. `127.0.0.1:3308`): serve an embedded MySQL-protocol time-travel port for
   every monitored server, routed by the connection username. Off by default;

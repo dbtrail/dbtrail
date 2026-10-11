@@ -186,3 +186,20 @@ func hasCPUQuota(path string) bool {
 	q, err := strconv.ParseInt(fields[0], 10, 64)
 	return err == nil && q > 0
 }
+
+// SQLSandbox is the runner SQL on the copy runs in, nil for a console built
+// with a stand-in. A process that owns its console closes it when it stops,
+// so the workers it keeps do not outlive it.
+func (s *Server) SQLSandbox() *sqlsandbox.Runner {
+	if r, ok := s.sqlRunner.(sandboxRunner); ok {
+		return r.r
+	}
+	return nil
+}
+
+// SQLPortSharedSlots reports Config.SQLPortSharedSlots: a server's statements
+// on the MySQL port run at once, bounded by the slot count alone.
+func (s *Server) SQLPortSharedSlots() bool { return s.sqlPortSharedSlots }
+
+// ServerCount is how many servers the registry holds now.
+func (s *Server) ServerCount() int { return s.cm.reg.Len() }

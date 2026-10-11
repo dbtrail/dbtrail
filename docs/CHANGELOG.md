@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **`bintrail-console router`: the MySQL-protocol port and its read routing as
+  a service of its own** (#2084, experimental). Until now the port lived
+  inside `bintrail-console watch`, the process that captures: restarting it
+  dropped every routed connection, and the statements that go to the copy
+  were kept to two at a time so they could not starve capture. The new
+  command runs the same port, with the same routing rules, beside that
+  process. It reads the servers the web interface manages and never writes
+  them, sees a change there within seconds, and asks the capture process
+  nothing. How many statements run on the copy at once, and with how many
+  threads each, is worked out from the cores and the memory the service may
+  use, so nothing is set by hand; each worker process answers statement after
+  statement instead of one process per statement. Three rules differ from the
+  port inside `watch`: there is no maximum copy age (an expensive read goes
+  to the copy whatever the age of its snapshot), a statement that finds
+  every worker busy waits and then gets error 1040 instead of being forwarded
+  to MySQL, and a server that cannot route refuses its statements with the
+  reason instead of answering them from the copy alone. It listens on
+  `127.0.0.1:3310` by default. Nothing changes for the port inside `watch`.
+  The Docker stack and the packages do not start it yet. See
+  [The router](time-travel-sql.md#the-router-the-same-port-as-a-service-of-its-own-experimental).
+
 
 ## [0.103.1] - 2026-10-10
 

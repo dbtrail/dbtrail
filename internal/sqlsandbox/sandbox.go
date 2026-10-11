@@ -723,6 +723,10 @@ var fenceFor = func() fence {
 // replaced: 1 for a Runner whose workers serve one each.
 func (r *Runner) WorkerStatements() int { return max(r.workerStatements, 1) }
 
+// WorkersStarted is how many worker processes this Runner has started. With
+// workers that stay it grows far slower than the statements they answer.
+func (r *Runner) WorkersStarted() int64 { return r.started.Load() }
+
 // MaxInFlight is how many statements run at once.
 func (r *Runner) MaxInFlight() int { return r.maxInFlight }
 

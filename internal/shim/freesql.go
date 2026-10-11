@@ -233,6 +233,12 @@ func (h *Handler) observeRoute(route RouteSide, reason RouteReason) {
 	}
 }
 
+// RouterConfig is the routing policy this connection was bound with, and
+// whether it was bound to a router at all.
+func (h *Handler) RouterConfig() (cfg RouterConfig, routing bool) {
+	return h.routerCfg, h.router != nil
+}
+
 // BindRouter turns this connection into a routing one. Call once after the
 // handshake, with a FreeSQL already bound; r must be non-nil.
 func (h *Handler) BindRouter(r Router, cfg RouterConfig) {

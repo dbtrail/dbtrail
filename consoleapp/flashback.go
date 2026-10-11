@@ -70,6 +70,18 @@ type flashbackConfig struct {
 	// RouteReadOnly makes the routed port read-only (#2079): the handler
 	// refuses every statement that is not a read before the source sees it.
 	RouteReadOnly bool
+	// RouteAnyCopyAge turns read routing on with no maximum copy age, and
+	// RouteBusyRefuses answers error 1040 when the copy has no slot instead
+	// of forwarding (#2084, shim.RouterConfig). The router command sets
+	// both; the port inside watch sets neither.
+	RouteAnyCopyAge  bool
+	RouteBusyRefuses bool
+	// RouteRequired refuses the statements of a connection to a server that
+	// cannot route (no source to forward to, an account whose address
+	// cannot be used, no SQL on the copy), with the reason, instead of
+	// serving that connection from the copy only as the port inside watch
+	// does. The router sets it: its clients connect in place of MySQL.
+	RouteRequired bool
 	// ResultBudget bounds the SQL-on-the-copy results the port holds while
 	// it sends them (#2241). nil = withDefaults makes one of
 	// defaultFlashbackResultBudget; a test passes its own to read it.
@@ -250,7 +262,7 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 	if err != nil {
 		// Auth already succeeded; surface the routing failure on the client's
 		// first query (a typed MySQL error) rather than a bare disconnect.
-		proxy.fail = err
+		proxy.fail, proxy.failPing = err, cfg.RouteRequired
 	}
 	// The handler may hold an upstream MySQL connection (read routing); it
 	// ends with this one.
@@ -364,7 +376,15 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	// BEFORE the schema seeds below so the upstream follows them. A server that cannot route stays copy-only and says so
 	// once per connection: silently serving the copy to a client who was
 	// promised MySQL semantics is the one thing this must not do.
-	if fw := bindReadRouter(h, srv, tgt, user, cfg, logger); fw != nil {
+	fw, unavailable := bindReadRouterWhy(h, srv, tgt, user, cfg, logger)
+	if fw == nil && cfg.RouteRequired {
+		// A port people point their application at in place of MySQL does
+		// not answer from the copy alone: every read, the cheap ones too,
+		// would come from the copy as it was, with nothing saying so.
+		h.Close()
+		return untrack, gomysql.NewError(gomysql.ER_UNKNOWN_ERROR, fmt.Sprintf("router: server %q cannot be routed: %s", user, unavailable))
+	}
+	if fw != nil {
 		if fw.TrackSession {
 			// A panic on a connection that asked the source for session
 			// tracking: the one new thing such a connection does is decode
@@ -414,16 +434,25 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 // It returns the forwarder of the router it bound, nil when it bound none:
 // such a connection holds an account on the source for as long as it lives.
 func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackTarget, user string, cfg flashbackConfig, logger *slog.Logger) (bound *readrouter.Forwarder) {
-	if cfg.RouteMaxCopyAge <= 0 {
-		return nil
+	bound, _ = bindReadRouterWhy(h, srv, tgt, user, cfg, logger)
+	return bound
+}
+
+// bindReadRouterWhy is bindReadRouter with, when routing is on and the
+// server cannot route, the reason the Connect page is given.
+func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.FlashbackTarget, user string, cfg flashbackConfig, logger *slog.Logger) (bound *readrouter.Forwarder, unavailable string) {
+	if cfg.RouteMaxCopyAge <= 0 && !cfg.RouteAnyCopyAge {
+		return nil, ""
 	}
 	switch {
 	case tgt.SQL == nil:
 		logger.Warn("read routing off for this connection: SQL on the copy unavailable", "server", user, "reason", tgt.SQLUnavailable)
-		srv.RecordRouteUnavailable(tgt.ID, "SQL on the copy is unavailable ("+tgt.SQLUnavailable+")")
+		unavailable = "SQL on the copy is unavailable (" + tgt.SQLUnavailable + ")"
+		srv.RecordRouteUnavailable(tgt.ID, unavailable)
 	case tgt.ForwardDSN == "":
 		logger.Warn("read routing off for this connection: the server has no source DSN to forward to", "server", user)
-		srv.RecordRouteUnavailable(tgt.ID, "the server has no source database to forward to")
+		unavailable = "the server has no source database to forward to"
+		srv.RecordRouteUnavailable(tgt.ID, unavailable)
 	default:
 		// ForwardDSN is the server's forwarding account when it has one
 		// (#2079), else its source account. This Forwarder is the only
@@ -442,6 +471,7 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 			if problem, isTLS := strings.CutPrefix(err.Error(), "source TLS settings: "); isTLS {
 				why = "this server's TLS settings cannot be used (" + problem + ")"
 			}
+			unavailable = why
 			srv.RecordRouteUnavailable(tgt.ID, why)
 		} else {
 			srv.RecordRouteAvailable(tgt.ID)
@@ -519,8 +549,10 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 			warnDSNOverridesTLS(logger, id, user, tgt.ForwardDSN, tgt.SourceSSL.Mode)
 			bound = fw
 			h.BindRouter(fw, shim.RouterConfig{
-				MaxCopyAge: cfg.RouteMaxCopyAge,
-				ReadOnly:   cfg.RouteReadOnly,
+				MaxCopyAge:  cfg.RouteMaxCopyAge,
+				AnyCopyAge:  cfg.RouteAnyCopyAge,
+				BusyRefuses: cfg.RouteBusyRefuses,
+				ReadOnly:    cfg.RouteReadOnly,
 				Observe: func(route shim.RouteSide, reason shim.RouteReason) {
 					observe.ObserveRouteDecision(id, string(route), string(reason))
 					srv.RecordRouteDecision(id, string(route), string(reason))
@@ -528,7 +560,7 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 			})
 		}
 	}
-	return bound
+	return bound, unavailable
 }
 
 // tlsOverrideWarned: the servers already told that their DSN overrides a
@@ -751,6 +783,9 @@ type routingHandler struct {
 	server.EmptyHandler
 	inner *shim.Handler
 	fail  error
+	// failPing: a PING on a connection that failed to bind answers fail
+	// too (the router; the port inside watch answers OK, as it always has).
+	failPing bool
 	// onPanic, when set, is run after a panic on this connection's
 	// goroutine (flashbackConnPanicked).
 	onPanic func()
@@ -804,6 +839,14 @@ func (r *routingHandler) SourceLost(statement bool) error {
 
 func (r *routingHandler) PingSource() error {
 	if r.inner == nil {
+		if r.failPing {
+			// A connection whose server could not be bound answers every
+			// statement with that failure. On the router a PING says the
+			// same: a pool that checks its connections with one would keep
+			// this one as healthy, and its application reads errors from a
+			// connection it was told is fine.
+			return r.fail
+		}
 		return nil
 	}
 	return r.inner.PingSource()
