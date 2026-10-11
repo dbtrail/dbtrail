@@ -76,6 +76,11 @@ type flashbackConfig struct {
 	// both; the port inside watch sets neither.
 	RouteAnyCopyAge  bool
 	RouteBusyRefuses bool
+	// RouteSwitch, when set, is asked as each connection is made whether
+	// read routing is on (#2341): the switch saved in the web interface.
+	// False: that connection is not routed and the copy answers it alone,
+	// whatever the fields above say. Unset, they decide.
+	RouteSwitch func() bool
 	// FailedBindFailsPing: a connection whose server could not be bound (no
 	// such server) answers a PING with that failure, as it answers every
 	// statement. The router sets it: a pool that checks its connections
@@ -324,6 +329,16 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	untrack = func() {}
 	user := mysqlConn.GetUser()
 	tgt, err := srv.ResolveFlashback(ctx, user)
+	// "<server>@copy": this connection asks for the copy alone (#2341). A
+	// server whose own name ends that way is found first, under its name.
+	copyOnly := false
+	if errors.Is(err, console.ErrUnknownServer) {
+		if name, ok := strings.CutSuffix(user, copyOnlySuffix); ok && name != "" {
+			if t, e := srv.ResolveFlashback(ctx, name); !errors.Is(e, console.ErrUnknownServer) {
+				user, tgt, err, copyOnly = name, t, e, true
+			}
+		}
+	}
 	if err != nil {
 		if errors.Is(err, console.ErrUnknownServer) {
 			// Auth is the token alone (CheckUsername accepts any username), so an
@@ -380,7 +395,10 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	// BEFORE the schema seeds below so the upstream follows them. A server that cannot route stays copy-only and says so
 	// once per connection: silently serving the copy to a client who was
 	// promised MySQL semantics is the one thing this must not do.
-	fw, _ := bindReadRouterWhy(h, srv, tgt, user, cfg, logger)
+	var fw *readrouter.Forwarder
+	if !copyOnly {
+		fw, _ = bindReadRouterWhy(h, srv, tgt, user, cfg, logger)
+	}
 	if fw != nil {
 		if fw.TrackSession {
 			// A panic on a connection that asked the source for session
@@ -435,10 +453,19 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 	return bound
 }
 
+// copyOnlySuffix, after a server's id or name in the user a client connects
+// as, asks that this connection be answered from the copy alone while read
+// routing is on for the others: "shop@copy". It can only take a connection
+// out of routing, never put one in.
+const copyOnlySuffix = "@copy"
+
 // bindReadRouterWhy is bindReadRouter with, when routing is on and the
 // server cannot route, the reason the Connect page is given.
 func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.FlashbackTarget, user string, cfg flashbackConfig, logger *slog.Logger) (bound *readrouter.Forwarder, unavailable string) {
 	if cfg.RouteMaxCopyAge <= 0 && !cfg.RouteAnyCopyAge {
+		return nil, ""
+	}
+	if cfg.RouteSwitch != nil && !cfg.RouteSwitch() {
 		return nil, ""
 	}
 	switch {

@@ -281,6 +281,81 @@ func TestFollowFiles_registryChangesReachOpenConnections(t *testing.T) {
 	}
 }
 
+// Read routing is the saved setting's too (#2341): on only while the port is
+// on and its file says so, and off for a file that cannot be read. Turning
+// it on or off closes the connections made under the other setting, once,
+// and a save that changes nothing closes none.
+func TestFollowFiles_theRoutingSwitch(t *testing.T) {
+	_, srv, _, portFile := followerServer(t)
+	closed, wantClosed := 0, 0
+	srv.OnFlashbackPasswordWithdrawn(func() { closed++ })
+	routing := func(step string) bool {
+		t.Helper()
+		srv.RefreshFollowedFiles()
+		if closed != wantClosed {
+			t.Errorf("%s: open connections were closed %d time(s), want %d", step, closed, wantClosed)
+			wantClosed = closed
+		}
+		return srv.FlashbackRoutingOn()
+	}
+	save := func(f FlashbackFile) {
+		t.Helper()
+		if err := saveFlashbackFile(portFile, &f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if routing("no saved setting") {
+		t.Fatal("routing is on with no saved setting")
+	}
+	save(FlashbackFile{Enabled: true, Password: "pw"})
+	if routing("the port turned on, routing never set") {
+		t.Fatal("routing is on for a file that does not say so")
+	}
+	save(FlashbackFile{Enabled: true, Password: "pw", Routing: true})
+	wantClosed++
+	if !routing("routing turned on") {
+		t.Fatal("routing is off after it was saved as on")
+	}
+	save(FlashbackFile{Enabled: true, Password: "pw", Routing: true})
+	if !routing("saved again, unchanged") {
+		t.Fatal("routing went off on a save that changed nothing")
+	}
+	// A new password and routing off at once: one closing, not two.
+	save(FlashbackFile{Enabled: true, Password: "pw2", Routing: false})
+	wantClosed++
+	if routing("a new password and routing off together") {
+		t.Fatal("routing stayed on")
+	}
+	save(FlashbackFile{Enabled: true, Password: "pw2", Routing: true})
+	wantClosed++
+	if !routing("routing turned on again") {
+		t.Fatal("routing is off")
+	}
+	// The port turned off keeps the setting in the file and routes nothing.
+	save(FlashbackFile{Enabled: false, Password: "pw2", Routing: true})
+	wantClosed++
+	if routing("the port turned off") {
+		t.Fatal("routing is on while the port is off")
+	}
+	save(FlashbackFile{Enabled: true, Password: "pw2", Routing: true})
+	if !routing("the port turned on again, routing as saved") {
+		t.Fatal("routing is off after the port came back with routing saved as on")
+	}
+	if err := os.WriteFile(portFile, []byte("routing: [\n{{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantClosed++
+	if routing("a file that does not parse") {
+		t.Fatal("routing is on from a file that cannot be read")
+	}
+	// The field survives a load and a save by this version.
+	save(FlashbackFile{Enabled: true, Password: "pw3", Routing: true})
+	back, err := LoadFlashbackFile(portFile)
+	if err != nil || !back.Routing {
+		t.Fatalf("routing after a load: %+v (%v)", back, err)
+	}
+}
+
 // The password the web interface generates for the port is accepted as soon
 // as the daemon saves it with the port on, stops being accepted when it is
 // replaced or removed or the port is turned off, and is not accepted from a

@@ -197,23 +197,48 @@ func (s *Server) refreshFlashbackPassword() {
 	}
 	f, err := LoadFlashbackFile(path)
 	s.noteFollow("port", "console: the MySQL port's saved setting could not be read; the password created in the web interface is not accepted until it can", err)
-	password, createdAt := "", ""
+	password, createdAt, routing := "", "", false
 	if err == nil && f.Enabled {
-		password, createdAt = f.Password, f.PasswordCreatedAt
+		password, createdAt, routing = f.Password, f.PasswordCreatedAt, f.Routing
 	}
 	fb.mu.Lock()
 	// Replaced counts too: a new password is how a person holding the old
 	// one is put out without turning the port off.
 	withdrawn := fb.saved.Password != "" && password != fb.saved.Password
-	fb.saved.Password, fb.saved.PasswordCreatedAt = password, createdAt
+	// Read routing turned on or off while the port stays open with the same
+	// password: who answers is decided when a connection is made, so the
+	// connections made under the other setting are closed and come back
+	// under this one. A change that left them open would leave an
+	// application forwarding to the source after routing was turned off.
+	// A port that was closed had no connection to close.
+	rerouted := !withdrawn && fb.saved.Password != "" && routing != fb.saved.Routing
+	fb.saved.Password, fb.saved.PasswordCreatedAt, fb.saved.Routing = password, createdAt, routing
 	onWithdrawn := fb.onWithdrawn
 	fb.mu.Unlock()
 	// Outside the lock: closing connections waits on handshakes, which read
 	// the passwords under it.
-	if withdrawn && onWithdrawn != nil {
+	if onWithdrawn == nil {
+		return
+	}
+	switch {
+	case withdrawn:
 		slog.Info("console: the MySQL port's password from the web interface is no longer the one accepted (it was replaced there, the port was turned off, or its setting removed); connections open on this port are closed")
 		onWithdrawn()
+	case rerouted:
+		slog.Info("console: read routing was turned on or off in the web interface; connections open on this port are closed and come back under the new setting", "routing", routing)
+		onWithdrawn()
 	}
+}
+
+// FlashbackRoutingOn reports whether the saved setting this process follows
+// says read routing is on (FlashbackFile.Routing). False while the port is
+// off or its setting cannot be read: nothing is forwarded on a setting this
+// process cannot read.
+func (s *Server) FlashbackRoutingOn() bool {
+	fb := &s.flashback
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return fb.saved.Routing
 }
 
 // OnFlashbackPasswordWithdrawn sets what FollowFiles calls when a password

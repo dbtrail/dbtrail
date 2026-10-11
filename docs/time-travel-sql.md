@@ -2090,6 +2090,21 @@ every connection on it, when the port is turned off there. Replacing the
 password there closes the connections that were open too: clients reconnect
 with the new one, and whoever held the old one is out.
 
+**Routing on or off.** A router started without a token reads one more
+thing from the port's saved setting: `routing`. Absent or `false`, the copy
+answers every statement and nothing is forwarded. `true`, statements are
+routed as above. The change is seen within a few seconds and closes the
+connections that were open: who answers is decided when a connection is
+made, and one left open would go on forwarding after routing was turned off.
+A router started with a token does not read that file, and routes.
+
+**The copy alone, for one connection.** Connect as `<server>@copy` and that
+connection is answered from the copy alone, the light reads too, while the
+others stay routed: `mysql -u shop@copy ...`. It only takes a connection out
+of routing. `sql-compare` needs such a connection (`--copy-dsn
+'shop@copy:<password>@tcp(...)/'`) when routing is on. A server whose own
+name ends in `@copy` is found under its name first.
+
 **Its numbers.** The router has no web page, so it answers for itself.
 `SHOW ROUTER STATUS`, on any connection to it, lists the server's copy
 snapshot and its age in seconds, how many of that server's statements the

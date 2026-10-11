@@ -152,7 +152,7 @@ func probeCopy(ctx context.Context, c *sql.Conn) error {
 		return fmt.Errorf("the copy cannot run SQL (%w); --copy-dsn must be the console's MySQL-protocol port for a server whose copy is on local disk", err)
 	}
 	if !v.Valid || !strings.HasPrefix(v.String, "8") {
-		return fmt.Errorf("--copy-dsn answered like MySQL (2 ^ 3 = %q): the port has read routing on (--route-max-copy-age); sql-compare needs a port with routing off, so every statement runs on the copy", v.String)
+		return fmt.Errorf("--copy-dsn answered like MySQL (2 ^ 3 = %q): this connection is routed; sql-compare needs one the copy answers alone. Connect as <server>@copy in --copy-dsn, or turn read routing off on that port", v.String)
 	}
 	return nil
 }

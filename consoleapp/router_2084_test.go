@@ -568,7 +568,7 @@ func TestRouterStartupLines_sayWhatWillHappen(t *testing.T) {
 		{"a pool of one is one statement", func(u *routerStartup) { u.Pool.Workers = 1 },
 			[]string{"1 statement on the copy at once"}, []string{"1 statements"}},
 		{"no token: the web interface's password", func(u *routerStartup) { u.PortFile = "/var/lib/bintrail/console-mysql-port.yaml" },
-			[]string{"no access token was given", "/var/lib/bintrail/console-mysql-port.yaml", "only while it is on"},
+			[]string{"no access token was given", "/var/lib/bintrail/console-mysql-port.yaml", "only while it is on", "routed only when that file says so"},
 			[]string{"the password is the access token"}},
 		{"a servers file that is not there", func(u *routerStartup) { u.ServersExists, u.Servers = false, 0 },
 			[]string{"does not exist yet", "no server can be reached", "--servers-file"},

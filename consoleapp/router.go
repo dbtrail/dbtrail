@@ -525,7 +525,7 @@ func routerStartupLines(u routerStartup) string {
 	if u.PortFile == "" {
 		b.WriteString("Router: the password is the access token (--token). A port password created in the web interface is not accepted here.\n")
 	} else {
-		fmt.Fprintf(&b, "Router: no access token was given, so the password is the one the web interface creates when the MySQL port is turned on there (read from %s), and the port is open only while it is on.\n", u.PortFile)
+		fmt.Fprintf(&b, "Router: no access token was given, so the password is the one the web interface creates when the MySQL port is turned on there (read from %s), and the port is open only while it is on. Statements are routed only when that file says so (routing: true); otherwise the copy answers every statement.\n", u.PortFile)
 	}
 	switch {
 	case !u.ServersExists:
@@ -610,6 +610,12 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 	}
 
 	cfg := routerFlashbackConfig(st)
+	if routerPortFile(st) != "" {
+		// The switch saved in the web interface says whether statements
+		// are routed (#2341). A router started with a token does not read
+		// that file, and routes.
+		cfg.RouteSwitch = srv.FlashbackRoutingOn
+	}
 	_, statErr := os.Stat(st.ServersFile)
 	fmt.Fprint(os.Stderr, routerStartupLines(routerStartup{
 		Listen: st.Listen, Pool: pool, MemoryLimit: memoryLimit, Cfg: cfg,

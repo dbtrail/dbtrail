@@ -57,6 +57,11 @@ type FlashbackFile struct {
 	Listen            string `yaml:"listen,omitempty"`
 	Password          string `yaml:"password,omitempty"`
 	PasswordCreatedAt string `yaml:"password_created_at,omitempty"`
+	// Routing: read routing is on (#2341). Off, the copy answers every
+	// statement; on, each statement goes to the server's source except the
+	// expensive SELECTs. Followed by the router; the port inside watch
+	// still takes its routing from where it is started.
+	Routing bool `yaml:"routing,omitempty"`
 	// Extra preserves unknown top-level fields a newer binary wrote, across
 	// this binary's load and save.
 	Extra map[string]any `yaml:",inline"`

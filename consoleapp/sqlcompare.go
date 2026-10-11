@@ -48,7 +48,8 @@ between two runs) or SKIPPED (not a plain read: writes, WITH ... DELETE,
 SELECT ... INTO, locking reads, GET_LOCK/SLEEP/BENCHMARK, two statements in
 one; a stored function with side effects cannot be screened by text), plus
 what the read router would do with it. The run refuses to start when the
-copy port has read routing on (it would compare MySQL with MySQL), and
+connection to the copy port is routed (it would compare MySQL with MySQL;
+connect as <server>@copy to be answered by the copy alone), and
 exits 1 when nothing reached a comparison. The exit status is 1 when a statement the router would send to
 the copy answers differently: that is a veto to add or a difference to
 document before turning routing on for that workload.
@@ -64,7 +65,7 @@ counted apart and never fail the run (ties resolve differently per engine).`,
 func init() {
 	f := sqlCompareCmd.Flags()
 	f.StringVar(&scSourceDSN, "source-dsn", "", "MySQL source DSN, user:pass@tcp(host:port)/db (env BINTRAIL_SOURCE_DSN)")
-	f.StringVar(&scCopyDSN, "copy-dsn", "", "The console's MySQL-protocol port for the same server: <server>:<token>@tcp(host:port)/ (read routing must be off on that port)")
+	f.StringVar(&scCopyDSN, "copy-dsn", "", "The console's MySQL-protocol port for the same server: <server>:<token>@tcp(host:port)/; with read routing on there, <server>@copy:<token>@tcp(host:port)/, a connection the copy answers alone")
 	f.StringVar(&scSchema, "schema", "", "USE this schema on both sides first (default: the DSNs' own)")
 	f.StringVar(&scStatements, "statements", "", "File of statements to compare, ';'-terminated")
 	f.IntVar(&scSample, "sample", 0, "Instead of a file, compare the N most recent distinct SELECTs the source ran (performance_schema.events_statements_history_long)")
