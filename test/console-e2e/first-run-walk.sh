@@ -35,7 +35,9 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 DOCKER="${DOCKER:-docker}"
 MYSQL_CONTAINER="${MYSQL_CONTAINER:-bintrail-test-mysql}"
 BASE_DSN="${BINTRAIL_TEST_DSN:-root:testroot@tcp(127.0.0.1:13306)}"
-SOURCE_IMAGE="mysql:8.4"
+# The database the walk captures. CI names the same image on its mirror
+# (TEST_IMAGES in ci.yml), because a bare name is a pull from Docker Hub.
+SOURCE_IMAGE="${SOURCE_IMAGE:-mysql:8.4}"
 export E2E_ARTIFACT_DIR="${E2E_ARTIFACT_DIR:-${RUNNER_TEMP:-/tmp}}"
 
 skip() {
