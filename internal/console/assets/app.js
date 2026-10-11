@@ -14949,18 +14949,48 @@ function genSourcePassword() {
 // and Percona 8.0 or later. LOCK TABLES is only what lock-all needs, which is
 // the RDS/Aurora path: the commented alternative (#1658), or the live line
 // when managed is set (the Connect screen's RDS box, #1953).
-function grantBlocks(user, password, hasSavedPassword, managed, connect) {
+//
+// schemas is the form's Schemas field (#2317). Blank, the server captures
+// every schema and the account needs SELECT on every one. With schemas
+// typed, SELECT is granted on those alone: SELECT ON *.* also covers MySQL's
+// own account tables, which capture never reads. The two REPLICATION
+// privileges have no level but the global one.
+function grantBlocks(user, password, hasSavedPassword, managed, connect, schemas) {
   const typedUser = String(user || "").trim();
   const acct = sqlString(typedUser || "dbtrail") + "@'%'";
   // A placeholder, not '': an empty quoted string is a real password MySQL
   // accepts, and the block is one uncomment away from creating an account
   // with it. Unquoted, the line is a syntax error however it is run.
   const secret = password ? sqlString(password) : "<choose a password>";
+  // The typed schemas, as DBTrail reads the field (comma-separated, trimmed,
+  // blanks dropped), once each. A line break counts as a comma: a name is
+  // never written across two lines of the block. The two schemas nobody can
+  // be granted on are left out; capture reads neither.
+  const scoped = [];
+  for (const part of String(schemas || "").split(/[,\r\n]/)) {
+    const name = part.trim();
+    if (!name || /^(information_schema|performance_schema)$/i.test(name) || scoped.includes(name)) continue;
+    scoped.push(name);
+  }
+  let grantRead = "GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO " + acct + ";\n";
+  if (scoped.length) {
+    grantRead = "GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO " + acct + ";\n" +
+      "-- SELECT on the schemas typed above only. Add a schema there and this adds its line.\n" +
+      (scoped.some((n) => /[_%]/.test(n)) ? "-- In a GRANT, _ and % in a schema name match any character: a name with one also covers schemas named alike.\n" : "") +
+      scoped.map((n) => "GRANT SELECT ON `" + n.split("`").join("``") + "`.* TO " + acct + ";\n").join("") +
+      // The source check reads one table outside those schemas, and only
+      // Amazon RDS and Aurora have it: the live line where the form knows
+      // the source is one, a commented one elsewhere (it fails where the
+      // table does not exist).
+      (managed ? "-- Amazon RDS and Aurora keep their binlog retention here; the source check reads it.\n"
+        : "-- On Amazon RDS or Aurora, run this too (the source check reads the binlog retention there):\n-- ") +
+      "GRANT SELECT ON mysql.rds_configuration TO " + acct + ";\n";
+  }
   const grantBase =
     "CREATE USER " + acct + " IDENTIFIED BY " + secret + ";\n" +
     "-- Created it already on an earlier try? Run this instead of CREATE USER:\n" +
     "-- ALTER USER " + acct + " IDENTIFIED BY " + secret + ";\n" +
-    "GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO " + acct + ";\n";
+    grantRead;
   // Managed services cannot use the default lock mode (no BACKUP_ADMIN on
   // managed MySQL; RDS MariaDB's RELOAD excludes FLUSH TABLES WITH READ LOCK),
   // so they switch to lock-all, which locks tables instead of the instance.
@@ -15027,7 +15057,8 @@ function grantBlocks(user, password, hasSavedPassword, managed, connect) {
 function refreshGrants(form) {
   const f = form.elements;
   const managed = !!(f.cx_managed && f.cx_managed.checked);
-  const b = grantBlocks(f.source_user.value, f.source_password.value, !!savedSourcePasswords.get(form), managed, !!form.dataset.connect);
+  // The Connect screen has no Schemas field: it captures every schema.
+  const b = grantBlocks(f.source_user.value, f.source_password.value, !!savedSourcePasswords.get(form), managed, !!form.dataset.connect, f.schemas ? f.schemas.value : "");
   // The Connect screen shows one block, for the flavor step 1 found or chose.
   if (form.dataset.connect) $all("pre[data-grant]", form).forEach((p) => p.setAttribute("data-grant", f.flavor.value === "mariadb" ? "mariadb" : "mysql"));
   $all("pre[data-grant]", form).forEach((p) => { p.textContent = b[p.dataset.grant]; });
@@ -15174,7 +15205,7 @@ function buildServerForm() {
   const grantHint = tagFlavor(el("p", { class: "form-hint", style: "margin-top:10px" }), "mysql mariadb");
   grantHint.append("Source user needs ");
   grantHint.append(el("code", { text: "REPLICATION SLAVE, REPLICATION CLIENT, SELECT" }));
-  grantHint.append(" to capture, and the snapshot line for the first copy of your tables. Create one on the source; copy and run:");
+  grantHint.append(" to capture, and the snapshot line for the first copy of your tables. Type the schemas to capture in Schemas and the SELECT below is granted on those alone. Create one on the source; copy and run:");
   mon.append(grantHint);
   const grants = grantBlocks("", "");
   mon.append(tagFlavor(el("pre", { class: "form-code", "data-grant": "mysql", text: grants.mysql }), "mysql"));
@@ -15255,7 +15286,7 @@ function showServerForm(prefill, opts) {
   form.elements.flavor.addEventListener("change", () => { applyFlavor(form); applyGrantDefaults(form); });
   // "change" as well as "input": some autofill fills a field and fires only
   // change, which would leave the block showing another password.
-  ["source_user", "source_password"].forEach((k) => ["input", "change"].forEach((ev) =>
+  ["source_user", "source_password", "schemas"].forEach((k) => ["input", "change"].forEach((ev) =>
     form.elements[k].addEventListener(ev, () => refreshGrants(form))));
   // The generated password sits masked in its field. Someone reusing their
   // own account clicks in and types, and the caret lands after the hidden

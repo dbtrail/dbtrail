@@ -65,6 +65,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reconnect. A forwarding account saved as the capture account itself, or
   one that cannot be read, counts as none. Nothing changes for a port with
   read routing off, which is the default.
+- **The server form grants `SELECT` on the schemas you typed, not on every
+  schema** (#2317). The SQL the add-server form shows for the capture account
+  used to grant `SELECT ON *.*` whatever the form held, which also covers
+  MySQL's own `mysql` schema and its account tables. With schemas typed in
+  **Schemas**, it now grants `SELECT` on those, one line each, and adds the
+  one table the source check reads on Amazon RDS and Aurora
+  (`mysql.rds_configuration`), as a live line where the form knows the
+  source is one and a commented line elsewhere. A form with **Schemas**
+  blank, and the first-run Connect screen, show the global grant as before:
+  such a server captures every schema. An account created with the earlier
+  block keeps working; nothing checks or changes its grants.
 
 
 ## [0.103.1] - 2026-10-10

@@ -131,13 +131,19 @@ back to a snapshot it cannot vouch for. The low-privilege escape hatches are
 snapshot, so expect it to refuse on a write-active source) and `no-lock` (accepts
 a torn snapshot — see [dump-and-baseline.md](dump-and-baseline.md)).
 
-**Least-privilege variant** — `SELECT` is the only privilege you can scope to specific schemas (the two `REPLICATION` grants are global-only in MySQL):
+**Least-privilege variant, for a server that captures chosen schemas.** `SELECT ON *.*` covers every schema on the server, MySQL's own `mysql` schema with its account tables included, and capture reads none of that. When you name the schemas to capture (the **Schemas** field of the server, `--schemas` on the command line), grant `SELECT` on those alone. It is the only privilege you can scope: the two `REPLICATION` grants are global-only in MySQL.
 
 ```sql
 CREATE USER 'dbtrail'@'%' IDENTIFIED BY <choose a password>;
 GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'dbtrail'@'%';
-GRANT SELECT ON shop.* TO 'dbtrail'@'%';        -- repeat per monitored schema
+GRANT SELECT ON `shop`.* TO 'dbtrail'@'%';      -- repeat per monitored schema
+-- On Amazon RDS or Aurora only: the source check reads the binlog retention here.
+-- GRANT SELECT ON mysql.rds_configuration TO 'dbtrail'@'%';
 ```
+
+The web interface writes this block for you: type the schemas in **Schemas** on the server's form and the SQL it shows grants `SELECT` on those, one line each. A server with **Schemas** left blank captures every schema, so it needs the global grant of the first block.
+
+In a `GRANT`, `_` and `%` in a schema name match any character, so `` `shop_eu` `` also covers a schema named `shopXeu`.
 
 The baseline `GRANT` from the first block stays as written: `RELOAD` and
 `BACKUP_ADMIN` are global-only as well.
