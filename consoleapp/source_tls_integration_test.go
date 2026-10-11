@@ -52,7 +52,7 @@ func tlsOnlyDSN(t *testing.T) string {
 // source that only accepts encrypted connections passes, as capture would.
 func TestDoctorUnsaved_UsesTheEntrysSourceTLS(t *testing.T) {
 	dsn := tlsOnlyDSN(t)
-	m := newMonitorSupervisor(context.Background(), "", nil, 0)
+	m := newMonitorSupervisor(context.Background(), "", nil, nil)
 	m.loopbackRetry = func(string, string) string { return "" }
 
 	for _, tc := range []struct {
@@ -176,7 +176,7 @@ func TestReplicaReads_TLSOnlySource(t *testing.T) {
 	if _, err := reg.Add(console.ServerEntry{Name: "peer", DSN: testutil.DefaultDSN + "/peer_idx", SourceDSN: src}); err != nil {
 		t.Fatal(err)
 	}
-	m := newMonitorSupervisor(context.Background(), "", reg, 0)
+	m := newMonitorSupervisor(context.Background(), "", reg, nil)
 	c := m.replicaOverlapCheck(context.Background(), console.ServerEntry{ID: "cand", Name: "cand", SourceDSN: src})
 	if c == nil {
 		t.Fatal("no replica check")

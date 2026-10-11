@@ -40,7 +40,7 @@ func TestIntegrationDoctorUnsaved_namesTablesWithoutAKey(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	sup := newMonitorSupervisor(context.Background(), testutil.IntegrationDSN(name), nil, 0)
+	sup := newMonitorSupervisor(context.Background(), testutil.IntegrationDSN(name), nil, nil)
 	r, err := sup.DoctorUnsaved(context.Background(), console.ServerEntry{
 		SourceDSN: testutil.BaseDSN() + "/", Schemas: name,
 	})
@@ -82,7 +82,7 @@ func TestIntegrationDoctorUnsaved_provesTheLoopbackCase(t *testing.T) {
 	_, closed, _ := net.SplitHostPort(l.Addr().String())
 	l.Close()
 
-	sup := newMonitorSupervisor(context.Background(), testutil.IntegrationDSN("unused"), nil, 0)
+	sup := newMonitorSupervisor(context.Background(), testutil.IntegrationDSN("unused"), nil, nil)
 	sup.loopbackRetry = func(string, string) string { return cfg.Addr }
 	typed := *cfg
 	typed.Addr = net.JoinHostPort("localhost", closed)

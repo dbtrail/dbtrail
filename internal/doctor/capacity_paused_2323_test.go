@@ -127,3 +127,41 @@ func TestWithDropsPaused_reachesTheBuildConfig(t *testing.T) {
 		t.Fatal("a build with no guard verdict must not be paused")
 	}
 }
+
+// #2328: a daemon's own doctor run knows no retention was chosen, so it says
+// so as a fact, offers no `doctor --retain`, and warns what choosing deletes.
+func TestWithRotationWindow_daemonWording(t *testing.T) {
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	oldest := time.Date(2026, 1, 15, 3, 0, 0, 0, time.UTC)
+
+	var cfg buildConfig
+	WithRotationWindow("the retention this index was created under", true, oldest)(&cfg)
+	if cfg.retainNote == "" || cfg.dropsPaused == nil || !cfg.dropsPaused.InDaemon || !cfg.dropsPaused.Oldest.Equal(oldest) {
+		t.Fatalf("config = note %q paused %+v, want the note and an in-daemon pause", cfg.retainNote, cfg.dropsPaused)
+	}
+	var clear buildConfig
+	WithDropsPaused(oldest)(&clear)
+	WithRotationWindow("", false, time.Time{})(&clear)
+	if clear.dropsPaused != nil {
+		t.Fatal("a window that is not paused must clear an earlier pause")
+	}
+
+	m := EvaluateCapacity(pausedProbe(now, 6, 2_000_000_000, true), 30*24*time.Hour, true, cfg.dropsPaused, now)
+	r := capacityCheckResult(m, "binlog_index", "")
+	for _, want := range []string{"this daemon, started with no retention of its own, does not drop that"} {
+		if !strings.Contains(r.Detail, want) {
+			t.Errorf("detail lacks %q:\n%s", want, r.Detail)
+		}
+	}
+	for _, want := range []string{"--rotate-retain", "Edit rotation", "is dropped on the next rotation cycle", "archive it first"} {
+		if !strings.Contains(r.Remediation, want) {
+			t.Errorf("remediation lacks %q:\n%s", want, r.Remediation)
+		}
+	}
+	for _, not := range []string{"re-run with --retain", "If the daemon already runs"} {
+		if strings.Contains(r.Remediation, not) {
+			t.Errorf("a daemon's own report hedges with %q:\n%s", not, r.Remediation)
+		}
+	}
+	t.Logf("daemon line:\n%s\n%s", r.Detail, r.Remediation)
+}

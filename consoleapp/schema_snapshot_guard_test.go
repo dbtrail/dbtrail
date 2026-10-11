@@ -401,7 +401,7 @@ func TestMonitorStart_panicLeavesTheSlotRetryable(t *testing.T) {
 	prev := dbNameRE
 	t.Cleanup(func() { dbNameRE = prev })
 
-	m := newMonitorSupervisor(context.Background(), "", nil, 0)
+	m := newMonitorSupervisor(context.Background(), "", nil, nil)
 	e := console.ServerEntry{ID: "srv-1", Name: "srv",
 		SourceDSN: "u:p@tcp(127.0.0.1:3306)/app", DSN: "u:p@tcp(127.0.0.1:3306)/idx"}
 

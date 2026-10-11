@@ -286,8 +286,12 @@ func upStreamSSL() config.SSL {
 // use (upStreamSSL), so it cannot refuse a server that only accepts encrypted
 // connections while the stream would have reached it.
 func upPreflight(ctx context.Context) *doctor.Report {
-	return doctor.Build(ctx, upSourceDSN, upIndexDSN, upSchemas, upRotationCfg.Retain,
-		doctor.WithSourceSSL(upStreamSSL()))
+	// The window the loop will drop THIS index on, not the flag's value: with
+	// no --rotate-retain an existing index keeps the window it records, and
+	// may be held back by the upgrade guard (#2328).
+	w := rotation.ResolveWindowDSN(ctx, upIndexDSN, upRotationCfg)
+	return doctor.Build(ctx, upSourceDSN, upIndexDSN, upSchemas, w.Retain,
+		doctor.WithSourceSSL(upStreamSSL()), doctor.WithRotationWindow(w.Note, w.Guard.Blocked, w.Guard.Oldest))
 }
 
 // autoServerID derives the replication server-id when --server-id was not

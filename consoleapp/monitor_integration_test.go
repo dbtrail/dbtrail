@@ -60,7 +60,7 @@ func TestIntegrationMonitorRunsExtSourceJob(t *testing.T) {
 	_, bootName := testutil.CreateTestDB(t)
 	bootDSN := testutil.IntegrationDSN(bootName)
 
-	sup := newMonitorSupervisor(ctx, bootDSN, nil, 0)
+	sup := newMonitorSupervisor(ctx, bootDSN, nil, nil)
 	// Block until the job's lifecycle context is cancelled: this lets Start reach
 	// the ext wiring with only provisioning + the advisory lock done (real
 	// MySQL), never a reachable source, and keeps the stored state at "pending"
@@ -156,7 +156,7 @@ func TestIntegrationMonitorExtSourceJobTornDownOnStreamExit(t *testing.T) {
 	_, bootName := testutil.CreateTestDB(t)
 	bootDSN := testutil.IntegrationDSN(bootName)
 
-	sup := newMonitorSupervisor(ctx, bootDSN, nil, 0)
+	sup := newMonitorSupervisor(ctx, bootDSN, nil, nil)
 	// A stream that returns nil immediately: run takes the clean-return terminal
 	// branch (err == nil) and, with the fix, cancels jobCtx via its defer.
 	sup.streamFn = func(_ context.Context, cfg streamrun.Config) error {
@@ -224,7 +224,7 @@ func TestIntegrationMonitorExtSourceJobPGFlavor(t *testing.T) {
 	_, bootName := testutil.CreateTestDB(t)
 	bootDSN := testutil.IntegrationDSN(bootName)
 
-	sup := newMonitorSupervisor(ctx, bootDSN, nil, 0)
+	sup := newMonitorSupervisor(ctx, bootDSN, nil, nil)
 	sup.pgStreamFn = func(c context.Context, _ pgstreamrun.Config) error { <-c.Done(); return c.Err() }
 
 	sentinel := fmt.Sprintf("extjobpg%d", time.Now().UnixNano()%1e9)
@@ -332,7 +332,7 @@ func TestIntegrationMonitorSupervisor(t *testing.T) {
 	t.Cleanup(func() { _, _ = srcDB.Exec("DROP DATABASE IF EXISTS " + srcSchema) })
 	mustExec("CREATE TABLE " + srcSchema + ".items (id INT PRIMARY KEY, qty INT)")
 
-	sup := newMonitorSupervisor(ctx, bootDSN, nil, 0)
+	sup := newMonitorSupervisor(ctx, bootDSN, nil, nil)
 	entry := console.ServerEntry{
 		ID:        fmt.Sprintf("itest%d", time.Now().UnixNano()%1e9),
 		Name:      "integration",
@@ -393,7 +393,7 @@ func TestIntegrationMonitorSupervisor(t *testing.T) {
 
 	// The capture lock: a second supervisor (second daemon) must wait for it,
 	// not capture beside the first and not fail for good (#2105).
-	sup2 := newMonitorSupervisor(ctx, bootDSN, nil, 0)
+	sup2 := newMonitorSupervisor(ctx, bootDSN, nil, nil)
 	if err := sup2.Start(ctx, entry); err != nil {
 		t.Fatalf("second daemon Start: %v, want it to wait for the lock", err)
 	}
@@ -517,7 +517,7 @@ func TestIntegrationDDLThenImmediateInserts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sup := newMonitorSupervisor(ctx, bootDSN, nil, 0)
+	sup := newMonitorSupervisor(ctx, bootDSN, nil, nil)
 	entry := console.ServerEntry{
 		ID:        fmt.Sprintf("ddlrace%d", time.Now().UnixNano()%1e9),
 		Name:      "ddl-race",
@@ -629,7 +629,7 @@ func TestIntegrationLostPositionDurable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sup := newMonitorSupervisor(ctx, bootDSN, nil, 0)
+	sup := newMonitorSupervisor(ctx, bootDSN, nil, nil)
 	entry := console.ServerEntry{
 		ID:        fmt.Sprintf("lptest%d", time.Now().UnixNano()%1e9),
 		Name:      "lost-position",
@@ -749,7 +749,7 @@ func TestIntegrationReplicaOverlapSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sup := newMonitorSupervisor(ctx, bootDSN, reg, 0)
+	sup := newMonitorSupervisor(ctx, bootDSN, reg, nil)
 
 	// Peer B's per-source index DB, provisioned with the real tables and
 	// seeded with an identity + an accumulated GTID set.
@@ -851,7 +851,7 @@ func TestIntegrationMonitorLockLossStopsThenResumes(t *testing.T) {
 	t.Cleanup(func() { _, _ = srcDB.Exec("DROP DATABASE IF EXISTS " + srcSchema) })
 	mustExec("CREATE TABLE " + srcSchema + ".items (id INT PRIMARY KEY, qty INT)")
 
-	sup := newMonitorSupervisor(ctx, bootDSN, nil, 0)
+	sup := newMonitorSupervisor(ctx, bootDSN, nil, nil)
 	entry := console.ServerEntry{
 		ID:        fmt.Sprintf("lockloss%d", time.Now().UnixNano()%1e9),
 		Name:      "lockloss",

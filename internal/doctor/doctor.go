@@ -205,6 +205,22 @@ func WithDropsPaused(oldest time.Time) BuildOption {
 	return func(c *buildConfig) { c.dropsPaused = &DropsPaused{Oldest: oldest} }
 }
 
+// WithRotationWindow is how a DAEMON's doctor run (a preflight, the web
+// interface's Checks report) hands over what its rotation loop does with the
+// index (#2328): note names where an implicit window came from, and paused
+// says the loop's upgrade guard is refusing to drop on it, with the oldest
+// partition it protects. The caller resolves both with the loop's own
+// settings (rotation.ResolveWindowDSN); this package only grades.
+func WithRotationWindow(note string, paused bool, oldest time.Time) BuildOption {
+	return func(c *buildConfig) {
+		c.retainNote = note
+		c.dropsPaused = nil
+		if paused {
+			c.dropsPaused = &DropsPaused{Oldest: oldest, InDaemon: true}
+		}
+	}
+}
+
 // ForUnsavedServer runs the source half of the checks for a server that is not
 // saved yet: the web interface's Test connection on a new server (#1767). Its
 // index does not exist, so the first schema snapshot is certainly still to be

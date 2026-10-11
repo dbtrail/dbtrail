@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -376,8 +377,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		// unattended reboot would crash-loop instead of capturing while
 		// there is still room). Standalone `bintrail doctor` keeps full FAIL
 		// semantics for CI.
-		preflight := doctor.Build(cmd.Context(), upSourceDSN, upIndexDSN, upSchemas, upRotationCfg.Retain,
-			doctor.WithSourceSSL(bootSourceSSL()))
+		preflight := watchPreflight(cmd.Context())
 		if err := preflight.Write(os.Stderr, "text"); err != nil {
 			return fmt.Errorf("write preflight report: %w", err)
 		}
@@ -405,6 +405,54 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintln(os.Stderr, "=== Phase 3/3: Streaming ===")
 	return runUpStreamWithConsole(cmd, args)
+}
+
+// watchPreflight runs the boot preflight. The capacity window is the one the
+// loop will drop THIS index on (#2328): a retention saved in the web interface
+// or given at startup applies to every index; with neither, an existing index
+// keeps the window it records, and may be held back by the upgrade guard.
+func watchPreflight(ctx context.Context) *doctor.Report {
+	w := rotation.ResolveWindowDSN(ctx, upIndexDSN, preflightRotationSettings())
+	return doctor.Build(ctx, upSourceDSN, upIndexDSN, upSchemas, w.Retain,
+		doctor.WithSourceSSL(bootSourceSSL()), doctor.WithRotationWindow(w.Note, w.Guard.Blocked, w.Guard.Oldest))
+}
+
+// preflightRotationSettings is what the rotation loop will read on its first
+// cycle, known before the daemon loads its registry: the policy saved in the
+// web interface when there is a valid one, else the --rotate-* flags. The
+// file is read the way a process that does not own it reads it
+// (LoadRegistryFollower: nothing is written, the baseline migration is
+// skipped), because the daemon's own load comes later and must stay the first
+// writer. A file that cannot be read answers the flags, as the preflight did
+// before it looked.
+func preflightRotationSettings() rotation.Settings {
+	path := upConsoleServersFile
+	if path == "" {
+		path = console.DefaultRegistryPath()
+	}
+	reg, err := console.LoadRegistryFollower(path)
+	if err != nil {
+		slog.Debug("preflight: could not read the web interface's saved settings; using the --rotate-* flags", "error", err)
+		return upRotationCfg
+	}
+	return rotationSettingsProvider(reg)()
+}
+
+// checksRotationSettings is what the Checks report grades an index over: the
+// loop's own live settings, as long as a loop is running. StartLoop decides
+// that ONCE, from the settings in force when the daemon starts; a daemon
+// started with rotation off runs none, and a retention saved afterwards
+// drops nothing until a restart. Reporting it as a window in force would show
+// a bounded projection over an index that only grows.
+func checksRotationSettings(reg *console.Registry) func() rotation.Settings {
+	provider := rotationSettingsProvider(reg)
+	loopRuns := provider().Enabled
+	return func() rotation.Settings {
+		if !loopRuns {
+			return rotation.Settings{}
+		}
+		return provider()
+	}
 }
 
 // upPreflightOutcome maps the preflight report to the daemon's boot decision:
@@ -536,7 +584,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	// without this loop a daemon's beacons would spool and age out undelivered.
 	go tel.Client().RunDaemon(ctx, cmd.Name())
 
-	supervisor := newMonitorSupervisor(ctx, upIndexDSN, registry, upRotationCfg.Retain)
+	supervisor := newMonitorSupervisor(ctx, upIndexDSN, registry, checksRotationSettings(registry))
 	cfg.MonitorCtrl = supervisor
 	// Refreshing a source's schema snapshot needs no opt-in of its own (#1296):
 	// unlike the baseline trigger it starts no dump and copies no row data — it
@@ -889,7 +937,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	// The control-plane supervisor: "+ Add server" in the console starts real
 	// monitoring through it. Streams live on the daemon context (ctx), not on
 	// the HTTP requests that start them.
-	supervisor := newMonitorSupervisor(ctx, upIndexDSN, registry, upRotationCfg.Retain)
+	supervisor := newMonitorSupervisor(ctx, upIndexDSN, registry, checksRotationSettings(registry))
 	cfg.MonitorCtrl = supervisor
 	// Refreshing a source's schema snapshot needs no opt-in of its own (#1296):
 	// unlike the baseline trigger it starts no dump and copies no row data — it
@@ -2035,6 +2083,10 @@ func rotateTargets(bootDSN string, boot bootRole, sup *monitorSupervisor, reg *c
 // falls back to the defaults with a warning rather than silently disabling
 // rotation. The boot-index/per-source targets are unaffected: this governs the
 // daemon-global retain/interval/add-future only (the loop is one shared ticker).
+// invalidRotationWarned remembers which invalid saved policies this process
+// has already warned about.
+var invalidRotationWarned sync.Map
+
 func rotationSettingsProvider(reg *console.Registry) func() rotation.Settings {
 	return func() rotation.Settings {
 		if rc, ok := reg.Rotation(); ok {
@@ -2048,7 +2100,12 @@ func rotationSettingsProvider(reg *console.Registry) func() rotation.Settings {
 				// hand edit. Name it rather than logging error=<nil>.
 				err = fmt.Errorf("retain %q turns rotation off, which only --rotate-retain can do", rc.Retain)
 			}
-			slog.Warn("built-in rotation: ignoring the invalid policy saved in the web interface; using daemon defaults", "error", err)
+			// Once per distinct saved value: the provider is read by every
+			// rotation cycle AND every Checks report, and a warning repeated
+			// on each teaches the operator to stop reading the log.
+			if _, seen := invalidRotationWarned.LoadOrStore(fmt.Sprintf("%s|%s|%d", rc.Retain, rc.Interval, rc.AddFuture), struct{}{}); !seen {
+				slog.Warn("built-in rotation: ignoring the invalid policy saved in the web interface; using daemon defaults", "error", err)
+			}
 		}
 		return upRotationCfg
 	}

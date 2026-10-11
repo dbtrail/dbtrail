@@ -55,7 +55,7 @@ func TestIntegrationMonitorRegistrySourceMariaDBDetected(t *testing.T) {
 	defer cancel()
 	_, bootName := testutil.CreateTestDB(t)
 	bootDSN := testutil.IntegrationDSN(bootName)
-	sup := newMonitorSupervisor(ctx, bootDSN, nil, 0)
+	sup := newMonitorSupervisor(ctx, bootDSN, nil, nil)
 
 	sentinel := fmt.Sprintf("flvmaria%d", time.Now().UnixNano()%1e9)
 	infoCh, _ := probeSourceJob(t, sentinel)
@@ -115,7 +115,7 @@ func TestIntegrationMonitorRegistryFlavorHintContradicted(t *testing.T) {
 	bootDSN := testutil.IntegrationDSN(bootName)
 	sourceDB, sourceName := testutil.CreateTestDB(t)
 	testutil.MustExec(t, sourceDB, "CREATE TABLE t (id INT PRIMARY KEY)")
-	sup := newMonitorSupervisor(ctx, bootDSN, nil, 0)
+	sup := newMonitorSupervisor(ctx, bootDSN, nil, nil)
 
 	sentinel := fmt.Sprintf("flvmysql%d", time.Now().UnixNano()%1e9)
 	infoCh, _ := probeSourceJob(t, sentinel)
@@ -196,7 +196,7 @@ func TestIntegrationMonitorRegistrySourceMariaDBRelabeled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sup := newMonitorSupervisor(ctx, bootDSN, reg, 0)
+	sup := newMonitorSupervisor(ctx, bootDSN, reg, nil)
 	infoCh, _ := probeSourceJob(t, added.ID)
 	entry := startRegistrySource(t, ctx, sup, bootDSN, added)
 

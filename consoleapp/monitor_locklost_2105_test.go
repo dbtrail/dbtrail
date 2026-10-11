@@ -14,7 +14,7 @@ import (
 // Start that landed first: start with an expected job refuses once the slot
 // holds anything else, and leaves the slot as it was.
 func TestStartRefusesWhenTheExpectedJobIsGone(t *testing.T) {
-	m := newMonitorSupervisor(context.Background(), "", nil, 0)
+	m := newMonitorSupervisor(context.Background(), "", nil, nil)
 	e := console.ServerEntry{ID: "s2105", Name: "shop", SourceDSN: "root@tcp(127.0.0.1:1)/", DSN: "root@tcp(127.0.0.1:1)/bintrail_idx_s2105"}
 	lost := &monitorJob{cancel: func() {}, done: make(chan struct{})}
 
@@ -46,7 +46,7 @@ func TestLockLostRestartThatFailsKeepsRetrying(t *testing.T) {
 	t.Cleanup(func() { lockLostBackoffBase = base })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m := newMonitorSupervisor(ctx, "", nil, 0)
+	m := newMonitorSupervisor(ctx, "", nil, nil)
 	// An index DSN start cannot parse: start reserves the slot and fails.
 	e := console.ServerEntry{ID: "s2105b", Name: "shop", SourceDSN: "root@tcp(127.0.0.1:1)/", DSN: "::not a dsn::"}
 	lost := &monitorJob{cancel: func() {}, done: make(chan struct{})}
@@ -101,7 +101,7 @@ func TestLockLostRestartRespectsTheRegistry(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m := newMonitorSupervisor(ctx, "", reg, 0)
+	m := newMonitorSupervisor(ctx, "", reg, nil)
 	e := console.ServerEntry{ID: "s2105c", Name: "shop", SourceDSN: "root@tcp(127.0.0.1:1)/", DSN: "::not a dsn::", MonitorDesired: true}
 	lost := &monitorJob{cancel: func() {}, done: make(chan struct{})}
 	m.jobs[e.ID] = lost

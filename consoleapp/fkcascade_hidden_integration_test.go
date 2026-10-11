@@ -35,7 +35,7 @@ func TestIntegrationConsoleDoctor_omitsFKCascades(t *testing.T) {
 		t.Fatal("bintrail doctor no longer reports the cascade on this server; the test proves nothing")
 	}
 
-	sup := newMonitorSupervisor(context.Background(), testutil.IntegrationDSN(name), nil, 0)
+	sup := newMonitorSupervisor(context.Background(), testutil.IntegrationDSN(name), nil, nil)
 	entry := console.ServerEntry{SourceDSN: testutil.BaseDSN() + "/", Schemas: name, DSN: testutil.IntegrationDSN(name)}
 	for label, run := range map[string]func(context.Context, console.ServerEntry) (*console.DoctorReport, error){
 		"unsaved": sup.DoctorUnsaved,

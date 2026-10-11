@@ -92,7 +92,7 @@ func TestIntegrationFlashbackRoutedUnchangedRealCapture_2085(t *testing.T) {
 
 	// The capture: the supervisor's stream, as `watch` runs it for a server
 	// saved in the console.
-	sup := newMonitorSupervisor(ctx, testutil.IntegrationDSN(indexName), nil, 0)
+	sup := newMonitorSupervisor(ctx, testutil.IntegrationDSN(indexName), nil, nil)
 	if err := sup.Start(ctx, ent); err != nil {
 		t.Fatalf("start the capture: %v", err)
 	}

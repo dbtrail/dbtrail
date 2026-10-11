@@ -83,7 +83,7 @@ func TestIntegrationConnectCheck_aFailedCheckLeavesNothingBehind(t *testing.T) {
 	db, name := testutil.CreateTestDB(t)
 	testutil.MustExec(t, db, "CREATE TABLE loose (v INT)")
 
-	sup := &recordingSupervisor{monitorSupervisor: newMonitorSupervisor(context.Background(), testutil.IntegrationDSN(name), nil, 0)}
+	sup := &recordingSupervisor{monitorSupervisor: newMonitorSupervisor(context.Background(), testutil.IntegrationDSN(name), nil, nil)}
 	srv, reg := connectConsole(t, sup)
 	code, out := postCheck(t, srv, sourceBody(t, name))
 	if code != 200 {
@@ -131,7 +131,7 @@ func TestIntegrationConnectCheck_aFailedCheckLeavesNothingBehind(t *testing.T) {
 // failed — possibly after it had already created the per-server database.
 func TestIntegrationDiscardNew_dropsOnlyTheDatabaseItDerived(t *testing.T) {
 	_, name := testutil.CreateTestDB(t)
-	sup := newMonitorSupervisor(context.Background(), testutil.IntegrationDSN(name), nil, 0)
+	sup := newMonitorSupervisor(context.Background(), testutil.IntegrationDSN(name), nil, nil)
 
 	const id = "0123456789abcdef"
 	derived, err := sup.DeriveIndexDSN(id)
@@ -322,7 +322,7 @@ func TestIntegrationConnectCheck_aStartThatFailsAfterCreatingItsDatabaseLeavesNo
 	db, schema := testutil.CreateTestDB(t)
 	testutil.MustExec(t, db, "CREATE TABLE keyed (id INT PRIMARY KEY)")
 	sup := &recordingSupervisor{monitorSupervisor: newMonitorSupervisor(context.Background(),
-		limitedIndexUser(t, "ct1803_noinsert", true), nil, 0)}
+		limitedIndexUser(t, "ct1803_noinsert", true), nil, nil)}
 	srv, reg := connectConsole(t, sup)
 
 	code, out := postCheck(t, srv, sourceBody(t, schema))
@@ -363,7 +363,7 @@ func TestIntegrationConnectCheck_aDatabaseThatCannotBeDroppedIsReportedKept(t *t
 	db, schema := testutil.CreateTestDB(t)
 	testutil.MustExec(t, db, "CREATE TABLE keyed (id INT PRIMARY KEY)")
 	sup := &recordingSupervisor{monitorSupervisor: newMonitorSupervisor(context.Background(),
-		limitedIndexUser(t, "ct1803_nodrop", false), nil, 0)}
+		limitedIndexUser(t, "ct1803_nodrop", false), nil, nil)}
 	srv, reg := connectConsole(t, sup)
 
 	_, out := postCheck(t, srv, sourceBody(t, schema))

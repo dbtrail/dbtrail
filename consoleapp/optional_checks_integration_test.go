@@ -26,7 +26,7 @@ func TestIntegrationDoctorUnsaved_carriesOptional(t *testing.T) {
 	if (stmtLog != "0" && !strings.EqualFold(stmtLog, "OFF")) || !strings.EqualFold(rowMeta, "MINIMAL") {
 		t.Skipf("the test MySQL is not stock (binlog_rows_query_log_events=%s, binlog_row_metadata=%s)", stmtLog, rowMeta)
 	}
-	sup := newMonitorSupervisor(context.Background(), testutil.IntegrationDSN(name), nil, 0)
+	sup := newMonitorSupervisor(context.Background(), testutil.IntegrationDSN(name), nil, nil)
 	r, err := sup.DoctorUnsaved(context.Background(), console.ServerEntry{SourceDSN: testutil.BaseDSN() + "/", Schemas: name})
 	if err != nil {
 		t.Fatal(err)

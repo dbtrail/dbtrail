@@ -244,8 +244,9 @@ type CapacityMeasurement struct {
 	// DropsPaused is true under CapacityRotationPaused: Retain is the window
 	// the index would rotate on, and nothing is being dropped on it.
 	// PausedOldest is how far back the history the loop will not touch goes.
-	DropsPaused  bool
-	PausedOldest time.Time
+	DropsPaused    bool
+	PausedOldest   time.Time
+	PausedInDaemon bool
 	// ProjectedBytes is the steady-state size over Retain (0 when Retain is
 	// 0 or unknown); RemainingBytes the growth still ahead of CurrentBytes
 	// to reach it (floored at 0).
@@ -308,7 +309,7 @@ func EvaluateCapacity(probe CapacityProbe, retain time.Duration, retainKnown boo
 		// the cause and the fix are not. The too-little-history SKIP stands.
 		p, ok := projectCapacity(probe.Partitions, 0, now)
 		m := classifyCapacity(p, ok, 0, true, probe.FreeBytes, probe.FreeKnown, probe.FreeReason)
-		m.Retain, m.DropsPaused, m.PausedOldest = retain, true, paused.Oldest
+		m.Retain, m.DropsPaused, m.PausedOldest, m.PausedInDaemon = retain, true, paused.Oldest, paused.InDaemon
 		if m.Reason == CapacityNoRetention {
 			m.Reason = CapacityRotationPaused
 		}
@@ -320,8 +321,15 @@ func EvaluateCapacity(probe CapacityProbe, retain time.Duration, retainKnown boo
 
 // DropsPaused is the upgrade guard's refusal, as the capacity check needs it:
 // Oldest is the oldest partition the loop will not drop.
+//
+// InDaemon is true when the caller IS the process that rotates this index (a
+// daemon's preflight, the web interface's Checks report): it knows no
+// retention was chosen, so the finding is stated as a fact. False is the
+// standalone `bintrail doctor`, which cannot see the daemon's flags and words
+// it as a condition, with --retain as the way to say otherwise.
 type DropsPaused struct {
-	Oldest time.Time
+	Oldest   time.Time
+	InDaemon bool
 }
 
 // capacityProjection is projectCapacity's measured outcome.
@@ -473,8 +481,8 @@ func capacityCheckResult(m CapacityMeasurement, dbName, retainNote string) Check
 			// The shape of an index just rebuilt from archives: months of
 			// history, no recent rate yet. The rate can wait; the fact that
 			// nothing will be dropped cannot go unsaid (#2323).
-			detail += fmt.Sprintf(". Meanwhile this index holds history back to %s, more than twice the %s it would keep: a daemon running without a retention of its own drops none of it until one is chosen (--rotate-retain, BINTRAIL_ROTATE_RETAIN, or Edit rotation in the web interface)",
-				m.PausedOldest.UTC().Format("2006-01-02 15:04 UTC"), cliRetain(m.Retain))
+			detail += fmt.Sprintf(". Meanwhile this index holds history back to %s, more than twice the %s it would keep: %s drops none of it until one is chosen (--rotate-retain, BINTRAIL_ROTATE_RETAIN, or Edit rotation in the web interface)",
+				m.PausedOldest.UTC().Format("2006-01-02 15:04 UTC"), cliRetain(m.Retain), pausedWho(m))
 		}
 		return CheckResult{Name: CapacityCheckName, Status: StatusSkip, Detail: detail}
 	case CapacityRetentionUnknown:
@@ -502,20 +510,26 @@ func capacityCheckResult(m CapacityMeasurement, dbName, retainNote string) Check
 		// Worded as a condition on purpose: this command runs outside the
 		// daemon and cannot see whether it was started with a retention of
 		// its own, in which case the guard is not consulted (#2315).
-		detail := fmt.Sprintf("this index holds history back to %s, more than twice the %s it would keep, and a daemon running without a retention of its own does not drop that: until one is chosen nothing is dropped and the index grows unbounded at ~%s/day measured (%.0f events/day × %s/event, InnoDB estimates); current size %s",
-			m.PausedOldest.UTC().Format("2006-01-02 15:04 UTC"), cliRetain(m.Retain),
+		detail := fmt.Sprintf("this index holds history back to %s, more than twice the %s it would keep, and %s does not drop that: until one is chosen nothing is dropped and the index grows unbounded at ~%s/day measured (%.0f events/day × %s/event, InnoDB estimates); current size %s",
+			m.PausedOldest.UTC().Format("2006-01-02 15:04 UTC"), cliRetain(m.Retain), pausedWho(m),
 			humanBytes(m.GrowthBytesPerDay), m.EventsPerDay, humanBytes(m.BytesPerEvent), humanBytes(float64(m.CurrentBytes)))
 		if days, ok := m.DaysUntilFull(); ok {
 			detail += fmt.Sprintf("; ~%.0f days until the volume fills (%s free)", days, humanBytes(float64(m.FreeBytes)))
 		}
+		fix := "Choose a retention so rotation drops again: start the daemon with --rotate-retain <window> (or BINTRAIL_ROTATE_RETAIN),\n" +
+			"or save one with Edit rotation in the web interface. The daemon's log names the same choice every cycle.\n"
+		if m.PausedInDaemon {
+			// Said by the daemon itself: no doubt to hedge, and no `doctor`
+			// flag to offer. What choosing DELETES is the part to read first.
+			fix += "Whatever is older than the retention you choose is dropped on the next rotation cycle: archive it first to keep it.\n"
+		} else {
+			fix += "If the daemon already runs with one, it bounds this index: re-run with --retain <that window> to grade it.\n"
+		}
 		return CheckResult{
-			Name:   CapacityCheckName,
-			Status: StatusWarn,
-			Detail: detail,
-			Remediation: "Choose a retention so rotation drops again: start the daemon with --rotate-retain <window> (or BINTRAIL_ROTATE_RETAIN),\n" +
-				"or save one with Edit rotation in the web interface. The daemon's log names the same choice every cycle.\n" +
-				"If the daemon already runs with one, it bounds this index: re-run with --retain <that window> to grade it.\n" +
-				"Why it waits: docs/rotation-and-status.md (upgrade guard)",
+			Name:        CapacityCheckName,
+			Status:      StatusWarn,
+			Detail:      detail,
+			Remediation: fix + "Why it waits: docs/rotation-and-status.md (upgrade guard)",
 		}
 	}
 
@@ -936,4 +950,13 @@ func cliRetain(d time.Duration) string {
 		return fmt.Sprintf("%dd", d/(24*time.Hour))
 	}
 	return fmt.Sprintf("%dh", int(d.Hours()))
+}
+
+// pausedWho is the subject of "does not drop that": the daemon itself when it
+// is the one reporting, a conditional daemon when `bintrail doctor` is.
+func pausedWho(m CapacityMeasurement) string {
+	if m.PausedInDaemon {
+		return "this daemon, started with no retention of its own,"
+	}
+	return "a daemon running without a retention of its own"
 }

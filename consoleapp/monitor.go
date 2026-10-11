@@ -24,6 +24,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/installid"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/pgstreamrun"
+	"github.com/dbtrail/dbtrail/internal/rotation"
 	"github.com/dbtrail/dbtrail/internal/streamdeps"
 	"github.com/dbtrail/dbtrail/internal/streamrun"
 )
@@ -55,10 +56,11 @@ type monitorSupervisor struct {
 	// candidate source against them for replica/duplicate detection. May be
 	// nil (tests); the check is skipped then.
 	registry *console.Registry
-	// rotateRetain is the rotation window the daemon's built-in loop uses; the
-	// Doctor capacity projection assumes it (0 = rotation disabled). Set at
-	// construction so the supervisor never reads the cmd-layer upRotationCfg global.
-	rotateRetain time.Duration
+	// rotation is the live settings the built-in loop reads each cycle (the
+	// policy saved in the web interface when valid, else the daemon's flags):
+	// the Checks report grades each source's index over what the loop does
+	// with THAT index (#2328). nil = no loop (tests), graded as rotation off.
+	rotSettings func() rotation.Settings
 	// streamFn runs one supervised MySQL/MariaDB stream; a seam for unit tests,
 	// streamrun.One in production.
 	streamFn func(ctx context.Context, cfg streamrun.Config) error
@@ -333,12 +335,12 @@ func (j *monitorJob) snapshot() console.MonitorStatus {
 
 // newMonitorSupervisor builds the control plane. reg may be nil (tests) —
 // Doctor's replica/duplicate detection is skipped then.
-func newMonitorSupervisor(baseCtx context.Context, bootIndexDSN string, reg *console.Registry, retain time.Duration) *monitorSupervisor {
+func newMonitorSupervisor(baseCtx context.Context, bootIndexDSN string, reg *console.Registry, rot func() rotation.Settings) *monitorSupervisor {
 	return &monitorSupervisor{
 		baseCtx:       baseCtx,
 		bootIndexDSN:  bootIndexDSN,
 		registry:      reg,
-		rotateRetain:  retain,
+		rotSettings:   rot,
 		streamFn:      streamrun.One,
 		pgStreamFn:    pgstreamrun.One,
 		loopbackRetry: doctor.DockerHostRetry,
@@ -401,7 +403,9 @@ func (m *monitorSupervisor) doctor(ctx context.Context, e console.ServerEntry, o
 		})
 	default:
 		opts = append(opts, doctor.ForConsole(), doctor.WithLoopbackRetry(m.loopbackRetry), doctor.WithSourceSSL(e.SourceSSL()))
-		r = doctor.Build(ctx, e.SourceDSN, e.DSN, e.Schemas, m.rotateRetain, opts...)
+		w := m.rotationWindow(ctx, e.DSN)
+		opts = append(opts, doctor.WithRotationWindow(w.Note, w.Guard.Blocked, w.Guard.Oldest))
+		r = doctor.Build(ctx, e.SourceDSN, e.DSN, e.Schemas, w.Retain, opts...)
 	}
 	out := &console.DoctorReport{
 		Passed:   r.Passed,
@@ -1366,4 +1370,16 @@ func streamBatchSize(n int) int {
 		return defaultStreamBatchSize
 	}
 	return n
+}
+
+// rotationWindow is what the rotation loop does with one source's index right
+// now: a saved policy or the daemon's own retention applies to every index;
+// with neither, the index's recorded window, behind the upgrade guard. Asked
+// per report, like the loop asks per cycle, so an edit in the web interface
+// shows on the next run of the checks.
+func (m *monitorSupervisor) rotationWindow(ctx context.Context, indexDSN string) rotation.Window {
+	if m.rotSettings == nil {
+		return rotation.Window{}
+	}
+	return rotation.ResolveWindowDSN(ctx, indexDSN, m.rotSettings())
 }

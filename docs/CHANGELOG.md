@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Fixed
+- **The checks a daemon runs on itself graded the index over the retention it
+  was started with, whatever the index really rotates on** (#2328). The web
+  interface's Checks report and the `up` / `watch` boot preflights passed the
+  `--rotate-retain` value to the index disk capacity check. They ignored a
+  retention saved in the web interface, the window an index keeps from its
+  creation while none is set, and the upgrade guard refusing to drop, so the
+  Checks list could show the capacity check passing over 48 hours beside an
+  Index disk card that projected 30 days or said nothing was being deleted.
+  All three now ask what the rotation loop does with that index, using the
+  loop's own settings, and name where an inherited window came from. When
+  the guard holds the history back they say so as a fact, and warn that
+  whatever is older than the retention you choose is dropped on the next
+  cycle. A first boot, where the index does not exist yet, gets the same
+  preflight as before. A daemon started with rotation off runs no loop, so a
+  retention saved afterwards is reported as not in force until a restart.
 - **Under read routing, a statement the copy answered came back under the
   copy's column names, not MySQL's.** `SELECT COUNT(*), SUM(total) FROM ...`
   returned columns called `COUNT(*)` and `SUM(total)` when MySQL answered and

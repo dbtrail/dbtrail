@@ -8,7 +8,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
+
 	"github.com/dbtrail/dbtrail/internal/cliutil"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/status"
 )
@@ -250,4 +253,84 @@ func UpgradeGuard(ctx context.Context, db *sql.DB, dbName string, e Effective) (
 		return Guard{}, err
 	}
 	return guardBlocks(partitions, e.Retain, e.Source == RetainRecorded, e.RecordedAt, time.Now()), nil
+}
+
+// Window is what the loop does with ONE index under settings s, for a doctor
+// run that grades that index: the window it drops on, where an implicit one
+// came from, and whether the upgrade guard is refusing to drop on it (#2328).
+type Window struct {
+	// Retain is the window; zero means rotation is off (the doctor grades
+	// that as unbounded growth).
+	Retain time.Duration
+	// Note is the phrase for an implicit window's source (DescribeSource);
+	// empty for an explicit one, which the settings alone cannot attribute to
+	// a flag or to a policy saved in the web interface.
+	Note string
+	// Guard is the upgrade guard's verdict; never Blocked under an explicit
+	// window or with rotation off.
+	Guard Guard
+}
+
+// ResolveWindow mirrors rotateOneIndex branch for branch: rotation off drops
+// nothing; an explicit window (the daemon's flag or env, or a policy saved in
+// the web interface, which the settings provider parses as explicit) is what
+// every index drops on; otherwise the index's own record, behind the upgrade
+// guard. A guard that cannot be evaluated is "not known to be blocked".
+func ResolveWindow(ctx context.Context, db *sql.DB, dbName string, s Settings) Window {
+	switch {
+	case !s.Enabled:
+		return Window{}
+	case s.Explicit:
+		return Window{Retain: s.Retain}
+	}
+	eff := ResolveEffective(ctx, db, dbName)
+	w := Window{Retain: eff.Retain, Note: eff.DescribeSource()}
+	g, err := UpgradeGuard(ctx, db, dbName, eff)
+	if err != nil {
+		// Not known to be blocked: said in the log, because the report this
+		// feeds then grades a possibly guarded index as bounded.
+		slog.Debug("rotation window: could not evaluate the upgrade guard; reporting the window as in force", "db", dbName, "error", err)
+		return w
+	}
+	w.Guard = g
+	return w
+}
+
+// windowResolveTimeout bounds ResolveWindowDSN's reads. They run BEFORE the
+// doctor report (which caps itself), on a daemon's boot path and on the web
+// interface's request path, where the caller's context ends only on a signal:
+// an index that answers the ping and then stalls must cost seconds, not the
+// boot.
+const windowResolveTimeout = 10 * time.Second
+
+// ResolveWindowDSN is ResolveWindow for a caller holding only the index DSN
+// (the daemons' preflights and the web interface's Checks report). It is best
+// effort by design: these runs sit on the boot path, where the index database
+// may not exist yet, so an index that cannot be opened answers the settings'
+// own window with no note and no guard — exactly what those runs assumed
+// before they asked the index — and never an error.
+func ResolveWindowDSN(ctx context.Context, indexDSN string, s Settings) Window {
+	fallback := Window{}
+	if s.Enabled {
+		fallback.Retain = s.Retain
+	}
+	if !s.Enabled || s.Explicit {
+		return fallback
+	}
+	cfg, err := mysql.ParseDSN(indexDSN)
+	if err != nil || cfg.DBName == "" {
+		return fallback
+	}
+	db, err := config.Connect(indexDSN)
+	if err != nil {
+		// Expected on a first boot (the database is not there yet); anything
+		// else means this run grades the settings' window with no record and
+		// no guard, so leave a trace.
+		slog.Debug("rotation window: could not open the index; assuming the daemon's own window", "error", config.ScrubDSNText(err.Error(), indexDSN))
+		return fallback
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(ctx, windowResolveTimeout)
+	defer cancel()
+	return ResolveWindow(ctx, db, cfg.DBName, s)
 }
