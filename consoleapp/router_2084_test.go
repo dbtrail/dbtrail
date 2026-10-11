@@ -145,7 +145,7 @@ func TestRouterSettings_refusals(t *testing.T) {
 func TestRouterFlashbackConfig_reachesTheHandler(t *testing.T) {
 	st := routerSettings{Policy: readrouter.Policy{CostThreshold: 7, ScanRows: 11}, ReadOnly: true}
 	cfg := routerFlashbackConfig(st)
-	if !cfg.RouteAnyCopyAge || !cfg.RouteBusyRefuses || !cfg.RouteRequired || !cfg.RouteStatus || cfg.RouteMaxCopyAge != 0 || !cfg.RouteReadOnly || cfg.RoutePolicy != st.Policy {
+	if !cfg.RouteAnyCopyAge || !cfg.RouteBusyRefuses || !cfg.FailedBindFailsPing || !cfg.RouteStatus || cfg.RouteMaxCopyAge != 0 || !cfg.RouteReadOnly || cfg.RoutePolicy != st.Policy {
 		t.Fatalf("config: %+v", cfg)
 	}
 	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok"})

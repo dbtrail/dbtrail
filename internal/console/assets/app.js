@@ -14506,7 +14506,7 @@ function routerLines(view, cur) {
     const sinceText = since && !isNaN(since) ? " since " + since.toLocaleString() : "";
     out.push({ text: "Who answered for " + name + sinceText + ": " + (total === 0 ? (known ? "no statements yet." : "nothing to show. Either no statement was sent for it yet, or the router does not have this server: it reads its own servers file, which must be the one this DBTrail manages.")
       : (t.mysql || 0) + " by MySQL, " + (t.copy || 0) + " by the copy" + (t.refused ? ", " + t.refused + " refused" : "") + ".") });
-    if (t.cannot_route) out.push({ strong: "The router refuses every statement for this server:", text: "it cannot route for it. The router's log says why." });
+    if (t.cannot_route) out.push({ strong: "The copy answers everything for this server, the light reads too:", text: "the router cannot forward for it. Usually the server has no forwarding account; the router's log says why." });
     if (t.account_refused) out.push({ strong: "MySQL refused the router's login for this server.", text: "Its clients get error 2006 until that account is fixed, while the counts above go on rising. The router's log names the account and what MySQL answered." });
     if (t.session_untracked) out.push({ text: "This server's MySQL does not tell the router when a statement changes a session setting, so one changed inside a stored function is not seen. The router's log says why." });
     // The copy's age, by the clock of the DBTrail that asked: the browser's

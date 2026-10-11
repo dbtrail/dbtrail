@@ -524,8 +524,8 @@ services:
   # MySQL with that server's FORWARDING ACCOUNT: a MySQL user of its own that
   # you create with SELECT on what applications should read, and set on the
   # server's page in the web interface. The account DBTrail captures with is
-  # never used here, so a server with no forwarding account is refused, with
-  # an error that says so, until it has one.
+  # never used here, so a server with no forwarding account is answered
+  # from the copy alone, the light reads too, until it has one.
   #
   #   mysql -h 127.0.0.1 -P 3310 -u <server id or name> -p
   #   mysql> SHOW ROUTER STATUS;     -- the copy's age, who answered, the pool

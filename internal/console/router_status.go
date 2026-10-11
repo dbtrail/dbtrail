@@ -148,7 +148,7 @@ type RouterServerNumbers struct {
 	// Reasons uses the shim's RouteReason* vocabulary. Never null.
 	Reasons map[string]uint64 `json:"reasons"`
 	// CannotRoute: the last connection to this server could not route, so
-	// its statements are refused. Why is in this process's log, not here.
+	// the copy answers alone for it. Why is in this process's log, not here.
 	CannotRoute bool `json:"cannot_route,omitempty"`
 	// AccountRefused: the source turned away the login of the last
 	// connection that tried one for this server, so its clients get error

@@ -189,10 +189,9 @@ func TestIntegrationRouter(t *testing.T) {
 		t.Errorf("login with the web interface's password: %d, want 1045", code)
 	}
 
-	// A server with no source to forward to cannot be routed. Its client
-	// is told so on its first statement and is not answered from the copy:
-	// connected in place of MySQL, it would read every row as the copy had
-	// it with nothing saying so.
+	// A server with no source to forward to is answered from the copy
+	// alone, the cheap reads too: turning the port on is enough to query,
+	// with nothing created on a source (#2341).
 	view, err := f.owner.Add(console.ServerEntry{Name: "viewonly", DSN: indexDSN, BaselineDir: baseDir})
 	if err != nil {
 		t.Fatal(err)
@@ -203,15 +202,18 @@ func TestIntegrationRouter(t *testing.T) {
 	})
 	vc := openFlashback(t, addr, view.Name, "tok", srcName)
 	defer vc.Close()
-	_, err = vc.Query("SELECT status, count(*) FROM orders GROUP BY status")
-	if err == nil || mysqlCode(err) != 1105 || !strings.Contains(err.Error(), "cannot be routed") || !strings.Contains(err.Error(), "no source database") {
-		t.Errorf("a statement for a server with no source: %v, want error 1105 that says it cannot be routed and why", err)
+	if got := scanStrings(t, vc, "SELECT status, count(*) FROM orders GROUP BY status"); len(got) != 1 || got[0] != "copy" {
+		t.Errorf("an expensive read for a server with no source: %v, want the copy's", got)
+	}
+	if got := scanStrings(t, vc, "SELECT status FROM orders WHERE id = 1"); len(got) != 1 || got[0] != "copy" {
+		t.Errorf("a point lookup for a server with no source: %v, want the copy's row", got)
 	}
 
-	// Nor can a server that has a source and no forwarding account (#2317):
+	// So is a server that has a source and no forwarding account (#2317):
 	// the router never forwards with the account the server captures with,
-	// here one that works. The client is told what is missing, and nothing
-	// it sends runs on the source.
+	// here one that works. The copy answers, and nothing the client sends
+	// runs on the source: its row there says "live", and its accounts are
+	// not a table of the copy.
 	bare, err := f.owner.Add(console.ServerEntry{Name: "noaccount", DSN: indexDSN, SourceDSN: sourceDSN, BaselineDir: baseDir})
 	if err != nil {
 		t.Fatal(err)
@@ -222,11 +224,19 @@ func TestIntegrationRouter(t *testing.T) {
 	})
 	bc := openFlashback(t, addr, bare.Name, "tok", srcName)
 	defer bc.Close()
-	for _, stmt := range []string{"SELECT CURRENT_USER()", "SELECT status FROM orders WHERE id = 1", "SELECT user FROM mysql.user"} {
-		_, err = bc.Query(stmt)
-		if err == nil || mysqlCode(err) != 1105 || !strings.Contains(err.Error(), "cannot be routed") || !strings.Contains(err.Error(), "no forwarding account") {
-			t.Errorf("%q for a server with no forwarding account: %v, want error 1105 that says it cannot be routed and what is missing", stmt, err)
-		}
+	if got := scanStrings(t, bc, "SELECT status FROM orders WHERE id = 1"); len(got) != 1 || got[0] != "copy" {
+		t.Errorf("a point lookup for a server with no forwarding account: %v, want the copy's row, never the source's", got)
+	}
+	if rows, err := bc.Query("SELECT user FROM mysql.user"); err == nil {
+		rows.Close()
+		t.Error("the source's accounts were read through a server with no forwarding account")
+	}
+	if _, err := bc.Exec("UPDATE orders SET status = 'edited' WHERE id = 2"); err == nil {
+		t.Error("a write for a server with no forwarding account was accepted")
+	}
+	var onSource string
+	if err := srcDB.QueryRow("SELECT status FROM orders WHERE id = 2").Scan(&onSource); err != nil || onSource == "edited" {
+		t.Errorf("the source after that write: %q (%v), want it untouched", onSource, err)
 	}
 
 	// And the router wrote nothing in the daemon's directory but what the

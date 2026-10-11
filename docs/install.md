@@ -329,7 +329,7 @@ journalctl -u bintrail-router -f
   forwarding account: a MySQL user of its own, set on the server's page in
   the web interface, with `SELECT` on what applications should read. The
   account DBTrail captures with is never used, so a server with no
-  forwarding account is refused with an error that names what is missing.
+  forwarding account is answered from the copy alone, the light reads too.
 - It is **read-only** unless the settings file says
   `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0`: a statement that is not a read is
   refused and never reaches the source.

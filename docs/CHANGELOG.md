@@ -117,12 +117,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing. How many statements run on the copy at once, and with how many
   threads each, is worked out from the cores and the memory the service may
   use, so nothing is set by hand; each worker process answers statement after
-  statement instead of one process per statement. Three rules differ from the
+  statement instead of one process per statement. Two rules differ from the
   port inside `watch`: there is no maximum copy age (an expensive read goes
-  to the copy whatever the age of its snapshot), a statement that finds
+  to the copy whatever the age of its snapshot), and a statement that finds
   every worker busy waits and then gets error 1040 instead of being forwarded
-  to MySQL, and a server that cannot route refuses its statements with the
-  reason instead of answering them from the copy alone. It listens on
+  to MySQL. A server with no forwarding account is answered from the copy
+  alone, as there. It listens on
   `127.0.0.1:3310` by default. Nothing changes for the port inside `watch`.
   Its port opens for an access token (`--token`) or, without one, when it
   is turned on in the web interface (Settings, MCP Server, The router),

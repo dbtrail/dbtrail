@@ -76,12 +76,12 @@ type flashbackConfig struct {
 	// both; the port inside watch sets neither.
 	RouteAnyCopyAge  bool
 	RouteBusyRefuses bool
-	// RouteRequired refuses the statements of a connection to a server that
-	// cannot route (no source to forward to, an account whose address
-	// cannot be used, no SQL on the copy), with the reason, instead of
-	// serving that connection from the copy only as the port inside watch
-	// does. The router sets it: its clients connect in place of MySQL.
-	RouteRequired bool
+	// FailedBindFailsPing: a connection whose server could not be bound (no
+	// such server) answers a PING with that failure, as it answers every
+	// statement. The router sets it: a pool that checks its connections
+	// with a PING would keep that one as healthy. The port inside watch
+	// answers OK, as it always has.
+	FailedBindFailsPing bool
 	// RouteStatus answers SHOW ROUTER STATUS on a routed connection with
 	// the port's own numbers (console.Server.RouterStatus). The router sets
 	// it: it has no web page to show them on.
@@ -266,7 +266,7 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 	if err != nil {
 		// Auth already succeeded; surface the routing failure on the client's
 		// first query (a typed MySQL error) rather than a bare disconnect.
-		proxy.fail, proxy.failPing = err, cfg.RouteRequired
+		proxy.fail, proxy.failPing = err, cfg.FailedBindFailsPing
 	}
 	// The handler may hold an upstream MySQL connection (read routing); it
 	// ends with this one.
@@ -380,14 +380,7 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	// BEFORE the schema seeds below so the upstream follows them. A server that cannot route stays copy-only and says so
 	// once per connection: silently serving the copy to a client who was
 	// promised MySQL semantics is the one thing this must not do.
-	fw, unavailable := bindReadRouterWhy(h, srv, tgt, user, cfg, logger)
-	if fw == nil && cfg.RouteRequired {
-		// A port people point their application at in place of MySQL does
-		// not answer from the copy alone: every read, the cheap ones too,
-		// would come from the copy as it was, with nothing saying so.
-		h.Close()
-		return untrack, gomysql.NewError(gomysql.ER_UNKNOWN_ERROR, fmt.Sprintf("router: server %q cannot be routed: %s", user, unavailable))
-	}
+	fw, _ := bindReadRouterWhy(h, srv, tgt, user, cfg, logger)
 	if fw != nil {
 		if fw.TrackSession {
 			// A panic on a connection that asked the source for session
@@ -791,8 +784,7 @@ type routingHandler struct {
 	server.EmptyHandler
 	inner *shim.Handler
 	fail  error
-	// failPing: a PING on a connection that failed to bind answers fail
-	// too (the router; the port inside watch answers OK, as it always has).
+	// failPing: flashbackConfig.FailedBindFailsPing.
 	failPing bool
 	// onPanic, when set, is run after a panic on this connection's
 	// goroutine (flashbackConnPanicked).
@@ -848,11 +840,6 @@ func (r *routingHandler) SourceLost(statement bool) error {
 func (r *routingHandler) PingSource() error {
 	if r.inner == nil {
 		if r.failPing {
-			// A connection whose server could not be bound answers every
-			// statement with that failure. On the router a PING says the
-			// same: a pool that checks its connections with one would keep
-			// this one as healthy, and its application reads errors from a
-			// connection it was told is fine.
 			return r.fail
 		}
 		return nil

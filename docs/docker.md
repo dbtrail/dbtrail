@@ -637,9 +637,9 @@ GRANT SELECT ON shop.* TO 'report_ro'@'%';
 The account DBTrail captures with is never used by the router: it reads
 whatever capture needs, which with `SELECT ON *.*` includes the `mysql`
 schema and the password hashes of every account. So a server with no
-forwarding account is refused, with an error that names what is missing,
-until it has one. If you do not want the password to reach the source at
-all, `docker compose stop router`.
+forwarding account is not forwarded for: the copy answers every statement
+for it, the light reads too, and the web interface says so. Nothing the
+client sends reaches the source until the server has that account.
 
 **It is read-only in this stack.** A statement that is not a read is refused
 with an error and never reaches the source. The password that opens the

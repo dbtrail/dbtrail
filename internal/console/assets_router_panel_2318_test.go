@@ -155,7 +155,7 @@ console.log(JSON.stringify(out));
 	mustNot("notReadYet", "snapshot of")
 	must("stale", "snapshot of", "The router last looked 11m ago", "a newer one may exist")
 	must("noCopy", "The router knows no copy for shop", "9 by MySQL")
-	must("cannotRoute", "The router refuses every statement for this server", "The router's log says why", "no statements yet")
+	must("cannotRoute", "The copy answers everything for this server, the light reads too", "the router's log says why", "no statements yet")
 	must("refusedAcct", "MySQL refused the router's login for this server", "error 2006", "go on rising", "9 by MySQL")
 	must("untracked", "does not tell the router when a statement changes a session setting")
 }

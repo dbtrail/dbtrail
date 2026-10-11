@@ -2064,13 +2064,17 @@ seconds, without a restart. When a server's forwarding account changes, the
 connections that were using the previous one are closed, as on the port
 inside `watch`.
 
-Three rules differ from the port inside `watch`:
+Two rules differ from the port inside `watch`:
 
 | | Inside `watch` | The router |
 |---|---|---|
 | How old the copy may be | `--route-max-copy-age` | No maximum. An expensive read goes to the copy whatever the age of its snapshot. |
 | Every worker busy | The statement is forwarded to MySQL | The statement waits its turn, in the order it arrived, for up to 30 seconds, then the client gets error 1040, "too many connections", which drivers and pools retry. The line is not kept short as it is inside `watch`: a refusal that cost the client no time would be repeated as fast as the client can send, each attempt asking the source for a plan first |
-| A server that cannot route (no forwarding account, no source to forward to, an account whose address cannot be used) | Its connections are answered from the copy only | Its statements are refused with error 1105 and the reason |
+
+A server that cannot route (no forwarding account, no source to forward to,
+an account whose address cannot be used) is answered from the copy alone on
+both, the light reads too, and nothing its clients send reaches the source.
+`SHOW ROUTER STATUS` and the web interface say so for that server.
 
 The first is the trade a read/write split through a proxy already makes: on
 one connection a cheap statement is answered by MySQL as it is now, and an
