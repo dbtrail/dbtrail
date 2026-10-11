@@ -55,7 +55,7 @@
 # instead of leaving you to diff two files (#1529). It is passed to the
 # console service below through the YAML anchor, so there is one number to
 # bump: raise it whenever this file gains wiring a running stack would need.
-x-bintrail-compose-version: &compose_version 2
+x-bintrail-compose-version: &compose_version 3
 
 volumes:
   bintrail-index-data:    # MySQL 8.4 datadir — the forensic record (NEW volume:
@@ -490,6 +490,86 @@ services:
     depends_on:
       index-mysql:
         condition: service_healthy
+    restart: unless-stopped
+
+  # ── Router: the MySQL port with read routing, apart from capture ─
+  # Experimental. Applications connect to it in place of their MySQL server:
+  # a statement goes to the server's source MySQL, except SELECTs whose plan
+  # says they are expensive, which run on the copy. It is the port the
+  # `bintrail` service can serve on 3309, run as a service of its own, so
+  # restarting `bintrail` does not drop its connections and a statement that
+  # runs out of memory here cannot take capture with it.
+  #
+  # It is READ-ONLY here (ROUTER_READ_ONLY below): writes are refused, not
+  # forwarded.
+  #
+  # It starts with the stack and LISTENS ONLY ONCE THERE IS A PASSWORD:
+  #   - with CONSOLE_TOKEN set in .env, the token is the password;
+  #   - without it, when the MySQL port is turned on in the web interface
+  #     (Connect), with the password created there, and it closes again when
+  #     the port is turned off there.
+  # Until then it waits and uses next to nothing.
+  #
+  #   mysql -h 127.0.0.1 -P 3310 -u <server id or name> -p
+  #   mysql> SHOW ROUTER STATUS;     -- the copy's age, who answered, the pool
+  #
+  # It reads the servers the web interface manages and the copies on the state
+  # volume, mounted READ-ONLY here: it writes nothing there. It needs each
+  # server's source to be reachable from this container, as `bintrail` does.
+  #
+  # How many statements run on the copy at once is worked out from the cores
+  # and memory this service may use. With no ceiling it takes half of the
+  # machine, since capture uses the machine too. To give it ceilings of its
+  # own, set ROUTER_MEMORY (e.g. 8g) and ROUTER_CPUS (e.g. 4) in .env: it then
+  # uses all of what it was given, and a statement that outgrows its memory
+  # cannot reach capture's. Each statement may take SQL_MEMORY (2GB unless
+  # set) plus a quarter.
+  #
+  # Not wanted? `docker compose stop router`, or delete this service.
+  router:
+    image: ghcr.io/dbtrail/bintrail-console:${BINTRAIL_TAG:-latest}
+    extra_hosts:
+      - "host.docker.internal:${HOST_GATEWAY:-host-gateway}"
+    command: ["router"]
+    ports:
+      # On the host loopback. For another machine, open a tunnel, or widen to
+      # "3310:3310" behind a firewall: the port forwards statements to every
+      # server's source on its password alone. If 3310 is taken on this
+      # machine, delete this line (install.sh does it for you).
+      - "127.0.0.1:3310:3310"
+    environment:
+      # All interfaces INSIDE the container; the `ports` mapping above is what
+      # controls exposure on the host.
+      BINTRAIL_ROUTER_LISTEN: 0.0.0.0:3310
+      BINTRAIL_CONSOLE_TOKEN: ${CONSOLE_TOKEN:-}
+      # The same three paths the `bintrail` service is given: the servers it
+      # routes for, and the two files a statement must never read through a
+      # copy directory that contains them.
+      BINTRAIL_CONSOLE_SERVERS: /var/lib/bintrail/console-servers.yaml
+      BINTRAIL_CONSOLE_AUTH: /var/lib/bintrail/console-auth.yaml
+      BINTRAIL_CONSOLE_MCP_TOKEN_FILE: /var/lib/bintrail/console-mcp-token.yaml
+      # Memory each statement on the copy may use, and the most rows one
+      # returns: the same two settings as `bintrail`, from the same .env.
+      BINTRAIL_CONSOLE_SQL_MEMORY: ${SQL_MEMORY:-}
+      BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS: ${SQL_PORT_MAX_ROWS:-}
+      # READ-ONLY unless you say otherwise: a statement that is not a read is
+      # refused and never reaches the source. This service starts with the
+      # stack, and its password is one that until now could only read (the
+      # MySQL port's password, or CONSOLE_TOKEN); it must not become a way to
+      # write to your databases without anyone deciding so. ROUTER_READ_ONLY=0
+      # in .env forwards writes too, with each server's forwarding account
+      # when it has one, else with its source account: give each server a
+      # forwarding account with the grants you mean before you set it.
+      BINTRAIL_CONSOLE_ROUTE_READ_ONLY: ${ROUTER_READ_ONLY:-1}
+      # Prometheus metrics of the router, inside the compose network
+      # (router:9091). Not published on the host: add a `ports:` line to
+      # scrape it from outside. Empty in .env turns it off.
+      BINTRAIL_ROUTER_METRICS_ADDR: ${ROUTER_METRICS_ADDR-:9091}
+    # 0 = no ceiling. See ROUTER_MEMORY / ROUTER_CPUS above.
+    mem_limit: ${ROUTER_MEMORY:-0}
+    cpus: ${ROUTER_CPUS:-0}
+    volumes:
+      - bintrail-state:/var/lib/bintrail:ro
     restart: unless-stopped
 
   # ── Time-travel SQL terminal (opt-in `flashback` profile) ─

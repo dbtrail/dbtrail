@@ -267,6 +267,39 @@ func TestInstaller_aFailedPullStartsWithTheImagesHere(t *testing.T) {
 	}
 }
 
+// The router waits, without listening, until there is a password for it, so
+// a taken 3310 must not stop the install either: its port is left
+// unpublished, the installer says so, and nothing else moves. With 3310 free
+// the mapping is there and nothing is said.
+func TestInstaller_aTakenRouterPortIsLeftUnpublished(t *testing.T) {
+	r := install(t)
+	if r.failed || !strings.Contains(r.compose(t), `"127.0.0.1:3310:3310"`) {
+		t.Fatalf("with 3310 free the router's port must be published on loopback (failed=%v):\n%s", r.failed, portLines(r.compose(t)))
+	}
+	if strings.Contains(r.out, "3310") {
+		t.Errorf("nothing about 3310 should be said when it is free:\n%s", r.out)
+	}
+
+	r = install(t, "BUSY_PORTS=3310")
+	if r.failed || r.upCalls != 1 {
+		t.Fatalf("install failed with only 3310 taken (up=%d):\n%s", r.upCalls, r.out)
+	}
+	c := r.compose(t)
+	if strings.Contains(c, `- "127.0.0.1:3310:3310"`) {
+		t.Errorf("a taken 3310 is still published:\n%s", portLines(c))
+	}
+	if !strings.Contains(c, `"127.0.0.1:8090:8090"`) || !strings.Contains(c, `"127.0.0.1:9090:9090"`) || !strings.Contains(c, `"127.0.0.1:3309:3309"`) {
+		t.Errorf("the other ports were disturbed:\n%s", portLines(c))
+	}
+	if !strings.Contains(r.out, "port 3310 is taken, so the router's port is not published") {
+		t.Errorf("the skip is not said:\n%s", r.out)
+	}
+	// And the router service itself is still there: only its mapping went.
+	if !strings.Contains(c, "BINTRAIL_ROUTER_LISTEN: 0.0.0.0:3310") {
+		t.Errorf("the router service lost more than its port mapping")
+	}
+}
+
 // The MySQL-protocol port is off until someone turns it on, so a taken 3309
 // must not stop the install: the stack comes up without publishing it, and
 // the installer says so. With 3309 free the mapping is there.

@@ -599,6 +599,58 @@ Notes:
   data, and keeping it out of `watch` is what makes sure a long export cannot
   slow capture down. See [Iceberg export](iceberg-export.md).
 
+### The router: the MySQL port with read routing, apart from capture (experimental)
+
+The stack starts a `router` service beside `bintrail`. Applications connect to
+it in place of their MySQL server: a statement goes to the server's source
+MySQL, except a `SELECT` whose plan says it is expensive, which runs on the
+copy. It is the MySQL port the `bintrail` service can serve on 3309, run as a
+service of its own, so restarting `bintrail` does not drop its connections and
+a statement that runs out of memory there cannot take capture with it.
+
+It listens on `127.0.0.1:3310`, and only once there is a password for it:
+
+- with `CONSOLE_TOKEN` set in `.env`, the token is the password;
+- without it, when the MySQL port is turned on in the web interface
+  (**Connect**), with the password created there. It closes again when the
+  port is turned off there, and replacing the password closes the connections
+  that were open.
+
+Until then the container waits and uses next to nothing.
+
+**It is read-only in this stack.** A statement that is not a read is refused
+with an error and never reaches the source. The password that opens the
+router is one that, until the router existed, could only read; it does not
+become a way to write to your databases because a service was added.
+`ROUTER_READ_ONLY=0` in `.env` makes it forward writes too, with each
+server's forwarding account when it has one and its source account otherwise.
+Give each server a forwarding account with the grants you mean before setting
+it (the web interface, on the server's page).
+
+```bash
+mysql -h 127.0.0.1 -P 3310 -u <server id or name> -p
+mysql> SHOW ROUTER STATUS;   -- the copy's age, who answered, the pool
+```
+
+It reads the servers the web interface manages and the copies on the state
+volume, which it mounts read-only. A server needs a source address the
+container can reach (as for `bintrail`) and a copy on that volume for its
+expensive reads; a copy that lives only on S3 is not read by the router.
+
+**How much of the machine it takes.** How many statements run on the copy at
+once is worked out from the cores and the memory the service may use. By
+default it has no ceiling of its own and takes half of the machine, since
+capture uses the machine too. Set `ROUTER_MEMORY` and `ROUTER_CPUS` in `.env`
+to give it ceilings: it then uses all of what it was given, and a statement
+that outgrows its memory is stopped inside the router's own. Each statement
+may reach `SQL_MEMORY` (2 GB unless set) plus a quarter, and the router keeps
+half a gigabyte for itself, so 8g and 4 cores run two statements at once.
+`docker compose logs router` shows the numbers it worked out and why.
+
+Not wanted: `docker compose stop router`, or delete the service from the file.
+The rules it routes by, and how they differ from the port inside `bintrail`,
+are in [The router](time-travel-sql.md#the-router-the-same-port-as-a-service-of-its-own-experimental).
+
 ### Time-travel SQL (`AS OF`) and the compose stack
 
 The web interface's Time-travel tab and time-travel **SQL** (`SELECT … AS OF`) are
@@ -670,6 +722,10 @@ surface, use the demo image ([demo.md](./demo.md)).
 | `SCHEMAS` | compose (optional) | Comma-separated schemas to track (empty = all user schemas) |
 | `CONSOLE_TOKEN` | compose (optional) | Opt-in static API-automation token (default: none; humans sign in with a username and password) |
 | `METRICS_ADDR` | compose (optional) | Container-side bind for the watch daemon's Prometheus `/metrics` (default `:9090`, published on the host loopback as `127.0.0.1:9090`; set empty to disable) |
+| `ROUTER_MEMORY` | compose `router` service (optional) | Memory ceiling of the router (e.g. `8g`). Unset = none: the router takes half of the machine |
+| `ROUTER_CPUS` | compose `router` service (optional) | CPU ceiling of the router (e.g. `4`). Unset = none |
+| `ROUTER_READ_ONLY` | compose `router` service (optional) | The router refuses every statement that is not a read, and never sends it to the source (default `1`). `0` forwards writes too |
+| `ROUTER_METRICS_ADDR` | compose `router` service (optional) | Container-side bind for the router's Prometheus `/metrics` (default `:9091`, reachable as `router:9091` on the compose network and not published on the host; set empty to disable) |
 | `INDEX_MYSQL_ROOT_PASSWORD` | compose (optional) | Pin the bundled index root password (set *before* first boot; default: randomly generated into the `bintrail-index-secret` volume) |
 | `BINTRAIL_TAG` | compose (optional) | Image tag to run (default `latest`) |
 | `BASELINE_SOURCE_DSN` | compose `baseline` profile | Source MySQL to snapshot (default: `SOURCE_DSN`) |

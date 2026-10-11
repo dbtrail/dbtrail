@@ -415,6 +415,9 @@ type routerStartup struct {
 	PortFile string
 	// Ignored are the settings found in the environment that do not apply.
 	Ignored []string
+	// InContainer: this process runs in a container, where listening on
+	// every interface is how a port is published and not an exposure.
+	InContainer bool
 }
 
 // routerStartupLines says, at startup, where the port will be, which files
@@ -427,7 +430,13 @@ func routerStartupLines(u routerStartup) string {
 	host, _, _ := net.SplitHostPort(u.Listen)
 	fmt.Fprintf(&b, "Router: the MySQL-protocol port is %s; connect a MySQL client with user=<server id or name>.\n", u.Listen)
 	if host == "" || host == "0.0.0.0" || host == "::" {
-		b.WriteString("Router: that address is every network interface of this machine, and the port forwards statements to each source on its credential alone. Bind 127.0.0.1, or keep it behind a firewall.\n")
+		if u.InContainer {
+			// Inside a container this is how a port is published at all;
+			// what reaches it is the container's port mapping.
+			b.WriteString("Router: that address is every network interface of this container. What reaches it from outside is what the container publishes: the port forwards statements to each source on its credential alone, so publish it on 127.0.0.1 or behind a firewall.\n")
+		} else {
+			b.WriteString("Router: that address is every network interface of this machine, and the port forwards statements to each source on its credential alone. Bind 127.0.0.1, or keep it behind a firewall.\n")
+		}
 	}
 	if u.PortFile == "" {
 		b.WriteString("Router: the password is the access token (--token). A port password created in the web interface is not accepted here.\n")
@@ -452,6 +461,17 @@ func routerStartupLines(u routerStartup) string {
 		b.WriteString("Router: " + line + ".\n")
 	}
 	return b.String()
+}
+
+// inContainer reports whether this process runs in a Docker or Podman
+// container, by the marker file each leaves at the root.
+func inContainer() bool {
+	for _, marker := range []string{"/.dockerenv", "/run/.containerenv"} {
+		if _, err := os.Stat(marker); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func countOfServers(n int) string {
@@ -500,7 +520,7 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 	fmt.Fprint(os.Stderr, routerStartupLines(routerStartup{
 		Listen: st.Listen, Pool: pool, MemoryLimit: memoryLimit, Cfg: cfg,
 		ServersFile: st.ServersFile, ServersExists: statErr == nil, Servers: srv.ServerCount(),
-		PortFile: routerPortFile(st), Ignored: routerIgnoredEnv(),
+		PortFile: routerPortFile(st), Ignored: routerIgnoredEnv(), InContainer: inContainer(),
 	}))
 	port := &routerPort{srv: srv, addr: st.Listen, cfg: cfg, poll: console.DefaultFollowInterval, out: os.Stderr}
 	return port.serve(ctx)
