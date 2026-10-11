@@ -89,6 +89,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to match.
 
 ### Added
+- **The Snapshots page says whether SQL can read a server whose snapshots are
+  only on S3** (#2302). Above the list: which snapshot the local mirror
+  holds and when the bucket was last checked, that the bucket has a newer
+  one, that one is being brought and how much it has to download, or, in
+  red, why the last attempt failed. It is said when the list itself cannot
+  be read too. Until now that was only in the daemon log, while the SQL card
+  stayed hidden with nothing to explain it. On the Overview the SQL card now
+  appears at the page's next refresh once the first snapshot arrives; it
+  used to need a reload. The message for a snapshot that does not fit gives
+  its sizes in GiB and MiB.
 - **SQL on a server whose snapshots are only on S3** (#2302). The SQL card
   and the MySQL port refused such a server ("the copy for this server is only
   on S3"): a statement runs in a process with no network. `bintrail-console

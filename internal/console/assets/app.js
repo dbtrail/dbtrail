@@ -359,7 +359,12 @@ async function api(path, opts = {}) {
     // One central chokepoint clears state and raises the sign-in gate; every
     // in-flight render bails on the serverGen bump.
     if (res.status === 401) handleUnauthorized();
-    throw apiError(res.status, (data && data.error) || "HTTP " + res.status);
+    const err = apiError(res.status, (data && data.error) || "HTTP " + res.status);
+    // What the server sent beside its error, for the caller that knows the
+    // route sends something (#2302: the snapshot list's failure carries
+    // the state of the local copy SQL reads).
+    err.body = data;
+    throw err;
   }
   return data;
 }
@@ -2975,6 +2980,7 @@ function sqlErrorView(status, message, limits) {
       return { text: "Your session is not allowed to run SQL.", detail: "" };
     case 409:
       if (/only on S3/.test(msg)) return { text: "The copy for this server is only on S3. SQL in the web interface needs a local copy.", detail: "" };
+      if (/not ready yet/.test(msg)) return { text: "The local copy SQL reads is not ready yet. The Snapshots page says how that stands.", detail: "" };
       if (/no copy|no view/.test(msg)) return { text: "There is no copy to run SQL on yet.", detail: "" };
       return { text: "This copy cannot be queried from the web interface.", detail: msg };
     case 422: return { text: "The query did not run.", detail: msg };
@@ -3507,7 +3513,10 @@ function useCopySection() {
       api("/api/capabilities").then((caps) => {
         state.sqlAsking = false;
         if (gen !== serverGen) return;
-        state.sqlAskedAt = snapAt;
+        // Not remembered while the answer is "not yet" (#2302): a server
+        // whose snapshots are only in S3 gets SQL when its local copy
+        // arrives, with no new snapshot to prompt another ask.
+        if (!(caps && caps.sql_pending)) state.sqlAskedAt = snapAt;
         if (caps && caps.sql) {
           capsCache.sql = true;
           state.cards.sql.hidden = false;
@@ -7563,7 +7572,7 @@ async function renderSnapshots() {
   const asErr = (err) => ({ error: (err && err.message) || String(err) });
   const [serversRes, baselines, coverage, settings, storage] = await Promise.all([
     api("/api/servers").catch(asErr),
-    api("/api/baselines").catch(asErr),
+    api("/api/baselines").catch((err) => Object.assign(asErr(err), { sql_mirror: (err && err.body && err.body.sql_mirror) || undefined })),
     // The hero colours the copy's age by the capture's state (a young copy
     // of a stopped capture is pink, not mint); a failed read paints nothing
     // about capture rather than a false green.
@@ -10106,6 +10115,46 @@ function snapshotRetentionLines(b) {
   return out;
 }
 
+// snapshotSQLMirrorLines says whether SQL can read these snapshots (#2302).
+// Only for a server whose snapshots are in S3 and nowhere on this machine:
+// SQL reads files on disk, so DBTrail keeps a copy of the newest snapshots
+// here, and until the first one arrives the SQL card is not shown at all.
+// This is the one place that says why, and when it stops being true. The
+// server sends sql_mirror for such a server only; without it nothing is drawn.
+function snapshotSQLMirrorLines(b) {
+  const m = b.sql_mirror;
+  if (!m) return [];
+  const has = m.ready && m.newest ? "the snapshot of " + utcLabel(m.newest) : "a snapshot";
+  const size = m.bringing_bytes > 0 ? " (" + humanBytes(m.bringing_bytes) + " to download)" : "";
+  // When the bucket was last looked at, on every line that states what the
+  // copy holds: with one server's long download in front of it, another
+  // server's copy can go unchecked for hours, and "holds the snapshot of X"
+  // must not read as "X is the newest there is".
+  const checked = m.checked_at ? " Last checked against the bucket " + utcLabel(m.checked_at) + "." : "";
+  const hint = (text) => el("p", { class: "form-hint bk-sqlmirror", text });
+  const err = (text) => el("p", { class: "form-msg err bk-sqlmirror-err", text });
+  switch (m.state) {
+    case "ready":
+      return [hint("SQL reads a copy of the newest snapshots kept on this machine. It holds " + has + "." +
+        (m.behind ? " The bucket has a newer one, of " + utcLabel(m.behind) + ", not brought yet." : "") + checked)];
+    case "bringing": {
+      const what = "Bringing " + (m.bringing ? "the snapshot of " + utcLabel(m.bringing) : "a snapshot") + " from S3 to this machine" + size + ".";
+      return [hint(m.ready ? what + " SQL answers from " + has + " until it arrives." : "SQL is not available yet. " + what)];
+    }
+    case "failed":
+      // The reason is the daemon's own sentence, whole, with or without its
+      // full stop: it gets exactly one before the next sentence starts.
+      return [err("The copy SQL reads could not be brought up to date: " + String(m.error || "no reason recorded").replace(/[.\s]+$/, "") + "." +
+        (m.ready ? " SQL answers from " + has + "." : " SQL is not available yet.") + " DBTrail tries again by itself." + checked)];
+    case "empty":
+      return [hint("SQL has nothing to read yet: the bucket holds no complete snapshot to bring to this machine." + checked)];
+    case "unfilled":
+      return [hint("SQL is not available here. These snapshots are only in S3, and nothing on this machine brings them to disk: bintrail-console watch does.")];
+    default:
+      return [hint("SQL is not available yet. DBTrail has not brought a snapshot from S3 to this machine.")];
+  }
+}
+
 function baselinesPanel(b, servers, opts) {
   // Full-width (#1415): this list is the page. The Create-baseline action
   // moved to the context strip — at page level it is a page action; inside
@@ -10136,6 +10185,9 @@ function baselinesPanel(b, servers, opts) {
     panel.append(newTablesBlock(b.refresh, (b.snapshots || [])[0]) || "");
   }
   if (b && !b.error) snapshotRetentionLines(b).forEach((line) => panel.append(line));
+  // Drawn when the list could not be read too: what SQL answers from is on
+  // this machine, and a bucket that cannot be listed is when it is asked.
+  if (b) snapshotSQLMirrorLines(b).forEach((line) => panel.append(line));
   const list = el("div", { class: "stg-list" });
   if (!b || b.error) {
     // A missing index database is the pre-capture state, and renderError

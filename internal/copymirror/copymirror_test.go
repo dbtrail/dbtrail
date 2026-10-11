@@ -734,6 +734,10 @@ func TestSync_refusesBeforeDownloadingWhenTheDiskIsShort(t *testing.T) {
 	if !errors.As(err, &noSpace) || !errors.Is(err, ErrNoSpace) {
 		t.Fatalf("err = %v, want NoSpaceError", err)
 	}
+	// The sentence is shown to a person as it is: sizes in units, before the path.
+	if msg := err.Error(); !strings.Contains(msg, "the disk has 1.4 KiB free, and 500 B must stay free") || strings.Index(msg, "mirror folder") < strings.Index(msg, "must stay free") {
+		t.Errorf("message = %q", msg)
+	}
 	if noSpace.Need < 1000 || noSpace.Need > 1200 || noSpace.Free != 1400 || noSpace.Headroom != 500 || noSpace.Snapshot != t1 {
 		t.Errorf("numbers = %+v", noSpace)
 	}
@@ -1391,5 +1395,14 @@ func TestSync_damagedPriorCountsAgainstTheDisk(t *testing.T) {
 	}
 	if src.gets[t2+"/shop/orders.parquet"] != 0 {
 		t.Error("the table was downloaded into a disk it does not fit")
+	}
+}
+
+func TestSizeText(t *testing.T) {
+	for n, want := range map[int64]string{0: "0 B", 1023: "1023 B", 1024: "1.0 KiB", 1536: "1.5 KiB", 1 << 20: "1.0 MiB",
+		42 << 30: "42.0 GiB", 3 << 40: "3.0 TiB", 5000 << 40: "5000.0 TiB"} {
+		if got := sizeText(n); got != want {
+			t.Errorf("sizeText(%d) = %q, want %q", n, got, want)
+		}
 	}
 }

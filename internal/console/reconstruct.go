@@ -87,6 +87,11 @@ type capabilitiesResponse struct {
 	// The Overview shows its "Ask it here" card on this and nothing else, so
 	// the card is never offered where the route can only refuse.
 	SQL bool `json:"sql"`
+	// SQLPending: SQL is false now and will turn true by itself: this
+	// server's snapshots are only in S3 and its local mirror is being
+	// filled (#2302). The page keeps asking instead of taking the false for
+	// this server's answer.
+	SQLPending bool `json:"sql_pending,omitempty"`
 	// BaselineTrigger: this process can create baseline snapshots in-process from
 	// the console (the watch daemon opted in with BINTRAIL_CONSOLE_BASELINE_TRIGGER=1).
 	// Process-global, like Monitor — the endpoint does the per-server validation
@@ -246,6 +251,9 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		resp.Reconstruct = b.baselineConfigured && !restricted
 		resp.Views = s.viewsAvailable(r, b)
 		resp.SQL = s.sqlAvailable(r, b)
+		// Only where a copy arriving is all that is missing: a session that
+		// may not run SQL would be asked to keep asking for nothing.
+		resp.SQLPending = !resp.SQL && s.sqlAllowed(r, b) && s.sqlPending(b)
 		// Gated on Views for the reason the field's doc gives, and read off the
 		// same bundle field the handler refuses on, so the control cannot be
 		// offered for a server the route would then reject.

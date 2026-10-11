@@ -204,9 +204,26 @@ type NoSpaceError struct {
 	Need, Free, Headroom int64
 }
 
+// Error says what does not fit, with the sizes first and in units a person
+// reads: the sentence is shown on a page as it is, and the path is the part
+// that can be cut.
 func (e *NoSpaceError) Error() string {
-	return fmt.Sprintf("%v: snapshot %s needs %d bytes downloaded into %s, which has %d free, and %d must stay free",
-		ErrNoSpace, e.Snapshot, e.Need, e.Dir, e.Free, e.Headroom)
+	return fmt.Sprintf("%v: snapshot %s needs %s downloaded, the disk has %s free, and %s must stay free (mirror folder %s)",
+		ErrNoSpace, e.Snapshot, sizeText(e.Need), sizeText(e.Free), sizeText(e.Headroom), e.Dir)
+}
+
+// sizeText writes a byte count in binary units, one decimal past bytes.
+func sizeText(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit && exp < 3; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), []string{"KiB", "MiB", "GiB", "TiB"}[exp])
 }
 
 func (e *NoSpaceError) Unwrap() error { return ErrNoSpace }

@@ -1406,9 +1406,15 @@ For a server that keeps its snapshots in S3 and has no local snapshot folder,
   snapshot needs and how much is free, and SQL keeps answering from the
   snapshot the mirror already has.
 - **Until the first snapshot is there**, SQL answers that the local copy is
-  not ready yet. If it stays that way, the daemon log says why under
-  `copy mirror`: no complete snapshot in the bucket yet, no room, or the
-  bucket cannot be read.
+  not ready yet. On the Overview the SQL card appears without a reload once
+  it arrives, at one of the page's own refreshes (within a few minutes).
+- **Where to look.** The **Snapshots** page says, above the list: which
+  snapshot SQL is reading and when the bucket was last checked; that the
+  bucket has a newer one not brought yet; that one is being brought and how
+  much it has to download; that the bucket holds no complete snapshot yet;
+  and, in red, why the last attempt failed (no room, with the sizes, or a
+  bucket that cannot be read). It says so even when the list itself cannot
+  be read. The daemon log says the same under `copy mirror`.
 
 A server that also keeps a local snapshot folder has no mirror: that folder
 is what SQL reads. The change history (the `events` view) is not mirrored: on

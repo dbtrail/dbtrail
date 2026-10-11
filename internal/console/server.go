@@ -232,6 +232,10 @@ type Config struct {
 	// does, the read-only console and the router do not. It decides only
 	// what a refusal promises: "the local copy is on its way" where it is.
 	FillsCopyMirrors bool
+	// CopyMirror reports what the loop that fills the mirrors last did, for
+	// the Snapshots page. Set with FillsCopyMirrors; nil elsewhere, and the
+	// page then says only what the disk says.
+	CopyMirror CopyMirrorReporter
 	// AuthPath locates the console credential file (username + bcrypt hash,
 	// written by `bintrail-console user set-password`). Empty means
 	// DefaultAuthPath(). A missing file means password login is not
@@ -524,6 +528,8 @@ type Server struct {
 	sqlLimits sqlsandbox.Limits
 	// fillsCopyMirrors is Config.FillsCopyMirrors.
 	fillsCopyMirrors bool
+	// copyMirror is Config.CopyMirror.
+	copyMirror CopyMirrorReporter
 	// sqlPortMaxRows is Config.SQLPortMaxRows; read through sqlPortRowCap.
 	sqlPortMaxRows int
 	// sqlPortSharedSlots is Config.SQLPortSharedSlots.
@@ -828,6 +834,7 @@ func New(cfg Config) (*Server, error) {
 	// the registry is loaded, before any loop reads it).
 	s.sqlLimits = resolveSQLLimits(cfg.SQLLimits)
 	s.fillsCopyMirrors = cfg.FillsCopyMirrors
+	s.copyMirror = cfg.CopyMirror
 	s.sqlPortMaxRows = cfg.SQLPortMaxRows
 	s.routerURL, s.routerURLErr, s.routerClient = cfg.RouterURL, cfg.RouterURLError, newRouterClient(routerStatusTimeout)
 	s.loadRouterSwitch(cfg.RouterSwitchPath)

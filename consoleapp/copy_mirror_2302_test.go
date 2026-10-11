@@ -8,6 +8,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/copymirror"
+	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
 func mirrorRegistry(t *testing.T, entries ...console.ServerEntry) *console.Registry {
@@ -527,5 +529,134 @@ func TestCopyMirror_watchTellsItsConsoleItFillsTheMirrors(t *testing.T) {
 	}
 	if cfg.FillsCopyMirrors {
 		t.Error("a configuration nobody marked says it fills the mirrors")
+	}
+}
+
+// What the Snapshots page is told: a download under way from the moment the
+// round knows it is bringing one until the round ends, whatever way it ends;
+// and nothing about a server no round ran for.
+func TestCopyMirrorReport_whatThePageIsTold(t *testing.T) {
+	state := newCopyMirrorState()
+	if _, ok := state.CopyMirrorReport("abc"); ok {
+		t.Error("a server no round ran for has a report")
+	}
+	state.set("abc", copyMirrorStatus{At: time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC), SourceNewest: "2026-10-11T10-00-00Z", Err: "no room"})
+	rep, ok := state.CopyMirrorReport("abc")
+	if !ok || rep.Err != "no room" || rep.SourceNewest != "2026-10-11T10-00-00Z" || rep.CheckedAt.IsZero() || rep.Bringing != "" {
+		t.Errorf("after a failed round: %+v, %v", rep, ok)
+	}
+	state.startBringing("abc", "s3://bucket/a", "2026-10-11T11-00-00Z", 1234)
+	rep, _ = state.CopyMirrorReport("abc")
+	if rep.Bringing != "2026-10-11T11-00-00Z" || rep.BringingBytes != 1234 || rep.Err != "" {
+		t.Errorf("during a download: %+v, want the download and no earlier round's failure", rep)
+	}
+	state.startBringing("first", "s3://bucket/f", "2026-10-11T11-00-00Z", 9)
+	if rep, ok := state.CopyMirrorReport("first"); !ok || rep.Bringing == "" {
+		t.Errorf("a first download, before any round ended: %+v, %v", rep, ok)
+	}
+	state.doneBringing("abc")
+	if rep, _ := state.CopyMirrorReport("abc"); rep.Bringing != "" || rep.Err != "no room" {
+		t.Errorf("after the download: %+v", rep)
+	}
+}
+
+// The real round marks its download and always unmarks it: a round that
+// failed mid-download must not leave the page saying one is under way.
+func TestSyncCopyMirror_alwaysEndsItsDownloadMark(t *testing.T) {
+	state := newCopyMirrorState()
+	state.startBringing("abc", "s3://bucket/a", "2026-10-11T11-00-00Z", 1)
+	// A location that cannot be opened: the round fails before any download.
+	_, err := syncCopyMirrorInto(context.Background(), copyMirrorTarget{id: "abc", name: "shop", dir: t.TempDir(), s3: "not-an-s3-url"}, state)
+	if err == nil {
+		t.Fatal("a round over a location that is not a bucket did not fail")
+	}
+	if rep, _ := state.CopyMirrorReport("abc"); rep.Bringing != "" {
+		t.Errorf("the failed round left a download marked: %+v", rep)
+	}
+}
+
+func TestCopyMirror_watchHandsItsConsoleTheReporter(t *testing.T) {
+	opts := upConsoleOpts()
+	if opts.CopyMirror != console.CopyMirrorReporter(copyMirrors) {
+		t.Fatal("the watch daemon's console options do not carry the loop's own record")
+	}
+	opts.Listen, opts.Token = "127.0.0.1:8090", "tok"
+	cfg, err := upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/binlog_index", opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CopyMirror != console.CopyMirrorReporter(copyMirrors) {
+		t.Error("the console configuration built from them lost it")
+	}
+}
+
+// The round's own configuration is what marks a download for the page.
+func TestCopyMirrorConfig_marksTheDownload(t *testing.T) {
+	state := newCopyMirrorState()
+	tg := copyMirrorTarget{id: "abc", name: "shop", dir: "/m", s3: "s3://bucket/a"}
+	cfg := copyMirrorConfig(tg, nil, state)
+	if cfg.Dir != "/m" || cfg.SourceName != "s3://bucket/a" || cfg.OnDownload == nil {
+		t.Fatalf("config = %+v", cfg)
+	}
+	cfg.OnDownload("2026-10-11T11-00-00Z", 3, 4096)
+	if rep, ok := state.CopyMirrorReport("abc"); !ok || rep.Bringing != "2026-10-11T11-00-00Z" || rep.BringingBytes != 4096 || rep.Source != "s3://bucket/a" {
+		t.Errorf("after OnDownload: %+v, %v", rep, ok)
+	}
+}
+
+// Every report says which bucket it is about, and a round that stepped aside
+// for another process reports nothing: it did not look at the bucket.
+func TestCopyMirrorRound_reportsNameTheirBucketAndBusyReportsNothing(t *testing.T) {
+	reg := mirrorRegistry(t, mirrorEntry("a", "", "s3://bucket/a"), mirrorEntry("b", "", "s3://bucket/b"))
+	ids := map[string]string{}
+	for _, e := range reg.List() {
+		ids[e.Name] = e.ID
+	}
+	state := newCopyMirrorState()
+	state.set(ids["b"], copyMirrorStatus{Source: "s3://bucket/b", Newest: "2026-10-01T10-00-00Z", Err: "earlier failure"})
+	runCopyMirrorRound(context.Background(), reg, bootMirror{}, state, func(_ context.Context, tg copyMirrorTarget) (copymirror.Result, error) {
+		if tg.name == "b" {
+			return copymirror.Result{Busy: true}, nil
+		}
+		return copymirror.Result{Newest: "2026-10-01T10-00-00Z", SourceNewest: "2026-10-01T10-00-00Z"}, nil
+	})
+	if rep, ok := state.CopyMirrorReport(ids["a"]); !ok || rep.Source != "s3://bucket/a" || rep.SourceNewest != "2026-10-01T10-00-00Z" {
+		t.Errorf("a: %+v, %v", rep, ok)
+	}
+	if rep, _ := state.CopyMirrorReport(ids["b"]); rep.Err != "earlier failure" {
+		t.Errorf("b: a round that stepped aside rewrote the report: %+v", rep)
+	}
+}
+
+// halfSource lists one snapshot and fails every download: a round over it
+// gets as far as announcing the download, and then fails.
+type halfSource struct{}
+
+func (halfSource) ListDirs(context.Context, string) ([]string, error) {
+	return []string{"2026-10-01T10-00-00Z"}, nil
+}
+
+func (halfSource) ListInfo(context.Context, string) ([]storage.ObjectInfo, error) {
+	return []storage.ObjectInfo{{Key: "2026-10-01T10-00-00Z/shop/orders.parquet", Size: 6}}, nil
+}
+
+func (halfSource) Get(context.Context, string) (io.ReadCloser, error) {
+	return nil, errors.New("connection reset")
+}
+
+// A round that fails after it announced its download does not leave the page
+// saying one is under way.
+func TestSyncCopyMirror_aDownloadThatFailsIsNoLongerUnderWay(t *testing.T) {
+	real := openCopyMirrorSource
+	openCopyMirrorSource = func(context.Context, string, string) (copymirror.Source, error) { return halfSource{}, nil }
+	t.Cleanup(func() { openCopyMirrorSource = real })
+	state := newCopyMirrorState()
+	tg := copyMirrorTarget{id: "abc", name: "shop", dir: filepath.Join(t.TempDir(), "m"), s3: "s3://bucket/a"}
+	_, err := syncCopyMirrorInto(context.Background(), tg, state)
+	if err == nil || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("err = %v, want the download's failure", err)
+	}
+	if rep, _ := state.CopyMirrorReport("abc"); rep.Bringing != "" {
+		t.Errorf("the failed round left a download marked: %+v", rep)
 	}
 }

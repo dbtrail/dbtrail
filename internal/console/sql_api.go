@@ -208,8 +208,7 @@ func (s *Server) sqlGate(w http.ResponseWriter, r *http.Request, b *bundle) bool
 // It is never optimistic: where it says true, GET /api/sql answers 200
 // (TestCapabilities_sqlAgreesWithTheRoute).
 func (s *Server) sqlAvailable(r *http.Request, b *bundle) bool {
-	if b == nil || b.noArchive || s.sqlRunner == nil || s.profileActiveFor(r) ||
-		!policyFrom(r.Context()).Allows(ext.PermSQLExecute) {
+	if !s.sqlAllowed(r, b) {
 		return false
 	}
 	src := b.sqlCopySource()
@@ -226,6 +225,15 @@ func (s *Server) sqlAvailable(r *http.Request, b *bundle) bool {
 		return false
 	}
 	return sqlArchivesLocal(sources)
+}
+
+// sqlAllowed is the half of sqlAvailable that is about the session and the
+// server's settings, not about where the copy is: this process runs SQL,
+// archive access is on, no data profile is active, and the session holds
+// sql:execute. Where it is false, no copy arriving later changes the answer.
+func (s *Server) sqlAllowed(r *http.Request, b *bundle) bool {
+	return b != nil && !b.noArchive && s.sqlRunner != nil && !s.profileActiveFor(r) &&
+		policyFrom(r.Context()).Allows(ext.PermSQLExecute)
 }
 
 // sqlArchivesLocal reports whether the change log can be read by the
@@ -1702,9 +1710,13 @@ const sqlWorkerFailedMessage = "the SQL worker failed before it could answer; DB
 // are only in S3 and whose local mirror holds none yet (#2302): the copy is
 // on its way, which "only on S3" does not say. Written for a browser and for
 // a MySQL client alike, and short: a client cuts a message at 512 bytes.
+//
+// It promises nothing about when: the same refusal is sent while a first
+// download runs, while the disk is too full for it, and while the bucket
+// holds nothing to bring. The Snapshots page and the log say which.
 const sqlCopyMirrorNotReadyMessage = "this server's snapshots are in S3 and the local copy SQL reads is not ready yet: " +
-	"DBTrail is bringing the newest snapshot from the bucket. Try again in a few minutes; " +
-	"if it stays like this, the DBTrail log says why under \"copy mirror\""
+	"DBTrail brings the newest snapshot from the bucket by itself. " +
+	"The " + PageSnapshots + " page says how that stands, and the DBTrail log says why under \"copy mirror\""
 
 // sqlNotLocalMessage is the refusal for a server SQL cannot read locally:
 // one that has a mirror on its way, or one that has none. "On its way" is

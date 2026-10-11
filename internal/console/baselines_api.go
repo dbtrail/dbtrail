@@ -121,6 +121,11 @@ type baselinesResponse struct {
 	// and the reason, because a saved schedule that nothing executes is the
 	// silent failure this feature exists to prevent.
 	Schedule *backupScheduleDTO `json:"schedule,omitempty"`
+	// SQLMirror is the state of the local mirror SQL on the copy reads
+	// (#2302), omitted for a server that has none: one whose snapshots are
+	// not only in S3. Here because this page is where the bucket is shown,
+	// and "these snapshots are in S3; can I run SQL on them" is asked here.
+	SQLMirror *sqlMirrorDTO `json:"sql_mirror,omitempty"`
 	// Staleness is the panel headline: the worst verdict across each table's
 	// NEWEST snapshot (#1193). An old superseded snapshot being past coverage
 	// is routine — grading every row red on a healthy retention cadence would
@@ -279,6 +284,7 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		resp.Schedule = s.backupScheduleDTO(sctx, e, s.scheduleClock())
 		cancel()
 	}
+	resp.SQLMirror = s.sqlMirrorOf(b, s.selectedServerID(r))
 	resp.LocalRetention = s.localRetentionOf(s.selectedServerID(r))
 	resp.LastPrune, resp.LastPruneFailure, resp.LastPruneError = lastPruneOf(b, s.selectedServerID(r))
 	if b.baselineSrc == "" {
@@ -317,7 +323,19 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		for _, src := range merged.Sources {
 			parts = append(parts, src.Source+": "+src.Error)
 		}
-		writeJSONError(w, http.StatusBadGateway, "list baselines: "+strings.Join(parts, "; "))
+		msg := "list baselines: " + strings.Join(parts, "; ")
+		if resp.SQLMirror == nil {
+			writeJSONError(w, http.StatusBadGateway, msg)
+			return
+		}
+		// The mirror's state travels with the failure (#2302). A bucket that
+		// cannot be listed is the very case in which the page has to say
+		// whether SQL still answers, and from which snapshot: that is read
+		// from this machine's disk and does not depend on the bucket.
+		writeJSON(w, http.StatusBadGateway, struct {
+			Error     string        `json:"error"`
+			SQLMirror *sqlMirrorDTO `json:"sql_mirror"`
+		}{msg, resp.SQLMirror})
 		return
 	}
 	// Incomplete when a location did not answer OR answered in part: a listing

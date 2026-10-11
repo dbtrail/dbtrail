@@ -263,12 +263,12 @@ func TestSQLMirror_everyBundleIsGivenItsMirrorFolder(t *testing.T) {
 	}
 
 	// The server on the command line, which is not in the registry.
-	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, BaselineS3: "s3://bucket/boot", FillsCopyMirrors: true})
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, BaselineS3: "s3://bucket/boot", FillsCopyMirrors: true, CopyMirror: fakeMirrorReporter{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !srv.fillsCopyMirrors {
-		t.Error("New dropped Config.FillsCopyMirrors")
+	if !srv.fillsCopyMirrors || srv.copyMirror == nil {
+		t.Error("New dropped Config.FillsCopyMirrors or Config.CopyMirror")
 	}
 	if got, want := srv.cm.boot.sqlMirrorDir, reg.BootCopyMirrorDir("", "s3://bucket/boot"); got != want || want == "" {
 		t.Errorf("the command-line server: sqlMirrorDir = %q, want %q", got, want)

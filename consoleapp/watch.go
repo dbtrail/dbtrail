@@ -1829,6 +1829,8 @@ type consoleOpts struct {
 	ReadRouting console.ReadRoutingConfig
 	// FillsCopyMirrors is console.Config.FillsCopyMirrors.
 	FillsCopyMirrors bool
+	// CopyMirror is console.Config.CopyMirror.
+	CopyMirror console.CopyMirrorReporter
 }
 
 // upConsoleOpts snapshots the resolved upConsole* globals.
@@ -1838,6 +1840,7 @@ func upConsoleOpts() consoleOpts {
 		// (startCopyMirrorLoop), and both reach this function; the
 		// read-only serve does neither.
 		FillsCopyMirrors: true,
+		CopyMirror:       copyMirrors,
 		Listen:           upConsoleListen,
 		Token:            upConsoleToken,
 		BaselineDir:      upConsoleBaselineDir,
@@ -1953,6 +1956,7 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		BaselineDir:      opts.BaselineDir,
 		BaselineS3:       opts.BaselineS3,
 		FillsCopyMirrors: opts.FillsCopyMirrors,
+		CopyMirror:       opts.CopyMirror,
 		AuthPath:         opts.AuthFile,
 		MCPTokenPath:     opts.MCPTokenFile,
 		FlashbackPath:    flashbackFilePath(opts),

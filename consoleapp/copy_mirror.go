@@ -82,7 +82,9 @@ func copyMirrorTargets(reg *console.Registry, boot bootMirror) []copyMirrorTarge
 
 // copyMirrorStatus is what the last round left for one server.
 type copyMirrorStatus struct {
-	At time.Time
+	// Source is the snapshot root the round was for.
+	Source string
+	At     time.Time
 	// Newest is the newest snapshot in the mirror, what SQL reads; ""
 	// when it holds none. SourceNewest is the newest the bucket listed.
 	Newest, SourceNewest string
@@ -91,14 +93,59 @@ type copyMirrorStatus struct {
 }
 
 type copyMirrorState struct {
-	mu   sync.Mutex
-	m    map[string]copyMirrorStatus
-	said map[string]time.Time
-	now  func() time.Time // nil is time.Now
+	mu       sync.Mutex
+	m        map[string]copyMirrorStatus
+	bringing map[string]copyMirrorDownload
+	said     map[string]time.Time
+	now      func() time.Time // nil is time.Now
+}
+
+// copyMirrorDownload is a download under way: which snapshot, and how many
+// bytes the round set out to download.
+type copyMirrorDownload struct {
+	source   string
+	snapshot string
+	bytes    int64
 }
 
 func newCopyMirrorState() *copyMirrorState {
-	return &copyMirrorState{m: map[string]copyMirrorStatus{}, said: map[string]time.Time{}}
+	return &copyMirrorState{m: map[string]copyMirrorStatus{}, bringing: map[string]copyMirrorDownload{}, said: map[string]time.Time{}}
+}
+
+// copyMirrors is this process's record of the mirrors it fills: written by
+// the loop, read by the Snapshots page through CopyMirrorReport. One per
+// process, like the loop.
+var copyMirrors = newCopyMirrorState()
+
+// startBringing and doneBringing bracket a download, so the page can say one
+// is under way: a first download can take long, and until it ends the round
+// has reported nothing.
+func (s *copyMirrorState) startBringing(id, source, snapshot string, bytes int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bringing[id] = copyMirrorDownload{source, snapshot, bytes}
+}
+
+func (s *copyMirrorState) doneBringing(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.bringing, id)
+}
+
+// CopyMirrorReport implements console.CopyMirrorReporter.
+func (s *copyMirrorState) CopyMirrorReport(id string) (console.CopyMirrorReport, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.m[id]
+	b, bringing := s.bringing[id]
+	rep := console.CopyMirrorReport{Source: st.Source, CheckedAt: st.At, SourceNewest: st.SourceNewest, Err: st.Err}
+	if bringing {
+		rep.Source = b.source
+		rep.Bringing, rep.BringingBytes = b.snapshot, b.bytes
+		// A failure of an earlier round is not this download's.
+		rep.Err = ""
+	}
+	return rep, ok || bringing
 }
 
 // copyMirrorRepeatEvery is how often a line that keeps being true is logged
@@ -156,19 +203,35 @@ func (s *copyMirrorState) set(id string, st copyMirrorStatus) (prev copyMirrorSt
 
 // syncCopyMirror runs one round for one server against its bucket.
 func syncCopyMirror(ctx context.Context, t copyMirrorTarget) (copymirror.Result, error) {
+	return syncCopyMirrorInto(ctx, t, copyMirrors)
+}
+
+func syncCopyMirrorInto(ctx context.Context, t copyMirrorTarget, state *copyMirrorState) (copymirror.Result, error) {
+	// Whatever way the round ends, no download is under way after it.
+	defer state.doneBringing(t.id)
 	// Opened per round, not kept: see copymirror.OpenS3.
-	src, err := copymirror.OpenS3(ctx, t.s3, t.region)
+	src, err := openCopyMirrorSource(ctx, t.s3, t.region)
 	if err != nil {
 		return copymirror.Result{}, err
 	}
-	return copymirror.Sync(ctx, copymirror.Config{Dir: t.dir, Source: src, SourceName: t.s3,
+	return copymirror.Sync(ctx, copyMirrorConfig(t, src, state))
+}
+
+// openCopyMirrorSource opens a server's bucket; a test replaces it.
+var openCopyMirrorSource = copymirror.OpenS3
+
+// copyMirrorConfig is the round's configuration for one server.
+func copyMirrorConfig(t copyMirrorTarget, src copymirror.Source, state *copyMirrorState) copymirror.Config {
+	return copymirror.Config{Dir: t.dir, Source: src, SourceName: t.s3,
 		// A first download can take long, and the round says nothing else
-		// until it ends: without this line the log shows a server whose SQL
-		// answers "not ready yet" and no sign that anything is happening.
+		// until it ends: without this the log, and the Snapshots page, show
+		// a server whose SQL answers "not ready yet" and no sign that
+		// anything is happening.
 		OnDownload: func(snapshot string, files int, bytes int64) {
+			state.startBringing(t.id, t.s3, snapshot, bytes)
 			slog.Info("copy mirror: bringing a snapshot from S3 for SQL on the copy",
 				"server", t.name, "snapshot", snapshot, "files", files, "bytes_to_download", bytes)
-		}})
+		}}
 }
 
 // runCopyMirrorRound runs one round for every server that has a mirror, one
@@ -181,7 +244,13 @@ func runCopyMirrorRound(ctx context.Context, reg *console.Registry, boot bootMir
 			return
 		}
 		res, err := guardedCopyMirrorSync(ctx, t, sync)
-		st := copyMirrorStatus{At: time.Now().UTC(), Newest: res.Newest, SourceNewest: res.SourceNewest}
+		if err == nil && res.Busy {
+			// Another process holds this mirror and is doing the round. It
+			// learned nothing about the bucket here, so what the last round
+			// of its own found stays as it is.
+			continue
+		}
+		st := copyMirrorStatus{Source: t.s3, At: time.Now().UTC(), Newest: res.Newest, SourceNewest: res.SourceNewest}
 		if err != nil {
 			st.Err = err.Error()
 		}
@@ -346,7 +415,7 @@ func startCopyMirrorLoop(ctx context.Context, reg *console.Registry, bootDir, bo
 		return
 	}
 	boot := bootMirror{dir: bootDir, s3: bootS3}
-	state := newCopyMirrorState()
+	state := copyMirrors
 	runOnce := func() {
 		defer func() {
 			if r := recover(); r != nil {

@@ -144,6 +144,9 @@ func TestSQLPanelPureFunctions(t *testing.T) {
 			{"status": 502, "message": "list baselines: boom"},
 			{"status": 0, "message": "Failed to fetch"},
 			{"status": 418, "message": "teapot"},
+			// The server's own words for a mirror on its way (#2302): the
+			// page matches them, so the constant is what is fed in.
+			{"status": 409, "message": sqlCopyMirrorNotReadyMessage},
 		},
 		"table": c{
 			"columns": []c{{"name": "id", "type": "INTEGER"}, {"name": "zip", "type": "VARCHAR"}, {"name": "total", "type": "DECIMAL(10,2)"}, {"name": "<i>x</i>", "type": "VARCHAR[]"}},
@@ -280,6 +283,7 @@ func TestSQLPanelPureFunctions(t *testing.T) {
 		{"The copy could not be read.", "list baselines: boom"},
 		{"The server did not answer.", "Failed to fetch"},
 		{"The query failed.", "teapot"},
+		{"The local copy SQL reads is not ready yet. The Snapshots page says how that stands.", ""},
 	}
 	for i, w := range wantErr {
 		if out.Errors[i].Text != w.text || out.Errors[i].Detail != w.detail {
