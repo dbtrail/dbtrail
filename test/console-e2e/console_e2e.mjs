@@ -726,7 +726,10 @@ try {
       // precondition, or an operator points it at a local mysqld that is not
       // the index and gets a measured number for the wrong volume.
       tunnelQualifiesTheMount: /cannot confirm/.test(tunnelCard.textContent) && /BINTRAIL_INDEX_DATADIR_RO/.test(tunnelCard.textContent) && /nothing else/.test(tunnelCard.textContent),
-      serveWorded: /not known here/.test(serveCard.textContent) && !/settles at/.test(serveCard.textContent),
+      // No steady size in the picture: not in the legend, and no growth
+      // segment. The note under it may say the words, to say it is unknown.
+      serveWorded: /not known here/.test(serveCard.textContent) && !serveCard.querySelector(".sdk-dot.sdk-ahead") && !serveCard.querySelector(".sdk-seg.sdk-ahead")
+        && !Array.from(serveCard.querySelectorAll(".sdk-k")).some((k) => /settles at/.test(k.textContent)),
       errNote: /Could not measure the index disk: boom/.test(errCard.textContent),
       noEmDash: !/—/.test(texts),
     };
