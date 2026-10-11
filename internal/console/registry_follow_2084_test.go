@@ -396,3 +396,43 @@ func TestFollowFiles_followsUntilItsContextEnds(t *testing.T) {
 		t.Fatal("FollowFiles did not return when its context ended")
 	}
 }
+
+// A follower started before the daemon has saved its first server has no
+// file to read. That is not a fault: it holds no servers, says nothing, and
+// reads the file when it appears.
+func TestRegistryFollower_theFileDoesNotExistYet(t *testing.T) {
+	clearStores(t)
+	path := filepath.Join(t.TempDir(), "console-servers.yaml")
+	f, err := LoadRegistryFollower(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if cs, err := f.Reload(); err != nil || cs != nil || f.Len() != 0 {
+			t.Fatalf("with no file yet: %v, %v, %d servers", changeNames(cs), err, f.Len())
+		}
+	}
+	owner, err := LoadRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.Add(ServerEntry{Name: "first", DSN: "u:p@tcp(h:3306)/idx"}); err != nil {
+		t.Fatal(err)
+	}
+	if cs, err := f.Reload(); err != nil || strings.Join(changeNames(cs), "; ") != "added first" {
+		t.Fatalf("once the daemon saved its first server: %v, %v", changeNames(cs), err)
+	}
+	// And from then on a missing file is one that was lost.
+	if err := owner.Delete(owner.List()[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Reload(); err == nil {
+		t.Error("a file that was there and is gone read as one not written yet")
+	}
+}

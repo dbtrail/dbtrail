@@ -66,6 +66,11 @@ func (r *Registry) Reload() ([]RegistryChange, error) {
 		return nil, errors.New("this server registry is not a follower of its file; it does not reload")
 	}
 	data, err := os.ReadFile(r.path)
+	if errors.Is(err, os.ErrNotExist) && len(r.file.Servers) == 0 && r.followed == nil {
+		// Not written yet: the daemon saves the file with its first server.
+		// A file that was there and is gone is the error below.
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read server registry %s: %w", r.path, err)
 	}
