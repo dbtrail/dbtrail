@@ -14182,6 +14182,9 @@ function routerSwitch(view, reveal) {
   // DBTrail's own start does not say how the router was started.
   const cred = st && st.credential;
   if (a.token) {
+    // One line when no router answered: most installs with a token run no
+    // router, and this page is kept short.
+    if (!st) return { lines: [{ text: "The router, a second MySQL port for applications (bintrail-console router), has no switch here: this DBTrail was started with an access token, and a router that reads the same settings is on while it runs, with the token as its password." }], on: false, manage: false, port, portKnown, quiet: true };
     lines.push({ text: "This DBTrail was started with an access token. A router that reads the same settings takes that token as its only password, so it has no switch here: it is on while it runs, and the token is the password." });
     if (cred === "saved") lines.push({ strong: "The router that answered was started without that token.", text: "It still follows the switch and password saved before the token was set, which cannot be changed here. Restart the router with the token, or remove the token where DBTrail starts.", err: true });
     return { lines, on: false, manage: false, port, portKnown };
@@ -14290,7 +14293,7 @@ function routerPanel(view, cur) {
     const lines = numbers || (sw
       ? [{ text: "This DBTrail is not given the router's address, so the router's numbers are not shown here (CLI: --router-url or BINTRAIL_CONSOLE_ROUTER_URL). SHOW ROUTER STATUS on the router's own port says them." }]
       : [{ text: "This DBTrail is no longer given a router's address." }]);
-    for (const l of lines) body.append(row(l, !v || (v.configured && !v.status)));
+    if (!(sw && sw.quiet && !numbers)) for (const l of lines) body.append(row(l, !v || (v.configured && !v.status)));
     if (!v && shown) body.append(row({ strong: "Copy the password above first:", text: "reloading the page takes it off the screen." }));
     if (!numbers && sw) return;
     const refresh = el("button", { class: "btn btn-sm", type: "button", text: "Refresh" });

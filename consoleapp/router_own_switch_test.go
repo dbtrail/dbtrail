@@ -186,7 +186,7 @@ func TestRouterPort_followsTheSwitchTheConsoleSaves(t *testing.T) {
 	_, second := change("POST", "/api/router/password", ``)
 	waitUntil(t, "the new password to open the router", func() bool { return mysqlLoginQuiet(addr, second) == 0 })
 	waitUntil(t, "the connection made with the old password to be closed", func() bool { return connClosed(app) })
-	if code := mysqlLoginQuiet(addr, first); code != gomysql.ER_ACCESS_DENIED_ERROR {
+	if code := mysqlLoginSettled(t, addr, first); code != gomysql.ER_ACCESS_DENIED_ERROR {
 		t.Fatalf("login with the replaced password: %d, want 1045", code)
 	}
 

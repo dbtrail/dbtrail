@@ -5614,6 +5614,9 @@ try {
     const icePanel = view.querySelector(".cn-ice");
     const dkPanel = view.querySelector(".cn-dk");
     const memPanel = view.querySelector(".cn-sqlmem");
+    // The router's panel is its own too: with an access token, as here, it
+    // is one line saying the router has no switch on this page.
+    const routerPanel = view.querySelector(".cn-router");
     const kids = Array.from(view.children || []);
     const iceCode = icePanel ? icePanel.querySelector("code.cn-url") : null;
     return {
@@ -5622,7 +5625,8 @@ try {
       // Minus the three panels' own text (see the budget note above).
       visibleChars: visible.length - (sqlPanel ? sqlPanel.innerText.length : 0)
         - (icePanel ? icePanel.innerText.length : 0) - (dkPanel ? dkPanel.innerText.length : 0)
-        - (memPanel ? memPanel.innerText.length : 0),
+        - (memPanel ? memPanel.innerText.length : 0) - (routerPanel ? routerPanel.innerText.length : 0),
+      router: routerPanel ? { present: true, chars: routerPanel.innerText.length, buttons: routerPanel.querySelectorAll("button").length } : { present: false },
       // The memory panel's own text, its folded notes closed.
       mem: memPanel ? { present: true, chars: memPanel.innerText.length,
         open: memPanel.querySelectorAll("details[open]").length } : { present: false },
@@ -5663,6 +5667,11 @@ try {
   (cn.visibleChars > 0 && cn.visibleChars < 1500 && cn.fine >= 1)
     ? ok("connect: visible text stays under budget with fine print folded")
     : bad("connect: visible text stays under budget with fine print folded", "chars " + cn.visibleChars + " fine " + cn.fine);
+  // This daemon has an access token: the router's panel is one line and no
+  // button, so a page that never uses a router stays short.
+  (cn.router.present && cn.router.chars > 0 && cn.router.chars <= 320 && cn.router.buttons === 0)
+    ? ok("connect: with an access token the router's panel is one line under 320 characters, with no switch")
+    : bad("connect: with an access token the router's panel is one line under 320 characters, with no switch", JSON.stringify(cn.router));
   (cn.mem.present && cn.mem.chars > 0 && cn.mem.chars <= 700 && cn.mem.open === 0)
     ? ok("connect: the memory panel stays under its 700-character budget, its notes folded")
     : bad("connect: the memory panel stays under its 700-character budget, its notes folded", JSON.stringify(cn.mem));

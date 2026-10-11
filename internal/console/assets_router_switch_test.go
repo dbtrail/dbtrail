@@ -293,7 +293,8 @@ const withPw = (v, pw) => Object.assign(JSON.parse(JSON.stringify(v)), { passwor
 			t.Errorf("%s reached the command to paste: %s", name, s.Text)
 		}
 	}
-	has("started with a token", got.Token, "started with an access token", "the token is the password")
+	has("started with a token", got.Token, "started with an access token", "with the token as its password")
+	hasNot("started with a token", got.Token, "is not given the router's address")
 	buttons("started with a token", got.Token, "")
 	has("a setting that cannot be changed", got.Refused, "cannot be changed here:", "could not be read")
 	buttons("a setting that cannot be changed", got.Refused, "")
