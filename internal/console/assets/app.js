@@ -2641,19 +2641,22 @@ function ovStripModel(inp) {
   const caps = inp.caps || {};
   const now = typeof inp.now === "number" ? inp.now : Date.now();
   const tile = (key, tone, value, sub, extra) => Object.assign({ key, tone, value, sub: sub || "" }, extra || {});
+  // The words on these tiles are read on a first install too, so they keep
+  // to that screen's vocabulary: "change history" for what the page's
+  // internals call the index, and a word, never a dash, for a missing value.
   const unread = "could not be read";
 
   let version, running;
   if (inp.capsUnknown) {
-    version = tile("Version", "none", "—", unread);
-    running = tile("Running for", "none", "—", unread);
+    version = tile("Version", "none", "unknown", unread, { words: true });
+    running = tile("Running for", "none", "unknown", unread, { words: true });
   } else {
     const ver = String(caps.version || "").replace(/^v/, "");
     version = !ver || ver === "dev" ? tile("Version", "none", "dev", "not a released build")
       : tile("Version", "none", ver, "this DBTrail");
     const up = ovSinceText(caps.started_at, now);
     running = up ? tile("Running for", "none", up, "since " + utcLabel(caps.started_at), { since: caps.started_at })
-      : tile("Running for", "none", "—", "not reported");
+      : tile("Running for", "none", "unknown", "not reported", { words: true });
   }
 
   let disk;
@@ -2662,11 +2665,11 @@ function ovStripModel(inp) {
   if (err && err.status === 403) {
     // Not this session's to read: no link either, the page behind it is the
     // same read.
-    disk = tile("Index disk", "none", "—", "not available to this session");
+    disk = tile("Disk", "none", "unknown", "not available to this session", { words: true });
   } else if (err || !cap || !cap.status) {
-    disk = tile("Index disk", "none", "—", unread, { link: "status" });
+    disk = tile("Disk", "none", "unknown", unread, { link: "status", words: true });
   } else if (cap.reason === "not_initialized") {
-    disk = tile("Index disk", "none", "—", "no index yet", { link: "status" });
+    disk = tile("Disk", "none", "not measured", "no change history yet", { link: "status", words: true });
   } else {
     const graded = cap.status === "pass" ? "ok" : cap.status === "warn" ? "warn" : cap.status === "fail" ? "bad" : "none";
     const parts = [];
@@ -2674,12 +2677,12 @@ function ovStripModel(inp) {
     // plain "ok": a red border alone says something is wrong, not what.
     const word = capacityStateText(cap);
     if (cap.reason !== "ok" && cap.reason !== "free_unknown" && cap.reason !== "not_enough_history" && word) parts.push(word);
-    parts.push("index " + humanBytes(cap.current_bytes));
+    parts.push("change history " + humanBytes(cap.current_bytes));
     parts.push(cap.measured ? "grows " + humanBytes(cap.growth_bytes_per_day) + " a day" : "measuring the write rate");
     // A disk nobody measured is never green, whatever the grade says.
     disk = cap.free_known
-      ? tile("Index disk", graded, humanBytes(cap.free_bytes) + " free", parts.join(" · "), { link: "status" })
-      : tile("Index disk", graded === "ok" ? "none" : graded, "free space not measured", parts.join(" · "), { link: "status", words: true });
+      ? tile("Disk", graded, humanBytes(cap.free_bytes) + " free", parts.join(" · "), { link: "status" })
+      : tile("Disk", graded === "ok" ? "none" : graded, "free space not measured", parts.join(" · "), { link: "status", words: true });
   }
   return { tiles: [version, running, disk] };
 }
@@ -2729,6 +2732,14 @@ function loadOvStrip(f, live) {
     clear(f.stripSlot);
     f.stripSlot.append(ovStripSection(ovStripModel(Object.assign({ now: Date.now() }, a, b))));
   });
+}
+
+// ovDaemonSilent: the request got no answer from the daemon: no status at
+// all (the network failed, or the deadline passed), or a gateway in front
+// of it saying it is not there. Any other status is the daemon's own word.
+function ovDaemonSilent(err) {
+  const st = (err && err.status) || 0;
+  return st === 0 || st === 502 || st === 503 || st === 504;
 }
 
 // ovStripUnread paints the three tiles as not read. The page's loop calls it
@@ -3835,9 +3846,12 @@ function watchOverview(f, live, firstRun) {
   const failed = (err) => {
     const msg = (err && err.message) || String(err);
     if (err && err.status === 401) { stopped = true; return; } // the sign-in gate is up
-    // The tiles above the drawing are read on this loop's turns; a turn that
-    // failed leaves them unvouched for, so they say so until one succeeds.
-    if (!stripUnread) { stripUnread = true; ovStripUnread(f); }
+    // The tiles above the drawing are read on this loop's turns. When the
+    // daemon did not answer at all they are unvouched for, and say so until
+    // a turn succeeds. An error the daemon itself sent is not that: it is
+    // running, which is what two of the tiles say, and during setup this
+    // loop's read fails every turn because there is nothing to read yet.
+    if (!stripUnread && ovDaemonSilent(err)) { stripUnread = true; ovStripUnread(f); }
     if (err && (err.status === 403 || err.status === 404)) {
       stopped = true;
       note("The Overview stopped updating: " + msg + ". Reload the page to try again.");

@@ -154,11 +154,11 @@ func TestOverviewStrip(t *testing.T) {
 
 	want("healthy", 0, version)
 	want("healthy", 1, running)
-	want("healthy", 2, stripTile{Key: "Index disk", Tone: "ok", Value: "96.1 GB free", Sub: "index 16.7 GB · grows 60.9 GB a day", Link: "status"})
+	want("healthy", 2, stripTile{Key: "Disk", Tone: "ok", Value: "96.1 GB free", Sub: "change history 16.7 GB · grows 60.9 GB a day", Link: "status"})
 
 	// The whole tile's words reach the screen, and the tone is on the tile.
 	h := get("healthy")
-	if h.Screen[2] != "Index disk96.1 GB freeindex 16.7 GB · grows 60.9 GB a day" {
+	if h.Screen[2] != "Disk96.1 GB freechange history 16.7 GB · grows 60.9 GB a day" {
 		t.Errorf("healthy disk tile on screen: %q", h.Screen[2])
 	}
 	if !strings.Contains(h.Tones[2], "tone-ok") || !strings.Contains(h.Tones[0], "tone-none") {
@@ -170,33 +170,39 @@ func TestOverviewStrip(t *testing.T) {
 
 	// The capabilities read failed: neither fact is known, and neither is a
 	// dash that reads as "none".
-	want("caps unreadable", 0, stripTile{Key: "Version", Tone: "none", Value: "—", Sub: "could not be read"})
-	want("caps unreadable", 1, stripTile{Key: "Running for", Tone: "none", Value: "—", Sub: "could not be read"})
+	want("caps unreadable", 0, stripTile{Key: "Version", Tone: "none", Value: "unknown", Words: true, Sub: "could not be read"})
+	want("caps unreadable", 1, stripTile{Key: "Running for", Tone: "none", Value: "unknown", Words: true, Sub: "could not be read"})
 	want("caps unreadable", 2, tile("healthy", 2))
 
 	want("dev build", 0, stripTile{Key: "Version", Tone: "none", Value: "dev", Sub: "not a released build"})
 	want("no version", 0, stripTile{Key: "Version", Tone: "none", Value: "dev", Sub: "not a released build"})
-	want("no start time", 1, stripTile{Key: "Running for", Tone: "none", Value: "—", Sub: "not reported"})
-	want("bad start time", 1, stripTile{Key: "Running for", Tone: "none", Value: "—", Sub: "not reported"})
+	want("no start time", 1, stripTile{Key: "Running for", Tone: "none", Value: "unknown", Words: true, Sub: "not reported"})
+	want("bad start time", 1, stripTile{Key: "Running for", Tone: "none", Value: "unknown", Words: true, Sub: "not reported"})
 	// The daemon's clock is ahead of the browser's: never a negative age.
 	want("clock ahead", 1, stripTile{Key: "Running for", Tone: "none", Value: "0s", Sub: "since 2026-10-11 18:00:00 UTC", Since: "2026-10-11T18:00:00Z"})
 
-	want("capacity failed", 2, stripTile{Key: "Index disk", Tone: "none", Value: "—", Sub: "could not be read", Link: "status"})
-	want("capacity denied", 2, stripTile{Key: "Index disk", Tone: "none", Value: "—", Sub: "not available to this session"})
-	want("capacity empty", 2, stripTile{Key: "Index disk", Tone: "none", Value: "—", Sub: "could not be read", Link: "status"})
-	want("no index yet", 2, stripTile{Key: "Index disk", Tone: "none", Value: "—", Sub: "no index yet", Link: "status"})
-	want("free unknown", 2, stripTile{Key: "Index disk", Tone: "none", Value: "free space not measured", Words: true,
-		Sub: "index 16.7 GB · grows 60.9 GB a day", Link: "status"})
-	want("measuring", 2, stripTile{Key: "Index disk", Tone: "none", Value: "50.0 GB free", Sub: "index 2.0 MB · measuring the write rate", Link: "status"})
-	want("will fill", 2, stripTile{Key: "Index disk", Tone: "bad", Value: "96.1 GB free", Sub: "will fill · index 16.7 GB · grows 60.9 GB a day", Link: "status"})
-	want("tight", 2, stripTile{Key: "Index disk", Tone: "warn", Value: "96.1 GB free", Sub: "tight headroom · index 16.7 GB · grows 60.9 GB a day", Link: "status"})
-	want("unknown status", 2, stripTile{Key: "Index disk", Tone: "none", Value: "96.1 GB free", Sub: "excellent · index 16.7 GB · grows 60.9 GB a day", Link: "status"})
-	want("pass without free", 2, stripTile{Key: "Index disk", Tone: "none", Value: "free space not measured", Words: true,
-		Sub: "index 16.7 GB · grows 60.9 GB a day", Link: "status"})
+	want("capacity failed", 2, stripTile{Key: "Disk", Tone: "none", Value: "unknown", Words: true, Sub: "could not be read", Link: "status"})
+	want("capacity denied", 2, stripTile{Key: "Disk", Tone: "none", Value: "unknown", Words: true, Sub: "not available to this session"})
+	want("capacity empty", 2, stripTile{Key: "Disk", Tone: "none", Value: "unknown", Words: true, Sub: "could not be read", Link: "status"})
+	want("no index yet", 2, stripTile{Key: "Disk", Tone: "none", Value: "not measured", Words: true, Sub: "no change history yet", Link: "status"})
+	want("free unknown", 2, stripTile{Key: "Disk", Tone: "none", Value: "free space not measured", Words: true,
+		Sub: "change history 16.7 GB · grows 60.9 GB a day", Link: "status"})
+	want("measuring", 2, stripTile{Key: "Disk", Tone: "none", Value: "50.0 GB free", Sub: "change history 2.0 MB · measuring the write rate", Link: "status"})
+	want("will fill", 2, stripTile{Key: "Disk", Tone: "bad", Value: "96.1 GB free", Sub: "will fill · change history 16.7 GB · grows 60.9 GB a day", Link: "status"})
+	want("tight", 2, stripTile{Key: "Disk", Tone: "warn", Value: "96.1 GB free", Sub: "tight headroom · change history 16.7 GB · grows 60.9 GB a day", Link: "status"})
+	want("unknown status", 2, stripTile{Key: "Disk", Tone: "none", Value: "96.1 GB free", Sub: "excellent · change history 16.7 GB · grows 60.9 GB a day", Link: "status"})
+	want("pass without free", 2, stripTile{Key: "Disk", Tone: "none", Value: "free space not measured", Words: true,
+		Sub: "change history 16.7 GB · grows 60.9 GB a day", Link: "status"})
 
-	// No case may print a zero for something that was not read.
+	// No case may print a zero for something that was not read, and none
+	// may use the words the first-install screens keep out (the strip is on
+	// that screen too; test/console-e2e's scoreboard counts them) or a dash
+	// standing in for a value.
 	for name := range cases {
 		for _, s := range get(name).Screen {
+			if low := strings.ToLower(s); strings.Contains(low, "index") || strings.Contains(s, "—") {
+				t.Errorf("%s: a tile uses a first-install banned word or an em dash: %q", name, s)
+			}
 			if strings.Contains(s, "0.0 B") || strings.Contains(s, "0 B") || strings.Contains(s, "NaN") || strings.Contains(s, "undefined") {
 				t.Errorf("%s: a tile prints an unread figure: %q", name, s)
 			}
@@ -312,6 +318,14 @@ const at = (ms) => new Date(ms).toISOString().replace(/\.\d+Z$/, "Z");
   await advance(5000);
   out.ticked = { tiles: tiles(), caps: count("a", "/api/capabilities") };
 
+  // The daemon answers with an error of its own (during setup there is
+  // nothing to read yet): it is running, and the tiles go on saying so.
+  servers.a.fail["/api/events/head"] = [fail(500, "no events table yet")];
+  await advance(5000);
+  out.daemonError = { tiles: tiles(), ticking: ticking() };
+  delete servers.a.fail["/api/events/head"];
+  await advance(5000);
+
   // The daemon stops answering. One failed turn is enough.
   servers.a.fail["/api/events/head"] = [fail(0, "the server did not answer")];
   await advance(5000);
@@ -390,7 +404,7 @@ const at = (ms) => new Date(ms).toISOString().replace(/\.\d+Z$/, "Z");
 			t.Errorf("%s:\n got %q\nwant %q", what, got, want)
 		}
 	}
-	const disk = "Index disk96.1 GB freeindex 16.7 GB · grows 60.9 GB a day"
+	const disk = "Disk96.1 GB freechange history 16.7 GB · grows 60.9 GB a day"
 	const since = "since 1970-01-01 00:00:00 UTC"
 	first := out["first"]
 	eq("first paint", first.Tiles, []string{"Version0.103.1this DBTrail", "Running for16m 40s" + since, disk})
@@ -405,7 +419,10 @@ const at = (ms) => new Date(ms).toISOString().replace(/\.\d+Z$/, "Z");
 	if ticked.Caps != 1 {
 		t.Errorf("the tick read capabilities again (%d reads); it must move the figure off its own stamp", ticked.Caps)
 	}
-	unread := []string{"Version—could not be read", "Running for—could not be read", "Index disk—could not be read"}
+	if de := out["daemonError"]; de.Ticking != 1 || len(de.Tiles) != 3 || de.Tiles[0] != "Version0.103.1this DBTrail" || de.Tiles[2] != disk {
+		t.Errorf("an error the daemon sent blanked the tiles: %q (ticking %d)", de.Tiles, de.Ticking)
+	}
+	unread := []string{"Versionunknowncould not be read", "Running forunknowncould not be read", "Diskunknowncould not be read"}
 	down := out["down"]
 	eq("daemon unreachable", down.Tiles, unread)
 	if down.Ticking != 0 {
@@ -425,7 +442,7 @@ const at = (ms) => new Date(ms).toISOString().replace(/\.\d+Z$/, "Z");
 	if back.WithinMs == 0 || back.WithinMs > 60000 {
 		t.Errorf("back: tiles read again after %d ms, want within a minute", back.WithinMs)
 	}
-	if len(back.Tiles) != 3 || !strings.HasPrefix(back.Tiles[1], "Running for") || strings.Contains(back.Tiles[1], "16m") || strings.Contains(back.Tiles[1], "—") {
+	if len(back.Tiles) != 3 || !strings.HasPrefix(back.Tiles[1], "Running for") || strings.Contains(back.Tiles[1], "16m") || strings.Contains(back.Tiles[1], "unknown") {
 		t.Errorf("back: the new process's uptime is not on screen: %q", back.Tiles)
 	}
 	if len(back.Tiles) == 3 && back.Tiles[2] != disk {
@@ -434,7 +451,7 @@ const at = (ms) => new Date(ms).toISOString().replace(/\.\d+Z$/, "Z");
 	eq("unread while the read hangs", out["late"].Tones, unread)
 	eq("a late read does not paint over unread tiles", out["late"].Tiles, unread)
 	denied := out["denied"]
-	if len(denied.Tiles) != 3 || denied.Tiles[2] != "Index disk—not available to this session" || denied.Links[2] != "div" {
+	if len(denied.Tiles) != 3 || denied.Tiles[2] != "Diskunknownnot available to this session" || denied.Links[2] != "div" {
 		t.Errorf("denied: %q %v", denied.Tiles, denied.Links)
 	}
 	if e := out["empty"]; len(e.Tiles) != 0 || e.Asked != 0 {

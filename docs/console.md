@@ -107,8 +107,9 @@ and searching events:
 
    Three tiles sit above the drawing, for what the drawing does not say:
    **Version** (the running build), **Running for** (how long this process
-   has been up, with the instant it started) and **Index disk** (free space,
-   the index's size and how much it grows a day). Only the disk tile takes a
+   has been up, with the instant it started) and **Disk** (free space on the
+   index volume, the size of the change history and how much it grows a
+   day). Only the disk tile takes a
    colour, on its top edge, and it is the doctor's own verdict from
    `GET /api/capacity`: green when it fits, amber or red with the reason in
    words when it does not. A disk that could not be measured is never green,
