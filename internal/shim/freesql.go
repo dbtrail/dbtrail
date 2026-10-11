@@ -219,8 +219,9 @@ const RouteReasonResultOverCap RouteReason = "result_over_row_cap"
 // busy copy sends an expensive statement to MySQL (#2112). A statement that
 // finds every slot of the copy taken WAITS for one (sqlsandbox.Runner.
 // Reserve): it is MySQL's only when the line was already full as it arrived
-// (copy_queue_full: sqlsandbox.DefaultMaxWaiters statements waiting, and it
-// did not wait at all), or when it waited the whole sqlsandbox.DefaultMaxWait
+// (copy_queue_full: as many statements waiting as the process lets wait,
+// sqlsandbox.DefaultMaxWaiters inside watch and thousands on the router, and
+// it did not wait at all), or when it waited the whole sqlsandbox.DefaultMaxWait
 // and no slot came free (copy_wait_timeout). Neither is a fault of the copy,
 // which is why they are not counted under RouteReasonCopyRefused: a copy that
 // is merely asked for more than it serves must not read as a broken one.

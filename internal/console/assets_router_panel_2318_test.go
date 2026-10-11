@@ -133,7 +133,7 @@ console.log(JSON.stringify(out));
 		"snapshot of", "(12m old)", "whatever its age", "1 of 4 busy, 1 statement waiting", "2 threads and 2048MiB", "error 1040",
 		"plan costs at least 10000", "at least 100000 rows", "Every other read runs on MySQL", "Refresh", "These numbers were read at",
 		"Why each side", "9 × a cheap plan", "4 × an expensive plan",
-		"2 × every worker was busy and as many statements as may wait were already waiting: refused with error 1040",
+		"2 × every worker was busy and thousands of statements were already waiting, more than the router lets wait: refused with error 1040 at once",
 		"1 × refused: not a read, and the router is read-only")
 	// The words of the port inside the service must not be said of a router.
 	mustNot("counts", "MySQL answered at once", "this port is read-only", "last looked", "later version")

@@ -543,7 +543,7 @@ func TestRouterStartupLines_sayWhatWillHappen(t *testing.T) {
 	}{
 		{"as started by default with a token", nil,
 			[]string{"127.0.0.1:3310", "the password is the access token", "3 servers from /var/lib/bintrail/console-servers.yaml", "4 statements on the copy at once", "2 threads", "8 cores allow 4",
-				"whatever the age of its snapshot", "waits up to 30s", "at most 16 waiting at once", "error 1040", "read routing is read-write"},
+				"whatever the age of its snapshot", "waits its turn, in the order it arrived, for up to 30s", "error 1040", "read routing is read-write"},
 			[]string{"every network interface", "does not exist", "is not applied", "read routing is read-only"}},
 		{"a pool of one is one statement", func(u *routerStartup) { u.Pool.Workers = 1 },
 			[]string{"1 statement on the copy at once"}, []string{"1 statements"}},

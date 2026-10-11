@@ -79,6 +79,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -615,10 +616,9 @@ type Runner struct {
 	mu       sync.Mutex
 	busy     map[string]bool
 	inFlight int
-	// waiting counts the callers parked in Reserve; freed is closed (and
-	// replaced) on every release, which wakes all of them to try again.
-	waiting int
-	freed   chan struct{}
+	// waiters are the callers parked in Reserve, in the order they arrived.
+	// A release hands the freed slot to the first of them that can use it.
+	waiters []*waiter
 
 	// The standby workers (#2236), guarded by mu: at most one per slot.
 	standby     bool
@@ -671,7 +671,6 @@ func New(cfg Config) *Runner {
 		standby:     cfg.Standby,
 		standbyIdle: cfg.StandbyIdle,
 		busy:        map[string]bool{},
-		freed:       make(chan struct{}),
 	}
 	if r.maxInFlight <= 0 {
 		r.maxInFlight = DefaultMaxInFlight
@@ -939,44 +938,67 @@ type Slot struct {
 // at once, and so does a negative MaxWait. A ctx that ends while waiting
 // returns its error: the caller left, nobody is told "busy".
 //
-// Not first-come-first-served: every release wakes every waiter and the
-// first to take a slot it can use wins. That is deliberate, because a waiter
-// whose own per-person slot is busy can never use the freed slot, and a
-// strict line would park everyone behind it.
+// First come, first served, among those a freed slot is of use to: a release
+// hands the slot to the waiter that has waited longest and can take it. One
+// whose own per-person slot is busy cannot, and is passed over, not waited
+// behind, so it never parks the callers after it. The order matters once
+// the line is long (the router lets it grow, #2327): were every waiter woken
+// to race for the slot, some would lose every race and be refused at the
+// end of their wait while later arrivals were served.
 func (r *Runner) Reserve(ctx context.Context, user string) (*Slot, error) {
 	r.mu.Lock()
 	if r.acquireLocked(user) {
 		r.mu.Unlock()
 		return &Slot{r: r, user: user}, nil
 	}
-	if r.maxWait < 0 || r.waiting >= r.maxWaiters {
+	if r.maxWait < 0 || len(r.waiters) >= r.maxWaiters {
 		r.mu.Unlock()
 		return nil, ErrBusy
 	}
-	r.waiting++
-	defer func() {
-		r.mu.Lock()
-		r.waiting--
-		r.mu.Unlock()
-	}()
+	w := &waiter{user: user, granted: make(chan struct{})}
+	r.waiters = append(r.waiters, w)
+	r.mu.Unlock()
+
 	timer := time.NewTimer(r.maxWait)
 	defer timer.Stop()
-	for {
-		freed := r.freed
-		r.mu.Unlock()
-		select {
-		case <-freed:
-		case <-ctx.Done():
+	var gaveUp error
+	select {
+	case <-w.granted:
+		if ctx.Err() != nil {
+			// Handed a slot as it left: given back, for the next in line.
+			r.release(user)
 			return nil, ctx.Err()
-		case <-timer.C:
-			return nil, &BusyError{Waited: r.maxWait, MaxInFlight: r.maxInFlight}
 		}
-		r.mu.Lock()
-		if r.acquireLocked(user) {
-			r.mu.Unlock()
-			return &Slot{r: r, user: user}, nil
-		}
+		return &Slot{r: r, user: user}, nil
+	case <-ctx.Done():
+		gaveUp = ctx.Err()
+	case <-timer.C:
+		gaveUp = &BusyError{Waited: r.maxWait, MaxInFlight: r.maxInFlight}
 	}
+	r.mu.Lock()
+	if w.got {
+		// The slot was handed over in the same instant the wait ended. It
+		// is this caller's now and nobody else was offered it: a caller
+		// whose wait ran out uses it, one that left gives it back, which
+		// offers it to the next in line.
+		r.mu.Unlock()
+		if ctx.Err() != nil {
+			r.release(user)
+			return nil, ctx.Err()
+		}
+		return &Slot{r: r, user: user}, nil
+	}
+	r.waiters = slices.DeleteFunc(r.waiters, func(o *waiter) bool { return o == w })
+	r.mu.Unlock()
+	return nil, gaveUp
+}
+
+// waiter is one caller parked in Reserve. granted is closed, with got set
+// under the Runner's lock, when a release hands it a slot.
+type waiter struct {
+	user    string
+	granted chan struct{}
+	got     bool
 }
 
 // BusyError is a statement that waited MaxWait for a slot and got none. It
@@ -993,11 +1015,14 @@ func (e *BusyError) Error() string {
 
 func (e *BusyError) Is(target error) bool { return target == ErrBusy }
 
+// MaxWaiters is how many callers may wait for a slot at once.
+func (r *Runner) MaxWaiters() int { return r.maxWaiters }
+
 // waitingNow is how many callers wait in Reserve (tests).
 func (r *Runner) waitingNow() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.waiting
+	return len(r.waiters)
 }
 
 // Release gives the slot back without running. Idempotent, and a no-op
@@ -1070,14 +1095,38 @@ func (r *Runner) acquireLocked(user string) bool {
 	return true
 }
 
+// grantLocked hands free slots to the waiters that can take one, the longest
+// waiting first; r.mu is held. A waiter whose own slot is busy stays in line
+// where it was.
+func (r *Runner) grantLocked() {
+	if len(r.waiters) == 0 || r.inFlight >= r.maxInFlight {
+		return
+	}
+	kept := r.waiters[:0]
+	for i, w := range r.waiters {
+		if r.inFlight >= r.maxInFlight {
+			// No slot left to hand out: the rest of the line stays as it is.
+			kept = append(kept, r.waiters[i:]...)
+			break
+		}
+		if r.acquireLocked(w.user) {
+			w.got = true
+			close(w.granted)
+			continue
+		}
+		kept = append(kept, w)
+	}
+	clear(r.waiters[len(kept):])
+	r.waiters = kept
+}
+
 func (r *Runner) release(user string) {
 	r.mu.Lock()
 	r.inFlight--
 	if user != "" {
 		delete(r.busy, user)
 	}
-	close(r.freed)
-	r.freed = make(chan struct{})
+	r.grantLocked()
 	r.mu.Unlock()
 }
 

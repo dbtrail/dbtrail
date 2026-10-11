@@ -229,6 +229,7 @@ func newRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server,
 		SQLLimits:           sqlsandbox.Limits{MemoryLimit: st.SQLMemory, Threads: pool.Threads},
 		SQLMaxInFlight:      pool.Workers,
 		SQLWorkerStatements: sqlsandbox.DefaultWorkerStatements,
+		SQLMaxWaiters:       routerMaxWaiters,
 		SQLPortSharedSlots:  true,
 		SQLPortMaxRows:      st.SQLPortMaxRows,
 		KillSourceThreads:   killSourceThreads,
@@ -242,6 +243,17 @@ func newRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server,
 	}
 	return srv, srv.SQLSandbox(), nil
 }
+
+// routerMaxWaiters is how many statements may wait for a worker of the
+// router at once (#2327). The wait is what bounds the line here, not this
+// number: a statement waits its turn for up to sqlsandbox.DefaultMaxWait and
+// only then is refused, so a refusal costs the client that wait and cannot
+// be repeated in a loop. With a short line the refusal came at once, after
+// the source had already been asked for the statement's plan, and clients
+// that retried without a pause cost the source one EXPLAIN per attempt and
+// halved what the router answered. This number only keeps a flood from
+// parking without limit; each waiter is a connection that exists anyway.
+const routerMaxWaiters = 4096
 
 // routerCopySnapshotEvery is how often the age of each server's copy is read
 // for the metric: a copy changes when a snapshot is taken, which is minutes
@@ -523,8 +535,8 @@ func routerStartupLines(u routerStartup) string {
 		fmt.Fprintf(&b, "Router: %s from %s, read again when it changes.\n", countOfServers(u.Servers), u.ServersFile)
 	}
 	fmt.Fprintf(&b, "Router: %s on the copy at once, %d threads and up to %s of memory each: %s.\n", countOfStatements(u.Pool.Workers), u.Pool.Threads, u.MemoryLimit, u.Pool.Why)
-	rule := fmt.Sprintf("SELECTs with plan cost >= %.0f or a full scan over >= %d rows (on a MariaDB source, also joins that read that many rows in all) run on the copy, whatever the age of its snapshot. When every worker is busy such a statement waits up to %s, with at most %d waiting at once; past either the client gets error 1040",
-		u.Cfg.RoutePolicy.CostThreshold, u.Cfg.RoutePolicy.ScanRows, sqlsandbox.DefaultMaxWait, sqlsandbox.DefaultMaxWaiters)
+	rule := fmt.Sprintf("SELECTs with plan cost >= %.0f or a full scan over >= %d rows (on a MariaDB source, also joins that read that many rows in all) run on the copy, whatever the age of its snapshot. When every worker is busy such a statement waits its turn, in the order it arrived, for up to %s; past that the client gets error 1040",
+		u.Cfg.RoutePolicy.CostThreshold, u.Cfg.RoutePolicy.ScanRows, sqlsandbox.DefaultMaxWait)
 	if u.Cfg.RouteReadOnly {
 		b.WriteString("Router: read routing is read-only (--route-read-only): reads go to each server's source MySQL with that server's forwarding account; a server that has none is not forwarded for, since the account DBTrail captures with is never used; " + rule + ". A statement that is not a read is refused and never sent to the source. The check reads the statement's text: what a stored function does when a SELECT calls it is up to that account's grants.\n")
 	} else {

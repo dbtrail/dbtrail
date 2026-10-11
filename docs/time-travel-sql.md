@@ -1866,9 +1866,10 @@ as the daemon applies it:
   So sixteen connections reading the same server share ONE place on the
   copy, whatever `--sql-max-in-flight` says.
 - **The rest wait.** A read that finds its place taken waits until one comes
-  free, then runs on the copy. The turn is not strictly in order of arrival:
-  when a place comes free, every waiting statement that can use it tries,
-  and one gets it.
+  free, then runs on the copy. The turn is in order of arrival: a place
+  that comes free goes to the statement that has waited longest and can use
+  it. One whose server already runs a statement cannot, and keeps its place
+  in the line without holding up those behind it.
 - **Up to 16 wait, for at most 30 seconds.** The line holds 16 statements
   for the whole daemon, every server and the web interface's SQL card
   together. A read that arrives with 16 already waiting does not wait:
@@ -2064,7 +2065,7 @@ Three rules differ from the port inside `watch`:
 | | Inside `watch` | The router |
 |---|---|---|
 | How old the copy may be | `--route-max-copy-age` | No maximum. An expensive read goes to the copy whatever the age of its snapshot. |
-| Every worker busy | The statement is forwarded to MySQL | The statement waits up to 30 seconds (16 at most wait at once), then the client gets error 1040, "too many connections", which drivers and pools retry |
+| Every worker busy | The statement is forwarded to MySQL | The statement waits its turn, in the order it arrived, for up to 30 seconds, then the client gets error 1040, "too many connections", which drivers and pools retry. The line is not kept short as it is inside `watch`: a refusal that cost the client no time would be repeated as fast as the client can send, each attempt asking the source for a plan first |
 | A server that cannot route (no forwarding account, no source to forward to, an account whose address cannot be used) | Its connections are answered from the copy only | Its statements are refused with error 1105 and the reason |
 
 The first is the trade a read/write split through a proxy already makes: on

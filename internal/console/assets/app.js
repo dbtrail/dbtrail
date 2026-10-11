@@ -14051,8 +14051,8 @@ const ROUTE_REASON_TEXT = {
 // copy busy is refused with error 1040, where the port inside the service
 // hands it to MySQL. Every other reason reads as ROUTE_REASON_TEXT says.
 const ROUTER_REASON_TEXT = {
-  copy_queue_full: "every worker was busy and as many statements as may wait were already waiting: refused with error 1040",
-  copy_wait_timeout: "every worker was busy for the whole wait: refused with error 1040",
+  copy_queue_full: "every worker was busy and thousands of statements were already waiting, more than the router lets wait: refused with error 1040 at once",
+  copy_wait_timeout: "every worker was busy: the statement waited 30 seconds for its turn, then was refused with error 1040",
   read_only: "refused: not a read, and the router is read-only",
 };
 
@@ -14118,7 +14118,7 @@ function routerLines(view, cur) {
   const p = st.pool;
   if (p) {
     out.push({ text: "Workers for the copy, shared by every server: " + (p.running || 0) + " of " + (p.workers || 0) + " busy, " + (p.waiting || 0) + " " + ((p.waiting || 0) === 1 ? "statement" : "statements") + " waiting. Each statement gets " +
-      (p.threads_each || 0) + " threads and " + (p.memory_each || "its default memory") + ". With every worker busy a statement waits, then is refused with error 1040." });
+      (p.threads_each || 0) + " threads and " + (p.memory_each || "its default memory") + ". With every worker busy a statement waits its turn for up to 30 seconds, then is refused with error 1040." });
   }
   const rules = [];
   if (st.cost_threshold > 0) rules.push("MySQL's plan costs at least " + st.cost_threshold);

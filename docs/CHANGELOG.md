@@ -83,6 +83,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [The router](time-travel-sql.md#the-router-the-same-port-as-a-service-of-its-own-experimental).
 
 ### Changed
+- **The router no longer refuses a statement at once when 16 are already
+  waiting for a worker** (#2327). It waits its turn, for up to 30 seconds,
+  and only then gets error 1040. A refusal answered at once was free to
+  repeat: clients that retried without a pause sent thousands of statements
+  a second, each of which had already cost the source an `EXPLAIN`, and a
+  router over capacity answered half of what it answers at capacity (8
+  statements a second against 17, measured with 256 clients on 2 workers).
+  The port inside `watch` keeps its line of 16: there a statement that finds
+  the copy busy is forwarded to MySQL, not refused.
+- **Statements waiting for a SQL worker are served in the order they
+  arrived**, on the router, the port inside `watch` and the SQL page. A freed
+  worker went to whichever waiter took it first, so with a long line some
+  lost every time and were refused at the end of their wait while later
+  arrivals were served. A statement whose server already runs one on the
+  port inside `watch` is passed over, as before, and keeps its place.
 - **The MySQL port no longer forwards with the account DBTrail captures
   with** (#2317). Under read routing (`--route-max-copy-age`, experimental)
   a server with no forwarding account used to have its statements forwarded

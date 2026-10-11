@@ -163,3 +163,26 @@ func TestExportCopySnapshots_leavesEachReadingAndStops(t *testing.T) {
 		t.Fatal("the loop did not stop with its context")
 	}
 }
+
+// #2327: the router's line for a worker is long, so that what bounds it is
+// the wait and a refusal is never free to repeat; a console that shares its
+// process with capture keeps the short one.
+func TestNewRouterConsole_letsStatementsWaitTheirTurn(t *testing.T) {
+	files := newRouterFiles(t)
+	_, runner, err := newRouterConsole(files.settings("tok"), console.SQLPool{Workers: 2, Threads: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runner.Close)
+	if got := runner.MaxWaiters(); got != routerMaxWaiters || got < 1000 {
+		t.Errorf("the router lets %d statements wait, want %d", got, routerMaxWaiters)
+	}
+	web, err := console.New(console.Config{Listen: "127.0.0.1:8090", Token: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(web.SQLSandbox().Close)
+	if got := web.SQLSandbox().MaxWaiters(); got != 16 {
+		t.Errorf("a console in the capture process lets %d statements wait, want 16", got)
+	}
+}
