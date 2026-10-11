@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,6 +59,13 @@ type bundle struct {
 	// table/time only covered by the S3 copy silently degraded to "no
 	// baseline" instead of finding it (#766).
 	baselineFallbackSrc string
+	// sqlMirrorDir is where the local mirror of this server's S3 snapshots
+	// lives (#2302), "" for a server that keeps a local folder or has no
+	// bucket. Only SQL on the copy reads it, through sqlCopySource: the
+	// worker that runs a statement has no network, so it cannot read
+	// baselineSrc when that is s3://. The directory may not exist or may
+	// hold nothing yet; whoever fills it is not this package.
+	sqlMirrorDir string
 	// baselineConfigured gates the reconstruct surface per server: a baseline
 	// is present AND archives are enabled AND no RBAC profile is active. See
 	// the rationale on newBundleDerived.
@@ -195,6 +203,7 @@ func (cm *connManager) Resolve(ctx context.Context, id string) (*bundle, error) 
 			// baseline/no-archive-only edit during the open keeps this db but
 			// must not publish the stale entry's reconstruct gate.
 			nb := newBundleDerived(b.db, b.dbName, cur, cm.profileActive)
+			nb.sqlMirrorDir = cm.reg.CopyMirrorDir(cur)
 			nb.dsn = b.dsn
 			nb.resolver = b.resolver
 			nb.resolverUnavailable = b.resolverUnavailable
@@ -292,6 +301,7 @@ func (cm *connManager) buildBundle(entry ServerEntry) (*bundle, error) {
 			return nil, fmt.Errorf("server %q: %s", entry.Name, scrubDSNError(err, entry.DSN))
 		}
 		b := newBundleDerived(db, cfg.DBName, entry, cm.profileActive)
+		b.sqlMirrorDir = cm.reg.CopyMirrorDir(entry)
 		b.dsn = entry.DSN
 		// The schema resolver is the recovery pages' and is read from the
 		// index: not loaded here, and marked so nothing reads its absence
@@ -304,6 +314,7 @@ func (cm *connManager) buildBundle(entry ServerEntry) (*bundle, error) {
 		return nil, fmt.Errorf("server %q: %s", entry.Name, scrubDSNError(err, entry.DSN))
 	}
 	b := newBundleDerived(db, cfg.DBName, entry, cm.profileActive)
+	b.sqlMirrorDir = cm.reg.CopyMirrorDir(entry)
 	b.dsn = entry.DSN
 	b.resolver, b.resolverUnavailable = loadResolver(db)
 	return b, nil
@@ -345,6 +356,31 @@ func newBundleDerived(db *sql.DB, dbName string, entry ServerEntry, profileActiv
 		baselineConfigured:  src != "" && !noArchive,
 		activity:            newActivityCache(),
 	}
+}
+
+// sqlCopySource is where SQL on the copy reads this server's snapshots from:
+// its own location, or, when that is in S3, the local mirror of it once the
+// mirror holds a complete snapshot (#2302). Asked per statement, not kept:
+// the mirror fills and moves on while the bundle lives.
+//
+// It is the ONLY reader of the mirror. Everything else that names where a
+// server's snapshots are (recovery, the downloaded views file, the Snapshots
+// page) keeps baselineSrc: the mirror is a read cache of the newest
+// snapshots, never a second location of the backup.
+func (b *bundle) sqlCopySource() string {
+	if b == nil {
+		return ""
+	}
+	if b.usesSQLMirror() {
+		return b.sqlMirrorDir
+	}
+	return b.baselineSrc
+}
+
+// usesSQLMirror reports whether sqlCopySource answers with the mirror.
+func (b *bundle) usesSQLMirror() bool {
+	return b != nil && b.sqlMirrorDir != "" && strings.HasPrefix(b.baselineSrc, "s3://") &&
+		reconstruct.HasLocalSnapshot(b.sqlMirrorDir)
 }
 
 // findBaseline locates a baseline for schema.table at-or-before at via
@@ -479,6 +515,7 @@ func (cm *connManager) rebuildDerived(entry ServerEntry) {
 		return
 	}
 	nb := newBundleDerived(old.db, old.dbName, entry, cm.profileActive)
+	nb.sqlMirrorDir = cm.reg.CopyMirrorDir(entry)
 	nb.dsn = old.dsn
 	nb.engine = old.engine
 	nb.resolver = old.resolver

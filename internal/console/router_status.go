@@ -75,7 +75,7 @@ func (q *SQLOnCopy) snapshotTimeWhy(ctx context.Context) (time.Time, error) {
 	if q == nil || q.s == nil || q.b == nil {
 		return time.Time{}, nil
 	}
-	in, err := q.s.buildViewsInput(ctx, q.b, viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true})
+	in, err := q.s.buildViewsInput(ctx, q.b, viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true, LocalCopy: true})
 	if err != nil {
 		return time.Time{}, err
 	}

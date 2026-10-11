@@ -71,6 +71,12 @@ type viewsRequest struct {
 	// snapshots both locally and in S3), which exists to tell a file's
 	// reader that a newer snapshot lives elsewhere.
 	ForStatement bool
+	// LocalCopy reads the state views from where SQL on the copy reads them
+	// (bundle.sqlCopySource): for a server whose snapshots are only in S3,
+	// the local mirror once it holds one (#2302). Set by the SQL surfaces
+	// alone. A downloaded file never sets it: the mirror's paths exist on
+	// this host only.
+	LocalCopy bool
 	// SnapshotAt pins the state views to that snapshot instead of the
 	// newest (#2210): SQL on the copy answers from an earlier copy when the
 	// newest one holds more unmerged changes than a statement can merge.
@@ -144,6 +150,10 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 		}
 	}
 	baseSrc := b.baselineSrc
+	mirrored := req.LocalCopy && b.usesSQLMirror()
+	if mirrored {
+		baseSrc = b.sqlMirrorDir
+	}
 	baseUnreadable := 0
 	if req.PortableBaseline && b.baselineFallbackSrc != "" {
 		// Read from the bundle, never from the request: the two locations this
@@ -166,6 +176,12 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 		in.BaselineUnreadable = skipped
 		baseUnreadable = skipped
 		if !req.SnapshotAt.IsZero() && !slices.ContainsFunc(files, func(f reconstruct.BaselineFile) bool { return f.SnapshotTime.Equal(req.SnapshotAt) }) {
+			if mirrored {
+				// The mirror keeps the newest snapshots only, and its path
+				// is this host's: name neither as where to look.
+				return views.Input{}, fmt.Errorf("the snapshot of %s is only in S3; the local mirror SQL reads keeps the newest ones",
+					req.SnapshotAt.UTC().Format(time.RFC3339))
+			}
 			return views.Input{}, fmt.Errorf("no snapshot of %s under %s", req.SnapshotAt.UTC().Format(time.RFC3339), baseSrc)
 		}
 		if len(files) > 0 {
@@ -178,7 +194,9 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 			// other one is invisible to its reader. Not merged -- the state
 			// views resolve paths under a single root, and a mixed file
 			// resolves for nobody. Named instead, best-effort.
-			if other := otherBaselineSource(b, baseSrc); other != "" && !req.ForStatement {
+			// Not for the mirror either: its "other location" is the bucket
+			// it follows, and being a little behind it is what a mirror is.
+			if other := otherBaselineSource(b, baseSrc); other != "" && !req.ForStatement && !mirrored {
 				octx, cancel := context.WithTimeout(ctx, baselineListTimeout)
 				othersFiles, oskipped, oerr := reconstruct.ListBaselinesReport(octx, other)
 				cancel()

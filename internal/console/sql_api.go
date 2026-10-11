@@ -212,10 +212,11 @@ func (s *Server) sqlAvailable(r *http.Request, b *bundle) bool {
 		!policyFrom(r.Context()).Allows(ext.PermSQLExecute) {
 		return false
 	}
-	if strings.HasPrefix(b.baselineSrc, "s3://") {
+	src := b.sqlCopySource()
+	if strings.HasPrefix(src, "s3://") {
 		return false
 	}
-	if b.baselineSrc != "" && reconstruct.HasLocalSnapshot(b.baselineSrc) {
+	if src != "" && reconstruct.HasLocalSnapshot(src) {
 		return true
 	}
 	// The portable lookup: no tree walk, no warning per call. A source it
@@ -369,7 +370,7 @@ func (s *Server) handleSQLInfo(w http.ResponseWriter, r *http.Request) {
 	if !s.sqlGate(w, r, b) {
 		return
 	}
-	in, err := s.buildViewsInput(r.Context(), b, viewsRequest{PinSnapshot: true, OmitEvents: true})
+	in, err := s.buildViewsInput(r.Context(), b, viewsRequest{PinSnapshot: true, OmitEvents: true, LocalCopy: true})
 	switch {
 	case errors.Is(err, errNoViewSources):
 		writeJSONError(w, http.StatusConflict, errNoViewSources.Error()+"; there is no copy to run SQL on yet")
@@ -915,12 +916,13 @@ func sqlMayAnswerOlder(statement string, sess sqlsandbox.Session) bool {
 // than h.limit. Every snapshot it can list is a complete one (a run that
 // failed is never listed), so the tables of one copy are one moment.
 func (s *Server) sqlOlderCopy(ctx context.Context, b *bundle, h *sqlHeavyRun) (time.Time, bool) {
-	if b.baselineSrc == "" || len(h.tables) == 0 {
+	src := b.sqlCopySource()
+	if src == "" || len(h.tables) == 0 {
 		return time.Time{}, false
 	}
 	lctx, cancel := context.WithTimeout(ctx, baselineListTimeout)
 	defer cancel()
-	files, _, err := reconstruct.ListBaselinesReport(lctx, b.baselineSrc)
+	files, _, err := reconstruct.ListBaselinesReport(lctx, src)
 	if err != nil {
 		slog.Warn("console: sql: could not list earlier copies to answer from", "error", err)
 		return time.Time{}, false
@@ -989,8 +991,9 @@ func sqlOlderCopyNote(h *sqlHeavyRun, at time.Time) string {
 func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schema string, maxRows int, sess sqlsandbox.Session, unchanged sqlUnchanged, at time.Time, heavy **sqlHeavyRun) (sqlOutcome, error) {
 	// What is known without any I/O is refused before the slot: a copy that
 	// lives only on S3 is never served here, and listing it would hold one
-	// of the daemon's two slots while it waits on the network.
-	if strings.HasPrefix(b.baselineSrc, "s3://") {
+	// of the daemon's two slots while it waits on the network. A local
+	// mirror of it that holds a snapshot is a local copy (#2302).
+	if strings.HasPrefix(b.sqlCopySource(), "s3://") {
 		return sqlOutcome{}, &sqlRefusal{http.StatusConflict, sqlCopyNotLocalMessage}
 	}
 	// The slot first (#2026): a statement that will be refused as busy must
@@ -1629,7 +1632,7 @@ func (s *Server) sqlViewsFor(ctx context.Context, b *bundle, statement string, a
 	// fixed cost per statement, paid by every statement. A copy that gives
 	// no state view this way (no snapshot, or every table in a schema
 	// DuckDB keeps for itself) falls through to the archive, as before.
-	tablesOnly := viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true, SnapshotAt: at}
+	tablesOnly := viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true, LocalCopy: true, SnapshotAt: at}
 	if !sqlMentionsEvents(statement) {
 		in, err = s.buildViewsInput(ctx, b, tablesOnly)
 		if err == nil && in.RendersAnyView() {
@@ -1644,7 +1647,7 @@ func (s *Server) sqlViewsFor(ctx context.Context, b *bundle, statement string, a
 	// S3 change log is detected from the sources alone and answered with
 	// the tables, exactly as before; only a local change log is then built
 	// with the events view on.
-	in, err = s.buildViewsInput(ctx, b, viewsRequest{PinSnapshot: true, OmitEvents: true, ForStatement: true, SnapshotAt: at})
+	in, err = s.buildViewsInput(ctx, b, viewsRequest{PinSnapshot: true, OmitEvents: true, ForStatement: true, LocalCopy: true, SnapshotAt: at})
 	if err != nil {
 		return views.Input{}, false, err
 	}
@@ -1654,7 +1657,7 @@ func (s *Server) sqlViewsFor(ctx context.Context, b *bundle, statement string, a
 	if !sqlArchivesLocal(in.ArchiveSources) {
 		return in, true, nil
 	}
-	in, err = s.buildViewsInput(ctx, b, viewsRequest{PinSnapshot: true, ForStatement: true, SnapshotAt: at})
+	in, err = s.buildViewsInput(ctx, b, viewsRequest{PinSnapshot: true, ForStatement: true, LocalCopy: true, SnapshotAt: at})
 	if err != nil {
 		return views.Input{}, false, err
 	}

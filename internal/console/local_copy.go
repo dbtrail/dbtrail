@@ -1,10 +1,13 @@
 package console
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 )
@@ -52,6 +55,31 @@ func (r *Registry) DefaultBaselineDir(id string) string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(r.path), localSnapshotsDirName, id)
+}
+
+// copyMirrorDirName is the folder under the state directory that holds the
+// local mirrors of servers whose snapshots are only in S3 (#2302). Its own
+// folder, beside "snapshots" and never inside it or inside the startup
+// folder: nothing that prunes, uploads or lists a snapshot location may walk
+// into a mirror (see localSnapshotsDirName for what happened when two such
+// folders nested).
+const copyMirrorDirName = "copy-mirror"
+
+// CopyMirrorDir is where the local mirror of entry's S3 snapshots lives:
+// <state dir>/copy-mirror/<id>/<digest of the bucket and prefix>. "" when the
+// entry has no mirror: it keeps a local folder (that folder is the copy), it
+// has no bucket, or the registry is in memory.
+//
+// The last segment changes with the bucket or the prefix, so a server pointed
+// at another one gets an empty folder and never reads the old one's
+// snapshots as its own. One trailing slash apart is the same location, as it
+// is for the storage layer.
+func (r *Registry) CopyMirrorDir(entry ServerEntry) string {
+	if r == nil || r.path == "" || entry.ID == "" || entry.BaselineS3 == "" || entry.BaselineDir != "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(strings.TrimSuffix(entry.BaselineS3, "/")))
+	return filepath.Join(filepath.Dir(r.path), copyMirrorDirName, entry.ID, hex.EncodeToString(sum[:8]))
 }
 
 // errLocalDirInvalid marks a refusal of the folder itself, which the handlers
