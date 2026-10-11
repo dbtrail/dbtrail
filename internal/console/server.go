@@ -185,6 +185,15 @@ type Config struct {
 	// Unset, one runs at a time per server (#2026), which is the rule for a
 	// port that shares its process with capture.
 	SQLPortSharedSlots bool
+	// LazyIndex opens a registry server's index without asking it to answer
+	// (#2084): selecting the server succeeds while its index is away, and
+	// only what reads the index fails then, with the connection's own
+	// error. For a process whose main work does not need the index, the
+	// MySQL port run as a router: it forwards to the source and reads the
+	// copy's tables without it, and must not refuse every connection for a
+	// server because that server's index is restarting. The web console
+	// leaves it unset: there a server that does not answer is said at once.
+	LazyIndex bool
 	// SQLSettingsPath is the file the web interface saves the SQL memory in
 	// (#2210), beside the servers file. Empty = this console keeps none, and
 	// the memory can only be set where DBTrail starts.
@@ -774,6 +783,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	// Before resolveSQLLimits filled it, the memory was given or not.
 	s.initSQLMemory(cfg.SQLLimits.MemoryLimit != "", cfg.SQLSettingsPath)
+	s.cm.lazyIndex = cfg.LazyIndex
 	s.cm.defaultBaselineDir = cfg.BaselineDir
 	s.cm.defaultBaselineS3 = cfg.BaselineS3
 	// That bucket is read with the process-wide endpoint, so no per-server
