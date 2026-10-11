@@ -14169,28 +14169,33 @@ function routerSwitch(view, reveal) {
   const a = view && view.access;
   if (!a) return null;
   const st = view.status;
-  const port = (st && String(st.listen || "").replace(/^.*:/, "")) || "3310";
+  // The port goes into a command people paste into a shell, and it comes
+  // from what the router answered: a port number or nothing. portKnown says
+  // which, so the panel does not present the default as the router's.
+  const said = st ? String(st.listen || "").replace(/^.*:/, "") : "";
+  const portKnown = /^[0-9]{1,5}$/.test(said) && Number(said) > 0 && Number(said) < 65536;
+  const port = portKnown ? said : "3310";
   const lines = [];
   // With no numbers read, nothing below says what a router is.
   if (!st) lines.push({ text: "The router is a second MySQL port for applications, run as a service of its own (bintrail-console router): it sends light reads to MySQL and heavy ones to the copy." });
   if (a.token) {
     lines.push({ text: "This DBTrail was started with an access token. A router that reads the same settings takes that token as its only password, so it has no switch here: it is on while it runs, and the token is the password." });
-    return { lines, on: false, manage: false, port };
+    return { lines, on: false, manage: false, port, portKnown };
   }
   if (!a.can_manage) {
     lines.push({ strong: "The router's switch cannot be changed here:", text: a.refusal || "this DBTrail gave no reason.", err: true });
-    return { lines, on: !!a.enabled, manage: false, port };
+    return { lines, on: !!a.enabled, manage: false, port, portKnown };
   }
   if (!a.enabled) {
     lines.push({ strong: "The router is off.", text: "A router that is running accepts no connection until it is turned on here. " +
       (a.has_password ? "Turning it on brings back the password it had; it is not shown again." : "Turning it on creates its password, shown once.") });
-    return { lines, on: false, manage: true, port };
+    return { lines, on: false, manage: true, port, portKnown };
   }
   lines.push({ strong: "The router is on.", text: "A router that is running opens its port within a few seconds of a change made here. This switch and this password are the router's own: the MySQL port above has others, and changing those does not touch the router." });
   if (!reveal) {
     lines.push({ text: "Password: the one shown when it was created" + (a.password_created_at ? ", " + utcLabel(a.password_created_at) : "") + ". It cannot be shown again." });
   }
-  return { lines, on: true, manage: true, port };
+  return { lines, on: true, manage: true, port, portKnown };
 }
 
 // routerPanel (#2318) draws the router's switch and routerLines, with a
@@ -14232,7 +14237,7 @@ function routerPanel(view, cur) {
           el("code", { class: "stg-code cn-url", text: line }),
           el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(line, "mysql command") })));
         body.append(el("p", { class: "cn-sql-row", text: "The user is the name of a server in the left sidebar. The command uses the name this page was opened with" +
-          (v.status ? "" : " and port 3310, the router's unless it was started with another") + ": when the router runs on another machine, put that machine's name." }));
+          (sw.portKnown ? "" : " and port 3310, the router's unless it was started with another") + ": when the router runs on another machine, put that machine's name." }));
       }
       if (sw.manage && sessionMay("settings:write")) {
         const ask = (q) => typeof window.confirm !== "function" || window.confirm(q);

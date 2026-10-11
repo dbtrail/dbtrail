@@ -2076,11 +2076,21 @@ application cannot read a result that old, do not send it through the router.
 
 **The password.** Started with `--token` (or `BINTRAIL_CONSOLE_TOKEN`), the
 token is the password and nothing else opens the port. Started without one,
-the router waits without listening until the MySQL port is turned on in the
-web interface, accepts the password created there, and closes its port, with
-every connection on it, when the port is turned off there. Replacing the
-password there closes the connections that were open too: clients reconnect
-with the new one, and whoever held the old one is out.
+the router waits without listening until it is turned on in the web interface
+(**Settings**, **MCP Server**, **The router**), accepts the password created
+there, and closes its port, with every connection on it, when it is turned
+off there. Replacing the password there closes the connections that were open
+too: clients reconnect with the new one, and whoever held the old one is out.
+
+That switch and that password are the router's own, kept in
+`console-router.yaml` beside the servers file. The port inside `watch` has
+another switch and another password (`console-mysql-port.yaml`): its password
+does not open the router, and turning it off or replacing its password does
+not close the router or the connections on it. The web interface writes the
+router's file and the router follows it; a web interface started with an
+access token shows no switch, since a router that reads the same settings
+takes the token. A session with a data access policy cannot change it: the
+router filters nothing by session.
 
 **Its numbers.** The router has no web page, so it answers for itself.
 `SHOW ROUTER STATUS`, on any connection to it, lists the server's copy

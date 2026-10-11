@@ -512,14 +512,15 @@ services:
   #
   # It starts with the stack and LISTENS ONLY ONCE THERE IS A PASSWORD:
   #   - with CONSOLE_TOKEN set in .env, the token is the password;
-  #   - without it, when the MySQL port is turned on in the web interface
-  #     (Connect), with the password created there, and it closes again when
-  #     the port is turned off there.
-  # Until then it waits and uses next to nothing.
+  #   - without it, when the router is turned on in the web interface
+  #     (Settings, MCP Server, The router), with the password created there,
+  #     and it closes again when it is turned off there.
+  # Until then it waits and uses next to nothing. That switch and that
+  # password are the router's own: the MySQL port on 3309 has others, and
+  # turning that port off or replacing its password does not touch this one.
   #
   # WHAT THAT PASSWORD READS HERE: the source itself, live, and only as far
-  # as you allow. On 3309 the same password reads the history and the copy of
-  # the captured tables. Here a statement is forwarded to the server's source
+  # as you allow. Here a statement is forwarded to the server's source
   # MySQL with that server's FORWARDING ACCOUNT: a MySQL user of its own that
   # you create with SELECT on what applications should read, and set on the
   # server's page in the web interface. The account DBTrail captures with is
