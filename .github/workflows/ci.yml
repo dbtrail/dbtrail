@@ -33,6 +33,15 @@ concurrency:
 permissions:
   contents: read
 
+# Where the test images come from: Google's mirror of Docker Hub, which asks
+# for no account. Docker Hub itself limits pulls per address and per account,
+# and on 2026-10-10 it refused them for hours although every job had logged
+# in: 20 of 26 jobs failed, three runs in a row (#2299). Every `docker run`
+# and `docker pull` in this file names its image under "${TEST_IMAGES}/";
+# scripts/check-test-image-registry.sh fails CI when one does not.
+env:
+  TEST_IMAGES: mirror.gcr.io
+
 jobs:
   # Detects which parts of the tree changed so the expensive jobs below can
   # skip themselves on PRs that can't possibly affect them (e.g. a console
@@ -123,6 +132,8 @@ jobs:
               # has to be able to run it.
               - '**/Dockerfile*'
               - '.github/workflows/ci.yml'
+              # Every job that starts a container pulls its images with it.
+              - 'scripts/pull-test-images.sh'
             dbgo:
               - '**/*.go'
               - 'go.mod'
@@ -130,6 +141,8 @@ jobs:
               - 'Makefile'
               - 'docs/migrations/**'
               - '.github/workflows/ci.yml'
+              # Every job that starts a container pulls its images with it.
+              - 'scripts/pull-test-images.sh'
               # The S3 test store actions run inside the integration job
               # (#1884): a change to one must be able to run that job.
               - '.github/actions/**'
@@ -147,6 +160,8 @@ jobs:
               - 'go.sum'
               - 'docs/migrations/**'
               - '.github/workflows/ci.yml'
+              # Every job that starts a container pulls its images with it.
+              - 'scripts/pull-test-images.sh'
               - '.github/actions/**'
               - 'scripts/mysql-integration-shard.sh'
               - '!internal/console/**'
@@ -302,33 +317,14 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Docker Hub limits anonymous image pulls per address, and GitHub's
-      # runners share theirs: without an account every `docker run` below can
-      # fail with "toomanyrequests" for hours. A pull request from a fork gets
-      # no secrets and pulls anonymously, as before.
-      - name: Log in to Docker Hub
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Pulled by name, ahead of the containers below: a registry that does
+      # not answer fails here and says so, where the readiness loops would
+      # only report "did not become ready" (they discard their probe's output).
+      - name: Pull the test images
+        if: env.RUN == 'true'
         run: |
-          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
-            echo "::notice::no Docker Hub credentials here (a fork's pull request, or the secrets are not set): images are pulled anonymously"
-            exit 0
-          fi
-          # A value pasted with a line break or a space makes the registry
-          # answer "malformed HTTP Authorization header".
-          user="$(printf %s "$DOCKERHUB_USERNAME" | tr -d '[:space:]')"
-          token="$(printf %s "$DOCKERHUB_TOKEN" | tr -d '[:space:]')"
-          if ! printf %s "$token" | docker login -u "$user" --password-stdin; then
-            # Credentials that stopped working must not stop every job: the
-            # pull is tried anonymously, and this says why it may be limited.
-            echo "::warning::Docker Hub refused the login (DOCKERHUB_USERNAME / DOCKERHUB_TOKEN): images are pulled anonymously, and may hit the pull limit"
-            # What is wrong with the values, without printing them.
-            case "$user" in *@*) echo "DOCKERHUB_USERNAME looks like an e-mail address: it must be the Docker ID" ;; esac
-            printf %s "$user" | LC_ALL=C grep -Eq '^[a-z0-9_-]+$' || echo "DOCKERHUB_USERNAME (${#user} characters) holds something other than lowercase letters, digits, _ and -"
-            case "$token" in dckr_pat_*) ;; *) echo "DOCKERHUB_TOKEN (${#token} characters) does not start with dckr_pat_, as a personal access token does" ;; esac
-            printf %s "$token" | LC_ALL=C grep -Eq '^[A-Za-z0-9_-]+$' || echo "DOCKERHUB_TOKEN (${#token} characters) holds something other than letters, digits, _ and -"
-          fi
+          bash scripts/pull-test-images.sh \
+            "${TEST_IMAGES}/library/mysql:${{ matrix.mysql }}"
 
       # Start MySQL as a manually-named container rather than a `services:`
       # block. The integration tests `docker cp` raw binlog files out of a
@@ -343,7 +339,7 @@ jobs:
           docker run -d --name bintrail-test-mysql \
             -e MYSQL_ROOT_PASSWORD=testroot \
             -p 13306:3306 \
-            mysql:${{ matrix.mysql }} \
+            "${TEST_IMAGES}/library/mysql:${{ matrix.mysql }}" \
             --binlog-format=ROW \
             --binlog-row-image=FULL \
             --log-bin=binlog \
@@ -367,7 +363,7 @@ jobs:
           # be preinstalled on the runner.
           consecutive=0
           for i in $(seq 1 60); do
-            if docker run --rm --network host "mysql:${{ matrix.mysql }}" \
+            if docker run --rm --network host "${TEST_IMAGES}/library/mysql:${{ matrix.mysql }}" \
                  mysql --protocol=TCP -h 127.0.0.1 -P 13306 -u root -ptestroot -e "SELECT 1" >/dev/null 2>&1; then
               consecutive=$((consecutive + 1))
               if [ "$consecutive" -ge 3 ]; then
@@ -398,7 +394,7 @@ jobs:
           docker run -d --name bintrail-test-mysql-gtid \
             -e MYSQL_ROOT_PASSWORD=testroot \
             -p 13316:3306 \
-            mysql:${{ matrix.mysql }} \
+            "${TEST_IMAGES}/library/mysql:${{ matrix.mysql }}" \
             --binlog-format=ROW \
             --binlog-row-image=FULL \
             --log-bin=binlog \
@@ -409,7 +405,7 @@ jobs:
           # reason given at the main server's start above.
           consecutive=0
           for i in $(seq 1 60); do
-            if docker run --rm --network host "mysql:${{ matrix.mysql }}" \
+            if docker run --rm --network host "${TEST_IMAGES}/library/mysql:${{ matrix.mysql }}" \
                  mysql --protocol=TCP -h 127.0.0.1 -P 13316 -u root -ptestroot -e "SELECT 1" >/dev/null 2>&1; then
               consecutive=$((consecutive + 1))
               if [ "$consecutive" -ge 3 ]; then
@@ -744,33 +740,15 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Docker Hub limits anonymous image pulls per address, and GitHub's
-      # runners share theirs: without an account every `docker run` below can
-      # fail with "toomanyrequests" for hours. A pull request from a fork gets
-      # no secrets and pulls anonymously, as before.
-      - name: Log in to Docker Hub
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Pulled by name, ahead of the containers below: a registry that does
+      # not answer fails here and says so, where the readiness loops would
+      # only report "did not become ready" (they discard their probe's output).
+      - name: Pull the test images
+        if: env.RUN == 'true'
         run: |
-          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
-            echo "::notice::no Docker Hub credentials here (a fork's pull request, or the secrets are not set): images are pulled anonymously"
-            exit 0
-          fi
-          # A value pasted with a line break or a space makes the registry
-          # answer "malformed HTTP Authorization header".
-          user="$(printf %s "$DOCKERHUB_USERNAME" | tr -d '[:space:]')"
-          token="$(printf %s "$DOCKERHUB_TOKEN" | tr -d '[:space:]')"
-          if ! printf %s "$token" | docker login -u "$user" --password-stdin; then
-            # Credentials that stopped working must not stop every job: the
-            # pull is tried anonymously, and this says why it may be limited.
-            echo "::warning::Docker Hub refused the login (DOCKERHUB_USERNAME / DOCKERHUB_TOKEN): images are pulled anonymously, and may hit the pull limit"
-            # What is wrong with the values, without printing them.
-            case "$user" in *@*) echo "DOCKERHUB_USERNAME looks like an e-mail address: it must be the Docker ID" ;; esac
-            printf %s "$user" | LC_ALL=C grep -Eq '^[a-z0-9_-]+$' || echo "DOCKERHUB_USERNAME (${#user} characters) holds something other than lowercase letters, digits, _ and -"
-            case "$token" in dckr_pat_*) ;; *) echo "DOCKERHUB_TOKEN (${#token} characters) does not start with dckr_pat_, as a personal access token does" ;; esac
-            printf %s "$token" | LC_ALL=C grep -Eq '^[A-Za-z0-9_-]+$' || echo "DOCKERHUB_TOKEN (${#token} characters) holds something other than letters, digits, _ and -"
-          fi
+          bash scripts/pull-test-images.sh \
+            "${TEST_IMAGES}/library/mysql:8.4" \
+            "${TEST_IMAGES}/library/mariadb:${{ matrix.mariadb }}"
 
       - name: Start MySQL index (bintrail-test-mysql, 8.4)
         if: env.RUN == 'true'
@@ -778,14 +756,14 @@ jobs:
           docker run -d --name bintrail-test-mysql \
             -e MYSQL_ROOT_PASSWORD=testroot \
             -p 13306:3306 \
-            mysql:8.4 \
+            "${TEST_IMAGES}/library/mysql:8.4" \
             --binlog-format=ROW --binlog-row-image=FULL --log-bin=binlog --server-id=1
           # See the "integration" job's MySQL-start step for why this probes
           # host TCP with full auth + a real query, requiring 3 consecutive
           # successes, instead of `docker exec ... mysqladmin ping` (#949).
           consecutive=0
           for i in $(seq 1 60); do
-            if docker run --rm --network host mysql:8.4 \
+            if docker run --rm --network host "${TEST_IMAGES}/library/mysql:8.4" \
                  mysql --protocol=TCP -h 127.0.0.1 -P 13306 -u root -ptestroot -e "SELECT 1" >/dev/null 2>&1; then
               consecutive=$((consecutive + 1))
               [ "$consecutive" -ge 3 ] && { echo "MySQL index is ready."; exit 0; }
@@ -804,7 +782,7 @@ jobs:
           docker run -d --name bintrail-test-mariadb \
             -e MARIADB_ROOT_PASSWORD=testroot \
             -p 13307:3306 \
-            mariadb:${{ matrix.mariadb }} \
+            "${TEST_IMAGES}/library/mariadb:${{ matrix.mariadb }}" \
             --log-bin=mariadb-bin --binlog-format=ROW --binlog-row-image=FULL \
             --server-id=2 --gtid-strict-mode=ON
           # Same socket-vs-TCP readiness race as the MySQL-start steps (#949):
@@ -812,7 +790,7 @@ jobs:
           # successes, instead of `docker exec ... mariadb-admin ping`.
           consecutive=0
           for i in $(seq 1 60); do
-            if docker run --rm --network host mariadb:${{ matrix.mariadb }} \
+            if docker run --rm --network host "${TEST_IMAGES}/library/mariadb:${{ matrix.mariadb }}" \
                  mariadb --protocol=TCP -h 127.0.0.1 -P 13307 -u root -ptestroot -e "SELECT 1" >/dev/null 2>&1; then
               consecutive=$((consecutive + 1))
               [ "$consecutive" -ge 3 ] && { echo "MariaDB source is ready."; exit 0; }
@@ -833,10 +811,10 @@ jobs:
           docker run -d --name bintrail-test-mariadb-scratch \
             -e MARIADB_ROOT_PASSWORD=testroot \
             -p 13309:3306 \
-            mariadb:${{ matrix.mariadb }}
+            "${TEST_IMAGES}/library/mariadb:${{ matrix.mariadb }}"
           consecutive=0
           for i in $(seq 1 60); do
-            if docker run --rm --network host mariadb:${{ matrix.mariadb }} \
+            if docker run --rm --network host "${TEST_IMAGES}/library/mariadb:${{ matrix.mariadb }}" \
                  mariadb --protocol=TCP -h 127.0.0.1 -P 13309 -u root -ptestroot -e "SELECT 1" >/dev/null 2>&1; then
               consecutive=$((consecutive + 1))
               [ "$consecutive" -ge 3 ] && { echo "MariaDB drill target is ready."; exit 0; }
@@ -985,33 +963,15 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Docker Hub limits anonymous image pulls per address, and GitHub's
-      # runners share theirs: without an account every `docker run` below can
-      # fail with "toomanyrequests" for hours. A pull request from a fork gets
-      # no secrets and pulls anonymously, as before.
-      - name: Log in to Docker Hub
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Pulled by name, ahead of the containers below: a registry that does
+      # not answer fails here and says so, where the readiness loops would
+      # only report "did not become ready" (they discard their probe's output).
+      - name: Pull the test images
+        if: env.RUN == 'true'
         run: |
-          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
-            echo "::notice::no Docker Hub credentials here (a fork's pull request, or the secrets are not set): images are pulled anonymously"
-            exit 0
-          fi
-          # A value pasted with a line break or a space makes the registry
-          # answer "malformed HTTP Authorization header".
-          user="$(printf %s "$DOCKERHUB_USERNAME" | tr -d '[:space:]')"
-          token="$(printf %s "$DOCKERHUB_TOKEN" | tr -d '[:space:]')"
-          if ! printf %s "$token" | docker login -u "$user" --password-stdin; then
-            # Credentials that stopped working must not stop every job: the
-            # pull is tried anonymously, and this says why it may be limited.
-            echo "::warning::Docker Hub refused the login (DOCKERHUB_USERNAME / DOCKERHUB_TOKEN): images are pulled anonymously, and may hit the pull limit"
-            # What is wrong with the values, without printing them.
-            case "$user" in *@*) echo "DOCKERHUB_USERNAME looks like an e-mail address: it must be the Docker ID" ;; esac
-            printf %s "$user" | LC_ALL=C grep -Eq '^[a-z0-9_-]+$' || echo "DOCKERHUB_USERNAME (${#user} characters) holds something other than lowercase letters, digits, _ and -"
-            case "$token" in dckr_pat_*) ;; *) echo "DOCKERHUB_TOKEN (${#token} characters) does not start with dckr_pat_, as a personal access token does" ;; esac
-            printf %s "$token" | LC_ALL=C grep -Eq '^[A-Za-z0-9_-]+$' || echo "DOCKERHUB_TOKEN (${#token} characters) holds something other than letters, digits, _ and -"
-          fi
+          bash scripts/pull-test-images.sh \
+            "${TEST_IMAGES}/library/mysql:8.4" \
+            "${TEST_IMAGES}/library/postgres:${{ matrix.postgres }}"
 
       - name: Start MySQL index (bintrail-test-mysql, 8.4)
         if: env.RUN == 'true'
@@ -1019,14 +979,14 @@ jobs:
           docker run -d --name bintrail-test-mysql \
             -e MYSQL_ROOT_PASSWORD=testroot \
             -p 13306:3306 \
-            mysql:8.4 \
+            "${TEST_IMAGES}/library/mysql:8.4" \
             --binlog-format=ROW --binlog-row-image=FULL --log-bin=binlog --server-id=1
           # See the "integration" job's MySQL-start step for why this probes
           # host TCP with full auth + a real query, requiring 3 consecutive
           # successes, instead of `docker exec ... mysqladmin ping` (#949).
           consecutive=0
           for i in $(seq 1 60); do
-            if docker run --rm --network host mysql:8.4 \
+            if docker run --rm --network host "${TEST_IMAGES}/library/mysql:8.4" \
                  mysql --protocol=TCP -h 127.0.0.1 -P 13306 -u root -ptestroot -e "SELECT 1" >/dev/null 2>&1; then
               consecutive=$((consecutive + 1))
               [ "$consecutive" -ge 3 ] && { echo "MySQL index is ready."; exit 0; }
@@ -1046,7 +1006,7 @@ jobs:
             -e POSTGRES_PASSWORD=testpg \
             -e POSTGRES_DB=pgtest \
             -p 15432:5432 \
-            postgres:${{ matrix.postgres }} \
+            "${TEST_IMAGES}/library/postgres:${{ matrix.postgres }}" \
             -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
           # Probe TCP from inside the container: during first-init the entrypoint
           # runs a temporary unix-socket-only server, so a TCP (-h 127.0.0.1)
@@ -1129,33 +1089,15 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Docker Hub limits anonymous image pulls per address, and GitHub's
-      # runners share theirs: without an account every `docker run` below can
-      # fail with "toomanyrequests" for hours. A pull request from a fork gets
-      # no secrets and pulls anonymously, as before.
-      - name: Log in to Docker Hub
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Pulled by name, ahead of the containers below: a registry that does
+      # not answer fails here and says so, where the readiness loops would
+      # only report "did not become ready" (they discard their probe's output).
+      - name: Pull the test images
+        if: env.RUN == 'true'
         run: |
-          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
-            echo "::notice::no Docker Hub credentials here (a fork's pull request, or the secrets are not set): images are pulled anonymously"
-            exit 0
-          fi
-          # A value pasted with a line break or a space makes the registry
-          # answer "malformed HTTP Authorization header".
-          user="$(printf %s "$DOCKERHUB_USERNAME" | tr -d '[:space:]')"
-          token="$(printf %s "$DOCKERHUB_TOKEN" | tr -d '[:space:]')"
-          if ! printf %s "$token" | docker login -u "$user" --password-stdin; then
-            # Credentials that stopped working must not stop every job: the
-            # pull is tried anonymously, and this says why it may be limited.
-            echo "::warning::Docker Hub refused the login (DOCKERHUB_USERNAME / DOCKERHUB_TOKEN): images are pulled anonymously, and may hit the pull limit"
-            # What is wrong with the values, without printing them.
-            case "$user" in *@*) echo "DOCKERHUB_USERNAME looks like an e-mail address: it must be the Docker ID" ;; esac
-            printf %s "$user" | LC_ALL=C grep -Eq '^[a-z0-9_-]+$' || echo "DOCKERHUB_USERNAME (${#user} characters) holds something other than lowercase letters, digits, _ and -"
-            case "$token" in dckr_pat_*) ;; *) echo "DOCKERHUB_TOKEN (${#token} characters) does not start with dckr_pat_, as a personal access token does" ;; esac
-            printf %s "$token" | LC_ALL=C grep -Eq '^[A-Za-z0-9_-]+$' || echo "DOCKERHUB_TOKEN (${#token} characters) holds something other than letters, digits, _ and -"
-          fi
+          bash scripts/pull-test-images.sh \
+            "${TEST_IMAGES}/library/mysql:8.4" \
+            "${TEST_IMAGES}/${{ matrix.image }}"
 
       - name: Start MySQL index (bintrail-test-mysql, 8.4)
         if: env.RUN == 'true'
@@ -1163,14 +1105,14 @@ jobs:
           docker run -d --name bintrail-test-mysql \
             -e MYSQL_ROOT_PASSWORD=testroot \
             -p 13306:3306 \
-            mysql:8.4 \
+            "${TEST_IMAGES}/library/mysql:8.4" \
             --binlog-format=ROW --binlog-row-image=FULL --log-bin=binlog --server-id=1
           # See the "integration" job's MySQL-start step for why this probes
           # host TCP with full auth + a real query, requiring 3 consecutive
           # successes, instead of `docker exec ... mysqladmin ping` (#949).
           consecutive=0
           for i in $(seq 1 60); do
-            if docker run --rm --network host mysql:8.4 \
+            if docker run --rm --network host "${TEST_IMAGES}/library/mysql:8.4" \
                  mysql --protocol=TCP -h 127.0.0.1 -P 13306 -u root -ptestroot -e "SELECT 1" >/dev/null 2>&1; then
               consecutive=$((consecutive + 1))
               [ "$consecutive" -ge 3 ] && { echo "MySQL index is ready."; exit 0; }
@@ -1190,7 +1132,7 @@ jobs:
             -e POSTGRES_PASSWORD=testpg \
             -e POSTGRES_DB=pgtest \
             -p 15432:5432 \
-            ${{ matrix.image }} \
+            "${TEST_IMAGES}/${{ matrix.image }}" \
             -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
           # Same in-container TCP probe as integration-postgres-source (the
           # postgis/pgvector images reuse the official postgres entrypoint,
@@ -1234,33 +1176,13 @@ jobs:
         with:
           node-version: "20"
 
-      # Docker Hub limits anonymous image pulls per address, and GitHub's
-      # runners share theirs: without an account every `docker run` below can
-      # fail with "toomanyrequests" for hours. A pull request from a fork gets
-      # no secrets and pulls anonymously, as before.
-      - name: Log in to Docker Hub
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Pulled by name, ahead of the containers below: a registry that does
+      # not answer fails here and says so, where the readiness loops would
+      # only report "did not become ready" (they discard their probe's output).
+      - name: Pull the test images
         run: |
-          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
-            echo "::notice::no Docker Hub credentials here (a fork's pull request, or the secrets are not set): images are pulled anonymously"
-            exit 0
-          fi
-          # A value pasted with a line break or a space makes the registry
-          # answer "malformed HTTP Authorization header".
-          user="$(printf %s "$DOCKERHUB_USERNAME" | tr -d '[:space:]')"
-          token="$(printf %s "$DOCKERHUB_TOKEN" | tr -d '[:space:]')"
-          if ! printf %s "$token" | docker login -u "$user" --password-stdin; then
-            # Credentials that stopped working must not stop every job: the
-            # pull is tried anonymously, and this says why it may be limited.
-            echo "::warning::Docker Hub refused the login (DOCKERHUB_USERNAME / DOCKERHUB_TOKEN): images are pulled anonymously, and may hit the pull limit"
-            # What is wrong with the values, without printing them.
-            case "$user" in *@*) echo "DOCKERHUB_USERNAME looks like an e-mail address: it must be the Docker ID" ;; esac
-            printf %s "$user" | LC_ALL=C grep -Eq '^[a-z0-9_-]+$' || echo "DOCKERHUB_USERNAME (${#user} characters) holds something other than lowercase letters, digits, _ and -"
-            case "$token" in dckr_pat_*) ;; *) echo "DOCKERHUB_TOKEN (${#token} characters) does not start with dckr_pat_, as a personal access token does" ;; esac
-            printf %s "$token" | LC_ALL=C grep -Eq '^[A-Za-z0-9_-]+$' || echo "DOCKERHUB_TOKEN (${#token} characters) holds something other than letters, digits, _ and -"
-          fi
+          bash scripts/pull-test-images.sh \
+            "${TEST_IMAGES}/library/mysql:8.4"
 
       # Same manually-named container as the integration job (8.4 = the bundled
       # index engine, caching_sha2_password default).
@@ -1269,14 +1191,14 @@ jobs:
           docker run -d --name bintrail-test-mysql \
             -e MYSQL_ROOT_PASSWORD=testroot \
             -p 13306:3306 \
-            mysql:8.4 \
+            "${TEST_IMAGES}/library/mysql:8.4" \
             --binlog-format=ROW --binlog-row-image=FULL --log-bin=binlog --server-id=1
           # See the "integration" job's MySQL-start step for why this probes
           # host TCP with full auth + a real query, requiring 3 consecutive
           # successes, instead of `docker exec ... mysqladmin ping` (#949).
           consecutive=0
           for i in $(seq 1 60); do
-            if docker run --rm --network host mysql:8.4 \
+            if docker run --rm --network host "${TEST_IMAGES}/library/mysql:8.4" \
                  mysql --protocol=TCP -h 127.0.0.1 -P 13306 -u root -ptestroot -e "SELECT 1" >/dev/null 2>&1; then
               consecutive=$((consecutive + 1))
               [ "$consecutive" -ge 3 ] && { echo "MySQL is ready."; exit 0; }
@@ -1337,33 +1259,13 @@ jobs:
         with:
           node-version: "20"
 
-      # Docker Hub limits anonymous image pulls per address, and GitHub's
-      # runners share theirs: without an account every `docker run` below can
-      # fail with "toomanyrequests" for hours. A pull request from a fork gets
-      # no secrets and pulls anonymously, as before.
-      - name: Log in to Docker Hub
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Pulled by name, ahead of the containers below: a registry that does
+      # not answer fails here and says so, where the readiness loops would
+      # only report "did not become ready" (they discard their probe's output).
+      - name: Pull the test images
         run: |
-          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
-            echo "::notice::no Docker Hub credentials here (a fork's pull request, or the secrets are not set): images are pulled anonymously"
-            exit 0
-          fi
-          # A value pasted with a line break or a space makes the registry
-          # answer "malformed HTTP Authorization header".
-          user="$(printf %s "$DOCKERHUB_USERNAME" | tr -d '[:space:]')"
-          token="$(printf %s "$DOCKERHUB_TOKEN" | tr -d '[:space:]')"
-          if ! printf %s "$token" | docker login -u "$user" --password-stdin; then
-            # Credentials that stopped working must not stop every job: the
-            # pull is tried anonymously, and this says why it may be limited.
-            echo "::warning::Docker Hub refused the login (DOCKERHUB_USERNAME / DOCKERHUB_TOKEN): images are pulled anonymously, and may hit the pull limit"
-            # What is wrong with the values, without printing them.
-            case "$user" in *@*) echo "DOCKERHUB_USERNAME looks like an e-mail address: it must be the Docker ID" ;; esac
-            printf %s "$user" | LC_ALL=C grep -Eq '^[a-z0-9_-]+$' || echo "DOCKERHUB_USERNAME (${#user} characters) holds something other than lowercase letters, digits, _ and -"
-            case "$token" in dckr_pat_*) ;; *) echo "DOCKERHUB_TOKEN (${#token} characters) does not start with dckr_pat_, as a personal access token does" ;; esac
-            printf %s "$token" | LC_ALL=C grep -Eq '^[A-Za-z0-9_-]+$' || echo "DOCKERHUB_TOKEN (${#token} characters) holds something other than letters, digits, _ and -"
-          fi
+          bash scripts/pull-test-images.sh \
+            "${TEST_IMAGES}/library/mysql:8.4"
 
       # The index server, the same manually-named 8.4 container the other jobs
       # use. The database the walk CAPTURES is a separate, stock mysql:8.4 that
@@ -1374,13 +1276,13 @@ jobs:
           docker run -d --name bintrail-test-mysql \
             -e MYSQL_ROOT_PASSWORD=testroot \
             -p 13306:3306 \
-            mysql:8.4 \
+            "${TEST_IMAGES}/library/mysql:8.4" \
             --binlog-format=ROW --binlog-row-image=FULL --log-bin=binlog --server-id=1
           # Host TCP with full auth + a real query, three times in a row: see
           # the "integration" job's MySQL-start step for why (#949).
           consecutive=0
           for i in $(seq 1 60); do
-            if docker run --rm --network host mysql:8.4 \
+            if docker run --rm --network host "${TEST_IMAGES}/library/mysql:8.4" \
                  mysql --protocol=TCP -h 127.0.0.1 -P 13306 -u root -ptestroot -e "SELECT 1" >/dev/null 2>&1; then
               consecutive=$((consecutive + 1))
               [ "$consecutive" -ge 3 ] && { echo "MySQL is ready."; exit 0; }
@@ -1528,3 +1430,5 @@ jobs:
         run: bash scripts/check-s3-store-lockstep.sh
       - name: MariaDB matrix lockstep (ci.yml, release.yaml)
         run: bash scripts/check-mariadb-matrix-lockstep.sh
+      - name: Test images come from the mirror, not Docker Hub (ci.yml, release.yaml, managed-pg-smoke.yml)
+        run: bash scripts/check-test-image-registry.sh
