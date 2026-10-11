@@ -241,6 +241,28 @@ var readRoutingDecisions = promauto.NewCounterVec(prometheus.CounterOpts{
 	Help:      "Read routing decisions on the embedded time-travel port, by server id, side (copy|mysql|refused) and reason.",
 }, []string{"server", "route", "reason"})
 
+// copySnapshotTime is when the newest snapshot of a server's copy was taken,
+// as the router last read it (#2084). The router sends an expensive read to
+// the copy whatever its age, so the age is a number to alert on, the way
+// replica lag is: time() minus this.
+var copySnapshotTime = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	Namespace: "bintrail",
+	Subsystem: "read_routing",
+	Name:      "copy_snapshot_timestamp_seconds",
+	Help:      "Unix time of the newest snapshot of a server's copy, as the router last read it, by server id. time() minus it is the copy's age.",
+}, []string{"server"})
+
+// SetCopySnapshot records when a server's copy was last snapshotted. A zero
+// time removes the series: a copy with no snapshot has no age, and a gauge
+// left at its last value would read as a copy that stopped ageing.
+func SetCopySnapshot(server string, at time.Time) {
+	if at.IsZero() {
+		copySnapshotTime.DeleteLabelValues(server)
+		return
+	}
+	copySnapshotTime.WithLabelValues(server).Set(float64(at.Unix()))
+}
+
 // ObserveRouteDecision counts one read-routing decision for a server.
 func ObserveRouteDecision(server, route, reason string) {
 	readRoutingDecisions.WithLabelValues(server, route, reason).Inc()

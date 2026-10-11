@@ -131,6 +131,11 @@ type RouterConfig struct {
 	// wait (#2084). Unset, such a statement is forwarded to MySQL (#2112).
 	// 1040 is what a full MySQL answers, and drivers and pools retry it.
 	BusyRefuses bool
+	// Status, when set, answers SHOW ROUTER STATUS on this connection
+	// (#2084): name and value pairs, in the order to show them. The
+	// statement is the port's own and is never sent to the source. Unset,
+	// it is a statement like any other, which MySQL refuses.
+	Status func(ctx context.Context) [][2]string
 	// Observe, when set, is told every routing decision this connection
 	// makes: route is "copy", "mysql" or "refused", reason one of the RouteReason*
 	// constants (a closed vocabulary, so a caller can hang a metric label on
@@ -231,6 +236,34 @@ func (h *Handler) observeRoute(route RouteSide, reason RouteReason) {
 	if h.routerCfg.Observe != nil {
 		h.routerCfg.Observe(route, reason)
 	}
+}
+
+// routerStatusRE matches the port's own SHOW ROUTER STATUS.
+var routerStatusRE = regexp.MustCompile(`(?i)^\s*SHOW\s+ROUTER\s+STATUS\s*;?\s*$`)
+
+// routerStatus answers SHOW ROUTER STATUS when this connection routes and
+// was given a Status; handled is false otherwise, and the statement goes on
+// as any other.
+func (h *Handler) routerStatus(qstr string) (res *mysql.Result, handled bool, err error) {
+	if h.router == nil || h.routerCfg.Status == nil || !routerStatusRE.MatchString(qstr) {
+		return nil, false, nil
+	}
+	ctx, cancel := h.queryContext()
+	defer cancel()
+	pairs := h.routerCfg.Status(ctx)
+	rows := make([][]any, len(pairs))
+	for i, p := range pairs {
+		rows[i] = []any{p[0], p[1]}
+	}
+	if len(rows) == 0 {
+		// The column types are read off the first row, so there is one.
+		rows = [][]any{{"status", "nothing to report"}}
+	}
+	rs, err := mysql.BuildSimpleTextResultset([]string{"Variable_name", "Value"}, rows)
+	if err != nil {
+		return nil, true, err
+	}
+	return mysql.NewResult(rs), true, nil
 }
 
 // RouterConfig is the routing policy this connection was bound with, and

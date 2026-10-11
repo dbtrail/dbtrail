@@ -531,6 +531,11 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 	currentDB := h.db
 	h.mu.Unlock()
 
+	// The port's own status statement, before anything else looks at it.
+	if res, handled, err := h.routerStatus(qstr); handled {
+		return res, err
+	}
+
 	// With free SQL bound, SHOW WARNINGS is a real statement (the cell-cap
 	// warning, freesql.go), answered before the noise allowlist would
 	// swallow it; every other statement clears it, as on MySQL.

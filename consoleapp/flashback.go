@@ -82,6 +82,10 @@ type flashbackConfig struct {
 	// serving that connection from the copy only as the port inside watch
 	// does. The router sets it: its clients connect in place of MySQL.
 	RouteRequired bool
+	// RouteStatus answers SHOW ROUTER STATUS on a routed connection with
+	// the port's own numbers (console.Server.RouterStatus). The router sets
+	// it: it has no web page to show them on.
+	RouteStatus bool
 	// ResultBudget bounds the SQL-on-the-copy results the port holds while
 	// it sends them (#2241). nil = withDefaults makes one of
 	// defaultFlashbackResultBudget; a test passes its own to read it.
@@ -548,7 +552,13 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 			}
 			warnDSNOverridesTLS(logger, id, user, tgt.ForwardDSN, tgt.SourceSSL.Mode)
 			bound = fw
+			var status func(context.Context) [][2]string
+			if cfg.RouteStatus {
+				sql := tgt.SQL
+				status = func(ctx context.Context) [][2]string { return srv.RouterStatus(ctx, id, sql) }
+			}
 			h.BindRouter(fw, shim.RouterConfig{
+				Status:      status,
 				MaxCopyAge:  cfg.RouteMaxCopyAge,
 				AnyCopyAge:  cfg.RouteAnyCopyAge,
 				BusyRefuses: cfg.RouteBusyRefuses,

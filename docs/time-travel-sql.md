@@ -2068,6 +2068,32 @@ every connection on it, when the port is turned off there. Replacing the
 password there closes the connections that were open too: clients reconnect
 with the new one, and whoever held the old one is out.
 
+**Its numbers.** The router has no web page, so it answers for itself.
+`SHOW ROUTER STATUS`, on any connection to it, lists the server's copy
+snapshot and its age in seconds, how many of that server's statements the
+copy and MySQL answered and how many were refused since the router started
+(with a row per reason), and the pool: how many workers, how many are running
+a statement and how many statements wait right now.
+
+```sql
+SHOW ROUTER STATUS;
+-- server              4f1c2a9b0d3e5f67
+-- copy_snapshot       2026-10-10T03:00:00Z
+-- copy_age_seconds    68412
+-- statements_copy     1841
+-- statements_mysql    96233
+-- pool_workers        4
+-- pool_running        1
+-- pool_waiting        0
+```
+
+With `--metrics-addr` (or `BINTRAIL_ROUTER_METRICS_ADDR`; an address of its
+own, not the one `watch` serves) it exports Prometheus metrics: the routing
+decisions and the wait for a worker that `watch` exports for its own port,
+and `bintrail_read_routing_copy_snapshot_timestamp_seconds`, per server.
+`time()` minus that one is the copy's age, the number to alert on here, the
+way replica lag is alerted on. See [Read routing metrics](observability.md#read-routing-bintrail_read_routing_decisions_total).
+
 **Without the index.** A server's index database can be away (restarting,
 unreachable from the router's host) and the router still serves that server:
 forwarding and the copy's tables do not read the index. Time travel

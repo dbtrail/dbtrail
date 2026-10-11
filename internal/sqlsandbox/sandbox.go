@@ -727,6 +727,16 @@ func (r *Runner) WorkerStatements() int { return max(r.workerStatements, 1) }
 // workers that stay it grows far slower than the statements they answer.
 func (r *Runner) WorkersStarted() int64 { return r.started.Load() }
 
+// Running and Waiting are how many statements run now and how many wait
+// for a slot now.
+func (r *Runner) Running() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.inFlight
+}
+
+func (r *Runner) Waiting() int { return r.waitingNow() }
+
 // MaxInFlight is how many statements run at once.
 func (r *Runner) MaxInFlight() int { return r.maxInFlight }
 

@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to MySQL, and a server that cannot route refuses its statements with the
   reason instead of answering them from the copy alone. It listens on
   `127.0.0.1:3310` by default. Nothing changes for the port inside `watch`.
+  It answers `SHOW ROUTER STATUS` on its own port (the copy's age, who
+  answered, the pool) and, with `--metrics-addr`, exports the copy's snapshot
+  time per server so its age can be alerted on like replica lag.
   The Docker stack and the packages do not start it yet. See
   [The router](time-travel-sql.md#the-router-the-same-port-as-a-service-of-its-own-experimental).
 
