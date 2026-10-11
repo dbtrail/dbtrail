@@ -119,6 +119,18 @@ type RouterConfig struct {
 	// snapshot, and MaxCopyAge is then how long ago capture must be known to
 	// have been complete (#2085).
 	MaxCopyAge time.Duration
+	// AnyCopyAge routes to the copy whatever the age of its snapshot
+	// (#2084): the copy is treated as an asynchronous replica, whose lag is
+	// a number to watch and not a rule. MaxCopyAge is then not read, zero
+	// included, the copy's snapshot time is not asked for, and the copy is
+	// never asked to vouch that tables are unchanged.
+	AnyCopyAge bool
+	// BusyRefuses answers MySQL error 1040 (ER_CON_COUNT_ERROR, "too many
+	// connections") when the copy has no slot for an expensive statement,
+	// whether the line for one was full or the statement waited the whole
+	// wait (#2084). Unset, such a statement is forwarded to MySQL (#2112).
+	// 1040 is what a full MySQL answers, and drivers and pools retry it.
+	BusyRefuses bool
 	// Observe, when set, is told every routing decision this connection
 	// makes: route is "copy", "mysql" or "refused", reason one of the RouteReason*
 	// constants (a closed vocabulary, so a caller can hang a metric label on
@@ -332,7 +344,7 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		return ops.forward(RouteReasonInTransaction, "in transaction")
 	case pinned:
 		return ops.forward(RouteReasonPinned, "a temporary table, a table lock or a PREPARE earlier on this connection")
-	case h.routerCfg.MaxCopyAge <= 0:
+	case h.routerCfg.MaxCopyAge <= 0 && !h.routerCfg.AnyCopyAge:
 		return ops.forward(RouteReasonRoutingOff, "routing to the copy is off (no max copy age)")
 	}
 	if v := readrouter.Veto(qstr); v != "" {
@@ -361,24 +373,15 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	if why := h.resultOverRowCap(ctx, d); why != "" {
 		return ops.forward(RouteReasonResultOverCap, why+"; "+d.Reason)
 	}
-	at := h.freeSQL.CopyUpdatedAt(ctx)
-	if at.IsZero() {
-		h.routeWarn("age", "read routing: copy age unknown, expensive statement forwarded", nil)
-		return ops.forward(RouteReasonCopyAgeUnknown, "copy age unknown")
-	}
-	// A snapshot older than the limit is not the end (#2085): a table with
-	// no change since its snapshot reads the same on the copy as on MySQL,
-	// whatever the snapshot's age. The copy is asked for an answer only over
-	// such tables, and only if capture is known to have read everything the
-	// source had written at some moment within the limit, so the answer is
-	// never older than the limit allows. It decides from the tables the
-	// statement names, which only it knows; when it cannot say so, the
-	// statement is MySQL's as before.
-	age := time.Since(at)
 	var unchangedWithin time.Duration
-	tooOld := fmt.Sprintf("copy is %s old, max %s", age.Round(time.Second), h.routerCfg.MaxCopyAge)
-	if age > h.routerCfg.MaxCopyAge {
-		unchangedWithin = h.routerCfg.MaxCopyAge
+	tooOld := ""
+	if !h.routerCfg.AnyCopyAge {
+		at := h.freeSQL.CopyUpdatedAt(ctx)
+		if at.IsZero() {
+			h.routeWarn("age", "read routing: copy age unknown, expensive statement forwarded", nil)
+			return ops.forward(RouteReasonCopyAgeUnknown, "copy age unknown")
+		}
+		unchangedWithin, tooOld = h.pastMaxCopyAge(at)
 	}
 	// Last, the source's session: the copy answers only under one it
 	// reproduces. Asked here and not earlier, so only a statement that
@@ -421,6 +424,14 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		if errors.As(err, &waited) {
 			reason, detail = RouteReasonCopyWaitTimeout, "copy busy for the whole wait: "
 		}
+		if h.routerCfg.BusyRefuses {
+			// Not forwarded (#2084): a port sized to keep expensive reads
+			// off the source does not hand them to it when they are many.
+			// The client is told what a full server tells it.
+			h.routeWarn("busy", "read routing: the copy was busy (every slot taken, and the line for one full or the wait over), an expensive statement refused with error 1040", err)
+			h.observeRoute(RouteRefused, reason)
+			return nil, mysql.NewError(mysql.ER_CON_COUNT_ERROR, err.Error())
+		}
 		h.routeWarn("busy", "read routing: the copy was busy (every slot taken, and the line for one full or the wait over), an expensive statement forwarded to mysql", err)
 		return ops.forward(reason, detail+err.Error())
 	}
@@ -447,6 +458,28 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	h.routeLastForwarded = false
 	h.mu.Unlock()
 	return res, nil
+}
+
+// pastMaxCopyAge says what a snapshot taken at `at` means for a statement
+// that is headed for the copy. unchangedWithin is zero for one within the
+// limit; past it, it is the limit, and tooOld the sentence for a statement
+// the copy then declines.
+//
+// A snapshot older than the limit is not the end (#2085): a table with
+// no change since its snapshot reads the same on the copy as on MySQL,
+// whatever the snapshot's age. The copy is asked for an answer only over
+// such tables, and only if capture is known to have read everything the
+// source had written at some moment within the limit, so the answer is
+// never older than the limit allows. It decides from the tables the
+// statement names, which only it knows; when it cannot say so, the
+// statement is MySQL's as before.
+func (h *Handler) pastMaxCopyAge(at time.Time) (unchangedWithin time.Duration, tooOld string) {
+	age := time.Since(at)
+	tooOld = fmt.Sprintf("copy is %s old, max %s", age.Round(time.Second), h.routerCfg.MaxCopyAge)
+	if age > h.routerCfg.MaxCopyAge {
+		unchangedWithin = h.routerCfg.MaxCopyAge
+	}
+	return unchangedWithin, tooOld
 }
 
 // resultOverRowCap says why an expensive statement is not worth trying on
