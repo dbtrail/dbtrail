@@ -194,6 +194,9 @@ type Handler struct {
 	routerCfg   RouterConfig
 	routeSess   routeSession
 	routePinned bool
+	// unroutedStatus answers SHOW ROUTER STATUS on a connection with no
+	// router (BindStatus).
+	unroutedStatus func(ctx context.Context) [][2]string
 	// routeLastForwarded: the last statement was MySQL's, so a SHOW WARNINGS
 	// is MySQL's too; after a copy-served one the warnings are ours.
 	// routeWarned keys the once-per-connection fallback warnings.

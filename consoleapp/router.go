@@ -358,6 +358,17 @@ func routerStatusHandler(st routerSettings, numbers func() console.RouterNumbers
 	})
 }
 
+// routerPortConfig is routerFlashbackConfig with the switch saved in the web
+// interface deciding whether statements are routed (#2341). A router
+// started with a token does not read that file, and routes.
+func routerPortConfig(st routerSettings, routingOn func() bool) flashbackConfig {
+	cfg := routerFlashbackConfig(st)
+	if routerPortFile(st) != "" {
+		cfg.RouteSwitch = routingOn
+	}
+	return cfg
+}
+
 // routerPortFile is the saved setting whose password the router accepts, ""
 // when it accepts none from it. With a token, the token decides and the file
 // is not read: that is the capture process's own rule when it is started
@@ -609,13 +620,7 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 		go exportCopySnapshots(ctx, srv.CopySnapshots, routerCopySnapshotEvery, last)
 	}
 
-	cfg := routerFlashbackConfig(st)
-	if routerPortFile(st) != "" {
-		// The switch saved in the web interface says whether statements
-		// are routed (#2341). A router started with a token does not read
-		// that file, and routes.
-		cfg.RouteSwitch = srv.FlashbackRoutingOn
-	}
+	cfg := routerPortConfig(st, srv.FlashbackRoutingOn)
 	_, statErr := os.Stat(st.ServersFile)
 	fmt.Fprint(os.Stderr, routerStartupLines(routerStartup{
 		Listen: st.Listen, Pool: pool, MemoryLimit: memoryLimit, Cfg: cfg,

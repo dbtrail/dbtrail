@@ -246,16 +246,36 @@ func (h *Handler) observeRoute(route RouteSide, reason RouteReason) {
 // routerStatusRE matches the port's own SHOW ROUTER STATUS.
 var routerStatusRE = regexp.MustCompile(`(?i)^\s*SHOW\s+ROUTER\s+STATUS\s*;?\s*$`)
 
-// routerStatus answers SHOW ROUTER STATUS when this connection routes and
-// was given a Status; handled is false otherwise, and the statement goes on
-// as any other.
+// BindStatus gives a connection that does NOT route an answer to SHOW ROUTER
+// STATUS (#2341): on a port whose routing is off, or for a connection that
+// asked for the copy alone, the statement would otherwise reach the copy
+// and come back as a syntax error that says nothing of routing. A routed
+// connection takes its answer from RouterConfig.Status.
+func (h *Handler) BindStatus(status func(ctx context.Context) [][2]string) {
+	h.mu.Lock()
+	h.unroutedStatus = status
+	h.mu.Unlock()
+}
+
+// routerStatus answers SHOW ROUTER STATUS when this connection was given a
+// status, routed or not; handled is false otherwise, and the statement goes
+// on as any other.
 func (h *Handler) routerStatus(qstr string) (res *mysql.Result, handled bool, err error) {
-	if h.router == nil || h.routerCfg.Status == nil || !routerStatusRE.MatchString(qstr) {
+	if !routerStatusRE.MatchString(qstr) {
+		return nil, false, nil
+	}
+	status := h.routerCfg.Status
+	if h.router == nil {
+		h.mu.Lock()
+		status = h.unroutedStatus
+		h.mu.Unlock()
+	}
+	if status == nil {
 		return nil, false, nil
 	}
 	ctx, cancel := h.queryContext()
 	defer cancel()
-	pairs := h.routerCfg.Status(ctx)
+	pairs := status(ctx)
 	rows := make([][]any, len(pairs))
 	for i, p := range pairs {
 		rows[i] = []any{p[0], p[1]}

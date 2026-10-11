@@ -399,6 +399,21 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	if !copyOnly {
 		fw, _ = bindReadRouterWhy(h, srv, tgt, user, cfg, logger)
 	}
+	if fw == nil && cfg.RouteStatus {
+		// SHOW ROUTER STATUS on a connection the copy answers alone: the
+		// same numbers, under a first line that says nothing is routed
+		// here and why.
+		why := "off: the copy answers every statement on this port (read routing is turned off)"
+		if copyOnly {
+			why = "off for this connection: it asked for the copy alone (" + copyOnlySuffix + ")"
+		} else if cfg.RouteSwitch == nil || cfg.RouteSwitch() {
+			why = "off for this server: it cannot be forwarded for, so the copy answers alone"
+		}
+		id, sql := tgt.ID, tgt.SQL
+		h.BindStatus(func(ctx context.Context) [][2]string {
+			return append([][2]string{{"routing", why}}, srv.RouterStatus(ctx, id, sql)...)
+		})
+	}
 	if fw != nil {
 		if fw.TrackSession {
 			// A panic on a connection that asked the source for session

@@ -189,7 +189,16 @@ func (s *Server) flashbackManageable() (path string, control FlashbackController
 	case fb.loadErr != "":
 		return "", nil, saved, "", "the MySQL port's settings file could not be read, so it is not changed: " + fb.loadErr + ". Fix or remove the file and restart DBTrail."
 	}
-	return fb.path, fb.control, fb.saved, fb.listen, ""
+	// Read routing is not this process's to remember (#2341): it is set in
+	// the file, which the router follows, and this process read the file
+	// when it started. A change made from that picture (a new password, the
+	// port turned off and on) would write the routing of that day back, and
+	// could turn forwarding on again after it was turned off.
+	saved = fb.saved
+	if f, err := LoadFlashbackFile(fb.path); err == nil {
+		saved.Routing = f.Routing
+	}
+	return fb.path, fb.control, saved, fb.listen, ""
 }
 
 // flashbackRefuseRestricted refuses a session with a data access policy: the

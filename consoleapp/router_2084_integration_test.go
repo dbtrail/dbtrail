@@ -126,6 +126,9 @@ func TestIntegrationRouter(t *testing.T) {
 		if got := scanStrings(t, only, "SELECT status FROM orders WHERE id = 1"); len(got) != 1 || got[0] != "copy" {
 			t.Errorf("a point lookup as %s@copy: %v, want the copy's row", who, got)
 		}
+		if got := scanStrings(t, only, "SHOW ROUTER STATUS"); len(got) == 0 || got[0] != "routing" {
+			t.Errorf("SHOW ROUTER STATUS as %s@copy: %v, want an answer that starts by saying routing is off here", who, got)
+		}
 		if _, err := only.Exec("UPDATE orders SET status = 'through-copy' WHERE id = 1"); err == nil {
 			t.Errorf("a write as %s@copy was accepted", who)
 		}
@@ -157,6 +160,10 @@ func TestIntegrationRouter(t *testing.T) {
 	off := openFlashback(t, swAddr, ent.Name, "tok", srcName)
 	if got := scanStrings(t, off, "SELECT status FROM orders WHERE id = 2"); len(got) != 1 || got[0] != "copy" {
 		t.Errorf("routing off, a point lookup: %v, want the copy's row", got)
+	}
+	var name, value string
+	if err := off.QueryRow("SHOW ROUTER STATUS").Scan(&name, &value); err != nil || name != "routing" || !strings.Contains(value, "read routing is turned off") {
+		t.Errorf("SHOW ROUTER STATUS with routing off: %q = %q (%v), want it to say routing is off", name, value, err)
 	}
 	if _, err := off.Exec("UPDATE orders SET status = 'while-off' WHERE id = 2"); err == nil {
 		t.Error("routing off, a write was accepted")

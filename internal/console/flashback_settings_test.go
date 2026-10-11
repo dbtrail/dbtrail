@@ -573,3 +573,59 @@ func (r *refuseAfter) Apply(listen string) error {
 	}
 	return r.fakeFlashbackControl.Apply(listen)
 }
+
+// Read routing is set in the file, which the router follows, and this
+// process read the file when it started. A change made from the web
+// interface must carry the routing the file holds NOW: written back from
+// this process's memory, a new password could turn forwarding on again
+// after it was turned off (#2341).
+func TestFlashbackChange_keepsTheRoutingTheFileHoldsNow(t *testing.T) {
+	s, _, path := newManagedFlashback(t, Config{})
+	if code, _, raw := doFlashback(t, s, "PUT", "/api/flashback", `{"enabled":true,"listen":"127.0.0.1:3309"}`); code != 200 {
+		t.Fatalf("turn on = %d %s", code, raw)
+	}
+	setRouting := func(on bool) {
+		t.Helper()
+		f, err := LoadFlashbackFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Routing = on
+		if err := saveFlashbackFile(path, f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	routing := func(after string) bool {
+		t.Helper()
+		f, err := LoadFlashbackFile(path)
+		if err != nil {
+			t.Fatalf("%s: %v", after, err)
+		}
+		return f.Routing
+	}
+	change := func(method, route, body string) {
+		t.Helper()
+		if code, _, raw := doFlashback(t, s, method, route, body); code != 200 {
+			t.Fatalf("%s %s = %d %s", method, route, code, raw)
+		}
+	}
+	// Turned on in the file after this process started.
+	setRouting(true)
+	change("POST", "/api/flashback/password", "")
+	if !routing("a new password") {
+		t.Error("a new password turned read routing off")
+	}
+	change("PUT", "/api/flashback", `{"enabled":false}`)
+	change("PUT", "/api/flashback", `{"enabled":true,"listen":"127.0.0.1:3309"}`)
+	if !routing("off and on") {
+		t.Error("turning the port off and on turned read routing off")
+	}
+	// Turned off in the file: no later change brings it back.
+	setRouting(false)
+	change("POST", "/api/flashback/password", "")
+	change("PUT", "/api/flashback", `{"enabled":false}`)
+	change("PUT", "/api/flashback", `{"enabled":true,"listen":"127.0.0.1:3309"}`)
+	if routing("a new password, off and on, after routing was turned off") {
+		t.Error("a change from the web interface turned read routing back ON")
+	}
+}
