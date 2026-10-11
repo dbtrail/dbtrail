@@ -196,8 +196,13 @@ func TestCutFloor_aLaterSearchReadsWhatWasIndexedSince(t *testing.T) {
 	if first < before {
 		t.Fatalf("the first search read %d rows; the fixture is meant to make it read the hour's %d", first, before)
 	}
-	if second > 200 {
-		t.Fatalf("the search after 20 new events read %d rows, want about 20: it started over from the hour's first event", second)
+	// Both searches also list the table's partitions, twice each, and the
+	// server counts the rows that listing reads; how many depends on what
+	// else the server holds (417 and 1,191 on two release runs). What the
+	// first search read beyond the hour's events is that count.
+	listing := first - before
+	if second > listing+200 {
+		t.Fatalf("the search after 20 new events read %d rows, want about 20 beyond the %d both searches read to list partitions: it started over from the hour's first event", second, listing)
 	}
 }
 

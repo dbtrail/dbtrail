@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.103.1] - 2026-10-10
+
+The first published build of the changes listed under 0.103.0, with the
+same code. 0.103.0 was tagged and never published: no binaries, packages
+or images exist for it.
+
+### Fixed
+- **A test of the release gate counted the rows a partition listing reads**
+  (#2269). The test that checks a refresh's search reads only the events
+  indexed since the one before it allowed 200 rows, and counted the rows the
+  server reads to list the table's partitions, which depend on what else the
+  server holds: 417 and 1,191 on the release run, where the search itself
+  read the 20 rows expected. It now sets that count apart.
+
 ## [0.103.0] - 2026-10-10
 ### Added
 - **The `bintrail-console` package installs a systemd service** (#2291). The
