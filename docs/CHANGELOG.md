@@ -96,14 +96,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server under the state directory (`copy-mirror/`) and SQL reads it: it
   looks when the daemon starts, after each of its own uploads and every five
   minutes; it downloads only the tables that changed since the snapshot it
-  has and links the rest; every file is checked against the snapshot's own
-  checksums; and nothing is downloaded unless it fits with 1 GiB left free.
+  has and links the rest; every table file and change file is checked
+  against the checksum the snapshot records for it; and nothing is downloaded
+  unless it fits with 1 GiB left free.
   Until the first snapshot is there the refusal says the local copy is not
   ready yet, and the daemon log says why under `copy mirror`. Recovery, time
   travel, the Snapshots page and the downloaded `views.sql` keep reading the
-  bucket. A server that also keeps a local snapshot folder is unchanged. Not
-  yet for the separate `router` service, which reads the copies on the state
-  volume and still does not read one that is only on S3.
+  bucket. A server that also keeps a local snapshot folder is unchanged. The
+  separate `router` service reads the mirrors the daemon keeps when it shares
+  the daemon's state volume, as it does in the bundled stack; a router on a
+  machine of its own keeps none yet.
 - **`bintrail-console router`: the MySQL-protocol port and its read routing as
   a service of its own** (#2084, experimental). Until now the port lived
   inside `bintrail-console watch`, the process that captures: restarting it

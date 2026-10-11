@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -393,7 +394,7 @@ func TestCopyMirrorReport_repeatsAreQuietAndStuckMirrorsAreNot(t *testing.T) {
 		if err != nil {
 			st.Err = err.Error()
 		}
-		reportCopyMirror(log, state, tg, res, err, state.set(tg.id, st))
+		reportCopyMirror(log, state, tg, res, err, state.set(tg.id, st), false)
 		return lines()
 	}
 	noSpace := func(free int64) error {
@@ -424,23 +425,107 @@ func TestCopyMirrorReport_repeatsAreQuietAndStuckMirrorsAreNot(t *testing.T) {
 
 	// No error and nothing to read: that is not silence.
 	other := copyMirrorTarget{id: "def", name: "empty", s3: "s3://bucket/typo"}
-	reportCopyMirror(log, state, other, copymirror.Result{}, nil, copyMirrorStatus{})
+	reportCopyMirror(log, state, other, copymirror.Result{}, nil, copyMirrorStatus{}, false)
 	if out := buf.String(); strings.Count(out, "\n") != 1 || !strings.Contains(out, "no snapshot to bring") {
 		t.Errorf("an empty mirror with no error logged %q", out)
 	}
 	buf.Reset()
-	reportCopyMirror(log, state, other, copymirror.Result{}, nil, copyMirrorStatus{})
+	reportCopyMirror(log, state, other, copymirror.Result{}, nil, copyMirrorStatus{}, false)
 	// Servers nothing was said about yet, so that silence here is the
 	// branch's own and not a repeat's.
-	reportCopyMirror(log, state, copyMirrorTarget{id: "busy", name: "busy"}, copymirror.Result{Busy: true}, nil, copyMirrorStatus{})
-	reportCopyMirror(log, state, copyMirrorTarget{id: "stop", name: "stop"}, copymirror.Result{}, context.Canceled, copyMirrorStatus{})
+	reportCopyMirror(log, state, copyMirrorTarget{id: "busy", name: "busy"}, copymirror.Result{Busy: true}, nil, copyMirrorStatus{}, false)
+	reportCopyMirror(log, state, copyMirrorTarget{id: "stop", name: "stop"}, copymirror.Result{}, context.Canceled, copyMirrorStatus{}, true)
 	if n := lines(); n != 0 {
 		t.Errorf("a repeat, a busy round and a stopping daemon logged %d lines, want 0", n)
 	}
 	// Notes are a round's own words: once each, not every round.
-	reportCopyMirror(log, state, tg, copymirror.Result{Newest: "x", Notes: []string{"could not remove the leftover .a.removing: busy"}}, nil, copyMirrorStatus{})
-	reportCopyMirror(log, state, tg, copymirror.Result{Newest: "x", Notes: []string{"could not remove the leftover .a.removing: busy"}}, nil, copyMirrorStatus{})
+	reportCopyMirror(log, state, tg, copymirror.Result{Newest: "x", Notes: []string{"could not remove the leftover .a.removing: busy"}}, nil, copyMirrorStatus{}, false)
+	reportCopyMirror(log, state, tg, copymirror.Result{Newest: "x", Notes: []string{"could not remove the leftover .a.removing: busy"}}, nil, copyMirrorStatus{}, false)
 	if n := lines(); n != 1 {
 		t.Errorf("the same note twice logged %d lines, want 1", n)
+	}
+}
+
+// A download the round gave up on because the source went silent is a
+// failure to report, although what ended the request was a cancellation. And
+// the ids S3 puts in every error must not make one failure look new each
+// round.
+func TestCopyMirrorReport_silentSourceAndRequestIDs(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	state := newCopyMirrorState()
+	tg := copyMirrorTarget{id: "abc", name: "shop", s3: "s3://bucket/a"}
+
+	silent := fmt.Errorf("download shop/t.parquet of snapshot x: %w: no answer in 2m0s (context canceled)", copymirror.ErrSourceSilent)
+	reportCopyMirror(log, state, tg, copymirror.Result{}, silent, copyMirrorStatus{}, false)
+	if !strings.Contains(buf.String(), "went silent") {
+		t.Errorf("a source that went silent logged %q", buf.String())
+	}
+	buf.Reset()
+	// Even an error that does wrap a cancellation is a failure while the
+	// daemon is running.
+	reportCopyMirror(log, state, copyMirrorTarget{id: "w", name: "w"}, copymirror.Result{},
+		fmt.Errorf("list: %w", context.Canceled), copyMirrorStatus{}, false)
+	if strings.Count(buf.String(), "\n") != 1 {
+		t.Errorf("a cancelled request on a running daemon logged %q", buf.String())
+	}
+	buf.Reset()
+
+	denied := func(req, host string) error {
+		return fmt.Errorf("list the snapshots in s3://bucket/a: operation error S3: ListObjectsV2, https response error StatusCode: 403, RequestID: %s, HostID: %s, api error AccessDenied: Access Denied", req, host)
+	}
+	other := copyMirrorTarget{id: "def", name: "denied", s3: "s3://bucket/a"}
+	reportCopyMirror(log, state, other, copymirror.Result{}, denied("80MX4SS6Z4XZEJY4", "kQ9+abcDEF/ghi7JKL=="), copyMirrorStatus{}, false)
+	reportCopyMirror(log, state, other, copymirror.Result{}, denied("ZZTOP77QRSTUVWX1", "mN3/opqRST+uvw8XYZ=="), copyMirrorStatus{}, false)
+	if n := strings.Count(buf.String(), "\n"); n != 1 {
+		t.Errorf("the same refusal under two request ids logged %d lines, want 1", n)
+	}
+	buf.Reset()
+
+	// A snapshot that landed is said even when the round then failed.
+	reportCopyMirror(log, state, copyMirrorTarget{id: "late", name: "late"},
+		copymirror.Result{Downloaded: "2026-10-01T10-00-00Z", Newest: "2026-10-01T10-00-00Z"}, errors.New("read the mirror directory: denied"), copyMirrorStatus{}, false)
+	if out := buf.String(); !strings.Contains(out, "brought a snapshot") || !strings.Contains(out, "could not be brought up to date") {
+		t.Errorf("a download followed by a failure logged %q", out)
+	}
+
+	// Lines too old to hold anything back are forgotten.
+	clock := time.Now()
+	state.now = func() time.Time { return clock }
+	for i := range 50 {
+		state.sayNow("grow", "line "+strings.Repeat("x", i+1))
+	}
+	clock = clock.Add(2 * copyMirrorRepeatEvery)
+	state.sayNow("grow", "one more")
+	state.mu.Lock()
+	n := len(state.said)
+	state.mu.Unlock()
+	if n != 1 {
+		t.Errorf("%d lines are remembered after their hour, want 1", n)
+	}
+}
+
+// The watch daemon tells its console that it fills the mirrors, which is what
+// lets a refusal say the local copy is on its way. The read-only serve builds
+// its configuration elsewhere and says nothing.
+func TestCopyMirror_watchTellsItsConsoleItFillsTheMirrors(t *testing.T) {
+	opts := upConsoleOpts()
+	if !opts.FillsCopyMirrors {
+		t.Fatal("the watch daemon's console options do not say it fills the mirrors")
+	}
+	opts.Listen, opts.Token = "127.0.0.1:8090", "tok"
+	cfg, err := upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/binlog_index", opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.FillsCopyMirrors {
+		t.Error("the console configuration built from them lost it")
+	}
+	cfg, err = upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/binlog_index", consoleOpts{Listen: "127.0.0.1:8090", Token: "tok"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.FillsCopyMirrors {
+		t.Error("a configuration nobody marked says it fills the mirrors")
 	}
 }

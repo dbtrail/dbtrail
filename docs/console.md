@@ -1381,8 +1381,9 @@ For a server that keeps its snapshots in S3 and has no local snapshot folder,
 - **What it costs.** Disk for what it downloads, in Parquet. An update
   publishes the tables that did not change as copies inside the bucket; the
   mirror links those from the snapshot it already has and downloads only the
-  tables that changed. Every file is checked against the snapshot's own
-  checksums before it is used.
+  tables that changed. Every table file and change file is checked against
+  the checksum the snapshot records for it before it is used, including the
+  ones already on disk.
 - **When the disk is short.** Nothing is downloaded unless it fits with 1 GiB
   left free. The daemon log says so, under `copy mirror`, with how much the
   snapshot needs and how much is free, and SQL keeps answering from the

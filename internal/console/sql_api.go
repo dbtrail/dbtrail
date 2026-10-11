@@ -380,7 +380,7 @@ func (s *Server) handleSQLInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.NeedsS3() {
-		writeJSONError(w, http.StatusConflict, sqlNotLocalMessage(b))
+		writeJSONError(w, http.StatusConflict, s.sqlNotLocalMessage(b))
 		return
 	}
 	// The events view is offered only over a local change log: a statement
@@ -398,7 +398,7 @@ func (s *Server) handleSQLInfo(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusConflict, why)
 			return
 		}
-		writeJSONError(w, http.StatusConflict, sqlNotLocalMessage(b))
+		writeJSONError(w, http.StatusConflict, s.sqlNotLocalMessage(b))
 		return
 	}
 	notes := in.NamingNotes()
@@ -994,7 +994,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	// of the daemon's two slots while it waits on the network. A local
 	// mirror of it that holds a snapshot is a local copy (#2302).
 	if strings.HasPrefix(b.sqlCopySource(), "s3://") {
-		return sqlOutcome{}, &sqlRefusal{http.StatusConflict, sqlNotLocalMessage(b)}
+		return sqlOutcome{}, &sqlRefusal{http.StatusConflict, s.sqlNotLocalMessage(b)}
 	}
 	// The slot first (#2026): a statement that will be refused as busy must
 	// not pay for the view build below, which reads the index and walks the
@@ -1034,7 +1034,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	if in.NeedsS3() || (!in.RendersAnyView() && eventsInS3) {
 		// The tables themselves are in S3, or the change log in S3 is all
 		// there is: nothing here is local.
-		return sqlOutcome{}, &sqlRefusal{http.StatusConflict, sqlNotLocalMessage(b)}
+		return sqlOutcome{}, &sqlRefusal{http.StatusConflict, s.sqlNotLocalMessage(b)}
 	}
 	if !in.RendersAnyView() {
 		return sqlOutcome{}, &sqlRefusal{http.StatusConflict,
@@ -1707,9 +1707,12 @@ const sqlCopyMirrorNotReadyMessage = "this server's snapshots are in S3 and the 
 	"if it stays like this, the DBTrail log says why under \"copy mirror\""
 
 // sqlNotLocalMessage is the refusal for a server SQL cannot read locally:
-// one that has a mirror on its way, or one that has none.
-func sqlNotLocalMessage(b *bundle) string {
-	if b != nil && b.sqlMirrorDir != "" {
+// one that has a mirror on its way, or one that has none. "On its way" is
+// said only by a process that fills mirrors (Config.FillsCopyMirrors): the
+// read-only console and the router have the folder and nobody bringing
+// anything to it, and must not promise a download.
+func (s *Server) sqlNotLocalMessage(b *bundle) string {
+	if s.fillsCopyMirrors && b != nil && b.sqlMirrorDir != "" {
 		return sqlCopyMirrorNotReadyMessage
 	}
 	return sqlCopyNotLocalMessage

@@ -715,8 +715,11 @@ func TestSync_networkErrorIsNotCalledAMissingObject(t *testing.T) {
 	src.fail[t1+"/shop/orders.parquet"] = errors.New("connection reset")
 	cfg := testConfig(t, src)
 	_, err := Sync(context.Background(), cfg)
-	if err == nil || errors.Is(err, ErrSourceChanged) || errors.Is(err, ErrCorrupt) {
-		t.Fatalf("err = %v", err)
+	if err == nil || errors.Is(err, ErrSourceChanged) || errors.Is(err, ErrCorrupt) || errors.Is(err, ErrSourceSilent) {
+		t.Fatalf("err = %v, want the network error as it is", err)
+	}
+	if !strings.Contains(err.Error(), "connection reset") || strings.Contains(err.Error(), "no answer") {
+		t.Errorf("err = %v, want it to say what the source said and nothing about silence", err)
 	}
 }
 
@@ -1263,8 +1266,13 @@ func TestSync_aSourceThatGoesSilentIsGivenUp(t *testing.T) {
 			go func() { _, err := Sync(context.Background(), cfg); done <- err }()
 			select {
 			case err := <-done:
-				if err == nil || !(strings.Contains(err.Error(), "no answer in") || strings.Contains(err.Error(), "no bytes for")) {
-					t.Errorf("err = %v, want one that says the source went silent", err)
+				if !errors.Is(err, ErrSourceSilent) || !(strings.Contains(err.Error(), "no answer in") || strings.Contains(err.Error(), "no bytes for")) {
+					t.Errorf("err = %v, want ErrSourceSilent with how long it waited", err)
+				}
+				// Nobody asked the round to stop: it must not read as if
+				// somebody had.
+				if errors.Is(err, context.Canceled) {
+					t.Errorf("a silent source reads as a cancelled round: %v", err)
 				}
 				if errors.Is(err, ErrSourceChanged) || errors.Is(err, ErrCorrupt) {
 					t.Errorf("a silent source was called something else: %v", err)

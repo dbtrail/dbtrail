@@ -107,23 +107,33 @@ func newCopyMirrorState() *copyMirrorState {
 // been failing for weeks with a single line far up the log.
 const copyMirrorRepeatEvery = time.Hour
 
-var digitRuns = regexp.MustCompile(`[0-9]+`)
+// changingWords matches every run of letters, digits and the punctuation of
+// an identifier that holds a digit: a count, a size, a duration, and the
+// request and host ids S3 puts in each error, which are new on every request.
+var changingWords = regexp.MustCompile(`[A-Za-z0-9+/=_.:-]*[0-9][A-Za-z0-9+/=_.:-]*`)
 
 // sayNow reports whether a line about server id should be logged now: the
 // first time, and again once copyMirrorRepeatEvery has passed. Two texts
 // that differ only in their numbers are one line (free bytes, bytes read
-// before a connection dropped), or a failure that carries a number would be
-// new every round.
+// before a connection dropped, a request id), or a failure that carries one
+// would be new every round.
 func (s *copyMirrorState) sayNow(id, text string) bool {
 	now := time.Now()
 	if s.now != nil {
 		now = s.now()
 	}
-	key := id + "\x00" + digitRuns.ReplaceAllString(text, "#")
+	key := id + "\x00" + changingWords.ReplaceAllString(text, "#")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if last, ok := s.said[key]; ok && now.Sub(last) < copyMirrorRepeatEvery {
 		return false
+	}
+	// What was said too long ago to hold anything back is forgotten, so the
+	// map holds an hour of distinct lines and not a daemon's lifetime of them.
+	for k, last := range s.said {
+		if now.Sub(last) >= copyMirrorRepeatEvery {
+			delete(s.said, k)
+		}
 	}
 	s.said[key] = now
 	return true
@@ -176,7 +186,10 @@ func runCopyMirrorRound(ctx context.Context, reg *console.Registry, boot bootMir
 			st.Err = err.Error()
 		}
 		prev := state.set(t.id, st)
-		reportCopyMirror(slog.Default(), state, t, res, err, prev)
+		// Whether the daemon is stopping is the daemon's context to say,
+		// never the error's: a request the round itself gave up on is a
+		// cancellation too.
+		reportCopyMirror(slog.Default(), state, t, res, err, prev, ctx.Err() != nil)
 	}
 }
 
@@ -200,14 +213,24 @@ func guardedCopyMirrorSync(ctx context.Context, t copyMirrorTarget,
 // brought, a mirror followed again) is said once; what goes on being true (a
 // failure, a bucket with nothing to mirror) is said when it starts and again
 // every copyMirrorRepeatEvery, never every round.
-func reportCopyMirror(log *slog.Logger, state *copyMirrorState, t copyMirrorTarget, res copymirror.Result, err error, prev copyMirrorStatus) {
+//
+// stopping is whether the daemon is shutting down: a round cut short by that
+// has failed at nothing.
+func reportCopyMirror(log *slog.Logger, state *copyMirrorState, t copyMirrorTarget, res copymirror.Result, err error, prev copyMirrorStatus, stopping bool) {
 	for _, n := range res.Notes {
 		if state.sayNow(t.id, "note: "+n) {
 			log.Warn("copy mirror: "+n, "server", t.name)
 		}
 	}
+	if res.Downloaded != "" {
+		// Said whatever came after: statements already read this snapshot,
+		// even if the round then failed at removing an older one.
+		log.Info("copy mirror: brought a snapshot from S3 for SQL on the copy",
+			"server", t.name, "snapshot", res.Downloaded, "downloaded_bytes", res.BytesDownloaded,
+			"linked_bytes", res.BytesLinked, "resumed_bytes", res.BytesResumed, "removed", res.Removed)
+	}
 	switch {
-	case err != nil && errors.Is(err, context.Canceled):
+	case err != nil && stopping:
 		// The daemon is stopping.
 	case err != nil:
 		if state.sayNow(t.id, "error: "+err.Error()) {
@@ -218,9 +241,7 @@ func reportCopyMirror(log *slog.Logger, state *copyMirrorState, t copyMirrorTarg
 	case res.Busy:
 		// Another process is bringing this mirror up to date.
 	case res.Downloaded != "":
-		log.Info("copy mirror: brought a snapshot from S3 for SQL on the copy",
-			"server", t.name, "snapshot", res.Downloaded, "downloaded_bytes", res.BytesDownloaded,
-			"linked_bytes", res.BytesLinked, "resumed_bytes", res.BytesResumed, "removed", res.Removed)
+		// Said above.
 	case res.Newest == "":
 		// No error and nothing to read: SQL on this server answers "not
 		// ready yet", and this is the line that says why it will stay so.

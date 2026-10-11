@@ -1827,23 +1827,29 @@ type consoleOpts struct {
 	// the threshold flags, #2038), reported by GET /api/flashback; the port
 	// itself is bound with the same values in startFlashbackPort.
 	ReadRouting console.ReadRoutingConfig
+	// FillsCopyMirrors is console.Config.FillsCopyMirrors.
+	FillsCopyMirrors bool
 }
 
 // upConsoleOpts snapshots the resolved upConsole* globals.
 func upConsoleOpts() consoleOpts {
 	return consoleOpts{
-		Listen:          upConsoleListen,
-		Token:           upConsoleToken,
-		BaselineDir:     upConsoleBaselineDir,
-		BaselineS3:      upConsoleBaselineS3,
-		AuthFile:        upConsoleAuthFile,
-		MCPTokenFile:    upConsoleMCPTokenFile,
-		ServersFile:     upConsoleServersFile,
-		TLSCert:         upConsoleTLSCert,
-		TLSKey:          upConsoleTLSKey,
-		AllowedHosts:    upConsoleAllowedHost,
-		AllowSetup:      upConsoleAllowSetup,
-		FlashbackListen: upConsoleFlashbackListen,
+		// Both watch entry points start the loop that fills the mirrors
+		// (startCopyMirrorLoop), and both reach this function; the
+		// read-only serve does neither.
+		FillsCopyMirrors: true,
+		Listen:           upConsoleListen,
+		Token:            upConsoleToken,
+		BaselineDir:      upConsoleBaselineDir,
+		BaselineS3:       upConsoleBaselineS3,
+		AuthFile:         upConsoleAuthFile,
+		MCPTokenFile:     upConsoleMCPTokenFile,
+		ServersFile:      upConsoleServersFile,
+		TLSCert:          upConsoleTLSCert,
+		TLSKey:           upConsoleTLSKey,
+		AllowedHosts:     upConsoleAllowedHost,
+		AllowSetup:       upConsoleAllowSetup,
+		FlashbackListen:  upConsoleFlashbackListen,
 		ReadRouting: console.ReadRoutingConfig{
 			MaxCopyAge:    upRouteMaxCopyAge,
 			CostThreshold: upRouteCostThreshold,
@@ -1944,11 +1950,12 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		CaptureStatus:    newCaptureStatusReporter(upSourceDSN).withBootFlavor(bootFlavor.get).withBootSSL(bootSourceSSL()).withBootFilters(upSchemas, upTables),
 		BootSourceFlavor: bootSourceFlavor,
 
-		BaselineDir:   opts.BaselineDir,
-		BaselineS3:    opts.BaselineS3,
-		AuthPath:      opts.AuthFile,
-		MCPTokenPath:  opts.MCPTokenFile,
-		FlashbackPath: flashbackFilePath(opts),
+		BaselineDir:      opts.BaselineDir,
+		BaselineS3:       opts.BaselineS3,
+		FillsCopyMirrors: opts.FillsCopyMirrors,
+		AuthPath:         opts.AuthFile,
+		MCPTokenPath:     opts.MCPTokenFile,
+		FlashbackPath:    flashbackFilePath(opts),
 		// The router's own switch, beside it: this process writes it and
 		// the router follows it.
 		RouterSwitchPath: console.RouterSwitchPath(opts.ServersFile),

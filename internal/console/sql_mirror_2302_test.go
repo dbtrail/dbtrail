@@ -21,6 +21,7 @@ func newSQLMirrorFixture(t *testing.T, runner sqlRunner) *sqlFixture {
 	f := newSQLFixture(t, runner, false)
 	f.s.cm.boot.baselineSrc = "s3://bucket/prefix"
 	f.s.cm.boot.sqlMirrorDir = f.root
+	f.s.fillsCopyMirrors = true // the watch daemon
 	return f
 }
 
@@ -262,9 +263,12 @@ func TestSQLMirror_everyBundleIsGivenItsMirrorFolder(t *testing.T) {
 	}
 
 	// The server on the command line, which is not in the registry.
-	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, BaselineS3: "s3://bucket/boot"})
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, BaselineS3: "s3://bucket/boot", FillsCopyMirrors: true})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !srv.fillsCopyMirrors {
+		t.Error("New dropped Config.FillsCopyMirrors")
 	}
 	if got, want := srv.cm.boot.sqlMirrorDir, reg.BootCopyMirrorDir("", "s3://bucket/boot"); got != want || want == "" {
 		t.Errorf("the command-line server: sqlMirrorDir = %q, want %q", got, want)
@@ -280,5 +284,22 @@ func TestCopyMirrorDir_idsThatAreNotPlainNames(t *testing.T) {
 	}
 	if got := reg.BootCopyMirrorDir("", "s3://bucket/prefix"); got == "" || !strings.HasPrefix(got, reg.CopyMirrorRoot()+string(filepath.Separator)) {
 		t.Errorf("the command-line server's mirror folder = %q", got)
+	}
+}
+
+// A process that fills no mirror (the read-only console, the router) has the
+// folder and nobody bringing anything to it: it must not say one is coming.
+func TestSQLMirror_noPromiseWhereNothingFillsTheMirror(t *testing.T) {
+	f := newSQLMirrorFixture(t, &fakeSQLRunner{busy: true})
+	f.s.fillsCopyMirrors = false
+	f.s.cm.boot.sqlMirrorDir = t.TempDir()
+	w := postSQL(t, f.s, `{"sql":"SELECT 1"}`)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), sqlCopyNotLocalMessage) {
+		t.Errorf("code=%d body=%s, want the plain refusal", w.Code, w.Body.String())
+	}
+	// And it still reads a mirror somebody else filled.
+	f.s.cm.boot.sqlMirrorDir = f.root
+	if w := postSQL(t, f.s, `{"sql":"SELECT 1"}`); w.Code == http.StatusConflict {
+		t.Errorf("a filled mirror was refused: %s", w.Body.String())
 	}
 }

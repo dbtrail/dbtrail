@@ -227,6 +227,11 @@ type Config struct {
 	// BaselineS3 is an s3:// prefix. Registry entries carry their own.
 	BaselineDir string
 	BaselineS3  string
+	// FillsCopyMirrors says this process keeps the local mirrors of servers
+	// whose snapshots are only in S3 up to date (#2302): the watch daemon
+	// does, the read-only console and the router do not. It decides only
+	// what a refusal promises: "the local copy is on its way" where it is.
+	FillsCopyMirrors bool
 	// AuthPath locates the console credential file (username + bcrypt hash,
 	// written by `bintrail-console user set-password`). Empty means
 	// DefaultAuthPath(). A missing file means password login is not
@@ -517,6 +522,8 @@ type Server struct {
 	// zero Config.SQLLimits is sqlsandbox.DefaultLimits); the handler reads
 	// them to bound max_rows and to name the timeout in its refusal.
 	sqlLimits sqlsandbox.Limits
+	// fillsCopyMirrors is Config.FillsCopyMirrors.
+	fillsCopyMirrors bool
 	// sqlPortMaxRows is Config.SQLPortMaxRows; read through sqlPortRowCap.
 	sqlPortMaxRows int
 	// sqlPortSharedSlots is Config.SQLPortSharedSlots.
@@ -820,6 +827,7 @@ func New(cfg Config) (*Server, error) {
 	// given the value on upgrade (MigrateProcessBaselineLocation, run where
 	// the registry is loaded, before any loop reads it).
 	s.sqlLimits = resolveSQLLimits(cfg.SQLLimits)
+	s.fillsCopyMirrors = cfg.FillsCopyMirrors
 	s.sqlPortMaxRows = cfg.SQLPortMaxRows
 	s.routerURL, s.routerURLErr, s.routerClient = cfg.RouterURL, cfg.RouterURLError, newRouterClient(routerStatusTimeout)
 	s.loadRouterSwitch(cfg.RouterSwitchPath)

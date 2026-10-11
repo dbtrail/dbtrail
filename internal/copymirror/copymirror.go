@@ -216,6 +216,12 @@ func (e *NoSpaceError) Unwrap() error { return ErrNoSpace }
 // name. The next round lists again.
 var ErrSourceChanged = errors.New("the snapshot is not whole in S3")
 
+// ErrSourceSilent: a request to the source got no answer, or a download no
+// byte, within the stall timeout. It does not wrap the cancellation that
+// ended the request: nothing asked this round to stop, and a caller that
+// tells a stopping daemon by context.Canceled must not take this for one.
+var ErrSourceSilent = errors.New("the source went silent")
+
 // ErrCorrupt: what the source returned is not what the snapshot's manifest
 // or its listing describe. Nothing of it is kept under a name a later round
 // would trust.
@@ -311,9 +317,12 @@ func (m *mirror) get(ctx context.Context, key string) (body io.ReadCloser, stop 
 	stop = func() { timer.Stop(); cancel() }
 	rc, err := m.cfg.Source.Get(gctx, key)
 	if err != nil {
+		// Asked before stop, which cancels the same context: afterwards
+		// every failure would look like the watch's own.
+		silent := gctx.Err() != nil && ctx.Err() == nil
 		stop()
-		if gctx.Err() != nil && ctx.Err() == nil {
-			err = fmt.Errorf("no answer in %s: %w", m.stall(), err)
+		if silent {
+			err = fmt.Errorf("%w: no answer in %s (%v)", ErrSourceSilent, m.stall(), err)
 		}
 		return nil, func() {}, err
 	}
@@ -334,7 +343,7 @@ func (w *watchedBody) Read(p []byte) (int, error) {
 		w.timer.Reset(w.stall)
 	}
 	if err != nil && err != io.EOF && w.gctx.Err() != nil && w.ctx.Err() == nil {
-		err = fmt.Errorf("no bytes for %s: %w", w.stall, err)
+		err = fmt.Errorf("%w: no bytes for %s (%v)", ErrSourceSilent, w.stall, err)
 	}
 	return n, err
 }

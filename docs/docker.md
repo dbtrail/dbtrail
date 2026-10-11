@@ -657,7 +657,10 @@ mysql> SHOW ROUTER STATUS;   -- the copy's age, who answered, the pool
 It reads the servers the web interface manages and the copies on the state
 volume, which it mounts read-only. A server needs a source address the
 container can reach (as for `bintrail`) and a copy on that volume for its
-expensive reads; a copy that lives only on S3 is not read by the router.
+expensive reads. For a server whose snapshots are only on S3, that copy is
+the local mirror `bintrail` keeps on the same volume
+([SQL on a server whose snapshots are only on S3](console.md#sql-on-a-server-whose-snapshots-are-only-on-s3));
+the router reads it and brings nothing from the bucket itself.
 
 **How much of the machine it takes.** How many statements run on the copy at
 once is worked out from the cores and the memory the service may use. By
