@@ -175,6 +175,16 @@ type Config struct {
 	// the whole process, the SQL card and the embedded port together (#2030,
 	// watch --sql-max-in-flight); 0 means sqlsandbox.DefaultMaxInFlight.
 	SQLMaxInFlight int
+	// SQLWorkerStatements is how many statements one SQL worker process
+	// answers before it is replaced (#2084, sqlsandbox.Config.
+	// WorkerStatements). 0 or 1: a process per statement, as watch and
+	// serve run.
+	SQLWorkerStatements int
+	// SQLPortSharedSlots lets statements on the MySQL port for one server
+	// run at once, up to SQLMaxInFlight for all servers together (#2084).
+	// Unset, one runs at a time per server (#2026), which is the rule for a
+	// port that shares its process with capture.
+	SQLPortSharedSlots bool
 	// LazyIndex opens a registry server's index without asking it to answer
 	// (#2084): selecting the server succeeds while its index is away, and
 	// only what reads the index fails then, with the connection's own
@@ -471,6 +481,8 @@ type Server struct {
 	sqlLimits sqlsandbox.Limits
 	// sqlPortMaxRows is Config.SQLPortMaxRows; read through sqlPortRowCap.
 	sqlPortMaxRows int
+	// sqlPortSharedSlots is Config.SQLPortSharedSlots.
+	sqlPortSharedSlots bool
 	// sqlMem is the SQL memory setting (#2210): MemoryLimit above is the
 	// startup value or the default, and sqlMemoryNow says which applies.
 	sqlMem sqlMemoryState
@@ -529,6 +541,10 @@ type Server struct {
 	// data-profile enforcement (#1075). Inert in OSS (no session ever carries a
 	// profile); populated lazily on the first profiled request.
 	sessionProfiles *profileRuleCache
+	// followNotes is what was last said about each followed file
+	// (FollowFiles), so its trouble is logged once. Guarded by followMu.
+	followMu    sync.Mutex
+	followNotes map[string]string
 	// flashback: the embedded MySQL-protocol port's state: where it listens
 	// (Config.FlashbackListen at startup, or the setting saved from the web
 	// interface) and the password that setting carries.
@@ -757,7 +773,9 @@ func New(cfg Config) (*Server, error) {
 	// its DuckDB open, so a short statement does not pay the start. They stop
 	// on their own after a few minutes with no statement, and with this
 	// process, whose exit closes their stdin.
-	runner := sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits, MaxInFlight: cfg.SQLMaxInFlight, Standby: true})
+	runner := sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits, MaxInFlight: cfg.SQLMaxInFlight, Standby: true,
+		WorkerStatements: cfg.SQLWorkerStatements})
+	s.sqlPortSharedSlots = cfg.SQLPortSharedSlots
 	s.sqlRunner, s.sqlSpillState, s.sqlFenceState = sandboxRunner{runner}, runner.SpillState, runner.FenceState
 	s.sqlMaxInFlight = cfg.SQLMaxInFlight
 	if s.sqlMaxInFlight < 1 {
