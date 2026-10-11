@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.103.0] - 2026-10-10
 ### Added
 - **The `bintrail-console` package installs a systemd service** (#2291). The
   `.deb` and `.rpm` used to bring the binary and nothing around it, so
