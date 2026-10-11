@@ -14178,8 +14178,16 @@ function routerSwitch(view, reveal) {
   const lines = [];
   // With no numbers read, nothing below says what a router is.
   if (!st) lines.push({ text: "The router is a second MySQL port for applications, run as a service of its own (bintrail-console router): it sends light reads to MySQL and heavy ones to the copy." });
+  // What the router itself says opens its port, when it answered: this
+  // DBTrail's own start does not say how the router was started.
+  const cred = st && st.credential;
   if (a.token) {
     lines.push({ text: "This DBTrail was started with an access token. A router that reads the same settings takes that token as its only password, so it has no switch here: it is on while it runs, and the token is the password." });
+    if (cred === "saved") lines.push({ strong: "The router that answered was started without that token.", text: "It still follows the switch and password saved before the token was set, which cannot be changed here. Restart the router with the token, or remove the token where DBTrail starts.", err: true });
+    return { lines, on: false, manage: false, port, portKnown };
+  }
+  if (cred === "token") {
+    lines.push({ strong: "The router that answered was started with an access token.", text: "The token is its only password and it is on while it runs: the switch here does not open or close it, so it is not offered. Start the router without the token to manage its password here." });
     return { lines, on: false, manage: false, port, portKnown };
   }
   if (!a.can_manage) {
@@ -14187,7 +14195,7 @@ function routerSwitch(view, reveal) {
     return { lines, on: !!a.enabled, manage: false, port, portKnown };
   }
   if (!a.enabled) {
-    lines.push({ strong: "The router is off.", text: "A router that is running accepts no connection until it is turned on here. " +
+    lines.push({ strong: "The router is off.", text: "A router that is running accepts no connection until it is turned on here" + (cred ? ". " : " (one started with an access token takes the token, and is not turned on or off here). ") +
       (a.has_password ? "Turning it on brings back the password it had; it is not shown again." : "Turning it on creates its password, shown once.") });
     return { lines, on: false, manage: true, port, portKnown };
   }
@@ -14197,6 +14205,10 @@ function routerSwitch(view, reveal) {
   }
   return { lines, on: true, manage: true, port, portKnown };
 }
+
+// routerPasswordOnce is the router's password of the answer that created
+// it, held for as long as this page is open (never stored).
+let routerPasswordOnce = "";
 
 // routerPanel (#2318) draws the router's switch and routerLines, with a
 // Refresh that asks again and repaints this panel alone, and the reasons
@@ -14208,10 +14220,11 @@ function routerPanel(view, cur) {
   panel.append(el("div", { class: "ov-panel-head" }, el("h2", { class: "ov-panel-title", text: "The router" })));
   const body = el("div", { class: "cn-sql-body" });
   panel.append(body);
-  // shown: the password of the answer that created it. Kept across Refresh:
-  // it exists nowhere else, and a repaint must not take it off the screen
-  // before it was copied.
-  let shown = "";
+  // shown: the password of the answer that created it. Kept across Refresh
+  // and across a redraw of the whole page (picking another server, making
+  // an MCP token): it exists nowhere else, and nothing but replacing it,
+  // turning the router off or leaving the page takes it off the screen.
+  let shown = routerPasswordOnce;
   const row = (l, err) => {
     const p = el("p", { class: "cn-sql-row" + (err || l.err ? " cn-sql-err" : "") });
     if (l.strong) p.append(el("b", { text: l.strong }), " ");
@@ -14224,6 +14237,9 @@ function routerPanel(view, cur) {
     // Drawn whatever else the answer says, a failed Refresh included: this
     // is the only place the password exists.
     if (sw) for (const l of sw.lines) body.append(row(l));
+    // A switch that is not on has no password to show: it was turned off
+    // somewhere else, or the router takes a token.
+    if (sw && !sw.on) shown = routerPasswordOnce = "";
     if (shown) {
       body.append(el("p", { class: "cn-sql-row", text: "The router's password, shown only now. Copy it and keep it somewhere safe:" }));
       body.append(el("div", { class: "cn-urlrow" },
@@ -14248,6 +14264,7 @@ function routerPanel(view, cur) {
             // off takes the one on screen away with the port it opened.
             if (rep && rep.password) shown = rep.password;
             else if (!rep || !rep.access || !rep.access.enabled) shown = "";
+            routerPasswordOnce = shown;
             paint(rep);
           }, (e) => {
             btn.disabled = false;
@@ -14274,6 +14291,7 @@ function routerPanel(view, cur) {
       ? [{ text: "This DBTrail is not given the router's address, so the router's numbers are not shown here (CLI: --router-url or BINTRAIL_CONSOLE_ROUTER_URL). SHOW ROUTER STATUS on the router's own port says them." }]
       : [{ text: "This DBTrail is no longer given a router's address." }]);
     for (const l of lines) body.append(row(l, !v || (v.configured && !v.status)));
+    if (!v && shown) body.append(row({ strong: "Copy the password above first:", text: "reloading the page takes it off the screen." }));
     if (!numbers && sw) return;
     const refresh = el("button", { class: "btn btn-sm", type: "button", text: "Refresh" });
     refresh.onclick = () => { refresh.disabled = true; api("/api/router").then(paint, (e) => {

@@ -196,7 +196,7 @@ func (s *Server) refreshFlashbackPassword() {
 		return
 	}
 	f, err := LoadFlashbackFile(path)
-	s.noteFollow("port", "console: the MySQL port's saved setting could not be read; the password created in the web interface is not accepted until it can", err)
+	s.noteFollow("port", "console: the saved setting this port follows could not be read; the password created in the web interface is not accepted until it can", err)
 	password, createdAt := "", ""
 	if err == nil && f.Enabled {
 		password, createdAt = f.Password, f.PasswordCreatedAt
@@ -211,7 +211,7 @@ func (s *Server) refreshFlashbackPassword() {
 	// Outside the lock: closing connections waits on handshakes, which read
 	// the passwords under it.
 	if withdrawn && onWithdrawn != nil {
-		slog.Info("console: the MySQL port's password from the web interface is no longer the one accepted (it was replaced there, the port was turned off, or its setting removed); connections open on this port are closed")
+		slog.Info("console: this port's password from the web interface is no longer the one accepted (it was replaced there, the port was turned off there, or its setting removed); connections open on this port are closed")
 		onWithdrawn()
 	}
 }

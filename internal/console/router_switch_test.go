@@ -234,3 +234,53 @@ func TestRouterSwitch_reportedWithNoAddress(t *testing.T) {
 		t.Fatalf("no address must still read as not configured: %s", rec.Body)
 	}
 }
+
+// The router follows the file, not this process: a file put there, changed
+// or removed while this process runs is what the panel reports and what a
+// change starts from. A change made from what this process last wrote would
+// put a new password over one applications are connected with.
+func TestRouterSwitch_readsTheFileEveryTime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), RouterFileName)
+	s := routerSwitchServer(t, "", path)
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Put there by hand: on, with a password this process never made.
+	write("version: 1\nenabled: true\npassword: kept-from-before\n")
+	if a := s.routerAccess(); !a.Enabled || !a.HasPassword || !a.CanManage {
+		t.Fatalf("a file put there while running: %+v, want reported on", a)
+	}
+	code, on := changeRouter(t, s, "put", `{"enabled":true}`, nil)
+	if code != 200 || on.Password != "" {
+		t.Fatalf("turn on over a password already there = %d, password %q; want none made", code, on.Password)
+	}
+	if f := savedRouterFile(t, path); f.Password != "kept-from-before" || !f.Enabled {
+		t.Fatalf("the password applications use was written over: %+v", f)
+	}
+
+	// Removed: reported off, and no password.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if a := s.routerAccess(); a.Enabled || a.HasPassword || !a.CanManage {
+		t.Fatalf("a file removed while running: %+v, want off with no password", a)
+	}
+
+	// Broken, then mended: refused with the reason, then manageable again
+	// with no restart.
+	write("enabled: [oops\n")
+	if a := s.routerAccess(); a.CanManage || !strings.Contains(a.Refusal, "could not be read") || a.Enabled {
+		t.Fatalf("a file broken while running: %+v", a)
+	}
+	if code, got := changeRouter(t, s, "password", ``, nil); code != 409 || got.Password != "" {
+		t.Fatalf("a new password over a broken file = %d %+v", code, got)
+	}
+	write("version: 1\nenabled: false\npassword: mended\n")
+	if a := s.routerAccess(); !a.CanManage || a.Enabled || !a.HasPassword {
+		t.Fatalf("a file mended while running: %+v", a)
+	}
+}

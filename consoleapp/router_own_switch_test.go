@@ -193,3 +193,22 @@ func TestRouterPort_followsTheSwitchTheConsoleSaves(t *testing.T) {
 	change("PUT", "/api/router", `{"enabled":false}`)
 	waitUntil(t, "the router's port to close after it is turned off in the web interface", func() bool { return bound() == "" && !accepts(addr) })
 }
+
+// The router says which credential opens its port: the web interface cannot
+// tell from its own start, and offers its switch by this.
+func TestRouterStatus_saysWhichCredentialItTook(t *testing.T) {
+	st := routerStatusSettings()
+	st.Token = ""
+	if got := routerStatus(st, console.RouterNumbers{}, &routerCopySnapshots{}).Credential; got != console.RouterCredentialSaved {
+		t.Errorf("started without a token: credential %q, want %q", got, console.RouterCredentialSaved)
+	}
+	st.Token = "tok"
+	doc := routerStatus(st, console.RouterNumbers{}, &routerCopySnapshots{})
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Credential != console.RouterCredentialToken || strings.Contains(string(raw), `"tok"`) {
+		t.Errorf("started with a token: credential %q in %s, want %q and never the token", doc.Credential, raw, console.RouterCredentialToken)
+	}
+}

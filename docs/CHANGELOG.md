@@ -6,20 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-### Changed
-- **The router has a switch and a password of its own.** It took the password
-  of the MySQL port inside `watch`, so the panel that turns that port on and
-  off also opened and closed the router: turning the port off, or replacing
-  its password, disconnected every application connected to the router. The
-  router's panel (Settings, MCP Server, The router) now has **Turn on**,
-  **New password** and **Turn off** for the router alone, each saying first
-  that it disconnects the applications on it, and the panel is there without
-  a router address too. The setting is saved in `console-router.yaml` beside
-  the servers file (`PUT /api/router`, `POST /api/router/password`,
-  `settings:write`). **If you ran a router without an access token, turn it
-  on in its own panel after upgrading and give applications the new
-  password**: the MySQL port's password no longer opens it. A router started
-  with a token is unchanged.
 ### Fixed
 - **Under read routing, a statement the copy answered came back under the
   copy's column names, not MySQL's.** `SELECT COUNT(*), SUM(total) FROM ...`
@@ -96,6 +82,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to MySQL, and a server that cannot route refuses its statements with the
   reason instead of answering them from the copy alone. It listens on
   `127.0.0.1:3310` by default. Nothing changes for the port inside `watch`.
+  Its port opens for an access token (`--token`) or, without one, when it
+  is turned on in the web interface (Settings, MCP Server, The router),
+  which creates its password and shows it once. That switch and that
+  password are the router's own (`PUT /api/router`,
+  `POST /api/router/password`, saved in `console-router.yaml` beside the
+  servers file): the MySQL port inside `watch` has others, and turning that
+  port off or replacing its password does not close the router or
+  disconnect the applications on it.
   It answers `SHOW ROUTER STATUS` on its own port (the copy's age, who
   answered, the pool) and, with `--metrics-addr`, exports the copy's snapshot
   time per server so its age can be alerted on like replica lag.

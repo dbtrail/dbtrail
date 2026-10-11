@@ -67,21 +67,38 @@ type routerSwitch struct {
 	loadErr string
 }
 
-// loadRouterSwitch reads the saved setting at start. A file that cannot be
-// read leaves the switch unmanageable, with the reason, rather than writing
-// over what is there.
+// loadRouterSwitch names the file and reads it for the first time.
 func (s *Server) loadRouterSwitch(path string) {
 	if path == "" {
 		return
 	}
-	s.routerSwitch.path = path
-	f, err := LoadFlashbackFile(path)
+	rs := &s.routerSwitch
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	rs.path = path
+	s.rereadRouterSwitchLocked()
+}
+
+// rereadRouterSwitchLocked reads the file again, before every answer and
+// every change: the router follows the file, not this process, so what this
+// process last wrote is not what the router is doing once anything else
+// touched it (a file copied in or restored, another DBTrail on the same
+// directory). A change made from a stale picture would write a new password
+// over one that applications are connected with. A file that cannot be read
+// leaves the switch unmanageable, with the reason, rather than writing over
+// what is there; it is said in the log once per reason. routerSwitch.mu is
+// held.
+func (s *Server) rereadRouterSwitchLocked() {
+	rs := &s.routerSwitch
+	f, err := LoadFlashbackFile(rs.path)
 	if err != nil {
-		s.routerSwitch.loadErr = err.Error()
-		slog.Warn("console: the router's saved setting could not be read; it cannot be changed from the web interface until it can", "path", path, "error", err)
+		if rs.loadErr != err.Error() {
+			slog.Warn("console: the router's saved setting could not be read; it cannot be changed from the web interface until it can", "path", rs.path, "error", err)
+		}
+		rs.loadErr, rs.saved = err.Error(), FlashbackFile{}
 		return
 	}
-	s.routerSwitch.saved = *f
+	rs.loadErr, rs.saved = "", *f
 }
 
 // routerAccessDTO is the router's switch as GET /api/router reports it.
@@ -110,6 +127,7 @@ func (s *Server) routerAccess() *routerAccessDTO {
 	if rs.path == "" {
 		return nil
 	}
+	s.rereadRouterSwitchLocked()
 	_, refusal := s.routerManageableLocked()
 	return &routerAccessDTO{
 		CanManage: refusal == "", Refusal: refusal, Token: s.token != "",
@@ -129,7 +147,7 @@ func (s *Server) routerManageableLocked() (saved FlashbackFile, refusal string) 
 	case rs.saved.readOnly:
 		return saved, "the router's settings file was written by a newer bintrail; changes are refused"
 	case rs.loadErr != "":
-		return saved, "the router's settings file could not be read, so it is not changed: " + rs.loadErr + ". Fix or remove the file and restart DBTrail."
+		return saved, "the router's settings file could not be read, so it is not changed: " + rs.loadErr + ". Fix or remove the file."
 	}
 	return rs.saved, ""
 }
@@ -165,7 +183,12 @@ func (s *Server) saveRouterSwitch(w http.ResponseWriter, next FlashbackFile) boo
 		if errors.Is(err, ErrFlashbackFileReadOnly) {
 			status = http.StatusConflict
 		}
-		writeJSONError(w, status, "the router's setting could not be saved, so nothing changed: "+err.Error())
+		// The saver's own words name the MySQL port, whose file format this is.
+		reason := err.Error()
+		if errors.Is(err, ErrFlashbackFileReadOnly) {
+			reason = "the router's settings file was written by a newer bintrail; changes are refused"
+		}
+		writeJSONError(w, status, "the router's setting could not be saved, so nothing changed: "+reason)
 		return false
 	}
 	rs.mu.Lock()
@@ -197,6 +220,9 @@ func (s *Server) handleRouterPut(w http.ResponseWriter, r *http.Request) {
 	rs.mutate.Lock()
 	defer rs.mutate.Unlock()
 	rs.mu.Lock()
+	if rs.path != "" {
+		s.rereadRouterSwitchLocked()
+	}
 	saved, refusal := s.routerManageableLocked()
 	rs.mu.Unlock()
 	if refusal != "" {
@@ -233,6 +259,9 @@ func (s *Server) handleRouterPassword(w http.ResponseWriter, r *http.Request) {
 	rs.mutate.Lock()
 	defer rs.mutate.Unlock()
 	rs.mu.Lock()
+	if rs.path != "" {
+		s.rereadRouterSwitchLocked()
+	}
 	saved, refusal := s.routerManageableLocked()
 	rs.mu.Unlock()
 	if refusal != "" {

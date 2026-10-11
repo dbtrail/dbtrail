@@ -85,7 +85,15 @@ const see = () => {
   (function walk(n) { if (!n || typeof n === "string") return; if (n.tag === "button") buttons.push(flat(n).join("") + (n.disabled ? " (disabled)" : "")); for (const c of n.children || []) walk(c); })(p);
   return { text: flat(p).join(" ").replace(/\s+/g, " "), buttons };
 };
+// open is a page opened anew (nothing held from before); redraw is the same
+// page drawn again, as picking another server does.
+const redraw = async (view, perms = {}, cur = "a") => {
+  router = view; sent = []; toasts = []; confirms = []; sayYes = true; change = null;
+  vm.runInContext("currentServer = " + JSON.stringify(cur) + "; capsCache = " + JSON.stringify({ monitor: true, permissions: perms }) + "; capsKnown = true;", ctx);
+  await vm.runInContext("renderConnect()", ctx);
+};
 const open = async (view, perms = {}, cur = "a") => {
+  vm.runInContext('routerPasswordOnce = ""', ctx);
   router = view; sent = []; toasts = []; confirms = []; sayYes = true; change = null;
   vm.runInContext("currentServer = " + JSON.stringify(cur) + "; capsCache = " + JSON.stringify({ monitor: true, permissions: perms }) + "; capsKnown = true;", ctx);
   await vm.runInContext("renderConnect()", ctx);
@@ -120,6 +128,11 @@ const withPw = (v, pw) => Object.assign(JSON.parse(JSON.stringify(v)), { passwor
   await press("Turn off", Object.assign(new Error("the router's setting could not be saved, so nothing changed: disk full"), { status: 500 }));
   out.failedChange = Object.assign(see(), { sent: sent.slice(), toasts: toasts.slice() });
 
+  // The whole page drawn again: the password is still the only copy.
+  await redraw(V.on, {}, "");
+  out.redrawn = see();
+  await redraw(V.on);
+
   sent = [];
   out.pressedOff = await press("Turn off", V.offHad);
   out.turnedOff = Object.assign(see(), { sent: sent.slice() });
@@ -140,6 +153,13 @@ const withPw = (v, pw) => Object.assign(JSON.parse(JSON.stringify(v)), { passwor
 
   await open(V.hostile); out.hostile = see();
   await open(V.odd); out.odd = see();
+  // What the router says of its own start wins over this DBTrail's.
+  const says = (view, cred) => { const v = JSON.parse(JSON.stringify(view)); v.status.credential = cred; return v; };
+  await open(says(V.numbers, "token")); out.routerHasToken = see();
+  await open(Object.assign(says(V.numbers, "saved"), { access: V.token.access })); out.routerHasNoToken = see();
+  await open(says(V.numbers, "saved")); out.routerSaved = see();
+  // Turned off somewhere else while its password was on this screen.
+  await open(V.off); await press("Turn on", withPw(V.on, "brp_gone")); await redraw(V.offHad); out.offElsewhere = see();
   await open(V.token); out.token = see();
   await open(V.refused); out.refused = see();
   await open(V.on, { "settings:write": false }); out.readOnly = see();
@@ -160,12 +180,14 @@ const withPw = (v, pw) => Object.assign(JSON.parse(JSON.stringify(v)), { passwor
 		Buttons, Sent, Confirms, Toasts []string
 	}
 	var got struct {
-		Err                                                  string
-		PressedOn, PressedNew, PressedOff                    bool
-		Off, On, Declined, Replaced, FailedChange, TurnedOff seen
-		Later, NoServer, Numbers, Refreshed, RefreshFailed   seen
-		Hostile, Odd                                         seen
-		Token, Refused, ReadOnly, None                       seen
+		Err                                                    string
+		PressedOn, PressedNew, PressedOff                      bool
+		Off, On, Declined, Replaced, FailedChange, TurnedOff   seen
+		Later, NoServer, Numbers, Refreshed, RefreshFailed     seen
+		Redrawn, RouterHasToken, RouterHasNoToken, RouterSaved seen
+		OffElsewhere                                           seen
+		Hostile, Odd                                           seen
+		Token, Refused, ReadOnly, None                         seen
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %.600q: %v", raw, err)
@@ -235,6 +257,19 @@ const withPw = (v, pw) => Object.assign(JSON.parse(JSON.stringify(v)), { passwor
 		t.Errorf("a change the server refused must be said with its reason: %q", got.FailedChange.Toasts)
 	}
 
+	has("the page drawn again", got.Redrawn, "brp_second", "-u <server-name> -p")
+	hasNot("the page drawn again", got.Redrawn, "It cannot be shown again")
+
+	has("a router that says it took a token", got.RouterHasToken, "The router that answered was started with an access token.", "9 by MySQL")
+	hasNot("a router that says it took a token", got.RouterHasToken, "The router is on.", "mysql -h")
+	buttons("a router that says it took a token", got.RouterHasToken, "Refresh")
+	has("a token here and a router without it", got.RouterHasNoToken, "The router that answered was started without that token.")
+	buttons("a token here and a router without it", got.RouterHasNoToken, "Refresh")
+	has("a router that follows the saved setting", got.RouterSaved, "The router is on.")
+	buttons("a router that follows the saved setting", got.RouterSaved, "Copy, New password, Turn off, Refresh")
+	has("turned off somewhere else", got.OffElsewhere, "The router is off.")
+	hasNot("turned off somewhere else", got.OffElsewhere, "brp_")
+
 	sent("Turn off", got.TurnedOff, `PUT /api/router {"enabled":false}`)
 	has("Turn off", got.TurnedOff, "The router is off.", "brings back the password it had")
 	hasNot("Turn off", got.TurnedOff, "brp_", "mysql -h")
@@ -249,7 +284,7 @@ const withPw = (v, pw) => Object.assign(JSON.parse(JSON.stringify(v)), { passwor
 	buttons("with the router's numbers", got.Numbers, "Copy, New password, Turn off, Refresh")
 
 	has("Refresh after a password was shown", got.Refreshed, "brp_kept", "9 by MySQL")
-	has("a failed Refresh after a password was shown", got.RefreshFailed, "brp_kept", "could not ask this DBTrail")
+	has("a failed Refresh after a password was shown", got.RefreshFailed, "brp_kept", "could not ask this DBTrail", "Copy the password above first")
 	hasNot("a failed Refresh", got.RefreshFailed, "9 by MySQL")
 
 	for name, s := range map[string]seen{"an address that carries a command": got.Hostile, "a port that is no port": got.Odd} {

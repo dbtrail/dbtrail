@@ -324,7 +324,10 @@ func routerStatus(st routerSettings, numbers console.RouterNumbers, last *router
 	doc := console.RouterStatusDoc{
 		Version: console.RouterStatusVersion, Listen: st.Listen, ReadOnly: st.ReadOnly,
 		CostThreshold: st.Policy.CostThreshold, ScanRows: st.Policy.ScanRows,
-		RouterNumbers: numbers,
+		RouterNumbers: numbers, Credential: console.RouterCredentialSaved,
+	}
+	if st.Token != "" {
+		doc.Credential = console.RouterCredentialToken
 	}
 	if doc.Servers == nil {
 		doc.Servers = map[string]console.RouterServerNumbers{}
