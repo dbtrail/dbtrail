@@ -12,7 +12,7 @@ import (
 )
 
 // stripHarnessJS drives ovStripModel (pure) and ovStripSection (paint) over
-// the fake DOM: the three facts the Overview's drawing does not carry
+// the fake DOM: the two facts the Overview's drawing does not carry
 // (#2330). Each case is what the two reads behind the strip handed back.
 const stripHarnessJS = `
 const find = (n, cls, out = []) => { if (!n || !n.children) return out; if ((" " + n.className + " ").includes(" " + cls + " ")) out.push(n);
@@ -51,8 +51,8 @@ type stripOut struct {
 	Links  []string
 }
 
-// TestOverviewStrip pins the three tiles above the Overview's drawing: the
-// running version, how long this process has been up, and the index disk.
+// TestOverviewStrip pins the two tiles above the Overview's drawing: how
+// long this process has been up, and the index disk.
 // Nothing here is green without the payload that earns it, and a read that
 // failed is said as a failure, never as a zero.
 func TestOverviewStrip(t *testing.T) {
@@ -85,7 +85,7 @@ func TestOverviewStrip(t *testing.T) {
 	cases := map[string]c{
 		"healthy":         {"caps": caps, "capacity": pass, "now": nowMS},
 		"caps unreadable": {"caps": c{}, "capsUnknown": true, "capacity": pass, "now": nowMS},
-		"dev build":       {"caps": c{"version": "dev", "started_at": "2026-10-11T05:58:56Z"}, "capacity": pass, "now": nowMS},
+		// The sidebar carries the version; a build that reports none changes nothing here.
 		"no version":      {"caps": c{"started_at": "2026-10-11T05:58:56Z"}, "capacity": pass, "now": nowMS},
 		"no start time":   {"caps": c{"version": "0.103.1"}, "capacity": pass, "now": nowMS},
 		"bad start time":  {"caps": c{"version": "0.103.1", "started_at": "soon"}, "capacity": pass, "now": nowMS},
@@ -135,8 +135,8 @@ func TestOverviewStrip(t *testing.T) {
 		if err := json.Unmarshal(r, &o); err != nil {
 			t.Fatal(err)
 		}
-		if len(o.Tiles) != 3 || len(o.Screen) != 3 {
-			t.Fatalf("%s: want 3 tiles in the model and on screen, got %d and %d", name, len(o.Tiles), len(o.Screen))
+		if len(o.Tiles) != 2 || len(o.Screen) != 2 {
+			t.Fatalf("%s: want 2 tiles in the model and on screen, got %d and %d", name, len(o.Tiles), len(o.Screen))
 		}
 		return o
 	}
@@ -149,51 +149,54 @@ func TestOverviewStrip(t *testing.T) {
 	}
 	const started = "2026-10-11T05:58:56Z"
 	const sinceSub = "since 2026-10-11 05:58:56 UTC"
-	version := stripTile{Key: "Version", Tone: "none", Value: "0.103.1", Sub: "this DBTrail"}
 	running := stripTile{Key: "Running for", Tone: "none", Value: "11h 36m", Sub: sinceSub, Since: started}
 
-	want("healthy", 0, version)
-	want("healthy", 1, running)
-	want("healthy", 2, stripTile{Key: "Disk", Tone: "ok", Value: "96.1 GB free", Sub: "change history 16.7 GB · grows 60.9 GB a day", Link: "status"})
+	want("healthy", 0, running)
+	want("healthy", 1, stripTile{Key: "Disk", Tone: "ok", Value: "96.1 GB free", Sub: "change history 16.7 GB · grows 60.9 GB a day", Link: "status"})
 
 	// The whole tile's words reach the screen, and the tone is on the tile.
 	h := get("healthy")
-	if h.Screen[2] != "Disk96.1 GB freechange history 16.7 GB · grows 60.9 GB a day" {
-		t.Errorf("healthy disk tile on screen: %q", h.Screen[2])
+	if h.Screen[1] != "Disk96.1 GB freechange history 16.7 GB · grows 60.9 GB a day" {
+		t.Errorf("healthy disk tile on screen: %q", h.Screen[1])
 	}
-	if !strings.Contains(h.Tones[2], "tone-ok") || !strings.Contains(h.Tones[0], "tone-none") {
+	if !strings.Contains(h.Tones[1], "tone-ok") || !strings.Contains(h.Tones[0], "tone-none") {
 		t.Errorf("healthy tones on screen: %v", h.Tones)
 	}
-	if h.Links[2] != "a" || h.Links[0] != "div" {
+	if h.Links[1] != "a" || h.Links[0] != "div" {
 		t.Errorf("only the disk tile is a link: %v", h.Links)
 	}
 
 	// The capabilities read failed: neither fact is known, and neither is a
 	// dash that reads as "none".
-	want("caps unreadable", 0, stripTile{Key: "Version", Tone: "none", Value: "unknown", Words: true, Sub: "could not be read"})
-	want("caps unreadable", 1, stripTile{Key: "Running for", Tone: "none", Value: "unknown", Words: true, Sub: "could not be read"})
-	want("caps unreadable", 2, tile("healthy", 2))
+	want("caps unreadable", 0, stripTile{Key: "Running for", Tone: "none", Value: "unknown", Words: true, Sub: "could not be read"})
+	want("caps unreadable", 1, tile("healthy", 1))
 
-	want("dev build", 0, stripTile{Key: "Version", Tone: "none", Value: "dev", Sub: "not a released build"})
-	want("no version", 0, stripTile{Key: "Version", Tone: "none", Value: "dev", Sub: "not a released build"})
-	want("no start time", 1, stripTile{Key: "Running for", Tone: "none", Value: "unknown", Words: true, Sub: "not reported"})
-	want("bad start time", 1, stripTile{Key: "Running for", Tone: "none", Value: "unknown", Words: true, Sub: "not reported"})
+	want("no start time", 0, stripTile{Key: "Running for", Tone: "none", Value: "unknown", Words: true, Sub: "not reported"})
+	want("bad start time", 0, stripTile{Key: "Running for", Tone: "none", Value: "unknown", Words: true, Sub: "not reported"})
 	// The daemon's clock is ahead of the browser's: never a negative age.
-	want("clock ahead", 1, stripTile{Key: "Running for", Tone: "none", Value: "0s", Sub: "since 2026-10-11 18:00:00 UTC", Since: "2026-10-11T18:00:00Z"})
+	want("clock ahead", 0, stripTile{Key: "Running for", Tone: "none", Value: "0s", Sub: "since 2026-10-11 18:00:00 UTC", Since: "2026-10-11T18:00:00Z"})
 
-	want("capacity failed", 2, stripTile{Key: "Disk", Tone: "none", Value: "unknown", Words: true, Sub: "could not be read", Link: "status"})
-	want("capacity denied", 2, stripTile{Key: "Disk", Tone: "none", Value: "unknown", Words: true, Sub: "not available to this session"})
-	want("capacity empty", 2, stripTile{Key: "Disk", Tone: "none", Value: "unknown", Words: true, Sub: "could not be read", Link: "status"})
-	want("no index yet", 2, stripTile{Key: "Disk", Tone: "none", Value: "not measured", Words: true, Sub: "no change history yet", Link: "status"})
-	want("free unknown", 2, stripTile{Key: "Disk", Tone: "none", Value: "free space not measured", Words: true,
+	want("capacity failed", 1, stripTile{Key: "Disk", Tone: "none", Value: "unknown", Words: true, Sub: "could not be read", Link: "status"})
+	want("capacity denied", 1, stripTile{Key: "Disk", Tone: "none", Value: "unknown", Words: true, Sub: "not available to this session"})
+	want("capacity empty", 1, stripTile{Key: "Disk", Tone: "none", Value: "unknown", Words: true, Sub: "could not be read", Link: "status"})
+	want("no index yet", 1, stripTile{Key: "Disk", Tone: "none", Value: "not measured", Words: true, Sub: "no change history yet", Link: "status"})
+	want("free unknown", 1, stripTile{Key: "Disk", Tone: "none", Value: "free space not measured", Words: true,
 		Sub: "change history 16.7 GB · grows 60.9 GB a day", Link: "status"})
-	want("measuring", 2, stripTile{Key: "Disk", Tone: "none", Value: "50.0 GB free", Sub: "change history 2.0 MB · measuring the write rate", Link: "status"})
-	want("will fill", 2, stripTile{Key: "Disk", Tone: "bad", Value: "96.1 GB free", Sub: "will fill · change history 16.7 GB · grows 60.9 GB a day", Link: "status"})
-	want("tight", 2, stripTile{Key: "Disk", Tone: "warn", Value: "96.1 GB free", Sub: "tight headroom · change history 16.7 GB · grows 60.9 GB a day", Link: "status"})
-	want("unknown status", 2, stripTile{Key: "Disk", Tone: "none", Value: "96.1 GB free", Sub: "excellent · change history 16.7 GB · grows 60.9 GB a day", Link: "status"})
-	want("pass without free", 2, stripTile{Key: "Disk", Tone: "none", Value: "free space not measured", Words: true,
+	want("measuring", 1, stripTile{Key: "Disk", Tone: "none", Value: "50.0 GB free", Sub: "change history 2.0 MB · measuring the write rate", Link: "status"})
+	want("will fill", 1, stripTile{Key: "Disk", Tone: "bad", Value: "96.1 GB free", Sub: "will fill · change history 16.7 GB · grows 60.9 GB a day", Link: "status"})
+	want("tight", 1, stripTile{Key: "Disk", Tone: "warn", Value: "96.1 GB free", Sub: "tight headroom · change history 16.7 GB · grows 60.9 GB a day", Link: "status"})
+	want("unknown status", 1, stripTile{Key: "Disk", Tone: "none", Value: "96.1 GB free", Sub: "excellent · change history 16.7 GB · grows 60.9 GB a day", Link: "status"})
+	want("pass without free", 1, stripTile{Key: "Disk", Tone: "none", Value: "free space not measured", Words: true,
 		Sub: "change history 16.7 GB · grows 60.9 GB a day", Link: "status"})
 
+	want("no version", 0, running)
+	for name := range cases {
+		for _, tl := range get(name).Tiles {
+			if tl.Key == "Version" {
+				t.Errorf("%s: a Version tile is back; the sidebar already says it", name)
+			}
+		}
+	}
 	// No case may print a zero for something that was not read, and none
 	// may use the words the first-install screens keep out (the strip is on
 	// that screen too; test/console-e2e's scoreboard counts them) or a dash
@@ -264,7 +267,7 @@ func TestCapabilitiesReportStartedAt(t *testing.T) {
 }
 
 // TestOverviewStripWiring drives the real Overview loop (the #1801 harness:
-// fake clock, fake server) and reads the three tiles off the screen. It pins
+// fake clock, fake server) and reads the tiles off the screen. It pins
 // what the model test cannot: that the tiles are read at all, that "Running
 // for" moves between reads, that a loop that cannot reach the daemon stops
 // vouching for them at once, and that the first good turn reads them again.
@@ -407,22 +410,22 @@ const at = (ms) => new Date(ms).toISOString().replace(/\.\d+Z$/, "Z");
 	const disk = "Disk96.1 GB freechange history 16.7 GB · grows 60.9 GB a day"
 	const since = "since 1970-01-01 00:00:00 UTC"
 	first := out["first"]
-	eq("first paint", first.Tiles, []string{"Version0.103.1this DBTrail", "Running for16m 40s" + since, disk})
+	eq("first paint", first.Tiles, []string{"Running for16m 40s" + since, disk})
 	if first.Caps != 1 || first.Capacity != 1 || first.Ticking != 1 {
 		t.Errorf("first paint: %d capabilities reads, %d capacity reads, %d ticking tiles; want 1, 1, 1", first.Caps, first.Capacity, first.Ticking)
 	}
-	if len(first.Tones) != 3 || !strings.Contains(first.Tones[2], "tone-ok") {
+	if len(first.Tones) != 2 || !strings.Contains(first.Tones[1], "tone-ok") {
 		t.Errorf("first paint tones: %v", first.Tones)
 	}
 	ticked := out["ticked"]
-	eq("after one tick", ticked.Tiles, []string{"Version0.103.1this DBTrail", "Running for16m 45s" + since, disk})
+	eq("after one tick", ticked.Tiles, []string{"Running for16m 45s" + since, disk})
 	if ticked.Caps != 1 {
 		t.Errorf("the tick read capabilities again (%d reads); it must move the figure off its own stamp", ticked.Caps)
 	}
-	if de := out["daemonError"]; de.Ticking != 1 || len(de.Tiles) != 3 || de.Tiles[0] != "Version0.103.1this DBTrail" || de.Tiles[2] != disk {
+	if de := out["daemonError"]; de.Ticking != 1 || len(de.Tiles) != 2 || !strings.HasPrefix(de.Tiles[0], "Running for16m") || de.Tiles[1] != disk {
 		t.Errorf("an error the daemon sent blanked the tiles: %q (ticking %d)", de.Tiles, de.Ticking)
 	}
-	unread := []string{"Versionunknowncould not be read", "Running forunknowncould not be read", "Diskunknowncould not be read"}
+	unread := []string{"Running forunknowncould not be read", "Diskunknowncould not be read"}
 	down := out["down"]
 	eq("daemon unreachable", down.Tiles, unread)
 	if down.Ticking != 0 {
@@ -442,16 +445,16 @@ const at = (ms) => new Date(ms).toISOString().replace(/\.\d+Z$/, "Z");
 	if back.WithinMs == 0 || back.WithinMs > 60000 {
 		t.Errorf("back: tiles read again after %d ms, want within a minute", back.WithinMs)
 	}
-	if len(back.Tiles) != 3 || !strings.HasPrefix(back.Tiles[1], "Running for") || strings.Contains(back.Tiles[1], "16m") || strings.Contains(back.Tiles[1], "unknown") {
+	if len(back.Tiles) != 2 || !strings.HasPrefix(back.Tiles[0], "Running for") || strings.Contains(back.Tiles[0], "16m") || strings.Contains(back.Tiles[0], "unknown") {
 		t.Errorf("back: the new process's uptime is not on screen: %q", back.Tiles)
 	}
-	if len(back.Tiles) == 3 && back.Tiles[2] != disk {
-		t.Errorf("back: disk tile %q", back.Tiles[2])
+	if len(back.Tiles) == 2 && back.Tiles[1] != disk {
+		t.Errorf("back: disk tile %q", back.Tiles[1])
 	}
 	eq("unread while the read hangs", out["late"].Tones, unread)
 	eq("a late read does not paint over unread tiles", out["late"].Tiles, unread)
 	denied := out["denied"]
-	if len(denied.Tiles) != 3 || denied.Tiles[2] != "Diskunknownnot available to this session" || denied.Links[2] != "div" {
+	if len(denied.Tiles) != 2 || denied.Tiles[1] != "Diskunknownnot available to this session" || denied.Links[1] != "div" {
 		t.Errorf("denied: %q %v", denied.Tiles, denied.Links)
 	}
 	if e := out["empty"]; len(e.Tiles) != 0 || e.Asked != 0 {

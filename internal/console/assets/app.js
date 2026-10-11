@@ -1626,8 +1626,8 @@ function ovFrame() {
   // by fillOvFlow once the four reads behind it land, and again on the slow
   // refresh cycle. Not painted on a console that lists no server yet: the
   // add-server card above is that page's whole first screen.
-  // Above the drawing, the three facts it does not carry (#2330): version,
-  // uptime and the index disk. Empty until its two reads land, and left
+  // Above the drawing, the two facts it does not carry (#2330): uptime and
+  // the index disk. Empty until its two reads land, and left
   // empty on a console that lists no server, like the drawing.
   f.stripSlot = el("div");
   v.append(f.stripSlot);
@@ -2614,15 +2614,16 @@ function loadOvFlow(f, live, coverageP) {
   });
 }
 
-// ── The three facts the drawing does not carry (#2330) ──────────────────────
+// ── The two facts the drawing does not carry (#2330) ──────────────────────
 //
 // The drawing above answers capture, the copy and how old the copy's data
 // is. It says nothing about the program itself or the disk under the index:
-// which version is running, how long this process has been up, and how much
-// room the index has. Those are these three tiles, and only those: a tile
+// how long this process has been up, and how much room the index has. Those
+// are these two tiles, and only those (the running version is in the
+// sidebar's foot, so a tile for it said one thing twice on one screen): a tile
 // repeating what an arrow says would be a second voice for one state.
 //
-// ovStripModel is pure, like ovFlowModel: the two payloads in, three tiles
+// ovStripModel is pure, like ovFlowModel: the two payloads in, two tiles
 // out. inp is { caps, capsUnknown, capacity, capacityErr, now }. Tones are
 // the drawing's: ok, warn, bad, none. Only the disk tile is ever coloured,
 // and only by the doctor's own verdict over a disk that was measured.
@@ -2646,14 +2647,11 @@ function ovStripModel(inp) {
   // internals call the index, and a word, never a dash, for a missing value.
   const unread = "could not be read";
 
-  let version, running;
+  // No version tile: the sidebar's foot already carries the running build.
+  let running;
   if (inp.capsUnknown) {
-    version = tile("Version", "none", "unknown", unread, { words: true });
     running = tile("Running for", "none", "unknown", unread, { words: true });
   } else {
-    const ver = String(caps.version || "").replace(/^v/, "");
-    version = !ver || ver === "dev" ? tile("Version", "none", "dev", "not a released build")
-      : tile("Version", "none", ver, "this DBTrail");
     const up = ovSinceText(caps.started_at, now);
     running = up ? tile("Running for", "none", up, "since " + utcLabel(caps.started_at), { since: caps.started_at })
       : tile("Running for", "none", "unknown", "not reported", { words: true });
@@ -2684,10 +2682,10 @@ function ovStripModel(inp) {
       ? tile("Disk", graded, humanBytes(cap.free_bytes) + " free", parts.join(" · "), { link: "status" })
       : tile("Disk", graded === "ok" ? "none" : graded, "free space not measured", parts.join(" · "), { link: "status", words: true });
   }
-  return { tiles: [version, running, disk] };
+  return { tiles: [running, disk] };
 }
 
-// ovStripSection paints the three tiles. The tone is the tile's top border
+// ovStripSection paints the tiles. The tone is the tile's top border
 // (and its class, which the tests read); the words under the value say the
 // same thing, so the row never depends on colour alone.
 function ovStripSection(model) {
@@ -2742,7 +2740,7 @@ function ovDaemonSilent(err) {
   return st === 0 || st === 502 || st === 503 || st === 504;
 }
 
-// ovStripUnread paints the three tiles as not read. The page's loop calls it
+// ovStripUnread paints the tiles as not read. The page's loop calls it
 // the moment a turn of its own fails: the strip's reads ride on that loop,
 // so while the loop cannot reach the daemon nothing would repaint the tiles,
 // and "Running for" would go on counting up for a process that may be gone

@@ -1347,10 +1347,10 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
    everything is .off (grey, "as of"), never red. Under 880px the grid stacks
    and the wires turn. The DBTrail station is the page's one brand-gradient
    element. */
-/* The three facts above the drawing (#2330): version, uptime, index disk.
+/* The two facts above the drawing (#2330): uptime and the index disk.
    The verdict is the tile's top border, and the words under the value say
    the same thing, so the row never depends on colour alone. */
-.ov-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 4px 0 14px; }
+.ov-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 4px 0 14px; }
 .ov-tile {
   display: block; background: var(--surface); border-radius: var(--r-lg); box-shadow: var(--shadow);
   border-top: 3px solid var(--line); padding: 10px 16px 12px; color: inherit; text-decoration: none; min-width: 0;
