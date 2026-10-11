@@ -371,20 +371,23 @@ func rotateOneIndex(ctx context.Context, t RotateTarget, s Settings) (int, error
 		// record describes none of that history. Exempting it would let the
 		// first cycle silently undo a restore the operator had just finished.
 		// The record's own timestamp is the exact test.
-		guarded, oldest, err := upgradeGuardTrips(ctx, db, cfg.DBName, retain)
+		//
+		// The decision itself is guardBlocks, shared with UpgradeGuard so the
+		// surfaces that report this index's window (doctor, the console's
+		// capacity card and rotation panel) can say when the loop is NOT
+		// dropping on it (#2323).
+		partitions, err := listPartitions(ctx, db, cfg.DBName)
 		if err != nil {
 			slog.Warn("built-in rotation: could not evaluate the upgrade guard; skipping drops this cycle",
 				"db", cfg.DBName, "error", config.ScrubDSNText(err.Error(), dsn))
 			return 0, err
 		}
-		exempt := imp.recorded && !oldest.IsZero() && !oldest.Before(imp.recordedAt)
-		if guarded && !exempt {
-			predates := imp.recorded // recorded, yet holding history older than the record
+		if g := guardBlocks(partitions, retain, imp.recorded, imp.recordedAt, time.Now()); g.Blocked {
 			slog.Error("built-in rotation: existing history extends far beyond the default retention — refusing to drop it without an explicit choice",
 				"db", cfg.DBName,
-				"oldest_partition", oldest.UTC().Format("2006-01-02 15:04"),
+				"oldest_partition", g.Oldest.UTC().Format("2006-01-02 15:04"),
 				"default_retain", retainRaw,
-				"history_predates_record", predates,
+				"history_predates_record", g.HistoryPredatesRecord,
 				"action", "set --rotate-retain explicitly (e.g. 30d to confirm, 90d to keep more, off to disable) or BINTRAIL_ROTATE_RETAIN")
 			retain = 0 // still top up future partitions; no drops
 		}
@@ -397,18 +400,6 @@ func rotateOneIndex(ctx context.Context, t RotateTarget, s Settings) (int, error
 		return res.Deferred, err
 	}
 	return res.Deferred, nil
-}
-
-// upgradeGuardTrips reports whether the implicit-default upgrade guard should
-// block drops: true when the oldest named hourly partition is more than twice
-// the retain window old. Returns the oldest partition hour for the log line.
-func upgradeGuardTrips(ctx context.Context, db *sql.DB, dbName string, retain time.Duration) (bool, time.Time, error) {
-	partitions, err := listPartitions(ctx, db, dbName)
-	if err != nil {
-		return false, time.Time{}, err
-	}
-	trips, oldest := guardTrips(partitions, retain, time.Now())
-	return trips, oldest, nil
 }
 
 // guardTrips is the pure decision behind the upgrade guard: strict-> on twice

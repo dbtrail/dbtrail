@@ -19,6 +19,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   those names. A prepared statement uses the names its own `PREPARE` was
   answered with. An expression with no alias no longer needs one to be read
   by name.
+- **The capacity check graded an index over a retention window the rotation
+  loop was refusing to drop on** (#2323). With no retention chosen, the loop's
+  upgrade guard deletes nothing from an index that holds history more than
+  twice as old as the window it would keep (an index older than built-in
+  rotation, or one rebuilt from archives), and says so only in the log. The
+  web interface's Index disk card still projected over that window and could
+  read "ok" while the index grew without limit; the Rotation card, `bintrail
+  status` and `bintrail doctor` named the window as if it were in force. They
+  now share the loop's own decision: `GET /api/capacity` answers the new
+  reason `rotation_paused` (a warning, no steady size, `days_until_full`
+  present, `retention.drops_paused` and `retention.oldest_history`), `GET
+  /api/rotation` carries `index_drops_paused`, the cards say the server keeps
+  everything until a retention is chosen, `status` says the
+  history is not dropped without a retention of your own
+  (`retention.needs_explicit_retain` in JSON) and `doctor` without `--retain`
+  warns instead of projecting (and says so even while it has too little recent history to measure a rate, the state of an index just rebuilt from archives). A retention the daemon was started with, or one
+  saved in the web interface, is an explicit choice: the guard is not
+  consulted and nothing changes there. `status` and `doctor` run outside the
+  daemon and cannot see its flags, so they word it as what a daemon with no
+  retention of its own does; `doctor --retain <window>` grades the index over
+  the window the daemon really uses.
 - **The web interface's capacity check and rotation card projected over the
   retention an index was created under even when the daemon was started with
   a retention of its own** (#2315). With `BINTRAIL_ROTATE_RETAIN=6h` (or

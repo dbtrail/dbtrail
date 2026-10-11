@@ -96,14 +96,15 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// (#1709) — not this flag's default. Asking the index costs one row and
 	// keeps the number on screen from describing a window nothing uses.
 	note := ""
+	var paused *rotation.Guard
 	if !cmd.Flags().Changed("retain") && docIndexDSN != "" {
-		retain, note = assumedRetain(cmd.Context(), docIndexDSN, retain)
+		retain, note, paused = assumedRetain(cmd.Context(), docIndexDSN, retain)
 	}
 	every, err := parseDocSnapshotEvery(docSnapshotEvery)
 	if err != nil {
 		return err
 	}
-	return runDoctorTo(cmd.Context(), doctorOut, docFormat, docSourceDSN, docIndexDSN, docSchemas, retain, note, docProxySQLAdmin, docArchiveS3, docArchiveS3Reg,
+	return runDoctorTo(cmd.Context(), doctorOut, docFormat, docSourceDSN, docIndexDSN, docSchemas, retain, note, paused, docProxySQLAdmin, docArchiveS3, docArchiveS3Reg,
 		doctorOptInChecks(docBaselineS3, docBaselineS3Reg, every, docStagingDir, docSourceDSN, docSchemas)...)
 }
 
@@ -179,8 +180,12 @@ func parseDocRetain(s string) (time.Duration, error) {
 // up` sending preflight output to stderr to keep stdout clean for streaming)
 // pass their own writer here instead of going through the cobra entry point.
 // more are further opt-in checks, run in order after the Object Lock one.
-func runDoctorTo(parent context.Context, w io.Writer, format, sourceDSN, indexDSN, schemasCSV string, indexRetain time.Duration, retainNote, proxysqlAdminDSN, archiveS3, archiveS3Region string, more ...func(context.Context) doctor.CheckResult) error {
-	report := doctor.Build(parent, sourceDSN, indexDSN, schemasCSV, indexRetain, doctor.WithRetainNote(retainNote))
+func runDoctorTo(parent context.Context, w io.Writer, format, sourceDSN, indexDSN, schemasCSV string, indexRetain time.Duration, retainNote string, paused *rotation.Guard, proxysqlAdminDSN, archiveS3, archiveS3Region string, more ...func(context.Context) doctor.CheckResult) error {
+	opts := []doctor.BuildOption{doctor.WithRetainNote(retainNote)}
+	if paused != nil && paused.Blocked {
+		opts = append(opts, doctor.WithDropsPaused(paused.Oldest))
+	}
+	report := doctor.Build(parent, sourceDSN, indexDSN, schemasCSV, indexRetain, opts...)
 	if proxysqlAdminDSN != "" {
 		report.Add(doctor.CheckProxySQLRules(parent, proxysqlAdminDSN))
 	}
@@ -269,19 +274,29 @@ func extCheckResult(c ext.DoctorCheck) doctor.CheckResult {
 // failure keeps the flag's value: a projection over a slightly wrong window is
 // still useful, and a doctor that refuses to run because it could not read one
 // row would be worse than the number it protects.
-func assumedRetain(ctx context.Context, indexDSN string, fallback time.Duration) (time.Duration, string) {
+//
+// The third answer is the loop's upgrade guard for that same window (#2323):
+// an index the loop refuses to drop on it must not be projected over it. nil
+// whenever the window was not read from the index, or the guard could not be
+// evaluated — "not known to be paused", never paused.
+func assumedRetain(ctx context.Context, indexDSN string, fallback time.Duration) (time.Duration, string, *rotation.Guard) {
 	cfg, err := mysql.ParseDSN(indexDSN)
 	if err != nil || cfg.DBName == "" {
-		return fallback, ""
+		return fallback, "", nil
 	}
 	db, err := config.Connect(indexDSN)
 	if err != nil {
-		return fallback, ""
+		return fallback, "", nil
 	}
 	defer db.Close()
 	eff := rotation.ResolveEffective(ctx, db, cfg.DBName)
 	if eff.Retain <= 0 {
-		return fallback, ""
+		return fallback, "", nil
 	}
-	return eff.Retain, eff.DescribeSource()
+	g, err := rotation.UpgradeGuard(ctx, db, cfg.DBName, eff)
+	if err != nil {
+		slog.Debug("doctor: could not evaluate the rotation upgrade guard", "db", cfg.DBName, "error", config.ScrubDSNText(err.Error(), indexDSN))
+		return eff.Retain, eff.DescribeSource(), nil
+	}
+	return eff.Retain, eff.DescribeSource(), &g
 }

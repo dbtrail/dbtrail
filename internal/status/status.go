@@ -1113,6 +1113,13 @@ func WriteStatus(w io.Writer, files []IndexStateRow, parts []PartitionStat, arch
 		fmt.Fprintln(w, "  (the window an unattended daemon drops on while nobody sets --rotate-retain;")
 		fmt.Fprintln(w, "   an explicit --rotate-retain, BINTRAIL_ROTATE_RETAIN, or a setting saved in")
 		fmt.Fprintln(w, "   the web interface, overrides it)")
+		if retention.NeedsExplicitRetain {
+			fmt.Fprintf(w, "  NOT DROPPED WITHOUT A RETENTION OF YOUR OWN: this index holds history back to\n   %s, more than twice that window. A daemon started with no\n", retention.OldestHistory)
+			fmt.Fprintln(w, "   --rotate-retain refuses to delete it, drops nothing, and the index grows")
+			fmt.Fprintln(w, "   unbounded until you choose one (--rotate-retain, BINTRAIL_ROTATE_RETAIN, or")
+			fmt.Fprintln(w, "   Edit rotation in the web interface). A daemon that already runs with one")
+			fmt.Fprintln(w, "   is not affected.")
+		}
 	}
 
 	// ── Section 3: Archives ──────────────────────────────────────────────────
@@ -2044,4 +2051,13 @@ type RetentionInfo struct {
 	// Basis is the machine-readable form of Source: recorded | legacy |
 	// unreadable. JSON consumers grade on this, never on the sentence.
 	Basis string `json:"basis"`
+	// NeedsExplicitRetain is true when a daemon running WITHOUT a retention of
+	// its own refuses to drop this index on Raw: it holds history far beyond
+	// a window nobody chose (the rotation loop's upgrade guard, #2323).
+	// OldestHistory is the oldest partition's hour, UTC. This command cannot
+	// see the daemon's flags, so the field is named for what the index needs,
+	// not for what the daemon is doing: under an explicit retention the guard
+	// is not consulted and drops proceed.
+	NeedsExplicitRetain bool   `json:"needs_explicit_retain,omitempty"`
+	OldestHistory       string `json:"oldest_history,omitempty"`
 }

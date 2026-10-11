@@ -29,6 +29,14 @@ type rotationDTO struct {
 	// to every index) or when this console cannot ask.
 	IndexRetain string `json:"index_retain,omitempty"`
 	IndexBasis  string `json:"index_basis,omitempty"`
+	// IndexDropsPaused is true when the loop's upgrade guard is refusing to
+	// drop the selected server's index on IndexRetain (#2323): it holds
+	// history far beyond a window nobody chose, so nothing is deleted until a
+	// retention is set — saved here, or given to the daemon at startup.
+	// IndexOldestHistory is how far back that history goes. Never set under
+	// an override or a configured retention: those are the explicit choice.
+	IndexDropsPaused   bool       `json:"index_drops_paused,omitempty"`
+	IndexOldestHistory *time.Time `json:"index_oldest_history,omitempty"`
 	// Enabled reports whether the rotation loop is actually RUNNING — false when
 	// the daemon was started with rotation off (--rotate-retain off). The loop's
 	// run/skip decision is taken once at boot, so a saved override does NOT
@@ -66,6 +74,11 @@ func (s *Server) handleRotationGet(w http.ResponseWriter, r *http.Request) {
 		if b, err := s.resolve(r); err == nil && b != nil && b.db != nil {
 			if eff := rotation.ResolveEffective(r.Context(), b.db, b.dbName); eff.Retain > 0 {
 				dto.IndexRetain, dto.IndexBasis = eff.Raw, string(eff.Source)
+				// Only a loop that is running refuses anything; with rotation
+				// off the panel already says so.
+				if oldest, paused := indexDropsPaused(r.Context(), b, eff); paused && dto.Enabled {
+					dto.IndexDropsPaused, dto.IndexOldestHistory = true, &oldest
+				}
 			}
 		}
 	}

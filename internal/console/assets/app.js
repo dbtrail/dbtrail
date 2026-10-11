@@ -6162,6 +6162,12 @@ function retentionBasis(ret) {
   }
 }
 
+// oldestHistoryText is the day a server's oldest kept history starts, from the
+// backend's UTC timestamp ("2026-01-15"); "" when it sent none.
+function oldestHistoryText(ts) {
+  return typeof ts === "string" && ts.length >= 10 ? ts.slice(0, 10) : "";
+}
+
 function daysText(d) {
   if (d === null || d === undefined || !isFinite(d)) return "";
   if (d < 1) return "under a day";
@@ -6194,6 +6200,7 @@ function capacityStateText(cap) {
     case "free_under_floor": return "little free space";
     case "growth_exceeds_free": return "will fill";
     case "no_retention": return "grows without limit";
+    case "rotation_paused": return "not deleting old history";
     case "free_unknown": return "free space unknown";
     case "retention_unknown": return "no window known here";
     case "not_enough_history": return "measuring";
@@ -6264,7 +6271,13 @@ function capacityCard(cap) {
     ? humanBytes(cap.growth_bytes_per_day) + " a day (" + Math.round(cap.events_per_day).toLocaleString() + " events)"
     : "not enough history yet", false, !cap.measured]);
   const basis = ret.known && ret.enabled ? retentionBasis(ret) : "";
-  rows.push(["keeps for", !ret.known ? "not known here" : (ret.enabled ? ret.retain + basis : "rotation is off"), false, !ret.known || !ret.enabled || !!basis]);
+  // drops_paused: the window is what this server WOULD keep, and DBTrail is
+  // deleting nothing (#2323). Showing the window alone would read as in force.
+  const keeps = !ret.known ? "not known here"
+    : !ret.enabled ? "rotation is off"
+    : ret.drops_paused ? "everything, until you choose (would be " + ret.retain + ")"
+    : ret.retain + basis;
+  rows.push(["keeps for", keeps, false, !ret.known || !ret.enabled || !!ret.drops_paused || !!basis]);
   if (cap.measured && cap.projected_bytes > 0) rows.push(["steady size", humanBytes(cap.projected_bytes)]);
   rows.push(["free on disk", cap.free_known ? humanBytes(cap.free_bytes) : "not measurable from here", false, !cap.free_known]);
   if (cap.free_space_days_at_write_rate !== null && cap.free_space_days_at_write_rate !== undefined) rows.push(["free space lasts", daysText(cap.free_space_days_at_write_rate) + " at this rate", false, true]);
@@ -6320,6 +6333,15 @@ function capacityBox(cap) {
         (cap.free_known ? ", and the disk fills in " + days + " (" + free + " free)" : "") + "." + stops;
       help = "Turn rotation on (CLI: --rotate-retain 48h) so old partitions are dropped and the index stays bounded. Archive to Parquet first to keep the history.";
       break;
+    case "rotation_paused": {
+      const since = oldestHistoryText(cap.retention && cap.retention.oldest_history);
+      head = "⚠ DBTrail is not deleting old history on this server";
+      body = "This server holds history" + (since ? " going back to " + since + "," : "") + " far older than the " + window +
+        " it would keep. Nobody chose that limit, so DBTrail will not delete the older history on its own. Until you choose, nothing is deleted and the index grows by " + growth +
+        (cap.free_known ? ": the disk fills in " + days + " (" + free + " free)" : "") + "." + stops;
+      help = "Choose how long to keep history: Settings, Rotation, Edit rotation (or start DBTrail with --rotate-retain). Whatever is older than your choice is deleted on the next rotation; archive it to Parquet first if you want to keep it.";
+      break;
+    }
     default:
       return null;
   }
@@ -7441,7 +7463,13 @@ function rotationCard(rot, archived) {
   // each server then keeps the window it was created under (#2315).
   const configured = rot.source !== "override" && rot.index_basis === "configured";
   kvRow(card, "retention", rot.retain + (rot.source === "override" || configured ? "" : " for a new server"), rot.source !== "override");
-  if (rot.source !== "override" && !configured && rot.index_retain && rot.index_retain !== rot.retain) {
+  if (rot.source !== "override" && !configured && rot.index_drops_paused) {
+    // The upgrade guard: the window is not in force, nothing is deleted
+    // (#2323). Shown even when the window equals the default above.
+    const since = oldestHistoryText(rot.index_oldest_history);
+    kvRow(card, "this server keeps", "everything, until you choose: its history" + (since ? " goes back to " + since + "," : " is") +
+      " far older than " + rot.index_retain + ", and DBTrail does not delete that without being told. Edit rotation to choose.", true);
+  } else if (rot.source !== "override" && !configured && rot.index_retain && rot.index_retain !== rot.retain) {
     kvRow(card, "this server keeps", rot.index_retain + retentionBasis({ source: rot.source, basis: rot.index_basis }), true);
   }
   kvRow(card, "interval", rot.interval);

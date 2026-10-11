@@ -32,7 +32,7 @@ func TestDoctorFullReadDiskWiring(t *testing.T) {
 	}
 	report := func(baselineS3, stagingDir, schemas string) string {
 		var buf bytes.Buffer
-		_ = runDoctorTo(context.Background(), &buf, "text", badDSN, "", schemas, 0, "", "", "", "",
+		_ = runDoctorTo(context.Background(), &buf, "text", badDSN, "", schemas, 0, "", nil, "", "", "",
 			doctorOptInChecks(baselineS3, "", 0, stagingDir, badDSN, schemas)...)
 		return buf.String()
 	}

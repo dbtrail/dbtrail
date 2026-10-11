@@ -196,6 +196,12 @@ const (
 	// CapacityNoRetention: no rotation configured, the index grows without
 	// bound (warn).
 	CapacityNoRetention CapacityReason = "no_retention"
+	// CapacityRotationPaused: rotation is ON and the index has a window, but
+	// the loop's upgrade guard is refusing to drop (history far beyond that
+	// window that no operator chose to delete), so nothing bounds the index
+	// until a retention is set (#2323). Same grade as no_retention, different
+	// fix: the advice there is "turn rotation on", which is wrong here.
+	CapacityRotationPaused CapacityReason = "rotation_paused"
 	// CapacityFreeUnknown: the projection is known but the datadir's free
 	// space is not measurable from this host, so the thresholds are skipped,
 	// not passed (skip).
@@ -235,6 +241,11 @@ type CapacityMeasurement struct {
 	// RetainKnown false means the caller could not say (no projection).
 	Retain      time.Duration
 	RetainKnown bool
+	// DropsPaused is true under CapacityRotationPaused: Retain is the window
+	// the index would rotate on, and nothing is being dropped on it.
+	// PausedOldest is how far back the history the loop will not touch goes.
+	DropsPaused  bool
+	PausedOldest time.Time
 	// ProjectedBytes is the steady-state size over Retain (0 when Retain is
 	// 0 or unknown); RemainingBytes the growth still ahead of CurrentBytes
 	// to reach it (floored at 0).
@@ -255,12 +266,13 @@ type CapacityMeasurement struct {
 }
 
 // DaysUntilFull is when the volume fills, and whether that can be said. Only
-// an index KNOWN to have no retention window grows at the gross rate until
+// an index KNOWN to have no retention window, or one whose window the loop is
+// known not to be dropping on (DropsPaused), grows at the gross rate until
 // the disk is full. A window that is set bounds the index, and one that could
 // not be read may be set, so neither is reported as a date the disk fills
 // (#2263): a client printed "full in 1.3 days" for an index that was flat.
 func (m CapacityMeasurement) DaysUntilFull() (float64, bool) {
-	if !m.FreeDaysKnown || !m.RetainKnown || m.Retain != 0 {
+	if !m.FreeDaysKnown || !m.RetainKnown || (m.Retain != 0 && !m.DropsPaused) {
 		return 0, false
 	}
 	return m.FreeDays, true
@@ -271,7 +283,13 @@ func (m CapacityMeasurement) DaysUntilFull() (float64, bool) {
 // that rotates the index is not this one, so the window is unknown and the
 // check must not claim "unbounded" — it projects nothing and only the
 // free-space floor can warn.
-func EvaluateCapacity(probe CapacityProbe, retain time.Duration, retainKnown bool, now time.Time) CapacityMeasurement {
+//
+// paused, when not nil, says the rotation loop is refusing to drop on retain
+// (the upgrade guard, rotation.UpgradeGuard). The caller decides that: only a
+// caller that knows the window is IMPLICIT may pass it, since under an
+// explicit window the loop never consults the guard. The index is then
+// graded as growing unbounded, with no steady-state projection.
+func EvaluateCapacity(probe CapacityProbe, retain time.Duration, retainKnown bool, paused *DropsPaused, now time.Time) CapacityMeasurement {
 	if len(probe.Partitions) == 0 && !probe.TableVisible {
 		// The probe still measured the volume; a surface that reports free
 		// space must not call it unmeasurable because the TABLE is missing.
@@ -284,8 +302,26 @@ func EvaluateCapacity(probe CapacityProbe, retain time.Duration, retainKnown boo
 	if !retainKnown {
 		retain = 0
 	}
+	if paused != nil && retainKnown && retain > 0 {
+		// Graded exactly as an index with no window (no projection, the
+		// days-until-full forecast), then renamed: the numbers are the same,
+		// the cause and the fix are not. The too-little-history SKIP stands.
+		p, ok := projectCapacity(probe.Partitions, 0, now)
+		m := classifyCapacity(p, ok, 0, true, probe.FreeBytes, probe.FreeKnown, probe.FreeReason)
+		m.Retain, m.DropsPaused, m.PausedOldest = retain, true, paused.Oldest
+		if m.Reason == CapacityNoRetention {
+			m.Reason = CapacityRotationPaused
+		}
+		return m
+	}
 	p, ok := projectCapacity(probe.Partitions, retain, now)
 	return classifyCapacity(p, ok, retain, retainKnown, probe.FreeBytes, probe.FreeKnown, probe.FreeReason)
+}
+
+// DropsPaused is the upgrade guard's refusal, as the capacity check needs it:
+// Oldest is the oldest partition the loop will not drop.
+type DropsPaused struct {
+	Oldest time.Time
 }
 
 // capacityProjection is projectCapacity's measured outcome.
@@ -431,12 +467,16 @@ func capacityCheckResult(m CapacityMeasurement, dbName, retainNote string) Check
 			Detail: fmt.Sprintf("binlog_events is not visible in %q: either the index is not initialized yet, so there is nothing to size, or this user lacks SELECT on it", dbName),
 		}
 	case CapacityNotEnoughHistory:
-		return CheckResult{
-			Name:   CapacityCheckName,
-			Status: StatusSkip,
-			Detail: fmt.Sprintf("not enough recent history to measure a write rate (%d sampled hours, need >=%d with >=%d rows) — re-run after a few hours of streaming",
-				m.SampleHours, capMinSampleHours, capMinSampleRows),
+		detail := fmt.Sprintf("not enough recent history to measure a write rate (%d sampled hours, need >=%d with >=%d rows) — re-run after a few hours of streaming",
+			m.SampleHours, capMinSampleHours, capMinSampleRows)
+		if m.DropsPaused {
+			// The shape of an index just rebuilt from archives: months of
+			// history, no recent rate yet. The rate can wait; the fact that
+			// nothing will be dropped cannot go unsaid (#2323).
+			detail += fmt.Sprintf(". Meanwhile this index holds history back to %s, more than twice the %s it would keep: a daemon running without a retention of its own drops none of it until one is chosen (--rotate-retain, BINTRAIL_ROTATE_RETAIN, or Edit rotation in the web interface)",
+				m.PausedOldest.UTC().Format("2006-01-02 15:04 UTC"), cliRetain(m.Retain))
 		}
+		return CheckResult{Name: CapacityCheckName, Status: StatusSkip, Detail: detail}
 	case CapacityRetentionUnknown:
 		return CheckResult{
 			Name:   CapacityCheckName,
@@ -457,6 +497,25 @@ func capacityCheckResult(m CapacityMeasurement, dbName, retainNote string) Check
 			Remediation: "Configure rotation so the live index stays bounded: `bintrail up` rotates by default (--rotate-retain " + indexer.DefaultRotateRetain + "),\n" +
 				"or schedule `bintrail rotate --retain <window>` (archive to Parquet first with --archive-dir to keep history cheaply).\n" +
 				"Sizing math: docs/capacity.md",
+		}
+	case CapacityRotationPaused:
+		// Worded as a condition on purpose: this command runs outside the
+		// daemon and cannot see whether it was started with a retention of
+		// its own, in which case the guard is not consulted (#2315).
+		detail := fmt.Sprintf("this index holds history back to %s, more than twice the %s it would keep, and a daemon running without a retention of its own does not drop that: until one is chosen nothing is dropped and the index grows unbounded at ~%s/day measured (%.0f events/day × %s/event, InnoDB estimates); current size %s",
+			m.PausedOldest.UTC().Format("2006-01-02 15:04 UTC"), cliRetain(m.Retain),
+			humanBytes(m.GrowthBytesPerDay), m.EventsPerDay, humanBytes(m.BytesPerEvent), humanBytes(float64(m.CurrentBytes)))
+		if days, ok := m.DaysUntilFull(); ok {
+			detail += fmt.Sprintf("; ~%.0f days until the volume fills (%s free)", days, humanBytes(float64(m.FreeBytes)))
+		}
+		return CheckResult{
+			Name:   CapacityCheckName,
+			Status: StatusWarn,
+			Detail: detail,
+			Remediation: "Choose a retention so rotation drops again: start the daemon with --rotate-retain <window> (or BINTRAIL_ROTATE_RETAIN),\n" +
+				"or save one with Edit rotation in the web interface. The daemon's log names the same choice every cycle.\n" +
+				"If the daemon already runs with one, it bounds this index: re-run with --retain <that window> to grade it.\n" +
+				"Why it waits: docs/rotation-and-status.md (upgrade guard)",
 		}
 	}
 
@@ -549,7 +608,7 @@ func freeUnmeasurableDetail(reason CapacityFreeReason) string {
 // checkIndexCapacity runs the capacity projection against the index server.
 // retain is the configured rotation window (0 = no rotation / unknown). It
 // connects server-level (the index database may not exist yet on first run).
-func checkIndexCapacity(ctx context.Context, dsn, dbName string, retain time.Duration, retainNote string) CheckResult {
+func checkIndexCapacity(ctx context.Context, dsn, dbName string, retain time.Duration, retainNote string, paused *DropsPaused) CheckResult {
 	db, err := connectWithoutDB(dsn)
 	if err != nil {
 		// checkIndexConnection (which runs first) already FAILs a dead
@@ -574,7 +633,7 @@ func checkIndexCapacity(ctx context.Context, dsn, dbName string, retain time.Dur
 		}
 		return CheckResult{Name: CapacityCheckName, Status: StatusFail, Detail: err.Error()}
 	}
-	return capacityCheckResult(EvaluateCapacity(probe, retain, true, time.Now()), dbName, retainNote)
+	return capacityCheckResult(EvaluateCapacity(probe, retain, true, paused, time.Now()), dbName, retainNote)
 }
 
 // tableVisible reports whether the table exists AND is visible to this user
@@ -868,4 +927,13 @@ func humanBytes(b float64) string {
 // reports zero free with a real total.
 func DiskSpace(path string) (free, total uint64, err error) {
 	return diskSpace(path)
+}
+
+// cliRetain spells a window the way operators write it: whole days from a
+// week up (30d), hours below (48h, the default's own spelling).
+func cliRetain(d time.Duration) string {
+	if d >= 7*24*time.Hour && d%(24*time.Hour) == 0 {
+		return fmt.Sprintf("%dd", d/(24*time.Hour))
+	}
+	return fmt.Sprintf("%dh", int(d.Hours()))
 }

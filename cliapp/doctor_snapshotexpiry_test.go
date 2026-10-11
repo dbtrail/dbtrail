@@ -19,7 +19,7 @@ func TestDoctorSnapshotExpiryWiring(t *testing.T) {
 	badDSN := "nouser:nopass@tcp(127.0.0.1:1)/"
 
 	var with bytes.Buffer
-	_ = runDoctorTo(context.Background(), &with, "text", badDSN, "", "", 0, "", "", "", "",
+	_ = runDoctorTo(context.Background(), &with, "text", badDSN, "", "", 0, "", nil, "", "", "",
 		snapshotExpiryChecks("/var/backups", "", 0)...)
 	if !strings.Contains(with.String(), doctor.SnapshotExpiryCheckName) {
 		t.Fatalf("report does not contain %q:\n%s", doctor.SnapshotExpiryCheckName, with.String())
@@ -29,7 +29,7 @@ func TestDoctorSnapshotExpiryWiring(t *testing.T) {
 	}
 
 	var without bytes.Buffer
-	_ = runDoctorTo(context.Background(), &without, "text", badDSN, "", "", 0, "", "", "", "",
+	_ = runDoctorTo(context.Background(), &without, "text", badDSN, "", "", 0, "", nil, "", "", "",
 		snapshotExpiryChecks("", "", time.Hour)...)
 	if strings.Contains(without.String(), doctor.SnapshotExpiryCheckName) {
 		t.Fatalf("check present without --baseline-s3:\n%s", without.String())

@@ -6,6 +6,8 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/dbtrail/dbtrail/internal/indexer"
 )
 
 // recordedRetainDB is an index whose rotation_policy row says it was created
@@ -22,8 +24,23 @@ func recordedRetainDB(t *testing.T, retain string, expectRead bool) (*sql.DB, sq
 	if expectRead {
 		mock.ExpectQuery("rotation_policy").
 			WillReturnRows(sqlmock.NewRows([]string{"initial_retain", "recorded_at"}).AddRow(retain, time.Now().Add(-72*time.Hour)))
+		// The implicit path then asks the loop's upgrade guard (#2323), which
+		// lists the partitions. Recent history only: the guard decides "not
+		// paused" on its own, rather than by the listing failing.
+		expectPartitions(mock, time.Hour, 5*time.Hour)
 	}
 	return db, mock
+}
+
+// expectPartitions registers the partition listing the upgrade guard reads,
+// with one hourly partition per age plus p_future.
+func expectPartitions(mock sqlmock.Sqlmock, ages ...time.Duration) {
+	rows := sqlmock.NewRows([]string{"PARTITION_NAME", "PARTITION_DESCRIPTION", "PARTITION_ORDINAL_POSITION"})
+	for i, age := range ages {
+		rows.AddRow(indexer.PartitionName(time.Now().UTC().Add(-age)), "0", i+1)
+	}
+	rows.AddRow("p_future", "MAXVALUE", len(ages)+1)
+	mock.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(rows)
 }
 
 // TestCapacityAPI_explicitRetainBeatsRecord_2315: the loop drops every index

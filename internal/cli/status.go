@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -139,7 +141,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		// Which window this index rotates on while nobody sets one, and where
 		// it came from (#1709). Resolved HERE, by the package that owns the
 		// decision, and passed in: status reports, it does not decide.
-		data.Retention = rotation.ResolveEffective(cmd.Context(), db, dbName).StatusInfo()
+		data.Retention = statusRetention(cmd.Context(), db, dbName)
 	}
 	if err != nil {
 		return err
@@ -410,4 +412,26 @@ func droppedEventsError(dropped int64, reasons []string) error {
 		also = " (" + status.CaptureSkipReasonRowMapFailed + " is a different cause: a text value that could not be converted, which a fresh snapshot does not fix; see `bintrail status` without this flag)"
 	}
 	return fmt.Errorf("capture health: %d event(s) read from the stream and permanently dropped (%s); most often the schema snapshot is stale or corrupt"+also+"; run `bintrail snapshot` against the source and restart the stream, then acknowledge this tally with `bintrail status --index-dsn <index> --ack-capture-skips` (it is monotonic and never clears itself; acknowledging erases nothing and a later skip fails this check again); failing closed under --fail-on-gap", dropped, strings.Join(reasons, ", "))
+}
+
+// statusRetention is the window the index rotates on while nobody sets one,
+// plus the loop's upgrade guard for that window (#2323): an index the loop
+// would refuse to drop on it must not be reported as simply keeping it. A
+// listing that fails says nothing — not known to be held back.
+func statusRetention(ctx context.Context, db *sql.DB, dbName string) *status.RetentionInfo {
+	eff := rotation.ResolveEffective(ctx, db, dbName)
+	info := eff.StatusInfo()
+	if info == nil {
+		return nil
+	}
+	g, err := rotation.UpgradeGuard(ctx, db, dbName, eff)
+	if err != nil {
+		slog.Debug("status: could not evaluate the rotation upgrade guard", "db", dbName, "error", err)
+		return info
+	}
+	if g.Blocked {
+		info.NeedsExplicitRetain = true
+		info.OldestHistory = g.Oldest.UTC().Format("2006-01-02 15:04 UTC")
+	}
+	return info
 }

@@ -149,7 +149,10 @@ func connectWithoutDB(dsn string) (*sql.DB, error) {
 type BuildOption func(*buildConfig)
 
 type buildConfig struct {
-	retainNote    string
+	retainNote string
+	// dropsPaused is WithDropsPaused: the rotation loop's upgrade guard is
+	// refusing to drop on the assumed window.
+	dropsPaused   *DropsPaused
 	snapshot      snapshotState
 	sourceOnly    bool
 	loopbackRetry func(host, port string) string
@@ -191,6 +194,15 @@ func (c *buildConfig) openSource(dsn string) (*sql.DB, error) {
 // the one each index was created under, not the running default.
 func WithRetainNote(note string) BuildOption {
 	return func(c *buildConfig) { c.retainNote = note }
+}
+
+// WithDropsPaused tells the capacity check that the rotation loop is refusing
+// to drop on the window it was given (the upgrade guard, #2323), so the index
+// is graded as growing unbounded instead of projected over that window. Only
+// for a caller that ASSUMED the window from the index's own record: with a
+// window the operator passed, the guard does not apply.
+func WithDropsPaused(oldest time.Time) BuildOption {
+	return func(c *buildConfig) { c.dropsPaused = &DropsPaused{Oldest: oldest} }
 }
 
 // ForUnsavedServer runs the source half of the checks for a server that is not
@@ -365,7 +377,7 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 			report.add(checkSourceIndexColocation(sourceDSN, indexDSN))
 			report.add(checkIndexConnection(ctx, indexDSN, indexCfg.DBName))
 			report.add(checkIndexWriteAccess(ctx, indexDSN, indexCfg.DBName))
-			report.add(checkIndexCapacity(ctx, indexDSN, indexCfg.DBName, indexRetain, cfg.retainNote))
+			report.add(checkIndexCapacity(ctx, indexDSN, indexCfg.DBName, indexRetain, cfg.retainNote, cfg.dropsPaused))
 			report.add(checkIndexBufferPool(ctx, indexDSN))
 		}
 	} else {

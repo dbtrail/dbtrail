@@ -122,6 +122,10 @@ type Effective struct {
 	// Err is set when Source is RetainUnreadable, for the log line; the window
 	// is usable either way.
 	Err error
+	// RecordedAt is when the record was written (the index's creation), set
+	// only for RetainRecorded. The upgrade guard exempts history that
+	// accumulated at or after it — see UpgradeGuard.
+	RecordedAt time.Time
 }
 
 // ResolveEffective answers for one index database, exactly as the rotation
@@ -134,7 +138,7 @@ func ResolveEffective(ctx context.Context, db *sql.DB, dbName string) Effective 
 	case err != nil:
 		return Effective{Retain: imp.retain, Raw: imp.raw, Source: RetainUnreadable, Err: err}
 	case imp.recorded:
-		return Effective{Retain: imp.retain, Raw: imp.raw, Source: RetainRecorded}
+		return Effective{Retain: imp.retain, Raw: imp.raw, Source: RetainRecorded, RecordedAt: imp.recordedAt}
 	default:
 		return Effective{Retain: imp.retain, Raw: imp.raw, Source: RetainLegacy}
 	}
@@ -193,4 +197,57 @@ func (e Effective) StatusInfo() *status.RetentionInfo {
 		return nil
 	}
 	return &status.RetentionInfo{Raw: e.Raw, Source: e.DescribeSource(), Basis: string(e.Source)}
+}
+
+// Guard is the upgrade guard's answer for one index under an implicit window:
+// whether the loop is refusing to drop (#2323). Blocked means every cycle
+// tops up future partitions and drops NOTHING until the operator sets
+// --rotate-retain, so a surface that reports the window must not present it
+// as the size the index settles at — the index is growing unbounded.
+type Guard struct {
+	Blocked bool
+	// Oldest is the oldest named hourly partition, for the sentence that says
+	// how far back the history the loop will not touch reaches.
+	Oldest time.Time
+	// HistoryPredatesRecord is true when the index carries a record and yet
+	// holds history older than it: created empty and then filled (a restore,
+	// `bintrail index` over old binlog files). False for an index with no
+	// record, the pre-record deployment the guard was written for.
+	HistoryPredatesRecord bool
+}
+
+// guardBlocks is the pure decision the loop and every surface share: the
+// guard trips on history more than twice the window old (guardTrips), and an
+// index is exempt only while that history accumulated under the window it
+// records — oldest partition at or after the record's own timestamp. An
+// index with no record (or an unreadable one) is never exempt, and a window
+// of zero has nothing to measure against. Any divergence between this and
+// rotateOneIndex would be #2323 again: a card grading a window the loop is
+// not enforcing.
+func guardBlocks(partitions []partitionInfo, retain time.Duration, recorded bool, recordedAt time.Time, now time.Time) Guard {
+	if retain <= 0 {
+		return Guard{}
+	}
+	trips, oldest := guardTrips(partitions, retain, now)
+	exempt := recorded && !oldest.IsZero() && !oldest.Before(recordedAt)
+	return Guard{
+		Blocked:               trips && !exempt,
+		Oldest:                oldest,
+		HistoryPredatesRecord: trips && !exempt && recorded,
+	}
+}
+
+// UpgradeGuard evaluates the guard for one index exactly as the loop does on
+// its next cycle, for a surface that reports e (ResolveEffective's answer).
+// It is only meaningful under an implicit window: with Settings.Explicit the
+// loop never consults the guard, and a caller that knows the window was set
+// explicitly must not call this. The error is the partition listing failing;
+// the loop then skips drops for that one cycle and retries, so a surface
+// treats it as "not known to be blocked", never as blocked.
+func UpgradeGuard(ctx context.Context, db *sql.DB, dbName string, e Effective) (Guard, error) {
+	partitions, err := listPartitions(ctx, db, dbName)
+	if err != nil {
+		return Guard{}, err
+	}
+	return guardBlocks(partitions, e.Retain, e.Source == RetainRecorded, e.RecordedAt, time.Now()), nil
 }

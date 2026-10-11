@@ -200,3 +200,35 @@ func TestEveryFreeReasonIsAccountedFor(t *testing.T) {
 // defaultArmValue is the reason whose meaning IS capacityFreeNote's default
 // arm; every other unmeasured reason must name itself.
 const defaultArmValue = "unknown"
+
+// #2323: the card for an index the rotation loop refuses to drop on. The copy
+// has to say nothing is being deleted, where the choice is made, and that
+// choosing deletes: the last one is the sentence an operator must read BEFORE
+// saving a retention over months of history.
+func TestCapacityCardSaysWhenRotationIsWaitingForAChoice(t *testing.T) {
+	js, err := os.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(js)
+	paused := caseBody(functionBody(t, src, "function capacityBox("), `case "rotation_paused"`)
+	for _, want := range []string{"not deleting old history", "nothing is deleted", "Edit rotation", "--rotate-retain", "is deleted on the next rotation", "archive it"} {
+		if !strings.Contains(paused, want) {
+			t.Errorf("the rotation_paused box lacks %q", want)
+		}
+	}
+	if strings.Contains(paused, "Turn rotation on") {
+		t.Error("the rotation_paused box gives the no_retention advice: rotation IS on")
+	}
+	if !strings.Contains(functionBody(t, src, "function capacityStateText("), `case "rotation_paused"`) {
+		t.Error("capacityStateText has no rotation_paused chip, so the state reads as the raw grade")
+	}
+	card := functionBody(t, src, "function capacityCard(")
+	if !strings.Contains(card, "ret.drops_paused") || !strings.Contains(card, "everything, until you choose") {
+		t.Error("the keeps-for row shows the window as in force while nothing is dropped on it")
+	}
+	rot := functionBody(t, src, "function rotationCard(")
+	if !strings.Contains(rot, "rot.index_drops_paused") || !strings.Contains(rot, "everything, until you choose") {
+		t.Error("the rotation card says this server keeps a window nothing is dropped on")
+	}
+}

@@ -60,9 +60,23 @@ func TestResolveEffective_agreesWithTheLoop(t *testing.T) {
 	if eff.Retain != 48*time.Hour || eff.Source != RetainRecorded {
 		t.Fatalf("surface reports {%v %s}, want 48h/recorded", eff.Retain, eff.Source)
 	}
+	// A surface must also know the loop is NOT dropping on that window
+	// (#2323): the same guard, asked the same way, on the real index.
+	g, err := UpgradeGuard(context.Background(), db, dbName, eff)
+	if err != nil {
+		t.Fatalf("UpgradeGuard: %v", err)
+	}
+	if !g.Blocked || !g.HistoryPredatesRecord || !g.Oldest.Equal(old) {
+		t.Fatalf("guard = %+v, want blocked, history predating the record, oldest %v", g, old)
+	}
 	// And the loop, on the same index, uses that window (while refusing the
 	// drops the guard holds back).
 	if _, err := rotateOneIndex(context.Background(), RotateTarget{DSN: dsn}, implicitSettings()); err != nil {
 		t.Fatalf("rotateOneIndex: %v", err)
+	}
+	// What the surface was told is what the loop did: the old partition is
+	// still there.
+	if !partitionExists(t, db, dbName, indexer.PartitionName(old)) {
+		t.Fatal("the loop dropped history the guard reported as held back")
 	}
 }

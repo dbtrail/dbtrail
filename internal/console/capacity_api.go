@@ -3,6 +3,7 @@ package console
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -44,6 +45,16 @@ type capacityRetentionDTO struct {
 	// it and no record is read, #2315). Empty under an override, or when this
 	// console cannot ask the index.
 	Basis string `json:"basis,omitempty"`
+	// DropsPaused is true when the loop's upgrade guard is refusing to drop
+	// on Retain: the index holds history far beyond a window nobody chose,
+	// and nothing is deleted until someone sets a retention (#2323). Retain
+	// is then the window the index WOULD keep, the check grades unbounded
+	// growth (reason rotation_paused), and OldestHistory is how far back that
+	// history goes. Only ever set for a window read from the index itself: a
+	// saved override or a retention the daemon was started with is an
+	// explicit choice, which the guard never questions.
+	DropsPaused   bool       `json:"drops_paused,omitempty"`
+	OldestHistory *time.Time `json:"oldest_history,omitempty"`
 	// Enabled is the rotation loop's boot-time liveness. Known && !Enabled
 	// is the "grows without limit" state: this daemon is the one that
 	// would rotate, and it runs with rotation off.
@@ -122,7 +133,11 @@ func (s *Server) handleCapacity(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadGateway, "could not measure the index: "+scrubDSNError(err, b.dsn))
 		return
 	}
-	m := doctor.EvaluateCapacity(in, retain, retention.Known, time.Now())
+	var paused *doctor.DropsPaused
+	if retention.DropsPaused && retention.OldestHistory != nil {
+		paused = &doctor.DropsPaused{Oldest: *retention.OldestHistory}
+	}
+	m := doctor.EvaluateCapacity(in, retain, retention.Known, paused, time.Now())
 	writeJSON(w, http.StatusOK, capacityResponseFrom(m, retention))
 }
 
@@ -153,10 +168,14 @@ func (s *Server) capacityRetention(ctx context.Context, b *bundle) (time.Duratio
 	// 48h, 8x the size the index will ever reach, as a false fail (#2315).
 	if rot.Source == "default" && rot.Enabled && !s.rotationDefaults.Explicit && b != nil && b.db != nil {
 		if eff := rotation.ResolveEffective(ctx, b.db, b.dbName); eff.Retain > 0 {
-			return eff.Retain, capacityRetentionDTO{
+			dto := capacityRetentionDTO{
 				Known: true, Retain: eff.Raw, Source: rot.Source,
 				Basis: string(eff.Source), Enabled: rot.Enabled,
 			}
+			if oldest, paused := indexDropsPaused(ctx, b, eff); paused {
+				dto.DropsPaused, dto.OldestHistory = true, &oldest
+			}
+			return eff.Retain, dto
 		}
 	}
 	dto := capacityRetentionDTO{Known: true, Retain: rot.Retain, Source: rot.Source, Enabled: rot.Enabled}
@@ -204,4 +223,27 @@ func capacityResponseFrom(m doctor.CapacityMeasurement, retention capacityRetent
 		resp.DaysUntilFull = &d
 	}
 	return resp
+}
+
+// indexDropsPaused asks the loop's own upgrade guard whether it is refusing
+// to drop on eff, the window b's index records, and how far back the history
+// it protects goes (#2323). Callers reach it ONLY on the implicit path — no
+// saved override, no retention the daemon was started with — where the loop
+// consults the guard too. A listing that fails answers false: the loop skips
+// that one cycle and retries, so the card must not call a transient error a
+// paused rotation.
+//
+// Bounded like the capacity probe: this is one more read on a page that
+// refreshes, and an index too slow to list its partitions must not hold the
+// rotation panel or the capacity card open.
+func indexDropsPaused(ctx context.Context, b *bundle, eff rotation.Effective) (time.Time, bool) {
+	ctx, cancel := context.WithTimeout(ctx, capacityProbeTimeout)
+	defer cancel()
+	g, err := rotation.UpgradeGuard(ctx, b.db, b.dbName, eff)
+	if err != nil {
+		slog.Debug("could not evaluate the rotation upgrade guard; reporting the index's window as in force",
+			"db", b.dbName, "error", scrubDSNError(err, b.dsn))
+		return time.Time{}, false
+	}
+	return g.Oldest.UTC(), g.Blocked
 }
