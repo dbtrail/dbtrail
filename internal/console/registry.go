@@ -265,6 +265,11 @@ type Registry struct {
 	// readOnly is set when the on-disk version is newer than this binary
 	// understands; see ErrRegistryReadOnly.
 	readOnly bool
+	// follows: the file belongs to another process (LoadRegistryFollower).
+	// followed is the file's content as last read, to tell a change from
+	// none. Guarded by mu.
+	follows  bool
+	followed []byte
 	// processBuckets are buckets the daemon itself reads with the
 	// process-wide endpoint (bucket → the setting's name), which no per-server
 	// store may claim; see SetProcessS3Location. Guarded by mu.
