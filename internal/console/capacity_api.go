@@ -163,14 +163,9 @@ func (s *Server) capacityRetention(ctx context.Context, b *bundle) (time.Duratio
 	if !rot.Enabled {
 		return 0, dto
 	}
+	// An invalid saved override never reaches here: effectiveRotation already
+	// reports the daemon defaults the loop falls back to.
 	d, err := cliutil.ParseRetain(rot.Retain)
-	if err != nil && rot.Source == "override" {
-		// The loop itself ignores an invalid saved override and runs the
-		// daemon defaults (rotationSettingsProvider in the watch command),
-		// so project over what actually rotates, not over the bad value.
-		d, err = cliutil.ParseRetain(s.rotationDefaults.Retain)
-		dto.Retain, dto.Source = s.rotationDefaults.Retain, "default"
-	}
 	if dto.Source == "default" && s.rotationDefaults.Explicit {
 		dto.Basis = string(rotation.RetainConfigured)
 	}

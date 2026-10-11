@@ -2042,6 +2042,12 @@ func rotationSettingsProvider(reg *console.Registry) func() rotation.Settings {
 			if err == nil && s.Enabled {
 				return s
 			}
+			if err == nil {
+				// ParseSettings answers Enabled=false only for a retain of
+				// "off"/"0"/"": the console refuses to save one, so this is a
+				// hand edit. Name it rather than logging error=<nil>.
+				err = fmt.Errorf("retain %q turns rotation off, which only --rotate-retain can do", rc.Retain)
+			}
 			slog.Warn("built-in rotation: ignoring the invalid policy saved in the web interface; using daemon defaults", "error", err)
 		}
 		return upRotationCfg

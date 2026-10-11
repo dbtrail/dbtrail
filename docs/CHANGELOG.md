@@ -21,9 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `basis: configured`, `GET /api/rotation` as `index_retain` equal to the
   configured window with `index_basis: configured`, and the cards say the
   retention was set when DBTrail was started. Indexes rotating on their own
-  record while no retention is set keep the previous behavior. `bintrail
-  doctor` runs outside the daemon and cannot see its environment: pass
-  `--retain` there to match.
+  record while no retention is set keep the previous behavior. The same two
+  surfaces now discard a saved rotation policy by the rule the loop uses, on
+  all three fields (an interval of `1x` or a retain of `off` beside a valid
+  retain, from a hand edit or a newer build), and report the daemon window the
+  loop falls back to instead of the saved retain. `bintrail doctor` and
+  `bintrail status` run outside the daemon and cannot see its environment, so
+  they still report the window the index records; pass `--retain` to `doctor`
+  to match.
 
 ### Added
 - **`bintrail-console router`: the MySQL-protocol port and its read routing as

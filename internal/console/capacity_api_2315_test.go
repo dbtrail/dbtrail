@@ -95,6 +95,40 @@ func TestCapacityAPI_explicitRetainBeatsRecord_2315(t *testing.T) {
 		}
 	})
 
+	t.Run("explicit window with an override the loop refuses for its interval: the daemon window, as configured", func(t *testing.T) {
+		// rotationSettingsProvider validates all three fields; a retain-only
+		// check here would project over the saved 7d while the loop drops on
+		// 6h — the issue's shape from the other side.
+		srv := newCapacityWatchServer(t)
+		srv.rotationDefaults = RotationDefaults{Retain: "6h", Interval: "1h", AddFuture: 3, Enabled: true, Explicit: true}
+		if err := srv.cm.reg.SetRotation(RotationConfig{Retain: "7d", Interval: "1x", AddFuture: 3}); err != nil {
+			t.Fatal(err)
+		}
+		stubCapacityProbe(srv, capacityFixture(0, free, true), nil)
+		got := capacityGet(t, srv)
+		if got.Retention.Retain != "6h" || got.Retention.Source != "default" || got.Retention.Basis != "configured" || got.ProjectedBytes != 6_000_000 {
+			t.Fatalf("retention = %+v projected=%v, want the configured 6h over 6 MB", got.Retention, got.ProjectedBytes)
+		}
+	})
+
+	t.Run("saved retain \"off\" with no explicit window: the record governs, as the loop does", func(t *testing.T) {
+		srv := newCapacityWatchServer(t)
+		srv.rotationDefaults = RotationDefaults{Retain: "48h", Interval: "1h", AddFuture: 3, Enabled: true}
+		if err := srv.cm.reg.SetRotation(RotationConfig{Retain: "off", Interval: "1h", AddFuture: 3}); err != nil {
+			t.Fatal(err)
+		}
+		db, mock := recordedRetainDB(t, "30d", true)
+		srv.cm.boot.db = db
+		stubCapacityProbe(srv, capacityFixture(0, free, true), nil)
+		got := capacityGet(t, srv)
+		if got.Retention.Retain != "30d" || got.Retention.Basis != "recorded" || !got.Retention.Enabled {
+			t.Fatalf("retention = %+v, want the recorded 30d, still enabled (the loop ignores the saved off)", got.Retention)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	t.Run("explicit window, rotation off: unchanged — a loop that is not running is a zero window", func(t *testing.T) {
 		srv := newCapacityWatchServer(t)
 		// ParseSettings drops Explicit for "off" (Settings{}), but a surface

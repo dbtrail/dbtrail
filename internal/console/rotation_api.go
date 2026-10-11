@@ -78,9 +78,20 @@ func (s *Server) handleRotationGet(w http.ResponseWriter, r *http.Request) {
 // branches — never forced true on override presence: a daemon booted with
 // rotation off runs no loop, so a saved override is dormant until a restart and
 // the panel must keep warning, not claim it is live.
+//
+// A saved override is reported only if the loop would run it: the same
+// rotation.ParseSettings the watch command's rotationSettingsProvider applies
+// each cycle, on all three fields. A file edited by hand or written by a newer
+// build can hold an interval of "1x" or a retain of "off" beside a valid
+// retain; the loop then warns and runs the daemon defaults, so the capacity
+// projection and the panel must say the defaults too — projecting over the
+// saved retain alone was the #2315 shape from the other side (#2315 review).
 func (s *Server) effectiveRotation() rotationDTO {
 	d := s.rotationDefaults
 	if rc, ok := s.cm.reg.Rotation(); ok {
+		if st, err := rotation.ParseSettings(rc.Retain, rc.Interval, rc.AddFuture, true); err != nil || !st.Enabled {
+			return rotationDTO{Retain: d.Retain, Interval: d.Interval, AddFuture: d.AddFuture, Source: "default", Enabled: d.Enabled}
+		}
 		return rotationDTO{
 			Retain:    rc.Retain,
 			Interval:  rc.Interval,

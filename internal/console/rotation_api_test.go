@@ -165,6 +165,18 @@ func TestRotationGet_explicitRetain_2315(t *testing.T) {
 		}
 	})
 
+	t.Run("override the loop refuses (bad interval): reported as the configured default it runs", func(t *testing.T) {
+		srv, _ := newSupervisorServer(t)
+		srv.rotationDefaults = RotationDefaults{Retain: "6h", Interval: "1h", AddFuture: 3, Enabled: true, Explicit: true}
+		if err := srv.cm.reg.SetRotation(RotationConfig{Retain: "7d", Interval: "1x", AddFuture: 3}); err != nil {
+			t.Fatal(err)
+		}
+		got := get(t, srv)
+		if got.Source != "default" || got.Retain != "6h" || got.IndexRetain != "6h" || got.IndexBasis != "configured" {
+			t.Fatalf("GET = %+v, want the 6h default the loop falls back to, not the refused 7d", got)
+		}
+	})
+
 	t.Run("override saved: explicit changes nothing, the override applies to every index", func(t *testing.T) {
 		srv, _ := newSupervisorServer(t)
 		srv.rotationDefaults = RotationDefaults{Retain: "6h", Interval: "1h", AddFuture: 3, Enabled: true, Explicit: true}
