@@ -719,6 +719,13 @@ var fenceFor = func() fence {
 	return findFence(cgroupMount, self, cgroupDelegated, settleInLeaf)
 }
 
+// WorkerStatements is how many statements one worker answers before it is
+// replaced: 1 for a Runner whose workers serve one each.
+func (r *Runner) WorkerStatements() int { return max(r.workerStatements, 1) }
+
+// MaxInFlight is how many statements run at once.
+func (r *Runner) MaxInFlight() int { return r.maxInFlight }
+
 // FenceState reports whether a statement runs in a memory cgroup of its own
 // (#2226) and, when it does not on a host where it could, why. Without one a
 // statement that outgrows its memory can only be stopped by the kernel once
