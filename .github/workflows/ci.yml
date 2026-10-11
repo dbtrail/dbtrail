@@ -476,10 +476,14 @@ jobs:
           printf '%s\n' "$TESTS_OUTCOME" > /tmp/mysql-it-shard/outcome
           printf '%s\n' "${S3_READY:-false}" > /tmp/mysql-it-shard/s3-ready
 
+      # The attempt is part of the name: a shard that runs again ("Re-run
+      # failed jobs") uploads beside its earlier result instead of under the
+      # same name, and the `integration` job reads the highest attempt of each
+      # shard. Under one name it sometimes read the older result (#2299).
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() && env.RUN == 'true' }}
         with:
-          name: mysql-it-${{ matrix.mysql }}-shard-${{ matrix.shard }}
+          name: mysql-it-${{ matrix.mysql }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           path: /tmp/mysql-it-shard/
           if-no-files-found: error
           retention-days: 7
@@ -529,46 +533,16 @@ jobs:
 
       # Every shard must have reported and passed. A missing result means the
       # shard was cancelled, crashed before writing it, or the matrix and
-      # SHARD_COUNT disagree. Readiness of the S3 store is true only when it
-      # started in EVERY shard: a shard whose store was down skipped its S3
-      # tests.
+      # SHARD_COUNT disagree. A shard that ran more than once ("Re-run failed
+      # jobs") left one result per attempt, and the newest is the one read.
+      # Readiness of the S3 store is true only when it started in EVERY shard:
+      # a shard whose store was down skipped its S3 tests. The rules, and
+      # their tests: `collect` in scripts/mysql-integration-shard.sh and
+      # scripts/test-mysql-integration-collect.sh.
       - name: Collect the shards (MySQL ${{ matrix.mysql }})
         id: s3store
         if: env.RUN == 'true'
-        run: |
-          count="$(bash scripts/mysql-integration-shard.sh count)"
-          bad=0
-          ready=true
-          : > /tmp/mysql-it.out
-          if [ -f /tmp/mysql-it-shards/outcome ]; then
-            # download-artifact extracts flat when only ONE artifact matched.
-            echo "::error::only one of $count shards reported a result"
-            exit 1
-          fi
-          for i in $(seq 1 "$count"); do
-            d="/tmp/mysql-it-shards/mysql-it-${{ matrix.mysql }}-shard-$i"
-            if [ ! -f "$d/outcome" ]; then
-              echo "::error::shard $i of $count left no result (cancelled, crashed, or not in the matrix)"
-              bad=1
-              ready=false
-              continue
-            fi
-            outcome="$(cat "$d/outcome")"
-            if [ "$outcome" != success ]; then
-              echo "::error::shard $i of $count: tests ended '$outcome'; its log is in the integration-shard (${{ matrix.mysql }}, $i) job"
-              bad=1
-            fi
-            [ "$(cat "$d/s3-ready")" = true ] || ready=false
-            cat "$d/mysql-it.out" >> /tmp/mysql-it.out
-          done
-          extra="$(find /tmp/mysql-it-shards -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
-          if [ "$extra" -gt "$count" ]; then
-            echo "::error::found $extra shard results, SHARD_COUNT is $count: the matrix and the script disagree"
-            bad=1
-          fi
-          echo "ready=$ready" >> "$GITHUB_OUTPUT"
-          grep -E '^(ok  |FAIL)'$'\t' /tmp/mysql-it.out || true
-          exit "$bad"
+        run: bash scripts/mysql-integration-shard.sh collect /tmp/mysql-it-shards "${{ matrix.mysql }}" /tmp/mysql-it.out
 
       # One package (consoleapp) runs in two shards, split by test name: one
       # shard runs the tests a pattern matches, another the rest. Over both
@@ -1526,5 +1500,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: S3 test store lockstep (ci.yml, release.yaml, mirror)
         run: bash scripts/check-s3-store-lockstep.sh
+      - name: The integration job reads each shard's newest attempt
+        run: bash scripts/test-mysql-integration-collect.sh
       - name: MariaDB matrix lockstep (ci.yml, release.yaml)
         run: bash scripts/check-mariadb-matrix-lockstep.sh
