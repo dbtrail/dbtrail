@@ -10206,6 +10206,10 @@ function snapshotSQLMirrorLines(b) {
         (m.ready ? " SQL answers from " + has + "." : " SQL is not available yet.") + " DBTrail tries again by itself." + checked)];
     case "empty":
       return [hint("SQL has nothing to read yet: the bucket holds no complete snapshot to bring to this machine." + checked)];
+    case "off":
+      // Someone turned it off for this server; no page offers the setting,
+      // so the line names it and the other way out.
+      return [hint("SQL is not available on this server: its snapshots are only in S3, and the copy SQL reads on this machine is turned off for it (no_sql_mirror in this server's snapshot settings). Turn it back on, or give the server a Local folder, and SQL becomes available.")];
     case "unfilled":
       return [hint("SQL is not available here. These snapshots are only in S3, and nothing on this machine brings them to disk: bintrail-console watch does.")];
     default:

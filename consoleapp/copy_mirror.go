@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -192,6 +193,27 @@ func (s *copyMirrorState) of(id string) copyMirrorStatus {
 	return s.m[id]
 }
 
+// keepOnly forgets what was recorded for every server not in ids. A server
+// that stops having a mirror (switched off, given a local folder, pointed
+// elsewhere, removed) has its folder swept; what a round once found for it
+// would otherwise be shown again, as this round's, if it gets a mirror back.
+func (s *copyMirrorState) keepOnly(ids map[string]bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id := range s.m {
+		if !ids[id] {
+			delete(s.m, id)
+		}
+	}
+	// And what was said about it: back with a mirror, its first failure or
+	// empty bucket is news again, not a repeat to hold back for an hour.
+	for key := range s.said {
+		if id, _, _ := strings.Cut(key, "\x00"); !ids[id] {
+			delete(s.said, key)
+		}
+	}
+}
+
 // set records a round and returns what the round before left.
 func (s *copyMirrorState) set(id string, st copyMirrorStatus) (prev copyMirrorStatus) {
 	s.mu.Lock()
@@ -239,9 +261,21 @@ func copyMirrorConfig(t copyMirrorTarget, src copymirror.Source, state *copyMirr
 // the next one from its round.
 func runCopyMirrorRound(ctx context.Context, reg *console.Registry, boot bootMirror, state *copyMirrorState,
 	sync func(context.Context, copyMirrorTarget) (copymirror.Result, error)) {
-	for _, t := range copyMirrorTargets(reg, boot) {
+	targets := copyMirrorTargets(reg, boot)
+	ids := map[string]bool{}
+	for _, t := range targets {
+		ids[t.id] = true
+	}
+	state.keepOnly(ids)
+	for i, t := range targets {
 		if ctx.Err() != nil {
 			return
+		}
+		// Asked again before each server after the first: a round can take
+		// long, and a server switched off, moved or removed while an earlier
+		// one downloaded must not be downloaded for on a list from before.
+		if i > 0 && !stillCopyMirrorTarget(reg, boot, t) {
+			continue
 		}
 		res, err := guardedCopyMirrorSync(ctx, t, sync)
 		if err == nil && res.Busy {
@@ -260,6 +294,17 @@ func runCopyMirrorRound(ctx context.Context, reg *console.Registry, boot bootMir
 		// cancellation too.
 		reportCopyMirror(slog.Default(), state, t, res, err, prev, ctx.Err() != nil)
 	}
+}
+
+// stillCopyMirrorTarget reports whether t is a mirror the registry has now:
+// the same server, folder and bucket.
+func stillCopyMirrorTarget(reg *console.Registry, boot bootMirror, t copyMirrorTarget) bool {
+	for _, now := range copyMirrorTargets(reg, boot) {
+		if now.id == t.id {
+			return now.dir == t.dir && now.s3 == t.s3
+		}
+	}
+	return false
 }
 
 // guardedCopyMirrorSync turns a panic in one server's round into that

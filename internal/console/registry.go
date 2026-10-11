@@ -154,6 +154,12 @@ type ServerEntry struct {
 	// #1681) keeps them all, as before. With a destination set it does
 	// nothing: that mode removes only what the destination confirmed.
 	LocalKeepNewest int `yaml:"local_keep_newest,omitempty"`
+	// NoSQLMirror turns off the local mirror SQL on the copy reads for a
+	// server whose snapshots are only in S3 (#2302): nothing is brought to
+	// this machine for it, and SQL does not run on it. It does nothing for a
+	// server that keeps a local folder, which has no mirror. Additive at
+	// registryVersion 1: a binary that predates it has no mirror either.
+	NoSQLMirror bool `yaml:"no_sql_mirror,omitempty"`
 	// LocalKeepHeldDir names a folder that stopped being shared while it
 	// still holds snapshots another server wrote (#1681): the other server
 	// was deleted, answered no, or moved away. A snapshot does not record

@@ -52,7 +52,8 @@ type CopyMirrorReporter interface {
 }
 
 // sqlMirrorDTO is the Snapshots page's view of the mirror. Present only for a
-// server that has one (its snapshots are in S3 and it keeps no local folder).
+// server that has one, or would with its switch on (its snapshots are in S3
+// and it keeps no local folder).
 type sqlMirrorDTO struct {
 	// State is one word for the page to branch on:
 	//
@@ -63,6 +64,7 @@ type sqlMirrorDTO struct {
 	//	empty      the bucket holds no complete snapshot to bring
 	//	waiting    nothing brought yet and no round reported
 	//	unfilled   nothing brought, and this process brings nothing
+	//	off        the mirror is switched off for this server (no_sql_mirror)
 	State string `json:"state"`
 	// Ready: SQL answers from the mirror. It is the statement path's own
 	// test (bundle.usesSQLMirror), asked here again, never a second opinion.
@@ -86,7 +88,15 @@ type sqlMirrorDTO struct {
 // sqlMirrorOf builds the mirror's state for bundle b, nil when the server has
 // no mirror.
 func (s *Server) sqlMirrorOf(b *bundle, serverID string) *sqlMirrorDTO {
-	if b == nil || b.sqlMirrorDir == "" || !strings.HasPrefix(b.baselineSrc, "s3://") {
+	if b == nil || !strings.HasPrefix(b.baselineSrc, "s3://") {
+		return nil
+	}
+	if b.sqlMirrorOff {
+		// Nothing else is true of it: no round runs for this server, and
+		// what an earlier one left is about a folder that is being removed.
+		return &sqlMirrorDTO{State: "off"}
+	}
+	if b.sqlMirrorDir == "" {
 		return nil
 	}
 	out := &sqlMirrorDTO{Ready: b.usesSQLMirror()}

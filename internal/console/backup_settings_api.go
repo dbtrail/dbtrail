@@ -115,6 +115,8 @@ type backupSettingsServerDTO struct {
 	BaselineDir string `json:"baseline_dir"`
 	BaselineS3  string `json:"baseline_s3"`
 	NoArchive   bool   `json:"no_archive"`
+	// NoSQLMirror is the saved switch (ServerEntry.NoSQLMirror).
+	NoSQLMirror bool `json:"no_sql_mirror,omitempty"`
 	// ResolvedDir / ResolvedS3 are the location the read paths use. Equal to
 	// the two above since #1684 (no daemon default fills them in); kept on
 	// the wire because the S3 retention rule reads resolved_s3.
@@ -320,6 +322,7 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 		BaselineDir: e.BaselineDir,
 		BaselineS3:  e.BaselineS3,
 		NoArchive:   e.NoArchive,
+		NoSQLMirror: e.NoSQLMirror,
 		ResolvedDir: e.BaselineDir,
 		ResolvedS3:  e.BaselineS3,
 		ArchiveS3:   e.ArchiveS3,
@@ -424,8 +427,8 @@ func (s *Server) snapshotEveryMinutes(e ServerEntry) int {
 }
 
 // backupSettingsUpdateRequest is the PUT body. Pointer semantics: an omitted
-// field keeps the stored value. This endpoint patches ONLY the three backup
-// fields — unlike PUT /api/servers/{id}, which replaces the entry and
+// field keeps the stored value. This endpoint patches ONLY the snapshot
+// fields below — unlike PUT /api/servers/{id}, which replaces the entry and
 // therefore needs every field echoed back — so a settings row can save
 // without carrying the connection form's whole state.
 type backupSettingsUpdateRequest struct {
@@ -439,6 +442,10 @@ type backupSettingsUpdateRequest struct {
 	LocalCopy *bool `json:"local_copy"`
 	// KeepNewest sets the local retention; 0 keeps every snapshot.
 	KeepNewest *int `json:"keep_newest"`
+	// NoSQLMirror is ServerEntry.NoSQLMirror (#2302): true stops the local
+	// mirror SQL reads for a server whose snapshots are only in S3. Stored
+	// whatever the server keeps now; it applies while it is S3-only.
+	NoSQLMirror *bool `json:"no_sql_mirror"`
 }
 
 // handleBackupSettingsServerUpdate serves PUT /api/backup-settings/servers/{id}.
@@ -492,6 +499,9 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 			return
 		}
 		entry.LocalKeepNewest = *req.KeepNewest
+	}
+	if req.NoSQLMirror != nil {
+		entry.NoSQLMirror = *req.NoSQLMirror
 	}
 	// A folder this save changes must be one DBTrail can use (#1681). An
 	// unchanged one is not re-checked, so a toggle elsewhere on the row still

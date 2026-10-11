@@ -99,6 +99,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   appears at the page's next refresh once the first snapshot arrives; it
   used to need a reload. The message for a snapshot that does not fit gives
   its sizes in GiB and MiB.
+- **The local copy SQL reads can be turned off per server** (#2302). For a
+  server whose snapshots are only on S3, `{"no_sql_mirror": true}` saved
+  through `PUT /api/backup-settings/servers/{id}` stops new downloads and
+  removes that server's mirror from disk at the next round; SQL is then not available on it,
+  and the Snapshots page and the refusal say it is turned off. `false`
+  turns it back on.
 - **SQL on a server whose snapshots are only on S3** (#2302). The SQL card
   and the MySQL port refused such a server ("the copy for this server is only
   on S3"): a statement runs in a process with no network. `bintrail-console
