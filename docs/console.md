@@ -250,8 +250,11 @@ and searching events:
    permanently lost" record when an unfillable gap (or a lost PostgreSQL slot)
    was detected. Both fire for any source family. See
    [the continuity signal](rotation-and-status.md#stream-continuity-no-data-lost).
-   A **Running with** list at the foot of the page gathers what this DBTrail
-   is running with for the selected server, in four groups: the source
+   A **Running with** panel gathers what this DBTrail is running with for
+   the selected server, in four columns, each led by its one figure (the
+   server, the schedule, the memory per statement, how long history is
+   kept). The size and the free space are in the Disk panel, so they are
+   not repeated here. The four groups: the source
    (address, schemas, position), the copy for SQL (the saved schedule and
    whether it can run, how the next run will be made, and the keep count
    where this machine applies one), SQL on the copy (memory per statement,
@@ -267,12 +270,17 @@ and searching events:
    session may not make (`GET /api/servers` without `servers:read`,
    `GET /api/sql-settings` and `GET /api/rotation` without `settings:read`)
    are not made, and read "not available to this session".
-   An **Index disk** card carries the projection `bintrail doctor` computes
-   for the selected server: index size, write rate, the size it settles at
-   for the configured retention, free space on the index volume, and how
-   long that free space lasts at the current rate. The grade is the
-   doctor's; a warn or fail grade also renders a box above the cards saying
-   what fills the disk and what fixes it. Two things it says rather than
+   A **Disk** panel draws the projection `bintrail doctor` computes for the
+   selected server. The free space on the index volume is its one large
+   figure. A bar shows the volume as the index sees it: the change history
+   now, the growth still ahead of it until rotation holds it steady
+   (striped), and what stays free. One line under it gives the write rate
+   and how long history is kept; how long the free space lasts at that rate
+   is added for every grade but a passing one, where it is not a forecast.
+   The grade is the doctor's, on a chip and in the colour of the growth
+   segment; a warn or fail grade also renders a box above the panel saying
+   what fills the disk and what fixes it. Free space that was not measured
+   draws no figure and no bar. Two things it says rather than
    guesses: free space that this process cannot measure reads "not
    measurable from here", never a number, and the card names why it could
    not measure it plus the fix when there is one (mount the index data
@@ -1070,7 +1078,7 @@ its question is asked, and the section after this one says where.
 - **Staged downloads** — under the .sql lane on Snapshots: what is staged on
   the machine, how many builds are for other servers, and a "Staged builds"
   fold with each build's size, state and deadline.
-- **Usage telemetry** — the last card on **Status**, for a session that may
+- **Usage telemetry** — a note at the foot of **Status**, for a session that may
   read settings; described below.
 
 Two cards left the page entirely. **Backups & disk space** moved to the

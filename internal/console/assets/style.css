@@ -897,7 +897,7 @@ button { font-family: inherit; }
 .ov-panel-head, .vfy-region-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
-.card-title, .rw-head, .ov-panel-title, .stg-card-t, .bk-lane-t, .fr-card .dc-name, .state-title, .empty h3 {
+.card-title, .ov-panel-title, .stg-card-t, .bk-lane-t, .fr-card .dc-name, .state-title, .empty h3 {
   font-family: var(--f-ui); font-size: var(--fs-lg); font-weight: 600;
   letter-spacing: -0.01em; line-height: 1.3; color: var(--ink); margin: 0;
 }
@@ -1347,18 +1347,62 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
    everything is .off (grey, "as of"), never red. Under 880px the grid stacks
    and the wires turn. The DBTrail station is the page's one brand-gradient
    element. */
-/* Running with (#2330): the Status page's one list of settings in force.
-   A label, the value in bold, and where the value came from in grey. */
-.rw-card { margin-top: 18px; padding: 22px 22px 18px; background: var(--surface); border-radius: var(--r-xl); box-shadow: var(--shadow); min-width: 0; }
-.rw-head { margin: 0 0 4px; }
-.rw-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 6px 36px; }
-.rw-title { font-family: var(--f-ui); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); margin: 14px 0 4px; }
-.rw-row { display: grid; grid-template-columns: minmax(120px, 42%) 1fr; gap: 12px; padding: 7px 0; border-top: 1px solid var(--line-soft); font-size: 13px; }
-.rw-k { color: var(--ink-2); }
-.rw-val { min-width: 0; overflow-wrap: anywhere; }
-.rw-v { font-weight: 600; color: var(--ink); }
+/* Status, drawn (#2330). Two full-width panels under the strip: the disk
+   as a picture, and what DBTrail is running with as four spec columns. One
+   large figure per panel or column, small labels, hairlines, air. */
+.sdk, .rw-card { margin-top: 20px; padding: 28px 32px 26px; background: var(--surface); border-radius: var(--r-xl); box-shadow: var(--shadow); min-width: 0; }
+.sdk-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.sdk-title, .rw-head { margin: 0; font-family: var(--f-ui); font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); }
+.sdk-body { display: grid; grid-template-columns: minmax(220px, auto) 1fr; gap: 20px 56px; align-items: center; margin-top: 18px; }
+.sdk-num { font-family: var(--f-display); font-size: 64px; font-weight: 600; letter-spacing: -0.03em; line-height: 1; color: var(--ink); font-variant-numeric: tabular-nums; }
+.sdk-unit { font-size: 24px; font-weight: 500; letter-spacing: 0; margin-left: 6px; color: var(--ink-2); }
+.sdk-cap { margin-top: 6px; font-size: 13px; color: var(--ink-3); }
+.sdk-words { font-size: 15px; color: var(--ink-2); max-width: 36ch; }
+.sdk-bar { display: flex; height: 14px; border-radius: 999px; background: var(--line-soft); overflow: hidden; }
+.sdk-seg { display: block; height: 100%; }
+.sdk-bar .sdk-now { background: var(--ink); }
+.sdk-bar .sdk-ahead { background: repeating-linear-gradient(135deg, var(--ok) 0 6px, transparent 6px 10px); opacity: .55; }
+.sdk-bar.tone-warn .sdk-ahead { background: repeating-linear-gradient(135deg, var(--warn) 0 6px, transparent 6px 10px); opacity: .8; }
+.sdk-bar.tone-bad .sdk-ahead { background: var(--error); opacity: 1; }
+.sdk-legend { display: flex; flex-wrap: wrap; gap: 6px 28px; margin-top: 14px; font-size: 13px; }
+.sdk-item { display: inline-flex; align-items: baseline; gap: 7px; }
+.sdk-dot { align-self: center; width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
+.sdk-dot.sdk-now { background: var(--ink); }
+.sdk-dot.sdk-ahead { background: var(--ok); opacity: .55; }
+.sdk-dot.sdk-free { background: var(--line); }
+.sdk-k { color: var(--ink-3); }
+.sdk-v { font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.sdk-facts { margin: 22px 0 0; padding-top: 16px; border-top: 1px solid var(--line-soft); font-size: 13px; color: var(--ink-3); }
+.sdk-note { margin: 10px 0 0; font-size: 13px; color: var(--ink-2); max-width: 90ch; }
+.rw-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 28px 36px; margin-top: 22px; }
+.rw-title { margin: 0 0 10px; font-family: var(--f-ui); font-size: 13px; font-weight: 500; color: var(--ink-3); }
+.rw-row { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; padding: 9px 0; border-top: 1px solid var(--line-soft); font-size: 13px; }
+.rw-k { color: var(--ink-3); flex: 0 1 auto; max-width: 58%; }
+.rw-val { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+.rw-row:not(.rw-stack) .rw-val .rw-v { white-space: nowrap; }
+.rw-row.rw-stack { flex-direction: column; align-items: flex-start; gap: 2px; }
+.rw-stack .rw-k { max-width: none; }
+.rw-stack .rw-val { text-align: left; }
+.rw-v { font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
 .rw-from { display: block; color: var(--ink-3); font-size: 12px; margin-top: 1px; }
-.rw-note { margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--orange-tint); color: var(--orange-deep); font-size: 12.5px; }
+/* The column's figure: value first and large, its label and origin under. */
+.rw-row.rw-lead { flex-direction: column; align-items: flex-start; gap: 3px; border-top: 0; padding: 0 0 16px; }
+.rw-lead .rw-k { max-width: none; }
+.rw-lead .rw-v { display: block; font-family: var(--f-display); font-size: 32px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; }
+.rw-lead .rw-v.rw-long { font-size: 21px; line-height: 1.25; letter-spacing: -0.01em; padding: 6px 0 5px; }
+.rw-lead .rw-from { font-size: 12px; margin-top: 0; }
+.rw-note { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--orange-tint); color: var(--orange-deep); font-size: 12.5px; }
+/* Usage telemetry, at the foot and quiet: a fact about the process, not one
+   of the page's figures. */
+.status-foot { margin-top: 26px; }
+.status-foot .card { background: transparent; box-shadow: none; overflow: visible; padding: 0 6px; font-size: 12.5px; color: var(--ink-3); }
+.status-foot .card-title { font-family: var(--f-ui); font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 6px; }
+.status-foot .stg-hint, .status-foot .form-hint { font-size: 12.5px; color: var(--ink-3); margin: 0 0 4px; }
+@media (max-width: 760px) {
+  .sdk, .rw-card { padding: 22px 20px; }
+  .sdk-body { grid-template-columns: 1fr; gap: 18px; }
+  .sdk-num { font-size: 48px; }
+}
 /* The two facts under the drawing (#2330): uptime and the index disk, on
    one quiet line. Small and below on purpose: the drawing is the page's
    answer. The verdict is the dot before the disk item, and the words after

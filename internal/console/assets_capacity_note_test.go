@@ -22,7 +22,7 @@ func TestCapacityCardNamesWhyFreeSpaceIsUnmeasurable(t *testing.T) {
 	src := string(js)
 	note := functionBody(t, src, "function capacityNote(")
 	free := functionBody(t, src, "function capacityFreeNote(")
-	card := functionBody(t, src, "function capacityCard(")
+	card := functionBody(t, src, "function diskPanel(")
 	// capacityBox is in the sweep too: it is the other place this card's copy
 	// is written, and the claim could come back there just as easily.
 	box := functionBody(t, src, "function capacityBox(")
@@ -70,7 +70,7 @@ func TestCapacityCardNamesWhyFreeSpaceIsUnmeasurable(t *testing.T) {
 		t.Error("capacityFreeNote must key on free_known and free_reason")
 	}
 	if !strings.Contains(card, "capacityFreeNote(") {
-		t.Error("capacityCard never renders the free-space reason, so it reaches nobody")
+		t.Error("diskPanel never renders the free-space reason, so it reaches nobody")
 	}
 	if strings.Contains(free, "—") {
 		t.Error("em dash in card copy")
@@ -223,7 +223,7 @@ func TestCapacityCardSaysWhenRotationIsWaitingForAChoice(t *testing.T) {
 	if !strings.Contains(functionBody(t, src, "function capacityStateText("), `case "rotation_paused"`) {
 		t.Error("capacityStateText has no rotation_paused chip, so the state reads as the raw grade")
 	}
-	card := functionBody(t, src, "function capacityCard(")
+	card := functionBody(t, src, "function diskPanel(")
 	if !strings.Contains(card, "ret.drops_paused") || !strings.Contains(card, "everything, until you choose") {
 		t.Error("the keeps-for row shows the window as in force while nothing is dropped on it")
 	}

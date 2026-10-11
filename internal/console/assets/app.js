@@ -6256,24 +6256,14 @@ async function renderStatus() {
   // station says the events and the partitions, the history arrow the span
   // and its two bounds, the capture arrow the position and the indexed
   // files. The cards keep what the strip does not show.
-  if (stream) cards.append(statusCard(pg ? "Stream · PostgreSQL" : "Stream", pg ? [
-    ["source", "PostgreSQL · logical replication"],
-    ["events indexed", stream.events_indexed],
-    ["last checkpoint", utcBare(stream.last_checkpoint)],
-  ] : [
-    ["mode", stream.mode],
-    ["events indexed", stream.events_indexed],
-    ["last checkpoint", utcBare(stream.last_checkpoint)],
-  ]));
+  // No Stream card (#2330): the strip's capture arrow says the position and
+  // how long ago the last checkpoint was, its DBTrail station the events,
+  // and Running with the mode. A card repeating the three said them twice.
   if (arch) cards.append(statusCard("Archives", [
     ["rows", arch.total_rows],
     ["local files", arch.local_files],
     ["S3 files", arch.s3_files],
   ]));
-  cards.append(capacityCard(capacity));
-  // Usage telemetry (#1867): what this process sends is a fact about the
-  // process, like everything else on this page. Last, after the data.
-  if (telemetry) cards.append(telemetryCard(telemetry));
   // Replication-health panel (#599): the streaming daemon polls the PostgreSQL source
   // (slot wal_status/lag + REPLICA IDENTITY coverage) and persists a snapshot to the
   // index; this renders it. Gated on source==postgresql AND a snapshot existing.
@@ -6292,12 +6282,19 @@ async function renderStatus() {
   // filling index volume is read before the cards, next to the other alarms.
   const capBox = capacityBox(capacity);
   if (capBox) v.append(capBox);
-  v.append(cards);
-  // Under the cards, full width: what this DBTrail is running with for the
-  // selected server (#2330).
+  // The disk as a picture, then what this DBTrail is running with for the
+  // selected server (#2330), each across the page. The size and the free
+  // space are in the picture, so the list leaves those two rows out.
+  v.append(diskPanel(capacity));
   const sid = currentServer || defaultServerId;
   const entry = servers ? ((servers.servers || []).find((x) => x.id === sid) || null) : null;
-  v.append(runningWithCard(runningWithModel({ servers, server: entry, serverId: sid, status: data, copy, sql: sqlSet, rotation, capacity, pg })));
+  v.append(runningWithCard(runningWithModel({ servers, server: entry, serverId: sid, status: data, copy, sql: sqlSet, rotation, capacity, pg }),
+    { skip: capacity && !capacity.error && capacity.status ? ["size", "free on disk"] : [] }));
+  if (cards.children.length) v.append(cards);
+  // Usage telemetry (#1867): what this process sends is a fact about the
+  // process, like everything else on this page. Last, after the data, and
+  // quiet: a line at the foot, not a card among the figures.
+  if (telemetry) v.append(el("div", { class: "status-foot" }, telemetryCard(telemetry)));
   viewEnter();
 }
 
@@ -6486,25 +6483,126 @@ function runningWithModel(inp) {
   return { groups };
 }
 
-// runningWithCard paints the list: one block per group, each row a label,
-// the value in bold, and where the value came from in grey.
-function runningWithCard(model) {
-  // Not one of the page's cards (the grid above, whose last is the usage
-  // telemetry card, #1867): a section of its own under them, full width.
+// runningWithCard paints the list as four spec columns (#2330): in each, the
+// group's first row is the figure, large, with its label and origin under
+// it, and the rest are quiet label and value lines. The model's words are
+// all here; only their size says which one the column is about.
+// opts.skip: row labels another part of the page already draws (the disk
+// panel above carries the size and the free space as a picture).
+function runningWithCard(model, opts) {
+  const skip = (opts && opts.skip) || [];
   const card = el("section", { class: "rw-card" }, el("h2", { class: "rw-head", text: "Running with" }));
   const grid = el("div", { class: "rw-groups" });
   for (const g of model.groups) {
+    const rows = g.rows.filter((r) => !skip.includes(r.k));
     const box = el("div", { class: "rw-group" }, el("h3", { class: "rw-title", text: g.title }));
-    for (const r of g.rows) {
-      box.append(el("div", { class: "rw-row" },
+    rows.forEach((r, i) => {
+      // The figure reads top down: the value, what it is, where it came from.
+      if (i === 0) {
+        box.append(el("div", { class: "rw-row rw-lead" },
+          el("span", { class: "rw-v" + (r.v.length > 14 ? " rw-long" : ""), text: r.v }),
+          el("span", { class: "rw-k", text: r.k }),
+          r.from ? el("span", { class: "rw-from", text: r.from }) : null));
+        return;
+      }
+      // A long value, or a long origin under it, takes the row's whole
+      // width under its label; beside the label it would wrap to a ribbon.
+      const stack = r.v.length > 18 || r.from.length > 28;
+      box.append(el("div", { class: "rw-row" + (stack ? " rw-stack" : "") },
         el("span", { class: "rw-k", text: r.k }),
         el("span", { class: "rw-val" }, el("span", { class: "rw-v", text: r.v }), r.from ? el("span", { class: "rw-from", text: r.from }) : null)));
-    }
+    });
     if (g.note) box.append(el("p", { class: "rw-note", text: g.note }));
     grid.append(box);
   }
   card.append(grid);
   return card;
+}
+
+// ── The disk, drawn (#2330) ──────────────────────────────────────────────────
+//
+// diskPanel is the Status page's reading of GET /api/capacity as a picture:
+// the free space as the one large figure, and a bar of the volume as the
+// index sees it (change history now, the growth still ahead of it until
+// rotation holds it steady, and what stays free). It draws what a card of
+// rows listed before it, from the same payload, and the grade is still the
+// doctor's: the chip carries it, and the growth segment takes its colour.
+//
+// The picture is for a disk that was measured. Free space that could not be
+// measured draws no bar and no figure, only the words that say so, and every
+// sentence the card had for a grade that is not "ok" is still here.
+function diskPanel(cap) {
+  const sec = el("section", { class: "sdk" });
+  const head = el("div", { class: "sdk-head" }, el("h2", { class: "sdk-title", text: "Disk" }));
+  sec.append(head);
+  if (!cap || cap.error) {
+    sec.append(el("p", { class: "sdk-words", text: "Could not measure the index disk" + (cap && cap.error ? ": " + cap.error : ".") }));
+    return sec;
+  }
+  head.append(el("span", { class: "chip chip-sm " + capacityChipClass(cap.status) + " hstat " + capacityStateClass(cap.status), text: capacityStateText(cap) }));
+  // No index yet: there is no size to draw, and a "0 B" would be a figure
+  // for something that does not exist.
+  if (cap.reason === "not_initialized") {
+    sec.append(el("p", { class: "sdk-words", text: capacityNote(cap) }));
+    return sec;
+  }
+  const ret = cap.retention || {};
+  const split = (bytes) => { const [n, u] = humanBytes(bytes).split(" "); return [n, u || ""]; };
+  const steady = cap.measured && cap.projected_bytes > 0;
+  const body = el("div", { class: "sdk-body" });
+  if (cap.free_known) {
+    const [n, u] = split(cap.free_bytes);
+    body.append(el("div", { class: "sdk-fig" },
+      el("div", { class: "sdk-num" }, n, el("span", { class: "sdk-unit", text: u })),
+      el("div", { class: "sdk-cap", text: "free" })));
+  } else {
+    body.append(el("div", { class: "sdk-fig" }, el("div", { class: "sdk-words", text: "Free space not measurable from here" })));
+  }
+  const pic = el("div", { class: "sdk-pic" });
+  if (cap.free_known && cap.current_bytes + cap.free_bytes > 0) {
+    const total = cap.current_bytes + cap.free_bytes;
+    const pct = (b) => Math.max(0, Math.min(100, (b / total) * 100));
+    const ahead = steady && cap.projected_bytes > cap.current_bytes ? Math.min(cap.projected_bytes - cap.current_bytes, cap.free_bytes) : 0;
+    // A sliver stays visible: an index of a few megabytes on a large volume
+    // would otherwise draw as an empty bar.
+    const nowW = Math.max(pct(cap.current_bytes), 0.6);
+    const bar = el("div", { class: "sdk-bar tone-" + (cap.status === "fail" ? "bad" : cap.status === "warn" ? "warn" : "ok"), role: "img",
+      "aria-label": "Change history " + humanBytes(cap.current_bytes) + (steady ? ", settling at " + humanBytes(cap.projected_bytes) : "") + ", " + humanBytes(cap.free_bytes) + " free" });
+    const now = el("span", { class: "sdk-seg sdk-now" }); now.style.width = nowW.toFixed(2) + "%";
+    bar.append(now);
+    if (ahead > 0) { const g = el("span", { class: "sdk-seg sdk-ahead" }); g.style.width = pct(ahead).toFixed(2) + "%"; bar.append(g); }
+    pic.append(bar);
+  }
+  const legend = el("div", { class: "sdk-legend" });
+  const item = (cls, k, v) => legend.append(el("div", { class: "sdk-item" }, el("span", { class: "sdk-dot " + cls, "aria-hidden": "true" }),
+    el("span", { class: "sdk-k", text: k }), el("span", { class: "sdk-v", text: v })));
+  item("sdk-now", "change history now", humanBytes(cap.current_bytes));
+  if (steady) item("sdk-ahead", "settles at", humanBytes(cap.projected_bytes));
+  if (cap.free_known) item("sdk-free", "free", humanBytes(cap.free_bytes));
+  pic.append(legend);
+  body.append(pic);
+  sec.append(body);
+
+  // One quiet line of what moves the picture: the write rate, and how long
+  // history is kept (what the row card called "keeps for").
+  const basis = ret.known && ret.enabled ? retentionBasis(ret) : "";
+  const keeps = !ret.known ? "how long history is kept is not known here"
+    : !ret.enabled ? "rotation is off"
+    : ret.drops_paused ? "keeps everything, until you choose (would be " + ret.retain + ")"
+    : "keeps " + ret.retain + basis;
+  const facts = [cap.measured ? "grows " + humanBytes(cap.growth_bytes_per_day) + " a day" : "not enough history yet for a write rate",
+    cap.measured ? Math.round(cap.events_per_day).toLocaleString() + " changes a day" : "", keeps];
+  if (cap.status !== "pass" && cap.free_space_days_at_write_rate !== null && cap.free_space_days_at_write_rate !== undefined) {
+    facts.push("free space lasts " + daysText(cap.free_space_days_at_write_rate) + " at this rate");
+  }
+  sec.append(el("p", { class: "sdk-facts", text: facts.filter(Boolean).join(" · ") }));
+  // The reading in words, for every grade but the plain "ok": that one the
+  // picture and the chip already say.
+  const note = cap.reason === "ok" ? "" : capacityNote(cap);
+  if (note) sec.append(el("p", { class: "sdk-note", text: note }));
+  const freeNote = capacityFreeNote(cap);
+  if (freeNote) sec.append(el("p", { class: "sdk-note", text: freeNote }));
+  return sec;
 }
 
 function statusCard(title, rows) {
@@ -6519,7 +6617,7 @@ function statusCard(title, rows) {
 
 // ── Index disk (#1444) ──
 //
-// capacityCard and capacityBox render GET /api/capacity: the projection
+// diskPanel and capacityBox render GET /api/capacity: the projection
 // `bintrail doctor` computes (write rate from the last 24 hours of partition
 // statistics, steady-state size over the retention window, free space on the
 // index volume when this process can measure it). The GRADE is the doctor's,
@@ -6642,48 +6740,6 @@ function capacityFreeNote(cap) {
     default:
       return "DBTrail cannot see the index volume from here, so free space was not measured.";
   }
-}
-
-function capacityCard(cap) {
-  const card = el("div", { class: "card" }, el("div", { class: "card-title", text: "Index disk" }));
-  if (!cap || cap.error) {
-    card.append(el("p", { class: "form-hint", text: "Could not measure the index disk" + (cap && cap.error ? ": " + cap.error : ".") }));
-    return card;
-  }
-  const ret = cap.retention || {};
-  // A row's value is a figure (mono) or words (the UI face, #1950): "not
-  // enough history yet" is a sentence, not data.
-  const rows = [["index size", humanBytes(cap.current_bytes), true]];
-  rows.push(["write rate", cap.measured
-    ? humanBytes(cap.growth_bytes_per_day) + " a day (" + Math.round(cap.events_per_day).toLocaleString() + " events)"
-    : "not enough history yet", false, !cap.measured]);
-  const basis = ret.known && ret.enabled ? retentionBasis(ret) : "";
-  // drops_paused: the window is what this server WOULD keep, and DBTrail is
-  // deleting nothing (#2323). Showing the window alone would read as in force.
-  const keeps = !ret.known ? "not known here"
-    : !ret.enabled ? "rotation is off"
-    : ret.drops_paused ? "everything, until you choose (would be " + ret.retain + ")"
-    : ret.retain + basis;
-  rows.push(["keeps for", keeps, false, !ret.known || !ret.enabled || !!ret.drops_paused || !!basis]);
-  if (cap.measured && cap.projected_bytes > 0) rows.push(["steady size", humanBytes(cap.projected_bytes)]);
-  rows.push(["free on disk", cap.free_known ? humanBytes(cap.free_bytes) : "not measurable from here", false, !cap.free_known]);
-  if (cap.free_space_days_at_write_rate !== null && cap.free_space_days_at_write_rate !== undefined) rows.push(["free space lasts", daysText(cap.free_space_days_at_write_rate) + " at this rate", false, true]);
-  rows.forEach(([k, val, big, words]) => {
-    card.append(el("div", { class: "kv" },
-      el("span", { class: "kv-k", text: k }),
-      el("span", { class: "kv-v" + (big ? " big" : "") + (words ? " words" : ""), text: val })));
-  });
-  // The state is a chip of the status family (#1950); the hstat-* classes
-  // stay as the grade's name for the tests that read it.
-  card.append(healthKV("state", el("span", { class: "chip chip-sm " + capacityChipClass(cap.status) + " hstat " + capacityStateClass(cap.status), text: capacityStateText(cap) })));
-  const note = capacityNote(cap);
-  if (note) card.append(el("p", { class: "form-hint", text: note }));
-  // Unmeasurable free space is explained under every grade, not just the
-  // free_unknown one: the row above reads "not measurable from here" for a
-  // fresh index and a short history too.
-  const freeNote = capacityFreeNote(cap);
-  if (freeNote) card.append(el("p", { class: "form-hint", text: freeNote }));
-  return card;
 }
 
 // capacityBox is the alarm: rendered only for the doctor's warn and fail
