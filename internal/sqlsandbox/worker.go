@@ -28,37 +28,77 @@ import (
 // selected by argument; the package's own test binary uses this.
 func IsWorkerProcess() bool { return os.Getenv(workerEnv) == "1" }
 
-// WorkerMain is the child's whole life: open its DuckDB, read one job from
-// stdin, run it, write one result to stdout, exit. The exit code is 0
-// whenever a result (including a structured error) was written; anything
-// else is a protocol failure the parent reports as a WorkerError with stderr
-// attached.
+// WorkerMain is the child's whole life: open its DuckDB, read a job from
+// stdin, run it, write its result to stdout, and exit, or, for a job that says
+// more follow (#2084), do it again. The exit code is 0 whenever every result
+// (including a structured error) was written; anything else is a protocol
+// failure the parent reports as a WorkerError with stderr attached.
 //
 // DuckDB is opened BEFORE the job is read (#2236), so a worker started ahead
 // of its statement has that part done when the statement arrives. Nothing
 // about a job is known then and nothing of one is applied: the threads, the
 // memory limit, the spill directory and the directories it may read are all
 // set from the job, in runJobOn.
+//
+// A worker that serves many statements opens a NEW DuckDB for each one and
+// closes it when the statement ends. The lock a statement runs under cannot
+// be undone (lock_configuration), and a locked instance keeps its memory
+// limit, its threads, its directories and its time zone, and shows the next
+// connection the views, temporary tables and variables of the last. So what
+// is kept from one statement to the next is the process, with the engine's
+// code loaded, and nothing a statement made.
 func WorkerMain(stdin io.Reader, stdout, stderr io.Writer) int {
 	// First thing: on Linux, be the kernel's first choice if memory runs
 	// out on the host, ahead of the console that is also the capture plane.
 	lowerOOMPriority(stderr)
-	sess := openSession(stderr)
-	defer sess.close()
-	var job wireJob
 	dec := json.NewDecoder(stdin)
+	enc := json.NewEncoder(stdout)
+	for {
+		more, code := serveJob(dec, enc, stderr)
+		if !more {
+			return code
+		}
+	}
+}
+
+// errViewsRefused is what the worker's question gets when the parent has no
+// views script for the statement: the statement ends there, and the worker is
+// still fit for another.
+var errViewsRefused = errors.New("the parent has no views for the statement")
+
+// serveJob opens a DuckDB, reads one job and answers it. more says another
+// job follows on the same pipe; otherwise code is the exit status.
+func serveJob(dec *json.Decoder, enc *json.Encoder, stderr io.Writer) (more bool, code int) {
+	sess := openSession(stderr)
+	// For a worker that stays, closed before the result is written, not
+	// after: once the parent has the result nothing of the statement is
+	// left, in memory or in its spill directory, which the parent removes
+	// then. A worker that serves one job writes its result first, as it
+	// always did, so a DuckDB that fails to close cannot cost the statement
+	// an answer it already had; its parent waits for the exit either way.
+	closed := false
+	closeSession := func() {
+		if !closed {
+			closed = true
+			sess.close()
+		}
+	}
+	defer closeSession()
+	var job wireJob
 	if err := dec.Decode(&job); err != nil {
 		if errors.Is(err, io.EOF) {
-			// Stdin closed with no job: a worker started ahead that its
-			// parent stopped, or whose parent is gone. Not a failure.
-			return 0
+			// Stdin closed with no job: a worker its parent stopped, or
+			// whose parent is gone. Not a failure.
+			return false, 0
 		}
 		fmt.Fprintf(stderr, "sql worker: read job: %v\n", err)
-		return 2
+		return false, 2
 	}
 	// The parent kills this process at its deadline. If the parent is gone
 	// (crashed, OOM-killed) nobody will, so the child stops on its own a
-	// little after: the query is not worth 2 threads and 2 GB for hours.
+	// little after: the query is not worth 2 threads and 2 GB for hours. The
+	// deadline is the statement's: it is called off with the result, so a
+	// worker that waits for its next statement is not stopped by the last.
 	if job.TimeoutNS > 0 {
 		stop := time.AfterFunc(time.Duration(job.TimeoutNS)+selfDeadlineGrace, func() {
 			fmt.Fprintln(stderr, "sql worker: past its deadline with no parent kill; exiting")
@@ -70,21 +110,30 @@ func WorkerMain(stdin io.Reader, stdout, stderr io.Writer) int {
 	// names, on stdout ahead of the result, and the parent answers on stdin
 	// with the script to install.
 	ask := func(refs Refs) (string, error) {
-		if err := json.NewEncoder(stdout).Encode(wireResult{Ask: &refs}); err != nil {
+		if err := enc.Encode(wireResult{Ask: &refs}); err != nil {
 			return "", fmt.Errorf("send the statement's names: %w", err)
 		}
 		var v wireViews
 		if err := dec.Decode(&v); err != nil {
 			return "", fmt.Errorf("read the views script: %w", err)
 		}
+		if v.Refused {
+			return "", errViewsRefused
+		}
 		return v.ViewsSQL, nil
 	}
 	res := runJobOn(sess, job, ask, stderr)
-	if err := json.NewEncoder(stdout).Encode(res); err != nil {
-		fmt.Fprintf(stderr, "sql worker: write result: %v\n", err)
-		return 2
+	if job.More {
+		closeSession()
+		// What this process still holds with no statement in it: the parent
+		// replaces a worker that holds too much.
+		res.ResidentBytes = residentBytes()
 	}
-	return 0
+	if err := enc.Encode(res); err != nil {
+		fmt.Fprintf(stderr, "sql worker: write result: %v\n", err)
+		return false, 2
+	}
+	return job.More, 0
 }
 
 // selfDeadlineGrace is how long past the parent's timeout the child waits for

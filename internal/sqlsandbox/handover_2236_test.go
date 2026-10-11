@@ -17,7 +17,7 @@ import (
 
 func handover(t *testing.T, r *Runner, w *worker, job Job, limits Limits) (Result, error) {
 	t.Helper()
-	in, err := marshalJob(job, limits, spillSpec{})
+	in, err := marshalJob(job, limits, spillSpec{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

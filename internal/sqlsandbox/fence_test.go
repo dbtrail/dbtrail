@@ -656,13 +656,13 @@ func TestCappedBuffer_armActsOnAnEarlierOverflow(t *testing.T) {
 		t.Fatalf("a write before the job: err = %v, want ErrResultTooLarge", err)
 	}
 	fired := 0
-	c.arm(1<<20, func() { fired++ }, nil)
+	c.arm(1<<20, func() { fired++ }, nil, nil)
 	if fired != 1 || !c.didOverflow() {
 		t.Errorf("after arm: overflow acted on %d times, overflowed = %v; want once, true", fired, c.didOverflow())
 	}
 	// And a buffer with nothing early is armed without it.
 	var quiet cappedBuffer
-	quiet.arm(1<<20, func() { t.Error("a buffer that took nothing acted on an overflow") }, nil)
+	quiet.arm(1<<20, func() { t.Error("a buffer that took nothing acted on an overflow") }, nil, nil)
 }
 
 func TestPlainReason(t *testing.T) {
