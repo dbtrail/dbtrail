@@ -16,6 +16,10 @@ permissions:
 # in: 20 of 26 jobs failed, three runs in a row (#2299). Every `docker run`
 # and `docker pull` in this file names its image under "${TEST_IMAGES}/";
 # scripts/check-test-image-registry.sh fails CI when one does not.
+#
+# The `release` job below still reaches Docker Hub when it builds the product
+# images (their `FROM debian` line, BuildKit, QEMU). That is a few pulls per
+# release, not one per test job, and it is not covered by the check.
 env:
   TEST_IMAGES: mirror.gcr.io
 
@@ -83,9 +87,9 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Pulled by name, ahead of the containers below: a registry that does
-      # not answer fails here and says so, where the readiness loops would
-      # only report "did not become ready" (they discard their probe's output).
+      # Pulled ahead of the containers below, with three tries per image: a
+      # registry that does not answer for a moment costs a retry here, where
+      # the `docker run` that starts the server would fail the job at once.
       - name: Pull the test images
         run: |
           bash scripts/pull-test-images.sh \
@@ -199,9 +203,9 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Pulled by name, ahead of the containers below: a registry that does
-      # not answer fails here and says so, where the readiness loops would
-      # only report "did not become ready" (they discard their probe's output).
+      # Pulled ahead of the containers below, with three tries per image: a
+      # registry that does not answer for a moment costs a retry here, where
+      # the `docker run` that starts the server would fail the job at once.
       - name: Pull the test images
         run: |
           bash scripts/pull-test-images.sh \
@@ -365,9 +369,9 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Pulled by name, ahead of the containers below: a registry that does
-      # not answer fails here and says so, where the readiness loops would
-      # only report "did not become ready" (they discard their probe's output).
+      # Pulled ahead of the containers below, with three tries per image: a
+      # registry that does not answer for a moment costs a retry here, where
+      # the `docker run` that starts the server would fail the job at once.
       - name: Pull the test images
         run: |
           bash scripts/pull-test-images.sh \

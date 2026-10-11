@@ -70,9 +70,9 @@ jobs:
       - name: Build bintrail-pg (CGO)
         run: go build -o ./bintrail-pg ./cmd/bintrail-pg
 
-      # Pulled by name, ahead of the containers below: a registry that does
-      # not answer fails here and says so, where the readiness loops would
-      # only report "did not become ready" (they discard their probe's output).
+      # Pulled ahead of the containers below, with three tries per image: a
+      # registry that does not answer for a moment costs a retry here, where
+      # the `docker run` that starts the server would fail the job at once.
       - name: Pull the test images
         run: |
           bash scripts/pull-test-images.sh \

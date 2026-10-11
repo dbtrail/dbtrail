@@ -5,10 +5,9 @@
 #   scripts/pull-test-images.sh mirror.gcr.io/library/mysql:8.4 [...]
 #
 # Why a step of its own, ahead of the `docker run` that would pull anyway:
-# the readiness loops in the workflows start a short-lived container from the
-# same image and discard its output, so an image that cannot be pulled used
-# to end as "did not become ready in time", sixty tries later. Here the pull
-# fails where it happens and names the image.
+# that `docker run` gets one try, and a registry that does not answer for a
+# moment fails the whole job. Here each image gets three, and a pull that
+# still fails names the image and the registry.
 #
 # Why it refuses a name without a registry host, and Docker Hub by name: a
 # bare `mysql:8.4` is a pull from Docker Hub, whose pull limit stopped whole

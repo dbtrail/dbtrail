@@ -317,9 +317,9 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Pulled by name, ahead of the containers below: a registry that does
-      # not answer fails here and says so, where the readiness loops would
-      # only report "did not become ready" (they discard their probe's output).
+      # Pulled ahead of the containers below, with three tries per image: a
+      # registry that does not answer for a moment costs a retry here, where
+      # the `docker run` that starts the server would fail the job at once.
       - name: Pull the test images
         if: env.RUN == 'true'
         run: |
@@ -740,9 +740,9 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Pulled by name, ahead of the containers below: a registry that does
-      # not answer fails here and says so, where the readiness loops would
-      # only report "did not become ready" (they discard their probe's output).
+      # Pulled ahead of the containers below, with three tries per image: a
+      # registry that does not answer for a moment costs a retry here, where
+      # the `docker run` that starts the server would fail the job at once.
       - name: Pull the test images
         if: env.RUN == 'true'
         run: |
@@ -963,9 +963,9 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Pulled by name, ahead of the containers below: a registry that does
-      # not answer fails here and says so, where the readiness loops would
-      # only report "did not become ready" (they discard their probe's output).
+      # Pulled ahead of the containers below, with three tries per image: a
+      # registry that does not answer for a moment costs a retry here, where
+      # the `docker run` that starts the server would fail the job at once.
       - name: Pull the test images
         if: env.RUN == 'true'
         run: |
@@ -1089,9 +1089,9 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Pulled by name, ahead of the containers below: a registry that does
-      # not answer fails here and says so, where the readiness loops would
-      # only report "did not become ready" (they discard their probe's output).
+      # Pulled ahead of the containers below, with three tries per image: a
+      # registry that does not answer for a moment costs a retry here, where
+      # the `docker run` that starts the server would fail the job at once.
       - name: Pull the test images
         if: env.RUN == 'true'
         run: |
@@ -1176,9 +1176,9 @@ jobs:
         with:
           node-version: "20"
 
-      # Pulled by name, ahead of the containers below: a registry that does
-      # not answer fails here and says so, where the readiness loops would
-      # only report "did not become ready" (they discard their probe's output).
+      # Pulled ahead of the containers below, with three tries per image: a
+      # registry that does not answer for a moment costs a retry here, where
+      # the `docker run` that starts the server would fail the job at once.
       - name: Pull the test images
         run: |
           bash scripts/pull-test-images.sh \
@@ -1259,9 +1259,9 @@ jobs:
         with:
           node-version: "20"
 
-      # Pulled by name, ahead of the containers below: a registry that does
-      # not answer fails here and says so, where the readiness loops would
-      # only report "did not become ready" (they discard their probe's output).
+      # Pulled ahead of the containers below, with three tries per image: a
+      # registry that does not answer for a moment costs a retry here, where
+      # the `docker run` that starts the server would fail the job at once.
       - name: Pull the test images
         run: |
           bash scripts/pull-test-images.sh \
@@ -1314,7 +1314,9 @@ jobs:
       # is installed above, so a skip in CI (exit 77) must fail the job rather
       # than pass quietly.
       - name: First-run walk (scoreboard, ratcheted)
-        run: make console-first-run-walk
+        # The walk starts its own database to capture; first-run-walk.sh
+        # reads which image from SOURCE_IMAGE and defaults to a bare name.
+        run: SOURCE_IMAGE="${TEST_IMAGES}/library/mysql:8.4" make console-first-run-walk
 
       - name: Upload the scoreboard and what failed
         if: always()
