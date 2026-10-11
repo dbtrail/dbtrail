@@ -51,6 +51,17 @@
 // a cgroup to manage, each worker also runs in a memory cgroup of its own
 // (#2226, fence.go), so it reaches its own ceiling before the host runs out.
 //
+// Why a worker may answer more than one statement (#2084,
+// Config.WorkerStatements): starting a process costs a short statement more
+// than the statement does. What is kept between statements is the process
+// only. Each statement still gets a DuckDB of its own, opened for it and
+// closed before its result is handed back, because the lock above cannot be
+// undone and a locked instance would carry one statement's limits,
+// directories, views and variables into the next (verified on v1.4.5). A
+// statement that is stopped (timeout, cancel, result cap, the kernel) still
+// ends by its process being killed, so everything in the paragraphs above
+// holds per statement exactly as it does with one process each.
+//
 // The parent API is Runner.Run. Slice 2 (the panel and its HTTP route) calls
 // it with a Job built from the selected server's copy location and the views
 // text from the same generator that serves /api/views.sql; slice 3 adds the
@@ -311,15 +322,18 @@ type Phases struct {
 	Query time.Duration `json:"query_ns"`
 	// Parent: the worker for this statement, from starting it to its exit,
 	// pipe included: NOT process start alone, which is Spawn minus the child
-	// phases.
+	// phases. For a worker that stays for another statement (#2084) it ends
+	// when the whole result has arrived, since that worker does not exit.
 	Spawn time.Duration `json:"spawn_ns"`
 	// Parent: decoding the child's result.
 	Decode time.Duration `json:"decode_ns"`
 	// Parent: the whole run, from Slot.Run's entry.
 	Total time.Duration `json:"total_ns"`
 	// Standby: the statement ran on a worker started before it arrived
-	// (#2236). Open is then zero, paid ahead of the statement, and Spawn
-	// runs from the hand-over of the job to the worker's exit.
+	// (#2236), or on one that had answered another (#2084). Open is then
+	// zero, not counted against the statement: it was paid ahead of it, or,
+	// for a statement that follows another at once, it overlaps the wait for
+	// the job and is part of Spawn. Spawn runs from the hand-over of the job.
 	Standby bool `json:"standby,omitempty"`
 }
 
@@ -438,9 +452,20 @@ type Config struct {
 	// Standby keeps workers started ahead of the statements that will use
 	// them (#2236): once a statement has run, one per slot waits with its
 	// DuckDB open, so the next statement does not pay the process start and
-	// the open. Each still serves ONE statement and exits. Off unless set:
-	// a Runner that keeps processes must be closed (Close).
+	// the open. Each still serves ONE statement and exits, unless
+	// WorkerStatements says otherwise. Off unless set: a Runner that keeps
+	// processes must be closed (Close).
 	Standby bool
+	// WorkerStatements is how many statements one worker answers, one after
+	// another, before it is replaced (#2084). It needs Standby. 0 or 1: one
+	// statement per process. Above that a worker that answered goes back to
+	// wait for the next statement, with a new DuckDB opened for it, and there
+	// are never more workers than MaxInFlight, waiting and running together.
+	// A worker is also replaced when what it holds between statements passes
+	// an eighth of the statement's memory limit (retireResident), and always
+	// when its statement was stopped: at the timeout, by the caller, past the
+	// result cap or by the kernel.
+	WorkerStatements int
 	// StandbyIdle is how long the standbys are kept with no statement
 	// running or arriving; after it they are stopped, and the next statement
 	// starts its own worker. 0 means DefaultStandbyIdle.
@@ -452,6 +477,36 @@ type Config struct {
 // ready every time, short enough that an install nobody runs SQL on keeps no
 // idle process.
 const DefaultStandbyIdle = 5 * time.Minute
+
+// DefaultWorkerStatements is a count of statements for Config.WorkerStatements
+// that bounds what a process can accumulate over its life without paying a
+// process start more than once in a few hundred statements.
+const DefaultWorkerStatements = 500
+
+// retireResidentFloor is the least a worker may hold between statements
+// before it is replaced, whatever the memory limit: a process with the engine
+// loaded and nothing open holds tens of megabytes of its own.
+const retireResidentFloor = 128 << 20
+
+// retireResident is how much a worker may hold between statements, its DuckDB
+// closed, and still be given the next: an eighth of the memory limit, at
+// least retireResidentFloor. What it holds then counts against the next
+// statement's memory cgroup (#2226), whose headroom over the limit is a
+// quarter of it, so a worker is replaced before it has used half of that.
+func retireResident(memoryLimit string) int64 {
+	mem, err := cliutil.ParseByteSize(memoryLimit)
+	if err != nil {
+		return retireResidentFloor
+	}
+	return max(mem/8, retireResidentFloor)
+}
+
+// retire reports whether a worker that has answered served statements, of
+// the most it may, and holds resident bytes (0: not known) is replaced
+// instead of being given another.
+func retire(served, most int, resident int64, memoryLimit string) bool {
+	return served >= most || resident > retireResident(memoryLimit)
+}
 
 // Standbys that die before they are used are a sign that keeping them costs
 // more than it gives (a host short of memory picks them first: they ask for
@@ -566,10 +621,16 @@ type Runner struct {
 	freed   chan struct{}
 
 	// The standby workers (#2236), guarded by mu: at most one per slot.
-	standby      bool
-	standbyIdle  time.Duration
-	standbys     []*worker
-	standbyTimer *time.Timer
+	standby     bool
+	standbyIdle time.Duration
+	standbys    []*worker
+	// workerStatements above 1: a worker answers that many statements
+	// (#2084). lent, under mu, counts the workers that are out with a
+	// statement and come back, so that waiting and running together they
+	// never pass maxInFlight.
+	workerStatements int
+	lent             int
+	standbyTimer     *time.Timer
 	// standbyDeaths counts standbys found dead in a row; standbyOffUntil is
 	// until when none is started after too many; standbyNote is the last
 	// thing logged about them, so the log says it once per change.
@@ -582,14 +643,19 @@ type Runner struct {
 	closed           bool
 	// topUps counts top-ups in flight, so Close can wait for them.
 	topUps sync.WaitGroup
-	// standbyUsed counts statements that ran on a standby.
+	// standbyUsed counts statements that ran on a standby; started counts
+	// worker processes started, for any reason.
 	standbyUsed atomic.Int64
+	started     atomic.Int64
 
 	// onStart is a test hook that receives the child's pid.
 	onStart func(pid int)
 	// beforeHandOver is a test hook that receives a standby just taken for
 	// a statement, before its job is written.
 	beforeHandOver func(w *worker)
+	// beforeKeep is a test hook that receives a worker that stays once it
+	// has answered, before it is decided whether it is kept.
+	beforeKeep func(w *worker)
 }
 
 // New builds a Runner.
@@ -621,6 +687,9 @@ func New(cfg Config) *Runner {
 	}
 	if r.standbyIdle <= 0 {
 		r.standbyIdle = DefaultStandbyIdle
+	}
+	if cfg.Standby && cfg.WorkerStatements > 1 {
+		r.workerStatements = cfg.WorkerStatements
 	}
 	r.sweepSpillDue(time.Now(), true)
 	if _, err := r.SpillState(r.limits.MemoryLimit); err != nil {
@@ -1030,11 +1099,20 @@ type wireJob struct {
 	// TimeoutNS is the parent's wall clock, so the child can stop on its own
 	// shortly after it if the parent is no longer there to kill it.
 	TimeoutNS int64 `json:"timeout_ns"`
+	// More: another job may follow this one on the same pipe (#2084), so the
+	// worker does not exit after its result. Unset, the worker serves this
+	// job and exits.
+	More bool `json:"more,omitempty"`
 }
 
 // wireViews is the parent's answer to an Ask: the views script to install.
 type wireViews struct {
 	ViewsSQL string `json:"views_sql"`
+	// Refused: there is no script, the parent refused the statement while
+	// building it. Sent only to a worker that stays for another job, so it
+	// ends this one instead of waiting; a worker that serves one job is
+	// stopped.
+	Refused bool `json:"refused,omitempty"`
 }
 
 // wireResult is what the child writes to stdout: a result, or a structured
@@ -1054,6 +1132,10 @@ type wireResult struct {
 	LockdownNS int64      `json:"lockdown_ns,omitempty"`
 	ViewsNS    int64      `json:"views_ns,omitempty"`
 	Error      *wireError `json:"error,omitempty"`
+	// ResidentBytes is the memory the worker holds after the statement, its
+	// DuckDB closed; 0 where the platform does not say. Sent by a worker that
+	// stays for another job (wireJob.More).
+	ResidentBytes int64 `json:"resident_bytes,omitempty"`
 }
 
 type wireError struct {
@@ -1077,8 +1159,9 @@ const (
 var errNotHandedOver = errors.New("the job did not reach the worker")
 
 // worker is one started worker process: its DuckDB open (or opening), blocked
-// reading its job from stdin. It serves ONE job and exits; it is never handed
-// a second one.
+// reading its job from stdin. It serves ONE job and exits, and is never handed
+// a second one, unless it is one that stays (more): that one is handed its
+// next job only after it has answered the last in full.
 type worker struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
@@ -1095,9 +1178,20 @@ type worker struct {
 	waitErr error
 	// standby: started ahead of its statement, not for it (#2236).
 	standby bool
-	// used is set by the one run this worker serves. A second hand-over is
-	// refused: its stdout still holds the first statement's answer.
+	// used is set by the run this worker serves. A second hand-over is
+	// refused: its stdout still holds the first statement's answer. A worker
+	// that stays is cleared when it goes back to wait (keep), its stdout
+	// taken.
 	used atomic.Bool
+	// more: the worker stays for another job after each one (#2084), so its
+	// jobs say so and its stdin is left open. served counts the statements
+	// it has answered; lent says it is counted in Runner.lent.
+	more   bool
+	served int
+	lent   bool
+	// resident is what the worker held after its last statement, 0 when not
+	// known or when it has answered none.
+	resident int64
 	// fence is the worker's memory cgroup (#2226), nil when it runs without
 	// one. oomKilled, set before done is closed, says the kernel stopped the
 	// worker at that cgroup's ceiling.
@@ -1110,6 +1204,15 @@ type worker struct {
 // sizes the worker's memory cgroup where the host gives one (#2226); a
 // worker that cannot be started inside it is started without, as before.
 func (r *Runner) startWorker(memoryLimit string) (*worker, error) {
+	w, err := r.startFenced(memoryLimit)
+	if err == nil {
+		w.more = r.workerStatements > 1
+		r.started.Add(1)
+	}
+	return w, err
+}
+
+func (r *Runner) startFenced(memoryLimit string) (*worker, error) {
 	exe := r.exe
 	if exe == "" {
 		var err error
@@ -1210,7 +1313,7 @@ func startWorkerProcess(exe string, args []string, wf *workerFence) (*worker, er
 
 // marshalJob is the job as the worker reads it. A job that asks for its views
 // (ViewsFor) carries none: the worker asks once it has parsed the statement.
-func marshalJob(job Job, limits Limits, spill spillSpec) ([]byte, error) {
+func marshalJob(job Job, limits Limits, spill spillSpec, more bool) ([]byte, error) {
 	asking := job.ViewsFor != nil
 	viewsSQL := job.ViewsSQL
 	if asking {
@@ -1221,23 +1324,26 @@ func marshalJob(job Job, limits Limits, spill spillSpec) ([]byte, error) {
 		TimeZone: job.Session.TimeZone, SelectLimit: job.Session.SelectLimit,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
-		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes,
+		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more,
 	})
 }
 
 func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, error) {
 	spill, noSpill := r.makeSpill(limits.MemoryLimit)
 	if spill.Dir != "" {
-		// After the worker has exited on every path (a group kill at the
-		// timeout included: run returns only then), so nothing writes here
-		// any more.
+		// Once run has returned nothing writes here any more: the worker
+		// has exited (a group kill at the timeout included), or it is one
+		// that stays and has closed the statement's DuckDB, which it does
+		// before it writes the result.
 		defer func() {
 			if err := os.RemoveAll(spill.Dir); err != nil {
 				slog.Warn("sql on the copy: could not remove a statement's spill directory", "dir", spill.Dir, "error", err)
 			}
 		}()
 	}
-	in, err := marshalJob(job, limits, spill)
+	// Every worker of a Runner stays or none does, so the job can say which
+	// before the worker is known.
+	in, err := marshalJob(job, limits, spill, r.workerStatements > 1)
 	if err != nil {
 		return Result{}, &WorkerError{Err: err}
 	}
@@ -1245,7 +1351,7 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 		// Already cancelled: report the cancel, not a worker that failed.
 		return Result{}, err
 	}
-	if w := r.takeStandby(); w != nil {
+	if w := r.takeStandby(limits.MemoryLimit); w != nil {
 		// Its replacement starts now, while this statement runs.
 		r.topUpStandbys()
 		if r.beforeHandOver != nil {
@@ -1269,10 +1375,20 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 	// A worker started for this statement: starting it is part of the
 	// statement's cost (Phases.Spawn).
 	began := time.Now()
+	// A worker that stays is already counted among the lent: by takeStandby
+	// when it found none waiting, or passed on by the one that was gone
+	// before it read the job.
+	stays := r.workerStatements > 1
 	w, err := r.startWorker(limits.MemoryLimit)
 	if err != nil {
+		if stays {
+			r.mu.Lock()
+			r.lent--
+			r.mu.Unlock()
+		}
 		return Result{}, &WorkerError{Err: err}
 	}
+	w.lent = stays
 	return r.run(ctx, w, began, in, job.ViewsFor, limits, spill, noSpill)
 }
 
@@ -1280,13 +1396,22 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 // starts here, when the job is handed over, not when the process started.
 // began is when this statement started paying for the worker: before the
 // start for a worker started for it. It returns only after the process has
-// exited.
+// exited, or, for a worker that stays (#2084), once that worker has answered
+// in full, closed the statement's DuckDB and gone back to wait.
 func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte, viewsFor func(Refs) (string, error), limits Limits, spill spillSpec, noSpill error) (Result, error) {
 	if w.used.Swap(true) {
 		return Result{}, &WorkerError{Err: errors.New("the worker was already handed a job; start another"), PID: w.cmd.Process.Pid}
 	}
-	// Whatever happens below, the process does not outlive this call.
+	// Whatever happens below, the process does not outlive this call, unless
+	// it answered and was kept for the next statement.
+	// passOn: the worker is gone and its statement has not run, so the
+	// worker started for it next inherits this one's count among the lent.
+	kept, passOn := false, false
 	defer func() {
+		if kept {
+			return
+		}
+		r.notLent(w, passOn)
 		w.kill()
 		<-w.done
 	}()
@@ -1301,7 +1426,13 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 	if asking {
 		firstLine = make(chan []byte, 1)
 	}
-	w.stdout.arm(limits.MaxResultBytes, func() { _ = killProcessGroup(w.cmd.Process) }, firstLine)
+	// A worker that stays does not exit to say it is done: the end of its
+	// result line does.
+	var lineEnds chan struct{}
+	if w.more {
+		lineEnds = make(chan struct{}, 2)
+	}
+	w.stdout.arm(limits.MaxResultBytes, func() { _ = killProcessGroup(w.cmd.Process) }, firstLine, lineEnds)
 	// wrote receives the result of writing the job, once.
 	wrote := make(chan error, 1)
 
@@ -1319,7 +1450,12 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 		r.onStart(pid)
 	}
 	var waitErr error
-	if asking {
+	// answered: the worker wrote its whole result and is still running.
+	answered := false
+	var refused error
+	if w.more {
+		answered, waitErr, refused = converse(w, in, wrote, firstLine, lineEnds, viewsFor)
+	} else if asking {
 		var askErr error
 		waitErr, askErr = answerAsk(w, in, wrote, firstLine, viewsFor)
 		if askErr != nil && ctx.Err() == nil && cctx.Err() == nil {
@@ -1347,26 +1483,54 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 	case w.stdout.didOverflow():
 		return Result{}, ErrResultTooLarge
 	}
-	// The process has exited, so the write of the job has returned. If it
-	// failed, the worker never had the whole job and so never ran it: a
-	// standby that was gone before its statement. (For a worker started for
-	// the statement the same failure is reported below, with its stderr.)
-	if err := <-wrote; err != nil && w.standby {
-		return Result{}, fmt.Errorf("%w: %v", errNotHandedOver, err)
+	var raw []byte
+	if answered {
+		// The worker read the job, or it would not have answered. Its stdout
+		// is taken whole and left empty and closed to it: it has nothing to
+		// say until its next job.
+		raw = w.stdout.take()
+	} else {
+		// The process has exited, so the write of the job has returned. If
+		// it failed, the worker never had the whole job and so never ran
+		// it: a standby that was gone before its statement. (For a worker
+		// started for the statement the same failure is reported below,
+		// with its stderr.)
+		if err := <-wrote; err != nil && w.standby {
+			// The statement goes to a worker started for it, which takes
+			// this one's place among the slots' workers.
+			passOn = true
+			return Result{}, fmt.Errorf("%w: %v", errNotHandedOver, err)
+		}
+		// The process has exited and its pipes are drained (done is
+		// closed), so nothing writes to the buffers any more.
+		raw = w.stdout.buf.Bytes()
 	}
 
 	spawnTook := time.Since(began)
 	decodeStart := time.Now()
 	var out wireResult
-	// The process has exited and its pipes are drained (done is closed), so
-	// nothing writes to the buffers any more.
-	dec := json.NewDecoder(bytes.NewReader(w.stdout.buf.Bytes()))
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	err := dec.Decode(&out)
 	if err == nil && out.Ask != nil {
 		// The question came first; the result follows it.
 		out = wireResult{}
 		err = dec.Decode(&out)
+	}
+	// Kept for the next statement only when this one ended by the worker's
+	// own account: it answered, the answer reads, its session did not fail,
+	// and nothing set out to kill it (stop reports false once the timeout or
+	// the caller's cancel has).
+	if answered && r.beforeKeep != nil {
+		r.beforeKeep(w)
+	}
+	if answered && err == nil && (out.Error == nil || out.Error.Kind != errSession || refused != nil) && stop() {
+		kept = r.keep(w, out.ResidentBytes, limits.MemoryLimit)
+	}
+	if refused != nil {
+		// The statement's views were refused while they were built. The
+		// worker was told and ended the statement; the refusal is the answer.
+		return Result{}, &WorkerError{Err: refused, PID: pid, Stderr: w.stderr.text()}
 	}
 	if err != nil {
 		if w.oomKilled {
@@ -1459,10 +1623,129 @@ func answerAsk(w *worker, job []byte, wrote chan<- error, firstLine <-chan []byt
 	}
 }
 
+// converse is a statement's exchange with a worker that stays (#2084): the
+// job, the worker's question and its answer when the job asks for its views,
+// and the result. Nothing closes the worker's stdin, and the worker does not
+// exit: answered says its whole result line has arrived. A worker that exits
+// instead (killed at the timeout, by the caller, by the kernel, or one that
+// failed) is reported by its exit, as for a worker that serves one job.
+//
+// refused is the error of a ViewsFor that had no script to give. The worker
+// is told (wireViews.Refused) and ends the statement with a result nobody
+// reads, so it is still fit for the next one.
+func converse(w *worker, job []byte, wrote chan<- error, firstLine <-chan []byte, lineEnds <-chan struct{}, viewsFor func(Refs) (string, error)) (answered bool, waitErr, refused error) {
+	// From its own goroutine, for the reasons answerAsk gives.
+	go func() {
+		_, err := w.stdin.Write(job)
+		wrote <- err
+		if err != nil {
+			_ = w.stdin.Close()
+		}
+	}()
+	// The result is the first line, or the second when the first is the
+	// worker's question.
+	lines := 1
+	if viewsFor != nil {
+		select {
+		case line := <-firstLine:
+			var q wireResult
+			if err := json.Unmarshal(line, &q); err == nil && q.Ask != nil {
+				lines = 2
+				script, err := viewsFor(*q.Ask)
+				v := wireViews{ViewsSQL: script}
+				if err != nil {
+					v, refused = wireViews{Refused: true}, fmt.Errorf("build the views for the statement: %w", err)
+				}
+				answer, err := json.Marshal(v)
+				if err != nil {
+					// Not sent: the worker waits for an answer that will not
+					// come, so it is stopped.
+					w.kill()
+					<-w.done
+					return false, w.waitErr, err
+				}
+				// A write that fails means the worker is gone; its exit says
+				// why.
+				_, _ = w.stdin.Write(answer)
+			}
+		case <-w.done:
+			return false, w.waitErr, nil
+		}
+	}
+	for range lines {
+		select {
+		case <-lineEnds:
+		case <-w.done:
+			return false, w.waitErr, refused
+		}
+	}
+	return true, nil, refused
+}
+
+// keep puts a worker that has just answered back among the waiting ones, for
+// the next statement, and reports whether it did. It does not when the worker
+// has served its statements or holds too much between them (retire), when
+// the Runner is closed, or when the worker has died meanwhile: the caller
+// then stops it. There is room for it by construction: it was counted as
+// lent while it was out, and waiting and lent workers together never pass
+// maxInFlight (takeStandby, spawn and addStandby keep that).
+func (r *Runner) keep(w *worker, resident int64, memoryLimit string) bool {
+	w.served++
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if w.lent {
+		w.lent = false
+		r.lent--
+	}
+	if retire(w.served, r.workerStatements, resident, memoryLimit) || r.closed {
+		return false
+	}
+	select {
+	case <-w.done:
+		return false
+	default:
+	}
+	w.standby = true
+	w.resident = resident
+	// What it said while it ran that statement was that statement's: the
+	// next one's failure must not be reported with it.
+	w.stderr.reset()
+	w.used.Store(false)
+	r.standbys = append(r.standbys, w)
+	r.standbyNote = ""
+	r.touchStandbysLocked()
+	return true
+}
+
+// notLent takes a worker that will not come back out of the count of those
+// that are out with a statement. With passOn the count stays as it is, for
+// the worker that is started in its place.
+func (r *Runner) notLent(w *worker, passOn bool) {
+	r.mu.Lock()
+	if w.lent {
+		w.lent = false
+		if !passOn {
+			r.lent--
+		}
+	}
+	r.mu.Unlock()
+}
+
 // takeStandby returns a standby worker for a statement, or nil when there is
 // none: the statement then starts its own. A standby found dead is dropped
 // here and never handed over.
-func (r *Runner) takeStandby() *worker {
+//
+// memoryLimit is the statement's. A kept worker that holds too much for it
+// (retireResident) is stopped instead of handed over: what it holds counts
+// against the statement's memory cgroup, which is sized from that limit, and
+// a worker kept after a statement with a large limit could be over the
+// ceiling of one with a small limit before it ran anything.
+//
+// With workers that stay (#2084) the statement's place among the slots'
+// workers is counted here in every case, in the same step that found a
+// worker or none: counted later, a top-up could add a worker in between and
+// the slot would have two.
+func (r *Runner) takeStandby(memoryLimit string) *worker {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for len(r.standbys) > 0 {
@@ -1484,9 +1767,23 @@ func (r *Runner) takeStandby() *worker {
 			r.standbyDiedLocked(w)
 			continue
 		}
+		if w.resident > retireResident(memoryLimit) {
+			// Not a death: it is stopped on purpose, off this statement.
+			go stopStandby(w)
+			continue
+		}
 		r.standbyDeaths, r.standbyNote = 0, ""
 		r.touchStandbysLocked()
+		if w.more {
+			// Out with a statement, and still one of the slots' workers.
+			w.lent = true
+			r.lent++
+		}
 		return w
+	}
+	if r.workerStatements > 1 {
+		// For the worker spawn starts for the statement.
+		r.lent++
 	}
 	return nil
 }
@@ -1526,7 +1823,7 @@ func (r *Runner) topUpStandbys() {
 func (r *Runner) addStandby() bool {
 	r.mu.Lock()
 	r.pruneStandbysLocked()
-	want := !r.closed && time.Now().After(r.standbyOffUntil) && len(r.standbys) < r.maxInFlight
+	want := !r.closed && time.Now().After(r.standbyOffUntil) && len(r.standbys)+r.lent < r.maxInFlight
 	r.mu.Unlock()
 	if !want {
 		return false
@@ -1542,7 +1839,7 @@ func (r *Runner) addStandby() bool {
 	}
 	r.mu.Lock()
 	// Counted again: another top-up may have added one while this started.
-	if r.closed || len(r.standbys) >= r.maxInFlight {
+	if r.closed || len(r.standbys)+r.lent >= r.maxInFlight {
 		r.mu.Unlock()
 		stopStandby(w)
 		return false
@@ -1572,8 +1869,9 @@ func (r *Runner) pruneStandbysLocked() {
 	r.standbys = live
 }
 
-// standbyDiedLocked counts a standby that died before it was used, and stops
-// starting them for a while after too many in a row.
+// standbyDiedLocked counts a worker that died while it waited for a
+// statement (one started ahead, or one kept after answering), and stops
+// starting them ahead for a while after too many in a row.
 //
 // w is the worker that died; how it ended (its exit and the end of its
 // stderr, where a worker says what went wrong before its job) is kept for
@@ -1628,7 +1926,7 @@ func (r *Runner) stopStandbys() {
 	}
 }
 
-// stopStandby ends a worker that was never given a job, and waits for it:
+// stopStandby ends a worker that waits for a job, and waits for it:
 // closing its stdin is how it is told, and the kill is for one that does not
 // listen.
 func stopStandby(w *worker) {
@@ -1742,14 +2040,18 @@ type cappedBuffer struct {
 	firstLine chan []byte
 	scanned   int
 	lineSent  bool
+	// lineEnds, when set, is told of every newline written (#2084): a worker
+	// that stays ends each message with one and does not exit to say so. A
+	// tell that finds it full is dropped; a job expects two lines at most.
+	lineEnds chan struct{}
 }
 
 // arm sets what a job allows this buffer: its cap, what to do past it, and
 // where the first line goes.
-func (c *cappedBuffer) arm(max int64, onOverflow func(), firstLine chan []byte) {
+func (c *cappedBuffer) arm(max int64, onOverflow func(), firstLine chan []byte, lineEnds chan struct{}) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.max, c.onOverflow, c.firstLine = max, onOverflow, firstLine
+	c.max, c.onOverflow, c.firstLine, c.lineEnds = max, onOverflow, firstLine, lineEnds
 	// A child that wrote before its job overflowed this buffer while it had
 	// no cap and nothing to call: act on it now, or the child is left
 	// running until the statement's timeout.
@@ -1762,6 +2064,28 @@ func (c *cappedBuffer) didOverflow() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.overflowed
+}
+
+// reset empties the buffer and keeps its cap: a kept worker's stderr, between
+// its statements.
+func (c *cappedBuffer) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.buf = bytes.Buffer{}
+	c.overflowed = false
+}
+
+// take hands over what was collected and leaves the buffer as it was before
+// arm: empty, with no cap, so anything written to it before the next arm is
+// an overflow. For a worker that stays, between its statements.
+func (c *cappedBuffer) take() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b := c.buf.Bytes()
+	c.buf = bytes.Buffer{}
+	c.max, c.onOverflow, c.firstLine, c.lineEnds = 0, nil, nil, nil
+	c.scanned, c.lineSent = 0, false
+	return b
 }
 
 // text is what was collected so far, for an error report.
@@ -1793,6 +2117,14 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 		return 0, ErrResultTooLarge
 	}
 	n, err := c.buf.Write(p)
+	if c.lineEnds != nil {
+		for range bytes.Count(p, []byte{'\n'}) {
+			select {
+			case c.lineEnds <- struct{}{}:
+			default:
+			}
+		}
+	}
 	if c.firstLine != nil && !c.lineSent {
 		b := c.buf.Bytes()
 		if i := bytes.IndexByte(b[c.scanned:], '\n'); i >= 0 {
