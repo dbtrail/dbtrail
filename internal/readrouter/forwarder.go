@@ -1259,6 +1259,36 @@ func (f *Forwarder) Prepare(ctx context.Context, query string) (Stmt, error) {
 	return &prepared{f: f, c: c, query: query, st: st}, nil
 }
 
+// ColumnNames asks the source how it names the columns of a statement's
+// result, without running it: the statement is prepared, its column
+// definitions are read, and it is closed. What the copy answers is sent
+// under these names, so a client reads the same ones whoever answered: an
+// expression with no alias is named its own text by MySQL (COUNT(*)) and
+// otherwise by the copy (count_star()), and a column written in another
+// case than it was declared in differs too.
+func (f *Forwarder) ColumnNames(ctx context.Context, stmt string) ([]string, error) {
+	st, err := f.Prepare(ctx, stmt)
+	if err != nil {
+		return nil, err
+	}
+	defer st.Close()
+	return FieldNames(st.ColumnFields())
+}
+
+// FieldNames reads the column names out of raw column definitions, as the
+// source sent them in answer to a PREPARE.
+func FieldNames(defs [][]byte) ([]string, error) {
+	names := make([]string, len(defs))
+	for i, def := range defs {
+		field, err := mysql.FieldData(def).Parse()
+		if err != nil {
+			return nil, fmt.Errorf("column %d of %d: its definition cannot be read: %w", i+1, len(defs), err)
+		}
+		names[i] = string(field.Name)
+	}
+	return names, nil
+}
+
 // unwrapMySQLError returns the *mysql.MyError inside err, so the port
 // writes the source's code and message back rather than a wrapped 1105.
 func unwrapMySQLError(err error) error {

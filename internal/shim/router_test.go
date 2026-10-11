@@ -39,6 +39,20 @@ type fakeRouter struct {
 	prepared       []*fakeStmt
 	prepareErr     error
 	paramsOverride int
+	// srcNames is what ColumnNames answers for a statement, by its text;
+	// one with no entry is answered namesDefault (nil: the source says
+	// nothing, and the copy's names stay). namesErr fails every call.
+	// namesAsked records the statements asked about.
+	srcNames     map[string][]string
+	namesDefault []string
+	namesErr     error
+	namesAsked   []string
+	// namesCtxErr is the state of the context each ColumnNames call was
+	// given, at the moment of the call: nil for one still running.
+	namesCtxErr []error
+	// stmtColumns, when set, is what a prepared statement's ColumnFields
+	// answers: real column definitions, as the source sends them.
+	stmtColumns [][]byte
 	// The source session's status flags (Status): sessStatus when sessKnown.
 	// resultStatus, when set, is the status the source's answers carry in
 	// place of plain autocommit; forwardOK makes Forward answer an OK packet
@@ -63,6 +77,18 @@ type fakeRouter struct {
 	pings   int
 	pingErr error
 	onPing  func()
+}
+
+func (r *fakeRouter) ColumnNames(ctx context.Context, stmt string) ([]string, error) {
+	r.namesAsked = append(r.namesAsked, stmt)
+	r.namesCtxErr = append(r.namesCtxErr, ctx.Err())
+	if r.namesErr != nil {
+		return nil, r.namesErr
+	}
+	if names, ok := r.srcNames[stmt]; ok {
+		return names, nil
+	}
+	return r.namesDefault, nil
 }
 
 func (r *fakeRouter) Status() (uint16, bool) { return r.sessStatus, r.sessKnown }
@@ -93,11 +119,16 @@ type fakeStmt struct {
 	closed   int
 }
 
-func (s *fakeStmt) Params() int            { return s.params }
-func (s *fakeStmt) Columns() int           { return 1 }
-func (s *fakeStmt) ParamFields() [][]byte  { return [][]byte{[]byte("param-def")} }
-func (s *fakeStmt) ColumnFields() [][]byte { return [][]byte{[]byte("column-def")} }
-func (s *fakeStmt) Close()                 { s.closed++ }
+func (s *fakeStmt) Params() int           { return s.params }
+func (s *fakeStmt) Columns() int          { return 1 }
+func (s *fakeStmt) ParamFields() [][]byte { return [][]byte{[]byte("param-def")} }
+func (s *fakeStmt) ColumnFields() [][]byte {
+	if s.r.stmtColumns != nil {
+		return s.r.stmtColumns
+	}
+	return [][]byte{[]byte("column-def")}
+}
+func (s *fakeStmt) Close() { s.closed++ }
 
 func (s *fakeStmt) Decide(_ context.Context, args []any) (readrouter.Decision, error) {
 	s.decided = append(s.decided, args)

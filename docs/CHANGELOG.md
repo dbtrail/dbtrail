@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Fixed
+- **Under read routing, a statement the copy answered came back under the
+  copy's column names, not MySQL's.** `SELECT COUNT(*), SUM(total) FROM ...`
+  returned columns called `COUNT(*)` and `SUM(total)` when MySQL answered and
+  `count_star()` and `sum(total)` when the copy did; a column written in
+  another case than it was declared in, and a string literal, differed too.
+  A program that reads its result by column name found one name or the other
+  depending on the plan. The port (inside `watch`, and the router) now asks
+  the source how it names the statement's columns, by preparing the
+  statement there without running it, and sends the copy's answer under
+  those names. A prepared statement uses the names its own `PREPARE` was
+  answered with. An expression with no alias no longer needs one to be read
+  by name.
 - **The web interface's capacity check and rotation card projected over the
   retention an index was created under even when the daemon was started with
   a retention of its own** (#2315). With `BINTRAIL_ROTATE_RETAIN=6h` (or

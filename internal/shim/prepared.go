@@ -387,6 +387,10 @@ func (h *Handler) runPreparedOnCopy(st *preparedStmt, args []any, db, reason str
 	if err != nil {
 		return nil, err
 	}
+	// The names the source answered PREPARE with: the ones the client was
+	// told then, and the ones the source's own answer would carry.
+	names, namesErr := readrouter.FieldNames(st.up.ColumnFields())
+	h.nameAsSource(res, names, namesErr)
 	bin, err := binaryResultset(res.Resultset)
 	if err != nil {
 		return nil, err

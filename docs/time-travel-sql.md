@@ -986,17 +986,24 @@ What this is and is not:
     already kept on MySQL. A double-quoted name under the source's
     `ANSI_QUOTES` is not recognized as one: it stays on MySQL as well.
 
-  What a client can still see through the rewrite: the copy finds a column
-  whatever the case it is written in, as MySQL does, but names the result
-  column as the table stores it, where MySQL names it as the statement
-  wrote it (``SELECT `ID` `` returns a column called `ID` on MySQL and `id`
-  on the copy; the same holds without quotes). An alias keeps the case it
-  was written in on both, with two exceptions: MySQL drops the spaces at
-  the start of an alias (``AS ` a` `` is `a` on MySQL and ` a` on the copy),
-  and a column of a subquery selected in another case than its alias was
-  declared in (`` `a` `` over ``AS `A` ``) is named as selected on MySQL and
-  as declared on the copy. The plain port without read routing translates
-  nothing: a client there writes the copy's dialect.
+  The names of the result's columns are the source's. Left to itself the
+  copy names a column its own way: an expression with no alias by its own
+  text (`count_star()` where MySQL says `COUNT(*)`, `(count_star() + 1)`
+  for `count(*) + 1`), a column as the table stores it where MySQL repeats
+  the statement's spelling (``SELECT `ID` `` is `ID` on MySQL and `id` on the
+  copy), a string literal with its quotes. A program that reads a result by
+  column name would then find one name or another depending on who answered.
+  So for a statement the copy answers, the port asks the source how it names
+  the statement's columns (it prepares the statement there, which runs
+  nothing, and closes it) and sends the copy's answer under those names. A
+  prepared statement already has them, from its own `PREPARE`. The question
+  costs one more exchange with the source, only for statements the copy
+  answered, and has a time limit of its own. If the source
+  cannot say (it refuses to prepare the statement, or counts other columns
+  than the copy returned), the answer keeps the copy's names and the log
+  says so, once per connection. The plain port without read routing
+  translates nothing: a client there writes the copy's dialect and reads
+  the copy's names.
 - **Where the copy answers differently without an error.** The veto list
   keeps the known cases on MySQL (`GROUP_CONCAT`, the `NOW()` family,
   `LIKE`/`REGEXP`, `COLLATE`, `DIV`, `||`, `^`, double-quoted string

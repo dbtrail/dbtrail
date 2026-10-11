@@ -87,6 +87,10 @@ type Router interface {
 	// Prepare prepares the statement on the source, which then binds its
 	// arguments itself on every execution.
 	Prepare(ctx context.Context, statement string) (readrouter.Stmt, error)
+	// ColumnNames is how the source names the columns of the statement's
+	// result, asked without running it. The copy's answer is sent under
+	// these names.
+	ColumnNames(ctx context.Context, statement string) ([]string, error)
 	// UseDB selects the database on the upstream connection.
 	UseDB(ctx context.Context, db string) error
 	// InTransaction reports whether the upstream connection is inside an
@@ -328,9 +332,62 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 			if err != nil {
 				return nil, err
 			}
-			return h.runFreeSQLRouted(currentDB, text, readrouter.ShapeOf(qstr), reason, unchangedWithin)
+			res, err := h.runFreeSQLRouted(currentDB, text, readrouter.ShapeOf(qstr), reason, unchangedWithin)
+			if err != nil {
+				return nil, err
+			}
+			// Asked only once the copy has answered: a statement the copy
+			// hands back costs the source nothing more. Under a deadline of
+			// its own, not the statement's: that one began before the plan
+			// was asked for and may be over by now, and a call on the source
+			// under an expired deadline drops the connection to it, which is
+			// the client's session there. An answer already in hand must not
+			// cost that.
+			namesCtx, done := h.queryContext()
+			defer done()
+			names, err := h.router.ColumnNames(namesCtx, qstr)
+			h.nameAsSource(res, names, err)
+			return res, nil
 		},
 	})
+}
+
+// nameAsSource puts the source's column names on what the copy answered, so
+// that a client reads the same names whoever answered. The copy names an
+// expression with no alias its own way (count_star() where MySQL says
+// COUNT(*)) and a column as it was declared, where MySQL repeats the
+// statement's spelling. names and err are what the source said of the
+// statement's columns. When it could not say, or counts other columns than
+// the copy returned, the copy's names stay and the log says so once per
+// connection: the cells are right either way.
+func (h *Handler) nameAsSource(res *mysql.Result, names []string, err error) {
+	if res == nil || res.Resultset == nil {
+		return
+	}
+	rs := res.Resultset
+	switch {
+	case err != nil:
+		h.routeWarn("names", "read routing: the source could not say how it names a statement's columns, so the copy's answer keeps the copy's names for them (an expression with no alias is then named differently from MySQL's answer)", err)
+		return
+	case len(names) != len(rs.Fields):
+		h.routeWarn("names-count", "read routing: the source and the copy count different columns for a statement, so the copy's answer keeps the copy's names", fmt.Errorf("the source names %d columns, the copy returned %d", len(names), len(rs.Fields)))
+		return
+	}
+	// The index by name is kept only where the result has one (the port's
+	// own results do not): rebuilt, so no column is found under a name it
+	// no longer has. The first of two columns of one name wins.
+	indexed := len(rs.FieldNames) > 0
+	if indexed {
+		rs.FieldNames = make(map[string]int, len(names))
+	}
+	for i, name := range names {
+		rs.Fields[i].Name = []byte(name)
+		if indexed {
+			if _, taken := rs.FieldNames[name]; !taken {
+				rs.FieldNames[name] = i
+			}
+		}
+	}
 }
 
 // route is the routing ladder, one rung per reason a statement is MySQL's;
