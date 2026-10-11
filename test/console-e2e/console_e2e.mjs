@@ -665,15 +665,18 @@ try {
   cont.missingNeither ? ok("continuity: missing continuity (legacy backend) shows no green") : bad("continuity: missing continuity (legacy backend) shows no green", "rendered green without continuity");
   cont.nilNeither ? ok("continuity: nil stream shows neither box") : bad("continuity: nil stream shows neither box", "rendered a box for nil stream");
 
-  // Scenario 8c — index disk (#1444). capacityCard/capacityBox are pure and
+  // Scenario 8c — index disk (#1444). diskPanel/capacityBox are pure and
   // fixture-drivable like continuityBox: the doctor's grade arrives as
   // `status`/`reason` and the copy keys on the reason. Pinned here, in a real
   // browser: the fail grade renders the red error-box (color applied, not just
   // the class), a warn grade the warn-box, pass/skip no box at all; free space
   // the backend could not measure is WORDED, never shown as a number; the
   // standalone console's unknown retention is worded too; a failed fetch
-  // renders a note inside the card, not a blank; and no rendered string
-  // carries an em dash (copy rule).
+  // renders a note inside the panel, not a blank; and no rendered string
+  // carries an em dash (copy rule). Since #2330 the reading is a picture
+  // (diskPanel): the free space as one figure and a bar, which must have a
+  // real width here, where the stylesheet applies, and must not be drawn at
+  // all for a disk nobody measured.
   const idxDisk = await page.evaluate(() => {
     const base = { measured: true, sample_hours: 6, current_bytes: 6000000, events_per_day: 24000, bytes_per_event: 1000,
       growth_bytes_per_day: 24000000, projected_bytes: 720000000, remaining_bytes: 714000000,
@@ -688,8 +691,14 @@ try {
     const serve = { ...base, status: "skip", reason: "retention_unknown", projected_bytes: 0, remaining_bytes: 0,
       retention: { known: false, enabled: false }, free_known: true, free_bytes: 2000000000, free_space_days_at_write_rate: 83.3 };
     const failBox = capacityBox(fail), warnBox = capacityBox(warn), passBox = capacityBox(pass), unknownBox = capacityBox(freeUnknown), serveBox = capacityBox(serve);
-    const failCard = capacityCard(fail), passCard = capacityCard(pass), unknownCard = capacityCard(freeUnknown), serveCard = capacityCard(serve), errCard = capacityCard({ error: "boom" });
-    const remoteCard = capacityCard(freeRemote), legacyCard = capacityCard(freeLegacy), tunnelCard = capacityCard(freeTunnel);
+    const failCard = diskPanel(fail), passCard = diskPanel(pass), unknownCard = diskPanel(freeUnknown), serveCard = diskPanel(serve), errCard = diskPanel({ error: "boom" });
+    const remoteCard = diskPanel(freeRemote), legacyCard = diskPanel(freeLegacy), tunnelCard = diskPanel(freeTunnel);
+    // Laid out for real: a class the stylesheet already used for something
+    // else once collapsed this bar to five pixels, which no fake DOM sees.
+    document.body.appendChild(passCard);
+    const bar = passCard.querySelector(".sdk-bar"), now = passCard.querySelector(".sdk-seg.sdk-now"), ahead = passCard.querySelector(".sdk-seg.sdk-ahead");
+    const barW = bar ? bar.getBoundingClientRect().width : 0, nowW = now ? now.getBoundingClientRect().width : 0, aheadW = ahead ? ahead.getBoundingClientRect().width : 0;
+    passCard.remove();
     let failBorder = "";
     document.body.appendChild(failBox); failBorder = getComputedStyle(failBox).borderColor; failBox.remove();
     const texts = [failBox, warnBox, failCard, passCard, unknownCard, serveCard, errCard, remoteCard, legacyCard, tunnelCard].map((n) => n.textContent).join("\n");
@@ -700,7 +709,12 @@ try {
       warnOrange: warnBox.classList.contains("warn-box") && /Little free space/.test(warnBox.textContent),
       passNone: passBox === null && unknownBox === null && serveBox === null,
       failState: !!failCard.querySelector(".hstat-err") && /will fill/.test(failCard.textContent),
-      passNote: /Rotation caps the index/.test(passCard.textContent) && /1\.9 GB/.test(passCard.textContent),
+      // Healthy: the figure and the bar say it; the sentence is for the
+      // grades that need one.
+      passFigure: /^1\.9/.test((passCard.querySelector(".sdk-num") || {}).textContent || "") && /free/.test(passCard.textContent) && !/Rotation caps the index/.test(passCard.textContent),
+      barDrawn: barW > 100 && nowW > 0 && aheadW > nowW && nowW + aheadW < barW,
+      failBarRed: !!failCard.querySelector(".sdk-bar.tone-bad"),
+      unknownNoPicture: !unknownCard.querySelector(".sdk-bar") && !unknownCard.querySelector(".sdk-num"),
       unknownWorded: /not measurable from here/.test(unknownCard.textContent) && !/0 B/.test(unknownCard.textContent) && !!unknownState && unknownState.classList.contains("hstat-muted"),
       // #1527: the reason the doctor landed on, said as a fix when there is
       // one, and never as a guess about where the index runs.
@@ -712,7 +726,7 @@ try {
       // precondition, or an operator points it at a local mysqld that is not
       // the index and gets a measured number for the wrong volume.
       tunnelQualifiesTheMount: /cannot confirm/.test(tunnelCard.textContent) && /BINTRAIL_INDEX_DATADIR_RO/.test(tunnelCard.textContent) && /nothing else/.test(tunnelCard.textContent),
-      serveWorded: /not known here/.test(serveCard.textContent) && !/steady size/.test(serveCard.textContent),
+      serveWorded: /not known here/.test(serveCard.textContent) && !/settles at/.test(serveCard.textContent),
       errNote: /Could not measure the index disk: boom/.test(errCard.textContent),
       noEmDash: !/—/.test(texts),
     };
@@ -723,15 +737,18 @@ try {
     : bad("index disk: red error-box actually renders (CSS applied)", `borderColor=${idxDisk.failBorder}`);
   idxDisk.warnOrange ? ok("index disk: warn renders the warn-box") : bad("index disk: warn renders the warn-box", "no .warn-box");
   idxDisk.passNone ? ok("index disk: pass and skip grades render no box") : bad("index disk: pass and skip grades render no box", "a box rendered for pass/skip");
-  idxDisk.failState ? ok("index disk: card state chip is red on fail") : bad("index disk: card state chip is red on fail", "no .hstat-err");
-  idxDisk.passNote ? ok("index disk: pass card reads the free space and the cap") : bad("index disk: pass card reads the free space and the cap", "note or free figure missing");
+  idxDisk.failState ? ok("index disk: the state chip is red on fail") : bad("index disk: the state chip is red on fail", "no .hstat-err");
+  idxDisk.passFigure ? ok("index disk: a passing disk shows its free space as the figure, with no sentence") : bad("index disk: a passing disk shows its free space as the figure, with no sentence", "figure missing, or the healthy note is back");
+  idxDisk.barDrawn ? ok("index disk: the bar has a real width, with history and growth inside it (CSS applied)") : bad("index disk: the bar has a real width, with history and growth inside it (CSS applied)", "bar collapsed or segments out of proportion");
+  idxDisk.failBarRed ? ok("index disk: the bar takes the fail grade") : bad("index disk: the bar takes the fail grade", "no .tone-bad on the bar");
+  idxDisk.unknownNoPicture ? ok("index disk: a disk nobody measured draws no bar and no figure") : bad("index disk: a disk nobody measured draws no bar and no figure", "drew a picture of an unmeasured disk");
   idxDisk.unknownWorded ? ok("index disk: unmeasurable free space is worded, never a number") : bad("index disk: unmeasurable free space is worded, never a number", "showed 0 B or no muted chip");
   idxDisk.unknownNamesTheFix ? ok("index disk: a missing datadir mount names the mount, not a topology") : bad("index disk: a missing datadir mount names the mount, not a topology", "no BINTRAIL_INDEX_DATADIR_RO, or still asserts another host");
   idxDisk.remoteOffersNoFix ? ok("index disk: an index at another address offers no local mount fix") : bad("index disk: an index at another address offers no local mount fix", "offered a mount that would measure the wrong volume");
   idxDisk.legacyStaysHonest ? ok("index disk: a response with no free_reason still says what happened") : bad("index disk: a response with no free_reason still says what happened", "blank or guessed reason");
   idxDisk.tunnelQualifiesTheMount ? ok("index disk: an unconfirmed local host gets the mount fix with its precondition") : bad("index disk: an unconfirmed local host gets the mount fix with its precondition", "advice missing, or offered without the warning");
   idxDisk.serveWorded ? ok("index disk: standalone console says the window is not known here") : bad("index disk: standalone console says the window is not known here", "claimed a window or a steady size");
-  idxDisk.errNote ? ok("index disk: a failed fetch renders a note inside the card") : bad("index disk: a failed fetch renders a note inside the card", "card blank on error");
+  idxDisk.errNote ? ok("index disk: a failed fetch renders a note inside the panel") : bad("index disk: a failed fetch renders a note inside the panel", "panel blank on error");
   idxDisk.noEmDash ? ok("index disk: rendered copy carries no em dash") : bad("index disk: rendered copy carries no em dash", "em dash in rendered text");
 
   // Scenario 8b — capture-degraded banner (#1296). captureHealthBox is pure
@@ -5073,12 +5090,13 @@ try {
   // four home tints, more than the two accent tints a screen may show. They
   // now share the card surface; two cards proving EQUAL and opaque is what
   // rules the rotation out (a rotation would make them differ).
-  // On Status, which always carries two or more cards (This daemon, the
-  // page this used to photograph, was dissolved in #1867).
+  // On Status, whose two panels are the disk and Running with since #2330
+  // (they replaced its row cards; This daemon, the page this used to
+  // photograph, was dissolved in #1867).
   await page.evaluate(() => navigate("status"));
-  await page.waitForFunction(() => location.pathname === "/status" && document.querySelectorAll(".cards .card").length >= 2);
+  await page.waitForFunction(() => location.pathname === "/status" && !!document.querySelector(".sdk") && !!document.querySelector(".rw-card"));
   const tints = await page.evaluate(() => {
-    const cards = Array.from(document.querySelectorAll(".cards .card")).slice(0, 2);
+    const cards = [document.querySelector(".sdk"), document.querySelector(".rw-card")];
     return cards.map((c) => getComputedStyle(c).backgroundColor);
   });
   (tints.length === 2 && tints[0] === tints[1] && !tints.includes("rgba(0, 0, 0, 0)"))
@@ -5153,7 +5171,7 @@ try {
   // telemetry bug and is not one.
   await page.evaluate(() => navigate("status"));
   await page.waitForFunction(() => location.pathname === "/status"
-    && document.querySelectorAll(".cards .card").length >= 2);
+    && !!document.querySelector(".status-foot .card"));
   // rows > 1 asserts the band is actually the wrapped case, so a future width
   // change that stops wrapping here cannot pass this vacuously.
   (bandRow.rows > 1 && bandRow.left <= 2)
@@ -5166,7 +5184,8 @@ try {
   // TestBackupServerRow_localCopyInEveryMode.
 
   // ── Scenario 17h — the telemetry card shows the exact sample event (#1447) ──
-  // Still on /status, where the card lives since #1867. The "Show a sample event" fold must be closed by
+  // Still on /status, where the card lives since #1867, at the foot of the
+  // page since #2330. The "Show a sample event" fold must be closed by
   // default, open on click, and carry the daemon's `sample_event` string
   // VERBATIM in a read-only <pre>: the daemon renders it through the same
   // function `bintrail telemetry show` prints through, and a JSON.stringify
@@ -5176,7 +5195,7 @@ try {
   // an empty normalisation cannot pass. run.sh builds without -ldflags, so
   // this photographs the no-endpoint arm, where the fold still renders.
   const telSample = await page.evaluate(async () => {
-    const card = Array.from(document.querySelectorAll(".cards .card"))
+    const card = Array.from(document.querySelectorAll(".status-foot .card"))
       .find((c) => (c.querySelector(".card-title") || {}).textContent === "Usage telemetry");
     if (!card) return { found: false };
     const d = card.querySelector("details.tel-sample");
