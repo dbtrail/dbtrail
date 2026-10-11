@@ -201,7 +201,14 @@ func (s *Server) sqlOnCopyFor(b *bundle, id string) (*SQLOnCopy, string) {
 	case b.noArchive:
 		return nil, "archive access is disabled for this server, so its copy cannot be read"
 	}
-	return &SQLOnCopy{s: s, b: b, user: "server:" + id, id: id}, ""
+	// The name a statement's slot is taken under: one per server, so a
+	// server runs one at a time, or none, so only the count of slots bounds
+	// them (Config.SQLPortSharedSlots).
+	user := "server:" + id
+	if s.sqlPortSharedSlots {
+		user = ""
+	}
+	return &SQLOnCopy{s: s, b: b, user: user, id: id}, ""
 }
 
 // ResolveFlashback maps a flashback connection username to its target server's

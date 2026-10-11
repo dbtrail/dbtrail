@@ -175,6 +175,16 @@ type Config struct {
 	// the whole process, the SQL card and the embedded port together (#2030,
 	// watch --sql-max-in-flight); 0 means sqlsandbox.DefaultMaxInFlight.
 	SQLMaxInFlight int
+	// SQLWorkerStatements is how many statements one SQL worker process
+	// answers before it is replaced (#2084, sqlsandbox.Config.
+	// WorkerStatements). 0 or 1: a process per statement, as watch and
+	// serve run.
+	SQLWorkerStatements int
+	// SQLPortSharedSlots lets statements on the MySQL port for one server
+	// run at once, up to SQLMaxInFlight for all servers together (#2084).
+	// Unset, one runs at a time per server (#2026), which is the rule for a
+	// port that shares its process with capture.
+	SQLPortSharedSlots bool
 	// SQLSettingsPath is the file the web interface saves the SQL memory in
 	// (#2210), beside the servers file. Empty = this console keeps none, and
 	// the memory can only be set where DBTrail starts.
@@ -462,6 +472,8 @@ type Server struct {
 	sqlLimits sqlsandbox.Limits
 	// sqlPortMaxRows is Config.SQLPortMaxRows; read through sqlPortRowCap.
 	sqlPortMaxRows int
+	// sqlPortSharedSlots is Config.SQLPortSharedSlots.
+	sqlPortSharedSlots bool
 	// sqlMem is the SQL memory setting (#2210): MemoryLimit above is the
 	// startup value or the default, and sqlMemoryNow says which applies.
 	sqlMem sqlMemoryState
@@ -748,7 +760,9 @@ func New(cfg Config) (*Server, error) {
 	// its DuckDB open, so a short statement does not pay the start. They stop
 	// on their own after a few minutes with no statement, and with this
 	// process, whose exit closes their stdin.
-	runner := sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits, MaxInFlight: cfg.SQLMaxInFlight, Standby: true})
+	runner := sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits, MaxInFlight: cfg.SQLMaxInFlight, Standby: true,
+		WorkerStatements: cfg.SQLWorkerStatements})
+	s.sqlPortSharedSlots = cfg.SQLPortSharedSlots
 	s.sqlRunner, s.sqlSpillState, s.sqlFenceState = sandboxRunner{runner}, runner.SpillState, runner.FenceState
 	s.sqlMaxInFlight = cfg.SQLMaxInFlight
 	if s.sqlMaxInFlight < 1 {

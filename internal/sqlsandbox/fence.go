@@ -271,6 +271,12 @@ func writeCgroupFile(name, value string) error {
 	return werr
 }
 
+// CeilingBytes is the most memory one statement's worker may reach under
+// memoryLimit where it runs in a cgroup of its own: the limit DuckDB is given
+// plus the headroom for what DuckDB holds outside it. What sizes a pool of
+// workers (#2084) is this, not the limit.
+func CeilingBytes(memoryLimit string) (int64, error) { return fenceBytes(memoryLimit) }
+
 // fenceBytes is the ceiling for a worker with memoryLimit.
 func fenceBytes(memoryLimit string) (int64, error) {
 	mem, err := cliutil.ParseByteSize(memoryLimit)
