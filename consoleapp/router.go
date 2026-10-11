@@ -84,7 +84,7 @@ func addRouterFlags(cmd *cobra.Command) {
 	f.String("servers-file", "", "Path to the server registry the web interface manages (default ~/.config/bintrail/console-servers.yaml). Read, never written. Env BINTRAIL_CONSOLE_SERVERS.")
 	f.String("auth-file", "", "Path to the web interface auth file, when it is not the default: only so a statement cannot read it through a copy directory that contains it. Env BINTRAIL_CONSOLE_AUTH.")
 	f.String("mcp-token-file", "", "Path to the managed MCP token file, when it is not the default: for the same reason as --auth-file. Env BINTRAIL_CONSOLE_MCP_TOKEN_FILE.")
-	f.String("sql-memory", "", "Memory each statement on the copy may use, e.g. 4GB; default 2GB, at least 512MB. Fewer statements run at once when each may use more. The memory saved in the web interface (Settings, MCP Server) is the capture process's and is not read here. Env BINTRAIL_CONSOLE_SQL_MEMORY.")
+	f.String("sql-memory", "", "Memory each statement on the copy may use, e.g. 4GB; default 2GB, at least 512MB. Fewer statements run at once when each may use more. Unset, the memory saved in the web interface (Settings, MCP Server) is used, read when the router starts: a change there takes effect when the router is restarted, since how many statements run at once was worked out from it. Env BINTRAIL_CONSOLE_SQL_MEMORY.")
 	f.Int("sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns; a result with more is refused with error 1104, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
 	f.Bool("route-read-only", false, "Refuse every statement that is not a read, and never send it to the source. It reads the statement's text, so it cannot see a stored function that writes: the forwarding account's grants are the guard for that. Env BINTRAIL_CONSOLE_ROUTE_READ_ONLY.")
 	f.Float64("route-cost-threshold", def.CostThreshold, "A SELECT whose plan query_cost is at least this goes to the copy (a point lookup costs about 1; a full scan over 200k rows about 20000). 0 disables the cost rule. Env BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD.")
@@ -369,6 +369,64 @@ func routerPortConfig(st routerSettings, routingOn func() bool) flashbackConfig 
 	return cfg
 }
 
+// routerMemory settles the memory a statement may use before the pool is
+// sized from it (#2341): what the router was started with, else what the
+// web interface saved, else the default (st.SQLMemory left empty). It is
+// read once, here: the number of workers is worked out from it, so a value
+// taken later would let workers times memory pass what the service was
+// given. from says where it came from, for the startup lines; err is a
+// saved setting that is there and cannot be read, which the default then
+// stands in for, said loudly.
+func routerMemory(st *routerSettings, savedPath string) (from string, err error) {
+	if st.SQLMemory != "" {
+		return "set where the router is started", nil
+	}
+	saved, err := console.SavedSQLMemory(savedPath)
+	if err != nil {
+		return "the default", err
+	}
+	if saved == "" {
+		return "the default", nil
+	}
+	st.SQLMemory = saved
+	return "saved in the web interface, read from " + savedPath, nil
+}
+
+// routerMemoryEvery is how often the saved SQL memory is read again, to say
+// when it is no longer the one applied.
+const routerMemoryEvery = 30 * time.Second
+
+// followRouterMemory says, once per value, when the memory saved in the web
+// interface is no longer the one this router was sized with: it is applied
+// at the next start, and until then nothing else would say why a change
+// made there did nothing here. Only when the router took the saved value or
+// the default; a value set where it is started decides.
+func followRouterMemory(ctx context.Context, savedPath, applied string, every time.Duration, warn func(msg string, args ...any)) {
+	said := applied
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		saved, err := console.SavedSQLMemory(savedPath)
+		if err != nil || saved == said {
+			continue
+		}
+		said = saved
+		if saved == applied {
+			continue
+		}
+		now := saved
+		if now == "" {
+			now = "the default"
+		}
+		warn("router: the SQL memory saved in the web interface changed and is NOT applied here yet: restart the router to apply it (how many statements run at once is worked out from it)", "saved", now, "running_with", applied)
+	}
+}
+
 // routerPortFile is the saved setting whose password the router accepts, ""
 // when it accepts none from it. With a token, the token decides and the file
 // is not read: that is the capture process's own rule when it is started
@@ -500,7 +558,11 @@ type routerStartup struct {
 	Listen      string
 	Pool        console.SQLPool
 	MemoryLimit string
-	Cfg         flashbackConfig
+	// MemoryFrom says where MemoryLimit came from; MemoryErr is a saved
+	// setting that could not be read (routerMemory).
+	MemoryFrom string
+	MemoryErr  error
+	Cfg        flashbackConfig
 	// ServersFile, whether it exists, and how many servers it holds now.
 	ServersFile   string
 	ServersExists bool
@@ -545,6 +607,12 @@ func routerStartupLines(u routerStartup) string {
 		fmt.Fprintf(&b, "Router: %s from %s, read again when it changes.\n", countOfServers(u.Servers), u.ServersFile)
 	}
 	fmt.Fprintf(&b, "Router: %s on the copy at once, %d threads and up to %s of memory each: %s.\n", countOfStatements(u.Pool.Workers), u.Pool.Threads, u.MemoryLimit, u.Pool.Why)
+	if u.MemoryFrom != "" {
+		fmt.Fprintf(&b, "Router: that memory is %s. A change saved in the web interface is applied when the router is restarted.\n", u.MemoryFrom)
+	}
+	if u.MemoryErr != nil {
+		fmt.Fprintf(&b, "Router: the SQL memory saved in the web interface could NOT be read, so the default is used: %v\n", u.MemoryErr)
+	}
 	rule := fmt.Sprintf("SELECTs with plan cost >= %.0f or a full scan over >= %d rows (on a MariaDB source, also joins that read that many rows in all) run on the copy, whatever the age of its snapshot. When every worker is busy such a statement waits its turn, in the order it arrived, for up to %s; past that the client gets error 1040",
 		u.Cfg.RoutePolicy.CostThreshold, u.Cfg.RoutePolicy.ScanRows, sqlsandbox.DefaultMaxWait)
 	if u.Cfg.RouteReadOnly {
@@ -589,6 +657,8 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	startedWithMemory := st.SQLMemory != ""
+	memoryFrom, savedErr := routerMemory(&st, sqlSettingsFilePath(st.ServersFile))
 	memoryLimit := st.SQLMemory
 	if memoryLimit == "" {
 		memoryLimit = sqlsandbox.DefaultLimits().MemoryLimit
@@ -608,6 +678,9 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 	// servers and the password that are in the files now.
 	srv.RefreshFollowedFiles()
 	go srv.FollowFiles(ctx, 0)
+	if !startedWithMemory {
+		go followRouterMemory(ctx, sqlSettingsFilePath(st.ServersFile), st.SQLMemory, routerMemoryEvery, slog.Warn)
+	}
 	if st.MetricsAddr != "" {
 		last := &routerCopySnapshots{}
 		stopMetrics, err := streamrun.StartMetricsServerWith(st.MetricsAddr, map[string]http.Handler{
@@ -623,7 +696,7 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 	cfg := routerPortConfig(st, srv.FlashbackRoutingOn)
 	_, statErr := os.Stat(st.ServersFile)
 	fmt.Fprint(os.Stderr, routerStartupLines(routerStartup{
-		Listen: st.Listen, Pool: pool, MemoryLimit: memoryLimit, Cfg: cfg,
+		Listen: st.Listen, Pool: pool, MemoryLimit: memoryLimit, MemoryFrom: memoryFrom, MemoryErr: savedErr, Cfg: cfg,
 		ServersFile: st.ServersFile, ServersExists: statErr == nil, Servers: srv.ServerCount(),
 		PortFile: routerPortFile(st), Ignored: routerIgnoredEnv(), InContainer: inContainer(),
 	}))

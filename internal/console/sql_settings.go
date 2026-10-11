@@ -248,6 +248,18 @@ func saveSQLSettingsFile(path string, f sqlSettingsFile) error {
 	return nil
 }
 
+// SavedSQLMemory reads the SQL memory saved in the web interface from path,
+// as a limit ("4096MiB"), or "" when none is saved. For a process that
+// follows the daemon's files and never writes them (the router, #2341). An
+// error is a file that is there and cannot be applied as written.
+func SavedSQLMemory(path string) (string, error) {
+	f, err := loadSQLSettingsFile(path)
+	if err != nil || f.MemoryMiB == 0 {
+		return "", err
+	}
+	return fmt.Sprintf("%dMiB", f.MemoryMiB), nil
+}
+
 // sqlMemoryState is the server's live view of the setting.
 type sqlMemoryState struct {
 	// mutate serializes PUTs (save, then apply); readers take mu only.

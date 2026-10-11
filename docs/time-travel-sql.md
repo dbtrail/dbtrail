@@ -2178,6 +2178,16 @@ environment file serves both. `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE` and
 `BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT` do not apply to it, and it says so at
 startup when they are set.
 
+**The memory of a statement.** With no `--sql-memory`, the router uses the
+memory saved in the web interface (**Settings**, **MCP Server**, **Memory for
+SQL on the copy**), else the default. It reads it once, when it starts: how
+many statements run at once is worked out from it, so a value taken later
+could let them use together more than the service was given. A change saved
+while the router runs is applied when the router is restarted, and the
+router's log says so when it sees one. Its startup lines say where the
+memory came from; a saved setting that cannot be read is said there, and the
+default is used.
+
 Forwarding to a replica is not something the router does. To read from
 replicas, put ProxySQL in front of the source and point the server's source
 address at it.
