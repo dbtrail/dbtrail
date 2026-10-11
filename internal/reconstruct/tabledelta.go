@@ -45,7 +45,10 @@ import (
 // # When the table is rewritten anyway
 //
 // tableDeltaCompactReason: the chain is a day old, or it started too close to
-// the oldest events the index keeps (FullTableConfig.ChainStartFloor); every pair together has
+// the oldest events the index keeps (FullTableConfig.ChainStartFloor); its
+// upserts passed the size SQL on the copy wants a chain kept under
+// (chainUpsertsLine: a fixed size, higher for a table read through its
+// resolved pair); every pair together has
 // passed tableDeltaMaxFraction of the base (and tableDeltaMinCompactBytes, so
 // small tables are left alone); the run
 // crossed a known capture gap; the previous snapshot is on S3; the table has
@@ -296,8 +299,10 @@ func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, 
 // files are. A copy inside S3 (#2212) applies these to the chain it would
 // carry, exactly as a local carry does.
 //
-// maxUpserts is FullTableConfig.MaxChainUpserts: past it the chain is ended
-// so SQL on the copy keeps reading the newest copy (#2210). Zero: no such rule.
+// maxUpserts is FullTableConfig.MaxChainUpserts, or MaxResolvedChainUpserts
+// for a table read through its resolved pair (chainUpsertsLine): past it the
+// chain is ended so SQL on the copy keeps reading the newest copy (#2210).
+// Zero: no such rule.
 func chainCompactReason(prev *tableDelta, baseSize int64, capGap *CaptureGap, at time.Time, hasAnchor bool, reserved string, chainFloor, newStart time.Time, maxUpserts int64) string {
 	switch {
 	case !hasAnchor:
@@ -1041,7 +1046,8 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	if s3CopyUnchangedChain(ctx, p, hasAnchor, reserved, rep) {
 		return nil
 	}
-	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.capGap, p.cfg.At, hasAnchor, reserved, p.cfg.ChainStartFloor, newChainStart(p), p.cfg.MaxChainUpserts); reason != "" {
+	maxUpserts, _ := chainUpsertsLine(p)
+	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.capGap, p.cfg.At, hasAnchor, reserved, p.cfg.ChainStartFloor, newChainStart(p), maxUpserts); reason != "" {
 		return rewriteWithEmptyDelta(ctx, p, in, newBase, reason, reserved != "", rep)
 	}
 	// A base written before a type joined the binary list (VECTOR) stores that
@@ -1217,18 +1223,36 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		// Above zero: the window's changes did not fit in memory and were
 		// read back from disk in that many passes.
 		"spill_passes", passes)
-	warnChainOverLine(p, chain)
+	warnChainOverLine(p, chain, maxUpserts)
 	return nil
 }
 
+// chainUpsertsLine is the size of upserts past which the chain this window
+// starts from is ended, and whether it is the line of a table read through
+// its resolved pair (#2261, FullTableConfig.MaxResolvedChainUpserts). The
+// previous snapshot's chain is the one asked about: its pair was written
+// after that snapshot was published, and a table whose pair could not be
+// written is back on the ordinary line at the next refresh.
+func chainUpsertsLine(p tableDeltaPublish) (line int64, resolved bool) {
+	c := p.cfg
+	if p.prev == nil || c.ChainResolved == nil || c.MaxChainUpserts <= 0 || c.MaxResolvedChainUpserts <= c.MaxChainUpserts ||
+		!c.ChainResolved(p.basePath, p.prev.Chain) {
+		return c.MaxChainUpserts, false
+	}
+	return c.MaxResolvedChainUpserts, true
+}
+
 // warnChainOverLine says when the chain just published, this window's pair
-// included, is past twice MaxChainUpserts, the console's fold line (#2210).
-// The rule looks at the chain a window starts from, so one window that alone
-// adds more than that leaves a long chain until the next refresh rewrites
-// it; meanwhile a statement over the table reads it more slowly, and the
-// operator should know why.
-func warnChainOverLine(p tableDeltaPublish, chain *baseline.TableDeltaChain) {
-	if p.cfg.MaxChainUpserts <= 0 || chain == nil {
+// included, is past the size a refresh keeps it under: twice MaxChainUpserts,
+// the console's fold line (#2210), or twice the line of a table read through
+// its resolved pair, past which a statement that finds no pair is answered
+// from an earlier copy (#2261). The rule looks at the chain a window starts
+// from, so one window that alone adds more than that leaves a long chain
+// until the next refresh rewrites it; meanwhile a statement over the table
+// reads it more slowly, and the operator should know why. max is the line
+// this window's decision used (chainUpsertsLine), not asked for again.
+func warnChainOverLine(p tableDeltaPublish, chain *baseline.TableDeltaChain, max int64) {
+	if max <= 0 || chain == nil {
 		return
 	}
 	var total int64
@@ -1237,7 +1261,7 @@ func warnChainOverLine(p tableDeltaPublish, chain *baseline.TableDeltaChain) {
 			total += fi.Size()
 		}
 	}
-	if line := 2 * p.cfg.MaxChainUpserts; total > line {
+	if line := 2 * max; total > line {
 		slog.Warn("table's changes are past the size a refresh keeps them under until the next refresh rewrites it: this window alone added more than half of that",
 			"schema", p.schema, "table", p.table, "unmerged_mb", (total+(1<<20)-1)>>20, "line_mb", line>>20)
 	}

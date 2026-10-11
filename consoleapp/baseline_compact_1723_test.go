@@ -114,6 +114,10 @@ func compactRig(t *testing.T, pairs int) (*baselineSupervisor, refreshRequest, *
 	writeSnapshotFiles(t, snapDir, baseline.SuccessMarker)
 	cs := stubCompaction(t, fakeChain(t, snapDir, pairs))
 	sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
+	// The job's goroutine goes on to the resolved pairs after the status
+	// turns terminal (#2261), and reads the seams stubCompaction restores:
+	// registered after it, so this runs first.
+	t.Cleanup(sup.postRefresh.Wait)
 	h, err := console.OpenBaselineHistory(filepath.Join(t.TempDir(), "h.json"))
 	if err != nil {
 		t.Fatal(err)

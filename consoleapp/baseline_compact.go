@@ -172,7 +172,19 @@ func (s *baselineSupervisor) TriggerCompact(req refreshRequest, due []compactCan
 	s.compacts[req.ServerID] = &console.BaselineStatus{State: "running", Since: nowStamp()}
 	s.mu.Unlock()
 	slog.Info("baseline compact: starting", "server", req.ServerName, "id", req.ServerID, "chains", len(due))
-	go s.runCompact(req, due)
+	s.postRefresh.Add(1)
+	go func() {
+		defer s.postRefresh.Done()
+		s.runCompact(req, due)
+		// The refresh that started this job found it running when it came
+		// to write the resolved pairs, and stood aside (maybeResolve). The
+		// job leaves the newest snapshot's chains as they were, so the pairs
+		// are written now: left to the next refresh, that snapshot would be
+		// read through its chains for a whole interval, and that refresh
+		// would find no pair for any table and hold each to the short line
+		// (#2261).
+		s.maybeResolve(req)
+	}()
 	return nil
 }
 

@@ -241,6 +241,21 @@ type FullTableConfig struct {
 	// line, so a statement over the table reads a short chain from the newest
 	// copy. Zero: no such rule.
 	MaxChainUpserts int64
+	// MaxResolvedChainUpserts is the line, in place of MaxChainUpserts, for a
+	// table ChainResolved answers for (#2261): a statement reads such a table
+	// through its resolved pair (#2231), so the length of its chain is not
+	// what the statement pays, and MaxChainUpserts, which does not look at
+	// the table, had an 80 M row table written in full as often as a small
+	// one. The share rule (tableDeltaMaxFraction) is what ends that chain
+	// instead. This line stays as a ceiling for the refresh whose pair is not
+	// written yet, when a statement reads the chain itself: the daemon sets
+	// half of the size past which SQL on the copy answers from an earlier
+	// copy. Zero, or not above MaxChainUpserts: every table keeps
+	// MaxChainUpserts.
+	MaxResolvedChainUpserts int64
+	// ChainResolved says whether the chain beside a previous table file is
+	// read through its resolved pair. Nil: no table is.
+	ChainResolved func(basePath string, chain *baseline.TableDeltaChain) bool
 
 	// WarnEventThreshold logs a loud warning when a table's fetched event count
 	// exceeds it. The event window itself is PAGED since #1097, so the resident

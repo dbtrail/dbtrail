@@ -105,12 +105,12 @@ func TestWarnChainOverLine(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	p := tableDeltaPublish{schema: "s", table: "t", cfg: FullTableConfig{MaxChainUpserts: 550}}
-	warnChainOverLine(p, chain) // 1100 is the line: not past it
+	warnChainOverLine(p, chain, p.cfg.MaxChainUpserts) // 1100 is the line: not past it
 	if buf.Len() != 0 {
 		t.Fatalf("at the line: %s", buf.String())
 	}
 	p.cfg.MaxChainUpserts = 549
-	warnChainOverLine(p, chain)
+	warnChainOverLine(p, chain, p.cfg.MaxChainUpserts)
 	if !strings.Contains(buf.String(), "past the size a refresh keeps them under") {
 		t.Fatalf("past the line: %q", buf.String())
 	}
