@@ -57,13 +57,14 @@ import (
 // two together (TestComposeVersionMatchesTheBinary asserts they agree) and add
 // a composeVersionAdded entry saying what the new number buys, or the daemon
 // can only tell an operator that their file is old and not what it is missing.
-const bundledComposeVersion = 2
+const bundledComposeVersion = 3
 
 // composeVersionAdded names, per version, the wiring that version added. Only
 // versions ABOVE the operator's are read, so version 1 (the first numbered
 // file) has no entry: there is nothing before it to be missing.
 var composeVersionAdded = map[int]string{
 	2: "host.docker.internal on Linux: the services that reach your database map it to this machine (extra_hosts host-gateway, HOST_GATEWAY to override)",
+	3: "the router service: the MySQL port with read routing, run apart from capture on port 3310",
 }
 
 // composeIndexHost is the bundled index MySQL's service name in

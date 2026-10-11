@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"go.yaml.in/yaml/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -264,6 +265,58 @@ func TestInstaller_aFailedPullStartsWithTheImagesHere(t *testing.T) {
 	}
 	if !strings.Contains(r.out, "could not download the newest images") {
 		t.Errorf("a failed pull is not said:\n%s", r.out)
+	}
+}
+
+// The router waits, without listening, until there is a password for it, so
+// a taken 3310 must not stop the install either: its port is left
+// unpublished, the installer says so, and nothing else moves. With 3310 free
+// the mapping is there and nothing is said.
+func TestInstaller_aTakenRouterPortIsLeftUnpublished(t *testing.T) {
+	r := install(t)
+	if r.failed || !strings.Contains(r.compose(t), `"127.0.0.1:3310:3310"`) {
+		t.Fatalf("with 3310 free the router's port must be published on loopback (failed=%v):\n%s", r.failed, portLines(r.compose(t)))
+	}
+	if strings.Contains(r.out, "3310") {
+		t.Errorf("nothing about 3310 should be said when it is free:\n%s", r.out)
+	}
+
+	r = install(t, "BUSY_PORTS=3310")
+	if r.failed || r.upCalls != 1 {
+		t.Fatalf("install failed with only 3310 taken (up=%d):\n%s", r.upCalls, r.out)
+	}
+	c := r.compose(t)
+	if strings.Contains(c, `"127.0.0.1:3310:3310"`) {
+		t.Errorf("a taken 3310 is still published:\n%s", portLines(c))
+	}
+	if !strings.Contains(c, `"127.0.0.1:8090:8090"`) || !strings.Contains(c, `"127.0.0.1:9090:9090"`) || !strings.Contains(c, `"127.0.0.1:3309:3309"`) {
+		t.Errorf("the other ports were disturbed:\n%s", portLines(c))
+	}
+	if !strings.Contains(r.out, "port 3310 is taken, so the router's port is not published") {
+		t.Errorf("the skip is not said:\n%s", r.out)
+	}
+	// Docker Compose refuses a file where a service has a "ports:" key and no
+	// entries under it ("services.router.ports must be a array"), and then
+	// nothing starts, capture included. The mapping was the router's only one.
+	var doc struct {
+		Services map[string]map[string]any `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(c), &doc); err != nil {
+		t.Fatalf("the rewritten compose file is not YAML: %v", err)
+	}
+	if len(doc.Services) < 3 {
+		t.Fatalf("read %d services from the rewritten compose file", len(doc.Services))
+	}
+	for name, svc := range doc.Services {
+		if ports, has := svc["ports"]; has {
+			if list, ok := ports.([]any); !ok || len(list) == 0 {
+				t.Errorf("service %s is left with an empty ports: key (%v), which Docker Compose refuses", name, ports)
+			}
+		}
+	}
+	// And the router service itself is still there: only its mapping went.
+	if !strings.Contains(c, "BINTRAIL_ROUTER_LISTEN: 0.0.0.0:3310") {
+		t.Errorf("the router service lost more than its port mapping")
 	}
 }
 

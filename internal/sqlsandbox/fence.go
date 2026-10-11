@@ -131,7 +131,7 @@ func findFence(mount string, procSelfCgroup []byte, delegated func(dir string) b
 	why := func(cg, what string, err error) fence {
 		if errors.Is(err, syscall.EROFS) {
 			if cg == "/" && container {
-				return fence{why: "this container does not let DBTrail make cgroups: in docker-compose.yml, uncomment security_opt (writable-cgroups=true) on the bintrail service, which needs Docker 28 or later, and recreate the container"}
+				return fence{why: "this container does not let DBTrail make cgroups: in docker-compose.yml, uncomment security_opt (writable-cgroups=true) on the service that prints this (bintrail or router), which needs Docker 28 or later, and recreate the container"}
 			}
 			return fence{why: "the cgroups DBTrail was handed are read-only (under systemd, ProtectControlGroups=yes in its unit does that)"}
 		}

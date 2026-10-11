@@ -112,7 +112,7 @@ func TestSQLMemoryPanel_2210(t *testing.T) {
 	put("fenced", fenced, "GET", "")
 	unfenced := sqlSettingsServer(t, filepath.Join(dir, "unfenced", SQLSettingsFileName), "")
 	unfenced.sqlFenceState = func() (bool, string) {
-		return false, "this container does not let DBTrail make cgroups: in docker-compose.yml, uncomment security_opt (writable-cgroups=true) on the bintrail service, which needs Docker 28 or later, and recreate the container"
+		return false, "this container does not let DBTrail make cgroups: in docker-compose.yml, uncomment security_opt (writable-cgroups=true) on the service that prints this (bintrail or router), which needs Docker 28 or later, and recreate the container"
 	}
 	put("unfenced", unfenced, "GET", "")
 
@@ -166,7 +166,7 @@ func TestSQLMemoryPanel_2210(t *testing.T) {
 	// with the reason when it is not, and not mentioned where the system has
 	// nothing to offer (the default server here: no reason given).
 	has("fenced", got.Fenced, "Each statement also has a memory ceiling of its own, kept by the system: one that outgrows its memory is stopped alone, and nothing else on this machine is affected.")
-	has("unfenced", got.Unfenced, "A statement has no memory ceiling of its own here, so one that outgrows its memory is only stopped when this machine runs out of memory, and the system may stop something else with it. Why: this container does not let DBTrail make cgroups: in docker-compose.yml, uncomment security_opt (writable-cgroups=true) on the bintrail service, which needs Docker 28 or later, and recreate the container.")
+	has("unfenced", got.Unfenced, "A statement has no memory ceiling of its own here, so one that outgrows its memory is only stopped when this machine runs out of memory, and the system may stop something else with it. Why: this container does not let DBTrail make cgroups: in docker-compose.yml, uncomment security_opt (writable-cgroups=true) on the service that prints this (bintrail or router), which needs Docker 28 or later, and recreate the container.")
 	// Folded, each under a label that says which it is: the page keeps its
 	// visible text short (the console's own budget for this page).
 	if len(got.Fenced.Folds) != 1 || !strings.HasPrefix(got.Fenced.Folds[0], "Own memory ceiling: on Each statement also has") {
