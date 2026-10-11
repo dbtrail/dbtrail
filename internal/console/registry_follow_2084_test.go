@@ -282,9 +282,9 @@ func TestFollowFiles_registryChangesReachOpenConnections(t *testing.T) {
 }
 
 // The password the web interface generates for the port is accepted as soon
-// as the daemon saves it, stops being accepted when it is replaced or
-// removed, and is not accepted from a file that cannot be read. The token
-// always is.
+// as the daemon saves it with the port on, stops being accepted when it is
+// replaced or removed or the port is turned off, and is not accepted from a
+// file that cannot be read. The token always is.
 func TestFollowFiles_thePortPassword(t *testing.T) {
 	_, srv, _, portFile := followerServer(t)
 	passwords := func() string {
@@ -314,9 +314,20 @@ func TestFollowFiles_thePortPassword(t *testing.T) {
 	if got := passwords(); got != "tok" {
 		t.Fatalf("with a file that does not parse: %q", got)
 	}
-	save(FlashbackFile{Password: "back"})
+	save(FlashbackFile{Enabled: true, Password: "back"})
 	if got := passwords(); got != "tok,back" {
 		t.Fatalf("after the file was fixed: %q", got)
+	}
+	// Turned off in the web interface: the daemon keeps the password in the
+	// file and closes its port. This port is still open, so the password
+	// must stop opening it.
+	save(FlashbackFile{Enabled: false, Listen: "127.0.0.1:3309", Password: "back"})
+	if got := passwords(); got != "tok" {
+		t.Fatalf("after the port was turned off in the web interface: %q", got)
+	}
+	save(FlashbackFile{Enabled: true, Listen: "127.0.0.1:3309", Password: "back"})
+	if got := passwords(); got != "tok,back" {
+		t.Fatalf("after the port was turned on again: %q", got)
 	}
 	if err := os.Remove(portFile); err != nil {
 		t.Fatal(err)

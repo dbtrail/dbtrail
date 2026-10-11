@@ -172,10 +172,16 @@ func (s *Server) applyRegistryChange(c RegistryChange) {
 }
 
 // refreshFlashbackPassword reads the port's saved setting again for its
-// password. A file that is gone is a password that was removed. One that is
-// there and cannot be read or parsed also leaves no password from it: a
-// credential this process cannot read is not one it goes on accepting, and
-// the token, when there is one, still opens the port.
+// password, which is accepted only while the setting says the port is on.
+// Turning the port off in the web interface keeps the password in the file,
+// for when it is turned on again: there the port is closed, so the password
+// opens nothing. This process's port stays open, so it has to stop taking
+// the password itself, or turning the port off would revoke nothing here.
+//
+// A file that is gone is a password that was removed. One that is there and
+// cannot be read or parsed also leaves no password from it: a credential
+// this process cannot read is not one it goes on accepting, and the token,
+// when there is one, still opens the port.
 func (s *Server) refreshFlashbackPassword() {
 	fb := &s.flashback
 	fb.mu.Lock()
@@ -187,7 +193,7 @@ func (s *Server) refreshFlashbackPassword() {
 	f, err := LoadFlashbackFile(path)
 	s.noteFollow("port", "console: the MySQL port's saved setting could not be read; the password created in the web interface is not accepted until it can", err)
 	password, createdAt := "", ""
-	if err == nil {
+	if err == nil && f.Enabled {
 		password, createdAt = f.Password, f.PasswordCreatedAt
 	}
 	fb.mu.Lock()
