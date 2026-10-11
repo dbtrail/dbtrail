@@ -897,7 +897,7 @@ button { font-family: inherit; }
 .ov-panel-head, .vfy-region-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
-.card-title, .ov-panel-title, .stg-card-t, .bk-lane-t, .fr-card .dc-name, .state-title, .empty h3 {
+.card-title, .rw-head, .ov-panel-title, .stg-card-t, .bk-lane-t, .fr-card .dc-name, .state-title, .empty h3 {
   font-family: var(--f-ui); font-size: var(--fs-lg); font-weight: 600;
   letter-spacing: -0.01em; line-height: 1.3; color: var(--ink); margin: 0;
 }
@@ -1347,6 +1347,18 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
    everything is .off (grey, "as of"), never red. Under 880px the grid stacks
    and the wires turn. The DBTrail station is the page's one brand-gradient
    element. */
+/* Running with (#2330): the Status page's one list of settings in force.
+   A label, the value in bold, and where the value came from in grey. */
+.rw-card { margin-top: 18px; padding: 22px 22px 18px; background: var(--surface); border-radius: var(--r-xl); box-shadow: var(--shadow); min-width: 0; }
+.rw-head { margin: 0 0 4px; }
+.rw-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 6px 36px; }
+.rw-title { font-family: var(--f-ui); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); margin: 14px 0 4px; }
+.rw-row { display: grid; grid-template-columns: minmax(120px, 42%) 1fr; gap: 12px; padding: 7px 0; border-top: 1px solid var(--line-soft); font-size: 13px; }
+.rw-k { color: var(--ink-2); }
+.rw-val { min-width: 0; overflow-wrap: anywhere; }
+.rw-v { font-weight: 600; color: var(--ink); }
+.rw-from { display: block; color: var(--ink-3); font-size: 12px; margin-top: 1px; }
+.rw-note { margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--orange-tint); color: var(--orange-deep); font-size: 12.5px; }
 /* The two facts above the drawing (#2330): uptime and the index disk.
    The verdict is the tile's top border, and the words under the value say
    the same thing, so the row never depends on colour alone. */

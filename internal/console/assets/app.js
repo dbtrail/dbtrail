@@ -6201,7 +6201,7 @@ function statusFlow(model) {
 async function renderStatus() {
   const gen = serverGen, vgen = viewGen;
   viewLoading();
-  let data, capacity, telemetry, copy;
+  let data, capacity, telemetry, copy, servers, sqlSet, rotation;
   // The index-disk read degrades independently (as the Storage panels do): a
   // failed /api/capacity renders its own note inside the card, never blanking
   // the health page it sits on. Telemetry (#1867, from the dissolved This
@@ -6212,9 +6212,17 @@ async function renderStatus() {
   try {
     // The snapshot list, as the Overview reads it: bounded, because a slow
     // S3 listing must not hold the whole page, and a failure is drawn as one.
-    [data, capacity, telemetry, copy] = await Promise.all([api("/api/status"), api("/api/capacity").catch(asErr),
-      sessionMay("settings:read") ? api("/api/telemetry").catch(asErr) : Promise.resolve(null),
-      apiWithin("/api/baselines", OV_REQUEST_MS).then((d) => d || {}, () => ({ unavailable: true }))]);
+    // The last three are for the Running with list (#2330), each degrading
+    // on its own: the server list as "could not be read", and the two
+    // settings reads not asked at all for a session that may not read
+    // settings (undefined, which the list says as "not available").
+    const mayRead = sessionMay("settings:read");
+    [data, capacity, telemetry, copy, servers, sqlSet, rotation] = await Promise.all([api("/api/status"), api("/api/capacity").catch(asErr),
+      mayRead ? api("/api/telemetry").catch(asErr) : Promise.resolve(null),
+      apiWithin("/api/baselines", OV_REQUEST_MS).then((d) => d || {}, (err) => ({ unavailable: true, status: (err && err.status) || 0 })),
+      sessionMay("servers:read") ? apiWithin("/api/servers", OV_REQUEST_MS).then((d) => d || null, () => null) : Promise.resolve(undefined),
+      mayRead ? apiWithin("/api/sql-settings", OV_REQUEST_MS).then((d) => d || null, () => null) : Promise.resolve(undefined),
+      mayRead ? apiWithin("/api/rotation", OV_REQUEST_MS).then((d) => d || null, asErr) : Promise.resolve(undefined)]);
   }
   catch (err) { if (gen !== serverGen || vgen !== viewGen) return; const v = VIEW(); clear(v); v.append(pageHead("Status", null)); renderError(v, err); return; }
   if (gen !== serverGen || vgen !== viewGen) return;
@@ -6283,7 +6291,218 @@ async function renderStatus() {
   const capBox = capacityBox(capacity);
   if (capBox) v.append(capBox);
   v.append(cards);
+  // Under the cards, full width: what this DBTrail is running with for the
+  // selected server (#2330).
+  const sid = currentServer || defaultServerId;
+  const entry = servers ? ((servers.servers || []).find((x) => x.id === sid) || null) : null;
+  v.append(runningWithCard(runningWithModel({ servers, server: entry, serverId: sid, status: data, copy, sql: sqlSet, rotation, capacity, pg })));
   viewEnter();
+}
+
+// ── Running with (#2330) ─────────────────────────────────────────────────────
+//
+// One list of what this DBTrail is running with for the selected server, in
+// the order the docs explain it: the source, the copy, SQL on the copy, the
+// index. Every value here is already on some page (the server form, the
+// Snapshots page, the Connect page's memory panel, the Retention page, the
+// index disk card); this is the one place that answers "what is it actually
+// running with", and each value says where it came from, so a reader who
+// sees "4 GB · set where DBTrail starts · default 2 GB" knows which knob it
+// is. Read-only: every setting is changed where it already was.
+//
+// runningWithModel is pure: the page's payloads in, the groups out. inp is
+// { servers, server, serverId, status, copy, sql, rotation, capacity, pg }.
+// servers is /api/servers (undefined when this session may not read it,
+// null when the read failed), server the selected entry in it. sql and
+// rotation are undefined for a session that may not read settings (nothing
+// is asked, and the list says so), null or {error} when the read failed.
+//
+// Two rules. A value that was not read is said so: never left out as if it
+// were unset, never shown as a figure. And a row repeats what a payload
+// states; it does not conclude. "No schedule" does not mean the copy never
+// moves, an absent keep count does not mean nothing is deleted, and an entry
+// with no source in the list is not an entry that captures nothing: each of
+// those was a sentence here once, and each was false on some install.
+
+// rwEvery spells a schedule's interval ("5m", "6h", "7d") in words, and
+// leaves anything else as it was written.
+function rwEvery(every) {
+  const m = /^(\d+)\s*([mhd])$/.exec(String(every || "").trim());
+  if (!m) return every ? "every " + every : "";
+  const n = Number(m[1]);
+  const unit = { m: "minute", h: "hour", d: "day" }[m[2]];
+  return n === 1 ? "every " + unit : "every " + n + " " + unit + "s";
+}
+
+function runningWithModel(inp) {
+  const unread = "could not be read";
+  const denied = "not available to this session";
+  const row = (k, v, from) => ({ k, v: String(v), from: from || "" });
+  const groups = [];
+
+  // Source. The list has three states that must not be mixed up: not asked
+  // (undefined: the session may not read servers), not read (null), and
+  // read without the selected entry in it (server null, serverId set).
+  const srv = inp.server || null;
+  const src = [];
+  const data = inp.status || null;
+  const stream = (data && data.stream) || null;
+  // The position, from the capture's own checkpoint. An unreadable stream
+  // state is said as that, the way the strip above says it, never as "no
+  // capture".
+  const position = (pg) => {
+    if (!data) return row("position", unread);
+    if (data.stream_error) return row("position", unread, data.stream_error.error || "");
+    if (!stream) return row("position", "none", "no live capture");
+    const mode = pg ? "" : stream.mode === "gtid" ? "GTID mode" : stream.mode === "position" ? "file and position mode" : "";
+    if (!stream.binlog_file) return row("position", "none yet", mode);
+    if (pg) return row("position", "LSN " + stream.binlog_file);
+    const pos = stream.binlog_position;
+    return row("position", stream.binlog_file + (pos === undefined || pos === null ? "" : ":" + pos), mode);
+  };
+  if (inp.servers === undefined) src.push(row("server", denied));
+  else if (!inp.servers) src.push(row("server", unread));
+  else if (!srv) src.push(row("server", inp.serverId || "none selected", "not in the list of servers"));
+  else {
+    src.push(row("server", srv.name || srv.id || "default"));
+    // "postgres" is what the server list says, "postgresql" what the
+    // capabilities say; either one is PostgreSQL.
+    const pg = !!inp.pg || srv.flavor === "postgres" || srv.flavor === "postgresql";
+    const family = pg ? "PostgreSQL" : srv.flavor === "mariadb" ? "MariaDB" : "MySQL";
+    if (srv.kind !== "registry") {
+      // The entry DBTrail was started with: its database, when it has one,
+      // was given at startup and is not in the server list, so nothing here
+      // may say it has none.
+      src.push(row("address", "set where DBTrail starts", "not listed here for this entry"));
+      src.push(position(pg));
+    } else if (!srv.has_source) {
+      src.push(row("address", "none", "no database to capture is set for this server"));
+    } else {
+      const addr = (srv.source_host || "") + (srv.source_host && srv.source_port ? ":" + srv.source_port : "");
+      src.push(addr ? row("address", addr, family) : row("address", unread, "the saved connection could not be taken apart"));
+      const schemas = String(srv.schemas || "").split(",").map((x) => x.trim()).filter(Boolean);
+      src.push(row("schemas", schemas.length ? schemas.join(", ") : "all"));
+      src.push(position(pg));
+    }
+  }
+  groups.push({ title: "Source", rows: src });
+
+  // Copy for SQL. Only what the listing itself states: the schedule and
+  // whether it can run, how the next run will be made as decided right now,
+  // and the keep count where this DBTrail applies one. What happens to a
+  // server with no schedule, or to a folder no count applies to, has too
+  // many answers to put in one line, and the Snapshots page gives them.
+  const bl = inp.copy || null;
+  const cp = [];
+  if (!bl || bl.unavailable) cp.push(row("copy", bl && bl.status === 403 ? denied : unread));
+  else if (bl.configured === false) cp.push(row("copy", "no location set", "this server keeps no copy"));
+  else {
+    const sch = bl.schedule || null;
+    if (!sch || !sch.every) cp.push(row("schedule", "none saved for this server"));
+    else if (sch.runnable === false) cp.push(row("schedule", "saved, and not running", [rwEvery(sch.every), sch.reason].filter(Boolean).join(" · ")));
+    else {
+      cp.push(row("schedule", rwEvery(sch.every)));
+      if (sch.full_every) {
+        cp.push(sch.full_reason ? row("full read", "cannot run on its timetable", rwEvery(sch.full_every) + " · " + sch.full_reason)
+          : row("full read", rwEvery(sch.full_every)));
+      }
+      if (sch.next_method_error) cp.push(row("next run", "cannot start", sch.next_method_error));
+      else if (sch.next_method) cp.push(row("next run", sch.next_method === "refresh" ? "an update from the recorded changes" : "a full read of the database", sch.next_method_why || ""));
+    }
+    const keep = bl.local_retention && bl.local_retention.keep_newest;
+    if (keep > 0) cp.push(row("snapshots kept on this machine", "the newest " + keep));
+  }
+  groups.push({ title: "Copy for SQL", rows: cp });
+
+  // SQL on the copy.
+  const st = inp.sql;
+  const sq = [];
+  let sqNote = "";
+  if (st === undefined) sq.push(row("settings", denied));
+  else if (!st || !st.memory) {
+    sq.push(row("settings", unread));
+    if (st && st.error) sqNote = st.error;
+  } else {
+    const from = { default: "the default", saved: "saved in the web interface", startup: "set where DBTrail starts" }[st.source] || "";
+    const parts = [from];
+    if (st.source !== "default" && st.default) parts.push("default " + st.default);
+    if (st.saved) parts.push("the " + st.saved + " saved in the web interface is not used");
+    sq.push(row("memory per statement", st.memory, parts.filter(Boolean).join(" · ")));
+    // A figure the answer does not carry is said as that: left out, the row
+    // would read as a limit that is not there.
+    sq.push(row("statements at once", st.max_in_flight ? st.max_in_flight : "not reported"));
+    if (st.disk) sq.push(row("disk past that memory", "up to " + st.disk));
+    else if (st.no_disk) sq.push(row("disk past that memory", "none", st.no_disk));
+    else sq.push(row("disk past that memory", "not reported"));
+    // The line is on a statement, over every table it reads, and crossing
+    // it is not always a refusal (sqlChainTooHeavy, runSQLVouched).
+    sq.push(st.max_unmerged_mb ? row("changes not merged yet, per statement", "up to " + st.max_unmerged_mb + " MB", "past that it is answered from an earlier copy, or refused")
+      : row("changes not merged yet, per statement", "not reported"));
+    // The budget sentence (#2210) and a settings file that did not load are
+    // the server's own words; both are warnings about the rows above.
+    sqNote = [st.warning, st.error].filter(Boolean).join(" ");
+  }
+  groups.push({ title: "SQL on the copy", rows: sq, note: sqNote });
+
+  // Index.
+  const cap = inp.capacity || null;
+  const capOK = !!(cap && !cap.error && cap.status);
+  const rot = inp.rotation;
+  const ix = [];
+  // Whether this process runs rotation at all, as far as the capacity read
+  // says: null when that read did not land.
+  let rotates = null;
+  if (!capOK) ix.push(row("change history kept", unread));
+  else {
+    const ret = cap.retention || {};
+    if (!ret.known) { rotates = false; ix.push(row("change history kept", "not known here", "this DBTrail does not run rotation")); }
+    else if (!ret.enabled) { rotates = false; ix.push(row("change history kept", "all of it", "rotation is off, so nothing is deleted")); }
+    else {
+      rotates = true;
+      if (ret.drops_paused) ix.push(row("change history kept", "all of it, until you choose", "would be " + ret.retain + "; DBTrail is not deleting old history on this server"));
+      else ix.push(row("change history kept", ret.retain || unread,
+        ret.source === "override" ? "saved in the web interface" : retentionBasis(ret).trim().replace(/^\(|\)$/g, "")));
+    }
+  }
+  // How often rotation runs: only where rotation runs. The rotation read
+  // says whether its loop is running in this process (enabled), which a
+  // saved setting does not turn on without a restart.
+  if (rot !== undefined && rotates !== false) {
+    if (!rot || rot.error) ix.push(row("old history checked every", unread));
+    else if (rot.enabled === false) { if (rotates) ix.push(row("old history checked every", "not running", "rotation was off when DBTrail started, and starts with it")); }
+    else if (rot.interval) ix.push(row("old history checked every", rot.interval));
+    else ix.push(row("old history checked every", unread));
+  }
+  if (!capOK) ix.push(row("size", unread));
+  else {
+    ix.push(row("size", humanBytes(cap.current_bytes), cap.measured
+      ? "grows " + humanBytes(cap.growth_bytes_per_day) + " a day · " + Math.round(cap.events_per_day || 0).toLocaleString("en-US") + " changes a day"
+      : "not enough history yet for a write rate"));
+    ix.push(row("free on disk", cap.free_known ? humanBytes(cap.free_bytes) : "not measurable from here"));
+  }
+  groups.push({ title: "Index", rows: ix });
+  return { groups };
+}
+
+// runningWithCard paints the list: one block per group, each row a label,
+// the value in bold, and where the value came from in grey.
+function runningWithCard(model) {
+  // Not one of the page's cards (the grid above, whose last is the usage
+  // telemetry card, #1867): a section of its own under them, full width.
+  const card = el("section", { class: "rw-card" }, el("h2", { class: "rw-head", text: "Running with" }));
+  const grid = el("div", { class: "rw-groups" });
+  for (const g of model.groups) {
+    const box = el("div", { class: "rw-group" }, el("h3", { class: "rw-title", text: g.title }));
+    for (const r of g.rows) {
+      box.append(el("div", { class: "rw-row" },
+        el("span", { class: "rw-k", text: r.k }),
+        el("span", { class: "rw-val" }, el("span", { class: "rw-v", text: r.v }), r.from ? el("span", { class: "rw-from", text: r.from }) : null)));
+    }
+    if (g.note) box.append(el("p", { class: "rw-note", text: g.note }));
+    grid.append(box);
+  }
+  card.append(grid);
+  return card;
 }
 
 function statusCard(title, rows) {

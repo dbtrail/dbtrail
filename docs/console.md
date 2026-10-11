@@ -250,6 +250,23 @@ and searching events:
    permanently lost" record when an unfillable gap (or a lost PostgreSQL slot)
    was detected. Both fire for any source family. See
    [the continuity signal](rotation-and-status.md#stream-continuity-no-data-lost).
+   A **Running with** list at the foot of the page gathers what this DBTrail
+   is running with for the selected server, in four groups: the source
+   (address, schemas, position), the copy for SQL (the saved schedule and
+   whether it can run, how the next run will be made, and the keep count
+   where this machine applies one), SQL on the copy (memory per statement,
+   statements at once, disk past that memory, how many unmerged changes a
+   statement's tables may carry) and the index (how long change history is
+   kept, how often rotation runs, size and growth, free disk). A value says
+   where it came from: the default, saved in the web interface, or set where
+   DBTrail starts. The list is read-only, a summary of settings that are
+   changed on their own pages, and it repeats what each read states without
+   concluding from it: a server with no saved schedule reads "none saved",
+   not "never updated", and the keep count is shown only where one applies.
+   A value that could not be read says so. The reads behind it that a
+   session may not make (`GET /api/servers` without `servers:read`,
+   `GET /api/sql-settings` and `GET /api/rotation` without `settings:read`)
+   are not made, and read "not available to this session".
    An **Index disk** card carries the projection `bintrail doctor` computes
    for the selected server: index size, write rate, the size it settles at
    for the configured retention, free space on the index volume, and how
