@@ -7,6 +7,9 @@
 #   scripts/mysql-integration-shard.sh run <shard> <log> -> build and run them
 #   scripts/mysql-integration-shard.sh check-split <log> -> over every shard's
 #       log together: each test of the split package ran exactly once
+#   scripts/mysql-integration-shard.sh collect <dir> <mysql> <log> -> what the
+#       `integration` job does with the results its shards uploaded: one
+#       result per shard, the newest attempt's, into one log
 #
 # Which packages: only those with integration-tagged test files, found by
 # asking `go list` which packages see more test files under -tags integration.
@@ -182,6 +185,106 @@ check_split() {
   echo "check-split: each of the $total tests of $SPLIT_PKG ran exactly once"
 }
 
+# collect: reads the results the shards of one MySQL version uploaded, as
+# download-artifact left them under <dir>, one folder per shard and attempt:
+#
+#   <dir>/mysql-it-<mysql>-shard-<shard>-attempt-<attempt>/{outcome,s3-ready,mysql-it.out}
+#
+# For each shard it takes the HIGHEST attempt and ignores the older ones.
+# "Re-run failed jobs" runs a failed shard again under a new attempt number
+# and leaves the shards that passed alone, so the newest result of each shard
+# can come from a different attempt. Before the attempt was in the name, a
+# rerun shard uploaded under the name it had already used and the download
+# kept the upload with the higher artifact ID, which is not always the later
+# one: a rerun that passed was read as the failure it replaced (#2299).
+#
+# Writes every chosen shard's test log to <log>, in shard order, and
+# `ready=true` only when the S3 store started in every chosen result (to
+# $GITHUB_OUTPUT when set, else to stdout). Returns 1 when a shard has no
+# result, did not end in success, or a folder is not one it expects.
+collect() {
+  local dir="$1" mysql="$2" log="$3"
+  local prefix="mysql-it-${mysql}-shard-" bad=0 ready=true
+  local d name rest shard attempt i best best_dir seen outcome
+  : > "$log"
+  if [ -f "$dir/outcome" ]; then
+    # download-artifact extracts flat when only ONE artifact matched.
+    echo "::error::only one of $SHARD_COUNT shards reported a result"
+    return 1
+  fi
+  for d in "$dir"/*/; do
+    [ -d "$d" ] || continue
+    name="$(basename "$d")"
+    rest="${name#"$prefix"}"
+    shard="${rest%%-attempt-*}"
+    attempt="${rest##*-attempt-}"
+    case "$name" in
+      "$prefix"*-attempt-*) ;;
+      *) shard="" ;;
+    esac
+    case "$shard" in '' | *[!0-9]*) shard="" ;; esac
+    case "$attempt" in '' | *[!0-9]*) shard="" ;; esac
+    if [ -z "$shard" ]; then
+      echo "::error::unexpected result folder '$name': want ${prefix}<shard>-attempt-<attempt>"
+      bad=1
+    elif [ "$((10#$shard))" -lt 1 ] || [ "$((10#$shard))" -gt "$SHARD_COUNT" ]; then
+      echo "::error::found a result for shard $shard, SHARD_COUNT is $SHARD_COUNT: the matrix and the script disagree"
+      bad=1
+    fi
+  done
+  for i in $(seq 1 "$SHARD_COUNT"); do
+    best=0
+    best_dir=""
+    seen=""
+    for d in "$dir/${prefix}${i}-attempt-"*/; do
+      [ -d "$d" ] || continue
+      attempt="${d%/}"
+      attempt="${attempt##*-attempt-}"
+      case "$attempt" in '' | *[!0-9]*) continue ;; esac
+      attempt="$((10#$attempt))"
+      seen="$seen $attempt"
+      if [ "$attempt" -gt "$best" ]; then
+        best="$attempt"
+        best_dir="${d%/}"
+      fi
+    done
+    if [ -z "$best_dir" ]; then
+      echo "::error::shard $i of $SHARD_COUNT left no result (cancelled, crashed, or not in the matrix)"
+      bad=1
+      ready=false
+      continue
+    fi
+    echo "shard $i of $SHARD_COUNT: reading attempt $best (results found for attempts:$seen)"
+    if [ ! -f "$best_dir/outcome" ]; then
+      echo "::error::shard $i of $SHARD_COUNT: the result of attempt $best has no outcome file"
+      bad=1
+      ready=false
+      continue
+    fi
+    outcome="$(cat "$best_dir/outcome")"
+    if [ "$outcome" != success ]; then
+      echo "::error::shard $i of $SHARD_COUNT: tests ended '$outcome' (attempt $best); its log is in the integration-shard ($mysql, $i) job"
+      bad=1
+    fi
+    if [ ! -f "$best_dir/s3-ready" ] || [ "$(cat "$best_dir/s3-ready")" != true ]; then
+      ready=false
+    fi
+    if [ -f "$best_dir/mysql-it.out" ]; then
+      cat "$best_dir/mysql-it.out" >> "$log"
+    else
+      echo "::error::shard $i of $SHARD_COUNT: the result of attempt $best has no test log"
+      bad=1
+    fi
+  done
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    echo "ready=$ready" >> "$GITHUB_OUTPUT"
+  else
+    echo "ready=$ready"
+  fi
+  grep -E '^(ok  |FAIL)'$'\t' "$log" || true
+  return "$bad"
+}
+
 run_shard() {
   local shard="$1" log="$2" bindir t0 status=0 pkg dir bin rc start elapsed ran=0 dirs
   local list module label name
@@ -274,5 +377,10 @@ case "${1:-}" in
     [ -n "${2:-}" ] || die "usage: $0 check-split <log file>"
     check_split "$2"
     ;;
-  *) die "usage: $0 count | list <shard> | run <shard> <log file> | check-split <log file>" ;;
+  collect)
+    [ -n "${2:-}" ] && [ -n "${3:-}" ] && [ -n "${4:-}" ] \
+      || die "usage: $0 collect <results dir> <mysql version> <log file>"
+    collect "$2" "$3" "$4"
+    ;;
+  *) die "usage: $0 count | list <shard> | run <shard> <log file> | check-split <log file> | collect <results dir> <mysql version> <log file>" ;;
 esac
