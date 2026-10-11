@@ -199,3 +199,74 @@ func TestPreparedRouted_serviceOptions(t *testing.T) {
 		t.Errorf("observed %v, want the execution under refused/copy_queue_full", got)
 	}
 }
+
+// SHOW ROUTER STATUS is the port's own statement where a Status was bound:
+// answered from it, never sent to the source, and not a routing decision.
+func TestRouter_showRouterStatus(t *testing.T) {
+	asked := 0
+	status := func(context.Context) [][2]string {
+		asked++
+		return [][2]string{{"copy_age_seconds", "42"}, {"statements_copy", "7"}}
+	}
+	for _, stmt := range []string{"SHOW ROUTER STATUS", "show router status", "  Show   Router\tStatus ; "} {
+		r := &fakeRouter{toCopy: true}
+		f := &fakeFreeSQL{updatedAt: time.Now()}
+		var got []string
+		h := serviceHandler(t, r, f, RouterConfig{AnyCopyAge: true, Status: status}, &got)
+		res, err := h.HandleQuery(stmt)
+		if err != nil {
+			t.Fatalf("%q: %v", stmt, err)
+		}
+		if res.Resultset == nil || len(res.Resultset.Fields) != 2 || string(res.Resultset.Fields[0].Name) != "Variable_name" || string(res.Resultset.Fields[1].Name) != "Value" {
+			t.Fatalf("%q: columns %+v", stmt, res.Resultset)
+		}
+		var rows []string
+		for _, row := range textRows(t, res.Resultset) {
+			rows = append(rows, row[0]+"="+row[1])
+		}
+		if strings.Join(rows, ",") != "copy_age_seconds=42,statements_copy=7" {
+			t.Errorf("%q: rows %v", stmt, rows)
+		}
+		if len(r.forwarded) != 0 || len(got) != 0 || f.calls != 0 {
+			t.Errorf("%q: forwarded %v, observed %v, copy runs %d; want none of each", stmt, r.forwarded, got, f.calls)
+		}
+	}
+	if asked != 3 {
+		t.Errorf("the status was asked for %d times, want once per statement", asked)
+	}
+}
+
+// Anything that is not exactly that statement, and that statement on a
+// connection with no Status, goes on as any other: to MySQL, which answers it.
+func TestRouter_showRouterStatusOnlyWhereBoundAndOnlyThatStatement(t *testing.T) {
+	status := func(context.Context) [][2]string { return [][2]string{{"a", "b"}} }
+	for _, tc := range []struct {
+		name, stmt string
+		cfg        RouterConfig
+	}{
+		{"no Status bound", "SHOW ROUTER STATUS", RouterConfig{AnyCopyAge: true}},
+		{"another SHOW", "SHOW ROUTER STATUSES", RouterConfig{AnyCopyAge: true, Status: status}},
+		{"with a filter", "SHOW ROUTER STATUS LIKE 'copy%'", RouterConfig{AnyCopyAge: true, Status: status}},
+		{"inside something else", "SELECT 'SHOW ROUTER STATUS'", RouterConfig{AnyCopyAge: true, Status: status}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &fakeRouter{}
+			f := &fakeFreeSQL{updatedAt: time.Now()}
+			var got []string
+			h := serviceHandler(t, r, f, tc.cfg, &got)
+			if _, err := h.HandleQuery(tc.stmt); err != nil {
+				t.Fatal(err)
+			}
+			if len(r.forwarded) != 1 || r.forwarded[0] != tc.stmt {
+				t.Errorf("forwarded %v, want the statement, to MySQL", r.forwarded)
+			}
+		})
+	}
+	// With no rows to give, the answer is still a result with one row that
+	// says so, not a malformed one.
+	h := serviceHandler(t, &fakeRouter{}, &fakeFreeSQL{}, RouterConfig{AnyCopyAge: true, Status: func(context.Context) [][2]string { return nil }}, new([]string))
+	res, err := h.HandleQuery("SHOW ROUTER STATUS")
+	if err != nil || len(textRows(t, res.Resultset)) != 1 {
+		t.Errorf("a Status with nothing: %v, %v", res, err)
+	}
+}

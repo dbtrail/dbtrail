@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -85,6 +86,29 @@ func TestIntegrationRouter(t *testing.T) {
 	}
 	if got := side("SELECT status, count(*) FROM orders GROUP BY status"); got != "copy" {
 		t.Errorf("full scan answered %q, want the month-old copy", got)
+	}
+	// The router's own numbers, on its own port: the copy's age first (a
+	// month here, which nothing refuses), and who answered so far.
+	status := map[string]string{}
+	rows, err := conn.Query("SHOW ROUTER STATUS")
+	if err != nil {
+		t.Fatalf("SHOW ROUTER STATUS: %v", err)
+	}
+	for rows.Next() {
+		var name, value string
+		if err := rows.Scan(&name, &value); err != nil {
+			t.Fatal(err)
+		}
+		status[name] = value
+	}
+	rows.Close()
+	age, _ := strconv.Atoi(status["copy_age_seconds"])
+	if status["server"] != ent.ID || age < 29*24*3600 || age > 31*24*3600 || status["statements_copy"] != "1" || status["statements_mysql"] != "1" ||
+		status["reason_expensive_plan"] != "1" || status["pool_workers"] != "2" {
+		t.Errorf("SHOW ROUTER STATUS: %v", status)
+	}
+	if snaps := srv.CopySnapshots(context.Background()); len(snaps) != 1 || time.Since(snaps[ent.ID]) < 29*24*time.Hour {
+		t.Errorf("the copies' snapshot times, for the metric: %v", snaps)
 	}
 	// A write is forwarded, and inside a transaction a read is MySQL's.
 	if _, err := conn.Exec("UPDATE orders SET status = 'edited' WHERE id = 3"); err != nil {

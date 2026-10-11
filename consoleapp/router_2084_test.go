@@ -39,7 +39,7 @@ func routerTestCmd(t *testing.T, args ...string) *cobra.Command {
 
 func clearRouterEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"BINTRAIL_ROUTER_LISTEN", "BINTRAIL_CONSOLE_TOKEN", "BINTRAIL_CONSOLE_SERVERS", "BINTRAIL_CONSOLE_AUTH",
+	for _, k := range []string{"BINTRAIL_ROUTER_LISTEN", "BINTRAIL_ROUTER_METRICS_ADDR", "BINTRAIL_METRICS_ADDR", "BINTRAIL_CONSOLE_TOKEN", "BINTRAIL_CONSOLE_SERVERS", "BINTRAIL_CONSOLE_AUTH",
 		"BINTRAIL_CONSOLE_MCP_TOKEN_FILE", "BINTRAIL_CONSOLE_SQL_MEMORY", "BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS",
 		"BINTRAIL_CONSOLE_ROUTE_READ_ONLY", "BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD", "BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS",
 		"BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE", "BINTRAIL_CONSOLE_FLASHBACK_LISTEN"} {
@@ -56,7 +56,7 @@ func TestRouterSettings_flagsOverEnvironmentOverDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	def := readrouter.DefaultPolicy()
-	if st.Listen != "127.0.0.1:3310" || st.Token != "" || st.ReadOnly || st.SQLMemory != "" ||
+	if st.Listen != "127.0.0.1:3310" || st.MetricsAddr != "" || st.Token != "" || st.ReadOnly || st.SQLMemory != "" ||
 		st.Policy != def || st.SQLPortMaxRows != console.DefaultSQLPortMaxRows || st.ServersFile != console.DefaultRegistryPath() {
 		t.Errorf("defaults: %+v", st)
 	}
@@ -72,6 +72,10 @@ func TestRouterSettings_flagsOverEnvironmentOverDefaults(t *testing.T) {
 	}
 
 	t.Setenv("BINTRAIL_ROUTER_LISTEN", "127.0.0.1:4001")
+	t.Setenv("BINTRAIL_ROUTER_METRICS_ADDR", "127.0.0.1:9091")
+	// The capture process's metrics address is not the router's: two
+	// processes cannot serve one address.
+	t.Setenv("BINTRAIL_METRICS_ADDR", ":9090")
 	t.Setenv("BINTRAIL_CONSOLE_TOKEN", "envtok")
 	t.Setenv("BINTRAIL_CONSOLE_SERVERS", "/srv/servers.yaml")
 	t.Setenv("BINTRAIL_CONSOLE_SQL_MEMORY", "1GB")
@@ -87,7 +91,7 @@ func TestRouterSettings_flagsOverEnvironmentOverDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Listen != "127.0.0.1:4001" || st.Token != "envtok" || st.ServersFile != "/srv/servers.yaml" || st.SQLMemory != "1024MiB" ||
+	if st.Listen != "127.0.0.1:4001" || st.MetricsAddr != "127.0.0.1:9091" || st.Token != "envtok" || st.ServersFile != "/srv/servers.yaml" || st.SQLMemory != "1024MiB" ||
 		st.SQLPortMaxRows != 77 || !st.ReadOnly || st.Policy.CostThreshold != 123.5 || st.Policy.ScanRows != 9 {
 		t.Errorf("from the environment: %+v", st)
 	}
@@ -139,7 +143,7 @@ func TestRouterSettings_refusals(t *testing.T) {
 func TestRouterFlashbackConfig_reachesTheHandler(t *testing.T) {
 	st := routerSettings{Policy: readrouter.Policy{CostThreshold: 7, ScanRows: 11}, ReadOnly: true}
 	cfg := routerFlashbackConfig(st)
-	if !cfg.RouteAnyCopyAge || !cfg.RouteBusyRefuses || !cfg.RouteRequired || cfg.RouteMaxCopyAge != 0 || !cfg.RouteReadOnly || cfg.RoutePolicy != st.Policy {
+	if !cfg.RouteAnyCopyAge || !cfg.RouteBusyRefuses || !cfg.RouteRequired || !cfg.RouteStatus || cfg.RouteMaxCopyAge != 0 || !cfg.RouteReadOnly || cfg.RoutePolicy != st.Policy {
 		t.Fatalf("config: %+v", cfg)
 	}
 	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok"})
@@ -157,12 +161,30 @@ func TestRouterFlashbackConfig_reachesTheHandler(t *testing.T) {
 	if !routing || !got.AnyCopyAge || !got.BusyRefuses || !got.ReadOnly || got.MaxCopyAge != 0 {
 		t.Errorf("the handler's routing: %+v (routing %v)", got, routing)
 	}
+	// And its own status statement is answered there, with this server's
+	// numbers, not sent to a source nothing listens for.
+	srv.RecordRouteDecision("s1", "copy", "expensive_plan")
+	res, err := h.HandleQuery("SHOW ROUTER STATUS")
+	if err != nil {
+		t.Fatalf("SHOW ROUTER STATUS: %v", err)
+	}
+	status := map[string]string{}
+	for _, rd := range res.Resultset.RowDatas {
+		fvs, err := rd.ParseText(res.Resultset.Fields, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		status[string(fvs[0].AsString())] = string(fvs[1].AsString())
+	}
+	if status["server"] != "s1" || status["statements_copy"] != "1" || status["pool_workers"] == "" {
+		t.Errorf("SHOW ROUTER STATUS: %v", status)
+	}
 	// And the port inside watch, which sets neither, binds as before.
 	h2 := shim.NewHandler(nil, nil)
 	h2.BindFreeSQL(routeTestFreeSQL{})
 	bindReadRouter(h2, srv, tgt, "s1", flashbackConfig{RouteMaxCopyAge: time.Hour, RoutePolicy: st.Policy}.withDefaults(), slog.Default())
 	t.Cleanup(h2.Close)
-	if got, _ := h2.RouterConfig(); got.AnyCopyAge || got.BusyRefuses || got.MaxCopyAge != time.Hour {
+	if got, _ := h2.RouterConfig(); got.AnyCopyAge || got.BusyRefuses || got.Status != nil || got.MaxCopyAge != time.Hour {
 		t.Errorf("watch's port: %+v", got)
 	}
 }

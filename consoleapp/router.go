@@ -20,8 +20,10 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/cli"
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/readrouter"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
+	"github.com/dbtrail/dbtrail/internal/streamrun"
 )
 
 // routerCmd is the MySQL-protocol port and its read routing as a process of
@@ -75,6 +77,7 @@ func addRouterFlags(cmd *cobra.Command) {
 	def := readrouter.DefaultPolicy()
 	f := cmd.Flags()
 	f.String("listen", defaultRouterListen, "Address the MySQL-protocol port listens on (host:port). Env BINTRAIL_ROUTER_LISTEN.")
+	f.String("metrics-addr", "", "Address to expose Prometheus metrics on (e.g. 127.0.0.1:9091); empty = none. Not the capture process's address: each process serves its own. Env BINTRAIL_ROUTER_METRICS_ADDR.")
 	f.String("token", "", "Access token: the password every client of the port uses. With one, only the token opens the port. Without one, the port opens when the MySQL port is turned on in the web interface, with the password created there, and closes when it is turned off. Env BINTRAIL_CONSOLE_TOKEN.")
 	f.String("servers-file", "", "Path to the server registry the web interface manages (default ~/.config/bintrail/console-servers.yaml). Read, never written. Env BINTRAIL_CONSOLE_SERVERS.")
 	f.String("auth-file", "", "Path to the web interface auth file, when it is not the default: only so a statement cannot read it through a copy directory that contains it. Env BINTRAIL_CONSOLE_AUTH.")
@@ -90,6 +93,7 @@ func addRouterFlags(cmd *cobra.Command) {
 // resolved.
 type routerSettings struct {
 	Listen         string
+	MetricsAddr    string
 	Token          string
 	ServersFile    string
 	AuthFile       string
@@ -117,6 +121,7 @@ func routerSettingsFrom(cmd *cobra.Command) (routerSettings, error) {
 	}
 	st := routerSettings{
 		Listen:       str("listen", "BINTRAIL_ROUTER_LISTEN"),
+		MetricsAddr:  str("metrics-addr", "BINTRAIL_ROUTER_METRICS_ADDR"),
 		Token:        str("token", "BINTRAIL_CONSOLE_TOKEN"),
 		ServersFile:  str("servers-file", "BINTRAIL_CONSOLE_SERVERS"),
 		AuthFile:     str("auth-file", "BINTRAIL_CONSOLE_AUTH"),
@@ -193,6 +198,7 @@ func routerFlashbackConfig(st routerSettings) flashbackConfig {
 		RouteAnyCopyAge:  true,
 		RouteBusyRefuses: true,
 		RouteRequired:    true,
+		RouteStatus:      true,
 	}
 }
 
@@ -233,6 +239,39 @@ func newRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server,
 		return nil, nil, err
 	}
 	return srv, srv.SQLSandbox(), nil
+}
+
+// routerCopySnapshotEvery is how often the age of each server's copy is read
+// for the metric: a copy changes when a snapshot is taken, which is minutes
+// apart at the closest.
+const routerCopySnapshotEvery = 30 * time.Second
+
+// exportCopySnapshots keeps bintrail_read_routing_copy_snapshot_timestamp_seconds
+// in step with the copies, until ctx ends. A server whose copy can no longer
+// be read loses its series, so an alert on the age does not go on reading a
+// number that stopped moving.
+func exportCopySnapshots(ctx context.Context, srv *console.Server, every time.Duration) {
+	known := map[string]bool{}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		now := srv.CopySnapshots(ctx)
+		for id, at := range now {
+			observe.SetCopySnapshot(id, at)
+			known[id] = true
+		}
+		for id := range known {
+			if _, ok := now[id]; !ok {
+				observe.SetCopySnapshot(id, time.Time{})
+				delete(known, id)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }
 
 // routerPortFile is the saved setting whose password the router accepts, ""
@@ -447,6 +486,14 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 	// servers and the password that are in the files now.
 	srv.RefreshFollowedFiles()
 	go srv.FollowFiles(ctx, 0)
+	if st.MetricsAddr != "" {
+		stopMetrics, err := streamrun.StartMetricsServer(st.MetricsAddr)
+		if err != nil {
+			return err
+		}
+		defer stopMetrics()
+		go exportCopySnapshots(ctx, srv, routerCopySnapshotEvery)
+	}
 
 	cfg := routerFlashbackConfig(st)
 	_, statErr := os.Stat(st.ServersFile)

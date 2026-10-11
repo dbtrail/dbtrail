@@ -1466,6 +1466,10 @@ one release and warns that it no longer does anything. Remove it.
 - `BINTRAIL_ROUTER_LISTEN` (`router` only) — same as `router --listen`
   (default `127.0.0.1:3310`): the address of the MySQL-protocol port when it
   runs as a service of its own. See [The router](time-travel-sql.md#the-router-the-same-port-as-a-service-of-its-own-experimental).
+- `BINTRAIL_ROUTER_METRICS_ADDR` (`router` only) — same as `router
+  --metrics-addr`: where the router serves its Prometheus metrics. Its own
+  address: `BINTRAIL_METRICS_ADDR` is the capture process's, and two processes
+  cannot serve one address.
 - `BINTRAIL_CONSOLE_FLASHBACK_LISTEN` (`watch` only) — same as `--flashback-listen`
   (e.g. `127.0.0.1:3308`): serve an embedded MySQL-protocol time-travel port for
   every monitored server, routed by the connection username. Off by default;
