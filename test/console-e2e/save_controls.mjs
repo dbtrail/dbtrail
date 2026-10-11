@@ -51,8 +51,6 @@ export const WRITES = [
   // The MySQL port, turned on and off from the Connect panel (#2101).
   { method: "PUT", path: "/api/flashback", count: 2, kind: "scene", id: "mysql-port" },
   { method: "POST", path: "/api/flashback/password", count: 1, kind: "scene", id: "mysql-port" },
-  { method: "PUT", path: "/api/router", count: 2, kind: "scene", id: "router-switch" },
-  { method: "POST", path: "/api/router/password", count: 1, kind: "scene", id: "router-switch" },
   // The memory for SQL on the copy, Save and Use default (#2210).
   { method: "PUT", path: "/api/sql-settings", count: 2, kind: "scene", id: "sql-memory" },
   { method: "PUT", path: "/api/servers/draft", count: 1, kind: "scene", id: "draft" },
@@ -956,94 +954,6 @@ export async function runSaveScenes(ctx) {
         check("mysql-port", "Turn off closes the port, saves it as off, and the panel offers Turn on again",
           !!off && !!st3 && st3.has_password === true && st3.suggested_listen === want && !!back && !(await listening()),
           JSON.stringify({ off, st3, back, listening: await listening() }));
-      } finally { await tab.close(); }
-    });
-
-    // ── the router's own switch ─────────────────────────────────────────
-    // On a THIRD daemon, started by run.sh with no access token (with one,
-    // the router takes the token and the panel has no switch), and with a
-    // real router reading the same state directory. What is checked is the
-    // router's own port: it opens when Turn on is pressed in the browser,
-    // takes the password the panel showed, puts out the old password after
-    // New password, and closes on Turn off.
-    await scene("router-switch", async () => {
-      const url3 = process.env.E2E_PORT3_URL || "", routerPort = process.env.E2E_ROUTERPORT || "";
-      if (!url3 || !routerPort) throw new Error("E2E_PORT3_URL / E2E_ROUTERPORT not passed by run.sh");
-      const listening = () => new Promise((res) => {
-        const c = net.connect({ host: "127.0.0.1", port: Number(routerPort) });
-        const done = (v) => { c.destroy(); res(v); };
-        c.setTimeout(3000, () => done(false));
-        c.once("data", () => done(true));
-        c.once("error", () => done(false));
-        c.once("close", () => res(false));
-      });
-      // No token: the first login is created, as on a clean install, and
-      // its session is what the tab signs in with.
-      const setup = await fetch(url3 + "/api/auth/setup", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: "admin", password: "e2e-router-switch-1" }) });
-      const session = setup.ok ? (await setup.json()).token : "";
-      if (!session) throw new Error("first-run setup on the third daemon answered " + setup.status);
-      const tab = await browser.newPage({ viewport: { width: 1300, height: 1000 } });
-      tab.on("pageerror", (e) => jsErrors.push("router-switch tab: " + String(e)));
-      tab.on("dialog", acceptDialog);
-      try {
-        await tab.goto(`${url3}/?token=${encodeURIComponent(session)}`, { waitUntil: "networkidle" });
-        await tab.waitForFunction(() => typeof navigate === "function" && typeof capsCache !== "undefined" && capsCache.monitor === true);
-        const access = async () => { const r = (await readAs(tab, "/api/router")).body; return r && r.access; };
-        const press = (label) => until(() => tab.evaluate((label) => {
-          const b = Array.from(document.querySelectorAll(".cn-router button")).find((x) => x.textContent === label && !x.disabled);
-          if (b) { b.click(); return true; }
-          return false;
-        }, label));
-        const shown = () => tab.evaluate(() => {
-          const p = document.querySelector(".cn-router");
-          const codes = p ? Array.from(p.querySelectorAll(".cn-urlrow code.cn-url")).map((c) => c.textContent) : [];
-          return { password: codes.find((c) => /^brp_/.test(c)) || "", line: codes.find((c) => /^mysql /.test(c)) || "", text: p ? p.innerText : "" };
-        });
-
-        const before = await access();
-        const wasOpen = await listening();
-        await tab.evaluate(() => navigate("connect"));
-        const on = await press("Turn on");
-        const pw1 = await until(async () => (await shown()).password);
-        const a1 = await access();
-        const s1 = await shown();
-        const opened = await until(listening);
-        check("router-switch", "Turn on saves the switch, shows the router's password once, and the router opens its port",
-          before && before.can_manage === true && before.enabled === false && !wasOpen && !!on && !!pw1 &&
-          a1 && a1.enabled === true && a1.has_password === true && !JSON.stringify(a1).includes(pw1) &&
-          s1.line === "mysql -h 127.0.0.1 -P 3310 -u <server-name> -p" && !!opened,
-          JSON.stringify({ before, wasOpen, on, pw1: !!pw1, a1, line: s1.line, opened }));
-
-        // The same panel, pressed again: a second password replaces the first.
-        const fresh = await press("New password");
-        const pw2 = await until(async () => { const p = (await shown()).password; return p && p !== pw1 ? p : ""; });
-        const a2 = await access();
-        check("router-switch", "New password shows a different password on the same panel and the router stays on",
-          !!fresh && !!pw2 && a2 && a2.enabled === true && a2.password_created_at >= a1.password_created_at && await until(listening),
-          JSON.stringify({ fresh, pw2: !!pw2, a2 }));
-
-        // A second tab has only what the server stored: on, and no password.
-        const other = await browser.newPage({ viewport: { width: 1300, height: 1000 } });
-        try {
-          await other.goto(`${url3}/?token=${encodeURIComponent(session)}`, { waitUntil: "networkidle" });
-          await other.waitForFunction(() => typeof navigate === "function" && typeof capsCache !== "undefined" && capsCache.monitor === true);
-          await other.evaluate(() => navigate("connect"));
-          const seen = await until(() => other.evaluate(() => {
-            const p = document.querySelector(".cn-router");
-            return p && /It cannot be shown again\./.test(p.innerText) ? p.innerText : "";
-          }));
-          check("router-switch", "a fresh tab says the router is on and never shows the password",
-            !!seen && seen.includes("The router is on.") && !seen.includes("brp_"), JSON.stringify({ seen }));
-        } finally { await other.close(); }
-
-        const off = await press("Turn off");
-        const a3 = await until(async () => { const b = await access(); return b && b.enabled === false ? b : null; });
-        const back = await until(() => tab.evaluate(() => !!Array.from(document.querySelectorAll(".cn-router button")).find((x) => x.textContent === "Turn on")));
-        const closed = await until(async () => !(await listening()));
-        check("router-switch", "Turn off saves the switch as off, the router closes its port, and the panel offers Turn on again",
-          !!off && !!a3 && a3.has_password === true && !!back && !!closed && !(await shown()).password,
-          JSON.stringify({ off, a3, back, closed }));
       } finally { await tab.close(); }
     });
 

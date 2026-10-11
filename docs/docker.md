@@ -611,20 +611,17 @@ a statement that runs out of memory there cannot take capture with it.
 It listens on `127.0.0.1:3310`, and only once there is a password for it:
 
 - with `CONSOLE_TOKEN` set in `.env`, the token is the password;
-- without it, when the router is turned on in the web interface
-  (**Settings**, **MCP Server**, **The router**), with the password created
-  there, shown once. It closes again when it is turned off there, and
-  replacing the password closes the connections that were open.
+- without it, when the MySQL port is turned on in the web interface
+  (**Connect**), with the password created there. It closes again when the
+  port is turned off there, and replacing the password closes the connections
+  that were open.
 
 Until then the container waits and uses next to nothing.
 
-The router's switch and password are its own. The MySQL port on 3309 has
-another switch and another password, on the same page: turning that port off,
-or replacing its password, does not close the router or disconnect the
-applications on it, and its password does not open the router.
-
-**What the router's password reads: the source itself, live, as far as you
-allow.** A statement is forwarded to the server's source MySQL, with that server's **forwarding account**: a
+**What its password reads: the source itself, live, as far as you allow.**
+On port 3309 the MySQL port's password reads the history and the copy of the
+captured tables. On the router the same password has its statements forwarded
+to the server's source MySQL, with that server's **forwarding account**: a
 MySQL user of its own that you create and set on the server's page in the web
 interface. Give it `SELECT` on what applications should read, and nothing
 else:

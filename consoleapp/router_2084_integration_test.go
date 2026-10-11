@@ -246,7 +246,7 @@ func TestIntegrationRouter(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if e.Name() != "console-servers.yaml" && e.Name() != console.RouterFileName {
+		if e.Name() != "console-servers.yaml" && e.Name() != console.FlashbackFileName {
 			t.Errorf("a file appeared in the daemon's directory: %s", e.Name())
 		}
 	}

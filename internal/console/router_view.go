@@ -78,23 +78,10 @@ type routerViewDTO struct {
 	// ReadAt is when this console read the document, RFC 3339 UTC.
 	ReadAt string           `json:"read_at,omitempty"`
 	Status *RouterStatusDoc `json:"status,omitempty"`
-	// Access is the router's own switch and password, as saved by this
-	// console for the router to follow; absent on a console that manages
-	// none. It does not depend on Configured: the switch is a file, and
-	// the numbers are an address.
-	Access *routerAccessDTO `json:"access,omitempty"`
 }
 
-// routerView is the router's switch and, when this console was given the
-// router's address, its numbers, read once.
+// routerView reads the router's document once.
 func (s *Server) routerView(ctx context.Context) routerViewDTO {
-	out := s.routerNumbers(ctx)
-	out.Access = s.routerAccess()
-	return out
-}
-
-// routerNumbers reads the router's document once.
-func (s *Server) routerNumbers(ctx context.Context) routerViewDTO {
 	if s.routerURLErr != "" {
 		// An address was given and cannot be used: said on the page, where
 		// the numbers were expected, since the process started without them.

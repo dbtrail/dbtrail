@@ -202,12 +202,6 @@ type Config struct {
 	// used, when it could not: the page says it where the numbers would
 	// be. A process that captures does not refuse to start over a panel.
 	RouterURLError string
-	// RouterSwitchPath is the file this console saves the router's own
-	// setting in (on or off, and its password), for the router to follow:
-	// RouterFileName beside the servers file. Empty on a console that
-	// manages no router: serve, and a process that is itself the router,
-	// which follows the file through FlashbackPath.
-	RouterSwitchPath string
 	// LazyIndex opens a registry server's index without asking it to answer
 	// (#2084): selecting the server succeeds while its index is away, and
 	// only what reads the index fails then, with the connection's own
@@ -532,9 +526,6 @@ type Server struct {
 	routerURL    string
 	routerURLErr string
 	routerClient *http.Client
-	// routerSwitch is the router's own on/off and password, saved by this
-	// console for the router to follow (Config.RouterSwitchPath).
-	routerSwitch routerSwitch
 	// sqlMem is the SQL memory setting (#2210): MemoryLimit above is the
 	// startup value or the default, and sqlMemoryNow says which applies.
 	sqlMem sqlMemoryState
@@ -830,7 +821,6 @@ func New(cfg Config) (*Server, error) {
 	s.fillsCopyMirrors = cfg.FillsCopyMirrors
 	s.sqlPortMaxRows = cfg.SQLPortMaxRows
 	s.routerURL, s.routerURLErr, s.routerClient = cfg.RouterURL, cfg.RouterURLError, newRouterClient(routerStatusTimeout)
-	s.loadRouterSwitch(cfg.RouterSwitchPath)
 	// Standby (#2236): after a statement, a worker per free slot waits with
 	// its DuckDB open, so a short statement does not pay the start. They stop
 	// on their own after a few minutes with no statement, and with this
@@ -1062,8 +1052,6 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("PUT /api/sql-settings", s.recordAction("sql-settings", s.handleSQLSettingsPut))
 	api.HandleFunc("GET /api/flashback", s.handleFlashbackGet)
 	api.HandleFunc("GET /api/router", s.handleRouterGet)
-	api.HandleFunc("PUT /api/router", s.handleRouterPut)
-	api.HandleFunc("POST /api/router/password", s.handleRouterPassword)
 	api.HandleFunc("PUT /api/flashback", s.handleFlashbackPut)
 	api.HandleFunc("POST /api/flashback/password", s.handleFlashbackPassword)
 

@@ -1202,8 +1202,6 @@ jobs:
           path: |
             ${{ runner.temp }}/console-e2e-failure.png
             ${{ runner.temp }}/console-e2e-daemon.log
-            ${{ runner.temp }}/console-e2e-daemon3.log
-            ${{ runner.temp }}/console-e2e-router.log
           if-no-files-found: ignore
 
   console-first-run-walk:

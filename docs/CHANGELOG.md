@@ -124,14 +124,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to MySQL. A server with no forwarding account is answered from the copy
   alone, as there. It listens on
   `127.0.0.1:3310` by default. Nothing changes for the port inside `watch`.
-  Its port opens for an access token (`--token`) or, without one, when it
-  is turned on in the web interface (Settings, MCP Server, The router),
-  which creates its password and shows it once. That switch and that
-  password are the router's own (`PUT /api/router`,
-  `POST /api/router/password`, saved in `console-router.yaml` beside the
-  servers file): the MySQL port inside `watch` has others, and turning that
-  port off or replacing its password does not close the router or
-  disconnect the applications on it.
   It answers `SHOW ROUTER STATUS` on its own port (the copy's age, who
   answered, the pool) and, with `--metrics-addr`, exports the copy's snapshot
   time per server so its age can be alerted on like replica lag.

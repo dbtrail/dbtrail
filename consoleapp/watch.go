@@ -1956,9 +1956,6 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		AuthPath:         opts.AuthFile,
 		MCPTokenPath:     opts.MCPTokenFile,
 		FlashbackPath:    flashbackFilePath(opts),
-		// The router's own switch, beside it: this process writes it and
-		// the router follows it.
-		RouterSwitchPath: console.RouterSwitchPath(opts.ServersFile),
 		// The SQL memory saved in the web interface (#2210), beside the
 		// servers file like the port's setting.
 		SQLSettingsPath: sqlSettingsFilePath(opts.ServersFile),

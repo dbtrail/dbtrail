@@ -322,9 +322,7 @@ journalctl -u bintrail-router -f
   age of the copy, and the router's workers.
 - It **listens only once there is a password**: `BINTRAIL_CONSOLE_TOKEN` in
   the settings file, or else the password the web interface creates when the
-  router is turned on there (**Settings**, **MCP Server**, **The router**).
-  Until then it waits. That switch is the router's own, not the MySQL
-  port's.
+  MySQL port is turned on there. Until then it waits.
 - That password reads **the source itself, live**, with each server's
   forwarding account: a MySQL user of its own, set on the server's page in
   the web interface, with `SELECT` on what applications should read. The

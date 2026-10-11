@@ -211,17 +211,5 @@ type RouterStatusDoc struct {
 	// and the snapshot times are then the last ones known, not the
 	// current ones.
 	CopySnapshotsReadAt string `json:"copy_snapshots_read_at,omitempty"`
-	// Credential is what opens the router's port: "token" when it was
-	// started with an access token, "saved" when it follows the switch and
-	// password the web interface saves. Never the credential itself. The
-	// web interface cannot tell from its own start which one the router
-	// took; absent from a router older than the switch.
-	Credential string `json:"credential,omitempty"`
 	RouterNumbers
 }
-
-// The two values of RouterStatusDoc.Credential.
-const (
-	RouterCredentialToken = "token"
-	RouterCredentialSaved = "saved"
-)

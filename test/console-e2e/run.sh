@@ -52,16 +52,10 @@ mysql_exec() { docker exec -i "$MYSQL_CONTAINER" mysql -uroot -ptestroot "$@" 2>
 DAEMON_PID=""
 DAEMON2_PID=""
 STATE_DIR2=""
-DAEMON3_PID=""
-ROUTER_PID=""
-STATE_DIR3=""
 cleanup() {
   [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null || true
   [ -n "$DAEMON2_PID" ] && kill "$DAEMON2_PID" 2>/dev/null || true
   [ -n "$STATE_DIR2" ] && rm -rf "$STATE_DIR2" 2>/dev/null || true
-  [ -n "$DAEMON3_PID" ] && kill "$DAEMON3_PID" 2>/dev/null || true
-  [ -n "$ROUTER_PID" ] && kill "$ROUTER_PID" 2>/dev/null || true
-  [ -n "$STATE_DIR3" ] && rm -rf "$STATE_DIR3" 2>/dev/null || true
   mysql_exec -e "DROP DATABASE IF EXISTS $IDX_DB;" >/dev/null 2>&1 || true
   mysql_exec -e "DROP DATABASE IF EXISTS $ARC_DB;" >/dev/null 2>&1 || true
   rm -f "$SERVERS_FILE" 2>/dev/null || true
@@ -281,40 +275,6 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
-# A THIRD daemon, for the router's switch: started with NO access token. The
-# other two have one, and a router that reads the same settings then takes
-# the token as its only password, so their web interface has no switch for
-# it. Beside it a real router reads the same state directory: the scene
-# presses Turn on in the browser and this router is what opens its port.
-PORT3="${E2E_PORT3:-8093}"
-ROUTERPORT="${E2E_ROUTERPORT:-13320}"
-STATE_DIR3="$(mktemp -d -t console-e2e-state3.XXXXXX)"
-echo "==> launch a third watch daemon on :$PORT3 (no access token) and a router on :$ROUTERPORT"
-env -u BINTRAIL_CONSOLE_TOKEN "$CONSOLE_BIN" watch \
-  --index-dsn "${BASE_DSN}/${IDX_DB}" \
-  --console-listen "127.0.0.1:$PORT3" \
-  --console-servers-file "$STATE_DIR3/console-servers.yaml" \
-  --console-auth-file "$STATE_DIR3/console-auth.yaml" \
-  --console-mcp-token-file "$STATE_DIR3/console-mcp-token.yaml" \
-  --console-allow-setup >"$E2E_ARTIFACT_DIR/console-e2e-daemon3.log" 2>&1 &
-DAEMON3_PID=$!
-env -u BINTRAIL_CONSOLE_TOKEN "$CONSOLE_BIN" router \
-  --listen "127.0.0.1:$ROUTERPORT" \
-  --servers-file "$STATE_DIR3/console-servers.yaml" \
-  --auth-file "$STATE_DIR3/console-auth.yaml" \
-  --mcp-token-file "$STATE_DIR3/console-mcp-token.yaml" >"$E2E_ARTIFACT_DIR/console-e2e-router.log" 2>&1 &
-ROUTER_PID=$!
-for i in $(seq 1 30); do
-  if curl -fsS -o /dev/null "http://127.0.0.1:$PORT3/api/healthz" 2>/dev/null; then break; fi
-  if ! kill -0 "$DAEMON3_PID" 2>/dev/null; then
-    echo "third daemon exited early; log:" >&2; cat "$E2E_ARTIFACT_DIR/console-e2e-daemon3.log" >&2; exit 1
-  fi
-  sleep 1
-done
-if ! kill -0 "$ROUTER_PID" 2>/dev/null; then
-  echo "router exited early; log:" >&2; cat "$E2E_ARTIFACT_DIR/console-e2e-router.log" >&2; exit 1
-fi
-
 echo "==> seed a monitored source (per-source index left unprovisioned)"
 curl -fsS -X POST \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -334,5 +294,4 @@ CONSOLE_URL="http://127.0.0.1:$PORT" E2E_ARC_DB="$ARC_DB" \
   E2E_ARC_GAP_SINCE="$ARC_GAP_SINCE" E2E_ARC_GAP_UNTIL="$ARC_GAP_UNTIL" CONSOLE_TOKEN="$TOKEN" \
   E2E_FIX_SCHEMA="$FIX_SCHEMA" E2E_TT_AT="$TT_AT" E2E_BASELINE_DIR="$BASELINE_ROOT" \
   E2E_IDX_DB="$IDX_DB" E2E_MYSQL_CONTAINER="$MYSQL_CONTAINER" E2E_FLASHBACK_PORT="$FLASHBACK_PORT" \
-  E2E_PORT2_URL="http://127.0.0.1:$PORT2" E2E_SQLPORT="$SQLPORT" \
-  E2E_PORT3_URL="http://127.0.0.1:$PORT3" E2E_ROUTERPORT="$ROUTERPORT" node console_e2e.mjs
+  E2E_PORT2_URL="http://127.0.0.1:$PORT2" E2E_SQLPORT="$SQLPORT" node console_e2e.mjs

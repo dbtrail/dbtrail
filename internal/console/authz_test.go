@@ -94,8 +94,6 @@ var registeredAPIPatterns = []struct{ method, pattern string }{
 	{"DELETE", "/api/mcp-token"},
 	{"GET", "/api/flashback"},
 	{"GET", "/api/router"},
-	{"PUT", "/api/router"},
-	{"POST", "/api/router/password"},
 	{"POST", "/api/sql"},
 	{"GET", "/api/sql"},
 	{"PUT", "/api/flashback"},
