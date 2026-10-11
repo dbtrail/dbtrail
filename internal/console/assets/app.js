@@ -1626,14 +1626,16 @@ function ovFrame() {
   // by fillOvFlow once the four reads behind it land, and again on the slow
   // refresh cycle. Not painted on a console that lists no server yet: the
   // add-server card above is that page's whole first screen.
-  // Above the drawing, the two facts it does not carry (#2330): uptime and
-  // the index disk. Empty until its two reads land, and left
-  // empty on a console that lists no server, like the drawing.
-  f.stripSlot = el("div");
-  v.append(f.stripSlot);
   f.flowSlot = el("div");
   f.flowSlot.append(el("section", { class: "flow flow-pending" }, ovSkelLines(2), el("div", { class: "skel-note", text: "reading the path from your database to its copy…" })));
   v.append(f.flowSlot);
+  // Under the drawing, one quiet line for the two facts it does not carry
+  // (#2330): uptime and the index disk. Under, and small, on purpose: the
+  // drawing is the page's answer, and two cards above it read as more
+  // important than the path they sat on. Empty until its two reads land,
+  // and left empty on a console that lists no server, like the drawing.
+  f.stripSlot = el("div");
+  v.append(f.stripSlot);
   // Use your copy (#1950): the four ways to read the copy, one card each,
   // under the flow. The shape is static; it shows once the flow's reads say
   // a copy exists, and its figures (the table count, the newest copy behind
@@ -2619,7 +2621,7 @@ function loadOvFlow(f, live, coverageP) {
 // The drawing above answers capture, the copy and how old the copy's data
 // is. It says nothing about the program itself or the disk under the index:
 // how long this process has been up, and how much room the index has. Those
-// are these two tiles, and only those (the running version is in the
+// are these two items on one line under it, and only those (the running version is in the
 // sidebar's foot, so a tile for it said one thing twice on one screen): a tile
 // repeating what an arrow says would be a second voice for one state.
 //
@@ -2685,9 +2687,9 @@ function ovStripModel(inp) {
   return { tiles: [running, disk] };
 }
 
-// ovStripSection paints the tiles. The tone is the tile's top border
-// (and its class, which the tests read); the words under the value say the
-// same thing, so the row never depends on colour alone.
+// ovStripSection paints the line. The tone is a dot before the item (and
+// its class, which the tests read); the words after the value say the same
+// thing, so the line never depends on colour alone.
 function ovStripSection(model) {
   const row = el("div", { class: "ov-strip" });
   for (const t of model.tiles) {

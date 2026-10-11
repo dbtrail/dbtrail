@@ -105,19 +105,19 @@ and searching events:
    keyboard focus on an Undo button survives a newer change landing above
    it.
 
-   Two tiles sit above the drawing, for what the drawing does not say:
+   One small line sits under the drawing, for what the drawing does not say:
    **Running for** (how long this process has been up, with the instant it
    started) and **Disk** (free space on the index volume, the size of the
    change history and how much it grows a day). The running version is in
-   the sidebar's foot. Only the disk tile takes a
-   colour, on its top edge, and it is the doctor's own verdict from
+   the sidebar's foot. Only the disk item takes a
+   colour, a dot before it, and it is the doctor's own verdict from
    `GET /api/capacity`: green when it fits, amber or red with the reason in
    words when it does not. A disk that could not be measured is never green,
-   and a read that failed says so instead of showing a figure. The disk tile
+   and a read that failed says so instead of showing a figure. The disk item
    opens Status, where the full reading is. Both reads are made again on the
    page's slow refresh (once a minute while changes arrive, every five
    minutes when none do). While the page cannot reach the daemon both
-   tiles say they could not be read, and they are read again on the first
+   items say they could not be read, and they are read again on the first
    request that succeeds, so a restart shows as one. "Running for" is counted
    on the browser's clock from the daemon's start time, so a browser clock
    that is off by an hour is off by an hour here too; the "since" line under
