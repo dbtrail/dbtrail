@@ -201,12 +201,17 @@ func (u underWrites) writers(t *testing.T, commits *atomic.Int64, pace time.Dura
 	var wg sync.WaitGroup
 	var next atomic.Int64
 	// New ids continue after the table's highest, so a second set of
-	// writers does not insert an id the first one already used.
+	// writers does not insert an id the first one already used. With a gap:
+	// an INSERT of the previous set that was cancelled as it stopped can
+	// still commit on the server after this MAX is read (the driver cancels
+	// by closing the socket), and the id it took would be handed out again
+	// (seen in CI as a duplicate key from the writer). One such INSERT per
+	// previous writer at most.
 	var top sql.NullInt64
 	if err := u.sourceDB.QueryRow("SELECT MAX(id) FROM t").Scan(&top); err != nil {
 		t.Fatal(err)
 	}
-	next.Store(max(top.Int64, underWritesSeed))
+	next.Store(max(top.Int64, underWritesSeed) + 100*underWritesWriters)
 	for w := range underWritesWriters {
 		wg.Add(1)
 		go func() {
