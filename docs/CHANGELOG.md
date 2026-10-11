@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **The web interface's capacity check and rotation card projected over the
+  retention an index was created under even when the daemon was started with
+  a retention of its own** (#2315). With `BINTRAIL_ROTATE_RETAIN=6h` (or
+  `--rotate-retain 6h`) the rotation loop drops every index on 6 hours and
+  never reads the window the index recorded at creation, but the console
+  could not tell an operator's value from the built-in default — both reach
+  it as the daemon's setting — so it asked the index, found the 48 hours it
+  was created under and graded a 6-hour loop over 48 hours: eight times the
+  size the index will ever reach, reported as a failing `growth_exceeds_free`
+  on a healthy, bounded index. The console now knows whether the retention
+  was set explicitly and projects over it; `GET /api/capacity` reports it as
+  `basis: configured`, `GET /api/rotation` as `index_retain` equal to the
+  configured window with `index_basis: configured`, and the cards say the
+  retention was set when DBTrail was started. Indexes rotating on their own
+  record while no retention is set keep the previous behavior. `bintrail
+  doctor` runs outside the daemon and cannot see its environment: pass
+  `--retain` there to match.
+
 ### Added
 - **`bintrail-console router`: the MySQL-protocol port and its read routing as
   a service of its own** (#2084, experimental). Until now the port lived

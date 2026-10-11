@@ -6151,6 +6151,10 @@ function statusCard(title, rows) {
 function retentionBasis(ret) {
   if (!ret || ret.source === "override") return "";
   switch (ret.basis) {
+    // The operator set the window when DBTrail was started (--rotate-retain or
+    // BINTRAIL_ROTATE_RETAIN): every server rotates on it and the window a
+    // server was created under is not consulted (#2315).
+    case "configured": return " (set when DBTrail was started)";
     case "recorded": return " (set when this server was added)";
     case "legacy": return " (kept from before the default changed)";
     case "unreadable": return " (its own setting could not be read, so the older default is used)";
@@ -7432,15 +7436,19 @@ function rotationCard(rot, archived) {
     return card;
   }
   card.append(rotationTiles(rot.retain, rot.interval, rot.add_future, archived));
-  kvRow(card, "retention", rot.retain + (rot.source === "override" ? "" : " for a new server"), rot.source !== "override");
-  if (rot.source !== "override" && rot.index_retain && rot.index_retain !== rot.retain) {
+  // A window the operator set at startup applies to every server, like an
+  // override does; only the built-in default is "for a new server", since
+  // each server then keeps the window it was created under (#2315).
+  const configured = rot.source !== "override" && rot.index_basis === "configured";
+  kvRow(card, "retention", rot.retain + (rot.source === "override" || configured ? "" : " for a new server"), rot.source !== "override");
+  if (rot.source !== "override" && !configured && rot.index_retain && rot.index_retain !== rot.retain) {
     kvRow(card, "this server keeps", rot.index_retain + retentionBasis({ source: rot.source, basis: rot.index_basis }), true);
   }
   kvRow(card, "interval", rot.interval);
   kvRow(card, "future partitions", rot.add_future);
   kvRow(card, "policy", rot.source === "override"
     ? ("set in the web interface" + (rot.enabled ? " (live)" : ""))
-    : "DBTrail's defaults", true);
+    : (configured ? "set when DBTrail was started (--rotate-retain / BINTRAIL_ROTATE_RETAIN)" : "DBTrail's defaults"), true);
   if (!rot.enabled) card.append(el("p", { class: "form-hint", text: "Rotation is turned off. Changes saved with Edit rotation take effect only after DBTrail restarts." }));
   card.append(el("div", { class: "stg-cardfoot" },
     el("button", { class: "btn btn-sm", type: "button", text: "Edit rotation…", onclick: showRotationDialog })));

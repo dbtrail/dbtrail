@@ -35,12 +35,14 @@ type capacityRetentionDTO struct {
 	// when Known is false.
 	Retain string `json:"retain,omitempty"`
 	Source string `json:"source,omitempty"`
-	// Basis is where an unconfigured window came from, for the one phrase the
-	// card puts beside the number (#1709): "recorded" (the retention this
+	// Basis is where a window the daemon runs came from, for the one phrase
+	// the card puts beside the number (#1709): "recorded" (the retention this
 	// index was created under), "legacy" (an index older than that record,
-	// keeping what every such index kept), or "unreadable" (its record could
-	// not be read, so the legacy window is used). Empty under an override, or
-	// when this console cannot ask the index.
+	// keeping what every such index kept), "unreadable" (its record could not
+	// be read, so the legacy window is used), or "configured" (the operator
+	// set --rotate-retain / BINTRAIL_ROTATE_RETAIN, so every index rotates on
+	// it and no record is read, #2315). Empty under an override, or when this
+	// console cannot ask the index.
 	Basis string `json:"basis,omitempty"`
 	// Enabled is the rotation loop's boot-time liveness. Known && !Enabled
 	// is the "grows without limit" state: this daemon is the one that
@@ -136,13 +138,20 @@ func (s *Server) capacityRetention(ctx context.Context, b *bundle) (time.Duratio
 		return 0, capacityRetentionDTO{}
 	}
 	rot := s.effectiveRotation()
-	// No saved override: the loop drops on the window THIS index records, not
-	// on the daemon's default (#1709), so the projection has to ask the same
-	// index the probe just measured. Asking costs one row; projecting over the
-	// daemon's number would put a size on screen for a window this index does
-	// not use — and after the default moved to 48h, that is out by 15x on an
-	// index created before it.
-	if rot.Source == "default" && rot.Enabled && b != nil && b.db != nil {
+	// No saved override and no window the operator chose: the loop drops on
+	// the window THIS index records, not on the daemon's default (#1709), so
+	// the projection has to ask the same index the probe just measured.
+	// Asking costs one row; projecting over the daemon's number would put a
+	// size on screen for a window this index does not use — and after the
+	// default moved to 48h, that is out by 15x on an index created before it.
+	//
+	// The record is only the loop's answer while rotation.Settings.Explicit
+	// is false. An operator-set --rotate-retain / BINTRAIL_ROTATE_RETAIN also
+	// arrives here as "default" (it is the daemon's own value), and the loop
+	// then drops every index on it without reading the record — so asking the
+	// index would project the OTHER way: a 6h loop graded over a recorded
+	// 48h, 8x the size the index will ever reach, as a false fail (#2315).
+	if rot.Source == "default" && rot.Enabled && !s.rotationDefaults.Explicit && b != nil && b.db != nil {
 		if eff := rotation.ResolveEffective(ctx, b.db, b.dbName); eff.Retain > 0 {
 			return eff.Retain, capacityRetentionDTO{
 				Known: true, Retain: eff.Raw, Source: rot.Source,
@@ -161,6 +170,9 @@ func (s *Server) capacityRetention(ctx context.Context, b *bundle) (time.Duratio
 		// so project over what actually rotates, not over the bad value.
 		d, err = cliutil.ParseRetain(s.rotationDefaults.Retain)
 		dto.Retain, dto.Source = s.rotationDefaults.Retain, "default"
+	}
+	if dto.Source == "default" && s.rotationDefaults.Explicit {
+		dto.Basis = string(rotation.RetainConfigured)
 	}
 	if err != nil {
 		// Nothing parsable to project over: report the window as unknown

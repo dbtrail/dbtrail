@@ -339,6 +339,13 @@ type RotationDefaults struct {
 	// (--rotate-retain off). The loop is not running then, so a console-saved
 	// override would need a restart — the panel warns in that state.
 	Enabled bool
+	// Explicit is rotation.Settings.Explicit: the operator set Retain
+	// themselves (flag or env), so the loop drops EVERY index on it and never
+	// reads the retention an index was created under. Without it the console
+	// cannot tell an operator's 6h from the built-in 48h — both arrive as the
+	// daemon's "default" — and projected over the per-index record while the
+	// loop rotated on the configured window (#2315).
+	Explicit bool
 }
 
 // BaselineRefreshDefaults is the daemon-side baseline-refresh configuration,

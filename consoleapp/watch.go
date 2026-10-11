@@ -1904,6 +1904,10 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 			Interval:  upRotateInterval,
 			AddFuture: upRotateAddFuture,
 			Enabled:   upRotationCfg.Enabled,
+			// The same bit the loop decides on (#2315): an explicit window
+			// is what every index rotates on, so the capacity projection
+			// and the rotation panel must report it, not the index record.
+			Explicit: upRotationCfg.Explicit,
 		},
 		// The Snapshots page's read-only rows (#1582):
 		// what this daemon was told, verbatim, each under the exact flag or

@@ -118,3 +118,62 @@ func TestRotationUpdate_readOnlyConsoleForbidden(t *testing.T) {
 		t.Errorf("GET on read-only console code=%d, want 200", rec.Code)
 	}
 }
+
+// TestRotationGet_explicitRetain_2315: with --rotate-retain /
+// BINTRAIL_ROTATE_RETAIN set, the loop drops every index on that window and
+// reads no record, so index_retain must be that window (basis "configured")
+// and the index must not be asked — the panel used to say "this server keeps
+// 48h" under a 6h loop. Without an explicit window the record still governs.
+func TestRotationGet_explicitRetain_2315(t *testing.T) {
+	get := func(t *testing.T, srv *Server) rotationDTO {
+		t.Helper()
+		rec, body := doServersReq(t, srv, "GET", "/api/rotation", "")
+		if rec.Code != 200 {
+			t.Fatalf("GET code=%d body=%s", rec.Code, body)
+		}
+		var got rotationDTO
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	t.Run("explicit: index_retain is the configured window and the index is not asked", func(t *testing.T) {
+		srv, _ := newSupervisorServer(t)
+		srv.rotationDefaults = RotationDefaults{Retain: "6h", Interval: "1h", AddFuture: 3, Enabled: true, Explicit: true}
+		// No read expected: an unexpected query would make ResolveEffective
+		// answer the legacy 30d, which the assertion below would catch.
+		db, _ := recordedRetainDB(t, "48h", false)
+		srv.cm.boot = &bundle{db: db, dbName: "binlog_index"}
+		got := get(t, srv)
+		if got.Source != "default" || got.Retain != "6h" || got.IndexRetain != "6h" || got.IndexBasis != "configured" {
+			t.Fatalf("GET = %+v, want retain=index_retain=6h source=default index_basis=configured", got)
+		}
+	})
+
+	t.Run("implicit: the record the index was created under governs (#1709)", func(t *testing.T) {
+		srv, _ := newSupervisorServer(t)
+		srv.rotationDefaults = RotationDefaults{Retain: "48h", Interval: "1h", AddFuture: 3, Enabled: true}
+		db, mock := recordedRetainDB(t, "30d", true)
+		srv.cm.boot = &bundle{db: db, dbName: "binlog_index"}
+		got := get(t, srv)
+		if got.Retain != "48h" || got.IndexRetain != "30d" || got.IndexBasis != "recorded" {
+			t.Fatalf("GET = %+v, want retain=48h index_retain=30d index_basis=recorded", got)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("override saved: explicit changes nothing, the override applies to every index", func(t *testing.T) {
+		srv, _ := newSupervisorServer(t)
+		srv.rotationDefaults = RotationDefaults{Retain: "6h", Interval: "1h", AddFuture: 3, Enabled: true, Explicit: true}
+		if err := srv.cm.reg.SetRotation(RotationConfig{Retain: "7d", Interval: "1h", AddFuture: 3}); err != nil {
+			t.Fatal(err)
+		}
+		got := get(t, srv)
+		if got.Source != "override" || got.Retain != "7d" || got.IndexRetain != "" || got.IndexBasis != "" {
+			t.Fatalf("GET = %+v, want the 7d override with no index_retain", got)
+		}
+	})
+}

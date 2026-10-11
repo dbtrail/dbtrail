@@ -624,7 +624,11 @@ editing flags or restarting:
   retention it was created under, so the panel also shows what the selected
   server keeps whenever that differs (an index created before the default
   became 48 hours keeps the 30 days it was created under until someone sets a
-  retention). Saving an override applies to every index, and overrides that.
+  retention). A retention the daemon was started with (`--rotate-retain` or
+  `BINTRAIL_ROTATE_RETAIN`) is such a choice: it applies to every index, the
+  panel says it was set when DBTrail was started, and the window a server was
+  created under is not consulted. Saving an override applies to every index,
+  and overrides both.
 - **Disabling** rotation entirely stays a daemon-level decision
   (`--rotate-retain off`); the panel tunes a running loop rather than turning it
   off. A retain like `off` is rejected at save.

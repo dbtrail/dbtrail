@@ -102,6 +102,13 @@ const (
 	// used — same window as RetainLegacy, different reason, and a surface must
 	// not present a failed read as a fact about the index.
 	RetainUnreadable RetainSource = "unreadable"
+	// RetainConfigured: the operator set the window themselves
+	// (--rotate-retain or BINTRAIL_ROTATE_RETAIN; Settings.Explicit), so
+	// every index rotates on it and the record is not consulted. Never
+	// answered by ResolveEffective, which exists for the implicit case: a
+	// surface reports it when the loop's settings say Explicit (#2315), so the
+	// screen cannot project over a record the loop is not using.
+	RetainConfigured RetainSource = "configured"
 )
 
 // Effective is the window one index rotates on while the operator sets none,
@@ -170,6 +177,8 @@ func (e Effective) DescribeSource() string {
 		return "the retention this index was created under"
 	case RetainUnreadable:
 		return "the retention indexes kept before it was recorded (this index's own record could not be read)"
+	case RetainConfigured:
+		return "the retention set when the daemon was started (--rotate-retain / BINTRAIL_ROTATE_RETAIN)"
 	default:
 		return "the retention indexes kept before it was recorded"
 	}
