@@ -2577,20 +2577,23 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 }
 .sqlc.cn-routep { background: var(--violet-tint); border-color: var(--violet-line); }
 .sqlc.cn-sqlmem { background: var(--sun-tint); border-color: var(--sun-line); }
-.rd-node { background: var(--strip); }
+/* --ink with --on-ink, not --strip: the strip stays dark in dark, where it
+   measured 1.18 against the tinted card (floor 3) and the box, the button
+   and the lanes' rule all sank into it. --ink turns light there. */
+.rd-node { background: var(--ink); }
 .sqlc.cn-routep .cn-route-state { background: var(--surface); border-color: var(--violet-line); }
 .sqlc.cn-routep .cn-route-state.is-on { background: var(--mint-tint); border-color: transparent; }
 .cn-routep .rd-where { width: 220px; }
-.rd-node-k { color: var(--strip-ink); opacity: 0.75; }
-.rd-node-v { color: var(--white); }
+.rd-node-k { color: var(--on-ink); opacity: 0.75; }
+.rd-node-v { color: var(--on-ink); }
 .rd-where { background: var(--surface); }
 .rd-copy .rd-where { border-color: var(--pink-mid); }
-.rd-lanes { border-left-color: var(--strip); }
+.rd-lanes { border-left-color: var(--ink); }
 .rd-off .rd-where { background: transparent; }
 /* the one thing to do on a panel: the site's button, ink on a sun block */
-.btn.cn-cta { padding: 12px 20px; font-size: 16px; font-weight: 600; border-radius: 14px; border-color: transparent; background: var(--strip); color: var(--white); box-shadow: 6px 6px 0 var(--sun); margin: 0 6px 6px auto; transition: transform .08s ease, box-shadow .08s ease; }
+.btn.cn-cta { padding: 12px 20px; font-size: 16px; font-weight: 600; border-radius: 14px; border-color: transparent; background: var(--ink); color: var(--on-ink); box-shadow: 6px 6px 0 var(--sun); margin: 0 6px 6px auto; transition: transform .08s ease, box-shadow .08s ease; }
 .btn.cn-cta::after { content: "→"; margin-left: 10px; }
-.btn.cn-cta:hover, .btn.cn-cta:focus-visible { background: var(--strip); color: var(--white); border-color: transparent; transform: translate(2px, 2px); box-shadow: 4px 4px 0 var(--sun); }
+.btn.cn-cta:hover, .btn.cn-cta:focus-visible { background: var(--ink); color: var(--on-ink); border-color: transparent; transform: translate(2px, 2px); box-shadow: 4px 4px 0 var(--sun); }
 .btn.cn-cta:active { transform: translate(6px, 6px); box-shadow: 0 0 0 var(--sun); }
 .btn.cn-cta:disabled { opacity: 0.6; }
 /* narrow: the drawing stacks before a fixed lane width can push a

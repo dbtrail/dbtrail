@@ -1000,6 +1000,9 @@ export async function runSaveScenes(ctx) {
         i.value = v;
         return true;
       }, { sel, v }));
+      // What the panel shows: the setting is drawn as figures (a label, the
+      // number, its unit, a few words), each on a line of its own in
+      // innerText, and the sentences are in a closed fold it does not read.
       const text = () => page.evaluate((sel) => { const p = document.querySelector(sel); return p ? p.innerText : ""; }, sel);
       const GiB = 1 << 30;
       const savedAs = (bytes) => until(async () => { const b = await status(); return b && b.source === "saved" && b.memory_bytes === bytes ? b : null; });
@@ -1009,10 +1012,10 @@ export async function runSaveScenes(ctx) {
         await page.evaluate(() => navigate("mysql-clients"));
         const s1 = (await type("3GB")) && await press("Save");
         const st1 = await savedAs(3 * GiB);
-        const shown1 = await until(async () => /can use 3 GB of memory\. Saved here\./.test(await text()));
+        const shown1 = await until(async () => /per statement\s+3\s+GB\s+saved here/i.test(await text()));
         check("sql-memory", "Save stores the memory typed and the panel shows it, with its unmerged-changes line",
           before && before.can_manage === true && before.source === "default" && !!s1 && !!st1 && st1.max_unmerged_mb === 576 && !!shown1 &&
-            (await text()).includes("up to 576 MB of changes"),
+            /waiting to merge\s+576\s+MB/i.test(await text()),
           JSON.stringify({ before, s1, st1, shown1, text: await text() }));
         // The live value, as the SQL card reads it. The copy may not exist
         // yet when this runs; then the route has no limits to show.
@@ -1027,13 +1030,13 @@ export async function runSaveScenes(ctx) {
         // The same panel, pressed again.
         const s2 = (await type("4GB")) && await press("Save");
         const st2 = await savedAs(4 * GiB);
-        const shown2 = await until(async () => /can use 4 GB of memory\. Saved here\./.test(await text()));
+        const shown2 = await until(async () => /per statement\s+4\s+GB\s+saved here/i.test(await text()));
         check("sql-memory", "a second Save on the same panel stores the new value and the panel shows it",
           !!s2 && !!st2 && st2.max_unmerged_mb === 768 && !!shown2, JSON.stringify({ s2, st2, shown2, text: await text() }));
 
         const s3 = await press("Use default");
         const st3 = await until(async () => { const b = await status(); return b && b.source === "default" ? b : null; });
-        const shown3 = await until(async () => /can use 2 GB of memory\. This is the default\./.test(await text()));
+        const shown3 = await until(async () => /per statement\s+2\s+GB\s+the default/i.test(await text()));
         check("sql-memory", "Use default goes back to 2 GB, stored, and the panel says it is the default",
           !!s3 && !!st3 && st3.memory_bytes === 2 * GiB && !!shown3, JSON.stringify({ s3, st3, shown3, text: await text() }));
       } finally {
