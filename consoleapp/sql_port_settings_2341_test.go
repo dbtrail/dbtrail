@@ -128,7 +128,7 @@ func TestSQLPortStartupLines(t *testing.T) {
 		t.Errorf("with neither setting: %q, want nothing said", got)
 	}
 	got := sqlPortStartupLines("0.0.0.0:3308", "was saved as on, with a new password you can replace in the web interface", 0, true, nil)
-	for _, want := range []string{"--flashback-listen", "no longer opens a port in this process", "served by the router", "not on 0.0.0.0:3308", "127.0.0.1:3309, this machine only", "BINTRAIL_ROUTER_LISTEN", "was saved as on", "only if the router is started with it too", "Remove the setting"} {
+	for _, want := range []string{"--flashback-listen", "no longer opens a port in this process", "served by the router", "the address given here (0.0.0.0:3308) is not used", "127.0.0.1:3309, this machine only", "BINTRAIL_ROUTER_LISTEN", "was saved as on", "only if the router is started with it too", "Remove the setting"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("--flashback-listen: want %q in:\n%s", want, got)
 		}

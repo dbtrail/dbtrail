@@ -855,7 +855,7 @@ func sqlPortMigratedWords(created, on bool, err error) string {
 func sqlPortStartupLines(flashbackListen, migrated string, maxCopyAge time.Duration, token bool, routeFlags []string) string {
 	var b strings.Builder
 	if flashbackListen != "" {
-		fmt.Fprintf(&b, "WARNING: --flashback-listen (BINTRAIL_CONSOLE_FLASHBACK_LISTEN=%s) no longer opens a port in this process. The MySQL port is served by the router (bintrail-console router), on the address the router is started with (127.0.0.1:3309, this machine only, unless BINTRAIL_ROUTER_LISTEN or its --listen says otherwise), not on %s. The port %s (Settings, MCP Server, Connect a SQL client).", flashbackListen, flashbackListen, migrated)
+		fmt.Fprintf(&b, "WARNING: --flashback-listen (BINTRAIL_CONSOLE_FLASHBACK_LISTEN=%s) no longer opens a port in this process. The MySQL port is served by the router (bintrail-console router), on the address the router is started with (127.0.0.1:3309, this machine only, unless BINTRAIL_ROUTER_LISTEN or its --listen says otherwise): the address given here (%s) is not used. The port %s (Settings, MCP Server, Connect a SQL client).", flashbackListen, flashbackListen, migrated)
 		if token {
 			b.WriteString(" The access token is accepted as its password only if the router is started with it too (BINTRAIL_CONSOLE_TOKEN or its --token).")
 		}
