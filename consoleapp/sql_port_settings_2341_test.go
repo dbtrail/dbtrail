@@ -286,3 +286,25 @@ func TestSQLPortMigratedWords(t *testing.T) {
 		}
 	}
 }
+
+// The old-compose notice is worked out where DBTrail starts and must reach
+// the console, which says it in the web interface while the port is on.
+func TestUpConsoleConfig_theOldComposeNoticeReachesTheConsole(t *testing.T) {
+	t.Setenv("BINTRAIL_COMPOSE_VERSION", "3")
+	opts := upConsoleOpts()
+	if !strings.Contains(opts.SQLPortNotice, "NOTHING ANSWERS ON IT") || !strings.Contains(opts.SQLPortNotice, composeDownload) {
+		t.Fatalf("upConsoleOpts().SQLPortNotice = %q, want the notice with the way out", opts.SQLPortNotice)
+	}
+	cfg, err := upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/idx",
+		consoleOpts{Listen: "127.0.0.1:8090", Token: "tok", SQLPortNotice: opts.SQLPortNotice}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.FlashbackNotice != opts.SQLPortNotice {
+		t.Errorf("Config.FlashbackNotice = %q, want the notice", cfg.FlashbackNotice)
+	}
+	t.Setenv("BINTRAIL_COMPOSE_VERSION", "4")
+	if got := upConsoleOpts().SQLPortNotice; got != "" {
+		t.Errorf("under a current file: %q, want none", got)
+	}
+}

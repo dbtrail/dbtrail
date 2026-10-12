@@ -171,6 +171,11 @@ type Config struct {
 	// DefaultSQLPortMaxRows. The size of the result in bytes
 	// (SQLLimits.MaxResultBytes) bounds it either way.
 	SQLPortMaxRows int
+	// FlashbackNotice, when set, is why nothing answers on the MySQL port
+	// in this installation although it is turned on (an image updated
+	// under a compose file that does not start the router on it). The port's
+	// status carries it while the port is saved as on.
+	FlashbackNotice string
 	// SQLMaxInFlight is how many SQL-on-the-copy statements run at once for
 	// the whole process, the SQL card and the embedded port together (#2030,
 	// watch --sql-max-in-flight); 0 means sqlsandbox.DefaultMaxInFlight.
@@ -532,6 +537,8 @@ type Server struct {
 	copyMirror CopyMirrorReporter
 	// sqlPortMaxRows is Config.SQLPortMaxRows; read through sqlPortRowCap.
 	sqlPortMaxRows int
+	// flashbackNotice is Config.FlashbackNotice.
+	flashbackNotice string
 	// sqlPortSharedSlots is Config.SQLPortSharedSlots.
 	sqlPortSharedSlots bool
 	// routerURL is Config.RouterURL; routerClient asks it.
@@ -833,6 +840,7 @@ func New(cfg Config) (*Server, error) {
 	s.fillsCopyMirrors = cfg.FillsCopyMirrors
 	s.copyMirror = cfg.CopyMirror
 	s.sqlPortMaxRows = cfg.SQLPortMaxRows
+	s.flashbackNotice = cfg.FlashbackNotice
 	s.routerURL, s.routerURLErr, s.routerClient = cfg.RouterURL, cfg.RouterURLError, newRouterClient(routerStatusTimeout)
 	// Standby (#2236): after a statement, a worker per free slot waits with
 	// its DuckDB open, so a short statement does not pay the start. They stop

@@ -55,6 +55,15 @@ type flashbackStatusDTO struct {
 	// Error is why a port saved as on is not listening (its address was
 	// taken, the settings file could not be read).
 	Error string `json:"error,omitempty"`
+	// RoutingOn is the saved read-routing switch (FlashbackFile.Routing),
+	// which the router follows: on, each statement goes to the server's
+	// source except the expensive SELECTs; off, the copy answers every
+	// statement. Kept while the port is off. Who answered is the router's
+	// to say (GET /api/router).
+	RoutingOn bool `json:"routing_on"`
+	// Notice, when set, is why nothing answers on the port although it is
+	// on (Config.FlashbackNotice). Only while the port is saved as on.
+	Notice string `json:"notice,omitempty"`
 }
 
 // routingStatusDTO: whether MySQL answers on the port, under which rule, and
@@ -121,7 +130,7 @@ func (s *Server) routingStatus() *routingStatusDTO {
 func (s *Server) flashbackStatus() flashbackStatusDTO {
 	fb := &s.flashback
 	fb.mu.Lock()
-	listen, startup := fb.listen, fb.startup
+	listen, startup, path := fb.listen, fb.startup, fb.path
 	manageable := !startup && fb.control != nil && fb.path != "" && !fb.saved.readOnly && fb.loadErr == ""
 	saved, lastErr := fb.saved, fb.lastErr
 	fb.mu.Unlock()
@@ -129,6 +138,17 @@ func (s *Server) flashbackStatus() flashbackStatusDTO {
 	dto := flashbackStatusDTO{CanManage: manageable, Error: lastErr}
 	if !startup {
 		dto.HasPassword, dto.PasswordCreatedAt = saved.Password != "", saved.PasswordCreatedAt
+		// The file's own word, as flashbackManageable reads it: the router
+		// follows the file, not what this process remembers of it.
+		dto.RoutingOn = saved.Routing
+		if path != "" {
+			if f, err := LoadFlashbackFile(path); err == nil {
+				dto.RoutingOn = f.Routing
+			}
+		}
+		if saved.Enabled {
+			dto.Notice = s.flashbackNotice
+		}
 	}
 	if manageable {
 		dto.SuggestedListen = saved.Listen
@@ -191,15 +211,20 @@ func (s *Server) flashbackManageable() (path string, control FlashbackController
 	case fb.loadErr != "":
 		return "", nil, saved, "", "the MySQL port's settings file could not be read, so it is not changed: " + fb.loadErr + ". Fix or remove the file and restart DBTrail."
 	}
-	// Read routing is not this process's to remember (#2341): it is set in
-	// the file, which the router follows, and this process read the file
-	// when it started. A change made from that picture (a new password, the
-	// port turned off and on) would write the routing of that day back, and
-	// could turn forwarding on again after it was turned off.
-	saved = fb.saved
-	if f, err := LoadFlashbackFile(fb.path); err == nil {
-		saved.Routing = f.Routing
+	// The file is the setting, and the router follows it (#2341): every
+	// change starts from what it holds NOW, not from what this process read
+	// when it started. A change made from that old picture (routing alone, a
+	// new password) would write the rest of that day back: a port turned off
+	// in the file since would come back on, and so would forwarding. A file
+	// that cannot be read now is not changed at all, for the same reason.
+	f, err := LoadFlashbackFile(fb.path)
+	if err != nil {
+		return "", nil, saved, "", "the MySQL port's settings file could not be read, so it is not changed: " + err.Error() + ". Fix or remove the file"
 	}
+	if f.readOnly {
+		return "", nil, saved, "", ErrFlashbackFileReadOnly.Error()
+	}
+	saved = *f
 	return fb.path, fb.control, saved, fb.listen, ""
 }
 
@@ -217,7 +242,11 @@ func flashbackRefuseRestricted(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-// handleFlashbackPut turns the port on (at an address) or off. Turning it on
+// handleFlashbackPut turns the port on (at an address) or off, and read
+// routing on or off ("routing", alone or with "enabled"). Read routing sends
+// statements to each server's own MySQL with that server's forwarding
+// account, so it is gated exactly like the port itself: settings:write, and
+// never from a session with a data access policy. Turning it on
 // for the first time also creates its password, returned once.
 //
 // Order matters on the way up: the port is bound BEFORE the setting is saved,
@@ -231,13 +260,14 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Enabled *bool  `json:"enabled"`
 		Listen  string `json:"listen"`
+		Routing *bool  `json:"routing"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
-	if req.Enabled == nil {
-		writeJSONError(w, http.StatusBadRequest, `"enabled" is required: true to turn the port on, false to turn it off`)
+	if req.Enabled == nil && req.Routing == nil {
+		writeJSONError(w, http.StatusBadRequest, `"enabled" or "routing" is required: "enabled" true to turn the port on, false to turn it off; "routing" true to turn read routing on, false to turn it off`)
 		return
 	}
 	fb := &s.flashback
@@ -249,6 +279,24 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	next := saved
+	if req.Routing != nil {
+		next.Routing = *req.Routing
+	}
+	if req.Enabled == nil {
+		// Read routing alone: the port stays as it is, on or off, and the
+		// router picks the change up from the file. Saved while the port is
+		// off too, so it is in force from the moment the port is turned on.
+		if err := saveFlashbackFile(path, &next); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		fb.mu.Lock()
+		fb.saved = next
+		fb.mu.Unlock()
+		slog.Info("console: read routing on the MySQL port changed from the web interface", "routing", next.Routing)
+		writeJSON(w, http.StatusOK, flashbackChangeDTO{flashbackStatusDTO: s.flashbackStatus()})
+		return
+	}
 	next.Enabled = *req.Enabled
 
 	if !next.Enabled {

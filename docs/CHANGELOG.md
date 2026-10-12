@@ -89,6 +89,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to match.
 
 ### Added
+
+- `PUT /api/flashback` takes `routing` (true or false): read routing on the
+  MySQL port is saved from the API, alone or together with `enabled`, and the
+  router follows it. `GET /api/flashback` says it as `routing_on`, and carries
+  a `notice` when the port is on under a `docker-compose.yml` that does not
+  start the router on it. The web interface gets its switch next.
 - **The Snapshots page says whether SQL can read a server whose snapshots are
   only on S3** (#2302). Above the list: which snapshot the local mirror
   holds and when the bucket was last checked, that the bucket has a newer

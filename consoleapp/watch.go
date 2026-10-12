@@ -814,10 +814,22 @@ func sqlPortServedElsewhereLine(on bool, composeVersion string) string {
 	if !on {
 		return ""
 	}
-	if v, err := strconv.Atoi(strings.TrimSpace(composeVersion)); err == nil && v < 4 {
-		return fmt.Sprintf("WARNING: the MySQL port is turned on and NOTHING ANSWERS ON IT (port 3309). This version serves it from the router service, which the docker-compose.yml running this stack (version %d) does not start on that port. MySQL clients that connected to 3309 are refused until the file is replaced: %s\n", v, composeDownload)
+	if notice := sqlPortOldComposeNotice(composeVersion); notice != "" {
+		return "WARNING: the MySQL port is turned on and " + notice + "\n"
 	}
 	return "The MySQL port is turned on. The router answers it (bintrail-console router, port 3309 unless set), not this process: if nothing answers there, the router is not running.\n"
+}
+
+// sqlPortOldComposeNotice is what to say, at startup and in the web
+// interface, while the port is on under a docker-compose.yml from before the
+// router served it (composeVersion below 4): nobody answers. Empty for any
+// other file, and for one that passes no number.
+func sqlPortOldComposeNotice(composeVersion string) string {
+	v, err := strconv.Atoi(strings.TrimSpace(composeVersion))
+	if err != nil || v >= 4 {
+		return ""
+	}
+	return fmt.Sprintf("NOTHING ANSWERS ON IT (port 3309). This version serves it from the router service, which the docker-compose.yml running this stack (version %d) does not start on that port. MySQL clients that connected to 3309 are refused until the file is replaced: %s", v, composeDownload)
 }
 
 // sqlPortMigratedWords says what became of the port of an installation that
@@ -1775,6 +1787,9 @@ type consoleOpts struct {
 	SQLMaxInFlight int
 	// SQLPortMaxRows is the resolved --sql-port-max-rows.
 	SQLPortMaxRows int
+	// SQLPortNotice is why nothing answers on the MySQL port in this
+	// installation, when that is known (sqlPortOldComposeNotice).
+	SQLPortNotice string
 	// RouterURL is the resolved --router-url (#2318), "" when none;
 	// RouterURLError is why a value given could not be used.
 	RouterURL, RouterURLError string
@@ -1806,6 +1821,7 @@ func upConsoleOpts() consoleOpts {
 		SQLMaxInFlight:   upSQLMaxInFlight,
 		SQLMemoryLimit:   upSQLMemoryLimit,
 		SQLPortMaxRows:   upSQLPortMaxRows,
+		SQLPortNotice:    sqlPortOldComposeNotice(os.Getenv("BINTRAIL_COMPOSE_VERSION")),
 		RouterURL:        upRouterURL,
 		RouterURLError:   upRouterURLError,
 	}
@@ -1918,10 +1934,11 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		KillSourceThreads: killSourceThreads,
 		SQLMaxInFlight:    opts.SQLMaxInFlight,
 		// --sql-memory (#2210); "" keeps the sandbox default.
-		SQLLimits:      sqlsandbox.Limits{MemoryLimit: opts.SQLMemoryLimit},
-		SQLPortMaxRows: opts.SQLPortMaxRows,
-		RouterURL:      opts.RouterURL,
-		RouterURLError: opts.RouterURLError,
+		SQLLimits:       sqlsandbox.Limits{MemoryLimit: opts.SQLMemoryLimit},
+		SQLPortMaxRows:  opts.SQLPortMaxRows,
+		FlashbackNotice: opts.SQLPortNotice,
+		RouterURL:       opts.RouterURL,
+		RouterURLError:  opts.RouterURLError,
 		// The daemon's --rotate-* defaults, so GET /api/rotation can report the
 		// effective policy (and the console panel prefill it) before the
 		// operator saves an override.
