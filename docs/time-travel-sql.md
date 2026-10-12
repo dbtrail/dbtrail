@@ -2169,8 +2169,15 @@ forwarding and the copy's tables do not read the index. Time travel
 with an error until it is back.
 
 **What it needs.** The servers file, a copy on local disk for each server it
-should answer expensive reads for (a copy that lives only on S3 is not read
-here), and a network path to each server's source. The other flags are the
+should answer expensive reads for, and a network path to each server's
+source. The router brings nothing from a bucket itself. For a server whose
+snapshots are only on S3 it reads the local mirror `watch` keeps beside the
+servers file
+([SQL on a server whose snapshots are only on S3](console.md#sql-on-a-server-whose-snapshots-are-only-on-s3)),
+so it has to see that folder: it does when it runs beside `watch`, as in the
+bundled stack and the packaged service. A router on another machine needs
+the folder that holds the servers file shared with it, or it has no copy to
+run such a server's expensive reads on. The other flags are the
 routing thresholds of the port inside `watch`: `--route-cost-threshold`,
 `--route-scan-rows`, `--route-read-only`, `--sql-memory` and
 `--sql-port-max-rows`, under the same environment variables, so one
