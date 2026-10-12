@@ -136,9 +136,16 @@ func TestDrawings2330(t *testing.T) {
 	}
 	const now = 1791720000.0 // a whole minute
 	srvA := c{"id": "a", "name": "orders-db"}
-	rview := func(server c) c {
-		return c{"configured": true, "read_at": "2026-10-12T01:10:00Z", "status": c{"counting_since": "2026-10-11T19:00:00Z", "servers": c{"a": server}}}
+	// looked is when the router last read its copies' snapshot times: 15
+	// seconds before it was asked, unless a case says otherwise ("" = never).
+	rviewLooked := func(server c, looked string) c {
+		st := c{"counting_since": "2026-10-11T19:00:00Z", "servers": c{"a": server}}
+		if looked != "" {
+			st["copy_snapshots_read_at"] = looked
+		}
+		return c{"configured": true, "read_at": "2026-10-12T01:10:00Z", "status": st}
 	}
+	rview := func(server c) c { return rviewLooked(server, "2026-10-12T01:09:45Z") }
 	cases := c{
 		"jobs": c{
 			"mixed":       c{"jobs": mixed, "cap": 40},
@@ -163,13 +170,19 @@ func TestDrawings2330(t *testing.T) {
 			"old point": c{"ans": c{"kind": "gauge", "window": "15m", "points": pts(now-6000, 99, now-60, 3), "collected_seconds": 90000}, "now": now + 30},
 		},
 		"router": c{
-			"no view":       c{"view": nil, "cur": srvA},
-			"unconfigured":  c{"view": c{"configured": false}, "cur": srvA},
-			"no answer":     c{"view": c{"configured": true, "error": "refused"}, "cur": srvA},
-			"no server":     c{"view": rview(c{"mysql": 5}), "cur": nil},
-			"other server":  c{"view": rview(c{"mysql": 5}), "cur": c{"id": "zz"}},
-			"nothing yet":   c{"view": rview(c{"mysql": 0, "copy": 0, "refused": 0}), "cur": srvA},
-			"only refused":  c{"view": rview(c{"refused": 3}), "cur": srvA},
+			"no view":      c{"view": nil, "cur": srvA},
+			"unconfigured": c{"view": c{"configured": false}, "cur": srvA},
+			"no answer":    c{"view": c{"configured": true, "error": "refused"}, "cur": srvA},
+			"no server":    c{"view": rview(c{"mysql": 5}), "cur": nil},
+			"other server": c{"view": rview(c{"mysql": 5}), "cur": c{"id": "zz"}},
+			"nothing yet":  c{"view": rview(c{"mysql": 0, "copy": 0, "refused": 0}), "cur": srvA},
+			"only refused": c{"view": rview(c{"refused": 3}), "cur": srvA},
+			// The copy's age is drawn only from a reading made lately: not
+			// before the router's first reading, and not once it stopped
+			// looking (11 minutes ago here, though it looks every 30 seconds).
+			"age not read":  c{"view": rviewLooked(c{"mysql": 4, "copy": 2, "copy_snapshot": "2026-10-12T01:08:57Z"}, ""), "cur": srvA},
+			"age stale":     c{"view": rviewLooked(c{"mysql": 4, "copy": 2, "copy_snapshot": "2026-10-12T01:08:57Z"}, "2026-10-12T00:59:00Z"), "cur": srvA},
+			"age at limit":  c{"view": rviewLooked(c{"mysql": 4, "copy": 2, "copy_snapshot": "2026-10-12T01:08:57Z"}, "2026-10-12T01:08:00Z"), "cur": srvA},
 			"counts only":   c{"view": rview(c{"mysql": 10, "copy": 30}), "cur": srvA},
 			"full":          c{"view": rview(c{"mysql": 48210, "copy": 3233, "refused": 12, "copy_snapshot": "2026-10-12T01:08:57Z", "answers": c{"mysql": c{"count": 48100, "errors": 7, "timeouts": 2, "seconds": 310.4, "slowest_seconds": 9.78}, "copy": c{"count": 3233, "errors": 0, "timeouts": 0, "seconds": 5075.8, "slowest_seconds": 41.2}}}), "cur": srvA},
 			"more timeouts": c{"view": rview(c{"mysql": 4, "answers": c{"mysql": c{"count": 4, "errors": 1, "timeouts": 9, "seconds": 0.0001, "slowest_seconds": 0.00005}}}), "cur": srvA},
@@ -333,6 +346,11 @@ func TestDrawings2330(t *testing.T) {
 		if !f.Drawn || f.MySQL != (drawSide{Sent: 48210, Timed: 48100, Avg: "6 ms", Slowest: "9.78 s", Errors: 7, Timeouts: 2}) ||
 			f.Copy != (drawSide{Sent: 3233, Timed: 3233, Avg: "1.57 s", Slowest: "41.2 s"}) || f.Refused != 12 || f.Age != "63s" {
 			t.Errorf("full: %+v", f)
+		}
+		for name, want := range map[string]string{"age not read": "", "age stale": "", "age at limit": "63s"} {
+			if a := out.Router[name]; !a.Drawn || a.Age != want || strings.Contains(a.Screen, " old") != (want != "") {
+				t.Errorf("%s: drawn %v, age %q, want %q; screen: %s", name, a.Drawn, a.Age, want, a.Screen)
+			}
 		}
 		for _, want := range []string{"48K", "3,233", "7 errors (2 out of time)", "12 refused, run by neither", "6 ms each"} {
 			if !strings.Contains(f.Screen, want) {

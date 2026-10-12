@@ -950,7 +950,7 @@ func (h *Handler) resultsHeld(err error) error {
 // named when it is above the cap, because the client that set it expects it
 // to have covered this.
 func rowCapError(qstr string, rowCap int, selectLimit uint64) error {
-	msg := fmt.Sprintf("the result has more than %d rows, the row cap of this port (watch --sql-port-max-rows where DBTrail runs), and is not returned cut; ", rowCap)
+	msg := fmt.Sprintf("the result has more than %d rows, the row cap of this port (--sql-port-max-rows where the router runs), and is not returned cut; ", rowCap)
 	switch readrouter.LeadingKeyword(qstr) {
 	case "SHOW", "DESCRIBE", "DESC", "SUMMARIZE":
 		msg += fmt.Sprintf("this statement takes no LIMIT: read the same from the catalog with one "+

@@ -14819,7 +14819,7 @@ function sqlClientPanel(servers, fb, reveal, live, rt) {
   body.append(el("p", { class: "cn-sql-row", text: "This password reads every schema on every server in the sidebar." }));
   if (mayChange) {
     const fresh = el("button", { class: "btn btn-sm", type: "button", text: "New password" });
-    fresh.onclick = () => { if (ask("Create a new password?\n\nThe current one stops working for new connections.")) changeSQLPort(live, servers, () => api("/api/flashback/password", { method: "POST", body: {} }), fresh, rt); };
+    fresh.onclick = () => { if (ask("Create a new password?\n\nThe current one stops working, and MySQL clients connected to the port are disconnected.")) changeSQLPort(live, servers, () => api("/api/flashback/password", { method: "POST", body: {} }), fresh, rt); };
     const off = el("button", { class: "btn btn-sm btn-danger", type: "button", text: "Turn off" });
     off.onclick = () => { if (ask("Turn the port off?\n\nMySQL clients connected to it are disconnected.")) changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { enabled: false } }), off, rt); };
     body.append(el("div", { class: "cn-links" }, fresh, off));
@@ -15119,7 +15119,12 @@ function routerSidesModel(view, cur) {
   // The copy's age by the clock of the DBTrail that asked, as routerLines.
   const read = view.read_at ? new Date(view.read_at) : null;
   const snap = t.copy_snapshot ? new Date(t.copy_snapshot) : null;
-  if (read && !isNaN(read) && snap && !isNaN(snap)) out.age = fmtAge(Math.max(0, (read - snap) / 1000));
+  // Only from a reading the router made, and made lately: before its first
+  // reading, or once it has stopped looking (routerStaleAfterSec), the age
+  // is not drawn as a fact. routerLines says both in words.
+  const looked = view.status.copy_snapshots_read_at ? new Date(view.status.copy_snapshots_read_at) : null;
+  const fresh = looked && !isNaN(looked) && read && !isNaN(read) && (read - looked) / 1000 <= routerStaleAfterSec;
+  if (fresh && snap && !isNaN(snap)) out.age = fmtAge(Math.max(0, (read - snap) / 1000));
   const since = view.status.counting_since ? new Date(view.status.counting_since) : null;
   out.since = since && !isNaN(since) ? since : null;
   return out;
