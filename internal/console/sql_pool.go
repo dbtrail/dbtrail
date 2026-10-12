@@ -25,6 +25,11 @@ type SQLPoolInput struct {
 	MemoryOwn   bool
 	// MemoryLimit is what one statement's DuckDB is given, e.g. "2048MiB".
 	MemoryLimit string
+	// Asked is how many statements the operator said run at once, 0 when
+	// the machine decides. It is taken as said, up to SQLPoolMaxWorkers:
+	// the machine then only says how many threads each gets, and whether
+	// the number asks more of it than it has.
+	Asked int
 }
 
 // SQLPool is how many statements run at once and with how many threads
@@ -99,7 +104,38 @@ func SQLPoolFor(in SQLPoolInput) SQLPool {
 		workers = SQLPoolMaxWorkers
 		why += fmt.Sprintf("; at most %d run at once", SQLPoolMaxWorkers)
 	}
-	return SQLPool{Workers: workers, Threads: max(cores/workers, sqlPoolMinThreads), Why: why}
+	if in.Asked <= 0 {
+		return SQLPool{Workers: workers, Threads: max(cores/workers, sqlPoolMinThreads), Why: why}
+	}
+	// The operator's number. A statement gets its share of the cores, down
+	// to one thread: asked for more statements than the cores divide into
+	// pairs, each runs narrower and none is refused its place.
+	asked := min(in.Asked, SQLPoolMaxWorkers)
+	said := fmt.Sprintf("as set (the machine alone gives %d: %s)", workers, why)
+	if in.Asked > SQLPoolMaxWorkers {
+		said += fmt.Sprintf("; %d were asked for, and at most %d run at once", in.Asked, SQLPoolMaxWorkers)
+	}
+	if asked > cores {
+		said += fmt.Sprintf("; that is more statements than the %s they run on, so they take turns on them", countOfCores(cores))
+	}
+	if err == nil && in.MemoryBytes > 0 {
+		mem := in.MemoryBytes
+		if !in.MemoryOwn {
+			mem /= 2
+		}
+		if need := uint64(asked)*uint64(ceiling) + sqlPoolOwnBytes; need > mem {
+			said += fmt.Sprintf("; WARNING: %d statements at up to %s each can reach %s, more than the %s counted for this process, so under load a statement may be stopped for memory or the machine run short of it. Lower the number, or the memory each may use",
+				asked, gibText(uint64(ceiling)), gibText(need), gibText(mem))
+		}
+	}
+	return SQLPool{Workers: asked, Threads: max(cores/asked, 1), Why: said}
+}
+
+func countOfCores(n int) string {
+	if n == 1 {
+		return "1 core"
+	}
+	return fmt.Sprintf("%d cores", n)
 }
 
 func countOf(n int, noun, one, many string) string {

@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **`--concurrency` on the router: how many statements run on the copy at
+  once, set by hand.** From 1 to 64, like `innodb_thread_concurrency` on a
+  MySQL server (`BINTRAIL_ROUTER_CONCURRENCY`, or `ROUTER_CONCURRENCY` in
+  the Docker stack's `.env` with the current `docker-compose.yml`). Unset,
+  the router works the number out as before: one statement per two cores,
+  as many as its memory holds. A higher number is taken as said and each
+  statement runs with fewer threads, down to one; the startup lines print a
+  `WARNING` with the sum when the number can ask for more memory than the
+  router may use. Any number of clients can connect either way: the ones
+  past this number wait their turn.
+
 ### Changed
 - **A statement on the MySQL port waits for its turn on the copy for as
   long as its client stays connected.** It used to wait 30 seconds and then

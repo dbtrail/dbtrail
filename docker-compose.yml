@@ -566,6 +566,12 @@ services:
       # returns: the same two settings as `bintrail`, from the same .env.
       BINTRAIL_CONSOLE_SQL_MEMORY: ${SQL_MEMORY:-}
       BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS: ${SQL_PORT_MAX_ROWS:-}
+      # How many statements run on the copy at once (1 to 64). Empty = the
+      # router works it out from the cores and memory it may use, one
+      # statement per two cores. A number above that is taken as said: each
+      # statement gets fewer threads, and the router's startup lines warn
+      # when it can ask for more memory than there is.
+      BINTRAIL_ROUTER_CONCURRENCY: ${ROUTER_CONCURRENCY:-}
       # How long a statement waits for its turn on the copy when every worker
       # is busy. Empty = no limit: it waits for as long as its client stays
       # connected, so many clients at once are slower, not refused. A time

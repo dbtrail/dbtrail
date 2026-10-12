@@ -57,7 +57,8 @@ How many statements run on the copy at once, and with how many threads each,
 is worked out from the cores and the memory this process may use: give the
 service its own ceilings (cpus and mem_limit in Docker, CPUQuota and MemoryMax
 under systemd) and it uses all of them; without them it takes half of the
-machine, since capture uses the machine too. When every worker is busy a
+machine, since capture uses the machine too. --concurrency sets the number
+of statements by hand. When every worker is busy a
 statement waits its turn, in the order it arrived, for as long as its client
 stays connected: many clients at once are slower, not refused. Give
 --max-wait a time (30s) to refuse one with an error past it.
@@ -87,6 +88,7 @@ func addRouterFlags(cmd *cobra.Command) {
 	f.String("auth-file", "", "Path to the web interface auth file, when it is not the default: only so a statement cannot read it through a copy directory that contains it. Env BINTRAIL_CONSOLE_AUTH.")
 	f.String("mcp-token-file", "", "Path to the managed MCP token file, when it is not the default: for the same reason as --auth-file. Env BINTRAIL_CONSOLE_MCP_TOKEN_FILE.")
 	f.String("sql-memory", "", "Memory each statement on the copy may use, e.g. 4GB; default 2GB, at least 512MB. Fewer statements run at once when each may use more. Unset, the memory saved in the web interface (Settings, MCP Server) is used, read when the router starts: a change there takes effect when the router is restarted, since how many statements run at once was worked out from it. Env BINTRAIL_CONSOLE_SQL_MEMORY.")
+	f.String("concurrency", "", "How many statements run on the copy at once, 1 to 64, like innodb_thread_concurrency on a MySQL server. Empty or 0: worked out from the cores and the memory this process may use (one statement per two cores). A number above that is taken as said: each statement gets fewer threads, down to one, and the startup lines warn when the number can ask for more memory than there is. The rest wait their turn. Env BINTRAIL_ROUTER_CONCURRENCY.")
 	f.String("max-wait", "", "How long a statement waits for its turn on the copy when every worker is busy, e.g. 30s or 2m; past it the client gets an error (1040 on a routed connection, 1203 on one that is not). Empty or 0: no limit, it waits for as long as its client stays connected. Env BINTRAIL_ROUTER_MAX_WAIT.")
 	f.Int("sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns; a result with more is refused with error 1104, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
 	f.Bool("route-read-only", true, "On unless set to false (--route-read-only=false, BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0). Refuse every statement that is not a read, and never send it to the source. It reads the statement's text, so it cannot see a stored function that writes: the forwarding account's grants are the guard for that. Env BINTRAIL_CONSOLE_ROUTE_READ_ONLY.")
@@ -105,6 +107,9 @@ type routerSettings struct {
 	MCPTokenFile   string
 	SQLMemory      string // "" = the default; else "<n>MiB"
 	SQLPortMaxRows int
+	// Concurrency is how many statements run on the copy at once as the
+	// operator set it, 0 when the machine decides.
+	Concurrency int
 	// MaxWait is how long a statement waits for a worker of the copy:
 	// sqlsandbox.NoMaxWait unless a bound was given.
 	MaxWait  time.Duration
@@ -148,6 +153,9 @@ func routerSettingsFrom(cmd *cobra.Command) (routerSettings, error) {
 		return st, err
 	}
 
+	if st.Concurrency, err = parseRouterConcurrency(str("concurrency", "BINTRAIL_ROUTER_CONCURRENCY")); err != nil {
+		return st, err
+	}
 	if st.MaxWait, err = parseRouterMaxWait(str("max-wait", "BINTRAIL_ROUTER_MAX_WAIT")); err != nil {
 		return st, err
 	}
@@ -468,7 +476,7 @@ func routerIgnoredEnv() []string {
 		out = append(out, fmt.Sprintf("BINTRAIL_CONSOLE_FLASHBACK_LISTEN=%s is not applied: the router listens where BINTRAIL_ROUTER_LISTEN or --listen says, 127.0.0.1:3309 unless set. To keep answering on the old address, set BINTRAIL_ROUTER_LISTEN=%s", v, v))
 	}
 	if v := os.Getenv("BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT"); v != "" {
-		out = append(out, fmt.Sprintf("BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT=%s is not applied: the router works out how many statements run at once from its cores and memory", v))
+		out = append(out, fmt.Sprintf("BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT=%s is not applied: it is the capture process's. The router works out how many statements run at once from its cores and memory; to set the number, use BINTRAIL_ROUTER_CONCURRENCY or --concurrency", v))
 	}
 	return out
 }
@@ -675,6 +683,33 @@ func routerWaitText(maxWait time.Duration) string {
 	return fmt.Sprintf("for up to %s (--max-wait); past that the client gets an error (1040 on a routed connection, 1203 on one that is not)", maxWait)
 }
 
+// routerPool sizes the router's pool of workers: from this machine, and
+// with the number of statements the operator set when there is one.
+func routerPool(st routerSettings, memoryLimit string) console.SQLPool {
+	machine := console.ThisMachineForSQLPool(memoryLimit)
+	machine.Asked = st.Concurrency
+	return console.SQLPoolFor(machine)
+}
+
+// parseRouterConcurrency reads --concurrency: a whole number of statements,
+// empty or 0 for the machine to decide.
+func parseRouterConcurrency(v string) (int, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(v)
+	switch {
+	case err != nil:
+		return 0, fmt.Errorf("--concurrency %q is not a whole number of statements: write one from 1 to %d, or leave it empty for the router to work it out", v, console.SQLPoolMaxWorkers)
+	case n < 0:
+		return 0, fmt.Errorf("--concurrency %q is negative: write a number from 1 to %d, or leave it empty for the router to work it out", v, console.SQLPoolMaxWorkers)
+	case n > console.SQLPoolMaxWorkers:
+		return 0, fmt.Errorf("--concurrency %q is more than %d, the most statements the router runs at once: each is a process of its own with its own memory. Write a number up to %d; more clients than that wait their turn", v, console.SQLPoolMaxWorkers, console.SQLPoolMaxWorkers)
+	}
+	return n, nil
+}
+
 // routerMaxWaitMost is the longest time --max-wait takes: past a day a
 // limit is no limit, and the largest duration is how "no limit" is written
 // inside (sqlsandbox.NoMaxWait), which a typed value must not land on.
@@ -743,7 +778,7 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 	if memoryLimit == "" {
 		memoryLimit = sqlsandbox.DefaultLimits().MemoryLimit
 	}
-	pool := console.SQLPoolFor(console.ThisMachineForSQLPool(memoryLimit))
+	pool := routerPool(st, memoryLimit)
 	srv, runner, err := newRouterConsole(st, pool)
 	if err != nil {
 		return err
