@@ -67,7 +67,8 @@ type RouteAnswers struct {
 	Timeouts uint64 `json:"timeouts"`
 	// Seconds is the time all of them took, added up, and SlowestSeconds
 	// the longest one. For MySQL the time includes sending the rows to the
-	// client; for the copy it ends when the answer is ready to send.
+	// client; for the copy it ends when the answer is ready to send, and
+	// includes asking the source for the column names where the port does.
 	Seconds        float64 `json:"seconds"`
 	SlowestSeconds float64 `json:"slowest_seconds"`
 }

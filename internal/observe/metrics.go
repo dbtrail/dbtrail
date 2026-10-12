@@ -275,7 +275,7 @@ func ObserveRouteDecision(server, route, reason string) {
 var (
 	readRoutingAnswers = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "bintrail", Subsystem: "read_routing", Name: "answers_total",
-		Help: "Statements a side (copy|mysql) finished on the routed port, failed ones included, by server id.",
+		Help: "Statements a side (copy|mysql) finished on the routed port, failed ones included, by server id. Fewer than the decisions: a refusal and a statement that found the source unreachable finished on neither side.",
 	}, []string{"server", "route"})
 	readRoutingAnswerSeconds = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "bintrail", Subsystem: "read_routing", Name: "answer_seconds_total",

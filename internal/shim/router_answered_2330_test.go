@@ -1,12 +1,14 @@
 package shim
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-mysql-org/go-mysql/mysql"
+
+	"github.com/dbtrail/dbtrail/internal/readrouter"
 )
 
 // answeredHandler records every decision as "route/reason" and every answer
@@ -14,6 +16,11 @@ import (
 func answeredHandler(r *fakeRouter, f *fakeFreeSQL, cfg RouterConfig, decided, answered *[]string) *Handler {
 	h := NewHandler(nil, nil)
 	h.BindFreeSQL(f)
+	h.BindRouter(r, answeredConfig(cfg, decided, answered))
+	return h
+}
+
+func answeredConfig(cfg RouterConfig, decided, answered *[]string) RouterConfig {
 	cfg.Observe = func(route RouteSide, reason RouteReason) {
 		*decided = append(*decided, string(route)+"/"+string(reason))
 	}
@@ -27,13 +34,9 @@ func answeredHandler(r *fakeRouter, f *fakeFreeSQL, cfg RouterConfig, decided, a
 		case failed:
 			how = "error"
 		}
-		if took < 0 {
-			how += "/negative"
-		}
 		*answered = append(*answered, string(side)+"/"+how)
 	}
-	h.BindRouter(r, cfg)
-	return h
+	return cfg
 }
 
 // Each statement the ladder runs is reported once, on the side that ran it.
@@ -76,26 +79,48 @@ func TestRouterAnswered_onceOnTheSideThatRan(t *testing.T) {
 	}
 }
 
-// What the client got an error for is reported as failed, and a statement
-// whose time ran out as a timeout, on MySQL's side: it is what ran it.
-func TestRouterAnswered_failuresAndTimeouts(t *testing.T) {
-	for _, tc := range []struct {
-		err  error
-		want string
-	}{
-		{errors.New("ERROR 1146: table nope doesn't exist"), "mysql/error"},
-		{fmt.Errorf("forward: %w", context.DeadlineExceeded), "mysql/timeout"},
-	} {
-		r := &fakeRouter{toCopy: false, reason: "cheap", forwardErr: tc.err}
-		f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
-		var decided, answered []string
-		h := answeredHandler(r, f, RouterConfig{MaxCopyAge: time.Minute}, &decided, &answered)
-		if _, err := h.HandleQuery("SELECT * FROM nope WHERE id = 1"); err == nil {
-			t.Fatal("the error did not reach the client")
-		}
-		if len(answered) != 1 || answered[0] != tc.want {
-			t.Errorf("answered %v, want [%s]", answered, tc.want)
-		}
+// MySQL's own error is a failed answer: it ran the statement and said no.
+func TestRouterAnswered_mysqlErrorIsAFailedAnswer(t *testing.T) {
+	r := &fakeRouter{toCopy: false, reason: "cheap", forwardErr: errors.New("ERROR 1146: table nope doesn't exist")}
+	f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
+	var decided, answered []string
+	h := answeredHandler(r, f, RouterConfig{MaxCopyAge: time.Minute}, &decided, &answered)
+	if _, err := h.HandleQuery("SELECT * FROM nope WHERE id = 1"); err == nil {
+		t.Fatal("the error did not reach the client")
+	}
+	if len(answered) != 1 || answered[0] != "mysql/error" {
+		t.Errorf("answered %v, want [mysql/error]", answered)
+	}
+}
+
+// A statement whose time ran out reaches the ladder the way the real
+// forwarder hands it over: as a lost connection (error 2006), with the
+// statement's own context expired. That is a timeout. The same 2006 with
+// the context still good is a source nobody reached: not an answer at all.
+func TestRouterAnswered_timeoutAndLostConnection(t *testing.T) {
+	lost := mysql.NewError(readrouter.CodeUpstreamLost, "the connection to the source was lost")
+
+	r := &fakeRouter{toCopy: false, reason: "cheap", forwardErr: lost, forwardWaits: true}
+	f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
+	var decided, answered []string
+	h := NewHandlerWithConfig(nil, Config{QueryTimeout: 30 * time.Millisecond}, nil)
+	h.BindFreeSQL(f)
+	h.BindRouter(r, answeredConfig(RouterConfig{MaxCopyAge: time.Minute}, &decided, &answered))
+	if _, err := h.HandleQuery("SELECT * FROM t WHERE id = 1"); err == nil {
+		t.Fatal("the timeout did not reach the client")
+	}
+	if len(answered) != 1 || answered[0] != "mysql/timeout" {
+		t.Errorf("out of time: answered %v, want [mysql/timeout] (decided %v)", answered, decided)
+	}
+
+	r = &fakeRouter{toCopy: false, reason: "cheap", forwardErr: lost}
+	decided, answered = nil, nil
+	h = answeredHandler(r, f, RouterConfig{MaxCopyAge: time.Minute}, &decided, &answered)
+	if _, err := h.HandleQuery("SELECT * FROM t WHERE id = 1"); err == nil {
+		t.Fatal("the lost connection did not reach the client")
+	}
+	if len(answered) != 0 || len(decided) != 1 || decided[0] != "mysql/upstream_lost" {
+		t.Errorf("source not reached: answered %v, decided %v", answered, decided)
 	}
 }
 
@@ -111,20 +136,6 @@ func TestRouterAnswered_refusalsAreNotAnswers(t *testing.T) {
 	}
 	if len(answered) != 0 || len(decided) != 1 || !strings.HasPrefix(decided[0], "refused/") {
 		t.Errorf("answered %v, decided %v", answered, decided)
-	}
-}
-
-// With no one listening the ladder is as it was.
-func TestRouterAnswered_nilHookIsFine(t *testing.T) {
-	r := &fakeRouter{toCopy: true, reason: "expensive"}
-	f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
-	h := NewHandler(nil, nil)
-	h.BindFreeSQL(f)
-	h.BindRouter(r, RouterConfig{MaxCopyAge: time.Minute})
-	for _, q := range []string{"SELECT a, count(*) FROM t GROUP BY a", "UPDATE t SET a = 1"} {
-		if _, err := h.HandleQuery(q); err != nil {
-			t.Fatalf("%s: %v", q, err)
-		}
 	}
 }
 

@@ -150,11 +150,16 @@ type RouterConfig struct {
 	// it, how long that took, and whether the client got an error for it
 	// (timedOut when the error was the statement's time running out). The
 	// copy is reported only for a statement it answered: one it declines
-	// goes to MySQL, and is MySQL's. Refusals are not reported: nothing ran.
+	// goes to MySQL, and is MySQL's. Not reported, since nothing ran: a
+	// refusal, and a statement that found the connection to the source
+	// lost. So the answers add up to fewer than the decisions, also because
+	// the port forwards a few statements outside the ladder (SHOW WARNINGS
+	// after a forwarded statement, USE sent as text).
 	//
 	// The two sides' times are not the same measure. MySQL's includes
 	// sending the rows to the client, which are streamed as they arrive;
-	// the copy's ends when its answer is ready to send.
+	// the copy's ends when its answer is ready to send, and includes asking
+	// the source for the column names where the port does that.
 	Answered func(side RouteSide, took time.Duration, failed, timedOut bool)
 	// ReadOnly refuses every statement that is not a read or the session and
 	// transaction control around reads (readrouter.ReadOnlyRefusal), before
@@ -432,7 +437,23 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		ops.forward = func(reason RouteReason, detail string) (*mysql.Result, error) {
 			start := time.Now()
 			res, err := forward(reason, detail)
-			answered(RouteMySQL, time.Since(start), err != nil, errors.Is(err, context.DeadlineExceeded))
+			took := time.Since(start)
+			switch {
+			case err == nil:
+				answered(RouteMySQL, took, false, false)
+			case !readrouter.IsLost(err):
+				// MySQL's own error: it ran the statement and said no.
+				answered(RouteMySQL, took, true, false)
+			case errors.Is(ctx.Err(), context.DeadlineExceeded):
+				// The statement's time ran out. It reaches here as a lost
+				// connection (closing the socket is how the wait is ended),
+				// so it is the statement's own context that says which.
+				answered(RouteMySQL, took, true, true)
+			}
+			// Any other lost connection is nobody's answer: the source was
+			// not reached, or the client left. The decision says so
+			// (upstream_lost), and a failure in microseconds counted here
+			// would read as MySQL being fast and wrong.
 			return res, err
 		}
 		ops.runCopy = func(reason string, unchangedWithin time.Duration) (*mysql.Result, error) {
