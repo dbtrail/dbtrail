@@ -55,3 +55,28 @@ func TestWatchConnCancelsOnParentCancel(t *testing.T) {
 		t.Fatal("parent cancel did not propagate to the connection context")
 	}
 }
+
+// A driver's close sends COM_QUIT and then closes the socket. While a
+// statement is in hand nobody reads those bytes, and the close behind them
+// still has to be seen: the statement may be waiting its turn for the copy
+// with no time limit, for a client that has left.
+func TestWatchConnCancelsOnACloseThatFollowsUnreadBytes(t *testing.T) {
+	client, srvSide := net.Pipe()
+	_, ctx, stop := WatchConn(context.Background(), srvSide)
+	defer stop()
+
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := client.Write([]byte{1, 0, 0, 0, 1}) // COM_QUIT
+		client.Close()
+		wrote <- err
+	}()
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("a client that sent bytes nobody read and then closed was not seen leaving")
+	}
+	if err := <-wrote; err != nil {
+		t.Fatalf("the client's write failed: %v", err)
+	}
+}

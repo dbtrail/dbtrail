@@ -675,6 +675,11 @@ func routerWaitText(maxWait time.Duration) string {
 	return fmt.Sprintf("for up to %s (--max-wait); past that the client gets error 1040", maxWait)
 }
 
+// routerMaxWaitMost is the longest time --max-wait takes: past a day a
+// limit is no limit, and the largest duration is how "no limit" is written
+// inside (sqlsandbox.NoMaxWait), which a typed value must not land on.
+const routerMaxWaitMost = 24 * time.Hour
+
 // parseRouterMaxWait reads --max-wait. Empty and zero are the line with no
 // time bound. A bare number is refused rather than guessed at: 30 could be
 // seconds or minutes, and Go would read it as nanoseconds.
@@ -683,11 +688,14 @@ func parseRouterMaxWait(v string) (time.Duration, error) {
 	if v == "" {
 		return sqlsandbox.NoMaxWait, nil
 	}
-	if n, err := strconv.ParseFloat(v, 64); err == nil {
-		if n == 0 {
+	// A bare number, told apart from the rest so the refusal can say what
+	// is missing. Digits and one dot only: strconv would also take "NaN",
+	// "1e3" or "0x1p4", and "write it like NaNs" helps nobody.
+	if bare := strings.TrimLeft(v, "+-"); bare != "" && strings.Trim(bare, "0123456789.") == "" && strings.Count(bare, ".") <= 1 && bare != "." {
+		if strings.Trim(bare, "0.") == "" {
 			return sqlsandbox.NoMaxWait, nil
 		}
-		return 0, fmt.Errorf("--max-wait %q has no unit: write it with one, like %ss or %sm", v, v, v)
+		return 0, fmt.Errorf("--max-wait %q has no unit: write it with one, like %ss or %sm", v, bare, bare)
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
@@ -698,6 +706,8 @@ func parseRouterMaxWait(v string) (time.Duration, error) {
 		return 0, fmt.Errorf("--max-wait %q is negative: write a time like 30s, or leave it empty for no limit", v)
 	case d == 0:
 		return sqlsandbox.NoMaxWait, nil
+	case d > routerMaxWaitMost:
+		return 0, fmt.Errorf("--max-wait %q is more than %s: leave it empty for no limit", v, routerMaxWaitMost)
 	case d < time.Second:
 		return 0, fmt.Errorf("--max-wait %q is under a second: a statement refused that fast is sent again as fast, and each try asks the source for its plan. Write at least 1s, or leave it empty for no limit", v)
 	}

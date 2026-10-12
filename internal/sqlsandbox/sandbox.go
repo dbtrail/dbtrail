@@ -88,6 +88,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/cliutil"
+	"github.com/dbtrail/dbtrail/internal/stmtclock"
 )
 
 // WorkerCommand is the hidden subcommand the console binary registers for the
@@ -968,6 +969,9 @@ func (r *Runner) Reserve(ctx context.Context, user string) (*Slot, error) {
 	r.waiters = append(r.waiters, w)
 	r.mu.Unlock()
 
+	// The wait is not the statement running: its own time cap, if it has
+	// one that can be held, does not count it.
+	defer stmtclock.Hold(ctx)()
 	// No timer on a line with no time bound: its channel stays nil and is
 	// never ready.
 	var timeUp <-chan time.Time

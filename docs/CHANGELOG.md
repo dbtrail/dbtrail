@@ -17,7 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--max-wait 30s`, `BINTRAIL_ROUTER_MAX_WAIT`, or `ROUTER_MAX_WAIT` in the
   Docker stack's `.env` (take the current `docker-compose.yml` for that last
   one). Up to 4,096 statements wait at once; one more is still refused. The
-  SQL card of the web interface is unchanged.
+  SQL card of the web interface is unchanged. Two things that the 30
+  seconds used to hide are fixed with it: the port's 5-minute cap on a
+  statement no longer counts the time it waits its turn (it stopped a
+  statement that had only waited, and on a routed connection that closed
+  the client's session on the source), and a client that sends its goodbye
+  before it closes (`COM_QUIT`, what a driver's close does) is now seen
+  leaving while its statement waits or runs.
 
 ## [0.104.0] - 2026-10-11
 ### Fixed

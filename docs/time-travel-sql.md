@@ -1749,6 +1749,10 @@ as the router applies it:
   gets error 1040 without waiting (`copy_queue_full`).
 - **What else ends a wait.** The client disconnecting: the statement leaves
   the line at once and nothing runs. The router stopping does the same.
+- **The wait is not counted as the statement running.** The port stops a
+  statement after 5 minutes in all, and one on the copy after 60 seconds
+  there. The 60 seconds start when the statement gets its turn, and the 5
+  minutes stand still while it waits and go on from where they were.
 - **What a waiting read holds.** Its client connection and its idle
   connection to MySQL, nothing else: no place on the copy, no process, no
   memory worth counting.
@@ -1758,7 +1762,8 @@ as the router applies it:
   that refusal's own reason: it paid the wait, the attempt and MySQL's time.
 - **On a connection that is not routed** (routing off, a server that cannot
   be forwarded for, a `@copy` user) there is no MySQL behind the statement.
-  It waits the same way, and past the wait the client gets error 1203.
+  It waits the same way. Under `--max-wait`, past the wait the client gets
+  error 1203.
 
 What to watch ([Observability](observability.md)):
 `bintrail_sql_slot_wait_seconds` is how long statements wait and how each
