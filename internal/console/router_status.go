@@ -162,6 +162,9 @@ type RouterServerNumbers struct {
 	// 3339 UTC; empty when not known. Filled by the caller, which reads it
 	// on its own clock.
 	CopySnapshot string `json:"copy_snapshot,omitempty"`
+	// Answers is what each side ("copy", "mysql") finished: counts and
+	// times. Absent until a statement finishes.
+	Answers map[string]RouteAnswers `json:"answers,omitempty"`
 }
 
 // RouterNumbers reads the counts and the pool. It opens nothing and lists no
@@ -177,7 +180,8 @@ func (s *Server) RouterNumbers() RouterNumbers {
 			reasons = map[string]uint64{}
 		}
 		out.Servers[id] = RouterServerNumbers{Copy: t.Copy, MySQL: t.MySQL, Refused: t.Refused, Reasons: reasons,
-			CannotRoute: t.Unavailable != "", AccountRefused: t.AccountRefused != "", SessionUntracked: t.SessionUntracked != ""}
+			CannotRoute: t.Unavailable != "", AccountRefused: t.AccountRefused != "", SessionUntracked: t.SessionUntracked != "",
+			Answers: t.Answers}
 	}
 	if runner := s.SQLSandbox(); runner != nil {
 		memory, _ := s.sqlMemoryNow()

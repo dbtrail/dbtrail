@@ -146,6 +146,16 @@ type RouterConfig struct {
 	// it). Called once per statement, whatever the statement then does on
 	// the side it was sent to.
 	Observe func(route RouteSide, reason RouteReason)
+	// Answered, when set, is told each statement a side finished: who ran
+	// it, how long that took, and whether the client got an error for it
+	// (timedOut when the error was the statement's time running out). The
+	// copy is reported only for a statement it answered: one it declines
+	// goes to MySQL, and is MySQL's. Refusals are not reported: nothing ran.
+	//
+	// The two sides' times are not the same measure. MySQL's includes
+	// sending the rows to the client, which are streamed as they arrive;
+	// the copy's ends when its answer is ready to send.
+	Answered func(side RouteSide, took time.Duration, failed, timedOut bool)
 	// ReadOnly refuses every statement that is not a read or the session and
 	// transaction control around reads (readrouter.ReadOnlyRefusal), before
 	// anything is asked of the Router: a refused statement never reaches the
@@ -416,6 +426,23 @@ func (h *Handler) nameAsSource(res *mysql.Result, names []string, err error) {
 func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.Result, error) {
 	if err := h.readOnlyRefusal(qstr); err != nil {
 		return nil, err
+	}
+	if answered := h.routerCfg.Answered; answered != nil {
+		forward, runCopy := ops.forward, ops.runCopy
+		ops.forward = func(reason RouteReason, detail string) (*mysql.Result, error) {
+			start := time.Now()
+			res, err := forward(reason, detail)
+			answered(RouteMySQL, time.Since(start), err != nil, errors.Is(err, context.DeadlineExceeded))
+			return res, err
+		}
+		ops.runCopy = func(reason string, unchangedWithin time.Duration) (*mysql.Result, error) {
+			start := time.Now()
+			res, err := runCopy(reason, unchangedWithin)
+			if err == nil {
+				answered(RouteCopy, time.Since(start), false, false)
+			}
+			return res, err
+		}
 	}
 	// Whatever is forwarded and is not positively a plain read may change
 	// the source's session: the port stops assuming it knows it

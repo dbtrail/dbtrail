@@ -608,6 +608,10 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 					observe.ObserveRouteDecision(id, string(route), string(reason))
 					srv.RecordRouteDecision(id, string(route), string(reason))
 				},
+				Answered: func(side shim.RouteSide, took time.Duration, failed, timedOut bool) {
+					observe.ObserveRouteAnswer(id, string(side), took, failed, timedOut)
+					srv.RecordRouteAnswer(id, string(side), took, failed, timedOut)
+				},
 			})
 		}
 	}
