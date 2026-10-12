@@ -1726,7 +1726,8 @@ copy, and the client sees a slower answer, not a different one. The rule,
 as the router applies it:
 
 - **How many run.** The router works out how many statements run on the
-  copy at once from the cores and the memory it may use
+  copy at once from the cores and the memory it may use, unless you set the
+  number with `--concurrency`
   ([The router](#the-router-the-process-that-serves-the-port)). Statements
   for the same server can run at the same time. `SHOW ROUTER STATUS` shows
   the number as `pool_workers`.
@@ -1937,11 +1938,27 @@ Why it is a process of its own:
 - **It sizes itself.** How many statements run on the copy at once is worked
   out from the cores and the memory the router may use: one worker per two
   cores or per statement's memory, whichever is fewer, and the cores are
-  divided among the workers. Nothing is set by hand. Give the service its own
+  divided among the workers. Nothing has to be set by hand. Give the service its own
   ceilings (`cpus` and `mem_limit` in Docker, `CPUQuota=` and `MemoryMax=`
   under systemd) and it uses all of them. With none it takes half of the
   machine, since capture uses the machine too. The numbers and where they
   came from are printed when it starts.
+- **Or you say how many.** `--concurrency 16` (`BINTRAIL_ROUTER_CONCURRENCY`,
+  `ROUTER_CONCURRENCY` in the Docker stack's `.env`) sets how many statements
+  run on the copy at once, from 1 to 64, the way `innodb_thread_concurrency`
+  does on a MySQL server. The number is taken as said. Above one per two
+  cores each statement runs with fewer threads, down to one, so more run
+  at once and each is slower; above the number of cores they take turns. Each statement keeps its own memory (2 GB by default, plus a
+  quarter), so the startup lines print a `WARNING` with the sum when the
+  number can ask for more memory than the router may use: lower the number,
+  or the memory each may use. Two more things grow with the number. The temporary disk a
+  statement may use past its memory is the free space divided among twice
+  the number, and under 256 MB each there is none, which the router's log
+  says at startup: a heavy statement that used to finish slowly then fails
+  at its memory. And the router keeps up to that many idle worker processes
+  ready between statements, a few tens of MB each. It does not change how
+  many clients connect: any number does, and the ones past this number wait
+  their turn.
 
 It asks the capture process nothing. It reads the servers file the web
 interface manages (`--servers-file`, the same path `watch` uses) and never
