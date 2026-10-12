@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs one shard of the MySQL integration tests (the `integration-shard` job in
-# .github/workflows/ci.yml). Run from the repository root.
+# .github/workflows/ci.yml and the `integration-mysql-shard` job in
+# release.yaml). Run from the repository root.
 #
 #   scripts/mysql-integration-shard.sh count            -> number of shards
 #   scripts/mysql-integration-shard.sh list <shard>     -> that shard's packages
@@ -84,7 +85,7 @@ check_shard() {
     '' | *[!0-9]*) die "shard must be a number from 1 to $SHARD_COUNT, got '$1'" ;;
   esac
   [ "$1" -ge 1 ] && [ "$1" -le "$SHARD_COUNT" ] \
-    || die "shard must be from 1 to $SHARD_COUNT, got $1 (the ci.yml matrix and SHARD_COUNT must agree)"
+    || die "shard must be from 1 to $SHARD_COUNT, got $1 (the ci.yml and release.yaml matrices and SHARD_COUNT must agree)"
 }
 
 # Import paths of every package with integration-tagged test files.
