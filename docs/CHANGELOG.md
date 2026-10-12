@@ -23,7 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   statement that had only waited, and on a routed connection that closed
   the client's session on the source), and a client that sends its goodbye
   before it closes (`COM_QUIT`, what a driver's close does) is now seen
-  leaving while its statement waits or runs.
+  leaving while its statement waits or runs. And a statement whose client
+  left while it waited for the copy is no longer handed to MySQL, where it
+  ran for nobody: it is dropped, and counted as `cancelled` under
+  `route="refused"`.
 
 ## [0.104.0] - 2026-10-11
 ### Fixed

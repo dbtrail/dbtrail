@@ -899,6 +899,11 @@ func (e sinkError) Unwrap() error { return e.err }
 // BEGIN) comes back whole with its affected rows. MySQL's own error is
 // returned as is, for the port to write back to the client byte for byte.
 func (f *Forwarder) Forward(ctx context.Context, stmt string, sink RowSink) (*mysql.Result, error) {
+	// A statement whose context has ended is not sent: sent, it would start
+	// on the source and the watch below would close the session under it.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c, err := f.get(ctx)
 	if err != nil {
 		return nil, err

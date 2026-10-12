@@ -1746,16 +1746,20 @@ as the router applies it:
   client no time would be repeated as fast as the client can send, and each
   attempt asks the source for a plan first. Empty or `0` is no limit.
 - **The line is long.** Up to 4,096 statements may wait at once. One more
-  gets error 1040 without waiting (`copy_queue_full`).
+  gets error 1040 without waiting (`copy_queue_full`), or error 1203 on a
+  connection that is not routed.
 - **What else ends a wait.** The client disconnecting: the statement leaves
-  the line at once and nothing runs. The router stopping does the same.
+  the line at once and nothing runs, on the copy or on MySQL (`cancelled`
+  in the counter). The router stopping does the same.
 - **The wait is not counted as the statement running.** The port stops a
   statement after 5 minutes in all, and one on the copy after 60 seconds
   there. The 60 seconds start when the statement gets its turn, and the 5
   minutes stand still while it waits and go on from where they were.
 - **What a waiting read holds.** Its client connection and its idle
   connection to MySQL, nothing else: no place on the copy, no process, no
-  memory worth counting.
+  memory worth counting. That connection to MySQL is idle for the whole
+  wait: one longer than the source's `wait_timeout` (8 hours by default)
+  loses it, and the client then has to reconnect.
 - **Waiting does not exempt a read from the copy's other refusals.** A read
   that waited, ran on the copy, and was then refused there (a result over
   the row cap, a construct DuckDB lacks) is run by MySQL afterwards under
@@ -1809,7 +1813,9 @@ The router does the counting, so the numbers are read from the router:
   did not wait), `copy_wait_timeout` (refused with error 1040: the copy was
   busy and the statement
   waited the whole `--max-wait` for its turn; never counted when no time
-  limit is set), `copy_results_held` (the port was still
+  limit is set), `cancelled` (refused: the client left, or the router was
+  stopping, while the statement waited its turn or ran on the copy; it is
+  not handed to MySQL), `copy_results_held` (the port was still
   sending as many results as it keeps in memory at once, and MySQL
   answered), `copy_columns_differ`
   (the copy works and declined a `SELECT *` or a `NATURAL JOIN` over a table

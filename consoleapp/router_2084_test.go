@@ -629,7 +629,7 @@ func TestRouterStartupLines_sayWhatWillHappen(t *testing.T) {
 	}{
 		{"as started by default", func(u *routerStartup) { u.PortFile = "/var/lib/bintrail/console-mysql-port.yaml" },
 			[]string{"127.0.0.1:3309", "open only while the MySQL port is turned on in the web interface (read from /var/lib/bintrail/console-mysql-port.yaml)", "The password is the one created there.", "routed only when that file says so", "3 servers from /var/lib/bintrail/console-servers.yaml", "4 statements on the copy at once", "2 threads", "8 cores allow 4",
-				"whatever the age of its snapshot", "waits its turn, in the order it arrived, for as long as its client stays connected (no time limit; --max-wait sets one)", "Past 4096 statements waiting, one more gets error 1040", "read routing is read-write"},
+				"whatever the age of its snapshot", "waits its turn, in the order it arrived, for as long as its client stays connected (no time limit; --max-wait sets one)", "Past 4096 statements waiting, one more gets an error (1040 on a routed connection, 1203 on one that is not)", "read routing is read-write"},
 			[]string{"every network interface", "does not exist", "is not applied", "read routing is read-only", "access token"}},
 		{"a pool of one is one statement", func(u *routerStartup) { u.Pool.Workers = 1 },
 			[]string{"1 statement on the copy at once"}, []string{"1 statements"}},

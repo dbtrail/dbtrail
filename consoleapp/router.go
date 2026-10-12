@@ -60,7 +60,7 @@ under systemd) and it uses all of them; without them it takes half of the
 machine, since capture uses the machine too. When every worker is busy a
 statement waits its turn, in the order it arrived, for as long as its client
 stays connected: many clients at once are slower, not refused. Give
---max-wait a time (30s) to refuse one with error 1040 past it.
+--max-wait a time (30s) to refuse one with an error past it.
 
 Example:
   BINTRAIL_CONSOLE_TOKEN=... bintrail-console router --listen 127.0.0.1:3309`,
@@ -87,7 +87,7 @@ func addRouterFlags(cmd *cobra.Command) {
 	f.String("auth-file", "", "Path to the web interface auth file, when it is not the default: only so a statement cannot read it through a copy directory that contains it. Env BINTRAIL_CONSOLE_AUTH.")
 	f.String("mcp-token-file", "", "Path to the managed MCP token file, when it is not the default: for the same reason as --auth-file. Env BINTRAIL_CONSOLE_MCP_TOKEN_FILE.")
 	f.String("sql-memory", "", "Memory each statement on the copy may use, e.g. 4GB; default 2GB, at least 512MB. Fewer statements run at once when each may use more. Unset, the memory saved in the web interface (Settings, MCP Server) is used, read when the router starts: a change there takes effect when the router is restarted, since how many statements run at once was worked out from it. Env BINTRAIL_CONSOLE_SQL_MEMORY.")
-	f.String("max-wait", "", "How long a statement waits for its turn on the copy when every worker is busy, e.g. 30s or 2m; past it the client gets error 1040. Empty or 0: no limit, it waits for as long as its client stays connected. Env BINTRAIL_ROUTER_MAX_WAIT.")
+	f.String("max-wait", "", "How long a statement waits for its turn on the copy when every worker is busy, e.g. 30s or 2m; past it the client gets an error (1040 on a routed connection, 1203 on one that is not). Empty or 0: no limit, it waits for as long as its client stays connected. Env BINTRAIL_ROUTER_MAX_WAIT.")
 	f.Int("sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns; a result with more is refused with error 1104, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
 	f.Bool("route-read-only", true, "On unless set to false (--route-read-only=false, BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0). Refuse every statement that is not a read, and never send it to the source. It reads the statement's text, so it cannot see a stored function that writes: the forwarding account's grants are the guard for that. Env BINTRAIL_CONSOLE_ROUTE_READ_ONLY.")
 	f.Float64("route-cost-threshold", def.CostThreshold, "A SELECT whose plan query_cost is at least this goes to the copy (a point lookup costs about 1; a full scan over 200k rows about 20000). 0 disables the cost rule. Env BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD.")
@@ -670,9 +670,9 @@ func inContainer() bool {
 // statement does while every worker of the copy is busy.
 func routerWaitText(maxWait time.Duration) string {
 	if maxWait == sqlsandbox.NoMaxWait {
-		return fmt.Sprintf("for as long as its client stays connected (no time limit; --max-wait sets one). Past %d statements waiting, one more gets error 1040", routerMaxWaiters)
+		return fmt.Sprintf("for as long as its client stays connected (no time limit; --max-wait sets one). Past %d statements waiting, one more gets an error (1040 on a routed connection, 1203 on one that is not)", routerMaxWaiters)
 	}
-	return fmt.Sprintf("for up to %s (--max-wait); past that the client gets error 1040", maxWait)
+	return fmt.Sprintf("for up to %s (--max-wait); past that the client gets an error (1040 on a routed connection, 1203 on one that is not)", maxWait)
 }
 
 // routerMaxWaitMost is the longest time --max-wait takes: past a day a
@@ -694,6 +694,9 @@ func parseRouterMaxWait(v string) (time.Duration, error) {
 	if bare := strings.TrimLeft(v, "+-"); bare != "" && strings.Trim(bare, "0123456789.") == "" && strings.Count(bare, ".") <= 1 && bare != "." {
 		if strings.Trim(bare, "0.") == "" {
 			return sqlsandbox.NoMaxWait, nil
+		}
+		if bare != strings.TrimPrefix(v, "+") {
+			return 0, fmt.Errorf("--max-wait %q is negative: write a time like 30s, or leave it empty for no limit", v)
 		}
 		return 0, fmt.Errorf("--max-wait %q has no unit: write it with one, like %ss or %sm", v, bare, bare)
 	}

@@ -415,7 +415,7 @@ console.log(JSON.stringify({
 		"1 × an expensive plan: the copy answered")
 	reasons("busy", "40 × an expensive plan: the copy answered",
 		"3 × every worker was busy and thousands of statements were already waiting, more than the router lets wait: refused with error 1040 at once",
-		"2 × every worker was busy: the statement waited 30 seconds for its turn, then was refused with error 1040")
+		"2 × every worker was busy: the statement waited as long as the router was told to let one wait (--max-wait), then was refused with error 1040")
 	reasons("readOnly", "7 × a cheap plan (a lookup or a small read)", "3 × an expensive plan: the copy answered", "2 × refused: not a read, and the router is read-only")
 	// Another server's reasons never show under the picked one.
 	reasons("other")

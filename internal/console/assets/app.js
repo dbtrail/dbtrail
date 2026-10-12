@@ -14993,6 +14993,7 @@ const ROUTE_REASON_TEXT = {
   copy_queue_full: "the copy was busy and 16 statements were already waiting for it: MySQL answered at once",
   copy_wait_timeout: "the copy was busy: the statement waited 30 seconds for its turn, then MySQL answered",
   copy_results_held: "the port was still sending as many results as it keeps in memory at once: MySQL answered",
+  cancelled: "the client left, or the port was stopping, before the copy answered: nobody ran it on MySQL",
 };
 
 // What two reasons mean on a router (#2318): there a statement that finds the
@@ -15000,7 +15001,7 @@ const ROUTE_REASON_TEXT = {
 // hands it to MySQL. Every other reason reads as ROUTE_REASON_TEXT says.
 const ROUTER_REASON_TEXT = {
   copy_queue_full: "every worker was busy and thousands of statements were already waiting, more than the router lets wait: refused with error 1040 at once",
-  copy_wait_timeout: "every worker was busy: the statement waited 30 seconds for its turn, then was refused with error 1040",
+  copy_wait_timeout: "every worker was busy: the statement waited as long as the router was told to let one wait (--max-wait), then was refused with error 1040",
   read_only: "refused: not a read, and the router is read-only",
 };
 

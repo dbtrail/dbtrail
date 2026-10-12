@@ -32,7 +32,8 @@ func TestParseRouterMaxWait(t *testing.T) {
 		{in: "30", wantErr: "no unit"},
 		{in: "1.5", wantErr: "no unit"},
 		{in: "-5s", wantErr: "negative"},
-		{in: "-5", wantErr: "like 5s or 5m"},
+		{in: "-5", wantErr: "negative"},
+		{in: "+5", wantErr: "like 5s or 5m"},
 		{in: "500ms", wantErr: "under a second"},
 		{in: "30S", wantErr: "not a time"},
 		{in: "forever", wantErr: "not a time"},
@@ -119,7 +120,7 @@ func TestRouterStartupLines_sayTheWait(t *testing.T) {
 		t.Errorf("no time bound is not said:\n%s", none)
 	}
 	bound := routerStartupLines(routerStartup{MaxWait: 45 * time.Second, Pool: console.SQLPool{Workers: 2, Threads: 2, Why: "4 cores allow 2"}})
-	if !strings.Contains(bound, "for up to 45s (--max-wait); past that the client gets error 1040") {
+	if !strings.Contains(bound, "for up to 45s (--max-wait); past that the client gets an error (1040 on a routed connection, 1203 on one that is not)") {
 		t.Errorf("the bound is not said:\n%s", bound)
 	}
 }
