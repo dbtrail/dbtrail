@@ -58,7 +58,9 @@ is worked out from the cores and the memory this process may use: give the
 service its own ceilings (cpus and mem_limit in Docker, CPUQuota and MemoryMax
 under systemd) and it uses all of them; without them it takes half of the
 machine, since capture uses the machine too. When every worker is busy a
-statement waits, and past the wait the client gets error 1040.
+statement waits its turn, in the order it arrived, for as long as its client
+stays connected: many clients at once are slower, not refused. Give
+--max-wait a time (30s) to refuse one with error 1040 past it.
 
 Example:
   BINTRAIL_CONSOLE_TOKEN=... bintrail-console router --listen 127.0.0.1:3309`,
@@ -85,6 +87,7 @@ func addRouterFlags(cmd *cobra.Command) {
 	f.String("auth-file", "", "Path to the web interface auth file, when it is not the default: only so a statement cannot read it through a copy directory that contains it. Env BINTRAIL_CONSOLE_AUTH.")
 	f.String("mcp-token-file", "", "Path to the managed MCP token file, when it is not the default: for the same reason as --auth-file. Env BINTRAIL_CONSOLE_MCP_TOKEN_FILE.")
 	f.String("sql-memory", "", "Memory each statement on the copy may use, e.g. 4GB; default 2GB, at least 512MB. Fewer statements run at once when each may use more. Unset, the memory saved in the web interface (Settings, MCP Server) is used, read when the router starts: a change there takes effect when the router is restarted, since how many statements run at once was worked out from it. Env BINTRAIL_CONSOLE_SQL_MEMORY.")
+	f.String("max-wait", "", "How long a statement waits for its turn on the copy when every worker is busy, e.g. 30s or 2m; past it the client gets error 1040. Empty or 0: no limit, it waits for as long as its client stays connected. Env BINTRAIL_ROUTER_MAX_WAIT.")
 	f.Int("sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns; a result with more is refused with error 1104, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
 	f.Bool("route-read-only", true, "On unless set to false (--route-read-only=false, BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0). Refuse every statement that is not a read, and never send it to the source. It reads the statement's text, so it cannot see a stored function that writes: the forwarding account's grants are the guard for that. Env BINTRAIL_CONSOLE_ROUTE_READ_ONLY.")
 	f.Float64("route-cost-threshold", def.CostThreshold, "A SELECT whose plan query_cost is at least this goes to the copy (a point lookup costs about 1; a full scan over 200k rows about 20000). 0 disables the cost rule. Env BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD.")
@@ -102,8 +105,11 @@ type routerSettings struct {
 	MCPTokenFile   string
 	SQLMemory      string // "" = the default; else "<n>MiB"
 	SQLPortMaxRows int
-	Policy         readrouter.Policy
-	ReadOnly       bool
+	// MaxWait is how long a statement waits for a worker of the copy:
+	// sqlsandbox.NoMaxWait unless a bound was given.
+	MaxWait  time.Duration
+	Policy   readrouter.Policy
+	ReadOnly bool
 }
 
 // routerSettingsFrom resolves the router's flags with the environment, a
@@ -142,6 +148,9 @@ func routerSettingsFrom(cmd *cobra.Command) (routerSettings, error) {
 		return st, err
 	}
 
+	if st.MaxWait, err = parseRouterMaxWait(str("max-wait", "BINTRAIL_ROUTER_MAX_WAIT")); err != nil {
+		return st, err
+	}
 	st.SQLPortMaxRows, _ = f.GetInt("sql-port-max-rows")
 	rowsName := "--sql-port-max-rows"
 	if !f.Changed("sql-port-max-rows") {
@@ -230,6 +239,7 @@ func newRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server,
 		SQLMaxInFlight:         pool.Workers,
 		SQLWorkerStatements:    sqlsandbox.DefaultWorkerStatements,
 		SQLMaxWaiters:          routerMaxWaiters,
+		SQLMaxWait:             st.MaxWait,
 		SQLPortSharedSlots:     true,
 		SQLPortMaxRows:         st.SQLPortMaxRows,
 		KillSourceThreads:      killSourceThreads,
@@ -245,10 +255,12 @@ func newRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server,
 }
 
 // routerMaxWaiters is how many statements may wait for a worker of the
-// router at once (#2327). The wait is what bounds the line here, not this
-// number: a statement waits its turn for up to sqlsandbox.DefaultMaxWait and
-// only then is refused, so a refusal costs the client that wait and cannot
-// be repeated in a loop. With a short line the refusal came at once, after
+// router at once (#2327). It is the only bound of a line with no time
+// bound (the default, --max-wait unset): one statement more is refused at
+// once with error 1040. Under --max-wait the wait is what bounds the line,
+// not this number: a statement waits its turn for that long and only then
+// is refused, so a refusal costs the client that wait and cannot be repeated
+// in a loop. With a short line the refusal came at once, after
 // the source had already been asked for the statement's plan, and clients
 // that retried without a pause cost the source one EXPLAIN per attempt and
 // halved what the router answered. This number only keeps a flood from
@@ -585,6 +597,8 @@ type routerStartup struct {
 	// PortFile is the saved setting whose password is accepted, "" when the
 	// token decides.
 	PortFile string
+	// MaxWait is how long a statement waits for a worker of the copy.
+	MaxWait time.Duration
 	// Ignored are the settings found in the environment that do not apply.
 	Ignored []string
 	// InContainer: this process runs in a container, where listening on
@@ -628,8 +642,8 @@ func routerStartupLines(u routerStartup) string {
 	if u.MemoryErr != nil {
 		fmt.Fprintf(&b, "Router: the SQL memory saved in the web interface could NOT be read, so the default is used: %v\n", u.MemoryErr)
 	}
-	rule := fmt.Sprintf("SELECTs with plan cost >= %.0f or a full scan over >= %d rows (on a MariaDB source, also joins that read that many rows in all) run on the copy, whatever the age of its snapshot. When every worker is busy such a statement waits its turn, in the order it arrived, for up to %s; past that the client gets error 1040",
-		u.Cfg.RoutePolicy.CostThreshold, u.Cfg.RoutePolicy.ScanRows, sqlsandbox.DefaultMaxWait)
+	rule := fmt.Sprintf("SELECTs with plan cost >= %.0f or a full scan over >= %d rows (on a MariaDB source, also joins that read that many rows in all) run on the copy, whatever the age of its snapshot. When every worker is busy such a statement waits its turn, in the order it arrived, %s",
+		u.Cfg.RoutePolicy.CostThreshold, u.Cfg.RoutePolicy.ScanRows, routerWaitText(u.MaxWait))
 	if u.Cfg.RouteReadOnly {
 		b.WriteString("Router: read routing is read-only (--route-read-only): reads go to each server's source MySQL with that server's forwarding account; a server that has none is not forwarded for and is answered from the copy alone, since the account DBTrail captures with is never used; " + rule + ". A statement that is not a read is refused and never sent to the source. The check reads the statement's text: what a stored function does when a SELECT calls it is up to that account's grants.\n")
 	} else {
@@ -650,6 +664,44 @@ func inContainer() bool {
 		}
 	}
 	return false
+}
+
+// routerWaitText ends the sentence of the startup lines that says what a
+// statement does while every worker of the copy is busy.
+func routerWaitText(maxWait time.Duration) string {
+	if maxWait == sqlsandbox.NoMaxWait {
+		return fmt.Sprintf("for as long as its client stays connected (no time limit; --max-wait sets one). Past %d statements waiting, one more gets error 1040", routerMaxWaiters)
+	}
+	return fmt.Sprintf("for up to %s (--max-wait); past that the client gets error 1040", maxWait)
+}
+
+// parseRouterMaxWait reads --max-wait. Empty and zero are the line with no
+// time bound. A bare number is refused rather than guessed at: 30 could be
+// seconds or minutes, and Go would read it as nanoseconds.
+func parseRouterMaxWait(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return sqlsandbox.NoMaxWait, nil
+	}
+	if n, err := strconv.ParseFloat(v, 64); err == nil {
+		if n == 0 {
+			return sqlsandbox.NoMaxWait, nil
+		}
+		return 0, fmt.Errorf("--max-wait %q has no unit: write it with one, like %ss or %sm", v, v, v)
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("--max-wait %q is not a time: write it like 30s or 2m, or leave it empty for no limit", v)
+	}
+	switch {
+	case d < 0:
+		return 0, fmt.Errorf("--max-wait %q is negative: write a time like 30s, or leave it empty for no limit", v)
+	case d == 0:
+		return sqlsandbox.NoMaxWait, nil
+	case d < time.Second:
+		return 0, fmt.Errorf("--max-wait %q is under a second: a statement refused that fast is sent again as fast, and each try asks the source for its plan. Write at least 1s, or leave it empty for no limit", v)
+	}
+	return d, nil
 }
 
 func countOfStatements(n int) string {
@@ -716,7 +768,7 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 	fmt.Fprint(os.Stderr, routerStartupLines(routerStartup{
 		Listen: st.Listen, Pool: pool, MemoryLimit: memoryLimit, MemoryFrom: memoryFrom, MemoryErr: savedErr, Cfg: cfg,
 		ServersFile: st.ServersFile, ServersExists: statErr == nil, Servers: srv.ServerCount(),
-		PortFile: routerPortFile(st), Token: st.Token != "", Ignored: routerIgnoredEnv(), InContainer: inContainer(),
+		PortFile: routerPortFile(st), Token: st.Token != "", MaxWait: st.MaxWait, Ignored: routerIgnoredEnv(), InContainer: inContainer(),
 	}))
 	port := &routerPort{srv: srv, addr: st.Listen, cfg: cfg, poll: console.DefaultFollowInterval, out: os.Stderr}
 	return port.serve(ctx)

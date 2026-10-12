@@ -221,8 +221,10 @@ const RouteReasonResultOverCap RouteReason = "result_over_row_cap"
 // Reserve): it is MySQL's only when the line was already full as it arrived
 // (copy_queue_full: as many statements waiting as the process lets wait,
 // sqlsandbox.DefaultMaxWaiters inside watch and thousands on the router, and
-// it did not wait at all), or when it waited the whole sqlsandbox.DefaultMaxWait
-// and no slot came free (copy_wait_timeout). Neither is a fault of the copy,
+// it did not wait at all), or when it waited the whole wait its process sets
+// and no slot came free (copy_wait_timeout: sqlsandbox.DefaultMaxWait inside
+// watch; on the router only under --max-wait, since a statement there waits
+// with no time bound by default). Neither is a fault of the copy,
 // which is why they are not counted under RouteReasonCopyRefused: a copy that
 // is merely asked for more than it serves must not read as a broken one.
 const (

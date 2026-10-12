@@ -309,12 +309,14 @@ whatever happened next:
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `bintrail_sql_slot_wait_seconds{outcome}` | histogram | Seconds a statement waited for a slot, by how the wait ended: `slot` (it got one; a statement that found a slot free is counted here with a wait under a millisecond, so the count is every statement served and the lowest bucket is the share that did not wait), `queue_full` (the line was full when it arrived, so it did not wait at all: the line holds 16 statements in the capture process and 4,096 in the router), `timeout` (it waited the whole 30 seconds and no slot came free), `cancelled` (its client disconnected, or the connection's own time limit ran out, while it waited). Buckets from 1 ms to about 131 s. No server label: the slots belong to the process that exports the metric |
+| `bintrail_sql_slot_wait_seconds{outcome}` | histogram | Seconds a statement waited for a slot, by how the wait ended: `slot` (it got one; a statement that found a slot free is counted here with a wait under a millisecond, so the count is every statement served and the lowest bucket is the share that did not wait), `queue_full` (the line was full when it arrived, so it did not wait at all: the line holds 16 statements in the capture process and 4,096 in the router), `timeout` (it waited the whole wait and no slot came free: 30 seconds in the capture process; in the router only when it was started with `--max-wait`, since a statement there waits with no time limit by default), `cancelled` (its client disconnected, or the connection's own time limit ran out, while it waited). Buckets from 1 ms to about 131 s. No server label: the slots belong to the process that exports the metric |
 | `bintrail_sql_slot_waiting` | gauge | Statements asking for a slot right now and not yet given one or turned away, in the process that exports it. A statement is counted from the moment it asks, so a scrape can catch one or two more than the line holds, about to be turned away |
 
 What happens to a statement that does not get a slot depends on where it
-came from. On the SQL card it is refused (HTTP 429). On the port without
-read routing the client gets MySQL error 1203. On the port with read
+came from. On the SQL card it is refused (HTTP 429). On the port a statement
+waits for as long as its client stays connected, so only a full line or a
+time limit the router was given (`--max-wait`) turns one away: without
+read routing the client gets MySQL error 1203, and with read
 routing the client gets MySQL error 1040, which drivers and pools retry,
 and the decision is counted as `copy_queue_full` or
 `copy_wait_timeout` under `route="refused"` (next section). The statement is

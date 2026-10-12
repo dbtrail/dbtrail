@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **A statement on the MySQL port waits for its turn on the copy for as
+  long as its client stays connected.** It used to wait 30 seconds and then
+  get an error (1040 with read routing on, 1203 without), so a test with
+  more clients than the copy runs at once (64 or 256 connections sending
+  heavy reads) ended in errors. Now those clients are answered, more slowly,
+  the way a busy MySQL answers them. A client that disconnects leaves the
+  line at once. To get the old behaviour, give the router a time limit:
+  `--max-wait 30s`, `BINTRAIL_ROUTER_MAX_WAIT`, or `ROUTER_MAX_WAIT` in the
+  Docker stack's `.env` (take the current `docker-compose.yml` for that last
+  one). Up to 4,096 statements wait at once; one more is still refused. The
+  SQL card of the web interface is unchanged.
 
 ## [0.104.0] - 2026-10-11
 ### Fixed

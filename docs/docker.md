@@ -775,6 +775,7 @@ surface, use the demo image ([demo.md](./demo.md)).
 | `METRICS_ADDR` | compose (optional) | Container-side bind for the watch daemon's Prometheus `/metrics` (default `:9090`, published on the host loopback as `127.0.0.1:9090`; set empty to disable) |
 | `ROUTER_MEMORY` | compose `router` service (optional) | Memory ceiling of the router (e.g. `8g`). Unset = none: the router takes half of the machine |
 | `ROUTER_CPUS` | compose `router` service (optional) | CPU ceiling of the router (e.g. `4`). Unset = none |
+| `ROUTER_MAX_WAIT` | compose `router` service (optional) | How long a statement waits for its turn on the copy when every worker is busy (e.g. `30s`); past it the client gets an error. Unset = no limit: it waits for as long as its client stays connected |
 | `ROUTER_READ_ONLY` | compose `router` service (optional) | The router refuses every statement that is not a read, and never sends it to the source (default `1`). `0` forwards writes too |
 | `ROUTER_METRICS_ADDR` | compose `router` service (optional) | Container-side bind for the router's Prometheus `/metrics` and its `/status` document (default `:9091`, reachable as `router:9091` on the compose network and not published on the host; set empty to disable) |
 | `ROUTER_URL` | compose (optional) | Where the web interface reads the router's numbers to show them on its MCP Server page (default `http://router:9091`, the `router` service; set empty to show nothing about a router) |
