@@ -94,7 +94,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL port is saved from the API, alone or together with `enabled`, and the
   router follows it. `GET /api/flashback` says it as `routing_on`, and carries
   a `notice` when the port is on under a `docker-compose.yml` that does not
-  start the router on it. The web interface gets its switch next.
+  start the router on it.
+- **One panel for the MySQL port in the web interface** (Settings, MCP
+  Server, Connect a SQL client). It has the switch for read routing, shows
+  who answered for the server picked (by MySQL, by the copy) as two figures
+  over a bar, and folds the router's numbers under it; the separate "The
+  router" panel is gone. The address is no longer typed: the command to copy
+  carries the address the router says it listens on, and says when that could
+  not be confirmed. The memory panel says when the router runs with another
+  memory than the one saved, which it takes at its next start.
 - **The Snapshots page says whether SQL can read a server whose snapshots are
   only on S3** (#2302). Above the list: which snapshot the local mirror
   holds and when the bucket was last checked, that the bucket has a newer

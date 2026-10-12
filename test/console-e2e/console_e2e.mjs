@@ -5734,21 +5734,24 @@ try {
   (cn.once && cn.addrCopy && cn.downloadLinks === 0)
     ? ok("connect: one-time warning visible, address one click to copy, no 404able download link")
     : bad("connect: one-time warning visible, address one click to copy, no 404able download link", JSON.stringify({ once: cn.once, addrCopy: cn.addrCopy, downloadLinks: cn.downloadLinks }));
-  // The SQL client panel (#1446). run.sh opens the daemon's time-travel port,
-  // so the ENABLED shape is what gets photographed: a mysql line carrying the
-  // port and the selected server as its user (never a placeholder), with
-  // the console token nowhere on the page. The panel is NOT a .cn-card, so
+  // The SQL client panel (#1446). run.sh saves this daemon's MySQL port as
+  // on, so the ENABLED shape is what gets photographed: a mysql line carrying
+  // the port and the selected server as its user (never a placeholder), with
+  // the console token nowhere on the page. This daemon is told of no router,
+  // so the port is the usual one, 3309, and the panel says it is not a
+  // confirmed one (the scene that switches the port runs against a real
+  // router and sees the router's own port). The panel is NOT a .cn-card, so
   // the three-badge assertion above stays at three.
-  const fbPort = process.env.E2E_FLASHBACK_PORT || "13308";
+  const fbPort = "3309";
   const sq = await page.evaluate(() => {
     const p = document.querySelector(".view .cn-sql:not(.cn-ice)");
     const code = p ? p.querySelector("code.cn-url") : null;
     return { present: !!p, line: code ? code.textContent : "", text: p ? p.innerText : "" };
   });
   const sqLineRE = new RegExp("^mysql -h 127\\.0\\.0\\.1 -P " + fbPort + " -u \\S+ -p$");
-  (sq.present && sqLineRE.test(sq.line) && !sq.line.includes("<server") && !(TOKEN && sq.text.includes(TOKEN)))
-    ? ok("connect: SQL client panel shows the time-travel port with a mysql line for the selected server")
-    : bad("connect: SQL client panel shows the time-travel port with a mysql line for the selected server", JSON.stringify({ present: sq.present, line: sq.line }));
+  (sq.present && sqLineRE.test(sq.line) && !sq.line.includes("<server") && /not a confirmed one/.test(sq.text) && !(TOKEN && sq.text.includes(TOKEN)))
+    ? ok("connect: SQL client panel shows a mysql line for the selected server, and says the port is not confirmed with no router to ask")
+    : bad("connect: SQL client panel shows a mysql line for the selected server, and says the port is not confirmed with no router to ask", JSON.stringify({ present: sq.present, line: sq.line, text: sq.text.slice(0, 300) }));
 
   // ── Scenario 17f — the Events skeleton is visible (#1397) ──
   //

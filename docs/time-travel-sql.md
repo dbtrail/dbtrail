@@ -81,11 +81,16 @@ user DBTrail runs as.
 
 **The address.** The router listens on `127.0.0.1:3309` unless it is started
 with another address (`--listen`, or `BINTRAIL_ROUTER_LISTEN`). The panel
-also has an address field: it is the address the panel shows and writes into
-its ready-to-copy `mysql` line. It does not move the router, so keep the two
-the same. The Docker Compose stack publishes the port on the host loopback
-as 3309; keep the address `0.0.0.0:3309` the panel offers there and connect
-from that machine, or through a tunnel from another one.
+does not ask for an address: its ready-to-copy `mysql` line carries the one
+the router says it listens on. When the router cannot be asked, the line
+carries the usual port, 3309, and the panel says it is not a confirmed one.
+The Docker Compose stack publishes the port on the host loopback as 3309:
+connect from that machine, or through a tunnel from another one.
+
+**Read routing.** The same panel has its switch (**Turn routing on**, **Turn
+routing off**), and shows who answered for the server picked in the sidebar:
+how many statements MySQL answered and how many the copy did. See
+[Read routing](#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental).
 
 **Routing is by username.** Connect as the target
 server: its registry **ID** (robust; the `X-Bintrail-Server` value shown in the
@@ -380,9 +385,11 @@ What to know before relying on it:
 Read routing is off until it is turned on. Off, the copy answers every
 statement on the port, as described above, and nothing is sent to MySQL.
 
-It is a saved setting: `routing: true` in `console-mysql-port.yaml`, the file
-beside the servers file that also holds the port's switch and password. The
-router reads it and applies a change within a few seconds, closing the
+Turn it on in the web interface: **Settings**, **MCP Server**, **Connect a
+SQL client**, **Turn routing on** (or `PUT /api/flashback` with
+`{"routing": true}`). It is a saved setting, `routing: true` in
+`console-mysql-port.yaml`, the file beside the servers file that also holds
+the port's switch and password. The router reads it and applies a change within a few seconds, closing the
 connections that were open
 ([The router](#the-router-the-process-that-serves-the-port)). No flag turns
 it on: `--route-max-copy-age` did in earlier versions and now only prints a

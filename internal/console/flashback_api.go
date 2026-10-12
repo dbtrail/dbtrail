@@ -109,10 +109,6 @@ type routingServerDTO struct {
 	// not seen on this server's connections. Cleared when a connection is
 	// told.
 	SessionUntracked string `json:"session_untracked,omitempty"`
-	// Answers is what each side ("copy", "mysql") finished: how many
-	// statements, how many failed, how long they took. Absent until a
-	// statement finishes.
-	Answers map[string]RouteAnswers `json:"answers,omitempty"`
 }
 
 func (s *Server) routingStatus() *routingStatusDTO {
