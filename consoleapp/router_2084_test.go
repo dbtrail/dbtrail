@@ -59,7 +59,9 @@ func TestRouterSettings_flagsOverEnvironmentOverDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	def := readrouter.DefaultPolicy()
-	if st.Listen != "127.0.0.1:3310" || st.MetricsAddr != "" || st.Token != "" || st.ReadOnly || st.SQLMemory != "" ||
+	// Read-only unless told otherwise: the port is one people and
+	// applications are handed, and a write let through is asked for.
+	if st.Listen != "127.0.0.1:3309" || st.MetricsAddr != "" || st.Token != "" || !st.ReadOnly || st.SQLMemory != "" ||
 		st.Policy != def || st.SQLPortMaxRows != console.DefaultSQLPortMaxRows || st.ServersFile != console.DefaultRegistryPath() {
 		t.Errorf("defaults: %+v", st)
 	}
@@ -617,7 +619,7 @@ func TestRouterPort_anAddressTakenAtStartIsAnError(t *testing.T) {
 // files it serves from, the pool it worked out, and how reads are routed, in
 // whole sentences. The cases are the ones that are silent otherwise.
 func TestRouterStartupLines_sayWhatWillHappen(t *testing.T) {
-	base := routerStartup{Listen: "127.0.0.1:3310", Pool: console.SQLPool{Workers: 4, Threads: 2, Why: "8 cores allow 4"}, MemoryLimit: "2048MiB",
+	base := routerStartup{Listen: "127.0.0.1:3309", Pool: console.SQLPool{Workers: 4, Threads: 2, Why: "8 cores allow 4"}, MemoryLimit: "2048MiB",
 		Cfg: routerFlashbackConfig(routerSettings{Policy: readrouter.DefaultPolicy()}), ServersFile: "/var/lib/bintrail/console-servers.yaml", ServersExists: true, Servers: 3}
 	for _, tc := range []struct {
 		name    string
@@ -626,7 +628,7 @@ func TestRouterStartupLines_sayWhatWillHappen(t *testing.T) {
 		wantNot []string
 	}{
 		{"as started by default", func(u *routerStartup) { u.PortFile = "/var/lib/bintrail/console-mysql-port.yaml" },
-			[]string{"127.0.0.1:3310", "open only while the MySQL port is turned on in the web interface (read from /var/lib/bintrail/console-mysql-port.yaml)", "The password is the one created there.", "routed only when that file says so", "3 servers from /var/lib/bintrail/console-servers.yaml", "4 statements on the copy at once", "2 threads", "8 cores allow 4",
+			[]string{"127.0.0.1:3309", "open only while the MySQL port is turned on in the web interface (read from /var/lib/bintrail/console-mysql-port.yaml)", "The password is the one created there.", "routed only when that file says so", "3 servers from /var/lib/bintrail/console-servers.yaml", "4 statements on the copy at once", "2 threads", "8 cores allow 4",
 				"whatever the age of its snapshot", "waits its turn, in the order it arrived, for up to 30s", "error 1040", "read routing is read-write"},
 			[]string{"every network interface", "does not exist", "is not applied", "read routing is read-only", "access token"}},
 		{"a pool of one is one statement", func(u *routerStartup) { u.Pool.Workers = 1 },
@@ -638,9 +640,9 @@ func TestRouterStartupLines_sayWhatWillHappen(t *testing.T) {
 			[]string{"does not exist yet", "no server can be reached", "--servers-file"},
 			[]string{"0 servers"}},
 		{"one server", func(u *routerStartup) { u.Servers = 1 }, []string{"1 server from"}, []string{"1 servers"}},
-		{"every interface", func(u *routerStartup) { u.Listen = ":3310" }, []string{"every network interface", "Bind 127.0.0.1"}, nil},
-		{"every interface, spelled out", func(u *routerStartup) { u.Listen = "0.0.0.0:3310" }, []string{"every network interface of this machine"}, nil},
-		{"every interface, in a container", func(u *routerStartup) { u.Listen, u.InContainer = "0.0.0.0:3310", true },
+		{"every interface", func(u *routerStartup) { u.Listen = ":3309" }, []string{"every network interface", "Bind 127.0.0.1"}, nil},
+		{"every interface, spelled out", func(u *routerStartup) { u.Listen = "0.0.0.0:3309" }, []string{"every network interface of this machine"}, nil},
+		{"every interface, in a container", func(u *routerStartup) { u.Listen, u.InContainer = "0.0.0.0:3309", true },
 			[]string{"every network interface of this container", "what the container publishes"}, []string{"of this machine", "Bind 127.0.0.1"}},
 		{"read-only", func(u *routerStartup) { u.Cfg.RouteReadOnly = true }, []string{"read routing is read-only (--route-read-only)", "refused and never sent to the source"}, []string{"read routing is read-write"}},
 		{"settings of the capture process that do not apply", func(u *routerStartup) { u.Ignored = []string{"X=1 is not applied: because"} },
@@ -684,8 +686,9 @@ func TestRouterIgnoredEnv_namesWhatDoesNotApply(t *testing.T) {
 	}
 	t.Setenv("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE", "15m")
 	t.Setenv("BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT", "8")
+	t.Setenv("BINTRAIL_CONSOLE_FLASHBACK_LISTEN", "0.0.0.0:3308")
 	got := strings.Join(routerIgnoredEnv(), "\n")
-	for _, want := range []string{"BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE=15m is not applied", "no maximum copy age", "BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT=8 is not applied", "from its cores and memory"} {
+	for _, want := range []string{"BINTRAIL_CONSOLE_FLASHBACK_LISTEN=0.0.0.0:3308 is not applied", "set BINTRAIL_ROUTER_LISTEN=0.0.0.0:3308", "BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE=15m is not applied", "no maximum copy age", "BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT=8 is not applied", "from its cores and memory"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("does not say %q:\n%s", want, got)
 		}

@@ -19,7 +19,7 @@
 #   MYSQL_CONTAINER     docker container running test MySQL, default bintrail-test-mysql
 #   CONSOLE_BIN         path to a prebuilt bintrail-console (else it is built)
 #   PW_CHANNEL          playwright browser channel (e.g. "chrome"); default bundled chromium
-#   E2E_FLASHBACK_PORT  port for the daemon's embedded time-travel SQL port, default 13308
+#   E2E_FLASHBACK_PORT  address the main daemon's MySQL port is saved with, default 13308
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,8 +28,9 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 BASE_DSN="${BINTRAIL_TEST_DSN:-root:testroot@tcp(127.0.0.1:13306)}"
 MYSQL_CONTAINER="${MYSQL_CONTAINER:-bintrail-test-mysql}"
 PORT="${E2E_PORT:-8090}"
-# The daemon's embedded time-travel SQL port (#996), opened so scenario 17g
-# photographs the Connect page's SQL client panel in its enabled shape (#1446).
+# The MySQL port (#996) is saved as on at this address on the main daemon, so
+# scenario 17g photographs the Connect page's SQL client panel in its enabled
+# shape (#1446). Nothing connects to it there, so no router is started for it.
 FLASHBACK_PORT="${E2E_FLASHBACK_PORT:-13308}"
 TOKEN="${E2E_TOKEN:-e2e-console-token}"
 IDX_DB="bintrail_e2e_idx"
@@ -51,10 +52,12 @@ mysql_exec() { docker exec -i "$MYSQL_CONTAINER" mysql -uroot -ptestroot "$@" 2>
 
 DAEMON_PID=""
 DAEMON2_PID=""
+ROUTER2_PID=""
 STATE_DIR2=""
 cleanup() {
   [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null || true
   [ -n "$DAEMON2_PID" ] && kill "$DAEMON2_PID" 2>/dev/null || true
+  [ -n "$ROUTER2_PID" ] && kill "$ROUTER2_PID" 2>/dev/null || true
   [ -n "$STATE_DIR2" ] && rm -rf "$STATE_DIR2" 2>/dev/null || true
   mysql_exec -e "DROP DATABASE IF EXISTS $IDX_DB;" >/dev/null 2>&1 || true
   mysql_exec -e "DROP DATABASE IF EXISTS $ARC_DB;" >/dev/null 2>&1 || true
@@ -236,7 +239,6 @@ BINTRAIL_CONSOLE_TOKEN="$TOKEN" BINTRAIL_CONSOLE_BASELINE_TRIGGER=1 BINTRAIL_CON
   --console-auth-file "$STATE_DIR/console-auth.yaml" \
   --console-mcp-token-file "$STATE_DIR/console-mcp-token.yaml" \
   --baseline-dir "$BASELINE_ROOT" \
-  --flashback-listen "127.0.0.1:$FLASHBACK_PORT" \
   --console-allow-setup >"$E2E_ARTIFACT_DIR/console-e2e-daemon.log" 2>&1 &
 DAEMON_PID=$!
 
@@ -249,11 +251,19 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
-# A second daemon with NO --flashback-listen, for the scene that turns the
-# MySQL port on from the web interface (#2101): the main one is given the
-# port's address at startup, where the panel shows it as fixed. It has its own
-# state files and no servers; it shares the index database, which a daemon
-# with nothing to supervise only reads.
+# The main daemon's MySQL port, saved as on (what the Connect panel's Turn on
+# does), so the panel is photographed in its enabled shape.
+curl -fsS -X PUT \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"enabled\":true,\"listen\":\"127.0.0.1:$FLASHBACK_PORT\"}" \
+  "http://127.0.0.1:$PORT/api/flashback" >/dev/null
+
+# A second daemon whose MySQL port was never turned on, for the scene that
+# turns it on from the web interface (#2101), and the router that serves that
+# port (#2341): the daemon only saves the setting, and the router, which
+# follows the daemon's files, opens and closes the port. The daemon has its
+# own state files and no servers; it shares the index database, which a
+# daemon with nothing to supervise only reads.
 PORT2="${E2E_PORT2:-8092}"
 SQLPORT="${E2E_SQLPORT:-13319}"
 STATE_DIR2="$(mktemp -d -t console-e2e-state2.XXXXXX)"
@@ -274,6 +284,18 @@ for i in $(seq 1 30); do
   fi
   sleep 1
 done
+
+echo "==> launch the router that serves the second daemon's MySQL port on :$SQLPORT"
+"$CONSOLE_BIN" router \
+  --listen "127.0.0.1:$SQLPORT" \
+  --servers-file "$STATE_DIR2/console-servers.yaml" \
+  --auth-file "$STATE_DIR2/console-auth.yaml" \
+  --mcp-token-file "$STATE_DIR2/console-mcp-token.yaml" >"$E2E_ARTIFACT_DIR/console-e2e-router2.log" 2>&1 &
+ROUTER2_PID=$!
+sleep 2
+if ! kill -0 "$ROUTER2_PID" 2>/dev/null; then
+  echo "router exited early; log:" >&2; cat "$E2E_ARTIFACT_DIR/console-e2e-router2.log" >&2; exit 1
+fi
 
 echo "==> seed a monitored source (per-source index left unprovisioned)"
 curl -fsS -X POST \

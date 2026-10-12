@@ -85,14 +85,15 @@ func TestComposeRouter_agreesWithTheCaptureService(t *testing.T) {
 	if captureTarget == "" || len(router.Volumes) != 1 || router.Volumes[0] != composeVolume+":"+captureTarget+":ro" {
 		t.Errorf("the router's volumes are %v, want only %s:%s:ro", router.Volumes, composeVolume, captureTarget)
 	}
-	// It listens where the file publishes, on the host's loopback, and not
-	// on the capture service's port.
+	// It listens where the file publishes, on the host's loopback: the MySQL
+	// port, 3309, which only this service serves (#2341). Two services
+	// cannot publish one host port, and the capture service opens none.
 	listen := fmt.Sprint(router.Environment["BINTRAIL_ROUTER_LISTEN"])
-	if listen != "0.0.0.0:3310" || len(router.Ports) != 1 || router.Ports[0] != "127.0.0.1:3310:3310" {
-		t.Errorf("listens on %s and publishes %v, want 0.0.0.0:3310 published as 127.0.0.1:3310:3310", listen, router.Ports)
+	if listen != "0.0.0.0:3309" || len(router.Ports) != 1 || router.Ports[0] != "127.0.0.1:3309:3309" {
+		t.Errorf("listens on %s and publishes %v, want 0.0.0.0:3309 published as 127.0.0.1:3309:3309", listen, router.Ports)
 	}
 	for _, p := range capture.Ports {
-		if strings.Contains(p, "3310") {
+		if strings.Contains(p, "3309") {
 			t.Errorf("the capture service publishes %s", p)
 		}
 	}

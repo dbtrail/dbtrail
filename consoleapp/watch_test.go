@@ -30,20 +30,21 @@ func assertStr(t *testing.T, name, got, want string) {
 }
 
 func TestUpConsoleConfig(t *testing.T) {
-	cfg, err := upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/binlog_index", consoleOpts{Listen: "127.0.0.1:8090", Token: "tok", BaselineDir: "/baselines", BaselineS3: "s3://bucket/prefix/", AuthFile: "/auth.yaml", TLSCert: "/c.pem", TLSKey: "/k.pem", AllowedHosts: []string{"console.internal"}, FlashbackListen: "127.0.0.1:3308"}, nil)
+	cfg, err := upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/binlog_index", consoleOpts{Listen: "127.0.0.1:8090", Token: "tok", BaselineDir: "/baselines", BaselineS3: "s3://bucket/prefix/", AuthFile: "/auth.yaml", TLSCert: "/c.pem", TLSKey: "/k.pem", AllowedHosts: []string{"console.internal"}}, nil)
 	if err != nil {
 		t.Fatalf("upConsoleConfig: %v", err)
 	}
 	// The time-travel port's address reaches the console verbatim (#1446), so
 	// GET /api/flashback reports the bind the daemon is serving; and the
 	// resolved flag global is what upConsoleOpts snapshots into it.
-	if cfg.FlashbackListen != "127.0.0.1:3308" {
-		t.Errorf("FlashbackListen=%q, want verbatim pass-through", cfg.FlashbackListen)
-	}
+	// The MySQL port is served by the router (#2341): the capture process
+	// never tells its console that the port's address was set at startup,
+	// whatever --flashback-listen says, so the web interface always manages
+	// the saved setting.
 	prevFB := upConsoleFlashbackListen
 	upConsoleFlashbackListen = "[::]:13308"
-	if got := upConsoleOpts().FlashbackListen; got != "[::]:13308" {
-		t.Errorf("upConsoleOpts().FlashbackListen=%q, want the --flashback-listen value", got)
+	if got, err := upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/binlog_index", upConsoleOpts(), nil); err != nil || got.FlashbackListen != "" {
+		t.Errorf("with --flashback-listen, the console's startup address is %q (%v), want none", got.FlashbackListen, err)
 	}
 	upConsoleFlashbackListen = prevFB
 	if cfg.DBName != "binlog_index" {

@@ -69,18 +69,17 @@ accepts `--ssl-mode` / `--ssl-ca` / `--ssl-cert` / `--ssl-key` (env
 The default stays `--ssl-mode preferred` (opportunistic, no certificate
 verification).
 
-> **Scope of `--ssl-mode` under `watch`.** The flag encrypts `watch`'s embedded
-> **stream** connections — the source replication and the index *write*. It does
+> **Scope of `--ssl-mode` under `watch`.** The flag encrypts `watch`'s own
+> **stream** connections: the source replication and the index *write*. It does
 > **not** currently cover the web interface's own index *reads* (the connections the
-> multi-server manager opens to serve the web UI) or the index reads behind the
-> embedded flashback port (`--flashback-listen`). Encrypt those index
+> multi-server manager opens to serve the web UI). Encrypt those index
 > connections by adding a `tls=` parameter to their DSN (`...?tls=true`, or
-> `?tls=skip-verify` for self-signed dev certs) — the same knob the offline read
-> commands use. (The flashback port's *inbound* MySQL-protocol listener — the
-> client→port leg — has no TLS option in this release; `tls=` only covers its
-> backend index reads.) If your index MySQL is reached over loopback or a
+> `?tls=skip-verify` for self-signed dev certs), the same knob the offline read
+> commands use. If your index MySQL is reached over loopback or a
 > private network this is moot; over an untrusted network, set `tls=` on the
-> index DSN in addition to `--ssl-mode`.
+> index DSN in addition to `--ssl-mode`. The MySQL port is served by another
+> process, the router: see
+> [time-travel-sql.md](time-travel-sql.md#the-router-the-process-that-serves-the-port).
 
 Open that URL in a browser. A left **sidebar** groups the views (Time-travel
 appears only when a baseline is configured), with a **server switcher** at the
@@ -1320,15 +1319,14 @@ The limits, so a query can never hurt capture:
 - 1,000 rows come back. The page says when there were more. **Download CSV**
   saves the same rows as a file.
 - One query at a time per person, two at a time for the whole daemon by
-  default (`watch --sql-max-in-flight`, see below; shared
-  with the MySQL-protocol port, where the unit is one per server). One more
+  default (`watch --sql-max-in-flight`, see below; the MySQL port has
+  workers of its own, in the router). One more
   statement waits for a free slot, up to 30 seconds, and runs as soon as one
   is free, so a burst turns slow instead of failing. One identity still runs
   one statement at a time: a dashboard's panels come one after another, and
   a panel that would wait more than 30 seconds is still refused. Past 30 seconds, or with 16 statements
   already waiting, it is refused as busy (HTTP 429). The line of 16 is one
-  for the whole daemon: statements from the MySQL-protocol port wait in it
-  too, and `bintrail_sql_slot_wait_seconds` and `bintrail_sql_slot_waiting`
+  for the whole daemon, and `bintrail_sql_slot_wait_seconds` and `bintrail_sql_slot_waiting`
   ([Observability](observability.md)) show the wait. It never runs beside the
   others: the process that serves it is the one capturing changes. Waiting
   costs nothing, because the slot is taken before anything is read, and a
@@ -1452,9 +1450,9 @@ The API behind it is `POST /api/sql` with `{"sql": "..."}` (JSON result, or CSV
 with `?format=csv`), and `GET /api/sql` for the list of tables, the copy's age
 and the limits. Both need `sql:execute`.
 
-The same queries run from a `mysql` client, with the same caps, over the
-embedded time-travel port (`watch --flashback-listen`): see
-[Ordinary SQL on the copy](time-travel-sql.md#ordinary-sql-on-the-copy-embedded-port-only).
+The same queries run from a `mysql` client over the MySQL port (3309,
+served by the router): see
+[Ordinary SQL on the copy](time-travel-sql.md#ordinary-sql-on-the-copy).
 
 An earlier SQL page was removed in 0.75.0. It ran queries inside the process
 that captures, and it defined the `events` view on every page load, which took
@@ -1554,28 +1552,29 @@ one release and warns that it no longer does anything. Remove it.
   Off by default for a bare `watch` invocation; the bundled compose stack sets
   this on by default (see [docker.md](docker.md) — `VERIFY_TRIGGER=0` in
   `.env` opts out there).
-- `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` (`watch` only) — same as
-  `--sql-port-max-rows`: the most rows one statement returns on the
-  time-travel port (default `10000`; below `1` refuses to start). A result
+- `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` (`router`): same as `router
+  --sql-port-max-rows`: the most rows one statement returns on the
+  MySQL port (default `10000`). A result
   with more is refused with error 1104, not cut. This page's SQL card shows
   1,000 rows whatever it is. A result is also refused past 64 MB, and is
-  held in the daemon while it is sent: at most 256 MB of results over all
+  held in the router while it is sent: at most 256 MB of results over all
   the port's connections, past which a statement is refused with error
   1203 until an answer has been written to its client (one that reads
   nothing of it for 60 seconds is disconnected). On the compose stack the value goes in `.env` as
-  `SQL_PORT_MAX_ROWS`.
-- `BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT` (`watch` only) — same as
-  `--sql-max-in-flight`: how many SQL-on-the-copy statements run at once, the
-  SQL card and the time-travel port together (default `2`; below `1` refuses
+  `SQL_PORT_MAX_ROWS`. Given to `watch` as a flag, it no longer applies and
+  `watch` says so at startup.
+- `BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT` (`watch` only): same as
+  `--sql-max-in-flight`: how many SQL-on-the-copy statements run at once on
+  the SQL card (default `2`; below `1` refuses
   to start). Each one is its own process with 2 threads and up to
   `--sql-memory` (2 GB by default), on
-  the host that captures, and every result is held in the daemon while it is
-  sent, so the daemon's own memory grows with it; on the compose stack the
+  the host that captures; on the compose stack the
   workers share the `watch` container, which sets no limit, and the value goes
   in `.env` as `SQL_MAX_IN_FLIGHT`. The default is
   right for a 4-core host: measured there, two heavy statements kept capture
   current (#2026). The daemon warns at startup when the statements could take
-  more threads than the host has cores.
+  more threads than the host has cores. It does not apply to the MySQL port:
+  the router works out its own number from its cores and memory.
 - `BINTRAIL_CONSOLE_SQL_MEMORY` (`watch` and `serve`) — same as
   `--sql-memory`: the memory each SQL-on-the-copy statement may use, e.g.
   `4GB` (default 2GB; under 512MB, or not a size, refuses to start). The
@@ -1587,15 +1586,17 @@ one release and warns that it no longer does anything. Remove it.
   read-only); unset, the saved value applies, else 2GB. The same setting is
   `GET`/`PUT /api/sql-settings` (`{"memory":"4GB"}`, `""` for the default;
   `settings:read` / `settings:write`).
-- `BINTRAIL_ROUTER_LISTEN` (`router` only) — same as `router --listen`
-  (default `127.0.0.1:3310`): the address of the MySQL-protocol port when it
-  runs as a service of its own. See [The router](time-travel-sql.md#the-router-the-same-port-as-a-service-of-its-own-experimental).
-- `BINTRAIL_ROUTER_METRICS_ADDR` (`router` only) — same as `router
-  --metrics-addr`: where the router serves its Prometheus metrics. Its own
+- `BINTRAIL_ROUTER_LISTEN` (`router` only): same as `router --listen`
+  (default `127.0.0.1:3309`): the address of the MySQL port. The router is
+  the only process that serves it. See [The router](time-travel-sql.md#the-router-the-process-that-serves-the-port).
+- `BINTRAIL_ROUTER_METRICS_ADDR` (`router` only): same as `router
+  --metrics-addr`: where the router serves its Prometheus metrics and its
+  `/status` document. Its own
   address: `BINTRAIL_METRICS_ADDR` is the capture process's, and two processes
-  cannot serve one address.
-- `BINTRAIL_CONSOLE_ROUTER_URL` (`watch` only) — same as `--router-url`: the
-  address a router serves its metrics on (e.g. `http://127.0.0.1:9091`).
+  cannot serve one address. The compose stack sets `:9091` and the packages
+  `127.0.0.1:9091`.
+- `BINTRAIL_CONSOLE_ROUTER_URL` (`watch` only): same as `--router-url`: the
+  address the router serves its metrics on (e.g. `http://127.0.0.1:9091`).
   Given it, the MCP Server page shows the router's numbers for the server
   picked in the sidebar: who answered, the age of the copy it reads, its
   workers. This process asks the router (`GET /status`, at most two seconds);
@@ -1604,29 +1605,27 @@ one release and warns that it no longer does anything. Remove it.
   that is not an `http://` or `https://` address, or that carries a user or
   password, is warned about at startup and said on that panel in place of
   the numbers; it never stops this process from starting. Compose default `http://router:9091`
-  (`ROUTER_URL`). `GET /api/router` (`settings:read`) is what the page reads.
-- `BINTRAIL_CONSOLE_FLASHBACK_LISTEN` (`watch` only) — same as `--flashback-listen`
-  (e.g. `127.0.0.1:3308`): serve an embedded MySQL-protocol time-travel port for
-  every monitored server, routed by the connection username. Off by default;
-  requires an access token. See [Time-travel over the MySQL protocol](#time-travel-over-the-mysql-protocol-flashback-port).
-- `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE` (`watch` only) — same as
-  `--route-max-copy-age` (e.g. `15m`): experimental read routing on the
-  flashback port. Statements are forwarded to each server's source MySQL;
-  SELECTs whose plan is expensive run on the copy while its snapshot is at
-  most this old (past that age, the ones whose tables have not changed since
-  their snapshot still do), and fall back to MySQL when the copy rejects
-  them. Off by
-  default (`0`). `BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD` and
-  `BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS` set the plan thresholds
-  (`--route-cost-threshold`, default 10000; `--route-scan-rows`, default
-  100000). `BINTRAIL_CONSOLE_ROUTE_READ_ONLY` (`--route-read-only`, off by
-  default, needs routing on) makes the routed port read-only: a statement
-  that is not a read is refused with an error that names the flag and is
-  never sent to the source. The **Connect a SQL client** panel (Settings → MCP Server) says
-  whether routing is on, whether the port is read-only or read-write and, per server, how many statements MySQL and the
-  copy each answered since start; `bintrail_read_routing_decisions_total`
-  under `--metrics-addr` carries the same counts by reason. See
+  (`ROUTER_URL`); the packages set `http://127.0.0.1:9091`. `GET /api/router` (`settings:read`) is what the page reads.
+- `BINTRAIL_CONSOLE_FLASHBACK_LISTEN` (`watch` only): same as `--flashback-listen`.
+  It no longer opens a port: the MySQL port is served by the router. If it is
+  still set, it does one thing, once: a port with no saved setting yet is
+  saved as on, so an installation that used it keeps its port. `watch` prints
+  a warning at startup that asks you to remove it. See
+  [Upgrading](time-travel-sql.md#upgrading-from-a-version-with-the-port-inside-watch).
+- `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE` (`watch` only): same as
+  `--route-max-copy-age`. It no longer turns read routing on and only prints
+  a warning at startup. Read routing is a saved setting, off by default, and
+  there is no maximum copy age any more. See
   [time-travel-sql.md](time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental).
+- `BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD`, `BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS`
+  and `BINTRAIL_CONSOLE_ROUTE_READ_ONLY` (`router`): the router's
+  `--route-cost-threshold` (default 10000), `--route-scan-rows` (default
+  100000) and `--route-read-only` (on by default; `0` forwards writes). With
+  read-only on, a statement
+  that is not a read is refused with an error that names the flag and is
+  never sent to the source. The same flags given to `watch` no longer apply,
+  and `watch` says so at startup. `bintrail_read_routing_decisions_total`
+  under the router's `--metrics-addr` carries the routing counts by reason.
 
 There is deliberately **no** environment variable for the password itself —
 env vars leak through `docker inspect`, `ps e`, and `/proc`; the password is
@@ -2070,7 +2069,7 @@ generates, replaces (**New token**), and deletes the managed MCP token; the plai
 displayed exactly once, at generation, and never stored. For the
 start-to-finish walkthrough (bundle install included), see
 [Connect an AI assistant](connect-ai.md). Below the three steps, the
-**Connect a SQL client** panel does the same for the embedded time-travel SQL
+**Connect a SQL client** panel does the same for the MySQL
 port: see [Time-travel over the MySQL protocol](#time-travel-over-the-mysql-protocol-flashback-port).
 After it comes the **Download a DuckDB schema** card, when the server's
 Parquet can be described (the `views` capability), with or without the
@@ -2140,9 +2139,9 @@ All endpoints return JSON except `GET /api/views.sql`, which serves a SQL file. 
 | `GET /api/baselines` | Read-only listing of the **selected server's** baseline snapshots, grouped per snapshot: `{configured, source, kind, reconstruct, snapshots: [{time, age_hours, tables, binlog_file, binlog_pos, gtid_set, data_as_of}]}` (coordinates local-only, capped at 50 snapshots). Every configured location is listed and merged; `sources` reports each one (`source`, `kind`, `count`, `error`, and `skipped`, the number of snapshot or schema directories under it that could not be read, #1601) and `incomplete` is true when any location did not answer or answered only in part. `502` only when no location could be read at all. With `?location_only=1` it answers only `{configured, source, kind}` (the location the listing reads first: the server's own, else the daemon-wide default, a directory over a bucket) from configuration, without the schedule, the storage or the server's index; same permission as the listing, refused while a data profile is active (a named startup `--profile` even with no rules yet, or the session's, wider than the listing because the export it feeds is not redacted); any value other than `1` is a 400. MCP Server uses it for the Iceberg export command. Since #1681 it also carries, at the top level, `local_retention: {keep_newest}` when this daemon removes snapshots past a count from the selected server's local folder, and `last_prune: {at, removed}` (RFC 3339 UTC) once a prune has removed any, read from the `.last-prune.json` the prune leaves beside the snapshots; `last_prune_failure: {at, reason}` while the most recent prune attempt on that folder failed (`reason` holds one cause per line, separated by `\n` only) (from `.last-prune-failure.json`, removed by the next attempt that succeeds); and `last_prune_error` when either record exists but cannot be read. All are omitted, never null, when there is nothing to say. Each snapshot also carries `staleness` (`ok`, `aging`, `broken` or `unknown`), the worst verdict over its tables, and the response carries the headline `staleness` over each table's newest snapshot. A table with table deltas is graded on where its chain of deltas started, the instant a restore reads events from, and `reads_from` gives the earliest such instant of the snapshot when it is not the snapshot's own time ([#1707](https://github.com/dbtrail/dbtrail/issues/1707)). Reading that instant costs one file footer per table, so it is read for the newest snapshot and for each table's newest one. An older snapshot whose tables have deltas is `unknown` unless the snapshot is already past coverage (`broken`): its start was not read, and it is never reported as `ok`. A start that cannot be read is `unknown` too. `data_as_of` is the newest change the snapshot holds, from the run that made it as this daemon recorded it ([#2201](https://github.com/dbtrail/dbtrail/issues/2201)): a full read's own time, or an update's recorded value (on the source's clock). It is omitted when no run on record says, which the Overview reads as "at least as old as capture's lag", never as current. |
 | `GET /api/views.sql` | **Not JSON** — a `text/plain` DuckDB schema over the selected server's Parquet (the same output as `bintrail views`), served as a `views.sql` attachment. Nothing is executed here; the file runs in your own DuckDB. `?include_events=1` adds the `events` view over the archived change log, which is left out by default because defining it opens one Parquet footer per archived file (`bintrail views --include-events`). `?include_live=1` adds the leg over the live index (`bintrail views --include-live`), with the index host, port, database and user in the file and never its password; it requires `include_events=1`, since the leg hangs on that view, and 400s without it. 404 when archives are disabled or nothing is archived yet, 403 while an access-control profile is active, 422 when this server cannot carry the live leg (an index reached over a unix socket, or one with no `binlog_events` table), 502 when the index could not be asked, and 400 for an `include_live` or `include_events` value other than `1`/`true`/`0`/`false` (so a request that meant to ask never comes back as an archives-only file). |
 | `GET /api/storage` | Process-global storage context: `{aws: {access_key_env, profile, region_env, shared_config, container_creds, web_identity, web_identity_token_readable, web_identity_role_arn}}` — presence booleans and non-secret names only, never credential values. |
-| `GET /api/flashback` | Process-global: the embedded time-travel SQL port (`watch --flashback-listen`): `{enabled, listen, host, port, routing}`. `enabled: false` alone on standalone `serve` and on a daemon that did not open the port; `host` is empty on a wildcard bind (the UI then uses the name it was opened with). `routing` (present when the port is on) is the read router's state: `{enabled: false}` when `--route-max-copy-age` is unset, else `{enabled, max_copy_age, cost_threshold, scan_rows, read_only, since, servers}`: a threshold is omitted when that rule is off (0), `read_only` is omitted on a read-write port, `servers` is omitted until a server has a decision, and each entry (keyed by registry id) is `{copy, mysql, refused, reasons, unavailable}` counting decisions since the daemon started (`refused`, omitted while zero, counts statements a read-only port did not run), `unavailable` (omitted when routing works) saying why connections to that server cannot route and read the copy alone. Never the access token that authenticates the port. Backs the **Connect a SQL client** panel on Settings → MCP Server. |
-| `PUT /api/flashback` | `settings:write`. `{enabled, listen}`: turn the embedded port on at `listen` (omitted = the address saved last, else one with the web interface's own reach on port 3309) or off. Answers the same document as the GET plus, in the response that creates it, `password`: the port's own password, never returned again. `409` when the address was set at startup, on `serve`, when the address cannot be bound (nothing is changed), or when the saved settings file cannot be read or was written by a newer version; `403` from a session with a data access policy. The GET also carries `source` (`startup`/`saved`), `can_manage`, `suggested_listen`, `has_password`, `password_created_at` and `error` (why a port saved as on is not listening). |
-| `POST /api/flashback/password` | `settings:write`. Replaces the port's password and returns the new one once. Open connections stay; the next login needs the new password. Same refusals as the PUT. |
+| `GET /api/flashback` | Process-global: the MySQL port's saved setting, as the web interface manages it: `{enabled, listen, host, port, routing}`. `enabled` says the port is saved as on. It is not proof that something listens: the router (`bintrail-console router`) serves the port and follows this setting. `enabled: false` alone on standalone `serve`. `listen` is the address saved with the setting, which the panel shows; the router listens on its own `--listen`. `host` is empty on a wildcard address (the UI then uses the name it was opened with). `routing` (present when the port is on) is `{enabled: false}` in this process: the router makes the routing decisions and counts them, and `GET /api/router` carries its numbers. Never a password of the port. Also carries `source`, `can_manage`, `suggested_listen`, `has_password`, `password_created_at` and `error`. Backs the **Connect a SQL client** panel on Settings → MCP Server. |
+| `PUT /api/flashback` | `settings:write`. `{enabled, listen}`: save the port as on, with `listen` as its address (omitted = the address saved last, else one with the web interface's own reach on port 3309), or as off. Nothing is bound by this process: the router opens and closes the port when it reads the change. Answers the same document as the GET plus, in the response that creates it, `password`: the port's own password, never returned again. `400` for an address that cannot be read; `409` on `serve`, or when the saved settings file cannot be read or was written by a newer version; `403` from a session with a data access policy. |
+| `POST /api/flashback/password` | `settings:write`. Replaces the port's password and returns the new one once. The router closes the connections that were open when it reads the change; clients reconnect with the new password. Same refusals as the PUT. |
 | `GET /api/sql-settings` | `settings:read`. Process-global: the memory each SQL-on-the-copy statement uses (#2210): `{memory, memory_bytes, value, source, saved, default, floor_mb, max_unmerged_mb, disk, no_disk, own_ceiling, no_own_ceiling, max_in_flight, host_memory_bytes, warning, can_manage, locked, error}`. `source` is `startup` (`--sql-memory` / `BINTRAIL_CONSOLE_SQL_MEMORY`, which wins), `saved` or `default`; `saved` names a saved value a startup one overrides; `max_unmerged_mb` is the changes a statement's tables may hold unmerged at that memory; `warning` is set when `max_in_flight` statements could take more than the host's memory (`host_memory_bytes`, omitted when unknown); `locked` says why `can_manage` is false; `own_ceiling` is true when each statement runs under a memory cgroup of its own, and `no_own_ceiling` is why not (#2226; both absent off Linux); `error` is why the saved file did not load. Backs the **Memory for SQL on the copy** panel on Settings → MCP Server. |
 | `GET /api/router` | `settings:read`. Process-global: the numbers of a router (`bintrail-console router`), read from it by this process when `--router-url` names it: `{configured, url, error, newer, read_at, status}`. `configured: false` alone when no address was given. `error` and no `status` when the router did not answer or answered something else; `status` is the router's own `/status` document (counts per server, the pool, its settings). One request to the router per call, at most two seconds. |
 | `PUT /api/sql-settings` | `settings:write`. `{"memory":"4GB"}` saves the memory (KB/MB/GB or KiB/MiB/GiB, at least 512MB) and applies it to the next statement; `{"memory":""}` goes back to the default. Answers the GET document. `400` for a value that is not such a size (or no `memory` field); `409` when the memory was set at startup, when this console keeps no settings file, or when the saved file cannot be read. |
@@ -2251,34 +2250,40 @@ truncated prefix.
 ### Time-travel over the MySQL protocol (flashback port)
 
 The reconstruct tab above is HTTP/browser-oriented. For a `mysql` client or an
-application that speaks `AS OF` SQL, `bintrail-console watch --flashback-listen
-<addr>` opens an embedded MySQL-protocol port that serves the `_flashback` /
-`_snapshot` / `_diff` virtual schemas for **every monitored server** — routed by
-the connection username (the server's registry id or display name), authenticated
-with the access token. It replaces running a separate `bintrail shim` per
-per-source index: the daemon already resolves each server's `bintrail_idx_<id>`
-and baseline, so one port covers them all. A token is required (`--console-token`
-/ `BINTRAIL_CONSOLE_TOKEN`) because MySQL-protocol auth cannot use the web interface's
-password store. The port does not filter by schema: anyone with the token can
+application that speaks `AS OF` SQL, DBTrail has a MySQL-protocol port, 3309,
+that serves the `_flashback` /
+`_snapshot` / `_diff` virtual schemas for **every monitored server**, routed by
+the connection username (the server's registry id or display name). It replaces running a separate `bintrail shim` per
+per-source index: one port covers every server.
+
+The port is not opened by `watch`. A second process serves it, the router
+(`bintrail-console router`; the `router` service of the Docker stack, the
+`bintrail-router` service of the packages). `watch` keeps the port's saved
+setting, and the router follows it.
+
+The port has a password of its own, created in the web interface, because
+MySQL-protocol auth cannot use the web interface's password store. An access
+token given to the router (`--token` / `BINTRAIL_CONSOLE_TOKEN`) is accepted
+as one more password while the port is on; it does not open the port. The
+port does not filter by schema: anyone with a password of the port can
 read the full history of every schema on every monitored server. For per-schema
 filtering, use the standalone `bintrail shim` (or `bintrail-pg flashback`) with
 `allowed_schemas` on each tenant. Full setup, routing, and the `_snapshot` baseline-parity edge:
-[docs/time-travel-sql.md → the embedded port](time-travel-sql.md#the-embedded-port-multi-source).
+[docs/time-travel-sql.md → the MySQL port](time-travel-sql.md#the-mysql-port-multi-source).
 
 The web interface shows the port on **Settings → MCP Server**, in the **Connect a
-SQL client** panel (#1446): when `watch` opened it, the listen address, the
+SQL client** panel (#1446): when the port is on, its address, the
 user rule (the server picked in the sidebar: its registry name or id, `default`
-for the command-line entry), the password rule (the access token, never
-displayed) and a ready-to-copy `mysql -h <host> -P <port> -u <server> -p` line
+for the command-line entry), the password rule and a ready-to-copy `mysql -h <host> -P <port> -u <server> -p` line
 for that server. When the port is off, the panel turns it on: an address and
 a **Turn on** button, which also creates the port's own password and shows it
-once (**New password** replaces it, **Turn off** closes the port: the call
-answers once a new connection is refused, and closes the connections already
+once (**New password** replaces it, **Turn off** turns the port off; the
+router then closes the port and the connections already
 open). A session
 without `settings:write`, or one with a data access policy, gets no controls.
-When the address was given with `--flashback-listen` /
-`BINTRAIL_CONSOLE_FLASHBACK_LISTEN`, that decides and the panel shows it as
-fixed; on standalone `serve` it says the port belongs to `watch`.
+On standalone `serve` the panel says the port is not available there. At
+startup, with the port on, `watch` prints a line that says the router answers
+it, so a port nothing answers on points at a router that is not running.
 
 ### Coverage gaps and incomplete data
 

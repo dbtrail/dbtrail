@@ -65,7 +65,7 @@ func TestRouterMemory_whereItComesFrom(t *testing.T) {
 // The startup lines say where the memory came from and that a change saved
 // later needs a restart, and say loudly when the saved one could not be read.
 func TestRouterStartupLines_theMemory(t *testing.T) {
-	base := routerStartup{Listen: "127.0.0.1:3310", Pool: console.SQLPool{Workers: 2, Threads: 2, Why: "4 cores allow 2"}, MemoryLimit: "4096MiB", Cfg: routerFlashbackConfig(routerSettings{}), ServersFile: "/x/console-servers.yaml", ServersExists: true}
+	base := routerStartup{Listen: "127.0.0.1:3309", Pool: console.SQLPool{Workers: 2, Threads: 2, Why: "4 cores allow 2"}, MemoryLimit: "4096MiB", Cfg: routerFlashbackConfig(routerSettings{}), ServersFile: "/x/console-servers.yaml", ServersExists: true}
 	saved := base
 	saved.MemoryFrom = "saved in the web interface, read from /x/console-sql-settings.json"
 	if got := routerStartupLines(saved); !strings.Contains(got, "up to 4096MiB of memory each") || !strings.Contains(got, "that memory is saved in the web interface, read from /x/console-sql-settings.json") || !strings.Contains(got, "applied when the router is restarted") {

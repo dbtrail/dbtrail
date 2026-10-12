@@ -83,7 +83,10 @@ installer. `DBTRAIL_PORT` also points the startup banner (in
 `docker-compose.yml` yourself, change `BINTRAIL_CONSOLE_URL` beside it too. The stack also publishes Prometheus metrics on 9090, which is
 Prometheus's own default port; when 9090 is taken the installer moves the
 metrics to the next free port and says so. Choose one yourself with
-`DBTRAIL_METRICS_PORT`. Prefer to drive Compose yourself?
+`DBTRAIL_METRICS_PORT`. The stack also publishes the MySQL port on 3309 (it
+answers nothing until you turn it on in the web interface). When 3309 is
+taken, the installer leaves that port unpublished and says so; add a `ports:`
+line to the `router` service of `docker-compose.yml` to use it. Prefer to drive Compose yourself?
 
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/dbtrail/dbtrail/main/docker-compose.yml
@@ -260,7 +263,8 @@ package — install it only on hosts that capture from PostgreSQL.
 From the release after 0.102.0 the `bintrail-console` package installs a
 systemd service for `bintrail-console watch`, the daemon that captures and
 serves the web interface. Installing the package does not start it: it cannot
-run until it knows where the index MySQL is.
+run until it knows where the index MySQL is. (The package's second service,
+the router, is started by the install: see below.)
 
 ```sh
 sudoedit /etc/bintrail/bintrail-console.env     # set BINTRAIL_INDEX_DSN
@@ -272,7 +276,7 @@ What the package puts on the machine:
 
 | Path | What it is |
 |---|---|
-| `/usr/lib/systemd/system/bintrail-router.service` | The router's unit, off until you enable it (below) |
+| `/usr/lib/systemd/system/bintrail-router.service` | The router's unit: the service that answers the MySQL port (3309). The package enables and starts it (below) |
 | `/usr/lib/systemd/system/bintrail-console.service` | The unit: restarts whenever the process ends without being asked to stop, and gives capture 60 seconds to save its position on a stop |
 | `/etc/bintrail/bintrail-console.env` | The settings, mode `0600` because the index DSN holds a password. Created on install when there is none; no upgrade overwrites it or asks about it |
 | `/var/lib/bintrail` | What DBTrail saves: the servers you add, the login, Claude's token, the work folders of full reads |
@@ -303,28 +307,43 @@ What the package puts on the machine:
 #### The router, a second service of the same package
 
 The package also installs `bintrail-router.service`, which runs
-`bintrail-console router`: the MySQL port with read routing, apart from
-capture ([The router](./time-travel-sql.md#the-router-the-same-port-as-a-service-of-its-own-experimental)).
-It is not started by an install either.
+`bintrail-console router`: the service that answers the MySQL port, 3309
+([The router](./time-travel-sql.md#the-router-the-process-that-serves-the-port)).
+It is the only thing that answers that port: the capture service does not
+open it.
+
+The package enables and starts it, on a first install and on the first
+upgrade that brings it. It needs no settings to start, and it accepts no
+connection until you turn the MySQL port on in the web interface.
 
 ```sh
-sudo systemctl enable --now bintrail-router
+systemctl status bintrail-router
 journalctl -u bintrail-router -f
 ```
 
+- It is started **once**. The package leaves a marker,
+  `/etc/bintrail/.router-started`, so a later upgrade does not start a router
+  you stopped. To stop it for good:
+  `sudo systemctl disable --now bintrail-router`.
 - It reads **the same settings file** as the capture service, so it serves the
   servers that one manages. Its own settings are at the end of that file,
-  commented out: `BINTRAIL_ROUTER_LISTEN` (`127.0.0.1:3310` unless set) and
-  `BINTRAIL_ROUTER_METRICS_ADDR`.
-- To **see its numbers in the web interface**, uncomment
-  `BINTRAIL_ROUTER_METRICS_ADDR` and `BINTRAIL_CONSOLE_ROUTER_URL` there and
-  restart both services. The MCP Server page then shows who answered, the
-  age of the copy, and the router's workers.
+  commented out: `BINTRAIL_ROUTER_LISTEN` (`127.0.0.1:3309` unless set),
+  `BINTRAIL_CONSOLE_ROUTE_READ_ONLY`, `BINTRAIL_ROUTER_METRICS_ADDR` and
+  `BINTRAIL_CONSOLE_ROUTER_URL`.
+- **Its numbers are on by default.** The router's unit sets
+  `BINTRAIL_ROUTER_METRICS_ADDR=127.0.0.1:9091` and the capture unit sets
+  `BINTRAIL_CONSOLE_ROUTER_URL=http://127.0.0.1:9091`, so the MCP Server
+  page shows who answered, the age of the copy, and the router's workers. A
+  line in the settings file wins over either. Change both together, then
+  restart both services.
 - It **listens only while the MySQL port is turned on** in the web interface
   (**Settings**, **MCP Server**, **Connect a SQL client**), with the password
   created there. `BINTRAIL_CONSOLE_TOKEN` in the settings file is accepted
   as a password too while the port is on; it does not open it.
-- That password reads **the source itself, live**, with each server's
+- As it comes, **the copy answers every statement**. With read routing turned
+  on (a saved setting, off by default, see
+  [Read routing](./time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental)),
+  statements are forwarded to **the source itself, live**, with each server's
   forwarding account: a MySQL user of its own, set on the server's page in
   the web interface, with `SELECT` on what applications should read. The
   account DBTrail captures with is never used, so a server with no
@@ -333,14 +352,35 @@ journalctl -u bintrail-router -f
   `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0`: a statement that is not a read is
   refused and never reaches the source.
 - It is **a service of its own**: restarting `bintrail-console` does not
-  restart it or drop its connections. An upgrade restarts it if it was
-  running, and a removal stops and disables it.
+  restart it or drop its connections, and it may run where capture is
+  stopped. An upgrade restarts it if it was
+  running, and says so if it does not come back. A removal stops and
+  disables it.
 - It has **no memory or CPU ceiling by default** and sizes itself from half of
   the machine, since capture uses the machine too. To give it ceilings of its
   own, `sudo systemctl edit bintrail-router` and set, under `[Service]`,
   `MemoryMax=8G` and `CPUQuota=400%` for example: it then uses all of what it
   was given.
 
+**Upgrading from an earlier package.** In earlier packages the capture
+service opened the MySQL port itself (turned on in the web interface, or with
+`BINTRAIL_CONSOLE_FLASHBACK_LISTEN` in the settings file). After the upgrade:
+
+- The package starts `bintrail-router`, and the MySQL port answers on
+  **`127.0.0.1:3309`**: this machine only.
+- **If the port answered other machines before** (`0.0.0.0:3309`, a LAN
+  address) or used another port number, that address no longer decides. Set
+  `BINTRAIL_ROUTER_LISTEN` to it in `/etc/bintrail/bintrail-console.env`,
+  then `sudo systemctl restart bintrail-router`. Until then those clients
+  are refused.
+- `BINTRAIL_CONSOLE_FLASHBACK_LISTEN` no longer opens a port. If it is still
+  in the settings file, the port is saved as on once (when it has no saved
+  setting yet), and the capture service prints a `WARNING` in its log asking
+  you to remove the line. Point clients at the router's address.
+- `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE` no longer turns read routing on. It
+  only prints a `WARNING`. Remove it.
+- The details are in
+  [Upgrading](./time-travel-sql.md#upgrading-from-a-version-with-the-port-inside-watch).
 The package still does not bring mydumper or an index MySQL. Full reads from
 the web interface run the `mydumper` found on the `PATH` of the service, so
 install it on that host

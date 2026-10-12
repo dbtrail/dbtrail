@@ -162,6 +162,25 @@ upgrade that adds a column. This is the same architectural boundary described in
 [console.md](./console.md) (`connManager` never runs `EnsureSchema` on a
 registry DSN).
 
+### The MySQL port moved to the router
+
+Before, the capture process (`bintrail-console watch`) could open the MySQL
+port itself. Now only the router (`bintrail-console router`) serves it, on
+`3309`. What to do depends on how you run DBTrail:
+
+- **Docker Compose:** take the current `docker-compose.yml` (step 3). Under an
+  older file nothing answers on `3309`, and the capture process says so when
+  it starts.
+- **deb/rpm:** nothing. The package starts `bintrail-router` on the first
+  upgrade that brings it. It listens on this machine only (`127.0.0.1:3309`);
+  to answer other machines, set `BINTRAIL_ROUTER_LISTEN` in
+  `/etc/bintrail/bintrail-console.env`.
+- **Your own setup:** run `bintrail-console router` beside the capture
+  process, with the same servers file, and remove `--flashback-listen`.
+
+See [the upgrade notes in time-travel-sql.md](time-travel-sql.md) for the
+settings that changed.
+
 ## 7. Upgrading a live `stream`/`watch` daemon
 
 Binlog position (or GTID) is checkpointed to `stream_state` on the

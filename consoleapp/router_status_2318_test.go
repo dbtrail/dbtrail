@@ -16,7 +16,7 @@ import (
 )
 
 func routerStatusSettings() routerSettings {
-	return routerSettings{Listen: "127.0.0.1:3310", ReadOnly: true, Policy: readrouter.Policy{CostThreshold: 5000, ScanRows: 100000}}
+	return routerSettings{Listen: "127.0.0.1:3309", ReadOnly: true, Policy: readrouter.Policy{CostThreshold: 5000, ScanRows: 100000}}
 }
 
 // #2318: the copies' snapshot times are joined to the counts by server id.
@@ -35,7 +35,7 @@ func TestRouterStatus_joinsTheCopiesToTheCounts(t *testing.T) {
 	}}
 	doc := routerStatus(routerStatusSettings(), numbers, last)
 
-	if doc.Version != console.RouterStatusVersion || doc.Listen != "127.0.0.1:3310" || !doc.ReadOnly || doc.CostThreshold != 5000 || doc.ScanRows != 100000 {
+	if doc.Version != console.RouterStatusVersion || doc.Listen != "127.0.0.1:3309" || !doc.ReadOnly || doc.CostThreshold != 5000 || doc.ScanRows != 100000 {
 		t.Errorf("settings = %+v", doc)
 	}
 	if doc.CopySnapshotsReadAt != "2026-10-11T14:31:00Z" {
@@ -66,7 +66,7 @@ func TestRouterStatus_beforeTheFirstReading(t *testing.T) {
 	if strings.Contains(string(raw), "copy_snapshots_read_at") {
 		t.Errorf("a reading time before any reading: %s", raw)
 	}
-	for _, want := range []string{`"servers":{}`, `"version":1`, `"read_only":true`, `"listen":"127.0.0.1:3310"`} {
+	for _, want := range []string{`"servers":{}`, `"version":1`, `"read_only":true`, `"listen":"127.0.0.1:3309"`} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("want %s in %s", want, raw)
 		}

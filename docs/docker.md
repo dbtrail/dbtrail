@@ -255,12 +255,33 @@ What a stale compose file costs:
 
 | What your file is missing | What it costs | How it looks |
 |---|---|---|
+| the `router` service on port 3309 (file version 4) | nothing answers on the MySQL port. This version serves it from the `router` service only; the `bintrail` service no longer opens it | MySQL clients that connected to 3309 are refused. With the port turned on, `bintrail` prints a `WARNING` at startup that says so (below) |
 | the state paths on the `bintrail-state` volume | your username and password, the servers you added, and the AI connection token live inside the container, so the next `up -d` that recreates it deletes them | **Silent.** The web interface comes back asking you to create a password, exactly like a fresh install, and reports no loss. Fix this one first |
 | the read-only index mount plus `BINTRAIL_INDEX_DATADIR_RO` | free disk space for the index cannot be measured | The preflight and the Retention page report it as not measurable |
 | the `iceberg-export` profile and its volume | there is no one-shot Iceberg export to run | `docker compose --profile iceberg-export run ...` says the service does not exist |
 | the `host.docker.internal` mapping (`extra_hosts`) | on Linux, a database on this same machine cannot be reached by that name | Adding the server fails with `lookup host.docker.internal: no such host` |
 | `--innodb-buffer-pool-size=${INDEX_BUFFER_POOL:-128M}` on `index-mysql` | `INDEX_BUFFER_POOL` in `.env` does nothing, and the index MySQL keeps the 128 MB buffer pool, which caps capture on a busy source | `doctor` warns "Index buffer pool" at 128 MB on a machine with about 4 GB or more; capture lag keeps growing |
 | `BINTRAIL_CONSOLE_SQL_PANEL` (the current file does not set it) | nothing: the SQL page it switched was removed in 0.75.0 | Remove the variable. It is read for one release and warns. SQL in the browser is on the Overview now and this variable does not control it |
+
+**The MySQL port moved to the `router` service (file version 4).** Until
+now the `bintrail` service opened the MySQL port on 3309. Now only the
+`router` service answers it. If you update the
+images and keep an older file, nothing answers on 3309: the old file either
+has no `router` service or (a version 3 file, downloaded between releases)
+starts it on port 3310. When the port is
+turned on, the `bintrail` service says so at startup, in
+`docker compose logs bintrail`, with a line that begins `WARNING: the MySQL
+port is turned on and NOTHING ANSWERS ON IT (port 3309)` and ends with the
+fix, which is step 2 above: download the current file next to yours, merge
+your own edits into it, and move it into place. Three more things to know:
+
+- The port's switch and password are kept on the state volume, so they carry
+  over: a port that was on stays on, with the same password.
+- If you edited the `3309` mapping of the `bintrail` service (widened it to
+  `"3309:3309"`, or changed the host port), carry that edit to the `ports:`
+  line of the `router` service in the new file. Left on `bintrail`, it
+  publishes a port nothing listens on.
+- The router is read-only unless `ROUTER_READ_ONLY=0` is set in `.env`.
 
 Two things make this easier to catch:
 
@@ -599,16 +620,17 @@ Notes:
   data, and keeping it out of `watch` is what makes sure a long export cannot
   slow capture down. See [Iceberg export](iceberg-export.md).
 
-### The router: the MySQL port with read routing, apart from capture (experimental)
+### The router: the service that answers the MySQL port
 
-The stack starts a `router` service beside `bintrail`. Applications connect to
-it in place of their MySQL server: a statement goes to the server's source
-MySQL, except a `SELECT` whose plan says it is expensive, which runs on the
-copy. It is the MySQL port the `bintrail` service can serve on 3309, run as a
-service of its own, so restarting `bintrail` does not drop its connections and
-a statement that runs out of memory there cannot take capture with it.
+The stack starts a `router` service beside `bintrail`. MySQL clients and
+applications connect to it, on port **3309**. It is the only service that
+answers that port: the `bintrail` service captures and serves the web
+interface, and opens no MySQL port. It is a service of its own so that
+restarting `bintrail` does not drop its connections and a statement that
+runs out of memory there cannot take capture with it.
 
-It listens on `127.0.0.1:3310`, and only while the MySQL port is turned on in
+The stack publishes it as `127.0.0.1:3309`. The router listens only while
+the MySQL port is turned on in
 the web interface (**Settings**, **MCP Server**, **Connect a SQL client**),
 with the password created there. It closes again when the port is turned off
 there, and replacing the password closes the connections that were open. With
@@ -617,10 +639,26 @@ the port is on; it does not open it.
 
 Until then the container waits and uses next to nothing.
 
-**What its password reads: the source itself, live, as far as you allow.**
-On port 3309 the MySQL port's password reads the history and the copy of the
-captured tables. On the router the same password has its statements forwarded
-to the server's source MySQL, with that server's **forwarding account**: a
+```bash
+mysql -h 127.0.0.1 -P 3309 -u <server id or name> -p
+mysql> SHOW ROUTER STATUS;   -- the copy's age, who answered, the pool
+```
+
+For another machine, open a tunnel, or widen the mapping to `"3309:3309"`
+behind a firewall: the port's password reads every server. If 3309 is taken
+on this machine, delete the whole `ports:` line of the `router` service
+(`install.sh` does that for you and says so).
+
+**Who answers.** As it comes, the copy answers every statement: the history
+(`_flashback`, `_snapshot`, `_diff`) and ordinary SQL over the captured
+tables. Nothing is sent to your MySQL.
+
+**Read routing (experimental, off by default).** Read routing is a saved
+setting, off until it is turned on
+([Read routing](time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental)).
+With it on, each statement goes to the server's source MySQL, except a
+`SELECT` whose plan says it is expensive, which runs on the copy. Statements
+are forwarded with that server's **forwarding account**: a
 MySQL user of its own that you create and set on the server's page in the web
 interface. Give it `SELECT` on what applications should read, and nothing
 else:
@@ -634,26 +672,19 @@ The account DBTrail captures with is never used by the router: it reads
 whatever capture needs, which with `SELECT ON *.*` includes the `mysql`
 schema and the password hashes of every account. So a server with no
 forwarding account is not forwarded for: the copy answers every statement
-for it, the light reads too, and the web interface says so. Nothing the
+for it, the light reads too. Nothing the
 client sends reaches the source until the server has that account.
 
-**It is read-only in this stack.** A statement that is not a read is refused
-with an error and never reaches the source. The password that opens the
-router is one that, until the router existed, could only read; it does not
-become a way to write to your databases because a service was added.
+**It is read-only unless you say otherwise.** A statement that is not a read
+is refused with an error and never reaches the source.
 `ROUTER_READ_ONLY=0` in `.env` makes it forward writes too, with each
 server's forwarding account. Give that account the grants you mean before
 setting it.
 
-```bash
-mysql -h 127.0.0.1 -P 3310 -u <server id or name> -p
-mysql> SHOW ROUTER STATUS;   -- the copy's age, who answered, the pool
-```
-
 It reads the servers the web interface manages and the copies on the state
-volume, which it mounts read-only. A server needs a source address the
-container can reach (as for `bintrail`) and a copy on that volume for its
-expensive reads. For a server whose snapshots are only on S3, that copy is
+volume, which it mounts read-only. A server needs a copy on that volume for
+ordinary SQL and, with read routing on, a source address the container can
+reach (as for `bintrail`). For a server whose snapshots are only on S3, that copy is
 the local mirror `bintrail` keeps on the same volume
 ([SQL on a server whose snapshots are only on S3](console.md#sql-on-a-server-whose-snapshots-are-only-on-s3));
 the router reads it and brings nothing from the bucket itself.
@@ -668,10 +699,9 @@ may reach `SQL_MEMORY` (2 GB unless set) plus a quarter, and the router keeps
 half a gigabyte for itself, so 8g and 4 cores run two statements at once.
 `docker compose logs router` shows the numbers it worked out and why.
 
-Not wanted: `docker compose stop router`, or delete the service from the file.
-The rules it routes by, and how they differ from the port inside `bintrail`,
-are in [The router](time-travel-sql.md#the-router-the-same-port-as-a-service-of-its-own-experimental).
-
+Without this service nothing serves the MySQL port: the web interface can
+turn it on and nothing listens. The router itself is described in
+[The router](time-travel-sql.md#the-router-the-process-that-serves-the-port).
 ### Time-travel SQL (`AS OF`) and the compose stack
 
 The web interface's Time-travel tab and time-travel **SQL** (`SELECT … AS OF`) are
@@ -746,7 +776,7 @@ surface, use the demo image ([demo.md](./demo.md)).
 | `ROUTER_MEMORY` | compose `router` service (optional) | Memory ceiling of the router (e.g. `8g`). Unset = none: the router takes half of the machine |
 | `ROUTER_CPUS` | compose `router` service (optional) | CPU ceiling of the router (e.g. `4`). Unset = none |
 | `ROUTER_READ_ONLY` | compose `router` service (optional) | The router refuses every statement that is not a read, and never sends it to the source (default `1`). `0` forwards writes too |
-| `ROUTER_METRICS_ADDR` | compose `router` service (optional) | Container-side bind for the router's Prometheus `/metrics` (default `:9091`, reachable as `router:9091` on the compose network and not published on the host; set empty to disable) |
+| `ROUTER_METRICS_ADDR` | compose `router` service (optional) | Container-side bind for the router's Prometheus `/metrics` and its `/status` document (default `:9091`, reachable as `router:9091` on the compose network and not published on the host; set empty to disable) |
 | `ROUTER_URL` | compose (optional) | Where the web interface reads the router's numbers to show them on its MCP Server page (default `http://router:9091`, the `router` service; set empty to show nothing about a router) |
 | `INDEX_MYSQL_ROOT_PASSWORD` | compose (optional) | Pin the bundled index root password (set *before* first boot; default: randomly generated into the `bintrail-index-secret` volume) |
 | `BINTRAIL_TAG` | compose (optional) | Image tag to run (default `latest`) |

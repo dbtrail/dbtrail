@@ -292,15 +292,15 @@ func init() {
 	watchCmd.Flags().StringVar(&upConsoleTLSKey, "console-tls-key", "", "TLS private key file (PEM; requires --console-tls-cert)")
 	watchCmd.Flags().StringSliceVar(&upConsoleAllowedHost, "console-allowed-hosts", nil, "Extra hostnames allowed in the Host header (for a TLS-terminating reverse proxy); IP literals and localhost are always allowed")
 	watchCmd.Flags().BoolVar(&upConsoleAllowSetup, "console-allow-setup", false, "Allow browser first-run password setup on a non-loopback bind (assert the bind is access-controlled, e.g. published only on the host loopback)")
-	watchCmd.Flags().IntVar(&upSQLMaxInFlight, "sql-max-in-flight", sqlsandbox.DefaultMaxInFlight, "How many SQL-on-the-copy statements run at once, the SQL card and the --flashback-listen port together; one more waits up to 30 s for a free slot, then is refused. Each runs as its own process with 2 threads and up to --sql-memory, on the host that captures, and every result is held in this process while it is sent, so raise it only with cores and memory to spare. Env BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT.")
-	watchCmd.Flags().IntVar(&upSQLPortMaxRows, "sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns on the --flashback-listen port; a result with more is refused with error 1104, not cut. The SQL page of the web interface shows 1,000 rows whatever this is. A result is also refused past 64 MB. A result is held in this process, which captures, while it is sent, taking a few times its size while it is prepared; the port holds at most 256 MB of results being sent, over all its connections, plus one result, and past that refuses a statement with error 1203 until an answer has been written to its client. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
+	watchCmd.Flags().IntVar(&upSQLMaxInFlight, "sql-max-in-flight", sqlsandbox.DefaultMaxInFlight, "How many SQL-on-the-copy statements run at once, on the SQL card of the web interface (the MySQL port is served by the router, which sizes its own); one more waits up to 30 s for a free slot, then is refused. Each runs as its own process with 2 threads and up to --sql-memory, on the host that captures, and every result is held in this process while it is sent, so raise it only with cores and memory to spare. Env BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT.")
+	watchCmd.Flags().IntVar(&upSQLPortMaxRows, "sql-port-max-rows", console.DefaultSQLPortMaxRows, "No longer acts in this process: the MySQL port is served by the router (bintrail-console router), which takes its own --sql-port-max-rows, or BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS. Given on this command line, it only prints a warning at startup. The SQL page of the web interface shows 1,000 rows whatever this is.")
 	watchCmd.Flags().StringVar(&upRouterURL, "router-url", "", "Address a router (bintrail-console router) serves its metrics on, e.g. http://127.0.0.1:9091. Given it, the web interface shows the router's numbers on its "+console.PageConnect+" page: who answered each server's statements, the copy's age, the pool. This process asks the router; the router never asks this one. Empty = the page shows nothing about a router. Env BINTRAIL_CONSOLE_ROUTER_URL.")
-	watchCmd.Flags().StringVar(&upSQLMemory, "sql-memory", "", "Memory each SQL-on-the-copy statement may use (the SQL card and the --flashback-listen port), e.g. 4GB; default 2GB, at least 512MB. It runs on the host that captures, times --sql-max-in-flight at once. A table with more changes not yet merged than this memory can merge (384 MB at 2 GB, in proportion) is answered from an earlier copy, or refused with a pointer to your own DuckDB when none fits. Past its memory a statement spills to a temporary folder, up to four times it. Env BINTRAIL_CONSOLE_SQL_MEMORY. Unset, the web interface can set it (Settings, MCP Server); set, it wins there.")
-	watchCmd.Flags().StringVar(&upConsoleFlashbackListen, "flashback-listen", "", "Serve an embedded MySQL-protocol time-travel port (_flashback/_snapshot/_diff) for every monitored server, routed by the connection username (server id or name); e.g. 127.0.0.1:3308. Requires --console-token, which reads every schema of every server: the port does not filter by schema. Empty = the web interface decides (Connect turns the port on and off, with its own password; off until then). Set, this address decides and the web interface cannot change it. Env BINTRAIL_CONSOLE_FLASHBACK_LISTEN.")
-	watchCmd.Flags().DurationVar(&upRouteMaxCopyAge, "route-max-copy-age", 0, "Experimental read routing on the --flashback-listen port: forward every statement, WRITES INCLUDED, to the server's source MySQL with the server's forwarding account (set on the server, in the web interface or as route_user / route_password in the API), except SELECTs whose EXPLAIN FORMAT=JSON says they are expensive (see --route-cost-threshold, --route-scan-rows), which run on the copy while its snapshot is at most this old; past that age the copy still answers one whose tables have had no change since their snapshot, as long as capture is known to have read everything the source had written at some moment within this same limit; a statement the copy rejects runs on MySQL. A server with no forwarding account is not forwarded for and is answered by the copy alone: the account DBTrail captures with is never used by the port. Anyone holding the access token can do on the source whatever the forwarding account is granted: give it SELECT only, on the schemas the port should read, and set --route-read-only. 0 = off (the port serves the copy only). Env BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE.")
-	watchCmd.Flags().BoolVar(&upRouteReadOnly, "route-read-only", false, "Read routing: refuse every statement that is not a read (INSERT, UPDATE, DELETE, DDL, GRANT, KILL, SET GLOBAL, SELECT ... INTO OUTFILE, SELECT ... FOR UPDATE, more than one statement in a line and anything else not recognised as a read) with an error that names this flag, and never send it to the source. SELECT, SHOW, DESCRIBE, EXPLAIN, USE, session SETs and transaction control keep working. It reads the statement's text, so it cannot see a stored function that writes: the forwarding account's grants are the guard for that. Requires --route-max-copy-age. Env BINTRAIL_CONSOLE_ROUTE_READ_ONLY.")
-	watchCmd.Flags().Float64Var(&upRouteCostThreshold, "route-cost-threshold", readrouter.DefaultPolicy().CostThreshold, "Read routing: a SELECT whose plan query_cost is at least this goes to the copy (a point lookup costs about 1; a full scan over 200k rows about 20000). 0 disables the cost rule. Env BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD.")
-	watchCmd.Flags().Int64Var(&upRouteScanRows, "route-scan-rows", readrouter.DefaultPolicy().ScanRows, "Read routing: a SELECT whose plan has a full table scan over at least this many rows goes to the copy (on a MariaDB source, whose plans carry no comparable cost, a full index scan too, and a plan whose joins read at least this many rows in all). 0 disables the scan rule. Env BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS.")
+	watchCmd.Flags().StringVar(&upSQLMemory, "sql-memory", "", "Memory each SQL-on-the-copy statement may use (the SQL card; the MySQL port is served by the router, which takes its own --sql-memory), e.g. 4GB; default 2GB, at least 512MB. It runs on the host that captures, times --sql-max-in-flight at once. A table with more changes not yet merged than this memory can merge (384 MB at 2 GB, in proportion) is answered from an earlier copy, or refused with a pointer to your own DuckDB when none fits. Past its memory a statement spills to a temporary folder, up to four times it. Env BINTRAIL_CONSOLE_SQL_MEMORY. Unset, the web interface can set it (Settings, MCP Server); set, it wins there.")
+	watchCmd.Flags().StringVar(&upConsoleFlashbackListen, "flashback-listen", "", "No longer opens a port in this process: the MySQL port is served by the router (bintrail-console router, port 3309 unless set) and is turned on and off in the web interface (Settings, MCP Server, Connect a SQL client). Given, it has one effect, once: a port that has no saved setting yet is saved as on, so an installation that opened it with this setting keeps it. Remove it. Env BINTRAIL_CONSOLE_FLASHBACK_LISTEN.")
+	watchCmd.Flags().DurationVar(&upRouteMaxCopyAge, "route-max-copy-age", 0, "No longer turns read routing on: read routing is a switch in the web interface (Settings, MCP Server, Connect a SQL client), off until turned on there, and there is no maximum copy age any more. Given, it only prints a warning at startup. Remove it. Env BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE.")
+	watchCmd.Flags().BoolVar(&upRouteReadOnly, "route-read-only", false, "No longer acts in this process: the router (bintrail-console router) refuses every statement that is not a read unless it is started with --route-read-only=false or BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0. Given on this command line, it only prints a warning at startup.")
+	watchCmd.Flags().Float64Var(&upRouteCostThreshold, "route-cost-threshold", readrouter.DefaultPolicy().CostThreshold, "No longer acts in this process: the router (bintrail-console router) takes its own --route-cost-threshold, or BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD. Given on this command line, it only prints a warning at startup.")
+	watchCmd.Flags().Int64Var(&upRouteScanRows, "route-scan-rows", readrouter.DefaultPolicy().ScanRows, "No longer acts in this process: the router (bintrail-console router) takes its own --route-scan-rows, or BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS. Given on this command line, it only prints a warning at startup.")
 	watchCmd.Flags().StringVar(&upArchiveStageDir, "archive-staging-dir", "", "Local staging directory for S3 archive uploads (default: OS temp dir). Rotated Parquet is written here, uploaded to a source's configured Archive S3 bucket, then pruned.")
 	watchCmd.Flags().StringVar(&upRotateRetain, "rotate-retain", indexer.DefaultRotateRetain, "Built-in rotation: drop index partitions older than this (Nd/Nh; \"off\" disables)")
 	watchCmd.Flags().StringVar(&upRotateInterval, "rotate-interval", "1h", "Built-in rotation: how often to run a rotation cycle")
@@ -341,9 +341,6 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := resolveSQLMaxInFlight(cmd); err != nil {
-		return err
-	}
-	if err := resolveSQLPortMaxRows(cmd); err != nil {
 		return err
 	}
 	resolveRouterURL(cmd, os.Stderr)
@@ -722,178 +719,146 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 		defer stopMetrics()
 	}
 
-	stopFlashback, err := startFlashbackPort(ctx, srv)
-	if err != nil {
-		return err
-	}
+	startSQLPortSettings(srv)
 	printConsoleBanner(srv, "The DBTrail web interface is running: open it and add the MySQL servers to watch:")
 	go supervisor.Reconcile(registry)
 
 	serveErr := srv.Serve(ctx, ln)
-	stop()                // cancel ctx so the flashback listener unblocks even if Serve returned a non-signal error
-	stopFlashback()       // drain the flashback port before the deferred db.Close
+	stop()
 	supervisor.Shutdown() // final checkpoints for every monitored stream
 	return serveErr
 }
 
-// startFlashbackPort binds and serves the embedded MySQL-protocol time-travel
-// port (#996) when --flashback-listen is set, routing each connection to a
-// monitored server by its username. It returns a drain func (a no-op when the
-// port is disabled) the caller must invoke before closing the shared index DB,
-// so an in-flight time-travel query never races the deferred db.Close.
-//
-// The bind is synchronous so a port conflict or a missing token fails `watch`
-// validateRoutePolicy refuses a read-routing setup under which no statement
-// could ever reach the copy: routing on (a max copy age) with both plan
-// thresholds at 0. Every statement would land under cheap_plan, which reads
-// as a tuning question rather than the misconfiguration it is.
-// resolveRouteFlags applies the environment to the MySQL-protocol port's
-// flags (--flashback-listen and the --route-* family) and checks them
-// together. It opens nothing and starts nothing, so runWatch calls it before
-// the first connection: a typo in a safety setting stops the daemon at once,
-// not after the index answered. resolveUpConsoleEnv calls it again from the
-// console paths; it is idempotent.
+// resolveRouteFlags applies the environment to the two startup settings
+// that used to act on the MySQL-protocol port in this process. It opens
+// nothing and starts nothing.
 func resolveRouteFlags(cmd *cobra.Command) error {
+	// The MySQL port is served by the router (#2341), which reads the
+	// --route-* settings from its own flags and the same environment. Here
+	// only the two that used to turn something on are read, to say what
+	// became of them (sqlPortStartupLines); a value that does not parse is
+	// the router's to refuse, not a reason to stop capture.
 	if !cmd.Flags().Changed("flashback-listen") {
 		if v := os.Getenv("BINTRAIL_CONSOLE_FLASHBACK_LISTEN"); v != "" {
 			upConsoleFlashbackListen = v
 		}
 	}
 	if !cmd.Flags().Changed("route-max-copy-age") {
-		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE"); v != "" {
-			d, err := time.ParseDuration(v)
-			if err != nil {
-				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE: %w", err)
+		// A value that does not parse was asked for too, and is said too:
+		// before, it stopped the start.
+		if v := strings.TrimSpace(os.Getenv("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE")); v != "" {
+			if d, err := time.ParseDuration(v); err == nil {
+				upRouteMaxCopyAge = d
+			} else {
+				upRouteMaxCopyAge = time.Nanosecond
 			}
-			upRouteMaxCopyAge = d
 		}
 	}
-	if !cmd.Flags().Changed("route-read-only") {
-		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_READ_ONLY"); v != "" {
-			b, err := strconv.ParseBool(v)
-			if err != nil {
-				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_READ_ONLY=%q is not a yes or no: use 1 or true to make the routed port read-only, 0 or false (or leave it unset) for read-write", v)
-			}
-			upRouteReadOnly = b
+	routeFlagsGiven = nil
+	for _, name := range []string{"route-read-only", "route-cost-threshold", "route-scan-rows", "sql-port-max-rows"} {
+		if f := cmd.Flags().Lookup(name); f != nil && f.Changed {
+			routeFlagsGiven = append(routeFlagsGiven, "--"+name)
 		}
 	}
-	if !cmd.Flags().Changed("route-cost-threshold") {
-		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD"); v != "" {
-			f, err := strconv.ParseFloat(v, 64)
-			if err != nil {
-				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD: %w", err)
-			}
-			upRouteCostThreshold = f
-		}
-	}
-	if !cmd.Flags().Changed("route-scan-rows") {
-		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS"); v != "" {
-			n, err := strconv.ParseInt(v, 10, 64)
-			if err != nil {
-				return fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS: %w", err)
-			}
-			upRouteScanRows = n
-		}
-	}
-	if err := validateRouteReadOnly(upRouteReadOnly, upConsoleFlashbackListen, upRouteMaxCopyAge); err != nil {
-		return err
-	}
+	return nil
+}
+
+// savedPortControl is the MySQL port's controller in the capture process
+// since the port is served by the router (#2341): it opens nothing. The web
+// interface's routes save the switch and the password, which the router
+// follows; this only remembers the address they were saved with, which is
+// what those routes report back.
+type savedPortControl struct {
+	mu   sync.Mutex
+	addr string
+}
+
+func (c *savedPortControl) Apply(listen string) error {
+	c.mu.Lock()
+	c.addr = listen
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *savedPortControl) Listening() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.addr
+}
+
+// startSQLPortSettings hands the web interface the MySQL port's saved
+// setting to manage, and says what became of the startup settings that used
+// to open the port in this process. It binds nothing and cannot fail: the
+// router serves the port.
+func startSQLPortSettings(srv *console.Server) {
+	srv.ManageFlashback(&savedPortControl{})
+	migrated := ""
 	if upConsoleFlashbackListen != "" {
-		return validateRoutePolicy(upRouteMaxCopyAge, upRouteCostThreshold, upRouteScanRows)
+		// The port used to be opened here by this setting, always on. It
+		// is saved as on, so that an installation that had it keeps it.
+		// Once: a setting that exists is the web interface's, on or off.
+		migrated = sqlPortMigratedWords(srv.EnsureFlashbackOn())
 	}
-	return nil
+	fmt.Fprint(os.Stderr, sqlPortStartupLines(upConsoleFlashbackListen, migrated, upRouteMaxCopyAge, srv.Token() != "", routeFlagsGiven))
+	fmt.Fprint(os.Stderr, sqlPortServedElsewhereLine(srv.FlashbackSwitchOn(), os.Getenv("BINTRAIL_COMPOSE_VERSION")))
 }
 
-// flashbackConfigFromFlags is the port's serving configuration as the
-// resolved flags give it: what startFlashbackPort serves with.
-func flashbackConfigFromFlags() flashbackConfig {
-	return flashbackConfig{
-		RouteMaxCopyAge: upRouteMaxCopyAge,
-		RoutePolicy:     readrouter.Policy{CostThreshold: upRouteCostThreshold, ScanRows: upRouteScanRows},
-		RouteReadOnly:   upRouteReadOnly,
+// sqlPortServedElsewhereLine says, when the MySQL port is turned on, who
+// answers it, since it is not this process. Under a docker-compose.yml from
+// before the router served the port (composeVersion, the number the file
+// passes, below 4) nobody does, and that is a warning with the way out: an
+// image updated under an old file is the one upgrade that takes the port
+// away. A file that passes no number says nothing about its age, so it gets
+// the plain line. Empty while the port is off.
+func sqlPortServedElsewhereLine(on bool, composeVersion string) string {
+	if !on {
+		return ""
 	}
+	if v, err := strconv.Atoi(strings.TrimSpace(composeVersion)); err == nil && v < 4 {
+		return fmt.Sprintf("WARNING: the MySQL port is turned on and NOTHING ANSWERS ON IT (port 3309). This version serves it from the router service, which the docker-compose.yml running this stack (version %d) does not start on that port. MySQL clients that connected to 3309 are refused until the file is replaced: %s\n", v, composeDownload)
+	}
+	return "The MySQL port is turned on. The router answers it (bintrail-console router, port 3309 unless set), not this process: if nothing answers there, the router is not running.\n"
 }
 
-// validateRouteReadOnly refuses --route-read-only where it would guard
-// nothing: without the port, or with the port serving the copy only (routing
-// off sends nothing to the source). A safety flag that is silently ignored
-// reads as protection that is not there.
-func validateRouteReadOnly(readOnly bool, flashbackListen string, maxCopyAge time.Duration) error {
+// sqlPortMigratedWords says what became of the port of an installation that
+// opened it with --flashback-listen (EnsureFlashbackOn's answer), as the end
+// of the sentence "The port ...".
+func sqlPortMigratedWords(created, on bool, err error) string {
 	switch {
-	case !readOnly:
-		return nil
-	case flashbackListen == "":
-		return fmt.Errorf("--route-read-only applies to the MySQL-protocol port, which is off: set --flashback-listen and --route-max-copy-age too, or drop --route-read-only")
-	case maxCopyAge <= 0:
-		return fmt.Errorf("--route-read-only applies to read routing, which is off: set --route-max-copy-age too, or drop --route-read-only (with routing off the port serves the copy only and sends nothing to the source)")
+	case err != nil:
+		return "could not be saved as on (" + err.Error() + "): once that is fixed, turn it on in the web interface"
+	case created:
+		return "was saved as on, with a new password you can replace in the web interface"
+	case on:
+		return "is saved as on, and the password created for it in the web interface is accepted (New password there replaces it)"
+	default:
+		return "is saved as OFF in the web interface, and stays off: turn it on there"
 	}
-	return nil
 }
 
-func validateRoutePolicy(maxCopyAge time.Duration, costThreshold float64, scanRows int64) error {
-	if maxCopyAge > 0 && costThreshold <= 0 && scanRows <= 0 {
-		return fmt.Errorf("read routing: --route-cost-threshold and --route-scan-rows are both 0, so no statement could ever go to the copy; set one of them, or drop --route-max-copy-age to serve the copy only")
-	}
-	return nil
-}
-
-// routeStartupLine is the stderr line that says, at startup, what read
-// routing sends to the source and whether the port is read-only.
-func routeStartupLine(cfg flashbackConfig) string {
-	rule := fmt.Sprintf("SELECTs with plan cost >= %.0f or a full scan over >= %d rows (on a MariaDB source, also joins that read that many rows in all) run on the copy while its snapshot is at most %s old, or over tables with no change since their snapshot", cfg.RoutePolicy.CostThreshold, cfg.RoutePolicy.ScanRows, cfg.RouteMaxCopyAge)
-	if cfg.RouteReadOnly {
-		return "Read routing (experimental) is on, read-only (--route-read-only): reads go to each server's source MySQL with that server's forwarding account; a server that has none is not forwarded for, since the account DBTrail captures with is never used; " + rule + ". A statement that is not a read is refused and never sent to the source. The check reads the statement's text: what a stored function does when a SELECT calls it is up to that account's grants.\n"
-	}
-	return "Read routing (experimental) is on, read-write: statements, writes included, go to each server's source MySQL with that server's forwarding account; a server that has none is not forwarded for, since the account DBTrail captures with is never used; " + rule + ". Anyone holding the access token can do on each source what that account can. Set --route-read-only to refuse writes, and a forwarding account on each server to bound the rest.\n"
-}
-
-// fast, exactly like the console bind. Serving runs on the daemon context: ctx
-// cancellation closes the listener and drains open connections. A mid-run crash
-// is logged, never propagated — the flashback port is strictly secondary to the
-// console and the capture stream.
-func startFlashbackPort(ctx context.Context, srv *console.Server) (func(), error) {
-	cfg := flashbackConfigFromFlags()
-	control := &flashbackControl{ctx: ctx, srv: srv, cfg: cfg}
-	routeErr := validateRoutePolicy(upRouteMaxCopyAge, upRouteCostThreshold, upRouteScanRows)
-	if upConsoleFlashbackListen == "" {
-		// No address at startup: the web interface decides (#2101), so the
-		// port is not "off" for --route-read-only. The flag still guards
-		// nothing with routing off, whoever turns the port on.
-		if err := validateRouteReadOnly(upRouteReadOnly, "decided in the web interface", upRouteMaxCopyAge); err != nil {
-			return nil, err
+// sqlPortStartupLines says, at startup, what a setting that used to act in
+// this process does now. Empty when none was given.
+func sqlPortStartupLines(flashbackListen, migrated string, maxCopyAge time.Duration, token bool, routeFlags []string) string {
+	var b strings.Builder
+	if flashbackListen != "" {
+		fmt.Fprintf(&b, "WARNING: --flashback-listen (BINTRAIL_CONSOLE_FLASHBACK_LISTEN=%s) no longer opens a port in this process. The MySQL port is served by the router (bintrail-console router), on the address the router is started with (127.0.0.1:3309, this machine only, unless BINTRAIL_ROUTER_LISTEN or its --listen says otherwise), not on %s. The port %s (Settings, MCP Server, Connect a SQL client).", flashbackListen, flashbackListen, migrated)
+		if token {
+			b.WriteString(" The access token is accepted as its password only if the router is started with it too (BINTRAIL_CONSOLE_TOKEN or its --token).")
 		}
-		// A port saved as on comes up here; one that cannot (its address was
-		// taken, the routing thresholds contradict each other) is reported in
-		// the web interface and the log and does NOT stop the daemon, which
-		// is also the capture process.
-		control.cfgErr = routeErr
-		srv.ManageFlashback(control)
-		if addr := control.boundAddr(); addr != nil {
-			fmt.Fprintf(os.Stderr, "Time-travel SQL (MySQL protocol) is listening on %s, as saved in the web interface; connect a MySQL client with user=<server id or name> and the port password created there.\n", addr)
-			if cfg.RouteMaxCopyAge > 0 {
-				fmt.Fprint(os.Stderr, routeStartupLine(cfg))
-			}
-		}
-		return control.Close, nil
+		b.WriteString(" Remove the setting.\n")
 	}
-	if err := validateRouteReadOnly(upRouteReadOnly, upConsoleFlashbackListen, upRouteMaxCopyAge); err != nil {
-		return nil, err
+	if maxCopyAge > 0 {
+		b.WriteString("WARNING: --route-max-copy-age (BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE) no longer turns read routing on. Read routing is a switch in the web interface now, and it is OFF: the copy answers every statement until it is turned on there (Settings, MCP Server, Connect a SQL client). There is no maximum copy age any more: an expensive read goes to the copy whatever the age of its snapshot. Remove the setting.\n")
 	}
-	if srv.Token() == "" {
-		return nil, fmt.Errorf("--flashback-listen %s requires the access token: set --console-token or BINTRAIL_CONSOLE_TOKEN (MySQL-protocol auth cannot use the web interface password)", upConsoleFlashbackListen)
+	if len(routeFlags) > 0 {
+		fmt.Fprintf(&b, "WARNING: %s given to this process no longer applies: the router reads these settings, from its own command line or from the environment both processes share. A value given only here is NOT in force on the port. The router refuses writes unless it is told otherwise (BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0); its startup lines say what it runs with.\n", strings.Join(routeFlags, ", "))
 	}
-	if routeErr != nil {
-		return nil, routeErr
-	}
-	if err := control.Apply(upConsoleFlashbackListen); err != nil {
-		return nil, fmt.Errorf("flashback: %w", err)
-	}
-	fmt.Fprintf(os.Stderr, "Time-travel SQL (MySQL protocol) is listening on %s; connect a MySQL client with user=<server id or name>, password=<access token> (--console-token).\n", control.boundAddr())
-	if cfg.RouteMaxCopyAge > 0 {
-		fmt.Fprint(os.Stderr, routeStartupLine(cfg))
-	}
-	return control.Close, nil
+	return b.String()
 }
+
+// routeFlagsGiven names the --route-* flags given on this process's command
+// line, which the router does not see (resolveRouteFlags).
+var routeFlagsGiven []string
 
 // runUpStreamWithConsole serves the read-only web console in this same process,
 // alongside the live stream. Both share one SIGINT/SIGTERM lifecycle: the signal
@@ -1086,10 +1051,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	// the shared index db, so the deferred db.Close can never race an in-flight
 	// console request on a failed startup (runUpConsoleOnly binds it before its
 	// synchronous Serve for the same reason).
-	stopFlashback, err := startFlashbackPort(ctx, srv)
-	if err != nil {
-		return err
-	}
+	startSQLPortSettings(srv)
 
 	// The console is the secondary job: log a mid-run crash when it happens (not
 	// only at shutdown), but NEVER let it take down the stream, which is the
@@ -1134,7 +1096,6 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	})
 	stop()                // drain the console even if the stream returned without a signal
 	<-consoleDone         // order the console goroutine's exit before the deferred db.Close()
-	stopFlashback()       // drain the flashback port before the deferred db.Close()
 	supervisor.Shutdown() // final checkpoints for every monitored stream
 	return streamErr
 }
@@ -1807,12 +1768,6 @@ type consoleOpts struct {
 	TLSKey       string
 	AllowedHosts []string
 	AllowSetup   bool
-	// FlashbackListen is the --flashback-listen address, reported to the
-	// console so the Connect page can show the port (#1446). Empty = off.
-	// startFlashbackPort binds it after console.New and aborts the daemon on
-	// a bind failure, so a value the console reports was bound at startup;
-	// a mid-run serve failure is logged and swallowed, not reflected here.
-	FlashbackListen string
 	// SQLMemoryLimit is the resolved --sql-memory as DuckDB takes it
 	// ("4096MiB"), "" for the default (#2210).
 	SQLMemoryLimit string
@@ -1823,10 +1778,6 @@ type consoleOpts struct {
 	// RouterURL is the resolved --router-url (#2318), "" when none;
 	// RouterURLError is why a value given could not be used.
 	RouterURL, RouterURLError string
-	// ReadRouting is the port's read-routing policy (--route-max-copy-age and
-	// the threshold flags, #2038), reported by GET /api/flashback; the port
-	// itself is bound with the same values in startFlashbackPort.
-	ReadRouting console.ReadRoutingConfig
 	// FillsCopyMirrors is console.Config.FillsCopyMirrors.
 	FillsCopyMirrors bool
 	// CopyMirror is console.Config.CopyMirror.
@@ -1852,18 +1803,11 @@ func upConsoleOpts() consoleOpts {
 		TLSKey:           upConsoleTLSKey,
 		AllowedHosts:     upConsoleAllowedHost,
 		AllowSetup:       upConsoleAllowSetup,
-		FlashbackListen:  upConsoleFlashbackListen,
-		ReadRouting: console.ReadRoutingConfig{
-			MaxCopyAge:    upRouteMaxCopyAge,
-			CostThreshold: upRouteCostThreshold,
-			ScanRows:      upRouteScanRows,
-			ReadOnly:      upRouteReadOnly,
-		},
-		SQLMaxInFlight: upSQLMaxInFlight,
-		SQLMemoryLimit: upSQLMemoryLimit,
-		SQLPortMaxRows: upSQLPortMaxRows,
-		RouterURL:      upRouterURL,
-		RouterURLError: upRouterURLError,
+		SQLMaxInFlight:   upSQLMaxInFlight,
+		SQLMemoryLimit:   upSQLMemoryLimit,
+		SQLPortMaxRows:   upSQLPortMaxRows,
+		RouterURL:        upRouterURL,
+		RouterURLError:   upRouterURLError,
 	}
 }
 
@@ -1966,8 +1910,6 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		TLSCert:         opts.TLSCert,
 		TLSKey:          opts.TLSKey,
 		AllowedHosts:    opts.AllowedHosts,
-		FlashbackListen: opts.FlashbackListen,
-		ReadRouting:     opts.ReadRouting,
 		// Test connection tries a forwarding account with the port's own
 		// client (#2079).
 		RouteAccountProbe: probeRouteAccount,
@@ -2383,26 +2325,6 @@ func resolveSQLMaxInFlight(cmd *cobra.Command) error {
 		}
 	} else if upSQLMaxInFlight < 1 {
 		return fmt.Errorf("--sql-max-in-flight %d: want at least 1 (how many SQL statements run at once; the default is %d)", upSQLMaxInFlight, sqlsandbox.DefaultMaxInFlight)
-	}
-	return nil
-}
-
-// resolveSQLPortMaxRows sets upSQLPortMaxRows from --sql-port-max-rows or,
-// when the flag is not given, BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS. A value
-// below 1 fails here, at startup: it would refuse every result, and falling
-// back to the default would hide the mistake.
-func resolveSQLPortMaxRows(cmd *cobra.Command) error {
-	const want = "want a whole number of at least 1 (the most rows one statement returns on the MySQL port; the default is %d)"
-	if !cmd.Flags().Changed("sql-port-max-rows") {
-		if v := strings.TrimSpace(os.Getenv("BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS")); v != "" {
-			n, err := strconv.Atoi(v)
-			if err != nil || n < 1 {
-				return fmt.Errorf("BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS=%q: "+want, v, console.DefaultSQLPortMaxRows)
-			}
-			upSQLPortMaxRows = n
-		}
-	} else if upSQLPortMaxRows < 1 {
-		return fmt.Errorf("--sql-port-max-rows %d: "+want, upSQLPortMaxRows, console.DefaultSQLPortMaxRows)
 	}
 	return nil
 }

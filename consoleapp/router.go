@@ -61,14 +61,14 @@ machine, since capture uses the machine too. When every worker is busy a
 statement waits, and past the wait the client gets error 1040.
 
 Example:
-  BINTRAIL_CONSOLE_TOKEN=... bintrail-console router --listen 127.0.0.1:3310`,
+  BINTRAIL_CONSOLE_TOKEN=... bintrail-console router --listen 127.0.0.1:3309`,
 	Args: cobra.NoArgs,
 	RunE: runRouter,
 }
 
-// defaultRouterListen is the router's own port: the one inside watch is
-// offered on 3309, and both may run on one host.
-const defaultRouterListen = "127.0.0.1:3310"
+// defaultRouterListen is the MySQL port: the router is the only process
+// that serves it.
+const defaultRouterListen = "127.0.0.1:3309"
 
 func init() {
 	addRouterFlags(routerCmd)
@@ -86,7 +86,7 @@ func addRouterFlags(cmd *cobra.Command) {
 	f.String("mcp-token-file", "", "Path to the managed MCP token file, when it is not the default: for the same reason as --auth-file. Env BINTRAIL_CONSOLE_MCP_TOKEN_FILE.")
 	f.String("sql-memory", "", "Memory each statement on the copy may use, e.g. 4GB; default 2GB, at least 512MB. Fewer statements run at once when each may use more. Unset, the memory saved in the web interface (Settings, MCP Server) is used, read when the router starts: a change there takes effect when the router is restarted, since how many statements run at once was worked out from it. Env BINTRAIL_CONSOLE_SQL_MEMORY.")
 	f.Int("sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns; a result with more is refused with error 1104, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
-	f.Bool("route-read-only", false, "Refuse every statement that is not a read, and never send it to the source. It reads the statement's text, so it cannot see a stored function that writes: the forwarding account's grants are the guard for that. Env BINTRAIL_CONSOLE_ROUTE_READ_ONLY.")
+	f.Bool("route-read-only", true, "On unless set to false (--route-read-only=false, BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0). Refuse every statement that is not a read, and never send it to the source. It reads the statement's text, so it cannot see a stored function that writes: the forwarding account's grants are the guard for that. Env BINTRAIL_CONSOLE_ROUTE_READ_ONLY.")
 	f.Float64("route-cost-threshold", def.CostThreshold, "A SELECT whose plan query_cost is at least this goes to the copy (a point lookup costs about 1; a full scan over 200k rows about 20000). 0 disables the cost rule. Env BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD.")
 	f.Int64("route-scan-rows", def.ScanRows, "A SELECT whose plan has a full table scan over at least this many rows goes to the copy (on a MariaDB source, whose plans carry no comparable cost, a full index scan too, and a plan whose joins read at least this many rows in all). 0 disables the scan rule. Env BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS.")
 }
@@ -160,7 +160,7 @@ func routerSettingsFrom(cmd *cobra.Command) (routerSettings, error) {
 	if !f.Changed("route-read-only") {
 		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_READ_ONLY"); v != "" {
 			if st.ReadOnly, err = strconv.ParseBool(v); err != nil {
-				return st, fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_READ_ONLY=%q is not a yes or no: use 1 or true to make the port read-only, 0 or false (or leave it unset) for read-write", v)
+				return st, fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_READ_ONLY=%q is not a yes or no: use 1 or true (or leave it unset) for a read-only port, 0 or false to forward writes", v)
 			}
 		}
 	}
@@ -437,6 +437,12 @@ func routerPortFile(st routerSettings) string {
 	return filepath.Join(filepath.Dir(st.ServersFile), console.FlashbackFileName)
 }
 
+// routerMetricsOffLine says that the router's numbers could not be served on
+// addr, and that the MySQL port is served all the same.
+func routerMetricsOffLine(addr string, err error) string {
+	return fmt.Sprintf("WARNING: the router's numbers and metrics are OFF: %s could not be opened (%v). The MySQL port is served without them, and the web interface shows nothing about the router. Free that address or set another (BINTRAIL_ROUTER_METRICS_ADDR or --metrics-addr, and the same in BINTRAIL_CONSOLE_ROUTER_URL where the web interface runs), then restart the router.\n", addr, err)
+}
+
 // routerIgnoredEnv names the capture process's settings that are in the
 // environment and do not apply to the router, each with why. One environment
 // file serves both, so a setting that is silently not read here would read
@@ -445,6 +451,9 @@ func routerIgnoredEnv() []string {
 	var out []string
 	if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE"); v != "" {
 		out = append(out, fmt.Sprintf("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE=%s is not applied: the router has no maximum copy age, an expensive read goes to the copy whatever the age of its snapshot", v))
+	}
+	if v := os.Getenv("BINTRAIL_CONSOLE_FLASHBACK_LISTEN"); v != "" {
+		out = append(out, fmt.Sprintf("BINTRAIL_CONSOLE_FLASHBACK_LISTEN=%s is not applied: the router listens where BINTRAIL_ROUTER_LISTEN or --listen says, 127.0.0.1:3309 unless set. To keep answering on the old address, set BINTRAIL_ROUTER_LISTEN=%s", v, v))
 	}
 	if v := os.Getenv("BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT"); v != "" {
 		out = append(out, fmt.Sprintf("BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT=%s is not applied: the router works out how many statements run at once from its cores and memory", v))
@@ -693,10 +702,13 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 			"GET " + routerStatusPath: routerStatusHandler(st, srv.RouterNumbers, last),
 		})
 		if err != nil {
-			return err
+			// Not a reason to leave the MySQL port closed: the numbers are
+			// an extra, and their address may simply be taken.
+			fmt.Fprint(os.Stderr, routerMetricsOffLine(st.MetricsAddr, err))
+		} else {
+			defer stopMetrics()
+			go exportCopySnapshots(ctx, srv.CopySnapshots, routerCopySnapshotEvery, last)
 		}
-		defer stopMetrics()
-		go exportCopySnapshots(ctx, srv.CopySnapshots, routerCopySnapshotEvery, last)
 	}
 
 	cfg := routerPortConfig(st, srv.FlashbackRoutingOn)

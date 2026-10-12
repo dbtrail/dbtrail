@@ -9,5 +9,8 @@ set -e
 case "$1" in
     remove|0)  # deb: remove. rpm: 0 = last version removed, 1 = upgrade
         systemctl disable --now bintrail-console.service bintrail-router.service || true
+        # The package stopped the router, not its operator: an install after
+        # this removal starts it again.
+        rm -f "${BINTRAIL_ROUTER_MARKER:-/etc/bintrail/.router-started}"
         ;;
 esac

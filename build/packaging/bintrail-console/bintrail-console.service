@@ -11,6 +11,9 @@ Wants=network-online.target
 Type=simple
 User=bintrail
 Group=bintrail
+# Where the web interface reads the router's numbers (bintrail-router.service).
+# A line in the settings file wins.
+Environment=BINTRAIL_CONSOLE_ROUTER_URL=http://127.0.0.1:9091
 EnvironmentFile=/etc/bintrail/bintrail-console.env
 ExecStart=/usr/bin/bintrail-console watch
 WorkingDirectory=/var/lib/bintrail

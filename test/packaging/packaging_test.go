@@ -118,20 +118,25 @@ func TestPackaging_theUnitMatchesWhatThePackageInstalls(t *testing.T) {
 // answers is-enabled from ENABLED, and is-active from ACTIVE: "yes", "no", or
 // "once" for a service that is running when asked and gone after a restart.
 // bintrail-router.service answers is-active from ROUTER_ACTIVE instead, so a
-// case can have one service running and the other not.
+// case can have one service running and the other not; its "starts" is a
+// service that is not running until it is enabled and started.
 func stub(t *testing.T) (path, log string) {
 	t.Helper()
 	dir := t.TempDir()
 	log = filepath.Join(dir, "calls.log")
 	rec := "#!/bin/sh\necho \"$(basename \"$0\") $*\" >> \"$STUB_LOG\"\n"
 	for name, body := range map[string]string{
-		"systemctl": rec + `case "$1" in
+		"systemctl": rec + `case "$*" in "enable --now bintrail-router.service")
+  [ "$ENABLE_FAILS" = yes ] && exit 1
+  : > "$STUB_LOG.router-started" ;; esac
+case "$1" in
   is-enabled) [ "$ENABLED" = yes ] ;;
   is-active) state=$ACTIVE; mark=$STUB_LOG.asked
     case "$*" in *bintrail-router.service*) state=$ROUTER_ACTIVE; mark=$STUB_LOG.router-asked ;; esac
     case "$state" in
       yes) exit 0 ;;
       once) [ ! -e "$mark" ] && : > "$mark" ;;
+      starts) [ -e "$STUB_LOG.router-started" ] ;;
       *) exit 1 ;;
     esac ;;
 esac
@@ -160,7 +165,11 @@ func runScriptEnv(t *testing.T, script string, env []string, args ...string) (ca
 	t.Helper()
 	bin, log := stub(t)
 	cmd := exec.Command("/bin/sh", append([]string{filepath.Join(pkgDir, script)}, args...)...)
-	cmd.Env = append([]string{"PATH=" + bin + ":/usr/bin:/bin", "STUB_LOG=" + log}, env...)
+	// The marker that says the router was started once lives in /etc, which a
+	// test cannot write: every run gets one of its own, absent unless the case
+	// names another.
+	cmd.Env = append([]string{"PATH=" + bin + ":/usr/bin:/bin", "STUB_LOG=" + log,
+		"BINTRAIL_ROUTER_MARKER=" + filepath.Join(filepath.Dir(log), "router-started-once")}, env...)
 	b, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s %v: %v\n%s", script, args, err, b)
@@ -239,15 +248,15 @@ func TestPackaging_postinstallStartsNothingOnAFirstInstallAndRestartsOnAnUpgrade
 		{"first install, their own unit running", []string{"1"}, "yes", "yes", false, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			calls, out := runScriptEnv(t, "postinstall.sh", []string{"ACTIVE=" + tc.active, "ENABLED=" + tc.enabled}, tc.args...)
+			calls, out := runScriptEnv(t, "postinstall.sh", []string{"ACTIVE=" + tc.active, "ENABLED=" + tc.enabled, "ROUTER_ACTIVE=starts"}, tc.args...)
 			if !strings.Contains(calls, "systemctl daemon-reload\n") {
 				t.Errorf("want a daemon-reload, got:\n%s", calls)
 			}
 			if got := strings.Contains(calls, "try-restart bintrail-console.service"); got != tc.restart {
 				t.Errorf("restart = %v, want %v; calls:\n%s", got, tc.restart, calls)
 			}
-			if strings.Contains(calls, "systemctl enable") || strings.Contains(calls, "systemctl start") {
-				t.Errorf("an install must never enable or start the service, got:\n%s", calls)
+			if regexp.MustCompile(`(?m)^systemctl (enable|start).*bintrail-console\.service`).MatchString(calls) {
+				t.Errorf("an install must never enable or start the capture service, got:\n%s", calls)
 			}
 			if got := strings.Contains(out, "systemctl enable --now bintrail-console"); got != tc.hint {
 				t.Errorf("how-to-start hint printed = %v, want %v; output:\n%s", got, tc.hint, out)
@@ -287,7 +296,7 @@ func TestPackaging_preremoveStopsTheServiceOnARemovalAndNeverOnAnUpgrade(t *test
 func TestPackaging_postremoveDeletesOnlyTheSettingsFileAndOnlyOnAPurge(t *testing.T) {
 	// purge runs before the systemd check, so it is tested on any host.
 	calls, _ := runScript(t, "postremove.sh", "", "purge")
-	if !strings.Contains(calls, "rm -f /etc/bintrail/bintrail-console.env\n") {
+	if !strings.Contains(calls, "rm -f /etc/bintrail/bintrail-console.env /etc/bintrail/.router-started\n") {
 		t.Errorf("a purge must delete the settings file, got:\n%s", calls)
 	}
 	for _, arg := range []string{"remove", "upgrade", "0", "1", "purge"} {
@@ -350,8 +359,17 @@ func TestPackaging_theRouterUnitRunsBesideTheCaptureUnitAndNotUnderIt(t *testing
 	}
 	// Read-only unless the settings file says otherwise. Environment= is the
 	// default and EnvironmentFile= overrides it, whatever their order.
-	if got := line(router, "Environment"); got != "BINTRAIL_CONSOLE_ROUTE_READ_ONLY=1" {
+	if got := line(router, "Environment"); !strings.HasPrefix(got, "BINTRAIL_CONSOLE_ROUTE_READ_ONLY=1 ") {
 		t.Errorf("Environment=%s, want the router read-only by default", got)
+	}
+	// The router says its numbers on an address, and the web interface reads
+	// them from one: the two units must name the same, or the panel is empty
+	// on a stock install.
+	if !strings.HasSuffix(line(router, "Environment"), " BINTRAIL_ROUTER_METRICS_ADDR=127.0.0.1:9091") {
+		t.Error("the router unit does not turn its numbers on at 127.0.0.1:9091")
+	}
+	if !strings.Contains(capture, "\nEnvironment=BINTRAIL_CONSOLE_ROUTER_URL=http://127.0.0.1:9091\n") {
+		t.Error("the capture unit does not read the router's numbers from 127.0.0.1:9091")
 	}
 	for _, l := range strings.Split(router, "\n") {
 		if strings.HasPrefix(l, "#") {
@@ -363,35 +381,76 @@ func TestPackaging_theRouterUnitRunsBesideTheCaptureUnitAndNotUnderIt(t *testing
 	}
 }
 
-func TestPackaging_postinstallRestartsARunningRouterOnAnUpgradeAndNeverStartsOne(t *testing.T) {
+// The MySQL port is answered by the router and by nothing else, so the package
+// starts it: on a first install, and on the first upgrade that brings it (the
+// capture service of the version before answered the port itself). The marker
+// says that happened, so a router its operator stopped stays stopped. One that
+// runs is restarted, as the capture service is. And a router that is not
+// running after either is said, with where to look.
+func TestPackaging_postinstallStartsTheRouterOnceAndRestartsARunningOne(t *testing.T) {
 	needSystemd(t)
 	for _, tc := range []struct {
 		name            string
 		args            []string
 		capture, router string
-		restart, warn   bool
+		marked          bool
+		restart, start  bool
+		warn            bool
+		enableFails     bool
 	}{
-		{"deb upgrade, router running", []string{"configure", "0.103.0"}, "yes", "yes", true, false},
-		{"rpm upgrade, router running", []string{"2"}, "yes", "yes", true, false},
-		{"upgrade, router running and capture stopped", []string{"2"}, "no", "yes", true, false},
-		{"upgrade, router never started", []string{"2"}, "yes", "no", false, false},
-		{"upgrade, and the router does not come back", []string{"2"}, "yes", "once", true, true},
-		{"first install, their own router unit running", []string{"1"}, "no", "yes", false, false},
-		{"deb first install", []string{"configure"}, "no", "no", false, false},
+		{"deb first install", []string{"configure"}, "no", "starts", false, false, true, false, false},
+		{"rpm first install", []string{"1"}, "no", "starts", false, false, true, false, false},
+		{"first upgrade that brings the router", []string{"configure", "0.103.1"}, "yes", "starts", false, false, true, false, false},
+		{"rpm first upgrade that brings the router", []string{"2"}, "yes", "starts", false, false, true, false, false},
+		{"first install, and the router does not start", []string{"1"}, "no", "no", false, false, true, true, false},
+		{"deb upgrade, router running", []string{"configure", "0.104.0"}, "yes", "yes", true, true, false, false, false},
+		{"rpm upgrade, router running", []string{"2"}, "yes", "yes", true, true, false, false, false},
+		{"upgrade, router running and capture stopped", []string{"2"}, "no", "yes", true, true, false, false, false},
+		{"upgrade, router running, marker lost", []string{"2"}, "yes", "yes", false, true, false, false, false},
+		{"upgrade, router stopped by the operator", []string{"2"}, "yes", "no", true, false, false, false, false},
+		{"reinstall, router stopped by the operator", []string{"configure"}, "no", "no", true, false, false, false, false},
+		{"upgrade, and the router does not come back", []string{"2"}, "yes", "once", true, true, false, true, false},
+		{"first install, their own router unit running", []string{"1"}, "no", "yes", false, false, true, false, false},
+		// Enabling did not work (a masked unit, no systemd to talk to): it is
+		// said, nothing claims it started, and no marker stops the next try.
+		{"first install, and the router cannot be enabled", []string{"1"}, "no", "no", false, false, true, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			calls, out := runScriptEnv(t, "postinstall.sh", []string{"ACTIVE=" + tc.capture, "ROUTER_ACTIVE=" + tc.router, "ENABLED=yes"}, tc.args...)
+			marker := filepath.Join(t.TempDir(), "router-started-once")
+			if tc.marked {
+				if err := os.WriteFile(marker, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			calls, out := runScriptEnv(t, "postinstall.sh", []string{"ACTIVE=" + tc.capture, "ROUTER_ACTIVE=" + tc.router, "ENABLED=yes", "BINTRAIL_ROUTER_MARKER=" + marker, "ENABLE_FAILS=" + map[bool]string{true: "yes"}[tc.enableFails]}, tc.args...)
 			if got := strings.Contains(calls, "try-restart bintrail-router.service"); got != tc.restart {
 				t.Errorf("router restart = %v, want %v; calls:\n%s", got, tc.restart, calls)
 			}
-			if strings.Contains(calls, "systemctl enable") || strings.Contains(calls, "systemctl start") {
-				t.Errorf("an install must never enable or start a service, got:\n%s", calls)
+			if got := strings.Contains(calls, "systemctl enable --now bintrail-router.service\n"); got != tc.start {
+				t.Errorf("router enabled and started = %v, want %v; calls:\n%s", got, tc.start, calls)
 			}
-			if got := strings.Contains(out, "bintrail-router did not come back"); got != tc.warn {
+			// The folder the unit works in must be there before the router
+			// starts: the capture unit, which creates it, may never have run.
+			if tc.start {
+				mk, en := strings.Index(calls, "install -d -o bintrail -g bintrail -m 0750 /var/lib/bintrail"), strings.Index(calls, "systemctl enable --now bintrail-router.service")
+				if _, err := os.Stat("/var/lib/bintrail"); err != nil && (mk < 0 || mk > en) {
+					t.Errorf("the working folder is not created before the router starts; calls:\n%s", calls)
+				}
+			}
+			if got := strings.Contains(out, "could not be enabled"); got != tc.enableFails {
+				t.Errorf("said enabling failed = %v, want %v; output:\n%s", got, tc.enableFails, out)
+			}
+			if got := strings.Contains(out, "started now"); got != (tc.start && !tc.enableFails) {
+				t.Errorf("said the router was started = %v, want %v; output:\n%s", got, tc.start, out)
+			}
+			if got := strings.Contains(out, "bintrail-router is not running"); got != tc.warn {
 				t.Errorf("router warning printed = %v, want %v; output:\n%s", got, tc.warn, out)
 			}
 			if strings.Contains(out, "bintrail-console did not come back") {
 				t.Errorf("the capture service was fine in every case here, got:\n%s", out)
+			}
+			if _, err := os.Stat(marker); (err == nil) == tc.enableFails {
+				t.Errorf("marker there = %v after the script: it must be there unless enabling failed, or the next upgrade starts a stopped router again (or never retries one that did not start)", err == nil)
 			}
 		})
 	}
@@ -403,6 +462,11 @@ func TestPackaging_preremoveStopsTheRouterOnARemoval(t *testing.T) {
 		calls, _ := runScript(t, "preremove.sh", "", arg)
 		if !regexp.MustCompile(`(?m)^systemctl disable --now .*bintrail-router\.service`).MatchString(calls) {
 			t.Errorf("preremove %s must stop and disable the router, got:\n%s", arg, calls)
+		}
+		// And forget that it was started once: the package stopped it, so an
+		// install after this removal must start it again.
+		if !regexp.MustCompile(`(?m)^rm -f \S*router-started`).MatchString(calls) {
+			t.Errorf("preremove %s must remove the started-once marker, got:\n%s", arg, calls)
 		}
 	}
 }

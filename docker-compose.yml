@@ -55,7 +55,7 @@
 # instead of leaving you to diff two files (#1529). It is passed to the
 # console service below through the YAML anchor, so there is one number to
 # bump: raise it whenever this file gains wiring a running stack would need.
-x-bintrail-compose-version: &compose_version 3
+x-bintrail-compose-version: &compose_version 4
 
 volumes:
   bintrail-index-data:    # MySQL 8.4 datadir — the forensic record (NEW volume:
@@ -276,13 +276,8 @@ services:
       # If you disable metrics (METRICS_ADDR= empty in .env) this mapping stays
       # but nothing listens behind it — connections are simply refused.
       - "127.0.0.1:9090:9090"
-      # The MySQL-protocol port, on the host loopback. Nothing listens behind
-      # it until it is turned on in the web interface (Connect), and then a
-      # MySQL client on this machine reaches it with the password shown there.
-      # For another machine, open a tunnel, or widen to "3309:3309" behind a
-      # firewall: the port's password reads every server. If 3309 is taken on
-      # this machine, delete this line (install.sh does it for you).
-      - "127.0.0.1:3309:3309"
+      # The MySQL-protocol port (3309) is not published here: the `router`
+      # service below serves it.
     environment:
       # Optional: a source MySQL to start watching immediately. Leave unset
       # and add servers from the console UI instead (the zero-config path).
@@ -499,16 +494,11 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # ── Router: the MySQL port with read routing, apart from capture ─
-  # Experimental. Applications connect to it in place of their MySQL server:
-  # a statement goes to the server's source MySQL, except SELECTs whose plan
-  # says they are expensive, which run on the copy. It is the port the
-  # `bintrail` service can serve on 3309, run as a service of its own, so
-  # restarting `bintrail` does not drop its connections and a statement that
-  # runs out of memory here cannot take capture with it.
-  #
-  # It is READ-ONLY here (ROUTER_READ_ONLY below): writes are refused, not
-  # forwarded.
+  # ── Router: the MySQL port, served apart from capture ─────────────
+  # MySQL clients and applications connect here, on port 3309. It runs as a
+  # service of its own, so restarting `bintrail` does not drop its
+  # connections and a statement that runs out of memory here cannot take
+  # capture with it.
   #
   # It starts with the stack and LISTENS ONLY WHILE THE MYSQL PORT IS TURNED
   # ON in the web interface (Settings, MCP Server, Connect a SQL client),
@@ -517,47 +507,54 @@ services:
   # password too while the port is on; it does not open it.
   # Until then it waits and uses next to nothing.
   #
-  # WHAT THAT PASSWORD READS HERE: the source itself, live, and only as far
-  # as you allow. On 3309 the same password reads the history and the copy of
-  # the captured tables. Here a statement is forwarded to the server's source
-  # MySQL with that server's FORWARDING ACCOUNT: a MySQL user of its own that
-  # you create with SELECT on what applications should read, and set on the
+  #   mysql -h 127.0.0.1 -P 3309 -u <server id or name> -p
+  #   mysql> SHOW ROUTER STATUS;     -- the copy's age, who answered, the pool
+  #
+  # WHO ANSWERS. As it comes, the copy answers every statement: the history
+  # (_flashback, _snapshot, _diff) and ordinary SQL over the captured tables.
+  # With READ ROUTING turned on in the web interface (experimental), each
+  # statement goes to the server's source MySQL instead, except SELECTs
+  # whose plan says they are expensive, which run on the copy. It forwards
+  # with that server's FORWARDING ACCOUNT: a MySQL user of its own that you
+  # create with SELECT on what applications should read, and set on the
   # server's page in the web interface. The account DBTrail captures with is
   # never used here, so a server with no forwarding account is answered
   # from the copy alone, the light reads too, until it has one.
   #
-  #   mysql -h 127.0.0.1 -P 3310 -u <server id or name> -p
-  #   mysql> SHOW ROUTER STATUS;     -- the copy's age, who answered, the pool
+  # It is READ-ONLY (ROUTER_READ_ONLY below): writes are refused, not
+  # forwarded.
   #
   # It reads the servers the web interface manages and the copies on the state
-  # volume, mounted READ-ONLY here: it writes nothing there. It needs each
-  # server's source to be reachable from this container, as `bintrail` does.
+  # volume, mounted READ-ONLY here: it writes nothing there. With read routing
+  # on it needs each server's source to be reachable from this container, as
+  # `bintrail` does.
   #
   # How many statements run on the copy at once is worked out from the cores
   # and memory this service may use. With no ceiling it takes half of the
   # machine, since capture uses the machine too. To give it ceilings of its
   # own, set ROUTER_MEMORY (e.g. 8g) and ROUTER_CPUS (e.g. 4) in .env: it then
   # uses all of what it was given, and a statement that outgrows its memory
-  # cannot reach capture's. Each statement may take SQL_MEMORY (2GB unless
-  # set) plus a quarter.
+  # cannot reach capture's. Each statement may take the memory saved in the
+  # web interface (SQL_MEMORY in .env wins; 2GB unless set) plus a quarter.
   #
-  # Not wanted? `docker compose stop router`, or delete this service.
+  # Without this service nothing serves the MySQL port: the web interface
+  # can turn it on and nothing listens.
   router:
     image: ghcr.io/dbtrail/bintrail-console:${BINTRAIL_TAG:-latest}
     extra_hosts:
       - "host.docker.internal:${HOST_GATEWAY:-host-gateway}"
     command: ["router"]
-    # On the host loopback. For another machine, open a tunnel, or widen to
-    # "3310:3310" behind a firewall: the port forwards statements to every
-    # server's source on its password alone. If 3310 is taken on this machine,
-    # delete the whole `ports:` line below (install.sh does it for you). It is
-    # one line on purpose: a `ports:` key with nothing under it is a file
-    # Docker Compose refuses.
-    ports: ["127.0.0.1:3310:3310"]
+    # On the host loopback. Nothing listens behind it until the MySQL port is
+    # turned on in the web interface. For another machine, open a tunnel, or
+    # widen to "3309:3309" behind a firewall: the port's password reads every
+    # server. If 3309 is taken on this machine, delete the whole `ports:` line
+    # below (install.sh does it for you). It is one line on purpose: a
+    # `ports:` key with nothing under it is a file Docker Compose refuses.
+    ports: ["127.0.0.1:3309:3309"]
     environment:
       # All interfaces INSIDE the container; the `ports` mapping above is what
       # controls exposure on the host.
-      BINTRAIL_ROUTER_LISTEN: 0.0.0.0:3310
+      BINTRAIL_ROUTER_LISTEN: 0.0.0.0:3309
       BINTRAIL_CONSOLE_TOKEN: ${CONSOLE_TOKEN:-}
       # The same three paths the `bintrail` service is given: the servers it
       # routes for, and the two files a statement must never read through a

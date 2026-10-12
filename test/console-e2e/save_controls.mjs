@@ -870,9 +870,11 @@ export async function runSaveScenes(ctx) {
     });
 
     // ── the MySQL port ──────────────────────────────────────────────────
-    // On a SECOND daemon, started by run.sh with no port address: the main
-    // one is given its address at startup, where the panel shows it as fixed
-    // and has no switch. Everything is pressed on one panel, in a row, so a
+    // On a SECOND daemon, whose port was never turned on (the main one's is
+    // on from the start, for another scene's photograph). The daemon only
+    // saves the setting: a router, started by run.sh beside it, follows the
+    // saved file and opens and closes the port, so "listening" is waited for,
+    // not read at once. Everything is pressed on one panel, in a row, so a
     // redraw that left the buttons acting on a detached copy fails here.
     await scene("mysql-port", async () => {
       const url2 = process.env.E2E_PORT2_URL || "", sqlPort = process.env.E2E_SQLPORT || "";
@@ -888,6 +890,8 @@ export async function runSaveScenes(ctx) {
         c.once("error", () => done(false));
         c.once("close", () => res(false));
       });
+      const opened = () => until(listening, 15000, 500);
+      const closed = () => until(async () => !(await listening()), 15000, 500);
       const tab = await browser.newPage({ viewport: { width: 1300, height: 1000 } });
       tab.on("pageerror", (e) => jsErrors.push("mysql-port tab: " + String(e)));
       tab.on("dialog", acceptDialog);
@@ -919,11 +923,12 @@ export async function runSaveScenes(ctx) {
         const pw1 = await until(async () => (await shown()).password);
         const st1 = await status();
         const s1 = await shown();
-        check("mysql-port", "Turn on opens the port at the address typed, saves it, and shows the password and the mysql line",
+        const open1 = await opened();
+        check("mysql-port", "Turn on saves the port as on at the address typed, shows the password and the mysql line, and the router opens it",
           before && before.enabled === false && before.can_manage === true && !wasOpen && !!on && !!pw1 &&
           st1 && st1.enabled === true && st1.listen === want && st1.source === "saved" && st1.has_password === true &&
-          !JSON.stringify(st1).includes(pw1) && s1.line === "mysql -h 127.0.0.1 -P " + sqlPort + " -u <server-name> -p" && await listening(),
-          JSON.stringify({ before, wasOpen, typed, on, pw1: !!pw1, st1, line: s1.line, listening: await listening() }));
+          !JSON.stringify(st1).includes(pw1) && s1.line === "mysql -h 127.0.0.1 -P " + sqlPort + " -u <server-name> -p" && open1,
+          JSON.stringify({ before, wasOpen, typed, on, pw1: !!pw1, st1, line: s1.line, listening: open1 }));
 
         // The same panel, pressed again: a second password replaces the first.
         const fresh = await press("New password");
@@ -951,9 +956,10 @@ export async function runSaveScenes(ctx) {
         const off = await press("Turn off");
         const st3 = await until(async () => { const b = await status(); return b && b.enabled === false ? b : null; });
         const back = await until(() => tab.evaluate(() => !!Array.from(document.querySelectorAll(".cn-sql:not(.cn-ice) button")).find((x) => x.textContent === "Turn on")));
-        check("mysql-port", "Turn off closes the port, saves it as off, and the panel offers Turn on again",
-          !!off && !!st3 && st3.has_password === true && st3.suggested_listen === want && !!back && !(await listening()),
-          JSON.stringify({ off, st3, back, listening: await listening() }));
+        const shut = await closed();
+        check("mysql-port", "Turn off saves the port as off, the panel offers Turn on again, and the router closes it",
+          !!off && !!st3 && st3.has_password === true && st3.suggested_listen === want && !!back && shut,
+          JSON.stringify({ off, st3, back, closed: shut }));
       } finally { await tab.close(); }
     });
 

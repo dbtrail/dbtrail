@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `count_star()` and `sum(total)` when the copy did; a column written in
   another case than it was declared in, and a string literal, differed too.
   A program that reads its result by column name found one name or the other
-  depending on the plan. The port (inside `watch`, and the router) now asks
+  depending on the plan. The port now asks
   the source how it names the statement's columns, by preparing the
   statement there without running it, and sends the copy's answer under
   those names. A prepared statement uses the names its own `PREPARE` was
@@ -119,71 +119,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ready yet, and the daemon log says why under `copy mirror`. Recovery, time
   travel, the Snapshots page and the downloaded `views.sql` keep reading the
   bucket. A server that also keeps a local snapshot folder is unchanged. The
-  separate `router` service reads the mirrors the daemon keeps when it shares
-  the daemon's state volume, as it does in the bundled stack; a router on a
-  machine of its own keeps none yet.
-- **`bintrail-console router`: the MySQL-protocol port and its read routing as
-  a service of its own** (#2084, experimental). Until now the port lived
-  inside `bintrail-console watch`, the process that captures: restarting it
-  dropped every routed connection, and the statements that go to the copy
-  were kept to two at a time so they could not starve capture. The new
-  command runs the same port, with the same routing rules, beside that
-  process. It reads the servers the web interface manages and never writes
-  them, sees a change there within seconds, and asks the capture process
-  nothing. How many statements run on the copy at once, and with how many
-  threads each, is worked out from the cores and the memory the service may
-  use, so nothing is set by hand; each worker process answers statement after
-  statement instead of one process per statement. Two rules differ from the
-  port inside `watch`: there is no maximum copy age (an expensive read goes
-  to the copy whatever the age of its snapshot), and a statement that finds
-  every worker busy waits and then gets error 1040 instead of being forwarded
-  to MySQL. A server with no forwarding account is answered from the copy
-  alone, as there. It routes only when the port's
-  saved setting says so (`routing: true` in `console-mysql-port.yaml`, off
-  until set), and turning that on or off closes the connections that were
-  open, so that each comes back under the new setting. On either port a
-  client that connects as `<server>@copy` is answered from the copy alone,
-  whatever the routing. It listens on
-  `127.0.0.1:3310` by default. Nothing changes for the port inside `watch`.
-  It answers `SHOW ROUTER STATUS` on its own port (the copy's age, who
-  answered, the pool) and, with `--metrics-addr`, exports the copy's snapshot
-  time per server so its age can be alerted on like replica lag.
-  The same address answers `GET /status` with those numbers as one JSON
-  document, every server and the pool, for a program to read (#2318).
-  Given that address (`watch --router-url`, `BINTRAIL_CONSOLE_ROUTER_URL`;
-  the Docker stack sets it), the web interface shows them on its MCP Server
-  page, in a panel of their own: who answered for the server picked in the
-  sidebar and why, the age of the copy the router reads, and its workers. A
-  router that does not answer is said as that, never as zero statements.
-  The Docker stack starts it as the `router` service (`docker-compose.yml`
-  is version 3: download the current file to get it), with the state volume
-  mounted read-only, and read-only itself: it refuses writes unless
-  `ROUTER_READ_ONLY=0` is set. It forwards with each server's forwarding
-  account and refuses a server that has none (see Changed, #2317).
-  `ROUTER_MEMORY` and `ROUTER_CPUS` in `.env`
-  give it ceilings of its own. The `bintrail-console` package installs it as a
-  second systemd service, `bintrail-router`, read-only and off until you
-  enable it (`sudo systemctl enable --now bintrail-router`). See
-  [The router](time-travel-sql.md#the-router-the-same-port-as-a-service-of-its-own-experimental).
+  router, which serves the MySQL port, reads the mirrors the daemon keeps
+  when it shares the daemon's state volume, as it does in the bundled stack;
+  a router on a machine of its own keeps none yet.
+- **`bintrail-console router`: the process that serves the MySQL port**
+  (#2084, #2341). The MySQL port used to be opened by `bintrail-console
+  watch`, the process that captures: restarting it dropped every connection,
+  and the statements on the copy were kept to two at a time so they could not
+  starve capture. The port is now served by a process of its own, the
+  router, and by nothing else (see Changed for what to do on an upgrade). It
+  listens on `127.0.0.1:3309` by default (`--listen`,
+  `BINTRAIL_ROUTER_LISTEN`), and only while the MySQL port is turned on in
+  the web interface (Settings, MCP Server, Connect a SQL client): it follows
+  the saved setting, takes the password created there, and closes the port
+  with every connection on it when the port is turned off or the password is
+  replaced. An access token (`--token`, `BINTRAIL_CONSOLE_TOKEN`) is one
+  more password while the port is on, and does not open it. The router reads
+  the servers the web interface manages and never writes them, sees a change
+  there within seconds, and asks the capture process nothing. How many
+  statements run on the copy at once, and with how many threads each, is
+  worked out from the cores and the memory the service may use, so nothing
+  is set by hand; each worker process answers statement after statement
+  instead of one process per statement. It answers `SHOW ROUTER STATUS` on
+  its own port (the copy's age, who answered, the pool) and, with
+  `--metrics-addr`, exports the copy's snapshot time per server so its age
+  can be alerted on like replica lag. The same address answers `GET /status`
+  with those numbers as one JSON document, every server and the pool, for a
+  program to read (#2318). Given that address (`watch --router-url`,
+  `BINTRAIL_CONSOLE_ROUTER_URL`; the Docker stack and the packages set it),
+  the web interface shows them on its MCP Server page, in a panel of their
+  own: who answered for the server picked in the sidebar and why, the age of
+  the copy the router reads, and its workers. A router that does not answer
+  is said as that, never as zero statements. The Docker stack runs it as the
+  `router` service, with the state volume mounted read-only; `ROUTER_MEMORY`
+  and `ROUTER_CPUS` in `.env` give it ceilings of its own. The
+  `bintrail-console` package runs it as a second systemd service,
+  `bintrail-router`, which the package enables and starts. See
+  [The router](time-travel-sql.md#the-router-the-process-that-serves-the-port).
+- **A connection can ask for the copy alone: `<server>@copy`** (#2341). A
+  client that connects with `@copy` after the server's id or name is
+  answered from the copy alone, the light reads too, while read routing is
+  on for the others. It only takes a connection out of routing.
 
 ### Changed
-- **The router no longer refuses a statement at once when 16 are already
-  waiting for a worker** (#2327). It waits its turn, for up to 30 seconds,
-  and only then gets error 1040. A refusal answered at once was free to
-  repeat: clients that retried without a pause sent thousands of statements
-  a second, each of which had already cost the source an `EXPLAIN`, and a
-  router over capacity answered half of what it answers at capacity (8
-  statements a second against 17, measured with 256 clients on 2 workers).
-  The port inside `watch` keeps its line of 16: there a statement that finds
-  the copy busy is forwarded to MySQL, not refused.
+- **The MySQL port, 3309, is served by the router only** (#2341). The port
+  used to be opened inside `bintrail-console watch` (turned on in the web
+  interface or with `--flashback-listen`; 3309 in the Docker stack). Now
+  `bintrail-console router` is the only process that serves it. `watch`
+  opens no MySQL port. The port is still turned on and off in the web
+  interface, and its saved setting and password are kept. **What to do on
+  an upgrade:**
+  - **Docker Compose: take the current `docker-compose.yml`** (it is version
+    4). The `127.0.0.1:3309:3309` mapping moved from the `bintrail` service
+    to the `router` service. With newer images under an older file, nothing
+    answers on 3309: when the port is turned on, the `bintrail` service
+    prints a `WARNING` at startup that says so and how to fix it (download
+    the current file next to yours, merge your edits, move it into place).
+    An edit you made to the `3309` mapping belongs on the `router` service
+    in the new file.
+    See [Upgrading the stack](docker.md#upgrading-the-stack).
+  - **deb and rpm packages:** the package enables and starts
+    `bintrail-router` on the first upgrade that brings it (once: a router
+    you stop later stays stopped). It needs no settings to start, and its
+    numbers are on by default, at `127.0.0.1:9091`. It listens on
+    `127.0.0.1:3309`. If your port answered other machines, or used another
+    port number, set `BINTRAIL_ROUTER_LISTEN` to that address in
+    `/etc/bintrail/bintrail-console.env` and restart `bintrail-router`.
+  - **ECS, or any setup you wire by hand:** add a second container or
+    process that runs `bintrail-console router`, shares the capture
+    process's state (the servers file and `console-mysql-port.yaml`) and
+    publishes 3309. See [ecs.md](ecs.md#the-mysql-port).
+  - **`install.sh`** checks port 3309 only. When it is taken, the stack is
+    installed without publishing the MySQL port, and the installer says so.
+- **`--flashback-listen` no longer opens a port** (#2341).
+  `bintrail-console watch --flashback-listen` /
+  `BINTRAIL_CONSOLE_FLASHBACK_LISTEN` is kept so that a start line that has
+  it does not fail, and does one thing, once: a port with no saved setting
+  yet is saved as on, with a new password you can replace in the web
+  interface, so an installation that used the flag keeps its port. A port
+  that already has a saved setting, on or off, is left alone. `watch` prints
+  a `WARNING` at startup that asks you to remove the setting. The port
+  answers where the router listens (`127.0.0.1:3309` unless
+  `--listen` / `BINTRAIL_ROUTER_LISTEN` says otherwise), not on the address
+  the flag named or the one saved in the web interface.
+- **Read routing is a saved setting, with no maximum copy age** (#2341).
+  `--route-max-copy-age` / `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE` no longer
+  turns read routing on and only prints a `WARNING`. Read routing
+  (experimental) is `routing: true` in the port's saved setting
+  (`console-mysql-port.yaml`), off until set; turning it on or off closes
+  the connections that were open, so that each comes back under the new
+  setting. **If you ran with `--route-max-copy-age`, routing is off after
+  the upgrade and the copy answers every statement until you turn it on.**
+  With routing on, an expensive read goes to the copy whatever the age of
+  its snapshot: the copy's age is a number to watch (`SHOW ROUTER STATUS`,
+  `bintrail_read_routing_copy_snapshot_timestamp_seconds`), not a rule. The
+  check of which tables changed since their snapshot is gone with the limit,
+  and the reasons `copy_age_unknown`, `copy_too_old` and `tables_unchanged`
+  are no longer counted. Statements the copy cannot answer correctly (for
+  example `DATE_FORMAT`, `NOW()`) still go to MySQL.
+- **The port is read-only unless told otherwise** (#2341).
+  `--route-read-only` is now on by default on the router: under read
+  routing, a statement that is not a read is refused with error 1290 and
+  never reaches the source. `--route-read-only=false`,
+  `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0` or, in the Docker stack,
+  `ROUTER_READ_ONLY=0` forwards writes. `--route-read-only`,
+  `--route-cost-threshold`, `--route-scan-rows` and `--sql-port-max-rows`
+  given to `watch` no longer apply: `watch` prints a `WARNING` that names
+  them. Give them to the router, on its command line or in the environment
+  both processes share.
+- **A busy copy never hands a heavy read to MySQL** (#2327, #2341). Under
+  read routing, an expensive read that finds every worker busy waits its
+  turn, in the order it arrived, for up to 30 seconds, and then the client
+  gets error 1040, which drivers and pools retry. It used to be forwarded to
+  MySQL after the wait, or at once when 16 statements were already waiting.
+  The line is long on purpose (4,096 statements): a refusal answered at once
+  was free to repeat, and each attempt had already cost the source an
+  `EXPLAIN` (a router over capacity answered 8 statements a second against
+  17 at capacity, measured with 256 clients on 2 workers). Refusals are
+  counted as `copy_queue_full` and `copy_wait_timeout` under
+  `route="refused"`.
 - **Statements waiting for a SQL worker are served in the order they
-  arrived**, on the router, the port inside `watch` and the SQL page. A freed
+  arrived**, on the MySQL port and on the SQL page. A freed
   worker went to whichever waiter took it first, so with a long line some
   lost every time and were refused at the end of their wait while later
-  arrivals were served. A statement whose server already runs one on the
-  port inside `watch` is passed over, as before, and keeps its place.
+  arrivals were served.
 - **The MySQL port no longer forwards with the account DBTrail captures
-  with** (#2317). Under read routing (`--route-max-copy-age`, experimental)
+  with** (#2317). Under read routing (experimental)
   a server with no forwarding account used to have its statements forwarded
   to its source with the capture account. That account reads whatever
   capture needs, and with `SELECT ON *.*`, the grant the docs show first,
@@ -191,11 +252,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   history, could read the password hashes of every account on the source.
   The port now forwards only with a server's forwarding account, a second
   MySQL user set on the server's page (**Forwarding user**) or as
-  `route_user` / `route_password` in the API. **If you turned read routing
-  on without one, routing stops for that server after the upgrade**: the
-  copy answers alone on the port inside `watch`, the new `router` service
-  refuses the server's statements, and the Connect page and the error both
-  say what is missing. To get routing back, create a user with `SELECT` on
+  `route_user` / `route_password` in the API. A server with no forwarding
+  account is not forwarded for: the copy answers it alone, the light reads
+  too, and `SHOW ROUTER STATUS` says so. To get routing for it, create a
+  user with `SELECT` on
   what the port should read, save it as the server's forwarding user, and
   reconnect. A forwarding account saved as the capture account itself, or
   one that cannot be read, counts as none. Nothing changes for a port with

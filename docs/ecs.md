@@ -147,21 +147,61 @@ again from the index.
   is always allowed.
 - **HTTPS.** Terminate TLS on the ALB, with a certificate for the name people
   open. The session cookie is always marked `Secure`.
-- **Security groups.** The task accepts `8090` from the load balancer only,
+- **Security groups.** The task accepts `8090` from the load balancer only
+  (and `3309` from the Network Load Balancer, if you add
+  [the MySQL port](#the-mysql-port)),
   reaches the index on `3306`, every source it captures, and EFS on `2049`.
 
 ## The MySQL port
 
-To let a MySQL client in ([time-travel-sql.md](time-travel-sql.md)), add a
-port mapping for `3309` and a **Network** Load Balancer in front of it: it is
-plain TCP, which an ALB does not carry. Then turn the port on in the web
-interface (**Settings → MCP Server → Connect a SQL client**, address
-`0.0.0.0:3309`). The setting and its password are kept in
-`console-mysql-port.yaml` on EFS. The port has no TLS: keep the NLB internal.
+The MySQL port (3309, see [time-travel-sql.md](time-travel-sql.md)) is not
+opened by the capture container. A second process serves it,
+`bintrail-console router`, so the task needs **a second container** for it.
+Add it to the same task definition, from the same image, with the state
+volume mounted at the same path: the router reads the servers file and
+`console-mysql-port.yaml` that the capture container writes there.
 
-Starting it with `--flashback-listen` instead also needs
-`BINTRAIL_CONSOLE_TOKEN` (as a secret): without it the task stops at startup.
+```json
+{
+  "name": "router",
+  "image": "ghcr.io/dbtrail/bintrail-console:<version>",
+  "essential": false,
+  "command": ["router"],
+  "portMappings": [{ "containerPort": 3309, "protocol": "tcp" }],
+  "environment": [
+    { "name": "BINTRAIL_ROUTER_LISTEN", "value": "0.0.0.0:3309" },
+    { "name": "BINTRAIL_CONSOLE_SERVERS", "value": "/var/lib/bintrail/console-servers.yaml" },
+    { "name": "BINTRAIL_CONSOLE_AUTH", "value": "/var/lib/bintrail/console-auth.yaml" },
+    { "name": "BINTRAIL_CONSOLE_MCP_TOKEN_FILE", "value": "/var/lib/bintrail/console-mcp-token.yaml" },
+    { "name": "AWS_REGION", "value": "<region>" }
+  ],
+  "mountPoints": [{ "sourceVolume": "state", "containerPath": "/var/lib/bintrail", "readOnly": true }],
+  "logConfiguration": {
+    "logDriver": "awslogs",
+    "options": { "awslogs-group": "/ecs/dbtrail", "awslogs-region": "<region>", "awslogs-stream-prefix": "router" }
+  }
+}
+```
 
+- Put a **Network** Load Balancer in front of `3309`: it is plain TCP, which
+  an ALB does not carry. The port has no TLS: keep the NLB internal.
+- Then turn the port on in the web interface (**Settings → MCP Server →
+  Connect a SQL client**, address `0.0.0.0:3309`). The setting and its
+  password are kept in `console-mysql-port.yaml` on EFS. The router listens
+  only while the port is turned on there.
+- The router mounts the state read-only: it writes nothing there. This is how
+  the Docker Compose stack runs it.
+- It is read-only: a statement that is not a read is refused. See
+  [The router](time-travel-sql.md#the-router-the-process-that-serves-the-port)
+  for its settings.
+- The router sizes itself from the cores and memory it may use. In one task
+  the two containers share the task's `cpu` and `memory`, so size the task
+  for both.
+
+Without this container nothing answers on 3309, even with the port turned on
+in the web interface. `--flashback-listen` on the capture container no longer
+opens a port: remove it, and `BINTRAIL_CONSOLE_FLASHBACK_LISTEN` too
+([Upgrading](time-travel-sql.md#upgrading-from-a-version-with-the-port-inside-watch)).
 ## AWS access
 
 Give the task role the S3 policy in [s3-iam-policy.md](s3-iam-policy.md) for

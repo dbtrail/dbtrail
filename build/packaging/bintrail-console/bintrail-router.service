@@ -2,14 +2,13 @@
 # /etc/bintrail/bintrail-console.env. To change the unit itself, use
 # `systemctl edit bintrail-router`, which survives upgrades; this file does not.
 #
-# The router is the MySQL port with read routing, as a service of its own:
-# applications connect to it in place of their MySQL server. It is separate
-# from bintrail-console.service on purpose, so that restarting capture does not
-# drop its connections and a statement that runs out of memory here cannot
-# take capture with it. It is not started when the package is installed:
-#   sudo systemctl enable --now bintrail-router
+# The router is the MySQL port (3309): MySQL clients and applications connect
+# to it. It is a service of its own on purpose, so that restarting capture
+# does not drop its connections and a statement that runs out of memory here
+# cannot take capture with it. The package enables and starts it; it accepts
+# no connection until the port is turned on in the web interface.
 [Unit]
-Description=DBTrail router: the MySQL port with read routing
+Description=DBTrail router: the MySQL port
 Documentation=https://www.dbtrail.com/docs/
 After=network-online.target
 Wants=network-online.target
@@ -21,7 +20,9 @@ Group=bintrail
 # Read-only unless the settings file says otherwise: a statement that is not
 # a read is refused and never reaches the source. A line in the settings file
 # wins over this one; BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0 there forwards writes.
-Environment=BINTRAIL_CONSOLE_ROUTE_READ_ONLY=1
+# The second setting turns on its numbers (who answered, the copy's age, its
+# workers) at the address the web interface reads them from.
+Environment=BINTRAIL_CONSOLE_ROUTE_READ_ONLY=1 BINTRAIL_ROUTER_METRICS_ADDR=127.0.0.1:9091
 # The same file the capture service reads, so both use the same servers file.
 EnvironmentFile=/etc/bintrail/bintrail-console.env
 ExecStart=/usr/bin/bintrail-console router

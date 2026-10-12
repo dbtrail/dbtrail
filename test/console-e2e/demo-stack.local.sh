@@ -19,7 +19,7 @@
 #   MYSQL_CONTAINER     docker container running test MySQL, default bintrail-test-mysql
 #   CONSOLE_BIN         path to a prebuilt bintrail-console (else it is built)
 #   PW_CHANNEL          playwright browser channel (e.g. "chrome"); default bundled chromium
-#   E2E_FLASHBACK_PORT  port for the daemon's embedded time-travel SQL port, default 13308
+#   E2E_FLASHBACK_PORT  address the daemon's MySQL port is saved with, default 13308
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -215,7 +215,6 @@ BINTRAIL_CONSOLE_TOKEN="$TOKEN" BINTRAIL_CONSOLE_BASELINE_TRIGGER=1 BINTRAIL_CON
   --console-token "$TOKEN" \
   --console-servers-file "$SERVERS_FILE" \
   --baseline-dir "$BASELINE_ROOT" \
-  --flashback-listen "127.0.0.1:$FLASHBACK_PORT" \
   --console-allow-setup >"$E2E_ARTIFACT_DIR/console-e2e-daemon.log" 2>&1 &
 DAEMON_PID=$!
 
@@ -227,6 +226,13 @@ for i in $(seq 1 30); do
   fi
   sleep 1
 done
+
+# The MySQL port saved as on, so the Connect page shows its enabled shape. A
+# router (bintrail-console router) serves it; none is started here.
+curl -fsS -X PUT \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"enabled\":true,\"listen\":\"127.0.0.1:$FLASHBACK_PORT\"}" \
+  "http://127.0.0.1:$PORT/api/flashback" >/dev/null
 
 echo "==> seed a monitored source (per-source index left unprovisioned)"
 curl -fsS -X POST \

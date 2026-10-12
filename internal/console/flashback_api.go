@@ -3,9 +3,11 @@ package console
 import (
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -323,6 +325,53 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 	fb.mu.Unlock()
 	slog.Info("console: MySQL port turned on from the web interface", "listen", listen, "password_created", created != "")
 	writeJSON(w, http.StatusOK, flashbackChangeDTO{flashbackStatusDTO: s.flashbackStatus(), Password: created})
+}
+
+// EnsureFlashbackOn saves the port as on when NO setting was ever saved,
+// creating its password, and reports whether it did. For an installation
+// that used to open the port from where DBTrail is started
+// (--flashback-listen) and upgrades to one whose port is served by the
+// router, which follows this setting (#2341): the port that was always on
+// stays on. Nothing is bound here.
+//
+// Once only. A setting that exists is the operator's, on or off: a port
+// turned off in the web interface must not come back on at the next start
+// because the old startup setting is still there. on reports what the
+// saved setting says after the call.
+func (s *Server) EnsureFlashbackOn() (changed, on bool, err error) {
+	fb := &s.flashback
+	fb.mutate.Lock()
+	defer fb.mutate.Unlock()
+	path, control, saved, _, refusal := s.flashbackManageable()
+	if refusal != "" {
+		return false, false, errors.New(refusal)
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		return false, saved.Enabled, nil
+	} else if !errors.Is(statErr, fs.ErrNotExist) {
+		return false, false, statErr
+	}
+	next := saved
+	next.Enabled = true
+	if next.Listen == "" {
+		next.Listen = defaultFlashbackListen(s.listen)
+	}
+	if next.Password == "" {
+		pw, err := newFlashbackPassword()
+		if err != nil {
+			return false, false, err
+		}
+		next.Password, next.PasswordCreatedAt = pw, time.Now().UTC().Format(time.RFC3339)
+	}
+	if err := saveFlashbackFile(path, &next); err != nil {
+		return false, false, err
+	}
+	_ = control.Apply(next.Listen)
+	fb.mu.Lock()
+	fb.saved, fb.listen, fb.lastErr = next, control.Listening(), ""
+	fb.mu.Unlock()
+	slog.Info("console: the MySQL port was saved as on, as the startup setting that used to open it asked")
+	return true, true, nil
 }
 
 // handleFlashbackPassword replaces the port's password and returns the new

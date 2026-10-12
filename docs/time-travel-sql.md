@@ -24,16 +24,16 @@ The query is answered by `bintrail shim`, an in-process MySQL-protocol server (a
 There are three ways to put `AS OF` SQL in front of your data; they differ only
 in *how the client connects*:
 
-1. **Embedded in `bintrail-console watch` — one port for every monitored server
-   (multi-source).** If you already run the daemon, turn the port on in the
-   web interface (**Connect a SQL client**), or start it with
-   `--flashback-listen`, and it serves `_flashback` / `_snapshot` / `_diff` for *every* server in the
+1. **The MySQL port of `bintrail-console`: one port for every monitored
+   server (multi-source).** If you already run `bintrail-console watch`, turn
+   the port on in the web interface (**Connect a SQL client**). It serves
+   `_flashback` / `_snapshot` / `_diff` for *every* server in the
    web interface, routed by the connection username. No separate `bintrail shim`
-   process, no hand-built index DSN. See [the embedded port](#the-embedded-port-multi-source)
+   process, no hand-built index DSN. See [the MySQL port](#the-mysql-port-multi-source)
    below. Start here if you run `watch`. This port also answers **ordinary
-   SQL on the copy** — joins, aggregations, anything the console's SQL card
-   takes — see [Ordinary SQL on the copy](#ordinary-sql-on-the-copy-embedded-port-only).
-2. **A dedicated terminal — point `mysql` straight at a standalone shim (no
+   SQL on the copy** (joins, aggregations, anything the console's SQL card
+   takes): see [Ordinary SQL on the copy](#ordinary-sql-on-the-copy).
+2. **A dedicated terminal: point `mysql` straight at a standalone shim (no
    ProxySQL).** Simplest for a single index. The shim already speaks the MySQL
    protocol, so an analyst connects a `mysql` client directly to it and runs
    `_flashback` / `_snapshot` / `_diff` queries. Trade-off: that connection
@@ -41,65 +41,74 @@ in *how the client connects*:
    returns `ER_NOT_SUPPORTED_YET`, 1235; the standalone shim has no copy to
    read). Use it when a person or tool just needs to read historical state
    from one index.
-3. **Transparent routing — ProxySQL in front (the rest of this guide).** Needed
+3. **Transparent routing with ProxySQL in front (the rest of this guide).** Needed
    only when an application's *normal* connection must mix live queries and
    `AS OF` queries on the same endpoint. ProxySQL routes virtual-schema queries
    to the shim and everything else to your real MySQL.
 
 All three speak the **MySQL** protocol. A **PostgreSQL** operator can instead run
 single-row `AS OF` over the **PostgreSQL wire protocol** from `psql` with
-`bintrail-pg flashback` — same grammar, no MySQL client required. See
+`bintrail-pg flashback` (same grammar, no MySQL client required). See
 [Interactive `AS OF` from `psql`](postgres.md#interactive-as-of-from-psql).
 
-### The embedded port (multi-source)
+<a id="the-embedded-port-multi-source"></a>
+### The MySQL port (multi-source)
 
-`bintrail-console watch` already holds the time-travel engine and, through its
-control plane, a resolved connection to every monitored server's *own* per-source
-index (`bintrail_idx_<id>`). `--flashback-listen` exposes a MySQL-protocol port
-wired to that same map, so one endpoint time-travels any server you monitor —
-no `bintrail shim` container, no `--profile flashback`, no per-source DSN to
-discover:
+DBTrail has one MySQL port: **3309**. One endpoint time-travels any server
+you monitor, with no `bintrail shim` container, no `--profile flashback` and
+no per-source DSN to discover.
 
-```sh
-bintrail-console watch \
-  --index-dsn 'root:pw@tcp(127.0.0.1:3306)/bintrail_index' \
-  --console-token "$BINTRAIL_CONSOLE_TOKEN" \
-  --flashback-listen 127.0.0.1:3308            # or env BINTRAIL_CONSOLE_FLASHBACK_LISTEN
-```
+**Who serves it.** A process of its own, the router (`bintrail-console
+router`), and nothing else. The capture process (`bintrail-console watch`)
+opens no MySQL port. In the Docker Compose stack the router is the `router`
+service; in the deb and rpm packages it is the `bintrail-router` service.
+Both start it for you. See
+[The router](#the-router-the-process-that-serves-the-port) for the process
+itself, and
+[Upgrading](#upgrading-from-a-version-with-the-port-inside-watch) if you
+used `--flashback-listen` before.
 
-**Or turn it on in the web interface, with no flag and no restart.** When the
-daemon was started without `--flashback-listen`, the **Connect a SQL client**
-panel has an address field and a **Turn on** button. Turning it on creates the
-port's own password and shows it once; **New password** replaces it, and
-**Turn off** closes the port. The setting and the password are kept in
-`console-mysql-port.yaml` beside the servers file, so they survive a restart.
-That file holds the password as the client types it (MySQL-protocol
-authentication needs it that way), readable only by the user DBTrail runs as.
-An address given with the flag or the environment variable decides instead,
-and the panel then shows it as fixed. A newly installed Docker Compose stack publishes the port
-on the host loopback as 3309 (an older install needs the `ports:` line added to
-its docker-compose.yml); turn it on with the address
-`0.0.0.0:3309` (the default offered there) and connect from that machine, or
-through a tunnel from another one.
+**Turn it on in the web interface.** On **Settings → MCP Server**, the
+**Connect a SQL client** panel has a **Turn on** button. Turning it on
+creates the port's own password and shows it once (it starts with `bfp_`);
+**New password** replaces it, and **Turn off** closes the port and
+disconnects its clients. No flag and no restart. The router follows that
+saved setting: off, it does not listen; on, it listens. The setting and the
+password are kept in `console-mysql-port.yaml` beside the servers file, so
+they survive a restart. That file holds the password as the client types it
+(MySQL-protocol authentication needs it that way), readable only by the
+user DBTrail runs as.
 
-**Routing is by username, auth is the access token.** Connect as the target
-server — its registry **ID** (robust; the `X-Bintrail-Server` value shown in the
-web interface) or its display **name**, with the access token as the password:
+**The address.** The router listens on `127.0.0.1:3309` unless it is started
+with another address (`--listen`, or `BINTRAIL_ROUTER_LISTEN`). The panel
+also has an address field: it is the address the panel shows and writes into
+its ready-to-copy `mysql` line. It does not move the router, so keep the two
+the same. The Docker Compose stack publishes the port on the host loopback
+as 3309; keep the address `0.0.0.0:3309` the panel offers there and connect
+from that machine, or through a tunnel from another one.
+
+**Routing is by username.** Connect as the target
+server: its registry **ID** (robust; the `X-Bintrail-Server` value shown in the
+web interface) or its display **name**. The password is the one created in
+the web interface. If the router was started with an access token (`--token`
+/ `BINTRAIL_CONSOLE_TOKEN`), the token works as a password too, while the
+port is on. A token does not open the port by itself.
 
 ```sh
 # the web interface shows each server's id/name in the switcher
-mysql -h 127.0.0.1 -P 3308 -u 7f4d577430b48821 -p"$BINTRAIL_CONSOLE_TOKEN"
+mysql -h 127.0.0.1 -P 3309 -u 7f4d577430b48821 -p
 mysql> USE myapp;   -- optional: seeded from the server's source DSN when known
 mysql> SELECT * FROM _flashback.orders AS OF '2026-05-02 10:00:00' WHERE id = 12345;
 ```
 
-### Ordinary SQL on the copy (embedded port only)
+<a id="ordinary-sql-on-the-copy-embedded-port-only"></a>
+### Ordinary SQL on the copy
 The same connection runs ordinary read-only SQL over the server's Parquet
 copy, the snapshots and the archived change log, exactly as the console's
-**SQL** card does: same locked DuckDB child process, same views, same caps
-(2 threads, 2 GB by default, 60 seconds, one query at a time per server),
-except the row cap: 10,000 rows on this port by default, where the card
-shows 1,000.
+**SQL** card does: same locked DuckDB child process, same views, the same
+2 GB of memory and 60 seconds per statement by default. Two things differ:
+the row cap (10,000 rows on this port by default, where the card shows
+1,000), and how many statements run at once (below).
 A statement that is not time travel is handed to it:
 
 ```sql
@@ -126,7 +135,7 @@ What to know before relying on it:
   folded: a schema `Été` is not found as `été`, and a `USE` of a name that
   is not found leaves the connection where it was.
 - **`events` needs the change log on local disk, and the bundled stack keeps
-  it in S3.** `watch` uploads each archived hour to the server's S3 location
+  it in S3.** The capture process uploads each archived hour to the server's S3 location
   and removes the local file once the upload is confirmed, so on that stack a
   statement that reads `events` is refused with an error that says so, from
   the first uploaded hour on. (An hour whose upload is not confirmed yet is
@@ -143,27 +152,27 @@ What to know before relying on it:
 - **Tested with the `mysql` command-line client.** A graphical client
   (DBeaver, Workbench) probes `information_schema` the MySQL way and may show
   an incomplete table tree; that has not been tested.
-- **How many at once.** Two statements run at once per daemon by default
-  (`--sql-max-in-flight` raises it on a host with cores to spare), shared between
-  the SQL card and this port, and **one at a time per server on this port**:
-  two people querying the same server at the same moment means the second one
-  waits for the first to finish. A statement waits up to 30 seconds for its
-  slot and then gets MySQL error 1203 ("SQL on the copy is busy"); with 16
-  statements already waiting it gets 1203 at once. A client that disconnects
+- **How many at once.** The router, which serves this port, works out how
+  many statements run on the copy at once from the cores and the memory it
+  may use ([The router](#the-router-the-process-that-serves-the-port)); its
+  startup lines and `SHOW ROUTER STATUS` say the number. Statements for the
+  same server can run at the same time. The SQL card of the web interface
+  does not share these workers: it runs in the capture process, two
+  statements at once by default (`watch --sql-max-in-flight`). A statement
+  on the port waits up to 30 seconds for a worker and then gets MySQL error
+  1203 ("SQL on the copy is busy"). A client that disconnects
   while waiting, or while its statement runs, leaves at once and frees its
-  place. The line of 16 is one for the whole daemon: statements from the SQL
-  card wait in it too. With read routing on, a statement that would get 1203
-  is answered by MySQL instead (see
+  place. With read routing on, a routed statement that waited that long gets
+  error 1040 instead (see
   [A busy copy](#a-busy-copy-the-read-waits-its-turn)). The wait is in the
-  metrics: `bintrail_sql_slot_wait_seconds` and `bintrail_sql_slot_waiting`
-  ([Observability](observability.md)). The daemon that serves them is the one
-  capturing changes, which is why the limits are small. A
+  router's metrics: `bintrail_sql_slot_wait_seconds` and `bintrail_sql_slot_waiting`
+  ([Observability](observability.md)). A
   statement past its memory (2 GB by default) goes on using a temporary
   folder of its own on disk, more slowly, up to four times its memory (8 GB
   by default) and never more than a share of the free space there, and fails
   only past that. The folder is under the system's temporary directory
   (`TMPDIR`), is removed when the statement ends; one a crash left behind is
-  removed once it is ten minutes old, when the daemon starts or with a later
+  removed once it is ten minutes old, when the process starts or with a later
   statement. Where that directory is in
   memory (a `tmpfs`), statements do not spill and fail past their memory as
   before; the settings panel (Memory for SQL on the copy) says which. One whose tables have more than 384 MB of changes not merged into
@@ -175,15 +184,17 @@ What to know before relying on it:
   copy. On a host with memory to spare, `--sql-memory`
   (env `BINTRAIL_CONSOLE_SQL_MEMORY`, at least 512MB) raises both: the line
   of changes moves with it, 768 MB at 4GB. Without the flag it can be set in
-  the web interface (Settings, MCP Server, Memory for SQL on the copy) and
-  applies to the next statement, no restart; the flag, when given, wins. The
+  the web interface (Settings, MCP Server, Memory for SQL on the copy); the
+  flag, when given, wins. The SQL card takes a saved change with its next
+  statement, no restart. The router reads the saved value once, when it
+  starts, so a change reaches the port when the router is restarted. The
   SQL card shows the memory and the line in force. Each statement can take that much at once, times
-  `--sql-max-in-flight`, on the host that captures. For a team or a
+  the router's workers. For a team or a
   dashboard tool, each reader's own DuckDB on the bucket is the way to scale
   reads (see [Dashboards](dashboards.md)): it runs on the reader's machine and
   adds no load to the capture host. The trade-off: bucket permissions replace
   the console's access rules, and the data is as fresh as the last snapshot
-  and the last archived hour. The daemon's log at debug level, the
+  and the last archived hour. The router's log at debug level, the
   `phases_ms` field of the SQL card's response, and the
   `bintrail_sql_statement_phase_seconds` histogram say where each
   statement's time went.
@@ -310,20 +321,20 @@ What to know before relying on it:
   (10,000 rows by default) and the way out: add a `LIMIT` at or under the
   cap, or narrow the statement. Nothing is returned, so an application
   cannot take the first rows for the whole result. The cap is the port's
-  own: `watch --sql-port-max-rows` (env `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS`,
+  own: `router --sql-port-max-rows` (env `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS`,
   `SQL_PORT_MAX_ROWS` in the compose stack's `.env`) sets it, and the SQL
   card's 1,000 rows do not move with it. A result is also refused, with the
   same error code, past 64 MB, whatever its row count. The whole result is held by the
-  daemon, which captures, while it is sent, and takes a few times its size
+  router while it is sent, and takes a few times its size
   while it is prepared (measured: a 64 MB result of 100,000 rows, about 320
-  MB at its peak). `--sql-max-in-flight` bounds the statements running, not
+  MB at its peak). The number of workers bounds the statements running, not
   the connections receiving a result, so the port has a bound of its own:
   a result is counted only while the port holds less than 256 MB of results
   being sent, over all its connections, so it never holds more than that
   plus one result. While it holds that much, a statement is refused, before
   it runs when the port can tell, with error 1203 and "run the statement
   again in a moment"; under read routing MySQL answers it instead
-  (`copy_results_held` in the counter). The daemon's log says so, once a
+  (`copy_results_held` in the counter). The router's log says so, once a
   minute at most. A result stops counting when it has been written to the
   client, so a connection left open holds nothing. A client that reads
   nothing of an answer for 60 seconds is disconnected, as MySQL does at its
@@ -354,10 +365,11 @@ What to know before relying on it:
   unqualified names then resolve in `main`, `SHOW DATABASES` and `events`
   keep working, and a name that fails to resolve says which database is
   missing from the copy.
-- **Access is the token's, all or nothing.** The port authenticates on the
-  console token, which has no data profile and no table or column rules, so
-  none apply here — the same rule the SQL card follows for a token session.
-  Give this port to people who may read every table of every server.
+- **Access is all or nothing.** The port authenticates on its own password
+  (or the access token), which has no data profile and no table or column
+  rules, so none apply here. It is the same rule the SQL card follows for a
+  token session. Give this port to people who may read every table of every
+  server.
 - Every statement is written to the audit trail when one is installed
   (`shim` / `sql.run`: the statement, the schema, the row count).
 - Column types are mapped to MySQL's (DuckDB `INTEGER` arrives as `BIGINT`,
@@ -365,34 +377,51 @@ What to know before relying on it:
   a `LIST`/`STRUCT` as JSON text, `MAP`/`HUGEINT`/`UUID`/`INTERVAL` as text).
 
 ### Read routing: MySQL answers, the copy takes the heavy reads (experimental)
-With `--route-max-copy-age` set (for example `--route-max-copy-age 15m`), a
+Read routing is off until it is turned on. Off, the copy answers every
+statement on the port, as described above, and nothing is sent to MySQL.
+
+It is a saved setting: `routing: true` in `console-mysql-port.yaml`, the file
+beside the servers file that also holds the port's switch and password. The
+router reads it and applies a change within a few seconds, closing the
+connections that were open
+([The router](#the-router-the-process-that-serves-the-port)). No flag turns
+it on: `--route-max-copy-age` did in earlier versions and now only prints a
+warning.
+
+With read routing on, a
 connection on this port to a server that has a source DSN and a
 [forwarding account](#the-forwarding-account) forwards every statement to
 that MySQL over one upstream connection per client connection, with that
 forwarding account, and MySQL's own answer comes back, errors included. A
-server with no forwarding account is not forwarded for: the account the
-daemon captures with is never used by this port, so the copy answers alone
-and the web interface says why. Resultsets are streamed to the client as they arrive, never held
-in the daemon. The one exception is a `SELECT` whose plan says it is
+server with no forwarding account is not forwarded for: the account
+DBTrail captures with is never used by this port, so the copy answers that
+server alone. Resultsets are streamed to the client as they arrive, never held
+in the router. The one exception is a `SELECT` whose plan says it is
 expensive: it runs on the copy, and if the copy rejects it (DuckDB does not
 know the syntax, the table is not in the copy, the result exceeds the
 port's row or cell cap), MySQL runs it. A copy that is busy does not reject
-it: the read waits its turn, and reaches MySQL only after 30 seconds or when
-16 statements are already waiting
+it: the read waits its turn for up to 30 seconds, and past that the client
+gets error 1040. It does not fall back onto MySQL because of load
 ([A busy copy](#a-busy-copy-the-read-waits-its-turn)). Nothing the client sends
 needs to change. **This is experimental**: for what MySQL answers, the
 behaviour is MySQL's; for what the copy answers, it is DuckDB's, and the
 list below of where the two differ is what the feature's own testing is
 still growing.
 
+The port is read-only unless the router is started otherwise, so the
+`UPDATE` in this example is refused with error 1290. Started with
+`--route-read-only=false`, it goes to MySQL.
+
 ```
-bintrail-console watch ... --flashback-listen 127.0.0.1:3308 --route-max-copy-age 15m
-mysql -h 127.0.0.1 -P 3308 -u <server> -p<token> shop
+mysql -h 127.0.0.1 -P 3309 -u <server> -p shop
 mysql> SELECT * FROM orders WHERE id = 42;                    -- MySQL (a point lookup)
 mysql> SELECT status, count(*) FROM orders GROUP BY status;  -- the copy (a full scan)
 mysql> SELECT GROUP_CONCAT(status) FROM orders;              -- MySQL (the copy would answer differently)
-mysql> UPDATE orders SET status = 'paid' WHERE id = 42;      -- MySQL
+mysql> UPDATE orders SET status = 'paid' WHERE id = 42;      -- refused (read-only), or MySQL
 ```
+
+One connection can ask for the copy alone while routing is on: connect as
+`<server>@copy` (for example `-u shop@copy`).
 
 The decision, in order, for every statement:
 
@@ -549,15 +578,9 @@ The decision, in order, for every statement:
    (`copy_refused`). A connection that set `sql_select_limit` at or under
    the cap asked for the cut, and the copy answers it as before. On a
    **MariaDB** source this is seen for a table or an index read whole.
-6. For a plan the copy should take, how fresh the copy is. Its snapshot's
-   age unknown: **MySQL**. Its snapshot at most `--route-max-copy-age` old:
-   on to the next step. Older than that: the copy still answers when every
-   table the statement reads has had no change since its snapshot, and
-   **MySQL** answers otherwise (see
-   [Past the limit](#past-the-limit-tables-that-have-not-changed) below).
-   (Freshness is checked after the plan on purpose: it costs a snapshot
-   listing, and past the limit a few reads of the index, which the cheap
-   reads must not pay.)
+6. The age of the copy is not checked. A plan the copy should take goes on
+   to the next step whatever the age of the copy's snapshot (see
+   [No maximum copy age](#no-maximum-copy-age) below).
 7. The session. MySQL answers a statement under the connection's session
    settings (its time zone, its SQL mode and so on); the copy answers the
    same only when it runs under the same ones. So before a statement goes
@@ -712,221 +735,42 @@ asked:
   time travel is answered from the index alone. This is what keeps time
   travel working while the source is down.
 
-#### Past the limit: tables that have not changed
+<a id="past-the-limit-tables-that-have-not-changed"></a>
+#### No maximum copy age
 
-`--route-max-copy-age` is one age for the whole server: the age of the newest
-snapshot. A table nobody has written since its snapshot reads the same on the
-copy as on MySQL however old that snapshot is, and a table written a second
-ago does not, whatever the server's age says. So when the snapshot is older
-than the limit, the port does not send every heavy read to MySQL. It asks,
-for that statement, whether the tables it reads have changed since their
-snapshot, and the copy answers when none has.
+There is no limit on how old the copy may be. With read routing on, an
+expensive read goes to the copy whatever the age of its snapshot. Earlier
+versions had a limit (`--route-max-copy-age`) and, past it, a check of which
+tables had changed since their snapshot. Both are gone.
 
-The tables are the ones the statement names, as the copy reads it. Every one
-of these must hold, and when any does not the statement goes to MySQL, as it
-did before:
+This is the trade a read/write split through a proxy already makes: on one
+connection a cheap statement is answered by MySQL as it is now, and an
+expensive one by the copy as it was at its last snapshot. The copy is an
+asynchronous replica. Its age is a number to watch, not a rule:
 
-- **Capture is known to be up to date, as of a moment within the limit.**
-  The index only knows the changes capture has delivered, so "the index holds
-  no change of this table" means nothing while capture is behind or stopped.
-  DBTrail asks the source what it has executed (its GTID set) and compares it
-  with the position capture has saved. When capture's position includes
-  everything the source had at one of those reads, capture was complete as of
-  that read. That moment has to be at most `--route-max-copy-age` ago. The
-  limit therefore keeps its meaning: the copy's answer is never older than
-  it.
-- **The index holds no change of the table since its snapshot.** "Since" is
-  decided by binlog position, not by time: each table file of a snapshot
-  records the position it was read at, and the index is asked for a row
-  change of that table at or after that position, the same question a
-  snapshot refresh asks. A transaction that ran shortly before the snapshot
-  and committed after it counts as a change. (The index is searched from an
-  hour before the last change the snapshot holds of that table, or before
-  the full read its rows came from, on the source's own clock, so a refresh
-  taken while capture was behind does not hide what capture indexed later.
-  A statement that began earlier still, and committed after the snapshot, is
-  dated before that hour: when the index holds any change of that kind, the
-  table's older changes are searched too, by position alone. An index that
-  `bintrail index` has ever loaded binlog files into cannot tell that from
-  one row, so there the older changes are searched on every statement: a
-  table with a long history in the index then runs into the two-second
-  budget and follows the age rule.) So does any
-  schema change that names the table (`ALTER`,
-  `TRUNCATE`, `DROP`, `RENAME`), which changes a table without a row change:
-  those are placed by position alone, however long the statement ran.
-- **The index still holds everything since that position.** If rotation has
-  already dropped the partitions that cover it, changes may exist that the
-  index no longer has. A table whose file was carried over from an older
-  snapshot is judged from that file's own position, not from the newest
-  snapshot's. This is the limit to know: a snapshot refresh leaves a table
-  with no changes exactly as it was, position included, so a table that has
-  been quiet for longer than the index keeps its changes (`--rotate-retain`,
-  48 hours unless set) cannot be vouched for from the index, and follows the
-  age rule. A full snapshot gives every table a new position.
-- **Capture lost nothing in between.** A binlog gap, or an event capture read
-  and dropped (the capture health on the Overview), since the table's rows
-  were last read from the source, and the copy does not answer.
-- **The table can only change through its own row changes.** A table with a
-  foreign key that says `ON DELETE` or `ON UPDATE` `CASCADE`, `SET NULL` or
-  `SET DEFAULT` changes when its parent does, and MySQL does not write those
-  changes to the binlog. Such a table always follows the age rule. So does a
-  table outside what capture records (`--schemas`, `--tables`, a server's
-  schema filter).
-- **The snapshot is one DBTrail can vouch for**: taken at one point in time
-  (not with the `no-lock` mode, which reads each table at a different
-  moment), with its binlog position recorded, and not built over a known gap
-  in capture.
-- **The source's binary log kept one numbering since the snapshot.** After a
-  `RESET MASTER`, a failover to another server or a new `log_bin` name, the
-  source's binary log starts again, and its changes sort before the
-  snapshot's binlog position, where "no change after the position" proves
-  nothing. The copy does not answer when a change reached the index after
-  the one the snapshot records as its newest (its event mark) and sorts
-  before it, when the newest change sorts before the position of a snapshot
-  a refresh wrote, or when capture found another server at the source's
-  address.
+- `SHOW ROUTER STATUS` shows `copy_snapshot` and `copy_age_seconds` for the
+  server of that connection.
+- `bintrail_read_routing_copy_snapshot_timestamp_seconds` is the same number
+  for Prometheus. Alert on `time()` minus it, the way replica lag is alerted
+  on ([Observability](observability.md#read-routing-bintrail_read_routing_decisions_total)).
 
-What the answer is, then: what MySQL held for those tables at the moment
-capture was last confirmed complete. A change the source makes after that
-moment is not in it, exactly as a change made after a young snapshot is not
-in the copy's answer under the age rule. The next statement over that table
-goes to MySQL once the change reaches the index.
-
-This rule trusts the index to hold every change capture was given. What the
-index never received, and has no record of not receiving, it cannot see:
-
-- a write made with binary logging off (`SET sql_log_bin = 0`);
-- a statement-format write issued while the default database is a system
-  schema or one outside the capture's filters;
-- a table excluded from capture and included again in between, and a capture
-  restarted from a later position than it had reached;
-- a row capture could not decode and skipped with only a warning in the log
-  (a value in a legacy character set that does not convert);
-- a schema change (`TRUNCATE` included) whose record could not be written to
-  the index at that moment, which is also only a warning in the log;
-- a gap in capture whose record was cleared by stopping capture on that
-  server (Stop clears it) before a new full snapshot was taken;
-- a change a snapshot refresh itself left out of the file it wrote: a
-  refresh that ran while capture was more than about two hours behind can
-  miss changes it should have folded in. The position in that file's footer
-  says they are in it, so nothing after it looks changed;
-- a statement that began before the oldest hour the index still holds and
-  committed after the table's snapshot, when rotation dropped that hour
-  WITHOUT archiving it. While the hour it began in is in the index the
-  statement is found, however long it ran. When rotation archives the hour
-  before dropping it, the archive's record of the newest change it holds
-  says so, and the statement goes to MySQL (below); dropped with no archive,
-  and until rotation also drops the hour of the snapshot, it is not found.
-  The same goes for a change dated that far back because the source's clock
-  runs behind.
-
-None of these is new, and the copy was already wrong about such a change
-before this rule. The copy's age is the stamp of its newest snapshot, and a
-scheduled snapshot is, whenever it can be, a refresh built from the index
-with no read of the source. A refresh renews the age and still lacks what
-the index never received. So such a change stays missing from the copy until
-the next FULL snapshot, the one that reads the source again, under the age
-rule and under this one alike.
-
-What this rule adds is the stretch in which the copy answers at all. Under
-the age rule alone the copy stops answering heavy reads when its newest
-snapshot passes the limit, and starts again at the next snapshot. Under this
-rule it also answers in between, for tables the index shows no change of.
-Where every scheduled snapshot is a refresh, this makes no difference to how
-long such a change is missing. Where every snapshot is a full read, or
-nothing is scheduled, it does make one: the limit used to cap how stale the copy's
-answer about such a change could be, and for these tables it no longer
-does. On a source where those changes happen, taking FULL snapshots more
-often is what shortens it; refreshing more often does not, under either
-rule. A source that filters its binary log (`binlog-do-db`,
-`binlog-ignore-db`) is detected, and this rule is never applied to it.
-
-When it applies and what it costs:
-
-- Only a MySQL source captured in GTID mode (checked on every statement: a
-  capture restarted in binlog-position mode, or from an earlier point and
-  not yet back where it was, stops being vouched for at once),
-  whose index is not on the source server itself. A MariaDB source, a source in binlog-position mode, one with
-  tagged GTIDs, one that filters its binary log, and one that executed
-  transactions capture never read (a dump loaded with
-  `SET @@GLOBAL.gtid_purged`) always follow the age rule. The account DBTrail
-  captures with needs `REPLICATION CLIENT` on the source, which capture
-  already requires, to read the binary log's filters.
-- Only statements whose plan is expensive, and only past the limit. A cheap
-  read, and any read while the snapshot is within the limit, costs nothing
-  more than before.
-- The source is asked for its GTID set at most once every 30 seconds per
-  server, the same read the Overview makes to say whether capture is up to
-  date. The statement that triggers a read waits for it (two short
-  connections, bounded at three seconds) before it is decided. On a source that is being written, one read is not enough: capture
-  saves its position every few seconds, so the source is always a little
-  ahead. The first read leaves a sample and a later read confirms capture
-  reached it. The first heavy read after a quiet spell therefore goes to
-  MySQL, and the ones that follow half a minute later go to the copy. With a
-  limit under about a minute this rule rarely applies.
-- Each such statement reads the index a few times (capture's state, the
-  partition list, the schema changes since the snapshot, and two lookups per
-  table). Measured on an index of 3 million events over a week of hourly
-  partitions, on MySQL 8.4: about 5 ms in all for one table and 7.5 ms for
-  three, whether they changed or not. There are two slow cases. One is a
-  table that received a very large load in the two hours before its
-  snapshot and nothing since: the lookup walks those index entries every
-  time. For half a million of them that took 0.25 s when the table's file
-  came from a snapshot refresh and 1.5 s when it came from a full read of
-  the source (a refresh records how far into the index it got, which lets
-  MySQL skip the rows without reading them; a full read has nothing to
-  record). The other only exists while the index holds a statement that
-  began long before some snapshot and committed after it: then each table's
-  older changes are searched as well, across everything the index still
-  holds of that table. That costs nothing for a table with few of them and
-  grows with their number: 1.5 s for half a million with a full read's file
-  (0.25 s with a refresh's), so a table with more than about 700,000 older
-  changes and a full read's file does not fit. All the reads of one
-  statement share a two-second budget; past it the statement goes to MySQL,
-  so a statement over two such tables at once is not vouched for either.
-  Once a table is found changed after its snapshot, that is remembered for
-  that snapshot file and the index is not asked again: the statements that
-  follow go to MySQL at once.
-- The archives rotation wrote are read too. A change indexed late lands in an
-  old hour, the next one rotation archives and drops, and then the index no
-  longer shows it. Each archive records the newest binlog position it holds,
-  so the statement goes to MySQL when an archive of an hour older than the
-  lookups reach, written since the table's snapshot (less an hour for clock
-  differences), holds a change at or after the snapshot's position, does not
-  record its newest position (written by an older version, or registered by
-  `archive reconcile --repair` or `restore-index`), or records it in a binary
-  log with another base name. An archive holds every table of its hour, so
-  another table's late change in it counts as well. Only the archives written
-  since the oldest of the statement's snapshots are read: measured with a
-  year of hourly archives (8,760) on MySQL 8.4, 0.5 ms a statement; on an
-  index no version with this check has migrated yet (it adds an index on
-  `archive_state.archived_at`), about 3 ms. An index with no `archive_state`
-  at all, or one that cannot be read, is not vouched for.
-- The statement takes one of the copy's slots while it is checked, as a heavy
-  read within the limit does.
-
-A statement the copy answers this way is counted under `tables_unchanged`
-(below), apart from `expensive_plan`, so a copy that keeps answering from an
-old snapshot is visible. One that goes to MySQL is counted under
-`copy_too_old` as before, and the debug log line of that decision says which
-table changed or what could not be confirmed.
+If an application cannot read a result as old as the last snapshot, have it
+connect straight to MySQL and not through this port.
 
 What this is and is not:
 
 - **The copy's answer is as fresh as its snapshot.** A heavy read served
-  from the copy does not see what changed since the last snapshot; that is
-  what `--route-max-copy-age` bounds, and why there is no default that turns
-  this on. Past that age the copy only answers over tables with no change
-  since their snapshot, and then its answer is what the source held at a
-  moment no longer ago than the same limit (next section). A `SELECT` that
+  from the copy does not see what changed since the last snapshot, however
+  long ago that was ([No maximum copy age](#no-maximum-copy-age) above).
+  That is why read routing is off until you turn it on. A `SELECT` that
   must see the last second belongs in a transaction, which MySQL always
   answers.
 - **The copy's grants are nobody's; the forwarded ones are the forwarding
   account's.** Forwarded statements run with the server's forwarding
-  account, never with the account the daemon captures with. Give this port
+  account, never with the account DBTrail captures with. Give this port
   to people who may do on MySQL whatever the forwarding account is granted.
   To bound it, give that account only the grants the port should have and
-  start the port with `--route-read-only` (both below).
+  keep the port read-only, as it starts (both below).
 - **One thing is translated: backtick-quoted names.** DuckDB does not read
   MySQL's backtick-quoted names, and most ORMs and drivers quote every name
   that way. So a routed statement reaches the copy with each
@@ -1268,7 +1112,7 @@ What this is and is not:
     included, and its decimal columns read as text. That is every table of
     a PostgreSQL source, a MySQL or MariaDB table whose snapshot was
     written by a version before 0.5, and a file whose footer could not be
-    read at that moment. The daemon's log says so once per table (`this
+    read at that moment. The router's log says so once per table (`this
     table's snapshot file carries no CREATE TABLE`), naming the first ten
     at warning level and the rest in the debug log, and counts the files
     it could not read; a new full snapshot of a MySQL or MariaDB source
@@ -1496,21 +1340,23 @@ What this is and is not:
 - **The thresholds are knobs, not truths.** The optimizer's cost is its
   own estimate; it misleads on cached data and on skewed values (and on
   `LIMIT`, which is why steps 4 and 5 read the statement, not the cost).
-  Start with the defaults, read the daemon's log (every decision is logged
+  Start with the defaults, read the router's log (every decision is logged
   with its reason at debug; a copy that never answers, a failing EXPLAIN or
   an unreadable snapshot time is a warning, once per connection) and the
   audit trail (a copy-served statement carries `route: copy` and the
   reason), and move the thresholds.
-- **One query at a time per server on the copy, still.** A heavy read that
-  arrives while the copy is busy is not refused, and it does not go to MySQL
-  either: it waits its turn on the copy. See
+- **The copy has a fixed number of workers.** A heavy read that
+  arrives while every worker is busy does not go to MySQL: it waits its turn
+  on the copy, and past 30 seconds the client gets error 1040. See
   [A busy copy](#a-busy-copy-the-read-waits-its-turn) below for the rule and
   its numbers. The limits of the section above are the copy's; MySQL's are
   MySQL's.
-- **The port accepts writes under routing.** `INSERT`, `UPDATE`, `DELETE`,
+- **The port accepts writes under routing only when read-only is turned
+  off.** The router is read-only by default. Started with
+  `--route-read-only=false`, `INSERT`, `UPDATE`, `DELETE`,
   DDL, `GRANT`: everything that is not a `SELECT` reaches the source, as
-  the server's forwarding account: anyone holding the access token can do
-  on the source what that account is granted. Each forwarded write is
+  the server's forwarding account: anyone holding a password of the port
+  can do on the source what that account is granted. Each forwarded write is
   logged at info level with its leading keyword (never the statement). Two
   settings bound this, and they are meant to be used together: the grants
   of the forwarding account, and `--route-read-only`, so a write is
@@ -1520,13 +1366,13 @@ What this is and is not:
   second account on the server's source, used only by this port.
   Everything the port does on that server's MySQL (forwarded statements,
   the `EXPLAIN` the decision reads, prepared statements, `USE`) runs as
-  that account. The account the daemon captures with is never opened by
+  that account. The account DBTrail captures with is never opened by
   the port: it reads whatever capture needs, which with `SELECT ON *.*`
   includes the `mysql` schema and the password hashes of every account,
   and a credential handed out to read history must not reach that. So a
-  server with no forwarding account is not forwarded for: on this port the
-  copy answers alone, on the [router](#the-router-the-same-port-as-a-service-of-its-own-experimental)
-  its statements are refused, and both say what is missing. A forwarding
+  server with no forwarding account is not forwarded for: the
+  copy answers it alone, the light reads too, and `SHOW ROUTER STATUS` says
+  so. A forwarding
   account saved as the capture account itself, or one that cannot be read,
   counts as none. Its grants are the most the port can do there:
 
@@ -1605,13 +1451,15 @@ What this is and is not:
   the form and the panel say so, and other edits of the server still
   save. The server given on the command line (`--source-dsn`) is not
   routed, so it has no such setting.
-- **`--route-read-only` makes the routed port read-only.** With it (or
-  `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=1`), a statement that is not a read is
+- **The port is read-only unless you say otherwise.** The router starts
+  with `--route-read-only` on. A statement that is not a read is
   refused with MySQL error 1290 and a message that names the flag, and it is
   never sent to the source, not even to be explained or prepared. `SHOW
-  WARNINGS` right after shows that refusal. The flag needs
-  `--route-max-copy-age`; `watch` refuses to start with it alone, before it
-  connects to anything.
+  WARNINGS` right after shows that refusal. To forward writes, start the
+  router with `--route-read-only=false` (or
+  `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0`; `ROUTER_READ_ONLY=0` in the Docker
+  stack's `.env`). It matters only with read routing on: with it off,
+  nothing is forwarded at all.
   - **Allowed**: `SELECT`, `WITH ... SELECT`, `TABLE`, `VALUES`, `SHOW`,
     `DESCRIBE`, `EXPLAIN` (and `EXPLAIN ANALYZE`, or MariaDB's `ANALYZE`, of a
     read), `USE`, `BEGIN`,
@@ -1670,37 +1518,39 @@ What this is and is not:
   (`QueryTimeout`, 5 minutes by default), the same as a copy statement.
 - `SHOW WARNINGS` after a forwarded statement is MySQL's; after a statement
   the copy served it is the copy's.
-- A server with no source DSN (the daemon's own command-line source, a
-  server registered without one), or whose copy is unavailable, keeps the
-  copy-only behaviour and says so once per connection in the daemon's log.
+- A server with no source DSN (the capture process's own command-line
+  source, a server registered without one), or whose copy is unavailable,
+  keeps the copy-only behaviour and says so once per connection in the
+  router's log.
 
-Servers added in the web interface mid-session are reachable immediately (the registry
-is read live). A token is **required** — MySQL-protocol auth cannot use the
-web interface's password store, so set `--console-token` / `BINTRAIL_CONSOLE_TOKEN`;
-`watch` refuses to open the port otherwise. The default `127.0.0.1` bind keeps
-it host-local; do not expose it to untrusted networks.
+Servers added in the web interface mid-session are reachable within a few
+seconds (the router reads the servers file again when it changes). The port
+takes a password of its own, created when the port is turned on in the web
+interface: MySQL-protocol auth cannot use the web interface's password
+store. The default `127.0.0.1` bind keeps it host-local; do not expose it to
+untrusted networks.
 
-**The port does not filter by schema.** Anyone with the access token can read
+**The port does not filter by schema.** Anyone with the port's password (or
+the access token, when the router has one) can read
 the full history of every schema on every monitored server through it. There is
 no `allowed_schemas` here. When you need per-schema filtering, run the standalone
 `bintrail shim` (or `bintrail-pg flashback`) instead, with one tenant per
 application and an `allowed_schemas` list on each (see
 [Isolating tenants with `allowed_schemas`](#isolating-tenants-with-allowed_schemas)).
 
-The web interface shows all of this on **Settings → MCP Server**, in the **Connect a
+The web interface shows the port on **Settings → MCP Server**, in the **Connect a
 SQL client** panel: whether the port is on, its address, the user and password
-rules, and a ready-to-copy `mysql` line for the server picked in the sidebar
-(the token itself is never displayed). When the port is off, the panel turns
-it on; when its address was given at startup, the panel shows it as fixed.
+rules, and a ready-to-copy `mysql` line for the server picked in the sidebar.
+When the port is off, the panel turns it on.
 
 `_snapshot.*` parity: each server reads the baseline configured on its registry
-entry (or the daemon's `--baseline-dir` / `--baseline-s3`), exactly as the
+entry, exactly as the
 web interface's Time-travel tab does, with one edge: a server configured with *both*
 a local `--baseline-dir` **and** an `--baseline-s3` copy reads `_snapshot` only
 from the local dir on this port. If local baselines have been pruned (retention)
 while a durable S3 copy remains, use the web interface's Time-travel tab or a standalone
-shim pointed at the S3 prefix for those tables. Single-source baseline configs —
-the common case — have full parity.
+shim pointed at the S3 prefix for those tables. Single-source baseline configs,
+the common case, have full parity.
 
 #### What the port tells a driver about its session and about the server
 MySQL sends two bytes of status with its handshake and with every answer:
@@ -1863,26 +1713,28 @@ chooses its behaviour from the handshake version rather than from a query:
 
 A heavy read that finds the copy busy is not sent to MySQL. It waits for the
 copy, and the client sees a slower answer, not a different one. The rule,
-as the daemon applies it:
+as the router applies it:
 
-- **How many run.** Two statements run on the copy at once for the whole
-  daemon (`--sql-max-in-flight`), and on this port one at a time per server.
-  So sixteen connections reading the same server share ONE place on the
-  copy, whatever `--sql-max-in-flight` says.
-- **The rest wait.** A read that finds its place taken waits until one comes
-  free, then runs on the copy. The turn is in order of arrival: a place
-  that comes free goes to the statement that has waited longest and can use
-  it. One whose server already runs a statement cannot, and keeps its place
-  in the line without holding up those behind it.
-- **Up to 16 wait, for at most 30 seconds.** The line holds 16 statements
-  for the whole daemon, every server and the web interface's SQL card
-  together. A read that arrives with 16 already waiting does not wait:
-  MySQL runs it at once (`copy_queue_full` in the counter). A read that has
-  waited 30 seconds without getting a place is run by MySQL then
-  (`copy_wait_timeout`), so its client waited 30 seconds plus MySQL's own
-  time. Neither number is a setting.
+- **How many run.** The router works out how many statements run on the
+  copy at once from the cores and the memory it may use
+  ([The router](#the-router-the-process-that-serves-the-port)). Statements
+  for the same server can run at the same time. `SHOW ROUTER STATUS` shows
+  the number as `pool_workers`.
+- **The rest wait.** A read that finds every worker taken waits until one
+  comes free, then runs on the copy. The turn is in order of arrival.
+- **A read waits at most 30 seconds.** Past that the client gets MySQL error
+  1040, "too many connections", which drivers and pools retry
+  (`copy_wait_timeout` in the counter, under `route="refused"`). The read is
+  not handed to MySQL: a port that exists to keep expensive reads off the
+  source does not send them there when they are many. The 30 seconds are not
+  a setting.
+- **The line is long on purpose.** Up to 4,096 statements may wait at once.
+  One more gets error 1040 without waiting (`copy_queue_full`). The wait is
+  what bounds the line, not that number: a refusal that cost the client no
+  time would be repeated as fast as the client can send, and each attempt
+  asks the source for a plan first.
 - **What else ends a wait.** The client disconnecting: the statement leaves
-  the line at once and nothing runs. The daemon stopping does the same.
+  the line at once and nothing runs. The router stopping does the same.
 - **What a waiting read holds.** Its client connection and its idle
   connection to MySQL, nothing else: no place on the copy, no process, no
   memory worth counting.
@@ -1890,72 +1742,69 @@ as the daemon applies it:
   that waited, ran on the copy, and was then refused there (a result over
   the row cap, a construct DuckDB lacks) is run by MySQL afterwards under
   that refusal's own reason: it paid the wait, the attempt and MySQL's time.
-
-Why waiting and not MySQL: measured with 16 connections sending a mix with
-heavy reads to one server ([#2080](https://github.com/dbtrail/dbtrail/issues/2080)),
-no read left the line for MySQL, the mean wait for the copy was 1.6 seconds,
-and the median heavy read took 1.2 seconds through the port, wait included,
-against 22 seconds sent straight to MySQL. Waiting for the copy was far
-faster than not waiting. At 64 connections the line overflowed: about 8 % of
-the heavy reads went to MySQL and piled up there, with a 99th percentile of
-94 to 120 seconds, while the median heavy read through the port stayed at
-1.2 to 1.4 seconds.
+- **On a connection that is not routed** (routing off, a server that cannot
+  be forwarded for, a `@copy` user) there is no MySQL behind the statement.
+  It waits the same way, and past the wait the client gets error 1203.
 
 What to watch ([Observability](observability.md)):
 `bintrail_sql_slot_wait_seconds` is how long statements wait and how each
 wait ended, `bintrail_sql_slot_waiting` is how many wait right now, and
 `copy_queue_full` and `copy_wait_timeout` in
-`bintrail_read_routing_decisions_total` (and in the "Who answered" block of
-the web interface) count the reads that reached MySQL because the copy was
-busy. Those two climbing means this port is asked for more heavy reads than
-one copy serves: point some readers at their own DuckDB on the bucket
-([Dashboards](dashboards.md)), or accept that the overflow runs at MySQL's
-speed.
+`bintrail_read_routing_decisions_total` count the reads refused because the
+copy was busy. `SHOW ROUTER STATUS` shows `pool_running` and `pool_waiting`
+at that moment. Those counts climbing means the port is asked for more heavy
+reads than the router's workers serve: give the router more cores and
+memory, or point some readers at their own DuckDB on the bucket
+([Dashboards](dashboards.md)).
 
 #### Seeing who answered
-Two surfaces count every routing decision, per server, since the daemon
-started — decisions, not successes: a statement MySQL then fails was still
-MySQL's.
+Every routing decision is counted, per server, since the router started.
+Decisions, not successes: a statement MySQL then fails was still MySQL's.
+The router does the counting, so the numbers are read from the router:
 
-- The web interface: on **Settings → MCP Server → Connect a SQL client**, the
-  block *Who answered* shows, for the server picked in the sidebar, how many
-  statements MySQL answered and how many the copy did, the rule in force, and
-  (under *Why each side*) a count per reason. With routing off it says so and
-  names the flag. **Refresh** re-reads the counts. The same numbers are in
-  `GET /api/flashback` under `routing`.
-- Prometheus (`watch --metrics-addr`):
-  `bintrail_read_routing_decisions_total{server, route, reason}` — `server`
+- `SHOW ROUTER STATUS` on any connection to the port
+  ([The router](#the-router-the-process-that-serves-the-port)).
+- The web interface: on **Settings → MCP Server**, the panel **The router**
+  shows, for the server picked in the sidebar, how many statements MySQL
+  answered and how many the copy did, with a count per reason. It needs the
+  capture process to know the router's address (`--router-url`; the Docker
+  stack and the packages set it). **Refresh** re-reads the counts. The same
+  numbers are in `GET /api/router`.
+- Prometheus (`router --metrics-addr`):
+  `bintrail_read_routing_decisions_total{server, route, reason}`. `server`
   is the registry id, `route` is `copy`, `mysql` or `refused` (a statement
-  the read-only port did not run), and `reason` is one of
-  a closed set: `expensive_plan` (the copy answered, its snapshot within
-  the limit), `tables_unchanged` (the copy answered although its snapshot is
-  older than the limit, because the tables the statement reads have not
-  changed since their snapshot), `cheap_plan`, `bounded_limit` (a small `LIMIT` MySQL answers
+  nobody ran), and `reason` is one of
+  a closed set: `expensive_plan` (the copy answered), `cheap_plan`, `bounded_limit` (a small `LIMIT` MySQL answers
   without reading past it), `result_over_row_cap` (an expensive plan whose
   result is estimated above the copy's row cap: MySQL answered, and the copy
   was not tried), `not_a_select`, `write`, `session_setting`,
   `session_differs` (the source's session on that connection holds a setting
-  the copy does not reproduce; DBTrail's log names the setting and its
+  the copy does not reproduce; the router's log names the setting and its
   value once per connection), `connection_pinned` (a `CREATE TEMPORARY
   TABLE`, `LOCK TABLES` or `PREPARE` ran earlier on that connection),
   `in_transaction`, `veto`, `explain_failed`,
-  `copy_age_unknown`, `copy_too_old`, `copy_refused`, `copy_queue_full` (the
-  copy was busy and 16 statements were already waiting for it, so this one
-  did not wait), `copy_wait_timeout` (the copy was busy and the statement
+  `copy_refused`, `copy_queue_full` (refused with error 1040: the copy was
+  busy and the line for it was full, so this one
+  did not wait), `copy_wait_timeout` (refused with error 1040: the copy was
+  busy and the statement
   waited 30 seconds for its turn), `copy_results_held` (the port was still
-  sending as many results as it keeps in memory at once), `copy_columns_differ`
+  sending as many results as it keeps in memory at once, and MySQL
+  answered), `copy_columns_differ`
   (the copy works and declined a `SELECT *` or a `NATURAL JOIN` over a table
   whose columns there are not MySQL's, a statement that names a column
   the copy does not hold, one that does arithmetic on a date column, or one
   that names a `TIME` or `YEAR` column), `show_warnings`,
   `upstream_lost` (nobody answered: the port's connection to the source is
-  lost or could not be opened, and the client got error 2006),
-  `read_only` (refused: not a read, on a port started with
-  `--route-read-only`; the client got error 1290), and
-  `routing_off` (listed for completeness: a daemon binds the router only
-  with routing on). A copy that never answers shows up as `copy_refused`,
-  `copy_too_old`, `copy_age_unknown` or `session_differs` climbing while
-  `expensive_plan` and `tables_unchanged` stay flat; `explain_failed` climbing means MySQL refuses to `EXPLAIN` what the
+  lost or could not be opened, and the client got error 2006), and
+  `read_only` (refused: not a read, on a read-only port, which is how the
+  router starts unless told otherwise; the client got error 1290).
+  Four more names are part of the set and are not counted by the port any
+  more. `copy_age_unknown`, `copy_too_old` and `tables_unchanged` belonged
+  to the maximum copy age, which no longer exists. `routing_off` is listed
+  for completeness: a connection made while routing is off is not routed, so
+  it counts no decision. A copy that never answers shows up as `copy_refused`
+  or `session_differs` climbing while
+  `expensive_plan` stays flat; `explain_failed` climbing means MySQL refuses to `EXPLAIN` what the
   client runs (a table it cannot see, a statement it cannot plan);
   `upstream_lost` climbing means the source is unreachable or the forwarding
   account's credentials are wrong. Each routed statement counts exactly once,
@@ -1965,11 +1814,11 @@ MySQL's.
   WARNINGS` right after a statement the copy answered (the copy's own
   warnings), and the `_flashback`/`_snapshot`/`_diff` time-travel shapes.
 
-A server whose connections cannot route — no source database to forward to
-(the command-line boot entry, a server registered without a source), or no
-SQL on the copy — is served from the copy alone, as before. The block says
-so for that server once a connection has found it out, and the metric has no
-series for it.
+A server whose connections cannot route (no forwarding account, no source
+database to forward to, or no SQL on the copy) is served from the copy
+alone. `SHOW ROUTER STATUS` says so on its first line, the router's status
+document marks that server `cannot_route`, and the metric has no series for
+it.
 
 #### Finding where the copy answers differently: `sql-compare`
 Before turning routing on for a workload, play that workload through both
@@ -1978,19 +1827,20 @@ sides and read the differences:
 ```
 bintrail-console sql-compare \
   --source-dsn 'app:pw@tcp(db.internal:3306)/shop' \
-  --copy-dsn   '<server id or name>:<token>@tcp(127.0.0.1:3308)/shop' \
+  --copy-dsn   '<server id or name>:<password>@tcp(127.0.0.1:3309)/shop' \
   --sample 200            # or --statements queries.sql (';'-terminated)
 ```
 
-`--copy-dsn` is this port with routing **off**, so every statement runs on
-the copy; `--sample N` takes the N most recent distinct `SELECT`s the source
+`--copy-dsn` is the MySQL port on a connection the copy answers alone, so
+every statement runs on the copy: the port with routing off, or, with
+routing on, the user written `<server>@copy`. `--sample N` takes the N most recent distinct `SELECT`s the source
 ran (`performance_schema.events_statements_history_long`; the error names
 the consumer to enable when it is off). The command is read-only: anything
 that is not a plain read is skipped before it runs (writes, a `WITH` that
 writes, `SELECT ... INTO`, locking reads, `GET_LOCK`/`SLEEP`/`BENCHMARK`,
 two statements in one line); a stored function with side effects cannot be
 screened by its text, so do not point `--sample` at a workload that calls
-one. The run refuses to start when the copy port has read routing on (it
+one. The run refuses to start when its connection to the copy port is routed (it
 would be comparing MySQL with MySQL), and exits 1 when no statement reached
 a comparison at all.
 
@@ -2028,59 +1878,48 @@ different order are counted apart and never fail the run: ties in an `ORDER
 BY` resolve differently on each engine, and so does a collation difference
 in the sort key; read those by hand.
 
-### The router: the same port as a service of its own (experimental)
+<a id="the-router-the-same-port-as-a-service-of-its-own-experimental"></a>
+### The router: the process that serves the port
 
-`bintrail-console router` runs the port and its read routing in a process of
-its own, beside `bintrail-console watch` and not inside it. Applications
-connect to it in place of their MySQL server: a statement goes to the server's
-source MySQL, except a `SELECT` whose plan says it is expensive, which runs on
-the copy.
+`bintrail-console router` is the process that serves the MySQL port. It runs
+beside `bintrail-console watch`, the process that captures, and not inside
+it. `watch` opens no MySQL port. If the router is not running, nothing
+answers on 3309, even with the port turned on in the web interface.
 
 ```bash
-BINTRAIL_CONSOLE_TOKEN=... bintrail-console router --listen 127.0.0.1:3310
-mysql -h 127.0.0.1 -P 3310 -u <server id or name> -p
+bintrail-console router --listen 127.0.0.1:3309
+mysql -h 127.0.0.1 -P 3309 -u <server id or name> -p
 ```
 
-What running it apart changes:
+Who starts it:
 
-- **Restarting capture does not drop its connections.** The port inside `watch`
-  ends with the process that captures.
-- **More statements run on the copy at once.** Inside `watch` they are kept to
-  two at a time, and one per server, because they share a machine with
-  capture. The router works the number out from the cores and the memory it
-  may use: one worker per two cores or per statement's memory, whichever is
-  fewer, and the cores are divided among the workers. Nothing is set by hand.
-  Give the service its own ceilings (`cpus` and `mem_limit` in Docker,
-  `CPUQuota=` and `MemoryMax=` under systemd) and it uses all of them; with
-  none it takes half of the machine, since capture uses the machine too. The
-  numbers and where they came from are printed when it starts.
+- **Docker Compose**: the `router` service of `docker-compose.yml`. It starts
+  with the stack. See [docker.md](docker.md#the-router-the-service-that-answers-the-mysql-port).
+- **The deb and rpm packages**: the `bintrail-router` systemd service. The
+  package enables and starts it. See [install.md](install.md#the-router-a-second-service-of-the-same-package).
+- **Anything else** (ECS, a container you wire by hand): one more container or
+  process that runs `bintrail-console router` and reads the same servers file
+  and the same `console-mysql-port.yaml` as the capture process.
+
+Why it is a process of its own:
+
+- **Restarting capture does not drop its connections.**
 - **A statement that runs out of memory cannot take capture with it.** It is
   another process, under its own ceiling.
+- **It sizes itself.** How many statements run on the copy at once is worked
+  out from the cores and the memory the router may use: one worker per two
+  cores or per statement's memory, whichever is fewer, and the cores are
+  divided among the workers. Nothing is set by hand. Give the service its own
+  ceilings (`cpus` and `mem_limit` in Docker, `CPUQuota=` and `MemoryMax=`
+  under systemd) and it uses all of them. With none it takes half of the
+  machine, since capture uses the machine too. The numbers and where they
+  came from are printed when it starts.
 
 It asks the capture process nothing. It reads the servers file the web
 interface manages (`--servers-file`, the same path `watch` uses) and never
 writes it, and it sees a server added, changed or removed there within a few
 seconds, without a restart. When a server's forwarding account changes, the
-connections that were using the previous one are closed, as on the port
-inside `watch`.
-
-Two rules differ from the port inside `watch`:
-
-| | Inside `watch` | The router |
-|---|---|---|
-| How old the copy may be | `--route-max-copy-age` | No maximum. An expensive read goes to the copy whatever the age of its snapshot. |
-| Every worker busy | The statement is forwarded to MySQL | The statement waits its turn, in the order it arrived, for up to 30 seconds, then the client gets error 1040, "too many connections", which drivers and pools retry. The line is not kept short as it is inside `watch`: a refusal that cost the client no time would be repeated as fast as the client can send, each attempt asking the source for a plan first |
-
-A server that cannot route (no forwarding account, no source to forward to,
-an account whose address cannot be used) is answered from the copy alone on
-both, the light reads too, and nothing its clients send reaches the source.
-`SHOW ROUTER STATUS` and the web interface say so for that server.
-
-The first is the trade a read/write split through a proxy already makes: on
-one connection a cheap statement is answered by MySQL as it is now, and an
-expensive one by the copy as it was at its last snapshot. The copy is an
-asynchronous replica; its age is a number to watch, not a rule. If your
-application cannot read a result that old, do not send it through the router.
+connections that were using the previous one are closed.
 
 **The switch and the password.** The router waits without listening until
 the MySQL port is turned on in the web interface, accepts the password
@@ -2089,17 +1928,19 @@ port is turned off there. Started with `--token` (or
 `BINTRAIL_CONSOLE_TOKEN`), it accepts the token as a password too while the
 port is on. The token does not open the port: one that nobody turned on must
 not open because a token is in the environment the router shares with the
-capture process. Replacing the
-password there closes the connections that were open too: clients reconnect
-with the new one, and whoever held the old one is out.
+capture process. Replacing the password in the web interface closes the
+connections that were open too: clients reconnect with the new one, and
+whoever held the old one is out.
 
-**Routing on or off.** The router reads one more
-thing from the port's saved setting: `routing`. Absent or `false`, the copy
+**Routing on or off.** The router reads one more thing from the port's saved
+setting (`console-mysql-port.yaml`): `routing`. Absent or `false`, the copy
 answers every statement and nothing is forwarded. `true`, statements are
-routed as above. The change is seen within a few seconds and closes the
-connections that were open: who answers is decided when a connection is
-made, and one left open would go on forwarding after routing was turned off.
-With or without a token.
+routed as described under
+[Read routing](#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental).
+The change is seen within a few seconds and closes the connections that were
+open: who answers is decided when a connection is made, and one left open
+would go on forwarding after routing was turned off. With or without a
+token.
 
 **The copy alone, for one connection.** Connect as `<server>@copy` and that
 connection is answered from the copy alone, the light reads too, while the
@@ -2113,7 +1954,8 @@ name ends in `@copy` is found under its name first.
 snapshot and its age in seconds, how many of that server's statements the
 copy and MySQL answered and how many were refused since the router started
 (with a row per reason), and the pool: how many workers, how many are running
-a statement and how many statements wait right now.
+a statement and how many statements wait right now. On a connection the copy
+answers alone, its first line says that nothing is routed there and why.
 
 ```sql
 SHOW ROUTER STATUS;
@@ -2129,10 +1971,11 @@ SHOW ROUTER STATUS;
 
 With `--metrics-addr` (or `BINTRAIL_ROUTER_METRICS_ADDR`; an address of its
 own, not the one `watch` serves) it exports Prometheus metrics: the routing
-decisions and the wait for a worker that `watch` exports for its own port,
-and `bintrail_read_routing_copy_snapshot_timestamp_seconds`, per server.
+decisions, the wait for a worker, and
+`bintrail_read_routing_copy_snapshot_timestamp_seconds`, per server.
 `time()` minus that one is the copy's age, the number to alert on here, the
 way replica lag is alerted on. See [Read routing metrics](observability.md#read-routing-bintrail_read_routing_decisions_total).
+The Docker stack and the packages set this address for you.
 
 The same address answers `GET /status` with the router's numbers as one JSON
 document: for every server, how many statements the copy answered, how many
@@ -2144,7 +1987,8 @@ time much older than that means the reading stopped, and the snapshot times
 are the last ones known. A server left out of a reading (its copy could not
 be read, or it has none) has no `copy_snapshot`; the router's log at debug
 level says which. Three yes-or-no fields say what the counts cannot:
-`cannot_route` (the server's statements are refused), `account_refused` (the
+`cannot_route` (the server cannot be forwarded for, so the copy answers it
+alone), `account_refused` (the
 source turned the router's login away, so clients get error 2006 while the
 counts go on rising) and `session_untracked`. Like
 `/metrics` it asks for no password, so it carries counts, times and the
@@ -2153,13 +1997,13 @@ answered a login. Those stay in the router's log.
 
 **In the web interface.** Give the capture process that address
 (`watch --router-url http://127.0.0.1:9091`, or
-`BINTRAIL_CONSOLE_ROUTER_URL`; the Docker stack sets it) and its MCP Server
-page shows a panel, The router: for the server picked in the sidebar, who
-answered and why, the snapshot of the copy the router reads and its age, and
-the workers. The capture process asks the router each time the page is
-opened or Refresh is pressed; the router asks it nothing. When the router
-does not answer, the panel says so and why, and shows no counts: a router
-that is down is not a router nobody uses.
+`BINTRAIL_CONSOLE_ROUTER_URL`; the Docker stack and the packages set it) and
+its MCP Server page shows a panel, The router: for the server picked in the
+sidebar, who answered and why, the snapshot of the copy the router reads and
+its age, and the workers. The capture process asks the router each time the
+page is opened or Refresh is pressed; the router asks it nothing. When the
+router does not answer, the panel says so and why, and shows no counts: a
+router that is down is not a router nobody uses.
 
 ```sh
 curl -s http://127.0.0.1:9091/status
@@ -2172,20 +2016,36 @@ forwarding and the copy's tables do not read the index. Time travel
 with an error until it is back.
 
 **What it needs.** The servers file, a copy on local disk for each server it
-should answer expensive reads for, and a network path to each server's
-source. The router brings nothing from a bucket itself. For a server whose
-snapshots are only on S3 it reads the local mirror `watch` keeps beside the
-servers file
+should answer ordinary SQL for, and, with read routing on, a network path to
+each server's source. The router brings nothing from a bucket itself. For a
+server whose snapshots are only on S3 it reads the local mirror `watch` keeps
+beside the servers file
 ([SQL on a server whose snapshots are only on S3](console.md#sql-on-a-server-whose-snapshots-are-only-on-s3)),
 so it has to see that folder: it does when it runs beside `watch`, as in the
 bundled stack and the packaged service. A router on another machine needs
 the folder that holds the servers file shared with it, or it has no copy to
-run such a server's expensive reads on. The other flags are the
-routing thresholds of the port inside `watch`: `--route-cost-threshold`,
-`--route-scan-rows`, `--route-read-only`, `--sql-memory` and
-`--sql-port-max-rows`, under the same environment variables, so one
-environment file serves both. `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE` and
-`BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT` do not apply to it, and it says so at
+answer for such a server.
+
+**Its settings.** Each is a flag of `bintrail-console router` and an
+environment variable. Most variables are the capture process's own names, so
+one environment file serves both processes.
+
+| Flag | Environment variable | Default | What it does |
+|---|---|---|---|
+| `--listen` | `BINTRAIL_ROUTER_LISTEN` | `127.0.0.1:3309` | Where the MySQL port listens |
+| `--metrics-addr` | `BINTRAIL_ROUTER_METRICS_ADDR` | none | Where `/metrics` and `/status` are served |
+| `--token` | `BINTRAIL_CONSOLE_TOKEN` | none | The access token, one more password for the port. It does not open the port |
+| `--servers-file` | `BINTRAIL_CONSOLE_SERVERS` | `~/.config/bintrail/console-servers.yaml` | The servers file the web interface manages. Read, never written |
+| `--route-read-only` | `BINTRAIL_CONSOLE_ROUTE_READ_ONLY` | on | Refuse every statement that is not a read. `--route-read-only=false` or `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0` forwards writes |
+| `--route-cost-threshold` | `BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD` | 10,000 | Under read routing, a `SELECT` whose plan costs at least this goes to the copy. 0 turns the rule off |
+| `--route-scan-rows` | `BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS` | 100,000 | Under read routing, a `SELECT` whose plan scans a whole table of at least this many rows goes to the copy. 0 turns the rule off |
+| `--sql-memory` | `BINTRAIL_CONSOLE_SQL_MEMORY` | 2GB | Memory each statement on the copy may use (at least 512MB) |
+| `--sql-port-max-rows` | `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` | 10,000 | Most rows one statement returns. A larger result is refused with error 1104 |
+
+The router refuses to start with both `--route-cost-threshold` and
+`--route-scan-rows` at 0, since no statement could then go to the copy.
+`BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE`, `BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT` and
+`BINTRAIL_CONSOLE_FLASHBACK_LISTEN` do not apply to it, and it says so at
 startup when they are set.
 
 **The memory of a statement.** With no `--sql-memory`, the router uses the
@@ -2201,6 +2061,47 @@ default is used.
 Forwarding to a replica is not something the router does. To read from
 replicas, put ProxySQL in front of the source and point the server's source
 address at it.
+
+### Upgrading from a version with the port inside `watch`
+
+Earlier versions opened the MySQL port inside the capture process
+(`bintrail-console watch`, turned on in the web interface or with
+`--flashback-listen`). Now only the router serves the port, on 3309.
+What changes on an upgrade:
+
+- **`--flashback-listen` / `BINTRAIL_CONSOLE_FLASHBACK_LISTEN` on `watch` no
+  longer opens a port.** If it is still set, it does one thing, once: when
+  the port has no saved setting yet, the port is saved as on, with a new
+  password you can replace in the web interface. An installation that had
+  the port keeps it. A port that already has a saved setting, on or off, is
+  left as it is. `watch` prints a WARNING at startup that says what happened
+  and asks you to remove the setting. The access token, if one is set, is
+  still accepted as a password.
+- **The port answers where the router listens: `127.0.0.1:3309` unless you
+  say otherwise.** The address `--flashback-listen` named, and the address
+  saved in the web interface, no longer decide where the port listens. If
+  the port answered other machines before (`0.0.0.0:3309`, a LAN address)
+  or used another port number (3308 in older examples), start the router
+  with that address: `--listen`, or `BINTRAIL_ROUTER_LISTEN`. Otherwise
+  those clients are refused after the upgrade.
+- **Something must run the router.** The Docker stack needs the current
+  `docker-compose.yml` ([docker.md](docker.md#upgrading-the-stack)). The
+  packages start `bintrail-router` on the upgrade
+  ([install.md](install.md#the-router-a-second-service-of-the-same-package)).
+  Anywhere else, start `bintrail-console router` yourself.
+- **`--route-max-copy-age` / `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE` no longer
+  turns read routing on.** It only prints a WARNING. Read routing is the
+  saved `routing` setting, and it is off until that is turned on. There is no
+  maximum copy age any more: with routing on, an expensive read goes to the
+  copy whatever the age of its snapshot.
+- **`--route-read-only`, `--route-cost-threshold`, `--route-scan-rows` and
+  `--sql-port-max-rows` given to `watch` no longer apply.** `watch` prints a
+  WARNING that names them. Give them to the router, on its command line or
+  in the environment both processes share.
+- **The router refuses writes unless told otherwise.** Before, read-only was
+  something you asked for. Now it is the default. To forward writes, start
+  the router with `--route-read-only=false` or
+  `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0`.
 
 ### The dedicated terminal
 
@@ -2568,7 +2469,7 @@ Every quoted time literal — in `AS OF`, `DBTRAIL_AT`, and the `BETWEEN` bounds
 - An error keeps the code the same statement gets as text, at `PREPARE` and at `EXECUTE`.
 - An argument whose bytes are not valid UTF-8 reaches the copy as a `BLOB`; the time-travel shapes refuse it.
 - Cursors are not served: an execution that asks for one (Connector/J with `useCursorFetch=true`, the C API's `STMT_ATTR_CURSOR_TYPE`) is refused with error 1105 naming the cause. Results are sent whole.
-- With read routing on (`--route-max-copy-age`), a statement that is not a time-travel shape is prepared on MySQL itself and executed there with MySQL binding the arguments, as if the client were connected to it: the port never writes a forwarded statement out as text, so a write stores exactly the value the client bound. The prepare answer then carries MySQL's own parameter and column definitions, errors are MySQL's, and a forwarded result is streamed row by row in MySQL's own binary encoding. Each execution goes through the routing rules above with its own arguments (the plan is read with them bound); only an execution the rules send to the copy is written out, for the copy alone, and falls back to MySQL if the copy refuses it. An execution stays on MySQL when the copy would read it differently: the database changed since the statement was prepared, or a string argument spells a non-integer number (`'12.7'`, compared as a number on MySQL). A statement that reaches the plan step holds a second statement on the source, the `EXPLAIN` of itself, which counts toward the source's `max_prepared_stmt_count`. A statement is tied to the connection it was prepared on: once the port's connection to the source is lost, its executions fail with 2006 like everything else.
+- With read routing on, a statement that is not a time-travel shape is prepared on MySQL itself and executed there with MySQL binding the arguments, as if the client were connected to it: the port never writes a forwarded statement out as text, so a write stores exactly the value the client bound. The prepare answer then carries MySQL's own parameter and column definitions, errors are MySQL's, and a forwarded result is streamed row by row in MySQL's own binary encoding. Each execution goes through the routing rules above with its own arguments (the plan is read with them bound); only an execution the rules send to the copy is written out, for the copy alone, and falls back to MySQL if the copy refuses it. An execution stays on MySQL when the copy would read it differently: the database changed since the statement was prepared, or a string argument spells a non-integer number (`'12.7'`, compared as a number on MySQL). A statement that reaches the plan step holds a second statement on the source, the `EXPLAIN` of itself, which counts toward the source's `max_prepared_stmt_count`. A statement is tied to the connection it was prepared on: once the port's connection to the source is lost, its executions fail with 2006 like everything else.
 - On a MariaDB source, a client that understands MariaDB's own column annotations (a `JSON` column, which MariaDB stores as text) sees such a column as plain text through the port: the bytes are the same, the annotation is not relayed.
 
 On the `_flashback` / `_snapshot` shapes a column list may replace `*` and the optional `TIMESTAMP` keyword may follow `AS OF` (Oracle / SQL Server convention):
@@ -2596,7 +2497,7 @@ SHOW TABLES FROM _flashback;
 
 `LIMIT <n>` bounds a full-table `AS OF` resultset (`SELECT * FROM _snapshot.orders AS OF '…' LIMIT 100`). It composes with a `WHERE` clause and a column list, and it is the quickest way to *browse* a large table: a `LIMIT` at or below the row cap lets the query succeed instead of tripping the cap. Rows come back in the merge's internal order (roughly primary-key order for `_snapshot`), **not** a sorted order — add your own `ORDER BY` downstream if you need one — and a `LIMIT n` can return fewer than `n` rows when some of the first `n` were deleted by the AS OF instant. A `LIMIT` never *raises* the cap.
 
-Full-table `_snapshot` with **no** `LIMIT`, run over a live shim (`bintrail shim`, or `bintrail-console watch --flashback-listen`), **streams** its resultset row-by-row over the wire and is **not** row-capped: the baseline flows through the merge cursor one row at a time, so peak memory is proportional to the rows *changed* since the baseline, not the table size — a multi-million-row table dumps without `ER_TOO_BIG_SELECT`. If the merge fails mid-stream, the connection receives an error packet in place of the next row (no clean end-of-result), so a failed dump is never mistaken for a complete one. The 100,000-row cap still applies to the binlog-only full-table `_flashback` path (whose fetch is buffered) and to any `LIMIT`ed query; exceeding it surfaces as `ER_TOO_BIG_SELECT` (code 1104) with a hint to add a `LIMIT`, narrow the AS OF range, or add a PK filter.
+Full-table `_snapshot` with **no** `LIMIT`, run over a live shim (`bintrail shim`, or the MySQL port of `bintrail-console router`), **streams** its resultset row-by-row over the wire and is **not** row-capped: the baseline flows through the merge cursor one row at a time, so peak memory is proportional to the rows *changed* since the baseline, not the table size: a multi-million-row table dumps without `ER_TOO_BIG_SELECT`. If the merge fails mid-stream, the connection receives an error packet in place of the next row (no clean end-of-result), so a failed dump is never mistaken for a complete one. The 100,000-row cap still applies to the binlog-only full-table `_flashback` path (whose fetch is buffered) and to any `LIMIT`ed query; exceeding it surfaces as `ER_TOO_BIG_SELECT` (code 1104) with a hint to add a `LIMIT`, narrow the AS OF range, or add a PK filter.
 
 DELETE events are correctly suppressed — rows that did not exist at the AS OF instant don't appear in the resultset (same semantic as Oracle's `AS OF`). For ad-hoc filtering, joins, or aggregations, pipe the resultset to `duckdb`, `pandas`, or any tool that consumes a `SELECT *` stream — the shim deliberately stays a forensic point-lookup + full-table tool, not a SQL planner.
 
@@ -2647,7 +2548,7 @@ If `bintrail-shim` is dead, `journalctl -u bintrail-shim -n 100` shows why. Comm
 The shim emits typed wire codes so ORMs and monitoring can distinguish *user input* errors from *server fault* errors — a 1105 spike no longer means "any time-travel query failed". Codes you may see:
 
 - **1064 `ER_PARSE_ERROR`** — a query mentions `_flashback` / `_snapshot` / `_diff` but doesn't match any supported shape (missing `AS OF`, missing `BETWEEN`, missing `USE <db>`, unparseable timestamp). Same code MySQL itself returns for any SQL syntax error.
-- **1235 `ER_NOT_SUPPORTED_YET`** — a non-virtual-schema query reached a shim that has no copy to run it on: the standalone `bintrail shim` (typically a direct connection to `:3308` bypassing ProxySQL; hostgroup routing is misconfigured), or the embedded port for a server whose copy is only on S3 or whose archive access is off (the message says which).
+- **1235 `ER_NOT_SUPPORTED_YET`**: a non-virtual-schema query reached a shim that has no copy to run it on: the standalone `bintrail shim` (typically a direct connection to `:3308` bypassing ProxySQL; hostgroup routing is misconfigured), or the MySQL port for a server whose copy is only on S3 or whose archive access is off (the message says which).
 - **1526 `ER_NO_PARTITION_FOR_GIVEN_VALUE`** — two causes, distinguished by the message. Either the AS OF or BETWEEN range falls outside what this index retains (rotated out of MySQL with no archive coverage) — narrow the time range or check `archive_state` and the shim's `--allow-gaps` flag. Or a **full-table `_snapshot`** query found the configured baseline unusable (no baseline snapshot at-or-before the AS OF instant, or a primary key the baseline merge can't canonicalize) and refused rather than return a partial table — create or re-run `bintrail baseline` so a snapshot covers the AS OF, or query `_flashback` for a binlog-only view.
 - **1045 `ER_ACCESS_DENIED_ERROR`** — credential mismatch (see the section above).
 - **1317 `ER_QUERY_INTERRUPTED`** — the query exceeded `--query-timeout` (message names the flag), or its client disconnected / the shim shut down mid-query. Narrow the AS OF range, filter by PK, or raise the timeout.

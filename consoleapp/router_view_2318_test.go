@@ -107,7 +107,7 @@ func TestRouterNumbers_reachTheWebInterface(t *testing.T) {
 	if a.Copy != 4 || a.MySQL != 1 || a.Refused != 1 || a.Reasons["copy_wait_timeout"] != 1 || a.CopySnapshot != "2026-10-11T14:19:00Z" {
 		t.Errorf("srv-a as the web interface got it = %+v", a)
 	}
-	if got.Status.Pool == nil || got.Status.Pool.Workers != 3 || got.Status.Listen != "127.0.0.1:3310" || !got.Status.ReadOnly {
+	if got.Status.Pool == nil || got.Status.Pool.Workers != 3 || got.Status.Listen != "127.0.0.1:3309" || !got.Status.ReadOnly {
 		t.Errorf("pool and settings = %+v", got.Status)
 	}
 
