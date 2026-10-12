@@ -234,7 +234,7 @@ console.log(JSON.stringify({ text: out, shape, refresh: { asked, disabled: !!btn
 	}
 	must("counts", "The router is the service that answers this port, on port 3310.", "read-only",
 		"Who answered for shop Your MySQL 9 statements DBTrail's copy 4 statements data 12m old since ", "3 refused, run by neither",
-		"snapshot of", "(12m old)", "whatever its age", "1 of 4 busy, 1 statement waiting", "2 threads and 2048MiB", "error 1040",
+		"snapshot of", "(12m old)", "whatever its age", "1 of 4 busy, 1 statement waiting", "2 threads and 2048MiB", "With every worker busy a statement waits its turn.", "error 1040",
 		"plan costs at least 10000", "at least 100000 rows", "Every other read runs on MySQL", "Refresh", "These numbers were read at",
 		"Why each side", "9 × a cheap plan", "4 × an expensive plan",
 		"2 × every worker was busy and thousands of statements were already waiting, more than the router lets wait: refused with error 1040 at once",

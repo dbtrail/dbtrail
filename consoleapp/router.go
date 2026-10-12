@@ -87,8 +87,8 @@ func addRouterFlags(cmd *cobra.Command) {
 	f.String("servers-file", "", "Path to the server registry the web interface manages (default ~/.config/bintrail/console-servers.yaml). Read, never written. Env BINTRAIL_CONSOLE_SERVERS.")
 	f.String("auth-file", "", "Path to the web interface auth file, when it is not the default: only so a statement cannot read it through a copy directory that contains it. Env BINTRAIL_CONSOLE_AUTH.")
 	f.String("mcp-token-file", "", "Path to the managed MCP token file, when it is not the default: for the same reason as --auth-file. Env BINTRAIL_CONSOLE_MCP_TOKEN_FILE.")
-	f.String("sql-memory", "", "Memory each statement on the copy may use, e.g. 4GB; default 2GB, at least 512MB. Fewer statements run at once when each may use more. Unset, the memory saved in the web interface (Settings, MCP Server) is used, read when the router starts: a change there takes effect when the router is restarted, since how many statements run at once was worked out from it. Env BINTRAIL_CONSOLE_SQL_MEMORY.")
-	f.String("concurrency", "", "How many statements run on the copy at once, 1 to 64, like innodb_thread_concurrency on a MySQL server. Empty or 0: worked out from the cores and the memory this process may use (one statement per two cores). A number above that is taken as said: each statement gets fewer threads, down to one, and the startup lines warn when the number can ask for more memory than there is. The rest wait their turn. Env BINTRAIL_ROUTER_CONCURRENCY.")
+	f.String("sql-memory", "", "Memory each statement on the copy may use, e.g. 4GB; default 2GB, at least 512MB. Fewer statements run at once when each may use more, unless --concurrency sets the number. Unset, the memory saved in the web interface (Settings, MCP Server) is used, read when the router starts: a change there takes effect when the router is restarted, since how many statements run at once was worked out from it. Env BINTRAIL_CONSOLE_SQL_MEMORY.")
+	f.String("concurrency", "", "How many statements run on the copy at once, 1 to 64, like innodb_thread_concurrency on a MySQL server. Empty or 0: worked out from the cores and the memory this process may use (one statement per two cores). A number above that is taken as said: each statement gets fewer threads, down to one, and the startup lines warn when the number can ask for more memory than there is. A higher number also divides the temporary disk statements may use past their memory into more shares, and keeps that many idle worker processes ready. The rest wait their turn. Env BINTRAIL_ROUTER_CONCURRENCY.")
 	f.String("max-wait", "", "How long a statement waits for its turn on the copy when every worker is busy, e.g. 30s or 2m; past it the client gets an error (1040 on a routed connection, 1203 on one that is not). Empty or 0: no limit, it waits for as long as its client stays connected. Env BINTRAIL_ROUTER_MAX_WAIT.")
 	f.Int("sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns; a result with more is refused with error 1104, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
 	f.Bool("route-read-only", true, "On unless set to false (--route-read-only=false, BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0). Refuse every statement that is not a read, and never send it to the source. It reads the statement's text, so it cannot see a stored function that writes: the forwarding account's grants are the guard for that. Env BINTRAIL_CONSOLE_ROUTE_READ_ONLY.")
@@ -442,7 +442,7 @@ func followRouterMemory(ctx context.Context, savedPath, applied string, every ti
 		if now == "" {
 			now = "the default"
 		}
-		warn("router: the SQL memory saved in the web interface changed and is NOT applied here yet: restart the router to apply it (how many statements run at once is worked out from it)", "saved", now, "running_with", applied)
+		warn("router: the SQL memory saved in the web interface changed and is NOT applied here yet: restart the router to apply it (how many statements run at once is worked out from it, unless --concurrency sets the number)", "saved", now, "running_with", applied)
 	}
 }
 
@@ -476,7 +476,7 @@ func routerIgnoredEnv() []string {
 		out = append(out, fmt.Sprintf("BINTRAIL_CONSOLE_FLASHBACK_LISTEN=%s is not applied: the router listens where BINTRAIL_ROUTER_LISTEN or --listen says, 127.0.0.1:3309 unless set. To keep answering on the old address, set BINTRAIL_ROUTER_LISTEN=%s", v, v))
 	}
 	if v := os.Getenv("BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT"); v != "" {
-		out = append(out, fmt.Sprintf("BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT=%s is not applied: it is the capture process's. The router works out how many statements run at once from its cores and memory; to set the number, use BINTRAIL_ROUTER_CONCURRENCY or --concurrency", v))
+		out = append(out, fmt.Sprintf("BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT=%s is not applied: it is the capture process's. How many statements the router runs at once is BINTRAIL_ROUTER_CONCURRENCY or --concurrency, and worked out from its cores and memory when that is not set", v))
 	}
 	return out
 }
@@ -643,7 +643,10 @@ func routerStartupLines(u routerStartup) string {
 	default:
 		fmt.Fprintf(&b, "Router: %s from %s, read again when it changes.\n", countOfServers(u.Servers), u.ServersFile)
 	}
-	fmt.Fprintf(&b, "Router: %s on the copy at once, %d threads and up to %s of memory each: %s.\n", countOfStatements(u.Pool.Workers), u.Pool.Threads, u.MemoryLimit, u.Pool.Why)
+	fmt.Fprintf(&b, "Router: %s on the copy at once, %s and up to %s of memory each: %s.\n", countOfStatements(u.Pool.Workers), countOfThreads(u.Pool.Threads), u.MemoryLimit, u.Pool.Why)
+	if u.Pool.Warning != "" {
+		fmt.Fprintf(&b, "Router: WARNING: %s.\n", u.Pool.Warning)
+	}
 	if u.MemoryFrom != "" {
 		fmt.Fprintf(&b, "Router: that memory is %s. A change saved in the web interface is applied when the router is restarted.\n", u.MemoryFrom)
 	}
@@ -752,6 +755,13 @@ func parseRouterMaxWait(v string) (time.Duration, error) {
 	return d, nil
 }
 
+func countOfThreads(n int) string {
+	if n == 1 {
+		return "1 thread"
+	}
+	return fmt.Sprintf("%d threads", n)
+}
+
 func countOfStatements(n int) string {
 	if n == 1 {
 		return "1 statement"
@@ -779,6 +789,11 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 		memoryLimit = sqlsandbox.DefaultLimits().MemoryLimit
 	}
 	pool := routerPool(st, memoryLimit)
+	if pool.Warning != "" {
+		// In the log as well as in the startup lines: those are plain text
+		// on stderr, which a collector that reads levels does not see.
+		slog.Warn("router: --concurrency can ask for more memory than this process may use", "detail", pool.Warning)
+	}
 	srv, runner, err := newRouterConsole(st, pool)
 	if err != nil {
 		return err

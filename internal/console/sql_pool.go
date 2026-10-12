@@ -38,6 +38,10 @@ type SQLPool struct {
 	Workers int
 	Threads int
 	Why     string
+	// Warning is said on a line of its own, "" when there is nothing to
+	// warn about: the number the operator set can ask for more memory than
+	// this process may use.
+	Warning string
 }
 
 const (
@@ -115,20 +119,30 @@ func SQLPoolFor(in SQLPoolInput) SQLPool {
 	if in.Asked > SQLPoolMaxWorkers {
 		said += fmt.Sprintf("; %d were asked for, and at most %d run at once", in.Asked, SQLPoolMaxWorkers)
 	}
-	if asked > cores {
-		said += fmt.Sprintf("; that is more statements than the %s they run on, so they take turns on them", countOfCores(cores))
+	// Against the cores there are, not the share counted above: nothing
+	// keeps the workers off the other half of a machine.
+	if all := max(in.Cores, 1); asked > all {
+		said += fmt.Sprintf("; that is more statements than this process has cores (%d), so they take turns", all)
 	}
+	warning := ""
 	if err == nil && in.MemoryBytes > 0 {
 		mem := in.MemoryBytes
 		if !in.MemoryOwn {
 			mem /= 2
 		}
 		if need := uint64(asked)*uint64(ceiling) + sqlPoolOwnBytes; need > mem {
-			said += fmt.Sprintf("; WARNING: %d statements at up to %s each can reach %s, more than the %s counted for this process, so under load a statement may be stopped for memory or the machine run short of it. Lower the number, or the memory each may use",
-				asked, gibText(uint64(ceiling)), gibText(need), gibText(mem))
+			warning = fmt.Sprintf("%s at up to %s each can reach %s, more than the %s counted for this process, so under load a statement may be stopped for memory or the machine run short of it. Lower the number (--concurrency), or the memory each may use (--sql-memory)",
+				countOfStatements(asked), gibText(uint64(ceiling)), gibText(need), gibText(mem))
 		}
 	}
-	return SQLPool{Workers: asked, Threads: max(cores/asked, 1), Why: said}
+	return SQLPool{Workers: asked, Threads: max(cores/asked, 1), Why: said, Warning: warning}
+}
+
+func countOfStatements(n int) string {
+	if n == 1 {
+		return "1 statement"
+	}
+	return fmt.Sprintf("%d statements", n)
 }
 
 func countOfCores(n int) string {

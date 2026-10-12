@@ -24,9 +24,9 @@ func TestSQLPoolFor_theNumberTheOperatorAsked(t *testing.T) {
 		{"fewer: each gets more of the cores", with(big, 2), 2, 8, []string{"as set"}, []string{"WARNING", "take turns"}},
 		{"more than a pair of cores each: one thread", with(big, 16), 16, 1, []string{"as set"}, []string{"WARNING", "take turns"}},
 		{"between: the cores divided, never under one", with(big, 12), 12, 1, nil, []string{"take turns"}},
-		{"more than there are cores: they take turns", with(big, 32), 32, 1, []string{"more statements than the 16 cores they run on"}, []string{"WARNING"}},
+		{"more than there are cores: they take turns", with(big, 32), 32, 1, []string{"more statements than this process has cores (16), so they take turns"}, []string{"WARNING"}},
 		{"one core", with(SQLPoolInput{Cores: 1, CoresOwn: true, MemoryBytes: 256 * gib, MemoryOwn: true, MemoryLimit: "2048MiB"}, 4), 4, 1,
-			[]string{"more statements than the 1 core they run on"}, []string{"1 cores"}},
+			[]string{"more statements than this process has cores (1)"}, nil},
 		{"past the cap: the cap, and said", with(SQLPoolInput{Cores: 256, CoresOwn: true, MemoryBytes: 2048 * gib, MemoryOwn: true, MemoryLimit: "2048MiB"}, 500), SQLPoolMaxWorkers, 4,
 			[]string{"500 were asked for, and at most 64 run at once"}, nil},
 		{"more than the memory holds: taken, with a warning that has the sum",
@@ -41,6 +41,12 @@ func TestSQLPoolFor_theNumberTheOperatorAsked(t *testing.T) {
 			[]string{"WARNING: 4 statements at up to 2.5 GiB each can reach 10.5 GiB, more than the 8.0 GiB counted"}, nil},
 		{"the machine's cores, not its own: half of them are divided",
 			with(SQLPoolInput{Cores: 16, MemoryBytes: 256 * gib, MemoryOwn: true, MemoryLimit: "2048MiB"}, 8), 8, 1, nil, []string{"take turns"}},
+		{"the machine's cores: turns are counted against all of them, not the half that is divided",
+			with(SQLPoolInput{Cores: 16, MemoryBytes: 256 * gib, MemoryOwn: true, MemoryLimit: "2048MiB"}, 12), 12, 1, nil, []string{"take turns"}},
+		{"and past all of them they do take turns",
+			with(SQLPoolInput{Cores: 16, MemoryBytes: 256 * gib, MemoryOwn: true, MemoryLimit: "2048MiB"}, 20), 20, 1, []string{"has cores (16)"}, nil},
+		{"one statement asked of a process too small for it: the warning, in the singular",
+			with(SQLPoolInput{Cores: 2, CoresOwn: true, MemoryBytes: 300 << 20, MemoryOwn: true, MemoryLimit: "2048MiB"}, 1), 1, 2, []string{"WARNING: 1 statement at up to"}, []string{"1 statements"}},
 		{"memory not known: taken, nothing to warn with",
 			with(SQLPoolInput{Cores: 8, CoresOwn: true, MemoryLimit: "2048MiB"}, 6), 6, 1, []string{"memory is not known"}, []string{"WARNING"}},
 		{"a memory setting that does not parse: taken, nothing to warn with",
@@ -51,16 +57,35 @@ func TestSQLPoolFor_theNumberTheOperatorAsked(t *testing.T) {
 			if got.Workers != tc.workers || got.Threads != tc.threads {
 				t.Errorf("SQLPoolFor = %d workers x %d threads, want %d x %d (%s)", got.Workers, got.Threads, tc.workers, tc.threads, got.Why)
 			}
+			said := got.Why
+			if got.Warning != "" {
+				said += "; WARNING: " + got.Warning
+			}
 			for _, want := range tc.say {
-				if !strings.Contains(got.Why, want) {
-					t.Errorf("Why does not say %q:\n%s", want, got.Why)
+				if !strings.Contains(said, want) {
+					t.Errorf("does not say %q:\n%s", want, said)
 				}
 			}
 			for _, not := range tc.sayNot {
-				if strings.Contains(got.Why, not) {
-					t.Errorf("Why says %q:\n%s", not, got.Why)
+				if strings.Contains(said, not) {
+					t.Errorf("says %q:\n%s", not, said)
 				}
 			}
 		})
+	}
+}
+
+// The warning is the pool's to say apart from the sentence that explains the
+// numbers, and there is none when the machine decides.
+func TestSQLPoolFor_theWarningIsItsOwnField(t *testing.T) {
+	const gib = uint64(1) << 30
+	in := SQLPoolInput{Cores: 16, CoresOwn: true, MemoryBytes: 8 * gib, MemoryOwn: true, MemoryLimit: "2048MiB", Asked: 8}
+	got := SQLPoolFor(in)
+	if got.Warning == "" || strings.Contains(got.Why, "can reach") {
+		t.Errorf("Warning = %q, Why = %q; want the warning apart from the why", got.Warning, got.Why)
+	}
+	in.Asked = 0
+	if got := SQLPoolFor(in); got.Warning != "" {
+		t.Errorf("the machine's own number warns: %q", got.Warning)
 	}
 }

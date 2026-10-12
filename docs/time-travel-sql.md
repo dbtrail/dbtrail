@@ -1948,12 +1948,17 @@ Why it is a process of its own:
   run on the copy at once, from 1 to 64, the way `innodb_thread_concurrency`
   does on a MySQL server. The number is taken as said. Above one per two
   cores each statement runs with fewer threads, down to one, so more run
-  at once and each is slower; above the number of cores they take turns on
-  them. Each statement keeps its own memory (2 GB by default, plus a
+  at once and each is slower; above the number of cores they take turns. Each statement keeps its own memory (2 GB by default, plus a
   quarter), so the startup lines print a `WARNING` with the sum when the
   number can ask for more memory than the router may use: lower the number,
-  or the memory each may use. It does not change how many clients connect:
-  any number does, and the ones past this number wait their turn.
+  or the memory each may use. Two more things grow with the number. The temporary disk a
+  statement may use past its memory is the free space divided among twice
+  the number, and under 256 MB each there is none, which the router's log
+  says at startup: a heavy statement that used to finish slowly then fails
+  at its memory. And the router keeps up to that many idle worker processes
+  ready between statements, a few tens of MB each. It does not change how
+  many clients connect: any number does, and the ones past this number wait
+  their turn.
 
 It asks the capture process nothing. It reads the servers file the web
 interface manages (`--servers-file`, the same path `watch` uses) and never

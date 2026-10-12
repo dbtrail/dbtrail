@@ -15071,7 +15071,7 @@ function routerLines(view, cur) {
   const p = st.pool;
   if (p) {
     out.push({ text: "Workers for the copy, shared by every server: " + (p.running || 0) + " of " + (p.workers || 0) + " busy, " + (p.waiting || 0) + " " + ((p.waiting || 0) === 1 ? "statement" : "statements") + " waiting. Each statement gets " +
-      (p.threads_each || 0) + " threads and " + (p.memory_each || "its default memory") + ". With every worker busy a statement waits its turn for up to 30 seconds, then is refused with error 1040." });
+      (p.threads_each || 0) + ((p.threads_each || 0) === 1 ? " thread and " : " threads and ") + (p.memory_each || "its default memory") + ". With every worker busy a statement waits its turn." });
   }
   const rules = [];
   if (st.cost_threshold > 0) rules.push("MySQL's plan costs at least " + st.cost_threshold);

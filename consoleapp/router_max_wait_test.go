@@ -202,3 +202,23 @@ func TestRouterPool_takesTheNumberSet(t *testing.T) {
 		t.Errorf("unset: %d workers (%s), want the machine's own number", auto.Workers, auto.Why)
 	}
 }
+
+// The startup lines say one thread in the singular, and a pool that can ask
+// for more memory than there is gets a line of its own that begins with
+// WARNING, where it is not the tail of the sentence before it.
+func TestRouterStartupLines_sayTheNumberSet(t *testing.T) {
+	got := routerStartupLines(routerStartup{MaxWait: sqlsandbox.NoMaxWait, MemoryLimit: "2048MiB",
+		Pool: console.SQLPool{Workers: 8, Threads: 1, Why: "as set (the machine alone gives 3)", Warning: "8 statements at up to 2.5 GiB each can reach 20.5 GiB"}})
+	for _, want := range []string{
+		"Router: 8 statements on the copy at once, 1 thread and up to 2048MiB of memory each: as set (the machine alone gives 3).\n",
+		"\nRouter: WARNING: 8 statements at up to 2.5 GiB each can reach 20.5 GiB.\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the startup lines do not say %q:\n%s", want, got)
+		}
+	}
+	quiet := routerStartupLines(routerStartup{MaxWait: sqlsandbox.NoMaxWait, Pool: console.SQLPool{Workers: 2, Threads: 2, Why: "4 cores allow 2"}})
+	if strings.Contains(quiet, "WARNING") || !strings.Contains(quiet, "2 threads") {
+		t.Errorf("a pool with nothing to warn about:\n%s", quiet)
+	}
+}
