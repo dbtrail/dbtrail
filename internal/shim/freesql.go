@@ -221,8 +221,10 @@ const RouteReasonResultOverCap RouteReason = "result_over_row_cap"
 // Reserve): it is MySQL's only when the line was already full as it arrived
 // (copy_queue_full: as many statements waiting as the process lets wait,
 // sqlsandbox.DefaultMaxWaiters inside watch and thousands on the router, and
-// it did not wait at all), or when it waited the whole sqlsandbox.DefaultMaxWait
-// and no slot came free (copy_wait_timeout). Neither is a fault of the copy,
+// it did not wait at all), or when it waited the whole wait its process sets
+// and no slot came free (copy_wait_timeout: sqlsandbox.DefaultMaxWait inside
+// watch; on the router only under --max-wait, since a statement there waits
+// with no time bound by default). Neither is a fault of the copy,
 // which is why they are not counted under RouteReasonCopyRefused: a copy that
 // is merely asked for more than it serves must not read as a broken one.
 const (
@@ -235,6 +237,15 @@ const (
 // sends them (ResultBudget, #2241). Its own reason: what clears it is
 // clients reading their answers, not more slots.
 const RouteReasonCopyResultsHeld RouteReason = "copy_results_held"
+
+// RouteReasonCancelled: the statement was on its way to the copy, waiting
+// its turn or running there, and it ended before the copy answered: its
+// client left, the port is stopping, or the connection's own time cap ran
+// out. Counted under RouteRefused: nobody answered it, and it is NOT handed
+// to MySQL. There is no one to read the answer, and the context a forward
+// would be given has ended, which would start the statement on the source
+// and then close the session it runs in.
+const RouteReasonCancelled RouteReason = "cancelled"
 
 // observeRoute reports one decision to the bound observer, if any.
 func (h *Handler) observeRoute(route RouteSide, reason RouteReason) {
@@ -534,8 +545,8 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		// statement either waited the whole time a statement waits, or found
 		// the line full and did not wait: told apart, because the first has
 		// already cost the client that wait and the second cost it nothing.
-		// A cancelled wait (the client left, the connection's own time cap)
-		// is neither, and falls through to the rung below as before.
+		// A cancelled wait (the client left) is neither, and has its own
+		// rung below.
 		reason, detail := RouteReasonCopyQueueFull, "copy busy, and the line for it full: "
 		var waited *sqlsandbox.BusyError
 		if errors.As(err, &waited) {
@@ -551,6 +562,16 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		}
 		h.routeWarn("busy", "read routing: the copy was busy (every slot taken, and the line for one full or the wait over), an expensive statement forwarded to mysql", err)
 		return ops.forward(reason, detail+err.Error())
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || (err != nil && ctx.Err() != nil) {
+		// The statement ended, in the line or on the copy, before the copy
+		// answered (RouteReasonCancelled). Not a fault of the copy, and not
+		// forwarded: a client that gives up on a long line must not turn
+		// its wait into a read on the source, nor a router that stops into
+		// one read there per statement that waited.
+		h.logger.Debug("read routing: a statement for the copy ended before the copy answered; not forwarded", "err", err)
+		h.observeRoute(RouteRefused, RouteReasonCancelled)
+		return nil, h.freeSQLError(err)
 	}
 	if err != nil {
 		// The slow path is always right: whatever the copy could not do
@@ -881,6 +902,12 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 		// Under routing a busy copy is the ladder's to tell from a fault too
 		// (#2112). Asked of the connection, like StrictStar above. A
 		// connection that does not route gets error 1203 below.
+		return nil, err
+	}
+	if h.router != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		// So is a statement that ended before the copy answered
+		// (RouteReasonCancelled): turned into the client's error here, the
+		// ladder would read it as the copy refusing and forward it.
 		return nil, err
 	}
 	if err != nil {

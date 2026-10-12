@@ -619,7 +619,7 @@ func TestRouterPort_anAddressTakenAtStartIsAnError(t *testing.T) {
 // files it serves from, the pool it worked out, and how reads are routed, in
 // whole sentences. The cases are the ones that are silent otherwise.
 func TestRouterStartupLines_sayWhatWillHappen(t *testing.T) {
-	base := routerStartup{Listen: "127.0.0.1:3309", Pool: console.SQLPool{Workers: 4, Threads: 2, Why: "8 cores allow 4"}, MemoryLimit: "2048MiB",
+	base := routerStartup{Listen: "127.0.0.1:3309", MaxWait: sqlsandbox.NoMaxWait, Pool: console.SQLPool{Workers: 4, Threads: 2, Why: "8 cores allow 4"}, MemoryLimit: "2048MiB",
 		Cfg: routerFlashbackConfig(routerSettings{Policy: readrouter.DefaultPolicy()}), ServersFile: "/var/lib/bintrail/console-servers.yaml", ServersExists: true, Servers: 3}
 	for _, tc := range []struct {
 		name    string
@@ -629,7 +629,7 @@ func TestRouterStartupLines_sayWhatWillHappen(t *testing.T) {
 	}{
 		{"as started by default", func(u *routerStartup) { u.PortFile = "/var/lib/bintrail/console-mysql-port.yaml" },
 			[]string{"127.0.0.1:3309", "open only while the MySQL port is turned on in the web interface (read from /var/lib/bintrail/console-mysql-port.yaml)", "The password is the one created there.", "routed only when that file says so", "3 servers from /var/lib/bintrail/console-servers.yaml", "4 statements on the copy at once", "2 threads", "8 cores allow 4",
-				"whatever the age of its snapshot", "waits its turn, in the order it arrived, for up to 30s", "error 1040", "read routing is read-write"},
+				"whatever the age of its snapshot", "waits its turn, in the order it arrived, for as long as its client stays connected (no time limit; --max-wait sets one)", "Past 4096 statements waiting, one more gets an error (1040 on a routed connection, 1203 on one that is not)", "read routing is read-write"},
 			[]string{"every network interface", "does not exist", "is not applied", "read routing is read-only", "access token"}},
 		{"a pool of one is one statement", func(u *routerStartup) { u.Pool.Workers = 1 },
 			[]string{"1 statement on the copy at once"}, []string{"1 statements"}},

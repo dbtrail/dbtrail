@@ -12,6 +12,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/readrouter"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/streamrun"
 )
 
@@ -184,5 +185,10 @@ func TestNewRouterConsole_letsStatementsWaitTheirTurn(t *testing.T) {
 	t.Cleanup(web.SQLSandbox().Close)
 	if got := web.SQLSandbox().MaxWaiters(); got != 16 {
 		t.Errorf("a console in the capture process lets %d statements wait, want 16", got)
+	}
+	// The wait with no time bound is the router's alone: beside capture a
+	// statement still gives up after the default wait.
+	if got := web.SQLSandbox().MaxWait(); got != sqlsandbox.DefaultMaxWait {
+		t.Errorf("a console in the capture process waits %v, want %v", got, sqlsandbox.DefaultMaxWait)
 	}
 }

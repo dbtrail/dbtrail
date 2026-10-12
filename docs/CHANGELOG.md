@@ -22,6 +22,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/sql` address lands on the new page, and every message and flag
   description that sent you to MCP Server for the port now names MySQL
   clients.
+- **A statement on the MySQL port waits for its turn on the copy for as
+  long as its client stays connected.** It used to wait 30 seconds and then
+  get an error (1040 with read routing on, 1203 without), so a test with
+  more clients than the copy runs at once (64 or 256 connections sending
+  heavy reads) ended in errors. Now those clients are answered, more slowly,
+  the way a busy MySQL answers them. A client that disconnects leaves the
+  line at once. To get the old behaviour, give the router a time limit:
+  `--max-wait 30s`, `BINTRAIL_ROUTER_MAX_WAIT`, or `ROUTER_MAX_WAIT` in the
+  Docker stack's `.env` (take the current `docker-compose.yml` for that last
+  one). Up to 4,096 statements wait at once; one more is still refused. The
+  SQL card of the web interface is unchanged. Two things that the 30
+  seconds used to hide are fixed with it: the port's 5-minute cap on a
+  statement no longer counts the time it waits its turn (it stopped a
+  statement that had only waited, and on a routed connection that closed
+  the client's session on the source), and a client that sends its goodbye
+  before it closes (`COM_QUIT`, what a driver's close does) is now seen
+  leaving while its statement waits or runs. And a statement whose client
+  left while it waited for the copy is no longer handed to MySQL, where it
+  ran for nobody: it is dropped, and counted as `cancelled` under
+  `route="refused"`.
 
 ## [0.104.0] - 2026-10-11
 ### Fixed

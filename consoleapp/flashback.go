@@ -42,11 +42,10 @@ type flashbackConfig struct {
 	// loudly on a coverage gap / archive failure; true downgrades to a
 	// server-side warning and returns partial rows.
 	AllowGaps bool
-	// QueryTimeout bounds each time-travel query end-to-end. It is the ONLY
-	// backstop against a runaway query on a dropped connection here — unlike the
-	// standalone shim, the embedded port runs no client-disconnect detection
-	// pump — so it must never be 0. withDefaults substitutes the 5-minute
-	// default when this is 0.
+	// QueryTimeout bounds each statement of the port end-to-end, a wait for
+	// a worker of the copy aside (the line holds this clock while a
+	// statement waits in it, internal/stmtclock). It must never be 0:
+	// withDefaults substitutes the 5-minute default when this is 0.
 	QueryTimeout time.Duration
 	// MaxFullTable caps concurrent full-table reconstructions across every
 	// connection of this port (0 → 4, the standalone default): a shared gate,
@@ -109,10 +108,10 @@ const (
 )
 
 // withDefaults resolves the zero-value fields to their production defaults.
-// QueryTimeout is the load-bearing one: 0 means "unbounded", but the embedded
-// port has no client-disconnect pump, so a runaway query on a dropped
-// connection would never be reclaimed — the 5-minute default is the only
-// backstop. serveFlashback always calls this, so the dangerous zero never
+// QueryTimeout is the load-bearing one: 0 means "unbounded", and a client
+// that stays connected to a statement that never ends would then hold it
+// for good — the 5-minute default is the backstop for what runs (a client
+// that leaves is seen by shim.WatchConn). serveFlashback always calls this, so the dangerous zero never
 // reaches the query path; keeping both substitutions here (rather than one
 // inline and one in a side variable) is why they can't drift apart.
 func (c flashbackConfig) withDefaults() flashbackConfig {

@@ -566,6 +566,12 @@ services:
       # returns: the same two settings as `bintrail`, from the same .env.
       BINTRAIL_CONSOLE_SQL_MEMORY: ${SQL_MEMORY:-}
       BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS: ${SQL_PORT_MAX_ROWS:-}
+      # How long a statement waits for its turn on the copy when every worker
+      # is busy. Empty = no limit: it waits for as long as its client stays
+      # connected, so many clients at once are slower, not refused. A time
+      # here (ROUTER_MAX_WAIT=30s in .env) refuses it past that, with an
+      # error drivers and pools retry.
+      BINTRAIL_ROUTER_MAX_WAIT: ${ROUTER_MAX_WAIT:-}
       # READ-ONLY unless you say otherwise: a statement that is not a read is
       # refused and never reaches the source. This service starts with the
       # stack, and its password is one that until now could only read (the

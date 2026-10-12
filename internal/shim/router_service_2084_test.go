@@ -144,8 +144,8 @@ func TestRouter_busyRefusesWith1040(t *testing.T) {
 	}
 }
 
-// BusyRefuses is about a busy copy only. A statement the copy cannot run, a
-// caller that left and a port that holds its results are what they were.
+// BusyRefuses is about a busy copy only. A statement the copy cannot run
+// and a port that holds its results are what they were.
 func TestRouter_busyRefusesOnlyABusyCopy(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -153,7 +153,6 @@ func TestRouter_busyRefusesOnlyABusyCopy(t *testing.T) {
 		want    string
 	}{
 		{"a fault of the copy", errors.New("Binder Error"), "mysql/copy_refused"},
-		{"cancelled while waiting", context.Canceled, "mysql/copy_refused"},
 		{"the port holds its results", &ResultsHeldError{}, "mysql/copy_results_held"},
 		{"the copy's columns differ", &sqlsandbox.ColumnsDifferError{Reason: "a star"}, "mysql/copy_columns_differ"},
 	} {

@@ -1,7 +1,6 @@
 package shim
 
 import (
-	"context"
 	"errors"
 	"os"
 	"regexp"
@@ -28,11 +27,6 @@ func TestRouter_busyCopyHasItsOwnReasons(t *testing.T) {
 	}{
 		{"the line was full on arrival", sqlsandbox.ErrBusy, "mysql/copy_queue_full", "busy"},
 		{"waited the whole 30 s", &sqlsandbox.BusyError{Waited: 30 * time.Second, MaxInFlight: 2}, "mysql/copy_wait_timeout", "busy"},
-		// Not a busy copy, and not to be absorbed by the two reasons above:
-		// the client left, or the connection's own time cap ran out, while
-		// the statement waited. Counted as before.
-		{"cancelled while waiting", context.Canceled, "mysql/copy_refused", "copy"},
-		{"the connection's cap ran out while waiting", context.DeadlineExceeded, "mysql/copy_refused", "copy"},
 		{"a fault of the copy", errors.New("Binder Error"), "mysql/copy_refused", "copy"},
 	}
 	for _, tc := range cases {

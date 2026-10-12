@@ -25,6 +25,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/parquetquery"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/stmtclock"
 )
 
 // showTablesFromVirtualRE matches the interactive `SHOW [FULL] TABLES
@@ -141,6 +142,9 @@ type Handler struct {
 	// disconnect or daemon shutdown aborts in-flight fetches. nil means
 	// context.Background() (unit tests, pre-#823 embedders).
 	baseCtx context.Context
+	// clocks are the time caps of the statements this connection has in
+	// hand (queryContext), held together while one of them waits its turn.
+	clocks stmtclock.Group
 
 	// conn, when non-nil, lets the full-table _snapshot path stream its
 	// resultset row-by-row over the wire instead of buffering it and tripping
@@ -483,7 +487,10 @@ func (h *Handler) queryContext() (context.Context, context.CancelFunc) {
 		base = context.Background()
 	}
 	if h.cfg.QueryTimeout > 0 {
-		return context.WithTimeout(base, h.cfg.QueryTimeout)
+		// A clock the line for the copy holds while the statement waits in
+		// it (sqlsandbox.Runner.Reserve): the cap is on what a statement
+		// runs, and a wait is not the statement running.
+		return h.clocks.WithTimeout(base, h.cfg.QueryTimeout)
 	}
 	return context.WithCancel(base)
 }

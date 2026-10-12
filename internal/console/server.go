@@ -198,6 +198,11 @@ type Config struct {
 	// refusal is answered to the client, and one that costs the client no
 	// time is repeated as fast as the client can send.
 	SQLMaxWaiters int
+	// SQLMaxWait is how long a statement waits for a SQL worker before it
+	// is refused; 0 means sqlsandbox.DefaultMaxWait. The router gives
+	// sqlsandbox.NoMaxWait unless it was started with a bound: a statement
+	// there waits its turn for as long as its client stays.
+	SQLMaxWait time.Duration
 	// SQLPortSharedSlots lets statements on the MySQL port for one server
 	// run at once, up to SQLMaxInFlight for all servers together (#2084).
 	// Unset, one runs at a time per server (#2026), which is the rule for a
@@ -857,7 +862,7 @@ func New(cfg Config) (*Server, error) {
 	// on their own after a few minutes with no statement, and with this
 	// process, whose exit closes their stdin.
 	runner := sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits, MaxInFlight: cfg.SQLMaxInFlight, Standby: true,
-		WorkerStatements: cfg.SQLWorkerStatements, MaxWaiters: cfg.SQLMaxWaiters})
+		WorkerStatements: cfg.SQLWorkerStatements, MaxWaiters: cfg.SQLMaxWaiters, MaxWait: cfg.SQLMaxWait})
 	s.sqlPortSharedSlots = cfg.SQLPortSharedSlots
 	s.sqlRunner, s.sqlSpillState, s.sqlFenceState = sandboxRunner{runner}, runner.SpillState, runner.FenceState
 	s.sqlMaxInFlight = cfg.SQLMaxInFlight

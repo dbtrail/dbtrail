@@ -165,11 +165,13 @@ What to know before relying on it:
   same server can run at the same time. The SQL card of the web interface
   does not share these workers: it runs in the capture process, two
   statements at once by default (`watch --sql-max-in-flight`). A statement
-  on the port waits up to 30 seconds for a worker and then gets MySQL error
-  1203 ("SQL on the copy is busy"). A client that disconnects
+  on the port waits for a worker for as long as its client stays connected:
+  many clients at once are slower, not refused. A client that disconnects
   while waiting, or while its statement runs, leaves at once and frees its
-  place. With read routing on, a routed statement that waited that long gets
-  error 1040 instead (see
+  place. To refuse a statement that has waited too long, start the router
+  with `--max-wait` (`ROUTER_MAX_WAIT` in `.env`, e.g. `30s`): past that
+  time the client gets MySQL error 1203 ("SQL on the copy is busy"), or
+  error 1040 with read routing on (see
   [A busy copy](#a-busy-copy-the-read-waits-its-turn)). The wait is in the
   router's metrics: `bintrail_sql_slot_wait_seconds` and `bintrail_sql_slot_waiting`
   ([Observability](observability.md)). A
@@ -408,8 +410,7 @@ in the router. The one exception is a `SELECT` whose plan says it is
 expensive: it runs on the copy, and if the copy rejects it (DuckDB does not
 know the syntax, the table is not in the copy, the result exceeds the
 port's row or cell cap), MySQL runs it. A copy that is busy does not reject
-it: the read waits its turn for up to 30 seconds, and past that the client
-gets error 1040. It does not fall back onto MySQL because of load
+it: the read waits its turn. It does not fall back onto MySQL because of load
 ([A busy copy](#a-busy-copy-the-read-waits-its-turn)). Nothing the client sends
 needs to change. **This is experimental**: for what MySQL answers, the
 behaviour is MySQL's; for what the copy answers, it is DuckDB's, and the
@@ -1355,7 +1356,7 @@ What this is and is not:
   reason), and move the thresholds.
 - **The copy has a fixed number of workers.** A heavy read that
   arrives while every worker is busy does not go to MySQL: it waits its turn
-  on the copy, and past 30 seconds the client gets error 1040. See
+  on the copy. See
   [A busy copy](#a-busy-copy-the-read-waits-its-turn) below for the rule and
   its numbers. The limits of the section above are the copy's; MySQL's are
   MySQL's.
@@ -1731,29 +1732,42 @@ as the router applies it:
   the number as `pool_workers`.
 - **The rest wait.** A read that finds every worker taken waits until one
   comes free, then runs on the copy. The turn is in order of arrival.
-- **A read waits at most 30 seconds.** Past that the client gets MySQL error
-  1040, "too many connections", which drivers and pools retry
-  (`copy_wait_timeout` in the counter, under `route="refused"`). The read is
-  not handed to MySQL: a port that exists to keep expensive reads off the
-  source does not send them there when they are many. The 30 seconds are not
-  a setting.
-- **The line is long on purpose.** Up to 4,096 statements may wait at once.
-  One more gets error 1040 without waiting (`copy_queue_full`). The wait is
-  what bounds the line, not that number: a refusal that cost the client no
-  time would be repeated as fast as the client can send, and each attempt
-  asks the source for a plan first.
+- **A read waits for as long as its client stays connected.** There is no
+  time limit by default, the way a statement waits for a thread on a busy
+  MySQL: 256 clients sending heavy reads to a copy that runs 4 at once are
+  all answered, slowly, and none gets an error. The read is not handed to
+  MySQL: a port that exists to keep expensive reads off the source does not
+  send them there when they are many.
+- **A time limit, if you want one.** Start the router with `--max-wait 30s`
+  (`BINTRAIL_ROUTER_MAX_WAIT`, or `ROUTER_MAX_WAIT` in the Docker stack's
+  `.env`). A read that has waited that long gets MySQL error 1040, "too many
+  connections", which drivers and pools retry (`copy_wait_timeout` in the
+  counter, under `route="refused"`). At least `1s`: a refusal that cost the
+  client no time would be repeated as fast as the client can send, and each
+  attempt asks the source for a plan first. Empty or `0` is no limit.
+- **The line is long.** Up to 4,096 statements may wait at once. One more
+  gets error 1040 without waiting (`copy_queue_full`), or error 1203 on a
+  connection that is not routed.
 - **What else ends a wait.** The client disconnecting: the statement leaves
-  the line at once and nothing runs. The router stopping does the same.
+  the line at once and nothing runs, on the copy or on MySQL (`cancelled`
+  in the counter). The router stopping does the same.
+- **The wait is not counted as the statement running.** The port stops a
+  statement after 5 minutes in all, and one on the copy after 60 seconds
+  there. The 60 seconds start when the statement gets its turn, and the 5
+  minutes stand still while it waits and go on from where they were.
 - **What a waiting read holds.** Its client connection and its idle
   connection to MySQL, nothing else: no place on the copy, no process, no
-  memory worth counting.
+  memory worth counting. That connection to MySQL is idle for the whole
+  wait: one longer than the source's `wait_timeout` (8 hours by default)
+  loses it, and the client then has to reconnect.
 - **Waiting does not exempt a read from the copy's other refusals.** A read
   that waited, ran on the copy, and was then refused there (a result over
   the row cap, a construct DuckDB lacks) is run by MySQL afterwards under
   that refusal's own reason: it paid the wait, the attempt and MySQL's time.
 - **On a connection that is not routed** (routing off, a server that cannot
   be forwarded for, a `@copy` user) there is no MySQL behind the statement.
-  It waits the same way, and past the wait the client gets error 1203.
+  It waits the same way. Under `--max-wait`, past the wait the client gets
+  error 1203.
 
 What to watch ([Observability](observability.md)):
 `bintrail_sql_slot_wait_seconds` is how long statements wait and how each
@@ -1798,7 +1812,10 @@ The router does the counting, so the numbers are read from the router:
   busy and the line for it was full, so this one
   did not wait), `copy_wait_timeout` (refused with error 1040: the copy was
   busy and the statement
-  waited 30 seconds for its turn), `copy_results_held` (the port was still
+  waited the whole `--max-wait` for its turn; never counted when no time
+  limit is set), `cancelled` (refused: the client left, or the router was
+  stopping, while the statement waited its turn or ran on the copy; it is
+  not handed to MySQL), `copy_results_held` (the port was still
   sending as many results as it keeps in memory at once, and MySQL
   answered), `copy_columns_differ`
   (the copy works and declined a `SELECT *` or a `NATURAL JOIN` over a table

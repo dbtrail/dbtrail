@@ -76,6 +76,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,6 +88,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/cliutil"
+	"github.com/dbtrail/dbtrail/internal/stmtclock"
 )
 
 // WorkerCommand is the hidden subcommand the console binary registers for the
@@ -439,7 +441,8 @@ type Config struct {
 	// means DefaultMaxInFlight.
 	MaxInFlight int
 	// MaxWait is how long Reserve waits for a slot before refusing (#2033);
-	// 0 means DefaultMaxWait, a negative value refuses at once.
+	// 0 means DefaultMaxWait, a negative value refuses at once, NoMaxWait
+	// waits until a slot is free or the caller leaves.
 	MaxWait time.Duration
 	// MaxWaiters bounds how many callers wait at once; past it Reserve
 	// refuses at once. 0 means DefaultMaxWaiters.
@@ -587,6 +590,13 @@ const (
 	DefaultMaxWait    = 30 * time.Second
 	DefaultMaxWaiters = 16
 )
+
+// NoMaxWait is the MaxWait of a line with no time bound: a caller waits its
+// turn for as long as it stays, the way a statement waits for a thread on a
+// MySQL server, and is never told "busy" for having waited. What ends the
+// wait is a slot, or the caller's context (the client left). MaxWaiters
+// still bounds how many wait.
+const NoMaxWait = time.Duration(math.MaxInt64)
 
 // Runner spawns workers and keeps the per-user and the global gate.
 type Runner struct {
@@ -959,8 +969,17 @@ func (r *Runner) Reserve(ctx context.Context, user string) (*Slot, error) {
 	r.waiters = append(r.waiters, w)
 	r.mu.Unlock()
 
-	timer := time.NewTimer(r.maxWait)
-	defer timer.Stop()
+	// The wait is not the statement running: its own time cap, if it has
+	// one that can be held, does not count it.
+	defer stmtclock.Hold(ctx)()
+	// No timer on a line with no time bound: its channel stays nil and is
+	// never ready.
+	var timeUp <-chan time.Time
+	if r.maxWait != NoMaxWait {
+		timer := time.NewTimer(r.maxWait)
+		defer timer.Stop()
+		timeUp = timer.C
+	}
 	var gaveUp error
 	select {
 	case <-w.granted:
@@ -972,7 +991,7 @@ func (r *Runner) Reserve(ctx context.Context, user string) (*Slot, error) {
 		return &Slot{r: r, user: user}, nil
 	case <-ctx.Done():
 		gaveUp = ctx.Err()
-	case <-timer.C:
+	case <-timeUp:
 		gaveUp = &BusyError{Waited: r.maxWait, MaxInFlight: r.maxInFlight}
 	}
 	r.mu.Lock()
@@ -1017,6 +1036,10 @@ func (e *BusyError) Is(target error) bool { return target == ErrBusy }
 
 // MaxWaiters is how many callers may wait for a slot at once.
 func (r *Runner) MaxWaiters() int { return r.maxWaiters }
+
+// MaxWait is how long a caller waits for a slot before it is refused;
+// NoMaxWait when it waits for as long as it stays.
+func (r *Runner) MaxWait() time.Duration { return r.maxWait }
 
 // waitingNow is how many callers wait in Reserve (tests).
 func (r *Runner) waitingNow() int {
