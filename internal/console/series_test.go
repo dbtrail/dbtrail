@@ -2,6 +2,7 @@ package console
 
 import (
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -113,8 +114,7 @@ func TestSeries_counterThatFallsHasNoPointThatMinute(t *testing.T) {
 	}
 }
 
-// Series are added up when the filter matches several, and a filter that
-// names a label is exact: "a" does not match "ab".
+// A filter that names a label is exact: "a" does not match "ab".
 func TestSeries_labelsFilterExactlyAndMatchesAreAddedUp(t *testing.T) {
 	f := newSeriesFixture(t)
 	f.lag.WithLabelValues("a").Set(3)
@@ -122,8 +122,10 @@ func TestSeries_labelsFilterExactlyAndMatchesAreAddedUp(t *testing.T) {
 	f.st.Sample(seriesT0)
 	name := "bintrail_stream_replication_lag_seconds"
 	now := seriesT0.Add(time.Second)
-	if ans := seriesPoints(t, f.st, name, "", "15m", now); ans.Series != 2 || ans.Points[0].V != 43 {
-		t.Fatalf("no filter: %+v", ans)
+	// Two gauges match: their sum would mean nothing, so the caller is told
+	// to pick one rather than handed it.
+	if _, err := f.st.Query(name, nil, "15m", now); !errors.Is(err, ErrSeriesAmbiguous) {
+		t.Fatalf("no filter over two gauges: err = %v", err)
 	}
 	if ans := seriesPoints(t, f.st, name, "source=a", "15m", now); ans.Series != 1 || ans.Points[0].V != 3 {
 		t.Fatalf("source=a: %+v", ans)
@@ -246,9 +248,135 @@ func TestSeriesRoute(t *testing.T) {
 	if code != http.StatusOK || !strings.Contains(body, `"kind":"gauge"`) || !strings.Contains(body, `"window":"1h"`) || !strings.Contains(body, `,4]]`) {
 		t.Fatalf("got %d %s", code, body)
 	}
+	f.lag.WithLabelValues("b").Set(4)
+	srv.series.Sample(time.Now())
+	if code, body := getSeries(t, srv, "?name=bintrail_stream_replication_lag_seconds"); code != http.StatusBadRequest || !strings.Contains(body, "add labels") {
+		t.Fatalf("two gauges, no filter: %d %s", code, body)
+	}
 	for _, bad := range []string{"", "?name=go_goroutines", "?name=bintrail_x&window=2h", "?name=bintrail_x&labels=broken"} {
 		if code, body := getSeries(t, srv, bad); code != http.StatusBadRequest {
 			t.Errorf("%q: got %d %s", bad, code, body)
 		}
+	}
+}
+
+// Counters that match are added up: every server's changes, in one line.
+func TestSeries_countersAreAddedUp(t *testing.T) {
+	f := newSeriesFixture(t)
+	at := func(min int) time.Time { return seriesT0.Add(time.Duration(min) * time.Minute) }
+	f.count.WithLabelValues("a").Add(1)
+	f.count.WithLabelValues("b").Add(1)
+	f.st.Sample(at(0))
+	f.count.WithLabelValues("a").Add(10)
+	f.count.WithLabelValues("b").Add(5)
+	f.st.Sample(at(1))
+	ans := seriesPoints(t, f.st, "bintrail_stream_events_indexed_total", "", "15m", at(2))
+	if ans.Series != 2 || len(ans.Points) != 1 || ans.Points[0].V != 15 {
+		t.Fatalf("got %+v", ans)
+	}
+}
+
+// A counter with labels is published only once it first counts. One that
+// appears after readings began did not exist before, so its first reading is
+// a rise from zero: a single error must draw, not vanish.
+func TestSeries_counterBornLaterCountsItsFirstReading(t *testing.T) {
+	f := newSeriesFixture(t)
+	at := func(min int) time.Time { return seriesT0.Add(time.Duration(min) * time.Minute) }
+	f.count.WithLabelValues("old").Add(900) // there from the first read: its past is unknown
+	f.st.Sample(at(0))
+	f.count.WithLabelValues("new").Add(1)
+	f.st.Sample(at(1))
+	f.st.Sample(at(2))
+	name := "bintrail_stream_events_indexed_total"
+	born := seriesPoints(t, f.st, name, "source=new", "15m", at(3))
+	if len(born.Points) != 2 || born.Points[0] != (SeriesPoint{at(1).Unix(), 1}) || born.Points[1].V != 0 {
+		t.Fatalf("born later: %+v", born.Points)
+	}
+	old := seriesPoints(t, f.st, name, "source=old", "15m", at(3))
+	if len(old.Points) != 2 || old.Points[0] != (SeriesPoint{at(1).Unix(), 0}) {
+		t.Fatalf("there from the start: %+v", old.Points)
+	}
+}
+
+// The minute that is not over has no counter point: half a minute drawn as a
+// whole one would dip at the right edge of every chart. A gauge has one.
+func TestSeries_currentMinuteIsLeftOutForCounters(t *testing.T) {
+	f := newSeriesFixture(t)
+	at := func(sec int) time.Time { return seriesT0.Add(time.Duration(sec) * time.Second) }
+	for _, sec := range []int{0, 60, 120, 135} {
+		f.count.WithLabelValues("a").Add(10)
+		f.lag.WithLabelValues("a").Set(float64(sec))
+		f.st.Sample(at(sec))
+	}
+	c := seriesPoints(t, f.st, "bintrail_stream_events_indexed_total", "", "15m", at(140))
+	if len(c.Points) != 1 || c.Points[0] != (SeriesPoint{at(60).Unix(), 10}) {
+		t.Fatalf("counter: %+v", c.Points)
+	}
+	g := seriesPoints(t, f.st, "bintrail_stream_replication_lag_seconds", "", "15m", at(140))
+	if len(g.Points) != 3 || g.Points[2] != (SeriesPoint{at(120).Unix(), 135}) {
+		t.Fatalf("gauge: %+v", g.Points)
+	}
+}
+
+// A clock that steps back does not file a reading: the minutes stay in order.
+func TestSeries_clockSteppingBackIsNotFiled(t *testing.T) {
+	f := newSeriesFixture(t)
+	f.lag.WithLabelValues("a").Set(1)
+	f.st.Sample(seriesT0.Add(2 * time.Minute))
+	f.lag.WithLabelValues("a").Set(99)
+	f.st.Sample(seriesT0.Add(time.Minute))
+	f.st.Sample(seriesT0.Add(2 * time.Minute))
+	ans := seriesPoints(t, f.st, "bintrail_stream_replication_lag_seconds", "", "15m", seriesT0.Add(3*time.Minute))
+	if len(ans.Points) != 1 || ans.Points[0].V != 1 {
+		t.Fatalf("got %+v", ans.Points)
+	}
+}
+
+// A series nothing reports for a day gives its place up.
+func TestSeries_silentSeriesIsDroppedAfterADay(t *testing.T) {
+	f := newSeriesFixture(t)
+	f.lag.WithLabelValues("gone").Set(1)
+	f.lag.WithLabelValues("here").Set(1)
+	f.st.Sample(seriesT0)
+	f.lag.DeleteLabelValues("gone")
+	f.st.Sample(seriesT0.Add(SeriesKeep))
+	if len(f.st.rings) != 2 {
+		t.Fatalf("dropped at exactly a day: %d rings", len(f.st.rings))
+	}
+	f.st.Sample(seriesT0.Add(SeriesKeep + time.Minute))
+	if len(f.st.rings) != 1 {
+		t.Fatalf("kept %d rings, want 1", len(f.st.rings))
+	}
+}
+
+// brokenCollector fails at read time, the way a collector can: the registry
+// then returns what the others gave AND an error.
+type brokenCollector struct{ desc *prometheus.Desc }
+
+func (c brokenCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
+func (c brokenCollector) Collect(ch chan<- prometheus.Metric) {
+	ch <- prometheus.NewInvalidMetric(c.desc, errors.New("collector broke"))
+}
+
+// A read that failed, and series that could not be kept, travel with the
+// answer: the points may be missing something.
+func TestSeries_answerSaysWhenTheReadWasIncomplete(t *testing.T) {
+	f := newSeriesFixture(t)
+	f.reg.MustRegister(brokenCollector{prometheus.NewDesc("bintrail_broken", "x", nil, nil)})
+	st := NewSeriesStore(f.reg)
+	f.lag.WithLabelValues("a").Set(1)
+	st.Sample(seriesT0.Add(-time.Minute))
+	for i := range SeriesMax + 2 {
+		f.count.WithLabelValues("s" + strings.Repeat("x", i)).Add(1)
+	}
+	st.Sample(seriesT0)
+	ans := seriesPoints(t, st, "bintrail_stream_replication_lag_seconds", "", "15m", seriesT0.Add(time.Second))
+	if !strings.Contains(ans.ReadError, "collector broke") || ans.LeftOut == 0 || len(ans.Points) != 2 {
+		t.Fatalf("got %+v", ans)
+	}
+	g := newSeriesFixture(t)
+	g.st.Sample(seriesT0)
+	if clean := seriesPoints(t, g.st, "bintrail_stream_replication_lag_seconds", "", "15m", seriesT0); clean.ReadError != "" || clean.LeftOut != 0 {
+		t.Fatalf("a clean store says it is incomplete: %+v", clean)
 	}
 }

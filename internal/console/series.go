@@ -2,7 +2,9 @@ package console
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"slices"
 	"sort"
@@ -23,8 +25,9 @@ const (
 	SeriesSampleEvery = 15 * time.Second
 	// SeriesKeep is how far back readings are kept.
 	SeriesKeep = 24 * time.Hour
-	// seriesPerRing is SeriesKeep at SeriesSampleEvery.
-	seriesPerRing = int(SeriesKeep / SeriesSampleEvery)
+	// seriesPerRing is SeriesKeep at one reading a minute: an answer has one
+	// point a minute, so only the last reading of each minute is kept.
+	seriesPerRing = int(SeriesKeep / seriesStep)
 	// SeriesMax bounds how many series are kept. The registry is this
 	// program's own, so the count is small; the bound is what keeps a label
 	// that turns out to be unbounded from growing memory without limit.
@@ -52,21 +55,48 @@ type seriesSample struct {
 	v  float64
 }
 
-// seriesRing is one series' readings, oldest first, bounded to seriesPerRing.
+// seriesRing is one series' readings, the last of each minute, oldest first,
+// bounded to seriesPerRing.
 type seriesRing struct {
 	name   string
 	kind   string
 	labels map[string]string
-	buf    []seriesSample
-	head   int // index of the oldest reading once buf is full
+	buf    []seriesSample // at is the START of the minute
+	head   int            // index of the oldest reading once buf is full
+	last   int64          // when the newest reading was taken, unix seconds
+	// fromZero: the series appeared after readings began, so it did not
+	// exist before its first reading and that reading is a rise from zero.
+	// (A counter with labels is only published once it first counts.)
+	fromZero bool
+	// firstMin is the minute of the series' first reading ever.
+	firstMin int64
 }
 
-func (r *seriesRing) add(s seriesSample, limit int) {
-	if len(r.buf) < limit {
-		r.buf = append(r.buf, s)
+// add files a reading taken at unix second at. A reading that is not later
+// than the newest one (the clock stepped back) is not kept: minutes out of
+// order would be added up twice, or read as a counter falling.
+func (r *seriesRing) add(at int64, v float64, limit int) {
+	if len(r.buf) > 0 && at <= r.last {
 		return
 	}
-	r.buf[r.head] = s
+	step := int64(seriesStep / time.Second)
+	min := at / step * step
+	if len(r.buf) == 0 {
+		r.firstMin = min
+	}
+	r.last = at
+	if n := len(r.buf); n > 0 {
+		newest := (r.head + n - 1) % n
+		if r.buf[newest].at == min {
+			r.buf[newest].v = v
+			return
+		}
+	}
+	if len(r.buf) < limit {
+		r.buf = append(r.buf, seriesSample{min, v})
+		return
+	}
+	r.buf[r.head] = seriesSample{min, v}
 	r.head = (r.head + 1) % len(r.buf)
 }
 
@@ -86,7 +116,7 @@ type SeriesStore struct {
 	rings   map[string]*seriesRing
 	kinds   map[string]string // metric name -> kind, for a name with no reading in the window
 	first   time.Time         // the first read that succeeded; zero before it
-	dropped int               // series not kept because SeriesMax was reached
+	dropped int               // series not kept by the newest read because SeriesMax was reached
 	lastErr string            // the newest read's failure, empty after a good one
 }
 
@@ -129,14 +159,31 @@ func (st *SeriesStore) Sample(now time.Time) {
 	fams, err := st.gather.Gather()
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.lastErr = ""
+	was, wasDropped := st.lastErr, st.dropped
+	st.lastErr, st.dropped = "", 0
 	if err != nil {
 		st.lastErr = err.Error()
 	}
-	if len(fams) > 0 && st.first.IsZero() {
+	began := !st.first.IsZero()
+	if len(fams) > 0 && !began {
 		st.first = now
 	}
 	at := now.Unix()
+	// Said when it starts and when it changes, not every 15 seconds.
+	defer func() {
+		if st.lastErr != "" && st.lastErr != was {
+			slog.Warn("trend charts: reading the metrics failed; the charts are missing what it could not read", "error", st.lastErr)
+		}
+		if st.dropped > 0 && wasDropped == 0 {
+			slog.Warn("trend charts: more series than are kept; the rest are not charted", "kept", SeriesMax, "left_out", st.dropped)
+		}
+		// A series nothing has reported for a whole day gives its place up.
+		for key, ring := range st.rings {
+			if at-ring.last > int64(SeriesKeep/time.Second) {
+				delete(st.rings, key)
+			}
+		}
+	}()
 	for _, f := range fams {
 		name := f.GetName()
 		if !strings.HasPrefix(name, seriesPrefix) {
@@ -171,10 +218,10 @@ func (st *SeriesStore) Sample(now time.Time) {
 					st.dropped++
 					continue
 				}
-				ring = &seriesRing{name: name, kind: kind, labels: labels}
+				ring = &seriesRing{name: name, kind: kind, labels: labels, fromZero: began}
 				st.rings[key] = ring
 			}
-			ring.add(seriesSample{at: at, v: v}, st.limit)
+			ring.add(at, v, st.limit)
 		}
 	}
 }
@@ -224,16 +271,32 @@ type SeriesAnswer struct {
 	// CollectedSeconds is how long readings have been kept for, whatever the
 	// window: a chart over 24 hours of a service started an hour ago holds
 	// an hour.
-	CollectedSeconds int64         `json:"collected_seconds"`
-	Points           []SeriesPoint `json:"points"`
+	CollectedSeconds int64 `json:"collected_seconds"`
+	// ReadError is why the newest read of the metrics failed, and LeftOut
+	// how many series it could not keep: either way the points may be
+	// missing something, and the page says so instead of drawing them as
+	// whole.
+	ReadError string        `json:"read_error,omitempty"`
+	LeftOut   int           `json:"left_out,omitempty"`
+	Points    []SeriesPoint `json:"points"`
 }
 
-// Query answers name over window ending at now. Every series of that name
-// whose labels include all of want is added up, minute by minute. A gauge's
-// minute is its last reading in it. A counter's minute is how much it rose
-// since the previous minute that has a reading, per minute; a minute where it
+// ErrSeriesAmbiguous: the name and labels match several gauges. Adding
+// gauges up gives a number that means nothing (two servers' lag, two
+// timestamps), so the caller has to say which one.
+var ErrSeriesAmbiguous = errors.New("several series match; add labels to pick one")
+
+// Query answers name over window ending at now. A gauge's minute is its last
+// reading in it, and the name and labels must pick ONE gauge. A counter's
+// minute is how much it rose since the previous minute that has a reading,
+// per minute, added up over every series that matches; a minute where it
 // went DOWN (the series was re-created) has no point, since the fall says
-// nothing about how much was counted.
+// nothing about how much was counted. A counter's current minute is left
+// out: it is not over, and a part of a minute drawn as a whole one would dip
+// at the right edge of every chart.
+//
+// What a chart of these cannot show: most stream gauges only move when a
+// change arrives, so a stalled stream draws a flat line, not a rising one.
 func (st *SeriesStore) Query(name string, want map[string]string, window string, now time.Time) (SeriesAnswer, error) {
 	span, ok := SeriesWindows[window]
 	if !ok {
@@ -241,7 +304,8 @@ func (st *SeriesStore) Query(name string, want map[string]string, window string,
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	ans := SeriesAnswer{Name: name, Kind: st.kinds[name], Window: window, Points: []SeriesPoint{}}
+	ans := SeriesAnswer{Name: name, Kind: st.kinds[name], Window: window, Points: []SeriesPoint{},
+		ReadError: st.lastErr, LeftOut: st.dropped}
 	if !st.first.IsZero() && now.After(st.first) {
 		ans.CollectedSeconds = int64(now.Sub(st.first) / time.Second)
 	}
@@ -249,6 +313,7 @@ func (st *SeriesStore) Query(name string, want map[string]string, window string,
 		ans.Unit = "per_minute"
 	}
 	step := int64(seriesStep / time.Second)
+	thisMin := now.Unix() / step * step
 	from := now.Add(-span).Unix() / step * step
 	sums := map[int64]float64{}
 	for _, ring := range st.rings {
@@ -256,37 +321,30 @@ func (st *SeriesStore) Query(name string, want map[string]string, window string,
 			continue
 		}
 		ans.Series++
-		// The last reading of each minute, oldest first. A counter also
-		// needs the minute before the window to have something to rise from.
-		type minute struct {
-			at int64
-			v  float64
+		if ring.kind == SeriesGauge && ans.Series > 1 {
+			return SeriesAnswer{}, ErrSeriesAmbiguous
 		}
-		var mins []minute
+		var prev *seriesSample
 		ring.each(func(s seriesSample) {
-			at := s.at / step * step
-			if at < from-step || s.at > now.Unix() {
+			cur := s
+			defer func() { prev = &cur }()
+			if s.at < from || s.at > thisMin {
 				return
-			}
-			if n := len(mins); n > 0 && mins[n-1].at == at {
-				mins[n-1].v = s.v
-				return
-			}
-			mins = append(mins, minute{at, s.v})
-		})
-		for i, m := range mins {
-			if m.at < from {
-				continue
 			}
 			if ring.kind == SeriesGauge {
-				sums[m.at] += m.v
-				continue
+				sums[s.at] += s.v
+				return
 			}
-			if i == 0 || m.v < mins[i-1].v {
-				continue
+			if s.at == thisMin {
+				return
 			}
-			sums[m.at] += (m.v - mins[i-1].v) / float64((m.at-mins[i-1].at)/step)
-		}
+			switch {
+			case prev != nil && s.v >= prev.v:
+				sums[s.at] += (s.v - prev.v) / float64((s.at-prev.at)/step)
+			case prev == nil && ring.fromZero && s.at == ring.firstMin:
+				sums[s.at] += s.v
+			}
+		})
 	}
 	for at, v := range sums {
 		ans.Points = append(ans.Points, SeriesPoint{At: at, V: v})
