@@ -1006,6 +1006,7 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("GET /api/servers/{id}/baseline", s.handleBaselineStatus)
 	api.HandleFunc("POST /api/servers/{id}/baseline/restore", s.recordAction("baseline-restore", s.handleBaselineRestore))
 	api.HandleFunc("GET /api/servers/{id}/baseline/restore", s.handleBaselineRestoreStatus)
+	api.HandleFunc("GET /api/servers/{id}/copy-jobs", s.handleCopyJobs)
 	// Per-server backup schedule (#1442): save or remove the timer. Its state
 	// rides on GET /api/baselines. 403 unless this process runs the loop.
 	api.HandleFunc("PUT /api/servers/{id}/backup-schedule", s.recordAction("backup-schedule", s.handleBackupScheduleUpdate))

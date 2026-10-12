@@ -145,6 +145,8 @@ var apiRoutePerms = []routePerm{
 	{"POST", "/api/servers/{}/schema-snapshot", ext.PermServersWrite},
 	{"GET", "/api/servers/{}/baseline", ext.PermServersRead},
 	{"GET", "/api/servers/{}/baseline/restore", ext.PermServersRead},
+	// The copy-job history (#2330): what ran and how it ended, no table names.
+	{"GET", "/api/servers/{}/copy-jobs", ext.PermServersRead},
 	{"GET", "/api/servers/{}/sql-export", ext.PermServersRead},
 	// The dump download is a full unredacted copy of every row — the
 	// row-data tier, exactly like /api/baselines/download.
