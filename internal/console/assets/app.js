@@ -14439,7 +14439,7 @@ function sqlClientPanel(servers, fb, reveal, live, rt) {
   body.append(el("p", { class: "cn-sql-row", text: "This password reads every schema on every server in the sidebar." }));
   if (mayChange) {
     const fresh = el("button", { class: "btn btn-sm", type: "button", text: "New password" });
-    fresh.onclick = () => { if (ask("Create a new password?\n\nThe current one stops working for new connections.")) changeSQLPort(live, servers, () => api("/api/flashback/password", { method: "POST", body: {} }), fresh, rt); };
+    fresh.onclick = () => { if (ask("Create a new password?\n\nThe current one stops working, and MySQL clients connected to the port are disconnected.")) changeSQLPort(live, servers, () => api("/api/flashback/password", { method: "POST", body: {} }), fresh, rt); };
     const off = el("button", { class: "btn btn-sm btn-danger", type: "button", text: "Turn off" });
     off.onclick = () => { if (ask("Turn the port off?\n\nMySQL clients connected to it are disconnected.")) changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { enabled: false } }), off, rt); };
     body.append(el("div", { class: "cn-links" }, fresh, off));

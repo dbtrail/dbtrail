@@ -128,9 +128,10 @@ mysql> SELECT count(*) FROM events WHERE table_name = 'orders';   -- only with t
 What to know before relying on it:
 
 - **The SQL dialect is DuckDB's, not MySQL's.** The client is the transport;
-  the statement is what the SQL card takes. `DATE_FORMAT`, `GROUP_CONCAT` as
-  MySQL spells them, and backtick-quoted names are not understood; DuckDB's
-  `strftime`, `string_agg` and double quotes are. `USE <schema>` works and sets
+  the statement is what the SQL card takes. `DATE_FORMAT` and
+  backtick-quoted names are not understood; DuckDB's `strftime` and double
+  quotes are. `GROUP_CONCAT` runs (DuckDB has it), and the order of its list
+  can differ from MySQL's; `string_agg` is DuckDB's own spelling. `USE <schema>` works and sets
   where unqualified names resolve; the connection starts in the server's
   source database when the registry knows it. Schema and table names match
   without regard to the case of ASCII letters (`USE SHOP` and `FROM Orders`
@@ -1442,9 +1443,10 @@ What this is and is not:
   source later turns the port's login away (a changed password, a host
   that is not allowed, a locked account, on MySQL an expired password),
   clients get error 2006 on every statement, and the **Connect a SQL
-  client** panel says which account was refused and the source's own
-  error, until a connection logs in again or a **Test connection** of
-  that forwarding account works. An expired password on MariaDB is
+  client** panel says, under **The router's numbers**, that MySQL refused
+  the router's login for that server; the router's log names the account
+  and the source's own error. A **Test connection** of that forwarding
+  account, on the server's form, tries the login. An expired password on MariaDB is
   different: MariaDB lets the account log in and answers every statement
   with its own error 1820 ("You must SET PASSWORD before executing this
   statement"), which the port passes to the client as it is, so nothing
@@ -1771,9 +1773,11 @@ The router does the counting, so the numbers are read from the router:
 
 - `SHOW ROUTER STATUS` on any connection to the port
   ([The router](#the-router-the-process-that-serves-the-port)).
-- The web interface: on **Settings → MCP Server**, the panel **The router**
-  shows, for the server picked in the sidebar, how many statements MySQL
-  answered and how many the copy did, with a count per reason. It needs the
+- The web interface: on **Settings → MCP Server**, the panel **Connect a SQL
+  client** shows, for the server picked in the sidebar, how many statements
+  MySQL answered and how many the copy did, as two figures over a bar. The
+  count per reason is folded under **Why each side**, and the router's other
+  numbers under **The router's numbers**. It needs the
   capture process to know the router's address (`--router-url`; the Docker
   stack and the packages set it). **Refresh** re-reads the counts. The same
   numbers are in `GET /api/router`.

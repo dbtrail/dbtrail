@@ -178,7 +178,7 @@ func (q *SQLOnCopy) CopyUpdatedAt(ctx context.Context) time.Time {
 func (q *SQLOnCopy) RowCap() int { return q.s.sqlPortRowCap() }
 
 // DefaultSQLPortMaxRows is the port's row cap when none is configured
-// (Config.SQLPortMaxRows, watch --sql-port-max-rows).
+// (Config.SQLPortMaxRows, router --sql-port-max-rows).
 const DefaultSQLPortMaxRows = 10_000
 
 // sqlPortRowCap is the row cap of one statement on the embedded port: the
