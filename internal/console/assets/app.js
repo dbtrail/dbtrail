@@ -6209,6 +6209,143 @@ function statusFlow(model) {
   return sec;
 }
 
+// ── Trends (#2330): a number over time, drawn ──
+//
+// trendModel turns one GET /api/series answer into what the chart draws.
+// Pure. A minute with no point is a gap in the line, never a zero: the
+// service did not report that minute, which is not the same as nothing
+// happening in it.
+const TREND_WINDOWS = ["15m", "1h", "6h", "24h"];
+const TREND_WINDOW_MINUTES = { "15m": 15, "1h": 60, "6h": 360, "24h": 1440 };
+let trendWindow = "1h";
+function trendCount(v) {
+  const n = Number(v) || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, "") + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+  if (n >= 1e4) return Math.round(n / 1e3) + "K";
+  return Math.round(n).toLocaleString("en-US");
+}
+function trendModel(ans, nowSec) {
+  const win = ans && TREND_WINDOW_MINUTES[ans.window] ? ans.window : "1h";
+  const minutes = TREND_WINDOW_MINUTES[win];
+  const pts = ((ans && Array.isArray(ans.points)) ? ans.points : [])
+    .filter((p) => Array.isArray(p) && isFinite(p[0]) && isFinite(p[1]))
+    .map((p) => ({ at: Number(p[0]), v: Number(p[1]) }))
+    .sort((a, b) => a.at - b.at);
+  const notes = [];
+  const collected = Math.max(0, Number(ans && ans.collected_seconds) || 0);
+  // Said only while it matters: the chart holds less than the window asks.
+  if (collected < minutes * 60) notes.push(collected < 60 ? "collecting since a moment ago" : "collected for " + plainDuration(collected) + " so far");
+  if (ans && ans.read_error) notes.push("the last read of the numbers failed, so some may be missing");
+  if (ans && Number(ans.left_out) > 0) notes.push("some series are not kept, so this may be missing some");
+  if (!ans || !ans.kind) return { state: "none", window: win, notes: [] };
+  if (!pts.length) return { state: "waiting", window: win, notes: notes };
+  const end = Math.floor((Number(nowSec) || pts[pts.length - 1].at) / 60) * 60;
+  const start = end - minutes * 60;
+  const peak = pts.reduce((m, p) => (p.v > m ? p.v : m), 0);
+  const x = (at) => Math.max(0, Math.min(100, ((at - start) / (end - start)) * 100));
+  const y = (v) => (peak > 0 ? 100 - (v / peak) * 100 : 100);
+  // One segment per run of consecutive minutes.
+  const segs = [];
+  for (const p of pts) {
+    if (p.at < start) continue;
+    const last = segs.length ? segs[segs.length - 1] : null;
+    if (last && p.at - last[last.length - 1].at <= 60) last.push(p);
+    else segs.push([p]);
+  }
+  const newest = pts[pts.length - 1];
+  return {
+    state: "chart", window: win, notes: notes,
+    now: newest.v, peak: peak, nowAt: newest.at,
+    // How old the newest point is, in minutes: a line that stops short of
+    // the right edge is the chart saying nothing was reported since.
+    stale: Math.max(0, Math.round((end - newest.at) / 60) - 1),
+    segs: segs.map((seg) => seg.map((p) => [x(p.at), y(p.v)])),
+  };
+}
+
+function trendSvg(m) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 100 100");
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("class", "tr-svg");
+  svg.setAttribute("aria-hidden", "true");
+  for (const seg of m.segs) {
+    const line = seg.map((p) => p[0].toFixed(2) + "," + p[1].toFixed(2)).join(" ");
+    if (seg.length === 1) {
+      // A lone minute has no line to draw; a short tick keeps it visible.
+      const one = document.createElementNS(NS, "line");
+      one.setAttribute("x1", seg[0][0]); one.setAttribute("x2", seg[0][0]);
+      one.setAttribute("y1", seg[0][1]); one.setAttribute("y2", 100);
+      one.setAttribute("class", "tr-line"); one.setAttribute("vector-effect", "non-scaling-stroke");
+      svg.append(one);
+      continue;
+    }
+    const area = document.createElementNS(NS, "polygon");
+    area.setAttribute("points", seg[0][0].toFixed(2) + ",100 " + line + " " + seg[seg.length - 1][0].toFixed(2) + ",100");
+    area.setAttribute("class", "tr-area");
+    const path = document.createElementNS(NS, "polyline");
+    path.setAttribute("points", line);
+    path.setAttribute("class", "tr-line");
+    path.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.append(area, path);
+  }
+  return svg;
+}
+
+// trendCard: the figure, big; the line under it; the window in one corner.
+function trendCard(title, unit, m, onWindow) {
+  const card = el("section", { class: "tcard tr-card" });
+  const pick = el("div", { class: "tr-win", role: "group", "aria-label": "Time span" });
+  for (const w of TREND_WINDOWS) {
+    pick.append(el("button", { type: "button", class: "tr-win-b" + (w === m.window ? " is-on" : ""), "aria-pressed": w === m.window ? "true" : "false",
+      text: w, onclick: () => onWindow(w) }));
+  }
+  const head = el("div", { class: "tr-head" }, el("div", { class: "tr-k", text: title }), pick);
+  card.append(head);
+  if (m.state !== "chart") {
+    card.append(el("div", { class: "tr-fig" }, el("span", { class: "tr-num none", text: "–" })));
+    card.append(el("p", { class: "tr-note", text: m.state === "none" ? "Not reported yet." : (m.notes[0] ? m.notes[0].replace(/^./, (c) => c.toUpperCase()) + "." : "Nothing in this span.") }));
+    return card;
+  }
+  card.append(el("div", { class: "tr-fig" },
+    el("span", { class: "tr-num", text: trendCount(m.now) }),
+    el("span", { class: "tr-unit", text: unit }),
+    m.stale > 0 ? el("span", { class: "tr-stale", text: m.stale + " min ago" }) : null));
+  const plot = el("div", { class: "tr-plot" }, trendSvg(m));
+  card.append(plot);
+  card.append(el("div", { class: "tr-axis" },
+    el("span", { text: m.window + " ago" }),
+    el("span", { class: "tr-peak", text: "peak " + trendCount(m.peak) }),
+    el("span", { text: "now" })));
+  if (m.notes.length) card.append(el("p", { class: "tr-note", text: m.notes.join(" · ").replace(/^./, (c) => c.toUpperCase()) + "." }));
+  return card;
+}
+
+// loadTrend fills box with one metric's chart and redraws it when the
+// reader picks another span. A refusal (a web interface that runs apart
+// from capture keeps no numbers) draws nothing: there is nothing to chart.
+async function loadTrend(box, title, unit, name, labels) {
+  const gen = serverGen, vgen = viewGen;
+  let ans;
+  try {
+    ans = await api("/api/series?name=" + encodeURIComponent(name) + "&labels=" + encodeURIComponent(labels || "") + "&window=" + encodeURIComponent(trendWindow));
+  } catch (err) {
+    if (!box.isConnected || gen !== serverGen || vgen !== viewGen) return;
+    clear(box);
+    if (!(err && err.status === 403)) box.append(el("div", { class: "error-box", text: "Could not load " + title.toLowerCase() + ": " + ((err && err.message) || String(err)) }));
+    return;
+  }
+  if (!box.isConnected || gen !== serverGen || vgen !== viewGen) return;
+  clear(box);
+  try {
+    box.append(trendCard(title, unit, trendModel(ans, Date.now() / 1000), (w) => { trendWindow = w; loadTrend(box, title, unit, name, labels); }));
+  } catch (err) {
+    box.append(el("div", { class: "error-box", text: title + " could not be drawn: " + ((err && err.message) || String(err)) }));
+  }
+}
+
 async function renderStatus() {
   const gen = serverGen, vgen = viewGen;
   viewLoading();
@@ -6248,6 +6385,15 @@ async function renderStatus() {
     el("button", { class: "btn btn-primary btn-sm", type: "button", text: "Refresh", onclick: () => renderStatus() }),
   ]));
   v.append(statusFlow(statusFlowModel(data, capacity, capsCache, copy)));
+
+  // Trends (#2330), under the strip: only where this process keeps the
+  // numbers, and for a server it captures (the label is the server's id).
+  const trendFor = currentServer || defaultServerId;
+  if (capsCache.series && trendFor) {
+    const tbox = el("div", { class: "tr-wrap" });
+    v.append(tbox);
+    loadTrend(tbox, "Changes recorded", "per minute", "bintrail_stream_events_indexed_total", "source=" + trendFor);
+  }
 
   const cards = el("div", { class: "cards" });
   const cov = data.coverage || {};
@@ -7271,7 +7417,7 @@ let snapTab = "versions";
 // yet, so Settings), not by the reader or the address. A repaint may then
 // move on: once the first snapshot exists the list is what to show.
 let snapTabAuto = false;
-const SNAP_TAB_IDS = { versions: "versions", checks: "checks", setup: "settings", settings: "settings" };
+const SNAP_TAB_IDS = { versions: "versions", jobs: "jobs", checks: "checks", setup: "settings", settings: "settings" };
 function snapTabFromHash() {
   return SNAP_TAB_IDS[(location.hash || "").slice(1)] || "";
 }
@@ -7285,7 +7431,7 @@ function snapshotTabs(has) {
   const list = el("div", { class: "tablist snap-tablist", role: "tablist", "aria-label": "Snapshots" });
   bar.append(list);
   const panels = {}, buttons = {}, order = [];
-  const names = [["versions", "Versions"], ["checks", "Checks"], ["settings", "Settings"]];
+  const names = [["versions", "Versions"], ["jobs", "Jobs"], ["checks", "Checks"], ["settings", "Settings"]];
   for (const [id, label] of names) {
     if (id !== "versions" && !has[id]) continue;
     panels[id] = el("div", { class: "tabpanel snap-panel", id: "snap-" + id, role: "tabpanel", "aria-labelledby": "snap-tab-" + id });
@@ -7334,6 +7480,228 @@ function snapshotTabs(has) {
     }
   }
   return { bar: bar, panels: panels, actions: actions, select: select };
+}
+
+// ── Copy jobs (#2330): a bar per job, then the list ──
+//
+// copyJobsModel turns GET /api/servers/{id}/copy-jobs into what the card
+// draws. Pure: no fetch, no DOM. Every row REPEATS what the daemon recorded:
+// a count of zero is "not measured" and is left blank, never shown as "0",
+// and a job with no start or no end has no duration rather than "0s".
+const COPY_JOB_KIND = {
+  dump: { label: "full read", tone: "full" },
+  refresh: { label: "update", tone: "update" },
+  restore: { label: "restore", tone: "restore" },
+  compact: { label: "compaction", tone: "compact" },
+};
+// What each word in the legend means, shown when the reader points at it or
+// reaches it with the keyboard. One or two sentences: what the job does, and
+// whether it touches the reader's database.
+const COPY_JOB_HELP = {
+  full: "Reads every table from your database and writes a new snapshot. It is the slowest job, and the only one here that puts load on your database.",
+  update: "Makes a new snapshot from the previous one plus the changes recorded since then. It does not read your database.",
+  restore: "Builds a snapshot of a past moment you asked for, from an earlier snapshot plus the recorded changes.",
+  compact: "Tidies up: joins the pieces that updates add to a table back into one file. The data stays the same.",
+  failed: "The job ended with an error. Its line in the list says why.",
+  skipped: "A scheduled run that did not start, most often because another job was still working on this server.",
+};
+function copyJobStampMs(stamp) {
+  const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.\d+)?Z?$/.exec(String(stamp || ""));
+  if (!m) return NaN;
+  return Date.parse(m[1] + "T" + m[2] + "Z");
+}
+function copyJobFirstLine(text) {
+  const line = String(text || "").split(/\r?\n/).map((l) => l.trim()).find((l) => l) || "";
+  return line.length > 140 ? line.slice(0, 137) + "..." : line;
+}
+// Round durations a scale can be marked with, in seconds.
+const COPY_JOB_NICE = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 43200, 86400];
+function copyJobNiceCeil(sec) {
+  if (!(sec > 0)) return 0;
+  return COPY_JOB_NICE.find((n) => n >= sec) || Math.ceil(sec / 86400) * 86400;
+}
+function copyJobNiceFloor(sec) {
+  let out = 0;
+  for (const n of COPY_JOB_NICE) if (n <= sec) out = n;
+  return out;
+}
+function copyJobsModel(payload) {
+  const list = payload && Array.isArray(payload.jobs) ? payload.jobs.filter((j) => j && typeof j === "object") : [];
+  const cap = payload && Number(payload.cap) > 0 ? Math.floor(Number(payload.cap)) : 0;
+  const rows = list.map((j) => {
+    const skipped = j.outcome === "skipped", failed = j.outcome === "failed";
+    // A skip does not say what would have run: the daemon sends no kind.
+    const kind = COPY_JOB_KIND[j.kind] || { label: skipped ? "scheduled run" : String(j.kind || "job"), tone: "other" };
+    const t0 = copyJobStampMs(j.started_at), t1 = copyJobStampMs(j.finished_at);
+    // An entry that repeats (a skip, a compaction that keeps failing) spans
+    // every try: start to end is how long it has gone on, not a duration.
+    const repeats = skipped || !!j.repeats;
+    const sec = !repeats && !isNaN(t0) && !isNaN(t1) && t1 >= t0 ? (t1 - t0) / 1000 : null;
+    // Such an entry is placed at its latest try, a job at its start.
+    // A stamp that does not read as one is not shown as a time.
+    const at = (repeats ? [j.finished_at, j.started_at] : [j.started_at, j.finished_at]).find((x) => !isNaN(copyJobStampMs(x))) || "";
+    const streak = repeats && !isNaN(t0) && !isNaN(t1) && t1 - t0 >= 60000 ? "since " + utcBare(j.started_at).slice(0, 16) : "";
+    const events = Number(j.events) || 0, nrows = Number(j.rows) || 0;
+    let qty = "";
+    if (!skipped && events > 0) qty = events.toLocaleString("en-US") + (events === 1 ? " change" : " changes");
+    else if (!skipped && nrows > 0) qty = nrows.toLocaleString("en-US") + (nrows === 1 ? " row" : " rows");
+    let detail = "", full = "";
+    if (skipped) detail = copyJobFirstLine(j.skip_reason);
+    else if (failed) {
+      full = String(j.error || "");
+      detail = copyJobFirstLine(j.summary) || copyJobFirstLine(j.error);
+      if (j.published) detail = (detail ? detail + " · " : "") + "the copy was written";
+    } else detail = copyJobFirstLine(j.why);
+    if (streak) detail = (detail ? detail + " · " : "") + streak;
+    return {
+      label: kind.label, tone: failed ? "failed" : skipped ? "skipped" : kind.tone, kindTone: kind.tone,
+      scheduled: j.trigger === "scheduled", at: at, sec: sec,
+      took: sec === null ? "" : sec < 1 ? "under 1s" : plainDuration(sec),
+      outcome: failed ? "failed" : skipped ? "skipped" : "", qty: qty, detail: detail, full: full,
+    };
+  });
+  const ran = rows.filter((r) => r.outcome !== "skipped");
+  const longest = ran.reduce((m, r) => (r.sec !== null && r.sec > m ? r.sec : m), 0);
+  // Oldest on the left, newest on the right, one slot each: jobs minutes
+  // apart and a full read from days ago would otherwise pile on one edge.
+  // Height follows the square root of the time taken, so a 20-second update
+  // still shows beside a 16-minute read.
+  // The scale tops out at a round duration at or above the longest job, and
+  // carries two more round marks under it, so a bar's height can be read
+  // against a line instead of guessed.
+  const top = copyJobNiceCeil(longest);
+  const ticks = [];
+  if (top > 0) {
+    ticks.push(top);
+    for (const frac of [4, 16]) {
+      const v = copyJobNiceFloor(top / frac);
+      if (v >= 1 && v < ticks[ticks.length - 1]) ticks.push(v);
+    }
+  }
+  const bars = rows.slice().reverse().map((r) => ({
+    tone: r.tone, skipped: r.outcome === "skipped",
+    h: r.sec === null || top <= 0 ? 0 : Math.max(0.03, Math.sqrt(r.sec / top)),
+    title: r.label + (r.outcome ? ", " + r.outcome : "") + (r.took ? ", " + r.took : "") + (r.at ? " · " + utcLabel(r.at) : ""),
+  }));
+  const tones = [];
+  for (const r of rows) if (!tones.some((t) => t.tone === r.tone)) tones.push({ tone: r.tone, label: r.outcome || r.label });
+  const order = ["full", "update", "restore", "compact", "other", "failed", "skipped"];
+  tones.sort((a, b) => order.indexOf(a.tone) - order.indexOf(b.tone));
+  const oldest = rows.length ? rows[rows.length - 1].at : "";
+  return {
+    state: rows.length ? "list" : "empty", cap: cap, rows: rows, bars: bars, legend: tones,
+    ticks: ticks.map((v) => ({ at: Math.sqrt(v / top), label: plainDuration(v) })),
+    ran: ran.length, failed: rows.filter((r) => r.outcome === "failed").length,
+    skipped: rows.length - ran.length,
+    longest: longest > 0 ? (longest < 1 ? "under 1s" : plainDuration(longest)) : "",
+    since: oldest, full: cap > 0 && rows.length >= cap,
+    withheld: !!(payload && payload.detail_withheld),
+  };
+}
+
+// How many rows are on the page before the fold, and whether the reader
+// opened it: kept out of the card, which the page replaces on every repaint.
+const COPY_JOBS_SHOWN = 8;
+let copyJobsOpen = false;
+function copyJobsCard(m) {
+  const card = el("section", { class: "tcard cj-card" });
+  if (m.state === "empty") {
+    card.append(el("div", { class: "stg-empty" },
+      el("p", { class: "stg-empty-lead", text: "No job has run yet." }),
+      el("p", { class: "stg-empty-sub", text: "Each read, update, restore and compaction is listed here once it ends." })));
+    return card;
+  }
+  const head = el("div", { class: "cj-head" });
+  const fig = el("div", { class: "cj-fig" },
+    el("span", { class: "cj-num", text: String(m.ran) }),
+    el("span", { class: "cj-unit", text: m.ran === 1 ? "job" : "jobs" }));
+  head.append(fig);
+  const facts = el("div", { class: "cj-facts" });
+  if (m.failed) facts.append(el("span", { class: "cj-fact bad", text: m.failed + " failed" }));
+  if (m.skipped) facts.append(el("span", { class: "cj-fact warn", text: m.skipped + " skipped" }));
+  if (m.longest) facts.append(el("span", { class: "cj-fact", text: "longest " + m.longest }));
+  head.append(facts, tzChip());
+  card.append(head);
+
+  const strip = el("div", { class: "cj-strip", role: "img", "aria-label": m.ran + (m.ran === 1 ? " job" : " jobs") + ", oldest on the left" });
+  for (const b of m.bars) {
+    strip.append(el("span", { class: "cj-slot", title: b.title },
+      el("span", { class: "cj-bar tone-" + b.tone, style: b.skipped ? null : "height:" + (b.h * 100).toFixed(1) + "%" })));
+  }
+  const plot = el("div", { class: "cj-plot" });
+  const scale = el("div", { class: "cj-scale", "aria-hidden": "true" });
+  for (const t of m.ticks) {
+    const pos = "bottom:" + (t.at * 100).toFixed(1) + "%";
+    scale.append(el("span", { class: "cj-tick", style: pos, text: t.label }));
+    strip.append(el("i", { class: "cj-grid", style: pos }));
+  }
+  plot.append(scale, strip);
+  card.append(plot);
+  const foot = el("div", { class: "cj-axis" });
+  foot.append(el("span", { text: m.since ? utcBare(m.since).slice(0, 16) : "" }));
+  const legend = el("span", { class: "cj-legend" });
+  m.legend.forEach((t, i) => {
+    const help = COPY_JOB_HELP[t.tone];
+    if (!help) { legend.append(el("span", { class: "cj-key" }, el("i", { class: "cj-dot tone-" + t.tone }), t.label)); return; }
+    const id = "cj-tip-" + i;
+    legend.append(el("span", { class: "cj-key has-tip", tabindex: "0", "aria-describedby": id },
+      el("i", { class: "cj-dot tone-" + t.tone }), el("span", { class: "cj-key-t", text: t.label }),
+      el("span", { class: "cj-tip", role: "tooltip", id: id, text: help })));
+  });
+  foot.append(legend, el("span", { text: "now" }));
+  card.append(foot);
+
+  // The newest few are on the page; the rest open on request, so a day of
+  // identical updates is not forty lines to scroll past. The bars above
+  // already show every one of them.
+  const table = el("div", { class: "cj-list", role: "table" });
+  const rest = el("div", { class: "cj-list cj-rest", role: "table" });
+  m.rows.forEach((r, i) => {
+    const row = el("div", { class: "cj-row" + (r.outcome ? " is-" + r.outcome : ""), role: "row" });
+    row.append(
+      el("span", { class: "cj-kind", role: "cell" }, el("i", { class: "cj-dot tone-" + r.kindTone }), r.label),
+      el("span", { class: "cj-at", role: "cell", text: r.at ? utcBare(r.at) : "", title: (r.at && utcLocalTitle(r.at)) || null }),
+      el("span", { class: "cj-took", role: "cell", text: r.took }),
+      el("span", { class: "cj-what", role: "cell" },
+        r.outcome ? el("b", { class: "cj-out " + r.outcome, text: r.outcome }) : null,
+        r.qty ? el("span", { class: "cj-qty", text: r.qty }) : null,
+        r.detail ? el("span", { class: "cj-detail", text: r.detail, title: r.full || null }) : null));
+    (i < COPY_JOBS_SHOWN ? table : rest).append(row);
+  });
+  card.append(table);
+  const hidden = m.rows.length - COPY_JOBS_SHOWN;
+  if (hidden > 0) {
+    const fold = el("details", { class: "cj-more" }, el("summary", { text: hidden + " earlier" }), rest);
+    fold.open = copyJobsOpen;
+    fold.addEventListener("toggle", () => { copyJobsOpen = fold.open; });
+    card.append(fold);
+  }
+  const notes = [];
+  if (m.full) notes.push("The last " + m.cap + " are kept.");
+  // Only when a row is missing its reason: otherwise there is nothing to explain.
+  if (m.withheld && (m.failed || m.skipped)) notes.push("Your sign-in has an access profile, so the reasons are not shown.");
+  if (notes.length) card.append(el("p", { class: "cj-note", text: notes.join(" ") }));
+  return card;
+}
+
+async function loadCopyJobs(id, box) {
+  let payload;
+  try {
+    payload = await api("/api/servers/" + encodeURIComponent(id) + "/copy-jobs");
+  } catch (err) {
+    if (!box.isConnected) return;
+    clear(box);
+    const msg = (err && err.message) || String(err);
+    // A refusal is the daemon saying there is no history to show and why;
+    // that is a fact about the setup, not a failed read.
+    if (err && err.status === 403) box.append(el("section", { class: "tcard cj-card" }, el("div", { class: "stg-empty" }, el("p", { class: "stg-empty-sub", text: msg }))));
+    else box.append(el("div", { class: "error-box", text: "Could not load the jobs: " + msg }));
+    return;
+  }
+  if (!box.isConnected) return;
+  clear(box);
+  try { box.append(copyJobsCard(copyJobsModel(payload))); }
+  catch (err) { box.append(el("div", { class: "error-box", text: "The jobs could not be drawn: " + ((err && err.message) || String(err)) })); }
 }
 
 // snapshotHeroTone grades the copy, worst fact first, and says which page
@@ -7729,7 +8097,8 @@ async function renderSnapshots() {
     // Below it the three tabs (Versions, Checks, Settings); a tab this
     // daemon or session cannot serve is not offered.
     const takeAway = backupTakeAway(cur, baselines, sqlSt);
-    const tabs = snapshotTabs({ checks: drawChecks, settings: drawSetup });
+    const drawJobs = !!capsCache.monitor && !!(cur && cur.id);
+    const tabs = snapshotTabs({ jobs: drawJobs, checks: drawChecks, settings: drawSetup });
     part("The copy", () => {
       v.append(snapshotHero(baselines, coverage, cur, {
         // Download: one button for the newest copy (D1). It opens the
@@ -7767,6 +8136,17 @@ async function renderSnapshots() {
       tabs.panels.versions.append(baselinesPanel(baselines, servers, { serversErr: serversErr }));
     });
     v.append(tabs.panels.versions);
+    // Jobs (#2330): every copy job the daemon ran for this server, drawn.
+    // The daemon keeps the history, so on a standalone serve the tab is
+    // absent, like Checks.
+    if (drawJobs) {
+      part("Jobs", () => {
+        const box = el("div", { class: "cj-wrap" });
+        tabs.panels.jobs.append(box);
+        loadCopyJobs(cur.id, box);
+      });
+      v.append(tabs.panels.jobs);
+    }
     // Checks — the verification page, whole. Its runner is daemon-side, so
     // on a standalone serve the tab is absent rather than present and
     // unable to answer. The section heading keeps its id: /snapshots#checks
@@ -14657,6 +15037,82 @@ function routerLines(view, cur) {
   return out;
 }
 
+// routerSidesModel (#2330): the two sides of the router for one server, from
+// GET /api/router. Pure. Null when there is nothing to draw (no router, no
+// answer, no server picked, or no statement for it yet): routerLines says
+// those in words. Each figure repeats what the router counted; an average is
+// drawn only when the router timed at least one statement on that side.
+function routerSecs(sec) {
+  const s = Number(sec);
+  if (!isFinite(s) || s < 0) return "";
+  if (s < 0.001) return "under 1 ms";
+  if (s < 1) return Math.round(s * 1000) + " ms";
+  if (s < 10) return s.toFixed(2).replace(/\.?0+$/, "") + " s";
+  if (s < 60) return s.toFixed(1).replace(/\.0$/, "") + " s";
+  return plainDuration(s);
+}
+function routerSidesModel(view, cur) {
+  if (!view || !view.configured || view.error || !view.status || !cur) return null;
+  const t = view.status.servers && view.status.servers[cur.id];
+  if (!t) return null;
+  const mysql = Number(t.mysql) || 0, copy = Number(t.copy) || 0, refused = Number(t.refused) || 0;
+  if (mysql + copy + refused === 0) return null;
+  const side = (key, sent) => {
+    const a = (t.answers && t.answers[key]) || null;
+    const n = a ? Number(a.count) || 0 : 0;
+    const errors = a ? Number(a.errors) || 0 : 0, timeouts = a ? Number(a.timeouts) || 0 : 0;
+    return {
+      key: key, sent: sent, timed: n,
+      avg: n > 0 ? routerSecs((Number(a.seconds) || 0) / n) : "",
+      slowest: n > 0 ? routerSecs(a.slowest_seconds) : "",
+      // Timeouts are among the errors: said apart, never added twice.
+      errors: errors, timeouts: Math.min(timeouts, errors),
+    };
+  };
+  const out = { mysql: side("mysql", mysql), copy: side("copy", copy), refused: refused, total: mysql + copy,
+    share: mysql + copy > 0 ? copy / (mysql + copy) : 0, age: "" };
+  // The copy's age by the clock of the DBTrail that asked, as routerLines.
+  const read = view.read_at ? new Date(view.read_at) : null;
+  const snap = t.copy_snapshot ? new Date(t.copy_snapshot) : null;
+  if (read && !isNaN(read) && snap && !isNaN(snap)) out.age = fmtAge(Math.max(0, (read - snap) / 1000));
+  const since = view.status.counting_since ? new Date(view.status.counting_since) : null;
+  out.since = since && !isNaN(since) ? since : null;
+  return out;
+}
+
+const ROUTER_SIDE_HELP = {
+  mysql: "Statements the router sent to your MySQL server: the light reads, and everything that is not a read. The time includes sending the rows back.",
+  copy: "Heavy reads the router answered from DBTrail's copy instead of your MySQL server. The time ends when the answer is ready to send.",
+};
+function routerSides(m) {
+  const wrap = el("div", { class: "rs-wrap" });
+  const col = (s, title) => {
+    const c = el("div", { class: "rs-side rs-" + s.key });
+    c.append(el("div", { class: "rs-k", title: ROUTER_SIDE_HELP[s.key] }, el("i", { class: "rs-dot" }), title));
+    c.append(el("div", { class: "rs-fig" }, el("span", { class: "rs-num", text: trendCount(s.sent) }), el("span", { class: "rs-unit", text: s.sent === 1 ? "statement" : "statements" })));
+    const facts = el("div", { class: "rs-facts" });
+    if (s.avg) facts.append(el("span", { class: "rs-fact" }, el("b", { text: s.avg }), " each"));
+    if (s.slowest) facts.append(el("span", { class: "rs-fact" }, "slowest ", el("b", { text: s.slowest })));
+    if (s.errors) facts.append(el("span", { class: "rs-fact bad" }, el("b", { text: String(s.errors) }), s.errors === 1 ? " error" : " errors",
+      s.timeouts ? " (" + s.timeouts + " out of time)" : ""));
+    if (s.key === "copy" && m.age) facts.append(el("span", { class: "rs-fact" }, "data ", el("b", { text: m.age }), " old"));
+    c.append(facts);
+    return c;
+  };
+  wrap.append(el("div", { class: "rs-cols" }, col(m.mysql, "Your MySQL"), col(m.copy, "DBTrail's copy")));
+  if (m.total > 0) {
+    const pct = Math.round(m.share * 100);
+    const bar = el("div", { class: "rs-bar", role: "img", "aria-label": "The copy answered " + pct + "% of the statements" });
+    bar.append(el("span", { class: "rs-bar-mysql", style: "flex:" + Math.max(m.mysql.sent, 0) }), el("span", { class: "rs-bar-copy", style: "flex:" + Math.max(m.copy.sent, 0) }));
+    wrap.append(bar);
+  }
+  const foot = [];
+  if (m.since) foot.push("since " + m.since.toLocaleString());
+  if (m.refused) foot.push(m.refused + " refused, run by neither");
+  if (foot.length) wrap.append(el("div", { class: "rs-foot", text: foot.join(" · ") }));
+  return wrap;
+}
+
 // routerPanel (#2318) draws routerLines, with a Refresh that asks again and
 // repaints this panel alone, and the reasons folded under it. Null when no
 // router was configured.
@@ -14669,7 +15125,13 @@ function routerPanel(view, cur) {
   const paint = (v) => {
     clear(body);
     const lines = routerLines(v, cur) || [{ text: "This DBTrail is no longer given a router's address." }];
+    // The two sides, drawn, before the words (#2330). The line that said
+    // the same two counts in a sentence is then left out: one fact, once.
+    let sides = null;
+    try { sides = routerSidesModel(v, cur); } catch (err) { sides = null; }
+    if (sides) body.append(routerSides(sides));
     for (const l of lines) {
+      if (sides && /^Who answered for /.test(l.text || "")) continue;
       const p = el("p", { class: "cn-sql-row" + (!v || (v.configured && !v.status) ? " cn-sql-err" : "") });
       if (l.strong) p.append(el("b", { text: l.strong }), " ");
       p.append(l.text);

@@ -129,34 +129,36 @@ console.log(JSON.stringify(out));
 	// Down is not zero.
 	must("down", "No numbers from the router", "http://router:9091/status", "connection refused", "counts are unknown", "Refresh")
 	mustNot("down", "no statements yet", "0 by", "Who answered", "Workers")
-	must("counts", "The router", "on port 3310", "read-only", "Who answered for shop since", "9 by MySQL, 4 by the copy, 3 refused",
+	must("counts", "The router", "on port 3310", "read-only", "Your MySQL 9 statements", "DBTrail's copy 4 statements", "3 refused, run by neither",
 		"snapshot of", "(12m old)", "whatever its age", "1 of 4 busy, 1 statement waiting", "2 threads and 2048MiB", "error 1040",
 		"plan costs at least 10000", "at least 100000 rows", "Every other read runs on MySQL", "Refresh", "These numbers were read at",
 		"Why each side", "9 × a cheap plan", "4 × an expensive plan",
 		"2 × every worker was busy and thousands of statements were already waiting, more than the router lets wait: refused with error 1040 at once",
 		"1 × refused: not a read, and the router is read-only")
 	// The words of the port inside the service must not be said of a router.
+	// The two counts are drawn (#2330), so the sentence that said them is gone: one fact, once.
+	mustNot("counts", "Who answered", "9 by MySQL")
 	mustNot("counts", "MySQL answered at once", "this port is read-only", "last looked", "later version")
-	must("newer", "later version than this page knows", "may be missing or read as zero", "SHOW ROUTER STATUS", "9 by MySQL")
+	must("newer", "later version than this page knows", "may be missing or read as zero", "SHOW ROUTER STATUS", "Your MySQL 9 statements")
 	must("readWrite", "It is read-write: writes sent to it run on MySQL", "Everything else, writes included, runs on MySQL")
 	must("noRule", "No plan threshold is set", "every read runs on MySQL and nothing reaches the copy")
-	must("noPool", "9 by MySQL")
+	must("noPool", "Your MySQL 9 statements")
 	mustNot("noPool", "Workers for the copy")
 	// A server the router says nothing of: not sent anything, or not one of
 	// its servers. The document cannot tell, so the page says both.
 	must("empty", "Who answered for shop since", "nothing to show", "the router does not have this server", "The router knows no copy for shop")
 	must("otherServer", "Who answered for billing", "nothing to show", "the router does not have this server", "The router knows no copy for billing")
-	mustNot("otherServer", "9 by MySQL", "Why each side", "no statements yet")
+	mustNot("otherServer", "9 statements", "Why each side", "no statements yet")
 	must("badAddress", "No numbers from the router", "cannot be used", "names no host")
 	mustNot("badAddress", "Asked at", "Who answered")
 	must("noServer", "pick a server in the left sidebar", "Workers for the copy")
-	mustNot("noServer", "9 by MySQL")
-	must("notReadYet", "has not read its copies yet", "9 by MySQL")
+	mustNot("noServer", "9 statements")
+	must("notReadYet", "has not read its copies yet", "Your MySQL 9 statements")
 	mustNot("notReadYet", "snapshot of")
 	must("stale", "snapshot of", "The router last looked 11m ago", "a newer one may exist")
-	must("noCopy", "The router knows no copy for shop", "9 by MySQL")
+	must("noCopy", "The router knows no copy for shop", "Your MySQL 9 statements")
 	must("cannotRoute", "The copy answers everything for this server, the light reads too", "the router's log says why", "no statements yet")
-	must("refusedAcct", "MySQL refused the router's login for this server", "error 2006", "go on rising", "9 by MySQL")
+	must("refusedAcct", "MySQL refused the router's login for this server", "error 2006", "go on rising", "Your MySQL 9 statements")
 	must("untracked", "does not tell the router when a statement changes a session setting")
 }
 
@@ -260,10 +262,10 @@ const run = async (answer, perms = {}, cur = "a") => {
 	if got.Err != "" {
 		t.Fatalf("threw: %s", got.Err)
 	}
-	if !got.Shown.Page || !got.Shown.Panel || !strings.Contains(got.Shown.Text, "Who answered for shop") || !strings.Contains(got.Shown.Text, "9 by MySQL, 4 by the copy") {
+	if !got.Shown.Page || !got.Shown.Panel || !strings.Contains(got.Shown.Text, "Your MySQL 9 statements") || !strings.Contains(got.Shown.Text, "DBTrail's copy 4 statements") {
 		t.Errorf("a router that answers: page %v, panel %v; want the panel with the picked server's counts in: %s", got.Shown.Page, got.Shown.Panel, got.Shown.Text)
 	}
-	if !got.Other.Panel || !strings.Contains(got.Other.Text, "Who answered for billing") || !strings.Contains(got.Other.Text, "80 by MySQL, 70 by the copy") || strings.Contains(got.Other.Text, "9 by MySQL") {
+	if !got.Other.Panel || !strings.Contains(got.Other.Text, "Your MySQL 80 statements") || !strings.Contains(got.Other.Text, "DBTrail's copy 70 statements") || strings.Contains(got.Other.Text, "MySQL 9 statements") {
 		t.Errorf("another server picked: want its own counts, not the first server's, in: %s", got.Other.Text)
 	}
 	for name, r := range map[string]result{"no router configured": got.None, "a console without the route": got.OldServer, "refused": got.Refused} {
@@ -274,10 +276,10 @@ const run = async (answer, perms = {}, cur = "a") => {
 	if !got.Failed.Page || got.Failed.Panel || !strings.Contains(got.Failed.Text, "could not ask this DBTrail for its router's numbers") {
 		t.Errorf("the read failed: page %v; want the page drawn and the panel saying it could not ask, in: %s", got.Failed.Page, got.Failed.Text)
 	}
-	if !strings.Contains(got.Refreshed.Text, "41 by MySQL, 4 by the copy") || strings.Contains(got.Refreshed.Text, "9 by MySQL") {
+	if !strings.Contains(got.Refreshed.Text, "Your MySQL 41 statements") || !strings.Contains(got.Refreshed.Text, "DBTrail's copy 4 statements") || strings.Contains(got.Refreshed.Text, "MySQL 9 statements") {
 		t.Errorf("Refresh with a new answer: want the new counts and not the old ones, in: %s", got.Refreshed.Text)
 	}
-	if strings.Contains(got.RefreshFailed.Text, "9 by MySQL") || strings.Contains(got.RefreshFailed.Text, "Who answered") || !strings.Contains(got.RefreshFailed.Text, "could not ask this DBTrail for its router's numbers") {
+	if strings.Contains(got.RefreshFailed.Text, "9 statements") || strings.Contains(got.RefreshFailed.Text, "Your MySQL") || !strings.Contains(got.RefreshFailed.Text, "could not ask this DBTrail for its router's numbers") {
 		t.Errorf("Refresh that failed: the old counts must leave the screen and the panel say it could not ask, in: %s", got.RefreshFailed.Text)
 	}
 	if !got.NoPerm.Page || got.NoPerm.Panel || got.NoPerm.Asked {
