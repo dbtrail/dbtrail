@@ -66,6 +66,10 @@ type bundle struct {
 	// baselineSrc when that is s3://. The directory may not exist or may
 	// hold nothing yet; whoever fills it is not this package.
 	sqlMirrorDir string
+	// sqlMirrorOff says the mirror is switched off for this server
+	// (Registry.CopyMirrorOff): it has no folder because someone said so,
+	// which the page and the refusal say instead of "not ready yet".
+	sqlMirrorOff bool
 	// baselineConfigured gates the reconstruct surface per server: a baseline
 	// is present AND archives are enabled AND no RBAC profile is active. See
 	// the rationale on newBundleDerived.
@@ -202,8 +206,7 @@ func (cm *connManager) Resolve(ctx context.Context, id string) (*bundle, error) 
 			// Derive the published gates from the CURRENT entry: a
 			// baseline/no-archive-only edit during the open keeps this db but
 			// must not publish the stale entry's reconstruct gate.
-			nb := newBundleDerived(b.db, b.dbName, cur, cm.profileActive)
-			nb.sqlMirrorDir = cm.reg.CopyMirrorDir(cur)
+			nb := cm.newBundle(b.db, b.dbName, cur)
 			nb.dsn = b.dsn
 			nb.resolver = b.resolver
 			nb.resolverUnavailable = b.resolverUnavailable
@@ -300,8 +303,7 @@ func (cm *connManager) buildBundle(entry ServerEntry) (*bundle, error) {
 		if err != nil {
 			return nil, fmt.Errorf("server %q: %s", entry.Name, scrubDSNError(err, entry.DSN))
 		}
-		b := newBundleDerived(db, cfg.DBName, entry, cm.profileActive)
-		b.sqlMirrorDir = cm.reg.CopyMirrorDir(entry)
+		b := cm.newBundle(db, cfg.DBName, entry)
 		b.dsn = entry.DSN
 		// The schema resolver is the recovery pages' and is read from the
 		// index: not loaded here, and marked so nothing reads its absence
@@ -313,8 +315,7 @@ func (cm *connManager) buildBundle(entry ServerEntry) (*bundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("server %q: %s", entry.Name, scrubDSNError(err, entry.DSN))
 	}
-	b := newBundleDerived(db, cfg.DBName, entry, cm.profileActive)
-	b.sqlMirrorDir = cm.reg.CopyMirrorDir(entry)
+	b := cm.newBundle(db, cfg.DBName, entry)
 	b.dsn = entry.DSN
 	b.resolver, b.resolverUnavailable = loadResolver(db)
 	return b, nil
@@ -502,6 +503,16 @@ func (cm *connManager) evict(id string) {
 	}
 }
 
+// newBundle is the one way this manager makes a registry server's bundle:
+// newBundleDerived plus what only the registry knows, where the server's SQL
+// mirror is and whether it is switched off (#2302). A bundle made any other
+// way would have no mirror, and SQL on it would answer "only on S3".
+func (cm *connManager) newBundle(db *sql.DB, dbName string, entry ServerEntry) *bundle {
+	b := newBundleDerived(db, dbName, entry, cm.profileActive)
+	b.sqlMirrorDir, b.sqlMirrorOff = cm.reg.CopyMirrorDir(entry), cm.reg.CopyMirrorOff(entry)
+	return b
+}
+
 // rebuildDerived recomputes a cached bundle's derived flags after a
 // baseline/no-archive-only edit, keeping the open db (no needless re-Ping).
 // The bundle is replaced wholesale (handlers hold *bundle snapshots, which
@@ -514,8 +525,7 @@ func (cm *connManager) rebuildDerived(entry ServerEntry) {
 	if !ok {
 		return
 	}
-	nb := newBundleDerived(old.db, old.dbName, entry, cm.profileActive)
-	nb.sqlMirrorDir = cm.reg.CopyMirrorDir(entry)
+	nb := cm.newBundle(old.db, old.dbName, entry)
 	nb.dsn = old.dsn
 	nb.engine = old.engine
 	nb.resolver = old.resolver

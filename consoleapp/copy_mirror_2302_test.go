@@ -660,3 +660,109 @@ func TestSyncCopyMirror_aDownloadThatFailsIsNoLongerUnderWay(t *testing.T) {
 		t.Errorf("the failed round left a download marked: %+v", rep)
 	}
 }
+
+// A server whose mirror is switched off (#2302) is not a target: no round
+// runs for it, its folder is swept like any nobody uses, and what an earlier
+// round found is forgotten, so that turning it back on does not show that
+// round's answer as today's.
+func TestCopyMirror_switchedOff(t *testing.T) {
+	reg := mirrorRegistry(t, mirrorEntry("a", "", "s3://bucket/a"), mirrorEntry("b", "", "s3://bucket/b"))
+	var a console.ServerEntry
+	for _, e := range reg.List() {
+		if e.Name == "a" {
+			a = e
+		}
+	}
+	dir := reg.CopyMirrorDir(a)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, copymirror.SourceFile), []byte("s3://bucket/a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := newCopyMirrorState()
+	state.set(a.ID, copyMirrorStatus{Source: "s3://bucket/a", At: time.Now(), Newest: "2026-10-01T10-00-00Z"})
+
+	a.NoSQLMirror = true
+	if err := reg.Update(a); err != nil {
+		t.Fatal(err)
+	}
+	var ran []string
+	sync := func(_ context.Context, tg copyMirrorTarget) (copymirror.Result, error) {
+		ran = append(ran, tg.name)
+		return copymirror.Result{}, nil
+	}
+	sweepCopyMirrors(reg, bootMirror{})
+	runCopyMirrorRound(context.Background(), reg, bootMirror{}, state, sync)
+	if len(ran) != 1 || ran[0] != "b" {
+		t.Errorf("rounds ran for %v, want only b", ran)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the mirror of a server switched off was kept: %v", err)
+	}
+	if rep, ok := state.CopyMirrorReport(a.ID); ok {
+		t.Errorf("the earlier round's report is still there: %+v", rep)
+	}
+
+	a.NoSQLMirror = false
+	if err := reg.Update(a); err != nil {
+		t.Fatal(err)
+	}
+	ran = nil
+	runCopyMirrorRound(context.Background(), reg, bootMirror{}, state, sync)
+	if len(ran) != 2 {
+		t.Errorf("switched back on, rounds ran for %v, want both", ran)
+	}
+}
+
+// A round works from the registry as it is when each server's turn comes,
+// not as it was when the round started: a server switched off, or pointed at
+// another bucket, while an earlier one downloaded is not downloaded for.
+func TestCopyMirrorRound_asksAgainBeforeEachServer(t *testing.T) {
+	for name, change := range map[string]func(e *console.ServerEntry){
+		"switched off":   func(e *console.ServerEntry) { e.NoSQLMirror = true },
+		"another bucket": func(e *console.ServerEntry) { e.BaselineS3 = "s3://bucket/elsewhere" },
+		"untouched":      func(e *console.ServerEntry) {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reg := mirrorRegistry(t, mirrorEntry("a", "", "s3://bucket/a"), mirrorEntry("b", "", "s3://bucket/b"), mirrorEntry("c", "", "s3://bucket/c"))
+			var ran []string
+			runCopyMirrorRound(context.Background(), reg, bootMirror{}, newCopyMirrorState(), func(_ context.Context, tg copyMirrorTarget) (copymirror.Result, error) {
+				ran = append(ran, tg.name)
+				if tg.name == "a" {
+					for _, e := range reg.List() {
+						if e.Name == "b" {
+							change(&e)
+							if err := reg.Update(e); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+				}
+				return copymirror.Result{}, nil
+			})
+			want := "a c"
+			if name == "untouched" {
+				want = "a b c"
+			}
+			if got := strings.Join(ran, " "); got != want {
+				t.Errorf("rounds ran for %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// Forgetting a server forgets what was said about it too.
+func TestCopyMirrorState_keepOnlyForgetsWhatWasSaid(t *testing.T) {
+	state := newCopyMirrorState()
+	if !state.sayNow("gone", "empty") || !state.sayNow("kept", "empty") {
+		t.Fatal("a first line was held back")
+	}
+	state.keepOnly(map[string]bool{"kept": true})
+	if !state.sayNow("gone", "empty") {
+		t.Error("a server that got its mirror back is still being held quiet")
+	}
+	if state.sayNow("kept", "empty") {
+		t.Error("a server still mirrored repeats itself")
+	}
+}

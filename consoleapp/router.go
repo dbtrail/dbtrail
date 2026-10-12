@@ -80,7 +80,7 @@ func addRouterFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
 	f.String("listen", defaultRouterListen, "Address the MySQL-protocol port listens on (host:port). Env BINTRAIL_ROUTER_LISTEN.")
 	f.String("metrics-addr", "", "Address to expose Prometheus metrics on (e.g. 127.0.0.1:9091); empty = none. The same address answers /status, the router's numbers as JSON, which the web interface reads when it is given this address (BINTRAIL_CONSOLE_ROUTER_URL). Neither asks for a password. Not the capture process's address: each process serves its own. Env BINTRAIL_ROUTER_METRICS_ADDR.")
-	f.String("token", "", "Access token: the password every client of the port uses. With one, only the token opens the port. Without one, the port opens when the MySQL port is turned on in the web interface, with the password created there, and closes when it is turned off. Env BINTRAIL_CONSOLE_TOKEN.")
+	f.String("token", "", "Access token: one more password for the port, beside the one created in the web interface. It does not open the port: the port is open while the MySQL port is turned on in the web interface, and closed when it is turned off there. Env BINTRAIL_CONSOLE_TOKEN.")
 	f.String("servers-file", "", "Path to the server registry the web interface manages (default ~/.config/bintrail/console-servers.yaml). Read, never written. Env BINTRAIL_CONSOLE_SERVERS.")
 	f.String("auth-file", "", "Path to the web interface auth file, when it is not the default: only so a statement cannot read it through a copy directory that contains it. Env BINTRAIL_CONSOLE_AUTH.")
 	f.String("mcp-token-file", "", "Path to the managed MCP token file, when it is not the default: for the same reason as --auth-file. Env BINTRAIL_CONSOLE_MCP_TOKEN_FILE.")
@@ -224,14 +224,15 @@ func newRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server,
 		// The port's password, created in the web interface: followed only
 		// when the router has no token (routerPortFile). No address is
 		// given here: the router binds its own.
-		FlashbackPath:       routerPortFile(st),
-		SQLLimits:           sqlsandbox.Limits{MemoryLimit: st.SQLMemory, Threads: pool.Threads},
-		SQLMaxInFlight:      pool.Workers,
-		SQLWorkerStatements: sqlsandbox.DefaultWorkerStatements,
-		SQLMaxWaiters:       routerMaxWaiters,
-		SQLPortSharedSlots:  true,
-		SQLPortMaxRows:      st.SQLPortMaxRows,
-		KillSourceThreads:   killSourceThreads,
+		FlashbackPath:          routerPortFile(st),
+		FlashbackFollowsSwitch: true,
+		SQLLimits:              sqlsandbox.Limits{MemoryLimit: st.SQLMemory, Threads: pool.Threads},
+		SQLMaxInFlight:         pool.Workers,
+		SQLWorkerStatements:    sqlsandbox.DefaultWorkerStatements,
+		SQLMaxWaiters:          routerMaxWaiters,
+		SQLPortSharedSlots:     true,
+		SQLPortMaxRows:         st.SQLPortMaxRows,
+		KillSourceThreads:      killSourceThreads,
 		// A server is served while its index is away: forwarding and the
 		// copy's tables do not read it. Time travel and the events view
 		// do, and fail then with the reason.
@@ -359,13 +360,11 @@ func routerStatusHandler(st routerSettings, numbers func() console.RouterNumbers
 }
 
 // routerPortConfig is routerFlashbackConfig with the switch saved in the web
-// interface deciding whether statements are routed (#2341). A router
-// started with a token does not read that file, and routes.
+// interface deciding whether statements are routed (#2341), with or without
+// a token.
 func routerPortConfig(st routerSettings, routingOn func() bool) flashbackConfig {
 	cfg := routerFlashbackConfig(st)
-	if routerPortFile(st) != "" {
-		cfg.RouteSwitch = routingOn
-	}
+	cfg.RouteSwitch = routingOn
 	return cfg
 }
 
@@ -427,16 +426,14 @@ func followRouterMemory(ctx context.Context, savedPath, applied string, every ti
 	}
 }
 
-// routerPortFile is the saved setting whose password the router accepts, ""
-// when it accepts none from it. With a token, the token decides and the file
-// is not read: that is the capture process's own rule when it is started
-// with an address for its port, and such a process ignores the file without
-// clearing it, so a password left there would open this port while opening
-// nothing where it was made, and nobody could see or replace it.
+// routerPortFile is the saved setting the router follows: the MySQL port's,
+// which the web interface writes. Its switch opens and closes the router's
+// port, its password is accepted while the port is on, and its routing says
+// whether statements are routed. A token the router was started with is one
+// more password while the port is on. It does not open the port: a port
+// nobody turned on must not open because a token is in the environment the
+// router shares with the capture process (#2341).
 func routerPortFile(st routerSettings) string {
-	if st.Token != "" {
-		return ""
-	}
 	return filepath.Join(filepath.Dir(st.ServersFile), console.FlashbackFileName)
 }
 
@@ -483,6 +480,13 @@ func (p *routerPort) listening() string {
 // not stay up looking like one that does. After that a failure to bind
 // again is logged and tried again, since something is expected to connect
 // to this address.
+// open says whether the port is to be open now: there is a password to
+// take, which there is only while the switch saved in the web interface is
+// on (console.Config.FlashbackFollowsSwitch).
+func (p *routerPort) open() bool {
+	return len(p.srv.FlashbackPasswords()) > 0
+}
+
 func (p *routerPort) serve(ctx context.Context) error {
 	p.srv.OnFlashbackPasswordWithdrawn(func() {
 		// Every connection: the port cannot tell which of them came in
@@ -503,10 +507,10 @@ func (p *routerPort) serve(ctx context.Context) error {
 	_ = probe.Close()
 	opened, waiting, saidRebind := false, false, false
 	for ctx.Err() == nil {
-		if len(p.srv.FlashbackPasswords()) == 0 {
+		if !p.open() {
 			if !waiting {
 				waiting = true
-				fmt.Fprintf(p.out, "The router is not listening yet: there is no credential that could open its port. Start it with --token (or BINTRAIL_CONSOLE_TOKEN), or turn the MySQL port on in the web interface, which creates a password; it opens %s then, without a restart. (A capture process started with --flashback-listen saves no password there: use the token.)\n", p.addr)
+				fmt.Fprintf(p.out, "The router is not listening yet: the MySQL port is not turned on in the web interface (Settings, MCP Server, Connect a SQL client). Turning it on there creates its password and opens %s here within a few seconds, without a restart. An access token (--token, BINTRAIL_CONSOLE_TOKEN) is one more password while the port is on; it does not open it.\n", p.addr)
 			}
 			select {
 			case <-ctx.Done():
@@ -542,7 +546,7 @@ func (p *routerPort) serve(ctx context.Context) error {
 		p.mu.Lock()
 		p.bound, p.stop = "", nil
 		p.mu.Unlock()
-		if err != nil && ctx.Err() == nil && len(p.srv.FlashbackPasswords()) > 0 {
+		if err != nil && ctx.Err() == nil && p.open() {
 			slog.Warn("router: the MySQL-protocol port stopped; opening it again", "error", err)
 			select {
 			case <-ctx.Done():
@@ -558,6 +562,8 @@ type routerStartup struct {
 	Listen      string
 	Pool        console.SQLPool
 	MemoryLimit string
+	// Token: the router was started with an access token.
+	Token bool
 	// MemoryFrom says where MemoryLimit came from; MemoryErr is a saved
 	// setting that could not be read (routerMemory).
 	MemoryFrom string
@@ -595,11 +601,11 @@ func routerStartupLines(u routerStartup) string {
 			b.WriteString("Router: that address is every network interface of this machine, and the port forwards statements to each source on its credential alone. Bind 127.0.0.1, or keep it behind a firewall.\n")
 		}
 	}
-	if u.PortFile == "" {
-		b.WriteString("Router: the password is the access token (--token). A port password created in the web interface is not accepted here.\n")
-	} else {
-		fmt.Fprintf(&b, "Router: no access token was given, so the password is the one the web interface creates when the MySQL port is turned on there (read from %s), and the port is open only while it is on. Statements are routed only when that file says so (routing: true); otherwise the copy answers every statement.\n", u.PortFile)
+	fmt.Fprintf(&b, "Router: the port is open only while the MySQL port is turned on in the web interface (read from %s). The password is the one created there", u.PortFile)
+	if u.Token {
+		b.WriteString("; the access token (--token) is accepted too")
 	}
+	b.WriteString(". Statements are routed only when that file says so (routing: true); otherwise the copy answers every statement.\n")
 	switch {
 	case !u.ServersExists:
 		fmt.Fprintf(&b, "Router: the servers file %s does not exist yet, so no server can be reached. It is read again when it appears; if DBTrail keeps it somewhere else, give that path with --servers-file.\n", u.ServersFile)
@@ -698,7 +704,7 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 	fmt.Fprint(os.Stderr, routerStartupLines(routerStartup{
 		Listen: st.Listen, Pool: pool, MemoryLimit: memoryLimit, MemoryFrom: memoryFrom, MemoryErr: savedErr, Cfg: cfg,
 		ServersFile: st.ServersFile, ServersExists: statErr == nil, Servers: srv.ServerCount(),
-		PortFile: routerPortFile(st), Ignored: routerIgnoredEnv(), InContainer: inContainer(),
+		PortFile: routerPortFile(st), Token: st.Token != "", Ignored: routerIgnoredEnv(), InContainer: inContainer(),
 	}))
 	port := &routerPort{srv: srv, addr: st.Listen, cfg: cfg, poll: console.DefaultFollowInterval, out: os.Stderr}
 	return port.serve(ctx)

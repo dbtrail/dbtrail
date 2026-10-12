@@ -1718,12 +1718,23 @@ const sqlCopyMirrorNotReadyMessage = "this server's snapshots are in S3 and the 
 	"DBTrail brings the newest snapshot from the bucket by itself. " +
 	"The " + PageSnapshots + " page says how that stands, and the DBTrail log says why under \"copy mirror\""
 
+// sqlCopyMirrorOffMessage is the refusal for a server whose snapshots are
+// only in S3 and whose local mirror is switched off (#2302). True in every
+// process, and it names the setting, because no page offers it.
+const sqlCopyMirrorOffMessage = "this server's snapshots are only in S3, and the local copy SQL reads is turned off for it " +
+	"(no_sql_mirror in this server's snapshot settings). Turn it back on, or give the server a local folder on the " +
+	PageSnapshots + " page, and SQL becomes available once a snapshot is on this machine"
+
 // sqlNotLocalMessage is the refusal for a server SQL cannot read locally:
-// one that has a mirror on its way, or one that has none. "On its way" is
+// one whose mirror is switched off, one that has a mirror on its way, or one
+// that has none. "On its way" is
 // said only by a process that fills mirrors (Config.FillsCopyMirrors): the
 // read-only console and the router have the folder and nobody bringing
 // anything to it, and must not promise a download.
 func (s *Server) sqlNotLocalMessage(b *bundle) string {
+	if b != nil && b.sqlMirrorOff && strings.HasPrefix(b.baselineSrc, "s3://") {
+		return sqlCopyMirrorOffMessage
+	}
 	if s.fillsCopyMirrors && b != nil && b.sqlMirrorDir != "" {
 		return sqlCopyMirrorNotReadyMessage
 	}

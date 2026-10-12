@@ -77,7 +77,8 @@ func (r *Registry) CopyMirrorRoot() string {
 // CopyMirrorDir is where the local mirror of entry's S3 snapshots lives:
 // <state dir>/copy-mirror/<id>/<digest of the bucket and prefix>. "" when the
 // entry has no mirror: it keeps a local folder (that folder is the copy), it
-// has no bucket, or the registry is in memory.
+// has no bucket, its mirror is switched off (ServerEntry.NoSQLMirror), or the
+// registry is in memory.
 //
 // The last segment changes with the bucket or the prefix, so a server pointed
 // at another one gets an empty folder and never reads the old one's
@@ -89,11 +90,22 @@ func (r *Registry) CopyMirrorRoot() string {
 // in this folder: one holding a separator or a dot name would put the mirror,
 // and the directories handed to the SQL worker, outside it.
 func (r *Registry) CopyMirrorDir(entry ServerEntry) string {
-	if r == nil || r.path == "" || !plainPathSegment(entry.ID) || entry.BaselineS3 == "" || entry.BaselineDir != "" {
+	if r == nil || r.path == "" || !plainPathSegment(entry.ID) || entry.BaselineS3 == "" || entry.BaselineDir != "" || entry.NoSQLMirror {
 		return ""
 	}
 	sum := sha256.Sum256([]byte(strings.TrimSuffix(entry.BaselineS3, "/")))
 	return filepath.Join(r.CopyMirrorRoot(), entry.ID, hex.EncodeToString(sum[:8]))
+}
+
+// CopyMirrorOff reports whether entry's mirror is switched off: it would have
+// one, and ServerEntry.NoSQLMirror is all that keeps it from it. The switch
+// on a server that has no mirror to turn off is not "off".
+func (r *Registry) CopyMirrorOff(entry ServerEntry) bool {
+	if !entry.NoSQLMirror {
+		return false
+	}
+	entry.NoSQLMirror = false
+	return r.CopyMirrorDir(entry) != ""
 }
 
 // BootServerID is the id of the server the daemon was started with on its

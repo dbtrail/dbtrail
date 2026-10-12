@@ -638,7 +638,9 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 		BackupSchedule: old.BackupSchedule,
 		// Local retention (#1681) is set on the backup settings; a plain
 		// edit must not turn it off by omission.
-		LocalKeepNewest:   old.LocalKeepNewest,
+		LocalKeepNewest: old.LocalKeepNewest,
+		// So is the SQL mirror's switch (#2302).
+		NoSQLMirror:       old.NoSQLMirror,
 		SourceServerID:    req.SourceServerID,
 		Schemas:           req.Schemas,
 		Flavor:            flavor,

@@ -197,14 +197,17 @@ func (s *Server) refreshFlashbackPassword() {
 	}
 	f, err := LoadFlashbackFile(path)
 	s.noteFollow("port", "console: the MySQL port's saved setting could not be read; the password created in the web interface is not accepted until it can", err)
-	password, createdAt, routing := "", "", false
+	on, password, createdAt, routing := false, "", "", false
 	if err == nil && f.Enabled {
-		password, createdAt, routing = f.Password, f.PasswordCreatedAt, f.Routing
+		on, password, createdAt, routing = true, f.Password, f.PasswordCreatedAt, f.Routing
 	}
 	fb.mu.Lock()
 	// Replaced counts too: a new password is how a person holding the old
-	// one is put out without turning the port off.
-	withdrawn := fb.saved.Password != "" && password != fb.saved.Password
+	// one is put out without turning the port off. So does the port turned
+	// off while a token still opens it: the switch closes the port, whoever
+	// came in and with what (#2341).
+	withdrawn := (fb.saved.Password != "" && password != fb.saved.Password) || (fb.saved.Enabled && !on)
+	fb.saved.Enabled = on
 	// Read routing turned on or off while the port stays open with the same
 	// password: who answers is decided when a connection is made, so the
 	// connections made under the other setting are closed and come back
@@ -228,6 +231,18 @@ func (s *Server) refreshFlashbackPassword() {
 		slog.Info("console: read routing was turned on or off in the web interface; connections open on this port are closed and come back under the new setting", "routing", routing)
 		onWithdrawn()
 	}
+}
+
+// FlashbackSwitchOn reports whether the saved setting this process follows
+// says the port is on (#2341). It is what opens and closes the port of a
+// process that follows the file: a token is a password, not a switch, so a
+// port nobody turned on is not opened by starting the process with one.
+// False for a setting that is missing or cannot be read.
+func (s *Server) FlashbackSwitchOn() bool {
+	fb := &s.flashback
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return fb.saved.Enabled
 }
 
 // FlashbackRoutingOn reports whether the saved setting this process follows

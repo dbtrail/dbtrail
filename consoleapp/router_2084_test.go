@@ -145,7 +145,7 @@ func TestRouterSettings_refusals(t *testing.T) {
 // three to its handler.
 // The switch saved in the web interface decides the routing of a router that
 // follows the port's saved setting, and is not asked by one started with a
-// token, which does not read that file.
+// token.
 func TestRouterPortConfig_theSavedSwitchDecides(t *testing.T) {
 	on := false
 	asked := func() bool { return on }
@@ -157,8 +157,9 @@ func TestRouterPortConfig_theSavedSwitchDecides(t *testing.T) {
 	if !noToken.RouteSwitch() {
 		t.Fatal("no token: the switch is not read each time")
 	}
-	if withToken := routerPortConfig(routerSettings{ServersFile: "/x/console-servers.yaml", Token: "tok"}, asked); withToken.RouteSwitch != nil {
-		t.Fatal("with a token the saved switch is asked, though its file is not read")
+	on = false
+	if withToken := routerPortConfig(routerSettings{ServersFile: "/x/console-servers.yaml", Token: "tok"}, asked); withToken.RouteSwitch == nil || withToken.RouteSwitch() {
+		t.Fatal("with a token the saved switch does not decide: a router given a token would route with routing turned off")
 	}
 }
 
@@ -496,19 +497,17 @@ func TestRouterPort_waitsForACredentialAndFollowsIt(t *testing.T) {
 	}
 }
 
-// With a token, the token decides, as on a capture process started with an
-// address for its port: the password in the web interface's saved setting
-// is not accepted, whatever that file says, and nothing done to the file
-// closes a connection.
-func TestRouterPort_withATokenOnlyTheTokenOpensIt(t *testing.T) {
+// A token is one more password, not a switch (#2341): the port of a router
+// started with one is closed until the MySQL port is turned on in the web
+// interface, takes the token and the password created there while it is on,
+// and closes, with the connections on it, when it is turned off there. A
+// port nobody turned on must not open because a token is in the
+// environment.
+func TestRouterPort_aTokenIsAPasswordNotASwitch(t *testing.T) {
 	f := newRouterFiles(t)
-	f.savePortFile(t, true, "made-in-the-web")
 	st := f.settings("tok")
-	if got := routerPortFile(st); got != "" {
-		t.Fatalf("with a token the router follows %s", got)
-	}
-	if got := routerPortFile(f.settings("")); got != f.portFile {
-		t.Fatalf("with no token the router follows %q, want %s", got, f.portFile)
+	if got := routerPortFile(st); got != f.portFile {
+		t.Fatalf("with a token the router follows %q, want %s", got, f.portFile)
 	}
 	srv, runner, err := newRouterConsole(st, console.SQLPool{Workers: 1, Threads: 2})
 	if err != nil {
@@ -516,13 +515,27 @@ func TestRouterPort_withATokenOnlyTheTokenOpensIt(t *testing.T) {
 	}
 	t.Cleanup(runner.Close)
 	addr := freeAddr(t)
-	bound, stop := startRouter(t, srv, addr)
-	waitUntil(t, "the port to open", func() bool { return bound() != "" })
-	if code := mysqlLogin(t, addr, "tok"); code != 0 {
-		t.Fatalf("login with the token: MySQL error %d", code)
+	bound, stop, said := startRouterSaying(t, srv, addr)
+
+	// Never turned on, then saved as off: closed, token or not.
+	waitUntil(t, "the router to say it waits for the port to be turned on", func() bool { return strings.Contains(said(), "not listening yet") })
+	f.savePortFile(t, false, "made-in-the-web")
+	for range 15 {
+		if bound() != "" || accepts(addr) {
+			t.Fatal("the router opened its port on a token alone, with the MySQL port turned off")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	if code := mysqlLogin(t, addr, "made-in-the-web"); code != gomysql.ER_ACCESS_DENIED_ERROR {
-		t.Fatalf("login with the web interface's password on a router that has a token: %d, want 1045", code)
+
+	f.savePortFile(t, true, "made-in-the-web")
+	waitUntil(t, "the port to open once it is turned on", func() bool { return bound() != "" })
+	for _, pw := range []string{"tok", "made-in-the-web"} {
+		if code := mysqlLogin(t, addr, pw); code != 0 {
+			t.Fatalf("login with %q while the port is on: MySQL error %d", pw, code)
+		}
+	}
+	if code := mysqlLogin(t, addr, "something-else"); code != gomysql.ER_ACCESS_DENIED_ERROR {
+		t.Fatalf("login with a wrong password: %d, want 1045", code)
 	}
 	conn, err := client.Connect(addr, "default", "tok", "")
 	if err != nil {
@@ -540,18 +553,28 @@ func TestRouterPort_withATokenOnlyTheTokenOpensIt(t *testing.T) {
 	if err := conn.Ping(); !errors.As(err, &me) || me.Code != gomysql.ER_BAD_DB_ERROR {
 		t.Fatalf("a PING on a connection for a server that does not exist: %v", err)
 	}
+
+	// Turned off: the port closes and the connection made with the token
+	// goes with it. Then the setting removed: still closed.
 	f.savePortFile(t, false, "made-in-the-web")
+	waitUntil(t, "the port to close when it is turned off, token or not", func() bool { return bound() == "" && !accepts(addr) })
+	waitUntil(t, "the connection made with the token to be closed", func() bool { return connGone(conn) })
 	if err := os.Remove(f.portFile); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(200 * time.Millisecond)
-	if _, err := conn.Execute("SELECT 1"); !errors.As(err, &me) || me.Code != gomysql.ER_BAD_DB_ERROR {
-		t.Fatalf("the connection after the web interface's setting was removed: %v, want it still open", err)
+	time.Sleep(150 * time.Millisecond)
+	if bound() != "" || accepts(addr) {
+		t.Fatal("the port opened after its setting was removed")
 	}
 	stop()
-	if accepts(addr) {
-		t.Error("the port is still open after the router stopped")
-	}
+}
+
+// connGone reports whether the server end of conn is gone: an answer from
+// the server, an error packet included, means the connection is alive.
+func connGone(conn *client.Conn) bool {
+	err := conn.Ping()
+	var me *gomysql.MyError
+	return err != nil && !errors.As(err, &me)
 }
 
 // mysqlLoginQuiet is mysqlLogin for a polling loop: any failure is a code.
@@ -602,14 +625,14 @@ func TestRouterStartupLines_sayWhatWillHappen(t *testing.T) {
 		want    []string
 		wantNot []string
 	}{
-		{"as started by default with a token", nil,
-			[]string{"127.0.0.1:3310", "the password is the access token", "3 servers from /var/lib/bintrail/console-servers.yaml", "4 statements on the copy at once", "2 threads", "8 cores allow 4",
+		{"as started by default", func(u *routerStartup) { u.PortFile = "/var/lib/bintrail/console-mysql-port.yaml" },
+			[]string{"127.0.0.1:3310", "open only while the MySQL port is turned on in the web interface (read from /var/lib/bintrail/console-mysql-port.yaml)", "The password is the one created there.", "routed only when that file says so", "3 servers from /var/lib/bintrail/console-servers.yaml", "4 statements on the copy at once", "2 threads", "8 cores allow 4",
 				"whatever the age of its snapshot", "waits its turn, in the order it arrived, for up to 30s", "error 1040", "read routing is read-write"},
-			[]string{"every network interface", "does not exist", "is not applied", "read routing is read-only"}},
+			[]string{"every network interface", "does not exist", "is not applied", "read routing is read-only", "access token"}},
 		{"a pool of one is one statement", func(u *routerStartup) { u.Pool.Workers = 1 },
 			[]string{"1 statement on the copy at once"}, []string{"1 statements"}},
-		{"no token: the web interface's password", func(u *routerStartup) { u.PortFile = "/var/lib/bintrail/console-mysql-port.yaml" },
-			[]string{"no access token was given", "/var/lib/bintrail/console-mysql-port.yaml", "only while it is on", "routed only when that file says so"},
+		{"with a token: one more password, not a switch", func(u *routerStartup) { u.Token = true },
+			[]string{"open only while the MySQL port is turned on in the web interface", "The password is the one created there; the access token (--token) is accepted too."},
 			[]string{"the password is the access token"}},
 		{"a servers file that is not there", func(u *routerStartup) { u.ServersExists, u.Servers = false, 0 },
 			[]string{"does not exist yet", "no server can be reached", "--servers-file"},

@@ -608,13 +608,12 @@ copy. It is the MySQL port the `bintrail` service can serve on 3309, run as a
 service of its own, so restarting `bintrail` does not drop its connections and
 a statement that runs out of memory there cannot take capture with it.
 
-It listens on `127.0.0.1:3310`, and only once there is a password for it:
-
-- with `CONSOLE_TOKEN` set in `.env`, the token is the password;
-- without it, when the MySQL port is turned on in the web interface
-  (**Connect**), with the password created there. It closes again when the
-  port is turned off there, and replacing the password closes the connections
-  that were open.
+It listens on `127.0.0.1:3310`, and only while the MySQL port is turned on in
+the web interface (**Settings**, **MCP Server**, **Connect a SQL client**),
+with the password created there. It closes again when the port is turned off
+there, and replacing the password closes the connections that were open. With
+`CONSOLE_TOKEN` set in `.env`, the token is accepted as a password too while
+the port is on; it does not open it.
 
 Until then the container waits and uses next to nothing.
 

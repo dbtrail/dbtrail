@@ -310,6 +310,7 @@ console.log(JSON.stringify(out));
 		"empty":        wire(&sqlMirrorDTO{State: "empty"}),
 		"waiting":      wire(&sqlMirrorDTO{State: "waiting"}),
 		"unfilled":     wire(&sqlMirrorDTO{State: "unfilled"}),
+		"off":          wire(&sqlMirrorDTO{State: "off"}),
 		"unknownState": wire(&sqlMirrorDTO{State: "something-newer"}),
 	}
 	in, _ := json.Marshal(cases)
@@ -349,6 +350,7 @@ console.log(JSON.stringify(out));
 		"empty":          {{false, "SQL has nothing to read yet: the bucket holds no complete snapshot to bring to this machine."}},
 		"waiting":        {{false, "SQL is not available yet. DBTrail has not brought a snapshot from S3 to this machine."}},
 		"unfilled":       {{false, "SQL is not available here. These snapshots are only in S3, and nothing on this machine brings them to disk: bintrail-console watch does."}},
+		"off":            {{false, "SQL is not available on this server: its snapshots are only in S3, and the copy SQL reads on this machine is turned off for it (no_sql_mirror in this server's snapshot settings). Turn it back on, or give the server a Local folder, and SQL becomes available."}},
 		"unknownState":   {{false, "SQL is not available yet. DBTrail has not brought a snapshot from S3 to this machine."}},
 	}
 	for name, w := range want {

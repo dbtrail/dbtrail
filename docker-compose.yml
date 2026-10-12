@@ -510,11 +510,11 @@ services:
   # It is READ-ONLY here (ROUTER_READ_ONLY below): writes are refused, not
   # forwarded.
   #
-  # It starts with the stack and LISTENS ONLY ONCE THERE IS A PASSWORD:
-  #   - with CONSOLE_TOKEN set in .env, the token is the password;
-  #   - without it, when the MySQL port is turned on in the web interface
-  #     (Connect), with the password created there, and it closes again when
-  #     the port is turned off there.
+  # It starts with the stack and LISTENS ONLY WHILE THE MYSQL PORT IS TURNED
+  # ON in the web interface (Settings, MCP Server, Connect a SQL client),
+  # with the password created there; it closes again when the port is turned
+  # off there. With CONSOLE_TOKEN set in .env the token is accepted as a
+  # password too while the port is on; it does not open it.
   # Until then it waits and uses next to nothing.
   #
   # WHAT THAT PASSWORD READS HERE: the source itself, live, and only as far

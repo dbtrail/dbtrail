@@ -320,9 +320,10 @@ journalctl -u bintrail-router -f
   `BINTRAIL_ROUTER_METRICS_ADDR` and `BINTRAIL_CONSOLE_ROUTER_URL` there and
   restart both services. The MCP Server page then shows who answered, the
   age of the copy, and the router's workers.
-- It **listens only once there is a password**: `BINTRAIL_CONSOLE_TOKEN` in
-  the settings file, or else the password the web interface creates when the
-  MySQL port is turned on there. Until then it waits.
+- It **listens only while the MySQL port is turned on** in the web interface
+  (**Settings**, **MCP Server**, **Connect a SQL client**), with the password
+  created there. `BINTRAIL_CONSOLE_TOKEN` in the settings file is accepted
+  as a password too while the port is on; it does not open it.
 - That password reads **the source itself, live**, with each server's
   forwarding account: a MySQL user of its own, set on the server's page in
   the web interface, with `SELECT` on what applications should read. The

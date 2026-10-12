@@ -1423,6 +1423,25 @@ For a server that keeps its snapshots in S3 and has no local snapshot folder,
   and, in red, why the last attempt failed (no room, with the sizes, or a
   bucket that cannot be read). It says so even when the list itself cannot
   be read. The daemon log says the same under `copy mirror`.
+- **Turning it off for one server.** For a server that should keep nothing on
+  this machine, save `no_sql_mirror` in its snapshot settings:
+
+  ```bash
+  curl -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"no_sql_mirror": true}' \
+    http://localhost:8090/api/backup-settings/servers/<server id>
+  ```
+
+  No new download starts for that server (one already under way finishes),
+  its mirror is removed from disk at the start of the daemon's next round,
+  five minutes later at most once the current one ends, and SQL is not
+  available on it: the Snapshots page and the refusal both say that it is
+  turned off, and how to turn it back on. `false` turns it back on, and the
+  newest snapshot is downloaded again at the next round. The setting is kept through every
+  other save, and does nothing while the server keeps a local folder. The
+  server the daemon was started with on its command line is not in the saved
+  settings, so it has no such switch: give it a local folder
+  (`--baseline-dir`) to stop the downloads.
 
 A server that also keeps a local snapshot folder has no mirror: that folder
 is what SQL reads. The change history (the `events` view) is not mirrored: on
