@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/dbtrail/dbtrail/ext"
+	"github.com/dbtrail/dbtrail/internal/query"
 )
 
 func newCopyJobsServer(t *testing.T, withHistory bool) (*Server, *BaselineRunHistory, string) {
@@ -256,6 +257,12 @@ func TestCopyJobs_restrictedSessionGetsNoFreeText(t *testing.T) {
 	if strings.Contains(open, "detail_withheld") {
 		t.Errorf("an unrestricted session is told detail was withheld: %s", open)
 	}
+	// A profile the service was started with restricts every session.
+	srv.denyTables = []query.SchemaTable{{Schema: "shop", Table: "cards"}}
+	if boot := call(nil); strings.Contains(boot, "zz_") || !strings.Contains(boot, `"detail_withheld":true`) {
+		t.Fatalf("a startup profile did not withhold the free text: %s", boot)
+	}
+	srv.denyTables = nil
 	closed := call(&ext.AccessPolicy{Profile: "analyst", Permissions: ext.AllPermissions()})
 	if strings.Contains(closed, "zz_") {
 		t.Fatalf("a profiled session was sent free text: %s", closed)

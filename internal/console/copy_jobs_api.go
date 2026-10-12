@@ -18,8 +18,9 @@ const (
 // narrow view of BaselineRunRecord on purpose. The record's lists name
 // tables one by one (refused, left out, new), and one of them is uncapped;
 // none of them is copied here. What is left that can name a table is the
-// free text (error, summary, why, skip reason), and a session that carries a
-// data profile is not sent it: it keeps the outcome and the counts.
+// free text (error, summary, why, skip reason), and a reader under a data
+// profile, the session's own or one the service was started with, is not
+// sent it: it keeps the outcome and the counts.
 type copyJobDTO struct {
 	// Kind is empty for a skipped slot: the schedule files every skip under
 	// the full-read kind whatever would have run, so the record's kind says
@@ -111,7 +112,9 @@ func (s *Server) handleCopyJobs(w http.ResponseWriter, r *http.Request) {
 		return strings.Compare(copyJobEnd(b), copyJobEnd(a))
 	})
 	jobs := make([]copyJobDTO, 0, len(recs))
-	restricted := sessionRestricted(r)
+	// Either kind of restriction: a profile on the session, or one the
+	// service was started with (deny or redact rules for every session).
+	restricted := s.rbacActiveFor(r)
 	for _, rec := range recs {
 		jobs = append(jobs, copyJobFromRecord(rec, restricted))
 	}
