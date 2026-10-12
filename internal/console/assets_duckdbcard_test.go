@@ -165,34 +165,78 @@ func TestDuckDBCardStaysNearlyTextless(t *testing.T) {
 	}
 }
 
-// TestDuckDBCardMountsOnConnect: the DuckDB schema card lives on Connect AI
-// (#1573), with or without the watch daemon, beside the other ways to take the
-// data somewhere else; Backups no longer mounts it (its take-away lane
-// downloads the default file itself). Between the SQL client panel and the
-// Iceberg export, the order of the page from least to most setup.
+// TestDuckDBCardMountsOnConnect: the DuckDB schema card lives on MCP Server
+// (#1573), with or without the watch daemon; Backups no longer mounts it (its
+// take-away lane downloads the default file itself), and neither does MySQL
+// clients, the page the MySQL port moved to.
 func TestDuckDBCardMountsOnConnect(t *testing.T) {
 	js := readAsset(t, "app.js")
 	if strings.Contains(stripJSLineComments(functionBody(t, js, "async function renderSnapshots(")), "duckdbPanel(") {
-		t.Error("Snapshots mounts duckdbPanel again; the card moved to Connect AI (#1573), and two " +
+		t.Error("Snapshots mounts duckdbPanel again; the card moved to MCP Server (#1573), and two " +
 			"copies of one download put two different option sets in front of the reader")
 	}
 	connect := stripJSLineComments(functionBody(t, js, "function buildConnect("))
 	// Gated on views and on settings:read, the permission GET /api/views.sql
 	// checks: on Backups the listing's own permission hid it, and without the
 	// second half a session denied it sees a button that can only be refused.
-	mount := strings.Index(connect, `if (capsCache.views && (capsCache.permissions || {})["settings:read"] !== false) v.append(duckdbPanel())`)
-	sql := strings.Index(connect, "sqlClientPanel(")
-	ice := strings.Index(connect, "icebergExportPanel(")
-	switch {
-	case mount < 0:
+	if !strings.Contains(connect, `if (capsCache.views && (capsCache.permissions || {})["settings:read"] !== false) v.append(duckdbPanel())`) {
 		t.Fatal("buildConnect does not mount duckdbPanel on capsCache.views plus settings:read; with " +
 			"the daemon running (monitor on) the views download would have no page at all, or a " +
 			"session denied settings:read would get a button that only 403s")
-	case sql < 0 || ice < 0:
-		t.Fatal("buildConnect no longer mounts the SQL client panel or the Iceberg panel; re-anchor this order check")
-	case !(sql < mount && mount < ice):
-		t.Error("the DuckDB card is out of order on Connect AI: it belongs after the SQL client panel " +
-			"and before the Iceberg export")
+	}
+	// After the AI clients: the steps are what the page is for.
+	if strings.Index(connect, "duckdbPanel(") < strings.Index(connect, "otherClientsPanel(") {
+		t.Error("the DuckDB card is drawn above the AI clients on MCP Server; it belongs below them")
+	}
+}
+
+// TestTheMySQLPortHasItsOwnPage: MCP Server is the token, the address, the
+// installer, the other AI clients and the DuckDB schema; MySQL clients is the
+// MySQL port, the memory a statement may use and the Iceberg export. The
+// port's panels sat under the MCP steps until the page was split, and a
+// reader looking for the mysql line did not look there. Neither builder
+// mounts the other's panels, and the MCP loader asks for nothing a MySQL
+// clients panel is drawn from.
+func TestTheMySQLPortHasItsOwnPage(t *testing.T) {
+	js := readAsset(t, "app.js")
+	mcp := []string{"mcpTokenCard(", "mcpEndpointCard(", "bundleCard(", "otherClientsPanel(", "duckdbPanel("}
+	port := []string{"sqlClientPanel(", "sqlMemoryPanel(", "icebergExportPanel("}
+	check := func(name string, own, other []string) {
+		body := stripJSLineComments(functionBody(t, js, "function "+name+"("))
+		for _, must := range own {
+			if !strings.Contains(body, must) {
+				t.Errorf("%s does not mount %s, so it is on no page at all", name, must)
+			}
+		}
+		for _, not := range other {
+			if strings.Contains(body, not) {
+				t.Errorf("%s mounts %s, which belongs on the other page", name, not)
+			}
+		}
+	}
+	check("buildConnect", mcp, port)
+	check("buildMySQLClients", port, mcp)
+	load := stripJSLineComments(functionBody(t, js, "async function renderConnect("))
+	for _, not := range []string{"/api/flashback", "/api/sql-settings", "/api/router", "/api/baselines"} {
+		if strings.Contains(load, not) {
+			t.Errorf("renderConnect asks %s, which only a MySQL clients panel is drawn from", not)
+		}
+	}
+	// The port's setting takes settings:read. A session without it is not
+	// asked (the request could only be refused, on every visit) and is told
+	// so, not told to reload a page that reloading cannot fix; and the
+	// heading over the page promises nothing a read-write router breaks.
+	page := stripJSLineComments(functionBody(t, js, "async function renderMySQLClients("))
+	gate, ask := strings.Index(page, `if (sessionMay("settings:read")) {`), strings.Index(page, `api("/api/flashback")`)
+	if gate < 0 || ask < gate || ask-gate > 80 {
+		t.Error("renderMySQLClients asks /api/flashback without checking settings:read right before it")
+	}
+	panel := functionBody(t, js, "function sqlClientPanel(")
+	if !strings.Contains(panel, "fb === undefined") || !strings.Contains(panel, "this session may not read settings") {
+		t.Error("sqlClientPanel no longer tells a session that may not read settings apart from a check that failed")
+	}
+	if strings.Contains(functionBody(t, js, "function buildMySQLClients("), "only read") {
+		t.Error("the MySQL clients heading says the port only reads; with a read-write router, read routing runs writes on MySQL")
 	}
 }
 

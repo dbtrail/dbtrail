@@ -18,8 +18,9 @@ const whole = (n) => !n ? "" : n.nodeType === 3 ? n.textContent : (n._text || ""
 const tidy = (s) => s.replace(/\s+/g, " ").trim();
 const walk = (n, f) => { if (!n || n.nodeType === 3) return; f(n); (n.children || []).forEach((c) => walk(c, f)); };
 const run = (s) => vm.runInContext(s, ctx);
-const read = (panel) => { const o = { lines: [], buttons: [], inputs: [], folds: [] };
+const read = (panel) => { const o = { lines: [], buttons: [], inputs: [], folds: [], figs: [] };
   walk(panel, (x) => { if (x.tag === "p") o.lines.push(tidy(whole(x)));
+    if ((" " + x.className + " ").includes(" cn-fig ")) o.figs.push(tidy(whole(x)) + ((" " + x.className + " ").includes(" is-bad ") ? " [bad]" : ""));
     if (x.tag === "details") o.folds.push(tidy(whole(x)));
     if (x.tag === "button") o.buttons.push(x._text); if (x.tag === "input") o.inputs.push(x.value); });
   return o; };
@@ -73,6 +74,9 @@ type sqlMemDrawn struct {
 	// Folds is the whole text of each folded note: its label, then what is
 	// under it.
 	Folds []string
+	// Figs is each figure as drawn: its label, the number with its unit,
+	// the few words under it, and " [bad]" when it is drawn as a fault.
+	Figs []string
 }
 
 func TestSQLMemoryPanel_2210(t *testing.T) {
@@ -169,14 +173,39 @@ func TestSQLMemoryPanel_2210(t *testing.T) {
 	has("unfenced", got.Unfenced, "A statement has no memory ceiling of its own here, so one that outgrows its memory is only stopped when this machine runs out of memory, and the system may stop something else with it. Why: this container does not let DBTrail make cgroups: in docker-compose.yml, uncomment security_opt (writable-cgroups=true) on the service that prints this (bintrail or router), which needs Docker 28 or later, and recreate the container.")
 	// Folded, each under a label that says which it is: the page keeps its
 	// visible text short (the console's own budget for this page).
-	if len(got.Fenced.Folds) != 1 || !strings.HasPrefix(got.Fenced.Folds[0], "Own memory ceiling: on Each statement also has") {
-		t.Errorf("fenced: folds %q, want one, labelled on, holding the sentence", got.Fenced.Folds)
+	// The first fold on every panel holds the sentences the figures stand
+	// for; the ceiling's is the second, and only where there is one to say.
+	const meaning = "What these numbers mean Each statement can use "
+	if len(got.Fenced.Folds) != 2 || !strings.HasPrefix(got.Fenced.Folds[0], meaning) || !strings.HasPrefix(got.Fenced.Folds[1], "Own memory ceiling: on Each statement also has") {
+		t.Errorf("fenced: folds %q, want the sentences, then one labelled on holding the ceiling's", got.Fenced.Folds)
 	}
-	if len(got.Unfenced.Folds) != 1 || !strings.HasPrefix(got.Unfenced.Folds[0], "Own memory ceiling: off A statement has no memory ceiling") {
-		t.Errorf("unfenced: folds %q, want one, labelled off, holding the sentence", got.Unfenced.Folds)
+	if len(got.Unfenced.Folds) != 2 || !strings.HasPrefix(got.Unfenced.Folds[0], meaning) || !strings.HasPrefix(got.Unfenced.Folds[1], "Own memory ceiling: off A statement has no memory ceiling") {
+		t.Errorf("unfenced: folds %q, want the sentences, then one labelled off holding the ceiling's", got.Unfenced.Folds)
 	}
-	if len(got.Def.Folds) != 0 {
-		t.Errorf("default: a folded note with nothing to say: %q", got.Def.Folds)
+	if len(got.Def.Folds) != 1 || !strings.HasPrefix(got.Def.Folds[0], meaning) {
+		t.Errorf("default: folds %q, want only the sentences: a ceiling note with nothing to say is not drawn", got.Def.Folds)
+	}
+	// The same answer, drawn as figures: a label, the number with its unit,
+	// a few words. Every number is the route's; none is worked out here.
+	if want := []string{
+		"Memory per statement 2 GB the default",
+		"Then disk 8 GB slower instead of failing",
+		"Changes waiting to merge 384 MB the most a table can have and be queried",
+		"At once 2 statements on the machine that captures changes",
+	}; !slices.Equal(got.Def.Figs, want) {
+		t.Errorf("default: figures\n  %q\nwant\n  %q", got.Def.Figs, want)
+	}
+	if f := got.Saved4.Figs; len(f) < 3 || f[0] != "Memory per statement 4 GB saved here" || f[1] != "Then disk 16 GB slower instead of failing" || !strings.HasPrefix(f[2], "Changes waiting to merge 768 MB") {
+		t.Errorf("saved: figures %q", f)
+	}
+	// No disk is a fault, drawn as one, and never as a size.
+	if f := got.NoDisk.Figs; len(f) < 2 || f[1] != "Then disk None past its memory a statement fails [bad]" {
+		t.Errorf("no disk: figures %q, want the disk figure drawn as a fault", f)
+	}
+	// A setting that could not be read draws no figure: a number here would
+	// be one nobody read.
+	if len(got.None.Figs) != 0 {
+		t.Errorf("unread setting: figures drawn from nothing: %q", got.None.Figs)
 	}
 	for name, d := range map[string]sqlMemDrawn{"default": got.Def, "unfenced": got.Unfenced} {
 		for _, l := range d.Lines {

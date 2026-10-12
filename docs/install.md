@@ -332,12 +332,12 @@ journalctl -u bintrail-router -f
   `BINTRAIL_CONSOLE_ROUTER_URL`.
 - **Its numbers are on by default.** The router's unit sets
   `BINTRAIL_ROUTER_METRICS_ADDR=127.0.0.1:9091` and the capture unit sets
-  `BINTRAIL_CONSOLE_ROUTER_URL=http://127.0.0.1:9091`, so the MCP Server
+  `BINTRAIL_CONSOLE_ROUTER_URL=http://127.0.0.1:9091`, so the MySQL clients
   page shows who answered, the age of the copy, and the router's workers. A
   line in the settings file wins over either. Change both together, then
   restart both services.
 - It **listens only while the MySQL port is turned on** in the web interface
-  (**Settings**, **MCP Server**, **Connect a SQL client**), with the password
+  (**Settings**, **MySQL clients**, **Connect a SQL client**), with the password
   created there. `BINTRAIL_CONSOLE_TOKEN` in the settings file is accepted
   as a password too while the port is on; it does not open it.
 - As it comes, **the copy answers every statement**. With read routing turned

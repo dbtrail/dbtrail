@@ -188,8 +188,9 @@ func TestScreenTextNamesThePlace(t *testing.T) {
 			}
 		}
 	}
-	has("sqlNamed", "The copy answers every statement. Turn it on and an application can use this port in place of its MySQL")
-	has("sqlRouted", "Light statements run on each server's own MySQL. Heavy SELECTs run on the copy.")
+	// Where a statement goes is drawn as lanes now (TestRoutingBlockSaysWhoAnswered
+	// reads them); the one sentence left is the one a drawing cannot say.
+	has("sqlNamed", "Turn it on and an application can use this port in place of its MySQL.")
 	has("sqlHost", "The port answers on 10.0.0.5 only.")
 	has("sqlHost", "To answer other machines, start the router with another address")
 	has("sqlDown", "The router that serves the port did not answer, so 3309 above is the port's usual number, not a confirmed one.")

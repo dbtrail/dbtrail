@@ -27,7 +27,7 @@ ctx.history = { pushState: (s, t, u) => { log.push("push " + u); setURL(u); }, r
 let calls = [], nav = [];
 ctx.setActiveNav = (r) => nav.push(r);
 const painters = ["renderOverview", "renderEvents", "renderSchemaChanges", "renderRecover", "renderStatus", "renderRetention",
-  "renderDaemon", "renderSnapshots", "renderConnect", "renderAccessProfiles"];
+  "renderDaemon", "renderSnapshots", "renderConnect", "renderMySQLClients", "renderAccessProfiles"];
 const real = {};
 for (const n of painters) real[n] = ctx[n];
 const run = (sc) => {
@@ -142,14 +142,14 @@ func TestOldAddressesLandOnTheirPage(t *testing.T) {
 		// itself: the translation must not skip that gate.
 		{"storage, serve", routeScenario{Start: "/storage", Steps: boot, Caps: serveCaps, Known: true, Real: []string{"renderRetention"}},
 			want{"/overview", []string{"replace /retention", "replace /overview"}, []string{"renderRetention", "renderOverview"}, "retention", "storage"}},
-		// /sql goes to Connect AI (#1573), which every console has, so the
+		// /sql goes to MySQL clients, which every console has, so the
 		// answer does not wait for the capability check.
 		{"sql, watch", routeScenario{Start: "/sql", Steps: boot, Caps: watchCaps, Known: true},
-			want{"/connect", []string{"replace /connect"}, []string{"renderConnect"}, "connect", "sql"}},
+			want{"/mysql-clients", []string{"replace /mysql-clients"}, []string{"renderMySQLClients"}, "mysql-clients", "sql"}},
 		{"sql, serve", routeScenario{Start: "/sql", Steps: boot, Caps: serveCaps, Known: true},
-			want{"/connect", []string{"replace /connect"}, []string{"renderConnect"}, "connect", "sql"}},
+			want{"/mysql-clients", []string{"replace /mysql-clients"}, []string{"renderMySQLClients"}, "mysql-clients", "sql"}},
 		{"sql, capabilities unknown", routeScenario{Start: "/sql", Steps: boot, Caps: serveCaps, Known: false},
-			want{"/connect", []string{"replace /connect"}, []string{"renderConnect"}, "connect", "sql"}},
+			want{"/mysql-clients", []string{"replace /mysql-clients"}, []string{"renderMySQLClients"}, "mysql-clients", "sql"}},
 		// Where /storage goes depends on the capability answer. With no answer
 		// (the check failed), it does not guess: a guess written into the bar
 		// would stick to that history entry after the check recovers.
@@ -221,7 +221,7 @@ func TestOldAddressesLandOnTheirPage(t *testing.T) {
 		{"navigate storage from events", routeScenario{Start: "/events", Steps: []string{"navigate('storage')"}, Caps: watchCaps, Known: true},
 			want{"/retention", []string{"push /retention"}, []string{"renderRetention"}, "retention", ""}},
 		{"navigate sql from events, serve", routeScenario{Start: "/events", Steps: []string{"navigate('sql')"}, Caps: serveCaps, Known: true},
-			want{"/connect", []string{"push /connect"}, []string{"renderConnect"}, "connect", ""}},
+			want{"/mysql-clients", []string{"push /mysql-clients"}, []string{"renderMySQLClients"}, "mysql-clients", ""}},
 		{"navigate timetravel", routeScenario{Start: "/events", Steps: []string{"navigate('timetravel')"}, Caps: watchCaps, Known: true},
 			want{"/recover", []string{"push /recover"}, []string{"renderRecover"}, "recover", ""}},
 		// Where the visit came from outlives a repaint of the same visit (a

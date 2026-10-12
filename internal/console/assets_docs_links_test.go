@@ -33,9 +33,10 @@ var expectedDocsPages = map[string]string{
 	// settings/backups); the header link opens the strategy guide, which
 	// covers the whole job, and the other two stay reachable from it and
 	// from the docsMore links below.
-	"snapshots": "guides/backup-strategy",
-	"storage":   "guides/capacity-planning",
-	"connect":   "claude/setup",
+	"snapshots":     "guides/backup-strategy",
+	"storage":       "guides/capacity-planning",
+	"connect":       "claude/setup",
+	"mysql-clients": "guides/query-with-a-mysql-client",
 }
 
 // Slugs a compact block links to that no page header names (#1573). Recorded

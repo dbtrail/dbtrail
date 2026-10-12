@@ -34,7 +34,7 @@ const SERVER_KEY = "bintrail_console_server";
 const ONBOARD_KEY = "bintrail_console_onboarded";
 
 // The generated DuckDB views file, named in two places that must not drift:
-// the card that builds it (on Connect AI, #1573) and the take-away lane on
+// the card that builds it (on MCP Server, #1573) and the take-away lane on
 // Snapshots that downloads the default one. Shared rather than guarded -- a
 // constant cannot disagree with itself, and a test comparing two literals
 // only reports the drift after someone ships it.
@@ -71,6 +71,10 @@ const ROUTES = ["overview", "events", "schema-changes", "timetravel", "recover",
   // Retention through ROUTE_ALIASES; its other half, This daemon, was
   // dissolved in #1867 and /daemon lands on Status.
   "retention", "connect",
+  // MySQL clients: the MySQL port, read routing, the memory a statement
+  // may use and the Iceberg export, which sat on MCP Server until the page
+  // was split.
+  "mysql-clients",
   // Access profiles (#1445): author the flags/profiles/rules a data profile
   // enforces. Not monitor-gated: the standalone serve can author too, the
   // write goes to the selected server's index, not to daemon state.
@@ -112,6 +116,7 @@ const DOCS_PAGES = {
   snapshots: "guides/backup-strategy",
   storage: "guides/capacity-planning",
   connect: "claude/setup",
+  "mysql-clients": "guides/query-with-a-mysql-client",
 };
 
 const MON_STATE_TITLES = {
@@ -1121,10 +1126,10 @@ const ROUTE_ALIASES = new Map([
   // credential signals and staged downloads on Snapshots. A bookmark lands
   // on Status, which every console has, so no capability answer is needed.
   ["daemon", () => "status"],
-  // The SQL page was removed (#1549); its DuckDB schema card lives on
-  // Connect AI (#1573), which every console has, so no capability answer is
-  // needed to know where to send it.
-  ["sql", () => "connect"],
+  // The SQL page was removed (#1549). An address that says "sql" lands on
+  // MySQL clients, which every console has, so no capability answer is needed
+  // to know where to send it. (Its DuckDB schema card is on MCP Server.)
+  ["sql", () => "mysql-clients"],
   // The three backup pages merged into Snapshots (#1573). Each lands where
   // its page went, so a bookmark, a link in an email or a Back entry still
   // shows what it named. No capability answer is needed: Snapshots opens on
@@ -1265,6 +1270,7 @@ function renderRoute() {
     case "retention": return renderRetention();
     case "snapshots": return renderSnapshots();
     case "connect": return renderConnect();
+    case "mysql-clients": return renderMySQLClients();
     case "access-profiles": return renderAccessProfiles();
     default: return renderOverview();
   }
@@ -3307,7 +3313,7 @@ const USE_PANELS = {
     });
   },
   client(body) {
-    // The same panel MCP Server carries, read when the card is opened and
+    // The same panel MySQL clients carries, read when the card is opened and
     // not before: two requests nobody asked for would run on every paint.
     body.append(ovSkelLines(3));
     const gen = serverGen;
@@ -9604,7 +9610,7 @@ async function downloadViewsSQL(opts) {
 //
 // It is NOT the console SQL page, which #1549 removed: nothing here executes.
 // The title is load-bearing beyond this panel and must not be renamed casually
-// (it was "Query in DuckDB" until #1528). Mounted on Connect AI (#1573); it
+// (it was "Query in DuckDB" until #1528). Mounted on MCP Server (#1573); it
 // sat on Backups from #1581 to #1573, where the take-away lane still
 // downloads the default file through downloadViewsSQL.
 function duckdbPanel() {
@@ -10137,7 +10143,7 @@ function snapshotTablesUniform(snaps, truncated) {
 // purpose: it writes a new copy of the data, and it is deliberately kept out
 // of the process that captures changes, so nothing here can start one. The
 // panel is display only: the command is built from /api/servers and from the
-// backup location Connect AI asks for (GET /api/baselines?location_only=1,
+// backup location MySQL clients asks for (GET /api/baselines?location_only=1,
 // #1573), which reads neither the storage nor the server's index. The
 // password is elided the same way the SQL-client panel elides the console
 // token.
@@ -12389,7 +12395,7 @@ function backupDuckLane(b) {
   const go = el("div", { class: "bk-lane-go" }, dl);
   if (hasViews) {
     const views = el("button", { class: "btn btn-ghost", type: "button", text: "Download " + DUCKDB_VIEWS_FILE });
-    // A download, not a jump: the card with the options moved to Connect AI
+    // A download, not a jump: the card with the options moved to MCP Server
     // (#1573). This saves the default file (no change log, for this machine)
     // and then shows the one command a reader cannot guess. Errors land in
     // the lane's own line, or in a toast when the lane was repainted.
@@ -14007,11 +14013,39 @@ async function renderConnect() {
   // The server list only picks between /mcp and /mcp/{id-or-name}; a failure
   // (or the registry-only 404 on an empty console) degrades to the bare
   // default-server URL instead of blanking the page.
-  // serversFailed covers what that degrade leaves out: the Iceberg command
-  // needs the selected server's index address, and a failure other than a
-  // refusal or the empty console must say why the panel is missing. The
-  // default id is THIS response's, the one a header-less request resolves to
-  // right now, not the one the last loadServers left behind.
+  let servers = [];
+  try { servers = (await api("/api/servers")).servers || []; } catch (_) {}
+  // Token status (#1052): presence/provenance only, never a value. null on
+  // failure — the card degrades to a reload hint instead of blanking the page.
+  let tokStatus = null;
+  try { tokStatus = await api("/api/mcp-token"); } catch (_) {}
+  // vgen: navigating away while these requests are out must not let this
+  // page paint over the next one.
+  if (gen !== serverGen || vgen !== viewGen) {
+    // The consumed plaintext cannot be re-shown; say so instead of losing it
+    // silently (the user must rotate to get a usable value).
+    if (minted) toastError("Token display interrupted; the plain token is gone. Click New token to get a fresh one");
+    return;
+  }
+  try {
+    buildConnect(servers, tokStatus, minted);
+  } catch (err) {
+    if (minted) toastError("Token display interrupted; the plain token is gone. Click New token to get a fresh one");
+    const v = VIEW(); clear(v); v.append(pageHead("MCP Server", null)); renderError(v, err);
+  }
+}
+
+// ── MySQL clients ──────────────────────────────────────────────────────────────
+//
+// The MySQL port and its read routing, the router's numbers, the memory a
+// statement may use and the Iceberg export. These panels
+// sat under the three MCP cards until the page was split: none of them is
+// about an AI client, and a reader looking for the mysql line did not look
+// under "MCP Server".
+
+async function renderMySQLClients() {
+  const gen = serverGen, vgen = viewGen;
+  viewLoading();
   // A router's numbers (#2318), read by the server from the router, which
   // may take two seconds when the router is away: asked now and awaited
   // last, so the page does not wait for it on top of the rest. undefined
@@ -14020,20 +14054,26 @@ async function renderConnect() {
   const rtAsked = sessionMay("settings:read")
     ? api("/api/router").then((v) => v, (err) => (err && (err.status === 403 || err.status === 404) ? undefined : null))
     : Promise.resolve(undefined);
+  // serversFailed: the Iceberg command needs the selected server's index
+  // address, and a failure other than a refusal or the empty console must
+  // say why the panel is missing. The default id is THIS response's, the one
+  // a header-less request resolves to right now, not the one the last
+  // loadServers left behind.
   let servers = [], serversDefault = "", serversFailed = false;
   try {
     const r = await api("/api/servers");
     servers = r.servers || [];
     serversDefault = r.default_id || "";
   } catch (err) { serversFailed = err.status !== 403 && err.status !== 404; }
-  // Token status (#1052): presence/provenance only, never a value. null on
-  // failure — the card degrades to a reload hint instead of blanking the page.
-  let tokStatus = null;
-  try { tokStatus = await api("/api/mcp-token"); } catch (_) {}
   // Time-travel port status (#1446): on/off plus its address, never the token.
   // null on failure — the SQL client panel says it could not check.
-  let fbStatus = null;
-  try { fbStatus = await api("/api/flashback"); } catch (_) {}
+  // undefined: this session may not read settings, which is what the route
+  // takes. It is not asked (the request could only be refused, on every
+  // visit) and the panel says that, not "reload to try again".
+  let fbStatus;
+  if (sessionMay("settings:read")) {
+    try { fbStatus = await api("/api/flashback"); } catch (err) { fbStatus = err && err.status === 403 ? undefined : null; }
+  }
   // The SQL memory setting (#2210): undefined draws no panel (a session
   // without settings:read), null says the read failed.
   let sqlMem;
@@ -14062,21 +14102,15 @@ async function renderConnect() {
   }
   // vgen: navigating away while these requests are out must not let this
   // page paint over the next one.
-  if (gen !== serverGen || vgen !== viewGen) {
-    // The consumed plaintext cannot be re-shown; say so instead of losing it
-    // silently (the user must rotate to get a usable value).
-    if (minted) toastError("Token display interrupted; the plain token is gone. Click New token to get a fresh one");
-    return;
-  }
+  if (gen !== serverGen || vgen !== viewGen) return;
   try {
     // No note for a console with no server at all: the location 404s there
     // too, and "this server" would name nothing.
     const cur = servers.find((s) => s.id === (currentServer || serversDefault));
-    buildConnect(servers, tokStatus, minted, fbStatus,
+    buildMySQLClients(servers, fbStatus,
       { cur: cur, loc: bLoc, failed: (bLocFailed && !!cur) || serversFailed }, sqlMem, rtView);
   } catch (err) {
-    if (minted) toastError("Token display interrupted; the plain token is gone. Click New token to get a fresh one");
-    const v = VIEW(); clear(v); v.append(pageHead("MCP Server", null)); renderError(v, err);
+    const v = VIEW(); clear(v); v.append(pageHead("MySQL clients", null)); renderError(v, err);
   }
 }
 
@@ -14115,7 +14149,7 @@ function copyText(text, what) {
   clip.writeText(text).then(() => toast(what + " copied to clipboard"), () => toastError("Copy failed."));
 }
 
-function buildConnect(servers, tokStatus, minted, fbStatus, ice, sqlMem, rtView) {
+function buildConnect(servers, tokStatus, minted) {
   const v = VIEW(); clear(v);
   const sub = el("p", { class: "page-sub" },
     "Three steps and Claude can answer questions about your database history. It can only read; it can never change anything.");
@@ -14127,8 +14161,6 @@ function buildConnect(servers, tokStatus, minted, fbStatus, ice, sqlMem, rtView)
   cards.append(bundleCard());
   v.append(cards);
   if (capsCache.mcp) v.append(otherClientsPanel(servers));
-  v.append(sqlClientPanel(servers, fbStatus, "", null, rtView));
-  if (sqlMem !== undefined) v.append(sqlMemoryPanel(sqlMem, null, rtView));
   // The DuckDB schema card, on this page with or without the watch daemon
   // (#1573; it sat on Backups from #1581, and here only on a serve-only
   // console). GET /api/views.sql needs settings:read, so a session denied it
@@ -14136,12 +14168,28 @@ function buildConnect(servers, tokStatus, minted, fbStatus, ice, sqlMem, rtView)
   // the listing's own permission hid it). The views capability is already false under a
   // data profile.
   if (capsCache.views && (capsCache.permissions || {})["settings:read"] !== false) v.append(duckdbPanel());
+  viewEnter();
+}
+
+function buildMySQLClients(servers, fbStatus, ice, sqlMem, rtView) {
+  const v = VIEW(); clear(v);
+  const sub = el("p", { class: "page-sub" },
+    "Two ways to use one MySQL port.");
+  v.append(pageHead("MySQL clients", sub));
+  v.append(sqlClientPanel(servers, fbStatus, "", null, rtView, true));
+  if (sqlMem !== undefined) {
+    v.append(cnSection("Applies to both", "", "What each statement that runs on the copy may use.", "sun"));
+    // .sqlc: the page's own scale, larger than the same panel wears elsewhere.
+    const mem = sqlMemoryPanel(sqlMem, null, rtView);
+    mem.className += " sqlc";
+    v.append(mem);
+  }
   // Last: what the selected server's snapshots can become, for a reader who
   // wants them in front of a reporting engine (#1466). It was the bottom of
   // the old Backups page, a third answer to "what do I download" there — the
   // page that has since merged into Snapshots, which never carried it (#1573).
   const iceberg = icebergExportPanel(ice.cur, ice.loc);
-  if (iceberg) v.append(iceberg);
+  if (iceberg) { iceberg.className += " sqlc"; v.append(iceberg); }
   else if (ice.failed) {
     v.append(el("p", { class: "form-hint cn-ice-err", style: "margin-top:18px", text:
       "Could not check where this server's snapshots are kept, so the Iceberg export command is not shown. Reload the page to try again." }));
@@ -14708,6 +14756,25 @@ function sqlPortAddress(rt) {
   return { port: "3309", host: "", confirmed: false };
 }
 
+// cnSection is the heading over one of a page's sections: a small label, the
+// title large, and one line saying what the section is for.
+function cnSection(k, title, sub, tone) {
+  return el("div", { class: "cn-sec" + (tone ? " is-" + tone : "") },
+    el("span", { class: "cn-sec-k", text: k }),
+    title ? el("h2", { class: "cn-sec-t", text: title }) : null,
+    sub ? el("p", { class: "cn-sec-sub", text: sub }) : null);
+}
+
+// cnFact is one fact of a panel, drawn instead of written: a small label, the
+// value large, and a few words under it. tone "warn" or "bad" colours the
+// words, for a value that is a guess or a fault.
+function cnFact(k, value, cap, tone) {
+  return el("div", { class: "cn-fact" + (tone ? " is-" + tone : "") },
+    el("span", { class: "cn-fact-k", text: k }),
+    el("span", { class: "cn-fact-v" }, value),
+    cap ? el("span", { class: "cn-fact-cap", text: cap }) : null);
+}
+
 // redrawSQLPanel draws the panel again, in place, from a fresh answer.
 function redrawSQLPanel(panel, servers, fb, reveal, rt) {
   // The fresh render's buttons are wired to panel, the element on the page,
@@ -14740,17 +14807,45 @@ function changeSQLPort(panel, servers, send, btn, rt, keep) {
 // /api/router, what the router that serves the port says (undefined when
 // not asked, null when the asking failed). Not a .cn-card: the three
 // numbered cards are the Connect AI how-to, and this is a different client.
-function sqlClientPanel(servers, fb, reveal, live, rt) {
-  const panel = el("section", { class: "ov-panel cn-sql", style: "margin-top:18px" });
-  // live: the panel already on the page that this render will be moved
+function sqlClientPanel(servers, fb, reveal, live, rt, split) {
+  // split (the MySQL clients page): two things a reader must not take for one
+  // are drawn as two sections, each under its own heading. Reading the copy
+  // from a MySQL client is the first; read routing, where the same port also
+  // sends statements to the server's own MySQL, is the second, and optional.
+  // What comes back is then a wrapper holding both, and it is the wrapper
+  // that is redrawn in place. Without split it is one panel, as a card
+  // elsewhere mounts.
+  split = !!split || (!!live && /\bcn-split\b/.test(live.className || ""));
+  const panel = el("section", { class: "ov-panel cn-sql" + (split ? " sqlc" : ""), style: "margin-top:18px" });
+  const wrap = split ? el("div", { class: "cn-split" }) : null;
+  // The second section's card; one panel holds everything without split.
+  const routeCard = split ? el("section", { class: "ov-panel cn-routep sqlc" }) : null;
+  // live: the element already on the page that this render will be moved
   // into (redrawSQLPanel); the buttons act on that one.
-  live = live || panel;
-  panel.append(el("div", { class: "ov-panel-head" }, el("h2", { class: "ov-panel-title", text: "Connect a SQL client" })));
+  live = live || wrap || panel;
+  // route: "card" when read routing is drawn, "idle" when the port is off
+  // and turning it on is what comes first, "" when this page cannot say
+  // whether the port is on or can never have it (nothing is promised then).
+  const done = (route) => {
+    if (!split) return panel;
+    wrap.append(cnSection("MySQL client", "Read your copy from a MySQL client",
+      "Your tables as DBTrail keeps them, answered by DBTrail's copy. Nothing here touches your database.", "pink"), panel);
+    wrap.append(cnSection("Read routing · optional", "Run MySQL and DuckDB on one port",
+      "Point an application at the same port and DBTrail picks who answers each statement: light ones on your MySQL, heavy SELECTs on DuckDB, over the copy.", "violet"));
+    if (route === "card") wrap.append(routeCard);
+    else wrap.append(el("section", { class: "ov-panel cn-routep sqlc is-idle" },
+      el("p", { class: "cn-sql-row", text: route === "idle" ? "Available once the MySQL port above is on." : "Read routing is part of the MySQL port: see above." })));
+    return wrap;
+  };
+  const head = el("div", { class: "ov-panel-head" }, el("h2", { class: "ov-panel-title", text: "Connect a SQL client" }));
+  panel.append(head);
   const body = el("div", { class: "cn-sql-body" });
   panel.append(body);
   if (!fb) {
-    body.append(el("p", { class: "cn-sql-row", text: "We could not check whether the MySQL port is on. Reload the page to try again." }));
-    return panel;
+    body.append(el("p", { class: "cn-sql-row", text: fb === undefined
+      ? "The MySQL port is a setting, and this session may not read settings. Someone who can will see it here."
+      : "We could not check whether the MySQL port is on. Reload the page to try again." }));
+    return done("");
   }
   const ask = (q) => typeof window.confirm !== "function" || window.confirm(q);
   const mayChange = fb.can_manage && sessionMay("settings:write");
@@ -14759,91 +14854,113 @@ function sqlClientPanel(servers, fb, reveal, live, rt) {
       // serve: this process saves no setting for the port, so a button
       // here could only be refused.
       body.append(el("p", { class: "cn-sql-row", text: "Not available: this DBTrail only reads. The MySQL port is turned on in the web interface of the DBTrail service, and your usual MySQL client can then read any table as it was at a chosen moment." }));
-      return panel;
+      return done("");
     }
     if (!fb.can_manage) {
       body.append(el("p", { class: "cn-sql-row", text: "The MySQL port cannot be turned on or off from the web interface." }));
       body.append(el("p", { class: "cn-sql-row cn-sql-err", text: fb.error || "Its saved setting cannot be changed by this DBTrail." }));
-      return panel;
+      return done("idle");
     }
     if (!mayChange) {
       body.append(el("p", { class: "cn-sql-row", text: "Off. Someone who can change settings can turn it on here." }));
-      return panel;
+      return done("idle");
     }
     body.append(el("p", { class: "cn-sql-row", text: "Off. Turn it on and your usual MySQL client can read any table as it was at a chosen moment." }));
     if (fb.error) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: fb.error }));
-    const on = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Turn on" });
+    const on = el("button", { class: "btn cn-cta", type: "button", text: "Turn on" });
     on.onclick = () => changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { enabled: true } }), on, rt);
     body.append(el("div", { class: "cn-links" }, on));
     body.append(el("p", { class: "form-hint", text: "Turning it on creates the port's password. It is shown once, right then." }));
-    return panel;
+    return done("idle");
   }
   const cur = (servers || []).find((s) => s.id === (currentServer || defaultServerId));
   const user = mcpSelector(cur);
   const at = sqlPortAddress(rt);
-  // Nothing answers, and why: said first, above a command that would fail.
-  if (fb.notice) body.append(el("p", { class: "cn-sql-row cn-sql-err" }, el("b", { text: "The port is on and " }), fb.notice));
-  if (fb.error) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: fb.error }));
-  const line = "mysql -h " + shellWord(flashbackHost(at)) + " -P " + at.port + " -u " + (user ? shellWord(user) : "<server-name>") + " -p";
-  body.append(el("div", { class: "cn-urlrow" },
-    el("code", { class: "stg-code cn-url", text: line }),
-    el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(line, "mysql command") })));
-  if (!at.confirmed) {
-    // The address is the router's to say. Without its answer the command
-    // above carries the usual port, and says so.
-    // Four ways to have no address, each said as what it is: the asking
-    // failed, the router did not answer, it answered with an address this
-    // page cannot read, or this DBTrail was never told of a router.
-    const why = rt === null ? "This DBTrail could not ask the router that serves the port, so "
-      : rt && rt.status ? "The router that serves the port did not say an address this page can read, so "
-      : rt && rt.configured ? "The router that serves the port did not answer, so "
-      : "This DBTrail was not told where the router that serves the port is, so ";
-    body.append(el("p", { class: "cn-sql-row" + (rt === null || (rt && rt.configured) ? " cn-sql-err" : ""), text: why + "3309 above is the port's usual number, not a confirmed one." }));
-  }
-  body.append(el("p", { class: "cn-sql-row" }, "User ",
-    user ? el("code", { text: user }) : el("code", { text: "<server name>" }),
-    user ? ", the server picked in the left sidebar" : ", the name of a server in the left sidebar (none yet)"));
-  if (reveal) {
-    // Drawn whatever else the answer says: after a new password this is the
-    // only place the working one exists.
-    body.append(el("p", { class: "cn-sql-row", text: "Password, shown only now. Copy it and keep it somewhere safe:" }));
-    body.append(el("div", { class: "cn-urlrow" },
-      el("code", { class: "stg-code cn-url", text: reveal }),
-      el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(reveal, "Port password") })));
-  } else {
-    body.append(el("p", { class: "cn-sql-row", text: "Password: the one shown when it was created" +
-      (fb.password_created_at ? ", " + utcLabel(fb.password_created_at) : "") + ". It cannot be shown again." }));
-  }
-  // The port does not filter by schema (#1685): say so, so it is not taken
-  // for a path that scopes access per schema.
-  body.append(el("p", { class: "cn-sql-row", text: "This password reads every schema on every server in the sidebar." }));
+  // On, said by a pill beside the title; the two things that change the
+  // port sit across from it, out of the way of the command.
+  head.append(el("b", { class: "cn-state is-on", text: "On" }));
   if (mayChange) {
     const fresh = el("button", { class: "btn btn-sm", type: "button", text: "New password" });
     fresh.onclick = () => { if (ask("Create a new password?\n\nThe current one stops working, and MySQL clients connected to the port are disconnected.")) changeSQLPort(live, servers, () => api("/api/flashback/password", { method: "POST", body: {} }), fresh, rt); };
     const off = el("button", { class: "btn btn-sm btn-danger", type: "button", text: "Turn off" });
     off.onclick = () => { if (ask("Turn the port off?\n\nMySQL clients connected to it are disconnected.")) changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { enabled: false } }), off, rt); };
-    body.append(el("div", { class: "cn-links" }, fresh, off));
+    head.append(el("div", { class: "cn-head-acts" }, fresh, off));
   }
-  body.append(routingSwitch(fb, cur, rt, mayChange && ((btn) => {
+  // Nothing answers, and why: said first, above a command that would fail.
+  if (fb.notice) body.append(el("p", { class: "cn-sql-row cn-sql-err" }, el("b", { text: "The port is on and " }), fb.notice));
+  if (fb.error) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: fb.error }));
+  // The command, drawn as the terminal line it is: the one thing on this
+  // panel a reader came for.
+  const line = "mysql -h " + shellWord(flashbackHost(at)) + " -P " + at.port + " -u " + (user ? shellWord(user) : "<server-name>") + " -p";
+  // The row inside is the command and its Copy, nothing else: the prompt
+  // sign is decoration and sits beside it.
+  body.append(el("div", { class: "cn-term" },
+    el("span", { class: "cn-term-p", "aria-hidden": "true", text: "$" }),
+    el("div", { class: "cn-urlrow" },
+      el("code", { class: "stg-code cn-url cn-term-line", text: line }),
+      el("button", { class: "btn btn-sm cn-term-copy", type: "button", text: "Copy", onclick: () => copyText(line, "mysql command") }))));
+  // The address is the router's to say. Without its answer the command
+  // above carries the usual port, and says so.
+  // Four ways to have no address, each said as what it is: the asking
+  // failed, the router did not answer, it answered with an address this
+  // page cannot read, or this DBTrail was never told of a router.
+  const why = at.confirmed ? "" : (rt === null ? "This DBTrail could not ask the router that serves the port, so "
+    : rt && rt.status ? "The router that serves the port did not say an address this page can read, so "
+    : rt && rt.configured ? "The router that serves the port did not answer, so "
+    : "This DBTrail was not told where the router that serves the port is, so ") + "3309 above is the port's usual number, not a confirmed one.";
+  const portBad = !at.confirmed && (rt === null || !!(rt && rt.configured));
+  // What the line is made of, as facts: a label, the value large, a few
+  // words. The sentences these replaced are in the fold below.
+  const facts = el("div", { class: "cn-facts" },
+    cnFact("User", el("code", { text: user || "<server name>" }),
+      user ? "the server picked in the sidebar" : "the name of a server in the sidebar (none yet)"),
+    cnFact("Password", reveal ? "Shown below" : "Shown once",
+      reveal ? "copy it now" : fb.password_created_at ? "created " + utcLabel(fb.password_created_at) : "when it was created"),
+    // The port does not filter by schema (#1685): say so, so it is not
+    // taken for a path that scopes access per schema.
+    cnFact("Reads", "Every schema", "on every server in the sidebar"),
+    cnFact("Port", at.port, at.confirmed ? "said by the router" : "the usual number, not confirmed", at.confirmed ? "" : portBad ? "bad" : "warn"));
+  body.append(facts);
+  if (portBad) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: why }));
+  if (reveal) {
+    // Drawn whatever else the answer says: after a new password this is the
+    // only place the working one exists.
+    body.append(el("p", { class: "cn-sql-row cn-reveal-k", text: "Password, shown only now. Copy it and keep it somewhere safe:" }));
+    body.append(el("div", { class: "cn-term cn-term-pass" },
+      el("div", { class: "cn-urlrow" },
+        el("code", { class: "stg-code cn-url cn-term-line", text: reveal }),
+        el("button", { class: "btn btn-sm cn-term-copy", type: "button", text: "Copy", onclick: () => copyText(reveal, "Port password") }))));
+  }
+  const rbody = routeCard ? el("div", { class: "cn-sql-body" }) : body;
+  if (routeCard) routeCard.append(rbody);
+  rbody.append(routingSwitch(fb, cur, rt, mayChange && ((btn) => {
     const next = !fb.routing_on;
     if (next && !ask("Turn read routing on?\n\nStatements sent to this port then run on each server's own MySQL, with that server's forwarding account. Only heavy SELECTs run on the copy.")) return;
     changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { routing: next } }), btn, rt, reveal);
-  })));
+  }), at.port));
   const numbers = routerNumbers(rt, cur, () => api("/api/router").then((v) => redrawSQLPanel(live, servers, fb, reveal, v), (e) => {
     // The numbers on screen are no longer ones just read: they go, and the
     // panel says it could not ask, with the button to try again.
     redrawSQLPanel(live, servers, fb, reveal, null);
     toastError("Could not refresh the router's numbers: " + ((e && e.message) || e));
   }));
-  if (numbers) body.append(numbers);
+  if (numbers) rbody.append(numbers);
   body.append(cnFine("What to run, and other machines",
+    !at.confirmed && !portBad ? el("p", { class: "form-hint", text: why }) : null,
+    // The sentences the four facts stand for, whole.
+    el("p", { class: "form-hint" }, "User ",
+      user ? el("code", { text: user }) : el("code", { text: "<server name>" }),
+      user ? ", the server picked in the left sidebar" : ", the name of a server in the left sidebar (none yet)"),
+    reveal ? null : el("p", { class: "form-hint", text: "Password: the one shown when it was created" +
+      (fb.password_created_at ? ", " + utcLabel(fb.password_created_at) : "") + ". It cannot be shown again." }),
+    el("p", { class: "form-hint", text: "This password reads every schema on every server in the sidebar." }),
     el("p", { class: "form-hint" }, "Ask for a table as it was: ",
       el("code", { text: "SELECT * FROM _flashback.orders AS OF '10 minutes ago' WHERE id = 1;" }),
       " Use _snapshot for the whole table (needs a snapshot) and _diff for what changed between two moments. The user picks the server, so each server has its own line; pick another in the sidebar and copy again. Add @copy to the user (", el("code", { text: (user || "<server-name>") + "@copy" }), ") and the copy answers everything on that connection, whatever read routing says."),
     el("p", { class: "form-hint", text: at.host
       ? "The port answers on " + at.host + " only. Run mysql where it can reach it (on the machine DBTrail runs on when it is 127.0.0.1), or open a tunnel to it. To answer other machines, start the router with another address (BINTRAIL_ROUTER_LISTEN)."
       : "The command uses the name the web interface was opened with. If that name is a reverse proxy in front of DBTrail, it does not pass this port through, so use that machine's own name or address instead. In the Docker install, docker-compose.yml decides who can reach the port: a new install publishes it to the machine itself only." })));
-  return panel;
+  return done("card");
 }
 
 // ── Memory for SQL on the copy (#2210) ──────────────────────────────────────
@@ -14893,6 +15010,20 @@ function sqlMemoryLines(st) {
   return out;
 }
 
+// sqlMemoryFigures is the same answer as sqlMemoryLines, as figures: a label,
+// a number with its unit, and a few words. Pure, so it is tested in node.
+function sqlMemoryFigures(st) {
+  if (!st) return [];
+  const split = (v) => { const m = /^([\d.,]+)\s*(.*)$/.exec(String(v || "").trim()); return m ? { num: m[1], unit: m[2] } : { num: String(v || ""), unit: "" }; };
+  const from = { default: "the default", saved: "saved here", startup: "set where DBTrail starts" }[st.source] || "";
+  const out = [Object.assign({ k: "Memory per statement", cap: from }, split(st.memory))];
+  if (st.disk) out.push(Object.assign({ k: "Then disk", cap: "slower instead of failing" }, split(st.disk)));
+  else if (st.no_disk) out.push({ k: "Then disk", num: "None", unit: "", cap: "past its memory a statement fails", bad: true });
+  if (st.max_unmerged_mb) out.push({ k: "Changes waiting to merge", num: String(st.max_unmerged_mb), unit: "MB", cap: "the most a table can have and be queried" });
+  if (st.max_in_flight) out.push({ k: "At once", num: String(st.max_in_flight), unit: st.max_in_flight === 1 ? "statement" : "statements", cap: "on the machine that captures changes" });
+  return out;
+}
+
 // routerMemoryNote is what to say when the router that serves the MySQL port
 // runs with another memory per statement than the one in force here: it
 // reads the saved setting when it starts, so a change made since waits for
@@ -14931,8 +15062,27 @@ function sqlMemoryPanel(st, live, rt) {
   panel.append(el("div", { class: "ov-panel-head" }, el("h2", { class: "ov-panel-title", text: "Memory for SQL on the copy" })));
   const body = el("div", { class: "cn-sql-body" });
   panel.append(body);
-  for (const line of sqlMemoryLines(st)) body.append(el("p", { class: "cn-sql-row", text: line }));
-  if (!st) return panel;
+  if (!st) {
+    for (const line of sqlMemoryLines(st)) body.append(el("p", { class: "cn-sql-row", text: line }));
+    return panel;
+  }
+  // The setting and what follows from it, as figures. The sentences are in
+  // the fold under them.
+  const figs = el("div", { class: "cn-figs" });
+  for (const f of sqlMemoryFigures(st)) {
+    figs.append(el("div", { class: "cn-fig" + (f.bad ? " is-bad" : "") },
+      el("span", { class: "cn-fig-k", text: f.k }),
+      el("span", { class: "cn-fig-v" }, el("b", { class: "cn-fig-num", text: f.num }), f.unit ? el("span", { class: "cn-fig-unit", text: f.unit }) : null),
+      el("span", { class: "cn-fig-cap", text: f.cap })));
+  }
+  body.append(figs);
+  // Two of the sentences are not what a number means but something to act
+  // on: a saved value that is not the one in force, and why there is no
+  // disk. They stay in the open, and are not said twice.
+  const open = (line) => line.startsWith("The value saved here") || line.startsWith("Past that, a statement fails");
+  const lines = sqlMemoryLines(st);
+  for (const line of lines.filter(open)) body.append(el("p", { class: "cn-sql-row" + (line.startsWith("Past that") ? " cn-sql-err" : ""), text: line }));
+  body.append(cnFine("What these numbers mean", ...lines.filter((line) => !open(line)).map((line) => el("p", { class: "form-hint", text: line }))));
   const ceiling = sqlCeilingNote(st);
   if (ceiling) body.append(cnFine(ceiling.label, el("p", { class: "form-hint", text: ceiling.text })));
   if (st.warning) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: st.warning }));
@@ -15230,23 +15380,45 @@ function routeAccountMissing(cur) {
 // sidebar: the two sides, drawn (routerSides, #2330). The saved switch is
 // fb.routing_on (GET /api/flashback); who answered is the router's to say
 // (rt, GET /api/router).
-function routingSwitch(fb, cur, rt, toggle) {
+// routeDrawing draws where a statement sent to the port goes: the port on the
+// left, and a lane to each side that answers. Off, the copy takes everything
+// and MySQL's lane is drawn empty.
+function routeDrawing(on, port) {
+  const lane = (what, where, cls) => el("div", { class: "rd-lane " + cls },
+    el("span", { class: "rd-what", text: what }),
+    el("span", { class: "rd-line", "aria-hidden": "true" }),
+    el("span", { class: "rd-where" }, el("i", { class: "rd-dot", "aria-hidden": "true" }), where));
+  return el("div", { class: "rd", role: "img", "aria-label": on
+    ? "Statements sent to the port: light ones run on MySQL, heavy SELECTs on DuckDB, on the copy."
+    : "Statements sent to the port: DuckDB, on the copy, answers every one; none runs on MySQL." },
+    el("div", { class: "rd-node" },
+      el("span", { class: "rd-node-k", text: "Your application" }),
+      el("span", { class: "rd-node-v", text: port ? "port " + port : "this port" })),
+    el("div", { class: "rd-lanes" },
+      // "MySQL", not "Your MySQL": that is how who answered names its side,
+      // and a destination is not a count.
+      lane(on ? "Light statements" : "Nothing", "MySQL", "rd-mysql" + (on ? "" : " rd-off")),
+      lane(on ? "Heavy SELECTs" : "Every statement", "DuckDB, on the copy", "rd-copy")));
+}
+
+function routingSwitch(fb, cur, rt, toggle, port) {
   const on = !!fb.routing_on;
   const wrap = el("div", { class: "cn-route" });
   const head = el("div", { class: "cn-route-head" },
     el("span", { class: "cn-route-name", text: "Read routing" }),
     el("b", { class: "cn-route-state" + (on ? " is-on" : ""), text: on ? "On" : "Off" }));
   if (toggle) {
-    const btn = el("button", { class: "btn btn-sm", type: "button", text: on ? "Turn routing off" : "Turn routing on" });
+    // Off, turning it on is the one thing to do here: the button says so.
+    const btn = el("button", { class: on ? "btn btn-sm" : "btn cn-cta", type: "button", text: on ? "Turn routing off" : "Turn routing on" });
     btn.onclick = () => toggle(btn);
     head.append(btn);
   }
   wrap.append(head);
   const st = rt && rt.status;
   const writes = !st ? "" : st.read_only ? " A statement that would change the server is refused." : " Writes run on MySQL too.";
-  wrap.append(el("p", { class: "cn-sql-row", text: on
-    ? "Light statements run on each server's own MySQL. Heavy SELECTs run on the copy." + writes
-    : "The copy answers every statement. Turn it on and an application can use this port in place of its MySQL: light statements run on MySQL, heavy SELECTs on the copy." }));
+  wrap.append(routeDrawing(on, port));
+  const said = on ? writes.trim() : "Turn it on and an application can use this port in place of its MySQL.";
+  if (said) wrap.append(el("p", { class: "cn-sql-row cn-route-said", text: said }));
   const noAccount = on && cur ? routeAccountMissing(cur) : "";
   if (noAccount) {
     wrap.append(el("p", { class: "cn-sql-row" }, "For ", el("code", { text: cur.name || cur.id }), " the copy still answers everything: " + noAccount + "."));
@@ -15813,7 +15985,7 @@ function serverRow(s) {
 // srvField builds a labeled input row: <label class="field"><span/><input/></label>.
 // FORWARDING_HINT explains the two optional forwarding fields of the server
 // form (#2079) in the form's own words.
-const FORWARDING_HINT = "Forwarding user and password are optional. They only matter while read routing is on (Settings, MCP Server, Connect a SQL client): what a SQL client sends to the MySQL port then runs on this server as the forwarding user, so the forwarding user's permissions are all that port can do here, and what its SELECT covers is all it can read. Give it SELECT only, on the schemas the port should read. It must be another user than the source user: the port never forwards with the account DBTrail captures with, so with these fields blank the port does not forward for this server and the copy answers alone. Saving a change to the forwarding account closes the connections open on that port for this server, so that none stays on the previous account; clients reconnect.";
+const FORWARDING_HINT = "Forwarding user and password are optional. They only matter while read routing is on (Settings, MySQL clients, Connect a SQL client): what a SQL client sends to the MySQL port then runs on this server as the forwarding user, so the forwarding user's permissions are all that port can do here, and what its SELECT covers is all it can read. Give it SELECT only, on the schemas the port should read. It must be another user than the source user: the port never forwards with the account DBTrail captures with, so with these fields blank the port does not forward for this server and the copy answers alone. Saving a change to the forwarding account closes the connections open on that port for this server, so that none stays on the previous account; clients reconnect.";
 
 // routePrefill remembers, per form, the forwarding account its server had
 // when the form opened: serverFormBody sends the forwarding fields only when
@@ -17784,6 +17956,7 @@ function cmdkCommands() {
   ];
   if (capsCache.reconstruct) cmds.push({ group: "Navigate", label: "Time-travel", run: () => navigate("timetravel") });
   cmds.push({ group: "Navigate", label: "MCP Server", run: () => navigate("connect") });
+  cmds.push({ group: "Navigate", label: "MySQL clients", run: () => navigate("mysql-clients") });
   if (capsCache.monitor) cmds.push({ group: "Navigate", label: "Retention", run: () => navigate("retention") });
   cmds.push({ group: "Navigate", label: "Access profiles", run: () => navigate("access-profiles") });
   cmds.push({ group: "Actions", label: "Manage servers", run: () => { closeCmdk(); openServersModal(); } });

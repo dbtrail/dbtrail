@@ -3316,8 +3316,8 @@ try {
     ? ok("take-away: with the capability on, the same builder draws both downloads")
     : bad("take-away: with the capability on, the same builder draws both downloads", JSON.stringify(duckOff.on));
 
-  // The DuckDB schema card moved to Connect AI (#1573); its drawing, budget
-  // and placement checks moved with it, to scenario 17g. Found by its title,
+  // The DuckDB schema card moved to MCP Server (#1573); its drawing and
+  // budget checks moved with it, to scenario 17g. Found by its title,
   // and anchored on the listing being drawn, so a page that never rendered
   // cannot pass; the lane above still downloads the file itself.
   const dkGone = await page.evaluate(() => {
@@ -3325,8 +3325,8 @@ try {
     return { listed: titles.some((t) => /^Snapshots\b/.test(t)), card: titles.includes("Download a DuckDB schema") };
   });
   (dkGone.listed && !dkGone.card)
-    ? ok("snapshots: the DuckDB schema card is not here (it lives on Connect AI)")
-    : bad("snapshots: the DuckDB schema card is not here (it lives on Connect AI)", JSON.stringify(dkGone));
+    ? ok("snapshots: the DuckDB schema card is not here (it lives on MCP Server)")
+    : bad("snapshots: the DuckDB schema card is not here (it lives on MCP Server)", JSON.stringify(dkGone));
 
   // Paging, EXECUTED through the real panel. The Go guards test the window
   // function and the clamp in isolation and read the call site as text; their
@@ -5555,15 +5555,15 @@ try {
   (cardCount === 0)
     ? ok("snapshots: the disk-space card is not drawn")
     : bad("snapshots: the disk-space card is not drawn", "found " + cardCount + " .bkr-head on /snapshots");
-  // The Iceberg export panel moved to Connect AI (#1573). Found by its title,
+  // The Iceberg export panel moved to MySQL clients. Found by its title,
   // not by its class: the old page mounted it without .cn-ice, and a class
-  // lookup would pass against it. Scenario 17g shows the same server DOES get
+  // lookup would pass against it. Scenario 17g4 shows the same server DOES get
   // the panel, on Connect, so absence here is the move and not a gate.
   const iceOnSnapshots = await page.evaluate(() => Array.from(document.querySelectorAll(".view .ov-panel-title"))
     .some((t) => t.textContent === "Keep it current with Iceberg"));
   (!iceOnSnapshots)
-    ? ok("snapshots: the Iceberg export panel is not here (it lives on Connect AI)")
-    : bad("snapshots: the Iceberg export panel is not here (it lives on Connect AI)", "found its title on /snapshots");
+    ? ok("snapshots: the Iceberg export panel is not here (it lives on MySQL clients)")
+    : bad("snapshots: the Iceberg export panel is not here (it lives on MySQL clients)", "found its title on /snapshots");
 
   // ── Scenario 17g — Connect AI is three short steps with a drawn dialog ──
   // The audience is Claude users, mostly non-technical. The first rewrite
@@ -5578,24 +5578,13 @@ try {
   // open page counts against the cap. The cap (1500)
   // sits ~50% above the measured page (869-985 chars across the token states)
   // and 35% below the pre-simplify page (2304 measured, RED verified), so a
-  // copy edit breathes but a wall of text rings. The SQL client panel below
-  // the steps (#1446) is EXCLUDED from that measurement: the budget was
-  // calibrated on the three MCP steps, and the panel's enabled shape alone
-  // measures ~330 chars (1316 with it, 985 without), which would leave ~12%
-  // headroom and make a legit copy edit on the panel ring a guard about a
-  // different page. The panel has its own assertion further down. The
-  // Iceberg export panel that moved here from Snapshots (#1573) is excluded for
-  // the same reason, and carries its own assertion too: measured on this
-  // stack it shows 815 chars on its own, against 1046 for the steps, so
-  // counting it would put the page past the cap on a panel the cap was
-  // never about.
-  // The DuckDB schema card, back here since #1573, is left out the same way:
+  // copy edit breathes but a wall of text rings. The SQL client, memory and
+  // Iceberg panels moved to MySQL clients: none of them may be drawn here,
+  // and each keeps its own assertion on that page, further down. The DuckDB
+  // schema card stays under the steps and is left out of this measurement:
   // it carries its own 300-character budget, asserted below.
-  // The "Memory for SQL on the copy" panel (#2210) is left out for the same
-  // reason, and was not until #2226: with it counted the page measured about 1486
-  // of 1500, so the label of one folded note on that panel rang this guard.
-  // Its own budget (700) sits about 50% above what it shows (about 460
-  // chars on this stack), as the cap above does for the steps.
+  // The memory panel's own budget (700) sits about 50% above what it shows
+  // (about 460 chars on this stack), as the cap above does for the steps.
   // Limit worth naming: run.sh builds without -ldflags, so this only ever
   // photographs the UNVERSIONED bundle arm.
   await page.evaluate(() => navigate("connect"));
@@ -5627,53 +5616,33 @@ try {
     const badges = Array.from(document.querySelectorAll(".view .card .cn-num")).map((n) => n.textContent).join("");
     const labels = Array.from(document.querySelectorAll(".cn-mock .cn-mock-label")).map((n) => n.textContent);
     const addrCard = document.querySelectorAll(".view .cn-card")[1];
-    const view = document.querySelector(".view") || { innerText: "", querySelector: () => null };
+    const view = document.querySelector(".view") || { innerText: "", querySelectorAll: () => [], querySelector: () => null };
     const visible = view.innerText;
-    // Both panels below the steps wear .cn-sql; .cn-ice tells the Iceberg
-    // one apart, so neither is subtracted twice or mistaken for the other.
-    // The DuckDB card (.cn-dk) is left out too: it has its own budget, below.
-    const sqlPanel = view.querySelector(".cn-sql:not(.cn-ice)");
-    const icePanel = view.querySelector(".cn-ice");
     const dkPanel = view.querySelector(".cn-dk");
-    const memPanel = view.querySelector(".cn-sqlmem");
-    const kids = Array.from(view.children || []);
-    const iceCode = icePanel ? icePanel.querySelector("code.cn-url") : null;
     return {
       badges,
       labels,
-      // Minus the three panels' own text (see the budget note above).
-      visibleChars: visible.length - (sqlPanel ? sqlPanel.innerText.length : 0)
-        - (icePanel ? icePanel.innerText.length : 0) - (dkPanel ? dkPanel.innerText.length : 0)
-        - (memPanel ? memPanel.innerText.length : 0),
-      // The memory panel's own text, its folded notes closed.
-      mem: memPanel ? { present: true, chars: memPanel.innerText.length,
-        open: memPanel.querySelectorAll("details[open]").length } : { present: false },
-      ice: {
-        present: !!icePanel,
-        title: icePanel ? (icePanel.querySelector(".ov-panel-title") || {}).textContent || "" : "",
-        cmd: iceCode ? iceCode.textContent : "",
-      },
-      fine: document.querySelectorAll(".view details.cn-fine").length,
-      addrCopy: addrCard ? Array.from(addrCard.querySelectorAll("button")).some((b) => b.textContent === "Copy") : false,
-      once: /shown only once/.test(visible),
-      // The 404-honesty rule's photographable half: this run is the
-      // unversioned arm, where a direct release-asset link can only 404.
-      downloadLinks: document.querySelectorAll('.view a[href*="/releases/download/"]').length,
-      // The DuckDB schema card, back on Connect AI with the daemon running
-      // (#1573; it sat on Snapshots from #1581). Its own budget (300): enough
-      // for a title, one control and a button, and not enough to start
-      // explaining, the prose door #1549 closed. Placement: after the SQL
-      // client panel, before the Iceberg export.
+      visibleChars: visible.length - (dkPanel ? dkPanel.innerText.length : 0),
+      // The panels that moved to MySQL clients: none is drawn under the steps.
+      // .cn-sql is worn by the SQL client and Iceberg panels both.
+      foreign: view.querySelectorAll(".cn-sql, .cn-sqlmem, .cn-routep").length,
+      // The DuckDB schema card (#1573). Its own budget (300): enough for a
+      // title, one control and a button, and not enough to start
+      // explaining, the prose door #1549 closed.
       dk: dkPanel ? {
         present: true,
         chars: dkPanel.innerText.length,
         tiles: dkPanel.querySelectorAll(".dk-shape .dk-tile").length,
         bars: dkPanel.querySelectorAll(".dk-shape .dk-bar").length,
         lit: dkPanel.querySelectorAll(".dk-shape .dk-part:not(.dk-off)").length,
-        afterSql: !!sqlPanel && kids.indexOf(dkPanel) > kids.indexOf(sqlPanel),
-        beforeIce: !icePanel || kids.indexOf(dkPanel) < kids.indexOf(icePanel),
       } : { present: false },
       duckViewsCap: !!capsCache.views,
+      fine: document.querySelectorAll(".view details.cn-fine").length,
+      addrCopy: addrCard ? Array.from(addrCard.querySelectorAll("button")).some((b) => b.textContent === "Copy") : false,
+      once: /shown only once/.test(visible),
+      // The 404-honesty rule's photographable half: this run is the
+      // unversioned arm, where a direct release-asset link can only 404.
+      downloadLinks: document.querySelectorAll('.view a[href*="/releases/download/"]').length,
     };
   });
   (cn.badges === "123")
@@ -5685,9 +5654,9 @@ try {
   (cn.visibleChars > 0 && cn.visibleChars < 1500 && cn.fine >= 1)
     ? ok("connect: visible text stays under budget with fine print folded")
     : bad("connect: visible text stays under budget with fine print folded", "chars " + cn.visibleChars + " fine " + cn.fine);
-  (cn.mem.present && cn.mem.chars > 0 && cn.mem.chars <= 700 && cn.mem.open === 0)
-    ? ok("connect: the memory panel stays under its 700-character budget, its notes folded")
-    : bad("connect: the memory panel stays under its 700-character budget, its notes folded", JSON.stringify(cn.mem));
+  (cn.foreign === 0)
+    ? ok("connect: no SQL client, read routing, memory or Iceberg panel under the steps (they live on MySQL clients)")
+    : bad("connect: no SQL client, read routing, memory or Iceberg panel under the steps (they live on MySQL clients)", "found " + cn.foreign);
   // The DuckDB schema card lives here since #1573, with monitor on too (the
   // views capability is on for this stack, so absence would be a bug).
   (cn.duckViewsCap && cn.dk.present && cn.dk.chars > 0 && cn.dk.chars <= 300)
@@ -5697,20 +5666,72 @@ try {
   (cn.dk.present && cn.dk.tiles > 0 && cn.dk.bars > cn.dk.tiles && cn.dk.lit === 1)
     ? ok("connect: the DuckDB card draws the shape, with the change log unlit until asked for")
     : bad("connect: the DuckDB card draws the shape, with the change log unlit until asked for", JSON.stringify(cn.dk));
-  (cn.dk.present && cn.dk.afterSql && cn.dk.beforeIce)
-    ? ok("connect: the DuckDB card sits after the SQL client panel and before the Iceberg export")
-    : bad("connect: the DuckDB card sits after the SQL client panel and before the Iceberg export", JSON.stringify(cn.dk));
-  // The Iceberg export panel lives here since #1573 (it was on Snapshots), and
+  // "shown only once" is carried by the fresh state and the managed state
+  // (except managed read_only, which drops the Lost-it clause and the phrase
+  // with it); this run exercises the fresh one (no scenario mints a token).
+  (cn.once && cn.addrCopy && cn.downloadLinks === 0)
+    ? ok("connect: one-time warning visible, address one click to copy, no 404able download link")
+    : bad("connect: one-time warning visible, address one click to copy, no 404able download link", JSON.stringify({ once: cn.once, addrCopy: cn.addrCopy, downloadLinks: cn.downloadLinks }));
+
+  // ── Scenario 17g4 — MySQL clients carries the panels that left MCP Server ──
+  // The MySQL port and read routing as two headed sections, then the memory
+  // a statement may use and the Iceberg export. Waited on
+  // .cn-sql, which only buildMySQLClients draws; tolerant for the reason the
+  // wait above is, so a page without it reports through the assertions.
+  await page.evaluate(() => navigate("mysql-clients"));
+  await page.waitForFunction(() => location.pathname === "/mysql-clients"
+    && !!document.querySelector(".view .cn-sql:not(.cn-ice)"))
+    .catch(() => {});
+  const sc = await page.evaluate(() => {
+    const view = document.querySelector(".view") || { innerText: "", querySelector: () => null };
+    // Two panels wear .cn-sql; .cn-ice tells the Iceberg one apart, so
+    // neither is mistaken for the other.
+    const sqlPanel = view.querySelector(".cn-sql:not(.cn-ice)");
+    const icePanel = view.querySelector(".cn-ice");
+    const memPanel = view.querySelector(".cn-sqlmem");
+    const iceCode = icePanel ? icePanel.querySelector("code.cn-url") : null;
+    return {
+      title: (document.querySelector(".view h1") || {}).textContent || "",
+      // The MCP steps stayed behind: no numbered card here.
+      steps: document.querySelectorAll(".view .cn-card").length,
+      // The memory panel's own text, its folded notes closed.
+      mem: memPanel ? { present: true, chars: memPanel.innerText.length,
+        open: memPanel.querySelectorAll("details[open]").length } : { present: false },
+      ice: {
+        present: !!icePanel,
+        title: icePanel ? (icePanel.querySelector(".ov-panel-title") || {}).textContent || "" : "",
+        cmd: iceCode ? iceCode.textContent : "",
+      },
+      // Two sections, each under its own heading, so that reading the copy
+      // from a MySQL client is not taken for read routing: the headings,
+      // read routing in a card of its own, and its switch there.
+      sections: Array.from(view.querySelectorAll(".cn-split .cn-sec .cn-sec-t")).map((t) => t.textContent),
+      routeCard: !!view.querySelector(".cn-split .cn-routep .cn-route-state"),
+      routeInPort: !!(sqlPanel && sqlPanel.querySelector(".cn-route")),
+      lanes: view.querySelectorAll(".cn-routep .rd-lane").length,
+    };
+  });
+  (sc.title === "MySQL clients" && sc.steps === 0)
+    ? ok("sql clients: the page is drawn under its own name, with none of the MCP steps")
+    : bad("sql clients: the page is drawn under its own name, with none of the MCP steps", JSON.stringify({ title: sc.title, steps: sc.steps }));
+  (sc.sections.length === 2 && sc.sections[0] === "Read your copy from a MySQL client" && sc.sections[1] === "Run MySQL and DuckDB on one port"
+    && sc.routeCard && !sc.routeInPort && sc.lanes === 2)
+    ? ok("sql clients: two headed sections, with read routing drawn in a card of its own")
+    : bad("sql clients: two headed sections, with read routing drawn in a card of its own", JSON.stringify({ sections: sc.sections, routeCard: sc.routeCard, routeInPort: sc.routeInPort, lanes: sc.lanes }));
+  (sc.mem.present && sc.mem.chars > 0 && sc.mem.chars <= 700 && sc.mem.open === 0)
+    ? ok("sql clients: the memory panel stays under its 700-character budget, its notes folded")
+    : bad("sql clients: the memory panel stays under its 700-character budget, its notes folded", JSON.stringify(sc.mem));
+  // The Iceberg export panel lives here (it was on Snapshots until #1573), and
   // its command names the fixture's snapshot folder. On this stack byo-idx's own
   // folder and index are the same as the daemon's, so this cannot tell one
   // server from another; TestBaselinesAPI_locationOnlyRegistry carries that
   // guarantee, with a different folder per server.
   const iceDirArg = "--baseline-dir '" + (process.env.E2E_BASELINE_DIR || "") + "'";
-  (cn.ice.present && cn.ice.title === "Keep it current with Iceberg"
-    && cn.ice.cmd.startsWith("bintrail export iceberg ") && cn.ice.cmd.includes(iceDirArg))
-    ? ok("connect: the Iceberg export panel is here, pointed at this server's snapshot folder")
-    : bad("connect: the Iceberg export panel is here, pointed at this server's snapshot folder",
-        JSON.stringify({ ice: cn.ice, want: iceDirArg }));
+  (sc.ice.present && sc.ice.title === "Keep it current with Iceberg"
+    && sc.ice.cmd.startsWith("bintrail export iceberg ") && sc.ice.cmd.includes(iceDirArg))
+    ? ok("sql clients: the Iceberg export panel is here, pointed at this server's snapshot folder")
+    : bad("sql clients: the Iceberg export panel is here, pointed at this server's snapshot folder",
+        JSON.stringify({ ice: sc.ice, want: iceDirArg }));
   // The three stage cards size to their words: the first two carry a title
   // and a line, the third also the engine pills, so a stretched row turns the
   // first two into big empty boxes. And the arrows sit on the middle line of
@@ -5726,22 +5747,15 @@ try {
     && iceGeo.stages[0].h < iceGeo.stages[2].h - 10 && iceGeo.stages[1].h < iceGeo.stages[2].h - 10
     && iceMid(iceGeo.arrows[0], iceGeo.stages[0]) && iceMid(iceGeo.arrows[0], iceGeo.stages[1])
     && iceMid(iceGeo.arrows[1], iceGeo.stages[1]))
-    ? ok("connect: the Iceberg stage cards are as tall as their words, the arrows on their middle line")
-    : bad("connect: the Iceberg stage cards are as tall as their words, the arrows on their middle line", JSON.stringify(iceGeo));
-  // "shown only once" is carried by the fresh state and the managed state
-  // (except managed read_only, which drops the Lost-it clause and the phrase
-  // with it); this run exercises the fresh one (no scenario mints a token).
-  (cn.once && cn.addrCopy && cn.downloadLinks === 0)
-    ? ok("connect: one-time warning visible, address one click to copy, no 404able download link")
-    : bad("connect: one-time warning visible, address one click to copy, no 404able download link", JSON.stringify({ once: cn.once, addrCopy: cn.addrCopy, downloadLinks: cn.downloadLinks }));
+    ? ok("sql clients: the Iceberg stage cards are as tall as their words, the arrows on their middle line")
+    : bad("sql clients: the Iceberg stage cards are as tall as their words, the arrows on their middle line", JSON.stringify(iceGeo));
   // The SQL client panel (#1446). run.sh saves this daemon's MySQL port as
   // on, so the ENABLED shape is what gets photographed: a mysql line carrying
   // the port and the selected server as its user (never a placeholder), with
   // the console token nowhere on the page. This daemon is told of no router,
   // so the port is the usual one, 3309, and the panel says it is not a
   // confirmed one (the scene that switches the port runs against a real
-  // router and sees the router's own port). The panel is NOT a .cn-card, so
-  // the three-badge assertion above stays at three.
+  // router and sees the router's own port).
   const fbPort = "3309";
   const sq = await page.evaluate(() => {
     const p = document.querySelector(".view .cn-sql:not(.cn-ice)");
@@ -5749,9 +5763,9 @@ try {
     return { present: !!p, line: code ? code.textContent : "", text: p ? p.innerText : "" };
   });
   const sqLineRE = new RegExp("^mysql -h 127\\.0\\.0\\.1 -P " + fbPort + " -u \\S+ -p$");
-  (sq.present && sqLineRE.test(sq.line) && !sq.line.includes("<server") && /not a confirmed one/.test(sq.text) && !(TOKEN && sq.text.includes(TOKEN)))
-    ? ok("connect: SQL client panel shows a mysql line for the selected server, and says the port is not confirmed with no router to ask")
-    : bad("connect: SQL client panel shows a mysql line for the selected server, and says the port is not confirmed with no router to ask", JSON.stringify({ present: sq.present, line: sq.line, text: sq.text.slice(0, 300) }));
+  (sq.present && sqLineRE.test(sq.line) && !sq.line.includes("<server") && /not confirmed/.test(sq.text) && !(TOKEN && sq.text.includes(TOKEN)))
+    ? ok("sql clients: SQL client panel shows a mysql line for the selected server, and says the port is not confirmed with no router to ask")
+    : bad("sql clients: SQL client panel shows a mysql line for the selected server, and says the port is not confirmed with no router to ask", JSON.stringify({ present: sq.present, line: sq.line, text: sq.text.slice(0, 300) }));
 
   // ── Scenario 17f — the Events skeleton is visible (#1397) ──
   //
@@ -6206,7 +6220,7 @@ try {
   tab.on("pageerror", (e) => jsErrors.push("bookmark tab: " + String(e)));
   const bookmarks = [];
   for (const [from, to, came] of [["/storage", "/retention", "storage"], ["/storage/", "/retention", "storage"],
-    ["/sql", "/connect", "sql"], ["/timetravel", "/recover", "timetravel"], ["/events/", "/events/", ""]]) {
+    ["/sql", "/mysql-clients", "sql"], ["/timetravel", "/recover", "timetravel"], ["/events/", "/events/", ""]]) {
     await tab.goto(`${URL}${from}?token=${encodeURIComponent(TOKEN)}`, { waitUntil: "networkidle" });
     try {
       await tab.waitForFunction(([to, lit]) => location.pathname === to
@@ -6867,7 +6881,7 @@ try {
         }
         return out;
       });
-      const routes = ["overview", "snapshots", "status", "events", "schema-changes", "recover", "connect", "retention", "access-profiles"];
+      const routes = ["overview", "snapshots", "status", "events", "schema-changes", "recover", "connect", "mysql-clients", "retention", "access-profiles"];
       const drops = [];
       const markDrops = [];
       let judged = 0;

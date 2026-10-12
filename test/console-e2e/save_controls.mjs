@@ -898,25 +898,27 @@ export async function runSaveScenes(ctx) {
         await tab.goto(`${url2}/?token=${encodeURIComponent(token)}`, { waitUntil: "networkidle" });
         await tab.waitForFunction(() => typeof navigate === "function" && typeof capsCache !== "undefined" && capsCache.monitor === true);
         const status = async () => (await readAs(tab, "/api/flashback")).body;
+        // .cn-split holds both sections of the page: the port's card and
+        // read routing's, which are redrawn together from each answer.
         const press = (label) => until(() => tab.evaluate((label) => {
-          const b = Array.from(document.querySelectorAll(".cn-sql:not(.cn-ice) button")).find((x) => x.textContent === label && !x.disabled);
+          const b = Array.from(document.querySelectorAll(".cn-split button")).find((x) => x.textContent === label && !x.disabled);
           if (b) { b.click(); return true; }
           return false;
         }, label));
         const shown = () => tab.evaluate(() => {
-          const p = document.querySelector(".cn-sql:not(.cn-ice)");
+          const p = document.querySelector(".cn-split");
           const codes = p ? Array.from(p.querySelectorAll(".cn-urlrow code.cn-url")).map((c) => c.textContent) : [];
           return { password: codes.find((c) => /^bfp_/.test(c)) || "", line: codes.find((c) => /^mysql /.test(c)) || "", text: p ? p.innerText : "" };
         });
 
         const before = await status();
         const wasOpen = await listening();
-        await tab.evaluate(() => navigate("connect"));
+        await tab.evaluate(() => navigate("mysql-clients"));
         // No address is asked: the router that serves the port says its own
         // (run.sh gives this daemon the router's address), and the mysql
         // line carries that one.
         const noField = await until(() => tab.evaluate(() => {
-          const p = document.querySelector(".cn-sql:not(.cn-ice)");
+          const p = document.querySelector(".cn-split");
           return !!p && !!Array.from(p.querySelectorAll("button")).find((b) => b.textContent === "Turn on") && !p.querySelector("input");
         }));
         const on = noField && await press("Turn on");
@@ -926,7 +928,7 @@ export async function runSaveScenes(ctx) {
         const open1 = await opened();
         check("mysql-port", "Turn on asks for no address, saves the port as on, shows the password and a mysql line with the router's own port, and the router opens it",
           before && before.enabled === false && before.can_manage === true && !wasOpen && !!on && !!pw1 &&
-          st1 && st1.enabled === true && st1.source === "saved" && st1.has_password === true && !/not a confirmed one/.test(s1.text) &&
+          st1 && st1.enabled === true && st1.source === "saved" && st1.has_password === true && !/not confirmed/.test(s1.text) &&
           !JSON.stringify(st1).includes(pw1) && s1.line === "mysql -h 127.0.0.1 -P " + sqlPort + " -u <server-name> -p" && open1,
           JSON.stringify({ before, wasOpen, noField, on, pw1: !!pw1, st1, line: s1.line, text: s1.text.slice(0, 300), listening: open1 }));
 
@@ -943,10 +945,11 @@ export async function runSaveScenes(ctx) {
         try {
           await other.goto(`${url2}/?token=${encodeURIComponent(token)}`, { waitUntil: "networkidle" });
           await other.waitForFunction(() => typeof navigate === "function" && typeof capsCache !== "undefined" && capsCache.monitor === true);
-          await other.evaluate(() => navigate("connect"));
+          await other.evaluate(() => navigate("mysql-clients"));
           const seen = await until(() => other.evaluate(() => {
-            const p = document.querySelector(".cn-sql:not(.cn-ice)");
-            return p && /It cannot be shown again\./.test(p.innerText) ? p.innerText : "";
+            const p = document.querySelector(".cn-split");
+            // "Shown once" is the Password fact's value when no password is on screen.
+            return p && /Shown once/.test(p.innerText) ? p.innerText : "";
           }));
           check("mysql-port", "a fresh tab says the port is on and never shows the password",
             !!seen && seen.includes("-P " + sqlPort + " ") && !seen.includes(pw1) && !seen.includes(pw2), JSON.stringify({ seen }));
@@ -958,7 +961,7 @@ export async function runSaveScenes(ctx) {
         const rOn = await press("Turn routing on");
         const stR1 = await until(async () => { const b = await status(); return b && b.routing_on === true ? b : null; });
         const saidOn = await until(() => tab.evaluate(() => {
-          const p = document.querySelector(".cn-sql:not(.cn-ice) .cn-route-state");
+          const p = document.querySelector(".cn-split .cn-route-state");
           return !!p && p.textContent === "On";
         }));
         const rOff = await press("Turn routing off");
@@ -970,7 +973,7 @@ export async function runSaveScenes(ctx) {
         // And a last press, still on the first panel.
         const off = await press("Turn off");
         const st3 = await until(async () => { const b = await status(); return b && b.enabled === false ? b : null; });
-        const back = await until(() => tab.evaluate(() => !!Array.from(document.querySelectorAll(".cn-sql:not(.cn-ice) button")).find((x) => x.textContent === "Turn on")));
+        const back = await until(() => tab.evaluate(() => !!Array.from(document.querySelectorAll(".cn-split button")).find((x) => x.textContent === "Turn on")));
         const shut = await closed();
         check("mysql-port", "Turn off saves the port as off, the panel offers Turn on again, and the router closes it",
           !!off && !!st3 && st3.has_password === true && !!back && shut,
@@ -1003,7 +1006,7 @@ export async function runSaveScenes(ctx) {
 
       const before = await status();
       try {
-        await page.evaluate(() => navigate("connect"));
+        await page.evaluate(() => navigate("mysql-clients"));
         const s1 = (await type("3GB")) && await press("Save");
         const st1 = await savedAs(3 * GiB);
         const shown1 = await until(async () => /can use 3 GB of memory\. Saved here\./.test(await text()));

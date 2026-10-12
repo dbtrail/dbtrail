@@ -13,9 +13,14 @@ const (
 	// than the page names one of its sections in words ("under Set when
 	// DBTrail starts"), which is what naming a different page used to do.
 	PageSnapshots = "Snapshots"
-	// PageConnect is where a reader downloads a DuckDB schema or exports
-	// to Iceberg, on every console (#1573).
+	// PageConnect is where an AI client is connected (the token, the
+	// address, the installer) and where a reader downloads a DuckDB schema.
 	PageConnect = "MCP Server"
+	// PageMySQLClients is where a reader turns on the MySQL port, sets the
+	// memory a statement may use, sees the router's numbers or exports
+	// to Iceberg, on every console. Those panels
+	// sat on PageConnect until the page was split.
+	PageMySQLClients = "MySQL clients"
 )
 
 // onPage is the suffix an error carries to say where it is fixed, as in

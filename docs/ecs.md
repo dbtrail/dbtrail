@@ -185,7 +185,7 @@ volume mounted at the same path: the router reads the servers file and
 
 - Put a **Network** Load Balancer in front of `3309`: it is plain TCP, which
   an ALB does not carry. The port has no TLS: keep the NLB internal.
-- Then turn the port on in the web interface (**Settings → MCP Server →
+- Then turn the port on in the web interface (**Settings → MySQL clients →
   Connect a SQL client**, **Turn on**). The setting and its
   password are kept in `console-mysql-port.yaml` on EFS. The router listens
   only while the port is turned on there.

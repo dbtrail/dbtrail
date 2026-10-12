@@ -271,7 +271,7 @@ console.log(JSON.stringify({ text: out, shape, refresh: { asked, disabled: !!btn
 	must("untracked", "does not tell the router when a statement changes a session setting")
 }
 
-// TestRouterPanelIsOnTheConnectPage runs the whole MCP Server page, not the
+// TestRouterPanelIsOnTheMySQLClientsPage runs the whole MySQL clients page, not the
 // panel alone: the router's numbers are drawn from what GET /api/router
 // answered, for the server picked, and a console that has no such route (an
 // older one behind this page), a session that may not read settings, and a
@@ -281,7 +281,7 @@ console.log(JSON.stringify({ text: out, shape, refresh: { asked, disabled: !!btn
 // address are all inside Connect a SQL client, and no panel is titled "The
 // router". The port is on in every run (the status a real PUT answered), or
 // none of this is drawn.
-func TestRouterPanelIsOnTheConnectPage(t *testing.T) {
+func TestRouterPanelIsOnTheMySQLClientsPage(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		if os.Getenv(requireNodeEnv) != "" {
@@ -334,7 +334,7 @@ ctx.__toast = (m) => toasts.push(String(m));
 vm.runInContext("api = (p, o) => __api(p, o); gateCapabilities = async () => {}; toastError = (m) => __toast(m); toast = () => {}; icon = () => el('span', {});", ctx);
 const read = () => {
   const text = flat(screen).join(" ").replace(/\s+/g, " ");
-  const o = { page: text.includes("Three steps"), panel: text.includes("The router is the service that answers this port"), text,
+  const o = { page: text.includes("Two ways to use one MySQL port"), panel: text.includes("The router is the service that answers this port"), text,
     titles: [], figs: [], cmd: [], unconfirmed: [], routerSaid: [], whoSaid: [], caption: [] };
   each(screen, (x) => {
     const t = flat(x).join(" ").replace(/\s+/g, " ").trim();
@@ -357,7 +357,7 @@ const read = () => {
 const run = async (answer, perms = {}, cur = "a") => {
   router = answer; asked = []; toasts = [];
   vm.runInContext("currentServer = " + JSON.stringify(cur) + "; capsCache = " + JSON.stringify({ monitor: true, permissions: perms }) + "; capsKnown = true;", ctx);
-  await vm.runInContext("renderConnect()", ctx);
+  await vm.runInContext("renderMySQLClients()", ctx);
   return Object.assign(read(), { asked: asked.includes("/api/router") });
 };
 (async () => {

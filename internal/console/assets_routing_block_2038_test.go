@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -83,13 +84,15 @@ const rt = ` + string(views) + `;
 // the router answered. toggle is given as the panel gives it: a function
 // for a session that may change settings, false for one that may not.
 const draw = (on, cur, view, toggle) => {
-  const o = { text: "", state: "", isOn: false, buttons: [], sentence: "", account: "", caption: "", figs: "", bar: [], aria: "", bars: 0, wraps: 0, since: false, help: [] };
+  const o = { text: "", state: "", isOn: false, buttons: [], sentence: "", lanes: [], laneOff: [], account: "", caption: "", figs: "", bar: [], aria: "", bars: 0, wraps: 0, since: false, help: [] };
   const sides = []; let foot = "";
   const w = sw({ enabled: true, routing_on: on }, cur, view, toggle === undefined ? () => {} : toggle);
   o.text = tidy(w);
   each(w, (x) => {
     if (has(x, "cn-route-state")) { o.state = tidy(x); o.isOn = has(x, "is-on"); }
     if (x.tag === "button") o.buttons.push(tidy(x));
+    // Where a statement goes, drawn: each lane, and whether it is drawn empty.
+    if (has(x, "rd-lane")) { o.lanes.push(tidy(x)); o.laneOff.push(has(x, "rd-off")); }
     if (x.tag === "p" && has(x, "cn-sql-row")) { const t = tidy(x); if (t.startsWith("For ")) o.account = t; else o.sentence = t; }
     if (has(x, "cn-who-cap")) o.caption = tidy(x);
     // The two sides, drawn (#2330): one figure each, the refusals under
@@ -184,6 +187,8 @@ console.log(JSON.stringify({
 		IsOn                       bool
 		Buttons                    []string
 		Sentence, Account, Caption string
+		Lanes                      []string
+		LaneOff                    []bool
 		Figs                       string
 		Bar                        []string
 		Aria                       string
@@ -235,20 +240,34 @@ console.log(JSON.stringify({
 			}
 		}
 	}
-	const offSentence = "The copy answers every statement. Turn it on and an application can use this port in place of its MySQL: light statements run on MySQL, heavy SELECTs on the copy."
-	const onSentence = "Light statements run on each server's own MySQL. Heavy SELECTs run on the copy."
+	// Where a statement goes is DRAWN, not written: a lane to each side. The
+	// one sentence left is what the drawing cannot say.
+	const offSentence = "Turn it on and an application can use this port in place of its MySQL."
+	offLanes := []string{"Nothing MySQL", "Every statement DuckDB, on the copy"}
+	onLanes := []string{"Light statements MySQL", "Heavy SELECTs DuckDB, on the copy"}
 
-	// The switch: one word, the button that changes it, one sentence.
+	// The switch: one word, the button that changes it, the drawing.
 	for _, name := range []string{"off", "offCounts", "offNoAccount", "lockedOff"} {
-		if v := d(name); v.State != "Off" || v.IsOn || v.Sentence != offSentence {
+		v := d(name)
+		if v.State != "Off" || v.IsOn || v.Sentence != offSentence {
 			t.Errorf("%s: state %q (drawn as on: %v), sentence %q; want Off and %q", name, v.State, v.IsOn, v.Sentence, offSentence)
+		}
+		// Off, MySQL's lane is drawn empty and the copy's is not.
+		if !reflect.DeepEqual(v.Lanes, offLanes) || !reflect.DeepEqual(v.LaneOff, []bool{true, false}) {
+			t.Errorf("%s: lanes %q (drawn empty: %v), want %q with only MySQL's empty", name, v.Lanes, v.LaneOff, offLanes)
 		}
 	}
 	for _, name := range []string{"on", "onReadOnly", "onNoAnswer", "onNotSet", "onFailed", "onNotAsked", "lockedOn", "counts", "noAccount"} {
-		if v := d(name); v.State != "On" || !v.IsOn || !strings.HasPrefix(v.Sentence, onSentence) {
-			t.Errorf("%s: state %q (drawn as on: %v), sentence %q; want On and %q", name, v.State, v.IsOn, v.Sentence, onSentence)
+		v := d(name)
+		if v.State != "On" || !v.IsOn {
+			t.Errorf("%s: state %q (drawn as on: %v); want On", name, v.State, v.IsOn)
+		}
+		if !reflect.DeepEqual(v.Lanes, onLanes) || !reflect.DeepEqual(v.LaneOff, []bool{false, false}) {
+			t.Errorf("%s: lanes %q (drawn empty: %v), want %q, both lit", name, v.Lanes, v.LaneOff, onLanes)
 		}
 	}
+	// The site's button where turning it on is the one thing to do; the
+	// arrow is drawn by the stylesheet, so the name stays these words.
 	if b := d("off").Buttons; len(b) != 1 || b[0] != "Turn routing on" {
 		t.Errorf("off: buttons %q, want Turn routing on", b)
 	}
@@ -267,14 +286,14 @@ console.log(JSON.stringify({
 	}
 	// What a write does is the router's to say (its read_only), and is said
 	// only when it answered.
-	if v := d("on"); v.Sentence != onSentence+" Writes run on MySQL too." {
+	if v := d("on"); v.Sentence != "Writes run on MySQL too." {
 		t.Errorf("on, a read-write router: %q", v.Sentence)
 	}
-	if v := d("onReadOnly"); v.Sentence != onSentence+" A statement that would change the server is refused." {
+	if v := d("onReadOnly"); v.Sentence != "A statement that would change the server is refused." {
 		t.Errorf("on, a read-only router: %q", v.Sentence)
 	}
 	for _, name := range []string{"onNoAnswer", "onNotSet", "onFailed", "onNotAsked"} {
-		if v := d(name); v.Sentence != onSentence {
+		if v := d(name); v.Sentence != "" {
 			t.Errorf("%s: with no answer from a router nothing is said of writes; got %q", name, v.Sentence)
 		}
 	}
@@ -433,7 +452,7 @@ console.log(JSON.stringify({
 	// never the one DBTrail captures with (#2317), and where routing is
 	// turned on now that it is a switch and not a startup flag (#2341).
 	must("form hint", got.Hint, "Forwarding user", "SELECT only", "must be another user than the source user", "never forwards with the account DBTrail captures with", "the copy answers alone",
-		"They only matter while read routing is on (Settings, MCP Server, Connect a SQL client)")
+		"They only matter while read routing is on (Settings, MySQL clients, Connect a SQL client)")
 	for _, bad := range []string{"forwards with the source user", "started with read routing", "router service", "whatever that account can.", "never writ", "exactly the tables", "—"} {
 		if strings.Contains(got.Hint, bad) {
 			t.Errorf("the form hint holds %q: %s", bad, got.Hint)

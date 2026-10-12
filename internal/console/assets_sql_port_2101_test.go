@@ -546,7 +546,7 @@ func TestSQLPortPanel_TurnedOnFromTheWebInterface(t *testing.T) {
 	if b := got.RoutingBefore; !slices.Equal(b.State, []string{"Off"}) || routingButtons(b) != 1 || !slices.Contains(b.Buttons, "Turn routing on") {
 		t.Errorf("routing off: word %q, buttons %q; want Off and the one button Turn routing on", b.State, b.Buttons)
 	}
-	has("routing off", got.RoutingBefore, "The copy answers every statement.")
+	has("routing off", got.RoutingBefore, "Turn it on and an application can use this port in place of its MySQL.")
 	one("Turn routing on", got.RoutingOn.Calls, `["/api/flashback",{"method":"PUT","body":{"routing":true}}]`)
 	if len(got.RoutingOn.Asked) != 1 || !strings.HasPrefix(got.RoutingOn.Asked[0], "Turn read routing on?") || !strings.Contains(got.RoutingOn.Asked[0], "forwarding account") {
 		t.Errorf("Turn routing on asked %q; want one question that says statements then run on each server's MySQL with its forwarding account", got.RoutingOn.Asked)
@@ -554,8 +554,8 @@ func TestSQLPortPanel_TurnedOnFromTheWebInterface(t *testing.T) {
 	if a := got.RoutingOn.After; !slices.Equal(a.State, []string{"On"}) || routingButtons(a) != 1 || !slices.Contains(a.Buttons, "Turn routing off") {
 		t.Errorf("after Turn routing on: word %q, buttons %q; want On and the one button Turn routing off", a.State, a.Buttons)
 	}
-	has("after Turn routing on", got.RoutingOn.After, "Light statements run on each server's own MySQL. Heavy SELECTs run on the copy. A statement that would change the server is refused.")
-	lacks("after Turn routing on", got.RoutingOn.After, "The copy answers every statement.")
+	has("after Turn routing on", got.RoutingOn.After, "A statement that would change the server is refused.")
+	lacks("after Turn routing on", got.RoutingOn.After, "Turn it on and an application can use this port")
 	// The redraw keeps what the router said: the command and who answered.
 	has("after Turn routing on", got.RoutingOn.After, "mysql -h 127.0.0.1 -P 3309 -u shop -p")
 	if !slices.Equal(got.RoutingOn.After.Who, shopSides) {

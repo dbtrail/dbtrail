@@ -101,13 +101,13 @@ func TestIcebergExportPanel(t *testing.T) {
 	}
 
 	// And it is actually on a page: a panel nothing calls is invisible, and
-	// every check above would still pass. It lives on Connect AI since #1573;
-	// TestIcebergPanelLivesOnConnect drives that page for real.
-	if !strings.Contains(functionBody(t, js, "function buildConnect("), "icebergExportPanel(") {
-		t.Error("buildConnect never calls icebergExportPanel, so the panel never renders")
+	// every check above would still pass. It lives on MySQL clients;
+	// TestIcebergPanelLivesOnMySQLClients drives that page for real.
+	if !strings.Contains(functionBody(t, js, "function buildMySQLClients("), "icebergExportPanel(") {
+		t.Error("buildMySQLClients never calls icebergExportPanel, so the panel never renders")
 	}
 	if strings.Contains(functionBody(t, js, "async function renderSnapshots("), "icebergExportPanel(") {
-		t.Error("Snapshots still mounts the Iceberg panel, which moved to Connect AI (#1573)")
+		t.Error("Snapshots still mounts the Iceberg panel, which moved to MySQL clients")
 	}
 }
 

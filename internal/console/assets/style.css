@@ -2494,6 +2494,140 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 .cn-route-head .btn { margin-left: auto; }
 .cn-who-cap { margin: 10px 0 6px; font-size: 12px; color: var(--ink-2); }
 .cn-sql .cn-fine { margin-top: 4px; }
+/* ── MySQL clients: show, do not tell ──
+   The command as a terminal line, what it is made of as facts (label, value
+   large, a few words), read routing as a drawing, the memory as figures.
+   Unscoped, so the same panel inside a card elsewhere draws the same way;
+   .sqlc is the page's own scale on top. */
+.cn-state { margin-left: 12px; font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink-2); }
+.cn-state.is-on { color: var(--accent); border-color: var(--accent); }
+.cn-sql .ov-panel-head { justify-content: flex-start; }
+.cn-head-acts { display: flex; gap: 8px; margin-left: auto; }
+.cn-term { display: flex; align-items: center; background: var(--strip); border-radius: var(--r-md); padding: 16px 16px 16px 20px; gap: 14px; margin: 2px 0 20px; }
+.cn-term > .cn-urlrow { flex: 1; min-width: 0; margin: 0; gap: 14px; }
+.cn-term-p { font-family: var(--f-mono); font-size: 17px; color: var(--pink-mid); user-select: none; }
+.cn-term .cn-term-line { font-family: var(--f-mono); font-size: 17px; line-height: 1.4; color: var(--strip-ink); background: none; border: 0; padding: 0; overflow-x: auto; }
+.cn-term .cn-term-copy { background: transparent; color: var(--strip-ink); border-color: color-mix(in oklch, var(--strip-ink) 35%, transparent); }
+.cn-term .cn-term-copy:hover { background: color-mix(in oklch, var(--strip-ink) 14%, transparent); }
+.cn-term-pass { margin-top: 0; }
+.cn-reveal-k { margin-top: 4px; }
+.cn-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 20px 28px; margin: 0 0 6px; }
+.cn-fact { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.cn-fact-k, .cn-fig-k { font-family: var(--f-ui); font-size: 12px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-3); }
+.cn-fact-v { font-family: var(--f-display); font-size: 24px; line-height: 1.15; font-weight: 600; letter-spacing: -0.02em; color: var(--ink); overflow-wrap: anywhere; }
+.cn-fact-v code { font-family: var(--f-mono); font-size: 20px; font-weight: 500; letter-spacing: 0; }
+.cn-fact-cap, .cn-fig-cap { font-size: 13px; color: var(--ink-3); }
+.cn-fact.is-warn .cn-fact-cap { color: var(--warn); }
+.cn-fact.is-bad .cn-fact-cap, .cn-fig.is-bad .cn-fig-cap { color: var(--error); }
+.cn-figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 24px 28px; margin: 2px 0 14px; }
+.cn-fig { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.cn-fig-v { display: flex; align-items: baseline; gap: 8px; }
+.cn-fig-num { font-family: var(--f-display); font-size: 44px; line-height: 1.05; font-weight: 600; letter-spacing: -0.03em; color: var(--ink); font-variant-numeric: tabular-nums; }
+.cn-fig-unit { font-size: 15px; color: var(--ink-3); }
+/* read routing, drawn: the port, then a lane to each side that answers */
+.rd { display: flex; align-items: center; gap: 0; margin: 14px 0 12px; }
+.rd-node { flex: none; display: flex; flex-direction: column; gap: 2px; padding: 14px 18px; border-radius: var(--r-md); background: var(--inset); }
+.rd-node-k { font-size: 12px; color: var(--ink-3); }
+.rd-node-v { font-family: var(--f-mono); font-size: 15px; font-weight: 500; color: var(--ink); }
+.rd-lanes { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; padding-left: 18px; margin-left: 18px; border-left: 2px solid var(--line); }
+.rd-lane { display: flex; align-items: center; gap: 12px; }
+.rd-what { flex: none; width: 150px; font-size: 15px; font-weight: 500; color: var(--ink); }
+.rd-line { flex: 1; min-width: 24px; height: 2px; background: var(--ink); border-radius: 2px; }
+.rd-copy .rd-line { background: var(--pink-mid); }
+.rd-where { flex: none; width: 170px; display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: var(--r-md); border: 1px solid var(--line); font-size: 15px; font-weight: 600; color: var(--ink); }
+.rd-dot { width: 9px; height: 9px; border-radius: 2px; background: var(--ink); }
+.rd-copy .rd-dot { background: var(--pink-mid); }
+.rd-off .rd-what, .rd-off .rd-where { color: var(--ink-4); font-weight: 500; }
+.rd-off .rd-where { border-style: dashed; }
+.rd-off .rd-line { background: none; border-top: 2px dashed var(--line); height: 0; }
+.rd-off .rd-dot { background: var(--line); }
+/* a page's sections: two things a reader must not take for one */
+.cn-sec { margin: 44px 0 14px; max-width: 70ch; }
+.cn-split > .cn-sec:first-child { margin-top: 26px; }
+.cn-sec-k { display: block; font-family: var(--f-ui); font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--pink-mid); }
+.cn-sec-t { margin: 6px 0 6px; font-family: var(--f-display); font-size: 30px; line-height: 1.1; font-weight: 600; letter-spacing: -0.02em; color: var(--ink); }
+.cn-sec-sub { margin: 0; font-size: 16px; line-height: 1.5; color: var(--ink-2); }
+.cn-split > .ov-panel { margin-top: 0 !important; }
+.cn-sec + .ov-panel.sqlc { margin-top: 0 !important; }
+.sqlc.cn-routep .cn-route { margin: 0; padding-top: 0; border-top: 0; }
+.sqlc.cn-sql .cn-facts + .cn-fine, .sqlc.cn-sql .cn-term-pass + .cn-fine { margin-top: 18px; }
+.cn-routep.is-idle .cn-sql-row { margin: 0; color: var(--ink-3); }
+.cn-routep .rd { margin: 22px 0 18px; }
+.cn-routep .rd-node { padding: 20px 24px; }
+.cn-routep .rd-node-v { font-size: 18px; }
+.cn-routep .rd-lanes { gap: 14px; }
+.cn-routep .rd-what { font-size: 17px; width: 170px; }
+.cn-routep .rd-where { font-size: 16px; width: 190px; padding: 14px 16px; }
+/* colour: the site's sunset on a config surface (no row data here) */
+.cn-sec-k { display: inline-block; padding: 4px 10px; border-radius: 999px; background: var(--pink-tint); color: var(--pink-deep); }
+.cn-sec.is-violet .cn-sec-k { background: var(--violet-tint); color: var(--violet-deep); }
+.cn-sec.is-sun .cn-sec-k { background: var(--sun-tint); color: var(--sun-deep); }
+.cn-sec-t { margin-top: 12px; }
+.cn-sec.is-sun .cn-sec-sub { margin-top: 10px; }
+.cn-term { border: 6px solid transparent; border-radius: 20px; background: linear-gradient(var(--strip), var(--strip)) padding-box, var(--brand-canvas) border-box; }
+.cn-state.is-on, .cn-route-state.is-on { border-color: transparent; background: var(--mint-tint); color: var(--ink); }
+.cn-state.is-on::before, .cn-route-state.is-on::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--ok); vertical-align: 1px; }
+.cn-fact { padding-left: 14px; border-left: 3px solid var(--pink-tint); }
+.cn-fact:nth-child(2) { border-left-color: var(--orange-tint); }
+.cn-fact:nth-child(3) { border-left-color: var(--violet-tint); }
+.cn-fact:nth-child(4) { border-left-color: var(--sun-tint); }
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .cn-fig-num { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .cn-fig.is-bad .cn-fig-num { background: none; color: var(--error); }
+}
+.sqlc.cn-routep { background: var(--violet-tint); border-color: var(--violet-line); }
+.sqlc.cn-sqlmem { background: var(--sun-tint); border-color: var(--sun-line); }
+.rd-node { background: var(--strip); }
+.sqlc.cn-routep .cn-route-state { background: var(--surface); border-color: var(--violet-line); }
+.sqlc.cn-routep .cn-route-state.is-on { background: var(--mint-tint); border-color: transparent; }
+.cn-routep .rd-where { width: 220px; }
+.rd-node-k { color: var(--strip-ink); opacity: 0.75; }
+.rd-node-v { color: var(--white); }
+.rd-where { background: var(--surface); }
+.rd-copy .rd-where { border-color: var(--pink-mid); }
+.rd-lanes { border-left-color: var(--strip); }
+.rd-off .rd-where { background: transparent; }
+/* the one thing to do on a panel: the site's button, ink on a sun block */
+.btn.cn-cta { padding: 12px 20px; font-size: 16px; font-weight: 600; border-radius: 14px; border-color: transparent; background: var(--strip); color: var(--white); box-shadow: 6px 6px 0 var(--sun); margin: 0 6px 6px auto; transition: transform .08s ease, box-shadow .08s ease; }
+.btn.cn-cta::after { content: "→"; margin-left: 10px; }
+.btn.cn-cta:hover, .btn.cn-cta:focus-visible { background: var(--strip); color: var(--white); border-color: transparent; transform: translate(2px, 2px); box-shadow: 4px 4px 0 var(--sun); }
+.btn.cn-cta:active { transform: translate(6px, 6px); box-shadow: 0 0 0 var(--sun); }
+.btn.cn-cta:disabled { opacity: 0.6; }
+/* narrow: the drawing stacks before a fixed lane width can push a
+   destination past its card (the sidebar leaves at 880px, so the band just
+   above that is the tight one), and the head lets its buttons wrap. Named
+   with .cn-routep too, or that card's own widths would win. */
+.cn-sql .ov-panel-head { flex-wrap: wrap; row-gap: 10px; }
+.cn-route-head { flex-wrap: wrap; row-gap: 12px; }
+@media (max-width: 1100px) {
+  .rd, .cn-routep .rd { flex-direction: column; align-items: stretch; gap: 14px; }
+  .rd-lanes, .cn-routep .rd-lanes { margin-left: 0; }
+  .rd-what, .cn-routep .rd-what { width: auto; flex: 0 0 9.5em; }
+  .rd-where, .cn-routep .rd-where { width: auto; flex: 0 1 auto; min-width: 0; }
+}
+@media (max-width: 620px) {
+  .rd-lane { flex-wrap: wrap; row-gap: 6px; }
+  .rd-what, .cn-routep .rd-what { flex-basis: 100%; }
+  .rd-line { min-width: 16px; }
+  .cn-term .cn-term-line, .cn-term-p { font-size: 14px; }
+  .cn-fig-num { font-size: 36px; }
+}
+/* the page's scale */
+.sqlc.ov-panel { padding: 26px 30px 26px; margin-top: 22px !important; }
+.sqlc .ov-panel-head { padding: 0 0 18px; }
+.sqlc .ov-panel-title { font-size: 20px; }
+.sqlc .cn-sql-body { padding: 0; }
+.sqlc .cn-sql-row { font-size: 15px; }
+.sqlc .cn-sql-row code { font-size: 14px; }
+.sqlc .form-hint { font-size: 14px; }
+.sqlc .form-hint code { font-size: 13px; }
+.sqlc .cn-route { margin-top: 22px; padding-top: 20px; }
+.sqlc .cn-route-name { font-size: 16px; }
+.sqlc .cn-route-state { font-size: 12px; font-weight: 600; padding: 2px 10px; }
+.sqlc .cn-sql-lbl { font-size: 15px; }
+.sqlc .cn-sql-addr { font-size: 15px; max-width: 200px; }
+.sqlc .form-adv-summary { font-size: 14px; }
+.sqlc.cn-sqlmem .cn-fine { margin: 0 0 18px; }
 
 /* Telemetry sample event (#1447): the daemon's bytes, shown as they are. */
 .tel-sample { margin-top: 12px; }

@@ -353,7 +353,7 @@ account's credentials are wrong. `copy_queue_full` or `copy_wait_timeout` climbi
 is asked for more heavy reads than it serves: it works, and the reads that
 did not fit were refused with error 1040. `SHOW WARNINGS` after a copy-served statement and the schema
 seeded at connect are not decisions and are not counted. The same counts, per server since the router started,
-are in `SHOW ROUTER STATUS` on the port and, when the capture process knows the router's address, on the web interface under Settings → MCP Server → The router.
+are in `SHOW ROUTER STATUS` on the port and, when the capture process knows the router's address, on the web interface under Settings → MySQL clients → The router.
 
 ```promql
 # statements per second the copy takes off each source, by server

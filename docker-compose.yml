@@ -248,7 +248,7 @@ services:
     # this container's own, and nowhere else; the container gains no other
     # privilege. Needs Docker Engine 28 or later: an older Docker refuses to
     # start the stack when it reads it (Podman was not tried), which is why
-    # it is off here. Settings, MCP Server, Memory for SQL on the copy says
+    # it is off here. Settings, MySQL clients, Memory for SQL on the copy says
     # whether it is in effect. After a statement is stopped this way
     # `docker inspect` reports OOMKilled=true for this container although it
     # kept running.
@@ -369,14 +369,14 @@ services:
       # 10000. The SQL card shows 1,000 rows whatever this is.
       BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS: ${SQL_PORT_MAX_ROWS:-}
       # Where the router service below says its numbers (#2318): the web
-      # interface reads them from there and shows them on its MCP Server
+      # interface reads them from there and shows them on its MySQL clients
       # page. This service asks the router; the router never asks this one.
       # ROUTER_URL= (empty) in .env shows nothing about a router: set it so
       # if you stop the router for good or turn its metrics off, or the page
       # goes on saying the router does not answer.
       BINTRAIL_CONSOLE_ROUTER_URL: ${ROUTER_URL-http://router:9091}
       # Memory each SQL statement on the copy may use (#2210). Empty = the
-      # value saved in the web interface (Settings, MCP Server), else 2GB;
+      # value saved in the web interface (Settings, MySQL clients), else 2GB;
       # set here, it wins and that panel only shows it.
       # The changes a statement's tables may hold unmerged grow with it
       # (384 MB at 2GB, 768 MB at 4GB).
@@ -501,7 +501,7 @@ services:
   # capture with it.
   #
   # It starts with the stack and LISTENS ONLY WHILE THE MYSQL PORT IS TURNED
-  # ON in the web interface (Settings, MCP Server, Connect a SQL client),
+  # ON in the web interface (Settings, MySQL clients, Connect a SQL client),
   # with the password created there; it closes again when the port is turned
   # off there. With CONSOLE_TOKEN set in .env the token is accepted as a
   # password too while the port is on; it does not open it.

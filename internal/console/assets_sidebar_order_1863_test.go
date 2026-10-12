@@ -10,7 +10,7 @@ import (
 
 // The sidebar's order is a decision (#1863): the three pages an operator opens
 // every day sit at the top with no heading, Investigate and Resolve keep
-// theirs, and Settings runs MCP Server, Rotation, Retention, then Access
+// theirs below Settings, and Settings runs MySQL clients, MCP Server, Rotation, Retention, then Access
 // profiles, after which a commercial build's panels are inserted. A guard
 // over index.html, because an entry that drifts back into a group of its own
 // looks fine in every unit test and wrong on the only screen that matters.
@@ -37,9 +37,9 @@ func TestSidebarOrder1863(t *testing.T) {
 	}
 	want := []string{
 		"Overview", "Snapshots", "Status",
+		"## Settings", "MySQL clients", "MCP Server", "Rotation", "Retention", "Access profiles",
 		"## Investigate", "Events", "Schema changes",
 		"## Resolve", "Restore",
-		"## Settings", "MCP Server", "Rotation", "Retention", "Access profiles",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("sidebar reads\n  %q\nwant\n  %q", got, want)

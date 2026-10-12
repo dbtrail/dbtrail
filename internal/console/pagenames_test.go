@@ -21,7 +21,7 @@ func TestPageNamesAreTheSidebarLabels(t *testing.T) {
 		t.Fatal(err)
 	}
 	labelRE := regexp.MustCompile(`<span>([^<]*)</span>\s*$`)
-	for route, name := range map[string]string{"snapshots": PageSnapshots, "connect": PageConnect} {
+	for route, name := range map[string]string{"snapshots": PageSnapshots, "connect": PageConnect, "mysql-clients": PageMySQLClients} {
 		// The label is the last <span> inside that route's own <a>, read from
 		// that anchor only, so a match can never run into the next entry.
 		i := strings.Index(string(html), `data-route="`+route+`"`)
@@ -48,7 +48,7 @@ func TestPageNamesAreTheSidebarLabels(t *testing.T) {
 // that no longer exists. A literal that IS a page name ("Snapshots", as in
 // onPage("Snapshots") or "on the " + "Snapshots" + " page") is refused too,
 // outside pagenames.go.
-var pageNameTypedRE = regexp.MustCompile(`(Backups|Backup settings|Verification|Snapshots|MCP Server) page`)
+var pageNameTypedRE = regexp.MustCompile(`(Backups|Backup settings|Verification|Snapshots|MCP Server|MySQL clients) page`)
 
 // TestMessagesNameBackupPagesThroughTheConstants: no string in the console's
 // Go code names one of these pages as typed text. Three of them merged into
@@ -76,7 +76,7 @@ func TestMessagesNameBackupPagesThroughTheConstants(t *testing.T) {
 			t.Fatalf("read %d Go files in %s, want that package's: it moved, and this guard no longer covers it", n, dir)
 		}
 	}
-	names := map[string]bool{PageSnapshots: true, PageConnect: true}
+	names := map[string]bool{PageSnapshots: true, PageConnect: true, PageMySQLClients: true}
 	fset := token.NewFileSet()
 	seen := 0
 	for _, f := range files {
@@ -96,7 +96,7 @@ func TestMessagesNameBackupPagesThroughTheConstants(t *testing.T) {
 				s = lit.Value
 			}
 			if m := pageNameTypedRE.FindString(s); m != "" {
-				t.Errorf("%s names %q as typed text: build it from PageSnapshots / PageConnect (onPage for the suffix)", fset.Position(lit.Pos()), m)
+				t.Errorf("%s names %q as typed text: build it from PageSnapshots / PageConnect / PageMySQLClients (onPage for the suffix)", fset.Position(lit.Pos()), m)
 			} else if names[s] && !own {
 				t.Errorf("%s types the page name %q: use the constant, or a rename misses this spot", fset.Position(lit.Pos()), s)
 			}

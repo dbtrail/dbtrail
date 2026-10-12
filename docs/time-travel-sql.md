@@ -68,7 +68,7 @@ itself, and
 [Upgrading](#upgrading-from-a-version-with-the-port-inside-watch) if you
 used `--flashback-listen` before.
 
-**Turn it on in the web interface.** On **Settings → MCP Server**, the
+**Turn it on in the web interface.** On **Settings → MySQL clients**, the
 **Connect a SQL client** panel has a **Turn on** button. Turning it on
 creates the port's own password and shows it once (it starts with `bfp_`);
 **New password** replaces it, and **Turn off** closes the port and
@@ -190,7 +190,7 @@ What to know before relying on it:
   copy. On a host with memory to spare, `--sql-memory`
   (env `BINTRAIL_CONSOLE_SQL_MEMORY`, at least 512MB) raises both: the line
   of changes moves with it, 768 MB at 4GB. Without the flag it can be set in
-  the web interface (Settings, MCP Server, Memory for SQL on the copy); the
+  the web interface (Settings, MySQL clients, Memory for SQL on the copy); the
   flag, when given, wins. The SQL card takes a saved change with its next
   statement, no restart. The router reads the saved value once, when it
   starts, so a change reaches the port when the router is restarted. The
@@ -386,7 +386,7 @@ What to know before relying on it:
 Read routing is off until it is turned on. Off, the copy answers every
 statement on the port, as described above, and nothing is sent to MySQL.
 
-Turn it on in the web interface: **Settings**, **MCP Server**, **Connect a
+Turn it on in the web interface: **Settings**, **MySQL clients**, **Connect a
 SQL client**, **Turn routing on** (or `PUT /api/flashback` with
 `{"routing": true}`). It is a saved setting, `routing: true` in
 `console-mysql-port.yaml`, the file beside the servers file that also holds
@@ -1547,7 +1547,7 @@ no `allowed_schemas` here. When you need per-schema filtering, run the standalon
 application and an `allowed_schemas` list on each (see
 [Isolating tenants with `allowed_schemas`](#isolating-tenants-with-allowed_schemas)).
 
-The web interface shows the port on **Settings → MCP Server**, in the **Connect a
+The web interface shows the port on **Settings → MySQL clients**, in the **Connect a
 SQL client** panel: whether the port is on, its address, the user and password
 rules, and a ready-to-copy `mysql` line for the server picked in the sidebar.
 When the port is off, the panel turns it on.
@@ -1773,7 +1773,7 @@ The router does the counting, so the numbers are read from the router:
 
 - `SHOW ROUTER STATUS` on any connection to the port
   ([The router](#the-router-the-process-that-serves-the-port)).
-- The web interface: on **Settings → MCP Server**, the panel **Connect a SQL
+- The web interface: on **Settings → MySQL clients**, the panel **Connect a SQL
   client** shows, for the server picked in the sidebar, how many statements
   MySQL answered and how many the copy did, as two figures over a bar. The
   count per reason is folded under **Why each side**, and the router's other
@@ -2009,7 +2009,7 @@ answered a login. Those stay in the router's log.
 **In the web interface.** Give the capture process that address
 (`watch --router-url http://127.0.0.1:9091`, or
 `BINTRAIL_CONSOLE_ROUTER_URL`; the Docker stack and the packages set it) and
-its MCP Server page shows a panel, The router: for the server picked in the
+its MySQL clients page shows a panel, The router: for the server picked in the
 sidebar, who answered and why, the snapshot of the copy the router reads and
 its age, and the workers. The capture process asks the router each time the
 page is opened or Refresh is pressed; the router asks it nothing. When the
@@ -2060,7 +2060,7 @@ The router refuses to start with both `--route-cost-threshold` and
 startup when they are set.
 
 **The memory of a statement.** With no `--sql-memory`, the router uses the
-memory saved in the web interface (**Settings**, **MCP Server**, **Memory for
+memory saved in the web interface (**Settings**, **MySQL clients**, **Memory for
 SQL on the copy**), else the default. It reads it once, when it starts: how
 many statements run at once is worked out from it, so a value taken later
 could let them use together more than the service was given. A change saved

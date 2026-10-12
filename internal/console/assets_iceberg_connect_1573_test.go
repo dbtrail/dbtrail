@@ -9,8 +9,8 @@ import (
 	"testing"
 )
 
-// TestIcebergPanelLivesOnConnect (#1573): the Iceberg export panel is on
-// MCP Server, built from where the selected server's snapshots live
+// TestIcebergPanelLivesOnMySQLClients (#1573): the Iceberg export panel is on
+// MySQL clients, built from where the selected server's snapshots live
 // (GET /api/baselines?location_only=1, no walk of the storage). A session that
 // may not read the server, or under a data profile, is not made to ask, since
 // the server would refuse it on every open; the gated permission is the one
@@ -19,7 +19,7 @@ import (
 // panel, but any other failure says so, so a missing panel never reads as "no
 // backups"; the rest of the page renders either way, and a page the reader
 // left while the requests were out is not painted.
-func TestIcebergPanelLivesOnConnect(t *testing.T) {
+func TestIcebergPanelLivesOnMySQLClients(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		if os.Getenv(requireNodeEnv) != "" {
@@ -71,10 +71,11 @@ const run = async (perms, location, caps = {}, leave = false, servers = null, cu
   asked = []; loc = location; leaveOnAsk = leave; serversAnswer = servers;
   vm.runInContext("currentServer = " + JSON.stringify(cur) + "; defaultServerId = 'stale-from-an-old-load';", ctx);
   vm.runInContext("capsCache = " + JSON.stringify(Object.assign({ monitor: true, permissions: perms }, caps)) + "; capsKnown = true;", ctx);
-  await vm.runInContext("renderConnect()", ctx);
+  await vm.runInContext("renderMySQLClients()", ctx);
   const text = flat(screen).join(" ");
-  return { asked: [...asked], panel: text.includes("Keep it current with Iceberg"), page: text.includes("MCP Server"),
-    steps: text.includes("Three steps"), note: text.includes("Could not check where this server's snapshots are kept"),
+  // steps: the page's own lead, the text that says this page was painted.
+  return { asked: [...asked], panel: text.includes("Keep it current with Iceberg"), page: text.includes("MySQL clients"),
+    steps: text.includes("Two ways to use one MySQL port"), note: text.includes("Could not check where this server's snapshots are kept"),
     cmd: (text.match(/bintrail export iceberg .*?--warehouse/) || [""])[0] };
 };
 const where = { configured: true, source: "/data/baselines", kind: "dir" };
@@ -156,7 +157,7 @@ const where = { configured: true, source: "/data/baselines", kind: "dir" };
 				return true
 			}
 			if strings.HasPrefix(p, "/api/baselines") {
-				t.Errorf("Connect asked %q: only the location_only form, never the listing that walks the storage", p)
+				t.Errorf("MySQL clients asked %q: only the location_only form, never the listing that walks the storage", p)
 			}
 		}
 		return false
@@ -169,7 +170,7 @@ const where = { configured: true, source: "/data/baselines", kind: "dir" };
 	}
 	for name, r := range map[string]result{"nothing configured": got.None, "refused (a data profile)": got.Refused} {
 		if r.Panel || r.Note || !r.Page {
-			t.Errorf("%s: panel %v, note %v, page drawn %v; want no panel, no note, and the rest of Connect drawn", name, r.Panel, r.Note, r.Page)
+			t.Errorf("%s: panel %v, note %v, page drawn %v; want no panel, no note, and the rest of MySQL clients drawn", name, r.Panel, r.Note, r.Page)
 		}
 	}
 	for name, r := range map[string]result{"no servers:read": got.NoPerm, "a data profile": got.Profile} {
@@ -215,6 +216,6 @@ const where = { configured: true, source: "/data/baselines", kind: "dir" };
 			got.RevokeLeft.Steps, got.RevokeLeft.Events)
 	}
 	if !got.Dir.Steps {
-		t.Errorf("the steps text this test uses to see a painted page is gone from Connect; re-anchor the left-page check")
+		t.Errorf("the lead this test uses to see a painted page is gone from MySQL clients; re-anchor the left-page check")
 	}
 }
