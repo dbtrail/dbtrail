@@ -49,7 +49,7 @@ export const WRITES = [
   { method: "POST", path: "/api/mcp-token", count: 1, kind: "scene", id: "mcp-token" },
   { method: "DELETE", path: "/api/mcp-token", count: 1, kind: "scene", id: "mcp-token" },
   // The MySQL port, turned on and off from the Connect panel (#2101).
-  { method: "PUT", path: "/api/flashback", count: 2, kind: "scene", id: "mysql-port" },
+  { method: "PUT", path: "/api/flashback", count: 3, kind: "scene", id: "mysql-port" },
   { method: "POST", path: "/api/flashback/password", count: 1, kind: "scene", id: "mysql-port" },
   // The memory for SQL on the copy, Save and Use default (#2210).
   { method: "PUT", path: "/api/sql-settings", count: 2, kind: "scene", id: "sql-memory" },
@@ -879,7 +879,6 @@ export async function runSaveScenes(ctx) {
     await scene("mysql-port", async () => {
       const url2 = process.env.E2E_PORT2_URL || "", sqlPort = process.env.E2E_SQLPORT || "";
       if (!url2 || !sqlPort) throw new Error("E2E_PORT2_URL / E2E_SQLPORT not passed by run.sh");
-      const want = "127.0.0.1:" + sqlPort;
       // listening: something accepts on the port and speaks first, as a
       // MySQL server does (the handshake greeting).
       const listening = () => new Promise((res) => {
@@ -913,22 +912,23 @@ export async function runSaveScenes(ctx) {
         const before = await status();
         const wasOpen = await listening();
         await tab.evaluate(() => navigate("connect"));
-        const typed = await until(() => tab.evaluate((want) => {
-          const i = document.querySelector(".cn-sql:not(.cn-ice) input.cn-sql-addr");
-          if (!i) return false;
-          i.value = want;
-          return true;
-        }, want));
-        const on = typed && await press("Turn on");
+        // No address is asked: the router that serves the port says its own
+        // (run.sh gives this daemon the router's address), and the mysql
+        // line carries that one.
+        const noField = await until(() => tab.evaluate(() => {
+          const p = document.querySelector(".cn-sql:not(.cn-ice)");
+          return !!p && !!Array.from(p.querySelectorAll("button")).find((b) => b.textContent === "Turn on") && !p.querySelector("input");
+        }));
+        const on = noField && await press("Turn on");
         const pw1 = await until(async () => (await shown()).password);
         const st1 = await status();
         const s1 = await shown();
         const open1 = await opened();
-        check("mysql-port", "Turn on saves the port as on at the address typed, shows the password and the mysql line, and the router opens it",
+        check("mysql-port", "Turn on asks for no address, saves the port as on, shows the password and a mysql line with the router's own port, and the router opens it",
           before && before.enabled === false && before.can_manage === true && !wasOpen && !!on && !!pw1 &&
-          st1 && st1.enabled === true && st1.listen === want && st1.source === "saved" && st1.has_password === true &&
+          st1 && st1.enabled === true && st1.source === "saved" && st1.has_password === true && !/not a confirmed one/.test(s1.text) &&
           !JSON.stringify(st1).includes(pw1) && s1.line === "mysql -h 127.0.0.1 -P " + sqlPort + " -u <server-name> -p" && open1,
-          JSON.stringify({ before, wasOpen, typed, on, pw1: !!pw1, st1, line: s1.line, listening: open1 }));
+          JSON.stringify({ before, wasOpen, noField, on, pw1: !!pw1, st1, line: s1.line, text: s1.text.slice(0, 300), listening: open1 }));
 
         // The same panel, pressed again: a second password replaces the first.
         const fresh = await press("New password");
@@ -949,16 +949,31 @@ export async function runSaveScenes(ctx) {
             return p && /It cannot be shown again\./.test(p.innerText) ? p.innerText : "";
           }));
           check("mysql-port", "a fresh tab says the port is on and never shows the password",
-            !!seen && seen.includes(want) && !seen.includes(pw1) && !seen.includes(pw2), JSON.stringify({ seen }));
+            !!seen && seen.includes("-P " + sqlPort + " ") && !seen.includes(pw1) && !seen.includes(pw2), JSON.stringify({ seen }));
         } finally { await other.close(); }
 
-        // And a third press, still on the first panel.
+        // Read routing, on the same panel: the saved switch, on and back
+        // off, with the port left as it is. Turning it on asks first (the
+        // dialog is accepted by this scene's handler).
+        const rOn = await press("Turn routing on");
+        const stR1 = await until(async () => { const b = await status(); return b && b.routing_on === true ? b : null; });
+        const saidOn = await until(() => tab.evaluate(() => {
+          const p = document.querySelector(".cn-sql:not(.cn-ice) .cn-route-state");
+          return !!p && p.textContent === "On";
+        }));
+        const rOff = await press("Turn routing off");
+        const stR2 = await until(async () => { const b = await status(); return b && b.routing_on === false ? b : null; });
+        check("mysql-port", "Turn routing on and off saves the switch, says it on the panel, and leaves the port on",
+          !!rOn && !!stR1 && stR1.enabled === true && !!saidOn && !!rOff && !!stR2 && stR2.enabled === true && await listening(),
+          JSON.stringify({ rOn, stR1, saidOn, rOff, stR2 }));
+
+        // And a last press, still on the first panel.
         const off = await press("Turn off");
         const st3 = await until(async () => { const b = await status(); return b && b.enabled === false ? b : null; });
         const back = await until(() => tab.evaluate(() => !!Array.from(document.querySelectorAll(".cn-sql:not(.cn-ice) button")).find((x) => x.textContent === "Turn on")));
         const shut = await closed();
         check("mysql-port", "Turn off saves the port as off, the panel offers Turn on again, and the router closes it",
-          !!off && !!st3 && st3.has_password === true && st3.suggested_listen === want && !!back && shut,
+          !!off && !!st3 && st3.has_password === true && !!back && shut,
           JSON.stringify({ off, st3, back, closed: shut }));
       } finally { await tab.close(); }
     });

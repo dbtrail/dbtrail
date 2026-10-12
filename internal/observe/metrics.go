@@ -268,41 +268,6 @@ func ObserveRouteDecision(server, route, reason string) {
 	readRoutingDecisions.WithLabelValues(server, route, reason).Inc()
 }
 
-// The read router's finished statements, by side (#2330): how many, how long
-// they took added up, and how many failed. Counters and not a histogram on
-// purpose: seconds_total over answers_total is the average over any window,
-// and a counter is what the web interface's own charts read.
-var (
-	readRoutingAnswers = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "bintrail", Subsystem: "read_routing", Name: "answers_total",
-		Help: "Statements a side (copy|mysql) finished on the routed port, failed ones included, by server id. Fewer than the decisions: a refusal and a statement that found the source unreachable finished on neither side.",
-	}, []string{"server", "route"})
-	readRoutingAnswerSeconds = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "bintrail", Subsystem: "read_routing", Name: "answer_seconds_total",
-		Help: "Seconds the statements a side finished took, added up, by server id. MySQL's time includes sending rows to the client; the copy's ends when its answer is ready.",
-	}, []string{"server", "route"})
-	readRoutingAnswerErrors = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "bintrail", Subsystem: "read_routing", Name: "answer_errors_total",
-		Help: "Statements a side finished with an error to the client, by server id and kind (error|timeout).",
-	}, []string{"server", "route", "kind"})
-)
-
-// ObserveRouteAnswer counts one statement a side finished.
-func ObserveRouteAnswer(server, route string, took time.Duration, failed, timedOut bool) {
-	if took < 0 {
-		took = 0
-	}
-	readRoutingAnswers.WithLabelValues(server, route).Inc()
-	readRoutingAnswerSeconds.WithLabelValues(server, route).Add(took.Seconds())
-	if failed {
-		kind := "error"
-		if timedOut {
-			kind = "timeout"
-		}
-		readRoutingAnswerErrors.WithLabelValues(server, route, kind).Inc()
-	}
-}
-
 // StatementDMLDropped increments the statement-DML-dropped counter. Called from
 // the binlog parser's QUERY_EVENT handlers (file and stream paths) when a DML
 // statement — not DDL, not transaction-control — is observed, i.e. the

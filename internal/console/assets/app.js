@@ -14127,13 +14127,8 @@ function buildConnect(servers, tokStatus, minted, fbStatus, ice, sqlMem, rtView)
   cards.append(bundleCard());
   v.append(cards);
   if (capsCache.mcp) v.append(otherClientsPanel(servers));
-  v.append(sqlClientPanel(servers, fbStatus));
-  if (rtView !== undefined) {
-    // The server this page is about, as the Iceberg panel has it.
-    const rp = routerPanel(rtView, ice && ice.cur);
-    if (rp) v.append(rp);
-  }
-  if (sqlMem !== undefined) v.append(sqlMemoryPanel(sqlMem));
+  v.append(sqlClientPanel(servers, fbStatus, "", null, rtView));
+  if (sqlMem !== undefined) v.append(sqlMemoryPanel(sqlMem, null, rtView));
   // The DuckDB schema card, on this page with or without the watch daemon
   // (#1573; it sat on Backups from #1581, and here only on a serve-only
   // console). GET /api/views.sql needs settings:read, so a session denied it
@@ -14667,14 +14662,14 @@ function otherClientsPanel(servers) {
 
 // ── Connect a SQL client (#1446) ─────────────────────────────────────────────
 //
-// The embedded time-travel port (`watch --flashback-listen`, #996) serves the
-// _flashback / _snapshot / _diff schemas for every monitored server over the
-// MySQL protocol, routed by the connection USERNAME (the server's registry
-// name or id, "default" for the boot entry: the same selector /mcp uses, so
-// mcpSelector is reused) and authenticated with the console token or with the
-// port's own password. A daemon that was not given the port's address at
-// startup lets this panel turn the port on and off (#2101); one that was
-// shows where it is and never toggles it. Status comes from GET
+// The MySQL port serves the _flashback / _snapshot / _diff schemas and SQL
+// on the copy for every monitored server over the MySQL protocol, routed by
+// the connection USERNAME (the server's registry name or id, "default" for
+// the boot entry: the same selector /mcp uses, so mcpSelector is reused) and
+// authenticated with the port's own password. The router serves it
+// (bintrail-console router, #2341); this panel turns it on and off by saving
+// the setting the router follows (#2101), and says where the router says it
+// listens. Status comes from GET
 // /api/flashback; a null status means the call failed, and the panel says so
 // instead of guessing an address.
 
@@ -14694,132 +14689,160 @@ function flashbackHost(fb) {
   // "localhost" is the one name that must not be printed: the mysql client
   // reads it as "use the local socket file" and never tries the port.
   const page = (location.hostname || "").replace(/^\[|\]$/g, "");
-  return fb.host || (page.toLowerCase() === "localhost" ? "" : page) || "127.0.0.1";
+  const named = String(fb.host || "").toLowerCase() === "localhost" ? "127.0.0.1" : fb.host;
+  return named || (page.toLowerCase() === "localhost" ? "" : page) || "127.0.0.1";
 }
 
-// changeSQLPort sends one change to the port (on, off, new password) and
-// draws the panel again from the answer, in place. send makes the request:
-// each caller spells its own method and path, so the list of everything the
-// page writes (test/console-e2e/save_controls.mjs) can see them.
-function changeSQLPort(panel, servers, send, btn) {
+// sqlPortAddress is where MySQL clients connect. The router serves the port,
+// on its own address, so that address is the router's to say (GET
+// /api/router): confirmed is true only then. With no answer from a router
+// the port is its usual one, 3309, and the panel says it is not confirmed.
+// host is empty when the router listens on every address of its machine.
+// Pure, so it is tested in node.
+function sqlPortAddress(rt) {
+  const m = /^(.*):(\d+)$/.exec(String((rt && rt.status && rt.status.listen) || ""));
+  if (m) {
+    const host = m[1].replace(/^\[|\]$/g, "");
+    return { port: m[2], host: host === "0.0.0.0" || host === "::" ? "" : host, confirmed: true };
+  }
+  return { port: "3309", host: "", confirmed: false };
+}
+
+// redrawSQLPanel draws the panel again, in place, from a fresh answer.
+function redrawSQLPanel(panel, servers, fb, reveal, rt) {
+  // The fresh render's buttons are wired to panel, the element on the page,
+  // not to the detached section they were built in: otherwise the second
+  // press would redraw something nobody is looking at.
+  const fresh = sqlClientPanel(servers, fb, reveal, panel, rt);
+  panel.replaceChildren(...Array.from(fresh.children));
+}
+
+// changeSQLPort sends one change to the port (on, off, new password, read
+// routing) and draws the panel again from the answer, in place. send makes
+// the request: each caller spells its own method and path, so the list of
+// everything the page writes (test/console-e2e/save_controls.mjs) can see
+// them.
+function changeSQLPort(panel, servers, send, btn, rt, keep) {
   if (btn) btn.disabled = true;
-  return send().then((rep) => {
-    // The fresh render's buttons are wired to panel, the element on the
-    // page, not to the detached section they were built in: otherwise the
-    // second press would redraw something nobody is looking at.
-    const fresh = sqlClientPanel(servers, rep, rep && rep.password, panel);
-    panel.replaceChildren(...Array.from(fresh.children));
-  }, (err) => {
+  // keep: a password on screen "shown only now" that this change does not
+  // replace (read routing). Without it the redraw would erase the only copy.
+  return send().then((rep) => redrawSQLPanel(panel, servers, rep, (rep && rep.password) || keep || "", rt), (err) => {
     if (btn) btn.disabled = false;
     toastError("MySQL port: " + ((err && err.message) || err));
   });
 }
 
-// sqlClientPanel renders the port's state in one of four shapes: could not
-// check, off on a read-only console (the port belongs to watch), off on a
-// watch daemon (name the flag and env var, as daemon configuration), or on
-// (address, user rule, password rule, and the ready-to-copy mysql line for
-// the server picked in the sidebar). Not a .cn-card: the three numbered cards
-// are the Connect AI how-to, and this is a different client.
-function sqlClientPanel(servers, fb, reveal, live) {
+// sqlClientPanel renders the MySQL port: could not check, not here (a
+// read-only console), off, a setting this console cannot change, or on (the
+// ready-to-copy mysql line for the server picked in the sidebar, the user
+// and password rules, read routing with who answered, and the router's
+// numbers). fb is GET /api/flashback, the saved setting; rt is GET
+// /api/router, what the router that serves the port says (undefined when
+// not asked, null when the asking failed). Not a .cn-card: the three
+// numbered cards are the Connect AI how-to, and this is a different client.
+function sqlClientPanel(servers, fb, reveal, live, rt) {
   const panel = el("section", { class: "ov-panel cn-sql", style: "margin-top:18px" });
   // live: the panel already on the page that this render will be moved
-  // into (changeSQLPort); the buttons act on that one.
+  // into (redrawSQLPanel); the buttons act on that one.
   live = live || panel;
   panel.append(el("div", { class: "ov-panel-head" }, el("h2", { class: "ov-panel-title", text: "Connect a SQL client" })));
   const body = el("div", { class: "cn-sql-body" });
   panel.append(body);
   if (!fb) {
-    body.append(el("p", { class: "cn-sql-row", text: "We could not check whether the time-travel port is on. Reload the page to try again." }));
+    body.append(el("p", { class: "cn-sql-row", text: "We could not check whether the MySQL port is on. Reload the page to try again." }));
     return panel;
   }
+  const ask = (q) => typeof window.confirm !== "function" || window.confirm(q);
+  const mayChange = fb.can_manage && sessionMay("settings:write");
   if (!fb.enabled) {
     if (!capsCache.monitor) {
-      // serve: there is no daemon here to carry the port, so naming the
-      // watch flag as "how to turn it on" would send the reader to a flag
-      // this process does not have.
-      body.append(el("p", { class: "cn-sql-row" },
-        "Not available: this DBTrail is read-only. The time-travel port is part of the DBTrail service (CLI: ",
-        el("code", { text: "bintrail-console watch --flashback-listen" }),
-        "). Start DBTrail that way and your usual MySQL client can read any table as it was at a chosen moment."));
+      // serve: this process saves no setting for the port, so a button
+      // here could only be refused.
+      body.append(el("p", { class: "cn-sql-row", text: "Not available: this DBTrail only reads. The MySQL port is turned on in the web interface of the DBTrail service, and your usual MySQL client can then read any table as it was at a chosen moment." }));
       return panel;
     }
-    if (fb.can_manage) {
-      if (!sessionMay("settings:write")) {
-        body.append(el("p", { class: "cn-sql-row", text: "Off. Someone who can change settings can turn it on here." }));
-        return panel;
-      }
-      body.append(el("p", { class: "cn-sql-row", text: "Off. Turn it on and your usual MySQL client can read any table as it was at a chosen moment." }));
-      if (fb.error) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: "It was on and did not start: " + fb.error }));
-      const addr = el("input", { class: "input cn-sql-addr", type: "text", value: fb.suggested_listen || "", "aria-label": "Port address", spellcheck: "false", autocomplete: "off" });
-      const on = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Turn on" });
-      on.onclick = () => changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { enabled: true, listen: addr.value } }), on);
-      body.append(el("div", { class: "cn-urlrow" }, el("span", { class: "cn-sql-lbl", text: "Address" }), addr, on));
-      body.append(cnFine("Which address, and the password",
-        el("p", { class: "form-hint", text: "127.0.0.1 answers only on the machine DBTrail runs on. 0.0.0.0 answers on every network address of that machine. In the Docker install keep 0.0.0.0. Who can reach the port is then decided by docker-compose.yml: a new install publishes it to the machine itself only, and one installed before this existed does not publish it until its ports line is added." }),
-        el("p", { class: "form-hint", text: "Turning it on creates the port's password. It is shown once, right then." })));
+    if (!fb.can_manage) {
+      body.append(el("p", { class: "cn-sql-row", text: "The MySQL port cannot be turned on or off from the web interface." }));
+      body.append(el("p", { class: "cn-sql-row cn-sql-err", text: fb.error || "Its saved setting cannot be changed by this DBTrail." }));
       return panel;
     }
-    body.append(el("p", { class: "cn-sql-row", text: "Off. The port is set when DBTrail starts, not from the web interface." }));
-    body.append(cnFine("How to turn it on",
-      el("p", { class: "form-hint" },
-        "Start DBTrail with a port address (CLI: ", el("code", { text: "--flashback-listen 127.0.0.1:3308" }),
-        ", or the environment variable ", el("code", { text: "BINTRAIL_CONSOLE_FLASHBACK_LISTEN" }),
-        ") and an access token (CLI: ", el("code", { text: "--console-token" }), " or ", el("code", { text: "BINTRAIL_CONSOLE_TOKEN" }),
-        "). This panel then shows the address and a ready to copy mysql line, and your usual MySQL client can read any table as it was at a chosen moment.")));
+    if (!mayChange) {
+      body.append(el("p", { class: "cn-sql-row", text: "Off. Someone who can change settings can turn it on here." }));
+      return panel;
+    }
+    body.append(el("p", { class: "cn-sql-row", text: "Off. Turn it on and your usual MySQL client can read any table as it was at a chosen moment." }));
+    if (fb.error) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: fb.error }));
+    const on = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Turn on" });
+    on.onclick = () => changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { enabled: true } }), on, rt);
+    body.append(el("div", { class: "cn-links" }, on));
+    body.append(el("p", { class: "form-hint", text: "Turning it on creates the port's password. It is shown once, right then." }));
     return panel;
   }
   const cur = (servers || []).find((s) => s.id === (currentServer || defaultServerId));
   const user = mcpSelector(cur);
-  // A wildcard bind (":3308") reads as a typo to a non-technical reader; say
-  // what it means and let the mysql line carry the name this page uses.
-  body.append(el("p", { class: "cn-sql-row" }, "Address ",
-    el("code", { text: fb.host ? fb.listen : "port " + (fb.port || fb.listen) }),
-    fb.host ? "" : " on every network address of the machine DBTrail runs on"));
+  const at = sqlPortAddress(rt);
+  // Nothing answers, and why: said first, above a command that would fail.
+  if (fb.notice) body.append(el("p", { class: "cn-sql-row cn-sql-err" }, el("b", { text: "The port is on and " }), fb.notice));
+  if (fb.error) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: fb.error }));
+  const line = "mysql -h " + shellWord(flashbackHost(at)) + " -P " + at.port + " -u " + (user ? shellWord(user) : "<server-name>") + " -p";
+  body.append(el("div", { class: "cn-urlrow" },
+    el("code", { class: "stg-code cn-url", text: line }),
+    el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(line, "mysql command") })));
+  if (!at.confirmed) {
+    // The address is the router's to say. Without its answer the command
+    // above carries the usual port, and says so.
+    // Four ways to have no address, each said as what it is: the asking
+    // failed, the router did not answer, it answered with an address this
+    // page cannot read, or this DBTrail was never told of a router.
+    const why = rt === null ? "This DBTrail could not ask the router that serves the port, so "
+      : rt && rt.status ? "The router that serves the port did not say an address this page can read, so "
+      : rt && rt.configured ? "The router that serves the port did not answer, so "
+      : "This DBTrail was not told where the router that serves the port is, so ";
+    body.append(el("p", { class: "cn-sql-row" + (rt === null || (rt && rt.configured) ? " cn-sql-err" : ""), text: why + "3309 above is the port's usual number, not a confirmed one." }));
+  }
   body.append(el("p", { class: "cn-sql-row" }, "User ",
     user ? el("code", { text: user }) : el("code", { text: "<server name>" }),
     user ? ", the server picked in the left sidebar" : ", the name of a server in the left sidebar (none yet)"));
-  const own = fb.source === "saved";
-  if (own && reveal) {
+  if (reveal) {
     // Drawn whatever else the answer says: after a new password this is the
     // only place the working one exists.
     body.append(el("p", { class: "cn-sql-row", text: "Password, shown only now. Copy it and keep it somewhere safe:" }));
     body.append(el("div", { class: "cn-urlrow" },
       el("code", { class: "stg-code cn-url", text: reveal }),
       el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(reveal, "Port password") })));
-  } else if (own) {
+  } else {
     body.append(el("p", { class: "cn-sql-row", text: "Password: the one shown when it was created" +
       (fb.password_created_at ? ", " + utcLabel(fb.password_created_at) : "") + ". It cannot be shown again." }));
-  } else {
-    body.append(el("p", { class: "cn-sql-row" },
-      "Password: the access token (CLI: ", el("code", { text: "--console-token" }), " or ", el("code", { text: "BINTRAIL_CONSOLE_TOKEN" }), "), never shown in the web interface"));
-  }
-  if (fb.port) {
-    const line = "mysql -h " + shellWord(flashbackHost(fb)) + " -P " + fb.port + " -u " + (user ? shellWord(user) : "<server-name>") + " -p";
-    body.append(el("div", { class: "cn-urlrow" },
-      el("code", { class: "stg-code cn-url", text: line }),
-      el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(line, "mysql command") })));
-    body.append(el("p", { class: "cn-sql-row", text: own ? "Paste the password at the password prompt." : "Paste the token at the password prompt." }));
   }
   // The port does not filter by schema (#1685): say so, so it is not taken
   // for a path that scopes access per schema.
   body.append(el("p", { class: "cn-sql-row", text: "This password reads every schema on every server in the sidebar." }));
-  if (fb.can_manage && sessionMay("settings:write")) {
-    const ask = (q) => typeof window.confirm !== "function" || window.confirm(q);
+  if (mayChange) {
     const fresh = el("button", { class: "btn btn-sm", type: "button", text: "New password" });
-    fresh.onclick = () => { if (ask("Create a new password?\n\nThe current one stops working for new connections.")) changeSQLPort(live, servers, () => api("/api/flashback/password", { method: "POST", body: {} }), fresh); };
+    fresh.onclick = () => { if (ask("Create a new password?\n\nThe current one stops working for new connections.")) changeSQLPort(live, servers, () => api("/api/flashback/password", { method: "POST", body: {} }), fresh, rt); };
     const off = el("button", { class: "btn btn-sm btn-danger", type: "button", text: "Turn off" });
-    off.onclick = () => { if (ask("Turn the port off?\n\nMySQL clients connected to it are disconnected.")) changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { enabled: false } }), off); };
+    off.onclick = () => { if (ask("Turn the port off?\n\nMySQL clients connected to it are disconnected.")) changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { enabled: false } }), off, rt); };
     body.append(el("div", { class: "cn-links" }, fresh, off));
   }
-  body.append(routingBlock(fb, cur));
+  body.append(routingSwitch(fb, cur, rt, mayChange && ((btn) => {
+    const next = !fb.routing_on;
+    if (next && !ask("Turn read routing on?\n\nStatements sent to this port then run on each server's own MySQL, with that server's forwarding account. Only heavy SELECTs run on the copy.")) return;
+    changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { routing: next } }), btn, rt, reveal);
+  })));
+  const numbers = routerNumbers(rt, cur, () => api("/api/router").then((v) => redrawSQLPanel(live, servers, fb, reveal, v), (e) => {
+    // The numbers on screen are no longer ones just read: they go, and the
+    // panel says it could not ask, with the button to try again.
+    redrawSQLPanel(live, servers, fb, reveal, null);
+    toastError("Could not refresh the router's numbers: " + ((e && e.message) || e));
+  }));
+  if (numbers) body.append(numbers);
   body.append(cnFine("What to run, and other machines",
     el("p", { class: "form-hint" }, "Ask for a table as it was: ",
       el("code", { text: "SELECT * FROM _flashback.orders AS OF '10 minutes ago' WHERE id = 1;" }),
-      " Use _snapshot for the whole table (needs a snapshot) and _diff for what changed between two moments. The user picks the server, so each server has its own line; pick another in the sidebar and copy again."),
-    el("p", { class: "form-hint", text: fb.host
-      ? "The port answers on that address only. Run mysql where it can reach it (on the machine DBTrail runs on when it is 127.0.0.1), or open a tunnel to it."
-      : "The port answers on every network address of the machine DBTrail runs on; the command uses the name the web interface was opened with. If that name is a reverse proxy in front of DBTrail, it does not pass this port through, so use that machine's own name or address instead. In the Docker install, docker-compose.yml decides who can reach it: a new install publishes it to the machine itself only." })));
+      " Use _snapshot for the whole table (needs a snapshot) and _diff for what changed between two moments. The user picks the server, so each server has its own line; pick another in the sidebar and copy again. Add @copy to the user (", el("code", { text: (user || "<server-name>") + "@copy" }), ") and the copy answers everything on that connection, whatever read routing says."),
+    el("p", { class: "form-hint", text: at.host
+      ? "The port answers on " + at.host + " only. Run mysql where it can reach it (on the machine DBTrail runs on when it is 127.0.0.1), or open a tunnel to it. To answer other machines, start the router with another address (BINTRAIL_ROUTER_LISTEN)."
+      : "The command uses the name the web interface was opened with. If that name is a reverse proxy in front of DBTrail, it does not pass this port through, so use that machine's own name or address instead. In the Docker install, docker-compose.yml decides who can reach the port: a new install publishes it to the machine itself only." })));
   return panel;
 }
 
@@ -14870,13 +14893,29 @@ function sqlMemoryLines(st) {
   return out;
 }
 
+// routerMemoryNote is what to say when the router that serves the MySQL port
+// runs with another memory per statement than the one in force here: it
+// reads the saved setting when it starts, so a change made since waits for
+// its restart. st is GET /api/sql-settings, rt GET /api/router. Empty when
+// they agree or either is unknown. Pure, so it is tested in node.
+function routerMemoryNote(st, rt) {
+  const each = rt && rt.status && rt.status.pool && rt.status.pool.memory_each;
+  const m = /^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)?$/i.exec(String(each || "").trim());
+  if (!st || !st.memory_bytes || !m) return "";
+  const unit = { b: 1, kb: 1e3, mb: 1e6, gb: 1e9, tb: 1e12, kib: 1024, mib: 1048576, gib: 1073741824, tib: 1099511627776 }[(m[2] || "B").toLowerCase()];
+  // The setting spells GB as the router spells GiB: both mean powers of 1024.
+  const bytes = Number(m[1]) * (unit >= 1e3 && unit % 1024 ? Math.pow(1024, Math.round(Math.log10(unit) / 3)) : unit);
+  if (bytes === st.memory_bytes) return "";
+  return "The router that serves the MySQL port runs with " + each + " for each statement, not " + st.memory + ". It takes this setting when it starts: restart the router to apply it. One started with its own memory (--sql-memory) keeps that one.";
+}
+
 // changeSQLMemory sends one change and draws the panel again from the answer,
 // in place on live (the element on the page), so a second press acts on what
 // the reader sees. send spells its own method and path for save_controls.mjs.
-function changeSQLMemory(live, send, btn) {
+function changeSQLMemory(live, send, btn, rt) {
   if (btn) btn.disabled = true;
   return send().then((st) => {
-    const fresh = sqlMemoryPanel(st, live);
+    const fresh = sqlMemoryPanel(st, live, rt);
     live.replaceChildren(...Array.from(fresh.children));
   }, (err) => {
     if (btn) btn.disabled = false;
@@ -14886,7 +14925,7 @@ function changeSQLMemory(live, send, btn) {
 
 // sqlMemoryPanel: the setting, its effect, and a form when this session may
 // change it here. live: the panel already on the page (changeSQLMemory).
-function sqlMemoryPanel(st, live) {
+function sqlMemoryPanel(st, live, rt) {
   const panel = el("section", { class: "ov-panel cn-sqlmem", style: "margin-top:18px" });
   live = live || panel;
   panel.append(el("div", { class: "ov-panel-head" }, el("h2", { class: "ov-panel-title", text: "Memory for SQL on the copy" })));
@@ -14897,6 +14936,8 @@ function sqlMemoryPanel(st, live) {
   const ceiling = sqlCeilingNote(st);
   if (ceiling) body.append(cnFine(ceiling.label, el("p", { class: "form-hint", text: ceiling.text })));
   if (st.warning) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: st.warning }));
+  const restart = routerMemoryNote(st, rt);
+  if (restart) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: restart }));
   if (!st.can_manage) {
     if (st.locked) body.append(el("p", { class: "cn-sql-row", text: st.locked }));
     // A startup value locks it first; a file that did not load is still said.
@@ -14911,11 +14952,11 @@ function sqlMemoryPanel(st, live) {
   }
   const input = el("input", { class: "input cn-sql-addr", type: "text", value: st.value || "", "aria-label": "Memory per statement", spellcheck: "false", autocomplete: "off" });
   const save = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Save" });
-  save.onclick = () => changeSQLMemory(live, () => api("/api/sql-settings", { method: "PUT", body: { memory: input.value } }), save);
+  save.onclick = () => changeSQLMemory(live, () => api("/api/sql-settings", { method: "PUT", body: { memory: input.value } }), save, rt);
   const row = el("div", { class: "cn-urlrow" }, el("span", { class: "cn-sql-lbl", text: "Memory" }), input, save);
   if (st.source === "saved") {
     const reset = el("button", { class: "btn btn-sm", type: "button", text: "Use default" });
-    reset.onclick = () => changeSQLMemory(live, () => api("/api/sql-settings", { method: "PUT", body: { memory: "" } }), reset);
+    reset.onclick = () => changeSQLMemory(live, () => api("/api/sql-settings", { method: "PUT", body: { memory: "" } }), reset, rt);
     row.append(reset);
   }
   body.append(row);
@@ -14975,6 +15016,10 @@ const routerStaleAfterSec = 120;
 // answer (never shown as zero statements), and its numbers. Pure, so it is
 // tested in node.
 function routerLines(view, cur) {
+  // undefined: the router was not asked at all (a session that may not read
+  // settings, a DBTrail without the route). Nothing is said of it; null is
+  // an asking that failed.
+  if (view === undefined) return null;
   if (!view) return [{ text: "We could not ask this DBTrail for its router's numbers. Reload the page to try again." }];
   if (!view.configured) return null;
   if (view.error || !view.status) {
@@ -14984,10 +15029,10 @@ function routerLines(view, cur) {
     ];
   }
   const st = view.status, out = [];
-  const port = String(st.listen || "").replace(/^.*:/, "");
-  out.push({ text: "The router is a second MySQL port, run as a service of its own" + (port ? ", on port " + port : "") + ". " +
+  const port = (/:(\d+)$/.exec(String(st.listen || "")) || [])[1] || "";
+  out.push({ text: "The router is the service that answers this port" + (port ? ", on port " + port : "") + ". " +
     (st.read_only ? "It is read-only: a statement that would change the server is refused and never sent to MySQL."
-      : "It is read-write: writes sent to it run on MySQL.") });
+      : "It is read-write: with read routing on, writes sent to it run on MySQL.") });
   if (view.newer) out.push({ strong: "This router is a later version than this page knows.", text: "A number below may be missing or read as zero when the router now says it another way. SHOW ROUTER STATUS on the router's own port is the one to trust until DBTrail is updated too." });
   if (!cur) {
     out.push({ text: "Who answered: pick a server in the left sidebar to see its counts." });
@@ -15113,48 +15158,38 @@ function routerSides(m) {
   return wrap;
 }
 
-// routerPanel (#2318) draws routerLines, with a Refresh that asks again and
-// repaints this panel alone, and the reasons folded under it. Null when no
-// router was configured.
-function routerPanel(view, cur) {
-  if (routerLines(view, cur) === null) return null;
-  const panel = el("section", { class: "ov-panel cn-sql", style: "margin-top:18px" });
-  panel.append(el("div", { class: "ov-panel-head" }, el("h2", { class: "ov-panel-title", text: "The router" })));
-  const body = el("div", { class: "cn-sql-body" });
-  panel.append(body);
-  const paint = (v) => {
-    clear(body);
-    const lines = routerLines(v, cur) || [{ text: "This DBTrail is no longer given a router's address." }];
-    // The two sides, drawn, before the words (#2330). The line that said
-    // the same two counts in a sentence is then left out: one fact, once.
-    let sides = null;
-    try { sides = routerSidesModel(v, cur); } catch (err) { sides = null; }
-    if (sides) body.append(routerSides(sides));
-    for (const l of lines) {
-      if (sides && /^Who answered for /.test(l.text || "")) continue;
-      const p = el("p", { class: "cn-sql-row" + (!v || (v.configured && !v.status) ? " cn-sql-err" : "") });
-      if (l.strong) p.append(el("b", { text: l.strong }), " ");
-      p.append(l.text);
-      body.append(p);
-    }
-    const refresh = el("button", { class: "btn btn-sm", type: "button", text: "Refresh" });
-    refresh.onclick = () => { refresh.disabled = true; api("/api/router").then(paint, (e) => {
-      // The numbers on screen are no longer ones just read: they go, and
-      // the panel says it could not ask, with the button to try again.
-      paint(null);
-      toastError("Could not refresh the router's numbers: " + ((e && e.message) || e));
-    }); };
-    body.append(el("div", { class: "cn-links" }, refresh));
-    const t = v && v.status && cur && v.status.servers && v.status.servers[cur.id];
-    const reasons = Object.entries((t && t.reasons) || {}).sort((x, y) => y[1] - x[1]);
-    if (reasons.length) {
-      const ul = el("ul", { class: "form-hint", style: "margin:4px 0 0 18px; padding:0" });
-      for (const [key, n] of reasons) ul.append(el("li", { text: n + " × " + (ROUTER_REASON_TEXT[key] || ROUTE_REASON_TEXT[key] || key) }));
-      body.append(cnFine("Why each side", ul));
-    }
-  };
-  paint(view);
-  return panel;
+// routerNumbers (#2318) draws routerLines inside the MySQL port's panel,
+// with a Refresh (refresh asks again and redraws the whole panel) and the
+// reasons folded under it. A router that did not answer is said in the open;
+// its numbers, when it has them, are folded. Null when no router was
+// configured.
+function routerNumbers(view, cur, refresh) {
+  const lines = routerLines(view, cur);
+  if (lines === null) return null;
+  const down = !view || (view.configured && !view.status);
+  // The two counts are drawn above, by routingSwitch (routerSides): the
+  // line that says the same in a sentence is left out. One fact, once.
+  let drawn = null;
+  try { drawn = routerSidesModel(view, cur); } catch (err) { drawn = null; }
+  const rows = lines.filter((l) => !(drawn && /^Who answered for /.test(l.text || ""))).map((l) => {
+    const p = el("p", { class: down ? "cn-sql-row cn-sql-err" : "form-hint" });
+    if (l.strong) p.append(el("b", { text: l.strong }), " ");
+    p.append(l.text);
+    return p;
+  });
+  const again = el("button", { class: "btn btn-sm", type: "button", text: "Refresh" });
+  again.onclick = () => { again.disabled = true; refresh(); };
+  const links = el("div", { class: "cn-links" }, again);
+  if (down) return el("div", { class: "cn-rt" }, ...rows, links);
+  const t = view.status && cur && view.status.servers && view.status.servers[cur.id];
+  const reasons = Object.entries((t && t.reasons) || {}).sort((x, y) => y[1] - x[1]);
+  const out = el("div", { class: "cn-rt" }, cnFine("The router's numbers", ...rows, links));
+  if (reasons.length) {
+    const ul = el("ul", { class: "form-hint", style: "margin:4px 0 0 18px; padding:0" });
+    for (const [key, n] of reasons) ul.append(el("li", { text: n + " × " + (ROUTER_REASON_TEXT[key] || ROUTE_REASON_TEXT[key] || key) }));
+    out.append(cnFine("Why each side", ul));
+  }
+  return out;
 }
 
 // fmtGoDuration shortens a Go duration string for display by dropping the
@@ -15184,111 +15219,42 @@ function routeAccountMissing(cur) {
   return "it has no forwarding account, and this port never forwards with the account DBTrail captures with. On its MySQL, create a user with SELECT on what this port should read, then edit the server and set it as the forwarding user";
 }
 
-// routingBlock (#2038) says who answers on the port: with read routing off,
-// the copy, always (and how to turn routing on); with it on, the rule and,
-// for the server picked in the sidebar, how many statements each side has
-// answered since the daemon started and why MySQL took the ones it took. The
-// counts travel with /api/flashback, so Refresh re-reads that one route and
-// repaints this block alone; nothing else on the page moves.
-function routingBlock(fb, cur) {
+// routingSwitch says whether read routing is on, in one word, with the
+// button that changes it (toggle, absent for a session that may not), what
+// that means in one sentence, and who answered for the server picked in the
+// sidebar: the two sides, drawn (routerSides, #2330). The saved switch is
+// fb.routing_on (GET /api/flashback); who answered is the router's to say
+// (rt, GET /api/router).
+function routingSwitch(fb, cur, rt, toggle) {
+  const on = !!fb.routing_on;
   const wrap = el("div", { class: "cn-route" });
-  const paint = (status) => {
-    clear(wrap);
-    const r = status && status.routing;
-    if (!r) return;
-    if (!r.enabled) {
-      wrap.append(el("p", { class: "cn-sql-row", text: "Who answers: the copy, always. Read routing is off." }));
-      wrap.append(cnFine("How to let MySQL answer too",
-        el("p", { class: "form-hint" },
-          "Start DBTrail with a freshness limit for the copy (CLI: ", el("code", { text: "--route-max-copy-age 15m" }),
-          ", or the environment variable ", el("code", { text: "BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE" }),
-          "). Then everything sent to this port runs on the server's own MySQL, writes included, except the heavy SELECTs, which run on the copy while it is at most that old, or over tables that have not changed since their snapshot. To refuse writes, add ", el("code", { text: "--route-read-only" }),
-          " (or ", el("code", { text: "BINTRAIL_CONSOLE_ROUTE_READ_ONLY=1" }), "). The mysql line above stays the same. Experimental.")));
-      return;
-    }
-    const t = (cur && r.servers && r.servers[cur.id]) || { copy: 0, mysql: 0, reasons: {} };
-    const total = (t.copy || 0) + (t.mysql || 0) + (t.refused || 0);
-    const refresh = el("button", { class: "btn btn-sm", type: "button", text: "Refresh",
-      onclick: () => api("/api/flashback").then(paint, (e) => toastError("Could not refresh who answered: " + ((e && e.message) || e))) });
-    if (!cur) {
-      wrap.append(el("p", { class: "cn-sql-row", text: "Who answered: pick a server in the left sidebar to see its counts." }));
-      return;
-    }
-    // The port forwards with a server's forwarding account and never with
-    // the account DBTrail captures with (#2317). A server that has a source
-    // and no account of its own for the port does not route, and that is
-    // read here from the server itself: it holds before any client has
-    // connected, and it is what to fix whatever else a connection found.
-    const noAccount = routeAccountMissing(cur);
-    if (noAccount || t.unavailable) {
-      // noAccount, or a connection to this server found it cannot route
-      // (no source to forward to, or no SQL on the copy): the copy answers
-      // everything sent under its name, and the rule below does not apply.
-      const p = el("p", { class: "cn-sql-row" });
-      p.append("Who answered", cur ? " for " : "", cur ? el("code", { text: cur.name || cur.id }) : "",
-        ": the copy, always. Routing is off for this server: " + (noAccount || t.unavailable) + ". ", refresh);
-      wrap.append(p);
-      if (noAccount && cur.flavor !== "postgres") {
-        wrap.append(el("p", { class: "cn-sql-row", text: "A connection already open keeps being answered by the copy; it routes once it is opened again. The router service refuses this server's statements for the same reason." }));
-      }
-      return;
-    }
-    const since = r.since ? new Date(r.since) : null;
-    const sinceText = since && !isNaN(since) ? " since " + since.toLocaleString() : "";
-    const head = el("p", { class: "cn-sql-row" });
-    head.append("Who answered", cur ? " for " : "", cur ? el("code", { text: cur.name || cur.id }) : "", sinceText + ": ");
-    if (total === 0) {
-      head.append(el("b", { text: "no statements yet" }));
-    } else {
-      head.append(el("b", { text: String(t.mysql || 0) }), " by MySQL, ", el("b", { text: String(t.copy || 0) }), " by the copy");
-      if (t.refused) head.append(", ", el("b", { text: String(t.refused) }), " refused");
-    }
-    head.append(" ", refresh);
-    wrap.append(head);
-    const rules = [];
-    if (r.cost_threshold > 0) rules.push("MySQL's plan costs at least " + r.cost_threshold);
-    if (r.scan_rows > 0) rules.push("it scans a whole table of at least " + r.scan_rows + " rows");
-    wrap.append(el("p", { class: "cn-sql-row" }, rules.length
-      ? "A SELECT runs on the copy when " + rules.join(" or ") + ", while the copy is at most " + fmtGoDuration(r.max_copy_age) + " old. " +
-        "Past that age the copy still answers one whose tables have not changed since their snapshot. " +
-        (r.read_only ? "Every other read runs on MySQL." : "Everything else, writes included, runs on MySQL.")
-      : "No plan threshold is set (both are 0), so every " + (r.read_only ? "read" : "statement") + " runs on MySQL and nothing reaches the copy."));
-    // Which mode the port is in (#2079), said either way: read-write is the
-    // one a reader must not have to infer from a missing line.
-    wrap.append(r.read_only
-      ? el("p", { class: "cn-sql-row" }, el("b", { text: "This port is read-only." }),
-        " A statement that would change the server (INSERT, UPDATE, DELETE, CREATE, DROP, GRANT and the like) is refused and never sent to MySQL. The check reads the statement's text; the permissions of the account below bound everything else.")
-      : el("p", { class: "cn-sql-row" }, el("b", { text: "This port is read-write." }),
-        " Writes sent to it run on MySQL. To refuse them, start DBTrail with ", el("code", { text: "--route-read-only" }), "."));
-    // Which account runs what MySQL answers (#2079): the user name only.
-    // Always the server's forwarding account: a server without one was
-    // answered for above and never gets here with a source (#2317).
-    if (cur.has_route) {
-      // route_host is sent only when the account connects somewhere else
-      // than the source.
-      const where = cur.route_host ? " It connects to " + cur.route_host + (cur.route_port ? ":" + cur.route_port : "") + ", not the source's address." : "";
-      wrap.append(el("p", { class: "cn-sql-row" }, "On MySQL, statements run as ",
-        cur.route_user ? el("code", { text: cur.route_user }) : "this server's forwarding account",
-        (cur.route_user ? ", this server's forwarding user." : ".") + where +
-        " This port can do there whatever that account is granted, and read whatever its SELECT covers. The account DBTrail captures with is never used by this port."));
-    }
-    // The source turned the port's login away (#2079): every statement of
-    // such a connection fails with error 2006, which says nothing of why.
-    if (t.account_refused) {
-      wrap.append(el("p", { class: "cn-sql-row" }, el("b", { text: "MySQL refused the login of " + t.account_refused + "." }),
-        " Clients of this port get error 2006 for this server until that is fixed. " +
-        "Edit the server to correct the forwarding account. Test connection on that form tries its login, and one that works clears this message."));
-    }
-    if (total > 0) {
-      const reasons = Object.entries(t.reasons || {}).sort((x, y) => y[1] - x[1]);
-      const ul = el("ul", { class: "form-hint", style: "margin:4px 0 0 18px; padding:0" });
-      for (const [key, n] of reasons) {
-        ul.append(el("li", { text: n + " × " + (ROUTE_REASON_TEXT[key] || key) }));
-      }
-      wrap.append(cnFine("Why each side", ul));
-    }
-  };
-  paint(fb);
+  const head = el("div", { class: "cn-route-head" },
+    el("span", { class: "cn-route-name", text: "Read routing" }),
+    el("b", { class: "cn-route-state" + (on ? " is-on" : ""), text: on ? "On" : "Off" }));
+  if (toggle) {
+    const btn = el("button", { class: "btn btn-sm", type: "button", text: on ? "Turn routing off" : "Turn routing on" });
+    btn.onclick = () => toggle(btn);
+    head.append(btn);
+  }
+  wrap.append(head);
+  const st = rt && rt.status;
+  const writes = !st ? "" : st.read_only ? " A statement that would change the server is refused." : " Writes run on MySQL too.";
+  wrap.append(el("p", { class: "cn-sql-row", text: on
+    ? "Light statements run on each server's own MySQL. Heavy SELECTs run on the copy." + writes
+    : "The copy answers every statement. Turn it on and an application can use this port in place of its MySQL: light statements run on MySQL, heavy SELECTs on the copy." }));
+  const noAccount = on && cur ? routeAccountMissing(cur) : "";
+  if (noAccount) {
+    wrap.append(el("p", { class: "cn-sql-row" }, "For ", el("code", { text: cur.name || cur.id }), " the copy still answers everything: " + noAccount + "."));
+  }
+  // Who answered, drawn (#2330): the two sides with what each took, over a
+  // bar split between them. Nothing when the router has no counts for the
+  // server picked; never zeros for a router that did not answer.
+  let sides = null;
+  try { sides = routerSidesModel(rt, cur); } catch (err) { sides = null; }
+  if (sides) {
+    wrap.append(el("p", { class: "cn-who-cap" }, "Who answered for ", el("code", { text: cur.name || cur.id })));
+    wrap.append(routerSides(sides));
+  }
   return wrap;
 }
 
@@ -15842,7 +15808,7 @@ function serverRow(s) {
 // srvField builds a labeled input row: <label class="field"><span/><input/></label>.
 // FORWARDING_HINT explains the two optional forwarding fields of the server
 // form (#2079) in the form's own words.
-const FORWARDING_HINT = "Forwarding user and password are optional. They only matter when DBTrail was started with read routing, or when the router service runs: what a SQL client sends to the MySQL port then runs on this server as the forwarding user, so the forwarding user's permissions are all that port can do here, and what its SELECT covers is all it can read. Give it SELECT only, on the schemas the port should read. It must be another user than the source user: the port never forwards with the account DBTrail captures with, so with these fields blank the port does not forward for this server and the copy answers alone. Saving a change to the forwarding account closes the connections open on that port for this server, so that none stays on the previous account; clients reconnect.";
+const FORWARDING_HINT = "Forwarding user and password are optional. They only matter while read routing is on (Settings, MCP Server, Connect a SQL client): what a SQL client sends to the MySQL port then runs on this server as the forwarding user, so the forwarding user's permissions are all that port can do here, and what its SELECT covers is all it can read. Give it SELECT only, on the schemas the port should read. It must be another user than the source user: the port never forwards with the account DBTrail captures with, so with these fields blank the port does not forward for this server and the copy answers alone. Saving a change to the forwarding account closes the connections open on that port for this server, so that none stays on the previous account; clients reconnect.";
 
 // routePrefill remembers, per form, the forwarding account its server had
 // when the form opened: serverFormBody sends the forwarding fields only when

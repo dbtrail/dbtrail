@@ -28,9 +28,8 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 BASE_DSN="${BINTRAIL_TEST_DSN:-root:testroot@tcp(127.0.0.1:13306)}"
 MYSQL_CONTAINER="${MYSQL_CONTAINER:-bintrail-test-mysql}"
 PORT="${E2E_PORT:-8090}"
-# The MySQL port (#996) is saved as on at this address on the main daemon, so
-# scenario 17g photographs the Connect page's SQL client panel in its enabled
-# shape (#1446). Nothing connects to it there, so no router is started for it.
+# Not used by the daemon any more (the router serves the MySQL port on its own
+# address); kept so an environment that still passes it is not broken.
 FLASHBACK_PORT="${E2E_FLASHBACK_PORT:-13308}"
 TOKEN="${E2E_TOKEN:-e2e-console-token}"
 IDX_DB="bintrail_e2e_idx"
@@ -252,10 +251,12 @@ for i in $(seq 1 30); do
 done
 
 # The main daemon's MySQL port, saved as on (what the Connect panel's Turn on
-# does), so the panel is photographed in its enabled shape.
+# does), so scenario 17g photographs the panel in its enabled shape (#1446).
+# No router is started for it and the daemon is not told of one, so the panel
+# shows the port's usual number, 3309, and says it is not a confirmed one.
 curl -fsS -X PUT \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d "{\"enabled\":true,\"listen\":\"127.0.0.1:$FLASHBACK_PORT\"}" \
+  -d '{"enabled":true}' \
   "http://127.0.0.1:$PORT/api/flashback" >/dev/null
 
 # A second daemon whose MySQL port was never turned on, for the scene that
@@ -267,8 +268,9 @@ curl -fsS -X PUT \
 PORT2="${E2E_PORT2:-8092}"
 SQLPORT="${E2E_SQLPORT:-13319}"
 STATE_DIR2="$(mktemp -d -t console-e2e-state2.XXXXXX)"
+ROUTER2_METRICS="${E2E_ROUTER2_METRICS:-19391}"
 echo "==> launch a second watch daemon on :$PORT2 (no MySQL port at startup)"
-"$CONSOLE_BIN" watch \
+BINTRAIL_CONSOLE_ROUTER_URL="http://127.0.0.1:$ROUTER2_METRICS" "$CONSOLE_BIN" watch \
   --index-dsn "${BASE_DSN}/${IDX_DB}" \
   --console-listen "127.0.0.1:$PORT2" \
   --console-token "$TOKEN" \
@@ -288,6 +290,7 @@ done
 echo "==> launch the router that serves the second daemon's MySQL port on :$SQLPORT"
 "$CONSOLE_BIN" router \
   --listen "127.0.0.1:$SQLPORT" \
+  --metrics-addr "127.0.0.1:$ROUTER2_METRICS" \
   --servers-file "$STATE_DIR2/console-servers.yaml" \
   --auth-file "$STATE_DIR2/console-auth.yaml" \
   --mcp-token-file "$STATE_DIR2/console-mcp-token.yaml" >"$E2E_ARTIFACT_DIR/console-e2e-router2.log" 2>&1 &

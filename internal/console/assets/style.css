@@ -2484,6 +2484,15 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 .cn-sql-lbl { font-size: 13px; color: var(--ink-2); }
 .cn-sql-addr { max-width: 220px; font-family: var(--f-mono); font-size: 12px; }
 .cn-sql-err { color: var(--error); }
+/* Read routing: one word for the state, the button beside it, and who
+   answered as two figures over a bar split between them. */
+.cn-route { margin: 14px 0 10px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
+.cn-route-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.cn-route-name { font-size: 13px; font-weight: 600; color: var(--ink); }
+.cn-route-state { font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line-soft); color: var(--ink-2); }
+.cn-route-state.is-on { color: var(--accent); border-color: var(--accent); }
+.cn-route-head .btn { margin-left: auto; }
+.cn-who-cap { margin: 10px 0 6px; font-size: 12px; color: var(--ink-2); }
 .cn-sql .cn-fine { margin-top: 4px; }
 
 /* Telemetry sample event (#1447): the daemon's bytes, shown as they are. */

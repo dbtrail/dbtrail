@@ -11,8 +11,9 @@ import (
 // first-run card, its links. Text inside <code> is left out of the prose: a
 // flag such as --console-token keeps its spelling.
 const wordingPassJS = `
-const prose = (n) => !n ? "" : n.nodeType === 3 ? n.textContent : n.tag === "code" ? "" : (n._text || "") + (n.children || []).map(prose).join(" ");
-const whole = (n) => !n ? "" : n.nodeType === 3 ? n.textContent : (n._text || "") + (n.children || []).map(whole).join(" ");
+// A string appended to an element is text too (the router's lines are).
+const prose = (n) => !n ? "" : typeof n === "string" ? n : n.nodeType === 3 ? n.textContent : n.tag === "code" ? "" : (n._text || "") + (n.children || []).map(prose).join(" ");
+const whole = (n) => !n ? "" : typeof n === "string" ? n : n.nodeType === 3 ? n.textContent : (n._text || "") + (n.children || []).map(whole).join(" ");
 const tidy = (s) => s.replace(/\s+/g, " ").trim();
 const rows = (n, out = []) => {
   if (!n || n.nodeType === 3) return out;
@@ -33,9 +34,13 @@ const run = (s) => vm.runInContext(s, ctx);
   const servers = [{ id: "s1", name: "shop db", kind: "registry" }, { id: "s2", name: "billing", kind: "registry" }];
   const panel = run("sqlClientPanel");
   run("capsCache = { monitor: true };");
-  for (const k of Object.keys(fb)) out.sql[k] = rows(panel(servers, fb[k]));
-  out.sql.unread = rows(panel(servers, null));
-  out.sql.noServers = rows(panel([], fb.named));
+  // The command's host and port are what the router says it listens on
+  // (#2341), so each port state is drawn with the router's answer for it.
+  const rt = JSON.parse(process.argv[7]);
+  for (const k of Object.keys(fb)) out.sql[k] = rows(panel(servers, fb[k], "", null, rt[k]));
+  out.sql.unread = rows(panel(servers, null, "", null, rt.named));
+  out.sql.noServers = rows(panel([], fb.named, "", null, rt.named));
+  out.sql.routerDown = rows(panel(servers, fb.named, "", null, rt.down));
   run("capsCache = {};");
   out.sql.serve = rows(panel(servers, fb.off));
 
@@ -126,7 +131,27 @@ func TestWordingPassTheseSentences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw := runNodeConnectArgs(t, renderHarnessJS+wordingPassJS, string(fb), string(setting), string(steps))
+	// What the router answers for each port state above: one address, every
+	// address, a listen that is no address, and (for the port that is off)
+	// nothing asked of it.
+	router := func(listen string) routerViewDTO {
+		return routerViewDTO{Configured: true, URL: "http://router:9091/status", ReadAt: "2026-10-11T14:31:00Z",
+			Status: &RouterStatusDoc{Version: 1, Listen: listen, CostThreshold: 10000,
+				RouterNumbers: RouterNumbers{CountingSince: "2026-10-11T09:00:00Z", Servers: map[string]RouterServerNumbers{
+					"s1": {Copy: 4, MySQL: 9, Reasons: map[string]uint64{"expensive_plan": 4, "cheap_plan": 9}},
+				}}}}
+	}
+	routers, err := json.Marshal(map[string]routerViewDTO{
+		"named":    router("127.0.0.1:3308"),
+		"wildcard": router(":3308"),
+		"noPort":   router("not-an-address"),
+		"off":      {},
+		"down":     {Configured: true, URL: "http://router:9091/status", Error: "it could not be reached: connection refused"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := runNodeConnectArgs(t, renderHarnessJS+wordingPassJS, string(fb), string(setting), string(steps), string(routers))
 	var got struct {
 		SQL                                    map[string][]string
 		Sections, Locked, NoSchedule, Schedule []string
@@ -158,24 +183,79 @@ func TestWordingPassTheseSentences(t *testing.T) {
 		}
 		return at
 	}
-	for _, k := range []string{"named", "wildcard", "noServers"} {
+	// The notice sits right under the line about the password it speaks of,
+	// which is under the command. (Before #2341 a "Paste the token" line
+	// came between; the password is now always the port's own, and that
+	// line is gone.)
+	const password = "Password: the one shown when it was created. It cannot be shown again."
+	const doubt = "3309 above is the port's usual number, not a confirmed one."
+	placed := func(k, wantCmd string) []string {
+		t.Helper()
 		lines := got.SQL[k]
 		t.Logf("%s:\n  %s", k, strings.Join(lines, "\n  "))
-		n, paste := index(lines, notice), index(lines, "Paste the token at the password prompt.")
+		n, pw := index(lines, notice), index(lines, password)
 		cmd := -1
 		for i, l := range lines {
 			if strings.HasPrefix(l, "mysql -h ") {
 				cmd = i
+				if l != wantCmd {
+					t.Errorf("%s: the command is %q, want %q", k, l, wantCmd)
+				}
 			}
 		}
-		if n < 0 || cmd < 0 || paste < 0 || n < cmd || n != paste+1 {
-			t.Errorf("%s: the notice must be there once, under the command and its paste line (command %d, paste %d, notice %d)", k, cmd, paste, n)
+		if n < 0 || cmd < 0 || pw < 0 || pw < cmd || n != pw+1 {
+			t.Errorf("%s: the notice must be there once, right under the password line, which is under the command (command %d, password %d, notice %d)", k, cmd, pw, n)
+		}
+		return lines
+	}
+	unconfirmed := func(lines []string) (out []string) {
+		for _, l := range lines {
+			if strings.HasSuffix(l, doubt) {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
+	for k, wantCmd := range map[string]string{
+		"named":     "mysql -h 127.0.0.1 -P 3308 -u 'shop db' -p Copy",
+		"wildcard":  "mysql -h 127.0.0.1 -P 3308 -u 'shop db' -p Copy",
+		"noServers": "mysql -h 127.0.0.1 -P 3308 -u <server-name> -p Copy",
+	} {
+		if u := unconfirmed(placed(k, wantCmd)); len(u) != 0 {
+			t.Errorf("%s: the router said its port, and the panel still doubts it: %q", k, u)
 		}
 	}
-	// A port with no command to copy still has a password that opens every
-	// server.
-	if lines := got.SQL["noPort"]; index(lines, notice) < 0 {
-		t.Errorf("no port: the notice is missing: %q", lines)
+	// A router whose address cannot be read, or that did not answer: the
+	// command still stands, with the usual port and a line saying so, and
+	// the password still opens every server.
+	for _, k := range []string{"noPort", "routerDown"} {
+		if u := unconfirmed(placed(k, "mysql -h 127.0.0.1 -P 3309 -u 'shop db' -p Copy")); len(u) != 1 {
+			t.Errorf("%s: want one line saying 3309 is not confirmed, got %q", k, u)
+		}
+	}
+	// The sentences this panel gained with the router (#2341), as drawn.
+	has2 := func(k, want string) {
+		t.Helper()
+		if index(got.SQL[k], want) < 0 {
+			t.Errorf("%s: want the line %q in:\n  %s", k, want, strings.Join(got.SQL[k], "\n  "))
+		}
+	}
+	has2("named", "The copy answers every statement. Turn it on and an application can use this port in place of its MySQL: light statements run on MySQL, heavy SELECTs on the copy.")
+	has2("named", "The router is the service that answers this port, on port 3308. It is read-write: with read routing on, writes sent to it run on MySQL.")
+	has2("named", "The port answers on 127.0.0.1 only. Run mysql where it can reach it (on the machine DBTrail runs on when it is 127.0.0.1), or open a tunnel to it. To answer other machines, start the router with another address (BINTRAIL_ROUTER_LISTEN).")
+	has2("wildcard", "The command uses the name the web interface was opened with. If that name is a reverse proxy in front of DBTrail, it does not pass this port through, so use that machine's own name or address instead. In the Docker install, docker-compose.yml decides who can reach the port: a new install publishes it to the machine itself only.")
+	has2("routerDown", "The router that serves the port did not answer, so "+doubt)
+	has2("off", "The MySQL port cannot be turned on or off from the web interface.")
+	has2("unread", "We could not check whether the MySQL port is on. Reload the page to try again.")
+	has2("serve", "Not available: this DBTrail only reads. The MySQL port is turned on in the web interface of the DBTrail service, and your usual MySQL client can then read any table as it was at a chosen moment.")
+	for k, lines := range got.SQL {
+		for _, l := range lines {
+			for _, old := range []string{"Paste the", "access token", "time-travel port", "second MySQL port"} {
+				if strings.Contains(l, old) {
+					t.Errorf("%s: %q still says %q", k, l, old)
+				}
+			}
+		}
 	}
 	for _, k := range []string{"off", "unread", "serve"} {
 		if len(got.SQL[k]) == 0 {

@@ -11,7 +11,8 @@ import (
 // for the screen (#1683) and returns every line of text they show, a
 // tooltip included, with <code> left out: a flag keeps its spelling.
 const deixisJS = `
-const prose = (n) => !n ? "" : n.nodeType === 3 ? n.textContent : n.tag === "code" ? "" : (n._text || "") + (n.children || []).map(prose).join(" ");
+// A string appended to an element is text too (the router's lines are).
+const prose = (n) => !n ? "" : typeof n === "string" ? n : n.nodeType === 3 ? n.textContent : n.tag === "code" ? "" : (n._text || "") + (n.children || []).map(prose).join(" ");
 const tidy = (s) => s.replace(/\s+/g, " ").trim();
 // A tooltip is read wherever it sits, also inside a line read whole.
 const tips = (n, out) => {
@@ -57,8 +58,16 @@ out.lane = lines(run("backupDuckLane")({ configured: true, source: "/data/snaps"
 out.token = lines(run("mcpTokenCard")({ managed: true, read_only: true, static: true, created_at: "2026-06-10T12:00:00Z" }, ""));
 run("capsCache = { monitor: true };");
 const fb = JSON.parse(process.argv[4]);
-out.sqlNamed = lines(run("sqlClientPanel")(servers, fb.wildcard));
+// The port, on, with what the router answered (#2341): on every address of
+// its machine, on one address, and not at all.
+const rt = JSON.parse(process.argv[5]);
+out.sqlNamed = lines(run("sqlClientPanel")(servers, fb.wildcard, "", null, rt.wild));
+out.sqlHost = lines(run("sqlClientPanel")(servers, fb.wildcard, "", null, rt.host));
+out.sqlDown = lines(run("sqlClientPanel")(servers, fb.wildcard, "", null, rt.down));
+out.sqlNoRouter = lines(run("sqlClientPanel")(servers, fb.wildcard, "", null, rt.none));
+out.sqlRouted = lines(run("sqlClientPanel")(servers, Object.assign({}, fb.wildcard, { routing_on: true }), "", null, rt.wild));
 out.sqlOff = lines(run("sqlClientPanel")(servers, fb.off));
+out.sqlOffMine = lines(run("sqlClientPanel")(servers, Object.assign({}, fb.off, { can_manage: true })));
 run("capsCache = {};");
 out.sqlServe = lines(run("sqlClientPanel")(servers, fb.off));
 run("capsKnown = false;");
@@ -84,7 +93,26 @@ func TestScreenTextNamesThePlace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw := runNodeConnectArgs(t, renderHarnessJS+deixisJS, string(fb))
+	router := func(listen string) routerViewDTO {
+		return routerViewDTO{Configured: true, URL: "http://router:9091/status", ReadAt: "2026-10-11T14:31:00Z",
+			Status: &RouterStatusDoc{Version: 1, Listen: listen, ReadOnly: true, CostThreshold: 10000, CopySnapshotsReadAt: "2026-10-11T14:30:50Z",
+				RouterNumbers: RouterNumbers{CountingSince: "2026-10-11T09:00:00Z",
+					Pool: &RouterPoolNumbers{Workers: 4, Running: 1, Waiting: 1, ThreadsEach: 2, MemoryEach: "2048MiB"},
+					Servers: map[string]RouterServerNumbers{
+						"s1": {Copy: 4, MySQL: 9, Refused: 3, Reasons: map[string]uint64{"expensive_plan": 4, "cheap_plan": 9}, CopySnapshot: "2026-10-11T14:19:00Z",
+							CannotRoute: true, AccountRefused: true, SessionUntracked: true},
+					}}}}
+	}
+	rt, err := json.Marshal(map[string]routerViewDTO{
+		"wild": router("0.0.0.0:3310"),
+		"host": router("10.0.0.5:3310"),
+		"down": {Configured: true, URL: "http://router:9091/status", Error: "it could not be reached: connection refused"},
+		"none": {},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := runNodeConnectArgs(t, renderHarnessJS+deixisJS, string(fb), string(rt))
 	var got map[string][]string
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %s: %v", raw, err)
@@ -121,10 +149,61 @@ func TestScreenTextNamesThePlace(t *testing.T) {
 	has("token", "Why are there no New token and Delete token buttons?")
 	has("token", "This token was created by a newer version of DBTrail. It keeps working, but this version cannot replace or delete it")
 	has("token", "It is managed wherever it was set up, not in the web interface.")
-	has("sqlServe", "Not available: this DBTrail is read-only.")
-	has("sqlOff", "The port is set when DBTrail starts, not from the web interface.")
-	has("sqlNamed", "never shown in the web interface")
-	has("sqlNamed", "the command uses the name the web interface was opened with.")
+	// The MySQL port's panel (#2341). The router serves the port, so the
+	// sentences that named a startup flag or the access token are gone; the
+	// ones that took their place name the web interface, DBTrail, the router
+	// or the sidebar, never "here".
+	has("sqlServe", "Not available: this DBTrail only reads. The MySQL port is turned on in the web interface of the DBTrail service")
+	has("sqlOff", "The MySQL port cannot be turned on or off from the web interface.")
+	has("sqlOff", "Its saved setting cannot be changed by this DBTrail.")
+	has("sqlOffMine", "Off. Turn it on and your usual MySQL client can read any table as it was at a chosen moment.")
+	has("sqlNamed", "Password: the one shown when it was created. It cannot be shown again.")
+	has("sqlNamed", "The command uses the name the web interface was opened with.")
+	has("sqlNamed", "the server picked in the left sidebar")
+	has("sqlNamed", "The router is the service that answers this port, on port 3310.")
+	// Who answered, drawn (#2330): the caption (the server's name is code,
+	// left out here), a figure per side with the tooltip that says what the
+	// side is, the copy's age, and the foot.
+	has("sqlNamed", "Who answered for")
+	has("sqlNamed", "Your MySQL")
+	has("sqlNamed", "9 statements")
+	has("sqlNamed", "DBTrail's copy")
+	has("sqlNamed", "4 statements")
+	has("sqlNamed", "data 12m old")
+	has("sqlNamed", "3 refused, run by neither")
+	has("sqlNamed", "Statements the router sent to your MySQL server: the light reads, and everything that is not a read.")
+	has("sqlNamed", "Heavy reads the router answered from DBTrail's copy instead of your MySQL server.")
+	// Drawn, so not said again; and with no router answer, not drawn.
+	for _, k := range []string{"sqlNamed", "sqlHost", "sqlRouted"} {
+		for _, l := range got[k] {
+			if strings.Contains(l, "by MySQL,") {
+				t.Errorf("%s: the counts are drawn and also said: %q", k, l)
+			}
+		}
+	}
+	for _, k := range []string{"sqlDown", "sqlNoRouter"} {
+		for _, l := range got[k] {
+			if strings.Contains(l, "Who answered") || strings.Contains(l, "Your MySQL") || strings.Contains(l, "run by neither") {
+				t.Errorf("%s: who answered is drawn with no answer from a router: %q", k, l)
+			}
+		}
+	}
+	has("sqlNamed", "The copy answers every statement. Turn it on and an application can use this port in place of its MySQL")
+	has("sqlRouted", "Light statements run on each server's own MySQL. Heavy SELECTs run on the copy.")
+	has("sqlHost", "The port answers on 10.0.0.5 only.")
+	has("sqlHost", "To answer other machines, start the router with another address")
+	has("sqlDown", "The router that serves the port did not answer, so 3309 above is the port's usual number, not a confirmed one.")
+	has("sqlDown", "No numbers from the router.")
+	has("sqlNoRouter", "This DBTrail was not told where the router that serves the port is, so 3309 above is the port's usual number, not a confirmed one.")
+	for _, k := range []string{"sqlNamed", "sqlHost", "sqlDown", "sqlNoRouter", "sqlRouted", "sqlOff", "sqlOffMine", "sqlServe"} {
+		for _, l := range got[k] {
+			for _, old := range []string{"access token", "when DBTrail starts", "time-travel port", "never shown", "Paste the"} {
+				if strings.Contains(l, old) {
+					t.Errorf("%s: %q still says %q", k, l, old)
+				}
+			}
+		}
+	}
 	has("noCapture", "the capability check failed when the web interface loaded, so capture cannot be started. Reload the page")
 
 	// Sentences in functions that need a live page to draw (a fetch loop, a

@@ -9,14 +9,23 @@ import (
 	"testing"
 )
 
-// TestRoutingBlockSaysWhoAnswered renders the "Who answered" block of the
-// Connect a SQL client panel (#2038) through the real app.js, one shape per
-// state the server can report: routing off (name the flag), on with no
-// server picked, on with no decision yet, on with counts and reasons, a
-// server whose connections cannot route, a policy with no threshold, and
-// the port's mode (#2079): read-write, or read-only with its refusals.
-// The duration formatter is pinned over the values that broke its first
-// version ("10m0s" read as "1").
+// TestRoutingBlockSaysWhoAnswered renders the read-routing part of the
+// Connect a SQL client panel through the real app.js, one shape per state.
+//
+// Since #2341 that part is routingSwitch: the word On or Off (the saved
+// switch, routing_on in GET /api/flashback), the button that changes it, one
+// sentence of what it means, a line when the picked server has no forwarding
+// account, and who answered as two figures over a bar. The counts are the
+// ROUTER's (GET /api/router), for the server picked in the sidebar, and are
+// never drawn as zeros when the router said nothing. Why each side answered
+// is the router's too, under "Why each side" (routerNumbers).
+//
+// routingBlock, which this test drew before, is gone, and with it the lines
+// that named startup flags, the freshness limit, the account statements run
+// as and the "Test connection" advice; the scenarios that guarded them are
+// kept, each drawn in the shape that replaced it. The duration formatter is
+// still pinned over the values that broke its first version ("10m0s" read
+// as "1").
 func TestRoutingBlockSaysWhoAnswered(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -29,47 +38,135 @@ func TestRoutingBlockSaysWhoAnswered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The router's document, from this package's own types.
+	answered := func(readOnly bool, servers map[string]RouterServerNumbers) routerViewDTO {
+		return routerViewDTO{Configured: true, URL: "http://router:9091/status", ReadAt: "2026-10-11T14:31:00Z",
+			Status: &RouterStatusDoc{Version: 1, Listen: "127.0.0.1:3309", ReadOnly: readOnly, CostThreshold: 10000, ScanRows: 100000,
+				RouterNumbers: RouterNumbers{CountingSince: "2026-10-04T12:00:00Z", Servers: servers}}}
+	}
+	one := func(n RouterServerNumbers) map[string]RouterServerNumbers {
+		return map[string]RouterServerNumbers{"s1": n}
+	}
+	views, err := json.Marshal(map[string]routerViewDTO{
+		"none":         answered(false, map[string]RouterServerNumbers{}),
+		"noneRO":       answered(true, map[string]RouterServerNumbers{}),
+		"zeros":        answered(false, one(RouterServerNumbers{Reasons: map[string]uint64{}})),
+		"counts":       answered(false, one(RouterServerNumbers{Copy: 3, MySQL: 7, Reasons: map[string]uint64{"expensive_plan": 3, "cheap_plan": 5, "write": 2}})),
+		"limits":       answered(false, one(RouterServerNumbers{Copy: 1, MySQL: 6, Reasons: map[string]uint64{"expensive_plan": 1, "bounded_limit": 4, "result_over_row_cap": 2}})),
+		"busy":         answered(false, one(RouterServerNumbers{Copy: 40, MySQL: 5, Refused: 5, Reasons: map[string]uint64{"expensive_plan": 40, "copy_queue_full": 3, "copy_wait_timeout": 2}})),
+		"other":        answered(false, map[string]RouterServerNumbers{"s2": {Copy: 30, MySQL: 70, Reasons: map[string]uint64{"expensive_plan": 30}}}),
+		"both":         answered(false, map[string]RouterServerNumbers{"s1": {Copy: 3, MySQL: 7, Reasons: map[string]uint64{}}, "s2": {Copy: 30, MySQL: 70, Reasons: map[string]uint64{}}}),
+		"readOnly":     answered(true, one(RouterServerNumbers{Copy: 3, MySQL: 7, Refused: 2, Reasons: map[string]uint64{"expensive_plan": 3, "cheap_plan": 7, "read_only": 2}})),
+		"onlyRefusals": answered(true, one(RouterServerNumbers{Refused: 4, Reasons: map[string]uint64{"read_only": 4}})),
+		"onlyMySQL":    answered(false, one(RouterServerNumbers{MySQL: 5, Reasons: map[string]uint64{"cheap_plan": 5}})),
+		"onlyCopy":     answered(false, one(RouterServerNumbers{Copy: 8, Reasons: map[string]uint64{"expensive_plan": 8}})),
+		"cannotRoute":  answered(false, one(RouterServerNumbers{Reasons: map[string]uint64{}, CannotRoute: true})),
+		"refusedAcct":  answered(false, one(RouterServerNumbers{MySQL: 4, Reasons: map[string]uint64{"upstream_lost": 4}, AccountRefused: true})),
+		"refusedAcct0": answered(false, one(RouterServerNumbers{Reasons: map[string]uint64{}, AccountRefused: true})),
+		"down":         {Configured: true, URL: "http://router:9091/status", Error: "it could not be reached: connection refused"},
+		"notSet":       {},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	script := renderHarnessJS + `
 const flat = (n, out = []) => { if (n == null) return out; if (typeof n === "string") { out.push(n); return out; }
   if (n.nodeType === 3) { out.push(n.textContent); return out; } if (n._text) out.push(n._text); for (const c of n.children || []) flat(c, out); return out; };
-const block = vm.runInContext("routingBlock", ctx);
+const tidy = (n) => flat(n).join(" ").replace(/\s+/g, " ").trim();
+const each = (n, f) => { if (!n || typeof n === "string" || n.nodeType === 3) return; f(n); (n.children || []).forEach((c) => each(c, f)); };
+const has = (x, c) => (" " + x.className + " ").includes(" " + c + " ");
+const sw = vm.runInContext("routingSwitch", ctx);
+const numbers = vm.runInContext("routerNumbers", ctx);
 const fmt = vm.runInContext("fmtGoDuration", ctx);
-const draw = (routing, cur) => flat(block({ enabled: true, listen: "127.0.0.1:3308", port: "3308", routing }, cur)).join(" ").replace(/\s+/g, " ");
+const rt = ` + string(views) + `;
+// draw: what the switch shows for a saved setting, a picked server and what
+// the router answered. toggle is given as the panel gives it: a function
+// for a session that may change settings, false for one that may not.
+const draw = (on, cur, view, toggle) => {
+  const o = { text: "", state: "", isOn: false, buttons: [], sentence: "", account: "", caption: "", figs: "", bar: [], aria: "", bars: 0, wraps: 0, since: false, help: [] };
+  const sides = []; let foot = "";
+  const w = sw({ enabled: true, routing_on: on }, cur, view, toggle === undefined ? () => {} : toggle);
+  o.text = tidy(w);
+  each(w, (x) => {
+    if (has(x, "cn-route-state")) { o.state = tidy(x); o.isOn = has(x, "is-on"); }
+    if (x.tag === "button") o.buttons.push(tidy(x));
+    if (x.tag === "p" && has(x, "cn-sql-row")) { const t = tidy(x); if (t.startsWith("For ")) o.account = t; else o.sentence = t; }
+    if (has(x, "cn-who-cap")) o.caption = tidy(x);
+    // The two sides, drawn (#2330): one figure each, the refusals under
+    // them, and a bar split between the two.
+    if (has(x, "rs-wrap")) o.wraps++;
+    if (has(x, "rs-side")) sides.push(tidy(x));
+    if (has(x, "rs-k")) o.help.push(String((x.attrs || {}).title || x.title || ""));
+    if (has(x, "rs-foot")) foot = tidy(x);
+    if (has(x, "rs-bar")) { o.bars++; o.aria = x.attrs["aria-label"] || ""; o.bar = (x.children || []).map((c) => c.className + " " + String((c.attrs || {}).style || "")); }
+  });
+  const refused = foot.match(/\d+ refused, run by neither/);
+  o.figs = sides.concat(refused ? [refused[0]] : []).join(" | ");
+  o.since = /^since \S/.test(foot);
+  return o;
+};
+// why: the reasons the router gives, as drawn under "Why each side".
+const why = (view, cur) => { let d = null;
+  each(numbers(view, cur, () => {}), (x) => { if (x.tag === "details" && tidy((x.children || []).find((c) => c && c.tag === "summary")) === "Why each side") d = x; });
+  const out = []; each(d, (x) => { if (x.tag === "li") out.push(tidy(x)); }); return out; };
 // bare: a server with a source and no forwarding account. The port never
 // forwards with the account it captures with (#2317), so it does not route.
 const bare = { id: "s1", name: "shop", has_source: true, source_user: "repl" };
 const srv = { ...bare, has_route: true, route_user: "report_ro" };
-const fwd = srv;
-const on = { enabled: true, max_copy_age: "10m0s", cost_threshold: 10000, scan_rows: 100000, since: "2026-10-04T12:00:00Z" };
+const billing = { id: "s2", name: "billing", has_source: true, has_route: true, route_user: "report_ro" };
+// The button: pressed, it hands itself to toggle, once.
+const pressed = [];
+const tw = sw({ enabled: true, routing_on: false }, srv, rt.counts, (b) => pressed.push(b));
+let tbtn = null; each(tw, (x) => { if (x.tag === "button") tbtn = x; });
+tbtn.onclick();
 console.log(JSON.stringify({
-  off: draw({ enabled: false }, srv),
-  noServer: draw(on, null),
-  none: draw(on, srv),
-  counts: draw({ ...on, servers: { s1: { copy: 3, mysql: 7, reasons: { expensive_plan: 3, cheap_plan: 5, write: 2 } } } }, srv),
-  limits: draw({ ...on, servers: { s1: { copy: 1, mysql: 6, reasons: { expensive_plan: 1, bounded_limit: 4, result_over_row_cap: 2 } } } }, srv),
-  busy: draw({ ...on, servers: { s1: { copy: 40, mysql: 5, reasons: { expensive_plan: 40, copy_queue_full: 3, copy_wait_timeout: 2 } } } }, srv),
-  other: draw({ ...on, servers: { s2: { copy: 3, mysql: 7, reasons: { expensive_plan: 3 } } } }, srv),
-  unavailable: draw({ ...on, servers: { s1: { copy: 0, mysql: 0, reasons: {}, unavailable: "the server has no source database to forward to" } } }, srv),
-  noRule: draw({ ...on, cost_threshold: 0, scan_rows: 0 }, srv),
-  readOnly: draw({ ...on, read_only: true, servers: { s1: { copy: 3, mysql: 7, refused: 2, reasons: { expensive_plan: 3, cheap_plan: 7, read_only: 2 } } } }, srv),
-  readOnlyOnlyRefusals: draw({ ...on, read_only: true, servers: { s1: { copy: 0, mysql: 0, refused: 4, reasons: { read_only: 4 } } } }, srv),
-  readOnlyNoRule: draw({ ...on, read_only: true, cost_threshold: 0, scan_rows: 0 }, srv),
-  forwarding: draw(on, fwd),
-  forwardingReadOnly: draw({ ...on, read_only: true }, fwd),
-  forwardingNoName: draw(on, { ...bare, has_route: true }),
-  noSource: draw(on, { id: "s1", name: "shop" }),
-  elsewhere: draw(on, { ...fwd, route_host: "replica.internal", route_port: "3307" }),
-  unreadable: draw(on, { ...bare, route_unreadable: true }),
-  isCapture: draw(on, { ...bare, route_is_capture: true, route_user: "repl" }),
-  noAccount: draw(on, bare),
-  noAccountReadOnly: draw({ ...on, read_only: true }, bare),
-  noAccountCounts: draw({ ...on, servers: { s1: { copy: 3, mysql: 7, reasons: { expensive_plan: 3, cheap_plan: 7 } } } }, bare),
-  noAccountOtherNote: draw({ ...on, servers: { s1: { copy: 0, mysql: 0, reasons: {}, unavailable: "SQL on the copy is unavailable (no local copy)" } } }, bare),
-  noAccountPostgres: draw(on, { ...bare, flavor: "postgres" }),
+  draws: {
+    off: draw(false, srv, rt.none),
+    offCounts: draw(false, srv, rt.counts),
+    offNoAccount: draw(false, bare, rt.none),
+    on: draw(true, srv, rt.none),
+    onReadOnly: draw(true, srv, rt.noneRO),
+    onNoAnswer: draw(true, srv, rt.down),
+    onNotSet: draw(true, srv, rt.notSet),
+    onFailed: draw(true, srv, null),
+    onNotAsked: draw(true, srv, undefined),
+    lockedOff: draw(false, srv, rt.counts, false),
+    lockedOn: draw(true, srv, rt.counts, false),
+    noServer: draw(true, null, rt.counts),
+    none: draw(true, srv, rt.none),
+    zeros: draw(true, srv, rt.zeros),
+    counts: draw(true, srv, rt.counts),
+    other: draw(true, srv, rt.other),
+    otherPicked: draw(true, billing, rt.both),
+    firstPicked: draw(true, srv, rt.both),
+    cannotRoute: draw(true, srv, rt.cannotRoute),
+    readOnly: draw(true, srv, rt.readOnly),
+    readOnlyOnlyRefusals: draw(true, srv, rt.onlyRefusals),
+    onlyMySQL: draw(true, srv, rt.onlyMySQL),
+    onlyCopy: draw(true, srv, rt.onlyCopy),
+    oneEach: draw(true, srv, rt.limits),
+    busy: draw(true, srv, rt.busy),
+    forwarding: draw(true, srv, rt.none),
+    forwardingReadOnly: draw(true, srv, rt.noneRO),
+    forwardingNoName: draw(true, { ...bare, has_route: true }, rt.none),
+    elsewhere: draw(true, { ...srv, route_host: "replica.internal", route_port: "3307" }, rt.none),
+    noSource: draw(true, { id: "s1", name: "shop" }, rt.none),
+    unreadable: draw(true, { ...bare, route_unreadable: true }, rt.none),
+    isCapture: draw(true, { ...bare, route_is_capture: true, route_user: "repl" }, rt.none),
+    noAccount: draw(true, bare, rt.none),
+    noAccountReadOnly: draw(true, bare, rt.noneRO),
+    noAccountCounts: draw(true, bare, rt.counts),
+    noAccountDown: draw(true, bare, rt.down),
+    noAccountNoName: draw(true, { id: "s1", has_source: true }, rt.none),
+    noAccountPostgres: draw(true, { ...bare, flavor: "postgres" }, rt.none),
+    refused: draw(true, srv, rt.refusedAcct),
+    refusedNoCounts: draw(true, srv, rt.refusedAcct0),
+  },
+  why: { counts: why(rt.counts, srv), limits: why(rt.limits, srv), busy: why(rt.busy, srv), readOnly: why(rt.readOnly, srv), other: why(rt.other, srv), none: why(rt.none, srv) },
+  lines: { refused: tidy(numbers(rt.refusedAcct, srv, () => {})), refusedNoCounts: tidy(numbers(rt.refusedAcct0, srv, () => {})), forwarding: tidy(numbers(rt.counts, srv, () => {})) },
+  pressed: { times: pressed.length, same: pressed[0] === tbtn },
   missing: ["none", "own", "same", "unreadable", "nosource", "null"].map((k) => vm.runInContext("routeAccountMissing", ctx)(
     { none: bare, own: srv, same: { ...bare, route_is_capture: true }, unreadable: { ...bare, route_unreadable: true }, nosource: { id: "s1" }, null: null }[k])),
-  refused: draw({ ...on, servers: { s1: { copy: 0, mysql: 4, reasons: { upstream_lost: 4 }, account_refused: "the forwarding account report_ro: MySQL error 1045, Access denied for user 'report_ro'@'10.0.0.5' (using password: YES)" } } }, fwd),
-  refusedNoCounts: draw({ ...on, servers: { s1: { copy: 0, mysql: 0, reasons: {}, account_refused: "the forwarding account report_ro: MySQL error 1045, Access denied" } } }, srv),
   hint: vm.runInContext("FORWARDING_HINT", ctx),
   durations: ["15m0s", "10m0s", "1h0m0s", "1h30m0s", "1m30s", "30s", "24h0m0s"].map(fmt),
 }));
@@ -82,29 +179,53 @@ console.log(JSON.stringify({
 	if err != nil {
 		t.Fatalf("node: %v\n%s", err, raw)
 	}
+	type drawn struct {
+		Text, State                string
+		IsOn                       bool
+		Buttons                    []string
+		Sentence, Account, Caption string
+		Figs                       string
+		Bar                        []string
+		Aria                       string
+		Bars, Wraps                int
+		Since                      bool
+		Help                       []string
+	}
 	var got struct {
-		Off, NoServer, None, Counts, Other, Unavailable, NoRule string
-		Limits                                                  string
-		Busy                                                    string
-		ReadOnly, ReadOnlyOnlyRefusals, ReadOnlyNoRule          string
-		Forwarding, ForwardingReadOnly, ForwardingNoName        string
-		NoSource, Hint                                          string
-		Elsewhere, Unreadable, IsCapture                        string
-		Refused, RefusedNoCounts                                string
-		NoAccount, NoAccountReadOnly                            string
-		NoAccountCounts, NoAccountOtherNote                     string
-		NoAccountPostgres                                       string
-		Missing                                                 []string
-		Durations                                               []string
+		Draws   map[string]drawn
+		Why     map[string][]string
+		Lines   map[string]string
+		Pressed struct {
+			Times int
+			Same  bool
+		}
+		Missing   []string
+		Hint      string
+		Durations []string
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
 	}
-	for name, text := range map[string]string{"off": got.Off, "no server": got.NoServer, "none": got.None, "counts": got.Counts, "unavailable": got.Unavailable, "no rule": got.NoRule,
-		"read-only": got.ReadOnly, "only refusals": got.ReadOnlyOnlyRefusals, "ro no rule": got.ReadOnlyNoRule,
-		"forwarding": got.Forwarding, "forwarding ro": got.ForwardingReadOnly, "fwd no name": got.ForwardingNoName, "no source": got.NoSource, "form hint": got.Hint,
-		"elsewhere": got.Elsewhere, "unreadable": got.Unreadable, "is capture": got.IsCapture, "refused": got.Refused, "refused 0": got.RefusedNoCounts} {
-		t.Logf("%-12s %s", name+":", text)
+	d := func(name string) drawn {
+		t.Helper()
+		v, ok := got.Draws[name]
+		if !ok {
+			t.Fatalf("%s: not drawn", name)
+		}
+		return v
+	}
+	for name, v := range got.Draws {
+		t.Logf("%-20s %s | figs %q bar %q", name+":", v.Text, v.Figs, v.Bar)
+		if !strings.HasPrefix(v.Text, "Read routing ") {
+			t.Errorf("%s: does not open with Read routing: %s", name, v.Text)
+		}
+		// No shape of the switch names the capture account, shows a blank
+		// made visible, or says what only the old block said.
+		for _, bad := range []string{"—", "undefined", "NaN", "null", "Invalid Date", "[object", "repl", "statements run as", "--route-", "BINTRAIL_CONSOLE_ROUTE", "Experimental"} {
+			if strings.Contains(v.Text, bad) {
+				t.Errorf("%s: holds %q: %s", name, bad, v.Text)
+			}
+		}
 	}
 	must := func(name, text string, wants ...string) {
 		t.Helper()
@@ -113,94 +234,159 @@ console.log(JSON.stringify({
 				t.Errorf("%s: missing %q in: %s", name, w, text)
 			}
 		}
-		if strings.Contains(text, "—") || strings.Contains(text, "undefined") || strings.Contains(text, "NaN") {
-			t.Errorf("%s: holds an em dash, undefined or NaN: %s", name, text)
+	}
+	const offSentence = "The copy answers every statement. Turn it on and an application can use this port in place of its MySQL: light statements run on MySQL, heavy SELECTs on the copy."
+	const onSentence = "Light statements run on each server's own MySQL. Heavy SELECTs run on the copy."
+
+	// The switch: one word, the button that changes it, one sentence.
+	for _, name := range []string{"off", "offCounts", "offNoAccount", "lockedOff"} {
+		if v := d(name); v.State != "Off" || v.IsOn || v.Sentence != offSentence {
+			t.Errorf("%s: state %q (drawn as on: %v), sentence %q; want Off and %q", name, v.State, v.IsOn, v.Sentence, offSentence)
 		}
 	}
-	must("off", got.Off, "the copy, always", "Read routing is off", "--route-max-copy-age", "BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE")
-	must("no server", got.NoServer, "pick a server in the left sidebar")
-	must("none", got.None, "shop", "no statements yet", "at most 10m old", "plan costs at least 10000", "at least 100000 rows", "Refresh")
-	must("counts", got.Counts, "7 by MySQL", "3 by the copy", "3 × an expensive plan", "5 × a cheap plan", "2 × a write", "Why each side")
-	// The two reasons a LIMIT and the copy's row cap keep a statement on
-	// MySQL (#2061, #2115), as the page words them.
-	t.Logf("%-12s %s", "limits:", got.Limits)
-	// #2112: a busy copy has its own two lines, in plain words.
-	t.Logf("%-12s %s", "busy:", got.Busy)
-	must("busy", got.Busy, "5 by MySQL", "40 by the copy",
-		"3 × the copy was busy and 16 statements were already waiting for it: MySQL answered at once",
-		"2 × the copy was busy: the statement waited 30 seconds for its turn, then MySQL answered")
-	must("limits", got.Limits, "6 by MySQL", "1 by the copy", "4 × a small LIMIT MySQL answers without reading past it",
-		"2 × an expensive plan whose result is over the copy's row cap: MySQL answered, and the copy was not tried")
-	// Another server's counts never show under the picked one.
-	must("other server", got.Other, "no statements yet")
-	if strings.Contains(got.Other, "7 by MySQL") {
-		t.Errorf("another server's counts rendered under shop: %s", got.Other)
-	}
-	must("unavailable", got.Unavailable, "the copy, always", "Routing is off for this server", "no source database to forward to")
-	if strings.Contains(got.Unavailable, "runs on the copy when") {
-		t.Errorf("a server that cannot route still shows the routing rule: %s", got.Unavailable)
-	}
-	must("no rule", got.NoRule, "No plan threshold is set", "nothing reaches the copy")
-	// The port's mode (#2079) is said either way, and the refusals are
-	// counted on their own: nobody answered those.
-	must("off", got.Off, "--route-read-only", "BINTRAIL_CONSOLE_ROUTE_READ_ONLY")
-	must("counts", got.Counts, "This port is read-write.", "Writes sent to it run on MySQL", "--route-read-only")
-	must("none", got.None, "This port is read-write.")
-	must("no rule", got.NoRule, "This port is read-write.")
-	must("read-only", got.ReadOnly, "This port is read-only.", "is refused and never sent to MySQL", "Every other read runs on MySQL",
-		"7 by MySQL", "3 by the copy", "2 refused", "2 × refused: not a read, and this port is read-only")
-	must("only refusals", got.ReadOnlyOnlyRefusals, "0 by MySQL", "0 by the copy", "4 refused", "Why each side")
-	must("ro no rule", got.ReadOnlyNoRule, "This port is read-only.", "No plan threshold is set", "every read runs on MySQL")
-	for name, text := range map[string]string{"read-only": got.ReadOnly, "only refusals": got.ReadOnlyOnlyRefusals, "ro no rule": got.ReadOnlyNoRule} {
-		if strings.Contains(text, "read-write") || strings.Contains(text, "writes included") {
-			t.Errorf("%s: a read-only port is described as taking writes: %s", name, text)
+	for _, name := range []string{"on", "onReadOnly", "onNoAnswer", "onNotSet", "onFailed", "onNotAsked", "lockedOn", "counts", "noAccount"} {
+		if v := d(name); v.State != "On" || !v.IsOn || !strings.HasPrefix(v.Sentence, onSentence) {
+			t.Errorf("%s: state %q (drawn as on: %v), sentence %q; want On and %q", name, v.State, v.IsOn, v.Sentence, onSentence)
 		}
 	}
-	// Which account runs what MySQL answers (#2079): the server's forwarding
-	// user, by name, and never the account DBTrail captures with (#2317).
-	must("none", got.None, "On MySQL, statements run as report_ro", "this server's forwarding user", "whatever that account is granted", "read whatever its SELECT covers", "The account DBTrail captures with is never used by this port")
-	must("read-only", got.ReadOnly, "On MySQL, statements run as report_ro", "the permissions of the account below")
-	must("forwarding ro", got.ForwardingReadOnly, "This port is read-only.", "statements run as report_ro")
-	must("fwd no name", got.ForwardingNoName, "statements run as this server's forwarding account")
-	must("form hint", got.Hint, "Forwarding user", "SELECT only", "must be another user than the source user", "never forwards with the account DBTrail captures with", "the copy answers alone", "router service")
-	if strings.Contains(got.Hint, "forwards with the source user") {
-		t.Errorf("the form still offers the source user as what the port forwards with: %s", got.Hint)
+	if b := d("off").Buttons; len(b) != 1 || b[0] != "Turn routing on" {
+		t.Errorf("off: buttons %q, want Turn routing on", b)
 	}
-	// An account that connects somewhere else than the source says where.
-	must("elsewhere", got.Elsewhere, "statements run as report_ro", "replica.internal:3307", "not the source's address")
-	if strings.Contains(got.Forwarding, "address") {
-		t.Errorf("an account on the source's own address talks about an address: %s", got.Forwarding)
+	if b := d("on").Buttons; len(b) != 1 || b[0] != "Turn routing off" {
+		t.Errorf("on: buttons %q, want Turn routing off", b)
 	}
+	// A session that may not change settings reads the state and gets no
+	// button.
+	for _, name := range []string{"lockedOff", "lockedOn"} {
+		if b := d(name).Buttons; len(b) != 0 {
+			t.Errorf("%s: buttons %q drawn for a session that cannot press them", name, b)
+		}
+	}
+	if got.Pressed.Times != 1 || !got.Pressed.Same {
+		t.Errorf("the button, pressed once: toggle ran %d time(s), with the button itself: %v", got.Pressed.Times, got.Pressed.Same)
+	}
+	// What a write does is the router's to say (its read_only), and is said
+	// only when it answered.
+	if v := d("on"); v.Sentence != onSentence+" Writes run on MySQL too." {
+		t.Errorf("on, a read-write router: %q", v.Sentence)
+	}
+	if v := d("onReadOnly"); v.Sentence != onSentence+" A statement that would change the server is refused." {
+		t.Errorf("on, a read-only router: %q", v.Sentence)
+	}
+	for _, name := range []string{"onNoAnswer", "onNotSet", "onFailed", "onNotAsked"} {
+		if v := d(name); v.Sentence != onSentence {
+			t.Errorf("%s: with no answer from a router nothing is said of writes; got %q", name, v.Sentence)
+		}
+	}
+	for _, name := range []string{"readOnly", "readOnlyOnlyRefusals", "forwardingReadOnly", "noAccountReadOnly"} {
+		if v := d(name); strings.Contains(v.Text, "Writes run on MySQL") {
+			t.Errorf("%s: a read-only router is described as taking writes: %s", name, v.Text)
+		}
+	}
+	for _, name := range []string{"counts", "none", "forwarding"} {
+		if v := d(name); strings.Contains(v.Text, "is refused") || strings.Contains(v.Text, " refused") {
+			t.Errorf("%s: a read-write router is described as refusing: %s", name, v.Text)
+		}
+	}
+
+	// Who answered: two figures over a bar split between them, for the
+	// server picked, only when the router reports counts for it.
+	figures := func(name, wantFigs, wantAria string, wantBar ...string) {
+		t.Helper()
+		v := d(name)
+		// One bar, except with nothing to split (no wantAria): then none.
+		wantBars := 1
+		if wantAria == "" {
+			wantBars = 0
+		}
+		if v.Figs != wantFigs || v.Aria != wantAria || v.Bars != wantBars || v.Wraps != 1 || strings.Join(v.Bar, "|") != strings.Join(wantBar, "|") {
+			t.Errorf("%s: figures %q, bar %q (%d drawn, in %d drawings) read as %q; want %q, %q read as %q", name, v.Figs, v.Bar, v.Bars, v.Wraps, v.Aria, wantFigs, wantBar, wantAria)
+		}
+		// Since when the router counts is said under the figures, and each
+		// side says what it is when pointed at.
+		if !v.Since || len(v.Help) != 2 || !strings.HasPrefix(v.Help[0], "Statements the router sent to your MySQL server") || !strings.HasPrefix(v.Help[1], "Heavy reads the router answered from DBTrail's copy") {
+			t.Errorf("%s: since said: %v; what each side is: %q", name, v.Since, v.Help)
+		}
+		// One fact, once: the old sentence wording is not drawn beside it.
+		if strings.Contains(v.Text, "by MySQL") || strings.Contains(v.Text, "by the copy") {
+			t.Errorf("%s: the counts are also said the old way: %s", name, v.Text)
+		}
+	}
+	const split73 = "The copy answered 30% of the statements"
+	figures("counts", "Your MySQL 7 statements | DBTrail's copy 3 statements", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
+	if c := d("counts").Caption; c != "Who answered for shop" {
+		t.Errorf("counts: caption %q", c)
+	}
+	// The saved switch does not hide what the router counted.
+	figures("offCounts", "Your MySQL 7 statements | DBTrail's copy 3 statements", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
+	figures("lockedOn", "Your MySQL 7 statements | DBTrail's copy 3 statements", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
+	figures("noAccountCounts", "Your MySQL 7 statements | DBTrail's copy 3 statements", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
+	// Refused statements were run by neither side: said under the figures,
+	// and left out of the bar and of its share.
+	figures("readOnly", "Your MySQL 7 statements | DBTrail's copy 3 statements | 2 refused, run by neither", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
+	figures("busy", "Your MySQL 5 statements | DBTrail's copy 40 statements | 5 refused, run by neither", "The copy answered 89% of the statements", "rs-bar-mysql flex:5", "rs-bar-copy flex:40")
+	// Refusals alone are counts too: nobody answered those, the bar has
+	// nothing to split, and none is drawn (an empty bar would read as a
+	// figure).
+	figures("readOnlyOnlyRefusals", "Your MySQL 0 statements | DBTrail's copy 0 statements | 4 refused, run by neither", "")
+	figures("onlyMySQL", "Your MySQL 5 statements | DBTrail's copy 0 statements", "The copy answered 0% of the statements", "rs-bar-mysql flex:5", "rs-bar-copy flex:0")
+	figures("onlyCopy", "Your MySQL 0 statements | DBTrail's copy 8 statements", "The copy answered 100% of the statements", "rs-bar-mysql flex:0", "rs-bar-copy flex:8")
+	figures("refused", "Your MySQL 4 statements | DBTrail's copy 0 statements", "The copy answered 0% of the statements", "rs-bar-mysql flex:4", "rs-bar-copy flex:0")
+	// One is one statement, not one statements.
+	figures("oneEach", "Your MySQL 6 statements | DBTrail's copy 1 statement", "The copy answered 14% of the statements", "rs-bar-mysql flex:6", "rs-bar-copy flex:1")
+	// Another server's counts never show under the picked one, and each
+	// picked server gets its own.
+	figures("firstPicked", "Your MySQL 7 statements | DBTrail's copy 3 statements", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
+	figures("otherPicked", "Your MySQL 70 statements | DBTrail's copy 30 statements", split73, "rs-bar-mysql flex:70", "rs-bar-copy flex:30")
+	if c := d("otherPicked").Caption; c != "Who answered for billing" {
+		t.Errorf("otherPicked: caption %q", c)
+	}
+	// No counts: no figures, no bar, and never zeros. A router that did not
+	// answer, one that was not configured, a server it said nothing of, one
+	// it counted nothing for, and no server picked.
+	for _, name := range []string{"none", "zeros", "other", "noServer", "onNoAnswer", "onNotSet", "onFailed", "onNotAsked", "cannotRoute", "refusedNoCounts", "noAccount", "noAccountDown", "off"} {
+		if v := d(name); v.Figs != "" || v.Bars != 0 || v.Wraps != 0 || v.Caption != "" || v.Since || strings.Contains(v.Text, "Who answered") || strings.Contains(v.Text, "Your MySQL") || strings.Contains(v.Text, "DBTrail's copy") ||
+			strings.Contains(v.Text, "0 statements") || strings.Contains(v.Text, "by MySQL") || strings.Contains(v.Text, "by the copy") {
+			t.Errorf("%s: counts are drawn where the router gave none: %s", name, v.Text)
+		}
+	}
+
 	// #2317: a server with a source and no account of its own for the port
-	// does not route, and the page says so from the server itself, before
+	// does not route, and the switch says so from the server itself, before
 	// any client connected: none saved, the capture account saved as one, a
 	// saved value that cannot be read. Each names what to do.
-	must("no account", got.NoAccount, "the copy, always", "Routing is off for this server", "it has no forwarding account", "never forwards with the account DBTrail captures with",
-		"create a user with SELECT", "set it as the forwarding user", "opened again", "The router service refuses this server's statements")
-	must("no account ro", got.NoAccountReadOnly, "Routing is off for this server", "it has no forwarding account")
-	must("is capture", got.IsCapture, "Routing is off for this server", "saved forwarding account is the account DBTrail captures with", "set another forwarding user")
-	must("unreadable", got.Unreadable, "Routing is off for this server", "saved forwarding account cannot be read", "type the forwarding user and password again")
-	// Counts recorded earlier, or what a connection found for another
-	// reason, do not put the routing rule back on the page: the account is
-	// what to fix first.
-	must("no account, counts", got.NoAccountCounts, "Routing is off for this server", "it has no forwarding account")
-	must("no account, other note", got.NoAccountOtherNote, "Routing is off for this server", "it has no forwarding account")
-	if strings.Contains(got.NoAccountOtherNote, "SQL on the copy is unavailable") {
-		t.Errorf("a server with no forwarding account shows another reason in its place: %s", got.NoAccountOtherNote)
-	}
-	for name, text := range map[string]string{"no account": got.NoAccount, "no account ro": got.NoAccountReadOnly, "is capture": got.IsCapture, "unreadable": got.Unreadable,
-		"no account, counts": got.NoAccountCounts, "no account, other note": got.NoAccountOtherNote} {
-		// Nothing runs on MySQL for such a server, as anyone.
-		for _, bad := range []string{"statements run as", "runs on the copy when", "by MySQL", "This port is read-", "repl"} {
-			if strings.Contains(text, bad) {
-				t.Errorf("%s: a server the port does not forward for shows %q: %s", name, bad, text)
-			}
+	account := func(name string, wants ...string) {
+		t.Helper()
+		v := d(name)
+		if !strings.HasPrefix(v.Account, "For shop the copy still answers everything: ") || !strings.HasSuffix(v.Account, ".") || strings.HasSuffix(v.Account, "..") {
+			t.Errorf("%s: the line about the server's account is %q", name, v.Account)
 		}
+		must(name, v.Account, wants...)
 	}
+	account("noAccount", "it has no forwarding account", "never forwards with the account DBTrail captures with", "create a user with SELECT", "set it as the forwarding user")
+	account("noAccountReadOnly", "it has no forwarding account")
+	account("isCapture", "saved forwarding account is the account DBTrail captures with", "set another forwarding user")
+	account("unreadable", "saved forwarding account cannot be read", "type the forwarding user and password again")
+	// What the router counted, or that it did not answer, does not take the
+	// line away: the account is what to fix first.
+	account("noAccountCounts", "it has no forwarding account")
+	account("noAccountDown", "it has no forwarding account")
 	// A PostgreSQL source is not asked for a MySQL account it cannot have.
-	must("postgres", got.NoAccountPostgres, "Routing is off for this server", "its source is PostgreSQL")
-	if strings.Contains(got.NoAccountPostgres, "forwarding") || strings.Contains(got.NoAccountPostgres, "opened again") {
-		t.Errorf("a PostgreSQL source is told to set a forwarding account: %s", got.NoAccountPostgres)
+	account("noAccountPostgres", "its source is PostgreSQL", "MySQL and MariaDB sources only")
+	if v := d("noAccountPostgres"); strings.Contains(v.Account, "forwarding") {
+		t.Errorf("a PostgreSQL source is told to set a forwarding account: %s", v.Account)
+	}
+	// A server with no name is called by its id.
+	if v := d("noAccountNoName"); !strings.HasPrefix(v.Account, "For s1 the copy still answers everything: ") {
+		t.Errorf("a server with no name: %q", v.Account)
+	}
+	// No line for a server that can route, one with no source, none picked,
+	// or while routing is off (the copy answers everything then, for every
+	// server).
+	for _, name := range []string{"forwarding", "forwardingReadOnly", "forwardingNoName", "elsewhere", "noSource", "noServer", "counts", "offNoAccount", "refused"} {
+		if v := d(name); v.Account != "" || strings.Contains(v.Text, "still answers everything") {
+			t.Errorf("%s: a line about a missing account is drawn: %s", name, v.Text)
+		}
 	}
 	if want := []string{"it has no forwarding account", "", "is the account DBTrail captures with", "cannot be read", "", ""}; len(got.Missing) != len(want) {
 		t.Errorf("routeAccountMissing: %q", got.Missing)
@@ -211,28 +397,46 @@ console.log(JSON.stringify({
 			}
 		}
 	}
-	// What the source said when it turned the port's login away.
-	must("refused", got.Refused, "MySQL refused the login of the forwarding account report_ro", "MySQL error 1045", "error 2006", "Test connection")
-	must("refused 0", got.RefusedNoCounts, "MySQL refused the login of the forwarding account report_ro", "Test connection")
-	if strings.Contains(got.Forwarding, "refused the login") {
-		t.Errorf("a server with no refusal shows one: %s", got.Forwarding)
-	}
-	// No shape of the page names the capture account as one that runs
-	// statements, or promises what an account's grants decide.
-	for name, text := range map[string]string{"none": got.None, "read-only": got.ReadOnly, "forwarding": got.Forwarding, "forwarding ro": got.ForwardingReadOnly, "fwd no name": got.ForwardingNoName,
-		"counts": got.Counts, "form hint": got.Hint} {
-		for _, bad := range []string{"statements run as repl", "whatever that account can.", "never writ", "exactly the tables"} {
-			if strings.Contains(text, bad) {
-				t.Errorf("%s: holds %q: %s", name, bad, text)
-			}
+
+	// Why each side, most frequent first, in the router's words. The two
+	// reasons a LIMIT and the copy's row cap keep a statement on MySQL
+	// (#2061, #2115), and what a busy copy means on a router (#2112, #2318):
+	// refused with error 1040, where the port inside the service used to
+	// hand the statement to MySQL.
+	reasons := func(name string, want ...string) {
+		t.Helper()
+		if strings.Join(got.Why[name], "\n") != strings.Join(want, "\n") {
+			t.Errorf("%s: Why each side =\n  %s\nwant\n  %s", name, strings.Join(got.Why[name], "\n  "), strings.Join(want, "\n  "))
 		}
 	}
-	if strings.Contains(got.NoSource, "statements run as") || strings.Contains(got.Unavailable, "statements run as") {
-		t.Errorf("a server with no source names an account: %s / %s", got.NoSource, got.Unavailable)
+	reasons("counts", "5 × a cheap plan (a lookup or a small read)", "3 × an expensive plan: the copy answered", "2 × a write (INSERT, UPDATE, DELETE, DDL)")
+	reasons("limits", "4 × a small LIMIT MySQL answers without reading past it",
+		"2 × an expensive plan whose result is over the copy's row cap: MySQL answered, and the copy was not tried",
+		"1 × an expensive plan: the copy answered")
+	reasons("busy", "40 × an expensive plan: the copy answered",
+		"3 × every worker was busy and thousands of statements were already waiting, more than the router lets wait: refused with error 1040 at once",
+		"2 × every worker was busy: the statement waited 30 seconds for its turn, then was refused with error 1040")
+	reasons("readOnly", "7 × a cheap plan (a lookup or a small read)", "3 × an expensive plan: the copy answered", "2 × refused: not a read, and the router is read-only")
+	// Another server's reasons never show under the picked one.
+	reasons("other")
+	reasons("none")
+
+	// The source turned the router's login away: said with the router's
+	// numbers, with or without counts, and not for a server it let in.
+	must("refused", got.Lines["refused"], "MySQL refused the router's login for this server.", "error 2006", "The router's log names the account")
+	must("refused 0", got.Lines["refusedNoCounts"], "MySQL refused the router's login for this server.", "no statements yet")
+	if strings.Contains(got.Lines["forwarding"], "refused the router's login") {
+		t.Errorf("a server with no refusal shows one: %s", got.Lines["forwarding"])
 	}
-	for name, text := range map[string]string{"counts": got.Counts, "none": got.None, "unavailable": got.Unavailable} {
-		if strings.Contains(text, "read-only.") || strings.Contains(text, "refused") {
-			t.Errorf("%s: a read-write port is described as read-only: %s", name, text)
+
+	// The server form's hint: which account the port forwards with (#2079),
+	// never the one DBTrail captures with (#2317), and where routing is
+	// turned on now that it is a switch and not a startup flag (#2341).
+	must("form hint", got.Hint, "Forwarding user", "SELECT only", "must be another user than the source user", "never forwards with the account DBTrail captures with", "the copy answers alone",
+		"They only matter while read routing is on (Settings, MCP Server, Connect a SQL client)")
+	for _, bad := range []string{"forwards with the source user", "started with read routing", "router service", "whatever that account can.", "never writ", "exactly the tables", "—"} {
+		if strings.Contains(got.Hint, bad) {
+			t.Errorf("the form hint holds %q: %s", bad, got.Hint)
 		}
 	}
 	if want := []string{"15m", "10m", "1h", "1h30m", "1m30s", "30s", "24h"}; strings.Join(got.Durations, ",") != strings.Join(want, ",") {
