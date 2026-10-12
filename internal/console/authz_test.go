@@ -24,6 +24,7 @@ var registeredAPIPatterns = []struct{ method, pattern string }{
 	{"GET", "/api/capture-status"},
 	{"GET", "/api/uncaptured-tables"},
 	{"GET", "/api/capacity"},
+	{"GET", "/api/series"},
 	{"GET", "/api/activity"},
 	{"GET", "/api/schemas"},
 	{"GET", "/api/events"},

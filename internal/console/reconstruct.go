@@ -169,6 +169,9 @@ type capabilitiesResponse struct {
 	// Presentation-only, like Version: the Overview's "Running for" tile. The
 	// page reads it again on its slow refresh, so a restart shows as one.
 	StartedAt string `json:"started_at,omitempty"`
+	// Series: this process keeps recent readings of its own metrics, so
+	// GET /api/series answers (#2330). False on a read-only web interface.
+	Series bool `json:"series,omitempty"`
 	// Source names the selected server's source database family — "postgresql"
 	// or "mysql" — derived per-server from stream_state.flavor (the same field
 	// DialectForIndex reads). It drives source-aware PRESENTATION only: the
@@ -239,6 +242,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		MCP:       s.token != "" || s.managedTok.configured(),
 		Version:   s.version,
 		StartedAt: startedAtWire(s.startedAt),
+		Series:    s.series != nil,
 		// Default until the bundle resolves: a degraded console renders MySQL
 		// vocabulary (the common case), never a blank source.
 		Source: sourceMySQL,

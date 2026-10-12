@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/dbtrail/dbtrail/ext"
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/doctor"
@@ -138,6 +140,10 @@ type Config struct {
 	// performed (dump/refresh/restore), used by the backups detail surface to
 	// report exact durations. Nil = no history (exact durations unavailable).
 	BaselineHistory *BaselineRunHistory
+	// SeriesGatherer is the metrics registry the trend charts read (#2330).
+	// Set by the process that captures (watch), whose registry holds the
+	// numbers; nil keeps no history and GET /api/series refuses.
+	SeriesGatherer prometheus.Gatherer
 	// SchemaSnapshotCtrl re-reads a monitored source's column layout and
 	// restarts that server's stream onto the result (#1296). Wired in by
 	// `bintrail-console watch` alongside MonitorCtrl and needing no separate
@@ -482,6 +488,9 @@ type Server struct {
 	captureStatus   CaptureStatusReporter
 	sqlExport       SQLExporter
 	baselineHistory *BaselineRunHistory
+	// series keeps recent readings of the service's own metrics (#2330);
+	// nil when this process has none to read.
+	series *SeriesStore
 	// telemetry: non-nil only when a long-running console wired its live
 	// telemetry client (see Config.Telemetry), so the UI opt-out reaches it.
 	telemetry TelemetryController
@@ -783,6 +792,7 @@ func New(cfg Config) (*Server, error) {
 		captureStatus:           cfg.CaptureStatus,
 		sqlExport:               cfg.SQLExport,
 		baselineHistory:         cfg.BaselineHistory,
+		series:                  newSeriesStoreOrNil(cfg.SeriesGatherer),
 		telemetry:               cfg.Telemetry,
 		rotationDefaults:        cfg.RotationDefaults,
 		backupSettingsDefaults:  cfg.BackupSettingsDefaults,
@@ -925,6 +935,7 @@ func (s *Server) buildHandler() http.Handler {
 	api := http.NewServeMux()
 	api.HandleFunc("GET /api/status", s.handleStatus)
 	api.HandleFunc("GET /api/capacity", s.handleCapacity)
+	api.HandleFunc("GET /api/series", s.handleSeries)
 	api.HandleFunc("GET /api/coverage", s.handleCoverage)
 	api.HandleFunc("GET /api/capture-status", s.handleCaptureStatus)
 	api.HandleFunc("GET /api/uncaptured-tables", s.handleUncapturedTables)
@@ -1213,6 +1224,9 @@ func (s *Server) httpServer() *http.Server {
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	defer s.cm.CloseAll()
 	srv := s.httpServer()
+	if s.series != nil {
+		go s.series.Run(ctx)
+	}
 
 	errCh := make(chan error, 1)
 	go func() {

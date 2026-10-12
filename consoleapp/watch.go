@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 
@@ -1940,11 +1942,13 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		bootSourceFlavor = bootFlavor.get
 	}
 	return console.Config{
-		DB:      db,
-		DBName:  cfg.DBName,
-		BootDSN: indexDSN,
-		Listen:  opts.Listen,
-		Token:   opts.Token,
+		// This process captures, so its registry holds the numbers.
+		SeriesGatherer: prometheus.DefaultGatherer,
+		DB:             db,
+		DBName:         cfg.DBName,
+		BootDSN:        indexDSN,
+		Listen:         opts.Listen,
+		Token:          opts.Token,
 		// What this daemon's own capture watches (#1802).
 		BootCaptureFilter: bootCaptureFilter(),
 		// The Overview asks the source whether capture is caught up (#1794).
