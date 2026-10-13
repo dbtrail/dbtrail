@@ -331,6 +331,13 @@ func TestChangeSpill_passRowsCountsEveryDrainedRow(t *testing.T) {
 
 // The sample sees a mixed map: small deletes beside wide updates. A sample of
 // one entry would land on one shape and miss the other by far.
+//
+// The band is 60% each way, not tighter. Half the map is wide, and the wide
+// rows are nearly all the bytes, so the estimate is off by as much as the
+// wide share of the 64 sampled entries is off from a half. That share strays
+// 20 points (a 40% miss) about once in 640 draws, and this test draws 20
+// times: a 40% band failed about one run in 32. 60% is 30 points, about one
+// draw in two million. A sample of one still misses by 100% each way.
 func TestSampledChangeBytes_mixedShapes(t *testing.T) {
 	m := map[string]*query.ResultRow{}
 	var exact int64
@@ -345,7 +352,7 @@ func TestSampledChangeBytes_mixedShapes(t *testing.T) {
 	}
 	for range 20 {
 		total, _ := sampledChangeBytes(m)
-		if total < exact*6/10 || total > exact*14/10 {
+		if total < exact*4/10 || total > exact*16/10 {
 			t.Fatalf("sampled %d, exact %d: the sample does not see the mix", total, exact)
 		}
 	}

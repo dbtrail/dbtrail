@@ -88,7 +88,12 @@ func newStatusPorts(t *testing.T, mariadb bool) statusPorts {
 	if err := indexer.EnsureSchema(indexDB); err != nil {
 		t.Fatalf("EnsureSchema: %v", err)
 	}
-	testutil.SetupPartitionedTable(t, indexDB, indexName, []time.Time{hour})
+	// The hours on both sides have a partition too, as an index that rotates
+	// has. The copy below is two seconds old and the ports are asked a moment
+	// later: started within seconds of the top of an hour, one of the two
+	// falls in the neighbouring hour, and with no partition there time travel
+	// refuses the read as crossing an hour with no data.
+	testutil.SetupPartitionedTable(t, indexDB, indexName, []time.Time{hour.Add(-time.Hour), hour, hour.Add(time.Hour)})
 	snapTS := hour.Add(-time.Hour).Format("2006-01-02 15:04:05")
 	testutil.InsertSnapshot(t, indexDB, 1, snapTS, srcName, "users", "id", 1, "PRI", "int", "NO")
 	testutil.InsertSnapshot(t, indexDB, 1, snapTS, srcName, "users", "name", 2, "", "varchar", "YES")
