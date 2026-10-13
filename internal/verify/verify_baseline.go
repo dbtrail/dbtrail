@@ -505,7 +505,7 @@ func FindBaselinePair(ctx context.Context, source string) (pairs []BaselinePair,
 
 // FindBaselinePairWith is FindBaselinePair for a server that keeps its
 // snapshots in two places: source, the one it lists (a local folder that a
-// retention rule empties by age), and other, a second location holding the
+// retention rule removes the older snapshots from), and other, a second location holding the
 // same snapshots for longer (its s3:// destination; "" for none). The newest
 // snapshots, and so the tables to answer for, come from source alone. other is
 // asked only for what a table's pair needs and source no longer has: the
@@ -569,13 +569,13 @@ func FindBaselinePairWith(ctx context.Context, source, other string) (pairs []Ba
 	if err := reconstruct.UnreadableAtOrAfter(unreadable, tSecond, time.Time{}); err != nil {
 		return nil, nil, err
 	}
-	found := false // a table whose answer is not "no earlier snapshot anywhere"
+	found := false // a table whose answer is not "the one listed snapshot is its first anywhere"
 	for _, key := range keys {
 		snaps := byTable[key]
 		switch {
 		case snaps[0].SnapshotTime.Equal(tNew):
 			p, rests := pairLastRead(ctx, snaps, other)
-			if p.Settled == nil || rests.until.IsZero() {
+			if p.Settled == nil || !rests.until.Equal(tNew) {
 				found = true
 			}
 			if u := rests.unreadableIn(unreadable, p.Schema); u != nil {
@@ -703,7 +703,7 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile, other s
 		}
 		if !haveRead {
 			return settle(StatusInconclusive, fmt.Sprintf("this check needs the snapshot that last read this table from the database (%s), and it is no longer kept%s. "+
-					"The newest copy of this table was built from the recorded changes, not read from the database. "+
+					"The newest copy of this table is not a read of the database itself. "+
 					"A new full read of the database makes the table checkable", at.UTC().Format(time.RFC3339), where)),
 				restsOn{at: at, holds: fmt.Sprintf("the snapshot that last read this table from the database (%s)", at.UTC().Format(time.RFC3339))}
 		}

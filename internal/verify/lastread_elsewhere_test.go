@@ -102,7 +102,7 @@ func TestLastReadElsewhere_readIsInNeitherPlace(t *testing.T) {
 	lrLocalFolds(t, root, "orders")
 	lrWrite(t, other, lr0, "orders", lrDump(lr0, 100))
 	wantSettled(t, lrOne(t, lrFindWith(t, root, other), "orders"), StatusInconclusive,
-		lr1.Format(time.RFC3339), "no longer kept on this machine or in "+other, "was built from the recorded changes", "full read of the database")
+		lr1.Format(time.RFC3339), "no longer kept on this machine or in "+other, "is not a read of the database itself", "full read of the database")
 }
 
 // No second location: the answer names no place, and says what is kept.
@@ -110,7 +110,7 @@ func TestLastReadElsewhere_noSecondLocation(t *testing.T) {
 	root := t.TempDir()
 	lrLocalFolds(t, root, "orders")
 	p := lrOne(t, lrFindWith(t, root, ""), "orders")
-	wantSettled(t, p, StatusInconclusive, lr1.Format(time.RFC3339), "no longer kept. ", "was built from the recorded changes", "full read of the database")
+	wantSettled(t, p, StatusInconclusive, lr1.Format(time.RFC3339), "no longer kept. ", "is not a read of the database itself", "full read of the database")
 	if strings.Contains(p.Settled.Detail, "on this machine") {
 		t.Fatalf("detail names a second place when there is none: %q", p.Settled.Detail)
 	}
@@ -233,4 +233,14 @@ func TestLastReadElsewhere_unreadableLocalFolderOfThePrevious(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 	wantCompared(t, lrOne(t, lrFindWith(t, root, other), "orders"), lr0, lr1, 200)
+}
+
+// One snapshot on disk, built from the changes; its read is in the second
+// location and is the oldest there. That is the table's answer, not "nothing
+// to verify yet": the server has more than one snapshot.
+func TestLastReadElsewhere_oneSnapshotOnDiskReadIsTheOldestElsewhere(t *testing.T) {
+	root, other := t.TempDir(), t.TempDir()
+	lrWrite(t, root, lr3, "orders", lrFold(lr3, lr2, lr1, 2, 400))
+	lrWrite(t, other, lr1, "orders", lrDump(lr1, 200))
+	wantSettled(t, lrOne(t, lrFindWith(t, root, other), "orders"), StatusInconclusive, lr1.Format(time.RFC3339), "no earlier snapshot")
 }
