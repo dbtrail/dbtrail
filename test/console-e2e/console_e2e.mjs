@@ -3129,7 +3129,8 @@ try {
       const det = page.locator(".bk-detail:not([hidden])").first();
       try { await det.screenshot({ path: `${ART}/snapshot-facts-${width}.png` }); } catch (_) {}
     }
-    await page.unroute(route);
+    // "wait", for the reason written at the capabilities route further down.
+    await page.unrouteAll({ behavior: "wait" });
     await page.setViewportSize({ width: 1300, height: 1000 });
     const lines = facts[1280].texts.join("\n");
     (/Reason:/.test(lines) && /Last real read of your database/.test(lines) && /Different points-in-time/.test(lines))
@@ -6670,7 +6671,14 @@ try {
       const out = { hidden: !!(c && c.hidden), others: Array.from(document.querySelectorAll(".use-card")).filter((k) => !k.hidden).length };
       return out;
     });
-    await page.unroute(capsRoute);
+    // Not page.unroute: the page asks for its capabilities on its own clock,
+    // so one request can still be inside route.fetch() here. Removing the
+    // route then makes Playwright let that request through by itself, and the
+    // handler's fulfill fails with "Route is already handled!" from a promise
+    // nobody awaits, which ends the whole run (#2374). "wait" lets a handler
+    // that already started finish before the route goes. It removes every
+    // route on the page; no other one is live at this point.
+    await page.unrouteAll({ behavior: "wait" });
     await page.evaluate((keep) => { capsCache.sql = keep; navigate("overview"); }, keepSql);
     (hiddenCard.hidden && hiddenCard.others === 3)
       ? ok("sql: without the capability the card is not shown and the other three are")
