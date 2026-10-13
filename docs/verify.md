@@ -108,7 +108,10 @@ started, or unreadable at the time).
 
 A table is reported `inconclusive` instead of compared when:
 
-- the baseline that last read it is no longer kept;
+- the baseline that last read it is no longer kept (with both `--baseline-dir`
+  and `--baseline-s3` given, and in the console when the server has both, a
+  baseline the directory no longer keeps is read from S3 for the check, so
+  this means it is in neither place);
 - its last read is the oldest baseline that holds it, so there is nothing before
   it to compare with;
 - when the database was last read for it is not on record (a baseline that a

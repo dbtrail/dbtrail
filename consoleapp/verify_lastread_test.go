@@ -69,3 +69,25 @@ func TestRunBaselineAnchored_settledTableShownOnce(t *testing.T) {
 		t.Fatalf("results = %+v, want shop.orders once, inconclusive because its read is no longer kept", rs)
 	}
 }
+
+// The server's S3 destination reaches the pairing: a read the local folder no
+// longer keeps is looked for there, and the answer names the place.
+func TestRunBaselineAnchored_looksInTheServersS3(t *testing.T) {
+	root, other := t.TempDir(), t.TempDir()
+	read := time.Date(2026, 9, 1, 3, 0, 0, 0, time.UTC)
+	writeFoldSnapshot(t, root, read.Add(24*time.Hour), read)
+	writeFoldSnapshot(t, root, read.Add(48*time.Hour), read)
+	resolver := metadata.NewResolverFromTables(1, map[string]*metadata.TableMeta{
+		"shop.orders": {Schema: "shop", Table: "orders"},
+	})
+	s := newVerifySupervisor(context.Background(), nil, nil)
+	s.jobs["s1"] = &verifyJob{status: console.VerifyStatus{State: "running"}, mode: console.VerifyModeBaselineAnchored}
+	req := console.VerifyRequest{ServerID: "s1", BaselineDir: root, BaselineS3: other}
+	if err := s.runBaselineAnchored(req, root, nil, resolver, "idx", ""); err != nil {
+		t.Fatalf("runBaselineAnchored: %v", err)
+	}
+	rs := s.jobs["s1"].status.Results
+	if len(rs) != 1 || !strings.Contains(rs[0].Reason, "no longer kept on this machine or in "+other) {
+		t.Fatalf("results = %+v, want the answer to say it looked in %s", rs, other)
+	}
+}

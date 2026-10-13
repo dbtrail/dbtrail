@@ -300,7 +300,7 @@ func TestLastRead_readNoLongerKept(t *testing.T) {
 	lrWrite(t, root, lr1, "orders", lrFold(lr1, lr0, lr0, 1, 200))
 	lrWrite(t, root, lr2, "orders", lrFold(lr2, lr1, lr0, 2, 300))
 	pairs, _ := lrFind(t, root)
-	wantSettled(t, lrOne(t, pairs, "orders"), StatusInconclusive, lr0.Format(time.RFC3339), "no longer kept", "full backup")
+	wantSettled(t, lrOne(t, pairs, "orders"), StatusInconclusive, lr0.Format(time.RFC3339), "no longer kept", "full read of the database")
 }
 
 // 7. A fold written before the read was recorded, table rewritten: when the

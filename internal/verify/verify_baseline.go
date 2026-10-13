@@ -500,6 +500,27 @@ func AnyBaseline(ctx context.Context, source string) (bool, error) {
 // kept" over such a folder is worse than no answer for that table, but one
 // table's folder must not take every other table's check with it.
 func FindBaselinePair(ctx context.Context, source string) (pairs []BaselinePair, prevOnly []query.SchemaTable, err error) {
+	return FindBaselinePairWith(ctx, source, "")
+}
+
+// FindBaselinePairWith is FindBaselinePair for a server that keeps its
+// snapshots in two places: source, the one it lists (a local folder that a
+// retention rule empties by age), and other, a second location holding the
+// same snapshots for longer (its s3:// destination; "" for none). The newest
+// snapshots, and so the tables to answer for, come from source alone. other is
+// asked only for what a table's pair needs and source no longer has: the
+// snapshot that last read the table from the database, and the snapshot
+// before that one. Without it, a server that keeps a few hours on disk can
+// check nothing once its last full read is older than that.
+//
+// A file found in other is paired by its path there. Nothing is copied here:
+// the comparison brings an s3:// file to a temporary file for the time it
+// reads it and removes it (reconstruct.SnapshotFullTableImages), so the check
+// leaves nothing on disk.
+func FindBaselinePairWith(ctx context.Context, source, other string) (pairs []BaselinePair, prevOnly []query.SchemaTable, err error) {
+	if other == source {
+		other = ""
+	}
 	files, unreadable, err := reconstruct.ListBaselinesUnreadable(ctx, source)
 	if err != nil {
 		return nil, nil, err
@@ -547,7 +568,7 @@ func FindBaselinePair(ctx context.Context, source string) (pairs []BaselinePair,
 		snaps := byTable[key]
 		switch {
 		case snaps[0].SnapshotTime.Equal(tNew):
-			p, rests := pairLastRead(ctx, snaps)
+			p, rests := pairLastRead(ctx, snaps, other)
 			if u := rests.unreadableIn(unreadable, p.Schema); u != nil {
 				p = BaselinePair{Schema: p.Schema, Table: p.Table, Settled: &TableResult{
 					Schema: p.Schema, Table: p.Table, Status: StatusInconclusive,
@@ -608,8 +629,10 @@ func (r restsOn) unreadableIn(unreadable []reconstruct.UnreadableSnapshot, schem
 }
 
 // pairLastRead pairs one table, snaps being its snapshots newest first, and
-// says which stretch of the listing that answer rests on.
-func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile) (p BaselinePair, rests restsOn) {
+// says which stretch of the listing that answer rests on. other is the second
+// location to look in for a snapshot the listing no longer holds ("" for
+// none): see FindBaselinePairWith.
+func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile, other string) (p BaselinePair, rests restsOn) {
 	newest := snaps[0]
 	p = BaselinePair{Schema: newest.Schema, Table: newest.Table}
 	settle := func(st Status, detail string) BaselinePair {
@@ -623,57 +646,97 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile) (p Base
 		}
 		return md, nil
 	}
+	// elsewhere is the table's file in the newest snapshot of other at or
+	// before at; found is false when other holds none.
+	elsewhere := func(at time.Time) (f reconstruct.BaselineFile, found bool, err error) {
+		f, err = reconstruct.FindBaselineFile(ctx, other, p.Schema, p.Table, at)
+		if errors.Is(err, reconstruct.ErrNoBaseline) {
+			return f, false, nil
+		}
+		return f, err == nil, err
+	}
 
 	md, err := footer(newest)
 	if err != nil {
 		return settle(StatusError, err.Error()), restsOn{}
 	}
-	n, nMeta := -1, md
-	if readHere(newest.SnapshotTime, md) {
-		n = 0
-	} else {
+	read, nMeta, haveRead := newest, md, readHere(newest.SnapshotTime, md)
+	if !haveRead {
 		at := baseline.SourceReadOf(md).At
 		if at.IsZero() {
 			return settle(StatusInconclusive, "the newest copy of this table does not record when the database was last read for it. "+
 				"The next full backup makes it checkable"), restsOn{}
 		}
-		for i, f := range snaps {
+		for _, f := range snaps {
 			if f.SnapshotTime.Equal(at) {
-				n = i
+				read, haveRead = f, true
 				break
 			}
 		}
-		if n < 0 {
-			return settle(StatusInconclusive, fmt.Sprintf("the snapshot that last read this table from the database (%s) is no longer kept. "+
-					"The next full backup makes it checkable", at.UTC().Format(time.RFC3339))),
+		where := ""
+		if !haveRead && other != "" {
+			f, found, err := elsewhere(at)
+			if err != nil {
+				return settle(StatusError, fmt.Sprintf("the snapshot that last read this table from the database (%s) is no longer kept on this machine, "+
+					"and looking for it in %s failed: %v", at.UTC().Format(time.RFC3339), other, err)), restsOn{}
+			}
+			// The newest at or before the read's instant that is not OF that
+			// instant is an older snapshot: the read itself is not there.
+			if found && f.SnapshotTime.Equal(at) {
+				read, haveRead = f, true
+			}
+			where = " on this machine or in " + other
+		}
+		if !haveRead {
+			return settle(StatusInconclusive, fmt.Sprintf("this check needs the snapshot that last read this table from the database (%s), and it is no longer kept%s. "+
+					"The snapshots that are kept were built from the recorded changes, not read from the database. "+
+					"A new full read of the database makes the table checkable", at.UTC().Format(time.RFC3339), where)),
 				restsOn{at: at, holds: fmt.Sprintf("the snapshot that last read this table from the database (%s)", at.UTC().Format(time.RFC3339))}
 		}
-		if nMeta, err = footer(snaps[n]); err != nil {
+		if nMeta, err = footer(read); err != nil {
 			return settle(StatusError, err.Error()), restsOn{}
 		}
-		if !readHere(snaps[n].SnapshotTime, nMeta) {
+		if !readHere(read.SnapshotTime, nMeta) {
 			// A copy of known making where the read should be: the records of
 			// the two snapshots contradict each other.
-			switch baseline.ProvenanceOf(snaps[n].SnapshotTime, nMeta).ProducedBy {
+			switch baseline.ProvenanceOf(read.SnapshotTime, nMeta).ProducedBy {
 			case baseline.ProducedByFold, baseline.ProducedByCarriedForward:
 				return settle(StatusError, fmt.Sprintf("the newest copy of this table says the database was last read at %s, "+
 					"but the snapshot of that time holds a copy that did not read it (%s)",
-					at.UTC().Format(time.RFC3339), snaps[n].Path)), restsOn{}
+					at.UTC().Format(time.RFC3339), read.Path)), restsOn{}
 			}
 			return settle(StatusInconclusive, fmt.Sprintf("the newest copy of this table says the database was last read at %s, "+
 				"but the snapshot of that time does not say how its copy was made. The next full backup makes it checkable",
 				at.UTC().Format(time.RFC3339))), restsOn{}
 		}
 	}
-	read := snaps[n]
 	readAt := read.SnapshotTime.UTC().Format(time.RFC3339)
-	if n == len(snaps)-1 {
+	// The snapshot before the read: the newest one listed, else the newest
+	// one other holds.
+	var prev reconstruct.BaselineFile
+	havePrev := false
+	for _, f := range snaps {
+		if f.SnapshotTime.Before(read.SnapshotTime) {
+			prev, havePrev = f, true
+			break
+		}
+	}
+	where := ""
+	if !havePrev && other != "" {
+		f, found, err := elsewhere(read.SnapshotTime.Add(-time.Nanosecond))
+		if err != nil {
+			return settle(StatusError, fmt.Sprintf("no snapshot of this table earlier than its last read from the database (%s) is kept on this machine, "+
+				"and looking for one in %s failed: %v", readAt, other, err)), restsOn{}
+		}
+		prev, havePrev = f, found
+		where = ", on this machine or in " + other
+	}
+	if !havePrev {
 		return settle(StatusInconclusive, fmt.Sprintf("the last read of this table from the database (%s) is the oldest snapshot that holds it: "+
-				"there is no earlier snapshot to compare it with", readAt)),
+				"there is no earlier snapshot to compare it with%s", readAt, where)),
 			restsOn{until: read.SnapshotTime, holds: fmt.Sprintf("an earlier snapshot of this table than its last read (%s)", readAt),
 				after: "; if it holds none, the next full backup makes it checkable"}
 	}
-	prev := snaps[n+1]
 	prevMeta, err := footer(prev)
 	if err != nil {
 		return settle(StatusError, err.Error()), restsOn{}

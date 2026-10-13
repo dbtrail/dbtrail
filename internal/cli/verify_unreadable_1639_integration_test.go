@@ -84,7 +84,7 @@ func TestRunVerifyBaselinePair_newestFolderUnreadable(t *testing.T) {
 	cmd.SetOut(&out)
 	var runErr error
 	out.WriteString(captureStdout(t, func() {
-		runErr = runVerifyBaselinePair(cmd, db, resolver, dbName, baseDir, duckdbutil.Tuning{}, "")
+		runErr = runVerifyBaselinePair(cmd, db, resolver, dbName, baseDir, "", duckdbutil.Tuning{}, "")
 	}))
 	if runErr == nil {
 		t.Fatalf("an all-inconclusive run must exit non-zero; output:\n%s", out.String())

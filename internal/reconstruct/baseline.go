@@ -92,6 +92,26 @@ type StaleWarning struct {
 // Stale reports whether the baseline was a stale fallback.
 func (s StaleWarning) Stale() bool { return s.Message != "" }
 
+// FindBaselineFile is the table's file in the newest complete snapshot at or
+// before at, with the time of the snapshot directory that holds it, or
+// ErrNoBaseline. Unlike FindBaseline it does not move the time back to the
+// start of a delta chain: it is for a caller that needs to know WHICH snapshot
+// the file is in, not where to bound an event fetch from.
+func FindBaselineFile(ctx context.Context, source, schema, table string, at time.Time) (BaselineFile, error) {
+	path, dir, _, err := findBaselineIn(ctx, source, schema, table, at)
+	if err != nil {
+		return BaselineFile{}, err
+	}
+	return BaselineFile{SnapshotTime: dir, Schema: schema, Table: table, Path: path}, nil
+}
+
+func findBaselineIn(ctx context.Context, source, schema, table string, at time.Time) (string, time.Time, StaleWarning, error) {
+	if strings.HasPrefix(source, "s3://") {
+		return findBaselineS3(ctx, source, schema, table, at)
+	}
+	return findBaselineLocal(source, schema, table, at)
+}
+
 // FindBaseline finds the most recent baseline Parquet file at or before `at`
 // for the given schema and table, returning its path, snapshot timestamp, and a
 // staleness warning (#466). The warning's Message is non-empty only when the
@@ -102,11 +122,7 @@ func (s StaleWarning) Stale() bool { return s.Message != "" }
 //   - A local directory path (parent of RFC3339-named snapshot subdirectories)
 //   - An S3 URL prefix (e.g. "s3://bucket/baselines")
 func FindBaseline(ctx context.Context, source, schema, table string, at time.Time) (path string, snapshotTime time.Time, stale StaleWarning, err error) {
-	if strings.HasPrefix(source, "s3://") {
-		path, snapshotTime, stale, err = findBaselineS3(ctx, source, schema, table, at)
-	} else {
-		path, snapshotTime, stale, err = findBaselineLocal(source, schema, table, at)
-	}
+	path, snapshotTime, stale, err = findBaselineIn(ctx, source, schema, table, at)
 	if err != nil {
 		return "", time.Time{}, StaleWarning{}, err
 	}

@@ -493,7 +493,11 @@ func (s *verifySupervisor) run(req console.VerifyRequest, baselineSrc string) {
 
 func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baselineSrc string, indexDB *sql.DB, resolver *metadata.Resolver, dbName, flavor string) error {
 	ctx := s.ctx
-	pairs, prevOnly, err := verify.FindBaselinePair(ctx, baselineSrc)
+	// The folder on this machine is the one listed; a snapshot a table's pair
+	// needs and the folder no longer keeps (deleted by age) is looked for in
+	// the server's S3 destination. Nothing is left on disk: see
+	// verify.FindBaselinePairWith.
+	pairs, prevOnly, err := verify.FindBaselinePairWith(ctx, baselineSrc, req.BaselineS3)
 	if errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
 		// #1639: a folder the walk could not read sits at or after the second
 		// newest snapshot, so no pair can be trusted (an older one is each

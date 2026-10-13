@@ -123,7 +123,7 @@ func init() {
 	verifyCmd.Flags().StringVar(&vfySourceDSN, "source-dsn", "", "DSN for the live source database (MySQL DSN, or postgres:// for a PostgreSQL source); pass it for live-source mode, omit for baseline-anchored mode")
 	verifyCmd.Flags().StringVar(&vfyIndexDSN, "index-dsn", "", "DSN for the index MySQL database (required)")
 	verifyCmd.Flags().StringVar(&vfyBaselineDir, "baseline-dir", "", "Local directory of baseline Parquet snapshots")
-	verifyCmd.Flags().StringVar(&vfyBaselineS3, "baseline-s3", "", "S3 URL prefix of baseline Parquet snapshots (e.g. s3://bucket/baselines/)")
+	verifyCmd.Flags().StringVar(&vfyBaselineS3, "baseline-s3", "", "S3 URL prefix of baseline Parquet snapshots (e.g. s3://bucket/baselines/). With --baseline-dir too, the directory is the one listed and this is where a snapshot the directory no longer keeps is looked for")
 	verifyCmd.Flags().StringVar(&vfyTables, "tables", "", "Comma-separated schema.table list (default: all tables in the latest schema snapshot)")
 	verifyCmd.Flags().BoolVar(&vfyNoArchive, "no-archive", false, "Query live MySQL partitions only; skip Parquet archive discovery")
 	verifyCmd.Flags().BoolVar(&vfyExplain, "explain", false, "On a baseline-anchored mismatch, print a row-level drill-down (which primary keys diverged and how) below the report")
@@ -215,14 +215,17 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 		}
 		return runVerifyLive(cmd, indexDB, resolver, indexDBName, baselineSrc, duckTuning)
 	}
-	return runVerifyBaselinePair(cmd, indexDB, resolver, indexDBName, baselineSrc, duckTuning, flavor)
+	// With both given, the folder is the one listed and the s3:// location is
+	// where a snapshot the folder no longer keeps is looked for.
+	return runVerifyBaselinePair(cmd, indexDB, resolver, indexDBName, baselineSrc, vfyBaselineS3, duckTuning, flavor)
 }
 
 // runVerifyBaselinePair is the default, drift-free mode (#642): compare each
 // table's last read of the database with the snapshot before it
-// (verify.FindBaselinePair). It reads no live source.
-func runVerifyBaselinePair(cmd *cobra.Command, indexDB *sql.DB, resolver *metadata.Resolver, indexDBName, baselineSrc string, duckTuning duckdbutil.Tuning, flavor string) error {
-	pairs, prevOnly, err := verify.FindBaselinePair(cmd.Context(), baselineSrc)
+// (verify.FindBaselinePairWith). It reads no live source. baselineOther is a
+// second location holding the same snapshots for longer ("" for none).
+func runVerifyBaselinePair(cmd *cobra.Command, indexDB *sql.DB, resolver *metadata.Resolver, indexDBName, baselineSrc, baselineOther string, duckTuning duckdbutil.Tuning, flavor string) error {
+	pairs, prevOnly, err := verify.FindBaselinePairWith(cmd.Context(), baselineSrc, baselineOther)
 	if errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
 		return emitUnreadablePairReport(cmd, resolver, baselineSrc, err)
 	}

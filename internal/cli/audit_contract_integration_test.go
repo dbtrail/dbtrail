@@ -209,7 +209,7 @@ func TestIntegrationAuditContract_CLI(t *testing.T) {
 				// A mismatch is the point: --explain only drills down (and only
 				// emits) when the fingerprints disagree, and the command then
 				// exits non-zero by contract.
-				if err := runVerifyBaselinePair(c, db, resolver, dbName, baseDir, duckdbutil.Tuning{}, ""); err == nil {
+				if err := runVerifyBaselinePair(c, db, resolver, dbName, baseDir, "", duckdbutil.Tuning{}, ""); err == nil {
 					t.Fatal("expected a mismatch so --explain drills down")
 				}
 			},

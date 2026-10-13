@@ -90,7 +90,7 @@ func TestRunVerifyBaselinePair_NoBaselines(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 
-	err := runVerifyBaselinePair(cmd, nil, nil, "", t.TempDir(), duckdbutil.Tuning{}, "")
+	err := runVerifyBaselinePair(cmd, nil, nil, "", t.TempDir(), "", duckdbutil.Tuning{}, "")
 	if err == nil {
 		t.Fatalf("want a non-nil error (non-zero exit) for zero baselines, got nil; output:\n%s", out.String())
 	}
@@ -114,7 +114,7 @@ func TestRunVerifyBaselinePair_SingleBaseline(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 
-	err := runVerifyBaselinePair(cmd, nil, nil, "", baseDir, duckdbutil.Tuning{}, "")
+	err := runVerifyBaselinePair(cmd, nil, nil, "", baseDir, "", duckdbutil.Tuning{}, "")
 	if err != nil {
 		t.Fatalf("want nil error (exit 0) for a single baseline, got %v\noutput:\n%s", err, out.String())
 	}
@@ -144,7 +144,7 @@ func TestRunVerifyBaselinePair_TablesAbsent(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 
-	err := runVerifyBaselinePair(cmd, nil, metadata.NewResolverFromTables(1, nil), "", baseDir, duckdbutil.Tuning{}, "")
+	err := runVerifyBaselinePair(cmd, nil, metadata.NewResolverFromTables(1, nil), "", baseDir, "", duckdbutil.Tuning{}, "")
 	if err == nil {
 		t.Fatalf("want a non-nil error (non-zero exit) for an absent --tables request, got nil; output:\n%s", out.String())
 	}
@@ -176,7 +176,7 @@ func TestRunVerifyBaselinePair_SettledTableReportedOnce(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 
-	err := runVerifyBaselinePair(cmd, nil, resolver, "", baseDir, duckdbutil.Tuning{}, "")
+	err := runVerifyBaselinePair(cmd, nil, resolver, "", baseDir, "", duckdbutil.Tuning{}, "")
 	s := out.String()
 	if err == nil {
 		t.Fatalf("want a non-zero exit (nothing proven), got nil; output:\n%s", s)
@@ -214,7 +214,7 @@ func TestRunVerifyBaselinePair_NeverBaselined(t *testing.T) {
 
 	// Non-zero exit is expected here, but from the "nothing proven" gate (the
 	// only result is inconclusive), NOT from the --tables-absent error path.
-	err := runVerifyBaselinePair(cmd, nil, resolver, "", baseDir, duckdbutil.Tuning{}, "")
+	err := runVerifyBaselinePair(cmd, nil, resolver, "", baseDir, "", duckdbutil.Tuning{}, "")
 	if err == nil {
 		t.Fatalf("want a non-nil error (all-inconclusive run proves nothing), got nil; output:\n%s", out.String())
 	}
@@ -265,7 +265,7 @@ func TestRunVerifyBaselinePair_UncoveredNamesOnlyItsOwnFolders(t *testing.T) {
 			cmd.SetContext(context.Background())
 			var out bytes.Buffer
 			cmd.SetOut(&out)
-			_ = runVerifyBaselinePair(cmd, nil, resolver, "", baseDir, duckdbutil.Tuning{}, "")
+			_ = runVerifyBaselinePair(cmd, nil, resolver, "", baseDir, "", duckdbutil.Tuning{}, "")
 			if !strings.Contains(out.String(), tc.want) {
 				t.Fatalf("want %q in:\n%s", tc.want, out.String())
 			}
@@ -273,5 +273,25 @@ func TestRunVerifyBaselinePair_UncoveredNamesOnlyItsOwnFolders(t *testing.T) {
 				t.Fatalf("the reason does not name the folder %s:\n%s", locked, out.String())
 			}
 		})
+	}
+}
+
+// With a directory and a second location, a read the directory no longer
+// keeps is looked for in the second one, and the answer names it.
+func TestRunVerifyBaselinePair_LooksInTheSecondLocation(t *testing.T) {
+	baseDir, other := t.TempDir(), t.TempDir()
+	read := time.Date(2026, 9, 1, 3, 0, 0, 0, time.UTC)
+	writeMinimalFold(t, baseDir, "mydb", "orders", read.Add(24*time.Hour), read)
+	writeMinimalFold(t, baseDir, "mydb", "orders", read.Add(48*time.Hour), read)
+	resolver := metadata.NewResolverFromTables(1, map[string]*metadata.TableMeta{
+		"mydb.orders": {Schema: "mydb", Table: "orders"},
+	})
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	_ = runVerifyBaselinePair(cmd, nil, resolver, "", baseDir, other, duckdbutil.Tuning{}, "")
+	if s := out.String(); !strings.Contains(s, "on this machine or in "+other) {
+		t.Fatalf("want the answer to say it looked in %s; output:\n%s", other, s)
 	}
 }
