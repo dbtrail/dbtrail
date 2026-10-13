@@ -66,7 +66,7 @@ var composeVersionAdded = map[int]string{
 	2: "host.docker.internal on Linux: the services that reach your database map it to this machine (extra_hosts host-gateway, HOST_GATEWAY to override)",
 	3: "the router service: the MySQL port with Engine Routing, run apart from capture on port 3310",
 	4: "the MySQL port (3309) is served by the router service and no longer by this one: with an older file nothing listens on 3309, and a MySQL client that connected there is refused",
-	5: "the usage telemetry choice is kept on the state volume (BINTRAIL_TELEMETRY_DIR): with an older file it lives inside the container, so telemetry turned off in the web interface is back on after the next upgrade",
+	5: "the usage telemetry choice is kept on the state volume (BINTRAIL_TELEMETRY_DIR) and read by the router and shim services too: with an older file it lives inside the container, so telemetry turned off in the web interface is back on after the next upgrade, and those two services never follow it",
 }
 
 // composeIndexHost is the bundled index MySQL's service name in

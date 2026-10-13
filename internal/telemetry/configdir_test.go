@@ -1,6 +1,9 @@
 package telemetry
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -105,5 +108,44 @@ func TestARefusedOverrideNeverReports(t *testing.T) {
 	c := Init(Config{Version: "v0.1.0", Endpoint: "http://127.0.0.1:1/"})
 	if c.Enabled() {
 		t.Error("telemetry is reporting with a refused " + DirEnvVar + "; it must be off")
+	}
+}
+
+// TestDaemonWarnsOnARefusedOverride: a refused folder leaves telemetry off,
+// which is safe, but the operator set it to KEEP a choice somewhere and has to
+// be told it is not being kept. A daemon says so once; a missing home
+// directory, which nobody set, stays silent.
+func TestDaemonWarnsOnARefusedOverride(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		override string
+		home     string
+		wantWarn bool
+	}{
+		{name: "a relative override is reported", override: "telemetry", home: "x", wantWarn: true},
+		{name: "no override and no home is silent", override: "", home: "", wantWarn: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			if tc.home != "" {
+				t.Setenv("HOME", t.TempDir())
+			} else {
+				t.Setenv("HOME", "")
+			}
+			t.Setenv(DirEnvVar, tc.override)
+
+			var logs bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			c := Init(Config{Version: "v0.1.0", Endpoint: "http://127.0.0.1:1/", Stderr: &bytes.Buffer{}})
+			c.RunDaemon(context.Background(), "watch") // returns at once: nothing can report
+
+			got := strings.Contains(logs.String(), DirEnvVar)
+			if got != tc.wantWarn {
+				t.Errorf("warning naming %s logged = %v, want %v\nlog: %s", DirEnvVar, got, tc.wantWarn, logs.String())
+			}
+		})
 	}
 }

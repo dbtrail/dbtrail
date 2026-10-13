@@ -255,7 +255,7 @@ What a stale compose file costs:
 
 | What your file is missing | What it costs | How it looks |
 |---|---|---|
-| `BINTRAIL_TELEMETRY_DIR` on the `bintrail` service (file version 5) | the usage telemetry choice lives inside the container, so the next `up -d` that recreates it deletes the choice | **Silent.** Telemetry you turned off in the web interface, or with `telemetry off`, is on again after the upgrade. `BINTRAIL_TELEMETRY=off` and `DO_NOT_TRACK=1` in the file are not affected |
+| `BINTRAIL_TELEMETRY_DIR` on the `bintrail`, `router` and `shim` services (file version 5) | the usage telemetry choice lives inside the container, so the next `up -d` that recreates it deletes the choice | **Silent.** Telemetry you turned off in the web interface, or with `telemetry off`, is on again after the upgrade. `BINTRAIL_TELEMETRY=off` and `DO_NOT_TRACK=1` in the file are not affected |
 | the `router` service on port 3309 (file version 4) | nothing answers on the MySQL port. This version serves it from the `router` service only; the `bintrail` service no longer opens it | MySQL clients that connected to 3309 are refused. With the port turned on, `bintrail` prints a `WARNING` at startup that says so (below) |
 | the state paths on the `bintrail-state` volume | your username and password, the servers you added, and the AI connection token live inside the container, so the next `up -d` that recreates it deletes them | **Silent.** The web interface comes back asking you to create a password, exactly like a fresh install, and reports no loss. Fix this one first |
 | the read-only index mount plus `BINTRAIL_INDEX_DATADIR_RO` | free disk space for the index cannot be measured | The preflight and the Retention page report it as not measurable |
@@ -896,13 +896,18 @@ services:
       BINTRAIL_TELEMETRY: "off"     # or DO_NOT_TRACK=1
 ```
 
-Turning it off in the web interface (**Status → Usage telemetry**) works too,
-and the bundled file keeps that choice across upgrades: it sets
-`BINTRAIL_TELEMETRY_DIR` to a folder on the `bintrail-state` volume. A file
-older than version 5 does not, so the choice is deleted with the container on
-the next upgrade and telemetry is on again; take the current file (see
-"Upgrading the stack"), or use one of the two settings above, which live in
-the file and not in the container.
+That example covers the `bintrail` service only. To turn it off for every
+service at once, use the web interface (**Status → Usage telemetry**): the
+bundled file keeps that choice on the `bintrail-state` volume
+(`BINTRAIL_TELEMETRY_DIR`), where `router` and `shim` read it too, and it
+survives upgrades.
+
+A file older than version 5 does neither: the choice is deleted with the
+container on the next upgrade, and `router` and `shim` never saw it. Take the
+current file (see "Upgrading the stack"). **If you had turned telemetry off
+before, turn it off once more after that upgrade**: the earlier choice was
+inside the container the upgrade replaces. The one-shot `baseline` and
+`iceberg-export` services follow only the environment settings above.
 
 The **demo image** (`ghcr.io/dbtrail/bintrail-demo`) never reports, regardless
 of configuration — it is hard-disabled in the image and asserted by its smoke

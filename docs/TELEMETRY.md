@@ -246,10 +246,23 @@ survive an upgrade.** Use `BINTRAIL_TELEMETRY=off` or `DO_NOT_TRACK=1` in the
 container's environment, which do, or set `BINTRAIL_TELEMETRY_DIR` to a path on
 a volume.
 
-Each container has its own home directory, so the toggle in the web interface
-reaches the `bintrail` service only. Another service you run from the same
-file (the `flashback` profile, for example) keeps its own choice; the two
-environment settings above are the way to turn it off there.
+**If you had turned telemetry off before taking file version 5, turn it off
+once more after that upgrade.** The earlier choice was inside the container
+that the upgrade replaces, so there is nothing to carry over; from then on it
+is kept.
+
+Each container has its own home directory, so in the bundled file the three
+long-lived services (`bintrail`, `router`, and `shim` from the `flashback`
+profile) are all given the same folder. `router` and `shim` mount the volume
+read-only: they follow the choice and report nothing themselves. With a file
+older than version 5 they read their own empty home directory, so the toggle
+in the web interface does not reach them. The one-shot services (`baseline`,
+`iceberg-export`) do not read that folder either; `BINTRAIL_TELEMETRY=off` or
+`DO_NOT_TRACK=1` in their environment is the way to turn it off there.
+
+`bintrail telemetry status` names the folder in use, and says so when
+`BINTRAIL_TELEMETRY_DIR` was refused. A daemon logs one `WARN` line for a
+refused value.
 
 The `.deb` and `.rpm` packages are not affected: their service user's home is
 `/var/lib/bintrail`, which is kept.

@@ -171,7 +171,9 @@ func (s *Server) handleTelemetrySet(w http.ResponseWriter, r *http.Request) {
 	}
 	dir, err := telemetry.ConfigDir()
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "no config directory to record the choice")
+		// The cause is safe to show and is the only thing that tells a
+		// refused BINTRAIL_TELEMETRY_DIR apart from a missing home directory.
+		writeJSONError(w, http.StatusInternalServerError, "no folder to record the choice in: "+err.Error())
 		return
 	}
 	if err := telemetry.SetEnabled(dir, req.Enabled); err != nil {

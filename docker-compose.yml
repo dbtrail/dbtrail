@@ -596,6 +596,10 @@ services:
       # scrape it from outside. Empty in .env turns it off. The same address
       # says the router's numbers to the web interface (ROUTER_URL above).
       BINTRAIL_ROUTER_METRICS_ADDR: ${ROUTER_METRICS_ADDR-:9091}
+      # The usage telemetry choice made in the web interface, read from the
+      # state volume. The mount below is read-only, so this service follows
+      # that choice and reports nothing itself. See docs/TELEMETRY.md.
+      BINTRAIL_TELEMETRY_DIR: /var/lib/bintrail/telemetry
     # 0 = no ceiling. See ROUTER_MEMORY / ROUTER_CPUS above.
     mem_limit: ${ROUTER_MEMORY:-0}
     cpus: ${ROUTER_CPUS:-0}
@@ -674,6 +678,10 @@ services:
       # for the `mysql` CLI; set caching_sha2_password for drivers that require
       # it (those clients then need TLS or a primed SHA2 cache to the shim).
       SHIM_AUTH_METHOD: ${SHIM_AUTH_METHOD:-}
+      # The usage telemetry choice made in the web interface, read from the
+      # state volume. The mount below is read-only, so this service follows
+      # that choice and reports nothing itself. See docs/TELEMETRY.md.
+      BINTRAIL_TELEMETRY_DIR: /var/lib/bintrail/telemetry
     volumes:
       - bintrail-state:/var/lib/bintrail:ro   # read-only: baselines for _snapshot
       - bintrail-index-secret:/run/secret:ro

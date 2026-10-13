@@ -180,19 +180,22 @@ var telemetryStatusCmd = &cobra.Command{
 		if telFormat == "json" {
 			// With no home directory there is no spool; emit empty rather than
 			// a bare relative path that looks like a real location.
-			spool := ""
+			spool, dirProblem := "", ""
 			if dirErr == nil {
 				spool = telemetry.SpoolDir(dir)
+			} else {
+				dirProblem = dirErr.Error()
 			}
 			return cliutil.OutputJSON(map[string]any{
-				"reporting":      reporting,
-				"consent":        decision.Enabled,
-				"decided_by":     string(decision.Source),
-				"endpoint_set":   ep != "",
-				"ci_detected":    isCI,
-				"config_dir":     dir,
-				"spool_dir":      spool,
-				"schema_version": telemetry.SchemaVersion,
+				"reporting":        reporting,
+				"consent":          decision.Enabled,
+				"decided_by":       string(decision.Source),
+				"endpoint_set":     ep != "",
+				"ci_detected":      isCI,
+				"config_dir":       dir,
+				"config_dir_error": dirProblem,
+				"spool_dir":        spool,
+				"schema_version":   telemetry.SchemaVersion,
 			})
 		}
 
@@ -201,8 +204,14 @@ var telemetryStatusCmd = &cobra.Command{
 			state = "ON"
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Telemetry:    %s\n", state)
-		fmt.Fprintf(cmd.OutOrStdout(), "Consent:      %s (decided by: %s)\n",
-			onOff(decision.Enabled), decision.Source)
+		if dirErr != nil && decision.Source == telemetry.SourceDefault {
+			// "on, by default" would be a guess: the file that may hold an
+			// explicit choice could not be looked for.
+			fmt.Fprintln(cmd.OutOrStdout(), "Consent:      not readable (the consent file's folder is unavailable, see below)")
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "Consent:      %s (decided by: %s)\n",
+				onOff(decision.Enabled), decision.Source)
+		}
 		if ep == "" {
 			fmt.Fprintln(cmd.OutOrStdout(), "Endpoint:     not compiled in; this build cannot send anything")
 		} else {
@@ -212,7 +221,9 @@ var telemetryStatusCmd = &cobra.Command{
 			fmt.Fprintln(cmd.OutOrStdout(), "CI detected:  yes; reporting suppressed regardless of consent")
 		}
 		if dirErr != nil {
-			fmt.Fprintln(cmd.OutOrStdout(), "Config dir:   unavailable (no home directory); telemetry disabled")
+			// The cause is printed as it is: "no home directory" and "the
+			// override is not an absolute path" are fixed in different places.
+			fmt.Fprintf(cmd.OutOrStdout(), "Config dir:   unavailable (%v); telemetry disabled\n", dirErr)
 		} else {
 			fmt.Fprintf(cmd.OutOrStdout(), "Spool:        %s\n", telemetry.SpoolDir(dir))
 		}

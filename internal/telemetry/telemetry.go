@@ -139,6 +139,8 @@ func Init(cfg Config) (c *Client) {
 		// operator did not ask about.
 		if d, err := ConfigDir(); err == nil {
 			dir = d
+		} else {
+			debugf("no config directory, telemetry disabled: %v", err)
 		}
 	}
 	stderr := cfg.Stderr
@@ -327,6 +329,7 @@ func (c *Client) RunDaemon(ctx context.Context, daemon string) {
 	// without a restart; Beacon and drainOnce no-op while consent is off.
 	if !c.canEverReport() {
 		debugf("daemon %q: telemetry can never report in this build/environment; loop not started", daemon)
+		warnRefusedDir(c)
 		return
 	}
 	defer func() {
@@ -361,6 +364,20 @@ func (c *Client) RunDaemon(ctx context.Context, daemon string) {
 			c.Beacon(daemon)
 			c.drainOnce()
 		}()
+	}
+}
+
+// warnRefusedDir tells a daemon's operator that DirEnvVar was set and could
+// not be honoured. Without it the setting fails in silence: telemetry is off,
+// which is safe, but the choice the operator meant to keep on a volume is not
+// being kept there, and nothing else says so. Daemons only: a one-shot
+// command must not grow a log line about a subsystem nobody asked about.
+func warnRefusedDir(c *Client) {
+	if c == nil || c.dir != "" || strings.TrimSpace(os.Getenv(DirEnvVar)) == "" {
+		return
+	}
+	if _, err := ConfigDir(); err != nil {
+		slog.Warn("usage telemetry is off: its folder setting was refused", "error", err.Error())
 	}
 }
 

@@ -11,10 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on after an upgrade.** The choice was saved inside the container, and an
   upgrade replaces the container. The bundled `docker-compose.yml` (now file
   version 5) keeps it on the state volume through a new setting,
-  `BINTRAIL_TELEMETRY_DIR`. **Take the current file when you upgrade**, or the
-  choice is still lost; the daemon tells you at startup when your file is
-  older. `BINTRAIL_TELEMETRY=off` and `DO_NOT_TRACK=1` were never affected,
-  and neither were the `.deb` and `.rpm` packages.
+  `BINTRAIL_TELEMETRY_DIR`, and gives the `router` and `shim` services the
+  same folder, so the toggle now reaches them too (it did not before).
+  **Take the current file when you upgrade, and if you had turned telemetry
+  off, turn it off once more afterwards**: the earlier choice is in the
+  container this upgrade replaces. With a numbered older file the daemon
+  names what is missing at startup. `BINTRAIL_TELEMETRY=off` and
+  `DO_NOT_TRACK=1` were never affected, and neither were the `.deb` and
+  `.rpm` packages.
 ### Changed
 - **Read routing is now called Engine Routing, and it is no longer
   experimental.** The switch on **Settings → MySQL clients** picks the
