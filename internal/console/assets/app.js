@@ -5290,17 +5290,35 @@ function openBusyModal(form, opts) {
   const panel = el("div", { class: "modal busy-modal", role: "dialog", "aria-label": opts.title, "aria-busy": "true" });
   panel.append(el("div", { class: "modal-head" }, el("h2", { class: "modal-title", text: opts.title })));
   const body = el("div", { class: "modal-body" });
-  body.append(el("div", { class: "busy-anim", "aria-hidden": "true" }, el("span"), el("span"), el("span")));
-  // The reduced-motion arm: CSS swaps the animation for this static note.
-  body.append(el("p", { class: "busy-static", text: "Working. This closes when the result is ready." }));
-  const facts = el("div", { class: "busy-facts" });
-  (opts.facts || []).forEach(([k, v]) => facts.append(el("div", { class: "busy-fact" },
-    el("span", { class: "bf-k", text: k }), el("span", { class: "bf-v", text: v }))));
-  body.append(facts);
+  // A caller with a wait worth drawing (Explain: minutes) passes its own
+  // scene, which stands where the three dots and the facts do.
+  let tick = 0;
+  if (opts.scene) {
+    panel.classList.add("busy-drawn");
+    body.append(opts.scene);
+    // The time waited so far: on a wait of minutes, a number that moves is
+    // what says the page is alive. Not progress, which nobody knows here.
+    const t0 = Date.now();
+    const clock = el("p", { class: "busy-clock", "aria-hidden": "true", text: "0:00" });
+    tick = setInterval(() => {
+      const sec = Math.floor((Date.now() - t0) / 1000);
+      clock.textContent = Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0");
+    }, 1000);
+    body.append(clock);
+  } else {
+    body.append(el("div", { class: "busy-anim", "aria-hidden": "true" }, el("span"), el("span"), el("span")));
+    // The reduced-motion arm: CSS swaps the animation for this static note.
+    body.append(el("p", { class: "busy-static", text: "Working. This closes when the result is ready." }));
+    const facts = el("div", { class: "busy-facts" });
+    (opts.facts || []).forEach(([k, v]) => facts.append(el("div", { class: "busy-fact" },
+      el("span", { class: "bf-k", text: k }), el("span", { class: "bf-v", text: v }))));
+    body.append(facts);
+  }
   body.append(el("p", { class: "busy-note", text: opts.note ||
     "Reading indexed changes: a window that reaches archived hours can take a few seconds." }));
+  if (opts.fine) body.append(el("p", { class: "busy-note busy-fine", text: opts.fine }));
   const foot = el("div", { class: "modal-foot" });
-  const cancelBtn = el("button", { class: "btn", type: "button", text: "Cancel", onclick: () => cancel() });
+  const cancelBtn = el("button", { class: "btn", type: "button", text: opts.cancelText || "Cancel", onclick: () => cancel() });
   foot.append(cancelBtn);
   body.append(foot);
   panel.append(body);
@@ -5343,6 +5361,7 @@ function openBusyModal(form, opts) {
   const teardown = () => {
     if (closed) return false;
     closed = true;
+    clearInterval(tick);
     document.removeEventListener("keydown", onKey, true);
     scrim.remove();
     actions.forEach((b) => { b.disabled = false; });
@@ -5372,6 +5391,7 @@ function openBusyModal(form, opts) {
         return;
       }
       panel.setAttribute("aria-busy", "false");
+      clearInterval(tick);
       panel.classList.add("busy-failed");
       body.insertBefore(el("div", { class: "busy-error", role: "alert" },
         el("p", { class: "busy-error-title", text: opts.errTitle }),
@@ -13476,6 +13496,26 @@ function renderVerifyResults(container, status, id, opts) {
   container.append(rows);
 }
 
+// verifyExplainScene draws what the Explain wait is doing: the table rebuilt
+// from the older snapshot and the recorded changes on one side, what the
+// database held on the other, read row by row. The rows are a picture, not
+// data: two of them are marked because the check already said they differ
+// somewhere, not because these are the ones.
+function verifyExplainScene(schema, table) {
+  const sheet = (cap, marks) => {
+    const rows = el("div", { class: "ds-rows" });
+    for (let i = 0; i < 6; i++) rows.append(el("span", { class: marks.includes(i) ? "ds-row ds-diff" : "ds-row" }));
+    return el("div", { class: "ds-side" }, el("div", { class: "ds-sheet" }, rows), el("span", { class: "ds-cap", text: cap }));
+  };
+  return el("div", { class: "busy-scene" },
+    el("p", { class: "busy-hero", text: schema + "." + table }),
+    el("div", { class: "diff-scene", role: "img",
+      "aria-label": "The table rebuilt from the older snapshot and the recorded changes, compared row by row with what your database held." },
+      sheet("Rebuilt from the changes", [1, 4]),
+      el("span", { class: "ds-vs", "aria-hidden": "true", text: "\u2260" }),
+      sheet("What your database held", [1, 4])));
+}
+
 // openVerifyExplain shows the row-level drill-down for one mismatched table,
 // re-using the modal chrome showRotationDialog established. The server
 // computes it in the background (#1375), so most of this is the wait: a busy
@@ -13486,12 +13526,12 @@ async function openVerifyExplain(id, schema, table, btn) {
   const gen = serverGen;
   const ctrl = new AbortController();
   const busy = openBusyModal(null, {
-    title: "Working out what differs",
+    title: "Finding the rows that differ",
     errTitle: "Couldn't explain this mismatch",
-    facts: [["table", schema + "." + table]],
-    note: "Rebuilding this table from the older snapshot and its change log to diff it row by row: minutes on a large table. " +
-      "The work continues on the server; closing this only stops the waiting. " +
-      "A new verify run discards drill-downs from the previous one; Explain is unavailable until a baseline-anchored run reports this table as a mismatch again.",
+    scene: verifyExplainScene(schema, table),
+    note: "A large table takes minutes. You can close this: the work keeps going on the server.",
+    fine: "Running a new check discards this result.",
+    cancelText: "Stop waiting",
     disable: btn ? [btn] : [],
     onCancel: () => ctrl.abort(),
   });
