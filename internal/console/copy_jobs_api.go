@@ -39,11 +39,15 @@ type copyJobDTO struct {
 	Repeats bool `json:"repeats,omitempty"`
 	// Published: the run left a snapshot. A failed run can have one (only
 	// its upload failed), which is why this is not derived from Outcome.
-	Published bool  `json:"published,omitempty"`
-	Tables    int   `json:"tables,omitempty"`
-	Carried   int   `json:"carried,omitempty"`
-	S3Copied  int   `json:"s3_copied,omitempty"`
-	Rows      int64 `json:"rows,omitempty"`
+	Published bool `json:"published,omitempty"`
+	// SnapshotTime names the snapshot the run left (RFC3339 UTC), so the page
+	// can draw the job on that snapshot's own line. Empty with Published
+	// false, and the list of snapshots already shows every such instant.
+	SnapshotTime string `json:"snapshot_time,omitempty"`
+	Tables       int    `json:"tables,omitempty"`
+	Carried      int    `json:"carried,omitempty"`
+	S3Copied     int    `json:"s3_copied,omitempty"`
+	Rows         int64  `json:"rows,omitempty"`
 	// Events: see BaselineRunRecord.Events. Zero is "not measured", never
 	// "no changes".
 	Events     int64  `json:"events,omitempty"`
@@ -59,8 +63,8 @@ func copyJobFromRecord(r BaselineRunRecord, restricted bool) copyJobDTO {
 	d := copyJobDTO{
 		Kind: r.Kind, Trigger: r.Trigger, Outcome: CopyJobOK,
 		StartedAt: r.StartedAt, FinishedAt: r.FinishedAt,
-		Published: r.SnapshotTime != "",
-		Tables:    r.Tables, Carried: r.Carried, S3Copied: r.S3Copied,
+		Published: r.SnapshotTime != "", SnapshotTime: r.SnapshotTime,
+		Tables: r.Tables, Carried: r.Carried, S3Copied: r.S3Copied,
 		Rows: r.Rows, Events: r.Events,
 		Why: r.Why, SkipReason: r.SkipReason, Error: r.Error,
 	}

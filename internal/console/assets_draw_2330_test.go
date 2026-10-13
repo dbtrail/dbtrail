@@ -22,15 +22,14 @@ const cases = JSON.parse(process.argv[3]);
 const out = { jobs: {}, trends: {}, router: {} };
 for (const [name, payload] of Object.entries(cases.jobs)) {
   const m = call("copyJobsModel")(payload);
-  const card = call("copyJobsCard")(m);
+  const card = call("copyJobsParts")(m);
   out.jobs[name] = {
     state: m.state, ran: m.ran, failed: m.failed, skipped: m.skipped, longest: m.longest,
     rows: m.rows.map((r) => [r.label, r.took, r.outcome, r.qty, r.detail].join("|")),
     ticks: m.ticks.map((t) => t.label), bars: m.bars.map((b) => b.tone + ":" + (b.h > 0 ? "h" : "0")),
     legend: m.legend.map((l) => l.label),
     screen: text(card), tips: texts(card, "cj-tip"), notes: texts(card, "cj-note"),
-    shown: find(card, "cj-list")[0] ? find(find(card, "cj-list")[0], "cj-row").length : 0,
-    more: find(card, "cj-more").map((d) => text(d.children[0])),
+    bars_drawn: find(card, "cj-bar").length, lines: find(card, "stg-row").length,
   };
 }
 for (const [name, c] of Object.entries(cases.trends)) {
@@ -56,8 +55,10 @@ type drawJobsOut struct {
 	Legend               []string
 	Screen               string
 	Tips, Notes          []string
-	Shown                int
-	More                 []string
+	// The bars drawn, and the list lines in the drawing: the list is the
+	// list of snapshots, which the card draws itself, so there are none.
+	BarsDrawn int `json:"bars_drawn"`
+	Lines     int
 }
 
 type drawTrendOut struct {
@@ -259,8 +260,8 @@ func TestDrawings2330(t *testing.T) {
 				t.Errorf("explanation %q", tip)
 			}
 		}
-		if m.Shown != 8 || len(m.More) != 1 || m.More[0] != "2 earlier" {
-			t.Errorf("shown %d, fold %v", m.Shown, m.More)
+		if m.BarsDrawn != 10 || m.Lines != 0 {
+			t.Errorf("%d bars drawn, %d list lines in the drawing", m.BarsDrawn, m.Lines)
 		}
 		for _, bad := range []string{"0 changes", "0 rows", "not a time", "NaN", "undefined", "null"} {
 			if strings.Contains(m.Screen, bad) {
@@ -278,8 +279,8 @@ func TestDrawings2330(t *testing.T) {
 			}
 		}
 		full := out.Jobs["full"]
-		if !has(full.Notes, "The last 40 are kept.") || full.Shown != 8 || full.More[0] != "32 earlier" {
-			t.Errorf("full: notes %v shown %d fold %v", full.Notes, full.Shown, full.More)
+		if !has(full.Notes, "The last 40 are kept.") || full.BarsDrawn != 40 {
+			t.Errorf("full: notes %v, %d bars", full.Notes, full.BarsDrawn)
 		}
 		// The reason is missing because of the reader's profile: said when a
 		// row lacks one, not when nothing failed.

@@ -2804,6 +2804,9 @@ try {
       return {
         unread: /could not be read/.test(txt(takeUnread)),
         unreadOpen: !!takeUnread && !!takeUnread.open,
+        // The panel sits on a tab that is closed on arrival, so it also
+        // carries the mark the page reads to put a dot on that tab.
+        unreadOwed: !!takeUnread && takeUnread.dataset.owed === "1",
         unknown: /does not recognise: weird/.test(txt(takeUnknown)),
         unknownOpen: !!takeUnknown && !!takeUnknown.open,
         laneSub: txt(sqlFailed),
@@ -2831,7 +2834,7 @@ try {
   const pFull = outcome.full, pView = outcome.viewer;
   (pFull.schedFailed && pFull.schedForm && pFull.sqlFailed && pFull.sqlBuild && /Ready/.test(pFull.sqlReadyText) && pFull.sqlReadyDownload
     && pFull.sqlStaging && pFull.sqlBuildAgain && pFull.restoreFailed && pFull.restoreButton
-    && pFull.unread && pFull.unreadOpen && pFull.unknown && pFull.unknownOpen
+    && pFull.unread && pFull.unreadOpen && pFull.unreadOwed && pFull.unknown && pFull.unknownOpen
     && /whatever moment you pick/.test(pFull.laneSub) && pFull.restoreHead === "Restore to a moment")
     ? ok("permissions: with full access the failing fixtures draw their outcome and their controls (control case)")
     : bad("permissions: with full access the failing fixtures draw their outcome and their controls (control case)", JSON.stringify(pFull));
@@ -2839,7 +2842,7 @@ try {
     && pView.sqlFailed && !pView.sqlBuild && /Built for/.test(pView.sqlReadyText) && !/Ready/.test(pView.sqlReadyText) && !pView.sqlReadyDownload
     && pView.sqlStaging && !pView.sqlBuildAgain && !pView.sqlIdle && pView.takeOpen
     && pView.restoreFailed && !pView.restoreButton && !pView.restoreIdle
-    && pView.unread && pView.unreadOpen && pView.unknown && pView.unknownOpen
+    && pView.unread && pView.unreadOpen && pView.unreadOwed && pView.unknown && pView.unknownOpen
     && !/whatever moment you pick/.test(pView.laneSub) && pView.restoreHead === "Last restore")
     ? ok("permissions: a view-only session is still told a scheduled run, a .sql build or a restore failed, without the controls")
     : bad("permissions: a view-only session is still told a scheduled run, a .sql build or a restore failed, without the controls", JSON.stringify(pView));
@@ -3038,12 +3041,12 @@ try {
     out.expandable = !!row;
     if (row) {
       row.click();
-      for (let i = 0; i < 40 && !/file\(s\)/.test(v.querySelector(".bk-detail").textContent); i++) {
+      for (let i = 0; i < 40 && !v.querySelector(".bk-detail .bk-tables"); i++) {
         await new Promise((r) => setTimeout(r, 100));
       }
       const det = v.querySelector(".bk-detail");
       out.detailText = det ? det.textContent : "";
-      out.detailTables = det ? det.querySelectorAll(".bk-table tbody tr").length : 0;
+      out.detailTables = det ? det.querySelectorAll(".bk-tables .bk-trow:not(.bk-thead)").length : 0;
       out.detailHasDownload = det ? Array.from(det.querySelectorAll("button")).some((b) => /Download/.test(b.textContent)) : false;
     }
     // The download wire: real bytes, gzip magic, attachment filename.
@@ -3323,7 +3326,7 @@ try {
   // cannot pass; the lane above still downloads the file itself.
   const dkGone = await page.evaluate(() => {
     const titles = Array.from(document.querySelectorAll(".view .ov-panel-title")).map((t) => t.textContent);
-    return { listed: titles.some((t) => /^Snapshots\b/.test(t)), card: titles.includes("Download a DuckDB schema") };
+    return { listed: !!document.querySelector(".view .stg-list .stg-row"), card: titles.includes("Download a DuckDB schema") };
   });
   (dkGone.listed && !dkGone.card)
     ? ok("snapshots: the DuckDB schema card is not here (it lives on MCP Server)")
@@ -3333,10 +3336,10 @@ try {
   // function and the clamp in isolation and read the call site as text; their
   // COMPOSITION is what a literal page argument breaks, and only rendering
   // catches that. The fixture index carries one snapshot, so the list is
-  // handed eight synthetic ones instead.
+  // handed eleven synthetic ones instead.
   const paged = await page.evaluate(() => {
     const snaps = [];
-    for (let i = 0; i < 8; i++) snaps.push({ time: "2026-06-1" + i + " 12:00:00", age_hours: i });
+    for (let i = 0; i < 11; i++) snaps.push({ time: "2026-06-" + (10 + i) + " 12:00:00", age_hours: i });
     const keep = backupsPage;
     const read = (idx) => {
       backupsPage = { server: currentServer, index: idx };
@@ -3351,9 +3354,9 @@ try {
     backupsPage = keep;
     return { p0: p0, p1: p1 };
   });
-  (paged.p0.rows.length === 5 && paged.p1.rows.length === 3)
-    ? ok("snapshots paging: five rows a page, and the last page holds the remainder")
-    : bad("snapshots paging: five rows a page, and the last page holds the remainder",
+  (paged.p0.rows.length === 8 && paged.p1.rows.length === 3)
+    ? ok("snapshots paging: eight rows a page, and the last page holds the remainder")
+    : bad("snapshots paging: eight rows a page, and the last page holds the remainder",
         JSON.stringify({ p0: paged.p0.rows.length, p1: paged.p1.rows.length }));
   // The composition is what a literal page argument breaks: the window has to
   // MOVE. Page two showing page one's rows is the shape that passed every
@@ -3368,7 +3371,7 @@ try {
     ? ok("snapshots paging: only the real newest snapshot wears the treatment")
     : bad("snapshots paging: only the real newest snapshot wears the treatment",
         JSON.stringify({ p0: paged.p0.latest, p1: paged.p1.latest }));
-  (/^1.5 of 8$/.test(paged.p0.pager) && /^6.8 of 8$/.test(paged.p1.pager))
+  (/^1.8 of 11$/.test(paged.p0.pager) && /^9.11 of 11$/.test(paged.p1.pager))
     ? ok("snapshots paging: the pager says which rows are on screen")
     : bad("snapshots paging: the pager says which rows are on screen",
         JSON.stringify({ p0: paged.p0.pager, p1: paged.p1.pager }));
@@ -3698,7 +3701,7 @@ try {
   await page.evaluate(() => navigate("snapshots"));
   await page.waitForFunction(() => location.pathname === "/snapshots"
     && Array.from(document.querySelectorAll("h1.page-title")).some((h) => /Snapshots/.test(h.textContent))
-    && Array.from(document.querySelectorAll(".ov-panel-title")).some((h) => /Snapshots/.test(h.textContent))
+    && !!document.querySelector("#snap-versions .stg-list")
     && document.querySelectorAll(".vfy-region").length >= 3
     && !!document.querySelector(".bks-erow"));
   const snapSections = await page.evaluate(() => Array.from(document.querySelectorAll(".snap-sect")).map((h) => [h.id, h.textContent]));

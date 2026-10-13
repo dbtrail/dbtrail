@@ -146,28 +146,54 @@ func TestViewsFileIsNamedFromOneConstant(t *testing.T) {
 
 // A panel nobody mounts answers nothing. This is the wiring half: the guards
 // above prove the lanes are right, not that a reader ever sees them.
-func TestTakeAwayPanelIsMountedAboveTheList(t *testing.T) {
-	body := stripJSLineComments(functionBody(t, readAsset(t, "app.js"), "async function renderSnapshots("))
+func TestTakeAwayPanelIsMountedOnItsOwnTab(t *testing.T) {
+	js := readAsset(t, "app.js")
+	body := stripJSLineComments(functionBody(t, js, "async function renderSnapshots("))
 	// the append, not backupTakeAway(: dropping only the append leaves the
 	// call sitting there, and a guard that reads the call reports a panel
-	// that no reader can see. Since round 3 the lanes live on the Versions
-	// tab, above the list.
-	mount := strings.Index(body, "tabs.panels.versions.append(takeAway)")
-	list := strings.Index(body, "baselinesPanel(")
-	// The panel the lanes go into must itself reach the page, or the mount
-	// above is into a node nobody sees.
-	if !strings.Contains(body, "v.append(tabs.panels.versions)") {
-		t.Error("the Versions panel is never appended to the view")
-	}
-	switch {
-	case mount < 0:
+	// that no reader can see. The lanes have the Download tab to themselves:
+	// above the list of snapshots they pushed it off the screen.
+	if !strings.Contains(body, "tabs.panels.download.append(takeAway)") {
 		t.Fatal("Snapshots no longer mounts backupTakeAway: the Parquet download goes back " +
 			"inside a row expand, and the .sql builder leaves the page entirely — backupTakeAway " +
 			"is its only caller")
-	case list < 0:
-		t.Fatal("Snapshots no longer mounts baselinesPanel")
-	case mount > list:
-		t.Error("the two lanes render BELOW the snapshots list. They are the answer to why the page " +
-			"was opened; the list is how you pick a different one")
+	}
+	// The panel the lanes go into must itself reach the page, and the bar
+	// must offer its tab, or the mount above is into a node nobody sees.
+	if !strings.Contains(body, "v.append(tabs.panels.download)") {
+		t.Error("the Download panel is never appended to the view")
+	}
+	if !strings.Contains(body, "download: !!takeAway") {
+		t.Error("the tab bar is not told whether there are lanes to show, so the Download tab is never offered")
+	}
+	if !strings.Contains(functionBody(t, js, "function snapshotTabs("), `["download", "Download"]`) {
+		t.Error("the tab bar has no Download tab")
+	}
+	if strings.Contains(body, "tabs.panels.versions.append(takeAway)") {
+		t.Error("the lanes are back above the list of snapshots")
+	}
+	if !strings.Contains(body, "v.append(tabs.panels.versions)") || !strings.Contains(body, "baselinesPanel(") {
+		t.Error("Snapshots no longer mounts the list of snapshots on Versions")
+	}
+}
+
+// The lanes sit on a tab that is closed on arrival, so an outcome waiting
+// there (a .sql build that failed, one ready and not yet downloaded) has to
+// reach the tab itself: without the dot a reader who comes back to the page
+// lands on Versions and nothing says a build is waiting.
+func TestTakeAwayOutcomeMarksTheDownloadTab(t *testing.T) {
+	js := readAsset(t, "app.js")
+	take := stripJSLineComments(functionBody(t, js, "function backupTakeAway("))
+	if !strings.Contains(take, `if (owed) panel.dataset.owed = "1";`) {
+		t.Error("backupTakeAway no longer says on the panel that an outcome is waiting")
+	}
+	body := stripJSLineComments(functionBody(t, js, "async function renderSnapshots("))
+	read := strings.Index(body, "takeAway.dataset.owed ? tabs.bar.querySelector('.snap-tab[data-tab=\"download\"]')")
+	if read < 0 {
+		t.Fatal("renderSnapshots no longer looks up the Download tab when the take-away panel has an outcome waiting")
+	}
+	rest := body[read:]
+	if end := strings.Index(rest, "});"); end < 0 || !strings.Contains(rest[:end], `t.classList.add("has-alarm")`) {
+		t.Error("the Download tab is found and never marked: an outcome waits behind a tab with no dot")
 	}
 }

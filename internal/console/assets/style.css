@@ -2234,10 +2234,6 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
    the Download button stays at its right, or drops under it on a phone. */
 .bk-fact-list { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .bk-fact { color: var(--ink-2); overflow-wrap: anywhere; }
-.bk-facts > .btn { flex: none; }
-.bk-table { border-collapse: collapse; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
-.bk-table th { text-align: left; font-weight: 600; padding: 2px 18px 2px 0; color: var(--ink-3); }
-.bk-table td { padding: 2px 18px 2px 0; }
 .bk-restore-body { padding: 8px 2px 2px; }
 /* #1528: the schedule and the restore stopped being folds, so their body is
    no longer indented by a <summary>, and they take the gutter every other
@@ -3526,30 +3522,90 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 .cj-axis { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 8px; font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .cj-legend { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
 .cj-key { display: inline-flex; align-items: center; }
-.cj-list { margin-top: 22px; }
-.cj-row { display: grid; grid-template-columns: 120px 170px 84px minmax(0, 1fr); gap: 14px; align-items: baseline; padding: 9px 0; border-top: 1px solid var(--line-soft); font-size: 13px; }
-.cj-kind { color: var(--ink); font-weight: 500; white-space: nowrap; }
-.cj-at, .cj-took { color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.cj-what { display: flex; gap: 10px; align-items: baseline; min-width: 0; color: var(--ink-2); }
 .cj-qty { white-space: nowrap; font-variant-numeric: tabular-nums; }
-.cj-detail { color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .cj-out { font-weight: 600; }
 .cj-out.failed { color: var(--error); }
 .cj-out.skipped { color: var(--warn); }
 .cj-note { margin: 12px 0 0; font-size: 12px; color: var(--ink-3); }
 @media (max-width: 720px) {
-  .cj-row { grid-template-columns: 1fr auto; row-gap: 2px; }
-  .cj-what { grid-column: 1 / -1; flex-wrap: wrap; }
-  .cj-detail { white-space: normal; }
   .cj-num { font-size: 44px; }
 }
-.cj-rest { margin-top: 0; }
-.cj-more { border-top: 1px solid var(--line-soft); }
-.cj-more > summary { cursor: pointer; padding: 10px 0; font-size: 13px; color: var(--ink-3); list-style: none; }
-.cj-more > summary::-webkit-details-marker { display: none; }
-.cj-more > summary::after { content: " ▾"; }
-.cj-more[open] > summary::after { content: " ▴"; }
-.cj-more > summary:hover { color: var(--ink); }
+/* ── Snapshots: one card, the jobs drawn and the list of snapshots under them ── */
+.snap-one .cj-top + * { margin-top: 20px; }
+.snap-one .form-hint, .snap-one .bk-retention { margin-left: 0; }
+.snap-one .stg-list { padding: 0; margin-top: 22px; }
+.stg-row.snap-row {
+  display: grid; grid-template-columns: 124px 172px 82px 62px minmax(0, 1fr) auto 14px; gap: 14px; align-items: center;
+  min-height: 46px; padding: 0 12px; border-bottom: 0; border-top: 1px solid var(--line-soft); font-size: 13px;
+}
+.snap-row.bk-expandable { cursor: pointer; transition: background .12s ease; }
+.snap-row.stg-row-latest, .snap-row.stg-row-latest + .bk-detail + .snap-row, .snap-row[aria-expanded="true"] { border-top-color: transparent; }
+.snap-row[aria-expanded="true"] { background: var(--inset); border-radius: var(--radius) var(--radius) 0 0; }
+.snap-row.stg-row-latest[aria-expanded="true"] { background: var(--violet-tint); }
+.snap-kind { display: inline-flex; align-items: center; color: var(--ink); font-weight: 500; white-space: nowrap; }
+.snap-kind-none { color: var(--ink-4); font-weight: 400; }
+.snap-took { color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* on the newest row's tint --ink-3 is 4.20:1 and --ink-4 lower still */
+.stg-row-latest .snap-took { color: var(--ink-2); }
+.stg-row-latest .snap-kind-none { color: var(--ink-2); }
+.snap-what { display: flex; align-items: center; gap: 10px; min-width: 0; color: var(--ink-2); }
+.snap-what .cj-qty { color: var(--ink-2); }
+.snap-row .bk-chev { margin-left: 0; }
+.snap-row-job { min-height: 38px; }
+.snap-row-job .snap-kind { color: var(--ink-3); font-weight: 400; }
+.snap-job-at { color: var(--ink-3); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.snap-quiet { margin: 10px 12px 0; }
+.cj-head > .cj-note, .cj-head > .error-box { flex: 1; margin: 0; }
+.snap-one .bk-pager { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
+
+/* An opened snapshot: figures, the download, the sentences, the tables drawn. */
+.bk-detail.snap-open {
+  padding: 22px 24px 20px; margin: 0 0 10px; border: 0; background: var(--inset);
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+}
+.stg-row-latest + .bk-detail.snap-open { background: linear-gradient(var(--violet-tint), var(--inset) 120px); }
+.snap-open .bk-facts { display: block; margin: 0; }
+.bk-facts-top { display: flex; align-items: flex-start; gap: 16px 28px; flex-wrap: wrap; }
+.bk-figs { display: flex; flex-wrap: wrap; gap: 14px 36px; flex: 1 1 320px; }
+.bk-fig { display: grid; gap: 4px; min-width: 64px; align-content: start; }
+.bk-fig-v { font-family: var(--f-display); font-size: 30px; line-height: 1; font-weight: 600; letter-spacing: -0.025em; color: var(--ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bk-fig-l { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); }
+.bk-fig-s { font-size: 12px; color: var(--ink-3); }
+.bk-facts-top > .bk-dl { flex: none; align-self: center; padding: 10px 18px; border-radius: var(--r-pill); }
+.snap-open .bk-fact-list { margin-top: 18px; padding: 12px 16px; gap: 6px; background: var(--surface); border-radius: var(--radius); flex: none; }
+.snap-open .bk-fact { position: relative; padding-left: 16px; font-size: 13px; line-height: 1.45; color: var(--ink-2); }
+.snap-open .bk-fact::before { content: ""; position: absolute; left: 0; top: .55em; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-4); }
+.snap-open > .form-msg, .snap-open > .form-hint { margin: 12px 0 0; }
+.bk-tables { margin-top: 20px; }
+.bk-trow { display: grid; grid-template-columns: minmax(140px, 300px) minmax(60px, 1fr) 76px; gap: 16px; align-items: center; padding: 7px 0; border-top: 1px solid var(--line-on-tint, var(--line)); font-size: 13px; }
+.bk-tables.has-made .bk-trow { grid-template-columns: minmax(140px, 300px) minmax(60px, 1fr) 76px minmax(0, 320px); }
+.bk-thead { border-top: 0; padding-top: 0; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); }
+.bk-tname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.bk-tbar { height: 8px; border-radius: 4px; background: var(--surface); overflow: hidden; }
+.bk-tbar > i { display: block; height: 100%; border-radius: 4px; background: var(--ink-4); }
+.bk-tbar > i.tone-full { background: var(--ink); }
+.bk-tbar > i.tone-other { background: var(--ink-4); opacity: .45; }
+.bk-tsize { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink-2); white-space: nowrap; }
+.bk-tmade { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 760px) {
+  .stg-row.snap-row { grid-template-columns: minmax(0, 1fr) auto 14px; row-gap: 2px; padding: 8px 10px; }
+  .snap-row .snap-kind { grid-column: 1; grid-row: 1; }
+  .snap-row .stg-name, .snap-row .snap-job-at { grid-column: 1; grid-row: 2; }
+  /* the age beside what made it, the short duration beside the long time:
+     the time does not wrap, and the age beside it ran into it */
+  .snap-row .stg-rel { grid-column: 2; grid-row: 1; text-align: right; }
+  .snap-row .snap-took { grid-column: 2; grid-row: 2; text-align: right; }
+  .snap-row .snap-what { grid-column: 1 / -1; flex-wrap: wrap; }
+  /* a reason is a sentence: wrapped here, where there is no hover to read the rest */
+  .snap-row .snap-what .stg-dest { flex-basis: 100%; white-space: normal; overflow: visible; }
+  .snap-row .snap-nowhere { display: none; }
+  .snap-row .bk-chev { grid-column: 3; grid-row: 1 / 3; }
+  .bk-trow, .bk-tables.has-made .bk-trow { grid-template-columns: minmax(0, 1fr) 70px; }
+  .bk-tbar, .bk-tmade, .bk-thead { display: none; }
+  .bk-detail.snap-open { padding: 16px 14px; }
+  .bk-figs { gap: 12px 22px; }
+  .bk-fig-v { font-size: 24px; }
+}
 .cj-key.has-tip { position: relative; cursor: help; outline: none; }
 .cj-key.has-tip .cj-key-t { border-bottom: 1px dotted var(--ink-4); }
 .cj-key.has-tip:hover .cj-key-t, .cj-key.has-tip:focus-visible .cj-key-t { color: var(--ink); border-bottom-color: var(--ink); }

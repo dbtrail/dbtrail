@@ -7423,7 +7423,7 @@ let snapTab = "versions";
 // yet, so Settings), not by the reader or the address. A repaint may then
 // move on: once the first snapshot exists the list is what to show.
 let snapTabAuto = false;
-const SNAP_TAB_IDS = { versions: "versions", jobs: "jobs", checks: "checks", setup: "settings", settings: "settings" };
+const SNAP_TAB_IDS = { versions: "versions", jobs: "versions", download: "download", checks: "checks", setup: "settings", settings: "settings" };
 function snapTabFromHash() {
   return SNAP_TAB_IDS[(location.hash || "").slice(1)] || "";
 }
@@ -7437,7 +7437,7 @@ function snapshotTabs(has) {
   const list = el("div", { class: "tablist snap-tablist", role: "tablist", "aria-label": "Snapshots" });
   bar.append(list);
   const panels = {}, buttons = {}, order = [];
-  const names = [["versions", "Versions"], ["jobs", "Jobs"], ["checks", "Checks"], ["settings", "Settings"]];
+  const names = [["versions", "Versions"], ["download", "Download"], ["checks", "Checks"], ["settings", "Settings"]];
   for (const [id, label] of names) {
     if (id !== "versions" && !has[id]) continue;
     panels[id] = el("div", { class: "tabpanel snap-panel", id: "snap-" + id, role: "tabpanel", "aria-labelledby": "snap-tab-" + id });
@@ -7475,8 +7475,6 @@ function snapshotTabs(has) {
       buttons[k].classList.toggle("is-on", k === id);
     }
     snapTab = id;
-    const dl = actions.querySelector ? actions.querySelector(".snap-dl") : null;
-    if (dl) dl.classList.toggle("btn-primary", id === "versions");
     if (!quiet) snapTabAuto = false;
     if (!quiet && typeof history !== "undefined" && history.replaceState) {
       history.replaceState(history.state, "", location.pathname + location.search + "#" + id);
@@ -7488,7 +7486,7 @@ function snapshotTabs(has) {
   return { bar: bar, panels: panels, actions: actions, select: select };
 }
 
-// ── Copy jobs (#2330): a bar per job, then the list ──
+// ── Copy jobs (#2330): a bar per job; their lines are in the list of snapshots ──
 //
 // copyJobsModel turns GET /api/servers/{id}/copy-jobs into what the card
 // draws. Pure: no fetch, no DOM. Every row REPEATS what the daemon recorded:
@@ -7562,6 +7560,7 @@ function copyJobsModel(payload) {
     return {
       label: kind.label, tone: failed ? "failed" : skipped ? "skipped" : kind.tone, kindTone: kind.tone,
       scheduled: j.trigger === "scheduled", at: at, sec: sec,
+      atMs: copyJobStampMs(at), snapMs: copyJobStampMs(j.snapshot_time),
       took: sec === null ? "" : sec < 1 ? "under 1s" : plainDuration(sec),
       outcome: failed ? "failed" : skipped ? "skipped" : "", qty: qty, detail: detail, full: full,
     };
@@ -7605,16 +7604,88 @@ function copyJobsModel(payload) {
   };
 }
 
-// How many rows are on the page before the fold, and whether the reader
-// opened it: kept out of the card, which the page replaces on every repaint.
-const COPY_JOBS_SHOWN = 8;
-let copyJobsOpen = false;
-function copyJobsCard(m) {
-  const card = el("section", { class: "tcard cj-card" });
+// copyJobsJoin puts each job on the snapshot it left: the two are
+// one event, and the list of snapshots is where it is read. A job joins by
+// the instant of the snapshot it published, never by its own start. bySnap
+// maps a snapshot's index to its job; loose holds every job with no line of
+// its own in the list (a skip, a failure, a compaction, a job whose snapshot
+// is not listed), in the order the model has them. When two jobs name
+// one snapshot the newest takes the line and the other stays loose.
+function copyJobsJoin(rows, snapshots) {
+  const at = new Map();
+  (snapshots || []).forEach((sn, i) => {
+    const ms = copyJobStampMs(sn && sn.time);
+    if (!isNaN(ms) && !at.has(ms)) at.set(ms, i);
+  });
+  // gone: the jobs that left a snapshot the list no longer has. A job
+  // that is loose because a newer one took its snapshot's line is not one.
+  const bySnap = new Map(), loose = [], gone = new Set();
+  for (const r of rows || []) {
+    const i = isNaN(r.snapMs) ? undefined : at.get(r.snapMs);
+    if (i !== undefined && !bySnap.has(i)) { bySnap.set(i, r); continue; }
+    loose.push(r);
+    if (i === undefined && !isNaN(r.snapMs)) gone.add(r);
+  }
+  return { bySnap: bySnap, loose: loose, gone: gone };
+}
+// copyJobsBetween is the loose jobs that belong on one page of the list:
+// the ones that ran after the first snapshot of the next page and no later
+// than the first snapshot of this one. The first page also takes every
+// newer job, the last page every older one and any job with no time. A
+// snapshot whose time does not read is no bound, so a job is never lost.
+// The caller draws them from the front, so they come back newest first.
+function copyJobsBetween(loose, snapshots, start, end) {
+  const ms = (i) => copyJobStampMs(snapshots[i] && snapshots[i].time);
+  const last = end >= snapshots.length;
+  let hi = start > 0 ? ms(start) : Infinity, lo = last ? -Infinity : ms(end);
+  if (isNaN(hi)) hi = Infinity;
+  if (isNaN(lo)) lo = -Infinity;
+  // Newest first by when each ran, a job with no time last: the list they
+  // come in is ordered by when each ended, which is not the same.
+  return (loose || []).filter((r) => (isNaN(r.atMs) ? last : r.atMs <= hi && r.atMs > lo))
+    .sort((a, b) => (isNaN(a.atMs) ? 1 : isNaN(b.atMs) ? -1 : b.atMs - a.atMs));
+}
+// copyJobLine is a loose job's line in the list of snapshots: what ran, when,
+// how it ended and why. It opens nothing, so it has no chevron. gone: the
+// job left a snapshot that the list no longer has.
+// copyJobLines draws a run of loose jobs. A job that went well and whose
+// snapshot is gone gets no line: with few snapshots kept there is one for
+// every update the history holds, each saying nothing the bars do not. They
+// are counted in one sentence instead.
+function copyJobLines(list, rows, gone) {
+  let quiet = 0;
+  for (const r of rows) {
+    if (gone.has(r) && !r.outcome) { quiet++; continue; }
+    list.append(copyJobLine(r, gone.has(r)));
+  }
+  return quiet;
+}
+function copyJobsQuietNote(n) {
+  return el("p", { class: "cj-note snap-quiet", text: n + (n === 1 ? " job on this page left a snapshot that is" : " jobs on this page left snapshots that are") + " no longer in the list. The bars show " + (n === 1 ? "it." : "them.") });
+}
+function copyJobLine(r, gone) {
+  // The same columns as a snapshot's row, so the two read as one list.
+  // Through el, which leaves out a null; the page's own append would write it.
+  return el("div", { class: "stg-row snap-row snap-row-job" + (r.outcome ? " is-" + r.outcome : "") },
+    el("span", { class: "snap-kind" }, el("i", { class: "cj-dot tone-" + r.tone }), r.label),
+    el("span", { class: "snap-job-at mono", text: r.at ? utcBare(r.at) : "", title: (r.at && utcLocalTitle(r.at)) || null }),
+    el("span", { class: "stg-rel" }),
+    el("span", { class: "snap-took", text: r.took }),
+    el("span", { class: "snap-what" },
+      r.outcome ? el("b", { class: "cj-out " + r.outcome, text: r.outcome }) : null,
+      r.qty ? el("span", { class: "cj-qty", text: r.qty }) : null,
+      el("span", { class: "stg-dest muted", text: [r.detail, gone ? "its snapshot is not in this list" : ""].filter(Boolean).join(" · "), title: r.full || null })),
+    el("span", { class: "snap-nowhere" }), el("span", { class: "snap-nowhere" }));
+}
+
+// copyJobsParts is the drawing as the pieces the Snapshots card opens with:
+// the count, the bars and their legend. The list under them is the list of
+// snapshots, which the card draws itself.
+function copyJobsParts(m) {
+  const card = el("div", { class: "cj-top" });
   if (m.state === "empty") {
-    card.append(el("div", { class: "stg-empty" },
-      el("p", { class: "stg-empty-lead", text: "No job has run yet." }),
-      el("p", { class: "stg-empty-sub", text: "Each read, update, restore and compaction is listed here once it ends." })));
+    card.append(el("div", { class: "cj-head" },
+      el("p", { class: "cj-note", text: "No job has run yet. Each read, update, restore and compaction is drawn here once it ends." }), tzChip()));
     return card;
   }
   const head = el("div", { class: "cj-head" });
@@ -7656,32 +7727,6 @@ function copyJobsCard(m) {
   });
   foot.append(legend, el("span", { text: "now" }));
   card.append(foot);
-
-  // The newest few are on the page; the rest open on request, so a day of
-  // identical updates is not forty lines to scroll past. The bars above
-  // already show every one of them.
-  const table = el("div", { class: "cj-list", role: "table" });
-  const rest = el("div", { class: "cj-list cj-rest", role: "table" });
-  m.rows.forEach((r, i) => {
-    const row = el("div", { class: "cj-row" + (r.outcome ? " is-" + r.outcome : ""), role: "row" });
-    row.append(
-      el("span", { class: "cj-kind", role: "cell" }, el("i", { class: "cj-dot tone-" + r.kindTone }), r.label),
-      el("span", { class: "cj-at", role: "cell", text: r.at ? utcBare(r.at) : "", title: (r.at && utcLocalTitle(r.at)) || null }),
-      el("span", { class: "cj-took", role: "cell", text: r.took }),
-      el("span", { class: "cj-what", role: "cell" },
-        r.outcome ? el("b", { class: "cj-out " + r.outcome, text: r.outcome }) : null,
-        r.qty ? el("span", { class: "cj-qty", text: r.qty }) : null,
-        r.detail ? el("span", { class: "cj-detail", text: r.detail, title: r.full || null }) : null));
-    (i < COPY_JOBS_SHOWN ? table : rest).append(row);
-  });
-  card.append(table);
-  const hidden = m.rows.length - COPY_JOBS_SHOWN;
-  if (hidden > 0) {
-    const fold = el("details", { class: "cj-more" }, el("summary", { text: hidden + " earlier" }), rest);
-    fold.open = copyJobsOpen;
-    fold.addEventListener("toggle", () => { copyJobsOpen = fold.open; });
-    card.append(fold);
-  }
   const notes = [];
   if (m.full) notes.push("The last " + m.cap + " are kept.");
   // Only when a row is missing its reason: otherwise there is nothing to explain.
@@ -7690,24 +7735,17 @@ function copyJobsCard(m) {
   return card;
 }
 
-async function loadCopyJobs(id, box) {
-  let payload;
-  try {
-    payload = await api("/api/servers/" + encodeURIComponent(id) + "/copy-jobs");
-  } catch (err) {
-    if (!box.isConnected) return;
-    clear(box);
-    const msg = (err && err.message) || String(err);
+// copyJobsBox draws the bars from the history the page read with the rest.
+// jobs is the payload, or { error, status } when the read failed.
+function copyJobsBox(jobs, model) {
+  if (jobs && jobs.error) {
     // A refusal is the daemon saying there is no history to show and why;
     // that is a fact about the setup, not a failed read.
-    if (err && err.status === 403) box.append(el("section", { class: "tcard cj-card" }, el("div", { class: "stg-empty" }, el("p", { class: "stg-empty-sub", text: msg }))));
-    else box.append(el("div", { class: "error-box", text: "Could not load the jobs: " + msg }));
-    return;
+    // Either way the list under it still shows bare times, so the zone is said.
+    if (jobs.status === 403) return el("div", { class: "cj-top" }, el("div", { class: "cj-head" }, el("p", { class: "cj-note", text: jobs.error }), tzChip()));
+    return el("div", { class: "cj-top" }, el("div", { class: "cj-head" }, el("div", { class: "error-box", text: "Could not load the jobs: " + jobs.error }), tzChip()));
   }
-  if (!box.isConnected) return;
-  clear(box);
-  try { box.append(copyJobsCard(copyJobsModel(payload))); }
-  catch (err) { box.append(el("div", { class: "error-box", text: "The jobs could not be drawn: " + ((err && err.message) || String(err)) })); }
+  return copyJobsParts(model);
 }
 
 // snapshotHeroTone grades the copy, worst fact first, and says which page
@@ -7765,9 +7803,8 @@ function snapshotHeroTone(b, cov, cur) {
 // the last check, and the two actions. Everything it shows comes from the
 // listing and the coverage read already on the page; the check verdict is
 // filled in by loadSnapshotVerdict once its own read answers.
-// acts.download / acts.settings: what the Download button and the
-// "Settings ›" links do (null = not offered). acts.mount: where the buttons
-// go (the tab bar's right end, so they stay one click away on every tab);
+// acts.settings: what the "Settings ›" links do (null = not offered).
+// acts.mount: where the button goes (the tab bar's right end, so they stay one click away on every tab);
 // without it they sit in the hero. The reason a button is missing stays in
 // the hero either way.
 function snapshotHero(b, cov, cur, acts) {
@@ -7879,17 +7916,13 @@ function snapshotHero(b, cov, cur, acts) {
     loadSnapshotVerdict(cur.id, check);
   }
 
-  // The actions: Download opens the take-away lane; Read database now keeps
+  // The action: Read database now keeps
   // the gating the context strip had (#1677), and says why when it cannot
   // run. Only for a session that may create one: the note names a
   // configuration fix, and sending a reader who lacks the permission to fix
   // a setting they cannot touch is worse than saying nothing.
   const actions = (acts && acts.mount) || el("div", { class: "hero-actions" });
-  // One filled button per tab (#1950): Download is it on Versions, the tab
-  // it acts on; on Checks that is Run verification, and on Settings the Save
-  // of the form being changed (snapshotTabs.select keeps this in step).
   let canRead = false;
-  if (acts && acts.download) actions.append(el("button", { class: "btn snap-dl" + (snapTab && snapTab !== "versions" ? "" : " btn-primary"), type: "button", text: "Download", onclick: acts.download }));
   if (cur && cur.id && cur.kind === "registry" && sessionMay(PERM_SNAPSHOT_CREATE)) {
     // cur is the RAW registry entry, while b.configured also counts the
     // daemon-wide default, which a backup refuses to write to. The precheck
@@ -8029,13 +8062,16 @@ async function renderSnapshots() {
   // Run states for the selected server: only the endpoints this daemon
   // actually serves (each 403s when its feature is off).
   const selId = currentServer || defaultServerId;
-  const [dumpSt, restoreSt, sqlSt] = await Promise.all([
+  const [dumpSt, restoreSt, sqlSt, jobsRes] = await Promise.all([
     (capsCache.baseline_trigger && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/baseline").catch(() => null) : null,
     (capsCache.baseline_restore && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/baseline/restore").catch(() => null) : null,
     // asErr, not a swallow: the .sql build's outcome appears in exactly one
     // place on this page, so a failed status read has to reach the panel as
     // a failure rather than as "no build has ever run here".
     (capsCache.sql_export && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/sql-export").catch(asErr) : null,
+    // The daemon keeps the job history, so a standalone serve has none to
+    // read. A failed read is kept as one: the list still draws without it.
+    (capsCache.monitor && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/copy-jobs").catch((err) => Object.assign(asErr(err), { status: err && err.status })) : null,
   ]);
   if (gen !== serverGen || vgen !== viewGen) return;
   try {
@@ -8100,20 +8136,12 @@ async function renderSnapshots() {
     };
     // The hero (round 3): where the copy lives, how fresh it is, its rhythm
     // over seven days and the last check, drawn, with the two actions.
-    // Below it the three tabs (Versions, Checks, Settings); a tab this
+    // Below it the tabs (Versions, Download, Checks, Settings); a tab this
     // daemon or session cannot serve is not offered.
     const takeAway = backupTakeAway(cur, baselines, sqlSt);
-    const drawJobs = !!capsCache.monitor && !!(cur && cur.id);
-    const tabs = snapshotTabs({ jobs: drawJobs, checks: drawChecks, settings: drawSetup });
+    const tabs = snapshotTabs({ download: !!takeAway, checks: drawChecks, settings: drawSetup });
     part("The copy", () => {
       v.append(snapshotHero(baselines, coverage, cur, {
-        // Download: one button for the newest copy (D1). It opens the
-        // take-away lane on Versions, where the two downloads live.
-        download: takeAway ? () => {
-          tabs.select("versions");
-          takeAway.open = true; takeAwayOpen = true;
-          if (takeAway.scrollIntoView) takeAway.scrollIntoView({ block: "start" });
-        } : null,
         settings: drawSetup ? () => tabs.select("settings") : null,
         mount: tabs.actions,
       }));
@@ -8133,25 +8161,36 @@ async function renderSnapshots() {
       }
     });
     v.append(tabs.bar);
-    // Versions: what you can do with a copy, above the list of copies — the
-    // two lanes are the answer to why a reader opened it (what do I download
-    // to open this in DuckDB, what do I download to load it into MySQL), and
-    // the list is how you pick a different copy.
+    // Versions: one card, the jobs drawn (#2330) and under them the list of
+    // copies, where each job sits on the line of the snapshot it left.
     part("The list of copies", () => {
-      if (takeAway) tabs.panels.versions.append(takeAway);
-      tabs.panels.versions.append(baselinesPanel(baselines, servers, { serversErr: serversErr }));
+      // The drawing is built first and on its own: a history this build
+      // cannot read costs the bars, never the list under them.
+      let jobsModel = null, top = null;
+      if (jobsRes) {
+        try {
+          if (!jobsRes.error) jobsModel = copyJobsModel(jobsRes);
+          top = copyJobsBox(jobsRes, jobsModel);
+        } catch (err) {
+          jobsModel = null;
+          top = el("div", { class: "cj-top" }, el("div", { class: "cj-head" },
+            el("div", { class: "error-box", text: "The jobs could not be drawn: " + ((err && err.message) || String(err)) }), tzChip()));
+        }
+      }
+      tabs.panels.versions.append(baselinesPanel(baselines, servers, { serversErr: serversErr, jobs: jobsModel && jobsModel.rows, top: top }));
     });
     v.append(tabs.panels.versions);
-    // Jobs (#2330): every copy job the daemon ran for this server, drawn.
-    // The daemon keeps the history, so on a standalone serve the tab is
-    // absent, like Checks.
-    if (drawJobs) {
-      part("Jobs", () => {
-        const box = el("div", { class: "cj-wrap" });
-        tabs.panels.jobs.append(box);
-        loadCopyJobs(cur.id, box);
+    // Download has its own tab: the two lanes are a thing to do with a copy,
+    // not a part of the list, and above the list they pushed it off screen.
+    if (takeAway) {
+      part("Download", () => {
+        tabs.panels.download.append(takeAway);
+        // An outcome waiting on a tab that is closed on arrival (a build
+        // that failed, one ready and not yet downloaded): the tab says so.
+        const t = takeAway.dataset.owed ? tabs.bar.querySelector('.snap-tab[data-tab="download"]') : null;
+        if (t) { t.classList.add("has-alarm"); t.setAttribute("title", "A .sql build needs attention"); }
       });
-      v.append(tabs.panels.jobs);
+      v.append(tabs.panels.download);
     }
     // Checks — the verification page, whole. Its runner is daemon-side, so
     // on a standalone serve the tab is absent rather than present and
@@ -10444,7 +10483,7 @@ function backupIncompleteNotice(b) {
 // is the newest few and whether they are fresh. Twenty-five rows pushed the
 // per-row Download and the restore controls below the fold, so the panel read
 // as a wall with nothing to do in it.
-const BACKUPS_PAGE_SIZE = 5;
+const BACKUPS_PAGE_SIZE = 8;
 
 // backupsPage survives a re-render on purpose. The panel repaints every ~10s
 // while a backup run is in flight (watchBackupRuns), and page state held in the
@@ -10491,7 +10530,7 @@ function backupsPageIndex(serverId, pages) {
 }
 
 // backupsPager draws the two controls and the position. Rendered only when
-// there is more than one page: a pager under five rows is furniture.
+// there is more than one page: a pager under one page of rows is furniture.
 // truncated: /api/baselines caps its listing (baselinesMaxSnapshots) and says
 // so. The pager's one job is to tell a reader where they are, so it must not
 // render "46-50 of 50" for a server with 200 backups -- that is the one line
@@ -10607,7 +10646,8 @@ function baselinesPanel(b, servers, opts) {
   // Full-width (#1415): this list is the page. The Create-baseline action
   // moved to the context strip — at page level it is a page action; inside
   // this header it read as scoped to the list.
-  const panel = el("section", { class: "ov-panel" });
+  const top = opts && opts.top;
+  const panel = el("section", { class: top ? "tcard cj-card snap-one" : "ov-panel" });
   const cur = (servers || []).find((s) => s.id === (currentServer || defaultServerId));
   let owner = cur ? serverLabel(cur) : "";
   if (!owner && b && !b.error && b.configured && !(opts && opts.serversErr)) {
@@ -10616,7 +10656,9 @@ function baselinesPanel(b, servers, opts) {
   const head = el("div", { class: "ov-panel-head" },
     el("h2", { class: "ov-panel-title", text: "Snapshots" + (owner ? " · " + owner : "") }),
     tzChip());
-  panel.append(head);
+  // With the jobs drawn, the card opens with them: the count and the bars
+  // are its head, and they carry the zone chip.
+  panel.append(top || head);
   // The daemon's periodic refresh (#1171). Shown next to the list because the
   // question it answers — "is this list going to keep moving on its own?" — is
   // only meaningful here. A failed refresh is reported plainly: it usually means
@@ -10637,6 +10679,17 @@ function baselinesPanel(b, servers, opts) {
   // this machine, and a bucket that cannot be listed is when it is asked.
   if (b) snapshotSQLMirrorLines(b).forEach((line) => panel.append(line));
   const list = el("div", { class: "stg-list" });
+  // Each job on the line of the snapshot it left; the ones with no line of
+  // their own go between the snapshots, by when they ran. A join that
+  // throws costs the jobs their lines, never the list: it is said, and the
+  // list draws as it does with no history.
+  const jobRows = (opts && opts.jobs) || null;
+  const snapsListed = (b && !b.error && b.configured && b.snapshots) || [];
+  let joined = null;
+  if (jobRows) {
+    try { joined = copyJobsJoin(jobRows, snapsListed); }
+    catch (err) { panel.append(el("div", { class: "error-box", text: "The jobs could not be placed in the list: " + ((err && err.message) || String(err)) })); }
+  }
   if (!b || b.error) {
     // A missing index database is the pre-capture state, and renderError
     // draws it as what to do and where; any other failure stays a failure.
@@ -10697,37 +10750,70 @@ function baselinesPanel(b, servers, opts) {
     const pages = Math.max(1, Math.ceil(total / BACKUPS_PAGE_SIZE));
     const page = backupsPageIndex(currentServer || defaultServerId, pages);
     const pageWindow = backupsPageSlice(b.snapshots, page);
+    const between = joined ? copyJobsBetween(joined.loose, b.snapshots, pageWindow.start, pageWindow.start + pageWindow.rows.length) : [];
+    let quiet = 0;
+    const looseBefore = (ms) => {
+      let n = 0;
+      while (n < between.length && !isNaN(ms) && between[n].atMs >= ms) n++;
+      quiet += copyJobLines(list, between.splice(0, n), joined.gone);
+    };
     // idx is the index in the WHOLE list, not in the page: it decides the
     // "Newest" treatment, and paging must not promote the first row of page two.
     pageWindow.rows.forEach((sn, i) => {
       const idx = pageWindow.start + i;
-      const row = el("div", { class: "stg-row" + (idx === 0 ? " stg-row-latest" : "") });
-      if (idx === 0) row.append(el("span", { class: "chip chip-newest", text: "Newest" }));
+      if (joined) looseBefore(copyJobStampMs(sn.time));
+      const job = joined ? joined.bySnap.get(idx) : null;
+      // With the jobs read, a row is a grid whose columns line up with the
+      // job lines between the snapshots: what made it, when, how long ago,
+      // how long it took, then what it holds. Without them (a standalone
+      // serve keeps no history) it is the plain row it always was.
+      const grid = !!joined;
+      const row = el("div", { class: "stg-row" + (grid ? " snap-row" : "") + (idx === 0 ? " stg-row-latest" : "") });
+      const what = grid ? el("span", { class: "snap-what" }) : row;
+      const newest = idx === 0 ? el("span", { class: "chip chip-newest", text: "Newest" }) : null;
       const when = tsSpan("stg-name mono", sn.time);
       // The binlog coordinates are for whoever debugs a copy, not for the
       // list: they ride as the tooltip of the time.
       if (sn.binlog_file) when.title = "binlog " + sn.binlog_file + ":" + sn.binlog_pos;
-      row.append(when);
-      row.append(el("span", { class: "stg-rel", text: formatAge(sn.age_hours) + " ago" }));
+      const rel = el("span", { class: "stg-rel", text: formatAge(sn.age_hours) + " ago" });
+      if (grid) {
+        row.append(
+          // The line carries the snapshot's instant; when its job ran is one hover away.
+          job ? el("span", { class: "snap-kind", title: job.at ? "Ran " + utcLabel(job.at) : null }, el("i", { class: "cj-dot tone-" + job.kindTone }), job.label)
+            // A snapshot older than the history kept, one another daemon
+            // made, or one whose job does not say which snapshot it left.
+            : el("span", { class: "snap-kind snap-kind-none", title: "No job on record names this snapshot." }, el("i", { class: "cj-dot tone-other" }), "snapshot"),
+          when, rel, el("span", { class: "snap-took", text: (job && job.took) || "" }), what);
+        if (job && job.qty) what.append(el("span", { class: "cj-qty", text: job.qty }));
+        // A run that failed and still left this snapshot (only its upload failed).
+        // Its reason is written, not left to a hover a touch screen has none of.
+        if (job && job.outcome) what.append(el("b", { class: "cj-out " + job.outcome, text: job.outcome }));
+        if (newest) what.append(newest);
+        if (job && job.outcome && job.detail) what.append(el("span", { class: "stg-dest", text: job.detail, title: job.full || null }));
+      } else {
+        if (newest) row.append(newest);
+        row.append(when, rel);
+      }
       if (goingIdx.has(idx)) {
         row.classList.add("stg-row-going");
-        row.append(el("span", { class: "chip chip-unknown", text: "goes at the next cleanup", title: "Past the newest " + keepInForce + " kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, never a table's only copy." }));
+        what.append(el("span", { class: "chip chip-unknown", text: "goes at the next cleanup", title: "Past the newest " + keepInForce + " kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, never a table's only copy." }));
       }
       // With skipped views the row says both counts (#1879), whether or not
       // the table count varies: the views are what the row is there to show.
       const skippedViews = snapshotViewsText(sn);
-      if (skippedViews || uniformTables === null) row.append(el("span", { class: "stg-dest", text: skippedViews || (sn.tables || []).length + " table(s)" }));
+      if (skippedViews || uniformTables === null) what.append(el("span", { class: "stg-dest", text: skippedViews || (sn.tables || []).length + " table(s)" }));
       const lockPill = snapshotLockPill(sn.lock);
-      if (lockPill) row.append(lockPill);
+      if (lockPill) what.append(lockPill);
       if (idx === 0 && sn.staleness && sn.staleness !== "ok") {
-        row.append(el("span", { class: "chip chip-mon", text:
+        what.append(el("span", { class: "chip chip-mon", text:
           sn.staleness === "broken" ? "⚠ STALE: restore broken" : sn.staleness.toUpperCase() }));
       }
       const where = backupWhereChip(b, sn);
       if (where) row.append(where);
+      else if (grid) row.append(el("span", { class: "snap-nowhere" }));
       // Click to expand: tables, sizes and how long the backup took. Loaded
       // once per row, on first open.
-      const detail = el("div", { class: "bk-detail" });
+      const detail = el("div", { class: "bk-detail snap-open" });
       detail.hidden = true;
       // A chevron, because the only thing that said "this opens" was a hover
       // background and a pointer cursor. The per-row Download lives inside
@@ -10746,6 +10832,8 @@ function baselinesPanel(b, servers, opts) {
       };
       list.append(row, detail);
     });
+    if (joined) quiet += copyJobLines(list, between.splice(0), joined.gone);
+    if (quiet) list.append(copyJobsQuietNote(quiet));
     const pager = backupsPager(total, page, pages, (target) => {
       backupsPage = { server: currentServer || defaultServerId, index: target };
       // renderSnapshots(), not renderRoute(): the route path bumps viewGen,
@@ -10759,6 +10847,10 @@ function baselinesPanel(b, servers, opts) {
     // and up are not shown" when they are on page 2.
     if (b.truncated && !pager) list.append(el("div", { class: "ev-empty", text: "…older snapshots not shown." }));
   }
+  // With no list of snapshots to sit in (none yet, or the list could not be
+  // read) the jobs are listed all the same: a first read that keeps failing
+  // has its reason here and nowhere else on the page.
+  if (joined && !snapsListed.length) copyJobLines(list, copyJobsBetween(joined.loose, [], 0, 0), joined.gone);
   panel.append(list);
   return panel;
 }
@@ -11262,36 +11354,43 @@ async function loadBackupDetail(at, box) {
     return;
   }
   clear(box);
+  // The numbers first, as figures: how big, how many tables and files, how
+  // long it took. The Download sits at their right. The sentences follow.
   const facts = el("div", { class: "bk-facts" });
-  // One fact per line, wrapped, never cut (#2002): the why, read and
-  // point-in-time lines are whole sentences, and the ellipsis meant for a
-  // path (.stg-dest) once showed "Point-in-time copy: every r..." with no
-  // way to read the rest. The list takes the room; the Download button
-  // keeps its place at its right, or under it when the width runs out.
-  const list = el("div", { class: "bk-fact-list" });
-  facts.append(list);
-  list.append(el("span", { class: "bk-fact", text: humanBytes(d.total_bytes || 0) + " in " + (d.files || 0) + " file(s)" }));
+  const figs = el("div", { class: "bk-figs" });
+  const fig = (value, label, sub) => figs.append(el("div", { class: "bk-fig" },
+    el("span", { class: "bk-fig-v", text: value }), el("span", { class: "bk-fig-l", text: label }),
+    sub ? el("span", { class: "bk-fig-s", text: sub }) : null));
+  const nTables = (d.tables || []).length, nFiles = d.files || 0;
+  fig(humanBytes(d.total_bytes || 0), "size");
+  fig(String(nTables), nTables === 1 ? "table" : "tables");
+  fig(String(nFiles), nFiles === 1 ? "file" : "files");
+  const lines = [];
   if (d.run && d.run.seconds > 0) {
-    list.append(el("span", { class: "bk-fact", text:
-      "took " + fmtSeconds(d.run.seconds) + " (" + (BACKUP_KIND_LABEL[d.run.kind] || d.run.kind) +
-      (d.run.rows ? ", " + Number(d.run.rows).toLocaleString("en-US") + " rows" : "") + ")" }));
+    fig(fmtSeconds(d.run.seconds), "took", (BACKUP_KIND_LABEL[d.run.kind] || d.run.kind) +
+      (d.run.rows ? ", " + Number(d.run.rows).toLocaleString("en-US") + " rows" : ""));
   } else if (d.write_span_seconds > 0) {
-    list.append(el("span", { class: "bk-fact", text:
+    lines.push(el("span", { class: "bk-fact", text:
       "files written over about " + fmtSeconds(d.write_span_seconds) + " (from file timestamps; the real run took longer)" }));
   }
+  const top = el("div", { class: "bk-facts-top" }, figs);
   // Outside the duration branch: a run stamped within one second has no
   // duration to show and still has its reason (#1604).
-  if (d.run && d.run.why) list.append(el("span", { class: "bk-fact", text: backupWhyLine(d.run.why, d.run.why_code, false) }));
+  if (d.run && d.run.why) lines.push(el("span", { class: "bk-fact", text: backupWhyLine(d.run.why, d.run.why_code, false) }));
   const readLine = sourceReadLine(d);
-  if (readLine) list.append(el("span", { class: "bk-fact", text: readLine }));
+  if (readLine) lines.push(el("span", { class: "bk-fact", text: readLine }));
   const lockLine = snapshotLockLine(d);
-  if (lockLine) list.append(el("span", { class: "bk-fact", text: lockLine }));
-  const dl = el("button", { class: "btn", type: "button",
+  if (lockLine) lines.push(el("span", { class: "bk-fact", text: lockLine }));
+  const dl = el("button", { class: "btn btn-primary bk-dl", type: "button",
     text: "Download (.tar.gz) · " + humanBytes(d.total_bytes || 0) });
   if (d.incomplete) dl.disabled = true;
   dl.onclick = (ev) => { ev.stopPropagation(); downloadBackup(at, dl, d.total_bytes || 0); };
   // The download hands over every row, unredacted: query:execute.
-  if (sessionMay("query:execute")) facts.append(dl);
+  if (sessionMay("query:execute")) top.append(dl);
+  facts.append(top);
+  // One fact per line, wrapped, never cut (#2002): the why, read and
+  // point-in-time lines are whole sentences.
+  if (lines.length) facts.append(el("div", { class: "bk-fact-list" }, ...lines));
   box.append(facts);
   if (d.incomplete) box.append(el("p", { class: "form-msg err", text: "This snapshot is marked incomplete (a failed or unfinished run); it cannot be downloaded or restored from." }));
   // The full read's disk check (#1938), in the style its verdict asks for.
@@ -11303,24 +11402,29 @@ async function loadBackupDetail(at, box) {
   if (skipped) box.append(skipped);
   const leftOut = leftOutTablesBlock(d.run);
   if (leftOut) box.append(leftOut);
-  const tbl = el("table", { class: "bk-table" });
-  // The "Made by" column is only rendered when a row actually carries a verdict
-  // (#1545). An S3 source does not look it up, and a header over a column of
-  // dashes reads as "we checked and there is nothing", which is a different
-  // answer from "we did not check".
-  const anyProv = (d.tables || []).some((t) => t.produced_by);
-  const head = el("tr", {}, el("th", { text: "Table" }), el("th", { text: "Size" }));
-  if (anyProv) head.append(el("th", { text: "Made by" }));
-  tbl.append(el("thead", {}, head));
-  const tb = el("tbody");
-  (d.tables || []).forEach((t) => {
-    const row = el("tr", {},
-      el("td", {}, el("span", { class: "mono", text: t.schema + "." + t.table }), tableLockMark(t)),
-      el("td", { text: humanBytes(t.size_bytes || 0) }));
-    if (anyProv) row.append(el("td", {}, madeByCell(t)));
-    tb.append(row);
+  // The tables, drawn: one line each with a bar for its share of the
+  // largest, coloured by how this copy of it was made, in the colours of the
+  // bars at the top of the card. The "made by" words are only written when a
+  // row carries a verdict (#1545): an S3 source does not look it up, and a
+  // column of dashes reads as "we checked and there is nothing".
+  const tables = d.tables || [];
+  const anyProv = tables.some((t) => t.produced_by);
+  const biggest = tables.reduce((m, t) => Math.max(m, Number(t.size_bytes) || 0), 0);
+  const tone = { dump: "full", fold: "update", carried_forward: "other" };
+  const tbl = el("div", { class: "bk-tables" + (anyProv ? " has-made" : ""), role: "table" });
+  tbl.append(el("div", { class: "bk-trow bk-thead", role: "row" },
+    el("span", { role: "columnheader", text: "Table" }), el("span", { role: "columnheader" }),
+    el("span", { role: "columnheader", class: "bk-tsize", text: "Size" }),
+    anyProv ? el("span", { role: "columnheader", text: "Made by" }) : null));
+  tables.forEach((t) => {
+    const size = Number(t.size_bytes) || 0;
+    tbl.append(el("div", { class: "bk-trow", role: "row" },
+      el("span", { class: "bk-tname", role: "cell" }, el("span", { class: "mono", text: t.schema + "." + t.table }), tableLockMark(t)),
+      el("span", { class: "bk-tbar", role: "cell", "aria-hidden": "true" },
+        el("i", { class: tone[t.produced_by] ? "tone-" + tone[t.produced_by] : null, style: "width:" + (biggest > 0 ? Math.max(2, (size / biggest) * 100).toFixed(1) : 0) + "%" })),
+      el("span", { class: "bk-tsize", role: "cell", text: humanBytes(size) }),
+      anyProv ? el("span", { class: "bk-tmade", role: "cell" }, madeByCell(t)) : null));
   });
-  tbl.append(tb);
   box.append(tbl);
 }
 
@@ -12285,6 +12389,7 @@ function backupTakeAway(cur, b, sqlSt) {
   const stErr = sql && sqlSt && sqlSt.error;
   const owed = !!(sql && st && (!SQL_EXPORT_QUIET.has(st.state || "") || st.staging_error)) || !!stErr;
   const panel = el("details", { class: "ov-panel bk-take", open: owed || takeAwayOpen || null });
+  if (owed) panel.dataset.owed = "1";
   const summary = el("summary", { class: "ov-panel-head bk-take-sum" },
     el("h2", { class: "ov-panel-title", text: "Take a copy with you" }));
   if (sql && st && st.state === "expired") {
@@ -12423,7 +12528,7 @@ function backupDuckLane(b) {
   // the list is a SUBSET and "the newest" is only the newest of what was read.
   lane.append(el("p", { class: "form-hint", text:
     (b.incomplete ? "The newest snapshot that could be read, from " : "The newest snapshot, from ") +
-    utcLabel(snaps[0].time) + ". Any other one downloads from its row below." }));
+    utcLabel(snaps[0].time) + ". Any other one downloads from its row in Versions." }));
   // Say WHY the second file is missing, and do not dress it as a property of
   // the data. It is withheld by this console's own setting, not by the
   // backup: the same folder still yields the file from the command line. And
@@ -12460,7 +12565,7 @@ async function downloadNewestBackup(at, btn) {
   btn.disabled = false;
   btn.textContent = label;
   if (d.incomplete) {
-    return "The newest snapshot is marked incomplete, so it cannot be downloaded. Open another one in the list below.";
+    return "The newest snapshot is marked incomplete, so it cannot be downloaded. Open another one from its row in Versions.";
   }
   downloadBackup(at, btn, d.total_bytes || 0);
   return "";

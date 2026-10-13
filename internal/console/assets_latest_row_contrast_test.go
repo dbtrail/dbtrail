@@ -38,6 +38,13 @@ var latestRowChildren = []string{
 	"chip-unknown",  // a copy past the count in force (never on the newest row, listed so the guard sees it), and the lock mark
 	"stg-row-going", // the row modifier for the same case
 	"bk-chev",  // the expand affordance
+	// With the jobs read, the row is a grid and carries its job (#2330).
+	"snap-row", "snap-what", "snap-nowhere", "snap-open", // layout only
+	"snap-kind", "snap-kind-none", // what made it; the second when no job is on record
+	"snap-took", // how long the job took
+	"cj-qty",    // how much it moved
+	"cj-out",    // failed, on a run that still left this snapshot
+	"cj-dot", "tone-other", // the job's mark
 }
 
 func TestNewestBackupRowClearsItsFloorOnTheTint(t *testing.T) {
@@ -111,7 +118,7 @@ func TestNewestBackupRowChildrenAreAllListed(t *testing.T) {
 	js := readAsset(t, "app.js")
 	// Anchored on stg-row-latest, not on stg-row: the latter is a shared list
 	// class and starting there swept in every earlier panel on the page.
-	start := strings.Index(js, `"stg-row" + (idx === 0 ? " stg-row-latest"`)
+	start := strings.Index(js, `"stg-row" + (grid ? " snap-row" : "") + (idx === 0 ? " stg-row-latest"`)
 	end := -1
 	if start >= 0 {
 		if rel := strings.Index(js[start:], "list.append(row, detail);"); rel >= 0 {

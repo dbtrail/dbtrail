@@ -152,7 +152,7 @@ func TestBackupsPageSliceWindowsTheList(t *testing.T) {
 	script := "const BACKUPS_PAGE_SIZE = " + backupsPageSizeFromSource(t, js) + ";\n" +
 		functionBody(t, js, "function backupsPageSlice(") + `
 const list = [];
-for (let i = 0; i < 8; i++) list.push({ n: i });
+for (let i = 0; i < 11; i++) list.push({ n: i });
 const out = {};
 const p0 = backupsPageSlice(list, 0), p1 = backupsPageSlice(list, 1);
 out.p0start = p0.start;
@@ -173,14 +173,14 @@ console.log(JSON.stringify(out));
 	if err := json.Unmarshal(outBytes, &got); err != nil {
 		t.Fatalf("parsing node output %q: %v", outBytes, err)
 	}
-	// Page one is the newest five. Page two CONTINUES the list; it does not
+	// Page one is the newest eight. Page two CONTINUES the list; it does not
 	// restart it, and its offset is what keeps the "Newest" treatment on the
 	// backup a restore actually reads.
-	if got.P0start != 0 || got.P0 != "0,1,2,3,4" {
-		t.Errorf("page one is {start:%d, rows:%s}, want {0, 0,1,2,3,4}", got.P0start, got.P0)
+	if got.P0start != 0 || got.P0 != "0,1,2,3,4,5,6,7" {
+		t.Errorf("page one is {start:%d, rows:%s}, want {0, 0,1,2,3,4,5,6,7}", got.P0start, got.P0)
 	}
-	if got.P1start != 5 || got.P1 != "5,6,7" {
-		t.Errorf("page two is {start:%d, rows:%s}, want {5, 5,6,7} — a page that restarts at 0 "+
+	if got.P1start != 8 || got.P1 != "8,9,10" {
+		t.Errorf("page two is {start:%d, rows:%s}, want {8, 8,9,10} — a page that restarts at 0 "+
 			"makes Older a dead control and re-crowns a row Newest on every page", got.P1start, got.P1)
 	}
 }
