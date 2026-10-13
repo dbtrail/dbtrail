@@ -319,8 +319,8 @@ What happens to a statement that does not get a slot depends on where it
 came from. On the SQL card it is refused (HTTP 429). On the port a statement
 waits for as long as its client stays connected, so only a full line or a
 time limit the router was given (`--max-wait`) turns one away: without
-read routing the client gets MySQL error 1203, and with read
-routing the client gets MySQL error 1040, which drivers and pools retry,
+Engine Routing the client gets MySQL error 1203, and with Engine
+Routing the client gets MySQL error 1040, which drivers and pools retry,
 and the decision is counted as `copy_queue_full` or
 `copy_wait_timeout` under `route="refused"` (next section). The statement is
 not handed to MySQL.
@@ -338,9 +338,10 @@ copy has more heavy reads than slots. On the router, more cores and memory
 for the service give it more workers. In the capture process,
 `--sql-max-in-flight` adds slots for the SQL card.
 
-## Read routing (`bintrail_read_routing_decisions_total`)
+<a id="read-routing-bintrail_read_routing_decisions_total"></a>
+## Engine Routing (`bintrail_read_routing_decisions_total`)
 
-With read routing on (a saved setting of the MySQL port, off by default),
+With Engine Routing on (a saved setting of the MySQL port, off by default),
 every routed statement is one decision, counted once by the router:
 
 | Metric | Type | Meaning |

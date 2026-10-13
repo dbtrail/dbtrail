@@ -238,7 +238,7 @@ var readRoutingDecisions = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "bintrail",
 	Subsystem: "read_routing",
 	Name:      "decisions_total",
-	Help:      "Read routing decisions on the embedded time-travel port, by server id, side (copy|mysql|refused) and reason.",
+	Help:      "Engine Routing decisions on the embedded time-travel port, by server id, side (copy|mysql|refused) and reason.",
 }, []string{"server", "route", "reason"})
 
 // copySnapshotTime is when the newest snapshot of a server's copy was taken,

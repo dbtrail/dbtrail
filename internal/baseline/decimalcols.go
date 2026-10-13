@@ -324,7 +324,7 @@ func warnNoSchema(paths []string) {
 		}
 		named++
 		slog.Warn("baseline: this table's snapshot file carries no CREATE TABLE, so its column types and collations are unknown; "+
-			"its state view "+SchemaLossConsequence+", and under read routing MySQL answers every statement over this table. "+
+			"its state view "+SchemaLossConsequence+", and under Engine Routing MySQL answers every statement over this table. "+
 			"Take a new full snapshot: one of a MySQL or MariaDB source records them "+
 			"(a PostgreSQL source has none to record)",
 			"table", table, "path", p)

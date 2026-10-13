@@ -107,7 +107,7 @@ func (h *Handler) SourceLost(statement bool) error {
 	if statement {
 		h.observeRoute(RouteMySQL, RouteReasonUpstreamLost)
 	}
-	h.routeWarn("lost", "read routing: the connection to the source was lost; this client connection answers 2006 until it reconnects", err)
+	h.routeWarn("lost", "Engine Routing: the connection to the source was lost; this client connection answers 2006 until it reconnects", err)
 	return err
 }
 

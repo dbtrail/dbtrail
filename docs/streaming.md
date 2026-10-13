@@ -33,7 +33,7 @@ Run both `GRANT` lines. The first one is what capture uses, and each privilege i
 
 DBTrail **never writes to the source**, and nothing on the capture path ever locks it. Capture does not use `RELOAD`, `LOCK TABLES`, `PROCESS`, `SHOW VIEW`, or `EXECUTE`. The second `GRANT` is for the baseline, below.
 
-This account is for capture alone. The MySQL port (served by `bintrail-console router`) never forwards statements with it under [read routing](time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental): it uses a server's [forwarding account](time-travel-sql.md#the-forwarding-account), a second user you create for it, and does not forward for a server that has none (the copy answers that server alone). What this account reads is every table its `SELECT` covers, and `SELECT ON *.*` covers the `mysql` schema too, password hashes included; the least-privilege variant below bounds it to the monitored schemas.
+This account is for capture alone. The MySQL port (served by `bintrail-console router`) never forwards statements with it under [Engine Routing](time-travel-sql.md#engine-routing-mysql-answers-the-copy-takes-the-heavy-reads): it uses a server's [forwarding account](time-travel-sql.md#the-forwarding-account), a second user you create for it, and does not forward for a server that has none (the copy answers that server alone). What this account reads is every table its `SELECT` covers, and `SELECT ON *.*` covers the `mysql` schema too, password hashes included; the least-privilege variant below bounds it to the monitored schemas.
 
 <a id="if-you-also-want-baselines-add-a-lock-privilege-and-show-view"></a>
 

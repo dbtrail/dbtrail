@@ -548,7 +548,7 @@ func TestSQLPortPanel_TurnedOnFromTheWebInterface(t *testing.T) {
 	}
 	has("routing off", got.RoutingBefore, "Turn it on and an application can use this port in place of its MySQL.")
 	one("Turn routing on", got.RoutingOn.Calls, `["/api/flashback",{"method":"PUT","body":{"routing":true}}]`)
-	if len(got.RoutingOn.Asked) != 1 || !strings.HasPrefix(got.RoutingOn.Asked[0], "Turn read routing on?") || !strings.Contains(got.RoutingOn.Asked[0], "forwarding account") {
+	if len(got.RoutingOn.Asked) != 1 || !strings.HasPrefix(got.RoutingOn.Asked[0], "Turn Engine Routing on?") || !strings.Contains(got.RoutingOn.Asked[0], "forwarding account") {
 		t.Errorf("Turn routing on asked %q; want one question that says statements then run on each server's MySQL with its forwarding account", got.RoutingOn.Asked)
 	}
 	if a := got.RoutingOn.After; !slices.Equal(a.State, []string{"On"}) || routingButtons(a) != 1 || !slices.Contains(a.Buttons, "Turn routing off") {

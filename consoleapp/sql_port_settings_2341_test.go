@@ -146,7 +146,7 @@ func TestSQLPortStartupLines(t *testing.T) {
 		}
 	}
 	got = sqlPortStartupLines("", "", 15*time.Minute, false, nil)
-	for _, want := range []string{"--route-max-copy-age", "no longer turns read routing on", "it is OFF", "the copy answers every statement", "no maximum copy age", "Remove the setting"} {
+	for _, want := range []string{"--route-max-copy-age", "no longer turns Engine Routing on", "it is OFF", "the copy answers every statement", "no maximum copy age", "Remove the setting"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("--route-max-copy-age: want %q in:\n%s", want, got)
 		}
@@ -169,7 +169,7 @@ func TestResolveRouteFlags_neverStopsCapture(t *testing.T) {
 	if upRouteMaxCopyAge <= 0 || upConsoleFlashbackListen != "nonsense" {
 		t.Errorf("max copy age %v, listen %q", upRouteMaxCopyAge, upConsoleFlashbackListen)
 	}
-	if got := sqlPortStartupLines("", "", upRouteMaxCopyAge, false, nil); !strings.Contains(got, "no longer turns read routing on") {
+	if got := sqlPortStartupLines("", "", upRouteMaxCopyAge, false, nil); !strings.Contains(got, "no longer turns Engine Routing on") {
 		t.Errorf("a max copy age that does not parse is not said: %q", got)
 	}
 	for _, off := range []string{"", "0", "0s"} {

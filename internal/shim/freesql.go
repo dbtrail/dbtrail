@@ -399,10 +399,10 @@ func (h *Handler) nameAsSource(res *mysql.Result, names []string, err error) {
 	rs := res.Resultset
 	switch {
 	case err != nil:
-		h.routeWarn("names", "read routing: the source could not say how it names a statement's columns, so the copy's answer keeps the copy's names for them (an expression with no alias is then named differently from MySQL's answer)", err)
+		h.routeWarn("names", "Engine Routing: the source could not say how it names a statement's columns, so the copy's answer keeps the copy's names for them (an expression with no alias is then named differently from MySQL's answer)", err)
 		return
 	case len(names) != len(rs.Fields):
-		h.routeWarn("names-count", "read routing: the source and the copy count different columns for a statement, so the copy's answer keeps the copy's names", fmt.Errorf("the source names %d columns, the copy returned %d", len(names), len(rs.Fields)))
+		h.routeWarn("names-count", "Engine Routing: the source and the copy count different columns for a statement, so the copy's answer keeps the copy's names", fmt.Errorf("the source names %d columns, the copy returned %d", len(names), len(rs.Fields)))
 		return
 	}
 	// The index by name is kept only where the result has one (the port's
@@ -459,7 +459,7 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		// A write reaches the source with the registry's account, on the
 		// strength of the console token. Named in the log at info: the
 		// audit trail covers historical reads, and this is neither.
-		h.logger.Info("read routing: write forwarded to mysql", "statement", readrouter.LeadingKeyword(qstr))
+		h.logger.Info("Engine Routing: write forwarded to mysql", "statement", readrouter.LeadingKeyword(qstr))
 		return ops.forward(RouteReasonWrite, "write")
 	case readrouter.KindTxnBegin, readrouter.KindTxnEnd, readrouter.KindOther:
 		return ops.forward(RouteReasonNotASelect, "not a select")
@@ -488,7 +488,7 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	// this exists to keep fast must not pay it.
 	d, err := ops.decide()
 	if err != nil {
-		h.routeWarn("explain", "read routing: could not explain, statement forwarded", err)
+		h.routeWarn("explain", "Engine Routing: could not explain, statement forwarded", err)
 		return ops.forward(RouteReasonExplainFailed, "could not explain: "+err.Error())
 	}
 	if !d.ToCopy {
@@ -506,7 +506,7 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	if !h.routerCfg.AnyCopyAge {
 		at := h.freeSQL.CopyUpdatedAt(ctx)
 		if at.IsZero() {
-			h.routeWarn("age", "read routing: copy age unknown, expensive statement forwarded", nil)
+			h.routeWarn("age", "Engine Routing: copy age unknown, expensive statement forwarded", nil)
 			return ops.forward(RouteReasonCopyAgeUnknown, "copy age unknown")
 		}
 		unchangedWithin, tooOld = h.pastMaxCopyAge(at)
@@ -531,13 +531,13 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		// something else there (#2123), or a date, time or year column
 		// would be read another way (#2133). Its own reason and its own
 		// warning, so it does not read as a fault nor use up a fault's.
-		h.routeWarn("columns", "read routing: the copy's columns are not MySQL's for a statement (a star, a NATURAL JOIN, the name of a column the copy does not hold, or a date, time or year column it reads another way), forwarded to mysql", err)
+		h.routeWarn("columns", "Engine Routing: the copy's columns are not MySQL's for a statement (a star, a NATURAL JOIN, the name of a column the copy does not hold, or a date, time or year column it reads another way), forwarded to mysql", err)
 		return ops.forward(RouteReasonCopyColumnsDiffer, "copy's columns differ: "+differ.Reason)
 	}
 	var held *ResultsHeldError
 	if errors.As(err, &held) {
 		// The copy works; the port has no room for another result (#2241).
-		h.routeWarn("results", "read routing: the port is still sending as many results as it keeps in memory at once, an expensive statement forwarded to mysql", err)
+		h.routeWarn("results", "Engine Routing: the port is still sending as many results as it keeps in memory at once, an expensive statement forwarded to mysql", err)
 		return ops.forward(RouteReasonCopyResultsHeld, "port holds its results: "+err.Error())
 	}
 	if errors.Is(err, sqlsandbox.ErrBusy) {
@@ -556,11 +556,11 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 			// Not forwarded (#2084): a port sized to keep expensive reads
 			// off the source does not hand them to it when they are many.
 			// The client is told what a full server tells it.
-			h.routeWarn("busy", "read routing: the copy was busy (every slot taken, and the line for one full or the wait over), an expensive statement refused with error 1040", err)
+			h.routeWarn("busy", "Engine Routing: the copy was busy (every slot taken, and the line for one full or the wait over), an expensive statement refused with error 1040", err)
 			h.observeRoute(RouteRefused, reason)
 			return nil, mysql.NewError(mysql.ER_CON_COUNT_ERROR, err.Error())
 		}
-		h.routeWarn("busy", "read routing: the copy was busy (every slot taken, and the line for one full or the wait over), an expensive statement forwarded to mysql", err)
+		h.routeWarn("busy", "Engine Routing: the copy was busy (every slot taken, and the line for one full or the wait over), an expensive statement forwarded to mysql", err)
 		return ops.forward(reason, detail+err.Error())
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || (err != nil && ctx.Err() != nil) {
@@ -569,7 +569,7 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		// forwarded: a client that gives up on a long line must not turn
 		// its wait into a read on the source, nor a router that stops into
 		// one read there per statement that waited.
-		h.logger.Debug("read routing: a statement for the copy ended before the copy answered; not forwarded", "err", err)
+		h.logger.Debug("Engine Routing: a statement for the copy ended before the copy answered; not forwarded", "err", err)
 		h.observeRoute(RouteRefused, RouteReasonCancelled)
 		return nil, h.freeSQLError(err)
 	}
@@ -577,7 +577,7 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		// The slow path is always right: whatever the copy could not do
 		// (a construct DuckDB lacks, a missing table, a timeout, a result
 		// over the cap), MySQL does.
-		h.routeWarn("copy", "read routing: copy refused an expensive statement, forwarded to mysql", err)
+		h.routeWarn("copy", "Engine Routing: copy refused an expensive statement, forwarded to mysql", err)
 		return ops.forward(RouteReasonCopyRefused, "copy refused: "+shortErr(err))
 	}
 	// The copy's side of the trace: forwarded statements log their reason,
@@ -586,10 +586,10 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	if unchangedWithin > 0 {
 		// Its own reason: the copy answering past the limit has to show in
 		// the tally, or a snapshot that is never refreshed reads as fresh.
-		h.logger.Debug("read routing: served by the copy", "reason", d.Reason+"; "+tooOld+", and the statement's tables are unchanged since their snapshot")
+		h.logger.Debug("Engine Routing: served by the copy", "reason", d.Reason+"; "+tooOld+", and the statement's tables are unchanged since their snapshot")
 		h.observeRoute(RouteCopy, RouteReasonTablesUnchanged)
 	} else {
-		h.logger.Debug("read routing: served by the copy", "reason", d.Reason)
+		h.logger.Debug("Engine Routing: served by the copy", "reason", d.Reason)
 		h.observeRoute(RouteCopy, RouteReasonExpensivePlan)
 	}
 	h.mu.Lock()
@@ -663,7 +663,7 @@ func (h *Handler) readOnlyRefusal(qstr string) error {
 	}
 	// The reason alone: it is fixed text and known keywords, where the
 	// statement's first word can be anything the client typed.
-	h.logger.Debug("read routing: refused by read-only mode", "reason", why)
+	h.logger.Debug("Engine Routing: refused by read-only mode", "reason", why)
 	h.observeRoute(RouteRefused, RouteReasonReadOnly)
 	msg := "this port is read-only (--route-read-only) and refused the statement: " + why + ". Nothing was sent to the source."
 	h.mu.Lock()
@@ -730,7 +730,7 @@ func (h *Handler) forward(ctx context.Context, qstr string, reason RouteReason, 
 // the client is reading a prepared statement's answer, so the rows go out in
 // the binary encoding.
 func (h *Handler) forwardWith(reason RouteReason, detail string, binary bool, run func(readrouter.RowSink) (*mysql.Result, error)) (*mysql.Result, error) {
-	h.logger.Debug("read routing: forwarded to mysql", "reason", detail)
+	h.logger.Debug("Engine Routing: forwarded to mysql", "reason", detail)
 	h.mu.Lock()
 	h.routeLastForwarded = true
 	h.mu.Unlock()
@@ -757,7 +757,7 @@ func (h *Handler) forwardWith(reason RouteReason, detail string, binary bool, ru
 	h.observeRoute(RouteMySQL, reason)
 	if err != nil {
 		if reason == RouteReasonUpstreamLost {
-			h.routeWarn("lost", "read routing: the connection to the source was lost; this client connection answers 2006 until it reconnects", err)
+			h.routeWarn("lost", "Engine Routing: the connection to the source was lost; this client connection answers 2006 until it reconnects", err)
 		}
 		return nil, err
 	}

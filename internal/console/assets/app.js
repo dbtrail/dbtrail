@@ -14830,11 +14830,11 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
     if (!split) return panel;
     wrap.append(cnSection("MySQL client", "Read your copy from a MySQL client",
       "Your tables as DBTrail keeps them, answered by DBTrail's copy. Nothing here touches your database.", "pink"), panel);
-    wrap.append(cnSection("Read routing · optional", "Run MySQL and DuckDB on one port",
+    wrap.append(cnSection("Engine Routing · optional", "Run MySQL and DuckDB on one port",
       "Point an application at the same port and DBTrail picks who answers each statement: light ones on your MySQL, heavy SELECTs on DuckDB, over the copy.", "violet"));
     if (route === "card") wrap.append(routeCard);
     else wrap.append(el("section", { class: "ov-panel cn-routep sqlc is-idle" },
-      el("p", { class: "cn-sql-row", text: route === "idle" ? "Available once the MySQL port above is on." : "Read routing is part of the MySQL port: see above." })));
+      el("p", { class: "cn-sql-row", text: route === "idle" ? "Available once the MySQL port above is on." : "Engine Routing is part of the MySQL port: see above." })));
     return wrap;
   };
   const head = el("div", { class: "ov-panel-head" }, el("h2", { class: "ov-panel-title", text: "Connect a SQL client" }));
@@ -14935,7 +14935,7 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
   if (routeCard) routeCard.append(rbody);
   rbody.append(routingSwitch(fb, cur, rt, mayChange && ((btn) => {
     const next = !fb.routing_on;
-    if (next && !ask("Turn read routing on?\n\nStatements sent to this port then run on each server's own MySQL, with that server's forwarding account. Only heavy SELECTs run on the copy.")) return;
+    if (next && !ask("Turn Engine Routing on?\n\nStatements sent to this port then run on each server's own MySQL, with that server's forwarding account. Only heavy SELECTs run on the copy.")) return;
     changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { routing: next } }), btn, rt, reveal);
   }), at.port));
   const numbers = routerNumbers(rt, cur, () => api("/api/router").then((v) => redrawSQLPanel(live, servers, fb, reveal, v), (e) => {
@@ -14956,7 +14956,7 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
     el("p", { class: "form-hint", text: "This password reads every schema on every server in the sidebar." }),
     el("p", { class: "form-hint" }, "Ask for a table as it was: ",
       el("code", { text: "SELECT * FROM _flashback.orders AS OF '10 minutes ago' WHERE id = 1;" }),
-      " Use _snapshot for the whole table (needs a snapshot) and _diff for what changed between two moments. The user picks the server, so each server has its own line; pick another in the sidebar and copy again. Add @copy to the user (", el("code", { text: (user || "<server-name>") + "@copy" }), ") and the copy answers everything on that connection, whatever read routing says."),
+      " Use _snapshot for the whole table (needs a snapshot) and _diff for what changed between two moments. The user picks the server, so each server has its own line; pick another in the sidebar and copy again. Add @copy to the user (", el("code", { text: (user || "<server-name>") + "@copy" }), ") and the copy answers everything on that connection, whatever Engine Routing says."),
     el("p", { class: "form-hint", text: at.host
       ? "The port answers on " + at.host + " only. Run mysql where it can reach it (on the machine DBTrail runs on when it is 127.0.0.1), or open a tunnel to it. To answer other machines, start the router with another address (BINTRAIL_ROUTER_LISTEN)."
       : "The command uses the name the web interface was opened with. If that name is a reverse proxy in front of DBTrail, it does not pass this port through, so use that machine's own name or address instead. In the Docker install, docker-compose.yml decides who can reach the port: a new install publishes it to the machine itself only." })));
@@ -15183,7 +15183,7 @@ function routerLines(view, cur) {
   const port = (/:(\d+)$/.exec(String(st.listen || "")) || [])[1] || "";
   out.push({ text: "The router is the service that answers this port" + (port ? ", on port " + port : "") + ". " +
     (st.read_only ? "It is read-only: a statement that would change the server is refused and never sent to MySQL."
-      : "It is read-write: with read routing on, writes sent to it run on MySQL.") });
+      : "It is read-write: with Engine Routing on, writes sent to it run on MySQL.") });
   if (view.newer) out.push({ strong: "This router is a later version than this page knows.", text: "A number below may be missing or read as zero when the router now says it another way. SHOW ROUTER STATUS on the router's own port is the one to trust until DBTrail is updated too." });
   if (!cur) {
     out.push({ text: "Who answered: pick a server in the left sidebar to see its counts." });
@@ -15406,7 +15406,7 @@ function routingSwitch(fb, cur, rt, toggle, port) {
   const on = !!fb.routing_on;
   const wrap = el("div", { class: "cn-route" });
   const head = el("div", { class: "cn-route-head" },
-    el("span", { class: "cn-route-name", text: "Read routing" }),
+    el("span", { class: "cn-route-name", text: "Engine Routing" }),
     el("b", { class: "cn-route-state" + (on ? " is-on" : ""), text: on ? "On" : "Off" }));
   if (toggle) {
     // Off, turning it on is the one thing to do here: the button says so.
@@ -15986,7 +15986,7 @@ function serverRow(s) {
 // srvField builds a labeled input row: <label class="field"><span/><input/></label>.
 // FORWARDING_HINT explains the two optional forwarding fields of the server
 // form (#2079) in the form's own words.
-const FORWARDING_HINT = "Forwarding user and password are optional. They only matter while read routing is on (Settings, MySQL clients, Connect a SQL client): what a SQL client sends to the MySQL port then runs on this server as the forwarding user, so the forwarding user's permissions are all that port can do here, and what its SELECT covers is all it can read. Give it SELECT only, on the schemas the port should read. It must be another user than the source user: the port never forwards with the account DBTrail captures with, so with these fields blank the port does not forward for this server and the copy answers alone. Saving a change to the forwarding account closes the connections open on that port for this server, so that none stays on the previous account; clients reconnect.";
+const FORWARDING_HINT = "Forwarding user and password are optional. They only matter while Engine Routing is on (Settings, MySQL clients, Connect a SQL client): what a SQL client sends to the MySQL port then runs on this server as the forwarding user, so the forwarding user's permissions are all that port can do here, and what its SELECT covers is all it can read. Give it SELECT only, on the schemas the port should read. It must be another user than the source user: the port never forwards with the account DBTrail captures with, so with these fields blank the port does not forward for this server and the copy answers alone. Saving a change to the forwarding account closes the connections open on that port for this server, so that none stays on the previous account; clients reconnect.";
 
 // routePrefill remembers, per form, the forwarding account its server had
 // when the form opened: serverFormBody sends the forwarding fields only when

@@ -165,7 +165,7 @@ func TestIntegrationRouter(t *testing.T) {
 		t.Errorf("routing off, a point lookup: %v, want the copy's row", got)
 	}
 	var name, value string
-	if err := off.QueryRow("SHOW ROUTER STATUS").Scan(&name, &value); err != nil || name != "routing" || !strings.Contains(value, "read routing is turned off") {
+	if err := off.QueryRow("SHOW ROUTER STATUS").Scan(&name, &value); err != nil || name != "routing" || !strings.Contains(value, "Engine Routing is turned off") {
 		t.Errorf("SHOW ROUTER STATUS with routing off: %q = %q (%v), want it to say routing is off", name, value, err)
 	}
 	if _, err := off.Exec("UPDATE orders SET status = 'while-off' WHERE id = 2"); err == nil {

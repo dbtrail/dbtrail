@@ -241,7 +241,7 @@ func TestWordingPassTheseSentences(t *testing.T) {
 		}
 	}
 	has2("named", "Turn it on and an application can use this port in place of its MySQL.")
-	has2("named", "The router is the service that answers this port, on port 3308. It is read-write: with read routing on, writes sent to it run on MySQL.")
+	has2("named", "The router is the service that answers this port, on port 3308. It is read-write: with Engine Routing on, writes sent to it run on MySQL.")
 	has2("named", "The port answers on 127.0.0.1 only. Run mysql where it can reach it (on the machine DBTrail runs on when it is 127.0.0.1), or open a tunnel to it. To answer other machines, start the router with another address (BINTRAIL_ROUTER_LISTEN).")
 	has2("wildcard", "The command uses the name the web interface was opened with. If that name is a reverse proxy in front of DBTrail, it does not pass this port through, so use that machine's own name or address instead. In the Docker install, docker-compose.yml decides who can reach the port: a new install publishes it to the machine itself only.")
 	has2("routerDown", "The router that serves the port did not answer, so "+doubt)

@@ -653,9 +653,9 @@ on this machine, delete the whole `ports:` line of the `router` service
 (`_flashback`, `_snapshot`, `_diff`) and ordinary SQL over the captured
 tables. Nothing is sent to your MySQL.
 
-**Read routing (experimental, off by default).** Read routing is a saved
+**Engine Routing (off by default).** Engine Routing is a saved
 setting, off until it is turned on
-([Read routing](time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental)).
+([Engine Routing](time-travel-sql.md#engine-routing-mysql-answers-the-copy-takes-the-heavy-reads)).
 With it on, each statement goes to the server's source MySQL, except a
 `SELECT` whose plan says it is expensive, which runs on the copy. Statements
 are forwarded with that server's **forwarding account**: a
@@ -683,7 +683,7 @@ setting it.
 
 It reads the servers the web interface manages and the copies on the state
 volume, which it mounts read-only. A server needs a copy on that volume for
-ordinary SQL and, with read routing on, a source address the container can
+ordinary SQL and, with Engine Routing on, a source address the container can
 reach (as for `bintrail`). For a server whose snapshots are only on S3, that copy is
 the local mirror `bintrail` keeps on the same volume
 ([SQL on a server whose snapshots are only on S3](console.md#sql-on-a-server-whose-snapshots-are-only-on-s3));

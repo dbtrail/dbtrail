@@ -267,7 +267,7 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Enabled == nil && req.Routing == nil {
-		writeJSONError(w, http.StatusBadRequest, `"enabled" or "routing" is required: "enabled" true to turn the port on, false to turn it off; "routing" true to turn read routing on, false to turn it off`)
+		writeJSONError(w, http.StatusBadRequest, `"enabled" or "routing" is required: "enabled" true to turn the port on, false to turn it off; "routing" true to turn Engine Routing on, false to turn it off`)
 		return
 	}
 	fb := &s.flashback
@@ -293,7 +293,7 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 		fb.mu.Lock()
 		fb.saved = next
 		fb.mu.Unlock()
-		slog.Info("console: read routing on the MySQL port changed from the web interface", "routing", next.Routing)
+		slog.Info("console: Engine Routing on the MySQL port changed from the web interface", "routing", next.Routing)
 		writeJSON(w, http.StatusOK, flashbackChangeDTO{flashbackStatusDTO: s.flashbackStatus()})
 		return
 	}

@@ -167,7 +167,7 @@ func (q *SQLOnCopy) CopyUpdatedAt(ctx context.Context) time.Time {
 	if err != nil {
 		// The router forwards on a zero time; the operator still has to
 		// learn why the copy never answers.
-		slog.Warn("read routing: cannot read the copy's snapshot time; statements are forwarded", "server", q.user, "err", err)
+		slog.Warn("Engine Routing: cannot read the copy's snapshot time; statements are forwarded", "server", q.user, "err", err)
 		return time.Time{}
 	}
 	return in.BaselineSnapshot

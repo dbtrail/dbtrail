@@ -512,7 +512,7 @@ services:
   #
   # WHO ANSWERS. As it comes, the copy answers every statement: the history
   # (_flashback, _snapshot, _diff) and ordinary SQL over the captured tables.
-  # With READ ROUTING turned on in the web interface (experimental), each
+  # With ENGINE ROUTING turned on in the web interface, each
   # statement goes to the server's source MySQL instead, except SELECTs
   # whose plan says they are expensive, which run on the copy. It forwards
   # with that server's FORWARDING ACCOUNT: a MySQL user of its own that you
@@ -525,7 +525,7 @@ services:
   # forwarded.
   #
   # It reads the servers the web interface manages and the copies on the state
-  # volume, mounted READ-ONLY here: it writes nothing there. With read routing
+  # volume, mounted READ-ONLY here: it writes nothing there. With Engine Routing
   # on it needs each server's source to be reachable from this container, as
   # `bintrail` does.
   #

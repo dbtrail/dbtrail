@@ -64,7 +64,7 @@ const bundledComposeVersion = 4
 // file) has no entry: there is nothing before it to be missing.
 var composeVersionAdded = map[int]string{
 	2: "host.docker.internal on Linux: the services that reach your database map it to this machine (extra_hosts host-gateway, HOST_GATEWAY to override)",
-	3: "the router service: the MySQL port with read routing, run apart from capture on port 3310",
+	3: "the router service: the MySQL port with Engine Routing, run apart from capture on port 3310",
 	4: "the MySQL port (3309) is served by the router service and no longer by this one: with an older file nothing listens on 3309, and a MySQL client that connected there is refused",
 }
 

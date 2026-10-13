@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **Read routing is now called Engine Routing, and it is no longer
+  experimental.** The switch on **Settings → MySQL clients** picks the
+  engine that answers each statement on the MySQL port, your MySQL (InnoDB)
+  or the copy (DuckDB), and the name now says so: the old one read as
+  "send reads to a replica", which is not what it does. The web interface,
+  the log lines (they open with `Engine Routing:` where they opened with
+  `read routing:`, for anyone who filters logs on that text), the startup
+  lines, the `routing` row of `SHOW ROUTER STATUS`, the command help and
+  the documentation all use the new name. Nothing you have written
+  changes: flags, environment variables, the `router` command and its
+  service, the row names of `SHOW ROUTER STATUS`, the reason identifiers
+  and the metric `bintrail_read_routing_decisions_total` keep their names.
+  Entries below this one keep the old name.
 
 ## [0.104.1] - 2026-10-12
 ### Added

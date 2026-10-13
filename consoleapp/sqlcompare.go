@@ -34,7 +34,7 @@ var sqlCompareCmd = &cobra.Command{
 	Short: "Run SELECTs against the MySQL source and the copy and report which ones the copy answers differently",
 	Long: `Plays read statements through both sides of the read router and compares
 the answers row by row: the MySQL source (--source-dsn) and the server's
-copy, reached through the console's MySQL-protocol port with read routing
+copy, reached through the console's MySQL-protocol port with Engine Routing
 OFF (--copy-dsn, user = server id or name, password = the access token).
 
 Statements come from a file (--statements; one or more lines each, ending
@@ -65,7 +65,7 @@ counted apart and never fail the run (ties resolve differently per engine).`,
 func init() {
 	f := sqlCompareCmd.Flags()
 	f.StringVar(&scSourceDSN, "source-dsn", "", "MySQL source DSN, user:pass@tcp(host:port)/db (env BINTRAIL_SOURCE_DSN)")
-	f.StringVar(&scCopyDSN, "copy-dsn", "", "The console's MySQL-protocol port for the same server: <server>:<token>@tcp(host:port)/; with read routing on there, <server>@copy:<token>@tcp(host:port)/, a connection the copy answers alone")
+	f.StringVar(&scCopyDSN, "copy-dsn", "", "The console's MySQL-protocol port for the same server: <server>:<token>@tcp(host:port)/; with Engine Routing on there, <server>@copy:<token>@tcp(host:port)/, a connection the copy answers alone")
 	f.StringVar(&scSchema, "schema", "", "USE this schema on both sides first (default: the DSNs' own)")
 	f.StringVar(&scStatements, "statements", "", "File of statements to compare, ';'-terminated")
 	f.IntVar(&scSample, "sample", 0, "Instead of a file, compare the N most recent distinct SELECTs the source ran (performance_schema.events_statements_history_long)")

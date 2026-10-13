@@ -340,9 +340,9 @@ journalctl -u bintrail-router -f
   (**Settings**, **MySQL clients**, **Connect a SQL client**), with the password
   created there. `BINTRAIL_CONSOLE_TOKEN` in the settings file is accepted
   as a password too while the port is on; it does not open it.
-- As it comes, **the copy answers every statement**. With read routing turned
+- As it comes, **the copy answers every statement**. With Engine Routing turned
   on (a saved setting, off by default, see
-  [Read routing](./time-travel-sql.md#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental)),
+  [Engine Routing](./time-travel-sql.md#engine-routing-mysql-answers-the-copy-takes-the-heavy-reads)),
   statements are forwarded to **the source itself, live**, with each server's
   forwarding account: a MySQL user of its own, set on the server's page in
   the web interface, with `SELECT` on what applications should read. The
@@ -377,7 +377,7 @@ service opened the MySQL port itself (turned on in the web interface, or with
   in the settings file, the port is saved as on once (when it has no saved
   setting yet), and the capture service prints a `WARNING` in its log asking
   you to remove the line. Point clients at the router's address.
-- `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE` no longer turns read routing on. It
+- `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE` no longer turns Engine Routing on. It
   only prints a `WARNING`. Remove it.
 - The details are in
   [Upgrading](./time-travel-sql.md#upgrading-from-a-version-with-the-port-inside-watch).

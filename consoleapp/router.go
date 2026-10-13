@@ -41,7 +41,7 @@ import (
 // connections to each server's index and source.
 var routerCmd = &cobra.Command{
 	Use:   "router",
-	Short: "Serve the MySQL-protocol port with read routing, as a service of its own beside the one that captures",
+	Short: "Serve the MySQL-protocol port with Engine Routing, as a service of its own beside the one that captures",
 	Long: `Starts a MySQL-protocol port that applications connect to in place of their
 MySQL server. Each statement goes to the server's source MySQL, except SELECTs
 whose plan says they are expensive, which run on the copy.
@@ -656,9 +656,9 @@ func routerStartupLines(u routerStartup) string {
 	rule := fmt.Sprintf("SELECTs with plan cost >= %.0f or a full scan over >= %d rows (on a MariaDB source, also joins that read that many rows in all) run on the copy, whatever the age of its snapshot. When every worker is busy such a statement waits its turn, in the order it arrived, %s",
 		u.Cfg.RoutePolicy.CostThreshold, u.Cfg.RoutePolicy.ScanRows, routerWaitText(u.MaxWait))
 	if u.Cfg.RouteReadOnly {
-		b.WriteString("Router: read routing is read-only (--route-read-only): reads go to each server's source MySQL with that server's forwarding account; a server that has none is not forwarded for and is answered from the copy alone, since the account DBTrail captures with is never used; " + rule + ". A statement that is not a read is refused and never sent to the source. The check reads the statement's text: what a stored function does when a SELECT calls it is up to that account's grants.\n")
+		b.WriteString("Router: Engine Routing is read-only (--route-read-only): reads go to each server's source MySQL with that server's forwarding account; a server that has none is not forwarded for and is answered from the copy alone, since the account DBTrail captures with is never used; " + rule + ". A statement that is not a read is refused and never sent to the source. The check reads the statement's text: what a stored function does when a SELECT calls it is up to that account's grants.\n")
 	} else {
-		b.WriteString("Router: read routing is read-write: statements, writes included, go to each server's source MySQL with that server's forwarding account; a server that has none is not forwarded for and is answered from the copy alone, since the account DBTrail captures with is never used; " + rule + ". Anyone holding a credential of this port can do on each source what that account can. Set --route-read-only to refuse writes, and a forwarding account on each server to bound the rest.\n")
+		b.WriteString("Router: Engine Routing is read-write: statements, writes included, go to each server's source MySQL with that server's forwarding account; a server that has none is not forwarded for and is answered from the copy alone, since the account DBTrail captures with is never used; " + rule + ". Anyone holding a credential of this port can do on each source what that account can. Set --route-read-only to refuse writes, and a forwarding account on each server to bound the rest.\n")
 	}
 	for _, line := range u.Ignored {
 		b.WriteString("Router: " + line + ".\n")

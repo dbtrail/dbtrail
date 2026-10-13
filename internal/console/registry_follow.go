@@ -228,7 +228,7 @@ func (s *Server) refreshFlashbackPassword() {
 		slog.Info("console: the MySQL port's password from the web interface is no longer the one accepted (it was replaced there, the port was turned off, or its setting removed); connections open on this port are closed")
 		onWithdrawn()
 	case rerouted:
-		slog.Info("console: read routing was turned on or off in the web interface; connections open on this port are closed and come back under the new setting", "routing", routing)
+		slog.Info("console: Engine Routing was turned on or off in the web interface; connections open on this port are closed and come back under the new setting", "routing", routing)
 		onWithdrawn()
 	}
 }

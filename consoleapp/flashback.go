@@ -402,7 +402,7 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 		// SHOW ROUTER STATUS on a connection the copy answers alone: the
 		// same numbers, under a first line that says nothing is routed
 		// here and why.
-		why := "off: the copy answers every statement on this port (read routing is turned off)"
+		why := "off: the copy answers every statement on this port (Engine Routing is turned off)"
 		if copyOnly {
 			why = "off for this connection: it asked for the copy alone (" + copyOnlySuffix + ")"
 		} else if cfg.RouteSwitch == nil || cfg.RouteSwitch() {
@@ -484,18 +484,18 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 	}
 	switch {
 	case tgt.SQL == nil:
-		logger.Warn("read routing off for this connection: SQL on the copy unavailable", "server", user, "reason", tgt.SQLUnavailable)
+		logger.Warn("Engine Routing off for this connection: SQL on the copy unavailable", "server", user, "reason", tgt.SQLUnavailable)
 		unavailable = "SQL on the copy is unavailable (" + tgt.SQLUnavailable + ")"
 		srv.RecordRouteUnavailable(tgt.ID, unavailable)
 	case tgt.ForwardRefused != "":
 		// The server has a source and no account of its own for this port
 		// (#2317). Ahead of the empty-DSN case below: the DSN is empty
 		// here too, and "no source" would send the reader to the wrong fix.
-		logger.Warn("read routing off for this connection: the server has no account this port may forward with", "server", user, "reason", tgt.ForwardRefused)
+		logger.Warn("Engine Routing off for this connection: the server has no account this port may forward with", "server", user, "reason", tgt.ForwardRefused)
 		unavailable = tgt.ForwardRefused
 		srv.RecordRouteUnavailable(tgt.ID, unavailable)
 	case tgt.ForwardDSN == "":
-		logger.Warn("read routing off for this connection: the server has no source DSN to forward to", "server", user)
+		logger.Warn("Engine Routing off for this connection: the server has no source DSN to forward to", "server", user)
 		unavailable = "the server has no source database to forward to"
 		srv.RecordRouteUnavailable(tgt.ID, unavailable)
 	default:
@@ -510,7 +510,7 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 			// source; a scheme the forwarder does not speak, or a TLS
 			// setting that cannot be used, is the realistic cause. The
 			// message carries no secret.
-			logger.Warn("read routing off for this connection", "server", user, "err", err)
+			logger.Warn("Engine Routing off for this connection", "server", user, "err", err)
 			why := forwardAddressUnavailable(err)
 			if problem, isTLS := strings.CutPrefix(err.Error(), "source TLS settings: "); isTLS {
 				why = "this server's TLS settings cannot be used (" + problem + ")"
@@ -519,12 +519,12 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 			srv.RecordRouteUnavailable(tgt.ID, why)
 		} else {
 			srv.RecordRouteAvailable(tgt.ID)
-			logger.Debug("read routing: connection bound", "server", user)
+			logger.Debug("Engine Routing: connection bound", "server", user)
 			host := config.DSNHost(tgt.ForwardDSN)
 			fw.OnCleartext = func(err error) {
 				// The same thing capture says when its own connection to
 				// this source falls back, once per client connection.
-				logger.Warn("read routing: the source offers no TLS; this connection forwards to it WITHOUT encryption, as capture does",
+				logger.Warn("Engine Routing: the source offers no TLS; this connection forwards to it WITHOUT encryption, as capture does",
 					"server", user, "host", host, "error", err)
 			}
 			// Every decision is counted twice over, by the canonical
@@ -547,7 +547,7 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 				}
 				if _, refused := readrouter.AccountRefused(err); refused {
 					text := accountRefusedText(account, err)
-					logger.Warn("read routing: the source refused the port's login", "server", user, "account", account, "error", text)
+					logger.Warn("Engine Routing: the source refused the port's login", "server", user, "account", account, "error", text)
 					srv.RecordRouteAccountRefused(id, gen, text)
 				}
 			}
@@ -558,7 +558,7 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 			// A MariaDB that did not know the collation the port's login
 			// asked for, and would not take the one the port names instead.
 			fw.OnCollation = func(collation string, err error) {
-				logger.Warn("read routing: the source would not give this connection a collation the copy reproduces; MySQL answers every statement on it",
+				logger.Warn("Engine Routing: the source would not give this connection a collation the copy reproduces; MySQL answers every statement on it",
 					"server", user, "collation", collation, "error", err.Error())
 			}
 			// The source is asked to say when a statement changed one of
@@ -577,7 +577,7 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 				if unusable {
 					sessionTrackingUnusable.Store(id, true)
 				}
-				logger.Debug("read routing: the source does not report session changes on this connection; a setting changed inside a stored function is not seen",
+				logger.Debug("Engine Routing: the source does not report session changes on this connection; a setting changed inside a stored function is not seen",
 					"server", user, "why", why)
 				warnSessionUntracked(logger, id, user, why)
 				srv.RecordRouteSessionUntracked(id, why)
@@ -636,7 +636,7 @@ func warnDSNOverridesTLS(logger *slog.Logger, id, server, dsn, mode string) {
 	if _, told := tlsOverrideWarned.LoadOrStore(id+"\x00"+mode, true); told {
 		return
 	}
-	logger.Warn("read routing: the DSN the port forwards with sets its own tls= parameter, which takes precedence over this server's TLS mode; verify it meets your security requirement",
+	logger.Warn("Engine Routing: the DSN the port forwards with sets its own tls= parameter, which takes precedence over this server's TLS mode; verify it meets your security requirement",
 		"server", server, "ssl_mode", mode)
 }
 
@@ -652,9 +652,9 @@ var sessionUntrackedWarned sync.Map
 
 // sessionUntrackedText is what the log says, once per server, when the source
 // does not report changes to session settings on the port's connections.
-const sessionUntrackedText = "read routing: this source does not tell the port when a statement changes a session setting, " +
+const sessionUntrackedText = "Engine Routing: this source does not tell the port when a statement changes a session setting, " +
 	"so a setting changed inside a stored function that a SELECT calls is not seen until the next statement that changes settings (a SET, a write, a CALL); " +
-	"until then the copy can answer an expensive read under the setting from before. Everything else about read routing works as before"
+	"until then the copy can answer an expensive read under the setting from before. Everything else about Engine Routing works as before"
 
 // warnSessionUntracked says it, once per server for the life of the process,
 // with the reason the port's connection gave.
@@ -711,7 +711,7 @@ func warnSessionDefaults(logger *slog.Logger, id, server string, status uint16) 
 	if _, told := sessionDefaultsWarned.LoadOrStore(id+"\x00"+difference, true); told {
 		return
 	}
-	logger.Warn("read routing: the source opens its sessions with "+difference+", and the port's handshake tells every client autocommit on and backslash escapes; "+
+	logger.Warn("Engine Routing: the source opens its sessions with "+difference+", and the port's handshake tells every client autocommit on and backslash escapes; "+
 		"the port reports the session's real state from the first answer on, which a driver that decided at connect does not read",
 		"server", server, "sessions_open_with", difference, "consequence", consequence, "note", "logged once per server")
 }

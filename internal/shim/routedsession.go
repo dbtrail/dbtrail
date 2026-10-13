@@ -601,7 +601,7 @@ func (h *Handler) sessionKeepsCopyFromAnswering(ctx context.Context) string {
 		// Not read: nothing is assumed. (When the cause is the connection
 		// to the source being gone, the forward that follows says so to
 		// the client and to the tally.)
-		h.routeWarn("session-read", "read routing: the source's session settings could not be read, expensive statement forwarded", err)
+		h.routeWarn("session-read", "Engine Routing: the source's session settings could not be read, expensive statement forwarded", err)
 		return "the source's session could not be read: " + shortErr(err)
 	}
 	if rs.differs == "" {
@@ -616,7 +616,7 @@ func (h *Handler) sessionKeepsCopyFromAnswering(ctx context.Context) string {
 	h.routeWarned[key] = true
 	h.mu.Unlock()
 	if !seen {
-		h.logger.Warn("read routing: the copy does not answer on this connection while the source's session holds a setting it does not reproduce",
+		h.logger.Warn("Engine Routing: the copy does not answer on this connection while the source's session holds a setting it does not reproduce",
 			"setting", rs.differs, "note", "logged once per setting per connection")
 	}
 	return rs.differs

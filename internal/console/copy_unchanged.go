@@ -599,7 +599,7 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 		}
 		cuts[i] = copyCutOf(t, s.copyCuts.footer)
 		if cuts[i].fault != nil {
-			s.copyFaults.warn(id, "read routing: a snapshot file's footer could not be read; statements over its table are not vouched for and follow the age rule",
+			s.copyFaults.warn(id, "Engine Routing: a snapshot file's footer could not be read; statements over its table are not vouched for and follow the age rule",
 				"server", id, "table", t.Schema+"."+t.Table, "error", cuts[i].fault)
 		}
 		if cuts[i].refusal != "" {
@@ -616,7 +616,7 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 		}
 	}
 	unreadable := func(what string, err error) string {
-		s.copyFaults.warn(id, "read routing: the index could not answer whether a statement's tables changed since their snapshot; such statements are not vouched for and follow the age rule",
+		s.copyFaults.warn(id, "Engine Routing: the index could not answer whether a statement's tables changed since their snapshot; such statements are not vouched for and follow the age rule",
 			"server", id, "reading", what, "error", err)
 		return "the index could not be read (" + what + ")"
 	}

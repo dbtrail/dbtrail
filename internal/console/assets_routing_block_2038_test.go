@@ -221,8 +221,8 @@ console.log(JSON.stringify({
 	}
 	for name, v := range got.Draws {
 		t.Logf("%-20s %s | figs %q bar %q", name+":", v.Text, v.Figs, v.Bar)
-		if !strings.HasPrefix(v.Text, "Read routing ") {
-			t.Errorf("%s: does not open with Read routing: %s", name, v.Text)
+		if !strings.HasPrefix(v.Text, "Engine Routing ") {
+			t.Errorf("%s: does not open with Engine Routing: %s", name, v.Text)
 		}
 		// No shape of the switch names the capture account, shows a blank
 		// made visible, or says what only the old block said.
@@ -452,7 +452,7 @@ console.log(JSON.stringify({
 	// never the one DBTrail captures with (#2317), and where routing is
 	// turned on now that it is a switch and not a startup flag (#2341).
 	must("form hint", got.Hint, "Forwarding user", "SELECT only", "must be another user than the source user", "never forwards with the account DBTrail captures with", "the copy answers alone",
-		"They only matter while read routing is on (Settings, MySQL clients, Connect a SQL client)")
+		"They only matter while Engine Routing is on (Settings, MySQL clients, Connect a SQL client)")
 	for _, bad := range []string{"forwards with the source user", "started with read routing", "router service", "whatever that account can.", "never writ", "exactly the tables", "—"} {
 		if strings.Contains(got.Hint, bad) {
 			t.Errorf("the form hint holds %q: %s", bad, got.Hint)

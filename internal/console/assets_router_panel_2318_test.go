@@ -245,7 +245,7 @@ console.log(JSON.stringify({ text: out, shape, refresh: { asked, disabled: !!btn
 	must("noListen", "The router is the service that answers this port. It is read-only")
 	mustNot("noListen", "on port")
 	must("newer", "later version than this page knows", "may be missing or read as zero", "SHOW ROUTER STATUS", "Your MySQL 9 statements")
-	must("readWrite", "It is read-write: with read routing on, writes sent to it run on MySQL", "Everything else, writes included, runs on MySQL")
+	must("readWrite", "It is read-write: with Engine Routing on, writes sent to it run on MySQL", "Everything else, writes included, runs on MySQL")
 	mustNot("readWrite", "It is read-only", "Every other read")
 	must("noRule", "No plan threshold is set", "every read runs on MySQL and nothing reaches the copy")
 	must("noRuleRW", "No plan threshold is set", "every statement runs on MySQL and nothing reaches the copy")

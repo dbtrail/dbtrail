@@ -87,10 +87,10 @@ carries the usual port, 3309, and the panel says it is not a confirmed one.
 The Docker Compose stack publishes the port on the host loopback as 3309:
 connect from that machine, or through a tunnel from another one.
 
-**Read routing.** The same panel has its switch (**Turn routing on**, **Turn
+**Engine Routing.** The same panel has its switch (**Turn routing on**, **Turn
 routing off**), and shows who answered for the server picked in the sidebar:
 how many statements MySQL answered and how many the copy did. See
-[Read routing](#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental).
+[Engine Routing](#engine-routing-mysql-answers-the-copy-takes-the-heavy-reads).
 
 **Routing is by username.** Connect as the target
 server: its registry **ID** (robust; the `X-Bintrail-Server` value shown in the
@@ -152,7 +152,7 @@ What to know before relying on it:
   which reads the archives in S3; for counts and grouping over the whole
   history, your own DuckDB reading the bucket, with a `views.sql` downloaded
   with **Include the change log** and **Works on another machine** ticked
-  ([Dashboards](dashboards.md)). With read routing on, an ordinary
+  ([Dashboards](dashboards.md)). With Engine Routing on, an ordinary
   statement is planned on MySQL first, so `events` there means a table of
   that name on the source, never the change log.
 - **Tested with the `mysql` command-line client.** A graphical client
@@ -171,7 +171,7 @@ What to know before relying on it:
   place. To refuse a statement that has waited too long, start the router
   with `--max-wait` (`ROUTER_MAX_WAIT` in `.env`, e.g. `30s`): past that
   time the client gets MySQL error 1203 ("SQL on the copy is busy"), or
-  error 1040 with read routing on (see
+  error 1040 with Engine Routing on (see
   [A busy copy](#a-busy-copy-the-read-waits-its-turn)). The wait is in the
   router's metrics: `bintrail_sql_slot_wait_seconds` and `bintrail_sql_slot_waiting`
   ([Observability](observability.md)). A
@@ -186,7 +186,7 @@ What to know before relying on it:
   before; the settings panel (Memory for SQL on the copy) says which. One whose tables have more than 384 MB of changes not merged into
   them yet is answered from the newest earlier copy in which they fit, with
   a warning (SHOW WARNINGS) naming that copy's time; with no such copy it is
-  refused before it runs. Under read routing it is not answered from an
+  refused before it runs. Under Engine Routing it is not answered from an
   earlier copy: it goes to MySQL like any other refusal. A statement that
   reads `events` is not either, since the change log is not pinned to a
   copy. On a host with memory to spare, `--sql-memory`
@@ -247,7 +247,7 @@ What to know before relying on it:
   written with `USING` or `NATURAL` returns the join's columns first on
   MySQL, and where the left table has them here.
 
-  Under read routing none of these reaches the client, because MySQL
+  Under Engine Routing none of these reaches the client, because MySQL
   answers such a statement: see below. The SQL card has no routing: it
   answers from the copy, with these differences. A views file that follows later snapshots
   (the default of `bintrail views`, see [Dashboards](dashboards.md)) keeps
@@ -255,8 +255,8 @@ What to know before relying on it:
 - **`SET time_zone`, `SET sql_select_limit` and `SET sql_mode` are applied
   or refused, never ignored.** They used to be answered with an empty OK and
   read by nothing, so a client that had set its zone got answers computed in
-  UTC. On a connection that runs ordinary SQL on the copy (not under read
-  routing, where every `SET` is MySQL's) each one is now handled, in every
+  UTC. On a connection that runs ordinary SQL on the copy (not under Engine
+  Routing, where every `SET` is MySQL's) each one is now handled, in every
   spelling (`SET time_zone = ...`, `SET SESSION ...`, `SET @@session....`,
   several assignments in one `SET`, a prepared `SET`), and `SELECT
   @@time_zone`, `@@sql_mode` and `@@sql_select_limit` answer what the
@@ -341,7 +341,7 @@ What to know before relying on it:
   being sent, over all its connections, so it never holds more than that
   plus one result. While it holds that much, a statement is refused, before
   it runs when the port can tell, with error 1203 and "run the statement
-  again in a moment"; under read routing MySQL answers it instead
+  again in a moment"; under Engine Routing MySQL answers it instead
   (`copy_results_held` in the counter). The router's log says so, once a
   minute at most. A result stops counting when it has been written to the
   client, so a connection left open holds nothing. A client that reads
@@ -355,7 +355,7 @@ What to know before relying on it:
   past it is the same error, which says the limit is above the cap. A
   listing (`SHOW TABLES`, `DESCRIBE`) takes neither a `LIMIT` nor the select
   limit, so its error points at `information_schema`, which does. (Under
-  read routing a result past the cap is not an error: MySQL answers that
+  Engine Routing a result past the cap is not an error: MySQL answers that
   statement instead.) A cell longer than the cell cap (1 MiB) is cut and
   marked, and raises a warning the client counts; `SHOW WARNINGS` reports
   it. The console's SQL card keeps its own behaviour: it returns the first
@@ -384,8 +384,9 @@ What to know before relying on it:
   `DECIMAL(p,s)` as `DECIMAL`, `TIMESTAMP` as `DATETIME`, `BOOLEAN` as 1/0,
   a `LIST`/`STRUCT` as JSON text, `MAP`/`HUGEINT`/`UUID`/`INTERVAL` as text).
 
-### Read routing: MySQL answers, the copy takes the heavy reads (experimental)
-Read routing is off until it is turned on. Off, the copy answers every
+<a id="read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental"></a>
+### Engine Routing: MySQL answers, the copy takes the heavy reads
+Engine Routing is off until it is turned on. Off, the copy answers every
 statement on the port, as described above, and nothing is sent to MySQL.
 
 Turn it on in the web interface: **Settings**, **MySQL clients**, **Connect a
@@ -398,7 +399,7 @@ connections that were open
 it on: `--route-max-copy-age` did in earlier versions and now only prints a
 warning.
 
-With read routing on, a
+With Engine Routing on, a
 connection on this port to a server that has a source DSN and a
 [forwarding account](#the-forwarding-account) forwards every statement to
 that MySQL over one upstream connection per client connection, with that
@@ -412,7 +413,7 @@ know the syntax, the table is not in the copy, the result exceeds the
 port's row or cell cap), MySQL runs it. A copy that is busy does not reject
 it: the read waits its turn. It does not fall back onto MySQL because of load
 ([A busy copy](#a-busy-copy-the-read-waits-its-turn)). Nothing the client sends
-needs to change. **This is experimental**: for what MySQL answers, the
+needs to change. For what MySQL answers, the
 behaviour is MySQL's; for what the copy answers, it is DuckDB's, and the
 list below of where the two differ is what the feature's own testing is
 still growing.
@@ -564,8 +565,8 @@ The decision, in order, for every statement:
    versions. A statement only the cost would have sent to the copy still
    stays on the source: for example an index walked in order under a
    `LIMIT` with a filter no index serves. The study of which statements the copy answers the same way
-   (the vetoes of step 4) was run against MySQL; on a MariaDB source read
-   routing is as experimental, and less measured.
+   (the vetoes of step 4) was run against MySQL; on a MariaDB source Engine
+   Routing is less measured.
    Last, for a plan the copy should take, **the size of the result**. The
    copy returns at most its row cap (10,000 rows by default) and refuses a
    larger result, so a statement that returns more would run on the copy,
@@ -616,7 +617,7 @@ The decision, in order, for every statement:
    changes again. The connection is not kept on MySQL for good: put the
    setting back and the copy answers again. The reason is counted as
    `session_differs`, and DBTrail's log names the setting and its value
-   once per connection (`read routing: the copy does not answer on this
+   once per connection (`Engine Routing: the copy does not answer on this
    connection ...`).
 
    What is read, and what the copy reproduces:
@@ -698,7 +699,7 @@ The decision, in order, for every statement:
    one change is not seen on it: do not change session settings inside a
    function there. The port finds out on every connection, from the answer
    to its own statement: a source that tracks marks that answer too.
-   DBTrail's log says so once per server, at warn level (`read routing:
+   DBTrail's log says so once per server, at warn level (`Engine Routing:
    this source does not tell the port when a statement changes a session
    setting ...`, with the reason), and `GET /api/flashback` carries the
    reason as `session_untracked` for that server.
@@ -747,7 +748,7 @@ asked:
 <a id="past-the-limit-tables-that-have-not-changed"></a>
 #### No maximum copy age
 
-There is no limit on how old the copy may be. With read routing on, an
+There is no limit on how old the copy may be. With Engine Routing on, an
 expensive read goes to the copy whatever the age of its snapshot. Earlier
 versions had a limit (`--route-max-copy-age`) and, past it, a check of which
 tables had changed since their snapshot. Both are gone.
@@ -761,7 +762,7 @@ asynchronous replica. Its age is a number to watch, not a rule:
   server of that connection.
 - `bintrail_read_routing_copy_snapshot_timestamp_seconds` is the same number
   for Prometheus. Alert on `time()` minus it, the way replica lag is alerted
-  on ([Observability](observability.md#read-routing-bintrail_read_routing_decisions_total)).
+  on ([Observability](observability.md#engine-routing-bintrail_read_routing_decisions_total)).
 
 If an application cannot read a result as old as the last snapshot, have it
 connect straight to MySQL and not through this port.
@@ -771,7 +772,7 @@ What this is and is not:
 - **The copy's answer is as fresh as its snapshot.** A heavy read served
   from the copy does not see what changed since the last snapshot, however
   long ago that was ([No maximum copy age](#no-maximum-copy-age) above).
-  That is why read routing is off until you turn it on. A `SELECT` that
+  That is why Engine Routing is off until you turn it on. A `SELECT` that
   must see the last second belongs in a transaction, which MySQL always
   answers.
 - **The copy's grants are nobody's; the forwarded ones are the forwarding
@@ -858,7 +859,7 @@ What this is and is not:
   answered, and has a time limit of its own. If the source
   cannot say (it refuses to prepare the statement, or counts other columns
   than the copy returned), the answer keeps the copy's names and the log
-  says so, once per connection. The plain port without read routing
+  says so, once per connection. The plain port without Engine Routing
   translates nothing: a client there writes the copy's dialect and reads
   the copy's names.
 - **Where the copy answers differently without an error.** The veto list
@@ -1208,7 +1209,7 @@ What this is and is not:
   date column is a number on MySQL and a date and time on the copy. The
   statement's text does not say that `created_on` is a date, so the copy
   reads each table's column types from the `CREATE TABLE` stored with its
-  snapshot, and under read routing it declines and MySQL answers
+  snapshot, and under Engine Routing it declines and MySQL answers
   (`copy_columns_differ`):
   - **a statement where the name of a `DATE`, `DATETIME` or `TIMESTAMP`
     column of a table it reads stands next to a `+` or a `-`, or under
@@ -1287,7 +1288,7 @@ What this is and is not:
   = 2` filters on the alias; `SELECT twice FROM gen AS twice` returns the
   whole row as one value; and a generated column named `user` or
   `current_date` is answered by the function of that name. One table is
-  enough for the last three. So, under read routing, the copy declines and
+  enough for the last three. So, under Engine Routing, the copy declines and
   MySQL answers (`copy_columns_differ`):
   - **a statement whose text holds the name of a generated column of a
     table it reads**, anywhere: in the select list, `WHERE`, `ORDER BY`,
@@ -1468,7 +1469,7 @@ What this is and is not:
   WARNINGS` right after shows that refusal. To forward writes, start the
   router with `--route-read-only=false` (or
   `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0`; `ROUTER_READ_ONLY=0` in the Docker
-  stack's `.env`). It matters only with read routing on: with it off,
+  stack's `.env`). It matters only with Engine Routing on: with it off,
   nothing is forwarded at all.
   - **Allowed**: `SELECT`, `WITH ... SELECT`, `TABLE`, `VALUES`, `SHOW`,
     `DESCRIBE`, `EXPLAIN` (and `EXPLAIN ANALYZE`, or MariaDB's `ANALYZE`, of a
@@ -1572,7 +1573,7 @@ the one they want; Connector/J with `useLocalTransactionState` skips a
 driver read `NO_BACKSLASH_ESCAPES` from them to decide how to escape a
 string. The port's flags describe the session the client really has:
 
-- **Under read routing**, the session on the source, as the source last
+- **Under Engine Routing**, the session on the source, as the source last
   reported it, on every answer, whoever produced it. A `SELECT` the copy
   answered, a time-travel statement, a `SHOW WARNINGS` or `USE` the port
   answered itself and a `PING` all say "in a transaction" between `BEGIN`
@@ -1617,7 +1618,7 @@ string. The port's flags describe the session the client really has:
   connects (PyMySQL with its default settings, Connector/J, mysqlclient)
   gets 2006 and cannot finish connecting to a routed server. What works
   while the source is down: the `mysql` client, a driver that sends no `SET`
-  when it connects, or a port started without read routing.
+  when it connects, or a port started without Engine Routing.
 - **The handshake** announces autocommit and no `NO_BACKSLASH_ESCAPES`, as
   MySQL and MariaDB do by default. It is written before the port knows which
   server the client asked for, so it cannot carry that server's state, and
@@ -1649,8 +1650,8 @@ string. The port's flags describe the session the client really has:
   - **PyMySQL with its default (`autocommit=False`) now sends
     `SET AUTOCOMMIT = 0` when it connects**, because the handshake says
     autocommit is on, as it does connected to MySQL. Its writes and its
-    `rollback()` then behave as on MySQL. Two things follow under read
-    routing. Every statement of such a connection, reads included, runs
+    `rollback()` then behave as on MySQL. Two things follow under Engine
+    Routing. Every statement of such a connection, reads included, runs
     inside a transaction on the source, and inside a transaction nothing
     goes to the copy: **the copy does not answer a PyMySQL connection left
     on its defaults**. (Before the fix it did, by accident of the wrong
@@ -1680,8 +1681,8 @@ string. The port's flags describe the session the client really has:
   makes the first statement one without string arguments; or make
   autocommit, and a `sql_mode` without `NO_BACKSLASH_ESCAPES`, the source's
   default. The port says it in its log, once per server, when the first
-  answer of a session on the source shows a state that differs: `read
-  routing: the source opens its sessions with autocommit off, and the
+  answer of a session on the source shows a state that differs: `Engine
+  Routing: the source opens its sessions with autocommit off, and the
   port's handshake tells every client autocommit on and backslash escapes`.
   (When a connection's first statement is itself a `SET` of `autocommit`
   or of `sql_mode`, the setting it sets is the client's and is not counted;
@@ -1697,7 +1698,7 @@ the row in the table.
 **The server version in the handshake is always `8.0.11`**, whatever the
 source is. It is fixed on purpose, for the same reason: the handshake is
 written before the server is chosen, and one port serves every server.
-What a client reads by asking is the source's own under read routing
+What a client reads by asking is the source's own under Engine Routing
 (`SELECT VERSION()`, `@@version` and `@@version_comment` are forwarded, so a
 MariaDB source answers `11.4.x-MariaDB`), and the port's own on a
 connection that is not routed (`@@version` is `8.0.11`, `@@version_comment`
@@ -1707,8 +1708,8 @@ chooses its behaviour from the handshake version rather than from a query:
 - Connector/J picks the names of the variables it reads when it connects
   from that version: told 8.0.11 it asks for `@@transaction_isolation` and
   not `@@tx_isolation`, and leaves out the query cache variables. MySQL 5.7.20
-  and later, MySQL 8 and MariaDB 11.1 and later know that name; under read
-  routing, an older MariaDB (10.11 for example) or MySQL source does not,
+  and later, MySQL 8 and MariaDB 11.1 and later know that name; under Engine
+  Routing, an older MariaDB (10.11 for example) or MySQL source does not,
   and Connector/J's connect statement fails there with error 1193. Not
   measured; read from the driver's source.
 - A driver that recognises MariaDB by the `-MariaDB` suffix of the handshake
@@ -1981,7 +1982,7 @@ whoever held the old one is out.
 setting (`console-mysql-port.yaml`): `routing`. Absent or `false`, the copy
 answers every statement and nothing is forwarded. `true`, statements are
 routed as described under
-[Read routing](#read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental).
+[Engine Routing](#engine-routing-mysql-answers-the-copy-takes-the-heavy-reads).
 The change is seen within a few seconds and closes the connections that were
 open: who answers is decided when a connection is made, and one left open
 would go on forwarding after routing was turned off. With or without a
@@ -2019,7 +2020,7 @@ own, not the one `watch` serves) it exports Prometheus metrics: the routing
 decisions, the wait for a worker, and
 `bintrail_read_routing_copy_snapshot_timestamp_seconds`, per server.
 `time()` minus that one is the copy's age, the number to alert on here, the
-way replica lag is alerted on. See [Read routing metrics](observability.md#read-routing-bintrail_read_routing_decisions_total).
+way replica lag is alerted on. See [Engine Routing metrics](observability.md#engine-routing-bintrail_read_routing_decisions_total).
 The Docker stack and the packages set this address for you.
 
 The same address answers `GET /status` with the router's numbers as one JSON
@@ -2061,7 +2062,7 @@ forwarding and the copy's tables do not read the index. Time travel
 with an error until it is back.
 
 **What it needs.** The servers file, a copy on local disk for each server it
-should answer ordinary SQL for, and, with read routing on, a network path to
+should answer ordinary SQL for, and, with Engine Routing on, a network path to
 each server's source. The router brings nothing from a bucket itself. For a
 server whose snapshots are only on S3 it reads the local mirror `watch` keeps
 beside the servers file
@@ -2082,8 +2083,8 @@ one environment file serves both processes.
 | `--token` | `BINTRAIL_CONSOLE_TOKEN` | none | The access token, one more password for the port. It does not open the port |
 | `--servers-file` | `BINTRAIL_CONSOLE_SERVERS` | `~/.config/bintrail/console-servers.yaml` | The servers file the web interface manages. Read, never written |
 | `--route-read-only` | `BINTRAIL_CONSOLE_ROUTE_READ_ONLY` | on | Refuse every statement that is not a read. `--route-read-only=false` or `BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0` forwards writes |
-| `--route-cost-threshold` | `BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD` | 10,000 | Under read routing, a `SELECT` whose plan costs at least this goes to the copy. 0 turns the rule off |
-| `--route-scan-rows` | `BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS` | 100,000 | Under read routing, a `SELECT` whose plan scans a whole table of at least this many rows goes to the copy. 0 turns the rule off |
+| `--route-cost-threshold` | `BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD` | 10,000 | Under Engine Routing, a `SELECT` whose plan costs at least this goes to the copy. 0 turns the rule off |
+| `--route-scan-rows` | `BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS` | 100,000 | Under Engine Routing, a `SELECT` whose plan scans a whole table of at least this many rows goes to the copy. 0 turns the rule off |
 | `--sql-memory` | `BINTRAIL_CONSOLE_SQL_MEMORY` | 2GB | Memory each statement on the copy may use (at least 512MB) |
 | `--sql-port-max-rows` | `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` | 10,000 | Most rows one statement returns. A larger result is refused with error 1104 |
 
@@ -2135,7 +2136,7 @@ What changes on an upgrade:
   ([install.md](install.md#the-router-a-second-service-of-the-same-package)).
   Anywhere else, start `bintrail-console router` yourself.
 - **`--route-max-copy-age` / `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE` no longer
-  turns read routing on.** It only prints a WARNING. Read routing is the
+  turns Engine Routing on.** It only prints a WARNING. Engine Routing is the
   saved `routing` setting, and it is off until that is turned on. There is no
   maximum copy age any more: with routing on, an expensive read goes to the
   copy whatever the age of its snapshot.
@@ -2514,7 +2515,7 @@ Every quoted time literal — in `AS OF`, `DBTRAIL_AT`, and the `BETWEEN` bounds
 - An error keeps the code the same statement gets as text, at `PREPARE` and at `EXECUTE`.
 - An argument whose bytes are not valid UTF-8 reaches the copy as a `BLOB`; the time-travel shapes refuse it.
 - Cursors are not served: an execution that asks for one (Connector/J with `useCursorFetch=true`, the C API's `STMT_ATTR_CURSOR_TYPE`) is refused with error 1105 naming the cause. Results are sent whole.
-- With read routing on, a statement that is not a time-travel shape is prepared on MySQL itself and executed there with MySQL binding the arguments, as if the client were connected to it: the port never writes a forwarded statement out as text, so a write stores exactly the value the client bound. The prepare answer then carries MySQL's own parameter and column definitions, errors are MySQL's, and a forwarded result is streamed row by row in MySQL's own binary encoding. Each execution goes through the routing rules above with its own arguments (the plan is read with them bound); only an execution the rules send to the copy is written out, for the copy alone, and falls back to MySQL if the copy refuses it. An execution stays on MySQL when the copy would read it differently: the database changed since the statement was prepared, or a string argument spells a non-integer number (`'12.7'`, compared as a number on MySQL). A statement that reaches the plan step holds a second statement on the source, the `EXPLAIN` of itself, which counts toward the source's `max_prepared_stmt_count`. A statement is tied to the connection it was prepared on: once the port's connection to the source is lost, its executions fail with 2006 like everything else.
+- With Engine Routing on, a statement that is not a time-travel shape is prepared on MySQL itself and executed there with MySQL binding the arguments, as if the client were connected to it: the port never writes a forwarded statement out as text, so a write stores exactly the value the client bound. The prepare answer then carries MySQL's own parameter and column definitions, errors are MySQL's, and a forwarded result is streamed row by row in MySQL's own binary encoding. Each execution goes through the routing rules above with its own arguments (the plan is read with them bound); only an execution the rules send to the copy is written out, for the copy alone, and falls back to MySQL if the copy refuses it. An execution stays on MySQL when the copy would read it differently: the database changed since the statement was prepared, or a string argument spells a non-integer number (`'12.7'`, compared as a number on MySQL). A statement that reaches the plan step holds a second statement on the source, the `EXPLAIN` of itself, which counts toward the source's `max_prepared_stmt_count`. A statement is tied to the connection it was prepared on: once the port's connection to the source is lost, its executions fail with 2006 like everything else.
 - On a MariaDB source, a client that understands MariaDB's own column annotations (a `JSON` column, which MariaDB stores as text) sees such a column as plain text through the port: the bytes are the same, the annotation is not relayed.
 
 On the `_flashback` / `_snapshot` shapes a column list may replace `*` and the optional `TIMESTAMP` keyword may follow `AS OF` (Oracle / SQL Server convention):

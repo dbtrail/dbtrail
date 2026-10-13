@@ -250,7 +250,7 @@ func (h *Handler) prepareRouted(query string, parts []string) (int, int, any, er
 	if err != nil {
 		if readrouter.IsLost(err) {
 			h.observeRoute(RouteMySQL, RouteReasonUpstreamLost)
-			h.routeWarn("lost", "read routing: the connection to the source was lost; this client connection answers 2006 until it reconnects", err)
+			h.routeWarn("lost", "Engine Routing: the connection to the source was lost; this client connection answers 2006 until it reconnects", err)
 		}
 		return 0, 0, nil, err
 	}

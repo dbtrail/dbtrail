@@ -158,9 +158,9 @@ func TestWarnSessionUntracked(t *testing.T) {
 		t.Fatalf("%d lines for two servers, want one each:\n%s", len(lines), logs.String())
 	}
 	t.Log(lines[0])
-	const want = `level=WARN msg="read routing: this source does not tell the port when a statement changes a session setting, ` +
+	const want = `level=WARN msg="Engine Routing: this source does not tell the port when a statement changes a session setting, ` +
 		`so a setting changed inside a stored function that a SELECT calls is not seen until the next statement that changes settings (a SET, a write, a CALL); ` +
-		`until then the copy can answer an expensive read under the setting from before. Everything else about read routing works as before" ` +
+		`until then the copy can answer an expensive read under the setting from before. Everything else about Engine Routing works as before" ` +
 		`server=shop why="the source did not agree to CLIENT_SESSION_TRACK when the connection opened" note="logged once per server"`
 	if !strings.HasSuffix(lines[0], want) {
 		t.Errorf("the line is\n%s\nwant it to end with\n%s", lines[0], want)
@@ -214,7 +214,7 @@ func TestBindReadRouterSessionTracking(t *testing.T) {
 		return fb.Routing.Servers[id].SessionUntracked
 	}
 	warns := func() int {
-		return strings.Count(logs.String(), "level=WARN msg=\"read routing: this source does not tell the port")
+		return strings.Count(logs.String(), "level=WARN msg=\"Engine Routing: this source does not tell the port")
 	}
 
 	first := bind()
