@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
 // A server that deletes its local snapshots by age keeps a few hours of them
@@ -101,7 +102,7 @@ func TestLastReadElsewhere_readIsInNeitherPlace(t *testing.T) {
 	lrLocalFolds(t, root, "orders")
 	lrWrite(t, other, lr0, "orders", lrDump(lr0, 100))
 	wantSettled(t, lrOne(t, lrFindWith(t, root, other), "orders"), StatusInconclusive,
-		lr1.Format(time.RFC3339), "no longer kept on this machine or in "+other, "built from the recorded changes", "full read of the database")
+		lr1.Format(time.RFC3339), "no longer kept on this machine or in "+other, "was built from the recorded changes", "full read of the database")
 }
 
 // No second location: the answer names no place, and says what is kept.
@@ -109,7 +110,7 @@ func TestLastReadElsewhere_noSecondLocation(t *testing.T) {
 	root := t.TempDir()
 	lrLocalFolds(t, root, "orders")
 	p := lrOne(t, lrFindWith(t, root, ""), "orders")
-	wantSettled(t, p, StatusInconclusive, lr1.Format(time.RFC3339), "no longer kept. ", "built from the recorded changes", "full read of the database")
+	wantSettled(t, p, StatusInconclusive, lr1.Format(time.RFC3339), "no longer kept. ", "was built from the recorded changes", "full read of the database")
 	if strings.Contains(p.Settled.Detail, "on this machine") {
 		t.Fatalf("detail names a second place when there is none: %q", p.Settled.Detail)
 	}
@@ -184,4 +185,52 @@ func TestLastReadElsewhere_aFailedLookupIsAnError(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantSettled(t, lrOne(t, lrFindWith(t, root, other), "orders"), StatusError, "looking for it in "+other+" failed")
+}
+
+// One snapshot on disk (a folder that keeps less than one schedule interval)
+// and the rest in the second location: the tables are still paired.
+func TestLastReadElsewhere_oneSnapshotOnDisk(t *testing.T) {
+	root, other := t.TempDir(), t.TempDir()
+	lrWrite(t, root, lr3, "orders", lrFold(lr3, lr2, lr1, 2, 400))
+	lrWrite(t, other, lr0, "orders", lrDump(lr0, 100))
+	lrWrite(t, other, lr1, "orders", lrDump(lr1, 200))
+	wantCompared(t, lrOne(t, lrFindWith(t, root, other), "orders"), lr0, lr1, 200)
+}
+
+// One snapshot on disk whose read is in neither place: said, not "nothing
+// to verify yet".
+func TestLastReadElsewhere_oneSnapshotOnDiskReadNowhere(t *testing.T) {
+	root, other := t.TempDir(), t.TempDir()
+	lrWrite(t, root, lr3, "orders", lrFold(lr3, lr2, lr1, 2, 400))
+	wantSettled(t, lrOne(t, lrFindWith(t, root, other), "orders"), StatusInconclusive, "no longer kept on this machine or in "+other)
+}
+
+// The first snapshot a server ever took, in both places: still nothing to
+// verify yet, as without a second location.
+func TestLastReadElsewhere_firstSnapshotEver(t *testing.T) {
+	root, other := t.TempDir(), t.TempDir()
+	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
+	lrWrite(t, other, lr0, "orders", lrDump(lr0, 100))
+	if pairs := lrFindWith(t, root, other); pairs != nil {
+		t.Fatalf("pairs = %+v, want none: there is nothing to compare yet", pairs)
+	}
+}
+
+// The snapshot before the read came from the second location; the local
+// folder of that same instant cannot be read. The second location already
+// answered for it, so the table is compared.
+func TestLastReadElsewhere_unreadableLocalFolderOfThePrevious(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads every folder")
+	}
+	root, other := t.TempDir(), t.TempDir()
+	lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
+	lrWrite(t, root, lr2, "orders", lrFold(lr2, lr1, lr1, 1, 300))
+	lrWrite(t, other, lr0, "orders", lrDump(lr0, 100))
+	dir := filepath.Join(root, reconstruct.SnapshotDirName(lr0))
+	if err := os.Mkdir(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	wantCompared(t, lrOne(t, lrFindWith(t, root, other), "orders"), lr0, lr1, 200)
 }

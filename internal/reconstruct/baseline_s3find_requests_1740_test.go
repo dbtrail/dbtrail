@@ -447,3 +447,24 @@ func TestFindBaselineS3_usesASnapshotOnceItCompletes(t *testing.T) {
 		t.Fatalf("picked %s (%v), want snapshot 2 now that it is complete", snap, err)
 	}
 }
+
+// FindBaselineFile over an s3:// source: the table's file and the time of the
+// directory that holds it, and ErrNoBaseline when no snapshot that old has it.
+func TestFindBaselineFile_S3(t *testing.T) {
+	captureLog(t)
+	keys := requestFixture(20)
+	keys = append(keys, findDay(7)+"/shop/rare.parquet")
+	stubS3Snapshots(t, &fakeS3Snapshots{keys: keys})
+	at := findTime(t, findDay(7))
+	f, err := FindBaselineFile(context.Background(), findRoot, "shop", "rare", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := findRoot + "/" + findDay(7) + "/shop/rare.parquet"; f.Path != want || !f.SnapshotTime.Equal(at) || f.Schema != "shop" || f.Table != "rare" {
+		t.Fatalf("file = %+v, want %q at %s", f, want, at)
+	}
+	// One nanosecond before the directory's own time is before the directory.
+	if _, err := FindBaselineFile(context.Background(), findRoot, "shop", "rare", at.Add(-time.Nanosecond)); !errors.Is(err, ErrNoBaseline) {
+		t.Fatalf("err = %v, want ErrNoBaseline: no snapshot before %s holds the table", err, findDay(7))
+	}
+}

@@ -538,7 +538,12 @@ func FindBaselinePairWith(ctx context.Context, source, other string) (pairs []Ba
 			break
 		}
 	}
-	if tNew.IsZero() || tSecond.IsZero() {
+	// One snapshot listed and a second location to ask: the snapshots before
+	// it may all be there (a folder that keeps less than one schedule
+	// interval), so the tables are paired, and "nothing to verify yet" is
+	// said below only if the second location held nothing for any of them.
+	single := !tNew.IsZero() && tSecond.IsZero() && other != ""
+	if tNew.IsZero() || tSecond.IsZero() && !single {
 		// Fewer than two readable snapshots, and then every skipped folder
 		// counts: "only one baseline, nothing to verify yet" would be a false
 		// exit 0 while the predecessor exists and cannot be read.
@@ -564,11 +569,15 @@ func FindBaselinePairWith(ctx context.Context, source, other string) (pairs []Ba
 	if err := reconstruct.UnreadableAtOrAfter(unreadable, tSecond, time.Time{}); err != nil {
 		return nil, nil, err
 	}
+	found := false // a table whose answer is not "no earlier snapshot anywhere"
 	for _, key := range keys {
 		snaps := byTable[key]
 		switch {
 		case snaps[0].SnapshotTime.Equal(tNew):
 			p, rests := pairLastRead(ctx, snaps, other)
+			if p.Settled == nil || rests.until.IsZero() {
+				found = true
+			}
 			if u := rests.unreadableIn(unreadable, p.Schema); u != nil {
 				p = BaselinePair{Schema: p.Schema, Table: p.Table, Settled: &TableResult{
 					Schema: p.Schema, Table: p.Table, Status: StatusInconclusive,
@@ -580,6 +589,10 @@ func FindBaselinePairWith(ctx context.Context, source, other string) (pairs []Ba
 		case snaps[0].SnapshotTime.Equal(tSecond):
 			prevOnly = append(prevOnly, query.SchemaTable{Schema: snaps[0].Schema, Table: snaps[0].Table})
 		}
+	}
+	if single && !found {
+		// The one snapshot is the first of every table in both places.
+		return nil, nil, nil
 	}
 	sortBaselinePairs(pairs)
 	sortSchemaTables(prevOnly)
@@ -678,7 +691,8 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile, other s
 			f, found, err := elsewhere(at)
 			if err != nil {
 				return settle(StatusError, fmt.Sprintf("the snapshot that last read this table from the database (%s) is no longer kept on this machine, "+
-					"and looking for it in %s failed: %v", at.UTC().Format(time.RFC3339), other, err)), restsOn{}
+						"and looking for it in %s failed: %v", at.UTC().Format(time.RFC3339), other, err)),
+					restsOn{at: at, holds: fmt.Sprintf("the snapshot that last read this table from the database (%s)", at.UTC().Format(time.RFC3339))}
 			}
 			// The newest at or before the read's instant that is not OF that
 			// instant is an older snapshot: the read itself is not there.
@@ -689,7 +703,7 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile, other s
 		}
 		if !haveRead {
 			return settle(StatusInconclusive, fmt.Sprintf("this check needs the snapshot that last read this table from the database (%s), and it is no longer kept%s. "+
-					"The snapshots that are kept were built from the recorded changes, not read from the database. "+
+					"The newest copy of this table was built from the recorded changes, not read from the database. "+
 					"A new full read of the database makes the table checkable", at.UTC().Format(time.RFC3339), where)),
 				restsOn{at: at, holds: fmt.Sprintf("the snapshot that last read this table from the database (%s)", at.UTC().Format(time.RFC3339))}
 		}
@@ -714,7 +728,7 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile, other s
 	// The snapshot before the read: the newest one listed, else the newest
 	// one other holds.
 	var prev reconstruct.BaselineFile
-	havePrev := false
+	havePrev, prevElsewhere := false, false
 	for _, f := range snaps {
 		if f.SnapshotTime.Before(read.SnapshotTime) {
 			prev, havePrev = f, true
@@ -728,7 +742,7 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile, other s
 			return settle(StatusError, fmt.Sprintf("no snapshot of this table earlier than its last read from the database (%s) is kept on this machine, "+
 				"and looking for one in %s failed: %v", readAt, other, err)), restsOn{}
 		}
-		prev, havePrev = f, found
+		prev, havePrev, prevElsewhere = f, found, found
 		where = ", on this machine or in " + other
 	}
 	if !havePrev {
@@ -770,7 +784,13 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile, other s
 		NewLock:             baseline.ReadConsistencyOf(nMeta),
 		PrevLock:            baseline.ReadConsistencyOf(prevMeta),
 	}
-	return pair, restsOn{from: prev.SnapshotTime, until: read.SnapshotTime,
+	from := prev.SnapshotTime
+	if prevElsewhere {
+		// The second location answered for that instant: a folder of it that
+		// could not be read here holds nothing the answer lacks.
+		from = from.Add(time.Nanosecond)
+	}
+	return pair, restsOn{from: from, until: read.SnapshotTime,
 		holds: fmt.Sprintf("a snapshot of this table between the one it would be compared with (%s) and its last read (%s)",
 			prev.SnapshotTime.UTC().Format(time.RFC3339), readAt)}
 }
