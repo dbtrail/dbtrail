@@ -453,7 +453,7 @@ console.log(JSON.stringify({
 	// turned on now that it is a switch and not a startup flag (#2341).
 	must("form hint", got.Hint, "Forwarding user", "SELECT only", "must be another user than the source user", "never forwards with the account DBTrail captures with", "the copy answers alone",
 		"They only matter while Engine Routing is on (Settings, MySQL clients, Connect a SQL client)")
-	for _, bad := range []string{"forwards with the source user", "started with read routing", "router service", "whatever that account can.", "never writ", "exactly the tables", "—"} {
+	for _, bad := range []string{"forwards with the source user", "started with read routing", "started with Engine Routing", "router service", "whatever that account can.", "never writ", "exactly the tables", "—"} {
 		if strings.Contains(got.Hint, bad) {
 			t.Errorf("the form hint holds %q: %s", bad, got.Hint)
 		}
