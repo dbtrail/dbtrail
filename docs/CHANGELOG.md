@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Usage telemetry: a daemon's daily beacon now says roughly how old the
   install is, and once, which version it ran before.** Two new fields,
   `install_age` (one of four ranges: `<7d`, `7d-30d`, `30d-90d`, `>90d`) and
-  `previous_version` (major.minor, on the first beacon after the version
-  changes), tell us whether installs stay and whether they upgrade. There is
+  `previous_version` (major.minor, on the first beacon after an upgrade),
+  tell us whether installs stay and whether they upgrade. There is
   still no install identifier: a daemon keeps a calendar day and a version in
   `telemetry-install.json`, the day never leaves the machine, and
   `bintrail telemetry off` or the web interface toggle deletes the file.

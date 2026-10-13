@@ -3,6 +3,7 @@ package telemetry
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -116,11 +117,17 @@ func TestBeaconReportsPreviousVersionOnce(t *testing.T) {
 		{2, "v0.102.3", ""},      // a patch release: same major.minor, not a move
 		{3, "v0.104.0", "0.102"}, // the upgrade
 		{4, "v0.104.0", ""},      // reported once, never again
-		{5, "v0.103.0", "0.104"}, // a downgrade is a move too
+		// A downgrade is not reported and does not lower the record: see
+		// stampInstall for why only an upgrade counts.
+		{5, "v0.103.0", ""},
+		{6, "v0.103.0", ""},
 		// A source build has no version worth naming and must not erase the
 		// one this install really came from.
-		{6, "dev-abc123", ""},
-		{7, "v0.105.0", "0.103"},
+		{7, "dev-abc123", ""},
+		{8, "v0.105.0", "0.104"},
+		// Compared as numbers: 0.99 is older than 0.105, and 1.0 is newer.
+		{9, "v0.99.0", ""},
+		{10, "v1.0.0", "0.105"},
 	} {
 		clock.Store(day(s.day))
 		beaconClient(t, dir, s.version, &clock).Beacon("watch")
@@ -265,18 +272,17 @@ func TestTamperedInstallRecord(t *testing.T) {
 		wantAge  string
 		wantPrev string
 	}{
-		"intact":                      {`{` + good + `,"last_versions":{"watch":"0.102"}}`, Age30to90d, "0.102"},
-		"not json":                    {"{{{", AgeUnder7d, ""},
-		"empty":                       {"", AgeUnder7d, ""},
-		"a version with text":         {`{` + good + `,"last_versions":{"watch":"0.102; DROP"}}`, Age30to90d, ""},
-		"a full triple":               {`{` + good + `,"last_versions":{"watch":"0.102.3"}}`, Age30to90d, ""},
-		"a long number":               {`{` + good + `,"last_versions":{"watch":"84729135550123.99887766"}}`, Age30to90d, ""},
-		"major one digit too long":    {`{` + good + `,"last_versions":{"watch":"1234.1"}}`, Age30to90d, ""},
-		"minor one digit too long":    {`{` + good + `,"last_versions":{"watch":"1.12345"}}`, Age30to90d, ""},
-		"the longest that is allowed": {`{` + good + `,"last_versions":{"watch":"999.9999"}}`, Age30to90d, "999.9999"},
-		"digits of another script":    {`{` + good + `,"last_versions":{"watch":"٠.١٢"}}`, Age30to90d, ""},
-		"another daemon's version":    {`{` + good + `,"last_versions":{"shim":"0.102"}}`, Age30to90d, ""},
-		"a daemon name that is text":  {`{` + good + `,"last_versions":{"Watch; x":"0.102"}}`, Age30to90d, ""},
+		"intact":                     {`{` + good + `,"last_versions":{"watch":"0.102"}}`, Age30to90d, "0.102"},
+		"not json":                   {"{{{", AgeUnder7d, ""},
+		"empty":                      {"", AgeUnder7d, ""},
+		"a version with text":        {`{` + good + `,"last_versions":{"watch":"0.102; DROP"}}`, Age30to90d, ""},
+		"a full triple":              {`{` + good + `,"last_versions":{"watch":"0.102.3"}}`, Age30to90d, ""},
+		"a long number":              {`{` + good + `,"last_versions":{"watch":"84729135550123.99887766"}}`, Age30to90d, ""},
+		"major one digit too long":   {`{` + good + `,"last_versions":{"watch":"1234.1"}}`, Age30to90d, ""},
+		"minor one digit too long":   {`{` + good + `,"last_versions":{"watch":"1.12345"}}`, Age30to90d, ""},
+		"digits of another script":   {`{` + good + `,"last_versions":{"watch":"٠.١٢"}}`, Age30to90d, ""},
+		"another daemon's version":   {`{` + good + `,"last_versions":{"shim":"0.102"}}`, Age30to90d, ""},
+		"a daemon name that is text": {`{` + good + `,"last_versions":{"Watch; x":"0.102"}}`, Age30to90d, ""},
 		// One field of the wrong type must not take the other with it.
 		"versions of the wrong type": {`{` + good + `,"last_versions":104}`, Age30to90d, ""},
 		"a date of the wrong type":   {`{"first_seen":20260701,"last_versions":{"watch":"0.102"}}`, AgeUnder7d, "0.102"},
@@ -303,6 +309,19 @@ func TestTamperedInstallRecord(t *testing.T) {
 				t.Errorf("previous_version = %q, want %q", got, tc.wantPrev)
 			}
 		})
+	}
+}
+
+// TestLongestAllowedVersionIsKept: the other side of the length bound. Checked
+// on the loader, because a recorded version above the build's is by design
+// not reported.
+func TestLongestAllowedVersionIsKept(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(InstallPath(dir), []byte(`{"last_versions":{"watch":"999.9999"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if rec, readable := loadInstall(dir); !readable || rec.Versions["watch"] != "999.9999" {
+		t.Errorf("loadInstall = %+v (readable %v), want watch at 999.9999", rec, readable)
 	}
 }
 
@@ -451,7 +470,45 @@ func TestTwoDaemonsAtDifferentVersionsDoNotReportEachOther(t *testing.T) {
 	}
 }
 
-// TestRunningDaemonFollowsARecordedOptOut: `telemetry off` typed next to a
+// TestTwoProcessesWithOneNameDoNotReportEachOther: `bintrail stream` and
+// `bintrail-pg stream` share a daemon name and can share this folder at
+// different versions, as can two copies of one daemon mid rolling upgrade.
+// The per-name record cannot tell them apart, so the rule that only an upgrade
+// counts has to keep them quiet.
+func TestTwoProcessesWithOneNameDoNotReportEachOther(t *testing.T) {
+	clearEnv(t)
+	dir := t.TempDir()
+	var clock atomic.Int64
+	reported := 0
+	for d := range 6 {
+		clock.Store(day(d))
+		for _, v := range []string{"v0.104.0", "v0.105.0"} {
+			beaconClient(t, dir, v, &clock).Beacon("stream")
+			evs := spooledEvents(t, SpoolDir(dir))
+			if evs[len(evs)-1].PreviousVersion != "" {
+				reported++
+			}
+		}
+	}
+	// Day 0: 0.104 records itself, then 0.105 is a real upgrade of that name.
+	if reported != 1 {
+		t.Errorf("%d beacons of 12 carried previous_version, want exactly the one upgrade", reported)
+	}
+}
+
+// recordOptOutOnly writes "off" into the consent file and does nothing else:
+// no purge, no install-record removal. It stands for the weakest opt-out a
+// daemon can meet (a file restored from a backup, another tool's write), so
+// whatever cleanup the test then sees was done by the daemon itself.
+func recordOptOutOnly(t *testing.T, dir string) {
+	t.Helper()
+	off := false
+	if err := saveState(dir, state{Enabled: &off, NoticeShown: true}); err != nil {
+		t.Fatalf("record the opt-out: %v", err)
+	}
+}
+
+// TestRunningDaemonFollowsARecordedOptOut: an opt-out recorded next to a
 // daemon that has been up for weeks. The daemon resolved consent at start; it
 // has to notice the file, stop, and leave nothing behind.
 func TestRunningDaemonFollowsARecordedOptOut(t *testing.T) {
@@ -461,17 +518,15 @@ func TestRunningDaemonFollowsARecordedOptOut(t *testing.T) {
 	clock.Store(day(0))
 	c := beaconClient(t, dir, "v0.104.0", &clock)
 	c.Beacon("watch")
-
-	// Another process records the opt-out, exactly as the CLI does.
-	if err := SetEnabled(dir, false); err != nil {
-		t.Fatal(err)
-	}
-	if err := PurgeSpool(dir); err != nil {
-		t.Fatal(err)
-	}
-	// The daemon, unaware, records one more action before its next tick.
 	c.RecordDaemonCommand("console-sql").Finish()
+	if _, err := os.Stat(InstallPath(dir)); err != nil {
+		t.Fatalf("precondition: no install record: %v", err)
+	}
+	if n := countSpooledEvents(t, SpoolDir(dir)); n != 2 {
+		t.Fatalf("precondition: %d spooled events, want 2", n)
+	}
 
+	recordOptOutOnly(t, dir)
 	clock.Store(day(30))
 	c.followRecordedOptOut() // what every tick does before its beacon
 	c.Beacon("watch")
@@ -479,11 +534,72 @@ func TestRunningDaemonFollowsARecordedOptOut(t *testing.T) {
 	if c.Enabled() {
 		t.Error("the daemon is still reporting after an opt-out was recorded")
 	}
+	if d := c.Decision(); d.Enabled || d.Source != SourceConfig {
+		t.Errorf("decision after following the opt-out = %+v, want off by the config file", d)
+	}
 	if _, err := os.Stat(InstallPath(dir)); !os.IsNotExist(err) {
-		t.Errorf("the install record is back after the opt-out (stat err = %v)", err)
+		t.Errorf("the daemon left the install record after following the opt-out (stat err = %v)", err)
 	}
 	if entries, _ := os.ReadDir(SpoolDir(dir)); len(entries) != 0 {
-		t.Errorf("events recorded after the opt-out were left in the spool: %v", entries)
+		t.Errorf("the daemon left spooled events after following the opt-out: %v", entries)
+	}
+}
+
+// TestRunDaemonFollowsARecordedOptOut is the WIRING: the loop itself has to
+// make the check. The test above calls the method by hand and would stay
+// green with the call deleted from RunDaemon.
+func TestRunDaemonFollowsARecordedOptOut(t *testing.T) {
+	clearEnv(t)
+	t.Cleanup(ShortenDaemonTickForTest(5 * time.Millisecond))
+	dir := t.TempDir()
+	c := initDrained(t, Config{
+		Dir: dir, Endpoint: "http://127.0.0.1:1", Version: "v0.104.0",
+		Stderr: &bytes.Buffer{}, Interactive: boolPtr(false),
+	})
+	recordOptOutOnly(t, dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); c.RunDaemon(ctx, "watch") }()
+	deadline := time.Now().Add(5 * time.Second)
+	for c.Enabled() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if c.Enabled() {
+		t.Fatal("the daemon loop never followed the recorded opt-out")
+	}
+	if entries, _ := os.ReadDir(SpoolDir(dir)); len(entries) != 0 {
+		t.Errorf("the loop spooled something on its way out: %v", entries)
+	}
+}
+
+// TestFollowingAnOptOutCannotUndoAWebOptIn: the file said off, and the web
+// interface turns telemetry on (file first, then the live client) while the
+// daemon's hourly check is running. Whatever the order, the daemon must end
+// on, because that is what the file says and what the web interface answered.
+func TestFollowingAnOptOutCannotUndoAWebOptIn(t *testing.T) {
+	clearEnv(t)
+	dir := t.TempDir()
+	var clock atomic.Int64
+	clock.Store(day(0))
+	for range 300 {
+		c := beaconClient(t, dir, "v0.104.0", &clock)
+		recordOptOutOnly(t, dir)
+		done := make(chan struct{})
+		go func() { defer close(done); c.followRecordedOptOut() }()
+		if err := SetEnabled(dir, true); err != nil {
+			t.Fatal(err)
+		}
+		c.SetRuntimeConsent(true)
+		<-done
+		if !c.Enabled() {
+			t.Fatal("the daemon is off while the consent file says on")
+		}
+		if err := os.Remove(StatePath(dir)); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -505,36 +621,118 @@ func TestRecordedOptOutDoesNotOverrideAHigherControl(t *testing.T) {
 	}
 }
 
+// holdBeaconBeforeSpool starts a beacon and stops it between its record save
+// and its spool append. It returns once the beacon is parked there, with a
+// func that lets it go and waits for it to finish.
+func holdBeaconBeforeSpool(t *testing.T, c *Client, daemon string) (release func()) {
+	t.Helper()
+	parked, resume, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	beaconBeforeSpoolHook = func() { close(parked); <-resume }
+	t.Cleanup(func() { beaconBeforeSpoolHook = nil })
+	go func() { defer close(done); c.Beacon(daemon) }()
+	<-parked
+	beaconBeforeSpoolHook = nil // the parked beacon already read it
+	return func() { close(resume); <-done }
+}
+
 // TestOptOutWaitsForABeaconInFlight: SetRuntimeConsent(false) must not return
-// while a beacon is between its consent check and its last write, or the
-// caller would delete the install record and the beacon would write it back.
+// while a beacon is between its record save and its spool append. If it did,
+// the caller would delete the record and purge the spool, and the beacon would
+// then spool an event nothing ever sends or removes.
 func TestOptOutWaitsForABeaconInFlight(t *testing.T) {
 	clearEnv(t)
 	dir := t.TempDir()
 	var clock atomic.Int64
 	clock.Store(day(0))
-	for range 200 {
-		c := beaconClient(t, dir, "v0.104.0", &clock)
-		done := make(chan struct{})
-		go func() { defer close(done); c.Beacon("watch") }()
-		// The web interface's order: stop the process, then clean the disk.
-		c.SetRuntimeConsent(false)
-		if err := SetEnabled(dir, false); err != nil {
-			t.Fatal(err)
-		}
-		if err := PurgeSpool(dir); err != nil {
-			t.Fatal(err)
-		}
-		<-done
-		if _, err := os.Stat(InstallPath(dir)); !os.IsNotExist(err) {
-			t.Fatalf("a beacon wrote the install record back after the opt-out (stat err = %v)", err)
-		}
-		if entries, _ := os.ReadDir(SpoolDir(dir)); len(entries) != 0 {
-			t.Fatalf("a beacon was spooled after the opt-out: %v", entries)
-		}
-		if err := os.Remove(StatePath(dir)); err != nil { // next round starts enabled
-			t.Fatal(err)
-		}
+	c := beaconClient(t, dir, "v0.104.0", &clock)
+	release := holdBeaconBeforeSpool(t, c, "watch")
+
+	stopped := make(chan struct{})
+	go func() { defer close(stopped); c.SetRuntimeConsent(false) }()
+	select {
+	case <-stopped:
+		release()
+		t.Fatal("the opt-out returned while a beacon was still writing")
+	case <-time.After(150 * time.Millisecond):
+	}
+	release()
+	<-stopped
+
+	// The caller's cleanup now runs with nothing in flight, and it sticks.
+	if err := SetEnabled(dir, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := PurgeSpool(dir); err != nil {
+		t.Fatal(err)
+	}
+	c.Beacon("watch")
+	if _, err := os.Stat(InstallPath(dir)); !os.IsNotExist(err) {
+		t.Errorf("install record present after the opt-out (stat err = %v)", err)
+	}
+	if entries, _ := os.ReadDir(SpoolDir(dir)); len(entries) != 0 {
+		t.Errorf("spool not empty after the opt-out: %v", entries)
+	}
+}
+
+// TestFailedBeaconDoesNotEraseAnotherDaemonsRecord: `watch` saves its record,
+// `shim` (another process, same folder) records its own upgrade on top, and
+// then watch's spool append fails. Taking back watch's version must not put
+// shim's back to the old one, or shim reports its upgrade a second time.
+func TestFailedBeaconDoesNotEraseAnotherDaemonsRecord(t *testing.T) {
+	clearEnv(t)
+	dir := t.TempDir()
+	if err := saveInstall(dir, installRecord{FirstSeen: "2026-07-01",
+		Versions: map[string]string{"watch": "0.103", "shim": "0.103"}}); err != nil {
+		t.Fatal(err)
+	}
+	var clock atomic.Int64
+	clock.Store(day(10))
+	c := beaconClient(t, dir, "v0.104.0", &clock)
+	release := holdBeaconBeforeSpool(t, c, "watch")
+
+	// While watch is parked: shim's beacon lands, and the spool breaks.
+	rec, _ := loadInstall(dir)
+	if rec.Versions["watch"] != "0.104" {
+		t.Fatalf("precondition: watch has not saved its record yet: %+v", rec)
+	}
+	rec.Versions["shim"] = "0.104"
+	if err := saveInstall(dir, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(SpoolDir(dir)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(SpoolDir(dir), []byte("in the way"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	got, _ := loadInstall(dir)
+	want := installRecord{FirstSeen: "2026-07-01", Versions: map[string]string{"watch": "0.103", "shim": "0.104"}}
+	if !got.equal(want) {
+		t.Errorf("record after watch's failed beacon = %+v, want %+v", got, want)
+	}
+}
+
+// TestOptOutSucceedsWhenTheInstallRecordCannotBeRemoved: the web interface
+// treats an error from SetEnabled as "the choice was not recorded". A cleanup
+// failure reported that way would tell the operator their opt-out failed when
+// it is on disk.
+func TestOptOutSucceedsWhenTheInstallRecordCannotBeRemoved(t *testing.T) {
+	clearEnv(t)
+	dir := t.TempDir()
+	// A non-empty directory where the file should be: os.Remove fails on it.
+	if err := os.MkdirAll(filepath.Join(InstallPath(dir), "in-the-way"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeInstall(dir); err == nil {
+		t.Fatal("precondition: removing the install record did not fail, so this test proves nothing")
+	}
+	if err := SetEnabled(dir, false); err != nil {
+		t.Fatalf("SetEnabled(false) failed over a leftover file: %v", err)
+	}
+	if d := Resolve("", dir); d.Enabled || d.Source != SourceConfig {
+		t.Errorf("decision after the opt-out = %+v, want off by the config file", d)
 	}
 }
 
@@ -628,5 +826,38 @@ func TestBeaconChecksConsentAgainUnderTheLock(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(SpoolDir(dir)); len(entries) != 0 {
 		t.Errorf("a beacon parked across an opt-out was spooled: %v", entries)
+	}
+}
+
+// TestFailedBeaconLeavesANewerVersionOfItsOwnNameAlone: while `watch` 0.104 is
+// between save and spool, a second `watch` process (0.105, mid rolling
+// upgrade) records itself. When the first one's spool append fails, taking
+// back "its" version must not touch an entry that is no longer what it wrote.
+func TestFailedBeaconLeavesANewerVersionOfItsOwnNameAlone(t *testing.T) {
+	clearEnv(t)
+	dir := t.TempDir()
+	if err := saveInstall(dir, installRecord{FirstSeen: "2026-07-01",
+		Versions: map[string]string{"watch": "0.103"}}); err != nil {
+		t.Fatal(err)
+	}
+	var clock atomic.Int64
+	clock.Store(day(10))
+	c := beaconClient(t, dir, "v0.104.0", &clock)
+	release := holdBeaconBeforeSpool(t, c, "watch")
+
+	if err := saveInstall(dir, installRecord{FirstSeen: "2026-07-01",
+		Versions: map[string]string{"watch": "0.105"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(SpoolDir(dir)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(SpoolDir(dir), []byte("in the way"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	if got, _ := loadInstall(dir); got.Versions["watch"] != "0.105" {
+		t.Errorf("watch = %q after the older process's failed beacon, want 0.105 left alone", got.Versions["watch"])
 	}
 }

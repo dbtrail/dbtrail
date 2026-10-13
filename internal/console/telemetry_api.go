@@ -182,8 +182,10 @@ func (s *Server) handleTelemetrySet(w http.ResponseWriter, r *http.Request) {
 	}
 	// An opt-out stops the running process FIRST and cleans the disk second.
 	// SetRuntimeConsent(false) waits for a beacon already in flight and lets
-	// none start after it, so nothing writes back what SetEnabled and
-	// PurgeSpool are about to delete. If recording the choice then fails, the
+	// none start after it, so no beacon writes back what SetEnabled and
+	// PurgeSpool are about to delete. (A console action finishing in that
+	// instant can still append its one line; the next opt-out follow or
+	// `telemetry off` removes it.) If recording the choice then fails, the
 	// process stays off: that is the safe side of a half-done opt-out.
 	if !req.Enabled && s.telemetry != nil {
 		s.telemetry.SetRuntimeConsent(false)

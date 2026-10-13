@@ -69,7 +69,7 @@ This is the complete wire payload. There are no other fields.
 | `is_interactive` | `true` | Whether stderr is a terminal |
 | `run_id` | a UUID | Ephemeral, per process. Lets ingestion discard a re-sent batch. **Absent from daemon beacons** |
 | `install_age` | `30d-90d` | **Daemon beacons only.** How long ago this install sent its first beacon, as one of four ranges: `<7d`, `7d-30d`, `30d-90d`, `>90d`. Never a date |
-| `previous_version` | `0.103` | **Daemon beacons only, and on one beacon:** the first one after the version changed. The major.minor this install ran before. Absent otherwise |
+| `previous_version` | `0.103` | **Daemon beacons only, and on one beacon:** the first one after an upgrade. The major.minor this install ran before. Absent otherwise |
 
 A real event looks like this:
 
@@ -195,10 +195,12 @@ identifier:
   beacon. Every install that started that day has the same value. It never
   leaves your machine: a beacon reports only which of four ranges the age
   falls in (`install_age`).
-- `last_versions` is the major.minor that last sent a beacon from here, per
+- `last_versions` is the newest major.minor that sent a beacon from here, per
   long-running command. Every install on that release has the same value. It
-  is sent once, as `previous_version`, on the first beacon after that
-  command's version changes.
+  is sent once, as `previous_version`, on the first beacon after that command
+  is upgraded. A downgrade is not reported and does not lower the record:
+  two processes of one command can share this folder at different versions,
+  and counting every difference would have them report each other daily.
 
 The file is written only while telemetry is on, only by a daemon's beacon. A
 source build neither reports nor records a version.
@@ -212,9 +214,9 @@ everything from being written or sent but delete nothing: a file left by an
 earlier run with telemetry on stays on disk, unused, until you remove it or
 run `bintrail telemetry off`.
 
-A beacon carries the two fields only when the daemon could also save the file.
-If the folder cannot be written, or the file is there and cannot be read, the
-beacon goes out without them.
+A beacon carries the two fields only when the daemon can keep the file in step
+with what it sends. If the file needed updating and could not be saved, or is
+there and cannot be read, the beacon goes out without them.
 
 What this buys, and what it does not: we can see whether installs stay
 (the spread of `install_age`) and whether they upgrade, and from which release
@@ -225,11 +227,11 @@ the ranges are wide, why `previous_version` rides on a single beacon instead
 of every one, and why neither is ever attached to an event that carries a
 `run_id`.
 
-Three things to know when reading these numbers. An install that was already
+Things to know when reading these numbers. An install that was already
 running before this release has no recorded start, so its age counts from the
 first beacon it sends on this release. A patch release (0.104.0 to 0.104.1)
 is not a version change here, because the version is truncated to
-major.minor. And a container whose telemetry folder is not on a volume starts
+major.minor. A downgrade is not reported. And a container whose telemetry folder is not on a volume starts
 over on every upgrade (see "Where the choice is kept, and containers").
 
 `run_id` is generated fresh in memory each time a command runs, lives in the
@@ -505,13 +507,13 @@ statements of fact rather than intent.
 | Per-daemon wiring guards (`*DaemonWiringEmitsBeacon`, one per call site across `stream`, `agent`, `up`, both `watch` paths, `serve`, `shim`, `bintrail-pg stream`, `bintrail-pg flashback`) | Every daemon this document says beacons actually starts the beacon loop — each test drives the real run function and fails if its launch line is deleted |
 | `TestBeaconCarriesNoRunID` | Daemon beacons carry no identifier |
 | `TestInstallFieldsOnlyOnBeacons` | `install_age` and `previous_version` never ride on an event that carries a `run_id` |
-| `TestBeaconReportsPreviousVersionOnce` | `previous_version` is on one beacon per version change; a patch release or a source build is not a change |
+| `TestBeaconReportsPreviousVersionOnce` | `previous_version` is on one beacon per upgrade; a patch release, a downgrade or a source build is not one |
 | `TestTamperedInstallRecord` | A hand-edited install file can put nothing on the wire except a range and a major.minor of at most three and four digits |
 | `TestUnsavableRecordSendsNoInstallFields` | A daemon that cannot save the install file sends neither field, so `previous_version` can never repeat daily |
-| `TestTwoDaemonsAtDifferentVersionsDoNotReportEachOther` | Two daemons sharing a folder each report only their own version change |
+| `TestTwoDaemonsAtDifferentVersionsDoNotReportEachOther`, `TestTwoProcessesWithOneNameDoNotReportEachOther` | Daemons sharing a folder at different versions do not report each other, same command name or not |
 | `TestOptOutDeletesTheInstallRecord` | Opting out deletes the install file |
-| `TestRunningDaemonFollowsARecordedOptOut` | A running daemon follows `telemetry off` typed next to it, and deletes what it wrote in between |
-| `TestBeaconChecksConsentAgainUnderTheLock` | A beacon in flight cannot write anything back after an opt-out |
+| `TestRunDaemonFollowsARecordedOptOut`, `TestRunningDaemonFollowsARecordedOptOut` | A running daemon's loop follows an opt-out recorded next to it, and deletes what it wrote in between |
+| `TestOptOutWaitsForABeaconInFlight`, `TestBeaconChecksConsentAgainUnderTheLock` | An opt-out waits for a beacon that is writing, and a beacon that was waiting writes nothing after it |
 | `TestBeaconNeverRewritesTheConsentFile` | The daily beacon never writes the consent file, so it cannot overwrite an opt-out |
 | `TestRecordDaemonCommandOmitsRunID` | A web interface action inside a daemon records no `run_id`, so there is no per-install timeline |
 | `TestRecordActionUsesFixedName` | The web interface action name is a fixed constant, never derived from the request |

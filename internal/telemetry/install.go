@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -50,8 +52,6 @@ type installRecord struct {
 func (r installRecord) equal(o installRecord) bool {
 	return r.FirstSeen == o.FirstSeen && maps.Equal(r.Versions, o.Versions)
 }
-
-func (r installRecord) empty() bool { return r.FirstSeen == "" && len(r.Versions) == 0 }
 
 const firstSeenLayout = "2006-01-02"
 
@@ -165,13 +165,26 @@ func removeInstall(dir string) error {
 	return nil
 }
 
-// restoreInstall puts the record back the way it was before a beacon that
-// turned out not to exist.
-func restoreInstall(dir string, prev installRecord) error {
-	if prev.empty() {
-		return removeInstall(dir)
+// undoVersion takes back the version a beacon recorded for daemon when that
+// beacon turned out not to exist, so the change is reported by the next one.
+//
+// It re-reads the file and touches ONE entry, and only if that entry is still
+// what this beacon wrote. Writing back the snapshot taken before the beacon
+// would erase whatever another daemon sharing the folder recorded in between,
+// and that daemon would then report its own change a second time. first_seen
+// is left as it is: a clock started by a beacon that failed to spool is at
+// most a day early.
+func undoVersion(dir, daemon, wrote, before string) error {
+	cur, readable := loadInstall(dir)
+	if !readable || cur.Versions[daemon] != wrote {
+		return nil
 	}
-	return saveInstall(dir, prev)
+	if before == "" {
+		delete(cur.Versions, daemon)
+	} else {
+		cur.Versions[daemon] = before
+	}
+	return saveInstall(dir, cur)
 }
 
 // installAgeBucket coarsens the days between first and now. A first day in
@@ -217,13 +230,39 @@ func stampInstall(e *Event, rec installRecord, daemon, current string, now time.
 	e.InstallAge = installAgeBucket(first, now)
 
 	if minorVersionRE.MatchString(current) && daemon != "other" {
-		if prev := rec.Versions[daemon]; prev != "" && prev != current {
-			e.PreviousVersion = prev
+		prev := rec.Versions[daemon]
+		// Only an UPGRADE is a change, and the record only ever moves up.
+		// Two processes can share a daemon name and this folder at different
+		// versions (`bintrail stream` and `bintrail-pg stream`, or two copies
+		// mid rolling upgrade). If any difference counted, each would see the
+		// other's version as "previous" and report a change every day. With
+		// the record at the highest version seen, the older process finds a
+		// newer one recorded, reports nothing and leaves it alone. The price
+		// is that a downgrade is not reported.
+		if prev == "" || minorNewer(current, prev) {
+			if prev != "" {
+				e.PreviousVersion = prev
+			}
+			if next.Versions == nil {
+				next.Versions = map[string]string{}
+			}
+			next.Versions[daemon] = current
 		}
-		if next.Versions == nil {
-			next.Versions = map[string]string{}
-		}
-		next.Versions[daemon] = current
 	}
 	return next
+}
+
+// minorNewer reports whether major.minor a is a later release than b. Both
+// have already matched minorVersionRE, so the fields are short digit runs.
+func minorNewer(a, b string) bool {
+	amaj, amin, _ := strings.Cut(a, ".")
+	bmaj, bmin, _ := strings.Cut(b, ".")
+	am, _ := strconv.Atoi(amaj)
+	bm, _ := strconv.Atoi(bmaj)
+	if am != bm {
+		return am > bm
+	}
+	an, _ := strconv.Atoi(amin)
+	bn, _ := strconv.Atoi(bmin)
+	return an > bn
 }

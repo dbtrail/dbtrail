@@ -441,8 +441,7 @@ func (c *Client) SetRuntimeConsent(enabled bool) {
 // reported as done, and ignored by that daemon until its next restart.
 //
 // One direction only. Turning ON from the file is left to the next start, as
-// documented, and that keeps this free of a race with the web interface's own
-// toggle, which stops the process first and writes the file second.
+// documented.
 //
 // A control that outranks the file (DO_NOT_TRACK, --telemetry,
 // BINTRAIL_TELEMETRY) made the decision for this process and keeps it.
@@ -450,13 +449,24 @@ func (c *Client) followRecordedOptOut() {
 	if !c.Enabled() {
 		return
 	}
-	if src := c.Decision().Source; src != SourceConfig && src != SourceDefault {
+	// The file is read and the process turned off under c.mu, as one step.
+	// SetRuntimeConsent takes the same lock, so the web interface turning
+	// telemetry ON (it writes the file, then calls SetRuntimeConsent) lands
+	// either wholly before this, and the file read here already says on, or
+	// wholly after, and its "on" is the last word.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if src := c.decision.Source; src != SourceConfig && src != SourceDefault {
+		return
+	}
+	if !c.enabled.Load() {
 		return
 	}
 	if s := loadState(c.dir); s.Enabled == nil || *s.Enabled {
 		return
 	}
-	c.SetRuntimeConsent(false)
+	c.decision = Decision{Enabled: false, Source: SourceConfig}
+	c.enabled.Store(false)
 	// What this process wrote between the opt-out and now would otherwise
 	// stay: the drain runs only while enabled.
 	if err := PurgeSpool(c.dir); err != nil {
@@ -522,11 +532,12 @@ func SampleEventJSON() ([]byte, error) {
 	return json.MarshalIndent(SampleEvent(), "", "  ")
 }
 
-// SampleBeacon returns the daemon beacon this machine would spool right now,
-// for `bintrail telemetry show`. The install fields are computed from the real
-// install record in dir (read only: nothing is written), so previous_version
-// appears exactly when the next real beacon would carry it. With no record
-// yet, the age is what a first beacon reports.
+// SampleBeacon returns a daemon beacon as this build would spool it for the
+// `watch` command right now, for `bintrail telemetry show`. The install fields
+// are computed from the real install record in dir (read only: nothing is
+// written). It is this binary's view: a daemon of another name or version
+// reading the same folder reports its own. With no record yet, the age is
+// what a first beacon reports.
 func SampleBeacon(dir string) Event {
 	e := Event{
 		SchemaVersion: SchemaVersion,
@@ -666,30 +677,41 @@ func (c *Client) Beacon(daemon string) {
 	// unwritable folder would repeat the same previous_version every day and
 	// hold install_age at its youngest value forever.
 	prev, readable := loadInstall(c.dir)
-	saved := false
-	if readable {
-		next := stampInstall(&e, prev, e.Command, e.Version, now)
+	wroteVersion := false
+	var next installRecord
+	if !readable {
+		debugf("install record is there and cannot be read, beacon sent without install fields")
+	} else {
+		next = stampInstall(&e, prev, e.Command, e.Version, now)
 		if !next.equal(prev) {
 			if err := saveInstall(c.dir, next); err != nil {
 				debugf("could not save install record, beacon sent without install fields: %v", err)
 				e.InstallAge, e.PreviousVersion = "", ""
 			} else {
-				saved = true
+				wroteVersion = next.Versions[e.Command] != prev.Versions[e.Command]
 			}
 		}
+	}
+	if beaconBeforeSpoolHook != nil {
+		beaconBeforeSpoolHook()
 	}
 	if err := appendEvent(c.spoolDir, e, now); err != nil {
 		debugf("could not spool beacon: %v", err)
 		// previous_version is reported once. A record that says it was
 		// reported, for a beacon that was never spooled, would spend it on
-		// nothing, so the record goes back to what it was.
-		if saved {
-			if err := restoreInstall(c.dir, prev); err != nil {
-				debugf("could not restore install record: %v", err)
+		// nothing, so the version this beacon recorded is taken back.
+		if wroteVersion {
+			if err := undoVersion(c.dir, e.Command, next.Versions[e.Command], prev.Versions[e.Command]); err != nil {
+				debugf("could not take back the recorded version: %v", err)
 			}
 		}
 	}
 }
+
+// beaconBeforeSpoolHook runs between a beacon's record save and its spool
+// append. Nil outside tests, which use it to hold a beacon at exactly the
+// point where an opt-out or another process must not be able to cut in.
+var beaconBeforeSpoolHook func()
 
 func sameUTCDay(a, b time.Time) bool {
 	ay, am, ad := a.UTC().Date()
