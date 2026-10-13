@@ -150,7 +150,9 @@ const draw = (caps, sched) => {
     // words, reason included, are the drawing's text alternative, read here
     // beside the hints so the assertions below hold on the same sentence.
     hints: byClass(card, "form-hint").map((n) => flat(n).join("")).concat(byClass(card, "ks-chain").map((n) => n.attrs["aria-label"])),
-    full: (inputs(card).find((i) => i.attrs["aria-label"] === "Full read every") || {}).value };
+    // The full read timetable is a row of pills: the one lit, and the list.
+    full: (byClass(card, "sch-pills").find((g) => g.attrs["aria-label"] === "Full read every") || {}).value,
+    fullPills: ((byClass(card, "sch-pills").find((g) => g.attrs["aria-label"] === "Full read every") || {}).children || []).map((p) => flat(p).join("")) };
 };
 console.log(JSON.stringify({
   daily: draw("{ backup_schedule: true }", ` + string(daily) + `),
@@ -182,6 +184,8 @@ console.log(JSON.stringify({
 		Fold  []string
 		Hints []string
 		Full  string
+		// FullPills is the row of choices the form offers for the full read.
+		FullPills []string `json:"fullPills"`
 	}
 	var got map[string]drawn
 	if err := json.Unmarshal(raw, &got); err != nil {
@@ -196,6 +200,22 @@ console.log(JSON.stringify({
 		for _, h := range d.Hints {
 			t.Logf("%s hint:  %s", name, h)
 		}
+	}
+	// The form shows the saved full read timetable lit, and one outside its
+	// list as a pill of its own, so a save does not change it unasked.
+	for name, want := range map[string]string{"daily": "1d", "weekly": "7d", "odd": "9h"} {
+		if got[name].Full != want {
+			t.Errorf("%s: the full read pill lit is %q, want %q", name, got[name].Full, want)
+		}
+	}
+	if p := strings.Join(got["weekly"].FullPills, "|"); p != "Off|24 h|7 days|30 days" {
+		t.Errorf("weekly: the full read choices are %q", p)
+	}
+	if p := strings.Join(got["odd"].FullPills, "|"); p != "Off|24 h|7 days|30 days|9h" {
+		t.Errorf("odd: a saved timetable outside the list has no pill of its own: %q", p)
+	}
+	if got["refusedReadOnly"].Full != "" || len(got["refusedReadOnly"].FullPills) != 0 {
+		t.Errorf("read-only: the form is drawn: %+v", got["refusedReadOnly"].FullPills)
 	}
 	has := func(list []string, want string) bool {
 		for _, s := range list {

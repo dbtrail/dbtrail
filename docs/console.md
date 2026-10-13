@@ -1500,7 +1500,7 @@ one release and warns that it no longer does anything. Remove it.
   the server (no previous backup, or S3 only with a working folder that
   cannot be used) or fails (a capture
   gap, a schema change), and it is what a schedule's full-backup timetable
-  (`full_every`, set through the schedule API; the page no longer edits it)
+  (`full_every`: the **Read the whole database again every** row of the schedule form, or the schedule API)
   needs: without it, saving one is refused with the reason, and one saved
   before the opt-in was turned off is shown in red and skipped at its slots
   while the updates keep running

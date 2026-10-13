@@ -11511,6 +11511,11 @@ async function watchBackupRuns(id, vgen, kinds) {
 // minutes is the floor the daemon accepts. scheduleChoice maps a saved
 // interval to the list's spelling of it (15m and 15min are one choice).
 const SCHEDULE_CHOICES = [["5m", "5 min"], ["15m", "15 min"], ["30m", "30 min"], ["1h", "1 h"], ["6h", "6 h"], ["1d", "24 h"]];
+// FULL_READ_CHOICES is the list the same form offers for the full read
+// timetable (#1564): none, or a whole read of the database every day, week or
+// month. Every one is at least the longest interval above, so no pair the two
+// lists can make is refused for asking more full reads than runs.
+const FULL_READ_CHOICES = [["", "Off"], ["1d", "24 h"], ["7d", "7 days"], ["30d", "30 days"]];
 function scheduleChoice(every) {
   const m = /^(\d+)\s*(m|min|h|d)$/.exec(String(every || "").trim());
   if (!m) return String(every || "");
@@ -11739,8 +11744,8 @@ function backupScheduleCard(cur, b) {
   }
 
   // The form (D13): one list of intervals, five minutes to a day. The UTC
-  // hour a daily run lines up on shows only for the daily choice; the full
-  // read timetable (#1564) is kept as saved, never edited here.
+  // hour a daily run lines up on shows only for the daily choice. Under it,
+  // the full read timetable (#1564): a second row of pills, Off first.
   // The choice is a row of pills, one lit: a reader sees the interval in
   // force and the alternatives at once, where a closed dropdown showed one
   // value and hid the question. A saved interval outside the list gets its
@@ -11762,7 +11767,16 @@ function backupScheduleCard(cur, b) {
   at.addEventListener("input", touched);
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
-  save.onclick = () => saveBackupSchedule(cur.id, { every: every.value, at: at.value.trim(), full_every: sch && sch.full_every ? sch.full_every : "" }, save, msg);
+  // A saved timetable outside the list gets its own pill, as above, and is
+  // sent back as saved: its spelling is the server's, not the list's.
+  const savedFull = sch && sch.full_every ? scheduleChoice(sch.full_every) : "";
+  const fullChoices = FULL_READ_CHOICES.slice();
+  if (!fullChoices.some(([v]) => v === savedFull)) fullChoices.push([savedFull, sch.full_every]);
+  const full = choicePills(fullChoices, savedFull, "Full read every", touched);
+  const fullWrap = el("div", { class: "bk-sched-full", "data-sched-edit": "1" },
+    el("p", { class: "form-hint", text: "Read the whole database again every" }), full,
+    el("p", { class: "form-hint", text: "The runs in between update the copy from the recorded changes and do not read your database. A full read does, so it adds load there while it runs." }));
+  save.onclick = () => saveBackupSchedule(cur.id, { every: every.value, at: at.value.trim(), full_every: full.value }, save, msg);
   const row = el("div", { class: "bk-restore-row", "data-sched-edit": "1" }, atWrap, save);
   if (sch) {
     const remove = el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Turn off" });
@@ -11771,7 +11785,7 @@ function backupScheduleCard(cur, b) {
   }
   every.setAttribute("data-sched-edit", "1");
   msg.setAttribute("data-sched-edit", "1");
-  body.append(every, row, msg);
+  body.append(every, fullWrap, row, msg);
 
   // What the schedule will do next, and what it last did. The skip is
   // shown when it is the newest fact: a slot that could not start after
