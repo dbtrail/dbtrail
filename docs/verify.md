@@ -106,6 +106,13 @@ was built from: normally the last full backup, but not a full backup that a
 later refresh could not build on (one still being written when the refresh
 started, or unreadable at the time).
 
+A `mismatch` on a table with a foreign key that cascades into it (`ON DELETE` or
+`ON UPDATE` with `CASCADE`, `SET NULL` or `SET DEFAULT`) names that key as the
+likely cause: MariaDB and MySQL before 9.6 apply those changes to the child
+rows without writing them to the binary log, so a baseline built from the
+recorded changes keeps rows the database already removed. The database is not
+affected, and the next full backup brings the baseline back in line.
+
 A table is reported `inconclusive` instead of compared when:
 
 - the baseline that last read it is no longer kept (with both `--baseline-dir`

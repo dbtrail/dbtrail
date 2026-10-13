@@ -264,6 +264,9 @@ type VerifyExplanation struct {
 	Total    int             `json:"total"`
 	Diffs    []VerifyRowDiff `json:"diffs"`
 	Rendered string          `json:"rendered"`
+	// CascadeNote is verify.MismatchExplanation.CascadeNote: why the rows may
+	// differ on a table with foreign keys that cascade. Omitted when none.
+	CascadeNote string `json:"cascade_note,omitempty"`
 }
 
 // handleVerifyTrigger enqueues an in-process verify run for the selected

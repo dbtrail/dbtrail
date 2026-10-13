@@ -153,9 +153,14 @@ type BaselinePair struct {
 	// PrevDir is the time of the snapshot that holds the older side, which
 	// PrevSnapshot is not when a chain of table deltas sits beside the file.
 	// Zero on a pair built by hand.
-	PrevDir  time.Time
-	NewLock  baseline.ReadConsistency
-	PrevLock baseline.ReadConsistency
+	PrevDir time.Time
+	// NewCascadeNote says, when the read's own CREATE TABLE declares foreign
+	// keys that cascade into this table, that the server applies them without
+	// writing them to the binary log (cascadeNote). "" when it declares none,
+	// and on a pair built by hand. Added to a mismatch only.
+	NewCascadeNote string
+	NewLock        baseline.ReadConsistency
+	PrevLock       baseline.ReadConsistency
 	// Settled, when set, is this table's answer, decided while pairing: the
 	// read it needs is not kept, not on record, or has no earlier snapshot, a
 	// footer the pairing needed would not open, or a backup folder the answer
@@ -406,6 +411,9 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 	// A snapshot known to be torn explains a difference; one with no record
 	// of its locks does not (#1380, withSnapshotLock).
 	pairLockVerdict(p, res.Status, res.Detail).apply(&res)
+	// A mismatch on a table the server changes by itself (a foreign key that
+	// cascades) says so: those changes are not in the binary log.
+	withCascadeNote(&res, p)
 	withOrderNote(&res, order)
 	return res, nil
 }
@@ -780,6 +788,7 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile, other s
 		NewLSN:              nMeta.LSN,
 		PrevLSN:             prevMeta.LSN,
 		NewReadFromDatabase: true,
+		NewCascadeNote:      cascadeNote(nMeta.CreateTableSQL),
 		PrevDir:             prev.SnapshotTime,
 		NewLock:             baseline.ReadConsistencyOf(nMeta),
 		PrevLock:            baseline.ReadConsistencyOf(prevMeta),

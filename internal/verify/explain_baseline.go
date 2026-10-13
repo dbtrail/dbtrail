@@ -68,6 +68,11 @@ type MismatchExplanation struct {
 	// because binary log order could not be established (#2156), so a diff on
 	// such a row can be the order's, not the data's. "" when there is none.
 	OrderNote string
+	// CascadeNote is BaselinePair.NewCascadeNote: the table has foreign keys
+	// the server applies without writing them to the binary log, the likely
+	// cause of rows the replay kept and the database no longer has. "" when
+	// it has none.
+	CascadeNote string
 }
 
 func (ex *MismatchExplanation) add(d RowDiff) {
@@ -168,7 +173,7 @@ func ExplainBaselinePairMismatch(ctx context.Context, cfg BaselineConfig, p Base
 		return nil, fmt.Errorf("read new baseline %s.%s: %w", p.Schema, p.Table, err)
 	}
 
-	ex := &MismatchExplanation{Schema: p.Schema, Table: p.Table, Anchor: anchorLabel(pg, p), OrderNote: order.Note()}
+	ex := &MismatchExplanation{Schema: p.Schema, Table: p.Table, Anchor: anchorLabel(pg, p), OrderNote: order.Note(), CascadeNote: p.NewCascadeNote}
 	seen := make(map[string]bool, len(truth))
 	err = streamRowsByPK(ctx, p.PrevPath, p.Schema, p.Table, pkCols, orderedCols, changes, rows, pg, cfg.DuckDBTuning, func(key string, rec rowCells) error {
 		seen[key] = true
@@ -304,6 +309,9 @@ func (ex *MismatchExplanation) Write(w io.Writer) {
 	}
 	if ex.OrderNote != "" {
 		fmt.Fprintln(w, "  "+ex.OrderNote)
+	}
+	if ex.CascadeNote != "" {
+		fmt.Fprintln(w, "  "+ex.CascadeNote+".")
 	}
 	if ex.Total == 0 {
 		// A mismatch can be flagged on row COUNT while every matched PK lines up

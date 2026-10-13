@@ -2440,6 +2440,10 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
    disclosure for troubleshooting (#690 follow-up: the raw dump alone read as
    "no se entiende una verga"). */
 .vfy-explain-modal { max-width: 900px; }
+.vfy-explain-why {
+  margin: 6px 28px 12px; padding: 12px 14px; font-size: 13.5px; line-height: 1.5; color: var(--ink);
+  background: var(--sun-tint); border: 1px solid var(--sun-line); border-radius: var(--radius-sm);
+}
 .vfy-explain-body { padding: 4px 28px 16px; display: flex; flex-direction: column; gap: 8px; max-height: 45vh; overflow-y: auto; }
 .vfy-diff-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: var(--fs-sm); }
 .vfy-diff-table th {

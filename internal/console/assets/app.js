@@ -13674,6 +13674,9 @@ async function openVerifyExplain(id, schema, table, btn) {
     "Recovered = what replaying the change log on top of the older snapshot produced. Snapshot (real) = the actual values from the newer, trusted snapshot." }));
   head.append(el("button", { class: "btn btn-icon btn-ghost modal-x", type: "button", text: "✕", onclick: closeVerifyExplain }));
   modal.append(head);
+  // Why, before the rows: a table the server changes by itself (a foreign key
+  // that cascades) differs for a reason that is not a broken table.
+  if (ex.cascade_note) modal.append(el("p", { class: "vfy-explain-why", text: ex.cascade_note + "." }));
 
   const body = el("div", { class: "vfy-explain-body" });
   if (!ex.diffs || !ex.diffs.length) {

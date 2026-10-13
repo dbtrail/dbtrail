@@ -433,6 +433,7 @@ func explainNow(ctx context.Context, indexDSN string, noArchive bool, schema, ta
 	return &console.VerifyExplanation{
 		Schema: ex.Schema, Table: ex.Table, Anchor: ex.Anchor,
 		Total: ex.Total, Diffs: diffs, Rendered: buf.String(),
+		CascadeNote: ex.CascadeNote,
 	}, nil
 }
 
