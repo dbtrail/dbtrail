@@ -214,7 +214,11 @@ func setupLiveSourceMariaDB(t *testing.T) (Config, *sql.DB, string) {
 
 	// ── binlog event on the INDEX db: an UPDATE touching details+big with the
 	// SAME logical values, embedded as marshalRow would store them ──
-	testutil.SetupPartitionedTable(t, indexDB, dbName, []time.Time{h1, h2})
+	// The hour after the current one has a partition too: verify reads up to
+	// its own clock, taken after this fixture, and an hour with no partition
+	// in that window makes the verdict inconclusive. Without it a test started
+	// in the last second of an hour failed.
+	testutil.SetupPartitionedTable(t, indexDB, dbName, []time.Time{h1, h2, h2.Add(time.Hour)})
 	ts := now.Add(-1 * time.Minute).Format("2006-01-02 15:04:05")
 	// A captured MariaDB change always carries its GTID, and live-source
 	// verify cuts the read by it (#2150): domain 0, sequence 1, which every

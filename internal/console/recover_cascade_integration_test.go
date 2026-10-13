@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,22 @@ import (
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
+
+// cascadeConsoleHours is the hour seedCascadeConsole gave each index, by
+// database name. A test that needs that hour asks cascadeConsoleHour for it.
+// Reading the clock again gave the next hour to a test that started in the
+// last second of one, and a baseline dated from it fell after the delete it
+// had to come before.
+var cascadeConsoleHours sync.Map
+
+func cascadeConsoleHour(t *testing.T, dbName string) time.Time {
+	t.Helper()
+	h, ok := cascadeConsoleHours.Load(dbName)
+	if !ok {
+		t.Fatalf("seedCascadeConsole did not seed %s", dbName)
+	}
+	return h.(time.Time)
+}
 
 // seedCascadeConsole builds a Server over a fresh index holding a parent DELETE
 // plus two child INSERTs that referenced it, and the fk_constraints row marking
@@ -30,6 +47,7 @@ func seedCascadeConsole(t *testing.T, mutate func(*Config)) (*Server, string) {
 	testutil.InitIndexTables(t, db)
 
 	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	cascadeConsoleHours.Store(dbName, h)
 	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h})
 	childTs := h.Add(10 * time.Minute).Format("2006-01-02 15:04:05")
 	parentTs := h.Add(20 * time.Minute).Format("2006-01-02 15:04:05")
@@ -304,7 +322,7 @@ func TestIntegrationRecover_autoCascade_mixedEvents(t *testing.T) {
 	srv, dbName := seedCascadeConsole(t, nil)
 	// A parent UPDATE between the children (h+10m) and the seeded parent DELETE
 	// (h+20m), on the same pk=1.
-	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	h := cascadeConsoleHour(t, dbName) // the fixture's live hour
 	updTs := h.Add(15 * time.Minute).Format("2006-01-02 15:04:05")
 	testutil.InsertEvent(t, srv.cm.boot.db, "binlog.000001", 250, 260, updTs, nil,
 		dbName, "parent", 2 /*UPDATE*/, "1", []byte(`["status"]`),
@@ -888,7 +906,7 @@ func TestIntegrationRecoverCascade_archivesOutsideWindowKeepBaseline(t *testing.
 		c.BaselineDir = dir
 		c.NoArchive = false // baselineConfigured folds in NoArchive; the fixture defaults it on
 	})
-	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour) // the fixture's live hour
+	h := cascadeConsoleHour(t, dbName) // the fixture's live hour
 	writeChildBaselineParquet(t, dir, h.Add(5*time.Minute).Format("2006-01-02T15-04-05Z"), dbName,
 		[][]string{{"10", "1"}, {"11", "1"}, {"12", "1"}}, nil)
 	writeArchivedChildInsert(t, srv.cm.boot.db, dbName, "77", time.Date(2026, 1, 1, 0, 30, 0, 0, time.UTC)) // readable, nowhere near the window
@@ -969,7 +987,7 @@ func writeArchivedChildInsert(t *testing.T, db *sql.DB, dbName, pk string, at ti
 // archive; the child is recovered and the run is complete.
 func TestIntegrationRecoverCascade_childOnlyInArchiveRecovered(t *testing.T) {
 	srv, dbName := seedCascadeConsole(t, func(c *Config) { c.NoArchive = false })
-	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour) // the fixture's live hour
+	h := cascadeConsoleHour(t, dbName) // the fixture's live hour
 	writeArchivedChildInsert(t, srv.cm.boot.db, dbName, "12", h.Add(-3*time.Hour+10*time.Minute))
 
 	rec, body := doReq(t, srv, "POST", "/api/recover-cascade", `{"schema":"`+dbName+`","table":"parent"}`)
@@ -1012,7 +1030,7 @@ func TestIntegrationRecoverCascade_childOnlyInArchiveRecovered(t *testing.T) {
 // rotated out to Parquet, and its archived child (#1615).
 func TestIntegrationRecoverCascade_parentAndChildOnlyInArchiveRecovered(t *testing.T) {
 	srv, dbName := seedCascadeConsole(t, func(c *Config) { c.NoArchive = false })
-	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	h := cascadeConsoleHour(t, dbName) // the fixture's live hour
 	// The fixture's live parent is pk 1; this parent is pk 2 and lives only in the archive.
 	parent := archivedParentDelete(dbName, h.Add(-4*time.Hour+30*time.Minute))
 	parent.PKValues, parent.RowBefore, parent.EventID = "2", map[string]any{"id": int64(2)}, 800002

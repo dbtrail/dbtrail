@@ -50,7 +50,10 @@ func TestRotateOneIndex_UpgradeGuard(t *testing.T) {
 		t.Fatalf("listPartitions: %v", err)
 	}
 	found, future := false, 0
-	nowHour := time.Now().UTC().Truncate(time.Hour)
+	// Counted after the fixture's hour, not after the clock's: read again
+	// here, the clock gave the next hour to a test that started in the last
+	// second of one, and one of the two added partitions stopped counting.
+	nowHour := current
 	for _, p := range partitions {
 		if p.Name == indexer.PartitionName(old) {
 			found = true

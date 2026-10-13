@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,22 @@ import (
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
+// cascadeIndexHours is the hour seedCascadeIndex gave each index, by
+// database name. A test that needs that hour asks cascadeIndexHour for it.
+// Reading the clock again gave the next hour to a test that started in the
+// last second of one, and a baseline dated from it fell after the delete it
+// had to come before.
+var cascadeIndexHours sync.Map
+
+func cascadeIndexHour(t *testing.T, dbName string) time.Time {
+	t.Helper()
+	h, ok := cascadeIndexHours.Load(dbName)
+	if !ok {
+		t.Fatalf("seedCascadeIndex did not seed %s", dbName)
+	}
+	return h.(time.Time)
+}
+
 // seedCascadeIndex builds an index holding an ON DELETE CASCADE topology: two
 // child INSERTs (id=10,11 → pid=1) followed by the parent DELETE (id=1), with
 // the FK snapshot and a schema snapshot — the same fixture shape the console's
@@ -33,6 +50,7 @@ func seedCascadeIndex(t *testing.T) (*sql.DB, string) {
 	testutil.InitIndexTables(t, db)
 
 	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	cascadeIndexHours.Store(dbName, h)
 	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h})
 	childTs := h.Add(10 * time.Minute).Format("2006-01-02 15:04:05")
 	parentTs := h.Add(20 * time.Minute).Format("2006-01-02 15:04:05")
@@ -192,7 +210,7 @@ func TestIntegrationRecoverCascadeTool_archivesOutsideWindowKeepBaseline(t *test
 	cs := cascadeSession(t, db, dbName)
 	writeArchivedChildInsert(t, db, dbName, "77", time.Date(2026, 1, 1, 0, 30, 0, 0, time.UTC)) // readable, nowhere near the window
 
-	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour) // the fixture's live hour
+	h := cascadeIndexHour(t, dbName) // the fixture's live hour
 	dir := t.TempDir()
 	path := filepath.Join(dir, h.Add(5*time.Minute).Format("2006-01-02T15-04-05Z"), dbName, "child.parquet")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -298,7 +316,7 @@ func writeArchivedChildInsert(t *testing.T, db *sql.DB, dbName, pk string, at ti
 func TestIntegrationRecoverCascadeTool_childOnlyInArchiveRecovered(t *testing.T) {
 	db, dbName := seedCascadeIndex(t)
 	cs := cascadeSession(t, db, dbName)
-	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	h := cascadeIndexHour(t, dbName) // the fixture's live hour
 	writeArchivedChildInsert(t, db, dbName, "12", h.Add(-3*time.Hour+10*time.Minute))
 
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
@@ -335,7 +353,7 @@ func TestIntegrationRecoverCascadeTool_childOnlyInArchiveRecovered(t *testing.T)
 func TestIntegrationRecoverCascadeTool_noArchiveServerIsFlagged(t *testing.T) {
 	db, dbName := seedCascadeIndex(t)
 	cs := cascadeSession(t, db, dbName, func(tg *Target) { tg.NoArchive = true })
-	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	h := cascadeIndexHour(t, dbName) // the fixture's live hour
 	writeArchivedChildInsert(t, db, dbName, "12", h.Add(-3*time.Hour+10*time.Minute))
 
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
@@ -371,7 +389,7 @@ func TestIntegrationRecoverCascadeTool_envDiscoveryFailureIsACaveat(t *testing.T
 	t.Setenv("BINTRAIL_ARCHIVE_S3", "s3://bucket/prefix")
 	t.Setenv("BINTRAIL_ID", "")
 	cs := cascadeSession(t, db, dbName, func(tg *Target) { tg.EnvArchiveDiscovery = true })
-	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	h := cascadeIndexHour(t, dbName) // the fixture's live hour
 	writeArchivedChildInsert(t, db, dbName, "12", h.Add(-3*time.Hour+10*time.Minute))
 
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
@@ -404,7 +422,7 @@ func TestIntegrationRecoverCascadeTool_envDiscoveryFailureIsACaveat(t *testing.T
 func TestIntegrationRecoverCascadeTool_parentAndChildOnlyInArchiveRecovered(t *testing.T) {
 	db, dbName := seedCascadeIndex(t)
 	cs := cascadeSession(t, db, dbName)
-	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	h := cascadeIndexHour(t, dbName) // the fixture's live hour
 	parent := archivedParentDelete(dbName, h.Add(-4*time.Hour+30*time.Minute))
 	parent.PKValues, parent.RowBefore, parent.EventID = "2", map[string]any{"id": int64(2)}, 800002
 	child := archivedChildInsert(dbName, "20", h.Add(-5*time.Hour+10*time.Minute))

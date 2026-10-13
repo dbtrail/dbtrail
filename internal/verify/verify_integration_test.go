@@ -110,7 +110,11 @@ func TestVerifyTable_MatchesAndDetectsDivergence(t *testing.T) {
 	}
 
 	// ── binlog events: 2 updated, 3 deleted, 4 inserted ──
-	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, h2})
+	// The hour after the current one has a partition too: verify reads up to
+	// its own clock, taken after this fixture, and an hour with no partition
+	// in that window makes the verdict inconclusive. Without it a test started
+	// in the last second of an hour failed.
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, h2, h2.Add(time.Hour)})
 	// Events strictly before now (so a Until=now reconstruct includes them) and
 	// inside the partitioned hours.
 	ts1 := now.Add(-2 * time.Minute).Format("2006-01-02 15:04:05")
@@ -224,7 +228,7 @@ func TestVerifyTable_TextEventDecoded(t *testing.T) {
 
 	// ── binlog event: body updated, base64-encoded as TEXT is delivered ──
 	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
-	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, h2})
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, h2, h2.Add(time.Hour)})
 	ts := now.Add(-1 * time.Minute).Format("2006-01-02 15:04:05")
 	testutil.InsertEvent(t, db, "binlog.000001", 100, 200, ts, nil, dbName, "orders", 2 /*UPDATE*/, "1", []byte(`["body"]`),
 		[]byte(fmt.Sprintf(`{"id":1,"body":"%s"}`, b64("hello"))),
@@ -344,7 +348,7 @@ func TestVerifyTable_JSONValuedTextColumn_KeyOrderIsAMatch(t *testing.T) {
 
 	// ── binlog event: an UPDATE touches details with the SAME logical value,
 	// embedded as a nested JSON object (matching marshalRow's promotion) ──
-	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, h2})
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, h2, h2.Add(time.Hour)})
 	ts := now.Add(-1 * time.Minute).Format("2006-01-02 15:04:05")
 	testutil.InsertEvent(t, db, "binlog.000001", 100, 200, ts, nil, dbName, "audit_log", 2 /*UPDATE*/, "1", []byte(`["details"]`),
 		[]byte(`{"id":1,"details":{"c":3,"a":1,"b":2}}`),
@@ -445,7 +449,7 @@ func TestVerifyTable_ZeroDateSentinel_IsAMatch(t *testing.T) {
 	}
 
 	// ── no binlog event touches this PK: recon is a pure baseline passthrough ──
-	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, curHour})
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, curHour, curHour.Add(time.Hour)})
 
 	var uuid string
 	if err := db.QueryRow("SELECT @@server_uuid").Scan(&uuid); err != nil {
@@ -539,7 +543,7 @@ func TestVerifyTable_ZeroDateVsRealNull_StaysMismatch(t *testing.T) {
 	}
 
 	// ── no binlog event touches this PK: recon is a pure baseline passthrough ──
-	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, curHour})
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, curHour, curHour.Add(time.Hour)})
 
 	var uuid string
 	if err := db.QueryRow("SELECT @@server_uuid").Scan(&uuid); err != nil {
@@ -642,7 +646,7 @@ func TestVerifyTable_DuplicateJSONKey_StaysMismatch(t *testing.T) {
 
 	// ── binlog event: row_after is pre-collapsed, as MySQL's own JSON column
 	// would store it, regardless of what bytes were sent ──
-	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, h2})
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, h2, h2.Add(time.Hour)})
 	ts := now.Add(-1 * time.Minute).Format("2006-01-02 15:04:05")
 	testutil.InsertEvent(t, db, "binlog.000001", 100, 200, ts, nil, dbName, "audit_log", 2 /*UPDATE*/, "1", []byte(`["details"]`),
 		[]byte(`{"id":1,"details":{"placeholder":true}}`),
@@ -745,7 +749,7 @@ func TestVerifyTable_StaleZeroDateVsGenuineNull_AcceptedRisk(t *testing.T) {
 	// ── the only in-window event for this PK: a real, faithfully-captured
 	// write setting the column to the zero-date sentinel. Nothing later in
 	// the binlog moves this PK past it ──
-	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, h2})
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, h2, h2.Add(time.Hour)})
 	ts := now.Add(-1 * time.Minute).Format("2006-01-02 15:04:05")
 	testutil.InsertEvent(t, db, "binlog.000001", 100, 200, ts, nil, dbName, "actionscheduler_actions", 2 /*UPDATE*/, "577", []byte(`["last_attempt_gmt"]`),
 		[]byte(`{"action_id":577,"last_attempt_gmt":"2026-05-01 00:00:00"}`),
@@ -846,7 +850,7 @@ func TestVerifyTable_DeferredColumnsResolved_RealDivergenceStaysMismatch(t *test
 	// One in-window UPDATE (id=2, status b→shipped). row_image=FULL: the
 	// row_after carries the untouched ENUM as its ordinal (2 = 'inactive'),
 	// the BIT as its integer (5), and the JSON document.
-	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, now.Truncate(time.Hour)})
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, now.Truncate(time.Hour), now.Truncate(time.Hour).Add(time.Hour)})
 	ts1 := now.Add(-2 * time.Minute).Format("2006-01-02 15:04:05")
 	testutil.InsertEvent(t, db, "binlog.000001", 100, 200, ts1, nil, dbName, "orders", 2 /*UPDATE*/, "2", nil,
 		[]byte(`{"id":2,"status":"b","state":2,"flags":5,"meta":{"tags":["y"]}}`),
@@ -997,7 +1001,7 @@ func TestVerifyTable_TimeFspAndFloatText_IsAMatch(t *testing.T) {
 
 	// In-window UPDATE on row 2. The TIME texts are go-mysql's timeFormat
 	// output: integer-second values carry NO fractional suffix.
-	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, h2})
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, h2, h2.Add(time.Hour)})
 	ts1 := now.Add(-2 * time.Minute).Format("2006-01-02 15:04:05")
 	testutil.InsertEvent(t, db, "binlog.000001", 100, 200, ts1, nil, dbName, "appointments", 2 /*UPDATE*/, "2", nil,
 		[]byte(`{"id":2,"start":"10:30:00","factor":2.25,"gauge":2.25}`),

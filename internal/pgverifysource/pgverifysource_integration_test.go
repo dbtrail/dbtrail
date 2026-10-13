@@ -182,7 +182,11 @@ func TestVerifyTablePG_Integration(t *testing.T) {
 	// the planner's gap check reports the current hour as rotated-and-lost —
 	// same setup rule as every MySQL live-source verify test.
 	curHour := time.Now().UTC().Truncate(time.Hour)
-	testutil.SetupPartitionedTable(t, indexDB, dbName, []time.Time{curHour.Add(-time.Hour), curHour})
+	// The hour after the current one has a partition too: verify reads up to
+	// its own clock, taken after this fixture, and an hour with no partition
+	// in that window makes the verdict inconclusive. Without it a test started
+	// in the last second of an hour failed.
+	testutil.SetupPartitionedTable(t, indexDB, dbName, []time.Time{curHour.Add(-time.Hour), curHour, curHour.Add(time.Hour)})
 	ctx := context.Background()
 
 	setup, err := pgx.Connect(ctx, baseDSN)

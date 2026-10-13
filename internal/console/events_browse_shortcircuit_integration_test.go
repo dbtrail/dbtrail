@@ -66,12 +66,13 @@ func TestIntegrationEventsBrowseArchiveShortCircuit(t *testing.T) {
 
 	// The real rotation: archive to Parquet, register archive_state, drop the
 	// partitions past retention. Retention ages a partition by its label hour,
-	// so 2h keeps the newest one or two of the six depending on where in the
-	// hour this runs; the assertions below derive their expectations from the
-	// live remnant rather than hardcoding it.
+	// so 3h keeps the newest two of the six, or the newest one when the hour
+	// turns between this fixture's clock and rotation's own (2h kept none
+	// then, and the premise below failed); the assertions below derive their
+	// expectations from the live remnant rather than hardcoding it.
 	if _, err := rotation.Perform(context.Background(), db, dbName, rotation.Options{
-		RetainDur:          2 * time.Hour,
-		RetainRaw:          "2h",
+		RetainDur:          3 * time.Hour,
+		RetainRaw:          "3h",
 		ArchiveDir:         t.TempDir(),
 		ArchiveCompression: "zstd",
 		BintrailID:         "browse-sc",

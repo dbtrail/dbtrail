@@ -313,7 +313,11 @@ func TestVerifyTable_afterTheBinlogNumberingStartsOver_2174(t *testing.T) {
 				// stamped after now, outside what the read and its check see.
 				t.Skip("live mode reads up to now")
 			}
-			renumberIndex(t, db, dbName, tc, []time.Time{h1.Add(-time.Hour), h1, h1.Add(time.Hour)}, h1.Add(-5*time.Minute), now.Add(-time.Minute), time.Time{}, now)
+			// The hour after the current one has a partition too: verify reads up to
+			// its own clock, taken after this fixture, and an hour with no partition
+			// in that window makes the verdict inconclusive. Without it a test started
+			// in the last second of an hour failed.
+			renumberIndex(t, db, dbName, tc, []time.Time{h1.Add(-time.Hour), h1, h1.Add(time.Hour), h1.Add(2 * time.Hour)}, h1.Add(-5*time.Minute), now.Add(-time.Minute), time.Time{}, now)
 
 			// The source table holds the change.
 			testutil.MustExec(t, db, fmt.Sprintf("CREATE TABLE `%s`.`orders` (`id` INT PRIMARY KEY, `status` VARCHAR(64))", dbName))

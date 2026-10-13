@@ -103,7 +103,11 @@ func binarySpatialFixture(t *testing.T, dataType, colType, createColSQL string, 
 		}
 		return base64.StdEncoding.EncodeToString(raw)
 	}
-	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, h2})
+	// The hour after the current one has a partition too: verify reads up to
+	// its own clock, taken after this fixture, and an hour with no partition
+	// in that window makes the verdict inconclusive. Without it a test started
+	// in the last second of an hour failed.
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1, h2, h2.Add(time.Hour)})
 	ts := now.Add(-1 * time.Minute).Format("2006-01-02 15:04:05")
 	testutil.InsertEvent(t, db, "binlog.000001", 100, 200, ts, nil, dbName, "orders", 2 /*UPDATE*/, "1", []byte(`["v"]`),
 		[]byte(fmt.Sprintf(`{"id":1,"v":"%s"}`, b64hex(eventBeforeHex))),
