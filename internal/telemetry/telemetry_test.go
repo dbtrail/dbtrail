@@ -421,8 +421,8 @@ func TestSpoolCapDropsRatherThanGrows(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	before, _ := os.Stat(path)
-	if err := appendEvent(dir, Event{Command: "status"}, now); err != nil {
-		t.Fatalf("appendEvent: %v", err)
+	if err := appendEvent(dir, Event{Command: "status"}, now); !errors.Is(err, errSpoolFull) {
+		t.Fatalf("appendEvent at the cap = %v, want errSpoolFull: a dropped event must not read as a spooled one", err)
 	}
 	after, _ := os.Stat(path)
 	if after.Size() != before.Size() {

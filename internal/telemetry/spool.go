@@ -56,6 +56,11 @@ func PurgeSpool(dir string) error {
 	return nil
 }
 
+// errSpoolFull is returned for an event dropped at the day's size cap. It is
+// an error, not a quiet nil, because a caller may keep state that depends on
+// the event existing (Beacon's install record does).
+var errSpoolFull = errors.New("spool file at its size cap, event dropped")
+
 // appendEvent writes one NDJSON line. Plain O_APPEND with no fsync: this runs
 // at the end of every command, and an fsync per invocation is exactly the kind
 // of hot-path tax telemetry must never impose. A single write of a short line
@@ -74,8 +79,7 @@ func appendEvent(spoolDir string, e Event, now time.Time) error {
 	path := filepath.Join(spoolDir, now.UTC().Format("2006-01-02")+spoolSuffix)
 
 	if fi, err := os.Stat(path); err == nil && fi.Size() >= maxSpoolFileBytes {
-		debugf("spool file at cap, dropping event")
-		return nil
+		return errSpoolFull
 	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {

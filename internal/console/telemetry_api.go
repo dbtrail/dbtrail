@@ -171,22 +171,37 @@ func (s *Server) handleTelemetrySet(w http.ResponseWriter, r *http.Request) {
 	}
 	dir, err := telemetry.ConfigDir()
 	if err != nil {
-		// The cause is safe to show and is the only thing that tells a
-		// refused BINTRAIL_TELEMETRY_DIR apart from a missing home directory.
-		writeJSONError(w, http.StatusInternalServerError, "no folder to record the choice in: "+err.Error())
+		// The cause goes to the server log, not to the browser: it carries a
+		// path or an environment value from the machine DBTrail runs on, which
+		// a signed-in user of the web interface has no business reading. The
+		// response names the two places to look instead.
+		slog.Warn("telemetry choice not recorded: no folder to record it in", "error", err.Error())
+		writeJSONError(w, http.StatusInternalServerError,
+			"no folder to record the choice in: check "+telemetry.DirEnvVar+" and the home directory where DBTrail was started (the server log has the reason)")
 		return
 	}
+	// An opt-out stops the running process FIRST and cleans the disk second.
+	// SetRuntimeConsent(false) waits for a beacon already in flight and lets
+	// none start after it, so nothing writes back what SetEnabled and
+	// PurgeSpool are about to delete. If recording the choice then fails, the
+	// process stays off: that is the safe side of a half-done opt-out.
+	if !req.Enabled && s.telemetry != nil {
+		s.telemetry.SetRuntimeConsent(false)
+	}
 	if err := telemetry.SetEnabled(dir, req.Enabled); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "could not record the telemetry choice")
+		slog.Warn("telemetry choice not recorded", "error", err.Error())
+		writeJSONError(w, http.StatusInternalServerError, "could not record the telemetry choice (the server log has the reason)")
 		return
 	}
 	if !req.Enabled {
 		// A stranded spool would otherwise sit on disk forever (the drain runs
 		// only while enabled), so discard it — same as `telemetry off`.
-		_ = telemetry.PurgeSpool(dir)
+		if err := telemetry.PurgeSpool(dir); err != nil {
+			slog.Warn("telemetry turned off; events already recorded on this machine could not be deleted", "error", err.Error())
+		}
 	}
-	if s.telemetry != nil {
-		s.telemetry.SetRuntimeConsent(req.Enabled)
+	if req.Enabled && s.telemetry != nil {
+		s.telemetry.SetRuntimeConsent(true)
 	}
 	writeJSON(w, http.StatusOK, s.telemetryState())
 }

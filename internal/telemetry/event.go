@@ -13,9 +13,11 @@
 //     survives a careless future contributor, which a field allowlist alone
 //     does not (an allowlist is blind to where a value came from).
 //
-// There is no PERSISTENT identifier: nothing that survives the process or
-// identifies the install is created, and the only file telemetry writes
-// outside the spool is the consent record, which carries no id. RunID is
+// There is no PERSISTENT identifier: nothing that identifies the install is
+// created. Telemetry writes two files outside the spool, and neither carries
+// an id: the consent record, and a daemon's install record (install.go) — a
+// calendar day and a major.minor version, both shared by every install that
+// started that day or runs that release. RunID is
 // generated per process, lives in the spooled event until that batch is
 // delivered or aged out (so ingestion can dedup a re-sent file), and never
 // appears in a daemon beacon — a months-lived process's run_id would be
@@ -31,7 +33,7 @@ import (
 // SchemaVersion is bumped when a field is added; the ingestion side keys off
 // it. Additive evolution only — removing a field is a breaking change for
 // existing aggregates.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // Event types.
 const (
@@ -68,6 +70,10 @@ type Event struct {
 	IsCI           bool   `json:"is_ci"`
 	IsInteractive  bool   `json:"is_interactive"`
 	RunID          string `json:"run_id,omitempty"`
+	// InstallAge and PreviousVersion appear on daemon beacons only, never on
+	// an event that carries a run_id. See install.go.
+	InstallAge      string `json:"install_age,omitempty"`
+	PreviousVersion string `json:"previous_version,omitempty"`
 }
 
 // AllowedFields is the complete set of JSON keys that may appear on the wire,
@@ -87,6 +93,8 @@ var AllowedFields = []string{
 	"is_ci",
 	"is_interactive",
 	"run_id",
+	"install_age",
+	"previous_version",
 }
 
 // durationBucket coarsens a command's wall time. The tail collapses at >10m

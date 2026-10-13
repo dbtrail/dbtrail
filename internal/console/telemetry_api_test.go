@@ -420,3 +420,98 @@ func TestHandleTelemetryGetSampleEventMatchesCLI(t *testing.T) {
 		t.Errorf("sample_event is not the two-space pretty-printed form:\n%q", dto.SampleEvent)
 	}
 }
+
+// orderTelemetry records what the consent file said at the moment the live
+// client was told to stop.
+type orderTelemetry struct {
+	fakeTelemetry
+	dir            string
+	fileAtStopCall telemetry.Decision
+}
+
+func (o *orderTelemetry) SetRuntimeConsent(enabled bool) {
+	if !enabled {
+		o.fileAtStopCall = telemetry.Resolve("", o.dir)
+	}
+	o.fakeTelemetry.SetRuntimeConsent(enabled)
+}
+
+// An opt-out has to stop the running process BEFORE it cleans the disk. The
+// other order leaves a window in which a beacon writes back what was just
+// deleted, and it stays there: the drain and the purge only run while enabled.
+func TestHandleTelemetrySetOffStopsTheLiveClientBeforeCleaningTheDisk(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("BINTRAIL_TELEMETRY", "")
+	t.Setenv(telemetry.DirEnvVar, "")
+	dir, err := telemetry.ConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ot := &orderTelemetry{fakeTelemetry: fakeTelemetry{enabled: true}, dir: dir}
+	s := &Server{telemetry: ot}
+	rec := httptest.NewRecorder()
+	s.handleTelemetrySet(rec, httptest.NewRequest("POST", "/api/telemetry", strings.NewReader(`{"enabled":false}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(ot.setCalls) != 1 || ot.setCalls[0] {
+		t.Fatalf("live client calls = %v, want one stop", ot.setCalls)
+	}
+	if !ot.fileAtStopCall.Enabled {
+		t.Errorf("the consent file already said off when the live client was stopped: the disk was cleaned first")
+	}
+	if d := telemetry.Resolve("", dir); d.Enabled {
+		t.Errorf("the choice was not recorded: %+v", d)
+	}
+}
+
+// A failure to record the choice names where to look, and never the path or
+// the environment value itself: those describe the server's filesystem to
+// whoever is signed in to the web interface.
+func TestHandleTelemetrySetErrorsDoNotLeakServerPaths(t *testing.T) {
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("BINTRAIL_TELEMETRY", "")
+
+	t.Run("a refused folder setting", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv(telemetry.DirEnvVar, "secret-relative/place")
+		s := &Server{telemetry: &fakeTelemetry{enabled: true}}
+		rec := httptest.NewRecorder()
+		s.handleTelemetrySet(rec, httptest.NewRequest("POST", "/api/telemetry", strings.NewReader(`{"enabled":true}`)))
+		body := rec.Body.String()
+		if rec.Code != http.StatusInternalServerError || !strings.Contains(body, telemetry.DirEnvVar) {
+			t.Errorf("status %d, body %s: want a 500 naming %s", rec.Code, body, telemetry.DirEnvVar)
+		}
+		if strings.Contains(body, "secret-relative") {
+			t.Errorf("the response carries the setting's value: %s", body)
+		}
+	})
+
+	t.Run("a folder that cannot be written", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		// A FILE where the folder has to be created: SetEnabled fails, and its
+		// error names the full path.
+		blocked := filepath.Join(home, "blocked")
+		if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(telemetry.DirEnvVar, filepath.Join(blocked, "telemetry"))
+		ft := &fakeTelemetry{enabled: true}
+		s := &Server{telemetry: ft}
+		rec := httptest.NewRecorder()
+		s.handleTelemetrySet(rec, httptest.NewRequest("POST", "/api/telemetry", strings.NewReader(`{"enabled":false}`)))
+		body := rec.Body.String()
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status %d, body %s: want 500", rec.Code, body)
+		}
+		if strings.Contains(body, home) || strings.Contains(body, "blocked") {
+			t.Errorf("the response carries a server path: %s", body)
+		}
+		// The half-done opt-out lands on the safe side: the process is off.
+		if ft.enabled {
+			t.Error("recording the opt-out failed and the live client is still reporting")
+		}
+	})
+}

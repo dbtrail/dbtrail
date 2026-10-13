@@ -60,7 +60,8 @@ func IsCI() bool {
 }
 
 // state is the on-disk consent record. It carries NO identifier and never goes
-// on the wire — the only thing telemetry ever writes outside the spool.
+// on the wire. Telemetry writes two files outside the spool: this one, and a
+// daemon's install record (install.go), which the beacon path owns.
 type state struct {
 	// Enabled is nil when the operator has never made an explicit choice, which
 	// is distinct from an explicit "on": only the former shows the notice.
@@ -69,8 +70,8 @@ type state struct {
 	DecidedAt   string `json:"decided_at,omitempty"`
 }
 
-// DirEnvVar moves the directory telemetry keeps its two things in: the consent
-// file and the spool. It exists for a process whose home directory does not
+// DirEnvVar moves the directory telemetry keeps its three things in: the
+// consent file, the spool, and a daemon's install record. It exists for a process whose home directory does not
 // outlive it. A container's home sits in the container's own writable layer,
 // so a stack that recreates the container on every upgrade would lose the
 // consent file each time and an opt-out would revert to the default (on); the
@@ -80,7 +81,8 @@ type state struct {
 // consent control and can never turn reporting on.
 const DirEnvVar = "BINTRAIL_TELEMETRY_DIR"
 
-// ConfigDir returns the directory holding the consent file and the spool:
+// ConfigDir returns the directory holding the consent file, the spool and the
+// install record:
 // DirEnvVar when set, otherwise ~/.config/bintrail. An error here (no home
 // directory: distroless, systemd DynamicUser, a scrubbed environment) disables
 // telemetry entirely and silently — mirroring how the env-file loader skips
@@ -171,7 +173,20 @@ func SetEnabled(dir string, enabled bool) error {
 	s.Enabled = &enabled
 	s.NoticeShown = true // an explicit choice makes the first-run notice moot
 	s.DecidedAt = time.Now().UTC().Format(time.RFC3339)
-	return saveState(dir, s)
+	if err := saveState(dir, s); err != nil {
+		return err
+	}
+	if !enabled {
+		// Opting out leaves nothing of telemetry's on disk but the choice.
+		// Best effort, and never an error: the choice IS recorded at this
+		// point, and callers stop a running daemon only when this returns
+		// nil. Failing here over a leftover file would report a recorded
+		// opt-out as a failure and leave that daemon reporting.
+		if err := removeInstall(dir); err != nil {
+			debugf("opt-out recorded; could not remove the install record: %v", err)
+		}
+	}
+	return nil
 }
 
 // parseOnOff accepts the spellings an operator is likely to type. Returns

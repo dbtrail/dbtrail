@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **Usage telemetry: a daemon's daily beacon now says roughly how old the
+  install is, and once, which version it ran before.** Two new fields,
+  `install_age` (one of four ranges: `<7d`, `7d-30d`, `30d-90d`, `>90d`) and
+  `previous_version` (major.minor, on the first beacon after the version
+  changes), tell us whether installs stay and whether they upgrade. There is
+  still no install identifier: a daemon keeps a calendar day and a version in
+  `telemetry-install.json`, the day never leaves the machine, and
+  `bintrail telemetry off` or the web interface toggle deletes the file.
+  Nothing changes for an install with telemetry off. `bintrail telemetry show`
+  prints the beacon too. See [TELEMETRY.md](./TELEMETRY.md), "No persistent
+  identifier".
+- **A running daemon now follows `bintrail telemetry off`.** Typed next to a
+  daemon that was already up, the choice was recorded and that daemon kept
+  reporting until its next restart. It now stops at its next hourly check and
+  deletes what it had recorded since.
 ### Fixed
 - **Docker Compose: usage telemetry turned off in the web interface came back
   on after an upgrade.** The choice was saved inside the container, and an

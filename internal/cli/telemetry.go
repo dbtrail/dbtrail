@@ -234,7 +234,8 @@ var telemetryStatusCmd = &cobra.Command{
 var telemetryShowCmd = &cobra.Command{
 	Use:   "show",
 	Short: "Print the exact JSON that would be sent (sends nothing)",
-	Long: `Print a representative event, byte for byte as it would be transmitted.
+	Long: `Print a representative event and the daily beacon of a long-running
+command, byte for byte as they would be transmitted.
 
 This command performs no network access. It exists so the payload can be
 inspected without trusting the documentation: what you see here is the
@@ -244,8 +245,16 @@ complete set of fields the wire format permits.`,
 		if err != nil {
 			return fmt.Errorf("render sample event: %w", err)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s\n\nFields permitted on the wire: %v\n",
-			out, telemetry.AllowedFields)
+		// A missing config directory is not an error here: the beacon is then
+		// rendered as a first one, which is what such a machine would send if
+		// it could send at all.
+		dir, _ := telemetry.ConfigDir()
+		beacon, err := telemetry.SampleBeaconJSON(dir)
+		if err != nil {
+			return fmt.Errorf("render sample beacon: %w", err)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s\n\nA long-running command (watch, stream, ...) also sends this once a day:\n%s\n\nFields permitted on the wire: %v\n",
+			out, beacon, telemetry.AllowedFields)
 		fmt.Fprintf(cmd.OutOrStdout(), "Sent to: %s\n", endpointDescription())
 		return nil
 	},

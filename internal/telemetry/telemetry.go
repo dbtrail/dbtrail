@@ -348,6 +348,7 @@ func (c *Client) RunDaemon(ctx context.Context, daemon string) {
 			return
 		case <-time.After(time.Duration(daemonTick.Load())):
 		}
+		c.followRecordedOptOut()
 		if !c.Enabled() {
 			continue // consent off right now; a runtime opt-in resumes us
 		}
@@ -424,10 +425,46 @@ func (c *Client) SetRuntimeConsent(enabled bool) {
 	if c == nil {
 		return
 	}
+	// Under c.mu, which Beacon holds from its own consent check to its last
+	// write: an opt-out therefore waits for a beacon already in flight and no
+	// beacon can start after it, so the caller can delete what telemetry left
+	// on disk without a beacon writing it back.
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.decision = Decision{Enabled: enabled, Source: SourceConfig}
-	c.mu.Unlock()
 	c.enabled.Store(enabled && c.canEverReport())
+}
+
+// followRecordedOptOut turns this process off when the consent file says off.
+// A daemon resolves consent once, at start; without this, `telemetry off` run
+// in a shell next to a daemon that has been up for a month would be recorded,
+// reported as done, and ignored by that daemon until its next restart.
+//
+// One direction only. Turning ON from the file is left to the next start, as
+// documented, and that keeps this free of a race with the web interface's own
+// toggle, which stops the process first and writes the file second.
+//
+// A control that outranks the file (DO_NOT_TRACK, --telemetry,
+// BINTRAIL_TELEMETRY) made the decision for this process and keeps it.
+func (c *Client) followRecordedOptOut() {
+	if !c.Enabled() {
+		return
+	}
+	if src := c.Decision().Source; src != SourceConfig && src != SourceDefault {
+		return
+	}
+	if s := loadState(c.dir); s.Enabled == nil || *s.Enabled {
+		return
+	}
+	c.SetRuntimeConsent(false)
+	// What this process wrote between the opt-out and now would otherwise
+	// stay: the drain runs only while enabled.
+	if err := PurgeSpool(c.dir); err != nil {
+		debugf("recorded opt-out followed; could not purge the spool: %v", err)
+	}
+	if err := removeInstall(c.dir); err != nil {
+		debugf("recorded opt-out followed; could not remove the install record: %v", err)
+	}
 }
 
 // Decision reports the resolved consent state and what decided it.
@@ -483,6 +520,36 @@ func SampleEvent() Event {
 // from the operator's local CLI.
 func SampleEventJSON() ([]byte, error) {
 	return json.MarshalIndent(SampleEvent(), "", "  ")
+}
+
+// SampleBeacon returns the daemon beacon this machine would spool right now,
+// for `bintrail telemetry show`. The install fields are computed from the real
+// install record in dir (read only: nothing is written), so previous_version
+// appears exactly when the next real beacon would carry it. With no record
+// yet, the age is what a first beacon reports.
+func SampleBeacon(dir string) Event {
+	e := Event{
+		SchemaVersion: SchemaVersion,
+		EventType:     EventDaemonBeacon,
+		Command:       "watch",
+		Outcome:       OutcomeOK,
+		Version:       minorVersion(buildVersion),
+		IsRelease:     isReleaseVersion(buildVersion),
+		OS:            runtime.GOOS,
+		Arch:          coarseArch(runtime.GOARCH),
+		IsCI:          IsCI(),
+	}
+	// A record that cannot be read sends no install fields, here as in Beacon.
+	if rec, readable := loadInstall(dir); readable {
+		stampInstall(&e, rec, e.Command, e.Version, time.Now())
+	}
+	return e
+}
+
+// SampleBeaconJSON renders SampleBeacon the way SampleEventJSON renders the
+// command event.
+func SampleBeaconJSON(dir string) ([]byte, error) {
+	return json.MarshalIndent(SampleBeacon(dir), "", "  ")
 }
 
 // Span measures one command invocation. A nil *Span is safe and inert.
@@ -575,21 +642,52 @@ func (c *Client) Beacon(daemon string) {
 	}
 	defer func() { _ = recover() }()
 
-	now := c.now().UTC()
+	// c.mu is held to the last write, and consent is checked again inside it:
+	// see SetRuntimeConsent. This only touches local files, once a day.
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.enabled.Load() {
+		return
+	}
+	now := c.now().UTC()
 	if !c.lastBeacon.IsZero() && sameUTCDay(c.lastBeacon, now) {
-		c.mu.Unlock()
 		return
 	}
 	c.lastBeacon = now
-	c.mu.Unlock()
 
 	e := c.baseEvent()
 	e.EventType = EventDaemonBeacon
 	e.Command = sanitizeCommand(daemon)
 	e.Outcome = OutcomeOK
+
+	// The install fields are only worth sending when this process can also
+	// REMEMBER that it sent them. So the record is saved first, and a beacon
+	// whose record cannot be read or saved goes out without them: otherwise an
+	// unwritable folder would repeat the same previous_version every day and
+	// hold install_age at its youngest value forever.
+	prev, readable := loadInstall(c.dir)
+	saved := false
+	if readable {
+		next := stampInstall(&e, prev, e.Command, e.Version, now)
+		if !next.equal(prev) {
+			if err := saveInstall(c.dir, next); err != nil {
+				debugf("could not save install record, beacon sent without install fields: %v", err)
+				e.InstallAge, e.PreviousVersion = "", ""
+			} else {
+				saved = true
+			}
+		}
+	}
 	if err := appendEvent(c.spoolDir, e, now); err != nil {
 		debugf("could not spool beacon: %v", err)
+		// previous_version is reported once. A record that says it was
+		// reported, for a beacon that was never spooled, would spend it on
+		// nothing, so the record goes back to what it was.
+		if saved {
+			if err := restoreInstall(c.dir, prev); err != nil {
+				debugf("could not restore install record: %v", err)
+			}
+		}
 	}
 }
 

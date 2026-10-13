@@ -55,7 +55,7 @@ This is the complete wire payload. There are no other fields.
 
 | Field | Example | Why |
 |---|---|---|
-| `schema_version` | `1` | Lets the format evolve additively |
+| `schema_version` | `2` | Lets the format evolve additively |
 | `event_type` | `command_run` | One of `command_run`, `command_error`, `daemon_beacon` |
 | `command` | `archive-reconcile` | Which command ran. Built from cobra command *names*, which are compile-time constants — never arguments or flag values |
 | `outcome` | `ok` | `ok` or `error` |
@@ -68,12 +68,14 @@ This is the complete wire payload. There are no other fields.
 | `is_ci` | `false` | Whether a CI environment was detected |
 | `is_interactive` | `true` | Whether stderr is a terminal |
 | `run_id` | a UUID | Ephemeral, per process. Lets ingestion discard a re-sent batch. **Absent from daemon beacons** |
+| `install_age` | `30d-90d` | **Daemon beacons only.** How long ago this install sent its first beacon, as one of four ranges: `<7d`, `7d-30d`, `30d-90d`, `>90d`. Never a date |
+| `previous_version` | `0.103` | **Daemon beacons only, and on one beacon:** the first one after the version changed. The major.minor this install ran before. Absent otherwise |
 
 A real event looks like this:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "event_type": "command_error",
   "command": "status",
   "outcome": "error",
@@ -86,6 +88,26 @@ A real event looks like this:
   "is_ci": false,
   "is_interactive": true,
   "run_id": "470a53a1-20c2-4819-aacc-b132e516fec8"
+}
+```
+
+A daemon beacon is the only event that carries the two install fields, and it
+carries no `run_id`:
+
+```json
+{
+  "schema_version": 2,
+  "event_type": "daemon_beacon",
+  "command": "watch",
+  "outcome": "ok",
+  "version": "0.104",
+  "is_release": true,
+  "os": "linux",
+  "arch": "arm64",
+  "is_ci": false,
+  "is_interactive": false,
+  "install_age": "30d-90d",
+  "previous_version": "0.103"
 }
 ```
 
@@ -160,15 +182,66 @@ Not "is not currently sent" — cannot be, by the structure of the code:
 Nothing that identifies your installation is written to disk or sent. There is
 no install UUID, no machine fingerprint, no account linkage.
 
+A daemon does keep two facts between runs, in `telemetry-install.json` in the
+telemetry folder (`~/.config/bintrail/`, or `BINTRAIL_TELEMETRY_DIR` when that
+is set, as it is in the bundled Docker Compose file), and neither is an
+identifier:
+
+```json
+{"first_seen":"2026-07-21","last_versions":{"watch":"0.104"}}
+```
+
+- `first_seen` is the calendar day (UTC) this install spooled its first
+  beacon. Every install that started that day has the same value. It never
+  leaves your machine: a beacon reports only which of four ranges the age
+  falls in (`install_age`).
+- `last_versions` is the major.minor that last sent a beacon from here, per
+  long-running command. Every install on that release has the same value. It
+  is sent once, as `previous_version`, on the first beacon after that
+  command's version changes.
+
+The file is written only while telemetry is on, only by a daemon's beacon. A
+source build neither reports nor records a version.
+
+`bintrail telemetry off` and the web interface toggle delete the file. A
+daemon that is already running follows an opt-out recorded by another process
+(you typed `telemetry off` next to it) at its next hourly check: it stops,
+and deletes the file and anything it had spooled since. The environment
+controls (`DO_NOT_TRACK=1`, `BINTRAIL_TELEMETRY=off`, `--telemetry=off`) stop
+everything from being written or sent but delete nothing: a file left by an
+earlier run with telemetry on stays on disk, unused, until you remove it or
+run `bintrail telemetry off`.
+
+A beacon carries the two fields only when the daemon could also save the file.
+If the folder cannot be written, or the file is there and cannot be read, the
+beacon goes out without them.
+
+What this buys, and what it does not: we can see whether installs stay
+(the spread of `install_age`) and whether they upgrade, and from which release
+(`previous_version`). We still cannot follow one install from day to day,
+because nothing sent says which install a beacon came from. On a small
+population two wide ranges and a version do narrow things down, which is why
+the ranges are wide, why `previous_version` rides on a single beacon instead
+of every one, and why neither is ever attached to an event that carries a
+`run_id`.
+
+Three things to know when reading these numbers. An install that was already
+running before this release has no recorded start, so its age counts from the
+first beacon it sends on this release. A patch release (0.104.0 to 0.104.1)
+is not a version change here, because the version is truncated to
+major.minor. And a container whose telemetry folder is not on a volume starts
+over on every upgrade (see "Where the choice is kept, and containers").
+
 `run_id` is generated fresh in memory each time a command runs, lives in the
 spooled event only until that batch is delivered or expires, and never appears
 in a daemon beacon — a process that runs for months would otherwise carry one
 stable identifier for months, which is exactly the thing this design refuses to
 create.
 
-The cost is real and worth stating: **we cannot measure active users or
-retention.** Daily totals, version adoption, command mix, error rates and
-platform mix are what remain. That trade was made deliberately.
+The cost is real and worth stating: **we cannot count users, or follow any
+one install over time.** Daily totals, version adoption, command mix, error
+rates, platform mix, and the two coarse install facts above are what remain.
+That trade was made deliberately.
 
 ## How it is sent
 
@@ -202,7 +275,8 @@ first only after they have been running for an hour. A finer cadence would
 reconstruct your uptime and maintenance windows; a beacon at startup would
 mean a crash-looping daemon emitted one per restart.
 
-Beacons carry no `run_id`.
+Beacons carry no `run_id`. They are the only events that carry `install_age`
+and `previous_version` (see "No persistent identifier").
 
 Because daemons have no terminal, they log one line at startup when telemetry
 is on. It is logged at `WARN` so that a host running at a raised log level — a
@@ -221,15 +295,18 @@ one did.
 | `~/.config/bintrail/telemetry.json` | Written by `bintrail telemetry on\|off`, or by the web interface's **Status → Usage telemetry** toggle |
 | *(nothing set)* | **On** |
 
-The toggle in the web interface writes that same file (so every bintrail process on the
-machine honours it from its next run) *and* flips the running `watch` daemon's
-live decision, so its beacons stop the moment you opt out. When a
+The toggle in the web interface writes that same file *and* flips the running
+`watch` daemon's live decision, so its beacons stop the moment you opt out.
+Every other bintrail process that reads that folder honours the file from its
+next run, and a long-running one that is already up follows an opt-out within
+the hour (turning it back **on** takes effect at its next start). When a
 higher-precedence control above is in charge, the web interface shows that and defers
 to it rather than pretending to override it.
 
 ### Where the choice is kept, and containers
 
-The file and the spool live in `~/.config/bintrail/`. Set
+The consent file, the spool and a daemon's install record (see "No persistent
+identifier") live in `~/.config/bintrail/`. Set
 `BINTRAIL_TELEMETRY_DIR` to an absolute path to keep them somewhere else. It
 only names a folder: it is not a consent control and cannot turn telemetry on.
 A value that is not an absolute path is refused, and telemetry stays off until
@@ -427,6 +504,15 @@ statements of fact rather than intent.
 | `TestRunDaemonDoesNotBeaconBeforeFirstTick` | A crash-looping daemon emits nothing |
 | Per-daemon wiring guards (`*DaemonWiringEmitsBeacon`, one per call site across `stream`, `agent`, `up`, both `watch` paths, `serve`, `shim`, `bintrail-pg stream`, `bintrail-pg flashback`) | Every daemon this document says beacons actually starts the beacon loop — each test drives the real run function and fails if its launch line is deleted |
 | `TestBeaconCarriesNoRunID` | Daemon beacons carry no identifier |
+| `TestInstallFieldsOnlyOnBeacons` | `install_age` and `previous_version` never ride on an event that carries a `run_id` |
+| `TestBeaconReportsPreviousVersionOnce` | `previous_version` is on one beacon per version change; a patch release or a source build is not a change |
+| `TestTamperedInstallRecord` | A hand-edited install file can put nothing on the wire except a range and a major.minor of at most three and four digits |
+| `TestUnsavableRecordSendsNoInstallFields` | A daemon that cannot save the install file sends neither field, so `previous_version` can never repeat daily |
+| `TestTwoDaemonsAtDifferentVersionsDoNotReportEachOther` | Two daemons sharing a folder each report only their own version change |
+| `TestOptOutDeletesTheInstallRecord` | Opting out deletes the install file |
+| `TestRunningDaemonFollowsARecordedOptOut` | A running daemon follows `telemetry off` typed next to it, and deletes what it wrote in between |
+| `TestBeaconChecksConsentAgainUnderTheLock` | A beacon in flight cannot write anything back after an opt-out |
+| `TestBeaconNeverRewritesTheConsentFile` | The daily beacon never writes the consent file, so it cannot overwrite an opt-out |
 | `TestRecordDaemonCommandOmitsRunID` | A web interface action inside a daemon records no `run_id`, so there is no per-install timeline |
 | `TestRecordActionUsesFixedName` | The web interface action name is a fixed constant, never derived from the request |
 | Demo image smoke test | The demo image's telemetry guard is present and applies to every process in the container |
