@@ -55,7 +55,7 @@
 # instead of leaving you to diff two files (#1529). It is passed to the
 # console service below through the YAML anchor, so there is one number to
 # bump: raise it whenever this file gains wiring a running stack would need.
-x-bintrail-compose-version: &compose_version 4
+x-bintrail-compose-version: &compose_version 5
 
 volumes:
   bintrail-index-data:    # MySQL 8.4 datadir — the forensic record (NEW volume:
@@ -417,6 +417,11 @@ services:
       # to name what a stale file is missing; without it the daemon says
       # nothing about the file's age, so an older stack raises no false alarm.
       BINTRAIL_COMPOSE_VERSION: *compose_version
+      # Where the usage telemetry choice and its outbox are kept. Without this
+      # they sit in the container's home directory, which the next `up -d`
+      # that recreates the container deletes: telemetry turned off in the web
+      # interface would be back on after an upgrade. See docs/TELEMETRY.md.
+      BINTRAIL_TELEMETRY_DIR: /var/lib/bintrail/telemetry
     volumes:
       - bintrail-state:/var/lib/bintrail
       - bintrail-index-secret:/run/secret:ro

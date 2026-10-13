@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **Docker Compose: usage telemetry turned off in the web interface came back
+  on after an upgrade.** The choice was saved inside the container, and an
+  upgrade replaces the container. The bundled `docker-compose.yml` (now file
+  version 5) keeps it on the state volume through a new setting,
+  `BINTRAIL_TELEMETRY_DIR`. **Take the current file when you upgrade**, or the
+  choice is still lost; the daemon tells you at startup when your file is
+  older. `BINTRAIL_TELEMETRY=off` and `DO_NOT_TRACK=1` were never affected,
+  and neither were the `.deb` and `.rpm` packages.
 ### Changed
 - **Read routing is now called Engine Routing, and it is no longer
   experimental.** The switch on **Settings → MySQL clients** picks the

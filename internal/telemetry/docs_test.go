@@ -163,6 +163,9 @@ func TestDocumentedControlsExist(t *testing.T) {
 		"bintrail telemetry off",
 		"--telemetry=off",
 		DebugEnvVar,
+		// Not a consent control, but the one setting that decides whether a
+		// recorded opt-out survives a container upgrade.
+		DirEnvVar,
 	} {
 		if !strings.Contains(doc, control) {
 			t.Errorf("TELEMETRY.md does not mention the %q control", control)

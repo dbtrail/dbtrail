@@ -69,11 +69,35 @@ type state struct {
 	DecidedAt   string `json:"decided_at,omitempty"`
 }
 
-// ConfigDir returns ~/.config/bintrail. An error here (no home directory:
-// distroless, systemd DynamicUser, a scrubbed environment) disables telemetry
-// entirely and silently — mirroring how the env-file loader skips rather than
-// failing a command the operator actually asked for.
+// DirEnvVar moves the directory telemetry keeps its two things in: the consent
+// file and the spool. It exists for a process whose home directory does not
+// outlive it. A container's home sits in the container's own writable layer,
+// so a stack that recreates the container on every upgrade would lose the
+// consent file each time and an opt-out would revert to the default (on); the
+// bundled docker-compose.yml points this at its state volume for that reason.
+//
+// It names where telemetry's own files live and nothing else: it is not a
+// consent control and can never turn reporting on.
+const DirEnvVar = "BINTRAIL_TELEMETRY_DIR"
+
+// ConfigDir returns the directory holding the consent file and the spool:
+// DirEnvVar when set, otherwise ~/.config/bintrail. An error here (no home
+// directory: distroless, systemd DynamicUser, a scrubbed environment) disables
+// telemetry entirely and silently — mirroring how the env-file loader skips
+// rather than failing a command the operator actually asked for.
+//
+// A DirEnvVar that is not an absolute path is an error too, and deliberately
+// NOT a fallback to the home directory: a relative value resolves against
+// wherever the process was started, and falling back would read a different
+// consent file than the one the operator pointed at. Refusing leaves telemetry
+// off, which is the only safe reading of a setting that cannot be honoured.
 func ConfigDir() (string, error) {
+	if v := strings.TrimSpace(os.Getenv(DirEnvVar)); v != "" {
+		if !filepath.IsAbs(v) {
+			return "", fmt.Errorf("%s must be an absolute path, got %q", DirEnvVar, v)
+		}
+		return filepath.Clean(v), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err

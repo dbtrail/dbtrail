@@ -29,6 +29,7 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("DO_NOT_TRACK", "")
 	t.Setenv(EnvVar, "")
+	t.Setenv(DirEnvVar, "")
 	for _, v := range ciEnvVars {
 		t.Setenv(v, "")
 	}

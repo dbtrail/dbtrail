@@ -227,6 +227,33 @@ live decision, so its beacons stop the moment you opt out. When a
 higher-precedence control above is in charge, the web interface shows that and defers
 to it rather than pretending to override it.
 
+### Where the choice is kept, and containers
+
+The file and the spool live in `~/.config/bintrail/`. Set
+`BINTRAIL_TELEMETRY_DIR` to an absolute path to keep them somewhere else. It
+only names a folder: it is not a consent control and cannot turn telemetry on.
+A value that is not an absolute path is refused, and telemetry stays off until
+it is fixed.
+
+That setting exists because of containers. A container's home directory is part
+of the container, so recreating the container (which is what an upgrade does)
+deletes the file, and a choice made with `telemetry off` or the web interface
+toggle is gone: telemetry is back to the default, on. The bundled
+`docker-compose.yml` sets `BINTRAIL_TELEMETRY_DIR` to a folder on its state
+volume from file version 5, so the choice survives. **With an older compose
+file, or your own container setup, a choice recorded in the file does not
+survive an upgrade.** Use `BINTRAIL_TELEMETRY=off` or `DO_NOT_TRACK=1` in the
+container's environment, which do, or set `BINTRAIL_TELEMETRY_DIR` to a path on
+a volume.
+
+Each container has its own home directory, so the toggle in the web interface
+reaches the `bintrail` service only. Another service you run from the same
+file (the `flashback` profile, for example) keeps its own choice; the two
+environment settings above are the way to turn it off there.
+
+The `.deb` and `.rpm` packages are not affected: their service user's home is
+`/var/lib/bintrail`, which is kept.
+
 `bintrail telemetry off` also deletes anything already spooled locally, so
 opting out does not leave earlier events sitting on your disk waiting for a
 delivery that will never come.
