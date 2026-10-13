@@ -62,6 +62,29 @@ the container reads the password from the stack:
 17 * * * * cd /path/to/stack && docker compose --profile iceberg-export run --rm iceberg-export
 ```
 
+### How far behind the tables are
+
+As far behind as the interval you schedule, plus the few seconds a run takes.
+A run reads the changes captured since the previous run and nothing else, so
+a shorter interval costs shorter runs, not more work. For tables that must be
+at most five minutes behind, run it every five minutes:
+
+```
+*/5 * * * * cd /path/to/stack && docker compose --profile iceberg-export run --rm iceberg-export
+```
+
+Measured on v0.104.1, on one 8-vCPU machine with a 5-million-row TPC-C source
+taking 20 transactions per second: twelve runs in a row, five minutes apart,
+took 6 to 12 seconds each, none was refused, and when a run ended the tables
+were 4 to 11 seconds behind the source. With the load paused, every table read
+back through Spark matched the source: the same row count and the same total
+of one numeric column. The warehouse grew
+from 64 MB to 88 MB and by about 49 files per run across nine tables; each run
+adds files and removes none (see "What a run does").
+
+If the reader takes the tables from S3, add the time your sync takes: the
+export writes a local directory (see "Limits in this release").
+
 The export is deliberately not a button and never runs inside the capture
 daemon: it writes a whole new copy of your data, and keeping it out of that
 process is what stops a long run slowing capture down.
@@ -200,6 +223,13 @@ Two things to know:
   key columns too (as the quick start does), or materialize first:
   `CREATE TABLE orders AS SELECT * FROM iceberg_scan('...')`. DuckDB 1.5 lifts
   this (checked with 1.5.5).
+- **DuckDB gets slower on a table that is exported often.** Every run adds
+  one equality-delete file per table, and DuckDB's cost of applying them grows
+  with each one: with DuckDB 1.5.5 a 300,000-row table exported every five
+  minutes went from 3 seconds to read to 200 seconds after twelve runs, about
+  16 seconds more per run, while Spark read the same table in under a second
+  ([#2372](https://github.com/dbtrail/dbtrail/issues/2372)). Read a frequently-exported table with Spark or another engine, or
+  keep DuckDB for a table exported a few times a day.
 - **The table is not relocatable by default.** Iceberg metadata stores
   absolute paths. If you copy or sync the warehouse elsewhere (for example
   `bintrail upload` to S3), read it with
