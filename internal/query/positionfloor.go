@@ -386,7 +386,20 @@ func loadArchiveHeads(ctx context.Context, db *sql.DB, writtenSince time.Time) (
 
 // headsPerStatement is how many partitions one statement of
 // loadPartitionHeadsOnce reads the newest row of.
-const headsPerStatement = 250
+//
+// Kept small on purpose (#2385). Every branch names binlog_events, and MySQL
+// opens a TABLE instance of it per branch, each carrying a handler for EVERY
+// partition of the table, not only the one its branch reads. The instances
+// stay in the table cache when the statement ends, and a connection reuses
+// only those of its own cache instance (table_open_cache_instances, 16 by
+// default), so the cache fills to about headsPerStatement x 16 of them. At
+// 250 per statement and 223 hourly partitions that was over 1600 cached
+// instances of binlog_events, memory/sql/TABLE climbing about 30 MB a
+// minute, and the index's mysqld killed for memory at 6.3 GB after 19 hours
+// on an 8 GB host. At 16 the cache holds a few hundred, and a month of
+// partitions (720) costs 45 statements, between the 3 (34-47 ms) and the
+// 720 (100-167 ms) measured for #2138.
+const headsPerStatement = 16
 
 // fileIndexingWarnEvery spaces the warning below: every fetch that loads a
 // picture would otherwise repeat it.
