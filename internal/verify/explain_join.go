@@ -59,7 +59,13 @@ type rowJoin struct {
 }
 
 func newRowJoin(ctx context.Context, tuning duckdbutil.Tuning) (*rowJoin, error) {
-	return newRowJoinCapped(ctx, tuning, explainJoinMemoryLimit)
+	limit := explainJoinMemoryLimit
+	if t := duckdbutil.DefaultTuningFor(ctx); t != duckdbutil.DefaultTuning() && t.MemoryLimit != "" {
+		// The job's budget (#2385) is sized for its sessions together; this
+		// one runs beside the reconstruction's, so it takes the same share.
+		limit = t.MemoryLimit
+	}
+	return newRowJoinCapped(ctx, tuning, limit)
 }
 
 // newRowJoinCapped is newRowJoin with the session's memory cap given, so a

@@ -50,7 +50,7 @@ func Fetch(ctx context.Context, opts query.Options, source string) ([]query.Resu
 	if opts.BeforeEvent != nil && query.OrderDirection(opts.Order) == "ASC" {
 		return nil, errors.New("parquetquery: BeforeEvent is a backward keyset cursor and cannot be combined with Order=ASC")
 	}
-	return FetchWithTuning(ctx, opts, source, duckdbutil.DefaultTuning())
+	return FetchWithTuning(ctx, opts, source, duckdbutil.DefaultTuningFor(ctx))
 }
 
 // FetchWithTuning is Fetch with an explicit DuckDB resource budget. See Tuning:

@@ -182,15 +182,16 @@ const checkLaneWaitNote = "Waiting for a snapshot update or another check to fin
 
 // inCheckLane runs one table of a check in the check lane: it waits for
 // snapshot work and for any other check's table, saying so in the run's note
-// while it waits, and clears that note once its turn comes.
-func (s *verifySupervisor) inCheckLane(ctx context.Context, serverID string, f func()) error {
+// while it waits, and clears that note once its turn comes. f gets ctx with
+// the lane's DuckDB budget on it (laneCtx).
+func (s *verifySupervisor) inCheckLane(ctx context.Context, serverID string, f func(context.Context)) error {
 	release, err := s.heavy().acquire(ctx, laneCheck, func() { s.setNote(serverID, checkLaneWaitNote) })
 	s.clearNote(serverID, checkLaneWaitNote) // on both paths: a stopped run must not keep it
 	if err != nil {
 		return fmt.Errorf("verify interrupted: %w", err)
 	}
 	defer release()
-	f()
+	f(laneCtx(ctx, laneCheck))
 	return nil
 }
 

@@ -293,3 +293,19 @@ func deadPid(t *testing.T) int {
 	}
 	return pid
 }
+
+// TestDefaultTuningFor: a job's budget on ctx replaces DefaultTuning; no
+// budget, or a zero one, leaves DefaultTuning.
+func TestDefaultTuningFor(t *testing.T) {
+	ctx := context.Background()
+	if got := DefaultTuningFor(ctx); got != DefaultTuning() {
+		t.Errorf("no budget: %+v", got)
+	}
+	if got := DefaultTuningFor(WithSessionTuning(ctx, Tuning{})); got != DefaultTuning() {
+		t.Errorf("zero budget: %+v", got)
+	}
+	b := Tuning{Threads: 2, MemoryLimit: "512MiB"}
+	if got := DefaultTuningFor(WithSessionTuning(ctx, b)); got != b {
+		t.Errorf("budget: %+v, want %+v", got, b)
+	}
+}

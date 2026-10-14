@@ -356,8 +356,15 @@ type FullTableConfig struct {
 // host-greedy budget passes duckdbutil.Ultrafast() (which sets S3Direct, so it
 // is never the zero value) or any other explicit non-zero Tuning.
 func effectiveDuckDBTuning(t duckdbutil.Tuning) duckdbutil.Tuning {
+	return effectiveDuckDBTuningFor(context.Background(), t)
+}
+
+// effectiveDuckDBTuningFor is effectiveDuckDBTuning with the zero value
+// falling back to the budget the caller's job put on ctx
+// (duckdbutil.WithSessionTuning, #2385) before DefaultTuning.
+func effectiveDuckDBTuningFor(ctx context.Context, t duckdbutil.Tuning) duckdbutil.Tuning {
 	if t == (duckdbutil.Tuning{}) {
-		return duckdbutil.DefaultTuning()
+		return duckdbutil.DefaultTuningFor(ctx)
 	}
 	return t
 }
@@ -369,7 +376,7 @@ func effectiveDuckDBTuning(t duckdbutil.Tuning) duckdbutil.Tuning {
 // DuckDB session this package opens for the merge/baseline path goes through
 // this single call so the pairing can't be forgotten at a future call site.
 func applyDuckDBTuning(ctx context.Context, db *sql.DB, t duckdbutil.Tuning) {
-	effectiveDuckDBTuning(t).Apply(ctx, db)
+	effectiveDuckDBTuningFor(ctx, t).Apply(ctx, db)
 	duckdbutil.SetTempDirectory(ctx, db)
 }
 

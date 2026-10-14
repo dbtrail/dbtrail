@@ -230,3 +230,17 @@ func TestFinalizeCompletenessMarker(t *testing.T) {
 		}
 	})
 }
+
+// TestEffectiveDuckDBTuningFor: the zero value takes the job's budget from
+// ctx (#2385) before the default; an explicit tuning still wins.
+func TestEffectiveDuckDBTuningFor(t *testing.T) {
+	b := duckdbutil.Tuning{Threads: 2, MemoryLimit: "512MiB"}
+	ctx := duckdbutil.WithSessionTuning(context.Background(), b)
+	if got := effectiveDuckDBTuningFor(ctx, duckdbutil.Tuning{}); got != b {
+		t.Errorf("zero tuning under a job budget = %+v, want %+v", got, b)
+	}
+	explicit := duckdbutil.Tuning{Threads: 8, MemoryLimit: "16GB"}
+	if got := effectiveDuckDBTuningFor(ctx, explicit); got != explicit {
+		t.Errorf("explicit tuning = %+v, want it kept", got)
+	}
+}

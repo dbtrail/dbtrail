@@ -247,3 +247,24 @@ func applyTuningStmt(ctx context.Context, db *sql.DB, stmt string) {
 		slog.Warn("could not configure DuckDB", "statement", stmt, "error", err)
 	}
 }
+
+type sessionTuningKey struct{}
+
+// WithSessionTuning returns ctx carrying t as the budget for the DuckDB
+// sessions opened under it that were given no Tuning of their own: the ones
+// that would otherwise take DefaultTuning (#2385). The daemon sets it per job
+// from the host's memory, so one job's sessions fit beside the others' and
+// beside capture, where DefaultTuning's fixed 4GB per session did not. An
+// explicit Tuning a caller passes still wins.
+func WithSessionTuning(ctx context.Context, t Tuning) context.Context {
+	return context.WithValue(ctx, sessionTuningKey{}, t)
+}
+
+// DefaultTuningFor is DefaultTuning, or the budget WithSessionTuning put on
+// ctx.
+func DefaultTuningFor(ctx context.Context) Tuning {
+	if t, ok := ctx.Value(sessionTuningKey{}).(Tuning); ok && t != (Tuning{}) {
+		return t
+	}
+	return DefaultTuning()
+}

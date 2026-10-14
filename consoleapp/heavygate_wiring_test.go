@@ -38,7 +38,7 @@ func TestCheckLane_noteWhileWaiting(t *testing.T) {
 	ran := make(chan string, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- s.inCheckLane(context.Background(), "a", func() { ran <- s.Status("a").Note })
+		done <- s.inCheckLane(context.Background(), "a", func(context.Context) { ran <- s.Status("a").Note })
 	}()
 	eventually(t, "the waiting note", func() bool { return s.Status("a").Note == checkLaneWaitNote })
 	select {
@@ -63,7 +63,7 @@ func TestCheckLane_canceledWait(t *testing.T) {
 	defer mustAcquire(t, g, laneSnapshot)()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := s.inCheckLane(ctx, "a", func() { t.Error("the table ran after the check was stopped") })
+	err := s.inCheckLane(ctx, "a", func(context.Context) { t.Error("the table ran after the check was stopped") })
 	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "verify interrupted") {
 		t.Fatalf("err = %v", err)
 	}

@@ -128,7 +128,7 @@ func withLocalArchive(ctx context.Context, file string, fn func(db *sql.DB, path
 	}
 	defer db.Close()
 	duckdbutil.SetTempDirectory(ctx, db)
-	duckdbutil.DefaultTuning().Apply(ctx, db)
+	duckdbutil.DefaultTuningFor(ctx).Apply(ctx, db)
 	if err := fn(db, path); err != nil {
 		return fmt.Errorf("read %s: %w", file, err)
 	}

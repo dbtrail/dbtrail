@@ -323,7 +323,7 @@ func (s *verifySupervisor) Explain(serverID, schema, table string) (*console.Ver
 			return
 		}
 		defer release()
-		res, err := run(ctx, indexDSN, noArchive, schema, table, pair)
+		res, err := run(laneCtx(ctx, laneCheck), indexDSN, noArchive, schema, table, pair)
 		s.finishExplain(key, job, res, err)
 	}()
 	return nil, console.ErrExplainRunning
@@ -588,7 +588,7 @@ func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baseli
 			res verify.TableResult
 			err error
 		)
-		if lerr := s.inCheckLane(ctx, req.ServerID, func() { res, err = verify.VerifyBaselinePair(ctx, cfg, p) }); lerr != nil {
+		if lerr := s.inCheckLane(ctx, req.ServerID, func(ctx context.Context) { res, err = verify.VerifyBaselinePair(ctx, cfg, p) }); lerr != nil {
 			return lerr
 		}
 		if err != nil {
@@ -655,7 +655,7 @@ func (s *verifySupervisor) runLiveSource(req console.VerifyRequest, indexDB *sql
 			res verify.TableResult
 			err error
 		)
-		if lerr := s.inCheckLane(ctx, req.ServerID, func() { res, err = verify.VerifyTable(ctx, cfg, st.Schema, st.Table) }); lerr != nil {
+		if lerr := s.inCheckLane(ctx, req.ServerID, func(ctx context.Context) { res, err = verify.VerifyTable(ctx, cfg, st.Schema, st.Table) }); lerr != nil {
 			return lerr
 		}
 		if err != nil {
@@ -721,7 +721,7 @@ func (s *verifySupervisor) runLiveSourcePG(req console.VerifyRequest, indexDB *s
 			res verify.TableResult
 			err error
 		)
-		if lerr := s.inCheckLane(ctx, req.ServerID, func() { res, err = verify.VerifyTablePG(ctx, cfg, st.Schema, st.Table) }); lerr != nil {
+		if lerr := s.inCheckLane(ctx, req.ServerID, func(ctx context.Context) { res, err = verify.VerifyTablePG(ctx, cfg, st.Schema, st.Table) }); lerr != nil {
 			return lerr
 		}
 		if err != nil {
@@ -775,7 +775,7 @@ func (s *verifySupervisor) runRecoverInputs(req console.VerifyRequest, indexDB *
 			res verify.TableResult
 			err error
 		)
-		if lerr := s.inCheckLane(ctx, req.ServerID, func() { res, err = verify.VerifyRecoverInputs(ctx, cfg, st.Schema, st.Table) }); lerr != nil {
+		if lerr := s.inCheckLane(ctx, req.ServerID, func(ctx context.Context) { res, err = verify.VerifyRecoverInputs(ctx, cfg, st.Schema, st.Table) }); lerr != nil {
 			return lerr
 		}
 		if err != nil {

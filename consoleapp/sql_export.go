@@ -907,7 +907,7 @@ func (s *baselineSupervisor) executeSQLExport(req console.SQLExportRequest, dir 
 	}
 	reports, _, runErr := func() ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
 		defer release() // deferred: a panic in the fold must not keep the lane
-		return foldTables(s.ctx, sqlExportFoldConfig(req, dir, tableList))
+		return foldTables(laneCtx(s.ctx, laneSnapshot), sqlExportFoldConfig(req, dir, tableList))
 	}()
 	for _, rep := range reports {
 		rows += rep.RowsWritten

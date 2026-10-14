@@ -273,3 +273,21 @@ func TestRemoveOldExplainDirs(t *testing.T) {
 		}
 	}
 }
+
+// TestRowJoin_capFollowsTheJobBudget: under a job's DuckDB budget (#2385) the
+// join takes that memory cap instead of its own 1GB.
+func TestRowJoin_capFollowsTheJobBudget(t *testing.T) {
+	ctx := duckdbutil.WithSessionTuning(context.Background(), duckdbutil.Tuning{Threads: 2, MemoryLimit: "300MiB"})
+	j, err := newRowJoin(ctx, duckdbutil.Tuning{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.close()
+	var got string
+	if err := j.conn.QueryRowContext(ctx, "SELECT current_setting('memory_limit')").Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "300.0 MiB" {
+		t.Errorf("join memory_limit = %q, want the job's 300MiB", got)
+	}
+}

@@ -284,7 +284,7 @@ func (s *baselineSupervisor) resolveNewest(req refreshRequest, root, done string
 		err := space(root, need)
 		var written, wasLinked bool
 		if err == nil {
-			written, wasLinked, err = resolveTableDelta(s.ctx, base, c, prevBase)
+			written, wasLinked, err = resolveTableDelta(laneCtx(s.ctx, laneSnapshot), base, c, prevBase)
 		}
 		switch {
 		case err != nil && s.ctx.Err() != nil:

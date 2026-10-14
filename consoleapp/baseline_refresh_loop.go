@@ -1800,7 +1800,7 @@ func (s *baselineSupervisor) foldSnapshot(req refreshRequest, at time.Time, tabl
 	}
 	reports, failures, runErr := func() ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
 		defer release() // deferred: a panic in the fold must not keep the lane
-		return foldTables(s.ctx, refreshFoldConfig(req, at, tableList))
+		return foldTables(laneCtx(s.ctx, laneSnapshot), refreshFoldConfig(req, at, tableList))
 	}()
 	if req.s3Copies != nil {
 		req.s3Copies.files = reconstruct.S3Copies(reports)
