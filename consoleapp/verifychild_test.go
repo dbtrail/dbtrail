@@ -15,8 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
+	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/verify"
 )
@@ -51,6 +53,18 @@ var explainChildFakes = map[string]func(context.Context, string, bool, string, s
 	},
 	"silent": func(context.Context, string, bool, string, string, verify.BaselinePair) (*console.VerifyExplanation, error) {
 		return nil, nil
+	},
+}
+
+var checkChildFakes = map[string]func(context.Context, string, bool, verify.BaselinePair) (verify.TableResult, error){
+	// check-ok answers a mismatch carrying what it was handed.
+	"check-ok": func(ctx context.Context, dsn string, noArchive bool, p verify.BaselinePair) (verify.TableResult, error) {
+		return verify.TableResult{Schema: p.Schema, Table: p.Table, Status: verify.StatusMismatch,
+			Anchor: p.NewAnchor.File, SourceRows: 3, ReconstructRows: 2,
+			Detail: dsn + " " + strconv.FormatBool(noArchive) + " " + duckdbutil.DefaultTuningFor(ctx).MemoryLimit}, nil
+	},
+	"check-error": func(context.Context, string, bool, verify.BaselinePair) (verify.TableResult, error) {
+		return verify.TableResult{}, errors.New("resolve shop.orders: no such table")
 	},
 }
 
@@ -109,13 +123,13 @@ func fillAll(t *testing.T, v reflect.Value, path string) {
 // Every field is filled by reflection, so one added later is covered without
 // anyone remembering this test.
 func TestExplainChildJob_EveryFieldCrosses(t *testing.T) {
-	var want explainChildJob
+	var want verifyChildJob
 	fillAll(t, reflect.ValueOf(&want).Elem(), "job")
 	b, err := json.Marshal(want)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got explainChildJob
+	var got verifyChildJob
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}
@@ -124,9 +138,28 @@ func TestExplainChildJob_EveryFieldCrosses(t *testing.T) {
 	}
 }
 
+// TestVerifyChildAnswer_EveryFieldCrosses: a table's verdict comes back as
+// JSON and is persisted (#1191). A field lost on the way would be a verdict
+// recorded without it.
+func TestVerifyChildAnswer_EveryFieldCrosses(t *testing.T) {
+	var want verifyChildAnswer
+	fillAll(t, reflect.ValueOf(&want).Elem(), "answer")
+	b, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got verifyChildAnswer
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the answer changed crossing back:\n got %+v\nwant %+v", got, want)
+	}
+}
+
 func TestExplainChildMemory(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
-		// Two sessions plus explainGoAllowance.
+		// Two sessions plus verifyChildGoAllowance.
 		{"546MiB", "1604MiB"},
 		{"512MiB", "1536MiB"},
 		// The byte parser reads GB as binary, DuckDB as decimal: the ceiling
@@ -134,13 +167,13 @@ func TestExplainChildMemory(t *testing.T) {
 		// worker's fence reads it the same way.
 		{"4GB", "8704MiB"},
 	} {
-		if got, _, err := explainChildMemory(duckdbutil.Tuning{MemoryLimit: tc.in}); err != nil || got != tc.want {
-			t.Errorf("explainChildMemory(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
+		if got, _, err := verifyChildMemory(duckdbutil.Tuning{MemoryLimit: tc.in}); err != nil || got != tc.want {
+			t.Errorf("verifyChildMemory(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
 		}
 	}
 	for _, in := range []string{"", "0", "lots"} {
-		if got, _, err := explainChildMemory(duckdbutil.Tuning{MemoryLimit: in}); err == nil {
-			t.Errorf("explainChildMemory(%q) = %q, want an error", in, got)
+		if got, _, err := verifyChildMemory(duckdbutil.Tuning{MemoryLimit: in}); err == nil {
+			t.Errorf("verifyChildMemory(%q) = %q, want an error", in, got)
 		}
 	}
 }
@@ -261,7 +294,7 @@ func TestVerifyWorkerMain_ParentGone(t *testing.T) {
 	r, w := io.Pipe()
 	code := make(chan int, 1)
 	go func() { code <- verifyWorkerMain(r, io.Discard, io.Discard, func() {}) }()
-	job, _ := json.Marshal(explainChildJob{Schema: "wp", Table: "posts"})
+	job, _ := json.Marshal(verifyChildJob{Kind: verifyChildExplain, Schema: "wp", Table: "posts"})
 	if _, err := fmt.Fprintf(w, "%s\n", job); err != nil {
 		t.Fatal(err)
 	}
@@ -291,17 +324,17 @@ func TestVerifyWorkerMain_ParentGone(t *testing.T) {
 // the child is told what its heap may use: the ceiling less the DuckDB
 // sessions. An operator's own GOMEMLIMIT is left as it is.
 func TestExplainChildEnv_GoMemLimit(t *testing.T) {
-	mem, duck, err := explainChildMemory(duckdbutil.Tuning{MemoryLimit: "546MiB"})
+	mem, duck, err := verifyChildMemory(duckdbutil.Tuning{MemoryLimit: "546MiB"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 1604 MiB + a quarter of it (401) = 2005 MiB ceiling, less the two
 	// sessions' 1092 and the 2 x 190 they hold outside their limits.
-	if got := lastEnv(explainChildEnv(mem, duck), "GOMEMLIMIT"); got != "533MiB" {
+	if got := lastEnv(verifyChildEnv(mem, duck), "GOMEMLIMIT"); got != "533MiB" {
 		t.Errorf("GOMEMLIMIT = %q, want 533MiB", got)
 	}
 	t.Setenv("GOMEMLIMIT", "300MiB")
-	if got := lastEnv(explainChildEnv(mem, duck), "GOMEMLIMIT"); got != "300MiB" {
+	if got := lastEnv(verifyChildEnv(mem, duck), "GOMEMLIMIT"); got != "300MiB" {
 		t.Errorf("GOMEMLIMIT = %q, want the operator's 300MiB", got)
 	}
 }
@@ -350,4 +383,88 @@ func waitExplainFor(t *testing.T, s *verifySupervisor, d time.Duration) (*consol
 // by the parent's Wait, so a killed one is gone, not a zombie.
 func processRunning(pid int) bool {
 	return !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+}
+
+// checkFixture writes two reads of shop.orders a day apart, so the newer has
+// an earlier one to be compared with and the pair is not settled while
+// pairing: the check has to compare it.
+func checkFixture(t *testing.T) (*verifySupervisor, string, *metadata.Resolver) {
+	t.Helper()
+	root := t.TempDir()
+	read := time.Date(2026, 9, 1, 3, 0, 0, 0, time.UTC)
+	writeSnapshotAs(t, root, read.Add(-24*time.Hour), read.Add(-24*time.Hour), baseline.ProducerDump)
+	writeSnapshotAs(t, root, read, read, baseline.ProducerDump)
+	resolver := metadata.NewResolverFromTables(1, map[string]*metadata.TableMeta{"shop.orders": {Schema: "shop", Table: "orders"}})
+	s := newVerifySupervisor(context.Background(), nil, nil)
+	s.jobs["s1"] = &verifyJob{status: console.VerifyStatus{State: "running"}, mode: console.VerifyModeBaselineAnchored}
+	return s, root, resolver
+}
+
+// TestRunBaselineAnchored_comparesInAChild pins the wiring: a table the check
+// must compare is compared in a child, with the run's index DSN and archive
+// switch and the check lane's DuckDB budget, and its mismatch is kept for
+// Explain as before.
+func TestRunBaselineAnchored_comparesInAChild(t *testing.T) {
+	t.Setenv(explainChildFakeEnv, "check-ok")
+	s, root, resolver := checkFixture(t)
+	req := console.VerifyRequest{ServerID: "s1", IndexDSN: "u:p@tcp(h:3306)/idx", NoArchive: true}
+	if err := s.runBaselineAnchored(req, root, nil, resolver, "idx", ""); err != nil {
+		t.Fatal(err)
+	}
+	rs := s.jobs["s1"].status.Results
+	if len(rs) != 1 || rs[0].Status != "mismatch" {
+		t.Fatalf("results = %+v, want the child's mismatch", rs)
+	}
+	if !strings.HasPrefix(rs[0].Detail, "u:p@tcp(h:3306)/idx true ") {
+		t.Errorf("the child saw %q, want the run's DSN and archive switch", rs[0].Detail)
+	}
+	if _, ok := s.jobs["s1"].pairs["shop.orders"]; !ok {
+		t.Error("the mismatch's pair was not kept, so Explain would answer unavailable")
+	}
+}
+
+// TestRunBaselineAnchored_childErrorIsTheTablesError: the child's own error
+// becomes that table's error verdict, word for word, and the run goes on.
+func TestRunBaselineAnchored_childErrorIsTheTablesError(t *testing.T) {
+	t.Setenv(explainChildFakeEnv, "check-error")
+	s, root, resolver := checkFixture(t)
+	if err := s.runBaselineAnchored(console.VerifyRequest{ServerID: "s1", IndexDSN: "dsn"}, root, nil, resolver, "idx", ""); err != nil {
+		t.Fatal(err)
+	}
+	rs := s.jobs["s1"].status.Results
+	if len(rs) != 1 || rs[0].Status != "error" || rs[0].Detail != "resolve shop.orders: no such table" {
+		t.Fatalf("results = %+v, want the child's error as the table's", rs)
+	}
+}
+
+// TestRunBaselineAnchored_settledStartsNoChild: a table the pairing already
+// answered has nothing to compare; it is answered here, with no process
+// started for it.
+func TestRunBaselineAnchored_settledStartsNoChild(t *testing.T) {
+	root := t.TempDir()
+	read := time.Date(2026, 9, 1, 3, 0, 0, 0, time.UTC)
+	writeFoldSnapshot(t, root, read.Add(24*time.Hour), read)
+	writeFoldSnapshot(t, root, read.Add(48*time.Hour), read)
+	resolver := metadata.NewResolverFromTables(1, map[string]*metadata.TableMeta{"shop.orders": {Schema: "shop", Table: "orders"}})
+	s := newVerifySupervisor(context.Background(), nil, nil)
+	s.checkPairFn = func(context.Context, string, bool, verify.BaselinePair) (verify.TableResult, error) {
+		t.Error("a settled table was sent to be compared")
+		return verify.TableResult{}, nil
+	}
+	s.jobs["s1"] = &verifyJob{status: console.VerifyStatus{State: "running"}, mode: console.VerifyModeBaselineAnchored}
+	if err := s.runBaselineAnchored(console.VerifyRequest{ServerID: "s1"}, root, nil, resolver, "idx", ""); err != nil {
+		t.Fatal(err)
+	}
+	if rs := s.jobs["s1"].status.Results; len(rs) != 1 || rs[0].Status != "inconclusive" {
+		t.Fatalf("results = %+v, want the settled answer", rs)
+	}
+}
+
+// TestRunVerifyJob_UnknownKind: a job the child does not know is an error it
+// says, never an explanation or a verdict guessed from an empty answer.
+func TestRunVerifyJob_UnknownKind(t *testing.T) {
+	ans := runVerifyJob(context.Background(), verifyChildJob{Kind: "mystery"}, io.Discard)
+	if ans.Error != `unknown verify job "mystery"` || ans.Result != nil || ans.Table != nil {
+		t.Errorf("answer = %+v, want the unknown kind named", ans)
+	}
 }

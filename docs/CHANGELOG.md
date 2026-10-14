@@ -7,23 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
-- **Explain runs in a process of its own** (#2385). The drill-down on a
-  mismatched table used to run inside `bintrail-console watch`, which also
-  captures, so a table that needed more memory than the host had could take
-  capture down with it. It now runs in a child process. Where DBTrail was
-  given a cgroup to manage (a systemd unit with `Delegate=yes`, or the bundled
-  compose file with its optional `writable-cgroups=true` turned on, the same
-  setting SQL on the copy uses), the child gets a
-  memory ceiling of its own: twice the check's DuckDB memory per session,
-  512 MiB for what runs outside DuckDB, and headroom, about 2 GiB on an 8 GiB
-  host. Past it the child is stopped and
-  Explain says it ran out of memory; capture and the console keep running.
-  Everywhere else the child is only the kernel's first choice when the host
-  runs out of memory. A new check replacing a drill-down, or the console
-  stopping, stops the child, and a child whose console went away stops by
-  itself. Explain's working files now live in the process's own temporary
-  directory, so the ones a killed drill-down leaves are removed by the next
-  one instead of a day later.
+- **Explain and the check between snapshots run in a process of their own**
+  (#2385). The drill-down on a mismatched table, and each table the check
+  between two snapshots compares, used to run inside `bintrail-console
+  watch`, which also captures, so a table that needed more memory than the
+  host had could take capture down with it. Each now runs in a child process,
+  one table at a time. Where DBTrail was given a cgroup to manage (a systemd
+  unit with `Delegate=yes`, or the bundled compose file with its optional
+  `writable-cgroups=true` turned on, the same setting SQL on the copy uses),
+  the child gets a memory ceiling of its own: twice the check's DuckDB memory
+  per session, 512 MiB for what runs outside DuckDB, and headroom, about
+  2 GiB on an 8 GiB host. Past it the child is stopped and that table, or
+  that Explain, says it ran out of memory; the rest of the check, capture and
+  the console keep running. Everywhere else the child is only the kernel's
+  first choice when the host runs out of memory. A new check replacing a
+  drill-down, or the console stopping, stops the child, and a child whose
+  console went away stops by itself. Explain's working files now live in the
+  process's own temporary directory, so the ones a killed drill-down leaves
+  are removed by the next one instead of a day later. The check against the
+  live source and the check of recovery inputs still run in the console's
+  process.
 
 ## [0.104.4] - 2026-10-14
 ### Added

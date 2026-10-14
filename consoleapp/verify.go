@@ -54,6 +54,10 @@ type verifySupervisor struct {
 	// and it is the one whose failure mode is "a click stops capture". Set it
 	// before the first Explain, never after: it is read outside mu.
 	explainFn func(ctx context.Context, indexDSN string, noArchive bool, schema, table string, pair verify.BaselinePair) (*console.VerifyExplanation, error)
+	// checkPairFn overrides one table of a baseline-anchored check, which
+	// runs in a child process in production (checkPairInChild). Same rule:
+	// set before the first run.
+	checkPairFn func(ctx context.Context, indexDSN string, noArchive bool, p verify.BaselinePair) (verify.TableResult, error)
 
 	mu   sync.Mutex
 	jobs map[string]*verifyJob
@@ -410,22 +414,11 @@ func explainLogVerdict(err error, live bool) (slog.Level, string) {
 // DuckDB false. A test could only catch that after the fact; this makes it
 // not compile.
 func explainNow(ctx context.Context, indexDSN string, noArchive bool, schema, table string, pair verify.BaselinePair) (*console.VerifyExplanation, error) {
-	db, err := config.Connect(indexDSN)
+	cfg, closeDB, err := baselineConfigFor(indexDSN, noArchive)
 	if err != nil {
-		return nil, fmt.Errorf("connect index: %w", err)
+		return nil, err
 	}
-	defer db.Close()
-	resolver, err := verify.ResolverFor(db)
-	if err != nil {
-		return nil, fmt.Errorf("load schema snapshot: %w", err)
-	}
-	// The pair already carries the resolved Prev/New Parquet paths — no need
-	// to re-resolve a baseline source dir/S3 prefix here.
-	cfg := verify.BaselineConfig{
-		IndexDB: db, Resolver: resolver, IndexDBName: indexDBName(indexDSN),
-		NoArchive: noArchive, ArchiveFetcher: parquetquery.Fetch,
-		SourceFlavor: query.SourceFlavor(db),
-	}
+	defer closeDB()
 
 	ex, err := verify.ExplainBaselinePairMismatch(ctx, cfg, pair)
 	if err != nil {
@@ -447,6 +440,27 @@ func explainNow(ctx context.Context, indexDSN string, noArchive bool, schema, ta
 		Total: ex.Total, Diffs: diffs, Rendered: buf.String(),
 		CascadeNote: ex.CascadeNote,
 	}, nil
+}
+
+// baselineConfigFor opens its own index connection and builds the config a
+// baseline pair is compared or explained with. The pair already carries the
+// resolved Prev/New Parquet paths, so no baseline source is needed. closeDB
+// closes the connection.
+func baselineConfigFor(indexDSN string, noArchive bool) (cfg verify.BaselineConfig, closeDB func(), err error) {
+	db, err := config.Connect(indexDSN)
+	if err != nil {
+		return cfg, nil, fmt.Errorf("connect index: %w", err)
+	}
+	resolver, err := verify.ResolverFor(db)
+	if err != nil {
+		db.Close()
+		return cfg, nil, fmt.Errorf("load schema snapshot: %w", err)
+	}
+	return verify.BaselineConfig{
+		IndexDB: db, Resolver: resolver, IndexDBName: indexDBName(indexDSN),
+		NoArchive: noArchive, ArchiveFetcher: parquetquery.Fetch,
+		SourceFlavor: query.SourceFlavor(db),
+	}, func() { db.Close() }, nil
 }
 
 // run drives the verify engine to completion and publishes the final state.
@@ -590,7 +604,11 @@ func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baseli
 			res verify.TableResult
 			err error
 		)
-		if lerr := s.inCheckLane(ctx, req.ServerID, func(ctx context.Context) { res, err = verify.VerifyBaselinePair(ctx, cfg, p) }); lerr != nil {
+		if p.Settled != nil {
+			// Decided while pairing: nothing to compare, so no turn and no
+			// process.
+			res, err = verify.VerifyBaselinePair(ctx, cfg, p)
+		} else if lerr := s.inCheckLane(ctx, req.ServerID, func(ctx context.Context) { res, err = s.checkPair(ctx, req.IndexDSN, req.NoArchive, p) }); lerr != nil {
 			return lerr
 		}
 		if err != nil {
@@ -620,6 +638,15 @@ func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baseli
 		}, false))
 	}
 	return nil
+}
+
+// checkPair compares one table of a baseline-anchored check: in a process
+// of its own (#2385), or with the test's stand-in.
+func (s *verifySupervisor) checkPair(ctx context.Context, indexDSN string, noArchive bool, p verify.BaselinePair) (verify.TableResult, error) {
+	if s.checkPairFn != nil {
+		return s.checkPairFn(ctx, indexDSN, noArchive, p)
+	}
+	return checkPairInChild(ctx, indexDSN, noArchive, p)
 }
 
 func (s *verifySupervisor) runLiveSource(req console.VerifyRequest, indexDB *sql.DB, resolver *metadata.Resolver, dbName string) error {

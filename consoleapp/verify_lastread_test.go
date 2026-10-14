@@ -18,6 +18,13 @@ import (
 // changes at `at`, inheriting the read at `read`.
 func writeFoldSnapshot(t *testing.T, root string, at, read time.Time) {
 	t.Helper()
+	writeSnapshotAs(t, root, at, read, baseline.ProducerReconstruct)
+}
+
+// writeSnapshotAs is writeFoldSnapshot with the producer given: a
+// baseline.ProducerDump snapshot is a read of the database.
+func writeSnapshotAs(t *testing.T, root string, at, read time.Time, producer string) {
+	t.Helper()
 	snap := filepath.Join(root, reconstruct.SnapshotDirName(at))
 	path := filepath.Join(snap, "shop", "orders.parquet")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -27,7 +34,7 @@ func writeFoldSnapshot(t *testing.T, root string, at, read time.Time) {
 	w, err := baseline.NewWriter(path, cols, baseline.WriterConfig{Compression: "none", RowGroupSize: 100, Metadata: map[string]string{
 		baseline.MetaKeyCreateTableSQL:    "CREATE TABLE `orders` (`id` INT PRIMARY KEY);",
 		baseline.MetaKeySnapshotTimestamp: at.UTC().Format(time.RFC3339),
-		baseline.MetaKeySnapshotProducer:  baseline.ProducerReconstruct,
+		baseline.MetaKeySnapshotProducer:  producer,
 		baseline.MetaKeyLastDumpAt:        read.UTC().Format(time.RFC3339),
 		baseline.MetaKeyFoldGeneration:    "1",
 		baseline.MetaKeyBinlogFile:        "binlog.000001",
