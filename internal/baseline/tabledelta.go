@@ -1189,3 +1189,33 @@ func WithDeltaSeq(md map[string]string, seq int) map[string]string {
 	out[MetaKeyDeltaSeq] = strconv.Itoa(seq)
 	return out
 }
+
+// TableTailStateSQL is a table's state with its tail (#2369) over it: the
+// newest change of each key captured after the copy's cut, one row per key,
+// in the .upserts layout. state is the table's published state SQL built
+// with no REPLACE; replace is applied here, over both sides, so the tail's
+// rows take the same casts as the published ones. tail is a SQL expression
+// for the tail file's path, pk the table's key columns.
+//
+// The published rows of every key the tail touched are dropped, by key, and
+// the tail's live rows are added: a tombstone ('d') drops its key and adds
+// nothing. The tail carries the key's typed values on every row, a
+// tombstone's included, so the anti-join compares typed columns. Only
+// integer keys have a tail (reconstruct.NewTail): an integer compares the
+// same under any collation, where text under the sandbox's nocase one
+// would not.
+func TableTailStateSQL(state, tail string, pk []string, replace string) string {
+	star := "*"
+	if replace != "" {
+		star = "* REPLACE (" + replace + ")"
+	}
+	keys := make([]string, len(pk))
+	for i, c := range pk {
+		keys[i] = `"` + strings.ReplaceAll(c, `"`, `""`) + `"`
+	}
+	using := strings.Join(keys, ", ")
+	return fmt.Sprintf("SELECT %s FROM (SELECT bintrail_state.* FROM (%s) bintrail_state ANTI JOIN (SELECT %s FROM read_parquet(%s)) bintrail_tail USING (%s) "+
+		"UNION ALL BY NAME SELECT * EXCLUDE (\"%s\", \"%s\") FROM read_parquet(%s) WHERE \"%s\" = '%s')",
+		star, state, using, tail, using,
+		TableDeltaPKColumn, TableDeltaOpColumn, tail, TableDeltaOpColumn, TableDeltaOpUpsert)
+}
