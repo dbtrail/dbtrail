@@ -144,7 +144,8 @@ func TestSamePrimaryKey(t *testing.T) {
 		{"another column", ddl("`a`"), cols("b"), false},
 		{"the copy's key is wider", ddl("`a`,`b`"), cols("a"), false},
 		{"the snapshot's key is wider", ddl("`a`"), cols("a", "b"), false},
-		{"another order", ddl("`a`,`b`"), cols("b", "a"), false},
+		{"the definition's key order, the snapshot's column order", ddl("`b`,`a`"), cols("a", "b"), true},
+		{"a column named twice", ddl("`a`,`a`"), cols("a", "b"), false},
 		{"a prefix length", ddl("`a`(10)"), cols("a"), false},
 		{"no key", "CREATE TABLE `t` (\n  `a` int NOT NULL\n);\n", cols("a"), false},
 		{"no definition", "", cols("a"), false},
@@ -160,12 +161,10 @@ func TestSamePrimaryKey(t *testing.T) {
 func TestIndexTailSource_startNeedsTheCaptureFilters(t *testing.T) {
 	x, _ := newMockTailSource(t)
 	tbl := views.BaselineTable{Schema: "shop", Table: "orders", Path: "/nowhere/shop/orders.parquet"}
-	x.capturesUnknown = true
 	if _, why, err := x.Start(context.Background(), tbl); err != nil || !strings.Contains(why, "not known") {
-		t.Errorf("filters unknown: %q %v", why, err)
+		t.Errorf("a source no one told the filters: %q %v", why, err)
 	}
-	x.capturesUnknown = false
-	x.captures = func(schema, table string) bool { return table != "orders" }
+	x.capturing(func(schema, table string) bool { return table != "orders" })
 	if _, why, err := x.Start(context.Background(), tbl); err != nil || !strings.Contains(why, "outside what capture records") {
 		t.Errorf("a table capture does not record: %q %v", why, err)
 	}

@@ -35,7 +35,7 @@ func newTailRig(t *testing.T) (*unchangedRig, *tailKeeper) {
 		}}
 	}
 	r.b.resolver = metadata.NewResolverFromTables(1, tables)
-	return r, newTailKeeper(newIndexTailSource(r.s, r.b), t.TempDir(), 1000, time.Minute, time.Hour)
+	return r, newTailKeeper(newIndexTailSource(r.s, r.b).capturing(nil), t.TempDir(), 1000, time.Minute, time.Hour)
 }
 
 // change indexes a row event of shop.table: id's status becomes status.
@@ -148,6 +148,26 @@ func TestIntegrationTailSource(t *testing.T) {
 		got, err = k.refresh(ctx, []views.BaselineTable{tbl})
 		if _, ok := got[tailKey("shop", tbl.Table)]; err != nil || ok {
 			t.Fatalf("a tail across a gap recorded after it was built (%v)", err)
+		}
+	})
+
+	t.Run("a change of source server, or events dropped by capture, after the tail was built ends it", func(t *testing.T) {
+		for name, c := range map[string]struct{ set, undo string }{
+			"server":  {`INSERT INTO bintrail_server_changes (bintrail_id, field_changed, old_value, new_value) VALUES ('x', 'server_uuid', 'a', 'b')`, `DELETE FROM bintrail_server_changes`},
+			"dropped": {`UPDATE stream_state SET capture_skips = CONCAT('{"stale_snapshot":{"count":1,"last_at":"', DATE_FORMAT(UTC_TIMESTAMP(), '%Y-%m-%dT%H:%i:%sZ'), '"}}') WHERE id = 1`, `UPDATE stream_state SET capture_skips = '{}' WHERE id = 1`},
+		} {
+			tbl := r.table(nil)
+			r.change(tbl.Table, event.EventUpdate, "1", "x", "binlog.000013", 100, hourAgo)
+			got, err := k.refresh(ctx, []views.BaselineTable{tbl})
+			if _, ok := got[tailKey("shop", tbl.Table)]; err != nil || !ok {
+				t.Fatalf("%s: no tail to begin with: %v", name, err)
+			}
+			testutil.MustExec(t, r.db, c.set)
+			got, err = k.refresh(ctx, []views.BaselineTable{tbl})
+			testutil.MustExec(t, r.db, c.undo)
+			if _, ok := got[tailKey("shop", tbl.Table)]; err != nil || ok {
+				t.Fatalf("%s: still a tail (%v)", name, err)
+			}
 		}
 	})
 

@@ -22,11 +22,15 @@ import (
 //
 // What a table's tail starts from is the window the refresh would fold next,
 // read by the same rules the port uses to say a table is unchanged since its
-// snapshot (copyUnchanged, #2085), and refused by the same conditions, in
-// the same order: a tail that misses a change is worse than no tail. The one
-// rule it does not apply is the capture watermark: this process does not read
-// the source, so a gap in capture that the index does not record is not seen
-// (an accepted risk, #2369).
+// snapshot (copyUnchanged, #2085): a tail that misses a change is worse than
+// no tail. Fill applies its lookups and its checks of the index in its order;
+// a schema change, a loss in capture and a change of source server are
+// Broken's, asked at every refresh, since they can happen after a tail was
+// built. Two of copyUnchanged's rules are not applied, on purpose: the
+// capture watermark (this process does not read the source, so a gap in
+// capture that the index does not record is not seen, an accepted risk of
+// #2369), and its GTID-mode rule, which serves the watermark's comparison
+// with the source.
 type indexTailSource struct {
 	s        *Server
 	b        *bundle
@@ -42,8 +46,16 @@ type indexTailSource struct {
 // tailPageSize is how many events one read of the index returns.
 const tailPageSize = 5000
 
+// newIndexTailSource gives no table a tail until capturing says which tables
+// capture records: forgetting it must not vouch for tables it never does.
 func newIndexTailSource(s *Server, b *bundle) *indexTailSource {
-	return &indexTailSource{s: s, b: b, pageSize: tailPageSize}
+	return &indexTailSource{s: s, b: b, pageSize: tailPageSize, capturesUnknown: true}
+}
+
+// capturing says which tables capture records (nil: every table).
+func (x *indexTailSource) capturing(captures func(schema, table string) bool) *indexTailSource {
+	x.captures, x.capturesUnknown = captures, false
+	return x
 }
 
 // Newest reads the newest event of the index. An index `bintrail index` also
@@ -335,9 +347,11 @@ func (x *indexTailSource) Broken(ctx context.Context, tables []views.BaselineTab
 	return out, nil
 }
 
-// samePrimaryKey says whether pk is the PRIMARY KEY createTableSQL declares,
-// column for column (MySQL compares column names without case). One it
-// cannot read is not the same.
+// samePrimaryKey says whether pk names the columns of the PRIMARY KEY
+// createTableSQL declares (MySQL compares column names without case). As
+// sets: the snapshot lists a key in its columns' order, and so does
+// event.BuildPKValues, which the tail splits its keys by, while the
+// definition lists it in the key's own. One it cannot read is not the same.
 func samePrimaryKey(createTableSQL string, pk []metadata.ColumnMeta) bool {
 	m := primaryKeyRE.FindStringSubmatch(createTableSQL)
 	if m == nil {
@@ -347,14 +361,20 @@ func samePrimaryKey(createTableSQL string, pk []metadata.ColumnMeta) bool {
 	if len(parts) != len(pk) {
 		return false
 	}
-	for i, p := range parts {
+	want := map[string]bool{}
+	for _, c := range pk {
+		want[strings.ToLower(c.Name)] = true
+	}
+	for _, p := range parts {
 		name := strings.TrimSpace(p)
 		if len(name) < 2 || name[0] != '`' || name[len(name)-1] != '`' {
 			return false
 		}
-		if !strings.EqualFold(strings.ReplaceAll(name[1:len(name)-1], "``", "`"), pk[i].Name) {
+		key := strings.ToLower(strings.ReplaceAll(name[1:len(name)-1], "``", "`"))
+		if !want[key] {
 			return false
 		}
+		delete(want, key)
 	}
 	return true
 }
@@ -365,9 +385,6 @@ func samePrimaryKey(createTableSQL string, pk []metadata.ColumnMeta) bool {
 var primaryKeyRE = regexp.MustCompile("(?i)PRIMARY KEY \\(((?:`(?:[^`]|``)*`\\s*,?\\s*)+)\\)")
 
 var _ tailSource = (*indexTailSource)(nil)
-
-// tailSourceTimeout bounds what a statement waits for its tails.
-const tailSourceTimeout = 2 * time.Second
 
 // tailCaptureLoss is captureLossSince without its GTID rule, which is there
 // to compare a watermark with the source: a tail compares nothing with the
