@@ -156,7 +156,11 @@ type tailKeeper struct {
 	idle    time.Duration
 	now     func() time.Time
 
-	mark    tailMark
+	mark tailMark
+	// through is the latest time of a mark folded, not the newest mark's
+	// own: a transaction that commits late is the newest event with an
+	// early time, and everything folded before it is still folded.
+	through time.Time
 	tables  map[string]*tailEntry
 	written int
 	// orphans are the files of tails replaced or forgotten, kept like old
@@ -210,6 +214,9 @@ func (k *tailKeeper) refresh(ctx context.Context, tables []views.BaselineTable) 
 		k.dropAll()
 	}
 	k.mark = newest
+	if newest.At.After(k.through) {
+		k.through = newest.At
+	}
 	changed, err := k.src.Changed(ctx, tables)
 	if err != nil {
 		return nil, err
@@ -386,7 +393,7 @@ func (k *tailKeeper) view(t views.BaselineTable, e *tailEntry) (tailView, bool) 
 		}
 	}
 	if !e.frozen {
-		e.through = k.mark.At
+		e.through = k.through
 	}
 	if e.through.IsZero() {
 		// Frozen before any version was written: nothing to read, and no
@@ -449,7 +456,7 @@ func (k *tailKeeper) dropAll() {
 		k.drop(e)
 		delete(k.tables, key)
 	}
-	k.mark = tailMark{}
+	k.mark, k.through = tailMark{}, time.Time{}
 }
 
 // forgetIdle forgets the tails no statement asked for in a while: they are

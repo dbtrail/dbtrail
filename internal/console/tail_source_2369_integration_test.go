@@ -89,7 +89,7 @@ func TestIntegrationTailSource(t *testing.T) {
 	hourAgo := time.Now().UTC().Add(-time.Hour)
 
 	t.Run("the window after the cut, then the index as it grows", func(t *testing.T) {
-		tbl := r.table(nil) // one row: 1=new, cut at binlog.000007:4200
+		tbl := r.table(nil)                                                                               // one row: 1=new, cut at binlog.000007:4200
 		r.change(tbl.Table, event.EventUpdate, "1", "old", "binlog.000007", 100, r.stamp.Add(-time.Hour)) // before the cut
 		r.change(tbl.Table, event.EventUpdate, "1", "paid", "binlog.000008", 100, hourAgo)
 		r.change(tbl.Table, event.EventInsert, "2", "two", "binlog.000008", 200, hourAgo)

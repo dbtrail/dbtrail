@@ -264,6 +264,19 @@ func TestTailKeeper(t *testing.T) {
 		}
 	})
 
+	t.Run("a late commit, the newest event with an early time, does not move the instant back", func(t *testing.T) {
+		f := &fakeIndex{}
+		f.add("orders", "1")
+		k := newKeeper(f)
+		before := refresh(t, k, orders)
+		f.add("orders", "2")
+		f.events[1].EventTimestamp = f.events[0].EventTimestamp.Add(-time.Hour)
+		got := refresh(t, k, orders)
+		if fileKeys(t, got[ko].Path) != 2 || got[ko].Through.Before(before[ko].Through) {
+			t.Fatalf("%+v -> %+v", before[ko], got[ko])
+		}
+	})
+
 	t.Run("an unchanged table has no file and the cursor's instant", func(t *testing.T) {
 		f := &fakeIndex{}
 		f.add("customers", "1")
