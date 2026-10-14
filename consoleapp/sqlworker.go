@@ -19,8 +19,8 @@ import (
 // later.
 //
 // It also answers for the verify drill-down's child (#2385, explainchild.go),
-// so a main() that calls it needs no second line: the EE console, whose boot
-// (license, banners, audit sink) must not run again in a child, is one.
+// so a main() that calls it first needs no second line, and whatever it
+// sets up after that call does not run again in the child.
 func RunSQLWorkerIfInvoked() {
 	if isVerifyWorkerInvocation(os.Args) {
 		os.Exit(runVerifyWorker())

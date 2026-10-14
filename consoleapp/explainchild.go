@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -64,26 +66,55 @@ type explainChildAnswer struct {
 	Error  string                     `json:"error,omitempty"`
 }
 
+// explainGoAllowance is what the child may hold outside DuckDB's limits:
+// each session's memory outside its memory_limit (a session capped at 64 MB
+// was measured at about 250 MB resident, see heavybudget.go) and Go's own
+// heap, where the drill-down keeps the latest change of every key in its
+// window.
+const explainGoAllowance = 512 << 20
+
 // explainChildMemory is the memory the child may use in all: an Explain runs
-// checkSessions DuckDB sessions together, each with the lane's budget. The
-// child's ceiling is this plus the worker headroom (sqlsandbox.CeilingBytes).
-func explainChildMemory(t duckdbutil.Tuning) (string, error) {
+// checkSessions DuckDB sessions together, each with the lane's budget, plus
+// explainGoAllowance. The child's ceiling is this plus the worker headroom
+// (sqlsandbox.CeilingBytes). duckdb is the sessions' part alone.
+func explainChildMemory(t duckdbutil.Tuning) (total string, duckdb int64, err error) {
 	per, err := cliutil.ParseByteSize(t.MemoryLimit)
 	if err != nil {
-		return "", fmt.Errorf("the session memory %q does not parse: %w", t.MemoryLimit, err)
+		return "", 0, fmt.Errorf("the session memory %q does not parse: %w", t.MemoryLimit, err)
 	}
 	if per <= 0 {
-		return "", fmt.Errorf("the session memory %q is not a size", t.MemoryLimit)
+		return "", 0, fmt.Errorf("the session memory %q is not a size", t.MemoryLimit)
 	}
-	return fmt.Sprintf("%dMiB", per*checkSessions>>20), nil
+	duckdb = per * checkSessions
+	return fmt.Sprintf("%dMiB", (duckdb+explainGoAllowance)>>20), duckdb, nil
 }
+
+// explainChildEnv is the console's environment plus, unless the operator set
+// one, a GOMEMLIMIT for the child's Go heap: what its ceiling leaves after
+// the DuckDB sessions. Go does not know the cgroup's ceiling, and without it
+// lets the heap grow to twice what it holds before collecting.
+func explainChildEnv(mem string, duckdb int64) []string {
+	env := os.Environ()
+	if _, set := os.LookupEnv("GOMEMLIMIT"); set {
+		return env
+	}
+	ceiling, err := sqlsandbox.CeilingBytes(mem)
+	if err != nil || ceiling <= duckdb {
+		return env
+	}
+	return append(env, fmt.Sprintf("GOMEMLIMIT=%dMiB", (ceiling-duckdb)>>20))
+}
+
+// explainStopGrace is how long a drill-down whose job was dropped has to stop
+// by itself and remove its working files before it is killed.
+const explainStopGrace = 10 * time.Second
 
 // explainInChild is explainNow, run in a child process. Same arguments, same
 // answers, plus two of its own: a child stopped at its memory ceiling, and
 // one that ended without an answer. ctx ending kills the child.
 func explainInChild(ctx context.Context, indexDSN string, noArchive bool, schema, table string, pair verify.BaselinePair) (*console.VerifyExplanation, error) {
 	t := duckdbutil.DefaultTuningFor(ctx)
-	mem, err := explainChildMemory(t)
+	mem, duckdbMem, err := explainChildMemory(t)
 	if err != nil {
 		return nil, fmt.Errorf("explain %s.%s: %w", schema, table, err)
 	}
@@ -97,10 +128,13 @@ func explainInChild(ctx context.Context, indexDSN string, noArchive bool, schema
 		Args: []string{verifyWorkerCommand},
 		// The console's own environment: the child reads the index, S3 and
 		// the archives exactly as the console would.
-		Env:         os.Environ(),
+		Env:         explainChildEnv(mem, duckdbMem),
 		MemoryLimit: mem,
 		Input:       append(in, '\n'),
 		MaxOutput:   explainMaxOutput,
+		StopGrace:   explainStopGrace,
+		LogMsg:      "verify: drill-down process",
+		LogAttrs:    []any{"table", schema + "." + table},
 	})
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
@@ -109,13 +143,16 @@ func explainInChild(ctx context.Context, indexDSN string, noArchive bool, schema
 		}
 		var oom *sqlsandbox.ChildOOMError
 		if errors.As(err, &oom) {
-			return nil, fmt.Errorf("explain %s.%s ran out of memory: %w", schema, table, err)
+			return nil, fmt.Errorf("explain %s.%s ran out of memory: %w (the ceiling grows with this host's memory)", schema, table, err)
+		}
+		if errors.Is(err, sqlsandbox.ErrResultTooLarge) {
+			return nil, fmt.Errorf("explain %s.%s: the drill-down's answer was larger than %d MiB", schema, table, explainMaxOutput>>20)
 		}
 		return nil, fmt.Errorf("explain %s.%s: the drill-down process failed: %w", schema, table, err)
 	}
 	var ans explainChildAnswer
 	if err := json.Unmarshal(out, &ans); err != nil {
-		return nil, fmt.Errorf("explain %s.%s: the drill-down process answered something unreadable: %w", schema, table, err)
+		return nil, fmt.Errorf("explain %s.%s: the drill-down process answered something unreadable (%q): %w", schema, table, truncate(out, 200), err)
 	}
 	if ans.Error != "" {
 		return nil, errors.New(ans.Error)
@@ -126,16 +163,25 @@ func explainInChild(ctx context.Context, indexDSN string, noArchive bool, schema
 	return ans.Result, nil
 }
 
+func truncate(b []byte, n int) string {
+	if len(b) > n {
+		return string(b[:n]) + "..."
+	}
+	return string(b)
+}
+
 // explainChildRun is what the child runs; a variable so a test can give it
 // work that needs no index.
 var explainChildRun = explainNow
 
 // verifyWorkerMain is the child: it reads one job from stdin, runs it, and
 // writes the answer to stdout. stdin stays open for as long as the parent
-// lives, so reading it to the end means the parent is gone, and then
-// parentGone is called: nobody is left to read the answer, and the memory
-// is better given back at once.
-func verifyWorkerMain(stdin io.Reader, stdout, stderr io.Writer, parentGone func()) int {
+// wants the answer, so reading it to the end means the parent dropped the
+// job or is gone: the work is canceled, so its cleanup runs (the join's
+// working files), and if it has not stopped within explainStopGrace,
+// parentGone is called. The parent kills it at that same grace, but a parent
+// that died cannot.
+func verifyWorkerMain(stdin io.Reader, stdout, stderr io.Writer, parentGone func()) (code int) {
 	sqlsandbox.LowerOOMPriority(stderr)
 	dec := json.NewDecoder(stdin)
 	var job explainChildJob
@@ -143,21 +189,41 @@ func verifyWorkerMain(stdin io.Reader, stdout, stderr io.Writer, parentGone func
 		fmt.Fprintf(stderr, "verify worker: read the job: %v\n", err)
 		return 2
 	}
+	ctx, cancel := context.WithCancel(duckdbutil.WithSessionTuning(context.Background(), job.Tuning))
+	defer cancel()
 	go func() {
 		_, _ = io.Copy(io.Discard, io.MultiReader(dec.Buffered(), stdin))
+		cancel()
+		time.Sleep(explainStopGrace)
 		parentGone()
 	}()
-	ctx := duckdbutil.WithSessionTuning(context.Background(), job.Tuning)
-	res, err := explainChildRun(ctx, job.IndexDSN, job.NoArchive, job.Schema, job.Table, job.Pair)
-	ans := explainChildAnswer{Result: res}
-	if err != nil {
-		ans = explainChildAnswer{Error: err.Error()}
+	ans := runExplainJob(ctx, job, stderr)
+	if ctx.Err() != nil {
+		// Nobody is waiting for the answer.
+		return 1
 	}
 	if err := json.NewEncoder(stdout).Encode(ans); err != nil {
 		fmt.Fprintf(stderr, "verify worker: write the answer: %v\n", err)
 		return 2
 	}
 	return 0
+}
+
+// runExplainJob runs the job and turns a panic into the answer the parent
+// used to give one in-process ("internal error: ..."): the page shows that
+// line, and the stack goes to stderr, which the parent logs.
+func runExplainJob(ctx context.Context, job explainChildJob, stderr io.Writer) (ans explainChildAnswer) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(stderr, "verify worker: panic: %v\n%s", r, debug.Stack())
+			ans = explainChildAnswer{Error: fmt.Sprintf("internal error: %v", r)}
+		}
+	}()
+	res, err := explainChildRun(ctx, job.IndexDSN, job.NoArchive, job.Schema, job.Table, job.Pair)
+	if err != nil {
+		return explainChildAnswer{Error: err.Error()}
+	}
+	return explainChildAnswer{Result: res}
 }
 
 // isVerifyWorkerInvocation reports whether this process was started as the

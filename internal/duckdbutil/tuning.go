@@ -146,7 +146,29 @@ var (
 	spillSeq  atomic.Uint64
 )
 
+// ScratchDir is this process's own directory for working files, the one its
+// DuckDB sessions spill under (#2387). A file left there by a process that
+// was killed is removed by the next process on this host that starts DuckDB
+// work, instead of waiting for an age-based sweep: a drill-down killed at its
+// memory ceiling (#2385) leaves its whole join there. The OS temp dir when
+// the directory could not be made.
+func ScratchDir() string {
+	if root := processSpillRoot(); root != "" {
+		return root
+	}
+	return os.TempDir()
+}
+
 func sessionSpillDir() string {
+	if processSpillRoot() == "" {
+		return os.TempDir()
+	}
+	return filepath.Join(spillRoot, strconv.FormatUint(spillSeq.Add(1), 10))
+}
+
+// processSpillRoot makes this process's spill directory once, removing dead
+// processes' first, and returns it; "" if it could not be made.
+func processSpillRoot() string {
 	spillOnce.Do(func() {
 		host := spillHost()
 		removeDeadSpillDirs(os.TempDir(), host)
@@ -157,10 +179,7 @@ func sessionSpillDir() string {
 		}
 		spillRoot = dir
 	})
-	if spillRoot == "" {
-		return os.TempDir()
-	}
-	return filepath.Join(spillRoot, strconv.FormatUint(spillSeq.Add(1), 10))
+	return spillRoot
 }
 
 // spillHost is the hostname as it goes into a directory name: no separators.

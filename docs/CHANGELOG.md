@@ -14,12 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   given a cgroup to manage (a systemd unit with `Delegate=yes`, or the bundled
   compose file with its optional `writable-cgroups=true` turned on, the same
   setting SQL on the copy uses), the child gets a
-  memory ceiling of its own: twice the check's DuckDB memory per session plus
-  headroom, about 1.3 GB on an 8 GB host. Past it the child is stopped and
+  memory ceiling of its own: twice the check's DuckDB memory per session,
+  512 MiB for what runs outside DuckDB, and headroom, about 2 GiB on an 8 GiB
+  host. Past it the child is stopped and
   Explain says it ran out of memory; capture and the console keep running.
   Everywhere else the child is only the kernel's first choice when the host
-  runs out of memory. Canceling a drill-down, or a new check replacing it,
-  stops the child, and a child whose console went away stops by itself.
+  runs out of memory. A new check replacing a drill-down, or the console
+  stopping, stops the child, and a child whose console went away stops by
+  itself. Explain's working files now live in the process's own temporary
+  directory, so the ones a killed drill-down leaves are removed by the next
+  one instead of a day later.
 
 ## [0.104.4] - 2026-10-14
 ### Added

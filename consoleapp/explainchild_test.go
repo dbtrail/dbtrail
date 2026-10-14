@@ -126,19 +126,20 @@ func TestExplainChildJob_EveryFieldCrosses(t *testing.T) {
 
 func TestExplainChildMemory(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
-		{"546MiB", "1092MiB"},
-		{"512MiB", "1024MiB"},
+		// Two sessions plus explainGoAllowance.
+		{"546MiB", "1604MiB"},
+		{"512MiB", "1536MiB"},
 		// The byte parser reads GB as binary, DuckDB as decimal: the ceiling
 		// comes out above what DuckDB will use, never below. The SQL
 		// worker's fence reads it the same way.
-		{"4GB", "8192MiB"},
+		{"4GB", "8704MiB"},
 	} {
-		if got, err := explainChildMemory(duckdbutil.Tuning{MemoryLimit: tc.in}); err != nil || got != tc.want {
+		if got, _, err := explainChildMemory(duckdbutil.Tuning{MemoryLimit: tc.in}); err != nil || got != tc.want {
 			t.Errorf("explainChildMemory(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
 		}
 	}
 	for _, in := range []string{"", "0", "lots"} {
-		if got, err := explainChildMemory(duckdbutil.Tuning{MemoryLimit: in}); err == nil {
+		if got, _, err := explainChildMemory(duckdbutil.Tuning{MemoryLimit: in}); err == nil {
 			t.Errorf("explainChildMemory(%q) = %q, want an error", in, got)
 		}
 	}
@@ -174,14 +175,14 @@ func TestExplainInChild_Failures(t *testing.T) {
 		// The drill-down's own error, word for word: the page shows it.
 		{"error", "explain wp.posts: connect index: refused"},
 		// A crash in the child is an error for one Explain, never the
-		// console's: the panic text comes back from its stderr.
-		{"panic", "the drill-down blew up"},
+		// console's, and it reads as it did in-process: one line, no stack.
+		{"panic", "internal error: the drill-down blew up"},
 		{"silent", "answered nothing"},
 	} {
 		t.Run(tc.fake, func(t *testing.T) {
 			t.Setenv(explainChildFakeEnv, tc.fake)
 			ex, err := explainInChild(context.Background(), "dsn", false, "wp", "posts", testPair())
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
+			if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "goroutine") {
 				t.Fatalf("explainInChild = %+v, %v; want an error containing %q", ex, err, tc.want)
 			}
 		})
@@ -244,36 +245,74 @@ func waitPIDFile(t *testing.T, path string) int {
 }
 
 // TestVerifyWorkerMain_ParentGone: the parent holds the child's stdin open
-// until it has the answer. If the parent dies (the kernel took it, or it was
-// killed) the pipe closes, and the child must stop rather than finish a
-// drill-down nobody will read, holding its memory meanwhile.
+// until it has the answer. When it closes (the job was dropped, or the parent
+// died) the work is canceled, so its cleanup runs, and the child ends rather
+// than finish a drill-down nobody will read.
 func TestVerifyWorkerMain_ParentGone(t *testing.T) {
-	release := make(chan struct{})
-	defer close(release)
 	old := explainChildRun
 	t.Cleanup(func() { explainChildRun = old })
-	explainChildRun = func(context.Context, string, bool, string, string, verify.BaselinePair) (*console.VerifyExplanation, error) {
-		<-release
-		return nil, errors.New("released")
+	started, canceled := make(chan struct{}), make(chan struct{})
+	explainChildRun = func(ctx context.Context, _ string, _ bool, _, _ string, _ verify.BaselinePair) (*console.VerifyExplanation, error) {
+		close(started)
+		<-ctx.Done()
+		close(canceled)
+		return nil, ctx.Err()
 	}
 	r, w := io.Pipe()
-	gone := make(chan struct{})
-	go verifyWorkerMain(r, io.Discard, io.Discard, func() { close(gone) })
+	code := make(chan int, 1)
+	go func() { code <- verifyWorkerMain(r, io.Discard, io.Discard, func() {}) }()
 	job, _ := json.Marshal(explainChildJob{Schema: "wp", Table: "posts"})
 	if _, err := fmt.Fprintf(w, "%s\n", job); err != nil {
 		t.Fatal(err)
 	}
+	<-started
 	select {
-	case <-gone:
+	case <-canceled:
 		t.Fatal("the child took a live parent for a dead one")
 	case <-time.After(100 * time.Millisecond):
 	}
 	_ = w.Close()
 	select {
-	case <-gone:
+	case <-canceled:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the child did not notice its parent was gone")
+		t.Fatal("the work was not canceled when the parent went away")
 	}
+	select {
+	case c := <-code:
+		if c == 0 {
+			t.Error("a child whose parent went away reported success")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the child did not end after its work was canceled")
+	}
+}
+
+// TestExplainChildEnv_GoMemLimit: Go does not see the cgroup's ceiling, so
+// the child is told what its heap may use: the ceiling less the DuckDB
+// sessions. An operator's own GOMEMLIMIT is left as it is.
+func TestExplainChildEnv_GoMemLimit(t *testing.T) {
+	mem, duck, err := explainChildMemory(duckdbutil.Tuning{MemoryLimit: "546MiB"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 1604 MiB + a quarter of it (401) = 2005 MiB ceiling, less 1092.
+	if got := lastEnv(explainChildEnv(mem, duck), "GOMEMLIMIT"); got != "913MiB" {
+		t.Errorf("GOMEMLIMIT = %q, want 913MiB", got)
+	}
+	t.Setenv("GOMEMLIMIT", "300MiB")
+	if got := lastEnv(explainChildEnv(mem, duck), "GOMEMLIMIT"); got != "300MiB" {
+		t.Errorf("GOMEMLIMIT = %q, want the operator's 300MiB", got)
+	}
+}
+
+func lastEnv(env []string, key string) string {
+	v := ""
+	for _, kv := range env {
+		if k, val, ok := strings.Cut(kv, "="); ok && k == key {
+			v = val
+		}
+	}
+	return v
 }
 
 // TestVerifySupervisor_ExplainRunsInAChild pins the wiring: with no test

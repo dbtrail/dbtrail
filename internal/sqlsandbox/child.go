@@ -1,6 +1,7 @@
 package sqlsandbox
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -44,6 +46,16 @@ type ChildJob struct {
 	// MaxOutput caps what the child may write to stdout. Past it the child
 	// is killed and ErrResultTooLarge is returned.
 	MaxOutput int64
+	// StopGrace is how long a child whose context ended has to stop by
+	// itself once its stdin is closed, so its deferred cleanup runs (a
+	// working directory the size of a table, say). Past it, or with 0, its
+	// process group is killed.
+	StopGrace time.Duration
+	// LogMsg and LogAttrs label the child's stderr in this process's log:
+	// each line it writes is logged here, as it comes, at the level the line
+	// names (WARN when it names none).
+	LogMsg   string
+	LogAttrs []any
 }
 
 // ChildOOMError is a child the kernel stopped at its own cgroup's ceiling:
@@ -62,11 +74,18 @@ func (e *ChildOOMError) Error() string {
 type ChildExitError struct {
 	// Err is what Wait returned.
 	Err error
-	// Stderr is the end of what the child wrote to stderr.
+	// Stderr is the child's own account of why: the line of a Go panic, or
+	// else the last line it wrote. Its whole stderr is in the log.
 	Stderr string
+	// Killed: SIGKILL from outside this process. With no ceiling of its own
+	// to reach, that is most often the kernel's out-of-memory killer.
+	Killed bool
 }
 
 func (e *ChildExitError) Error() string {
+	if e.Killed {
+		return "the process was killed from outside, most likely by the kernel because the host or its container ran out of memory"
+	}
 	if s := strings.TrimSpace(e.Stderr); s != "" {
 		return fmt.Sprintf("%v: %s", e.Err, s)
 	}
@@ -75,20 +94,15 @@ func (e *ChildExitError) Error() string {
 
 func (e *ChildExitError) Unwrap() error { return e.Err }
 
-// childStderrMax is how much of a child's stderr is kept: its last words are
-// what an error report needs, and the rest is dropped, never a reason to
-// fail.
-const childStderrMax = 64 << 10
+// childStderrLines is how many of a child's stderr lines reach this
+// process's log; past it one line says how many more were dropped.
+const childStderrLines = 200
 
-// childFence is where children get their cgroups: found once per process,
-// with the cgroups a dead daemon's children left swept on the way.
-var childFence = sync.OnceValue(func() fence {
-	f := fenceFor()
-	if f.root != "" {
-		sweepFences(f.root)
-	}
-	return f
-})
+// childFence is where children get their cgroups, found once per process.
+// No sweep here: the console's Runner sweeps the same root once at boot, and
+// a sweep while it serves statements could remove a cgroup it has made and
+// not yet filled.
+var childFence = sync.OnceValue(func() fence { return fenceFor() })
 
 // childExe is the executable a child runs: this binary. A variable so a
 // test can start its own test binary.
@@ -132,35 +146,62 @@ func RunChild(ctx context.Context, job ChildJob) ([]byte, error) {
 	}
 	// Inside its cgroup now (or with none): only now does it get its job.
 	if _, err := c.stdin.Write(job.Input); err != nil {
+		// It died before reading it: its own exit says why, not the pipe.
 		c.kill()
 		<-c.done
-		if c.oomKilled {
-			return nil, &ChildOOMError{CeilingBytes: ceiling}
+		if c.waitErr == nil {
+			c.waitErr = fmt.Errorf("hand the job over: %w", err)
 		}
-		return nil, &ChildExitError{Err: fmt.Errorf("hand the job over: %w", err), Stderr: c.stderr.text()}
+		return nil, c.failure(ceiling)
 	}
 	select {
 	case <-c.done:
 	case <-ctx.Done():
-		select {
-		case <-c.done:
-			// Ended on its own as ctx did: never signal a group that may be
-			// gone. The caller asked to stop, so it gets that.
-		default:
-			c.kill()
-			<-c.done
-		}
+		c.stop(job.StopGrace)
 		return nil, ctx.Err()
 	}
-	switch {
-	case c.stdout.didOverflow():
+	if c.stdout.didOverflow() {
 		return nil, ErrResultTooLarge
-	case c.oomKilled:
-		return nil, &ChildOOMError{CeilingBytes: ceiling}
-	case c.waitErr != nil:
-		return nil, &ChildExitError{Err: c.waitErr, Stderr: c.stderr.text()}
+	}
+	if err := c.failure(ceiling); err != nil {
+		return nil, err
 	}
 	return c.stdout.take(), nil
+}
+
+// failure is how the finished child ended, nil for a clean exit.
+func (c *child) failure(ceiling int64) error {
+	switch {
+	case c.oomKilled:
+		return &ChildOOMError{CeilingBytes: ceiling}
+	case c.waitErr == nil:
+		return nil
+	}
+	var ee *exec.ExitError
+	killed := false
+	if errors.As(c.waitErr, &ee) && !c.killedByUs.Load() {
+		if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() && ws.Signal() == syscall.SIGKILL {
+			killed = true
+		}
+	}
+	return &ChildExitError{Err: c.waitErr, Stderr: c.stderr.summary(), Killed: killed}
+}
+
+// stop ends a child whose caller gave up: its stdin is closed so it can stop
+// by itself and run its cleanup, and past grace its group is killed.
+func (c *child) stop(grace time.Duration) {
+	_ = c.stdinCloser.Close()
+	if grace > 0 {
+		t := time.NewTimer(grace)
+		defer t.Stop()
+		select {
+		case <-c.done:
+			return
+		case <-t.C:
+		}
+	}
+	c.kill()
+	<-c.done
 }
 
 // LowerOOMPriority makes the calling process the kernel's first choice when
@@ -170,10 +211,18 @@ func LowerOOMPriority(stderr io.Writer) { lowerOOMPriority(stderr) }
 
 // child is one started helper process.
 type child struct {
-	stdin io.Writer
-	stdout, stderr *cappedBuffer
-	kill           func()
-	done           chan struct{}
+	stdin       io.Writer
+	stdinCloser io.Closer
+	stdout      *cappedBuffer
+	stderr      *stderrLog
+	kill        func()
+	done        chan struct{}
+	// reaped is set as soon as Wait returns: from then on the pid may be
+	// another process's, and kill must not signal it.
+	reaped atomic.Bool
+	// killedByUs: the group kill came from this process (a cancel, the
+	// output cap, a cgroup it could not be moved into), not from outside.
+	killedByUs atomic.Bool
 	// Set before done is closed.
 	waitErr   error
 	oomKilled bool
@@ -195,11 +244,19 @@ func startChild(exe string, job ChildJob, wf *workerFence) (*child, error) {
 	setProcessGroup(cmd)
 	// If the group kill somehow leaves the pipes open, stop waiting on them.
 	cmd.WaitDelay = 5 * time.Second
-	c := &child{stdin: stdin, done: make(chan struct{}),
-		stderr: &cappedBuffer{max: childStderrMax, drop: true},
+	c := &child{stdin: stdin, stdinCloser: stdin, done: make(chan struct{}),
+		stderr: &stderrLog{msg: job.LogMsg, attrs: job.LogAttrs},
 	}
 	var once sync.Once
-	c.kill = func() { once.Do(func() { _ = killProcessGroup(cmd.Process) }) }
+	c.kill = func() {
+		once.Do(func() {
+			if c.reaped.Load() {
+				return
+			}
+			c.killedByUs.Store(true)
+			_ = killProcessGroup(cmd.Process)
+		})
+	}
 	c.stdout = &cappedBuffer{max: job.MaxOutput, onOverflow: func() { go c.kill() }}
 	cmd.Stdout, cmd.Stderr = c.stdout, c.stderr
 	if err := cmd.Start(); err != nil {
@@ -209,7 +266,10 @@ func startChild(exe string, job ChildJob, wf *workerFence) (*child, error) {
 		return nil, fmt.Errorf("start: %w", err)
 	}
 	go func() {
-		c.waitErr = cmd.Wait()
+		err := cmd.Wait()
+		c.reaped.Store(true)
+		c.waitErr = err
+		c.stderr.flush()
 		if wf != nil {
 			// The process is gone: its cgroup's counters are final, and the
 			// cgroup can go.
@@ -233,4 +293,108 @@ func startChild(exe string, job ChildJob, wf *workerFence) (*child, error) {
 		}
 	}
 	return c, nil
+}
+
+// stderrLog takes a child's stderr: each line goes to this process's log as
+// it comes, so what the child warned about is not lost when it succeeds, and
+// the lines an error report needs are kept.
+type stderrLog struct {
+	msg   string
+	attrs []any
+
+	mu      sync.Mutex
+	partial []byte
+	lines   int
+	dropped int
+	panic   string
+	last    string
+}
+
+func (l *stderrLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.partial = append(l.partial, p...)
+	for {
+		i := bytes.IndexByte(l.partial, '\n')
+		if i < 0 {
+			break
+		}
+		l.line(string(l.partial[:i]))
+		l.partial = l.partial[i+1:]
+	}
+	// A line with no end in sight is cut, never held without bound.
+	if len(l.partial) > 16<<10 {
+		l.line(string(l.partial))
+		l.partial = nil
+	}
+	return len(p), nil
+}
+
+// flush logs a last line the child did not end, and the count of dropped
+// ones. Called once the child has exited.
+func (l *stderrLog) flush() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.partial) > 0 {
+		l.line(string(l.partial))
+		l.partial = nil
+	}
+	if l.dropped > 0 {
+		slog.Warn(l.label(), append(l.attrs[:len(l.attrs):len(l.attrs)], "dropped_lines", l.dropped)...)
+	}
+}
+
+func (l *stderrLog) line(text string) {
+	text = strings.TrimRight(text, "\r")
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	if l.panic == "" && strings.HasPrefix(text, "panic: ") {
+		l.panic = text
+	}
+	l.last = text
+	if l.lines >= childStderrLines {
+		l.dropped++
+		return
+	}
+	l.lines++
+	slog.Log(context.Background(), childLineLevel(text), l.label(), append(l.attrs[:len(l.attrs):len(l.attrs)], "line", text)...)
+}
+
+func (l *stderrLog) label() string {
+	if l.msg == "" {
+		return "helper process"
+	}
+	return l.msg
+}
+
+// summary is the child's own account of why it failed: the line of a Go
+// panic (the goroutine dump after it is for the log, not for a page), or
+// else the last line it wrote, cut to a readable length.
+func (l *stderrLog) summary() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s := l.last
+	if l.panic != "" {
+		s = l.panic
+	}
+	if len(s) > 1<<10 {
+		s = s[:1<<10] + "..."
+	}
+	return s
+}
+
+// childLineLevel is the level a child's log line names (slog's text format
+// writes level=ERROR), WARN when it names none: the child logs at WARN and
+// above, and a line with no level is a panic or a library's own output.
+func childLineLevel(text string) slog.Level {
+	switch {
+	case strings.Contains(text, "level=ERROR"):
+		return slog.LevelError
+	case strings.Contains(text, "level=INFO"):
+		return slog.LevelInfo
+	case strings.Contains(text, "level=DEBUG"):
+		return slog.LevelDebug
+	}
+	return slog.LevelWarn
 }

@@ -85,7 +85,10 @@ func newRowJoinCapped(ctx context.Context, tuning duckdbutil.Tuning, memoryLimit
 	// an in-memory table, so under its cap an in-memory join fails with "Out
 	// of Memory" instead of spilling. On disk, the cap is a cap.
 	removeOldExplainDirs(os.TempDir())
-	dir, err := os.MkdirTemp("", explainDirPrefix+"*")
+	// Under this process's own scratch directory: a drill-down run in a child
+	// (#2385) can be killed, and then its join is removed by the next process
+	// that starts DuckDB work, not a day later by removeOldExplainDirs.
+	dir, err := os.MkdirTemp(duckdbutil.ScratchDir(), explainDirPrefix+"*")
 	if err != nil {
 		return nil, fmt.Errorf("open drill-down join: %w", err)
 	}

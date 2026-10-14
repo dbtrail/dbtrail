@@ -309,3 +309,18 @@ func TestRowJoin_neverAboveItsOwnCap(t *testing.T) {
 		t.Errorf("join memory_limit = %q, want its own 1GB", got)
 	}
 }
+
+// TestRowJoin_WorkingFilesInTheProcessScratchDir: a drill-down runs in a child
+// that can be killed (#2385). Its join must then be in that process's own
+// scratch directory, which the next process removes once this one is dead,
+// not in the shared temp dir, where only a day-old sweep would take it.
+func TestRowJoin_WorkingFilesInTheProcessScratchDir(t *testing.T) {
+	j, err := newRowJoin(context.Background(), duckdbutil.Tuning{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.close()
+	if got, want := filepath.Dir(j.dir), duckdbutil.ScratchDir(); got != want {
+		t.Errorf("the join's files are under %s, want this process's scratch dir %s", got, want)
+	}
+}

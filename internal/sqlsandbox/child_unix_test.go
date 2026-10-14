@@ -5,6 +5,12 @@ package sqlsandbox
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"os/exec"
+	"path/filepath"
+	"sync"
+	"time"
+	"os"
 	"strconv"
 	"strings"
 	"syscall"
@@ -130,3 +136,110 @@ func noFence(t *testing.T) {
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+// TestRunChild_KilledFromOutside: without a ceiling of its own, a child the
+// kernel killed reads as that, not as a bare "signal: killed".
+func TestRunChild_KilledFromOutside(t *testing.T) {
+	shChild(t)
+	noFence(t)
+	_, err := RunChild(context.Background(), shJob(`read j; kill -9 $$`))
+	var ce *ChildExitError
+	if !errors.As(err, &ce) || !ce.Killed || !strings.Contains(err.Error(), "ran out of memory") {
+		t.Fatalf("err = %v, want a ChildExitError that says it was killed from outside", err)
+	}
+}
+
+// TestRunChild_StopGraceLetsItClean: a child whose caller gave up gets its
+// stdin closed and time to run its cleanup before any kill.
+func TestRunChild_StopGraceLetsItClean(t *testing.T) {
+	shChild(t)
+	noFence(t)
+	cleaned := filepath.Join(t.TempDir(), "cleaned")
+	ctx, cancel := context.WithCancel(context.Background())
+	job := shJob(`read j; cat >/dev/null; echo yes > ` + cleaned)
+	job.StopGrace = 10 * time.Second
+	go func() { time.Sleep(200 * time.Millisecond); cancel() }()
+	if _, err := RunChild(ctx, job); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if _, err := os.Stat(cleaned); err != nil {
+		t.Errorf("the child was not given the chance to clean up: %v", err)
+	}
+}
+
+// TestRunChild_StopGraceThenKill: one that does not stop within its grace is
+// killed.
+func TestRunChild_StopGraceThenKill(t *testing.T) {
+	shChild(t)
+	noFence(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	job := shJob(`read j; trap '' TERM; while :; do sleep 1; done`)
+	job.StopGrace = 300 * time.Millisecond
+	go func() { time.Sleep(200 * time.Millisecond); cancel() }()
+	start := time.Now()
+	if _, err := RunChild(ctx, job); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("RunChild took %v to give up on a child that ignored its stdin", d)
+	}
+}
+
+// TestRunChild_StderrReachesTheLog: what a child warns about is logged here
+// even when it succeeds, at the level its line names; and a failure's
+// summary is the panic line, not the goroutine dump after it.
+func TestRunChild_StderrReachesTheLog(t *testing.T) {
+	shChild(t)
+	noFence(t)
+	var buf syncBuffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	job := shJob(`read j; echo 'level=WARN msg="hours missing"' >&2; echo 'level=ERROR msg=bad' >&2; echo ok`)
+	job.LogMsg, job.LogAttrs = "drill-down", []any{"table", "wp.posts"}
+	if _, err := RunChild(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	log := buf.String()
+	for _, want := range []string{`level=WARN msg=drill-down table=wp.posts line="level=WARN msg=\"hours missing\""`, `level=ERROR msg=drill-down table=wp.posts`} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log lacks %s:\n%s", want, log)
+		}
+	}
+	_, err := RunChild(context.Background(), shJob(`read j; echo 'panic: boom' >&2; echo; echo 'goroutine 1 [running]:' >&2; echo 'main.main()' >&2; exit 2`))
+	var ce *ChildExitError
+	if !errors.As(err, &ce) || ce.Stderr != "panic: boom" {
+		t.Fatalf("err = %v, want the panic line as its summary", err)
+	}
+}
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// TestChildFailure_OwnKillIsNotTheKernel: a SIGKILL this process sent (a
+// child it gave up on) must not read as the kernel's out-of-memory kill.
+func TestChildFailure_OwnKillIsNotTheKernel(t *testing.T) {
+	waitErr := exec.Command("/bin/sh", "-c", "kill -9 $$").Run()
+	c := &child{stderr: &stderrLog{}, waitErr: waitErr}
+	if ce, ok := c.failure(0).(*ChildExitError); !ok || !ce.Killed {
+		t.Fatalf("a SIGKILL from outside: %v, want Killed", c.failure(0))
+	}
+	c.killedByUs.Store(true)
+	if ce, ok := c.failure(0).(*ChildExitError); !ok || ce.Killed {
+		t.Errorf("our own kill read as one from outside: %v", c.failure(0))
+	}
+}
