@@ -53,6 +53,9 @@ type tailMark struct {
 type tailSource interface {
 	// Newest is the newest event the index holds; ID 0 when it holds none.
 	Newest(ctx context.Context) (tailMark, error)
+	// Holds says whether the index still holds m's event where m says: an
+	// index rebuilt since gives its ids to other events.
+	Holds(ctx context.Context, m tailMark) (bool, error)
 	// Start builds t's empty tail, or says why t has none.
 	Start(ctx context.Context, t views.BaselineTable) (tailTable, string, error)
 	// Fill hands page t's events after its published cut with an id up to
@@ -60,7 +63,7 @@ type tailSource interface {
 	// error from page stops it and is returned.
 	Fill(ctx context.Context, t views.BaselineTable, upTo uint64, page func([]query.ResultRow) error) (string, error)
 	// Since hands page the events of tables with from < id <= upTo, a page
-	// at a time.
+	// at a time, in id order.
 	Since(ctx context.Context, tables []views.BaselineTable, from, upTo uint64, page func([]query.ResultRow) error) error
 	// Changed says, by tailKey, why a table's definition may have changed
 	// after its published cut. Tables it leaves out are unchanged.
@@ -129,6 +132,10 @@ type tailOldFile struct {
 // errTailBudget stops a Fill whose tail went over its budget.
 var errTailBudget = errors.New("over the tail budget")
 
+// errTailRenumbered stops a read that met an event before the one read just
+// before it in the binary log.
+var errTailRenumbered = errors.New("the source's binary log started again from another numbering")
+
 // tailKeeper keeps one server's tails.
 //
 // One lock over a whole refresh: the tails are one cursor's, and a refresh is
@@ -177,18 +184,32 @@ func (k *tailKeeper) refresh(ctx context.Context, tables []views.BaselineTable) 
 	if newest.ID == 0 {
 		return nil, nil
 	}
-	if why := tailStartOver(k.mark, newest); why != "" {
+	why := tailStartOver(k.mark, newest)
+	if why == "" && k.mark.ID != 0 {
+		// Ids grow on a rebuilt index too, past the old mark in time: the
+		// mark's own event says whether this is the index it was read from.
+		held, err := k.src.Holds(ctx, k.mark)
+		if err != nil {
+			return nil, err
+		}
+		if !held {
+			why = "the index no longer holds the last event read (it was rebuilt)"
+		}
+	}
+	if why == "" && newest.ID > k.mark.ID && k.mark.ID != 0 {
+		err := k.advance(ctx, newest.ID)
+		switch {
+		case errors.Is(err, errTailRenumbered):
+			why = err.Error()
+		case err != nil:
+			return nil, err
+		}
+	}
+	if why != "" {
 		slog.Info("Engine Routing: the copy's tails are rebuilt", "reason", why)
 		k.dropAll()
 	}
-	if k.mark.ID == 0 {
-		k.mark = newest
-	} else if newest.ID > k.mark.ID {
-		if err := k.advance(ctx, newest.ID); err != nil {
-			return nil, err
-		}
-		k.mark = newest
-	}
+	k.mark = newest
 	changed, err := k.src.Changed(ctx, tables)
 	if err != nil {
 		return nil, err
@@ -211,8 +232,8 @@ func (k *tailKeeper) refresh(ctx context.Context, tables []views.BaselineTable) 
 }
 
 // tailStartOver says why the tails folded so far cannot go on from mark to
-// newest, or "". Ids only grow on an index a stream writes, so one that
-// holds a lower newest id was rebuilt. And a tail keeps a key's last change
+// newest, or "" (an index rebuilt since is the mark's own check, Holds). A
+// tail keeps a key's last change
 // in the binary log by position, which only orders changes within one
 // numbering of it: a source whose binary log started again (RESET MASTER, a
 // failover, another log_bin base name) shows a newest event before the last
@@ -221,8 +242,6 @@ func tailStartOver(mark, newest tailMark) string {
 	switch {
 	case mark.ID == 0:
 		return ""
-	case newest.ID < mark.ID:
-		return "the index holds fewer events than were read (it was rebuilt)"
 	case reconstruct.BinlogBaseName(newest.Pos.File) != reconstruct.BinlogBaseName(mark.Pos.File) || !mark.Pos.AtOrBefore(newest.Pos):
 		return "the source's binary log started again from another numbering"
 	}
@@ -231,7 +250,10 @@ func tailStartOver(mark, newest tailMark) string {
 
 // advance folds the events after the cursor up to upTo into the tails that
 // are advancing. A table with no tail yet has its events read by its first
-// Fill.
+// Fill. The events must go on in the binary log from the cursor's: one
+// before the last stops the read (errTailRenumbered), since a numbering that
+// started again inside the window would rank its changes below older ones.
+// Several rows of one statement share a position, so "before" is strict.
 func (k *tailKeeper) advance(ctx context.Context, upTo uint64) error {
 	var live []views.BaselineTable
 	for _, e := range k.tables {
@@ -242,9 +264,15 @@ func (k *tailKeeper) advance(ctx context.Context, upTo uint64) error {
 	if len(live) == 0 {
 		return nil
 	}
+	last := k.mark.Pos
 	return k.src.Since(ctx, live, k.mark.ID, upTo, func(page []query.ResultRow) error {
 		byTable := map[string][]query.ResultRow{}
 		for _, ev := range page {
+			at := query.BinlogPos{File: ev.BinlogFile, Pos: ev.StartPos}
+			if at.File == "" || reconstruct.BinlogBaseName(at.File) != reconstruct.BinlogBaseName(last.File) || !last.AtOrBefore(at) {
+				return errTailRenumbered
+			}
+			last = at
 			key := tailKey(ev.SchemaName, ev.TableName)
 			if e := k.tables[key]; e != nil && e.refused == "" && !e.frozen {
 				byTable[key] = append(byTable[key], ev)
@@ -359,6 +387,11 @@ func (k *tailKeeper) view(t views.BaselineTable, e *tailEntry) (tailView, bool) 
 	}
 	if !e.frozen {
 		e.through = k.mark.At
+	}
+	if e.through.IsZero() {
+		// Frozen before any version was written: nothing to read, and no
+		// instant to say.
+		return tailView{}, false
 	}
 	return tailView{Path: e.file, PK: e.tail.PKColumns(), Through: e.through}, true
 }

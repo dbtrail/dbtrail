@@ -45,6 +45,15 @@ func (f *fakeIndex) Newest(context.Context) (tailMark, error) {
 	return tailMark{ID: last.EventID, Pos: query.BinlogPos{File: last.BinlogFile, Pos: last.StartPos}, At: last.EventTimestamp}, nil
 }
 
+func (f *fakeIndex) Holds(_ context.Context, m tailMark) (bool, error) {
+	for _, ev := range f.events {
+		if ev.EventID == m.ID {
+			return ev.BinlogFile == m.Pos.File && ev.StartPos == m.Pos.Pos, nil
+		}
+	}
+	return false, nil
+}
+
 func (f *fakeIndex) Start(_ context.Context, t views.BaselineTable) (tailTable, string, error) {
 	if why := f.startWhy[tailKey(t.Schema, t.Table)]; why != "" {
 		return nil, why, nil
@@ -435,6 +444,90 @@ func TestTailKeeper(t *testing.T) {
 				t.Errorf("%s: filled %d times, want a rebuild", name, f.fills)
 			}
 			_ = got
+		}
+	})
+
+	t.Run("an index rebuilt whose new ids passed the old mark starts over", func(t *testing.T) {
+		f := &fakeIndex{}
+		f.add("orders", "1")
+		f.add("orders", "2")
+		k := newKeeper(f)
+		refresh(t, k, orders)
+		// Re-created: ids from 1 again, the source's log further on, and by
+		// the next statement past the old mark.
+		f.events = nil
+		for _, key := range []string{"7", "8", "9"} {
+			f.add("orders", key)
+		}
+		for i := range f.events {
+			f.events[i].StartPos += 1000
+		}
+		got := refresh(t, k, orders)
+		if f.fills != 2 || fileKeys(t, got[ko].Path) != 3 {
+			t.Fatalf("filled %d times, %d keys: the new events were skipped", f.fills, fileKeys(t, got[ko].Path))
+		}
+	})
+
+	t.Run("a numbering that started again inside the window starts over", func(t *testing.T) {
+		f := &fakeIndex{}
+		f.add("orders", "1")
+		f.add("orders", "2")
+		k := newKeeper(f)
+		refresh(t, k, orders) // mark at binlog.000003:200
+		f.add("orders", "3")
+		f.events[2].BinlogFile, f.events[2].StartPos = "binlog.000001", 4 // RESET MASTER
+		f.add("orders", "4")
+		f.events[3].BinlogFile, f.events[3].StartPos = "binlog.000004", 4 // the new numbering went on
+		refresh(t, k, orders)
+		if f.fills != 2 {
+			t.Fatalf("filled %d times, want a rebuild", f.fills)
+		}
+	})
+
+	t.Run("a numbering that started again, seen only in another table's event, starts over", func(t *testing.T) {
+		f := &fakeIndex{}
+		f.add("orders", "1")
+		k := newKeeper(f)
+		refresh(t, k, orders) // mark at binlog.000003:100
+		f.add("customers", "1")
+		f.events[1].BinlogFile, f.events[1].StartPos = "binlog.000001", 4 // RESET MASTER, no tail reads it
+		refresh(t, k, orders)
+		if f.fills != 2 {
+			t.Fatalf("filled %d times, want a rebuild", f.fills)
+		}
+	})
+
+	t.Run("a numbering that started again between two events after the cursor starts over", func(t *testing.T) {
+		f := &fakeIndex{}
+		f.add("orders", "1")
+		k := newKeeper(f)
+		refresh(t, k, orders) // mark at binlog.000003:100
+		f.add("orders", "2")
+		f.events[1].BinlogFile = "binlog.000009"
+		f.add("orders", "3")
+		f.events[2].BinlogFile = "binlog.000004" // after the mark, before the event before it
+		f.add("orders", "4")
+		f.events[3].BinlogFile = "binlog.000010"
+		refresh(t, k, orders)
+		if f.fills != 2 {
+			t.Fatalf("filled %d times, want a rebuild", f.fills)
+		}
+	})
+
+	t.Run("a tail frozen before any version was written has no view", func(t *testing.T) {
+		f := &fakeIndex{}
+		f.add("orders", "1")
+		k := newKeeper(f)
+		f.writeErr = errors.New("disk full")
+		if got := refresh(t, k, orders); len(got) != 0 {
+			t.Fatalf("%+v", got)
+		}
+		f.writeErr = nil
+		for _, key := range []string{"2", "3", "4"} {
+			f.add("orders", key)
+		}
+		if got := refresh(t, k, orders); len(got) != 0 {
+			t.Fatalf("a frozen, never written tail: %+v", got[ko])
 		}
 	})
 
