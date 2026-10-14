@@ -136,6 +136,38 @@ func TestIntegrationTailSource(t *testing.T) {
 		}
 	})
 
+	t.Run("a loss in capture after the tail was built ends it", func(t *testing.T) {
+		tbl := r.table(nil)
+		r.change(tbl.Table, event.EventUpdate, "1", "x", "binlog.000012", 100, hourAgo)
+		got, err := k.refresh(ctx, []views.BaselineTable{tbl})
+		if _, ok := got[tailKey("shop", tbl.Table)]; err != nil || !ok {
+			t.Fatalf("no tail to begin with: %v", err)
+		}
+		testutil.MustExec(t, r.db, "UPDATE stream_state SET gap_lost_at = UTC_TIMESTAMP() WHERE id = 1")
+		defer testutil.MustExec(t, r.db, "UPDATE stream_state SET gap_lost_at = NULL WHERE id = 1")
+		got, err = k.refresh(ctx, []views.BaselineTable{tbl})
+		if _, ok := got[tailKey("shop", tbl.Table)]; err != nil || ok {
+			t.Fatalf("a tail across a gap recorded after it was built (%v)", err)
+		}
+	})
+
+	t.Run("refused: the schema snapshot's key is not the copy's", func(t *testing.T) {
+		// The copy's definition has a second integer column, n, the key of an
+		// older schema snapshot: an integer, so only the key's own check can
+		// refuse it.
+		tbl := r.table(func(md map[string]string) {
+			md[baseline.MetaKeyCreateTableSQL] = strings.Replace(md[baseline.MetaKeyCreateTableSQL], "  PRIMARY KEY", "  `n` int NOT NULL,\n  PRIMARY KEY", 1)
+		})
+		tm, _ := r.b.resolver.Resolve("shop", tbl.Table)
+		saved := tm.Columns
+		tm.Columns = []metadata.ColumnMeta{{Name: "id", DataType: "int"}, {Name: "n", IsPK: true, DataType: "int"}}
+		defer func() { tm.Columns = saved }()
+		got, err := k.refresh(ctx, []views.BaselineTable{tbl})
+		if _, ok := got[tailKey("shop", tbl.Table)]; err != nil || ok {
+			t.Fatalf("a tail keyed by another column (%v)", err)
+		}
+	})
+
 	t.Run("refused: a loss in capture since the snapshot", func(t *testing.T) {
 		testutil.MustExec(t, r.db, "UPDATE stream_state SET gap_lost_at = UTC_TIMESTAMP() WHERE id = 1")
 		defer testutil.MustExec(t, r.db, "UPDATE stream_state SET gap_lost_at = NULL WHERE id = 1")

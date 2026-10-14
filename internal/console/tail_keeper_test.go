@@ -111,7 +111,7 @@ func (f *fakeIndex) Since(_ context.Context, tables []views.BaselineTable, from,
 	return f.hand(evs, page)
 }
 
-func (f *fakeIndex) Changed(context.Context, []views.BaselineTable) (map[string]string, error) {
+func (f *fakeIndex) Broken(context.Context, []views.BaselineTable) (map[string]string, error) {
 	return f.changed, f.changedErr
 }
 
@@ -274,6 +274,18 @@ func TestTailKeeper(t *testing.T) {
 		got := refresh(t, k, orders)
 		if fileKeys(t, got[ko].Path) != 2 || got[ko].Through.Before(before[ko].Through) {
 			t.Fatalf("%+v -> %+v", before[ko], got[ko])
+		}
+	})
+
+	t.Run("an event under another case of a tail's name refuses that tail", func(t *testing.T) {
+		f := &fakeIndex{}
+		f.add("orders", "1")
+		k := newKeeper(f)
+		refresh(t, k, orders)
+		f.add("Orders", "2") // the index's spelling, which the copy does not share
+		k.src = &foldingIndex{f}
+		if got := refresh(t, k, orders); len(got) != 0 {
+			t.Fatalf("still a tail: %+v", got[ko])
 		}
 	})
 
@@ -649,4 +661,21 @@ func (l *lateIndex) Newest(ctx context.Context) (tailMark, error) {
 	m, err := l.fakeIndex.Newest(ctx)
 	l.fakeIndex.add("orders", "3")
 	return m, err
+}
+
+// foldingIndex answers Since as the index does: names compared without case.
+type foldingIndex struct{ *fakeIndex }
+
+func (f *foldingIndex) Since(_ context.Context, tables []views.BaselineTable, from, upTo uint64, page func([]query.ResultRow) error) error {
+	want := map[string]bool{}
+	for _, t := range tables {
+		want[strings.ToLower(tailKey(t.Schema, t.Table))] = true
+	}
+	var evs []query.ResultRow
+	for _, ev := range f.events {
+		if want[strings.ToLower(tailKey(ev.SchemaName, ev.TableName))] && ev.EventID > from && ev.EventID <= upTo {
+			evs = append(evs, ev)
+		}
+	}
+	return f.hand(evs, page)
 }

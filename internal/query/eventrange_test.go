@@ -8,15 +8,14 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 )
 
-// The tails' read: by id, in id order, the names compared exactly, bounded
-// on both ends.
+// The tails' read: by id, in id order, bounded on both ends.
 func TestFetchEventRange(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	mock.ExpectQuery(`FORCE INDEX \(PRIMARY\) WHERE event_id > \? AND event_id <= \? AND \(\(BINARY schema_name = \? AND BINARY table_name = \?\) OR \(BINARY schema_name = \? AND BINARY table_name = \?\)\) ORDER BY event_id LIMIT \?`).
+	mock.ExpectQuery(`FORCE INDEX \(PRIMARY\) WHERE event_id > \? AND event_id <= \? AND \(\(schema_name = \? AND table_name = \?\) OR \(schema_name = \? AND table_name = \?\)\) ORDER BY event_id LIMIT \?`).
 		WithArgs(10, 20, "shop", "orders", "shop", "Orders", 5).
 		WillReturnRows(sqlmock.NewRows(strings.Split(strings.Join(strings.Fields(strings.ReplaceAll(strings.ReplaceAll(resultColumns, "be.", ""), ",", " ")), ","), ",")))
 	if _, err := FetchEventRange(context.Background(), db, []SchemaTable{{"shop", "orders"}, {"shop", "Orders"}}, 10, 20, 5); err != nil {

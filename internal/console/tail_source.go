@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/status"
@@ -28,6 +31,12 @@ type indexTailSource struct {
 	s        *Server
 	b        *bundle
 	pageSize int
+	// captures says whether capture records a table (nil: every table);
+	// capturesUnknown that this process cannot tell, and then no table has
+	// a tail: a table capture does not record has no events, and its tail
+	// would claim a copy as current as the index.
+	captures        func(schema, table string) bool
+	capturesUnknown bool
 }
 
 // tailPageSize is how many events one read of the index returns.
@@ -89,9 +98,17 @@ func (d decodingTail) Apply(page []query.ResultRow) error {
 }
 
 // Start builds t's tail from the footer of the file its view reads first
-// (the table's definition) and the schema snapshot (its key).
+// (the table's definition) and the schema snapshot (its key, which must be
+// the definition's: a snapshot loaded before the key changed would drop
+// published rows by a part of it).
 func (x *indexTailSource) Start(_ context.Context, t views.BaselineTable) (tailTable, string, error) {
 	name := t.Schema + "." + t.Table
+	if x.capturesUnknown {
+		return nil, "which tables capture records is not known here", nil
+	}
+	if x.captures != nil && !x.captures(t.Schema, t.Table) {
+		return nil, name + " is outside what capture records", nil
+	}
 	cut := copyCutOf(t, x.s.copyCuts.footer)
 	if cut.refusal != "" {
 		return nil, cut.refusal, nil
@@ -107,7 +124,11 @@ func (x *indexTailSource) Start(_ context.Context, t views.BaselineTable) (tailT
 	if err != nil {
 		return nil, fmt.Sprintf("%s is not in the index's schema snapshot", name), nil
 	}
-	tail, err := reconstruct.NewTail(t.Schema, t.Table, md.CreateTableSQL, t.Path, tm.PKColumnMetas())
+	pk := tm.PKColumnMetas()
+	if !samePrimaryKey(md.CreateTableSQL, pk) {
+		return nil, fmt.Sprintf("the key of %s in the index's schema snapshot is not the key of its copy", name), nil
+	}
+	tail, err := reconstruct.NewTail(t.Schema, t.Table, md.CreateTableSQL, t.Path, pk)
 	if err != nil {
 		var r *reconstruct.TailRefusal
 		if errors.As(err, &r) {
@@ -129,13 +150,8 @@ func (x *indexTailSource) Fill(ctx context.Context, t views.BaselineTable, upTo 
 	if cut.refusal != "" {
 		return cut.refusal, nil
 	}
-	st, err := status.LoadStreamState(ctx, db)
-	if err != nil {
-		return "", fmt.Errorf("read the capture's state: %w", err)
-	}
-	if why := tailCaptureLoss(st, cut.sourceRead); why != "" {
-		return why, nil
-	}
+	// A loss in capture is Broken's, asked before any tail is built and at
+	// every refresh after.
 	since, why, err := copyLookupSince(ctx, db, t, cut)
 	if err != nil {
 		return "", err
@@ -152,10 +168,12 @@ func (x *indexTailSource) Fill(ctx context.Context, t views.BaselineTable, upTo 
 	// And the hours below its time floor, where a statement that began long
 	// before the snapshot and committed after it sits (copyUnchanged says
 	// why). On an index only a stream wrote, one row says whether to look.
-	search := true
-	if newest, found, err := newestEventOlderThan(ctx, db, floor); err != nil {
-		return "", err
-	} else {
+	search := indexBackfilled(ctx, db)
+	if !search {
+		newest, found, err := newestEventOlderThan(ctx, db, floor)
+		if err != nil {
+			return "", err
+		}
 		search = found && cut.anchor.AtOrBefore(newest)
 	}
 	if search {
@@ -251,11 +269,15 @@ func (x *indexTailSource) Since(ctx context.Context, tables []views.BaselineTabl
 	return nil
 }
 
-// Changed reads the schema changes after the oldest of the tables' cuts and
-// places each against each table's own, as copyUnchanged does.
-func (x *indexTailSource) Changed(ctx context.Context, tables []views.BaselineTable) (map[string]string, error) {
+// Broken says why each table's tail cannot go on, asked at every refresh:
+// a schema change placed after its cut (as copyUnchanged places them), a
+// loss in capture recorded since its rows were read from the source, or a
+// change of the source server since. What Fill ruled out once can happen
+// after the tail was built.
+func (x *indexTailSource) Broken(ctx context.Context, tables []views.BaselineTable) (map[string]string, error) {
 	cuts := make([]copyCut, len(tables))
 	var oldest query.BinlogPos
+	var read time.Time
 	any := false
 	for i, t := range tables {
 		cuts[i] = copyCutOf(t, x.s.copyCuts.footer)
@@ -263,11 +285,23 @@ func (x *indexTailSource) Changed(ctx context.Context, tables []views.BaselineTa
 			continue // no tail: Start refuses it
 		}
 		if !any || cuts[i].anchor.AtOrBefore(oldest) {
-			oldest, any = cuts[i].anchor, true
+			oldest = cuts[i].anchor
 		}
+		if !any || cuts[i].sourceRead.Before(read) {
+			read = cuts[i].sourceRead
+		}
+		any = true
 	}
 	if !any {
 		return nil, nil
+	}
+	st, err := status.LoadStreamState(ctx, x.b.db)
+	if err != nil {
+		return nil, fmt.Errorf("read the capture's state: %w", err)
+	}
+	var changedServer int
+	if err := x.b.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM bintrail_server_changes WHERE UNIX_TIMESTAMP(detected_at) >= ?`, read.Unix()).Scan(&changedServer); err != nil {
+		return nil, fmt.Errorf("read the source's identity record: %w", err)
 	}
 	ddl, complete, err := loadDDLAfter(ctx, x.b.db, oldest)
 	if err != nil {
@@ -279,8 +313,16 @@ func (x *indexTailSource) Changed(ctx context.Context, tables []views.BaselineTa
 			continue
 		}
 		key := tailKey(t.Schema, t.Table)
-		if !complete {
+		switch {
+		case !complete:
 			out[key] = "too many schema changes since the snapshot to check each one"
+			continue
+		case changedServer > 0:
+			out[key] = "the source server's identity changed since the snapshot"
+			continue
+		}
+		if why := tailCaptureLoss(st, cuts[i].sourceRead); why != "" {
+			out[key] = why
 			continue
 		}
 		for _, r := range ddl {
@@ -292,6 +334,35 @@ func (x *indexTailSource) Changed(ctx context.Context, tables []views.BaselineTa
 	}
 	return out, nil
 }
+
+// samePrimaryKey says whether pk is the PRIMARY KEY createTableSQL declares,
+// column for column (MySQL compares column names without case). One it
+// cannot read is not the same.
+func samePrimaryKey(createTableSQL string, pk []metadata.ColumnMeta) bool {
+	m := primaryKeyRE.FindStringSubmatch(createTableSQL)
+	if m == nil {
+		return false
+	}
+	parts := strings.Split(m[1], ",")
+	if len(parts) != len(pk) {
+		return false
+	}
+	for i, p := range parts {
+		name := strings.TrimSpace(p)
+		if len(name) < 2 || name[0] != '`' || name[len(name)-1] != '`' {
+			return false
+		}
+		if !strings.EqualFold(strings.ReplaceAll(name[1:len(name)-1], "``", "`"), pk[i].Name) {
+			return false
+		}
+	}
+	return true
+}
+
+// primaryKeyRE is the column list of a CREATE TABLE's PRIMARY KEY, as SHOW
+// CREATE TABLE prints it: backquoted names, no prefix lengths for an
+// integer key (a list it cannot read refuses the tail).
+var primaryKeyRE = regexp.MustCompile("(?i)PRIMARY KEY \\(((?:`(?:[^`]|``)*`\\s*,?\\s*)+)\\)")
 
 var _ tailSource = (*indexTailSource)(nil)
 

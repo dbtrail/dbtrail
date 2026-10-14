@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,9 +66,10 @@ type tailSource interface {
 	// Since hands page the events of tables with from < id <= upTo, a page
 	// at a time, in id order.
 	Since(ctx context.Context, tables []views.BaselineTable, from, upTo uint64, page func([]query.ResultRow) error) error
-	// Changed says, by tailKey, why a table's definition may have changed
-	// after its published cut. Tables it leaves out are unchanged.
-	Changed(ctx context.Context, tables []views.BaselineTable) (map[string]string, error)
+	// Broken says, by tailKey, why a table's tail cannot go on, asked at
+	// every refresh (its definition changed after its cut, capture lost
+	// events since). Tables it leaves out can.
+	Broken(ctx context.Context, tables []views.BaselineTable) (map[string]string, error)
 }
 
 // tailTable is a reconstruct.Tail as the keeper drives it.
@@ -217,7 +219,7 @@ func (k *tailKeeper) refresh(ctx context.Context, tables []views.BaselineTable) 
 	if newest.At.After(k.through) {
 		k.through = newest.At
 	}
-	changed, err := k.src.Changed(ctx, tables)
+	changed, err := k.src.Broken(ctx, tables)
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +276,21 @@ func (k *tailKeeper) advance(ctx context.Context, upTo uint64) error {
 	last := k.mark.Pos
 	return k.src.Since(ctx, live, k.mark.ID, upTo, func(page []query.ResultRow) error {
 		byTable := map[string][]query.ResultRow{}
+		folded := map[string]string{}
+		for key, e := range k.tables {
+			folded[strings.ToLower(e.table.Schema)+"\x00"+strings.ToLower(e.table.Table)] = key
+		}
 		for _, ev := range page {
+			// The index compares names without case and the tails do not: an
+			// event under another case of a tail's name is a table the copy
+			// and the index spell apart, and that tail cannot tell it is
+			// missing its changes.
+			if key, ok := folded[strings.ToLower(ev.SchemaName)+"\x00"+strings.ToLower(ev.TableName)]; ok && key != tailKey(ev.SchemaName, ev.TableName) {
+				if e := k.tables[key]; e.refused == "" {
+					e.refused = "the index names it in another case than its copy"
+				}
+				continue
+			}
 			at := query.BinlogPos{File: ev.BinlogFile, Pos: ev.StartPos}
 			if at.File == "" || reconstruct.BinlogBaseName(at.File) != reconstruct.BinlogBaseName(last.File) || !last.AtOrBefore(at) {
 				return errTailRenumbered

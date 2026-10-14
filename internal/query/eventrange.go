@@ -9,8 +9,9 @@ import (
 
 // FetchEventRange is a page of the events of tables whose id is in
 // (from, upTo], in id order, at most limit of them: the next page starts
-// after the last id returned. Names compare exactly, as BINARY: on a source
-// with lower_case_table_names=0 Orders and orders are two tables.
+// after the last id returned. Names compare as the index compares them, the
+// way every other read of it does (Fetch): a caller that tells two names
+// apart by case does it on the rows.
 //
 // In id order, not in time order: a caller that follows the index as it
 // grows (the SQL port's tails, #2369) needs the order events were indexed
@@ -27,7 +28,7 @@ func FetchEventRange(ctx context.Context, db *sql.DB, tables []SchemaTable, from
 	ors := make([]string, len(tables))
 	args := []any{from, upTo}
 	for i, t := range tables {
-		ors[i] = "(BINARY schema_name = ? AND BINARY table_name = ?)"
+		ors[i] = "(schema_name = ? AND table_name = ?)"
 		args = append(args, t.Schema, t.Table)
 	}
 	args = append(args, limit)

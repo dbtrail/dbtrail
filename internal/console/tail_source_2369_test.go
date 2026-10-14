@@ -3,13 +3,16 @@ package console
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
+	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/status"
+	"github.com/dbtrail/dbtrail/internal/views"
 )
 
 func newMockTailSource(t *testing.T) (*indexTailSource, sqlmock.Sqlmock) {
@@ -112,5 +115,58 @@ func TestTailCaptureLoss(t *testing.T) {
 		if why := tailCaptureLoss(c.st, read); (why != "") != c.want {
 			t.Errorf("%s: %q", name, why)
 		}
+	}
+}
+
+// The tail's key is the copy's: the schema snapshot's is taken only when it
+// is the same, column for column.
+func TestSamePrimaryKey(t *testing.T) {
+	ddl := func(pk string) string {
+		return "CREATE TABLE `t` (\n  `a` int NOT NULL,\n  `b` int NOT NULL,\n  `we``ird` int NOT NULL,\n  PRIMARY KEY (" + pk + ")\n);\n"
+	}
+	cols := func(names ...string) []metadata.ColumnMeta {
+		out := make([]metadata.ColumnMeta, len(names))
+		for i, n := range names {
+			out[i] = metadata.ColumnMeta{Name: n, IsPK: true}
+		}
+		return out
+	}
+	for _, c := range []struct {
+		name string
+		ddl  string
+		pk   []metadata.ColumnMeta
+		want bool
+	}{
+		{"one column", ddl("`a`"), cols("a"), true},
+		{"two, in order", ddl("`a`,`b`"), cols("a", "b"), true},
+		{"names without case", ddl("`a`"), cols("A"), true},
+		{"a backquote in a name", ddl("`we``ird`"), cols("we`ird"), true},
+		{"another column", ddl("`a`"), cols("b"), false},
+		{"the copy's key is wider", ddl("`a`,`b`"), cols("a"), false},
+		{"the snapshot's key is wider", ddl("`a`"), cols("a", "b"), false},
+		{"another order", ddl("`a`,`b`"), cols("b", "a"), false},
+		{"a prefix length", ddl("`a`(10)"), cols("a"), false},
+		{"no key", "CREATE TABLE `t` (\n  `a` int NOT NULL\n);\n", cols("a"), false},
+		{"no definition", "", cols("a"), false},
+	} {
+		if got := samePrimaryKey(c.ddl, c.pk); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// Which tables capture records decides which have a tail; a process that
+// cannot tell gives none.
+func TestIndexTailSource_startNeedsTheCaptureFilters(t *testing.T) {
+	x, _ := newMockTailSource(t)
+	tbl := views.BaselineTable{Schema: "shop", Table: "orders", Path: "/nowhere/shop/orders.parquet"}
+	x.capturesUnknown = true
+	if _, why, err := x.Start(context.Background(), tbl); err != nil || !strings.Contains(why, "not known") {
+		t.Errorf("filters unknown: %q %v", why, err)
+	}
+	x.capturesUnknown = false
+	x.captures = func(schema, table string) bool { return table != "orders" }
+	if _, why, err := x.Start(context.Background(), tbl); err != nil || !strings.Contains(why, "outside what capture records") {
+		t.Errorf("a table capture does not record: %q %v", why, err)
 	}
 }
