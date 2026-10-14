@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/metadata"
@@ -239,5 +241,35 @@ func TestRowJoin_spillsUnderCap(t *testing.T) {
 	j.close()
 	if _, err := os.Stat(j.dir); !os.IsNotExist(err) {
 		t.Errorf("working dir %s (database and spill files) not removed: %v", j.dir, err)
+	}
+}
+
+// TestRemoveOldExplainDirs: a drill-down directory a killed process left
+// behind is removed once it is past any run still going; a recent one, and
+// anything not ours, stays.
+func TestRemoveOldExplainDirs(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, explainDirPrefix+"old")
+	fresh := filepath.Join(dir, explainDirPrefix+"fresh")
+	other := filepath.Join(dir, "something-else")
+	for _, d := range []string{old, fresh, other} {
+		if err := os.MkdirAll(filepath.Join(d, "x"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-explainDirMaxAge - time.Hour)
+	for _, d := range []string{old, other} {
+		if err := os.Chtimes(d, past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removeOldExplainDirs(dir)
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("old drill-down dir not removed: %v", err)
+	}
+	for _, d := range []string{fresh, other} {
+		if _, err := os.Stat(d); err != nil {
+			t.Errorf("%s must stay: %v", d, err)
+		}
 	}
 }

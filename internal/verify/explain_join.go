@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/duckdb/duckdb-go/v2"
 
@@ -67,7 +68,8 @@ func newRowJoinCapped(ctx context.Context, tuning duckdbutil.Tuning, memoryLimit
 	// A database FILE, not an in-memory one: DuckDB cannot evict the blocks of
 	// an in-memory table, so under its cap an in-memory join fails with "Out
 	// of Memory" instead of spilling. On disk, the cap is a cap.
-	dir, err := os.MkdirTemp("", "bintrail-explain-")
+	removeOldExplainDirs(os.TempDir())
+	dir, err := os.MkdirTemp("", explainDirPrefix+"*")
 	if err != nil {
 		return nil, fmt.Errorf("open drill-down join: %w", err)
 	}
@@ -127,6 +129,33 @@ func newRowJoinCapped(ctx context.Context, tuning duckdbutil.Tuning, memoryLimit
 		return nil, fmt.Errorf("prepare drill-down join: %w", err)
 	}
 	return j, nil
+}
+
+// explainDirPrefix names the directory one drill-down works in, under the
+// OS temp dir: its database file (both sides' rows) and its spill files.
+const explainDirPrefix = "bintrail-explain-"
+
+// explainDirMaxAge is past any drill-down still running: a directory older
+// than this was left by a process that was killed before close() ran.
+const explainDirMaxAge = 24 * time.Hour
+
+// removeOldExplainDirs removes the directories killed drill-downs left in
+// dir. The kill #2385 is about (out of memory) is exactly the one that skips
+// close(), and what it leaves is a copy of the table's rows, as big as the
+// table, on the disk capture writes to.
+func removeOldExplainDirs(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), explainDirPrefix) {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > explainDirMaxAge {
+			_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 func (j *rowJoin) addTruth(key string, r rowCells, cols []metadata.ColumnMeta) error {
