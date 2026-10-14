@@ -76,9 +76,6 @@ func TestIntegrationRouter(t *testing.T) {
 	waitUntil(t, "the port to open", func() bool { return port.listening() != "" })
 
 	conn := openFlashback(t, addr, ent.ID, "tok", srcName)
-	// One connection: SHOW ROUTER STATUS reports that connection's last
-	// answer (#2369), which a pool could hand to another.
-	conn.SetMaxOpenConns(1)
 	defer conn.Close()
 	side := func(q string) string {
 		t.Helper()
@@ -124,27 +121,43 @@ func TestIntegrationRouter(t *testing.T) {
 	if got := side("SELECT status FROM orders WHERE id = 3"); got != "edited" {
 		t.Errorf("after the UPDATE the lookup answered %q", got)
 	}
-	// The connection's last answer (#2369): the copy answered the scan above,
-	// and this lookup, MySQL's, replaces it, with no number.
-	if status["last_answer"] != "copy" || status["last_answer_indexed_through"] == "" {
-		t.Errorf("after the copy's answer: %v", status)
-	}
-	last := map[string]string{}
-	lrows, err := conn.Query("SHOW ROUTER STATUS")
+	// The connection's last answer (#2369), on one connection of its own:
+	// SHOW ROUTER STATUS reports that connection's, which a pool could hand
+	// to another. The copy answers a scan, then MySQL a lookup, with no
+	// number.
+	one, err := conn.Conn(context.Background())
 	if err != nil {
-		t.Fatalf("SHOW ROUTER STATUS: %v", err)
+		t.Fatal(err)
 	}
-	for lrows.Next() {
-		var name, value string
-		if err := lrows.Scan(&name, &value); err != nil {
-			t.Fatal(err)
+	lastAnswer := func(q string) map[string]string {
+		t.Helper()
+		r, err := one.QueryContext(context.Background(), q)
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
 		}
-		last[name] = value
+		r.Close()
+		out := map[string]string{}
+		r, err = one.QueryContext(context.Background(), "SHOW ROUTER STATUS")
+		if err != nil {
+			t.Fatalf("SHOW ROUTER STATUS: %v", err)
+		}
+		defer r.Close()
+		for r.Next() {
+			var name, value string
+			if err := r.Scan(&name, &value); err != nil {
+				t.Fatal(err)
+			}
+			out[name] = value
+		}
+		return out
 	}
-	lrows.Close()
-	if last["last_answer"] != "mysql" || last["last_answer_indexed_through"] != "" {
-		t.Errorf("after MySQL's answer: last_answer=%q indexed_through=%q", last["last_answer"], last["last_answer_indexed_through"])
+	if got := lastAnswer("SELECT status, count(*) FROM orders GROUP BY status"); got["last_answer"] != "copy" || got["last_answer_indexed_through"] == "" || got["last_answer_age_seconds"] == "" {
+		t.Errorf("after the copy's answer: %v", got)
 	}
+	if got := lastAnswer("SELECT status FROM orders WHERE id = 1"); got["last_answer"] != "mysql" || got["last_answer_indexed_through"] != "" {
+		t.Errorf("after MySQL's answer: %v", got)
+	}
+	one.Close()
 
 	// A connection that asks for the copy alone ("<server>@copy") gets it,
 	// the point lookup too, while the others stay routed. By name and by id.
