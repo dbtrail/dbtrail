@@ -247,6 +247,20 @@ const RouteReasonCopyResultsHeld RouteReason = "copy_results_held"
 // and then close the session it runs in.
 const RouteReasonCancelled RouteReason = "cancelled"
 
+// answerNoter is the optional half of a FreeSQL that keeps what answered
+// the connection's last statement (#2369).
+type answerNoter interface {
+	NoteRoute(side string)
+}
+
+// noteAnswer tells the FreeSQL what answered this connection's statement,
+// if it keeps that.
+func (h *Handler) noteAnswer(side string) {
+	if n, ok := h.freeSQL.(answerNoter); ok {
+		n.NoteRoute(side)
+	}
+}
+
 // observeRoute reports one decision to the bound observer, if any.
 func (h *Handler) observeRoute(route RouteSide, reason RouteReason) {
 	if h.routerCfg.Observe != nil {
@@ -855,7 +869,20 @@ func copyText(qstr string) (string, error) {
 //
 // types is sqlsandbox.Session.Types: the routing layer's reading of the
 // client's own statement, nil for a port without routing.
-func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnTypes, routeReason string, unchangedWithin time.Duration) (*mysql.Result, error) {
+func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnTypes, routeReason string, unchangedWithin time.Duration) (served *mysql.Result, refused error) {
+	if h.router == nil {
+		// Where the copy answers alone, this is the statement's answer: the
+		// copy's when it is served, a refusal otherwise, including one made
+		// after the copy ran (the row cap, the results held). A routing
+		// connection's answer is the ladder's decision (observeRoute).
+		defer func() {
+			side := string(RouteCopy)
+			if refused != nil {
+				side = string(RouteRefused)
+			}
+			h.noteAnswer(side)
+		}()
+	}
 	// Before anything is run (#2241): a statement whose result the port has
 	// no room to hold is refused here, not after the copy answered it.
 	if err := h.cfg.ResultBudget.admit(h.logger); err != nil {
