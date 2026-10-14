@@ -37,6 +37,8 @@ import (
 // a verify run's result has no artifact of its own, so a console restart
 // loses it (mirrors BaselineStatus's "idle if never run in this process").
 type verifySupervisor struct {
+	// gate is the heavy-work gate (#2385); nil is the process's heavyWork.
+	gate *heavyGate
 	ctx context.Context // daemon lifecycle; cancels an in-flight run on shutdown
 	// history, when non-nil, receives one VerifyRunRecord per finished run
 	// (#1191) — manual and scheduled alike, so the history is the one place
@@ -313,6 +315,14 @@ func (s *verifySupervisor) Explain(serverID, schema, table string) (*console.Ver
 				s.finishExplain(key, job, nil, fmt.Errorf("internal error: %v", r))
 			}
 		}()
+		// One table of check work (#2385): it waits for snapshot work and
+		// for another check's table, never the other way round.
+		release, err := s.heavy().acquire(ctx, laneCheck, nil)
+		if err != nil {
+			s.finishExplain(key, job, nil, err)
+			return
+		}
+		defer release()
 		res, err := run(ctx, indexDSN, noArchive, schema, table, pair)
 		s.finishExplain(key, job, res, err)
 	}()
@@ -574,7 +584,13 @@ func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baseli
 			continue
 		}
 		delete(seen, key)
-		res, err := verify.VerifyBaselinePair(ctx, cfg, p)
+		var (
+			res verify.TableResult
+			err error
+		)
+		if lerr := s.inCheckLane(ctx, req.ServerID, func() { res, err = verify.VerifyBaselinePair(ctx, cfg, p) }); lerr != nil {
+			return lerr
+		}
 		if err != nil {
 			res = verify.TableResult{Schema: p.Schema, Table: p.Table, Status: verify.StatusError, Detail: err.Error()}
 		}
@@ -635,7 +651,13 @@ func (s *verifySupervisor) runLiveSource(req console.VerifyRequest, indexDB *sql
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("verify interrupted: %w", err)
 		}
-		res, err := verify.VerifyTable(ctx, cfg, st.Schema, st.Table)
+		var (
+			res verify.TableResult
+			err error
+		)
+		if lerr := s.inCheckLane(ctx, req.ServerID, func() { res, err = verify.VerifyTable(ctx, cfg, st.Schema, st.Table) }); lerr != nil {
+			return lerr
+		}
 		if err != nil {
 			res = verify.TableResult{Schema: st.Schema, Table: st.Table, Status: verify.StatusError, Detail: err.Error()}
 		}
@@ -695,7 +717,13 @@ func (s *verifySupervisor) runLiveSourcePG(req console.VerifyRequest, indexDB *s
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("verify interrupted: %w", err)
 		}
-		res, err := verify.VerifyTablePG(ctx, cfg, st.Schema, st.Table)
+		var (
+			res verify.TableResult
+			err error
+		)
+		if lerr := s.inCheckLane(ctx, req.ServerID, func() { res, err = verify.VerifyTablePG(ctx, cfg, st.Schema, st.Table) }); lerr != nil {
+			return lerr
+		}
 		if err != nil {
 			res = verify.TableResult{Schema: st.Schema, Table: st.Table, Status: verify.StatusError, Detail: err.Error()}
 		}
@@ -743,7 +771,13 @@ func (s *verifySupervisor) runRecoverInputs(req console.VerifyRequest, indexDB *
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("verify interrupted: %w", err)
 		}
-		res, err := verify.VerifyRecoverInputs(ctx, cfg, st.Schema, st.Table)
+		var (
+			res verify.TableResult
+			err error
+		)
+		if lerr := s.inCheckLane(ctx, req.ServerID, func() { res, err = verify.VerifyRecoverInputs(ctx, cfg, st.Schema, st.Table) }); lerr != nil {
+			return lerr
+		}
 		if err != nil {
 			res = verify.TableResult{Schema: st.Schema, Table: st.Table, Status: verify.StatusError, Detail: err.Error()}
 		}

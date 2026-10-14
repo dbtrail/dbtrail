@@ -52,6 +52,8 @@ var checkMydumperPrivileges = func(ctx context.Context, sourceDSN string, ssl co
 // mounts the docker socket. One job at a time per server, tracked in-memory —
 // the durable record is the snapshot itself (listed by /api/baselines).
 type baselineSupervisor struct {
+	// gate is the heavy-work gate (#2385); nil is the process's heavyWork.
+	gate *heavyGate
 	ctx        context.Context // daemon lifecycle; cancels an in-flight dump on shutdown
 	stagingDir string          // base dir for temp dump + staged Parquet (S3-destined runs)
 
@@ -354,7 +356,15 @@ func (s *baselineSupervisor) Trigger(req console.BaselineRequest) error {
 	s.mu.Unlock()
 
 	slog.Info("baseline: starting in-process snapshot", "server", req.ServerName, "id", req.ServerID)
-	go s.run(req)
+	go func() {
+		release, err := s.takeSnapshotLane(req.ServerName, "full read")
+		if err != nil {
+			s.stoppedBeforeStart(s.jobs, req.ServerID)
+			return
+		}
+		defer release()
+		s.run(req)
+	}()
 	return nil
 }
 

@@ -161,7 +161,15 @@ func (s *baselineSupervisor) TriggerSQLExport(req console.SQLExportRequest) erro
 
 	slog.Info("sql export: starting", "server", req.ServerName, "id", req.ServerID,
 		"at", req.At.UTC().Format(time.RFC3339))
-	go s.runSQLExport(req, dir)
+	go func() {
+		release, err := s.takeSnapshotLane(req.ServerName, "SQL export")
+		if err != nil {
+			s.finishSQLExport(req, dir, 0, 0, 0, errStoppedBeforeStart)
+			return
+		}
+		defer release()
+		s.runSQLExport(req, dir)
+	}()
 	return nil
 }
 

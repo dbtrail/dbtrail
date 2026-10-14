@@ -157,6 +157,15 @@ func (s *baselineSupervisor) TriggerRefresh(req refreshRequest, interval time.Du
 	s.postRefresh.Add(1)
 	go func() {
 		defer s.postRefresh.Done()
+		// The whole cycle (fold, compaction check, resolve) holds the
+		// snapshot lane: one snapshot job at a time in the process (#2385).
+		// The compaction it may start runs on its own goroutine and queues.
+		release, err := s.takeSnapshotLane(req.ServerName, "refresh")
+		if err != nil {
+			s.releaseRefreshSlot(req.ServerID)
+			return
+		}
+		defer release()
 		// Once per server and process, before the fold: a daemon stopped
 		// between a refresh and the pass that follows it left the newest
 		// snapshot with no resolved pairs, and this refresh would hold

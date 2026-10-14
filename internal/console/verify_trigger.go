@@ -221,8 +221,9 @@ type VerifyStatus struct {
 // the type reaches embedders through the assurance facade, and a verdict
 // field they could read but not compute would be one that is always empty. A succeeded run with nothing tallied and a Note is the
 // one-baseline case: the supervisor sets a Note for that and nothing else
-// (consoleapp's setNote has one caller), so it is NoPredecessor, as the CLI
-// reports it, not Unproven.
+// (the only other note, a table waiting for its turn, is cleared before the
+// table runs, so it never reaches a finished run), so it is NoPredecessor, as
+// the CLI reports it, not Unproven.
 func (st VerifyStatus) WithVerdict() VerifyStatus {
 	st.Verdict = ""
 	if st.State != VerifyStateSucceeded {
