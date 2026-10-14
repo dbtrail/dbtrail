@@ -48,25 +48,18 @@ func TestMismatchExplanation_Write_rowCountOnly(t *testing.T) {
 	}
 }
 
-// TestMismatchExplanation_add_caps locks the cap: detail is bounded at
-// maxExplainRows while Total keeps counting, so a pathological all-differ table
-// never dumps the whole table yet nothing is silently hidden — and the overflow
-// line breaks the un-shown rows down by kind.
-func TestMismatchExplanation_add_caps(t *testing.T) {
-	ex := &MismatchExplanation{}
-	for i := 0; i < maxExplainRows+25; i++ {
-		ex.add(RowDiff{PK: "x", Kind: diffExtra})
-	}
-	if len(ex.Diffs) != maxExplainRows {
-		t.Errorf("Diffs len = %d, want capped at %d", len(ex.Diffs), maxExplainRows)
-	}
-	if ex.Total != maxExplainRows+25 {
-		t.Errorf("Total = %d, want %d (counting continues past the cap)", ex.Total, maxExplainRows+25)
+// TestMismatchExplanation_Write_overflowByKind: rows past the printed cap are
+// still counted, and the overflow line breaks them down by kind so the
+// missing rows are never hidden behind the ones that filled the cap.
+func TestMismatchExplanation_Write_overflowByKind(t *testing.T) {
+	ex := &MismatchExplanation{Total: maxExplainRows + 25, byKind: map[string]int{diffExtra: maxExplainRows + 20, diffMissing: 5}}
+	for range maxExplainRows {
+		ex.Diffs = append(ex.Diffs, RowDiff{PK: "x", Kind: diffExtra})
 	}
 	var buf bytes.Buffer
 	ex.Write(&buf)
-	if !strings.Contains(buf.String(), "25 extra") {
-		t.Errorf("want the overflow broken down by kind ('25 extra'), got:\n%s", buf.String())
+	if !strings.Contains(buf.String(), "5 missing (not reproduced), 20 extra") {
+		t.Errorf("want the overflow broken down by kind, got:\n%s", buf.String())
 	}
 }
 
@@ -120,5 +113,19 @@ func TestCellEqual(t *testing.T) {
 		if got := cellEqual(tc.a, tc.b); got != tc.want {
 			t.Errorf("%s: cellEqual(%q,%q)=%v, want %v", tc.name, tc.a, tc.b, got, tc.want)
 		}
+	}
+}
+
+// add records one differing row the way rowJoin.diff fills an explanation:
+// counted in Total and byKind, kept in Diffs up to maxExplainRows. A test
+// helper for building explanations by hand.
+func (ex *MismatchExplanation) add(d RowDiff) {
+	ex.Total++
+	if ex.byKind == nil {
+		ex.byKind = map[string]int{}
+	}
+	ex.byKind[d.Kind]++
+	if len(ex.Diffs) < maxExplainRows {
+		ex.Diffs = append(ex.Diffs, d)
 	}
 }

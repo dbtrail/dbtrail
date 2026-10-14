@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
@@ -56,7 +55,8 @@ type RowDiff struct {
 // (SnapshotFullTableImages) over the SAME fixed window (the BaselinePair's
 // snapshots/anchor are immutable), so the row stream is byte-identical to the
 // digest's by construction and the diff and the verdict cannot disagree. No live
-// source, no scratch DB, no external tool: an in-memory full-outer-join on the PK.
+// source, no external tool: a full outer join on the PK in a capped, spilling
+// DuckDB session (rowJoin), so neither side is held whole in memory (#2385).
 type MismatchExplanation struct {
 	Schema, Table, Anchor string
 	Diffs                 []RowDiff
@@ -73,17 +73,6 @@ type MismatchExplanation struct {
 	// cause of rows the replay kept and the database no longer has. "" when
 	// it has none.
 	CascadeNote string
-}
-
-func (ex *MismatchExplanation) add(d RowDiff) {
-	ex.Total++
-	if ex.byKind == nil {
-		ex.byKind = map[string]int{}
-	}
-	ex.byKind[d.Kind]++
-	if len(ex.Diffs) < maxExplainRows {
-		ex.Diffs = append(ex.Diffs, d)
-	}
 }
 
 // rowCells is one reconstructed row reduced to its canonical per-column bytes
@@ -166,61 +155,30 @@ func ExplainBaselinePairMismatch(ctx context.Context, cfg BaselineConfig, p Base
 		changes[rows[i].PKValues] = &rows[i]
 	}
 
-	// Truth side held fully (the new baseline as-is); recovery streamed against it
-	// so only one side is materialized in memory at a time.
-	truth, err := collectRowsByPK(ctx, p.NewPath, p.Schema, p.Table, pkCols, orderedCols, map[string]*query.ResultRow{}, pg, cfg.DuckDBTuning)
+	// Both sides go to a DuckDB join with a memory cap and a spill directory
+	// (#2385): the Go heap holds one row at a time, never a table.
+	join, err := newRowJoin(ctx, cfg.DuckDBTuning)
+	if err != nil {
+		return nil, err
+	}
+	defer join.close()
+	err = streamRowsByPK(ctx, p.NewPath, p.Schema, p.Table, pkCols, orderedCols, map[string]*query.ResultRow{}, nil, pg, cfg.DuckDBTuning, func(key string, rec rowCells) error {
+		return join.addTruth(key, rec, orderedCols)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("read new baseline %s.%s: %w", p.Schema, p.Table, err)
 	}
-
-	ex := &MismatchExplanation{Schema: p.Schema, Table: p.Table, Anchor: anchorLabel(pg, p), OrderNote: order.Note(), CascadeNote: p.NewCascadeNote}
-	seen := make(map[string]bool, len(truth))
 	err = streamRowsByPK(ctx, p.PrevPath, p.Schema, p.Table, pkCols, orderedCols, changes, rows, pg, cfg.DuckDBTuning, func(key string, rec rowCells) error {
-		seen[key] = true
-		t, ok := truth[key]
-		if !ok {
-			ex.add(RowDiff{PK: rec.pk, Kind: diffExtra})
-			return nil
-		}
-		var cells []CellDiff
-		for _, c := range orderedCols {
-			rv, bv := rec.cells[c.Name], t.cells[c.Name]
-			if cellEqual(rv, bv) {
-				continue
-			}
-			// Both values are shown raw. For a deferred-type column (ENUM/SET/JSON/
-			// binary) the recovery value MAY be an event image (ordinal/base64/
-			// Go-JSON) rather than MySQL's source text — see deferredCaveat, surfaced
-			// once per drill-down. We deliberately do NOT blank such cells: when the
-			// divergence is a baseline-vs-baseline drift (no in-window event), the
-			// values are directly comparable and hiding them would mask exactly the
-			// silent drift this command exists to catch.
-			cells = append(cells, CellDiff{Column: c.Name, Recovery: displayCell(rv), Baseline: displayCell(bv)})
-			if isDeferredType(c.DataType) {
-				ex.deferredSeen = true
-			}
-		}
-		if len(cells) > 0 {
-			ex.add(RowDiff{PK: rec.pk, Kind: diffChanged, Cells: cells})
-		}
-		return nil
+		return join.addRecovery(key, rec, orderedCols)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("reconstruct prev %s.%s: %w", p.Schema, p.Table, err)
 	}
 
-	// Truth rows the recovery never produced (deterministic order for stable output).
-	missing := make([]rowCells, 0)
-	for key, t := range truth {
-		if !seen[key] {
-			missing = append(missing, t)
-		}
+	ex := &MismatchExplanation{Schema: p.Schema, Table: p.Table, Anchor: anchorLabel(pg, p), OrderNote: order.Note(), CascadeNote: p.NewCascadeNote}
+	if err := join.diff(ctx, orderedCols, ex); err != nil {
+		return nil, fmt.Errorf("compare %s.%s: %w", p.Schema, p.Table, err)
 	}
-	sort.Slice(missing, func(i, j int) bool { return missing[i].pk < missing[j].pk })
-	for _, m := range missing {
-		ex.add(RowDiff{PK: m.pk, Kind: diffMissing})
-	}
-
 	return ex, nil
 }
 
@@ -248,15 +206,6 @@ func streamRowsByPK(ctx context.Context, baselinePath, schema, table string, pkC
 		}
 		return emit(key, rowCells{pk: pk, cells: cells})
 	})
-}
-
-func collectRowsByPK(ctx context.Context, baselinePath, schema, table string, pkCols, orderedCols []metadata.ColumnMeta, changes map[string]*query.ResultRow, pgTextPK bool, tuning duckdbutil.Tuning) (map[string]rowCells, error) {
-	out := make(map[string]rowCells)
-	err := streamRowsByPK(ctx, baselinePath, schema, table, pkCols, orderedCols, changes, nil, pgTextPK, tuning, func(key string, r rowCells) error {
-		out[key] = r
-		return nil
-	})
-	return out, err
 }
 
 // pkKeyAndDisplay builds a join key and a human label ("col=val, …"). Each PK
