@@ -157,15 +157,6 @@ func (s *baselineSupervisor) TriggerRefresh(req refreshRequest, interval time.Du
 	s.postRefresh.Add(1)
 	go func() {
 		defer s.postRefresh.Done()
-		// The whole cycle (fold, compaction check, resolve) holds the
-		// snapshot lane: one snapshot job at a time in the process (#2385).
-		// The compaction it may start runs on its own goroutine and queues.
-		release, err := s.takeSnapshotLane(req.ServerName, "refresh")
-		if err != nil {
-			s.releaseRefreshSlot(req.ServerID)
-			return
-		}
-		defer release()
 		// Once per server and process, before the fold: a daemon stopped
 		// between a refresh and the pass that follows it left the newest
 		// snapshot with no resolved pairs, and this refresh would hold
@@ -1791,7 +1782,17 @@ func countReuse(reports []*reconstruct.TableReport) (tally reuseTally) {
 // setting, because asking for reuse is not getting it: a table with changes,
 // with a capture gap, or on the S3 path is folded anyway.
 func (s *baselineSupervisor) foldSnapshot(req refreshRequest, at time.Time, tableList []string) (tables, refused int, reuse reuseTally, err error) {
-	reports, failures, runErr := foldTables(s.ctx, refreshFoldConfig(req, at, tableList))
+	// Only the fold takes the snapshot lane (#2385), not the cycle around
+	// it: the reading of the source, the upload and the "nothing changed"
+	// check never hold another server's work back. A restore folds here too.
+	release, err := s.takeSnapshotLane(req.ServerName, "snapshot fold")
+	if err != nil {
+		return 0, 0, reuseTally{}, err
+	}
+	reports, failures, runErr := func() ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		defer release() // deferred: a panic in the fold must not keep the lane
+		return foldTables(s.ctx, refreshFoldConfig(req, at, tableList))
+	}()
 	if req.s3Copies != nil {
 		req.s3Copies.files = reconstruct.S3Copies(reports)
 		req.s3Copies.chainStarts = reconstruct.S3CopyChainStarts(reports)

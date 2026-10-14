@@ -9,6 +9,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/verify"
 )
 
@@ -100,39 +101,87 @@ func TestExplain_waitsForSnapshotJob(t *testing.T) {
 	}
 }
 
-// TestSnapshotJobs_stoppedWhileWaiting: a refresh or a compaction still
-// waiting for the snapshot lane when DBTrail shuts down does not leave its
-// slot "running" (which would refuse that server's jobs until a restart).
-func TestSnapshotJobs_stoppedWhileWaiting(t *testing.T) {
+// TestSnapshotFold_waitsForTheLane: the fold a refresh or a restore runs
+// waits while another server's snapshot work holds the lane, runs when it is
+// given back, and gives it back even when the fold panics.
+func TestSnapshotFold_waitsForTheLane(t *testing.T) {
+	g := newHeavyGate()
+	s := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.LockModeSafeNoLock)
+	s.gate = g
+	folded := make(chan struct{}, 2)
+	prev := foldTables
+	t.Cleanup(func() { foldTables = prev })
+	foldTables = func(context.Context, reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		folded <- struct{}{}
+		return nil, nil, nil
+	}
+	relOther := mustAcquire(t, g, laneSnapshot)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.foldSnapshot(refreshRequest{ServerID: "a", ServerName: "a"}, time.Now(), []string{"db.t"})
+	}()
+	select {
+	case <-folded:
+		t.Fatal("the fold ran while another server's snapshot work held the lane")
+	case <-time.After(50 * time.Millisecond):
+	}
+	relOther()
+	<-folded
+	<-done
+
+	foldTables = func(context.Context, reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		panic("boom")
+	}
+	func() {
+		defer func() { _ = recover() }()
+		s.foldSnapshot(refreshRequest{ServerID: "a", ServerName: "a"}, time.Now(), []string{"db.t"})
+	}()
+	mustAcquire(t, g, laneSnapshot)() // the panicking fold gave the lane back
+}
+
+// TestSnapshotFold_stoppedWhileWaiting: a fold still waiting when DBTrail
+// shuts down returns the shutdown, without folding.
+func TestSnapshotFold_stoppedWhileWaiting(t *testing.T) {
 	g := newHeavyGate()
 	ctx, cancel := context.WithCancel(context.Background())
 	s := newBaselineSupervisor(ctx, t.TempDir(), baseline.LockModeSafeNoLock)
 	s.gate = g
 	defer mustAcquire(t, g, laneSnapshot)()
-
-	req := refreshRequest{ServerID: "a", ServerName: "a", BaselineDir: t.TempDir()}
-	if _, err := s.TriggerRefresh(req, time.Hour); err != nil {
-		t.Fatal(err)
+	prev := foldTables
+	t.Cleanup(func() { foldTables = prev })
+	foldTables = func(context.Context, reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		t.Error("folded after shutdown")
+		return nil, nil, nil
 	}
+	cancel()
+	if _, _, _, err := s.foldSnapshot(refreshRequest{ServerID: "a", ServerName: "a"}, time.Now(), []string{"db.t"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the shutdown", err)
+	}
+}
+
+// TestCompaction_stoppedWhileWaiting: a compaction still waiting for the lane
+// when DBTrail shuts down does not leave its slot "running" (which would
+// refuse that server's jobs until a restart).
+func TestCompaction_stoppedWhileWaiting(t *testing.T) {
+	g := newHeavyGate()
+	ctx, cancel := context.WithCancel(context.Background())
+	s := newBaselineSupervisor(ctx, t.TempDir(), baseline.LockModeSafeNoLock)
+	s.gate = g
+	defer mustAcquire(t, g, laneSnapshot)()
 	if err := s.TriggerCompact(refreshRequest{ServerID: "b", ServerName: "b", BaselineDir: t.TempDir()}, nil); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(30 * time.Millisecond)
-	if st := s.RefreshStatus("a"); st.State != "running" {
-		t.Fatalf("refresh state while waiting = %q, want running", st.State)
-	}
 	cancel()
 	s.postRefresh.Wait()
-	if st := s.RefreshStatus("a"); st.State == "running" {
-		t.Errorf("refresh still running after shutdown while waiting: %+v", st)
-	}
 	if st := s.compactStatusFor("b"); st.State != "failed" || st.LastError != errStoppedBeforeStart.Error() {
 		t.Errorf("compaction after shutdown while waiting = %+v", st)
 	}
 	s.mu.Lock()
-	busy := s.busyLocked("a") || s.busyLocked("b")
+	busy := s.busyLocked("b")
 	s.mu.Unlock()
 	if busy {
-		t.Error("a server is still busy after its waiting job stopped")
+		t.Error("the server is still busy after its waiting compaction stopped")
 	}
 }

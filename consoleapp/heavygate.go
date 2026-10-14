@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/console"
 )
@@ -15,8 +16,11 @@ import (
 type heavyLane int
 
 const (
-	// laneSnapshot is the work that writes snapshots: a refresh cycle, a
-	// compaction, a full read, an SQL export. One at a time in the process.
+	// laneSnapshot is the DuckDB part of the work that writes snapshots: the
+	// fold of a refresh or a restore, a compaction, the resolved pairs, the
+	// fold of an SQL export. One at a time in the process. Only that part:
+	// a full read (whose start time is the schedule's promise), reading the
+	// source, uploading, are outside the lane.
 	laneSnapshot heavyLane = iota
 	// laneCheck is one table of a check, or one Explain. One at a time, and
 	// never while snapshot work runs or waits.
@@ -45,6 +49,9 @@ type heavyGate struct {
 	held        [2]bool
 	snapWaiting int
 	changed     chan struct{} // closed and replaced whenever the state above changes
+	// unbounded lets everything in at once. Tests only: one whose subject
+	// is two folds overlapping cannot otherwise stage it.
+	unbounded bool
 }
 
 func newHeavyGate() *heavyGate { return &heavyGate{changed: make(chan struct{})} }
@@ -59,6 +66,9 @@ var heavyWork = newHeavyGate()
 // the wait with its error and nothing held. Release is safe to call twice,
 // and must be deferred so a job that panics still gives its lane back.
 func (g *heavyGate) acquire(ctx context.Context, lane heavyLane, onWait func()) (release func(), err error) {
+	if g.unbounded {
+		return func() {}, nil
+	}
 	g.mu.Lock()
 	waited := false
 	for !g.freeLocked(lane) {
@@ -133,15 +143,22 @@ func (s *verifySupervisor) heavy() *heavyGate {
 
 // errStoppedBeforeStart is the end of a snapshot job that was still waiting
 // for the snapshot lane when DBTrail shut down.
-var errStoppedBeforeStart = errors.New("stopped because DBTrail shut down before it could start; it runs again at the next scheduled time or click")
+var errStoppedBeforeStart = errors.New("stopped because DBTrail shut down before it could start")
 
 // takeSnapshotLane waits for the snapshot lane on the daemon's context. The
 // wait is logged, so a job that sits in line does not read as a slow one.
 func (s *baselineSupervisor) takeSnapshotLane(server, job string) (func(), error) {
-	return s.heavy().acquire(s.ctx, laneSnapshot, func() {
-		slog.Info("snapshot job waiting: another snapshot job is running in this process; they run one at a time",
+	var waitedSince time.Time
+	release, err := s.heavy().acquire(s.ctx, laneSnapshot, func() {
+		waitedSince = time.Now()
+		slog.Info("snapshot work waiting: another server's snapshot work is running in this process; they run one at a time",
 			"server", server, "job", job)
 	})
+	if err == nil && !waitedSince.IsZero() {
+		slog.Info("snapshot work starting after waiting its turn", "server", server, "job", job,
+			"waited", time.Since(waitedSince).Round(time.Second).String())
+	}
+	return release, err
 }
 
 // stoppedBeforeStart ends a job slot that was claimed "running" but never got
@@ -163,11 +180,11 @@ const checkLaneWaitNote = "Waiting for a snapshot update or another check to fin
 // while it waits, and clears that note once its turn comes.
 func (s *verifySupervisor) inCheckLane(ctx context.Context, serverID string, f func()) error {
 	release, err := s.heavy().acquire(ctx, laneCheck, func() { s.setNote(serverID, checkLaneWaitNote) })
+	s.clearNote(serverID, checkLaneWaitNote) // on both paths: a stopped run must not keep it
 	if err != nil {
 		return fmt.Errorf("verify interrupted: %w", err)
 	}
 	defer release()
-	s.clearNote(serverID, checkLaneWaitNote)
 	f()
 	return nil
 }

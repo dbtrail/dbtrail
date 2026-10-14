@@ -161,15 +161,7 @@ func (s *baselineSupervisor) TriggerSQLExport(req console.SQLExportRequest) erro
 
 	slog.Info("sql export: starting", "server", req.ServerName, "id", req.ServerID,
 		"at", req.At.UTC().Format(time.RFC3339))
-	go func() {
-		release, err := s.takeSnapshotLane(req.ServerName, "SQL export")
-		if err != nil {
-			s.finishSQLExport(req, dir, 0, 0, 0, errStoppedBeforeStart)
-			return
-		}
-		defer release()
-		s.runSQLExport(req, dir)
-	}()
+	go s.runSQLExport(req, dir)
 	return nil
 }
 
@@ -908,7 +900,15 @@ func (s *baselineSupervisor) executeSQLExport(req console.SQLExportRequest, dir 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return 0, 0, 0, fmt.Errorf("create build directory: %w", err)
 	}
-	reports, _, runErr := foldTables(s.ctx, sqlExportFoldConfig(req, dir, tableList))
+	// The fold is snapshot work (#2385): it waits for another server's.
+	release, err := s.takeSnapshotLane(req.ServerName, "SQL export")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	reports, _, runErr := func() ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		defer release() // deferred: a panic in the fold must not keep the lane
+		return foldTables(s.ctx, sqlExportFoldConfig(req, dir, tableList))
+	}()
 	for _, rep := range reports {
 		rows += rep.RowsWritten
 	}

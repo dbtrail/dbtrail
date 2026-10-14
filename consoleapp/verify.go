@@ -39,7 +39,7 @@ import (
 type verifySupervisor struct {
 	// gate is the heavy-work gate (#2385); nil is the process's heavyWork.
 	gate *heavyGate
-	ctx context.Context // daemon lifecycle; cancels an in-flight run on shutdown
+	ctx  context.Context // daemon lifecycle; cancels an in-flight run on shutdown
 	// history, when non-nil, receives one VerifyRunRecord per finished run
 	// (#1191) — manual and scheduled alike, so the history is the one place
 	// "when did this last verify" is answered.

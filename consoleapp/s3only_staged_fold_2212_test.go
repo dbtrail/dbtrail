@@ -146,6 +146,10 @@ func TestStagedFold_twoServersAtOnceUseDistinctRunFolders(t *testing.T) {
 	stubs := stubStagedFold(t, nil)
 	f := newJobsFixture(t)
 	sup := f.supervisor(t)
+	// The subject is two folds overlapping, which the heavy-work gate
+	// (#2385) otherwise serializes; their cycles (and run folders) still
+	// overlap with it on.
+	sup.gate = &heavyGate{unbounded: true}
 	var mu sync.Mutex
 	outs := map[string]string{}
 	both := make(chan struct{})

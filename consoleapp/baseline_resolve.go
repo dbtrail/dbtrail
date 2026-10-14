@@ -129,6 +129,12 @@ func (s *baselineSupervisor) maybeResolve(req refreshRequest) {
 		sweepResolved(root, nil)
 		return
 	}
+	// The merges are snapshot work (#2385): one at a time in the process.
+	release, err := s.takeSnapshotLane(req.ServerName, "resolved pairs")
+	if err != nil {
+		return
+	}
+	defer release()
 	// Again while a newer snapshot appeared during the pass: a refresh that
 	// found this run busy returned at once and left that snapshot to it.
 	for done := ""; s.ctx.Err() == nil; {
