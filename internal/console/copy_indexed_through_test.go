@@ -324,6 +324,18 @@ func TestSQLOnCopy_noteTheSnapshotThatRan(t *testing.T) {
 		}
 	})
 
+	t.Run("a statement whose tables the parse cannot tell reads every view: all of them bound it", func(t *testing.T) {
+		f := newSQLFixture(t, runner, false)
+		q := &SQLOnCopy{s: f.s, b: f.s.cm.boot, user: "u", id: bootServerID}
+		if _, err := q.Run(context.Background(), "SELECT count(*) FROM duckdb_tables()", "", sqlsandbox.Session{}); err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.Dir(f.schemaDir) + string(filepath.Separator)
+		if got := dirs(q); len(got) != 1 || got[0] != want {
+			t.Fatalf("read from %v, want %s", got, want)
+		}
+	})
+
 	t.Run("an earlier copy", func(t *testing.T) {
 		prev := sqlMaxChainBytes
 		t.Cleanup(func() { sqlMaxChainBytes = prev })
@@ -402,6 +414,26 @@ func TestCopyIndexedThrough(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Error(err)
+	}
+
+	// Two snapshot directories: the older one's instant, whichever order
+	// they are met in.
+	olderDir := filepath.Dir(filepath.Dir(dir)) + "/2026-10-13T10-00-00Z/"
+	olderOrders := olderDir + "shop/orders.parquet"
+	writeFooterFile(t, olderOrders, footer("binlog.000001", 40, mk(3, "binlog.000001", 40)))
+	before := at.Add(-24 * time.Hour)
+	for range 4 { // map order varies: each run may meet either directory first
+		mock.ExpectQuery(`SELECT event_timestamp, binlog_file, end_pos FROM binlog_events WHERE event_id = ?`).
+			WithArgs(50).WillReturnRows(sqlmock.NewRows([]string{"a", "b", "c"}).AddRow(at, "binlog.000003", 900))
+		mock.ExpectQuery(`SELECT event_timestamp, binlog_file, end_pos FROM binlog_events WHERE event_id = ?`).
+			WithArgs(3).WillReturnRows(sqlmock.NewRows([]string{"a", "b", "c"}).AddRow(before, "binlog.000001", 40))
+	}
+	mock.MatchExpectationsInOrder(false)
+	for range 4 {
+		got, why := s.copyIndexedThrough(context.Background(), db, map[string][]string{dir: {orders}, olderDir: {olderOrders}})
+		if why != "" || !got.Equal(before) {
+			t.Fatalf("two directories: got %v %q, want the older %v", got, why, before)
+		}
 	}
 
 	got, why = s.copyIndexedThrough(context.Background(), db, map[string][]string{dir: {orders, dir + "shop/gone.parquet"}})

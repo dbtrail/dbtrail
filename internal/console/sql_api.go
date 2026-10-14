@@ -1078,9 +1078,10 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	// StrictStar): its error reaches the runner as a worker failure, so the
 	// reason is kept here and returned instead.
 	var viewsRefusal error
-	// named is the copy's tables the statement read, set once its views are
-	// decided (#2369).
-	var named []views.BaselineTable
+	// readTables is the copy's tables the statement could read, set once its
+	// views are decided (#2369): every table when every view is installed,
+	// since then the parse did not say which ones it reads.
+	var readTables []views.BaselineTable
 	job := sqlsandbox.Job{
 		// One query at a time per identity: the login identity, or the
 		// shared automation token as one identity.
@@ -1101,7 +1102,10 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			// long does not fit the worker's memory, and the statement
 			// would fail there after reading for a while.
 			limit := sqlChainLimit(memory)
-			named = sqlNamedTables(in, refs)
+			named := sqlNamedTables(in, refs)
+			if readTables = named; narrowed.OnlyViews == nil {
+				readTables = in.Baselines
+			}
 			if h := sqlChainTooHeavy(named, limit, sqlFileSize); h.Table != "" {
 				viewsRefusal = &sqlRefusal{http.StatusUnprocessableEntity, sqlChainTooHeavyMessage(h, limit, memory)}
 				*heavy = &sqlHeavyRun{tables: named, chain: h, limit: limit, newest: in.BaselineSnapshot}
@@ -1182,7 +1186,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	for phase, d := range sqlPhases(slotWait, viewBuild, res.Phases) {
 		observe.ObserveSQLStatementPhase(phase, d)
 	}
-	readFrom, readFromOK := copyReadFrom(in, named)
+	readFrom, readFromOK := copyReadFrom(in, readTables)
 	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, ViewBuild: viewBuild, SlotWait: slotWait,
 		ReadFrom: readFrom, ReadFromOK: readFromOK}, nil
 }
