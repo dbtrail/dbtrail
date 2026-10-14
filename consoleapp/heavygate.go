@@ -145,20 +145,25 @@ func (s *verifySupervisor) heavy() *heavyGate {
 // for the snapshot lane when DBTrail shut down.
 var errStoppedBeforeStart = errors.New("stopped because DBTrail shut down before it could start")
 
-// takeSnapshotLane waits for the snapshot lane on the daemon's context. The
-// wait is logged, so a job that sits in line does not read as a slow one.
-func (s *baselineSupervisor) takeSnapshotLane(server, job string) (func(), error) {
+// takeSnapshotLane waits for the snapshot lane on the daemon's context and
+// returns how long it waited. The wait is logged, so a job that sits in line
+// does not read as a slow one, and a caller that times its work subtracts it.
+func (s *baselineSupervisor) takeSnapshotLane(server, job string) (func(), time.Duration, error) {
 	var waitedSince time.Time
 	release, err := s.heavy().acquire(s.ctx, laneSnapshot, func() {
 		waitedSince = time.Now()
 		slog.Info("snapshot work waiting: another server's snapshot work is running in this process; they run one at a time",
 			"server", server, "job", job)
 	})
-	if err == nil && !waitedSince.IsZero() {
-		slog.Info("snapshot work starting after waiting its turn", "server", server, "job", job,
-			"waited", time.Since(waitedSince).Round(time.Second).String())
+	var waited time.Duration
+	if !waitedSince.IsZero() {
+		waited = time.Since(waitedSince)
+		if err == nil {
+			slog.Info("snapshot work starting after waiting its turn", "server", server, "job", job,
+				"waited", waited.Round(time.Second).String())
+		}
 	}
-	return release, err
+	return release, waited, err
 }
 
 // stoppedBeforeStart ends a job slot that was claimed "running" but never got

@@ -175,7 +175,7 @@ func (s *baselineSupervisor) TriggerCompact(req refreshRequest, due []compactCan
 	s.postRefresh.Add(1)
 	go func() {
 		defer s.postRefresh.Done()
-		release, err := s.takeSnapshotLane(req.ServerName, "compaction")
+		release, _, err := s.takeSnapshotLane(req.ServerName, "compaction")
 		if err != nil {
 			s.stoppedBeforeStart(s.compacts, req.ServerID)
 			return

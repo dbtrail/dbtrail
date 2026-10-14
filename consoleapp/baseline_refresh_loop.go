@@ -99,6 +99,11 @@ type refreshRequest struct {
 	// everywhere else (a Local folder, a restore): those publish the
 	// directory whole, so a table left out of it would be lost.
 	s3Copies *stagedCopies
+	// laneWait, when set, adds up the time the fold waited for the snapshot
+	// lane (#2385). runRefresh takes it off the run's measured time: a wait
+	// behind another server is not what an update costs, and UpdateSeconds
+	// feeds the #1721 model that picks between an update and a full read.
+	laneWait *time.Duration
 	// PlanNewTables, set by the backup schedule, decides what happens to the
 	// tables a published update left out (#1993): it is handed every one of
 	// them and returns a console.NewTablesAction* value and, for a refusal,
@@ -328,6 +333,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// move the number this change exists to get right, in either direction.
 	// started stays for the RFC3339 stamp, which wants the wall clock.
 	elapsed := time.Now()
+	req.laneWait = new(time.Duration)
 	// Journaled from here (#2180), below the #1689 gate so a skipped cycle
 	// still leaves no trace, and the snapshot directory only when it was
 	// proven this run's own: a kill must never make somebody else's files
@@ -442,7 +448,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		// backup it is compared against), and the mark the next update's
 		// count starts from.
 		rec.Events = s.measuredEvents(req, mark, known, prev)
-		rec.UpdateSeconds = took.Seconds()
+		rec.UpdateSeconds = (took - *req.laneWait).Seconds()
 		if known {
 			rec.IndexMark = mark.events
 		}
@@ -1785,7 +1791,10 @@ func (s *baselineSupervisor) foldSnapshot(req refreshRequest, at time.Time, tabl
 	// Only the fold takes the snapshot lane (#2385), not the cycle around
 	// it: the reading of the source, the upload and the "nothing changed"
 	// check never hold another server's work back. A restore folds here too.
-	release, err := s.takeSnapshotLane(req.ServerName, "snapshot fold")
+	release, waited, err := s.takeSnapshotLane(req.ServerName, "snapshot fold")
+	if req.laneWait != nil {
+		*req.laneWait += waited
+	}
 	if err != nil {
 		return 0, 0, reuseTally{}, err
 	}

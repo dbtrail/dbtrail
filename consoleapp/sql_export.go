@@ -901,7 +901,7 @@ func (s *baselineSupervisor) executeSQLExport(req console.SQLExportRequest, dir 
 		return 0, 0, 0, fmt.Errorf("create build directory: %w", err)
 	}
 	// The fold is snapshot work (#2385): it waits for another server's.
-	release, err := s.takeSnapshotLane(req.ServerName, "SQL export")
+	release, _, err := s.takeSnapshotLane(req.ServerName, "SQL export")
 	if err != nil {
 		return 0, 0, 0, err
 	}

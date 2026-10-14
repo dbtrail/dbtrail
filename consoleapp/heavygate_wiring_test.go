@@ -117,9 +117,10 @@ func TestSnapshotFold_waitsForTheLane(t *testing.T) {
 	}
 	relOther := mustAcquire(t, g, laneSnapshot)
 	done := make(chan struct{})
+	wait := new(time.Duration)
 	go func() {
 		defer close(done)
-		s.foldSnapshot(refreshRequest{ServerID: "a", ServerName: "a"}, time.Now(), []string{"db.t"})
+		s.foldSnapshot(refreshRequest{ServerID: "a", ServerName: "a", laneWait: wait}, time.Now(), []string{"db.t"})
 	}()
 	select {
 	case <-folded:
@@ -129,6 +130,10 @@ func TestSnapshotFold_waitsForTheLane(t *testing.T) {
 	relOther()
 	<-folded
 	<-done
+	// The wait is handed back so the refresh takes it off UpdateSeconds.
+	if *wait < 50*time.Millisecond {
+		t.Errorf("laneWait = %v, want the time the fold stood in line (>= 50ms)", *wait)
+	}
 
 	foldTables = func(context.Context, reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
 		panic("boom")
@@ -183,5 +188,26 @@ func TestCompaction_stoppedWhileWaiting(t *testing.T) {
 	s.mu.Unlock()
 	if busy {
 		t.Error("the server is still busy after its waiting compaction stopped")
+	}
+}
+
+// TestCompaction_waitsForTheLane: a compaction does not merge while another
+// server's snapshot work holds the lane, and finishes once it is given back.
+func TestCompaction_waitsForTheLane(t *testing.T) {
+	g := newHeavyGate()
+	s := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.LockModeSafeNoLock)
+	s.gate = g
+	relOther := mustAcquire(t, g, laneSnapshot)
+	if err := s.TriggerCompact(refreshRequest{ServerID: "b", ServerName: "b", BaselineDir: t.TempDir()}, nil); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if st := s.compactStatusFor("b"); st.State != "running" || st.FinishedAt != "" {
+		t.Fatalf("compaction while another server held the lane = %+v, want still waiting", st)
+	}
+	relOther()
+	s.postRefresh.Wait()
+	if st := s.compactStatusFor("b"); st.State != "succeeded" {
+		t.Errorf("compaction after the lane was given back = %+v", st)
 	}
 }
