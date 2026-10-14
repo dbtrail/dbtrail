@@ -37,6 +37,15 @@ func TestMain(m *testing.M) {
 		rootCmd.SetArgs(os.Args[1:])
 		os.Exit(Main("test", "none", "unknown"))
 	}
+	// Re-executed as the verify drill-down's child (explainInChild spawns
+	// THIS binary): a test names the work it should do instead of a real
+	// drill-down, which needs an index.
+	if isVerifyWorkerInvocation(os.Args) {
+		if fake, ok := explainChildFakes[os.Getenv(explainChildFakeEnv)]; ok {
+			explainChildRun = fake
+		}
+		os.Exit(runVerifyWorker())
+	}
 	mydumperlock.ProbeTimeout = fakeMydumperBound
 	// Password tests here hash through the console package: at the shipped
 	// cost each one costs seconds under -race. The cost itself is pinned by

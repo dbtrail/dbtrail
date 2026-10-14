@@ -251,7 +251,8 @@ services:
     # it is off here. Settings, MySQL clients, Memory for SQL on the copy says
     # whether it is in effect. After a statement is stopped this way
     # `docker inspect` reports OOMKilled=true for this container although it
-    # kept running.
+    # kept running. The same setting gives each Explain on the check page a
+    # ceiling of its own (#2385).
     # security_opt:
     #   - writable-cgroups=true
     # Building from a source checkout instead? Uncomment here AND on

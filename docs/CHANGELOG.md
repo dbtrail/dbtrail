@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **Explain runs in a process of its own** (#2385). The drill-down on a
+  mismatched table used to run inside `bintrail-console watch`, which also
+  captures, so a table that needed more memory than the host had could take
+  capture down with it. It now runs in a child process. Where DBTrail was
+  given a cgroup to manage (a systemd unit with `Delegate=yes`, or the bundled
+  compose file with its optional `writable-cgroups=true` turned on, the same
+  setting SQL on the copy uses), the child gets a
+  memory ceiling of its own: twice the check's DuckDB memory per session plus
+  headroom, about 1.3 GB on an 8 GB host. Past it the child is stopped and
+  Explain says it ran out of memory; capture and the console keep running.
+  Everywhere else the child is only the kernel's first choice when the host
+  runs out of memory. Canceling a drill-down, or a new check replacing it,
+  stops the child, and a child whose console went away stops by itself.
 
 ## [0.104.4] - 2026-10-14
 ### Added

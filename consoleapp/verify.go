@@ -299,7 +299,9 @@ func (s *verifySupervisor) Explain(serverID, schema, table string) (*console.Ver
 	s.explains[key] = job
 	s.mu.Unlock()
 
-	run := explainNow
+	// In a process of its own (#2385): a drill-down that outgrows its memory
+	// stops that process, not the one that captures.
+	run := explainInChild
 	if s.explainFn != nil {
 		run = s.explainFn
 	}
