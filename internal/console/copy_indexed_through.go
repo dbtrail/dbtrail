@@ -244,34 +244,77 @@ type copyAnswer struct {
 }
 
 // lastAnswerState is the SQLOnCopy's record of its connection's last answer.
+//
+// On a routed connection the router decides what answered, after the copy
+// ran: a result it then refuses goes to MySQL, and the router also asks the
+// copy things no client sent (the zone probe). So a run there is only
+// PENDING, and becomes the answer when the router says the copy answered
+// (NoteRoute). On a connection the copy answers alone, every run is the
+// answer. Statements on the time-travel schemas are neither, as in the
+// statement counts.
 type lastAnswerState struct {
-	mu sync.Mutex
-	a  copyAnswer
+	mu      sync.Mutex
+	routed  bool
+	a       copyAnswer
+	pending *copyAnswer
 }
 
-// noteCopyAnswer records that the copy answered the connection's statement.
-func (q *SQLOnCopy) noteCopyAnswer(files map[string][]string, ok bool, ranAt time.Time) {
+// MarkRouted says the connection routes: its runs wait for NoteRoute. Call
+// before the first statement.
+func (q *SQLOnCopy) MarkRouted() {
 	if q == nil {
 		return
 	}
 	q.last.mu.Lock()
-	q.last.a = copyAnswer{side: "copy", files: files, ok: ok, ranAt: ranAt}
+	q.last.routed = true
 	q.last.mu.Unlock()
 }
 
+// noteCopyAnswer records that the copy ran a statement on the connection.
+func (q *SQLOnCopy) noteCopyAnswer(files map[string][]string, ok bool, ranAt time.Time) {
+	if q == nil {
+		return
+	}
+	a := copyAnswer{side: "copy", files: files, ok: ok, ranAt: ranAt}
+	q.last.mu.Lock()
+	defer q.last.mu.Unlock()
+	if q.last.routed {
+		q.last.pending = &a
+		return
+	}
+	q.last.a = a
+}
+
+// noteCopyRefused records that the copy could not run a statement. On a
+// connection the copy answers alone that is the answer; a routed one sends
+// the statement on and says where (NoteRoute).
+func (q *SQLOnCopy) noteCopyRefused() {
+	if q == nil {
+		return
+	}
+	q.last.mu.Lock()
+	defer q.last.mu.Unlock()
+	q.last.pending = nil
+	if !q.last.routed {
+		q.last.a = copyAnswer{side: "refused"}
+	}
+}
+
 // NoteRoute records the router's decision for the connection's statement
-// ("copy", "mysql" or "refused"). The copy's own run, noted before it, keeps
-// its files; any other answer forgets them.
+// ("copy", "mysql" or "refused"). "copy" makes the copy's pending run the
+// answer; any other answer forgets it.
 func (q *SQLOnCopy) NoteRoute(side string) {
 	if q == nil {
 		return
 	}
 	q.last.mu.Lock()
 	defer q.last.mu.Unlock()
-	if side == "copy" && q.last.a.side == "copy" {
-		return
+	if side == "copy" && q.last.pending != nil {
+		q.last.a = *q.last.pending
+	} else {
+		q.last.a = copyAnswer{side: side}
 	}
-	q.last.a = copyAnswer{side: side}
+	q.last.pending = nil
 }
 
 func (q *SQLOnCopy) lastAnswer() copyAnswer {

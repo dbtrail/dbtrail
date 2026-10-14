@@ -597,6 +597,8 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 				sql := tgt.SQL
 				status = func(ctx context.Context) [][2]string { return srv.RouterStatus(ctx, id, sql) }
 			}
+			// Its runs on the copy wait for the router's decision (#2369).
+			tgt.SQL.MarkRouted()
 			h.BindRouter(fw, shim.RouterConfig{
 				Status:      status,
 				MaxCopyAge:  cfg.RouteMaxCopyAge,

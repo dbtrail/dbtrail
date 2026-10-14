@@ -770,7 +770,9 @@ asynchronous replica. Its age is a number to watch, not a rule:
   old that was when the statement finished (`last_answer_age_seconds`). This
   is what capture had indexed by then, not the source at that instant. When
   it cannot be told, both read `unknown`. The number can be older than the
-  truth but never newer.
+  truth but never newer. Statements on the `_flashback`, `_snapshot` and
+  `_diff` schemas are not counted here, as they are not in the statement
+  counts.
 
 If an application cannot read a result as old as the last snapshot, have it
 connect straight to MySQL and not through this port.

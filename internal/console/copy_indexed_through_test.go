@@ -256,29 +256,53 @@ func TestLastAnswerRows(t *testing.T) {
 	}
 }
 
-// A connection's last answer: the copy's when the copy ran it, MySQL's when
-// the router then forwarded it anyway, and the copy's tables are forgotten
-// with it.
+// A connection's last answer. Where the copy answers alone, each run is the
+// answer, a refusal included. Where the router decides, a run only counts
+// once the router says the copy answered: a result it refuses goes to
+// MySQL, and a probe of its own (the zone check) is no client's statement.
 func TestSQLOnCopy_lastAnswer(t *testing.T) {
-	q := &SQLOnCopy{}
-	if a := q.lastAnswer(); a.side != "" {
+	files := map[string][]string{"/d/": {"/d/a.parquet"}}
+	ran := time.Now()
+
+	alone := &SQLOnCopy{}
+	if a := alone.lastAnswer(); a.side != "" {
 		t.Fatalf("fresh connection: %+v", a)
 	}
-	ran := time.Now()
-	q.noteCopyAnswer(map[string][]string{"/d/": {"/d/a.parquet"}}, true, ran)
-	if a := q.lastAnswer(); a.side != "copy" || len(a.files) != 1 || !a.ok {
-		t.Fatalf("after the copy: %+v", a)
+	alone.noteCopyAnswer(files, true, ran)
+	if a := alone.lastAnswer(); a.side != "copy" || len(a.files) != 1 || !a.ok {
+		t.Fatalf("copy alone, after a run: %+v", a)
 	}
-	q.NoteRoute("copy")
-	if a := q.lastAnswer(); a.side != "copy" || len(a.files) != 1 {
-		t.Fatalf("the router's own copy decision must keep the tables: %+v", a)
+	alone.noteCopyRefused()
+	if a := alone.lastAnswer(); a.side != "refused" || a.files != nil {
+		t.Fatalf("copy alone, after a refusal: %+v", a)
 	}
-	q.NoteRoute("mysql")
-	if a := q.lastAnswer(); a.side != "mysql" || a.files != nil {
-		t.Fatalf("after a forward: %+v", a)
+
+	routed := &SQLOnCopy{}
+	routed.MarkRouted()
+	routed.NoteRoute("mysql")
+	routed.noteCopyAnswer(files, true, ran) // the zone probe: no decision follows
+	if a := routed.lastAnswer(); a.side != "mysql" {
+		t.Fatalf("a run the router did not answer with replaced the answer: %+v", a)
 	}
+	routed.noteCopyAnswer(files, true, ran)
+	routed.NoteRoute("copy")
+	if a := routed.lastAnswer(); a.side != "copy" || len(a.files) != 1 {
+		t.Fatalf("routed, the copy answered: %+v", a)
+	}
+	routed.noteCopyAnswer(files, true, ran) // ran, then the router forwarded it
+	routed.NoteRoute("mysql")
+	if a := routed.lastAnswer(); a.side != "mysql" || a.files != nil {
+		t.Fatalf("routed, forwarded after the copy ran: %+v", a)
+	}
+	routed.noteCopyRefused()
+	routed.NoteRoute("copy") // nothing pending: never another statement's files
+	if a := routed.lastAnswer(); a.side != "copy" || a.files != nil {
+		t.Fatalf("routed, copy with nothing pending: %+v", a)
+	}
+
 	var nilQ *SQLOnCopy
 	nilQ.NoteRoute("mysql") // a connection with no copy: nothing to note, no panic
+	nilQ.MarkRouted()
 }
 
 // The wiring: a statement the copy really ran leaves, on its connection, the
@@ -312,6 +336,16 @@ func TestSQLOnCopy_noteTheSnapshotThatRan(t *testing.T) {
 		want := filepath.Dir(f.schemaDir) + string(filepath.Separator)
 		if got := dirs(q); len(got) != 1 || got[0] != want {
 			t.Fatalf("read from %v, want %s", got, want)
+		}
+		// A statement the copy cannot run is this connection's answer too.
+		if _, err := q.Run(context.Background(), "SELECT nope FROM", "", sqlsandbox.Session{}); err == nil {
+			t.Fatal("a broken statement ran")
+		}
+		if a := q.lastAnswer(); a.side != "refused" {
+			t.Fatalf("after a refusal: %+v", a)
+		}
+		if _, err := q.Run(context.Background(), stmt, "", sqlsandbox.Session{}); err != nil {
+			t.Fatal(err)
 		}
 		// This fixture's footers record no producer and no mark: the status
 		// says so, and guesses nothing.
