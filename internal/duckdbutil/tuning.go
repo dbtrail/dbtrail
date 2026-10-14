@@ -2,9 +2,7 @@ package duckdbutil
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -123,81 +121,114 @@ func (t Tuning) Statements() []string {
 //
 // One directory PER SESSION (#2387): DuckDB names its spill files by block
 // size only (duckdb_temp_storage_DEFAULT-0.tmp, ...), so two sessions
-// spilling into one directory, in one process or two, overwrite each other's
-// files and the queries fail with "Could not read enough bytes". DuckDB
-// creates the directory on its first spill and removes it when the session
-// closes; what a killed process leaves behind is removed by the next process
-// that opens a session (removeDeadSpillDirs).
+// spilling into one directory, in one process or two, overwrote each other's
+// files and the queries failed with "Could not read enough bytes" or hung.
+// Each session gets <process dir>/<n>: DuckDB creates it on its first spill
+// and removes it when the session closes. The process dir is created once, by
+// os.MkdirTemp (owner-only, unguessable name), so no other user on the host
+// can read the spilled rows or plant the directory first. What a killed
+// process leaves behind is removed when a later process starts its first
+// session (removeDeadSpillDirs).
 func SetTempDirectory(ctx context.Context, db *sql.DB) {
-	sweepDeadSpillDirs.Do(func() { removeDeadSpillDirs(os.TempDir()) })
-	dir := filepath.Join(os.TempDir(), spillDirName(os.Getpid(), spillNonce, spillSeq.Add(1)))
-	applyTuningStmt(ctx, db, "SET temp_directory = '"+strings.ReplaceAll(dir, "'", "''")+"'")
+	applyTuningStmt(ctx, db, "SET temp_directory = '"+strings.ReplaceAll(sessionSpillDir(), "'", "''")+"'")
 }
 
-// spillDirPrefix starts every session spill directory's name; the rest is
-// "<pid>-<nonce>-<seq>". The nonce tells this process from an earlier one
-// that had the same pid (a restarted container's process is pid 1 again).
+// spillDirPrefix starts the name of a process's spill directory under the OS
+// temp dir; the rest is "<host>-<pid>-<random>". The host keeps the sweep off
+// the directories of another container sharing the same /tmp, whose pids mean
+// nothing here; the random part tells this process from an earlier one with
+// the same pid (a restarted container's process is pid 1 again).
 const spillDirPrefix = "bintrail-duckdb-spill-"
 
 var (
-	spillNonce         = newSpillNonce()
-	spillSeq           atomic.Uint64
-	sweepDeadSpillDirs sync.Once
+	spillOnce sync.Once
+	spillRoot string // this process's spill directory; "" if it could not be made
+	spillSeq  atomic.Uint64
 )
 
-func newSpillNonce() string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+func sessionSpillDir() string {
+	spillOnce.Do(func() {
+		host := spillHost()
+		removeDeadSpillDirs(os.TempDir(), host)
+		dir, err := os.MkdirTemp("", fmt.Sprintf("%s%s-%d-", spillDirPrefix, host, os.Getpid()))
+		if err != nil {
+			slog.Warn("could not create the DuckDB spill directory; sessions will share the OS temp dir", "error", err)
+			return
+		}
+		spillRoot = dir
+	})
+	if spillRoot == "" {
+		return os.TempDir()
+	}
+	return filepath.Join(spillRoot, strconv.FormatUint(spillSeq.Add(1), 10))
 }
 
-func spillDirName(pid int, nonce string, seq uint64) string {
-	return fmt.Sprintf("%s%d-%s-%d", spillDirPrefix, pid, nonce, seq)
+// spillHost is the hostname as it goes into a directory name: no separators.
+func spillHost() string {
+	h, _ := os.Hostname()
+	h = strings.Map(func(r rune) rune {
+		if r == '/' || r == os.PathSeparator || r == 0 {
+			return '_'
+		}
+		return r
+	}, h)
+	if h == "" {
+		return "unknown"
+	}
+	return h
 }
 
-// removeDeadSpillDirs removes the spill directories in dir whose process is
-// gone: a session that closes removes its own, so one still there after its
-// process ended was left by a kill (out of memory, say), and it can hold as
-// much as that session spilled. A directory of an earlier process with this
-// process's pid is dead too. Anything not named by spillDirName is left alone.
-func removeDeadSpillDirs(dir string) {
+// removeDeadSpillDirs removes the spill directories in dir that processes on
+// this host left when they were killed (out of memory, say): a session that
+// closes removes its own, so one still there belongs to a process that is
+// gone, and it can hold as much as that process spilled. It runs before this
+// process makes its own, so a directory with this process's pid is an earlier
+// process's and dead too. Another host's directories, and anything not named
+// like one, are left alone.
+func removeDeadSpillDirs(dir, host string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		slog.Debug("could not list the temp dir for dead DuckDB spill directories", "dir", dir, "error", err)
 		return
 	}
 	for _, e := range entries {
-		pid, nonce, ok := parseSpillDirName(e.Name())
-		if !ok || !e.IsDir() {
+		h, pid, ok := parseSpillDirName(e.Name())
+		if !ok || !e.IsDir() || h != host {
 			continue
 		}
-		if pid == os.Getpid() {
-			if nonce == spillNonce {
-				continue
-			}
-		} else if processAlive(pid) {
+		path := filepath.Join(dir, e.Name())
+		if pid != os.Getpid() && processAlive(pid) {
 			continue
 		}
-		_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+		if err := os.RemoveAll(path); err != nil {
+			slog.Warn("could not remove a DuckDB spill directory a killed process left", "dir", path, "error", err)
+			continue
+		}
+		slog.Debug("removed a DuckDB spill directory a killed process left", "dir", path)
 	}
 }
 
-func parseSpillDirName(name string) (pid int, nonce string, ok bool) {
+// parseSpillDirName reads "<prefix><host>-<pid>-<random>"; the host may hold
+// dashes, so pid and random are taken from the right.
+func parseSpillDirName(name string) (host string, pid int, ok bool) {
 	rest, found := strings.CutPrefix(name, spillDirPrefix)
 	if !found {
-		return 0, "", false
+		return "", 0, false
 	}
-	parts := strings.Split(rest, "-")
-	if len(parts) != 3 || parts[1] == "" {
-		return 0, "", false
+	i := strings.LastIndexByte(rest, '-')
+	if i <= 0 || i == len(rest)-1 {
+		return "", 0, false
 	}
-	pid, err := strconv.Atoi(parts[0])
+	rest = rest[:i]
+	j := strings.LastIndexByte(rest, '-')
+	if j <= 0 {
+		return "", 0, false
+	}
+	pid, err := strconv.Atoi(rest[j+1:])
 	if err != nil || pid <= 0 {
-		return 0, "", false
+		return "", 0, false
 	}
-	if _, err := strconv.ParseUint(parts[2], 10, 64); err != nil {
-		return 0, "", false
-	}
-	return pid, parts[1], true
+	return rest[:j], pid, true
 }
 
 // processAlive reports whether a process with pid exists. EPERM means it

@@ -135,8 +135,9 @@ func assertUsable(t *testing.T, db *sql.DB) {
 // other's. Two sessions spilling at once must both get the right answer, and
 // each session's directory must be gone once it closes.
 func TestSetTempDirectory_ownDirPerSession(t *testing.T) {
-	// Sessions colliding in one directory can also hang instead of failing;
-	// the deadline turns that into a failure.
+	// Sessions colliding in one directory can also hang inside DuckDB, where
+	// the deadline does not reach: a regression may show as the go test
+	// timeout rather than as these assertions.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	const n = 3_000_000
@@ -174,7 +175,7 @@ func TestSetTempDirectory_ownDirPerSession(t *testing.T) {
 	}
 	wg.Wait()
 	if dirs[0] == dirs[1] {
-		t.Fatalf("two sessions share the spill directory %s", dirs[0])
+		t.Errorf("two sessions share the spill directory %s", dirs[0])
 	}
 	for i := range 2 {
 		if errs[i] != nil || counts[i] != n {
@@ -186,38 +187,63 @@ func TestSetTempDirectory_ownDirPerSession(t *testing.T) {
 	}
 }
 
-// TestRemoveDeadSpillDirs: a spill directory whose process is gone, or that an
-// earlier process with this pid left, is removed; this process's own, a live
-// process's, and anything not named like one stay.
+// TestSetTempDirectory_privateProcessDir: the sessions' directories sit in
+// one per-process directory only its owner can enter, so no other user can
+// read spilled rows or create a session's directory first.
+func TestSetTempDirectory_privateProcessDir(t *testing.T) {
+	db := openDuckDB(t)
+	SetTempDirectory(context.Background(), db)
+	got := currentSetting(t, db, "temp_directory")
+	parent := filepath.Dir(got)
+	if parent != spillRoot || spillRoot == "" {
+		t.Fatalf("session dir %s not under the process dir %q", got, spillRoot)
+	}
+	fi, err := os.Stat(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o700 {
+		t.Errorf("process spill dir mode = %v, want 0700", fi.Mode().Perm())
+	}
+	if h, pid, ok := parseSpillDirName(filepath.Base(parent)); !ok || h != spillHost() || pid != os.Getpid() {
+		t.Errorf("process spill dir %s: host %q pid %d ok %v", parent, h, pid, ok)
+	}
+}
+
+// TestRemoveDeadSpillDirs: on this host, a spill directory whose process is
+// gone, or an earlier one with this process's pid, is removed; a live
+// process's, another host's, and anything not named like one stay.
 func TestRemoveDeadSpillDirs(t *testing.T) {
 	dir := t.TempDir()
 	me := os.Getpid()
 	dead := deadPid(t)
-	mk := func(name string) string {
-		p := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Join(p, "x"), 0o700); err != nil {
+	name := func(host string, pid int) string {
+		return fmt.Sprintf("%s%s-%d-%s", spillDirPrefix, host, pid, "123456")
+	}
+	mk := func(n string) string {
+		p := filepath.Join(dir, n)
+		if err := os.MkdirAll(filepath.Join(p, "1"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		return p
 	}
 	gone := []string{
-		mk(spillDirName(dead, "aaaa", 1)),
-		mk(spillDirName(me, "0ld0", 3)), // an earlier process that had this pid
+		mk(name("box-a", dead)),
+		mk(name("box-a", me)), // an earlier process that had this pid
 	}
 	stay := []string{
-		mk(spillDirName(me, spillNonce, 7)),
-		mk(spillDirName(os.Getppid(), "bbbb", 1)),
-		mk(spillDirPrefix + "not-a-pid-1"),
-		mk(spillDirPrefix + fmt.Sprint(dead)),
+		mk(name("box-a", os.Getppid())),
+		mk(name("box-b", dead)), // another container's; its pids mean nothing here
+		mk(spillDirPrefix + "box-a-x-1"),
 		mk("something-else"),
 	}
-	file := filepath.Join(dir, spillDirName(dead, "cccc", 2))
+	file := filepath.Join(dir, name("box-a", dead)+"0")
 	if err := os.WriteFile(file, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	stay = append(stay, file)
 
-	removeDeadSpillDirs(dir)
+	removeDeadSpillDirs(dir, "box-a")
 	for _, p := range gone {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("%s should be removed: %v", filepath.Base(p), err)
@@ -232,24 +258,24 @@ func TestRemoveDeadSpillDirs(t *testing.T) {
 
 func TestParseSpillDirName(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		pid   int
-		nonce string
-		ok    bool
+		name string
+		host string
+		pid  int
+		ok   bool
 	}{
-		{spillDirName(42, "ab12", 9), 42, "ab12", true},
-		{spillDirPrefix + "42-ab12", 0, "", false},
-		{spillDirPrefix + "42--9", 0, "", false},
-		{spillDirPrefix + "0-ab12-9", 0, "", false},
-		{spillDirPrefix + "-1-ab12-9", 0, "", false},
-		{spillDirPrefix + "x-ab12-9", 0, "", false},
-		{spillDirPrefix + "42-ab12-x", 0, "", false},
-		{spillDirPrefix + "42-ab-12-9", 0, "", false},
-		{"other-42-ab12-9", 0, "", false},
+		{spillDirPrefix + "box-42-123", "box", 42, true},
+		{spillDirPrefix + "ip-10-0-0-1-42-987", "ip-10-0-0-1", 42, true},
+		{spillDirPrefix + "box-42-", "", 0, false},
+		{spillDirPrefix + "box-42", "", 0, false},
+		{spillDirPrefix + "-42-123", "", 0, false},
+		{spillDirPrefix + "box-0-123", "", 0, false},
+		{spillDirPrefix + "box-x-123", "", 0, false},
+		{spillDirPrefix + "42-123", "", 0, false},
+		{"other-box-42-123", "", 0, false},
 	} {
-		pid, nonce, ok := parseSpillDirName(tc.name)
-		if pid != tc.pid || nonce != tc.nonce || ok != tc.ok {
-			t.Errorf("parseSpillDirName(%q) = %d, %q, %v; want %d, %q, %v", tc.name, pid, nonce, ok, tc.pid, tc.nonce, tc.ok)
+		host, pid, ok := parseSpillDirName(tc.name)
+		if host != tc.host || pid != tc.pid || ok != tc.ok {
+			t.Errorf("parseSpillDirName(%q) = %q, %d, %v; want %q, %d, %v", tc.name, host, pid, ok, tc.host, tc.pid, tc.ok)
 		}
 	}
 }
