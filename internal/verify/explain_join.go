@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,10 +84,19 @@ func newRowJoinCapped(ctx context.Context, tuning duckdbutil.Tuning, memoryLimit
 	if threads <= 0 {
 		threads = duckdbutil.DefaultTuning().Threads
 	}
-	// memory_limit and temp_directory always travel together (Tuning.Apply's
-	// contract): a cap with nowhere to spill fails instead of spilling.
-	duckdbutil.Tuning{Threads: threads, MemoryLimit: memoryLimit}.Apply(ctx, db)
-	duckdbutil.SetTempDirectory(ctx, db)
+	duckdbutil.Tuning{Threads: threads}.Apply(ctx, db)
+	// The cap IS this session's guarantee, so unlike the shared sessions'
+	// best-effort Apply a cap that does not take is fatal. It travels with
+	// its spill directory (Tuning.Apply's contract), here inside dir rather
+	// than the shared OS temp dir, so close() removes the spill files too
+	// and they never mix with the reconstruction session's.
+	for _, stmt := range append(duckdbutil.Tuning{MemoryLimit: memoryLimit}.Statements(),
+		"SET temp_directory = '"+strings.ReplaceAll(filepath.Join(dir, "spill"), "'", "''")+"'") {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			j.close()
+			return nil, fmt.Errorf("cap drill-down join (%s): %w", stmt, err)
+		}
+	}
 	for _, stmt := range []string{
 		"CREATE TABLE truth (seq BIGINT, k1 UBIGINT, k2 UBIGINT, c1 UBIGINT, c2 UBIGINT, d UBIGINT, pk BLOB, cells BLOB)",
 		"CREATE TABLE rec (seq BIGINT, k1 UBIGINT, k2 UBIGINT, c1 UBIGINT, c2 UBIGINT, d UBIGINT, pk BLOB, cells BLOB)",
@@ -197,7 +207,8 @@ func (j *rowJoin) diff(ctx context.Context, cols []metadata.ColumnMeta, ex *Mism
 		if err != nil {
 			return err
 		}
-		ex.Diffs = append(ex.Diffs, shown...)
+		// A key the new baseline holds twice joins twice; keep the cap.
+		ex.Diffs = append(ex.Diffs, shown[:min(len(shown), maxExplainRows)]...)
 	}
 	if room := maxExplainRows - len(ex.Diffs); room > 0 && missing > 0 {
 		pks, err := queryColumn[[]byte](ctx, j.conn, missingFirstQuery, room)
@@ -309,7 +320,9 @@ func (j *rowJoin) close() {
 		_ = j.conn.Close()
 	}
 	_ = j.db.Close()
-	_ = os.RemoveAll(j.dir)
+	if err := os.RemoveAll(j.dir); err != nil {
+		slog.Warn("could not remove the Explain working files", "dir", j.dir, "error", err)
+	}
 }
 
 // encodeCells serializes one row's canonical cells in column order (only the

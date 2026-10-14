@@ -264,8 +264,7 @@ func (ex *MismatchExplanation) Write(w io.Writer) {
 	}
 	if ex.Total == 0 {
 		// A mismatch can be flagged on row COUNT while every matched PK lines up
-		// cell-for-cell (e.g. a duplicate-PK pathology collapsing in the join).
-		// Say so rather than print nothing.
+		// cell-for-cell. Say so rather than print nothing.
 		fmt.Fprintln(w, "  no per-row content differences found; the mismatch is in row count, not row content")
 		return
 	}
@@ -297,9 +296,8 @@ func (ex *MismatchExplanation) Write(w io.Writer) {
 }
 
 // overflowBreakdown summarizes the differing rows that exceeded the cap, by kind
-// (missing/changed/extra). Returns "" when per-kind totals are unavailable (a
-// hand-built explanation that never went through add), so Write falls back to a
-// plain count.
+// (missing/changed/extra). Returns "" when per-kind totals are unavailable (an
+// explanation built without them), so Write falls back to a plain count.
 func (ex *MismatchExplanation) overflowBreakdown() string {
 	if len(ex.byKind) == 0 {
 		return ""

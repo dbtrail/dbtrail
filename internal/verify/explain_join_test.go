@@ -3,6 +3,7 @@ package verify
 import (
 	"context"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -234,5 +235,9 @@ func TestRowJoin_spillsUnderCap(t *testing.T) {
 	}
 	if len(ex.Diffs) != maxExplainRows || ex.Diffs[0].PK != "1" || ex.Diffs[1].PK != "4" {
 		t.Fatalf("first diffs = %+v", ex.Diffs[:2])
+	}
+	j.close()
+	if _, err := os.Stat(j.dir); !os.IsNotExist(err) {
+		t.Errorf("working dir %s (database and spill files) not removed: %v", j.dir, err)
 	}
 }
