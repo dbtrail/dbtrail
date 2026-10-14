@@ -813,6 +813,13 @@ func Format(rows []ResultRow, format string, w io.Writer) (int, error) {
 
 // ─── SQL builder ──────────────────────────────────────────────────────────────
 
+// resultColumns are the columns of binlog_events scanRows reads, in its
+// order, qualified for buildQuery's join.
+const resultColumns = `be.event_id, be.binlog_file, be.start_pos, be.end_pos, be.event_timestamp,
+	         be.gtid, be.connection_id, be.schema_name, be.table_name, be.event_type, be.pk_values,
+	         be.changed_columns, be.row_before, be.row_after, be.schema_version, be.query_text, be.query_hash,
+	         be.commit_ts_us`
+
 func buildQuery(opts Options) (string, []any) {
 	var where []string
 	var args []any
@@ -1164,10 +1171,7 @@ func buildQuery(opts Options) (string, []any) {
 	//
 	// The PK is (event_id, event_timestamp) — joining on both keys keeps the
 	// match 1:1 and lets MySQL prune partitions on the eq_ref lookup.
-	cols := `be.event_id, be.binlog_file, be.start_pos, be.end_pos, be.event_timestamp,
-	         be.gtid, be.connection_id, be.schema_name, be.table_name, be.event_type, be.pk_values,
-	         be.changed_columns, be.row_before, be.row_after, be.schema_version, be.query_text, be.query_hash,
-	         be.commit_ts_us`
+	cols := resultColumns
 
 	dir := OrderDirection(opts.Order)
 	whereSQL := ""

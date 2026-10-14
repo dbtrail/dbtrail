@@ -1,6 +1,7 @@
 package reconstruct
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"sort"
@@ -259,4 +260,16 @@ func tailKeyValues(key string, n int) ([]string, error) {
 		}
 	}
 	return parts, nil
+}
+
+// NewTailDecoder decodes a page of schema.table's events as the refresh does
+// before it folds them (enum and set labels per snapshot epoch, binaries),
+// built once for a tail and reused for every page: its per-epoch resolvers
+// are what a call costs.
+func NewTailDecoder(db *sql.DB, schema, table string, latest *metadata.Resolver) func([]query.ResultRow) {
+	d := newEventDecoder(db, schema, table, latest)
+	return func(page []query.ResultRow) {
+		d.mapEnums(page)
+		d.decodeBinaries(page)
+	}
 }
