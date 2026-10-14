@@ -21,6 +21,8 @@ import (
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/storage"
 	"github.com/dbtrail/dbtrail/internal/verify"
 )
@@ -550,5 +552,37 @@ func TestVerifyChildSessions(t *testing.T) {
 	}
 	if got := verifyChildSessions(verifyChildCheck); got != 1 {
 		t.Errorf("a check table runs %d sessions at once, want 1", got)
+	}
+}
+
+// TestNoticeOnceCarriesTheOnceMarker: the console keeps a once-per-process
+// notice once across its verify children by a mark in the line. The mark
+// the notice writes and the one the relay looks for are spelled in two
+// packages; this is where they must agree.
+func TestNoticeOnceCarriesTheOnceMarker(t *testing.T) {
+	var buf strings.Builder
+	var n reconstruct.NoticeOnce
+	n.To(slog.New(slog.NewTextHandler(&buf, nil)))(slog.LevelWarn, "index also written", "mark", 7)
+	if !strings.Contains(buf.String(), " "+sqlsandbox.OnceMarker) {
+		t.Errorf("a NoticeOnce line %q lacks %q, so every check table would log it again", buf.String(), sqlsandbox.OnceMarker)
+	}
+}
+
+// TestRunBaselineAnchored_finishedTableKeepsItsVerdict: a stop that arrives
+// after a table finished does not take that table's verdict with it.
+func TestRunBaselineAnchored_finishedTableKeepsItsVerdict(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, root, resolver := checkFixture(t)
+	s.ctx = ctx
+	s.checkPairFn = func(context.Context, string, bool, verify.BaselinePair) (verify.TableResult, error) {
+		cancel()
+		return verify.TableResult{Schema: "shop", Table: "orders", Status: verify.StatusMatch}, nil
+	}
+	if err := s.runBaselineAnchored(console.VerifyRequest{ServerID: "s1"}, root, nil, resolver, "idx", ""); err != nil {
+		t.Fatalf("err = %v, want the run to end with its one table done", err)
+	}
+	if rs := s.jobs["s1"].status.Results; len(rs) != 1 || rs[0].Status != "match" {
+		t.Errorf("results = %+v, want the finished table's match", rs)
 	}
 }

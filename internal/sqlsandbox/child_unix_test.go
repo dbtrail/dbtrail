@@ -260,7 +260,7 @@ func TestRunChild_LogOnce(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	once := &LineSet{}
 	for i := range 3 {
-		job := shJob(`read j; echo "time=2026-10-14T0` + strconv.Itoa(i) + `:00:00Z level=WARN msg=\"index also written by bintrail index\"" >&2; echo "level=WARN msg=table` + strconv.Itoa(i) + `" >&2; echo ok`)
+		job := shJob(`read j; echo "time=2026-10-14T0` + strconv.Itoa(i) + `:00:00Z level=WARN msg=\"index also written by bintrail index\" notice=once" >&2; echo "level=WARN msg=table` + strconv.Itoa(i) + `" >&2; echo "level=ERROR msg=\"index unreachable\"" >&2; echo ok`)
 		job.LogOnce = once
 		if _, err := RunChild(context.Background(), job); err != nil {
 			t.Fatal(err)
@@ -268,7 +268,12 @@ func TestRunChild_LogOnce(t *testing.T) {
 	}
 	log := buf.String()
 	if n := strings.Count(log, "index also written"); n != 1 {
-		t.Errorf("the shared warning was logged %d times, want once:\n%s", n, log)
+		t.Errorf("the once-per-process notice was logged %d times, want once:\n%s", n, log)
+	}
+	// Unmarked lines repeat: an error every table hits is logged for every
+	// table, not only the first.
+	if n := strings.Count(log, "index unreachable"); n != 3 {
+		t.Errorf("an unmarked error was logged %d times, want 3:\n%s", n, log)
 	}
 	for i := range 3 {
 		if !strings.Contains(log, "msg=table"+strconv.Itoa(i)) {

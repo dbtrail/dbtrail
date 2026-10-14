@@ -154,10 +154,11 @@ func consoleLogLevel() string {
 	return "error"
 }
 
-// verifyChildSeen is the log lines a verify child already relayed in this
-// process. Warnings the verify engine gives once per process (an index that
-// `bintrail index` also wrote into, say) would otherwise come once per check
-// table, since each table is a new process.
+// verifyChildSeen is the once-per-process notices a verify child already
+// relayed in this process. The verify engine gives some once per process
+// (an index that `bintrail index` also wrote into, say, through
+// reconstruct.NoticeOnce); they would otherwise come once per check table,
+// since each table is a new process. Every other line is relayed each time.
 var verifyChildSeen = &sqlsandbox.LineSet{}
 
 // verifyChildStopGrace is how long a child whose job was dropped has to stop

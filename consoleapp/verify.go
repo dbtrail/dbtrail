@@ -616,13 +616,14 @@ func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baseli
 		} else if lerr := s.inCheckLane(ctx, req.ServerID, func(ctx context.Context) { res, err = s.checkPair(ctx, req.IndexDSN, req.NoArchive, flavor, p) }); lerr != nil {
 			return lerr
 		}
-		if cerr := ctx.Err(); cerr != nil {
+		if cerr := ctx.Err(); cerr != nil && err != nil {
 			// Stopped during this table: the run is interrupted, and the
 			// table's "context canceled" is not a verdict. Checked here and
 			// not only at the top of the loop, or a stop during the LAST
 			// table would end the run as succeeded with that error persisted
 			// (#1191). The child is killed at once on a stop, which makes
-			// that the usual case, not a rare one.
+			// that the usual case, not a rare one. A table that finished
+			// before the stop keeps its verdict.
 			return fmt.Errorf("verify interrupted: %w", cerr)
 		}
 		if err != nil {

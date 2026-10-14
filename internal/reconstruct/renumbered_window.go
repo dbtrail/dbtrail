@@ -97,9 +97,18 @@ func (n *NoticeOnce) To(logger *slog.Logger) func(level slog.Level, msg string, 
 		if l == nil {
 			l = slog.Default()
 		}
-		l.Log(context.Background(), level, msg, args...)
+		l.Log(context.Background(), level, msg, append(args, NoticeOnceAttr, NoticeOnceValue)...)
 	}
 }
+
+// NoticeOnceAttr and NoticeOnceValue mark a line a NoticeOnce wrote: meant
+// once per process. A process that relays the logs of children, each a new
+// process, keeps the once across them by this mark (sqlsandbox
+// ChildJob.LogOnce), and repeats every other line.
+const (
+	NoticeOnceAttr  = "notice"
+	NoticeOnceValue = "once"
+)
 
 // renumberChecked remembers, per snapshot mark, table and read floor, the
 // part of the index a bounded check already found clean: every change with

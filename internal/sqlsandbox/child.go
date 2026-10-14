@@ -56,11 +56,17 @@ type ChildJob struct {
 	// names (WARN when it names none).
 	LogMsg   string
 	LogAttrs []any
-	// LogOnce, when set, is shared by a caller's children: a line one of
-	// them already logged (its time aside) is not logged again. For a child
-	// that runs code which warns once per PROCESS, started once per table.
+	// LogOnce, when set, is shared by a caller's children: a line marked
+	// OnceMarker that one of them already logged (its time aside) is not
+	// logged again. For a child that runs code which warns once per
+	// PROCESS, started once per table. Every unmarked line is logged each
+	// time, errors and crash output included.
 	LogOnce *LineSet
 }
+
+// OnceMarker is the slog text a line meant once per process carries
+// (reconstruct.NoticeOnceAttr=NoticeOnceValue).
+const OnceMarker = "notice=once"
 
 // LineSet is the log lines already seen, for ChildJob.LogOnce. Past
 // lineSetMax lines it starts over: a repeat then and then is better than
@@ -72,9 +78,13 @@ type LineSet struct {
 
 const lineSetMax = 4096
 
-// first reports whether line (its slog time= field aside) is new, and
-// records it.
+// first reports whether line should be logged: any line without
+// OnceMarker, and a marked one the first time it is seen (its slog time=
+// field aside).
 func (s *LineSet) first(line string) bool {
+	if !strings.Contains(line, " "+OnceMarker) {
+		return true
+	}
 	if rest, ok := strings.CutPrefix(line, "time="); ok {
 		if _, after, found := strings.Cut(rest, " "); found {
 			line = after
