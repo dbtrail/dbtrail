@@ -247,3 +247,32 @@ func TestChildFailure_OwnKillIsNotTheKernel(t *testing.T) {
 		t.Errorf("our own kill read as one from outside: %v", c.failure(0))
 	}
 }
+
+// TestRunChild_LogOnce: children sharing a LineSet log a line (its time
+// aside) once between them, the way code that warns once per process did
+// when it ran in this one.
+func TestRunChild_LogOnce(t *testing.T) {
+	shChild(t)
+	noFence(t)
+	var buf syncBuffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	once := &LineSet{}
+	for i := range 3 {
+		job := shJob(`read j; echo "time=2026-10-14T0` + strconv.Itoa(i) + `:00:00Z level=WARN msg=\"index also written by bintrail index\"" >&2; echo "level=WARN msg=table` + strconv.Itoa(i) + `" >&2; echo ok`)
+		job.LogOnce = once
+		if _, err := RunChild(context.Background(), job); err != nil {
+			t.Fatal(err)
+		}
+	}
+	log := buf.String()
+	if n := strings.Count(log, "index also written"); n != 1 {
+		t.Errorf("the shared warning was logged %d times, want once:\n%s", n, log)
+	}
+	for i := range 3 {
+		if !strings.Contains(log, "msg=table"+strconv.Itoa(i)) {
+			t.Errorf("a distinct line (table%d) was dropped:\n%s", i, log)
+		}
+	}
+}

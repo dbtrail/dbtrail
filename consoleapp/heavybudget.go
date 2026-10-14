@@ -29,7 +29,8 @@ const (
 	// snapshotSessions: a fold runs daemonFoldParallelism tables at once,
 	// each with its own sessions.
 	snapshotSessions = daemonFoldParallelism
-	// checkSessions: an Explain's reconstruction and its join run together.
+	// checkSessions: an Explain's reconstruction and its join run together
+	// (a check table runs one session at a time, under the same budget).
 	checkSessions = 2
 	// Per session. The floor is the least memory the table-delta query (a
 	// GROUP BY over every key, which DuckDB does not spill well) was

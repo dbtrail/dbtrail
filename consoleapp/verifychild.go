@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"runtime/debug"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
+	"github.com/dbtrail/dbtrail/internal/storage"
 	"github.com/dbtrail/dbtrail/internal/verify"
 )
 
@@ -58,6 +60,15 @@ type verifyChildJob struct {
 	Schema    string              `json:"schema"`
 	Table     string              `json:"table"`
 	Pair      verify.BaselinePair `json:"pair"`
+	// SourceFlavor is the run's, read once by the parent; "" reads it in the
+	// child (Explain).
+	SourceFlavor string `json:"source_flavor,omitempty"`
+	// BucketStores is the console's bucket→store table (an S3 endpoint and
+	// keys per bucket, from its registry), which lives only in the parent's
+	// memory: without it a child reads a server's copy on its own S3 with the
+	// environment's endpoint and keys, and fails. Secret included, so it
+	// travels on stdin only (storage.EncodeBucketStoresForChild).
+	BucketStores json.RawMessage `json:"bucket_stores,omitempty"`
 	// Tuning is the DuckDB budget per session the parent's lane gave
 	// (laneCtx): the child's sessions get the same.
 	Tuning duckdbutil.Tuning `json:"tuning"`
@@ -87,8 +98,8 @@ const verifyChildGoAllowance = 512 << 20
 // checkSessions DuckDB sessions together, each with the lane's budget (a
 // check table runs no more than that), plus
 // verifyChildGoAllowance. The child's ceiling is this plus the worker headroom
-// (sqlsandbox.CeilingBytes). duckdb is the sessions' part alone.
-func verifyChildMemory(t duckdbutil.Tuning) (total string, duckdb int64, err error) {
+// (sqlsandbox.CeilingBytes). perSession is one session's limit.
+func verifyChildMemory(t duckdbutil.Tuning) (total string, perSession int64, err error) {
 	per, err := cliutil.ParseByteSize(t.MemoryLimit)
 	if err != nil {
 		return "", 0, fmt.Errorf("the session memory %q does not parse: %w", t.MemoryLimit, err)
@@ -96,8 +107,7 @@ func verifyChildMemory(t duckdbutil.Tuning) (total string, duckdb int64, err err
 	if per <= 0 {
 		return "", 0, fmt.Errorf("the session memory %q is not a size", t.MemoryLimit)
 	}
-	duckdb = per * checkSessions
-	return fmt.Sprintf("%dMiB", (duckdb+verifyChildGoAllowance)>>20), duckdb, nil
+	return fmt.Sprintf("%dMiB", (per*checkSessions+verifyChildGoAllowance)>>20), per, nil
 }
 
 // duckdbOutsideLimit is what one DuckDB session holds outside its
@@ -107,26 +117,62 @@ const duckdbOutsideLimit = 190 << 20
 
 // verifyChildEnv is the console's environment plus, unless the operator set
 // one, a GOMEMLIMIT for the child's Go heap: what its ceiling leaves after
-// the DuckDB sessions, their limits and what they hold outside them. Go does
+// the DuckDB sessions that run at once (two for Explain, one for a check
+// table, whose reads run one after the other), their limits and what they
+// hold outside them; and the console's log level, so the child logs what
+// the console would. Go does
 // not know the cgroup's ceiling, and without it lets the heap grow to twice
 // what it holds before collecting; a limit above what fits would only start
 // collecting harder once the kernel had stopped the child.
-func verifyChildEnv(mem string, duckdb int64) []string {
-	env := os.Environ()
+func verifyChildEnv(mem string, perSession int64, sessions int) []string {
+	env := append(os.Environ(), verifyChildLogLevelEnv+"="+consoleLogLevel())
 	if _, set := os.LookupEnv("GOMEMLIMIT"); set {
 		return env
 	}
 	ceiling, err := sqlsandbox.CeilingBytes(mem)
-	goHeap := ceiling - duckdb - checkSessions*duckdbOutsideLimit
+	goHeap := ceiling - int64(sessions)*(perSession+duckdbOutsideLimit)
 	if err != nil || goHeap <= 0 {
 		return env
 	}
 	return append(env, fmt.Sprintf("GOMEMLIMIT=%dMiB", goHeap>>20))
 }
 
-// verifyChildStopGrace is how long a drill-down whose job was dropped has to stop
+// verifyChildLogLevelEnv carries the console's log level to the child.
+const verifyChildLogLevelEnv = "BINTRAIL_VERIFY_CHILD_LOG_LEVEL"
+
+// consoleLogLevel is the lowest level this process's logger takes.
+func consoleLogLevel() string {
+	ctx := context.Background()
+	switch {
+	case slog.Default().Enabled(ctx, slog.LevelDebug):
+		return "debug"
+	case slog.Default().Enabled(ctx, slog.LevelInfo):
+		return "info"
+	case slog.Default().Enabled(ctx, slog.LevelWarn):
+		return "warn"
+	}
+	return "error"
+}
+
+// verifyChildSeen is the log lines a verify child already relayed in this
+// process. Warnings the verify engine gives once per process (an index that
+// `bintrail index` also wrote into, say) would otherwise come once per check
+// table, since each table is a new process.
+var verifyChildSeen = &sqlsandbox.LineSet{}
+
+// verifyChildStopGrace is how long a child whose job was dropped has to stop
 // by itself and remove its working files before it is killed.
 const verifyChildStopGrace = 10 * time.Second
+
+// verifyChildSessions is how many DuckDB sessions a job runs at once: an
+// Explain its reconstruction and its join together, a check table its reads
+// one after the other.
+func verifyChildSessions(kind string) int {
+	if kind == verifyChildCheck {
+		return 1
+	}
+	return checkSessions
+}
 
 // runVerifyChild runs job in a child process and returns its answer. what
 // names the work in errors ("explain wp.posts"), noun the process ("drill-
@@ -135,11 +181,15 @@ const verifyChildStopGrace = 10 * time.Second
 // child and returns ctx.Err() unwrapped, so a cancel still reads as one.
 func runVerifyChild(ctx context.Context, job verifyChildJob, what, noun string) (verifyChildAnswer, error) {
 	t := duckdbutil.DefaultTuningFor(ctx)
-	mem, duckdbMem, err := verifyChildMemory(t)
+	mem, perSession, err := verifyChildMemory(t)
 	if err != nil {
 		return verifyChildAnswer{}, fmt.Errorf("%s: %w", what, err)
 	}
 	job.Tuning = t
+	if job.BucketStores, err = storage.EncodeBucketStoresForChild(storage.BucketStores()); err != nil {
+		return verifyChildAnswer{}, fmt.Errorf("%s: encode the S3 stores: %w", what, err)
+	}
+	sessions := verifyChildSessions(job.Kind)
 	in, err := json.Marshal(job)
 	if err != nil {
 		return verifyChildAnswer{}, fmt.Errorf("%s: encode the job: %w", what, err)
@@ -148,13 +198,14 @@ func runVerifyChild(ctx context.Context, job verifyChildJob, what, noun string) 
 		Args: []string{verifyWorkerCommand},
 		// The console's own environment: the child reads the index, S3 and
 		// the archives exactly as the console would.
-		Env:         verifyChildEnv(mem, duckdbMem),
+		Env:         verifyChildEnv(mem, perSession, sessions),
 		MemoryLimit: mem,
 		Input:       append(in, '\n'),
 		MaxOutput:   verifyChildMaxOutput,
 		StopGrace:   verifyChildStopGrace,
 		LogMsg:      "verify: " + noun + " process",
 		LogAttrs:    []any{"table", job.Schema + "." + job.Table},
+		LogOnce:     verifyChildSeen,
 	})
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
@@ -195,8 +246,8 @@ func explainInChild(ctx context.Context, indexDSN string, noArchive bool, schema
 
 // checkPairInChild is checkPairNow, run in a child process: one table of a
 // baseline-anchored check.
-func checkPairInChild(ctx context.Context, indexDSN string, noArchive bool, p verify.BaselinePair) (verify.TableResult, error) {
-	ans, err := runVerifyChild(ctx, verifyChildJob{Kind: verifyChildCheck,
+func checkPairInChild(ctx context.Context, indexDSN string, noArchive bool, flavor string, p verify.BaselinePair) (verify.TableResult, error) {
+	ans, err := runVerifyChild(ctx, verifyChildJob{Kind: verifyChildCheck, SourceFlavor: flavor,
 		IndexDSN: indexDSN, NoArchive: noArchive, Schema: p.Schema, Table: p.Table, Pair: p,
 	}, fmt.Sprintf("check %s.%s", p.Schema, p.Table), "check")
 	if err != nil {
@@ -211,8 +262,8 @@ func checkPairInChild(ctx context.Context, indexDSN string, noArchive bool, p ve
 // checkPairNow compares one table's pair, in the process it is called in:
 // the child's half of checkPairInChild. It opens its own index connection,
 // as explainNow does.
-func checkPairNow(ctx context.Context, indexDSN string, noArchive bool, p verify.BaselinePair) (verify.TableResult, error) {
-	cfg, closeDB, err := baselineConfigFor(indexDSN, noArchive)
+func checkPairNow(ctx context.Context, indexDSN string, noArchive bool, flavor string, p verify.BaselinePair) (verify.TableResult, error) {
+	cfg, closeDB, err := baselineConfigFor(indexDSN, noArchive, flavor)
 	if err != nil {
 		return verify.TableResult{}, err
 	}
@@ -249,6 +300,12 @@ func verifyWorkerMain(stdin io.Reader, stdout, stderr io.Writer, parentGone func
 		fmt.Fprintf(stderr, "verify worker: read the job: %v\n", err)
 		return 2
 	}
+	stores, err := storage.DecodeBucketStoresForChild(job.BucketStores)
+	if err != nil {
+		fmt.Fprintf(stderr, "verify worker: read the S3 stores: %v\n", err)
+		return 2
+	}
+	storage.SetBucketStores(stores)
 	ctx, cancel := context.WithCancel(duckdbutil.WithSessionTuning(context.Background(), job.Tuning))
 	defer cancel()
 	go func() {
@@ -281,7 +338,7 @@ func runVerifyJob(ctx context.Context, job verifyChildJob, stderr io.Writer) (an
 	}()
 	switch job.Kind {
 	case verifyChildCheck:
-		res, err := checkChildRun(ctx, job.IndexDSN, job.NoArchive, job.Pair)
+		res, err := checkChildRun(ctx, job.IndexDSN, job.NoArchive, job.SourceFlavor, job.Pair)
 		if err != nil {
 			return verifyChildAnswer{Error: err.Error()}
 		}
@@ -299,7 +356,7 @@ func runVerifyJob(ctx context.Context, job verifyChildJob, stderr io.Writer) (an
 }
 
 // isVerifyWorkerInvocation reports whether this process was started as the
-// drill-down child.
+// verify child (Explain or a check table).
 func isVerifyWorkerInvocation(args []string) bool {
 	return len(args) > 1 && args[1] == verifyWorkerCommand
 }
@@ -307,7 +364,11 @@ func isVerifyWorkerInvocation(args []string) bool {
 // runVerifyWorker is the child's whole life, for a main() or the hidden
 // command.
 func runVerifyWorker() int {
-	observe.Setup(os.Stderr, "text", "warn")
+	level := os.Getenv(verifyChildLogLevelEnv)
+	if level == "" {
+		level = "warn"
+	}
+	observe.Setup(os.Stderr, "text", level)
 	return verifyWorkerMain(os.Stdin, os.Stdout, os.Stderr, func() { os.Exit(1) })
 }
 
@@ -316,7 +377,7 @@ func runVerifyWorker() int {
 var verifyWorkerCmd = &cobra.Command{
 	Use:    verifyWorkerCommand,
 	Hidden: true,
-	Short:  "Internal: run one verify drill-down for the console (started by the console itself)",
+	Short:  "Internal: run one verify job for the console (started by the console itself)",
 	Args:   cobra.NoArgs,
 	RunE: func(*cobra.Command, []string) error {
 		if code := runVerifyWorker(); code != 0 {

@@ -37,7 +37,7 @@ func TestMain(m *testing.M) {
 		rootCmd.SetArgs(os.Args[1:])
 		os.Exit(Main("test", "none", "unknown"))
 	}
-	// Re-executed as the verify verify child (runVerifyChild spawns
+	// Re-executed as the verify child (runVerifyChild spawns
 	// THIS binary): a test names the work it should do instead of a real
 	// drill-down, which needs an index.
 	if isVerifyWorkerInvocation(os.Args) {

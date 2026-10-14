@@ -197,7 +197,9 @@ const renumberedPairRemedy = "verify compares a table's last read with the snaps
 
 // renumberNotices logs each of the renumbering check's lasting conditions
 // once per process: the console's verify engine runs the check per table on
-// every run.
+// every run. The console runs each table in a process of its own (#2385), so
+// there the once-per-process is kept by the console, which drops a line one
+// of its verify children already relayed.
 var renumberNotices reconstruct.NoticeOnce
 
 // pairNumbering runs the refresh's binlog-renumbering check (#2160) on the

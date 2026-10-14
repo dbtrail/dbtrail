@@ -414,7 +414,7 @@ func explainLogVerdict(err error, live bool) (slog.Level, string) {
 // DuckDB false. A test could only catch that after the fact; this makes it
 // not compile.
 func explainNow(ctx context.Context, indexDSN string, noArchive bool, schema, table string, pair verify.BaselinePair) (*console.VerifyExplanation, error) {
-	cfg, closeDB, err := baselineConfigFor(indexDSN, noArchive)
+	cfg, closeDB, err := baselineConfigFor(indexDSN, noArchive, "")
 	if err != nil {
 		return nil, err
 	}
@@ -445,8 +445,10 @@ func explainNow(ctx context.Context, indexDSN string, noArchive bool, schema, ta
 // baselineConfigFor opens its own index connection and builds the config a
 // baseline pair is compared or explained with. The pair already carries the
 // resolved Prev/New Parquet paths, so no baseline source is needed. closeDB
-// closes the connection.
-func baselineConfigFor(indexDSN string, noArchive bool) (cfg verify.BaselineConfig, closeDB func(), err error) {
+// closes the connection. flavor is the source flavor the caller already
+// read, so a check reads it once per run and not once per table; "" reads it
+// here.
+func baselineConfigFor(indexDSN string, noArchive bool, flavor string) (cfg verify.BaselineConfig, closeDB func(), err error) {
 	db, err := config.Connect(indexDSN)
 	if err != nil {
 		return cfg, nil, fmt.Errorf("connect index: %w", err)
@@ -456,10 +458,13 @@ func baselineConfigFor(indexDSN string, noArchive bool) (cfg verify.BaselineConf
 		db.Close()
 		return cfg, nil, fmt.Errorf("load schema snapshot: %w", err)
 	}
+	if flavor == "" {
+		flavor = query.SourceFlavor(db)
+	}
 	return verify.BaselineConfig{
 		IndexDB: db, Resolver: resolver, IndexDBName: indexDBName(indexDSN),
 		NoArchive: noArchive, ArchiveFetcher: parquetquery.Fetch,
-		SourceFlavor: query.SourceFlavor(db),
+		SourceFlavor: flavor,
 	}, func() { db.Close() }, nil
 }
 
@@ -608,8 +613,17 @@ func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baseli
 			// Decided while pairing: nothing to compare, so no turn and no
 			// process.
 			res, err = verify.VerifyBaselinePair(ctx, cfg, p)
-		} else if lerr := s.inCheckLane(ctx, req.ServerID, func(ctx context.Context) { res, err = s.checkPair(ctx, req.IndexDSN, req.NoArchive, p) }); lerr != nil {
+		} else if lerr := s.inCheckLane(ctx, req.ServerID, func(ctx context.Context) { res, err = s.checkPair(ctx, req.IndexDSN, req.NoArchive, flavor, p) }); lerr != nil {
 			return lerr
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			// Stopped during this table: the run is interrupted, and the
+			// table's "context canceled" is not a verdict. Checked here and
+			// not only at the top of the loop, or a stop during the LAST
+			// table would end the run as succeeded with that error persisted
+			// (#1191). The child is killed at once on a stop, which makes
+			// that the usual case, not a rare one.
+			return fmt.Errorf("verify interrupted: %w", cerr)
 		}
 		if err != nil {
 			res = verify.TableResult{Schema: p.Schema, Table: p.Table, Status: verify.StatusError, Detail: err.Error()}
@@ -642,11 +656,11 @@ func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baseli
 
 // checkPair compares one table of a baseline-anchored check: in a process
 // of its own (#2385), or with the test's stand-in.
-func (s *verifySupervisor) checkPair(ctx context.Context, indexDSN string, noArchive bool, p verify.BaselinePair) (verify.TableResult, error) {
+func (s *verifySupervisor) checkPair(ctx context.Context, indexDSN string, noArchive bool, flavor string, p verify.BaselinePair) (verify.TableResult, error) {
 	if s.checkPairFn != nil {
 		return s.checkPairFn(ctx, indexDSN, noArchive, p)
 	}
-	return checkPairInChild(ctx, indexDSN, noArchive, p)
+	return checkPairInChild(ctx, indexDSN, noArchive, flavor, p)
 }
 
 func (s *verifySupervisor) runLiveSource(req console.VerifyRequest, indexDB *sql.DB, resolver *metadata.Resolver, dbName string) error {

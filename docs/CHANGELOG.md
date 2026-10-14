@@ -24,9 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drill-down, or the console stopping, stops the child, and a child whose
   console went away stops by itself. Explain's working files now live in the
   process's own temporary directory, so the ones a killed drill-down leaves
-  are removed by the next one instead of a day later. The check against the
-  live source and the check of recovery inputs still run in the console's
-  process.
+  are removed by the next one instead of a day later. A crash while
+  comparing one table is now that table's error, not the whole run's. A
+  check stopped during its last table now ends interrupted instead of
+  succeeded with that table in error. The check against the live source and
+  the check of recovery inputs still run in the console's process.
 
 ## [0.104.4] - 2026-10-14
 ### Added

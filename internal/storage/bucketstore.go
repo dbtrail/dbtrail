@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -235,4 +236,54 @@ func BucketStores() map[string]BucketStore {
 		cp[b] = s
 	}
 	return cp
+}
+
+// bucketStoreWire is a BucketStore with every field exported for JSON,
+// the secret and the explicit path style included.
+type bucketStoreWire struct {
+	URL               string `json:"url,omitempty"`
+	PathStyle         bool   `json:"path_style,omitempty"`
+	Source            string `json:"source,omitempty"`
+	PathStyleExplicit bool   `json:"path_style_explicit,omitempty"`
+	Region            string `json:"region,omitempty"`
+	AccessKeyID       string `json:"access_key_id,omitempty"`
+	SecretKey         string `json:"secret_key,omitempty"`
+}
+
+// EncodeBucketStoresForChild is the bucket→store table as it crosses to a
+// child process of this same binary (#2385): whole, secret included, which
+// BucketStore's own JSON leaves out on purpose. A child that reads S3 needs
+// the table the console built from its registry, which lives only in the
+// parent's memory. Only ever written to a child's stdin, never to a file, a
+// log or a page.
+func EncodeBucketStoresForChild(m map[string]BucketStore) ([]byte, error) {
+	w := make(map[string]bucketStoreWire, len(m))
+	for b, s := range m {
+		w[b] = bucketStoreWire{
+			URL: s.Endpoint.URL, PathStyle: s.Endpoint.PathStyle, Source: s.Endpoint.Source,
+			PathStyleExplicit: s.Endpoint.pathStyleExplicit,
+			Region:            s.Region, AccessKeyID: s.AccessKeyID, SecretKey: s.SecretKey,
+		}
+	}
+	return json.Marshal(w)
+}
+
+// DecodeBucketStoresForChild reads what EncodeBucketStoresForChild wrote. An
+// empty input is an empty table.
+func DecodeBucketStoresForChild(b []byte) (map[string]BucketStore, error) {
+	if len(b) == 0 {
+		return nil, nil
+	}
+	var w map[string]bucketStoreWire
+	if err := json.Unmarshal(b, &w); err != nil {
+		return nil, err
+	}
+	m := make(map[string]BucketStore, len(w))
+	for b, s := range w {
+		m[b] = BucketStore{
+			Endpoint: S3Endpoint{URL: s.URL, PathStyle: s.PathStyle, Source: s.Source, pathStyleExplicit: s.PathStyleExplicit},
+			Region:   s.Region, AccessKeyID: s.AccessKeyID, SecretKey: s.SecretKey,
+		}
+	}
+	return m, nil
 }

@@ -56,6 +56,40 @@ type ChildJob struct {
 	// names (WARN when it names none).
 	LogMsg   string
 	LogAttrs []any
+	// LogOnce, when set, is shared by a caller's children: a line one of
+	// them already logged (its time aside) is not logged again. For a child
+	// that runs code which warns once per PROCESS, started once per table.
+	LogOnce *LineSet
+}
+
+// LineSet is the log lines already seen, for ChildJob.LogOnce. Past
+// lineSetMax lines it starts over: a repeat then and then is better than
+// memory that grows with every distinct line.
+type LineSet struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+}
+
+const lineSetMax = 4096
+
+// first reports whether line (its slog time= field aside) is new, and
+// records it.
+func (s *LineSet) first(line string) bool {
+	if rest, ok := strings.CutPrefix(line, "time="); ok {
+		if _, after, found := strings.Cut(rest, " "); found {
+			line = after
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.seen[line]; ok {
+		return false
+	}
+	if s.seen == nil || len(s.seen) >= lineSetMax {
+		s.seen = map[string]struct{}{}
+	}
+	s.seen[line] = struct{}{}
+	return true
 }
 
 // ChildOOMError is a child the kernel stopped at its own cgroup's ceiling:
@@ -245,7 +279,7 @@ func startChild(exe string, job ChildJob, wf *workerFence) (*child, error) {
 	// If the group kill somehow leaves the pipes open, stop waiting on them.
 	cmd.WaitDelay = 5 * time.Second
 	c := &child{stdin: stdin, stdinCloser: stdin, done: make(chan struct{}),
-		stderr: &stderrLog{msg: job.LogMsg, attrs: job.LogAttrs},
+		stderr: &stderrLog{msg: job.LogMsg, attrs: job.LogAttrs, once: job.LogOnce},
 	}
 	var once sync.Once
 	c.kill = func() {
@@ -301,6 +335,7 @@ func startChild(exe string, job ChildJob, wf *workerFence) (*child, error) {
 type stderrLog struct {
 	msg   string
 	attrs []any
+	once  *LineSet
 
 	mu      sync.Mutex
 	partial []byte
@@ -353,6 +388,9 @@ func (l *stderrLog) line(text string) {
 		l.panic = text
 	}
 	l.last = text
+	if l.once != nil && !l.once.first(text) {
+		return
+	}
 	if l.lines >= childStderrLines {
 		l.dropped++
 		return
