@@ -257,6 +257,10 @@ func LaterInBinlog(a, b *ResultRow) bool {
 // refuse the source first); this keeps a later caller from ordering them by
 // accident. A binary log base name cannot hold a slash: the server stores
 // only the name after the last one.
+// HasBinlogCoordinate is hasBinlogCoordinate, for a fold outside this
+// package that orders changes by LaterInBinlog.
+func HasBinlogCoordinate(r *ResultRow) bool { return hasBinlogCoordinate(r) }
+
 func hasBinlogCoordinate(r *ResultRow) bool {
 	return r.BinlogFile != "" && r.StartPos < 1<<63 && !strings.Contains(r.BinlogFile, "/")
 }

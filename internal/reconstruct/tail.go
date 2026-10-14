@@ -39,7 +39,11 @@ type Tail struct {
 	// UNION ALL BY NAME would widen them.
 	cols   []baseline.Column
 	pkCols []metadata.ColumnMeta
-	fold   foldResult
+	// pkNames are the key columns as the copy spells them, which the writer
+	// looks a value up by: a tombstone filed under another case of the name
+	// would write a NULL key, and the deleted row would come back.
+	pkNames []string
+	fold    foldResult
 }
 
 // tailKeyTypes are the MySQL types a tail key may have: the integers. Not
@@ -47,9 +51,10 @@ type Tail struct {
 var tailKeyTypes = map[string]bool{"tinyint": true, "smallint": true, "mediumint": true, "int": true, "integer": true, "bigint": true}
 
 // NewTail starts an empty tail for schema.table. createTableSQL is the
-// CREATE TABLE in the footer of the file the table's view reads, and pkCols
-// its key. A *TailRefusal when the table cannot have one.
-func NewTail(schema, table, createTableSQL string, pkCols []metadata.ColumnMeta) (*Tail, error) {
+// CREATE TABLE in the footer of the file the table's view reads, basePath
+// that file (local), and pkCols its key. A *TailRefusal when the table
+// cannot have one.
+func NewTail(schema, table, createTableSQL, basePath string, pkCols []metadata.ColumnMeta) (*Tail, error) {
 	name := schema + "." + table
 	if createTableSQL == "" {
 		return nil, &TailRefusal{name + ": its copy does not record the table's definition"}
@@ -70,7 +75,8 @@ func NewTail(schema, table, createTableSQL string, pkCols []metadata.ColumnMeta)
 	for _, c := range cols {
 		byName[strings.ToLower(c.Name)] = c
 	}
-	for _, pk := range pkCols {
+	pkNames := make([]string, len(pkCols))
+	for i, pk := range pkCols {
 		c, ok := byName[strings.ToLower(pk.Name)]
 		if !ok {
 			return nil, &TailRefusal{fmt.Sprintf("%s: its key column %s is not in its copy", name, pk.Name)}
@@ -78,8 +84,20 @@ func NewTail(schema, table, createTableSQL string, pkCols []metadata.ColumnMeta)
 		if !tailIntegerColumn(c) {
 			return nil, &TailRefusal{fmt.Sprintf("%s: its key column %s is %s, and only integer keys have a tail", name, c.Name, c.MySQLType)}
 		}
+		pkNames[i] = c.Name
 	}
-	return &Tail{schema: schema, table: table, cols: cols, pkCols: pkCols,
+	// A copy written before a type joined the binary list (VECTOR) stores
+	// that column as text, and the tail would store bytes: UNION ALL BY NAME
+	// turns the text into its ASCII bytes, every published row wrong. The
+	// refresh rewrites such a table; a tail is refused until it has.
+	mixed, err := baseline.BinaryColumnsStoredAsText(basePath, cols)
+	if err != nil {
+		return nil, &TailRefusal{fmt.Sprintf("%s: the column types of its copy could not be read (%v)", name, err)}
+	}
+	if len(mixed) > 0 {
+		return nil, &TailRefusal{fmt.Sprintf("%s: its copy stores %s as text, which the next refresh rewrites as bytes", name, strings.Join(mixed, ", "))}
+	}
+	return &Tail{schema: schema, table: table, cols: cols, pkCols: pkCols, pkNames: pkNames,
 		fold: foldResult{Changes: map[string]*query.ResultRow{}}}, nil
 }
 
@@ -89,13 +107,18 @@ func tailIntegerColumn(c baseline.Column) bool {
 	return tailKeyTypes[strings.ToLower(strings.TrimSpace(c.MySQLType))]
 }
 
-// Apply folds one page of the table's events, in any order, decoded as the
-// refresh decodes them (eventDecoder). An error refuses the table's tail
-// from then on: the caller drops it.
+// Apply folds one page of the table's events, decoded as the refresh decodes
+// them (eventDecoder). Pages may come in any order: a key keeps its last
+// change in the binary log, which is why an event with no place in one is
+// refused. An error refuses the table's tail from then on: the caller drops
+// it.
 func (t *Tail) Apply(page []query.ResultRow) error {
 	for i := range page {
 		if !strings.EqualFold(page[i].SchemaName, t.schema) || !strings.EqualFold(page[i].TableName, t.table) {
 			return fmt.Errorf("internal: an event of %s.%s handed to the tail of %s.%s", page[i].SchemaName, page[i].TableName, t.schema, t.table)
+		}
+		if !query.HasBinlogCoordinate(&page[i]) {
+			return fmt.Errorf("%s.%s: event %d has no binary log position, so its order against the others cannot be told", t.schema, t.table, page[i].EventID)
 		}
 		switch page[i].EventType {
 		case event.EventInsert, event.EventUpdate, event.EventDelete:
@@ -118,21 +141,37 @@ func (t *Tail) Keys() int { return len(t.fold.Changes) }
 // LastEventID is the highest event id folded, 0 before the first.
 func (t *Tail) LastEventID() uint64 { return t.fold.LastEventID }
 
-// PKColumns are the table's key columns, in key order.
-func (t *Tail) PKColumns() []string {
-	out := make([]string, len(t.pkCols))
-	for i, c := range t.pkCols {
-		out[i] = c.Name
-	}
-	return out
-}
+// PKColumns are the table's key columns, in key order, as its copy spells
+// them.
+func (t *Tail) PKColumns() []string { return append([]string(nil), t.pkNames...) }
 
 // WriteFile writes the tail to path in the .upserts layout, one row per key:
 // the newest image under 'u', or a tombstone under 'd' that carries the
 // key's values and NULL elsewhere. The tail is left as it was. The file is
 // written beside path and renamed onto it, so a reader sees a whole file or
 // none.
+//
+// path must be a name no earlier version used, and an existing one is
+// refused: the view reads the file twice in one statement (the keys it
+// drops, the rows it adds), and a file replaced between the two would drop
+// one version's keys and add another's rows.
 func (t *Tail) WriteFile(path string) (rows int64, retErr error) {
+	if _, err := os.Lstat(path); err == nil {
+		return 0, fmt.Errorf("internal: the tail of %s.%s would replace %s, which a running statement may be reading", t.schema, t.table, path)
+	}
+	// The refresh's #843 guard: a column the copy has and a change's image
+	// lacks was dropped at the source after the cut. Written, the touched rows
+	// would read NULL beside untouched ones keeping the old value, two
+	// versions of the table in one view. A change of the table's definition
+	// in the window (#602) is the caller's to screen, before Apply.
+	names := make([]string, len(t.cols))
+	for i, c := range t.cols {
+		names[i] = c.Name
+	}
+	if missing := droppedBaselineColumns(t.fold.ImageColumns, t.fold.SawImage, names); len(missing) > 0 {
+		return 0, &TailRefusal{fmt.Sprintf("%s.%s: column(s) %s of its copy are missing from changes after the copy's cut (dropped at the source)",
+			t.schema, t.table, strings.Join(missing, ", "))}
+	}
 	upsCols, err := baseline.TableDeltaColumns(t.cols)
 	if err != nil {
 		return 0, &TailRefusal{fmt.Sprintf("%s.%s: %v", t.schema, t.table, err)}
@@ -185,8 +224,8 @@ func (t *Tail) tailRow(key string, ev *query.ResultRow) (map[string]any, error) 
 		for _, c := range t.cols {
 			row[c.Name] = nil
 		}
-		for i, c := range t.pkCols {
-			row[c.Name] = vals[i]
+		for i, name := range t.pkNames {
+			row[name] = vals[i]
 		}
 		row[baseline.TableDeltaOpColumn] = baseline.TableDeltaOpDelete
 	} else {
@@ -204,32 +243,18 @@ func (t *Tail) tailRow(key string, ev *query.ResultRow) (map[string]any, error) 
 
 // tailKeyValues splits an integer key as pk_values spells it
 // (event.BuildPKValues: the values joined by '|'; an integer needs no
-// escape) into n values, each an integer exactly as written, so a tombstone
-// carries the key it deletes. Anything else is refused: a guessed key would
-// let the deleted row come back.
+// escape) into n values, each an integer exactly as %v writes one
+// (plainInteger), so a tombstone carries the key it deletes. Anything else
+// is refused: a guessed key would let the deleted row come back.
 func tailKeyValues(key string, n int) ([]string, error) {
 	parts := strings.Split(key, "|")
 	if len(parts) != n {
 		return nil, fmt.Errorf("the key %q does not have %d integer parts", key, n)
 	}
 	for _, p := range parts {
-		if !tailInteger(p) {
+		if !plainInteger(p) {
 			return nil, fmt.Errorf("the key %q is not made of integers", key)
 		}
 	}
 	return parts, nil
-}
-
-// tailInteger: an optional minus, then digits with no leading zero.
-func tailInteger(s string) bool {
-	s = strings.TrimPrefix(s, "-")
-	if s == "" || (len(s) > 1 && s[0] == '0') {
-		return false
-	}
-	for i := range len(s) {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
 }

@@ -110,9 +110,9 @@ func readState(t *testing.T, stateSQL string) []string {
 
 // tailOver folds events into a fresh tail of orders, writes it beside the
 // base, and returns the merged state of the published state SQL with it.
-func tailOver(t *testing.T, dir, published string, events ...[]query.ResultRow) string {
+func tailOver(t *testing.T, dir, base, published string, events ...[]query.ResultRow) string {
 	t.Helper()
-	tail, err := NewTail("shop", "orders", tailOrdersDDL, tailOrdersPK)
+	tail, err := NewTail("shop", "orders", tailOrdersDDL, base, tailOrdersPK)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,10 +154,10 @@ func TestTail_overThePublishedState(t *testing.T) {
 	all := []string{"1=one", "18446744073709551614=big minus one", big + "=big", "2=two", "3=three"}
 
 	t.Run("an empty tail reads as the published state", func(t *testing.T) {
-		want(t, readState(t, tailOver(t, t.TempDir(), published)), all...)
+		want(t, readState(t, tailOver(t, t.TempDir(), base, published)), all...)
 	})
 	t.Run("insert, update and delete", func(t *testing.T) {
-		got := readState(t, tailOver(t, t.TempDir(), published, []query.ResultRow{
+		got := readState(t, tailOver(t, t.TempDir(), base, published, []query.ResultRow{
 			tailEvent(10, event.EventInsert, "9", "nine", 100),
 			tailEvent(11, event.EventUpdate, "2", "two edited", 110),
 			tailEvent(12, event.EventDelete, "1", "", 120),
@@ -165,21 +165,21 @@ func TestTail_overThePublishedState(t *testing.T) {
 		want(t, got, "18446744073709551614=big minus one", big+"=big", "2=two edited", "3=three", "9=nine")
 	})
 	t.Run("a key touched twice keeps its last change in the binary log, across pages", func(t *testing.T) {
-		got := readState(t, tailOver(t, t.TempDir(), published,
+		got := readState(t, tailOver(t, t.TempDir(), base, published,
 			[]query.ResultRow{tailEvent(21, event.EventUpdate, "3", "later", 300)},
 			[]query.ResultRow{tailEvent(20, event.EventUpdate, "3", "earlier", 200)},
 		))
 		want(t, got, "1=one", "18446744073709551614=big minus one", big+"=big", "2=two", "3=later")
 	})
 	t.Run("inserted then deleted inside the tail: nowhere", func(t *testing.T) {
-		got := readState(t, tailOver(t, t.TempDir(), published, []query.ResultRow{
+		got := readState(t, tailOver(t, t.TempDir(), base, published, []query.ResultRow{
 			tailEvent(30, event.EventInsert, "11", "eleven", 100),
 			tailEvent(31, event.EventDelete, "11", "", 110),
 		}))
 		want(t, got, all...)
 	})
 	t.Run("the largest unsigned key, deleted and updated, exactly", func(t *testing.T) {
-		got := readState(t, tailOver(t, t.TempDir(), published, []query.ResultRow{
+		got := readState(t, tailOver(t, t.TempDir(), base, published, []query.ResultRow{
 			tailEvent(40, event.EventDelete, big, "", 100),
 			tailEvent(41, event.EventUpdate, "18446744073709551614", "edited", 110),
 		}))
@@ -188,8 +188,8 @@ func TestTail_overThePublishedState(t *testing.T) {
 	t.Run("a capture replay folds to the same state", func(t *testing.T) {
 		evs := []query.ResultRow{tailEvent(50, event.EventUpdate, "2", "x", 100), tailEvent(51, event.EventDelete, "3", "", 110)}
 		replay := []query.ResultRow{tailEvent(60, event.EventUpdate, "2", "x", 100), tailEvent(61, event.EventDelete, "3", "", 110)}
-		want(t, readState(t, tailOver(t, t.TempDir(), published, evs, replay)),
-			readState(t, tailOver(t, t.TempDir(), published, evs))...)
+		want(t, readState(t, tailOver(t, t.TempDir(), base, published, evs, replay)),
+			readState(t, tailOver(t, t.TempDir(), base, published, evs))...)
 	})
 	t.Run("over a published pair that already replaced the key, the tail wins", func(t *testing.T) {
 		d := t.TempDir()
@@ -214,11 +214,11 @@ func TestTail_overThePublishedState(t *testing.T) {
 		if got := readState(t, withPair); !strings.Contains(strings.Join(got, ","), "2=pair") {
 			t.Fatalf("the published pair does not read: %v", got)
 		}
-		got := readState(t, tailOver(t, d, withPair, []query.ResultRow{tailEvent(70, event.EventUpdate, "2", "tail", 100)}))
+		got := readState(t, tailOver(t, d, base, withPair, []query.ResultRow{tailEvent(70, event.EventUpdate, "2", "tail", 100)}))
 		want(t, got, "1=one", "18446744073709551614=big minus one", big+"=big", "2=tail", "3=three")
 	})
 	t.Run("the published casts apply to the tail's rows too", func(t *testing.T) {
-		tail, err := NewTail("shop", "orders", tailOrdersDDL, tailOrdersPK)
+		tail, err := NewTail("shop", "orders", tailOrdersDDL, base, tailOrdersPK)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -233,7 +233,7 @@ func TestTail_overThePublishedState(t *testing.T) {
 		want(t, got, "1=ONE", "18446744073709551614=BIG MINUS ONE", big+"=BIG", "2=TWO", "3=THREE", "9=NINE")
 	})
 	t.Run("the view has the published columns and types, column for column", func(t *testing.T) {
-		merged := tailOver(t, t.TempDir(), published, []query.ResultRow{tailEvent(80, event.EventInsert, "9", "nine", 100)})
+		merged := tailOver(t, t.TempDir(), base, published, []query.ResultRow{tailEvent(80, event.EventInsert, "9", "nine", 100)})
 		if a, b := describe(t, published), describe(t, merged); a != b {
 			t.Errorf("published %s\nwith tail %s", a, b)
 		}
@@ -279,7 +279,7 @@ func TestTail_compositeIntegerKey(t *testing.T) {
 		map[string]string{"o": "-1", "n": "2", "status": "b"},
 		map[string]string{"o": "1", "n": "-1", "status": "c"},
 	)
-	tail, err := NewTail("shop", "lines", ddl, pk)
+	tail, err := NewTail("shop", "lines", ddl, base, pk)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,8 +324,10 @@ func TestNewTail_refusals(t *testing.T) {
 		return "CREATE TABLE `t` (\n  `id` " + idType + " NOT NULL,\n  `v` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n"
 	}
 	pk := []metadata.ColumnMeta{{Name: "id", IsPK: true}}
+	dir := t.TempDir()
 	for _, ok := range []string{"tinyint", "tinyint(1)", "smallint unsigned", "mediumint", "int", "int unsigned", "bigint", "bigint unsigned"} {
-		if _, err := NewTail("s", "t", ddl(ok), pk); err != nil {
+		base := writeTailBase(t, dir, strings.ReplaceAll(ok, " ", "_")+".parquet", ddl(ok))
+		if _, err := NewTail("s", "t", ddl(ok), base, pk); err != nil {
 			t.Errorf("%s: refused: %v", ok, err)
 		}
 	}
@@ -338,17 +340,18 @@ func TestNewTail_refusals(t *testing.T) {
 		{"no definition", "", "does not record"},
 		{"system versioned", strings.TrimSuffix(ddl("int"), ";\n") + " WITH SYSTEM VERSIONING;\n", "system-versioned"},
 	} {
-		_, err := NewTail("s", "t", c.ddl, pk)
+		_, err := NewTail("s", "t", c.ddl, "", pk)
 		var r *TailRefusal
 		if !errors.As(err, &r) || !strings.Contains(r.Reason, c.why) {
 			t.Errorf("%s: %v, want a refusal saying %q", c.name, err, c.why)
 		}
 	}
 	var r *TailRefusal
-	if _, err := NewTail("s", "t", ddl("int"), nil); !errors.As(err, &r) || !strings.Contains(r.Reason, "no primary key") {
+	intBase := writeTailBase(t, dir, "int_base.parquet", ddl("int"))
+	if _, err := NewTail("s", "t", ddl("int"), intBase, nil); !errors.As(err, &r) || !strings.Contains(r.Reason, "no primary key") {
 		t.Errorf("no key: %v", err)
 	}
-	if _, err := NewTail("s", "t", ddl("int"), []metadata.ColumnMeta{{Name: "other"}}); !errors.As(err, &r) || !strings.Contains(r.Reason, "not in its copy") {
+	if _, err := NewTail("s", "t", ddl("int"), intBase, []metadata.ColumnMeta{{Name: "other"}}); !errors.As(err, &r) || !strings.Contains(r.Reason, "not in its copy") {
 		t.Errorf("a key the copy does not have: %v", err)
 	}
 }
@@ -356,7 +359,7 @@ func TestNewTail_refusals(t *testing.T) {
 // The tail takes its own table's row events only: another table's (one whose
 // name starts the same included) is a caller's bug, and so is a DDL.
 func TestTail_applyOnlyItsTable(t *testing.T) {
-	tail, err := NewTail("shop", "orders", tailOrdersDDL, tailOrdersPK)
+	tail, err := NewTail("shop", "orders", tailOrdersDDL, writeTailBase(t, t.TempDir(), "orders.parquet", tailOrdersDDL), tailOrdersPK)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,11 +393,112 @@ func TestTailKeyValues(t *testing.T) {
 		ok  bool
 	}{
 		{"5", 1, true}, {"-5", 1, true}, {"0", 1, true}, {"18446744073709551615", 1, true}, {"1|-2", 2, true},
-		{"", 1, false}, {"-", 1, false}, {"05", 1, false}, {"-0x1", 1, false}, {"1.0", 1, false}, {"1|2", 1, false}, {"1", 2, false}, {`1\|2`, 2, false},
+		{"", 1, false}, {"-", 1, false}, {"-0", 1, false}, {"05", 1, false}, {"-0x1", 1, false}, {"1.0", 1, false}, {"1|2", 1, false}, {"1", 2, false}, {`1\|2`, 2, false},
 	} {
 		_, err := tailKeyValues(c.key, c.n)
 		if (err == nil) != c.ok {
 			t.Errorf("%q/%d: err %v, want ok=%v", c.key, c.n, err, c.ok)
 		}
+	}
+}
+
+// The key as the copy spells it: metadata naming it ID and the copy id must
+// still file a tombstone's key under the copy's name, or the key is NULL and
+// the deleted row comes back.
+func TestTail_keyNameCaseFromTheCopy(t *testing.T) {
+	dir := t.TempDir()
+	base := writeTailBase(t, dir, "orders.parquet", tailOrdersDDL,
+		map[string]string{"id": "1", "status": "one"}, map[string]string{"id": "2", "status": "two"})
+	tail, err := NewTail("shop", "orders", tailOrdersDDL, base, []metadata.ColumnMeta{{Name: "ID", IsPK: true, DataType: "bigint"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tail.PKColumns(); len(got) != 1 || got[0] != "id" {
+		t.Fatalf("key columns %v, want the copy's spelling", got)
+	}
+	if err := tail.Apply([]query.ResultRow{tailEvent(1, event.EventDelete, "1", "", 10)}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "orders.tail.parquet")
+	if _, err := tail.WriteFile(path); err != nil {
+		t.Fatal(err)
+	}
+	got := readState(t, baseline.TableTailStateSQL("SELECT * FROM read_parquet("+lit(base)+")", lit(path), tail.PKColumns(), ""))
+	if strings.Join(got, ",") != "2=two" {
+		t.Errorf("got %v, want the deleted row gone", got)
+	}
+}
+
+// #843 for the tail: a change after the cut whose image lacks a column the
+// copy has (dropped at the source) refuses the tail instead of writing NULL
+// beside rows that keep the old value.
+func TestTail_aDroppedColumnRefuses(t *testing.T) {
+	tail, err := NewTail("shop", "orders", tailOrdersDDL, writeTailBase(t, t.TempDir(), "orders.parquet", tailOrdersDDL), tailOrdersPK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := tailEvent(1, event.EventInsert, "9", "nine", 10)
+	delete(ev.RowAfter, "status")
+	if err := tail.Apply([]query.ResultRow{ev}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = tail.WriteFile(filepath.Join(t.TempDir(), "orders.tail.parquet"))
+	var r *TailRefusal
+	if !errors.As(err, &r) || !strings.Contains(r.Reason, "status") {
+		t.Fatalf("got %v, want a refusal naming status", err)
+	}
+}
+
+// A copy that stores a now-binary column as text (written before VECTOR
+// joined the binary list) has no tail: the merge would turn its text into
+// bytes on every published row.
+func TestNewTail_binaryStoredAsTextRefuses(t *testing.T) {
+	old := "CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `v` varchar(64) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n"
+	now := "CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `v` vector(2) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n"
+	base := writeTailBase(t, t.TempDir(), "t.parquet", old, map[string]string{"id": "1", "v": "0x00"})
+	_, err := NewTail("s", "t", now, base, []metadata.ColumnMeta{{Name: "id", IsPK: true}})
+	var r *TailRefusal
+	if !errors.As(err, &r) || !strings.Contains(r.Reason, "stores v as text") {
+		t.Fatalf("got %v, want a refusal naming v", err)
+	}
+	if _, err := NewTail("s", "t", now, filepath.Join(t.TempDir(), "gone.parquet"), []metadata.ColumnMeta{{Name: "id", IsPK: true}}); !errors.As(err, &r) {
+		t.Errorf("an unreadable copy: %v, want a refusal", err)
+	}
+}
+
+// An event with no place in a binary log cannot be ordered against the
+// others, and the last change of a key is chosen by that order.
+func TestTail_anEventWithNoPositionRefuses(t *testing.T) {
+	tail, err := NewTail("shop", "orders", tailOrdersDDL, writeTailBase(t, t.TempDir(), "orders.parquet", tailOrdersDDL), tailOrdersPK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []func(*query.ResultRow){
+		func(r *query.ResultRow) { r.BinlogFile = "" },
+		func(r *query.ResultRow) { r.BinlogFile = "0/16B3748" }, // a PostgreSQL LSN
+		func(r *query.ResultRow) { r.StartPos = 1 << 63 },
+	} {
+		ev := tailEvent(1, event.EventInsert, "9", "nine", 10)
+		f(&ev)
+		if err := tail.Apply([]query.ResultRow{ev}); err == nil {
+			t.Errorf("%s:%d was folded", ev.BinlogFile, ev.StartPos)
+		}
+	}
+}
+
+// A version of the tail is never written over another: a statement reads
+// the file twice.
+func TestTail_writeFileRefusesAnExistingName(t *testing.T) {
+	dir := t.TempDir()
+	tail, err := NewTail("shop", "orders", tailOrdersDDL, writeTailBase(t, dir, "orders.parquet", tailOrdersDDL), tailOrdersPK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "orders.tail.1.parquet")
+	if _, err := tail.WriteFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tail.WriteFile(path); err == nil {
+		t.Error("a version was written over another")
 	}
 }
