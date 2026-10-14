@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **The built-in rotation no longer piles up empty future partitions.** Each
+  cycle added back one future partition for every old one it dropped, even
+  when enough were already prepared. A cycle that dropped a lot at once
+  (lowering the retention from 48 hours to 12, or the upgrade guard letting go
+  of days of history) added that many empty hours ahead, and the steady
+  one-dropped, one-added cycles after it kept them forever: an index with a
+  12-hour window could carry nine days of empty partitions. The loop now only
+  tops up to `--rotate-add-future`, and never keeps fewer future partitions
+  than the hours between two cycles, so a long `--rotate-interval` still has
+  somewhere to write. Partitions already piled up stay until you drop them;
+  they hold no data. `bintrail rotate` keeps its documented one-for-one
+  replacement.
 
 ## [0.104.2] - 2026-10-13
 ### Added

@@ -138,9 +138,9 @@ func StartLoop(ctx context.Context, settings func() Settings, targets func() []R
 		"Built-in rotation: dropping index partitions older than %s every %s, keeping %d future partitions ready.\n"+
 			"%s"+
 			"  Tune with --rotate-retain / --rotate-interval (or BINTRAIL_ROTATE_RETAIN), or live from the web interface; disable with --rotate-retain off.\n",
-		s0.RetainRaw, s0.Interval, s0.AddFuture, perIndex)
+		s0.RetainRaw, s0.Interval, futureHeadroom(s0), perIndex)
 	slog.Info("built-in rotation enabled",
-		"retain", s0.RetainRaw, "interval", s0.Interval.String(), "add_future", s0.AddFuture,
+		"retain", s0.RetainRaw, "interval", s0.Interval.String(), "add_future", futureHeadroom(s0),
 		"per_index_records", !s0.Explicit)
 
 	go func() {
@@ -257,6 +257,16 @@ func indexHoldsNoEvents(ctx context.Context, db *sql.DB, dbName string) (bool, e
 	return false, nil
 }
 
+// futureHeadroom is how many future hourly partitions a cycle keeps ready:
+// the operator's --rotate-add-future, but never fewer than the hours until
+// the next cycle. Without the floor, a 6h interval with 3 future partitions
+// would send hours four to six into p_future (the one-for-one replacement
+// the loop no longer does used to cover that gap by accident).
+func futureHeadroom(s Settings) int {
+	hours := int((s.Interval + time.Hour - 1) / time.Hour)
+	return max(s.AddFuture, hours)
+}
+
 // loopOptions builds the Perform Options for one built-in-rotation cycle. It
 // ALWAYS arms ProtectUnarchived so the loop can never be the first to destroy
 // data an external archiving flow would preserve; Format "json" suppresses
@@ -266,10 +276,15 @@ func indexHoldsNoEvents(ctx context.Context, db *sql.DB, dbName string) (bool, e
 // drops-and-tops-up only — the historical behavior.
 func loopOptions(retain time.Duration, retainRaw string, s Settings, t RotateTarget, quietEmpty bool) Options {
 	o := Options{
-		RetainDur:         retain,
-		RetainRaw:         retainRaw,
-		AddFuture:         s.AddFuture,
-		NoReplace:         false,
+		RetainDur: retain,
+		RetainRaw: retainRaw,
+		AddFuture: futureHeadroom(s),
+		// The loop tops up toward a target every cycle, so it never replaces
+		// drops one for one: a cycle that drops a backlog at once (a retention
+		// lowered from 48h to 12h, or the upgrade guard releasing days of
+		// history) would otherwise add that many empty future partitions, and
+		// the steady one-drop-one-add that follows keeps them forever.
+		NoReplace:         true,
 		Format:            "json",
 		ProtectUnarchived: true,
 		QuietEmpty:        quietEmpty,

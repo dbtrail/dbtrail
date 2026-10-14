@@ -126,8 +126,8 @@ func TestLoopOptions(t *testing.T) {
 	if q := loopOptions(7*24*time.Hour, "7d", s, RotateTarget{DSN: "x"}, true); !q.QuietEmpty {
 		t.Error("QuietEmpty must carry through from the probe's verdict")
 	}
-	if o.NoReplace {
-		t.Error("NoReplace must be false (dropped partitions are replaced)")
+	if !o.NoReplace {
+		t.Error("NoReplace must be true: the loop tops up toward a target, and replacing a backlog drop one for one leaks empty future partitions forever")
 	}
 	if o.ArchiveDir != "" || o.ArchiveS3 != "" || o.BintrailID != "" {
 		t.Errorf("a drop-only target must leave archive fields empty: dir=%q s3=%q id=%q",
@@ -495,6 +495,33 @@ func TestDedupeTargets(t *testing.T) {
 	for i := range want {
 		if got[i].DSN != want[i] {
 			t.Fatalf("dedupeTargets[%d].DSN = %q, want %q", i, got[i].DSN, want[i])
+		}
+	}
+}
+
+// The loop keeps at least as many future partitions as there are hours until
+// its next cycle; with replacement gone, nothing else covers a long interval.
+func TestFutureHeadroom(t *testing.T) {
+	for _, tc := range []struct {
+		interval time.Duration
+		add      int
+		want     int
+	}{
+		{time.Hour, 3, 3},        // defaults: unchanged
+		{time.Hour, 1, 1},        // the operator's smaller choice is kept
+		{time.Hour, 0, 1},        // zero still covers the next hour
+		{6 * time.Hour, 3, 6},    // interval longer than the headroom
+		{90 * time.Minute, 1, 2}, // a partial hour rounds up
+		{30 * time.Minute, 0, 1},
+		{59 * time.Minute, 2, 2},
+		{24 * time.Hour, 48, 48},
+	} {
+		s := Settings{Enabled: true, Interval: tc.interval, AddFuture: tc.add}
+		if got := futureHeadroom(s); got != tc.want {
+			t.Errorf("interval %s add %d: got %d, want %d", tc.interval, tc.add, got, tc.want)
+		}
+		if got := loopOptions(time.Hour, "1h", s, RotateTarget{DSN: "x"}, false).AddFuture; got != tc.want {
+			t.Errorf("loopOptions interval %s add %d: AddFuture %d, want %d", tc.interval, tc.add, got, tc.want)
 		}
 	}
 }
