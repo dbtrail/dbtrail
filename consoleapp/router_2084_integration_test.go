@@ -76,6 +76,9 @@ func TestIntegrationRouter(t *testing.T) {
 	waitUntil(t, "the port to open", func() bool { return port.listening() != "" })
 
 	conn := openFlashback(t, addr, ent.ID, "tok", srcName)
+	// One connection: SHOW ROUTER STATUS reports that connection's last
+	// answer (#2369), which a pool could hand to another.
+	conn.SetMaxOpenConns(1)
 	defer conn.Close()
 	side := func(q string) string {
 		t.Helper()
@@ -120,6 +123,27 @@ func TestIntegrationRouter(t *testing.T) {
 	}
 	if got := side("SELECT status FROM orders WHERE id = 3"); got != "edited" {
 		t.Errorf("after the UPDATE the lookup answered %q", got)
+	}
+	// The connection's last answer (#2369): the copy answered the scan above,
+	// and this lookup, MySQL's, replaces it, with no number.
+	if status["last_answer"] != "copy" || status["last_answer_indexed_through"] == "" {
+		t.Errorf("after the copy's answer: %v", status)
+	}
+	last := map[string]string{}
+	lrows, err := conn.Query("SHOW ROUTER STATUS")
+	if err != nil {
+		t.Fatalf("SHOW ROUTER STATUS: %v", err)
+	}
+	for lrows.Next() {
+		var name, value string
+		if err := lrows.Scan(&name, &value); err != nil {
+			t.Fatal(err)
+		}
+		last[name] = value
+	}
+	lrows.Close()
+	if last["last_answer"] != "mysql" || last["last_answer_indexed_through"] != "" {
+		t.Errorf("after MySQL's answer: last_answer=%q indexed_through=%q", last["last_answer"], last["last_answer_indexed_through"])
 	}
 
 	// A connection that asks for the copy alone ("<server>@copy") gets it,

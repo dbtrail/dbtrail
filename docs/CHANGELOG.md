@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **`SHOW ROUTER STATUS` says how current the last answer was.** For the last statement on the connection, `last_answer` says who answered it (`copy`, `mysql`, `refused`, or `none` before the first). When the copy answered, `last_answer_indexed_through` is the instant the data it read had been indexed through, and `last_answer_age_seconds` is how old that was when the statement finished. The instant comes from the snapshot that was read, so a table nobody writes does not make the answer look days old. When it cannot be told, both read `unknown`; the number can be older than the truth but never newer (#2369).
 ### Fixed
 - **The built-in rotation no longer piles up empty future partitions.** Each
   cycle added back one future partition for every old one it dropped, even

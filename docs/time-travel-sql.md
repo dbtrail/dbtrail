@@ -763,6 +763,14 @@ asynchronous replica. Its age is a number to watch, not a rule:
 - `bintrail_read_routing_copy_snapshot_timestamp_seconds` is the same number
   for Prometheus. Alert on `time()` minus it, the way replica lag is alerted
   on ([Observability](observability.md#engine-routing-bintrail_read_routing_decisions_total)).
+- For the last statement on that connection, `SHOW ROUTER STATUS` also says
+  who answered it (`last_answer`: `copy`, `mysql`, `refused`, or `none`
+  before the first). When the copy answered, it shows the instant the data
+  it read had been indexed through (`last_answer_indexed_through`) and how
+  old that was when the statement finished (`last_answer_age_seconds`). This
+  is what capture had indexed by then, not the source at that instant. When
+  it cannot be told, both read `unknown`. The number can be older than the
+  truth but never newer.
 
 If an application cannot read a result as old as the last snapshot, have it
 connect straight to MySQL and not through this port.
@@ -2000,19 +2008,25 @@ name ends in `@copy` is found under its name first.
 snapshot and its age in seconds, how many of that server's statements the
 copy and MySQL answered and how many were refused since the router started
 (with a row per reason), and the pool: how many workers, how many are running
-a statement and how many statements wait right now. On a connection the copy
-answers alone, its first line says that nothing is routed there and why.
+a statement and how many statements wait right now. It also says who answered
+the last statement on that connection, and when the copy did, how far the data
+it read had been indexed ([No maximum copy age](#no-maximum-copy-age)). On a
+connection the copy answers alone, its first line says that nothing is routed
+there and why.
 
 ```sql
 SHOW ROUTER STATUS;
--- server              4f1c2a9b0d3e5f67
--- copy_snapshot       2026-10-10T03:00:00Z
--- copy_age_seconds    68412
--- statements_copy     1841
--- statements_mysql    96233
--- pool_workers        4
--- pool_running        1
--- pool_waiting        0
+-- server                        4f1c2a9b0d3e5f67
+-- copy_snapshot                 2026-10-10T03:00:00Z
+-- copy_age_seconds              68412
+-- last_answer                   copy
+-- last_answer_indexed_through   2026-10-10T02:58:41Z
+-- last_answer_age_seconds       68480
+-- statements_copy               1841
+-- statements_mysql              96233
+-- pool_workers                  4
+-- pool_running                  1
+-- pool_waiting                  0
 ```
 
 With `--metrics-addr` (or `BINTRAIL_ROUTER_METRICS_ADDR`; an address of its

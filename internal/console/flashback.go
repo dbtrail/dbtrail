@@ -91,6 +91,8 @@ type SQLOnCopy struct {
 	user string
 	// id is the server's registry id (the boot id for the daemon's own).
 	id string
+	// last is what answered the connection's last statement (#2369).
+	last lastAnswerState
 }
 
 // Run runs one statement; schema is where unqualified names resolve (the
@@ -144,6 +146,7 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 		}
 		return sqlsandbox.Result{}, err
 	}
+	q.noteCopyAnswer(out.ReadFrom, out.ReadFromOK, time.Now())
 	out.Result.Note = out.OlderCopyNote
 	return out.Result, nil
 }

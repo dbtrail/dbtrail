@@ -34,6 +34,9 @@ func (s *Server) RouterStatus(ctx context.Context, serverID string, sql *SQLOnCo
 			[2]string{"copy_snapshot", at.UTC().Format(time.RFC3339)},
 			[2]string{"copy_age_seconds", strconv.FormatInt(int64(time.Since(at).Seconds()), 10)})
 	}
+	// The connection's own last statement (#2369): the copy's age above is
+	// the newest snapshot's, this is what the statement actually read.
+	out = append(out, sql.lastAnswerStatus(ctx)...)
 	tally := s.routing.snapshot()[serverID]
 	out = append(out,
 		[2]string{"counting_since", s.routing.since.UTC().Format(time.RFC3339)},

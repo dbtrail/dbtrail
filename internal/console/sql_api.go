@@ -809,6 +809,11 @@ type sqlOutcome struct {
 	// OlderCopyNote says why the statement was answered from an earlier
 	// copy than the newest (#2210), "" when it was not.
 	OlderCopyNote string
+	// ReadFrom is the files whose footers bound how far the data the
+	// statement read was indexed, by snapshot directory (copyReadFrom), from
+	// the views that ran; ReadFromOK is false when that cannot be told.
+	ReadFrom   map[string][]string
+	ReadFromOK bool
 }
 
 // runSQL is POST /api/sql without the HTTP: the gates that need the copy
@@ -1073,6 +1078,9 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	// StrictStar): its error reaches the runner as a worker failure, so the
 	// reason is kept here and returned instead.
 	var viewsRefusal error
+	// named is the copy's tables the statement read, set once its views are
+	// decided (#2369).
+	var named []views.BaselineTable
 	job := sqlsandbox.Job{
 		// One query at a time per identity: the login identity, or the
 		// shared automation token as one identity.
@@ -1093,7 +1101,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			// long does not fit the worker's memory, and the statement
 			// would fail there after reading for a while.
 			limit := sqlChainLimit(memory)
-			named := sqlNamedTables(in, refs)
+			named = sqlNamedTables(in, refs)
 			if h := sqlChainTooHeavy(named, limit, sqlFileSize); h.Table != "" {
 				viewsRefusal = &sqlRefusal{http.StatusUnprocessableEntity, sqlChainTooHeavyMessage(h, limit, memory)}
 				*heavy = &sqlHeavyRun{tables: named, chain: h, limit: limit, newest: in.BaselineSnapshot}
@@ -1174,7 +1182,9 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	for phase, d := range sqlPhases(slotWait, viewBuild, res.Phases) {
 		observe.ObserveSQLStatementPhase(phase, d)
 	}
-	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, ViewBuild: viewBuild, SlotWait: slotWait}, nil
+	readFrom, readFromOK := copyReadFrom(in, named)
+	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, ViewBuild: viewBuild, SlotWait: slotWait,
+		ReadFrom: readFrom, ReadFromOK: readFromOK}, nil
 }
 
 // sqlWantedViews decides which of the copy's views a statement needs, from

@@ -606,6 +606,7 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 				Observe: func(route shim.RouteSide, reason shim.RouteReason) {
 					observe.ObserveRouteDecision(id, string(route), string(reason))
 					srv.RecordRouteDecision(id, string(route), string(reason))
+					tgt.SQL.NoteRoute(string(route))
 				},
 			})
 		}
