@@ -295,9 +295,10 @@ func TestExplainChildEnv_GoMemLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 1604 MiB + a quarter of it (401) = 2005 MiB ceiling, less 1092.
-	if got := lastEnv(explainChildEnv(mem, duck), "GOMEMLIMIT"); got != "913MiB" {
-		t.Errorf("GOMEMLIMIT = %q, want 913MiB", got)
+	// 1604 MiB + a quarter of it (401) = 2005 MiB ceiling, less the two
+	// sessions' 1092 and the 2 x 190 they hold outside their limits.
+	if got := lastEnv(explainChildEnv(mem, duck), "GOMEMLIMIT"); got != "533MiB" {
+		t.Errorf("GOMEMLIMIT = %q, want 533MiB", got)
 	}
 	t.Setenv("GOMEMLIMIT", "300MiB")
 	if got := lastEnv(explainChildEnv(mem, duck), "GOMEMLIMIT"); got != "300MiB" {

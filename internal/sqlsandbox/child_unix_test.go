@@ -6,15 +6,15 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
-	"sync"
-	"time"
-	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // shChild makes RunChild start /bin/sh with script, and its fence the one
@@ -210,6 +210,10 @@ func TestRunChild_StderrReachesTheLog(t *testing.T) {
 	var ce *ChildExitError
 	if !errors.As(err, &ce) || ce.Stderr != "panic: boom" {
 		t.Fatalf("err = %v, want the panic line as its summary", err)
+	}
+	_, err = RunChild(context.Background(), shJob(`read j; echo 'fatal error: concurrent map writes' >&2; echo 'goroutine 1 [running]:' >&2; exit 2`))
+	if !errors.As(err, &ce) || ce.Stderr != "fatal error: concurrent map writes" {
+		t.Fatalf("err = %v, want the fatal error line as its summary", err)
 	}
 }
 

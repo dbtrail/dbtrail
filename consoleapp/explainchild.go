@@ -89,20 +89,28 @@ func explainChildMemory(t duckdbutil.Tuning) (total string, duckdb int64, err er
 	return fmt.Sprintf("%dMiB", (duckdb+explainGoAllowance)>>20), duckdb, nil
 }
 
+// duckdbOutsideLimit is what one DuckDB session holds outside its
+// memory_limit: a session capped at 64 MB was measured at about 250 MB
+// resident (heavybudget.go).
+const duckdbOutsideLimit = 190 << 20
+
 // explainChildEnv is the console's environment plus, unless the operator set
 // one, a GOMEMLIMIT for the child's Go heap: what its ceiling leaves after
-// the DuckDB sessions. Go does not know the cgroup's ceiling, and without it
-// lets the heap grow to twice what it holds before collecting.
+// the DuckDB sessions, their limits and what they hold outside them. Go does
+// not know the cgroup's ceiling, and without it lets the heap grow to twice
+// what it holds before collecting; a limit above what fits would only start
+// collecting harder once the kernel had stopped the child.
 func explainChildEnv(mem string, duckdb int64) []string {
 	env := os.Environ()
 	if _, set := os.LookupEnv("GOMEMLIMIT"); set {
 		return env
 	}
 	ceiling, err := sqlsandbox.CeilingBytes(mem)
-	if err != nil || ceiling <= duckdb {
+	goHeap := ceiling - duckdb - checkSessions*duckdbOutsideLimit
+	if err != nil || goHeap <= 0 {
 		return env
 	}
-	return append(env, fmt.Sprintf("GOMEMLIMIT=%dMiB", (ceiling-duckdb)>>20))
+	return append(env, fmt.Sprintf("GOMEMLIMIT=%dMiB", goHeap>>20))
 }
 
 // explainStopGrace is how long a drill-down whose job was dropped has to stop

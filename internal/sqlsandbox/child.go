@@ -349,7 +349,7 @@ func (l *stderrLog) line(text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	if l.panic == "" && strings.HasPrefix(text, "panic: ") {
+	if l.panic == "" && isFatalLine(text) {
 		l.panic = text
 	}
 	l.last = text
@@ -368,8 +368,8 @@ func (l *stderrLog) label() string {
 	return l.msg
 }
 
-// summary is the child's own account of why it failed: the line of a Go
-// panic (the goroutine dump after it is for the log, not for a page), or
+// summary is the child's own account of why it failed: the line a Go crash
+// starts with (the goroutine dump after it is for the log, not for a page), or
 // else the last line it wrote, cut to a readable length.
 func (l *stderrLog) summary() string {
 	l.mu.Lock()
@@ -397,4 +397,16 @@ func childLineLevel(text string) slog.Level {
 		return slog.LevelDebug
 	}
 	return slog.LevelWarn
+}
+
+// isFatalLine reports the line the Go runtime starts a crash with: a panic,
+// a fatal error (concurrent map writes, the runtime out of memory), or a
+// signal in C code such as DuckDB's.
+func isFatalLine(text string) bool {
+	for _, p := range []string{"panic: ", "fatal error: ", "SIGSEGV", "SIGBUS", "unexpected signal"} {
+		if strings.HasPrefix(text, p) {
+			return true
+		}
+	}
+	return false
 }
