@@ -357,7 +357,8 @@ func TestNewTail_refusals(t *testing.T) {
 }
 
 // The tail takes its own table's row events only: another table's (one whose
-// name starts the same included) is a caller's bug, and so is a DDL.
+// name starts the same, or differs only in case, included) is a caller's
+// bug, and so is a DDL.
 func TestTail_applyOnlyItsTable(t *testing.T) {
 	tail, err := NewTail("shop", "orders", tailOrdersDDL, writeTailBase(t, t.TempDir(), "orders.parquet", tailOrdersDDL), tailOrdersPK)
 	if err != nil {
@@ -368,10 +369,10 @@ func TestTail_applyOnlyItsTable(t *testing.T) {
 	if err := tail.Apply([]query.ResultRow{other}); err == nil {
 		t.Error("orders_archive's event was folded into orders")
 	}
-	same := tailEvent(2, event.EventInsert, "1", "x", 10)
-	same.SchemaName, same.TableName = "SHOP", "Orders"
-	if err := tail.Apply([]query.ResultRow{same}); err != nil {
-		t.Errorf("the same table in another case: %v", err)
+	cased := tailEvent(2, event.EventInsert, "1", "x", 10)
+	cased.TableName = "Orders"
+	if err := tail.Apply([]query.ResultRow{cased}); err == nil {
+		t.Error("Orders' event was folded into orders: two tables where names keep their case")
 	}
 	ddl := tailEvent(3, event.EventDDL, "", "", 20)
 	if err := tail.Apply([]query.ResultRow{ddl}); err == nil {

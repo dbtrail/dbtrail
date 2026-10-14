@@ -114,7 +114,9 @@ func tailIntegerColumn(c baseline.Column) bool {
 // it.
 func (t *Tail) Apply(page []query.ResultRow) error {
 	for i := range page {
-		if !strings.EqualFold(page[i].SchemaName, t.schema) || !strings.EqualFold(page[i].TableName, t.table) {
+		// Exact: on a source with lower_case_table_names=0, Orders and
+		// orders are two tables.
+		if page[i].SchemaName != t.schema || page[i].TableName != t.table {
 			return fmt.Errorf("internal: an event of %s.%s handed to the tail of %s.%s", page[i].SchemaName, page[i].TableName, t.schema, t.table)
 		}
 		if !query.HasBinlogCoordinate(&page[i]) {
