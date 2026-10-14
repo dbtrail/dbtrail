@@ -2,11 +2,19 @@ package duckdbutil
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 )
 
 // Tuning holds the two DuckDB resource knobs bintrail sets on its Parquet query
@@ -97,11 +105,11 @@ func (t Tuning) Statements() []string {
 	return stmts
 }
 
-// SetTempDirectory points a DuckDB session's temp_directory at the OS temp
-// directory, unconditionally — it is the spill backstop for Apply's
-// memory_limit (see Apply's doc comment: the two MUST be paired on every
-// session), not a memory-for-speed trade-off, so it stays on even under
-// Ultrafast.
+// SetTempDirectory points a DuckDB session's temp_directory at a directory
+// of its own under the OS temp directory, unconditionally — it is the spill
+// backstop for Apply's memory_limit (see Apply's doc comment: the two MUST be
+// paired on every session), not a memory-for-speed trade-off, so it stays on
+// even under Ultrafast.
 //
 // DuckDB's own default is a ".tmp" directory relative to the process's
 // CURRENT WORKING DIRECTORY, not the OS temp dir — which fails outright in a
@@ -112,8 +120,95 @@ func (t Tuning) Statements() []string {
 // Tuning.Apply call site must call this too — see the #842 fix that
 // extracted this from parquetquery into this shared home, one definition
 // instead of duplicated copies).
+//
+// One directory PER SESSION (#2387): DuckDB names its spill files by block
+// size only (duckdb_temp_storage_DEFAULT-0.tmp, ...), so two sessions
+// spilling into one directory, in one process or two, overwrite each other's
+// files and the queries fail with "Could not read enough bytes". DuckDB
+// creates the directory on its first spill and removes it when the session
+// closes; what a killed process leaves behind is removed by the next process
+// that opens a session (removeDeadSpillDirs).
 func SetTempDirectory(ctx context.Context, db *sql.DB) {
-	applyTuningStmt(ctx, db, "SET temp_directory = '"+strings.ReplaceAll(os.TempDir(), "'", "''")+"'")
+	sweepDeadSpillDirs.Do(func() { removeDeadSpillDirs(os.TempDir()) })
+	dir := filepath.Join(os.TempDir(), spillDirName(os.Getpid(), spillNonce, spillSeq.Add(1)))
+	applyTuningStmt(ctx, db, "SET temp_directory = '"+strings.ReplaceAll(dir, "'", "''")+"'")
+}
+
+// spillDirPrefix starts every session spill directory's name; the rest is
+// "<pid>-<nonce>-<seq>". The nonce tells this process from an earlier one
+// that had the same pid (a restarted container's process is pid 1 again).
+const spillDirPrefix = "bintrail-duckdb-spill-"
+
+var (
+	spillNonce         = newSpillNonce()
+	spillSeq           atomic.Uint64
+	sweepDeadSpillDirs sync.Once
+)
+
+func newSpillNonce() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func spillDirName(pid int, nonce string, seq uint64) string {
+	return fmt.Sprintf("%s%d-%s-%d", spillDirPrefix, pid, nonce, seq)
+}
+
+// removeDeadSpillDirs removes the spill directories in dir whose process is
+// gone: a session that closes removes its own, so one still there after its
+// process ended was left by a kill (out of memory, say), and it can hold as
+// much as that session spilled. A directory of an earlier process with this
+// process's pid is dead too. Anything not named by spillDirName is left alone.
+func removeDeadSpillDirs(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		pid, nonce, ok := parseSpillDirName(e.Name())
+		if !ok || !e.IsDir() {
+			continue
+		}
+		if pid == os.Getpid() {
+			if nonce == spillNonce {
+				continue
+			}
+		} else if processAlive(pid) {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+	}
+}
+
+func parseSpillDirName(name string) (pid int, nonce string, ok bool) {
+	rest, found := strings.CutPrefix(name, spillDirPrefix)
+	if !found {
+		return 0, "", false
+	}
+	parts := strings.Split(rest, "-")
+	if len(parts) != 3 || parts[1] == "" {
+		return 0, "", false
+	}
+	pid, err := strconv.Atoi(parts[0])
+	if err != nil || pid <= 0 {
+		return 0, "", false
+	}
+	if _, err := strconv.ParseUint(parts[2], 10, 64); err != nil {
+		return 0, "", false
+	}
+	return pid, parts[1], true
+}
+
+// processAlive reports whether a process with pid exists. EPERM means it
+// exists under another user, so it counts as alive.
+func processAlive(pid int) bool {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = p.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 func applyTuningStmt(ctx context.Context, db *sql.DB, stmt string) {
