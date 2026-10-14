@@ -120,6 +120,9 @@ type baselineSupervisor struct {
 	// written (#2231, maybeResolve), by absolute path. Not a job slot: it
 	// only keeps two runs from writing the same pairs. Guarded by mu.
 	resolving map[string]bool
+	// resolveWriting marks a folder whose resolve pass holds the snapshot
+	// lane and is writing pairs (#2385); resolving also covers one waiting.
+	resolveWriting map[string]bool
 	// resolveRetry is when a table whose pair could not be written may be
 	// tried again, keyed by resolveRetryKey. Guarded by mu.
 	resolveRetry map[string]time.Time

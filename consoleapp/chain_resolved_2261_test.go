@@ -90,8 +90,16 @@ func TestChainResolved_pairOrPassInFlight(t *testing.T) {
 	if ask(base, chainOf(2)) {
 		t.Error("no pair and no pass: counted")
 	}
+	// A pass that has claimed the folder but still waits for the snapshot
+	// lane (#2385) is writing nothing yet.
 	sup.mu.Lock()
 	sup.resolving[resolveFolder(local)] = true
+	sup.mu.Unlock()
+	if ask(base, chainOf(2)) {
+		t.Error("a pass still waiting its turn counted as writing this folder's pairs")
+	}
+	sup.mu.Lock()
+	sup.resolveWriting = map[string]bool{resolveFolder(local): true}
 	sup.mu.Unlock()
 	if !ask(base, chainOf(2)) {
 		t.Error("a pass is writing this folder's pairs: the table was held to the ordinary line")
@@ -117,7 +125,9 @@ func TestChainResolved_pairOrPassInFlight(t *testing.T) {
 	}
 	sup.mu.Lock()
 	delete(sup.resolving, resolveFolder(local))
-	sup.resolving[resolveFolder(t.TempDir())] = true // another folder's pass
+	delete(sup.resolveWriting, resolveFolder(local))
+	other := resolveFolder(t.TempDir()) // another folder's pass
+	sup.resolving[other], sup.resolveWriting[other] = true, true
 	sup.mu.Unlock()
 	if ask(base, chainOf(2)) {
 		t.Error("another folder's pass counted for this one")

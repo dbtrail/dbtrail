@@ -103,15 +103,6 @@ func (s *baselineSupervisor) maybeResolve(req refreshRequest) {
 			}
 		}
 	}
-	// The merges are snapshot work (#2385): one at a time in the process.
-	// Taken BEFORE the folder is claimed below: chainResolved reads the
-	// claim as "a pass is writing these pairs right now", which a pass still
-	// waiting its turn is not.
-	release, _, err := s.takeSnapshotLane(req.ServerName, "resolved pairs")
-	if err != nil {
-		return
-	}
-	defer release()
 	folder := resolveFolder(req.BaselineDir)
 	s.mu.Lock()
 	// A compaction of this server is merging nearly the same files in its
@@ -138,6 +129,27 @@ func (s *baselineSupervisor) maybeResolve(req refreshRequest) {
 		sweepResolved(root, nil)
 		return
 	}
+	// The merges are snapshot work (#2385): one at a time in the process.
+	// Taken AFTER the folder is claimed, so a second look at it still
+	// returns at once; only once the lane is held does chainResolved read
+	// the pass as writing pairs (resolveWriting), since one still waiting
+	// its turn is not.
+	release, _, err := s.takeSnapshotLane(req.ServerName, "resolved pairs")
+	if err != nil {
+		return
+	}
+	defer release()
+	s.mu.Lock()
+	if s.resolveWriting == nil {
+		s.resolveWriting = map[string]bool{}
+	}
+	s.resolveWriting[folder] = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.resolveWriting, folder)
+		s.mu.Unlock()
+	}()
 	// Again while a newer snapshot appeared during the pass: a refresh that
 	// found this run busy returned at once and left that snapshot to it.
 	for done := ""; s.ctx.Err() == nil; {
@@ -182,7 +194,7 @@ func (s *baselineSupervisor) chainResolved(req refreshRequest) func(string, *bas
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return s.resolving[folder] && !time.Now().Before(s.resolveRetry[resolveRetryKey(req.ServerID, basePath)])
+		return s.resolveWriting[folder] && !time.Now().Before(s.resolveRetry[resolveRetryKey(req.ServerID, basePath)])
 	}
 }
 
