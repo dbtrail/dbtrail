@@ -291,3 +291,21 @@ func TestRowJoin_capFollowsTheJobBudget(t *testing.T) {
 		t.Errorf("join memory_limit = %q, want the job's 300MiB", got)
 	}
 }
+
+// TestRowJoin_neverAboveItsOwnCap: a job budget larger than the join's own
+// 1GB (a large host) leaves the join at 1GB.
+func TestRowJoin_neverAboveItsOwnCap(t *testing.T) {
+	ctx := duckdbutil.WithSessionTuning(context.Background(), duckdbutil.Tuning{Threads: 2, MemoryLimit: "4096MiB"})
+	j, err := newRowJoin(ctx, duckdbutil.Tuning{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.close()
+	var got string
+	if err := j.conn.QueryRowContext(ctx, "SELECT current_setting('memory_limit')").Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "953.6 MiB" && got != "1.0 GiB" && got != "1000.0 MiB" {
+		t.Errorf("join memory_limit = %q, want its own 1GB", got)
+	}
+}

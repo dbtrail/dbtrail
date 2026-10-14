@@ -29,7 +29,8 @@ func TestBudgetFor(t *testing.T) {
 	}{
 		{8 * gib, "1092MiB", "546MiB"},
 		{16 * gib, "2184MiB", "1092MiB"},
-		{1 * gib, "256MiB", "256MiB"},
+		{4 * gib, "546MiB", "512MiB"},
+		{1 * gib, "512MiB", "512MiB"},
 		{64 * gib, "4096MiB", "4096MiB"},
 	} {
 		b, ok := budgetFor(tc.host)
@@ -140,5 +141,39 @@ func TestBudgetWiring_explain(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the Explain never ran")
+	}
+}
+
+// TestBudgetWiring_compactionAndResolve: a compaction's merges and the
+// resolved pairs' merges get the snapshot budget.
+func TestBudgetWiring_compactionAndResolve(t *testing.T) {
+	b, _ := budgetFor(8 << 30)
+	withBudget(t, b)
+
+	sup, req, _, _ := compactRig(t, compactMinPairs)
+	var compacted duckdbutil.Tuning
+	prevCompact := compactMinor
+	t.Cleanup(func() { compactMinor = prevCompact })
+	compactMinor = func(ctx context.Context, base string, c *baseline.TableDeltaChain, lo, hi int, outDir string) (*reconstruct.MinorCompaction, error) {
+		compacted = duckdbutil.DefaultTuningFor(ctx)
+		return prevCompact(ctx, base, c, lo, hi, outDir)
+	}
+	sup.maybeCompact(req)
+	waitCompact(t, sup, "s")
+	if compacted != b.snapshot {
+		t.Errorf("compaction budget = %+v, want %+v", compacted, b.snapshot)
+	}
+
+	rsup, rreq, _, _ := resolveRig(t, []int{1}, map[string]int{"orders": 2})
+	var resolved duckdbutil.Tuning
+	prevResolve := resolveTableDelta
+	t.Cleanup(func() { resolveTableDelta = prevResolve })
+	resolveTableDelta = func(ctx context.Context, base string, c *baseline.TableDeltaChain, prevBase string) (bool, bool, error) {
+		resolved = duckdbutil.DefaultTuningFor(ctx)
+		return prevResolve(ctx, base, c, prevBase)
+	}
+	rsup.maybeResolve(rreq)
+	if resolved != b.snapshot {
+		t.Errorf("resolved pairs budget = %+v, want %+v", resolved, b.snapshot)
 	}
 }

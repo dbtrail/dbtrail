@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,10 +24,14 @@ import (
 
 // explainJoinMemoryLimit caps the DuckDB session that joins the two sides of a
 // drill-down. It runs WHILE the reconstruction's own DuckDB session (the
-// caller's tuning, 4GB by default) is streaming rows into it, so it must not
+// caller's tuning: the job's budget in the daemon, 4GB on the command line)
+// is streaming rows into it, so it must not
 // claim another full budget on top: past this cap the rows spill to the
 // session's temp_directory instead of growing the process (#2385).
-const explainJoinMemoryLimit = "1GB"
+const (
+	explainJoinMemoryLimit = "1GB"
+	explainJoinMemoryMiB   = 953 // the same in MiB (DuckDB reads 1GB as 10^9 bytes), to compare a job budget against
+)
 
 // rowJoin is the full outer join on the primary key behind a drill-down, done
 // in DuckDB instead of a Go map (#2385). Both sides are appended as they are
@@ -60,10 +65,15 @@ type rowJoin struct {
 
 func newRowJoin(ctx context.Context, tuning duckdbutil.Tuning) (*rowJoin, error) {
 	limit := explainJoinMemoryLimit
-	if t := duckdbutil.DefaultTuningFor(ctx); t != duckdbutil.DefaultTuning() && t.MemoryLimit != "" {
+	if t := duckdbutil.DefaultTuningFor(ctx); t != duckdbutil.DefaultTuning() {
 		// The job's budget (#2385) is sized for its sessions together; this
-		// one runs beside the reconstruction's, so it takes the same share.
-		limit = t.MemoryLimit
+		// one runs beside the reconstruction's, so it takes the same share,
+		// never more than its own cap.
+		if mib, ok := strings.CutSuffix(t.MemoryLimit, "MiB"); ok {
+			if n, err := strconv.Atoi(mib); err == nil && n > 0 && n < explainJoinMemoryMiB {
+				limit = t.MemoryLimit
+			}
+		}
 	}
 	return newRowJoinCapped(ctx, tuning, limit)
 }

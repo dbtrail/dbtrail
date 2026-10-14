@@ -932,8 +932,9 @@ func (s *baselineSupervisor) executeSQLExport(req console.SQLExportRequest, dir 
 //
 // RESOURCE POSTURE: this build folds inside the process that is also capturing
 // and serving the console, so it takes the shared in-daemon posture. The DuckDB
-// budget stays at its zero value, which resolves to the container-safe
-// DefaultTuning. Parallelism and WarnEventThreshold do NOT, so both are named:
+// budget stays at its zero value, which resolves to the snapshot lane's budget
+// on the job's context (laneCtx, #2385), or DefaultTuning where the host's
+// memory is unknown. Parallelism and WarnEventThreshold do NOT, so both are named:
 // zero would mean runtime.NumCPU() and a warning that never fires. They are the
 // same constants the refresh and restore folds use, because a host that cannot
 // afford one of these folds cannot afford another.

@@ -20,7 +20,10 @@ import (
 // The rest is for capture, the index MySQL next to it, Go's own heap and
 // DuckDB's memory outside memory_limit (a session capped at 64 MB was
 // measured at about 250 MB resident). Each lane runs one job at a time
-// (heavyGate), so these add up to the whole budget and no more.
+// (heavyGate), so these add up to the whole budget. Below about 5 GB the
+// per-session floor takes over and they add up to more: a small host gets
+// the least memory the heaviest query was measured to work with, not a
+// share of nothing.
 const (
 	heavySharePercent = 40
 	// snapshotSessions: a fold runs daemonFoldParallelism tables at once,
@@ -28,10 +31,13 @@ const (
 	snapshotSessions = daemonFoldParallelism
 	// checkSessions: an Explain's reconstruction and its join run together.
 	checkSessions = 2
-	// Per session: below the floor DuckDB fails rather than spills on
-	// ordinary operators; above the ceiling is more than DefaultTuning ever
-	// gave, so a large host keeps today's behaviour.
-	sessionFloorMiB   = 256
+	// Per session. The floor is the least memory the table-delta query (a
+	// GROUP BY over every key, which DuckDB does not spill well) was
+	// measured to finish with (internal/baseline TableDeltaLatestSQL, 500 MB
+	// at 15.1M upserts); with less it can fail where it used to spill.
+	// Above the ceiling is more than DefaultTuning ever gave, so a large
+	// host keeps today's behaviour.
+	sessionFloorMiB   = 512
 	sessionCeilingMiB = 4 << 10
 )
 

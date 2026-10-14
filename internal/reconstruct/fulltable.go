@@ -345,6 +345,8 @@ type FullTableConfig struct {
 	// RAM regardless of any --ultrafast/--duckdb-* flag the caller set. The
 	// CLI sets this to the same resolved Tuning it hands ArchiveFetcher, so an
 	// explicit operator flag is honored here too, not just on archive reads.
+	// Under the daemon the zero value takes the job's budget from ctx first
+	// (duckdbutil.WithSessionTuning, #2385), sized from the host.
 	DuckDBTuning duckdbutil.Tuning
 }
 

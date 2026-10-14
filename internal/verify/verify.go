@@ -119,8 +119,9 @@ type Config struct {
 	// DuckDBTuning is the resource budget for the baseline-merge DuckDB
 	// sessions VerifyTable's reconstruct step opens (#842) — the same
 	// resolved --ultrafast/--duckdb-* tuning the CLI already hands
-	// ArchiveFetcher above. Zero value falls back to the container-safe
-	// default (reconstruct.effectiveDuckDBTuning); verify is an offline
+	// ArchiveFetcher above. Zero value falls back to the job's budget on ctx
+	// (the daemon's check lane, #2385), else the container-safe default
+	// (reconstruct.effectiveDuckDBTuningFor); verify is an offline
 	// command that carries these flags, so leaving this unset would silently
 	// cap the reconstruct-heavy half of a --ultrafast run at 2 threads/4GB.
 	DuckDBTuning duckdbutil.Tuning

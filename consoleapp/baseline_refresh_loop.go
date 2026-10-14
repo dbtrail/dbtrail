@@ -1530,7 +1530,8 @@ func applyFoldStatus(st *console.BaselineStatus, tables, refused int, reuse reus
 //
 // The zero value is NOT uniformly the safe choice on that struct, which is the
 // trap this note used to leave open. It is safe for the DuckDB budgets and the
-// archive fetcher, where zero resolves to the container-safe default. It is the
+// archive fetcher, where zero resolves to the snapshot lane's budget on the
+// fold's context (laneCtx, #2385), or the container-safe default. It is the
 // OPPOSITE for Parallelism (zero means runtime.NumCPU()) and for
 // WarnEventThreshold (zero means the volume warning never fires). Those two are
 // therefore set explicitly in refreshFoldConfig; see the constants above it.
