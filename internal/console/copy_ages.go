@@ -43,7 +43,9 @@ type serverCopyAges struct {
 	worst      time.Duration
 	worstKnown bool
 	unknown    uint64
-	unknownWhy string
+	// lastWhy is why the last answer's lag is unknown, "" when it is known
+	// or still waits.
+	lastWhy string
 	// pending are the answers whose snapshots' instant is not known yet, by
 	// the snapshots read (copyAgesKey).
 	pending map[string]*pendingCopyAge
@@ -59,6 +61,8 @@ type pendingCopyAge struct {
 	files     map[string][]string
 	latest    time.Time
 	tailWorst time.Duration
+	// n is how many answers wait on it.
+	n uint64
 }
 
 // copyAgesCutKeep is how many resolved sets of snapshots a server keeps.
@@ -101,13 +105,13 @@ const (
 	copyAgeWhyBacklog   = "too many snapshots wait to be placed in the index"
 	copyAgeWhyNoIndex   = "the server's index could not be reached"
 	copyAgeWhyNotPlaced = "the snapshot it read could not be placed in the index"
+	copyAgeWhyMoving    = "it read the snapshot through the current link, which moves"
 )
 
 // unknownFor counts an answer whose lag cannot be told: public is one of
 // the copyAgeWhy reasons, detail what the log says.
-func (c *copyAges) unknownFor(id string, s *serverCopyAges, public, detail string) {
-	s.unknown++
-	s.unknownWhy = public
+func (c *copyAges) unknownFor(id string, s *serverCopyAges, n uint64, public, detail string) {
+	s.unknown += n
 	c.faults.warn(id, "router: how far behind a copy answer was is not known", "server", id, "reason", public, "detail", detail)
 }
 
@@ -125,16 +129,24 @@ func (c *copyAges) note(id string, a copyAnswer) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	s := c.server(id)
-	s.last, s.lastThrough, s.lastPending, s.lastKey = a, time.Time{}, false, ""
+	s.last, s.lastThrough, s.lastPending, s.lastKey, s.lastWhy = a, time.Time{}, false, "", ""
 	switch {
 	case a.allTailed:
 		s.lastThrough = a.tailThrough
 		s.worse(copyAgeOf(a.ranAt, a.tailThrough))
 	case !a.ok || len(a.files) == 0:
 		// Which snapshots it read is not known.
-		c.unknownFor(id, s, copyAgeWhyNoFiles, "")
+		s.lastWhy = copyAgeWhyNoFiles
+		c.unknownFor(id, s, 1, copyAgeWhyNoFiles, "")
 	default:
 		key := copyAgesKey(a.files)
+		if !copyAgesCacheable(key) {
+			// Which snapshot the link named when the statement ran is not
+			// known by the time the index is asked: never a number.
+			s.lastWhy = copyAgeWhyMoving
+			c.unknownFor(id, s, 1, copyAgeWhyMoving, "")
+			return
+		}
 		if cut, ok := s.cut[key]; ok {
 			s.lastThrough = olderOf(cut, a.tailThrough)
 			s.worse(copyAgeOf(a.ranAt, s.lastThrough))
@@ -146,13 +158,14 @@ func (c *copyAges) note(id string, a copyAnswer) {
 			if len(s.pending) >= copyAgesCutKeep {
 				// The index is not keeping up: this answer stays unknown
 				// rather than the map growing.
-				s.lastPending, s.lastKey = false, ""
-				c.unknownFor(id, s, copyAgeWhyBacklog, "")
+				s.lastPending, s.lastKey, s.lastWhy = false, "", copyAgeWhyBacklog
+				c.unknownFor(id, s, 1, copyAgeWhyBacklog, "")
 				return
 			}
 			p = &pendingCopyAge{files: a.files}
 			s.pending[key] = p
 		}
+		p.n++
 		if a.ranAt.After(p.latest) {
 			p.latest = a.ranAt
 		}
@@ -218,23 +231,24 @@ func (c *copyAges) settle(id, key string, cut time.Time, why string) {
 	delete(s.pending, key)
 	if why == "" {
 		s.worse(max(copyAgeOf(p.latest, cut), p.tailWorst))
-		if copyAgesCacheable(key) {
-			if len(s.cut) >= copyAgesCutKeep {
-				clear(s.cut)
-			}
-			s.cut[key] = cut
+		if len(s.cut) >= copyAgesCutKeep {
+			clear(s.cut)
 		}
-	} else {
-		public := copyAgeWhyNotPlaced
-		if strings.HasPrefix(why, copyAgeWhyNoIndex) {
-			public = copyAgeWhyNoIndex
-		}
-		c.unknownFor(id, s, public, why)
+		s.cut[key] = cut
+	}
+	public := copyAgeWhyNotPlaced
+	if strings.HasPrefix(why, copyAgeWhyNoIndex) {
+		public = copyAgeWhyNoIndex
+	}
+	if why != "" {
+		c.unknownFor(id, s, p.n, public, why)
 	}
 	if s.lastPending && s.lastKey == key {
 		s.lastPending = false
 		if why == "" {
 			s.lastThrough = olderOf(cut, s.last.tailThrough)
+		} else {
+			s.lastWhy = public
 		}
 	}
 }
@@ -245,9 +259,11 @@ type copyAgesNow struct {
 	asOf          time.Time
 	age, worst    time.Duration
 	known, anyMax bool
-	// unknown is how many answers' lag could not be told, unknownWhy the
-	// last reason, said when the last answer is one of them.
+	// unknown is how many answers' lag could not be told; pending says the
+	// last answer's still waits on the index, and unknownWhy is why the
+	// last answer's is not known (empty when it waits).
 	unknown    uint64
+	pending    bool
 	unknownWhy string
 }
 
@@ -258,7 +274,7 @@ func (c *copyAges) now(id string) copyAgesNow {
 	if s == nil {
 		return copyAgesNow{}
 	}
-	out := copyAgesNow{worst: s.worst, anyMax: s.worstKnown, unknown: s.unknown, unknownWhy: s.unknownWhy}
+	out := copyAgesNow{worst: s.worst, anyMax: s.worstKnown, unknown: s.unknown, pending: s.lastPending, unknownWhy: s.lastWhy}
 	if !s.lastPending && !s.lastThrough.IsZero() {
 		out.asOf, out.age, out.known = s.lastThrough, copyAgeOf(s.last.ranAt, s.lastThrough), true
 	}

@@ -180,6 +180,10 @@ type RouterServerNumbers struct {
 	// DataAgeUnknownReason is the last one's reason.
 	DataAgeUnknown       uint64 `json:"data_age_unknown,omitempty"`
 	DataAgeUnknownReason string `json:"data_age_unknown_reason,omitempty"`
+	// DataAgePending: the last answer's lag is not known yet, only because
+	// the router has not placed its snapshot in the index yet (it does
+	// every 30 seconds).
+	DataAgePending bool `json:"data_age_pending,omitempty"`
 }
 
 // RouterNumbers reads the counts and the pool. It opens nothing and lists no
@@ -196,10 +200,10 @@ func (s *Server) RouterNumbers() RouterNumbers {
 		}
 		n := RouterServerNumbers{Copy: t.Copy, MySQL: t.MySQL, Refused: t.Refused, Reasons: reasons,
 			CannotRoute: t.Unavailable != "", AccountRefused: t.AccountRefused != "", SessionUntracked: t.SessionUntracked != ""}
-		if ages := s.copyAges.now(id); ages.known || ages.anyMax || ages.unknown > 0 {
+		if ages := s.copyAges.now(id); ages.known || ages.anyMax || ages.unknown > 0 || ages.pending {
 			// Rounded up: a lag is never said smaller than it was.
 			secs := func(d time.Duration) *int64 { v := int64(math.Ceil(d.Seconds())); return &v }
-			n.DataAgeUnknown, n.DataAgeUnknownReason = ages.unknown, ages.unknownWhy
+			n.DataAgeUnknown, n.DataAgeUnknownReason, n.DataAgePending = ages.unknown, ages.unknownWhy, ages.pending
 			if ages.known {
 				n.DataAsOf, n.DataAgeSeconds = ages.asOf.UTC().Format(time.RFC3339), secs(ages.age)
 			}

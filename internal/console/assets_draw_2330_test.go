@@ -186,6 +186,7 @@ func TestDrawings2330(t *testing.T) {
 			"age unknown":    c{"view": rview(c{"mysql": 4, "copy": 2, "copy_snapshot": "2026-10-12T01:08:57Z", "data_age_max_seconds": 300}), "cur": srvA},
 			"age known":      c{"view": rview(c{"mysql": 4, "copy": 2, "copy_snapshot": "2026-10-12T01:08:57Z", "data_as_of": "2026-10-12T01:09:55Z", "data_age_seconds": 3, "data_age_max_seconds": 300}), "cur": srvA},
 			"age zero":       c{"view": rview(c{"copy": 1, "data_as_of": "2026-10-12T01:09:55Z", "data_age_seconds": 0}), "cur": srvA},
+			"age pending":    c{"view": rview(c{"copy": 1, "data_age_pending": true, "data_age_unknown_reason": "stale"}), "cur": srvA},
 			"age fraction":   c{"view": rview(c{"copy": 1, "data_as_of": "2026-10-12T01:09:55Z", "data_age_seconds": 2.4}), "cur": srvA},
 			"age floor":      c{"view": rview(c{"copy": 3, "data_as_of": "2026-10-12T01:09:55Z", "data_age_seconds": 89, "data_age_max_seconds": 5340, "data_age_unknown": 2, "data_age_unknown_reason": "the index could not be read"}), "cur": srvA},
 			"age junk":       c{"view": rview(c{"copy": 1, "data_as_of": "nope", "data_age_seconds": 3}), "cur": srvA},
@@ -359,6 +360,7 @@ func TestDrawings2330(t *testing.T) {
 			"age known":      {"known", "3 seconds", "5 minutes", "Lag: 3 seconds (last answer)"},
 			"age zero":       {"known", "0 seconds", "", "Lag: 0 seconds (last answer)"},
 			"age junk":       {"unknown", "", "", "Lag: unknown (last answer)"},
+			"age pending":    {"unknown", "", "", "Lag: being worked out (last answer)"},
 			"age fraction":   {"known", "3 seconds", "", "Lag: 3 seconds (last answer)"},
 			"age floor":      {"known", "1 minute 29 seconds", "1 hour 29 minutes", "Max lag: at least 1 hour 29 minutes"},
 		} {

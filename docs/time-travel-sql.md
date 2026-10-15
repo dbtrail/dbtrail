@@ -2089,7 +2089,9 @@ since `counting_since`, all rounded up. The first two are absent when the
 last answer's instant is not known (or the copy has answered nothing yet);
 the third, when no answer's is. `data_age_unknown` counts the answers whose
 lag could not be told, which the max cannot include (the panel then says
-"at least"), and `data_age_unknown_reason` says why for the last of them;
+"at least"), `data_age_unknown_reason` says why when the last answer is one of them,
+and `data_age_pending` says the last answer's lag is still being worked out
+(the router places a snapshot in the index within 30 seconds);
 the router's log says it at warning level, once a minute at most. Like
 `/metrics` it asks for no password, so it carries counts, times and the
 router's own settings only: never an account's name, nor what a source

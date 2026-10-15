@@ -15462,6 +15462,7 @@ function routerSidesModel(view, cur) {
       worst: t.data_age_max_seconds != null && isFinite(worst) && worst >= 0 ? routerBehindWords(worst) : "",
       // Answers whose lag could not be told: the max cannot include them.
       unknown: Math.max(0, Number(t.data_age_unknown) || 0),
+      pending: !known && t.data_age_pending === true,
       why: String(t.data_age_unknown_reason || ""),
     };
   }
@@ -15489,6 +15490,7 @@ function routerSides(m) {
     if (s.key === "copy" && m.data) {
       const d = m.data;
       if (d.state === "known") facts.append(el("span", { class: "rs-fact", title: "Its data reached " + d.at.toLocaleString() }, "Lag: ", el("b", { text: d.age }), " (last answer)"));
+      else if (d.pending) facts.append(el("span", { class: "rs-fact", title: "The router works out the lag of an answer over a snapshot within 30 seconds. Refresh to see it." }, "Lag: ", el("b", { text: "being worked out" }), " (last answer)"));
       else facts.append(el("span", { class: "rs-fact", title: d.why ? "Why: " + d.why + "." : "The router could not tell how far behind it was." }, "Lag: ", el("b", { text: "unknown" }), " (last answer)"));
       if (d.worst) facts.append(el("span", { class: "rs-fact", title: d.unknown ? d.unknown + (d.unknown === 1 ? " answer's lag" : " answers' lag") + " could not be told, so the max may be higher." : "" }, "Max lag: ", d.unknown ? "at least " : "", el("b", { text: d.worst })));
     }

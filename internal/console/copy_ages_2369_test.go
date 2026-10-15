@@ -123,15 +123,35 @@ func TestCopyAges(t *testing.T) {
 		}
 	})
 
-	t.Run("snapshots reached through the current link are asked again each time", func(t *testing.T) {
+	t.Run("an answer through the moving current link is unknown, never a number", func(t *testing.T) {
 		var c copyAges
 		c.note("s", copyAt(at(10), snap("/snap/current")))
-		for key := range c.pendingFor()["s"] {
-			c.settle("s", key, at(0), "")
+		n := c.now("s")
+		if n.known || n.pending || n.unknown != 1 || n.unknownWhy != copyAgeWhyMoving || len(c.pendingFor()) != 0 {
+			t.Fatalf("%+v", n)
 		}
-		c.note("s", copyAt(at(20), snap("/snap/current")))
-		if len(c.pendingFor()["s"]) != 1 {
-			t.Fatal("the instant of the moving current link was kept")
+	})
+
+	t.Run("a waiting answer is said to wait, without an older answer's reason", func(t *testing.T) {
+		var c copyAges
+		c.note("s", copyAnswer{side: "copy", ranAt: at(1), ok: false}) // unknown, with a reason
+		c.note("s", copyAt(at(2), snap("/snap/1")))
+		n := c.now("s")
+		if n.known || !n.pending || n.unknownWhy != "" {
+			t.Fatalf("%+v", n)
+		}
+	})
+
+	t.Run("every answer waiting on a set the index cannot place is counted", func(t *testing.T) {
+		var c copyAges
+		for i := range 5 {
+			c.note("s", copyAt(at(i), snap("/snap/1")))
+		}
+		for key := range c.pendingFor()["s"] {
+			c.settle("s", key, time.Time{}, "gone")
+		}
+		if n := c.now("s"); n.unknown != 5 || n.pending || n.unknownWhy != copyAgeWhyNotPlaced {
+			t.Fatalf("%+v", n)
 		}
 	})
 
