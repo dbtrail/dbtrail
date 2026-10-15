@@ -2,32 +2,12 @@ package rotation
 
 import (
 	"context"
-	"log/slog"
+	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
-
-// attemptsOn counts the rotation attempts the loop made on index database db:
-// each target here is unreachable, so every attempt logs one "cannot connect".
-func (c *logCapture) attemptsOn(db string) int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	n := 0
-	for _, r := range c.records {
-		if r.Message != "built-in rotation: cannot connect to index database" {
-			continue
-		}
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "db" && a.Value.String() == db {
-				n++
-				return false
-			}
-			return true
-		})
-	}
-	return n
-}
 
 // startHourlyLoop runs StartLoop with an hour-long interval, so any attempt
 // the test sees inside a few hundred milliseconds came from the first cycle
@@ -59,38 +39,98 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // after startup, or one added later) is rotated within a poll, not an
 // interval later (#2412).
 func TestStartLoop_rotatesANewTargetWithoutWaitingForTheTick(t *testing.T) {
-	logs := captureSlog(t)
-	var calls atomic.Int32
+	calls := fakeRotate(t, nil)
+	var n atomic.Int32
 	startHourlyLoop(t, func() []RotateTarget {
-		if calls.Add(1) < 3 {
-			return []RotateTarget{{DSN: "root:x@tcp(127.0.0.1:1)/boot"}}
+		if n.Add(1) < 3 {
+			return []RotateTarget{{DSN: "boot"}}
 		}
-		return []RotateTarget{{DSN: "root:x@tcp(127.0.0.1:1)/boot"}, {DSN: "root:x@tcp(127.0.0.1:1)/late"}}
+		return []RotateTarget{{DSN: "boot"}, {DSN: "late"}}
 	})
-	waitFor(t, "the index that appeared after the first cycle was not rotated before the tick", func() bool { return logs.attemptsOn("late") == 1 })
+	waitFor(t, "the index that appeared after the first cycle was not rotated before the tick", func() bool { return calls("late") == 1 })
 	time.Sleep(100 * time.Millisecond)
-	if n := logs.attemptsOn("boot"); n != 1 {
-		t.Errorf("the index of the first cycle was rotated %d times before the tick, want 1", n)
+	if c := calls("boot"); c != 1 {
+		t.Errorf("the index of the first cycle was rotated %d times before the tick, want 1", c)
 	}
-	if n := logs.attemptsOn("late"); n != 1 {
-		t.Errorf("the new index was rotated %d times before the tick, want 1 (a failed one waits for the tick)", n)
+	if c := calls("late"); c != 1 {
+		t.Errorf("the new index was rotated %d times before the tick, want 1", c)
 	}
 }
 
-// TestStartLoop_newTargetPollIgnoresEmptyAndDuplicateDSNs: the poll dedupes
-// like a full cycle does.
-func TestStartLoop_newTargetPollIgnoresEmptyAndDuplicateDSNs(t *testing.T) {
-	logs := captureSlog(t)
-	var calls atomic.Int32
+// TestStartLoop_aDSNListedTwiceIsRotatedOnce: a new DSN the provider lists
+// twice, beside an empty one, is rotated once.
+func TestStartLoop_aDSNListedTwiceIsRotatedOnce(t *testing.T) {
+	calls := fakeRotate(t, nil)
+	var n atomic.Int32
 	startHourlyLoop(t, func() []RotateTarget {
-		if calls.Add(1) < 3 {
+		if n.Add(1) < 3 {
 			return nil
 		}
-		return []RotateTarget{{DSN: ""}, {DSN: "root:x@tcp(127.0.0.1:1)/dup"}, {DSN: "root:x@tcp(127.0.0.1:1)/dup"}}
+		return []RotateTarget{{DSN: ""}, {DSN: "dup"}, {DSN: "dup"}}
 	})
-	waitFor(t, "the new index was never rotated", func() bool { return logs.attemptsOn("dup") >= 1 })
+	waitFor(t, "the new index was never rotated", func() bool { return calls("dup") >= 1 })
 	time.Sleep(100 * time.Millisecond)
-	if n := logs.attemptsOn("dup"); n != 1 {
-		t.Errorf("a DSN listed twice was rotated %d times, want 1", n)
+	if c := calls("dup"); c != 1 {
+		t.Errorf("a DSN listed twice was rotated %d times, want 1", c)
+	}
+	if c := calls(""); c != 0 {
+		t.Errorf("an empty DSN was rotated %d times", c)
+	}
+}
+
+// fakeRotate swaps rotateIndex for a counter that fails each DSN's first
+// failFirst[dsn] attempts.
+func fakeRotate(t *testing.T, failFirst map[string]int) func(string) int {
+	t.Helper()
+	var mu sync.Mutex
+	calls := map[string]int{}
+	prev := rotateIndex
+	rotateIndex = func(_ context.Context, rt RotateTarget, _ Settings) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls[rt.DSN]++
+		if calls[rt.DSN] <= failFirst[rt.DSN] {
+			return 0, errors.New("Unknown database")
+		}
+		return 0, nil
+	}
+	t.Cleanup(func() { rotateIndex = prev })
+	return func(dsn string) int { mu.Lock(); defer mu.Unlock(); return calls[dsn] }
+}
+
+// TestStartLoop_aNewTargetThatFailsIsTriedAgain: a server added while its
+// database is still being created fails its first try; the poll tries it
+// again instead of leaving it to the next full cycle (#2412).
+func TestStartLoop_aNewTargetThatFailsIsTriedAgain(t *testing.T) {
+	calls := fakeRotate(t, map[string]int{"late": 1})
+	var n atomic.Int32
+	startHourlyLoop(t, func() []RotateTarget {
+		if n.Add(1) < 3 {
+			return nil
+		}
+		return []RotateTarget{{DSN: "late"}}
+	})
+	waitFor(t, "the new index that failed once was not tried again", func() bool { return calls("late") == 2 })
+	time.Sleep(100 * time.Millisecond)
+	if c := calls("late"); c != 2 {
+		t.Errorf("a new index that succeeded on its second try was rotated %d times before the tick, want 2", c)
+	}
+}
+
+// TestStartLoop_aNewTargetThatKeepsFailingWaitsForTheTick: the poll gives up
+// after newTargetTries; the full cycle retries and reports it.
+func TestStartLoop_aNewTargetThatKeepsFailingWaitsForTheTick(t *testing.T) {
+	calls := fakeRotate(t, map[string]int{"late": 1000})
+	var n atomic.Int32
+	startHourlyLoop(t, func() []RotateTarget {
+		if n.Add(1) < 3 {
+			return nil
+		}
+		return []RotateTarget{{DSN: "late"}}
+	})
+	waitFor(t, "the new index was not tried", func() bool { return calls("late") >= newTargetTries })
+	time.Sleep(100 * time.Millisecond)
+	if c := calls("late"); c != newTargetTries {
+		t.Errorf("a new index that keeps failing was tried %d times before the tick, want %d", c, newTargetTries)
 	}
 }

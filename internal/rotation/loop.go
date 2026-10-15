@@ -159,10 +159,14 @@ func StartLoop(ctx context.Context, settings func() Settings, targets func() []R
 		// come up after the first cycle, and one can be added at any time.
 		// Waiting a whole interval for those leaves an index whose partitions
 		// are behind the clock behind for that long (#2412), so a short poll
-		// rotates each new one once, right away. It stays out of the
-		// escalation streak and the onCycle callbacks: the next full cycle
-		// covers it again and reports its health.
+		// rotates each new one right away. A new index can fail its first try
+		// because the console is still creating its database, which comes
+		// with no partition ahead of the clock: the poll tries it again, up to
+		// newTargetTries times, and leaves it to the full cycle after that.
+		// It stays out of the escalation streak and the onCycle callbacks:
+		// the next full cycle covers it again and reports its health.
 		rotated := map[string]bool{}
+		tries := map[string]int{}
 		tracked := func() []RotateTarget {
 			ts := dedupeTargets(targets())
 			for _, t := range ts {
@@ -176,15 +180,19 @@ func StartLoop(ctx context.Context, settings func() Settings, targets func() []R
 					slog.Error("built-in rotation of a new index panicked; rotation continues next tick", "panic", r)
 				}
 			}()
-			var fresh []RotateTarget
+			var s Settings
+			read := false
 			for _, t := range dedupeTargets(targets()) {
-				if !rotated[t.DSN] {
-					rotated[t.DSN] = true
-					fresh = append(fresh, t)
+				if rotated[t.DSN] {
+					continue
 				}
-			}
-			if len(fresh) > 0 {
-				runCycle(ctx, settings(), func() []RotateTarget { return fresh })
+				if !read {
+					s, read = settings(), true
+				}
+				tries[t.DSN]++
+				if _, err := rotateIndex(ctx, t, s); err == nil || tries[t.DSN] >= newTargetTries {
+					rotated[t.DSN] = true
+				}
 			}
 		}
 		// runOne reads the current settings (the console may have edited them
@@ -247,8 +255,16 @@ func StartLoop(ctx context.Context, settings func() Settings, targets func() []R
 }
 
 // newTargetPoll is how often the loop looks for an index it has not rotated
-// yet (#2412). A var so tests can shrink it.
-var newTargetPoll = time.Minute
+// yet, and newTargetTries how many polls try one that fails (#2412). Vars so
+// tests can shrink them.
+var (
+	newTargetPoll  = time.Minute
+	newTargetTries = 3
+)
+
+// rotateIndex is rotateOneIndex; a var so tests can fail and count rotations
+// without a database.
+var rotateIndex = rotateOneIndex
 
 // escalateAfter is how many consecutive unhealthy cycles (failed
 // or deferring) the loop tolerates before escalating from Warn to Error. A
@@ -261,7 +277,7 @@ var escalateAfter = 3
 // drop (Result.Deferred, summed), and whether any database's rotation failed.
 func runCycle(ctx context.Context, s Settings, targets func() []RotateTarget) (deferred int, failed bool) {
 	for _, t := range dedupeTargets(targets()) {
-		d, err := rotateOneIndex(ctx, t, s)
+		d, err := rotateIndex(ctx, t, s)
 		deferred += d
 		if err != nil {
 			failed = true
