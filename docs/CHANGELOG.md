@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **Built-in rotation rotates a server's index as soon as it shows up.** `watch`'s first rotation cycle runs before the servers in the web interface start, so their indexes waited a whole interval (an hour by default) after every restart, and so did a server added later; one whose partitions were behind the clock stayed behind that long. The loop now looks every minute for an index it has not rotated yet and rotates it right away (#2412).
 
 ## [0.105.1] - 2026-10-15
 ### Fixed
