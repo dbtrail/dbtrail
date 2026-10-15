@@ -2,7 +2,7 @@ package console
 
 import (
 	"context"
-	"log/slog"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -23,6 +23,11 @@ import (
 type copyAges struct {
 	mu sync.Mutex
 	by map[string]*serverCopyAges
+	// resolving keeps one ResolveCopyAges at a time: the loop and the
+	// status document would otherwise ask the index the same thing twice.
+	resolving sync.Mutex
+	// faults logs why an answer's lag is not known, at Warn now and then.
+	faults copyFaultLog
 }
 
 type serverCopyAges struct {
@@ -32,9 +37,13 @@ type serverCopyAges struct {
 	lastThrough time.Time
 	lastPending bool
 	lastKey     string
-	// worst is the largest age of an answer whose instant is known.
+	// worst is the largest age of an answer whose instant is known;
+	// unknown counts the answers whose instant is not, which the worst
+	// cannot account for (it is then "at least"), and why the last of them.
 	worst      time.Duration
 	worstKnown bool
+	unknown    uint64
+	unknownWhy string
 	// pending are the answers whose snapshots' instant is not known yet, by
 	// the snapshots read (copyAgesKey).
 	pending map[string]*pendingCopyAge
@@ -83,6 +92,13 @@ func (c *copyAges) server(id string) *serverCopyAges {
 	return s
 }
 
+// unknownFor counts an answer whose lag cannot be told, for why.
+func (c *copyAges) unknownFor(id string, s *serverCopyAges, why string) {
+	s.unknown++
+	s.unknownWhy = why
+	c.faults.warn(id, "router: how far behind a copy answer was is not known", "server", id, "reason", why)
+}
+
 func (s *serverCopyAges) worse(age time.Duration) {
 	if !s.worstKnown || age > s.worst {
 		s.worst, s.worstKnown = age, true
@@ -103,7 +119,8 @@ func (c *copyAges) note(id string, a copyAnswer) {
 		s.lastThrough = a.tailThrough
 		s.worse(copyAgeOf(a.ranAt, a.tailThrough))
 	case !a.ok || len(a.files) == 0:
-		// Which snapshots it read is not known: unknown, and not a worst.
+		// Which snapshots it read is not known.
+		c.unknownFor(id, s, "which snapshot the answer read could not be told")
 	default:
 		key := copyAgesKey(a.files)
 		if cut, ok := s.cut[key]; ok {
@@ -115,9 +132,10 @@ func (c *copyAges) note(id string, a copyAnswer) {
 		p := s.pending[key]
 		if p == nil {
 			if len(s.pending) >= copyAgesCutKeep {
-				// Nothing resolves them (no status read, no loop): this
-				// answer stays unknown rather than the map growing.
+				// The index is not keeping up: this answer stays unknown
+				// rather than the map growing.
 				s.lastPending, s.lastKey = false, ""
+				c.unknownFor(id, s, "too many snapshots wait to be placed in the index")
 				return
 			}
 			p = &pendingCopyAge{files: a.files}
@@ -130,6 +148,20 @@ func (c *copyAges) note(id string, a copyAnswer) {
 			p.tailWorst = max(p.tailWorst, copyAgeOf(a.ranAt, a.tailThrough))
 		}
 	}
+}
+
+// copyAgesCurrentLink is baseline.CurrentLinkName (a test pins them equal).
+const copyAgesCurrentLink = "current"
+
+// copyAgesCacheable says a set of snapshot directories always holds the
+// same data: not one reached through the moving "current" link.
+func copyAgesCacheable(key string) bool {
+	for _, d := range strings.Split(key, "\x00") {
+		if filepath.Base(filepath.Clean(d)) == copyAgesCurrentLink {
+			return false
+		}
+	}
+	return true
 }
 
 // olderOf is the older of a snapshot's instant and a tail's, a zero tail
@@ -174,10 +206,14 @@ func (c *copyAges) settle(id, key string, cut time.Time, why string) {
 	delete(s.pending, key)
 	if why == "" {
 		s.worse(max(copyAgeOf(p.latest, cut), p.tailWorst))
-		if len(s.cut) >= copyAgesCutKeep {
-			clear(s.cut)
+		if copyAgesCacheable(key) {
+			if len(s.cut) >= copyAgesCutKeep {
+				clear(s.cut)
+			}
+			s.cut[key] = cut
 		}
-		s.cut[key] = cut
+	} else {
+		c.unknownFor(id, s, why)
 	}
 	if s.lastPending && s.lastKey == key {
 		s.lastPending = false
@@ -193,6 +229,10 @@ type copyAgesNow struct {
 	asOf          time.Time
 	age, worst    time.Duration
 	known, anyMax bool
+	// unknown is how many answers' lag could not be told, unknownWhy the
+	// last reason, said when the last answer is one of them.
+	unknown    uint64
+	unknownWhy string
 }
 
 func (c *copyAges) now(id string) copyAgesNow {
@@ -202,7 +242,7 @@ func (c *copyAges) now(id string) copyAgesNow {
 	if s == nil {
 		return copyAgesNow{}
 	}
-	out := copyAgesNow{worst: s.worst, anyMax: s.worstKnown}
+	out := copyAgesNow{worst: s.worst, anyMax: s.worstKnown, unknown: s.unknown, unknownWhy: s.unknownWhy}
 	if !s.lastPending && !s.lastThrough.IsZero() {
 		out.asOf, out.age, out.known = s.lastThrough, copyAgeOf(s.last.ranAt, s.lastThrough), true
 	}
@@ -210,15 +250,27 @@ func (c *copyAges) now(id string) copyAgesNow {
 }
 
 // ResolveCopyAges asks the index the instants of the snapshots the copy's
-// pending answers read (copyAges). Called by the router's status document
-// and its 30-second loop; at most one index read per set of snapshots.
+// pending answers read (copyAges), within ctx. Called by the router's
+// 30-second loop and, briefly, its status document; one at a time (a call
+// while another runs returns at once), at most one index read per set of
+// snapshots.
 func (s *Server) ResolveCopyAges(ctx context.Context) {
+	if !s.copyAges.resolving.TryLock() {
+		return
+	}
+	defer s.copyAges.resolving.Unlock()
 	for id, sets := range s.copyAges.pendingFor() {
+		if ctx.Err() != nil {
+			return // left pending, for the next call
+		}
 		b, err := s.cm.Resolve(ctx, id)
+		if err != nil && ctx.Err() != nil {
+			return
+		}
 		if err != nil || b == nil || b.db == nil {
 			why := "the server's index could not be reached"
 			if err != nil {
-				slog.Debug("router status: a server could not be resolved, so its copy answers' age is not known", "server", id, "error", err)
+				why += ": " + err.Error()
 			}
 			for key := range sets {
 				s.copyAges.settle(id, key, time.Time{}, why)
@@ -229,8 +281,8 @@ func (s *Server) ResolveCopyAges(ctx context.Context) {
 			rctx, cancel := context.WithTimeout(ctx, copyUnchangedTimeout)
 			cut, why := s.copyIndexedThrough(rctx, b.db, files)
 			cancel()
-			if why != "" {
-				slog.Debug("router status: how far a copy answer's data was indexed is not known", "server", id, "reason", why)
+			if why != "" && ctx.Err() != nil {
+				return // out of the caller's time, not the index's answer
 			}
 			s.copyAges.settle(id, key, cut, why)
 		}

@@ -186,6 +186,8 @@ func TestDrawings2330(t *testing.T) {
 			"age unknown":    c{"view": rview(c{"mysql": 4, "copy": 2, "copy_snapshot": "2026-10-12T01:08:57Z", "data_age_max_seconds": 300}), "cur": srvA},
 			"age known":      c{"view": rview(c{"mysql": 4, "copy": 2, "copy_snapshot": "2026-10-12T01:08:57Z", "data_as_of": "2026-10-12T01:09:55Z", "data_age_seconds": 3, "data_age_max_seconds": 300}), "cur": srvA},
 			"age zero":       c{"view": rview(c{"copy": 1, "data_as_of": "2026-10-12T01:09:55Z", "data_age_seconds": 0}), "cur": srvA},
+			"age fraction":   c{"view": rview(c{"copy": 1, "data_as_of": "2026-10-12T01:09:55Z", "data_age_seconds": 2.4}), "cur": srvA},
+			"age floor":      c{"view": rview(c{"copy": 3, "data_as_of": "2026-10-12T01:09:55Z", "data_age_seconds": 89, "data_age_max_seconds": 5340, "data_age_unknown": 2, "data_age_unknown_reason": "the index could not be read"}), "cur": srvA},
 			"age junk":       c{"view": rview(c{"copy": 1, "data_as_of": "nope", "data_age_seconds": 3}), "cur": srvA},
 			"counts only":   c{"view": rview(c{"mysql": 10, "copy": 30}), "cur": srvA},
 			"full":          c{"view": rview(c{"mysql": 48210, "copy": 3233, "refused": 12, "copy_snapshot": "2026-10-12T01:08:57Z", "answers": c{"mysql": c{"count": 48100, "errors": 7, "timeouts": 2, "seconds": 310.4, "slowest_seconds": 9.78}, "copy": c{"count": 3233, "errors": 0, "timeouts": 0, "seconds": 5075.8, "slowest_seconds": 41.2}}}), "cur": srvA},
@@ -357,6 +359,8 @@ func TestDrawings2330(t *testing.T) {
 			"age known":      {"known", "3 seconds", "5 minutes", "Lag: 3 seconds (last answer)"},
 			"age zero":       {"known", "0 seconds", "", "Lag: 0 seconds (last answer)"},
 			"age junk":       {"unknown", "", "", "Lag: unknown (last answer)"},
+			"age fraction":   {"known", "3 seconds", "", "Lag: 3 seconds (last answer)"},
+			"age floor":      {"known", "1 minute 29 seconds", "1 hour 29 minutes", "Max lag: at least 1 hour 29 minutes"},
 		} {
 			a := out.Router[name]
 			if !a.Drawn || a.AgeState != want.state || a.Age != want.age || a.Worst != want.worst || !strings.Contains(a.Screen, want.screen) {
@@ -365,7 +369,7 @@ func TestDrawings2330(t *testing.T) {
 			if want.state == "" && strings.Contains(a.Screen, "Lag") {
 				t.Errorf("%s: an age drawn with no copy answer: %s", name, a.Screen)
 			}
-			if (want.worst != "") != strings.Contains(a.Screen, "Max lag: "+want.worst) {
+			if (want.worst != "") != strings.Contains(a.Screen, "Max lag: ") || !strings.Contains(a.Screen, want.worst) {
 				t.Errorf("%s: the worst not drawn: %s", name, a.Screen)
 			}
 		}

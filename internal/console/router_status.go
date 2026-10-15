@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"strconv"
 	"time"
@@ -174,6 +175,11 @@ type RouterServerNumbers struct {
 	// DataAgeMaxSeconds is the worst such age since CountingSince, over the
 	// answers whose instant is known; absent when none is.
 	DataAgeMaxSeconds *int64 `json:"data_age_max_seconds,omitempty"`
+	// DataAgeUnknown counts the copy's answers whose lag could not be told,
+	// which DataAgeMaxSeconds cannot include: with any, the max is a floor.
+	// DataAgeUnknownReason is the last one's reason.
+	DataAgeUnknown       uint64 `json:"data_age_unknown,omitempty"`
+	DataAgeUnknownReason string `json:"data_age_unknown_reason,omitempty"`
 }
 
 // RouterNumbers reads the counts and the pool. It opens nothing and lists no
@@ -190,8 +196,10 @@ func (s *Server) RouterNumbers() RouterNumbers {
 		}
 		n := RouterServerNumbers{Copy: t.Copy, MySQL: t.MySQL, Refused: t.Refused, Reasons: reasons,
 			CannotRoute: t.Unavailable != "", AccountRefused: t.AccountRefused != "", SessionUntracked: t.SessionUntracked != ""}
-		if ages := s.copyAges.now(id); ages.known || ages.anyMax {
-			secs := func(d time.Duration) *int64 { v := int64(d.Seconds()); return &v }
+		if ages := s.copyAges.now(id); ages.known || ages.anyMax || ages.unknown > 0 {
+			// Rounded up: a lag is never said smaller than it was.
+			secs := func(d time.Duration) *int64 { v := int64(math.Ceil(d.Seconds())); return &v }
+			n.DataAgeUnknown, n.DataAgeUnknownReason = ages.unknown, ages.unknownWhy
 			if ages.known {
 				n.DataAsOf, n.DataAgeSeconds = ages.asOf.UTC().Format(time.RFC3339), secs(ages.age)
 			}

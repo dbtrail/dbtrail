@@ -1,6 +1,9 @@
 package console
 
 import (
+	"context"
+
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"sync"
 	"testing"
 	"time"
@@ -94,12 +97,15 @@ func TestCopyAges(t *testing.T) {
 		if n.known || !n.anyMax || n.worst != time.Minute {
 			t.Fatalf("an unknown answer shown, or counted toward the worst: %+v", n)
 		}
+		if n.unknown != 1 || n.unknownWhy != "the index no longer holds the event" {
+			t.Errorf("the unknown answer is not counted, with its reason: %+v", n)
+		}
 	})
 
 	t.Run("files not known: unknown at once", func(t *testing.T) {
 		var c copyAges
 		c.note("s", copyAnswer{side: "copy", ranAt: at(1), ok: false})
-		if n := c.now("s"); n.known || len(c.pendingFor()) != 0 {
+		if n := c.now("s"); n.known || len(c.pendingFor()) != 0 || n.unknown != 1 {
 			t.Fatalf("%+v", n)
 		}
 	})
@@ -114,6 +120,18 @@ func TestCopyAges(t *testing.T) {
 		n := c.now("s")
 		if !n.known || n.age != 0 || n.worst != 40*time.Minute {
 			t.Fatalf("%+v", n)
+		}
+	})
+
+	t.Run("snapshots reached through the current link are asked again each time", func(t *testing.T) {
+		var c copyAges
+		c.note("s", copyAt(at(10), snap("/snap/current")))
+		for key := range c.pendingFor()["s"] {
+			c.settle("s", key, at(0), "")
+		}
+		c.note("s", copyAt(at(20), snap("/snap/current")))
+		if len(c.pendingFor()["s"]) != 1 {
+			t.Fatal("the instant of the moving current link was kept")
 		}
 	})
 
@@ -141,8 +159,8 @@ func TestCopyAges(t *testing.T) {
 		if got := len(c.pendingFor()["s"]); got != copyAgesCutKeep {
 			t.Fatalf("%d pending", got)
 		}
-		if n := c.now("s"); n.known {
-			t.Errorf("an answer left out of the pending shown as known: %+v", n)
+		if n := c.now("s"); n.known || n.unknown != 5 {
+			t.Errorf("an answer left out of the pending shown as known, or not counted: %+v", n)
 		}
 	})
 
@@ -193,5 +211,38 @@ func TestNoteRouteRecordsCopyAge(t *testing.T) {
 	q.NoteRoute("copy")
 	if n := s.copyAges.now("s"); !n.known || n.age != time.Minute {
 		t.Fatalf("%+v", n)
+	}
+}
+
+// The lag is rounded up in the document: never said smaller than it was.
+func TestRouterNumbersRoundsLagUp(t *testing.T) {
+	s := &Server{routing: newRoutingStats(time.Now())}
+	s.routing.record("s", "copy", "")
+	through := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	s.copyAges.note("s", copyAnswer{side: "copy", ranAt: through.Add(3900 * time.Millisecond), tailThrough: through, allTailed: true})
+	s.copyAges.note("s", copyAnswer{side: "copy", ok: false, ranAt: through})
+	n := s.RouterNumbers().Servers["s"]
+	if n.DataAgeMaxSeconds == nil || *n.DataAgeMaxSeconds != 4 || n.DataAgeUnknown != 1 || n.DataAgeUnknownReason == "" || n.DataAsOf != "" {
+		t.Fatalf("%+v", n)
+	}
+}
+
+// One resolve at a time: a second call while one runs returns at once.
+func TestResolveCopyAgesOneAtATime(t *testing.T) {
+	s := &Server{}
+	s.copyAges.resolving.Lock()
+	done := make(chan struct{})
+	go func() { s.ResolveCopyAges(context.Background()); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a resolve waited on another")
+	}
+	s.copyAges.resolving.Unlock()
+}
+
+func TestCopyAgesCurrentLinkIsTheBaselines(t *testing.T) {
+	if copyAgesCurrentLink != baseline.CurrentLinkName {
+		t.Fatalf("%q != %q", copyAgesCurrentLink, baseline.CurrentLinkName)
 	}
 }

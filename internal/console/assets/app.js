@@ -15409,15 +15409,21 @@ function routerSecs(sec) {
   if (s < 60) return s.toFixed(1).replace(/\.0$/, "") + " s";
   return plainDuration(s);
 }
-// routerBehindWords says a number of seconds in words, rounded to its
-// largest unit: "3 seconds", "6 minutes", "2 hours", "1 day".
+// routerBehindWords says a lag in words, in its two largest units, the
+// smaller ROUNDED UP: a lag is never said smaller than it was ("3 seconds",
+// "1 minute 29 seconds", "1 hour 30 minutes", "2 days 10 hours").
 function routerBehindWords(sec) {
-  const s = Math.max(0, Math.round(Number(sec) || 0));
+  const s = Math.max(0, Math.ceil(Number(sec) || 0));
   const say = (n, unit) => n + " " + unit + (n === 1 ? "" : "s");
+  const two = (big, bigUnit, small, smallUnit) => {
+    let b = Math.floor(s / big), r = Math.ceil((s - b * big) / small);
+    if (r * small >= big) { b++; r = 0; }
+    return say(b, bigUnit) + (r ? " " + say(r, smallUnit) : "");
+  };
   if (s < 60) return say(s, "second");
-  if (s < 3600) return say(Math.round(s / 60), "minute");
-  if (s < 86400) return say(Math.round(s / 3600), "hour");
-  return say(Math.round(s / 86400), "day");
+  if (s < 3600) return two(60, "minute", 1, "second");
+  if (s < 86400) return two(3600, "hour", 60, "minute");
+  return two(86400, "day", 3600, "hour");
 }
 function routerSidesModel(view, cur) {
   if (!view || !view.configured || view.error || !view.status || !cur) return null;
@@ -15454,6 +15460,9 @@ function routerSidesModel(view, cur) {
       age: known ? routerBehindWords(age) : "",
       at: known ? asOf : null,
       worst: t.data_age_max_seconds != null && isFinite(worst) && worst >= 0 ? routerBehindWords(worst) : "",
+      // Answers whose lag could not be told: the max cannot include them.
+      unknown: Math.max(0, Number(t.data_age_unknown) || 0),
+      why: String(t.data_age_unknown_reason || ""),
     };
   }
   const since = view.status.counting_since ? new Date(view.status.counting_since) : null;
@@ -15480,8 +15489,8 @@ function routerSides(m) {
     if (s.key === "copy" && m.data) {
       const d = m.data;
       if (d.state === "known") facts.append(el("span", { class: "rs-fact", title: "Its data reached " + d.at.toLocaleString() }, "Lag: ", el("b", { text: d.age }), " (last answer)"));
-      else facts.append(el("span", { class: "rs-fact", title: "The snapshot it read could not be placed in the index. The router's log says why." }, "Lag: ", el("b", { text: "unknown" }), " (last answer)"));
-      if (d.worst) facts.append(el("span", { class: "rs-fact" }, "Max lag: ", el("b", { text: d.worst })));
+      else facts.append(el("span", { class: "rs-fact", title: d.why ? "Why: " + d.why + "." : "The router could not tell how far behind it was." }, "Lag: ", el("b", { text: "unknown" }), " (last answer)"));
+      if (d.worst) facts.append(el("span", { class: "rs-fact", title: d.unknown ? d.unknown + (d.unknown === 1 ? " answer's lag" : " answers' lag") + " could not be told, so the max may be higher." : "" }, "Max lag: ", d.unknown ? "at least " : "", el("b", { text: d.worst })));
     }
     c.append(facts);
     return c;
