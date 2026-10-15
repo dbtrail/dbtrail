@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // drawHarnessJS drives the three drawings of #2330 from the payloads the
@@ -149,6 +150,32 @@ func TestDrawings2330(t *testing.T) {
 		return c{"configured": true, "read_at": "2026-10-12T01:10:00Z", "status": st}
 	}
 	rview := func(server c) c { return rviewLooked(server, "2026-10-12T01:09:45Z") }
+	// One server's numbers as the Go side produces them, not typed by hand:
+	// a renamed JSON field would otherwise pass here and draw nothing.
+	fromGo := func() c {
+		srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r := srv.SQLSandbox(); r != nil {
+			t.Cleanup(r.Close)
+		}
+		for i := 0; i < 3; i++ {
+			srv.RecordRouteDecision("a", "mysql", "cheap_plan")
+			srv.RecordRouteAnswer("a", "mysql", 4*time.Millisecond, i == 2, false)
+		}
+		srv.RecordRouteDecision("a", "copy", "expensive_plan")
+		srv.RecordRouteAnswer("a", "copy", 1500*time.Millisecond, false, false)
+		raw, err := json.Marshal(srv.RouterNumbers().Servers["a"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var server c
+		if err := json.Unmarshal(raw, &server); err != nil {
+			t.Fatal(err)
+		}
+		return server
+	}
 	cases := c{
 		"jobs": c{
 			"mixed":       c{"jobs": mixed, "cap": 40},
@@ -190,10 +217,11 @@ func TestDrawings2330(t *testing.T) {
 			"age fraction":   c{"view": rview(c{"copy": 1, "data_as_of": "2026-10-12T01:09:55Z", "data_age_seconds": 2.4}), "cur": srvA},
 			"age floor":      c{"view": rview(c{"copy": 3, "data_as_of": "2026-10-12T01:09:55Z", "data_age_seconds": 89, "data_age_max_seconds": 5340, "data_age_unknown": 2, "data_age_unknown_reason": "the index could not be read"}), "cur": srvA},
 			"age junk":       c{"view": rview(c{"copy": 1, "data_as_of": "nope", "data_age_seconds": 3}), "cur": srvA},
-			"counts only":   c{"view": rview(c{"mysql": 10, "copy": 30}), "cur": srvA},
-			"full":          c{"view": rview(c{"mysql": 48210, "copy": 3233, "refused": 12, "copy_snapshot": "2026-10-12T01:08:57Z", "answers": c{"mysql": c{"count": 48100, "errors": 7, "timeouts": 2, "seconds": 310.4, "slowest_seconds": 9.78}, "copy": c{"count": 3233, "errors": 0, "timeouts": 0, "seconds": 5075.8, "slowest_seconds": 41.2}}}), "cur": srvA},
-			"more timeouts": c{"view": rview(c{"mysql": 4, "answers": c{"mysql": c{"count": 4, "errors": 1, "timeouts": 9, "seconds": 0.0001, "slowest_seconds": 0.00005}}}), "cur": srvA},
-			"untimed side":  c{"view": rview(c{"mysql": 4, "copy": 2, "answers": c{"mysql": c{"count": 0, "seconds": 0}}}), "cur": srvA},
+			"counts only":    c{"view": rview(c{"mysql": 10, "copy": 30}), "cur": srvA},
+			"from go":        c{"view": rview(fromGo()), "cur": srvA},
+			"full":           c{"view": rview(c{"mysql": 48210, "copy": 3233, "refused": 12, "copy_snapshot": "2026-10-12T01:08:57Z", "answers": c{"mysql": c{"count": 48100, "errors": 7, "timeouts": 2, "seconds": 310.4, "slowest_seconds": 9.78}, "copy": c{"count": 3233, "errors": 0, "timeouts": 0, "seconds": 5075.8, "slowest_seconds": 41.2}}}), "cur": srvA},
+			"more timeouts":  c{"view": rview(c{"mysql": 4, "answers": c{"mysql": c{"count": 4, "errors": 1, "timeouts": 9, "seconds": 0.0001, "slowest_seconds": 0.00005}}}), "cur": srvA},
+			"untimed side":   c{"view": rview(c{"mysql": 4, "copy": 2, "answers": c{"mysql": c{"count": 0, "seconds": 0}}}), "cur": srvA},
 		},
 	}
 	arg, err := json.Marshal(cases)
@@ -381,6 +409,10 @@ func TestDrawings2330(t *testing.T) {
 			}
 		}
 		// Counts and no times: no average is invented.
+		if o := out.Router["from go"]; !o.Drawn || o.MySQL != (drawSide{Sent: 3, Timed: 3, Avg: "4 ms", Slowest: "4 ms", Errors: 1}) ||
+			o.Copy != (drawSide{Sent: 1, Timed: 1, Avg: "1.5 s", Slowest: "1.5 s"}) {
+			t.Errorf("from go: %+v", o)
+		}
 		if o := out.Router["counts only"]; !o.Drawn || o.MySQL.Avg != "" || o.Copy.Avg != "" || strings.Contains(o.Screen, "each") || o.Share != 0.75 {
 			t.Errorf("counts only: %+v", o)
 		}
