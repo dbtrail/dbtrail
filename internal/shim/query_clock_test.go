@@ -14,8 +14,12 @@ import (
 // the contexts the connection has in hand: a routed statement holds two (the
 // decision's and the copy's), and the first is the one a forward to the
 // source would be given afterwards.
+//
+// The cap runs for real until the statement joins the line, so it is a whole
+// second: with a shorter one a busy machine that stalls the test before
+// Reserve ran it out there, and the test read that as the wait counted (#2417).
 func TestQueryContext_theWaitForTheCopyIsNotCounted(t *testing.T) {
-	h := NewHandlerWithConfig(nil, Config{QueryTimeout: 120 * time.Millisecond}, nil)
+	h := NewHandlerWithConfig(nil, Config{QueryTimeout: time.Second}, nil)
 	h.BindConnContext(context.Background())
 	decision, cancelDecision := h.queryContext()
 	defer cancelDecision()
@@ -27,8 +31,8 @@ func TestQueryContext_theWaitForTheCopyIsNotCounted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Four times the cap in the line, then the turn.
-	time.AfterFunc(480*time.Millisecond, held.Release)
+	// Longer than the cap in the line, then the turn.
+	time.AfterFunc(1500*time.Millisecond, held.Release)
 	slot, err := r.Reserve(onCopy, "")
 	if err != nil {
 		t.Fatalf("the statement that waited got %v, want its turn: the wait was counted against its %v cap", err, h.cfg.QueryTimeout)
@@ -40,7 +44,7 @@ func TestQueryContext_theWaitForTheCopyIsNotCounted(t *testing.T) {
 	// Out of the line, the cap runs again and is the cap, not a longer one.
 	select {
 	case <-onCopy.Done():
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("the cap never ran out once the statement had its turn")
 	}
 	if !errors.Is(onCopy.Err(), context.DeadlineExceeded) {
