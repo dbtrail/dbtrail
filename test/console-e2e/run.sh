@@ -74,6 +74,10 @@ node --test "$HERE/save_controls.test.mjs"
 echo "==> theme loader edge cases (theme.test.mjs)"
 node --test "$HERE/theme.test.mjs"
 
+# The Updated card's line for a failed update (#2410): no daemon either.
+echo "==> failed update line (hero_fail.test.mjs)"
+node --test "$HERE/hero_fail.test.mjs"
+
 echo "==> build bintrail-console"
 CONSOLE_BIN="${CONSOLE_BIN:-}"
 if [ -z "$CONSOLE_BIN" ]; then

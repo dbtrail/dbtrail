@@ -7768,6 +7768,27 @@ function copyJobsBox(jobs, model) {
   return copyJobsParts(model);
 }
 
+// heroFailWhy says a failed update in one line for the Updated card (#2410).
+// A refusal names how many tables and the first one, with its reason cut to
+// a line; the Settings tab lists every table with its whole reason. The
+// full error once printed one long sentence per table into the card, which
+// grew to several screens and stretched the cards beside it.
+function heroFailWhy(run, err) {
+  const list = run && Array.isArray(run.refused_tables) ? run.refused_tables.filter((t) => t && t.name) : [];
+  const omitted = run ? Math.max(0, Math.floor(Number(run.refused_tables_omitted)) || 0) : 0;
+  const count = Math.max(list.length + omitted, run ? Math.floor(Number(run.refused)) || 0 : 0);
+  if (count > 0) {
+    let out = "The last update failed: " + (count === 1 ? "1 table was refused." : count + " tables were refused.");
+    if (list.length) {
+      const why = copyJobFirstLine(plainWords(list[0].reason || ""));
+      out += (count === 1 ? " " : " The first, ") + list[0].name + (why ? ": " + why : "") + (/[.!?]$/.test(why) ? "" : ".");
+    }
+    return out + " Settings lists each table and why.";
+  }
+  const line = copyJobFirstLine(plainWords(err || ""));
+  return "The last update failed" + (line ? ": " + line + (/[.!?]$/.test(line) ? "" : ".") : ".");
+}
+
 // snapshotHeroTone grades the copy, worst fact first, and says which page
 // fixes it (link: "overview" for capture, "settings" for the schedule, ""
 // when nothing here can):
@@ -7794,10 +7815,10 @@ function snapshotHeroTone(b, cov, cur) {
   }
   const lastRun = sch && sch.last_run;
   if (lastRun && lastRun.ok === false) {
-    return { tone: "bad", why: "The last update failed" + (lastRun.error ? ": " + plainWords(lastRun.error) : "."), link: "settings" };
+    return { tone: "bad", why: heroFailWhy(lastRun, lastRun.error), link: "settings" };
   }
   if (b.refresh && b.refresh.state === "failed") {
-    return { tone: "bad", why: "The last update failed" + (b.refresh.last_error ? ": " + plainWords(b.refresh.last_error) : "."), link: "settings" };
+    return { tone: "bad", why: heroFailWhy(b.refresh, b.refresh.last_error), link: "settings" };
   }
   if (sch && !sch.runnable) {
     const why = plainWords(sch.reason || "unknown reason");
