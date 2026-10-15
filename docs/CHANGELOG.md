@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Fixed
+- **Built-in rotation catches up when the index falls an hour behind.** Since 0.104.4, an index whose newest hourly partition was behind the clock stayed behind: each cycle created only the current hour, late, and none ahead, so until it ran the current hour's rows sat in `p_future` and every snapshot update failed with "query covers hours with no data (rotated and not archived)" for that hour. One cycle now adds the missing hours plus the ones ahead (#2409).
 - **The SQL port's router forgets a removed server's tails, and idle tails without waiting for a statement.** A server deleted in the web interface kept its tails in memory and on disk until the router restarted, and a server nobody queried any more kept its last ones; the router's 30-second housekeeping now drops them (#2407). The docs no longer list the boot server among the tables with no tail: the router has no boot server, so the case cannot occur (#2406).
 
 ## [0.105.0] - 2026-10-15

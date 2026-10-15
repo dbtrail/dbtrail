@@ -597,11 +597,12 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 	// ── Add new future partitions ─────────────────────────────────────────────
 	// --add-future N is declarative: maintain at least N future hourly
 	// partitions beyond the current hour. Top up only if headroom is below
-	// target; never shrink. Unless --no-replace, also add one replacement
+	// target, first filling any hours the latest partition is behind; never
+	// shrink. Unless --no-replace, also add one replacement
 	// for each partition dropped this cycle.
 	nowHour := time.Now().UTC().Truncate(time.Hour)
 	futureCount := countFuturePartitions(partitions, nowHour)
-	toAdd := computeToAdd(opts.AddFuture, futureCount, droppedCount, opts.NoReplace)
+	toAdd, behind := partitionsToAdd(opts.AddFuture, partitions, nowHour, droppedCount, opts.NoReplace)
 	addSkipped, addFutureTarget := 0, 0
 	if toAdd > 0 {
 		startDate := nextPartitionStart(partitions)
@@ -625,7 +626,7 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 			if opts.Format != "json" {
 				fmt.Fprintf(os.Stdout, "skipped adding %d future partition(s) (the index table was in use)\n", toAdd)
 			}
-			addSkipped, addFutureTarget = toAdd, futureCount+toAdd
+			addSkipped, addFutureTarget = toAdd, futureCount+toAdd-behind
 			deferredCount++
 			toAdd = 0
 		}
@@ -926,6 +927,22 @@ func computeToAdd(target, futureCount, dropped int, noReplace bool) int {
 	return toAdd
 }
 
+// partitionsToAdd is how many partitions a cycle adds after the latest
+// named one: computeToAdd's count, plus, when there is a target, the hours
+// the latest partition is behind the clock. New partitions start right
+// after the latest one, so without those hours a table that fell behind
+// would get only its missing hours, none ahead, cycle after cycle, and each
+// new hour's rows would land in p_future until the next cycle (#2409).
+// behind is the part of toAdd that catches up, so a deferred add can say
+// its target without it.
+func partitionsToAdd(target int, partitions []partitionInfo, nowHour time.Time, dropped int, noReplace bool) (toAdd, behind int) {
+	toAdd = computeToAdd(target, countFuturePartitions(partitions, nowHour), dropped, noReplace)
+	if toAdd > 0 && target > 0 {
+		behind = hoursBehind(partitions, nowHour)
+	}
+	return toAdd + behind, behind
+}
+
 // countFuturePartitions returns how many named hourly partitions start
 // strictly after the given reference hour. p_future and unrecognised names
 // are ignored.
@@ -941,6 +958,22 @@ func countFuturePartitions(partitions []partitionInfo, ref time.Time) int {
 		}
 	}
 	return n
+}
+
+// hoursBehind returns how many hourly partitions are missing between the
+// latest named one and nowHour, nowHour included: 0 when the latest covers
+// nowHour or later, or when there is no named partition at all.
+func hoursBehind(partitions []partitionInfo, nowHour time.Time) int {
+	var maxDate time.Time
+	for _, p := range partitions {
+		if d, ok := indexer.PartitionDate(p.Name); ok && d.After(maxDate) {
+			maxDate = d
+		}
+	}
+	if maxDate.IsZero() || !maxDate.Before(nowHour) {
+		return 0
+	}
+	return int(nowHour.Sub(maxDate) / time.Hour)
 }
 
 // nextPartitionStart returns the hour for the first new partition to add.

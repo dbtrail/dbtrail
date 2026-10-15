@@ -409,3 +409,95 @@ func TestEscapesLabelHour(t *testing.T) {
 		t.Error("p_future has no hour label; must never report an escape")
 	}
 }
+
+// TestHoursBehind: the partitions missing between the latest named one and
+// the current hour, the current hour included (#2409).
+func TestHoursBehind(t *testing.T) {
+	now := time.Date(2026, 10, 15, 14, 0, 0, 0, time.UTC)
+	named := func(hours ...int) []partitionInfo {
+		ps := []partitionInfo{}
+		for _, h := range hours {
+			ps = append(ps, partitionInfo{Name: indexer.PartitionName(now.Add(time.Duration(h) * time.Hour))})
+		}
+		return append(ps, partitionInfo{Name: "p_future", Description: "MAXVALUE"})
+	}
+	cases := []struct {
+		name  string
+		parts []partitionInfo
+		want  int
+	}{
+		{"one hour behind", named(-3, -2, -1), 1},
+		{"current hour exists", named(-1, 0), 0},
+		{"ahead", named(0, 1, 2), 0},
+		{"eight hours behind", named(-9, -8), 8},
+		{"only p_future", named(), 0},
+		{"nil", nil, 0},
+		{"unsorted", named(-1, -5, -2), 1},
+	}
+	for _, c := range cases {
+		if got := hoursBehind(c.parts, now); got != c.want {
+			t.Errorf("%s: hoursBehind = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// TestRotationCatchesUpWhenBehind replays the built-in loop (NoReplace, as
+// loopOptions sets it) from a table whose latest partition is an hour behind
+// the clock. Before #2409 every cycle added only the current hour, so each
+// new hour began with no partition and its rows in p_future; after the first
+// cycle there must be a partition ahead at every cycle.
+func TestRotationCatchesUpWhenBehind(t *testing.T) {
+	start := time.Date(2026, 10, 15, 0, 41, 0, 0, time.UTC)
+	parts := []partitionInfo{}
+	for i := -12; i <= -1; i++ {
+		parts = append(parts, partitionInfo{Name: indexer.PartitionName(start.Truncate(time.Hour).Add(time.Duration(i) * time.Hour))})
+	}
+	parts = append(parts, partitionInfo{Name: "p_future", Description: "MAXVALUE"})
+	for _, target := range []int{1, 3} {
+		ps := append([]partitionInfo(nil), parts...)
+		for cycle := range 24 {
+			nowHour := start.Add(time.Duration(cycle) * time.Hour).Truncate(time.Hour)
+			toAdd, _ := partitionsToAdd(target, ps, nowHour, 0, true)
+			startDate := nextPartitionStart(ps)
+			ps = ps[:len(ps)-1]
+			for i := range toAdd {
+				ps = append(ps, partitionInfo{Name: indexer.PartitionName(startDate.Add(time.Duration(i) * time.Hour))})
+			}
+			ps = append(ps, partitionInfo{Name: "p_future", Description: "MAXVALUE"})
+			if got := countFuturePartitions(ps, nowHour); got < target {
+				t.Fatalf("target %d, cycle %d: %d partitions ahead of %s, want %d", target, cycle, got, nowHour, target)
+			}
+			if hoursBehind(ps, nowHour.Add(time.Hour)) != 0 {
+				t.Fatalf("target %d, cycle %d: the next hour has no partition", target, cycle)
+			}
+		}
+	}
+}
+
+// TestPartitionsToAddBehindOnlyWithTarget: without a target (the CLI's
+// rotate with no --add-future), replacements for drops add no catch-up, so
+// a deferred add's suggested --add-future (futureCount+toAdd-behind) stays
+// the replacements owed, never zero or negative (#2409).
+func TestPartitionsToAddBehindOnlyWithTarget(t *testing.T) {
+	now := time.Date(2026, 10, 15, 14, 0, 0, 0, time.UTC)
+	ps := []partitionInfo{{Name: indexer.PartitionName(now.Add(-5 * time.Hour))}, {Name: "p_future", Description: "MAXVALUE"}}
+	cases := []struct {
+		target, dropped     int
+		noReplace           bool
+		wantToAdd, wantBack int
+	}{
+		{0, 2, false, 2, 0},
+		{0, 0, false, 0, 0},
+		{3, 0, true, 8, 5},
+		{3, 2, false, 10, 5},
+	}
+	for _, c := range cases {
+		toAdd, behind := partitionsToAdd(c.target, ps, now, c.dropped, c.noReplace)
+		if toAdd != c.wantToAdd || behind != c.wantBack {
+			t.Errorf("target %d dropped %d: got (%d, %d), want (%d, %d)", c.target, c.dropped, toAdd, behind, c.wantToAdd, c.wantBack)
+		}
+		if toAdd > 0 && toAdd-behind <= 0 {
+			t.Errorf("target %d dropped %d: deferred target %d", c.target, c.dropped, toAdd-behind)
+		}
+	}
+}
