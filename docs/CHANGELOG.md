@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
-- **The SQL port's copy answers with what capture has indexed, not only with its last snapshot.** For each table a heavy statement reads, the newest change of each row indexed after the table's snapshot replaces the snapshot's row, so the answer is about as far behind as capture (usually seconds) instead of as old as the last snapshot. `SHOW ROUTER STATUS`'s `last_answer_indexed_through` reports it. A table whose primary key is not made of integers, or that changed definition, lost events or had more than 200,000 rows change since its snapshot, is read as of its snapshot, as before. `BINTRAIL_SQL_TAILS=off` turns this off (#2369).
+- **The SQL port's copy answers with what capture has indexed, not only with its last snapshot.** For each table a heavy statement reads, the newest change of each row indexed after the table's snapshot replaces the snapshot's row, so the answer is about as far behind as capture (usually seconds) instead of as old as the last snapshot. `SHOW ROUTER STATUS`'s `last_answer_indexed_through` reports it. A table whose primary key is not made of integers, or that changed definition, lost events or had more than 200,000 rows change since its snapshot, is read as of its snapshot, as before, and so is every table of a statement that reads one such table: a statement reads all its tables at one moment. `BINTRAIL_SQL_TAILS=off` (or `false`, or `0`) turns this off (#2369).
 
 ## [0.104.5] - 2026-10-14
 ### Changed

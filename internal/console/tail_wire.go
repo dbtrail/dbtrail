@@ -4,7 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
-	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,35 +46,50 @@ func tailsFor(ctx context.Context) (string, bool) {
 	return id, ok && id != ""
 }
 
-// tailsOff is BINTRAIL_SQL_TAILS=off.
-func tailsOff() bool { return os.Getenv("BINTRAIL_SQL_TAILS") == "off" }
+// tailsOff is BINTRAIL_SQL_TAILS=off (or false, or 0, in any case).
+func tailsOff() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("BINTRAIL_SQL_TAILS"))) {
+	case "off", "false", "0", "no":
+		return true
+	}
+	return false
+}
 
-// tailKeeperFor is server id's keeper over b. A keeper over another bundle
-// (the server's index connection was opened again) is replaced; its files are
-// removed once no statement can still read them.
+// tailKeeperFor is server id's keeper over b, nil when the server can have no
+// tails (which tables its capture records is not known here: no index read
+// is paid for nothing). A keeper over another bundle (the server's index
+// connection was opened again) is replaced; its files are removed once no
+// statement can still read them.
 func (s *Server) tailKeeperFor(id string, b *bundle) *tailKeeper {
+	captures, known := s.tailCaptures(id)
+	if !known {
+		return nil
+	}
 	s.tails.mu.Lock()
-	defer s.tails.mu.Unlock()
-	if k := s.tails.by[id]; k != nil {
-		if src, ok := k.src.(*indexTailSource); ok && src.b == b {
-			return k
-		}
-		k.mu.Lock()
-		dir := k.dir
-		k.mu.Unlock()
-		if dir != "" {
-			time.AfterFunc(tailKeepOld, func() { _ = os.RemoveAll(dir) })
+	old := s.tails.by[id]
+	if old != nil {
+		if src, ok := old.src.(*indexTailSource); ok && src.b == b {
+			s.tails.mu.Unlock()
+			return old
 		}
 	}
-	src := newIndexTailSource(s, b)
-	if captures, known := s.tailCaptures(id); known {
-		src.capturing(captures)
-	}
-	k := newTailKeeper(src, filepath.Join(os.TempDir(), "bintrail-tails"), tailMaxKeys, tailKeepOld, tailIdle)
+	k := newTailKeeper(newIndexTailSource(s, b).capturing(captures), os.TempDir(), tailMaxKeys, tailKeepOld, tailIdle)
 	if s.tails.by == nil {
 		s.tails.by = map[string]*tailKeeper{}
 	}
 	s.tails.by[id] = k
+	s.tails.mu.Unlock()
+	if old != nil {
+		// Outside the keepers' lock: the old one may be mid-refresh.
+		time.AfterFunc(tailKeepOld, func() {
+			old.mu.Lock()
+			dir := old.dir
+			old.mu.Unlock()
+			if dir != "" {
+				_ = os.RemoveAll(dir)
+			}
+		})
+	}
 	return k
 }
 
@@ -100,11 +115,17 @@ func (s *Server) tailCaptures(id string) (func(schema, table string) bool, bool)
 	return filters.Matches, true
 }
 
-// statementTails refreshes the tails of tables for a statement and returns
-// the tables with theirs set, and the oldest instant the tails are indexed
-// through; all says every table had one. A table with none reads its
-// published copy. tables is not changed.
-func (s *Server) statementTails(ctx context.Context, k *tailKeeper, tables, read []views.BaselineTable) (out []views.BaselineTable, through time.Time, all bool) {
+// statementTails refreshes the tails of read, the tables a statement reads,
+// and returns tables with theirs set and the instant they are indexed
+// through. All or nothing: a statement reads every table at one moment, so
+// unless every table it reads has a tail at the same instant, none is used
+// and it reads the published copy, which is one moment too. A join over a
+// table read now and one read as of its snapshot would pair rows that never
+// coexisted. ok false: tables, unchanged.
+func (s *Server) statementTails(ctx context.Context, k *tailKeeper, tables, read []views.BaselineTable) (out []views.BaselineTable, through time.Time, ok bool) {
+	if len(read) == 0 {
+		return tables, time.Time{}, false
+	}
 	ctx, cancel := context.WithTimeout(ctx, copyUnchangedTimeout)
 	defer cancel()
 	got, err := k.refresh(ctx, read)
@@ -112,16 +133,12 @@ func (s *Server) statementTails(ctx context.Context, k *tailKeeper, tables, read
 		slog.Debug("Engine Routing: the copy's tails could not be read; the statement reads the published copy", "error", err)
 		return tables, time.Time{}, false
 	}
-	all = len(read) > 0
-	for _, t := range read {
-		v, ok := got[tailKey(t.Schema, t.Table)]
-		if !ok {
-			all = false
-			continue
+	for i, t := range read {
+		v, has := got[tailKey(t.Schema, t.Table)]
+		if !has || (i > 0 && !v.Through.Equal(through)) {
+			return tables, time.Time{}, false
 		}
-		if through.IsZero() || v.Through.Before(through) {
-			through = v.Through
-		}
+		through = v.Through
 	}
 	out = make([]views.BaselineTable, len(tables))
 	copy(out, tables)
@@ -130,5 +147,13 @@ func (s *Server) statementTails(ctx context.Context, k *tailKeeper, tables, read
 			out[i].Tail = &views.TableTail{Path: v.Path, PK: v.PK}
 		}
 	}
-	return out, through, all
+	return out, through, true
+}
+
+// tailsSayTheInstant is whether a statement whose tables all read tails
+// (tailed) is answered as of the tails' instant. Not one over the change
+// log, read as it is, not at that moment: its number is the copy's, as
+// without tails.
+func tailsSayTheInstant(statement string, tailed bool) bool {
+	return tailed && !sqlMentionsEvents(statement)
 }

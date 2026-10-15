@@ -1,0 +1,114 @@
+package console
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/dbtrail/dbtrail/internal/views"
+)
+
+func TestTailsOff(t *testing.T) {
+	for v, want := range map[string]bool{"": false, "on": false, "off": true, "OFF": true, " Off ": true, "false": true, "0": true, "no": true, "1": false} {
+		t.Setenv("BINTRAIL_SQL_TAILS", v)
+		if got := tailsOff(); got != want {
+			t.Errorf("BINTRAIL_SQL_TAILS=%q: off %v, want %v", v, got, want)
+		}
+	}
+}
+
+// A server whose capture filters are not known here gets no keeper: no
+// index read is paid for a tail it could not trust.
+func TestTailKeeperForUnknownCapture(t *testing.T) {
+	s := &Server{}
+	s.tailCapturesHook = func(string) (func(string, string) bool, bool) { return nil, false }
+	if k := s.tailKeeperFor("srv", &bundle{}); k != nil {
+		t.Fatal("a keeper for a server whose capture is not known")
+	}
+	s.tailCapturesHook = func(string) (func(string, string) bool, bool) { return nil, true }
+	b := &bundle{}
+	k := s.tailKeeperFor("srv", b)
+	if k == nil || s.tailKeeperFor("srv", b) != k {
+		t.Fatal("no keeper, or a new one at every statement")
+	}
+	if s.tailKeeperFor("srv", &bundle{}) == k {
+		t.Error("the keeper over a replaced bundle was kept")
+	}
+}
+
+// All or nothing: a statement reads every table at one moment.
+func TestStatementTailsAllOrNothing(t *testing.T) {
+	ctx := context.Background()
+	orders, customers := keeperTable("orders"), keeperTable("customers")
+	s := &Server{}
+	newKeeper := func(f *fakeIndex) *tailKeeper { return newTailKeeper(f, t.TempDir(), 3, time.Minute, time.Hour) }
+	tables := []views.BaselineTable{orders, customers}
+
+	t.Run("every table read has a tail: all of them laid over", func(t *testing.T) {
+		f := &fakeIndex{}
+		f.add("orders", "1")
+		f.add("customers", "9")
+		out, through, ok := s.statementTails(ctx, newKeeper(f), tables, tables)
+		if !ok || out[0].Tail == nil || out[1].Tail == nil || !through.Equal(f.at(2)) {
+			t.Fatalf("%v %v %+v", ok, through, out)
+		}
+		if tables[0].Tail != nil {
+			t.Error("the tables passed in were changed")
+		}
+	})
+
+	t.Run("one table without a tail: none", func(t *testing.T) {
+		f := &fakeIndex{startWhy: map[string]string{tailKey("shop", "customers"): "no key"}}
+		f.add("orders", "1")
+		out, through, ok := s.statementTails(ctx, newKeeper(f), tables, tables)
+		if ok || !through.IsZero() || out[0].Tail != nil {
+			t.Fatalf("%v %v %+v", ok, through, out)
+		}
+		if _, _, ok := s.statementTails(ctx, newKeeper(f), tables, tables[1:]); ok {
+			t.Error("a statement over the one table without a tail said it read tails")
+		}
+	})
+
+	t.Run("tails at two instants (one frozen): none", func(t *testing.T) {
+		f := &fakeIndex{}
+		f.add("orders", "1")
+		f.add("customers", "9")
+		k := newKeeper(f)
+		s.statementTails(ctx, k, tables, tables)
+		for _, key := range []string{"2", "3", "4"} {
+			f.add("orders", key) // over the budget of 3: frozen
+		}
+		f.add("customers", "8")
+		out, _, ok := s.statementTails(ctx, k, tables, tables)
+		if ok || out[0].Tail != nil || out[1].Tail != nil {
+			t.Fatalf("a frozen tail read with a current one: %v %+v", ok, out)
+		}
+		if _, _, ok := s.statementTails(ctx, k, tables, tables[1:]); !ok {
+			t.Error("a statement over the current table alone has no tail")
+		}
+	})
+
+	t.Run("no table read: none", func(t *testing.T) {
+		f := &fakeIndex{}
+		f.add("orders", "1")
+		if _, _, ok := s.statementTails(ctx, newKeeper(f), tables, nil); ok {
+			t.Fatal("tails for a statement that reads no table")
+		}
+	})
+}
+
+func TestTailsSayTheInstant(t *testing.T) {
+	for _, c := range []struct {
+		stmt         string
+		tailed, want bool
+	}{
+		{"SELECT * FROM shop.orders", true, true},
+		{"SELECT * FROM shop.orders", false, false},
+		{"SELECT * FROM shop.orders, events", true, false},
+		{"SELECT * FROM shop.orders WHERE note = 'events'", true, true},
+	} {
+		if got := tailsSayTheInstant(c.stmt, c.tailed); got != c.want {
+			t.Errorf("%q tailed %v: %v, want %v", c.stmt, c.tailed, got, c.want)
+		}
+	}
+}

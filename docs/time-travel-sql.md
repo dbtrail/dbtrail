@@ -757,8 +757,10 @@ The copy answers with what capture has indexed, not only with its last
 snapshot. For each table a statement reads, the newest change of each row the
 index holds after the table's snapshot (the table's tail) replaces the
 snapshot's row, so the answer is about as far behind as capture, usually
-seconds. A table with no tail is read as it was at its snapshot. A table has
-none when:
+seconds. A statement reads every table at one moment: if one table it reads
+has no tail, or tails stopped at different moments, the statement reads every
+table as it was at its snapshot, so a join never pairs a row of now with a
+row of an hour ago. A table has no tail when:
 
 - its primary key is not made of integers;
 - its definition changed since its snapshot, capture lost events since, or
@@ -766,10 +768,15 @@ none when:
 - more than 200,000 rows changed since its snapshot (its tail then stops
   advancing until the next snapshot);
 - capture does not record it, or `bintrail index` also wrote the index;
+- its changes since its snapshot could not be read in the time a statement
+  waits for them (until its next snapshot);
 - the statement is answered from an earlier snapshot, because the newest
   holds more unmerged changes than it can read;
 - the server is the one the daemon was started with by flags, not one added
   in the web interface (which tables its capture records is not known here).
+
+A statement whose tables the port cannot tell apart (a `WITH` that reads
+another `WITH`, for one) reads no tails either.
 
 `BINTRAIL_SQL_TAILS=off` turns tails off, and the copy answers as it was at
 its last snapshot. The console's own SQL card always reads the snapshot.
@@ -801,9 +808,9 @@ connect straight to MySQL and not through this port.
 What this is and is not:
 
 - **The copy's answer is as fresh as capture, or as its snapshot.** A heavy
-  read served from the copy sees what capture has indexed, and for a table
-  with no tail, only what its last snapshot holds, however long ago that
-  was ([No maximum copy age](#no-maximum-copy-age) above).
+  read served from the copy sees what capture has indexed, and when one of
+  its tables has no tail, only what the last snapshots hold, however long
+  ago that was ([No maximum copy age](#no-maximum-copy-age) above).
   That is why Engine Routing is off until you turn it on. A `SELECT` that
   must see the last second belongs in a transaction, which MySQL always
   answers.

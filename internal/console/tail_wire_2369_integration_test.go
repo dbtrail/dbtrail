@@ -63,6 +63,16 @@ func TestIntegrationPortReadsTheTail(t *testing.T) {
 		t.Errorf("indexed through %q, want the newest event's %s", st["last_answer_indexed_through"], at.Format(time.RFC3339))
 	}
 
+	// A statement the parse cannot tell the tables of reads no tail: it
+	// would build one for every table of the copy.
+	res, err := q.Run(context.Background(), "WITH a AS (SELECT * FROM shop."+tbl.Table+"), b AS (SELECT * FROM a) SELECT CAST(id AS VARCHAR) || '=' || status FROM b ORDER BY id", "", sqlsandbox.Session{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 1 || res.Rows[0][0].(string) != "1=new" {
+		t.Errorf("a statement whose tables the parse could not tell: %v", res.Rows)
+	}
+
 	t.Setenv("BINTRAIL_SQL_TAILS", "off")
 	if got := read(t); len(got) != 1 || got[0] != "1=new" {
 		t.Fatalf("tails off: %v", got)

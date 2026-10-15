@@ -146,8 +146,9 @@ var errTailRenumbered = errors.New("the source's binary log started again from a
 type tailKeeper struct {
 	mu  sync.Mutex
 	src tailSource
-	// parent is where this keeper makes its own directory, at its first
-	// write: never one an earlier process wrote, so no name repeats.
+	// parent is where this keeper makes its own directory (which must
+	// exist), at its first write: never one an earlier process wrote, so no
+	// name repeats.
 	parent string
 	dir    string
 	// maxKeys is the budget of one tail; keepOld how long a replaced
@@ -316,6 +317,16 @@ func (k *tailKeeper) advance(ctx context.Context, upTo uint64) error {
 					"table", e.table.Schema+"."+e.table.Table, "keys", e.tail.Keys(), "budget", k.maxKeys)
 			}
 		}
+		// The cursor moves with every page folded: a read that runs out of
+		// time keeps what it did, and the next statement goes on from there
+		// instead of reading the same backlog again.
+		if n := len(page); n > 0 && page[n-1].EventID > k.mark.ID {
+			ev := page[n-1]
+			k.mark = tailMark{ID: ev.EventID, Pos: query.BinlogPos{File: ev.BinlogFile, Pos: ev.StartPos}, At: ev.EventTimestamp}
+			if k.mark.At.After(k.through) {
+				k.through = k.mark.At
+			}
+		}
 		return nil
 	})
 }
@@ -329,13 +340,34 @@ func (k *tailKeeper) entryFor(ctx context.Context, key string, t views.BaselineT
 		if e == nil || e.refused == "" {
 			k.drop(e)
 			k.tables[key] = &tailEntry{table: t, cut: cut, refused: changed, used: k.now()}
+			slog.Info("Engine Routing: a table has no tail; statements over it read the copy as of its snapshot",
+				"table", t.Schema+"."+t.Table, "reason", changed)
 		}
 		return nil
 	}
 	if e != nil && e.cut == cut {
 		return e
 	}
+	if ctx.Err() != nil {
+		// The statement's time went on another table: this one is not
+		// judged on what is left of it, and is built at the next statement.
+		if e != nil && e.refused == "" && !e.frozen {
+			return e
+		}
+		return nil
+	}
 	fresh, err := k.build(ctx, t, cut)
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		// Out of time: trying again at every statement would make each pay
+		// the whole wait. A tail it already had stays, now standing for the
+		// newer cut too (it is correct over it, see the top of this file);
+		// else the table has none until its cut moves again.
+		if e != nil && e.refused == "" && !e.frozen {
+			e.cut = cut
+			return e
+		}
+		fresh, err = &tailEntry{table: t, cut: cut, refused: "its changes since the snapshot could not be read in time"}, nil
+	}
 	if err != nil {
 		// The index could not be read. A tail it already had stays while it
 		// is advancing: it is correct over the newer copy too (see the top of
@@ -351,6 +383,10 @@ func (k *tailKeeper) entryFor(ctx context.Context, key string, t views.BaselineT
 	k.drop(e)
 	fresh.used = k.now()
 	k.tables[key] = fresh
+	if fresh.refused != "" {
+		slog.Info("Engine Routing: a table has no tail; statements over it read the copy as of its snapshot",
+			"table", t.Schema+"."+t.Table, "reason", fresh.refused)
+	}
 	return fresh
 }
 
@@ -451,10 +487,10 @@ func (k *tailKeeper) ensureDir() (string, error) {
 
 func (k *tailKeeper) makeDir() (string, error) {
 	if k.dir == "" {
-		if err := os.MkdirAll(k.parent, 0o700); err != nil {
-			return "", err
-		}
-		dir, err := os.MkdirTemp(k.parent, "tails-")
+		// Made here, by this process, under a name no one could have made
+		// before (0700): a fixed name under a shared temporary directory is
+		// one another user can make first, and then own.
+		dir, err := os.MkdirTemp(k.parent, "bintrail-tails-")
 		if err != nil {
 			return "", err
 		}

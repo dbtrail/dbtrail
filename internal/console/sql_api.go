@@ -1073,6 +1073,8 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	// A copy with no index connection has nothing to read them from.
 	if id, ok := tailsFor(ctx); ok && at.IsZero() && b.db != nil && !tailsOff() {
 		tails = s.tailKeeperFor(id, b)
+	}
+	if tails != nil {
 		if dir, err := tails.ensureDir(); err != nil {
 			slog.Debug("Engine Routing: the copy's tails have no directory; the statement reads the published copy", "error", err)
 			tails = nil
@@ -1126,8 +1128,11 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			if readTables = named; narrowed.OnlyViews == nil {
 				readTables = in.Baselines
 			}
-			if tails != nil {
+			// Not over a statement whose tables the parse could not tell: it
+			// would build a tail for every table of the copy.
+			if tails != nil && narrowed.OnlyViews != nil {
 				narrowed.Baselines, tailThrough, allTailed = s.statementTails(ctx, tails, narrowed.Baselines, readTables)
+				allTailed = tailsSayTheInstant(statement, allTailed)
 			}
 			if h := sqlChainTooHeavy(named, limit, sqlFileSize); h.Table != "" {
 				viewsRefusal = &sqlRefusal{http.StatusUnprocessableEntity, sqlChainTooHeavyMessage(h, limit, memory)}
