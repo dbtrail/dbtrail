@@ -121,6 +121,13 @@ func (s *serverCopyAges) worse(age time.Duration) {
 	}
 }
 
+// forget drops server id's record: it left the registry.
+func (c *copyAges) forget(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.by, id)
+}
+
 // note records a, an answer the copy gave for server id.
 func (c *copyAges) note(id string, a copyAnswer) {
 	if a.side != "copy" {

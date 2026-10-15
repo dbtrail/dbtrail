@@ -181,3 +181,36 @@ func sweepTailDirs(parent string, cutoff time.Time) {
 		}
 	}
 }
+
+// TidyTails is the tails' housekeeping, run by the router every so often
+// (#2407): a server no longer in the registry loses its keeper, whose files
+// are removed once no statement can still read them, and every other keeper
+// forgets its idle tails and old versions.
+func (s *Server) TidyTails() {
+	if s.cm == nil || s.cm.reg == nil {
+		return
+	}
+	s.tails.mu.Lock()
+	var gone, live []*tailKeeper
+	for id, k := range s.tails.by {
+		if _, ok := s.cm.reg.Get(id); ok {
+			live = append(live, k)
+			continue
+		}
+		gone = append(gone, k)
+		delete(s.tails.by, id)
+		s.copyAges.forget(id)
+	}
+	s.tails.mu.Unlock()
+	for _, k := range gone {
+		k.mu.Lock()
+		dir := k.dir
+		k.mu.Unlock()
+		if dir != "" {
+			time.AfterFunc(tailKeepOld, func() { _ = os.RemoveAll(dir) })
+		}
+	}
+	for _, k := range live {
+		k.tidy()
+	}
+}

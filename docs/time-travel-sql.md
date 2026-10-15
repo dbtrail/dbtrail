@@ -771,9 +771,7 @@ row of an hour ago. A table has no tail when:
 - its changes since its snapshot could not be read in the time a statement
   waits for them (until its next snapshot);
 - the statement is answered from an earlier snapshot, because the newest
-  holds more unmerged changes than it can read;
-- the server is the one the daemon was started with by flags, not one added
-  in the web interface (which tables its capture records is not known here).
+  holds more unmerged changes than it can read.
 
 A statement whose tables the port cannot tell apart (a `WITH` that reads
 another `WITH`, for one) reads no tails either.

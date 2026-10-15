@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **The SQL port's router forgets a removed server's tails, and idle tails without waiting for a statement.** A server deleted in the web interface kept its tails in memory and on disk until the router restarted, and a server nobody queried any more kept its last ones; the router's 30-second housekeeping now drops them (#2407). The docs no longer list the boot server among the tables with no tail: the router has no boot server, so the case cannot occur (#2406).
 
 ## [0.105.0] - 2026-10-15
 ### Added

@@ -595,6 +595,16 @@ func (k *tailKeeper) forgetIdle() {
 	}
 }
 
+// tidy forgets idle tails and removes old versions without waiting for a
+// statement to refresh: a server nobody queries any more would otherwise
+// keep its last tails for as long as the process runs (#2407).
+func (k *tailKeeper) tidy() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.forgetIdle()
+	k.collect()
+}
+
 // collect removes the files replaced longer ago than a statement may still
 // read them.
 func (k *tailKeeper) collect() {
