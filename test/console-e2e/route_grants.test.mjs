@@ -30,35 +30,49 @@ const LINES = ["GRANT USAGE ON *.* TO `r`@`%`", "GRANT SELECT ON `shop`.* TO `r`
 test("only reads: read-only, no note", () => {
   const m = model({ user: "r", grants: LINES }, true);
   assert.equal(m.tone, "ok");
-  assert.equal(m.verdict, "Read-only: no privilege that changes data");
-  assert.equal(m.note, "");
+  assert.equal(m.verdict, "Read-only: every privilege only reads");
+  assert.deepEqual(m.notes, []);
   assert.deepEqual(m.lines, LINES);
+});
+
+test("administration privileges are never read-only", () => {
+  const m = model({ user: "r", grants: LINES, other: ["BINLOG_ADMIN", "SUPER"] }, true);
+  assert.equal(m.tone, "warn");
+  assert.equal(m.verdict, "Not read-only: BINLOG_ADMIN, SUPER");
+});
+
+test("EXECUTE: a SELECT can run a function that writes, past a read-only router", () => {
+  const m = model({ user: "r", grants: LINES, execute: true }, true);
+  assert.equal(m.tone, "warn");
+  assert.equal(m.verdict, "Can run stored routines (EXECUTE)");
+  assert.match(m.notes.join(" "), /The router sees only the SELECT, so it lets it through/);
+  assert.match(model({ user: "r", grants: LINES, writes: ["INSERT"], execute: true }, true).notes.join(" "), /stored function/);
 });
 
 test("writes under a read-only router: refused before MySQL", () => {
   const m = model({ user: "r", grants: LINES, writes: ["INSERT", "UPDATE"] }, true);
   assert.equal(m.tone, "bad");
   assert.equal(m.verdict, "Can change data: INSERT, UPDATE");
-  assert.match(m.note, /read-only, so it refuses those statements/);
+  assert.match(m.notes[0], /read-only: it refuses a statement that changes data before it reaches MySQL/);
 });
 
 test("writes under a read-write router: they run on MySQL", () => {
-  assert.match(model({ user: "r", writes: ["DELETE"] }, false).note, /read-write: a statement that needs them runs on your MySQL/);
+  assert.match(model({ user: "r", grants: LINES, writes: ["DELETE"] }, false).notes[0], /read-write: a statement that needs them runs on your MySQL/);
 });
 
 test("writes with the router's rule unknown: no claim about it", () => {
-  assert.equal(model({ user: "r", writes: ["DELETE"] }, null).note, "");
+  assert.deepEqual(model({ user: "r", grants: LINES, writes: ["DELETE"] }, null).notes, []);
 });
 
 test("roles without writes: never called read-only", () => {
   const one = model({ user: "r", grants: LINES, roles: ["`reader`@`%`"] }, true);
   assert.equal(one.tone, "warn");
   assert.equal(one.verdict, "Has a role: SHOW GRANTS does not list what it allows");
-  assert.equal(model({ user: "r", roles: ["a", "b"] }, true).verdict, "Has 2 roles: SHOW GRANTS does not list what they allow");
+  assert.equal(model({ user: "r", grants: LINES, roles: ["a", "b"] }, true).verdict, "Has 2 roles: SHOW GRANTS does not list what they allow");
 });
 
 test("writes win over roles", () => {
-  assert.equal(model({ user: "r", writes: ["INSERT"], roles: ["a"] }, true).tone, "bad");
+  assert.equal(model({ user: "r", grants: LINES, writes: ["INSERT"], roles: ["a"] }, true).tone, "bad");
 });
 
 test("none, skipped and error say why, capitalized and with a period", () => {
@@ -69,8 +83,7 @@ test("none, skipped and error say why, capitalized and with a period", () => {
   assert.equal(model({ user: "r", error: "Access denied for user 'r'" }).state, "error");
 });
 
-test("an empty answer is read with no lines, not a crash", () => {
-  const m = model(null, true);
-  assert.equal(m.state, "read");
-  assert.deepEqual(m.lines, []);
+test("no lines is never read-only", () => {
+  assert.equal(model(null, true).state, "error");
+  assert.equal(model({ user: "r", grants: [] }, true).state, "error");
 });

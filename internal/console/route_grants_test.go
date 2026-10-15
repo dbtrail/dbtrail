@@ -13,27 +13,36 @@ import (
 
 func TestClassifyGrants(t *testing.T) {
 	cases := []struct {
-		name          string
-		lines         []string
-		writes, roles []string
+		name                 string
+		lines                []string
+		writes, other, roles []string
+		execute              bool
 	}{
-		{"select on one schema", []string{"GRANT USAGE ON *.* TO `r`@`%`", "GRANT SELECT ON `shop`.* TO `r`@`%`"}, nil, nil},
-		{"all privileges", []string{"GRANT ALL PRIVILEGES ON *.* TO `r`@`%` WITH GRANT OPTION"}, []string{"ALL PRIVILEGES"}, nil},
-		{"lower case", []string{"grant select, insert on shop.* to r@'%'"}, []string{"INSERT"}, nil},
-		{"column list", []string{"GRANT SELECT, UPDATE (`a`, `b`), INSERT ON `shop`.`t` TO `r`@`%`"}, []string{"UPDATE", "INSERT"}, nil},
-		{"each once", []string{"GRANT UPDATE ON `a`.* TO `r`@`%`", "GRANT UPDATE, DELETE ON `b`.* TO `r`@`%`"}, []string{"UPDATE", "DELETE"}, nil},
-		{"usage only", []string{"GRANT USAGE ON *.* TO `r`@`%`"}, nil, nil},
-		{"revoke adds nothing", []string{"GRANT SELECT ON *.* TO `r`@`%`", "REVOKE INSERT ON `mysql`.* FROM `r`@`%`"}, nil, nil},
-		{"role", []string{"GRANT USAGE ON *.* TO `r`@`%`", "GRANT `reader`@`%`,`audit` TO `r`@`%`"}, nil, []string{"`reader`@`%`", "`audit`"}},
-		{"dynamic admin privileges are not data", []string{"GRANT BACKUP_ADMIN,REPLICATION_SLAVE_ADMIN ON *.* TO `r`@`%`"}, nil, nil},
-		{"proxy is not a role", []string{"GRANT PROXY ON ''@'' TO 'r'@'%' WITH GRANT OPTION"}, nil, nil},
-		{"multi-word privileges", []string{"GRANT CREATE TEMPORARY TABLES, LOCK TABLES, CREATE VIEW ON `s`.* TO `r`@`%`"}, []string{"CREATE TEMPORARY TABLES", "LOCK TABLES", "CREATE VIEW"}, nil},
-		{"empty lines", []string{"", "  "}, nil, nil},
+		{name: "select on one schema", lines: []string{"GRANT USAGE ON *.* TO `r`@`%`", "GRANT SELECT ON `shop`.* TO `r`@`%`"}},
+		{name: "all privileges", lines: []string{"GRANT ALL PRIVILEGES ON *.* TO `r`@`%` WITH GRANT OPTION"}, writes: []string{"ALL PRIVILEGES"}},
+		{name: "lower case", lines: []string{"grant select, insert on shop.* to r@'%'"}, writes: []string{"INSERT"}},
+		{name: "column list", lines: []string{"GRANT SELECT, UPDATE (`a`, `b`), INSERT ON `shop`.`t` TO `r`@`%`"}, writes: []string{"UPDATE", "INSERT"}},
+		{name: "each once", lines: []string{"GRANT UPDATE ON `a`.* TO `r`@`%`", "GRANT UPDATE, DELETE ON `b`.* TO `r`@`%`"}, writes: []string{"UPDATE", "DELETE"}},
+		{name: "usage only", lines: []string{"GRANT USAGE ON *.* TO `r`@`%`"}},
+		{name: "revoke adds nothing", lines: []string{"GRANT SELECT ON *.* TO `r`@`%`", "REVOKE INSERT ON `mysql`.* FROM `r`@`%`"}},
+		{name: "role", lines: []string{"GRANT USAGE ON *.* TO `r`@`%`", "GRANT `reader`@`%`,`audit` TO `r`@`%`"}, roles: []string{"`reader`@`%`", "`audit`"}},
+		{name: "a role whose name holds ' on '", lines: []string{"GRANT `role on x`@`%` TO `u`@`%`"}, roles: []string{"`role on x`@`%`"}},
+		{name: "a column whose name holds ' on '", lines: []string{"GRANT SELECT (`note on x`), UPDATE (`id`) ON `db`.`t` TO `u`@`%`"}, writes: []string{"UPDATE"}},
+		{name: "a schema whose name holds ' to '", lines: []string{"GRANT SELECT ON `a to b`.* TO `u`@`%`"}},
+		{name: "server administration is never read-only", lines: []string{"GRANT SELECT ON *.* TO `r`@`%`", "GRANT BINLOG_ADMIN,SYSTEM_VARIABLES_ADMIN ON *.* TO `r`@`%`"}, other: []string{"BINLOG_ADMIN", "SYSTEM_VARIABLES_ADMIN"}},
+		{name: "super, create user, shutdown", lines: []string{"GRANT SUPER, CREATE USER, SHUTDOWN ON *.* TO `r`@`%`"}, other: []string{"SUPER", "CREATE USER", "SHUTDOWN"}},
+		{name: "a privilege this build does not know", lines: []string{"GRANT SELECT, FUTURE_THING ON *.* TO `r`@`%`"}, other: []string{"FUTURE_THING"}},
+		{name: "create tablespace changes the schema", lines: []string{"GRANT CREATE TABLESPACE ON *.* TO `r`@`%`"}, writes: []string{"CREATE TABLESPACE"}},
+		{name: "execute", lines: []string{"GRANT SELECT, EXECUTE ON `app`.* TO `u`@`%`"}, execute: true},
+		{name: "proxy", lines: []string{"GRANT PROXY ON ''@'' TO 'r'@'%' WITH GRANT OPTION"}, other: []string{"PROXY"}},
+		{name: "read-only kinds", lines: []string{"GRANT SELECT, SHOW VIEW, PROCESS, REPLICATION CLIENT, REPLICATION SLAVE ON *.* TO `r`@`%`"}},
+		{name: "multi-word privileges", lines: []string{"GRANT CREATE TEMPORARY TABLES, LOCK TABLES, CREATE VIEW ON `s`.* TO `r`@`%`"}, writes: []string{"CREATE TEMPORARY TABLES", "LOCK TABLES", "CREATE VIEW"}},
+		{name: "empty lines", lines: []string{"", "  "}},
 	}
 	for _, c := range cases {
-		_, writes, roles := classifyGrants(c.lines)
-		if !reflect.DeepEqual(writes, c.writes) || !reflect.DeepEqual(roles, c.roles) {
-			t.Errorf("%s: writes %q roles %q, want %q %q", c.name, writes, roles, c.writes, c.roles)
+		g := classifyGrants(c.lines)
+		if !reflect.DeepEqual(g.writes, c.writes) || !reflect.DeepEqual(g.other, c.other) || !reflect.DeepEqual(g.roles, c.roles) || g.execute != c.execute {
+			t.Errorf("%s: writes %q other %q roles %q execute %v, want %q %q %q %v", c.name, g.writes, g.other, g.roles, g.execute, c.writes, c.other, c.roles, c.execute)
 		}
 	}
 }
@@ -46,7 +55,7 @@ func TestClassifyGrantsHidesAuthentication(t *testing.T) {
 		"GRANT USAGE ON *.* TO 'r'@'%' IDENTIFIED WITH 'mysql_native_password' AS '*2470C0C06DEE42FD1618BB99005ADCA2EC9D1E19'",
 		"GRANT USAGE ON *.* TO 'r'@'%' IDENTIFIED BY 'it''s secret'",
 	}
-	shown, _, _ := classifyGrants(lines)
+	shown := classifyGrants(lines).shown
 	for _, s := range shown {
 		for _, secret := range []string{"2470C0C06", "ZIgUREUg5", "secret"} {
 			if strings.Contains(s, secret) {
@@ -98,6 +107,15 @@ func TestRouteGrantsStates(t *testing.T) {
 		e := ServerEntry{ID: "a", SourceDSN: src, RouteDSN: route}
 		r := grantsServer(t, e, ok).routeGrants(context.Background(), e)
 		if r.User != "fwd" || len(r.Grants) != 1 || !reflect.DeepEqual(r.Writes, []string{"INSERT"}) {
+			t.Errorf("%+v", r)
+		}
+	})
+	t.Run("no lines is an error, never read-only", func(t *testing.T) {
+		e := ServerEntry{ID: "a", SourceDSN: src, RouteDSN: route}
+		r := grantsServer(t, e, func(context.Context, string, config.SSL, time.Duration) ([]string, error) {
+			return []string{"", " "}, nil
+		}).routeGrants(context.Background(), e)
+		if r.Error == "" || r.Grants != nil {
 			t.Errorf("%+v", r)
 		}
 	})

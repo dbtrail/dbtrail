@@ -15101,9 +15101,11 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
       reveal ? "copy it now" : fb.password_created_at ? "created " + utcLabel(fb.password_created_at) : "when it was created"),
     // The port does not filter by schema (#1685): say so, so it is not
     // taken for a path that scopes access per schema.
-    cnFact("Reads", "Every schema", fb.routing_on && rt && rt.status && rt.status.read_only === false
-      ? "every server in the sidebar; with Engine Routing on, writes run on MySQL"
-      : "read-only, every server in the sidebar"),
+    cnFact("Reads", "Every schema", !fb.routing_on || (rt && rt.status && rt.status.read_only === true)
+      ? "read-only, every server in the sidebar"
+      : rt && rt.status && rt.status.read_only === false
+        ? "every server in the sidebar; with Engine Routing on, writes run on MySQL"
+        : "every server in the sidebar; whether writes reach MySQL is not known (the router did not answer)"),
     cnFact("Port", at.port, at.confirmed ? "said by the router" : "the usual number, not confirmed", at.confirmed ? "" : portBad ? "bad" : "warn"));
   body.append(facts);
   if (portBad) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: why }));
@@ -15645,18 +15647,29 @@ function routeGrantsModel(v, readOnly) {
   if (v.error) return { user: user, state: "error", text: "Its grants could not be read: " + v.error + "." };
   const lines = Array.isArray(v.grants) ? v.grants.map(String) : [];
   const writes = Array.isArray(v.writes) ? v.writes.map(String) : [];
+  const other = Array.isArray(v.other) ? v.other.map(String) : [];
   const roles = Array.isArray(v.roles) ? v.roles.map(String) : [];
-  const m = { user: user, state: "read", lines: lines, tone: "ok", verdict: "Read-only: no privilege that changes data", note: "" };
+  // Nothing read is never "read-only": the claim needs lines behind it.
+  if (!lines.length) return { user: user, state: "error", text: "Its grants could not be read: SHOW GRANTS returned no lines this page could read." };
+  const m = { user: user, state: "read", lines: lines, tone: "ok", verdict: "Read-only: every privilege only reads", notes: [] };
   if (writes.length) {
     m.tone = "bad";
     m.verdict = "Can change data: " + writes.join(", ");
-    m.note = readOnly === true ? "The router is read-only, so it refuses those statements before they reach MySQL."
-      : readOnly === false ? "The router is read-write: a statement that needs them runs on your MySQL."
-      : "";
+    if (readOnly === true) m.notes.push("The router is read-only: it refuses a statement that changes data before it reaches MySQL.");
+    else if (readOnly === false) m.notes.push("The router is read-write: a statement that needs them runs on your MySQL.");
+  } else if (other.length) {
+    m.tone = "warn";
+    m.verdict = "Not read-only: " + other.join(", ");
+  } else if (v.execute) {
+    m.tone = "warn";
+    m.verdict = "Can run stored routines (EXECUTE)";
   } else if (roles.length) {
     m.tone = "warn";
     m.verdict = "Has " + (roles.length === 1 ? "a role" : roles.length + " roles") + ": SHOW GRANTS does not list what " + (roles.length === 1 ? "it allows" : "they allow");
   }
+  if (other.length && writes.length) m.notes.push("It also holds " + other.join(", ") + ", which are not about reading tables.");
+  if (v.execute) m.notes.push("With EXECUTE, a SELECT can call a stored function, and a function may change data with its creator's rights. The router sees only the SELECT, so it lets it through.");
+  if (roles.length && (writes.length || other.length || v.execute)) m.notes.push("It also has " + (roles.length === 1 ? "a role" : roles.length + " roles") + ", whose privileges SHOW GRANTS does not list.");
   return m;
 }
 
@@ -15665,7 +15678,7 @@ function routeGrantsBlock(m) {
   if (m.state !== "read") return [head, el("p", { class: "form-hint", text: m.text })];
   const out = [head, el("p", { class: "cn-grants-verdict is-" + m.tone, text: m.verdict })];
   if (m.lines.length) out.push(el("pre", { class: "cn-grants-lines" }, m.lines.join("\n")));
-  if (m.note) out.push(el("p", { class: "form-hint", text: m.note }));
+  for (const n of m.notes || []) out.push(el("p", { class: "form-hint", text: n }));
   return out;
 }
 
