@@ -144,7 +144,9 @@ A copy you can trust is one whose edges you know.
   Nothing fails over to it.
 - **Not your backup.** History starts the day you install it. Keep your
   physical backups.
-- **Minutes behind, not seconds.** The copy refreshes on the schedule you set.
+- **Minutes behind, not seconds, for the files.** The copy refreshes on the
+  schedule you set. Through the SQL port, a heavy read also sees what capture
+  has indexed since, usually seconds behind.
 - **Needs a ROW binlog with full row images.** `binlog_format=ROW` and
   `binlog_row_image=FULL`. `bintrail doctor` checks both and prints the fix
   (on RDS and Aurora, set them in the parameter group).
