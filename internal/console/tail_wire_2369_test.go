@@ -2,6 +2,9 @@ package console
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -109,6 +112,47 @@ func TestTailsSayTheInstant(t *testing.T) {
 	} {
 		if got := tailsSayTheInstant(c.stmt, c.tailed); got != c.want {
 			t.Errorf("%q tailed %v: %v, want %v", c.stmt, c.tailed, got, c.want)
+		}
+	}
+}
+
+// Failures that leave every statement without tails are said once per reason.
+func TestTailKeeperNote(t *testing.T) {
+	k := newTailKeeper(&fakeIndex{}, t.TempDir(), 3, time.Minute, time.Hour)
+	k.note(errors.New("denied"))
+	if k.failing != "denied" {
+		t.Fatalf("failing %q", k.failing)
+	}
+	k.note(errors.New("denied"))
+	k.note(nil)
+	if k.failing != "" {
+		t.Fatalf("still failing %q after a read", k.failing)
+	}
+}
+
+// An earlier process's tails directories are removed; a running one's, and
+// anything else, stay.
+func TestSweepTailDirs(t *testing.T) {
+	parent := t.TempDir()
+	old, recent, other := filepath.Join(parent, "bintrail-tails-1"), filepath.Join(parent, "bintrail-tails-2"), filepath.Join(parent, "keep-me")
+	for _, d := range []string{old, recent, other} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	long := time.Now().Add(-2 * time.Hour)
+	for _, d := range []string{old, other} {
+		if err := os.Chtimes(d, long, long); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sweepTailDirs(parent, time.Now().Add(-time.Hour))
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Error("an earlier process's directory stayed")
+	}
+	for _, d := range []string{recent, other} {
+		if _, err := os.Stat(d); err != nil {
+			t.Errorf("%s removed", d)
 		}
 	}
 }

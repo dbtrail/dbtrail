@@ -4,8 +4,10 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/cliutil"
@@ -25,6 +27,8 @@ const (
 	tailMaxKeys = 200_000
 	tailKeepOld = 30 * time.Minute
 	tailIdle    = 30 * time.Minute
+	// tailMinBuild is the least time left for a table's first read.
+	tailMinBuild = time.Second
 )
 
 // tailKeepers are the keepers of one process, by server id.
@@ -65,6 +69,7 @@ func (s *Server) tailKeeperFor(id string, b *bundle) *tailKeeper {
 	if !known {
 		return nil
 	}
+	tailSweep.Do(func() { sweepTailDirs(os.TempDir(), time.Now().Add(-tailKeepOld)) })
 	s.tails.mu.Lock()
 	old := s.tails.by[id]
 	if old != nil {
@@ -126,11 +131,9 @@ func (s *Server) statementTails(ctx context.Context, k *tailKeeper, tables, read
 	if len(read) == 0 {
 		return tables, time.Time{}, false
 	}
-	ctx, cancel := context.WithTimeout(ctx, copyUnchangedTimeout)
-	defer cancel()
-	got, err := k.refresh(ctx, read)
+	got, err := k.refreshWithin(ctx, copyUnchangedTimeout, read)
+	k.note(err)
 	if err != nil {
-		slog.Debug("Engine Routing: the copy's tails could not be read; the statement reads the published copy", "error", err)
 		return tables, time.Time{}, false
 	}
 	for i, t := range read {
@@ -156,4 +159,25 @@ func (s *Server) statementTails(ctx context.Context, k *tailKeeper, tables, read
 // without tails.
 func tailsSayTheInstant(statement string, tailed bool) bool {
 	return tailed && !sqlMentionsEvents(statement)
+}
+
+var tailSweep sync.Once
+
+// sweepTailDirs removes the tails' directories an earlier process left under
+// parent (it stopped before removing them; nothing reads them again), those
+// last written before cutoff: another process's are written while it runs.
+func sweepTailDirs(parent string, cutoff time.Time) {
+	dirs, _ := filepath.Glob(filepath.Join(parent, "bintrail-tails-*"))
+	for _, dir := range dirs {
+		fi, err := os.Lstat(dir)
+		if err != nil || !fi.IsDir() || !fi.ModTime().Before(cutoff) {
+			continue
+		}
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+			continue // another user's
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			slog.Debug("Engine Routing: an earlier process's tails could not be removed", "dir", dir, "error", err)
+		}
+	}
 }

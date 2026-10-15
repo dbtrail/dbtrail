@@ -1076,7 +1076,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	}
 	if tails != nil {
 		if dir, err := tails.ensureDir(); err != nil {
-			slog.Debug("Engine Routing: the copy's tails have no directory; the statement reads the published copy", "error", err)
+			tails.note(fmt.Errorf("the tails' directory: %w", err))
 			tails = nil
 		} else {
 			copyDirs = append(copyDirs, dir)

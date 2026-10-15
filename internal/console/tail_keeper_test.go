@@ -211,6 +211,7 @@ func TestTailKeeper(t *testing.T) {
 	newKeeper := func(f *fakeIndex) *tailKeeper {
 		k := newTailKeeper(f, t.TempDir(), 3, time.Minute, time.Hour)
 		k.now = func() time.Time { return clock }
+		k.minBuild = 0
 		return k
 	}
 	refresh := func(t *testing.T, k *tailKeeper, tables ...views.BaselineTable) map[string]tailView {
@@ -405,6 +406,55 @@ func TestTailKeeper(t *testing.T) {
 		fills := f.fills
 		if got := refresh(t, k, newerCut(orders)); got[ko].Path != before[ko].Path || f.fills != fills {
 			t.Errorf("rebuilt again at every statement: %+v, %d fills", got[ko], f.fills-fills)
+		}
+	})
+
+	t.Run("a table left too little time by the others waits for the next statement, unjudged", func(t *testing.T) {
+		f := &fakeIndex{fillWait: map[string]bool{ko: true}}
+		f.add("orders", "1")
+		k := newKeeper(f)
+		k.minBuild = time.Hour
+		short, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		if got, err := k.refresh(short, []views.BaselineTable{orders}); err != nil || len(got) != 0 {
+			t.Fatalf("%+v %v", got, err)
+		}
+		if e := k.tables[ko]; e != nil || !f.fillWait[ko] {
+			t.Fatalf("started on a remainder, or judged on it: %+v", e)
+		}
+	})
+
+	t.Run("the time to refresh is counted from when the keeper is the statement's", func(t *testing.T) {
+		f := &fakeIndex{fillWait: map[string]bool{ko: true}}
+		f.add("orders", "1")
+		k := newKeeper(f)
+		k.mu.Lock()
+		go func() { time.Sleep(100 * time.Millisecond); k.mu.Unlock() }()
+		if _, err := k.refreshWithin(ctx, 50*time.Millisecond, []views.BaselineTable{orders}); err != nil {
+			t.Fatal(err)
+		}
+		if e := k.tables[ko]; e == nil || f.fillWait[ko] {
+			t.Fatalf("the wait for another statement was spent from this one's time: %+v", e)
+		}
+	})
+
+	t.Run("a version written over an older cut is not laid over a newer one", func(t *testing.T) {
+		f := &fakeIndex{fillErr: map[string]error{}}
+		f.add("orders", "1")
+		k := newKeeper(f)
+		before := refresh(t, k, orders)
+		if before[ko].Path == "" {
+			t.Fatal("no version written")
+		}
+		f.add("orders", "2")
+		f.fillErr[ko] = errors.New("timeout") // the rebuild fails: the advancing tail stays
+		f.writeErr = errors.New("disk full")  // and its newer version cannot be written
+		if got := refresh(t, k, newerCut(orders)); len(got) != 0 {
+			t.Fatalf("a version of the older cut over the newer one: %+v", got[ko])
+		}
+		f.writeErr = nil
+		if got := refresh(t, k, newerCut(orders)); got[ko].Path == "" {
+			t.Error("no version once it could be written")
 		}
 	})
 

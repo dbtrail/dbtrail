@@ -127,14 +127,14 @@ func (x *indexTailSource) Start(_ context.Context, t views.BaselineTable) (tailT
 	}
 	md, err := x.s.copyCuts.footer(t.Path)
 	if err != nil {
-		return nil, fmt.Sprintf("the snapshot file of %s could not be read", name), nil
+		return nil, fmt.Sprintf("the snapshot file of %s could not be read: %v", name, err), nil
 	}
 	if x.b.resolver == nil {
 		return nil, "the index has no schema snapshot to read " + name + "'s key from", nil
 	}
 	tm, err := x.b.resolver.Resolve(t.Schema, t.Table)
 	if err != nil {
-		return nil, fmt.Sprintf("%s is not in the index's schema snapshot", name), nil
+		return nil, fmt.Sprintf("%s could not be found in the index's schema snapshot: %v", name, err), nil
 	}
 	pk := tm.PKColumnMetas()
 	if !samePrimaryKey(md.CreateTableSQL, pk) {

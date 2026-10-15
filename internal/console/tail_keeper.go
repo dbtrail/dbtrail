@@ -121,6 +121,9 @@ type tailEntry struct {
 	// tail holds nothing), through the instant it is indexed through.
 	file    string
 	through time.Time
+	// fileCut is the published cut file was written over: a version is
+	// laid only over the copy it was written for.
+	fileCut string
 	// old are the earlier versions, kept while a statement may still read
 	// them.
 	old []tailOldFile
@@ -146,6 +149,13 @@ var errTailRenumbered = errors.New("the source's binary log started again from a
 type tailKeeper struct {
 	mu  sync.Mutex
 	src tailSource
+	// minBuild is the least time a table's first read is started with: one
+	// left less by the others of its statement waits for the next, rather
+	// than be refused as too slow on a remainder.
+	minBuild time.Duration
+	// noteMu guards failing, the reason no statement reads tails now.
+	noteMu  sync.Mutex
+	failing string
 	// parent is where this keeper makes its own directory (which must
 	// exist), at its first write: never one an earlier process wrote, so no
 	// name repeats.
@@ -172,7 +182,7 @@ type tailKeeper struct {
 }
 
 func newTailKeeper(src tailSource, parent string, maxKeys int, keepOld, idle time.Duration) *tailKeeper {
-	return &tailKeeper{src: src, parent: parent, maxKeys: maxKeys, keepOld: keepOld, idle: idle, now: time.Now, tables: map[string]*tailEntry{}}
+	return &tailKeeper{src: src, parent: parent, maxKeys: maxKeys, keepOld: keepOld, idle: idle, now: time.Now, minBuild: tailMinBuild, tables: map[string]*tailEntry{}}
 }
 
 // refresh brings the tails of tables up to what the index holds now and
@@ -182,6 +192,20 @@ func newTailKeeper(src tailSource, parent string, maxKeys int, keepOld, idle tim
 func (k *tailKeeper) refresh(ctx context.Context, tables []views.BaselineTable) (map[string]tailView, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	return k.refreshLocked(ctx, tables)
+}
+
+// refreshWithin is refresh with d to do it in, counted from when the keeper
+// is this statement's: not spent waiting on another statement's refresh.
+func (k *tailKeeper) refreshWithin(ctx context.Context, d time.Duration, tables []views.BaselineTable) (map[string]tailView, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	return k.refreshLocked(ctx, tables)
+}
+
+func (k *tailKeeper) refreshLocked(ctx context.Context, tables []views.BaselineTable) (map[string]tailView, error) {
 	// The newest event FIRST: every read below is bounded by it, so the
 	// instant reported is of an event every tail has folded.
 	newest, err := k.src.Newest(ctx)
@@ -288,7 +312,7 @@ func (k *tailKeeper) advance(ctx context.Context, upTo uint64) error {
 			// missing its changes.
 			if key, ok := folded[strings.ToLower(ev.SchemaName)+"\x00"+strings.ToLower(ev.TableName)]; ok && key != tailKey(ev.SchemaName, ev.TableName) {
 				if e := k.tables[key]; e.refused == "" {
-					e.refused = "the index names it in another case than its copy"
+					k.refuse(e, "the index names it in another case than its copy")
 				}
 				continue
 			}
@@ -305,7 +329,7 @@ func (k *tailKeeper) advance(ctx context.Context, upTo uint64) error {
 		for key, evs := range byTable {
 			e := k.tables[key]
 			if err := e.tail.Apply(evs); err != nil {
-				e.refused = "its changes could not be folded: " + err.Error()
+				k.refuse(e, "its changes could not be folded: "+err.Error())
 				continue
 			}
 			e.dirty = true
@@ -339,16 +363,16 @@ func (k *tailKeeper) entryFor(ctx context.Context, key string, t views.BaselineT
 	if changed != "" {
 		if e == nil || e.refused == "" {
 			k.drop(e)
-			k.tables[key] = &tailEntry{table: t, cut: cut, refused: changed, used: k.now()}
-			slog.Info("Engine Routing: a table has no tail; statements over it read the copy as of its snapshot",
-				"table", t.Schema+"."+t.Table, "reason", changed)
+			e = &tailEntry{table: t, cut: cut, used: k.now()}
+			k.tables[key] = e
+			k.refuse(e, changed)
 		}
 		return nil
 	}
 	if e != nil && e.cut == cut {
 		return e
 	}
-	if ctx.Err() != nil {
+	if dl, ok := ctx.Deadline(); ctx.Err() != nil || ok && time.Until(dl) < k.minBuild {
 		// The statement's time went on another table: this one is not
 		// judged on what is left of it, and is built at the next statement.
 		if e != nil && e.refused == "" && !e.frozen {
@@ -383,11 +407,41 @@ func (k *tailKeeper) entryFor(ctx context.Context, key string, t views.BaselineT
 	k.drop(e)
 	fresh.used = k.now()
 	k.tables[key] = fresh
-	if fresh.refused != "" {
-		slog.Info("Engine Routing: a table has no tail; statements over it read the copy as of its snapshot",
-			"table", t.Schema+"."+t.Table, "reason", fresh.refused)
+	if why := fresh.refused; why != "" {
+		fresh.refused = ""
+		k.refuse(fresh, why)
 	}
 	return fresh
+}
+
+// refuse ends e's tail for why, said once: statements over the table read
+// its copy as of its snapshot until its next one.
+func (k *tailKeeper) refuse(e *tailEntry, why string) {
+	if e.refused != "" {
+		return
+	}
+	e.refused = why
+	slog.Info("Engine Routing: a table has no tail; statements over it read the copy as of its snapshot",
+		"table", e.table.Schema+"."+e.table.Table, "reason", why)
+}
+
+// note says, once per reason, that no statement reads tails now (the index
+// or the keeper's directory cannot be read), and when they are read again:
+// every statement then reads the copy as of its snapshots, which an
+// operator must be able to find out without debug logs.
+func (k *tailKeeper) note(err error) {
+	k.noteMu.Lock()
+	defer k.noteMu.Unlock()
+	switch {
+	case err == nil && k.failing != "":
+		slog.Info("Engine Routing: the copy's tails are read again")
+		k.failing = ""
+	case err != nil && err.Error() != k.failing:
+		slog.Warn("Engine Routing: no statement reads the copy's tails; they read the copy as of its snapshots", "error", err)
+		k.failing = err.Error()
+	case err != nil:
+		slog.Debug("Engine Routing: the copy's tails could not be read", "error", err)
+	}
 }
 
 // build starts t's tail over its published cut and folds its events up to
@@ -434,11 +488,13 @@ func (k *tailKeeper) view(t views.BaselineTable, e *tailEntry) (tailView, bool) 
 		if err := k.write(t, e); err != nil {
 			var r *reconstruct.TailRefusal
 			if errors.As(err, &r) {
-				e.refused = r.Reason
+				k.refuse(e, r.Reason)
 				return tailView{}, false
 			}
 			slog.Debug("Engine Routing: a table's tail could not be written; its last version stays", "table", t.Schema+"."+t.Table, "error", err)
-			if e.through.IsZero() {
+			// Not a version written over an older copy: laid over a newer
+			// one, its values would replace newer published ones.
+			if e.through.IsZero() || e.fileCut != tailCutOf(t) {
 				return tailView{}, false
 			}
 			return tailView{Path: e.file, PK: e.tail.PKColumns(), Through: e.through}, true
@@ -472,7 +528,7 @@ func (k *tailKeeper) write(t views.BaselineTable, e *tailEntry) error {
 		return err
 	}
 	k.retire(e)
-	e.file, e.dirty = path, false
+	e.file, e.dirty, e.fileCut = path, false, e.cut
 	return nil
 }
 
