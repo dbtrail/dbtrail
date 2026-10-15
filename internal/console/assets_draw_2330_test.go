@@ -42,7 +42,7 @@ for (const [name, c] of Object.entries(cases.trends)) {
 }
 for (const [name, c] of Object.entries(cases.router)) {
   const m = call("routerSidesModel")(c.view, c.cur);
-  out.router[name] = m ? { drawn: true, mysql: m.mysql, copy: m.copy, refused: m.refused, share: m.share, age: m.age, screen: text(call("routerSides")(m)) } : { drawn: false };
+  out.router[name] = m ? { drawn: true, mysql: m.mysql, copy: m.copy, refused: m.refused, share: m.share, age: m.data ? m.data.age : "", ageState: m.data ? m.data.state : "", worst: m.data ? m.data.worst : "", screen: text(call("routerSides")(m)) } : { drawn: false };
 }
 process.stdout.write(JSON.stringify(out));
 `
@@ -83,6 +83,8 @@ type drawRouterOut struct {
 	Refused     int
 	Share       float64
 	Age, Screen string
+	AgeState    string `json:"ageState"`
+	Worst       string
 }
 
 func TestDrawings2330(t *testing.T) {
@@ -178,12 +180,13 @@ func TestDrawings2330(t *testing.T) {
 			"other server": c{"view": rview(c{"mysql": 5}), "cur": c{"id": "zz"}},
 			"nothing yet":  c{"view": rview(c{"mysql": 0, "copy": 0, "refused": 0}), "cur": srvA},
 			"only refused": c{"view": rview(c{"refused": 3}), "cur": srvA},
-			// The copy's age is drawn only from a reading made lately: not
-			// before the router's first reading, and not once it stopped
-			// looking (11 minutes ago here, though it looks every 30 seconds).
-			"age not read":  c{"view": rviewLooked(c{"mysql": 4, "copy": 2, "copy_snapshot": "2026-10-12T01:08:57Z"}, ""), "cur": srvA},
-			"age stale":     c{"view": rviewLooked(c{"mysql": 4, "copy": 2, "copy_snapshot": "2026-10-12T01:08:57Z"}, "2026-10-12T00:59:00Z"), "cur": srvA},
-			"age at limit":  c{"view": rviewLooked(c{"mysql": 4, "copy": 2, "copy_snapshot": "2026-10-12T01:08:57Z"}, "2026-10-12T01:08:00Z"), "cur": srvA},
+			// How far behind the copy's data was (#2369): the router's own
+			// numbers, never the snapshot's age.
+			"no copy answer": c{"view": rview(c{"mysql": 4, "copy_snapshot": "2026-10-12T01:08:57Z", "data_age_max_seconds": 5}), "cur": srvA},
+			"age unknown":    c{"view": rview(c{"mysql": 4, "copy": 2, "copy_snapshot": "2026-10-12T01:08:57Z", "data_age_max_seconds": 300}), "cur": srvA},
+			"age known":      c{"view": rview(c{"mysql": 4, "copy": 2, "copy_snapshot": "2026-10-12T01:08:57Z", "data_as_of": "2026-10-12T01:09:55Z", "data_age_seconds": 3, "data_age_max_seconds": 300}), "cur": srvA},
+			"age zero":       c{"view": rview(c{"copy": 1, "data_as_of": "2026-10-12T01:09:55Z", "data_age_seconds": 0}), "cur": srvA},
+			"age junk":       c{"view": rview(c{"copy": 1, "data_as_of": "nope", "data_age_seconds": 3}), "cur": srvA},
 			"counts only":   c{"view": rview(c{"mysql": 10, "copy": 30}), "cur": srvA},
 			"full":          c{"view": rview(c{"mysql": 48210, "copy": 3233, "refused": 12, "copy_snapshot": "2026-10-12T01:08:57Z", "answers": c{"mysql": c{"count": 48100, "errors": 7, "timeouts": 2, "seconds": 310.4, "slowest_seconds": 9.78}, "copy": c{"count": 3233, "errors": 0, "timeouts": 0, "seconds": 5075.8, "slowest_seconds": 41.2}}}), "cur": srvA},
 			"more timeouts": c{"view": rview(c{"mysql": 4, "answers": c{"mysql": c{"count": 4, "errors": 1, "timeouts": 9, "seconds": 0.0001, "slowest_seconds": 0.00005}}}), "cur": srvA},
@@ -345,15 +348,28 @@ func TestDrawings2330(t *testing.T) {
 		}
 		f := out.Router["full"]
 		if !f.Drawn || f.MySQL != (drawSide{Sent: 48210, Timed: 48100, Avg: "6 ms", Slowest: "9.78 s", Errors: 7, Timeouts: 2}) ||
-			f.Copy != (drawSide{Sent: 3233, Timed: 3233, Avg: "1.57 s", Slowest: "41.2 s"}) || f.Refused != 12 || f.Age != "63s" {
+			f.Copy != (drawSide{Sent: 3233, Timed: 3233, Avg: "1.57 s", Slowest: "41.2 s"}) || f.Refused != 12 || f.AgeState != "unknown" {
 			t.Errorf("full: %+v", f)
 		}
-		for name, want := range map[string]string{"age not read": "", "age stale": "", "age at limit": "63s"} {
-			if a := out.Router[name]; !a.Drawn || a.Age != want || strings.Contains(a.Screen, " old") != (want != "") {
-				t.Errorf("%s: drawn %v, age %q, want %q; screen: %s", name, a.Drawn, a.Age, want, a.Screen)
+		for name, want := range map[string]struct{ state, age, worst, screen string }{
+			"no copy answer": {"", "", "", ""},
+			"age unknown":    {"unknown", "", "5 minutes", "Lag: unknown (last answer)"},
+			"age known":      {"known", "3 seconds", "5 minutes", "Lag: 3 seconds (last answer)"},
+			"age zero":       {"known", "0 seconds", "", "Lag: 0 seconds (last answer)"},
+			"age junk":       {"unknown", "", "", "Lag: unknown (last answer)"},
+		} {
+			a := out.Router[name]
+			if !a.Drawn || a.AgeState != want.state || a.Age != want.age || a.Worst != want.worst || !strings.Contains(a.Screen, want.screen) {
+				t.Errorf("%s: %+v, want %+v", name, a, want)
+			}
+			if want.state == "" && strings.Contains(a.Screen, "Lag") {
+				t.Errorf("%s: an age drawn with no copy answer: %s", name, a.Screen)
+			}
+			if (want.worst != "") != strings.Contains(a.Screen, "Max lag: "+want.worst) {
+				t.Errorf("%s: the worst not drawn: %s", name, a.Screen)
 			}
 		}
-		for _, want := range []string{"48K", "3,233", "7 errors (2 out of time)", "12 refused, run by neither", "6 ms each"} {
+		for _, want := range []string{"48K", "3,233", "7 errors (2 out of time)", "12 refused, run by neither", "6 ms each", "Your MySQL did not have to run these", "The copy answered 6% of the statements", "when the router started"} {
 			if !strings.Contains(f.Screen, want) {
 				t.Errorf("full screen lacks %q: %s", want, f.Screen)
 			}

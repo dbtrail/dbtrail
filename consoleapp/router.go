@@ -814,7 +814,12 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 	if st.MetricsAddr != "" {
 		last := &routerCopySnapshots{}
 		stopMetrics, err := streamrun.StartMetricsServerWith(st.MetricsAddr, map[string]http.Handler{
-			"GET " + routerStatusPath: routerStatusHandler(st, srv.RouterNumbers, last),
+			"GET " + routerStatusPath: routerStatusHandler(st, func() console.RouterNumbers {
+				// The copy answers' instants are read from the index here
+				// (once per snapshot), not by the statements (#2369).
+				srv.ResolveCopyAges(ctx)
+				return srv.RouterNumbers()
+			}, last),
 		})
 		if err != nil {
 			// Not a reason to leave the MySQL port closed: the numbers are
@@ -822,7 +827,10 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 			fmt.Fprint(os.Stderr, routerMetricsOffLine(st.MetricsAddr, err))
 		} else {
 			defer stopMetrics()
-			go exportCopySnapshots(ctx, srv.CopySnapshots, routerCopySnapshotEvery, last)
+			go exportCopySnapshots(ctx, func(ctx context.Context) map[string]time.Time {
+				srv.ResolveCopyAges(ctx)
+				return srv.CopySnapshots(ctx)
+			}, routerCopySnapshotEvery, last)
 		}
 	}
 

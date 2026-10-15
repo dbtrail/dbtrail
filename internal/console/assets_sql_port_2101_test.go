@@ -295,7 +295,7 @@ func TestSQLPortPanel_TurnedOnFromTheWebInterface(t *testing.T) {
 		t.Fatalf("decode %s: %v", out, err)
 	}
 	// The two sides as drawn for the server picked first (#2330).
-	shopSides := []string{"Your MySQL 9 statements", "DBTrail's copy 4 statements"}
+	shopSides := []string{"Answered by your MySQL 9 statements", "Answered by DBTrail's copy 4 statements Your MySQL did not have to run these Lag: unknown (last answer)"}
 	has := func(what string, d sqlPortDrawn, want string) {
 		t.Helper()
 		for _, l := range d.Lines {
@@ -451,7 +451,7 @@ func TestSQLPortPanel_TurnedOnFromTheWebInterface(t *testing.T) {
 	if !slices.Equal(got.Later.Who, shopSides) || !slices.Equal(got.Later.Caption, []string{"Who answered for shop"}) {
 		t.Errorf("who answered for the picked server: %q under %q", got.Later.Who, got.Later.Caption)
 	}
-	if !slices.Equal(got.WhoOther.Who, []string{"Your MySQL 80 statements", "DBTrail's copy 70 statements", "6 refused, run by neither"}) || !slices.Equal(got.WhoOther.Caption, []string{"Who answered for billing"}) {
+	if !slices.Equal(got.WhoOther.Who, []string{"Answered by your MySQL 80 statements", "Answered by DBTrail's copy 70 statements Your MySQL did not have to run these Lag: unknown (last answer)", "6 refused, run by neither"}) || !slices.Equal(got.WhoOther.Caption, []string{"Who answered for billing"}) {
 		t.Errorf("who answered for another picked server: %q under %q, want its own counts", got.WhoOther.Who, got.WhoOther.Caption)
 	}
 	// One fact, once: the counts that are drawn are not said again among

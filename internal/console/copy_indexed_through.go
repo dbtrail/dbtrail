@@ -295,6 +295,9 @@ func (q *SQLOnCopy) NoteRoute(side string) {
 	defer q.last.mu.Unlock()
 	if side == "copy" && q.last.pending != nil {
 		q.last.a = *q.last.pending
+		if q.s != nil {
+			q.s.copyAges.note(q.id, q.last.a)
+		}
 	} else {
 		q.last.a = copyAnswer{side: side}
 	}

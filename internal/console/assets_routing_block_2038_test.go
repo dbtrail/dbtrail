@@ -105,7 +105,7 @@ const draw = (on, cur, view, toggle) => {
   });
   const refused = foot.match(/\d+ refused, run by neither/);
   o.figs = sides.concat(refused ? [refused[0]] : []).join(" | ");
-  o.since = /^since \S/.test(foot);
+  o.since = /counted since \S.*when the router started/.test(foot);
   return o;
 };
 // why: the reasons the router gives, as drawn under "Why each side".
@@ -332,31 +332,31 @@ console.log(JSON.stringify({
 		}
 	}
 	const split73 = "The copy answered 30% of the statements"
-	figures("counts", "Your MySQL 7 statements | DBTrail's copy 3 statements", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
+	figures("counts", "Answered by your MySQL 7 statements | Answered by DBTrail's copy 3 statements Your MySQL did not have to run these Lag: unknown (last answer)", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
 	if c := d("counts").Caption; c != "Who answered for shop" {
 		t.Errorf("counts: caption %q", c)
 	}
 	// The saved switch does not hide what the router counted.
-	figures("offCounts", "Your MySQL 7 statements | DBTrail's copy 3 statements", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
-	figures("lockedOn", "Your MySQL 7 statements | DBTrail's copy 3 statements", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
-	figures("noAccountCounts", "Your MySQL 7 statements | DBTrail's copy 3 statements", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
+	figures("offCounts", "Answered by your MySQL 7 statements | Answered by DBTrail's copy 3 statements Your MySQL did not have to run these Lag: unknown (last answer)", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
+	figures("lockedOn", "Answered by your MySQL 7 statements | Answered by DBTrail's copy 3 statements Your MySQL did not have to run these Lag: unknown (last answer)", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
+	figures("noAccountCounts", "Answered by your MySQL 7 statements | Answered by DBTrail's copy 3 statements Your MySQL did not have to run these Lag: unknown (last answer)", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
 	// Refused statements were run by neither side: said under the figures,
 	// and left out of the bar and of its share.
-	figures("readOnly", "Your MySQL 7 statements | DBTrail's copy 3 statements | 2 refused, run by neither", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
-	figures("busy", "Your MySQL 5 statements | DBTrail's copy 40 statements | 5 refused, run by neither", "The copy answered 89% of the statements", "rs-bar-mysql flex:5", "rs-bar-copy flex:40")
+	figures("readOnly", "Answered by your MySQL 7 statements | Answered by DBTrail's copy 3 statements Your MySQL did not have to run these Lag: unknown (last answer) | 2 refused, run by neither", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
+	figures("busy", "Answered by your MySQL 5 statements | Answered by DBTrail's copy 40 statements Your MySQL did not have to run these Lag: unknown (last answer) | 5 refused, run by neither", "The copy answered 89% of the statements", "rs-bar-mysql flex:5", "rs-bar-copy flex:40")
 	// Refusals alone are counts too: nobody answered those, the bar has
 	// nothing to split, and none is drawn (an empty bar would read as a
 	// figure).
-	figures("readOnlyOnlyRefusals", "Your MySQL 0 statements | DBTrail's copy 0 statements | 4 refused, run by neither", "")
-	figures("onlyMySQL", "Your MySQL 5 statements | DBTrail's copy 0 statements", "The copy answered 0% of the statements", "rs-bar-mysql flex:5", "rs-bar-copy flex:0")
-	figures("onlyCopy", "Your MySQL 0 statements | DBTrail's copy 8 statements", "The copy answered 100% of the statements", "rs-bar-mysql flex:0", "rs-bar-copy flex:8")
-	figures("refused", "Your MySQL 4 statements | DBTrail's copy 0 statements", "The copy answered 0% of the statements", "rs-bar-mysql flex:4", "rs-bar-copy flex:0")
+	figures("readOnlyOnlyRefusals", "Answered by your MySQL 0 statements | Answered by DBTrail's copy 0 statements | 4 refused, run by neither", "")
+	figures("onlyMySQL", "Answered by your MySQL 5 statements | Answered by DBTrail's copy 0 statements", "The copy answered 0% of the statements", "rs-bar-mysql flex:5", "rs-bar-copy flex:0")
+	figures("onlyCopy", "Answered by your MySQL 0 statements | Answered by DBTrail's copy 8 statements Your MySQL did not have to run these Lag: unknown (last answer)", "The copy answered 100% of the statements", "rs-bar-mysql flex:0", "rs-bar-copy flex:8")
+	figures("refused", "Answered by your MySQL 4 statements | Answered by DBTrail's copy 0 statements", "The copy answered 0% of the statements", "rs-bar-mysql flex:4", "rs-bar-copy flex:0")
 	// One is one statement, not one statements.
-	figures("oneEach", "Your MySQL 6 statements | DBTrail's copy 1 statement", "The copy answered 14% of the statements", "rs-bar-mysql flex:6", "rs-bar-copy flex:1")
+	figures("oneEach", "Answered by your MySQL 6 statements | Answered by DBTrail's copy 1 statement Your MySQL did not have to run it Lag: unknown (last answer)", "The copy answered 14% of the statements", "rs-bar-mysql flex:6", "rs-bar-copy flex:1")
 	// Another server's counts never show under the picked one, and each
 	// picked server gets its own.
-	figures("firstPicked", "Your MySQL 7 statements | DBTrail's copy 3 statements", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
-	figures("otherPicked", "Your MySQL 70 statements | DBTrail's copy 30 statements", split73, "rs-bar-mysql flex:70", "rs-bar-copy flex:30")
+	figures("firstPicked", "Answered by your MySQL 7 statements | Answered by DBTrail's copy 3 statements Your MySQL did not have to run these Lag: unknown (last answer)", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
+	figures("otherPicked", "Answered by your MySQL 70 statements | Answered by DBTrail's copy 30 statements Your MySQL did not have to run these Lag: unknown (last answer)", split73, "rs-bar-mysql flex:70", "rs-bar-copy flex:30")
 	if c := d("otherPicked").Caption; c != "Who answered for billing" {
 		t.Errorf("otherPicked: caption %q", c)
 	}

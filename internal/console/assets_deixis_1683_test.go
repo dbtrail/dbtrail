@@ -163,13 +163,13 @@ func TestScreenTextNamesThePlace(t *testing.T) {
 	has("sqlNamed", "The router is the service that answers this port, on port 3310.")
 	// Who answered, drawn (#2330): the caption (the server's name is code,
 	// left out here), a figure per side with the tooltip that says what the
-	// side is, the copy's age, and the foot.
+	// side is, the copy's lag, and the foot.
 	has("sqlNamed", "Who answered for")
 	has("sqlNamed", "Your MySQL")
 	has("sqlNamed", "9 statements")
 	has("sqlNamed", "DBTrail's copy")
 	has("sqlNamed", "4 statements")
-	has("sqlNamed", "data 12m old")
+	has("sqlNamed", "Lag: unknown (last answer)")
 	has("sqlNamed", "3 refused, run by neither")
 	has("sqlNamed", "Statements the router sent to your MySQL server: the light reads, and everything that is not a read.")
 	has("sqlNamed", "Heavy reads the router answered from DBTrail's copy instead of your MySQL server.")

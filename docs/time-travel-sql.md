@@ -2081,7 +2081,13 @@ level says which. Three yes-or-no fields say what the counts cannot:
 `cannot_route` (the server cannot be forwarded for, so the copy answers it
 alone), `account_refused` (the
 source turned the router's login away, so clients get error 2006 while the
-counts go on rising) and `session_untracked`. Like
+counts go on rising) and `session_untracked`. Three more say how far behind
+capture the copy's answers were: `data_as_of`, the instant the data of the
+copy's last answer for that server was indexed through, `data_age_seconds`,
+how far behind that was when it ran, and `data_age_max_seconds`, the worst
+since `counting_since`. The first two are absent when the last answer's
+instant is not known (or the copy has answered nothing yet); the third, when
+no answer's is. Like
 `/metrics` it asks for no password, so it carries counts, times and the
 router's own settings only: never an account's name, nor what a source
 answered a login. Those stay in the router's log.
@@ -2090,8 +2096,9 @@ answered a login. Those stay in the router's log.
 (`watch --router-url http://127.0.0.1:9091`, or
 `BINTRAIL_CONSOLE_ROUTER_URL`; the Docker stack and the packages set it) and
 its MySQL clients page shows a panel, The router: for the server picked in the
-sidebar, who answered and why, the snapshot of the copy the router reads and
-its age, and the workers. The capture process asks the router each time the
+sidebar, who answered and why, the copy's lag (its last answer's, and the
+max since the router started), the snapshot of the copy the router reads and its
+age, and the workers. The capture process asks the router each time the
 page is opened or Refresh is pressed; the router asks it nothing. When the
 router does not answer, the panel says so and why, and shows no counts: a
 router that is down is not a router nobody uses.

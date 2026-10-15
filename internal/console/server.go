@@ -638,6 +638,9 @@ type Server struct {
 	// per server, to close them when the account they forward with changes.
 	routed  *routedConns
 	routing *routingStats
+	// copyAges is how far behind the copy's answers' data was, per server
+	// (#2369), for the router's status document.
+	copyAges copyAges
 	// routeAccountProbe is Config.RouteAccountProbe.
 	routeAccountProbe func(ctx context.Context, dsn string, ssl config.SSL, timeout time.Duration) error
 	// killSourceThreads is Config.KillSourceThreads; routedKills counts the

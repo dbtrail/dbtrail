@@ -233,7 +233,7 @@ console.log(JSON.stringify({ text: out, shape, refresh: { asked, disabled: !!btn
 		t.Errorf("Refresh pressed once: asked %d time(s), disabled %v; want one asking and the button disabled while it asks", all.Refresh.Asked, all.Refresh.Disabled)
 	}
 	must("counts", "The router is the service that answers this port, on port 3310.", "read-only",
-		"Who answered for shop Your MySQL 9 statements DBTrail's copy 4 statements data 12m old since ", "3 refused, run by neither",
+		"Who answered for shop Answered by your MySQL 9 statements Answered by DBTrail's copy 4 statements Your MySQL did not have to run these Lag: unknown (last answer) The copy answered 31% of the statements · counted since ", "3 refused, run by neither",
 		"snapshot of", "(12m old)", "whatever its age", "1 of 4 busy, 1 statement waiting", "2 threads and 2048MiB", "With every worker busy a statement waits its turn.", "error 1040",
 		"plan costs at least 10000", "at least 100000 rows", "Every other read runs on MySQL", "Refresh", "These numbers were read at",
 		"Why each side", "9 × a cheap plan", "4 × an expensive plan",
@@ -244,12 +244,12 @@ console.log(JSON.stringify({ text: out, shape, refresh: { asked, disabled: !!btn
 	// A router that names no address is not given a port number.
 	must("noListen", "The router is the service that answers this port. It is read-only")
 	mustNot("noListen", "on port")
-	must("newer", "later version than this page knows", "may be missing or read as zero", "SHOW ROUTER STATUS", "Your MySQL 9 statements")
+	must("newer", "later version than this page knows", "may be missing or read as zero", "SHOW ROUTER STATUS", "Answered by your MySQL 9 statements")
 	must("readWrite", "It is read-write: with Engine Routing on, writes sent to it run on MySQL", "Everything else, writes included, runs on MySQL")
 	mustNot("readWrite", "It is read-only", "Every other read")
 	must("noRule", "No plan threshold is set", "every read runs on MySQL and nothing reaches the copy")
 	must("noRuleRW", "No plan threshold is set", "every statement runs on MySQL and nothing reaches the copy")
-	must("noPool", "Your MySQL 9 statements")
+	must("noPool", "Answered by your MySQL 9 statements")
 	mustNot("noPool", "Workers for the copy")
 	// A server the router says nothing of: not sent anything, or not one of
 	// its servers. The document cannot tell, so the page says both.
@@ -260,14 +260,14 @@ console.log(JSON.stringify({ text: out, shape, refresh: { asked, disabled: !!btn
 	mustNot("badAddress", "Asked at", "Who answered")
 	must("noServer", "pick a server in the left sidebar", "Workers for the copy")
 	mustNot("noServer", "9 statements", "9 by MySQL")
-	must("notReadYet", "has not read its copies yet", "Your MySQL 9 statements")
+	must("notReadYet", "has not read its copies yet", "Answered by your MySQL 9 statements")
 	mustNot("notReadYet", "snapshot of")
 	must("stale", "snapshot of", "The router last looked 11m ago", "a newer one may exist")
-	must("noCopy", "The router knows no copy for shop", "Your MySQL 9 statements")
+	must("noCopy", "The router knows no copy for shop", "Answered by your MySQL 9 statements")
 	// A copy the router does not know has no age to draw on its side.
 	mustNot("noCopy", " old")
 	must("cannotRoute", "The copy answers everything for this server, the light reads too", "the router's log says why", "no statements yet")
-	must("refusedAcct", "MySQL refused the router's login for this server", "error 2006", "go on rising", "Your MySQL 9 statements")
+	must("refusedAcct", "MySQL refused the router's login for this server", "error 2006", "go on rising", "Answered by your MySQL 9 statements")
 	must("untracked", "does not tell the router when a statement changes a session setting")
 }
 
@@ -426,11 +426,11 @@ const run = async (answer, perms = {}, cur = "a") => {
 	}
 	figs := func(r result) string { return strings.Join(r.Figs, " | ") }
 	// Who answered is drawn (#2330): one figure per side, under a caption
-	// that names the server picked. Server a has a copy the router read, so
-	// its side says how old that data is.
+	// that names the server picked. The router gave no instant for its copy
+	// answers (#2369), so the copy's side says their lag is unknown.
 	caption := func(r result) string { return strings.Join(r.Caption, " | ") }
 	if !got.Shown.Page || !got.Shown.Panel || caption(got.Shown) != "Who answered for shop" ||
-		figs(got.Shown) != "Your MySQL 9 statements | DBTrail's copy 4 statements data 12m old" {
+		figs(got.Shown) != "Answered by your MySQL 9 statements | Answered by DBTrail's copy 4 statements Your MySQL did not have to run these Lag: unknown (last answer)" {
 		t.Errorf("a router that answers: page %v, panel %v, caption %q, figures %q; want the panel with the picked server's counts in: %s", got.Shown.Page, got.Shown.Panel, got.Shown.Caption, got.Shown.Figs, got.Shown.Text)
 	}
 	// One fact, once: what is drawn is not said again in a sentence among
@@ -465,7 +465,7 @@ const run = async (answer, perms = {}, cur = "a") => {
 		t.Errorf("a router that answers: command %q, unconfirmed %q; want the router's port 3310, the picked server, and no doubt about the port", got.Shown.Cmd, got.Shown.Unconfirmed)
 	}
 	if !got.Other.Panel || caption(got.Other) != "Who answered for billing" || strings.Contains(got.Other.Text, "MySQL 9 statements") || strings.Contains(got.Other.Text, "copy 4 statements") ||
-		figs(got.Other) != "Your MySQL 80 statements | DBTrail's copy 70 statements" {
+		figs(got.Other) != "Answered by your MySQL 80 statements | Answered by DBTrail's copy 70 statements Your MySQL did not have to run these Lag: unknown (last answer)" {
 		t.Errorf("another server picked: figures %q; want its own counts, not the first server's, in: %s", got.Other.Figs, got.Other.Text)
 	}
 	// A router that was configured and did not answer: no counts, never
@@ -508,7 +508,7 @@ const run = async (answer, perms = {}, cur = "a") => {
 	if len(got.Refreshed.Sent) != 1 || string(got.Refreshed.Sent[0]) != `"/api/router"` {
 		t.Errorf("Refresh sent %s, want exactly one GET /api/router", got.Refreshed.Sent)
 	}
-	if strings.Contains(got.Refreshed.Text, "MySQL 9 statements") || figs(got.Refreshed) != "Your MySQL 41 statements | DBTrail's copy 4 statements data 12m old" || len(got.Refreshed.WhoSaid) != 0 ||
+	if strings.Contains(got.Refreshed.Text, "MySQL 9 statements") || figs(got.Refreshed) != "Answered by your MySQL 41 statements | Answered by DBTrail's copy 4 statements Your MySQL did not have to run these Lag: unknown (last answer)" || len(got.Refreshed.WhoSaid) != 0 ||
 		len(got.Refreshed.Cmd) != 1 || !strings.Contains(got.Refreshed.Cmd[0], " -P 3399 ") || len(got.Refreshed.Toasts) != 0 || !got.Refreshed.Again {
 		t.Errorf("Refresh with a new answer: figures %q, command %q, toasts %q; want the new counts and port, not the old ones, in: %s", got.Refreshed.Figs, got.Refreshed.Cmd, got.Refreshed.Toasts, got.Refreshed.Text)
 	}

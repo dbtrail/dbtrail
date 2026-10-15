@@ -165,6 +165,15 @@ type RouterServerNumbers struct {
 	// 3339 UTC; empty when not known. Filled by the caller, which reads it
 	// on its own clock.
 	CopySnapshot string `json:"copy_snapshot,omitempty"`
+	// DataAsOf is the instant the data of the copy's last answer for this
+	// server was indexed through (#2369), RFC 3339 UTC, and DataAgeSeconds
+	// how far behind that was when it ran. Both absent when the last answer's
+	// instant is not known, or the copy has answered nothing.
+	DataAsOf       string `json:"data_as_of,omitempty"`
+	DataAgeSeconds *int64 `json:"data_age_seconds,omitempty"`
+	// DataAgeMaxSeconds is the worst such age since CountingSince, over the
+	// answers whose instant is known; absent when none is.
+	DataAgeMaxSeconds *int64 `json:"data_age_max_seconds,omitempty"`
 }
 
 // RouterNumbers reads the counts and the pool. It opens nothing and lists no
@@ -179,8 +188,18 @@ func (s *Server) RouterNumbers() RouterNumbers {
 		if reasons == nil {
 			reasons = map[string]uint64{}
 		}
-		out.Servers[id] = RouterServerNumbers{Copy: t.Copy, MySQL: t.MySQL, Refused: t.Refused, Reasons: reasons,
+		n := RouterServerNumbers{Copy: t.Copy, MySQL: t.MySQL, Refused: t.Refused, Reasons: reasons,
 			CannotRoute: t.Unavailable != "", AccountRefused: t.AccountRefused != "", SessionUntracked: t.SessionUntracked != ""}
+		if ages := s.copyAges.now(id); ages.known || ages.anyMax {
+			secs := func(d time.Duration) *int64 { v := int64(d.Seconds()); return &v }
+			if ages.known {
+				n.DataAsOf, n.DataAgeSeconds = ages.asOf.UTC().Format(time.RFC3339), secs(ages.age)
+			}
+			if ages.anyMax {
+				n.DataAgeMaxSeconds = secs(ages.worst)
+			}
+		}
+		out.Servers[id] = n
 	}
 	if runner := s.SQLSandbox(); runner != nil {
 		memory, _ := s.sqlMemoryNow()
