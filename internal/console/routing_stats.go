@@ -45,6 +45,32 @@ type routingStats struct {
 type routingTally struct {
 	copy, mysql, refused uint64
 	reasons              map[string]uint64
+	// answers is keyed by side ("copy", "mysql"): what each side finished,
+	// apart from the decisions above. A decision is counted when it is
+	// made; an answer when the statement is over, with how long it took.
+	answers map[string]*routingAnswers
+}
+
+// routingAnswers is one side's finished statements for one server.
+type routingAnswers struct {
+	count, failed, timedOut uint64
+	total, slowest          time.Duration
+}
+
+// RouteAnswers is routingAnswers on the wire: counts and times only.
+type RouteAnswers struct {
+	// Count is the statements this side finished, failed ones included.
+	Count uint64 `json:"count"`
+	// Errors is how many of them the client got an error for, and Timeouts
+	// how many of those were the statement's time running out.
+	Errors   uint64 `json:"errors"`
+	Timeouts uint64 `json:"timeouts"`
+	// Seconds is the time all of them took, added up, and SlowestSeconds
+	// the longest one. For MySQL the time includes sending the rows to the
+	// client; for the copy it ends when the answer is ready to send, and
+	// includes asking the source for the column names where the port does.
+	Seconds        float64 `json:"seconds"`
+	SlowestSeconds float64 `json:"slowest_seconds"`
 }
 
 func newRoutingStats(now time.Time) *routingStats {
@@ -71,6 +97,56 @@ func (r *routingStats) record(serverID, route, reason string) {
 		t.refused++
 	}
 	t.reasons[reason]++
+}
+
+// answered tallies one finished statement. side is "copy" or "mysql"; any
+// other value is dropped, since no column of the page is its.
+func (r *routingStats) answered(serverID, side string, took time.Duration, failed, timedOut bool) {
+	if side != "copy" && side != "mysql" {
+		return
+	}
+	if took < 0 {
+		took = 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t := r.perServer[serverID]
+	if t == nil {
+		t = &routingTally{reasons: map[string]uint64{}}
+		r.perServer[serverID] = t
+	}
+	if t.answers == nil {
+		t.answers = map[string]*routingAnswers{}
+	}
+	a := t.answers[side]
+	if a == nil {
+		a = &routingAnswers{}
+		t.answers[side] = a
+	}
+	a.count++
+	if failed {
+		a.failed++
+		if timedOut {
+			a.timedOut++
+		}
+	}
+	a.total += took
+	if took > a.slowest {
+		a.slowest = took
+	}
+}
+
+// answersDTO copies a tally's answers for the wire, nil when it has none.
+func (t *routingTally) answersDTO() map[string]RouteAnswers {
+	if len(t.answers) == 0 {
+		return nil
+	}
+	out := make(map[string]RouteAnswers, len(t.answers))
+	for side, a := range t.answers {
+		out[side] = RouteAnswers{Count: a.count, Errors: a.failed, Timeouts: a.timedOut,
+			Seconds: a.total.Seconds(), SlowestSeconds: a.slowest.Seconds()}
+	}
+	return out
 }
 
 // setUnavailable records why connections to a server cannot route; an
@@ -116,7 +192,7 @@ func (r *routingStats) snapshot() map[string]routingServerDTO {
 	defer r.mu.Unlock()
 	out := make(map[string]routingServerDTO, len(r.perServer))
 	for id, t := range r.perServer {
-		out[id] = routingServerDTO{Copy: t.copy, MySQL: t.mysql, Refused: t.refused, Reasons: maps.Clone(t.reasons)}
+		out[id] = routingServerDTO{Copy: t.copy, MySQL: t.mysql, Refused: t.refused, Reasons: maps.Clone(t.reasons), Answers: t.answersDTO()}
 	}
 	// The notes: a server with a note and no decision yet still gets an
 	// entry, with zero counts.
@@ -145,6 +221,13 @@ func (r *routingStats) snapshot() map[string]routingServerDTO {
 // the shim's RouterConfig.Observe hook; safe from any goroutine.
 func (s *Server) RecordRouteDecision(serverID, route, reason string) {
 	s.routing.record(serverID, route, reason)
+}
+
+// RecordRouteAnswer tallies one statement a side finished: how long it took
+// and whether the client got an error for it. Called by the port's serving
+// layer from the shim's RouterConfig.Answered hook; safe from any goroutine.
+func (s *Server) RecordRouteAnswer(serverID, side string, took time.Duration, failed, timedOut bool) {
+	s.routing.answered(serverID, side, took, failed, timedOut)
 }
 
 // RecordRouteUnavailable notes that a connection to serverID could not route

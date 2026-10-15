@@ -184,6 +184,9 @@ type RouterServerNumbers struct {
 	// the router has not placed its snapshot in the index yet (it does
 	// every 30 seconds).
 	DataAgePending bool `json:"data_age_pending,omitempty"`
+	// Answers is what each side ("copy", "mysql") finished: counts and
+	// times. Absent until a statement finishes.
+	Answers map[string]RouteAnswers `json:"answers,omitempty"`
 }
 
 // RouterNumbers reads the counts and the pool. It opens nothing and lists no
@@ -211,6 +214,7 @@ func (s *Server) RouterNumbers() RouterNumbers {
 				n.DataAgeMaxSeconds = secs(ages.worst)
 			}
 		}
+		n.Answers = t.Answers
 		out.Servers[id] = n
 	}
 	if runner := s.SQLSandbox(); runner != nil {

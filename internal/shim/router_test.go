@@ -29,10 +29,13 @@ type fakeRouter struct {
 	useDBErr   error
 	// forwardErr, when set, is what Forward answers (MySQL's own error).
 	forwardErr error
-	forwarded  []string
-	explained  []string
-	useDBs     []string
-	closed     int
+	// forwardWaits makes Forward wait for its context to end before it
+	// answers forwardErr, as a statement that runs out of time does.
+	forwardWaits bool
+	forwarded    []string
+	explained    []string
+	useDBs       []string
+	closed       int
 	// Prepared statements: what the source was asked to prepare, the
 	// placeholder count it answers (the statement's `?` count unless
 	// paramsOverride is set), and its refusal when prepareErr is set.
@@ -171,7 +174,10 @@ func (r *fakeRouter) Decide(_ context.Context, stmt string) (readrouter.Decision
 	return readrouter.Decision{ToCopy: r.toCopy, Reason: r.reason, Rule: r.rule, ResultRows: r.resultRows}, r.decideErr
 }
 
-func (r *fakeRouter) Forward(_ context.Context, stmt string, sink readrouter.RowSink) (*mysql.Result, error) {
+func (r *fakeRouter) Forward(ctx context.Context, stmt string, sink readrouter.RowSink) (*mysql.Result, error) {
+	if r.forwardWaits && !isSessionReadBack(stmt) {
+		<-ctx.Done()
+	}
 	if isSessionReadBack(stmt) {
 		r.readBacks++
 		switch {

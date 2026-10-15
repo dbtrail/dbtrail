@@ -389,6 +389,10 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 				Copy    uint64            `json:"copy"`
 				MySQL   uint64            `json:"mysql"`
 				Reasons map[string]uint64 `json:"reasons"`
+				Answers map[string]struct {
+					Count   uint64  `json:"count"`
+					Seconds float64 `json:"seconds"`
+				} `json:"answers"`
 			} `json:"servers"`
 		} `json:"routing"`
 	}
@@ -426,6 +430,15 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 	}
 	if tally.Copy != 5 {
 		t.Errorf("copy = %d, want 5", tally.Copy)
+	}
+	// What each side finished, end to end through the real port (#2358).
+	// #2361 deleted this wiring by accident and every other assertion here
+	// still passed, so the wiring is pinned here and not only in unit tests.
+	if a := tally.Answers["copy"]; a.Count != 5 || a.Seconds <= 0 {
+		t.Errorf("answers[copy] = %+v, want count 5 with time spent (all: %+v)", a, tally.Answers)
+	}
+	if a := tally.Answers["mysql"]; a.Count == 0 || a.Seconds <= 0 {
+		t.Errorf("answers[mysql] = %+v, want statements with time spent (all: %+v)", a, tally.Answers)
 	}
 	var mysqlSum uint64
 	for reason, n := range tally.Reasons {
