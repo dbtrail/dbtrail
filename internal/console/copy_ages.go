@@ -92,11 +92,23 @@ func (c *copyAges) server(id string) *serverCopyAges {
 	return s
 }
 
-// unknownFor counts an answer whose lag cannot be told, for why.
-func (c *copyAges) unknownFor(id string, s *serverCopyAges, why string) {
+// The reasons the status document gives for an unknown lag. A fixed few on
+// purpose: the document is served to whoever reaches it, with no password,
+// so it never carries an error's text (a driver error can name an account
+// or a host) or a path. The detail goes to the log.
+const (
+	copyAgeWhyNoFiles   = "which snapshot the answer read could not be told"
+	copyAgeWhyBacklog   = "too many snapshots wait to be placed in the index"
+	copyAgeWhyNoIndex   = "the server's index could not be reached"
+	copyAgeWhyNotPlaced = "the snapshot it read could not be placed in the index"
+)
+
+// unknownFor counts an answer whose lag cannot be told: public is one of
+// the copyAgeWhy reasons, detail what the log says.
+func (c *copyAges) unknownFor(id string, s *serverCopyAges, public, detail string) {
 	s.unknown++
-	s.unknownWhy = why
-	c.faults.warn(id, "router: how far behind a copy answer was is not known", "server", id, "reason", why)
+	s.unknownWhy = public
+	c.faults.warn(id, "router: how far behind a copy answer was is not known", "server", id, "reason", public, "detail", detail)
 }
 
 func (s *serverCopyAges) worse(age time.Duration) {
@@ -120,7 +132,7 @@ func (c *copyAges) note(id string, a copyAnswer) {
 		s.worse(copyAgeOf(a.ranAt, a.tailThrough))
 	case !a.ok || len(a.files) == 0:
 		// Which snapshots it read is not known.
-		c.unknownFor(id, s, "which snapshot the answer read could not be told")
+		c.unknownFor(id, s, copyAgeWhyNoFiles, "")
 	default:
 		key := copyAgesKey(a.files)
 		if cut, ok := s.cut[key]; ok {
@@ -135,7 +147,7 @@ func (c *copyAges) note(id string, a copyAnswer) {
 				// The index is not keeping up: this answer stays unknown
 				// rather than the map growing.
 				s.lastPending, s.lastKey = false, ""
-				c.unknownFor(id, s, "too many snapshots wait to be placed in the index")
+				c.unknownFor(id, s, copyAgeWhyBacklog, "")
 				return
 			}
 			p = &pendingCopyAge{files: a.files}
@@ -213,7 +225,11 @@ func (c *copyAges) settle(id, key string, cut time.Time, why string) {
 			s.cut[key] = cut
 		}
 	} else {
-		c.unknownFor(id, s, why)
+		public := copyAgeWhyNotPlaced
+		if strings.HasPrefix(why, copyAgeWhyNoIndex) {
+			public = copyAgeWhyNoIndex
+		}
+		c.unknownFor(id, s, public, why)
 	}
 	if s.lastPending && s.lastKey == key {
 		s.lastPending = false

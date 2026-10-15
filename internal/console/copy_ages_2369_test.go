@@ -97,7 +97,7 @@ func TestCopyAges(t *testing.T) {
 		if n.known || !n.anyMax || n.worst != time.Minute {
 			t.Fatalf("an unknown answer shown, or counted toward the worst: %+v", n)
 		}
-		if n.unknown != 1 || n.unknownWhy != "the index no longer holds the event" {
+		if n.unknown != 1 || n.unknownWhy != copyAgeWhyNotPlaced {
 			t.Errorf("the unknown answer is not counted, with its reason: %+v", n)
 		}
 	})
@@ -244,5 +244,25 @@ func TestResolveCopyAgesOneAtATime(t *testing.T) {
 func TestCopyAgesCurrentLinkIsTheBaselines(t *testing.T) {
 	if copyAgesCurrentLink != baseline.CurrentLinkName {
 		t.Fatalf("%q != %q", copyAgesCurrentLink, baseline.CurrentLinkName)
+	}
+}
+
+// The reason in the status document is one of a fixed few: never an
+// error's text, which can name an account or a host, nor a path.
+func TestCopyAgesReasonIsNeverTheErrorText(t *testing.T) {
+	var c copyAges
+	files := map[string][]string{"/data/secret-dir/": {"/data/secret-dir/shop/t.parquet"}}
+	for _, detail := range []string{
+		copyAgeWhyNoIndex + ": Error 1045: Access denied for user 'capture'@'10.0.0.7'",
+		"a file of the snapshot /data/secret-dir/ could not be read",
+	} {
+		c.note("s", copyAnswer{side: "copy", files: files, ok: true, ranAt: time.Now()})
+		for key := range c.pendingFor()["s"] {
+			c.settle("s", key, time.Time{}, detail)
+		}
+		why := c.now("s").unknownWhy
+		if why != copyAgeWhyNoIndex && why != copyAgeWhyNotPlaced {
+			t.Fatalf("a reason off the fixed list: %q", why)
+		}
 	}
 }
