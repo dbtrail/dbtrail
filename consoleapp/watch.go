@@ -1932,7 +1932,8 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		AllowedHosts:    opts.AllowedHosts,
 		// Test connection tries a forwarding account with the port's own
 		// client (#2079).
-		RouteAccountProbe: probeRouteAccount,
+		RouteAccountProbe:  probeRouteAccount,
+		RouteAccountGrants: routeAccountGrants,
 		// A statement in flight on a connection dropped by an account
 		// change is ended on the source too.
 		KillSourceThreads: killSourceThreads,

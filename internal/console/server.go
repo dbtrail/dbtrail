@@ -340,6 +340,11 @@ type Config struct {
 	// process has no port to forward from (the read-only serve), and Test
 	// connection then says nothing about that login.
 	RouteAccountProbe func(ctx context.Context, dsn string, ssl config.SSL, timeout time.Duration) error
+	// RouteAccountGrants logs in like RouteAccountProbe and returns the
+	// account's SHOW GRANTS lines, so the MySQL clients page can say what
+	// the port may do on the source when it forwards. nil = no client in
+	// this process, as for RouteAccountProbe.
+	RouteAccountGrants func(ctx context.Context, dsn string, ssl config.SSL, timeout time.Duration) ([]string, error)
 	// KillSourceThreads ends, on a source, the connections with the given
 	// thread ids: one short-lived connection with dsn (and ssl, as the
 	// port connects), a KILL for each id. Used when a server's routed
@@ -643,6 +648,8 @@ type Server struct {
 	copyAges copyAges
 	// routeAccountProbe is Config.RouteAccountProbe.
 	routeAccountProbe func(ctx context.Context, dsn string, ssl config.SSL, timeout time.Duration) error
+	// routeAccountGrants is Config.RouteAccountGrants.
+	routeAccountGrants func(ctx context.Context, dsn string, ssl config.SSL, timeout time.Duration) ([]string, error)
 	// killSourceThreads is Config.KillSourceThreads; routedKills counts the
 	// background runs of it still going (tests wait on it).
 	killSourceThreads func(ctx context.Context, dsn string, ssl config.SSL, ids []uint32) error
@@ -841,6 +848,7 @@ func New(cfg Config) (*Server, error) {
 		routing:                 newRoutingStats(time.Now()),
 		routed:                  newRoutedConns(),
 		routeAccountProbe:       cfg.RouteAccountProbe,
+		routeAccountGrants:      cfg.RouteAccountGrants,
 		killSourceThreads:       cfg.KillSourceThreads,
 		archiveFetcher:          parquetquery.Fetch,
 		capacityProbe:           doctor.ProbeCapacity,
@@ -1031,6 +1039,7 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("PUT /api/servers/{id}", s.handleServersUpdate)
 	api.HandleFunc("DELETE /api/servers/{id}", s.handleServersDelete)
 	api.HandleFunc("POST /api/servers/{id}/test", s.handleServersTest)
+	api.HandleFunc("GET /api/servers/{id}/route-grants", s.handleRouteGrants)
 	// Monitor verbs: 403 unless this process is a control-plane supervisor
 	// (`bintrail-console watch`). The standalone console stays read-only.
 	api.HandleFunc("POST /api/servers/{id}/monitor/start", s.handleMonitorStart)

@@ -261,6 +261,9 @@ var apiRoutePerms = []routePerm{
 	// counts, times and its settings, shown beside the port's on the same
 	// page, so the same tier. No row data and no account's name.
 	{"GET", "/api/router", ext.PermSettingsRead},
+	// What the forwarding account may do on the source (SHOW GRANTS):
+	// shown beside the router's numbers, read on the same tier.
+	{"GET", "/api/servers/{}/route-grants", ext.PermSettingsRead},
 	// Turning the port on, off, or giving it a new password opens (or
 	// re-keys) a network door onto every server's history: a settings
 	// mutation, and the response is the one place the password is shown.

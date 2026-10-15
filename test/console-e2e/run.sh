@@ -78,6 +78,10 @@ node --test "$HERE/theme.test.mjs"
 echo "==> failed update line (hero_fail.test.mjs)"
 node --test "$HERE/hero_fail.test.mjs"
 
+# The routing card's forwarding-account block (#2415): no daemon either.
+echo "==> forwarding account grants (route_grants.test.mjs)"
+node --test "$HERE/route_grants.test.mjs"
+
 echo "==> build bintrail-console"
 CONSOLE_BIN="${CONSOLE_BIN:-}"
 if [ -z "$CONSOLE_BIN" ]; then

@@ -15101,7 +15101,9 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
       reveal ? "copy it now" : fb.password_created_at ? "created " + utcLabel(fb.password_created_at) : "when it was created"),
     // The port does not filter by schema (#1685): say so, so it is not
     // taken for a path that scopes access per schema.
-    cnFact("Reads", "Every schema", "on every server in the sidebar"),
+    cnFact("Reads", "Every schema", fb.routing_on && rt && rt.status && rt.status.read_only === false
+      ? "every server in the sidebar; with Engine Routing on, writes run on MySQL"
+      : "read-only, every server in the sidebar"),
     cnFact("Port", at.port, at.confirmed ? "said by the router" : "the usual number, not confirmed", at.confirmed ? "" : portBad ? "bad" : "warn"));
   body.append(facts);
   if (portBad) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: why }));
@@ -15121,6 +15123,16 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
     if (next && !ask("Turn Engine Routing on?\n\nStatements sent to this port then run on each server's own MySQL, with that server's forwarding account. Only heavy SELECTs run on the copy.")) return;
     changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { routing: next } }), btn, rt, reveal);
   }), at.port));
+  // What the forwarding account may do on the source, read live (SHOW
+  // GRANTS): with routing on, the light statements run as that account.
+  if (cur && cur.id && sessionMay("settings:read")) {
+    const grants = el("div", { class: "cn-grants" }, el("p", { class: "form-hint", text: "Reading the forwarding account's grants..." }));
+    rbody.append(grants);
+    const ro = rt && rt.status ? !!rt.status.read_only : null;
+    api("/api/servers/" + encodeURIComponent(cur.id) + "/route-grants").then(
+      (v) => grants.replaceChildren(...routeGrantsBlock(routeGrantsModel(v, ro))),
+      (e) => grants.replaceChildren(el("p", { class: "form-hint", text: "Could not read the forwarding account's grants: " + ((e && e.message) || e) })));
+  }
   const numbers = routerNumbers(rt, cur, () => api("/api/router").then((v) => redrawSQLPanel(live, servers, fb, reveal, v), (e) => {
     // The numbers on screen are no longer ones just read: they go, and the
     // panel says it could not ask, with the button to try again.
@@ -15137,6 +15149,7 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
     reveal ? null : el("p", { class: "form-hint", text: "Password: the one shown when it was created" +
       (fb.password_created_at ? ", " + utcLabel(fb.password_created_at) : "") + ". It cannot be shown again." }),
     el("p", { class: "form-hint", text: "This password reads every schema on every server in the sidebar." }),
+    el("p", { class: "form-hint", text: "It is not an account on your MySQL: DBTrail made it, and it opens only this port. What a statement the port sends on to your MySQL may do is up to that server's forwarding account, under Engine Routing below." }),
     el("p", { class: "form-hint" }, "Ask for a table as it was: ",
       el("code", { text: "SELECT * FROM _flashback.orders AS OF '10 minutes ago' WHERE id = 1;" }),
       " Use _snapshot for the whole table (needs a snapshot) and _diff for what changed between two moments. The user picks the server, so each server has its own line; pick another in the sidebar and copy again. Add @copy to the user (", el("code", { text: (user || "<server-name>") + "@copy" }), ") and the copy answers everything on that connection, whatever Engine Routing says."),
@@ -15619,6 +15632,41 @@ function routeDrawing(on, port) {
       // and a destination is not a count.
       lane(on ? "Light statements" : "Nothing", "MySQL", "rd-mysql" + (on ? "" : " rd-off")),
       lane(on ? "Heavy SELECTs" : "Every statement", "DuckDB, on the copy", "rd-copy")));
+}
+
+// routeGrantsModel says what GET /api/servers/{id}/route-grants found, in
+// the words the routing card shows (#2415). readOnly is the router's rule
+// (null: not known). Pure, for the tests.
+function routeGrantsModel(v, readOnly) {
+  v = v || {};
+  const user = String(v.user || "");
+  if (v.none) return { user: user, state: "none", text: v.none.charAt(0).toUpperCase() + v.none.slice(1) + "." };
+  if (v.skipped) return { user: user, state: "skipped", text: "Its grants were not read: " + v.skipped + "." };
+  if (v.error) return { user: user, state: "error", text: "Its grants could not be read: " + v.error + "." };
+  const lines = Array.isArray(v.grants) ? v.grants.map(String) : [];
+  const writes = Array.isArray(v.writes) ? v.writes.map(String) : [];
+  const roles = Array.isArray(v.roles) ? v.roles.map(String) : [];
+  const m = { user: user, state: "read", lines: lines, tone: "ok", verdict: "Read-only: no privilege that changes data", note: "" };
+  if (writes.length) {
+    m.tone = "bad";
+    m.verdict = "Can change data: " + writes.join(", ");
+    m.note = readOnly === true ? "The router is read-only, so it refuses those statements before they reach MySQL."
+      : readOnly === false ? "The router is read-write: a statement that needs them runs on your MySQL."
+      : "";
+  } else if (roles.length) {
+    m.tone = "warn";
+    m.verdict = "Has " + (roles.length === 1 ? "a role" : roles.length + " roles") + ": SHOW GRANTS does not list what " + (roles.length === 1 ? "it allows" : "they allow");
+  }
+  return m;
+}
+
+function routeGrantsBlock(m) {
+  const head = el("p", { class: "cn-grants-head" }, "Forwarding account ", m.user ? el("code", { text: m.user }) : "");
+  if (m.state !== "read") return [head, el("p", { class: "form-hint", text: m.text })];
+  const out = [head, el("p", { class: "cn-grants-verdict is-" + m.tone, text: m.verdict })];
+  if (m.lines.length) out.push(el("pre", { class: "cn-grants-lines" }, m.lines.join("\n")));
+  if (m.note) out.push(el("p", { class: "form-hint", text: m.note }));
+  return out;
 }
 
 function routingSwitch(fb, cur, rt, toggle, port) {

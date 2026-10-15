@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **The MySQL clients page says what the forwarding account may do on your MySQL.** With Engine Routing on, the light statements sent to the port run on the source as the server's forwarding account; the routing card now shows that account's `SHOW GRANTS`, read live through the port's own client (authentication strings removed: MariaDB prints the password hash there), a verdict (read-only, can change data and which privileges, or has roles whose privileges SHOW GRANTS does not list) and whether the router's read-only rule refuses those statements first. The port card's Reads fact says read-only, and its fold says the port's password is not an account on your MySQL. New route: `GET /api/servers/{id}/route-grants` (settings:read) (#2415).
 
 ## [0.105.2] - 2026-10-15
 ### Fixed

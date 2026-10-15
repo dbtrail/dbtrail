@@ -80,7 +80,9 @@ const find = (panel, tag, text) => { let hit = null; walk(panel, (x) => { if (!h
 
   // Pressing things. api records the call and answers what the route did.
   ctx.__calls = []; ctx.__toasts = []; ctx.__asked = []; ctx.__answer = st.created; ctx.__fail = null; ctx.__confirm = true;
-  run('api = (p, o) => { __calls.push([p, o]); return __fail ? Promise.reject(new Error(__fail)) : Promise.resolve(__answer); };');
+  // The forwarding account's grants (#2415) are a read each redraw makes; the
+  // actions are counted without it.
+  run('api = (p, o) => { if (String(p).endsWith("/route-grants")) return Promise.resolve({}); __calls.push([p, o]); return __fail ? Promise.reject(new Error(__fail)) : Promise.resolve(__answer); };');
   run('toastError = (m) => { __toasts.push(m); };');
   run('confirm = (q) => { __asked.push(q); return __confirm; };');
   const settle = () => new Promise((r) => setImmediate(r));

@@ -324,6 +324,9 @@ const servers = [{ id: "a", name: "shop", kind: "registry" }, { id: "b", name: "
 const each = (n, f) => { if (!n || typeof n === "string" || n.nodeType === 3) return; f(n); (n.children || []).forEach((c) => each(c, f)); };
 let router = null, asked = [], toasts = [];
 ctx.__api = async (path, opts) => {
+  // The forwarding account's grants (#2415): a read each redraw makes, not
+  // counted with the actions.
+  if (String(path).endsWith("/route-grants")) return {};
   asked.push(opts ? [path, opts] : path);
   if (path === "/api/servers") return { servers };
   if (path === "/api/flashback") return ` + fbRaw + `;

@@ -749,6 +749,38 @@ func probeRouteAccount(ctx context.Context, dsn string, ssl config.SSL, timeout 
 	return nil
 }
 
+// routeAccountGrants is console.Config.RouteAccountGrants: SHOW GRANTS through
+// the forwarder the port uses, logged in as the forwarding account.
+func routeAccountGrants(ctx context.Context, dsn string, ssl config.SSL, timeout time.Duration) ([]string, error) {
+	fw, err := readrouter.NewForwarder(dsn, ssl, readrouter.Policy{}, timeout)
+	if err != nil {
+		return nil, err
+	}
+	defer fw.Close()
+	var connectErr error
+	fw.OnConnect = func(err error) { connectErr = err }
+	sink := &readrouter.BufferSink{}
+	if _, err := fw.Forward(ctx, "SHOW GRANTS", sink); err != nil {
+		if connectErr != nil {
+			return nil, connectErr
+		}
+		return nil, err
+	}
+	lines := make([]string, 0, len(sink.Rows))
+	for _, row := range sink.Rows {
+		if len(row) == 0 {
+			continue
+		}
+		switch v := row[0].(type) {
+		case []byte:
+			lines = append(lines, string(v))
+		case string:
+			lines = append(lines, v)
+		}
+	}
+	return lines, nil
+}
+
 // accountLabel names the account the port logs in with: the server's
 // forwarding account, the only one it ever uses (#2317).
 func accountLabel(user string) string {
