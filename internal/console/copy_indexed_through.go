@@ -241,6 +241,10 @@ type copyAnswer struct {
 	files map[string][]string
 	ok    bool
 	ranAt time.Time
+	// tailThrough is the oldest instant the tails it read are indexed
+	// through, zero for none; allTailed says every table read had one.
+	tailThrough time.Time
+	allTailed   bool
 }
 
 // lastAnswerState is the SQLOnCopy's record of its connection's last answer.
@@ -259,11 +263,11 @@ type lastAnswerState struct {
 
 // noteCopyAnswer records that the copy ran a statement on the connection,
 // pending the port's decision.
-func (q *SQLOnCopy) noteCopyAnswer(files map[string][]string, ok bool, ranAt time.Time) {
+func (q *SQLOnCopy) noteCopyAnswer(files map[string][]string, ok bool, ranAt, tailThrough time.Time, allTailed bool) {
 	if q == nil {
 		return
 	}
-	a := copyAnswer{side: "copy", files: files, ok: ok, ranAt: ranAt}
+	a := copyAnswer{side: "copy", files: files, ok: ok, ranAt: ranAt, tailThrough: tailThrough, allTailed: allTailed}
 	q.last.mu.Lock()
 	q.last.pending = &a
 	q.last.mu.Unlock()
@@ -312,12 +316,21 @@ func (q *SQLOnCopy) lastAnswer() copyAnswer {
 func (q *SQLOnCopy) lastAnswerStatus(ctx context.Context) [][2]string {
 	a := q.lastAnswer()
 	var through time.Time
-	if a.side == "copy" && a.ok && q.s != nil && q.b != nil {
+	switch {
+	case a.side != "copy":
+	case a.allTailed:
+		// Every table it read had its tail over it: the tails' instant.
+		through = a.tailThrough
+	case a.ok && q.s != nil && q.b != nil:
 		ctx, cancel := context.WithTimeout(ctx, copyUnchangedTimeout)
 		defer cancel()
 		var why string
 		if through, why = q.s.copyIndexedThrough(ctx, q.b.db, a.files); why != "" {
 			slog.Debug("router status: how far the last statement's data was indexed is not known", "server", q.id, "reason", why)
+		}
+		// Tables with a tail and tables without: the older of the two.
+		if !through.IsZero() && !a.tailThrough.IsZero() && a.tailThrough.Before(through) {
+			through = a.tailThrough
 		}
 	}
 	return lastAnswerRows(a, through)

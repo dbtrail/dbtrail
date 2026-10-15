@@ -753,9 +753,30 @@ expensive read goes to the copy whatever the age of its snapshot. Earlier
 versions had a limit (`--route-max-copy-age`) and, past it, a check of which
 tables had changed since their snapshot. Both are gone.
 
+The copy answers with what capture has indexed, not only with its last
+snapshot. For each table a statement reads, the newest change of each row the
+index holds after the table's snapshot (the table's tail) replaces the
+snapshot's row, so the answer is about as far behind as capture, usually
+seconds. A table with no tail is read as it was at its snapshot. A table has
+none when:
+
+- its primary key is not made of integers;
+- its definition changed since its snapshot, capture lost events since, or
+  the source server changed;
+- more than 200,000 rows changed since its snapshot (its tail then stops
+  advancing until the next snapshot);
+- capture does not record it, or `bintrail index` also wrote the index;
+- the statement is answered from an earlier snapshot, because the newest
+  holds more unmerged changes than it can read;
+- the server is the one the daemon was started with by flags, not one added
+  in the web interface (which tables its capture records is not known here).
+
+`BINTRAIL_SQL_TAILS=off` turns tails off, and the copy answers as it was at
+its last snapshot. The console's own SQL card always reads the snapshot.
+
 This is the trade a read/write split through a proxy already makes: on one
 connection a cheap statement is answered by MySQL as it is now, and an
-expensive one by the copy as it was at its last snapshot. The copy is an
+expensive one by the copy, as far as capture has indexed. The copy is an
 asynchronous replica. Its age is a number to watch, not a rule:
 
 - `SHOW ROUTER STATUS` shows `copy_snapshot` and `copy_age_seconds` for the
@@ -774,14 +795,15 @@ asynchronous replica. Its age is a number to watch, not a rule:
   `_diff` schemas are not counted here, as they are not in the statement
   counts.
 
-If an application cannot read a result as old as the last snapshot, have it
+If an application cannot read a result as far behind as capture, have it
 connect straight to MySQL and not through this port.
 
 What this is and is not:
 
-- **The copy's answer is as fresh as its snapshot.** A heavy read served
-  from the copy does not see what changed since the last snapshot, however
-  long ago that was ([No maximum copy age](#no-maximum-copy-age) above).
+- **The copy's answer is as fresh as capture, or as its snapshot.** A heavy
+  read served from the copy sees what capture has indexed, and for a table
+  with no tail, only what its last snapshot holds, however long ago that
+  was ([No maximum copy age](#no-maximum-copy-age) above).
   That is why Engine Routing is off until you turn it on. A `SELECT` that
   must see the last second belongs in a transaction, which MySQL always
   answers.

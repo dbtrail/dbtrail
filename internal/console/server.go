@@ -457,6 +457,11 @@ type Server struct {
 	// copyFaults limits the warnings of that question's faults.
 	copyFaults  copyFaultLog
 	copyChanged copyChangedMemo
+	// tails are the SQL port's tails, by server (#2369; tail_wire.go).
+	tails tailKeepers
+	// tailCapturesHook, when set, replaces tailCaptures: a test's server
+	// has no registry.
+	tailCapturesHook func(id string) (func(schema, table string) bool, bool)
 
 	listen     string
 	token      string

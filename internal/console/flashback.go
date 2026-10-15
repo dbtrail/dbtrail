@@ -118,7 +118,7 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 			return q.s.copyUnchanged(ctx, q.b, q.id, tables, sess.UnchangedWithin)
 		}
 	}
-	out, err := q.s.runSQLVouched(ctx, q.b, q.user, statement, schema, q.s.sqlPortRowCap(), sess, unchanged)
+	out, err := q.s.runSQLVouched(withTailsFor(ctx, q.id), q.b, q.user, statement, schema, q.s.sqlPortRowCap(), sess, unchanged)
 	if err != nil {
 		q.noteCopyRefused()
 		var werr *sqlsandbox.WorkerError
@@ -148,7 +148,7 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 		}
 		return sqlsandbox.Result{}, err
 	}
-	q.noteCopyAnswer(out.ReadFrom, out.ReadFromOK, time.Now())
+	q.noteCopyAnswer(out.ReadFrom, out.ReadFromOK, time.Now(), out.TailThrough, out.AllTailed)
 	out.Result.Note = out.OlderCopyNote
 	return out.Result, nil
 }

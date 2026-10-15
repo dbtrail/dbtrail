@@ -427,15 +427,8 @@ func (k *tailKeeper) write(t views.BaselineTable, e *tailEntry) error {
 		e.dirty = false
 		return nil
 	}
-	if k.dir == "" {
-		if err := os.MkdirAll(k.parent, 0o700); err != nil {
-			return err
-		}
-		dir, err := os.MkdirTemp(k.parent, "tails-")
-		if err != nil {
-			return err
-		}
-		k.dir = dir
+	if _, err := k.makeDir(); err != nil {
+		return err
 	}
 	k.written++
 	path := filepath.Join(k.dir, fmt.Sprintf("%d-%s.%s.parquet", k.written, url.PathEscape(t.Schema), url.PathEscape(t.Table)))
@@ -445,6 +438,29 @@ func (k *tailKeeper) write(t views.BaselineTable, e *tailEntry) error {
 	k.retire(e)
 	e.file, e.dirty = path, false
 	return nil
+}
+
+// ensureDir is the keeper's own directory, made if it is not yet: a
+// statement's sandbox is allowed to read it before the first version is
+// written into it.
+func (k *tailKeeper) ensureDir() (string, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.makeDir()
+}
+
+func (k *tailKeeper) makeDir() (string, error) {
+	if k.dir == "" {
+		if err := os.MkdirAll(k.parent, 0o700); err != nil {
+			return "", err
+		}
+		dir, err := os.MkdirTemp(k.parent, "tails-")
+		if err != nil {
+			return "", err
+		}
+		k.dir = dir
+	}
+	return k.dir, nil
 }
 
 // retire moves e's current file among the old ones.

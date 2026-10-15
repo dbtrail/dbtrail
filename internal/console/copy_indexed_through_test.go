@@ -267,21 +267,21 @@ func TestSQLOnCopy_lastAnswer(t *testing.T) {
 		t.Fatalf("fresh connection: %+v", a)
 	}
 	q.NoteRoute("mysql")
-	q.noteCopyAnswer(files, true, ran) // the zone probe: no decision follows
+	q.noteCopyAnswer(files, true, ran, time.Time{}, false) // the zone probe: no decision follows
 	if a := q.lastAnswer(); a.side != "mysql" {
 		t.Fatalf("a run the port did not answer with replaced the answer: %+v", a)
 	}
-	q.noteCopyAnswer(files, true, ran)
+	q.noteCopyAnswer(files, true, ran, time.Time{}, false)
 	q.NoteRoute("copy")
 	if a := q.lastAnswer(); a.side != "copy" || len(a.files) != 1 || !a.ok {
 		t.Fatalf("the copy answered: %+v", a)
 	}
-	q.noteCopyAnswer(files, true, ran) // ran, then refused by the port
+	q.noteCopyAnswer(files, true, ran, time.Time{}, false) // ran, then refused by the port
 	q.NoteRoute("refused")
 	if a := q.lastAnswer(); a.side != "refused" || a.files != nil {
 		t.Fatalf("refused after the copy ran: %+v", a)
 	}
-	q.noteCopyAnswer(files, true, ran)
+	q.noteCopyAnswer(files, true, ran, time.Time{}, false)
 	q.noteCopyRefused()
 	q.NoteRoute("copy") // nothing pending: never another statement's files
 	if a := q.lastAnswer(); a.side != "copy" || a.files != nil {

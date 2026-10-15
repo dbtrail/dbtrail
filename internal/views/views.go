@@ -98,6 +98,13 @@ type BaselineTable struct {
 	// it: the pair belongs to one snapshot and is removed after it.
 	DeltaResolved *baseline.TableDeltaFile
 
+	// Tail, when set, is the table's tail (#2369): the newest change of each
+	// key the index holds after the snapshot, in the .upserts layout, which a
+	// PINNED view lays over the published state
+	// (baseline.TableTailStateSQL). A following view ignores it: the file
+	// belongs to one statement's moment.
+	Tail *TableTail
+
 	// Decimals are the table's DECIMAL and NUMERIC columns, which the baseline
 	// writer stores as text (internal/baseline.MysqlToParquetNode says why).
 	// The state view casts each one back to a number so arithmetic works
@@ -2294,6 +2301,10 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 			}
 		}
 		fmt.Fprintf(b, "CREATE OR REPLACE VIEW %s AS\n", in.stateRef(p))
+		if t.Tail != nil && !in.Follow.follows() {
+			fmt.Fprintf(b, "  %s;\n", tailStateBody(t))
+			continue
+		}
 		if in.Follow == FollowNewest {
 			writeNewestStateBody(b, in, t)
 			continue
@@ -3053,4 +3064,26 @@ func anyStoreHasKeys(stores map[string]storage.BucketStore) bool {
 		}
 	}
 	return false
+}
+
+// TableTail is a table's tail as a pinned state view reads it: the file and
+// the table's key columns.
+type TableTail struct {
+	Path string
+	PK   []string
+}
+
+// tailStateBody is a pinned state view's body for a table with a tail: its
+// published state, built with no REPLACE, with the tail over it, the casts
+// and the column order applied over both (ordered).
+func tailStateBody(t BaselineTable) string {
+	published := "SELECT * FROM read_parquet(" + sqlString(fileGlob(t.Path)) + ")"
+	if t.Delta {
+		published = deltaStateStar(t, t.Path, sqlString, true, "")
+	}
+	return ordered(t, func(replace string) string {
+		// Through globLiteral like every file a view names (#2235): a table
+		// named "a*b" has a tail file with that name in it.
+		return baseline.TableTailStateSQL(published, sqlString(fileGlob(t.Tail.Path)), t.Tail.PK, replace)
+	})
 }
