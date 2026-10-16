@@ -5,6 +5,7 @@ package streamrun
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
@@ -253,45 +254,48 @@ func TestIntegrationRowCapSplitsAndTheResumeTakesThePartsBack_2391(t *testing.T)
 	}
 }
 
-// Past the time cap, the open index transaction is committed when the next row
-// arrives, and also on a checkpoint tick when no row does.
+// Past the time cap, the open index transaction is committed by its own timer:
+// not when the next row happens to arrive, nor at the next checkpoint tick,
+// which can be much later than the cap.
 func TestIntegrationTimeCapSplits_2391(t *testing.T) {
 	prev := maxTxnOpen
 	maxTxnOpen = 50 * time.Millisecond
 	t.Cleanup(func() { maxTxnOpen = prev })
 
-	t.Run("on the next row", func(t *testing.T) {
+	t.Run("with no row and no tick", func(t *testing.T) {
 		idx, db := floorIndex(t, 2)
-		l := startLoop(t, idx, db, positionState(), time.Hour, "atomic-timecap-row")
-		l.send(t, floorEvent(1, ""))
-		l.send(t, floorEvent(2, "")) // a full batch: into the index transaction
-		l.settle(t)
-		if got := countRows(t, db); got != 0 {
-			t.Fatalf("before the cap want 0 visible, got %d", got)
-		}
-		time.Sleep(100 * time.Millisecond)
-		l.send(t, floorEvent(3, ""))
-		l.settle(t)
-		// A split makes visible everything read so far, the row that tripped
-		// the cap included.
-		if got := countRows(t, db); got != 3 {
-			t.Fatalf("past the time cap want the 3 rows read so far visible, got %d", got)
-		}
-		if promtest.ToFloat64(l.m.TxnSplits) < 1 {
-			t.Fatal("the split was not counted")
-		}
-	})
-	t.Run("on a tick", func(t *testing.T) {
-		idx, db := floorIndex(t, 2)
-		l := startLoop(t, idx, db, positionState(), 20*time.Millisecond, "atomic-timecap-tick")
+		l := startLoop(t, idx, db, positionState(), time.Hour, "atomic-timecap-idle")
 		l.send(t, floorEvent(1, ""))
 		l.send(t, floorEvent(2, ""))
 		deadline := time.Now().Add(5 * time.Second)
 		for countRows(t, db) != 2 {
 			if time.Now().After(deadline) {
-				t.Fatal("no tick committed the open index transaction past its time cap")
+				t.Fatal("nothing committed the open index transaction past its time cap")
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
 	})
+}
+
+// CREATE TABLE ... SELECT logs its DDL, then its rows, then an XID, in ONE
+// transaction, and in GTID mode the DDL already puts its GTID in the durable
+// set. A resume would not read that transaction again, so a stop inside it
+// must keep its rows: discarding them would lose them for good.
+func TestIntegrationStopInsideCreateTableSelectKeepsItsRows_2391(t *testing.T) {
+	idx, db := floorIndex(t, 1000)
+	state := gtidState(t)
+	l := startLoop(t, idx, db, state, time.Hour, "atomic-ctas")
+	l.send(t, parser.Event{EventType: parser.EventGTID, BinlogFile: "binlog.000007", EndPos: 150, GTID: atomicGTID})
+	l.send(t, parser.Event{EventType: parser.EventDDL, BinlogFile: "binlog.000007", EndPos: 250, GTID: atomicGTID,
+		Schema: "testdb", Table: "orders"})
+	l.send(t, floorEvent(3, ""))
+	l.send(t, floorEvent(4, ""))
+	l.finish(t) // stops before the XID
+	if got := countRows(t, db); got != 2 {
+		t.Fatalf("the CREATE ... SELECT rows must be kept when its GTID is already claimed; got %d rows, want 2", got)
+	}
+	saved := savedCheckpoint(t, db)
+	if !strings.Contains(saved.gtidSet, "3f2a1c88-0000-0000-0000-000000002391") {
+		t.Fatalf("the fixture must have claimed the DDL's GTID (saved set %q); it cannot discriminate", saved.gtidSet)
+	}
 }

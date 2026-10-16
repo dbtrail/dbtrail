@@ -694,7 +694,7 @@ When `--metrics-addr :9090` is set, a Prometheus HTTP endpoint starts at `/metri
 |--------|------|-------------|
 | `bintrail_stream_events_received_total` | Counter | Row events received from the replication stream |
 | `bintrail_stream_events_indexed_total` | Counter | Events successfully written to `binlog_events` |
-| `bintrail_stream_batch_flushes_total` | Counter | Number of batch INSERT operations |
+| `bintrail_stream_batch_flushes_total` | Counter | Number of batch INSERT statements, including ones inside an index transaction a stop later rolled back |
 | `bintrail_stream_checkpoint_saves_total` | Counter | Successful checkpoint writes |
 | `bintrail_stream_transaction_splits_total` | Counter | Times a source transaction past the row or time cap was made visible in parts (see [What a reader sees](#checkpointing-and-stream_state)) |
 | `bintrail_stream_last_event_timestamp_seconds` | Gauge | Unix timestamp of the last received event |

@@ -34,9 +34,16 @@ func (idx *Indexer) Begin() (*Txn, error) {
 	if err != nil {
 		return nil, deadlineTagged(fmt.Errorf("open an index transaction: %w", err))
 	}
-	if _, err := conn.ExecContext(ctx, "START TRANSACTION"); err != nil {
-		discard(conn)
-		return nil, deadlineTagged(fmt.Errorf("open an index transaction: %w", err))
+	// A connection cut by the network (a half-open socket) is never seen
+	// closing by the server, which then keeps its open transaction, its row
+	// locks and its hold on binlog_events until wait_timeout: eight hours by
+	// default, during which rotation and the resume cleanup wait on it. A
+	// short one ends it soon after the client is gone. Restored at Commit.
+	for _, q := range []string{fmt.Sprintf("SET SESSION wait_timeout = %d", txnIdleSeconds), "START TRANSACTION"} {
+		if _, err := conn.ExecContext(ctx, q); err != nil {
+			discard(conn)
+			return nil, deadlineTagged(fmt.Errorf("open an index transaction: %w", err))
+		}
 	}
 	return &Txn{idx: idx, conn: conn}, nil
 }
@@ -69,8 +76,20 @@ func (t *Txn) Commit() error {
 		discard(conn)
 		return deadlineTagged(fmt.Errorf("commit an index transaction: %w", err))
 	}
+	// Back to the server's own idle timeout before the pool reuses it. The
+	// rows are committed either way: a failure here only drops the connection.
+	if _, err := conn.ExecContext(ctx, "SET SESSION wait_timeout = @@GLOBAL.wait_timeout"); err != nil {
+		discard(conn)
+		return nil
+	}
 	return conn.Close()
 }
+
+// txnIdleSeconds is the wait_timeout of a connection holding an index
+// transaction: far above how long capture leaves one idle (it commits within
+// DefaultMaxTxnOpen of opening it, or at the next row or tick after that),
+// far below the server's default eight hours.
+const txnIdleSeconds = 300
 
 // Rollback discards every batch written through t. It is safe to call on a
 // spent Txn, so a deferred Rollback after Commit is a no-op.

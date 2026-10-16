@@ -122,3 +122,40 @@ func TestTxnRollbackAfterAFailedInsertLeavesNoOpenTransaction(t *testing.T) {
 		t.Fatalf("want the two autocommit rows, got %d", n)
 	}
 }
+
+// sessionsWithWaitTimeout counts this test database's sessions whose
+// wait_timeout is secs.
+func sessionsWithWaitTimeout(t *testing.T, db *sql.DB, secs int) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM performance_schema.variables_by_thread v
+		JOIN performance_schema.threads th ON th.thread_id = v.thread_id
+		WHERE v.variable_name = 'wait_timeout' AND v.variable_value = ? AND th.processlist_db = DATABASE()`,
+		strconv.Itoa(secs)).Scan(&n); err != nil {
+		t.Fatalf("variables_by_thread: %v", err)
+	}
+	return n
+}
+
+// The connection holding an index transaction gets a short idle timeout, so a
+// client cut off by the network does not leave the transaction open on the
+// server for its default eight hours, and gets the server's back after Commit.
+func TestTxnBoundsItsConnectionsIdleLife(t *testing.T) {
+	db, _ := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	idx := New(db, 10)
+	tx, err := idx.Begin()
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	defer tx.Rollback()
+	if n := sessionsWithWaitTimeout(t, db, txnIdleSeconds); n != 1 {
+		t.Fatalf("want the transaction's connection at wait_timeout=%d, found %d such sessions", txnIdleSeconds, n)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if n := sessionsWithWaitTimeout(t, db, txnIdleSeconds); n != 0 {
+		t.Fatalf("after Commit %d pooled sessions still carry the short wait_timeout", n)
+	}
+}
