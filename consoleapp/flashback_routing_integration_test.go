@@ -112,7 +112,7 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 	// it bound); the port below is served by hand on its own listener.
 	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg,
 		FlashbackListen: "127.0.0.1:3308", ReadRouting: console.ReadRoutingConfig{MaxCopyAge: time.Hour, ScanRows: 2},
-		StatementTable: true})
+		StatementShape: readrouter.Fingerprint})
 	if err != nil {
 		t.Fatal(err)
 	}

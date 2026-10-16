@@ -11,11 +11,16 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/ext"
+	"github.com/dbtrail/dbtrail/internal/readrouter"
 )
 
 func newStatementServer(t *testing.T, on bool) *Server {
 	t.Helper()
-	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", StatementTable: on})
+	cfg := Config{Listen: "127.0.0.1:8090", Token: "t"}
+	if on {
+		cfg.StatementShape = readrouter.Fingerprint
+	}
+	srv, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

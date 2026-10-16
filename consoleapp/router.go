@@ -241,10 +241,15 @@ func newRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server,
 	if err != nil {
 		return nil, nil, err
 	}
+	var shape func(string) string
+	if st.StatementTable {
+		shape = readrouter.Fingerprint
+	}
 	srv, err := console.New(console.Config{
-		Token:    st.Token,
-		Registry: registry,
-		Version:  appVersion,
+		StatementShape: shape,
+		Token:          st.Token,
+		Registry:       registry,
+		Version:        appVersion,
 		// The same three files the daemon keeps a statement from reading
 		// through a copy directory that contains them.
 		AuthPath:     st.AuthFile,
@@ -259,7 +264,6 @@ func newRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server,
 		SQLWorkerStatements:    sqlsandbox.DefaultWorkerStatements,
 		SQLMaxWaiters:          routerMaxWaiters,
 		SQLMaxWait:             st.MaxWait,
-		StatementTable:         st.StatementTable,
 		SQLPortSharedSlots:     true,
 		SQLPortMaxRows:         st.SQLPortMaxRows,
 		KillSourceThreads:      killSourceThreads,

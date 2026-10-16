@@ -6,13 +6,11 @@ import (
 	"slices"
 	"time"
 	"unicode/utf8"
-
-	"github.com/dbtrail/dbtrail/internal/readrouter"
 )
 
 // The per-statement table (#2360): what each statement shape cost on each
 // side, per server. Kept only when the router was started with it on
-// (Config.StatementTable), since its rows name tables and columns and the
+// (Config.StatementShape), since its rows name tables and columns and the
 // router's status address asks for no password.
 
 const (
@@ -56,8 +54,8 @@ type statementTally struct {
 
 // statementShape is the row a statement lands on, "" for none (nothing
 // but white space). Worked out before the lock is taken.
-func statementShape(stmt string) string {
-	shape := readrouter.Fingerprint(stmt)
+func statementShape(fingerprint func(string) string, stmt string) string {
+	shape := fingerprint(stmt)
 	if len(shape) <= StatementMaxBytes {
 		return shape
 	}

@@ -8,7 +8,7 @@ import (
 )
 
 func TestRoutingStats_answersPerSide(t *testing.T) {
-	r := newRoutingStats(time.Now(), false)
+	r := newRoutingStats(time.Now(), nil)
 	r.answered("a", "mysql", "", 2*time.Second, false, false)
 	r.answered("a", "mysql", "", 4*time.Second, true, false)
 	r.answered("a", "mysql", "", time.Second, true, true)
@@ -35,7 +35,7 @@ func TestRoutingStats_answersPerSide(t *testing.T) {
 // A server with decisions and no finished statement has no answers key at
 // all: zero counts would read as "measured, and nothing ran".
 func TestRoutingStats_noAnswersIsAbsent(t *testing.T) {
-	r := newRoutingStats(time.Now(), false)
+	r := newRoutingStats(time.Now(), nil)
 	r.record("a", "mysql", "cheap_plan")
 	b, err := json.Marshal(r.snapshot()["a"])
 	if err != nil || strings.Contains(string(b), "answers") {

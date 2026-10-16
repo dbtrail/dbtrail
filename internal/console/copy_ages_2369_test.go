@@ -204,7 +204,7 @@ func TestCopyAges(t *testing.T) {
 
 // The router's document carries the three numbers per server.
 func TestRouterNumbersCopyAges(t *testing.T) {
-	s := &Server{routing: newRoutingStats(time.Now(), false)}
+	s := &Server{routing: newRoutingStats(time.Now(), nil)}
 	s.routing.record("s", "copy", "")
 	if n := s.RouterNumbers().Servers["s"]; n.DataAsOf != "" || n.DataAgeSeconds != nil || n.DataAgeMaxSeconds != nil {
 		t.Fatalf("numbers before any is known: %+v", n)
@@ -236,7 +236,7 @@ func TestNoteRouteRecordsCopyAge(t *testing.T) {
 
 // The lag is rounded up in the document: never said smaller than it was.
 func TestRouterNumbersRoundsLagUp(t *testing.T) {
-	s := &Server{routing: newRoutingStats(time.Now(), false)}
+	s := &Server{routing: newRoutingStats(time.Now(), nil)}
 	s.routing.record("s", "copy", "")
 	through := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 	s.copyAges.note("s", copyAnswer{side: "copy", ranAt: through.Add(3900 * time.Millisecond), tailThrough: through, allTailed: true})

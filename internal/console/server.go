@@ -214,11 +214,12 @@ type Config struct {
 	// empty, the page shows nothing about a router. Only the operator sets
 	// it, at startup: this process then makes requests to that address.
 	RouterURL string
-	// StatementTable keeps the per-statement table (#2360): each statement
-	// shape a side finished, with its counts and times, in RouterNumbers.
-	// The router sets it from --statement-table. Off, the statements are
-	// not even fingerprinted.
-	StatementTable bool
+	// StatementShape turns the per-statement table on (#2360): the shape a
+	// statement is counted under (readrouter.Fingerprint, which the router
+	// passes: this package must not link the MySQL protocol library that
+	// readrouter does). Nil, the table is off and statements are not even
+	// shaped.
+	StatementShape func(stmt string) string
 	// RouterURLError is why the address given for a router could not be
 	// used, when it could not: the page says it where the numbers would
 	// be. A process that captures does not refuse to start over a panel.
@@ -850,7 +851,7 @@ func New(cfg Config) (*Server, error) {
 		sessionProfiles:         newProfileRuleCache(),
 		flashback:               flashbackState{followsSwitch: cfg.FlashbackFollowsSwitch, startup: cfg.FlashbackListen != "", listen: cfg.FlashbackListen, path: cfg.FlashbackPath},
 		readRouting:             cfg.ReadRouting,
-		routing:                 newRoutingStats(time.Now(), cfg.StatementTable),
+		routing:                 newRoutingStats(time.Now(), cfg.StatementShape),
 		routed:                  newRoutedConns(),
 		routeAccountProbe:       cfg.RouteAccountProbe,
 		routeAccountGrants:      cfg.RouteAccountGrants,

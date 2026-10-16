@@ -16,8 +16,10 @@ import (
 type routingStats struct {
 	mu    sync.Mutex
 	since time.Time
-	// statementsOn: the per-statement table is kept (Config.StatementTable).
+	// statementsOn: the per-statement table is kept, under the shapes
+	// shape gives (Config.StatementShape).
 	statementsOn bool
+	shape        func(string) string
 	// perServer is keyed by the registry id the port resolved the connection
 	// to (the canonical id, never the display name a client typed), so a
 	// renamed server keeps its tally. An entry outlives its server: a deleted
@@ -78,8 +80,8 @@ type RouteAnswers struct {
 	SlowestSeconds float64 `json:"slowest_seconds"`
 }
 
-func newRoutingStats(now time.Time, statementsOn bool) *routingStats {
-	return &routingStats{since: now, statementsOn: statementsOn, perServer: map[string]*routingTally{}, unavailable: map[string]string{}, accountRefused: map[string]string{}, sessionUntracked: map[string]string{}}
+func newRoutingStats(now time.Time, shape func(string) string) *routingStats {
+	return &routingStats{since: now, statementsOn: shape != nil, shape: shape, perServer: map[string]*routingTally{}, unavailable: map[string]string{}, accountRefused: map[string]string{}, sessionUntracked: map[string]string{}}
 }
 
 // record tallies one decision. route is "copy", "mysql" or "refused" (the
@@ -263,7 +265,7 @@ func (s *Server) RecordRouteDecision(serverID, route, reason string) {
 func (s *Server) RecordRouteAnswer(serverID, side, stmt string, took time.Duration, failed, timedOut bool) {
 	shape := ""
 	if s.routing.statementsOn {
-		shape = statementShape(stmt)
+		shape = statementShape(s.routing.shape, stmt)
 	}
 	s.routing.answered(serverID, side, shape, took, failed, timedOut)
 }
