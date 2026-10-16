@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/dbtrail/dbtrail/internal/telemetry"
 )
 
@@ -25,9 +26,13 @@ import (
 // reason scrolled past in the log. Instead, it now keeps the console's port
 // with one page that says why, until it is stopped.
 //
-// Only for failures a restart cannot fix (configuration, permissions, a
-// database that does not exist). A transient one (the index not up yet, the
-// network) keeps exiting, so the restart still heals it on its own.
+// Only for failures classed as configuration, permissions or a missing
+// database. Some of those still heal with time (an app's migrations create the
+// tables a minute later, grants are applied after the pod starts, the source
+// fails over mid-preflight), so the page is shown for startupPageFor and then
+// the process exits, letting the supervisor try again: a transient failure
+// heals as it did, at one restart per startupPageFor instead of a tight loop.
+// Failures classed as transient (the index not reachable yet) exit at once.
 
 // watchReached and watchListening are set by runWatch: the page is for a
 // watch run that failed before its console accepted its listener. Failures
@@ -41,6 +46,10 @@ var (
 // exits on a startup failure as it did before, for an operator whose alerting
 // watches for a process that is down.
 const startupPageEnv = "BINTRAIL_CONSOLE_STARTUP_PAGE"
+
+// startupPageFor is how long the page stays before the process exits so its
+// supervisor starts it again. A var for tests.
+var startupPageFor = 5 * time.Minute
 
 // startupState is what newStartupFailure reads, gathered by the caller so the
 // decision is testable without the process's globals.
@@ -58,8 +67,9 @@ type startupState struct {
 type startupFailure struct {
 	listen       string
 	message      string
-	public       bool // the message is one we wrote: shown to anyone
-	trusted      bool // loopback bind, or access control asserted by allow-setup
+	public       bool     // the message is one we wrote: shown to anyone
+	checks       []string // the failed preflight checks' names, if that is what failed
+	trusted      bool     // loopback bind, or access control asserted by allow-setup
 	allowedHosts []string
 }
 
@@ -115,11 +125,19 @@ func newStartupFailure(err error, st startupState) *startupFailure {
 			hosts = strings.Split(v, ",")
 		}
 	}
-	var pub shownToAnyone
+	// The error itself, not one wrapped inside it: a wrapper may add text we
+	// did not write, and the whole of err.Error() is what the page shows.
+	pub, _ := err.(shownToAnyone)
+	var pf *doctor.PreflightError
+	var checks []string
+	if errors.As(err, &pf) {
+		checks = pf.Checks // check names are constants: nothing internal
+	}
 	return &startupFailure{
 		listen:       listen,
 		message:      err.Error(),
-		public:       errors.As(err, &pub) && pub.ShownToAnyone(),
+		public:       pub != nil && pub.ShownToAnyone(),
+		checks:       checks,
 		trusted:      console.IsLoopbackAddr(listen) || allowSetup,
 		allowedHosts: hosts,
 	}
@@ -174,10 +192,10 @@ p{margin:12px 0}
 <h1>dbtrail could not start</h1>
 {{if .Show}}<p>It stopped on this, before the web interface opened:</p>
 <pre>{{.Message}}</pre>
-<p>Fix it, then restart dbtrail (with the Docker Compose stack: <code>docker compose up -d</code>). This page stays until then.</p>
 {{else}}<p>It stopped on its configuration, before the web interface opened. The reason is in dbtrail's log (with the Docker Compose stack: <code>docker compose logs bintrail</code>).</p>
-<p>This page does not show it to this address. Open it from the machine dbtrail runs on, or add this hostname to <code>BINTRAIL_CONSOLE_ALLOWED_HOSTS</code>.</p>
-<p>Fix it, then restart dbtrail. This page stays until then.</p>{{end}}
+<p>This page does not show it to this address. Open it from the machine dbtrail runs on, or add this hostname to <code>BINTRAIL_CONSOLE_ALLOWED_HOSTS</code>.</p>{{end}}
+{{if .Checks}}<p>Checks that failed: {{range $i, $c := .Checks}}{{if $i}}, {{end}}<code>{{$c}}</code>{{end}}. The log shows how to fix each one.</p>{{end}}
+<p>dbtrail tries again by itself every {{.Every}}. After fixing it, to try now: <code>docker compose restart bintrail</code> (or restart the service the way you run it).</p>
 </main></body></html>`))
 
 func (f *startupFailure) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -190,12 +208,25 @@ func (f *startupFailure) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = startupPageTmpl.Execute(w, struct {
 		Show    bool
 		Message string
-	}{show, f.message})
+		Checks  []string
+		Every   string
+	}{show, f.message, f.checks, humanMinutes(startupPageFor)})
 }
 
-// serve binds the console's address and shows the page until SIGINT/SIGTERM.
-// It returns the process exit code: 1, so a supervisor still sees a failed
-// run. A bind failure (the port taken) prints why and returns 1 at once.
+func humanMinutes(d time.Duration) string {
+	if m := int(d.Minutes()); m >= 1 {
+		if m == 1 {
+			return "minute"
+		}
+		return fmt.Sprintf("%d minutes", m)
+	}
+	return d.String()
+}
+
+// serve binds the console's address and shows the page until SIGINT/SIGTERM
+// or startupPageFor, whichever comes first. It returns the process exit code:
+// 1, so a supervisor sees a failed run and starts it again. A bind failure
+// (the port taken) prints why and returns 1 at once.
 func (f *startupFailure) serve(stderr io.Writer) int {
 	ln, err := net.Listen("tcp", f.listen)
 	if err != nil {
@@ -208,10 +239,15 @@ func (f *startupFailure) serve(stderr io.Writer) int {
 }
 
 func (f *startupFailure) run(ctx context.Context, ln net.Listener, stderr io.Writer) int {
-	fmt.Fprintf(stderr, "dbtrail did not start; the web interface at %s shows why until dbtrail is stopped (%s=0 exits instead)\n", ln.Addr(), startupPageEnv)
+	fmt.Fprintf(stderr, "dbtrail did not start; the web interface at %s shows why for %s, then dbtrail exits to be started again (%s=0 exits at once)\n", ln.Addr(), startupPageFor, startupPageEnv)
 	srv := &http.Server{Handler: f, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
-	<-ctx.Done()
+	timer := time.NewTimer(startupPageFor)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)

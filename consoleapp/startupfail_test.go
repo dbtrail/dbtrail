@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/go-sql-driver/mysql"
 )
 
@@ -213,5 +214,62 @@ func TestWatchStartupFailureWiring(t *testing.T) {
 	watchListening.Store(true)
 	if watchStartupFailure(err) != nil {
 		t.Error("a failure after the console listened still got a page")
+	}
+}
+
+// TestStartupFailureReviewFixes pins what the first review found missing.
+func TestStartupFailureReviewFixes(t *testing.T) {
+	public := failureEnv{reached: true, env: map[string]string{"BINTRAIL_CONSOLE_LISTEN": "0.0.0.0:8090"}}
+	get := func(f *startupFailure, host string) string {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		f.ServeHTTP(rec, req)
+		return rec.Body.String()
+	}
+
+	// A preflight refusal names its failed checks (constants), even where the
+	// message itself is not shown.
+	pf := fmt.Errorf("preflight failed (use --skip-doctor to bypass at your own risk): %w", &doctor.PreflightError{Checks: []string{"binlog_format", "log_bin"}})
+	f := public.build(pf)
+	if f == nil {
+		t.Fatal("no page for a preflight refusal")
+	}
+	if body := get(f, "10.1.1.1:8090"); !strings.Contains(body, "<code>binlog_format</code>, <code>log_bin</code>") {
+		t.Errorf("failed checks not listed: %s", body)
+	}
+
+	// Our message wrapped by text we did not write is not shown to anyone.
+	wrapped := fmt.Errorf("context from elsewhere 10.0.0.9: %w", errCfg)
+	if body := get(public.build(wrapped), "10.1.1.1:8090"); strings.Contains(body, "10.0.0.9") {
+		t.Errorf("wrapped message shown on an untrusted bind: %s", body)
+	}
+
+	// The advice restarts the container even when nothing in compose changed.
+	if body := get(public.build(errCfg), "10.1.1.1:8090"); !strings.Contains(body, "docker compose restart bintrail") || strings.Contains(body, "docker compose up -d") {
+		t.Errorf("restart advice: %s", body)
+	}
+}
+
+// TestStartupFailureTimesOut: the page gives way after startupPageFor so the
+// supervisor tries again, which is how a failure that heals with time heals.
+func TestStartupFailureTimesOut(t *testing.T) {
+	orig := startupPageFor
+	t.Cleanup(func() { startupPageFor = orig })
+	startupPageFor = 50 * time.Millisecond
+	f := failureEnv{reached: true}.build(errCfg)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int, 1)
+	go func() { done <- f.run(context.Background(), ln, io.Discard) }()
+	select {
+	case code := <-done:
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("page did not give way after startupPageFor")
 	}
 }
