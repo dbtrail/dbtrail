@@ -327,7 +327,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	var job *jobRun
 	var unclaimed string
 	var noFolder error
-	if req.BaselineDir == "" {
+	if strings.TrimSpace(req.BaselineDir) == "" {
 		// Every server that is written keeps a local folder (#2431), and
 		// TriggerRefresh refuses one without: this is the belt for a caller
 		// that reaches the run another way. Nothing is folded.
@@ -1219,7 +1219,7 @@ func reclaimPartialSnapshot(dir string, refused int, unclaimed string) []any {
 // previous delete did not finish and the operator has no other way to learn it
 // happened: a staging directory is skipped by every listing by design.
 func sweepDiscardedSnapshots(req refreshRequest) {
-	if req.BaselineDir == "" {
+	if strings.TrimSpace(req.BaselineDir) == "" {
 		return // a run refused for having no folder (#2431)
 	}
 	removed, err := reconstruct.SweepDiscardedSnapshots(req.BaselineDir)

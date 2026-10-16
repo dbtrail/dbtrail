@@ -113,8 +113,7 @@ func (j *jobRun) Created(root, name string) {
 
 // journal is Created reporting whether the directory is now in the journal:
 // false for a job with no journal, and for one whose entry could not be
-// written (said at Warn here). A caller that must tell an operator who will
-// clean a directory up reads this rather than assuming.
+// written (said at Warn here).
 func (j *jobRun) journal(root, name string) bool {
 	if j == nil {
 		return false
@@ -164,23 +163,6 @@ func (j *jobRun) release() {
 		return
 	}
 	os.Remove(j.lockPath)
-	j.lock.Close()
-}
-
-// keepForReclaim ends the job WITHOUT dropping its journal entry: the lock is
-// released and the lock file kept, so the next start finds the job dead and
-// removes what it journaled (a folder whose delete failed). Its
-// record, already written, is not written again. Idempotent with release.
-func (j *jobRun) keepForReclaim() {
-	if j == nil {
-		return
-	}
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	if j.released {
-		return
-	}
-	j.released = true
 	j.lock.Close()
 }
 

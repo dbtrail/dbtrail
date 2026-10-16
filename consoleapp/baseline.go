@@ -1283,12 +1283,12 @@ var pgBaselineRun = pgbaseline.Run
 // finishDump then marks the run published and names its
 // time, so no page calls it unfinished (#1991 review).
 func (s *baselineSupervisor) executePG(req console.BaselineRequest) (dumpOutcome, int, error) {
-	if err := os.MkdirAll(s.stagingDir, 0o755); err != nil {
-		return dumpOutcome{}, 0, fmt.Errorf("create the working folder %s: %w", s.stagingDir, err)
-	}
 	outputDir := req.LocalDir
 	if strings.TrimSpace(outputDir) == "" {
 		return dumpOutcome{}, 0, console.NoLocalFolderError()
+	}
+	if err := os.MkdirAll(s.stagingDir, 0o755); err != nil {
+		return dumpOutcome{}, 0, fmt.Errorf("create the working folder %s: %w", s.stagingDir, err)
 	}
 
 	cfg, err := pgBaselineConfig(req, outputDir)
