@@ -15507,6 +15507,84 @@ function routerSidesModel(view, cur) {
   return out;
 }
 
+// routerStatementsModel (#2360): which statement shapes took the time on the
+// server picked, from the router's per-statement table. Pure. Null when there
+// is nothing to say about this server (no router, no answer, no server, or a
+// server the router has no entry for). Otherwise a state: "off" (the router
+// does not keep the table), "withheld" (this session may not see it), "none"
+// (nothing finished yet) or "rows". Rows are the router's, checked one by
+// one: a row that does not read as a statement on a side is left out.
+const ROUTER_STATEMENTS_SHOWN = 10;
+function routerStatementsModel(view, cur) {
+  if (!view || !view.configured || view.error || !view.status || !cur) return null;
+  const t = view.status.servers && view.status.servers[cur.id];
+  if (!t) return null;
+  if (view.statements_withheld) return { state: "withheld" };
+  if (!view.status.statement_table) return { state: "off" };
+  const st = t.statements || {};
+  const notCounted = Math.max(0, Number(st.not_counted) || 0);
+  const limit = Math.max(0, Number(st.limit) || 0);
+  const num = (v) => { const n = Number(v); return isFinite(n) && n > 0 ? n : 0; };
+  const rows = (Array.isArray(st.rows) ? st.rows : []).filter((r) => r && typeof r === "object" &&
+    typeof r.statement === "string" && r.statement !== "" && (r.side === "copy" || r.side === "mysql") && num(r.count) > 0)
+    .map((r) => {
+      const count = num(r.count), seconds = num(r.seconds), errors = Math.floor(num(r.errors));
+      return { text: r.statement, side: r.side, count: count, seconds: seconds,
+        avg: seconds > 0 ? routerSecs(seconds / count) : "", slowest: num(r.slowest_seconds) > 0 ? routerSecs(r.slowest_seconds) : "",
+        // Timeouts are among the errors: said apart, never added twice.
+        errors: errors, timeouts: Math.min(Math.floor(num(r.timeouts)), errors) };
+    })
+    .sort((x, y) => y.seconds - x.seconds || y.count - x.count);
+  if (!rows.length) return { state: "none", notCounted: notCounted, limit: limit };
+  const max = rows[0].seconds;
+  for (const r of rows) r.pct = max > 0 ? (r.seconds / max) * 100 : 0;
+  return { state: "rows", shown: rows.slice(0, ROUTER_STATEMENTS_SHOWN), more: rows.slice(ROUTER_STATEMENTS_SHOWN), notCounted: notCounted, limit: limit };
+}
+
+// routerStatements draws routerStatementsModel: one line per statement shape,
+// a bar as long as the time it took next to the one that took the most, in
+// the side's colour, and what it cost under it. The rest fold away.
+function routerStatements(m) {
+  const wrap = el("div", { class: "st-wrap" });
+  if (m.state === "off") {
+    // Folded: most routers run without it, and a paragraph on every panel
+    // about a list nobody turned on is noise.
+    wrap.append(cnFine("Which statements take the time: off",
+      el("p", { class: "form-hint", text: "The router does not keep this list. To see it, start the router with ROUTER_STATEMENT_TABLE=1 in the Docker .env file, or with --statement-table. The list names your tables and columns, and the router's status address, where it is published, asks for no password." })));
+    return wrap;
+  }
+  wrap.append(el("p", { class: "st-cap" }, "Which statements take the time"));
+  if (m.state === "withheld") {
+    wrap.append(el("p", { class: "form-hint", text: "The router keeps this list, and it is shown only to users with no data profile: it names tables and columns." }));
+    return wrap;
+  }
+  if (m.state === "none") {
+    wrap.append(el("p", { class: "form-hint", text: "No statement has finished on this server since the router started." }));
+  }
+  const line = (r) => {
+    const facts = el("div", { class: "st-facts" },
+      el("span", { class: "st-side", text: r.side === "copy" ? "DBTrail's copy" : "your MySQL" }),
+      el("span", { text: trendCount(r.count) + (r.count === 1 ? " time" : " times") }));
+    if (r.avg) facts.append(el("span", {}, el("b", { text: r.avg }), " each"));
+    if (r.slowest && r.count > 1) facts.append(el("span", {}, "slowest ", el("b", { text: r.slowest })));
+    if (r.errors) facts.append(el("span", { class: "bad" }, el("b", { text: String(r.errors) }), r.errors === 1 ? " error" : " errors",
+      r.timeouts ? " (" + r.timeouts + " out of time)" : ""));
+    return el("div", { class: "st-row st-" + r.side },
+      el("div", { class: "st-track" }, el("span", { class: "st-bar", style: "width:" + Math.max(r.pct, 0.5).toFixed(1) + "%" })),
+      el("code", { class: "st-text", title: r.text, text: r.text }),
+      facts);
+  };
+  if (m.state === "rows") {
+    for (const r of m.shown) wrap.append(line(r));
+    if (m.more.length) wrap.append(cnFine(m.more.length + " more", ...m.more.map(line)));
+  }
+  if (m.notCounted) {
+    wrap.append(el("p", { class: "form-hint", text: trendCount(m.notCounted) + (m.notCounted === 1 ? " statement is" : " statements are") +
+      " not listed: the list keeps the first " + (m.limit || 200) + " kinds of statement for each server, and a blank statement has none." }));
+  }
+  return wrap;
+}
+
 const ROUTER_SIDE_HELP = {
   mysql: "Statements the router sent to your MySQL server: the light reads, and everything that is not a read. The time includes sending the rows back.",
   copy: "Heavy reads the router answered from DBTrail's copy instead of your MySQL server. The time ends when the answer is ready to send.",
@@ -15713,6 +15791,13 @@ function routingSwitch(fb, cur, rt, toggle, port) {
     wrap.append(el("p", { class: "cn-who-cap" }, "Who answered for ", el("code", { text: cur.name || cur.id })));
     wrap.append(routerSides(sides));
   }
+  // Which statements took that time (#2360), under the two sides, and only
+  // where the two sides are drawn: no counts, no list to speak of.
+  let statements = null;
+  if (sides) {
+    try { statements = routerStatementsModel(rt, cur); } catch (err) { statements = null; }
+  }
+  if (statements) wrap.append(routerStatements(statements));
   return wrap;
 }
 

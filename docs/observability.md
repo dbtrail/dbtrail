@@ -393,6 +393,13 @@ Whoever reaches that address reads the names of the tables and columns your
 clients query. The web interface passes it on only to sessions with no data
 profile, and tells the others it was withheld.
 
+The web interface draws it on the MySQL clients page, under the router's
+two sides, as **Which statements take the time**: one bar per shape, as
+long as its total time next to the shape that took the most, with how many
+times it ran, its time each, its slowest and its errors. The ten that took
+the most are shown and the rest fold away. A router without the table says
+so in one folded line.
+
 ## Example Prometheus alert rules
 
 The push-based sibling of these metrics is the watch daemon's

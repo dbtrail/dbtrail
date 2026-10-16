@@ -3546,6 +3546,18 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 .cn-grants-verdict.is-bad { color: var(--error); }
 .cn-grants-lines { margin: 0 0 8px; padding: 10px 12px; border-radius: 8px; background: var(--line-soft); color: var(--ink); font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 @media (max-width: 640px) { .rs-cols { grid-template-columns: 1fr; gap: 18px; } .rs-num { font-size: 36px; } }
+/* Which statements take the time (#2360): a bar per statement shape. */
+.st-wrap { margin: 4px 0 18px; }
+.st-cap { margin: 10px 0 6px; font-size: 12px; color: var(--ink-2); }
+.st-row { padding: 8px 0; border-top: 1px solid var(--line-soft); min-width: 0; }
+.st-track { height: 6px; border-radius: 999px; background: var(--line-soft); overflow: hidden; }
+.st-bar { display: block; height: 100%; border-radius: 999px; background: var(--ink); }
+.st-copy .st-bar { background: var(--pink-mid); }
+.st-text { display: block; margin-top: 6px; font-size: 13px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st-facts { display: flex; flex-wrap: wrap; gap: 2px 14px; margin-top: 4px; font-size: 12px; color: var(--ink-3); }
+.st-facts b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.st-facts .bad, .st-facts .bad b { color: var(--error); }
+.st-side { font-weight: 500; }
 /* ── Copy jobs (#2330): a bar per job, then the list ── */
 .cj-card { padding: 28px 28px 20px; }
 .cj-head { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }

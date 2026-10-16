@@ -357,6 +357,11 @@ console.log(JSON.stringify({
 	// picked server gets its own.
 	figures("firstPicked", "Answered by your MySQL 7 statements | Answered by DBTrail's copy 3 statements Your MySQL did not have to run these Lag: unknown (last answer)", split73, "rs-bar-mysql flex:7", "rs-bar-copy flex:3")
 	figures("otherPicked", "Answered by your MySQL 70 statements | Answered by DBTrail's copy 30 statements Your MySQL did not have to run these Lag: unknown (last answer)", split73, "rs-bar-mysql flex:70", "rs-bar-copy flex:30")
+	// Under the two sides, the per-statement list (#2360): this router does
+	// not keep one, which is said folded, in one line.
+	if v := d("counts"); !strings.Contains(v.Text, "Which statements take the time: off") {
+		t.Errorf("counts: no per-statement line under the two sides: %s", v.Text)
+	}
 	if c := d("otherPicked").Caption; c != "Who answered for billing" {
 		t.Errorf("otherPicked: caption %q", c)
 	}
@@ -365,7 +370,8 @@ console.log(JSON.stringify({
 	// it counted nothing for, and no server picked.
 	for _, name := range []string{"none", "zeros", "other", "noServer", "onNoAnswer", "onNotSet", "onFailed", "onNotAsked", "cannotRoute", "refusedNoCounts", "noAccount", "noAccountDown", "off"} {
 		if v := d(name); v.Figs != "" || v.Bars != 0 || v.Wraps != 0 || v.Caption != "" || v.Since || strings.Contains(v.Text, "Who answered") || strings.Contains(v.Text, "Your MySQL") || strings.Contains(v.Text, "DBTrail's copy") ||
-			strings.Contains(v.Text, "0 statements") || strings.Contains(v.Text, "by MySQL") || strings.Contains(v.Text, "by the copy") {
+			strings.Contains(v.Text, "0 statements") || strings.Contains(v.Text, "by MySQL") || strings.Contains(v.Text, "by the copy") ||
+			strings.Contains(v.Text, "Which statements") {
 			t.Errorf("%s: counts are drawn where the router gave none: %s", name, v.Text)
 		}
 	}
